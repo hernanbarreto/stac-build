@@ -1276,8 +1276,9 @@ async def get_flythrough(session_id: str):
     metric frame → scale 1.0. Source: mapanything (maplong_run) / DA3 / lidar."""
     import numpy as np
     ctx = _ctx(session_id)
-    poses_txt = next((c for c in (ctx.output_dir / "maplong_run" / "camera_poses.txt",
-                                  ctx.output_dir / "camera_poses.txt",
+    # The live poses first — they travel with the geometry epoch (see the session load).
+    poses_txt = next((c for c in (ctx.output_dir / "camera_poses.txt",
+                                  ctx.output_dir / "maplong_run" / "camera_poses.txt",
                                   ctx.output_dir / "da3_run" / "camera_poses.txt")
                       if c.exists()), None)
     if poses_txt is None:
@@ -5196,6 +5197,77 @@ async def delete_tsdf_mesh(request: Request):
     return {"ok": True, "deleted": folder}
 
 
+def _camera_poses_payload(output_dir: Path, frames_dir: Optional[Path]):
+    """(c2w list, keyframe names, intrinsics) for the viewer's camera markers, or None.
+
+    The LIVE poses first: output/camera_poses.txt + intrinsic.txt travel with the
+    geometry epoch (F5's refined poses and camera on the corrected cloud).
+    maplong_run/ holds Omega's ORIGINAL poses — pccr 2026-10-01: the viewer framed
+    epoch 7 with them, cameras 1.3 m under the floor and a 47 cm step at a chunk
+    seam the live poses do not have. Poses go through floor_transform.npz like the
+    cloud. Sent at session load AND with every epoch's potree_ready, since the
+    poses change with the epoch."""
+    frame_names = None
+    if frames_dir is not None:
+        sel_json = Path(frames_dir) / "selected_frames.json"
+        if sel_json.exists():
+            try:
+                sel_data = json.loads(sel_json.read_text())
+                frame_names = sel_data if isinstance(sel_data, list) else sel_data.get("selected_files", [])
+            except Exception:
+                frame_names = None
+    poses_path = next((c for c in (output_dir / "camera_poses.txt",
+                                   output_dir / "maplong_run" / "camera_poses.txt",
+                                   output_dir / "da3_run" / "camera_poses.txt")
+                       if c.exists()), None)
+    if poses_path is None:
+        return None
+    try:
+        ft_s, ft_R, ft_t = 1.0, np.eye(3), np.zeros(3)
+        transform_path = output_dir / "floor_transform.npz"
+        if transform_path.exists():
+            ft_data = np.load(transform_path)
+            ft_s, ft_R, ft_t = float(ft_data["s"]), ft_data["R"], ft_data["t"]
+        c2w_list = []
+        with open(poses_path) as pf:
+            for line in pf:
+                vals = line.strip().split()
+                if len(vals) >= 16:
+                    c2w_scan = np.array([float(v) for v in vals[:16]]).reshape(4, 4)
+                    c2w_aligned = np.eye(4)
+                    c2w_aligned[:3, :3] = ft_R @ c2w_scan[:3, :3]
+                    c2w_aligned[:3, 3] = ft_s * ft_R @ c2w_scan[:3, 3] + ft_t
+                    c2w_list.append(c2w_aligned.tolist())
+        # per-frame poses (DA3 / lidar) → keep the keyframes only
+        n_kf = len(frame_names) if frame_names else 0
+        if n_kf > 0 and len(c2w_list) > n_kf and frames_dir is not None:
+            all_jpg = sorted(f.name for f in Path(frames_dir).glob("*.jpg"))
+            fn2idx = {fn: i for i, fn in enumerate(all_jpg)}
+            kf_indices = [fn2idx[kf] for kf in frame_names if kf in fn2idx]
+            valid = [i for i in kf_indices if i < len(c2w_list)]
+            if valid:
+                c2w_list = [c2w_list[i] for i in valid]
+                print(f"[Viewer] Filtered {len(valid)} keyframe poses from {len(all_jpg)} total")
+        if not c2w_list:
+            return None
+        intrinsics_list = []
+        intr_path = poses_path.parent / "intrinsic.txt"
+        if intr_path.exists():
+            with open(intr_path) as inf:
+                for line in inf:
+                    parts = line.strip().split()
+                    if len(parts) >= 4:
+                        intrinsics_list.append({"fx": float(parts[0]), "fy": float(parts[1]),
+                                                "cx": float(parts[2]), "cy": float(parts[3])})
+        print(f"[Viewer] Loaded {len(c2w_list)} camera poses from {poses_path.relative_to(output_dir)}")
+        return (c2w_list,
+                frame_names[:len(c2w_list)] if frame_names else None,
+                intrinsics_list[:len(c2w_list)] if intrinsics_list else None)
+    except Exception as e:  # noqa: BLE001
+        print(f"[Viewer] ⚠️ Could not load camera poses: {e}")
+        return None
+
+
 async def _correction_notify_viewer(session_id: str, output_dir: Path):
     """potree_ready broadcast after a correction/undo rebuild — same message
     the session-open flow sends, so the viewport reloads the octree."""
@@ -5223,6 +5295,17 @@ async def _correction_notify_viewer(session_id: str, output_dir: Path):
             M[:3, :3] = float(d["s"]) * d["R"]
             M[:3, 3] = d["t"]
             msg["floorTransform"] = _display_matrix(session_id, M)
+        # the camera markers follow the epoch (its poses + camera are artifacts)
+        try:
+            cams = _camera_poses_payload(output_dir, _ctx(session_id).frames_dir)
+        except Exception:  # noqa: BLE001
+            cams = None
+        if cams:
+            msg["cameraPoses"] = cams[0]
+            if cams[1]:
+                msg["cameraFrameNames"] = cams[1]
+            if cams[2]:
+                msg["cameraIntrinsics"] = cams[2]
         await viewer_manager.broadcast_text(json.dumps(msg))
         print("[Correction] potree_ready broadcast (viewer reloads octree)")
     except Exception as e:  # noqa: BLE001
@@ -7433,81 +7516,7 @@ async def viewer_websocket(websocket: WebSocket):
                             # Load camera poses (4x4 extrinsic matrices from VGGT-Long)
                             # Prefer maplong_run/ (keyframe-only) over root (may have all frames)
                             # Transform to floor-aligned space using floor_transform (s*R*p+t)
-                            camera_poses_list = None
-                            frame_names = None
-                            
-                            # Load keyframe names first (for tooltip labels + filtering)
-                            sel_json = _load_ctx.frames_dir / "selected_frames.json"
-                            if sel_json.exists():
-                                with open(sel_json) as sf:
-                                    sel_data = json.loads(sf.read())
-                                    frame_names = sel_data if isinstance(sel_data, list) else sel_data.get("selected_files", [])
-                            
-                            # Find poses file (prefer maplong_run/ or da3_run/)
-                            poses_path = output_dir / "maplong_run" / "camera_poses.txt"
-                            if not poses_path.exists():
-                                poses_path = output_dir / "da3_run" / "camera_poses.txt"
-                            if not poses_path.exists():
-                                poses_path = output_dir / "camera_poses.txt"
-                            
-                            if poses_path.exists():
-                                try:
-                                    # Load floor transform for pose transformation
-                                    ft_s, ft_R, ft_t = 1.0, np.eye(3), np.zeros(3)
-                                    transform_path = output_dir / "floor_transform.npz"
-                                    if transform_path.exists():
-                                        ft_data = np.load(transform_path)
-                                        ft_s = float(ft_data['s'])
-                                        ft_R = ft_data['R']
-                                        ft_t = ft_data['t']
-                                    
-                                    c2w_list = []
-                                    with open(poses_path) as pf:
-                                        for line in pf:
-                                            vals = line.strip().split()
-                                            if len(vals) >= 16:
-                                                c2w_scan = np.array([float(v) for v in vals[:16]]).reshape(4, 4)
-                                                c2w_aligned = np.eye(4)
-                                                c2w_aligned[:3, :3] = ft_R @ c2w_scan[:3, :3]
-                                                c2w_aligned[:3, 3] = ft_s * ft_R @ c2w_scan[:3, 3] + ft_t
-                                                c2w_list.append(c2w_aligned.tolist())
-                                    
-                                    # Filter to keyframe indices if poses > keyframes
-                                    n_kf = len(frame_names) if frame_names else 0
-                                    if n_kf > 0 and len(c2w_list) > n_kf:
-                                        all_jpg = sorted(f.name for f in _load_ctx.frames_dir.glob("*.jpg"))
-                                        fn2idx = {fn: i for i, fn in enumerate(all_jpg)}
-                                        kf_indices = [fn2idx[kf] for kf in frame_names if kf in fn2idx]
-                                        valid = [i for i in kf_indices if i < len(c2w_list)]
-                                        if valid:
-                                            c2w_list = [c2w_list[i] for i in valid]
-                                            print(f"[Viewer] Filtered {len(valid)} keyframe poses from {len(all_jpg)} total")
-                                    
-                                    if c2w_list:
-                                        camera_poses_list = c2w_list
-                                        # Load intrinsics for FOV matching
-                                        intrinsics_list = []
-                                        intr_path = poses_path.parent / "intrinsic.txt"
-                                        if intr_path.exists():
-                                            with open(intr_path) as inf:
-                                                for line in inf:
-                                                    parts = line.strip().split()
-                                                    if len(parts) >= 4:
-                                                        intrinsics_list.append({
-                                                            "fx": float(parts[0]),
-                                                            "fy": float(parts[1]),
-                                                            "cx": float(parts[2]),
-                                                            "cy": float(parts[3]),
-                                                        })
-                                        # Bundle: (poses, frame_names, intrinsics)
-                                        camera_poses_list = (
-                                            c2w_list,
-                                            frame_names[:len(c2w_list)] if frame_names else None,
-                                            intrinsics_list[:len(c2w_list)] if intrinsics_list else None,
-                                        )
-                                        print(f"[Viewer] Loaded {len(c2w_list)} camera poses from {poses_path.name}")
-                                except Exception as e:
-                                    print(f"[Viewer] ⚠️ Could not load camera poses: {e}")
+                            camera_poses_list = _camera_poses_payload(output_dir, _load_ctx.frames_dir)
                             scene_payload = _load_scene_payload(output_dir, session_id)
                             return potree_meta, floor_transform_4x4, ifc_files, has_confidence, camera_poses_list, scene_payload
 

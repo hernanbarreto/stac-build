@@ -359,7 +359,9 @@ def test_config_keys_are_mandatory_and_the_device_never_falls_back():
     from config import cfg as raw
     from precision.config import PrecisionConfigError, load_precision_config
     c = load_precision_config().cloud
-    assert c.silhouette_filter is True and c.silhouette_max_views >= 1 and 0 < c.silhouette_min_inside_frac <= 1
+    # the switch is the user's (OFF since 2026-09-30: the certify mask filter judges the points);
+    # the keys stay mandatory either way
+    assert isinstance(c.silhouette_filter, bool) and c.silhouette_max_views >= 1 and 0 < c.silhouette_min_inside_frac <= 1
     for key in ("silhouette_filter", "silhouette_max_views", "silhouette_block", "silhouette_min_votes",
                 "silhouette_min_inside_frac", "silhouette_device"):
         bad = copy.deepcopy(raw)

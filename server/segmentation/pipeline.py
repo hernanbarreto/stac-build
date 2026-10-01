@@ -2033,6 +2033,182 @@ def _record_overlap(record: dict, absorbed: dict, keeper: dict,
                         "overlap": round(float(overlap_ratio), 3)}
 
 
+def _gap_is_free_space(A: np.ndarray, B: np.ndarray, tree, cams: np.ndarray, gap_m: float,
+                       reach_m: float) -> bool:
+    """Is the gap between two components of one instance EMPTY SPACE the cameras see through?
+
+    Three desks side by side leave AIR between them: a camera looking across the gap sees what is
+    behind it (the floor, a wall). The fragments of one floor, wall or ceiling are separated by
+    HOLES the cleaning left: behind the hole the camera saw that same surface, so nothing lies
+    beyond it. pccr 2026-09-30: a split without this test cut the floor in 2 and the ceiling in 3.
+    Interior samples of the segment between the two closest points (every `gap_m`); for every
+    camera in `cams` (seeing both components) the ray through a sample is walked beyond it every
+    `gap_m` up to `reach_m`. A ray with a point in FRONT of the sample says nothing (occluded);
+    otherwise it sees through when it meets a point behind. Free space = most informative rays see
+    through."""
+    from scipy.spatial import cKDTree
+    d, ia = cKDTree(A).query(B, k=1)
+    jb = int(np.argmin(d))
+    a, b = A[ia[jb]], B[jb]
+    n = int(np.floor(np.linalg.norm(b - a) / gap_m))
+    if n < 2:
+        return False
+    samples = a + (b - a) * (np.linspace(1, n - 1, min(n - 1, 20))[:, None] / n)   # BOUND (cost): ≤ 20
+    through = informative = 0
+    steps = np.arange(1, max(int(reach_m / gap_m), 1) + 1) * gap_m
+    for C in cams:
+        for smp in samples:
+            ray = smp - C
+            L = float(np.linalg.norm(ray))
+            if L <= gap_m:
+                continue
+            ray /= L
+            front = C + ray * np.arange(gap_m, L - gap_m, gap_m)[:, None]
+            if len(front) and np.isfinite(tree.query(front, k=1, distance_upper_bound=gap_m / 2)[0]).any():
+                continue                                     # something stands before the gap
+            informative += 1
+            behind = smp + ray * steps[:, None]
+            if np.isfinite(tree.query(behind, k=1, distance_upper_bound=gap_m / 2)[0]).any():
+                through += 1
+    return informative > 0 and through > informative / 2
+
+
+def _camera_returned(fa: set, fb: set, cam_centre: Dict[int, np.ndarray], chain: Dict[int, float],
+                     min_walk_m: float) -> bool:
+    """Did the walk come back? True when a keyframe seeing A and one seeing B have cameras within
+    `min_walk_m` of each other in space but more than `min_walk_m` apart along the walk
+    (correction.visit_drift.min_walk_m — the USER's one definition of a visit)."""
+    a = sorted(f for f in fa if f in cam_centre and f in chain)
+    b = sorted(f for f in fb if f in cam_centre and f in chain)
+    if not a or not b:
+        return False
+    CA = np.array([cam_centre[f] for f in a]); CB = np.array([cam_centre[f] for f in b])
+    wa = np.array([chain[f] for f in a]); wb = np.array([chain[f] for f in b])
+    near = np.linalg.norm(CA[:, None, :] - CB[None, :, :], axis=2) <= min_walk_m
+    far_walk = np.abs(wa[:, None] - wb[None, :]) > min_walk_m
+    return bool((near & far_walk).any())
+
+
+def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_arr: np.ndarray,
+                                gap_m: float, min_points: int, covis_share: float,
+                                cam_centre: Optional[Dict[int, np.ndarray]] = None,
+                                max_cams: int = 12, min_walk_m: Optional[float] = None) -> int:
+    """Split an instance that is several objects seen TOGETHER (pccr 2026-09-30, USER: "está mal
+    que junte tres desk separados en uno solo ID").
+
+    SAM3 can draw ONE mask over several neighbouring objects (desk #174: 2–3 separate blobs in 32
+    of its 58 masks), and the space dedupe then absorbs each object's own instance into it. The
+    instance's points are split into components separated by more than `gap_m` (the same gap
+    under which `_merge_label_fragments` calls pieces contiguous). A component is a candidate
+    object when it has `min_points` (correction.visit_drift.min_points: below it an object cannot
+    be measured); smaller crumbs join the nearest candidate. Two candidates are DIFFERENT objects
+    when (1) they are seen together — by at least `covis_share` (segmentation.dedupe_overlap) of the
+    keyframes of the smaller one: one frame cannot see one object in two places — OR the walk never
+    CAME BACK between them (`_camera_returned`, `min_walk_m` = correction.visit_drift.min_walk_m): a
+    drift duplicate needs a second pass near the first, while a row of desks is walked past once, one
+    after the other, never all in one frame (pccr desk #174, 2026-09-30) — AND (2) the gap
+    between them is free space the cameras see through (`_gap_is_free_space`): the fragments of ONE
+    floor or wall, split by the holes the cleaning left, are seen together too, but nothing lies
+    behind a hole. Candidates that are not different are joined (a drift duplicate, never seen
+    together, stays whole for the certification, which
+    measures and corrects it). Without `cam_centre` nothing is split. Returns the number of
+    instances added. Mutates `instances`."""
+    from scipy import ndimage
+    added = 0
+    chain = {}
+    if cam_centre and min_walk_m is not None:                # walked distance at every keyframe
+        order = sorted(cam_centre)
+        C = np.array([cam_centre[f] for f in order])
+        run = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(C, axis=0), axis=1))]
+        chain = dict(zip(order, run.tolist()))
+    tree_box = [None]                                         # the cloud's KD-tree, built on first need
+    next_id = max([int(i.get("id", 0)) for i in instances] + [0]) + 1
+    new_list = []
+    for inst in instances:
+        gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
+        if len(gi) < 2 * min_points:
+            new_list.append(inst)
+            continue
+        P = xyz_display[gi]
+        k = np.floor((P - P.min(0)) / gap_m).astype(np.int64)
+        grid = np.zeros(k.max(0) + 1, dtype=bool)
+        grid[tuple(k.T)] = True
+        lab, n = ndimage.label(grid, structure=np.ones((3, 3, 3)))
+        if n < 2:
+            new_list.append(inst)
+            continue
+        comp = lab[tuple(k.T)] - 1
+        size = np.bincount(comp, minlength=n)
+        cand = [c for c in np.argsort(-size) if size[c] >= min_points]
+        if len(cand) < 2:
+            new_list.append(inst)
+            continue
+        ctr = {c: P[comp == c].mean(0) for c in cand}
+        kfs = {c: set(np.unique(frame_arr[gi[comp == c]]).tolist()) for c in cand}
+        if tree_box[0] is None and cam_centre:
+            from scipy.spatial import cKDTree
+            tree_box[0] = cKDTree(xyz_display)
+        reach = float(np.linalg.norm(xyz_display.max(0) - xyz_display.min(0)))
+        parent = {c: c for c in cand}
+
+        def _root(x):
+            while parent[x] != x:
+                x = parent[x]
+            return x
+        for ia_, c1 in enumerate(cand):
+            for c2 in cand[ia_ + 1:]:
+                common = kfs[c1] & kfs[c2]
+                covis = len(common) >= covis_share * min(len(kfs[c1]), len(kfs[c2]))
+                # a drift duplicate needs the camera to COME BACK: seen from two passes whose cameras
+                # stand within min_walk_m of each other with more than min_walk_m of walk between them.
+                # A row of desks walked past once never has that — two objects, not two copies.
+                dup_possible = (not covis) and bool(chain) and _camera_returned(kfs[c1], kfs[c2], cam_centre,
+                                                                                 chain, min_walk_m)
+                distinct = False
+                if not dup_possible and cam_centre:
+                    fs = sorted(f for f in (common or (kfs[c1] | kfs[c2])) if f in cam_centre)
+                    fs = fs[:: max(1, len(fs) // max_cams)][:max_cams]      # BOUND (cost): cameras asked
+                    cams = np.array([cam_centre[f] for f in fs]) if fs else np.zeros((0, 3))
+                    distinct = len(cams) > 0 and _gap_is_free_space(
+                        P[comp == c1], P[comp == c2], tree_box[0], cams, gap_m, reach)
+                if not distinct:
+                    parent[_root(c2)] = _root(c1)
+        roots = {}
+        for c in cand:
+            roots.setdefault(_root(c), []).append(c)
+        groups = sorted(roots.values(), key=lambda g: -sum(size[x] for x in g))
+        if len(groups) < 2:
+            new_list.append(inst)
+            continue
+        owner = np.full(n, -1, dtype=np.int64)
+        for gidx, g in enumerate(groups):
+            owner[g] = gidx
+        for c in range(n):                                   # crumbs -> the nearest candidate's group
+            if owner[c] < 0:
+                cc = P[comp == c].mean(0)
+                owner[c] = owner[min(cand, key=lambda m: np.linalg.norm(cc - ctr[m]))]
+        pt_group = owner[comp]
+        for gidx in range(len(groups)):
+            sel = sorted(gi[pt_group == gidx].tolist())
+            if gidx == 0:
+                inst["globalIndices"] = sel
+                inst["total_points"] = len(sel)
+                inst["split_into"] = len(groups)
+                new_list.append(inst)
+            else:
+                nid = next_id; next_id += 1
+                new_list.append({**{k_: v for k_, v in inst.items()
+                                    if k_ not in ("globalIndices", "obb", "split_into")},
+                                 "id": nid, "instance_id": nid + 1, "globalIndices": sel,
+                                 "total_points": len(sel),
+                                 "split_from": int(inst.get("instance_id", inst.get("id", 0)))})
+                added += 1
+        print(f"[SegPipeline]   ✂ '{inst.get('label')}' #{inst.get('instance_id', inst.get('id'))}: "
+              f"{len(groups)} objects seen together — split ({[int(size[g[0]]) for g in groups]} pts)")
+    instances[:] = new_list
+    return added
+
+
 def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
                            record=None):
     """Consolidate instances of the SAME label whose points are contiguous.
@@ -2397,6 +2573,43 @@ def _mask_fates(metadata: dict, instances: list, absorbed_into: dict) -> dict:
         rec["into"] = into if into in survivors else None
         rec["into_label"] = labels.get(rec["into"]) if rec["into"] is not None else None
     return fates
+
+
+def _instance_id(inst: dict) -> int:
+    """The id the class byte carries: the INSTANCE id, never the mask obj id
+    (`id` = instance_id − 1 on SAM3 masklets — writing it painted each object
+    with its neighbour's class, segmentation/republish.write_classification)."""
+    return int(inst.get("instance_id", inst.get("id", 0)))
+
+
+def _encode_classification(instances: list, classification: np.ndarray,
+                           prev_map: Optional[dict]):
+    """(classification, instance_id → byte, class_map) for the projection's writer.
+
+    pccr 2026-09-30: this writer stored `min(obj id, 255)`, so every instance id
+    above 254 — 50 objects there, the four drywalls, the backpack, beams,
+    windows… — shared byte 255 and ONE viewer toggle switched all of them. The
+    byte now comes from the same encoder as every other writer
+    (`segmentation.republish._encode`: identity while ids fit, a compact 1..N with
+    `class_map.json` when they do not). In incremental mode (`prev_map` given) the
+    bytes already in `classification` are translated through the previous map
+    into the new one, so a re-projected subset cannot shift the others."""
+    from segmentation.republish import _encode
+    ids = [_instance_id(i) for i in instances]
+    prev_codes, prev_ids = [], []
+    if prev_map is not None:
+        inst_of = {int(k): int(v) for k, v in (prev_map.get("instance_of") or {}).items()}
+        prev_codes = [int(c) for c in np.unique(classification) if int(c) > 0]
+        prev_ids = [inst_of.get(c, c) for c in prev_codes]      # no map = identity
+        ids = ids + prev_ids
+    class_map = _encode(ids)
+    code = {int(k): int(v) for k, v in class_map["class_of"].items()}
+    if prev_codes:
+        lut = np.zeros(256, dtype=np.uint8)
+        for c, iid in zip(prev_codes, prev_ids):
+            lut[c] = code.get(iid, 0)
+        classification = lut[classification]
+    return classification, code, class_map
 
 
 def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_obj_ids=None) -> dict:
@@ -3046,6 +3259,29 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         except Exception as e:
             print(f"[SegPipeline] fragment consolidation failed (non-fatal): {e}")
 
+    # ── One instance, several objects seen together → split (USER 2026-09-30) ──
+    if bool(_dd.get("split_covisible", True)) and instances:
+        from config import cfg as _cfg_all
+        _mp = int(_cfg_all["correction"]["visit_drift"]["min_points"])
+        _cc = None
+        try:                                                  # camera centres, display frame
+            _P = np.loadtxt(output_dir / "camera_poses.txt").reshape(-1, 4, 4)
+            _F = [int(float(x)) for x in (output_dir / "camera_frames.txt").read_text().split()]
+            if len(_F) == len(_P):
+                _C = s * (_P[:, :3, 3] @ R.T) + t
+                _cc = {f: _C[k] for k, f in enumerate(_F)}
+        except Exception as _e:                               # noqa: BLE001 — declared: no split
+            print(f"[SegPipeline]   ✂ co-visible split: no camera centres ({_e}) — nothing split")
+        n_split = _split_covisible_components(instances, xyz_display, frame_arr, gap_m=_frag_gap,
+                                              min_points=_mp, covis_share=_dup_thr, cam_centre=_cc,
+                                              min_walk_m=float(_cfg_all["correction"]["visit_drift"]["min_walk_m"]))
+        if n_split:
+            for inst in instances:
+                m = np.asarray(inst["globalIndices"], dtype=np.int64)
+                if len(m) >= 4:
+                    inst["obb"] = _compute_obb(xyz_display[m])
+            print(f"[SegPipeline]   ✂ Co-visible split: +{n_split} instance(s)")
+
     # ── Geometric completion — "pegar los puntos al lugar correcto" (USER
     # 2026-08-29): SAM3 runs on the KEYFRAMES and the mask→cloud step only
     # labels a point whose own origin frame carries a mask, so coverage is
@@ -3203,21 +3439,25 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         xyz_corrected = xyz.copy()  # RAW space
     # Load existing classification to preserve previous objects in incremental mode
     class_path = output_dir / "classification.npy"
+    prev_map = None
     if class_path.exists() and only_obj_ids is not None:
         classification = np.load(class_path)
         if len(classification) != len(xyz):
             classification = np.zeros(len(xyz), dtype=np.uint8)
+        else:
+            _pm = output_dir / "class_map.json"
+            prev_map = json.loads(_pm.read_text()) if _pm.exists() else {}
     else:
         classification = np.zeros(len(xyz), dtype=np.uint8)
-    
+    classification, class_code, class_map = _encode_classification(instances, classification, prev_map)
+
     for inst in instances:
         face_planes = inst.pop("_face_planes", None)
         face_id = inst.pop("_face_id", None)
-        
+
         # SIEMPRE asignar la clasificación del objeto (aunque no tenga caras planas)
         global_indices = np.array(inst["globalIndices"], dtype=np.int64)
-        seg_id = int(inst.get("id", 0))
-        classification[global_indices] = min(seg_id, 255)
+        classification[global_indices] = class_code.get(_instance_id(inst), 0)
 
         # Si no hay caras planas, saltamos la corrección geométrica (proyección)
         if face_planes is None or face_id is None or len(face_id) == 0:
@@ -3258,6 +3498,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         except Exception:  # noqa: BLE001
             pass
     np.save(class_path, classification)
+    (output_dir / "class_map.json").write_text(json.dumps(class_map, indent=1))
 
     if n_projected > 0:
         corrected_path = output_dir / "corrected_cloud.ply"
@@ -3576,6 +3817,30 @@ import threading
 
 
 def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
+    """The segmentation the viewer receives — every instance carries its `class_byte`.
+
+    pccr 2026-10-01 (USER: "cuando prendo o apago una segmentación además prende y apaga otros
+    objetos"): the viewer keys its visibility texture by `inst.class_byte ?? instance_id`
+    (ui Viewport.tsx). Only the /segments listing attached `class_byte`; the WebSocket payload built
+    here did not, so with the COMPACT encoding (instance ids above 255 → bytes 1..N, class_map.json)
+    every toggle switched the object whose byte equals the toggled instance id. The byte now rides on
+    every path out of here, from the same map the octree was written with."""
+    result = _apply_segmentation_to_cloud_impl(output_dir, ply_path)
+    return with_class_bytes(Path(output_dir), result)
+
+
+def with_class_bytes(output_dir: Path, result: dict) -> dict:
+    """Attach each instance's class byte (`segmentation.republish.class_of`; no map = identity)."""
+    from segmentation.republish import class_of
+    code = class_of(output_dir)
+    for inst in (result or {}).get("instances") or []:
+        iid = inst.get("instance_id", inst.get("id"))
+        if iid is not None:
+            inst["class_byte"] = int(code.get(int(iid), int(iid))) if code else int(iid)
+    return result
+
+
+def _apply_segmentation_to_cloud_impl(output_dir, ply_path=None) -> dict:
     """
     Load pre-computed segmentation result (instant) or fall back to
     full processing for backward compatibility with old sessions.

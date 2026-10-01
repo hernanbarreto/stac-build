@@ -21,7 +21,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -30,17 +30,62 @@ logger = logging.getLogger("TraceNormals")
 
 # ── per-frame machinery ──────────────────────────────────────────────
 
+def _one_sided_tangent(X: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """(H,W,3) tangent along the image COLUMNS (u): per pixel, the forward or the
+    backward difference of the unprojected points ``X``, whichever side lies on
+    the pixel's own surface.
+
+    The side is the one whose INVERSE-depth ``w`` second difference is smaller in
+    magnitude. Inverse depth is affine in (u, v) on any plane, so that second
+    difference is exactly 0 on a face and large across a crease or a depth step —
+    a comparison of the two sides, no threshold. A plain forward difference gave
+    the last pixel before a crease or an occluding edge the tangent of the OTHER
+    surface (edge audit 2026-10-01 #10): a blended normal at every crease and a
+    near-ray normal at every silhouette, the exact pixels the MLS normal gate is
+    there to protect. Ties (a plane) keep the forward difference; the first column
+    can only go forward, the last only backward.
+    """
+    H, W = w.shape
+    tan = np.empty_like(X)
+    if W < 2:
+        tan[:] = 0.0
+        return tan
+    fwd = np.empty_like(X)
+    fwd[:, :-1] = X[:, 1:] - X[:, :-1]
+    fwd[:, -1] = fwd[:, -2]
+    bwd = np.empty_like(X)
+    bwd[:, 1:] = X[:, 1:] - X[:, :-1]
+    bwd[:, 0] = bwd[:, 1]
+    # |second difference| centred on each interior column j (1 … W-2); a side
+    # whose centre falls outside, or touches a pixel with no depth, is +inf
+    e_f = np.full((H, W), np.inf, dtype=np.float64)
+    e_b = np.full((H, W), np.inf, dtype=np.float64)
+    if W >= 3:
+        with np.errstate(invalid="ignore"):
+            s = np.abs(w[:, 2:].astype(np.float64) - 2.0 * w[:, 1:-1] + w[:, :-2])
+        s = np.where(np.isfinite(s), s, np.inf)
+        e_f[:, :-2] = s            # forward side of column c is centred on c + 1
+        e_b[:, 2:] = s             # backward side of column c is centred on c - 1
+    use_b = e_b < e_f
+    use_b[:, -1] = True            # the last column has no forward neighbour
+    tan[:] = np.where(use_b[..., None], bwd, fwd)
+    return tan
+
+
 def _normal_map_from_depth(depth: np.ndarray, K: np.ndarray) -> np.ndarray:
     """(H,W,3) camera-space normal map from a depth map: unproject, then cross the
-    horizontal/vertical finite differences. Fully vectorized."""
+    horizontal/vertical one-sided differences (``_one_sided_tangent``: the side on
+    the pixel's own surface). Fully vectorized."""
     H, W = depth.shape
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
     uu, vv = np.meshgrid(np.arange(W, dtype=np.float32),
                          np.arange(H, dtype=np.float32))
     z = depth.astype(np.float32)
     X = np.stack([(uu - cx) / fx * z, (vv - cy) / fy * z, z], axis=-1)
-    dx = np.empty_like(X); dx[:, :-1] = X[:, 1:] - X[:, :-1]; dx[:, -1] = dx[:, -2]
-    dy = np.empty_like(X); dy[:-1] = X[1:] - X[:-1]; dy[-1] = dy[-2]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w = np.where(z > 0, 1.0 / z, np.nan)
+    dx = _one_sided_tangent(X, w)
+    dy = _one_sided_tangent(X.transpose(1, 0, 2), w.T).transpose(1, 0, 2)
     n = np.cross(dx, dy)
     norm = np.linalg.norm(n, axis=-1, keepdims=True)
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -95,14 +140,25 @@ def _load_frame_depth_index(output_dir: Path):
     return {k: (v[0], v[1]) for k, v in index.items()}
 
 
-def _load_poses(output_dir: Path) -> Optional[Dict[int, np.ndarray]]:
-    """frame_number → 4x4 c2w from camera_poses.txt + camera_frames.txt."""
-    pp = output_dir / "camera_poses.txt"
+def _load_frames(output_dir: Path) -> Optional[List[int]]:
+    """The real frame number of each camera_poses.txt / intrinsic.txt row."""
     fp = output_dir / "camera_frames.txt"
-    if not (pp.exists() and fp.exists()):
+    if not fp.exists():
+        return None
+    return [int(l.split()[0]) for l in open(fp) if l.strip()]
+
+
+def _load_poses(output_dir: Path, poses_dir: Optional[Path] = None
+                ) -> Optional[Dict[int, np.ndarray]]:
+    """frame_number → 4x4 c2w from camera_poses.txt (in ``poses_dir`` when given —
+    an epoch transaction stages its WARPED poses there) + the session's
+    camera_frames.txt (``output_dir``; the transaction does not stage it, the
+    keyframe set does not change)."""
+    pp = Path(poses_dir or output_dir) / "camera_poses.txt"
+    frames = _load_frames(output_dir)
+    if not pp.exists() or frames is None:
         return None
     poses = np.array([[float(x) for x in l.split()] for l in open(pp) if l.strip()])
-    frames = [int(l.split()[0]) for l in open(fp) if l.strip()]
     if poses.shape[1] == 17:
         poses = poses[:, 1:]
     if poses.shape[1] != 16 or len(frames) != len(poses):
@@ -110,14 +166,54 @@ def _load_poses(output_dir: Path) -> Optional[Dict[int, np.ndarray]]:
     return {f: M for f, M in zip(frames, poses.reshape(-1, 4, 4))}
 
 
-def _intrinsics_for(depth_hw: Tuple[int, int], output_dir: Path) -> Optional[np.ndarray]:
-    """K at the depth-map resolution, from intrinsic.txt (written at that same
-    processing resolution by the backend)."""
+def _read_intrinsic_rows(path: Path) -> np.ndarray:
+    """(N,3,3) K per row of an intrinsic.txt. Two layouts exist:
+
+    - ``fx fy cx cy`` per keyframe — what the vendor writes (vggt_long.py, one row
+      per camera_poses.txt row; precision.camera.read_omega_intrinsics reads the
+      same rows) and every session since;
+    - a flattened 3x3 (legacy): 9 values on one row, or the matrix as 3 rows of 3.
+
+    Anything else RAISES: a file that exists and cannot be read is not "no
+    intrinsics". (This used to read the first 9 numbers of ANY file as one 3x3, so
+    on the 4-column layout cy came out as the SECOND keyframe's fy — pccr: 363.6
+    for 416, an 8° shear of every trace normal, edge audit 2026-10-01 #10.)
+    """
+    rows = np.loadtxt(str(path), dtype=np.float64, ndmin=2)
+    if rows.shape == (3, 3):
+        return rows[None].copy()
+    if rows.ndim == 2 and len(rows) and rows.shape[1] == 9:
+        return rows.reshape(-1, 3, 3)
+    if rows.ndim == 2 and len(rows) and rows.shape[1] == 4:
+        K = np.zeros((len(rows), 3, 3), dtype=np.float64)
+        K[:, 0, 0], K[:, 1, 1] = rows[:, 0], rows[:, 1]
+        K[:, 0, 2], K[:, 1, 2] = rows[:, 2], rows[:, 3]
+        K[:, 2, 2] = 1.0
+        return K
+    raise ValueError(f"{path}: rows of {rows.shape[1] if rows.ndim == 2 else '?'} "
+                     f"value(s) — expected 'fx fy cx cy' rows or a 3x3 matrix")
+
+
+def _intrinsics_for(output_dir: Path, frames: Sequence[int]
+                    ) -> Optional[Dict[int, np.ndarray]]:
+    """frame_number → K at the depth-map resolution, from intrinsic.txt (written at
+    that same processing resolution by the backend, one row per keyframe in
+    camera_frames.txt order; a single row — or the legacy 3x3 — serves every
+    frame). None when the session has no intrinsic.txt, or when its rows cannot be
+    attributed to the keyframes (a row count that is neither 1 nor one per frame):
+    a K borrowed from another keyframe is the error this replaced (the omega focal
+    varies per keyframe — pccr fx 354.7–400.3)."""
     for cand in (output_dir / "intrinsic.txt", output_dir / "maplong_run" / "intrinsic.txt"):
         if cand.exists():
-            vals = [float(x) for x in cand.read_text().split()]
-            if len(vals) >= 9:
-                return np.array(vals[:9], dtype=np.float64).reshape(3, 3)
+            Ks = _read_intrinsic_rows(cand)
+            if len(Ks) == 1:
+                return {int(f): Ks[0] for f in frames}
+            if len(Ks) == len(frames):
+                return {int(f): K for f, K in zip(frames, Ks)}
+            logger.warning("trace-normals: %s has %d rows for %d keyframes — the "
+                           "intrinsics cannot be attributed to frames", cand,
+                           len(Ks), len(frames))
+            return None
     return None
 
 
@@ -126,20 +222,33 @@ def _intrinsics_for(depth_hw: Tuple[int, int], output_dir: Path) -> Optional[np.
 def normals_from_trace(xyz: np.ndarray, frame_global: np.ndarray,
                        pixel_row: np.ndarray, pixel_col: np.ndarray,
                        output_dir: Path,
-                       log=None) -> Optional[np.ndarray]:
+                       log=None,
+                       poses_dir: Optional[Path] = None) -> Optional[np.ndarray]:
     """(N,3) world-space, camera-oriented normals for a traced cloud. Returns None
-    when the session lacks any required artifact (caller falls back to KDTree+MST)."""
+    when the session lacks any required artifact (caller falls back to KDTree+MST).
+
+    Each keyframe's depth is unprojected with ITS OWN intrinsic.txt row and rotated
+    by its own pose. ``poses_dir``: where the camera_poses.txt that matches ``xyz``
+    lives when it is not ``output_dir`` — an epoch transaction warps the cloud and
+    stages the warped poses next to it, while the depth maps, intrinsics and frame
+    list stay in the session; the pre-warp rotation would tilt every normal by its
+    keyframe's correction."""
     def _log(m):
         (log or logger.info)(m)
 
     output_dir = Path(output_dir)
     depth_index = _load_frame_depth_index(output_dir)
-    poses = _load_poses(output_dir)
+    poses = _load_poses(output_dir, poses_dir)
     if depth_index is None or poses is None:
+        return None
+    K_by_frame = _intrinsics_for(output_dir, _load_frames(output_dir) or [])
+    if K_by_frame is None:
+        _log("trace-normals: no intrinsic.txt attributable to the keyframes — falling back")
         return None
 
     frames = np.unique(frame_global)
-    have = [f for f in frames if int(f) in depth_index and int(f) in poses]
+    have = [f for f in frames
+            if int(f) in depth_index and int(f) in poses and int(f) in K_by_frame]
     if len(have) < max(3, 0.5 * len(frames)):
         _log(f"trace-normals: only {len(have)}/{len(frames)} frames have depth+pose — "
              f"falling back")
@@ -147,7 +256,6 @@ def normals_from_trace(xyz: np.ndarray, frame_global: np.ndarray,
 
     normals = np.zeros((len(xyz), 3), dtype=np.float32)
     done = np.zeros(len(xyz), dtype=bool)
-    K_cache: Optional[np.ndarray] = None
     chunk_cache: Dict[Path, dict] = {}
 
     for f in have:
@@ -160,12 +268,7 @@ def normals_from_trace(xyz: np.ndarray, frame_global: np.ndarray,
         depth = np.asarray(data["depth"][local]).squeeze()
         if depth.ndim != 2:
             continue
-        if K_cache is None:
-            K_cache = _intrinsics_for(depth.shape, output_dir)
-            if K_cache is None:
-                _log("trace-normals: no intrinsic.txt — falling back")
-                return None
-        nmap = _normal_map_from_depth(depth, K_cache)
+        nmap = _normal_map_from_depth(depth, K_by_frame[int(f)])
 
         M = poses[int(f)]
         R = M[:3, :3]

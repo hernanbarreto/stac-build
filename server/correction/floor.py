@@ -600,6 +600,42 @@ def _segmented_floor_rows(session: CorrectionSession, labels) -> np.ndarray:
     return np.unique(rows)
 
 
+def _blend_across_overlaps(session: CorrectionSession, owner: np.ndarray, R_kf: np.ndarray,
+                           t_kf: np.ndarray):
+    """USER 2026-10-01 ("revisá las posiciones de cámara, hay un escalón que antes no existía"): one rigid
+    motion per OWNER chunk cut a step at every seam — pccr kf 62→63 jumped 15.0 cm where F5 had 6.9 cm, and
+    from a camera there the neighbouring chunk's points no longer matched the image. Omega's chunks overlap
+    (chunk_plan.json): a keyframe inside the overlap of chunks a and b takes a·(1−w) + b·w — rotation by
+    slerp, translation linearly — w its position across that overlap, so the motion changes gradually and
+    each chunk's floor still lands at y = 0 where it alone owns the walk. Without a chunk plan nothing is
+    blended. Returns (R_kf, t_kf, n_blended)."""
+    import json as _json
+    from scipy.spatial.transform import Rotation, Slerp
+    p = Path(session.output_dir) / "chunk_plan.json"
+    if not p.exists():
+        return R_kf, t_kf, 0
+    ranges = [tuple(r) for r in _json.loads(p.read_text()).get("chunk_ranges") or []]
+    motion = {}
+    for c in sorted(set(owner.tolist())):
+        k = int(np.flatnonzero(owner == c)[0])
+        motion[c] = (R_kf[k].copy(), t_kf[k].copy())
+    R_out, t_out, n = R_kf.copy(), t_kf.copy(), 0
+    for a in range(len(ranges) - 1):
+        b = a + 1
+        if a not in motion or b not in motion:
+            continue
+        lo, hi = ranges[b][0], ranges[a][1]            # the overlap [start of b, end of a)
+        if hi - lo < 2:
+            continue
+        sl = Slerp([0.0, 1.0], Rotation.from_matrix([motion[a][0], motion[b][0]]))
+        for i in range(max(lo, 0), min(hi, len(owner))):
+            w = (i - lo) / (hi - 1 - lo)
+            R_out[i] = sl([w]).as_matrix()[0]
+            t_out[i] = (1 - w) * motion[a][1] + w * motion[b][1]
+            n += 1
+    return R_out, t_out, n
+
+
 def solve_floor_by_chunk(session: CorrectionSession, cfg: CorrectionConfig,
                          rng: np.random.Generator, log=print) -> dict:
     """ONE rigid motion per Omega chunk: the chunk's SEGMENTED floor plane → horizontal at
@@ -657,10 +693,15 @@ def solve_floor_by_chunk(session: CorrectionSession, cfg: CorrectionConfig,
         info.update(role="anchor", tilt_deg=round(tilt, 3), floor_y_m=round(float(cen[1]), 4),
                     inliers=int(inl.sum()), sample=int(len(S)))
         per_chunk.append(info)
-        anchors.append({"kf": int(kfs[len(kfs) // 2]), "rot_deg": round(tilt, 3),
+        anchors.append({"kf": int(np.percentile(kfs, 50, method="nearest")),   # the chunk's median kf
+                        "rot_deg": round(tilt, 3),
                         "t_m": round(float(abs(cen[1])), 4), "chunk": int(c)})
         log(f"  floor[chunk {c}] kf {kfs[0]}-{kfs[-1]}: {len(mine):,} segmented floor pts, plane tilt "
             f"{tilt:.2f}°, floor at y {cen[1] * 100:+.1f} cm → horizontal at y = 0")
+    R_kf, t_kf, n_blend = _blend_across_overlaps(session, ck, R_kf, t_kf)
+    if n_blend:
+        log(f"  floor[chunk]: {n_blend} keyframe(s) in chunk overlaps blended between their two chunks' "
+            f"motions — no step at the seams")
     return {"R_kf": R_kf, "t_kf": t_kf, "k_kf": np.ones(n_kf), "anchors": anchors,
             "n_demoted": sum(1 for i in per_chunk if i["role"] != "anchor"),
             "per_kf_report": per_chunk, "model": "chunk",

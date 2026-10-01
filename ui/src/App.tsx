@@ -615,6 +615,10 @@ function App() {
           return d.instances.map((inst: any) => ({
             key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
             id: inst.instance_id || inst.id,
+            // the CLASS BYTE the octree carries (compact above 255 instances) — every
+            // visibility call is keyed by it; a list rebuilt without it toggled nothing
+            // or the wrong object (pccr 2026-10-01)
+            classId: (inst.class_byte ?? (inst.instance_id || inst.id)) as number,
             label: `${inst.label}`,
             color: inst.color || tokenColor('--measure'),
             totalPoints: inst.total_points || 0,
@@ -1804,6 +1808,7 @@ function App() {
           setSegments(data.instances.map((inst: any) => ({
             key: inst.global_id || `${inst.label}_${inst.instance_id || inst.id}`,
             id: inst.instance_id || inst.id,
+            classId: (inst.class_byte ?? (inst.instance_id || inst.id)) as number,
             label: `${inst.label}`,
             color: inst.color || tokenColor('--measure'),
             totalPoints: inst.total_points || 0,

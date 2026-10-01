@@ -915,6 +915,13 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // user-chosen per-segment point visibility (user 2026-08-30: an OBB/panel
     // resync must NOT resurrect segments the user had hidden)
     const segVisRef = useRef<Map<number, boolean>>(new Map())
+    // instance id → class byte of the list currently shown. The hidden set above is
+    // keyed by the BYTE, which names a different object in every epoch (compact
+    // encoding, class_map.json): pccr 2026-10-01, after switching epochs the bytes
+    // hidden in one stayed hidden in the other and a checked row showed another
+    // object's points. The set survives a refresh of the SAME map (OBB recompute,
+    // 2026-08-30) and is dropped when the map changes.
+    const segClassMapRef = useRef<Map<number, number>>(new Map())
     // Raycast honesty (user 2026-08-30): three.js raycasts hit EVERY point in
     // a node's geometry, including points the shader hides — the brush/measure
     // cursor landed on invisible points of hidden segments in MIXED nodes.
@@ -2316,6 +2323,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             if (group) group.visible = visible
         },
         setSegmentVisibility: (segId: number, visible: boolean) => {
+            if (!Number.isFinite(segId)) {
+                // a list built without its class bytes would land on texel NaN and
+                // toggle nothing — say so instead of failing silently
+                console.warn('[Viewport] setSegmentVisibility without a class byte', segId)
+                return
+            }
             segVisRef.current.set(segId, visible)
             // whole-node culling: octree nodes whose every point is hidden
             // skip the draw entirely (user 2026-08-30: single-segment work
@@ -4531,6 +4544,37 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const renderOBBs = useCallback((instances: Array<Record<string, unknown>>) => {
         const group = obbGroupRef.current
         if (!group) return
+
+        // A different instance → class-byte map means the hidden bytes name other
+        // objects now: forget them (every segment visible; the Unsegmented byte 0
+        // keeps its state, App owns it). Same map → the user's choices survive.
+        {
+            const next = new Map<number, number>()
+            for (const inst of instances) {
+                const iid = (inst.instance_id || inst.id || 0) as number
+                next.set(iid, (inst.class_byte ?? iid) as number)
+            }
+            const prev = segClassMapRef.current
+            let changed = false
+            next.forEach((cls, iid) => { if (prev.has(iid) && prev.get(iid) !== cls) changed = true })
+            if (changed && segVisRef.current.size) {
+                const unseg = segVisRef.current.get(0)
+                segVisRef.current.clear()
+                if (unseg !== undefined) segVisRef.current.set(0, unseg)
+                const mat = materialRef.current
+                if (mat) {
+                    const tex = mat.uniforms.uSegVisTex.value as THREE.DataTexture
+                    const data = tex.image.data as Uint8Array
+                    const keep0 = data[0]
+                    data.fill(255)
+                    data[0] = keep0
+                    tex.needsUpdate = true
+                }
+                potreeLoaderRef.current?.setClassVisibility(new Set(unseg === false ? [0] : []))
+                console.log('[Viewport] class map changed — segment visibility reset')
+            }
+            segClassMapRef.current = next
+        }
 
         // Preserve the user's choices across re-renders (user 2026-08-30:
         // recomputing a bbox must not bring every hidden box/segment back)

@@ -525,13 +525,19 @@ def scene_consolidate(output_dir: Path,
         # not in the staging directory a correction epoch consolidates in
         # (the transaction stages nine geometry artifacts and none of
         # them). Without this the fast path can never fire inside an epoch
-        # and every certification pays the kNN-PCA path.
+        # and every certification pays the kNN-PCA path. The POSES are the
+        # ones next to the cloud being consolidated: an epoch stages its
+        # warped camera_poses.txt there, and the session's pre-warp rotation
+        # would tilt every normal by its keyframe's correction (edge audit
+        # 2026-10-01 #10).
         normals = normals_from_trace(
             pts, np.asarray(data["frame_global"], np.int64),
             np.asarray(data["pixel_row"], np.int64),
             np.asarray(data["pixel_col"], np.int64),
             Path(artifacts_dir or output_dir),
-            log=lambda m: logger.info("scene_consolidate: %s", m))
+            log=lambda m: logger.info("scene_consolidate: %s", m),
+            poses_dir=(output_dir if (output_dir / "camera_poses.txt").exists()
+                       else None))
         if normals is None:
             logger.warning("scene_consolidate: the session has no depth maps for "
                            "trace normals — PCA normals over the exact kNN")

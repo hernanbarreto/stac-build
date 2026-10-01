@@ -274,6 +274,15 @@ segmentation:
                               # machinery.
   fragment_gap_m: 0.10        # occupied voxels of two same-label instances closer than this are
                               # touching. Also the voxel size of the test.
+  split_covisible: true       # USER 2026-09-30 ("está mal que junte tres desk separados en uno solo
+                              # ID"): an instance whose components (apart by more than
+                              # fragment_gap_m, each >= correction.visit_drift.min_points) are SEEN
+                              # TOGETHER in >= dedupe_overlap of the smaller one's keyframes AND whose gap
+                              # is free space the cameras see through is split — one frame cannot see one
+                              # object in two places, and nothing lies behind a HOLE (the first version,
+                              # without the free-space test, cut pccr's floor in 2 and ceiling in 3).
+                              # Components never seen together (a drift duplicate) stay for the
+                              # certification to correct. No number of its own. pccr desk #174.
   mask_erosion_iterations: 0  # USER ORDER 2026-08-29: no erosion at all (was 2; ate 131k
                               # mask-covered points on test3 — the #1 eater). Raise to 1-2
                               # if boundary bleed between neighbours returns.
@@ -2303,15 +2312,22 @@ reconstruction:
     cloud:                              # THE PRODUCT (USER 2026-09-29, pccr: the corrected Omega cloud
                                         # is "hasta ahora la mejor nube"; the witness fusion delivered
                                         # 9 M / 0.2 M points judged worse) — precision/corrected_cloud.py
-      source: omega_corrected           # omega_corrected: F6's depth (tier 0 sweep + tier 1 Omega ×
+      source: omega_bent                # USER 2026-10-01 (pccr epoch 7, the best cloud): omega_bent = Omega's
+                                        #   depth BENT to F5's landmarks + multi-view vote (f6_bend,
+                                        #   precision/depth_on_f5.py; no plane sweep, no F7) — see bend: below.
+                                        # (was) omega_corrected: F6's depth (tier 0 sweep + tier 1 Omega ×
                                         #   s_k, maximum coverage) with F5's camera + poses, the
                                         #   reconstruction's confidence gate per Omega chunk, voxel +
                                         #   SOR, witnesses, silhouettes, consolidation, octree
                                         #   (runner: … f5_refine → f6_sweep → f7_cloud → f6_check)
                                         # fusion: F6 sweep → F7 witness fusion (the §4-F7 chain)
-      witness_filter: true              # the witness filter fed the corrected frames (single_witness
-                                        #   leaves — pccr: 3.7 M of 25.5 M, the layers one keyframe invents)
-      silhouette_filter: true           # USER 2026-09-29: the flyer filter of the SAM3 silhouettes
+      witness_filter: false             # OFF — USER 2026-09-30: epoch 4 (Omega + F5, no witness, no silhouettes,
+                                        #   no consolidation) is the recipe judged good; the witness filter
+                                        #   ate 28 % of pccr (holes). (was true: single_witness leaves —
+                                        #   pccr: 3.7 M of 25.5 M, the layers one keyframe invents)
+      silhouette_filter: false          # OFF — USER 2026-09-30 (the certify stage's mask filter judges every
+                                        #   point against the other objects' masks already). (was) USER
+                                        #   2026-09-29: the flyer filter of the SAM3 silhouettes
                                         #   (precision/silhouette_filter.py), after the witnesses and
                                         #   before the consolidation. A point born inside masklet m's
                                         #   mask is projected into every OTHER keyframe where m has a
@@ -2340,7 +2356,28 @@ reconstruction:
                                         #   cuts nothing), this filter is the one that deletes
       silhouette_device: cuda           # where the per-view projection runs (cuda | cpu); an
                                         #   unavailable device FAILS the step — no silent fallback
-      consolidate: true                 # scene_consolidate with normals from the corrected depth maps
+      consolidate: false                # OFF — USER 2026-09-30 (epoch 4's recipe). (was true: scene_consolidate
+                                        #   with normals from the corrected depth maps)
+      confidence_gate: false            # USER 2026-09-30 "omega con F6 sin filtro por confianza": this step
+                                        #   applies no gate of its own. F6 already dropped what is under the
+                                        #   pipeline's ONE floor (reconstruction.simple.conf_min_norm, its
+                                        #   DISCARD_LOW_CONF: 7.6 % of pccr); the conf_percentile 20 on top cut
+                                        #   up to 20 % more per chunk — weak-texture floors and walls.
+      repair_contradicted: true         # USER 2026-09-30: F6 contradicted 32 % of pccr's pixels (a view sees free
+                                        #   space through the point: Omega's depth does not agree with F5's
+                                        #   poses there). Such a pixel still sees a surface — it takes the
+                                        #   depth its neighbours put on its ray when repair_min_views of them
+                                        #   agree, and leaves otherwise. Same rule as the DA3 fusion.
+      repair_neighbors: [-12, -6, -3, 3, 6, 12]   # keyframe offsets carried onto the pixel's ray
+      repair_tau_quantile: 75.0         # agreement tolerance = the p75 of the session's OWN neighbour
+                                        #   disagreement (pccr ≈ 3 %), measured on every run
+      repair_min_views: 2               # one neighbour is an opinion, two agreeing are evidence
+    bend:                               # USER 2026-10-01 — the depth on F5 (precision/depth_on_f5.py)
+      windows: [0, 1, 2, 4, 8]          # BOUND (search): ± keyframes pooled per bend; the HELD-OUT tracks choose
+                                        #   (pccr: ±0, held-out |dz|/z 7.25 % unbent → 2.80 %)
+      neighbors: [-12, -6, -3, 3, 6, 12]  # keyframe offsets that vote on each pixel (same as the repair)
+      tau_quantile: 75.0                # agreement tolerance = p75 of the session's OWN neighbour disagreement
+                                        #   (pccr 1.96 %), measured every run
     chunk_check:                        # USER 2026-09-29: per-chunk AND per-keyframe verification of
                                         # the corrected geometry against the floor/ceiling, DA3 as the
                                         # independent instrument (precision/chunk_check.py). Verdict per
@@ -3086,6 +3123,29 @@ correction:
                                   # visit_drift.min_points and visits at or
                                   # under visit_drift.min_visit_share.
                                   # UNSEGMENTED POINTS ARE NEVER TOUCHED.
+                                  # 2026-10-01 (edge definition, USER: "corte
+                                  # en los filos, las aristas"): every
+                                  # projection — mask lookup AND z-buffer — uses
+                                  # the camera the cloud was BUILT with
+                                  # (output/camera.json, verified on the cloud's
+                                  # own birth pixels; a mismatch fails the step,
+                                  # intrinsic.txt is never used in its place).
+                                  # Rule 4 (on ANOTHER object's surface) decides
+                                  # by MAJORITY of the views that saw the point
+                                  # and adds NO key here: it reads the silhouette
+                                  # filter's own declared values through its one
+                                  # reader (precision.silhouette_filter.
+                                  # params_from) — reconstruction.precision.cloud.
+                                  # silhouette_min_votes / _min_inside_frac,
+                                  # witness.occlusion_tol_rel (occluded / "on that
+                                  # surface", relative to the measured depth; it
+                                  # replaces segmentation.mask_filter.depth_tol_m
+                                  # for this rule), precision.refine.min_tri_deg
+                                  # (parallax on the birth ray) and
+                                  # segmentation.mask_filter.dilate_px (the
+                                  # point's OWN rim only — the foreign mask is
+                                  # never dilated). One home per value: two copies
+                                  # of a threshold drift apart.
     depth_correction_mode: sidecar  # sidecar (output/depth_correction.json served
                                     # via segmentation/session_io.correct_depth) |
                                     # rewrite (NOT implemented — selecting it fails loudly)

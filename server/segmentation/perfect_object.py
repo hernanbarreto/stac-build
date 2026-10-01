@@ -514,19 +514,29 @@ def _read_ply_fields(path: Path) -> Dict[str, np.ndarray]:
 
 
 def _load_instance_cloud(out: Path, inst: dict, cfg: dict, safe: str,
-                         log) -> np.ndarray:
+                         log, ply_path: Optional[Path] = None,
+                         fields: Optional[Dict[str, np.ndarray]] = None,
+                         return_indices: bool = False):
     """The instance's OWN cleaned-cloud points (raw frame), with the
     lowest-confidence ``p2c_conf_trim_pct`` % dropped. The cloud is the
-    validated truth — meshes never enter the CAD path."""
+    validated truth — meshes never enter the CAD path.
+
+    ``ply_path`` reads another PLY than ``out/cleaned_cloud.ply`` (e.g. a
+    frozen epoch's cloud); ``fields`` passes that PLY's vertex fields already
+    read by ``_read_ply_fields`` (a caller measuring many instances reads the
+    cloud once). ``return_indices=True`` also returns the PLY row of every
+    returned point. Defaults reproduce the original behaviour exactly."""
     trim_pct = float(cfg.get("p2c_conf_trim_pct", 20.0))
-    fields = _read_ply_fields(out / "cleaned_cloud.ply")
+    src = Path(ply_path) if ply_path is not None else out / "cleaned_cloud.ply"
+    if fields is None:
+        fields = _read_ply_fields(src)
     xyz = np.column_stack([fields["x"], fields["y"], fields["z"]]).astype(
         np.float64)
     gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
     gi = gi[(gi >= 0) & (gi < len(xyz))]
     if len(gi) == 0:
         raise RuntimeError(f"{safe}: instance has no globalIndices into "
-                           "cleaned_cloud.ply")
+                           f"{src.name}")
     P = xyz[gi]
     conf = fields.get("confidence")
     if conf is not None and trim_pct > 0:
@@ -537,20 +547,76 @@ def _load_instance_cloud(out: Path, inst: dict, cfg: dict, safe: str,
             f"dropping the {trim_pct:.0f}% lowest-confidence "
             f"(thr {thr:.3f})")
         P = P[keep]
+        gi = gi[keep]
     elif conf is None:
-        log(f"[cloud:{safe}] cleaned_cloud.ply has no confidence field — "
+        log(f"[cloud:{safe}] {src.name} has no confidence field — "
             f"no trim applied ({len(P):,} pts)")
+    if return_indices:
+        return P, gi
     return P
 
 
+def detector_min_region_pts(cfg: dict) -> int:
+    """The smallest region the cloud detector keeps — the exact value
+    ``_detect_and_snap_cloud`` applies (shared so a consumer of its labels uses
+    the same minimum, not a copy of it)."""
+    return int(cfg.get("perfect_min_region_faces", 300))
+
+
+def _knn_contact_edges(Pd: np.ndarray) -> np.ndarray:
+    """The detector's connectivity graph: k-NN edges (k = 8) capped at ~3× the
+    median point spacing. Returns an (E, 2) array of point-index pairs. Shared
+    by ``_detect_and_snap_cloud`` and the edge-definition metric
+    (``precision/edge_metric.py``), so both read contact on the same graph."""
+    from scipy.spatial import cKDTree
+    kd = cKDTree(Pd)
+    dnn = kd.query(Pd[:: max(1, len(Pd) // 5000)], k=2, workers=8)[0][:, 1]
+    radius = max(3.0 * float(np.median(dnn)), 0.01)
+    k_conn = 8
+    dist, nbr = kd.query(Pd, k=k_conn + 1, workers=8)
+    src = np.repeat(np.arange(len(Pd)), k_conn)
+    dst = nbr[:, 1:].ravel()
+    ok = dist[:, 1:].ravel() <= radius
+    return np.column_stack([src[ok], dst[ok]])
+
+
+def region_labels(regions: List[dict], n_points: int) -> np.ndarray:
+    """Per-point region index (position in ``regions``; -1 = unlabeled)."""
+    lab = np.full(int(n_points), -1, dtype=np.int64)
+    for ri, r in enumerate(regions):
+        lab[np.asarray(r["v_idx"], dtype=np.int64)] = ri
+    return lab
+
+
+def region_adjacency(E: np.ndarray, labels: np.ndarray) -> Dict[Tuple[int, int], int]:
+    """Region adjacency on a contact graph: {(i, j): number of contact edges}
+    for every pair of distinct labels (i < j, both >= 0) joined by at least one
+    edge of ``E``."""
+    E = np.asarray(E, dtype=np.int64).reshape(-1, 2)
+    labels = np.asarray(labels, dtype=np.int64)
+    if len(E) == 0:
+        return {}
+    la, lb = labels[E[:, 0]], labels[E[:, 1]]
+    m = (la >= 0) & (lb >= 0) & (la != lb)
+    if not m.any():
+        return {}
+    pairs, counts = np.unique(np.sort(np.column_stack([la[m], lb[m]]), axis=1),
+                              axis=0, return_counts=True)
+    return {(int(i), int(j)): int(c) for (i, j), c in zip(pairs, counts)}
+
+
 def _detect_and_snap_cloud(Pd: np.ndarray, cfg: dict, safe: str,
-                           log) -> Tuple[List[dict], int]:
+                           log, return_adjacency: bool = False):
     """Cloud-native region labeling: RANSAC-first (the validated
     ``decompose.extract_primitives`` machinery — noise-robust where crease
     graphs on raw-point normals are not), each primitive split into connected
     components; large freeform residues become labeled regions of their own
     (kind ``freeform``, no analytic model) so point2cad's INR can fit them.
-    ``v_idx`` indexes into ``Pd``. Same snap gates as the mesh detector."""
+    ``v_idx`` indexes into ``Pd``. Same snap gates as the mesh detector.
+
+    Returns ``(regions, min_region_pts)``; with ``return_adjacency=True`` also
+    the region adjacency of the final regions on the detector's own contact
+    graph (``region_adjacency``), as a third element."""
     import open3d as o3d
     import scipy.sparse as sp
     from scipy.spatial import cKDTree
@@ -642,15 +708,7 @@ def _detect_and_snap_cloud(Pd: np.ndarray, cfg: dict, safe: str,
         remaining &= ~mask
 
     # connectivity graph: k-NN edges capped at ~3× the median point spacing
-    kd = cKDTree(Pd)
-    dnn = kd.query(Pd[:: max(1, len(Pd) // 5000)], k=2, workers=8)[0][:, 1]
-    radius = max(3.0 * float(np.median(dnn)), 0.01)
-    k_conn = 8
-    dist, nbr = kd.query(Pd, k=k_conn + 1, workers=8)
-    src = np.repeat(np.arange(len(Pd)), k_conn)
-    dst = nbr[:, 1:].ravel()
-    ok = dist[:, 1:].ravel() <= radius
-    E = np.column_stack([src[ok], dst[ok]])
+    E = _knn_contact_edges(Pd)
 
     def _components(mask: np.ndarray) -> List[np.ndarray]:
         idx = np.nonzero(mask)[0]
@@ -771,6 +829,10 @@ def _detect_and_snap_cloud(Pd: np.ndarray, cfg: dict, safe: str,
         f"{covered / max(len(Pd), 1):.0%} of {len(Pd):,} pts")
 
     _snap_regions(regions, Pd, cfg, safe, log)
+    if return_adjacency:
+        # region index = position in the FINAL (sorted) ``regions`` list
+        return regions, min_region_pts, region_adjacency(
+            E, region_labels(regions, len(Pd)))
     return regions, min_region_pts
 
 

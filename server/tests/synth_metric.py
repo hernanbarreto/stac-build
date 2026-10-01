@@ -658,6 +658,15 @@ def write_session_dir(root: Path, sess: Session, instances: Dict[int, dict],
     K = sess.K
     (out / "intrinsic.txt").write_text("\n".join(
         f"{K[0,0]} {K[1,1]} {K[0,2]} {K[1,2]}" for _ in range(N)) + "\n")
+    # the session camera (precision.camera, F0) — the camera this cloud was rendered
+    # with: the certify mask filter projects ONLY through it and verifies it on the
+    # cloud's birth pixels (correction.visit_drift.projection_camera, 2026-10-01)
+    from precision.camera import CameraModel, grid_full_frame_resize, save_camera_json
+    save_camera_json(out / "camera.json", CameraModel(
+        width=W, height=H, params=(K[0, 0], K[1, 1], K[0, 2], K[1, 2], 0.0, 0.0, 0.0, 0.0),
+        source="synthetic", camera_epoch=0,
+        omega_grid=grid_full_frame_resize(W, H, W, H, "omega"),
+        mask_grid=grid_full_frame_resize(W, H, W, H, "mask")), geometry_epoch=0)
     names = [f"{int(x):06d}.jpg" for x in sess.frame_numbers]
     (out / "frame_list.json").write_text(json.dumps(names))
     (frames_dir / "frame_quality.json").write_text(json.dumps(

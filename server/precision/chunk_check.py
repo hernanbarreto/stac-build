@@ -196,6 +196,7 @@ def load_inputs(session_dir: Path, log: Callable = print):
         raise ChunkCheckError("Omega's grid is not the native grid — the check needs the "
                               "F0 grid mapping before unprojecting Omega's depth")
     s_k = {f: 1.0 for f in frames}
+    bend = {f: (0.0, 0.0) for f in frames}
     s_k_source = "absent (1.0 — neither the corrected cloud nor F6 measured the per-keyframe scale)"
     for rel in ("corrected_cloud.json", "depth_native/report.json"):
         rep = out / rel
@@ -204,7 +205,10 @@ def load_inputs(session_dir: Path, log: Callable = print):
         pf = json.loads(rep.read_text()).get("per_frame") or {}
         if all(str(f) in pf and "s_k" in pf[str(f)] for f in frames):
             s_k = {f: float(pf[str(f)]["s_k"]) for f in frames}
-            s_k_source = f"{rel} per_frame.s_k"
+            # the depth on F5 (f6_bend) publishes k(u, v) = s_k + c1·u' + c2·v' per keyframe:
+            # the check measures the cloud that was PUBLISHED, bend included
+            bend = {f: tuple(float(x) for x in (pf[str(f)].get("bend") or (0.0, 0.0))) for f in frames}
+            s_k_source = f"{rel} per_frame.s_k" + (" + bend" if any(b != (0.0, 0.0) for b in bend.values()) else "")
             break
     rec = out / "omega_run" / "results_output"
     chunk = {}
@@ -218,18 +222,29 @@ def load_inputs(session_dir: Path, log: Callable = print):
     chain = keyframe_chainage(Path(session_dir), frames)
     log(f"{LOG_TAG} {len(frames)} keyframes, {len(set(chunk.values()))} Omega chunk(s), "
         f"s_k from {s_k_source}, chainage {'measured' if chain is not None else 'NOT measured (no walk)'}")
-    return frames, c2w, K, s_k, s_k_source, chunk, chain, rec, out / "da3_run" / "results_output"
+    return frames, c2w, K, s_k, s_k_source, chunk, chain, rec, out / "da3_run" / "results_output", bend
+
+
+def scale_map(s_k: float, bend, H: int, W: int):
+    """The per-pixel factor the published cloud applied to Omega's depth: s_k alone, or the
+    f6_bend ratio model k(u, v) = s_k + c1·(u − W/2)/W + c2·(v − H/2)/H (precision.depth_on_f5.design)."""
+    c1, c2 = (float(bend[0]), float(bend[1])) if bend is not None else (0.0, 0.0)
+    if c1 == 0.0 and c2 == 0.0:
+        return float(s_k)
+    uu, vv = np.meshgrid(np.arange(W, dtype=np.float64), np.arange(H, dtype=np.float64))
+    return float(s_k) + c1 * (uu - W / 2) / W + c2 * (vv - H / 2) / H
 
 
 def measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir: Path, da3_dir: Path, cfg,
-                 log: Callable = print) -> Tuple[List[Row], dict]:
+                 log: Callable = print, bend: Optional[Dict[int, tuple]] = None) -> Tuple[List[Row], dict]:
     """Two passes over the depth maps: the dominant floor plane, then every height."""
     t0 = time.time()
     floor_pool = []
     world_pts: Dict[int, np.ndarray] = {}
     for i, f in enumerate(frames):
         with np.load(omega_dir / f"frame_{f}.npz") as z:
-            d = np.asarray(z["depth"], np.float64) * s_k[f]
+            d0 = np.asarray(z["depth"], np.float64)
+            d = d0 * scale_map(s_k[f], bend.get(f) if bend else None, d0.shape[0], d0.shape[1])
         X = unproject(d, K, c2w[i], cfg.pixel_stride)
         world_pts[f] = X
         if len(X):
@@ -475,10 +490,10 @@ def run_check(session_dir: Path, pcfg, log: Callable = print, chainage: Optional
     t0 = time.time()
     session_dir = Path(session_dir)
     cfg = pcfg.chunk_check
-    frames, c2w, K, s_k, s_k_source, chunk, chain, omega_dir, da3_dir = load_inputs(session_dir, log)
+    frames, c2w, K, s_k, s_k_source, chunk, chain, omega_dir, da3_dir, bend = load_inputs(session_dir, log)
     if chainage is not None:
         chain = np.asarray(chainage, np.float64)
-    rows, plane = measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir, da3_dir, cfg, log)
+    rows, plane = measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir, da3_dir, cfg, log, bend=bend)
     pool_m = float(pcfg.gauge.knot_walk_m) / 2.0
     verdicts = judge(rows, cfg, pool_m, log)
     rep = {"version": 1, "provenance": PROVENANCE, **_epochs(session_dir / "output"),

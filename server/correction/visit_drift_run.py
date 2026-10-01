@@ -70,6 +70,38 @@ def _depth_tol() -> float:
     return float(v)
 
 
+def _mask_filter_cost_cap() -> int:
+    """``segmentation.mask_filter.max_frames_per_visit`` — mask keyframes measured
+    per visit, the ones showing most of the object first: a COST cap, declared in
+    config.yaml next to the rest of the mask filter. A missing key fails here
+    naming itself (it used to fall back to a literal 8 nobody could see)."""
+    from config import get_param
+    v = get_param("segmentation.mask_filter.max_frames_per_visit")
+    if v is None:
+        raise RuntimeError(
+            "config.yaml is missing 'segmentation.mask_filter.max_frames_per_visit' — "
+            "the mask filter does not assume how many keyframes to read per visit")
+    return int(v)
+
+
+def _other_mask_params():
+    """The parameters of the mask filter's fourth rule, from their ONE declared
+    home: the same reader as the silhouette flyer filter
+    (``precision.silhouette_filter.params_from``) — ``silhouette_min_votes`` /
+    ``silhouette_min_inside_frac`` (``reconstruction.precision.cloud``, the
+    majority semantics, USER 2026-10-01: rule 4 decides by majority of the
+    views like the silhouette criterion), ``loops.witness.occlusion_tol_rel``
+    (occlusion AND "on that surface", relative to the measured depth — replaces
+    the invented ``depth_tol_m`` for this rule), ``precision.refine.min_tri_deg``
+    (a view along the birth ray cannot place the point) and
+    ``segmentation.mask_filter.dilate_px`` (the point's OWN rim tolerance). The
+    typed loaders fail on a missing key, naming it."""
+    from config import cfg as raw_cfg
+    from precision.config import load_precision_config
+    from precision.silhouette_filter import params_from
+    return params_from(load_precision_config(raw_cfg), raw_cfg)
+
+
 def _condemn(record: Optional[dict], iid, inst: dict, points: int,
              reason: str, min_points: int) -> None:
     """Write down why an instance stopped existing, in the result file's own
@@ -182,7 +214,6 @@ def measure_epoch(output_dir: Path, cfg, rep_m: float,
     _, data = read_ply(output_dir / "cleaned_cloud.ply")
     xyz = np.stack([data["x"], data["y"], data["z"]], 1).astype(np.float64)
     poses = np.loadtxt(output_dir / "camera_poses.txt").reshape(-1, 4, 4)
-    K_all = np.loadtxt(output_dir / "intrinsic.txt").reshape(-1, 4)
     up = -poses[:, :3, 1].mean(0)
     up = up / np.linalg.norm(up)
     chain = chainage(poses)
@@ -210,7 +241,11 @@ def measure_epoch(output_dir: Path, cfg, rep_m: float,
         rep["scale_rows"] = []
         return rep
 
-    vis = vd.Visibility(output_dir, xyz, ks, poses, K_all, tol)
+    # the camera the cloud was BUILT with, verified on its birth pixels (audit
+    # 2026-10-01: Omega's intrinsic.txt is another camera once F5 refined it)
+    cam = vd.projection_camera(output_dir, xyz, ks, poses, data["pixel_row"],
+                               data["pixel_col"], log=log)
+    vis = vd.Visibility(output_dir, xyz, ks, poses, cam, tol)
     det: List[Tuple] = []
     for c in cands:
         A, B = c.copies[0], c.copies[1]
@@ -466,11 +501,15 @@ def filter_staged_cloud(tx: Path, session, data_new, xyz_new: np.ndarray,
     otro"*. So it runs here, on the geometry already staged, and the ONE
     consolidation and the ONE octree that follow carry it.
 
-    Three rules, all on the MASKLETS of `segmentation.json` — not on the fused
+    Four rules, all on the MASKLETS of `segmentation.json` — not on the fused
     instances (USER 2026-09-18: *"no eran 82 instancias, está mal"*):
     a point that still falls outside its own object's mask in every view that
-    saw it unoccluded, a masklet under `min_points`, and a visit contributing
-    at or under `min_visit_share`.
+    saw it unoccluded, a masklet under `min_points`, a visit contributing
+    at or under `min_visit_share`, and a point that lies ON another object's
+    surface inside its mask in the majority of the views that saw it
+    (`visit_drift.cloud_filter_masklets`, rewritten 2026-10-01 for edge
+    definition; its parameters: `_other_mask_params`). Every projection uses
+    the camera the cloud was built with (`visit_drift.projection_camera`).
 
     Judged HERE and not earlier because the pose is already corrected: a point
     judged before is deleted for being where the correction was about to move
@@ -485,7 +524,6 @@ def filter_staged_cloud(tx: Path, session, data_new, xyz_new: np.ndarray,
     `load_session` refuses the epoch outright — measured 2026-09-19, when an
     epoch that filtered only one of them could not be loaded again.
     """
-    from config import get_param
     from correction.session import write_ply
 
     output_dir = Path(session.output_dir)
@@ -493,12 +531,24 @@ def filter_staged_cloud(tx: Path, session, data_new, xyz_new: np.ndarray,
     if not masklets:
         log("  mask filter: the session has no masklet — nothing to judge")
         return None
+    tol = _depth_tol()
+    # the camera the cloud was BUILT with — the mask lookup AND the z-buffer —
+    # verified on the staged cloud's own birth pixels with the staged poses (the
+    # warp moves a point with its birth camera, so its birth pixel is invariant);
+    # a camera that does not reproduce them fails the step instead of being mixed
+    # with another (audit 2026-10-01: intrinsic.txt misplaced pccr's rims by
+    # 3-23 px)
+    cam = vd.projection_camera(output_dir, xyz_new, session.ks, poses_new,
+                               data_new["pixel_row"], data_new["pixel_col"], log=log)
+    # which masklet each point belongs to: its birth pixel carried onto the mask
+    # grid through the same camera's exact grid maps
     pm = vd.points_of_masklets(output_dir, data_new["frame_global"],
                                data_new["pixel_row"], data_new["pixel_col"],
-                               log=lambda m: None)
-    K_all = np.loadtxt(output_dir / "intrinsic.txt").reshape(-1, 4)
-    tol = _depth_tol()
-    vis = vd.Visibility(output_dir, xyz_new, session.ks, poses_new, K_all, tol)
+                               log=lambda m: None,
+                               mask_pixels=cam.record_to_mask(data_new["pixel_row"],
+                                                              data_new["pixel_col"]))
+    vis = vd.Visibility(output_dir, xyz_new, session.ks, poses_new, cam, tol)
+    o4 = _other_mask_params()
 
     # the "too small to be worth anything" test is about the OBJECT, not the
     # mask: small masklets fuse into big objects (USER 2026-09-22)
@@ -509,9 +559,10 @@ def filter_staged_cloud(tx: Path, session, data_new, xyz_new: np.ndarray,
     kill, frep = vd.cloud_filter_masklets(
         pm, masklets, session.ks, xyz_new, vis,
         cfg.visit_drift.min_points, cfg.visit_drift.min_visit_share,
-        int(get_param("segmentation.mask_filter.max_frames_per_visit", 8)),
-        int(get_param("segmentation.mask_filter.dilate_px", 2)), log=log,
-        group_points=_grp, group_roots=vd.fused_object_roots(output_dir))
+        _mask_filter_cost_cap(), int(o4.dilate_px),
+        occlusion_tol_rel=float(o4.occlusion_tol_rel), min_votes=int(o4.min_votes),
+        min_inside_frac=float(o4.min_inside_frac), min_tri_deg=float(o4.min_tri_deg),
+        log=log, group_points=_grp, group_roots=vd.fused_object_roots(output_dir))
     if not kill.any():
         log("  mask filter: every point is where its own mask says — nothing to do")
         return None

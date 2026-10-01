@@ -317,6 +317,24 @@ class CloudConfig:
                                         # under which it leaves
     silhouette_device: str      # cuda | cpu — where the projection runs (no fallback)
     consolidate: bool           # the scene consolidation, normals from the corrected depth
+    confidence_gate: bool       # USER 2026-09-30: false = no gate of this step's own — F6 already applied
+                                # the pipeline's ONE confidence floor (its DISCARD_LOW_CONF)
+    repair_contradicted: bool   # USER 2026-09-30: a pixel F6 contradicted takes the depth its neighbours
+                                # agree on along its ray instead of leaving (it leaves when they do not)
+    repair_neighbors: tuple     # keyframe offsets whose surfaces are carried onto the pixel's ray
+    repair_tau_quantile: float  # agreement tolerance = this quantile of the session's own neighbour
+                                # disagreement (measured, never a fixed number)
+    repair_min_views: int       # neighbours that must agree before a depth is given back
+
+
+# ── depth on F5 (USER 2026-10-01: the epoch-7 recipe, precision/depth_on_f5.py) ──
+
+@dataclass(frozen=True)
+class BendConfig:
+    windows: Tuple[int, ...]    # BOUND (search): smoothing windows (± keyframes) the held-out chooses among
+    neighbors: Tuple[int, ...]  # keyframe offsets that vote on a pixel
+    tau_quantile: float         # agreement tolerance = this percentile of the session's OWN neighbour
+                                # disagreement (measured every run, never a fixed number)
 
 
 # ── chunk / keyframe floor check (USER 2026-09-29: "verificación interna e intrachunk") ──
@@ -359,6 +377,7 @@ class PrecisionConfig:
     depth: DepthConfig
     fuse: FuseConfig
     cloud: CloudConfig
+    bend: BendConfig
     chunk_check: ChunkCheckConfig
     runner: RunnerConfig
 
@@ -566,8 +585,9 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
 
     cl = _sub(sec, "cloud", "")
     src = _require(cl, "source", "cloud")
-    if src not in ("omega_corrected", "fusion"):
-        raise PrecisionConfigError(f"'{SECTION}.cloud.source' must be omega_corrected | fusion, got {src!r}")
+    if src not in ("omega_bent", "omega_corrected", "fusion"):
+        raise PrecisionConfigError(f"'{SECTION}.cloud.source' must be omega_bent | omega_corrected | fusion, "
+                                   f"got {src!r}")
     cloud = CloudConfig(source=str(src), witness_filter=_bool(cl, "witness_filter", "cloud"),
                         silhouette_filter=_bool(cl, "silhouette_filter", "cloud"),
                         silhouette_max_views=_num(cl, "silhouette_max_views", "cloud", lo=1, integer=True),
@@ -576,7 +596,13 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
                         silhouette_min_inside_frac=_num(cl, "silhouette_min_inside_frac", "cloud",
                                                         lo=0.0, hi=1.0, lo_excl=True),
                         silhouette_device=_enum(cl, "silhouette_device", "cloud", DEVICES),
-                        consolidate=_bool(cl, "consolidate", "cloud"))
+                        consolidate=_bool(cl, "consolidate", "cloud"),
+                        confidence_gate=_bool(cl, "confidence_gate", "cloud"),
+                        repair_contradicted=_bool(cl, "repair_contradicted", "cloud"),
+                        repair_neighbors=tuple(int(x) for x in _require(cl, "repair_neighbors", "cloud")),
+                        repair_tau_quantile=_num(cl, "repair_tau_quantile", "cloud", lo=0.0, hi=100.0,
+                                                 lo_excl=True),
+                        repair_min_views=_num(cl, "repair_min_views", "cloud", lo=1, integer=True))
     cc = _sub(sec, "chunk_check", "")
     chunk_check = ChunkCheckConfig(
         low_pct=_num(cc, "low_pct", "chunk_check", lo=0.0, hi=50.0),
@@ -589,6 +615,15 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
         bootstrap=_num(cc, "bootstrap", "chunk_check", lo=10, integer=True),
         seed=_num(cc, "seed", "chunk_check", lo=0, integer=True),
     )
+    bd = _sub(sec, "bend", "")
+    windows = tuple(int(x) for x in _require(bd, "windows", "bend"))
+    neighbors = tuple(int(x) for x in _require(bd, "neighbors", "bend"))
+    if not windows or min(windows) < 0:
+        raise PrecisionConfigError(f"'{SECTION}.bend.windows' must be non-negative keyframe counts, got {windows}")
+    if not neighbors or 0 in neighbors:
+        raise PrecisionConfigError(f"'{SECTION}.bend.neighbors' must be non-zero keyframe offsets, got {neighbors}")
+    bend = BendConfig(windows=windows, neighbors=neighbors,
+                      tau_quantile=_num(bd, "tau_quantile", "bend", lo=0.0, hi=100.0, lo_excl=True))
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,
                            tracks=tracks, refine=refine, depth=depth, fuse=fuse,
-                           cloud=cloud, chunk_check=chunk_check, runner=runner)
+                           cloud=cloud, bend=bend, chunk_check=chunk_check, runner=runner)

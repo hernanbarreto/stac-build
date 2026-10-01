@@ -807,22 +807,319 @@ def make_grid(copies: Sequence[np.ndarray], axes: np.ndarray, step: float,
     return Grid(axes=axes, lo=lo, step=float(step), shape=shape)
 
 
+# ── THE CAMERA THE CLOUD WAS BUILT WITH ─────────────────────────────────
+#
+# AUDIT 2026-10-01 (object-edge definition, item #2): the masks were looked up —
+# and the z-buffer built — with Omega's per-keyframe K from ``intrinsic.txt``
+# (pccr: fx 354.7-400.3, cx 232, cy 416) while the cloud had been unprojected
+# with F5's session camera (fx 391.87, cx 234.80, cy 414.06): 2.8 px off at the
+# principal point and 13-23 px at the borders, against a 2-px rim tolerance.
+# Every rim of every object was judged at the wrong pixel.
+#
+# Every projection of this module now goes through the camera that BUILT the
+# cloud — ``output/camera.json`` (precision.camera: F0, refined by F5), the
+# source precision/silhouette_filter.py projects with — through its lens and the
+# exact grid maps of precision.camera. And that claim is MEASURED before anything
+# is judged (``birth_systematic``): a point projected into its own birth keyframe
+# must land on the birth pixel it carries. A camera that did not build the cloud
+# leaves a SYSTEMATIC field there (affine in the pixel: a focal ratio and a
+# principal-point offset); the consolidation's motion along the normal and the
+# rounding of the stored pixel leave zero-mean scatter. When the systematic part
+# exceeds the precision the birth pixel is stored at, the filter refuses to run
+# instead of mixing two cameras.
+
+# The birth pixel is stored as an INTEGER of the record grid: rounding alone
+# cannot put the true projection farther than half a pixel per axis. A camera
+# whose systematic misprojection exceeds it is not the camera of this cloud.
+# (Not a decision: the resolution the provenance is written at.)
+BIRTH_PIXEL_PRECISION_PX = 0.5
+
+
+class CameraMismatchError(RuntimeError):
+    """The cloud, its poses and the session camera do not describe ONE camera —
+    the mask filter refuses to judge rather than mix them."""
+
+
+def _c2w(pose: np.ndarray) -> np.ndarray:
+    c2w = np.eye(4)
+    c2w[:3, :4] = np.asarray(pose, np.float64)[:3, :4]
+    return c2w
+
+
+class SessionProjection:
+    """The camera the cloud was built with, bound to the two grids this module
+    reads: the RECORD grid the cloud's ``pixel_row``/``pixel_col`` live on (the
+    trace grid ``intrinsic.txt`` describes; Omega's crop through
+    ``precision.camera.grid_like``) and the SAM3 MASK grid (a full-frame resize of
+    the native frame, ``precision.camera.mask_grid_for``).
+
+    World → camera (c2w per keyframe) → K of the UNDISTORTED native frame →
+    the lens (``precision.camera.distort_points``) → the native frame →
+    ``native_to_grid`` → rounded to the pixel whose centre is nearest (pixel
+    centres sit on integer coordinates everywhere in precision.camera).
+    """
+
+    def __init__(self, cam, record_grid, mask_grid, source: str):
+        self.cam = cam
+        self.K = cam.K()
+        self.record_grid = record_grid
+        self.mask_grid = mask_grid
+        self.source = str(source)
+        self._lens = bool(np.any(cam.dist()))
+
+    @property
+    def mask_hw(self) -> Tuple[int, int]:
+        return int(self.mask_grid.h), int(self.mask_grid.w)
+
+    def continuous(self, P_world: np.ndarray, pose: np.ndarray, min_depth: float,
+                   grid) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """(front, x, y, z): ``front`` per point (in front of the camera by more
+        than ``min_depth``); x (column), y (row) on ``grid`` and the camera depth
+        z, for the points in front only."""
+        from precision.camera import distort_points, native_to_grid
+        P = np.asarray(P_world, np.float64).reshape(-1, 3)
+        M = np.linalg.inv(_c2w(pose))
+        q = P @ M[:3, :3].T + M[:3, 3]
+        z = q[:, 2]
+        front = z > float(min_depth)
+        if not front.any():
+            e = np.zeros(0)
+            return front, e, e, e
+        zf = z[front]
+        uv = np.stack([self.K[0, 0] * q[front, 0] / zf + self.K[0, 2],
+                       self.K[1, 1] * q[front, 1] / zf + self.K[1, 2]], 1)
+        if self._lens:
+            uv = distort_points(uv, self.cam)
+        g = native_to_grid(uv, grid)
+        return front, g[:, 0], g[:, 1], zf
+
+    def to_grid(self, P_world: np.ndarray, pose: np.ndarray, min_depth: float,
+                grid) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """(ok, rows, cols, z): ``ok`` per point (in front and inside ``grid``);
+        the pixel and the camera depth for the ``ok`` points only."""
+        front, x, y, z = self.continuous(P_world, pose, min_depth, grid)
+        ok = np.zeros(len(front), bool)
+        if not len(x):
+            e = np.zeros(0, np.int64)
+            return ok, e, e, np.zeros(0)
+        c, r = np.rint(x), np.rint(y)
+        inb = (np.isfinite(c) & np.isfinite(r) & (c >= 0) & (c < int(grid.w))
+               & (r >= 0) & (r < int(grid.h)))
+        ok[np.flatnonzero(front)[inb]] = True
+        return ok, r[inb].astype(np.int64), c[inb].astype(np.int64), z[inb]
+
+    def to_mask(self, P_world: np.ndarray, pose: np.ndarray, min_depth: float):
+        """``to_grid`` on the SAM3 mask grid."""
+        return self.to_grid(P_world, pose, min_depth, self.mask_grid)
+
+    def record_to_mask(self, pixel_row: np.ndarray, pixel_col: np.ndarray
+                       ) -> Tuple[np.ndarray, np.ndarray]:
+        """A birth pixel of the record grid → the mask-grid pixel that shows it,
+        through the exact grid maps (both grids are crops/resizes of the same
+        native frame, so no lens is involved); -1 where the mask grid does not
+        cover it. For ``points_of_masklets(mask_pixels=...)``: the scale-only
+        mapping it does by itself ignores Omega's crop and truncates."""
+        from precision.camera import grid_to_native, native_to_grid
+        uv = np.stack([np.asarray(pixel_col, np.float64),
+                       np.asarray(pixel_row, np.float64)], -1)
+        g = native_to_grid(grid_to_native(uv, self.record_grid), self.mask_grid)
+        c, r = np.rint(g[:, 0]), np.rint(g[:, 1])
+        ok = ((c >= 0) & (c < int(self.mask_grid.w)) & (r >= 0)
+              & (r < int(self.mask_grid.h)))
+        return (np.where(ok, r, -1).astype(np.int64),
+                np.where(ok, c, -1).astype(np.int64))
+
+
+def birth_systematic(project: Callable[[np.ndarray, int], Tuple[np.ndarray, np.ndarray,
+                                                                  np.ndarray]],
+                     xyz: np.ndarray, ks_of_point: np.ndarray, n_kf: int,
+                     pixel_row: np.ndarray, pixel_col: np.ndarray,
+                     grid_wh: Tuple[int, int]) -> dict:
+    """The SYSTEMATIC misprojection of a camera over the cloud it is claimed to
+    have built, measured on the points' own birth pixels.
+
+    ``project(P, k)`` → (front, x, y) on the record grid for keyframe k. Per
+    keyframe and per axis the birth residual is fitted as ``a + b·(p − centre)``
+    — exactly the field a camera of another focal / principal point leaves (an
+    unprojection with K' re-projected with K is affine in the pixel) — and the
+    keyframe's systematic misprojection is the largest that fit predicts inside
+    the frame, ``|a| + |b|·half-size``. Zero-mean scatter (the rounding of the
+    stored pixel, the consolidation's motion along the normal) does not enter a
+    fit over the keyframe's points. The session's value is the POINT-WEIGHTED
+    median over keyframes: what the camera does to most of the cloud.
+    """
+    ks = np.asarray(ks_of_point, np.int64)
+    pr = np.asarray(pixel_row, np.float64)
+    pc = np.asarray(pixel_col, np.float64)
+    W, H = int(grid_wh[0]), int(grid_wh[1])
+    hx, hy = (W - 1) / 2.0, (H - 1) / 2.0
+    valid = (ks >= 0) & (ks < int(n_kf))
+    idx_all = np.flatnonzero(valid)
+    order = idx_all[np.argsort(ks[idx_all], kind="stable")]
+    kss = ks[order]
+    cuts = np.flatnonzero(np.diff(kss)) + 1
+    per_kf, weights, n_front, n_total = [], [], 0, 0
+    abs_res = []
+    for seg in (np.split(np.arange(len(order)), cuts) if len(order) else []):
+        sel = order[seg]
+        k = int(ks[sel[0]])
+        front, x, y = project(xyz[sel], k)
+        n_total += len(sel)
+        if not len(x):
+            continue
+        s = sel[front]
+        n_front += len(s)
+        dx, dy = x - pc[s], y - pr[s]
+        abs_res.append(np.maximum(np.abs(dx), np.abs(dy)))
+        sx = sy = 0.0
+        for d, p, half, axis in ((dx, pc[s] - hx, hx, "x"), (dy, pr[s] - hy, hy, "y")):
+            pm = p - p.mean()
+            var = float((pm * pm).sum())
+            b = float((pm * (d - d.mean())).sum() / var) if var > 0 else 0.0
+            a = float(d.mean() - b * p.mean())
+            v = abs(a) + abs(b) * half
+            if axis == "x":
+                sx = v
+            else:
+                sy = v
+        per_kf.append((k, max(sx, sy)))
+        weights.append(len(s))
+    if not per_kf:
+        return {"n_points": int(n_total), "n_in_front": 0, "n_keyframes": 0,
+                "systematic_px": float("inf"), "median_abs_px": float("inf"),
+                "worst_keyframes": []}
+    vals = np.array([v for _k, v in per_kf])
+    w = np.asarray(weights, np.float64)
+    o = np.argsort(vals, kind="stable")
+    cum = np.cumsum(w[o])
+    med = float(vals[o][np.searchsorted(cum, 0.5 * cum[-1])])
+    worst = sorted(per_kf, key=lambda kv: -kv[1])[:5]
+    return {"n_points": int(n_total), "n_in_front": int(n_front),
+            "n_keyframes": len(per_kf), "systematic_px": med,
+            "median_abs_px": float(np.median(np.concatenate(abs_res))),
+            "worst_keyframes": [{"keyframe": int(k), "systematic_px": round(float(v), 3)}
+                                for k, v in worst]}
+
+
+def mask_store_hw(output_dir) -> Tuple[int, int]:
+    """(H, W) of the session's SAM3 mask grid, read off the store itself."""
+    output_dir = Path(output_dir)
+    doc = json.loads((output_dir / "segmentation.json").read_text())
+    p = output_dir / str(doc.get("mask_file") or "seg_masks.npz")
+    with np.load(p) as masks:
+        key = next((k for k in masks.files if k.startswith("f") and "_o" in k), None)
+        if key is None:
+            raise RuntimeError(f"{p} holds no mask — the mask grid is unknown")
+        a = masks[key]
+    return int(a.shape[0]), int(a.shape[1])
+
+
+def projection_camera(output_dir, xyz: np.ndarray, ks_of_point: np.ndarray,
+                      poses: np.ndarray, pixel_row: np.ndarray, pixel_col: np.ndarray,
+                      min_depth_m: Optional[float] = None,
+                      log: Callable[[str], None] = print) -> SessionProjection:
+    """The camera the cloud was built with — ``camera.json`` — VERIFIED against
+    the cloud and ``poses`` (the poses the cloud stands in) before anything is
+    projected with it. Fails (``CameraMismatchError``) naming the measurement
+    when the session camera does not reproduce the cloud's own birth pixels: a
+    per-keyframe ``intrinsic.txt`` is never used in its place, because it is
+    Omega's record of ANOTHER camera once F5 refined the session's (it says so
+    in the message when it is the one that fits)."""
+    from precision.camera import CAMERA_JSON_NAME, grid_like, load_camera_json, mask_grid_for
+
+    output_dir = Path(output_dir)
+    poses = np.asarray(poses, np.float64)
+    ks = np.asarray(ks_of_point, np.int64)
+    if len(ks) and int(ks.max()) >= len(poses):
+        raise CameraMismatchError(
+            f"the cloud has points born in keyframe {int(ks.max())} and the poses "
+            f"hold {len(poses)} keyframes — the poses are not the cloud's")
+    p = output_dir / CAMERA_JSON_NAME
+    if not p.exists():
+        raise CameraMismatchError(
+            f"{p} does not exist — the camera the cloud was built with is unknown, "
+            f"and the mask filter does not project with intrinsic.txt in its place "
+            f"(Omega's per-keyframe record, another camera once F5 refines the "
+            f"session's); run precision.camera (F0)")
+    cam = load_camera_json(p)
+    Ht, Wt = trace_grid(output_dir)
+    g = cam.omega_grid
+    rec = g if (int(g.w), int(g.h)) == (Wt, Ht) else grid_like(g, Wt, Ht, "record")
+    proj = SessionProjection(cam, rec, mask_grid_for(cam.width, cam.height,
+                                                     mask_store_hw(output_dir)),
+                             source=f"{p.name} ({cam.source}, camera epoch "
+                                    f"{cam.camera_epoch})")
+    md = float(_vd_cfg().min_depth_m if min_depth_m is None else min_depth_m)
+
+    def _session(P, k):
+        front, x, y, _z = proj.continuous(P, poses[k], md, rec)
+        return front, x, y
+
+    chk = birth_systematic(_session, xyz, ks, len(poses), pixel_row, pixel_col, (Wt, Ht))
+    if not chk["n_in_front"]:
+        raise CameraMismatchError(
+            f"no point of the cloud lies in front of its own birth keyframe with "
+            f"{proj.source} and these poses — they are not the cloud's camera")
+    if not chk["systematic_px"] <= BIRTH_PIXEL_PRECISION_PX:
+        alt = ""
+        ip = output_dir / "intrinsic.txt"
+        if ip.exists():
+            Ki = np.loadtxt(ip).reshape(-1, 4)
+            if len(Ki) == len(poses):
+                def _omega(P, k):
+                    M = np.linalg.inv(_c2w(poses[k]))
+                    q = np.asarray(P, np.float64) @ M[:3, :3].T + M[:3, 3]
+                    front = q[:, 2] > md
+                    fx, fy, cx, cy = Ki[k]
+                    return (front, fx * q[front, 0] / q[front, 2] + cx,
+                            fy * q[front, 1] / q[front, 2] + cy)
+                a = birth_systematic(_omega, xyz, ks, len(poses), pixel_row, pixel_col,
+                                     (Wt, Ht))
+                alt = (f"; intrinsic.txt's per-keyframe camera misprojects it by "
+                       f"{a['systematic_px']:.2f} px"
+                       + (" — the cloud was built with Omega's camera, not the "
+                          "session's" if a["systematic_px"] <= BIRTH_PIXEL_PRECISION_PX
+                          else ""))
+        raise CameraMismatchError(
+            f"{proj.source} does not reproduce the cloud's birth pixels with these "
+            f"poses: systematic misprojection {chk['systematic_px']:.2f} px "
+            f"(point-weighted median over {chk['n_keyframes']} keyframes; worst "
+            f"{chk['worst_keyframes'][:3]}) against the {BIRTH_PIXEL_PRECISION_PX} px "
+            f"the birth pixel is stored at{alt} — the mask filter does not mix cameras")
+    log(f"[visit-drift] camera: {proj.source} K=({cam.fx:.2f}, {cam.fy:.2f}, "
+        f"{cam.cx:.2f}, {cam.cy:.2f}) reproduces the cloud's birth pixels — "
+        f"systematic {chk['systematic_px']:.3f} px, median |residual| "
+        f"{chk['median_abs_px']:.3f} px over {chk['n_in_front']:,} points / "
+        f"{chk['n_keyframes']} keyframes; record grid {Wt}x{Ht}, mask grid "
+        f"{proj.mask_grid.w}x{proj.mask_grid.h}")
+    return proj
+
+
 class Visibility:
     """What each keyframe could SEE of an object: its mask, depth-verified.
 
-    The Z-buffer is built from the full cloud at mask resolution, the same
-    construction as ``surface_fit/hole_audit._zbuf`` — 5-px minimum filter
-    included, because the cloud is sparse at mask resolution and a ray often has
-    no point on its exact pixel while its neighbours do. Cached per keyframe:
-    the visits of different objects share keyframes.
+    The Z-buffer is built at mask resolution, the same construction as
+    ``surface_fit/hole_audit._zbuf`` — 5-px minimum filter included, because the
+    cloud is sparse at mask resolution and a ray often has no point on its exact
+    pixel while its neighbours do. Cached per keyframe: the visits of different
+    objects share keyframes.
+
+    Every projection — the mask lookup AND the z-buffer — goes through ONE camera,
+    ``camera``: the camera the cloud was built with (``projection_camera``,
+    verified against the cloud's birth pixels before it gets here).
     """
 
     def __init__(self, output_dir, xyz: np.ndarray, ks_of_point: np.ndarray,
-                 poses: np.ndarray, K_all: np.ndarray, depth_tol_m: float,
+                 poses: np.ndarray, camera: "SessionProjection", depth_tol_m: float,
                  min_depth_m: Optional[float] = None):
         from segmentation import mask_space
+        if not isinstance(camera, SessionProjection):
+            raise TypeError(
+                "Visibility projects with the camera the cloud was built with — pass "
+                "visit_drift.projection_camera(...), not Omega's per-keyframe K "
+                "(audit 2026-10-01: the two disagree by up to 23 px on pccr)")
         self.dir = Path(output_dir)
-        self.xyz, self.poses, self.K = xyz, poses, K_all
+        self.xyz, self.poses, self.camera = xyz, poses, camera
         self.ks = np.asarray(ks_of_point, np.int64)
         order = np.argsort(self.ks, kind="stable")
         self._order = order
@@ -842,12 +1139,16 @@ class Visibility:
             mf = self.space.from_keyframe(k)
             if mf is not None:
                 self.kf_of_frame[int(mf)] = k
-        self.Ht, self.Wt = trace_grid(self.dir)
         probe = next(self.masks[k] for k in self.masks.files
                      if k.startswith("f") and "_o" in k)
         self.Hm, self.Wm = int(probe.shape[0]), int(probe.shape[1])
+        if (self.Hm, self.Wm) != camera.mask_hw:
+            raise CameraMismatchError(
+                f"the mask store is {self.Hm}x{self.Wm} and the camera was bound to a "
+                f"{camera.mask_hw[0]}x{camera.mask_hw[1]} mask grid")
         self._zb: Dict[int, np.ndarray] = {}
         self._by_oid: Dict[int, List[Tuple[int, str]]] = {}
+        self._by_kf: Dict[int, List[int]] = {}
         import re
         pat = re.compile(r"^f(\d+)_o(\d+)$")
         for key in self.masks.files:
@@ -857,11 +1158,22 @@ class Visibility:
             kf = self.kf_of_frame.get(int(m.group(1)))
             if kf is not None:
                 self._by_oid.setdefault(int(m.group(2)), []).append((kf, key))
+                self._by_kf.setdefault(kf, []).append(int(m.group(2)))
 
     def masks_of(self, oid: int, visit: Tuple[int, int]):
         a, b = int(visit[0]), int(visit[1])
         return [(kf, self.masks[key]) for kf, key in self._by_oid.get(int(oid), [])
                 if a <= kf <= b]
+
+    def oids_at(self, kf: int) -> List[int]:
+        """The masklets with a mask stored in keyframe ``kf`` (nothing is loaded)."""
+        return sorted(set(self._by_kf.get(int(kf), [])))
+
+    def project(self, P: np.ndarray, kf: int):
+        """(ok, rows, cols, z) of world points in keyframe ``kf`` on the MASK grid,
+        through the session camera: ``ok`` per point (in front and in frame), the
+        pixel and the camera depth for the ``ok`` points only."""
+        return self.camera.to_mask(P, self.poses[int(kf)], self.min_depth)
 
     def zbuf(self, kf: int) -> np.ndarray:
         """What THIS camera measured, not what the cloud holds.
@@ -883,20 +1195,9 @@ class Visibility:
             return self._zb[kf]
         from scipy import ndimage as ndi
         own = self._order[self._start[kf]:self._end[kf]]
-        c2w = np.eye(4)
-        c2w[:3, :4] = self.poses[kf][:3, :4]
-        M = np.linalg.inv(c2w)
-        p = (M[:3, :3] @ self.xyz[own].T).T + M[:3, 3]
-        z = p[:, 2]
-        ok = z > self.min_depth
-        fx, fy, cx, cy = self.K[kf]
-        u = fx * p[ok, 0] / z[ok] + cx
-        v = fy * p[ok, 1] / z[ok] + cy
-        mu = (u * self.Wm / self.Wt).astype(np.int64)
-        mv = (v * self.Hm / self.Ht).astype(np.int64)
-        inb = (mu >= 0) & (mu < self.Wm) & (mv >= 0) & (mv < self.Hm)
+        ok, r, c, z = self.project(self.xyz[own], kf)
         zb = np.full((self.Hm, self.Wm), np.inf)
-        np.minimum.at(zb, (mv[inb], mu[inb]), z[ok][inb])
+        np.minimum.at(zb, (r, c), z)
         zb = ndi.minimum_filter(zb, size=5, mode="nearest")
         self._zb[kf] = zb
         return zb
@@ -904,31 +1205,15 @@ class Visibility:
     def seen(self, centres: np.ndarray, kf_masks) -> np.ndarray:
         """Did ANY keyframe of this visit see these points, per its own mask
         and not occluded by measured geometry in front of them."""
-        sr, sc = self.Hm / float(self.Ht), self.Wm / float(self.Wt)
         seen = np.zeros(len(centres), bool)
         for kf, m in kf_masks:
-            c2w = np.eye(4)
-            c2w[:3, :4] = self.poses[kf][:3, :4]
-            M = np.linalg.inv(c2w)
-            p = (M[:3, :3] @ centres.T).T + M[:3, 3]
-            z = p[:, 2]
-            front = z > self.min_depth
-            if not front.any():
-                continue
-            fx, fy, cx, cy = self.K[kf]
-            u = np.full(len(centres), -1.0)
-            v = np.full(len(centres), -1.0)
-            u[front] = fx * p[front, 0] / z[front] + cx
-            v[front] = fy * p[front, 1] / z[front] + cy
-            ok = front & (u >= 0) & (u < self.Wt) & (v >= 0) & (v < self.Ht)
+            ok, r, c, z = self.project(centres, kf)
             if not ok.any():
                 continue
             idx = np.flatnonzero(ok)
-            r = np.clip((v[ok] * sr).astype(np.int64), 0, self.Hm - 1)
-            c = np.clip((u[ok] * sc).astype(np.int64), 0, self.Wm - 1)
             hit = m[r, c] > 0
             zpix = self.zbuf(kf)[r, c]
-            seen[idx[hit & ~(zpix < (z[ok] - self.tol))]] = True
+            seen[idx[hit & ~(zpix < (z - self.tol))]] = True
         return seen
 
 
@@ -1234,11 +1519,85 @@ def fused_object_points(output_dir) -> Dict[int, int]:
     return out
 
 
+def _top_frames(vis, oid: int, visit: Tuple[int, int], n: int) -> List[Tuple[int, np.ndarray]]:
+    """The mask keyframes of one visit that show MOST of the object first, at most
+    ``n`` of them (``segmentation.mask_filter.max_frames_per_visit``: a COST cap —
+    a frame with three pixels of mask measures nothing)."""
+    frames = list(vis.masks_of(oid, visit))
+    frames.sort(key=lambda it: (-int(np.count_nonzero(it[1])), int(it[0])))
+    return frames[:int(n)]
+
+
+def other_mask_votes(vis, P: np.ndarray, birth: np.ndarray,
+                     own_views: Dict[int, np.ndarray], rival_masks: Callable[[int], Optional[np.ndarray]],
+                     dilate_px: int, occlusion_tol_rel: float, min_tri_deg: float
+                     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """RULE 4's ballot for the points ``P`` of one object X (birth keyframe per point
+    in ``birth``): (n_votes, n_own, n_other) per point.
+
+    A VOTE is a keyframe where X has a mask (``own_views``: {keyframe: X's mask},
+    its own visit included — parallax inside one visit counts, USER 2026-09-29),
+    other than the point's birth keyframe (its birth pixel is inside X's mask there
+    by construction), that SAW the point: in frame, seen at a parallax of at least
+    ``min_tri_deg`` from its birth ray (a view along that line sees every depth on
+    it at one pixel and cannot tell where the point is — precision.refine's bound,
+    the silhouette filter's rule), and not occluded by that keyframe's own measured
+    depth (deeper than it by more than ``occlusion_tol_rel`` of it — the witness
+    rule, ``loops.witness.occlusion_tol_rel``).
+
+    The vote says OWN when the point lands inside X's mask dilated by ``dilate_px``
+    (the rim tolerance of the point's OWN silhouette); OTHER when it does not and it
+    lies ON another object's surface there: inside that object's UNDILATED mask
+    (``rival_masks(kf)``: the pixels where another object — another fused root —
+    drew a mask in keyframe kf) AND at the depth that keyframe measured at that
+    pixel, within ``occlusion_tol_rel`` of it. A point merely behind another
+    object's rim within an absolute tolerance (the first version's 15 cm) is not on
+    its surface — that was the halo the old rule cut at every contact crease (a desk
+    under a monitor foot, a wall behind a switch).
+    """
+    n = len(P)
+    n_votes = np.zeros(n, np.int32)
+    n_own = np.zeros(n, np.int32)
+    n_other = np.zeros(n, np.int32)
+    birth = np.asarray(birth, np.int64)
+    cos_max = float(np.cos(np.radians(float(min_tri_deg))))
+    tol = float(occlusion_tol_rel)
+    centres = np.asarray(vis.poses, np.float64)[:, :3, 3]   # camera centre per keyframe
+    for kf in sorted(own_views):
+        w = np.flatnonzero(birth != int(kf))           # the birth keyframe never votes
+        if not len(w):
+            continue
+        ok, r, c, z = vis.project(P[w], kf)
+        if not ok.any():
+            continue
+        wo = w[ok]
+        # parallax on the birth ray: min(θ, 180° − θ) ≥ min_tri_deg ⇔ |cos θ| ≤ cos(min)
+        a = centres[birth[wo]] - P[wo]
+        b = centres[int(kf)][None, :] - P[wo]
+        cos = (a * b).sum(1) / np.maximum(np.linalg.norm(a, axis=1)
+                                          * np.linalg.norm(b, axis=1), 1e-9)
+        zb = vis.zbuf(kf)[r, c]
+        measured = np.isfinite(zb)
+        occluded = measured & (z > zb * (1.0 + tol))
+        on_surface = measured & (np.abs(z - zb) <= tol * zb)
+        vote = (np.abs(cos) <= cos_max) & ~occluded
+        own = _dilated(own_views[kf], int(dilate_px))[r, c] > 0
+        fm = rival_masks(int(kf))
+        other = (~own & on_surface & (fm[r, c] > 0)) if fm is not None \
+            else np.zeros(len(wo), bool)
+        n_votes[wo] += vote.astype(np.int32)
+        n_own[wo] += (vote & own).astype(np.int32)
+        n_other[wo] += (vote & other).astype(np.int32)
+    return n_votes, n_own, n_other
+
+
 def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
                           masklets: Sequence[Masklet], ks_of_point: np.ndarray,
                           xyz: np.ndarray, vis: "Visibility",
                           min_points: int, min_visit_share: float,
-                          max_frames_per_visit: int, dilate_px: int,
+                          max_frames_per_visit: int, dilate_px: int, *,
+                          occlusion_tol_rel: float, min_votes: int,
+                          min_inside_frac: float, min_tri_deg: float,
                           log: Callable[[str], None] = print,
                           group_points: Optional[Dict[int, int]] = None,
                           group_roots: Optional[Dict[int, int]] = None
@@ -1246,22 +1605,35 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
     """STEP 12 — which points leave the cloud, once the pose is corrected.
 
     USER 2026-09-29: *"no debes probar los puntos contra su propia máscara, son
-    contra el resto de las máscaras con las vistas de ellos"* — the fourth rule:
-    a point of this object that, seen UNOCCLUDED from a keyframe outside its own
-    visit, lands inside ANOTHER object's mask (``group_roots``: masklets fused into
-    one object are one object) and never inside its own, is not part of it.
+    contra el resto de las máscaras con las vistas de ellos"* — the fourth rule.
+    REWRITTEN 2026-10-01 (audit of object-edge definition, USER: *"lo más
+    importante es que los objetos deben tener mucha definición, corte en los
+    filos, las aristas"* — and *"olvidate de las reglas que pusimos en su
+    momento"*): as first wired, ONE view decided, the 2-px tolerance widened the
+    FOREIGN mask over the point's own rim, "never inside its own" was vacuous for
+    every single-visit object, and a point merely within 15 cm behind another
+    object counted as being on it — it cut a halo at every contact crease. Now a
+    point of X leaves by this rule when, among the views that SAW it
+    (``other_mask_votes``: X's own mask keyframes, its own visit included, the
+    birth keyframe excluded, at a parallax of at least ``min_tri_deg``,
+    unoccluded), at least ``min_votes`` voted and it lies ON another object's
+    surface inside that object's mask in at least ``min_inside_frac`` of them
+    while inside its own (dilated) mask in less than ``min_inside_frac`` of them —
+    the majority semantics of ``precision.cloud.silhouette_min_votes`` /
+    ``silhouette_min_inside_frac``, read from there. Masklets fused into one
+    object never conflict (``group_roots``).
 
     USER 2026-09-18: *"no me elimines lo unsegmented, solo los puntos que
     figuran como parte del objeto que luego de ser ajustado cae aun fuera de las
     mascaras"*, and *"lo mismo deben eliminarse de la nube los puntos de
     revisitas menores al 1%"*.
 
-    Three rules, all on the MASKLETS — SAM3's own tracks, not the fused
+    The other three rules, all on the MASKLETS — SAM3's own tracks, not the fused
     instances:
 
       · a point that CLAIMS to be part of an object and, with the pose already
-        corrected, still lands outside that object's mask in every view that
-        saw it, is not part of it
+        corrected, still lands outside that object's mask in every view of its
+        OTHER visits that saw it, is not part of it
       · an object under ``min_points`` keeps nothing — judged on the FUSED
         object when ``group_points`` says which masklets ended up in the same
         one (USER 2026-09-22: *"podriamos objetarlo luego de la union de
@@ -1276,11 +1648,8 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
     A point belonging to NO masklet is UNSEGMENTED and is never touched: the
     masks say nothing about it, and silence is not a verdict.
 
-    The test is the CROSS view. A point moves with the keyframe it was born in,
-    so its projection into its own keyframe never changes and says nothing; what
-    the correction has to fix is where it lands in the keyframes of the OTHER
-    visit. A view only votes when it actually saw the point — in frustum and
-    not behind measured geometry.
+    Every projection goes through ``vis.project`` — the camera the cloud was
+    built with (``projection_camera``).
 
     It runs per epoch: each cloud has its own objects, and they need not be the
     same ones.
@@ -1292,38 +1661,43 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
     by_oid = {m.oid: m for m in masklets}
     off_mask = 0
     off_other = 0
-    sr, sc = vis.Hm / float(vis.Ht), vis.Wm / float(vis.Wt)
     roots = group_roots or {}
-    # the 3-D extent of every masklet: only objects that overlap can conflict
-    extents: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
-    for o, ix in points_by_oid.items():
-        ix = np.asarray(ix, np.int64)
-        ix = ix[(ix >= 0) & (ix < n_points)]
-        if len(ix):
-            extents[int(o)] = (xyz[ix].min(0), xyz[ix].max(0))
 
-    def _project(P: np.ndarray, kf: int):
-        """(ok, r, c, visible) of world points in keyframe kf: in front, in frame,
-        and nothing measured in front of them."""
-        c2w = np.eye(4)
-        c2w[:3, :4] = vis.poses[kf][:3, :4]
-        M = np.linalg.inv(c2w)
-        q = (M[:3, :3] @ P.T).T + M[:3, 3]
-        z = q[:, 2]
-        fr = z > vis.min_depth
-        fx, fy, cx, cy = vis.K[kf]
-        u = np.full(len(P), -1.0)
-        v = np.full(len(P), -1.0)
-        u[fr] = fx * q[fr, 0] / z[fr] + cx
-        v[fr] = fy * q[fr, 1] / z[fr] + cy
-        ok = fr & (u >= 0) & (u < vis.Wt) & (v >= 0) & (v < vis.Ht)
-        if not ok.any():
-            return ok, None, None, None
-        r = np.clip((v[ok] * sr).astype(np.int64), 0, vis.Hm - 1)
-        c = np.clip((u[ok] * sc).astype(np.int64), 0, vis.Wm - 1)
-        zpix = vis.zbuf(kf)[r, c]
-        visible = ~(zpix < (z[ok] - vis.tol))     # nothing in front
-        return ok, r, c, visible
+    def _root_of(o: int) -> int:
+        return int(roots.get(int(o), int(o) + 1))
+
+    def _union(oids, kf: int) -> Optional[np.ndarray]:
+        u = None
+        for o in oids:
+            for _kf, mm in vis.masks_of(int(o), (kf, kf)):
+                u = (mm > 0) if u is None else (u | (mm > 0))
+        return u
+
+    # How many OBJECTS (fused roots) drew a mask over each pixel of a keyframe —
+    # loaded once per keyframe. Rule 4 asks it per view instead of pre-selecting
+    # rivals by 3-D extent: the verdict is a VIEW's (its masks and its measured
+    # depth), and a point within the relative tolerance of a flat surface lies
+    # outside that surface's box — the box pre-filter of the first version
+    # silently withheld exactly the wall a skirt hovers on.
+    _cover: Dict[int, Optional[np.ndarray]] = {}
+
+    def _objects_over(kf: int) -> Optional[np.ndarray]:
+        if kf not in _cover:
+            by_root: Dict[int, List[int]] = {}
+            for o in vis.oids_at(kf):
+                by_root.setdefault(_root_of(o), []).append(int(o))
+            cnt = None
+            for _r, os_ in sorted(by_root.items()):
+                u = _union(os_, kf)
+                if u is None:
+                    continue
+                # saturating uint8 (a cache of one byte per mask pixel per keyframe):
+                # only "more objects than the point's own" is ever asked of it
+                cnt = (u.astype(np.uint8) if cnt is None else
+                       np.minimum(cnt.astype(np.uint16) + u, np.iinfo(np.uint8).max)
+                       .astype(np.uint8))
+            _cover[kf] = cnt
+        return _cover[kf]
 
     for oid, idx in points_by_oid.items():
         idx = np.asarray(idx, np.int64)
@@ -1363,83 +1737,48 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
         if not alive.any():
             continue
 
-        # the cross-view test, over the keyframes of the OTHER visits
+        # RULE 1 — the cross-view test, over the keyframes of the OTHER visits
         sub = idx[alive]
         sub_ks = ks[alive]
         saw = np.zeros(len(sub), bool)
         inside = np.zeros(len(sub), bool)
+        own_views: Dict[int, np.ndarray] = {}
         for vi, (a, b) in enumerate(visits):
-            frames = [(kf, mm) for kf, mm in vis.masks_of(oid, (a, b))]
-            if not frames:
-                continue
-            frames.sort(key=lambda it: -int(np.count_nonzero(it[1])))
-            for kf, mm in frames[:int(max_frames_per_visit)]:
+            for kf, mm in _top_frames(vis, oid, (a, b), max_frames_per_visit):
+                own_views[int(kf)] = mm
                 other = sub_ks < a
                 other |= sub_ks > b               # born outside this visit
                 if not other.any():
                     continue
                 w = np.flatnonzero(other)
-                P = xyz[sub[w]]
-                c2w = np.eye(4)
-                c2w[:3, :4] = vis.poses[kf][:3, :4]
-                M = np.linalg.inv(c2w)
-                q = (M[:3, :3] @ P.T).T + M[:3, 3]
-                z = q[:, 2]
-                fr = z > vis.min_depth
-                if not fr.any():
-                    continue
-                fx, fy, cx, cy = vis.K[kf]
-                u = np.full(len(P), -1.0)
-                v = np.full(len(P), -1.0)
-                u[fr] = fx * q[fr, 0] / z[fr] + cx
-                v[fr] = fy * q[fr, 1] / z[fr] + cy
-                ok = fr & (u >= 0) & (u < vis.Wt) & (v >= 0) & (v < vis.Ht)
+                ok, r, c, z = vis.project(xyz[sub[w]], kf)
                 if not ok.any():
                     continue
-                r = np.clip((v[ok] * sr).astype(np.int64), 0, vis.Hm - 1)
-                c = np.clip((u[ok] * sc).astype(np.int64), 0, vis.Wm - 1)
                 zpix = vis.zbuf(kf)[r, c]
-                visible = ~(zpix < (z[ok] - vis.tol))     # nothing in front
+                visible = ~(zpix < (z - vis.tol))     # nothing in front
                 hit = _dilated(mm, int(dilate_px))[r, c] > 0
                 wo = w[ok]
                 saw[wo[visible]] = True
                 inside[wo[visible & hit]] = True
-        # THE REST OF THE MASKS, WITH THEIR VIEWS: from a keyframe outside the point's
-        # own visit, unoccluded, inside another object's mask and not inside its own
+
+        # RULE 4 — on ANOTHER object's surface, by the majority of the views that saw it
         conflict = np.zeros(len(sub), bool)
-        my_root = roots.get(int(oid), int(oid) + 1)
-        lo, hi = xyz[sub].min(0), xyz[sub].max(0)
-        for y in masklets:
-            if int(y.oid) == int(oid) or roots.get(int(y.oid), int(y.oid) + 1) == my_root:
-                continue
-            ext = extents.get(int(y.oid))
-            if ext is None or (ext[1] < lo).any() or (ext[0] > hi).any():
-                continue
-            for (ya, yb) in y.visits:
-                frames_y = list(vis.masks_of(y.oid, (ya, yb)))
-                if not frames_y:
-                    continue
-                frames_y.sort(key=lambda it: -int(np.count_nonzero(it[1])))
-                for kf, my in frames_y[:int(max_frames_per_visit)]:
-                    own = np.zeros(len(sub), bool)
-                    for (xa, xb) in visits:                 # the point's own visit never votes
-                        if xa <= kf <= xb:
-                            own |= (sub_ks >= xa) & (sub_ks <= xb)
-                    w = np.flatnonzero(~own)
-                    if not w.size:
-                        continue
-                    ok, r, c, visible = _project(xyz[sub[w]], kf)
-                    if r is None:
-                        continue
-                    hit_y = _dilated(my, int(dilate_px))[r, c] > 0
-                    hit_x = np.zeros(len(r), bool)
-                    for _kf, mx in vis.masks_of(oid, (kf, kf)):
-                        hit_x |= _dilated(mx, int(dilate_px))[r, c] > 0
-                    wo = w[ok]
-                    conflict[wo[visible & hit_y & ~hit_x]] = True
+        my_root = _root_of(int(oid))
+        if own_views:
+            def _rival_mask(kf: int, _me=my_root) -> Optional[np.ndarray]:
+                """Pixels where ANOTHER object (another fused root) drew a mask."""
+                cnt = _objects_over(kf)
+                if cnt is None:
+                    return None
+                mine = _union([o for o in vis.oids_at(kf) if _root_of(o) == _me], kf)
+                return cnt > (mine.astype(np.uint8) if mine is not None else 0)
+            nv, no, nt = other_mask_votes(vis, xyz[sub], sub_ks, own_views, _rival_mask,
+                                          dilate_px, occlusion_tol_rel, min_tri_deg)
+            frac = float(min_inside_frac)
+            conflict = ((nv >= int(min_votes)) & (nt >= frac * nv) & (no < frac * nv))
         # judged and never inside: it is not part of this object
         drop_own = saw & ~inside
-        drop_other = conflict & ~inside & ~drop_own
+        drop_other = conflict & ~drop_own
         off_mask += int(drop_own.sum())
         off_other += int(drop_other.sum())
         drop = drop_own | drop_other
@@ -1450,11 +1789,13 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
     keep |= ~seg
     kill = ~keep
     rep.dropped_points = int(kill.sum())
-    rep.detail.append({"reason": "inside another object's mask from another visit, never inside its own",
+    rep.detail.append({"reason": "on another object's surface, inside its mask, in "
+                                 "the majority of the views that saw it",
                        "points": int(off_other)})
     log(f"[visit-drift] step 12: {rep.dropped_points:,} of {n_points:,} points "
         f"leave ({off_mask:,} still off their own mask after the correction, "
-        f"{off_other:,} inside another object's mask from another visit, "
+        f"{off_other:,} on another object's surface in ≥ {min_inside_frac:.0%} of "
+        f"≥ {min_votes} views that saw them, "
         f"{rep.dropped_objects} masklet(s) under {min_points} points, "
         f"{rep.dropped_visits} visit(s) at or under {min_visit_share:.0%}); "
         f"{int((~seg).sum()):,} unsegmented points untouched")

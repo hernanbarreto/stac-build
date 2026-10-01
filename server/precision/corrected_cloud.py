@@ -217,16 +217,119 @@ def _rgb_undistorted(frames_dir: Path, frame: int, maps) -> np.ndarray:
     return und[..., ::-1]
 
 
-def write_chunks(inp, f6: dict, raw_cfg: dict, tmp: Path, log: Callable) -> List[dict]:
+def _splat(depth: np.ndarray, enter: np.ndarray, K: np.ndarray, c2w_src: np.ndarray,
+           w2c_dst: np.ndarray, shape) -> np.ndarray:
+    """The surface one keyframe sees, carried into another keyframe's image: per pixel the
+    nearest depth (z-buffer), +inf where nothing lands."""
+    H, W = shape
+    rr, cc = np.nonzero(enter)
+    z = depth[rr, cc].astype(np.float64)
+    X = np.stack([(cc - K[0, 2]) / K[0, 0] * z, (rr - K[1, 2]) / K[1, 1] * z, z], 1)
+    Xw = X @ c2w_src[:3, :3].T + c2w_src[:3, 3]
+    Xd = Xw @ w2c_dst[:3, :3].T + w2c_dst[:3, 3]
+    zd = Xd[:, 2]
+    ok = zd > 0                                   # in front of the camera
+    zs = np.where(ok, zd, 1.0)
+    u = np.rint(K[0, 0] * Xd[:, 0] / zs + K[0, 2]).astype(np.int64)
+    v = np.rint(K[1, 1] * Xd[:, 1] / zs + K[1, 2]).astype(np.int64)
+    ok &= (u >= 0) & (u < W) & (v >= 0) & (v < H)
+    out = np.full(H * W, np.inf, np.float64)
+    np.minimum.at(out, v[ok] * W + u[ok], zd[ok])
+    return out.reshape(H, W)
+
+
+def repair_contradicted(depth: Dict[int, np.ndarray], enter: Dict[int, np.ndarray],
+                        contradicted: Dict[int, np.ndarray], K: np.ndarray, c2w: Dict[int, np.ndarray],
+                        order: List[int], neighbors, tau: float, min_views: int) -> Dict[int, tuple]:
+    """USER 2026-09-30 — a pixel F6 contradicted (a view saw free space through Omega's depth there)
+    still sees a surface: the neighbours' surfaces are carried onto its ray and, when at least
+    `min_views` of them agree within `tau` (relative) of their median, the pixel takes that median;
+    otherwise it leaves, as before. Returns {frame: (rows, cols, depth)} of the repaired pixels."""
+    w2c = {f: np.linalg.inv(c2w[f]) for f in order}
+    out: Dict[int, tuple] = {}
+    for i, f in enumerate(order):
+        bad = contradicted[f]
+        if not bad.any():
+            continue
+        rr, cc = np.nonzero(bad)
+        cand = []
+        for d in neighbors:
+            j = i + int(d)
+            if 0 <= j < len(order):
+                g = order[j]
+                cand.append(_splat(depth[g], enter[g], K, c2w[g], w2c[f], bad.shape)[rr, cc])
+        if not cand:
+            continue
+        C = np.vstack(cand)
+        C[~np.isfinite(C)] = np.nan
+        if not np.isfinite(C).any():
+            continue
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)          # all-NaN columns: nothing landed
+            med = np.nanmedian(C, 0)
+            agree = np.abs(C - med) <= tau * med
+            ok = (agree.sum(0) >= min_views) & np.isfinite(med)
+            if ok.any():
+                zz = np.nanmedian(np.where(agree, C, np.nan)[:, ok], 0)
+                out[f] = (rr[ok], cc[ok], zz.astype(np.float32))
+    return out
+
+
+def measured_tau(depth: Dict[int, np.ndarray], enter: Dict[int, np.ndarray], K: np.ndarray,
+                 c2w: Dict[int, np.ndarray], order: List[int], neighbors, quantile: float,
+                 stride: int = 6) -> float:
+    """The session's own neighbour disagreement (|z_i→j − d_j| / d_j over pixels both keep),
+    its `quantile` — the tolerance the repair accepts, measured on every run."""
+    w2c = {f: np.linalg.inv(c2w[f]) for f in order}
+    samp = []
+    for i in range(0, len(order), stride):
+        f = order[i]
+        for d in neighbors:
+            j = i + int(d)
+            if not 0 <= j < len(order):
+                continue
+            g = order[j]
+            s = _splat(depth[f], enter[f], K, c2w[f], w2c[g], depth[g].shape)
+            m = np.isfinite(s) & enter[g]
+            if m.any():
+                samp.append((np.abs(s[m] - depth[g][m]) / depth[g][m])[::7])
+    if not samp:
+        raise CorrectedCloudError("no two keyframes share a surface — the repair has no tolerance to measure")
+    return float(np.percentile(np.concatenate(samp), quantile))
+
+
+def write_chunks(inp, f6: dict, raw_cfg: dict, tmp: Path, log: Callable, ccfg=None) -> List[dict]:
     """F6's depth (tier 0 / tier 1) → one PLY + origins per Omega chunk (the cleaner's
-    input), the reconstruction's confidence gate per chunk. pixel_row/col = F6's pixel."""
-    from precision.depth_sweep import SOURCE_SWEEP
+    input), the reconstruction's confidence gate per chunk (unless `ccfg.confidence_gate` is off),
+    plus the contradicted pixels the neighbours repair (`ccfg.repair_contradicted`).
+    pixel_row/col = F6's pixel."""
+    from precision.depth_sweep import SOURCE_SWEEP, DISCARD_CONTRADICTED
     from precision.epoch0_cloud import SKY_CONF, _write_ply_xyzrgb, conf_threshold
     simple = (raw_cfg.get("reconstruction") or {}).get("simple") or {}
     if "conf_percentile" not in simple or "conf_min_norm" not in simple:
         raise CorrectedCloudError("reconstruction.simple.conf_percentile / conf_min_norm are missing — "
                                   "the corrected cloud runs the reconstruction's own gate")
     pct, floor = simple["conf_percentile"], float(simple["conf_min_norm"] or 0.0)
+    gate_on = True if ccfg is None else bool(ccfg.confidence_gate)
+    repaired: Dict[int, tuple] = {}
+    if ccfg is not None and ccfg.repair_contradicted:
+        order = [int(f) for f in inp.kf if int(f) in set(f6["frames"])]
+        idx = {int(f): i for i, f in enumerate(inp.kf)}
+        maps = {f: f6_frame(f6["dir"], f, inp.wh) for f in order}
+        dep = {f: maps[f]["depth"] for f in order}
+        ent = {f: maps[f]["enter"] for f in order}
+        bad = {f: maps[f]["source"] == DISCARD_CONTRADICTED for f in order}
+        c2w_ = {f: np.linalg.inv(inp.kf_w2c[idx[f]]) for f in order}
+        Kf = np.asarray(inp.K, np.float64)
+        tau = measured_tau(dep, ent, Kf, c2w_, order, ccfg.repair_neighbors, ccfg.repair_tau_quantile)
+        repaired = repair_contradicted(dep, ent, bad, Kf, c2w_, order, ccfg.repair_neighbors, tau,
+                                       ccfg.repair_min_views)
+        n_bad = int(sum(b.sum() for b in bad.values())); n_rep = int(sum(len(v[0]) for v in repaired.values()))
+        log(f"{LOG_TAG} repair: tau {tau * 100:.2f} % (p{ccfg.repair_tau_quantile:g} of the session's own "
+            f"neighbour disagreement); {n_rep:,} of {n_bad:,} contradicted pixels given back "
+            f"({n_rep / max(n_bad, 1) * 100:.1f} %), the rest leave")
+        del maps, dep, ent, bad
     have = set(f6["frames"])
     by_chunk: Dict[int, List[int]] = {}
     for i, f in enumerate(inp.kf):
@@ -243,9 +346,9 @@ def write_chunks(inp, f6: dict, raw_cfg: dict, tmp: Path, log: Callable) -> List
         for i in members:
             with np.load(inp.records_dir / f"frame_{inp.kf[i]}.npz") as z:
                 confs.append(np.asarray(z["conf"], np.float32).reshape(-1))
-        thr = conf_threshold(np.concatenate(confs), pct, floor)
+        thr = conf_threshold(np.concatenate(confs), pct, floor) if gate_on else -np.inf
         xyz_l, rgb_l, fg_l, pr_l, pc_l, cf_l = [], [], [], [], [], []
-        n_tier = {"tier0": 0, "tier1": 0}
+        n_tier = {"tier0": 0, "tier1": 0, "repaired": 0}
         for i in members:
             f = int(inp.kf[i])
             if f not in have:
@@ -255,10 +358,20 @@ def write_chunks(inp, f6: dict, raw_cfg: dict, tmp: Path, log: Callable) -> List
             with np.load(inp.records_dir / f"frame_{f}.npz") as z:
                 c = record_on_native(np.asarray(z["conf"], np.float32), inp.cam, inp.maps)
             keep = fr["enter"] & np.isfinite(c) & (c > SKY_CONF) & (c >= thr)
+            zmap = fr["depth"]
+            rep_n = 0
+            if f in repaired:
+                r2, c2, z2 = repaired[f]
+                zmap = zmap.copy(); zmap[r2, c2] = z2
+                rep = np.zeros_like(keep); rep[r2, c2] = True
+                rep &= np.isfinite(c) & (c > SKY_CONF)          # sky is not a surface to give back
+                rep_n = int(rep.sum())
+                n_tier["repaired"] += rep_n
+                keep = keep | rep
             rr, cc = np.nonzero(keep)
             if not rr.size:
                 continue
-            zc = fr["depth"][rr, cc].astype(np.float64)
+            zc = zmap[rr, cc].astype(np.float64)
             Xc = np.stack([(u_all[rr, cc] - K[0, 2]) / K[0, 0] * zc, (v_all[rr, cc] - K[1, 2]) / K[1, 1] * zc,
                            zc], 1)
             c2w = np.linalg.inv(inp.kf_w2c[i])
@@ -269,7 +382,7 @@ def write_chunks(inp, f6: dict, raw_cfg: dict, tmp: Path, log: Callable) -> List
             pc_l.append(cc.astype(np.int32)); cf_l.append(c[rr, cc])
             t0 = int((fr["source"][rr, cc] == SOURCE_SWEEP).sum())
             n_tier["tier0"] += t0
-            n_tier["tier1"] += int(rr.size) - t0
+            n_tier["tier1"] += int(rr.size) - t0 - rep_n
         if not xyz_l:
             log(f"{LOG_TAG} chunk {k}: nothing of F6 above the confidence gate")
             continue
@@ -281,7 +394,7 @@ def write_chunks(inp, f6: dict, raw_cfg: dict, tmp: Path, log: Callable) -> List
         chunks.append({"chunk": k, "n_keyframes": len(members), "conf_threshold": float(thr),
                        "raw_points": int(len(xyz)), **n_tier})
         log(f"{LOG_TAG} chunk {k}: {len(members)} keyframes, conf threshold {thr:.3f} → {len(xyz):,} pts "
-            f"(tier 0 {n_tier['tier0']:,}, tier 1 {n_tier['tier1']:,})")
+            f"(tier 0 {n_tier['tier0']:,}, tier 1 {n_tier['tier1']:,}, repaired {n_tier['repaired']:,})")
     if n_no_f6:
         log(f"{LOG_TAG} {n_no_f6} keyframe(s) without an F6 depth map (no prior) contribute nothing")
     if not chunks:
@@ -543,7 +656,7 @@ def run_corrected_cloud(session_dir: Path, pcfg, log: Callable = print,
                          "voxel + SOR (postprocessing, reconstruction/gpu_cloud_clean)"]}
     try:
         _p(12, "F6's depth with F5's camera and poses → chunks")
-        report["chunks"] = write_chunks(inp, f6, raw_cfg, chunks_dir, log)
+        report["chunks"] = write_chunks(inp, f6, raw_cfg, chunks_dir, log, ccfg=ccfg)
         report["raw_points"] = int(sum(c["raw_points"] for c in report["chunks"]))
         _p(35, "the cloud stage's cleaner (voxel + SOR)")
         cleaned = tmp / "cleaned_cloud.ply"
@@ -576,6 +689,256 @@ def run_corrected_cloud(session_dir: Path, pcfg, log: Callable = print,
     (out / CLOUD_REPORT).write_text(json.dumps(rep, indent=1, default=float))
     _p(100, f"corrected cloud is epoch {rep['epoch_to']} ({rep['n_points']:,} pts, {rep['seconds']} s)")
     return rep
+
+
+# ── edges (USER 2026-10-01) ──────────────────────────────────────────────
+# *"lo más importante es que los objetos deben tener mucha definición, corte en los filos, las
+# aristas"*. The pure pieces of the edge-keeping vote of the epoch-8 recipe
+# (analysis/2026-09-30_depth_sources/omega_edges_epoch8.py), tested on synthetic data in
+# tests/test_corrected_cloud_edges.py. No tolerance of their own: tau is always the session's
+# measured neighbour disagreement (measured_tau), min_views the declared repair_min_views.
+
+_NB8 = ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1))   # 4-neighbours first
+
+
+def _shift(a: np.ndarray, dy: int, dx: int, fill) -> np.ndarray:
+    """out[r, c] = a[r + dy, c + dx]; `fill` where that falls outside the image."""
+    H, W = a.shape
+    out = np.full((H, W), fill, dtype=a.dtype)
+    ys, yd = (slice(dy, H), slice(0, H - dy)) if dy >= 0 else (slice(0, H + dy), slice(-dy, H))
+    xs, xd = (slice(dx, W), slice(0, W - dx)) if dx >= 0 else (slice(0, W + dx), slice(-dx, W))
+    out[yd, xd] = a[ys, xs]
+    return out
+
+
+def window_extremes(depth: np.ndarray, valid: np.ndarray) -> tuple:
+    """(min, max) of the VALID depths of each pixel's 3x3 window (inf / 0 where it holds none)."""
+    lo = np.where(valid, depth, np.inf).astype(np.float64)
+    hi = np.where(valid, depth, 0.0).astype(np.float64)
+    mn, mx = lo.copy(), hi.copy()
+    for dy, dx in _NB8:
+        mn = np.minimum(mn, _shift(lo, dy, dx, np.inf))
+        mx = np.maximum(mx, _shift(hi, dy, dx, 0.0))
+    return mn, mx
+
+
+def mixed_pixels(depth: np.ndarray, valid: np.ndarray, tau: float) -> np.ndarray:
+    """Pixels on NEITHER surface of a depth step — more than tau (relative to that surface, as the
+    vote measures) from both extremes of their 3x3 window: Omega's ramp across an occluding contour."""
+    mn, mx = window_extremes(depth, valid)
+    z = depth.astype(np.float64)
+    return valid & (z > mn * (1.0 + tau)) & (z < mx * (1.0 - tau))
+
+
+def depth_steps(depth: np.ndarray, valid: np.ndarray, tau: float) -> np.ndarray:
+    """Pixels whose 3x3 window spans a depth STEP: extremes far enough apart to hold a mixed pixel
+    (the mixed-pixel rule's own condition, so the two can never disagree)."""
+    mn, mx = window_extremes(depth, valid)
+    return valid & (mx * (1.0 - tau) > mn * (1.0 + tau))
+
+
+def snap_mixed(depth: np.ndarray, valid: np.ndarray, labels: np.ndarray, tau: float) -> tuple:
+    """USER 2026-10-01 — a mixed pixel is snapped to the side of the step its SAM3 mask says.
+
+    `labels`: per pixel the masklet (0 = no mask, -1 = masks overlap there: the mask cannot say). A
+    mixed pixel's candidates are the 3x3 neighbours that carry ITS label and are not mixed themselves;
+    when all of them lie on ONE side of the step (nearer the window's min or its max), it takes the
+    depth of the nearest of them (4-neighbours before diagonals, their median). When none exists, or
+    its label spans both sides (the mask does not follow this step), it is left as it is — the vote
+    judges it. Returns (depth, mixed, snapped)."""
+    mixed = mixed_pixels(depth, valid, tau)
+    out = np.array(depth, copy=True)
+    snapped = np.zeros_like(mixed)
+    if not mixed.any():
+        return out, mixed, snapped
+    mn, mx = window_extremes(depth, valid)
+    rr, cc = np.nonzero(mixed)
+    lab = labels[rr, cc]
+    good = valid & ~mixed
+    d64 = depth.astype(np.float64)
+    lab_all = labels.astype(np.int64)
+    Z = np.full((len(_NB8), len(rr)), np.nan)
+    for k, (dy, dx) in enumerate(_NB8):
+        ok = (_shift(good, dy, dx, False)[rr, cc] & (_shift(lab_all, dy, dx, -1)[rr, cc] == lab)
+              & (lab >= 0))
+        Z[k] = np.where(ok, _shift(d64, dy, dx, np.nan)[rr, cc], np.nan)
+    lo, hi = mn[rr, cc], mx[rr, cc]
+    has = np.isfinite(Z)
+    near = has & (np.where(has, Z, 0.0) - lo <= hi - np.where(has, Z, 0.0))
+    far = has & ~near
+    to_near = near.any(0) & ~far.any(0)
+    to_far = far.any(0) & ~near.any(0)
+    decided = to_near | to_far
+    if not decided.any():
+        return out, mixed, snapped
+    pick = np.where(to_near[None], near, far) & decided[None]
+    four = pick[:4].any(0)                                    # a 4-neighbour is nearer than a diagonal
+    is4 = (np.arange(len(_NB8)) < 4)[:, None]
+    sel = np.where(four[None], pick & is4, pick)
+    z_new = np.nanmedian(np.where(sel, Z, np.nan)[:, decided], 0)
+    out[rr[decided], cc[decided]] = z_new
+    snapped[rr[decided], cc[decided]] = True
+    return out, mixed, snapped
+
+
+def ring_distance(seed: np.ndarray) -> np.ndarray:
+    """Chessboard distance (= number of 3x3 dilations) of every pixel to the nearest seed pixel;
+    inf everywhere when there is no seed."""
+    if not seed.any():
+        return np.full(seed.shape, np.inf)
+    import cv2
+    return cv2.distanceTransform((~seed).astype(np.uint8), cv2.DIST_C, 3).astype(np.float64)
+
+
+def ring_histogram(rings: np.ndarray, valid: np.ndarray, passed: np.ndarray) -> tuple:
+    """(valid pixels, floor-passing pixels) per ring — one keyframe's share of the band measurement."""
+    m = valid & np.isfinite(rings)
+    r = rings[m].astype(np.int64)
+    n = int(r.max()) + 1 if r.size else 0
+    return (np.bincount(r, minlength=n).astype(np.int64),
+            np.bincount(r, weights=passed[m].astype(np.float64), minlength=n).astype(np.int64))
+
+
+def edge_band(n_valid, n_pass) -> tuple:
+    """The width of the EDGE band, measured: the smallest ring k (3x3 dilations from a depth step)
+    whose confidence-floor pass rate reaches the pass rate of everything beyond it — where the
+    step stops depressing Omega's confidence. Pixels at rings < band are edge pixels; ring 0 passing
+    as well as the rest gives band 0 (the floor erodes nothing at steps). Returns (band, rate per ring)."""
+    nv = np.asarray(n_valid, np.float64)
+    npass = np.asarray(n_pass, np.float64)
+    rate = np.where(nv > 0, npass / np.maximum(nv, 1.0), np.nan)
+    tail_v = np.cumsum(nv[::-1])[::-1]
+    tail_p = np.cumsum(npass[::-1])[::-1]
+    for k in range(len(nv) - 1):
+        if nv[k] > 0 and tail_v[k + 1] > 0 and rate[k] >= tail_p[k + 1] / tail_v[k + 1]:
+            return k, rate
+    return len(nv), rate
+
+
+def consecutive_ratio(dep_a: np.ndarray, ok_a: np.ndarray, dep_b: np.ndarray, ok_b: np.ndarray,
+                      K: np.ndarray, c2w_a: np.ndarray, w2c_b: np.ndarray, stride: int) -> float:
+    """Median of z_{a→b} / d_b over the pixels both see: keyframe a's depth (every `stride`-th row
+    and column where ok_a) carried into keyframe b, against b's own depth at the pixel it lands on
+    (where ok_b). 1 = the two agree; NaN when they share no pixel."""
+    H, W = dep_b.shape
+    sub = np.zeros(ok_a.shape, bool)
+    sub[::stride, ::stride] = True
+    rr, cc = np.nonzero(ok_a & sub)
+    z = dep_a[rr, cc].astype(np.float64)
+    X = np.stack([(cc - K[0, 2]) / K[0, 0] * z, (rr - K[1, 2]) / K[1, 1] * z, z], 1)
+    Xb = (X @ c2w_a[:3, :3].T + c2w_a[:3, 3]) @ w2c_b[:3, :3].T + w2c_b[:3, 3]
+    zb = Xb[:, 2]
+    ok = zb > 0
+    zs = np.where(ok, zb, 1.0)
+    u = np.rint(K[0, 0] * Xb[:, 0] / zs + K[0, 2]).astype(np.int64)
+    v = np.rint(K[1, 1] * Xb[:, 1] / zs + K[1, 2]).astype(np.int64)
+    ok &= (u >= 0) & (u < W) & (v >= 0) & (v < H)
+    d = np.zeros(len(z))
+    d[ok] = dep_b[v[ok], u[ok]]
+    okb = np.zeros(len(z), bool)
+    okb[ok] = ok_b[v[ok], u[ok]]
+    ok &= okb & (d > 0)
+    return float(np.median(zb[ok] / d[ok])) if ok.any() else float("nan")
+
+
+def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge: Dict[int, np.ndarray],
+                   cand: np.ndarray, K: np.ndarray, c2w: Dict[int, np.ndarray], w2c: Dict[int, np.ndarray],
+                   neighbors, tau: float) -> dict:
+    """Keyframe order[i]'s candidate pixels judged by the neighbours' surfaces that passed their gate
+    (`judge`). Per neighbour a pixel
+      AGREES when its point lands on the neighbour's surface within tau (relative);
+      is CONTRADICTED when its point lies in FRONT of that surface by more than tau (the neighbour
+        sees free space through it — the epoch-7 rule) OR the neighbour's surface, splatted into
+        this view (z-buffer, _splat), lies in front of the pixel's depth by more than tau (this view
+        should have seen it) — one contradiction per neighbour.
+    Returns rr, cc, z, agree, contra, contra_fwd (the one-sided count alone), zmed (median of the
+    pixel's own depth and the agreeing views' depths along its ray) and splats (views × pixels: each
+    neighbour's surface on the pixel's ray, NaN where none lands — what a repair reads)."""
+    f = order[i]
+    H, W = depth[f].shape
+    rr, cc = np.nonzero(cand)
+    z = depth[f][rr, cc].astype(np.float64)
+    ray = np.stack([(cc - K[0, 2]) / K[0, 0], (rr - K[1, 2]) / K[1, 1], np.ones(len(rr))], 1) @ c2w[f][:3, :3].T
+    C = c2w[f][:3, 3]
+    n = len(z)
+    agree = np.zeros(n, np.int32)
+    contra = np.zeros(n, np.int32)
+    contra_fwd = np.zeros(n, np.int32)
+    cands, splats = [z], []
+    for d in neighbors:
+        j = i + int(d)
+        if not 0 <= j < len(order):
+            continue
+        g = order[j]
+        T = w2c[g]
+        a = T[2, :3] @ C + T[2, 3]
+        b = ray @ T[2, :3]
+        Xg = (C + z[:, None] * ray) @ T[:3, :3].T + T[:3, 3]
+        zg = Xg[:, 2]
+        ok = zg > 0
+        zs = np.where(ok, zg, 1.0)
+        u = np.rint(K[0, 0] * Xg[:, 0] / zs + K[0, 2]).astype(np.int64)
+        v = np.rint(K[1, 1] * Xg[:, 1] / zs + K[1, 2]).astype(np.int64)
+        ok &= (u >= 0) & (u < W) & (v >= 0) & (v < H)
+        dg = np.zeros(n)
+        dg[ok] = depth[g][v[ok], u[ok]]
+        jg = np.zeros(n, bool)
+        jg[ok] = judge[g][v[ok], u[ok]]
+        ok &= jg & (dg > 0)
+        e = np.zeros(n)
+        e[ok] = (zg[ok] - dg[ok]) / dg[ok]
+        ag = ok & (np.abs(e) <= tau) & (np.abs(b) > 0)
+        fwd = ok & (e < -tau)
+        s = _splat(depth[g], judge[g], K, c2w[g], w2c[f], (H, W))[rr, cc]
+        landed = np.isfinite(s)
+        front = landed & (z - np.where(landed, s, 0.0) > tau * np.where(landed, s, 0.0))
+        agree += ag
+        contra_fwd += fwd
+        contra += fwd | front
+        cands.append(np.where(ag, (dg - a) / np.where(np.abs(b) > 0, b, 1.0), np.nan))
+        splats.append(np.where(landed, s, np.nan))
+    zmed = np.nanmedian(np.vstack(cands), 0)
+    return {"rr": rr, "cc": cc, "z": z, "agree": agree, "contra": contra, "contra_fwd": contra_fwd,
+            "zmed": zmed, "splats": np.vstack(splats) if splats else np.zeros((0, n))}
+
+
+def agreeing_median(C: np.ndarray, tau: float, min_views: int) -> tuple:
+    """Per column of C (views × pixels; NaN = that view put nothing there): the views within tau
+    (relative) of the column's median and, where at least `min_views` of them agree, their median —
+    repair_contradicted's rule on values already carried onto the pixels' rays.
+    Returns (ok, depth, n_agree)."""
+    n = C.shape[1] if C.ndim == 2 else 0
+    ok = np.zeros(n, bool)
+    zz = np.full(n, np.nan)
+    if C.ndim != 2 or C.shape[0] == 0 or n == 0:
+        return ok, zz, np.zeros(n, np.int32)
+    C = np.where(np.isfinite(C), C, np.nan)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)              # all-NaN columns: nothing landed
+        med = np.nanmedian(C, 0)
+        agree = np.abs(C - med) <= tau * med
+        n_ag = agree.sum(0).astype(np.int32)
+        ok = (n_ag >= min_views) & np.isfinite(med)
+        if ok.any():
+            zz[ok] = np.nanmedian(np.where(agree, C, np.nan)[:, ok], 0)
+    return ok, zz, n_ag
+
+
+def edge_vote_decision(passed: np.ndarray, edge: np.ndarray, agree: np.ndarray, contra: np.ndarray,
+                       repairable: np.ndarray) -> tuple:
+    """USER 2026-10-01 — who stays, per candidate pixel:
+      keep    passed the confidence floor and contra <= agree (a pixel nobody judges, 0 / 0, stays
+              only here: only if it passed the floor);
+      repair  passed the floor, contradicted (contra > agree), and its neighbours agree on a surface
+              on its ray (`repairable`, agreeing_median) — it takes that surface;
+      admit   below the floor, an EDGE pixel, confirmed against floor-passing neighbours:
+              agree >= 1 and contra <= agree (the floor keeps acting on interior pixels).
+    Everything else leaves. Returns (keep, repair, admit)."""
+    keep = passed & (contra <= agree)
+    repair = passed & (contra > agree) & repairable
+    admit = ~passed & edge & (agree >= 1) & (contra <= agree)
+    return keep, repair, admit
 
 
 def main(argv: Optional[List[str]] = None) -> int:

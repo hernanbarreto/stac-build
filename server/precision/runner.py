@@ -61,6 +61,8 @@ STEPS: List[Step] = [
     Step("f3_probe", "F3 Omega resolution probe (report)", "mapanything",
          "precision.omega_probe", gpu=True),
     Step("f5_refine", "F5 joint refinement", "mapanything", "precision.refine"),
+    Step("f6_bend", "F6 depth on F5: Omega bent to F5's landmarks + multi-view vote (the product)", "da3",
+         "precision.depth_on_f5"),
     Step("f6_sweep", "F6 native depth sweep", "da3", "precision.depth_sweep", gpu=True),
     Step("f6_colmap", "F6 COLMAP reference (A/B)", "da3", "precision.depth_colmap", gpu=True),
     Step("f7_cloud", "F7-C corrected cloud on F6's depth (the product)", "da3",
@@ -131,6 +133,10 @@ def chain_steps(pcfg, steps: Sequence[Step] = STEPS) -> List[Step]:
     witness fusion. The check runs last."""
     fusion = pcfg.cloud.source == "fusion"
     drop = set()
+    if pcfg.cloud.source == "omega_bent":
+        # USER 2026-10-01 (pccr epoch 7): the depth on F5 IS the product — no plane sweep, no F7
+        return [s for s in steps if s.key not in {"f6_sweep", "f6_colmap", "f7_cloud", "f7_fuse"}]
+    drop.add("f6_bend")
     if fusion:
         drop.add("f7_cloud")
         if not pcfg.depth.colmap.enabled:

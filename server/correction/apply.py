@@ -106,6 +106,38 @@ def transform_poses(poses: np.ndarray, R_kf: np.ndarray,
     return out
 
 
+def reconsolidation_decision(cfg: CorrectionConfig,
+                             raw: Optional[dict] = None) -> Tuple[bool, str]:
+    """Whether the transaction re-consolidates the warped cloud (step 9b), and why.
+
+    ONE switch decides: ``reconstruction.precision.cloud.consolidate`` — the key
+    the product cloud already reads (precision/corrected_cloud.py), read here
+    through the same typed strict loader (a missing key fails the load). The
+    USER turned it off on 2026-09-30 (epoch 4's recipe: no consolidation), and
+    the epoch transaction kept consolidating anyway because it only read its own
+    ``correction.apply.reconsolidate`` (edge audit 2026-10-01, #4: the MLS pulls
+    3-4 mm into every crease it blends normals across — a chamfer — and thins
+    1-3 cm cylinders, on top of a cloud the user asked to leave as measured).
+
+    ``correction.apply.reconsolidate`` stays readable and is SUBORDINATE: the MLS
+    runs only when BOTH say true. It can switch the epoch's consolidation off
+    while the product cloud keeps its own; it can never switch it on against
+    the user's switch.
+
+    ``raw`` is the server config dict (None = the server-wide ``config.cfg``).
+    """
+    from precision.config import load_precision_config
+    if not load_precision_config(raw).cloud.consolidate:
+        return False, ("reconstruction.precision.cloud.consolidate is false (USER "
+                       "2026-09-30) — the cloud ships as warped; the MLS would "
+                       "round its creases (edge audit 2026-10-01 #4)")
+    if not cfg.apply.reconsolidate:
+        return False, ("correction.apply.reconsolidate is false — the epoch's "
+                       "consolidation is off although the product cloud's is on")
+    return True, ("reconstruction.precision.cloud.consolidate and "
+                  "correction.apply.reconsolidate are both true")
+
+
 def _recompute_obbs(output_dir: Path, xyz_new: np.ndarray,
                     result: dict, log=print,
                     floor_npz: Optional[dict] = None) -> dict:
@@ -148,6 +180,9 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
     problem — nothing outside the tx dir is touched."""
     output_dir = session.output_dir
     assert_no_interrupted_swap(output_dir)
+    # read BEFORE anything is staged: a configuration that cannot say whether
+    # to consolidate fails here, with no transaction directory left behind
+    run_mls, mls_why = reconsolidation_decision(cfg)
     epoch_from = current_epoch(output_dir)
     epoch_to = next_epoch(output_dir)
     tx = output_dir / f"{TX_PREFIX}{epoch_to}"
@@ -371,7 +406,14 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
     # provenance survive it, which is why it is safe here and a re-run of the
     # SOR would not be. Runs BEFORE the octree so the build carries it. Never
     # fatal: a transaction that could not consolidate is still a valid epoch.
-    if getattr(cfg.apply, "reconsolidate", False):
+    # Decided by `reconsolidation_decision` (read at the top): the user's ONE
+    # switch reconstruction.precision.cloud.consolidate, with
+    # correction.apply.reconsolidate subordinate to it. Off = no point moves
+    # here, and the semantic service is left running.
+    mls_done = False
+    if not run_mls:
+        log(f"  re-consolidation OFF: {mls_why}")
+    else:
         _p(68, "tx: re-consolidating the warped cloud...")
         try:
             # The MLS asks for ~7.7 GB in one allocation and this runs inside a
@@ -384,6 +426,7 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
             from reconstruction.surface_fit.consolidate import scene_consolidate
             rep = scene_consolidate(tx, artifacts_dir=output_dir)
             if rep:
+                mls_done = True
                 log(f"  re-consolidated {rep.get('n_points', 0):,} pts, "
                     f"mean move {rep.get('mean_move_mm', 0):.2f} mm "
                     f"(p95 {rep.get('p95_move_mm', 0):.2f} mm)")
@@ -443,7 +486,9 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
     return {"tx_dir": str(tx), "epoch_from": epoch_from,
             "epoch_to": epoch_to, "artifacts": artifacts,
             "pose_copies_skipped": pose_copies_skipped,
-            "points_moved": int(n_moved)}
+            "points_moved": int(n_moved),
+            "reconsolidation": {"enabled": bool(run_mls), "why": mls_why,
+                                "ran": bool(mls_done)}}
 
 
 def swap_transaction(output_dir: Path, tx_info: dict, log=print) -> None:

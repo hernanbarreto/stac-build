@@ -60,6 +60,20 @@ def update_instance_store(output_dir, R_kf: np.ndarray, t_kf: np.ndarray,
 
     result = json.loads(res_path.read_text())
     kf_of_frame = {int(f): k for k, f in enumerate(frames)}
+    # `globalIndices` index the cloud the masks were PROJECTED on (its size is the
+    # result's `total_points`). A transform epoch warps that same cloud point by point,
+    # so the indices still hold; a NEW cloud (another epoch's own reconstruction) has
+    # other points in another order, and the same indices land on arbitrary points of
+    # the whole scene. pccr 2026-09-30: every select between new-cloud epochs refit
+    # every OBB from such indices and the store filled with walk-sized cubes. A
+    # segmentation that does not index the live cloud is left as it is (points, OBBs,
+    # instances) and declared stale — the masks have to be re-projected on this cloud.
+    n_seg = result.get("total_points")
+    indices_hold = n_seg is None or int(n_seg) == len(xyz)
+    if not indices_hold:
+        log(f"  ⚠ the segmentation indexes a cloud of {int(n_seg):,} points and the live "
+            f"cloud has {len(xyz):,} — its points and OBBs are NOT refit from another "
+            f"cloud's indices; re-project the masks on this cloud to update them")
 
     store = InstanceStore(db)
     try:
@@ -78,6 +92,8 @@ def update_instance_store(output_dir, R_kf: np.ndarray, t_kf: np.ndarray,
                                       source="sam3_concepts", status="proposed",
                                       label_origin="vlm_proposed")
                 known.add(iid)
+            if not indices_hold:
+                continue
             g = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
             g = g[(g >= 0) & (g < len(xyz_display))]
             if not len(g):
@@ -144,7 +160,9 @@ def update_instance_store(output_dir, R_kf: np.ndarray, t_kf: np.ndarray,
         # chat, the findings and the reports all repeat
         recon = store.reconcile(live_ids)
         store.set_meta("geometry_epoch", str(current_epoch(output_dir)))
-        summary = {"store": "updated", "instances": n_inst,
+        store.set_meta("segmentation_indexes_live_cloud", "true" if indices_hold else "false")
+        summary = {"store": "updated" if indices_hold else "stale_segmentation",
+                   "instances": n_inst,
                    "removed": recon["removed"],
                    "findings_orphaned": recon["findings_orphaned"],
                    "findings_transformed": n_findings,
