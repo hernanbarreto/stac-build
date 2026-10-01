@@ -850,13 +850,10 @@ function App() {
       const data = await res.json()
       if (data.ok) {
         const statusMap: Record<number, { has_mesh: boolean }> = {}
-        const selectedIds = new Set<number>()
-        for (const inst of data.instances) {
-          statusMap[inst.id] = { has_mesh: inst.has_mesh }
-          if (!inst.has_mesh) selectedIds.add(inst.id)
-        }
+        for (const inst of data.instances) statusMap[inst.id] = { has_mesh: inst.has_mesh }
         setTsdfStatus(statusMap)
-        setTsdfSelected(selectedIds)
+        // nothing preselected (USER 2026-10-01): the user picks — search + select / deselect all
+        setTsdfSelected(new Set())
       }
     } catch { /* ignore */ }
   }, [activeSession])
@@ -2307,6 +2304,7 @@ function App() {
 
       <MeshingDialog open={showTsdfModal} onClose={() => setShowTsdfModal(false)} segments={segments} selected={tsdfSelected}
         onToggle={id => setTsdfSelected(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })}
+        onSetSelected={ids => setTsdfSelected(ids)}
         tsdfStatus={tsdfStatus} tsdfProgress={tsdfProgress} tsdfOverall={tsdfOverall} tsdfRunning={tsdfRunning} shapeRunning={shapeRunning} shapeProgress={shapeProgress} shapeOverall={shapeOverall}
         onObject={runObjectMeshing} onMesh={runMesh} />
 

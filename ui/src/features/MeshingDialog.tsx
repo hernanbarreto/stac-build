@@ -4,11 +4,13 @@
  * USER 2026-10-01) or Mesh (RANSAC + Poisson from the object's own cloud).
  * Live phase per instance for BOTH jobs; existing meshes are overwritten.
  */
-import { Box, Puzzle } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Box, CheckSquare, Puzzle, Square } from 'lucide-react'
 import type { SegmentInstance } from '../components/Viewport'
 import { Dialog } from '../components/ui/Dialog'
 import { Button } from '../components/ui/Button'
-import { Checkbox } from '../components/ui/Field'
+import { Checkbox, SearchInput } from '../components/ui/Field'
+import { IconButton } from '../components/ui/IconButton'
 import { Badge, ColorDot, type BadgeTone } from '../components/ui/Badge'
 import { Banner } from '../components/ui/Banner'
 import { Row, Stack } from '../components/ui/Panel'
@@ -24,6 +26,8 @@ interface MeshingDialogProps {
   segments: SegmentInstance[]
   selected: Set<number>
   onToggle: (id: number) => void
+  /** replace the whole selection (select / deselect all of the listed rows) */
+  onSetSelected: (ids: Set<number>) => void
   tsdfStatus: Record<number, { has_mesh: boolean }>
   tsdfProgress: Record<number, InstanceProgress>
   tsdfOverall: OverallProgress
@@ -50,7 +54,17 @@ const SHAPE_PHASE_TONE: Record<string, BadgeTone> = {
 export function MeshingDialog(p: MeshingDialogProps) {
   const t = useT()
   const fmt = useFmt()
-  const list = p.segments.filter(s => s.label !== 'Unsegmented')
+  const all = p.segments.filter(s => s.label !== 'Unsegmented')
+  // search by label or id (USER 2026-10-01); select / deselect all act on the rows the search shows
+  const [query, setQuery] = useState('')
+  useEffect(() => { if (!p.open) setQuery('') }, [p.open])
+  const q = query.trim().toLowerCase()
+  const list = q ? all.filter(s => s.label.toLowerCase().includes(q) || String(s.id).includes(q)) : all
+  const selectListed = (on: boolean) => {
+    const n = new Set(p.selected)
+    for (const s of list) { if (on) n.add(s.id); else n.delete(s.id) }
+    p.onSetSelected(n)
+  }
   const busy = p.tsdfRunning || p.shapeRunning
   const overallTone: BadgeTone = p.tsdfOverall.phase === 'error' ? 'err' : p.tsdfOverall.phase === 'done' ? 'ok' : 'brand'
   const shapeTone: 'err' | 'ok' | 'info' = p.shapeOverall.phase === 'error' ? 'err' : p.shapeOverall.phase === 'done' ? 'ok' : 'info'
@@ -69,7 +83,15 @@ export function MeshingDialog(p: MeshingDialogProps) {
       }>
       <Stack gap={3}>
         <p className="stac-dialog__message">{t('meshing.description')}</p>
-        {list.length === 0 && <EmptyState compact icon={<Puzzle aria-hidden />} title={t('meshing.noSegments')} description={t('meshing.noSegmentsDesc')} />}
+        {all.length === 0 && <EmptyState compact icon={<Puzzle aria-hidden />} title={t('meshing.noSegments')} description={t('meshing.noSegmentsDesc')} />}
+        {all.length > 0 && (
+          <Row>
+            <SearchInput size="sm" value={query} onChange={e => setQuery(e.target.value)} onClear={() => setQuery('')} placeholder={t('meshing.search')} />
+            <IconButton size="sm" label={t('meshing.selectAll')} icon={<CheckSquare aria-hidden />} disabled={busy || list.length === 0} onClick={() => selectListed(true)} />
+            <IconButton size="sm" label={t('meshing.deselectAll')} icon={<Square aria-hidden />} disabled={busy || p.selected.size === 0} onClick={() => selectListed(false)} />
+            <span className="stac-mono stac-picklist__meta">{t('meshing.selectedCount', { n: p.selected.size, total: all.length })}</span>
+          </Row>
+        )}
         <ul className="stac-picklist">
           {list.map(seg => {
             const st = p.tsdfStatus[seg.id]

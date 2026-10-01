@@ -790,6 +790,10 @@
     "none": "Sin duplicados"
   },
   "meshing": {
+    "search": "Buscar objetos",
+    "selectAll": "Seleccionar todos los listados",
+    "deselectAll": "Deseleccionar todos los listados",
+    "selectedCount": "{n} de {total} seleccionados",
     "title": "Mallado",
     "description": "Elegí las {@instances} y después Objeto (reconstrucción generativa, activo visual) o Malla (superficie RANSAC + Poisson desde la propia nube del objeto). Las mallas existentes se sobrescriben.",
     "noSegments": "No hay {@instances} en esta {@session}",

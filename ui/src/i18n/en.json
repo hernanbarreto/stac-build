@@ -790,6 +790,10 @@
     "none": "No duplicates"
   },
   "meshing": {
+    "search": "Search objects",
+    "selectAll": "Select all listed",
+    "deselectAll": "Deselect all listed",
+    "selectedCount": "{n} of {total} selected",
     "title": "Meshing",
     "description": "Pick the {@instances}, then Object (generative reconstruction, visual asset) or Mesh (RANSAC surface + Poisson from the object's own cloud). Existing meshes are overwritten.",
     "noSegments": "No {@instances} in this {@session}",
