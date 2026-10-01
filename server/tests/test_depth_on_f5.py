@@ -45,14 +45,14 @@ def test_vote_removes_a_flyer_and_keeps_the_surface():
 
 
 def test_the_camera_travels_with_the_cloud(tmp_path):
-    out = tmp_path
-    (out / "intrinsic.txt").write_text("363 364 232 416\n" * 3)
-    prev = out / "_epoch_0"; prev.mkdir()
-    (prev / "_manifest.json").write_text(json.dumps({"artifacts": [{"rel": "cleaned_cloud.ply", "existed_before": True}]}))
-    camera_travels(out, 0, [391.9, 388.7, 234.8, 414.1, 0, 0, 0, 0], 3, log=lambda *a: None)
-    assert (prev / "intrinsic.txt").read_text().startswith("363")
-    assert "intrinsic.txt" in {a["rel"] for a in json.loads((prev / "_manifest.json").read_text())["artifacts"]}
-    assert (out / "intrinsic.txt").read_text().splitlines()[0].startswith("391.9")
+    """Written into the transaction (one row per keyframe); publish registers it as an epoch artifact."""
+    import inspect
+    from precision import corrected_cloud as CC
+    p = camera_travels(tmp_path, [391.9, 388.7, 234.8, 414.1, 0, 0, 0, 0], 3, log=lambda *a: None)
+    rows = p.read_text().splitlines()
+    assert p == tmp_path / "intrinsic.txt" and len(rows) == 3 and rows[0].startswith("391.9 388.7")
+    src = inspect.getsource(CC.publish)
+    assert 'art("intrinsic.txt")' in src, "publish must file the camera with the epoch (pccr 2026-10-01)"
 
 
 def test_chunk_check_applies_the_published_bend():

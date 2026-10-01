@@ -553,6 +553,11 @@ def publish(session_dir: Path, tmp: Path, report: dict, log: Callable,
     else:
         write_ply(tx / "cleaned_cloud_raw.ply", header, data)
     art("cleaned_cloud_raw.ply")
+    # the camera the cloud was built with travels WITH it (one fx fy cx cy row per keyframe, what
+    # the viewer frames every camera with): an epoch artifact like the cloud — pccr 2026-10-01, a
+    # publish that wrote it after the swap left the next epoch without one and the certify crashed
+    if (tmp / "intrinsic.txt").exists():
+        shutil.copy2(tmp / "intrinsic.txt", tx / "intrinsic.txt"); art("intrinsic.txt")
     cid = ledger.new_correction_id()
     names = data.dtype.names
     columns = columns or {}
@@ -732,7 +737,11 @@ def mixed_pixels(depth: np.ndarray, valid: np.ndarray, tau: float) -> np.ndarray
 
 def depth_steps(depth: np.ndarray, valid: np.ndarray, tau: float) -> np.ndarray:
     """Pixels whose 3x3 window spans a depth STEP: extremes far enough apart to hold a mixed pixel
-    (the mixed-pixel rule's own condition, so the two can never disagree)."""
+    (the mixed-pixel rule's own condition, so the two can never disagree). These are the EDGE pixels of
+    the epoch-8 recipe: on Omega's depth before snapping the set covers the ramp and one pixel of each
+    side. (A band MEASURED from the floor's pass rate per ring away from a step does not exist on pccr:
+    9.7 % at the step, 50.8 % at 5 rings, 80 % at 25, 100 % only at 193 — no ring separates the step's
+    erosion from the scene's, so the user's own 3x3 window decides.)"""
     mn, mx = window_extremes(depth, valid)
     return valid & (mx * (1.0 - tau) > mn * (1.0 + tau))
 
@@ -779,40 +788,6 @@ def snap_mixed(depth: np.ndarray, valid: np.ndarray, labels: np.ndarray, tau: fl
     out[rr[decided], cc[decided]] = z_new
     snapped[rr[decided], cc[decided]] = True
     return out, mixed, snapped
-
-
-def ring_distance(seed: np.ndarray) -> np.ndarray:
-    """Chessboard distance (= number of 3x3 dilations) of every pixel to the nearest seed pixel;
-    inf everywhere when there is no seed."""
-    if not seed.any():
-        return np.full(seed.shape, np.inf)
-    import cv2
-    return cv2.distanceTransform((~seed).astype(np.uint8), cv2.DIST_C, 3).astype(np.float64)
-
-
-def ring_histogram(rings: np.ndarray, valid: np.ndarray, passed: np.ndarray) -> tuple:
-    """(valid pixels, floor-passing pixels) per ring — one keyframe's share of the band measurement."""
-    m = valid & np.isfinite(rings)
-    r = rings[m].astype(np.int64)
-    n = int(r.max()) + 1 if r.size else 0
-    return (np.bincount(r, minlength=n).astype(np.int64),
-            np.bincount(r, weights=passed[m].astype(np.float64), minlength=n).astype(np.int64))
-
-
-def edge_band(n_valid, n_pass) -> tuple:
-    """The width of the EDGE band, measured: the smallest ring k (3x3 dilations from a depth step)
-    whose confidence-floor pass rate reaches the pass rate of everything beyond it — where the
-    step stops depressing Omega's confidence. Pixels at rings < band are edge pixels; ring 0 passing
-    as well as the rest gives band 0 (the floor erodes nothing at steps). Returns (band, rate per ring)."""
-    nv = np.asarray(n_valid, np.float64)
-    npass = np.asarray(n_pass, np.float64)
-    rate = np.where(nv > 0, npass / np.maximum(nv, 1.0), np.nan)
-    tail_v = np.cumsum(nv[::-1])[::-1]
-    tail_p = np.cumsum(npass[::-1])[::-1]
-    for k in range(len(nv) - 1):
-        if nv[k] > 0 and tail_v[k + 1] > 0 and rate[k] >= tail_p[k + 1] / tail_v[k + 1]:
-            return k, rate
-    return len(nv), rate
 
 
 def consecutive_ratio(dep_a: np.ndarray, ok_a: np.ndarray, dep_b: np.ndarray, ok_b: np.ndarray,

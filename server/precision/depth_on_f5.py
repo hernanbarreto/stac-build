@@ -144,25 +144,19 @@ def vote(dep: Dict[int, np.ndarray], ent: Dict[int, np.ndarray], K: np.ndarray, 
     return out
 
 
-def camera_travels(out: Path, epoch_from: int, params, n_kf: int, log: Callable = print) -> None:
+def camera_travels(tmp: Path, params, n_kf: int, log: Callable = print) -> Path:
     """The camera travels with the cloud (pccr 2026-10-01: the viewer framed F5's poses with Omega's
     camera — standing at a keyframe, the scene did not match the image). The viewer reads
-    output/intrinsic.txt (one fx fy cx cy row per keyframe): the previous epoch keeps its file (stored in
-    its epoch folder and manifest, restored when it is selected again) and the new one gets the camera
-    it was built with."""
-    from correction.epoch import EPOCH_DIR_PREFIX
-    cur = out / "intrinsic.txt"
-    prev = out / f"{EPOCH_DIR_PREFIX}{epoch_from}"
-    if cur.exists() and prev.exists() and (prev / "_manifest.json").exists():
-        shutil.copy2(cur, prev / "intrinsic.txt")
-        m = json.loads((prev / "_manifest.json").read_text())
-        if "intrinsic.txt" not in {a["rel"] for a in m.get("artifacts", [])}:
-            m.setdefault("artifacts", []).append({"rel": "intrinsic.txt", "existed_before": True})
-            (prev / "_manifest.json").write_text(json.dumps(m))
-    cur.write_text("".join(f"{params[0]:.10g} {params[1]:.10g} {params[2]:.10g} {params[3]:.10g}\n"
-                           for _ in range(n_kf)))
-    log(f"{LOG_TAG} intrinsic.txt = the camera of this cloud ({params[0]:.1f} / {params[1]:.1f}); "
-        f"epoch {epoch_from} keeps its own")
+    output/intrinsic.txt (one fx fy cx cy row per keyframe). Written into the TRANSACTION, so
+    corrected_cloud.publish registers it as an epoch artifact: the previous epoch keeps its own file
+    (filed with its delta, restored when it is selected again) and the new one carries the camera it
+    was built with — a copy written after the swap left the next epoch without one."""
+    p = tmp / "intrinsic.txt"
+    p.write_text("".join(f"{params[0]:.10g} {params[1]:.10g} {params[2]:.10g} {params[3]:.10g}\n"
+                         for _ in range(n_kf)))
+    log(f"{LOG_TAG} intrinsic.txt = the camera of this cloud ({params[0]:.1f} / {params[1]:.1f}), "
+        f"an artifact of the epoch")
+    return p
 
 
 # ── the step ─────────────────────────────────────────────────────────────
@@ -333,11 +327,11 @@ def run_depth_on_f5(session_dir: Path, pcfg, log: Callable = print,
                                 for i, f in enumerate(frames)},
                   "vote": {"tau": tau, "contradicted_frac": n_out / max(n_in, 1), "coverage": cover},
                   "raw_points": n_raw}
+        camera_travels(tmp, params, len(frames), log)
         _p(85, "publishing the epoch (octree, atomic swap)")
         rep = CC.publish(session_dir, tmp, report, log, columns=cols)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    camera_travels(out, int(rep["epoch_from"]), params, len(frames), log)
     rep["seconds"] = round(time.time() - t0, 1)
     (out / "precision").mkdir(exist_ok=True)
     (out / "precision" / REPORT).write_text(json.dumps(rep, indent=1, default=float))
