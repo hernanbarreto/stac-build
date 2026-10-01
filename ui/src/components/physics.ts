@@ -7,8 +7,13 @@
  *  - the floor plane y = 0 (the display frame is levelled to it);
  *  - every visible MESH under the roots it is given (placed library objects — the reference human —,
  *    ShapeR objects, Mesh results), as triangle-mesh colliders in world space.
- * The point cloud is NOT solid: a sphere falls through it. Colliders follow the scene: they are rebuilt
- * when a mesh appears, disappears, hides or moves (checked at most twice a second).
+ *  - the POINT CLOUD too (USER 2026-10-01: "los puntos también son superficie"): around each sphere the
+ *    loaded points are binned into VOXEL cells and every occupied cell near it becomes a thin solid PLATE
+ *    lying on the local surface (normal fitted to the points of the cell and its 26 neighbours), so a floor
+ *    of points is a smooth floor and a wall a smooth wall (cubes deflected the sphere at their edges) —
+ *    only near the spheres, so millions of points cost nothing until a sphere gets there.
+ * Mesh colliders follow the scene: rebuilt when a mesh appears, disappears, hides or moves (checked at
+ * most twice a second). Hidden points (the cloud switched off, a culled node) are not solid.
  */
 import RAPIER from '@dimforge/rapier3d-compat'
 import * as THREE from 'three'
@@ -17,13 +22,48 @@ const GRAVITY = -9.81                 // m/s², the display frame is metric with
 const STEP = 1 / 60                   // fixed physics step (s)
 const MAX_STEPS = 5                   // per frame — a stalled tab does not explode into a spiral
 const RESYNC_S = 0.5                  // how often the scene's meshes are compared with the colliders
+const RESYNC_CELLS_S = 0.05           // how often the point cells around the spheres are refreshed
 const FLOOR_HALF = 500                // the floor plane's half extent (m) — a slab whose top is y = 0
 const LOST_Y = -50                    // a sphere below this fell out of the world and is removed
+const VOXEL = 0.03                    // m — the point cloud as solid cells of this size
+const NEAR = 0.25                     // m — cells this far beyond a sphere's surface are made solid
+const PLATE_HALF = VOXEL * 0.75       // a cell's plate overlaps its neighbours' — no gap to fall through
+const PLATE_THICK = VOXEL / 3         // and is thin: the surface, not a cube
 
 interface Ball { body: RAPIER.RigidBody; mesh: THREE.Mesh }
 const THROW_WINDOW_S = 0.1             // the release velocity = the hand's motion over the last 0.1 s
 const MAX_THROW_MS = 25                // a throw is capped at 25 m/s (a hard pitch)
 interface Solid { collider: RAPIER.Collider; key: string }
+
+/** Unit eigenvector of the smallest eigenvalue of a symmetric 3×3 matrix (Jacobi rotations). */
+function smallestEigenvector(A: number[][]): THREE.Vector3 {
+    const a = A.map(r => r.slice())
+    const V = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+    for (let sweep = 0; sweep < 32; sweep++) {
+        const off = Math.abs(a[0][1]) + Math.abs(a[0][2]) + Math.abs(a[1][2])
+        if (off < 1e-15) break
+        for (const [p, q] of [[0, 1], [0, 2], [1, 2]]) {
+            if (Math.abs(a[p][q]) < 1e-18) continue
+            const th = (a[q][q] - a[p][p]) / (2 * a[p][q])
+            const t = Math.sign(th || 1) / (Math.abs(th) + Math.sqrt(th * th + 1))
+            const c = 1 / Math.sqrt(t * t + 1), s = t * c
+            for (let k = 0; k < 3; k++) {
+                const akp = a[k][p], akq = a[k][q]
+                a[k][p] = c * akp - s * akq; a[k][q] = s * akp + c * akq
+            }
+            for (let k = 0; k < 3; k++) {
+                const apk = a[p][k], aqk = a[q][k]
+                a[p][k] = c * apk - s * aqk; a[q][k] = s * apk + c * aqk
+            }
+            for (let k = 0; k < 3; k++) {
+                const vkp = V[k][p], vkq = V[k][q]
+                V[k][p] = c * vkp - s * vkq; V[k][q] = s * vkp + c * vkq
+            }
+        }
+    }
+    const m = [0, 1, 2].reduce((b, i) => (a[i][i] < a[b][b] ? i : b), 0)
+    return new THREE.Vector3(V[0][m], V[1][m], V[2][m]).normalize()
+}
 
 function visibleInScene(o: THREE.Object3D): boolean {
     for (let p: THREE.Object3D | null = o; p; p = p.parent) if (!p.visible) return false
@@ -38,8 +78,13 @@ export class PhysicsSandbox {
     private solids = new Map<string, Solid>()   // mesh uuid → its collider and the pose it was built at
     private acc = 0
     private sinceSync = Infinity
+    private sinceCells = Infinity
     private roots: () => THREE.Object3D[] = () => []
     private held: { ball: Ball; trail: Array<{ t: number; p: THREE.Vector3 }> } | null = null
+    private pointRoots: () => THREE.Object3D[] = () => []
+    private occupied = new Map<string, Float64Array>() // voxel → [n, Σx, Σy, Σz, Σxx, Σyy, Σzz, Σxy, Σxz, Σyz]
+    private binned = new WeakSet<THREE.BufferGeometry>() // point geometries already binned
+    private cells = new Map<string, RAPIER.Collider>() // the solid cells around the spheres
 
     constructor(scene: THREE.Scene) {
         this.group.name = 'physics-spheres'
@@ -48,6 +93,91 @@ export class PhysicsSandbox {
 
     /** the scene objects whose meshes are solid (re-read at every sync) */
     setSolidRoots(fn: () => THREE.Object3D[]) { this.roots = fn }
+
+    /** the point clouds (Potree octree group, a plain THREE.Points) whose points are solid */
+    setPointRoots(fn: () => THREE.Object3D[]) { this.pointRoots = fn }
+
+    /** Bin the visible point nodes that reach the region [lo, hi] (world) into the voxel set. */
+    private binPointsNear(lo: THREE.Vector3, hi: THREE.Vector3) {
+        const region = new THREE.Box3(lo, hi)
+        const box = new THREE.Box3(), v = new THREE.Vector3()
+        for (const root of this.pointRoots()) {
+            if (!root) continue
+            root.updateMatrixWorld(true)
+            root.traverse(o => {
+                const pts = o as THREE.Points
+                if (!pts.isPoints || !pts.geometry || this.binned.has(pts.geometry) || !visibleInScene(pts)) return
+                const pos = pts.geometry.getAttribute('position') as THREE.BufferAttribute | undefined
+                if (!pos || !pos.count) return
+                if (!pts.geometry.boundingBox) pts.geometry.computeBoundingBox()
+                box.copy(pts.geometry.boundingBox!).applyMatrix4(pts.matrixWorld)
+                if (!box.intersectsBox(region)) return
+                for (let i = 0; i < pos.count; i++) {
+                    v.fromBufferAttribute(pos, i).applyMatrix4(pts.matrixWorld)
+                    const key = `${Math.floor(v.x / VOXEL)},${Math.floor(v.y / VOXEL)},${Math.floor(v.z / VOXEL)}`
+                    let a = this.occupied.get(key)
+                    if (!a) { a = new Float64Array(10); this.occupied.set(key, a) }
+                    a[0] += 1; a[1] += v.x; a[2] += v.y; a[3] += v.z
+                    a[4] += v.x * v.x; a[5] += v.y * v.y; a[6] += v.z * v.z
+                    a[7] += v.x * v.y; a[8] += v.x * v.z; a[9] += v.y * v.z
+                }
+                this.binned.add(pts.geometry)
+            })
+        }
+    }
+
+    /** Make the occupied cells near every sphere solid; release the ones no sphere is near any more. */
+    private syncCells() {
+        const w = this.world
+        if (!w) return
+        const want = new Set<string>()
+        for (const b of this.balls) {
+            const p = b.body.translation()
+            const lin = b.body.linvel()
+            const r = (b.mesh.geometry as THREE.SphereGeometry).parameters.radius
+            const reach = r + NEAR + Math.hypot(lin.x, lin.y, lin.z) * RESYNC_CELLS_S
+            const lo = new THREE.Vector3(p.x - reach, p.y - reach, p.z - reach)
+            const hi = new THREE.Vector3(p.x + reach, p.y + reach, p.z + reach)
+            this.binPointsNear(lo, hi)
+            const i0 = Math.floor(lo.x / VOXEL), i1 = Math.floor(hi.x / VOXEL)
+            const j0 = Math.floor(lo.y / VOXEL), j1 = Math.floor(hi.y / VOXEL)
+            const k0 = Math.floor(lo.z / VOXEL), k1 = Math.floor(hi.z / VOXEL)
+            for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) for (let k = k0; k <= k1; k++) {
+                const key = `${i},${j},${k}`
+                if (this.occupied.has(key)) want.add(key)
+            }
+        }
+        for (const [key, c] of this.cells) if (!want.has(key)) { w.removeCollider(c, false); this.cells.delete(key) }
+        for (const key of want) {
+            if (this.cells.has(key)) continue
+            const plate = this.cellPlate(key)
+            const desc = RAPIER.ColliderDesc.cuboid(PLATE_HALF, PLATE_HALF, PLATE_THICK / 2)
+                .setTranslation(plate.c.x, plate.c.y, plate.c.z)
+                .setRotation({ x: plate.q.x, y: plate.q.y, z: plate.q.z, w: plate.q.w }).setRestitution(1.0)
+            this.cells.set(key, w.createCollider(desc))
+        }
+    }
+
+    /** A cell's plate: centred on its points' centroid, its thin axis along the normal of the points of
+     *  the cell and its 26 neighbours (the smallest-variance direction of their covariance). */
+    private cellPlate(key: string): { c: THREE.Vector3; q: THREE.Quaternion } {
+        const [i, j, k] = key.split(',').map(Number)
+        const own = this.occupied.get(key)!
+        const c = new THREE.Vector3(own[1] / own[0], own[2] / own[0], own[3] / own[0])
+        const S = new Float64Array(10)
+        for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) for (let dk = -1; dk <= 1; dk++) {
+            const a = this.occupied.get(`${i + di},${j + dj},${k + dk}`)
+            if (a) for (let t = 0; t < 10; t++) S[t] += a[t]
+        }
+        const n = S[0], mx = S[1] / n, my = S[2] / n, mz = S[3] / n
+        const C = [[S[4] / n - mx * mx, S[7] / n - mx * my, S[8] / n - mx * mz],
+                   [S[7] / n - mx * my, S[5] / n - my * my, S[9] / n - my * mz],
+                   [S[8] / n - mx * mz, S[9] / n - my * mz, S[6] / n - mz * mz]]
+        const normal = smallestEigenvector(C)
+        if (n < 3 || !isFinite(normal.x)) normal.set(0, 1, 0)            // too few points: a level plate
+        const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal)
+        return { c, q }
+    }
 
     private init(): Promise<void> {
         if (!this.ready) {
@@ -113,6 +243,7 @@ export class PhysicsSandbox {
         mesh.name = 'physics-sphere'
         this.group.add(mesh)
         this.balls.push({ body, mesh })
+        this.syncCells(); this.sinceCells = 0
     }
 
     /** Advance the simulation by the frame's real time (called from the render loop). */
@@ -121,6 +252,8 @@ export class PhysicsSandbox {
         if (!w || !this.balls.length) return
         this.sinceSync += dt
         if (this.sinceSync >= RESYNC_S) { this.syncSolids(); this.sinceSync = 0 }
+        this.sinceCells += dt
+        if (this.sinceCells >= RESYNC_CELLS_S) { this.syncCells(); this.sinceCells = 0 }
         this.acc = Math.min(this.acc + dt, STEP * MAX_STEPS)
         while (this.acc >= STEP) { w.step(); this.acc -= STEP }
         for (let i = this.balls.length - 1; i >= 0; i--) {
@@ -181,12 +314,17 @@ export class PhysicsSandbox {
 
     get count() { return this.balls.length }
 
-    clear() { this.held = null; for (let i = this.balls.length - 1; i >= 0; i--) this.removeBall(i) }
+    clear() {
+        this.held = null
+        for (let i = this.balls.length - 1; i >= 0; i--) this.removeBall(i)
+        for (const c of this.cells.values()) this.world?.removeCollider(c, false)
+        this.cells.clear()
+    }
 
     dispose() {
         this.clear()
         this.group.removeFromParent()
         this.world?.free(); this.world = null; this.ready = null
-        this.solids.clear()
+        this.solids.clear(); this.occupied.clear(); this.binned = new WeakSet()
     }
 }

@@ -2960,6 +2960,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const physics = new PhysicsSandbox(scene)
         physics.setSolidRoots(() => [sceneObjectsGroupRef.current, shapesGroupRef.current, tsdfGroupRef.current,
                                      reconSceneGroupRef.current].filter((g): g is THREE.Group => !!g))
+        physics.setPointRoots(() => [scene.getObjectByName('potree-octree'), pointCloudRef.current]
+            .filter((o): o is THREE.Object3D => !!o))
         physicsRef.current = physics
         const physicsClock = new THREE.Clock()
 
