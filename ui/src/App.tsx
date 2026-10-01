@@ -132,6 +132,17 @@ function App() {
   const [physicsDiameterCm, setPhysicsDiameterCm] = useState(20)
   const [physicsBounce, setPhysicsBounce] = useState(0.7)
   const [physicsCount, setPhysicsCount] = useState(0)
+  const [physicsPlacing, setPhysicsPlacing] = useState(false)
+  useEffect(() => {                       // the ghost follows the panel's diameter / bounce while placing
+    if (physicsPlacing) viewportRef.current?.physicsPlace(physicsDiameterCm / 100, physicsBounce)
+    else viewportRef.current?.physicsStopPlacing()
+  }, [physicsPlacing, physicsDiameterCm, physicsBounce])
+  useEffect(() => {                       // Esc ends placing
+    if (!physicsPlacing) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setPhysicsPlacing(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [physicsPlacing])
   useEffect(() => {                       // how many spheres are still in the scene (they fall out)
     if (!physicsOpen) return
     const id = window.setInterval(() => setPhysicsCount(viewportRef.current?.physicsCount() ?? 0), 500)
@@ -2183,9 +2194,10 @@ function App() {
 
           {hasSession && !sessionLoading && physicsOpen && (
             <PhysicsPanel diameterCm={physicsDiameterCm} onDiameterCm={setPhysicsDiameterCm} bounce={physicsBounce} onBounce={setPhysicsBounce} count={physicsCount}
+              placing={physicsPlacing} onPlace={() => setPhysicsPlacing(v => !v)}
               onDrop={() => viewportRef.current?.physicsDrop(physicsDiameterCm / 100, physicsBounce)}
               onClear={() => viewportRef.current?.physicsClear()}
-              onClose={() => { setPhysicsOpen(false); viewportRef.current?.physicsClear() }} />
+              onClose={() => { setPhysicsOpen(false); setPhysicsPlacing(false); viewportRef.current?.physicsClear() }} />
           )}
 
           {hasSession && !sessionLoading && (

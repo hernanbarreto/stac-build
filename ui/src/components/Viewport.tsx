@@ -117,6 +117,9 @@ export interface ViewportHandle {
     physicsClear: () => void
     /** spheres in the scene right now */
     physicsCount: () => number
+    /** start placing spheres: a ghost follows the pointer; each click drops one where it shows */
+    physicsPlace: (diameterM: number, restitution: number) => void
+    physicsStopPlacing: () => void
     sendCommand: (cmd: Record<string, unknown>) => void
     sendCommandPreserveCamera: (cmd: Record<string, unknown>) => void
     toggleOBB: (key: string, visible: boolean) => void
@@ -652,6 +655,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const sceneObjectsGroupRef = useRef<THREE.Group | null>(null)
     const physicsRef = useRef<PhysicsSandbox | null>(null)
     const throwEndRef = useRef<(() => void) | null>(null)
+    // PLACING a sphere (USER 2026-10-01: "debe aparecer en el mouse y al hacer click se debe soltar"):
+    // a ghost sphere follows the pointer over the surface it points at; a click drops it there
+    const placeRef = useRef<{ diameter: number; restitution: number; ghost: THREE.Mesh } | null>(null)
+    const hitIsVisibleRef = useRef<(h: THREE.Intersection) => boolean>(() => true)
     const sceneObjByIdRef = useRef<Map<number, THREE.Group>>(new Map())
     const [selSceneObj, setSelSceneObj] = useState<number | null>(null)
     const [sceneObjMode, setSceneObjMode] = useState<'translate' | 'rotate' | 'scale'>('translate')
@@ -945,6 +952,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         if (cls < 0) return true
         return segVisRef.current.get(cls) !== false
     }, [])
+    hitIsVisibleRef.current = hitIsVisible
     useEffect(() => {
         if (activeTool !== 'erase') eraseApiRef.current?.clear()
     }, [activeTool])
@@ -2774,6 +2782,26 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         },
         physicsClear: () => { physicsRef.current?.clear(); throwEndRef.current?.() },
         physicsCount: () => physicsRef.current?.count ?? 0,
+        physicsPlace: (diameterM: number, restitution: number) => {
+            const scene = sceneRef.current
+            if (!scene) return
+            const old = placeRef.current
+            if (old) { scene.remove(old.ghost); old.ghost.geometry.dispose(); (old.ghost.material as THREE.Material).dispose() }
+            const ghost = new THREE.Mesh(new THREE.SphereGeometry(Math.max(0.01, diameterM / 2), 32, 16),
+                new THREE.MeshBasicMaterial({ color: 0xe8552b, transparent: true, opacity: 0.45, depthWrite: false }))
+            ghost.name = 'physics-ghost'
+            ghost.visible = false
+            scene.add(ghost)
+            placeRef.current = { diameter: diameterM, restitution, ghost }
+            if (rendererRef.current) rendererRef.current.domElement.style.cursor = 'crosshair'
+        },
+        physicsStopPlacing: () => {
+            const p = placeRef.current
+            if (!p) return
+            p.ghost.removeFromParent(); p.ghost.geometry.dispose(); (p.ghost.material as THREE.Material).dispose()
+            placeRef.current = null
+            if (rendererRef.current) rendererRef.current.domElement.style.cursor = ''
+        },
         alignSceneObject: (op: 'floor' | 'same_base' | 'on_top' | 'center_xz' | 'center_y', targetKey?: string) => {
             const id = selSceneObjRef.current
             if (id == null) return
@@ -3638,11 +3666,41 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             throwRay.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1,
                 -((e.clientY - r.top) / r.height) * 2 + 1), camera)
         }
+        // the surface under the pointer (visible points or meshes); the ghost hovers 0.3 m above it so a
+        // click DROPS the sphere onto that spot. No surface: 3 m along the pointer's ray.
+        const placeAt = (e: PointerEvent): THREE.Vector3 => {
+            pointerRay(e)
+            throwRay.params.Points = { threshold: 0.02 }
+            const targets: THREE.Object3D[] = []
+            if (!cloudHiddenRef.current) {
+                if (pointCloudRef.current) targets.push(pointCloudRef.current)
+                scene.getObjectByName('potree-octree')?.children.forEach(c => {
+                    if ((c.name || '').startsWith('potree-node-') && c.visible) targets.push(c)
+                })
+            }
+            for (const g of [sceneObjectsGroupRef.current, shapesGroupRef.current, tsdfGroupRef.current, reconSceneGroupRef.current])
+                if (g) targets.push(g)
+            const hit = throwRay.intersectObjects(targets, true).find(h => hitIsVisibleRef.current(h))
+            const r = placeRef.current ? placeRef.current.diameter / 2 : 0.1
+            return hit ? hit.point.clone().add(new THREE.Vector3(0, r + 0.3, 0))
+                : throwRay.ray.origin.clone().add(throwRay.ray.direction.clone().multiplyScalar(3))
+        }
+        let lastPlaceMove = 0
         const onThrowDown = (e: PointerEvent) => {
-            if (e.button !== 0 || !physics.count) return
+            if (e.button !== 0) return
+            const pl = placeRef.current
+            if (pl && !physics.count) {
+                e.stopPropagation(); e.preventDefault()
+                void physics.drop(placeAt(e), pl.diameter, pl.restitution)
+                return
+            }
+            if (!physics.count && !pl) return
             pointerRay(e)
             const ball = physics.pick(throwRay)
-            if (!ball) return
+            if (!ball) {
+                if (pl) { e.stopPropagation(); e.preventDefault(); void physics.drop(placeAt(e), pl.diameter, pl.restitution) }
+                return
+            }
             e.stopPropagation(); e.preventDefault()
             camera.getWorldDirection(throwHit)
             throwPlane.setFromNormalAndCoplanarPoint(throwHit, ball.position)
@@ -3663,6 +3721,16 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             renderer.domElement.style.cursor = ''
         }
         const onThrowMove = (e: PointerEvent) => {
+            const pl = placeRef.current
+            if (pl && !physics.holding) {
+                const now = performance.now()
+                if (now - lastPlaceMove > 60) {            // the points raycast is not free: ~16 Hz
+                    lastPlaceMove = now
+                    pl.ghost.position.copy(placeAt(e))
+                    pl.ghost.visible = true
+                }
+                return
+            }
             if (!physics.holding) return
             e.stopPropagation()
             pointerRay(e)
@@ -3703,6 +3771,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             window.removeEventListener('pointercancel', onThrowUp, true)
             window.removeEventListener('blur', endThrow)
             physics.dispose(); physicsRef.current = null
+            placeRef.current = null
             resizeObserver.disconnect()
             renderer.domElement.removeEventListener('click', onCanvasClick)
             renderer.domElement.removeEventListener('contextmenu', onContextMenu)

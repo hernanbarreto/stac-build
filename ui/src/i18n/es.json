@@ -1089,11 +1089,14 @@
   },
   "physics": {
     "title": "Gravedad: soltar esfera",
-    "hint": "Rebota en la nube de puntos y en las mallas: el piso es el de la nube, con sus desniveles; donde no hay superficie cae y desaparece. Cae desde 1,5 m sobre el centro de la vista; agarrala para lanzarla.",
+    "hint": "Colocar con el mouse: la esfera sigue al puntero sobre la superficie y con un clic se suelta ahí (Esc o el botón otra vez para terminar). Rebota en la nube de puntos y en las mallas; donde no hay superficie cae y desaparece. Agarrá una esfera para lanzarla.",
     "diameter": "Diámetro",
     "bounce": "Rebote",
-    "drop": "Soltar",
+    "drop": "Soltar al centro",
     "clear": "Borrar",
-    "count": "Esferas en escena: {n}"
+    "count": "Esferas en escena: {n}",
+    "place": "Colocar con el mouse",
+    "placing": "Colocando — clic para soltar",
+    "dropHint": "Suelta una esfera 1,5 m sobre el centro de la vista"
   }
 }

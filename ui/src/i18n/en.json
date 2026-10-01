@@ -1089,11 +1089,14 @@
   },
   "physics": {
     "title": "Gravity: drop a sphere",
-    "hint": "Bounces on the point cloud and on meshes — the floor is the cloud's own, steps included; where there is no surface it falls and disappears. It drops from 1.5 m above the centre of the view; grab it to throw it.",
+    "hint": "Place with the mouse: the sphere follows the pointer over the surface and a click drops it there (Esc or the button again to stop). It bounces on the point cloud and on meshes; with no surface under it, it falls and disappears. Grab a sphere to throw it.",
     "diameter": "Diameter",
     "bounce": "Bounce",
-    "drop": "Drop",
+    "drop": "Drop at centre",
     "clear": "Clear",
-    "count": "Spheres in the scene: {n}"
+    "count": "Spheres in the scene: {n}",
+    "place": "Place with the mouse",
+    "placing": "Placing — click to drop",
+    "dropHint": "Drops a sphere 1.5 m above the centre of the view"
   }
 }
