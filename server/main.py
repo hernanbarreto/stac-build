@@ -7753,7 +7753,8 @@ async def viewer_websocket(websocket: WebSocket):
                         session_path = Path(_job_dir) if _job_dir else _ctx(sid).session_dir
                         from precision.product import product_report as _product_report
                         if _product_report(session_path / "output") is not None:
-                            # the reconstruction stage ended with F7's fused cloud and
+                            # the reconstruction stage ended with the precision core's
+                            # published cloud (f6_bend, or the F7 chain when selected) and
                             # its own octree (USER 2026-09-28: the core runs inside the
                             # stage) — there are no raw chunks to preview, the cloud
                             # stage delivers the final cloud right after
@@ -7908,9 +7909,10 @@ async def viewer_websocket(websocket: WebSocket):
                                 _new_epoch = _acta.get("epoch_final")
                     except Exception as _e:  # noqa: BLE001
                         print(f"[Pipeline] certify acta lookup failed (non-fatal): {_e}")
-                    # the PRECISION stage (F0-F7) ends with F7's transactional swap: the
-                    # fused epoch is live when fuse_report.json names the epoch the session
-                    # is in (the same probe pipeline_manager uses to call the stage done)
+                    # the precision core (F0 → F6 bend) ends with its transactional publish:
+                    # the product is live when its report (corrected_cloud.json) names the
+                    # live epoch or an ancestor the certification warped (precision.product,
+                    # the same probe pipeline_manager uses to call the stage done)
                     try:
                         from precision.product import product_is_live as _product_is_live
                         _p_live, _p_why = _product_is_live(_ctx(sid).output_dir)

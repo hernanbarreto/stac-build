@@ -31,9 +31,9 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         raise FileNotFoundError(f"run_cloudcompy.sh not found at {script_path}")
 
     chunks = sorted(output_dir.glob("chunk_*.ply"))
-    # A FUSED cloud (F7) is the reconstruction: Omega's chunks, if any are still
-    # there, are never merged over it (USER 2026-09-29 — no working cloud, no filter
-    # before F7; the fused cloud enters by witnesses and is not cleaned here)
+    # The precision core's PUBLISHED cloud (f6_bend; or F7 when selected) is the
+    # reconstruction: Omega's chunks, if any are still there, are never merged over it
+    # (USER 2026-09-29 — no working cloud; the published cloud is already cleaned)
     if chunks:
         from precision.product import product_is_live
         _live, _why = product_is_live(output_dir)
@@ -337,7 +337,7 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
 
         # ── Deferred mask→cloud projection (USER 2026-09-28: VLM + SAM3 run ONCE,
         # at the intake, on the keyframes; the points they are projected onto
-        # exist only after F7). A segmentation.json without a
+        # exist only once the precision core published its cloud). A segmentation.json without a
         # segmentation_result.json as new as the cloud → project now. No model
         # is involved; a failure FAILS the stage with the reason.
         seg_path = output_dir / "segmentation.json"
