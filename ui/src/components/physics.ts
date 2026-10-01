@@ -66,6 +66,32 @@ function smallestEigenvector(A: number[][]): THREE.Vector3 {
     return new THREE.Vector3(V[0][m], V[1][m], V[2][m]).normalize()
 }
 
+// The spheres carry the STAC Build logo (USER 2026-10-01): /logo.png drawn twice around the equator
+// of an equirectangular canvas (front and back), on white — one texture shared by every sphere.
+let _ballTexture: THREE.Texture | null = null
+function ballTexture(): THREE.Texture | null {
+    if (_ballTexture || typeof document === 'undefined') return _ballTexture
+    const W = 1024, H = 512
+    const canvas = document.createElement('canvas')
+    canvas.width = W; canvas.height = H
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, W, H)
+    const tex = new THREE.CanvasTexture(canvas)
+    tex.colorSpace = THREE.SRGBColorSpace
+    tex.anisotropy = 4
+    const img = new Image()
+    img.onload = () => {
+        const w = W * 0.42, h = w * img.height / img.width       // the logo across ~150° of longitude
+        for (const cx of [W * 0.25, W * 0.75]) ctx.drawImage(img, cx - w / 2, H / 2 - h / 2, w, h)
+        tex.needsUpdate = true
+    }
+    img.src = '/logo.png'
+    _ballTexture = tex
+    return tex
+}
+
 function visibleInScene(o: THREE.Object3D): boolean {
     for (let p: THREE.Object3D | null = o; p; p = p.parent) if (!p.visible) return false
     return true
@@ -236,7 +262,7 @@ export class PhysicsSandbox {
         w.createCollider(RAPIER.ColliderDesc.ball(r).setRestitution(Math.min(1, Math.max(0, restitution)))
             .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Min).setFriction(0.5), body)
         const mesh = new THREE.Mesh(new THREE.SphereGeometry(r, 32, 16),
-            new THREE.MeshStandardMaterial({ color: 0xe8552b, roughness: 0.45, metalness: 0.05 }))
+            new THREE.MeshStandardMaterial({ color: 0xffffff, map: ballTexture(), roughness: 0.45, metalness: 0.05 }))
         mesh.position.copy(at)
         mesh.name = 'physics-sphere'
         this.group.add(mesh)
