@@ -117,6 +117,10 @@ measured vs generated (`caption_source`, view counts in its `.meta.json`).
 - ShapeR on the A100 (sm_80): `torchsparse` in env `shaper` rebuilt from `nihalsid/torchsparse@20ccc92`
   with `TORCH_CUDA_ARCH_LIST="8.0;8.6"`, `SPHASH_INCLUDE`, `CUDA_INCLUDE`, `CUDA_LIB`.
 - One Hugging Face cache: `HF_HOME=/workspace/hf_cache`.
+- texrecon (`vendor/mvs-texturing`, the texture bake of every object mesh) was built against libtiff 5;
+  the pod now has libtiff 6 only ("libtiff.so.5: cannot open shared object file", 2026-10-01). Relinked
+  with its own `apps/texrecon/CMakeFiles/texrecon.dir/link.txt`, `libtbb.so.12.19` → `libtbb.so.12`
+  (the vendored oneTBB holds 12.15; a full `cmake ..` fails on that mismatch).
 - The pccr session on disk (2026-10-01): live epoch 8 (certified, 18.2 M pts, 110 objects), stored
   epochs 0 / 6 / 7 — hand-built, not what the code produces; a "Reconstruir" wipes it.
 - Analysis scripts of the depth-source study: `analysis/2026-09-30_depth_sources/` (epoch 7 / 8
