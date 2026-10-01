@@ -3457,6 +3457,12 @@ async def get_segmentation_instances(session_id: str):
         # compact index when they do not — pccr 2026-09-20 had eight live
         # instances above 254, every one of them saturated to 255, one block in
         # the viewer where one toggle switched all eight.
+        # Objects the projection CREATED (the co-visible split's children) have
+        # no masklet in segmentation.json — they are listed from the result,
+        # or their points can never be hidden (pccr 2026-10-01).
+        from segmentation.mask_fates import created_by_projection
+        merged.extend(created_by_projection(enriched_by_id, merged, hidden))
+
         from segmentation.republish import class_of
         code = class_of(output_dir)
         if code:

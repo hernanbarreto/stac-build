@@ -103,6 +103,30 @@ def split_list(raw_instances: Sequence[dict], enriched_by_id: Dict[int, dict],
     return listed, hidden
 
 
+def created_by_projection(enriched_by_id: Dict[int, dict], listed: Sequence[dict],
+                          hidden: Sequence[dict]) -> List[dict]:
+    """The objects the PROJECTION created and no masklet names: the co-visible
+    split's children (`split_from`). They own class bytes in the octree like any
+    other object but have no row in segmentation.json, so a list built from the
+    masklets alone never showed them — pccr 2026-10-01: 15 objects, 752 k points
+    nobody could hide ("tengo todo deseleccionado y aún así hay puntos").
+    Returned in id order, only those that still own points."""
+    seen = set()
+    for inst in list(listed) + list(hidden):
+        iid = instance_id_of(inst)
+        if iid is not None:
+            seen.add(int(iid))
+    out: List[dict] = []
+    for iid in sorted(int(k) for k in enriched_by_id):
+        inst = enriched_by_id[iid]
+        if iid in seen or int(inst.get("total_points") or 0) <= 0:
+            continue
+        rec = dict(inst)
+        rec.setdefault("instance_id", iid)
+        out.append(rec)
+    return out
+
+
 def by_reason(hidden: Sequence[dict]) -> Dict[str, int]:
     counts: Dict[str, int] = {}
     for h in hidden:

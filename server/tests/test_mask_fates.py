@@ -157,10 +157,14 @@ def test_a_malformed_record_entry_is_skipped_not_fatal():
 # ── the producer: every mask gets a fate, survivors get none ─────────────
 
 def _mask_fates_fn():
+    # only the function itself: the text between two defs used to be exec'd and
+    # broke on any helper placed between them (an `np.ndarray` annotation)
+    import ast
     src = (Path(__file__).resolve().parents[1] / "segmentation" / "pipeline.py").read_text()
-    body = src[src.index("def _mask_fates("):src.index("def _match_masks_to_cloud(")]
+    fn = next(n for n in ast.parse(src).body
+              if isinstance(n, ast.FunctionDef) and n.name == "_mask_fates")
     ns = {}
-    exec(compile(body, "pipeline.py", "exec"), ns)
+    exec(compile(ast.get_source_segment(src, fn), "pipeline.py", "exec"), ns)
     return ns["_mask_fates"]
 
 
@@ -223,3 +227,18 @@ def test_merging_nothing_is_empty_and_a_bad_key_is_skipped():
     merge = _merge_absorbed_fn()
     assert merge(None, None, [{"instance_id": 1}]) == {}
     assert merge({"dos": {"into": 1}}, None, []) == {}
+
+
+def test_objects_the_projection_created_are_listed_once_and_only_with_points():
+    """The co-visible split's children exist only in segmentation_result.json (pccr 2026-10-01:
+    15 objects / 752 k points nobody could hide)."""
+    from segmentation.mask_fates import created_by_projection
+    enriched = {20: {"id": 19, "instance_id": 20, "label": "wall", "total_points": 100},
+                425: {"id": 424, "instance_id": 425, "label": "wall", "total_points": 50, "split_from": 20},
+                426: {"id": 425, "instance_id": 426, "label": "wall", "total_points": 0, "split_from": 20},
+                7: {"id": 6, "instance_id": 7, "label": "door", "total_points": 9}}
+    listed = [{"id": 19, "instance_id": 20, "label": "wall"}]
+    hidden = [{"id": 6, "instance_id": 7, "label": "door", "reason": "space_dedupe"}]
+    out = created_by_projection(enriched, listed, hidden)
+    assert [o["instance_id"] for o in out] == [425], out      # not the listed, not the hidden, not the empty one
+    assert out[0]["split_from"] == 20 and out[0] is not enriched[425]
