@@ -1,7 +1,7 @@
 /**
- * PhysicsPanel — the gravity sandbox (USER 2026-10-01): drop spheres that bounce on the floor (y = 0)
+ * PhysicsPanel — the gravity sandbox (USER 2026-10-01): drop spheres that bounce on the point cloud (the floor is the cloud's own, steps included)
  * and on every visible mesh (library objects such as the reference human, ShapeR objects, Mesh
- * results); the point cloud is not solid. The sphere is dropped 1.5 m above the point the view orbits.
+ * results); with no surface under it a sphere falls and is gone. Dropped 1.5 m above the view centre.
  */
 import { Circle, Trash2, X } from 'lucide-react'
 import { Button } from '../components/ui/Button'

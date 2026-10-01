@@ -1089,7 +1089,7 @@
   },
   "physics": {
     "title": "Gravity: drop a sphere",
-    "hint": "Bounces on the floor (y = 0) and on meshes; the point cloud is not solid. It falls from 1.5 m above the centre of the view.",
+    "hint": "Bounces on the point cloud and on meshes — the floor is the cloud's own, steps included; where there is no surface it falls and disappears. It drops from 1.5 m above the centre of the view; grab it to throw it.",
     "diameter": "Diameter",
     "bounce": "Bounce",
     "drop": "Drop",

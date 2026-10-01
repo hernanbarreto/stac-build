@@ -1,10 +1,12 @@
 /**
  * PhysicsSandbox — gravity + bouncing spheres in the viewer (USER 2026-10-01: "agregar gravedad a la
- * escena, una esfera que pueda soltarse y si cae sobre algún objeto sólido debe rebotar, y si solo hay
- * nube de puntos no"; "y = 0 en principio es la base para la pelota").
+ * escena, una esfera que pueda soltarse y si cae sobre algún objeto sólido debe rebotar"; then "los puntos
+ * también son superficie" and "tengo el piso con desnivel … si no hay piso debe caer y desaparecer, si hay
+ * piso debe ir copiando el nivel del piso, siempre el nivel mínimo de la nube").
  *
  * Rapier (WASM, @dimforge/rapier3d-compat). What is SOLID:
- *  - the floor plane y = 0 (the display frame is levelled to it);
+ *  - NO floor plane: the floor is the cloud's own (it has steps and slopes); where there is no surface the
+ *    sphere falls, and below the cloud's lowest point it is gone;
  *  - every visible MESH under the roots it is given (placed library objects — the reference human —,
  *    ShapeR objects, Mesh results), as triangle-mesh colliders in world space.
  *  - the POINT CLOUD too (USER 2026-10-01: "los puntos también son superficie"): around each sphere the
@@ -23,8 +25,7 @@ const STEP = 1 / 60                   // fixed physics step (s)
 const MAX_STEPS = 5                   // per frame — a stalled tab does not explode into a spiral
 const RESYNC_S = 0.5                  // how often the scene's meshes are compared with the colliders
 const RESYNC_CELLS_S = 0.05           // how often the point cells around the spheres are refreshed
-const FLOOR_HALF = 500                // the floor plane's half extent (m) — a slab whose top is y = 0
-const LOST_Y = -50                    // a sphere below this fell out of the world and is removed
+const LOST_BELOW = 1.0                // m under the cloud's lowest point: the sphere fell out and is removed
 const VOXEL = 0.03                    // m — the point cloud as solid cells of this size
 const NEAR = 0.25                     // m — cells this far beyond a sphere's surface are made solid
 const PLATE_HALF = VOXEL * 0.75       // a cell's plate overlaps its neighbours' — no gap to fall through
@@ -182,10 +183,7 @@ export class PhysicsSandbox {
     private init(): Promise<void> {
         if (!this.ready) {
             this.ready = RAPIER.init().then(() => {
-                const w = new RAPIER.World({ x: 0, y: GRAVITY, z: 0 })
-                const floor = w.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(0, -0.5, 0))
-                w.createCollider(RAPIER.ColliderDesc.cuboid(FLOOR_HALF, 0.5, FLOOR_HALF).setRestitution(1.0), floor)
-                this.world = w
+                this.world = new RAPIER.World({ x: 0, y: GRAVITY, z: 0 })
             })
         }
         return this.ready
@@ -259,7 +257,7 @@ export class PhysicsSandbox {
         for (let i = this.balls.length - 1; i >= 0; i--) {
             const b = this.balls[i]
             const p = b.body.translation(), q = b.body.rotation()
-            if (p.y < LOST_Y) { this.removeBall(i); continue }
+            if (p.y < this.lostY()) { this.removeBall(i); continue }
             b.mesh.position.set(p.x, p.y, p.z)
             b.mesh.quaternion.set(q.x, q.y, q.z, q.w)
         }
@@ -290,10 +288,9 @@ export class PhysicsSandbox {
     /** Move the held sphere to `p` (world). */
     moveHeld(p: THREE.Vector3) {
         if (!this.held) return
-        const y = Math.max(p.y, (this.held.ball.mesh.geometry as THREE.SphereGeometry).parameters.radius)
-        this.held.ball.body.setNextKinematicTranslation({ x: p.x, y, z: p.z })
+        this.held.ball.body.setNextKinematicTranslation({ x: p.x, y: p.y, z: p.z })
         const t = performance.now() / 1000
-        this.held.trail.push({ t, p: new THREE.Vector3(p.x, y, p.z) })
+        this.held.trail.push({ t, p: p.clone() })
         while (this.held.trail.length > 2 && t - this.held.trail[0].t > THROW_WINDOW_S) this.held.trail.shift()
     }
 
@@ -311,6 +308,15 @@ export class PhysicsSandbox {
     }
 
     get holding() { return this.held !== null }
+
+    /** Below this a sphere has fallen out of the scene: LOST_BELOW under the lowest visible point (or
+     *  mesh) of the scene; with nothing in the scene, under the place it was dropped from. */
+    private lostY(): number {
+        const box = new THREE.Box3()
+        for (const root of [...this.pointRoots(), ...this.roots()]) if (root && visibleInScene(root)) box.expandByObject(root)
+        const lowest = box.isEmpty() ? Math.min(...this.balls.map(b => b.mesh.position.y), 0) - 50 : box.min.y
+        return lowest - LOST_BELOW
+    }
 
     get count() { return this.balls.length }
 

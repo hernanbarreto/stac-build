@@ -112,7 +112,7 @@ export interface SegmentInstance {
 
 export interface ViewportHandle {
     /** gravity sandbox (USER 2026-10-01): drop a sphere 1.5 m above the point the view orbits;
-     *  it bounces on the floor y = 0 and on every visible mesh, never on the point cloud */
+     *  it bounces on the point cloud and every visible mesh; with no surface under it it falls and is gone */
     physicsDrop: (diameterM: number, restitution: number) => void
     physicsClear: () => void
     sendCommand: (cmd: Record<string, unknown>) => void
