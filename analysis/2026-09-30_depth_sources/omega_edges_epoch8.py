@@ -3,9 +3,13 @@ deben tener mucha definición, corte en los filos, las aristas"*, and *"la que c
 las reglas que pusimos en su momento, estamos en otra etapa"*). Epoch 7's recipe (omega_bent_epoch7.py) with
 the four fixes of the edge audit (#9, #6, #1, #14); no DA3. Per keyframe:
   1. landmarks: F5's FIT tracks triangulated with F5 (R1) poses + camera; HELD-OUT tracks only judge.
-  2. bend: Omega's depth × k(u,v) = c0 + c1 u + c2 v, fitted robustly (precision.depth_on_f5) on the
-     landmarks of keyframes i-w..i+w. A keyframe with fewer than refine.min_witness_corr rows there BORROWS
-     the nearest fitted keyframe's k (epoch 7 gave it identity [1,0,0] next to bent neighbours).
+  2. bend: Omega's depth × k(u,v) = c0 + c1 u + c2 v, fitted on the landmarks of keyframes i-w..i+w with
+     EPOCH 7'S estimator (Huber IRLS, 10 steps — irls7). The product's converged IRLS
+     (precision.depth_on_f5.irls_huber, tol 1e-12) reads a WORSE held-out on the same pccr rows: 3.84 % vs
+     2.80 % median |dz|/z (scratch probe 2026-10-01), so the estimator the user validated on epoch 7 stays.
+     A keyframe with fewer than refine.min_witness_corr rows in its window BORROWS the nearest fitted
+     keyframe's k (epoch 7 gave it identity [1,0,0] next to bent neighbours; on pccr no keyframe was under
+     its 20 rows, so that fallback did NOT cause the 0.359 jump — the per-keyframe fit did).
      THE WINDOW (#9): epoch 7 took the lowest median held-out error (±0), which cannot see the few keyframes
      where c0 jumps (0.359 between two consecutive keyframes). Now every candidate window is scored on
      CONSECUTIVE-keyframe agreement: per consecutive pair, the median ratio of the two keyframes' bent depths
@@ -19,10 +23,13 @@ the four fixes of the edge audit (#9, #6, #1, #14); no DA3. Per keyframe:
      sky out. tau = the bend.tau_quantile percentile of the session's own neighbour disagreement, measured on
      INTERIOR pixels only (floor-passing with their whole 3x3 window floor-passing: the confidence collapses
      at contours, so the mixed pixels never set their own tolerance).
-  4. edges (#1, USER decision): MIXED pixels (more than tau from both extremes of their 3x3 window) are snapped
-     to the side their SAM3 mask says (output/seg_masks.npz, keyframe positions, 832x464): that side's nearest
-     valid depth. The EDGE band = pixels fewer rings (3x3 dilations) from a depth step than the ring where the
-     floor's pass rate reaches the pass rate of everything beyond it (measured over the session).
+  4. edges (#1, USER decision): EDGE pixels = the pixels whose 3x3 window spans a depth step on the bent depth
+     (corrected_cloud.depth_steps: extremes far enough apart to hold a mixed pixel — the ramp plus one pixel of
+     each side). A band measured from the floor's pass rate per ring away from a step does not exist (pccr:
+     9.7 % at the step, 50.8 % at 5 rings, 80 % at 25, 100 % only at 193 rings: it would make 97 % of the pixels
+     "edge"), so the user's own 3x3 window decides. MIXED pixels (more than tau from both extremes of their
+     3x3 window) are then snapped to the side their SAM3 mask says (output/seg_masks.npz, keyframe positions,
+     832x464): that side's nearest valid depth.
   5. the vote, TWO-SIDED (#6) over bend.neighbors, judged ONLY by neighbour pixels that passed the floor: a
      contradiction is the pixel's point in front of a neighbour's surface by > tau OR the neighbour's surface
      (splatted into this view) in front of the pixel's depth by > tau. Floor-passing: contra <= agree stays
@@ -33,14 +40,13 @@ the four fixes of the edge audit (#9, #6, #1, #14); no DA3. Per keyframe:
   6. cloud (Omega chunks as units) with the vote's AGREE COUNT in the 'confidence' column (#14), voxel + SOR,
      octree, publish epoch 8, masks, certify -> renumbered 8.
 
---dry-run N: steps 1-4 on the whole session (the window, tau and the band are session measurements), the vote
+--dry-run N: steps 1-4 on the whole session (the window and tau are session measurements), the vote
 on N keyframes spread over the walk, epoch 7's recipe on the same keyframes as BEFORE; prints, writes NOTHING."""
 import argparse
 import json
 import shutil
 import sys
 import time
-import warnings
 from pathlib import Path
 
 import numpy as np
@@ -60,6 +66,32 @@ def log(m):
 
 def live():
     return int(json.loads((O / "geometry_epoch.json").read_text())["epoch"])
+
+
+def irls7(A, r):
+    """Epoch 7's robust fit (omega_bent_epoch7.py:90-96): Huber weights at 1.345 x 1.4826 MAD, 10 steps."""
+    w = np.ones(len(r))
+    for _ in range(10):
+        c = np.linalg.lstsq(A * w[:, None], r * w, rcond=None)[0]
+        e = r - A @ c; sc = 1.4826 * np.median(np.abs(e)) + 1e-12
+        w = np.sqrt(np.minimum(1.0, 1.345 * sc / np.maximum(np.abs(e), 1e-12)))
+    return c
+
+
+def bend_coefficients7(rows, N, w, min_rows):
+    """{i: (c0, c1, c2)}: keyframe i fitted (irls7) on the rows of i-w..i+w; a keyframe with fewer than
+    `min_rows` there BORROWS its nearest fitted keyframe's k (the lower one on a tie) — never identity next
+    to bent neighbours; identity only when no keyframe at all is fitted."""
+    out = {}
+    for i in range(N):
+        js = [j for j in range(max(0, i - w), min(N, i + w + 1)) if len(rows[j][1])]
+        if js and sum(len(rows[j][1]) for j in js) >= min_rows:
+            out[i] = irls7(np.vstack([rows[j][0] for j in js]), np.concatenate([rows[j][1] for j in js]))
+    fitted = sorted(out)
+    for i in range(N):
+        if i not in out:
+            out[i] = out[min(fitted, key=lambda j: abs(j - i))].copy() if fitted else np.array([1.0, 0.0, 0.0])
+    return out
 
 
 def mem_gb():
@@ -115,7 +147,26 @@ def load_session():
 
 # ── 1. landmarks ────────────────────────────────────────────────────────────
 
-def landmarks(s):
+def landmarks(s, cache=None):
+    """F5's FIT (0) and HELD-OUT (1) landmark rows per keyframe; `cache` (a path OUTSIDE the session, for
+    repeated dry runs: the triangulation is ~7 min on 2 threads) is read when present, written when not."""
+    if cache is not None:
+        cache = Path(cache).resolve()
+        if S.resolve() in cache.parents:
+            raise SystemExit(f"--landmarks-cache {cache} lies inside the session — the dry run writes nothing there")
+        if cache.exists():
+            with np.load(cache) as z:
+                obs = {sp: {i: z[f"s{sp}_{i}"] for i in range(s["N"])} for sp in (0, 1)}
+            log(f"landmark rows read from {cache}")
+            return obs
+    obs = _triangulate(s)
+    if cache is not None:
+        np.savez(cache, **{f"s{sp}_{i}": obs[sp][i] for sp in (0, 1) for i in range(s["N"])})
+        log(f"landmark rows cached in {cache}")
+    return obs
+
+
+def _triangulate(s):
     from precision.camera import undistort_solver
     from precision.tracks import load_tracks_v2
     from precision import refine as RF
@@ -179,19 +230,21 @@ def pair_ratios(s, coefs, D, stride):
 
 
 def candidate_windows(configured, N):
+    """The configured windows (precision.bend.windows), then their powers of two continued to the whole walk
+    (N - 1: one bend for every keyframe, no consecutive jump by construction). The continuation is only
+    walked while no window has been accepted (choose_window), so a candidate always passes."""
     ws = sorted(set(int(w) for w in configured))
+    n_conf = len(ws)
     w = ws[-1]
-    while w < N - 1:                                   # the configured powers of two, continued to the whole walk
+    while w < N - 1:
         w = min(2 * w if w > 0 else 1, N - 1)
         ws.append(w)
-    return ws
+    return ws, n_conf
 
 
 def choose_window(s, obs):
-    from precision.depth_on_f5 import bend_coefficients, design
+    from precision.depth_on_f5 import bilinear, design
     pcfg, frames, N, W, H = s["pcfg"], s["frames"], s["N"], s["W"], s["H"]
-    gc = pcfg.gauge
-    from precision.depth_on_f5 import bilinear
     rows = {}
     for i, f in enumerate(frames):
         o = obs[0][i]
@@ -199,7 +252,7 @@ def choose_window(s, obs):
         ok = z_ > 0
         rows[i] = (design(o[ok, 0], o[ok, 1], W, H), o[ok, 2] / z_[ok])
     n_rows = np.array([len(rows[i][1]) for i in range(N)])
-    min_rows = int(pcfg.refine.min_witness_corr)          # the product's bar (precision/depth_on_f5.py)
+    min_rows = int(pcfg.refine.min_witness_corr)          # declared: the product's bar (precision/depth_on_f5.py)
     uu, vv = np.meshgrid(np.arange(W), np.arange(H))
     D = design(uu.ravel(), vv.ravel(), W, H)
     stride = int(pcfg.chunk_check.pixel_stride)           # declared sampling of the depth maps (BOUND: cost)
@@ -212,9 +265,12 @@ def choose_window(s, obs):
         f"({time.time() - t:.0f} s)")
     held0 = heldout_err(s, obs[1], None, 0)
     table = {}
-    for w in candidate_windows(pcfg.bend.windows, N):
+    cands, n_conf = candidate_windows(pcfg.bend.windows, N)
+    for n_done, w in enumerate(cands):
+        if n_done >= n_conf and any(T["accepted"] for T in table.values()):
+            break                                       # past the configured windows only until one passes
         t = time.time()
-        cw = bend_coefficients(rows, N, w, min_rows, gc.huber_k, gc.huber_tol, gc.huber_max_iter)
+        cw = bend_coefficients7(rows, N, w, min_rows)
         J = pair_ratios(s, cw, D, stride) / m0
         ok = np.isfinite(J)
         out = ok & ((J < lo) | (J > hi))
@@ -255,14 +311,6 @@ def epoch7_bend(s, obs):
     def des(u, v):
         return np.c_[np.ones(len(u)), (u - W / 2) / W, (v - H / 2) / H]
 
-    def irls(A, r):
-        w = np.ones(len(r))
-        for _ in range(10):
-            c = np.linalg.lstsq(A * w[:, None], r * w, rcond=None)[0]
-            e = r - A @ c; sc = 1.4826 * np.median(np.abs(e)) + 1e-12
-            w = np.sqrt(np.minimum(1.0, 1.345 * sc / np.maximum(np.abs(e), 1e-12)))
-        return c
-
     fitrows = {}
     for i, f in enumerate(frames):
         o = obs[0][i]; z_ = bil(zo[f], o[:, 0], o[:, 1]) if len(o) else np.zeros(0); ok = z_ > 0.05
@@ -274,7 +322,7 @@ def epoch7_bend(s, obs):
             js = range(max(0, i - wnd), min(N, i + wnd + 1))
             A = np.vstack([fitrows[j][0] for j in js]); r = np.concatenate([fitrows[j][1] for j in js])
             if len(r) >= EPOCH7_MIN_ROWS:
-                cw[i] = irls(A, r)
+                cw[i] = irls7(A, r)
             else:
                 cw[i] = np.array([1.0, 0, 0]); idn.append(i)
             h = obs[1][i]; h = h[(np.arange(len(h)) % 2) == 0]
@@ -293,7 +341,7 @@ def epoch7_bend(s, obs):
     return wb, coefs[wb], ident[wb]
 
 
-# ── 3-4. tau on the interior, mixed pixels, the edge band ───────────────────
+# ── 3-4. tau on the interior, edge pixels, mixed pixels ─────────────────────
 
 def interior(passed_f):
     """Floor-passing pixels whose whole 3x3 window passed too — Omega's confidence collapses at contours, so
@@ -321,37 +369,36 @@ def label_loader(s):
     return labels, sum(len(v) for v in by_kf.values()), len(by_kf)
 
 
-def snap_and_band(s, dep, tau, labels):
-    """Mixed pixels snapped (every keyframe: the judges carry them too), then the edge band measured."""
+def edges_and_snap(s, dep, tau, labels):
+    """The EDGE pixels of every keyframe (3x3 window spans a depth step, on the bent depth BEFORE snapping), then
+    the mixed pixels snapped to their mask's side (every keyframe: the judges carry them too)."""
     from precision import corrected_cloud as CC
     frames, valid, passed = s["frames"], s["valid"], s["passed"]
-    n_mixed = n_snap = 0
-    nv = np.zeros(0, np.int64); npass = np.zeros(0, np.int64)
+    n_mixed = n_snap = n_edge = n_edge_below = 0
+    edge = {}
     for i, f in enumerate(frames):
+        edge[f] = CC.depth_steps(dep[f], valid[f], tau)
+        n_edge += int(edge[f].sum()); n_edge_below += int((edge[f] & ~passed[f]).sum())
         d, mixed, sn = CC.snap_mixed(dep[f], valid[f], labels(i), tau)
         dep[f] = d.astype(np.float32); n_mixed += int(mixed.sum()); n_snap += int(sn.sum())
-        a, b = CC.ring_histogram(CC.ring_distance(CC.depth_steps(dep[f], valid[f], tau)), valid[f], passed[f])
-        n = max(len(nv), len(a))
-        nv = np.pad(nv, (0, n - len(nv))) + np.pad(a, (0, n - len(a)))
-        npass = np.pad(npass, (0, n - len(npass))) + np.pad(b, (0, n - len(b)))
-    band, rate = CC.edge_band(nv, npass)
-    beyond = npass[band:].sum() / max(nv[band:].sum(), 1)
-    log(f"mixed pixels: {n_mixed:,} ({n_mixed / sum(int(v.sum()) for v in valid.values()) * 100:.2f} % of the valid), "
-        f"{n_snap:,} snapped to their mask's side ({n_snap / max(n_mixed, 1) * 100:.1f} %), the rest go to the vote as they are")
-    log(f"edge band: rings < {band} from a depth step (floor pass rate per ring "
-        + ", ".join(f"{k}: {rate[k] * 100:.1f} %" for k in range(min(len(rate), band + 3)))
-        + f"; beyond ring {band}: {beyond * 100:.1f} %)")
-    return band
+    n_valid = sum(int(v.sum()) for v in valid.values())
+    n_below = n_valid - sum(int(v.sum()) for v in passed.values())
+    log(f"edge pixels (3x3 window spans a depth step): {n_edge / n_valid * 100:.2f} % of the valid, "
+        f"{n_edge_below / max(n_edge, 1) * 100:.1f} % of them below the floor ({n_edge_below / max(n_below, 1) * 100:.1f} % "
+        f"of all below-floor pixels)")
+    log(f"mixed pixels: {n_mixed:,} ({n_mixed / n_valid * 100:.2f} % of the valid), {n_snap:,} snapped to their "
+        f"mask's side ({n_snap / max(n_mixed, 1) * 100:.1f} %), the rest go to the vote as they are")
+    return edge
 
 
 # ── 5. the vote ─────────────────────────────────────────────────────────────
 
-def vote_frame(s, i, dep, band, tau):
+def vote_frame(s, i, dep, edges, tau):
     from precision import corrected_cloud as CC
     pcfg, frames, valid, passed = s["pcfg"], s["frames"], s["valid"], s["passed"]
     f = frames[i]
     H, W = s["H"], s["W"]
-    edge = valid[f] & (CC.ring_distance(CC.depth_steps(dep[f], valid[f], tau)) < band)
+    edge = edges[f]
     cand = valid[f] & (passed[f] | edge)                   # below-floor interior pixels stay out without a vote
     v = CC.two_sided_vote(i, frames, dep, passed, cand, s["K"], s["c2w"], s["w2c"], pcfg.bend.neighbors, tau)
     rr, cc, agree, contra = v["rr"], v["cc"], v["agree"], v["contra"]
@@ -391,7 +438,7 @@ def vote_epoch7(s, i, dep7, tau7, edge):
 
 # ── 6. cloud -> octree -> epoch 8 -> masks -> certify -> renumbered 8 ───────
 
-def publish(s, final, wb, tau, band):
+def publish(s, final, wb, tau):
     from PIL import Image
     from precision import corrected_cloud as CC
     from precision.epoch0_cloud import _write_ply_xyzrgb
@@ -426,11 +473,17 @@ def publish(s, final, wb, tau, band):
     DST.mkdir()
     shutil.move(str(cleaned), str(DST / "cleaned_cloud.ply")); shutil.move(str(TMP / "potree"), str(DST / "potree"))
     shutil.copy(O / "precision" / "f5_camera_poses.txt", DST / "camera_poses.txt")
+    # the camera that built the cloud travels WITH it (d4fcccd): the stored epochs list intrinsic.txt, so a
+    # manifest without it files the live one away with the previous epoch and leaves the session with none —
+    # the certify crashed on exactly that (pccr 2026-10-01, restored by hand)
+    from precision.depth_on_f5 import camera_travels
+    camera_travels(DST, s["params"], len(frames), log)
     (DST / "_manifest.json").write_text(json.dumps({"epoch": EPOCH, "epoch_from": EPOCH, "epoch_to": EPOCH, "kind": "new_cloud",
         "note": f"Omega bent to F5 (±{wb}, chosen by consecutive-keyframe agreement), mixed pixels snapped by SAM3, "
-                f"two-sided vote (tau {tau * 100:.2f} % interior), below-floor edge pixels (rings < {band}) admitted when "
+                f"two-sided vote (tau {tau * 100:.2f} % interior), below-floor edge pixels (3x3 window spans a step) admitted when "
                 f"confirmed, confidence = agree count; no DA3",
-        "artifacts": [{"rel": x, "existed_before": True} for x in ("cleaned_cloud.ply", "potree", "camera_poses.txt")]}))
+        "artifacts": [{"rel": x, "existed_before": True}
+                      for x in ("cleaned_cloud.ply", "potree", "camera_poses.txt", "intrinsic.txt")]}))
     shutil.rmtree(TMP, ignore_errors=True)
     log(f"cloud built ({(time.time() - t0) / 60:.1f} min) — epoch {EPOCH} live")
     run_select(O, EPOCH, "auto", log=log)
@@ -465,15 +518,23 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--dry-run", type=int, default=0, metavar="N",
                     help="vote on N keyframes spread over the walk, print the stats, write NOTHING")
+    ap.add_argument("--landmarks-cache", default=None, metavar="NPZ",
+                    help="dry runs only: F5's landmark rows read from / written to this file outside the session")
     args = ap.parse_args()
+    if args.landmarks_cache and not args.dry_run:
+        raise SystemExit("--landmarks-cache is for dry runs only: the real run triangulates its own landmarks")
     dry = args.dry_run > 0
+    if not dry and live() == EPOCH:
+        raise SystemExit(f"the live epoch is already {EPOCH}: run_select({EPOCH}) would change nothing, the masks and "
+                         f"the certify would run on the OLD cloud and the renumbering would delete the new one — "
+                         f"select the parent epoch first (correction.run.run_select)")
     t0 = time.time()
     from precision import corrected_cloud as CC
     s = load_session()
     pcfg, frames, N = s["pcfg"], s["frames"], s["N"]
     log(f"{N} keyframes, {s['W']}x{s['H']}, floor {s['floor_norm']} per chunk ({len(s['thr'])} chunks); "
         f"cgroup {mem_gb():.1f} GB")
-    obs = landmarks(s)
+    obs = landmarks(s, args.landmarks_cache)
     wb, coefs, D, brep = choose_window(s, obs)
     e7 = epoch7_bend(s, obs) if dry else None
     dep = {f: np.where(s["valid"][f], bent(s, f, coefs[i], D), 0).astype(np.float32) for i, f in enumerate(frames)}
@@ -485,12 +546,12 @@ def main():
     del inner
     labels, n_masks, n_kf_masks = label_loader(s)
     log(f"SAM3 masks: {n_masks:,} over {n_kf_masks} keyframes")
-    band = snap_and_band(s, dep, tau, labels)
+    edges = edges_and_snap(s, dep, tau, labels)
     sel = (sorted(set(int(round(x)) for x in np.linspace(0, N - 1, args.dry_run + 2)[1:-1])) if dry
            else list(range(N)))
     final, tot = {}, {}
     for i in sel:
-        zmap, amap, st, edge = vote_frame(s, i, dep, band, tau)
+        zmap, amap, st, edge = vote_frame(s, i, dep, edges, tau)
         final[frames[i]] = (zmap, amap)
         for k, v in st.items():
             tot[k] = tot.get(k, 0) + v
@@ -526,14 +587,15 @@ def main():
               f"{b_tot['edge_out']:>9} | {tot['kept'] / nv * 100:9.1f}% {tot['contradicted'] / nv * 100:6.1f}% "
               f"{tot['repaired'] / nv * 100:8.1f}% {tot['admitted'] / nv * 100:8.1f}% {tot['edge_out']:>10} "
               f"{tot['out'] / nv * 100:5.1f}% | {tot['by_second_side'] / nv * 100:7.1f}% {tot['unjudged'] / nv * 100:7.1f}%")
-        print(f"(edge band: {tot['edge']:,} px = {tot['edge'] / nv * 100:.1f} % of the valid; BEFORE kept {b_tot['edge_out']:,} "
+        print(f"(edge pixels: {tot['edge']:,} px = {tot['edge'] / nv * 100:.1f} % of the valid; BEFORE kept {b_tot['edge_out']:,} "
               f"of them, AFTER {tot['edge_out']:,}; before = epoch 7 ±{wb7}, after = ±{wb}, spread "
               f"[{brep['spread'][0]:.4f}, {brep['spread'][1]:.4f}])")
         log(f"DRY RUN done in {(time.time() - t0) / 60:.1f} min — nothing written")
         return
     log("DA3 holes: off (epoch 8 = Omega bent to F5 + the edge-keeping vote, nothing else)")
     del dep
-    publish(s, final, wb, tau, band)
+    del edges
+    publish(s, final, wb, tau)
 
 
 if __name__ == "__main__":

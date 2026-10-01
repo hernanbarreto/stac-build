@@ -194,17 +194,45 @@ def masklet_visits(output_dir, log: Callable[[str], None] = print
 
 
 def trace_grid(output_dir) -> Tuple[int, int]:
-    """(H, W) of the grid the cloud's ``pixel_row`` / ``pixel_col`` live on.
+    """(H, W) of the grid the cloud's ``pixel_row`` / ``pixel_col`` live on —
+    DECLARED by the session, never guessed from the data:
 
-    Read from the session's own intrinsics (``intrinsic.txt``: fx fy cx cy per
-    keyframe, centred on the trace grid), never assumed: pccr's masks are
-    832x464 and its trace grid 688x384, and sampling one with the other's
-    coordinates silently reads the wrong pixel.
+    1. a corrected cloud (``corrected_cloud.json``: the depth on F5 / F7) lives on
+       the camera's grid — its own ``grid`` [W, H] when the report carries it,
+       else ``camera.json`` width × height;
+    2. an Omega cloud under the precision core: ``camera.json`` ``omega_grid``
+       (w × h), the grid of Omega's records;
+    3. a legacy session without ``camera.json``: ``intrinsic.txt`` (fx fy cx cy
+       per keyframe) CENTRED on the trace grid, 2·cy × 2·cx — pccr's masks are
+       832x464 and its maplong trace grid 688x384, and sampling one with the
+       other's coordinates silently reads the wrong pixel.
+
+    pccr 2026-10-01: rule 3 was the only rule, and applied to F5's REFINED camera
+    (cx 234.8, cy 414.1 on a 464x832 grid) it read 470x828 — the certification
+    refused the epoch for an aspect ratio the cloud never had.
     """
-    p = Path(output_dir) / "intrinsic.txt"
+    out = Path(output_dir)
+    rep = out / "corrected_cloud.json"
+    cam = out / "camera.json"
+    if rep.exists():
+        g = (json.loads(rep.read_text()) or {}).get("grid")
+        if g and len(g) == 2 and int(g[0]) > 0 and int(g[1]) > 0:
+            return int(g[1]), int(g[0])
+        if cam.exists():
+            c = json.loads(cam.read_text())
+            if int(c.get("width") or 0) > 0 and int(c.get("height") or 0) > 0:
+                return int(c["height"]), int(c["width"])
+    if cam.exists():
+        c = json.loads(cam.read_text())
+        og = c.get("omega_grid") or {}
+        if int(og.get("w") or 0) > 0 and int(og.get("h") or 0) > 0:
+            return int(og["h"]), int(og["w"])
+        if int(c.get("width") or 0) > 0 and int(c.get("height") or 0) > 0:
+            return int(c["height"]), int(c["width"])
+    p = out / "intrinsic.txt"
     if not p.exists():
-        raise RuntimeError(f"{p} does not exist — the grid the cloud's pixels "
-                           f"live on is unknown and cannot be guessed")
+        raise RuntimeError(f"neither camera.json nor {p} exists — the grid the cloud's "
+                           f"pixels live on is unknown and cannot be guessed")
     K = np.loadtxt(p).reshape(-1, 4)
     cx, cy = float(np.median(K[:, 2])), float(np.median(K[:, 3]))
     return int(round(cy * 2)), int(round(cx * 2))

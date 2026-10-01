@@ -1,8 +1,8 @@
 """The edge-keeping vote of the epoch-8 recipe (USER 2026-10-01: *"lo más importante es que los objetos
 deben tener mucha definición, corte en los filos, las aristas"*): mixed pixels at depth steps snapped to
-the side their SAM3 mask says, the edge band measured from where the confidence floor erodes, the
-two-sided vote, the repair from the neighbours' splats, and the consecutive-keyframe agreement that
-chooses the bend window. Synthetic scenes, no GPU."""
+the side their SAM3 mask says, the depth-step (edge) pixels, the two-sided vote, the repair from the
+neighbours' splats, and the consecutive-keyframe agreement that chooses the bend window. Synthetic scenes,
+no GPU."""
 import sys
 from pathlib import Path
 
@@ -11,8 +11,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from precision.corrected_cloud import (agreeing_median, consecutive_ratio, depth_steps,  # noqa: E402
-                                       edge_band, edge_vote_decision, mixed_pixels, ring_distance,
-                                       ring_histogram, snap_mixed, two_sided_vote, window_extremes)
+                                       edge_vote_decision, mixed_pixels, snap_mixed, two_sided_vote,
+                                       window_extremes)
 
 H, W = 60, 80
 K = np.array([[70.0, 0, W / 2], [0, 70.0, H / 2], [0, 0, 1]])
@@ -73,29 +73,6 @@ def test_a_mask_that_does_not_follow_the_step_or_overlaps_decides_nothing():
     lab[:, 40] = -1                                      # two masks overlap on the ramp
     out, _, snapped = snap_mixed(z, valid, lab, TAU)
     assert not snapped.any()
-
-
-# ── the edge band, measured ─────────────────────────────────────────────────
-
-def test_ring_distance_counts_3x3_dilations():
-    seed = np.zeros((H, W), bool)
-    seed[:, 40] = True
-    r = ring_distance(seed)
-    assert r[5, 40] == 0 and r[5, 43] == 3 and r[5, 37] == 3
-    assert np.isinf(ring_distance(np.zeros((H, W), bool))).all()
-
-
-def test_edge_band_is_where_the_floor_stops_eroding():
-    seed = np.zeros((H, W), bool)
-    seed[:, 40] = True
-    rings = ring_distance(seed)
-    valid = np.ones((H, W), bool)
-    passed = rings >= 3                                  # the floor removes rings 0, 1, 2
-    nv, npass = ring_histogram(rings, valid, passed)
-    band, rate = edge_band(nv, npass)
-    assert band == 3 and rate[0] == 0.0 and rate[3] == 1.0
-    nv, npass = ring_histogram(rings, valid, np.ones((H, W), bool))
-    assert edge_band(nv, npass)[0] == 0                  # nothing eroded at the step: no edge band
 
 
 # ── consecutive agreement (bend window) ─────────────────────────────────────

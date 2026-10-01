@@ -977,7 +977,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--compare", nargs=2, metavar=("PLY", "SEG"),
                     help="the other epoch's cloud and segmentation (A-vs-B verdict)")
     ap.add_argument("--out", required=True, help="output JSON")
-    ap.add_argument("--instance-ids", type=int, nargs="*", default=None,
+    ap.add_argument("--instance-ids", type=int, nargs="+", default=None,
                     help="measure only these reference instances")
     a = ap.parse_args(argv)
     run(Path(a.session_output), Path(a.ply), Path(a.seg),
