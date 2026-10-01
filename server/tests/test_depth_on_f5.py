@@ -8,7 +8,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from precision.depth_on_f5 import bend_coefficients, camera_travels, design, vote  # noqa: E402
+from precision.depth_on_f5 import bend_coefficients, camera_travels, design, edge_keeping_vote  # noqa: E402
 
 H, W = 60, 80
 K = np.array([[70.0, 0, W / 2], [0, 70.0, H / 2], [0, 0, 1]])
@@ -34,15 +34,21 @@ def test_bend_recovers_a_scale_error_and_keeps_omega_without_landmarks():
     assert np.allclose(c[3], [1.0, 0.0, 0.0])
 
 
-def test_vote_removes_a_flyer_and_keeps_the_surface():
+def test_the_edge_keeping_vote_removes_a_flyer_and_keeps_the_surface():
+    """pccr epoch 8's vote (the pipeline's since 2026-10-01): a flyer the neighbours see through leaves,
+    the wall stays at its own depth."""
     cams = _cams(); order = [0, 1, 2]
     dep = {f: np.full((H, W), 3.0, np.float32) for f in order}
-    ent = {f: np.ones((H, W), bool) for f in order}
     dep[1][10:20, 30:40] = 1.5                       # a flyer in front of the wall the others see
-    out = vote(dep, ent, K, cams, order, (-1, 1), 0.02)
-    z1, a1 = out[1][0], out[1][1]
-    assert (z1[10:20, 30:40] == 0).all(), "a point the neighbours see through leaves"
+    ok = {f: np.ones((H, W), bool) for f in order}
+    final, tau, tot = edge_keeping_vote(order, dep, ok, {f: ok[f].copy() for f in order}, K, cams, None,
+                                        (-1, 1), 75.0, 2, log=lambda *a: None)
+    z1, a1 = final[1]
+    # the flyer is gone: its pixels see the wall behind it, so they are REPAIRED to the depth the two
+    # neighbours agree on (epoch 8: a contradicted pixel still sees a surface) — never left at 1.5 m
+    assert np.allclose(z1[12:18, 32:38], 3.0, atol=1e-3), "the flyer's pixels take the wall the neighbours see"
     assert np.allclose(z1[40:50, 30:40], 3.0, atol=1e-3) and (a1[40:50, 30:40] >= 1).all()
+    assert tot["contradicted"] > 0 and tot["repaired"] > 0 and 0 <= tau
 
 
 def test_the_camera_travels_with_the_cloud(tmp_path):

@@ -95,48 +95,96 @@ def bend_coefficients(rows: Dict[int, tuple], n: int, window: int, min_rows: int
     return out
 
 
-def vote(dep: Dict[int, np.ndarray], ent: Dict[int, np.ndarray], K: np.ndarray, c2w: Dict[int, np.ndarray],
-         order: List[int], neighbors, tau: float):
-    """{frame: (depth map, agree count map)} after the vote: a pixel leaves when more neighbours see free
-    space through it (its point lies in FRONT of their surface by more than τ) than agree within τ;
-    a kept pixel takes the median of its own depth and the agreeing views' depths along its ray."""
-    w2c = {f: np.linalg.inv(c2w[f]) for f in order}
-    out = {}
-    for i, f in enumerate(order):
-        H, W = dep[f].shape
-        rr, cc = np.nonzero(ent[f])
-        z = dep[f][rr, cc].astype(np.float64)
-        ray = np.stack([(cc - K[0, 2]) / K[0, 0], (rr - K[1, 2]) / K[1, 1], np.ones(len(rr))], 1) @ c2w[f][:3, :3].T
-        C = c2w[f][:3, 3]
-        agree = np.zeros(len(z), np.int32); contra = np.zeros(len(z), np.int32); cand = [z]
-        for d in neighbors:
-            j = i + int(d)
-            if not 0 <= j < len(order):
-                continue
-            g = order[j]
-            a = w2c[g][2, :3] @ C + w2c[g][2, 3]; b = ray @ w2c[g][2, :3]
-            X = C + z[:, None] * ray
-            Xg = X @ w2c[g][:3, :3].T + w2c[g][:3, 3]; zg = Xg[:, 2]
-            ok = zg > 0
-            zs = np.where(ok, zg, 1.0)
-            u = np.rint(K[0, 0] * Xg[:, 0] / zs + K[0, 2]).astype(np.int64)
-            v = np.rint(K[1, 1] * Xg[:, 1] / zs + K[1, 2]).astype(np.int64)
-            ok &= (u >= 0) & (u < W) & (v >= 0) & (v < H)
-            dg = np.zeros(len(z))
-            dg[ok] = dep[g][v[ok], u[ok]]
-            ok &= dg > 0
-            e = np.zeros(len(z))
-            e[ok] = (zg[ok] - dg[ok]) / dg[ok]
-            ag = ok & (np.abs(e) <= tau) & (np.abs(b) > 0)
-            agree += ag
-            contra += ok & (e < -tau)
-            cand.append(np.where(ag, (dg - a) / np.where(np.abs(b) > 0, b, 1.0), np.nan))
-        keep = contra <= agree
-        zf = np.nanmedian(np.vstack(cand), 0)
-        zmap = np.zeros((H, W), np.float32); amap = np.zeros((H, W), np.int32)
-        zmap[rr[keep], cc[keep]] = zf[keep]; amap[rr[keep], cc[keep]] = agree[keep]
-        out[f] = (zmap, amap, int(len(z)), int((~keep).sum()))
-    return out
+def interior(passed: np.ndarray) -> np.ndarray:
+    """Floor-passing pixels whose whole 3x3 window passed too — Omega's confidence collapses at
+    contours, so tau is measured where it does not (pccr epoch 8)."""
+    from scipy.ndimage import binary_erosion
+    return binary_erosion(passed, structure=np.ones((3, 3), bool), border_value=0)
+
+
+def mask_labels(output_dir: Path, H: int, W: int, log: Callable = print):
+    """``position -> label map`` of the SAM3 masks (masklet id + 1, 0 = no mask, -1 = two masks
+    overlap) on Omega's grid, or None when the session holds no masks on that grid (then no mixed
+    pixel is snapped — declared)."""
+    from precision.silhouette_filter import masks_by_keyframe
+    p = Path(output_dir) / "seg_masks.npz"
+    if not p.exists():
+        log(f"{LOG_TAG} no seg_masks.npz — mixed pixels are not snapped (they go to the vote as they are)")
+        return None
+    masks = np.load(p)
+    by_kf = masks_by_keyframe(Path(output_dir), masks)
+    probe = next((key for lst in by_kf.values() for _, key in lst), None)
+    if probe is None or tuple(np.asarray(masks[probe]).shape) != (H, W):
+        log(f"{LOG_TAG} the SAM3 masks are not on Omega's grid {W}x{H} — mixed pixels are not snapped")
+        return None
+    log(f"{LOG_TAG} SAM3 masks: {sum(len(v) for v in by_kf.values()):,} over {len(by_kf)} keyframes")
+
+    def labels(i: int) -> np.ndarray:
+        L = np.zeros((H, W), np.int64); cnt = np.zeros((H, W), np.uint8)
+        for oid, key in by_kf.get(i, []):
+            m = np.asarray(masks[key]) > 0
+            L[m] = np.where(cnt[m] == 0, oid + 1, -1)
+            cnt[m] = np.minimum(cnt[m] + 1, 2)
+        return L
+    return labels
+
+
+def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict[int, np.ndarray],
+                      passed: Dict[int, np.ndarray], K: np.ndarray, c2w: Dict[int, np.ndarray], labels,
+                      neighbors, tau_quantile: float, repair_min_views: int, log: Callable = print):
+    """pccr EPOCH 8 (USER 2026-10-01: "es la mejor, incorporar al pipeline"), on the bent depth
+    `dep` (every `valid` pixel; `passed` = above the ONE confidence floor):
+     1. tau = the `tau_quantile` percentile of the neighbour disagreement on INTERIOR pixels;
+     2. EDGE pixels = the 3x3 window spans a depth step (on the depth before snapping);
+        MIXED pixels (on neither surface of the step) snapped to the side their SAM3 mask says;
+     3. the TWO-SIDED vote over `neighbors`, judged by floor-passing neighbour pixels only:
+        floor-passing pixels stay with contra ≤ agree (median of the agreeing views), a
+        contradicted one is repaired to the median of the neighbours when ≥ `repair_min_views`
+        agree, else it leaves; a below-floor EDGE pixel enters when agree ≥ 1 and contra ≤ agree.
+    Returns ({frame: (depth map, agree count map)}, tau, totals)."""
+    from precision import corrected_cloud as CC
+    H, W = next(iter(dep.values())).shape
+    inner = {f: interior(passed[f]) for f in frames}
+    tau = CC.measured_tau(dep, inner, K, c2w, frames, neighbors, tau_quantile)
+    del inner
+    edge = {}
+    n_mixed = n_snap = 0
+    for i, f in enumerate(frames):
+        edge[f] = CC.depth_steps(dep[f], valid[f], tau)
+        if labels is not None:
+            d, mixed, sn = CC.snap_mixed(dep[f], valid[f], labels(i), tau)
+            dep[f] = d.astype(np.float32); n_mixed += int(mixed.sum()); n_snap += int(sn.sum())
+    w2c = {f: np.linalg.inv(c2w[f]) for f in frames}
+    final, tot = {}, {}
+    for i, f in enumerate(frames):
+        cand = valid[f] & (passed[f] | edge[f])           # below-floor interior pixels stay out
+        v = CC.two_sided_vote(i, frames, dep, passed, cand, K, c2w, w2c, neighbors, tau)
+        rr, cc, agree, contra = v["rr"], v["cc"], v["agree"], v["contra"]
+        pas, edg = passed[f][rr, cc], edge[f][rr, cc]
+        contradicted = pas & (contra > agree)
+        rep_ok = np.zeros(len(rr), bool); zrep = np.full(len(rr), np.nan); nrep = np.zeros(len(rr), np.int32)
+        if contradicted.any():
+            ok, z_, n_ = CC.agreeing_median(v["splats"][:, contradicted], tau, int(repair_min_views))
+            rep_ok[contradicted] = ok; zrep[contradicted] = z_; nrep[contradicted] = n_
+        keep, repair, admit = CC.edge_vote_decision(pas, edg, agree, contra, rep_ok)
+        zmap = np.zeros((H, W), np.float32); amap = np.zeros((H, W), np.int16)
+        m = keep | admit
+        zmap[rr[m], cc[m]] = v["zmed"][m]; amap[rr[m], cc[m]] = agree[m]
+        zmap[rr[repair], cc[repair]] = zrep[repair]; amap[rr[repair], cc[repair]] = nrep[repair]
+        final[f] = (zmap, amap)
+        for k, n in (("valid", int(valid[f].sum())), ("edge", int(edge[f].sum())), ("kept", int(keep.sum())),
+                     ("contradicted", int(contradicted.sum())), ("repaired", int(repair.sum())),
+                     ("admitted", int(admit.sum())), ("edge_below", int((~pas & edg).sum())),
+                     ("out", int((zmap > 0).sum()))):
+            tot[k] = tot.get(k, 0) + n
+    tot.update(mixed=n_mixed, snapped=n_snap, tau=tau)
+    nv = max(tot["valid"], 1)
+    log(f"{LOG_TAG} tau {tau * 100:.2f} % (interior); edge pixels {tot['edge'] / nv * 100:.2f} % of the valid; "
+        f"mixed {n_mixed:,} ({n_mixed / nv * 100:.2f} %), {n_snap:,} snapped to their mask's side")
+    log(f"{LOG_TAG} vote: {tot['kept'] / nv * 100:.1f} % of the valid pixels kept, {tot['contradicted'] / nv * 100:.1f} % "
+        f"contradicted, {tot['repaired'] / nv * 100:.1f} % repaired, {tot['admitted'] / nv * 100:.1f} % admitted below "
+        f"the floor at edges; coverage {tot['out'] / float(len(frames) * H * W) * 100:.1f} % of all pixels")
+    return final, tau, tot
 
 
 def camera_travels(tmp: Path, params, n_kf: int, log: Callable = print) -> Path:
@@ -259,23 +307,23 @@ def run_depth_on_f5(session_dir: Path, pcfg, log: Callable = print,
            + ", ".join(f"±{w} {score[w] * 100:.2f} %" for w in bc.windows) + f" → ±{wb}; scale "
            f"{np.median(c0):.4f} [{c0.min():.4f}, {c0.max():.4f}], largest consecutive jump {np.abs(np.diff(c0)).max():.3f}")
     uu, vv = np.meshgrid(np.arange(W), np.arange(H))
-    dep, ent = {}, {}
+    Dm = design(uu.ravel(), vv.ravel(), W, H)
+    dep, valid, passed = {}, {}, {}
     for i, f in enumerate(frames):
-        k = (design(uu.ravel(), vv.ravel(), W, H) @ coefs[wb][i]).reshape(H, W)
-        valid = (np.isfinite(zo[f]) & (zo[f] > 0) & np.isfinite(conf[f]) & (conf[f] > SKY_CONF)
-                 & (conf[f] >= thr[chunk[f]]))
-        dep[f] = np.where(valid, zo[f] * k, 0).astype(np.float32)
-        ent[f] = valid
+        valid[f] = np.isfinite(zo[f]) & (zo[f] > 0) & np.isfinite(conf[f]) & (conf[f] > SKY_CONF)
+        passed[f] = valid[f] & (conf[f] >= thr[chunk[f]])
+        # the bent map in float32 first, then the mask — epoch 8's arithmetic, bit for bit
+        bent = (zo[f] * (Dm @ coefs[wb][i]).reshape(H, W)).astype(np.float32)
+        dep[f] = np.where(valid[f], bent, 0).astype(np.float32)
+    del zo, conf
 
-    # 4. the vote
-    _p(50, "multi-view vote")
-    tau = CC.measured_tau(dep, ent, K, c2w, frames, bc.neighbors, bc.tau_quantile)
-    voted = vote(dep, ent, K, c2w, frames, bc.neighbors, tau)
-    n_in = sum(v[2] for v in voted.values()); n_out = sum(v[3] for v in voted.values())
-    cover = sum(int((voted[f][0] > 0).sum()) for f in frames) / float(N * H * W)
-    _p(65, f"vote: τ {tau * 100:.2f} % (p{bc.tau_quantile:g} of the session's own disagreement); "
-           f"{n_out / max(n_in, 1) * 100:.1f} % of the valid pixels contradicted; coverage {cover * 100:.1f} %")
-    del dep, ent, zo, conf
+    # 4. the edge-keeping vote (pccr epoch 8)
+    _p(50, "edge-keeping multi-view vote")
+    voted, tau, vst = edge_keeping_vote(frames, dep, valid, passed, K, c2w, mask_labels(out, H, W, log),
+                                        bc.neighbors, bc.tau_quantile, int(pcfg.cloud.repair_min_views), log)
+    cover = vst["out"] / float(N * H * W)
+    _p(65, f"vote done: coverage {cover * 100:.1f} %")
+    del dep, valid, passed
 
     # 5. the cloud
     tmp = out / TX_TMP
@@ -311,7 +359,7 @@ def run_depth_on_f5(session_dir: Path, pcfg, log: Callable = print,
                 "n_consistent": np.clip(np.asarray(data["confidence"]), 0, 255).astype(np.uint8),
                 "source": np.ones(len(data), np.uint8)}
         report = {"version": 1, "stage": "depth_on_f5", "provenance": "tool_measured",
-                  "source_of_depth": "Omega's depth bent to F5's landmarks + multi-view vote",
+                  "source_of_depth": "Omega's depth bent to F5's landmarks + edge-keeping multi-view vote (pccr epoch 8)",
                   "camera": params, "grid": [W, H],
                   "bend": {"window": int(wb), "held_out": score,
                            "scale": {"median": float(np.median(c0)), "min": float(c0.min()),
@@ -321,7 +369,9 @@ def run_depth_on_f5(session_dir: Path, pcfg, log: Callable = print,
                   "per_frame": {str(f): {"s_k": float(coefs[wb][i][0]),
                                          "bend": [float(coefs[wb][i][1]), float(coefs[wb][i][2])]}
                                 for i, f in enumerate(frames)},
-                  "vote": {"tau": tau, "contradicted_frac": n_out / max(n_in, 1), "coverage": cover},
+                  "vote": {"tau": tau, "coverage": cover,
+                           **{k: (float(v) / max(vst["valid"], 1) if k not in ("tau", "valid") else v)
+                              for k, v in vst.items() if k != "tau"}},
                   "raw_points": n_raw}
         camera_travels(tmp, params, len(frames), log)
         _p(85, "publishing the epoch (octree, atomic swap)")
