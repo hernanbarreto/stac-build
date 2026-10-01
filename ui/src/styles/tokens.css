@@ -218,6 +218,12 @@
   --welcome-logo-w: 200px;
   --dialog-w: 440px;
   --dialog-w-lg: 640px;
+  /* FIXED heights (USER 2026-10-01: "todas las ventanas del proyecto deben ser de tamaño fijo y en
+     todo caso contar con scroll") — a window never grows or shrinks with its content */
+  --dialog-h-sm: 420px;
+  --dialog-h: 560px;
+  --dialog-h-lg: 720px;
+  --palette-h: 460px;
   --drawer-w: 560px;
   --palette-w: 560px;
   --popover-min-w: 200px;

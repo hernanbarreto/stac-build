@@ -316,6 +316,7 @@
 .stac-palette {
   width: var(--palette-w);
   max-width: calc(100vw - var(--sp-8));
+  height: var(--palette-h);            /* fixed: the results list scrolls, the window does not resize */
   max-height: calc(100vh - var(--header-h) - var(--sp-10) * 2);
   display: flex;
   flex-direction: column;

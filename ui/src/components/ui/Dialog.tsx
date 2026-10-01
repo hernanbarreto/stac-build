@@ -99,7 +99,7 @@ export function ConfirmDialog({ open, title, message, variant = 'confirm', confi
   const t = useT()
   const confirmText = confirmLabel ?? (variant === 'alert' ? t('common.ok') : variant === 'danger' ? t('common.delete') : t('common.confirm'))
   return (
-    <Dialog open={open} size="sm" tone={variant === 'danger' ? 'danger' : 'default'} icon={icon}
+    <Dialog open={open} size="sm" className="stac-dialog--fit" tone={variant === 'danger' ? 'danger' : 'default'} icon={icon}
       title={title ?? (variant === 'danger' ? t('dialog.confirmDeleteTitle') : variant === 'alert' ? t('dialog.noticeTitle') : t('dialog.confirmTitle'))}
       onClose={onCancel}
       footer={

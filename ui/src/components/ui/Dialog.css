@@ -43,12 +43,26 @@
   overflow: hidden;
 }
 
+/* Fixed size (USER 2026-10-01): the height never follows the content — a filtered list, a tab,
+   a form step: the body scrolls instead (.stac-dialog__body overflow: auto). On a short screen the
+   layer's own bound (max-height: 100%) still wins. */
+.stac-dialog--md {
+  height: var(--dialog-h);
+}
+
 .stac-dialog--sm {
   width: var(--toast-w);
+  height: var(--dialog-h-sm);
 }
 
 .stac-dialog--lg {
   width: var(--dialog-w-lg);
+  height: var(--dialog-h-lg);
+}
+
+/* a confirmation / alert: one fixed message, sized once to it (its content never changes) */
+.stac-dialog--fit {
+  height: auto;
 }
 
 .stac-dialog--full {
