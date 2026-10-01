@@ -446,6 +446,8 @@ def publish(s, final, wb, tau):
     from potree_converter import convert_ply_to_potree
     frames, K, c2w, chunk, H, W, cfg = s["frames"], s["K"], s["c2w"], s["chunk"], s["H"], s["W"], s["cfg"]
     t0 = time.time()
+    if live() == EPOCH:                    # replacing epoch 8: show 7 again, the old 8 is deleted below
+        run_select(O, EPOCH - 1, "auto", log=log)
     prev = live()
     for pth in (TMP, DST):
         shutil.rmtree(pth, ignore_errors=True)
@@ -479,7 +481,7 @@ def publish(s, final, wb, tau):
     from precision.depth_on_f5 import camera_travels
     camera_travels(DST, s["params"], len(frames), log)
     (DST / "_manifest.json").write_text(json.dumps({"epoch": EPOCH, "epoch_from": EPOCH, "epoch_to": EPOCH, "kind": "new_cloud",
-        "note": f"Omega bent to F5 (±{wb}, chosen by consecutive-keyframe agreement), mixed pixels snapped by SAM3, "
+        "note": f"Omega bent to F5 with EPOCH 7's bend (±{wb}, lowest held-out), mixed pixels snapped by SAM3, "
                 f"two-sided vote (tau {tau * 100:.2f} % interior), below-floor edge pixels (3x3 window spans a step) admitted when "
                 f"confirmed, confidence = agree count; no DA3",
         "artifacts": [{"rel": x, "existed_before": True}
@@ -535,7 +537,14 @@ def main():
     log(f"{N} keyframes, {s['W']}x{s['H']}, floor {s['floor_norm']} per chunk ({len(s['thr'])} chunks); "
         f"cgroup {mem_gb():.1f} GB")
     obs = landmarks(s, args.landmarks_cache)
-    wb, coefs, D, brep = choose_window(s, obs)
+    # USER 2026-10-01: "reconstruí la epoch 8 pero con el exactamente mismo ajuste que la 7" — the bend is
+    # epoch 7's, unchanged (10-step IRLS, z > 0.05, < 20 rows = identity, window by lowest held-out A);
+    # the consecutive-agreement window (±16) gave the floor that was judged worse.
+    from precision.depth_on_f5 import design
+    wb, coefs, _ident = epoch7_bend(s, obs)
+    _uu, _vv = np.meshgrid(np.arange(s["W"]), np.arange(s["H"]))
+    D = design(_uu.ravel(), _vv.ravel(), s["W"], s["H"])
+    brep = {"spread": (float("nan"), float("nan"))}
     e7 = epoch7_bend(s, obs) if dry else None
     dep = {f: np.where(s["valid"][f], bent(s, f, coefs[i], D), 0).astype(np.float32) for i, f in enumerate(frames)}
     inner = {f: interior(s["passed"][f]) for f in frames}

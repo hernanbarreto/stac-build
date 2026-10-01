@@ -64,39 +64,34 @@ def design(u: np.ndarray, v: np.ndarray, W: int, H: int) -> np.ndarray:
     return np.c_[np.ones(len(u)), (u - W / 2) / W, (v - H / 2) / H]
 
 
-def irls_huber(A: np.ndarray, r: np.ndarray, k: float, tol: float, max_iter: int) -> np.ndarray:
-    """Robust least squares: Huber weights at k·σ, σ = 1.4826·MAD of the residual."""
+def irls_huber(A: np.ndarray, r: np.ndarray, k: float, iterations: int) -> np.ndarray:
+    """pccr epoch 7's robust fit, exactly (omega_bent_epoch7.py `irls`; USER 2026-10-01 "exactamente el
+    mismo ajuste que la 7"): `iterations` Huber IRLS steps from the least-squares start, weights at k·σ,
+    σ = 1.4826·MAD of the residual. Iterated to convergence instead, the re-estimated MAD keeps shrinking
+    and the bend fits worse: 3.90 % held-out on pccr against 2.80 %."""
     w = np.ones(len(r))
-    c = np.linalg.lstsq(A, r, rcond=None)[0]
-    for _ in range(max_iter):
-        sw = np.sqrt(w)
-        c_new = np.linalg.lstsq(A * sw[:, None], r * sw, rcond=None)[0]
-        e = r - A @ c_new
+    c = np.zeros(A.shape[1])
+    for _ in range(iterations):
+        c = np.linalg.lstsq(A * w[:, None], r * w, rcond=None)[0]
+        e = r - A @ c
         s = MAD_TO_SIGMA * np.median(np.abs(e)) + 1e-12
-        w = np.minimum(1.0, k * s / np.maximum(np.abs(e), 1e-12))
-        done = np.max(np.abs(c_new - c)) <= tol * max(1.0, float(np.max(np.abs(c_new))))
-        c = c_new
-        if done:
-            break
+        w = np.sqrt(np.minimum(1.0, k * s / np.maximum(np.abs(e), 1e-12)))
     return c
 
 
 def bend_coefficients(rows: Dict[int, tuple], n: int, window: int, min_rows: int, huber_k: float,
-                      tol: float, max_iter: int) -> Dict[int, np.ndarray]:
+                      iterations: int) -> Dict[int, np.ndarray]:
     """{i: (c0, c1, c2)} — each keyframe fitted on the rows of i−w … i+w; one with fewer than `min_rows`
-    rows there borrows the nearest fitted keyframe's coefficients (identity only when none is fitted)."""
+    rows there keeps Omega's depth (k = 1), as epoch 7 did."""
     out: Dict[int, np.ndarray] = {}
     for i in range(n):
         js = range(max(0, i - window), min(n, i + window + 1))
         A = [rows[j][0] for j in js if j in rows and len(rows[j][1])]
         r = [rows[j][1] for j in js if j in rows and len(rows[j][1])]
         if A and sum(len(x) for x in r) >= min_rows:
-            out[i] = irls_huber(np.vstack(A), np.concatenate(r), huber_k, tol, max_iter)
-    fitted = sorted(out)
-    for i in range(n):
-        if i not in out:
-            out[i] = (out[min(fitted, key=lambda j: abs(j - i))].copy() if fitted
-                      else np.array([1.0, 0.0, 0.0]))
+            out[i] = irls_huber(np.vstack(A), np.concatenate(r), huber_k, iterations)
+        else:
+            out[i] = np.array([1.0, 0.0, 0.0])
     return out
 
 
@@ -238,17 +233,18 @@ def run_depth_on_f5(session_dir: Path, pcfg, log: Callable = print,
     for i, f in enumerate(frames):
         o = obs[0][i]
         zz = bilinear(zo[f], o[:, 0], o[:, 1]) if len(o) else np.zeros(0)
-        ok = zz > 0
+        ok = zz > bc.min_depth_m
         rows[i] = (design(o[ok, 0], o[ok, 1], W, H), o[ok, 2] / zz[ok])
+    # the window is chosen on half A of the held-out (its even rows), half B reports — epoch 7
     score, coefs = {}, {}
     for w in bc.windows:
-        cw = bend_coefficients(rows, N, int(w), int(pcfg.refine.min_witness_corr), gc.huber_k, gc.huber_tol,
-                               gc.huber_max_iter)
+        cw = bend_coefficients(rows, N, int(w), bc.min_rows, gc.huber_k, bc.irls_iterations)
         errs = []
         for i, f in enumerate(frames):
             h = obs[1][i]
+            h = h[(np.arange(len(h)) % 2) == 0]
             if len(h):
-                zz = bilinear(zo[f], h[:, 0], h[:, 1]); ok = zz > 0
+                zz = bilinear(zo[f], h[:, 0], h[:, 1]); ok = zz > bc.min_depth_m
                 errs.append(np.abs(zz[ok] * (design(h[ok, 0], h[ok, 1], W, H) @ cw[i]) - h[ok, 2]) / h[ok, 2])
         coefs[w] = cw; score[w] = float(np.median(np.concatenate(errs)))
     raw_err = []

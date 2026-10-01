@@ -2378,6 +2378,13 @@ reconstruction:
       neighbors: [-12, -6, -3, 3, 6, 12]  # keyframe offsets that vote on each pixel (same as the repair)
       tau_quantile: 75.0                # agreement tolerance = p75 of the session's OWN neighbour disagreement
                                         #   (pccr 1.96 %), measured every run
+      # USER 2026-10-01: "exactamente el mismo ajuste que la 7" — the fit of pccr epoch 7, the cloud
+      # judged best (omega_bent_epoch7.py). A Huber IRLS iterated to convergence instead read 3.90 % on
+      # the same landmarks (2.80 % with these): the MAD scale re-estimated without end shrinks the fit.
+      irls_iterations: 10               # Huber IRLS steps from the least-squares start (epoch 7)
+      min_rows: 20                      # a keyframe whose window holds fewer landmark rows keeps Omega's depth
+                                        #   (k = 1) — epoch 7
+      min_depth_m: 0.05                 # landmark rows where Omega's depth is under this are not used (epoch 7)
     chunk_check:                        # USER 2026-09-29: per-chunk AND per-keyframe verification of
                                         # the corrected geometry against the floor/ceiling, DA3 as the
                                         # independent instrument (precision/chunk_check.py). Verdict per

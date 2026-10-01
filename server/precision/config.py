@@ -335,6 +335,9 @@ class BendConfig:
     neighbors: Tuple[int, ...]  # keyframe offsets that vote on a pixel
     tau_quantile: float         # agreement tolerance = this percentile of the session's OWN neighbour
                                 # disagreement (measured every run, never a fixed number)
+    irls_iterations: int        # Huber IRLS steps (pccr epoch 7's fit, USER 2026-10-01)
+    min_rows: int               # fewer landmark rows in the window → k = 1 (epoch 7)
+    min_depth_m: float          # landmark rows on Omega depth under this are not used (epoch 7)
 
 
 # ── chunk / keyframe floor check (USER 2026-09-29: "verificación interna e intrachunk") ──
@@ -623,7 +626,10 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
     if not neighbors or 0 in neighbors:
         raise PrecisionConfigError(f"'{SECTION}.bend.neighbors' must be non-zero keyframe offsets, got {neighbors}")
     bend = BendConfig(windows=windows, neighbors=neighbors,
-                      tau_quantile=_num(bd, "tau_quantile", "bend", lo=0.0, hi=100.0, lo_excl=True))
+                      tau_quantile=_num(bd, "tau_quantile", "bend", lo=0.0, hi=100.0, lo_excl=True),
+                      irls_iterations=_num(bd, "irls_iterations", "bend", lo=1, integer=True),
+                      min_rows=_num(bd, "min_rows", "bend", lo=3, integer=True),
+                      min_depth_m=_num(bd, "min_depth_m", "bend", lo=0.0))
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,
                            tracks=tracks, refine=refine, depth=depth, fuse=fuse,
                            cloud=cloud, bend=bend, chunk_check=chunk_check, runner=runner)

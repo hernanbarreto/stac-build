@@ -21,16 +21,17 @@ def _cams():
     return out
 
 
-def test_bend_recovers_a_scale_error_and_borrows_for_a_keyframe_without_landmarks():
+def test_bend_recovers_a_scale_error_and_keeps_omega_without_landmarks():
+    """Epoch 7's fit: a keyframe with too few rows keeps Omega's depth (k = 1)."""
     rng = np.random.default_rng(0)
     rows = {}
     for i, true in enumerate((0.9, 0.9, 1.1)):
         u = rng.uniform(0, W, 200); v = rng.uniform(0, H, 200)
         rows[i] = (design(u, v, W, H), np.full(200, true) + rng.normal(0, 1e-3, 200))
     rows[3] = (design(np.zeros(0), np.zeros(0), W, H), np.zeros(0))      # no landmark at all
-    c = bend_coefficients(rows, 4, 0, 12, 1.345, 1e-12, 100)
+    c = bend_coefficients(rows, 4, 0, 20, 1.345, 10)
     assert abs(c[0][0] - 0.9) < 1e-2 and abs(c[2][0] - 1.1) < 1e-2
-    assert np.allclose(c[3], c[2]), "a keyframe without landmarks borrows its NEAREST fitted neighbour"
+    assert np.allclose(c[3], [1.0, 0.0, 0.0])
 
 
 def test_vote_removes_a_flyer_and_keeps_the_surface():
