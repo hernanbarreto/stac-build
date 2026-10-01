@@ -3618,6 +3618,48 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             if (onStatusMessage) onStatusMessage(tt('vp.zonesMarked', { n: eraseMarks.length }))
         }
 
+        // GRAB AND THROW a physics sphere (USER 2026-10-01: "la tengo que poder manipular para lanzar"):
+        // press on a sphere, drag it on the plane facing the camera, let go — it leaves with the hand's
+        // velocity. Capture phase on the container, so the orbit controls never see the gesture.
+        const throwRay = new THREE.Raycaster()
+        const throwPlane = new THREE.Plane()
+        const throwHit = new THREE.Vector3()
+        const throwOffset = new THREE.Vector3()
+        const pointerRay = (e: PointerEvent) => {
+            const r = renderer.domElement.getBoundingClientRect()
+            throwRay.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1,
+                -((e.clientY - r.top) / r.height) * 2 + 1), camera)
+        }
+        const onThrowDown = (e: PointerEvent) => {
+            if (e.button !== 0 || !physics.count) return
+            pointerRay(e)
+            const ball = physics.pick(throwRay)
+            if (!ball) return
+            e.stopPropagation(); e.preventDefault()
+            camera.getWorldDirection(throwHit)
+            throwPlane.setFromNormalAndCoplanarPoint(throwHit, ball.position)
+            throwRay.ray.intersectPlane(throwPlane, throwHit)
+            throwOffset.copy(ball.position).sub(throwHit)
+            controls.enabled = false
+            physics.grab(ball)
+            renderer.domElement.style.cursor = 'grabbing'
+        }
+        const onThrowMove = (e: PointerEvent) => {
+            if (!physics.holding) return
+            e.stopPropagation()
+            pointerRay(e)
+            if (throwRay.ray.intersectPlane(throwPlane, throwHit)) physics.moveHeld(throwHit.add(throwOffset))
+        }
+        const onThrowUp = (e: PointerEvent) => {
+            if (!physics.holding) return
+            e.stopPropagation()
+            physics.release()
+            controls.enabled = true
+            renderer.domElement.style.cursor = ''
+        }
+        container.addEventListener('pointerdown', onThrowDown, true)
+        window.addEventListener('pointermove', onThrowMove, true)
+        window.addEventListener('pointerup', onThrowUp, true)
         renderer.domElement.addEventListener('click', onCanvasClick)
         renderer.domElement.addEventListener('contextmenu', onContextMenu)
         renderer.domElement.addEventListener('mousedown', onSectionDown)
@@ -3636,6 +3678,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // Cleanup
         return () => {
             cancelAnimationFrame(animFrameRef.current)
+            container.removeEventListener('pointerdown', onThrowDown, true)
+            window.removeEventListener('pointermove', onThrowMove, true)
+            window.removeEventListener('pointerup', onThrowUp, true)
             physics.dispose(); physicsRef.current = null
             resizeObserver.disconnect()
             renderer.domElement.removeEventListener('click', onCanvasClick)

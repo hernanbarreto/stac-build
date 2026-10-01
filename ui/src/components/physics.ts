@@ -21,6 +21,8 @@ const FLOOR_HALF = 500                // the floor plane's half extent (m) — a
 const LOST_Y = -50                    // a sphere below this fell out of the world and is removed
 
 interface Ball { body: RAPIER.RigidBody; mesh: THREE.Mesh }
+const THROW_WINDOW_S = 0.1             // the release velocity = the hand's motion over the last 0.1 s
+const MAX_THROW_MS = 25                // a throw is capped at 25 m/s (a hard pitch)
 interface Solid { collider: RAPIER.Collider; key: string }
 
 function visibleInScene(o: THREE.Object3D): boolean {
@@ -37,6 +39,7 @@ export class PhysicsSandbox {
     private acc = 0
     private sinceSync = Infinity
     private roots: () => THREE.Object3D[] = () => []
+    private held: { ball: Ball; trail: Array<{ t: number; p: THREE.Vector3 }> } | null = null
 
     constructor(scene: THREE.Scene) {
         this.group.name = 'physics-spheres'
@@ -137,9 +140,48 @@ export class PhysicsSandbox {
         this.balls.splice(i, 1)
     }
 
+    /** The sphere under the ray (for grab-and-throw), or null. */
+    pick(ray: THREE.Raycaster): THREE.Mesh | null {
+        const hit = ray.intersectObjects(this.group.children, false)[0]
+        return hit ? (hit.object as THREE.Mesh) : null
+    }
+
+    /** Hold a sphere: it follows the pointer (kinematic) until released. */
+    grab(mesh: THREE.Mesh) {
+        const ball = this.balls.find(b => b.mesh === mesh)
+        if (!ball) return
+        ball.body.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true)
+        this.held = { ball, trail: [{ t: performance.now() / 1000, p: mesh.position.clone() }] }
+    }
+
+    /** Move the held sphere to `p` (world). */
+    moveHeld(p: THREE.Vector3) {
+        if (!this.held) return
+        const y = Math.max(p.y, (this.held.ball.mesh.geometry as THREE.SphereGeometry).parameters.radius)
+        this.held.ball.body.setNextKinematicTranslation({ x: p.x, y, z: p.z })
+        const t = performance.now() / 1000
+        this.held.trail.push({ t, p: new THREE.Vector3(p.x, y, p.z) })
+        while (this.held.trail.length > 2 && t - this.held.trail[0].t > THROW_WINDOW_S) this.held.trail.shift()
+    }
+
+    /** Let go: the sphere is dynamic again and leaves with the hand's velocity. */
+    release() {
+        if (!this.held) return
+        const { ball, trail } = this.held
+        this.held = null
+        const a = trail[0], b = trail[trail.length - 1]
+        const dt = b.t - a.t
+        const v = dt > 1e-3 ? b.p.clone().sub(a.p).divideScalar(dt) : new THREE.Vector3()
+        if (v.length() > MAX_THROW_MS) v.setLength(MAX_THROW_MS)
+        ball.body.setBodyType(RAPIER.RigidBodyType.Dynamic, true)
+        ball.body.setLinvel({ x: v.x, y: v.y, z: v.z }, true)
+    }
+
+    get holding() { return this.held !== null }
+
     get count() { return this.balls.length }
 
-    clear() { for (let i = this.balls.length - 1; i >= 0; i--) this.removeBall(i) }
+    clear() { this.held = null; for (let i = this.balls.length - 1; i >= 0; i--) this.removeBall(i) }
 
     dispose() {
         this.clear()
