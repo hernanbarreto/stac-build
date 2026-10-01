@@ -381,7 +381,7 @@ def bake_texture(
 
 
 def bake_object_glb(glb_path: Path, session_dir: Path, output_dir: Path,
-                    max_views: int = 200) -> bool:
+                    max_views: int = 200, closed: bool = False) -> bool:
     """Stage-3 (user 2026-08-29: "siempre con textura"): bake a real texrecon
     atlas onto an arbitrary per-object GLB, in the cloud frame, from the
     session's posed keyframes. Thin wrapper over bake_texture — loads the GLB,
@@ -417,11 +417,21 @@ def bake_object_glb(glb_path: Path, session_dir: Path, output_dir: Path,
         clean.remove_unreferenced_vertices()
         if not len(clean.faces):
             return False
-        # FACE THE CAMERAS: the fitted grid meshes carry arbitrary winding —
+        # A CLOSED object (ShapeR's generated volumes, `closed=True`): every face points OUT of the
+        # volume (USER 2026-10-01: "los objetos deben tener siempre las normales hacia fuera desde
+        # todas sus caras") — consistent winding + outward by the signed volume, per body. The
+        # camera rule below flipped the faces no camera looks at INWARD (the back of a backpack).
+        if closed:
+            from reconstruction.orient_outward import orient_mesh
+            logger.info("[TextureBake] %s: closed object — %d faces turned outward", glb_path.name,
+                        orient_mesh(clean))
+        # OPEN surfaces — FACE THE CAMERAS: the fitted grid meshes carry arbitrary winding —
         # when a surface's faces point away from every view, texrecon labels
         # them all unseen and the mesh ships untextured (user 2026-08-29:
         # "muchos X sin textura"). Flip each face toward its nearest camera.
         try:
+            if closed:
+                raise StopIteration          # orientation already decided above
             from scipy.spatial import cKDTree as _KD
             cams = np.array([np.asarray(p, np.float64)[:3, 3]
                              for p in cam.pose_map.values()])
@@ -438,6 +448,8 @@ def bake_object_glb(glb_path: Path, session_dir: Path, output_dir: Path,
                     logger.info("[TextureBake] %s: flipped %d/%d faces toward "
                                 "the cameras", glb_path.name,
                                 int(flip.sum()), len(f))
+        except StopIteration:
+            pass
         except Exception as e:  # noqa: BLE001
             logger.warning("[TextureBake] %s: face orientation skipped (%s)",
                            glb_path.name, e)
@@ -455,6 +467,10 @@ def bake_object_glb(glb_path: Path, session_dir: Path, output_dir: Path,
         finally:
             tmp_ply.unlink(missing_ok=True)
         ok = res is not None
+        if ok and closed:
+            # texrecon splits the object into atlas sub-meshes: re-check the orientation on the result
+            from reconstruction.orient_outward import orient_glb
+            orient_glb(glb_path)
         logger.info("[TextureBake] object %s: %s", glb_path.name,
                     "textured" if ok else "bake failed — mesh kept as-is")
         return ok

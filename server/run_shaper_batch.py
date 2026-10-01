@@ -671,6 +671,8 @@ def main():
                 else:
                     out_dir = pkl_path.parent
 
+                # (the faces are turned OUTWARD by the backend after the batch — reconstruction/
+                # orient_outward.py needs Open3D, which this env does not carry)
                 tmp_obj = out_dir / f".{name}.tmp.obj"
                 mesh.export(str(tmp_obj))
                 glb_mesh = trimesh.load(str(tmp_obj), force="mesh")

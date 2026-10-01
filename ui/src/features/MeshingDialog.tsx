@@ -86,7 +86,7 @@ export function MeshingDialog(p: MeshingDialogProps) {
         {all.length === 0 && <EmptyState compact icon={<Puzzle aria-hidden />} title={t('meshing.noSegments')} description={t('meshing.noSegmentsDesc')} />}
         {all.length > 0 && (
           <Row>
-            <SearchInput size="sm" value={query} onChange={e => setQuery(e.target.value)} onClear={() => setQuery('')} placeholder={t('meshing.search')} />
+            <SearchInput size="sm" data-autofocus value={query} onChange={e => setQuery(e.target.value)} onClear={() => setQuery('')} placeholder={t('meshing.search')} />
             <IconButton size="sm" label={t('meshing.selectAll')} icon={<CheckSquare aria-hidden />} disabled={busy || list.length === 0} onClick={() => selectListed(true)} />
             <IconButton size="sm" label={t('meshing.deselectAll')} icon={<Square aria-hidden />} disabled={busy || p.selected.size === 0} onClick={() => selectListed(false)} />
             <span className="stac-mono stac-picklist__meta">{t('meshing.selectedCount', { n: p.selected.size, total: all.length })}</span>

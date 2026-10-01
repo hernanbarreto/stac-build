@@ -4153,7 +4153,7 @@ async def _run_meshflow_subprocess(session_id: str, output_dir: Path,
 
             def _bake() -> bool:
                 from reconstruction.texture_bake import bake_object_glb
-                return bool(bake_object_glb(glb, output_dir.parent, output_dir))
+                return bool(bake_object_glb(glb, output_dir.parent, output_dir, closed=True))
 
             try:
                 ok = await asyncio.get_event_loop().run_in_executor(None, _bake)
@@ -4224,6 +4224,12 @@ async def _run_meshflow_subprocess(session_id: str, output_dir: Path,
                 _shape_set_overall(session_id, done=done_count)
                 if texture and kv.get("out"):
                     tex_tasks.append(asyncio.ensure_future(_texture(inst_id, Path(kv["out"]))))
+                elif kv.get("out") and engine == "shaper":
+                    # no texture: still every face OUTWARD (USER 2026-10-01; the bake does it otherwise)
+                    def _orient(p=Path(kv["out"])):
+                        from reconstruction.orient_outward import orient_glb
+                        return orient_glb(p)
+                    tex_tasks.append(asyncio.ensure_future(asyncio.get_event_loop().run_in_executor(None, _orient)))
             elif status == "error":
                 update["phase"] = "error"
                 update["error"] = kv.get("msg", "unknown")
@@ -4349,7 +4355,7 @@ async def export_shape_inputs(request: Request):
 
         # Reset state for the instances we're about to touch
         target_ids = set(instance_ids or [
-            inst.get("id", inst.get("instance_id"))
+            inst.get("instance_id", inst.get("id"))
             for inst in segments_result.get("instances", [])
         ])
         async with _shape_progress_lock:
@@ -4396,7 +4402,7 @@ async def export_shape_inputs(request: Request):
             done = {p.stem for p in pkls}
             skipped = []
             for inst in segments_result.get("instances", []):
-                iid = inst.get("id", inst.get("instance_id"))
+                iid = inst.get("instance_id", inst.get("id"))
                 if instance_ids and iid not in instance_ids:
                     continue
                 lab = inst.get("label", f"object_{iid}")
@@ -4433,7 +4439,7 @@ async def export_shape_inputs(request: Request):
         # resolves instances by stem directly).
         inst_by_folder = {}
         for inst in segments_result.get("instances", []):
-            iid = inst.get("id", inst.get("instance_id"))
+            iid = inst.get("instance_id", inst.get("id"))
             label = inst.get("label", f"object_{iid}")
             safe = label.replace(" ", "_").replace("/", "_")[:30]
             inst_by_folder[f"{safe}_{iid}"] = int(iid)
@@ -4546,7 +4552,7 @@ async def shape_status(session_id: str):
 
     statuses = []
     for inst in result_data.get("instances", []):
-        iid = inst.get("id", inst.get("instance_id"))
+        iid = inst.get("instance_id", inst.get("id"))
         label = inst.get("label", f"object_{iid}")
         safe_label = label.replace(" ", "_").replace("/", "_")[:30]
         obj_folder = shape_dir / f"{safe_label}_{iid}"
@@ -4612,6 +4618,46 @@ async def shape_list(session_id: str):
         })
 
     return {"ok": True, "shapes": shapes}
+
+
+def _shape_folder(session_id: str, folder: str) -> Path:
+    """A ShapeR object's folder under output/shape/ — the folder is a NAME, never a path."""
+    if not folder or "/" in folder or "\\" in folder or folder.startswith("."):
+        raise HTTPException(status_code=400, detail="invalid folder name")
+    target = _ctx(session_id).output_dir / "shape" / folder
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail=f"no object folder '{folder}'")
+    return target
+
+
+@app.post("/api/segmentation/shape/delete")
+async def delete_shape_object(request: Request):
+    """Delete a generated (ShapeR) object: its WHOLE folder — PKL, GLB, meta (USER 2026-10-01:
+    "al borrar, previa aceptación, debe eliminarse la carpeta entera generada con shaper de ese
+    objeto"). Body: session_id, folder."""
+    body = await request.json()
+    target = _shape_folder(str(body.get("session_id") or ""), str(body.get("folder") or ""))
+    import shutil
+    await asyncio.get_event_loop().run_in_executor(None, shutil.rmtree, str(target))
+    print(f"[Shape] 🗑 deleted shape/{target.name} ({body.get('session_id')})")
+    return {"ok": True, "deleted": target.name}
+
+
+@app.post("/api/segmentation/shape/rename")
+async def rename_shape_object(request: Request):
+    """Rename a generated object: the label its meta carries (the panel's name). Body: session_id,
+    folder, label."""
+    body = await request.json()
+    label = str(body.get("label") or "").strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="empty label")
+    target = _shape_folder(str(body.get("session_id") or ""), str(body.get("folder") or ""))
+    metas = sorted(target.glob("*.meta.json")) or [target / "meta.json"]
+    for mp in metas:
+        meta = json.loads(mp.read_text()) if mp.exists() else {}
+        meta["label"] = label
+        mp.write_text(json.dumps(meta, indent=2))
+    return {"ok": True, "folder": target.name, "label": label}
 
 
 @app.get("/api/segmentation/shape/file/{session_id}/{folder}/{filename}")
@@ -5519,7 +5565,7 @@ async def export_tsdf_endpoint(request: Request):
         segments_result = json.load(f)
 
     target_ids = set(instance_ids or [
-        inst.get("id", inst.get("instance_id"))
+        inst.get("instance_id", inst.get("id"))
         for inst in segments_result.get("instances", [])
     ])
 
@@ -5950,7 +5996,7 @@ async def tsdf_status(session_id: str):
 
     statuses = []
     for inst in result_data.get("instances", []):
-        iid = inst.get("id", inst.get("instance_id"))
+        iid = inst.get("instance_id", inst.get("id"))
         label = inst.get("label", f"object_{iid}")
         safe_label = label.replace(" ", "_").replace("/", "_")[:30]
         obj_folder = tsdf_dir / f"{safe_label}_{iid}"

@@ -367,7 +367,10 @@
     "deleteMeshTitle": "Delete mesh",
     "meshDeleted": "Mesh {label} deleted",
     "meshDeleteFailed": "Could not delete the mesh. {detail}",
-    "absorbed": "{n} mask(s) fused into these"
+    "absorbed": "{n} mask(s) fused into these",
+    "deleteShapeTitle": "Delete generated object",
+    "deleteShapeMessage": "Delete \"{label}\" and its whole folder ({folder}: PKL, mesh, metadata)? This cannot be undone.",
+    "renameFailed": "Rename failed {status}"
   },
   "toolbar": {
     "label": "Viewport tools",

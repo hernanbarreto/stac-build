@@ -1727,6 +1727,31 @@ function App() {
     } else report(t('instances.deleteFailed', { status: res.status }), 'err')
   }, [activeSession, confirmDanger, report, t])
 
+  // a generated (ShapeR) object: rename = its label; delete = its WHOLE folder, after a confirmation
+  // like a segment's (USER 2026-10-01)
+  const renameShapeObject = useCallback(async (m: MeshListItem, label: string) => {
+    if (!activeSession) return
+    try {
+      const r = await fetch('/api/segmentation/shape/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, folder: m.folder, label }) })
+      if (r.ok) setShapeMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, label } : x)))
+      else report(t('instances.renameFailed', { status: r.status }), 'err')
+    } catch { report(t('instances.renameFailed', { status: '' }), 'err') }
+  }, [activeSession, report, t])
+  const deleteShapeObject = useCallback(async (m: MeshListItem) => {
+    if (!activeSession) return
+    const ok = await confirmDanger(t('instances.deleteShapeMessage', { label: m.label, folder: m.folder }), t('instances.deleteShapeTitle'))
+    if (!ok) return
+    try {
+      const r = await fetch('/api/segmentation/shape/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, folder: m.folder }) })
+      const d = await r.json()
+      if (d.ok) {
+        report(t('instances.meshDeleted', { label: m.label }), 'ok')
+        setShapeMeshes(prev => prev.filter(x => x.folder !== m.folder))
+        await viewportRef.current?.reloadShapes(activeSession)
+      } else report(t('instances.meshDeleteFailed', { detail: d.detail || '' }), 'err')
+    } catch { report(t('instances.meshDeleteFailed', { detail: '' }), 'err') }
+  }, [activeSession, confirmDanger, report, t])
+
   const deleteTsdfMesh = useCallback(async (m: MeshListItem) => {
     if (!activeSession) return
     const ok = await confirmDanger(t('instances.deleteMeshMessage', { label: m.label, folder: m.folder }), t('instances.deleteMeshTitle'))
@@ -2021,15 +2046,19 @@ function App() {
                   const seg = segments.find(s => s.id === id)
                   if (seg?.focus) viewportRef.current?.flyToPoint(seg.focus.center, seg.focus.radius)
                 }}
-                onSelectAll={() => {
-                  setSegments(prev => prev.map(s => ({ ...s, visible: true }))); setUnsegmentedVisible(true)
-                  segments.forEach(s => { viewportRef.current?.toggleOBB(s.key, true); viewportRef.current?.setSegmentVisibility(s.classId, true) })
-                  viewportRef.current?.setSegmentVisibility(0, true)
-                }}
-                onDeselectAll={() => {
-                  setSegments(prev => prev.map(s => ({ ...s, visible: false }))); setUnsegmentedVisible(false)
-                  segments.forEach(s => { viewportRef.current?.toggleOBB(s.key, false); viewportRef.current?.setSegmentVisibility(s.classId, false) })
-                  viewportRef.current?.setSegmentVisibility(0, false)
+                onSetAllVisible={(v, listed) => {
+                  // every row the list shows (USER 2026-10-01): segments, Unsegmented, placed objects,
+                  // generated objects, meshes
+                  const keys = new Set(listed.segmentKeys)
+                  setSegments(prev => prev.map(s => (keys.has(s.key) ? { ...s, visible: v } : s)))
+                  segments.forEach(s => { if (keys.has(s.key)) { viewportRef.current?.toggleOBB(s.key, v); viewportRef.current?.setSegmentVisibility(s.classId, v) } })
+                  if (listed.unsegmented) { setUnsegmentedVisible(v); viewportRef.current?.setSegmentVisibility(0, v) }
+                  listed.placedIds.forEach(id => viewportRef.current?.setSceneObjectVisible(id, v))
+                  const sf = new Set(listed.shapeFolders), tf = new Set(listed.tsdfFolders)
+                  setShapeMeshes(prev => prev.map(x => (sf.has(x.folder) ? { ...x, visible: v } : x)))
+                  shapeMeshes.forEach(m => { if (sf.has(m.folder)) viewportRef.current?.setShapeVisibility(m.instanceId, v) })
+                  setTsdfMeshes(prev => prev.map(x => (tf.has(x.folder) ? { ...x, visible: v } : x)))
+                  tsdfMeshes.forEach(m => { if (tf.has(m.folder)) viewportRef.current?.setTsdfVisibility(m.folder, v) })
                 }}
                 onToggleSegment={(seg, vis) => { setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, visible: vis } : s))); viewportRef.current?.toggleOBB(seg.key, vis); viewportRef.current?.setSegmentVisibility(seg.classId, vis) }}
                 onRenameSegment={renameSegment} onDeleteSegment={deleteSegment}
@@ -2038,7 +2067,21 @@ function App() {
                 onTogglePlaced={(id, v) => viewportRef.current?.setSceneObjectVisible(id, v)} onRemovePlaced={id => viewportRef.current?.removeSceneObject(id)}
                 onToggleShape={(m, v) => { setShapeMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, visible: v } : x))); viewportRef.current?.setShapeVisibility(m.instanceId, v) }}
                 onToggleTsdf={(m, v) => { setTsdfMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, visible: v } : x))); viewportRef.current?.setTsdfVisibility(m.folder, v) }}
-                onDeleteTsdf={deleteTsdfMesh}
+                onDeleteTsdf={deleteTsdfMesh} onRenameShape={renameShapeObject} onDeleteShape={deleteShapeObject}
+                onRenamePlaced={async (id, name) => {
+                  if (!activeSession) return
+                  try {
+                    const r = await fetch('/api/objects/scene/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, id, name }) })
+                    if (r.ok) setPlacedObjects(prev => prev.map(o => (o.id === id ? { ...o, name } : o)))
+                    else report(t('instances.renameFailed', { status: r.status }), 'err')
+                  } catch { report(t('instances.renameFailed', { status: '' }), 'err') }
+                }}
+                onFocusItem={(kind, key, instanceId) => {
+                  // the object's own bounds; a mesh not loaded yet → its instance's OBB
+                  if (viewportRef.current?.flyToObject(kind, key)) return
+                  const seg = instanceId != null ? segments.find(s => s.id === instanceId) : undefined
+                  if (seg?.focus) viewportRef.current?.flyToPoint(seg.focus.center, seg.focus.radius)
+                }}
                 onOpenSegmentation={() => openSegmentationManager(activeSession)} onOpenMeshing={openTsdfModal} />
             )}
             {layout.state.leftTab === 'scans' && (

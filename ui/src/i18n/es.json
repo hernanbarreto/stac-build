@@ -367,7 +367,10 @@
     "deleteMeshTitle": "Eliminar malla",
     "meshDeleted": "Malla {label} eliminada",
     "meshDeleteFailed": "No se pudo eliminar la malla. {detail}",
-    "absorbed": "{n} máscara(s) fusionadas en estos"
+    "absorbed": "{n} máscara(s) fusionadas en estos",
+    "deleteShapeTitle": "Borrar objeto generado",
+    "deleteShapeMessage": "¿Borrar \"{label}\" y su carpeta entera ({folder}: PKL, malla, metadatos)? No se puede deshacer.",
+    "renameFailed": "No se pudo renombrar {status}"
   },
   "toolbar": {
     "label": "Herramientas del visor",

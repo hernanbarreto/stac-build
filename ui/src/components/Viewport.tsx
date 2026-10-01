@@ -115,6 +115,8 @@ export interface ViewportHandle {
      *  it bounces on the point cloud and every visible mesh; with no surface under it it falls and is gone */
     physicsDrop: (diameterM: number, restitution: number) => void
     physicsClear: () => void
+    /** fly to a listed object: a placed one (id), a generated one (instance id), a mesh (folder) */
+    flyToObject: (kind: 'placed' | 'shape' | 'tsdf', key: string | number) => boolean
     /** spheres in the scene right now */
     physicsCount: () => number
     /** start placing spheres: a ghost follows the pointer; each click drops one where it shows */
@@ -518,6 +520,19 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // automatically. Cleared/recreated when the session changes.
     const shapesGroupRef = useRef<THREE.Group | null>(null)
     const shapesByInstanceRef = useRef<Map<number, THREE.Group>>(new Map())
+    // instance id → its segment / OBB colour: a ShapeR object is drawn like the physics sphere — a smooth
+    // shaded solid in that colour, not the scan photo (USER 2026-10-01)
+    const instColorRef = useRef<Map<number, string>>(new Map())
+    const paintShape = useCallback((g: THREE.Object3D, color: string | undefined) => {
+        if (!color) return
+        g.traverse(o => {
+            const m = o as THREE.Mesh
+            if (!m.isMesh) return
+            const old = m.material as THREE.Material | THREE.Material[]
+            for (const mm of Array.isArray(old) ? old : [old]) mm.dispose()
+            m.material = new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: 0.45, metalness: 0.05 })
+        })
+    }, [])
     // TSDF meshes — same lifecycle as shapes, kept in a parallel group so both
     // backends can be displayed simultaneously for A/B comparison.
     const tsdfGroupRef = useRef<THREE.Group | null>(null)
@@ -655,6 +670,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const sceneObjectsGroupRef = useRef<THREE.Group | null>(null)
     const physicsRef = useRef<PhysicsSandbox | null>(null)
     const throwEndRef = useRef<(() => void) | null>(null)
+    const shapeLoadGenRef = useRef(0)
+    const tsdfLoadGenRef = useRef(0)
     // PLACING a sphere (USER 2026-10-01: "debe aparecer en el mouse y al hacer click se debe soltar"):
     // a ghost sphere follows the pointer over the surface it points at; a click drops it there
     const placeRef = useRef<{ diameter: number; restitution: number; ghost: THREE.Mesh } | null>(null)
@@ -1890,6 +1907,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     }, [])
 
     const loadShapesIntoGroup = useCallback(async (sessionId: string, parentGroup: THREE.Object3D) => {
+        // ONE load at a time wins (pccr 2026-10-01: a finished ShapeR job triggered two overlapping
+        // reloads; both added a group, the toggle reached only one copy and the mesh never hid). A load
+        // overtaken by a newer one throws away what it built.
+        const gen = ++shapeLoadGenRef.current
         // Reset previous shapes (different session or refresh)
         clearAllShapes()
 
@@ -1900,10 +1921,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             console.warn('[Viewport] shape list fetch failed', e)
             return
         }
-        if (!res.ok) return
+        if (!res.ok || gen !== shapeLoadGenRef.current) return
         const data = await res.json()
         const shapes = (data?.shapes || []) as Array<{ folder: string; glb_url: string; meta: any }>
-        if (shapes.length === 0) return
+        if (shapes.length === 0 || gen !== shapeLoadGenRef.current) return
 
         const group = new THREE.Group()
         group.name = 'shapes-group'
@@ -1917,6 +1938,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         for (const sh of shapes) {
             try {
                 const gltf = await loader.loadAsync(sh.glb_url)
+                if (gen !== shapeLoadGenRef.current) {          // overtaken: this group is not the scene's
+                    disposeMeshGroup(group); group.removeFromParent()
+                    return
+                }
                 const meshGroup = new THREE.Group()
                 meshGroup.name = `shape-${sh.folder}`
                 meshGroup.userData = { meta: sh.meta, folder: sh.folder }
@@ -1926,6 +1951,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const iid = sh.meta?.instance_id
                 if (typeof iid === 'number') {
                     shapesByInstanceRef.current.set(iid, meshGroup)
+                    paintShape(meshGroup, instColorRef.current.get(iid))
                 }
                 loaded += 1
             } catch (e) {
@@ -1935,7 +1961,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         if (onStatusMessage && loaded > 0) {
             onStatusMessage(tt('vp.loadedObjectMeshes', { n: loaded }))
         }
-    }, [clearAllShapes, onStatusMessage])
+    }, [clearAllShapes, onStatusMessage, paintShape])
 
     // ── TSDF mesh auto-load helpers (mirrors ShapeR — separate group) ──
     const clearAllTsdf = useCallback(() => {
@@ -1987,6 +2013,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     }, [])
 
     const loadTsdfIntoGroup = useCallback(async (sessionId: string, parentGroup: THREE.Object3D) => {
+        const gen = ++tsdfLoadGenRef.current          // one load at a time wins (see loadShapesIntoGroup)
         clearAllTsdf()
         let res: Response
         try {
@@ -1995,10 +2022,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             console.warn('[Viewport] tsdf list fetch failed', e)
             return
         }
-        if (!res.ok) return
+        if (!res.ok || gen !== tsdfLoadGenRef.current) return
         const data = await res.json()
         const meshes = (data?.shapes || []) as TsdfListEntry[]
-        if (meshes.length === 0) return
+        if (meshes.length === 0 || gen !== tsdfLoadGenRef.current) return
 
         const group = new THREE.Group()
         group.name = 'tsdf-group'
@@ -2018,6 +2045,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
         let loaded = 0
         for (const sh of eager) {
+            if (gen !== tsdfLoadGenRef.current) return
             try {
                 if (await loadTsdfMeshEntry(sh)) loaded += 1
             } catch (e) {
@@ -2259,6 +2287,24 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     group.add(marker)
                 }
             }
+        },
+        flyToObject: (kind, key) => {
+            // ANY row of the list flies to its object (USER 2026-10-01): the object's own bounds
+            let o: THREE.Object3D | undefined
+            if (kind === 'placed') o = sceneObjByIdRef.current.get(Number(key))
+            else if (kind === 'shape') o = shapesByInstanceRef.current.get(Number(key))
+            else if (kind === 'tsdf') o = tsdfGroupRef.current?.children.find(c => c.name === `tsdf-${key}`)
+            if (!o) return false
+            o.updateMatrixWorld(true)
+            const box = new THREE.Box3().setFromObject(o)
+            if (box.isEmpty()) return false
+            const c = box.getCenter(new THREE.Vector3()), r = box.getSize(new THREE.Vector3()).length() / 2
+            const camera = cameraRef.current, controls = controlsRef.current
+            if (!camera || !controls) return false
+            const dir = camera.position.clone().sub(controls.target).normalize()
+            const dist = Math.max(r, 0.5) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.4
+            animateCameraTo(c, c.clone().addScaledVector(dir, dist))
+            return true
         },
         flyToPoint: (p, radius) => {
             const camera = cameraRef.current, controls = controlsRef.current
@@ -4752,6 +4798,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const clsId = (inst.class_byte ?? instId) as number
             const label = (inst.label || 'object') as string
             const colorStr = (inst.color || tokenColor(VP.measure)) as string
+            if (instColorRef.current.get(instId) !== colorStr) {
+                instColorRef.current.set(instId, colorStr)
+                const sg = shapesByInstanceRef.current.get(instId)
+                if (sg) paintShape(sg, colorStr)
+            }
             const totalPoints = (inst.total_points || 0) as number
             const globalKey = (inst.global_id || `${label}_${instId}`) as string
 

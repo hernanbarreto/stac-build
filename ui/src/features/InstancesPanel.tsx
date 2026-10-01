@@ -17,6 +17,7 @@ import { useFmt, useT } from '../i18n'
 
 export interface MeshListItem { instanceId: number; label: string; folder: string; visible: boolean }
 export interface PlacedObject { id: number; name: string; visible: boolean }
+export interface ListedRows { segmentKeys: string[]; unsegmented: boolean; placedIds: number[]; shapeFolders: string[]; tsdfFolders: string[] }
 export interface FloorLevelState { candidates: { instance_id: number; label: string; height_m: number | null }[]; selected: number | null }
 
 interface InstancesPanelProps {
@@ -32,8 +33,9 @@ interface InstancesPanelProps {
   tsdfMeshes: MeshListItem[]
   selectedSegmentId: number | null
   onSelectSegment: (id: number | null) => void
-  onSelectAll: () => void
-  onDeselectAll: () => void
+  /** show / hide EVERY row the list shows (the search applies): segments, Unsegmented, placed objects,
+   *  generated objects, meshes (USER 2026-10-01) */
+  onSetAllVisible: (visible: boolean, listed: ListedRows) => void
   onToggleSegment: (seg: SegmentInstance, visible: boolean) => void
   onRenameSegment: (seg: SegmentInstance, label: string) => Promise<void>
   onDeleteSegment: (seg: SegmentInstance) => void
@@ -41,7 +43,12 @@ interface InstancesPanelProps {
   onFloorLevel: (instanceId: number) => void
   onTogglePlaced: (id: number, visible: boolean) => void
   onRemovePlaced: (id: number) => void
+  onRenamePlaced: (id: number, name: string) => Promise<void>
+  /** a row that is not a segment was clicked: fly to it */
+  onFocusItem: (kind: 'placed' | 'shape' | 'tsdf', key: string | number, instanceId?: number) => void
   onToggleShape: (m: MeshListItem, visible: boolean) => void
+  onRenameShape: (m: MeshListItem, label: string) => Promise<void>
+  onDeleteShape: (m: MeshListItem) => void
   onToggleTsdf: (m: MeshListItem, visible: boolean) => void
   onDeleteTsdf: (m: MeshListItem) => void
   onOpenSegmentation: () => void
@@ -61,8 +68,29 @@ export function InstancesPanel(p: InstancesPanelProps) {
     if (v && v !== seg.label) await p.onRenameSegment(seg, v)
   }
 
-  const segNodes: TreeNodeData<SegmentInstance>[] = p.segments
-    .filter(s => !search || s.label.toLowerCase().includes(search.toLowerCase()))
+  // ONE search over the whole list (USER 2026-10-01): segments, placed objects, generated objects, meshes
+  const q = search.trim().toLowerCase()
+  const hit = (...txt: Array<string | number | undefined>) => !q || txt.some(x => x != null && String(x).toLowerCase().includes(q))
+  const segs = p.segments.filter(s => hit(s.label, s.id))
+  const placed = p.placedObjects.filter(o => hit(o.name, o.id))
+  const shapes = p.shapeMeshes.filter(m => hit(m.label, m.folder, m.instanceId))
+  const tsdfs = p.tsdfMeshes.filter(m => hit(m.label, m.folder, m.instanceId))
+  const unsegListed = hit(t('instances.unsegmented'))
+  const listed: ListedRows = { segmentKeys: segs.map(s => s.key), unsegmented: unsegListed, placedIds: placed.map(o => o.id),
+                               shapeFolders: shapes.map(m => m.folder), tsdfFolders: tsdfs.map(m => m.folder) }
+  const anyListed = segs.length + placed.length + shapes.length + tsdfs.length > 0 || unsegListed
+  const commitPlaced = async (o: PlacedObject) => {
+    const v = editValue.trim()
+    setEditing(null)
+    if (v && v !== o.name) await p.onRenamePlaced(o.id, v)
+  }
+  const commitShape = async (m: MeshListItem) => {
+    const v = editValue.trim()
+    setEditing(null)
+    if (v && v !== m.label) await p.onRenameShape(m, v)
+  }
+
+  const segNodes: TreeNodeData<SegmentInstance>[] = segs
     .map(seg => ({
       id: seg.key,
       data: seg,
@@ -93,10 +121,10 @@ export function InstancesPanel(p: InstancesPanelProps) {
       subtitle={p.absorbedCount
         ? `${t.plural('instances.count', p.segments.length)} · ${t('instances.absorbed', { n: fmt.integer(p.absorbedCount) })}`
         : t.plural('instances.count', p.segments.length)}
-      actions={p.segments.length > 0 ? (
+      actions={anyListed ? (
         <>
-          <IconButton size="sm" label={t('instances.showAll')} icon={<CheckSquare aria-hidden />} onClick={p.onSelectAll} />
-          <IconButton size="sm" label={t('instances.hideAll')} icon={<Square aria-hidden />} onClick={p.onDeselectAll} />
+          <IconButton size="sm" label={t('instances.showAll')} icon={<CheckSquare aria-hidden />} onClick={() => p.onSetAllVisible(true, listed)} />
+          <IconButton size="sm" label={t('instances.hideAll')} icon={<Square aria-hidden />} onClick={() => p.onSetAllVisible(false, listed)} />
         </>
       ) : undefined}
       toolbar={<SearchInput size="sm" value={search} onChange={e => setSearch(e.target.value)} onClear={() => setSearch('')} placeholder={t('instances.search')} />}
@@ -120,27 +148,52 @@ export function InstancesPanel(p: InstancesPanelProps) {
           <EmptyState compact icon={<Tag aria-hidden />} title={t('instances.emptyTitle')} description={t('instances.emptyDesc')}
             action={<Button variant="primary" icon={<Crosshair aria-hidden />} onClick={p.onOpenSegmentation}>{t('instances.segmentation')}</Button>} />
         )}
-        <Tree ariaLabel={t('instances.title')} nodes={[...segNodes, unsegNode]} dense
+        <Tree ariaLabel={t('instances.title')} nodes={unsegListed ? [...segNodes, unsegNode] : segNodes} dense
           selectedId={p.selectedSegmentId != null ? p.segments.find(s => s.id === p.selectedSegmentId)?.key ?? null : null}
           onSelect={n => p.onSelectSegment(n.data ? (n.data as SegmentInstance).id : null)} />
-        {p.placedObjects.length > 0 && (
-          <Section title={t('instances.placedObjects', { n: p.placedObjects.length })} flush>
-            <Tree ariaLabel={t('instances.placedObjects', { n: p.placedObjects.length })} dense nodes={p.placedObjects.map(o => ({
-              id: `pobj-${o.id}`, label: o.name, icon: <Box aria-hidden />, visible: o.visible, onVisible: v => p.onTogglePlaced(o.id, v),
-              actions: <IconButton size="sm" variant="danger" label={t('instances.removePlacedHint')} icon={<Trash2 aria-hidden />} onClick={() => p.onRemovePlaced(o.id)} />,
+        {placed.length > 0 && (
+          <Section title={t('instances.placedObjects', { n: placed.length })} flush>
+            <Tree ariaLabel={t('instances.placedObjects', { n: placed.length })} dense
+              onSelect={n => { const o = placed.find(x => `pobj-${x.id}` === n.id); if (o) p.onFocusItem('placed', o.id) }}
+              nodes={placed.map(o => ({
+              id: `pobj-${o.id}`, icon: <Box aria-hidden />, visible: o.visible, onVisible: v => p.onTogglePlaced(o.id, v),
+              label: editing === `pobj-${o.id}` ? (
+                <Input size="sm" autoFocus value={editValue} onChange={e => setEditValue(e.target.value)} onClick={e => e.stopPropagation()}
+                  onKeyDown={e => { if (e.key === 'Enter') commitPlaced(o); if (e.key === 'Escape') setEditing(null) }} onBlur={() => commitPlaced(o)} aria-label={t('instances.renameLabel')} />
+              ) : o.name,
+              actions: (
+                <>
+                  <IconButton size="sm" label={t('instances.rename')} icon={<Pencil aria-hidden />} onClick={() => { setEditing(`pobj-${o.id}`); setEditValue(o.name) }} />
+                  <IconButton size="sm" variant="danger" label={t('instances.removePlacedHint')} icon={<Trash2 aria-hidden />} onClick={() => p.onRemovePlaced(o.id)} />
+                </>
+              ),
             }))} />
           </Section>
         )}
-        {p.shapeMeshes.length > 0 && (
-          <Section title={t('instances.objectMeshes', { n: p.shapeMeshes.length })} flush>
-            <Tree ariaLabel={t('instances.objectMeshes', { n: p.shapeMeshes.length })} dense nodes={p.shapeMeshes.map(m => ({
-              id: `shape-${m.folder}`, label: m.label, visible: m.visible, onVisible: v => p.onToggleShape(m, v),
+        {shapes.length > 0 && (
+          <Section title={t('instances.objectMeshes', { n: shapes.length })} flush>
+            <Tree ariaLabel={t('instances.objectMeshes', { n: shapes.length })} dense
+              onSelect={n => { const m = shapes.find(x => `shape-${x.folder}` === n.id); if (m) p.onFocusItem('shape', m.instanceId, m.instanceId) }}
+              nodes={shapes.map(m => ({
+              id: `shape-${m.folder}`, visible: m.visible, onVisible: v => p.onToggleShape(m, v),
+              label: editing === `shape-${m.folder}` ? (
+                <Input size="sm" autoFocus value={editValue} onChange={e => setEditValue(e.target.value)} onClick={e => e.stopPropagation()}
+                  onKeyDown={e => { if (e.key === 'Enter') commitShape(m); if (e.key === 'Escape') setEditing(null) }} onBlur={() => commitShape(m)} aria-label={t('instances.renameLabel')} />
+              ) : m.label,
+              actions: (
+                <>
+                  <IconButton size="sm" label={t('instances.rename')} icon={<Pencil aria-hidden />} onClick={() => { setEditing(`shape-${m.folder}`); setEditValue(m.label) }} />
+                  <IconButton size="sm" variant="danger" label={t('instances.delete')} icon={<Trash2 aria-hidden />} onClick={() => p.onDeleteShape(m)} />
+                </>
+              ),
             }))} />
           </Section>
         )}
-        {p.tsdfMeshes.length > 0 && (
-          <Section title={t('instances.meshes', { n: p.tsdfMeshes.length })} flush>
-            <Tree ariaLabel={t('instances.meshes', { n: p.tsdfMeshes.length })} dense nodes={p.tsdfMeshes.map(m => ({
+        {tsdfs.length > 0 && (
+          <Section title={t('instances.meshes', { n: tsdfs.length })} flush>
+            <Tree ariaLabel={t('instances.meshes', { n: tsdfs.length })} dense
+              onSelect={n => { const m = tsdfs.find(x => `tsdf-${x.folder}` === n.id); if (m) p.onFocusItem('tsdf', m.folder, m.instanceId) }}
+              nodes={tsdfs.map(m => ({
               id: `tsdf-${m.folder}`, label: m.label, meta: m.folder, visible: m.visible, onVisible: v => p.onToggleTsdf(m, v),
               actions: <IconButton size="sm" variant="danger" label={t('instances.deleteMeshHint', { folder: m.folder })} icon={<Trash2 aria-hidden />} onClick={() => p.onDeleteTsdf(m)} />,
             }))} />

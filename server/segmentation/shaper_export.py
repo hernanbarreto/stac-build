@@ -884,7 +884,7 @@ def export_shaper_pkls(
 
     for inst in instances:
         # In segmentation_result.json, "id" IS the unique instance_id (1-based).
-        inst_id = inst.get("id", inst.get("instance_id", inst.get("globalId")))
+        inst_id = inst.get("instance_id", inst.get("id", inst.get("globalId")))
         label = inst.get("label", f"object_{inst_id}")
 
         if obj_ids and inst_id not in obj_ids:

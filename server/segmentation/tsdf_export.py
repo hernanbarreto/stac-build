@@ -1173,7 +1173,7 @@ def export_tsdf_meshes(
     exported: List[Path] = []
 
     for inst in instances:
-        inst_id = inst.get("id", inst.get("instance_id", inst.get("globalId")))
+        inst_id = inst.get("instance_id", inst.get("id", inst.get("globalId")))
         label = inst.get("label", f"object_{inst_id}")
         if obj_ids and inst_id not in obj_ids:
             continue
@@ -3966,7 +3966,7 @@ def crop_scene_mesh_to_instances(
     exported: List[Path] = []
 
     for inst in instances:
-        inst_id = inst.get("id", inst.get("instance_id", inst.get("globalId")))
+        inst_id = inst.get("instance_id", inst.get("id", inst.get("globalId")))
         label = inst.get("label", f"object_{inst_id}")
         if obj_ids and inst_id not in obj_ids:
             continue

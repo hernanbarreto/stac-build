@@ -33,6 +33,13 @@ export function Dialog({ open, title, subtitle, icon, tone = 'default', size = '
   const ref = useRef<HTMLDivElement>(null)
   const lastActive = useRef<Element | null>(null)
 
+  // the latest handlers, read by the key listener — the effect below must run ONCE per opening: with
+  // `onClose` in its deps (a new arrow on every parent render) it re-ran on every progress poll and
+  // threw the focus back to the first control, the close X — typing in a search field was impossible
+  // (USER 2026-10-01)
+  const live = useRef({ onClose, busy, nonBlocking })
+  live.current = { onClose, busy, nonBlocking }
+
   useEffect(() => {
     if (!open) return
     lastActive.current = document.activeElement
@@ -41,8 +48,9 @@ export function Dialog({ open, title, subtitle, icon, tone = 'default', size = '
     const initial = node?.querySelector<HTMLElement>('[data-autofocus]') ?? focusables()[0]
     initial?.focus()
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && onClose && !busy) { e.stopPropagation(); onClose() }
-      if (e.key === 'Tab' && !nonBlocking) {
+      const { onClose: close, busy: isBusy, nonBlocking: passthrough } = live.current
+      if (e.key === 'Escape' && close && !isBusy) { e.stopPropagation(); close() }
+      if (e.key === 'Tab' && !passthrough) {
         const els = focusables()
         if (!els.length) return
         const first = els[0], last = els[els.length - 1]
@@ -56,7 +64,7 @@ export function Dialog({ open, title, subtitle, icon, tone = 'default', size = '
       const prev = lastActive.current as HTMLElement | null
       prev?.focus?.()
     }
-  }, [open, onClose, nonBlocking, busy])
+  }, [open])
 
   if (!open) return null
   const dialog = (
