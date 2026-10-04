@@ -2001,6 +2001,8 @@ function App() {
   // verdict (USER 2026-09-16: nothing waits for approval any more)
   const storedEpochs: number = Math.max((certifyState?.epochs?.length ?? 0) - 1, 0)
   const selectedSegment = segments.find(s => s.id === selectedSegmentId) ?? null
+  // the selected segment lights its OBB and shows H / W / D in the viewport (USER 2026-10-04)
+  useEffect(() => { viewportRef.current?.setSelectedSegment(selectedSegment?.key ?? null) }, [selectedSegment?.key])
   const hasSabanaResult = !!sessions.find(s => s.id === activeSession)?.hasSabana
 
   if (authLoading) {
@@ -2206,6 +2208,7 @@ function App() {
             onHasCameraPoses={setHasCameraPoses}
             onCursor={setCursor}
             onReadouts={setReadouts}
+            onSegmentPicked={cls => { const seg = segments.find(s => s.classId === cls); if (seg) { setSelectedSegmentId(seg.id); layout.setLeftTab('instances'); layout.openInspector('properties') } }}
             onViewScale={setMetersPerPixel}
           />
 

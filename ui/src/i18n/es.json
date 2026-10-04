@@ -462,7 +462,10 @@
     "east": "E",
     "south": "S",
     "west": "O",
-    "bottom": "Inferior"
+    "bottom": "Inferior",
+    "dimH": "Al",
+    "dimW": "An",
+    "dimD": "Pr"
   },
   "gizmo": {
     "move": "Mover",

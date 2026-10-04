@@ -506,3 +506,11 @@
   color: var(--text-3);
   font-size: var(--fs-0);
 }
+
+.stac-readout__tag {
+  margin-right: var(--sp-half);
+  font-family: var(--font-mono);
+  font-size: var(--fs-0);
+  font-weight: var(--fw-medium);
+  color: var(--brand-orange);
+}

@@ -29,6 +29,8 @@ export interface ReadoutAnchor {
   ax: number
   ay: number
   kind: 'distance' | 'angle'
+  /** a short label in front of the value (H / W / D of a selected segment) */
+  tag?: string
   metres?: number
   degrees?: number
   visible: boolean
@@ -120,6 +122,7 @@ export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, 
         return (
           <div key={r.id} className="stac-hud__readout" style={{ '--rx': `${r.x}px`, '--ry': `${r.y}px` } as React.CSSProperties}>
             <span className="stac-readout stac-readout--compact stac-readout--measure">
+              {r.tag && <span className="stac-readout__tag">{r.tag}</span>}
               {r.kind === 'distance' && len && <><span className="stac-readout__value">{len.value}</span><span className="stac-readout__unit">{len.unit}</span></>}
               {r.kind === 'angle' && r.degrees != null && <><span className="stac-readout__value">{fmt.number(r.degrees, 1)}</span><span className="stac-readout__unit">°</span></>}
             </span>

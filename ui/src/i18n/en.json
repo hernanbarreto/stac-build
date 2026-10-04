@@ -462,7 +462,10 @@
     "east": "E",
     "south": "S",
     "west": "W",
-    "bottom": "Bottom"
+    "bottom": "Bottom",
+    "dimH": "H",
+    "dimW": "W",
+    "dimD": "D"
   },
   "gizmo": {
     "move": "Move",

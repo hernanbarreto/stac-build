@@ -88,6 +88,8 @@ interface ViewportProps {
     onReadouts?: (anchors: ReadoutAnchor[]) => void
     /** Metres per screen pixel at the orbit target (HUD scale bar). */
     onViewScale?: (metersPerPixel: number) => void
+    /** a click on a point of the cloud (navigate tool) names its segment by CLASS BYTE (USER 2026-10-04) */
+    onSegmentPicked?: (classId: number) => void
 }
 
 export interface SegmentInstance {
@@ -216,6 +218,8 @@ export interface ViewportHandle {
     flyToPoint: (p: number[], radius: number) => void
     /** Navigation cube: look from a standard direction keeping target + distance. */
     setStandardView: (preset: ViewPreset) => void
+    /** light the segment's OBB and draw its H / W / D dimensions (null clears) — USER 2026-10-04 */
+    setSelectedSegment: (key: string | null) => void
     /** ViewCube (USER 2026-10-04): the main camera's orientation, a snap to any direction, an orbit step */
     getCameraQuaternion: () => THREE.Quaternion | null
     orientView: (dir: [number, number, number]) => void
@@ -553,7 +557,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onViewScale },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onViewScale, onSegmentPicked },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -996,10 +1000,14 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     useEffect(() => { onCursorRef.current = onCursor }, [onCursor])
     const onReadoutsRef = useRef(onReadouts)
     useEffect(() => { onReadoutsRef.current = onReadouts }, [onReadouts])
+    const onSegmentPickedRef = useRef(onSegmentPicked)
+    useEffect(() => { onSegmentPickedRef.current = onSegmentPicked }, [onSegmentPicked])
+    /** the selected segment's key (its OBB lit, its H / W / D dimensions drawn) — survives an OBB rebuild */
+    const selectedSegKeyRef = useRef<string | null>(null)
     const onViewScaleRef = useRef(onViewScale)
     useEffect(() => { onViewScaleRef.current = onViewScale }, [onViewScale])
     // HUD readouts: world anchors of the measurement labels, projected each frame
-    type WorldReadout = { id: string; kind: 'distance' | 'angle'; pos: THREE.Vector3; anchor: THREE.Vector3; metres?: number; degrees?: number }
+    type WorldReadout = { id: string; kind: 'distance' | 'angle'; pos: THREE.Vector3; anchor: THREE.Vector3; metres?: number; degrees?: number; tag?: string }
     const readoutsWorldRef = useRef<WorldReadout[]>([])
     const liveReadoutRef = useRef<WorldReadout | null>(null)
     const lastReadoutKeyRef = useRef('')
@@ -1955,6 +1963,67 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
         })
     }, [])
+
+    // ── Segment selection (USER 2026-10-04): the OBB lights up and its H / W / D dimensions are drawn ──
+    const clearSegmentSelection = useCallback(() => {
+        obbMapRef.current.forEach(c => {
+            const rig = c.getObjectByName('obb-dims')
+            if (rig) { rig.traverse(o => { const m = o as THREE.Line; m.geometry?.dispose(); (m.material as THREE.Material)?.dispose?.() }); c.remove(rig) }
+            const wire = c.getObjectByName('obb-wire') as THREE.LineSegments | undefined
+            if (wire && wire.userData.origColor != null) {
+                (wire.material as THREE.LineBasicMaterial).color.setHex(wire.userData.origColor as number)
+                wire.userData.origColor = null
+            }
+        })
+        readoutsWorldRef.current = readoutsWorldRef.current.filter(r => !r.id.startsWith('dim-'))
+    }, [])
+
+    const applySegmentSelection = useCallback((key: string | null) => {
+        clearSegmentSelection()
+        selectedSegKeyRef.current = key
+        if (!key) return
+        const c = obbMapRef.current.get(key)
+        const half = c?.userData.halfExtents as number[] | undefined
+        if (!c || !half || half.length !== 3) return
+        const wire = c.getObjectByName('obb-wire') as THREE.LineSegments | undefined
+        if (wire) {
+            const mat = wire.material as THREE.LineBasicMaterial
+            wire.userData.origColor = mat.color.getHex()
+            mat.color.setHex(tokenHex(VP.marker))
+        }
+        c.updateMatrixWorld(true)
+        // which local axis is the HEIGHT (the one closest to world up); of the other two the longer is the width
+        const basis = [0, 1, 2].map(i => new THREE.Vector3().setFromMatrixColumn(c.matrixWorld, i).normalize())
+        const hAxis = basis.map((b, i) => [Math.abs(b.y), i] as [number, number]).sort((a, b) => b[0] - a[0])[0][1]
+        const rest = [0, 1, 2].filter(i => i !== hAxis)
+        const wAxis = half[rest[0]] >= half[rest[1]] ? rest[0] : rest[1]
+        const dAxis = rest.find(i => i !== wAxis)!
+        const o = Math.max(0.02, 0.08 * Math.max(...half))             // the dimension lines sit just outside the box
+        const unit = (i: number, v: number) => { const a = [0, 0, 0]; a[i] = v; return new THREE.Vector3(a[0], a[1], a[2]) }
+        const rig = new THREE.Group(); rig.name = 'obb-dims'
+        const col = tokenHex(VP.measure)
+        const mkLine = (a: THREE.Vector3, b: THREE.Vector3) => new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), new THREE.LineBasicMaterial({ color: col, depthTest: false, transparent: true }))
+        const dims: Array<{ axis: number; tag: string; at: THREE.Vector3; tick: THREE.Vector3 }> = [
+            // height: along hAxis at the (+w, +d) corner, pushed out along w and d
+            { axis: hAxis, tag: 'H', at: unit(wAxis, half[wAxis] + o).add(unit(dAxis, half[dAxis] + o)), tick: unit(wAxis, 1) },
+            // width: along wAxis at the bottom (−h) front (+d) edge
+            { axis: wAxis, tag: 'W', at: unit(hAxis, -half[hAxis] - o).add(unit(dAxis, half[dAxis] + o)), tick: unit(hAxis, 1) },
+            // depth: along dAxis at the bottom (−h) right (+w) edge
+            { axis: dAxis, tag: 'D', at: unit(hAxis, -half[hAxis] - o).add(unit(wAxis, half[wAxis] + o)), tick: unit(hAxis, 1) },
+        ]
+        readoutsWorldRef.current = readoutsWorldRef.current.filter(r => !r.id.startsWith('dim-'))
+        for (const d of dims) {
+            const a = d.at.clone().add(unit(d.axis, -half[d.axis])), b = d.at.clone().add(unit(d.axis, half[d.axis]))
+            rig.add(mkLine(a, b))
+            const tk = d.tick.clone().multiplyScalar(o * 0.35)
+            rig.add(mkLine(a.clone().sub(tk), a.clone().add(tk)), mkLine(b.clone().sub(tk), b.clone().add(tk)))
+            const mid = c.localToWorld(d.at.clone())
+            readoutsWorldRef.current.push({ id: `dim-${d.tag}`, kind: 'distance', pos: mid.clone(), anchor: mid.clone(),
+                                            metres: 2 * half[d.axis], tag: tt(`view.dim${d.tag}`) })
+        }
+        rig.renderOrder = 20
+        c.add(rig)
+    }, [clearSegmentSelection])
 
     // ── ShapeR mesh auto-load helpers ────────────────────────────────
     const clearAllShapes = useCallback(() => {
@@ -3004,6 +3073,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             cam.lookAt(ctrl.target)
             ctrl.update()
         },
+        setSelectedSegment: (key: string | null) => applySegmentSelection(key),
         getCameraQuaternion: () => cameraRef.current ? cameraRef.current.quaternion : null,
         orientView: (dir: [number, number, number]) => {
             const cam = cameraRef.current
@@ -3378,7 +3448,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     v.copy(r.pos).project(camera)
                     const x = (v.x * 0.5 + 0.5) * w, y = (-v.y * 0.5 + 0.5) * h, visible = v.z < 1 && x >= 0 && x <= w && y >= 0 && y <= h
                     v.copy(r.anchor).project(camera)
-                    return { id: r.id, kind: r.kind, x: Math.round(x), y: Math.round(y), ax: Math.round((v.x * 0.5 + 0.5) * w), ay: Math.round((-v.y * 0.5 + 0.5) * h), metres: r.metres, degrees: r.degrees, visible }
+                    return { id: r.id, kind: r.kind, tag: r.tag, x: Math.round(x), y: Math.round(y), ax: Math.round((v.x * 0.5 + 0.5) * w), ay: Math.round((-v.y * 0.5 + 0.5) * h), metres: r.metres, degrees: r.degrees, visible }
                 })
                 const key = out.map(r => `${r.id}:${r.x}:${r.y}:${r.visible ? 1 : 0}`).join('|')
                 if (key !== lastReadoutKeyRef.current) { lastReadoutKeyRef.current = key; onReadoutsRef.current?.(out) }
@@ -3444,6 +3514,36 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
         // Click + keyboard handlers for measurements
         const onCanvasClick = (e: MouseEvent) => handleMeasureClick(e)
+        // a click on a POINT of the cloud selects its segment (USER 2026-10-04): navigate tool, no drag,
+        // nothing else picked (volumes and placed objects keep their own click handlers)
+        let pickDown: [number, number] | null = null
+        const onPickDown = (e: MouseEvent) => { if (e.button === 0) pickDown = [e.clientX, e.clientY] }
+        const onPickClick = (e: MouseEvent) => {
+            if (activeToolRef.current !== 'navigate' || !onSegmentPickedRef.current) return
+            if (pickDown && (Math.abs(e.clientX - pickDown[0]) > 4 || Math.abs(e.clientY - pickDown[1]) > 4)) return
+            if (cloudHiddenRef.current) return
+            const rect = renderer.domElement.getBoundingClientRect()
+            const mouse = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1)
+            const rc = new THREE.Raycaster()
+            rc.setFromCamera(mouse, camera)
+            const others: THREE.Object3D[] = []
+            const viz = assistantVizRef.current
+            if (viz) others.push(...viz.pickableVolumes())
+            if (sceneObjectsGroupRef.current) others.push(sceneObjectsGroupRef.current)
+            if (others.length && rc.intersectObjects(others, true).length) return
+            rc.params.Points = { threshold: 0.02 }
+            const targets: THREE.Object3D[] = []
+            if (pointCloudRef.current) targets.push(pointCloudRef.current)
+            const octreeGroup = sceneRef.current?.getObjectByName('potree-octree')
+            octreeGroup?.children.forEach(c => { if ((c.name || '').startsWith('potree-node-') && c.visible) targets.push(c) })
+            const hit = rc.intersectObjects(targets, false).find(h => h.index != null && hitIsVisible(h))
+            if (!hit) return
+            const geo = (hit.object as THREE.Points).geometry as THREE.BufferGeometry
+            const attr = geo.getAttribute('classId') as THREE.BufferAttribute | undefined
+            if (!attr) return
+            const cls = attr.getX(hit.index as number)
+            if (cls >= 0) onSegmentPickedRef.current(cls)
+        }
         const onContextMenu = (e: MouseEvent) => {
             if (activeToolRef.current === 'measure-distance' || activeToolRef.current === 'measure-angle') {
                 e.preventDefault()
@@ -3938,6 +4038,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         window.addEventListener('blur', endThrow)
         throwEndRef.current = () => { if (throwing) endThrow() }
         renderer.domElement.addEventListener('click', onCanvasClick)
+        renderer.domElement.addEventListener('mousedown', onPickDown)
+        renderer.domElement.addEventListener('click', onPickClick)
         renderer.domElement.addEventListener('contextmenu', onContextMenu)
         renderer.domElement.addEventListener('mousedown', onSectionDown)
         renderer.domElement.addEventListener('mousemove', onSectionMove)
@@ -3965,6 +4067,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             placeRef.current = null
             resizeObserver.disconnect()
             renderer.domElement.removeEventListener('click', onCanvasClick)
+            renderer.domElement.removeEventListener('mousedown', onPickDown)
+            renderer.domElement.removeEventListener('click', onPickClick)
             renderer.domElement.removeEventListener('contextmenu', onContextMenu)
             renderer.domElement.removeEventListener('mousedown', onSectionDown)
             renderer.domElement.removeEventListener('mousemove', onSectionMove)
@@ -5007,6 +5111,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
 
             obbContainer.add(wireframe)
+            obbContainer.userData.halfExtents = halfExtents.map(Number)
+            obbContainer.userData.segKey = globalKey
+            wireframe.name = 'obb-wire'
 
             // ── Voxel mesh: semi-transparent surface quads ──
             const voxelMesh = inst.voxel_mesh as { voxel_size: number; count: number; data: number[][] } | undefined
@@ -5114,6 +5221,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             obbContainer.visible = prevObbVis.get(globalKey) ?? true
             group.add(obbContainer)
             obbMapRef.current.set(globalKey, obbContainer)
+            if (selectedSegKeyRef.current === globalKey) applySegmentSelection(globalKey)   // a rebuilt OBB keeps its rig
             geom.dispose()
         }
 
