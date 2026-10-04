@@ -532,7 +532,9 @@ autoprompt:
                                       # bright region (per CONCEPT, the understanding prompt's rules), SAM3 runs the
                                       # new prompts over every keyframe, the projection runs again. Recorded in
                                       # vlm_analysis.json `second_pass` and the census.
-    enabled: true
+    enabled: false                    # USER 2026-10-04: OFF — this pass ADDED prompts (pccr: +16 prompts, 161 → 185
+                                      # segments) and the user wants FEWER, concentrated segments; the only second
+                                      # VLM pass is the one that concentrates the names (merge_synonyms) before SAM3
     max_calls: 300                    # BOUND (cost): keyframes looked at, the most unsegmented first
     dim: 0.25                         # brightness kept on the already-segmented pixels (0 = black, 1 = unchanged)
     grow_px: 6                        # BOUND (resolution): the sparse cloud pixels grown into a region
