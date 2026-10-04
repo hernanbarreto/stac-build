@@ -401,6 +401,7 @@ class CloudMetricsConfig:
     score_stride: int           # BOUND (cost): every n-th point scores a RANSAC candidate
     seed: int
     edge_max_objects: int       # BOUND (cost): largest objects measured by the edge metric
+    edge_timeout_s: float       # BOUND (cost): the edge metric runs in its own process and is killed past this
 
 
 # ── chunk / keyframe floor check (USER 2026-09-29: "verificación interna e intrachunk") ──
@@ -748,7 +749,8 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
         max_points=_num(cm, "max_points", "cloud_metrics", lo=1000, integer=True),
         score_stride=_num(cm, "score_stride", "cloud_metrics", lo=1, integer=True),
         seed=_num(cm, "seed", "cloud_metrics", lo=0, integer=True),
-        edge_max_objects=_num(cm, "edge_max_objects", "cloud_metrics", lo=0, integer=True))
+        edge_max_objects=_num(cm, "edge_max_objects", "cloud_metrics", lo=0, integer=True),
+        edge_timeout_s=_num(cm, "edge_timeout_s", "cloud_metrics", lo=1.0))
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,
                            tracks=tracks, refine=refine, depth=depth, fuse=fuse,
                            cloud=cloud, bend=bend, flyers=flyers, mono_detail=mono_detail,

@@ -2493,7 +2493,10 @@ reconstruction:
       max_points: 6000000               # BOUND (cost): subsample of the cloud
       score_stride: 10                  # BOUND (cost): every 10th point scores a RANSAC candidate
       seed: 0
-      edge_max_objects: 40              # BOUND (cost): the largest objects the edge metric measures in the acta
+      edge_max_objects: 20              # BOUND (cost): the largest objects the edge metric measures in the acta
+                                        #   (pccr 2026-10-04: ~1 min per object; one object held the in-process call
+                                        #   for over 30 min → the metric now runs in a subprocess under the timeout)
+      edge_timeout_s: 900               # BOUND (cost): the whole edge metric is killed past this and declared unmeasured
     chunk_check:                        # USER 2026-09-29: per-chunk AND per-keyframe verification of
                                         # the corrected geometry against the floor/ceiling, DA3 as the
                                         # independent instrument (precision/chunk_check.py). Verdict per

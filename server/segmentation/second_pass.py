@@ -274,7 +274,7 @@ def run_second_pass(session_dir: Path, config: dict, log: Callable = print,
         from segmentation.pipeline import run_segmentation
         res = run_segmentation(frames_dir=str(session_dir / "frames"), output_dir=str(out), prompt=";".join(new),
                                frame_map={}, boxes_map=None, prompt_status=prompt_status, fallback_prompts=fb,
-                               on_progress=lambda pct, m: _p(40 + 0.4 * pct, m))
+                               on_progress=lambda pct, m: _p(40 + 0.4 * pct, m), defer_cloud_mapping=True)
     else:
         res = segment(";".join(new), prompt_status, fb)
     if isinstance(res, dict) and res.get("error"):

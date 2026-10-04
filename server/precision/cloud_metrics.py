@@ -116,6 +116,35 @@ def floor_metric(X: np.ndarray, c2w: np.ndarray, cfg, seed: int = 0) -> dict:
             "band_share": float(len(B) / max(len(X), 1)), "points_measured": int(len(X))}
 
 
+def _edge_metric_subprocess(out: Path, ply: Path, seg: Path, ids, timeout_s: float, log: Callable) -> dict:
+    """precision/edge_metric.py in its own process, killed at ``timeout_s`` (pccr 2026-10-04: one object,
+    electrical_panel_5, held the certify stage for over half an hour in the in-process call; a report
+    may never hold the pipeline). Returns the parsed report; raises on a timeout or a failure."""
+    import subprocess
+    import sys as _sys
+    out_path = out / "precision" / "edge_metric.json"
+    cmd = [_sys.executable, "-m", "precision.edge_metric", "--session-output", str(out), "--ply", str(ply),
+           "--seg", str(seg), "--out", str(out_path), "--instance-ids", *[str(i) for i in ids]]
+    server_dir = Path(__file__).resolve().parents[1]
+    t0 = time.time()
+    try:
+        proc = subprocess.run(cmd, cwd=str(server_dir), capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        raise CloudMetricsError(f"edge metric killed after {timeout_s:.0f} s (precision.cloud_metrics.edge_timeout_s) "
+                                f"on {len(ids)} object(s) — not measured this run")
+    for line in (proc.stdout or "").splitlines():
+        if line.startswith("[edge]"):
+            log(line)
+    if proc.returncode != 0:
+        tail = (proc.stderr or "").strip().splitlines()[-3:]
+        raise CloudMetricsError(f"edge metric failed (exit {proc.returncode}): {' | '.join(tail)}")
+    if not out_path.exists():
+        raise CloudMetricsError("edge metric wrote no report")
+    rep = json.loads(out_path.read_text())
+    rep["seconds"] = rep.get("seconds", round(time.time() - t0, 1))
+    return rep
+
+
 def _epoch(out: Path) -> Optional[int]:
     p = out / "geometry_epoch.json"
     try:
@@ -157,11 +186,12 @@ def run_cloud_metrics(session_dir: Path, pcfg, stage: str, log: Callable = print
         try:
             if not seg.exists():
                 raise CloudMetricsError("no segmentation_result.json — the edge metric needs the projected objects")
-            from precision.edge_metric import run as edge_run
             doc = json.loads(seg.read_text())
             inst = sorted(doc.get("instances", []), key=lambda i: -int(i.get("total_points") or len(i.get("globalIndices") or [])))
             ids = [int(i.get("instance_id", i.get("id"))) for i in inst[:int(cfg.edge_max_objects)]]
-            er = edge_run(out, ply, seg, out_path=out / "precision" / "edge_metric.json", instance_ids=ids, log=log)
+            if not ids:
+                raise CloudMetricsError("edge_max_objects is 0 — the edge metric is off")
+            er = _edge_metric_subprocess(out, ply, seg, ids, float(cfg.edge_timeout_s), log)
             objs = er.get("reference", {}).get("objects", [])
             summ = [o["summary"] for o in objs if o.get("summary") and o["summary"].get("n_creases")]
             rep["edges"] = {"objects_measured": len(objs), "objects_with_creases": len(summ),

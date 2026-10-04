@@ -37,9 +37,12 @@ logger = logging.getLogger("SegPipeline")
 def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
                      frame_map: dict = None, on_progress=None,
                      boxes_map: dict = None, prompt_status: dict = None,
-                     fallback_prompts: dict = None) -> dict:
+                     fallback_prompts: dict = None, defer_cloud_mapping: bool = False) -> dict:
     """
     Full segmentation pipeline: batched SAM3 → IoU ID matching → mask-to-point mapping.
+    ``defer_cloud_mapping`` skips the in-run mask→cloud matching even when the cloud exists —
+    the caller projects itself (the second VLM pass: the in-run full match took 1 h 52 min on
+    pccr 2026-10-04 against the cloud stage's 23 min projection that followed it anyway).
 
     Supports multiple categories separated by ';' (e.g., "sofa;cushion;table").
     Uses the same blur-filtered frame set as reconstruction to ensure frame_global indices match.
@@ -127,11 +130,11 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
         # cloudcompy → tsdf) the cleaned cloud does not exist yet — the
         # mapping is DEFERRED to the cloudcompy stage, which calls
         # map_segmentation_to_cloud() after the (corrected) merge.
-        if (output_dir / "cleaned_cloud.ply").exists():
+        if (output_dir / "cleaned_cloud.ply").exists() and not defer_cloud_mapping:
             result = _match_and_save_result(output_dir)
         else:
-            print("[SegPipeline] ⏭ No cleaned_cloud.ply yet — mask→cloud "
-                  "mapping deferred to the cloudcompy stage")
+            print("[SegPipeline] ⏭ mask→cloud mapping deferred to the caller"
+                  + ("" if defer_cloud_mapping else " (no cleaned_cloud.ply yet — the cloudcompy stage projects)"))
             result = {"deferred_cloud_mapping": True, "instances": []}
 
         # (Step 5 removed: the ShapeR PKL export is gone — MeshFlow mesh
