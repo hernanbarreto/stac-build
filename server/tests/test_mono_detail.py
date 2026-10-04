@@ -83,7 +83,8 @@ def test_tile_without_support_is_rejected_and_seams_show_no_step():
     weight = {0: np.ones((H, W))}
     weight[0][:, :48] = 0.0                                   # the left part carries no confidence at all
     mcfg = _mcfg(tile_px=64, tile_overlap_frac=0.5, context_scale=1.0, min_support_frac=0.5,
-                 tile_residual_quantile=100.0, lowpass_patch_fraction=0.5, side_reach_px=3)
+                 tile_residual_quantile=100.0, lowpass_patch_fraction=0.5, side_reach_px=3,
+                 detail_scope="surfaces")          # the blend is tested over the whole ramp
     dep, src, rep = MD.run_stage([0], {0: z_cal.copy()}, valid, weight, img_of, R(), mcfg, tau=0.02,
                                  native_px_per_omega_px=1.0, huber_k=1.345, log=lambda m: None)
     assert rep.rejected_support >= 1 and rep.accepted >= 2
@@ -141,3 +142,23 @@ def test_mixed_pixels_go_to_a_side_never_in_between_and_without_support_stay_unr
 def test_production_config_declares_the_phase_keys():
     m = load_precision_config().mono_detail
     assert isinstance(m.enabled, bool) and m.tile_px >= 16 and m.fit_space in ("depth", "inverse")   # the flag is the user's
+
+
+def test_edges_scope_applies_detail_only_near_discontinuities_and_within_tau():
+    """USER 2026-10-04: PointDiT's detail over every surface bent walls; 'edges' keeps Omega on the
+    surfaces and takes PointDiT only near a discontinuity, and only within the session's tolerance."""
+    H, W = 48, 96
+    z_cal = np.where(np.arange(W)[None, :] < 48, 2.0, 3.0).astype(np.float32) * np.ones((H, 1), np.float32)
+    v = np.ones((H, W), bool)
+    z_al = z_cal.copy()
+    z_al[20:28, 10:18] += 0.2       # a bump PointDiT invents far from the step (10 % — a surface disagreement)
+    z_al[20:28, 40:46] += 0.02      # a small feature next to the step (1 %, within tau)
+    fr = MD.refine_frame(z_cal, v, z_al, v, tau=0.02, band_px=1, sigma_px=3.0, reach_px=3,
+                         detail_scope="edges", detail_zone_px=12)
+    d = fr.depth
+    assert np.allclose(d[20:28, 10:18], 2.0)                                  # the far bump never entered
+    assert (fr.source[20:28, 10:18] == MD.SRC_OMEGA).all()
+    assert (fr.source[20:28, 40:46] == MD.SRC_DETAIL).any() and d[24, 43] > 2.005   # the near feature did
+    assert (fr.source[:, 62:90] == MD.SRC_OMEGA).all()                        # flat surfaces past the zone untouched
+    fr2 = MD.refine_frame(z_cal, v, z_al, v, tau=0.02, band_px=1, sigma_px=3.0, reach_px=3, detail_scope="surfaces")
+    assert (fr2.source[:, 62:90] == MD.SRC_DETAIL).any()                     # 'surfaces' = the first run's recipe: detail everywhere

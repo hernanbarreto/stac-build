@@ -85,3 +85,24 @@ def test_the_core_runs_inside_the_reconstruction_stage():
     keys = [s.key for s in RN.STEPS]
     assert keys[0] == "f0_camera" and keys[-1] == "f6_check" and "f7_cloud" in keys, keys
     assert not any("measure" in k or "visit_drift" in s.module for k, s in zip(keys, RN.STEPS)), keys
+
+
+def test_rerun_from_a_step_tolerates_the_clouds_it_published(monkeypatch, tmp_path):
+    """USER 2026-10-04: a changed depth stage re-runs over the same F5 — the new-cloud epochs the
+    previous bend published move no camera, so the finished prefix still counts."""
+    from precision import runner as R
+    steps = [R.Step("f5_refine", "F5", "da3", "m"), R.Step("f6_bend", "F6", "da3", "m"), R.Step("f6_check", "chk", "da3", "m")]
+    state = {"done": [{"key": "f5_refine", "epoch_after": 2}, {"key": "f6_bend", "epoch_after": 3}, {"key": "f6_check", "epoch_after": 3}]}
+    import correction.epoch as CE
+    monkeypatch.setattr(CE, "epoch_kind", lambda out, e: "new_cloud" if e == 3 else "transform")
+    # forgetting from f6_bend: the prefix ends at epoch 2, the session is at 3 (a published cloud) → resumes at f6_bend
+    state["done"] = state["done"][:1]
+    assert R.resume_point(state, steps, 3, out=tmp_path) == 1
+    # a TRANSFORM epoch in between is not tolerated
+    monkeypatch.setattr(CE, "epoch_kind", lambda out, e: "transform")
+    import pytest
+    with pytest.raises(R.ChainError):
+        R.resume_point(state, steps, 3, out=tmp_path)
+    # without `out` the old rule holds
+    with pytest.raises(R.ChainError):
+        R.resume_point(state, steps, 3)

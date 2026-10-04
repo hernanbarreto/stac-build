@@ -376,6 +376,8 @@ class MonoDetailConfig:
     min_support_frac: float     # a tile with less support than this share of its pixels is rejected
     tile_residual_quantile: float  # a tile whose residual is above this percentile of the session's tiles is rejected
     lowpass_patch_fraction: float  # lowpass sigma = Omega's patch on the camera grid × this
+    detail_scope: str           # 'edges' (detail only near discontinuities, within tau) | 'surfaces' (everywhere)
+    detail_zone_px: int         # BOUND (resolution): how far from a discontinuity the detail reaches ('edges')
     side_reach_px: int          # BOUND (resolution): how far past the band the front/back surfaces are read
     overlays: bool              # per-keyframe PNG overlays (bent | aligned | detail | band + status) for the eye
     ab_edge_gradient_quantile: float  # the A/B's edge band: image gradient energy above this percentile of the
@@ -713,6 +715,9 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
     if model not in ("H", "L"):
         raise PrecisionConfigError(f"'{SECTION}.mono_detail.model' must be 'H' or 'L', got {model!r}")
     fit_space = str(_require(md, "fit_space", "mono_detail"))
+    detail_scope = str(_require(md, "detail_scope", "mono_detail"))
+    if detail_scope not in ("edges", "surfaces"):
+        raise PrecisionConfigError(f"'{SECTION}.mono_detail.detail_scope' must be 'edges' or 'surfaces', got {detail_scope!r}")
     if fit_space not in ("depth", "inverse"):
         raise PrecisionConfigError(f"'{SECTION}.mono_detail.fit_space' must be 'depth' or 'inverse', got {fit_space!r}")
     mono_detail = MonoDetailConfig(enabled=_bool(md, "enabled", "mono_detail"), model=model,
@@ -730,6 +735,8 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
                                    min_support_frac=_num(md, "min_support_frac", "mono_detail", lo=0.0, hi=1.0),
                                    tile_residual_quantile=_num(md, "tile_residual_quantile", "mono_detail", lo=0.0, hi=100.0, lo_excl=True),
                                    lowpass_patch_fraction=_num(md, "lowpass_patch_fraction", "mono_detail", lo=0.0, lo_excl=True),
+                                   detail_scope=detail_scope,
+                                   detail_zone_px=_num(md, "detail_zone_px", "mono_detail", lo=1, integer=True),
                                    side_reach_px=_num(md, "side_reach_px", "mono_detail", lo=1, integer=True),
                                    overlays=_bool(md, "overlays", "mono_detail"),
                                    ab_edge_gradient_quantile=_num(md, "ab_edge_gradient_quantile", "mono_detail", lo=0.0, hi=100.0, lo_excl=True))

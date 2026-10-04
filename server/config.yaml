@@ -2473,6 +2473,12 @@ reconstruction:
                                         #   session's own tiles is rejected (its pixels keep Omega)
       lowpass_patch_fraction: 0.5       # lowpass σ = Omega's 16-px patch on the camera grid × this: what the
                                         #   calibrated depth resolves; finer than that comes from PointDiT
+      detail_scope: edges               # USER 2026-10-04 (first end-to-end run): the detail over EVERY surface bent
+                                        #   walls and shed points off a rack; what the user wanted was the filos.
+                                        #   edges = PointDiT's detail only within detail_zone_px of a discontinuity
+                                        #   (edges, ducts, cables, thin structures) and only within τ of Omega; every
+                                        #   other pixel keeps Omega. surfaces = the first run's recipe (A/B only)
+      detail_zone_px: 12                # BOUND (resolution): reach of the detail around a discontinuity ('edges')
       side_reach_px: 3                  # BOUND (resolution): pixels past the band where front / back are read
       overlays: false                   # per-keyframe PNGs under output/precision/mono_overlays/ for the eye
       ab_edge_gradient_quantile: 90.0   # the Phase 8 A/B's edge band = image gradient energy above this percentile

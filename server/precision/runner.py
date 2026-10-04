@@ -103,9 +103,22 @@ def _save_state(session_dir: Path, state: dict) -> None:
     os.replace(tmp, p)
 
 
-def resume_point(state: dict, steps: Sequence[Step], epoch_now: int) -> int:
+def _only_new_cloud_epochs(out: Optional[Path], e_from: int, e_to: int) -> bool:
+    """True when every epoch after ``e_from`` up to ``e_to`` is a NEW-CLOUD epoch: a published
+    cloud moves no camera, so the poses the chain left behind still hold (load_inputs' own rule)."""
+    if out is None or e_to <= e_from:
+        return False
+    try:
+        from correction.epoch import epoch_kind
+        return all(epoch_kind(out, e) == "new_cloud" for e in range(e_from + 1, e_to + 1))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def resume_point(state: dict, steps: Sequence[Step], epoch_now: int, out: Optional[Path] = None) -> int:
     """Index of the first step to run. The finished prefix counts only while the
-    session is in the epoch its last step left it in."""
+    session is in the epoch its last step left it in — or in a later epoch that only
+    published clouds (``out`` given), which the depth stage re-runs over."""
     done = state.get("done") or []
     keys = [s.key for s in steps]
     n = 0
@@ -117,7 +130,8 @@ def resume_point(state: dict, steps: Sequence[Step], epoch_now: int) -> int:
     if n == 0:
         return 0
     last = done[n - 1]
-    if int(last.get("epoch_after", -1)) != int(epoch_now):
+    if int(last.get("epoch_after", -1)) != int(epoch_now) and not _only_new_cloud_epochs(
+            out, int(last.get("epoch_after", -1)), int(epoch_now)):
         raise ChainError(f"the precision chain stopped after '{last['key']}' with the session in "
                          f"epoch {last.get('epoch_after')}, and it is now in epoch {epoch_now} — "
                          f"the remaining steps would run on geometry they did not produce; "
@@ -154,7 +168,10 @@ def run_chain(session_dir: Path, pcfg, *, log: Callable = print,
               progress: Optional[Callable[[float, str], None]] = None,
               cancelled: Optional[Callable[[], bool]] = None,
               before_gpu: Optional[Callable[[str], None]] = None,
-              steps: Optional[Sequence[Step]] = None) -> dict:
+              steps: Optional[Sequence[Step]] = None, from_step: Optional[str] = None) -> dict:
+    """``from_step``: forget the steps from that one on (its record and the later ones) and run
+    them again — a changed depth stage over the same F5 (USER 2026-10-04: "relanzamos desde donde
+    requiera esta modificación")."""
     steps = chain_steps(pcfg) if steps is None else steps
     session_dir = Path(session_dir).resolve()
     rcfg = pcfg.runner
@@ -164,7 +181,14 @@ def run_chain(session_dir: Path, pcfg, *, log: Callable = print,
             raise ChainError(f"precision.runner.python_{k} = {v} does not exist")
     server_dir = Path(__file__).resolve().parent.parent
     state = load_state(session_dir)
-    first = resume_point(state, steps, _epoch(session_dir))
+    if from_step is not None:
+        keys = [s.key for s in steps]
+        if from_step not in keys:
+            raise ChainError(f"--from {from_step!r}: not a step of this chain {keys}")
+        state["done"] = [r for r in (state.get("done") or [])[:keys.index(from_step)]]
+        _save_state(session_dir, state)
+        log(f"{LOG_TAG} re-running from '{from_step}' (the later records forgotten)")
+    first = resume_point(state, steps, _epoch(session_dir), out=session_dir / "output")
     state["done"] = list(state.get("done") or [])[:first]
     if first:
         log(f"{LOG_TAG} resuming after '{steps[first - 1].key}' "
@@ -214,6 +238,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m precision.runner",
                                  description="The precision core F0 → F7 on a session.")
     ap.add_argument("--session", required=True)
+    ap.add_argument("--from", dest="from_step", default=None, help="re-run from this step (f6_bend …)")
     args = ap.parse_args(argv)
     # by hand the card is not shared either: vLLM (the chat) is stopped, verified,
     # before every GPU step — the same rule the pipeline's worker applies
@@ -222,7 +247,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     def _before_gpu(label: str) -> None:
         stop_semantic_service_verified(None, stage=f"precision {label}", log=print)
 
-    run_chain(Path(args.session), load_precision_config(), before_gpu=_before_gpu)
+    run_chain(Path(args.session), load_precision_config(), before_gpu=_before_gpu, from_step=args.from_step)
     return 0
 
 

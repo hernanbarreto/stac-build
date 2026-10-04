@@ -265,11 +265,20 @@ class FrameRefinement:
 
 
 def refine_frame(z_cal: np.ndarray, valid_cal: np.ndarray, z_al: np.ndarray, al_valid: np.ndarray,
-                 tau: float, band_px: int, sigma_px: float, reach_px: int, align_err: float = 0.0
-                 ) -> FrameRefinement:
+                 tau: float, band_px: int, sigma_px: float, reach_px: int, align_err: float = 0.0,
+                 detail_scope: str = "edges", detail_zone_px: int = 12) -> FrameRefinement:
     """One keyframe's refined depth from its calibrated (bent) map and PointDiT's aligned map.
     ``tau``: the session's agreement tolerance (relative); ``align_err``: the frame's own alignment
-    error (relative MAD) — the band margin is the larger of the two."""
+    error (relative MAD) — the band margin is the larger of the two.
+
+    ``detail_scope`` (USER 2026-10-04, after the first end-to-end run: PointDiT's detail over every
+    surface bent walls and shed points off a rack, while ducts and cables Omega smeared came out —
+    "lo que habíamos dicho que iba a hacer era mejorar los filos"):
+      'edges'     the detail is applied ONLY within ``detail_zone_px`` of a discontinuity of the
+                  aligned map (edges, ducts, cables, thin structures: every pixel of a thin object
+                  lies near its own two discontinuities) and only where it stays within the
+                  session's own tolerance (|detail| ≤ τ·z); every other pixel keeps Omega untouched.
+      'surfaces'  the detail everywhere PointDiT covers (the first run's recipe, kept for the A/B)."""
     H, W = z_cal.shape
     both = valid_cal & al_valid & (z_al > 0) & (z_cal > 0)
     disc, band = discontinuity_band(z_al, both, tau, band_px)
@@ -284,6 +293,16 @@ def refine_frame(z_cal: np.ndarray, valid_cal: np.ndarray, z_al: np.ndarray, al_
     d = (z_al.astype(np.float64) - lp_a)
     z_new = lp_c + d
     m &= z_new > 0
+    if detail_scope == "edges":
+        from scipy.ndimage import binary_dilation
+        r = max(1, int(detail_zone_px))
+        zone = binary_dilation(disc, structure=np.ones((2 * r + 1, 2 * r + 1), bool))
+        # the change must stay within the session's own tolerance: beyond it PointDiT and Omega
+        # disagree on the SURFACE, and the surface is Omega's
+        within = np.abs(z_new - z_cal.astype(np.float64)) <= float(tau) * np.maximum(z_cal.astype(np.float64), 1e-9)
+        m &= zone & within
+    elif detail_scope != "surfaces":
+        raise MonoDetailError(f"detail_scope must be 'edges' or 'surfaces', got {detail_scope!r}")
     out[m] = z_new[m].astype(np.float32)
     detail[m] = d[m].astype(np.float32)
     src[m] = SRC_DETAIL
@@ -343,7 +362,8 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
     weights = feather_weights(H, W, tiles)
     band_px = band_half_width_px(float(mcfg.context_scale))
     sigma_px = lowpass_sigma_px(PATCH, native_px_per_omega_px, float(mcfg.lowpass_patch_fraction))
-    rep = StageReport(params={"tiles_per_frame": len(tiles), "tile": [tiles[0].h, tiles[0].w],
+    rep = StageReport(params={"detail_scope": str(mcfg.detail_scope), "detail_zone_px": int(mcfg.detail_zone_px),
+                              "tiles_per_frame": len(tiles), "tile": [tiles[0].h, tiles[0].w],
                               "run_size": [tiles[0].run_h, tiles[0].run_w], "band_px": band_px,
                               "lowpass_sigma_px": round(sigma_px, 2), "tau": tau, "fit_space": mcfg.fit_space,
                               "context_scale": float(mcfg.context_scale)})
@@ -421,7 +441,8 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
             z_al_f = np.where(al_valid, num / np.maximum(den, 1e-12), 0.0).astype(np.float32)
         acc = [tf.residual for tf in fits[f] if tf.accepted]
         align_err = float(np.median(acc)) if acc else 0.0
-        fr = refine_frame(zc, vc, z_al_f, al_valid, tau, band_px, sigma_px, int(mcfg.side_reach_px), align_err)
+        fr = refine_frame(zc, vc, z_al_f, al_valid, tau, band_px, sigma_px, int(mcfg.side_reach_px), align_err,
+                          detail_scope=str(mcfg.detail_scope), detail_zone_px=int(mcfg.detail_zone_px))
         out_dep[f] = fr.depth; out_src[f] = fr.source
         ur, uc = np.nonzero(fr.source == SRC_UNRESOLVED)
         if len(ur):
