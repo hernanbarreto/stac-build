@@ -1,4 +1,4 @@
-# Final reconstruction pipeline — STATE OF 2026-10-01 (read this first in a new session)
+# Final reconstruction pipeline — STATE OF 2026-10-04 (read this first in a new session)
 
 This file is the single source of truth for: what the reconstruction pipeline IS today, what each
 stage does, the user decisions behind it, and EVERY pending item (two lists at the end: A = the
@@ -34,7 +34,7 @@ que describiste es correcto").
 | 3 | Omega | `workers/map_worker.py` `_run_vggtomega` | chunks of 5 m of walk, 50 % overlap (pccr: 6); poses, metric scale, per-keyframe depth + conf (`omega_run/results_output/frame_<f>.npz`) |
 | 4 | F0, F2, F4 (F3 report) | `precision/` runner steps | session camera, continuous gauge, native-pixel tracks |
 | 5 | F5 | `precision/refine.py` | corrected poses + camera (rung chosen by held-out; pccr R1, fx 364→392) |
-| 6 | **Depth on F5 (`f6_bend`)** | `precision/depth_on_f5.py`, `precision.cloud.source: omega_bent`, config `precision.bend` | (a) F5 FIT tracks triangulated with F5 poses + camera; (b) per keyframe Omega depth × k(u,v)=c0+c1·u+c2·v, fitted EXACTLY as epoch 7: 10-step Huber IRLS (`bend.irls_iterations`), landmark rows on depth > `bend.min_depth_m` (0.05), < `bend.min_rows` (20) rows → k = 1, window by half A of the HELD-OUT tracks (pccr ±0, 7.25 % → 2.80 %); (c) validity = the ONE confidence floor (`conf_min_norm`, min-max per Omega chunk) + not sky; (d) epoch 8's EDGE-KEEPING VOTE: τ = p75 of the neighbour disagreement on INTERIOR pixels (pccr 1.93 %), mixed pixels at contours snapped to their SAM3 mask's side, two-sided vote over ±3/±6/±12, contradicted pixels repaired to the neighbours' median when ≥ 2 agree, below-floor edge pixels admitted when confirmed; confidence column = agree count. pccr: 63.1 % kept, 15.1 % contradicted, 8.5 % repaired, 0.4 % admitted, coverage 71.0 % |
+| 6 | **Depth on F5 (`f6_bend`)** | `precision/depth_on_f5.py`, `precision.cloud.source: omega_bent`, config `precision.bend`; **mono detail** `precision/mono_detail.py` + `precision/pointdit_runner.py`, config `precision.mono_detail` (flag `enabled`) | (a) F5 FIT tracks triangulated with F5 poses + camera; (b) per keyframe Omega depth × k(u,v)=c0+c1·u+c2·v, fitted EXACTLY as epoch 7: 10-step Huber IRLS (`bend.irls_iterations`), landmark rows on depth > `bend.min_depth_m` (0.05), < `bend.min_rows` (20) rows → k = 1, window by half A of the HELD-OUT tracks (pccr ±0, 7.25 % → 2.80 %); (c) validity = the ONE confidence floor (`conf_min_norm`, min-max per Omega chunk) + not sky; (d) epoch 8's EDGE-KEEPING VOTE: τ = p75 of the neighbour disagreement on INTERIOR pixels (pccr 1.93 %), mixed pixels at contours snapped to their SAM3 mask's side, two-sided vote over ±3/±6/±12, contradicted pixels repaired to the neighbours' median when ≥ 2 agree, below-floor edge pixels admitted when confirmed; confidence column = agree count. pccr: 63.1 % kept, 15.1 % contradicted, 8.5 % repaired, 0.4 % admitted, coverage 71.0 %. **(c2) MONO DETAIL (USER 2026-10-04, `mono_detail.enabled`)** between the bend and the vote: PointDiT-H (DINOv3 ViT-H+/16, 16 Euler steps from zeros, deterministic) on native 512-px tiles with feathered overlaps → per tile z_cal ≈ s·z_mono + b (Huber IRLS weighted by the calibrated confidence, outside the band; tiles rejected by support or by the session's p95 residual) → z = lowpass(z_bent) + (z_al − lowpass(z_al)) with σ from Omega's patch; the discontinuity band (1-px jump > τ, dilated by context_scale) resolves Omega's MIXED pixels to the front or back surface by PointDiT's side, or marks them mixed_unresolved (out of the cloud). Metric and gauge are never touched (DA3's). Per-pixel provenance → cloud column `source` (1 omega_bent, 2 mono_detail, 3 band_front, 4 band_back); report `depth_on_f5.json` `mono_detail`; viewer layers View → PointDiT detail / Mixed unresolved. Flag off = epoch 8 bit for bit (tested) |
 | 7 | Cloud publish | `precision/corrected_cloud.publish` | voxel + SOR, octree, transactional epoch; `corrected_cloud.json` carries per-frame s_k + bend; intrinsic.txt inside the transaction |
 | 8 | Mask projection + OBBs | `segmentation/pipeline.py` (cloud stage) | class byte = `_encode_classification` + `class_map.json` (`class_byte` on every viewer payload); co-visible split (camera-return rule + free-space test); split children listed (`mask_fates.created_by_projection`); OBB yaw by RANSAC; every instance inherits its concept's `shape_caption` |
 | 9 | Certification | `workers/certify_worker.py`, `reconstruction/certify/run.py`, `correction/` | depth per chunk; floor per chunk BLENDED across overlaps; mask filter with the cloud's own camera (`camera.json`), rule 4 by majority of views; NO MLS (`precision.cloud.consolidate: false`); chunk check on the CERTIFIED depth (composes the transform epochs) |
@@ -48,10 +48,7 @@ PKL views = every posed keyframe that SEES the object (occlusion test with the p
 texture baked from the scan frames (`shaper.texture`); progress per object in the dialog.
 **Mesh** = RANSAC + Poisson today → to become point2cad (pending B2).
 
-**Run checks:** chunk check (automatic, in the acta). The crease-profile edge metric
-(`precision/edge_metric.py`) and the floor metric (`analysis/2026-09-30_depth_sources/floor_metric.py`:
-layer thickness + tilt-removed undulation per 1 m cell) exist but run by hand (pending A-checks).
-pccr epoch 7 reference: 18.5 M pts, floor 5.2 cm thickness / 7.6 cm undulation.
+**Run checks (automatic since 2026-10-04):** chunk check; `precision/cloud_metrics.py` = the floor metric (layer thickness + tilt-removed undulation per 1 m cell, every number in `precision.cloud_metrics`) after f6_bend (`chunk_check.json` → `cloud_metrics`) and on the certified cloud in the acta, where the crease-profile edge metric (`precision/edge_metric.py`, largest `edge_max_objects` objects) runs too; `output/precision/cloud_metrics.json`. pccr epoch 7 reference: 18.5 M pts, floor 5.2 cm thickness / 7.6 cm undulation. Diagnostics by hand: `python -m precision.flyers --session <dir>` (flyer classes a-d, viewer layer View → Flyers), `python -m precision.mono_ab --session <dir> --out <dir>` (the PointDiT A/B, Phase 8).
 
 **Viewer fixes of 2026-10-01** (in main): the session load and every epoch's potree_ready send the
 LIVE poses + intrinsic.txt (`main.py` `_camera_poses_payload`; maplong_run/ holds Omega's original
@@ -63,7 +60,7 @@ the objects the projection creates are listed (their points could never be hidde
 | # | Stage | Status |
 |---|---|---|
 | 1 | Intake | done |
-| 2 | VLM + SAM3 | done — **pending: VLM refinement** (below) |
+| 2 | VLM + SAM3 | done — VLM refinement DONE 2026-10-04: fallback with category; **second VLM pass** over the unsegmented points (`segmentation/second_pass.py`, in the cloud stage after the projection, `autoprompt.second_pass`); to validate on the fresh run (vLLM ↔ SAM3 hand-over) |
 | 3 | Omega (5 m chunks, 50 %) | done |
 | 4 | F0, F2, F4 (F3) | done |
 | 5 | F5 (R1) | done |
@@ -73,7 +70,8 @@ the objects the projection creates are listed (their points could never be hidde
 | 9 | Certification | done — **pending:** the chunk check flags a floor drift INSIDE chunk 0 (+16 cm, kf 0–62) and chunk 1 undecided (+5 cm); no intra-chunk correction exists |
 | 10 | One final epoch | done |
 | 11 | Per-object VLM description for ShapeR | done |
-| — | Run checks | **pending:** the edge metric and the floor metric run by hand, not as automatic reports of every run |
+| — | Run checks | done 2026-10-04 (`precision/cloud_metrics.py`, floor after f6_bend + floor and edges in the acta) |
+| — | PointDiT (claude_stac.txt 2026-10-04) | Phases 0-8 built (flyers, runner, tiles, affine, detail/band, mixed pixels, provenance + layers, A/B). **Flag `mono_detail.enabled` is decided by the A/B on pccr** (see analysis/2026-10-04_pointdit/ab/) |
 | — | End-to-end validation | **pending:** the user relaunches pccr from scratch (restart the backend first) |
 
 **VLM refinement (stage 2):** prompts per CONCEPT, never per object (the understanding prompt asks one entry per
@@ -131,6 +129,9 @@ measured vs generated (`caption_source`, view counts in its `.meta.json`).
   the pod now has libtiff 6 only ("libtiff.so.5: cannot open shared object file", 2026-10-01). Relinked
   with its own `apps/texrecon/CMakeFiles/texrecon.dir/link.txt`, `libtbb.so.12.19` → `libtbb.so.12`
   (the vendored oneTBB holds 12.15; a full `cmake ..` fails on that mismatch).
+- PointDiT: submodule `third_party/pointdit` (@ 11f53a3) with `third_party/dinov3` cloned inside and the weights under
+  `pretrained/` (H and L 512 checkpoints, DINOv3 ViT-H+/16 and ViT-L/16; sha256 verified), runs in env `da3`
+  (`torchmetrics` + `lightning-utilities` added `--no-deps`). Viewer: points drawn as cubes (View → Points as cubes).
 - The pccr session on disk (2026-10-01): live epoch 8 (certified, 18.2 M pts, 110 objects), stored
   epochs 0 / 6 / 7 — hand-built, not what the code produces; a "Reconstruir" wipes it.
 - Analysis scripts of the depth-source study: `analysis/2026-09-30_depth_sources/` (epoch 7 / 8

@@ -254,10 +254,12 @@ const vertexShader = `
   varying vec3 vWorldPos;
   varying vec3 vViewPos;
   varying float vSpritePx;
+  varying float vFocalPx;
   uniform float pointSize;
   // point shape (USER 2026-10-04: "cubos como en la página de PointDiT"): 0 = disc, 1 = cube — a
   // world-axis-aligned cube of the point's own size, ray-cast per fragment (see the fragment shader)
   uniform int uPointShape;
+  uniform float uViewportH;      // pixels — with projectionMatrix[1][1] it gives the focal length in px
   // 256 segment-visibility slots via a 256×1 LOOKUP TEXTURE (one texel per
   // instance id). The old float[16] uniform chain capped the viewer at 16
   // instances (test2: 46+). A texel fetch in the vertex shader is the
@@ -294,6 +296,7 @@ ${POINT_SHADOW_VERT_MAIN}
     float size = pointSize * 20.0 / depth;
     vViewPos = mvPosition.xyz;
     vSpritePx = clamp(size, 0.25, 40.0);
+    vFocalPx = projectionMatrix[1][1] * uViewportH * 0.5;   // projectionMatrix exists in the vertex stage only
     // a cube's projection is wider than its face: the sprite grows by sqrt(3) so no corner is clipped
     gl_PointSize = (uPointShape == 1) ? min(vSpritePx * 1.7321, 69.0) : vSpritePx;
   }
@@ -310,8 +313,8 @@ const fragmentShader = `
   varying vec3 vWorldPos;
   varying vec3 vViewPos;
   varying float vSpritePx;
+  varying float vFocalPx;
   uniform int uPointShape;
-  uniform float uViewportH;      // pixels — with projectionMatrix[1][1] it gives the focal length in px
   uniform mat3 uViewRotInv;      // view → world rotation (the cube's axes are the world's)
   uniform float highlightIntensity;
   uniform float uOpacity;
@@ -373,7 +376,7 @@ ${POINT_SHADOW_FRAG_DECL}
     if (uPointShape == 1) {
       // the cube: side = the point's own sprite size at its depth; the fragment's view ray is
       // intersected with that world-axis-aligned box (slab test); a miss is outside the cube
-      float focalPx = projectionMatrix[1][1] * uViewportH * 0.5;
+      float focalPx = max(vFocalPx, 1.0);
       float spritePx = vSpritePx * 1.7321;
       float depth = -vViewPos.z;
       vec2 offPx = vec2(centered.x, -centered.y) * spritePx;

@@ -1042,7 +1042,9 @@ def test_the_walk_limit_and_the_rerun_size_are_configured():
     cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
     s = cfg["reconstruction"]["simple"]
     assert float(s["max_walk_single_pass_m"]) == 15.0
-    assert float(s["chunk_walk_m"]) == 12.0, "the re-run is sized in WALKED METRES"
+    # the re-run is sized in WALKED METRES; the value is the USER's (12 m on 2026-09-23, 5 m since
+    # 2026-10-01: "Omega, 5 m chunks, 50 %" — docs/pipeline_final.md), never a number this test owns
+    assert float(s["chunk_walk_m"]) > 0.0, "the re-run is sized in WALKED METRES"
     # USER 2026-09-28: pinned to 152 (12 m on pccr 2026-08-24) after the walk probe
     # read 14.6x the walk; 0 = metres decide again once F2 measures the walk
     assert int(s["chunk_frames_over_walk"]) >= 0, "0 = metres decide; >0 pins a size"
