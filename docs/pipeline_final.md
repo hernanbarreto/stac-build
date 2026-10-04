@@ -71,7 +71,7 @@ the objects the projection creates are listed (their points could never be hidde
 | 10 | One final epoch | done |
 | 11 | Per-object VLM description for ShapeR | done |
 | — | Run checks | done 2026-10-04 (`precision/cloud_metrics.py`, floor after f6_bend + floor and edges in the acta) |
-| — | PointDiT (claude_stac.txt 2026-10-04) | Phases 0-8 built (flyers, runner, tiles, affine, detail/band, mixed pixels, provenance + layers, A/B). **Flag `mono_detail.enabled` is decided by the A/B on pccr** (see analysis/2026-10-04_pointdit/ab/) |
+| — | PointDiT (claude_stac.txt 2026-10-04) | Phases 0-8 built (flyers, runner, tiles, affine, detail/band, mixed pixels, provenance + layers, A/B). **`mono_detail.enabled: true` since 2026-10-04 by the USER's verdict on the maps** ("la nitidez de los bordes de pointdit es abrumadoramente superior a omega"). A/B pccr off → on: held-out 2.48 → 2.55 % (edge band 2.54 → 2.70 %, p90 29 → 39 %), contradicted 15.1 → 15.7 %, coverage 71.0 → 70.3 %, 18.42 → 19.29 M pts, mixed-edge flyers −30 %, +17 min (analysis/2026-10-04_pointdit/ab). **Pending:** the user's eye on the fresh cloud; next A/B variant 'detail only at the edges' (PointDiT in the widened band, Omega untouched on the surfaces) if the held-out loss matters |
 | — | End-to-end validation | **pending:** the user relaunches pccr from scratch (restart the backend first) |
 
 **VLM refinement (stage 2):** prompts per CONCEPT, never per object (the understanding prompt asks one entry per
