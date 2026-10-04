@@ -371,6 +371,37 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
             pipe.send_log(f"Mapped {n_applied} instances onto the cloud"
                           + (f" ({cov * 100:.1f}% coverage)" if cov is not None else ""))
             (output_dir / "seg_broadcast.json").write_text(_json.dumps(seg_data))
+            # THE SECOND VLM PASS over what stayed unsegmented (USER 2026-10-01; segmentation/
+            # second_pass.py): vLLM up for the calls, down for SAM3 on the new prompts, the
+            # projection again. Its failure is declared, never the stage's — the first projection stands.
+            if not pipe.check_cancel():
+                try:
+                    from segmentation.second_pass import run_second_pass
+                    from workers.base import stop_semantic_service_verified
+                    pipe.send_progress(96, "Second VLM pass over the unsegmented points...", stage="cloudcompy")
+                    sp = run_second_pass(session_path, config, log=pipe.send_log,
+                                         progress=lambda pct, m: pipe.send_progress(96 + 0.02 * pct, m, stage="cloudcompy"),
+                                         cancelled=pipe.check_cancel,
+                                         stop_vllm=lambda: stop_semantic_service_verified(pipe, stage="second pass SAM3"))
+                    if sp.get("new_prompts"):
+                        # the broadcast and the census describe what the store holds NOW
+                        res_path = output_dir / "segmentation_result.json"
+                        if res_path.exists():
+                            (output_dir / "seg_broadcast.json").write_text(res_path.read_text())
+                        try:
+                            from segmentation.census import build_census, visit_gap_kf
+                            vlm_doc = _json.loads((output_dir / "vlm_analysis.json").read_text())
+                            build_census(output_dir, prompt=str(vlm_doc.get("prompt") or ""), vlm_doc=vlm_doc,
+                                         gap_kf=visit_gap_kf(config), frames_dir=session_path / "frames",
+                                         prompt_status=sp.get("prompt_status"), log=pipe.send_log)
+                        except Exception as _ce:  # noqa: BLE001
+                            pipe.send_log(f"[second-pass] census not rewritten: {_ce}", level="warning")
+                    _b = sp.get("before", {}).get("unmasked_share"); _a = sp.get("after", {}).get("unmasked_share")
+                    pipe.send_log("[second-pass] " + (sp.get("skipped") or sp.get("note") or
+                                  f"{len(sp.get('new_prompts', []))} new prompt(s); unmasked points "
+                                  f"{(_b or 0) * 100:.1f} % → {((_a if _a is not None else _b) or 0) * 100:.1f} %"))
+                except Exception as _spe:  # noqa: BLE001 — declared
+                    pipe.send_log(f"[second-pass] not run: {type(_spe).__name__}: {_spe}", level="warning")
 
         # ── Build Potree LOD octree (so the first viewer load is instant) ──
         # Runs as the final reconstruction step. Carries the per-point

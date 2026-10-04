@@ -525,6 +525,17 @@ autoprompt:
                                       # names proposed by the FEWEST VLM calls (ties: seen later) are
                                       # not prompted, each recorded in the log + census as "BOUND
                                       # REACHED". The SAM3 stage logs its own measured s/prompt.
+  second_pass:                        # USER 2026-10-01 / built 2026-10-04 (segmentation/second_pass.py): after the
+                                      # cloud stage's projection, the VLM looks at what stayed UNSEGMENTED — the
+                                      # points whose source pixel carries no masklet (pccr: 14.6 % of the points)
+                                      # — shown with the segmented pixels dimmed, names the kinds of objects in the
+                                      # bright region (per CONCEPT, the understanding prompt's rules), SAM3 runs the
+                                      # new prompts over every keyframe, the projection runs again. Recorded in
+                                      # vlm_analysis.json `second_pass` and the census.
+    enabled: true
+    max_calls: 300                    # BOUND (cost): keyframes looked at, the most unsegmented first
+    dim: 0.25                         # brightness kept on the already-segmented pixels (0 = black, 1 = unchanged)
+    grow_px: 6                        # BOUND (resolution): the sparse cloud pixels grown into a region
   consolidate_prompts: true           # second VLM pass over the ASSEMBLED concept list (USER
                                       # 2026-09-16: "una segunda pasada para que fusione conceptos
                                       # en un único prompt"). The understanding runs frame by frame
