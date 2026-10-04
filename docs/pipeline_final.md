@@ -60,7 +60,7 @@ the objects the projection creates are listed (their points could never be hidde
 | # | Stage | Status |
 |---|---|---|
 | 1 | Intake | done |
-| 2 | VLM + SAM3 | done — VLM refinement DONE 2026-10-04: fallback with category; **second VLM pass** over the unsegmented points (`segmentation/second_pass.py`, in the cloud stage after the projection, `autoprompt.second_pass`); to validate on the fresh run (vLLM ↔ SAM3 hand-over) |
+| 2 | VLM + SAM3 | done — fallback with category (2026-10-04). The second pass over the UNSEGMENTED points (`segmentation/second_pass.py`) is **OFF** (USER 2026-10-04: it ADDED 16 prompts and segments on pccr and the floor ended inside an `electrical_panel` segment). **PENDING — smarter segmentation (USER 2026-10-04): the same physical object comes out as 3-4 segments under different names (not the same pixels, the same object: 10 'door', 10 'panel', 11 'metal_frame' on pccr). The consolidation must happen BEFORE SAM3 (one concept = one prompt, `merge_synonyms` is not enough) and/or AFTER the projection (merge the segments that are one physical object, the VLM deciding on the views). One VLM pass per image stays the rule (SAM3 prompt + ShapeR description in the same call).** |
 | 3 | Omega (5 m chunks, 50 %) | done |
 | 4 | F0, F2, F4 (F3) | done |
 | 5 | F5 (R1) | done |
@@ -71,7 +71,7 @@ the objects the projection creates are listed (their points could never be hidde
 | 10 | One final epoch | done |
 | 11 | Per-object VLM description for ShapeR | done |
 | — | Run checks | done 2026-10-04 (`precision/cloud_metrics.py`, floor after f6_bend + floor and edges in the acta) |
-| — | PointDiT (claude_stac.txt 2026-10-04) | Phases 0-8 built (flyers, runner, tiles, affine, detail/band, mixed pixels, provenance + layers, A/B). **`mono_detail.enabled: true` since 2026-10-04 by the USER's verdict on the maps** ("la nitidez de los bordes de pointdit es abrumadoramente superior a omega"). A/B pccr off → on: held-out 2.48 → 2.55 % (edge band 2.54 → 2.70 %, p90 29 → 39 %), contradicted 15.1 → 15.7 %, coverage 71.0 → 70.3 %, 18.42 → 19.29 M pts, mixed-edge flyers −30 %, +17 min (analysis/2026-10-04_pointdit/ab). **Pending:** the user's eye on the fresh cloud; next A/B variant 'detail only at the edges' (PointDiT in the widened band, Omega untouched on the surfaces) if the held-out loss matters |
+| — | PointDiT (claude_stac.txt 2026-10-04) | Phases 0-8 built (flyers, runner, tiles, affine, detail/band, mixed pixels, provenance + layers, A/B). **`mono_detail.enabled: true` since 2026-10-04 by the USER's verdict on the maps** ("la nitidez de los bordes de pointdit es abrumadoramente superior a omega"). A/B pccr off → on: held-out 2.48 → 2.55 % (edge band 2.54 → 2.70 %, p90 29 → 39 %), contradicted 15.1 → 15.7 %, coverage 71.0 → 70.3 %, 18.42 → 19.29 M pts, mixed-edge flyers −30 %, +17 min (analysis/2026-10-04_pointdit/ab). First end-to-end run (2026-10-04): the detail over every surface bent walls and shed points off a rack while ducts and cables came out → **`mono_detail.detail_scope: edges` (in the pipeline since dc1f509)**: PointDiT's detail only within `detail_zone_px` (12) of a discontinuity and within τ; surfaces stay Omega. pccr: detail on 17.9 % of the pixels (was 85.5 %). **Pending:** the user's eye on this cloud |
 | — | End-to-end validation | **pending:** the user relaunches pccr from scratch (restart the backend first) |
 
 **VLM refinement (stage 2):** prompts per CONCEPT, never per object (the understanding prompt asks one entry per
