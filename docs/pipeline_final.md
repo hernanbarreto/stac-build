@@ -5,7 +5,14 @@ stage does, the user decisions behind it, and EVERY pending item (two lists at t
 reconstruction pipeline, B = general). Validated by the user on 2026-10-01 ("así está bien, todo lo
 que describiste es correcto").
 
-## Decisions (USER, 2026-09-30 / 2026-10-01)
+## Decisions (USER, 2026-09-30 / 2026-10-01 / 2026-10-04)
+
+**2026-10-04 — VALIDATED: epoch 8's recipe + PointDiT at the edges ("la reconstrucción está perfecta").** pccr epoch 5 of the
+2026-10-04 run: f6_bend with `mono_detail.enabled: true`, `detail_scope: edges` (PointDiT's detail only within 12 px of a
+discontinuity and within τ; surfaces stay Omega; mixed edge pixels resolved to front / back), floor levelled per chunk
+(undulation 13.1 → 7.9 cm), 158 segments. The first variant (detail on every surface) was REJECTED by eye the same day:
+bent walls, points shed off a rack. The second VLM pass over the unsegmented points is OFF (it added prompts and
+segments). Next sessions run this recipe unchanged; the user is reconstructing a second scene with it.
 
 0. **pccr EPOCH 8 is the best cloud and IS the pipeline** (*"valido el resultado de la época 8, es la
    mejor, incorporar al pipeline"*). Epoch 8 = epoch 7's depth adjustment EXACTLY (the bend) + the

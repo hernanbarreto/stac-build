@@ -1,7 +1,13 @@
 # CLAUDE.md — working rules for this repo
 
-## ⭐⭐⭐ CURRENT STATE 2026-10-01 — read `docs/pipeline_final.md` FIRST (it supersedes the
+## ⭐⭐⭐ CURRENT STATE 2026-10-04 — read `docs/pipeline_final.md` FIRST (it supersedes the
 ## pipeline descriptions below wherever they disagree)
+- **2026-10-04 (USER: "la reconstrucción está perfecta")**: the pipeline = epoch 8's recipe + **PointDiT at the edges**
+  inside `f6_bend` (`precision.mono_detail`, `detail_scope: edges`: PointDiT-H's detail only within 12 px of a
+  discontinuity and within τ, surfaces stay Omega; `vendor/pointdit`, env `da3`). The 'detail on every surface' variant
+  and the 'second VLM pass over the unsegmented points' were both REJECTED the same day (bent walls / added segments).
+  **USER RULE, hard-earned the same day: NO decision without his OK** — not a config default, not a UI default, not a
+  repair on his session; one line, wait for the OK; when he says "detené todo", kill everything and confirm first.
 - **The pipeline = pccr EPOCH 8, validated by the user as the best cloud** (*"es la mejor,
   incorporar al pipeline"*): intake → VLM+SAM3 (all keyframes; the same VLM call prepares the
   ShapeR descriptions) → Omega (5 m chunks, 50 %) → F0/F2/F4/F3 → F5 (R1) → **`f6_bend`**
