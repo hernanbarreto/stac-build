@@ -11,8 +11,10 @@
  */
 import type { ReactNode } from 'react'
 import { ArrowDown } from 'lucide-react'
+import type * as THREE from 'three'
 import { Legend } from '../ui/Legend'
 import { Tooltip } from '../ui/Tooltip'
+import { ViewCube } from './ViewCube'
 import { useFmt, useT } from '../../i18n'
 import { EDGE_TOKENS, STATUS_TOKENS, DEV_RAMP } from './palette'
 import type { ColorMode } from './FloatingToolbar'
@@ -34,6 +36,11 @@ export interface ReadoutAnchor {
 
 interface ViewportHudProps {
   onView: (preset: ViewPreset) => void
+  /** the ViewCube's hooks into the main camera (USER 2026-10-04) */
+  getQuaternion: () => THREE.Quaternion | null
+  onOrient: (dir: [number, number, number]) => void
+  onOrbit: (dAz: number, dEl: number) => void
+  onHome: () => void
   metersPerPixel: number | null
   colorMode: ColorMode
   mvThreshold: number
@@ -46,7 +53,7 @@ interface ViewportHudProps {
 
 const SCALE_STEPS_M = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100]
 
-export function ViewportHud({ onView, metersPerPixel, colorMode, mvThreshold, statusFractions, deviationRange, showEdges, readouts, banner }: ViewportHudProps) {
+export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, metersPerPixel, colorMode, mvThreshold, statusFractions, deviationRange, showEdges, readouts, banner }: ViewportHudProps) {
   const t = useT()
   const fmt = useFmt()
 
@@ -57,23 +64,14 @@ export function ViewportHud({ onView, metersPerPixel, colorMode, mvThreshold, st
     scale = { px: step / metersPerPixel, label: fmt.lengthText(step) }
   }
 
-  const cube: Array<{ id: ViewPreset; label: string }> = [
-    { id: 'top', label: t('view.top') }, { id: 'front', label: t('view.front') }, { id: 'right', label: t('view.right') },
-    { id: 'left', label: t('view.left') }, { id: 'back', label: t('view.back') }, { id: 'iso', label: t('view.iso') },
-  ]
+  void onView   // the preset buttons gave way to the ViewCube; the handle stays for shortcuts
 
   return (
     <>
       {banner && <div className="stac-hud__banner">{banner}</div>}
 
-      <div className="stac-hud__cube" role="group" aria-label={t('view.cube')}>
-        {cube.map(v => (
-          <Tooltip key={v.id} label={v.label} side="left">
-            <button type="button" className={`stac-hud__face stac-hud__face--${v.id}`} onClick={() => onView(v.id)} aria-label={v.label}>
-              {v.label.slice(0, 1)}
-            </button>
-          </Tooltip>
-        ))}
+      <div className="stac-hud__cube">
+        <ViewCube getQuaternion={getQuaternion} onOrient={onOrient} onOrbit={onOrbit} onHome={onHome} />
       </div>
 
       <div className="stac-hud__bottomleft">

@@ -457,7 +457,12 @@
     "iso": "Isométrica",
     "gravity": "Gravedad: el eje Y apunta hacia arriba",
     "upAxis": "Y arriba",
-    "scaleBar": "Barra de escala: {length}"
+    "scaleBar": "Barra de escala: {length}",
+    "north": "N",
+    "east": "E",
+    "south": "S",
+    "west": "O",
+    "bottom": "Inferior"
   },
   "gizmo": {
     "move": "Mover",

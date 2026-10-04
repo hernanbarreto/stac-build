@@ -2263,6 +2263,10 @@ function App() {
 
           {hasSession && !sessionLoading && (
             <ViewportHud onView={preset => viewportRef.current?.setStandardView(preset)} metersPerPixel={metersPerPixel}
+              getQuaternion={() => viewportRef.current?.getCameraQuaternion() ?? null}
+              onOrient={dir => viewportRef.current?.orientView(dir)}
+              onOrbit={(a, e) => viewportRef.current?.orbitBy(a, e)}
+              onHome={() => viewportRef.current?.resetCamera()}
               colorMode={sabanaVisible ? 'deviation' : colorMode} mvThreshold={mvThreshold}
               statusFractions={certifyState?.report_metrics?.witnesses?.status_fraction ?? null}
               deviationRange={sabanaVisible && sabanaMetrics ? { maxMm: (sabanaMetrics.tolerance_mm || 15) * 3, toleranceMm: sabanaMetrics.tolerance_mm || 15 } : null}

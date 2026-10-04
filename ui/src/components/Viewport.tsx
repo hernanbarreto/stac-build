@@ -216,6 +216,10 @@ export interface ViewportHandle {
     flyToPoint: (p: number[], radius: number) => void
     /** Navigation cube: look from a standard direction keeping target + distance. */
     setStandardView: (preset: ViewPreset) => void
+    /** ViewCube (USER 2026-10-04): the main camera's orientation, a snap to any direction, an orbit step */
+    getCameraQuaternion: () => THREE.Quaternion | null
+    orientView: (dir: [number, number, number]) => void
+    orbitBy: (dAz: number, dEl: number) => void
 }
 
 // One item of /api/segmentation/tsdf/list — per-instance entries carry
@@ -2997,6 +3001,31 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const dist = Math.max(0.5, cam.position.distanceTo(ctrl.target))
             const d = new THREE.Vector3(...dirs[preset]).normalize()
             cam.position.copy(ctrl.target).addScaledVector(d, dist)
+            cam.lookAt(ctrl.target)
+            ctrl.update()
+        },
+        getCameraQuaternion: () => cameraRef.current ? cameraRef.current.quaternion : null,
+        orientView: (dir: [number, number, number]) => {
+            const cam = cameraRef.current
+            const ctrl = controlsRef.current
+            if (!cam || !ctrl) return
+            const d = new THREE.Vector3(...dir)
+            if (Math.abs(d.x) < 1e-6 && Math.abs(d.z) < 1e-6) d.z = 0.001 * Math.sign(d.y || 1)   // straight up / down keeps a heading
+            d.normalize()
+            const dist = Math.max(0.5, cam.position.distanceTo(ctrl.target))
+            cam.position.copy(ctrl.target).addScaledVector(d, dist)
+            cam.lookAt(ctrl.target)
+            ctrl.update()
+        },
+        orbitBy: (dAz: number, dEl: number) => {
+            const cam = cameraRef.current
+            const ctrl = controlsRef.current
+            if (!cam || !ctrl) return
+            const off = cam.position.clone().sub(ctrl.target)
+            const sph = new THREE.Spherical().setFromVector3(off)
+            sph.theta += dAz
+            sph.phi = Math.min(Math.PI - 0.01, Math.max(0.01, sph.phi + dEl))
+            cam.position.copy(ctrl.target).add(new THREE.Vector3().setFromSpherical(sph))
             cam.lookAt(ctrl.target)
             ctrl.update()
         },

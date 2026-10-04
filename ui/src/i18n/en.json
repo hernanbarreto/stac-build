@@ -457,7 +457,12 @@
     "iso": "Isometric",
     "gravity": "Gravity: the Y axis points up",
     "upAxis": "Y up",
-    "scaleBar": "Scale bar: {length}"
+    "scaleBar": "Scale bar: {length}",
+    "north": "N",
+    "east": "E",
+    "south": "S",
+    "west": "W",
+    "bottom": "Bottom"
   },
   "gizmo": {
     "move": "Move",
