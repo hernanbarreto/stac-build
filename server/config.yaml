@@ -2428,6 +2428,18 @@ reconstruction:
       specular_gray: 250                # BOUND (sensor): mean gray at or above this = saturated highlight (reflection)
       sample_points: 2000000            # BOUND (cost): points sampled for the session percentiles
       seed: 0
+    mono_detail:                        # claude_stac.txt 2026-10-04: PointDiT (monocular, affine-invariant, sharp
+                                        # edges) refines the DETAIL of the bent Omega depth inside f6_bend, before
+                                        # the edge-keeping vote; it never touches scale, gauge, poses or camera
+                                        # (precision/pointdit_runner.py, precision/mono_detail.py).
+      enabled: false                    # feature flag: false = the baseline (pccr epoch 8) stays reproducible
+      model: H                          # H = PointDiT-H/16 + DINOv3 ViT-H+/16 (default) | L = PointDiT-L/16 + ViT-L/16
+      steps: 2                          # Euler steps of the ODE from zeros (deterministic; the vendor's demo uses 3)
+      repo_dir: third_party/pointdit    # pinned submodule (vendor/VENDORS.lock.md)
+      weights_dir: third_party/pointdit/pretrained
+      dinov3_dir: third_party/pointdit/pretrained/dinov3
+      norm_max: 2.9                     # output norm above this = invalid pixel (the paper: sky dome at 3.0)
+      verify_sha256: true               # every checkpoint checked against the prefix in its name, once per file
     chunk_check:                        # USER 2026-09-29: per-chunk AND per-keyframe verification of
                                         # the corrected geometry against the floor/ceiling, DA3 as the
                                         # independent instrument (precision/chunk_check.py). Verdict per

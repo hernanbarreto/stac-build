@@ -356,6 +356,20 @@ class FlyersConfig:
     seed: int
 
 
+# ── mono detail: PointDiT refines the bent depth (claude_stac.txt 2026-10-04) ─────
+
+@dataclass(frozen=True)
+class MonoDetailConfig:
+    enabled: bool               # feature flag — false keeps the baseline (pccr epoch 8) reproducible
+    model: str                  # "H" (PointDiT-H/16 + DINOv3 ViT-H+/16, default) | "L"
+    steps: int                  # Euler steps of the ODE from zeros (deterministic)
+    repo_dir: str               # the vendored PointDiT checkout (relative to the repo root)
+    weights_dir: str            # the released checkpoints
+    dinov3_dir: str             # the gated DINOv3 encoder weights
+    norm_max: float             # output norm above this = invalid pixel (the paper's sky dome sits at 3.0)
+    verify_sha256: bool         # check every checkpoint against the prefix in its name (once per file)
+
+
 # ── chunk / keyframe floor check (USER 2026-09-29: "verificación interna e intrachunk") ──
 
 @dataclass(frozen=True)
@@ -398,6 +412,7 @@ class PrecisionConfig:
     cloud: CloudConfig
     bend: BendConfig
     flyers: FlyersConfig
+    mono_detail: MonoDetailConfig
     chunk_check: ChunkCheckConfig
     runner: RunnerConfig
 
@@ -658,6 +673,18 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
                           specular_gray=_num(fl, "specular_gray", "flyers", lo=0.0, hi=255.0),
                           sample_points=_num(fl, "sample_points", "flyers", lo=1, integer=True),
                           seed=_num(fl, "seed", "flyers", lo=0, integer=True))
+    md = _sub(sec, "mono_detail", "")
+    model = str(_require(md, "model", "mono_detail"))
+    if model not in ("H", "L"):
+        raise PrecisionConfigError(f"'{SECTION}.mono_detail.model' must be 'H' or 'L', got {model!r}")
+    mono_detail = MonoDetailConfig(enabled=_bool(md, "enabled", "mono_detail"), model=model,
+                                   steps=_num(md, "steps", "mono_detail", lo=1, integer=True),
+                                   repo_dir=str(_require(md, "repo_dir", "mono_detail")),
+                                   weights_dir=str(_require(md, "weights_dir", "mono_detail")),
+                                   dinov3_dir=str(_require(md, "dinov3_dir", "mono_detail")),
+                                   norm_max=_num(md, "norm_max", "mono_detail", lo=0.0, lo_excl=True),
+                                   verify_sha256=_bool(md, "verify_sha256", "mono_detail"))
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,
                            tracks=tracks, refine=refine, depth=depth, fuse=fuse,
-                           cloud=cloud, bend=bend, flyers=flyers, chunk_check=chunk_check, runner=runner)
+                           cloud=cloud, bend=bend, flyers=flyers, mono_detail=mono_detail,
+                           chunk_check=chunk_check, runner=runner)
