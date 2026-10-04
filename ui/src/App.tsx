@@ -132,9 +132,13 @@ function App() {
   // shadows: meshes cast + receive, the cloud receives (USER 2026-10-01); on by default
   const [shadowsOn, setShadowsOn] = useState(true)
   useEffect(() => { viewportRef.current?.setShadows(shadowsOn) }, [shadowsOn])
-  // the flyer-diagnosis layer (precision/flyers.py): off by default, per session
+  // the precision core's diagnostic layers (flyers, mono detail, mixed unresolved): off by default, per session
   const [flyersOn, setFlyersOn] = useState(false)
-  useEffect(() => { void viewportRef.current?.setFlyersLayer(flyersOn, activeSession) }, [flyersOn, activeSession])
+  const [monoDetailOn, setMonoDetailOn] = useState(false)
+  const [unresolvedOn, setUnresolvedOn] = useState(false)
+  useEffect(() => { void viewportRef.current?.setPrecisionLayer('flyers', flyersOn, activeSession) }, [flyersOn, activeSession])
+  useEffect(() => { void viewportRef.current?.setPrecisionLayer('mono_detail', monoDetailOn, activeSession) }, [monoDetailOn, activeSession])
+  useEffect(() => { void viewportRef.current?.setPrecisionLayer('mixed_unresolved', unresolvedOn, activeSession) }, [unresolvedOn, activeSession])
   const [physicsDiameterCm, setPhysicsDiameterCm] = useState(20)
   const [physicsBounce, setPhysicsBounce] = useState(0.7)
   const [physicsCount, setPhysicsCount] = useState(0)
@@ -1901,6 +1905,8 @@ function App() {
       { id: 'fullscreen', label: t('toolbar.fullscreen'), icon: <Maximize aria-hidden />, shortcut: 'F11', onSelect: toggleFullscreen },
       { id: 'shadows', label: t('menu.shadows'), icon: <Sun aria-hidden />, checked: shadowsOn, onSelect: () => setShadowsOn(v => !v) },
       { id: 'flyers', label: t('menu.flyers'), icon: <Circle aria-hidden />, checked: flyersOn, disabled: !hasSession, onSelect: () => setFlyersOn(v => !v) },
+      { id: 'monoDetail', label: t('menu.monoDetail'), icon: <Circle aria-hidden />, checked: monoDetailOn, disabled: !hasSession, onSelect: () => setMonoDetailOn(v => !v) },
+      { id: 'mixedUnresolved', label: t('menu.mixedUnresolved'), icon: <Circle aria-hidden />, checked: unresolvedOn, disabled: !hasSession, onSelect: () => setUnresolvedOn(v => !v) },
       { type: 'separator', id: 's2' },
       { id: 'console', label: t('dock.console'), icon: <Monitor aria-hidden />, shortcut: 'Mod+`', checked: consoleOpen, onSelect: () => setConsoleOpen(!consoleOpen) },
       { id: 'jobs', label: t('dock.jobs'), icon: <ListTodo aria-hidden />, checked: layout.state.dockOpen && layout.state.dockTab === 'jobs', onSelect: () => layout.openDock('jobs') },

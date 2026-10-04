@@ -111,6 +111,8 @@ export interface SegmentInstance {
     excluded?: boolean
 }
 
+export type PrecisionLayer = 'flyers' | 'mono_detail' | 'mixed_unresolved'
+
 export interface ViewportHandle {
     /** gravity sandbox (USER 2026-10-01): drop a sphere 1.5 m above the point the view orbits;
      *  it bounces on the point cloud and every visible mesh; with no surface under it it falls and is gone */
@@ -118,9 +120,10 @@ export interface ViewportHandle {
     physicsClear: () => void
     /** meshes cast and receive shadows, the point cloud receives them (USER 2026-10-01) */
     setShadows: (on: boolean) => void
-    /** the flyer-diagnosis layer (precision/flyers.py): the live cloud's flyers coloured by class,
-     *  a red mixed edge · b orange view-inconsistent · c blue low texture · d grey other */
-    setFlyersLayer: (on: boolean, sessionId: string | null) => Promise<void>
+    /** a diagnostic layer of the precision core (/api/precision/layer): 'flyers' (a red mixed edge ·
+     *  b orange view-inconsistent · c blue low texture · d grey other), 'mono_detail' (grey detail ·
+     *  green front · blue back), 'mixed_unresolved' (red) */
+    setPrecisionLayer: (name: PrecisionLayer, on: boolean, sessionId: string | null) => Promise<void>
     /** fly to a listed object: a placed one (id), a generated one (instance id), a mesh (folder) */
     flyToObject: (kind: 'placed' | 'shape' | 'tsdf', key: string | number) => boolean
     /** spheres in the scene right now */
@@ -543,7 +546,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // TSDF meshes — same lifecycle as shapes, kept in a parallel group so both
     // backends can be displayed simultaneously for A/B comparison.
     const tsdfGroupRef = useRef<THREE.Group | null>(null)
-    const flyersGroupRef = useRef<THREE.Group | null>(null)
+    const precisionLayersRef = useRef<Map<PrecisionLayer, THREE.Group>>(new Map())
     // Lazy TSDF: per-instance meshes are NOT downloaded at session open (only
     // the whole-scene mesh is). Entries wait here (folder  list item) until
     // setTsdfVisibility(folder, true) pulls them in on demand.
@@ -2837,17 +2840,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         },
         physicsClear: () => { physicsRef.current?.clear(); throwEndRef.current?.() },
         setShadows: (on: boolean) => { shadowsRef.current?.setEnabled(on) },
-        setFlyersLayer: async (on: boolean, sessionId: string | null) => {
-            const old = flyersGroupRef.current
-            if (old) { disposeMeshGroup(old); old.removeFromParent(); flyersGroupRef.current = null }
+        setPrecisionLayer: async (name: PrecisionLayer, on: boolean, sessionId: string | null) => {
+            const old = precisionLayersRef.current.get(name)
+            if (old) { disposeMeshGroup(old); old.removeFromParent(); precisionLayersRef.current.delete(name) }
             if (!on || !sessionId) return
             const parent = potreeLoaderRef.current?.getOctreeGroup()   // the cloud's frame: floor_transform applies
             if (!parent) return
             if (!gltfLoaderRef.current) gltfLoaderRef.current = makeGltfLoader()
             try {
-                const gltf = await gltfLoaderRef.current.loadAsync(`/api/precision/flyers/${sessionId}`)
+                const gltf = await gltfLoaderRef.current.loadAsync(`/api/precision/layer/${sessionId}/${name}`)
                 const group = new THREE.Group()
-                group.name = 'flyers-layer'
+                group.name = `precision-layer-${name}`
                 gltf.scene.traverse(o => {
                     const pts = o as THREE.Points
                     if ((pts as any).isPoints) {
@@ -2857,11 +2860,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 })
                 group.add(gltf.scene)
                 parent.add(group)
-                flyersGroupRef.current = group
-                onStatusMessage?.(tt('vp.flyersLayer'))
+                precisionLayersRef.current.set(name, group)
+                onStatusMessage?.(tt(`vp.layer_${name}`))
             } catch (e) {
-                console.warn('[Viewport] flyers layer not available', e)
-                onStatusMessage?.(tt('vp.flyersMissing'))
+                console.warn(`[Viewport] precision layer ${name} not available`, e)
+                onStatusMessage?.(tt('vp.layerMissing', { name }))
             }
         },
         physicsCount: () => physicsRef.current?.count ?? 0,

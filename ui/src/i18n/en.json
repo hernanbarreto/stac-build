@@ -191,7 +191,9 @@
     "userManagement": "User management",
     "logout": "Sign out",
     "shadows": "Shadows",
-    "flyers": "Flyers (diagnosis)"
+    "flyers": "Flyers (diagnosis)",
+    "monoDetail": "PointDiT detail layer",
+    "mixedUnresolved": "Mixed unresolved pixels"
   },
   "palette": {
     "title": "Command palette",
@@ -1055,8 +1057,10 @@
     "hide": "Hide",
     "isolate": "Isolate",
     "showAll": "Show all",
-    "flyersLayer": "Flyer layer loaded (red edge · orange views · blue texture · grey other)",
-    "flyersMissing": "No flyer diagnosis on this session yet"
+    "layer_flyers": "Flyer layer loaded (red edge · orange views · blue texture · grey other)",
+    "layer_mono_detail": "PointDiT layer loaded (grey detail · green front · blue back)",
+    "layer_mixed_unresolved": "Mixed unresolved pixels loaded (red): excluded from the cloud",
+    "layerMissing": "Layer '{{name}}' is not on this session yet"
   },
   "xr": {
     "title": "STAC XR",

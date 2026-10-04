@@ -5256,17 +5256,27 @@ async def get_scene(session_id: str):
     return {"ok": True, "exists": True, **payload}
 
 
-@app.get("/api/precision/flyers/{session_id}")
-async def precision_flyers_layer(session_id: str):
-    """The flyer diagnosis layer (precision/flyers.py, claude_stac.txt Phase 0): the flyers of the
-    live cloud as a coloured GLB point cloud — a red mixed edge, b orange view-inconsistent, c blue
-    low texture / highlight, d grey other. 404 until the diagnosis has run on this session."""
+PRECISION_LAYERS = {
+    "flyers": "flyers.glb",                        # precision/flyers.py (claude_stac.txt Phase 0)
+    "mono_detail": "layer_mono_detail.glb",        # precision/depth_on_f5.py + mono_detail.py (Phase 7)
+    "mixed_unresolved": "layer_mixed_unresolved.glb",
+}
+
+
+@app.get("/api/precision/layer/{session_id}/{name}")
+async def precision_layer(session_id: str, name: str):
+    """A diagnostic layer of the precision core as a coloured GLB point cloud (View menu):
+    `flyers` — the live cloud's flyers by class (a red mixed edge, b orange view-inconsistent, c blue
+    low texture / highlight, d grey other); `mono_detail` — the points PointDiT's detail or band
+    resolution wrote (grey detail, green front, blue back); `mixed_unresolved` — the mixed pixels that
+    left the measurement tier (red). 404 until the producing stage has run on this session."""
     from fastapi.responses import FileResponse
+    if name not in PRECISION_LAYERS:
+        raise HTTPException(status_code=404, detail=f"unknown layer {name!r}; one of {sorted(PRECISION_LAYERS)}")
     ctx = _ctx(session_id)
-    full_path = ctx.output_dir / "precision" / "flyers.glb"
+    full_path = ctx.output_dir / "precision" / PRECISION_LAYERS[name]
     if not full_path.exists():
-        raise HTTPException(status_code=404, detail="no flyer diagnosis on this session "
-                                                    "(python -m precision.flyers --session <dir>)")
+        raise HTTPException(status_code=404, detail=f"no '{name}' layer on this session yet")
     return FileResponse(str(full_path), media_type="model/gltf-binary",
                         headers={"Cache-Control": "no-cache"})
 

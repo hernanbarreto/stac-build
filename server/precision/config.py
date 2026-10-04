@@ -368,6 +368,39 @@ class MonoDetailConfig:
     dinov3_dir: str             # the gated DINOv3 encoder weights
     norm_max: float             # output norm above this = invalid pixel (the paper's sky dome sits at 3.0)
     verify_sha256: bool         # check every checkpoint against the prefix in its name (once per file)
+    tile_px: int                # BOUND (model): the native tile side PointDiT runs at (512 = its training size)
+    tile_overlap_frac: float    # share of a tile its neighbour repeats (feathered)
+    context_scale: float        # 1.0 = native tile; 2.0 = a window twice as large downscaled to the tile
+    fit_space: str              # 'depth' (z_cal ≈ s·z_mono + b) | 'inverse' (1/z_cal ≈ s·z_mono + b)
+    irls_iterations: int        # Huber IRLS steps of the per-tile affine fit (epoch 7's construction)
+    min_support_frac: float     # a tile with less support than this share of its pixels is rejected
+    tile_residual_quantile: float  # a tile whose residual is above this percentile of the session's tiles is rejected
+    lowpass_patch_fraction: float  # lowpass sigma = Omega's patch on the camera grid × this
+    side_reach_px: int          # BOUND (resolution): how far past the band the front/back surfaces are read
+    overlays: bool              # per-keyframe PNG overlays (bent | aligned | detail | band + status) for the eye
+    ab_edge_gradient_quantile: float  # the A/B's edge band: image gradient energy above this percentile of the
+                                      # session's pixels, or a step of the CALIBRATED depth — never PointDiT's
+
+
+# ── cloud metrics of every run (floor + edges; pending A "run checks", 2026-10-04) ──
+
+@dataclass(frozen=True)
+class CloudMetricsConfig:
+    ransac_iterations: int      # BOUND (search) of the global floor plane
+    floor_max_tilt_deg: float   # the floor normal lies within this of the cameras' up
+    camera_min_height_m: float  # the cameras stand at least this high over the floor …
+    camera_above_frac: float    # … for at least this share of them
+    inlier_m: float             # plane inliers (RANSAC score + refit)
+    band_m: float               # the floor band around the plane
+    cell_m: float               # the cell of the per-cell statistics
+    cell_min_points: int        # BOUND: band points a cell needs to be measured
+    mode_bin_m: float           # histogram bin of the cell's dominant layer
+    mode_band_m: float          # points within this of the mode fit the cell's plane
+    plane_min_points: int       # BOUND: points the cell plane needs
+    max_points: int             # BOUND (cost): subsample of the cloud
+    score_stride: int           # BOUND (cost): every n-th point scores a RANSAC candidate
+    seed: int
+    edge_max_objects: int       # BOUND (cost): largest objects measured by the edge metric
 
 
 # ── chunk / keyframe floor check (USER 2026-09-29: "verificación interna e intrachunk") ──
@@ -413,6 +446,7 @@ class PrecisionConfig:
     bend: BendConfig
     flyers: FlyersConfig
     mono_detail: MonoDetailConfig
+    cloud_metrics: CloudMetricsConfig
     chunk_check: ChunkCheckConfig
     runner: RunnerConfig
 
@@ -677,14 +711,45 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
     model = str(_require(md, "model", "mono_detail"))
     if model not in ("H", "L"):
         raise PrecisionConfigError(f"'{SECTION}.mono_detail.model' must be 'H' or 'L', got {model!r}")
+    fit_space = str(_require(md, "fit_space", "mono_detail"))
+    if fit_space not in ("depth", "inverse"):
+        raise PrecisionConfigError(f"'{SECTION}.mono_detail.fit_space' must be 'depth' or 'inverse', got {fit_space!r}")
     mono_detail = MonoDetailConfig(enabled=_bool(md, "enabled", "mono_detail"), model=model,
                                    steps=_num(md, "steps", "mono_detail", lo=1, integer=True),
                                    repo_dir=str(_require(md, "repo_dir", "mono_detail")),
                                    weights_dir=str(_require(md, "weights_dir", "mono_detail")),
                                    dinov3_dir=str(_require(md, "dinov3_dir", "mono_detail")),
                                    norm_max=_num(md, "norm_max", "mono_detail", lo=0.0, lo_excl=True),
-                                   verify_sha256=_bool(md, "verify_sha256", "mono_detail"))
+                                   verify_sha256=_bool(md, "verify_sha256", "mono_detail"),
+                                   tile_px=_num(md, "tile_px", "mono_detail", lo=16, integer=True),
+                                   tile_overlap_frac=_num(md, "tile_overlap_frac", "mono_detail", lo=0.0, hi=0.95),
+                                   context_scale=_num(md, "context_scale", "mono_detail", lo=1.0),
+                                   fit_space=fit_space,
+                                   irls_iterations=_num(md, "irls_iterations", "mono_detail", lo=1, integer=True),
+                                   min_support_frac=_num(md, "min_support_frac", "mono_detail", lo=0.0, hi=1.0),
+                                   tile_residual_quantile=_num(md, "tile_residual_quantile", "mono_detail", lo=0.0, hi=100.0, lo_excl=True),
+                                   lowpass_patch_fraction=_num(md, "lowpass_patch_fraction", "mono_detail", lo=0.0, lo_excl=True),
+                                   side_reach_px=_num(md, "side_reach_px", "mono_detail", lo=1, integer=True),
+                                   overlays=_bool(md, "overlays", "mono_detail"),
+                                   ab_edge_gradient_quantile=_num(md, "ab_edge_gradient_quantile", "mono_detail", lo=0.0, hi=100.0, lo_excl=True))
+    cm = _sub(sec, "cloud_metrics", "")
+    cloud_metrics = CloudMetricsConfig(
+        ransac_iterations=_num(cm, "ransac_iterations", "cloud_metrics", lo=1, integer=True),
+        floor_max_tilt_deg=_num(cm, "floor_max_tilt_deg", "cloud_metrics", lo=0.0, hi=90.0),
+        camera_min_height_m=_num(cm, "camera_min_height_m", "cloud_metrics", lo=0.0),
+        camera_above_frac=_num(cm, "camera_above_frac", "cloud_metrics", lo=0.0, hi=1.0),
+        inlier_m=_num(cm, "inlier_m", "cloud_metrics", lo=0.0, lo_excl=True),
+        band_m=_num(cm, "band_m", "cloud_metrics", lo=0.0, lo_excl=True),
+        cell_m=_num(cm, "cell_m", "cloud_metrics", lo=0.0, lo_excl=True),
+        cell_min_points=_num(cm, "cell_min_points", "cloud_metrics", lo=3, integer=True),
+        mode_bin_m=_num(cm, "mode_bin_m", "cloud_metrics", lo=0.0, lo_excl=True),
+        mode_band_m=_num(cm, "mode_band_m", "cloud_metrics", lo=0.0, lo_excl=True),
+        plane_min_points=_num(cm, "plane_min_points", "cloud_metrics", lo=3, integer=True),
+        max_points=_num(cm, "max_points", "cloud_metrics", lo=1000, integer=True),
+        score_stride=_num(cm, "score_stride", "cloud_metrics", lo=1, integer=True),
+        seed=_num(cm, "seed", "cloud_metrics", lo=0, integer=True),
+        edge_max_objects=_num(cm, "edge_max_objects", "cloud_metrics", lo=0, integer=True))
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,
                            tracks=tracks, refine=refine, depth=depth, fuse=fuse,
                            cloud=cloud, bend=bend, flyers=flyers, mono_detail=mono_detail,
-                           chunk_check=chunk_check, runner=runner)
+                           cloud_metrics=cloud_metrics, chunk_check=chunk_check, runner=runner)

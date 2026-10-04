@@ -71,3 +71,28 @@ def test_chunk_check_applies_the_published_bend():
     u = rng.integers(0, W, 50); v = rng.integers(0, H, 50)
     assert np.allclose(k[v, u], design(u.astype(float), v.astype(float), W, H) @ c)
     assert scale_map(1.03, (0.0, 0.0), H, W) == 1.03
+
+
+# ── the mono-detail hook (claude_stac.txt 2026-10-04) ────────────────────────
+
+def test_mono_detail_off_leaves_the_bend_untouched_and_the_source_is_omega():
+    from dataclasses import replace
+    from precision.config import load_precision_config
+    from precision.depth_on_f5 import apply_mono_detail, confidence_weight, source_column
+    pcfg = load_precision_config()
+    assert pcfg.mono_detail.enabled is False
+    dep = {0: np.ones((4, 4), np.float32)}; valid = {0: np.ones((4, 4), bool)}; passed = {0: np.ones((4, 4), bool)}
+    d2, v2, p2, src, rep = apply_mono_detail(pcfg, [0], dep, valid, passed, {}, None, K, {}, Path("."),
+                                             lambda m: None, lambda a, b: None)
+    assert d2 is dep and v2 is valid and p2 is passed and src is None and rep is None
+    data = {"frame_global": np.zeros(3, np.int64), "pixel_row": np.zeros(3, np.int64), "pixel_col": np.arange(3)}
+    assert source_column(data, None).tolist() == [1, 1, 1]
+    maps = {0: np.array([[0, 1, 3]], np.uint8)}
+    assert source_column(data, maps).tolist() == [1, 2, 4]
+    w = confidence_weight(np.array([0.0, 0.5, 1.0, 2.0]), 0.5, 1.5, np.array([False, True, True, True]))
+    assert np.allclose(w, [0.0, 0.0, 0.5, 1.0])
+    # the chain gives f6_bend the card only when the stage is on
+    from precision.runner import chain_steps
+    off = {s.key: s.gpu for s in chain_steps(pcfg)}
+    on = {s.key: s.gpu for s in chain_steps(replace(pcfg, mono_detail=replace(pcfg.mono_detail, enabled=True)))}
+    assert off["f6_bend"] is False and on["f6_bend"] is True and "f6_sweep" not in on

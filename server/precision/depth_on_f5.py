@@ -36,6 +36,7 @@ import json
 import shutil
 import sys
 import time
+import types
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -205,6 +206,118 @@ def camera_travels(tmp: Path, params, n_kf: int, log: Callable = print) -> Path:
     return p
 
 
+# ── mono detail (claude_stac.txt 2026-10-04) ──────────────────────────────
+
+# the cloud's `source` column: 1 = Omega bent (epoch 8's pixel), 2 = lowpass(Omega) + PointDiT detail,
+# 3 / 4 = a mixed pixel resolved to the front / back surface. mixed_unresolved never becomes a point.
+SRC_CLOUD_NAMES = {1: "omega_bent", 2: "mono_detail", 3: "band_front", 4: "band_back"}
+MONO_LAYERS = ("mono_detail", "mixed_unresolved")
+
+
+def confidence_weight(conf: np.ndarray, floor: float, cmax: float, passed: np.ndarray) -> np.ndarray:
+    """The session's calibrated confidence as a fit weight: 0 under the chunk's own floor, rising
+    linearly to 1 at the chunk's maximum (the same min-max arithmetic as the ONE confidence floor)."""
+    span = max(cmax - floor, 1e-9)
+    w = np.clip((conf.astype(np.float64) - floor) / span, 0.0, 1.0)
+    return np.where(passed, w, 0.0)
+
+
+def apply_mono_detail(pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out: Path, log, _p):
+    """The hook between the bend and the vote. With ``mono_detail.enabled`` false it returns its
+    inputs untouched (epoch 8 bit for bit); otherwise PointDiT's detail refines every bent map, the
+    unresolved mixed pixels leave the measurement tier (depth 0, not passed, not valid) and the
+    per-pixel provenance comes back for the cloud's `source` column."""
+    md = pcfg.mono_detail
+    if not md.enabled:
+        return dep, valid, passed, None, None
+    from precision import corrected_cloud as CC
+    from precision.mono_detail import run_stage
+    from precision.pointdit_runner import PointDiTRunner
+    _p(42, f"mono detail: PointDiT-{md.model} refines the bent depth (tiles, affine per tile, detail, band)")
+    runner = PointDiTRunner(md, log=log)
+    inner = {f: interior(passed[f]) for f in frames}
+    # the session's own agreement tolerance on the BENT maps (the vote measures its own again after)
+    tau0 = CC.measured_tau(dep, inner, K, c2w, frames, pcfg.bend.neighbors, pcfg.bend.tau_quantile)
+    del inner
+    grid = getattr(inp.cam, "omega_grid", None)
+    scale = float(getattr(grid, "scale_x", 1.0) or 1.0) if grid is not None else 1.0
+    image_of = lambda f: CC._rgb_undistorted(inp.frames_dir, f, inp.maps)   # noqa: E731
+    overlay_dir = (out / "precision" / "mono_overlays") if bool(md.overlays) else None
+    dep2, src, rep = run_stage(frames, dep, valid, weight, image_of, runner, md, tau0, scale,
+                               pcfg.gauge.huber_k, log=log, progress=lambda pct, m: _p(42 + 0.08 * pct, m),
+                               overlay_dir=overlay_dir)
+    for f in frames:
+        alive = dep2[f] > 0
+        valid[f] = valid[f] & alive
+        passed[f] = passed[f] & alive
+    rep.params["tau_bent"] = tau0
+    rep.params["footprint"] = runner.footprint()
+    return dep2, valid, passed, src, rep
+
+
+def source_column(data, src_maps) -> np.ndarray:
+    """Per cleaned point its provenance byte from the refined maps (1 = Omega bent when the stage did
+    not run); looked up by (frame, pixel) because the cleaner carries only the origin columns."""
+    n = len(data)
+    if src_maps is None:
+        return np.ones(n, np.uint8)
+    from precision.mono_detail import SRC_UNRESOLVED
+    fg = np.asarray(data["frame_global"], np.int64)
+    r = np.asarray(data["pixel_row"], np.int64); c = np.asarray(data["pixel_col"], np.int64)
+    out = np.ones(n, np.uint8)
+    for f in np.unique(fg):
+        m = fg == f
+        sm = src_maps.get(int(f))
+        if sm is None:
+            continue
+        v = sm[r[m], c[m]].astype(np.int64)
+        if (v == SRC_UNRESOLVED).any():
+            raise DepthOnF5Error("a mixed_unresolved pixel reached the cloud — the measurement tier must not hold it")
+        out[m] = (v + 1).astype(np.uint8)
+    return out
+
+
+def mono_report(rep, md) -> dict:
+    tiles = [dict(frame=int(f), **t) for f, per in rep.per_frame.items() for t in per["tiles"]]
+    frames = {str(f): {k: v for k, v in per.items() if k != "tiles"} for f, per in rep.per_frame.items()}
+    return {"enabled": True, "model": md.model, "steps": int(md.steps), "params": rep.params,
+            "tiles": {"total": rep.tiles, "accepted": rep.accepted, "rejected_support": rep.rejected_support,
+                      "rejected_residual": rep.rejected_residual, "residual_bar_rel": rep.residual_bar},
+            "pixels": rep.totals, "seconds_pointdit": rep.seconds_pointdit, "seconds_total": rep.seconds_total,
+            "per_frame": frames, "per_tile": tiles}
+
+
+def write_mono_layers(pdir: Path, data, source: np.ndarray, rep, K, c2w, log) -> None:
+    """Two viewer layers (GLB point clouds): the points PointDiT's detail or band resolution wrote
+    (`mono_detail`: grey detail, green front, blue back; a subsample bounded by LAYER_MAX_POINTS) and the
+    mixed_unresolved pixels at Omega's depth (`mixed_unresolved`, red) — what left the measurement tier."""
+    import trimesh
+    pdir.mkdir(parents=True, exist_ok=True)
+    xyz = np.stack([np.asarray(data["x"]), np.asarray(data["y"]), np.asarray(data["z"])], 1).astype(np.float32)
+    m = source >= 2
+    idx = np.nonzero(m)[0]
+    if len(idx) > LAYER_MAX_POINTS:
+        idx = np.random.default_rng(0).choice(idx, LAYER_MAX_POINTS, replace=False)
+    pal = {2: (150, 150, 150, 255), 3: (0, 200, 0, 255), 4: (0, 90, 255, 255)}
+    col = np.array([pal[int(v)] for v in source[idx]], np.uint8) if len(idx) else np.zeros((0, 4), np.uint8)
+    pts = xyz[idx] if len(idx) else np.zeros((1, 3), np.float32)
+    if not len(idx):
+        col = np.array([[0, 0, 0, 0]], np.uint8)
+    trimesh.PointCloud(pts, colors=col).export(str(pdir / "layer_mono_detail.glb"), file_type="glb")
+    P = []
+    for f, (rr, cc, zz) in rep.unresolved.items():
+        X = np.stack([(cc - K[0, 2]) / K[0, 0] * zz, (rr - K[1, 2]) / K[1, 1] * zz, zz], 1) @ c2w[f][:3, :3].T + c2w[f][:3, 3]
+        P.append(X.astype(np.float32))
+    U = np.concatenate(P) if P else np.zeros((1, 3), np.float32)
+    uc = np.tile(np.array([[255, 0, 0, 255]], np.uint8), (len(U), 1)) if P else np.array([[0, 0, 0, 0]], np.uint8)
+    trimesh.PointCloud(U, colors=uc).export(str(pdir / "layer_mixed_unresolved.glb"), file_type="glb")
+    log(f"{LOG_TAG} viewer layers: {len(idx):,} mono-detail point(s), {len(U) if P else 0:,} mixed_unresolved "
+        f"pixel(s) → {pdir}/layer_*.glb")
+
+
+LAYER_MAX_POINTS = 2_000_000
+
+
 # ── the step ─────────────────────────────────────────────────────────────
 
 def _landmark_rows(session_dir: Path, pcfg, frames: List[int], w2c: np.ndarray, params) -> Dict[int, dict]:
@@ -231,13 +344,14 @@ def _landmark_rows(session_dir: Path, pcfg, frames: List[int], w2c: np.ndarray, 
     return out
 
 
-def run_depth_on_f5(session_dir: Path, pcfg, log: Callable = print,
-                    progress: Optional[Callable[[float, str], None]] = None) -> dict:
+def compute(session_dir: Path, pcfg, log: Callable = print,
+            progress: Optional[Callable[[float, str], None]] = None, inp=None) -> types.SimpleNamespace:
+    """Steps 1-4 (landmarks, bend, mono detail, vote) — nothing written into the session. ``inp`` (a
+    depth_sweep.SweepInputs) may be injected: the A/B (precision/mono_ab.py) feeds F5's files directly.
+    Returns everything ``publish_cloud`` needs, plus the held-out landmark rows for the judges."""
     from config import cfg as raw_cfg
     from precision import depth_sweep as DS
-    from precision import corrected_cloud as CC
-    from precision.epoch0_cloud import SKY_CONF, _write_ply_xyzrgb
-    from correction.session import read_ply
+    from precision.epoch0_cloud import SKY_CONF
     t0 = time.time()
     session_dir = Path(session_dir)
     out = session_dir / "output"
@@ -248,7 +362,7 @@ def run_depth_on_f5(session_dir: Path, pcfg, log: Callable = print,
         if progress:
             progress(pct, msg)
 
-    inp = DS.load_inputs(session_dir, pcfg)                 # F5's camera + poses (guards F5's epoch)
+    inp = inp if inp is not None else DS.load_inputs(session_dir, pcfg)   # F5's camera + poses (guards F5's epoch)
     params = list(inp.cam.params)
     if any(abs(float(x)) > 0 for x in params[4:]):
         raise DepthOnF5Error(f"the session camera carries lens distortion {params[4:]} — the bend reads "
@@ -272,11 +386,12 @@ def run_depth_on_f5(session_dir: Path, pcfg, log: Callable = print,
                                      f"grid {W}x{H} — the bend needs Omega's depth on the camera's grid")
             zo[f] = d; conf[f] = np.asarray(z["conf"], np.float32); chunk[f] = int(z["chunk"]) if "chunk" in z.files else 0
     floor_norm = float(raw_cfg["reconstruction"]["simple"]["conf_min_norm"])
-    thr = {}
+    thr, cmax = {}, {}
     for k in sorted(set(chunk.values())):
         v = np.concatenate([conf[f][np.isfinite(conf[f]) & (conf[f] > SKY_CONF)].ravel()
                             for f in frames if chunk[f] == k])
         thr[k] = float(v.min() + floor_norm * (v.max() - v.min()))
+        cmax[k] = float(v.max())
 
     # 2. the bend
     _p(25, "bending Omega's depth to F5's landmarks")
@@ -311,14 +426,23 @@ def run_depth_on_f5(session_dir: Path, pcfg, log: Callable = print,
            f"{np.median(c0):.4f} [{c0.min():.4f}, {c0.max():.4f}], largest consecutive jump {np.abs(np.diff(c0)).max():.3f}")
     uu, vv = np.meshgrid(np.arange(W), np.arange(H))
     Dm = design(uu.ravel(), vv.ravel(), W, H)
-    dep, valid, passed = {}, {}, {}
+    dep, valid, passed, weight = {}, {}, {}, {}
+    md = pcfg.mono_detail
     for i, f in enumerate(frames):
         valid[f] = np.isfinite(zo[f]) & (zo[f] > 0) & np.isfinite(conf[f]) & (conf[f] > SKY_CONF)
         passed[f] = valid[f] & (conf[f] >= thr[chunk[f]])
         # the bent map in float32 first, then the mask — epoch 8's arithmetic, bit for bit
         bent = (zo[f] * (Dm @ coefs[wb][i]).reshape(H, W)).astype(np.float32)
         dep[f] = np.where(valid[f], bent, 0).astype(np.float32)
+        if md.enabled:
+            # the session's calibrated confidence as a weight in 0..1 above its own floor (per chunk)
+            weight[f] = confidence_weight(conf[f], thr[chunk[f]], float(cmax[chunk[f]]), passed[f])
+    cmax = None
     del zo, conf
+
+    # 3b. mono detail (claude_stac.txt 2026-10-04): PointDiT refines the bent maps before the vote
+    dep, valid, passed, src_maps, md_rep = apply_mono_detail(
+        pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out, log, _p)
 
     # 4. the edge-keeping vote (pccr epoch 8)
     _p(50, "edge-keeping multi-view vote")
@@ -327,6 +451,22 @@ def run_depth_on_f5(session_dir: Path, pcfg, log: Callable = print,
     cover = vst["out"] / float(N * H * W)
     _p(65, f"vote done: coverage {cover * 100:.1f} %")
     del dep, valid, passed
+    return types.SimpleNamespace(session_dir=session_dir, out=out, inp=inp, frames=frames, N=N, W=W, H=H, K=K,
+                                 c2w=c2w, params=params, chunk=chunk, voted=voted, tau=tau, vst=vst, cover=cover,
+                                 wb=wb, score=score, coefs=coefs, c0=c0, obs=obs, src_maps=src_maps, md_rep=md_rep,
+                                 md=md, uu=uu, vv=vv, t0=t0, _p=_p, seconds_compute=round(time.time() - t0, 1))
+
+
+def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict:
+    """Step 5: the voted maps → chunks → the cloud stage's cleaner → the new-cloud epoch (transaction)."""
+    from config import cfg as raw_cfg
+    from precision import corrected_cloud as CC
+    from precision.epoch0_cloud import _write_ply_xyzrgb
+    from correction.session import read_ply
+    session_dir, out, inp, frames, W, H, K, c2w = (C.session_dir, C.out, C.inp, C.frames, C.W, C.H, C.K, C.c2w)
+    params, chunk, voted, tau, vst, cover, wb, score, coefs, c0 = (C.params, C.chunk, C.voted, C.tau, C.vst, C.cover,
+                                                                   C.wb, C.score, C.coefs, C.c0)
+    src_maps, md_rep, md, uu, vv, t0, _p = C.src_maps, C.md_rep, C.md, C.uu, C.vv, C.t0, C._p
 
     # 5. the cloud
     tmp = out / TX_TMP
@@ -360,7 +500,7 @@ def run_depth_on_f5(session_dir: Path, pcfg, log: Callable = print,
         _, data = read_ply(cleaned)
         cols = {"pixel_u_und": np.asarray(data["pixel_col"]), "pixel_v_und": np.asarray(data["pixel_row"]),
                 "n_consistent": np.clip(np.asarray(data["confidence"]), 0, 255).astype(np.uint8),
-                "source": np.ones(len(data), np.uint8)}
+                "source": source_column(data, src_maps)}
         report = {"version": 1, "stage": "depth_on_f5", "provenance": "tool_measured",
                   "source_of_depth": "Omega's depth bent to F5's landmarks + edge-keeping multi-view vote (pccr epoch 8)",
                   "camera": params, "grid": [W, H],
@@ -376,6 +516,11 @@ def run_depth_on_f5(session_dir: Path, pcfg, log: Callable = print,
                            **{k: (float(v) / max(vst["valid"], 1) if k not in ("tau", "valid") else v)
                               for k, v in vst.items() if k != "tau"}},
                   "raw_points": n_raw}
+        if md_rep is not None:
+            report["mono_detail"] = mono_report(md_rep, md)
+            report["source_counts"] = {SRC_CLOUD_NAMES[int(v)]: int(c) for v, c in
+                                       zip(*np.unique(cols["source"], return_counts=True))}
+            write_mono_layers(out / "precision", data, cols["source"], md_rep, K, c2w, log)
         camera_travels(tmp, params, len(frames), log)
         _p(85, "publishing the epoch (octree, atomic swap)")
         rep = CC.publish(session_dir, tmp, report, log, columns=cols)
@@ -386,6 +531,13 @@ def run_depth_on_f5(session_dir: Path, pcfg, log: Callable = print,
     (out / "precision" / REPORT).write_text(json.dumps(rep, indent=1, default=float))
     _p(100, f"depth on F5 published epoch {rep['epoch_to']} ({rep['n_points']:,} pts, {rep['seconds']} s)")
     return rep
+
+
+def run_depth_on_f5(session_dir: Path, pcfg, log: Callable = print,
+                    progress: Optional[Callable[[float, str], None]] = None) -> dict:
+    return publish_cloud(compute(session_dir, pcfg, log=log, progress=progress), pcfg, log=log)
+
+
 
 
 def main(argv: Optional[List[str]] = None) -> int:

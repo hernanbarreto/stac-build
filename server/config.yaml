@@ -2434,12 +2434,51 @@ reconstruction:
                                         # (precision/pointdit_runner.py, precision/mono_detail.py).
       enabled: false                    # feature flag: false = the baseline (pccr epoch 8) stays reproducible
       model: H                          # H = PointDiT-H/16 + DINOv3 ViT-H+/16 (default) | L = PointDiT-L/16 + ViT-L/16
-      steps: 2                          # Euler steps of the ODE from zeros (deterministic; the vendor's demo uses 3)
+      steps: 16                         # Euler steps of the ODE from zeros (deterministic). USER 2026-10-04: the
+                                        #   vendor says more steps refine fine detail — "la mayor cantidad que
+                                        #   podamos". MEASURED on a pccr tile (A100): 57 ms per step per tile,
+                                        #   linear; the map converges at 16 (median change vs 12: 0.01 % of the
+                                        #   depth range, vs 24: 0.00 %) while the p99 edge jump still creeps
+                                        #   (0.211 @2 → 0.227 @16 → 0.231 @24). 16 = ~9 min on pccr's 578 tiles.
       repo_dir: third_party/pointdit    # pinned submodule (vendor/VENDORS.lock.md)
       weights_dir: third_party/pointdit/pretrained
       dinov3_dir: third_party/pointdit/pretrained/dinov3
       norm_max: 2.9                     # output norm above this = invalid pixel (the paper: sky dome at 3.0)
       verify_sha256: true               # every checkpoint checked against the prefix in its name, once per file
+      tile_px: 512                      # BOUND (model): native tile side = PointDiT's training size
+      tile_overlap_frac: 0.25           # share of a tile its neighbour repeats; feathered after the alignment
+      context_scale: 1.0                # 1.0 = native tiles (finest detail); 2.0 = twice the window, downscaled
+                                        #   (more context, coarser detail) — both measurable in the Phase 8 A/B
+      fit_space: depth                  # per-tile affine: depth (z_cal ≈ s·z_mono + b) | inverse (1/z_cal ≈ …)
+      irls_iterations: 10               # Huber IRLS steps (epoch 7's construction, gauge.huber_k)
+      min_support_frac: 0.05            # a tile with less support than this share of its pixels is rejected
+      tile_residual_quantile: 95.0      # a tile whose relative residual is above this percentile of the
+                                        #   session's own tiles is rejected (its pixels keep Omega)
+      lowpass_patch_fraction: 0.5       # lowpass σ = Omega's 16-px patch on the camera grid × this: what the
+                                        #   calibrated depth resolves; finer than that comes from PointDiT
+      side_reach_px: 3                  # BOUND (resolution): pixels past the band where front / back are read
+      overlays: false                   # per-keyframe PNGs under output/precision/mono_overlays/ for the eye
+      ab_edge_gradient_quantile: 90.0   # the Phase 8 A/B's edge band = image gradient energy above this percentile
+                                        #   of the session's pixels, or a step of the calibrated depth (never PointDiT)
+    cloud_metrics:                      # the floor + edge metrics of EVERY run (precision/cloud_metrics.py;
+                                        # pending A "run checks" closed 2026-10-04): floor after f6_bend
+                                        # (chunk_check.json) and on the certified cloud, edges in the acta.
+                                        # The values are the hand floor_metric.py's, the judge of epochs 4-8.
+      ransac_iterations: 600            # BOUND (search) of the global floor plane
+      floor_max_tilt_deg: 45.0          # the floor normal within this of the cameras' up
+      camera_min_height_m: 0.3          # the cameras stand at least this high over the floor …
+      camera_above_frac: 0.9            # … for at least this share of them
+      inlier_m: 0.03                    # plane inliers (score + refit)
+      band_m: 0.30                      # the floor band around the plane
+      cell_m: 1.0                       # the cell of the per-cell statistics
+      cell_min_points: 300              # BOUND: band points a cell needs
+      mode_bin_m: 0.01                  # histogram bin of the cell's dominant layer
+      mode_band_m: 0.10                 # points within this of the mode fit the cell plane
+      plane_min_points: 200             # BOUND: points the cell plane needs
+      max_points: 6000000               # BOUND (cost): subsample of the cloud
+      score_stride: 10                  # BOUND (cost): every 10th point scores a RANSAC candidate
+      seed: 0
+      edge_max_objects: 40              # BOUND (cost): the largest objects the edge metric measures in the acta
     chunk_check:                        # USER 2026-09-29: per-chunk AND per-keyframe verification of
                                         # the corrected geometry against the floor/ceiling, DA3 as the
                                         # independent instrument (precision/chunk_check.py). Verdict per

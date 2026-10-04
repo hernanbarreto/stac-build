@@ -576,6 +576,10 @@ def run_check(session_dir: Path, pcfg, log: Callable = print, chainage: Optional
     summary = ", ".join(f"chunk {c['chunk']} {c['verdict']}" for c in rep["chunks"])
     log(f"{LOG_TAG} {summary}; {len(rep['to_correct'])} correction(s) indicated → {pdir / CHECK_NAME} "
         f"({rep['seconds']} s)")
+    # the floor metric of the published cloud (precision/cloud_metrics.py; edges need the projection)
+    from precision.cloud_metrics import run_cloud_metrics
+    rep["cloud_metrics"] = run_cloud_metrics(session_dir, pcfg, stage="f6_check", log=log, edges=False)
+    (pdir / CHECK_NAME).write_text(json.dumps(rep, indent=1, default=float))
     return rep
 
 

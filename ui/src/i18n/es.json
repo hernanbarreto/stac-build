@@ -191,7 +191,9 @@
     "userManagement": "Gestión de usuarios",
     "logout": "Salir",
     "shadows": "Sombras",
-    "flyers": "Voladores (diagnóstico)"
+    "flyers": "Voladores (diagnóstico)",
+    "monoDetail": "Capa de detalle PointDiT",
+    "mixedUnresolved": "Píxeles mezclados sin resolver"
   },
   "palette": {
     "title": "Paleta de comandos",
@@ -1055,8 +1057,10 @@
     "hide": "Ocultar",
     "isolate": "Aislar",
     "showAll": "Mostrar todo",
-    "flyersLayer": "Capa de voladores cargada (rojo borde · naranja vistas · azul textura · gris otro)",
-    "flyersMissing": "Esta sesión no tiene diagnóstico de voladores todavía"
+    "layer_flyers": "Capa de voladores cargada (rojo borde · naranja vistas · azul textura · gris otro)",
+    "layer_mono_detail": "Capa PointDiT cargada (gris detalle · verde frente · azul fondo)",
+    "layer_mixed_unresolved": "Píxeles mezclados sin resolver cargados (rojo): excluidos de la nube",
+    "layerMissing": "La capa '{{name}}' no está en esta sesión todavía"
   },
   "xr": {
     "title": "STAC XR",

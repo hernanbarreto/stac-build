@@ -348,6 +348,16 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         except Exception as _e:  # noqa: BLE001 — declared, never silent
             log(f"[certify] chunk check not run: {_e}")
             acta["chunk_check"] = {"error": str(_e)}
+        # the floor + edge metrics of the CERTIFIED cloud (precision/cloud_metrics.py) — reports
+        try:
+            from precision.config import load_precision_config as _lpc
+            _pc2 = _lpc()
+            if _pc2.enabled:
+                from precision.cloud_metrics import run_cloud_metrics
+                acta["cloud_metrics"] = run_cloud_metrics(session_dir, _pc2, stage="certify", log=log, edges=True)
+        except Exception as _e:  # noqa: BLE001
+            log(f"[certify] cloud metrics not run: {_e}")
+            acta["cloud_metrics"] = {"error": str(_e)}
         base = load_session_frames(output_dir, log)   # poses moved under us
 
     for it in range(n_iters):

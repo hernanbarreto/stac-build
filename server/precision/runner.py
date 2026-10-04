@@ -134,8 +134,12 @@ def chain_steps(pcfg, steps: Sequence[Step] = STEPS) -> List[Step]:
     fusion = pcfg.cloud.source == "fusion"
     drop = set()
     if pcfg.cloud.source == "omega_bent":
-        # USER 2026-10-01 (pccr epoch 7): the depth on F5 IS the product — no plane sweep, no F7
-        return [s for s in steps if s.key not in {"f6_sweep", "f6_colmap", "f7_cloud", "f7_fuse"}]
+        # USER 2026-10-01 (pccr epoch 7): the depth on F5 IS the product — no plane sweep, no F7.
+        # With mono_detail on, PointDiT runs inside it: the step takes the card (vLLM stands down).
+        from dataclasses import replace as _replace
+        mono = bool(getattr(getattr(pcfg, "mono_detail", None), "enabled", False))
+        return [(_replace(s, gpu=True) if (mono and s.key == "f6_bend") else s)
+                for s in steps if s.key not in {"f6_sweep", "f6_colmap", "f7_cloud", "f7_fuse"}]
     drop.add("f6_bend")
     if fusion:
         drop.add("f7_cloud")
