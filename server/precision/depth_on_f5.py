@@ -14,9 +14,12 @@ Per keyframe i (cameras and poses = the session's, i.e. F5's after f5_refine):
  1. landmarks: F5's FIT tracks triangulated with these poses + camera (precision.refine helpers); the
     HELD-OUT tracks only judge;
  2. bend: z_i(u, v) · k_i(u, v), k_i = c0 + c1·u + c2·v fitted (robust IRLS, Huber `gauge.huber_k`) on
-    the landmarks of keyframes i−w … i+w; w chosen among `bend.windows` by the held-out (median |dz|/z).
-    A keyframe with fewer than `refine.min_witness_corr` landmark rows borrows the NEAREST fitted
-    keyframe's k (never identity next to bent neighbours);
+    the landmarks of keyframes i−w … i+w; w chosen among `bend.windows` by half A of the HELD-OUT
+    (median |dz|/z). A keyframe whose window holds fewer than `bend.min_rows` landmark rows keeps
+    Omega's depth (k = 1), exactly as epoch 7 did (the 'borrow the nearest k' variant belonged to the
+    first, discarded epoch 8). REPRODUCED 2026-10-04 on pccr's F5 files with this code, steps 1-4,
+    nothing published: held-out 7.25 → 2.80 % at ±0, tau 1.93 %, kept 63.1 %, contradicted 15.1 %,
+    repaired 8.5 %, admitted 0.4 %, coverage 71.0 % — the hand-built epoch 8's own numbers;
  3. validity: Omega's ONE confidence floor (`reconstruction.simple.conf_min_norm`, min-max per Omega
     chunk) and not sky (epoch0_cloud.SKY_CONF);
  4. vote over the keyframe offsets `bend.neighbors`: a pixel LEAVES when more neighbours see free space

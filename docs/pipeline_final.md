@@ -67,7 +67,7 @@ the objects the projection creates are listed (their points could never be hidde
 | 3 | Omega (5 m chunks, 50 %) | done |
 | 4 | F0, F2, F4 (F3) | done |
 | 5 | F5 (R1) | done |
-| 6 | Depth on F5 (`f6_bend` = epoch 8) | done — **pending:** it aborts when F5's camera carries lens distortion or Omega's grid is not the native one (pccr has neither); no fallback |
+| 6 | Depth on F5 (`f6_bend` = epoch 8) | done — **reproduced 2026-10-04**: the product code on pccr's F5 files gives epoch 8's numbers exactly (held-out 2.80 % at ±0, τ 1.93 %, kept 63.1 / contradicted 15.1 / repaired 8.5 / admitted 0.4 %, coverage 71.0 %) — **pending:** it aborts when F5's camera carries lens distortion or Omega's grid is not the native one (pccr has neither); no fallback |
 | 7 | Cloud publish | done |
 | 8 | Mask projection + OBB + class byte + co-visible split | done — **pending:** desk #174's 3.14 m piece may still hold 2 desks |
 | 9 | Certification | done — **pending:** the chunk check flags a floor drift INSIDE chunk 0 (+16 cm, kf 0–62) and chunk 1 undecided (+5 cm); no intra-chunk correction exists |
@@ -76,9 +76,12 @@ the objects the projection creates are listed (their points could never be hidde
 | — | Run checks | **pending:** the edge metric and the floor metric run by hand, not as automatic reports of every run |
 | — | End-to-end validation | **pending:** the user relaunches pccr from scratch (restart the backend first) |
 
-**VLM refinement (stage 2):** prompts per CONCEPT, never per object; 100 % of the points segmented (a
-second VLM pass looks at what stayed unsegmented and proposes the concepts it sees there); the fallback
-retry carries the category, not bare adjectives (pccr: a 'window' fallback got a door's description).
+**VLM refinement (stage 2):** prompts per CONCEPT, never per object (the understanding prompt asks one entry per
+kind; pccr's 43 prompts are all concepts); 100 % of the points segmented (a second VLM pass looks at what stayed
+unsegmented and proposes the concepts it sees there — MEASURED 2026-10-04 on pccr's live epoch: 14.6 % of the points
+have NO mask at their source pixel; today's 99.4 % coverage is the geometric growth of `_attach_unsegmented`, which
+gives them a neighbour's label); the fallback retry carries the category (DONE 2026-10-04:
+`session_builder.with_category`, "white tiled floor", never "white tiled").
 
 ## PENDING — B. General
 

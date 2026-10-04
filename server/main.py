@@ -5256,6 +5256,21 @@ async def get_scene(session_id: str):
     return {"ok": True, "exists": True, **payload}
 
 
+@app.get("/api/precision/flyers/{session_id}")
+async def precision_flyers_layer(session_id: str):
+    """The flyer diagnosis layer (precision/flyers.py, claude_stac.txt Phase 0): the flyers of the
+    live cloud as a coloured GLB point cloud — a red mixed edge, b orange view-inconsistent, c blue
+    low texture / highlight, d grey other. 404 until the diagnosis has run on this session."""
+    from fastapi.responses import FileResponse
+    ctx = _ctx(session_id)
+    full_path = ctx.output_dir / "precision" / "flyers.glb"
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail="no flyer diagnosis on this session "
+                                                    "(python -m precision.flyers --session <dir>)")
+    return FileResponse(str(full_path), media_type="model/gltf-binary",
+                        headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/api/segmentation/scene/file/{session_id}/{filename}")
 async def scene_file(session_id: str, filename: str):
     """Serve a reconstruction-v2 element GLB / meta.json."""

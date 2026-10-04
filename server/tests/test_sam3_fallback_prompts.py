@@ -36,9 +36,24 @@ def test_fallbacks_are_the_descriptions_then_the_merged_names():
     und = SceneUnderstanding("room", "", ["column", "desk"], per_frame=frames,
                              merged={"columns": "column"})
     fb = build_fallback_prompts(und, ["column", "desk"], {"beam": "column", "table": "desk"}, n_max=3)
-    # most frequent description first, then the others, then merged names; capped
-    assert fb["column"] == ["metal support column", "steel beam", "grey concrete column"]
+    # most frequent description first, then the others, then merged names; capped; every
+    # description carries the category it describes (USER 2026-10-01)
+    assert fb["column"] == ["metal support column", "steel beam column", "grey concrete column"]
     assert fb["desk"] == ["black metal desk", "table"]
+
+
+def test_the_retry_phrase_carries_the_category():
+    """pccr 2026-10-01: a 'window' fallback 'dark, rectangular, closed' got a door's masklet —
+    bare adjectives name nothing; the retry says what kind of object they describe."""
+    from segmentation.autoprompt.session_builder import with_category
+    assert with_category("dark, rectangular, closed", "window") == "dark rectangular closed window"
+    assert with_category("white tiled", "floor") == "white tiled floor"
+    assert with_category("metal support column", "column") == "metal support column"
+    assert with_category("Fire Extinguisher, red", "fire extinguisher") == "Fire Extinguisher red"
+    frames = [FrameUnderstanding(1, "room", "", ["window"], descriptions={"window": "dark, rectangular, closed"}),
+              FrameUnderstanding(2, "room", "", ["window"], descriptions={"window": "window"})]
+    und = SceneUnderstanding("room", "", ["window"], per_frame=frames, merged={})
+    assert build_fallback_prompts(und, ["window"], {}, n_max=3) == {"window": ["dark rectangular closed window"]}
 
 
 def test_production_config_has_the_bound():

@@ -503,7 +503,10 @@ autoprompt:
   sam3_fallback_max: 3                # BOUND: a prompt SAM3 confirmed NOTHING for is retried with at most
                                       # this many of its origins — the VLM's visual descriptions of it
                                       # (most frequent first), then the names merged into it (USER
-                                      # 2026-09-30: "column" 0 masklets, "metal support column" 62 kf)
+                                      # 2026-09-30: "column" 0 masklets, "metal support column" 62 kf).
+                                      # Every description retries WITH its category ("white tiled
+                                      # floor", never "white tiled" — USER 2026-10-01: a 'window'
+                                      # fallback of bare adjectives got a door's masklet on pccr)
   merge_max_phrases_per_call: 400     # BOUND: the whole name list goes to ONE merge call up to this
                                       # many names (a kind is often named with different heads —
                                       # 'floor tiles' / 'floor'); beyond, one call per head noun
@@ -2408,6 +2411,23 @@ reconstruction:
       min_rows: 20                      # a keyframe whose window holds fewer landmark rows keeps Omega's depth
                                         #   (k = 1) — epoch 7
       min_depth_m: 0.05                 # landmark rows where Omega's depth is under this are not used (epoch 7)
+    flyers:                             # Phase 0 of the mono-detail work (claude_stac.txt 2026-10-04): flyer
+                                        # diagnosis of the published cloud (precision/flyers.py). A flyer is an
+                                        # ISOLATED point or one BETWEEN two surfaces of its own frame; classes
+                                        # a mixed edge · b view-inconsistent · c low texture / highlight · d other.
+                                        # Every bar below is the SESSION'S OWN percentile, never a fixed number.
+      knn_k: 8                          # BOUND: neighbours of the isolation distance
+      isolated_quantile: 99.0           # isolated = k-NN mean distance, in pixel footprints (z / f) of its own
+                                        # camera, above this percentile of the cloud's own
+      step_quantile: 95.0               # a step = window depth spread (z_back - z_front) / z_front above this percentile of the session's pixels
+      band_px: 2                        # BOUND (resolution): half-width of the discontinuity band around a step
+      view_quantile: 75.0               # view agreement bar = this percentile of the neighbour disagreement on
+                                        # interior points (the construction of bend.tau_quantile)
+      texture_quantile: 10.0            # low texture = gradient energy under this percentile of the session's pixels
+      texture_window_px: 5              # BOUND: window of the gradient energy
+      specular_gray: 250                # BOUND (sensor): mean gray at or above this = saturated highlight (reflection)
+      sample_points: 2000000            # BOUND (cost): points sampled for the session percentiles
+      seed: 0
     chunk_check:                        # USER 2026-09-29: per-chunk AND per-keyframe verification of
                                         # the corrected geometry against the floor/ceiling, DA3 as the
                                         # independent instrument (precision/chunk_check.py). Verdict per

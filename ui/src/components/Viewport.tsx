@@ -118,6 +118,9 @@ export interface ViewportHandle {
     physicsClear: () => void
     /** meshes cast and receive shadows, the point cloud receives them (USER 2026-10-01) */
     setShadows: (on: boolean) => void
+    /** the flyer-diagnosis layer (precision/flyers.py): the live cloud's flyers coloured by class,
+     *  a red mixed edge · b orange view-inconsistent · c blue low texture · d grey other */
+    setFlyersLayer: (on: boolean, sessionId: string | null) => Promise<void>
     /** fly to a listed object: a placed one (id), a generated one (instance id), a mesh (folder) */
     flyToObject: (kind: 'placed' | 'shape' | 'tsdf', key: string | number) => boolean
     /** spheres in the scene right now */
@@ -540,6 +543,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // TSDF meshes — same lifecycle as shapes, kept in a parallel group so both
     // backends can be displayed simultaneously for A/B comparison.
     const tsdfGroupRef = useRef<THREE.Group | null>(null)
+    const flyersGroupRef = useRef<THREE.Group | null>(null)
     // Lazy TSDF: per-instance meshes are NOT downloaded at session open (only
     // the whole-scene mesh is). Entries wait here (folder  list item) until
     // setTsdfVisibility(folder, true) pulls them in on demand.
@@ -2833,6 +2837,33 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         },
         physicsClear: () => { physicsRef.current?.clear(); throwEndRef.current?.() },
         setShadows: (on: boolean) => { shadowsRef.current?.setEnabled(on) },
+        setFlyersLayer: async (on: boolean, sessionId: string | null) => {
+            const old = flyersGroupRef.current
+            if (old) { disposeMeshGroup(old); old.removeFromParent(); flyersGroupRef.current = null }
+            if (!on || !sessionId) return
+            const parent = potreeLoaderRef.current?.getOctreeGroup()   // the cloud's frame: floor_transform applies
+            if (!parent) return
+            if (!gltfLoaderRef.current) gltfLoaderRef.current = makeGltfLoader()
+            try {
+                const gltf = await gltfLoaderRef.current.loadAsync(`/api/precision/flyers/${sessionId}`)
+                const group = new THREE.Group()
+                group.name = 'flyers-layer'
+                gltf.scene.traverse(o => {
+                    const pts = o as THREE.Points
+                    if ((pts as any).isPoints) {
+                        pts.material = new THREE.PointsMaterial({ size: 5, sizeAttenuation: false, vertexColors: true, depthTest: false })
+                        pts.renderOrder = 50
+                    }
+                })
+                group.add(gltf.scene)
+                parent.add(group)
+                flyersGroupRef.current = group
+                onStatusMessage?.(tt('vp.flyersLayer'))
+            } catch (e) {
+                console.warn('[Viewport] flyers layer not available', e)
+                onStatusMessage?.(tt('vp.flyersMissing'))
+            }
+        },
         physicsCount: () => physicsRef.current?.count ?? 0,
         physicsPlace: (diameterM: number, restitution: number) => {
             const scene = sceneRef.current

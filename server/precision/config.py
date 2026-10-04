@@ -340,6 +340,22 @@ class BendConfig:
     min_depth_m: float          # landmark rows on Omega depth under this are not used (epoch 7)
 
 
+# ── flyer diagnosis (claude_stac.txt 2026-10-04, Phase 0) ──────────────────
+
+@dataclass(frozen=True)
+class FlyersConfig:
+    knn_k: int                  # BOUND: neighbours of the isolation distance
+    isolated_quantile: float    # isolated above this percentile of the session's OWN k-NN distance
+    step_quantile: float        # a depth step = adjacent-pixel |dz|/z above this percentile of the session's steps
+    band_px: int                # BOUND (resolution): half-width of the discontinuity band around a step
+    view_quantile: float        # view agreement bar = this percentile of the session's neighbour disagreement
+    texture_quantile: float     # low texture = gradient energy under this percentile of the session's pixels
+    texture_window_px: int      # BOUND: window of the gradient energy
+    specular_gray: float        # BOUND (sensor): mean gray at or above this = saturated highlight
+    sample_points: int          # BOUND (cost): points sampled for the session percentiles
+    seed: int
+
+
 # ── chunk / keyframe floor check (USER 2026-09-29: "verificación interna e intrachunk") ──
 
 @dataclass(frozen=True)
@@ -381,6 +397,7 @@ class PrecisionConfig:
     fuse: FuseConfig
     cloud: CloudConfig
     bend: BendConfig
+    flyers: FlyersConfig
     chunk_check: ChunkCheckConfig
     runner: RunnerConfig
 
@@ -630,6 +647,17 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
                       irls_iterations=_num(bd, "irls_iterations", "bend", lo=1, integer=True),
                       min_rows=_num(bd, "min_rows", "bend", lo=3, integer=True),
                       min_depth_m=_num(bd, "min_depth_m", "bend", lo=0.0))
+    fl = _sub(sec, "flyers", "")
+    flyers = FlyersConfig(knn_k=_num(fl, "knn_k", "flyers", lo=1, integer=True),
+                          isolated_quantile=_num(fl, "isolated_quantile", "flyers", lo=0.0, hi=100.0, lo_excl=True),
+                          step_quantile=_num(fl, "step_quantile", "flyers", lo=0.0, hi=100.0, lo_excl=True),
+                          band_px=_num(fl, "band_px", "flyers", lo=0, integer=True),
+                          view_quantile=_num(fl, "view_quantile", "flyers", lo=0.0, hi=100.0, lo_excl=True),
+                          texture_quantile=_num(fl, "texture_quantile", "flyers", lo=0.0, hi=100.0, lo_excl=True),
+                          texture_window_px=_num(fl, "texture_window_px", "flyers", lo=1, integer=True),
+                          specular_gray=_num(fl, "specular_gray", "flyers", lo=0.0, hi=255.0),
+                          sample_points=_num(fl, "sample_points", "flyers", lo=1, integer=True),
+                          seed=_num(fl, "seed", "flyers", lo=0, integer=True))
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,
                            tracks=tracks, refine=refine, depth=depth, fuse=fuse,
-                           cloud=cloud, bend=bend, chunk_check=chunk_check, runner=runner)
+                           cloud=cloud, bend=bend, flyers=flyers, chunk_check=chunk_check, runner=runner)

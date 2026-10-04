@@ -190,7 +190,8 @@
     "about": "Acerca de STAC Build",
     "userManagement": "Gestión de usuarios",
     "logout": "Salir",
-    "shadows": "Sombras"
+    "shadows": "Sombras",
+    "flyers": "Voladores (diagnóstico)"
   },
   "palette": {
     "title": "Paleta de comandos",
@@ -1053,7 +1054,9 @@
     "transparency": "Transparencia",
     "hide": "Ocultar",
     "isolate": "Aislar",
-    "showAll": "Mostrar todo"
+    "showAll": "Mostrar todo",
+    "flyersLayer": "Capa de voladores cargada (rojo borde · naranja vistas · azul textura · gris otro)",
+    "flyersMissing": "Esta sesión no tiene diagnóstico de voladores todavía"
   },
   "xr": {
     "title": "STAC XR",

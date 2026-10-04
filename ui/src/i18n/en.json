@@ -190,7 +190,8 @@
     "about": "About STAC Build",
     "userManagement": "User management",
     "logout": "Sign out",
-    "shadows": "Shadows"
+    "shadows": "Shadows",
+    "flyers": "Flyers (diagnosis)"
   },
   "palette": {
     "title": "Command palette",
@@ -1053,7 +1054,9 @@
     "transparency": "Transparency",
     "hide": "Hide",
     "isolate": "Isolate",
-    "showAll": "Show all"
+    "showAll": "Show all",
+    "flyersLayer": "Flyer layer loaded (red edge · orange views · blue texture · grey other)",
+    "flyersMissing": "No flyer diagnosis on this session yet"
   },
   "xr": {
     "title": "STAC XR",

@@ -63,11 +63,27 @@ def _frame_num(filename: str) -> int:
     return int(os.path.splitext(os.path.basename(filename))[0])
 
 
+def with_category(description: str, category: str) -> str:
+    """The retry phrase SAM3 gets: the VLM's visual description WITH the category it
+    describes — USER 2026-10-01 (pccr): the bare adjectives of a 'window' fallback
+    ("dark, rectangular, closed") describe a door just as well, and SAM3 segmented one.
+    Commas go (SAM3 reads a noun phrase, not a list); the category is appended unless the
+    description already names it ("metal support column" stays as it is)."""
+    words = [w for w in description.replace(",", " ").split() if w]
+    cat_words = category.lower().split()
+    text = " ".join(words)
+    low = [w.lower() for w in words]
+    if cat_words and all(w in low for w in cat_words):
+        return text
+    return f"{text} {category}".strip()
+
+
 def build_fallback_prompts(understanding, phrases: list[str], synonyms: dict,
                            n_max: int) -> dict[str, list[str]]:
     """Per SAM3 prompt, its ORIGINS in the order SAM3 should try them when the bare
     category confirms nothing: the visual descriptions the VLM gave its objects (most
-    frequent first), then the names merged into it (same name / synonym merge)."""
+    frequent first, each carrying the CATEGORY — `with_category`), then the names merged
+    into it (same name / synonym merge)."""
     pset = set(phrases)
     descs: dict[str, Counter] = {}
     alias: dict[str, Counter] = {}
@@ -79,7 +95,9 @@ def build_fallback_prompts(understanding, phrases: list[str], synonyms: dict,
                 continue
             de = (getattr(fu, "descriptions", {}) or {}).get(o)
             if de and de != c:
-                descs.setdefault(c, Counter())[de] += 1
+                de = with_category(de, c)
+                if de != c:
+                    descs.setdefault(c, Counter())[de] += 1
             if o != c:
                 alias.setdefault(c, Counter())[o] += 1
     out: dict[str, list[str]] = {}

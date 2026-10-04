@@ -71,3 +71,14 @@ Not clonable. Provision as noted; none is fetched by `git`.
 - `vendor/DepthLM_Official`, `vendor/perception_models` — **dead `.gitmodules`
   entries** (declared but never tracked and absent on disk). Removed from
   `.gitmodules`. Re-add as real submodules if these deps come back.
+- `third_party/pointdit` — SUBMODULE since 2026-10-04 (`google-research/pointdit`, pinned
+  `11f53a30aeb4d34d49d2beda655ee6f19b2ad7f8`, Apache-2.0): the monocular point-map DiT whose
+  depth DETAIL refines the bent Omega maps inside f6_bend (claude_stac.txt 2026-10-04, flag
+  `mono_detail.enabled`). Runs in env `da3` (torch 2.9.1 untouched; `torchmetrics` +
+  `lightning-utilities` added with `--no-deps` for its torch.hub load of DINOv3). Untracked inside
+  it: `third_party/dinov3` (clone of `facebookresearch/dinov3` @ `6876159a`, the hub code),
+  `pretrained/pointdit{h,l}-512-mixdata-nodinov3-*.pth` (HF `haofeixu/pointdit`, sha256 prefixes
+  cb01dd3b / 240c1a4f verified) and `pretrained/dinov3/dinov3_vit{h16plus,l16}_pretrain_lvd1689m-*.pth`
+  (gated Meta weights, prefixes 7c1da9a5 / 8aa4cbdd verified, downloaded 2026-10-04 with the user's
+  links). NOTE: `vendor/dinov3` and `weights/dinov3` named above are NOT on this pod any more
+  (2026-10-04: neither directory exists); the DINOv3 weights live under PointDiT's `pretrained/dinov3`.
