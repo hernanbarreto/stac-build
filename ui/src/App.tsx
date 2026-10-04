@@ -133,7 +133,7 @@ function App() {
   const [shadowsOn, setShadowsOn] = useState(true)
   useEffect(() => { viewportRef.current?.setShadows(shadowsOn) }, [shadowsOn])
   // points as cubes (USER 2026-10-04: "cubos como en la página de PointDiT"); on by default
-  const [cubesOn, setCubesOn] = useState(false)
+  const [cubesOn, setCubesOn] = useState(true)
   useEffect(() => { viewportRef.current?.setPointShape(cubesOn ? 'cube' : 'disc') }, [cubesOn])
   // the precision core's diagnostic layers (flyers, mono detail, mixed unresolved): off by default, per session
   const [flyersOn, setFlyersOn] = useState(false)

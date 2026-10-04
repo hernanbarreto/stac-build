@@ -3381,7 +3381,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 sectionBoxMax: { value: new THREE.Vector3(100, 100, 100) },
                 uSelBoxOn: { value: false },
                 uSelBoxInv: { value: new THREE.Matrix4() },
-                uPointShape: { value: 0 },   // discs by default; View → Points as cubes switches (App.tsx cubesOn)
+                uPointShape: { value: 1 },   // cubes by default (USER 2026-10-04; App.tsx cubesOn)
                 uViewportH: { value: container.clientHeight || 1 },
                 uViewRotInv: { value: new THREE.Matrix3() },
                 ...pointShadowU,
