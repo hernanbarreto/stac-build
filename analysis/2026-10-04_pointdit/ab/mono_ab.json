@@ -1,0 +1,255 @@
+[
+ {
+  "variant": "off",
+  "overrides": {
+   "enabled": false
+  },
+  "seconds_compute": 698.4,
+  "seconds_per_frame": 2.42,
+  "bend": {
+   "window": 0,
+   "held_out_A": {
+    "0": 0.02800358822263645,
+    "1": 0.02835594478761861,
+    "2": 0.02853137623613088,
+    "4": 0.02860138580185377,
+    "8": 0.028775919110557286
+   }
+  },
+  "vote": {
+   "valid": 109932923,
+   "edge": 0.053583274593726575,
+   "kept": 0.6310077100378746,
+   "contradicted": 0.15097671877604857,
+   "repaired": 0.08539720170999184,
+   "admitted": 0.003726690683918229,
+   "edge_below": 0.04611404719949091,
+   "out": 0.7200963354717677,
+   "mixed": 0.03507877253477559,
+   "snapped": 0.014524575135694336,
+   "tau": 0.019261389200870928,
+   "coverage": 0.7095438281730425
+  },
+  "vote_band": {
+   "band_pixels": 23503127,
+   "band_covered": 17583004,
+   "band_coverage": 0.7481133893375124,
+   "band_agree_median": 3.0
+  },
+  "heldout": {
+   "median_rel": 0.024772353445681544,
+   "p90_rel": 0.1850352551685814,
+   "band_median_rel": 0.02542693264009704,
+   "band_p90_rel": 0.29290902833348553,
+   "landmarks": 808830,
+   "covered": 675931,
+   "in_band": 219466
+  },
+  "flyers": {
+   "points": 18421966,
+   "flyers": 211725,
+   "flyer_share": 0.011493072997746278,
+   "by_class": {
+    "mixed_edge": {
+     "letter": "a",
+     "count": 29893,
+     "share_of_flyers": 0.1411878616129413,
+     "share_of_points": 0.0016226823999132341
+    },
+    "view_inconsistent": {
+     "letter": "b",
+     "count": 7014,
+     "share_of_flyers": 0.03312787814381863,
+     "share_of_points": 0.000380741121767351
+    },
+    "low_texture": {
+     "letter": "c",
+     "count": 43769,
+     "share_of_flyers": 0.20672570551422836,
+     "share_of_points": 0.0023759136239856265
+    },
+    "other": {
+     "letter": "d",
+     "count": 131049,
+     "share_of_flyers": 0.6189585547290117,
+     "share_of_points": 0.007113735852080066
+    }
+   },
+   "bars": {
+    "tau_step_rel": 0.05017554070800542,
+    "isolation_footprints": 3.4651901323748104,
+    "tau_view_rel": 0.009942821019787319,
+    "texture_energy": 6.399999999999993,
+    "n_interior_sampled": 2000000,
+    "flyers_isolated": 182466,
+    "flyers_between_surfaces": 29893,
+    "points_in_band": 916556,
+    "seconds": 37.5
+   },
+   "tiers": {
+    "omega_bent": 18421966,
+    "mono_detail": 0,
+    "band_front": 0,
+    "band_back": 0
+   },
+   "flyers_by_tier": {
+    "omega_bent": 211725,
+    "mono_detail": 0,
+    "band_front": 0,
+    "band_back": 0
+   }
+  },
+  "mono_detail": null,
+  "ground_truth": "pending (no gauge / test role on this session)",
+  "cleaned_cloud": "/workspace/stac-build/analysis/2026-10-04_pointdit/ab/scratch/off/cleaned_cloud.ply"
+ },
+ {
+  "variant": "on",
+  "overrides": {
+   "enabled": true,
+   "overlays": true
+  },
+  "seconds_compute": 1723.6,
+  "seconds_per_frame": 5.96,
+  "bend": {
+   "window": 0,
+   "held_out_A": {
+    "0": 0.02800358822263645,
+    "1": 0.02835594478761861,
+    "2": 0.02853137623613088,
+    "4": 0.02860138580185377,
+    "8": 0.028775919110557286
+   }
+  },
+  "vote": {
+   "valid": 108536196,
+   "edge": 0.05627173445437502,
+   "kept": 0.6321648862652235,
+   "contradicted": 0.15714794353028552,
+   "repaired": 0.08739540678208402,
+   "admitted": 0.0029078686339808705,
+   "edge_below": 0.03639865911644812,
+   "out": 0.7224681616812884,
+   "mixed": 0.02260430243934475,
+   "snapped": 0.006460416209906601,
+   "tau": 0.020321053522168796,
+   "coverage": 0.7028362609622957
+  },
+  "vote_band": {
+   "band_pixels": 23762062,
+   "band_covered": 17362360,
+   "band_coverage": 0.7306756459098541,
+   "band_agree_median": 3.0
+  },
+  "heldout": {
+   "median_rel": 0.025536387638265275,
+   "p90_rel": 0.2380219603627587,
+   "band_median_rel": 0.02696795130423059,
+   "band_p90_rel": 0.38803322759096665,
+   "landmarks": 808830,
+   "covered": 674017,
+   "in_band": 221919
+  },
+  "flyers": {
+   "points": 19290758,
+   "flyers": 211454,
+   "flyer_share": 0.010961414787329767,
+   "by_class": {
+    "mixed_edge": {
+     "letter": "a",
+     "count": 20775,
+     "share_of_flyers": 0.09824831878328147,
+     "share_of_points": 0.0010769405743413505
+    },
+    "view_inconsistent": {
+     "letter": "b",
+     "count": 8252,
+     "share_of_flyers": 0.039025036178081285,
+     "share_of_points": 0.00042776960863849934
+    },
+    "low_texture": {
+     "letter": "c",
+     "count": 38873,
+     "share_of_flyers": 0.18383667369735263,
+     "share_of_points": 0.002015110033519678
+    },
+    "other": {
+     "letter": "d",
+     "count": 143554,
+     "share_of_flyers": 0.6788899713412846,
+     "share_of_points": 0.007441594570830239
+    }
+   },
+   "bars": {
+    "tau_step_rel": 0.057860342599451525,
+    "isolation_footprints": 3.625341351577112,
+    "tau_view_rel": 0.010855534472298253,
+    "texture_energy": 6.3999999999997526,
+    "n_interior_sampled": 2000000,
+    "flyers_isolated": 193976,
+    "flyers_between_surfaces": 20775,
+    "points_in_band": 960229,
+    "seconds": 38.9
+   },
+   "tiers": {
+    "omega_bent": 2012004,
+    "mono_detail": 17067841,
+    "band_front": 104749,
+    "band_back": 106164
+   },
+   "flyers_by_tier": {
+    "omega_bent": 46694,
+    "mono_detail": 160792,
+    "band_front": 1437,
+    "band_back": 2531
+   }
+  },
+  "mono_detail": {
+   "tiles": {
+    "total": 578,
+    "accepted": 549,
+    "rejected_support": 0,
+    "rejected_residual": 29,
+    "residual_bar_rel": 0.09919575163688407
+   },
+   "pixels": {
+    "valid": 109927800,
+    "covered": 105551388,
+    "detail": 93935485,
+    "band": 10568731,
+    "mixed": 2519176,
+    "band_front": 498305,
+    "band_back": 629267,
+    "mixed_unresolved": 1391604,
+    "mixed_unjudged": 0
+   },
+   "seconds_pointdit": 727.3,
+   "seconds_total": 987.7,
+   "params": {
+    "tiles_per_frame": 2,
+    "tile": [
+     512,
+     464
+    ],
+    "run_size": [
+     512,
+     464
+    ],
+    "band_px": 1,
+    "lowpass_sigma_px": 8.0,
+    "tau": 0.019261389200870928,
+    "fit_space": "depth",
+    "context_scale": 1.0,
+    "tau_bent": 0.019261389200870928,
+    "footprint": {
+     "device": "cuda",
+     "model": "H",
+     "steps": 16,
+     "vram_peak_gb": 7.48
+    }
+   }
+  },
+  "ground_truth": "pending (no gauge / test role on this session)",
+  "cleaned_cloud": "/workspace/stac-build/analysis/2026-10-04_pointdit/ab/scratch/on/cleaned_cloud.ply"
+ }
+]

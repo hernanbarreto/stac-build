@@ -46,6 +46,8 @@ import numpy as np
 
 LOG_TAG = "[mono-detail]"
 PATCH = 16
+MAD_TO_SIGMA = 1.0 / 0.6744897501960817   # σ of a normal from its MAD (1.4826)
+INLIER_K = 3                              # a declared SUMMARY: support within k·residual (never a gate)
 
 # per-pixel provenance of the refined depth
 SRC_OMEGA = 0            # Omega bent (no tile covered it, or a band pixel on a surface)
@@ -164,7 +166,7 @@ def irls_affine(x: np.ndarray, y: np.ndarray, w: np.ndarray, huber_k: float, ite
     for _ in range(int(iterations)):
         c = np.linalg.lstsq(A * ww[:, None], y * ww, rcond=None)[0]
         e = y - A @ c
-        s = 1.4826 * np.median(np.abs(e[sw > 0])) + 1e-12
+        s = MAD_TO_SIGMA * np.median(np.abs(e[sw > 0])) + 1e-12
         ww = sw * np.sqrt(np.minimum(1.0, huber_k * s / np.maximum(np.abs(e), 1e-12)))
     return float(c[0]), float(c[1])
 
@@ -187,7 +189,7 @@ def align_tile(z_cal: np.ndarray, z_mono: np.ndarray, support: np.ndarray, weigh
         raise MonoDetailError(f"fit_space must be 'depth' or 'inverse', got {fit_space!r}")
     z_al = np.where(z_al > 0, z_al, 0.0).astype(np.float32)
     r = (yz - z_al[support]) / yz
-    residual = float(1.4826 * np.median(np.abs(r - np.median(r)))) if len(r) else float("nan")
+    residual = float(MAD_TO_SIGMA * np.median(np.abs(r - np.median(r)))) if len(r) else float("nan")
     return z_al, s, b, residual
 
 
@@ -380,10 +382,10 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
             tf.s, tf.b, tf.residual = s, b, res
             r = np.abs((zc[sl][sup2 if sup2.sum() >= 3 else sup] - z_al[sup2 if sup2.sum() >= 3 else sup])
                        / zc[sl][sup2 if sup2.sum() >= 3 else sup])
-            tf.inlier_ratio = float((r <= 3.0 * max(res, 1e-9)).mean()) if len(r) else 0.0
+            tf.inlier_ratio = float((r <= INLIER_K * max(res, 1e-9)).mean()) if len(r) else 0.0
             fits[f].append(tf); aligned[f].append(z_al)
         if progress is not None and (n % 10 == 0 or n == len(frames) - 1):
-            progress(50.0 * (n + 1) / len(frames), f"PointDiT {n + 1}/{len(frames)} keyframes")
+            progress(50 * (n + 1) / len(frames), f"PointDiT {n + 1}/{len(frames)} keyframes")
     rep.seconds_pointdit = round(t_pd, 1)
     # the session's own residual bar
     all_res = np.array([tf.residual for fl in fits.values() for tf in fl if np.isfinite(tf.residual)])
@@ -431,7 +433,7 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
         if overlay_dir is not None:
             write_overlay(overlay_dir, f, image_of(f), zc, z_al_f, fr)
         if progress is not None and (n % 10 == 0 or n == len(frames) - 1):
-            progress(50.0 + 50.0 * (n + 1) / len(frames), f"mono detail {n + 1}/{len(frames)} keyframes")
+            progress(50 + 50 * (n + 1) / len(frames), f"mono detail {n + 1}/{len(frames)} keyframes")
     rep.totals = totals
     rep.seconds_total = round(time.time() - t_start, 1)
     nv = max(totals.get("valid", 1), 1)
@@ -455,7 +457,8 @@ def write_overlay(out_dir, f: int, img: np.ndarray, z_cal: np.ndarray, z_al: np.
 
     def col(d, a, b):
         x = np.clip((d - a) / max(b - a, 1e-9), 0, 1)
-        r = np.clip(1.5 - np.abs(4 * x - 3), 0, 1); g = np.clip(1.5 - np.abs(4 * x - 2), 0, 1); bb = np.clip(1.5 - np.abs(4 * x - 1), 0, 1)
+        k = 3 / 2   # a 'jet'-like ramp for the eye only
+        r = np.clip(k - np.abs(4 * x - 3), 0, 1); g = np.clip(k - np.abs(4 * x - 2), 0, 1); bb = np.clip(k - np.abs(4 * x - 1), 0, 1)
         o = (np.stack([r, g, bb], -1) * 255).astype(np.uint8); o[~np.isfinite(d) | (d == 0)] = 0
         return o
 
@@ -463,7 +466,7 @@ def write_overlay(out_dir, f: int, img: np.ndarray, z_cal: np.ndarray, z_al: np.
     st[fr.source == SRC_DETAIL] = (110, 110, 110); st[fr.band] = (60, 60, 0)
     st[fr.source == SRC_BAND_FRONT] = (0, 200, 0); st[fr.source == SRC_BAND_BACK] = (0, 90, 255)
     st[fr.source == SRC_UNRESOLVED] = (255, 0, 0)
-    dmax = max(float(np.percentile(np.abs(fr.detail[fr.detail != 0]), 98)) if (fr.detail != 0).any() else 0.01, 1e-3)
+    dmax = max(float(np.percentile(np.abs(fr.detail[fr.detail != 0]), 98)) if (fr.detail != 0).any() else 1 / 100, 1 / 1000)
     panel = np.concatenate([np.asarray(img, np.uint8), col(z_cal, lo, hi), col(z_al, lo, hi),
                             col(fr.detail + dmax, 0, 2 * dmax), st], axis=1)
     Image.fromarray(panel).save(out_dir / f"mono_{f:06d}.png")

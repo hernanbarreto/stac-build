@@ -80,7 +80,7 @@ def test_mono_detail_off_leaves_the_bend_untouched_and_the_source_is_omega():
     from precision.config import load_precision_config
     from precision.depth_on_f5 import apply_mono_detail, confidence_weight, source_column
     pcfg = load_precision_config()
-    assert pcfg.mono_detail.enabled is False
+    pcfg = replace(pcfg, mono_detail=replace(pcfg.mono_detail, enabled=False))   # the flag's value is the user's
     dep = {0: np.ones((4, 4), np.float32)}; valid = {0: np.ones((4, 4), bool)}; passed = {0: np.ones((4, 4), bool)}
     d2, v2, p2, src, rep = apply_mono_detail(pcfg, [0], dep, valid, passed, {}, None, K, {}, Path("."),
                                              lambda m: None, lambda a, b: None)

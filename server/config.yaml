@@ -2443,7 +2443,11 @@ reconstruction:
                                         # edges) refines the DETAIL of the bent Omega depth inside f6_bend, before
                                         # the edge-keeping vote; it never touches scale, gauge, poses or camera
                                         # (precision/pointdit_runner.py, precision/mono_detail.py).
-      enabled: false                    # feature flag: false = the baseline (pccr epoch 8) stays reproducible
+      enabled: true                     # USER 2026-10-04 ("la nitidez de los bordes de pointdit es abrumadoramente
+                                        #   superior a omega"): ON for the end-to-end run; false = epoch 8 bit for bit.
+                                        #   A/B pccr 2026-10-04 (analysis/2026-10-04_pointdit/ab): held-out 2.48 → 2.55 %,
+                                        #   in the edge band 2.54 → 2.70 % (p90 29 → 39 %), contradicted 15.1 → 15.7 %,
+                                        #   mixed-edge flyers −30 %, +17 min. The cloud in the viewer decides.
       model: H                          # H = PointDiT-H/16 + DINOv3 ViT-H+/16 (default) | L = PointDiT-L/16 + ViT-L/16
       steps: 16                         # Euler steps of the ODE from zeros (deterministic). USER 2026-10-04: the
                                         #   vendor says more steps refine fine detail — "la mayor cantidad que
@@ -2451,9 +2455,9 @@ reconstruction:
                                         #   linear; the map converges at 16 (median change vs 12: 0.01 % of the
                                         #   depth range, vs 24: 0.00 %) while the p99 edge jump still creeps
                                         #   (0.211 @2 → 0.227 @16 → 0.231 @24). 16 = ~9 min on pccr's 578 tiles.
-      repo_dir: third_party/pointdit    # pinned submodule (vendor/VENDORS.lock.md)
-      weights_dir: third_party/pointdit/pretrained
-      dinov3_dir: third_party/pointdit/pretrained/dinov3
+      repo_dir: vendor/pointdit         # pinned submodule (vendor/VENDORS.lock.md)
+      weights_dir: vendor/pointdit/pretrained
+      dinov3_dir: vendor/pointdit/pretrained/dinov3
       norm_max: 2.9                     # output norm above this = invalid pixel (the paper: sky dome at 3.0)
       verify_sha256: true               # every checkpoint checked against the prefix in its name, once per file
       tile_px: 512                      # BOUND (model): native tile side = PointDiT's training size

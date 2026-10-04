@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -77,7 +77,7 @@ def floor_metric(X: np.ndarray, c2w: np.ndarray, cfg, seed: int = 0) -> dict:
     cam_h = C @ bn + bd
     dist = X @ bn + bd
     B = X[np.abs(dist) < float(cfg.band_m)]; bdist = B @ bn + bd
-    e1 = np.cross(bn, [1, 0, 0] if abs(bn[0]) < 0.9 else [0, 1, 0]); e1 /= np.linalg.norm(e1); e2 = np.cross(bn, e1)
+    e1 = np.cross(bn, np.eye(3)[int(np.argmin(np.abs(bn)))]); e1 /= np.linalg.norm(e1); e2 = np.cross(bn, e1)
     cell = float(cfg.cell_m)
     uv = np.stack([B @ e1, B @ e2], 1) / cell
     ci = np.floor(uv).astype(np.int64)

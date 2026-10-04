@@ -140,4 +140,4 @@ def test_mixed_pixels_go_to_a_side_never_in_between_and_without_support_stay_unr
 
 def test_production_config_declares_the_phase_keys():
     m = load_precision_config().mono_detail
-    assert m.enabled is False and m.tile_px >= 16 and m.fit_space in ("depth", "inverse")
+    assert isinstance(m.enabled, bool) and m.tile_px >= 16 and m.fit_space in ("depth", "inverse")   # the flag is the user's

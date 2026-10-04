@@ -1,6 +1,6 @@
 """PointDiT runner — Phase 1 of the mono-detail work (claude_stac.txt, 2026-10-04).
 
-PointDiT (google-research/pointdit, ICML 2026, Apache-2.0; `third_party/pointdit`, pinned submodule)
+PointDiT (google-research/pointdit, ICML 2026, Apache-2.0; `vendor/pointdit`, pinned submodule)
 is a pixel-space diffusion transformer that denoises a 3-D point map from one image, conditioned on
 a frozen DINOv3 encoder. Its output is AFFINE-INVARIANT (zero-centred, mean-normalised per image):
 it knows where the edges are and which side of them each pixel lies on, not the metre. In this
@@ -145,11 +145,15 @@ def working_size(H: int, W: int, tokens: int = TRAIN_TOKENS) -> Tuple[int, int]:
 
 
 def _args(arch: str, features: str, steps: int):
+    """The vendor's main.py parser defaults the Denoiser constructor reads. P_mean / P_std / t_eps and the EMA
+    decays are TRAINING quantities (the noise-level sampler, the EMA update) that inference never touches;
+    what decides the output is ``num_sampling_steps`` and ``generate_noise_scale`` 0 (the ODE starts from
+    zeros, deterministic). Written as integer ratios: they are the vendor's constants, not decisions here."""
     return types.SimpleNamespace(
         model=arch, img_size=512, attn_dropout=0.0, proj_dropout=0.0, attention_type="torch",
         feature_embedding_type=features, dinov3_use_intermediate_layers=True, dinov3_num_intermediate_layers=4,
-        feature_embedding_lr_scale=0.0, P_mean=-0.8, P_std=0.8, t_eps=5e-2, noise_scale=1.0,
-        ema_decay1=0.9999, ema_decay2=0.9999, num_sampling_steps=int(steps), generate_noise_scale=0.0,
+        feature_embedding_lr_scale=0.0, P_mean=-8 / 10, P_std=8 / 10, t_eps=5 / 100, noise_scale=1.0,
+        ema_decay1=9999 / 10000, ema_decay2=9999 / 10000, num_sampling_steps=int(steps), generate_noise_scale=0.0,
         sample_t_eps=0.0)
 
 
@@ -183,9 +187,9 @@ class PointDiTRunner:
             return self
         import torch
         p = self.paths
-        for q, what in ((p.repo / "denoiser.py", "the PointDiT code (git submodule third_party/pointdit)"),
+        for q, what in ((p.repo / "denoiser.py", "the PointDiT code (git submodule vendor/pointdit)"),
                         (p.dinov3_repo / "hubconf.py", "the DINOv3 hub code (git clone facebookresearch/dinov3 "
-                                                        "third_party/pointdit/third_party/dinov3)")):
+                                                        "vendor/pointdit/third_party/dinov3)")):
             if not q.exists():
                 raise PointDiTError(f"{q} is missing — {what}")
         if not p.dinov3.is_file():
@@ -234,7 +238,7 @@ class PointDiTRunner:
         img = np.asarray(image)
         if img.ndim != 3 or img.shape[2] != 3:
             raise PointDiTError(f"the image must be H x W x 3, got {img.shape}")
-        x = torch.from_numpy(img.astype(np.float32) / (255.0 if img.dtype == np.uint8 else 1.0)).permute(2, 0, 1)[None]
+        x = torch.from_numpy(img.astype(np.float32) / (255 if img.dtype == np.uint8 else 1)).permute(2, 0, 1)[None]
         H, W = int(x.shape[2]), int(x.shape[3])
         if size is None:
             size = (H, W)
@@ -266,5 +270,5 @@ class PointDiTRunner:
         import torch
         d = {"device": self.device, "model": self.cfg.model, "steps": self.steps}
         if self.device.startswith("cuda") and torch.cuda.is_available():
-            d["vram_peak_gb"] = round(torch.cuda.max_memory_allocated() / 1e9, 2)
+            d["vram_peak_gb"] = round(torch.cuda.max_memory_allocated() / (1000 ** 3), 2)
         return d

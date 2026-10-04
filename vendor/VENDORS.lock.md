@@ -71,7 +71,7 @@ Not clonable. Provision as noted; none is fetched by `git`.
 - `vendor/DepthLM_Official`, `vendor/perception_models` — **dead `.gitmodules`
   entries** (declared but never tracked and absent on disk). Removed from
   `.gitmodules`. Re-add as real submodules if these deps come back.
-- `third_party/pointdit` — SUBMODULE since 2026-10-04 (`google-research/pointdit`, pinned
+- `vendor/pointdit` — SUBMODULE since 2026-10-04 (moved from third_party/ the same day: the repo's vendor convention) (`google-research/pointdit`, pinned
   `11f53a30aeb4d34d49d2beda655ee6f19b2ad7f8`, Apache-2.0): the monocular point-map DiT whose
   depth DETAIL refines the bent Omega maps inside f6_bend (claude_stac.txt 2026-10-04, flag
   `mono_detail.enabled`). Runs in env `da3` (torch 2.9.1 untouched; `torchmetrics` +

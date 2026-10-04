@@ -244,7 +244,7 @@ def apply_mono_detail(pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out
     image_of = lambda f: CC._rgb_undistorted(inp.frames_dir, f, inp.maps)   # noqa: E731
     overlay_dir = (out / "precision" / "mono_overlays") if bool(md.overlays) else None
     dep2, src, rep = run_stage(frames, dep, valid, weight, image_of, runner, md, tau0, scale,
-                               pcfg.gauge.huber_k, log=log, progress=lambda pct, m: _p(42 + 0.08 * pct, m),
+                               pcfg.gauge.huber_k, log=log, progress=lambda pct, m: _p(42 + pct * 8 / 100, m),
                                overlay_dir=overlay_dir)
     for f in frames:
         alive = dep2[f] > 0

@@ -64,11 +64,11 @@ def f5_inputs(session_dir: Path):
                           records_dir=out / "omega_run" / "results_output")
 
 
-def edge_band(C, img_of: Callable[[int], np.ndarray], quantile: float, rng: np.random.Generator) -> Dict[int, np.ndarray]:
+def edge_band(C, img_of: Callable[[int], np.ndarray], quantile: float, step_quantile: float,
+              rng: np.random.Generator) -> Dict[int, np.ndarray]:
     """The judge's band per keyframe: image gradient energy above the session percentile OR a step of the
     calibrated (bent-before-refinement is not kept; the voted map is the calibrated depth here) depth."""
     from precision.flyers import texture_maps, window_spread
-    H, W = C.H, C.W
     energies, spreads = {}, {}
     pool_e, pool_s = [], []
     for f in C.frames:
@@ -83,7 +83,7 @@ def edge_band(C, img_of: Callable[[int], np.ndarray], quantile: float, rng: np.r
         if len(v):
             pool_s.append(v[rng.choice(len(v), min(20000, len(v)), replace=False)])
     e_bar = float(np.percentile(np.concatenate(pool_e), quantile))
-    s_bar = float(np.percentile(np.concatenate(pool_s), 95.0)) if pool_s else float("inf")
+    s_bar = float(np.percentile(np.concatenate(pool_s), step_quantile)) if pool_s else float("inf")
     from scipy.ndimage import binary_dilation
     band = {}
     for f in C.frames:
@@ -201,7 +201,7 @@ def run_variant(name: str, session_dir: Path, pcfg, inp, scratch: Path, log: Cal
     t_compute = time.time() - t0
     rng = np.random.default_rng(0)
     img_of = lambda f: CC._rgb_undistorted(C.inp.frames_dir, f, C.inp.maps)  # noqa: E731
-    band = edge_band(C, img_of, float(pcfg.mono_detail.ab_edge_gradient_quantile), rng)
+    band = edge_band(C, img_of, float(pcfg.mono_detail.ab_edge_gradient_quantile), float(pcfg.flyers.step_quantile), rng)
     held = heldout_error(C, band)
     vband = vote_in_band(C, band)
     nv = max(C.vst["valid"], 1)

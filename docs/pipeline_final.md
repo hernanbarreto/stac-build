@@ -129,7 +129,7 @@ measured vs generated (`caption_source`, view counts in its `.meta.json`).
   the pod now has libtiff 6 only ("libtiff.so.5: cannot open shared object file", 2026-10-01). Relinked
   with its own `apps/texrecon/CMakeFiles/texrecon.dir/link.txt`, `libtbb.so.12.19` → `libtbb.so.12`
   (the vendored oneTBB holds 12.15; a full `cmake ..` fails on that mismatch).
-- PointDiT: submodule `third_party/pointdit` (@ 11f53a3) with `third_party/dinov3` cloned inside and the weights under
+- PointDiT: submodule `vendor/pointdit` (@ 11f53a3) with `third_party/dinov3` cloned inside and the weights under
   `pretrained/` (H and L 512 checkpoints, DINOv3 ViT-H+/16 and ViT-L/16; sha256 verified), runs in env `da3`
   (`torchmetrics` + `lightning-utilities` added `--no-deps`). Viewer: points drawn as cubes (View → Points as cubes).
 - The pccr session on disk (2026-10-01): live epoch 8 (certified, 18.2 M pts, 110 objects), stored

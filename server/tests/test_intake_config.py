@@ -76,7 +76,8 @@ def test_shipped_values_and_their_provenance_tags():
     p = cfg.parallax
     assert p.keyframe_band_frac == 0.25 and p.parallax_quantile == 0.9
     assert p.reference_max_eval == 200 and p.reference_tol == 1.0e-12
-    assert cfg.content.sam3_scope == "all"
+    # USER 2026-09-28: the EXCLUSION pass stays on the flagged ranges ("all" measured 31 h on pccr)
+    assert cfg.content.sam3_scope == "flagged_ranges"
     lines = (SERVER / "config.yaml").read_text().splitlines()
     keys = ("sam3_scope:", "parallax_quantile:", "keyframe_band_frac:", "reference_max_eval:",
             "reference_tol:")
@@ -85,8 +86,7 @@ def test_shipped_values_and_their_provenance_tags():
         for key in keys:
             if ln.strip().startswith(key):
                 tag[key] = ln
-    assert "claude_stac.txt §4-F1 (all keyframes + witness frames)" in tag["sam3_scope:"]
-    assert "USER DECISION" not in tag["sam3_scope:"]
+    assert "USER 2026-09-28" in tag["sam3_scope:"]          # the exclusion pass stays on the flagged ranges
     for key in keys[1:-1]:
         assert "BOUND" in tag[key], key
     assert "declared convergence tolerance" in tag["reference_tol:"]

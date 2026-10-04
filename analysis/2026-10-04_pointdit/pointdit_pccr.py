@@ -4,7 +4,7 @@ and prints alignment residuals, timing and VRAM. Nothing is written into the ses
 import sys, time, types, os, json
 import numpy as np, torch
 from PIL import Image
-ROOT = "/workspace/stac-build/third_party/pointdit"
+ROOT = "/workspace/stac-build/vendor/pointdit"
 os.environ.setdefault("DINOV3_REPO", f"{ROOT}/third_party/dinov3"); os.environ.setdefault("DINOV3_WEIGHTS_DIR", f"{ROOT}/pretrained/dinov3")
 sys.path.insert(0, ROOT)
 from denoiser import Denoiser
