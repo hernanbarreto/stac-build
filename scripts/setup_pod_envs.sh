@@ -48,15 +48,6 @@ for env in "${ENVS[@]}"; do
     echo "  - $env  ($(wc -l <"$dst") líneas)"
 done
 
-# MeshFlow: si no está en migration, lo exportamos desde local sin builds
-if [[ ! -f "$STAGE_DIR/meshflow.yml" ]]; then
-    if [[ -d "$HOME/miniforge3/envs/meshflow" ]]; then
-        echo "  - meshflow (exportando desde local sin builds)"
-        source "$HOME/miniforge3/etc/profile.d/conda.sh"
-        conda env export -n meshflow --no-builds > "$STAGE_DIR/meshflow.yml"
-    fi
-fi
-
 # ── 2. Subir a la pod ──
 echo
 echo "[envs] Subiendo YAMLs a la pod"

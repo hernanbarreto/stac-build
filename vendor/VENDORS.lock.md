@@ -35,11 +35,10 @@ commit; already-present clones at the right commit are left untouched.
 | `vendor/r3d` | `facebookresearch/r3d` | `9669cacd` | **Reference only** — R3D was *ported* into `server/phase_r/` & `server/phase5_qa/`. Not imported at runtime; kept for provenance/diffing. |
 | `vendor/sam31` | `facebookresearch/sam3` (`main`) | `5dd401d1` | SAM 3.1 Object Multiplex (`config.yaml models.segmentation.version: sam3.1`) + `server/patches/sam31_base_predictor_PATCHED.py` |
 | `vendor/nvdiffrast` | `NVlabs/nvdiffrast` | `253ac4fc` | differentiable raster (texturing / render) |
-| `vendor/meshflow` | `facebookresearch/meshflow` | `55f56f60` | per-object generative meshes (replaced ShapeR). Needs gated ckpt `facebook/meshflow` → `vendor/meshflow/ckpt/meshflow/` (4.5 GB, HF_TOKEN) |
 | `vendor/mvs-texturing` | `nmoehrle/mvs-texturing` | `f3374298` | mesh texturing (C++, build from source) |
 | `vendor/oneTBB-src` | `uxlfoundation/oneTBB` | `e9af1a1b` | TBB source → builds `vendor/oneTBB` |
 | `vendor/vggt-omega` | `facebookresearch/vggt-omega` | `39a0cb8a` | optional VGGT-Ω backbone (weights below) |
-| `vendor/ShapeR` | `facebookresearch/ShapeR` | `d4402f55` | legacy per-object meshing (superseded by meshflow; kept for fallback) |
+| `vendor/ShapeR` | `facebookresearch/ShapeR` | `d4402f55` | per-object meshing, THE generative engine since 2026-09-29 (MeshFlow removed 2026-10-04); kept for fallback) |
 | `vendor/point2cad` | `prs-eth/point2cad` | `81e15bfa` | Perfect-pipeline EXPERIMENT (2026-08-31, user-validated "podría andar"): fit+trim/sew a labeled cloud (our regions → `.xyzc`) into a B-rep. **License CC-BY-NC** (research/internal use — user-approved). Env `point2cad` (py3.9, torch GPU, PyMesh compiled from source **with gcc-9** — `build_env.sh` + `build_resume.sh` in the clone; needs apt gcc-9/g++-9/unzip/libgmp/mpfr/boost). STAC patches in-tree: per-PID tmp files in `fitting_one_surface.py` (the shared `tmp.obj` raced under parallelism) + `out=None` default (UnboundLocalError on failed fits) + modulo palette indexing in `io_utils.py` (2026-09-04: the 64-color `make_colormap_optimal` palette raised IndexError with >64 surfaces — a poisson-source run shattered into 114 regions and crashed the save stage). Run: `python -m point2cad.main --path_in <xyzc> --path_out <dir> --max_parallel_surfaces 4` (each worker holds a CUDA context — 8 workers OOM'd next to the chat vLLM). Output is NORMALIZED (centered/PCA-rotated/extent-scaled) — invert with mean/R/scale recomputed from the same input. |
 | `vendor/pgsr` | `zju3dv/PGSR` | `de24f1a3` | precision-mode trainer (Phase D, backend `vggtomega_pgsr`): planar-regularized Gaussian surface reconstruction. Local patch `server/patches/pgsr_inline_quaternion_to_matrix.patch` (applied by setup_vendors.sh) removes the pytorch3d dependency. STAC patch 2026-08-30 (applied in-tree, `gaussian_renderer/__init__.py`): `rendered_alpha` added to the render return dict — required by the object-mode background loss (`pgsr_train.py --object_bg_weight`); additive, no vendor behavior change. Env `pgsr` (clone of `da3` + compiled `submodules/diff-plane-rasterization` + `simple-knn`, TORCH_CUDA_ARCH_LIST="8.0;8.6"). Inria research license (non-commercial) — see vendor/pgsr/LICENSE.md |
 
@@ -82,3 +81,7 @@ Not clonable. Provision as noted; none is fetched by `git`.
   (gated Meta weights, prefixes 7c1da9a5 / 8aa4cbdd verified, downloaded 2026-10-04 with the user's
   links). NOTE: `vendor/dinov3` and `weights/dinov3` named above are NOT on this pod any more
   (2026-10-04: neither directory exists); the DINOv3 weights live under PointDiT's `pretrained/dinov3`.
+
+- `vendor/meshflow` — REMOVED 2026-10-04 (USER: "saca del vendor los pesos, del config y del código"): the
+  checkout with its 4.3 GB `ckpt/`, the `meshflow:` config block, `run_meshflow_batch.py` / `run_meshflow.sh`,
+  `segmentation/mesh_export.py` and the `engine: meshflow` branch. ShapeR is the one generative engine.

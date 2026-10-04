@@ -36,7 +36,6 @@ GIT_VENDORS=(
   "r3d|https://github.com/facebookresearch/r3d.git|9669cacd7993"
   "sam31|https://github.com/facebookresearch/sam3.git|5dd401d1c5c1"
   "nvdiffrast|https://github.com/NVlabs/nvdiffrast.git|253ac4fcea7d"
-  "meshflow|https://github.com/facebookresearch/meshflow.git|55f56f60e1bb"
   "mvs-texturing|https://github.com/nmoehrle/mvs-texturing.git|f3374298ac95"
   "oneTBB-src|https://github.com/uxlfoundation/oneTBB.git|e9af1a1b38b8"
   "vggt-omega|https://github.com/facebookresearch/vggt-omega.git|39a0cb8af885"

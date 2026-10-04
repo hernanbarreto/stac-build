@@ -2853,19 +2853,14 @@ surface_fit:
                               # instance the fitter rejects — falls back to the TSDF crop.
                               # false = TSDF-only individual meshing (the 2026-08-28 morning flow).
 
-# ── MeshFlow (generative per-object meshes; replaces ShapeR) ──────────
-# ⚠ NON-METRIC: MeshFlow outputs are GENERATIVE visual assets (furniture,
-# equipment, signage) — never metric deliverables. The metric surfaces come
-# from surface_fit; scene geometry stays TSDF. Outputs are named
-# <folder>_visual.glb and carry "metric": false in meta.json.
-# Routing: architectural classes (surface_fit.fitted_roles) never reach
-# MeshFlow; oversized segments stay on the TSDF path.
+# ── ShapeR (generative per-object meshes, the Meshing dialog's 'Object' button) ──
+# ⚠ NON-METRIC: generated meshes are visual assets; the measured cloud stays the truth.
 shaper:                       # USER 2026-09-29: ShapeR REPLACES MeshFlow behind the UI's generative
                               # (Object) button — "debe reemplazar ShapeR a meshflow". Per object: the
                               # segment's metric points + multi-view frames (object projections as the
                               # mask) + a Qwen3-VL description → vendor/ShapeR (env `shaper`,
                               # checkpoints in vendor/ShapeR/checkpoints) → output/shape/<obj>/<obj>.glb
-  engine: shaper              # shaper | meshflow (the MeshFlow path stays selectable)
+  engine: shaper              # the ONE generative engine (MeshFlow removed 2026-10-04: code, config, 4.3 GB of weights)
   preset: max                 # USER 2026-09-30: "la mayor cantidad que ShapeR permita" — run_shaper_batch
                               # preset max = 32 views (every view's DINO tokens are kept at inference),
                               # 100 steps, CFG 4. (Vendor presets: quality 16/50, balance 16/25, speed 4/10.)
@@ -2897,25 +2892,6 @@ shaper:                       # USER 2026-09-29: ShapeR REPLACES MeshFlow behind
                               # one texrecon at a time, non-fatal — a failed bake keeps the vertex-
                               # coloured mesh); parts no camera saw stay untextured, never invented.
 
-meshflow:
-  steps: 28                   # flow-matching denoise steps (vendor default)
-  guidance_scale: 2.5         # CFG — only effective when a reference image is provided
-  seed: 42
-  dtype: fp16
-  num_verts: null             # vertex-budget control (needs use_proj_cond_on_temb in the
-                              # model config; null = model default ~4096)
-  max_extent_m: 15.0          # segments larger than this skip MeshFlow (the model's ~4096-vertex
-                              # budget degrades on scene-scale geometry) — raised per user decision
-  exclude_architectural: false # false (user decision 2026-07-03): generate for ANY class — the
-                              # assets are non-metric regardless and are never compared against
-                              # BIM; surface_fit remains the only metric surface source
-  require_ref_image: true     # MANDATORY image conditioning (project decision — upstream
-                              # says optional, but geometry-only generations came out wrong
-                              # on real scan segments). The exporter picks the best view by
-                              # mask pixel count (seg_masks.npz traceability), crops it to
-                              # the object bbox and saves <folder>_ref.jpg; instances with
-                              # no usable view are SKIPPED, never generated blind.
-                              # Needs the DINOv3 checkpoint (weights/dinov3 — installed).
 
 # ── Correction (user-directed loop closure, USER 2026-09-08 redesign) ──────
 # Consumed ONLY by server/correction/config.py (typed dataclasses, validated at

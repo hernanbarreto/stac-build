@@ -953,7 +953,7 @@ The automatic end-of-pipeline mesh worked on some scenes and not others, so:
   **ENVIRONMENT LESSON: Open3D Poisson hangs UNPINNED on this 252-core box;
   TBB ignores OMP_NUM_THREADS**; verified: infinite hang unpinned, ~1 min/
   object pinned). UI: one `🧩 Meshing` modal — segment selection + two
-  buttons only: `Object` (MeshFlow generative) and `Mesh` (ransac+poisson);
+  buttons only: `Object` (ShapeR generative; MeshFlow removed 2026-10-04) and `Mesh` (ransac+poisson);
   whole-scene buttons and TSDF sliders removed.
 - **Stage-1 hole audit — "understand what we reconstruct"** (USER CONCEPT
   2026-08-29): a hole in a fitted surface is either a REAL opening or a
