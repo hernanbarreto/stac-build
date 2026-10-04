@@ -132,6 +132,9 @@ function App() {
   // shadows: meshes cast + receive, the cloud receives (USER 2026-10-01); on by default
   const [shadowsOn, setShadowsOn] = useState(true)
   useEffect(() => { viewportRef.current?.setShadows(shadowsOn) }, [shadowsOn])
+  // points as cubes (USER 2026-10-04: "cubos como en la página de PointDiT"); on by default
+  const [cubesOn, setCubesOn] = useState(true)
+  useEffect(() => { viewportRef.current?.setPointShape(cubesOn ? 'cube' : 'disc') }, [cubesOn])
   // the precision core's diagnostic layers (flyers, mono detail, mixed unresolved): off by default, per session
   const [flyersOn, setFlyersOn] = useState(false)
   const [monoDetailOn, setMonoDetailOn] = useState(false)
@@ -1904,6 +1907,7 @@ function App() {
       { id: 'reset', label: t('menu.resetCamera'), icon: <Home aria-hidden />, shortcut: 'Home', disabled: !hasSession, onSelect: () => viewportRef.current?.resetCamera() },
       { id: 'fullscreen', label: t('toolbar.fullscreen'), icon: <Maximize aria-hidden />, shortcut: 'F11', onSelect: toggleFullscreen },
       { id: 'shadows', label: t('menu.shadows'), icon: <Sun aria-hidden />, checked: shadowsOn, onSelect: () => setShadowsOn(v => !v) },
+      { id: 'cubes', label: t('menu.cubes'), icon: <Package aria-hidden />, checked: cubesOn, onSelect: () => setCubesOn(v => !v) },
       { id: 'flyers', label: t('menu.flyers'), icon: <Circle aria-hidden />, checked: flyersOn, disabled: !hasSession, onSelect: () => setFlyersOn(v => !v) },
       { id: 'monoDetail', label: t('menu.monoDetail'), icon: <Circle aria-hidden />, checked: monoDetailOn, disabled: !hasSession, onSelect: () => setMonoDetailOn(v => !v) },
       { id: 'mixedUnresolved', label: t('menu.mixedUnresolved'), icon: <Circle aria-hidden />, checked: unresolvedOn, disabled: !hasSession, onSelect: () => setUnresolvedOn(v => !v) },

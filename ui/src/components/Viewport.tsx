@@ -120,6 +120,8 @@ export interface ViewportHandle {
     physicsClear: () => void
     /** meshes cast and receive shadows, the point cloud receives them (USER 2026-10-01) */
     setShadows: (on: boolean) => void
+    /** how a point is drawn: a disc, or a cube of its own size (USER 2026-10-04, as PointDiT's page) */
+    setPointShape: (shape: 'disc' | 'cube') => void
     /** a diagnostic layer of the precision core (/api/precision/layer): 'flyers' (a red mixed edge ·
      *  b orange view-inconsistent · c blue low texture · d grey other), 'mono_detail' (grey detail ·
      *  green front · blue back), 'mixed_unresolved' (red) */
@@ -250,7 +252,12 @@ const vertexShader = `
   varying float vMvVotes;
   varying vec3 vColor;
   varying vec3 vWorldPos;
+  varying vec3 vViewPos;
+  varying float vSpritePx;
   uniform float pointSize;
+  // point shape (USER 2026-10-04: "cubos como en la página de PointDiT"): 0 = disc, 1 = cube — a
+  // world-axis-aligned cube of the point's own size, ray-cast per fragment (see the fragment shader)
+  uniform int uPointShape;
   // 256 segment-visibility slots via a 256×1 LOOKUP TEXTURE (one texel per
   // instance id). The old float[16] uniform chain capped the viewer at 16
   // instances (test2: 46+). A texel fetch in the vertex shader is the
@@ -285,7 +292,10 @@ ${POINT_SHADOW_VERT_MAIN}
     // not get smaller than 1px on screen regardless of this floor.
     float depth = -mvPosition.z;
     float size = pointSize * 20.0 / depth;
-    gl_PointSize = clamp(size, 0.25, 40.0);
+    vViewPos = mvPosition.xyz;
+    vSpritePx = clamp(size, 0.25, 40.0);
+    // a cube's projection is wider than its face: the sprite grows by sqrt(3) so no corner is clipped
+    gl_PointSize = (uPointShape == 1) ? min(vSpritePx * 1.7321, 69.0) : vSpritePx;
   }
 `
 
@@ -298,6 +308,11 @@ const fragmentShader = `
   varying float vMvVotes;
   varying vec3 vColor;
   varying vec3 vWorldPos;
+  varying vec3 vViewPos;
+  varying float vSpritePx;
+  uniform int uPointShape;
+  uniform float uViewportH;      // pixels — with projectionMatrix[1][1] it gives the focal length in px
+  uniform mat3 uViewRotInv;      // view → world rotation (the cube's axes are the world's)
   uniform float highlightIntensity;
   uniform float uOpacity;
   uniform float uConfidenceThreshold;
@@ -353,11 +368,39 @@ ${POINT_SHADOW_FRAG_DECL}
     
     vec2 centered = gl_PointCoord - 0.5;
     float dist = length(centered);
-    if (dist > 0.5) discard;
+    float alpha = 1.0;
+    float cubeShade = 1.0;
+    if (uPointShape == 1) {
+      // the cube: side = the point's own sprite size at its depth; the fragment's view ray is
+      // intersected with that world-axis-aligned box (slab test); a miss is outside the cube
+      float focalPx = projectionMatrix[1][1] * uViewportH * 0.5;
+      float spritePx = vSpritePx * 1.7321;
+      float depth = -vViewPos.z;
+      vec2 offPx = vec2(centered.x, -centered.y) * spritePx;
+      vec3 pFrag = vec3(vViewPos.xy + offPx * depth / focalPx, vViewPos.z);
+      vec3 dirW = normalize(uViewRotInv * pFrag);
+      vec3 oW = uViewRotInv * (-vViewPos);              // camera origin relative to the cube's centre
+      float h = 0.5 * vSpritePx * depth / focalPx;       // half side in metres
+      vec3 inv = 1.0 / dirW;
+      vec3 t0 = (vec3(-h) - oW) * inv;
+      vec3 t1 = (vec3( h) - oW) * inv;
+      vec3 tmin = min(t0, t1);
+      vec3 tmax = max(t0, t1);
+      float tn = max(max(tmin.x, tmin.y), tmin.z);
+      float tf = min(min(tmax.x, tmax.y), tmax.z);
+      if (tf < tn || tf < 0.0) discard;
+      vec3 n = vec3(0.0);
+      if (tn == tmin.x) n = vec3(-sign(dirW.x), 0.0, 0.0);
+      else if (tn == tmin.y) n = vec3(0.0, -sign(dirW.y), 0.0);
+      else n = vec3(0.0, 0.0, -sign(dirW.z));
+      vec3 L = normalize(vec3(0.35, 0.85, 0.4));
+      cubeShade = 0.62 + 0.38 * max(dot(n, L), 0.0) + 0.08 * abs(n.y);
+    } else {
+      if (dist > 0.5) discard;
+      alpha = 1.0 - smoothstep(0.35, 0.5, dist);
+    }
     
-    float alpha = 1.0 - smoothstep(0.35, 0.5, dist);
-    
-    vec3 finalColor = vColor * 0.85;
+    vec3 finalColor = vColor * 0.85 * cubeShade;
 
     if (uColorMode == 1) {
       // status: verified green, single_witness yellow, mask_conflict red,
@@ -2840,6 +2883,13 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         },
         physicsClear: () => { physicsRef.current?.clear(); throwEndRef.current?.() },
         setShadows: (on: boolean) => { shadowsRef.current?.setEnabled(on) },
+        setPointShape: (shape: 'disc' | 'cube') => {
+            const v = shape === 'cube' ? 1 : 0
+            const u = materialRef.current?.uniforms
+            if (u && u.uPointShape) u.uPointShape.value = v
+            const ep = epochLayerRef.current?.material.uniforms
+            if (ep && ep.uPointShape) ep.uPointShape.value = v
+        },
         setPrecisionLayer: async (name: PrecisionLayer, on: boolean, sessionId: string | null) => {
             const old = precisionLayersRef.current.get(name)
             if (old) { disposeMeshGroup(old); old.removeFromParent(); precisionLayersRef.current.delete(name) }
@@ -3229,6 +3279,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 sectionBoxMax: { value: new THREE.Vector3(100, 100, 100) },
                 uSelBoxOn: { value: false },
                 uSelBoxInv: { value: new THREE.Matrix4() },
+                uPointShape: { value: 1 },   // cubes by default (App.tsx cubesOn)
+                uViewportH: { value: container.clientHeight || 1 },
+                uViewRotInv: { value: new THREE.Matrix3() },
                 ...pointShadowU,
             },
             vertexColors: true,
@@ -3331,6 +3384,15 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 }
             }
 
+            {   // the cube shape needs the view rotation and the viewport height every frame
+                const u = materialRef.current?.uniforms
+                if (u && u.uPointShape && u.uPointShape.value === 1) {
+                    (u.uViewRotInv.value as THREE.Matrix3).setFromMatrix4(camera.matrixWorld)
+                    u.uViewportH.value = renderer.domElement.clientHeight || 1
+                    const ep = epochLayerRef.current?.material.uniforms
+                    if (ep && ep.uViewRotInv) { (ep.uViewRotInv.value as THREE.Matrix3).copy(u.uViewRotInv.value as THREE.Matrix3); ep.uViewportH.value = u.uViewportH.value }
+                }
+            }
             renderer.render(scene, camera)
         }
         animate()

@@ -193,7 +193,8 @@
     "shadows": "Shadows",
     "flyers": "Flyers (diagnosis)",
     "monoDetail": "PointDiT detail layer",
-    "mixedUnresolved": "Mixed unresolved pixels"
+    "mixedUnresolved": "Mixed unresolved pixels",
+    "cubes": "Points as cubes"
   },
   "palette": {
     "title": "Command palette",

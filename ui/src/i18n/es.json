@@ -193,7 +193,8 @@
     "shadows": "Sombras",
     "flyers": "Voladores (diagnóstico)",
     "monoDetail": "Capa de detalle PointDiT",
-    "mixedUnresolved": "Píxeles mezclados sin resolver"
+    "mixedUnresolved": "Píxeles mezclados sin resolver",
+    "cubes": "Puntos como cubos"
   },
   "palette": {
     "title": "Paleta de comandos",
