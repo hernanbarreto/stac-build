@@ -204,6 +204,8 @@ class ParallaxConfig:
     focal_probe_frames: int             # BOUND: frames of the DA3 focal probe (spread over the video)
     focal_probe_res: Any                # DA3 process_res of the focal probe: an int or "native"
     focal_probe_model: str              # DA3 model of the focal probe
+    vram_calibration_frames: int        # BOUND: frames of the one DA3 window that measures the card's footprint
+    vram_margin_frac: float             # BOUND: share of the free VRAM left unused when sizing a window
 
 
 @dataclass(frozen=True)
@@ -315,6 +317,8 @@ def _load_parallax(sec: Dict[str, Any]) -> ParallaxConfig:
                          if p.get("focal_probe_res") == "native"
                          else _num(p, "focal_probe_res", "parallax", lo=14, integer=True)),
         focal_probe_model=_str(p, "focal_probe_model", "parallax"),
+        vram_calibration_frames=_num(p, "vram_calibration_frames", "parallax", lo=2, integer=True),
+        vram_margin_frac=_num(p, "vram_margin_frac", "parallax", lo=0.0, hi=0.9),
     )
     if out.keyframe_band_frac >= 1.0:
         raise IntakeConfigError(

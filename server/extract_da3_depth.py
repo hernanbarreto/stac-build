@@ -191,6 +191,10 @@ def run_windows(args):
     if device.type == "cuda" and next(model.parameters()).device.type != "cuda":
         raise RuntimeError("model did not reach the GPU — aborting instead of "
                            "silently burning CPU")
+    if device.type == "cuda":   # the weights' footprint — intake/vram.py sizes the windows from it
+        torch.cuda.synchronize()
+        print(f"[DA3 windows] model loaded: {torch.cuda.memory_allocated() / 2**30:.2f} GiB allocated", flush=True)
+        torch.cuda.reset_peak_memory_stats()
     res_kw = {"process_res": int(args.process_res)} if args.process_res else {}
     # the NESTED model computes each frame's MONOCULAR metric depth (its metric
     # branch) and discards it after aligning the multi-view depth to it — kept here
@@ -210,8 +214,15 @@ def run_windows(args):
         paths = windows[i]
         captured.clear()
         torch.manual_seed(i)            # a window's draws depend on the window alone
-        with torch.no_grad():
-            pred = model.inference(paths, **res_kw)
+        try:
+            with torch.no_grad():
+                pred = model.inference(paths, **res_kw)
+        except torch.OutOfMemoryError as e:
+            # a window that does not fit the card is NOT a crash to decode from a traceback:
+            # exit code 3 (intake.vram.OOM_EXIT) and the caller halves the window (zaragoza 2026-10-04)
+            print(f"[DA3 windows] window {i}: {len(paths)} frame(s) at process_res {res_kw.get('process_res')} "
+                  f"do NOT fit the card: {str(e).splitlines()[0][:160]}", flush=True)
+            sys.exit(3)
         frames = np.array([int("".join(ch for ch in os.path.splitext(os.path.basename(p))[0]
                                        if ch.isdigit())) for p in paths], dtype=np.int64)
         conf = np.clip(_np(pred.conf) - 1.0, 0, None)       # expp1 activation, as above
@@ -228,6 +239,11 @@ def run_windows(args):
             else:
                 print(f"[DA3 windows] window {i}: mono depth {mono.shape} ≠ depth "
                       f"{depth.shape} — not stored")
+        if device.type == "cuda":   # the window's VRAM footprint — what sizes the windows (intake/vram.py)
+            print(f"[DA3 windows] window {i}: {len(paths)} frame(s) at process_res {res_kw.get('process_res')} → "
+                  f"peak {torch.cuda.max_memory_allocated() / 2**30:.2f} GiB allocated, "
+                  f"{torch.cuda.max_memory_reserved() / 2**30:.2f} GiB reserved", flush=True)
+            torch.cuda.reset_peak_memory_stats()
         np.savez(tmp, frames=frames, depth=depth, **extra,
                  conf=conf.astype(np.float32), extrinsics=ext.astype(np.float64),
                  intrinsics=_np(pred.intrinsics).astype(np.float64),

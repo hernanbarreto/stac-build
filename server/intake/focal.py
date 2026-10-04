@@ -76,44 +76,62 @@ def run_focal_probe(session_dir: Path, quality: Dict[str, Any], pcfg, *, python:
     from intake.walk import da3_process_res
     session_dir = Path(session_dir)
     frames_dir = session_dir / "frames"
+    from intake.vram import OOM_EXIT, window_size
     files = probe_files(quality, pcfg.focal_probe_frames)
-    spec = {"windows": [[str(frames_dir / f) for f in files]],
-            "process_res": da3_process_res(pcfg.focal_probe_res, frames_dir),
-            "model_id": str(pcfg.focal_probe_model)}
+    process_res = da3_process_res(pcfg.focal_probe_res, frames_dir)
+    model_id = str(pcfg.focal_probe_model)
+    native_wh = (int(quality["native_w"]), int(quality["native_h"]))
+    # the window the CARD holds at this (native) resolution — zaragoza 2026-10-04: 16 frames of
+    # 1080p in one window were 57 GB; the probe's frames go in as many windows as needed
+    n_win = window_size(session_dir, files, frames_dir, model_id, process_res, native_wh, python,
+                        requested=len(files), calibration_frames=int(pcfg.vram_calibration_frames),
+                        margin_frac=float(pcfg.vram_margin_frac), log=log, cancelled=cancelled)
     out = session_dir / "intake" / FOCAL_NAME
     wdir = session_dir / "intake" / DIRNAME
-    if out.exists():
-        doc = json.loads(out.read_text())
-        if doc.get("version") == FOCAL_VERSION and doc.get("spec") == spec:
-            log(f"{LOG_TAG} reusing {out} (same {len(files)} frames, resolution and model): "
-                f"fx {doc['fx']:.2f} fy {doc['fy']:.2f} cx {doc['cx']:.2f} cy {doc['cy']:.2f} px")
-            return doc
-    wdir.mkdir(parents=True, exist_ok=True)
-    for p in wdir.glob("window_*.npz"):
-        p.unlink()
-    spec_path = wdir / "windows.json"
-    spec_path.write_text(json.dumps(spec))
     server_dir = Path(__file__).resolve().parent.parent
-    cmd = [str(python), str(server_dir / "extract_da3_depth.py"), "--image_dir", str(frames_dir),
-           "--output_dir", str(wdir), "--model", spec["model_id"],
-           "--process_res", str(spec["process_res"]), "--windows_json", str(spec_path)]
-    log(f"{LOG_TAG} DA3 {spec['model_id']} on {len(files)} frames spread over the video "
-        f"(process_res {spec['process_res']}) → the session K")
     env = dict(os.environ, CUBLAS_WORKSPACE_CONFIG=":4096:8")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            bufsize=1, env=env)
-    for line in proc.stdout:
-        if line.strip():
-            log(line.strip())
-        if cancelled is not None and cancelled():
-            proc.terminate()
-            raise FocalError("cancelled")
-    proc.wait()
-    if proc.returncode != 0:
-        raise FocalError(f"DA3 focal probe exited with code {proc.returncode}")
-    with np.load(wdir / "window_0000.npz") as z:
-        K_grid, depth = z["intrinsics"], z["depth"]
-    native_wh = (int(quality["native_w"]), int(quality["native_h"]))
+    while True:
+        windows = [[str(frames_dir / f) for f in files[a:a + n_win]] for a in range(0, len(files), n_win)]
+        if len(windows) > 1 and len(windows[-1]) < 2:          # a lone frame measures no K: fold it back
+            windows[-2].extend(windows.pop())
+        spec = {"windows": windows, "process_res": process_res, "model_id": model_id}
+        if out.exists():
+            doc = json.loads(out.read_text())
+            if doc.get("version") == FOCAL_VERSION and doc.get("spec") == spec:
+                log(f"{LOG_TAG} reusing {out} (same {len(files)} frames, resolution and model): "
+                    f"fx {doc['fx']:.2f} fy {doc['fy']:.2f} cx {doc['cx']:.2f} cy {doc['cy']:.2f} px")
+                return doc
+        wdir.mkdir(parents=True, exist_ok=True)
+        for p in wdir.glob("window_*.npz"):
+            p.unlink()
+        spec_path = wdir / "windows.json"
+        spec_path.write_text(json.dumps(spec))
+        cmd = [str(python), str(server_dir / "extract_da3_depth.py"), "--image_dir", str(frames_dir),
+               "--output_dir", str(wdir), "--model", model_id,
+               "--process_res", str(process_res), "--windows_json", str(spec_path)]
+        log(f"{LOG_TAG} DA3 {model_id} on {len(files)} frames spread over the video in {len(windows)} "
+            f"window(s) of ≤ {n_win} (process_res {process_res}) → the session K")
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                bufsize=1, env=env)
+        for line in proc.stdout:
+            if line.strip():
+                log(line.strip())
+            if cancelled is not None and cancelled():
+                proc.terminate()
+                raise FocalError("cancelled")
+        proc.wait()
+        if proc.returncode == OOM_EXIT and n_win > 1:
+            n_win = max(1, n_win // 2)
+            log(f"{LOG_TAG} the window did not fit the card after all — halving to {n_win} frame(s)")
+            continue
+        if proc.returncode != 0:
+            raise FocalError(f"DA3 focal probe exited with code {proc.returncode}")
+        break
+    Ks, depth = [], None
+    for i in range(len(windows)):
+        with np.load(wdir / f"window_{i:04d}.npz") as z:
+            Ks.append(np.asarray(z["intrinsics"], np.float64)); depth = z["depth"]
+    K_grid = np.concatenate(Ks, 0)
     K_nat = native_intrinsics(K_grid, (depth.shape[-1], depth.shape[-2]), native_wh)
     from intake.quality import read_session_epochs
     doc = {"version": FOCAL_VERSION, "provenance": PROVENANCE,

@@ -241,38 +241,58 @@ def run_da3_windows(session_dir: Path, gcfg, python: str, log: Callable = print,
     files = (sorted(files, key=lambda f: int("".join(ch for ch in Path(f).stem
                                                      if ch.isdigit())))
              if files else keyframe_files(frames_dir))
-    plan = plan_windows(len(files), gcfg.window_frames, gcfg.window_overlap_frac)
-    windows = [[str(frames_dir / f) for f in files[a:b]] for a, b in plan]
+    res = da3_process_res(gcfg.process_res, frames_dir)
     wdir = session_dir / "output" / WINDOWS_DIRNAME
     wdir.mkdir(parents=True, exist_ok=True)
-    res = da3_process_res(gcfg.process_res, frames_dir)
-    spec = {"windows": windows, "process_res": res, "model_id": gcfg.model_id}
-    spec_path = wdir / "windows.json"
-    old = json.loads(spec_path.read_text()) if spec_path.exists() else None
-    if old != spec:
-        for p in wdir.glob("window_*.npz"):        # another plan: its windows are not ours
-            p.unlink()
-        spec_path.write_text(json.dumps(spec))
+    # the window the CARD holds at this (native) resolution — intake/vram.py; the overlap keeps
+    # its share, so consecutive windows still chain through shared frames
+    from intake.vram import OOM_EXIT, window_size
+    from intake.config import load_intake_config
+    from config import cfg as _raw_cfg
+    icfg = load_intake_config(_raw_cfg)
+    import cv2
+    _img = cv2.imread(str(frames_dir / files[0]), cv2.IMREAD_UNCHANGED)
+    if _img is None:
+        raise WalkError(f"cannot read {frames_dir / files[0]}")
+    native_wh = (int(_img.shape[1]), int(_img.shape[0]))
+    w_frames = window_size(session_dir, files, frames_dir, gcfg.model_id, res, native_wh, python,
+                           requested=int(gcfg.window_frames), calibration_frames=int(icfg.parallax.vram_calibration_frames),
+                           margin_frac=float(icfg.parallax.vram_margin_frac), log=log, cancelled=check_cancel)
     server_dir = Path(__file__).resolve().parent.parent
-    cmd = [str(python), str(server_dir / "extract_da3_depth.py"), "--image_dir",
-           str(frames_dir), "--output_dir", str(wdir), "--model", gcfg.model_id,
-           "--process_res", str(res), "--windows_json", str(spec_path)]
-    log(f"{LOG_TAG} I3: DA3 {gcfg.model_id} over {len(windows)} window(s) of "
-        f"{gcfg.window_frames} keyframes ({len(files)} keyframes, overlap "
-        f"{gcfg.window_overlap_frac:g})")
-    env = dict(os.environ, CUBLAS_WORKSPACE_CONFIG=":4096:8")    # deterministic cuBLAS
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            bufsize=1, env=env)
-    for line in proc.stdout:
-        line = line.strip()
-        if line:
-            log(line)
-        if check_cancel is not None and check_cancel():
-            proc.terminate()
-            raise WalkError("cancelled")
-    proc.wait()
-    if proc.returncode != 0:
-        raise WalkError(f"DA3 window extraction exited with code {proc.returncode}")
+    while True:
+        plan = plan_windows(len(files), w_frames, gcfg.window_overlap_frac)
+        windows = [[str(frames_dir / f) for f in files[a:b]] for a, b in plan]
+        spec = {"windows": windows, "process_res": res, "model_id": gcfg.model_id}
+        spec_path = wdir / "windows.json"
+        old = json.loads(spec_path.read_text()) if spec_path.exists() else None
+        if old != spec:
+            for p in wdir.glob("window_*.npz"):        # another plan: its windows are not ours
+                p.unlink()
+            spec_path.write_text(json.dumps(spec))
+        cmd = [str(python), str(server_dir / "extract_da3_depth.py"), "--image_dir",
+               str(frames_dir), "--output_dir", str(wdir), "--model", gcfg.model_id,
+               "--process_res", str(res), "--windows_json", str(spec_path)]
+        log(f"{LOG_TAG} I3: DA3 {gcfg.model_id} over {len(windows)} window(s) of "
+            f"{w_frames} keyframes ({len(files)} keyframes, overlap "
+            f"{gcfg.window_overlap_frac:g}; configured {gcfg.window_frames})")
+        env = dict(os.environ, CUBLAS_WORKSPACE_CONFIG=":4096:8")    # deterministic cuBLAS
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                bufsize=1, env=env)
+        for line in proc.stdout:
+            line = line.strip()
+            if line:
+                log(line)
+            if check_cancel is not None and check_cancel():
+                proc.terminate()
+                raise WalkError("cancelled")
+        proc.wait()
+        if proc.returncode == OOM_EXIT and w_frames > 2:
+            w_frames = max(2, w_frames // 2)
+            log(f"{LOG_TAG} a window did not fit the card after all — halving to {w_frames} keyframes")
+            continue
+        if proc.returncode != 0:
+            raise WalkError(f"DA3 window extraction exited with code {proc.returncode}")
+        break
     return wdir, windows
 
 

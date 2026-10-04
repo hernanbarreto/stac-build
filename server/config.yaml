@@ -795,6 +795,11 @@ intake:
     focal_probe_res: native            # DA3 process_res of the probe: the frames' long side (USER
                                        # 2026-09-28: maximum resolution, never an upsampling)
     focal_probe_model: depth-anything/DA3NESTED-GIANT-LARGE-1.1   # the gauge's DA3 model
+    vram_calibration_frames: 2         # BOUND: the one DA3 window that MEASURES the card's footprint at the
+                                       # session's native resolution (intake/vram.py); every DA3 window of
+                                       # the probe and of the gauge is then sized from that measurement
+                                       # (zaragoza 2026-10-04: 1080p, 2 frames = 25.8 GiB; 16 did not fit)
+    vram_margin_frac: 0.15             # BOUND: share of the free VRAM a window leaves unused
     reference_tol: 1.0e-12             # declared convergence tolerance of the rotation fit (step,
                                        # cost change and gradient): the reading is the minimum, not
                                        # wherever a loose stop left it (USER 2026-09-28: identical

@@ -1547,6 +1547,23 @@ def _apply_stac_model_keys(cfg: dict, config: dict) -> dict:
     return cfg
 
 
+def _omega_grid_wh(frames_dir) -> tuple:
+    """(w, h) of the Omega grid for this session's frames in max_size mode: the native frame
+    rounded to Omega's patch (omega_native_resolution) and the short side by the aspect."""
+    import cv2
+    from intake.quality import list_frames
+    paths = list_frames(Path(frames_dir))
+    if not paths:
+        raise RuntimeError(f"no frame in {frames_dir} — the Omega grid cannot be sized")
+    img = cv2.imread(str(paths[0]), cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise RuntimeError(f"cannot read {paths[0]}")
+    h, w = img.shape[:2]
+    res = omega_native_resolution(frames_dir)
+    s_ = float(res) / float(max(w, h))
+    return int(round(w * s_)), int(round(h * s_))
+
+
 def omega_native_resolution(frames_dir) -> int:
     """``reconstruction.vggtomega.resolution: native`` — the frames' long side rounded
     up to Omega's patch: with mode ``max_size`` the Omega grid IS the native frame
@@ -1843,9 +1860,19 @@ def _run_intake_selection(pipe: WorkerPipe, session_path: Path, frames_dir: Path
         vlm_done["ran"] = True
         stop_semantic_service_verified(pipe, stage="intake I2 SAM3")
 
+    # the FIRST GPU step of the intake is the DA3 focal probe (zaragoza 2026-10-04: it ran with
+    # vLLM loading beside it and died in OOM) — the card is handed over there, verified; I2's
+    # VLM brings vLLM back (before_content) and hands it over again before SAM3
+    from intake.focal import default_probe
+    _probe = default_probe()
+
+    def _focal(*a, **k):
+        stop_semantic_service_verified(pipe, stage="intake focal probe (DA3)")
+        return _probe(*a, **k)
+
     res = run_intake(session_path, icfg, log=pipe.send_log, progress=None,
                      before_content=lambda: _ensure_semantic_or_fail(pipe, config),
-                     before_sam3=_before_sam3,
+                     before_sam3=_before_sam3, focal=_focal,
                      cancelled=pipe.check_cancel)
     ran = [k for k, v in res["steps"].items() if v.get("ran")]
     pipe.send_log(f"Intake steps run this time: {ran or 'none (every marker matched)'}")
@@ -2355,9 +2382,15 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             raise RuntimeError("the GPU's total memory cannot be read (nvidia-smi) — the "
                                "chunk capacity cannot be decided")
         else:
-            _cap = max(24, int((_free - 4.0) / 0.086))
+            # 0.086 GB/frame was MEASURED at pccr's grid (464x832); a frame's footprint grows with its
+            # pixels (tokens) — zaragoza's 1920x1080 frame holds 5.4x more (2026-10-04)
+            _ref_px = 464.0 * 832.0
+            _gw, _gh = _omega_grid_wh(frames_dir)
+            _per_frame = 0.086 * (float(_gw) * float(_gh)) / _ref_px
+            _cap = max(24, int((_free - 4.0) / _per_frame))
             pipe.send_log(f"SIMPLE: chunk capacity {_cap} frames — {_free:.1f} GB "
-                          f"total on the card, 4.0 GB base + 0.086 GB/frame (measured). "
+                          f"total on the card, 4.0 GB base + {_per_frame:.3f} GB/frame "
+                          f"(0.086 measured at 464x832, scaled to this session's {_gw}x{_gh} grid). "
                           f"{_n_selected} keyframe(s) to place.")
         _chunk_cfg = _cap
         _max_walk0 = float(_simple_cfg.get("max_walk_single_pass_m", 0) or 0)
