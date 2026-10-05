@@ -153,21 +153,24 @@ def stop_semantic_service(pipe: Optional["WorkerPipe"] = None, stage: str = "",
     ``log`` is for callers that are not workers and have no pipe — the epoch
     transaction's re-consolidation is one (correction/apply.py).
     """
-    import subprocess
     _say = (pipe.send_log if pipe is not None else (log or (lambda m, **k: None)))
     try:
-        if subprocess.run(["pgrep", "-f", "vllm serve"],
-                          capture_output=True).returncode != 0:
+        if not vllm_pids():
             return
         _say(f"[gpu] stopping vLLM semantic service — {stage or 'this stage'} "
              f"gets the whole GPU (it auto-restarts on next VLM use)")
-        kill_vllm_pids(signal.SIGTERM)
-        for _ in range(30):
-            time.sleep(2)
+        # the launcher chain (serve_semantic.sh → semantic.serve → vllm serve) is killed as a
+        # whole and the kill is REPEATED until nothing is left: a vLLM still starting turns into
+        # a new 'vllm serve' process right after the first signal (zaragoza 2026-10-05, launched
+        # one second after the backend came up)
+        for attempt in range(6):
+            kill_vllm_pids(signal.SIGTERM if attempt < 3 else signal.SIGKILL)
+            for _ in range(10):
+                time.sleep(2)
+                if not vllm_pids():
+                    break
             if not vllm_pids():
                 break
-        else:
-            kill_vllm_pids(signal.SIGKILL)
         free = gpu_free_gb()
         if free is not None:
             _say(f"[gpu] vLLM stopped — {free:.0f} GB VRAM free")
@@ -176,6 +179,8 @@ def stop_semantic_service(pipe: Optional["WorkerPipe"] = None, stage: str = "",
 
 
 VLLM_PROCESS_PATTERN = "vllm serve"      # what stop_semantic_service kills and pgrep looks for
+# the whole launcher chain: scripts/serve_semantic.sh → python -m semantic.serve → vllm serve
+VLLM_PATTERNS = ("vllm serve", "semantic.serve", "serve_semantic.sh")
 
 
 def kill_vllm_pids(sig) -> list:
@@ -195,16 +200,20 @@ def vllm_pids() -> list:
     """PIDs of every process whose command line matches ``vllm serve`` (pgrep -f),
     [] when none. RuntimeError when pgrep itself cannot run — a check that could
     not look is not a check that found nothing."""
+    import os
     import subprocess
-    try:
-        out = subprocess.run(["pgrep", "-f", VLLM_PROCESS_PATTERN], capture_output=True,
-                             text=True)
-    except OSError as e:
-        raise RuntimeError(f"cannot verify the GPU handover: pgrep failed to run ({e})") from e
-    if out.returncode not in (0, 1):
-        raise RuntimeError(f"cannot verify the GPU handover: pgrep -f '{VLLM_PROCESS_PATTERN}' "
-                           f"exited {out.returncode} ({out.stderr.strip()})")
-    return [int(p) for p in out.stdout.split() if p.strip().isdigit()]
+    pids = set()
+    for pat in VLLM_PATTERNS:
+        try:
+            out = subprocess.run(["pgrep", "-f", pat], capture_output=True, text=True)
+        except OSError as e:
+            raise RuntimeError(f"cannot verify the GPU handover: pgrep failed to run ({e})") from e
+        if out.returncode not in (0, 1):
+            raise RuntimeError(f"cannot verify the GPU handover: pgrep -f '{pat}' "
+                               f"exited {out.returncode} ({out.stderr.strip()})")
+        pids.update(int(p) for p in out.stdout.split() if p.strip().isdigit())
+    pids.discard(os.getpid())
+    return sorted(pids)
 
 
 def stop_semantic_service_verified(pipe: Optional["WorkerPipe"] = None, stage: str = "",
