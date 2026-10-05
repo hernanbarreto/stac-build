@@ -1918,11 +1918,14 @@ def _detect_recon_state(output_dir: Path) -> dict:
     try:
         if output_dir.exists() and any(output_dir.glob("chunk_*.ply")):
             return {"recon_state": "complete", "cached_chunks": 0}
-        cache = output_dir / "da3_run" / "_tmp_results_unaligned"
-        if cache.exists():
-            n = len(list(cache.glob("chunk_*.npy")))
-            if n > 0:
-                return {"recon_state": "partial", "cached_chunks": n}
+        # the chunk predictions a dead run left behind — the vggtomega fork reloads them
+        # ([STAC resume]) instead of inferring again; the legacy DA3-streaming cache likewise
+        for cache in (output_dir / "maplong_run" / "_tmp_results_unaligned",
+                      output_dir / "da3_run" / "_tmp_results_unaligned"):
+            if cache.exists():
+                n = len(list(cache.glob("chunk_*.npy")))
+                if n > 0:
+                    return {"recon_state": "partial", "cached_chunks": n}
     except Exception:
         pass
     return {"recon_state": "none", "cached_chunks": 0}

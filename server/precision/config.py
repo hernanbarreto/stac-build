@@ -175,6 +175,8 @@ class GaugeConfig:
     instruments: Tuple[str, ...]    # scale instruments that may enter the model; the FIRST one
                                     # judged is the default — another replaces it only when its
                                     # held-out error is lower beyond the sample's noise
+    delete_windows_after_chain: bool    # the I3 windows (F0's only reader) go when the chain is done;
+                                        # run_gauge regenerates them from windows.json on a re-run
 
 
 # ── F3: Omega ─────────────────────────────────────────────────────────────
@@ -502,6 +504,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
         huber_tol=_num(g, "huber_tol", "gauge", lo=0.0, lo_excl=True),
         huber_max_iter=_num(g, "huber_max_iter", "gauge", lo=1, integer=True),
         instruments=tuple(_str_list(g, "instruments", "gauge", allowed=GAUGE_INSTRUMENTS)),
+        delete_windows_after_chain=_bool(g, "delete_windows_after_chain", "gauge"),
     )
     if gauge.window_overlap_frac >= 1.0 or gauge.heldout_confidence >= 1.0:
         raise PrecisionConfigError(

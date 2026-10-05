@@ -2214,6 +2214,11 @@ reconstruction:
       huber_max_iter: 10000             # BOUND (generous): a gain still moving here is NOT
                                         # converged — its row is excluded and reported
       instruments: [da3_windows, da3_mono, vio, stray, known_dims]
+      delete_windows_after_chain: true  # USER 2026-10-05: output/da3_windows (the I3 multi-view depth,
+                                        # 2.6 GB on pccr, 8.5 GB on zaragoza) is read by F0 only; once the
+                                        # chain's last step is done it goes. walk.json, the anchors and
+                                        # windows.json stay — a re-run from F0 regenerates the windows
+                                        # from that plan (precision.gauge.run_gauge) before measuring.
                                         # ORDER MATTERS: the first one with a held-out error is
                                         # the default; another replaces it only when heldout_change
                                         # says it is better beyond the sample's noise
@@ -3603,7 +3608,14 @@ certify:                            # §4.8 ensemble witness + §9 certification
   ensemble_offset_frames: 0         # >0: a second Omega pass with chunk boundaries shifted by
                                     # this many frames — a third prediction per frame for
                                     # certification runs (OFF: doubles the inference)
-  keep_aligned_chunks: true         # keep maplong_run/_tmp_results_aligned (+ the loop bridges)
+  keep_aligned_chunks: false        # true = keep maplong_run/_tmp_results_aligned + _tmp_results_loop +
+                                    # uncert/ for the A/B harness (quality/ab_elastic.py). false (USER
+                                    # 2026-10-05: "que no almacene al pedo"): the aligned chunks go
+                                    # right after the omega-depth/scale step (their last consumer —
+                                    # omega_run/results_output carries the per-keyframe depth the core
+                                    # reads), the bridges and the uncertainty maps at the end of the
+                                    # reconstruction (uncertainty.json keeps the per-frame numbers).
+                                    # pccr held 8.7 GB of them; zaragoza (1080p) 30 GB.
   geometric_cleanup: false          # SUPERSEDED 2026-09-19 by the mask filter inside
                                     # the epoch transaction (correction.apply.mask_filter):
                                     # that one judges the 270 MASKLETS with the pose already

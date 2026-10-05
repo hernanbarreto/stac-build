@@ -144,6 +144,8 @@ def footprint(session_dir: Path, frames: Sequence[str], frames_dir: Path, model_
         tail = " | ".join(lines[-3:])
         raise VramError(f"the calibration window failed (exit {proc.returncode}): {tail}")
     fp = parse_footprint(lines)
+    for p in wdir.glob("window_*.npz"):          # the footprint is measured; the depth is dead
+        p.unlink()
     tokens = tpf * len(window)
     per_token = max(fp["peak_gb"] - fp["weights_gb"], 0.0) / float(tokens)
     doc = {"version": 1, "provenance": "tool_measured", "key": key, "weights_gb": fp["weights_gb"],

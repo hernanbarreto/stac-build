@@ -23,6 +23,12 @@
   the user's session; never change a validated recipe on a hypothesis — and when porting it, reproduce
   its numbers EXACTLY on the real session before saying it is done; when the user says "para / detenete",
   stop everything immediately and wait; short answers, no token burn on tests nobody asked for.
+- **Storage (USER 2026-10-05, zaragoza died with the /workspace quota full):** a session keeps only what
+  the next reader needs — `certify.keep_aligned_chunks: false` (aligned chunks go after the omega-depth
+  step, bridges + `uncert/` at the end of the run), bridges saved without images, I3 gauge windows deleted
+  after the chain (`gauge.delete_windows_after_chain`, regenerated on demand), probe windows deleted once
+  K is written. "Reconstruir" with replace OFF RESUMES (no wipe); replace ON wipes to frames + video.
+  /workspace quota 400 GB, not visible to `df`; `t5-v1_1-xl` in hf_cache is ShapeR's — keep.
 
 ## ⭐⭐ READ FIRST — USER DECISION 2026-09-28 (overrides any older rule below)
 - **F0→F9 of `claude_stac.txt` are ABSOLUTE PRIORITY.** Precision is not

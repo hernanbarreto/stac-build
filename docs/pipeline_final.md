@@ -5,7 +5,25 @@ stage does, the user decisions behind it, and EVERY pending item (two lists at t
 reconstruction pipeline, B = general). Validated by the user on 2026-10-01 ("así está bien, todo lo
 que describiste es correcto").
 
-## Decisions (USER, 2026-09-30 / 2026-10-01 / 2026-10-04)
+## Decisions (USER, 2026-09-30 / 2026-10-01 / 2026-10-04 / 2026-10-05)
+
+**2026-10-05 — STORAGE: a session keeps what the next reader needs, nothing else ("que no almacene al pedo … debe ir
+limpiando"), after zaragoza (1080p) died at the second loop bridge with the /workspace quota full.** Measured: pccr held
+18 GB, 12 GB of it dead (Omega's aligned chunks 6.5 GB + bridges 1.9 GB + uncertainty maps 0.3 GB kept by
+`certify.keep_aligned_chunks: true`, the I3 gauge windows 2.6 GB read by F0 only); zaragoza 42 GB (24 GB of chunk
+predictions, 8.5 GB of windows, 6.5 GB of two bridges). Wired: `certify.keep_aligned_chunks: false` (aligned chunks
+deleted right after the omega-depth/scale step, bridges + `uncert/` at the end of the reconstruction — existing
+cleanup code, now on); a bridge is saved and held WITHOUT its images (never read; a third of its 3.6 GB at 1080p);
+`gauge.delete_windows_after_chain: true` (the chain's last step deletes `output/da3_windows/window_*.npz`; the plan,
+walk.json and the anchors stay; `run_gauge` regenerates the files for a re-run from F0); the focal probe and the VRAM
+probe delete their window depth once K / the footprint is written. Epochs are NOT the bloat: one live potree (0.8 GB),
+`corrections/epoch_N.npz` ≤ 1.4 MB each. Kept on purpose: `omega_run` + `da3_run` records (the core's inputs),
+`origins.npz`, `cleaned_cloud_raw.ply` (epoch transactions), `precision/tracks.npz`, `scene_r.db`, `seg_broadcast.json`.
+**"Reconstruir" with the replace box OFF now RESUMES** (no wipe: the intake's step markers, DA3 depth on disk, the
+fork's `[STAC resume]` chunk predictions / `loop_closures.txt` / `metric_lock.json` stamps, the core's step records
+decide what is reused; everything derived is recomputed) — since 2026-07-11 a requested reconstruction wiped output/
+unconditionally. The dialog defaults the box OFF when a scan shows cached Omega chunks (`maplong_run/
+_tmp_results_unaligned`, now detected). With the box ON a reconstruction still leaves only the frames and the video.
 
 **2026-10-04 — VALIDATED: epoch 8's recipe + PointDiT at the edges ("la reconstrucción está perfecta").** pccr epoch 5 of the
 2026-10-04 run: f6_bend with `mono_detail.enabled: true`, `detail_scope: edges` (PointDiT's detail only within 12 px of a
@@ -128,7 +146,13 @@ measured vs generated (`caption_source`, view counts in its `.meta.json`).
 ## Environment notes
 
 - Pod: cgroup 117 GB RAM / ~30 CPUs — cap every job (`ulimit -v`, `OMP_NUM_THREADS`, `taskset`,
-  `nice`); never fan out agents on the user's session.
+  `nice`); never fan out agents on the user's session. `memory.usage_in_bytes` counts the page cache
+  (83 GB of it on 2026-10-05 with 4 GB of RSS) — read `memory.stat` `total_rss` for the real pressure.
+- /workspace is a MooseFS volume with a RunPod quota (400 GB since 2026-10-05, was 300): `df` reports the
+  cluster, not the quota, and no `mfs*` tool is installed — a full quota fails every write with
+  `Errno 122 Disk quota exceeded` and the worker dies without a traceback (its log write fails too).
+  Big tenants: miniforge3 180 GB, hf_cache 44 GB (`t5-v1_1-xl` 22 GB is ShapeR's text encoder — keep),
+  vendor 29 GB, the sessions (see the 2026-10-05 storage decision).
 - ShapeR on the A100 (sm_80): `torchsparse` in env `shaper` rebuilt from `nihalsid/torchsparse@20ccc92`
   with `TORCH_CUDA_ARCH_LIST="8.0;8.6"`, `SPHASH_INCLUDE`, `CUDA_INCLUDE`, `CUDA_LIB`.
 - One Hugging Face cache: `HF_HOME=/workspace/hf_cache`.

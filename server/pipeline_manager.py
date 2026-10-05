@@ -733,23 +733,25 @@ class PipelineManager:
         # consulting them first is what made Replace a no-op on sessions whose
         # artifacts all probed complete.
         #
-        # RECONSTRUCTION always starts from scratch: whenever the reconstruction
-        # stage is part of this run, output/ is wiped UNCONDITIONALLY — a
-        # reconstruction must never reuse any prior artifact (resume subtleties
-        # inside the stages caused silent partial reuse; the only safe contract
-        # is a clean slate). Stage-only runs (TSDF / segmentation) still resume
-        # on the existing outputs.
+        # A RECONSTRUCTION WITHOUT REPLACE RESUMES (USER 2026-10-05, zaragoza: the run died
+        # at the loop bridges with the intake, the VLM+SAM3 pass, the DA3 windows and the
+        # six Omega chunks — 1h45 of GPU — on disk): nothing is wiped; the stages' own
+        # resume guards decide what is reused — the intake's step markers, DA3 depth already
+        # on disk, the fork's chunk predictions / loop_closures.txt / metric_lock.json stamps,
+        # the core's step records — and every derived quantity is recomputed from them. From
+        # 2026-07-11 to today a requested reconstruction wiped output/ unconditionally; the
+        # dialog's "replace" box (on by default, off when a scan shows cached chunks) is the
+        # one switch between a clean slate and a resume.
         recon_requested = any(
             s.stage.enabled and s.stage.id == StageId.RECONSTRUCTION
             for s in job.stages)
         wiped_this_run = False
-        if replace or recon_requested:
+        if replace:
             wiped_this_run = True
-            if recon_requested and not replace:
-                logger.info("[Pipeline] reconstruction stage requested → output/ "
-                            "wiped unconditionally (a reconstruction never reuses "
-                            "prior artifacts)")
             self._wipe_outputs_for_replace(Path(session_dir), output_dir)
+        elif recon_requested:
+            logger.info("[Pipeline] reconstruction requested without replace → RESUME: "
+                        "output/ kept, each stage reuses what its own guards accept")
 
         # RESUME MODE (no wipe): the pipeline detects on its own which stages
         # this session already completed (artifact + freshness probes) and only

@@ -296,6 +296,25 @@ def run_da3_windows(session_dir: Path, gcfg, python: str, log: Callable = print,
     return wdir, windows
 
 
+def delete_windows(session_dir: Path, log: Callable = print) -> int:
+    """Remove the window depth files (``window_*.npz``) of ``output/da3_windows`` — F0's only
+    reader is through; ``windows.json`` (the plan), ``walk.json`` and the anchors stay, so
+    ``run_da3_windows`` regenerates exactly these windows when a step needs them again. Returns
+    the bytes freed."""
+    wdir = Path(session_dir) / "output" / WINDOWS_DIRNAME
+    freed = 0
+    for p in sorted(wdir.glob("window_*.npz")) if wdir.is_dir() else []:
+        try:
+            freed += p.stat().st_size
+            p.unlink()
+        except OSError as e:
+            log(f"{LOG_TAG} could not delete {p.name}: {e}")
+    if freed:
+        log(f"{LOG_TAG} deleted the I3 window depth files ({freed / 1e9:.1f} GB; windows.json, "
+            f"walk.json and the anchors stay — regenerated on demand)")
+    return freed
+
+
 def measure_walk(session_dir: Path, gcfg, log: Callable = print, *,
                  geometry_epoch: int = 0, camera_epoch: int = 0) -> Dict[str, Any]:
     """Chain the I3 windows, write ``intake/walk.json`` and the per-frame anchors.

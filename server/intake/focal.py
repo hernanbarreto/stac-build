@@ -141,6 +141,8 @@ def run_focal_probe(session_dir: Path, quality: Dict[str, Any], pcfg, *, python:
     tmp = out.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(doc, indent=1))
     os.replace(tmp, out)
+    for p in wdir.glob("window_*.npz"):          # K is in the json; the depth (389 MB at 1080p) is dead
+        p.unlink()
     s = doc["spread_pct"]
     log(f"{LOG_TAG} K: fx {doc['fx']:.2f} fy {doc['fy']:.2f} cx {doc['cx']:.2f} cy "
         f"{doc['cy']:.2f} px (spread fx {s['fx']:.2f} %, cx {s['cx']:.2f} %) → {out}")

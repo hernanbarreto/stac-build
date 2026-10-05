@@ -598,6 +598,13 @@ def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = pr
     if walk is None:
         raise GaugeError(f"{session_dir / 'intake' / 'walk.json'} is missing — run the walk "
                          f"(python -m intake.walk --session <dir>)")
+    # the window depth files are deleted once the chain is through (gauge.delete_windows_after_chain);
+    # a re-run from F0 brings them back from the same plan (windows.json) — this interpreter is the
+    # da3 env's, the one the windows were extracted with
+    from intake.walk import WINDOWS_DIRNAME, run_da3_windows
+    if not any((out / WINDOWS_DIRNAME).glob("window_*.npz")):
+        log(f"{LOG_TAG} the I3 window depth files are gone — regenerating them from their plan")
+        run_da3_windows(session_dir, gcfg, sys.executable, log=log)
     chainage = {int(c["frame"]): float(c["chainage_m"]) for c in walk["chainage"]}
     win_bounds = [(w["frames"][0], w["frames"][1]) for w in walk["windows"]]
     win_c = []

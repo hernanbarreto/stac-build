@@ -2792,7 +2792,9 @@ def _cleanup_recon_temps(save_dir: Path, output_dir: Path, backend: str, pipe: W
     except Exception as _e:  # noqa: BLE001 — a cleanup must never abort a finished reconstruction
         pipe.send_log(f"[cleanup] certify config unavailable ({_e}) — loop bridges deleted",
                       level="warning")
-    for tmp_dir_name in ["_tmp_results_unaligned", "pcd"] + ([] if _keep_loop else ["_tmp_results_loop"]):
+    # uncert/ (per-frame uncertainty maps) is read by nothing after the run: uncertainty.json carries
+    # the per-frame numbers the certification reads, and the fork's own resume reads that json too
+    for tmp_dir_name in ["_tmp_results_unaligned", "pcd"] + ([] if _keep_loop else ["_tmp_results_loop", "uncert"]):
         tmp_dir = save_dir / tmp_dir_name
         if tmp_dir.exists():
             size_mb = sum(f.stat().st_size for f in tmp_dir.rglob("*") if f.is_file()) / (1024 * 1024)

@@ -229,6 +229,11 @@ def run_chain(session_dir: Path, pcfg, *, log: Callable = print,
             f"{rec['epoch_before']} → {rec['epoch_after']})")
     if progress is not None:
         progress(100.0, "precision core done")
+    if bool(pcfg.gauge.delete_windows_after_chain):
+        # the I3 window depth (F0's only reader) is dead once the chain is through — walk.json,
+        # the anchors and windows.json stay, run_gauge regenerates the files for a re-run from F0
+        from intake.walk import delete_windows
+        delete_windows(session_dir, log)
     return {"steps": state["done"], "seconds": round(time.time() - t_chain, 1),
             "epoch": _epoch(session_dir)}
 
