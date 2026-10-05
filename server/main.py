@@ -198,6 +198,21 @@ def load_ply_to_numpy(ply_path: Path) -> Optional[np.ndarray]:
 # Sessions whose on-load rebuild chain is running — while set, any incoming
 # run_pipeline for that session is REJECTED (USER 2026-09-05: one and only one)
 _onload_busy: dict = {}
+# the on-load mask→cloud projection of a session, a SUBPROCESS so a Reconstruir can kill it
+# (USER 2026-10-05: "si puse reemplazar debió haber borrado todo" — nothing of the old session
+# may keep running, nor write anything, once a reconstruction is ordered)
+_onload_projection: dict = {}
+
+
+def _stop_onload_projection(session_id: str, why: str) -> None:
+    proc = _onload_projection.pop(session_id, None)
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.kill()
+            proc.wait(timeout=10)
+        except Exception:  # noqa: BLE001
+            pass
+        print(f"[Viewer] on-load mask projection of {session_id} stopped — {why}")
 
 
 async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, websocket=None):
@@ -7704,24 +7719,42 @@ async def viewer_websocket(websocket: WebSocket):
                             seg_data = await loop.run_in_executor(None, apply_segmentation_to_cloud, output_dir)
                         else:
                             seg_data = {}
-                            if (output_dir / "segmentation.json").exists():
-                                # masks but no projection yet (USER 2026-10-05): project in the BACKGROUND —
-                                # this handler keeps reading commands meanwhile. A pipeline that starts
-                                # later re-projects in its own cloud stage; a Replace wipes output/ first.
-                                print(f"[Viewer] masks not projected yet for {session_id} — projecting in the "
-                                      f"background (the viewer keeps taking commands)")
+                            _job = pipeline_manager._jobs.get(session_id)
+                            _job_active = bool(_job and str(getattr(_job.status, "value", _job.status))
+                                               in ("queued", "running"))
+                            if (output_dir / "segmentation.json").exists() and not _job_active \
+                                    and session_id not in _onload_projection:
+                                # masks but no projection yet (USER 2026-10-05): project in a SUBPROCESS —
+                                # this handler keeps reading commands, and a Reconstruir for this session
+                                # kills it (nothing of the old session runs or writes after that order)
+                                print(f"[Viewer] masks not projected yet for {session_id} — projecting in a "
+                                      f"background process (killed by any Reconstruir of this session)")
+                                import subprocess as _sp
+                                _code = ("from segmentation_pipeline import apply_segmentation_to_cloud as f; "
+                                         f"import pathlib; f(pathlib.Path({str(output_dir)!r}))")
+                                _proc = _sp.Popen([sys.executable, "-c", _code], cwd=str(Path(__file__).parent),
+                                                  stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+                                _onload_projection[session_id] = _proc
 
-                                async def _project_in_background(ws=websocket, od=output_dir, sid=session_id):
+                                async def _collect(ws=websocket, od=output_dir, sid=session_id, pr=_proc):
                                     try:
-                                        data = await loop.run_in_executor(None, apply_segmentation_to_cloud, od)
-                                        if data.get("instances"):
-                                            data.pop("reload_potree", None)
-                                            await viewer_manager.send_text(ws, json.dumps(data))
-                                            print(f"[Viewer] background projection done for {sid}: "
-                                                  f"{len(data['instances'])} segments")
+                                        while pr.poll() is None:
+                                            await asyncio.sleep(2)
+                                        if _onload_projection.get(sid) is not pr:
+                                            return                       # killed by a reconstruction
+                                        _onload_projection.pop(sid, None)
+                                        if pr.returncode == 0 and (od / "segmentation_result.json").exists():
+                                            data = await loop.run_in_executor(None, apply_segmentation_to_cloud, od)
+                                            if data.get("instances"):
+                                                data.pop("reload_potree", None)
+                                                await viewer_manager.send_text(ws, json.dumps(data))
+                                                print(f"[Viewer] on-load projection done for {sid}: "
+                                                      f"{len(data['instances'])} segments")
+                                        else:
+                                            print(f"[Viewer] on-load projection of {sid} ended with code {pr.returncode}")
                                     except Exception as _e:  # noqa: BLE001 — declared, never fatal
-                                        print(f"[Viewer] background projection for {sid} did not finish: {_e}")
-                                asyncio.create_task(_project_in_background())
+                                        print(f"[Viewer] on-load projection of {sid} did not finish: {_e}")
+                                asyncio.create_task(_collect())
                         if seg_data.get("instances"):
                             should_reload_potree = seg_data.pop("reload_potree", False)
                             await viewer_manager.send_text(websocket, json.dumps(seg_data))
@@ -7816,6 +7849,8 @@ async def viewer_websocket(websocket: WebSocket):
             elif cmd.get("type") in ("reconstruct_geometry", "run_pipeline"):
                 # Pipeline-based reconstruction (subprocess workers)
                 session_id = cmd.get("session_id")
+                if session_id:
+                    _stop_onload_projection(session_id, "a reconstruction was ordered")
 
                 # ONE AND ONLY ONE (USER ORDER 2026-09-05: "para reconstruccion
                 # no debe haber cola de comandos, hay uno y solo uno"): a
