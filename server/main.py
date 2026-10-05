@@ -7694,9 +7694,19 @@ async def viewer_websocket(websocket: WebSocket):
                         
                         await asyncio.sleep(0)  # Yield to process pings
                         
-                        # Offload segmentation loading to thread pool
+                        # Offload segmentation loading to thread pool — ONLY the cached projection
+                        # (segmentation_result.json). USER 2026-10-05: with masks but no projection the
+                        # full mask→cloud matching ran here, inline, for 10+ min on zaragoza's 114 M
+                        # points and this connection stopped reading commands — Reconstruir sat in the
+                        # socket. The projection belongs to the pipeline's cloud stage.
                         from segmentation_pipeline import apply_segmentation_to_cloud
-                        seg_data = await loop.run_in_executor(None, apply_segmentation_to_cloud, output_dir)
+                        if (output_dir / "segmentation_result.json").exists():
+                            seg_data = await loop.run_in_executor(None, apply_segmentation_to_cloud, output_dir)
+                        else:
+                            seg_data = {}
+                            if (output_dir / "segmentation.json").exists():
+                                print(f"[Viewer] masks not projected on the cloud yet — the pipeline's cloud stage "
+                                      f"projects them; nothing is computed on load")
                         if seg_data.get("instances"):
                             should_reload_potree = seg_data.pop("reload_potree", False)
                             await viewer_manager.send_text(websocket, json.dumps(seg_data))
