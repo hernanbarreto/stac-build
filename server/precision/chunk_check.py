@@ -85,6 +85,17 @@ def band_height(h: np.ndarray, pct: float, band_m: float, min_points: int) -> Tu
     return med, int(band.size), float(_MAD_TO_SIGMA * np.median(np.abs(band - med)))
 
 
+class NoFloorPlane(ChunkCheckError):
+    """The pooled low bands hold no plane at the acceptance bar — a scene with ramps, stairs or
+    several levels (zaragoza 2026-10-05: an industrial hall). The check REPORTS it; it is not a
+    failure of the reconstruction and must not stop the pipeline."""
+
+    def __init__(self, msg: str, best_frac: float, n_points: int):
+        super().__init__(msg)
+        self.best_frac = float(best_frac)
+        self.n_points = int(n_points)
+
+
 def dominant_plane(points: np.ndarray, band_m: float, seed: int,
                    min_inlier_frac: float) -> Tuple[np.ndarray, np.ndarray]:
     """The session's floor plane (unit normal towards +Y, a point on it) — RANSAC over the
@@ -96,7 +107,13 @@ def dominant_plane(points: np.ndarray, band_m: float, seed: int,
     pf = fit_plane_ransac(P, dist_thresh=band_m / 4, iters=400, min_inlier_frac=min_inlier_frac,
                           measure_curvature=False)
     if pf is None:
-        raise ChunkCheckError("no dominant floor plane in the pooled floor bands")
+        # how much the BEST plane explains, so the report says what was measured, not only "none"
+        best = fit_plane_ransac(P, dist_thresh=band_m / 4, iters=400, min_inlier_frac=0.001,
+                                measure_curvature=False)
+        frac = float(np.asarray(best.inliers, bool).mean()) if best is not None and len(P) else 0.0   # bool mask
+        raise NoFloorPlane(f"no dominant floor plane in the pooled floor bands: the best plane holds "
+                           f"{frac * 100:.1f} % of {len(P):,} low-band points, "
+                           f"{min_inlier_frac * 100:.0f} % required", frac, int(len(P)))
     inl = P[pf.inliers]
     c = inl.mean(0)
     n = np.linalg.svd(inl - c, full_matrices=False)[2][2]      # least-squares normal of the inliers
@@ -574,10 +591,22 @@ def run_check(session_dir: Path, pcfg, log: Callable = print, chainage: Optional
      composed) = load_inputs(session_dir, log)
     if chainage is not None:
         chain = np.asarray(chainage, np.float64)
-    rows, plane = measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir, da3_dir, cfg, log, bend=bend,
-                               offset=composed["offset"])
     pool_m = float(pcfg.gauge.knot_walk_m) / 2.0
-    verdicts = judge(rows, cfg, pool_m, log)
+    try:
+        rows, plane = measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir, da3_dir, cfg, log,
+                                   bend=bend, offset=composed["offset"])
+        verdicts = judge(rows, cfg, pool_m, log)
+    except NoFloorPlane as e:
+        # DECLARED, not fatal (USER 2026-10-05): a report step that cannot measure says so and the
+        # chain goes on — the cloud is published, the certification has its own floor machinery
+        log(f"{LOG_TAG} ⚠ {e} — the per-chunk floor/ceiling check is UNDECIDED for this session; "
+            f"the cloud stands, the certification measures its own floor")
+        plane = None
+        verdicts = {"session": {"verdict": "undecided", "reason": str(e),
+                                "floor_plane": {"found": False, "best_inlier_frac": e.best_frac,
+                                                "required_inlier_frac": float(cfg.plane_min_inlier_frac),
+                                                "low_band_points": e.n_points}},
+                    "chunks": [], "seams": [], "keyframes": [], "to_correct": []}
     rep = {"version": 1, "provenance": PROVENANCE, **_epochs(session_dir / "output"),
            "params": {"low_pct": cfg.low_pct, "high_pct": cfg.high_pct, "band_m": cfg.band_m,
                       "min_points": cfg.min_points, "pixel_stride": cfg.pixel_stride,
@@ -587,12 +616,17 @@ def run_check(session_dir: Path, pcfg, log: Callable = print, chainage: Optional
     pdir = session_dir / "output" / "precision"
     pdir.mkdir(parents=True, exist_ok=True)
     (pdir / CHECK_NAME).write_text(json.dumps(rep, indent=1, default=float))
-    summary = ", ".join(f"chunk {c['chunk']} {c['verdict']}" for c in rep["chunks"])
+    summary = (", ".join(f"chunk {c['chunk']} {c['verdict']}" for c in rep["chunks"])
+               or f"session {rep['session'].get('verdict', '?')}")
     log(f"{LOG_TAG} {summary}; {len(rep['to_correct'])} correction(s) indicated → {pdir / CHECK_NAME} "
         f"({rep['seconds']} s)")
     # the floor metric of the published cloud (precision/cloud_metrics.py; edges need the projection)
     from precision.cloud_metrics import run_cloud_metrics
-    rep["cloud_metrics"] = run_cloud_metrics(session_dir, pcfg, stage="f6_check", log=log, edges=False)
+    try:
+        rep["cloud_metrics"] = run_cloud_metrics(session_dir, pcfg, stage="f6_check", log=log, edges=False)
+    except Exception as e:  # noqa: BLE001 — a metric that cannot be measured is declared, never fatal
+        log(f"{LOG_TAG} ⚠ cloud metrics not measured: {e}")
+        rep["cloud_metrics"] = {"measured": False, "reason": str(e)}
     (pdir / CHECK_NAME).write_text(json.dumps(rep, indent=1, default=float))
     return rep
 
