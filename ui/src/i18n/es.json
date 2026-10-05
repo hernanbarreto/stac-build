@@ -319,7 +319,7 @@
     "created": "{@Session} {name} creada",
     "noCloudData": "La {@session} no tiene nube de puntos. Ejecutá la reconstrucción para generarla.",
     "queued": "en cola ({n} adelante)",
-    "queuedNext": "siguiente en la cola",
+    "queuedNext": "en cola",
     "built": "reconstruido",
     "notBuilt": "sin reconstrucción"
   },

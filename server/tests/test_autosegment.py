@@ -132,6 +132,8 @@ def test_forced_stages_skip_no_resume_probe():
 def test_the_websocket_command_carries_segment_and_autosegment():
     src = (Path(__file__).resolve().parents[1] / "main.py").read_text()
     assert 'cmd.get("segment")' in src and 'cmd.get("autosegment")' in src
-    assert src.count("stages=_stages_for(") == 2 and src.count("force=_force,") == 2
+    # ONE launch loop: every scan of the order is its own job (2026-10-05)
+    assert src.count("stages=_stages_for(") == 1 and src.count("force=_force,") == 1
+    assert "for _i, _sk in enumerate(_keys):" in src
     assert '@app.get("/api/autosegment/{session_id}")' in src
     assert '@app.post("/api/autosegment/{session_id}")' in src

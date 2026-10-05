@@ -448,12 +448,23 @@ function App() {
             const m = /\/scans\/([^/]+)\/src_([^/]+)/.exec(String(dir ?? ''))
             return m ? `${m[1]}/${m[2]}` : undefined
           }
-          setPipelineJobs(Object.fromEntries(Object.entries(live).map(
-            ([sid, j]) => [sid, {
-              status: String(j.status),
-              queue_position: Number(j.queue_position ?? 0),
-              scan_key: scanKeyOf(j.session_dir),
-            }])))
+          // one job per session + scan since 2026-10-05 (every scan of a multi-scan
+          // order waits in the queue as its own job): group them by session — the
+          // project row shows the best state, each scan row its own
+          const grouped: Record<string, { status: string; queue_position: number; scan_key?: string; scans: Record<string, { status: string; queue_position: number }> }> = {}
+          for (const j of Object.values(live)) {
+            const sid = String(j.session_id ?? '')
+            if (!sid) continue
+            const st = String(j.status)
+            const qp = Number(j.queue_position ?? 0)
+            const sk = (j.scan_key ? String(j.scan_key) : undefined) ?? scanKeyOf(j.session_dir)
+            const g = grouped[sid] ?? (grouped[sid] = { status: st, queue_position: qp, scan_key: sk, scans: {} })
+            if (sk) g.scans[sk] = { status: st, queue_position: qp }
+            if (st === 'running' || (g.status !== 'running' && qp < g.queue_position)) {
+              g.status = st; g.queue_position = qp; g.scan_key = sk
+            }
+          }
+          setPipelineJobs(grouped)
         }
       } catch { /* offline: keep the last picture rather than blank the list */ }
       if (!stop) window.setTimeout(poll, 4000)
@@ -471,7 +482,7 @@ function App() {
         const live = ((await r.json())?.pipelines ?? {}) as Record<string, unknown>
         setPipelineRunning(prev => {
           if (!prev) return prev
-          if (Object.prototype.hasOwnProperty.call(live, prev.session_id ?? '')) return prev
+          if (Object.values(live).some(j => (j as { session_id?: string }).session_id === prev.session_id)) return prev
           // the server does not know it: it finished while we were away
           return null
         })

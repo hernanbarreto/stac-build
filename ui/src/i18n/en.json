@@ -319,7 +319,7 @@
     "created": "{@Session} {name} created",
     "noCloudData": "The {@session} has no point cloud. Run the reconstruction to generate it.",
     "queued": "queued ({n} ahead)",
-    "queuedNext": "next in queue",
+    "queuedNext": "queued",
     "built": "reconstructed",
     "notBuilt": "no reconstruction"
   },

@@ -38,7 +38,7 @@ from alignment_manager import get_alignment_manager, AlignmentManager
 from segmentation.sam3_wrapper import get_sam3_wrapper
 from config import cfg, DATA_DIR, PROJECTS_DIR
 from atomic_io import atomic_write_json
-from pipeline_manager import PipelineManager, PipelineStage, StageId
+from pipeline_manager import JobStatus, PipelineManager, PipelineStage, StageId
 from project_paths import resolve_session
 
 # --- Centralized path resolution ---
@@ -6018,9 +6018,7 @@ async def autosegment_state(session_id: str):
     from segmentation.autoprompt.autosegment import state
     ctx = _ctx(session_id)
     d = state(ctx.output_dir)
-    _job = pipeline_manager._jobs.get(session_id)
-    d["busy"] = bool(_job and str(getattr(_job.status, "value", _job.status))
-                     in ("queued", "running"))
+    d["busy"] = pipeline_manager.is_active(session_id)
     return {"ok": True, **d}
 
 
@@ -7370,10 +7368,11 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
     # kills the 17:14 incident class: a stale command sitting in
     # the socket buffer behind a long stage executed late and
     # wiped output/. A command must act NOW or not at all.
-    _active = pipeline_manager._jobs.get(session_id) if session_id else None
-    _busy = bool(_active and getattr(_active, "status", None) is not None
-                 and str(getattr(_active.status, "value", _active.status))
-                 in ("queued", "running"))
+    # per SCAN since 2026-10-05: another scan of the same project is another job
+    # and waits its turn in the queue — the same scan twice is what is refused
+    _busy = bool(session_id) and any(
+        pipeline_manager.is_active(session_id, _sk or None)
+        for _sk in (list(cmd.get("scans") or []) or [None]))
     if _busy or _onload_busy.get(session_id):
         _why = ("a pipeline is already running"
                 if _busy else "the on-load rebuild chain is running")
@@ -7398,6 +7397,8 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
     # Progress callback: relay to this websocket + broadcast
     from task_manager import task_manager as _tm
     _pipeline_tid = _tm.start(session_id, "pipeline", "Running Pipeline")
+    # one task card per COMMAND: it closes when its last scan has finished
+    _remaining = {"n": max(1, len(list(cmd.get("scans") or [])))}
 
     async def _on_pipeline_progress(sid, job_dict):
         # BROADCAST to all live viewers, NOT the socket captured at run start: a
@@ -7662,7 +7663,9 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
             print(f"[Pipeline] Broadcast error: {e}")
 
         try:
-            _tm.finish(_pipeline_tid)
+            _remaining["n"] -= 1
+            if _remaining["n"] <= 0:
+                _tm.finish(_pipeline_tid)
             await viewer_manager.broadcast_text(json.dumps({
                 "type": "status",
                 "message": f"Pipeline complete for {sid}"
@@ -7718,86 +7721,29 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
         on = (sk in _segment_keys) if sk else bool(_segment_keys)
         return _select_stages(stages, segment=on)
 
-    if len(scan_keys) <= 1:
-        # Single scan or auto-resolve
-        single_key = scan_keys[0] if scan_keys else None
-        await pipeline_manager.start_pipeline(
+    # EVERY scan is its own job (USER 2026-10-05: "hay que meterlo en cola ... se
+    # debe mostrar en el UI"): the manager runs them one at a time on the card and
+    # the rest wait in ITS queue, visible to the UI like any other queued job. A
+    # scan is wiped (replace) when its own turn comes, by its own run — never before.
+    # (Until today the scans after the first were started one by one from a
+    # completion callback and did not exist for anyone until then.)
+    _keys = list(scan_keys) or [None]
+    for _i, _sk in enumerate(_keys):
+        _job = await pipeline_manager.start_pipeline(
             session_id=session_id,
-            stages=_stages_for(single_key),
+            stages=_stages_for(_sk),
             config=dict(_run_cfg),
             on_progress=_on_pipeline_progress,
             on_complete=_on_pipeline_complete,
             replace=replace,
-            scan_key=single_key,
+            scan_key=_sk,
             force=_force,
         )
-        label = single_key or "auto"
+        _state = "queued" if _job.status == JobStatus.QUEUED else "started"
         await viewer_manager.send_text(websocket, json.dumps({
             "type": "info",
-            "message": f"Pipeline started for {session_id} (scan: {label})"
-        }))
-    else:
-        # Sequential multi-scan: run each scan one at a time
-        async def _run_multi_scan():
-            total = len(scan_keys)
-            for i, sk in enumerate(scan_keys):
-                try:
-                    await viewer_manager.send_text(websocket, json.dumps({
-                        "type": "info",
-                        "message": f"Starting scan {i+1}/{total}: {sk}"
-                    }))
-                except Exception:
-                    pass
-
-                # Use a future to await sequential completion
-                done_event = asyncio.Event()
-                scan_success = [True]
-                _is_last_scan = (i == total - 1)
-
-                async def _on_scan_complete(sid, success, _ev=done_event,
-                                            _ss=scan_success, _last=_is_last_scan):
-                    _ss[0] = success
-                    # Reload the chat only when the multi-scan run is
-                    # actually over (last scan, or a failure stops it) —
-                    # the next scan would kill vLLM again right away.
-                    await _on_pipeline_complete(
-                        sid, success, restart_chat=(_last or not success))
-                    _ev.set()
-
-                await pipeline_manager.start_pipeline(
-                    session_id=session_id,
-                    stages=_stages_for(sk),
-                    config=dict(_run_cfg),
-                    on_progress=_on_pipeline_progress,
-                    on_complete=_on_scan_complete,
-                    replace=replace,
-                    scan_key=sk,
-                    force=_force,
-                )
-                await done_event.wait()
-
-                if not scan_success[0]:
-                    try:
-                        await viewer_manager.send_text(websocket, json.dumps({
-                            "type": "error",
-                            "message": f"Scan {sk} failed. Stopping multi-scan pipeline."
-                        }))
-                    except Exception:
-                        pass
-                    return
-
-            try:
-                await viewer_manager.send_text(websocket, json.dumps({
-                    "type": "info",
-                    "message": f"All {total} scans completed for {session_id}"
-                }))
-            except Exception:
-                pass
-
-        asyncio.create_task(_run_multi_scan())
-        await viewer_manager.send_text(websocket, json.dumps({
-            "type": "info",
-            "message": f"Multi-scan pipeline started: {len(scan_keys)} scans for {session_id}"
+            "message": f"Pipeline {_state} for {session_id} (scan: {_sk or 'auto'}"
+                       + (f", {_i + 1}/{len(_keys)}" if len(_keys) > 1 else "") + ")"
         }))
 
     return {"ok": True, "session_id": session_id}
@@ -8228,9 +8174,7 @@ async def viewer_websocket(websocket: WebSocket):
                             seg_data = await loop.run_in_executor(None, apply_segmentation_to_cloud, output_dir)
                         else:
                             seg_data = {}
-                            _job = pipeline_manager._jobs.get(session_id)
-                            _job_active = bool(_job and str(getattr(_job.status, "value", _job.status))
-                                               in ("queued", "running"))
+                            _job_active = pipeline_manager.is_active(session_id)
                             if (output_dir / "segmentation.json").exists() and not _job_active \
                                     and session_id not in _onload_projection:
                                 # masks but no projection yet (USER 2026-10-05): project in a SUBPROCESS —

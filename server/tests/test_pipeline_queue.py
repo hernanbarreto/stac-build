@@ -16,6 +16,7 @@ QUEUEING, not the stages.
 """
 
 import asyncio
+import time
 import sys
 from pathlib import Path
 
@@ -134,3 +135,50 @@ async def _body_test_the_queue_is_visible_to_the_ui(monkeypatch):
     jobs = pm.get_all_jobs()
     assert jobs["x"]["status"] == "running" and jobs["x"]["queue_position"] == 0
     assert jobs["y"]["status"] == "queued" and jobs["y"]["queue_position"] == 1
+
+
+# ── every scan of a multi-scan order is its own job (USER 2026-10-05) ──────────
+
+def test_two_scans_of_one_session_are_two_jobs_the_second_queued(monkeypatch):
+    asyncio.run(_body_test_two_scans_of_one_session(monkeypatch))
+
+
+async def _body_test_two_scans_of_one_session(monkeypatch):
+    """"hay que meterlo en cola ... se debe mostrar en el UI": the second scan of
+    the same project is a queued job of its own — visible, cancellable — not a
+    callback waiting for the first; the same scan twice is still refused."""
+    from pipeline_manager import JobStatus, PipelineManager, build_pipeline_stages
+    gate: dict = {}
+    pm = PipelineManager()
+
+    async def _fake_run(job, session_dir, config, on_progress, on_complete, replace, force=False):
+        key = pm.job_key(job.session_id, job.scan_key)       # one gate PER JOB
+        gate.setdefault(key, asyncio.Event())
+        await gate[key].wait()
+        job.status = JobStatus.DONE
+        job.ended_at = time.time()
+        if on_complete:
+            await on_complete(job.session_id, True)
+        await pm._start_next_queued()
+
+    monkeypatch.setattr(pm, "_run_pipeline", _fake_run)
+    monkeypatch.setattr(pm, "_resolve_dir", lambda *a, **k: "/tmp", raising=False)
+    a = await pm.start_pipeline("pccr", build_pipeline_stages(), {}, scan_key="2026-08-24/default")
+    b = await pm.start_pipeline("pccr", build_pipeline_stages(), {}, scan_key="2026-08-31/default")
+    assert a.status == JobStatus.RUNNING and b.status == JobStatus.QUEUED and b.queue_position == 1
+    keys = set(pm.get_all_jobs())
+    assert keys == {"pccr@2026-08-24/default", "pccr@2026-08-31/default"}
+    assert pm.get_all_jobs()["pccr@2026-08-31/default"]["scan_key"] == "2026-08-31/default"
+    assert pm.is_active("pccr") and pm.is_active("pccr", "2026-08-31/default")
+    assert not pm.is_active("pccr", "2026-09-01/default")
+    with pytest.raises(RuntimeError, match="one and only one"):
+        await pm.start_pipeline("pccr", build_pipeline_stages(), {}, scan_key="2026-08-31/default")
+    assert pm.job_of("pccr") is a                       # the one holding the card
+    # the first finishes: its completion handler must still see IT, then the second runs
+    gate.setdefault("pccr@2026-08-24/default", asyncio.Event()).set()
+    await asyncio.sleep(0.05)
+    assert a.status == JobStatus.DONE and a.ended_at > 0
+    assert b.status == JobStatus.RUNNING and pm.job_of("pccr") is b
+    # cancelling by session takes every job of it that is still alive
+    await pm.cancel_pipeline("pccr")
+    assert b.status == JobStatus.CANCELLED and a.status == JobStatus.DONE

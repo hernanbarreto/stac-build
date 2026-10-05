@@ -48,7 +48,7 @@ interface SessionsPanelProps {
   /** every live pipeline, keyed by session id (USER 2026-09-23: "los proyectos
    *  que mande deben identificar cual esta en reconstruccion, cual en cola").
    *  `queue_position` 0 = holding the card, 1 = next, N = N-1 ahead. */
-  pipelineJobs: Record<string, { status: string; queue_position: number; scan_key?: string }>
+  pipelineJobs: Record<string, { status: string; queue_position: number; scan_key?: string; scans?: Record<string, { status: string; queue_position: number }> }>
   extracting: Record<string, number>
   canManage: boolean
   onConnect: () => void
@@ -127,10 +127,12 @@ export function SessionsPanel(p: SessionsPanelProps) {
           // words (USER 2026-09-23: "ponele un punto a la sesion sin escribirle
           // rebuilding ... con el punto alcanza")
           ? <Badge tone="brand" size="sm" dot title={t('sessions.rebuilding')} />
+          // queued = BLUE with the word (USER 2026-10-05: the warn dot is orange like
+          // the brand dot — running and queued looked the same on the screen)
           : queued
-            ? <Badge tone="warn" size="sm" dot title={(job?.queue_position ?? 0) > 1
+            ? <Badge tone="info" size="sm">{(job?.queue_position ?? 0) > 1
                 ? t('sessions.queued', { n: (job!.queue_position - 1) })
-                : t('sessions.queuedNext')} />
+                : t('sessions.queuedNext')}</Badge>
             : loaded
               ? <Badge tone="ok" size="sm">{t('sessions.loaded')}</Badge>
               : s.hasCloud
@@ -171,14 +173,14 @@ export function SessionsPanel(p: SessionsPanelProps) {
           // (USER 2026-09-23: "cuando es multisesion, debes indicar en la
           // sesion cual es el que se esta reconstruyendo"). The star keeps its
           // place when the scan is neither running nor queued.
-          badge: (job && job.scan_key === sc.key)
-            // the dot alone here too — the tooltip says which state it is
-            ? (rebuilding
-                ? <Badge tone="brand" size="sm" dot title={t('sessions.rebuilding')} />
-                : <Badge tone="warn" size="sm" dot title={(job.queue_position ?? 0) > 1
-                    ? t('sessions.queued', { n: job.queue_position - 1 })
-                    : t('sessions.queuedNext')} />)
-            : sc.is_reference ? <Star className="stac-sessions__star" aria-hidden /> : undefined,
+          // each scan carries ITS OWN job state (one job per scan since 2026-10-05)
+          badge: (() => {
+            const sj = job?.scans?.[sc.key] ?? (job && job.scan_key === sc.key ? job : undefined)
+            if (sj?.status === 'running') return <Badge tone="brand" size="sm" dot title={t('sessions.rebuilding')} />
+            if (sj?.status === 'queued') return <Badge tone="info" size="sm">{(sj.queue_position ?? 0) > 1
+              ? t('sessions.queued', { n: sj.queue_position - 1 }) : t('sessions.queuedNext')}</Badge>
+            return sc.is_reference ? <Star className="stac-sessions__star" aria-hidden /> : undefined
+          })(),
           actions: sc.kind !== 'fused' && !sc.is_reference ? (
             <IconButton size="sm" label={t('scans.setReference')} icon={<Star aria-hidden />} onClick={() => p.onSetReference(s.id, sc)} />
           ) : undefined,

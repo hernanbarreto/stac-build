@@ -128,8 +128,14 @@ class PipelineJob:
     # in it, declared "Potree conversion failed" over a perfectly good octree
     # and fell through to the raw-cloud broadcast.
     session_dir: Optional[str] = None
+    # the "date/source" key the command named (None = the active scan). EVERY scan
+    # of a multi-scan "Reconstruir" is its own job in the queue (USER 2026-10-05:
+    # "hay que meterlo en cola ... se debe mostrar en el UI"); the registry keys a
+    # job by session + scan (`job_key`)
+    scan_key: Optional[str] = None
     # 0 = running or next to run; N = N jobs ahead of it in the queue
     queue_position: int = 0
+    ended_at: float = 0.0
     _process: Optional[Process] = field(default=None, repr=False)
     _server_conn: Optional[Connection] = field(default=None, repr=False)
     _task: Optional[asyncio.Task] = field(default=None, repr=False)
@@ -138,6 +144,7 @@ class PipelineJob:
         return {
             "session_id": self.session_id,
             "session_dir": self.session_dir,
+            "scan_key": self.scan_key,
             "status": self.status.value,
             "queue_position": self.queue_position,
             "current_stage_idx": self.current_stage_idx,
@@ -217,18 +224,20 @@ class PipelineManager:
         """
         # ONE AND ONLY ONE (USER ORDER 2026-09-05): a reconstruction command
         # never queues and never cancel-and-replaces a running one — if a job
-        # for this session is active, the new request is REFUSED loudly.
-        _existing = self._jobs.get(session_id)
+        # for this SCAN is active, the new request is REFUSED loudly. Another
+        # scan of the same project is another job and waits its turn (2026-10-05).
+        _key = self.job_key(session_id, scan_key)
+        _existing = self._jobs.get(_key)
         if _existing and _existing.status in (JobStatus.QUEUED,
                                               JobStatus.RUNNING):
             raise RuntimeError(
-                f"[Pipeline] a pipeline for {session_id} is already "
+                f"[Pipeline] a pipeline for {_key} is already "
                 f"{_existing.status.value} — one and only one; command refused")
 
         # Build job
         stage_states = [StageState(stage=s) for s in stages]
-        job = PipelineJob(session_id=session_id, stages=stage_states)
-        self._jobs[session_id] = job
+        job = PipelineJob(session_id=session_id, stages=stage_states, scan_key=scan_key)
+        self._jobs[_key] = job
 
         # Resolve session directory (supports both new-style projects/ and legacy scans/)
         from project_paths import resolve_session, ProjectPaths
@@ -342,12 +351,17 @@ class PipelineManager:
                 await nxt["on_progress"](job.session_id, job.to_dict())
             return
 
-    async def cancel_pipeline(self, session_id: str):
-        """Cancel a running pipeline."""
-        job = self._jobs.get(session_id)
-        if not job or job.status not in (JobStatus.QUEUED, JobStatus.RUNNING):
-            return
+    async def cancel_pipeline(self, session_id: str, scan_key: Optional[str] = None):
+        """Cancel the session's pipelines — the running one and the queued ones
+        (every scan of it); with ``scan_key`` only that scan's."""
+        jobs = [j for j in self.jobs_of(session_id)
+                if j.status in (JobStatus.QUEUED, JobStatus.RUNNING)
+                and (scan_key is None or j.scan_key == scan_key)]
+        for job in jobs:
+            await self._cancel_job(job)
 
+    async def _cancel_job(self, job: PipelineJob):
+        session_id = self.job_key(job.session_id, job.scan_key)
         logger.info(f"[Pipeline] Cancelling {session_id}")
 
         # A job still WAITING has no process and no task: drop it from the queue
@@ -425,21 +439,55 @@ class PipelineManager:
             except (ProcessLookupError, PermissionError):
                 pass
 
+    # ── the registry: one job per session + scan ──────────────────────────
+
+    @staticmethod
+    def job_key(session_id: str, scan_key: Optional[str] = None) -> str:
+        return f"{session_id}@{scan_key}" if scan_key else session_id
+
+    def jobs_of(self, session_id: str) -> List[PipelineJob]:
+        return [j for j in self._jobs.values() if j.session_id == session_id]
+
+    def job_of(self, session_id: str) -> Optional[PipelineJob]:
+        """THE job of a session for a caller that asks by session alone: the one
+        holding the card; else the one that ended last (a completion handler runs
+        before the next queued job starts and must see the job that just wrote);
+        else the next queued; else the newest."""
+        jobs = self.jobs_of(session_id)
+        if not jobs:
+            return None
+        running = [j for j in jobs if j.status == JobStatus.RUNNING]
+        if running:
+            return running[0]
+        ended = [j for j in jobs if j.ended_at > 0]
+        if ended:
+            return max(ended, key=lambda j: j.ended_at)
+        queued = [j for j in jobs if j.status == JobStatus.QUEUED]
+        if queued:
+            return min(queued, key=lambda j: j.queue_position)
+        return jobs[-1]
+
+    def is_active(self, session_id: str, scan_key: Optional[str] = None) -> bool:
+        """A job of this session (this scan, when named) is queued or running."""
+        return any(j.status in (JobStatus.QUEUED, JobStatus.RUNNING)
+                   for j in self.jobs_of(session_id)
+                   if scan_key is None or j.scan_key == scan_key)
+
     def get_status(self, session_id: str) -> Optional[dict]:
         """Get current status of a pipeline job."""
-        job = self._jobs.get(session_id)
+        job = self.job_of(session_id)
         return job.to_dict() if job else None
 
     def job_session_dir(self, session_id: str) -> Optional[str]:
         """The scan directory the running/last job resolved to — the one whose
         output/ it wrote. Callers must prefer this over the session's ACTIVE
         scan, which can be a different scan entirely."""
-        job = self._jobs.get(session_id)
+        job = self.job_of(session_id)
         return job.session_dir if job else None
 
     def get_all_jobs(self) -> Dict[str, dict]:
-        """Get status of all pipeline jobs."""
-        return {sid: job.to_dict() for sid, job in self._jobs.items()}
+        """Status of every job, keyed by session (+ '@scan' for a named scan)."""
+        return {key: job.to_dict() for key, job in self._jobs.items()}
 
     # ── Internal: Pipeline Orchestration Loop ─────────────────
 
@@ -830,6 +878,7 @@ class PipelineManager:
 
         if job.status != JobStatus.CANCELLED:
             job.status = JobStatus.DONE if success else JobStatus.FAILED
+        job.ended_at = time.time()           # job_of: the completion handler sees THIS job
 
         if on_progress:
             await on_progress(job.session_id, job.to_dict())
