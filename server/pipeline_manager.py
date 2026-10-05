@@ -1012,14 +1012,13 @@ class PipelineManager:
             return True, "poses + depth on disk"
 
         if stage_id == StageId.CLOUDCOMPY:
+            # the mask→cloud projection is the SAM3 stage's (it runs after this one
+            # since 2026-10-05): a segmentation newer than its projection must NOT
+            # re-run this stage — that would mark every stage after it stale and
+            # re-run the VLM (2 000 calls on pccr 2408) and SAM3 for nothing
             cloud = output_dir / "cleaned_cloud.ply"
             if not cloud.exists():
                 return False, "no cleaned cloud"
-            # this stage also owns the deferred mask→cloud mapping
-            seg = output_dir / "segmentation.json"
-            res = output_dir / "segmentation_result.json"
-            if seg.exists() and (not res.exists() or mt(res) < mt(seg)):
-                return False, "mask→cloud mapping pending"
             return True, "cleaned_cloud.ply on disk"
 
         if stage_id == StageId.VLM:
@@ -1156,24 +1155,15 @@ def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
     if not auto_certify:
         logger.info("[Pipeline] auto_after_segmentation off — CERTIFY stage disabled")
 
-    precision_on = False
-    try:
-        from config import cfg as _c4
-        precision_on = bool(((_c4.get("reconstruction") or {}).get("precision") or {})
-                            .get("enabled", False))
-    except Exception:
-        pass
-
+    # USER 2026-10-05: the VLM and SAM3 are stages AFTER the cloud stage again
+    # (DEFAULT_STAGE_ORDER: reconstruction → cloudcompy → vlm → sam3 → certify) —
+    # the reconstruction stage (intake, Omega, the precision core F0 → F6 bend)
+    # publishes its cloud with its octree, the cloud stage hands it to the viewer
+    # at once, the segmentation runs after it and the SAM3 stage projects its masks
+    # on the cloud on disk; the CERTIFY stage then runs the correction (closures →
+    # depth per chunk → floor → mask filter → chunk check, deliverable_only).
+    # (2026-09-28 → 2026-10-05 the two ran inside the reconstruction stage.)
     def _enabled(stage_id: StageId) -> bool:
-        if precision_on and stage_id in (StageId.VLM, StageId.SAM3):
-            # USER 2026-09-28: VLM + SAM3 run ONCE, inside the reconstruction stage
-            # (the intake), and the precision core (F0 → F6 bend) runs there too. The
-            # CERTIFY stage stays (USER 2026-09-29: "todo integrado, nada a mano"):
-            # after the cloud stage projects the masks on the published cloud it runs
-            # the correction — closures → depth per chunk → floor → mask filter →
-            # chunk check — in deliverable_only mode (no acta) and leaves ONE final
-            # epoch (certify.single_final_epoch, USER 2026-09-30)
-            return False
         if skip_cloudcompy and stage_id == StageId.CLOUDCOMPY:
             return False
         if not auto_segment and stage_id in _semantic_stages:

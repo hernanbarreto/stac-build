@@ -7,6 +7,21 @@ que describiste es correcto").
 
 ## Decisions (USER, 2026-09-30 / 2026-10-01 / 2026-10-04 / 2026-10-05)
 
+**2026-10-05 (evening) — THE ORDER: "intake, da3 para medir, omega, f0 a f6, octree, época publicada, vlm, sam3,
+máscaras, correcciones, época 1"; "chunks de 15 m siempre"; "olvidate de la exclusión de personas y objetos en
+movimiento"; "como mucho la original y la final, ninguna intermedia".** Zaragoza (17.8 m) at 5 m chunks came out
+in 6 chunks (metric lock spread ×1.39, pose graph held-out 12.5 cm and rejected, floor tilted 2.5–5.8° per chunk,
+the certification then applied 2.64 m of translation) — "muchísimo peor que Omega en un solo chunk". Wired:
+`chunk_walk_m: 15`; `intake.content.enabled: false` (I2 selectable, off); the VLM and SAM3 are pipeline STAGES after
+the cloud stage again (`pipeline_manager.DEFAULT_STAGE_ORDER`: reconstruction → cloudcompy → vlm → sam3 → certify;
+the reconstruction stage hosts no semantics; the cloud stage hands the published cloud to the viewer at once and its
+resume probe no longer keys on the segmentation; the SAM3 stage projects its masks on the cloud on disk; the
+certification follows); `certify.single_final_epoch: false` = the published cloud's epoch stays stored and selectable
+next to the certification's (the reconstruction stage always discards its pose-only epochs, builds no Omega
+comparison cloud). F6's mixed-pixel snap reads `seg_masks.npz` when present; without it (the new order) the mixed
+pixels go to the vote as they are (declared in its log). ALSO SEEN on zaragoza: `segmentation_result.json` is 1 GB
+at 111 M points and the viewer socket dropped while it was sent (the viewer showed no segmentation) — pending list B.
+
 **2026-10-05 — STORAGE: a session keeps what the next reader needs, nothing else ("que no almacene al pedo … debe ir
 limpiando"), after zaragoza (1080p) died at the second loop bridge with the /workspace quota full.** Measured: pccr held
 18 GB, 12 GB of it dead (Omega's aligned chunks 6.5 GB + bridges 1.9 GB + uncertainty maps 0.3 GB kept by
@@ -62,16 +77,16 @@ segments). Next sessions run this recipe unchanged; the user is reconstructing a
 
 | # | Stage | Code | What it does |
 |---|---|---|---|
-| 1 | Intake I0–I4 | `intake/`, `workers/map_worker.py` | frames, parallax keyframes, content exclusion |
-| 2 | VLM + SAM3 | `workers/vlm_worker.py`, `workers/sam3_worker.py`, `segmentation/autoprompt/` | ONCE, on EVERY keyframe (+2×2 crops); the same VLM call names the SAM3 prompts AND describes each kind for ShapeR (`vlm_analysis.json` `shape_descriptions`) |
-| 3 | Omega | `workers/map_worker.py` `_run_vggtomega` | chunks of 5 m of walk, 50 % overlap (pccr: 6); poses, metric scale, per-keyframe depth + conf (`omega_run/results_output/frame_<f>.npz`) |
+| 1 | Intake I0, I1, I3 | `intake/`, `workers/map_worker.py` | frames, parallax keyframes, DA3 to measure (K, walk). I2 (content tags + exclusion masks) is OFF (`intake.content.enabled: false`, USER 2026-10-05) |
+| 2 | VLM + SAM3 — **AFTER the cloud stage** (USER 2026-10-05) | `workers/vlm_worker.py`, `workers/sam3_worker.py` (pipeline stages `vlm`, `sam3`), `segmentation/autoprompt/` | ONCE, on EVERY keyframe (+2×2 crops); the same VLM call names the SAM3 prompts AND describes each kind for ShapeR (`vlm_analysis.json` `shape_descriptions`); the SAM3 stage projects its masks on the published cloud (stage 8) |
+| 3 | Omega | `workers/map_worker.py` `_run_vggtomega` | chunks of **15 m** of walk, 50 % overlap (USER 2026-10-05; was 5 m: zaragoza 17.8 m → 6 chunks, lock spread ×1.39, "muchísimo peor que Omega en un solo chunk"); poses, metric scale, per-keyframe depth + conf (`omega_run/results_output/frame_<f>.npz`) |
 | 4 | F0, F2, F4 (F3 report) | `precision/` runner steps | session camera, continuous gauge, native-pixel tracks |
 | 5 | F5 | `precision/refine.py` | corrected poses + camera (rung chosen by held-out; pccr R1, fx 364→392) |
 | 6 | **Depth on F5 (`f6_bend`)** | `precision/depth_on_f5.py`, `precision.cloud.source: omega_bent`, config `precision.bend`; **mono detail** `precision/mono_detail.py` + `precision/pointdit_runner.py`, config `precision.mono_detail` (flag `enabled`) | (a) F5 FIT tracks triangulated with F5 poses + camera; (b) per keyframe Omega depth × k(u,v)=c0+c1·u+c2·v, fitted EXACTLY as epoch 7: 10-step Huber IRLS (`bend.irls_iterations`), landmark rows on depth > `bend.min_depth_m` (0.05), < `bend.min_rows` (20) rows → k = 1, window by half A of the HELD-OUT tracks (pccr ±0, 7.25 % → 2.80 %); (c) validity = the ONE confidence floor (`conf_min_norm`, min-max per Omega chunk) + not sky; (d) epoch 8's EDGE-KEEPING VOTE: τ = p75 of the neighbour disagreement on INTERIOR pixels (pccr 1.93 %), mixed pixels at contours snapped to their SAM3 mask's side, two-sided vote over ±3/±6/±12, contradicted pixels repaired to the neighbours' median when ≥ 2 agree, below-floor edge pixels admitted when confirmed; confidence column = agree count. pccr: 63.1 % kept, 15.1 % contradicted, 8.5 % repaired, 0.4 % admitted, coverage 71.0 %. **(c2) MONO DETAIL (USER 2026-10-04, `mono_detail.enabled`)** between the bend and the vote: PointDiT-H (DINOv3 ViT-H+/16, 16 Euler steps from zeros, deterministic) on native 512-px tiles with feathered overlaps → per tile z_cal ≈ s·z_mono + b (Huber IRLS weighted by the calibrated confidence, outside the band; tiles rejected by support or by the session's p95 residual) → z = lowpass(z_bent) + (z_al − lowpass(z_al)) with σ from Omega's patch; the discontinuity band (1-px jump > τ, dilated by context_scale) resolves Omega's MIXED pixels to the front or back surface by PointDiT's side, or marks them mixed_unresolved (out of the cloud). Metric and gauge are never touched (DA3's). Per-pixel provenance → cloud column `source` (1 omega_bent, 2 mono_detail, 3 band_front, 4 band_back); report `depth_on_f5.json` `mono_detail`; viewer layers View → PointDiT detail / Mixed unresolved. Flag off = epoch 8 bit for bit (tested) |
 | 7 | Cloud publish | `precision/corrected_cloud.publish` | voxel + SOR, octree, transactional epoch; `corrected_cloud.json` carries per-frame s_k + bend; intrinsic.txt inside the transaction |
 | 8 | Mask projection + OBBs | `segmentation/pipeline.py` (cloud stage) | class byte = `_encode_classification` + `class_map.json` (`class_byte` on every viewer payload); co-visible split (camera-return rule + free-space test); split children listed (`mask_fates.created_by_projection`); OBB yaw by RANSAC; every instance inherits its concept's `shape_caption` |
 | 9 | Certification | `workers/certify_worker.py`, `reconstruction/certify/run.py`, `correction/` | depth per chunk; floor per chunk BLENDED across overlaps; mask filter with the cloud's own camera (`camera.json`), rule 4 by majority of views; NO MLS (`precision.cloud.consolidate: false`); chunk check on the CERTIFIED depth (composes the transform epochs) |
-| 10 | One final epoch | `certify.single_final_epoch: true`, `correction.apply.keep_only_live_epoch` | no Omega comparison cloud (`_epoch_0`) is built; after the certification every `_epoch_<N>/` is deleted (ledger + `corrections/epoch_<N>.npz` stay) |
+| 10 | Two epochs: ORIGINAL + FINAL | `certify.single_final_epoch: false` (USER 2026-10-05) | the reconstruction stage discards its pose-only epochs and Omega's chunks and builds no comparison cloud; the published cloud (stage 7) is the ORIGINAL and stays stored + selectable when the certification publishes the FINAL. The epoch NUMBER is a counter (F2, F5, F6 each take one: zaragoza published 3, certified 4) — the user wants to read them as 0 and 1; renumbering is pending list A |
 | 11 | Object descriptions | `segmentation/object_captioner.caption_session_objects` (end of certify) | ONE Qwen3-VL call per object over its largest SAM3-mask views → `shape_caption` source `object` (config `segmentation.object_captions`) |
 
 **On demand (Meshing dialog; search + select / deselect all, nothing preselected):** **Object** = ShapeR on every selected instance (keyed by `instance_id`; every face oriented OUTWARD by ray parity — `reconstruction/orient_outward.py` — before and after the texture bake; drawn in the viewer in its segment colour) (`/api/segmentation/
@@ -94,7 +109,7 @@ the objects the projection creates are listed (their points could never be hidde
 |---|---|---|
 | 1 | Intake | done |
 | 2 | VLM + SAM3 | done — fallback with category (2026-10-04). The second pass over the UNSEGMENTED points (`segmentation/second_pass.py`) is **OFF** (USER 2026-10-04: it ADDED 16 prompts and segments on pccr and the floor ended inside an `electrical_panel` segment). **PENDING — smarter segmentation (USER 2026-10-04): the same physical object comes out as 3-4 segments under different names (not the same pixels, the same object: 10 'door', 10 'panel', 11 'metal_frame' on pccr). The consolidation must happen BEFORE SAM3 (one concept = one prompt, `merge_synonyms` is not enough) and/or AFTER the projection (merge the segments that are one physical object, the VLM deciding on the views). One VLM pass per image stays the rule (SAM3 prompt + ShapeR description in the same call).** |
-| 3 | Omega (5 m chunks, 50 %) | done |
+| 3 | Omega (15 m chunks, 50 %) | done — 15 m since 2026-10-05 (USER); zaragoza at 5 m was judged "malísimo" |
 | 4 | F0, F2, F4 (F3) | done |
 | 5 | F5 (R1) | done |
 | 6 | Depth on F5 (`f6_bend` = epoch 8) | done — **reproduced 2026-10-04**: the product code on pccr's F5 files gives epoch 8's numbers exactly (held-out 2.80 % at ±0, τ 1.93 %, kept 63.1 / contradicted 15.1 / repaired 8.5 / admitted 0.4 %, coverage 71.0 %) — **pending:** it aborts when F5's camera carries lens distortion or Omega's grid is not the native one (pccr has neither); no fallback |

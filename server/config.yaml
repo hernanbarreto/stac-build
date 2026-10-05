@@ -805,7 +805,9 @@ intake:
                                        # wherever a loose stop left it (USER 2026-09-28: identical
                                        # inputs must give bit-identical keyframes)
   content:                             # I2 — VLM content tags (vlm_proposed) + SAM3 exclusion masks
-    enabled: true                      # claude_stac.txt §4-F1: I2 (content tags + exclusion masks)
+    enabled: false                     # USER 2026-10-05: OFF — "olvidate de la exclusión de personas y
+                                       # objetos en movimiento"; the VLM runs ONCE, as the stage after
+                                       # the cloud stage. (History: true, claude_stac.txt §4-F1: I2 (content tags + exclusion masks)
                                        # is part of the intake. USER 2026-09-28: ON for the F0-F7
                                        # validation run ("si es necesario ... incluí vlm y sam3")
     backend: qwen_local                # USER DECISION: local VLM (semantic.backends.<name>), no paid API
@@ -1738,9 +1740,13 @@ reconstruction:
                                         # 0 disables the re-run entirely (one pass, always).
                                         # 25->15 (2026-07-09): test6 (29 m) was still bad
                                         # single-pass; the comfort proven so far is test2 ~10 m.
-    chunk_walk_m: 5.0                   # USER 2026-09-30: "Omega deriva, está probado que no más de 5 m" — THE rule:
-                                        # metres of REAL walk (I3, DA3 windows) per chunk, 50 %
-                                        # overlap. 12 → 5 (2026-09-29): the 12 was calibrated
+    chunk_walk_m: 15.0                  # USER 2026-10-05: "chunks de 15 m siempre" — zaragoza (17.8 m) at 5 m
+                                        # came out in 6 chunks whose metric lock disagreed by
+                                        # ×1.39, floor tilted 2.5–5.8° per chunk, "muchísimo peor
+                                        # que Omega en un solo chunk". metres of REAL walk (I3,
+                                        # DA3 windows) per chunk, 50 % overlap.
+                                        # (History: 5 — USER 2026-09-30: "Omega deriva, está
+                                        # probado que no más de 5 m". 12 → 5 (2026-09-29): the 12 was calibrated
                                         # on the INFLATED Omega-pass walk (pccr 44 m → 12
                                         # inflated m = 59 kf = the accepted 60/30 layout —
                                         # plan_chunks' own docstring). Fed the REAL DA3 walk
@@ -3656,14 +3662,18 @@ certify:                            # §4.8 ensemble witness + §9 certification
                                     # What it costs when on: the objective, the gates and
                                     # the regression verdict are not measured — the verdict
                                     # is the user's eye on the delivered cloud.
-  single_final_epoch: true          # USER 2026-09-30: *"debe quedar una sola época que es la
-                                    # final"* (docs/pipeline_final.md §10). true = the session
-                                    # keeps ONE epoch: the reconstruction stage builds no Omega
-                                    # comparison cloud (no _epoch_0/) and discards every stored
-                                    # epoch; the certification, once its epoch is published and
-                                    # the chunk check ran, deletes every _epoch_<N>/ and
-                                    # _tx_epoch_*/ (correction.apply.keep_only_live_epoch) and
-                                    # the acta lists them as `epochs_discarded`. What STAYS:
+  single_final_epoch: false         # USER 2026-10-05: TWO epochs and no intermediate one — the
+                                    # ORIGINAL (the cloud the reconstruction stage published,
+                                    # F6 bend) and the FINAL (the certification's correction).
+                                    # false = the certification's swap keeps the published
+                                    # cloud's epoch stored and selectable (_epoch_<N>/) next to
+                                    # its own. The reconstruction stage ALWAYS discards its
+                                    # pose-only epochs and builds no Omega comparison cloud.
+                                    # true = ONE epoch (USER 2026-09-30): once its epoch is
+                                    # published and the chunk check ran, the certification
+                                    # deletes every _epoch_<N>/ and _tx_epoch_*/
+                                    # (correction.apply.keep_only_live_epoch) and the acta
+                                    # lists them as `epochs_discarded`. What STAYS either way:
                                     # geometry_epoch.json, corrections.jsonl and
                                     # corrections/epoch_<N>.npz (replay + provenance).
                                     # false = every epoch stays on disk and is selectable in

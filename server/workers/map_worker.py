@@ -103,13 +103,12 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
                       f"overrides frames_selector '{mode}'")
         mode = _sel
     sf_path = frames_dir / "selected_frames.json"
-    _vlm_done = False      # scene understanding already written while vLLM was up (I2)
     if mode == "parallax_lk":
         # Intake I0 → I1 → I2 in-process (CPU; I2's VLM / SAM3 only when
         # intake.content.enabled). replace on or off, the intake's marker decides step
         # by step what is already measured (intake/run.py): nothing measured is redone,
         # a missing or incomplete step runs.
-        _vlm_done = _run_intake_selection(pipe, session_path, frames_dir, config, replace)
+        _run_intake_selection(pipe, session_path, frames_dir, config, replace)
     elif not replace and sf_path.exists():
         pipe.send_log("Reusing existing selected_frames.json (replace=off)")
     elif mode == "fps":
@@ -288,12 +287,13 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     selected_frames_path = str(sf_path)
     pipe.send_log(f"Using frames from {sf_path}")
 
-    # ── SEMANTICS, ONCE, HERE (USER 2026-09-28): VLM understand + SAM3 autoprompt
-    # on the keyframes, before any geometry. The masks are 2-D per keyframe and do
-    # not depend on the cloud; they are projected onto the points the cloud stage
-    # delivers after the precision core published its cloud
-    # (workers/cloudcompy_worker.py) — no model runs twice.
-    _run_semantics_2d(pipe, session_path, config, vlm_done=_vlm_done)
+    # ── NO SEMANTICS HERE (USER 2026-10-05: "intake, da3 para medir, omega, f0 a f6,
+    # octree, época publicada, vlm, sam3, máscaras, correcciones"): the VLM and SAM3
+    # are pipeline STAGES after the cloud stage (pipeline_manager.DEFAULT_STAGE_ORDER:
+    # reconstruction → cloudcompy → vlm → sam3 → certify), so the published cloud
+    # reaches the viewer before the hours of segmentation; the SAM3 stage projects
+    # its masks on the cloud it finds on disk. (2026-09-28 → 2026-10-05 they ran
+    # here, before any geometry.)
 
     # ── Step 2b: DA3-dense fusion frame set ──
     # The asymmetric design feeds DA3 the FULL blur-valid set (a superset of the VGGT
@@ -463,59 +463,6 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
     _run_precision_core(pipe, session_path, output_dir, config)
 
 
-def _semantics_enabled(pipe: WorkerPipe, config: dict) -> bool:
-    from precision.config import load_precision_config
-    if not load_precision_config(config).enabled:
-        return False
-    if not bool((config.get("pipeline") or {}).get("auto_segment", True)):
-        pipe.send_log("pipeline.auto_segment is off — no VLM / SAM3 at the intake")
-        return False
-    return True
-
-
-def _run_vlm_understand(pipe: WorkerPipe, session_path: Path, config: dict) -> None:
-    """Scene understanding (workers/vlm_worker.py: the Qwen3-VL auto-prompter →
-    output/vlm_analysis.json, SAM3's vocabulary) on the keyframes, hosted by this
-    stage. Called while vLLM is already up (I2's GPU handover) so the VLM is loaded
-    once per run; from _run_semantics_2d otherwise."""
-    from workers.base import run_stage_inline
-    if not _semantics_enabled(pipe, config):
-        return
-    pipe.send_progress(4, "Scene analysis (VLM) on the keyframes...", stage="reconstruction")
-    run_stage_inline(pipe, "workers.vlm_worker", str(session_path), config,
-                     label="vlm", pct_range=(4.0, 4.5))
-
-
-def _run_semantics_2d(pipe: WorkerPipe, session_path: Path, config: dict, *,
-                      vlm_done: bool = False) -> None:
-    """VLM understand + SAM3 (autoprompt, everything) ONCE, at the intake, on the
-    keyframes — USER 2026-09-28: "si ya corrés VLM y SAM3 al inicio que ahí mismo
-    genere todo, y después no se vuelva a correr al final". Both run as the
-    pipeline's own workers (workers/vlm_worker.py, workers/sam3_worker.py) hosted
-    by this stage. With ``vlm_done`` the understanding was already written at I2's
-    handover (vLLM up once); SAM3 then works from the JSON with the card free.
-    The mask→cloud projection is NOT done here (no cloud yet): the SAM3 worker
-    leaves the 2-D masks and the cloud stage projects them on the published cloud.
-    Gated by reconstruction.precision.enabled and pipeline.auto_segment."""
-    from workers.base import run_stage_inline
-    if not _semantics_enabled(pipe, config):
-        return
-    # resume (replace off): the 2-D semantics are keyframe products — reused when on disk
-    _out = session_path / "output"
-    if not config.get("_pipeline_replace", True) and all(
-            (_out / n).exists() for n in ("vlm_analysis.json", "segmentation.json", "seg_masks.npz")):
-        pipe.send_log("Semantics already on disk (replace off): vlm_analysis.json + segmentation.json + "
-                      "seg_masks.npz reused — the cloud stage projects them")
-        return
-    if not vlm_done:
-        _run_vlm_understand(pipe, session_path, config)
-    pipe.send_progress(4.5, "Segmentation (SAM3) on the keyframes...", stage="reconstruction")
-    run_stage_inline(pipe, "workers.sam3_worker", str(session_path), config,
-                     label="sam3", pct_range=(4.5, 5.0))
-    pipe.send_log("Semantics done at the intake: vlm_analysis.json + segmentation.json + "
-                  "seg_masks.npz (2-D) — projected onto the published cloud by the cloud stage")
-
-
 def _run_precision_core(pipe: WorkerPipe, session_path: Path, output_dir: Path,
                         config: dict) -> None:
     """The precision core on the reconstruction this stage just produced, then keep
@@ -527,12 +474,12 @@ def _run_precision_core(pipe: WorkerPipe, session_path: Path, output_dir: Path,
     epochs of POSES only (precision/poses_epoch.py) — and the depth stage (F6 bend,
     cloud.source omega_bent; or the F6 sweep → F7 chain) builds the cloud and
     publishes it with its octree. Omega's chunk PLYs (its raw cloud) are never
-    merged, filtered or shown; they are deleted with the previous epochs once the
+    merged, filtered or shown; they are deleted with the pose-only epochs once the
     cloud is published (USER 2026-09-28: "no quiero ninguna época 0, la única para
-    visualizar debe ser la N, el resto deben descartarse"). The Omega comparison
-    cloud (`_epoch_0/`, USER 2026-09-29 "conservamos mientras validamos") is built
-    ONLY while `certify.single_final_epoch` is off: with it on the session keeps
-    one epoch (USER 2026-09-30) and that cloud is the artifact it forbids.
+    visualizar debe ser la N, el resto deben descartarse"). No Omega comparison
+    cloud is built any more (USER 2026-10-05: the ORIGINAL the final is compared
+    with is the published cloud itself — the certification keeps its epoch stored
+    and selectable unless `certify.single_final_epoch` is on).
     workers/precision_worker.py runs the core (precision/runner.py's step list,
     each step its own subprocess, resumable). Gated by
     reconstruction.precision.enabled."""
@@ -540,8 +487,6 @@ def _run_precision_core(pipe: WorkerPipe, session_path: Path, output_dir: Path,
     from workers.base import run_stage_inline
     if not load_precision_config(config).enabled:
         return
-    from reconstruction.loops.config import load_loops_config
-    single_final = bool(load_loops_config(config).certify.single_final_epoch)
 
     pipe.send_progress(84, "Precision core F0 → F6 bend...", stage="reconstruction")
     run_stage_inline(pipe, "workers.precision_worker", str(session_path), config,
@@ -552,49 +497,23 @@ def _run_precision_core(pipe: WorkerPipe, session_path: Path, output_dir: Path,
         raise RuntimeError(f"the precision core ended without a published cloud — {_why}")
     pipe.send_log(f"[precision] product: {_why}")
 
-    if single_final:
-        # ONE FINAL EPOCH (USER 2026-09-30): no comparison cloud, no epoch 0 on disk
-        pipe.send_log("[epochs] certify.single_final_epoch: no Omega comparison cloud is "
-                      "built and no stored epoch is kept — the session keeps ONE epoch")
-    else:
-        # THE COMPARISON CLOUD (USER 2026-09-29: "conservamos [la época 0] mientras
-        # validamos, deben poder seleccionarse desde la UI"): Omega's raw chunks through
-        # the cleaning recipe the cloud stage always ran, consolidated, with their
-        # octree, into `_epoch_0/` registered as a selectable epoch — BEFORE the chunks
-        # are deleted. Its failure is loud but does not take the reconstruction with it.
-        from precision.epoch0_cloud import build_epoch0_cloud
-        pipe.send_progress(98, "Epoch 0: Omega's cloud for comparison...", stage="reconstruction")
-        try:
-            rep0 = build_epoch0_cloud(session_path, config, input_dir=output_dir, log=pipe.send_log,
-                                      progress=lambda pct, msg: pipe.send_progress(98, msg, stage="reconstruction"))
-            pipe.send_log(f"[epochs] epoch 0 (Omega, {rep0['n_points']:,} pts) stored in _epoch_0/ — "
-                          f"selectable against the published cloud")
-        except Exception as e:  # noqa: BLE001 — declared, never silent
-            pipe.send_log(f"[epochs] ❌ epoch 0 comparison cloud NOT built: {e}", level="error")
-
-    freed = _discard_previous_epochs(output_dir, keep_epoch0=not single_final)
-    pipe.send_log(f"[epochs] the published cloud{'' if single_final else ' + epoch 0 (Omega)'} "
-                  f"stay{'s' if single_final else ''} — {freed / 1048576:.0f} MB of previous "
-                  f"epochs and Omega chunks discarded")
+    freed = _discard_previous_epochs(output_dir)
+    pipe.send_log(f"[epochs] the published cloud is the ORIGINAL epoch the viewer shows — "
+                  f"{freed / 1048576:.0f} MB of pose-only epochs and Omega chunks discarded")
     pipe.send_progress(99, "Published cloud is the reconstruction", stage="reconstruction")
 
 
-def _discard_previous_epochs(output_dir: Path, keep_epoch0: bool = True) -> int:
-    """Delete the intermediate epochs (`_epoch_1..N-1/`: the gauge's and the refine's
-    states), `_tx_epoch_*/` leftovers and Omega's raw
-    chunk PLYs (`chunk_*.ply` with its origins/meta — never merged). `_epoch_0/`
-    STAYS while ``keep_epoch0`` (USER 2026-09-29: "conservamos mientras validamos,
-    deben poder seleccionarse desde la UI") — it is the Omega cloud the published
-    one is judged against, selectable through the certification kit (a new_cloud
-    epoch is swapped, not transformed); under `certify.single_final_epoch` the
-    caller passes False and it goes with the rest (USER 2026-09-30: one epoch).
-    Returns the bytes freed. The ledger (corrections.jsonl) and geometry_epoch.json
-    stay: the live epoch is the published one and the record says so."""
+def _discard_previous_epochs(output_dir: Path) -> int:
+    """Delete every stored epoch (`_epoch_*/`: the gauge's and the refine's pose-only
+    states — no cloud in them), `_tx_epoch_*/` leftovers and Omega's raw chunk PLYs
+    (`chunk_*.ply` with its origins/meta — never merged). The live epoch — the
+    published cloud — is the ORIGINAL the certification's epoch is compared with
+    (USER 2026-10-05); nothing older is worth a byte. Returns the bytes freed. The
+    ledger (corrections.jsonl) and geometry_epoch.json stay: the live epoch is the
+    published one and the record says so."""
     freed = 0
     for pattern in ("_epoch_*", "_tx_epoch_*"):
         for d in output_dir.glob(pattern):
-            if keep_epoch0 and d.name == "_epoch_0":
-                continue
             if d.is_dir() and not d.is_symlink():
                 freed += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
                 shutil.rmtree(d, ignore_errors=True)
@@ -1848,24 +1767,19 @@ def _run_intake_selection(pipe: WorkerPipe, session_path: Path, frames_dir: Path
     pipe.send_log(f"Frame selection 'parallax_lk' (replace={'on' if replace else 'off'}): the "
                   f"intake marker decides step by step what is already measured")
     icfg = load_intake_config(config)
-    pipe.send_progress(3, "Intake: quality features → parallax keyframes → content tags...",
+    pipe.send_progress(3, "Intake: quality features → parallax keyframes"
+                       + (" → content tags" if icfg.content.enabled else "") + "...",
                        stage="reconstruction")
-    # GPU exclusivity (the SAM3 stage's own rule, workers/sam3_worker.py): vLLM serves
-    # the I2 tags, then is stopped BEFORE SAM3 segments the exclusion masks — the two
-    # never share the card, and the stop is VERIFIED (no 'vllm serve' left) before
-    # SAM3 loads; the next VLM consumer restarts it (ensure_service).
-    vlm_done = {"ran": False}
+    # I2 (content tags + exclusion masks) is OFF by default since 2026-10-05 (USER:
+    # "olvidate de la exclusión de personas y objetos en movimiento"); it stays
+    # selectable (intake.content.enabled). When on, GPU exclusivity is the SAM3
+    # stage's own rule: vLLM serves the I2 tags, then is stopped — VERIFIED (no
+    # 'vllm serve' left) — before SAM3 segments the exclusion masks; the VLM stage
+    # after the cloud stage restarts it (ensure_service).
 
     def _before_sam3():
-        # vLLM is up (it just tagged the keyframes): let it also UNDERSTAND the scene
-        # now (workers/vlm_worker.py → output/vlm_analysis.json, SAM3's vocabulary),
-        # so the VLM comes up ONCE per run — USER 2026-09-28: "no conviene, ya que
-        # está el vlm arriba, generar los json para cada etapa, y luego sam3.1
-        # trabajar con cada json, para no levantar bajar levantar bajar modelos" —
-        # then hand the card to SAM3, verified.
-        _run_vlm_understand(pipe, session_path, config)
-        vlm_done["ran"] = True
-        stop_semantic_service_verified(pipe, stage="intake I2 SAM3")
+        # the verification travels into content_tags.json (sam3_handover)
+        return stop_semantic_service_verified(pipe, stage="intake I2 SAM3")
 
     # the FIRST GPU step of the intake is the DA3 focal probe (zaragoza 2026-10-04: it ran with
     # vLLM loading beside it and died in OOM) — the card is handed over there, verified; I2's
@@ -1895,7 +1809,6 @@ def _run_intake_selection(pipe: WorkerPipe, session_path: Path, frames_dir: Path
                   f"quantum {icfg.parallax.parallax_quantum_px:g} px), {s['n_witness']} witness "
                   f"frames, {s['n_warnings']} coverage warning(s) → selected_frames.json / "
                   f"witness_frames.json")
-    return vlm_done["ran"]
 
 
 def _intake_da3_frames(frames_dir: Path) -> dict:

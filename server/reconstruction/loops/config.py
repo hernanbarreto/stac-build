@@ -477,12 +477,13 @@ class CertifyConfig:
                                     # measurement, no iteration loop, no acta metrics
                                     # (USER 2026-09-22 — the deliverable is epoch 0 and
                                     # the corrected epoch 1, judged by eye)
-    single_final_epoch: bool        # USER 2026-09-30 ("debe quedar una sola época que es
-                                    # la final"): the session keeps ONE epoch — no Omega
-                                    # comparison cloud is built (_epoch_0) and every stored
-                                    # _epoch_<N>/ is deleted once the certification published
-                                    # (correction.apply.keep_only_live_epoch); the ledger and
-                                    # the per-epoch npz stay (replay, provenance)
+    single_final_epoch: bool        # true (USER 2026-09-30): the session keeps ONE epoch —
+                                    # every stored _epoch_<N>/ is deleted once the
+                                    # certification published (correction.apply.
+                                    # keep_only_live_epoch). false (USER 2026-10-05, default):
+                                    # the published cloud (the ORIGINAL) stays stored and
+                                    # selectable next to the certification's epoch (the
+                                    # FINAL). The ledger and the per-epoch npz stay either way
     objective: ObjectiveWeights
     gates: CertifyGates
     scale: CertifyScale

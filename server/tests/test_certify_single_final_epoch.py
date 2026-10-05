@@ -1,11 +1,14 @@
 """Stage 10 — ONE FINAL EPOCH (USER 2026-09-30: *"debe quedar una sola época que es la
 final"*, docs/pipeline_final.md §10).
 
-`certify.single_final_epoch` is a mandatory typed key. When on: the reconstruction
-stage builds no Omega comparison cloud and drops `_epoch_0/` with the rest; the
-certification, once its epoch is published and the chunk check ran, deletes every
-`_epoch_<N>/` and `_tx_epoch_*/` and NOTHING else — the ledger, the per-epoch warps
-and the live record stay — and the acta lists the discarded epochs.
+`certify.single_final_epoch` is a mandatory typed key. When on: the certification,
+once its epoch is published and the chunk check ran, deletes every `_epoch_<N>/` and
+`_tx_epoch_*/` and NOTHING else — the ledger, the per-epoch warps and the live record
+stay — and the acta lists the discarded epochs. When off (the default since
+2026-10-05, USER: the ORIGINAL and the FINAL, no intermediate one): the published
+cloud's epoch stays stored and selectable next to the certification's. The
+reconstruction stage ALWAYS discards its pose-only epochs and Omega's chunks and
+builds no Omega comparison cloud.
 `publish_in_flight` names a transaction directory still on disk so an operation that
 rewrites the live cloud can refuse to race a publish."""
 
@@ -35,9 +38,9 @@ def _raw():
 
 # ── the key ──────────────────────────────────────────────────────────────
 
-def test_the_key_is_mandatory_typed_and_on_in_production():
+def test_the_key_is_mandatory_typed_and_off_in_production():
     raw = _raw()
-    assert load_loops_config(raw).certify.single_final_epoch is True
+    assert load_loops_config(raw).certify.single_final_epoch is False   # USER 2026-10-05: original + final
     missing = copy.deepcopy(raw)
     del missing["certify"]["single_final_epoch"]
     with pytest.raises(LoopsConfigError, match="certify.single_final_epoch"):
@@ -139,35 +142,31 @@ def test_publish_in_flight_names_a_transaction_dir(tmp_path):
 
 # ── the reconstruction stage under the key ───────────────────────────────
 
-def test_discard_previous_epochs_drops_epoch_0_only_under_the_key(tmp_path):
+def test_discard_previous_epochs_drops_every_stored_epoch_and_the_chunks(tmp_path):
     from workers.map_worker import _discard_previous_epochs
-    for keep0 in (True, False):
-        out = tmp_path / f"k{int(keep0)}" / "output"
-        out.mkdir(parents=True)
-        for e in (0, 1, 2):
-            _epoch_dir(out, e)
-        (out / "_tx_epoch_3").mkdir()
-        (out / "chunk_000.ply").write_bytes(b"ply\n")
-        (out / LEDGER_FILE).write_text("")
-        save_epoch_npz(out, 1, np.tile(np.eye(3), (1, 1, 1)), np.zeros((1, 3)), np.ones(1), [0])
-        (out / EPOCH_FILE).write_text(json.dumps({"epoch": 3}))
-        _discard_previous_epochs(out, keep_epoch0=keep0)
-        assert (out / "_epoch_0").is_dir() == keep0
-        assert not (out / "_epoch_1").exists() and not (out / "_epoch_2").exists()
-        assert not (out / "_tx_epoch_3").exists() and not (out / "chunk_000.ply").exists()
-        assert (out / LEDGER_FILE).exists() and (out / EPOCH_NPZ_DIR / "epoch_1.npz").exists()
-        assert (out / EPOCH_FILE).exists()
+    out = tmp_path / "output"
+    out.mkdir(parents=True)
+    for e in (0, 1, 2):
+        _epoch_dir(out, e)
+    (out / "_tx_epoch_3").mkdir()
+    (out / "chunk_000.ply").write_bytes(b"ply\n")
+    (out / LEDGER_FILE).write_text("")
+    save_epoch_npz(out, 1, np.tile(np.eye(3), (1, 1, 1)), np.zeros((1, 3)), np.ones(1), [0])
+    (out / EPOCH_FILE).write_text(json.dumps({"epoch": 3}))
+    _discard_previous_epochs(out)
+    assert not [d for d in out.glob("_epoch_*")] and not (out / "_tx_epoch_3").exists()
+    assert not (out / "chunk_000.ply").exists()
+    assert (out / LEDGER_FILE).exists() and (out / EPOCH_NPZ_DIR / "epoch_1.npz").exists()
+    assert (out / EPOCH_FILE).exists()
 
 
-def test_the_map_worker_builds_no_comparison_cloud_under_the_key():
+def test_the_map_worker_builds_no_comparison_cloud():
     import inspect
     import workers.map_worker as M
     src = inspect.getsource(M._run_precision_core)
-    assert "single_final_epoch" in src and "build_epoch0_cloud" in src
-    # the comparison cloud is built on the OTHER branch of the key, never unconditionally
-    assert "if single_final:" in src and "keep_epoch0=not single_final" in src
-    sig = inspect.signature(M._discard_previous_epochs)
-    assert "keep_epoch0" in sig.parameters
+    assert "build_epoch0_cloud" not in src and "if single_final" not in src
+    assert "_discard_previous_epochs(output_dir)" in src
+    assert "keep_epoch0" not in inspect.signature(M._discard_previous_epochs).parameters
 
 
 def test_the_certification_discards_after_the_check_and_before_the_acta():

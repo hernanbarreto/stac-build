@@ -675,11 +675,15 @@ def test_worker_hands_the_gpu_over_between_the_tags_and_sam3(session, monkeypatc
     cfg = _worker_config()
     mw._run_intake_selection(pipe, session, session / "frames", cfg, True)
     kinds = [e[0] for e in ev]
-    stop = kinds.index("stop")
-    assert kinds.index("ensure") < kinds.index("tag") < stop < kinds.index("pgrep") \
-        < kinds.index("sam3")
+    # the FIRST stop is the focal probe's (DA3 gets the card before I2); the one this
+    # test is about is the last stop BEFORE SAM3 — after the tags, before the masks
+    stop = max(i for i, k in enumerate(kinds) if k == "stop" and i < kinds.index("sam3"))
+    assert kinds.index("ensure") < kinds.index("tag") < stop < kinds.index("sam3")
+    assert "pgrep" in kinds[stop:kinds.index("sam3")]
     assert "tag" not in kinds[stop:] and "sam3" not in kinds[:stop]
-    assert ev[stop] == ("stop", "intake I2 SAM3") and kinds.count("stop") == 1
+    # two stops: the focal probe's (DA3 before I2, 2026-10-04) and this one
+    assert ev[stop] == ("stop", "intake I2 SAM3") and kinds.count("stop") == 2
+    assert ev[0] == ("stop", "intake focal probe (DA3)")
     assert ("segmenter", cfg["models"]["segmentation"]["batch_size"]) in ev
     assert pipe.has("Frame set:") and pipe.has("witness frames")
     content = json.loads(Cn.content_tags_path(session).read_text())

@@ -75,7 +75,7 @@ def test_the_core_runs_inside_the_reconstruction_stage():
     assert callable(W.run)
     import inspect
     import workers.map_worker as M
-    assert callable(M._run_precision_core) and callable(M._run_semantics_2d)
+    assert callable(M._run_precision_core) and not hasattr(M, "_run_semantics_2d")
     # no working cloud: the core merges / filters nothing before F7 (USER 2026-09-29)
     src = inspect.getsource(M._run_precision_core)
     assert "cloudcompy_worker" not in src and "merge" not in src.lower().replace("merged", "")

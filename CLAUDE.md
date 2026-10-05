@@ -2,6 +2,10 @@
 
 ## ⭐⭐⭐ CURRENT STATE 2026-10-04 — read `docs/pipeline_final.md` FIRST (it supersedes the
 ## pipeline descriptions below wherever they disagree)
+- **2026-10-05 (evening, USER)**: ORDER = intake (I0, I1, I3; I2 OFF) → Omega (**15 m chunks**, 50 %) → F0–F6 →
+  octree, published cloud = the ORIGINAL epoch (kept, selectable) → **VLM → SAM3 (pipeline stages, after the cloud
+  stage) → mask projection → certification = the FINAL epoch**. `certify.single_final_epoch: false`. Epoch numbers
+  are still a counter (F2/F5/F6 take one each); renumbering to 0/1 is pending. Zaragoza at 5 m chunks: "malísimo".
 - **2026-10-04 (USER: "la reconstrucción está perfecta")**: the pipeline = epoch 8's recipe + **PointDiT at the edges**
   inside `f6_bend` (`precision.mono_detail`, `detail_scope: edges`: PointDiT-H's detail only within 12 px of a
   discontinuity and within τ, surfaces stay Omega; `vendor/pointdit`, env `da3`). The 'detail on every surface' variant
