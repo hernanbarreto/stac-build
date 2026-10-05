@@ -133,6 +133,18 @@ def mask_labels(output_dir: Path, H: int, W: int, log: Callable = print):
     return labels
 
 
+def labels_on_undistorted(labels: Callable, maps) -> Callable:
+    """The SAM3 label maps (made on the ORIGINAL frames) carried onto the undistorted native frame
+    through F0's maps (nearest); where the frame has no original pixel: 0 (no mask)."""
+    import cv2
+
+    def fn(i: int) -> np.ndarray:
+        L = labels(i)
+        return cv2.remap(L.astype(np.int32), maps[0], maps[1], cv2.INTER_NEAREST,
+                         borderMode=cv2.BORDER_CONSTANT, borderValue=0).astype(np.int64)
+    return fn
+
+
 def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict[int, np.ndarray],
                       passed: Dict[int, np.ndarray], K: np.ndarray, c2w: Dict[int, np.ndarray], labels,
                       neighbors, tau_quantile: float, repair_min_views: int, log: Callable = print):
@@ -362,11 +374,9 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
         if progress:
             progress(pct, msg)
 
+    from precision import corrected_cloud as CC
     inp = inp if inp is not None else DS.load_inputs(session_dir, pcfg)   # F5's camera + poses (guards F5's epoch)
     params = list(inp.cam.params)
-    if any(abs(float(x)) > 0 for x in params[4:]):
-        raise DepthOnF5Error(f"the session camera carries lens distortion {params[4:]} — the bend reads "
-                             f"Omega's record pixels as the camera's pixels; undistort first")
     K = np.asarray(inp.K, np.float64)
     W, H = int(inp.wh[0]), int(inp.wh[1])
     frames = [int(f) for f in inp.kf]
@@ -374,17 +384,49 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     w2c = np.asarray(inp.kf_w2c, np.float64)
     c2w = {f: np.linalg.inv(w2c[i]) for i, f in enumerate(frames)}
 
-    _p(3, f"{N} keyframes, camera fx {K[0, 0]:.1f} fy {K[1, 1]:.1f} ({W}x{H}); F5's landmarks")
+    # THE GRID OF THE BEND is the UNDISTORTED NATIVE frame of F5's camera (K_F5 on F0's maps) — the
+    # chain's own convention (corrected_cloud, silhouette_filter, provenance: pixel_u_und / v_und).
+    # Omega's record is the ORIGINAL frame on Omega's grid. With no lens and a record on the camera's
+    # grid (pccr: 464x832, k = 0) the two frames are one and the record enters as it is — epoch 8's
+    # arithmetic, bit for bit. Otherwise (zaragoza 2026-10-05: records 1920x1088 for 1920x1080 frames
+    # and F5's rung R2 with k1 -0.0035) the record, the landmark pixels and the SAM3 masks are CARRIED
+    # onto that frame — the lens, then the record grid (corrected_cloud.record_on_native, nearest) —
+    # so PointDiT (on the undistorted frame), the vote (K), the colours and the cloud's pixel columns
+    # all live on one grid. The camera's lens is neither ignored nor refused.
+    lens = bool(np.any(inp.cam.dist()))
+    with np.load(inp.records_dir / f"frame_{frames[0]}.npz") as z:
+        rec_hw = tuple(int(x) for x in np.asarray(z["depth"]).shape)
+    carry = lens or rec_hw != (H, W)
+    if carry:
+        grid_note = (f"Omega's record {rec_hw[1]}x{rec_hw[0]}"
+                     + (" + lens k1 %.5f k2 %.5f p1 %.5f p2 %.5f" % tuple(params[4:8]) if lens else "")
+                     + f" carried onto the undistorted native grid {W}x{H} (F0's maps, nearest)")
+    else:
+        grid_note = f"Omega's record on the camera grid {W}x{H}, no lens — read as it is"
+    _p(3, f"{N} keyframes, camera fx {K[0, 0]:.1f} fy {K[1, 1]:.1f} ({W}x{H}); {grid_note}; F5's landmarks")
     obs = _landmark_rows(session_dir, pcfg, frames, w2c, params)
+    if lens:
+        # the tracks were observed where the lens put them (the original frame) → the undistorted frame
+        from precision.camera import undistort_points, undistort_solver
+        solver = undistort_solver(pcfg.camera)
+        for sp in obs:
+            for i, o in obs[sp].items():
+                if len(o):
+                    o[:, :2] = undistort_points(o[:, :2], inp.cam, **solver)
 
     zo, conf, chunk = {}, {}, {}
     for f in frames:
         with np.load(inp.records_dir / f"frame_{f}.npz") as z:
             d = np.asarray(z["depth"], np.float32)
-            if d.shape != (H, W):
-                raise DepthOnF5Error(f"Omega's record of frame {f} is {d.shape[1]}x{d.shape[0]}, the camera "
-                                     f"grid {W}x{H} — the bend needs Omega's depth on the camera's grid")
-            zo[f] = d; conf[f] = np.asarray(z["conf"], np.float32); chunk[f] = int(z["chunk"]) if "chunk" in z.files else 0
+            cf = np.asarray(z["conf"], np.float32)
+            if tuple(d.shape) != rec_hw or tuple(cf.shape) != rec_hw:
+                raise DepthOnF5Error(f"Omega's record of frame {f} is {d.shape[1]}x{d.shape[0]} (conf "
+                                     f"{cf.shape[1]}x{cf.shape[0]}), the first record {rec_hw[1]}x{rec_hw[0]} "
+                                     f"— one record grid per session")
+            if carry:
+                d = CC.record_on_native(d, inp.cam, inp.maps)       # NaN where the record does not cover
+                cf = CC.record_on_native(cf, inp.cam, inp.maps)
+            zo[f] = d; conf[f] = cf; chunk[f] = int(z["chunk"]) if "chunk" in z.files else 0
     floor_norm = float(raw_cfg["reconstruction"]["simple"]["conf_min_norm"])
     thr, cmax = {}, {}
     for k in sorted(set(chunk.values())):
@@ -446,7 +488,10 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
 
     # 4. the edge-keeping vote (pccr epoch 8)
     _p(50, "edge-keeping multi-view vote")
-    voted, tau, vst = edge_keeping_vote(frames, dep, valid, passed, K, c2w, mask_labels(out, H, W, log),
+    labels = mask_labels(out, H, W, log)
+    if labels is not None and lens:
+        labels = labels_on_undistorted(labels, inp.maps)       # the masks live on the original frame
+    voted, tau, vst = edge_keeping_vote(frames, dep, valid, passed, K, c2w, labels,
                                         bc.neighbors, bc.tau_quantile, int(pcfg.cloud.repair_min_views), log)
     cover = vst["out"] / float(N * H * W)
     _p(65, f"vote done: coverage {cover * 100:.1f} %")
@@ -454,7 +499,8 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     return types.SimpleNamespace(session_dir=session_dir, out=out, inp=inp, frames=frames, N=N, W=W, H=H, K=K,
                                  c2w=c2w, params=params, chunk=chunk, voted=voted, tau=tau, vst=vst, cover=cover,
                                  wb=wb, score=score, coefs=coefs, c0=c0, obs=obs, src_maps=src_maps, md_rep=md_rep,
-                                 md=md, uu=uu, vv=vv, t0=t0, _p=_p, seconds_compute=round(time.time() - t0, 1))
+                                 md=md, uu=uu, vv=vv, t0=t0, _p=_p, seconds_compute=round(time.time() - t0, 1),
+                                 rec_hw=rec_hw, carry=carry, lens=lens, grid_note=grid_note)
 
 
 def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict:
@@ -504,6 +550,10 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
         report = {"version": 1, "stage": "depth_on_f5", "provenance": "tool_measured",
                   "source_of_depth": "Omega's depth bent to F5's landmarks + edge-keeping multi-view vote (pccr epoch 8)",
                   "camera": params, "grid": [W, H],
+                  # the grid the bend worked on: the undistorted native frame; Omega's record (its own
+                  # grid, the original frame) carried onto it through the lens + grid when they differ
+                  "grid_of_the_bend": {"undistorted_native": [W, H], "record": [C.rec_hw[1], C.rec_hw[0]],
+                                       "lens": bool(C.lens), "carried": bool(C.carry), "note": C.grid_note},
                   "bend": {"window": int(wb), "held_out": score,
                            "scale": {"median": float(np.median(c0)), "min": float(c0.min()),
                                      "max": float(c0.max())}},

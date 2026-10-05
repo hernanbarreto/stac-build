@@ -190,11 +190,9 @@ def load_inputs(session_dir: Path, log: Callable = print):
     cam = json.loads(cam_json.read_text())
     fx, fy, cx, cy = [float(v) for v in cam["params"][:4]]
     K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], np.float64)
-    g = cam.get("omega_grid") or {}
-    if g and not (float(g.get("scale_x", 1.0)) == 1.0 and int(g.get("crop_x", 0)) == 0
-                  and int(g.get("pad_left", 0)) == 0):
-        raise ChunkCheckError("Omega's grid is not the native grid — the check needs the "
-                              "F0 grid mapping before unprojecting Omega's depth")
+    # Omega's record grid and the camera's lens are handled where the record is read (measure_rows
+    # carries it onto the undistorted native grid when they differ — zaragoza 2026-10-05: 1920x1088
+    # records, k1 -0.0035); this check used to refuse a grid whose x differed and miss one whose y did
     s_k = {f: 1.0 for f in frames}
     bend = {f: (0.0, 0.0) for f in frames}
     offset = {f: 0.0 for f in frames}
@@ -304,9 +302,25 @@ def measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir: Path, da3_dir: Pa
     t0 = time.time()
     floor_pool = []
     world_pts: Dict[int, np.ndarray] = {}
+    # K is the camera's (undistorted native frame); Omega's record is the ORIGINAL frame on Omega's own
+    # grid — the same frame only without a lens and on the camera's grid (pccr). Otherwise the record
+    # is carried onto the undistorted native grid first (the bend's own grid, corrected_cloud.record_on_native)
+    from precision.camera import load_camera_json, undistort_maps
+    from precision import corrected_cloud as CC
+    cm = load_camera_json(Path(omega_dir).parents[1] / "camera.json")
+    lens = bool(np.any(cm.dist()))
+    carry, maps = None, None
     for i, f in enumerate(frames):
         with np.load(omega_dir / f"frame_{f}.npz") as z:
             d0 = np.asarray(z["depth"], np.float64)
+            if carry is None:
+                carry = lens or tuple(d0.shape) != (cm.height, cm.width)
+                if carry:
+                    maps = undistort_maps(cm)[:2]
+                    log(f"{LOG_TAG} Omega's record {d0.shape[1]}x{d0.shape[0]}" + (" + lens" if lens else "")
+                        + f" carried onto the undistorted native grid {cm.width}x{cm.height} before unprojecting with K")
+            if carry:
+                d0 = CC.record_on_native(d0.astype(np.float32), cm, maps).astype(np.float64)
             d = d0 * scale_map(s_k[f], bend.get(f) if bend else None, d0.shape[0], d0.shape[1])
             off = float(offset.get(f, 0.0)) if offset else 0.0
             if off != 0.0:

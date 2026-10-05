@@ -19,6 +19,14 @@ walk.json and the anchors stay; `run_gauge` regenerates the files for a re-run f
 probe delete their window depth once K / the footprint is written. Epochs are NOT the bloat: one live potree (0.8 GB),
 `corrections/epoch_N.npz` ≤ 1.4 MB each. Kept on purpose: `omega_run` + `da3_run` records (the core's inputs),
 `origins.npz`, `cleaned_cloud_raw.ply` (epoch transactions), `precision/tracks.npz`, `scene_r.db`, `seg_broadcast.json`.
+**The bend's grid (zaragoza's second failure, 2026-10-05):** F5's ladder chose R2 (lens k1 −0.0035, held-out 0.784 →
+0.777 px) and `f6_bend` refused a camera with distortion; Omega's records were also 1920×1088 for 1920×1080 frames. Fixed
+at the root, not hidden: the bend works on the UNDISTORTED NATIVE frame (the chain's convention: corrected_cloud,
+silhouette_filter, `pixel_u_und/v_und`); Omega's record, F5's landmark pixels and the SAM3 label maps are carried onto it
+through the lens + record grid (`record_on_native`, nearest; `undistort_points`) when they differ; `f6_check` does the same
+before unprojecting with K (its old guard checked x only). pccr (no lens, record on the camera grid) takes the old path bit
+for bit. Report: `depth_on_f5.json` `grid_of_the_bend`. Measured on zaragoza: lens shift ≤ 3 px at the corners, 0 % uncovered.
+
 **"Reconstruir" with the replace box OFF now RESUMES** (no wipe: the intake's step markers, DA3 depth on disk, the
 fork's `[STAC resume]` chunk predictions / `loop_closures.txt` / `metric_lock.json` stamps, the core's step records
 decide what is reused; everything derived is recomputed) — since 2026-07-11 a requested reconstruction wiped output/
