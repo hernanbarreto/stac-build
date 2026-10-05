@@ -227,6 +227,14 @@ def run_chain(session_dir: Path, pcfg, *, log: Callable = print,
         _save_state(session_dir, state)
         log(f"{LOG_TAG} ✓ {s.label} in {rec['seconds'] / 60:.1f} min (epoch "
             f"{rec['epoch_before']} → {rec['epoch_after']})")
+        if s.key == "f2_gauge" and bool(pcfg.gauge.delete_windows_after_chain):
+            # the I3 window depth (read by F0 and F2 only) goes the moment F2 is through,
+            # not hours later at the end of the chain (USER 2026-10-05, the /workspace
+            # quota at 92 % on pccr 2408: 18 GB of windows sat there through F4-F6).
+            # windows.json, walk.json and the anchors stay; run_gauge regenerates the
+            # files when a re-run from F0/F2 needs them.
+            from intake.walk import delete_windows
+            delete_windows(session_dir, log)
     if progress is not None:
         progress(100.0, "precision core done")
     if bool(pcfg.gauge.delete_windows_after_chain):
