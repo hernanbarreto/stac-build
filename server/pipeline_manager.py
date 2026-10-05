@@ -196,6 +196,7 @@ class PipelineManager:
         on_complete: Optional[Callable[[str, bool], Awaitable[None]]] = None,
         replace: bool = False,
         scan_key: Optional[str] = None,
+        force: bool = False,
     ) -> PipelineJob:
         """Start a pipeline for the given session.
         
@@ -210,6 +211,9 @@ class PipelineManager:
                      an omitted flag must never destroy a reconstruction.
             scan_key: Optional "date/source" key (e.g. "2026-03-07/legacy") to target
                       a specific scan. If None, resolves to latest scan/first source.
+            force: run every ENABLED stage even when its resume probe says it is
+                   complete (the Autosegment window: the user asked for THESE stages
+                   again, on purpose — nothing is wiped).
         """
         # ONE AND ONLY ONE (USER ORDER 2026-09-05): a reconstruction command
         # never queues and never cancel-and-replaces a running one — if a job
@@ -269,7 +273,7 @@ class PipelineManager:
         # back of the queue instead of sharing the card (USER 2026-09-23).
         _pending = {"job": job, "session_dir": session_dir, "config": config,
                     "on_progress": on_progress, "on_complete": on_complete,
-                    "replace": replace}
+                    "replace": replace, "force": force}
         if self._running_session() is not None:
             job.status = JobStatus.QUEUED
             job.queue_position = len(self._queue) + 1
@@ -303,7 +307,7 @@ class PipelineManager:
         job._task = asyncio.create_task(
             self._run_pipeline(job, pending["session_dir"], pending["config"],
                                pending["on_progress"], pending["on_complete"],
-                               pending["replace"])
+                               pending["replace"], pending.get("force", False))
         )
 
         # SAFETY NET: `_run_pipeline` starts the next one itself, in order, once
@@ -722,8 +726,10 @@ class PipelineManager:
         on_progress: Optional[ProgressCallback],
         on_complete: Optional[Callable[[str, bool], Awaitable[None]]],
         replace: bool = False,
+        force: bool = False,
     ):
-        """Run stages sequentially, each as a subprocess."""
+        """Run stages sequentially, each as a subprocess. ``force``: the enabled
+        stages run whatever their resume probes say (Autosegment)."""
         job.status = JobStatus.RUNNING
         success = True
         output_dir = Path(session_dir) / "output"
@@ -758,7 +764,7 @@ class PipelineManager:
         # runs what is missing/stale — the user never selects stages. Once any
         # stage actually runs, everything downstream is considered stale (its
         # inputs just changed) and runs too.
-        upstream_ran = replace or recon_requested
+        upstream_ran = replace or recon_requested or force
 
         for idx, stage_state in enumerate(job.stages):
             if not stage_state.stage.enabled:
@@ -1182,3 +1188,29 @@ def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
              if s != StageId.PGSR or backend == "vggtomega_pgsr"]
     return [PipelineStage(id=stage_id, enabled=_enabled(stage_id))
             for stage_id in order]
+
+
+# the stages that run AFTER the published cloud: the segmentation chain and what
+# feeds on it (USER 2026-10-05: a per-scan check in "Reconstruir" turns them off;
+# the Autosegment window runs any subset of them later)
+SEGMENTATION_CHAIN = (StageId.VLM, StageId.SAM3, StageId.CERTIFY)
+
+
+def select_stages(stages: List[PipelineStage], *, segment: bool = True,
+                  only: Optional[set] = None) -> List[PipelineStage]:
+    """A copy of ``stages`` with the per-run choice applied — never the shared
+    list (one job's choice must not leak into the next):
+    - ``segment`` False disables the SEGMENTATION_CHAIN ("Reconstruir" with the
+      scan's *segment when done* check off: the run ends at the published cloud);
+    - ``only`` (a set of StageId) keeps exactly those enabled and disables every
+      other stage (the Autosegment window: VLM / SAM3 / certification on demand,
+      on the cloud already on disk)."""
+    out: List[PipelineStage] = []
+    for s in stages:
+        enabled = bool(s.enabled)
+        if only is not None:
+            enabled = enabled and s.id in only
+        elif not segment and s.id in SEGMENTATION_CHAIN:
+            enabled = False
+        out.append(PipelineStage(id=s.id, enabled=enabled, config=dict(s.config)))
+    return out

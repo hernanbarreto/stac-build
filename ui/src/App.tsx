@@ -29,7 +29,7 @@ import {
   Search, Tag, Plug, Upload, Settings, Crosshair, Maximize, Monitor, Grid3X3, RotateCcw, Ruler, TriangleRight, Scissors,
   Move, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D, Building2, Package, ArrowUpFromLine, Trash2, Unlock,
   Clock, Scale, BarChart3, Home, Camera, SlidersHorizontal, Sparkles, Undo2, Brush, Layers, Star, Terminal,
-  ListTodo, FileCheck2, Puzzle, PanelLeftClose, PanelLeftOpen,
+  ListTodo, FileCheck2, Puzzle, PanelLeftClose, PanelLeftOpen, Wand2,
   Circle, Sun,
 } from 'lucide-react'
 import { useI18n, getT } from './i18n'
@@ -63,6 +63,7 @@ import { PipelineDialog } from './features/PipelineDialog'
 import { ResumeDialog } from './features/ResumeDialog'
 import { ObjectLibraryDialog } from './features/ObjectLibraryDialog'
 import { MeshingDialog } from './features/MeshingDialog'
+import { AutosegmentDialog, type AutosegmentState, type AutosegmentStages } from './features/AutosegmentDialog'
 import { PhysicsPanel } from './features/PhysicsPanel'
 import { ConsolePanel, JobsPanel, PropertiesPanel } from './features/DockPanels'
 
@@ -406,6 +407,11 @@ function App() {
   // TSDF); the backend ignores any stage selection, so the dialog only asks
   // which scans to rebuild and whether to replace existing outputs.
   const [pipelineReplace, setPipelineReplace] = useState(true)
+  // scans whose segmentation chain runs after the cloud — OFF by default (USER 2026-10-05)
+  const [pipelineSegment, setPipelineSegment] = useState<string[]>([])
+  const [autosegOpen, setAutosegOpen] = useState(false)
+  const [autosegState, setAutosegState] = useState<AutosegmentState | null>(null)
+  const [autosegLoading, setAutosegLoading] = useState(false)
   const [pipelineRunning, setPipelineRunning] = useState<PipelineState | null>(() => {
     try {
       const saved = sessionStorage.getItem('pipelineRunning')
@@ -1303,6 +1309,7 @@ function App() {
 
   const handleReconstruct = useCallback(async (sessionId: string) => {
     setPipelineDialogSession(sessionId)
+    setPipelineSegment([])
     // Fetch available scans for this project
     try {
       const res = await fetch(`/sessions/${sessionId}/scans`)
@@ -1347,10 +1354,43 @@ function App() {
         session_id: pipelineDialogSession,
         replace: pipelineReplace,
         scans: selectedScans,
+        segment: pipelineSegment.filter(k => selectedScans.includes(k)),
       })
       setStatusMessage(tt('pipeline.started', { session: pipelineDialogSession, n: selectedScans.length }))
     }, 500)
-  }, [pipelineDialogSession, pipelineReplace, selectedScans])
+  }, [pipelineDialogSession, pipelineReplace, selectedScans, pipelineSegment])
+
+  // Autosegment (USER 2026-10-05): the segmentation chain on demand, prompts editable
+  const openAutosegment = useCallback(async () => {
+    if (!activeSession) return
+    setAutosegState(null)
+    setAutosegLoading(true)
+    setAutosegOpen(true)
+    try {
+      const r = await fetch(`/api/autosegment/${activeSession}`)
+      const d = await r.json()
+      if (d.ok) setAutosegState(d as AutosegmentState)
+      else setStatusMessage(d.detail || d.error || 'autosegment: state unavailable')
+    } catch (e) {
+      setStatusMessage(`autosegment: ${e}`)
+    } finally {
+      setAutosegLoading(false)
+    }
+  }, [activeSession])
+
+  const runAutosegment = useCallback(async (vlmPrompt: string, sam3Prompts: string[], stages: AutosegmentStages) => {
+    if (!activeSession) return
+    const body: Record<string, unknown> = { vlm_prompt: vlmPrompt }
+    // the SAM3 prompts are saved only when SAM3 runs WITHOUT a new VLM pass (a VLM pass rewrites them)
+    if (stages.sam3 && !stages.vlm) body.sam3_prompts = sam3Prompts
+    const r = await fetch(`/api/autosegment/${activeSession}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const d = await r.json().catch(() => ({}))
+    if (!r.ok || !d.ok) { setStatusMessage(d.detail || d.error || 'autosegment: prompts not saved'); return }
+    setAutosegOpen(false)
+    setPipelineRunning({ session_id: activeSession, status: 'queued', current_stage_idx: -1, stages: [] })
+    viewportRef.current?.sendCommand({ type: 'run_pipeline', session_id: activeSession, replace: false, scans: [], autosegment: { stages } })
+    setStatusMessage(tt('autosegment.started', { session: activeSession }))
+  }, [activeSession])
 
   const handlePipelineCancel = useCallback(() => {
     const targetSession = pipelineRunning?.session_id || activeSession
@@ -1937,6 +1977,7 @@ function App() {
       { id: 'resetsection', label: t('toolbar.resetSection'), icon: <Unlock aria-hidden />, onSelect: () => { viewportRef.current?.resetSectionBox(); setActiveTool('navigate') } },
       { type: 'separator', id: 's4' },
       { id: 'segmentation', label: t('instances.segmentation'), icon: <Crosshair aria-hidden />, onSelect: () => activeSession && openSegmentationManager(activeSession) },
+      { id: 'autosegment', label: t('instances.autosegment'), icon: <Wand2 aria-hidden />, disabled: !activeSession, onSelect: openAutosegment },
       { id: 'meshing', label: t('instances.meshing'), icon: <Puzzle aria-hidden />, onSelect: openTsdfModal },
       { id: 'fuse', label: t('sessions.fuse'), icon: <Layers aria-hidden />, disabled: projectScans.filter(sc => sc.kind !== 'fused').length < 2, onSelect: () => activeSession && openFuse(activeSession) },
       ...(hasCameraPoses ? [{ id: 'poses', label: t('menu.cameraPoses'), icon: <Camera aria-hidden />, checked: showCameraPoses, onSelect: () => setShowCameraPoses(v => !v) } as MenuEntry] : []),
@@ -2102,7 +2143,7 @@ function App() {
                   const seg = instanceId != null ? segments.find(s => s.id === instanceId) : undefined
                   if (seg?.focus) viewportRef.current?.flyToPoint(seg.focus.center, seg.focus.radius)
                 }}
-                onOpenSegmentation={() => openSegmentationManager(activeSession)} onOpenMeshing={openTsdfModal} />
+                onOpenSegmentation={() => openSegmentationManager(activeSession)} onOpenMeshing={openTsdfModal} onOpenAutosegment={openAutosegment} />
             )}
             {layout.state.leftTab === 'scans' && (
               <ScansPanel sessionId={activeSession} scans={projectScans} activeScanKey={activeScanTab}
@@ -2352,6 +2393,7 @@ function App() {
       <PipelineDialog open={pipelineDialogOpen} sessionId={pipelineDialogSession} scans={scansList} selected={selectedScans}
         onToggleScan={(key, on) => setSelectedScans(prev => (on ? [...prev, key] : prev.filter(k => k !== key)))}
         replace={pipelineReplace} onReplace={setPipelineReplace}
+        segment={pipelineSegment} onToggleSegment={(key, on) => setPipelineSegment(prev => (on ? [...prev.filter(k => k !== key), key] : prev.filter(k => k !== key)))}
         rebuildingKeys={(() => { const pr = pipelineRunning; const active = !!(pr && (pr.status === 'running' || pr.status === 'queued') && pr.session_id === pipelineDialogSession); return active ? (pr!.scans || scansList.map(s => s.key)) : [] })()}
         onCancel={() => setPipelineDialogOpen(false)} onRun={handlePipelineRun} />
 
@@ -2412,6 +2454,9 @@ function App() {
         onSetSelected={ids => setTsdfSelected(ids)}
         tsdfStatus={tsdfStatus} tsdfProgress={tsdfProgress} tsdfOverall={tsdfOverall} tsdfRunning={tsdfRunning} shapeRunning={shapeRunning} shapeProgress={shapeProgress} shapeOverall={shapeOverall}
         onObject={runObjectMeshing} onMesh={runMesh} />
+
+      <AutosegmentDialog open={autosegOpen} sessionId={activeSession} state={autosegState} loading={autosegLoading}
+        onClose={() => setAutosegOpen(false)} onRun={runAutosegment} />
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />

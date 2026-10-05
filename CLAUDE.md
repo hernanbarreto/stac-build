@@ -6,6 +6,10 @@
   octree, published cloud = the ORIGINAL epoch (kept, selectable) → **VLM → SAM3 (pipeline stages, after the cloud
   stage) → mask projection → certification = the FINAL epoch**. `certify.single_final_epoch: false`. Epoch numbers
   are still a counter (F2/F5/F6 take one each); renumbering to 0/1 is pending. Zaragoza at 5 m chunks: "malísimo".
+  SAME NIGHT: "Reconstruir" has a per-scan check *Segment when done* (OFF by default) — off, the run ends at the cloud;
+  Instances → **Autosegment** opens a window with the VLM prompt + SAM3 prompts (editable, SAVED IN THE SESSION,
+  `output/autosegment.json`) and a checkbox per stage (VLM / SAM3+masks / certification / descriptions), forced to run
+  on the cloud on disk (`segmentation/autoprompt/autosegment.py`, `pipeline_manager.select_stages`).
 - **2026-10-04 (USER: "la reconstrucción está perfecta")**: the pipeline = epoch 8's recipe + **PointDiT at the edges**
   inside `f6_bend` (`precision.mono_detail`, `detail_scope: edges`: PointDiT-H's detail only within 12 px of a
   discontinuity and within τ, surfaces stay Omega; `vendor/pointdit`, env `da3`). The 'detail on every surface' variant

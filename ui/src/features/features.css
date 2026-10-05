@@ -391,3 +391,18 @@
   min-height: 0;
   overflow-y: auto;
 }
+
+/* ── Autosegment dialog (USER 2026-10-05) ───────────────────────────── */
+.stac-autoseg__textarea {
+  width: 100%;
+  resize: vertical;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 8px 10px;
+}
+.stac-autoseg__row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+  font-size: 12px;
+}

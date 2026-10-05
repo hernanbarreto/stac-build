@@ -6004,6 +6004,46 @@ async def tsdf_progress(session_id: str):
             "scene": scene, "poisson": poisson}
 
 
+# ── Autosegment (USER 2026-10-05): the segmentation chain on demand, prompts editable ──
+# The window reads this state, saves the prompts here, and RUNS through the viewer's
+# websocket (`run_pipeline` with `autosegment`), the same path every pipeline takes.
+
+@app.get("/api/autosegment/{session_id}")
+async def autosegment_state(session_id: str):
+    """What the Autosegment window shows: the session's VLM prompt (saved or
+    default), its SAM3 prompts, what is on disk, whether a pipeline holds it."""
+    from segmentation.autoprompt.autosegment import state
+    ctx = _ctx(session_id)
+    d = state(ctx.output_dir)
+    _job = pipeline_manager._jobs.get(session_id)
+    d["busy"] = bool(_job and str(getattr(_job.status, "value", _job.status))
+                     in ("queued", "running"))
+    return {"ok": True, **d}
+
+
+@app.post("/api/autosegment/{session_id}")
+async def autosegment_save(session_id: str, request: Request):
+    """Save the prompts the window edited: `vlm_prompt` (the session's own
+    understanding prompt; empty or the default removes the override) and
+    `sam3_prompts` (a list — written into vlm_analysis.json, what the SAM3 stage
+    reads; a VLM run afterwards replaces them, declared in the window)."""
+    from segmentation.autoprompt.autosegment import save_vlm_prompt, set_sam3_prompts, state
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "a JSON object is expected")
+    ctx = _ctx(session_id)
+    out = {}
+    if "vlm_prompt" in body:
+        out["vlm_prompt_overridden"] = save_vlm_prompt(ctx.output_dir, body.get("vlm_prompt"))
+    if "sam3_prompts" in body:
+        prompts = body.get("sam3_prompts")
+        if not isinstance(prompts, list):
+            raise HTTPException(400, "sam3_prompts must be a list of strings")
+        out["sam3_prompts"] = set_sam3_prompts(ctx.output_dir, [str(p) for p in prompts])
+    _audit_log("autosegment_prompts", session_id, detail=", ".join(sorted(out)))
+    return {"ok": True, **state(ctx.output_dir)}
+
+
 @app.get("/api/segmentation/tsdf/status/{session_id}")
 async def tsdf_status(session_id: str):
     """Check which segmented instances already have TSDF meshes."""
@@ -8165,17 +8205,61 @@ async def viewer_websocket(websocket: WebSocket):
                 replace = bool(cmd.get("replace", False))
                 scan_keys = cmd.get("scans", [])  # e.g. ["2026-03-07/legacy", "2026-03-08/default"]
 
+                # USER 2026-10-05: the segmentation chain (VLM → SAM3 → certification)
+                # runs after the cloud ONLY for the scans whose "segment when done"
+                # check is on (`segment`: their keys; the field absent = every scan,
+                # the old behaviour). The Autosegment window sends `autosegment`
+                # instead: the chain's stages it chose, FORCED to run on the cloud on
+                # disk, nothing wiped, the object descriptions optional.
+                from pipeline_manager import select_stages as _select_stages
+                _segment_keys = cmd.get("segment")
+                _auto = cmd.get("autosegment") if isinstance(cmd.get("autosegment"), dict) else None
+                _force = False
+                _run_cfg = dict(cfg)
+                _only = None
+                if _auto is not None:
+                    _want = _auto.get("stages") if isinstance(_auto.get("stages"), dict) else {}
+                    _only = {sid_ for key_, sid_ in (("vlm", StageId.VLM), ("sam3", StageId.SAM3),
+                                                     ("certify", StageId.CERTIFY)) if _want.get(key_)}
+                    if not _only:
+                        await viewer_manager.send_text(websocket, json.dumps({
+                            "type": "error",
+                            "message": "Autosegment: no stage selected — nothing to run"}))
+                        continue
+                    if not _want.get("captions", True):
+                        _seg0 = dict(cfg.get("segmentation") or {})
+                        _seg0["object_captions"] = {**dict(_seg0.get("object_captions") or {}),
+                                                    "enabled": False}
+                        _run_cfg["segmentation"] = _seg0
+                    _force, replace = True, False
+                    print(f"[Pipeline] autosegment for {session_id}: "
+                          f"{sorted(s_.value for s_ in _only)}"
+                          f"{'' if _want.get('captions', True) else ' (no object descriptions)'}")
+                elif _segment_keys is not None:
+                    _segment_keys = [str(k) for k in (_segment_keys or [])]
+                    print(f"[Pipeline] segmentation after the cloud for scans "
+                          f"{_segment_keys or 'NONE'} of {scan_keys or ['auto']}")
+
+                def _stages_for(sk):
+                    if _only is not None:
+                        return _select_stages(stages, only=_only)
+                    if _segment_keys is None:
+                        return _select_stages(stages)
+                    on = (sk in _segment_keys) if sk else bool(_segment_keys)
+                    return _select_stages(stages, segment=on)
+
                 if len(scan_keys) <= 1:
                     # Single scan or auto-resolve
                     single_key = scan_keys[0] if scan_keys else None
                     await pipeline_manager.start_pipeline(
                         session_id=session_id,
-                        stages=stages,
-                        config=dict(cfg),
+                        stages=_stages_for(single_key),
+                        config=dict(_run_cfg),
                         on_progress=_on_pipeline_progress,
                         on_complete=_on_pipeline_complete,
                         replace=replace,
                         scan_key=single_key,
+                        force=_force,
                     )
                     label = single_key or "auto"
                     await viewer_manager.send_text(websocket, json.dumps({
@@ -8212,12 +8296,13 @@ async def viewer_websocket(websocket: WebSocket):
 
                             await pipeline_manager.start_pipeline(
                                 session_id=session_id,
-                                stages=stages,
-                                config=dict(cfg),
+                                stages=_stages_for(sk),
+                                config=dict(_run_cfg),
                                 on_progress=_on_pipeline_progress,
                                 on_complete=_on_scan_complete,
                                 replace=replace,
                                 scan_key=sk,
+                                force=_force,
                             )
                             await done_event.wait()
 

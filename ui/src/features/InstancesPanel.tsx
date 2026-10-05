@@ -5,7 +5,7 @@
  * footer buttons open Segmentation and Meshing.
  */
 import { useState } from 'react'
-import { Box, CheckSquare, Crosshair, Pencil, Puzzle, Square, Tag, Trash2 } from 'lucide-react'
+import { Box, CheckSquare, Crosshair, Pencil, Puzzle, Square, Tag, Trash2, Wand2 } from 'lucide-react'
 import type { SegmentInstance } from '../components/Viewport'
 import { Panel, Section, Stack } from '../components/ui/Panel'
 import { Tree, type TreeNodeData } from '../components/ui/Tree'
@@ -53,6 +53,8 @@ interface InstancesPanelProps {
   onDeleteTsdf: (m: MeshListItem) => void
   onOpenSegmentation: () => void
   onOpenMeshing: () => void
+  /** the segmentation chain on demand, prompts editable (USER 2026-10-05) */
+  onOpenAutosegment: () => void
 }
 
 export function InstancesPanel(p: InstancesPanelProps) {
@@ -131,6 +133,7 @@ export function InstancesPanel(p: InstancesPanelProps) {
       footer={
         <div className="stac-instances__footer">
           <Button size="sm" icon={<Crosshair aria-hidden />} onClick={p.onOpenSegmentation}>{t('instances.segmentation')}</Button>
+          <Button size="sm" icon={<Wand2 aria-hidden />} onClick={p.onOpenAutosegment} title={t('instances.autosegmentHint')}>{t('instances.autosegment')}</Button>
           <Button size="sm" icon={<Puzzle aria-hidden />} onClick={p.onOpenMeshing} title={t('instances.meshingHint')}>{t('instances.meshing')}</Button>
         </div>
       }>

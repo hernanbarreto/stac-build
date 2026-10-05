@@ -163,15 +163,19 @@ def _norm_obj(s: str) -> str:
 
 
 def understand_frame(client, image: Image.Image, frame_id: int, max_tokens: int = 512,
-                     tile: str | None = None, extra: str | None = None) -> FrameUnderstanding | None:
+                     tile: str | None = None, extra: str | None = None,
+                     prompt: str | None = None) -> FrameUnderstanding | None:
     """One VLM call on one image — a keyframe, or (``tile``) a crop of it shown
     at the frame's size. The prompt is the same for both: a crop is still an
     image of the scene; ``extra`` (the second pass over the unsegmented region,
     segmentation/second_pass.py) adds one instruction in front of it, the rules
-    stay. None when the answer does not parse."""
+    stay. ``prompt`` replaces the shipped understanding prompt — the session's own
+    (USER 2026-10-05: edited and saved from the Autosegment window,
+    segmentation/autoprompt/autosegment.py). None when the answer does not parse."""
     from semantic.types import system, user
     from segmentation.object_captioner import fields_from_shape_entry
-    prompt = (f"{extra}\n" + _PROMPT) if extra else _PROMPT
+    base = prompt if (prompt and prompt.strip()) else _PROMPT
+    prompt = (f"{extra}\n" + base) if extra else base
     resp = client.chat([system(_SYSTEM), user(prompt, images=[image])],
                         max_tokens=max_tokens, consumer="phase1.understand")
     d = _parse(resp.content or "")

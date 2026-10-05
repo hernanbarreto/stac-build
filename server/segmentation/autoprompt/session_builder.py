@@ -170,6 +170,10 @@ class AutoPrompter:
                                   .get("simple", {}) or {}).get("enabled", False))
         self.backend_name = cfg.get("backend", backend)
         self._config = config or {}
+        # the session's own understanding prompt when the user saved one (USER
+        # 2026-10-05, Autosegment window); the shipped prompt otherwise
+        from segmentation.autoprompt.autosegment import vlm_prompt_for
+        self.understand_prompt, self.understand_prompt_overridden = vlm_prompt_for(self.output_dir)
         self.understand_enabled = cfg.get("understand", True)
         self.understand_cover = bool(cfg.get("understand_cover", True))
         self.understand_cover_voxel_m = float(cfg.get("understand_cover_voxel_m", 0.10))
@@ -394,7 +398,8 @@ class AutoPrompter:
                 for tid, box in views:
                     view = img if box is None else crop_for_vlm(img, box)
                     fu = understand_frame(client, view, fr["frame"], tile=tid,
-                                          max_tokens=understand_max_tokens)
+                                          max_tokens=understand_max_tokens,
+                                          prompt=self.understand_prompt)
                     calls.append({"frame": fr["frame"], "file": fn,
                                   "keyframe_index": fr["keyframe_index"],
                                   "position": fr["position"], "tile": tid,

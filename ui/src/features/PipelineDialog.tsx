@@ -22,12 +22,15 @@ interface PipelineDialogProps {
   onToggleScan: (key: string, on: boolean) => void
   replace: boolean
   onReplace: (v: boolean) => void
+  /** scans whose segmentation chain (VLM → SAM3 → certification) runs after the cloud — OFF by default (USER 2026-10-05) */
+  segment: string[]
+  onToggleSegment: (key: string, on: boolean) => void
   rebuildingKeys: string[]
   onCancel: () => void
   onRun: () => void
 }
 
-export function PipelineDialog({ open, sessionId, scans, selected, onToggleScan, replace, onReplace, rebuildingKeys, onCancel, onRun }: PipelineDialogProps) {
+export function PipelineDialog({ open, sessionId, scans, selected, onToggleScan, replace, onReplace, segment, onToggleSegment, rebuildingKeys, onCancel, onRun }: PipelineDialogProps) {
   const t = useT()
   const fmt = useFmt()
   const partial = scans.filter(s => selected.includes(s.key) && s.recon_state === 'partial')
@@ -54,6 +57,8 @@ export function PipelineDialog({ open, sessionId, scans, selected, onToggleScan,
                   <span className="stac-pipeline__frames stac-mono">{t.plural('sessions.frames', scan.frame_count)}</span>
                   {scan.has_output && <Badge tone="ok" size="sm">{t('pipeline.hasOutput')}</Badge>}
                   {rebuilding && <Badge tone="brand" size="sm" dot>{t('sessions.rebuilding')}</Badge>}
+                  <Checkbox className="stac-pipeline__segment" checked={segment.includes(scan.key)} disabled={!selected.includes(scan.key) || rebuilding}
+                    onChange={v => onToggleSegment(scan.key, v)} label={t('pipeline.segmentAfter')} title={t('pipeline.segmentAfterHint')} />
                 </div>
               )
             })}
@@ -62,6 +67,7 @@ export function PipelineDialog({ open, sessionId, scans, selected, onToggleScan,
         {partial.length > 0 && (
           <Banner tone="ok" compact title={t('pipeline.partialTitle', { n: fmt.integer(cached) })}>{t('pipeline.partialDesc')}</Banner>
         )}
+        <p className="stac-muted stac-pipeline__hint">{t('pipeline.segmentAfterHint')}</p>
         <Checkbox checked={replace} onChange={onReplace} label={t('pipeline.replaceOutputs')} description={t('pipeline.replaceHint')} />
         {replace && partial.length > 0 && <Banner tone="warn" compact>{t('pipeline.replaceWarning')}</Banner>}
       </Stack>

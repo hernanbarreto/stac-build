@@ -7,6 +7,21 @@ que describiste es correcto").
 
 ## Decisions (USER, 2026-09-30 / 2026-10-01 / 2026-10-04 / 2026-10-05)
 
+**2026-10-05 (night) — SEGMENTATION ON DEMAND (USER: "un check para correr o no el vlm sam etc luego de la
+reconstrucción … en la lista de segmentación un botón para autosegment … una ventana donde se puede ver el prompt
+para vlm y segmentación, luego checkbox para el resto de etapas").** "Reconstruir" carries a per-scan check
+*Segment when done* (OFF by default, USER): off, the run ends with the cloud in the viewer (`run_pipeline`
+`segment`: the scan keys whose chain runs; `pipeline_manager.select_stages`). The Instances panel's **Autosegment**
+button (also in the command palette) opens a window with the VLM prompt (scene understanding — the SAM3
+vocabulary) and the session's SAM3 prompts, both editable, and a checkbox per stage: VLM, SAM3 + mask projection,
+certification, object descriptions. The VLM prompt is SAVED IN THE SESSION (`output/autosegment.json`, USER) and
+every later VLM pass of that session uses it (`AutoPrompter.understand_prompt` → `understand_frame(prompt=)`);
+edited SAM3 prompts go into `vlm_analysis.json` `prompt` (what the SAM3 stage reads; a VLM run replaces them —
+declared in the window). Run = `run_pipeline` with `autosegment` over the viewer socket: the chosen stages FORCED to
+run (`start_pipeline(force=True)`: the resume probes are not consulted), nothing wiped, captions off through the
+run's config. REST: `GET/POST /api/autosegment/{session}` (state / save prompts). Module
+`segmentation/autoprompt/autosegment.py`, UI `features/AutosegmentDialog.tsx`; tests `tests/test_autosegment.py`.
+
 **2026-10-05 (evening) — THE ORDER: "intake, da3 para medir, omega, f0 a f6, octree, época publicada, vlm, sam3,
 máscaras, correcciones, época 1"; "chunks de 15 m siempre"; "olvidate de la exclusión de personas y objetos en
 movimiento"; "como mucho la original y la final, ninguna intermedia".** Zaragoza (17.8 m) at 5 m chunks came out

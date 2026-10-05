@@ -31,7 +31,7 @@ def _mgr(monkeypatch, gate: dict):
     """A manager whose pipeline body waits on a per-session event."""
     pm = PipelineManager()
 
-    async def _fake_run(job, session_dir, config, on_progress, on_complete, replace):
+    async def _fake_run(job, session_dir, config, on_progress, on_complete, replace, force=False):
         gate.setdefault(job.session_id, asyncio.Event())
         await gate[job.session_id].wait()
         job.status = JobStatus.DONE
