@@ -109,9 +109,14 @@ def ensure_service(config: Optional[dict] = None,
             pass
 
     try:
+        # USER 2026-10-05 (zaragoza): with vLLM in the backend's own process group, the GPU
+        # handover that stops it took the backend down with it (twice it had survived because
+        # the vLLM came from an earlier, dead backend). Own session (start_new_session) — no
+        # group-wide signal reaches the backend — AND PR_SET_PDEATHSIG keeps the chat dying
+        # with the backend as before.
         subprocess.Popen(["bash", str(_LAUNCHER)], cwd=str(_STAC_ROOT),
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         preexec_fn=_die_with_parent)
+                         preexec_fn=_die_with_parent, start_new_session=True)
     except Exception as e:  # noqa: BLE001
         _log(f"Could not launch semantic service: {e}")
         return False

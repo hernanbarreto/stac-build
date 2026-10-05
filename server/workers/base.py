@@ -161,12 +161,13 @@ def stop_semantic_service(pipe: Optional["WorkerPipe"] = None, stage: str = "",
             return
         _say(f"[gpu] stopping vLLM semantic service — {stage or 'this stage'} "
              f"gets the whole GPU (it auto-restarts on next VLM use)")
-        subprocess.run(["pkill", "-f", "vllm serve"], capture_output=True)
+        kill_vllm_pids(signal.SIGTERM)
         for _ in range(30):
             time.sleep(2)
-            if subprocess.run(["pgrep", "-f", "vllm serve"],
-                              capture_output=True).returncode != 0:
+            if not vllm_pids():
                 break
+        else:
+            kill_vllm_pids(signal.SIGKILL)
         free = gpu_free_gb()
         if free is not None:
             _say(f"[gpu] vLLM stopped — {free:.0f} GB VRAM free")
@@ -175,6 +176,19 @@ def stop_semantic_service(pipe: Optional["WorkerPipe"] = None, stage: str = "",
 
 
 VLLM_PROCESS_PATTERN = "vllm serve"      # what stop_semantic_service kills and pgrep looks for
+
+
+def kill_vllm_pids(sig) -> list:
+    """Signal every vLLM process by PID (the `vllm serve` command lines pgrep finds), never
+    the backend or any shell that merely mentions the pattern. Returns the PIDs signalled."""
+    import os
+    pids = [p for p in vllm_pids() if p != os.getpid()]
+    for p in pids:
+        try:
+            os.kill(p, sig)
+        except ProcessLookupError:
+            pass
+    return pids
 
 
 def vllm_pids() -> list:

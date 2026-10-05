@@ -983,12 +983,15 @@ def _semantic_unload_for_gpu(reason: str = "") -> None:
             return
         print(f"[Semantic] chat UNLOADED ({reason or 'gpu-heavy work'}) — "
               "SAM3 gets the GPU")
-        _sp.run(["pkill", "-f", "vllm serve"], capture_output=True)
+        from workers.base import kill_vllm_pids, vllm_pids as _vpids
+        import signal as _sig
+        kill_vllm_pids(_sig.SIGTERM)
         for _ in range(30):
             time.sleep(2)
-            if _sp.run(["pgrep", "-f", "vllm serve"],
-                       capture_output=True).returncode != 0:
+            if not _vpids():
                 break
+        else:
+            kill_vllm_pids(_sig.SIGKILL)
     except Exception as e:  # noqa: BLE001 — never break the caller over the chat
         print(f"[Semantic] chat unload failed (non-fatal): {e}")
 
