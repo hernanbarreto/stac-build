@@ -3,6 +3,7 @@
 #
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
 
+import signal
 import time
 import traceback
 from multiprocessing.connection import Connection
@@ -179,8 +180,14 @@ def stop_semantic_service(pipe: Optional["WorkerPipe"] = None, stage: str = "",
 
 
 VLLM_PROCESS_PATTERN = "vllm serve"      # what stop_semantic_service kills and pgrep looks for
-# the whole launcher chain: scripts/serve_semantic.sh → python -m semantic.serve → vllm serve
-VLLM_PATTERNS = ("vllm serve", "semantic.serve", "serve_semantic.sh")
+# the whole launcher chain, each ANCHORED to the start of the command line so a shell whose
+# command text merely mentions these words (a terminal, a tool, a test) is never matched:
+#   bash /…/scripts/serve_semantic.sh  →  /…/envs/semantic/bin/python -m semantic.serve
+#   →  /…/envs/semantic/bin/python /…/bin/vllm serve …  →  its engine (proctitle VLLM::EngineCore)
+VLLM_PATTERNS = (r"^\S+/python[0-9.]* \S+/bin/vllm serve",
+                 r"^\S+/python[0-9.]* -m semantic\.serve",
+                 r"^(\S*/)?bash \S*/scripts/serve_semantic\.sh",
+                 r"^VLLM::")
 
 
 def kill_vllm_pids(sig) -> list:
