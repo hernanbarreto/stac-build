@@ -320,6 +320,14 @@ def _resolve_mapanything_depth(output_dir: Path, conf_percentile: Optional[float
     chunks = run_dir / "_tmp_results_aligned"
     if not chunks.exists():
         chunks = run_dir / "_tmp_results_unaligned"   # legacy fallback
+    if not chunks.exists():
+        # USER 2026-10-05: the chunk npys are temporaries now (certify.keep_aligned_chunks: false) —
+        # the per-keyframe RECORDS the precision core reads (omega_run/results_output/frame_<n>.npz:
+        # depth + conf + K_omega on Omega's grid, the same per-frame depth the chunks held) serve
+        # every later reader: the on-load cloud build's witnesses, mv_consistency, the TSDF export.
+        rec = _resolve_omega_records(output_dir, conf_percentile, mv_dir)
+        if rec is not None:
+            return rec
     flp = run_dir / "frame_list.json"
     if not flp.exists():
         flp = output_dir / "frame_list.json"
@@ -456,6 +464,49 @@ def _resolve_mapanything_depth(output_dir: Path, conf_percentile: Optional[float
             if "depth" in mv.files:          # median-replace variant
                 d = mv["depth"].astype(np.float32)
         return {"depth": d, "valid": valid, "K": K_intr, "rgb": None, "hw": d.shape}
+
+    return _with_depth_correction(_load, output_dir), (h, w)
+
+
+def _resolve_omega_records(output_dir: Path, conf_percentile: Optional[float] = None,
+                           mv_dir: Optional[Path] = None
+                           ) -> Optional[Tuple[Callable[[int], Optional[dict]],
+                                               Tuple[int, int]]]:
+    """Per-keyframe loader over ``omega_run/results_output/frame_<n>.npz`` (depth, conf,
+    K_omega — Omega's own grid), the same contract as the chunk loader. None when the
+    records are absent."""
+    rec = output_dir / "omega_run" / "results_output"
+    files = sorted(rec.glob("frame_*.npz")) if rec.is_dir() else []
+    if not files:
+        return None
+    with np.load(files[0]) as z:
+        d0 = np.asarray(z["depth"])
+    h, w = int(d0.shape[-2]), int(d0.shape[-1])
+
+    def _load(frame_idx: int) -> Optional[dict]:
+        p = rec / f"frame_{int(frame_idx)}.npz"
+        if not p.exists():
+            return None
+        with np.load(p) as z:
+            d = np.asarray(z["depth"], np.float32)
+            conf = np.asarray(z["conf"], np.float32) if "conf" in z.files else None
+            K = np.asarray(z["K_omega"], np.float64).reshape(3, 3) if "K_omega" in z.files else None
+        valid = np.isfinite(d) & (d > 0)
+        if conf_percentile is not None and conf is not None and conf.shape == d.shape:
+            valid &= conf >= float(np.percentile(conf, conf_percentile))
+        if mv_dir is not None:
+            mp = mv_dir / f"frame_{int(frame_idx)}.npz"
+            if not mp.exists():
+                raise RuntimeError(f"mv_consistency enabled but {mp.name} is missing — masks and "
+                                   f"depth are out of sync (delete {mv_dir} to regenerate)")
+            mv = np.load(mp)
+            if mv["valid"].shape != d.shape:
+                raise RuntimeError(f"mv_consistency mask {mp.name} shape {mv['valid'].shape} != depth "
+                                   f"{d.shape} — stale masks (delete {mv_dir} to regenerate)")
+            valid &= mv["valid"]
+            if "depth" in mv.files:
+                d = mv["depth"].astype(np.float32)
+        return {"depth": d, "valid": valid, "K": K, "rgb": None, "hw": d.shape}
 
     return _with_depth_correction(_load, output_dir), (h, w)
 
