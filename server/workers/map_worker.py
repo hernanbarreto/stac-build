@@ -500,6 +500,13 @@ def _run_semantics_2d(pipe: WorkerPipe, session_path: Path, config: dict, *,
     from workers.base import run_stage_inline
     if not _semantics_enabled(pipe, config):
         return
+    # resume (replace off): the 2-D semantics are keyframe products — reused when on disk
+    _out = session_path / "output"
+    if not config.get("_pipeline_replace", True) and all(
+            (_out / n).exists() for n in ("vlm_analysis.json", "segmentation.json", "seg_masks.npz")):
+        pipe.send_log("Semantics already on disk (replace off): vlm_analysis.json + segmentation.json + "
+                      "seg_masks.npz reused — the cloud stage projects them")
+        return
     if not vlm_done:
         _run_vlm_understand(pipe, session_path, config)
     pipe.send_progress(4.5, "Segmentation (SAM3) on the keyframes...", stage="reconstruction")
