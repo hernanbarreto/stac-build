@@ -339,12 +339,22 @@ def gate_frame_pair(i: int, j: int, view, cfg,
         out["reason"] = (f"only {L:.1f} m walked between the two keyframes "
                          f"(< {min_walk:.1f} m) — odometry, not a revisit")
         return out
+    # Rule 2 (frustum) is MEASURED and recorded but does not veto a SALAD pair
+    # (USER 2026-10-05: pccr 2408, 100 m of walk, 40 of 40 candidates rejected
+    # with ZERO frames visible — the rule judged the candidate with the drifted
+    # poses the closure exists to correct, under a budget of 30 cm + 1.3 cm/m
+    # that a long walk exceeds by metres; "así SALAD nunca va a funcionar").
+    # The candidate is measured instead — the bridge (a mini-Omega over the two
+    # windows) enters with the σ of its own fit, a false SALAD match fits badly
+    # and loses the vote, and the pose graph's held-out judge says whether the
+    # geometry got better. Rule 0 (the walk) still rejects.
     if not fr["passed"]:
-        out["verdict"] = "reject"
-        out["reason"] = (f"not co-visible even with a {budget['delta_m']*100:.0f} cm / "
-                         f"{budget['theta_deg']:.1f}° budget over {L:.1f} m walked "
-                         f"({fr['frames_visible_min']} < {fr['min_frustum_frames']} frames)")
-        return out
+        out["frustum_vetoes"] = False
+        out["frustum_note"] = (f"not co-visible under the drifted poses with a "
+                               f"{budget['delta_m']*100:.0f} cm / {budget['theta_deg']:.1f}° "
+                               f"budget over {L:.1f} m walked "
+                               f"({fr['frames_visible_min']} < {fr['min_frustum_frames']} frames) "
+                               f"— measured anyway (USER 2026-10-05)")
     if cor["corridor"] and fr["frames_visible_min"] < int(c["corridor_min_frustum_frames"]):
         out["verdict"] = "ambiguous"
         out["reason"] = (f"corridor walk (lateral {cor['lateral_extent_m']:.1f} m) with only "
@@ -352,7 +362,8 @@ def gate_frame_pair(i: int, j: int, view, cfg,
                          f"(< {int(c['corridor_min_frustum_frames'])}) — σ inflated")
         return out
     out["verdict"] = "accept"
-    out["reason"] = "co-visible under the drift budget"
+    out["reason"] = ("co-visible under the drift budget" if fr["passed"]
+                     else out["frustum_note"])
     return out
 
 

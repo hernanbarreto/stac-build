@@ -6,6 +6,9 @@
   octree, published cloud = the ORIGINAL epoch (kept, selectable) → **VLM → SAM3 (pipeline stages, after the cloud
   stage) → mask projection → certification = the FINAL epoch**. `certify.single_final_epoch: false`. Epoch numbers
   are still a counter (F2/F5/F6 take one each); renumbering to 0/1 is pending. Zaragoza at 5 m chunks: "malísimo".
+  SAME NIGHT: the spatial gate's FRUSTUM rule no longer vetoes a SALAD pair (pccr 2408: 40/40 rejected with zero
+  frames visible — it judged the pair with the drifted poses the closure exists to fix); the bridge is MEASURED
+  and its σ + the held-out judge decide (`spatial_gate.gate_frame_pair`). Rule 0 (the walk) still rejects.
   SAME NIGHT: "Reconstruir" has a per-scan check *Segment when done* (OFF by default) — off, the run ends at the cloud;
   Instances → **Autosegment** opens a window with the VLM prompt + SAM3 prompts (editable, SAVED IN THE SESSION,
   `output/autosegment.json`) and a checkbox per stage (VLM / SAM3+masks / certification / descriptions), forced to run

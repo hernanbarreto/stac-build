@@ -74,14 +74,22 @@ def test_drift_budget_grows_with_walk():
     assert ov["delta_m"] == 0.05 and ov["source"] == "chain"
 
 
-def test_salad_pair_revisit_accepted_far_pair_rejected(sess):
+def test_salad_pair_revisit_accepted_far_pair_measured_not_rejected(sess):
     c = _cfg().loops.spatial
     view = _View(sess)
     ok = sg.gate_frame_pair(140, 8, view, c)          # the walk returns past the start
     assert ok["verdict"] in ("accept", "ambiguous"), ok
-    bad = sg.gate_frame_pair(75, 8, view, c)          # opposite sides of the block
-    assert bad["verdict"] == "reject"
+    assert ok["rules"]["frustum"]["passed"] is True and "frustum_note" not in ok
+    # opposite sides of the block: the frustum rule says not co-visible — RECORDED,
+    # not a veto (USER 2026-10-05: the rule judged SALAD pairs with the drifted
+    # poses the closure exists to correct; the bridge is measured instead)
+    bad = sg.gate_frame_pair(75, 8, view, c)
+    assert bad["verdict"] != "reject", bad
     assert bad["rules"]["frustum"]["passed"] is False
+    assert bad["frustum_vetoes"] is False and "measured anyway" in bad["reason"]
+    # rule 0 (the walk) still rejects
+    near = sg.gate_frame_pair(8, 9, view, c)
+    assert near["verdict"] == "reject" and "odometry" in near["reason"]
 
 
 def test_fused_identity_splits_drifted_copy_loops(sess):
