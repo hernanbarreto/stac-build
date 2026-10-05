@@ -7541,7 +7541,19 @@ async def viewer_websocket(websocket: WebSocket):
                     
                     if not cleaned_ply.exists():
                         chunk_plys = sorted(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []
-                        if chunk_plys:
+                        # USER 2026-10-05: a session whose precision chain is mid-way (its product not
+                        # live) gets NO on-load rebuild — that build (Omega's raw cloud, minutes of GPU)
+                        # blocked the one-and-only-one reconstruct command three times on zaragoza; the
+                        # chain publishes the cloud itself when it resumes.
+                        _chain_midway = (output_dir / "precision" / "chain_state.json").exists()
+                        if chunk_plys and _chain_midway:
+                            print(f"[Viewer] No cleaned_cloud.ply: the precision chain is mid-way — no on-load "
+                                  f"rebuild; resume the reconstruction (replace off) to publish the cloud")
+                            await viewer_manager.send_text(websocket, json.dumps({
+                                "type": "status",
+                                "message": "No cloud yet: the reconstruction stopped mid-chain — resume it (replace off)"
+                            }))
+                        elif chunk_plys:
                             # The order is reconstruction → cloudcompy → VLM → SAM3, so the
                             # cloud no longer waits on the semantic stages: there is nothing
                             # to jump ahead of. This guard used to refuse the on-load cleanup
