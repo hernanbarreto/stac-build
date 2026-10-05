@@ -224,8 +224,16 @@ def stop_semantic_service_verified(pipe: Optional["WorkerPipe"] = None, stage: s
     still alive — a stage that needs the whole GPU must not start on a shared one.
     Returns the check for the caller's report: ``{"service_stopped": True,
     "check": "pgrep -f 'vllm serve'", "remaining_pids": [], "free_gb": float|None}``."""
-    stop_semantic_service(pipe, stage=stage, log=log)
-    left = vllm_pids()
+    # the backend kicks vLLM at its own boot through an HTTP probe that takes seconds: a pipeline
+    # launched right after a restart stops nothing, then the launcher appears (zaragoza 2026-10-05,
+    # twice) — so stop + verify is REPEATED until a verification finds nothing
+    left = []
+    for _ in range(6):
+        stop_semantic_service(pipe, stage=stage, log=log)
+        left = vllm_pids()
+        if not left:
+            break
+        time.sleep(2)
     if left:
         raise RuntimeError(
             f"{stage or 'this stage'} needs the GPU without the semantic service, but "
