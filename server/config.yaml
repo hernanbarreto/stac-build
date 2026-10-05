@@ -3566,7 +3566,13 @@ correction_graph:
                                     # the gates above (loop gain, held-out, authority, drift budget)
                                     # are MEASURED and declared in keyframe_graph.json / the acta /
                                     # the kit, the measured closure is APPLIED and Approve/Undo is
-                                    # the verdict; veto = any failed gate keeps identity (evaluation)
+                                    # the verdict; veto = any failed gate keeps identity (evaluation).
+                                    # 2026-09-28 → 2026-10-05 the in-run graph ALSO refused under
+                                    # advisory when the held-out worsened beyond its noise; USER
+                                    # 2026-10-05 ("la 2"): applied, the held-out measured and
+                                    # declared — its intra-chunk pairs measure local smoothness,
+                                    # not the global drift a loop closure corrects. Only a solve
+                                    # that did not converge is refused in advisory.
     holdout_offsets: [4, 10]        # frame offsets of the held-out pairs (never fitted)
     holdout_stride: 3
     holdout_samples: 4000
