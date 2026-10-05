@@ -43,6 +43,9 @@
   after the chain (`gauge.delete_windows_after_chain`, regenerated on demand), probe windows deleted once
   K is written. "Reconstruir" with replace OFF RESUMES (no wipe); replace ON wipes to frames + video.
   /workspace quota 400 GB, not visible to `df`; `t5-v1_1-xl` in hf_cache is ShapeR's — keep.
+  2026-10-05 night (pccr 2408, 1998 kf, quota at 92 %): chunk images stored uint8 (−1 GB per 296-frame chunk),
+  bridge files deleted once the loop stage consumed them (before the aligned copy), DA3 windows deleted right
+  after F2. Peak of a 1998-kf session ≈ unaligned 41 GB + aligned 41 GB + DA3 windows 18 GB + cloud.
 
 ## ⭐⭐ READ FIRST — USER DECISION 2026-09-28 (overrides any older rule below)
 - **F0→F9 of `claude_stac.txt` are ABSOLUTE PRIORITY.** Precision is not
