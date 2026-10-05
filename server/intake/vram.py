@@ -66,6 +66,19 @@ def free_vram_gb() -> Optional[float]:
         return None
 
 
+def total_vram_gb() -> Optional[float]:
+    """The card's TOTAL memory (nvidia-smi), None when it cannot be read — a property of the
+    card, the same on every run."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=20)
+        if out.returncode != 0:
+            return None
+        return float(out.stdout.strip().splitlines()[0]) / 1024.0
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
 def card_name() -> str:
     try:
         out = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
@@ -174,18 +187,31 @@ def window_size(session_dir: Path, frames: Sequence[str], frames_dir: Path, mode
                 margin_frac: float, log: Callable = print,
                 cancelled: Optional[Callable[[], bool]] = None) -> int:
     """``requested`` frames per window, or fewer when the card cannot hold them at this resolution —
-    the decision and its reasons in the log."""
+    the decision and its reasons in the log.
+
+    DETERMINISTIC (USER 2026-10-05, "debe ser determinista"): sized on the card's TOTAL memory and
+    the persisted footprint, never on the memory FREE at that moment. pccr 2408 measured its walk
+    over 221 windows of 18 keyframes on one run (an orphan SAM3 held 21 GB) and 153 of 25 on the
+    next, the same frames — a different walk, a different chunk plan. Free memory is read and
+    DECLARED: when another process holds what the window needs, the log says so; a window that
+    then does not fit exits OOM and the caller halves it (declared there)."""
     fp = footprint(session_dir, frames, frames_dir, model_id, process_res, native_wh, python,
                    calibration_frames, log, cancelled)
-    free = free_vram_gb()
-    if free is None:
-        raise VramError("the card's free memory cannot be read (nvidia-smi) — the window cannot be sized")
+    total = total_vram_gb()
+    if total is None:
+        raise VramError("the card's total memory cannot be read (nvidia-smi) — the window cannot be sized")
     tpf = int(fp["key"]["tokens_per_frame"])
-    n = max_frames_per_window(fp, tpf, free, margin_frac, requested)
+    n = max_frames_per_window(fp, tpf, total, margin_frac, requested)
     pred = float(fp["weights_gb"]) + float(fp["per_token_gb"]) * tpf * n
     if n < int(requested):
-        log(f"{LOG_TAG} window {requested} → {n} frame(s): {free:.1f} GiB free, {tpf:,} tokens/frame at "
-            f"process_res {process_res} (native), predicted peak {pred:.1f} GiB with a {margin_frac:.0%} margin")
+        log(f"{LOG_TAG} window {requested} → {n} frame(s): sized on the card's {total:.1f} GiB total, "
+            f"{tpf:,} tokens/frame at process_res {process_res} (native), predicted peak {pred:.1f} GiB "
+            f"with a {margin_frac:.0%} margin")
     else:
-        log(f"{LOG_TAG} window {requested} frame(s) fits: predicted peak {pred:.1f} GiB of {free:.1f} GiB free")
+        log(f"{LOG_TAG} window {requested} frame(s) fits: predicted peak {pred:.1f} GiB of the card's "
+            f"{total:.1f} GiB total")
+    free = free_vram_gb()
+    if free is not None and pred > free:
+        log(f"{LOG_TAG} ⚠ only {free:.1f} GiB free now (another process holds the card) — the predicted "
+            f"peak {pred:.1f} GiB may not fit; the window size stays what the CARD holds")
     return n

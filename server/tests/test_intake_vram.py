@@ -42,3 +42,24 @@ def test_production_config_declares_the_bounds():
     from intake.config import load_intake_config
     c = load_intake_config(raw)
     assert c.parallax.vram_calibration_frames == p["vram_calibration_frames"]
+
+
+def test_window_size_is_sized_on_the_total_never_on_the_free_memory(monkeypatch, tmp_path):
+    """USER 2026-10-05 ("debe ser determinista"): pccr 2408 measured its walk over 221
+    windows of 18 keyframes with an orphan holding 21 GB and 153 of 25 on the next run —
+    the same frames. The size comes from the card's TOTAL memory; the free memory only
+    produces a declared warning."""
+    import intake.vram as V
+    fp = {"weights_gb": 6.4, "per_token_gb": 1.194 / 1024.0, "key": {"tokens_per_frame": 2000}}
+    monkeypatch.setattr(V, "footprint", lambda *a, **k: fp)
+    monkeypatch.setattr(V, "total_vram_gb", lambda: 80.0)
+    logs = []
+    sizes = []
+    for free in (79.0, 58.0, 12.0):
+        monkeypatch.setattr(V, "free_vram_gb", lambda free=free: free)
+        sizes.append(V.window_size(tmp_path, ["a.jpg"], tmp_path, "m", 840, (832, 464), "py",
+                                   requested=32, calibration_frames=2, margin_frac=0.15,
+                                   log=logs.append))
+    assert len(set(sizes)) == 1, sizes
+    assert sizes[0] == V.max_frames_per_window(fp, 2000, 80.0, 0.15, 32)
+    assert any("only 12.0 GiB free" in m for m in logs), logs
