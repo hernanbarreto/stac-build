@@ -1340,24 +1340,29 @@ function App() {
     setPipelineDialogOpen(true)
   }, [])
 
-  const handlePipelineRun = useCallback(() => {
+  // "Reconstruir" goes over HTTP and NEVER loads the session (USER 2026-10-05: the
+  // order used to travel on the viewer socket after loading the session, the socket
+  // choked on the segmentation broadcast and the order was lost in silence — three
+  // sent, one arrived). The jobs list polls /api/pipelines/active, so progress shows
+  // whether or not a viewer socket is open.
+  const handlePipelineRun = useCallback(async () => {
     if (!pipelineDialogSession) return
     if (selectedScans.length === 0) return
-    // Load the session immediately so the websocket connects for progress
-    setActiveSession(pipelineDialogSession)
-    setSelectedSession(pipelineDialogSession)
+    const session = pipelineDialogSession
+    const scans = [...selectedScans]
     setPipelineDialogOpen(false)
-    setPipelineRunning({ session_id: pipelineDialogSession, status: 'queued', current_stage_idx: -1, stages: [], scans: [...selectedScans] })
-    setTimeout(() => {
-      viewportRef.current?.sendCommand({
-        type: 'run_pipeline',
-        session_id: pipelineDialogSession,
-        replace: pipelineReplace,
-        scans: selectedScans,
-        segment: pipelineSegment.filter(k => selectedScans.includes(k)),
+    try {
+      const r = await fetch('/api/pipeline/run', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: session, replace: pipelineReplace, scans, segment: pipelineSegment.filter(k => scans.includes(k)) }),
       })
-      setStatusMessage(tt('pipeline.started', { session: pipelineDialogSession, n: selectedScans.length }))
-    }, 500)
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok || !d.ok) { setStatusMessage(d.detail || d.error || `${session}: reconstruction command rejected`); return }
+      setPipelineRunning({ session_id: session, status: 'queued', current_stage_idx: -1, stages: [], scans })
+      setStatusMessage(tt('pipeline.started', { session, n: scans.length }))
+    } catch (e) {
+      setStatusMessage(`${session}: ${e}`)
+    }
   }, [pipelineDialogSession, pipelineReplace, selectedScans, pipelineSegment])
 
   // Autosegment (USER 2026-10-05): the segmentation chain on demand, prompts editable
@@ -1386,9 +1391,14 @@ function App() {
     const r = await fetch(`/api/autosegment/${activeSession}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const d = await r.json().catch(() => ({}))
     if (!r.ok || !d.ok) { setStatusMessage(d.detail || d.error || 'autosegment: prompts not saved'); return }
+    const rr = await fetch('/api/pipeline/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: activeSession, replace: false, scans: [], autosegment: { stages } }),
+    })
+    const dd = await rr.json().catch(() => ({}))
+    if (!rr.ok || !dd.ok) { setStatusMessage(dd.detail || dd.error || 'autosegment: command rejected'); return }
     setAutosegOpen(false)
     setPipelineRunning({ session_id: activeSession, status: 'queued', current_stage_idx: -1, stages: [] })
-    viewportRef.current?.sendCommand({ type: 'run_pipeline', session_id: activeSession, replace: false, scans: [], autosegment: { stages } })
     setStatusMessage(tt('autosegment.started', { session: activeSession }))
   }, [activeSession])
 

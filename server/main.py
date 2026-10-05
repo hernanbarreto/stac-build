@@ -963,6 +963,9 @@ class ViewerManager:
         return lk
 
     async def send_text(self, websocket: WebSocket, message: str):
+        if websocket is None:          # a command that came over HTTP: tell every viewer
+            await self.broadcast_text(message)
+            return
         async with self._lock_for(websocket):
             try:
                 await websocket.send_text(message)
@@ -7347,6 +7350,472 @@ async def _camera_frame_capture(websocket: WebSocket):
     finally:
         camera_manager.disconnect()
 
+async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
+    """The "Reconstruir" command — ONE path for the viewer socket (`run_pipeline`) and
+    for POST /api/pipeline/run (USER 2026-10-05: the button must NEVER load the session
+    first — the viewer socket chokes on the segmentation broadcast at load and the
+    order was lost in silence; zaragoza + pccr, three sent, one arrived). With
+    ``websocket`` None every reply is broadcast to the open viewers. Returns
+    {"ok": bool, ...}; a rejection (one and only one) carries its reason."""
+    # Pipeline-based reconstruction (subprocess workers)
+    session_id = cmd.get("session_id")
+    if session_id:
+        _stop_onload_projection(session_id, "a reconstruction was ordered")
+
+    # ONE AND ONLY ONE (USER ORDER 2026-09-05: "para reconstruccion
+    # no debe haber cola de comandos, hay uno y solo uno"): a
+    # run_pipeline that arrives while ANY reconstruction work is
+    # active — a pipeline job, or the on-load rebuild chain — is
+    # REJECTED, never queued, never cancel-and-replaced. This also
+    # kills the 17:14 incident class: a stale command sitting in
+    # the socket buffer behind a long stage executed late and
+    # wiped output/. A command must act NOW or not at all.
+    _active = pipeline_manager._jobs.get(session_id) if session_id else None
+    _busy = bool(_active and getattr(_active, "status", None) is not None
+                 and str(getattr(_active.status, "value", _active.status))
+                 in ("queued", "running"))
+    if _busy or _onload_busy.get(session_id):
+        _why = ("a pipeline is already running"
+                if _busy else "the on-load rebuild chain is running")
+        print(f"[Pipeline] ✋ run_pipeline REJECTED for "
+              f"{session_id}: {_why} (one and only one)")
+        await viewer_manager.send_text(websocket, json.dumps({
+            "type": "error",
+            "message": f"Reconstruction command rejected: {_why}. "
+                       f"One and only one — resend it yourself "
+                       f"when the current work finishes."}))
+        return {"ok": False, "error": _why}
+    print(f"[Pipeline] 🔧 Starting pipeline for session {session_id}")
+
+    # The pipeline runs reconstruction → cloudcompy and ends at the
+    # cleaned cloud (pipeline.auto_tsdf false, user 2026-08-28: the
+    # mesh is on-demand only). Any stage selection the client might
+    # still send is deliberately ignored (see build_pipeline_stages).
+    from pipeline_manager import build_pipeline_stages
+    _recon_backend = cfg.get("reconstruction", {}).get("backend", "da3")
+    stages = build_pipeline_stages(backend=_recon_backend)
+
+    # Progress callback: relay to this websocket + broadcast
+    from task_manager import task_manager as _tm
+    _pipeline_tid = _tm.start(session_id, "pipeline", "Running Pipeline")
+
+    async def _on_pipeline_progress(sid, job_dict):
+        # BROADCAST to all live viewers, NOT the socket captured at run start: a
+        # pipeline runs for hours and outlives the WS (ping timeout → reconnect),
+        # so the captured socket dies and progress/'done'/potree_ready were sent to
+        # a dead socket → UI stuck on "pipeline running", cloud never loaded.
+        try:
+            stage = job_dict.get("current_stage", "")
+            pct = job_dict.get("pct", 0)
+            _tm.update(_pipeline_tid, pct=pct, detail=f"Stage: {stage}")
+            await viewer_manager.broadcast_text(json.dumps({
+                "type": "pipeline_progress",
+                "session_id": sid,
+                **job_dict,
+            }))
+        except Exception:
+            pass
+        # early cloud delivery: cloudcompy done → the cleaned cloud is final
+        try:
+            _cc = next((st for st in job_dict.get("stages", [])
+                        if st.get("id") == "cloudcompy"), None)
+            if (_cc and _cc.get("enabled", True) and _cc.get("status") == "done"
+                    and sid not in _cloud_ready_sent):
+                _cloud_ready_sent.add(sid)
+                await viewer_manager.broadcast_text(json.dumps({
+                    "type": "status",
+                    "message": "Cloud ready — sending to the viewer..."
+                }))
+                await _notify_cloud_ready(sid)
+        except Exception as _e:
+            print(f"[Pipeline] early cloud delivery failed (non-fatal): {_e}")
+        # PREVIEW: the raw reconstruction exists the moment its stage ends;
+        # VLM + SAM3 run for an hour before CloudCompy cleans it, and a
+        # viewer with no cloud shows the full-screen progress splash over
+        # the canvas all that time. Shown now, the progress rides as a
+        # banner (USER 2026-09-28: "no me debe tapar la nube").
+        try:
+            _rc = next((st for st in job_dict.get("stages", [])
+                        if st.get("id") == "reconstruction"), None)
+            _cc = next((st for st in job_dict.get("stages", [])
+                        if st.get("id") == "cloudcompy"), None)
+            if (_rc and _rc.get("status") == "done"
+                    and not (_cc and _cc.get("status") == "done")
+                    and sid not in _preview_sent and sid not in _cloud_ready_sent):
+                _preview_sent.add(sid)
+                asyncio.create_task(_notify_preview(sid))
+        except Exception as _e:
+            print(f"[Pipeline] preview cloud delivery failed (non-fatal): {_e}")
+
+    # The cloud is DONE when cloudcompy finishes — the TSDF/texrecon that
+    # follows takes hours and does not touch it. Send it the moment it exists
+    # so the user inspects the cloud while the mesh still bakes.
+    _cloud_ready_sent = set()
+    _preview_sent = set()
+
+    async def _notify_preview(sid):
+        try:
+            from potree_converter import convert_chunks_preview_to_potree
+            _job_dir = pipeline_manager.job_session_dir(sid)
+            session_path = Path(_job_dir) if _job_dir else _ctx(sid).session_dir
+            from precision.product import product_report as _product_report
+            if _product_report(session_path / "output") is not None:
+                # the reconstruction stage ended with the precision core's
+                # published cloud (f6_bend, or the F7 chain when selected) and
+                # its own octree (USER 2026-09-28: the core runs inside the
+                # stage) — there are no raw chunks to preview, the cloud
+                # stage delivers the final cloud right after
+                return
+            await viewer_manager.broadcast_text(json.dumps({
+                "type": "status",
+                "message": "Reconstruction done — building a preview of the raw cloud..."
+            }))
+            _loop = asyncio.get_event_loop()
+            ok = await _loop.run_in_executor(None, convert_chunks_preview_to_potree,
+                                             session_path)
+            if not ok or sid in _cloud_ready_sent:
+                return          # no preview, or the clean cloud already went out
+            def _meta():
+                out = session_path / "output"
+                points = json.loads((out / "potree" / "metadata.json")
+                                    .read_text()).get("points", 0)
+                has_conf = False
+                first = next(iter(sorted(out.glob("chunk_*.ply"))), None)
+                if first is not None:
+                    with open(first, "rb") as fp:
+                        for hl in fp:
+                            if b"confidence" in hl:
+                                has_conf = True
+                            if hl.startswith(b"end_header"):
+                                break
+                return points, has_conf
+            points, has_conf = await _loop.run_in_executor(None, _meta)
+            await viewer_manager.broadcast_text(json.dumps({
+                "type": "potree_ready", "session_id": sid,
+                "url": f"/potree/{sid}/", "points": points,
+                "hasConfidence": has_conf, "preview": True,
+            }))
+            print(f"[Pipeline] ✅ preview cloud sent for {sid} ({points:,} pts)")
+        except Exception as e:
+            print(f"[Pipeline] preview cloud error (non-fatal): {e}")
+
+    async def _notify_cloud_ready(sid):
+        # Convert to Potree octree and notify viewer
+        try:
+            # The scan the JOB ran on, not the session's ACTIVE scan:
+            # a project holds several and they are not the same. On
+            # pccr 2026-09-14 the pipeline rebuilt 2026-08-31 while
+            # 2026-08-24 was active, so this pointed the converter at
+            # an output/ with no cleaned_cloud.ply, got False back and
+            # declared "Potree conversion failed" over an octree that
+            # had just been built correctly.
+            _job_dir = pipeline_manager.job_session_dir(sid)
+            session_path = Path(_job_dir) if _job_dir else _ctx(sid).session_dir
+            await viewer_manager.broadcast_text(json.dumps({
+                "type": "status",
+                "message": "Building LOD octree..."
+            }))
+            success = await convert_ply_to_potree_async(session_path, force=True)
+            if success:
+                # Offload file reads to thread pool
+                _pipe_loop = asyncio.get_event_loop()
+                def _load_pipe_metadata():
+                    _pipe_ctx = _ctx(sid)
+                    potree_meta_path = _pipe_ctx.merged_potree / "metadata.json"
+                    if not potree_meta_path.exists():
+                        potree_meta_path = session_path / "output" / "potree" / "metadata.json"
+                    potree_meta = json.loads(potree_meta_path.read_text())
+                    floor_transform_4x4 = None
+                    ft_path = session_path / "output" / "floor_transform.npz"
+                    if ft_path.exists():
+                        try:
+                            data = np.load(ft_path)
+                            s_val = float(data['s'])
+                            R = data['R']
+                            t = data['t']
+                            M = np.eye(4)
+                            M[:3, :3] = s_val * R
+                            M[:3, 3] = t
+                            floor_transform_4x4 = _display_matrix(sid, M)
+                        except Exception:
+                            pass
+                    # Check confidence in PLY
+                    has_confidence = False
+                    cp = session_path / "output" / "cleaned_cloud.ply"
+                    if cp.exists():
+                        with open(cp, 'rb') as fp:
+                            for hl in fp:
+                                if b'confidence' in hl:
+                                    has_confidence = True
+                                if hl.startswith(b'end_header'):
+                                    break
+                    return potree_meta, floor_transform_4x4, has_confidence
+
+                potree_meta, floor_transform_4x4, has_confidence = await _pipe_loop.run_in_executor(None, _load_pipe_metadata)
+
+                pipe_msg = {
+                    "type": "potree_ready",
+                    "session_id": sid,
+                    "url": f"/potree/{sid}/",
+                    "points": potree_meta.get("points", 0),
+                    "hasConfidence": has_confidence,
+                }
+                if floor_transform_4x4:
+                    pipe_msg["floorTransform"] = floor_transform_4x4
+                await viewer_manager.broadcast_text(json.dumps(pipe_msg))
+                print(f"[Pipeline] ✅ Potree ready for {sid}")
+            else:
+                print(f"[Pipeline] ⚠️ Potree conversion failed, sending raw cloud")
+                await _send_cleaned_cloud_broadcast(sid)
+        except Exception as e:
+            print(f"[Pipeline] Send cloud error: {e}")
+
+    # Completion callback: send cloud + segmentation data
+    async def _on_pipeline_complete(sid, success, restart_chat=True):
+        # Chat back up the moment the GPU is free — success OR failure
+        # (user decision 2026-08-28: the chat is always available; the
+        # reconstruction stages unloaded it to get the whole GPU).
+        # restart_chat=False between multi-scan runs: the next scan
+        # would immediately kill it again.
+        if restart_chat:
+            asyncio.get_running_loop().run_in_executor(
+                None, _semantic_reload_if_idle, "pipeline finished")
+            # USER 2026-09-04: at pipeline end there are NO
+            # segments (only scene + cloud) — generate ONLY the
+            # scene description. Per-segment dossiers happen when
+            # the SEGMENTATION finishes (see /api/segmentation/
+            # refresh).
+            if success:
+                asyncio.get_running_loop().run_in_executor(
+                    None, _session_intel_when_chat_up, sid, False)
+
+        if not success:
+            _tm.fail(_pipeline_tid, "Pipeline failed")
+            try:
+                await viewer_manager.broadcast_text(json.dumps({
+                    "type": "error",
+                    "message": f"Pipeline failed for {sid}. Check server logs."
+                }))
+            except Exception:
+                pass
+            return
+
+        # did the CERTIFY stage produce a new geometry epoch? Its
+        # transactional swap replaced cleaned_cloud.ply + the octree
+        # AFTER the early delivery → the viewer must reload the
+        # certified cloud (the acta says which epoch it left)
+        _certified = False
+        _new_epoch = None
+        try:
+            _acta_p = _ctx(sid).output_dir / "certify_acta.json"
+            if _acta_p.exists():
+                _acta = json.loads(_acta_p.read_text())
+                _certified = (_acta.get("epoch_final") is not None
+                              and _acta.get("epoch_final") != _acta.get("epoch_initial"))
+                if _certified:
+                    _new_epoch = _acta.get("epoch_final")
+        except Exception as _e:  # noqa: BLE001
+            print(f"[Pipeline] certify acta lookup failed (non-fatal): {_e}")
+        # the precision core (F0 → F6 bend) ends with its transactional publish:
+        # the product is live when its report (corrected_cloud.json) names the
+        # live epoch or an ancestor the certification warped (precision.product,
+        # the same probe pipeline_manager uses to call the stage done)
+        try:
+            from precision.product import product_is_live as _product_is_live
+            _p_live, _p_why = _product_is_live(_ctx(sid).output_dir)
+            _ge_p = _ctx(sid).output_dir / "geometry_epoch.json"
+            if _p_live and _ge_p.exists():
+                _live = json.loads(_ge_p.read_text()).get("epoch")
+                if _live is not None and _live != 0:
+                    _certified = True
+                    _new_epoch = _live
+        except Exception as _e:  # noqa: BLE001
+            print(f"[Pipeline] fuse report lookup failed (non-fatal): {_e}")
+
+        if sid in _cloud_ready_sent and not _certified:
+            print(f"[Pipeline] cloud already sent after cloudcompy — skipping rebuild")
+        elif sid in _cloud_ready_sent and _certified:
+            # the stage's transactional swap already built the octree of
+            # the new epoch — broadcast it, do not rebuild
+            print(f"[Pipeline] the pipeline produced epoch {_new_epoch} — "
+                  f"reloading the viewer with that cloud")
+            await _correction_notify_viewer(sid, _ctx(sid).output_dir)
+        else:
+            _cloud_ready_sent.add(sid)
+            await _notify_cloud_ready(sid)
+
+        # Send segmentation result (with floor-aligned OBBs) if available
+        # Use apply_segmentation_to_cloud (same as session reload) to ensure
+        # proper cache invalidation and OBB recalculation
+        try:
+            from segmentation_pipeline import apply_segmentation_to_cloud
+            _pipe_loop = asyncio.get_event_loop()
+            _seg_ctx = _ctx(sid)
+            _seg_output_dir = _seg_ctx.output_dir
+            seg_data = await _pipe_loop.run_in_executor(
+                None, apply_segmentation_to_cloud, _seg_output_dir
+            )
+            if seg_data and seg_data.get("instances"):
+                await viewer_manager.broadcast_text(json.dumps(seg_data))
+                print(f"[Pipeline] Sent {len(seg_data['instances'])} segments")
+        except Exception as e:
+            print(f"[Pipeline] Broadcast error: {e}")
+
+        try:
+            _tm.finish(_pipeline_tid)
+            await viewer_manager.broadcast_text(json.dumps({
+                "type": "status",
+                "message": f"Pipeline complete for {sid}"
+            }))
+        except Exception:
+            pass
+
+    # Start pipeline — support sequential multi-scan
+    # resume by default — an omitted flag must not wipe output/
+    replace = bool(cmd.get("replace", False))
+    scan_keys = cmd.get("scans", [])  # e.g. ["2026-03-07/legacy", "2026-03-08/default"]
+
+    # USER 2026-10-05: the segmentation chain (VLM → SAM3 → certification)
+    # runs after the cloud ONLY for the scans whose "segment when done"
+    # check is on (`segment`: their keys; the field absent = every scan,
+    # the old behaviour). The Autosegment window sends `autosegment`
+    # instead: the chain's stages it chose, FORCED to run on the cloud on
+    # disk, nothing wiped, the object descriptions optional.
+    from pipeline_manager import select_stages as _select_stages
+    _segment_keys = cmd.get("segment")
+    _auto = cmd.get("autosegment") if isinstance(cmd.get("autosegment"), dict) else None
+    _force = False
+    _run_cfg = dict(cfg)
+    _only = None
+    if _auto is not None:
+        _want = _auto.get("stages") if isinstance(_auto.get("stages"), dict) else {}
+        _only = {sid_ for key_, sid_ in (("vlm", StageId.VLM), ("sam3", StageId.SAM3),
+                                         ("certify", StageId.CERTIFY)) if _want.get(key_)}
+        if not _only:
+            await viewer_manager.send_text(websocket, json.dumps({
+                "type": "error",
+                "message": "Autosegment: no stage selected — nothing to run"}))
+            return {"ok": False, "error": "no stage selected"}
+        if not _want.get("captions", True):
+            _seg0 = dict(cfg.get("segmentation") or {})
+            _seg0["object_captions"] = {**dict(_seg0.get("object_captions") or {}),
+                                        "enabled": False}
+            _run_cfg["segmentation"] = _seg0
+        _force, replace = True, False
+        print(f"[Pipeline] autosegment for {session_id}: "
+              f"{sorted(s_.value for s_ in _only)}"
+              f"{'' if _want.get('captions', True) else ' (no object descriptions)'}")
+    elif _segment_keys is not None:
+        _segment_keys = [str(k) for k in (_segment_keys or [])]
+        print(f"[Pipeline] segmentation after the cloud for scans "
+              f"{_segment_keys or 'NONE'} of {scan_keys or ['auto']}")
+
+    def _stages_for(sk):
+        if _only is not None:
+            return _select_stages(stages, only=_only)
+        if _segment_keys is None:
+            return _select_stages(stages)
+        on = (sk in _segment_keys) if sk else bool(_segment_keys)
+        return _select_stages(stages, segment=on)
+
+    if len(scan_keys) <= 1:
+        # Single scan or auto-resolve
+        single_key = scan_keys[0] if scan_keys else None
+        await pipeline_manager.start_pipeline(
+            session_id=session_id,
+            stages=_stages_for(single_key),
+            config=dict(_run_cfg),
+            on_progress=_on_pipeline_progress,
+            on_complete=_on_pipeline_complete,
+            replace=replace,
+            scan_key=single_key,
+            force=_force,
+        )
+        label = single_key or "auto"
+        await viewer_manager.send_text(websocket, json.dumps({
+            "type": "info",
+            "message": f"Pipeline started for {session_id} (scan: {label})"
+        }))
+    else:
+        # Sequential multi-scan: run each scan one at a time
+        async def _run_multi_scan():
+            total = len(scan_keys)
+            for i, sk in enumerate(scan_keys):
+                try:
+                    await viewer_manager.send_text(websocket, json.dumps({
+                        "type": "info",
+                        "message": f"Starting scan {i+1}/{total}: {sk}"
+                    }))
+                except Exception:
+                    pass
+
+                # Use a future to await sequential completion
+                done_event = asyncio.Event()
+                scan_success = [True]
+                _is_last_scan = (i == total - 1)
+
+                async def _on_scan_complete(sid, success, _ev=done_event,
+                                            _ss=scan_success, _last=_is_last_scan):
+                    _ss[0] = success
+                    # Reload the chat only when the multi-scan run is
+                    # actually over (last scan, or a failure stops it) —
+                    # the next scan would kill vLLM again right away.
+                    await _on_pipeline_complete(
+                        sid, success, restart_chat=(_last or not success))
+                    _ev.set()
+
+                await pipeline_manager.start_pipeline(
+                    session_id=session_id,
+                    stages=_stages_for(sk),
+                    config=dict(_run_cfg),
+                    on_progress=_on_pipeline_progress,
+                    on_complete=_on_scan_complete,
+                    replace=replace,
+                    scan_key=sk,
+                    force=_force,
+                )
+                await done_event.wait()
+
+                if not scan_success[0]:
+                    try:
+                        await viewer_manager.send_text(websocket, json.dumps({
+                            "type": "error",
+                            "message": f"Scan {sk} failed. Stopping multi-scan pipeline."
+                        }))
+                    except Exception:
+                        pass
+                    return
+
+            try:
+                await viewer_manager.send_text(websocket, json.dumps({
+                    "type": "info",
+                    "message": f"All {total} scans completed for {session_id}"
+                }))
+            except Exception:
+                pass
+
+        asyncio.create_task(_run_multi_scan())
+        await viewer_manager.send_text(websocket, json.dumps({
+            "type": "info",
+            "message": f"Multi-scan pipeline started: {len(scan_keys)} scans for {session_id}"
+        }))
+
+    return {"ok": True, "session_id": session_id}
+
+
+@app.post("/api/pipeline/run")
+async def pipeline_run_http(request: Request):
+    """POST {session_id, scans, replace, segment | autosegment}: the same command the
+    viewer socket takes, without needing a viewer at all (USER 2026-10-05)."""
+    body = await request.json()
+    if not isinstance(body, dict) or not body.get("session_id"):
+        raise HTTPException(400, "session_id is required")
+    res = await _run_pipeline_command(dict(body, type="run_pipeline"), None)
+    if not res.get("ok"):
+        raise HTTPException(409, res.get("error") or "reconstruction command rejected")
+    return res
+
+
 @app.websocket("/ws/viewer")
 async def viewer_websocket(websocket: WebSocket):
     """
@@ -7887,449 +8356,7 @@ async def viewer_websocket(websocket: WebSocket):
                     print(f"[Viewer] ✅ Sábana Potree ready ({n_pts:,} pts)")
 
             elif cmd.get("type") in ("reconstruct_geometry", "run_pipeline"):
-                # Pipeline-based reconstruction (subprocess workers)
-                session_id = cmd.get("session_id")
-                if session_id:
-                    _stop_onload_projection(session_id, "a reconstruction was ordered")
-
-                # ONE AND ONLY ONE (USER ORDER 2026-09-05: "para reconstruccion
-                # no debe haber cola de comandos, hay uno y solo uno"): a
-                # run_pipeline that arrives while ANY reconstruction work is
-                # active — a pipeline job, or the on-load rebuild chain — is
-                # REJECTED, never queued, never cancel-and-replaced. This also
-                # kills the 17:14 incident class: a stale command sitting in
-                # the socket buffer behind a long stage executed late and
-                # wiped output/. A command must act NOW or not at all.
-                _active = pipeline_manager._jobs.get(session_id) if session_id else None
-                _busy = bool(_active and getattr(_active, "status", None) is not None
-                             and str(getattr(_active.status, "value", _active.status))
-                             in ("queued", "running"))
-                if _busy or _onload_busy.get(session_id):
-                    _why = ("a pipeline is already running"
-                            if _busy else "the on-load rebuild chain is running")
-                    print(f"[Pipeline] ✋ run_pipeline REJECTED for "
-                          f"{session_id}: {_why} (one and only one)")
-                    await viewer_manager.send_text(websocket, json.dumps({
-                        "type": "error",
-                        "message": f"Reconstruction command rejected: {_why}. "
-                                   f"One and only one — resend it yourself "
-                                   f"when the current work finishes."}))
-                    continue
-                print(f"[Pipeline] 🔧 Starting pipeline for session {session_id}")
-
-                # The pipeline runs reconstruction → cloudcompy and ends at the
-                # cleaned cloud (pipeline.auto_tsdf false, user 2026-08-28: the
-                # mesh is on-demand only). Any stage selection the client might
-                # still send is deliberately ignored (see build_pipeline_stages).
-                from pipeline_manager import build_pipeline_stages
-                _recon_backend = cfg.get("reconstruction", {}).get("backend", "da3")
-                stages = build_pipeline_stages(backend=_recon_backend)
-
-                # Progress callback: relay to this websocket + broadcast
-                from task_manager import task_manager as _tm
-                _pipeline_tid = _tm.start(session_id, "pipeline", "Running Pipeline")
-
-                async def _on_pipeline_progress(sid, job_dict):
-                    # BROADCAST to all live viewers, NOT the socket captured at run start: a
-                    # pipeline runs for hours and outlives the WS (ping timeout → reconnect),
-                    # so the captured socket dies and progress/'done'/potree_ready were sent to
-                    # a dead socket → UI stuck on "pipeline running", cloud never loaded.
-                    try:
-                        stage = job_dict.get("current_stage", "")
-                        pct = job_dict.get("pct", 0)
-                        _tm.update(_pipeline_tid, pct=pct, detail=f"Stage: {stage}")
-                        await viewer_manager.broadcast_text(json.dumps({
-                            "type": "pipeline_progress",
-                            "session_id": sid,
-                            **job_dict,
-                        }))
-                    except Exception:
-                        pass
-                    # early cloud delivery: cloudcompy done → the cleaned cloud is final
-                    try:
-                        _cc = next((st for st in job_dict.get("stages", [])
-                                    if st.get("id") == "cloudcompy"), None)
-                        if (_cc and _cc.get("enabled", True) and _cc.get("status") == "done"
-                                and sid not in _cloud_ready_sent):
-                            _cloud_ready_sent.add(sid)
-                            await viewer_manager.broadcast_text(json.dumps({
-                                "type": "status",
-                                "message": "Cloud ready — sending to the viewer..."
-                            }))
-                            await _notify_cloud_ready(sid)
-                    except Exception as _e:
-                        print(f"[Pipeline] early cloud delivery failed (non-fatal): {_e}")
-                    # PREVIEW: the raw reconstruction exists the moment its stage ends;
-                    # VLM + SAM3 run for an hour before CloudCompy cleans it, and a
-                    # viewer with no cloud shows the full-screen progress splash over
-                    # the canvas all that time. Shown now, the progress rides as a
-                    # banner (USER 2026-09-28: "no me debe tapar la nube").
-                    try:
-                        _rc = next((st for st in job_dict.get("stages", [])
-                                    if st.get("id") == "reconstruction"), None)
-                        _cc = next((st for st in job_dict.get("stages", [])
-                                    if st.get("id") == "cloudcompy"), None)
-                        if (_rc and _rc.get("status") == "done"
-                                and not (_cc and _cc.get("status") == "done")
-                                and sid not in _preview_sent and sid not in _cloud_ready_sent):
-                            _preview_sent.add(sid)
-                            asyncio.create_task(_notify_preview(sid))
-                    except Exception as _e:
-                        print(f"[Pipeline] preview cloud delivery failed (non-fatal): {_e}")
-
-                # The cloud is DONE when cloudcompy finishes — the TSDF/texrecon that
-                # follows takes hours and does not touch it. Send it the moment it exists
-                # so the user inspects the cloud while the mesh still bakes.
-                _cloud_ready_sent = set()
-                _preview_sent = set()
-
-                async def _notify_preview(sid):
-                    try:
-                        from potree_converter import convert_chunks_preview_to_potree
-                        _job_dir = pipeline_manager.job_session_dir(sid)
-                        session_path = Path(_job_dir) if _job_dir else _ctx(sid).session_dir
-                        from precision.product import product_report as _product_report
-                        if _product_report(session_path / "output") is not None:
-                            # the reconstruction stage ended with the precision core's
-                            # published cloud (f6_bend, or the F7 chain when selected) and
-                            # its own octree (USER 2026-09-28: the core runs inside the
-                            # stage) — there are no raw chunks to preview, the cloud
-                            # stage delivers the final cloud right after
-                            return
-                        await viewer_manager.broadcast_text(json.dumps({
-                            "type": "status",
-                            "message": "Reconstruction done — building a preview of the raw cloud..."
-                        }))
-                        _loop = asyncio.get_event_loop()
-                        ok = await _loop.run_in_executor(None, convert_chunks_preview_to_potree,
-                                                         session_path)
-                        if not ok or sid in _cloud_ready_sent:
-                            return          # no preview, or the clean cloud already went out
-                        def _meta():
-                            out = session_path / "output"
-                            points = json.loads((out / "potree" / "metadata.json")
-                                                .read_text()).get("points", 0)
-                            has_conf = False
-                            first = next(iter(sorted(out.glob("chunk_*.ply"))), None)
-                            if first is not None:
-                                with open(first, "rb") as fp:
-                                    for hl in fp:
-                                        if b"confidence" in hl:
-                                            has_conf = True
-                                        if hl.startswith(b"end_header"):
-                                            break
-                            return points, has_conf
-                        points, has_conf = await _loop.run_in_executor(None, _meta)
-                        await viewer_manager.broadcast_text(json.dumps({
-                            "type": "potree_ready", "session_id": sid,
-                            "url": f"/potree/{sid}/", "points": points,
-                            "hasConfidence": has_conf, "preview": True,
-                        }))
-                        print(f"[Pipeline] ✅ preview cloud sent for {sid} ({points:,} pts)")
-                    except Exception as e:
-                        print(f"[Pipeline] preview cloud error (non-fatal): {e}")
-
-                async def _notify_cloud_ready(sid):
-                    # Convert to Potree octree and notify viewer
-                    try:
-                        # The scan the JOB ran on, not the session's ACTIVE scan:
-                        # a project holds several and they are not the same. On
-                        # pccr 2026-09-14 the pipeline rebuilt 2026-08-31 while
-                        # 2026-08-24 was active, so this pointed the converter at
-                        # an output/ with no cleaned_cloud.ply, got False back and
-                        # declared "Potree conversion failed" over an octree that
-                        # had just been built correctly.
-                        _job_dir = pipeline_manager.job_session_dir(sid)
-                        session_path = Path(_job_dir) if _job_dir else _ctx(sid).session_dir
-                        await viewer_manager.broadcast_text(json.dumps({
-                            "type": "status",
-                            "message": "Building LOD octree..."
-                        }))
-                        success = await convert_ply_to_potree_async(session_path, force=True)
-                        if success:
-                            # Offload file reads to thread pool
-                            _pipe_loop = asyncio.get_event_loop()
-                            def _load_pipe_metadata():
-                                _pipe_ctx = _ctx(sid)
-                                potree_meta_path = _pipe_ctx.merged_potree / "metadata.json"
-                                if not potree_meta_path.exists():
-                                    potree_meta_path = session_path / "output" / "potree" / "metadata.json"
-                                potree_meta = json.loads(potree_meta_path.read_text())
-                                floor_transform_4x4 = None
-                                ft_path = session_path / "output" / "floor_transform.npz"
-                                if ft_path.exists():
-                                    try:
-                                        data = np.load(ft_path)
-                                        s_val = float(data['s'])
-                                        R = data['R']
-                                        t = data['t']
-                                        M = np.eye(4)
-                                        M[:3, :3] = s_val * R
-                                        M[:3, 3] = t
-                                        floor_transform_4x4 = _display_matrix(sid, M)
-                                    except Exception:
-                                        pass
-                                # Check confidence in PLY
-                                has_confidence = False
-                                cp = session_path / "output" / "cleaned_cloud.ply"
-                                if cp.exists():
-                                    with open(cp, 'rb') as fp:
-                                        for hl in fp:
-                                            if b'confidence' in hl:
-                                                has_confidence = True
-                                            if hl.startswith(b'end_header'):
-                                                break
-                                return potree_meta, floor_transform_4x4, has_confidence
-                            
-                            potree_meta, floor_transform_4x4, has_confidence = await _pipe_loop.run_in_executor(None, _load_pipe_metadata)
-                            
-                            pipe_msg = {
-                                "type": "potree_ready",
-                                "session_id": sid,
-                                "url": f"/potree/{sid}/",
-                                "points": potree_meta.get("points", 0),
-                                "hasConfidence": has_confidence,
-                            }
-                            if floor_transform_4x4:
-                                pipe_msg["floorTransform"] = floor_transform_4x4
-                            await viewer_manager.broadcast_text(json.dumps(pipe_msg))
-                            print(f"[Pipeline] ✅ Potree ready for {sid}")
-                        else:
-                            print(f"[Pipeline] ⚠️ Potree conversion failed, sending raw cloud")
-                            await _send_cleaned_cloud_broadcast(sid)
-                    except Exception as e:
-                        print(f"[Pipeline] Send cloud error: {e}")
-
-                # Completion callback: send cloud + segmentation data
-                async def _on_pipeline_complete(sid, success, restart_chat=True):
-                    # Chat back up the moment the GPU is free — success OR failure
-                    # (user decision 2026-08-28: the chat is always available; the
-                    # reconstruction stages unloaded it to get the whole GPU).
-                    # restart_chat=False between multi-scan runs: the next scan
-                    # would immediately kill it again.
-                    if restart_chat:
-                        asyncio.get_running_loop().run_in_executor(
-                            None, _semantic_reload_if_idle, "pipeline finished")
-                        # USER 2026-09-04: at pipeline end there are NO
-                        # segments (only scene + cloud) — generate ONLY the
-                        # scene description. Per-segment dossiers happen when
-                        # the SEGMENTATION finishes (see /api/segmentation/
-                        # refresh).
-                        if success:
-                            asyncio.get_running_loop().run_in_executor(
-                                None, _session_intel_when_chat_up, sid, False)
-
-                    if not success:
-                        _tm.fail(_pipeline_tid, "Pipeline failed")
-                        try:
-                            await viewer_manager.broadcast_text(json.dumps({
-                                "type": "error",
-                                "message": f"Pipeline failed for {sid}. Check server logs."
-                            }))
-                        except Exception:
-                            pass
-                        return
-
-                    # did the CERTIFY stage produce a new geometry epoch? Its
-                    # transactional swap replaced cleaned_cloud.ply + the octree
-                    # AFTER the early delivery → the viewer must reload the
-                    # certified cloud (the acta says which epoch it left)
-                    _certified = False
-                    _new_epoch = None
-                    try:
-                        _acta_p = _ctx(sid).output_dir / "certify_acta.json"
-                        if _acta_p.exists():
-                            _acta = json.loads(_acta_p.read_text())
-                            _certified = (_acta.get("epoch_final") is not None
-                                          and _acta.get("epoch_final") != _acta.get("epoch_initial"))
-                            if _certified:
-                                _new_epoch = _acta.get("epoch_final")
-                    except Exception as _e:  # noqa: BLE001
-                        print(f"[Pipeline] certify acta lookup failed (non-fatal): {_e}")
-                    # the precision core (F0 → F6 bend) ends with its transactional publish:
-                    # the product is live when its report (corrected_cloud.json) names the
-                    # live epoch or an ancestor the certification warped (precision.product,
-                    # the same probe pipeline_manager uses to call the stage done)
-                    try:
-                        from precision.product import product_is_live as _product_is_live
-                        _p_live, _p_why = _product_is_live(_ctx(sid).output_dir)
-                        _ge_p = _ctx(sid).output_dir / "geometry_epoch.json"
-                        if _p_live and _ge_p.exists():
-                            _live = json.loads(_ge_p.read_text()).get("epoch")
-                            if _live is not None and _live != 0:
-                                _certified = True
-                                _new_epoch = _live
-                    except Exception as _e:  # noqa: BLE001
-                        print(f"[Pipeline] fuse report lookup failed (non-fatal): {_e}")
-
-                    if sid in _cloud_ready_sent and not _certified:
-                        print(f"[Pipeline] cloud already sent after cloudcompy — skipping rebuild")
-                    elif sid in _cloud_ready_sent and _certified:
-                        # the stage's transactional swap already built the octree of
-                        # the new epoch — broadcast it, do not rebuild
-                        print(f"[Pipeline] the pipeline produced epoch {_new_epoch} — "
-                              f"reloading the viewer with that cloud")
-                        await _correction_notify_viewer(sid, _ctx(sid).output_dir)
-                    else:
-                        _cloud_ready_sent.add(sid)
-                        await _notify_cloud_ready(sid)
-
-                    # Send segmentation result (with floor-aligned OBBs) if available
-                    # Use apply_segmentation_to_cloud (same as session reload) to ensure
-                    # proper cache invalidation and OBB recalculation
-                    try:
-                        from segmentation_pipeline import apply_segmentation_to_cloud
-                        _pipe_loop = asyncio.get_event_loop()
-                        _seg_ctx = _ctx(sid)
-                        _seg_output_dir = _seg_ctx.output_dir
-                        seg_data = await _pipe_loop.run_in_executor(
-                            None, apply_segmentation_to_cloud, _seg_output_dir
-                        )
-                        if seg_data and seg_data.get("instances"):
-                            await viewer_manager.broadcast_text(json.dumps(seg_data))
-                            print(f"[Pipeline] Sent {len(seg_data['instances'])} segments")
-                    except Exception as e:
-                        print(f"[Pipeline] Broadcast error: {e}")
-
-                    try:
-                        _tm.finish(_pipeline_tid)
-                        await viewer_manager.broadcast_text(json.dumps({
-                            "type": "status",
-                            "message": f"Pipeline complete for {sid}"
-                        }))
-                    except Exception:
-                        pass
-
-                # Start pipeline — support sequential multi-scan
-                # resume by default — an omitted flag must not wipe output/
-                replace = bool(cmd.get("replace", False))
-                scan_keys = cmd.get("scans", [])  # e.g. ["2026-03-07/legacy", "2026-03-08/default"]
-
-                # USER 2026-10-05: the segmentation chain (VLM → SAM3 → certification)
-                # runs after the cloud ONLY for the scans whose "segment when done"
-                # check is on (`segment`: their keys; the field absent = every scan,
-                # the old behaviour). The Autosegment window sends `autosegment`
-                # instead: the chain's stages it chose, FORCED to run on the cloud on
-                # disk, nothing wiped, the object descriptions optional.
-                from pipeline_manager import select_stages as _select_stages
-                _segment_keys = cmd.get("segment")
-                _auto = cmd.get("autosegment") if isinstance(cmd.get("autosegment"), dict) else None
-                _force = False
-                _run_cfg = dict(cfg)
-                _only = None
-                if _auto is not None:
-                    _want = _auto.get("stages") if isinstance(_auto.get("stages"), dict) else {}
-                    _only = {sid_ for key_, sid_ in (("vlm", StageId.VLM), ("sam3", StageId.SAM3),
-                                                     ("certify", StageId.CERTIFY)) if _want.get(key_)}
-                    if not _only:
-                        await viewer_manager.send_text(websocket, json.dumps({
-                            "type": "error",
-                            "message": "Autosegment: no stage selected — nothing to run"}))
-                        continue
-                    if not _want.get("captions", True):
-                        _seg0 = dict(cfg.get("segmentation") or {})
-                        _seg0["object_captions"] = {**dict(_seg0.get("object_captions") or {}),
-                                                    "enabled": False}
-                        _run_cfg["segmentation"] = _seg0
-                    _force, replace = True, False
-                    print(f"[Pipeline] autosegment for {session_id}: "
-                          f"{sorted(s_.value for s_ in _only)}"
-                          f"{'' if _want.get('captions', True) else ' (no object descriptions)'}")
-                elif _segment_keys is not None:
-                    _segment_keys = [str(k) for k in (_segment_keys or [])]
-                    print(f"[Pipeline] segmentation after the cloud for scans "
-                          f"{_segment_keys or 'NONE'} of {scan_keys or ['auto']}")
-
-                def _stages_for(sk):
-                    if _only is not None:
-                        return _select_stages(stages, only=_only)
-                    if _segment_keys is None:
-                        return _select_stages(stages)
-                    on = (sk in _segment_keys) if sk else bool(_segment_keys)
-                    return _select_stages(stages, segment=on)
-
-                if len(scan_keys) <= 1:
-                    # Single scan or auto-resolve
-                    single_key = scan_keys[0] if scan_keys else None
-                    await pipeline_manager.start_pipeline(
-                        session_id=session_id,
-                        stages=_stages_for(single_key),
-                        config=dict(_run_cfg),
-                        on_progress=_on_pipeline_progress,
-                        on_complete=_on_pipeline_complete,
-                        replace=replace,
-                        scan_key=single_key,
-                        force=_force,
-                    )
-                    label = single_key or "auto"
-                    await viewer_manager.send_text(websocket, json.dumps({
-                        "type": "info",
-                        "message": f"Pipeline started for {session_id} (scan: {label})"
-                    }))
-                else:
-                    # Sequential multi-scan: run each scan one at a time
-                    async def _run_multi_scan():
-                        total = len(scan_keys)
-                        for i, sk in enumerate(scan_keys):
-                            try:
-                                await viewer_manager.send_text(websocket, json.dumps({
-                                    "type": "info",
-                                    "message": f"Starting scan {i+1}/{total}: {sk}"
-                                }))
-                            except Exception:
-                                pass
-
-                            # Use a future to await sequential completion
-                            done_event = asyncio.Event()
-                            scan_success = [True]
-                            _is_last_scan = (i == total - 1)
-
-                            async def _on_scan_complete(sid, success, _ev=done_event,
-                                                        _ss=scan_success, _last=_is_last_scan):
-                                _ss[0] = success
-                                # Reload the chat only when the multi-scan run is
-                                # actually over (last scan, or a failure stops it) —
-                                # the next scan would kill vLLM again right away.
-                                await _on_pipeline_complete(
-                                    sid, success, restart_chat=(_last or not success))
-                                _ev.set()
-
-                            await pipeline_manager.start_pipeline(
-                                session_id=session_id,
-                                stages=_stages_for(sk),
-                                config=dict(_run_cfg),
-                                on_progress=_on_pipeline_progress,
-                                on_complete=_on_scan_complete,
-                                replace=replace,
-                                scan_key=sk,
-                                force=_force,
-                            )
-                            await done_event.wait()
-
-                            if not scan_success[0]:
-                                try:
-                                    await viewer_manager.send_text(websocket, json.dumps({
-                                        "type": "error",
-                                        "message": f"Scan {sk} failed. Stopping multi-scan pipeline."
-                                    }))
-                                except Exception:
-                                    pass
-                                return
-
-                        try:
-                            await viewer_manager.send_text(websocket, json.dumps({
-                                "type": "info",
-                                "message": f"All {total} scans completed for {session_id}"
-                            }))
-                        except Exception:
-                            pass
-
-                    asyncio.create_task(_run_multi_scan())
-                    await viewer_manager.send_text(websocket, json.dumps({
-                        "type": "info",
-                        "message": f"Multi-scan pipeline started: {len(scan_keys)} scans for {session_id}"
-                    }))
-
+                await _run_pipeline_command(cmd, websocket)
             elif cmd.get("type") == "cancel_pipeline":
                 session_id = cmd.get("session_id")
                 await pipeline_manager.cancel_pipeline(session_id)
