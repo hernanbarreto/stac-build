@@ -7705,8 +7705,23 @@ async def viewer_websocket(websocket: WebSocket):
                         else:
                             seg_data = {}
                             if (output_dir / "segmentation.json").exists():
-                                print(f"[Viewer] masks not projected on the cloud yet — the pipeline's cloud stage "
-                                      f"projects them; nothing is computed on load")
+                                # masks but no projection yet (USER 2026-10-05): project in the BACKGROUND —
+                                # this handler keeps reading commands meanwhile. A pipeline that starts
+                                # later re-projects in its own cloud stage; a Replace wipes output/ first.
+                                print(f"[Viewer] masks not projected yet for {session_id} — projecting in the "
+                                      f"background (the viewer keeps taking commands)")
+
+                                async def _project_in_background(ws=websocket, od=output_dir, sid=session_id):
+                                    try:
+                                        data = await loop.run_in_executor(None, apply_segmentation_to_cloud, od)
+                                        if data.get("instances"):
+                                            data.pop("reload_potree", None)
+                                            await viewer_manager.send_text(ws, json.dumps(data))
+                                            print(f"[Viewer] background projection done for {sid}: "
+                                                  f"{len(data['instances'])} segments")
+                                    except Exception as _e:  # noqa: BLE001 — declared, never fatal
+                                        print(f"[Viewer] background projection for {sid} did not finish: {_e}")
+                                asyncio.create_task(_project_in_background())
                         if seg_data.get("instances"):
                             should_reload_potree = seg_data.pop("reload_potree", False)
                             await viewer_manager.send_text(websocket, json.dumps(seg_data))
