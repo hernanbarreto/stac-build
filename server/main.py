@@ -965,13 +965,33 @@ class ViewerManager:
             lk = self.locks[websocket] = asyncio.Lock()
         return lk
 
+    @staticmethod
+    def _send_timeout_s(n_bytes: int) -> float:
+        """How long ONE write to a viewer may take before the socket is declared dead
+        (USER 2026-10-06, zaragoza: a write to a dead viewer socket never returned — the pipeline's
+        progress broadcast waited on it forever, the job never closed, and every other viewer
+        command queued behind the socket lock): 30 s, plus the time the payload needs at a slow
+        2 MB/s, so a large but live transfer is never cut."""
+        return 30.0 + float(n_bytes) / 2e6
+
+    async def _drop_dead(self, websocket: WebSocket, why: str):
+        print(f"[Viewer] {why} — dropping the socket")
+        self.disconnect_viewer(websocket)
+        try:
+            await asyncio.wait_for(websocket.close(), timeout=2.0)
+        except Exception:
+            pass
+
     async def send_text(self, websocket: WebSocket, message: str):
         if websocket is None:          # a command that came over HTTP: tell every viewer
             await self.broadcast_text(message)
             return
         async with self._lock_for(websocket):
             try:
-                await websocket.send_text(message)
+                await asyncio.wait_for(websocket.send_text(message),
+                                       timeout=self._send_timeout_s(len(message)))
+            except asyncio.TimeoutError:
+                await self._drop_dead(websocket, f"send_text of {len(message):,} chars timed out")
             except Exception as e:
                 print(f"[Viewer] send_text failed, dropping the socket: {e}")
                 self.disconnect_viewer(websocket)
@@ -979,7 +999,11 @@ class ViewerManager:
     async def send_bytes(self, websocket: WebSocket, data: bytes):
         async with self._lock_for(websocket):
             try:
-                await websocket.send_bytes(data)
+                await asyncio.wait_for(websocket.send_bytes(data),
+                                       timeout=self._send_timeout_s(len(data)))
+            except asyncio.TimeoutError:
+                await self._drop_dead(websocket, f"send_bytes of {len(data):,} bytes timed out")
+                return
             except Exception as e:
                 print(f"[Viewer] send_bytes failed, dropping the socket: {e}")
                 self.disconnect_viewer(websocket)
