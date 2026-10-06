@@ -2071,6 +2071,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                              chunk_ranges(int(_n_kf), int(_chunk), int(_ov))],
             "walk_m": (round(float(_walk), 2) if _walk is not None else None),
         }
+        _invalidate_on_new_chunk_plan(output_dir, plan, pipe.send_log)
         (output_dir / "chunk_plan.json").write_text(json.dumps(plan, indent=1))
         pipe.send_log(f"[chunk-plan] persisted output/chunk_plan.json: "
                       f"{len(plan['chunk_ranges'])} chunk(s), size {_chunk}, "
@@ -2693,6 +2694,68 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             shutil.rmtree(_da3_run, ignore_errors=True)
             pipe.send_log(f"[scale-align] freed da3_run/ ({_mb:.0f} MB) — TSDF uses omega "
                           f"depth (depth_source={_ds}), DA3 no longer needed")
+
+
+# What a NEW chunk plan leaves standing (USER 2026-10-05: "si lo rechaza, debe eliminar todo lo
+# derivado de la inferencia, y de ahí hacia adelante también"): only what was computed BEFORE
+# Omega and does not depend on how the keyframes are chunked.
+_PLAN_INDEPENDENT_OUTPUT = {"chunk_plan.json", "da3_run", "da3_windows", "intake",
+                            "salad_revisit_reference.json", "vggt_omega_config.yaml", "maplong_run"}
+_PLAN_INDEPENDENT_MAPLONG = {"loop_closures.txt", "salad_calibration.json", "sky_masks",
+                             "frame_list.json", "vggt_omega_config.yaml"}
+
+
+def _invalidate_on_new_chunk_plan(output_dir: Path, plan: dict, log=print) -> bool:
+    """A chunked run whose plan differs from the one the outputs on disk were made with
+    (another walk measured, another chunk size) wipes EVERY product of the old plan before
+    Omega runs: the chunk predictions, the bridges, the aligned copies, the per-chunk PLYs
+    and stamps, and everything downstream (omega_run, the precision core, the cloud, the
+    segmentation projected on it, the epochs). Old and new never live side by side — a
+    resume would otherwise load chunk 11 of the old plan next to chunk 10 of the new one
+    (USER 2026-10-05, pccr 2408: 296/148 on disk, 293/146 planned). What stays: the
+    frames and the intake, DA3 per keyframe and its windows, the SALAD candidates and
+    calibration, the sky masks — all computed before Omega, independent of the chunking.
+    Returns True when something was wiped."""
+    out = Path(output_dir)
+    ml = out / "maplong_run"
+    old_path = out / "chunk_plan.json"
+    old = None
+    if old_path.exists():
+        try:
+            old = json.loads(old_path.read_text())
+        except (OSError, ValueError):
+            old = {"unreadable": True}
+    has_chunks = any((ml / "_tmp_results_unaligned").glob("chunk_*.npy")) if ml.is_dir() else False
+    same = (old is not None
+            and old.get("chunk_ranges") == plan["chunk_ranges"]
+            and int(old.get("n_keyframes", -1)) == int(plan["n_keyframes"]))
+    if same:
+        return False
+    if old is None and not has_chunks:
+        return False                  # a first run: nothing of any plan on disk yet
+    why = ("chunk files on disk with no chunk plan recorded for them" if old is None else
+           f"the outputs on disk are of chunk plan {old.get('chunk_size')}/{old.get('overlap')} "
+           f"over {old.get('n_keyframes')} keyframes, this run plans "
+           f"{plan['chunk_size']}/{plan['overlap']} over {plan['n_keyframes']}")
+    freed = 0
+    doomed = [p for p in out.iterdir() if p.name not in _PLAN_INDEPENDENT_OUTPUT]
+    if ml.is_dir():
+        doomed += [p for p in ml.iterdir() if p.name not in _PLAN_INDEPENDENT_MAPLONG]
+    for p in doomed:
+        try:
+            if p.is_dir() and not p.is_symlink():
+                freed += sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+                shutil.rmtree(p)
+            else:
+                freed += p.stat().st_size if p.exists() else 0
+                p.unlink(missing_ok=True)
+        except OSError as e:
+            raise RuntimeError(f"a new chunk plan must start clean and {p} could not be deleted ({e}) "
+                               f"— old and new chunk products would live side by side") from e
+    log(f"[chunk-plan] NEW PLAN — {why}: every product of the old plan and everything downstream "
+        f"deleted ({len(doomed)} item(s), {freed / 1e9:.1f} GB); kept: frames, intake, DA3 per "
+        f"keyframe + windows, SALAD candidates, sky masks")
+    return True
 
 
 def _cleanup_recon_temps(save_dir: Path, output_dir: Path, backend: str, pipe: WorkerPipe):
