@@ -83,8 +83,8 @@ def die_with_parent(poll_s: float = 2.0) -> None:
     it. PR_SET_PDEATHSIG alone kills only the direct child, and the stage tree used to
     survive a backend restart (pccr 2408: an orphan Omega kept 58 GB of RAM and the
     CPU for an hour; zaragoza: an orphan SAM3 held 21 GB of VRAM for four hours).
-    Deliberately persistent services (vLLM) run in their own session and are not
-    touched."""
+    vLLM runs in its own session (a GPU handover must not signal the backend's group)
+    and dies with the backend through semantic/watchdog.py and the server shutdown."""
     import os
     import signal
     import threading

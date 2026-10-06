@@ -1975,17 +1975,23 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # and skips. A single Omega pass is no instrument for it: over pccr 2026-08-24
     # it read 1526.6 m for a walk its chunked run measured at 104.8 m.
     _walk_doc = None
+    _walk_reused = False
     if _scale_align_on and _sel_files:
         from precision.config import load_precision_config
         _pc = load_precision_config(config)
         if _pc.enabled:
-            from intake.walk import run_da3_windows, measure_walk
-            pipe.send_progress(5, "Gauge I3: DA3 multi-view windows → metric walk...",
-                               stage="reconstruction")
-            run_da3_windows(output_dir.parent, _pc.gauge, sys.executable, log=pipe.send_log,
-                            check_cancel=pipe.check_cancel, frames_dir=frames_dir,
-                            files=_sel_files)
-            _walk_doc = measure_walk(output_dir.parent, _pc.gauge, log=pipe.send_log)
+            from intake.walk import load_walk, measure_walk, run_da3_windows, walk_is_current
+            if walk_is_current(output_dir.parent, _sel_files, frames_dir, _pc.gauge,
+                               sys.executable, log=pipe.send_log):
+                _walk_doc = load_walk(output_dir.parent)
+                _walk_reused = True
+            else:
+                pipe.send_progress(5, "Gauge I3: DA3 multi-view windows → metric walk...",
+                                   stage="reconstruction")
+                run_da3_windows(output_dir.parent, _pc.gauge, sys.executable, log=pipe.send_log,
+                                check_cancel=pipe.check_cancel, frames_dir=frames_dir,
+                                files=_sel_files)
+                _walk_doc = measure_walk(output_dir.parent, _pc.gauge, log=pipe.send_log)
     if _scale_align_on:
         pipe.send_progress(6, "VGGT-Omega: extracting DA3 metric depth (per-frame)...",
                            stage="reconstruction")
@@ -2354,7 +2360,11 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 # SALAD's appearance bar calibrated on the session's GEOMETRIC revisits
                 # (the DA3-window walk) — LoopModels.LoopModel.calibrate_threshold
                 from intake.walk import revisit_reference, REVISIT_REFERENCE_NAME
-                _ref = revisit_reference(output_dir.parent)
+                _ref_p = output_dir / REVISIT_REFERENCE_NAME
+                if _walk_reused and _ref_p.exists():
+                    _ref = json.loads(_ref_p.read_text())     # measured with the reused walk
+                else:
+                    _ref = revisit_reference(output_dir.parent)
                 _sal["revisit_reference"] = str(output_dir / REVISIT_REFERENCE_NAME)
                 pipe.send_log(f"[loops] SALAD revisit reference: {len(_ref['frames'])} "
                               f"keyframes, revisit = cameras < {_ref['dist_bar_m']:.2f} m "

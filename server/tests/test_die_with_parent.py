@@ -59,3 +59,36 @@ def test_the_server_shutdown_kills_the_pipeline_stage_trees():
     i_setsid = base.index("os.setsid()")
     i_watch = base.index("die_with_parent()          # the stage tree never outlives the server")
     assert i_setsid < i_watch
+
+
+def test_vllm_session_dies_with_the_backend(tmp_path):
+    """USER 2026-10-06: the VLM too. A fake 'vLLM session' (its own session, a child
+    in it) is killed by semantic.watchdog when the 'backend' pid dies."""
+    import subprocess as sp
+    backend = sp.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    fake_vllm = sp.Popen([sys.executable, "-c",
+                          "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)']); time.sleep(120)"],
+                         start_new_session=True)
+    time.sleep(0.5)
+    dog = sp.Popen([sys.executable, "-c",
+                    f"import sys; sys.path.insert(0, {str(SERVER)!r}); from semantic.watchdog import watch; "
+                    f"watch({backend.pid}, {fake_vllm.pid}, poll_s=0.2, grace_s=2.0)"])
+    time.sleep(0.6)
+    assert dog.poll() is None and fake_vllm.poll() is None
+    backend.kill(); backend.wait()
+    dog.wait(timeout=10)
+    fake_vllm.wait(timeout=10)
+    try:
+        os.killpg(fake_vllm.pid, 0)
+        group_left = True
+    except OSError:
+        group_left = False
+    assert not group_left, "a process of the vLLM session outlived the backend"
+
+
+def test_the_launcher_starts_the_watchdog_and_the_shutdown_stops_vllm():
+    svc = (SERVER / "semantic" / "service.py").read_text()
+    assert '"-m", "semantic.watchdog"' in svc and "STAC_BACKEND_PID" in svc
+    src = (SERVER / "main.py").read_text()
+    assert 'os.environ["STAC_BACKEND_PID"] = str(os.getpid())' in src
+    assert '_stop_sem(None, stage="server shutdown")' in src

@@ -296,6 +296,49 @@ def run_da3_windows(session_dir: Path, gcfg, python: str, log: Callable = print,
     return wdir, windows
 
 
+def walk_is_current(session_dir: Path, files: Sequence[str], frames_dir: Path, gcfg,
+                    python: str, log: Callable = print) -> bool:
+    """True when ``intake/walk.json`` was measured on EXACTLY the window plan this run would
+    extract (same keyframes, same deterministic window size, same model and resolution) and
+    the revisit reference is on disk — the walk, the anchors and the revisit reference are
+    then reused and the window depth files are NOT regenerated (USER 2026-10-06: a resume
+    regenerated 153 windows, 20 min of GPU, only because their files had been deleted to
+    save disk). F2 regenerates the files when IT needs them (gauge.run_gauge)."""
+    session_dir = Path(session_dir)
+    walk = load_walk(session_dir)
+    spec_path = session_dir / "output" / WINDOWS_DIRNAME / "windows.json"
+    ref = session_dir / "output" / REVISIT_REFERENCE_NAME
+    if walk is None or not spec_path.exists() or not ref.exists():
+        return False
+    try:
+        old = json.loads(spec_path.read_text())
+    except (OSError, ValueError):
+        return False
+    res = da3_process_res(gcfg.process_res, frames_dir)
+    from intake.vram import window_size
+    from intake.config import load_intake_config
+    from config import cfg as _raw_cfg
+    icfg = load_intake_config(_raw_cfg)
+    import cv2
+    _img = cv2.imread(str(Path(frames_dir) / files[0]), cv2.IMREAD_UNCHANGED)
+    if _img is None:
+        return False
+    w_frames = window_size(session_dir, files, frames_dir, gcfg.model_id, res,
+                           (int(_img.shape[1]), int(_img.shape[0])), python,
+                           requested=int(gcfg.window_frames),
+                           calibration_frames=int(icfg.parallax.vram_calibration_frames),
+                           margin_frac=float(icfg.parallax.vram_margin_frac), log=lambda *_: None)
+    plan = plan_windows(len(files), w_frames, gcfg.window_overlap_frac)
+    spec = {"windows": [[str(Path(frames_dir) / f) for f in files[a:b]] for a, b in plan],
+            "process_res": res, "model_id": gcfg.model_id}
+    same = (old == spec and int(walk.get("n_keyframes", -1)) == len(files)
+            and int(walk.get("n_windows", -1)) == len(plan))
+    if same:
+        log(f"{LOG_TAG} I3 reused: walk.json measured on this exact plan ({len(plan)} windows of "
+            f"{w_frames} keyframes, {len(files)} keyframes) — the window depth is not regenerated")
+    return same
+
+
 def delete_windows(session_dir: Path, log: Callable = print) -> int:
     """Remove the window depth files (``window_*.npz``) of ``output/da3_windows`` — F0's only
     reader is through; ``windows.json`` (the plan), ``walk.json`` and the anchors stay, so

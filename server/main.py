@@ -859,6 +859,9 @@ def _die_with_parent_sigkill():
 # uvicorn → lifespan shutdown) can kill any still running. PR_SET_PDEATHSIG handles
 # the hard-kill path; this handles the clean one.
 _ACTIVE_WORKERS: set = set()
+# every process the backend launches (vLLM's watchdog above all) knows WHICH pid is the
+# backend: the watchdog kills vLLM when this pid dies (USER 2026-10-06)
+os.environ["STAC_BACKEND_PID"] = str(os.getpid())
 
 
 def _track_worker(proc):
@@ -1151,6 +1154,13 @@ async def lifespan(app: FastAPI):
     if _ACTIVE_WORKERS:
         print(f"[Server] shutdown — killing {len(_ACTIVE_WORKERS)} active worker(s)")
         _kill_active_workers("server shutdown")
+    # vLLM too (USER 2026-10-06: "todo lo que haya debe morir" — the VLM included; a hard
+    # death is covered by semantic/watchdog.py on the backend's pid)
+    try:
+        from workers.base import stop_semantic_service as _stop_sem
+        _stop_sem(None, stage="server shutdown")
+    except Exception as _e:  # noqa: BLE001
+        print(f"[Server] shutdown — vLLM stop failed: {_e}")
     # the pipeline's stage trees too (USER 2026-10-06: Omega, DA3, SAM3, the core —
     # everything dies with the server; a hard death is covered by die_with_parent)
     try:

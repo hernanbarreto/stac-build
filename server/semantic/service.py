@@ -11,7 +11,9 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -114,9 +116,17 @@ def ensure_service(config: Optional[dict] = None,
         # the vLLM came from an earlier, dead backend). Own session (start_new_session) — no
         # group-wide signal reaches the backend — AND PR_SET_PDEATHSIG keeps the chat dying
         # with the backend as before.
-        subprocess.Popen(["bash", str(_LAUNCHER)], cwd=str(_STAC_ROOT),
+        _proc = subprocess.Popen(["bash", str(_LAUNCHER)], cwd=str(_STAC_ROOT),
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 preexec_fn=_die_with_parent, start_new_session=True)
+        # USER 2026-10-06 ("todo lo que haya debe morir", the VLM included): a watchdog on
+        # the BACKEND's pid kills the whole vLLM session the moment the backend is gone —
+        # PR_SET_PDEATHSIG alone follows the launching THREAD and reaches only the launcher
+        _backend = int(os.environ.get("STAC_BACKEND_PID") or os.getpid())
+        subprocess.Popen([sys.executable, "-m", "semantic.watchdog", str(_backend), str(_proc.pid)],
+                         cwd=str(Path(__file__).resolve().parent.parent),
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         preexec_fn=_die_with_parent, start_new_session=True)
+                         start_new_session=True)
     except Exception as e:  # noqa: BLE001
         _log(f"Could not launch semantic service: {e}")
         return False
