@@ -86,6 +86,19 @@ def test_production_config_declares_the_judge_and_the_fork_uses_it():
     assert "split_loop_edges(" in src and 'cfg_req(gcfg, "loop_holdout_frac", "graph")' in src
     assert "refused = (not converged) or (not ok_judge)" in src
     assert 'PoseGraph(T0, gcfg, device=_dev)' in src and 'torch.cuda.is_available()' in src
-    i_judge = src.index("refused = (not converged) or (not ok_judge)")
-    i_fallback = src.index("refused = (not converged) or (not ok_held)")
-    assert i_judge < i_fallback
+    # USER 2026-10-06: fewer than min_judge_closures held-out closures → NOT applied, no fallback
+    assert "if len(judge_edges) >= _min_judge:" in src and "refused = True" in src
+    assert "refused = (not converged) or (not ok_held)" not in src
+
+
+def test_the_judge_needs_enough_closures_to_tell_a_correction_from_luck():
+    from loop_utils.loop_judge import min_judge_closures
+    assert min_judge_closures(0.95) == 5          # 0.5**5 = 0.031 < 0.05 ; 0.5**4 = 0.0625
+    assert min_judge_closures(0.99) == 7
+    assert min_judge_closures(0.5) == 1
+    owner = np.zeros(60, int); owner[30:] = 1
+    edges = _edges(20, owner)
+    fit, judge, rep = split_loop_edges(edges, owner, 0.25, 4, min_judge=5)
+    assert len(judge) >= 5 and len(fit) >= 10, rep
+    fit, judge, rep = split_loop_edges(_edges(11, owner), owner, 0.25, 4, min_judge=5)
+    assert len(judge) < 5 or len(fit) >= len(judge)   # too few edges: the judge cannot reach 5
