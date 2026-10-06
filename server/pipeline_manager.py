@@ -398,6 +398,21 @@ class PipelineManager:
         if 0 <= job.current_stage_idx < len(job.stages):
             job.stages[job.current_stage_idx].status = JobStatus.CANCELLED
 
+    def kill_all_stages(self, reason: str = "server shutdown") -> int:
+        """SIGKILL the whole process tree of every stage still running (USER 2026-10-06:
+        stopping the server must stop EVERYTHING — Omega, DA3, SAM3, the core). Called
+        from the server's shutdown; a hard server death is covered by each worker's
+        die_with_parent watchdog. Returns how many stage trees were killed."""
+        n = 0
+        for job in list(self._jobs.values()):
+            proc = getattr(job, "_process", None)
+            if proc is not None and proc.is_alive():
+                logger.info(f"[Pipeline] {reason}: killing the stage tree of {job.session_id} "
+                            f"(pid {proc.pid})")
+                self._kill_stage_tree(proc)
+                n += 1
+        return n
+
     @staticmethod
     def _kill_stage_tree(process, timeout: float = 5.0) -> None:
         """Kill a stage worker AND every child it spawned. Workers call

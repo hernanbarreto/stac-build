@@ -1151,6 +1151,14 @@ async def lifespan(app: FastAPI):
     if _ACTIVE_WORKERS:
         print(f"[Server] shutdown — killing {len(_ACTIVE_WORKERS)} active worker(s)")
         _kill_active_workers("server shutdown")
+    # the pipeline's stage trees too (USER 2026-10-06: Omega, DA3, SAM3, the core —
+    # everything dies with the server; a hard death is covered by die_with_parent)
+    try:
+        _n = pipeline_manager.kill_all_stages("server shutdown")
+        if _n:
+            print(f"[Server] shutdown — killed {_n} pipeline stage tree(s)")
+    except Exception as _e:  # noqa: BLE001
+        print(f"[Server] shutdown — pipeline stage kill failed: {_e}")
 
 app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

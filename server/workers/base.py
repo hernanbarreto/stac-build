@@ -74,6 +74,34 @@ class WorkerPipe:
             pass
 
 
+def die_with_parent(poll_s: float = 2.0) -> None:
+    """USER 2026-10-06: "cuando mato el proceso debe matar todo lo que tenía corriendo,
+    omega, da3, vlm, sam3, pointdit, todo". A daemon thread watches the parent; the
+    moment it is gone (the server restarted, killed, crashed) the WHOLE process group
+    of this stage dies with SIGKILL — the worker, the inline child, Omega's
+    vggt_long.py, DA3, SAM3, the precision steps, PointDiT: everything launched under
+    it. PR_SET_PDEATHSIG alone kills only the direct child, and the stage tree used to
+    survive a backend restart (pccr 2408: an orphan Omega kept 58 GB of RAM and the
+    CPU for an hour; zaragoza: an orphan SAM3 held 21 GB of VRAM for four hours).
+    Deliberately persistent services (vLLM) run in their own session and are not
+    touched."""
+    import os
+    import signal
+    import threading
+    ppid = os.getppid()
+
+    def _watch():
+        while True:
+            time.sleep(poll_s)
+            if os.getppid() != ppid:
+                try:
+                    os.killpg(os.getpgid(0), signal.SIGKILL)
+                except OSError:
+                    os.kill(os.getpid(), signal.SIGKILL)
+
+    threading.Thread(target=_watch, name="die-with-parent", daemon=True).start()
+
+
 def run_worker_safe(worker_fn, conn: Connection, *args, **kwargs):
     """Execute a worker function with standard error handling and cleanup.
 
@@ -94,6 +122,7 @@ def run_worker_safe(worker_fn, conn: Connection, *args, **kwargs):
             os.setsid()
     except Exception:
         pass
+    die_with_parent()          # the stage tree never outlives the server (USER 2026-10-06)
     pipe = WorkerPipe(conn)
     t0 = time.time()
     try:
