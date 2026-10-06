@@ -2195,7 +2195,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         if _missing:
             _run_da3_anchor(pipe, frames_dir, output_dir, sorted(set(_missing)), recon_cfg)
 
-    _omega_oom = {"hit": False}
+    _omega_oom = {"hit": False, "text": ""}
 
     def _omega_pass(cfg_v, tag):
         # the ONE pass runs on the full keyframe set the plan was measured on
@@ -2241,6 +2241,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 return False
             if "out of memory" in line.lower() or "outofmemoryerror" in line.lower():
                 _omega_oom["hit"] = True
+                _omega_oom["text"] += line + " "
             m = chunk_pattern.search(line)
             if m:
                 done, total = int(m.group(1)), int(m.group(2))
@@ -2306,10 +2307,14 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # the same margin the I3 DA3 windows leave on the card (USER 2026-10-06)
     from intake.config import load_intake_config as _lic
     _omega_margin = float(_lic(config).parallax.vram_margin_frac)
+    from intake.vram import card_name as _card_name
+    from reconstruction.chunk_plan import omega_footprint_factor, record_omega_oom
+    _card = _card_name()
+    _ffac = omega_footprint_factor(_card)
     _res = omega_resolution_for(_n_max, _total_gb, _native_frame_wh(frames_dir),
                                 str(vggt_config["Model"]["omega_mode"]),
                                 int(vggt_config["Model"]["omega_resolution"]),
-                                margin_frac=_omega_margin)
+                                margin_frac=_omega_margin, footprint_factor=_ffac)
     vggt_config["Model"]["omega_resolution"] = int(_res["resolution"])
     vggt_config["Model"]["omega_resolution_report"] = _res
     pipe.send_log(f"[omega-res] Omega at {_res['resolution']} ({_res['mode']}, grid "
@@ -2406,9 +2411,22 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 raise
             _omega_oom["hit"] = False
             _prev = int(_res["resolution"])
+            # learn from the OOM (USER 2026-10-06): what the card really needed vs the prediction,
+            # stored per card; without a readable message, step down by the margin's share of the
+            # pixels (never one 16-px step: 1664 → 1648 is 1 % fewer pixels)
+            _newf = record_omega_oom(_card, float(_res["predicted_peak_gb"]), _omega_oom["text"],
+                                     {"resolution": _prev, "grid_wh": _res["grid_wh"], "frames": _n_max})
+            _omega_oom["text"] = ""
+            if _newf is not None:
+                _ffac = _newf
+                _ceil = _prev - _OPS
+                pipe.send_log(f"[omega-res] measured footprint factor {_ffac:.3f} for {_card} "
+                              f"(the linear model under-read this grid) — stored for this card")
+            else:
+                _ceil = max(_OPS, int(_prev * (1.0 - _omega_margin) ** 0.5) // _OPS * _OPS)
             _res = omega_resolution_for(_n_max, _total_gb, _native_frame_wh(frames_dir),
-                                        str(vggt_config["Model"]["omega_mode"]), _prev - _OPS,
-                                        margin_frac=_omega_margin)
+                                        str(vggt_config["Model"]["omega_mode"]), _ceil,
+                                        margin_frac=_omega_margin, footprint_factor=_ffac)
             _res["oom_fallback_from"] = _prev
             vggt_config["Model"]["omega_resolution"] = int(_res["resolution"])
             vggt_config["Model"]["omega_resolution_report"] = _res

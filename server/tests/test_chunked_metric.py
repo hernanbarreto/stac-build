@@ -1090,3 +1090,25 @@ def test_omega_resolution_leaves_the_margin_and_retries_lower_on_oom():
     src = (Path(__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
     assert "margin_frac=_omega_margin" in src and "parallax.vram_margin_frac" in src
     assert '_omega_oom["hit"] = True' in src and "_prev - _OPS" in src
+
+
+def test_an_omega_oom_teaches_the_card_its_real_footprint(tmp_path):
+    """USER 2026-10-06 ("guardar el pico de memoria medido"): zaragoza at 1664 OOM'd with 77.06 GiB in
+    use and 4.21 GiB more asked against a 66.95 GiB prediction; the factor is stored per card, never
+    lowered, and the next choice uses it."""
+    from reconstruction.chunk_plan import omega_footprint_factor, omega_resolution_for, record_omega_oom
+    f = tmp_path / "fp.json"
+    msg = ("torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 4.21 GiB. GPU 0 has a total "
+           "capacity of 79.25 GiB of which 2.19 GiB is free.")
+    assert omega_footprint_factor("cardA", f) == 1.0
+    r0 = omega_resolution_for(183, 80.0, (1920, 1080), "max_size", 1920, margin_frac=0.15)
+    k = record_omega_oom("cardA", r0["predicted_peak_gb"], msg, {"resolution": r0["resolution"]}, f)
+    assert k is not None and abs(k - (79.25 - 2.19 + 4.21) / r0["predicted_peak_gb"]) < 1e-9
+    assert omega_footprint_factor("cardA", f) == round(k, 4) and omega_footprint_factor("cardB", f) == 1.0
+    r1 = omega_resolution_for(183, 80.0, (1920, 1080), "max_size", 1920, margin_frac=0.15,
+                              footprint_factor=omega_footprint_factor("cardA", f))
+    assert r1["resolution"] < r0["resolution"]
+    # never lowered by a milder OOM; an unreadable message records nothing
+    record_omega_oom("cardA", 1000.0, msg, {}, f)
+    assert omega_footprint_factor("cardA", f) == round(k, 4)
+    assert record_omega_oom("cardA", 50.0, "killed", {}, f) is None

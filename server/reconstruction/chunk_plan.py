@@ -130,16 +130,65 @@ def plan_anchor_indices(ranges: Sequence[Sequence[int]], per_chunk: int = 3) -> 
 
 # ── Omega's resolution: the largest planned chunk must fit the card ──
 
-def omega_capacity(total_gb: float, grid_w: int, grid_h: int, margin_frac: float = 0.0) -> int:
+def omega_capacity(total_gb: float, grid_w: int, grid_h: int, margin_frac: float = 0.0,
+                   footprint_factor: float = 1.0) -> int:
     """Frames one Omega pass holds on a card of ``total_gb`` (less ``margin_frac`` of it) at a
-    ``grid_w`` x ``grid_h`` grid."""
-    per_frame = OMEGA_GB_PER_FRAME_REF * (float(grid_w) * float(grid_h)) / float(
+    ``grid_w`` x ``grid_h`` grid; ``footprint_factor`` is what this card MEASURED beyond the
+    linear model (omega_footprint_factor)."""
+    per_frame = float(footprint_factor) * OMEGA_GB_PER_FRAME_REF * (float(grid_w) * float(grid_h)) / float(
         OMEGA_REF_GRID_WH[0] * OMEGA_REF_GRID_WH[1])
     return int((float(total_gb) * (1.0 - float(margin_frac)) - OMEGA_BASE_GB) / per_frame)
 
 
+# ── what the card MEASURED (USER 2026-10-06: "guardar el pico de memoria medido") ──
+# zaragoza 183 keyframes at 1664 (grid 1664x928): predicted 66.95 GiB, an OOM with 77.06 GiB in use
+# and 4.21 GiB more asked — the linear 0.086 GB/frame model under-reads large grids. Every OOM of
+# an Omega pass records need ≥ (total − free + asked) against the prediction; the factor (≥ 1) is
+# kept PER CARD and multiplies the per-frame footprint from then on. It only ever grows.
+FOOTPRINT_FILE = Path(__file__).resolve().parents[2] / "weights" / "omega_footprint.json"
+
+
+def omega_footprint_factor(card: str, path: Path = None) -> float:
+    p = Path(path) if path is not None else FOOTPRINT_FILE
+    try:
+        doc = json.loads(p.read_text())
+        return max(1.0, float(doc.get(card, {}).get("factor", 1.0)))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 1.0
+
+
+def record_omega_oom(card: str, predicted_peak_gb: float, oom_text: str, evidence: Dict[str, Any],
+                     path: Path = None) -> Optional[float]:
+    """From torch's OOM message ('Tried to allocate X GiB … total capacity T GiB of which Y GiB is
+    free') the pass needed at least T − Y + X; factor = that / the predicted peak. Stored per card
+    (never lowered). Returns the new factor, None when the message cannot be read."""
+    import re
+    m_a = re.search(r"Tried to allocate ([0-9.]+) GiB", oom_text)
+    m_t = re.search(r"total capacity of ([0-9.]+) GiB of which ([0-9.]+) (GiB|MiB) is free", oom_text)
+    if not (m_a and m_t) or not predicted_peak_gb or predicted_peak_gb <= 0:
+        return None
+    free = float(m_t.group(2)) / (1024.0 if m_t.group(3) == "MiB" else 1.0)
+    need = float(m_t.group(1)) - free + float(m_a.group(1))
+    p = Path(path) if path is not None else FOOTPRINT_FILE
+    try:
+        doc = json.loads(p.read_text())
+    except (OSError, ValueError):
+        doc = {}
+    old = max(1.0, float(doc.get(card, {}).get("factor", 1.0)))
+    # the prediction already carried the old factor: scale it by what was missing
+    new = max(old, old * need / float(predicted_peak_gb))
+    doc[card] = {"factor": round(new, 4), "last": {**evidence, "need_min_gib": round(need, 3),
+                                                   "predicted_peak_gib": round(float(predicted_peak_gb), 3)}}
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(doc, indent=1))
+    tmp.replace(p)
+    return new
+
+
 def omega_resolution_for(n_frames: int, total_gb: float, native_wh: Tuple[int, int], mode: str,
-                         ceiling: int, margin_frac: float = 0.0) -> Dict[str, Any]:
+                         ceiling: int, margin_frac: float = 0.0,
+                         footprint_factor: float = 1.0) -> Dict[str, Any]:
     """USER 2026-10-06 (*"el plan de chunk no cambia, el tamaño de la tarjeta no lo podemos
     cambiar, para que encaje adaptamos la resolución"*): Omega's processing resolution for a run
     whose LARGEST chunk holds ``n_frames``. ``ceiling`` is the configured resolution (``native`` =
@@ -164,18 +213,19 @@ def omega_resolution_for(n_frames: int, total_gb: float, native_wh: Tuple[int, i
             "card_total_gb": round(float(total_gb), 3), "base_gb": OMEGA_BASE_GB,
             "gb_per_frame_ref": OMEGA_GB_PER_FRAME_REF, "ref_grid_wh": list(OMEGA_REF_GRID_WH),
             "largest_chunk_frames": n_frames, "patch": OMEGA_PATCH_SIZE,
-            "margin_frac": float(margin_frac)}
+            "margin_frac": float(margin_frac), "footprint_factor": float(footprint_factor)}
     for res in range(ceiling, 0, -OMEGA_PATCH_SIZE):
         g = omega_grid_for(nw, nh, str(mode), res)
-        cap = omega_capacity(total_gb, g.w, g.h, margin_frac)
+        cap = omega_capacity(total_gb, g.w, g.h, margin_frac, footprint_factor)
         if n_frames <= cap:
-            gb = OMEGA_GB_PER_FRAME_REF * g.w * g.h / float(OMEGA_REF_GRID_WH[0] * OMEGA_REF_GRID_WH[1])
+            gb = float(footprint_factor) * OMEGA_GB_PER_FRAME_REF * g.w * g.h / float(
+                OMEGA_REF_GRID_WH[0] * OMEGA_REF_GRID_WH[1])
             if res == ceiling:
                 why = (f"the largest chunk ({n_frames} frames) fits the card at the configured "
                        f"resolution {ceiling} (grid {g.w}x{g.h}): capacity {cap} frames")
             else:
                 g_up = omega_grid_for(nw, nh, str(mode), res + OMEGA_PATCH_SIZE)
-                cap_up = omega_capacity(total_gb, g_up.w, g_up.h, margin_frac)
+                cap_up = omega_capacity(total_gb, g_up.w, g_up.h, margin_frac, footprint_factor)
                 why = (f"the largest chunk ({n_frames} frames) does not fit at {ceiling}; "
                        f"{res} (grid {g.w}x{g.h}, capacity {cap}) is the largest patch-aligned "
                        f"resolution that holds it ({res + OMEGA_PATCH_SIZE}: grid "
