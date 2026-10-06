@@ -517,6 +517,7 @@ def fork_graph_cfg(**over) -> dict:
          "lm_diag_floor": 1e-9, "tol": 1e-8, "max_iters": 1000,
          "pcg_tol": 1e-10, "pcg_max_iters": 2000, "min_loop_gain": 0.5,
          "heldout_confidence": 0.95,
+         "loop_holdout_frac": 0.25, "loop_holdout_min_edges": 4,
          "gate_mode": "advisory",
          "holdout_offsets": [4, 10], "holdout_stride": 3,
          "holdout_samples": 4000, "holdout_max_nn_m": 0.10}

@@ -239,6 +239,9 @@ class GraphConfig:
     heldout_confidence: float       # gate: the held-out surface pairs may not worsen beyond
                                     # THEIR OWN NOISE — the bar is bootstrapped from the pairs
                                     # (metric_lock.heldout_change), not a tolerated magnitude
+    loop_holdout_frac: float        # USER 2026-10-06: share of the loop closures held out of the
+                                    # in-run solve as ITS JUDGE (applied only when they improve)
+    loop_holdout_min_edges: int     # BOUND: fewer loop edges → nothing held out, local pairs judge
     gate_mode: str                  # advisory | veto — advisory: the gates (gain, held-out,
                                     # authority) are measured and declared, the closure is
                                     # APPLIED (USER 2026-09-13); veto: a failed gate → identity
@@ -695,6 +698,8 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         pcg_max_iters=_num(gp, "pcg_max_iters", G, lo=1, integer=True),
         min_loop_gain=_num(gp, "min_loop_gain", G, lo=0, hi=1.0),
         heldout_confidence=_num(gp, "heldout_confidence", G, lo=0.5, hi=1.0, lo_excl=True),
+        loop_holdout_frac=_num(gp, "loop_holdout_frac", G, lo=0, hi=0.5),
+        loop_holdout_min_edges=_num(gp, "loop_holdout_min_edges", G, lo=2, integer=True),
         gate_mode=_choice(gp, "gate_mode", G, ("advisory", "veto")),
         holdout_offsets=tuple(int(x) for x in ho),
         holdout_stride=_num(gp, "holdout_stride", G, lo=1, integer=True),

@@ -9,9 +9,12 @@
   SAME NIGHT: the spatial gate's FRUSTUM rule no longer vetoes a SALAD pair (pccr 2408: 40/40 rejected with zero
   frames visible — it judged the pair with the drifted poses the closure exists to fix); the bridge is MEASURED
   and its σ + the graph's edge vote decide (`spatial_gate.gate_frame_pair`). Rule 0 (the walk) still rejects.
-  AND the in-run pose graph's held-out judge is ADVISORY again (USER "la 2": measured, declared, the closure
-  applied; only a non-converged solve is refused) — its intra-chunk pairs measure local smoothness, not the
-  global drift a closure corrects. Zaragoza's refusal on 12.47→12.65 cm had a degenerate CI [-0.00, -0.00]: to look at.
+  THE JUDGE of the in-run pose graph (USER 2026-10-06, replacing "la 2" of the night before): one loop closure
+  in four is HELD OUT of the solve, by chunk pair, and the graph is applied ONLY when those closures improve beyond
+  their own noise (`loop_utils/loop_judge.py`, `correction_graph.graph.loop_holdout_frac`/`_min_edges`). The local
+  held-out pairs measure smoothness, not the global drift a closure corrects (they vetoed pccr 2408's only real
+  correction); applied unjudged, bridges disagreeing by metres bent zaragoza. The solver runs on CUDA (was CPU:
+  minutes per LM iteration at 12k unknowns). Zaragoza's old refusal had a degenerate CI [-0.00, -0.00]: to look at.
   SAME NIGHT: "Reconstruir" has a per-scan check *Segment when done* (OFF by default) — off, the run ends at the cloud;
   Instances → **Autosegment** opens a window with the VLM prompt + SAM3 prompts (editable, SAVED IN THE SESSION,
   `output/autosegment.json`) and a checkbox per stage (VLM / SAM3+masks / certification / descriptions), forced to run

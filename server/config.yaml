@@ -3557,6 +3557,18 @@ correction_graph:
                                     # rejected a measured 12 % improvement. This is a declared
                                     # CONFIDENCE (how sure before we move geometry), not a
                                     # magnitude someone chose.
+    loop_holdout_frac: 0.25         # USER 2026-10-06: THE JUDGE of the in-run pose graph is a held-out
+                                    # share of the loop closures themselves — one in four, by chunk
+                                    # pair (every pair keeps a fitted edge), never fitted — measured
+                                    # at the chain and at the solution: the graph is applied ONLY
+                                    # when they improve beyond their own noise (heldout_change).
+                                    # The local held-out surface pairs (intra-chunk, a few frames
+                                    # apart) measure smoothness, not the global drift a closure
+                                    # corrects: on pccr 2408 they vetoed the only correction that
+                                    # mattered; applied unjudged ("la 2", the same day) bridges
+                                    # disagreeing by metres would have bent the chain.
+    loop_holdout_min_edges: 4       # BOUND: with fewer loop edges nothing can be held out — the
+                                    # local held-out pairs judge instead (2026-09-28), declared
     gate_mode: advisory             # advisory | veto. USER 2026-09-09 ("siempre debe aplicarse la
                                     # corrección de duplicados, no importa lo mucho que haya que
                                     # corregir") + pccr 2026-09-13 19:25: the four measured

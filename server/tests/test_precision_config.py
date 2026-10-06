@@ -89,7 +89,8 @@ def test_out_of_range_and_enum_name_the_key():
 # conversion values. 0.6744897501960817 is Φ⁻¹(3/4) (MAD → σ), a property of
 # the normal distribution. Integers are indices, counts and shapes.
 _FLOAT_WHITELIST = {0.0, 1.0, -1.0, 2.0, 0.5, 1e-9, 1e-6, 1e-12, 100.0, 1000.0,
-                    0.6744897501960817}
+                    0.6744897501960817,
+                    1024.0, 1e9}         # MiB ↔ GiB and bytes ↔ GB: units, not decisions
 
 
 def _float_literals(path: Path):
