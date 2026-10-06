@@ -532,7 +532,8 @@
     "sam3NeedsPrompts": "SAM3 without the VLM needs at least one prompt.",
     "nothing": "Pick at least one stage.",
     "run": "Run",
-    "started": "Autosegment started on {session}"
+    "started": "Autosegment started on {session}",
+    "scans": "Scans to segment ({n} of {total}) — each one on its own"
   },
   "jobs": {
     "empty": "No jobs running",

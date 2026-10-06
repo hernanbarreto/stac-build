@@ -6054,11 +6054,11 @@ async def tsdf_progress(session_id: str):
 # websocket (`run_pipeline` with `autosegment`), the same path every pipeline takes.
 
 @app.get("/api/autosegment/{session_id}")
-async def autosegment_state(session_id: str):
+async def autosegment_state(session_id: str, scan: Optional[str] = None):
     """What the Autosegment window shows: the session's VLM prompt (saved or
     default), its SAM3 prompts, what is on disk, whether a pipeline holds it."""
     from segmentation.autoprompt.autosegment import state
-    ctx = _ctx(session_id)
+    ctx = _ctx(session_id, scan)                 # per SCAN (USER 2026-10-06)
     d = state(ctx.output_dir)
     d["busy"] = pipeline_manager.is_active(session_id)          # shown, never blocking: it queues
     return {"ok": True, **d}
@@ -6074,7 +6074,7 @@ async def autosegment_save(session_id: str, request: Request):
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(400, "a JSON object is expected")
-    ctx = _ctx(session_id)
+    ctx = _ctx(session_id, body.get("scan") or None)   # per SCAN (USER 2026-10-06)
     out = {}
     if "vlm_prompt" in body:
         out["vlm_prompt_overridden"] = save_vlm_prompt(ctx.output_dir, body.get("vlm_prompt"))

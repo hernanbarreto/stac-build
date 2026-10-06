@@ -532,7 +532,8 @@
     "sam3NeedsPrompts": "SAM3 sin el VLM necesita al menos un prompt.",
     "nothing": "Elegí al menos una etapa.",
     "run": "Ejecutar",
-    "started": "Autosegmentación iniciada en {session}"
+    "started": "Autosegmentación iniciada en {session}",
+    "scans": "Escaneos a segmentar ({n} de {total}) — cada uno por separado"
   },
   "jobs": {
     "empty": "No hay trabajos en curso",

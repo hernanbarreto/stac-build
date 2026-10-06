@@ -412,6 +412,7 @@ function App() {
   const [autosegOpen, setAutosegOpen] = useState(false)
   const [autosegState, setAutosegState] = useState<AutosegmentState | null>(null)
   const [autosegLoading, setAutosegLoading] = useState(false)
+  const [autosegScans, setAutosegScans] = useState<string[]>([])
   const [pipelineRunning, setPipelineRunning] = useState<PipelineState | null>(() => {
     try {
       const saved = sessionStorage.getItem('pipelineRunning')
@@ -1382,8 +1383,11 @@ function App() {
     setAutosegState(null)
     setAutosegLoading(true)
     setAutosegOpen(true)
+    // per SCAN (USER 2026-10-06): the open scan comes marked; the prompts shown are that scan's
+    setAutosegScans(activeScanTab ? [activeScanTab] : [])
     try {
-      const r = await fetch(`/api/autosegment/${activeSession}`)
+      const q = activeScanTab ? `?scan=${encodeURIComponent(activeScanTab)}` : ''
+      const r = await fetch(`/api/autosegment/${activeSession}${q}`)
       const d = await r.json()
       if (d.ok) setAutosegState(d as AutosegmentState)
       else setStatusMessage(d.detail || d.error || 'autosegment: state unavailable')
@@ -1392,26 +1396,28 @@ function App() {
     } finally {
       setAutosegLoading(false)
     }
-  }, [activeSession])
+  }, [activeSession, activeScanTab])
 
   const runAutosegment = useCallback(async (vlmPrompt: string, sam3Prompts: string[], stages: AutosegmentStages) => {
-    if (!activeSession) return
-    const body: Record<string, unknown> = { vlm_prompt: vlmPrompt }
-    // the SAM3 prompts are saved only when SAM3 runs WITHOUT a new VLM pass (a VLM pass rewrites them)
-    if (stages.sam3 && !stages.vlm) body.sam3_prompts = sam3Prompts
-    const r = await fetch(`/api/autosegment/${activeSession}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-    const d = await r.json().catch(() => ({}))
-    if (!r.ok || !d.ok) { setStatusMessage(d.detail || d.error || 'autosegment: prompts not saved'); return }
+    if (!activeSession || autosegScans.length === 0) return
+    // the prompts are saved in EACH marked scan, then ONE order queues one task per scan
+    for (const scan of autosegScans) {
+      const body: Record<string, unknown> = { vlm_prompt: vlmPrompt, scan }
+      // the SAM3 prompts are saved only when SAM3 runs WITHOUT a new VLM pass (a VLM pass rewrites them)
+      if (stages.sam3 && !stages.vlm) body.sam3_prompts = sam3Prompts
+      const r = await fetch(`/api/autosegment/${activeSession}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok || !d.ok) { setStatusMessage(d.detail || d.error || `autosegment ${scan}: prompts not saved`); return }
+    }
     const rr = await fetch('/api/pipeline/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: activeSession, replace: false, scans: [], autosegment: { stages } }),
+      body: JSON.stringify({ session_id: activeSession, replace: false, scans: autosegScans, autosegment: { stages } }),
     })
     const dd = await rr.json().catch(() => ({}))
     if (!rr.ok || !dd.ok) { setStatusMessage(dd.detail || dd.error || 'autosegment: command rejected'); return }
     setAutosegOpen(false)
-    setPipelineRunning({ session_id: activeSession, status: 'queued', current_stage_idx: -1, stages: [] })
-    setStatusMessage(tt('autosegment.started', { session: activeSession }))
-  }, [activeSession])
+    setStatusMessage(tt('autosegment.started', { session: `${activeSession} (${autosegScans.length})` }))
+  }, [activeSession, autosegScans])
 
   const handlePipelineCancel = useCallback(() => {
     const targetSession = pipelineRunning?.session_id || activeSession
@@ -2477,6 +2483,9 @@ function App() {
         onObject={runObjectMeshing} onMesh={runMesh} />
 
       <AutosegmentDialog open={autosegOpen} sessionId={activeSession} state={autosegState} loading={autosegLoading}
+        scans={projectScans.filter((sc: any) => sc.kind !== 'fused').map((sc: any) => ({ key: sc.key, label: `${sc.date} ${sc.label}` }))}
+        selectedScans={autosegScans}
+        onToggleScan={(key, on) => setAutosegScans(prev => (on ? [...prev.filter(k => k !== key), key] : prev.filter(k => k !== key)))}
         onClose={() => setAutosegOpen(false)} onRun={runAutosegment} />
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />

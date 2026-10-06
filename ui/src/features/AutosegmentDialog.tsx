@@ -28,9 +28,15 @@ export interface AutosegmentState {
 
 export interface AutosegmentStages { vlm: boolean; sam3: boolean; certify: boolean; captions: boolean }
 
+export interface AutosegmentScan { key: string; label: string }
+
 interface AutosegmentDialogProps {
   open: boolean
   sessionId: string | null
+  /** the project's scans — each MARKED scan is segmented on its own, as its own queued task (USER 2026-10-06) */
+  scans: AutosegmentScan[]
+  selectedScans: string[]
+  onToggleScan: (key: string, on: boolean) => void
   state: AutosegmentState | null
   loading: boolean
   onClose: () => void
@@ -38,7 +44,7 @@ interface AutosegmentDialogProps {
   onRun: (vlmPrompt: string, sam3Prompts: string[], stages: AutosegmentStages) => Promise<void> | void
 }
 
-export function AutosegmentDialog({ open, sessionId, state, loading, onClose, onRun }: AutosegmentDialogProps) {
+export function AutosegmentDialog({ open, sessionId, scans, selectedScans, onToggleScan, state, loading, onClose, onRun }: AutosegmentDialogProps) {
   const t = useT()
   const [vlmPrompt, setVlmPrompt] = useState('')
   const [sam3Text, setSam3Text] = useState('')
@@ -58,7 +64,7 @@ export function AutosegmentDialog({ open, sessionId, state, loading, onClose, on
   const sam3NeedsPrompts = stages.sam3 && !stages.vlm && sam3Prompts.length === 0
   // USER 2026-10-06: an order never waits for the window to be free — a running pipeline on this
   // session (or any other) only means the order QUEUES behind it
-  const canRun = !!state && !nothing && !sam3NeedsPrompts && !running && !loading
+  const canRun = !!state && !nothing && !sam3NeedsPrompts && !running && !loading && selectedScans.length > 0
 
   const run = async () => {
     setRunning(true)
@@ -75,6 +81,15 @@ export function AutosegmentDialog({ open, sessionId, state, loading, onClose, on
       }>
       <Stack gap={3}>
         <p className="stac-dialog__message">{t('autosegment.description')}</p>
+        {scans.length > 1 && (
+          <Stack gap={1}>
+            <div className="stac-section__title">{t('autosegment.scans', { n: selectedScans.length, total: scans.length })}</div>
+            {scans.map(sc => (
+              <Checkbox key={sc.key} checked={selectedScans.includes(sc.key)} onChange={v => onToggleScan(sc.key, v)}
+                label={<span className="stac-mono">{sc.label}</span>} />
+            ))}
+          </Stack>
+        )}
         {state && !state.has_cloud && <Banner tone="warn" compact>{t('autosegment.noCloud')}</Banner>}
         {state && state.busy && <Banner tone="info" compact>{t('autosegment.busy')}</Banner>}
         <Field label={t('autosegment.vlmPrompt')} hint={t('autosegment.vlmPromptHint')}>
