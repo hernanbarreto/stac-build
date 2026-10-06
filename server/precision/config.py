@@ -528,8 +528,8 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
     ))
     if "coherence_probe" in om:
         raise PrecisionConfigError(
-            f"'{SECTION}.omega.coherence_probe' was DELETED 2026-09-30 (USER: Omega drifts, the "
-            f"chunk is chunk_walk_m of real walk) — remove the key")
+            f"'{SECTION}.omega.coherence_probe' was DELETED 2026-09-30 (USER: Omega drifts; the "
+            f"chunks are planned before Omega — since 2026-10-06 by co-visibility) — remove the key")
 
     tk = _sub(sec, "tracks", "")
     tracks = TracksConfig(

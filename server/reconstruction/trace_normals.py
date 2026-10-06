@@ -115,19 +115,20 @@ def _load_frame_depth_index(output_dir: Path):
                     key=lambda p: int(re.search(r"(\d+)", p.stem).group(1)))
     if not chunks:
         return None
-    # layout from the generated config (single chunk → the whole list)
-    import yaml
-    cfgp = output_dir / "vggt_omega_config.yaml"
-    chunk_size, overlap = len(nums), 0
-    if cfgp.exists():
-        m = (yaml.safe_load(cfgp.read_text()) or {}).get("Model", {})
-        chunk_size = int(m.get("chunk_size", chunk_size))
-        overlap = int(m.get("overlap", 0))
-    step = max(chunk_size - overlap, 1)
+    # the layout the run USED (USER 2026-10-06: the explicit co-visibility ranges — chunk_sim3.json,
+    # else the run config's Model.chunk_ranges, else chunk_plan.json); never rebuilt from a
+    # chunk size / overlap
+    from reconstruction.chunk_plan import ChunkLayoutError, omega_chunk_ranges
+    try:
+        lay = omega_chunk_ranges(output_dir)
+    except ChunkLayoutError:
+        return None
+    if lay is None and len(chunks) == 1:
+        lay = ([(0, len(nums))], "one chunk file: the whole frame list")
+    if lay is None or len(lay[0]) != len(chunks) or lay[0][-1][1] > len(nums):
+        return None
     index: Dict[int, Tuple[Path, int]] = {}
-    for ci, cp in enumerate(chunks):
-        start = ci * step
-        end = min(start + chunk_size, len(nums))
+    for (start, end), cp in zip(lay[0], chunks):
         for local, gi in enumerate(range(start, end)):
             # overlap frames appear in two chunks — keep the one farther from the
             # chunk edge (better-conditioned depth); later chunks overwrite the

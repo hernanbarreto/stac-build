@@ -116,3 +116,83 @@ def test_the_single_chunk_guard_is_still_the_one_that_makes_this_true():
     assert "get('intra_chunk') or len(self.chunk_indices) < 1" in vendor, (
         "intra_chunk's chunk-count guard changed — re-check whether the "
         "single-pass layout should still write it")
+
+
+# ── THE CHUNK LAYOUT (USER 2026-10-06): the co-visibility plan's explicit ranges ──
+# Every Omega run hands the fork Model.chunk_ranges — the SAME list chunk_plan.json stores —
+# and no chunk_size / overlap (a second, uniform layout nobody ran). Same bug class as above:
+# a key written on one branch only, or a list rebuilt instead of passed, fails here.
+
+def _run_src(tree):
+    return ast.get_source_segment(MAP_WORKER.read_text(), _func(tree, "_run_vggtomega"))
+
+
+def test_the_builder_writes_no_uniform_layout(tree):
+    import yaml
+    src = MAP_WORKER.read_text()
+    ns = {"Path": pathlib.Path}
+    exec(ast.get_source_segment(src, _func(tree, "_apply_stac_model_keys")), ns)
+    exec(ast.get_source_segment(src, _func(tree, "_build_vggtomega_config")), ns)
+    ns["__file__"] = str(MAP_WORKER)
+    cfg = ns["_build_vggtomega_config"]({"reconstruction": {"vggtomega": {"resolution": 512}}})
+    assert "chunk_size" not in cfg["Model"] and "overlap" not in cfg["Model"], (
+        "the vendor base YAML's chunk_size/overlap must not reach the fork — the layout is "
+        "Model.chunk_ranges")
+    base = yaml.safe_load((SERVER.parent / "vendor" / "VGGT-Long" / "configs" /
+                           "stac_vggtomega.yaml").read_text())
+    assert "chunk_size" in base["Model"], "premise: the base YAML carries a uniform size"
+    with pytest.raises(RuntimeError, match="chunk_overlap was DELETED"):
+        ns["_build_vggtomega_config"]({"reconstruction": {"vggtomega": {"resolution": 512,
+                                                                        "chunk_overlap": 30}}})
+
+
+def test_the_planned_ranges_are_the_ones_the_fork_and_the_plan_file_get(tree):
+    run = _run_src(tree)
+    # the ONE source of the layout: the co-visibility plan
+    assert "_cplan = plan_session(output_dir.parent" in run
+    assert '_ranges = [(int(a), int(b)) for a, b in _cplan["ranges"]]' in run
+    # chunked: the same list reaches the fork and chunk_plan.json
+    assert "_apply_chunked_metric(vggt_config, _ranges)" in run
+    assert "_persist_chunk_plan(_ranges, _n_selected, _walk0, _covis_rep, _res)" in run
+    applied = run[run.index("def _apply_chunked_metric"):run.index("def _ensure_anchors")]
+    assert 'cfg_v["Model"]["chunk_ranges"] = [[int(a), int(b)] for a, b in _ranges]' in applied
+    assert 'cfg_v["Model"].pop("chunk_size", None)' in applied
+    assert 'cfg_v["Model"].pop("overlap", None)' in applied
+    # single pass: the one range [0, n)
+    assert 'vggt_config["Model"]["chunk_ranges"] = [[0, int(_n_selected)]]' in run
+    # nothing re-derives a uniform layout anywhere in the Omega path
+    for gone in ('["Model"]["chunk_size"] =', '["Model"]["overlap"] =', "chunk_ranges(_n_selected"):
+        assert gone not in run, gone
+
+
+def test_the_plan_file_is_the_explicit_list(tree):
+    src = MAP_WORKER.read_text()
+    ns = {}
+    exec(ast.get_source_segment(src, _func(tree, "chunk_plan_doc")), ns)
+    import sys
+    sys.path.insert(0, str(SERVER))
+    ranges = [(0, 63), (30, 169), (63, 189), (169, 211), (189, 289)]
+    plan = ns["chunk_plan_doc"](ranges, 289, 17.3, {"D_total": 34.71},
+                                {"resolution": 832, "mode": "max_size"})
+    assert plan["chunk_ranges"] == [list(r) for r in ranges]
+    assert plan["seam_overlaps"] == [33, 106, 20, 22]
+    assert "chunk_size" not in plan and "overlap" not in plan
+
+
+def test_the_fork_reads_the_explicit_layout():
+    vendor = VENDOR.read_text()
+    assert "self.config['Model'].get('chunk_ranges')" in vendor
+    assert "validate_chunk_ranges(self.chunk_ranges_cfg" in vendor
+    # every seam sliced by its own overlap, never by a uniform self.overlap
+    assert "[-self.overlap:]" not in vendor and "[:self.overlap]" not in vendor
+
+
+def test_the_resolution_reaches_the_config_f0_reads(tree):
+    run = _run_src(tree)
+    assert 'vggt_config["Model"]["omega_resolution"] = int(_res["resolution"])' in run
+    i_res = run.index('vggt_config["Model"]["omega_resolution"] = int(_res["resolution"])')
+    i_pass = run.index("_ok = _omega_pass(vggt_config, _tag1)")
+    assert i_res < i_pass, "the resolution must be in the config the pass writes"
+    cam = (SERVER / "precision" / "camera.py").read_text()
+    assert 'return str(model["omega_mode"]), int(model["omega_resolution"])' in cam, \
+        "F0 must keep reading Omega's grid from the run's own config"

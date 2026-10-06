@@ -11,9 +11,10 @@ translations), so the chained trajectory carries only LOCAL error — measured,
 per seam, as the disagreement of the shared cameras' centres after placement.
 
 The walk is the sum of |c_{k+1} − c_k| over the chained keyframe centres; the
-chainage of every keyframe is written to ``<session>/intake/walk.json``. THIS is
-the walk that sizes the chunks (I4, ``reconstruction.chunk_plan.plan_chunks``);
-the one an Omega pass measures is evidence and never decides — a single Omega
+chainage of every keyframe is written to ``<session>/intake/walk.json``. The
+windows are what the chunk plan is measured on (I4, the co-visibility plan,
+``reconstruction.chunk_covis.plan_session``, USER 2026-10-06); the walk an Omega
+pass measures is evidence and never decides — a single Omega
 pass over pccr 2026-08-24 read 1526.6 m over a walk its chunked run measured at
 104.8 m.
 

@@ -1,5 +1,20 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ 2026-10-06 — CHUNKS PLANNED BY CO-VISIBILITY (USER: "no existe una receta que se ajuste a todos los casos")
+- The Omega chunk plan is ALWAYS `reconstruction/chunk_covis.plan_session` (no switch): VGG-T3-style co-visibility by
+  depth consistency on the I3 DA3 windows → each keyframe's co-visibility length ℓ → VGGT-Motion-style budget δ=1/ℓ;
+  chunks of 50 % block overlap, each ≤ H = 13.67 co-visibility lengths (CALIBRATED: pccr 5 m chunks D 6.0–13.7 good,
+  15 m chunks D 18.1–32.2 failed; zaragoza whole walk 5.0 and observatorio 3.4 good as ONE pass); cuts on near
+  structure, never mid-turn; deterministic; persisted in intake/covis.json. pccr → 5 chunks of 3–7.4 m; zaragoza and
+  observatorio → single pass. The fork takes `Model.chunk_ranges` (variable sizes, per-seam overlaps); EVERY consumer of
+  the chunking reads those ranges. The walk-based keys (chunk_walk_m, max_walk_single_pass_m, chunk_frames…) are gone.
+- RECONSTRUCTION RULE: the plan never depends on the card; Omega's resolution is the largest at which the largest chunk
+  fits the card's TOTAL memory less 15 % (intake.parallax.vram_margin_frac), native when it fits; an OOM retries one
+  patch step lower, declared. H was calibrated on the A100 80 GB window layout (recorded; a warning when the card differs).
+- LoGeR + PointDiT + DA3 (server/loger_pdit/, separate, not in the pipeline) was tried on pccr 08-31: poses coherent,
+  PointDiT doubles the inter-frame disagreement, DA3-conditioned better; none beat the validated pipeline — every method
+  shares the revisit drift that only the correction chain fixes.
+
 ## ⭐⭐⭐ CURRENT STATE 2026-10-04 — read `docs/pipeline_final.md` FIRST (it supersedes the
 ## pipeline descriptions below wherever they disagree)
 - **2026-10-05 (evening, USER)**: ORDER = intake (I0, I1, I3; I2 OFF) → Omega (**15 m chunks**, 50 %) → F0–F6 →

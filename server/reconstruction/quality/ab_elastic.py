@@ -54,8 +54,12 @@ def make_runner(save_dir: Path, model_cfg: dict, img_list: List[str],
     import vggt_long as vl
     r = object.__new__(vl.VGGT_Long)
     r.config = {"Model": copy.deepcopy(model_cfg)}
-    r.chunk_size = int(model_cfg["chunk_size"])
-    r.overlap = int(model_cfg["overlap"])
+    # the layout is the run's explicit list (chunk_sim3.json chunk_indices — USER 2026-10-06:
+    # co-visibility-planned, every seam its own overlap); the fork reads chunk_size / overlap
+    # only on a legacy uniform run, so they are carried when present and never required
+    r.chunk_ranges_cfg = model_cfg.get("chunk_ranges")
+    r.chunk_size = model_cfg.get("chunk_size")
+    r.overlap = model_cfg.get("overlap")
     r.chunk_indices = [tuple(int(x) for x in ci) for ci in chunk_indices]
     r.img_dir = str(img_dir)
     r.img_list = list(img_list)

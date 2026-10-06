@@ -1473,29 +1473,9 @@ def _apply_stac_model_keys(cfg: dict, config: dict) -> dict:
     return cfg
 
 
-def _omega_grid_wh(frames_dir) -> tuple:
-    """(w, h) of the Omega grid for this session's frames in max_size mode: the native frame
-    rounded to Omega's patch (omega_native_resolution) and the short side by the aspect."""
-    import cv2
-    from intake.quality import list_frames
-    paths = list_frames(Path(frames_dir))
-    if not paths:
-        raise RuntimeError(f"no frame in {frames_dir} — the Omega grid cannot be sized")
-    img = cv2.imread(str(paths[0]), cv2.IMREAD_UNCHANGED)
-    if img is None:
-        raise RuntimeError(f"cannot read {paths[0]}")
-    h, w = img.shape[:2]
-    res = omega_native_resolution(frames_dir)
-    s_ = float(res) / float(max(w, h))
-    return int(round(w * s_)), int(round(h * s_))
-
-
-def omega_native_resolution(frames_dir) -> int:
-    """``reconstruction.vggtomega.resolution: native`` — the frames' long side rounded
-    up to Omega's patch: with mode ``max_size`` the Omega grid IS the native frame
-    (pccr 464x832 → 832, grid 464x832, scale 1.0; the old 512 balanced saw 384x688)."""
+def _native_frame_wh(frames_dir) -> tuple:
+    """(w, h) of the session's frames (the first one; frames/ is at the video's native size)."""
     import cv2 as _cv2m
-    from precision.camera import OMEGA_PATCH_SIZE
     from intake.quality import list_frames
     paths = list_frames(Path(frames_dir))
     if not paths:
@@ -1503,15 +1483,26 @@ def omega_native_resolution(frames_dir) -> int:
     img = _cv2m.imread(str(paths[0]), _cv2m.IMREAD_UNCHANGED)
     if img is None:
         raise RuntimeError(f"cannot read {paths[0]}")
-    long_side = max(img.shape[:2])
+    return int(img.shape[1]), int(img.shape[0])
+
+
+def omega_native_resolution(frames_dir) -> int:
+    """``reconstruction.vggtomega.resolution: native`` — the frames' long side rounded
+    up to Omega's patch: with mode ``max_size`` the Omega grid IS the native frame
+    (pccr 464x832 → 832, grid 464x832, scale 1.0; the old 512 balanced saw 384x688).
+    It is the CEILING of the run's resolution: the run lowers it only when its largest
+    chunk does not fit the card (reconstruction.chunk_plan.omega_resolution_for)."""
+    from precision.camera import OMEGA_PATCH_SIZE
+    long_side = max(_native_frame_wh(frames_dir))
     return int(-(-long_side // OMEGA_PATCH_SIZE) * OMEGA_PATCH_SIZE)
 
 
 def _build_vggtomega_config(config: dict, frames_dir=None) -> dict:
-    """Load stac_vggtomega.yaml and override the same user-configurable params as the
-    MapAnything path (chunk size/overlap/loop), keeping the Omega-specific keys."""
+    """Load stac_vggtomega.yaml and override the user-configurable params (loop, resolution),
+    keeping the Omega-specific keys. NO chunk_size / overlap: the layout of every Omega run is
+    the explicit Model.chunk_ranges the co-visibility plan writes (USER 2026-10-06) — a size
+    and an overlap left in the config would be a second, uniform layout nobody ran."""
     import yaml as _yaml
-    ma = config.get("reconstruction", {}).get("mapanything", config.get("mapanything", {}))
     project_root = Path(__file__).resolve().parent.parent.parent
     base = project_root / "vendor" / "VGGT-Long" / "configs" / "stac_vggtomega.yaml"
     if not base.exists():
@@ -1519,8 +1510,13 @@ def _build_vggtomega_config(config: dict, frames_dir=None) -> dict:
     with open(base) as f:
         cfg = _yaml.safe_load(f)
     om = config.get("reconstruction", {}).get("vggtomega", {})
-    cfg["Model"]["chunk_size"] = om.get("chunk_size", ma.get("chunk_size", cfg["Model"]["chunk_size"]))
-    cfg["Model"]["overlap"] = om.get("chunk_overlap", ma.get("chunk_overlap", cfg["Model"]["overlap"]))
+    for _gone in ("chunk_size", "chunk_overlap"):
+        if _gone in om:
+            raise RuntimeError(f"reconstruction.vggtomega.{_gone} was DELETED 2026-10-06 — every "
+                               f"Omega run's chunks are the co-visibility plan's explicit ranges "
+                               f"(reconstruction/chunk_covis.py); remove the key")
+    cfg["Model"].pop("chunk_size", None)
+    cfg["Model"].pop("overlap", None)
     cfg["Model"]["loop_enable"] = om.get("loop_closure", cfg["Model"].get("loop_enable", True))
     cfg["Model"]["frame_stride"] = 1
     cfg["Model"]["delete_temp_files"] = False
@@ -1536,18 +1532,26 @@ def _build_vggtomega_config(config: dict, frames_dir=None) -> dict:
     return _apply_stac_model_keys(cfg, config)
 
 
-def _emit_omega_depth(save_dir: Path, output_dir: Path, chunk_size: int, overlap: int,
+def _emit_omega_depth(save_dir: Path, output_dir: Path, ranges,
                       selected_frames_path: str, pipe: WorkerPipe) -> None:
     """Write per-frame VGGT-Omega depth (globally scale-consistent) to
     omega_run/results_output/frame_<num>.npz so scale_align can compare it to DA3.
     The omega 'depth' is recovered from the ALIGNED world_points projected onto each
-    camera's forward axis → it carries the same global (up-to-scale) units as the poses."""
+    camera's forward axis → it carries the same global (up-to-scale) units as the poses.
+
+    ``ranges``: the chunk layout the fork RAN ([start, end) keyframe positions — the
+    co-visibility plan's explicit ranges, variable lengths and seams; one range for a
+    single pass). Chunk k's local frame j is keyframe ranges[k][0] + j; nothing is
+    rebuilt from a size or an overlap (USER 2026-10-06)."""
     import numpy as np, json, glob
     sel = json.load(open(selected_frames_path))
     files = sorted(sel.get("selected_files", sel if isinstance(sel, list) else []))
     stems = [int(Path(f).stem) for f in files]
     N = len(stems)
-    step = max(1, chunk_size - overlap)
+    _chunks = [(int(a), int(b)) for a, b in ranges]
+    if not _chunks or _chunks[0][0] != 0 or _chunks[-1][1] != N:
+        raise RuntimeError(f"[omega-depth] the chunk layout {_chunks} does not cover the "
+                           f"{N} selected keyframes [0, {N})")
     out_dir = output_dir / "omega_run" / "results_output"
     out_dir.mkdir(parents=True, exist_ok=True)
     aligned = save_dir / "_tmp_results_aligned"
@@ -1573,15 +1577,10 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, chunk_size: int, overlap
         raise RuntimeError("[omega-depth] no aligned camera_poses.txt / camera_frames.txt "
                            "pair — the Omega records cannot be written in the aligned frame")
 
-    # the chunk layout exactly as the fork builds it (vggt_long.py), and every frame's
-    # OWNER — the chunk whose centre is nearest (loop_utils.metric_lock.frame_owner):
-    # the record of a shared frame carries the depth, conf, K and pose of the chunk
-    # that writes its points (traceability), never of whichever chunk came last
-    if N <= chunk_size or step <= 0:
-        _chunks = [(0, N)]
-    else:
-        _chunks = [(i * step, min(i * step + chunk_size, N))
-                   for i in range((N - overlap + step - 1) // step)]
+    # every frame's OWNER — the chunk whose centre is nearest (loop_utils.metric_lock.
+    # frame_owner, the same rule over the same ranges): the record of a shared frame
+    # carries the depth, conf, K and pose of the chunk that writes its points
+    # (traceability), never of whichever chunk came last
     _centres = [(a + b) / 2.0 for a, b in _chunks]
 
     def _owner(g):
@@ -1613,7 +1612,11 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, chunk_size: int, overlap
             if Kin is not None and Kin.ndim == 4:
                 Kin = Kin[0]
             S = wp.shape[0]
-            start = k * step
+            if k >= len(_chunks) or S != _chunks[k][1] - _chunks[k][0]:
+                raise RuntimeError(f"chunk {k} holds {S} frames, the layout the fork ran "
+                                   f"says {_chunks[k] if k < len(_chunks) else 'no such chunk'}"
+                                   f" — the aligned chunks on disk are of another plan")
+            start = _chunks[k][0]
             for j in range(S):
                 gi = start + j
                 if gi >= N:
@@ -1944,36 +1947,15 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                            "selected_files": _anchor_files}, _f)
             pipe.send_log(f"SIMPLE: DA3 metric anchor on {len(_anchor_files)}/{_n_selected} "
                           f"evenly-spread frames (scale is one scalar — the rest is waste)")
-        # ONE pass, ONE DA3 round — USER ORDER 2026-09-22: *"no quiero que haga
-        # dos pasadas de da3, despues vggt omega para luego ir otra vez a da3 y
-        # vggt omega pero con chunks, quiero que lo haga de una"*. With a FIXED
-        # chunk size the chunk layout, and therefore the per-chunk metric
-        # anchors, is known BEFORE any inference — so they are extracted in THIS
-        # round instead of costing a second DA3 launch (model load included) in
-        # between the two Omega passes the walk probe used to need.
-        _cf_anchor = int(_simple_cfg.get("chunk_frames", 0) or 0)
-        if _anchor_files and _cf_anchor and _n_selected > _cf_anchor:
-            from reconstruction.chunk_plan import plan_anchor_indices as _pai
-            _chunk_anchor_files = [
-                _sel_files[i] for i in _pai(_n_selected, _cf_anchor, _cf_anchor // 2,
-                                            int(_simple_cfg.get("chunk_anchors", 3)))]
-            _extra = sorted(set(_chunk_anchor_files) - set(_anchor_files))
-            if _extra:
-                _anchor_files = sorted(set(_anchor_files) | set(_extra))
-                with open(output_dir / "scale_anchor_frames.json", "w") as _f:
-                    json.dump({"version": "2.0",
-                               "method": f"scale_anchor_{_k}+chunk_{_cf_anchor}",
-                               "total_frames": _n_selected,
-                               "selected_count": len(_anchor_files),
-                               "selected_files": _anchor_files}, _f)
-                pipe.send_log(f"SIMPLE: + {len(_extra)} per-chunk anchor(s) for the "
-                              f"{_cf_anchor}/{_cf_anchor // 2} layout in the SAME DA3 "
-                              f"round → {len(_anchor_files)} frames, ONE extraction")
+        # The per-chunk anchors need no extraction of their own: I3 (below) writes EVERY
+        # keyframe's DA3 anchor from its windows, and the co-visibility plan that places the
+        # chunks is measured on those same windows — one DA3 round (USER 2026-09-22).
     # ── F2 (claude_stac.txt §4-F2): I3 DA3 windows → the metric WALK, BEFORE Omega ──
-    # The walk sizes the chunks (I4 below) and the windows leave every keyframe's
-    # metric anchor on disk — the per-frame DA3 round that follows finds them all
-    # and skips. A single Omega pass is no instrument for it: over pccr 2026-08-24
-    # it read 1526.6 m for a walk its chunked run measured at 104.8 m.
+    # The windows are what the chunk plan is MEASURED on (I4 below: the co-visibility
+    # plan, reconstruction/chunk_covis.py) and they leave every keyframe's metric
+    # anchor on disk — the per-frame DA3 round that follows finds them all and skips. A
+    # single Omega pass is no instrument for the walk: over pccr 2026-08-24 it read
+    # 1526.6 m for a walk its chunked run measured at 104.8 m.
     _walk_doc = None
     _walk_reused = False
     if _scale_align_on and _sel_files:
@@ -2022,22 +2004,28 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         pipe.send_log("scale_align OFF → skipping DA3 (its only role here is the metric "
                       "anchor for scale_align) — running Omega ONLY")
 
-    # ── VGGT-Long with the Omega backbone — ONE PASS ──
-    # USER ORDER 2026-09-22: *"quiero que lo haga de una, si hay muchos kf lo chunkee
-    # y son menos que lo haga en uno solo siempre 60/30"*. `chunk_frames` decides,
-    # from the KEYFRAME COUNT alone, before any inference:
-    #   n_kf <= chunk_frames → ONE chunk, overlap 0, loop closure off: no seams.
-    #   n_kf >  chunk_frames → chunked-metric DIRECTLY at chunk_frames/2 overlap,
-    #     each chunk metric-locked to DA3 anchors BEFORE alignment, glued SE(3)
-    #     (scale is not negotiable — the Sim3 freedom is what produced the onion),
-    #     SALAD loop closure + pose graph on.
-    # There is NO second pass and NO walk comfort limit. The walk USED to decide
-    # both (`max_walk_single_pass_m`, `chunk_walk_m` — both REMOVED): it measured
-    # 44.1 m on pccr's ~19 m walk and that one number re-ran the whole
-    # reconstruction AND sized its chunks from the error. The walk is still
-    # measured and reported — it is evidence, not a verdict.
-    from reconstruction.chunk_plan import (walk_length_m, plan_anchor_indices,
-                                           plan_chunks, chunk_ranges)
+    # ── VGGT-Long with the Omega backbone — ONE PASS, CHUNKED BY CO-VISIBILITY ──
+    # USER 2026-10-06: the chunk layout of EVERY Omega run is the co-visibility plan
+    # (reconstruction/chunk_covis.py — no switch, no alternative, deterministic): the
+    # walk is priced by how long each keyframe stays co-visible (I3's DA3 windows, measured
+    # BEFORE Omega), ONE pass when the whole walk is within H co-visibility lengths,
+    # otherwise variable-size chunks at 50 % overlap with every seam its own block. The
+    # plan depends on co-visibility ONLY — *"el plan de chunk no cambia, el tamaño de la
+    # tarjeta no lo podemos cambiar, para que encaje adaptamos la resolución"*: the card
+    # never splits or shrinks a chunk; Omega's processing resolution is chosen so that the
+    # LARGEST planned chunk fits it (native when it fits). There is NO second pass.
+    # DELETED with it (a leftover key fails the run, naming itself): the walk-sized chunks
+    # (chunk_walk_m, max_walk_single_pass_m, chunk_frames_over_walk, plan_chunks), the
+    # capacity-sized chunks and their A/B pin (chunk_frames), the strided walk probe and
+    # the phase-2 re-run, reconstruction.vggtomega.chunk_size / chunk_overlap.
+    from reconstruction.chunk_plan import (walk_length_m, plan_anchor_indices, chunk_lengths,
+                                           omega_resolution_for)
+    for _gone in ("chunk_walk_m", "max_walk_single_pass_m", "chunk_frames_over_walk",
+                  "chunk_frames"):
+        if _gone in _simple_cfg:
+            raise RuntimeError(f"reconstruction.simple.{_gone} was DELETED 2026-10-06 — the chunk "
+                               f"plan is the co-visibility plan (reconstruction/chunk_covis.py) and "
+                               f"the card adapts Omega's resolution, never the chunks; remove the key")
     vggt_config = _build_vggtomega_config(config, frames_dir)
     _va_cfg = recon_cfg.get("vggtomega", {}) or {}
     _anch_per_chunk = int(_simple_cfg.get("chunk_anchors", 3))
@@ -2061,31 +2049,28 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 _ps["conf_threshold_coef"] = float(_coef)
                 pipe.send_log(f"SIMPLE: point confidence filter conf >= mean*{float(_coef):g}")
 
-    def _persist_chunk_plan(_chunk, _ov, _n_kf, _phase, _walk=None):
+    def _persist_chunk_plan(_ranges, _n_kf, _walk, _covis, _res):
         """Persist the REAL chunk plan (USER 2026-09-08: the correction module
         may group evidence only by the reconstruction's actual chunks, never by
-        a fixed divisor). Written whenever a chunked run is configured; a
-        single-pass session has no plan (the corrector then works purely per
-        keyframe)."""
-        plan = {
-            "version": 1,
-            "phase": _phase,
-            "n_keyframes": int(_n_kf),
-            "chunk_size": int(_chunk),
-            "overlap": int(_ov),
-            "chunk_ranges": [[int(a), int(b)] for a, b in
-                             chunk_ranges(int(_n_kf), int(_chunk), int(_ov))],
-            "walk_m": (round(float(_walk), 2) if _walk is not None else None),
-        }
+        a fixed divisor) — the co-visibility plan's explicit ranges, every chunk's
+        length and every seam's own overlap, its report (D per chunk, H, flags) and
+        the Omega resolution chosen for the largest chunk (USER 2026-10-06). Written
+        for a chunked run; a single-pass session has no plan (the corrector then
+        works purely per keyframe)."""
+        plan = chunk_plan_doc(_ranges, _n_kf, _walk, _covis, _res)
         _invalidate_on_new_chunk_plan(output_dir, plan, pipe.send_log)
         (output_dir / "chunk_plan.json").write_text(json.dumps(plan, indent=1))
         pipe.send_log(f"[chunk-plan] persisted output/chunk_plan.json: "
-                      f"{len(plan['chunk_ranges'])} chunk(s), size {_chunk}, "
-                      f"overlap {_ov}")
+                      f"{_plan_layout_text(plan)}, Omega at {_res['resolution']} "
+                      f"({_res['mode']}, grid {_res['grid_wh'][0]}x{_res['grid_wh'][1]})")
 
-    def _apply_chunked_metric(cfg_v, _chunk, _ov):
-        cfg_v["Model"]["chunk_size"] = int(_chunk)
-        cfg_v["Model"]["overlap"] = int(_ov)
+    def _apply_chunked_metric(cfg_v, _ranges):
+        # the layout IS the explicit list: the fork builds chunk_indices from it and slices
+        # every seam by its own overlap (vggt_long._stac_build_layout / _stac_seam_copies);
+        # with Model.chunk_ranges it reads no chunk_size / overlap at all
+        cfg_v["Model"]["chunk_ranges"] = [[int(a), int(b)] for a, b in _ranges]
+        cfg_v["Model"].pop("chunk_size", None)
+        cfg_v["Model"].pop("overlap", None)
         cfg_v["Model"]["loop_enable"] = True
         cfg_v["Model"]["using_sim3"] = False       # SE(3): scale locked by the anchors
         # USER ORDER 2026-09-04 ("deja omegalong como corresponde, sin
@@ -2198,7 +2183,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                             "ownership_backfill", "elastic_seam", "intra_chunk",
                             "depth_graph", "blend_copies")
                 if cfg_v["Model"].get(k)]
-        pipe.send_log(f"CHUNKED-METRIC: chunks {int(_chunk)}/{int(_ov)}, DA3 metric "
+        pipe.send_log(f"CHUNKED-METRIC: {_plan_layout_text({'chunk_ranges': _ranges})}, DA3 metric "
                       f"scale (anchors + seam graph; zoom chunks: anchors excluded, "
                       f"scale from seams), chunk health flags diagnostic-only; "
                       f"adjustment stages ON: {_adj if _adj else 'NONE (clean omegalong)'}")
@@ -2210,11 +2195,11 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         if _missing:
             _run_da3_anchor(pipe, frames_dir, output_dir, sorted(set(_missing)), recon_cfg)
 
-    def _omega_pass(cfg_v, tag, sel_path=None):
-        # sel_path: the keyframe list this pass runs on — the walk probe runs on
-        # an evenly-strided subset of selected_frames.json, every other pass on
-        # the full set
-        sel_path = sel_path or selected_frames_path
+    _omega_oom = {"hit": False}
+
+    def _omega_pass(cfg_v, tag):
+        # the ONE pass runs on the full keyframe set the plan was measured on
+        sel_path = selected_frames_path
         vggt_config_path = output_dir / "vggt_omega_config.yaml"
         with open(vggt_config_path, "w") as f:
             yaml.dump(cfg_v, f, default_flow_style=False)
@@ -2254,6 +2239,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             if pipe.check_cancel():
                 proc.terminate(); pipe.send_log("Cancelled by user", level="warning")
                 return False
+            if "out of memory" in line.lower() or "outofmemoryerror" in line.lower():
+                _omega_oom["hit"] = True
             m = chunk_pattern.search(line)
             if m:
                 done, total = int(m.group(1)), int(m.group(2))
@@ -2270,213 +2257,171 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         return True
 
     _chunked_already = False
-    _probe_sel = None             # set when the first pass is the strided walk probe
-    # AS MANY KEYFRAMES PER CHUNK AS THE CARD ALLOWS — USER ORDER 2026-09-23:
-    # *"vamos a armar los chunk de la mayor cantidad de frames posibles, si hay
-    # mas de uno, con el solape del 50% ... eso lo va a determinar el GPU, lo
-    # que el GPU permita"*, on his visual verdict over many runs: *"yo se como
-    # queda observatorio con un solo chunk, y es mucho mejor que lo que tenemos
-    # ahora, lo mismo el test2"*.
-    #
-    # WHY IT BEATS A FIXED SIZE, read off this repo's own measurements: the
-    # damage lands on the SEAMS. test2's epoch 1 tore at seam 6->7; the elastic
-    # stage starts from 8.4 cm of disagreement between the two copies of a
-    # shared frame; the in-run pose graph worsens its held-out by 0.6 cm. A
-    # chunk that holds the whole scene has none of those. Omega's feed-forward
-    # drift is the reason chunking exists, and on walks of ~11-13 m it is
-    # smaller than what the seams cost.
-    #
-    # `chunk_frames: 0` = ask the card: (free VRAM - 4 GB base) / 0.086 GB per
-    # frame, the vendor's own measured footprint (500 frames ~ 43 GB, the paper's
-    # number). A positive value overrides it, for A/B work.
-    _chunk_cfg = int(_simple_cfg.get("chunk_frames", 0) or 0)
-    if _simple_on and _n_selected:
-        # the card's TOTAL memory decides the layout (a property of the card); FREE
-        # memory at this instant depends on vLLM teardown and fragmentation and made
-        # the chunk layout — the whole geometry — a function of transient GPU state
-        _free = _gpu_total_gb()
-        if _chunk_cfg:
-            _cap = _chunk_cfg
-            _need = 4.0 + 0.086 * _cap
-            if _free is not None and _free < _need:
-                pipe.send_log(f"WARNING: free VRAM {_free:.1f} GB < {_need:.1f} GB "
-                              f"needed for {_cap}-frame chunks — NOT resizing "
-                              f"(explicit chunk_frames): free the GPU or lower "
-                              f"reconstruction.simple.chunk_frames", level="warning")
-            pipe.send_log(f"SIMPLE: chunk capacity {_cap} frames "
-                          f"(reconstruction.simple.chunk_frames, explicit)")
-        elif _free is None:
-            raise RuntimeError("the GPU's total memory cannot be read (nvidia-smi) — the "
-                               "chunk capacity cannot be decided")
-        else:
-            # 0.086 GB/frame was MEASURED at pccr's grid (464x832); a frame's footprint grows with its
-            # pixels (tokens) — zaragoza's 1920x1080 frame holds 5.4x more (2026-10-04)
-            _ref_px = 464.0 * 832.0
-            _gw, _gh = _omega_grid_wh(frames_dir)
-            _per_frame = 0.086 * (float(_gw) * float(_gh)) / _ref_px
-            _cap = max(24, int((_free - 4.0) / _per_frame))
-            pipe.send_log(f"SIMPLE: chunk capacity {_cap} frames — {_free:.1f} GB "
-                          f"total on the card, 4.0 GB base + {_per_frame:.3f} GB/frame "
-                          f"(0.086 measured at 464x832, scaled to this session's {_gw}x{_gh} grid). "
-                          f"{_n_selected} keyframe(s) to place.")
-        _chunk_cfg = _cap
-        _max_walk0 = float(_simple_cfg.get("max_walk_single_pass_m", 0) or 0)
-        _cw0 = float(_simple_cfg.get("chunk_walk_m", 12.0) or 12.0)
-        _walk0 = float(_walk_doc["walk_length_m"]) if _walk_doc else None
-        # THE WALK DECIDES (USER 2026-09-30: "Omega deriva, está probado que no más de 5 m"):
-        # a walk over max_walk_single_pass_m is chunked at chunk_walk_m of REAL walk. The
-        # Omega coherence probe that tried to measure it was DELETED the same day — it
-        # chose one 289-kf pass on pccr although 128 kf had drifted +301 %.
-        # An explicit pin (chunk_frames_over_walk > 0) still wins: it is the A/B knob.
-        _pin0 = int(_simple_cfg.get("chunk_frames_over_walk", 0) or 0)
-        _chunk_it = _walk0 is not None and _scale_align_on and not (
-            _n_selected <= _chunk_cfg and (_max_walk0 <= 0 or _walk0 <= _max_walk0))
-        if _chunk_it:
-            # I4 (claude_stac.txt §4-F2): the chunks are decided before Omega runs —
-            # one pass, no re-run. Precedence: pinned size > metres.
-            if _pin0 > 0:
-                _fx = max(24, min(_pin0, int(_chunk_cfg)))
-                _ov = _fx // 2
-                _how = f"{_fx} keyframes pinned (chunk_frames_over_walk)"
+    # ── I4: THE CHUNK PLAN — co-visibility only, measured on the I3 windows, BEFORE Omega ──
+    if not _n_selected:
+        raise RuntimeError("selected_frames.json lists no keyframe — nothing to plan or reconstruct")
+    if _walk_doc is None:
+        raise RuntimeError(
+            "the chunk plan is the co-visibility plan (USER 2026-10-06: always, no alternative) "
+            "and it is measured on the I3 DA3 windows, which this run did not produce — I3 runs "
+            "with reconstruction.precision.enabled and reconstruction.vggtomega.scale_align; "
+            "there is no other chunk layout to fall back on")
+    from reconstruction.chunk_covis import CovisError, format_plan, plan_session
+    pipe.send_progress(8, "Chunk plan: co-visibility over the I3 windows...", stage="reconstruction")
+    try:
+        _cplan = plan_session(output_dir.parent, log=pipe.send_log)
+    except CovisError as _ce:
+        if not _walk_reused:
+            raise
+        # A resume reused walk.json, but its window files are gone (F2 deletes them after the
+        # chain) and no co-visibility measurement of THIS walk is persisted yet: regenerate the
+        # SAME windows (walk.json and the anchors stay — they are the plan's stamp) and measure
+        # once; intake/covis.json then serves every later resume without the windows.
+        pipe.send_log(f"[covis] {_ce} — regenerating this walk's I3 windows to measure the "
+                      f"co-visibility plan once", level="warning")
+        from intake.walk import run_da3_windows
+        run_da3_windows(output_dir.parent, _pc.gauge, sys.executable, log=pipe.send_log,
+                        check_cancel=pipe.check_cancel, frames_dir=frames_dir, files=_sel_files)
+        _cplan = plan_session(output_dir.parent, log=pipe.send_log)
+    _ranges = [(int(a), int(b)) for a, b in _cplan["ranges"]]
+    _covis_rep = _cplan["report"]
+    for _line in format_plan(_covis_rep):
+        pipe.send_log(_line)
+    if int(_covis_rep["n"]) != _n_selected or _ranges[-1][1] != _n_selected:
+        raise RuntimeError(f"the co-visibility plan covers {_covis_rep['n']} keyframes, this run "
+                           f"selected {_n_selected} — the I3 walk is not of this keyframe set")
+    _walk0 = float(_walk_doc["walk_length_m"])
+
+    # ── Omega's resolution: the LARGEST planned chunk must fit the card ──
+    # The card's TOTAL memory (a property of the card — deterministic) and the per-frame
+    # footprint ∝ the grid's pixels: native when the largest chunk fits, otherwise the largest
+    # patch-aligned resolution that holds it (reconstruction.chunk_plan.omega_resolution_for).
+    # Every chunk runs at that one resolution; F0 reads it from the config this run writes
+    # (precision.camera.read_omega_preprocessing) and maps Omega's grid to the native frame.
+    _total_gb = _gpu_total_gb()
+    if _total_gb is None:
+        raise RuntimeError("the GPU's total memory cannot be read (nvidia-smi) — the Omega "
+                           "resolution that fits the largest chunk cannot be decided")
+    _n_max = max(chunk_lengths(_ranges))
+    # the same margin the I3 DA3 windows leave on the card (USER 2026-10-06)
+    from intake.config import load_intake_config as _lic
+    _omega_margin = float(_lic(config).parallax.vram_margin_frac)
+    _res = omega_resolution_for(_n_max, _total_gb, _native_frame_wh(frames_dir),
+                                str(vggt_config["Model"]["omega_mode"]),
+                                int(vggt_config["Model"]["omega_resolution"]),
+                                margin_frac=_omega_margin)
+    vggt_config["Model"]["omega_resolution"] = int(_res["resolution"])
+    vggt_config["Model"]["omega_resolution_report"] = _res
+    pipe.send_log(f"[omega-res] Omega at {_res['resolution']} ({_res['mode']}, grid "
+                  f"{_res['grid_wh'][0]}x{_res['grid_wh'][1]}, native "
+                  f"{_res['native_wh'][0]}x{_res['native_wh'][1]}) — {_res['why']}; "
+                  f"{_res['card_total_gb']:.1f} GB card, {_res['base_gb']:g} GB base + "
+                  f"{_res['gb_per_frame']:.3f} GB/frame ({_res['gb_per_frame_ref']:g} measured at "
+                  f"{_res['ref_grid_wh'][0]}x{_res['ref_grid_wh'][1]}, scaled by pixels); predicted "
+                  f"peak {_res['predicted_peak_gb']:.2f} of {_res['card_total_gb']:.2f} GB "
+                  f"({_res['headroom_gb']:.2f} GB headroom, {_omega_margin:.0%} margin; an OOM "
+                  f"retries one patch step lower)")
+
+    if len(_ranges) == 1:
+        # ONE pass: the whole walk within H co-visibility lengths. The fork runs the one range
+        # [0, n) — the same explicit layout every reader of the chunks reads.
+        vggt_config["Model"]["chunk_ranges"] = [[0, int(_n_selected)]]
+        vggt_config["Model"].pop("chunk_size", None)
+        vggt_config["Model"].pop("overlap", None)
+        vggt_config["Model"]["loop_enable"] = False
+        # outputs of ANOTHER layout on disk (a chunked plan, another resolution) go before Omega
+        # runs — the single pass used to leave them for the fork to trip over
+        _invalidate_on_new_chunk_plan(output_dir, {"chunk_ranges": [[0, int(_n_selected)]],
+                                                   "n_keyframes": int(_n_selected),
+                                                   "omega_resolution": _res}, pipe.send_log)
+        # single pass = no chunks: a stale plan from a previous chunked run
+        # would lie to the correction module
+        (output_dir / "chunk_plan.json").unlink(missing_ok=True)
+        # THE ONE ADJUSTMENT STAGE A SINGLE CHUNK CAN STILL RUN. Every seam
+        # stage guards on `len(chunk_indices) < 2` and disables itself here;
+        # `_stac_intra_chunk` guards on `< 1` — it was WRITTEN to work on one
+        # chunk, because it corrects the warp BETWEEN FRAMES OF THE SAME
+        # chunk, which is exactly what omega's feed-forward drift is when the
+        # chunk holds the whole scene. It was only ever written inside
+        # `_apply_chunked_metric`, so the single-pass layout dropped it in
+        # silence: measured 2026-09-23 — `intra_chunk` appears in pccr's
+        # session YAML (chunked) and NOT in test2's or observatorio's.
+        # config.yaml says `intra_chunk: true  # (KEEP ON)` with its A4
+        # verdict; the flag is what decides, not the layout.
+        vggt_config["Model"]["intra_chunk"] = bool(_va_cfg.get("intra_chunk", False))
+        pipe.send_log(f"SINGLE PASS: {_n_selected} keyframes, D_total "
+                      f"{_covis_rep['D_total']:.2f} — {_covis_rep['why']} → ONE chunk, no seams. "
+                      f"Adjustment stage ON: "
+                      f"{'intra_chunk' if vggt_config['Model']['intra_chunk'] else 'NONE'} "
+                      f"(the seam stages need 2+ chunks and stand down by themselves).")
+    else:
+        _chunked_already = True
+        _anchor_idx = plan_anchor_indices(_ranges, _anch_per_chunk)
+        _ensure_anchors([_sel_files[i] for i in _anchor_idx])
+        _apply_chunked_metric(vggt_config, _ranges)
+        # SALAD's non-local band in METRES OF WALK: the system's one definition of two visits
+        # (correction.visit_drift.min_walk_m) through the I3 walk's mean m/kf
+        _visit_m = float(((config.get("correction") or {}).get("visit_drift") or {})
+                         .get("min_walk_m", 0) or 0)
+        _sal = (vggt_config.get("Loop") or {}).get("SALAD")
+        if _sal is not None and _visit_m > 0 and _walk0 > 0:
+            import math as _math
+            _band = max(int(_sal["min_gap"]),
+                        int(_math.ceil(_visit_m / (_walk0 / _n_selected))))
+            pipe.send_log(f"[loops] SALAD non-local band: {_band} kf = {_visit_m:g} m of "
+                          f"the measured walk")
+            _sal["min_gap"] = int(_band)
+            _sal["min_gap_frac"] = 0.0
+        if _sal is not None:
+            # SALAD's appearance bar calibrated on the session's GEOMETRIC revisits
+            # (the DA3-window walk) — LoopModels.LoopModel.calibrate_threshold
+            from intake.walk import revisit_reference, REVISIT_REFERENCE_NAME
+            _ref_p = output_dir / REVISIT_REFERENCE_NAME
+            if _walk_reused and _ref_p.exists():
+                _ref = json.loads(_ref_p.read_text())     # measured with the reused walk
             else:
-                _fx, _ov = plan_chunks(_n_selected, _walk0, _cw0, max_size=max(_chunk_cfg, 24))
-                _how = f"{_cw0:g} m of REAL walk"
-            _chunked_already = True
-            _anchor_idx = plan_anchor_indices(_n_selected, _fx, _ov, _anch_per_chunk)
-            _ensure_anchors([_sel_files[i] for i in _anchor_idx])
-            _apply_chunked_metric(vggt_config, _fx, _ov)
-            _visit_m = float(((config.get("correction") or {}).get("visit_drift") or {})
-                             .get("min_walk_m", 0) or 0)
-            _sal = (vggt_config.get("Loop") or {}).get("SALAD")
-            if _sal is not None and _visit_m > 0 and _walk0 > 0:
-                import math as _math
-                _band = max(int(_sal["min_gap"]),
-                            int(_math.ceil(_visit_m / (_walk0 / _n_selected))))
-                pipe.send_log(f"[loops] SALAD non-local band: {_band} kf = {_visit_m:g} m of "
-                              f"the measured walk")
-                _sal["min_gap"] = int(_band)
-                _sal["min_gap_frac"] = 0.0
-            if _sal is not None:
-                # SALAD's appearance bar calibrated on the session's GEOMETRIC revisits
-                # (the DA3-window walk) — LoopModels.LoopModel.calibrate_threshold
-                from intake.walk import revisit_reference, REVISIT_REFERENCE_NAME
-                _ref_p = output_dir / REVISIT_REFERENCE_NAME
-                if _walk_reused and _ref_p.exists():
-                    _ref = json.loads(_ref_p.read_text())     # measured with the reused walk
-                else:
-                    _ref = revisit_reference(output_dir.parent)
-                _sal["revisit_reference"] = str(output_dir / REVISIT_REFERENCE_NAME)
-                pipe.send_log(f"[loops] SALAD revisit reference: {len(_ref['frames'])} "
-                              f"keyframes, revisit = cameras < {_ref['dist_bar_m']:.2f} m "
-                              f"(scene median depth) and < "
-                              f"{math_deg(_ref['hfov_rad']) / 2.0:.1f}° apart (half the FOV)")
-            _persist_chunk_plan(_fx, _ov, _n_selected, "walk-planned", _walk=_walk0)
-            pipe.send_log(f"SIMPLE chunked-metric (I4): walk {_walk0:.1f} m measured by the "
-                          f"DA3 windows → {len(chunk_ranges(_n_selected, _fx, _ov))} chunks of "
-                          f"{_fx} keyframes ({_how}, overlap {_ov}); ONE Omega pass")
-        elif _n_selected <= _chunk_cfg:
-            vggt_config["Model"]["chunk_size"] = max(_n_selected, 2)
-            vggt_config["Model"]["overlap"] = 0
-            vggt_config["Model"]["loop_enable"] = False
-            # single pass = no chunks: a stale plan from a previous chunked run
-            # would lie to the correction module
-            (output_dir / "chunk_plan.json").unlink(missing_ok=True)
-            # THE ONE ADJUSTMENT STAGE A SINGLE CHUNK CAN STILL RUN. Every seam
-            # stage guards on `len(chunk_indices) < 2` and disables itself here;
-            # `_stac_intra_chunk` guards on `< 1` — it was WRITTEN to work on one
-            # chunk, because it corrects the warp BETWEEN FRAMES OF THE SAME
-            # chunk, which is exactly what omega's feed-forward drift is when the
-            # chunk holds the whole scene. It was only ever written inside
-            # `_apply_chunked_metric`, so the single-pass layout dropped it in
-            # silence: measured 2026-09-23 — `intra_chunk` appears in pccr's
-            # session YAML (chunked) and NOT in test2's or observatorio's.
-            # config.yaml says `intra_chunk: true  # (KEEP ON)` with its A4
-            # verdict; the flag is what decides, not the layout.
-            vggt_config["Model"]["intra_chunk"] = bool(_va_cfg.get("intra_chunk", False))
-            pipe.send_log(f"SIMPLE single-pass: {_n_selected} keyframes ≤ "
-                          f"{_chunk_cfg} → ONE chunk, no overlap, no seams. "
-                          f"Nothing measured afterwards re-runs it. "
-                          f"Adjustment stage ON: "
-                          f"{'intra_chunk' if vggt_config['Model']['intra_chunk'] else 'NONE'} "
-                          f"(the seam stages need 2+ chunks and stand down by themselves).")
-        elif _scale_align_on and int(_simple_cfg.get("chunk_frames_over_walk", 0) or 0) > 0:
-            # A PINNED size (chunk_frames_over_walk) needs no walk probe: the probe only
-            # sizes the chunks, and on pccr 2026-08-24 it read 1526.6 m over a walk the
-            # chunked run measured at 104.8 m (14.6x — one Omega pass over ~105 m drifts
-            # past any use), which made 110 chunks of 24 kf (~1.9 m each). Chunked
-            # directly at the pinned size; SALAD's band in keyframes is the one
-            # definition of a visit (correction.visit_drift.min_walk_m) at the pin's own
-            # density — chunk_frames_over_walk keyframes per chunk_walk_m metres.
-            _fx = int(_simple_cfg.get("chunk_frames_over_walk"))
-            _cw = float(_simple_cfg.get("chunk_walk_m", 12.0) or 12.0)
-            if _fx > _chunk_cfg:
-                raise RuntimeError(
-                    f"reconstruction.simple.chunk_frames_over_walk = {_fx} keyframes per chunk "
-                    f"exceeds what the card holds ({_chunk_cfg}) — lower it")
-            _ov = _fx // 2
-            _chunked_already = True
-            _anchor_idx = plan_anchor_indices(_n_selected, _fx, _ov, _anch_per_chunk)
-            _ensure_anchors([_sel_files[i] for i in _anchor_idx])
-            _apply_chunked_metric(vggt_config, _fx, _ov)
-            _visit_m = float(((config.get("correction") or {}).get("visit_drift") or {})
-                             .get("min_walk_m", 0) or 0)
-            _sal = (vggt_config.get("Loop") or {}).get("SALAD")
-            if _sal is not None and _visit_m > 0:
-                import math as _math
-                _band = max(int(_sal["min_gap"]), int(_math.ceil(_visit_m * _fx / _cw)))
-                pipe.send_log(f"[loops] SALAD non-local band: {_band} kf = {_visit_m:g} m of "
-                              f"walk at the pinned {_fx} kf / {_cw:g} m")
-                _sal["min_gap"] = int(_band)
-                _sal["min_gap_frac"] = 0.0
-            _persist_chunk_plan(_fx, _ov, _n_selected, "pinned-chunked")
-            pipe.send_log(f"SIMPLE chunked-metric (pinned): {_n_selected} keyframes > "
-                          f"{_chunk_cfg} (card capacity) → "
-                          f"{len(chunk_ranges(_n_selected, _fx, _ov))} chunks of {_fx} "
-                          f"(overlap {_ov}) from reconstruction.simple.chunk_frames_over_walk; "
-                          f"no walk probe")
-        elif _scale_align_on:
-            # THE WALK DECIDES EVEN WHEN THE WHOLE SET DOES NOT FIT THE CARD —
-            # USER 2026-09-28: *"que no sea por memoria sino los 12m, siempre"*.
-            # This branch used to chunk DIRECTLY at the card's capacity: pccr
-            # 2026-08-24 (1329 kf, A100 80 GB) became 3 chunks of 870 frames,
-            # seams 3.5-5.1 m apart, and the run was OOM-killed. The walk that
-            # sizes the chunks needs a metric pass, so the first pass is a PROBE
-            # over an evenly-strided subset that fits: the strided walk traces
-            # the same trajectory, and its over-measurement when it drifts is the
-            # same self-correcting signal as the single pass's (see THE WALK
-            # DECIDES below). The probe is never the result — the full set is
-            # always re-run chunked at chunk_walk_m.
-            _stride = -(-_n_selected // _chunk_cfg)
-            _probe_files = list(_sel_files[::_stride])
-            _probe_doc = dict(_sel) if isinstance(_sel, dict) else {}
-            _probe_doc.update({"method": f"walk_probe_stride_{_stride}",
-                               "total_frames": _n_selected,
-                               "selected_count": len(_probe_files),
-                               "selected_files": _probe_files})
-            _probe_path = output_dir / "walk_probe_frames.json"
-            _probe_path.write_text(json.dumps(_probe_doc))
-            _probe_sel = str(_probe_path)
-            vggt_config["Model"]["chunk_size"] = max(len(_probe_files), 2)
-            vggt_config["Model"]["overlap"] = 0
-            vggt_config["Model"]["loop_enable"] = False
-            vggt_config["Model"]["intra_chunk"] = bool(_va_cfg.get("intra_chunk", False))
-            (output_dir / "chunk_plan.json").unlink(missing_ok=True)
-            pipe.send_log(f"SIMPLE walk probe: {_n_selected} keyframes > {_chunk_cfg} "
-                          f"(card capacity) → ONE pass over every {_stride}th keyframe "
-                          f"({len(_probe_files)} frames) to MEASURE the walk; the full "
-                          f"set is then re-run chunked at "
-                          f"{float(_simple_cfg.get('chunk_walk_m', 12.0) or 12.0):g} m "
-                          f"of walk per chunk (the probe is not the result)")
-        else:
-            vggt_config["Model"]["chunk_size"] = _chunk_cfg
-            vggt_config["Model"]["overlap"] = _chunk_cfg // 2
-            pipe.send_log(f"SIMPLE: {_n_selected} keyframes > {_chunk_cfg} and "
-                          f"scale_align is OFF → windowed mode without the metric "
-                          f"lock ({_chunk_cfg}/{_chunk_cfg // 2})", level="warning")
+                _ref = revisit_reference(output_dir.parent)
+            _sal["revisit_reference"] = str(output_dir / REVISIT_REFERENCE_NAME)
+            pipe.send_log(f"[loops] SALAD revisit reference: {len(_ref['frames'])} "
+                          f"keyframes, revisit = cameras < {_ref['dist_bar_m']:.2f} m "
+                          f"(scene median depth) and < "
+                          f"{math_deg(_ref['hfov_rad']) / 2.0:.1f}° apart (half the FOV)")
+        _persist_chunk_plan(_ranges, _n_selected, _walk0, _covis_rep, _res)
+        pipe.send_log(f"CHUNKED-METRIC (I4): walk {_walk0:.1f} m, D_total "
+                      f"{_covis_rep['D_total']:.2f} > H {_covis_rep['H']:g} → "
+                      f"{_plan_layout_text({'chunk_ranges': _ranges})}; ONE Omega pass")
+    if _simple_on:
         _apply_conf_filter(vggt_config)
-    _tag1 = ("walk-probe" if _probe_sel else
-             "chunked-metric" if _chunked_already else "single-pass")
-    if not _omega_pass(vggt_config, _tag1, sel_path=_probe_sel):
+    _tag1 = "chunked-metric" if _chunked_already else "single-pass"
+    # An Omega pass that runs out of memory despite the margin is retried ONE patch step lower
+    # (USER 2026-10-06), declared; the plan never changes — only the resolution. The products of
+    # the failed attempt are another layout and go first (the invalidation keys on resolution).
+    from precision.camera import OMEGA_PATCH_SIZE as _OPS
+    while True:
+        try:
+            _ok = _omega_pass(vggt_config, _tag1)
+            break
+        except RuntimeError:
+            if not _omega_oom["hit"]:
+                raise
+            _omega_oom["hit"] = False
+            _prev = int(_res["resolution"])
+            _res = omega_resolution_for(_n_max, _total_gb, _native_frame_wh(frames_dir),
+                                        str(vggt_config["Model"]["omega_mode"]), _prev - _OPS,
+                                        margin_frac=_omega_margin)
+            _res["oom_fallback_from"] = _prev
+            vggt_config["Model"]["omega_resolution"] = int(_res["resolution"])
+            vggt_config["Model"]["omega_resolution_report"] = _res
+            pipe.send_log(f"[omega-res] ⚠ Omega ran out of memory at {_prev} — retrying at "
+                          f"{_res['resolution']} (grid {_res['grid_wh'][0]}x{_res['grid_wh'][1]}), "
+                          f"same chunk plan", level="warning")
+            if _chunked_already:
+                _persist_chunk_plan(_ranges, _n_selected, _walk0, _covis_rep, _res)
+            else:
+                _invalidate_on_new_chunk_plan(output_dir, {"chunk_ranges": [[0, int(_n_selected)]],
+                                                           "n_keyframes": int(_n_selected),
+                                                           "omega_resolution": _res}, pipe.send_log)
+    if not _ok:
         return
 
     # ── metric scale + orientation (runs after EVERY pass) ──
@@ -2488,16 +2433,24 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                       level="warning")
         return
 
-    def _metricize_and_orient(cfg_v, tag, sel_path=None):
+    def _metricize_and_orient(cfg_v, tag):
         """Emit omega depth → scale_align (global; in chunked-metric mode the chunks are
         already locked, so this is the residual/VERIFICATION pass — its spread is the
         health metric) → bake upright orientation. Returns the walk length in meters."""
         pipe.send_progress(86, f"VGGT-Omega ({tag}): aligning metric scale to DA3...",
                            stage="reconstruction")
-        _emit_omega_depth(vggt_save_dir, output_dir,
-                          int(cfg_v["Model"]["chunk_size"]),
-                          int(cfg_v["Model"]["overlap"]),
-                          sel_path or selected_frames_path, pipe)
+        # the layout the fork RAN (maplong_run/chunk_sim3.json), checked against the one this
+        # run configured — the records' `chunk` field every precision / floor stage trusts
+        # comes from it
+        from reconstruction.chunk_plan import omega_chunk_ranges
+        _ran = omega_chunk_ranges(output_dir)
+        if _ran is None:
+            raise RuntimeError("[omega-depth] no record of the chunk layout Omega ran "
+                               "(maplong_run/chunk_sim3.json, vggt_omega_config.yaml)")
+        if _ran[0] != [tuple(r) for r in cfg_v["Model"]["chunk_ranges"]]:
+            raise RuntimeError(f"[omega-depth] Omega ran the layout {_ran[0]} ({_ran[1]}), this "
+                               f"run planned {cfg_v['Model']['chunk_ranges']}")
+        _emit_omega_depth(vggt_save_dir, output_dir, _ran[0], selected_frames_path, pipe)
         from reconstruction.scale_align import run as _scale_run
         _s = _scale_run(output_dir, dry_run=False,
                         log=lambda m: pipe.send_log(f"[scale-align] {m}"),
@@ -2567,133 +2520,23 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                           f"({_mb:.0f} MB freed)")
         return _walk
 
-    _walk_m = _metricize_and_orient(vggt_config, _tag1, sel_path=_probe_sel)
+    _walk_m = _metricize_and_orient(vggt_config, _tag1)
 
-    # The walk lands in the plan as EVIDENCE (the plan is written before the pass,
-    # so the size never waited for it). Reading it back against the real walk is
-    # how the 2.3x over-measurement became visible at all.
+    # Omega's own walk lands in the plan as EVIDENCE next to the I3 walk the plan was
+    # measured on (`walk_m`): the plan is written before the pass and never waits for it.
+    # Reading the two against each other is how an Omega pass that drifted shows (it
+    # measures long — pccr in one chunk read 43.7 m over a ~19 m walk).
     _plan_path = output_dir / "chunk_plan.json"
     if _plan_path.exists():
         try:
             _plan = json.loads(_plan_path.read_text())
-            _plan["walk_m"] = round(float(_walk_m), 2)
+            _plan["omega_walk_m"] = round(float(_walk_m), 2)
             _plan_path.write_text(json.dumps(_plan, indent=1))
         except Exception as _e:  # noqa: BLE001
             pipe.send_log(f"[chunk-plan] could not stamp the measured walk ({_e})",
                           level="warning")
-
-    # ── THE WALK DECIDES, AND THE SINGLE PASS IS ITS PROBE (USER 2026-09-23) ──
-    # *"da3 sobre todos los kf, chunk unico, medida de recorrido, menos de 15m
-    # un chunk, mas de 15m, 60/30"*.
-    #
-    # THE OVER-MEASUREMENT IS THE SIGNAL, NOT A BUG. I removed this on
-    # 2026-09-22 having read it backwards: a single pass that measured 44 m over
-    # a ~19 m walk looked like a broken instrument. It is not — a pass whose
-    # frames still agree measures the real length; one that DRIFTED measures
-    # long, because the drift stretches the trajectory it is summing. Either way
-    # the answer is the same: chunk it. Proven on the very run that led here —
-    # pccr in one chunk measured 43.7 m and dropped 60.1 % of the cloud as
-    # single_witness (frames disagreeing about where surfaces are), against
-    # 18.8 m and 11.6 % on the same scene in 60/30.
-    #
-    # WHY IT IS NOT ARBITRARY: below the limit raw Omega beats Omega + the seam
-    # machinery, above it the machinery wins. Almost every adjustment stage
-    # lives on the SEAMS (exact_seam_align, elastic_seam, frame_ownership,
-    # blend_copies, ownership_backfill, and scale_drift, whose judge IS the seam
-    # ratios), so a single chunk runs none of them: what is delivered is raw
-    # Omega plus one global scale. On short walks that is better — the user's
-    # verdict on observatorio (11.2 m) and test2 (12.9 m). On long ones the
-    # drift the machinery exists to fight is what dominates.
-    _walk_probe = float(_walk_m)
-    _max_walk = float(_simple_cfg.get("max_walk_single_pass_m", 0) or 0)
-    # The re-run is sized in WALKED METRES, not in frames: 60 frames is 5.2 m on
-    # one scene and 3.1 m on another, and a 3 m chunk gives Omega no baseline
-    # (USER 2026-09-23: "implementemos el chunk walk 12, por algo estaban no?").
-    # A positive `chunk_frames_over_walk` overrides it with a fixed size.
-    _fixed2 = int(_simple_cfg.get("chunk_frames_over_walk", 0) or 0)
-    _chunk_walk = float(_simple_cfg.get("chunk_walk_m", 12.0) or 12.0)
-    _phase2, _ov2 = 0, 0          # 0 = the single pass stands, nothing re-runs
-    # The chunk is sized by the WALK alone; the card's capacity is only the
-    # physical ceiling a 12 m chunk cannot exceed (it binds only when 12 m of
-    # this walk holds more keyframes than the card can take — logged if so).
-    _max_chunk = int(_chunk_cfg or _n_selected)
-    # with the walk MEASURED before Omega (F2 I4) the pass's own walk is evidence only —
-    # it never re-runs anything
-    if (_simple_on and not _chunked_already and _scale_align_on and _walk_doc is None
-            and (_probe_sel or (_max_walk > 0 and _walk_m > _max_walk))):
-        if _fixed2:
-            _phase2, _ov2 = _fixed2, _fixed2 // 2
-        else:
-            _phase2, _ov2 = plan_chunks(_n_selected, _walk_m, _chunk_walk,
-                                        max_size=max(_max_chunk, 24))
-            _want = int(round(_chunk_walk * _n_selected / max(_walk_m, 1e-6)))
-            if _want > _phase2 and _phase2 < _n_selected:
-                pipe.send_log(f"[chunk-plan] {_chunk_walk:g} m of this walk is {_want} "
-                              f"keyframes; the card holds {_phase2} per chunk — chunks "
-                              f"of {_phase2} ({_phase2 * _walk_m / _n_selected:.1f} m)",
-                              level="warning")
-        if _phase2 >= _n_selected and not _probe_sel:
-            pipe.send_log(f"[chunk-plan] walk {_walk_m:.1f} m > {_max_walk:g} m but "
-                          f"{_chunk_walk:g} m per chunk needs {_phase2} keyframes of "
-                          f"{_n_selected} — one chunk already covers it, keeping the "
-                          f"single pass")
-            _phase2 = 0
-    if _phase2:
-        pipe.send_log(f"[chunk-plan] walk {_walk_m:.1f} m "
-                      + ("(strided probe) → the full set" if _probe_sel else
-                         f"> {_max_walk:g} m → the single pass either covers a long "
-                         f"walk or drifted; either way it")
-                      + f" is re-run CHUNKED at {_phase2}/{_ov2} "
-                      f"({len(chunk_ranges(_n_selected, _phase2, _ov2))} chunks, "
-                      f"{_chunk_walk:g} m of walk each)")
-        pipe.send_progress(40, f"Walk {_walk_m:.1f} m — re-running chunked "
-                               f"({_phase2}/{_ov2})...", stage="reconstruction")
-        _anchor_idx = plan_anchor_indices(_n_selected, _phase2, _ov2, _anch_per_chunk)
-        _ensure_anchors([_sel_files[i] for i in _anchor_idx])   # already on disk: a no-op
-        # wipe what phase 1 produced — NOT da3_run, the anchors live there and
-        # every keyframe already has one (scale_anchor_frames: 0)
-        for _pat in ("chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json"):
-            for _f in output_dir.glob(_pat):
-                _f.unlink(missing_ok=True)
-        for _name in ("maplong_run", "omega_run", "frame_list.json", "intrinsic.txt",
-                      "camera_poses.txt", "camera_poses.txt.prescale",
-                      "camera_poses.txt.preorient", "camera_frames.txt",
-                      "camera_poses_mapanything.json",
-                      ".metric_scale_applied", ".orientation_applied"):
-            _t = output_dir / _name
-            if _t.is_dir():
-                shutil.rmtree(_t, ignore_errors=True)
-            elif _t.exists():
-                _t.unlink()
-        vggt_config = _build_vggtomega_config(config, frames_dir)
-        _apply_chunked_metric(vggt_config, _phase2, _ov2)
-        # SALAD's non-local band in METRES OF WALK, not in a share of the keyframe
-        # count: the walk is known now. `min_gap_frac` x n was 22 kf on pccr's 216
-        # and 133 kf on 1329 (pccr 2026-08-24: 0 candidates, nothing closed). The
-        # bar is the system's ONE definition of two visits,
-        # correction.visit_drift.min_walk_m (USER 2026-09-25), translated to
-        # keyframes through this walk's measured m/kf; the configured floor stays.
-        _visit_m = float(((config.get("correction") or {}).get("visit_drift") or {})
-                         .get("min_walk_m", 0) or 0)
-        _sal = (vggt_config.get("Loop") or {}).get("SALAD")
-        if _sal is not None and _visit_m > 0 and _walk_m > 0:
-            import math as _math
-            _band = max(int(_sal["min_gap"]),
-                        int(_math.ceil(_visit_m / (_walk_m / _n_selected))))
-            pipe.send_log(f"[loops] SALAD non-local band from the walk: {_band} kf = "
-                          f"{_visit_m:g} m of walk at {_walk_m / _n_selected * 100:.1f} cm/kf "
-                          f"(was {_sal['min_gap_frac']:g} x {_n_selected} kf)")
-            _sal["min_gap"] = int(_band)
-            _sal["min_gap_frac"] = 0.0
-        _persist_chunk_plan(_phase2, _ov2, _n_selected, "chunked-metric", _walk=_walk_m)
-        _apply_conf_filter(vggt_config)
-        _chunked_already = True
-        if not _omega_pass(vggt_config, "chunked-metric"):
-            return
-        _walk_m = _metricize_and_orient(vggt_config, "chunked-metric")
-        pipe.send_log(f"[chunk-plan] chunked re-run measured walk: {_walk_m:.1f} m "
-                      f"(the single pass read {_walk_probe:.1f} m — the gap between "
-                      f"the two IS the drift the chunking removed)")
+    pipe.send_log(f"[chunk-plan] Omega's walk {_walk_m:.1f} m against the I3 walk "
+                  f"{_walk0:.1f} m the plan was measured on (evidence, never a verdict)")
 
     # Success → free da3_run when the TSDF won't use it (depth_source not DA3-based).
     _ds = str((config.get("tsdf", {}) or {}).get("depth_source", "auto")).lower()
@@ -2715,38 +2558,175 @@ _PLAN_INDEPENDENT_MAPLONG = {"loop_closures.txt", "salad_calibration.json", "sky
                              "frame_list.json", "vggt_omega_config.yaml"}
 
 
+def chunk_plan_doc(ranges, n_kf: int, walk_m, covis: dict, omega_res: dict) -> dict:
+    """output/chunk_plan.json of a chunked run (version 2, USER 2026-10-06): the co-visibility
+    plan's EXPLICIT ranges — what every reader of the chunks reads — every chunk's length and
+    every seam's own overlap (variable: nothing here is a uniform size/overlap to rebuild
+    chunks from), the planner's report (D per chunk, H, τ, tol_rel, blocks, cuts, flags, the
+    input stamp) and the Omega resolution chosen for the largest chunk, with why."""
+    from reconstruction.chunk_plan import as_ranges, chunk_lengths, seam_overlaps
+    r = as_ranges(ranges)
+    return {
+        "version": 2,
+        "phase": "covis-planned",
+        "method": "covis",
+        "n_keyframes": int(n_kf),
+        "chunk_ranges": [[a, b] for a, b in r],
+        "chunk_lengths": chunk_lengths(r),
+        "seam_overlaps": seam_overlaps(r),
+        "walk_m": (round(float(walk_m), 2) if walk_m is not None else None),
+        "covis": covis,
+        "omega_resolution": omega_res,
+    }
+
+
+def _plan_layout_text(plan: dict) -> str:
+    """A plan in one phrase for the log: a legacy uniform plan by its size/overlap, an explicit
+    one by its chunk count, lengths and seams — each with Omega's resolution when recorded."""
+    from reconstruction.chunk_plan import as_ranges, chunk_lengths, seam_overlaps
+    res = (plan.get("omega_resolution") or {}).get("resolution")
+    at = f", Omega at {res}" if res is not None else ""
+    if plan.get("chunk_size") is not None and plan.get("overlap") is not None \
+            and "chunk_lengths" not in plan:
+        return f"{plan.get('chunk_size')}/{plan.get('overlap')}{at}"
+    r = as_ranges(plan.get("chunk_ranges") or [])
+    if not r:
+        return "no chunk"
+    ln, sm = chunk_lengths(r), seam_overlaps(r)
+    txt = f"{len(r)} chunk(s), lengths {min(ln)}-{max(ln)} kf"
+    if sm:
+        txt += f", seams {min(sm)}-{max(sm)} kf"
+    return txt + at
+
+
+def _res_key(plan: Optional[dict]):
+    r = (plan or {}).get("omega_resolution") or {}
+    return (int(r["resolution"]), str(r["mode"])) if "resolution" in r and "mode" in r else None
+
+
+def _model_resolution(m: dict) -> Optional[dict]:
+    """(omega_resolution, omega_mode) of a run config's Model block, None when not both recorded."""
+    try:
+        return ({"resolution": int(m["omega_resolution"]), "mode": str(m["omega_mode"])}
+                if "omega_resolution" in m and "omega_mode" in m else None)
+    except (TypeError, ValueError):
+        return None
+
+
+def _frame_list_count(out: Path) -> Optional[int]:
+    """How many keyframes the last fork launch ran: maplong_run/frame_list.json (written by the
+    fork at launch, after the keyframe filter — the same launch as the config beside it), else
+    the copy the run left in output/. None when neither is a readable list."""
+    for p in (out / "maplong_run" / "frame_list.json", out / "frame_list.json"):
+        if p.exists():
+            try:
+                fl = json.loads(p.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(fl, list) and fl:
+                return len(fl)
+    return None
+
+
+def _layout_on_disk(out: Path) -> Optional[dict]:
+    """The chunk layout + Omega resolution the products on disk were made with: the chunk plan
+    (a chunked run), else the previous pass's own config (output/vggt_omega_config.yaml:
+    Model.chunk_ranges + omega_resolution/omega_mode — a single pass writes no plan). None
+    when neither exists; {"unreadable": True} when one exists and cannot be read.
+
+    A PRE-2026-10-06 record carries no explicit layout of its own and is rebuilt, never presumed
+    different (review 2026-10-06: a validated single-pass session lost its Omega products, core,
+    segmentation and epochs on the first resume with replace OFF): a config with
+    Model.chunk_size / overlap is the vendor's UNIFORM layout, rebuilt with the vendor's formula
+    (reconstruction.chunk_plan.chunk_ranges) over the frames that launch ran — frame_list.json,
+    or chunk_size itself when overlap is 0 (a single pass wrote chunk_size = n); a version-1
+    chunk_plan.json carries its ranges but no resolution, which its run's config does. Only
+    {"legacy_config": True} when the uniform layout cannot be rebuilt (no size, no frame count)."""
+    c = out / "vggt_omega_config.yaml"
+    model = None
+    if c.exists():
+        try:
+            import yaml as _yaml
+            model = (_yaml.full_load(c.read_text()) or {}).get("Model") or {}
+            if not isinstance(model, dict):
+                model = {"__unreadable__": True}
+        except Exception:  # noqa: BLE001 — an unreadable record is a record of nothing
+            model = {"__unreadable__": True}
+    p = out / "chunk_plan.json"
+    if p.exists():
+        try:
+            doc = json.loads(p.read_text())
+        except (OSError, ValueError):
+            return {"unreadable": True}
+        if (isinstance(doc, dict) and doc.get("omega_resolution") is None
+                and model is not None and not model.get("__unreadable__")):
+            res = _model_resolution(model)
+            if res is not None:
+                doc["omega_resolution"] = res       # a version-1 plan: its run's config has it
+        return doc
+    if model is None:
+        return None
+    if model.get("__unreadable__"):
+        return {"unreadable": True}
+    res = _model_resolution(model)
+    if model.get("chunk_ranges") is None:
+        try:
+            size, ov = int(model["chunk_size"]), int(model["overlap"])
+        except (KeyError, TypeError, ValueError):
+            return {"legacy_config": True}
+        n = _frame_list_count(out)
+        if n is None and ov == 0:
+            n = size                               # a single pass: chunk_size = its keyframes
+        if n is None or size < 1 or ov < 0 or ov >= size:
+            return {"legacy_config": True}
+        from reconstruction.chunk_plan import chunk_ranges as _uniform_ranges
+        r = [[int(a), int(b)] for a, b in _uniform_ranges(n, size, ov)]
+        return {"chunk_ranges": r, "n_keyframes": n, "chunk_size": size, "overlap": ov,
+                "legacy_uniform": True, "omega_resolution": res}
+    r = [[int(a), int(b)] for a, b in model["chunk_ranges"]]
+    return {"chunk_ranges": r, "n_keyframes": r[-1][1] if r else -1, "omega_resolution": res}
+
+
 def _invalidate_on_new_chunk_plan(output_dir: Path, plan: dict, log=print) -> bool:
-    """A chunked run whose plan differs from the one the outputs on disk were made with
-    (another walk measured, another chunk size) wipes EVERY product of the old plan before
-    Omega runs: the chunk predictions, the bridges, the aligned copies, the per-chunk PLYs
-    and stamps, and everything downstream (omega_run, the precision core, the cloud, the
-    segmentation projected on it, the epochs). Old and new never live side by side — a
-    resume would otherwise load chunk 11 of the old plan next to chunk 10 of the new one
-    (USER 2026-10-05, pccr 2408: 296/148 on disk, 293/146 planned). What stays: the
-    frames and the intake, DA3 per keyframe and its windows, the SALAD candidates and
-    calibration, the sky masks — all computed before Omega, independent of the chunking.
-    Returns True when something was wiped."""
+    """A run whose chunk layout or Omega resolution differs from the one the outputs on disk
+    were made with (another co-visibility plan, another keyframe set, a card that fits the
+    largest chunk at another resolution) wipes EVERY product of the old layout before Omega
+    runs: the chunk predictions, the bridges, the aligned copies, the per-chunk PLYs and
+    stamps, and everything downstream (omega_run, the precision core, the cloud, the
+    segmentation projected on it, the epochs). Old and new never live side by side — a resume
+    would otherwise load chunk 11 of the old plan next to chunk 10 of the new one (USER
+    2026-10-05, pccr 2408). The comparison is on the explicit ranges, the keyframe count and
+    the resolution — never on a size or an overlap; the planner's report (measured/reused,
+    the card's GB) is not part of it. ``plan``: {"chunk_ranges", "n_keyframes",
+    "omega_resolution"} — a single pass passes its one range. The old layout comes from
+    chunk_plan.json, else the previous pass's vggt_omega_config.yaml; a pre-2026-10-06 record
+    (uniform chunk_size/overlap, a plan with no resolution) is REBUILT by _layout_on_disk and
+    compared like any other — a resume of the same layout never wipes. What stays: the frames
+    and the intake, DA3 per keyframe and its windows, the SALAD candidates and calibration,
+    the sky masks — all computed before Omega, independent of the chunking. Returns True
+    when something was wiped."""
     out = Path(output_dir)
     ml = out / "maplong_run"
-    old_path = out / "chunk_plan.json"
-    old = None
-    if old_path.exists():
-        try:
-            old = json.loads(old_path.read_text())
-        except (OSError, ValueError):
-            old = {"unreadable": True}
+    old = _layout_on_disk(out)
     has_chunks = any((ml / "_tmp_results_unaligned").glob("chunk_*.npy")) if ml.is_dir() else False
     same = (old is not None
-            and old.get("chunk_ranges") == plan["chunk_ranges"]
-            and int(old.get("n_keyframes", -1)) == int(plan["n_keyframes"]))
+            and old.get("chunk_ranges") == [[int(a), int(b)] for a, b in plan["chunk_ranges"]]
+            and int(old.get("n_keyframes", -1)) == int(plan["n_keyframes"])
+            and _res_key(old) == _res_key(plan))
     if same:
         return False
     if old is None and not has_chunks:
         return False                  # a first run: nothing of any plan on disk yet
-    why = ("chunk files on disk with no chunk plan recorded for them" if old is None else
-           f"the outputs on disk are of chunk plan {old.get('chunk_size')}/{old.get('overlap')} "
-           f"over {old.get('n_keyframes')} keyframes, this run plans "
-           f"{plan['chunk_size']}/{plan['overlap']} over {plan['n_keyframes']}")
+    new_txt = f"{_plan_layout_text(plan)} over {plan['n_keyframes']}"
+    if old is None:
+        why = "chunk files on disk with no chunk plan recorded for them"
+    elif old.get("unreadable") or old.get("legacy_config"):
+        why = (f"the outputs on disk carry no readable explicit layout "
+               f"({'unreadable record' if old.get('unreadable') else 'a pre-2026-10-06 config'}), "
+               f"this run plans {new_txt}")
+    else:
+        why = (f"the outputs on disk are of chunk plan {_plan_layout_text(old)} over "
+               f"{old.get('n_keyframes')} keyframes, this run plans {new_txt}")
     freed = 0
     doomed = [p for p in out.iterdir() if p.name not in _PLAN_INDEPENDENT_OUTPUT]
     if ml.is_dir():
@@ -3136,9 +3116,41 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
         pipe.send_log("No chunk PLYs found — origins not generated", level="warning")
         return
 
-    chunk_size = vggt_config["Model"]["chunk_size"]
-    overlap = vggt_config["Model"]["overlap"]
-    chunk_step = chunk_size - overlap
+    # Chunk K's local frame j is processed-list position ranges[K][0] + j. The layout is the
+    # run's EXPLICIT list (USER 2026-10-06): Model.chunk_ranges of the config the run was given
+    # (every Omega run), else the one the fork recorded (chunk_sim3.json). Only a legacy
+    # backend whose vendor builds the uniform chunk_size/overlap layout itself (DA3 streaming,
+    # MapAnything) and records no list falls back to that uniform layout — it IS what it ran.
+    _model = vggt_config.get("Model") or {}
+    if _model.get("chunk_ranges") is not None:
+        _layout = [(int(a), int(b)) for a, b in _model["chunk_ranges"]]
+        _layout_src = "Model.chunk_ranges"
+    elif (vggt_save_dir / "chunk_sim3.json").exists():
+        _layout = [(int(a), int(b)) for a, b in
+                   json.loads((vggt_save_dir / "chunk_sim3.json").read_text())["chunk_indices"]]
+        _layout_src = "chunk_sim3.json"
+    else:
+        _layout = None
+        _layout_src = "the legacy backend's uniform chunk_size/overlap"
+    _uniform_step = (None if _layout is not None
+                     else int(_model["chunk_size"]) - int(_model["overlap"]))
+
+    def _chunk_start(K: int) -> int:
+        if _layout is None:
+            return K * _uniform_step
+        if K >= len(_layout):
+            raise RuntimeError(f"chunk {K} is not in the run's layout ({len(_layout)} chunks, "
+                               f"{_layout_src})")
+        return _layout[K][0]
+
+    def _layout_meta(K: int, S: int) -> dict:
+        """chunk_NNN_meta.json's layout fields: the chunk's real first/last processed-list
+        positions; `chunk_step` only for a legacy uniform layout (its readers' key)."""
+        a = _chunk_start(K)
+        meta = {"frame_global_start": int(a), "frame_global_end": int(a + S - 1)}
+        if _layout is None:
+            meta["chunk_step"] = int(_uniform_step)
+        return meta
 
     # STAC: map img_list position -> REAL frame number (numeric part of the original
     # filename), so frame_global stays correct under stride / keyframe subsetting.
@@ -3205,9 +3217,13 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
                             f"for the PLY and for the origins must be identical.")
                     np.savez_compressed(output_dir / f"chunk_{i:03d}_origins.npz",
                                         **{k: z[k] for k in z.files})
+                    _S_inline = (_layout[K][1] - _layout[K][0]) if (
+                        _layout is not None and K < len(_layout)) else None
                     with open(output_dir / f"chunk_{i:03d}_meta.json", "w") as f:
-                        json.dump({"chunk_id": i, "source_chunk": int(K),
-                                   "n_points": n, "chunk_step": int(chunk_step)}, f)
+                        json.dump({"chunk_id": i, "source_chunk": int(K), "n_points": n,
+                                   **(_layout_meta(K, _S_inline) if _S_inline is not None
+                                      else ({"chunk_step": int(_uniform_step)}
+                                            if _layout is None else {}))}, f)
                     pipe.send_log(f"Saved origins chunk_{i:03d} (src {K}, inline 1:1): {n} pts")
                     # streaming clean (user 2026-09-03: minimize expansion):
                     # this chunk is now fully mirrored in output/ — its pcd/
@@ -3292,7 +3308,7 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
                 within = surviving % HW
                 pixel_row = (within // W).astype(np.int16)
                 pixel_col = (within % W).astype(np.int16)
-                abs_idx = frame_local + K * chunk_step          # position in processed img_list
+                abs_idx = frame_local + _chunk_start(K)          # position in processed img_list
                 if frame_numbers is not None:
                     safe = np.clip(abs_idx, 0, len(frame_numbers) - 1)
                     if np.any(abs_idx >= len(frame_numbers)) or np.any(abs_idx < 0):
@@ -3332,9 +3348,7 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
                         "source_chunk": K,
                         "frame_count": int(S),
                         "scaled_resolution": [int(H), int(W)],
-                        "chunk_step": int(chunk_step),
-                        "frame_global_start": int(K * chunk_step),
-                        "frame_global_end": int(K * chunk_step + S - 1),
+                        **_layout_meta(K, S),
                         "backend": vggt_config.get("_backend", "da3"),
                         "has_confidence": confidence is not None,
                         "ply_pre_aligned": True,

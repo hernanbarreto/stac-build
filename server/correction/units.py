@@ -32,10 +32,13 @@ def load_chunk_plan(output_dir) -> Optional[dict]:
     try:
         plan = json.loads(p.read_text())
         ranges = plan["chunk_ranges"]
-        if not isinstance(ranges, list) or not all(
-                isinstance(r, list) and len(r) == 2 for r in ranges):
-            raise ValueError("chunk_ranges must be a list of [start, end)")
-        int(plan["chunk_size"]); int(plan["overlap"]); int(plan["n_keyframes"])
+        if not isinstance(ranges, list) or not ranges or not all(
+                isinstance(r, list) and len(r) == 2 and int(r[0]) < int(r[1]) for r in ranges):
+            raise ValueError("chunk_ranges must be a non-empty list of [start, end)")
+        # the explicit ranges ARE the plan (USER 2026-10-06: co-visibility-planned, variable
+        # lengths, each seam its own overlap) — no uniform chunk_size / overlap is required
+        # or read; a legacy plan that still carries them loads unchanged
+        int(plan["n_keyframes"])
         return plan
     except (ValueError, KeyError, TypeError) as e:
         raise RuntimeError(

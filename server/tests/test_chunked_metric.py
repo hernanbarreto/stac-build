@@ -1,9 +1,10 @@
 # STAC-Builder — chunked-metric Omega: unit tests (synthetic, no GPU).
 #
-# Covers the three pure pieces the two-phase pipeline stands on:
-#   1. chunk_plan — walk measurement, the FIXED-size chunk layout and anchor
-#      placement (every chunk must get anchors, and ranges must match VGGT-Long's
-#      slicing). Meter-sized planning was deleted 2026-09-22 with the two-phase flow.
+# Covers the pure pieces the chunked pipeline stands on:
+#   1. chunk_plan — walk measurement, the vendor's uniform slicing (legacy backends), anchor
+#      placement over the EXPLICIT co-visibility ranges (every chunk must get anchors) and the
+#      Omega resolution that fits the largest planned chunk (USER 2026-10-06). The walk- and
+#      capacity-sized layouts were deleted 2026-10-06 with the co-visibility plan.
 #   2. metric_lock — per-chunk scale recovery from synthetic DA3 anchors and its
 #      application to world_points / depth / extrinsics.
 #
@@ -21,7 +22,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
                                                 "vendor", "VGGT-Long")))
 
 from reconstruction.chunk_plan import (  # noqa: E402
-    walk_length_m, plan_chunks, chunk_ranges, plan_anchor_indices,
+    walk_length_m, chunk_ranges, plan_anchor_indices,
 )
 from loop_utils.metric_lock import anchor_ratio, chunk_scale, apply_scale  # noqa: E402
 
@@ -54,10 +55,15 @@ def test_chunk_ranges_match_vendor_slicing():
         assert chunk_ranges(n, cs, ov) == vendor(n, cs, ov), (n, cs, ov)
 
 
+# pccr 2026-08-31's co-visibility plan (variable lengths 42-139, seams 20-106)
+PCCR_COVIS = [(0, 63), (30, 169), (63, 189), (169, 211), (189, 289)]
+
+
 def test_anchor_indices_cover_every_chunk():
-    for n, cs, ov in [(100, 60, 30), (66, 24, 12), (227, 80, 40)]:
-        picks = set(plan_anchor_indices(n, cs, ov, per_chunk=3))
-        for start, end in chunk_ranges(n, cs, ov):
+    for n, ranges in [(100, chunk_ranges(100, 60, 30)), (66, chunk_ranges(66, 24, 12)),
+                      (227, chunk_ranges(227, 80, 40)), (289, PCCR_COVIS)]:
+        picks = set(plan_anchor_indices(ranges, per_chunk=3))
+        for start, end in ranges:
             inside = [i for i in picks if start <= i < end]
             assert len(inside) >= 2, f"chunk ({start},{end}) has {len(inside)} anchors"
         assert all(0 <= i < n for i in picks)
@@ -975,131 +981,112 @@ def test_heldout_change_is_the_bar_not_a_constant():
     assert not v["improves"] and not v["worsens"]
 
 
-# ── AS MANY FRAMES AS THE CARD ALLOWS (USER ORDER 2026-09-23) ────────
-# *"vamos a armar los chunk de la mayor cantidad de frames posibles, si hay mas
-# de uno, con el solape del 50% ... eso lo va a determinar el GPU"*, on his
-# visual verdict: *"yo se como queda observatorio con un solo chunk, y es mucho
-# mejor que lo que tenemos ahora, lo mismo el test2"*. What is asserted is that
-# the capacity is MEASURED off the card, that a scene which fits becomes ONE
-# chunk with no seam, and that above it the overlap stays at half.
+# ── THE PLAN IS CO-VISIBILITY, THE CARD ADAPTS THE RESOLUTION (USER 2026-10-06) ──
+# *"el plan de chunk no cambia, el tamaño de la tarjeta no lo podemos cambiar, para que
+# encaje adaptamos la resolución"*. What is asserted: the walk/capacity-sized layouts are gone
+# (config and worker), the order is I3 → plan → resolution → ONE Omega pass, and the
+# resolution is the largest patch-aligned one at which the largest chunk fits the card.
+
+_SRC = Path(__file__).resolve().parents[1] / "workers" / "map_worker.py"
+_DELETED_SIMPLE = ("max_walk_single_pass_m", "chunk_walk_m", "chunk_frames_over_walk", "chunk_frames")
 
 
-def test_the_capacity_comes_from_the_card_not_from_a_constant():
-    import yaml
-    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
-    assert int(cfg["reconstruction"]["simple"]["chunk_frames"]) == 0, \
-        "0 = ask the card; a positive value is an explicit A/B override"
-    src = (Path(__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
-    assert "_cap = max(24, int((_free - 4.0) / 0.086))" in src, \
-        "the capacity must be (free VRAM - base) / per-frame footprint"
-    i = src.index("stop_semantic_service(pipe, stage=\"Omega reconstruction\")")
-    j = src.index("_cap = max(24, int((_free - 4.0) / 0.086))")
-    assert i < j, "the card must be read AFTER vLLM has released it"
-
-
-def test_a_scene_that_fits_is_one_chunk_with_no_seam():
-    """The whole point: no seam, nothing to tear. pccr/test2/observatorio all
-    sit at 213-255 keyframes against a ~500-frame capacity on a free 48 GB
-    card."""
-    for n in (213, 216, 255, 500):
-        assert chunk_ranges(n, max(n, 2), 0) == [(0, n)], n
-
-
-def test_above_the_capacity_the_overlap_is_half():
-    cap = 500
-    r = chunk_ranges(1200, cap, cap // 2)
-    assert r[0] == (0, cap)
-    assert r[1][0] == cap // 2, "50 % overlap"
-    assert all(b - a <= cap for a, b in r), "no chunk may exceed the capacity"
-    assert r[-1][1] == 1200
-
-
-def test_every_chunk_of_the_capacity_layout_gets_its_anchors():
-    """The per-chunk metric anchors are known from the KEYFRAME COUNT alone,
-    which is what lets them be extracted in the SAME DA3 round."""
-    cap = 500
-    idx = plan_anchor_indices(1200, cap, cap // 2, per_chunk=3)
-    assert idx == sorted(set(idx))
-    for start, end in chunk_ranges(1200, cap, cap // 2):
-        assert any(start <= i < end for i in idx), (start, end)
-
-
-def test_the_worker_extracts_both_anchor_sets_in_one_round():
-    src = (Path(__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
-    i = src.index("_cf_anchor = int(_simple_cfg.get(\"chunk_frames\", 0) or 0)")
-    j = src.index("_run_da3_anchor(pipe, frames_dir, output_dir, sorted(set(_missing))")
-    assert i < j, ("the per-chunk anchors must join _anchor_files BEFORE the DA3 "
-                   "extraction, or the second launch comes back")
-
-
-# ── THE WALK DECIDES, AND THE SINGLE PASS IS ITS PROBE (USER 2026-09-23) ──
-# *"da3 sobre todos los kf, chunk unico, medida de recorrido, menos de 15m un
-# chunk, mas de 15m, 60/30"*.
-
-
-def test_the_walk_limit_and_the_rerun_size_are_configured():
+def test_the_walk_and_capacity_keys_are_gone_and_refused():
     import yaml
     cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
     s = cfg["reconstruction"]["simple"]
-    assert float(s["max_walk_single_pass_m"]) == 15.0
-    # the re-run is sized in WALKED METRES; the value is the USER's (12 m on 2026-09-23, 5 m since
-    # 2026-10-01: "Omega, 5 m chunks, 50 %" — docs/pipeline_final.md), never a number this test owns
-    assert float(s["chunk_walk_m"]) > 0.0, "the re-run is sized in WALKED METRES"
-    # USER 2026-09-28: pinned to 152 (12 m on pccr 2026-08-24) after the walk probe
-    # read 14.6x the walk; 0 = metres decide again once F2 measures the walk
-    assert int(s["chunk_frames_over_walk"]) >= 0, "0 = metres decide; >0 pins a size"
+    for k in _DELETED_SIMPLE:
+        assert k not in s, f"reconstruction.simple.{k} is a deleted key"
+    for k in ("chunk_size", "chunk_overlap"):
+        assert k not in cfg["reconstruction"]["vggtomega"], f"reconstruction.vggtomega.{k}"
     assert int(s["scale_anchor_frames"]) == 0, "DA3 anchors every keyframe"
-    assert int(s["chunk_frames"]) == 0, "the single pass takes what the card allows"
+    src = _SRC.read_text()
+    for k in _DELETED_SIMPLE:
+        assert f'"{k}"' in src[src.index("for _gone in (\"chunk_walk_m\""):][:200], k
+    assert "plan_chunks" not in src.replace("plan_chunks), the", "")
+    import reconstruction.chunk_plan as CP
+    assert not hasattr(CP, "plan_chunks"), "the walk-sized chunk planner is deleted"
 
 
-def test_a_chunk_is_a_distance_not_a_frame_count():
-    """USER 2026-09-23: *"implementemos el chunk walk 12, por algo estaban no?"*.
-    60 frames is 5.2 m on pccr and 3.1 m on test2 — the same number, a different
-    chunk. Sizing by metres makes every scene get the same BASELINE."""
-    # pccr, on the walk phase 1 reads (43.7 m): the layout already proven there
-    assert plan_chunks(216, 43.7, 12.0) == (59, 29)
-    # a genuinely long walk: chunks stay ~12 m whatever the keyframe density
-    size, ov = plan_chunks(600, 80.0, 12.0)
-    assert ov == size // 2
-    assert abs(size * (80.0 / 600) - 12.0) < 1.5, size
-    # clamped: never below the overlap-alignment floor, never back into the
-    # long-horizon drift regime
-    assert plan_chunks(1000, 10.0, 12.0)[0] == 150
-    assert plan_chunks(100, 200.0, 12.0)[0] == 24
-
-
-def test_the_order_is_da3_then_one_pass_then_the_walk_then_maybe_chunks():
-    """The single pass IS the probe: its metric poses are what the walk is
-    measured on, so the re-run can only be decided after it."""
-    src = (Path(__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
+def test_the_order_is_i3_then_the_plan_then_the_resolution_then_one_pass():
+    src = _SRC.read_text()
+    i_stop = src.index('stop_semantic_service(pipe, stage="Omega reconstruction")')
+    i_walk = src.index("_walk_doc = measure_walk(output_dir.parent")
     i_da3 = src.index("DA3 metric anchor on ALL")
-    i_cap = src.index("_cap = max(24, int((_free - 4.0) / 0.086))")
-    i_walk = src.index("[chunk-plan] measured walk:")
-    i_rerun = src.index("re-run CHUNKED at")
-    assert i_da3 < i_cap < i_walk < i_rerun, (i_da3, i_cap, i_walk, i_rerun)
-    assert src.count("if not _omega_pass(") == 2, \
-        "one pass always, a second ONLY when the walk asks for it"
+    i_plan = src.index("_cplan = plan_session(output_dir.parent, log=pipe.send_log)")
+    i_card = src.index("_total_gb = _gpu_total_gb()")
+    i_res = src.index("_res = omega_resolution_for(")
+    i_pass = src.index("_ok = _omega_pass(vggt_config, _tag1)")
+    assert i_stop < i_walk < i_da3 < i_plan < i_card < i_res < i_pass
+    assert src.count("_omega_pass(vggt_config") == 1, "ONE Omega pass, never a re-run"
+    assert "re-run CHUNKED" not in src and "_phase2" not in src and "_probe_sel" not in src
+    assert "_gpu_free_gb()" not in src[i_plan:i_pass], "the card's TOTAL memory, never the free"
 
 
-def test_a_short_walk_never_re_runs():
-    """observatorio 11.2 m and test2 12.9 m stay in the single chunk the user
-    judged better, and a scene whose whole walk fits in one chunk-of-metres
-    keeps it too — a re-run into a single chunk is the same pass twice."""
+def test_a_resume_without_windows_replans_from_the_persisted_measurement():
+    """walk reused + window files deleted: covis.json serves the plan; without it the SAME
+    windows are regenerated once (walk.json and the anchors stay)."""
+    src = _SRC.read_text()
+    blk = src[src.index("_cplan = plan_session(output_dir.parent"):src.index("_ranges = [(int(a), int(b)) for a, b in _cplan")]
+    assert "except CovisError" in blk and "if not _walk_reused:" in blk
+    assert "run_da3_windows(" in blk and "measure_walk(" not in blk
+
+
+def test_the_resolution_is_native_when_the_largest_chunk_fits():
+    from reconstruction.chunk_plan import omega_resolution_for
+    r = omega_resolution_for(139, 47.99, (464, 832), "max_size", 832)     # pccr's largest chunk
+    assert r["resolution"] == 832 and not r["reduced"] and r["grid_wh"] == [464, 832]
+    assert r["capacity_frames"] == 511
+
+
+def test_the_resolution_drops_to_the_largest_patch_aligned_one_that_fits():
+    from precision.camera import OMEGA_PATCH_SIZE, omega_grid_for
+    from reconstruction.chunk_plan import omega_capacity, omega_resolution_for
+    # zaragoza: 1920x1080, ONE pass of 183 keyframes — 95 frames fit at native on 48 GB
+    r = omega_resolution_for(183, 47.99, (1920, 1080), "max_size", 1920)
+    assert r["reduced"] and r["resolution"] == 1376 and r["grid_wh"] == [1376, 768]
+    assert r["resolution"] % OMEGA_PATCH_SIZE == 0
+    assert r["capacity_frames"] >= 183
+    up = omega_grid_for(1920, 1080, "max_size", r["resolution"] + OMEGA_PATCH_SIZE)
+    assert omega_capacity(47.99, up.w, up.h) < 183, "the next patch up must not fit"
+    assert abs(r["grid_wh"][1] / r["grid_wh"][0] - 1080 / 1920) < 0.02, "aspect kept"
+    # deterministic per card: same inputs, same report
+    assert r == omega_resolution_for(183, 47.99, (1920, 1080), "max_size", 1920)
+    # a bigger card holds more at a higher resolution
+    assert omega_resolution_for(183, 80.0, (1920, 1080), "max_size", 1920)["resolution"] > 1376
+
+
+def test_nothing_fits_fails_loudly():
+    import pytest
+    from reconstruction.chunk_plan import ChunkLayoutError, omega_resolution_for
+    with pytest.raises(ChunkLayoutError):
+        omega_resolution_for(10 ** 9, 47.99, (1920, 1080), "max_size", 1920)
+    with pytest.raises(ChunkLayoutError):
+        omega_resolution_for(10, 3.0, (1920, 1080), "max_size", 1920)       # below the base
+
+
+def test_the_capacity_formula_is_the_measured_one():
+    from reconstruction.chunk_plan import omega_capacity
+    # (total - 4 GB) / 0.086 GB per frame at 832x464, scaled by pixels
+    assert omega_capacity(47.99, 832, 464) == int(43.99 / 0.086)
+    assert omega_capacity(47.99, 1920, 1088) == int(43.99 / (0.086 * 1920 * 1088 / (832 * 464)))
+
+
+def test_every_chunk_of_the_covis_layout_gets_its_anchors():
+    idx = plan_anchor_indices(PCCR_COVIS, per_chunk=3)
+    assert idx == sorted(set(idx))
+    for start, end in PCCR_COVIS:
+        assert sum(start <= i < end for i in idx) >= 3, (start, end)
+
+
+def test_omega_resolution_leaves_the_margin_and_retries_lower_on_oom():
+    """USER 2026-10-06: the Omega resolution leaves the I3 windows' margin on the card, and a pass
+    that still runs out of memory is retried one patch step lower — the plan never changes."""
+    from reconstruction.chunk_plan import omega_resolution_for
+    no = omega_resolution_for(183, 80.0, (1920, 1080), "max_size", 1920, margin_frac=0.0)
+    yes = omega_resolution_for(183, 80.0, (1920, 1080), "max_size", 1920, margin_frac=0.15)
+    assert yes["resolution"] < no["resolution"] and yes["margin_applied"] and not no["margin_applied"]
+    assert yes["predicted_peak_gb"] <= 80.0 * 0.85 + 1e-6
     src = (Path(__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
-    assert ("and _scale_align_on and _walk_doc is None\n            and (_probe_sel or "
-            "(_max_walk > 0 and _walk_m > _max_walk)))") in src, \
-        "the limit and the metric lock both guard the re-run (or the strided walk probe)"
-    assert "_max_walk > 0" in src, "0 disables the re-run entirely"
-    assert "_phase2, _ov2 = 0, 0" in src, \
-        "nothing re-runs unless the walk asks for it"
-    i = src.index("if _phase2 >= _n_selected and not _probe_sel:")
-    j = src.index("keeping the \n", i) if "keeping the \n" in src[i:i + 400] else i
-    assert j >= i, "one chunk already covering the walk keeps the single pass"
-
-
-def test_the_rerun_layout_is_the_vendor_default():
-    assert chunk_ranges(216, 60, 30)[0] == (0, 60)
-    assert len(chunk_ranges(216, 60, 30)) == 7, "pccr: the layout that worked"
-    idx = plan_anchor_indices(216, 60, 30, per_chunk=3)
-    for a, b in chunk_ranges(216, 60, 30):
-        assert any(a <= i < b for i in idx), (a, b)
+    assert "margin_frac=_omega_margin" in src and "parallax.vram_margin_frac" in src
+    assert '_omega_oom["hit"] = True' in src and "_prev - _OPS" in src

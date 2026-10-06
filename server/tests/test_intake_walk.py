@@ -139,13 +139,18 @@ def test_a_missing_window_names_itself(tmp_path):
         W.measure_walk(tmp_path, G, log=lambda *a: None)
 
 
-def test_chunk_plan_from_the_measured_walk_is_reproducible():
-    """I4: the measured walk sizes the chunks — the same walk, the same plan, and
-    each chunk ~chunk_walk_m of it (pccr 2026-08-24: 1329 kf over 104.8 m)."""
-    from reconstruction.chunk_plan import plan_chunks, chunk_ranges
-    a = plan_chunks(1329, 104.8, 12.0, max_size=870)
-    assert a == plan_chunks(1329, 104.8, 12.0, max_size=870)
-    size, ov = a
-    assert ov == size // 2
-    assert abs(size * 104.8 / 1329 - 12.0) < 0.1
-    assert chunk_ranges(1329, size, ov)[-1][1] == 1329
+def test_chunk_plan_from_the_walks_windows_is_reproducible(tmp_path):
+    """I4 (USER 2026-10-06): the chunks are planned by CO-VISIBILITY on the same I3 windows the
+    walk was chained from (reconstruction.chunk_covis) — the same windows and walk, the same
+    plan bit for bit, and the persisted measurement is stamped by that walk."""
+    from reconstruction.chunk_covis import plan_session
+    truth = _trajectory(150)
+    _write_windows(tmp_path, truth, noise_m=0.0)
+    W.measure_walk(tmp_path, G, log=lambda *a: None)
+    a = plan_session(tmp_path, log=lambda *a: None)
+    b = plan_session(tmp_path, log=lambda *a: None)
+    assert a["report"]["measurement"] == "measured" and b["report"]["measurement"] == "reused"
+    assert a["ranges"] == b["ranges"]
+    assert a["ranges"][0][0] == 0 and a["ranges"][-1][1] == 150
+    doc = json.loads((tmp_path / "intake" / "covis.json").read_text())
+    assert doc["stamp"] == a["report"]["input_stamp"] and doc["n"] == 150

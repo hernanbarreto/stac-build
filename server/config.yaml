@@ -1424,15 +1424,23 @@ reconstruction:
   # ⚠ Weights are gated: request access at huggingface.co/facebook/VGGT-Omega, download
   #   vggt_omega_1b_512.pt → vendor/vggt-omega-weights/ (path in stac_vggtomega.yaml).
   vggtomega:
-    chunk_size: 500                     # windowed FALLBACK only (video > max_frames_single_pass):
-    chunk_overlap: 250                  # 500/250 = few seams, wide-baseline chunks, 50% overlap
-                                        # (~43 GB VRAM at 500 frames — needs the GPU to itself)
+    # (chunk_size / chunk_overlap: DELETED 2026-10-06 — the chunks are the co-visibility plan's
+    # explicit ranges, reconstruction.simple's CHUNK PLAN block; a leftover key fails the run)
     loop_closure: true
     resolution: native                  # USER 2026-09-28 ("trabajemos a máxima resolución"):
                                         # native = the frames' long side rounded up to Omega's
                                         # patch (16), mode forced to max_size → the Omega grid
                                         # IS the native frame (pccr 464x832: grid 464x832; the
                                         # old 512 balanced saw 384x688). An int = that value.
+                                        # It is the CEILING (USER 2026-10-06): when the largest
+                                        # planned chunk does not fit the card at it, the run
+                                        # uses the largest patch-aligned resolution below it
+                                        # that does (reconstruction.chunk_plan.
+                                        # omega_resolution_for; zaragoza 1920x1080, ONE pass
+                                        # of 183 kf: 1376 (grid 1376x768) on a 48 GB card,
+                                        # 1808 (grid 1808x1024) on an 80 GB one; pccr's
+                                        # largest chunk, 139 kf, and observatorio's 71 kf
+                                        # run native on both).
     mode: "balanced"                    # "balanced" (≈res² tokens) | "max_size" (less VRAM);
                                         # ignored when resolution is native
     scale_align: true                   # metric: DA3 anchor + scale_align (global similarity:
@@ -1727,97 +1735,40 @@ reconstruction:
                                         # are not. Lower = denser keyframes.
     target_fps: 1.0                     # "fps" mode only: time sampling rate. 1 fps = the web
                                         # demo's regime (its slider caps at 2; examples use 1).
-    max_walk_single_pass_m: 15.0        # THE WALK DECIDES (USER 2026-09-23: "menos de 15m
-                                        # un chunk, mas de 15m, 60/30"). The single pass is
-                                        # its own probe: measured on its metric poses after
-                                        # scale_align, a pass whose frames still agree reads
-                                        # the real length, one that DRIFTED reads long —
-                                        # and both answers mean the same thing, chunk it.
-                                        # Measured on pccr the day this came back: one chunk
-                                        # read 43.7 m and dropped 60.1 % of the cloud as
-                                        # single_witness; the same scene at 60/30 read 18.8 m
-                                        # (real ~19) and dropped 11.6 %.
-                                        # 0 disables the re-run entirely (one pass, always).
-                                        # 25->15 (2026-07-09): test6 (29 m) was still bad
-                                        # single-pass; the comfort proven so far is test2 ~10 m.
-    chunk_walk_m: 15.0                  # USER 2026-10-05: "chunks de 15 m siempre" — zaragoza (17.8 m) at 5 m
-                                        # came out in 6 chunks whose metric lock disagreed by
-                                        # ×1.39, floor tilted 2.5–5.8° per chunk, "muchísimo peor
-                                        # que Omega en un solo chunk". metres of REAL walk (I3,
-                                        # DA3 windows) per chunk, 50 % overlap.
-                                        # (History: 5 — USER 2026-09-30: "Omega deriva, está
-                                        # probado que no más de 5 m". 12 → 5 (2026-09-29): the 12 was calibrated
-                                        # on the INFLATED Omega-pass walk (pccr 44 m → 12
-                                        # inflated m = 59 kf = the accepted 60/30 layout —
-                                        # plan_chunks' own docstring). Fed the REAL DA3 walk
-                                        # (17.5 m) it made 198-kf chunks, 3.4× that layout, and
-                                        # Omega drifted 80 % (31.75 m of poses). 5 m of real
-                                        # walk = pccr's accepted 0.087 m/kf × 60. MEASURED
-                                        # answer pending: the Omega coherence probe.
-                                        # (History, USER 2026-09-23: "implementemos el chunk
-                                        # walk 12, por algo estaban no?"). A size in FRAMES
-                                        # covers a different DISTANCE in every scene, because
-                                        # keyframes are parallax-uniform, not distance-uniform:
-                                        #   pccr          0.087 m/kf -> 60 kf = 5.2 m
-                                        #   test2         0.051 m/kf -> 60 kf = 3.1 m
-                                        #   observatorio  0.053 m/kf -> 60 kf = 3.2 m
-                                        # A 3 m chunk gives Omega nearly the same viewpoint
-                                        # sixty times and puts seven seams inside twelve
-                                        # metres; pccr at 5.2 m was accepted, those two at 3 m
-                                        # came out broken. Clamped to [24, 150] keyframes.
-                                        # On pccr this lands at 59/29 — the layout already
-                                        # proven there — because the walk it divides is phase
-                                        # 1's, inflated by the very drift that triggered the
-                                        # re-run, which shortens the chunk in the direction
-                                        # that helps.
-    chunk_frames_over_walk: 0           # >0 pins the chunk size in keyframes (overlap half)
-                                        # on EVERY planning branch, chunk_walk_m ignored; 0 =
-                                        # metres of the DA3 walk decide. 152 → 0 (2026-09-29):
-                                        # 152 was "12 m at pccr 2026-08-24's density" for the
-                                        # inflated-walk era and was silently ignored by the
-                                        # walk-planned branch anyway (it planned 198).
-    # (history) max_walk_single_pass_m was REMOVED 2026-09-22 (USER: *"no debe haber max walk,
-    #   eso ya no aplica"*). It was the comfort limit that re-ran the whole
-    #   reconstruction when the measured walk exceeded it — a second DA3 round and a
-    #   second Omega pass, decided by a number that read 44.1 m on pccr's ~19 m walk.
-    #   The chunk decision is chunk_frames alone, taken before any inference.
-    # chunk_walk_m / max_frames_single_pass: REMOVED the same day — the first sized
-    #   chunks in walked METERS through that same bad walk (plan_chunks, deleted with
-    #   its 45-kf re-densification); the second was the single-pass cap that
-    #   chunk_frames now IS.
-    chunk_frames: 0                     # 0 = AS MANY AS THE CARD ALLOWS (USER ORDER
-                                        # 2026-09-23: *"vamos a armar los chunk de la
-                                        # mayor cantidad de frames posibles, si hay mas de
-                                        # uno, con el solape del 50% ... eso lo va a
-                                        # determinar el GPU, lo que el GPU permita"*).
-                                        # capacity = (free VRAM - 4 GB base) / 0.086 GB per
-                                        # frame — the vendor's measured footprint, ~500
-                                        # frames on a free 48 GB card. n_kf <= capacity ->
-                                        # ONE chunk, overlap 0, no seams; above it ->
-                                        # chunks of that capacity with 50 % overlap.
-                                        # WHY, on his visual verdict over many runs
-                                        # (*"yo se como queda observatorio con un solo
-                                        # chunk, y es mucho mejor ... lo mismo el test2"*)
-                                        # and on this repo's own measurements: the damage
-                                        # lands on the SEAMS — test2's epoch 1 tore at seam
-                                        # 6->7, the elastic stage starts from 8.4 cm of
-                                        # disagreement between the two copies of a shared
-                                        # frame, the in-run pose graph worsens its held-out
-                                        # by 0.6 cm. A chunk that holds the whole scene has
-                                        # none of that. Omega's feed-forward drift is why
-                                        # chunking exists at all, and on walks of ~11-13 m
-                                        # it costs less than the seams do.
-                                        # A POSITIVE VALUE OVERRIDES the probe (A/B work).
-                                        # HISTORY — 60 (2026-09-22, the vendor default) gave
-                                        # 7-8 chunks on 213-255 keyframes and the user
-                                        # judged test2 and observatorio clearly worse than
-                                        # their single-chunk runs. 450 (2026-09-04) was the
-                                        # same idea as this one, stated as a constant; it
-                                        # was reverted the same night for "intra-chunk drift
-                                        # over the long horizon" — now the capacity is
-                                        # MEASURED rather than declared, and the single-pass
-                                        # case (n_kf <= capacity) is the one it produces on
-                                        # every scene shot so far.
+    # ── THE CHUNK PLAN = CO-VISIBILITY (USER 2026-10-06: always, no switch, no alternative,
+    #    deterministic — reconstruction/chunk_covis.py, docs/design_adaptive_chunking.md) ──
+    # I3's DA3 windows (measured BEFORE Omega) give every keyframe's forward CO-VISIBILITY
+    # LENGTH ℓ — how many following keyframes still share ≥ τ 0.3 of its content by depth
+    # consistency (VGG-T3), tolerance = the session's own two-window depth disagreement
+    # (95 % quantile), scanned over the WHOLE walk. The walk costs δ = 1/ℓ per keyframe
+    # (VGGT-Motion): static stretches nothing, turns and near-field sideways motion a lot.
+    # D(a,b) = Σ δ counts co-visibility lengths walked. ONE Omega pass when D(whole walk) ≤ H;
+    # otherwise half-chunk blocks of ≤ H/2 lengths (≥ 12 keyframes: MIN_CHUNK_FRAMES 24),
+    # chunk k = block k ∪ block k+1 (50 % overlap, every seam its own block), the cuts placed
+    # by an exact DP — fewest chunks, then the nearest seams, then the gentlest cut, leftmost.
+    # The explicit ranges reach the fork as Model.chunk_ranges and EVERY later reader of the
+    # chunks reads that list (output/chunk_plan.json, maplong_run/chunk_sim3.json).
+    # H = 13.67 co-visibility lengths per chunk — a constant of the method
+    # (chunk_covis.H_LENGTHS_PER_CHUNK), NOT a user option, calibrated on the user's verdicts:
+    #   pccr 2026-08-31, uniform 5 m chunks (50 %)   VALIDATED GOOD  D 6.00 – 13.67 per chunk
+    #   pccr 2026-08-31, uniform 15 m chunks (50 %)  FAILED (90.5 cm seam)  D 18.06 / 32.19
+    #   zaragoza 2026-06-03, the whole walk as ONE pass  validated good  D 5.01
+    #   observatorio 2026-08-11, the whole walk as ONE pass  validated good  D 3.39
+    #   lo = the largest D validated good = 13.67 < hi = the smallest D that failed = 18.06:
+    #   co-visibility separates the verdicts; H = lo (no extrapolation past what worked).
+    # THE CARD NEVER SHAPES THE PLAN — *"el plan de chunk no cambia, el tamaño de la tarjeta no
+    # lo podemos cambiar, para que encaje adaptamos la resolución"*: Omega's processing
+    # resolution (reconstruction.vggtomega.resolution is its CEILING) is lowered, patch-aligned
+    # with the aspect kept, only as far as needed for the LARGEST planned chunk to fit the
+    # card's TOTAL memory (4 GB base + 0.086 GB/frame at 832x464, scaled by the grid's pixels).
+    # Chosen value and why: the log ([omega-res]), chunk_plan.json `omega_resolution` and
+    # vggt_omega_config.yaml Model.omega_resolution_report.
+    # DELETED 2026-10-06 with the walk/capacity-sized chunks (a leftover key FAILS the run,
+    # naming itself): max_walk_single_pass_m (15 m single-pass limit), chunk_walk_m (15 m of
+    # walk per chunk), chunk_frames_over_walk (pinned keyframes per chunk), chunk_frames (the
+    # card's capacity as chunk size / its A/B pin), the strided walk probe and the phase-2
+    # re-run, reconstruction.vggtomega.chunk_size / chunk_overlap. Their history is in git
+    # and CLAUDE.md (2026-09-22/23/30, 2026-10-05).
     chunk_anchors: 3                    # DA3 metric anchors per chunk (metric lock BEFORE the
                                         # SE(3) gluing — scale is never a degree of freedom).
     # densify: REMOVED (2026-07-10). DA3 fill glued by frame-to-keyframe ICP was

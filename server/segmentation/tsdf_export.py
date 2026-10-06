@@ -346,32 +346,20 @@ def _resolve_mapanything_depth(output_dir: Path, conf_percentile: Optional[float
     if not frame_to_pos:
         return None
 
-    # chunk_step (= chunk_size - overlap) — from our origin meta sidecar; else the
-    # vendor config copy. Needed to map list position → (chunk K, frame_local).
-    chunk_step: Optional[int] = None
-    for mp in sorted(output_dir.glob("chunk_*_meta.json")):
-        try:
-            chunk_step = int(json.load(open(mp)).get("chunk_step"))
-            if chunk_step:
-                break
-        except Exception:
-            continue
-    if not chunk_step:
-        # The vendor config copy is named per backend: mapanything → vggt_long_config.yaml,
-        # vggtomega → vggt_omega_config.yaml. Try BOTH — looking only for vggt_long_config
-        # made this return None for vggtomega, so the TSDF fell back to DA3 depth (a
-        # DIFFERENT model than the omega cloud) → mesh ~1.6× off / displaced vs the cloud.
-        import yaml as _yaml
-        for _cfg in ("vggt_long_config.yaml", "vggt_omega_config.yaml"):
-            try:
-                c = _yaml.safe_load(open(run_dir / _cfg))
-                chunk_step = int(c["Model"]["chunk_size"]) - int(c["Model"]["overlap"])
-                if chunk_step:
-                    break
-            except Exception:
-                chunk_step = None
-    if not chunk_step or chunk_step < 1:
+    # The chunk layout the run USED (USER 2026-10-06: the co-visibility plan's explicit ranges,
+    # variable lengths, each seam its own overlap): maplong_run/chunk_sim3.json (what the fork
+    # ran), else the run config's Model.chunk_ranges, else chunk_plan.json
+    # (reconstruction.chunk_plan.omega_chunk_ranges). Needed to map list position → (chunk K,
+    # frame_local); nothing is rebuilt from a chunk size / overlap / step any more.
+    from reconstruction.chunk_plan import ChunkLayoutError, latest_chunk_of, omega_chunk_ranges
+    try:
+        _lay = omega_chunk_ranges(output_dir)
+    except ChunkLayoutError as _e:
+        logger.warning(f"chunk depth unavailable: {_e}")
         return None
+    if _lay is None:
+        return None
+    layout = _lay[0]
 
     def _load_chunk(K: int):
         p = chunks / f"chunk_{K}.npy"
@@ -396,16 +384,14 @@ def _resolve_mapanything_depth(output_dir: Path, conf_percentile: Optional[float
     d0 = _depth_stack(probe["depth"])
     h, w = int(d0.shape[-2]), int(d0.shape[-1])
 
-    # How many chunks exist (chunk_0 … chunk_{n-1}). The LAST chunk is longer than
-    # chunk_step (it keeps its full overlap tail with no successor), so its tail frames
-    # live at positions ≥ n_chunks*chunk_step. The naive K = pos // chunk_step sends those
-    # to a non-existent chunk → they get NO depth and are skipped, leaving the mesh short
-    # of the cloud's end (test3: 50 of 230 frames dropped → last section uncovered). Clamp
-    # K to the last chunk so the tail is read from it (local index stays < its depth len).
+    # every chunk of the layout must be on disk (chunk_0 … chunk_{n-1}) — a missing one would
+    # send its frames to no depth at all
     n_chunks = 0
     while (chunks / f"chunk_{n_chunks}.npy").exists():
         n_chunks += 1
-    if n_chunks == 0:
+    if n_chunks != len(layout):
+        logger.warning(f"{n_chunks} chunk npy(s) on disk, the run's layout has {len(layout)} — "
+                       f"chunk depth unavailable")
         return None
 
     cache: Dict[str, object] = {"K": None, "data": None}
@@ -414,8 +400,12 @@ def _resolve_mapanything_depth(output_dir: Path, conf_percentile: Optional[float
         pos = frame_to_pos.get(int(frame_idx))
         if pos is None:
             return None
-        K = min(pos // chunk_step, n_chunks - 1)
-        local = pos - K * chunk_step
+        # the LATER chunk holding the position — min(pos // step, n − 1) on a uniform layout,
+        # the same rule over the real ranges on an explicit one
+        K = latest_chunk_of(layout, pos)
+        if K < 0:
+            return None
+        local = pos - layout[K][0]
         if cache["K"] != K:
             data = _load_chunk(K)
             if data is None:
