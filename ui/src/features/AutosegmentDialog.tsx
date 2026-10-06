@@ -56,7 +56,9 @@ export function AutosegmentDialog({ open, sessionId, state, loading, onClose, on
   const sam3Prompts = sam3Text.split('\n').map(s => s.trim()).filter(Boolean)
   const nothing = !stages.vlm && !stages.sam3 && !stages.certify
   const sam3NeedsPrompts = stages.sam3 && !stages.vlm && sam3Prompts.length === 0
-  const canRun = !!state && state.has_cloud && !state.busy && !nothing && !sam3NeedsPrompts && !running && !loading
+  // USER 2026-10-06: an order never waits for the window to be free — a running pipeline on this
+  // session (or any other) only means the order QUEUES behind it
+  const canRun = !!state && !nothing && !sam3NeedsPrompts && !running && !loading
 
   const run = async () => {
     setRunning(true)
@@ -74,7 +76,7 @@ export function AutosegmentDialog({ open, sessionId, state, loading, onClose, on
       <Stack gap={3}>
         <p className="stac-dialog__message">{t('autosegment.description')}</p>
         {state && !state.has_cloud && <Banner tone="warn" compact>{t('autosegment.noCloud')}</Banner>}
-        {state && state.busy && <Banner tone="warn" compact>{t('autosegment.busy')}</Banner>}
+        {state && state.busy && <Banner tone="info" compact>{t('autosegment.busy')}</Banner>}
         <Field label={t('autosegment.vlmPrompt')} hint={t('autosegment.vlmPromptHint')}>
           <textarea className="stac-input__el stac-autoseg__textarea" rows={10} value={vlmPrompt} spellCheck={false}
             onChange={e => setVlmPrompt(e.target.value)} disabled={loading} />

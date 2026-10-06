@@ -182,3 +182,40 @@ async def _body_test_two_scans_of_one_session(monkeypatch):
     # cancelling by session takes every job of it that is still alive
     await pm.cancel_pipeline("pccr")
     assert b.status == JobStatus.CANCELLED and a.status == JobStatus.DONE
+
+
+def test_an_autosegment_after_a_reconstruction_of_the_same_scan_queues(monkeypatch):
+    asyncio.run(_body_autoseg_queues(monkeypatch))
+
+
+async def _body_autoseg_queues(monkeypatch):
+    """USER 2026-10-06 ("todo quede en cola"): another kind of order on the same scan waits its
+    turn; only the SAME order on the SAME scan while the first is pending is refused."""
+    from pipeline_manager import JobStatus, PipelineManager, build_pipeline_stages
+    pm = PipelineManager()
+    gate = asyncio.Event()
+
+    async def _fake_run(job, session_dir, config, on_progress, on_complete, replace, force=False):
+        await gate.wait()
+        job.status = JobStatus.DONE
+        job.ended_at = time.time()
+        await pm._start_next_queued()
+
+    monkeypatch.setattr(pm, "_run_pipeline", _fake_run)
+    monkeypatch.setattr(pm, "_resolve_dir", lambda *a, **k: "/tmp", raising=False)
+    sk = "2026-06-03/default"
+    rec = await pm.start_pipeline("zaragoza", build_pipeline_stages(), {}, scan_key=sk)
+    seg = await pm.start_pipeline("zaragoza", build_pipeline_stages(), {}, scan_key=sk, kind="autosegment")
+    other = await pm.start_pipeline("pccr", build_pipeline_stages(), {}, scan_key="2026-08-31/default",
+                                    kind="autosegment")
+    assert rec.status == JobStatus.RUNNING
+    assert seg.status == JobStatus.QUEUED and seg.queue_position == 1
+    assert other.status == JobStatus.QUEUED and other.queue_position == 2
+    assert pm.is_active("zaragoza", sk, "autosegment") and pm.is_active("zaragoza", sk, "reconstruct")
+    with pytest.raises(RuntimeError, match="one and only one"):
+        await pm.start_pipeline("zaragoza", build_pipeline_stages(), {}, scan_key=sk, kind="autosegment")
+    keys = set(pm.get_all_jobs())
+    assert "zaragoza@2026-06-03/default" in keys and "zaragoza@2026-06-03/default#autosegment" in keys
+    gate.set()
+    await asyncio.sleep(0.05)
+    assert rec.status == JobStatus.DONE and seg.status == JobStatus.DONE and other.status == JobStatus.DONE

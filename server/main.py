@@ -6060,7 +6060,7 @@ async def autosegment_state(session_id: str):
     from segmentation.autoprompt.autosegment import state
     ctx = _ctx(session_id)
     d = state(ctx.output_dir)
-    d["busy"] = pipeline_manager.is_active(session_id)
+    d["busy"] = pipeline_manager.is_active(session_id)          # shown, never blocking: it queues
     return {"ok": True, **d}
 
 
@@ -7412,8 +7412,11 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
     # wiped output/. A command must act NOW or not at all.
     # per SCAN since 2026-10-05: another scan of the same project is another job
     # and waits its turn in the queue — the same scan twice is what is refused
+    # USER 2026-10-06 ("todo quede en cola"): only the SAME order on the SAME scan while the
+    # first is pending is refused — an Autosegment after a Reconstruir, or another scan, queues
+    _kind = "autosegment" if isinstance(cmd.get("autosegment"), dict) else "reconstruct"
     _busy = bool(session_id) and any(
-        pipeline_manager.is_active(session_id, _sk or None)
+        pipeline_manager.is_active(session_id, _sk or None, _kind)
         for _sk in (list(cmd.get("scans") or []) or [None]))
     if _busy or _onload_busy.get(session_id):
         _why = ("a pipeline is already running"
@@ -7780,6 +7783,7 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
             replace=replace,
             scan_key=_sk,
             force=_force,
+            kind=_kind,
         )
         _state = "queued" if _job.status == JobStatus.QUEUED else "started"
         await viewer_manager.send_text(websocket, json.dumps({

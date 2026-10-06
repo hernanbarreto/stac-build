@@ -133,6 +133,11 @@ class PipelineJob:
     # "hay que meterlo en cola ... se debe mostrar en el UI"); the registry keys a
     # job by session + scan (`job_key`)
     scan_key: Optional[str] = None
+    # what the job does: 'reconstruct' (the Reconstruir order) or 'autosegment' (the chain on
+    # the cloud on disk). USER 2026-10-06: every order queues — a segmentation of a scan
+    # whose reconstruction is still queued or running waits for it; only the SAME order on
+    # the SAME scan while the first is pending is refused.
+    kind: str = "reconstruct"
     # 0 = running or next to run; N = N jobs ahead of it in the queue
     queue_position: int = 0
     ended_at: float = 0.0
@@ -145,6 +150,7 @@ class PipelineJob:
             "session_id": self.session_id,
             "session_dir": self.session_dir,
             "scan_key": self.scan_key,
+            "kind": self.kind,
             "status": self.status.value,
             "queue_position": self.queue_position,
             "current_stage_idx": self.current_stage_idx,
@@ -204,6 +210,7 @@ class PipelineManager:
         replace: bool = False,
         scan_key: Optional[str] = None,
         force: bool = False,
+        kind: str = "reconstruct",
     ) -> PipelineJob:
         """Start a pipeline for the given session.
         
@@ -222,11 +229,11 @@ class PipelineManager:
                    complete (the Autosegment window: the user asked for THESE stages
                    again, on purpose — nothing is wiped).
         """
-        # ONE AND ONLY ONE (USER ORDER 2026-09-05): a reconstruction command
-        # never queues and never cancel-and-replaces a running one — if a job
-        # for this SCAN is active, the new request is REFUSED loudly. Another
-        # scan of the same project is another job and waits its turn (2026-10-05).
-        _key = self.job_key(session_id, scan_key)
+        # ONE AND ONLY ONE (USER ORDER 2026-09-05): the SAME order on the SAME scan while the
+        # first is pending is REFUSED loudly (never cancel-and-replace). Everything else queues
+        # (USER 2026-10-06: "todo quede en cola"): another scan, another session, or another
+        # kind of order on this scan (an Autosegment after its Reconstruir) waits its turn.
+        _key = self.job_key(session_id, scan_key, kind)
         _existing = self._jobs.get(_key)
         if _existing and _existing.status in (JobStatus.QUEUED,
                                               JobStatus.RUNNING):
@@ -236,7 +243,7 @@ class PipelineManager:
 
         # Build job
         stage_states = [StageState(stage=s) for s in stages]
-        job = PipelineJob(session_id=session_id, stages=stage_states, scan_key=scan_key)
+        job = PipelineJob(session_id=session_id, stages=stage_states, scan_key=scan_key, kind=kind)
         self._jobs[_key] = job
 
         # Resolve session directory (supports both new-style projects/ and legacy scans/)
@@ -457,8 +464,9 @@ class PipelineManager:
     # ── the registry: one job per session + scan ──────────────────────────
 
     @staticmethod
-    def job_key(session_id: str, scan_key: Optional[str] = None) -> str:
-        return f"{session_id}@{scan_key}" if scan_key else session_id
+    def job_key(session_id: str, scan_key: Optional[str] = None, kind: str = "reconstruct") -> str:
+        base = f"{session_id}@{scan_key}" if scan_key else session_id
+        return base if kind == "reconstruct" else f"{base}#{kind}"
 
     def jobs_of(self, session_id: str) -> List[PipelineJob]:
         return [j for j in self._jobs.values() if j.session_id == session_id]
@@ -482,11 +490,13 @@ class PipelineManager:
             return min(queued, key=lambda j: j.queue_position)
         return jobs[-1]
 
-    def is_active(self, session_id: str, scan_key: Optional[str] = None) -> bool:
-        """A job of this session (this scan, when named) is queued or running."""
+    def is_active(self, session_id: str, scan_key: Optional[str] = None,
+                  kind: Optional[str] = None) -> bool:
+        """A job of this session (this scan / this kind, when named) is queued or running."""
         return any(j.status in (JobStatus.QUEUED, JobStatus.RUNNING)
                    for j in self.jobs_of(session_id)
-                   if scan_key is None or j.scan_key == scan_key)
+                   if (scan_key is None or j.scan_key == scan_key)
+                   and (kind is None or j.kind == kind))
 
     def get_status(self, session_id: str) -> Optional[dict]:
         """Get current status of a pipeline job."""
