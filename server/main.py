@@ -985,16 +985,16 @@ class ViewerManager:
     async def send_text(self, websocket: WebSocket, message: str):
         if websocket is None:          # a command that came over HTTP: tell every viewer
             await self.broadcast_text(message)
-            return
-        async with self._lock_for(websocket):
-            try:
-                await asyncio.wait_for(websocket.send_text(message),
-                                       timeout=self._send_timeout_s(len(message)))
-            except asyncio.TimeoutError:
-                await self._drop_dead(websocket, f"send_text of {len(message):,} chars timed out")
-            except Exception as e:
-                print(f"[Viewer] send_text failed, dropping the socket: {e}")
-                self.disconnect_viewer(websocket)
+        else:
+            async with self._lock_for(websocket):
+                try:
+                    await asyncio.wait_for(websocket.send_text(message),
+                                           timeout=self._send_timeout_s(len(message)))
+                except asyncio.TimeoutError:
+                    await self._drop_dead(websocket, f"send_text of {len(message):,} chars timed out")
+                except Exception as e:
+                    print(f"[Viewer] send_text failed, dropping the socket: {e}")
+                    self.disconnect_viewer(websocket)
 
     async def send_bytes(self, websocket: WebSocket, data: bytes):
         async with self._lock_for(websocket):
@@ -1003,7 +1003,6 @@ class ViewerManager:
                                        timeout=self._send_timeout_s(len(data)))
             except asyncio.TimeoutError:
                 await self._drop_dead(websocket, f"send_bytes of {len(data):,} bytes timed out")
-                return
             except Exception as e:
                 print(f"[Viewer] send_bytes failed, dropping the socket: {e}")
                 self.disconnect_viewer(websocket)
@@ -1720,11 +1719,22 @@ async def create_session(
 
 # ── Video upload → frame extraction ─────────────────────────────────
 # A freshly-created project has no frames, so reconstruction can't run yet.
-# The user uploads a video, we extract ALL frames into ctx.frames_dir as
-# {idx:06d}.jpg (same naming the frame selector / reconstruction expect),
-# then the UI swaps its "+" (upload) button for the "🔨" (reconstruct) one.
-# Extraction can take a while, so it runs as a background task; the UI polls
+# The user uploads a video, we extract ALL frames as {idx:06d}.jpg (same naming
+# the frame selector / reconstruction expect), then the UI swaps its "+"
+# (upload) button for the "🔨" (reconstruct) one. Extraction can take a while,
+# so it runs as a background task; the UI polls
 # GET /api/sessions/{id}/video/extract_progress.
+#
+# SEALED (docs/plan_determinismo.md points 67 / 76, intake.frames_manifest): the
+# frames are written into <scan>/frames.extracting/ — created BEFORE the video is
+# streamed, so every process sees the scan as "being extracted" from the first
+# byte — with frames/manifest.json (decoder, encoder, the video's sha256, every
+# frame's sha256) written last and the directory renamed to frames/ only when
+# complete. A restart mid-way leaves the temp dir: the pipeline and the intake
+# refuse the scan until a new upload removes it. A video is uploaded into a scan
+# WITHOUT frames only (409 naming the frame count otherwise): the UI offers the
+# upload only on a scan with no frames and has no replace-video action, so frames
+# and video are never mixed.
 _VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".m4v")
 _video_extract_state: Dict[str, Dict[str, Any]] = {}  # session_id -> {phase, pct, saved, total, error}
 
@@ -1735,34 +1745,23 @@ def _video_extract_set(session_id: str, **kw):
     st.update(kw)
 
 
-def _extract_video_frames_sync(video_path: str, frames_dir: Path, session_id: str):
-    """Decode every frame of the video to frames_dir/{idx:06d}.jpg. Runs in an executor."""
-    import cv2
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        _video_extract_set(session_id, phase="error", error="could not open video")
-        return
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-    frames_dir.mkdir(parents=True, exist_ok=True)
-    params = [cv2.IMWRITE_JPEG_QUALITY, 95]
-    idx = 0
-    saved = 0
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            cv2.imwrite(str(frames_dir / f"{idx:06d}.jpg"), frame, params)
-            idx += 1
-            saved += 1
-            if saved % 25 == 0:
-                pct = round(100.0 * idx / total, 1) if total else 0.0
-                _video_extract_set(session_id, pct=pct, saved=saved, total=total)
-    finally:
-        cap.release()
-    _video_extract_set(session_id, phase="done", pct=100.0, saved=saved,
-                       total=total or saved, error=None, finished_at=time.time())
-    print(f"[Video] ✅ Extracted {saved} frames → {frames_dir}", flush=True)
+def _extract_video_frames_sync(video_path: str, scan_dir: Path, session_id: str):
+    """Decode every frame of the video into the scan's frames, sealed
+    (intake.frames_manifest.extract_video). Runs in an executor; raises on failure."""
+    from intake import frames_manifest as FM
+    t0 = time.monotonic()
+
+    def _prog(saved: int, total: int) -> None:
+        pct = round(100.0 * saved / total, 1) if total else 0.0
+        _video_extract_set(session_id, pct=pct, saved=saved, total=total)
+
+    doc = FM.extract_video(video_path, scan_dir, origin=FM.ORIGIN_VIDEO, progress=_prog,
+                           log=lambda m: print(m, flush=True))
+    _video_extract_set(session_id, phase="done", pct=100.0, saved=doc["n_frames"],
+                       total=doc["frame_count_reported"] or doc["n_frames"], error=None,
+                       finished_at=time.time())
+    print(f"[Video] ✅ Extracted {doc['n_frames']} frames → {FM.frames_dir(scan_dir)} (sealed, "
+          f"{time.monotonic() - t0:.1f} s)", flush=True)
 
 
 @app.post("/api/sessions/{session_id}/video/upload")
@@ -1772,7 +1771,8 @@ async def upload_video(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ):
     """Upload a video and extract all its frames into the session. Admin/manager only.
-    Returns immediately; poll /api/sessions/{id}/video/extract_progress for status."""
+    Returns immediately; poll /api/sessions/{id}/video/extract_progress for status.
+    409 when the scan already has frames, or while its frames are being written."""
     from auth import decode_token
     if not credentials:
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -1793,15 +1793,40 @@ async def upload_video(
     if st and st.get("phase") == "extracting":
         raise HTTPException(status_code=409, detail="A video is already being processed for this session")
 
-    # Stream the upload to disk (videos can be large — avoid loading into RAM)
-    ctx.source_dir.mkdir(parents=True, exist_ok=True)
-    video_path = ctx.source_dir / f"source_video{ext}"
-    with video_path.open("wb") as out:
-        while True:
-            chunk = await file.read(1024 * 1024)
-            if not chunk:
-                break
-            out.write(chunk)
+    from intake import frames_manifest as FM
+    scan_dir = ctx.source_dir
+    refusal = FM.upload_refusal(scan_dir)            # frames already there (point 67)
+    if refusal:
+        raise HTTPException(status_code=409, detail=refusal)
+    try:
+        token = FM.claim_writer(scan_dir, FM.ORIGIN_VIDEO)
+    except FM.FramesManifestError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    try:
+        gone = FM.discard_partial(scan_dir)          # an interrupted extraction / upload
+        if gone:
+            print(f"[Video] removed what an interrupted extraction left: {', '.join(gone)}",
+                  flush=True)
+        # from here on every process sees the scan as being extracted (the pipeline refuses it)
+        FM.extracting_dir(scan_dir).mkdir(parents=True)
+        # Stream the upload to disk (videos can be large — avoid loading into RAM)
+        uploading = scan_dir / FM.UPLOADING_VIDEO_NAME
+        with uploading.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+        for old in FM.source_videos(scan_dir):       # a video whose frames never sealed
+            print(f"[Video] {old.name} had no frames — replaced by the new upload", flush=True)
+            old.unlink()
+        video_path = scan_dir / f"source_video{ext}"
+        os.replace(uploading, video_path)
+    except BaseException:
+        FM.discard_partial(scan_dir)
+        FM.release_writer(scan_dir, token)
+        raise
     print(f"[Video] ⬆️ Received {file.filename} → {video_path}", flush=True)
 
     _video_extract_set(session_id, phase="extracting", pct=0.0, saved=0, total=0,
@@ -1812,12 +1837,18 @@ async def upload_video(
     async def _job():
         try:
             await loop.run_in_executor(
-                None, _extract_video_frames_sync, str(video_path), ctx.frames_dir, session_id
+                None, _extract_video_frames_sync, str(video_path), scan_dir, session_id
             )
         except Exception as e:
             import traceback
             traceback.print_exc()
             _video_extract_set(session_id, phase="error", error=str(e))
+            try:
+                FM.discard_partial(scan_dir)         # a clean failure leaves no temp dir
+            except Exception:                        # noqa: BLE001 — the next upload removes it
+                traceback.print_exc()
+        finally:
+            FM.release_writer(scan_dir, token)
 
     asyncio.create_task(_job())
     return {"ok": True, "started": True, "filename": file.filename}
@@ -1825,12 +1856,18 @@ async def upload_video(
 
 @app.get("/api/sessions/{session_id}/video/extract_progress")
 async def video_extract_progress(session_id: str):
-    """Poll frame-extraction progress. When idle, reports the on-disk frame count."""
+    """Poll frame-extraction progress. When idle, reports the on-disk frame count, whether
+    the frames are sealed, and an extraction a restart interrupted (its temp dir)."""
     st = _video_extract_state.get(session_id)
     if not st:
         ctx = _ctx(session_id)
-        fc = len(list(ctx.frames_dir.glob("*.jpg"))) if ctx.frames_dir.exists() else 0
-        return {"phase": "idle", "frame_count": fc}
+        from intake import frames_manifest as FM
+        have = FM.frames_present(ctx.source_dir)
+        out = {"phase": "idle", "frame_count": have["n_frames"], "sealed": have["manifest"]}
+        why = FM.extraction_in_progress(ctx.source_dir)
+        if why:
+            out["interrupted"] = why
+        return out
     return st
 
 
@@ -7374,17 +7411,26 @@ async def camera_websocket(websocket: WebSocket):
 
 
 async def _camera_frame_capture(websocket: WebSocket):
-    """Capture camera frames and store them for offline pipeline processing."""
-    import cv2
-    
+    """The legacy live frame stream — its frames are REFUSED (docs/plan_determinismo.md points
+    67 / 76): ``frame_storage.add_frame`` wrote ``{n:05d}.jpg`` one by one into whatever scan
+    the viewer had loaded last, with no manifest — appending frames to a sealed scan. No client
+    in this repo uses this socket (static/camera.html captures through /ws/scan, which seals its
+    frames); the frames are received and dropped, and the client is told why once."""
+    told = False
     try:
         while True:
-            data = await websocket.receive_bytes()
-            frame = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
-            if frame is not None:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frame_storage.add_frame(frame)
-                camera_manager.frame_count += 1
+            await websocket.receive_bytes()
+            if not told:
+                told = True
+                print("[Camera] /ws/camera frames refused: they would be appended unsealed to a "
+                      "scan — capture with camera.html (/ws/scan)", flush=True)
+                try:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "frames refused: /ws/camera writes no frames manifest — "
+                                   "capture with /ws/scan (camera.html)"}))
+                except Exception:  # noqa: BLE001
+                    pass
     except Exception as e:
         print(f"[Camera] Connection closed: {e}")
     finally:
@@ -8516,16 +8562,39 @@ async def scan_websocket(websocket: WebSocket):
     """
     WebXR Scan WebSocket — receives frames + camera data from camera.html.
     Saves JPEG frames and camera metadata (pose, intrinsics) to disk.
+
+    SEALED (docs/plan_determinismo.md points 67 / 76, intake.frames_manifest): the frames go
+    into <scan>/frames.extracting/ through a FrameSealer (a duplicate frame_index is refused)
+    and are sealed at stop_scan — frames/manifest.json written last, the directory renamed to
+    frames/. A scan that already holds frames is refused: one capture per scan (the old handler
+    overwrote frame 000000… of a scan captured earlier the same day). A dropped socket leaves
+    the temp dir (the pipeline refuses the scan meanwhile): camera.html reconnects on its own
+    and its init_scan continues the capture — taking the claim over even before the server has
+    noticed the old socket died (a WebXR claim is reclaimable) — and the frames already
+    received keep their numbers. Frames after stop_scan are refused (the capture is sealed). The
+    capture's camera data (camera_data/, scan_meta.json) is written into <scan>/inputs/webxr/:
+    capture data, which the replace wipe keeps (point 73).
     """
+    from intake import frames_manifest as FM
+    from ingestors.capture_inputs import webxr_inputs_dir
     await websocket.accept()
     print("[Scan WS] Client connected")
 
     project_id = None
     scan_date = None
     source_name = "webxr"
-    frames_dir = None
+    scan_dir = None
+    sealer = None
+    token = None
+    sealed = False
     camera_data_dir = None
     frame_count = 0
+
+    def _release():
+        nonlocal token
+        if token is not None and scan_dir is not None:
+            FM.release_writer(scan_dir, token)
+        token = None
 
     try:
         while True:
@@ -8552,31 +8621,46 @@ async def scan_websocket(websocket: WebSocket):
                 from project_paths import ProjectPaths
                 projects_dir = PROJECTS_DIR
                 paths = ProjectPaths(str(projects_dir), project_id)
-                paths.ensure_source_dirs(scan_date, source_name)
-
-                # Resolve frame and camera_data directories
                 source_dir = paths.source_dir(scan_date, source_name)
-                frames_dir = source_dir / "frames"
-                camera_data_dir = source_dir / "camera_data"
-                frames_dir.mkdir(parents=True, exist_ok=True)
+                have = FM.frames_present(source_dir)
+                if have["n_frames"] or have["manifest"]:
+                    await websocket.send_json({"type": "error", "message": (
+                        f"scans/{scan_date}/src_{source_name} already holds {have['n_frames']} "
+                        f"sealed frame(s) — one capture per scan; this capture is refused")})
+                    continue
+                _release()
+                try:
+                    token = FM.claim_writer(source_dir, FM.ORIGIN_WEBXR)
+                except FM.FramesManifestError as e:
+                    await websocket.send_json({"type": "error", "message": str(e)})
+                    continue
+                paths.ensure_source_dirs(scan_date, source_name)
+                scan_dir = source_dir
+                sealer = FM.FrameSealer(scan_dir)        # continues a dropped capture, if any
+                sealed = False
+                inputs_webxr = webxr_inputs_dir(scan_dir)
+                camera_data_dir = inputs_webxr / "camera_data"
                 camera_data_dir.mkdir(parents=True, exist_ok=True)
 
-                # Create scan_meta.json with capture info
-                scan_meta = {
-                    "capture_method": "webxr",
-                    "has_ar": msg.get("has_ar", False),
-                    "capture_fps": msg.get("capture_fps", 3),
-                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    "zoom_level": 1.0,
-                    "source": "webxr_capture",
-                }
-                meta_path = source_dir / "scan_meta.json"
-                with open(meta_path, "w") as f:
-                    json.dump(scan_meta, f, indent=2)
+                # Create scan_meta.json with capture info (kept when a dropped capture resumes)
+                meta_path = inputs_webxr / "scan_meta.json"
+                if not meta_path.exists():
+                    scan_meta = {
+                        "capture_method": "webxr",
+                        "has_ar": msg.get("has_ar", False),
+                        "capture_fps": msg.get("capture_fps", 3),
+                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "zoom_level": 1.0,
+                        "source": "webxr_capture",
+                    }
+                    with open(meta_path, "w") as f:
+                        json.dump(scan_meta, f, indent=2)
 
-                frame_count = 0
-                print(f"[Scan WS] Initialized: project={project_id}, scan={scan_date}/{source_name}")
-                print(f"[Scan WS]   frames → {frames_dir}")
+                frame_count = len(sealer.shas)
+                print(f"[Scan WS] Initialized: project={project_id}, scan={scan_date}/{source_name}"
+                      + (f" (continuing a dropped capture: {frame_count} frame(s))"
+                         if frame_count else ""))
+                print(f"[Scan WS]   frames → {sealer.tmp} (sealed into frames/ at stop)")
                 print(f"[Scan WS]   camera → {camera_data_dir}")
 
                 await websocket.send_json({
@@ -8585,21 +8669,33 @@ async def scan_websocket(websocket: WebSocket):
                 })
 
             elif msg_type == "frame":
-                if not frames_dir:
+                if sealed:
+                    await websocket.send_json({"type": "error", "message": (
+                        "this capture was sealed at stop_scan — its frames are final; start a "
+                        "capture into a new scan")})
+                    continue
+                if sealer is None:
                     await websocket.send_json({"type": "error", "message": "Call init_scan first"})
                     continue
 
-                idx = msg.get("frame_index", frame_count)
+                try:
+                    idx = int(msg.get("frame_index", frame_count))
+                except (TypeError, ValueError):
+                    await websocket.send_json({"type": "error", "message": (
+                        f"frame_index {msg.get('frame_index')!r} is not an integer — refused")})
+                    continue
                 filename = f"{idx:06d}"
 
-                # ── Save JPEG frame ──
+                # ── Save JPEG frame (a duplicate frame number is refused) ──
                 image_b64 = msg.get("image_base64")
                 if image_b64:
                     import base64
                     jpg_bytes = base64.b64decode(image_b64)
-                    jpg_path = frames_dir / f"{filename}.jpg"
-                    with open(jpg_path, "wb") as f:
-                        f.write(jpg_bytes)
+                    try:
+                        sealer.add(idx, jpg_bytes, ".jpg")
+                    except FM.FramesManifestError as e:
+                        await websocket.send_json({"type": "error", "message": str(e)})
+                        continue
 
                 # ── Save camera data (pose + intrinsics) ──
                 camera_info = {
@@ -8626,7 +8722,26 @@ async def scan_websocket(websocket: WebSocket):
 
             elif msg_type == "stop_scan":
                 total = msg.get("total_frames", frame_count)
-                print(f"[Scan WS] Scan stopped: {total} frames saved to {frames_dir}")
+                if sealer is not None and not sealed and sealer.shas:
+                    try:
+                        doc = sealer.seal(
+                            origin=FM.ORIGIN_WEBXR,
+                            encoder={"library": "client",
+                                     "call": "canvas.toBlob('image/jpeg', JPEG_QUALITY) in "
+                                             "static/camera.html",
+                                     "note": "the client's JPEG bytes are written as received: "
+                                             "no decode, no re-encode on the server"},
+                            extra={"frames_reported_by_client": total})
+                        sealed = True
+                        print(f"[Scan WS] Scan stopped: {doc['n_frames']} frames sealed into "
+                              f"{FM.frames_dir(scan_dir)}")
+                    except FM.FramesManifestError as e:
+                        await websocket.send_json({"type": "error", "message": str(e)})
+                    finally:
+                        if sealed:
+                            _release()
+                else:
+                    print(f"[Scan WS] Scan stopped: {total} frames (nothing new to seal)")
                 await websocket.send_json({
                     "type": "scan_complete",
                     "total_frames": total,
@@ -8635,13 +8750,16 @@ async def scan_websocket(websocket: WebSocket):
                 })
 
     except WebSocketDisconnect:
-        print(f"[Scan WS] Client disconnected ({frame_count} frames saved)")
+        print(f"[Scan WS] Client disconnected ({frame_count} frames "
+              f"{'sealed' if sealed else 'received, not sealed yet'})")
     except Exception as e:
         print(f"[Scan WS] Error: {e}")
         try:
             await websocket.send_json({"type": "error", "message": str(e)})
         except Exception:
             pass
+    finally:
+        _release()            # an unsealed capture keeps its temp dir: the pipeline refuses it
 
 
 if __name__ == "__main__":

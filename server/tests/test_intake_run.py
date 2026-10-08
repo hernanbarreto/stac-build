@@ -1,8 +1,12 @@
 """intake.run — I0 → I1 → I2 end to end on a synthetic session with the
-tagger / segmenter injected; the marker makes an identical second run a
-no-op (JSON mtimes untouched, the log says skipped); force re-runs; a
-parameter or inventory change re-runs exactly the steps whose inputs
-changed; --skip-content leaves I2 out; the CLI. Plus the map_worker side: the
+tagger / segmenter injected; the marker (stamps: every frame's bytes, the
+intake + DA3 code, parameters, K, the CPU environment, the frozen run
+configuration — docs/plan_determinismo.md 66 / 69 / 70 / 74) makes an
+identical second run a no-op (JSON mtimes untouched, the log says skipped);
+force re-runs; a parameter, code or inventory change re-runs exactly the
+steps whose stamp changed and names the difference; no time, epoch or
+absolute path in the marker (the run record beside it holds them);
+--skip-content leaves I2 out; the CLI. Plus the map_worker side: the
 frame-selection resolver (rejects an unknown value, admits parallax_lk) and a
 branch for every admitted value (hf included), the stamped, atomic witness ∪
 keyframe da3_frames.json, and _run_intake_selection driven through a fake
@@ -26,13 +30,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 cv2 = pytest.importorskip("cv2")
 
 from intake import content as Cn                                  # noqa: E402
+from intake import frames_manifest as FM                          # noqa: E402
 from intake import parallax as P                                  # noqa: E402
 from intake import quality as Q                                   # noqa: E402
 from intake import run as R                                       # noqa: E402
+from intake import run_config as RC                               # noqa: E402
 from intake.config import CONTENT_CLASSES, load_intake_config     # noqa: E402
 from tests import synth_precision as S                            # noqa: E402
 
 SERVER = Path(__file__).resolve().parents[1]
+with open(SERVER / "config.yaml") as _f:
+    BASE_RAW = yaml.safe_load(_f)                                  # the raw server configuration
 W, H = 320, 240
 N_WALK, STILL_PREFIX, STEP_M = 40, 8, 0.08
 NOISE_SIGMA = 2.0
@@ -167,12 +175,23 @@ def _no_da3(monkeypatch):
     monkeypatch.setattr(F, "default_probe", lambda python=None: _true_focal)
 
 
+def _raw(icfg):
+    """The raw configuration whose intake section IS ``icfg`` (what a job freezes)."""
+    return RC.raw_with_intake(BASE_RAW, icfg)
+
+
 def _run(session_dir, icfg, **kw):
     kw.setdefault("focal", _true_focal)
     kw.setdefault("tagger", SpyTagger())
     kw.setdefault("segmenter", RectSegmenter())
     kw.setdefault("log", Log())
+    kw.setdefault("run_config", _raw(icfg))            # this call starts the job: it freezes
     return R.run_intake(session_dir, icfg, **kw), kw
+
+
+def _s(step):
+    """A step's record without its 'differences' list (compared on their own where it matters)."""
+    return {k: v for k, v in step.items() if k != "differences"}
 
 
 def _stamped(doc, provenance):
@@ -227,15 +246,43 @@ def test_end_to_end_artifacts_stamps_and_noop_second_run(session, icfg):
         assert m[r0:r1, c0:c1].all() and not m[r1 + 5:, c1 + 5:].any()
     assert (content["summary"]["tagged"]["dynamic"] == len(keyframes) - 1)
 
-    state = json.loads(R.state_path(session).read_text())
+    state_text = R.state_path(session).read_text()
+    state = json.loads(state_text)
     assert state["version"] == R.STATE_VERSION and state["provenance"] == "tool_measured"
+    assert state["run_config_sha256"] == res["run_config_sha256"]
+    assert RC.load_run_config(session)[1] == res["run_config_sha256"]
     for step in R.STEPS:
         e = state["steps"][step]
-        assert e["done"] is True and isinstance(e["params_hash"], str)
-        assert e["inputs"]["frames"]["n_frames"] == quality["n_frames"]
-        assert all(Path(a).exists() for a in e["artifacts"])
-    assert state["steps"]["parallax"]["inputs"]["quality"]["digest"]
-    assert state["steps"]["content"]["inputs"]["keyframes"]["n"] == len(keyframes)
+        st = e["stamp"]
+        assert e["done"] is True and len(st["sha256"]) == 64
+        # every stamp: the intake + DA3 code, every frame's bytes, the environment, the
+        # frozen run configuration, the step's parameters (plan point 66)
+        assert "server/intake/run.py" in st["code"] and "server/extract_da3_depth.py" in st["code"]
+        assert {"environment", "params"} <= set(st["config"])
+        assert e["run_config_sha256"] == res["run_config_sha256"]      # recorded, not a key
+        assert all((session / a).exists() and not Path(a).is_absolute() for a in e["artifacts"])
+    assert set(state["steps"]["quality"]["stamp"]["inputs"]) == {
+        f"frames/{p.name}" for p in frames_dir.glob("*.jpg")}
+    assert "frames" in state["steps"]["parallax"]["stamp"]["config"]
+    assert set(state["steps"]["parallax"]["stamp"]["inputs"]) == {"frames/quality_features.json"}
+    assert set(state["steps"]["content"]["stamp"]["inputs"]) == {"frames/selected_frames.json",
+                                                                 "frames/witness_frames.json"}
+    # no wall clock, no absolute path, no session epoch in the marker (point 70) ...
+    for key in ("updated_at", "finished_at", "elapsed_s", "session_dir", "frames_dir",
+                "geometry_epoch", "camera_epoch"):
+        assert key not in state_text, key
+    assert str(session) not in state_text
+    # ... they live in the run record beside it
+    timing = json.loads(R.timing_path(session).read_text())
+    assert timing["session_dir"] == str(session) and timing["geometry_epoch"] == 0
+    assert all("finished_at" in timing["steps"][s_] and "elapsed_s" in timing["steps"][s_]
+               for s_ in R.STEPS)
+    assert timing["environment"]["libs"]["numpy"] and timing["updated_at"]
+    # the products: epoch 0 by construction, session-relative inputs, the environment
+    for doc in (quality, selected, witness, warnings, content):
+        assert str(session) not in json.dumps(doc)
+    assert quality["environment"]["jpeg_decoders"]["opencv"]["libjpeg"]
+    assert content["exclusion_masks"]["dir"] == "intake/exclusion_masks"
 
     s = res["summary"]
     assert (s["n_frames"], s["n_keyframes"], s["n_witness"]) == (
@@ -259,6 +306,50 @@ def test_end_to_end_artifacts_stamps_and_noop_second_run(session, icfg):
         and log2.has("content: skipped")
     assert res2["summary"] == res["summary"]
     assert res2["content"]["frames"] == content["frames"]
+    # the frozen run configuration is the same bytes (its sha is in every stamp)
+    assert res2["run_config_sha256"] == res["run_config_sha256"]
+
+
+def test_a_copied_session_keeps_its_marker(session, icfg, tmp_path):
+    """Stamps key frames by their session-relative path and bytes (point 70): the session
+    copied elsewhere resumes without re-measuring anything."""
+    _run(session, icfg)
+    dst = tmp_path / "elsewhere" / "sess"
+    shutil.copytree(session, dst)
+    res, kw = _run(dst, icfg)
+    assert {k: v["ran"] for k, v in res["steps"].items()} == {s_: False for s_ in R.STEPS}
+    assert kw["tagger"].n_calls == 0
+
+
+def test_the_intake_refuses_a_configuration_nobody_froze(session, icfg):
+    """Plan point 69: without a frozen output/run_config.yaml the intake does not run; with one,
+    the configuration it is handed must be the frozen one (field named) — and the marker's
+    stamps carry the frozen sha, so another frozen configuration re-runs the steps."""
+    with pytest.raises(R.IntakeRunError, match="run_config.yaml"):
+        R.run_intake(session, icfg, focal=_true_focal, log=Log())
+    RC.freeze_run_config(session, _raw(icfg), log=lambda m: None)
+    res = R.run_intake(session, icfg, focal=_true_focal, log=Log(), tagger=SpyTagger(),
+                       segmenter=RectSegmenter())
+    assert all(v["ran"] for v in res["steps"].values())
+    other = replace(icfg, quality=replace(icfg.quality, luma_lo=icfg.quality.luma_lo + 1.0))
+    with pytest.raises(R.IntakeRunError, match=r"quality\.luma_lo"):
+        R.run_intake(session, other, focal=_true_focal, log=Log())
+    # the same configuration frozen again: identical bytes, nothing re-runs
+    RC.freeze_run_config(session, _raw(icfg), log=lambda m: None)
+    res2 = R.run_intake(session, icfg, focal=_true_focal, log=Log(), tagger=SpyTagger(),
+                        segmenter=RectSegmenter())
+    assert not any(v["ran"] for v in res2["steps"].values())
+    # a frozen configuration that differs OUTSIDE the intake section re-runs nothing (the
+    # step's own parameters are the key); the marker RECORDS the new sha on every entry
+    raw = _raw(icfg)
+    raw["pipeline"] = {**dict(raw.get("pipeline") or {}), "_probe": 1}
+    sha3 = RC.freeze_run_config(session, raw, log=lambda m: None)["sha256"]
+    res3 = R.run_intake(session, icfg, focal=_true_focal, log=Log(), tagger=SpyTagger(),
+                        segmenter=RectSegmenter())
+    assert not any(v["ran"] for v in res3["steps"].values())
+    assert res3["run_config_sha256"] == sha3 != res2["run_config_sha256"]
+    st = json.loads(R.state_path(session).read_text())
+    assert st["run_config_sha256"] == sha3
 
 
 def test_force_reruns_everything(session, icfg):
@@ -280,9 +371,10 @@ def test_skip_content_then_content_only(session, icfg, monkeypatch):
     monkeypatch.setattr(Cn, "Sam3Segmenter", Boom)
     before = Counter()
     log = Log()
-    res = R.run_intake(session, icfg, focal=_true_focal, log=log, skip_content=True, before_content=before)
+    res = R.run_intake(session, icfg, focal=_true_focal, log=log, skip_content=True,
+                       before_content=before, run_config=_raw(icfg))
     assert res["steps"]["quality"]["ran"] and res["steps"]["parallax"]["ran"]
-    assert res["steps"]["content"] == {
+    assert _s(res["steps"]["content"]) == {
         "ran": False, "reason": R.REASON_SKIP_CONTENT, "skipped": True,
         "would_have_run": R.REASON_NO_MARKER, "stale_artifact": False}
     assert res["content"] is None and res["artifacts"]["content_tags"] is None
@@ -303,8 +395,8 @@ def test_skip_content_then_content_only(session, icfg, monkeypatch):
     time.sleep(0.02)
     res2, kw2 = _run(session, icfg, before_content=before)
     assert not res2["steps"]["quality"]["ran"] and not res2["steps"]["parallax"]["ran"]
-    assert res2["steps"]["content"] == {"ran": True, "reason": R.REASON_NOT_DONE,
-                                        "skipped": False}
+    assert _s(res2["steps"]["content"]) == {"ran": True, "reason": R.REASON_NOT_DONE,
+                                            "skipped": False}
     assert before.n == 1 and kw2["tagger"].n_calls >= 1
     after = _mtimes(session)
     for p in (session / "frames" / Q.QUALITY_FEATURES_NAME,
@@ -315,8 +407,8 @@ def test_skip_content_then_content_only(session, icfg, monkeypatch):
     # skip_content with a content marker that still matches: the report is reused
     res3 = R.run_intake(session, icfg, focal=_true_focal, log=Log(), skip_content=True, tagger=Boom,
                         segmenter=Boom)
-    assert res3["steps"]["content"] == {"ran": False, "reason": R.REASON_MATCHES,
-                                        "skipped": False}
+    assert _s(res3["steps"]["content"]) == {"ran": False, "reason": R.REASON_MATCHES,
+                                            "skipped": False}
     assert res3["content"]["frames"] == res2["content"]["frames"]
 
 
@@ -327,7 +419,7 @@ def test_skip_content_flags_a_stale_report(session, icfg):
     changed = replace(icfg, parallax=replace(icfg.parallax, parallax_quantum_px=6.0))
     log = Log()
     res = R.run_intake(session, changed, focal=_true_focal, log=log, skip_content=True, tagger=Boom,
-                       segmenter=Boom)
+                       segmenter=Boom, run_config=_raw(changed))
     assert res["steps"]["parallax"]["ran"] and \
         res["steps"]["parallax"]["reason"] == R.REASON_PARAMS_CHANGED
     c = res["steps"]["content"]
@@ -362,22 +454,68 @@ def test_parameter_change_reruns_only_downstream(session, icfg):
     par = replace(con, parallax=replace(con.parallax, parallax_quantum_px=6.0))
     res2, _ = _run(session, par)
     assert res2["steps"]["quality"]["ran"] is False
-    assert res2["steps"]["parallax"] == {"ran": True, "reason": R.REASON_PARAMS_CHANGED}
+    assert _s(res2["steps"]["parallax"]) == {"ran": True, "reason": R.REASON_PARAMS_CHANGED}
+    assert res2["steps"]["parallax"]["differences"] and \
+        all(d.startswith("config 'params'") for d in res2["steps"]["parallax"]["differences"])
     n_kf_before, n_kf_after = res["summary"]["n_keyframes"], res2["summary"]["n_keyframes"]
     assert n_kf_after > n_kf_before                    # half the quantum → more keyframes
-    assert res2["steps"]["content"] == {"ran": True, "reason": R.REASON_INPUTS_CHANGED,
-                                        "skipped": False}
+    assert _s(res2["steps"]["content"]) == {"ran": True, "reason": R.REASON_INPUTS_CHANGED,
+                                            "skipped": False}
+    assert any("selected_frames.json" in d for d in res2["steps"]["content"]["differences"])
 
 
 def test_frame_inventory_change_reruns_everything(session, icfg):
     _run(session, icfg)
     frames_dir = session / "frames"
     last = sorted(frames_dir.glob("*.jpg"), key=lambda p: int(p.stem))[-1]
-    shutil.copy(last, frames_dir / f"{int(last.stem) + 3:06d}.jpg")
+    added = f"{int(last.stem) + 3:06d}.jpg"
+    shutil.copy(last, frames_dir / added)
+    # a frame added behind the seal is refused, naming it (points 67 / 76) ...
+    with pytest.raises(R.IntakeRunError, match=f"frames/{added} is on disk but not in the manifest"):
+        _run(session, icfg)
+    # ... a new inventory comes with its own seal (here: the old one dropped, the frames adopted)
+    (frames_dir / FM.MANIFEST_NAME).unlink()
     res, _ = _run(session, icfg)
     assert {k: (v["ran"], v["reason"]) for k, v in res["steps"].items()} == {
         step: (True, R.REASON_INPUTS_CHANGED) for step in R.STEPS}
     assert res["summary"]["n_frames"] == N_WALK + STILL_PREFIX + 1
+
+
+def test_legacy_frames_are_adopted_once_declared_and_verified_after(session, icfg):
+    """A frames/ with no manifest predates the seal (points 67 / 76): the first intake ADOPTS it
+    — origin 'adopted', each frame's sha256 from I0's own stamp, DECLARED in the log — and every
+    later run checks the frames on disk against it, leaving its bytes alone."""
+    import repro
+    frames_dir = session / "frames"
+    assert not (frames_dir / FM.MANIFEST_NAME).exists()
+    res, kw = _run(session, icfg)
+    m = json.loads((frames_dir / FM.MANIFEST_NAME).read_text())
+    assert m["origin"] == FM.ORIGIN_ADOPTED and m["complete"] is True and m["decoder"] is None
+    assert {r["name"]: r["sha256"] for r in m["frames"]} == \
+        {p.name: repro.sha256_file(p) for p in Q.list_frames(frames_dir)}
+    assert kw["log"].has("DECLARED") and kw["log"].has("ADOPTED")
+    assert res["frames_manifest"] == {"origin": FM.ORIGIN_ADOPTED, "n_frames": m["n_frames"],
+                                      "frames_sha256": m["frames_sha256"]}
+    seal = (frames_dir / FM.MANIFEST_NAME).read_bytes()
+    _res2, kw2 = _run(session, icfg)
+    assert kw2["log"].has("every frame's sha256 matches") and not kw2["log"].has("ADOPTED")
+    assert (frames_dir / FM.MANIFEST_NAME).read_bytes() == seal
+
+
+def test_frames_being_written_are_refused_and_never_adopted(session, icfg):
+    """The intake never reads a scan whose frames are being written (point 76): the temp dir of
+    an extraction (running, or left by a restart) refuses the run before any frame is hashed, and
+    nothing is adopted; an incomplete manifest is refused too."""
+    FM.extracting_dir(session).mkdir()
+    with pytest.raises(R.IntakeRunError, match="frames.extracting"):
+        _run(session, icfg)
+    assert not (session / "frames" / FM.MANIFEST_NAME).exists()
+    assert not R.state_path(session).exists()
+    FM.extracting_dir(session).rmdir()
+    (session / "frames" / FM.MANIFEST_NAME).write_text(json.dumps(
+        {"manifest_version": FM.MANIFEST_VERSION, "complete": False, "frames": []}))
+    with pytest.raises(R.IntakeRunError, match="not a complete manifest"):
+        _run(session, icfg)
 
 
 def test_replace_deleted_files_rerun_i1_but_not_the_vlm(session, icfg):
@@ -396,8 +534,8 @@ def test_replace_deleted_files_rerun_i1_but_not_the_vlm(session, icfg):
     assert (frames_dir / Q.LEGACY_FRAME_QUALITY_NAME).exists()
     assert res["steps"]["parallax"]["ran"] is True
     assert res["steps"]["parallax"]["reason"].startswith(R.REASON_ARTIFACT)
-    assert res["steps"]["content"] == {"ran": False, "reason": R.REASON_MATCHES,
-                                       "skipped": False}
+    assert _s(res["steps"]["content"]) == {"ran": False, "reason": R.REASON_MATCHES,
+                                           "skipped": False}
     assert kw["tagger"].n_calls == 0 and kw["segmenter"].calls == [] and before.n == 0
     assert res["parallax"]["selected_frames"]["selected_files"] == \
         res0["parallax"]["selected_frames"]["selected_files"]
@@ -443,18 +581,45 @@ def test_content_report_without_its_mask_dir_is_re_measured(session, icfg):
     assert "exclusion_masks.dir" in res["steps"]["content"]["reason"]
 
 
-def test_stage_version_is_part_of_the_marker(session, icfg):
-    """A change of the MEASUREMENT (the stage version), not only of its
-    parameters, re-runs the step: an I1 marker from another version re-runs I1."""
+def test_code_is_part_of_the_marker(session, icfg):
+    """A change of the MEASUREMENT (the code), not only of its parameters, re-runs the step
+    (plan point 66: no version number bumped by hand): an I1 marker whose stamp was made by
+    another intake/parallax.py re-runs I1 with reason code_changed, naming the file."""
     _run(session, icfg)
     p = R.state_path(session)
     st = json.loads(p.read_text())
-    assert st["steps"]["parallax"]["inputs"]["stage_version"] == P.PARALLAX_VERSION
-    st["steps"]["parallax"]["inputs"]["stage_version"] = P.PARALLAX_VERSION - 1
+    assert st["steps"]["parallax"]["stamp"]["code"]["server/intake/parallax.py"]
+    st["steps"]["parallax"]["stamp"]["code"]["server/intake/parallax.py"] = "0" * 64
     p.write_text(json.dumps(st))
     res, _ = _run(session, icfg)
     assert res["steps"]["quality"]["ran"] is False
-    assert res["steps"]["parallax"] == {"ran": True, "reason": R.REASON_INPUTS_CHANGED}
+    assert res["steps"]["parallax"]["ran"] and \
+        res["steps"]["parallax"]["reason"] == R.REASON_CODE_CHANGED
+    cur = R.St.step_stamp({}, {})["code"]["server/intake/parallax.py"][:12]
+    assert res["steps"]["parallax"]["differences"] == [
+        f"code 'server/intake/parallax.py' changed (000000000000 -> {cur})"]
+    assert res["steps"]["content"]["ran"] is False
+
+
+def test_a_changed_frame_byte_reruns_everything_and_names_the_frame(session, icfg):
+    """Frames are identified by their BYTES, not their name and size (point 66): re-encoding
+    one frame to the same size re-runs I0 (and what follows) and the log names the frame."""
+    _run(session, icfg)
+    frames_dir = session / "frames"
+    first = sorted(frames_dir.glob("*.jpg"), key=lambda p: int(p.stem))[0]
+    data = bytearray(first.read_bytes())
+    data[-3] ^= 0x01                                   # same size, other bytes
+    first.write_bytes(bytes(data))
+    # behind the seal: the intake fails naming the frame (points 67 / 76) ...
+    with pytest.raises(R.IntakeRunError, match=f"frames/{first.name} differs from the manifest"):
+        _run(session, icfg)
+    # ... re-sealed (the old manifest dropped, the frames adopted), the change re-runs I0
+    (frames_dir / FM.MANIFEST_NAME).unlink()
+    res, kw = _run(session, icfg)
+    assert res["steps"]["quality"]["ran"] and \
+        res["steps"]["quality"]["reason"] == R.REASON_INPUTS_CHANGED
+    assert any(f"frames/{first.name}" in d for d in res["steps"]["quality"]["differences"])
+    assert kw["log"].has(f"frames/{first.name}")
 
 
 def test_hooks_run_in_order_and_epochs_are_stamped(session, icfg):
@@ -484,11 +649,14 @@ def test_hooks_run_in_order_and_epochs_are_stamped(session, icfg):
     assert first_tag < ev.index("before_sam3") < first_sam3
     assert "tag" not in ev[ev.index("before_sam3"):]
     assert res["content"]["sam3_handover"]["called"] is True
+    # the session's epochs at run time go to the run record; every product carries epoch 0
+    # by construction (points 63 / 70: the same frames give the same bytes)
     assert (res["geometry_epoch"], res["camera_epoch"]) == (5, 0)
+    assert json.loads(R.timing_path(session).read_text())["geometry_epoch"] == 5
     for path in _artifacts(session):
-        if path.suffix == ".json":
+        if path.suffix == ".json" and path != R.state_path(session):
             doc = json.loads(path.read_text())
-            assert doc["geometry_epoch"] == 5, path.name
+            assert doc["geometry_epoch"] == 0, path.name
     with pytest.raises(Q.IntakeCancelled, match="intake I0"):
         R.run_intake(session, icfg, focal=_true_focal, log=Log(), force=True, cancelled=lambda: True)
 
@@ -500,7 +668,8 @@ def test_disabled_content_writes_json_and_constructs_nothing(session, icfg, monk
     monkeypatch.setattr(Cn, "Sam3Segmenter", Boom)
     off = replace(icfg, content=replace(icfg.content, enabled=False))
     before = Counter()
-    res = R.run_intake(session, off, focal=_true_focal, log=Log(), before_content=before)
+    res = R.run_intake(session, off, focal=_true_focal, log=Log(), before_content=before,
+                       run_config=_raw(off))
     assert res["steps"]["content"]["ran"] is True and before.n == 0
     content = json.loads(Cn.content_tags_path(session).read_text())
     assert content["enabled"] is False and content["provenance"] == "vlm_proposed"
@@ -522,7 +691,9 @@ def test_run_intake_needs_a_frames_dir(tmp_path, icfg):
 
 
 def test_cli_main(session, icfg, monkeypatch, capsys):
-    monkeypatch.setattr(R, "load_intake_config", lambda raw=None: icfg)
+    # the CLI reads the session's frozen run configuration (point 69); frozen here as a job
+    # would have
+    RC.freeze_run_config(session, _raw(icfg), log=lambda m: None)
     assert R.main(["--session", str(session), "--skip-content"]) == 0
     out = capsys.readouterr().out
     assert "keyframes=" in out and "content=skipped" in out
@@ -673,6 +844,7 @@ def test_worker_hands_the_gpu_over_between_the_tags_and_sam3(session, monkeypatc
     monkeypatch.setattr(wb, "gpu_free_gb", lambda: 44.0)
     pipe = FakePipe()
     cfg = _worker_config()
+    RC.freeze_run_config(session, cfg, log=lambda m: None)      # the manager's job start
     mw._run_intake_selection(pipe, session, session / "frames", cfg, True)
     kinds = [e[0] for e in ev]
     # the FIRST stop is the focal probe's (DA3 gets the card before I2); the one this
@@ -716,8 +888,10 @@ def test_worker_refuses_sam3_while_vllm_survives_the_stop(session, monkeypatch):
     monkeypatch.setattr(svc, "ensure_service", lambda *a, **k: True)
     monkeypatch.setattr(wb, "stop_semantic_service", lambda pipe=None, stage="", log=None: None)
     monkeypatch.setattr(wb, "vllm_pids", lambda: [4242, 4243])
+    cfg = _worker_config()
+    RC.freeze_run_config(session, cfg, log=lambda m: None)
     with pytest.raises(RuntimeError, match=r"still running after the stop \(PIDs \[4242, 4243\]\)"):
-        mw._run_intake_selection(FakePipe(), session, session / "frames", _worker_config(), True)
+        mw._run_intake_selection(FakePipe(), session, session / "frames", cfg, True)
     assert sam3 == [] and not Cn.content_tags_path(session).exists()
     # a pgrep that cannot run is not a check that found nothing
     import subprocess
@@ -786,6 +960,7 @@ def test_worker_retry_runs_the_missing_i2(session, monkeypatch):
 
     monkeypatch.setattr(svc, "ensure_service", down)
     cfg = _worker_config()
+    RC.freeze_run_config(session, cfg, log=lambda m: None)
     with pytest.raises(RuntimeError, match="Semantic service down"):
         mw._run_intake_selection(FakePipe(), session, session / "frames", cfg, False)
     st = json.loads(R.state_path(session).read_text())
@@ -858,6 +1033,7 @@ def test_worker_fails_with_the_services_reason_and_honours_cancel(session, monke
     # a cancel inside the intake's own loops stops it where it is
     monkeypatch.setattr(Cn, "QwenTagger", Boom)
     monkeypatch.setattr(Cn, "Sam3Segmenter", Boom)
+    RC.freeze_run_config(session, cfg, log=lambda m: None)
     with pytest.raises(Q.IntakeCancelled, match="intake I0"):
         mw._run_intake_selection(FakePipe(cancel_after=2), session, session / "frames", cfg, True)
 

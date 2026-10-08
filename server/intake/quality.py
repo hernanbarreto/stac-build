@@ -18,7 +18,12 @@ a clipped share over ``clip_frac_max`` ("clipped") — BOUNDS from
 
 Artifacts (both in <session>/frames/, which a reconstruction replace leaves
 alone; both written atomically):
-  * ``quality_features.json`` — the report of :func:`analyze_frames`;
+  * ``quality_features.json`` — the report of :func:`analyze_frames`; it names
+    its inputs relative to the session and carries the CPU environment it was
+    measured with (:func:`intake.stamps.cpu_environment_record`: library
+    versions, CPU, BLAS core, JPEG decoder — docs/plan_determinismo.md 74, 79);
+    no wall clock, no absolute path and no session epoch is written into it
+    (point 70: the same frames give the same bytes whatever ran before);
   * ``frame_quality.json`` — the LEGACY shape the existing consumers read
     (``workers.map_worker._motion_keyframes``, ``frames.selector.
     _load_valid_frame_list``, the vendor's ``_stac_extra_frames``) with
@@ -49,7 +54,13 @@ from intake.config import QualityConfig, load_intake_config
 
 QUALITY_FEATURES_NAME = "quality_features.json"
 LEGACY_FRAME_QUALITY_NAME = "frame_quality.json"
-QUALITY_VERSION = 1
+QUALITY_VERSION = 2                     # 2: FFT in explicit float64, environment recorded, no
+                                        #    epochs / absolute paths in the product (2026-10-07)
+# The epoch every intake product belongs to BY CONSTRUCTION (plan point 63, "numbered relative
+# to the reconstruction"): the intake measures frames, before any reconstruction, so what it
+# writes is the input of the ORIGINAL reconstruction — epoch 0 — whatever epoch the session's
+# output/ holds when it runs (that one goes to the run record, intake/intake_state.timing.json).
+INTAKE_EPOCH = 0
 PROVENANCE = "tool_measured"
 METHOD = "intake_features"
 REJECT_REASONS = ("dark", "bright", "clipped")
@@ -81,11 +92,17 @@ def check_cancelled(cancelled: Cancelled, where: str) -> None:
         raise IntakeCancelled(f"cancelled during {where}")
 
 
+def intake_epochs() -> Dict[str, int]:
+    """The epoch stamps of every intake product: :data:`INTAKE_EPOCH` for both (the intake
+    precedes every reconstruction; its products are epoch 0's input by construction)."""
+    return {"geometry_epoch": INTAKE_EPOCH, "camera_epoch": INTAKE_EPOCH}
+
+
 def read_session_epochs(session_dir: os.PathLike) -> Dict[str, int]:
-    """The session's current ``geometry_epoch`` / ``camera_epoch`` — the stamps
-    every intake artifact carries (conventions rule 4). The intake measures
-    FRAMES only, so none of its numbers depends on either epoch: the stamps
-    record the session state the measurement was taken in. geometry_epoch =
+    """The session's current ``geometry_epoch`` / ``camera_epoch`` AT RUN TIME — recorded in
+    the intake's run record (``intake_state.timing.json``), never in a product: the intake
+    measures FRAMES only, so none of its numbers depends on either epoch, and a product that
+    carried them changed bytes with the session's history (point 70). geometry_epoch =
     ``precision.camera.read_geometry_epoch(<session>/output)`` (0 = none);
     camera_epoch = ``output/camera.json``'s ``camera_epoch`` when F0 wrote one,
     else 0. A camera.json that exists but cannot be read fails (CameraError)."""
@@ -130,8 +147,11 @@ def _write_json_atomic(path: Path, obj: Any) -> Path:
 
 def list_frames(frames_dir: os.PathLike) -> List[Path]:
     """Frame files of ``frames_dir`` sorted by video frame number (int(stem)).
-    Raises QualityError when the directory holds no frame or a frame whose
-    stem is not an integer (the frame-naming contract, conventions rule 10)."""
+    Raises QualityError when the directory holds no frame, a frame whose
+    stem is not an integer (the frame-naming contract, conventions rule 10), or
+    two files with the same frame number (``000123.jpg`` + ``000123.png``, or
+    ``123.jpg`` + ``000123.jpg`` — docs/plan_determinismo.md point 67: which one
+    a reader took was the directory listing's order)."""
     frames_dir = Path(frames_dir)
     if not frames_dir.is_dir():
         raise QualityError(f"{frames_dir} is not a directory — no frames to measure")
@@ -147,7 +167,13 @@ def list_frames(frames_dir: os.PathLike) -> List[Path]:
                 f"number (<frame:06d>.jpg) — the intake cannot attribute it") from None
     if not keyed:
         raise QualityError(f"{frames_dir} holds no frame ({', '.join(FRAME_SUFFIXES)})")
-    keyed.sort(key=lambda t: t[0])
+    keyed.sort(key=lambda t: (t[0], t[1].name))
+    dup = next((i for i in range(1, len(keyed)) if keyed[i][0] == keyed[i - 1][0]), None)
+    if dup is not None:
+        same = [p.name for k, p in keyed if k == keyed[dup][0]]
+        raise QualityError(f"two frame files of {frames_dir} share video frame number "
+                           f"{keyed[dup][0]}: {', '.join(same)} — remove one (a frame number "
+                           f"names ONE frame)")
     return [p for _, p in keyed]
 
 
@@ -173,8 +199,15 @@ def downscale_gray(gray: np.ndarray, max_side: int, interpolation: int) -> np.nd
 
 def fft_score(gray_small: np.ndarray) -> float:
     """Legacy high-frequency energy: mean |F| outside the centred square of
-    half-side min(h, w) // 8 (the low-frequency block zeroed)."""
-    f = np.fft.fftshift(np.fft.fft2(gray_small.astype(np.float32)))
+    half-side min(h, w) // 8 (the low-frequency block zeroed).
+
+    The FFT runs in EXPLICIT float64 (plan point 74): the legacy formula fed a
+    float32 image, which numpy 1.x upcasts to complex128 and numpy 2.x computes
+    natively in complex64 — a ~1e-7 relative change that reorders near-tied
+    ``sharp_rank`` values and re-routes I1's chain. ``astype(np.float64)`` is
+    bit-identical to the numpy 1.26 result of the float32 call (a uint8 image is
+    exact in both; ``tests/test_intake_quality.py`` proves it)."""
+    f = np.fft.fftshift(np.fft.fft2(gray_small.astype(np.float64)))
     magnitude = np.abs(f)
     h, w = magnitude.shape
     cy, cx = h // 2, w // 2
@@ -257,23 +290,26 @@ def sharp_ranks(fft: np.ndarray) -> np.ndarray:
 # ── the stage ────────────────────────────────────────────────────────────
 
 def analyze_frames(frames_dir: os.PathLike, cfg: QualityConfig, log: Callable = print, *,
-                   heartbeat_s: float, geometry_epoch: int = 0, camera_epoch: int = 0,
-                   cancelled: Cancelled = None) -> Dict[str, Any]:
+                   heartbeat_s: float, cancelled: Cancelled = None,
+                   environment: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Measure every frame of ``frames_dir`` and return the I0 report.
 
     ``heartbeat_s`` (``intake.runtime.heartbeat_s``, passed by the caller —
     no default, no global config read here) paces the progress lines, which
-    carry the rate. ``geometry_epoch`` / ``camera_epoch`` are the session's
-    stamps (:func:`read_session_epochs`; 0 = none). ``cancelled()`` is polled
-    once per frame.
+    carry the rate. ``cancelled()`` is polled once per frame. ``environment``
+    is the CPU environment record to write (default: measured now —
+    :func:`intake.stamps.cpu_environment_record`).
 
-    Report: ``version``, ``provenance`` ("tool_measured"), ``geometry_epoch``,
-    ``camera_epoch``, ``native_w``/``native_h``, ``n_frames``, ``n_usable``,
-    ``rejected`` {reason: count}, ``frames`` (FrameQuality dicts sorted by
-    frame), plus ``params`` (the effective QualityConfig) and ``inputs`` (the
-    frame inventory identity for the resume marker)."""
+    Report: ``version``, ``provenance`` ("tool_measured"), ``geometry_epoch`` /
+    ``camera_epoch`` (:data:`INTAKE_EPOCH`), ``native_w``/``native_h``,
+    ``n_frames``, ``n_usable``, ``rejected`` {reason: count}, ``frames``
+    (FrameQuality dicts sorted by frame), ``params`` (the effective
+    QualityConfig), ``inputs`` (the frame inventory, paths relative to the
+    session) and ``environment``. No time, no absolute path (point 70)."""
     if heartbeat_s <= 0:
         raise QualityError(f"heartbeat_s must be positive, got {heartbeat_s}")
+    from intake.stamps import cpu_environment_record
+    env = dict(environment) if environment is not None else cpu_environment_record()
     frames_dir = Path(frames_dir)
     paths = list_frames(frames_dir)
     n = len(paths)
@@ -329,8 +365,7 @@ def analyze_frames(frames_dir: os.PathLike, cfg: QualityConfig, log: Callable = 
     return {
         "version": QUALITY_VERSION,
         "provenance": PROVENANCE,
-        "geometry_epoch": int(geometry_epoch),
-        "camera_epoch": int(camera_epoch),
+        **intake_epochs(),
         "method": METHOD,
         "native_w": int(native_hw[1]),
         "native_h": int(native_hw[0]),
@@ -341,12 +376,13 @@ def analyze_frames(frames_dir: os.PathLike, cfg: QualityConfig, log: Callable = 
         "reject_reasons": list(REJECT_REASONS),
         "params": asdict(cfg),
         "inputs": {
-            "frames_dir": str(frames_dir),
+            "frames_dir": frames_dir.name,          # relative to the session (point 70)
             "n_frames": n,
             "first": paths[0].name,
             "last": paths[-1].name,
             "bytes_total": int(bytes_total),
         },
+        "environment": env,
         "frames": [asdict(f) for f in frames],
     }
 
@@ -366,16 +402,16 @@ def legacy_frame_quality(report: Dict[str, Any]) -> Dict[str, Any]:
     (the legacy meaning); the first frame's ``inter_frame_diff`` is 0.0 as the
     legacy writer had it. ``blur_score`` carries the native Laplacian
     variance (the legacy one was computed on the ≤ 640 downscale; no consumer
-    gates on it). It also carries the four artifact stamps (``version``,
-    ``provenance``, ``geometry_epoch``, ``camera_epoch``) — extra top-level keys
-    every legacy reader ignores (they read ``frames[]`` only)."""
+    gates on it). It also carries the artifact stamps (``version``,
+    ``provenance``, ``geometry_epoch`` / ``camera_epoch`` = :data:`INTAKE_EPOCH`)
+    — extra top-level keys every legacy reader ignores (they read ``frames[]``
+    only)."""
     frames = report["frames"]
     n_usable = int(report["n_usable"])
     return {
         "version": QUALITY_VERSION,
         "provenance": PROVENANCE,
-        "geometry_epoch": int(report["geometry_epoch"]),
-        "camera_epoch": int(report["camera_epoch"]),
+        **intake_epochs(),
         "method": METHOD,
         "threshold_fft": 0.0,
         "threshold": 0.0,
@@ -419,12 +455,11 @@ def load_quality(frames_dir: os.PathLike) -> Dict[str, Any]:
 
 
 def run_quality(frames_dir: os.PathLike, cfg: QualityConfig, log: Callable = print, *,
-                heartbeat_s: float, geometry_epoch: int = 0, camera_epoch: int = 0,
-                cancelled: Cancelled = None) -> Dict[str, Any]:
+                heartbeat_s: float, cancelled: Cancelled = None,
+                environment: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """analyze → write both artifacts; returns the report."""
     report = analyze_frames(frames_dir, cfg, log=log, heartbeat_s=heartbeat_s,
-                            geometry_epoch=geometry_epoch, camera_epoch=camera_epoch,
-                            cancelled=cancelled)
+                            cancelled=cancelled, environment=environment)
     p1 = write_quality(frames_dir, report)
     p2 = write_legacy_frame_quality(frames_dir, report)
     log(f"{LOG_TAG} wrote {p1.name} and legacy {p2.name} in {Path(frames_dir)}")
@@ -442,10 +477,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     g.add_argument("--frames-dir", help="frames directory")
     args = ap.parse_args(argv)
     frames_dir = Path(args.frames_dir) if args.frames_dir else Path(args.session) / "frames"
-    icfg = load_intake_config()
-    epochs = read_session_epochs(frames_dir.parent)          # <session>/frames → <session>
+    # the configuration of this job: the session's frozen copy, else the server's frozen now
+    # (plan point 69) — <session>/frames → <session>
+    from intake.run_config import cli_intake_config
+    icfg, _sha = cli_intake_config(frames_dir.parent, log=print)
     report = run_quality(frames_dir, icfg.quality, log=print,
-                         heartbeat_s=icfg.runtime.heartbeat_s, **epochs)
+                         heartbeat_s=icfg.runtime.heartbeat_s)
     rejected = ", ".join(f"{k}={v}" for k, v in report["rejected"].items())
     print(f"{LOG_TAG} {report['n_usable']}/{report['n_frames']} usable "
           f"({rejected}); native {report['native_w']}x{report['native_h']}")

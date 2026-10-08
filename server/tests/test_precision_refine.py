@@ -25,6 +25,15 @@ SOLVER = undistort_solver(PC.camera)
 WH = (640, 480)
 
 
+def _error_factor() -> float:
+    from config import cfg as raw_cfg
+    from reconstruction.loops.config import improvement_error_factor
+    return float(improvement_error_factor(raw_cfg))
+
+
+FAC = _error_factor()
+
+
 def _rot(yaw_deg):
     a = np.radians(yaw_deg)
     return np.array([[np.cos(a), 0, np.sin(a)], [0, 1, 0], [-np.sin(a), 0, np.cos(a)]])
@@ -88,7 +97,7 @@ def test_a_wrong_focal_and_real_distortion_are_recovered_by_the_distortion_rung(
     track, frame, uv = _observe(X, c2w, gt, 0.3, 1, kf)
     init = [515.0, 515.0, 319.5, 239.5, 0.0, 0.0, 0.0, 0.0]
     core = R.refine_core(np.linalg.inv(_perturb(c2w, 0.2, 0.02, 2)), init, WH, track, frame, uv,
-                         _split(track), kf, 0.01, CFG, SOLVER, log=lambda *a: None)
+                         _split(track), kf, 0.01, CFG, SOLVER, error_factor=FAC, log=lambda *a: None)
     best = core["best"]
     assert best.name == "R2", core["rungs"]
     fx = best.params_by_block[0][0]
@@ -105,7 +114,7 @@ def test_a_perfect_camera_without_distortion_stays_at_R0():
     kf = list(range(len(c2w)))
     track, frame, uv = _observe(X, c2w, gt, 0.3, 4, kf)
     core = R.refine_core(np.linalg.inv(_perturb(c2w, 0.1, 0.01, 5)), gt, WH, track, frame, uv,
-                         _split(track), kf, 0.01, CFG, SOLVER, log=lambda *a: None)
+                         _split(track), kf, 0.01, CFG, SOLVER, error_factor=FAC, log=lambda *a: None)
     assert core["best"].name == "R0", core["rungs"]
     assert not core["rungs"]["R1"]["taken"] and not core["rungs"]["R2"]["taken"]
 
@@ -116,7 +125,7 @@ def test_witnesses_localise_within_the_keyframes_error():
     kf = list(range(0, 2 * len(c2w), 2))                 # keyframes 0, 2, 4, …
     track, frame, uv = _observe(X, c2w, gt, 0.3, 7, kf)
     core = R.refine_core(np.linalg.inv(c2w), gt, WH, track, frame, uv, _split(track), kf, 0.01,
-                         CFG, SOLVER, log=lambda *a: None)
+                         CFG, SOLVER, error_factor=FAC, log=lambda *a: None)
     # witnesses halfway between keyframes (odd frame numbers)
     wc2w = []
     for k in range(len(c2w) - 1):
@@ -162,7 +171,7 @@ def test_the_ladder_and_the_witnesses_are_bit_identical_run_to_run():
         junk = [np.random.default_rng(rep).random(1000 * (rep + 1) + 17) for _ in range(5)]
         pycolmap.set_random_seed(12345 + rep)             # someone else used the PRNG
         core = R.refine_core(w2c0, init, WH, track, frame, uv, _split(track), kf, 0.01, CFG,
-                             SOLVER, log=lambda *a: None)
+                             SOLVER, error_factor=FAC, log=lambda *a: None)
         loc = R.localize_witnesses(core["best"], core["X"], wt, wf, wuv, wframes, WH, 1e9, CFG)
         runs.append((_bits(core), {f: (np.asarray(r["c2w"]).tobytes(), r["rms_px"])
                                    for f, r in loc.items()}))
@@ -177,3 +186,67 @@ def test_prior_sigmas_grow_with_the_walk():
     s = R.prior_sigmas(c, 0.01)
     assert np.all(np.diff(s) >= 0) and s[0] > 0
     assert abs(s[-1] - 0.01 * np.sqrt(5)) < 1e-12
+
+
+# the F5 ladder on this file's scene, in a fresh interpreter: prints the sha256 of every solved
+# quantity (plan point 58 — run under the runner's own step environment)
+_SOLVE_ONCE = r"""
+import hashlib, json, sys
+sys.path.insert(0, %(server)r); sys.path.insert(0, %(tests)r)
+import numpy as np
+import threadpoolctl
+import test_precision_refine as T
+R = T.R
+X, c2w = T._scene(seed=6)
+gt = [500.0, 500.0, 319.5, 239.5, -0.05, 0.01, 0.0, 0.0]
+kf = list(range(0, 2 * len(c2w), 2))
+track, frame, uv = T._observe(X, c2w, gt, 0.3, 7, kf)
+init = [510.0, 510.0, 319.5, 239.5, 0.0, 0.0, 0.0, 0.0]
+w2c0 = np.linalg.inv(T._perturb(c2w, 0.2, 0.02, 9))
+core = R.refine_core(w2c0, init, T.WH, track, frame, uv, T._split(track), kf, 0.01, T.CFG, T.SOLVER,
+                     error_factor=T.FAC, log=lambda *a: None)
+b = core["best"]
+h = hashlib.sha256()
+h.update(b.name.encode()); h.update(b.w2c.tobytes()); h.update(np.asarray(b.params_by_block).tobytes())
+h.update(np.float64(b.fit_rms_px).tobytes())
+for name, held in sorted(core["held"].items()):
+    keys = sorted(held)
+    h.update(name.encode()); h.update(np.array(keys).tobytes()); h.update(np.array([held[k] for k in keys]).tobytes())
+for t in sorted(core["X"]):
+    h.update(core["X"][t].tobytes())
+print(json.dumps({"sha": h.hexdigest(), "best": b.name,
+                  "blas": sorted((str(d.get("internal_api")), str(d.get("architecture")), int(d.get("num_threads") or 0))
+                                 for d in threadpoolctl.threadpool_info() if d.get("user_api") == "blas")}))
+"""
+
+
+def _solve_in_a_fresh_interpreter(env):
+    import json
+    import subprocess
+    tests_dir = Path(__file__).resolve().parent
+    code = _SOLVE_ONCE % {"server": str(tests_dir.parent), "tests": str(tests_dir)}
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env,
+                       timeout=900)
+    assert r.returncode == 0, r.stderr[-2000:]
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+def test_the_solve_is_bit_identical_under_the_runners_blas_threads(monkeypatch):
+    """Plan point 58: Ceres runs one thread, but CHOLMOD's BLAS inside pycolmap sees the step env's
+    OMP / OPENBLAS / MKL thread count. Two F5 ladder solves in two fresh interpreters under the
+    runner's F5 environment must hash identically — and identically to the one-thread solve. They
+    did on 2026-10-07 (a8790622…, AMD EPYC 7763, pycolmap 4.0.4): that is why F5 keeps
+    runner.threads (precision.runner.step_threads). If this ever fails, F5 is pinned to 1 thread."""
+    from precision import runner as RN
+    monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+    monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
+    f5 = next(s for s in RN.STEPS if s.key == "f5_refine")
+    threads = RN.step_threads(f5, PC.runner)
+    env = RN.step_env(threads)
+    a = _solve_in_a_fresh_interpreter(env)
+    b = _solve_in_a_fresh_interpreter(env)
+    one = _solve_in_a_fresh_interpreter(RN.step_env(1))
+    assert a["blas"] and all(arch == "Haswell" for api, arch, _n in a["blas"] if api == "openblas")
+    assert a == b, (a, b)
+    assert a["sha"] == one["sha"], (a, one)
+    assert a["best"] == "R2"

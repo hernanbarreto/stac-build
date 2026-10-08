@@ -306,7 +306,8 @@ def test_numbers_come_back_typed():
 
 # ── static literal scan (the test_precision_config.py pattern) ───────────
 _FLOAT_WHITELIST = {0.0, 1.0, -1.0, 2.0, 0.5, 1e-9, 1e-6, 1e-12, 100.0, 1000.0,
-                    0.6744897501960817}
+                    0.6744897501960817,
+                    1e9}            # bytes -> GB in a log line (intake/walk.py), a unit not a decision
 
 
 def _float_literals(path: Path):

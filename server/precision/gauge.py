@@ -23,21 +23,44 @@ fork's metric lock already spent the seams, and the trend rows are made of the
 same DA3 anchors the absolute rows read — adding them would count one piece of
 evidence twice. The seams are reported.
 
-The model: x(c) = log s(c), piecewise linear in the chainage c with knots every
-``knot_walk_m``, weighted least squares (1/σ²) plus a second-difference
-smoothness whose weight λ is chosen by leave-one-window-out (the grid is
-dimensionless: λ × the rows' total weight per knot). σ of a row = max(its own,
-its instrument's measured scatter — 1.4826 × MAD of the residuals of the
-instrument fitted alone). Each absolute instrument is fitted alone and judged
-held-out (leave-one-window-out RMS in log units); the applied one is the DEFAULT
-(the first of ``gauge.instruments`` that was judged) unless the one with the lowest
-held-out error beats it beyond the sample's noise (``heldout_change`` improves) —
-a lower RMS within the noise switches nothing. It is fitted with the relative rows;
-every instrument is reported (``sigma_by_instrument``, ``heldout_by_instrument``)
-and the choice carries its verdict and decision (``choice_verdict``).
+The model: x(c) = log s(c), piecewise linear in the chainage c with knots at the
+FIXED positions 0, ``knot_walk_m``, 2 ``knot_walk_m`` … (the last one at or past the
+end of the walk — a walk crossing a multiple adds one knot past its data and moves
+the fit continuously, never re-spaces every knot), weighted least squares (1/σ²)
+plus a second-difference smoothness whose weight λ is chosen by leave-one-window-out
+(the grid is dimensionless: λ × the rows' total weight per knot): the SMOOTHEST λ
+whose mean held-out RMS lies within ``improvement_error_factor`` × the measured
+standard error of the minimum (USER 2026-10-07, plan point 29 — a near-tie between
+two grid values no longer flips λ); the whole curve per λ is kept in gauge.json.
+σ of a row = max(its own, its instrument's measured scatter — 1.4826 × MAD of the
+residuals of the instrument fitted alone). Each absolute instrument is fitted alone
+and judged held-out (leave-one-window-out RMS in log units); the applied one is the
+DEFAULT (the first of ``gauge.instruments`` that was judged) unless the one with the
+lowest held-out error beats it by THE USER'S RULE (plan points 1 / 30,
+``metric_lock.decide_change``): the whole CI of the paired per-window change on the
+improving side, at least ``min_judge_closures`` windows judging (5 at 0.95), and a
+median improvement of at least ``improvement_error_factor`` × the judges' measured
+error (the largest own σ measured on a row of the two instruments in the judged
+windows). It is fitted with the relative rows; every instrument is reported
+(``sigma_by_instrument``, ``heldout_by_instrument``) and the choice carries its
+verdict, every margin and the decision (``choice_verdict``).
 
-Each per-frame gain is a Huber IRLS iterated to ``huber_tol``; one that reaches
+Each per-frame gain is a Huber IRLS iterated to ``huber_tol`` — never finer than the
+float64 resolution of the weighted mean it re-evaluates (point 39); one that reaches
 ``huber_max_iter`` still moving is not converged — its row is excluded and reported.
+Each window's bootstrap draws from its own seeded stream (one window dropping out no
+longer changes every later window's σ).
+
+Evidence from outside the chain enters only when it belongs to THIS reconstruction
+(``correction.epoch.reconstruction_id``, points 33 / 34): the visit-drift scale rows
+and the known dimensions carry the id they were measured on; the confidence
+calibration also has to be measured on epoch 0 — the geometry F2 measures — so the
+chain's own F6 never feeds back into its F2. What was not taken is reported with
+the reason (``evidence``).
+
+When the I3 window depth files are gone (deleted after the chain), F2 regenerates them
+from their plan on a card checked free (``repro.require_exclusive_gpu``; the runner marks
+F2 a GPU step then) and REFUSES a regenerated plan that is not the walk's (point 26).
 
 The application: keyframe k gets s_k = exp x(c_k) — depth × s_k about its own
 camera, the camera moved so the walk stays continuous (c'_k = c'_{k−1} +
@@ -56,7 +79,7 @@ import math
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -91,8 +114,14 @@ class Row:
 # ── the model (pure numpy) ───────────────────────────────────────────────
 
 def knots_for(c_max: float, knot_walk_m: float) -> np.ndarray:
-    n = max(2, int(math.ceil(max(c_max, 0.0) / float(knot_walk_m))) + 1)
-    return np.linspace(0.0, max(c_max, float(knot_walk_m)), n)
+    """Knots at the FIXED positions k × ``knot_walk_m`` (k = 0, 1, …), the last at or past
+    ``c_max`` — at least two. The positions never depend on the walk's length: a walk that
+    crosses a multiple gains one knot past its data, and since that knot is free (no row
+    pins it and the smoothness lets it continue the curve) the fit moves continuously; the
+    old even spacing re-placed every knot at the crossing (point 39)."""
+    step = float(knot_walk_m)
+    m = max(1, int(math.ceil(max(float(c_max), 0.0) / step)))
+    return step * np.arange(m + 1, dtype=np.float64)
 
 
 def hat(c: float, knots: np.ndarray) -> np.ndarray:
@@ -121,14 +150,25 @@ def second_diff(K: int) -> np.ndarray:
     return D
 
 
+def _reach_in_spans(rows: Sequence[Row], knots: np.ndarray) -> float:
+    """How much walk the rows reach, in knot spacings (at least one): the farthest chainage a
+    row touches over the spacing. Continuous in the data — the number of knots is not (a walk
+    crossing a multiple of the spacing gains one), so it is not what normalises λ (point 39)."""
+    spacing = float(knots[1] - knots[0])
+    reach = max([float(r.c) for r in rows if r.absolute]
+                + [float(max(r.c_ab)) for r in rows if not r.absolute] + [0.0])
+    return max(reach / spacing, 1.0)
+
+
 def fit(rows: Sequence[Row], knots: np.ndarray, lam: float) -> np.ndarray:
-    """x at the knots: min Σ((A x − y)/σ)² + λ_eff ‖D2 x‖², λ_eff = λ × Σ(1/σ²)/K
-    (dimensionless λ). Minimum-norm when the rows leave the level free (only
-    relative rows)."""
+    """x at the knots: min Σ((A x − y)/σ)² + λ_eff ‖D2 x‖², λ_eff = λ × Σ(1/σ²) / (the
+    walk the rows reach, in knot spacings) — dimensionless λ: the rows' weight per knot
+    spacing of walk (it was per KNOT, whose count jumps when the walk crosses a multiple of
+    the spacing). Minimum-norm when the rows leave the level free (only relative rows)."""
     A, y, s = design(rows, knots)
     w = 1.0 / s
     D = second_diff(len(knots))
-    lam_eff = float(lam) * float(np.sum(w ** 2)) / len(knots)
+    lam_eff = float(lam) * float(np.sum(w ** 2)) / _reach_in_spans(rows, knots)
     M = np.vstack([A * w[:, None], math.sqrt(lam_eff) * D]) if len(D) else A * w[:, None]
     b = np.concatenate([y * w, np.zeros(len(D))])
     x, *_ = np.linalg.lstsq(M, b, rcond=None)
@@ -177,30 +217,83 @@ def loo(rows: Sequence[Row], knots: np.ndarray, lam: float) -> Optional[Dict[int
     return out or None
 
 
-def choose_lambda(rows: Sequence[Row], knots: np.ndarray, grid: Sequence[float]
-                  ) -> Tuple[float, Optional[float]]:
-    """(λ with the lowest mean leave-one-window-out RMS, that RMS); the grid's middle
-    value when the rows cannot be held out."""
-    best, best_e = None, None
-    for lam in grid:
+class LambdaChoice(NamedTuple):
+    lam: float                  # the λ applied
+    heldout: Optional[float]    # its mean leave-one-window-out RMS (None: nothing held out)
+    curve: List[Dict[str, Any]]  # every λ of the grid: mean held-out RMS, its measured error, n
+    rule: Dict[str, Any]        # the minimum, its error, the bar and why this λ
+
+
+def _bootstrap_error_of_mean(values: np.ndarray, seed_parts: Sequence[int]) -> float:
+    """The MEASURED error of a mean over its samples: the spread (standard deviation) of the mean
+    over ``BOOT_N`` bootstrap resamples of the samples, drawn from a stream seeded by
+    ``seed_parts`` (fixed → the same error on every run; one stream per statistic, so a grid
+    value more or less does not change the others'). NaN with one sample (nothing to resample)."""
+    v = np.asarray(values, np.float64).ravel()
+    if v.size < 2:
+        return float("nan")
+    rng = np.random.default_rng([BOOT_SEED, *[int(x) for x in seed_parts]])
+    idx = rng.integers(0, v.size, size=(BOOT_N, v.size))
+    return float(np.std(v[idx].mean(axis=1)))
+
+
+def choose_lambda(rows: Sequence[Row], knots: np.ndarray, grid: Sequence[float],
+                  error_factor: float) -> LambdaChoice:
+    """USER 2026-10-07 (plan point 29): the SMOOTHEST λ of the grid whose mean leave-one-window-
+    out RMS lies within ``error_factor`` × the MEASURED error of the minimum — the bootstrap
+    spread of the minimum's mean over its held-out windows (fixed seed, one stream per grid
+    value). A strict argmin flipped λ on a near-tie between two grid values. The whole curve is
+    returned for gauge.json. The grid's middle value when the rows cannot be held out (fewer than
+    two windows)."""
+    curve: List[Dict[str, Any]] = []
+    for k, lam in enumerate(grid):
         per = loo(rows, knots, lam)
         if per is None:
             continue
-        e = float(np.mean(list(per.values())))
-        if best_e is None or e < best_e:
-            best, best_e = float(lam), e
-    return (best if best is not None else float(grid[len(grid) // 2])), best_e
+        v = np.asarray(list(per.values()), np.float64)
+        curve.append({"lambda": float(lam), "heldout_mean": float(np.mean(v)),
+                      "heldout_error": _bootstrap_error_of_mean(v, [k]), "n_windows": int(len(v))})
+    if not curve:
+        lam = float(grid[len(grid) // 2])
+        return LambdaChoice(lam, None, [], {"rule": "no window can be held out — the grid's "
+                                                    "middle value", "lambda": lam})
+    best = min(curve, key=lambda c: (c["heldout_mean"], c["lambda"]))
+    err = best["heldout_error"] if np.isfinite(best["heldout_error"]) else 0.0
+    bar = best["heldout_mean"] + float(error_factor) * err
+    within = [c for c in curve if c["heldout_mean"] <= bar]
+    pick = max(within, key=lambda c: c["lambda"])
+    rule = {"rule": "smoothest lambda whose mean held-out RMS is within error_factor x the "
+                    "bootstrap error of the minimum's mean (fixed seed)",
+            "lambda_min": best["lambda"], "heldout_min": best["heldout_mean"],
+            "heldout_min_error": best["heldout_error"], "error_factor": float(error_factor),
+            "bar": bar, "lambda": pick["lambda"], "margin": bar - pick["heldout_mean"],
+            "bootstrap": {"n": BOOT_N, "seed": BOOT_SEED}}
+    return LambdaChoice(pick["lambda"], pick["heldout_mean"], curve, rule)
 
 
-def measure_sigma(rows: List[Row], knots: np.ndarray, grid: Sequence[float]) -> float:
+def _error_factor(error_factor: Optional[float]) -> float:
+    """``correction_graph.graph.improvement_error_factor`` (the user's 2 — THE one factor of the
+    rule, read where it is declared) unless the caller passes the value it already read."""
+    if error_factor is not None:
+        return float(error_factor)
+    from config import cfg as raw_cfg
+    from reconstruction.loops.config import improvement_error_factor
+    return float(improvement_error_factor(raw_cfg))
+
+
+def measure_sigma(rows: List[Row], knots: np.ndarray, grid: Sequence[float],
+                  error_factor: float) -> float:
     """The instrument's own scatter: 1.4826 × MAD of its HELD-OUT residuals (each
     window predicted without it — in-sample residuals shrink as the curve bends to
     the noise), fitted alone on unit weights; each row's σ becomes max(own, that).
-    Returns the scatter."""
+    The row's own σ as MEASURED is kept in ``meta['sigma_own']`` (the judges' error of
+    the instrument choice). Returns the scatter."""
     own = [r.sigma if np.isfinite(r.sigma) and r.sigma > 0 else None for r in rows]
+    for r, o in zip(rows, own):
+        r.meta.setdefault("sigma_own", o)
     for r in rows:                      # the scatter is measured on unit weights
         r.sigma = 1.0
-    lam, _ = choose_lambda(rows, knots, grid)
+    lam = choose_lambda(rows, knots, grid, error_factor).lam
     res = loo_residuals(rows, knots, lam)
     if res is None:                     # one window: nothing to hold out, in-sample it is
         x = fit(rows, knots, lam)
@@ -215,11 +308,14 @@ def measure_sigma(rows: List[Row], knots: np.ndarray, grid: Sequence[float]) -> 
     return scatter
 
 
-def solve(rows: Sequence[Row], c_max: float, gcfg, log: Callable = print) -> Dict[str, Any]:
+def solve(rows: Sequence[Row], c_max: float, gcfg, log: Callable = print,
+          error_factor: Optional[float] = None) -> Dict[str, Any]:
     """Every absolute instrument judged alone, the winner fitted with the relative
-    rows. Returns the model record."""
+    rows. ``error_factor``: correction_graph.graph.improvement_error_factor (read from the
+    config when not given). Returns the model record."""
     _vendor_path()
-    from loop_utils.metric_lock import heldout_change      # vendor/VGGT-Long
+    from loop_utils.metric_lock import decide_change      # vendor/VGGT-Long — THE USER'S RULE
+    fac = _error_factor(error_factor)
     knots = knots_for(c_max, gcfg.knot_walk_m)
     grid = list(gcfg.smooth_grid)
     rel = [r for r in rows if not r.absolute]
@@ -227,32 +323,58 @@ def solve(rows: Sequence[Row], c_max: float, gcfg, log: Callable = print) -> Dic
     for r in rows:
         if r.absolute:
             by_inst.setdefault(r.instrument, []).append(r)
-    sigma_by, held_by, per_group_by, lam_by = {}, {}, {}, {}
+    sigma_by, held_by, per_group_by, lam_by, curve_by = {}, {}, {}, {}, {}
     for name, rs in by_inst.items():
-        sigma_by[name] = measure_sigma(rs, knots, grid)
-        lam, e = choose_lambda(rs, knots, grid)
-        lam_by[name], held_by[name] = lam, e
-        per_group_by[name] = loo(rs, knots, lam) or {}
+        sigma_by[name] = measure_sigma(rs, knots, grid, fac)
+        ch = choose_lambda(rs, knots, grid, fac)
+        lam_by[name], held_by[name] = ch.lam, ch.heldout
+        curve_by[name] = {"curve": ch.curve, "rule": ch.rule}
+        per_group_by[name] = loo(rs, knots, ch.lam) or {}
     judged = {k: v for k, v in held_by.items() if v is not None}
     if not judged:
         raise GaugeError("no absolute instrument spans two I3 windows — nothing can be held "
                          "out, the gauge cannot choose (instruments present: "
                          f"{sorted(by_inst) or 'none'})")
-    # the configured order decides unless the held-out says otherwise BEYOND its noise:
+    # the configured order decides unless THE USER'S RULE says otherwise (plan points 1 / 30):
     # the default is the first instrument of ``gauge.instruments`` that was judged; the one
-    # with the lowest held-out error replaces it only when heldout_change IMPROVES (a
-    # lower RMS inside the sample's noise is not evidence — no noise-driven switch)
+    # with the lowest held-out error replaces it only when decide_change IMPROVES — the whole
+    # CI on the improving side, >= min_judge_closures windows, and a median improvement of at
+    # least error_factor x the judges' measured error; otherwise the default stays
     order = [k for k in gcfg.instruments if k in judged] + sorted(set(judged) - set(gcfg.instruments))
     default = order[0]
     lowest = min(order, key=lambda k: judged[k])          # ties → the configured order
     chosen, verdict = default, None
 
+    def _judge_error(names: Sequence[str], windows: Sequence[int]) -> Tuple[float, str]:
+        """The judges' measured error (plan point 30: "el error" of the instruments judged — the
+        largest, as point 1 takes the largest bridge sigma): per instrument, the largest OWN σ
+        measured on its rows in the judged windows (da3_windows: the bootstrap σ of the window's
+        gain over its frames); an instrument whose rows carry no own σ (da3_mono, vio, stray,
+        known_dims) enters with its measured scatter — 1.4826 × MAD of its held-out residuals,
+        ``sigma_by`` — never with 0. The error is the largest over the two."""
+        ws = set(windows)
+        parts, src = [], []
+        for n in names:
+            own = [float(r.meta["sigma_own"]) for r in by_inst[n]
+                   if r.group in ws and r.meta.get("sigma_own") is not None]
+            if own:
+                parts.append(max(own))
+                src.append(f"{n}: largest own sigma of its rows in the judged windows")
+            else:
+                parts.append(float(sigma_by[n]))
+                src.append(f"{n}: its measured held-out scatter (no row carries an own sigma)")
+        return float(max(parts)), "; ".join(src)
+
     def _versus(before: str, after: str) -> Dict[str, Any]:
-        """Paired over the windows both instruments were held out on (none → neither)."""
+        """Paired over the windows both instruments were held out on."""
         common = sorted(set(per_group_by[before]) & set(per_group_by[after]))
-        return heldout_change([per_group_by[before][g] for g in common],
-                              [per_group_by[after][g] for g in common],
-                              confidence=float(gcfg.heldout_confidence))
+        err, err_src = _judge_error((before, after), common)
+        v = decide_change([per_group_by[before][g] for g in common],
+                          [per_group_by[after][g] for g in common],
+                          error=err, error_factor=fac,
+                          confidence=float(gcfg.heldout_confidence))
+        v.update({"windows": [int(g) for g in common], "error_source": err_src})
+        return v
 
     if lowest != default:
         verdict = _versus(default, lowest)
@@ -268,18 +390,20 @@ def solve(rows: Sequence[Row], c_max: float, gcfg, log: Callable = print) -> Dic
         verdict.update({"against": runner, "candidate": default,
                         "decision": "default_is_lowest"})
     final_rows = list(by_inst[chosen]) + rel
-    lam, e = choose_lambda(final_rows, knots, grid)
+    ch = choose_lambda(final_rows, knots, grid, fac)
+    lam, e = ch.lam, ch.heldout
     x = fit(final_rows, knots, lam)
     log(f"{LOG_TAG} instruments held-out (log RMS): "
         + ", ".join(f"{k} {v:.4f}" for k, v in sorted(judged.items(), key=lambda kv: kv[1]))
         + f" → {chosen}" + (f" ({verdict['decision']}: {verdict['candidate']} vs "
-                            f"{verdict['against']} "
-                            f"{'better beyond the noise' if verdict['improves'] else 'within the noise'})"
-                            if verdict else "")
-        + f"; {len(rel)} relative row(s); λ {lam:g}; s along the walk "
+                            f"{verdict['against']}: {verdict['reason']})" if verdict else "")
+        + f"; {len(rel)} relative row(s); λ {lam:g} (min at {ch.rule.get('lambda_min', lam):g}, "
+          f"bar {ch.rule.get('bar', float('nan')):.4f}); s along the walk "
           f"{math.exp(x.min()):.4f}–{math.exp(x.max()):.4f}")
     return {"knots_m": knots.tolist(), "x": x.tolist(), "lambda": lam,
             "lambda_by_instrument": lam_by, "heldout_final": e,
+            "lambda_curve_final": {"curve": ch.curve, "rule": ch.rule},
+            "lambda_curve_by_instrument": curve_by,
             "sigma_by_instrument": sigma_by, "heldout_by_instrument": held_by,
             "applied_instrument": chosen, "choice_verdict": verdict,
             "n_rows": {k: len(v) for k, v in by_inst.items()} | {"relative": len(rel)}}
@@ -316,6 +440,7 @@ def huber_location(r: np.ndarray, w0: np.ndarray, k: float, tol: float,
     estimate's limit as its scale → 0 is that value (L1 → the median), returned as
     converged and flagged; no stand-in scale is invented."""
     mu = float(np.median(r))
+    gamma = _summation_gamma(r.size)
     for it in range(1, int(max_iter) + 1):
         mad = float(np.median(np.abs(r - mu)))
         if mad == 0.0:
@@ -324,11 +449,30 @@ def huber_location(r: np.ndarray, w0: np.ndarray, k: float, tol: float,
             return Gain(_weighted_median(r, w0), True, it - 1, True)
         z = np.abs(r - mu) / (MAD_TO_SIGMA * mad)
         w = w0 * np.where(z <= k, 1.0, k / np.maximum(z, 1e-12))
-        new = float(np.sum(w * r) / np.sum(w))
-        if abs(new - mu) <= float(tol) * max(1.0, abs(mu)):
+        sw = float(np.sum(w))
+        new = float(np.sum(w * r) / sw)
+        # the declared tolerance, never finer than what float64 can resolve here (point 39):
+        # each iterate is a weighted mean over n samples, computed with a rounding error of at
+        # most γ_n (Σw|r|/Σw + |mean|) (Higham, Accuracy and Stability of Numerical Algorithms,
+        # §4.2: |fl(Σx) − Σx| ≤ γ_{n−1} Σ|x|, for the numerator and the denominator); two
+        # iterates at the fixed point differ by up to twice that — a step inside it is the
+        # rounding of the sum, not movement. Without it, whether a frame's row existed depended
+        # on the last bits of a 10⁵-pixel sum (bar 1e-12, resolution ~1e-11 there).
+        resolution = 2.0 * gamma * (float(np.sum(w * np.abs(r))) / sw + abs(new))
+        if abs(new - mu) <= max(float(tol) * max(1.0, abs(mu)), resolution):
             return Gain(new, True, it, False)
         mu = new
     return Gain(mu, False, int(max_iter), False)
+
+
+def _summation_gamma(n: int) -> float:
+    """γ_n = n u / (1 − n u), u = the float64 unit roundoff (eps / 2): Higham's bound on the
+    relative rounding error of a sum of n terms (any order of summation)."""
+    u = float(np.finfo(np.float64).eps) / 2.0
+    nu = float(n) * u
+    if nu >= 1.0:
+        raise GaugeError(f"{n} samples: a float64 sum of that many terms has no rounding bound")
+    return nu / (1.0 - nu)
 
 
 def _log_gain(inst: np.ndarray, omega: np.ndarray, conf: Optional[np.ndarray],
@@ -383,8 +527,38 @@ def applied_global_scale(output_dir: Path) -> float:
     return float(m.read_text().strip().split("=")[-1])
 
 
-def da3_rows(session_dir: Path, chainage: Dict[int, float], log_s0: float, gcfg
-             ) -> Tuple[List[Row], List[Row], List[dict]]:
+# the geometry F2 measures (Omega's epoch 0, F0's camera): the only epochs whose evidence it takes
+GAUGE_EPOCHS = {"geometry_epoch": 0, "camera_epoch": 0}
+
+
+def calibration_for_gauge(output_dir: Path, rid: Optional[str] = None
+                          ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    """(the DA3 calibration table F2 may weigh its pixels with, report). claude_stac.txt §4-F6:
+    a DA3 pixel weighs 1/q² once the session's confidence calibration exists — taken only when it
+    belongs to THIS reconstruction (its ``reconstruction_id``) and was measured on the geometry
+    F2 measures, epoch 0 (point 33): a calibration the chain's own F6 wrote later is never F2's
+    input (it would make F2 depend on whether an earlier chain had run its sweep)."""
+    from correction.epoch import reconstruction_id_or_none, same_reconstruction
+    from precision import confidence as CAL
+    out = Path(output_dir)
+    doc = CAL.load_calibration(out, reference="tier0")
+    if doc is None:
+        return None, {"present": False, "taken": False}
+    if CAL.load_calibration(out, epochs=GAUGE_EPOCHS, reference="tier0") is None:
+        return None, {"present": True, "taken": False,
+                      "reason": f"measured on geometry/camera epoch {doc.get('geometry_epoch')}/"
+                                f"{doc.get('camera_epoch')}, F2 measures epoch 0"}
+    taken, why = same_reconstruction(doc, reconstruction_id_or_none(out) if rid is None else rid)
+    if not taken:
+        return None, {"present": True, "taken": False, "reason": why}
+    cal_da3 = (doc.get("models") or {}).get("da3")
+    if not (cal_da3 and "abs_err_quantile" in cal_da3):
+        return None, {"present": True, "taken": False, "reason": "no da3 table in it"}
+    return doc, {"present": True, "taken": True}
+
+
+def da3_rows(session_dir: Path, chainage: Dict[int, float], log_s0: float, gcfg,
+             rid: Optional[str] = None) -> Tuple[List[Row], List[Row], List[dict]]:
     """(da3_windows rows, da3_mono rows, per-window report incl. the near-band variant).
     A frame whose Huber gain did not converge gives no gain: the window's report lists
     it (``huber.not_converged`` / ``huber.mono_not_converged``; ``huber.mad_zero`` the
@@ -398,15 +572,9 @@ def da3_rows(session_dir: Path, chainage: Dict[int, float], log_s0: float, gcfg
     if not paths:
         raise GaugeError(f"no I3 window in {wdir} — run the DA3 windows first "
                          f"(python -m intake.walk --session <dir>)")
-    rng = np.random.default_rng(BOOT_SEED)
-    # claude_stac.txt §4-F6: once the session's confidence calibration exists (F6,
-    # measured against the tier-0 depth), a DA3 pixel weighs 1/q² — q its calibrated
-    # |error| quantile at its confidence and distance — instead of the raw confidence
     from precision import confidence as CAL
-    cal = CAL.load_calibration(out, reference="tier0")
-    cal_da3 = (cal or {}).get("models", {}).get("da3")
-    if not (cal_da3 and "abs_err_quantile" in cal_da3):
-        cal_da3 = None
+    cal, _cal_rep = calibration_for_gauge(out, rid)
+    cal_da3 = cal["models"]["da3"] if cal is not None else None
     win_rows, mono_best, report = [], {}, []
     for gi, p in enumerate(paths):
         with np.load(p) as z:
@@ -449,6 +617,9 @@ def da3_rows(session_dir: Path, chainage: Dict[int, float], log_s0: float, gcfg
             continue
         g_arr, w_arr = np.array(gains), np.array(weights)
         s_w = _weighted_median(g_arr, w_arr)
+        # the window's OWN stream (seed, window index): a window that drops out no longer
+        # shifts every later window's draws (point 39)
+        rng = np.random.default_rng([BOOT_SEED, gi])
         idx = rng.integers(0, len(g_arr), size=(BOOT_N, len(g_arr)))
         boots = [_weighted_median(g_arr[b], w_arr[b]) for b in idx]
         sig = float(np.std(boots))
@@ -494,6 +665,15 @@ def vio_rows(session_dir: Path, frames: List[int], chainage: Dict[int, float],
     return rows
 
 
+def _stray_depth_dir(session_dir: Path) -> Optional[Path]:
+    """The scan's Stray export holding ``depth/``: ``inputs/stray/`` first (the capture data the
+    replace wipe never touches — docs/plan_determinismo.md point 77), then the scan directory and
+    its ``stray/`` (ingestors.capture_inputs); None without Stray depth."""
+    from ingestors.capture_inputs import stray_dirs
+    return next((d for d in stray_dirs(Path(session_dir), required=("depth",))
+                 if (d / "depth").is_dir()), None)
+
+
 def stray_rows(session_dir: Path, omega: Dict[int, np.ndarray], chainage: Dict[int, float],
                group_of: Callable[[float], int], log_s0: float, gcfg,
                not_converged: Optional[List[int]] = None) -> Optional[List[Row]]:
@@ -502,9 +682,10 @@ def stray_rows(session_dir: Path, omega: Dict[int, np.ndarray], chainage: Dict[i
     whose Huber gain did not converge gives no row (appended to ``not_converged``)."""
     import cv2
     sd = Path(session_dir)
-    ddir, cdir = sd / "depth", sd / "confidence"
-    if not ddir.is_dir():
+    stray = _stray_depth_dir(sd)
+    if stray is None:
         return None
+    ddir, cdir = stray / "depth", stray / "confidence"
     rows = []
     for f, om in sorted(omega.items()):
         dp = ddir / f"{f:06d}.png"
@@ -527,16 +708,35 @@ def stray_rows(session_dir: Path, omega: Dict[int, np.ndarray], chainage: Dict[i
     return rows or None
 
 
+def _evidence_doc(output_dir: Path, name: str, rid: Optional[str],
+                  report: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The evidence file ``name`` when it belongs to THIS reconstruction (its
+    ``reconstruction_id``, point 34), else None; ``report[name]`` says which and why."""
+    from correction.epoch import reconstruction_id_or_none, same_reconstruction
+    p = Path(output_dir) / name
+    if not p.exists():
+        if report is not None:
+            report[name] = {"present": False, "taken": False}
+        return None
+    doc = json.loads(p.read_text())
+    taken, why = same_reconstruction(doc, reconstruction_id_or_none(output_dir) if rid is None
+                                     else rid)
+    if report is not None:
+        report[name] = {"present": True, "taken": taken} | ({} if taken else {"reason": why})
+    return doc if taken else None
+
+
 def known_dim_rows(output_dir: Path, chainage: Dict[int, float],
-                   group_of: Callable[[float], int]) -> List[Row]:
+                   group_of: Callable[[float], int], rid: Optional[str] = None,
+                   report: Optional[Dict[str, Any]] = None) -> List[Row]:
     """F8's known dimensions with role "gauge": log(true / measured-in-cloud) at the
     chainage of the frames that saw them; σ = the entry's own measurement σ over its
-    length."""
-    p = Path(output_dir) / "known_dimensions.json"
-    if not p.exists():
+    length. Taken only when stamped with this reconstruction's id (point 34)."""
+    doc = _evidence_doc(output_dir, "known_dimensions.json", rid, report)
+    if doc is None:
         return []
     rows = []
-    for d in json.loads(p.read_text()).get("dimensions", []):
+    for d in doc.get("dimensions", []):
         if d.get("role") != "gauge":
             continue
         fr = [chainage[f] for f in d.get("frames", []) if f in chainage]
@@ -550,14 +750,20 @@ def known_dim_rows(output_dir: Path, chainage: Dict[int, float],
 
 
 def visit_rows(output_dir: Path, frames: List[int], chainage: Dict[int, float],
-               group_of: Callable[[float], int], epoch: int) -> List[Row]:
-    """visit_drift's closures (scale_loop_rows.json) measured on THIS epoch: x(c_j) −
-    x(c_i) = log k_b, σ = the closure's residual over its ray distance."""
-    p = Path(output_dir) / "scale_loop_rows.json"
-    if not p.exists():
+               group_of: Callable[[float], int], epoch: int, rid: Optional[str] = None,
+               report: Optional[Dict[str, Any]] = None) -> List[Row]:
+    """visit_drift's closures (scale_loop_rows.json) measured on THIS reconstruction (its
+    ``reconstruction_id`` — epoch numbers restart with every reconstruction, point 34) and on
+    THIS epoch: x(c_j) − x(c_i) = log k_b, σ = the closure's residual over its ray distance."""
+    name = "scale_loop_rows.json"
+    doc = _evidence_doc(output_dir, name, rid, report)
+    if doc is None:
         return []
-    doc = json.loads(p.read_text())
     if int(doc.get("measured_on_epoch", -1)) != int(epoch):
+        if report is not None:
+            report[name] = {"present": True, "taken": False,
+                            "reason": f"measured on epoch {doc.get('measured_on_epoch')}, F2 "
+                                      f"measures epoch {epoch}"}
         return []
     rows = []
     for r in doc.get("rows", []):
@@ -581,12 +787,104 @@ def _vendor_path() -> None:
         sys.path.insert(0, p)
 
 
-def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = print) -> Dict[str, Any]:
+def needs_window_regeneration(session_dir: Path) -> bool:
+    """True when F2 must regenerate the I3 window depth (its files were deleted after the chain):
+    F2 is then a GPU step (the runner stops the chat service and checks the card free first)."""
+    from intake.walk import WINDOWS_DIRNAME
+    wdir = Path(session_dir) / "output" / WINDOWS_DIRNAME
+    return not (wdir.is_dir() and any(wdir.glob("window_*.npz")))
+
+
+def _plan_of_spec(spec: Dict[str, Any]) -> List[Tuple[int, int, int]]:
+    """(first frame, last frame, n) of every window of a windows.json plan."""
+    out = []
+    for w in spec.get("windows") or []:
+        nums = [int("".join(ch for ch in Path(f).stem if ch.isdigit())) for f in w]
+        out.append((nums[0], nums[-1], len(nums)))
+    return out
+
+
+def _plan_of_walk(walk: Dict[str, Any]) -> List[Tuple[int, int, Optional[int]]]:
+    return [(int(w["frames"][0]), int(w["frames"][-1]), (int(w["n"]) if "n" in w else None))
+            for w in walk.get("windows") or []]
+
+
+def regenerate_windows(session_dir: Path, gcfg, walk: Dict[str, Any], log: Callable = print) -> None:
+    """Point 26: the I3 window depth files are gone (deleted after the chain) — bring them back
+    from their plan, on a card checked FREE (``repro.require_exclusive_gpu``: a shared card once
+    made the extractor halve its windows), through intake.walk's own extractor, and REFUSE a
+    regenerated plan that is not the one walk.json was measured on: the gauge never mixes rows of
+    one plan with the chainage and windows of another."""
+    from intake.walk import WINDOWS_DIRNAME, run_da3_windows
+    from repro import require_exclusive_gpu
+    spec_p = Path(session_dir) / "output" / WINDOWS_DIRNAME / "windows.json"
+    before = json.loads(spec_p.read_text()) if spec_p.exists() else None
+    log(f"{LOG_TAG} the I3 window depth files are gone — regenerating them from their plan")
+    require_exclusive_gpu(log=log)
+    run_da3_windows(session_dir, gcfg, sys.executable, log=log)
+    after = json.loads(spec_p.read_text()) if spec_p.exists() else {}
+    got, want = _plan_of_spec(after), _plan_of_walk(walk)
+    same_walk = len(got) == len(want) and all(
+        g[0] == w[0] and g[1] == w[1] and (w[2] is None or g[2] == w[2]) for g, w in zip(got, want))
+    same_spec = before is None or all(before.get(k) == after.get(k)
+                                      for k in ("windows", "process_res", "model_id"))
+    if not (same_walk and same_spec):
+        raise GaugeError(
+            f"the regenerated I3 plan ({len(got)} window(s), first {got[:1]}) is not the plan "
+            f"walk.json was measured on ({len(want)} window(s), first {want[:1]})"
+            + ("" if same_spec else " and windows.json changed while regenerating")
+            + " — F2 never mixes two plans: re-run the walk (python -m intake.walk --session "
+              "<dir>), then F2")
+
+
+def chain_inputs(session_dir: Path, gcfg, rid: Optional[str] = None) -> Dict[str, Path]:
+    """The files F2 reads that no step of the chain writes (stamped by the runner, point 31):
+    the walk and its window plan, the global scale marker, the VIO / Stray instruments when
+    configured, and the evidence files it TAKES (this reconstruction's, points 33 / 34). Omega's
+    records (the reconstruction id), the frames and the config are stamped by the runner."""
+    from intake.walk import WINDOWS_DIRNAME
+    sd = Path(session_dir)
+    out = sd / "output"
+    found = {k: p for k, p in {
+        "intake/walk.json": sd / "intake" / "walk.json",
+        f"output/{WINDOWS_DIRNAME}/windows.json": out / WINDOWS_DIRNAME / "windows.json",
+        "output/.metric_scale_applied": out / ".metric_scale_applied",
+        "output/camera_frames.txt": out / "camera_frames.txt",
+        "output/maplong_run/metric_lock.json": out / "maplong_run" / "metric_lock.json"}.items()
+        if p.exists()}
+    # ``gcfg``: the gauge config, or just its instrument list (gauge_applied re-stamps from the
+    # params gauge.json recorded)
+    inst = set(gcfg.instruments if hasattr(gcfg, "instruments") else gcfg)
+    if "vio" in inst:
+        from ingestors.vio_detector import detect_vio_data
+        det = detect_vio_data(sd)
+        if det.get("has_vio"):
+            found["vio"] = Path(det["vio_path"])
+    if "stray" in inst:
+        stray = _stray_depth_dir(sd)
+        for d in ("depth", "confidence"):
+            if stray is not None and (stray / d).is_dir():
+                found[d] = stray / d
+    rep: Dict[str, Any] = {}
+    if "known_dims" in inst:
+        known_dim_rows(out, {}, lambda c: 0, rid, rep)
+    visit_rows(out, [], {}, lambda c: 0, 0, rid, rep)
+    for name, r in rep.items():
+        if r.get("taken"):
+            found[f"output/{name}"] = out / name
+    if calibration_for_gauge(out, rid)[1].get("taken"):
+        from precision.confidence import CALIBRATION_NAME
+        found[f"output/precision/{CALIBRATION_NAME}"] = out / "precision" / CALIBRATION_NAME
+    return found
+
+
+def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = print,
+              error_factor: Optional[float] = None) -> Dict[str, Any]:
     """Rows → model → (optionally) the epoch. Writes output/gauge.json and the v2 block
     of scale_diagnostics.json. Runs on epoch 0 only (the rows are measured against
     Omega's own depth)."""
     _vendor_path()
-    from correction.epoch import current_epoch
+    from correction.epoch import current_epoch, reconstruction_id_or_none
     from intake.walk import load_walk
     session_dir = Path(session_dir)
     out = session_dir / "output"
@@ -598,13 +896,14 @@ def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = pr
     if walk is None:
         raise GaugeError(f"{session_dir / 'intake' / 'walk.json'} is missing — run the walk "
                          f"(python -m intake.walk --session <dir>)")
+    fac = _error_factor(error_factor)
     # the window depth files are deleted once the chain is through (gauge.delete_windows_after_chain);
     # a re-run from F0 brings them back from the same plan (windows.json) — this interpreter is the
     # da3 env's, the one the windows were extracted with
-    from intake.walk import WINDOWS_DIRNAME, run_da3_windows
-    if not any((out / WINDOWS_DIRNAME).glob("window_*.npz")):
-        log(f"{LOG_TAG} the I3 window depth files are gone — regenerating them from their plan")
-        run_da3_windows(session_dir, gcfg, sys.executable, log=log)
+    if needs_window_regeneration(session_dir):
+        regenerate_windows(session_dir, gcfg, walk, log=log)
+    rid = reconstruction_id_or_none(out)
+    evidence: Dict[str, Any] = {}
     chainage = {int(c["frame"]): float(c["chainage_m"]) for c in walk["chainage"]}
     win_bounds = [(w["frames"][0], w["frames"][1]) for w in walk["windows"]]
     win_c = []
@@ -620,14 +919,15 @@ def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = pr
     wins, mono, win_report = [], [], []
     inst = set(gcfg.instruments)
     if {"da3_windows", "da3_mono"} & inst:
-        wins, mono, win_report = da3_rows(session_dir, chainage, log_s0, gcfg)
+        wins, mono, win_report = da3_rows(session_dir, chainage, log_s0, gcfg, rid)
+        evidence["confidence_calibration.json"] = calibration_for_gauge(out, rid)[1]
     if "da3_windows" in inst:
         rows += wins
     if "da3_mono" in inst:
         rows += mono
     absent = []
     if "known_dims" in inst:
-        kd = known_dim_rows(out, chainage, group_of)
+        kd = known_dim_rows(out, chainage, group_of, rid, evidence)
         rows += kd
         if not kd:
             absent.append("known_dims")
@@ -645,8 +945,11 @@ def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = pr
         rows += sr or []
         if not sr:
             absent.append("stray")
-    rows += visit_rows(out, frames, chainage, group_of, epoch)
-    model = solve(rows, max(chainage.values()), gcfg, log=log)
+    rows += visit_rows(out, frames, chainage, group_of, epoch, rid, evidence)
+    for name, r in evidence.items():
+        if r.get("present") and not r.get("taken"):
+            log(f"{LOG_TAG} {name} NOT taken: {r.get('reason')}")
+    model = solve(rows, max(chainage.values()), gcfg, log=log, error_factor=fac)
     knots = np.array(model["knots_m"])
     x = np.array(model["x"])
     c_kf = np.array([chainage.get(f, np.nan) for f in frames])
@@ -657,16 +960,22 @@ def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = pr
                          f"reconstruction were made from different keyframe sets")
     s_kf = np.exp([float(hat(c, knots) @ x) for c in c_kf])
     k_kf, t_kf = continuous_transforms(poses[:, :3, 3], s_kf)
+    params = gauge_params(gcfg, fac)
     doc = {"version": GAUGE_VERSION, "provenance": PROVENANCE, "geometry_epoch": epoch,
-           "params": {"knot_walk_m": gcfg.knot_walk_m, "smooth_grid": list(gcfg.smooth_grid),
-                      "huber_k": gcfg.huber_k, "huber_tol": gcfg.huber_tol,
-                      "huber_max_iter": gcfg.huber_max_iter,
-                      "heldout_confidence": gcfg.heldout_confidence,
-                      "instruments": list(gcfg.instruments)},
+           "params": params,
+           "reconstruction_id": rid,
+           # point 146: what this run consumed (inputs, code, params, reconstruction) — what
+           # gauge_applied verifies before the certification trusts the 'applied' flag
+           GAUGE_STAMP_KEY: gauge_stamp(session_dir, params, rid),
            "log_s_applied_global": log_s0, "walk_length_m": walk["walk_length_m"],
-           **model, "instruments_absent": absent,
+           **model, "instruments_absent": absent, "evidence": evidence,
            "windows": win_report, "stray_huber_not_converged": stray_not_converged,
            "seams_reported_not_rows": _seams(out),
+           # the scale source and the files its instruments read (point 73, DECIDIDO
+           # 2026-10-07): the instrument the gauge applied, the VIO trajectory (scan-relative
+           # path + sha256) when VIO rows entered, null when none did
+           "scale_source": model.get("applied_instrument"),
+           "scale_inputs": _scale_inputs(session_dir, inst, absent),
            "s_keyframes": {"min": float(s_kf.min()), "max": float(s_kf.max())},
            "camera_shift_max_m": float(np.linalg.norm(t_kf, axis=1).max()),
            "applied": False}
@@ -688,6 +997,19 @@ def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = pr
     return doc
 
 
+def _scale_inputs(session_dir: Path, instruments, absent: Sequence[str]) -> Dict[str, Any]:
+    """What gauge.json records of the capture files the scale instruments read: the VIO
+    trajectory (``{"file", "sha256"}``) when VIO rows entered, else None; the Stray depth
+    directory (scan-relative) when Stray rows did, else None."""
+    from ingestors.capture_inputs import rel_to_scan, vio_record
+    sd = Path(session_dir)
+    vio = vio_record(sd) if ("vio" in set(instruments) and "vio" not in absent) else None
+    stray = _stray_depth_dir(sd) if ("stray" in set(instruments) and "stray" not in absent) \
+        else None
+    return {"vio": vio, "vio_sha256": (vio or {}).get("sha256"),
+            "stray_depth_dir": rel_to_scan(stray / "depth", sd) if stray is not None else None}
+
+
 def _seams(output_dir: Path) -> Dict[str, Any]:
     p = Path(output_dir) / "maplong_run" / "metric_lock.json"
     if not p.exists():
@@ -700,13 +1022,76 @@ def _write_diagnostics_v2(output_dir: Path, doc: Dict[str, Any]) -> None:
     diag = json.loads(p.read_text()) if p.exists() else {}
     diag["v2"] = {k: doc.get(k) for k in (
         "version", "applied_instrument", "sigma_by_instrument", "heldout_by_instrument",
-        "choice_verdict", "knots_m", "x", "lambda", "s_keyframes", "applied", "epoch_to")}
+        "choice_verdict", "knots_m", "x", "lambda", "s_keyframes", "applied", "epoch_to",
+        "scale_source", "scale_inputs")}
     p.write_text(json.dumps(diag, indent=2, default=float))
 
 
+GAUGE_STAMP_KEY = "stamp"
+
+
+def gauge_params(gcfg, fac: float) -> Dict[str, Any]:
+    """The parameters an F2 run is made with (gauge.json ``params``)."""
+    return {"knot_walk_m": gcfg.knot_walk_m, "smooth_grid": list(gcfg.smooth_grid),
+            "huber_k": gcfg.huber_k, "huber_tol": gcfg.huber_tol,
+            "huber_max_iter": gcfg.huber_max_iter,
+            "heldout_confidence": gcfg.heldout_confidence,
+            "instruments": list(gcfg.instruments),
+            "improvement_error_factor": float(fac)}
+
+
+def gauge_stamp(session_dir: Path, params: Mapping[str, Any], rid: Optional[str]) -> Dict[str, Any]:
+    """The identity of an F2 run (plan point 146): ``repro.stamp`` over the files it consumed
+    that no epoch rewrites (:func:`chain_inputs` for its instruments — the walk, the window plan,
+    the scale marker, the keyframe list, the seams, the evidence it TOOK), the code the gauge
+    runs (``precision.code_closure.code_closure``), its ``params`` and the reconstruction id. Omega's
+    records and the epoch-0 poses enter through the reconstruction id."""
+    from precision.code_closure import code_closure
+    from repro import stamp
+    files, _ext = code_closure("precision.gauge")
+    inputs = chain_inputs(Path(session_dir), list(params["instruments"]), rid)
+    return stamp(inputs=inputs, code=files,
+                 config={"reconstruction.precision.gauge": dict(params), "reconstruction": {"id": rid}})
+
+
 def gauge_applied(output_dir: Path) -> bool:
-    p = Path(output_dir) / GAUGE_NAME
-    return p.exists() and bool(json.loads(p.read_text()).get("applied"))
+    """Did THIS session's precision gauge apply its epoch — read from gauge.json's stamp, never
+    from the file's existence (plan point 146: the certification builds its depth graph
+    differently on the answer). No gauge.json: False (F2 never ran here). A gauge.json without
+    a stamp, whose stamp does not match the session now (its inputs, code or reconstruction),
+    or whose applied epoch is not in the live epoch's lineage (undone, another branch) FAILS
+    naming why — re-run F2 or remove the file; a stale gauge.json decides nothing."""
+    from correction.epoch import current_epoch, epoch_lineage, reconstruction_id_or_none
+    from repro import check_stamp
+    out = Path(output_dir)
+    p = out / GAUGE_NAME
+    if not p.exists():
+        return False
+    doc = json.loads(p.read_text())
+    saved = doc.get(GAUGE_STAMP_KEY)
+    if not isinstance(saved, dict) or "sha256" not in saved:
+        raise GaugeError(f"{p} carries no stamp (written before 2026-10-07 or by hand) — it cannot "
+                         f"say whether the gauge applied to THIS reconstruction: re-run F2 "
+                         f"(python -m precision.gauge --session <dir>) or remove the file")
+    params = doc.get("params")
+    if not isinstance(params, dict) or "instruments" not in params:
+        raise GaugeError(f"{p} records no params — re-run F2")
+    now = gauge_stamp(out.parent, params, reconstruction_id_or_none(out))
+    diffs = check_stamp(saved, now)
+    if diffs:
+        raise GaugeError(f"{p} is not the gauge of this session as it is now — "
+                         + "; ".join(diffs[:6]) + (" …" if len(diffs) > 6 else "")
+                         + " — re-run F2 or remove the file")
+    if not bool(doc.get("applied")):
+        return False
+    e = doc.get("epoch_to")
+    live = int(current_epoch(out))
+    lineage = epoch_lineage(out, live)
+    if e is None or int(e) not in lineage:
+        raise GaugeError(f"{p} says the gauge applied epoch {e}, which is not in the lineage of the "
+                         f"live epoch {live} ({lineage}) — the gauge's epoch was undone or another "
+                         f"branch is selected: re-run F2 on this epoch or remove the file")
+    return True
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -721,6 +1106,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     sd = Path(args.session)
     from intake.walk import load_walk, run_da3_windows, measure_walk
     if load_walk(sd) is None:
+        from repro import require_exclusive_gpu
+        require_exclusive_gpu(log=print)             # the card is the extractor's alone (point 4)
         run_da3_windows(sd, g, sys.executable)
         measure_walk(sd, g)
     run_gauge(sd, g, apply=not args.no_apply)

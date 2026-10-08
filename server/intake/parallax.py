@@ -33,17 +33,29 @@ frames, in order), against the window's ANCHOR ``a``:
    from the spec's median: on a 2.5 m sideways walk the median never exceeded
    4.3 px (the near structure — the parallax — leaves the view first and the
    far background dominates the median) while the 0.9 quantile reached 12 px
-   at 0.45 m; a 42° pan reads ≤ 1.6 px at 0.9. A pure rotation never earns a
-   keyframe.
+   at 0.45 m; a 42° pan reads ≤ 1.6 px at 0.9. A pure rotation earns no
+   PARALLAX keyframe.
+4. ROTATION = the angle |w| of the fitted rotation vector (step 2) from the
+   anchor, about any axis, degrees. A pure rotation earns keyframes by THIS
+   reading (2026-10-07): on pccr 2026-08-31 a ~110° turn with 0.6 m of walk
+   left 68- and 70-frame gaps (558→626, 723→793) with 25° and 33° between
+   consecutive keyframes; Omega's forward co-visibility length ℓ fell to 1 there
+   and the reconstruction tore by 39 cm.
 
-Keyframes: once the reading reaches ``parallax_quantum_px`` the window is
-followed until it leaves the band ``quantum × (1 ± keyframe_band_frac)``; the
-keyframe is the SHARPEST frame (I0 ``sharp_rank``) whose reading lies in that
-band, and it becomes the next anchor. When the tracks are lost
-(< ``min_tracks``) before the quantum, a window that measured a baseline
-(≥ ``witness_min_parallax_px``) closes on its sharpest frame near its largest
-reading (``track_loss``); one that did not is a coverage break — no keyframe,
-the next anchor is the frame where the tracks were lost, and the run is warned.
+Keyframes: once the parallax reading reaches ``parallax_quantum_px`` the window
+is followed until it leaves the band ``quantum × (1 ± keyframe_band_frac)``;
+the keyframe is the SHARPEST frame (I0 ``sharp_rank``) whose reading lies in
+that band, and it becomes the next anchor. The ROTATION quantum θ_q closes a
+window the same way (band θ_q × (1 ± keyframe_band_frac), sharpest frame of the
+band, next anchor) — θ_q is DERIVED from the session camera, never configured:
+θ_q = (1 − τ)·FOV_h / 2 with τ = 0.3 (VGG-T3's co-visibility threshold,
+reconstruction/chunk_covis.py TAU) and FOV_h = 2·atan(W / (2·fx)) from the
+measured K (:func:`rotation_quantum`; pccr fx 387.5 px, W 464 → FOV_h 61.8°,
+θ_q 21.6°). When the tracks are lost (< ``min_tracks``) before either quantum, a
+window that measured a baseline (≥ ``witness_min_parallax_px``) closes on its
+sharpest frame near its largest parallax reading (``track_loss``); one that did
+not is a coverage break — no keyframe, the next anchor is the frame where the
+tracks were lost, and the run is warned.
 
 Witness frames: every usable frame whose parallax from the last CHOSEN witness
 reaches ``witness_min_parallax_px`` (or whose tracks from it are lost), plus
@@ -82,23 +94,49 @@ import numpy as np
 
 from intake.config import ParallaxConfig, load_intake_config
 from intake.quality import (QUALITY_VERSION, Cancelled, QualityError, _write_json_atomic,
-                            check_cancelled, list_frames, read_gray, read_session_epochs)
+                            check_cancelled, intake_epochs, list_frames, read_gray)
 
 SELECTED_FRAMES_NAME = "selected_frames.json"
 WITNESS_FRAMES_NAME = "witness_frames.json"
 COVERAGE_WARNINGS_NAME = "coverage_warnings.json"
 INTAKE_SUBDIR = "intake"
 SELECTED_CONTRACT_VERSION = "2.0"       # the v2 contract of frames/selected_frames.json
-PARALLAX_VERSION = 5                    # 3: anchor-based parallax (2026-09-27)
+PARALLAX_VERSION = 7                    # 3: anchor-based parallax (2026-09-27)
                                         # 4: rotation reference (2026-09-28)
                                         # 5: cut back to the §4-F1 spec (2026-09-28): quantile of
                                         #    the residual w.r.t. the rotation, no rigidity /
                                         #    refinement / lens / twin / held-object machinery
+                                        # 6: every window records its decision margins, the
+                                        #    environment is recorded, no epochs / absolute paths
+                                        #    in the products (docs/plan_determinismo.md 65, 70,
+                                        #    74 — 2026-10-07; the measurement is unchanged)
+                                        # 7: keyframes also by ROTATION from the anchor (the
+                                        #    rotation quantum θ_q derived from K; 2026-10-07)
 PROVENANCE = "tool_measured"
 METHOD = "parallax_lk"
 WARNING_KINDS = ("static", "pure_rotation", "tracking_lost", "exposure")
 LOST_REASONS = ("too_few_tracks", "rotation_fit_failed")
-WINDOW_CLOSERS = ("quantum", "track_loss", "coverage_break", "end")
+WINDOW_CLOSERS = ("quantum", "rotation", "track_loss", "coverage_break", "end")
+
+
+def covis_tau() -> float:
+    """VGG-T3's published co-visibility threshold τ (two frames are co-visible when they share
+    ≥ τ of their field), READ from the module that owns it — reconstruction/chunk_covis.py
+    ``TAU``, the number the chunk planner's H is calibrated at — so the selector and the planner
+    can never disagree on it. Loaded by file path: imported as a package member it would run
+    reconstruction/__init__ (trimesh, open3d, sklearn — 12.9 s measured), which the intake never
+    loads; chunk_covis.py's module level is stdlib + numpy imports and constants."""
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / "reconstruction" / "chunk_covis.py"
+    spec = importlib.util.spec_from_file_location("_stac_chunk_covis_constants", path)
+    if spec is None or spec.loader is None:
+        raise ParallaxError(f"cannot load {path} — the rotation quantum reads its τ from it")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    tau = float(mod.TAU)
+    if not 0.0 < tau < 1.0:
+        raise ParallaxError(f"{path} TAU = {tau!r} is not a share in (0, 1)")
+    return tau
 WITNESS_REASONS = ("first_usable_frame", "parallax", "track_loss", "keyframe")
 LOG_TAG = "[intake.parallax]"
 
@@ -123,6 +161,10 @@ class FrameMeasure:
     fb_px: float            # median forward–backward disagreement of the counted tracks
     lost: bool
     lost_reason: Optional[str]
+    nfev: int = 0           # residual evaluations the rotation fit took (0: no fit was run);
+                            # its margin to reference_max_eval is a window's recorded margin
+    rot_deg: float = float("nan")   # angle of the fitted rotation from the anchor, about any
+                                    # axis, degrees (the rotation quantum's reading; NaN: lost)
 
 
 def _cv2():
@@ -247,6 +289,45 @@ def rotation_homography(w: np.ndarray, Kn: np.ndarray) -> np.ndarray:
     return Kn @ _rotvec_to_matrix(w) @ _inv3(Kn)
 
 
+def rotation_angle_deg(w: np.ndarray) -> float:
+    """The rotation ANGLE of the rotation vector ``w`` in [0, 180] degrees, about whatever
+    axis: |w| folded into [0, π] (|w| = a + 2πk is the rotation of angle a; an angle past π
+    is 2π − a about the opposite axis)."""
+    a = float(np.linalg.norm(np.asarray(w, dtype=np.float64).ravel()))
+    return math.degrees(abs(math.remainder(a, 2.0 * math.pi)))
+
+
+def rotation_quantum(K: np.ndarray, native_w: int) -> Dict[str, float]:
+    """θ_q, the rotation from the anchor that makes a keyframe — DERIVED from the session
+    camera, not configured (2026-10-07).
+
+    Two views related by a pure rotation θ about the vertical share (FOV_h − θ) / FOV_h of
+    their horizontal field; VGG-T3 counts them co-visible when they share ≥ τ (:func:`covis_tau`,
+    the chunk planner's TAU), so consecutive keyframes stay co-visible for θ ≤ (1 − τ)·FOV_h.
+    A QUARTER of that keeps a keyframe co-visible with the next THREE — the planner's forward
+    co-visibility length ℓ ≥ 4, its budget δ = 1/ℓ ≤ 0.25 (reconstruction/chunk_covis.py):
+
+        θ_q = (1 − τ) · FOV_h / 4,   FOV_h = 2·atan(W / (2·fx))
+
+    with fx the focal probe's measured focal (intake/focal.py) and W the frames' native width.
+    pccr 2026-08-31: fx 387.5 px, W 464 → FOV_h 61.8° → θ_q 10.8°. USER 2026-10-07, measured on
+    pccr: at half the bound (21.6°) the turn still jumped 19–27° per keyframe ("huecos"); at the
+    session's own 7° the turn held 30 keyframes within 2–3 cm of each other ("solapados"), each
+    a near-duplicate view that gives F5 landmarks without baseline. The reading it gates is
+    the angle about ANY axis (:func:`rotation_angle_deg`); the horizontal field is the one
+    the derivation measures."""
+    fx = float(np.asarray(K, dtype=np.float64)[0, 0])
+    w = int(native_w)
+    if not (fx > 0.0 and w > 0):
+        raise ParallaxError(f"the rotation quantum needs a positive focal and width, got fx "
+                            f"{fx}, W {w}")
+    tau = covis_tau()
+    fov_h = 2.0 * math.degrees(math.atan(w / (2.0 * fx)))
+    return {"theta_q_deg": (1.0 - tau) * fov_h / 4.0, "fov_h_deg": fov_h,
+            "tau": tau, "fx_px": fx, "native_w": w,
+            "derivation": "theta_q = (1 - tau) * fov_h / 4; fov_h = 2 * atan(W / (2 * fx))"}
+
+
 def _transfer_jacobian(M: np.ndarray, p: np.ndarray) -> np.ndarray:
     """Jacobian of the transfer M·p w.r.t. the nine entries of M, row-major
     (n, 2, 9) — analytic."""
@@ -286,7 +367,7 @@ def fit_rotation(a: np.ndarray, b: np.ndarray, T: np.ndarray, cfg: ParallaxConfi
     ``reference_max_eval`` bound stops first is NOT a measurement (None: the frame is
     lost, reason rotation_fit_failed). ``x0``: the rotation vector to start from (the
     previous frame's); None → the rotation nearest the RANSAC homography. Returns
-    (rotation vector, H native, cost) or None."""
+    (rotation vector, H native, cost, nfev) or None."""
     from scipy.optimize import least_squares
     cv2 = _cv2()
     an = _apply_h(T, np.asarray(a, dtype=np.float64))
@@ -327,7 +408,7 @@ def fit_rotation(a: np.ndarray, b: np.ndarray, T: np.ndarray, cfg: ParallaxConfi
         return None
     if sol.status <= 0 or not np.all(np.isfinite(sol.x)):
         return None                              # the bound, not convergence, stopped it
-    return sol.x, _inv3(T) @ rotation_homography(sol.x, Kn) @ T, float(sol.cost)
+    return sol.x, _inv3(T) @ rotation_homography(sol.x, Kn) @ T, float(sol.cost), int(sol.nfev)
 
 
 # ── frames ───────────────────────────────────────────────────────────────
@@ -430,19 +511,20 @@ class _Window:
         if fit is None:
             return FrameMeasure(f, self.anchor, n, disp, nan, float(np.median(fb)), True,
                                 "rotation_fit_failed")
-        self.x, H, _cost = fit
+        self.x, H, _cost, nfev = fit
         H_inv = _inv3(H)
         if H_inv is None:
             return FrameMeasure(f, self.anchor, n, disp, nan, float(np.median(fb)), True,
-                                "rotation_fit_failed")
+                                "rotation_fit_failed", nfev)
         sym = symmetric_transfer_error(H, H_inv, a, b)
         sym = sym[np.isfinite(sym)]
         if len(sym) < self.cfg.min_tracks:
             return FrameMeasure(f, self.anchor, n, disp, nan, float(np.median(fb)), True,
-                                "rotation_fit_failed")
+                                "rotation_fit_failed", nfev)
         return FrameMeasure(f, self.anchor, n, disp,
                             float(np.quantile(sym, self.cfg.parallax_quantile)),
-                            float(np.median(fb)), False, None)
+                            float(np.median(fb)), False, None, nfev,
+                            rotation_angle_deg(self.x))
 
 
 class _Progress:
@@ -471,15 +553,106 @@ def _sharpest(cands: Sequence[FrameMeasure], by_frame: Dict[int, Dict[str, Any]]
     return max(cands, key=lambda m: (float(by_frame[m.frame]["sharp_rank"]), -m.frame))
 
 
+def window_margins(seen: Sequence[FrameMeasure], band: Sequence[FrameMeasure],
+                   closing: Optional[FrameMeasure], by_frame: Dict[int, Dict[str, Any]],
+                   cfg: ParallaxConfig, lo: float, hi: float) -> Dict[str, Any]:
+    """How far every hard bar of one window was from flipping (docs/plan_determinismo.md
+    point 65: the chain is kept, its margins are RECORDED so any flip is visible) — all in
+    the units of the bar:
+
+    * ``closing_margin_px`` = p − hi of the frame that closed the window (> 0 by
+      construction; small = the window closed by a hair; None when it did not close on
+      the quantum);
+    * ``band_edge_min_px`` = the least distance of a band candidate's reading to either
+      band edge (lo, hi): a candidate that nearly fell out — or a frame outside that nearly
+      got in (``outside_band_nearest_px``, the nearest non-band reading's distance to the band);
+    * ``sharp_rank_gap`` = the gap between the two best I0 sharp_ranks in the band (the
+      keyframe choice; None with one candidate) and ``sharp_rank_frame_gap`` = the frames
+      between those two;
+    * ``fb_margin_min_px`` = fb_max_px − the worst median forward-backward disagreement of a
+      measured frame (the track-death bar);
+    * ``tracks_margin`` = the least ``n_tracks − min_tracks`` over the window's frames;
+    * ``nfev_max`` and ``nfev_margin`` = the most residual evaluations a rotation fit took and
+      ``reference_max_eval`` − that (the convergence bound)."""
+    measured = [m for m in seen if not m.lost]
+    out: Dict[str, Any] = {
+        "closing_margin_px": (float(closing.parallax_px - hi) if closing is not None else None),
+        "band_edge_min_px": (min(min(m.parallax_px - lo, hi - m.parallax_px) for m in band)
+                             if band else None),
+    }
+    outside = [m for m in measured if not (lo <= m.parallax_px <= hi)]
+    out["outside_band_nearest_px"] = (min(max(lo - m.parallax_px, m.parallax_px - hi)
+                                          for m in outside) if outside else None)
+    ranks = sorted(((float(by_frame[m.frame]["sharp_rank"]), m.frame) for m in band),
+                   reverse=True)
+    out["sharp_rank_gap"] = (ranks[0][0] - ranks[1][0]) if len(ranks) > 1 else None
+    out["sharp_rank_frame_gap"] = (abs(ranks[0][1] - ranks[1][1])) if len(ranks) > 1 else None
+    fbs = [m.fb_px for m in seen if math.isfinite(m.fb_px)]
+    out["fb_margin_min_px"] = (float(cfg.fb_max_px) - max(fbs)) if fbs else None
+    out["tracks_margin"] = (min(m.n_tracks for m in seen) - int(cfg.min_tracks)) if seen else None
+    nfevs = [m.nfev for m in seen if m.nfev > 0]
+    out["nfev_max"] = max(nfevs) if nfevs else None
+    out["nfev_margin"] = (int(cfg.reference_max_eval) - max(nfevs)) if nfevs else None
+    return out
+
+
+def _band_of(seen: Sequence[FrameMeasure], key: Callable[[FrameMeasure], float], lo: float,
+             hi: float) -> List[FrameMeasure]:
+    """The frames of the window whose reading ``key`` lies in [lo, hi]; when the reading jumped
+    over the band in one frame, the first frame at or past ``lo`` (the closing one)."""
+    band = [s for s in seen if lo <= key(s) <= hi]
+    return band if band else [next(s for s in seen if key(s) >= lo)]
+
+
+def rotation_record(seen: Sequence[FrameMeasure], band: Sequence[FrameMeasure],
+                    closing: Optional[FrameMeasure], chosen: Optional[FrameMeasure],
+                    by_frame: Dict[int, Dict[str, Any]], rot: Dict[str, float], lo: float,
+                    hi: float) -> Dict[str, Any]:
+    """The ROTATION bar of one window (sibling of :func:`window_margins`, degrees): the quantum
+    θ_q and its band; ``keyframe_deg`` = the chosen keyframe's rotation from the anchor (what
+    the next window's co-visibility rests on; None without a keyframe); ``max_deg`` = the
+    largest rotation measured in the window; and, for a window the rotation closed, the same
+    margins the parallax bar records — ``closing_margin_deg`` (the closing reading over hi),
+    ``band_edge_min_deg`` (the band candidates' least distance to lo / hi),
+    ``outside_band_nearest_deg``, ``sharp_rank_gap`` / ``sharp_rank_frame_gap`` (the keyframe
+    choice inside the band) — None otherwise."""
+    rots = [s.rot_deg for s in seen if math.isfinite(s.rot_deg)]
+    out: Dict[str, Any] = {
+        "quantum_deg": float(rot["theta_q_deg"]),
+        "band_deg": [float(lo), float(hi)],
+        "keyframe_deg": (float(chosen.rot_deg) if chosen is not None
+                         and math.isfinite(chosen.rot_deg) else None),
+        "max_deg": (max(rots) if rots else None),
+        "closing_margin_deg": (float(closing.rot_deg - hi) if closing is not None else None),
+        "band_edge_min_deg": (min(min(s.rot_deg - lo, hi - s.rot_deg) for s in band)
+                              if band else None),
+    }
+    outside = [r for r in rots if not (lo <= r <= hi)] if band else []
+    out["outside_band_nearest_deg"] = (min(max(lo - r, r - hi) for r in outside)
+                                       if outside else None)
+    ranks = sorted(((float(by_frame[s.frame]["sharp_rank"]), s.frame) for s in band),
+                   reverse=True)
+    out["sharp_rank_gap"] = (ranks[0][0] - ranks[1][0]) if len(ranks) > 1 else None
+    out["sharp_rank_frame_gap"] = (abs(ranks[0][1] - ranks[1][1])) if len(ranks) > 1 else None
+    return out
+
+
 def select_keyframes(chain: List[int], frames: _Frames, by_frame: Dict[int, Dict[str, Any]],
-                     cfg: ParallaxConfig, T: np.ndarray, Kn: np.ndarray, prog: _Progress
+                     cfg: ParallaxConfig, T: np.ndarray, Kn: np.ndarray, prog: _Progress,
+                     rot: Dict[str, float]
                      ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[int, FrameMeasure]]:
-    """(keyframes, windows, {frame: its last measurement})."""
+    """(keyframes, windows, {frame: its last measurement}). ``rot`` is the rotation quantum
+    record of :func:`rotation_quantum` (θ_q in degrees). A window closes on whichever bar its
+    reading crosses first — the parallax quantum (``quantum``) or the rotation quantum
+    (``rotation``), the parallax bar read first when one frame crosses both — and its keyframe
+    is the sharpest frame in THAT bar's band."""
     q = float(cfg.parallax_quantum_px)
     lo, hi = q * (1.0 - cfg.keyframe_band_frac), q * (1.0 + cfg.keyframe_band_frac)
+    rq = float(rot["theta_q_deg"])
+    lo_r, hi_r = rq * (1.0 - cfg.keyframe_band_frac), rq * (1.0 + cfg.keyframe_band_frac)
     pos = {f: i for i, f in enumerate(chain)}
     keyframes = [{"frame": chain[0], "file": by_frame[chain[0]]["file"], "anchor": None,
-                  "parallax_px": 0.0, "closed_by": "first_usable_frame"}]
+                  "parallax_px": 0.0, "rotation_deg": 0.0, "closed_by": "first_usable_frame"}]
     windows: List[Dict[str, Any]] = []
     records: Dict[int, FrameMeasure] = {}
     anchor, anchor_is_kf = chain[0], True
@@ -487,7 +660,9 @@ def select_keyframes(chain: List[int], frames: _Frames, by_frame: Dict[int, Dict
     while i < len(chain):
         win = _Window(anchor, frames, cfg, Kn)
         seen: List[FrameMeasure] = []
+        band: List[FrameMeasure] = []
         closed_by, chosen, restart = "end", None, len(chain)
+        m: Optional[FrameMeasure] = None
         j = i
         while j < len(chain):
             f = chain[j]
@@ -507,28 +682,47 @@ def select_keyframes(chain: List[int], frames: _Frames, by_frame: Dict[int, Dict
                 break
             seen.append(m)
             if m.parallax_px > hi:
-                band = [s for s in seen if lo <= s.parallax_px <= hi]
-                if not band:
-                    band = [next(s for s in seen if s.parallax_px >= lo)]
+                band = _band_of(seen, lambda s: s.parallax_px, lo, hi)
                 chosen = _sharpest(band, by_frame)
                 closed_by, restart = "quantum", pos[chosen.frame] + 1
                 break
+            if m.rot_deg > hi_r:
+                band = _band_of(seen, lambda s: s.rot_deg, lo_r, hi_r)
+                chosen = _sharpest(band, by_frame)
+                closed_by, restart = "rotation", pos[chosen.frame] + 1
+                break
             j += 1
+        closing_m = None
         if closed_by == "end":
             band = [s for s in seen if lo <= s.parallax_px <= hi]
             if band:
                 chosen = _sharpest(band, by_frame)
                 closed_by = "quantum"
+            else:
+                band = [s for s in seen if lo_r <= s.rot_deg <= hi_r]
+                if band:
+                    chosen = _sharpest(band, by_frame)
+                    closed_by = "rotation"
+        elif closed_by in ("quantum", "rotation"):
+            closing_m = m
+        band_rec = band if closed_by == "quantum" else []
+        band_rot = band if closed_by == "rotation" else []
         windows.append({"anchor": anchor, "anchor_is_keyframe": anchor_is_kf,
                         "closed_by": closed_by, "n_frames": len(seen) + (closed_by in
                                                                          ("track_loss",
                                                                           "coverage_break")),
                         "keyframe": chosen.frame if chosen is not None else None,
-                        "max_parallax_px": (max(s.parallax_px for s in seen) if seen else None)})
+                        "max_parallax_px": (max(s.parallax_px for s in seen) if seen else None),
+                        "margins": window_margins(seen + ([m] if m.lost else []), band_rec,
+                                                  closing_m if closed_by == "quantum" else None,
+                                                  by_frame, cfg, lo, hi),
+                        "rotation": rotation_record(seen, band_rot,
+                                                    closing_m if closed_by == "rotation" else None,
+                                                    chosen, by_frame, rot, lo_r, hi_r)})
         if chosen is not None:
             keyframes.append({"frame": chosen.frame, "file": by_frame[chosen.frame]["file"],
                               "anchor": anchor, "parallax_px": chosen.parallax_px,
-                              "closed_by": closed_by})
+                              "rotation_deg": chosen.rot_deg, "closed_by": closed_by})
             anchor, anchor_is_kf = chosen.frame, True
         elif closed_by == "coverage_break":
             anchor, anchor_is_kf = chain[j], False
@@ -596,8 +790,8 @@ def coverage_warnings(chain: List[int], records: Dict[int, FrameMeasure],
         "static": f"median displacement from the anchor < {cfg.warn_static_disp_px:g} px: the "
                   f"camera is still — no new viewpoint",
         "pure_rotation": f"the view moved ≥ {cfg.warn_rotation_min_disp_px:g} px with parallax "
-                         f"< {cfg.witness_min_parallax_px:g} px: pure rotation, no baseline, "
-                         f"no keyframe",
+                         f"< {cfg.witness_min_parallax_px:g} px: pure rotation, no baseline — "
+                         f"keyframes there come from the rotation quantum only",
         "tracking_lost": f"fewer than {cfg.min_tracks} tracks matched to the anchor",
     }
     for kind in ("static", "pure_rotation", "tracking_lost"):
@@ -648,13 +842,16 @@ def _check_inventory(paths: List[Path], rows: List[Dict[str, Any]], frames_dir: 
 
 def run_parallax(frames_dir: os.PathLike, quality: Dict[str, Any], cfg: ParallaxConfig,
                  K: np.ndarray, log: Callable = print, *, heartbeat_s: float,
-                 geometry_epoch: int = 0,
-                 camera_epoch: int = 0, cancelled: Cancelled = None) -> Dict[str, Any]:
+                 cancelled: Cancelled = None,
+                 environment: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Keyframes, witnesses and coverage warnings over the usable frames of
     ``frames_dir``. ``quality`` is the I0 report of the SAME frame inventory; ``K`` the
-    session camera's intrinsics in native px (intake/focal.py)."""
+    session camera's intrinsics in native px (intake/focal.py); ``environment`` the CPU
+    environment record to write (default: measured now)."""
     if heartbeat_s <= 0:
         raise ParallaxError(f"heartbeat_s must be positive, got {heartbeat_s}")
+    from intake.stamps import cpu_environment_record
+    env = dict(environment) if environment is not None else cpu_environment_record()
     frames_dir = Path(frames_dir)
     try:
         paths = list_frames(frames_dir)
@@ -675,12 +872,15 @@ def run_parallax(frames_dir: os.PathLike, quality: Dict[str, Any], cfg: Parallax
     if K.shape != (3, 3) or not np.all(np.isfinite(K)) or K[0, 0] <= 0 or K[1, 1] <= 0:
         raise ParallaxError(f"the session K must be a finite 3x3 with positive focals, got {K}")
     Kn = T @ K
+    rot = rotation_quantum(K, native_wh[0])
     log(f"{LOG_TAG} {len(chain)}/{len(rows)} usable frame(s); LK grid {cfg.grid_side}x"
         f"{cfg.grid_side} at scale {cfg.process_scale:g} matched to the anchor; parallax = "
         f"{cfg.parallax_quantile:g}-quantile of the residuals w.r.t. the rotation of the "
         f"session camera (fx {K[0, 0]:.1f} px, measured); quantum "
         f"{cfg.parallax_quantum_px:g} px (band ±{cfg.keyframe_band_frac:g}), witness "
-        f"{cfg.witness_min_parallax_px:g} px (native px)")
+        f"{cfg.witness_min_parallax_px:g} px (native px); rotation quantum "
+        f"{rot['theta_q_deg']:.2f}° = (1 − τ {rot['tau']:g}) · FOV_h {rot['fov_h_deg']:.2f}° / 4 "
+        f"(W {native_wh[0]} px, same band)")
     frames = _Frames({int(p.stem): p for p in paths}, native_wh, cfg)
 
     # BLAS single-threaded: the passes are sequential, and no reading may depend on how
@@ -689,10 +889,14 @@ def run_parallax(frames_dir: os.PathLike, quality: Dict[str, Any], cfg: Parallax
     _blas = threadpool_limits(limits=1)
     t0 = time.monotonic()
     prog = _Progress(log, "keyframes", len(chain), heartbeat_s, cancelled)
-    keyframes, windows, records = select_keyframes(chain, frames, by_frame, cfg, T, Kn, prog)
+    keyframes, windows, records = select_keyframes(chain, frames, by_frame, cfg, T, Kn, prog,
+                                                   rot)
     dt = time.monotonic() - t0
+    closers = {c: sum(1 for k in keyframes if k["closed_by"] == c) for c in WINDOW_CLOSERS}
     log(f"{LOG_TAG} keyframes: {len(keyframes)} in {dt:.1f} s "
-        f"({prog.n} measurements, {prog.n / max(dt, 1e-9):.1f}/s)")
+        f"({prog.n} measurements, {prog.n / max(dt, 1e-9):.1f}/s; by parallax "
+        f"{closers['quantum']}, by rotation {closers['rotation']}, by track loss "
+        f"{closers['track_loss']})")
     t1 = time.monotonic()
     prog_w = _Progress(log, "witnesses", len(chain), heartbeat_s, cancelled)
     witnesses = select_witnesses(chain, [k["frame"] for k in keyframes], frames, by_frame,
@@ -728,15 +932,16 @@ def run_parallax(frames_dir: os.PathLike, quality: Dict[str, Any], cfg: Parallax
         "n_frame_reads": frames.n_reads,
         "version": PARALLAX_VERSION,
         "provenance": PROVENANCE,
-        "geometry_epoch": int(geometry_epoch),
-        "camera_epoch": int(camera_epoch),
+        **intake_epochs(),
         "method": METHOD,
         "native_w": native_wh[0],
         "native_h": native_wh[1],
         "params": asdict(cfg),
+        "rotation_quantum": rot,                     # derived from K and native_w (not a param)
         "K": K.tolist(),
+        "environment": env,
         "inputs": {
-            "frames_dir": str(frames_dir),
+            "frames_dir": frames_dir.name,              # relative to the session (point 70)
             "n_frames": len(paths),
             "first": paths[0].name,
             "last": paths[-1].name,
@@ -752,10 +957,12 @@ def run_parallax(frames_dir: os.PathLike, quality: Dict[str, Any], cfg: Parallax
 def _stamps(result: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "provenance": PROVENANCE,
-        "geometry_epoch": int(result["geometry_epoch"]),
-        "camera_epoch": int(result["camera_epoch"]),
+        **intake_epochs(),
         "params": result["params"],
+        "rotation_quantum": result["rotation_quantum"],
         "inputs": result["inputs"],
+        "environment": result["environment"],
+        "K": result["K"],
     }
 
 
@@ -773,6 +980,8 @@ def selected_frames_document(result: Dict[str, Any], cfg: ParallaxConfig) -> Dic
         **_stamps(result),
         "intake_version": PARALLAX_VERSION,
         "parallax_quantum_px": float(cfg.parallax_quantum_px),
+        "rotation_quantum_deg": float(result["rotation_quantum"]["theta_q_deg"]),
+        "fov_h_deg": float(result["rotation_quantum"]["fov_h_deg"]),
         "keyframe_band_frac": float(cfg.keyframe_band_frac),
         "keyframes": result["keyframes"],
         "windows": result["windows"],
@@ -853,14 +1062,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="session directory (frames in <session>/frames; I0 must have run)")
     args = ap.parse_args(argv)
     session_dir = Path(args.session)
-    icfg = load_intake_config()
+    from intake.run_config import cli_intake_config       # the frozen configuration (point 69)
+    icfg, _sha = cli_intake_config(session_dir, log=print)
     frames_dir = session_dir / "frames"
     quality = load_quality(frames_dir)
     from intake.focal import default_probe
     K = default_probe()(session_dir, quality, icfg.parallax, print, None)
     result = run_parallax(frames_dir, quality, icfg.parallax, K, log=print,
-                          heartbeat_s=icfg.runtime.heartbeat_s,
-                          **read_session_epochs(session_dir))
+                          heartbeat_s=icfg.runtime.heartbeat_s)
     p_kf, p_w, p_warn = write_selection(session_dir, result, icfg.parallax)
     print(f"{LOG_TAG} keyframes={result['n_keyframes']} witnesses={result['n_witness']} "
           f"warnings={len(result['warnings'])} → {p_kf}, {p_w}, {p_warn}")

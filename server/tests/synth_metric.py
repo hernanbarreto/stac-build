@@ -476,7 +476,7 @@ def write_anchors(sess: Session, anchor_dir: Path, frames: Sequence[int],
 def fork_loops_cfg(stac_server_dir: Optional[str] = None, **over) -> dict:
     d = {"anchors_per_bridge": 3, "max_edge_sigma_m": 0.05, "max_residual_m": 0.10,
          "min_correspondences": 500, "corr_per_frame": 2000, "fit_sample": 200000,
-         "scale_tol_log": 0.05, "scale_break_sigma_factor": 4.0, "starved_sigma_m": 0.30,
+         "starved_sigma_m": 0.30,
          "ambiguous_sigma_factor": 3.0, "nonstructural_sigma_factor": 2.0,
          "movable_labels": ["box", "person"], "min_shared_structural_labels": 1,
          "intra_chunk_loops": True, "bridge_extra_frames": 0,
@@ -517,7 +517,7 @@ def fork_graph_cfg(**over) -> dict:
          "lm_diag_floor": 1e-9, "tol": 1e-8, "max_iters": 1000,
          "pcg_tol": 1e-10, "pcg_max_iters": 2000, "min_loop_gain": 0.5,
          "heldout_confidence": 0.95,
-         "loop_holdout_frac": 0.25, "loop_holdout_min_edges": 4,
+         "improvement_error_factor": 2.0,     # USER 2026-10-07 (the rule's factor)
          "gate_mode": "advisory",
          "holdout_offsets": [4, 10], "holdout_stride": 3,
          "holdout_samples": 4000, "holdout_max_nn_m": 0.10}

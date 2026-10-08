@@ -14,6 +14,15 @@ H, W = 60, 80
 K = np.array([[70.0, 0, W / 2], [0, 70.0, H / 2], [0, 0, 1]])
 
 
+def _fac() -> float:
+    from config import cfg as raw_cfg
+    from reconstruction.loops.config import improvement_error_factor
+    return float(improvement_error_factor(raw_cfg))
+
+
+FAC = _fac()
+
+
 def _cams():
     out = {}
     for f, x in zip((0, 1, 2), (-0.2, 0.0, 0.2)):
@@ -29,9 +38,11 @@ def test_bend_recovers_a_scale_error_and_keeps_omega_without_landmarks():
         u = rng.uniform(0, W, 200); v = rng.uniform(0, H, 200)
         rows[i] = (design(u, v, W, H), np.full(200, true) + rng.normal(0, 1e-3, 200))
     rows[3] = (design(np.zeros(0), np.zeros(0), W, H), np.zeros(0))      # no landmark at all
-    c = bend_coefficients(rows, 4, 0, 20, 1.345, 10)
+    c, info = bend_coefficients(rows, 4, 0, 20, 1.345, 10, FAC)
     assert abs(c[0][0] - 0.9) < 1e-2 and abs(c[2][0] - 1.1) < 1e-2
-    assert np.allclose(c[3], [1.0, 0.0, 0.0])
+    assert np.allclose(c[3], [1.0, 0.0, 0.0]) and info[3]["fallback"] == "identity"
+    # a flat ratio field: the tilt terms c1, c2 are not significant and are dropped exactly (point 48)
+    assert c[0][1] == 0.0 and c[0][2] == 0.0 and info[0]["kept"] == {"c1": False, "c2": False}
 
 
 def test_the_edge_keeping_vote_removes_a_flyer_and_keeps_the_surface():

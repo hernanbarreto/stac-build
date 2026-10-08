@@ -120,7 +120,11 @@ def write_calibration(output_dir: Path, reference: str, tables: Dict[str, Dict[s
                       epochs: Dict[str, int], params: Dict[str, Any]) -> Path:
     if reference not in REFERENCES:
         raise CalibrationError(f"reference must be one of {REFERENCES}, got {reference!r}")
+    # the reconstruction it was measured on (docs/plan_determinismo.md point 33): epoch numbers
+    # restart with every reconstruction, so F2 takes a calibration only with THIS id
+    from correction.epoch import RECONSTRUCTION_ID_KEY, reconstruction_id_or_none
     doc = {"version": CALIBRATION_VERSION, "provenance": PROVENANCE, **epochs,
+           RECONSTRUCTION_ID_KEY: reconstruction_id_or_none(output_dir),
            "reference": reference, "da3_conf_transform": DA3_CONF_TRANSFORM,
            "params": params, "models": tables,
            "replaces_in_core_epochs": ["reconstruction.simple.conf_percentile",

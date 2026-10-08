@@ -1,6 +1,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <string>
 #include <filesystem>
 
@@ -299,8 +300,14 @@ struct HierarchyBuilder{
 
 		// now write all hierarchy batches, except root
 		// update proxy nodes in root with byteOffsets of written batches.
+		// STAC 2026-10-07 (docs/plan_determinismo.md point 57): the batches in file-name order, not the
+		// filesystem's (it differs from one directory to the next and hierarchy.bin is written in it)
+		vector<fs::path> batchFiles;
 		for(auto& entry : fs::directory_iterator(path)){
-			auto filepath = entry.path();
+			batchFiles.push_back(entry.path());
+		}
+		std::sort(batchFiles.begin(), batchFiles.end());
+		for(auto& filepath : batchFiles){
 			// r0626.txt
 
 			// skip root. it get's special treatment

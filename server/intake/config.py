@@ -204,8 +204,10 @@ class ParallaxConfig:
     focal_probe_frames: int             # BOUND: frames of the DA3 focal probe (spread over the video)
     focal_probe_res: Any                # DA3 process_res of the focal probe: an int or "native"
     focal_probe_model: str              # DA3 model of the focal probe
-    vram_calibration_frames: int        # BOUND: frames of the one DA3 window that measures the card's footprint
-    vram_margin_frac: float             # BOUND: share of the free VRAM left unused when sizing a window
+    vram_calibration_frames: int        # BOUND: frames of the one DA3 window the calibration CLI measures the
+                                        # card's footprint on (server/card_table.json; no run measures it)
+    vram_margin_frac: float             # BOUND: share of the card's TOTAL memory left unused when sizing a
+                                        # DA3 window / Omega's resolution (never the free memory)
 
 
 @dataclass(frozen=True)

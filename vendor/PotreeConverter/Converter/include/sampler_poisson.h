@@ -192,8 +192,18 @@ struct SamplerPoisson : public Sampler {
 				auto bz = b.z - center.z;
 				auto bdd = bx * bx + by * by + bz * bz;
 
-				// sort by distance to center
-				return add < bdd;
+				// sort by distance to center.
+				// STAC 2026-10-07 (docs/plan_determinismo.md point 57): a TOTAL order. Two points at the same
+				// squared distance (LAS-quantised coordinates tie exactly) are ordered by their own identity
+				// (child, index): the vendor's comparator left ties to the unstable parallel sort, whose
+				// order followed the threads, and the first point of a tie is the one the sampler accepts.
+				if (add != bdd) {
+					return add < bdd;
+				}
+				if (a.childIndex != b.childIndex) {
+					return a.childIndex < b.childIndex;
+				}
+				return a.pointIndex < b.pointIndex;
 
 				// sort by manhattan distance to center
 				//return (ax + ay + az) < (bx + by + bz);

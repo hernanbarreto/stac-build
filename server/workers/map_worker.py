@@ -685,22 +685,15 @@ def _run_bundle_adjust_step(pipe: WorkerPipe, frames_dir: Path, output_dir: Path
 
 
 def _find_stray_dir(session_path: Path) -> Path:
-    """Find the Stray Scanner raw data dir (odometry.csv + depth/). Checks the session
-    dir, a ``stray/`` subdir of it, and the same in sibling dirs (Stray data may sit in
-    src_default/, src_default/stray/, or a sibling)."""
-    def _ok(d: Path) -> bool:
-        return (d / "odometry.csv").exists() and (d / "depth").is_dir()
-    for cand in (session_path, session_path / "stray"):
-        if _ok(cand):
-            return cand
-    parent = session_path.parent
-    for child in parent.iterdir():
-        if not child.is_dir() or child.name == session_path.name:
-            continue
-        for cand in (child, child / "stray"):
-            if _ok(cand):
-                return cand
-    return None
+    """The Stray Scanner raw data dir (odometry.csv + depth/) of THIS scan: ``inputs/stray/``
+    first — the capture data the replace wipe never touches (docs/plan_determinismo.md point 77,
+    DECIDIDO 2026-10-07) — then the scan's own directory or its ``stray/`` subdirectory; never a
+    sibling scan's (point 35, 2026-10-07: the siblings were searched in directory order, so the
+    camera and the LiDAR a scan reconstructed with depended on what other scans sat beside it).
+    None when the scan carries no Stray data."""
+    from ingestors.capture_inputs import stray_dirs
+    return next((d for d in stray_dirs(Path(session_path), required=("odometry.csv", "depth"))
+                 if (d / "depth").is_dir()), None)
 
 
 def _run_lidar_only(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
@@ -723,7 +716,8 @@ def _run_lidar_only(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     if stray_dir is None:
         raise FileNotFoundError(
             f"Backend 'lidar' requires Stray Scanner data (depth/, odometry.csv), "
-            f"but not found in {session_path} or siblings."
+            f"but not found in {session_path / 'inputs' / 'stray'}, {session_path} or "
+            f"{session_path / 'stray'} (a sibling scan's data is never taken — plan point 35)."
         )
 
     n_depth_files = len(list((stray_dir / 'depth').glob('*.png')))
@@ -1021,7 +1015,8 @@ def _run_hybrid_or_lidar(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         if mode == "lidar":
             raise FileNotFoundError(
                 f"Backend 'lidar' requires Stray Scanner data (depth/, odometry.csv), "
-                f"but not found in {session_path} or siblings."
+                f"but not found in {session_path / 'inputs' / 'stray'}, {session_path} or "
+                f"{session_path / 'stray'} (never a sibling scan — plan point 35)."
             )
         if fallback:
             pipe.send_log(
@@ -1577,18 +1572,20 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, ranges,
         raise RuntimeError("[omega-depth] no aligned camera_poses.txt / camera_frames.txt "
                            "pair — the Omega records cannot be written in the aligned frame")
 
-    # every frame's OWNER — the chunk whose centre is nearest (loop_utils.metric_lock.
-    # frame_owner, the same rule over the same ranges): the record of a shared frame
-    # carries the depth, conf, K and pose of the chunk that writes its points
+    # every frame's OWNER — the same rule as loop_utils.metric_lock.frame_owner over the same
+    # ranges (the shared block of two chunks split at its midpoint, USER 2026-10-07): the record
+    # of a shared frame carries the depth, conf, K and pose of the chunk that writes its points
     # (traceability), never of whichever chunk came last
-    _centres = [(a + b) / 2.0 for a, b in _chunks]
+    _owner_of = np.full(N, -1, np.int32)
+    for kk, (a, b) in enumerate(_chunks):
+        _owner_of[a:b] = kk
+    for kk in range(len(_chunks) - 1):
+        a, b = _chunks[kk + 1][0], _chunks[kk][1]
+        if b > a:
+            _owner_of[a:a + (b - a) // 2 + 1] = kk      # the midpoint frame → the earlier chunk
 
     def _owner(g):
-        best, bd = -1, None
-        for kk, (a, b) in enumerate(_chunks):
-            if a <= g < b and (bd is None or abs(g - _centres[kk]) < bd):
-                best, bd = kk, abs(g - _centres[kk])
-        return best
+        return int(_owner_of[g])
 
     n_written = 0
     # numeric chunk order (a lexicographic glob put chunk_10 before chunk_2)
@@ -1644,9 +1641,7 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, ranges,
                   f"K_omega, pose_c2w)")
 
 
-from workers.base import (gpu_free_gb as _gpu_free_gb, gpu_total_gb as _gpu_total_gb,
-                          stop_semantic_service,
-                          stop_semantic_service_verified)
+from workers.base import stop_semantic_service, stop_semantic_service_verified
 
 
 def _motion_keyframes(frames_dir: Path, quantum: float):
@@ -1884,8 +1879,11 @@ def _run_da3_anchor(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     extract_da3_depth.py (--per_frame) and converts its output to the exact layout
     scale_align consumes: da3_run/results_output/frame_<num>.npz (depth + conf)."""
     from reconstruction.da3_anchor import extract_anchor_depths
+    import repro
     model_id = str((recon_cfg.get("da3", {}) or {}).get(
         "model_id", "depth-anything/DA3NESTED-GIANT-LARGE-1.1"))
+    # the card is the extractor's alone (docs/plan_determinismo.md point 4): FAIL, never degrade
+    repro.require_exclusive_gpu(log=pipe.send_log)
     n = extract_anchor_depths(frames_dir, output_dir, anchor_files, model_id,
                               python=sys.executable, log=pipe.send_log,
                               check_cancel=pipe.check_cancel)
@@ -1963,16 +1961,21 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         _pc = load_precision_config(config)
         if _pc.enabled:
             from intake.walk import load_walk, measure_walk, run_da3_windows, walk_is_current
+            # the job's configuration travels with the call (plan point 69): I3 never re-reads
+            # config.yaml from disk at spawn; a frozen output/run_config.yaml must agree with it
             if walk_is_current(output_dir.parent, _sel_files, frames_dir, _pc.gauge,
-                               sys.executable, log=pipe.send_log):
+                               sys.executable, log=pipe.send_log, run_cfg=config):
                 _walk_doc = load_walk(output_dir.parent)
                 _walk_reused = True
             else:
                 pipe.send_progress(5, "Gauge I3: DA3 multi-view windows → metric walk...",
                                    stage="reconstruction")
+                # I3 proper: THIS run's plan (another plan's window files go first); the walk
+                # is measured right after on exactly these windows (intake.walk: the card is
+                # checked free before DA3 and a window that does not fit FAILS — never halved)
                 run_da3_windows(output_dir.parent, _pc.gauge, sys.executable, log=pipe.send_log,
                                 check_cancel=pipe.check_cancel, frames_dir=frames_dir,
-                                files=_sel_files)
+                                files=_sel_files, for_new_walk=True, run_cfg=config)
                 _walk_doc = measure_walk(output_dir.parent, _pc.gauge, log=pipe.send_log)
     if _scale_align_on:
         pipe.send_progress(6, "VGGT-Omega: extracting DA3 metric depth (per-frame)...",
@@ -2019,7 +2022,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # capacity-sized chunks and their A/B pin (chunk_frames), the strided walk probe and
     # the phase-2 re-run, reconstruction.vggtomega.chunk_size / chunk_overlap.
     from reconstruction.chunk_plan import (walk_length_m, plan_anchor_indices, chunk_lengths,
-                                           omega_resolution_for)
+                                           omega_card, session_omega_resolution)
     for _gone in ("chunk_walk_m", "max_walk_single_pass_m", "chunk_frames_over_walk",
                   "chunk_frames"):
         if _gone in _simple_cfg:
@@ -2057,7 +2060,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         the Omega resolution chosen for the largest chunk (USER 2026-10-06). Written
         for a chunked run; a single-pass session has no plan (the corrector then
         works purely per keyframe)."""
-        plan = chunk_plan_doc(_ranges, _n_kf, _walk, _covis, _res)
+        plan = chunk_plan_doc(_ranges, _n_kf, _walk, _covis, _res, environment=_env_rec)
         _invalidate_on_new_chunk_plan(output_dir, plan, pipe.send_log)
         (output_dir / "chunk_plan.json").write_text(json.dumps(plan, indent=1))
         pipe.send_log(f"[chunk-plan] persisted output/chunk_plan.json: "
@@ -2158,12 +2161,17 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             "output_dir": str(output_dir),
             "model_id": str((recon_cfg.get("da3", {}) or {}).get(
                 "model_id", "depth-anything/DA3NESTED-GIANT-LARGE-1.1"))}
+        # regulated-dimension rows of a previous certification enter ONLY when stamped with
+        # this exact plan and measured on Omega's geometry (docs/plan_determinismo.md point 22)
+        from reconstruction.loops.structural import absolute_rows_for_plan
         _abs_path = output_dir / "scale_absolute_rows.json"
-        _abs_rows = []
-        if _abs_path.exists():
-            _abs_rows = list(json.loads(_abs_path.read_text()).get("rows", []))
+        _abs_rows, _abs_why = absolute_rows_for_plan(_abs_path, _ranges, _n_selected)
+        if _abs_rows:
             pipe.send_log(f"[scale-graph] {len(_abs_rows)} absolute scale row(s) from "
-                          f"{_abs_path.name} enter the chunk scale graph")
+                          f"{_abs_path.name} (stamped with this plan, epoch 0) enter the chunk "
+                          f"scale graph")
+        elif _abs_why:
+            pipe.send_log(f"[scale-graph] {_abs_path.name} IGNORED: {_abs_why}", level="warning")
         cfg_v["Model"]["metric_lock"]["absolute_rows"] = _abs_rows
         if bool(_va_cfg.get("scale_vio", True)):
             from ingestors.vio_detector import detect_vio_data
@@ -2215,18 +2223,21 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                "--config", str(vggt_config_path), "--save_dir", str(vggt_save_dir)]
         if sel_path:
             cmd.extend(["--selected_frames", str(sel_path)])
-        env = os.environ.copy()
+        # deterministic numerics (USER 2026-09-28: identical keyframes → bit-identical
+        # output): the cuBLAS workspace and Python's hash seed from repro (ONE value for every
+        # launcher — another value in the inherited environment is refused, not accepted), a
+        # FIXED thread count for every CPU library the fork uses (the pose graph, lstsq, SVD —
+        # a reduction's order must not depend on the machine's 252 cores or the cgroup's 30),
+        # MKL in its reproducible mode, and the ONE Hugging Face cache (plan point 43)
+        import da3_weights
+        import repro
+        env = repro.deterministic_env()
         if device == "cpu":
             env["CUDA_VISIBLE_DEVICES"] = ""
-        # deterministic numerics (USER 2026-09-28: identical keyframes → bit-identical
-        # output): cuBLAS workspace, a FIXED thread count for every CPU library the
-        # fork uses (the pose graph, lstsq, SVD — a reduction's order must not depend on
-        # the machine's 252 cores or the cgroup's 30), MKL in its reproducible mode
-        env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
         for _k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
             env[_k] = "8"
         env["MKL_CBWR"] = "COMPATIBLE"
-        env["PYTHONHASHSEED"] = "0"
+        env["HF_HOME"] = da3_weights.HF_HOME
 
         pipe.send_progress(10, f"Starting VGGT-Long[Omega] ({tag})...", stage="reconstruction")
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -2282,7 +2293,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                       f"co-visibility plan once", level="warning")
         from intake.walk import run_da3_windows
         run_da3_windows(output_dir.parent, _pc.gauge, sys.executable, log=pipe.send_log,
-                        check_cancel=pipe.check_cancel, frames_dir=frames_dir, files=_sel_files)
+                        check_cancel=pipe.check_cancel, frames_dir=frames_dir, files=_sel_files,
+                        run_cfg=config)
         _cplan = plan_session(output_dir.parent, log=pipe.send_log)
     _ranges = [(int(a), int(b)) for a, b in _cplan["ranges"]]
     _covis_rep = _cplan["report"]
@@ -2299,33 +2311,58 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # patch-aligned resolution that holds it (reconstruction.chunk_plan.omega_resolution_for).
     # Every chunk runs at that one resolution; F0 reads it from the config this run writes
     # (precision.camera.read_omega_preprocessing) and maps Omega's grid to the native frame.
-    _total_gb = _gpu_total_gb()
-    if _total_gb is None:
-        raise RuntimeError("the GPU's total memory cannot be read (nvidia-smi) — the Omega "
-                           "resolution that fits the largest chunk cannot be decided")
+    # THE CARD is read through torch (repro.card_identity — never an 'unknown' sentinel, plan
+    # point 13) and everything sized on it comes from the COMMITTED card table (point 3: its
+    # total memory and Omega's measured footprint factor — no run writes it; a card with no entry
+    # FAILS naming the calibration CLI). The learned per-card file every OOM used to rewrite is
+    # gone: a leftover is deleted, said (point 24).
+    import repro
+    _legacy_fp = Path(__file__).resolve().parent.parent.parent / "weights" / "omega_footprint.json"
+    if _legacy_fp.exists():
+        _legacy_fp.unlink()
+        pipe.send_log(f"[omega-res] {_legacy_fp} (the footprint LEARNED from other sessions' OOMs) "
+                      f"deleted — Omega's footprint per card is the committed server/card_table.json "
+                      f"(docs/plan_determinismo.md point 3); no run writes it")
+    import card_table as _ct
+    _ct.require_one_visible_card()          # point 78: the identity is THE device's, one card
+    _ident = repro.card_identity(0)
+    _card = omega_card(_ident["key"])
     _n_max = max(chunk_lengths(_ranges))
     # the same margin the I3 DA3 windows leave on the card (USER 2026-10-06)
     from intake.config import load_intake_config as _lic
     _omega_margin = float(_lic(config).parallax.vram_margin_frac)
-    from intake.vram import card_name as _card_name
-    from reconstruction.chunk_plan import omega_footprint_factor, record_omega_oom
-    _card = _card_name()
-    _ffac = omega_footprint_factor(_card)
-    _res = omega_resolution_for(_n_max, _total_gb, _native_frame_wh(frames_dir),
-                                str(vggt_config["Model"]["omega_mode"]),
-                                int(vggt_config["Model"]["omega_resolution"]),
-                                margin_frac=_omega_margin, footprint_factor=_ffac)
+    # FIXED PER SESSION (point 14): decided once for this exact plan from the card table and
+    # reused by every later run of the same plan; another plan decides again (declared)
+    _res = session_omega_resolution(output_dir.parent, _ranges, _native_frame_wh(frames_dir),
+                                    str(vggt_config["Model"]["omega_mode"]),
+                                    int(vggt_config["Model"]["omega_resolution"]),
+                                    _omega_margin, _card, log=pipe.send_log)
     vggt_config["Model"]["omega_resolution"] = int(_res["resolution"])
-    vggt_config["Model"]["omega_resolution_report"] = _res
+    # the report travels in the run config minus its log-only field (the config is stamped)
+    vggt_config["Model"]["omega_resolution_report"] = {k: v for k, v in _res.items()
+                                                       if k != "persisted"}
     pipe.send_log(f"[omega-res] Omega at {_res['resolution']} ({_res['mode']}, grid "
                   f"{_res['grid_wh'][0]}x{_res['grid_wh'][1]}, native "
-                  f"{_res['native_wh'][0]}x{_res['native_wh'][1]}) — {_res['why']}; "
-                  f"{_res['card_total_gb']:.1f} GB card, {_res['base_gb']:g} GB base + "
-                  f"{_res['gb_per_frame']:.3f} GB/frame ({_res['gb_per_frame_ref']:g} measured at "
-                  f"{_res['ref_grid_wh'][0]}x{_res['ref_grid_wh'][1]}, scaled by pixels); predicted "
-                  f"peak {_res['predicted_peak_gb']:.2f} of {_res['card_total_gb']:.2f} GB "
-                  f"({_res['headroom_gb']:.2f} GB headroom, {_omega_margin:.0%} margin; an OOM "
-                  f"retries one patch step lower)")
+                  f"{_res['native_wh'][0]}x{_res['native_wh'][1]}; {_res.get('persisted')} for "
+                  f"this plan) — {_res['why']}; {_card['card']}: {_res['card_total_gb']:.1f} GB "
+                  f"(card table), {_res['base_gb']:g} GB base + {_res['gb_per_frame']:.3f} "
+                  f"GB/frame ({_res['gb_per_frame_ref']:g} measured at {_res['ref_grid_wh'][0]}x"
+                  f"{_res['ref_grid_wh'][1]}, scaled by pixels, footprint factor "
+                  f"{_res['footprint_factor']:.4f}); predicted peak {_res['predicted_peak_gb']:.2f} "
+                  f"of {_res['card_total_gb']:.2f} GB ({_res['headroom_gb']:.2f} GB headroom, "
+                  f"{_omega_margin:.0%} margin; an OOM FAILS the run — nothing is lowered to fit)")
+    # the environment this run plans and reconstructs in (point 12): card, driver, torch / CUDA
+    # / cuDNN, BLAS, CPU, libraries, git state — recorded in chunk_plan.json (a chunked run) and
+    # beside the plan for every run; no time, host or pid
+    _env_rec = repro.environment_record(gpu=True)
+    _env_rec["card_identity"] = _ident
+    _env_rec["card_table"] = dict(_card)
+    _env_path = output_dir / "omega_plan_environment.json"
+    _env_path.write_text(json.dumps(_env_rec, indent=1, sort_keys=True, default=str))
+    pipe.send_log(f"[omega-res] environment recorded → {_env_path.name} ({_env_rec['gpu']['name']}, "
+                  f"driver {_env_rec['gpu']['driver_version']}, torch {_env_rec['torch']['version']}"
+                  f"+cu{_env_rec['torch']['cuda']}, cuDNN {_env_rec['torch']['cudnn']}, repo "
+                  f"{_env_rec['git']['repo']['commit'][:12]}{'+dirty' if _env_rec['git']['repo']['dirty'] else ''})")
 
     if len(_ranges) == 1:
         # ONE pass: the whole walk within H co-visibility lengths. The fork runs the one range
@@ -2371,12 +2408,23 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         _sal = (vggt_config.get("Loop") or {}).get("SALAD")
         if _sal is not None and _visit_m > 0 and _walk0 > 0:
             import math as _math
-            _band = max(int(_sal["min_gap"]),
-                        int(_math.ceil(_visit_m / (_walk0 / _n_selected))))
-            pipe.send_log(f"[loops] SALAD non-local band: {_band} kf = {_visit_m:g} m of "
-                          f"the measured walk")
+            # DECIDIDO (docs/plan_determinismo.md point 71): the band stays min_walk_m of WALK
+            # (the user's one definition of a visit) converted to keyframes with the FROZEN
+            # walk of the session (walk.json, measured by I3 — never an Omega pass), and its
+            # margin is RECORDED: how far the band's walk clears min_walk_m (a margin near 0
+            # is a ceil() one keyframe from flipping — visible, never silent)
+            _m_per_kf = _walk0 / _n_selected
+            _band_visit = int(_math.ceil(_visit_m / _m_per_kf))
+            _band = max(int(_sal["min_gap"]), _band_visit)
+            _band_margin_m = _band_visit * _m_per_kf - _visit_m
+            pipe.send_log(f"[loops] SALAD non-local band: {_band} kf = "
+                          f"{_band_visit * _m_per_kf:.3f} m of the frozen walk ({_visit_m:g} m "
+                          f"required; margin {_band_margin_m:.3f} m = "
+                          f"{_band_margin_m / _m_per_kf:.2f} kf; floor {_sal['min_gap']} kf)")
             _sal["min_gap"] = int(_band)
             _sal["min_gap_frac"] = 0.0
+            _sal["band_walk_m_per_kf"] = float(_m_per_kf)       # recorded in the Omega config
+            _sal["band_margin_m"] = float(_band_margin_m)
         if _sal is not None:
             # SALAD's appearance bar calibrated on the session's GEOMETRIC revisits
             # (the DA3-window walk) — LoopModels.LoopModel.calibrate_threshold
@@ -2398,47 +2446,52 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     if _simple_on:
         _apply_conf_filter(vggt_config)
     _tag1 = "chunked-metric" if _chunked_already else "single-pass"
-    # An Omega pass that runs out of memory despite the margin is retried ONE patch step lower
-    # (USER 2026-10-06), declared; the plan never changes — only the resolution. The products of
-    # the failed attempt are another layout and go first (the invalidation keys on resolution).
-    from precision.camera import OMEGA_PATCH_SIZE as _OPS
-    while True:
+    # ── THE LAUNCH'S STAMP AND OMEGA'S COMPLETION MARKER (docs/plan_determinismo.md point 23) ──
+    # The fork is skipped ONLY when maplong_run/omega_complete.json carries the stamp of exactly
+    # this launch (keyframes, walk, revisit reference, weights, fork code, whole fork config) and
+    # its products are on disk unchanged; a marker of another launch means the products are of
+    # another run — they are wiped (as a new plan wipes) and the fork runs again. No cleanup
+    # deletes the marker (it used to be the fork's own test on files the cleanup removes, so
+    # every replace-OFF Reconstruir re-inferred Omega over a finished session).
+    from reconstruction import omega_complete as _OC
+    _launch = _OC.launch_stamp(output_dir.parent, frames_dir, _sel_files, vggt_config)
+    _done, _why = _OC.check(output_dir, _launch)
+    if _done:
+        pipe.send_log(f"[omega] COMPLETE under this exact launch stamp ({_launch['sha256'][:12]}…, "
+                      f"{len(_launch['inputs'])} input(s), {len(_launch['code'])} code file(s)) — "
+                      f"the fork is not run; its products on disk are this run's")
+        _ok = True
+    else:
+        if _OC.marker_path(output_dir).exists():
+            _wipe_plan_products(output_dir, "Omega's completion marker is of ANOTHER launch — "
+                                + "; ".join(_why[:8]) + (" …" if len(_why) > 8 else ""),
+                                pipe.send_log)
+        else:
+            pipe.send_log(f"[omega] not complete: {'; '.join(_why[:4])} — the fork runs")
+        # the card is Omega's alone (point 4): FAIL listing what holds it, never degrade; and an
+        # Omega pass that runs out of memory FAILS — the resolution is the session's (point 14),
+        # the plan is the co-visibility plan, neither is lowered to fit what else held the card
+        repro.require_exclusive_gpu(log=pipe.send_log)
         try:
             _ok = _omega_pass(vggt_config, _tag1)
-            break
-        except RuntimeError:
+        except RuntimeError as _e:
             if not _omega_oom["hit"]:
                 raise
-            _omega_oom["hit"] = False
-            _prev = int(_res["resolution"])
-            # learn from the OOM (USER 2026-10-06): what the card really needed vs the prediction,
-            # stored per card; without a readable message, step down by the margin's share of the
-            # pixels (never one 16-px step: 1664 → 1648 is 1 % fewer pixels)
-            _newf = record_omega_oom(_card, float(_res["predicted_peak_gb"]), _omega_oom["text"],
-                                     {"resolution": _prev, "grid_wh": _res["grid_wh"], "frames": _n_max})
-            _omega_oom["text"] = ""
-            if _newf is not None:
-                _ffac = _newf
-                _ceil = _prev - _OPS
-                pipe.send_log(f"[omega-res] measured footprint factor {_ffac:.3f} for {_card} "
-                              f"(the linear model under-read this grid) — stored for this card")
-            else:
-                _ceil = max(_OPS, int(_prev * (1.0 - _omega_margin) ** 0.5) // _OPS * _OPS)
-            _res = omega_resolution_for(_n_max, _total_gb, _native_frame_wh(frames_dir),
-                                        str(vggt_config["Model"]["omega_mode"]), _ceil,
-                                        margin_frac=_omega_margin, footprint_factor=_ffac)
-            _res["oom_fallback_from"] = _prev
-            vggt_config["Model"]["omega_resolution"] = int(_res["resolution"])
-            vggt_config["Model"]["omega_resolution_report"] = _res
-            pipe.send_log(f"[omega-res] ⚠ Omega ran out of memory at {_prev} — retrying at "
-                          f"{_res['resolution']} (grid {_res['grid_wh'][0]}x{_res['grid_wh'][1]}), "
-                          f"same chunk plan", level="warning")
-            if _chunked_already:
-                _persist_chunk_plan(_ranges, _n_selected, _walk0, _covis_rep, _res)
-            else:
-                _invalidate_on_new_chunk_plan(output_dir, {"chunk_ranges": [[0, int(_n_selected)]],
-                                                           "n_keyframes": int(_n_selected),
-                                                           "omega_resolution": _res}, pipe.send_log)
+            raise RuntimeError(
+                f"Omega ran OUT OF MEMORY at {_res['resolution']} (grid {_res['grid_wh'][0]}x"
+                f"{_res['grid_wh'][1]}, {_n_max} frames in the largest chunk; predicted peak "
+                f"{_res['predicted_peak_gb']:.2f} of {_res['card_total_gb']:.2f} GB with footprint "
+                f"factor {_res['footprint_factor']:.4f} of {_card['card']}) — the run FAILS: nothing "
+                f"is lowered to fit (docs/plan_determinismo.md point 4). The card was verified free "
+                f"before the pass, so the card table's Omega footprint under-reads this grid: "
+                f"re-measure it with `python -m reconstruction.chunk_plan --omega-footprint "
+                f"--from-oom-log <this log> --predicted-peak-gib {_res['predicted_peak_gb']:.3f} "
+                f"--provenance '…'` and commit server/card_table.json. OOM text: "
+                f"{_omega_oom['text'][:400]}") from _e
+        if _ok:
+            _mp = _OC.write(output_dir, _launch)
+            pipe.send_log(f"[omega] completion marker written → {_mp.relative_to(output_dir)} "
+                          f"(stamp {_launch['sha256'][:12]}…)")
     if not _ok:
         return
 
@@ -2571,20 +2624,26 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
 # derivado de la inferencia, y de ahí hacia adelante también"): only what was computed BEFORE
 # Omega and does not depend on how the keyframes are chunked.
 _PLAN_INDEPENDENT_OUTPUT = {"chunk_plan.json", "da3_run", "da3_windows", "intake",
-                            "salad_revisit_reference.json", "vggt_omega_config.yaml", "maplong_run"}
+                            "salad_revisit_reference.json", "vggt_omega_config.yaml", "maplong_run",
+                            # written by THIS run before Omega (plan point 12): describes the run
+                            # that is about to reconstruct, not the products being wiped
+                            "omega_plan_environment.json"}
 _PLAN_INDEPENDENT_MAPLONG = {"loop_closures.txt", "salad_calibration.json", "sky_masks",
                              "frame_list.json", "vggt_omega_config.yaml"}
 
 
-def chunk_plan_doc(ranges, n_kf: int, walk_m, covis: dict, omega_res: dict) -> dict:
+def chunk_plan_doc(ranges, n_kf: int, walk_m, covis: dict, omega_res: dict,
+                   environment: "Optional[dict]" = None) -> dict:
     """output/chunk_plan.json of a chunked run (version 2, USER 2026-10-06): the co-visibility
     plan's EXPLICIT ranges — what every reader of the chunks reads — every chunk's length and
     every seam's own overlap (variable: nothing here is a uniform size/overlap to rebuild
     chunks from), the planner's report (D per chunk, H, τ, tol_rel, blocks, cuts, flags, the
-    input stamp) and the Omega resolution chosen for the largest chunk, with why."""
+    input stamp), the Omega resolution chosen for the largest chunk, with why, and — plan point
+    12 — the ``environment`` the run reconstructs in (repro.environment_record(gpu=True) + the
+    card's identity and table entry)."""
     from reconstruction.chunk_plan import as_ranges, chunk_lengths, seam_overlaps
     r = as_ranges(ranges)
-    return {
+    doc = {
         "version": 2,
         "phase": "covis-planned",
         "method": "covis",
@@ -2594,8 +2653,11 @@ def chunk_plan_doc(ranges, n_kf: int, walk_m, covis: dict, omega_res: dict) -> d
         "seam_overlaps": seam_overlaps(r),
         "walk_m": (round(float(walk_m), 2) if walk_m is not None else None),
         "covis": covis,
-        "omega_resolution": omega_res,
+        "omega_resolution": {k: v for k, v in (omega_res or {}).items() if k != "persisted"},
     }
+    if environment is not None:
+        doc["environment"] = json.loads(json.dumps(environment, default=str))
+    return doc
 
 
 def _plan_layout_text(plan: dict) -> str:
@@ -2745,8 +2807,21 @@ def _invalidate_on_new_chunk_plan(output_dir: Path, plan: dict, log=print) -> bo
     else:
         why = (f"the outputs on disk are of chunk plan {_plan_layout_text(old)} over "
                f"{old.get('n_keyframes')} keyframes, this run plans {new_txt}")
+    _wipe_plan_products(out, f"NEW PLAN — {why}", log)
+    return True
+
+
+def _wipe_plan_products(output_dir: Path, why: str, log=print) -> int:
+    """Delete every product of the Omega run on disk and everything downstream of it — what
+    ``_invalidate_on_new_chunk_plan`` does for a new plan, also run when Omega's completion marker
+    is of another launch (plan point 23): the fork would otherwise STOP on products of another
+    stamp, or resume them. Keeps what was computed BEFORE Omega and does not depend on it
+    (``_PLAN_INDEPENDENT_OUTPUT`` / ``_PLAN_INDEPENDENT_MAPLONG``). Returns the bytes freed; a
+    file that cannot be deleted FAILS (old and new products never live side by side)."""
+    out = Path(output_dir)
+    ml = out / "maplong_run"
     freed = 0
-    doomed = [p for p in out.iterdir() if p.name not in _PLAN_INDEPENDENT_OUTPUT]
+    doomed = [p for p in out.iterdir() if p.name not in _PLAN_INDEPENDENT_OUTPUT] if out.is_dir() else []
     if ml.is_dir():
         doomed += [p for p in ml.iterdir() if p.name not in _PLAN_INDEPENDENT_MAPLONG]
     for p in doomed:
@@ -2758,12 +2833,12 @@ def _invalidate_on_new_chunk_plan(output_dir: Path, plan: dict, log=print) -> bo
                 freed += p.stat().st_size if p.exists() else 0
                 p.unlink(missing_ok=True)
         except OSError as e:
-            raise RuntimeError(f"a new chunk plan must start clean and {p} could not be deleted ({e}) "
-                               f"— old and new chunk products would live side by side") from e
-    log(f"[chunk-plan] NEW PLAN — {why}: every product of the old plan and everything downstream "
+            raise RuntimeError(f"a new Omega run must start clean and {p} could not be deleted ({e}) "
+                               f"— old and new products would live side by side") from e
+    log(f"[chunk-plan] {why}: every product of the old run and everything downstream "
         f"deleted ({len(doomed)} item(s), {freed / 1e9:.1f} GB); kept: frames, intake, DA3 per "
         f"keyframe + windows, SALAD candidates, sky masks")
-    return True
+    return freed
 
 
 def _cleanup_recon_temps(save_dir: Path, output_dir: Path, backend: str, pipe: WorkerPipe):

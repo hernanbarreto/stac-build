@@ -19,15 +19,21 @@ median.
 
 ## File placement (auto-detected)
 
-Put ONE of these in the session directory (`src_*/`, same level as
-`source_video.*`):
+Put ONE of these in the scan's `inputs/` directory (`src_*/inputs/`, the
+capture data a "Reconstruir" with replace never touches —
+docs/plan_determinismo.md point 73):
 
 ```
-vio_trajectory.csv
-vio_trajectory.json
-vio/trajectory.csv
-vio/trajectory.json
+inputs/vio_trajectory.csv
+inputs/vio_trajectory.json
+inputs/vio/trajectory.csv
+inputs/vio/trajectory.json
 ```
+
+The same names directly in the scan directory (same level as
+`source_video.*`) are still read (after `inputs/`), and the replace wipe
+MOVES them into `inputs/` instead of deleting them. `scale_diagnostics.json`
+and `gauge.json` record the file used (scan-relative) and its sha256.
 
 Detection is automatic (like Stray sessions). **A present but unusable file
 aborts the reconstruction with the exact reason** — fix it or remove it; there

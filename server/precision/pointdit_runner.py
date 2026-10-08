@@ -167,9 +167,12 @@ class PointDiTRunner:
         self.log = log
         self.steps = int(mcfg.steps)
         self.norm_max = float(mcfg.norm_max)
+        self.seed = int(mcfg.seed)
         self.device = device or ("cuda" if self._cuda() else "cpu")
         self._generate = generate
         self._model = None
+        self._numerics: Optional[dict] = None     # repro.deterministic_torch's record of the first call
+        self._card: Optional[dict] = None         # repro.card_identity (cuda only), read once
         self.paths: Optional[Paths] = None if generate is not None else resolve_paths(mcfg)
 
     @staticmethod
@@ -246,9 +249,19 @@ class PointDiTRunner:
         if h % PATCH or w % PATCH or h < PATCH or w < PATCH:
             raise PointDiTError(f"PointDiT runs on multiples of {PATCH} px, asked {w}x{h}")
         x = x.to(self.device)
-        if (h, w) != (H, W):
-            x = torch.nn.functional.interpolate(x, size=(h, w), mode="bilinear", align_corners=False)
-        with torch.no_grad():
+        # docs/plan_determinismo.md point 54: the whole forward pass — the resize, DINOv3, the ODE —
+        # under torch's deterministic mode STRICT (an op with no deterministic kernel raises, never
+        # falls back silently), cuDNN deterministic and not benchmarking, TF32 off for cuDNN and
+        # matmul, the cuBLAS workspace pinned; bf16 autocast stays the recorded dtype. The seed pins
+        # torch's generators although the ODE starts from zeros (generate_noise_scale 0) and draws
+        # nothing — the record is complete either way. The numerics record of the first call and the
+        # card go to depth_on_f5.json through footprint().
+        from repro import deterministic_torch
+        with torch.no_grad(), deterministic_torch(self.seed) as numerics:
+            if self._numerics is None:
+                self._numerics = dict(numerics)
+            if (h, w) != (H, W):
+                x = torch.nn.functional.interpolate(x, size=(h, w), mode="bilinear", align_corners=False)
             if self._generate is not None:
                 out = self._generate(x)
             elif self.device.startswith("cuda"):
@@ -266,9 +279,26 @@ class PointDiTRunner:
         P, valid = self.infer(image, size)
         return P[2], valid
 
+    def card(self) -> Optional[dict]:
+        """The card the model runs on (repro.card_identity: name, memory, capability, uuid), read
+        once; None on the CPU. Any failure to identify the card RAISES — there is no 'unknown' card."""
+        if self._card is None and self.device.startswith("cuda"):
+            from repro import card_identity
+            self._card = card_identity(0)
+        return self._card
+
     def footprint(self) -> dict:
+        """What the detail's bits depend on, for the report (point 54): device, model, steps, seed,
+        the autocast dtype, the card and torch's numerics as the first inference recorded them. No
+        timing or memory here — those are run-dependent and go to timing()."""
+        return {"device": self.device, "model": self.cfg.model, "steps": self.steps, "seed": self.seed,
+                "autocast_dtype": "bfloat16" if self.device.startswith("cuda") else None,
+                "card": self.card(), "numerics": self._numerics}
+
+    def timing(self) -> dict:
+        """Run-dependent figures (the timing sidecar, never the compared report): peak VRAM."""
         import torch
-        d = {"device": self.device, "model": self.cfg.model, "steps": self.steps}
+        d: dict = {}
         if self.device.startswith("cuda") and torch.cuda.is_available():
             d["vram_peak_gb"] = round(torch.cuda.max_memory_allocated() / (1000 ** 3), 2)
         return d

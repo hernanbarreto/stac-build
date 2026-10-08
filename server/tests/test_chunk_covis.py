@@ -201,11 +201,19 @@ def test_session_persists_and_resumes_without_windows(tmp_path):
     for p in wdir.glob("window_*.npz"):                   # F2 deletes the windows
         p.unlink()
     again = plan_session(tmp_path, log=logs.append)
-    assert again["report"]["measurement"] == "reused"
+    # the session's FROZEN plan (point 15), served from the persisted measurement without windows
+    assert again["report"]["measurement"] == "frozen"
     assert again["ranges"] == first["ranges"]
     a = dict(rep); b = dict(again["report"])
     a.pop("measurement"); b.pop("measurement")
     assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+    assert (tmp_path / "intake" / "chunk_plan_frozen.json").exists()
+    # the stamp holds the code of the planner and of the walk (point 21)
+    assert set(doc["stamp_parts"]["code_sha256"]) == {"server/intake/walk.py",
+                                                       "server/reconstruction/chunk_covis.py"}
+    # every bar's margin is recorded (point 15)
+    assert rep["margins"]["D_total_over_H"] < 0 and rep["tau_margin_min"] is not None
+    assert len(doc["tau_margin"]) == 40 and doc["tau_margin_min"] >= 0
     # a new walk (I3 re-measured) invalidates the stamp; without the windows that is an error
     (tmp_path / "intake" / "walk.json").write_text(json.dumps({"version": 1, "n_keyframes": 40,
                                                                "walk_length_m": 3.9}))
@@ -229,13 +237,51 @@ def test_the_window_layout_is_recorded_next_to_h_calibration_layout(tmp_path):
     assert rep["window_layout"] == wl and rep["H_calibration_layout"] == H_CALIBRATION_LAYOUT
     assert H_CALIBRATION_LAYOUT["card"] == "NVIDIA A100 80GB PCIe, 81920 MiB"
     assert any("is not recorded" in ln and "H 13.67 was calibrated" in ln for ln in format_plan(rep))
-    # the card that sized the windows (the DA3 footprint's key) — another card is DECLARED only
-    (tmp_path / "output" / "intake").mkdir(parents=True)
-    (tmp_path / "output" / "intake" / "da3_vram.json").write_text(json.dumps(
-        {"key": {"model_id": "synthetic", "process_res": 32, "card": "NVIDIA RTX A6000, 49140 MiB"}}))
-    (tmp_path / "intake" / "covis.json").unlink()
+    # the card that sized the windows (windows.json's own sizing record, the committed card
+    # table's key — since 2026-10-07; the da3_vram.json cache is gone) — another card is DECLARED only
+    spec_p = tmp_path / "output" / "da3_windows" / "windows.json"
+    spec = json.loads(spec_p.read_text())
+    spec["window_sizing"] = {"card": "NVIDIA RTX A6000 | 49140 MiB | sm_8.6", "window_frames": 8}
+    spec_p.write_text(json.dumps(spec))
     again = plan_session(tmp_path, log=lambda m: None)
-    assert again["ranges"] == first["ranges"]
+    assert again["ranges"] == first["ranges"] and again["report"]["measurement"] == "frozen"
     wl2 = again["report"]["window_layout"]
-    assert wl2["card"] == "NVIDIA RTX A6000, 49140 MiB" and wl2["card_matches_calibration"] is False
+    assert wl2["card"] == "NVIDIA RTX A6000 | 49140 MiB | sm_8.6" and wl2["card_matches_calibration"] is False
     assert any("another card" in ln for ln in format_plan(again["report"]))
+    assert H_CALIBRATION_LAYOUT["card_key"] == "NVIDIA A100 80GB PCIe | 81920 MiB | sm_8.0"
+
+
+def test_the_frozen_plan_declines_a_replan_on_noise_and_plans_anew_for_other_keyframes(tmp_path, monkeypatch):
+    """Point 15: the first plan of a keyframe set is FROZEN per session; a later measurement whose
+    integer ℓ or DP thresholds would flip the cut never re-plans it (declared, with the plan it
+    would have given); another keyframe set plans again and freezes that."""
+    import shutil
+    from reconstruction import chunk_covis as CC
+    _synthetic_session(tmp_path)
+    first = plan_session(tmp_path, log=lambda m: None)
+    assert first["ranges"] == [(0, 40)] and first["report"]["measurement"] == "measured"
+    fz = json.loads((tmp_path / "intake" / CC.FROZEN_NAME).read_text())
+    assert fz["ranges"] == [[0, 40]] and len(fz["keyframes"]) == 40 and fz["planner"]["H"] == CC.H_LENGTHS_PER_CHUNK
+    # the measurement now reads differently (a flipped test): the planner would cut — the frozen plan stays
+    real = CC.plan_detail
+
+    def _flipped(*a, **k):
+        det = real(*a, **k)
+        det = dict(det, ranges=[(0, 24), (16, 40)], single_pass=False)
+        return det
+    monkeypatch.setattr(CC, "plan_detail", _flipped)
+    logs = []
+    again = plan_session(tmp_path, log=logs.append)
+    assert again["ranges"] == [(0, 40)] and again["report"]["measurement"] == "frozen"
+    assert again["report"]["replan_declined"]["ranges_now"] == [(0, 24), (16, 40)]
+    assert any("FROZEN plan" in m and "declared" in m for m in logs)
+    monkeypatch.setattr(CC, "plan_detail", real)
+    # another keyframe set (a session with 48 keyframes carrying the first one's frozen file)
+    other = tmp_path / "other"
+    _synthetic_session(other, n=48)
+    shutil.copy(tmp_path / "intake" / CC.FROZEN_NAME, other / "intake" / CC.FROZEN_NAME)
+    logs = []
+    new = plan_session(other, log=logs.append)
+    assert new["ranges"][-1][1] == 48 and new["report"]["measurement"] == "measured"
+    assert json.loads((other / "intake" / CC.FROZEN_NAME).read_text())["keyframes"][-1] == 470
+    assert any("froze another keyframe set" in m for m in logs)

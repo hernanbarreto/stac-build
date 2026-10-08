@@ -1,5 +1,6 @@
 
 #include <cerrno>
+#include <cstdlib>
 #include <execution>
 #include <algorithm>
 
@@ -171,6 +172,12 @@ namespace indexer{
 
 			chunksToLoad.push_back(chunk);
 		}
+
+		// STAC 2026-10-07 (docs/plan_determinismo.md point 57): directory_iterator lists the chunk files in
+		// the FILESYSTEM's order, which differs from one directory to the next; the chunks are indexed in this
+		// order and the node byte offsets follow it - sorted by file name, the octree layout is one
+		std::sort(chunksToLoad.begin(), chunksToLoad.end(),
+			[](const shared_ptr<Chunk>& a, const shared_ptr<Chunk>& b) { return a->file < b->file; });
 
 		auto chunks = make_shared<Chunks>(chunksToLoad, min, max);
 		chunks->attributes = attributes;
@@ -1635,7 +1642,10 @@ void doIndexing(string targetDir, State& state, Options& options, Sampler& sampl
 	atomic_int64_t activeThreads = 0;
 	mutex mtx_nodes;
 	vector<shared_ptr<Node>> nodes;
-	int numThreads = numSampleThreads() + 4;
+	// STAC 2026-10-07 (docs/plan_determinismo.md point 57): with POTREE_NUM_THREADS set the pool uses
+	// exactly that many threads - the vendor's '+ 4' (threads waiting on the writer) would make even a
+	// pinned count of 1 index five chunks at once, and the node byte offsets follow their finishing order
+	int numThreads = std::getenv("POTREE_NUM_THREADS") != nullptr ? numSampleThreads() : numSampleThreads() + 4;
 	TaskPool<Task> pool(numThreads, [&onNodeCompleted, &onNodeDiscarded, &writeAndUnload, &state, &options, &activeThreads, tStart, &lastReport, &totalPoints, totalBytes, &pointsProcessed, chunks, &indexer, &nodes, &mtx_nodes, &sampler](auto task) {
 		
 		auto chunk = task->chunk;

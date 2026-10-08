@@ -48,6 +48,40 @@ def is_starting() -> bool:
         return False
 
 
+def release_cached_vram(log: Optional[Callable[[str], Any]] = None) -> Optional[float]:
+    """Give back the VRAM PyTorch's caching allocator holds in THIS process — only when this
+    process already initialised CUDA (it ran GPU work: the certification's re-consolidation is
+    the case this exists for). A process that never touched the card has nothing cached and
+    must not create a CUDA context to find that out: ``torch.cuda.mem_get_info`` /
+    ``ipc_collect`` create one, and the backend did exactly that when it kicked vLLM at its own
+    boot (2026-10-07: nvidia-smi listed uvicorn main:app holding 416 MiB of the A100 for the
+    backend's whole life), which makes every later ``repro.require_exclusive_gpu`` refuse the
+    card. ``torch`` is read from ``sys.modules``: a process that never imported it never
+    initialised CUDA through it. Returns the GB released (None when nothing was asked of the
+    card); never fatal."""
+    def _log(msg: str) -> None:
+        if log:
+            log(msg)
+
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return None
+    try:
+        if not torch.cuda.is_initialized():
+            return None
+        free_before = torch.cuda.mem_get_info()[0] / 2 ** 30
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+        free_after = torch.cuda.mem_get_info()[0] / 2 ** 30
+        if free_after - free_before > 0.1:
+            _log(f"[gpu] released {free_after - free_before:.1f} GB of cached "
+                 f"VRAM before starting vLLM ({free_after:.1f} GB free)")
+        return free_after - free_before
+    except Exception as e:  # noqa: BLE001 — declared, never fatal
+        _log(f"[gpu] could not release cached VRAM ({e}) — starting anyway")
+        return None
+
+
 def ensure_service(config: Optional[dict] = None,
                    log: Optional[Callable[[str], Any]] = None,
                    cancelled: Optional[Callable[[], bool]] = None,
@@ -83,18 +117,7 @@ def ensure_service(config: Optional[dict] = None,
     # certification blocked FOREVER waiting for a service that could not start
     # while the certification itself held the memory. A deadlock, not a crash:
     # nothing in the log, 1 % CPU, S (sleeping), for as long as anyone waited.
-    try:
-        import torch  # noqa: PLC0415 — optional here, the caller may be CPU-only
-        if torch.cuda.is_available():
-            free_before = torch.cuda.mem_get_info()[0] / 2 ** 30
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-            free_after = torch.cuda.mem_get_info()[0] / 2 ** 30
-            if free_after - free_before > 0.1:
-                _log(f"[gpu] released {free_after - free_before:.1f} GB of cached "
-                     f"VRAM before starting vLLM ({free_after:.1f} GB free)")
-    except Exception as e:  # noqa: BLE001 — declared, never fatal
-        _log(f"[gpu] could not release cached VRAM ({e}) — starting anyway")
+    release_cached_vram(_log)
 
     def _die_with_parent():
         # USER ORDER 2026-09-04: the chat must DIE with the backend — twice

@@ -28,8 +28,11 @@ the effective parameters and the inputs' identity). With
 ``intake.content.enabled: false`` the JSON is still written (``enabled``
 false, empty maps, the reason) and neither the VLM nor SAM3 is touched.
 
-A malformed VLM answer is never a crash and never a parameter: every frame of
-that batch is tagged all-False with ``notes = "vlm_parse_failed"`` and the
+A malformed VLM answer FAILS the stage naming the batch (docs/plan_determinismo.md
+point 75, 2026-10-07): it used to tag every frame of the batch all-False — a
+truncated or garbled answer silently decided which frames SAM3 segmented
+(pccr 2026-10-05: "24 from unparsed answers" on both runs). Nothing is tagged
+'nothing' for the whole batch any more; the
 report counts it. Structural impossibilities (a keyframe file that does not
 exist, a segmenter returning a mask off the native grid, a tagger breaking
 the protocol) raise :class:`ContentError` with the exact reason.
@@ -66,7 +69,7 @@ from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional, Prot
 import numpy as np
 
 from intake.config import CONTENT_CLASSES, SAM3_SCOPES, ContentConfig, load_intake_config
-from intake.quality import Cancelled, check_cancelled, read_session_epochs
+from intake.quality import Cancelled, check_cancelled, intake_epochs
 
 INTAKE_DIRNAME = "intake"
 FRAMES_DIRNAME = "frames"
@@ -75,11 +78,12 @@ CONTENT_TAGS_NAME = "content_tags.json"
 EXCLUSION_MASKS_DIRNAME = "exclusion_masks"
 SELECTED_FRAMES_NAME = "selected_frames.json"       # I1 keyframes (v2 contract)
 WITNESS_FRAMES_NAME = "witness_frames.json"         # I1 witnesses
-CONTENT_VERSION = 1
+CONTENT_VERSION = 2                                 # 2: stamped mask inventory, relative dir,
+                                                    #    no epochs / absolute paths, a VLM parse
+                                                    #    failure fails the stage (2026-10-07)
 PROVENANCE = "vlm_proposed"
 METHOD = "intake_content"
 CONSUMER = "intake.content"                         # semantic call-log attribution
-PARSE_FAILED_NOTE = "vlm_parse_failed"
 EXCLUDED = 255                                      # PNG value of an excluded pixel
 FRAME_SUFFIXES = (".jpg", ".jpeg", ".png")
 TAG_KEYS = tuple(CONTENT_CLASSES) + ("notes",)
@@ -206,14 +210,15 @@ def native_size(frames_dir: os.PathLike, frame: int) -> Tuple[int, int]:
 
 
 def empty_tags(notes: str = "") -> Dict[str, Any]:
-    """All-False tags with the given notes (the parse-failure value)."""
+    """All-False tags with the given notes."""
     out: Dict[str, Any] = {cls: False for cls in CONTENT_CLASSES}
     out["notes"] = str(notes)
     return out
 
 
-def failed_tags() -> Dict[str, Any]:
-    return empty_tags(PARSE_FAILED_NOTE)
+class VLMParseError(ContentError):
+    """The VLM's answer for a batch did not follow the contract (point 75): the stage FAILS
+    naming the frames and the head of the answer — a batch is never tagged 'nothing'."""
 
 
 def _as_bool(v: Any) -> bool:
@@ -325,10 +330,11 @@ class QwenTagger:
     """The production VLMTagger: ``semantic.client.get_semantic_client`` on
     ``cfg.backend`` (a local vLLM Qwen3-VL — no paid API), one chat call per
     batch of ≤ ``cfg.batch`` images attached to ONE user message, generation
-    capped at ``cfg.max_tokens``. A malformed answer tags every frame of the
-    batch all-False with ``notes = "vlm_parse_failed"`` and increments
-    ``parse_failures``. ``client`` may be injected (tests); otherwise it is
-    created lazily on the first call."""
+    capped at ``cfg.max_tokens``. A malformed answer FAILS the call
+    (:class:`VLMParseError`, point 75) — never a batch tagged all-False;
+    ``parse_failures`` counts the failures seen before the raise (for the
+    report of a caller that catches it). ``client`` may be injected (tests);
+    otherwise it is created lazily on the first call."""
 
     def __init__(self, cfg: ContentConfig, client: Any = None):
         self.cfg = cfg
@@ -358,10 +364,15 @@ class QwenTagger:
             [system(SYSTEM_PROMPT), user(prompt, images=list(images))],
             max_tokens=self.cfg.max_tokens, consumer=CONSUMER)
         self.n_calls += 1
-        parsed = parse_tag_answer(resp.content or "", len(images))
+        text = resp.content or ""
+        parsed = parse_tag_answer(text, len(images))
         if parsed is None:
             self.parse_failures += 1
-            return [failed_tags() for _ in images]
+            raise VLMParseError(
+                f"the VLM's answer for frames {list(int(f) for f in frames)} did not follow the "
+                f"contract (one JSON object per image with boolean {list(CONTENT_CLASSES)}; "
+                f"max_tokens {self.cfg.max_tokens}) — intake I2 fails instead of tagging the "
+                f"batch 'nothing' (plan point 75); answer head: {text[:200]!r}")
         return parsed
 
 
@@ -562,9 +573,7 @@ def tag_keyframes(frames_dir: os.PathLike, keyframes: Sequence[int], tagger: VLM
             log(f"{LOG_TAG} {done}/{n} keyframes tagged ({rate:.2f} frames/s, eta {eta:.0f} s)")
             last_beat = now
     counts = {cls: sum(1 for t in tags.values() if t[cls]) for cls in CONTENT_CLASSES}
-    n_failed = sum(1 for t in tags.values() if t["notes"] == PARSE_FAILED_NOTE)
-    log(f"{LOG_TAG} tagged: " + ", ".join(f"{k}={v}" for k, v in counts.items())
-        + f"; {n_failed} frame(s) from answers that did not parse")
+    log(f"{LOG_TAG} tagged: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
     return tags
 
 
@@ -754,9 +763,9 @@ def _params(cfg: ContentConfig) -> Dict[str, Any]:
 
 
 def _inputs(frames_dir: Path, kfs: List[int], wits: List[int]) -> Dict[str, Any]:
-    """The inputs' identity for the resume marker (conventions rule 6)."""
+    """The inputs' identity, paths relative to the session (point 70)."""
     return {
-        "frames_dir": str(frames_dir),
+        "frames_dir": frames_dir.name,
         "n_keyframes": len(kfs),
         "keyframes_first": kfs[0] if kfs else None,
         "keyframes_last": kfs[-1] if kfs else None,
@@ -772,6 +781,95 @@ def content_tags_path(session_dir: os.PathLike) -> Path:
 
 def exclusion_masks_dir(session_dir: os.PathLike) -> Path:
     return Path(session_dir) / INTAKE_DIRNAME / EXCLUSION_MASKS_DIRNAME
+
+
+EXCLUSION_MASKS_REL = f"{INTAKE_DIRNAME}/{EXCLUSION_MASKS_DIRNAME}"   # the product's 'dir'
+
+
+def masks_stamp(session_dir: os.PathLike, frames_written: Sequence[int], kfs: Sequence[int],
+                wits: Sequence[int], cfg: ContentConfig) -> Dict[str, Any]:
+    """The stamp of the exclusion-mask inventory (plan points 68 / 84): the BYTES of every
+    mask PNG listed (keyed ``intake/exclusion_masks/<frame>.png``), the intake code, the I2
+    parameters and the keyframe / witness lists the masks were built for. Written at the
+    report's ROOT (``stamp`` — the key ``precision.tracks.exclusion_mask_paths``, F4's and the
+    depth sweep's reader, checks: every listed PNG's sha256 against the file on disk) and under
+    ``exclusion_masks.stamp`` (what :func:`valid_exclusion_masks` re-computes in full). With I2
+    off the inventory is empty and so is the stamp's input list — the stamp still says WHICH
+    masks are valid: none."""
+    from intake import stamps as St
+    session_dir = Path(session_dir)
+    masks_dir = exclusion_masks_dir(session_dir)
+    inputs = {f"{EXCLUSION_MASKS_REL}/{int(f):06d}.png": mask_path(masks_dir, int(f))
+              for f in sorted(int(x) for x in frames_written)}
+    return St.step_stamp(inputs, {"params": _params(cfg),
+                                  "keyframes": [int(k) for k in kfs],
+                                  "witnesses": [int(w) for w in wits],
+                                  "enabled": bool(cfg.enabled)})
+
+
+def _content_config_of(params: Mapping[str, Any]) -> ContentConfig:
+    """The ContentConfig a report's ``params`` describe (lists back to tuples)."""
+    kw: Dict[str, Any] = {}
+    for k, v in dict(params).items():
+        if isinstance(v, list):
+            kw[k] = tuple(v)
+        elif isinstance(v, dict):
+            kw[k] = {kk: tuple(vv) for kk, vv in v.items()}
+        else:
+            kw[k] = v
+    return ContentConfig(**kw)
+
+
+def valid_exclusion_masks(session_dir: os.PathLike, log: Callable = print
+                          ) -> Tuple[Dict[int, Path], Dict[str, Any]]:
+    """THE way a consumer reads I2's exclusion masks (plan points 68 / 84): ``({frame: PNG
+    path}, record)`` of exactly the masks ``content_tags.json`` lists, and only when its stamp
+    re-computed now — the listed PNGs' bytes, the intake code, the I2 parameters and the
+    keyframe / witness lists on disk (I1's products) — matches the one the report carries.
+    Otherwise NO mask is taken and the record says why (``reason``, ``differences``); a PNG on
+    disk that the report does not list is never read. No report → no masks, declared."""
+    from intake import stamps as St
+    session_dir = Path(session_dir)
+    p = content_tags_path(session_dir)
+    rec: Dict[str, Any] = {"report": f"{INTAKE_DIRNAME}/{CONTENT_TAGS_NAME}", "taken": False,
+                           "n_listed": 0, "n_taken": 0, "reason": None, "differences": []}
+
+    def _none(reason: str, diffs: Optional[List[str]] = None) -> Tuple[Dict[int, Path], Dict[str, Any]]:
+        rec["reason"], rec["differences"] = reason, list(diffs or [])
+        log(f"{LOG_TAG} exclusion masks: none taken ({reason}"
+            + ("" if not diffs else ": " + "; ".join(diffs[:5])) + ")")
+        return {}, rec
+
+    if not p.exists():
+        return _none(f"{p.name} does not exist — intake I2 wrote no mask inventory")
+    try:
+        doc = load_content(session_dir)
+        kfs, wits = read_i1_frames(session_dir)
+    except ContentError as e:
+        return _none(str(e))
+    masks = doc.get("exclusion_masks") or {}
+    listed = sorted(int(f) for f in (masks.get("frames") or {}))
+    rec["n_listed"] = len(listed)
+    if not isinstance(masks.get("stamp"), dict):
+        return _none(f"{p.name} carries no mask-inventory stamp (version {doc.get('version')})")
+    masks_dir = exclusion_masks_dir(session_dir)
+    missing = [f for f in listed if not mask_path(masks_dir, f).exists()]
+    if missing:
+        return _none(f"{len(missing)} listed mask PNG(s) are missing from {EXCLUSION_MASKS_REL} "
+                     f"(first: {missing[0]:06d}.png)")
+    try:
+        cfg = _content_config_of(doc.get("params") or {})
+    except TypeError as e:
+        return _none(f"{p.name} params do not read as an I2 configuration ({e})")
+    diffs = St.stamp_differences(masks["stamp"], masks_stamp(session_dir, listed, kfs, wits, cfg))
+    if diffs:
+        return _none("the mask inventory's stamp does not match the session now", diffs)
+    out = {f: mask_path(masks_dir, f) for f in listed}
+    rec.update({"taken": True, "n_taken": len(out)})
+    log(f"{LOG_TAG} exclusion masks: {len(out)} taken (stamp matches)" if out else
+        f"{LOG_TAG} exclusion masks: the inventory is empty (I2 "
+        f"{'wrote none' if doc.get('enabled') else 'is off'}) — none to take")
+    return out, rec
 
 
 def write_content(session_dir: os.PathLike, report: Dict[str, Any]) -> Path:
@@ -812,20 +910,21 @@ def run_content(session_dir: os.PathLike, keyframes: Sequence[int], witnesses: S
     frame to segment (the map_worker stops vLLM there: the two never share
     the card). ``cancelled()`` is polled by the tag and mask loops.
 
-    Report keys: ``version`` 1, ``provenance`` "vlm_proposed", ``method``,
+    Report keys: ``version`` 2, ``provenance`` "vlm_proposed", ``method``,
     ``enabled``, ``backend``, ``geometry_epoch`` / ``camera_epoch``
-    (``intake.quality.read_session_epochs``), ``sam3_handover`` {called,
+    (``intake.quality.INTAKE_EPOCH``), ``sam3_handover`` {called,
     verified, check (what ``before_sam3`` returned: the map_worker's and the
     CLIs' stopper verify with pgrep that no ``vllm serve`` is left and fail
     naming the PIDs otherwise), reason}, ``classes``
     {exclusion, weight}, ``native_w``/``native_h``, ``frames`` {str(frame):
-    tags}, ``parse_failures`` (FRAMES whose tags come from an answer that did
-    not parse), ``vlm_calls`` {n_calls, n_parse_failed} when the tagger
-    exposes its counters (None otherwise), ``exclusion_masks`` {dir, frames
-    {str(frame): n_px}, prompts, scope, requested {cls: n_frames},
-    n_frames_written, stale_removed, frame_status {str(frame): masked |
-    segmented_no_object} for every frame SAM3 was asked about,
-    n_segmented_no_object}, ``weights`` {cls: [frames]},
+    tags}, ``parse_failures`` (always 0: an answer that does not parse FAILS
+    the stage, point 75), ``vlm_calls`` {n_calls, n_parse_failed} when the
+    tagger exposes its counters (None otherwise), ``exclusion_masks`` {dir
+    (session-relative), frames {str(frame): n_px}, prompts, scope, requested
+    {cls: n_frames}, n_frames_written, frame_status
+    {str(frame): masked | segmented_no_object} for every frame SAM3 was asked
+    about, n_segmented_no_object, stamp (:func:`masks_stamp` — what a consumer
+    checks before taking a mask)}, ``weights`` {cls: [frames]},
     ``summary`` {tagged: {cls: n}}, ``params``, ``inputs``."""
     session_dir = Path(session_dir)
     frames_dir = session_dir / FRAMES_DIRNAME
@@ -838,7 +937,7 @@ def run_content(session_dir: os.PathLike, keyframes: Sequence[int], witnesses: S
         "method": METHOD,
         "enabled": bool(cfg.enabled),
         "backend": cfg.backend,
-        **read_session_epochs(session_dir),
+        **intake_epochs(),
         "classes": {"exclusion": list(cfg.exclusion_classes),
                     "weight": list(cfg.weight_classes)},
         "params": _params(cfg),
@@ -847,17 +946,24 @@ def run_content(session_dir: os.PathLike, keyframes: Sequence[int], witnesses: S
 
     if not cfg.enabled:
         reason = "intake.content.enabled is false — no VLM or SAM3 call was made"
+        # the masks a previous run with I2 ON left behind go too (plan points 68 / 84: F4 read
+        # every PNG on disk by existence, so a resumed session kept excluding what an older
+        # run had segmented); the inventory below lists exactly the valid masks — none
+        stale = clear_masks_dir(masks_dir, log=log)
+        st_masks = masks_stamp(session_dir, [], kfs, wits, cfg)
         report = {
             **base,
+            "stamp": st_masks,
             "reason": reason,
             "native_w": None, "native_h": None,
             "frames": {},
             "parse_failures": 0,
             "vlm_calls": None,
-            "exclusion_masks": {"dir": str(masks_dir), "frames": {}, "prompts": {},
+            "exclusion_masks": {"dir": EXCLUSION_MASKS_REL, "frames": {}, "prompts": {},
                                 "scope": cfg.sam3_scope, "requested": {},
-                                "n_frames_written": 0, "stale_removed": 0,
-                                "frame_status": {}, "n_segmented_no_object": 0},
+                                "n_frames_written": 0,
+                                "frame_status": {}, "n_segmented_no_object": 0,
+                                "stamp": st_masks},
             "sam3_handover": {"called": False, "verified": False, "check": None,
                               "reason": "content disabled"},
             "weights": {cls: [] for cls in cfg.weight_classes},
@@ -865,7 +971,7 @@ def run_content(session_dir: os.PathLike, keyframes: Sequence[int], witnesses: S
                         "tagged": {cls: 0 for cls in CONTENT_CLASSES}},
         }
         p = write_content(session_dir, report)
-        log(f"{LOG_TAG} {reason}; wrote {p}")
+        log(f"{LOG_TAG} {reason}; {stale} stale mask file(s) removed; wrote {p}")
         return report
 
     if not kfs:
@@ -914,30 +1020,33 @@ def run_content(session_dir: os.PathLike, keyframes: Sequence[int], witnesses: S
 
     requested_all = sorted({int(f) for ids in frame_ids_by_class.values() for f in ids})
     weights = {cls: [k for k in kfs if tags[k][cls]] for cls in cfg.weight_classes}
-    parse_failed_frames = sum(1 for k in kfs if tags[k]["notes"] == PARSE_FAILED_NOTE)
+    parse_failed_frames = 0          # a parse failure fails the stage (point 75): none survive
     n_calls = getattr(tagger, "n_calls", None)
     n_parse_failed = getattr(tagger, "parse_failures", None)
     vlm_calls = (None if n_calls is None and n_parse_failed is None
                  else {"n_calls": n_calls, "n_parse_failed": n_parse_failed})
+    st_masks = masks_stamp(session_dir, sorted(counts), kfs, wits, cfg)
     report = {
         **base,
+        "stamp": st_masks,                 # the readers' key (precision.tracks, point 68)
         "native_w": native_w, "native_h": native_h,
         "frames": {str(k): tags[k] for k in kfs},
         "parse_failures": parse_failed_frames,
         "vlm_calls": vlm_calls,
         "exclusion_masks": {
-            "dir": str(masks_dir),
+            "dir": EXCLUSION_MASKS_REL,
             "frames": {str(f): n for f, n in sorted(counts.items())},
             "prompts": prompts,
             "scope": cfg.sam3_scope,
             "requested": {cls: len(ids) for cls, ids in frame_ids_by_class.items()},
             "n_frames_written": len(counts),
-            "stale_removed": stale,
             # every frame SAM3 was asked about, and what came back (the Segmenter
             # contract: a frame without a mask was segmented and holds nothing)
             "frame_status": {str(f): ("masked" if f in counts else "segmented_no_object")
                              for f in requested_all},
             "n_segmented_no_object": sum(1 for f in requested_all if f not in counts),
+            # what makes these masks valid for a consumer (points 68 / 84): see masks_stamp
+            "stamp": st_masks,
         },
         "sam3_handover": handover,
         "weights": weights,
@@ -947,8 +1056,8 @@ def run_content(session_dir: os.PathLike, keyframes: Sequence[int], witnesses: S
         },
     }
     p = write_content(session_dir, report)
-    log(f"{LOG_TAG} wrote {p}: {len(kfs)} keyframes tagged, {parse_failed_frames} from "
-        f"unparsed answers, {len(counts)} exclusion mask(s)")
+    log(f"{LOG_TAG} wrote {p}: {len(kfs)} keyframes tagged, {len(counts)} exclusion mask(s) "
+        f"({stale} stale mask file(s) of a previous run removed first)")
     return report
 
 
@@ -1030,7 +1139,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "<session>/frames; I1 artifacts must exist)")
     args = ap.parse_args(argv)
     session_dir = Path(args.session)
-    icfg = load_intake_config()
+    from intake.run_config import cli_intake_config       # the frozen configuration (point 69)
+    icfg, _sha = cli_intake_config(session_dir, log=print)
     keyframes, witnesses = read_i1_frames(session_dir)
     if icfg.content.enabled:
         cli_before_content(print)()

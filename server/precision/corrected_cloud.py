@@ -558,12 +558,21 @@ def publish(session_dir: Path, tmp: Path, report: dict, log: Callable,
     # publish that wrote it after the swap left the next epoch without one and the certify crashed
     if (tmp / "intrinsic.txt").exists():
         shutil.copy2(tmp / "intrinsic.txt", tx / "intrinsic.txt"); art("intrinsic.txt")
-    cid = ledger.new_correction_id()
     names = data.dtype.names
     columns = columns or {}
     for k, v in columns.items():
         if len(v) != n:
             raise CorrectedCloudError(f"provenance column {k} has {len(v)} rows, the cloud {n}")
+    # the id of this publication is WHAT it publishes — the cloud's bytes, the measured columns and
+    # the depth it came from — never a random draw or a clock (points 36 / 56): the same cloud
+    # published twice writes the same id, ledger line, epoch record and origins meta
+    from correction.epoch import RECONSTRUCTION_ID_KEY, reconstruction_id_or_none
+    from repro import sha256_file
+    ply_sha = sha256_file(tx / "cleaned_cloud.ply")
+    source_of_depth = report.get("source_of_depth", "omega x s_k")
+    cid = ledger.new_correction_id("corrected_cloud", ply_sha, source_of_depth,
+                                   {k: np.asarray(columns[k]) for k in sorted(columns)})
+    rid = reconstruction_id_or_none(out)
     o = {}
     for k in PV.V2_FIELDS:
         if k in columns:
@@ -571,16 +580,21 @@ def publish(session_dir: Path, tmp: Path, report: dict, log: Callable,
         elif k in names:
             o[k] = np.asarray(data[k])
         elif k == "geometry_epoch":
+            # the epoch the cloud is LIVE at: precision.provenance.load_origins keys the artifact's
+            # validity on it, so it stays; the reconstruction id in the meta names the geometry
+            # independently of the session's epoch history (point 63)
             o[k] = np.full(n, epoch_to, PV.V2_DTYPES[k])
         else:
             o[k] = np.zeros(n, PV.V2_DTYPES[k])
     PV.write_origins(tx / PV.ORIGINS_NAME, o, {"stage": "corrected_cloud", "correction_id": cid, "epoch": epoch_to,
-                                                "source_of_depth": report.get("source_of_depth", "omega x s_k"),
+                                                RECONSTRUCTION_ID_KEY: rid, "cloud_sha256": ply_sha,
+                                                "source_of_depth": source_of_depth,
                                                 "fields_measured": sorted(columns),
                                                 "fields_from_ply": [k for k in PV.V2_FIELDS
                                                                     if k in names and k not in columns]})
     art(PV.ORIGINS_NAME)
-    rep = dict(report, epoch_to=epoch_to, epoch_from=epoch_from, correction_id=cid, n_points=n)
+    rep = dict(report, epoch_to=epoch_to, epoch_from=epoch_from, correction_id=cid, n_points=n,
+               cloud_sha256=ply_sha, **{RECONSTRUCTION_ID_KEY: rid})
     (tx / CLOUD_REPORT).write_text(json.dumps(rep, indent=1, default=float)); art(CLOUD_REPORT)
     if (out / "segmentation_result.json").exists():
         # the cloud stage projects the masks on this epoch (its own freshness test)
@@ -690,10 +704,26 @@ def run_corrected_cloud(session_dir: Path, pcfg, log: Callable = print,
         rep = publish(session_dir, tmp, report, log, columns=cols)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    rep["seconds"] = round(time.time() - t0, 1)
+    seconds = round(time.time() - t0, 1)
     (out / CLOUD_REPORT).write_text(json.dumps(rep, indent=1, default=float))
-    _p(100, f"corrected cloud is epoch {rep['epoch_to']} ({rep['n_points']:,} pts, {rep['seconds']} s)")
+    write_timing(out / CLOUD_REPORT, {"seconds": seconds})
+    _p(100, f"corrected cloud is epoch {rep['epoch_to']} ({rep['n_points']:,} pts, {seconds} s)")
     return rep
+
+
+def timing_path(report_path: Path) -> Path:
+    """``<report>.timing.json`` next to a report: where a stage's wall-clock times live
+    (docs/plan_determinismo.md points 36 / 56 — a report is compared byte for byte between two
+    runs of the same session; a clock never repeats, so it is never inside one)."""
+    report_path = Path(report_path)
+    return report_path.with_name(report_path.stem + ".timing.json")
+
+
+def write_timing(report_path: Path, times: dict) -> Path:
+    p = timing_path(report_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(times, indent=1, default=float, sort_keys=True))
+    return p
 
 
 # ── edges (USER 2026-10-01) ──────────────────────────────────────────────

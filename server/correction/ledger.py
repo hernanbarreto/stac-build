@@ -12,6 +12,11 @@ Persists:
   * a mirror of the ledger in the instance store's ``scene_meta`` (the jsonl
     stays authoritative; the mirror is refreshed on every append so a store
     rebuild only loses it until the next entry).
+  * ``output/corrections.timing.jsonl`` — WHEN each run was recorded (wall
+    clock), keyed by its correction id. Kept apart from the ledger since
+    2026-10-07 (docs/plan_determinismo.md point 36): the ledger, the epoch
+    record and the per-run report are compared byte for byte between two runs
+    of the same session, and a clock never repeats.
 """
 
 from __future__ import annotations
@@ -28,10 +33,33 @@ from correction.epoch import LEDGER_FILE
 
 ALGORITHM_VERSION = "correction/2.0.0 (2026-09-08 redesign)"
 EPOCH_NPZ_DIR = "corrections"
+TIMING_FILE = "corrections.timing.jsonl"
+# the ledger's id format (8 hex characters) — kept so every existing session's ids still read
+CORRECTION_ID_HEX = 8
 
 
-def new_correction_id() -> str:
-    return str(uuid.uuid4())[:8]
+def new_correction_id(*parts: Any) -> str:
+    """The id of a correction run. With ``parts`` (what makes the run what it is: its kind, the
+    epochs it goes from / to, the digest of the poses it started from and of the transform it
+    applies ...) the id is DERIVED from them (``repro.stable_id``, the ledger's 8 hex characters)
+    — a re-run of the same correction on the same session writes the same id, the same ledger
+    line and the same report file (docs/plan_determinismo.md points 36 / 56: every producer of the
+    Omega → F6 chain passes its parts). Without parts it stays the random id of the stages that
+    have not been converted (certification / witness / post-hoc graph, outside that chain)."""
+    if parts:
+        from repro import stable_id
+        return stable_id("correction", *parts, n_hex=CORRECTION_ID_HEX)
+    return str(uuid.uuid4())[:CORRECTION_ID_HEX]
+
+
+def record_timing(output_dir, correction_id: str, **times: Any) -> None:
+    """Append when a correction run happened (wall clock and any durations) to
+    ``corrections.timing.jsonl`` — the one place a run's times live, outside every compared
+    artifact (point 36). ``created_at`` is added here."""
+    entry = {"correction_id": correction_id,
+             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"), **times}
+    with open(Path(output_dir) / TIMING_FILE, "a") as f:
+        f.write(json.dumps(entry, sort_keys=True, default=float) + "\n")
 
 
 def _ledger_path(output_dir) -> Path:
@@ -92,11 +120,12 @@ def record_run(output_dir, *, correction_id: str, epoch_from: int,
                verdict: str = "applied") -> dict:
     if verdict not in ("applied", "rejected"):
         raise RuntimeError(f"invalid verdict {verdict!r}")
+    # no wall clock in the ledger line (point 36): when the run happened goes to
+    # corrections.timing.jsonl, keyed by the same correction id
     entry = {
         "type": "run", "correction_id": correction_id,
         "epoch_from": int(epoch_from), "epoch_to": int(epoch_to),
         "kind": kind, "operator": operator,
-        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "instance_ids": instance_ids, "visits": visits,
         "observability": observability, "diagnosis": diagnosis,
         "anchors": anchors, "gates": gates,
@@ -104,6 +133,7 @@ def record_run(output_dir, *, correction_id: str, epoch_from: int,
         "report": report_path, "algorithm_version": ALGORITHM_VERSION,
     }
     _append(output_dir, entry)
+    record_timing(output_dir, correction_id, epoch_to=int(epoch_to), kind=kind)
     return entry
 
 

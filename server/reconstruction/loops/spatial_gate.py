@@ -311,11 +311,27 @@ def same_surface_rule(pts_a: np.ndarray, pts_b: np.ndarray, cfg) -> Dict[str, An
 
 # ── verdicts ────────────────────────────────────────────────────────────────
 
+def salad_margin(similarity: Optional[float], threshold: Optional[float]) -> Dict[str, Any]:
+    """A SALAD candidate against the session's calibrated bar (docs/plan_determinismo.md point
+    16, DECIDIDO: the bar stays — measured per session — and every candidate RECORDS its margin):
+    similarity − threshold, > 0 passes (the detector rejects ``similarity <= threshold``)."""
+    if similarity is None or threshold is None:
+        return {"rule": "salad", "similarity": similarity, "threshold": threshold,
+                "margin": None, "passed": None}
+    m = float(similarity) - float(threshold)
+    return {"rule": "salad", "similarity": float(similarity), "threshold": float(threshold),
+            "margin": m, "passed": bool(m > 0)}
+
+
 def gate_frame_pair(i: int, j: int, view, cfg,
-                    budget_override: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+                    budget_override: Optional[Dict[str, float]] = None,
+                    salad: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
     """§4.5 rule 5 — a SALAD (or manual) candidate WITHOUT instances: rules 2
     and 4 over the two frames' frusta and their raw points. Returns
-    verdict ∈ {accept, ambiguous, reject} with every rule's numbers."""
+    verdict ∈ {accept, ambiguous, reject} with every rule's numbers AND its margin to every bar
+    (point 16: rule 0's walk − min_walk, the frustum's frames − min_frustum_frames, the
+    corridor's width − lateral extent, and — ``salad`` = {similarity, threshold} — the SALAD
+    similarity − its calibrated bar), so a candidate that sits on a bar says so."""
     c = _cfg(cfg)
     L = walked_length_m(view.centres(), i, j)
     budget = drift_budget(L, c, budget_override)
@@ -330,14 +346,26 @@ def gate_frame_pair(i: int, j: int, view, cfg,
     min_walk = float(c["min_walk_m"])
     walk_ok = L >= min_walk
     fr = frustum_reciprocal(i, j, view, c, budget["delta_m"], budget["theta_deg"])
+    fr["margin_frames"] = int(fr["frames_visible_min"]) - int(fr["min_frustum_frames"])
     cor = corridor_between(i, j, view, c)
+    if "lateral_extent_m" in cor:
+        cor["margin_m"] = float(cor["corridor_width_m"]) - float(cor["lateral_extent_m"])
+        cor["corridor_frames_margin"] = (int(fr["frames_visible_min"])
+                                         - int(c["corridor_min_frustum_frames"]))
     out = {"candidate": [int(i), int(j)], "budget": budget,
-           "rules": {"walk": {"walked_m": L, "min_walk_m": min_walk, "passed": walk_ok},
+           "rules": {"walk": {"walked_m": L, "min_walk_m": min_walk, "margin_m": L - min_walk,
+                              "passed": walk_ok},
                      "frustum": fr, "corridor": cor}}
+    if salad is not None:
+        out["rules"]["salad"] = salad_margin(salad.get("similarity"), salad.get("threshold"))
+    out["margins"] = {"walk_m": L - min_walk, "frustum_frames": fr["margin_frames"],
+                      "corridor_m": cor.get("margin_m"),
+                      "salad": (out["rules"].get("salad") or {}).get("margin")}
     if not walk_ok:
         out["verdict"] = "reject"
-        out["reason"] = (f"only {L:.1f} m walked between the two keyframes "
-                         f"(< {min_walk:.1f} m) — odometry, not a revisit")
+        out["reason"] = (f"only {L:.2f} m walked between the two keyframes "
+                         f"(< {min_walk:.1f} m, margin {L - min_walk:+.3f} m) — odometry, "
+                         f"not a revisit")
         return out
     # Rule 2 (frustum) is MEASURED and recorded but does not veto a SALAD pair
     # (USER 2026-10-05: pccr 2408, 100 m of walk, 40 of 40 candidates rejected
@@ -362,8 +390,9 @@ def gate_frame_pair(i: int, j: int, view, cfg,
                          f"(< {int(c['corridor_min_frustum_frames'])}) — σ inflated")
         return out
     out["verdict"] = "accept"
-    out["reason"] = ("co-visible under the drift budget" if fr["passed"]
-                     else out["frustum_note"])
+    out["reason"] = (("co-visible under the drift budget" if fr["passed"]
+                      else out["frustum_note"])
+                     + f" (walk margin {L - min_walk:+.3f} m)")
     return out
 
 

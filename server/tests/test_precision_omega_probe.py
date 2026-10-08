@@ -73,6 +73,17 @@ def test_run_reports_every_resolution_and_decides_nothing(tmp_path):
     doc = json.loads((tmp_path / "output" / P.PROBE_NAME).read_text())
     assert [r["resolution"] for r in doc["results"]] == [512, 768]
     assert doc["provenance"] == "tool_measured" and "user sets" in doc["decides"]
+    # plan points 36 / 37 / 40: no wall clock or memory pressure in the report — they go to the
+    # timing file; the environment the numbers depend on is recorded
+    assert all("seconds" not in r and "peak_vram_gb" not in r for r in doc["results"])
+    timing = json.loads((tmp_path / "output" / P.TIMING_NAME).read_text())
+    assert [t["resolution"] for t in timing["resolutions"]] == [512, 768]
+    assert all("seconds" in t and "peak_vram_gb" in t for t in timing["resolutions"])
+    assert doc["environment"]["cpu"]["model"] and "blas" in doc["environment"] and "gpu" not in doc["environment"]
+    # the same probe on the same inputs writes the same report bytes
+    first = (tmp_path / "output" / P.PROBE_NAME).read_bytes()
+    P.run_probe(tmp_path, cfg, infer=infer, log=lambda *a: None)
+    assert (tmp_path / "output" / P.PROBE_NAME).read_bytes() == first
 
 
 def test_no_keyframes_names_the_file(tmp_path):

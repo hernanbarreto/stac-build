@@ -149,8 +149,15 @@ def test_chunk_plan_from_the_walks_windows_is_reproducible(tmp_path):
     W.measure_walk(tmp_path, G, log=lambda *a: None)
     a = plan_session(tmp_path, log=lambda *a: None)
     b = plan_session(tmp_path, log=lambda *a: None)
-    assert a["report"]["measurement"] == "measured" and b["report"]["measurement"] == "reused"
+    # the second run returns the session's FROZEN plan (point 15) — the same ranges, no re-plan
+    assert a["report"]["measurement"] == "measured" and b["report"]["measurement"] == "frozen"
     assert a["ranges"] == b["ranges"]
     assert a["ranges"][0][0] == 0 and a["ranges"][-1][1] == 150
     doc = json.loads((tmp_path / "intake" / "covis.json").read_text())
     assert doc["stamp"] == a["report"]["input_stamp"] and doc["n"] == 150
+    # the walk carries what it was measured on: the plan's sha, every window's content sha and
+    # the chaining code (point 21)
+    walk = json.loads((tmp_path / "intake" / "walk.json").read_text())
+    assert walk["version"] == W.WALK_VERSION and len(walk["windows_spec_sha256"]) == 64
+    assert all(len(w["content_sha256"]) == 64 for w in walk["windows"])
+    assert "server/intake/walk.py" in walk["code"]

@@ -338,9 +338,18 @@ def regulated_rows(session, instances: List[dict], classes: Dict[int, str],
     return rows
 
 
+ABSOLUTE_ROWS_VERSION = 2   # 2: stamped with the plan and the epoch measured on
+
+
 def write_absolute_rows(output_dir, rows: List[dict], chunk_ranges: Optional[List[List[int]]]):
     """scale_absolute_rows.json — every row needs a chunk to enter the chunk
-    scale graph; rows without a plan are attributed to every chunk."""
+    scale graph; rows without a plan are attributed to every chunk.
+
+    STAMPED (docs/plan_determinismo.md point 22): the chunk layout the rows' chunk indices refer
+    to and the geometry epoch they were measured on travel with them; the in-run scale graph
+    (workers/map_worker.py) takes them only for that exact plan, measured on its Omega geometry
+    (epoch 0) — a row of another plan or of a corrected epoch is ignored, and says so."""
+    from correction.epoch import current_epoch
     out = []
     for r in rows:
         if r.get("chunk") is None:
@@ -348,6 +357,34 @@ def write_absolute_rows(output_dir, rows: List[dict], chunk_ranges: Optional[Lis
                 out.append(dict(r, chunk=int(ck)))
         else:
             out.append(dict(r, chunk=int(r["chunk"])))
+    ranges = [[int(a), int(b)] for a, b in (chunk_ranges or [])]
     p = Path(output_dir) / "scale_absolute_rows.json"
-    p.write_text(json.dumps({"version": 1, "rows": out}, indent=1))
+    p.write_text(json.dumps({"version": ABSOLUTE_ROWS_VERSION, "rows": out,
+                             "chunk_ranges": ranges,
+                             "n_keyframes": (ranges[-1][1] if ranges else None),
+                             "measured_on_epoch": int(current_epoch(output_dir))}, indent=1))
     return p
+
+
+def absolute_rows_for_plan(path, chunk_ranges, n_keyframes) -> tuple:
+    """(rows, why_not) of ``scale_absolute_rows.json`` for the run planning ``chunk_ranges`` over
+    ``n_keyframes``: the rows when the file is stamped with that plan and was measured on epoch 0
+    (Omega's geometry, the one the in-run graph solves), else ([], the reason). ([], None) when
+    there is no file."""
+    p = Path(path)
+    if not p.exists():
+        return [], None
+    try:
+        doc = json.loads(p.read_text())
+    except (OSError, ValueError) as e:
+        return [], f"unreadable ({e})"
+    if doc.get("version") != ABSOLUTE_ROWS_VERSION:
+        return [], f"version {doc.get('version')} carries no plan / epoch stamp"
+    want = [[int(a), int(b)] for a, b in chunk_ranges]
+    if doc.get("chunk_ranges") != want or doc.get("n_keyframes") != int(n_keyframes):
+        return [], (f"measured on the plan {doc.get('chunk_ranges')} over "
+                    f"{doc.get('n_keyframes')} keyframes, this run plans {want} over {n_keyframes}")
+    if doc.get("measured_on_epoch") != 0:
+        return [], (f"measured on geometry epoch {doc.get('measured_on_epoch')}, the in-run graph "
+                    f"solves Omega's (epoch 0)")
+    return list(doc.get("rows") or []), None

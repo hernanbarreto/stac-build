@@ -129,46 +129,39 @@ def extract_frames(
     max_frames: int = 0,
     stride: int = 1,
 ) -> int:
-    """Extract RGB frames from Stray Scanner's rgb.mp4.
-    
+    """Extract RGB frames from Stray Scanner's rgb.mp4 into a scan's ``frames/``, SEALED
+    (docs/plan_determinismo.md points 67 / 76, :func:`intake.frames_manifest.extract_video`):
+    written into ``<scan>/frames.extracting/``, ``frames/manifest.json`` (decoder, encoder,
+    the video's sha256, every frame's sha256, the stride) written last, renamed to ``frames/``
+    when complete. Frame ``i`` of the decode order → ``<i:06d>.jpg`` for ``i % stride == 0``.
+    Refused when ``output_dir`` is not a scan's ``frames/`` directory, when the scan already
+    holds frames, or while another writer is at work on it.
+
     Args:
-        mp4_path: Path to rgb.mp4
-        output_dir: Directory to save extracted JPGs
+        mp4_path: Path to rgb.mp4 (inside the scan: ``inputs/stray/rgb.mp4``)
+        output_dir: The scan's ``frames/`` directory
         max_frames: Max frames to extract (0 = all)
         stride: Extract every Nth frame
-    
+
     Returns:
         Number of frames extracted
     """
+    from intake import frames_manifest as FM
     out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    
-    cap = cv2.VideoCapture(str(mp4_path))
-    if not cap.isOpened():
-        raise IOError(f"Cannot open video: {mp4_path}")
-    
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    extracted = 0
-    frame_idx = 0
-    
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        
-        if frame_idx % stride == 0:
-            fname = out / f"{frame_idx:06d}.jpg"
-            cv2.imwrite(str(fname), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            extracted += 1
-            
-            if max_frames > 0 and extracted >= max_frames:
-                break
-        
-        frame_idx += 1
-    
-    cap.release()
-    print(f"[StrayScanner] Extracted {extracted}/{total} frames (stride={stride}) → {output_dir}")
-    return extracted
+    if out.name != FM.FRAMES_DIRNAME:
+        raise ValueError(f"{out} is not a scan's {FM.FRAMES_DIRNAME}/ directory — frames are "
+                         f"only written sealed into <scan>/{FM.FRAMES_DIRNAME}/")
+    scan_dir = out.parent
+    token = FM.claim_writer(scan_dir, FM.ORIGIN_STRAY)      # refused while another writes
+    try:
+        # refused when frames exist or an interrupted extraction left the temp dir non-empty
+        doc = FM.extract_video(mp4_path, scan_dir, origin=FM.ORIGIN_STRAY, stride=stride,
+                               max_frames=max_frames)
+    finally:
+        FM.release_writer(scan_dir, token)
+    print(f"[StrayScanner] Extracted {doc['n_frames']}/{doc['frame_count_reported']} frames "
+          f"(stride={stride}) → {output_dir}, sealed")
+    return int(doc["n_frames"])
 
 
 def upsample_depth_to_rgb(
@@ -269,12 +262,23 @@ def prepare_stray_data(
             keyframe_set = None
 
     if keyframe_set is None:
-        n_extracted = extract_frames(
-            str(data / "rgb.mp4"),
-            frames_output_dir,
-            max_frames=max_frames,
-            stride=stride,
-        )
+        # the scan's frames are SEALED once written (docs/plan_determinismo.md point 67): a
+        # frames/ that already holds frames is used as it is — rgb.mp4 is never re-extracted
+        # over it (the old stride extraction overwrote every stride-th frame of a scan that
+        # already had all of them)
+        from intake.frames_manifest import frames_present
+        have = frames_present(frames_dir.parent)["n_frames"] if frames_dir.name == "frames" \
+            else len([p for p in frames_dir.glob("*.jpg")]) if frames_dir.is_dir() else 0
+        if have:
+            print(f"[StrayScanner] {frames_dir} already holds {have} frame(s) — used as they "
+                  f"are, rgb.mp4 is not re-extracted over them")
+        else:
+            n_extracted = extract_frames(
+                str(data / "rgb.mp4"),
+                frames_output_dir,
+                max_frames=max_frames,
+                stride=stride,
+            )
 
     # 4. Get extracted frame list and their indices
     frame_files = sorted(frames_dir.glob("*.jpg"))

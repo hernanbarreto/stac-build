@@ -24,10 +24,27 @@ Windows:
 Determinism: the tracker's weights are the file whose sha256 is declared
 (``tracker_weights_url`` at a pinned revision, ``tracker_weights_sha256``; recorded in
 tracks.json, any other file refused) and every tracker call runs with torch's
-deterministic algorithms on, TF32 off and the ``seed`` set (:func:`deterministic_torch`).
+deterministic algorithms on (STRICT), TF32 off and the ``seed`` set
+(:func:`deterministic_torch` = ``repro.deterministic_torch``), on the card only (no CPU
+fallback: other kernels, other bits), with the card checked free before the step
+(``repro.require_exclusive_gpu`` — the runner checks it before launching, ``main`` again
+before torch touches CUDA) and the environment (card, driver, torch / CUDA / cuDNN, BLAS,
+CPU, libraries, code) recorded in tracks.json (docs/plan_determinismo.md points 4, 37).
 
-Every track is assigned to the fit or the held-out set once (``heldout_frac``,
-fixed ``seed``). Output ``output/precision/tracks.npz`` (v2 = the v1 keys at the
+Every track is assigned to the fit or the held-out set once (``heldout_frac``) by a
+hash of ITS OWN stable key — the seed, its query frame and the exact float32 bits of its
+query pixel (:func:`track_split_of`) — never by its position in the emission order:
+one query more or less anywhere used to reshuffle ~32 % of every later track between
+F5's fit and held-out sets (point 28). The same query point tracked in two windows
+lands in the same set (no leak between fit and held-out).
+
+Instance loops (``instance_loops.json``) enter only when stamped with THIS
+reconstruction's id (``correction.epoch.same_reconstruction``, point 34); the report
+says why one was not taken. I2's exclusion masks enter only when ``intake/content_tags.json``
+lists them under a stamp that matches the PNGs (:func:`exclusion_mask_paths`, point 68 —
+a PNG on disk by itself is a leftover). Timings go to ``tracks.timing.json`` (point 36).
+
+Output ``output/precision/tracks.npz`` (v2 = the v1 keys at the
 tracker grid + ``obs_uv_native``, ``obs_uv_sigma``, ``track_split``,
 ``window_id``, ``is_loop_pair``, ``frame_kind``) and ``tracks.json``.
 
@@ -41,7 +58,6 @@ import hashlib
 import json
 import sys
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -50,6 +66,8 @@ import numpy as np
 
 TRACKS_NAME = "tracks.npz"
 REPORT_NAME = "tracks.json"
+TIMING_NAME = "tracks.timing.json"
+INSTANCE_LOOPS_NAME = "instance_loops.json"
 TRACKS_VERSION = 2
 PROVENANCE = "tool_measured"
 LOG_TAG = "[tracks]"
@@ -220,62 +238,22 @@ def tracker_grid(native_w: int, native_h: int, long_side: int, stride: int) -> T
 
 # ── determinism (shared with F6) ─────────────────────────────────────────
 
-# cuBLAS is deterministic only with a fixed workspace (NVIDIA / torch docs); with
-# ``torch.use_deterministic_algorithms`` on, torch refuses every cuBLAS call without it
-CUBLAS_WORKSPACE_ENV = "CUBLAS_WORKSPACE_CONFIG"
-CUBLAS_WORKSPACE_DETERMINISTIC = (":4096:8", ":16:8")
+_SERVER = str(Path(__file__).resolve().parents[1])
+if _SERVER not in sys.path:
+    sys.path.insert(0, _SERVER)
 
-
-def ensure_cublas_workspace() -> None:
-    """Set CUBLAS_WORKSPACE_CONFIG (:4096:8) when unset — it must be in the environment
-    BEFORE torch initialises CUDA, so every GPU CLI calls this first."""
-    import os
-    os.environ.setdefault(CUBLAS_WORKSPACE_ENV, CUBLAS_WORKSPACE_DETERMINISTIC[0])
-
-
-@contextmanager
-def deterministic_torch(seed: int):
-    """torch with deterministic algorithms ON (an op without a deterministic kernel
-    RAISES instead of running), cuDNN deterministic and not benchmarking, TF32 off (full
-    float32 arithmetic on Ampere) and the RNGs seeded; the previous state is restored on
-    exit. On CUDA the cuBLAS workspace must already be fixed (:func:`ensure_cublas_workspace`
-    before CUDA initialises) — refused otherwise, naming why."""
-    import os
-    import torch
-    if torch.cuda.is_available() and \
-            os.environ.get(CUBLAS_WORKSPACE_ENV) not in CUBLAS_WORKSPACE_DETERMINISTIC:
-        if torch.cuda.is_initialized():
-            raise RuntimeError(f"{CUBLAS_WORKSPACE_ENV} is not one of "
-                               f"{CUBLAS_WORKSPACE_DETERMINISTIC} and CUDA is already "
-                               f"initialised — cuBLAS cannot be made deterministic now; set it "
-                               f"before torch touches the GPU (the precision CLIs do)")
-        ensure_cublas_workspace()
-    prev = (torch.are_deterministic_algorithms_enabled(),
-            torch.is_deterministic_algorithms_warn_only_enabled(),
-            torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark,
-            torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32)
-    torch.use_deterministic_algorithms(True)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.manual_seed(int(seed))                      # CPU and every CUDA device
-    try:
-        yield
-    finally:
-        torch.use_deterministic_algorithms(prev[0], warn_only=prev[1])
-        (torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark,
-         torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32) = prev[2:]
+# ONE implementation for every stage (server/repro.py, 2026-10-07): torch deterministic STRICT,
+# cuDNN deterministic without benchmark, TF32 off, seeds fixed, the cuBLAS workspace pinned to the
+# one value every launcher uses. Re-exported here for the stages that import it from F4.
+from repro import (CUBLAS_WORKSPACE_ENV, deterministic_torch,  # noqa: E402,F401
+                   ensure_cublas_workspace)
 
 
 # ── the tracker weights, pinned by content ───────────────────────────────
 
 def file_sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for block in iter(lambda: fh.read(1 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
+    from repro import sha256_file
+    return sha256_file(path)
 
 
 def verified_checkpoint(url: str, sha256: str, log: Callable = print) -> Path:
@@ -309,7 +287,12 @@ def vggsfm_track_fn(weights_url: str, weights_sha256: str, device: str = "cuda",
         sys.path.insert(0, str(root))
     from dependency.vggsfm_tracker import TrackerPredictor
     from dependency.track_modules.track_refine import refine_track
-    dev = torch.device(device if torch.cuda.is_available() else "cpu")
+    if str(device).startswith("cuda") and not torch.cuda.is_available():
+        # no CPU fallback: the CPU kernels round otherwise — the tracks would silently be
+        # another product (docs/plan_determinismo.md point 12's rule, applied to F4)
+        raise TracksError("torch sees no CUDA device — the tracker runs on the card, never "
+                          "falls back to the CPU")
+    dev = torch.device(device)
     tk = TrackerPredictor()
     ckpt = verified_checkpoint(weights_url, weights_sha256, log=log)
     tk.load_state_dict(torch.load(str(ckpt), map_location="cpu", weights_only=True))
@@ -327,6 +310,176 @@ def vggsfm_track_fn(weights_url: str, weights_sha256: str, device: str = "cuda",
         return (fine[0].float().cpu().numpy(), vis[0].float().cpu().numpy(),
                 score[0].float().cpu().numpy())
     return fn
+
+
+# ── the held-out split, per track ───────────────────────────────────────
+
+_SPLIT_KEY = np.dtype([("seed", "<i8"), ("frame", "<i8"), ("u", "<f4"), ("v", "<f4")])
+
+
+def track_split_of(seed: int, query_frames: np.ndarray, query_uv: np.ndarray,
+                   heldout_frac: float) -> np.ndarray:
+    """SPLIT_HELDOUT / SPLIT_FIT per track from a hash of the track's OWN stable key: (``seed``,
+    its query frame, the exact float32 bits of its query pixel) packed little-endian, sha256, the
+    first 8 bytes as an unsigned integer u: held out when u < ``heldout_frac`` × 2⁶⁴ (exact: the
+    fraction scaled by a power of two). Membership depends on the track alone — not on how many
+    tracks were emitted before it (point 28) — and is the same on every machine."""
+    qf = np.asarray(query_frames, np.int64).ravel()
+    uv = np.asarray(query_uv, np.float32).reshape(-1, 2)
+    if len(qf) != len(uv):
+        raise TracksError(f"track_split_of: {len(qf)} query frames for {len(uv)} query pixels")
+    frac = float(heldout_frac)
+    if not 0.0 <= frac <= 1.0:
+        raise TracksError(f"heldout_frac {heldout_frac!r} must lie in [0, 1]")
+    key = np.zeros(len(qf), _SPLIT_KEY)
+    key["seed"], key["frame"], key["u"], key["v"] = int(seed), qf, uv[:, 0], uv[:, 1]
+    raw, step = key.tobytes(), _SPLIT_KEY.itemsize
+    threshold = int(frac * 2.0 ** 64)
+    out = np.empty(len(qf), np.int8)
+    sha = hashlib.sha256
+    for i in range(len(qf)):
+        u = int.from_bytes(sha(raw[i * step:(i + 1) * step]).digest()[:8], "little")
+        out[i] = SPLIT_HELDOUT if u < threshold else SPLIT_FIT
+    return out
+
+
+# ── inputs that come from outside the chain ─────────────────────────────
+
+def instance_loops(out_dir: Path, rid: Optional[str] = None) -> Tuple[List[Tuple[int, int]], dict]:
+    """(keyframe-index pairs, report) of ``instance_loops.json`` — taken only when it was measured
+    on THIS reconstruction (its ``reconstruction_id``; point 34). ``rid``: the session's id when
+    the caller already has it."""
+    from correction.epoch import reconstruction_id_or_none, same_reconstruction
+    p = Path(out_dir) / INSTANCE_LOOPS_NAME
+    if not p.exists():
+        return [], {"present": False, "taken": False}
+    doc = json.loads(p.read_text())
+    rid = reconstruction_id_or_none(out_dir) if rid is None else rid
+    taken, why = same_reconstruction(doc, rid)
+    if not taken:
+        return [], {"present": True, "taken": False, "reason": why}
+    pairs = [(int(l["i"]), int(l["j"])) for l in doc.get("loops", [])]
+    return pairs, {"present": True, "taken": True, "n": len(pairs)}
+
+
+# ── I2's exclusion masks (plan point 68) ─────────────────────────────────
+#
+# THE CONTRACT between intake I2 (the writer, intake/content.py) and its readers (F4 here, the
+# depth sweep's read_exclusion): a mask PNG is applied ONLY when intake/content_tags.json lists
+# its frame under ``exclusion_masks.frames`` AND the report carries a ``stamp`` — a repro.stamp
+# whose ``inputs`` name every listed mask by :func:`exclusion_mask_key` (``exclusion_masks/
+# <frame:06d>.png``) with the sha256 of the file — that matches the files on disk now. With I2
+# off the report lists no frame (no mask). A PNG on disk the report does not list is a leftover
+# of an earlier run and is never applied; a report without a stamp, with an edited digest, or
+# naming a mask that is absent / unstamped / changed yields NO masks, with the reason declared.
+
+EXCLUSION_STAMP_KEY = "stamp"
+CONTENT_TAGS_RELPATH = "intake/content_tags.json"
+EXCLUSION_MASKS_RELDIR = "intake/exclusion_masks"
+
+
+def exclusion_mask_key(frame: int) -> str:
+    """The stamp key of frame ``frame``'s mask (relative to the intake directory)."""
+    return f"exclusion_masks/{int(frame):06d}.png"
+
+
+def exclusion_masks_stamp(masks_dir: Path, frames: Sequence[int], **more_inputs: Path) -> Dict[str, Any]:
+    """The stamp the WRITER puts in content_tags.json: every mask of ``frames`` by its key and
+    content (plus any other input the writer names, e.g. the keyframe list). A listed frame whose
+    PNG does not exist RAISES — a stamp of something absent says nothing."""
+    from repro import stamp
+    masks_dir = Path(masks_dir)
+    ins: Dict[str, Path] = {exclusion_mask_key(f): masks_dir / f"{int(f):06d}.png" for f in frames}
+    ins.update({str(k): Path(v) for k, v in more_inputs.items()})
+    return stamp(inputs=ins)
+
+
+def _stamp_is_consistent(st: Any) -> bool:
+    from repro import sha256_json
+    if not isinstance(st, dict) or not isinstance(st.get("inputs"), dict) or "sha256" not in st:
+        return False
+    body = {k: st.get(k) for k in ("stamp_version", "inputs", "code", "config")}
+    return sha256_json(body) == st.get("sha256")
+
+
+def exclusion_mask_paths(session_dir: Path) -> Tuple[Dict[int, Path], Dict[str, Any]]:
+    """(frame → mask PNG) F4 may apply, and the report of why — see the contract above. The
+    report: ``present`` (content_tags.json exists), ``taken`` (masks are applied), ``n`` (how
+    many), ``listed`` (frames the report names), ``unlisted_on_disk`` (PNGs on disk the report
+    does not name — never applied), ``reason`` when nothing is taken."""
+    from repro import sha256_file
+    sd = Path(session_dir)
+    report_p = sd / CONTENT_TAGS_RELPATH
+    mdir = sd / EXCLUSION_MASKS_RELDIR
+    on_disk = sorted(p.name for p in mdir.glob("*.png")) if mdir.is_dir() else []
+    rep: Dict[str, Any] = {"present": report_p.exists(), "taken": False, "n": 0, "listed": 0,
+                           "unlisted_on_disk": len(on_disk)}
+    if not report_p.exists():
+        rep["reason"] = f"{CONTENT_TAGS_RELPATH} is missing — no mask is applied"
+        return {}, rep
+    try:
+        doc = json.loads(report_p.read_text())
+    except ValueError as e:
+        rep["reason"] = f"{CONTENT_TAGS_RELPATH} is unreadable ({e}) — no mask is applied"
+        return {}, rep
+    listed_raw = ((doc.get("exclusion_masks") or {}).get("frames") or {}) if isinstance(doc, dict) else {}
+    try:
+        listed = sorted({int(f) for f in (listed_raw.keys() if isinstance(listed_raw, dict) else listed_raw)})
+    except (TypeError, ValueError):
+        rep["reason"] = f"{CONTENT_TAGS_RELPATH}: exclusion_masks.frames is not a list of frames"
+        return {}, rep
+    rep["listed"] = len(listed)
+    if not listed:
+        rep["reason"] = ("content_tags.json lists no exclusion mask"
+                         + ("" if doc.get("enabled", True) else " (intake.content disabled)"))
+        rep["unlisted_on_disk"] = len(on_disk)
+        return {}, rep
+    st = doc.get(EXCLUSION_STAMP_KEY)
+    if not _stamp_is_consistent(st):
+        rep["reason"] = (f"{CONTENT_TAGS_RELPATH} carries no stamp of its masks (or an edited one) — "
+                         f"its {len(listed)} mask(s) are not applied")
+        return {}, rep
+    paths: Dict[int, Path] = {}
+    for f in listed:
+        key = exclusion_mask_key(f)
+        want = st["inputs"].get(key)
+        if want is None:
+            tail = "/" + key.split("/")[-1]
+            hits = [v for k, v in st["inputs"].items() if k == key.split("/")[-1] or k.endswith(tail)]
+            want = hits[0] if len(hits) == 1 else None
+        p = mdir / f"{f:06d}.png"
+        if want is None:
+            rep["reason"] = f"the stamp of {CONTENT_TAGS_RELPATH} names no mask for frame {f} ({key})"
+            return {}, rep
+        if not p.exists():
+            rep["reason"] = f"{p.name} is listed and stamped but missing on disk"
+            return {}, rep
+        if sha256_file(p) != want:
+            rep["reason"] = f"{p.name} is not the mask content_tags.json was stamped with"
+            return {}, rep
+        paths[f] = p
+    rep.update({"taken": True, "n": len(paths),
+                "unlisted_on_disk": len(set(on_disk) - {p.name for p in paths.values()})})
+    return paths, rep
+
+
+def chain_inputs(session_dir: Path, rid: Optional[str] = None) -> Dict[str, Path]:
+    """The files F4 reads that no step of the chain writes (the runner stamps them, point 31):
+    the keyframe and witness lists, SALAD's pairs, I2's content report with the exclusion masks
+    it TAKES (point 68) and the instance loops it TAKES (point 34). The frames, Omega's records
+    (depth edges) and the config are stamped by the runner."""
+    sd = Path(session_dir)
+    out = sd / "output"
+    cand = {"frames/selected_frames.json": sd / "frames" / "selected_frames.json",
+            "frames/witness_frames.json": sd / "frames" / "witness_frames.json",
+            "output/maplong_run/loop_closures.txt": out / "maplong_run" / "loop_closures.txt",
+            CONTENT_TAGS_RELPATH: sd / CONTENT_TAGS_RELPATH}
+    found = {k: p for k, p in cand.items() if p.exists()}
+    for f, p in exclusion_mask_paths(sd)[0].items():
+        found[f"{EXCLUSION_MASKS_RELDIR}/{f:06d}.png"] = p
+    if instance_loops(out, rid)[1]["taken"]:
+        found[f"output/{INSTANCE_LOOPS_NAME}"] = out / INSTANCE_LOOPS_NAME
+    return found
 
 
 # ── run ──────────────────────────────────────────────────────────────────
@@ -360,12 +513,13 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
     s_mean = 0.5 * (nw / tw + nh / th)             # grid px → native px (σ)
 
     pairs_f = salad_pairs(out_dir / "maplong_run" / "loop_closures.txt")
-    il = out_dir / "instance_loops.json"
     kidx = {f: i for i, f in enumerate(kf)}
     idx_pairs = [(kidx[a], kidx[b]) for a, b in pairs_f if a in kidx and b in kidx]
     n_salad = len(idx_pairs)
-    if il.exists():
-        idx_pairs += [(int(l["i"]), int(l["j"])) for l in json.loads(il.read_text()).get("loops", [])]
+    il_pairs, il_rep = instance_loops(out_dir)
+    if il_rep["present"] and not il_rep["taken"]:
+        log(f"{LOG_TAG} {INSTANCE_LOOPS_NAME} NOT taken: {il_rep['reason']}")
+    idx_pairs += il_pairs
     windows = (keyframe_windows(kf, tcfg.window_frames, tcfg.window_overlap_frac,
                                 tcfg.query_frames_per_window)
                + loop_windows(kf, idx_pairs, tcfg.loop_half_window)
@@ -395,9 +549,21 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
         return cv2.resize(cv2.cvtColor(im, cv2.COLOR_BGR2RGB), (tw, th),
                           interpolation=cv2.INTER_AREA)
 
+    # point 68: only the masks content_tags.json lists under a matching stamp; the rest of the
+    # PNGs on disk (an earlier run's) never touch a query — and the report says so
+    excl_paths, excl_rep = exclusion_mask_paths(session_dir)
+    if not excl_rep["taken"]:
+        log(f"{LOG_TAG} exclusion masks: none applied — {excl_rep.get('reason')}"
+            + (f" ({excl_rep['unlisted_on_disk']} PNG(s) on disk ignored)" if excl_rep["unlisted_on_disk"] else ""))
+    else:
+        log(f"{LOG_TAG} exclusion masks: {excl_rep['n']} applied (stamped by content_tags.json)"
+            + (f"; {excl_rep['unlisted_on_disk']} unlisted PNG(s) on disk ignored" if excl_rep["unlisted_on_disk"] else ""))
+
     def exclusion(f):
-        p = session_dir / "intake" / "exclusion_masks" / f"{f:06d}.png"
-        m = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE) if p.exists() else None
+        p = excl_paths.get(int(f))
+        m = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE) if p is not None else None
+        if p is not None and m is None:
+            raise TracksError(f"exclusion mask {p} is unreadable")
         return (m == 255) if m is not None else None
 
     def edges(f):
@@ -413,11 +579,13 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
     # the tracker's weights are recorded by content; an injected track_fn (a ground-truth
     # stand-in) is said to be one
     weights = {"injected_track_fn": True}
-    if track_fn is None:
+    on_card = track_fn is None
+    if on_card:
         ensure_cublas_workspace()                 # before the tracker touches the GPU
         track_fn = vggsfm_track_fn(tcfg.tracker_weights_url, tcfg.tracker_weights_sha256,
                                    log=log)
         weights = {"url": tcfg.tracker_weights_url, "sha256": tcfg.tracker_weights_sha256}
+    numerics = None
     obs = {k: [] for k in ("track", "frame", "uv", "uv_native", "sigma", "vis", "window",
                            "loop", "kind")}
     tq = {k: [] for k in ("id", "frame", "uv")}
@@ -440,8 +608,9 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
             order = [qi] + [k for k in range(len(win.frames)) if k != qi]
             # deterministic kernels, re-seeded per call: a window's tracks do not depend on
             # the windows tracked before it
-            with deterministic_torch(tcfg.seed):
+            with deterministic_torch(tcfg.seed) as num:
                 uv, vis, sig = track_fn(imgs[order], q, [win.frames[k] for k in order])
+            numerics = num if numerics is None else numerics
             inv = np.argsort(order)
             uv, vis, sig = uv[inv], vis[inv], sig[inv]
             good = vis > tcfg.vis_thresh
@@ -470,8 +639,8 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
         raise TracksError("no track survived — nothing to write")
     uv = np.asarray(obs["uv"], np.float32)
     tids = np.asarray(tq["id"], np.int64)
-    rng = np.random.default_rng(int(tcfg.seed))
-    split = (rng.random(len(tids)) < float(tcfg.heldout_frac)).astype(np.int8)
+    split = track_split_of(int(tcfg.seed), np.asarray(tq["frame"], np.int64),
+                           np.asarray(tq["uv"], np.float32), float(tcfg.heldout_frac))
     pdir = out_dir / "precision"
     pdir.mkdir(parents=True, exist_ok=True)
     from intake.quality import read_session_epochs
@@ -496,7 +665,11 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
         meta=np.asarray(json.dumps(meta)))
     tmp.replace(pdir / TRACKS_NAME)
     sig = np.asarray(obs["sigma"])
-    rep = {**meta, "n_windows": len(windows),
+    # what the tracks depend on beyond their inputs (point 37): the card, driver, torch / CUDA /
+    # cuDNN, the numerics the tracker ran with, BLAS core, CPU, libraries and code — no clock
+    from repro import environment_record
+    env = {"environment": environment_record(gpu=on_card), "numerics": numerics}
+    rep = {**meta, **env, "n_windows": len(windows),
            "n_windows_by_kind": {k: sum(w.kind == k for w in windows)
                                  for k in ("keyframes", "loop", "witness")},
            "n_obs": len(obs["track"]), "n_tracks": int(len(tids)),
@@ -507,8 +680,12 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
            "witnesses_covered": len(set(obs["frame"]) & wit_set), "n_witnesses": len(wit_set),
            "sigma_native_px": {"median": float(np.median(sig)),
                                "p90": float(np.percentile(sig, 90))},
-           "elapsed_s": round(time.time() - t0, 1)}
+           "instance_loops": il_rep,
+           "exclusion_masks": excl_rep,
+           "split": "sha256 of (seed, query frame, query pixel float32 bits) per track"}
     (pdir / REPORT_NAME).write_text(json.dumps(rep, indent=1))
+    # the wall clock lives apart from the compared report (point 36)
+    (pdir / TIMING_NAME).write_text(json.dumps({"elapsed_s": round(time.time() - t0, 1)}, indent=1))
     log(f"{LOG_TAG} {rep['n_obs']:,} obs, {rep['n_tracks']:,} tracks ({rep['n_heldout_tracks']:,} "
         f"held out), keyframes {rep['keyframes_covered']}/{len(kf)}, witnesses "
         f"{rep['witnesses_covered']}/{len(wit_set)}, σ median {rep['sigma_native_px']['median']:.2f} "
@@ -530,6 +707,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                                  description="Native-pixel sub-pixel tracks (F4).")
     ap.add_argument("--session", required=True)
     args = ap.parse_args(argv)
+    # the card is this step's alone (point 4): checked here, before torch touches CUDA, also
+    # when the step is launched by hand; nothing is lowered to fit a shared card
+    from repro import require_exclusive_gpu
+    require_exclusive_gpu(log=print)
     ensure_cublas_workspace()                   # before torch initialises CUDA
     run_tracks(Path(args.session), load_precision_config().tracks)
     return 0

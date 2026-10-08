@@ -13,6 +13,12 @@ It REPORTS (``output/omega_probe.json``); the value is the user's to set in
 resolution joins the report once the correspondence (F4) and refinement (F5)
 stages exist. GPU; Omega runs on the keyframes only.
 
+USER 2026-10-07 (docs/plan_determinismo.md point 40): kept as a REPORT, deterministic —
+every inference inside ``repro.deterministic_torch`` (strict deterministic kernels, TF32
+off), on the card only (no CPU fallback), the card checked free before the step (point 4)
+and the environment recorded in the report (point 37); the wall-clock seconds and the
+peak VRAM of each resolution go to ``omega_probe.timing.json``, outside the report.
+
 CLI: ``python -m precision.omega_probe --session <dir>``.
 """
 
@@ -28,7 +34,11 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 import numpy as np
 
 PROBE_NAME = "omega_probe.json"
+TIMING_NAME = "omega_probe.timing.json"
 PROBE_VERSION = 1
+# the torch seed of the probe's deterministic block: Omega's inference draws no random number
+# (eval mode, no dropout) — the seed only pins torch's RNG state, as deterministic_torch requires
+PROBE_TORCH_SEED = 0
 PROVENANCE = "tool_measured"
 LOG_TAG = "[omega-probe]"
 
@@ -91,13 +101,20 @@ def omega_infer(session_dir: Path) -> Infer:
     from config import cfg as raw_cfg
     from workers.map_worker import _build_vggtomega_config
     from base_models.vggtomega_adapter import VGGTOmegaAdapter
+    if not torch.cuda.is_available():
+        # no CPU fallback (other kernels, another product — point 12's rule, applied to F3)
+        raise ProbeError("torch sees no CUDA device — Omega's probe runs on the card, never on "
+                         "the CPU")
     vcfg = _build_vggtomega_config(raw_cfg, Path(session_dir) / "frames")
-    ad = VGGTOmegaAdapter(vcfg, device="cuda" if torch.cuda.is_available() else "cpu")
+    ad = VGGTOmegaAdapter(vcfg, device="cuda")
     ad.load()
 
     def infer(paths: List[str], resolution: int, mode: str) -> Dict[str, np.ndarray]:
+        from repro import deterministic_torch
         ad.image_resolution, ad.preproc_mode = int(resolution), str(mode)
-        out = ad.infer_chunk(paths)
+        with deterministic_torch(PROBE_TORCH_SEED) as num:
+            out = ad.infer_chunk(paths)
+        infer.numerics = num
         f = lambda t: t.detach().float().cpu().numpy()[0]           # noqa: E731
         conf = out["world_points_conf"]
         return {"world_points": f(out["world_points"]), "conf": f(conf),
@@ -119,8 +136,9 @@ def run_probe(session_dir: Path, pcfg, infer: Optional[Infer] = None,
         raise ProbeError(f"{sel} lists {len(files)} keyframe(s) — a pair is the minimum")
     window = probe_window(files, pcfg.window_frames)
     paths = [str(frames_dir / f) for f in window]
+    on_card = infer is None
     infer = infer or omega_infer(session_dir)
-    results = []
+    results, timing = [], []
     for res in pcfg.resolutions:
         t0 = time.time()
         try:
@@ -137,8 +155,10 @@ def run_probe(session_dir: Path, pcfg, infer: Optional[Infer] = None,
             vram = torch.cuda.max_memory_allocated() / 1024 ** 3
         rec = {"resolution": int(res), "mode": pcfg.mode,
                "grid_hw": [int(pred["world_points"].shape[1]), int(pred["world_points"].shape[2])],
-               "seconds": round(dt, 2), "peak_vram_gb": vram, **m}
+               **m}
         results.append(rec)
+        # time and memory pressure are not the measurement (point 36): they go to the timing file
+        timing.append({"resolution": int(res), "seconds": round(dt, 2), "peak_vram_gb": vram})
         log(f"{LOG_TAG} {res} ({pcfg.mode}, grid {rec['grid_hw'][0]}x{rec['grid_hw'][1]}): "
             f"median pair mismatch "
             + (f"{rec['median_rel_mismatch'] * 100:.2f} %" if rec["median_rel_mismatch"] is not None
@@ -147,8 +167,12 @@ def run_probe(session_dir: Path, pcfg, infer: Optional[Infer] = None,
     ranked = [r for r in results if r["median_rel_mismatch"] is not None]
     best = min(ranked, key=lambda r: r["median_rel_mismatch"])["resolution"] if ranked else None
     from intake.quality import read_session_epochs
+    from repro import environment_record
     report = {"version": PROBE_VERSION, "provenance": PROVENANCE,
               **read_session_epochs(session_dir),
+              # point 37: what the probe's numbers depend on beyond their inputs — no clock
+              "environment": environment_record(gpu=on_card),
+              "numerics": getattr(infer, "numerics", None),
               "params": {"resolutions": list(pcfg.resolutions), "mode": pcfg.mode,
                          "window_frames": pcfg.window_frames,
                          "pair_samples": pcfg.pair_samples},
@@ -158,6 +182,7 @@ def run_probe(session_dir: Path, pcfg, infer: Optional[Infer] = None,
     out = session_dir / "output" / PROBE_NAME
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=1))
+    (out.parent / TIMING_NAME).write_text(json.dumps({"resolutions": timing}, indent=1))
     log(f"{LOG_TAG} lowest mismatch at {best} → {out} (report only)")
     return report
 
@@ -172,6 +197,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not pc.enabled:
         print(f"{LOG_TAG} reconstruction.precision.omega.resolution_probe.enabled is false")
         return 0
+    # the card is this step's alone (point 4), checked before torch touches CUDA — also when the
+    # step is launched by hand; the cuBLAS workspace is pinned before CUDA initialises
+    from repro import ensure_cublas_workspace, require_exclusive_gpu
+    require_exclusive_gpu(log=print)
+    ensure_cublas_workspace()
     run_probe(Path(args.session), pc)
     return 0
 

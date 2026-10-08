@@ -86,6 +86,10 @@ H_CALIBRATION_LAYOUT: Dict[str, Any] = {
     "window_frames_requested": 32,
     "window_overlap_frac": 0.5,
     "card": "NVIDIA A100 80GB PCIe, 81920 MiB",
+    # the same card as repro.card_key names it: the card MODEL (name | board MiB — nvidia-smi
+    # memory.total — | compute capability); never torch's usable-memory bytes (they moved by 3 MiB
+    # across a pod restart of 2026-10-07 on this same card)
+    "card_key": "NVIDIA A100 80GB PCIe | 81920 MiB | sm_8.0",
     "vram_margin_frac": 0.15,
     "scenes": {
         "pccr 2026-08-31": {"keyframes": 289, "windows": 22, "process_res": 840,
@@ -103,7 +107,9 @@ H_CALIBRATION_LAYOUT: Dict[str, Any] = {
 MIN_CHUNK_FRAMES = 24
 
 COVIS_NAME = "covis.json"
-COVIS_VERSION = 2          # 2: the scan horizon is the whole walk (1 scanned up to a card capacity)
+COVIS_VERSION = 4          # 4: measured on the PARALLAX keyframes only (plan_index; USER
+                           #    2026-10-07) — 3: the stamp holds the code; τ margins recorded (2: whole-walk
+                           # horizon; 1 scanned up to a card capacity)
 LOG_TAG = "[covis]"
 _INF = 1 << 62             # an unreachable DP cost (int64-safe with every block cost added)
 
@@ -216,18 +222,21 @@ def covis_dir(Pi: np.ndarray, vj: dict, tol: float) -> float:
     return float(agree.sum()) / len(Pi)
 
 
-def covis_lengths(frames: List[int], views: Dict[int, dict], tol: float,
-                  horizon: Optional[int] = None) -> np.ndarray:
-    """ℓ(i) by the majority rule (design §1.3); -1 marks a censored scan (never failed). The scan
-    from i reaches i + horizon − 1 at most; None = the whole walk (the plan's horizon)."""
+def covis_lengths_margins(frames: List[int], views: Dict[int, dict], tol: float,
+                          horizon: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
+    """(ℓ, τ-margin): ℓ(i) by the majority rule (design §1.3, -1 = a censored scan) and, per
+    keyframe, the smallest |c − τ| among the co-visibility tests that decided its ℓ — how close
+    one flipped test is (docs/plan_determinismo.md point 15: recorded, never acted on)."""
     n = len(frames)
     reach = n if horizon is None else int(horizon)
     P = {f: _samples(views[f]) for f in frames}
     ell = np.zeros(n, int)
+    margin = np.full(n, np.inf)
     for a in range(n):
         passes = fails = 0; last = a; censored = True
         for b in range(a + 1, min(n, a + reach)):
             c = min(covis_dir(P[frames[a]], views[frames[b]], tol), covis_dir(P[frames[b]], views[frames[a]], tol))
+            margin[a] = min(margin[a], abs(c - TAU))
             if c >= TAU:
                 passes += 1; last = b
             else:
@@ -236,7 +245,14 @@ def covis_lengths(frames: List[int], views: Dict[int, dict], tol: float,
                 censored = False
                 break
         ell[a] = (last - a) if not censored else -1
-    return ell
+    return ell, margin
+
+
+def covis_lengths(frames: List[int], views: Dict[int, dict], tol: float,
+                  horizon: Optional[int] = None) -> np.ndarray:
+    """ℓ(i) by the majority rule (design §1.3); -1 marks a censored scan (never failed). The scan
+    from i reaches i + horizon − 1 at most; None = the whole walk (the plan's horizon)."""
+    return covis_lengths_margins(frames, views, tol, horizon)[0]
 
 
 def budget(ell: np.ndarray) -> np.ndarray:
@@ -393,11 +409,13 @@ class _Blocks:
         return np.unique(np.concatenate(vals)) if vals else np.zeros(0)
 
 
-def _single(n: int, D_total: float, why: str, flags: List[str]) -> Dict[str, Any]:
+def _single(n: int, D_total: float, why: str, flags: List[str], H: float) -> Dict[str, Any]:
     return {"single_pass": True, "why": why, "ranges": [(0, n)], "blocks": [], "cuts": [],
             "chunks": [{"range": [0, n], "frames": n, "D": D_total, "seam_after": None,
                         "flags": list(flags)}],
-            "flags": list(flags), "objective": None}
+            "flags": list(flags), "objective": None,
+            "margins": {"D_total_over_H": D_total - H, "blocks_half_H_minus_D": [],
+                        "min_block_margin": None, "block_budget_margin": None}}
 
 
 def plan_detail(delta, zbar, theta, min_chunk_frames: int = MIN_CHUNK_FRAMES,
@@ -426,12 +444,12 @@ def plan_detail(delta, zbar, theta, min_chunk_frames: int = MIN_CHUNK_FRAMES,
     L_min = mcf // 2
     head = {"n": n, "H": H, "min_chunk_frames": mcf, "block_min": L_min, "D_total": D_total}
     if D_total <= H:
-        return {**head, **_single(n, D_total, f"D_total {D_total:.2f} ≤ H {H:g}", [])}
+        return {**head, **_single(n, D_total, f"D_total {D_total:.2f} ≤ H {H:g}", [], H)}
     if n < 2 * L_min:
         return {**head, **_single(n, D_total, f"{n} keyframes are fewer than the shortest "
                                               f"chunk ({2 * L_min}): one pass, over budget "
                                               f"(D_total {D_total:.2f} > H {H:g})",
-                                  ["too_short_to_chunk"])}
+                                  ["too_short_to_chunk"], H)}
     bl = _Blocks(P, mcf, H)
     # (a) fewest blocks (after the over-budget terms, which are 0 on any walk within budget)
     C = int(bl.solve()[0])
@@ -496,10 +514,18 @@ def plan_detail(delta, zbar, theta, min_chunk_frames: int = MIN_CHUNK_FRAMES,
                        "flags": [x["flag"] for x in (blocks[k], blocks[k + 1]) if x["flag"]]})
     cuts = [{"index": b, "theta_deg": float(t[b - 1])} for b in bnd[1:-1]]
     flags = sorted({x["flag"] for x in blocks if x["flag"]})
+    # every bar's margin (point 15): how far each decision sits from flipping — D_total vs H (one
+    # pass or chunks), each block's D vs H/2, the chosen block budget vs H/2
+    within = [bl.half - x["D"] for x in blocks if x["D"] <= bl.half]
+    margins = {"D_total_over_H": D_total - H,
+               "blocks_half_H_minus_D": [bl.half - x["D"] for x in blocks],
+               "min_block_margin": min(within) if within else None,
+               "block_budget_margin": (bl.half - obj["block_budget"]
+                                       if obj["block_budget"] is not None else None)}
     return {**head, "single_pass": len(ranges) == 1,
             "why": f"D_total {D_total:.2f} > H {H:g}",
             "ranges": ranges, "blocks": blocks, "chunks": chunks, "cuts": cuts, "flags": flags,
-            "objective": obj}
+            "objective": obj, "margins": margins}
 
 
 def plan(delta, zbar, theta, min_chunk_frames: int = MIN_CHUNK_FRAMES,
@@ -530,7 +556,16 @@ def inputs_sha256(delta, zbar, theta, min_chunk_frames: int, H: float) -> str:
 # ── the session: measure once, persist, replan bit-identically ───────────────────────────────
 
 def _sha_file(p: Path) -> str:
-    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+    import repro
+    return repro.sha256_file(p)
+
+
+def _code_stamp() -> Dict[str, str]:
+    """sha256 of the code the measurement depends on: this planner and the walk (the windows'
+    chaining, the anchors) — point 21: a code change re-measures instead of reusing an old plan
+    as if a fresh run would give it."""
+    import repro
+    return repro.stamp(code=[__file__, "intake.walk"])["code"]
 
 
 SCAN_HORIZON = "whole_walk"   # every keyframe's co-visibility scan may reach the end of the walk
@@ -538,9 +573,11 @@ SCAN_HORIZON = "whole_walk"   # every keyframe's co-visibility scan may reach th
 
 def input_stamp(scan_dir: Path) -> Tuple[str, Dict[str, Any]]:
     """The stamp of the measurement's inputs, computable WITHOUT the window files: the I3 window
-    plan (windows.json) and the walk measured on those windows (walk.json — rewritten whenever
-    I3 re-measures, so new DA3 windows change it), the method constants and the scan horizon
-    (the whole walk — no card capacity enters the plan)."""
+    plan (windows.json — since 2026-10-07 it carries the DA3 identity: pinned weights, extractor
+    and DA3 code, torch / cuDNN, card) and the walk measured on those windows (walk.json —
+    rewritten whenever I3 re-measures, so new DA3 windows change it), the method constants, the
+    scan horizon (the whole walk — no card capacity enters the plan) and the code of this planner
+    and of the walk (point 21)."""
     from intake.walk import WALK_NAME, WINDOWS_DIRNAME
     scan_dir = Path(scan_dir)
     spec = scan_dir / "output" / WINDOWS_DIRNAME / "windows.json"
@@ -549,36 +586,33 @@ def input_stamp(scan_dir: Path) -> Tuple[str, Dict[str, Any]]:
         if not p.exists():
             raise CovisError(f"{p} is missing — the co-visibility plan needs I3 (the DA3 windows "
                              f"and the walk measured on them)")
+    # the keyframes' KINDS (parallax / rotation) decide which ones the plan is measured on
+    sel = scan_dir / "frames" / "selected_frames.json"
     parts = {"covis_version": COVIS_VERSION, "tau": TAU, "tol_quantile": TOL_QUANTILE,
              "samples_per_frame": SAMPLES, "scan_horizon": SCAN_HORIZON,
-             "windows_json_sha256": _sha_file(spec), "walk_json_sha256": _sha_file(walk)}
+             "windows_json_sha256": _sha_file(spec), "walk_json_sha256": _sha_file(walk),
+             "selected_frames_sha256": (_sha_file(sel) if sel.exists() else None),
+             "code_sha256": _code_stamp()}
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest(), parts
 
 
 def window_layout(scan_dir: Path) -> Dict[str, Any]:
     """The I3 window layout a measurement is read from — what the co-visibility depends on beyond
     the frames (review 2026-10-06): the model and process_res, the windows' size and seams as they
-    RAN (windows.json — an OOM halving included), the requested size and overlap (walk.json), and
-    the card that sized them (output/intake/da3_vram.json, the footprint's key; None when it is not
-    on disk or belongs to another model / resolution). Readable without the window files.
-    RECORDED and compared with H_CALIBRATION_LAYOUT's card — never acted on here."""
-    from intake.vram import CACHE_NAME
+    RAN (windows.json), the requested size and overlap (walk.json), and the card that sized them
+    (windows.json's window_sizing — the committed card table's key; None for windows planned
+    before the record existed). Readable without the window files.
+    RECORDED and compared with H_CALIBRATION_LAYOUT's card_key — never acted on here."""
     from intake.walk import WINDOWS_DIRNAME, load_walk
     scan_dir = Path(scan_dir)
     spec = json.loads((scan_dir / "output" / WINDOWS_DIRNAME / "windows.json").read_text())
     wins = spec.get("windows") or []
     lens = [len(w) for w in wins]
     shared = [len(set(a) & set(b)) for a, b in zip(wins, wins[1:])]
-    card = None
-    vp = scan_dir / "output" / "intake" / CACHE_NAME
-    if vp.exists():
-        try:
-            key = json.loads(vp.read_text()).get("key") or {}
-            if (key.get("model_id") == spec.get("model_id")
-                    and int(key.get("process_res", -1)) == int(spec.get("process_res", -2))):
-                card = key.get("card")
-        except (OSError, ValueError, TypeError, AttributeError):
-            card = None
+    # the card that sized them: windows.json's own sizing record (the committed card table's key,
+    # repro.card_key) — None for windows planned before the record existed
+    card = ((spec.get("window_sizing") or {}).get("card")
+            or (spec.get("da3_environment") or {}).get("card"))
     params = (load_walk(scan_dir) or {}).get("params") or {}
     return {"model_id": spec.get("model_id"), "process_res": spec.get("process_res"),
             "n_windows": len(wins), "window_frames": max(lens) if lens else 0,
@@ -588,7 +622,7 @@ def window_layout(scan_dir: Path) -> Dict[str, Any]:
             "seam_frames": [min(shared), max(shared)] if shared else [],
             "card": card,
             "card_matches_calibration": (None if card is None
-                                         else card == H_CALIBRATION_LAYOUT["card"])}
+                                         else card == H_CALIBRATION_LAYOUT["card_key"])}
 
 
 def measure_inputs(scan_dir: Path, log: Callable = print) -> Dict[str, Any]:
@@ -611,18 +645,34 @@ def measure_inputs(scan_dir: Path, log: Callable = print) -> Dict[str, Any]:
         raise CovisError(f"walk.json counts {walk_n} keyframes, the windows hold {len(frames)} — "
                          f"the walk was not measured on these windows")
     tol = measured_tol(windows)
-    ell = covis_lengths(frames, views, tol)
+    # THE PLAN IS MEASURED ON THE PARALLAX KEYFRAMES ONLY (USER 2026-10-07). H was calibrated on
+    # keyframes chosen by parallax alone; the keyframes the selector adds in a TURN
+    # (intake/parallax.py, closed_by "rotation") give every view more co-visible neighbours
+    # without a metre of walk, so counted here they made turns CHEAP (pccr: D_total 34.7 → 31.9,
+    # 5 chunks → 4 longer ones, the chunks spanned the turn and Omega drifted −54 cm inside them).
+    # They fill the turns INSIDE the chunks; they never move a cut or stretch a budget.
+    plan_idx = planning_indices(scan_dir, frames)
+    pframes = [frames[i] for i in plan_idx]
+    ell, tau_margin = covis_lengths_margins(pframes, views, tol)
     delta = budget(ell)
-    zbar = [frame_depth_median(views[f]) for f in frames]
-    c2w = np.stack([views[f]["c2w"] for f in frames])
+    zbar = [frame_depth_median(views[f]) for f in pframes]
+    c2w = np.stack([views[f]["c2w"] for f in pframes])
     theta = rotation_steps_deg(c2w)
     c = c2w[:, :3, 3]
     chain = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(c, axis=0), axis=1))])
     doc = {"version": COVIS_VERSION, "provenance": "tool_measured", "stamp": stamp,
            "stamp_parts": parts, "n": len(frames), "frames": [int(f) for f in frames],
+           # the planning subsequence: full keyframe index and frame number of every parallax
+           # keyframe; ell / delta / zbar / theta / chainage below are over THESE
+           "plan_index": [int(i) for i in plan_idx], "plan_frames": [int(f) for f in pframes],
+           "n_plan": len(pframes), "n_rotation_keyframes": len(frames) - len(pframes),
            "tau": TAU, "tol_quantile": TOL_QUANTILE, "samples_per_frame": SAMPLES,
            "scan_horizon": SCAN_HORIZON, "tol_rel": float(tol),
            "ell": [int(x) for x in ell], "delta": [float(x) for x in delta],
+           # point 15: how close each ℓ is to flipping (smallest |c − τ| among its tests)
+           "tau_margin": [float(x) if np.isfinite(x) else None for x in tau_margin],
+           "tau_margin_min": (float(np.min(tau_margin[np.isfinite(tau_margin)]))
+                              if np.isfinite(tau_margin).any() else None),
            "zbar_m": [float(x) for x in zbar], "theta_deg": [float(x) for x in theta],
            "chainage_m": [float(x) for x in chain],
            "D_total": float(np.concatenate(([0.0], np.cumsum(delta)))[-1]),
@@ -658,43 +708,196 @@ def covis_inputs(scan_dir: Path, *, cache_path: Optional[Path] = None,
     return doc, "measured"
 
 
-def plan_session(scan_dir: Path, *, cache_path: Optional[Path] = None,
-                 log: Callable = print) -> Dict[str, Any]:
-    """The session's chunk plan: {"ranges": [(start, end), ...], "report": {...}}. The report
-    carries n, D_total, H, tol_rel, every chunk's D / frames / metres / seam depth, the cuts, the
-    flags, the input stamp and the sha256 of exactly what the planner read. It depends on the
-    co-visibility measurement ONLY — never on the card (USER 2026-10-06)."""
-    doc, source = covis_inputs(scan_dir, cache_path=cache_path, log=log)
+FROZEN_NAME = "chunk_plan_frozen.json"
+FROZEN_VERSION = 1
+
+
+def _planner_constants() -> Dict[str, Any]:
+    """What a plan is a function of beyond the measurement: the method's constants."""
+    return {"H": H_LENGTHS_PER_CHUNK, "min_chunk_frames": MIN_CHUNK_FRAMES, "tau": TAU,
+            "tol_quantile": TOL_QUANTILE, "samples_per_frame": SAMPLES,
+            "scan_horizon": SCAN_HORIZON}
+
+
+def _walk_keyframes(scan_dir: Path) -> Optional[List[int]]:
+    """The keyframes walk.json was measured over (its chainage frames), None when not recorded."""
+    from intake.walk import load_walk
+    ch = (load_walk(scan_dir) or {}).get("chainage")
+    if not ch:
+        return None
+    return [int(c["frame"]) for c in ch]
+
+
+def _load_frozen(scan_dir: Path) -> Optional[Dict[str, Any]]:
+    p = Path(scan_dir) / "intake" / FROZEN_NAME
+    if not p.exists():
+        return None
+    try:
+        doc = json.loads(p.read_text())
+    except (OSError, ValueError) as e:
+        raise CovisError(f"{p} is unreadable ({e}) — the session's frozen chunk plan cannot be read "
+                         f"back; delete it to plan again") from e
+    return doc if doc.get("version") == FROZEN_VERSION else None
+
+
+def _reusable_measurement(scan_dir: Path, cache_path: Optional[Path]) -> Optional[Dict[str, Any]]:
+    """The persisted measurement when its stamp is current — never measured here."""
+    path = Path(cache_path) if cache_path else Path(scan_dir) / "intake" / COVIS_NAME
+    try:
+        stamp, _parts = input_stamp(scan_dir)
+        old = json.loads(path.read_text()) if path.exists() else None
+    except (CovisError, OSError, ValueError):
+        return None
+    if isinstance(old, dict) and old.get("version") == COVIS_VERSION and old.get("stamp") == stamp:
+        return old
+    return None
+
+
+def planning_indices(scan_dir: Path, frames: List[int]) -> List[int]:
+    """The indices (into ``frames``, the keyframes in walk order) of the PARALLAX keyframes — the
+    ones the plan is measured on. A keyframe the selector closed by rotation (selected_frames.json
+    keyframes[].closed_by == "rotation") is not one; a selection written before that field
+    existed has only parallax keyframes. A frame the selection does not list FAILS: the windows
+    were built on another keyframe set."""
+    p = Path(scan_dir) / "frames" / "selected_frames.json"
+    try:
+        sel = json.loads(p.read_text())
+    except (OSError, ValueError) as e:
+        raise CovisError(f"{p} is unreadable ({e}) — the plan needs the keyframes' kinds") from e
+    kinds = {int(k["frame"]): str(k.get("closed_by", "quantum")) for k in sel.get("keyframes", [])}
+    if kinds:
+        missing = [int(f) for f in frames if int(f) not in kinds]
+        if missing:
+            raise CovisError(f"{len(missing)} keyframe(s) of the windows are not in {p} (first "
+                             f"{missing[0]}) — the windows were built on another keyframe set")
+    return [i for i, f in enumerate(frames) if kinds.get(int(f), "quantum") != "rotation"]
+
+
+def _report_of(scan_dir: Path, doc: Dict[str, Any], source: str) -> Dict[str, Any]:
     delta = np.asarray(doc["delta"], dtype=np.float64)
     zbar = np.asarray(doc["zbar_m"], dtype=np.float64)
     theta = np.asarray(doc["theta_deg"], dtype=np.float64)
     det = plan_detail(delta, zbar, theta)
     chain = doc["chainage_m"]
     frames = doc["frames"]
+    n_full = len(frames)
+    # the plan is measured on the planning subsequence (the parallax keyframes); every range it
+    # reports is mapped to FULL keyframe indices — a boundary at planning keyframe p becomes the
+    # full index of p, the end of the walk stays n — so the rotation keyframes between two
+    # planning keyframes fall inside the chunk that holds both
+    plan_index = [int(i) for i in doc.get("plan_index", list(range(n_full)))]
+    full_of = plan_index + [n_full]
+    pframes = [frames[i] for i in plan_index]
+    n_plan = len(plan_index)
+
+    def _full(r):
+        return [int(full_of[int(r[0])]), int(full_of[int(r[1])])]
     for ch in det["chunks"]:
         s, e = ch["range"]
         ch["metres"] = float(chain[e - 1] - chain[s])
-        ch["keyframes"] = [frames[s], frames[e - 1]]
+        ch["keyframes"] = [pframes[s], pframes[e - 1]]
+        ch["plan_range"] = [int(s), int(e)]
+        ch["plan_frames"] = int(e - s)
+        ch["range"] = _full(ch["range"]); ch["frames"] = ch["range"][1] - ch["range"][0]
+        if ch.get("seam_after"):
+            ch["seam_after"]["plan_range"] = list(ch["seam_after"]["range"])
+            ch["seam_after"]["range"] = _full(ch["seam_after"]["range"])
+            ch["seam_after"]["frames"] = ch["seam_after"]["range"][1] - ch["seam_after"]["range"][0]
+    for bl in det["blocks"]:
+        bl["plan_range"] = list(bl["range"]); bl["range"] = _full(bl["range"])
+        bl["frames"] = bl["range"][1] - bl["range"][0]
     for cu in det["cuts"]:
-        cu["frame"] = frames[cu["index"]]
-        cu["chainage_m"] = float(chain[cu["index"]])
-    ranges = [(int(a), int(b)) for a, b in det["ranges"]]
-    report = {"version": 2, "method": "covis", "session": str(scan_dir), "tau": TAU,
-              "tol_rel": doc["tol_rel"], "walk_m": float(chain[-1]), **det, "ranges": ranges,
-              "input_stamp": doc["stamp"], "measurement": source,
-              "inputs_sha256": inputs_sha256(delta, zbar, theta, MIN_CHUNK_FRAMES,
-                                             H_LENGTHS_PER_CHUNK),
-              # the windows this measurement was read from (a measurement persisted before the
-              # layout was recorded: windows.json is the stamped one, so read it there) and the
-              # layout H was calibrated at — recorded side by side, never acted on (review
-              # 2026-10-06; the decision is the user's)
-              "window_layout": doc.get("window_layout") or window_layout(scan_dir),
-              "H_calibration_layout": H_CALIBRATION_LAYOUT}
+        cu["plan_index"] = int(cu["index"]); cu["index"] = int(full_of[int(cu["index"])])
+        cu["frame"] = pframes[cu["plan_index"]]
+        cu["chainage_m"] = float(chain[cu["plan_index"]])
+    det["plan_ranges"] = [(int(a), int(b)) for a, b in det["ranges"]]
+    ranges = [tuple(_full(r)) for r in det["ranges"]]
+    det["n_plan"] = n_plan
+    det["n"] = n_full
+    det["n_rotation_keyframes"] = n_full - n_plan
+    return {"version": 2, "method": "covis", "session": str(scan_dir), "tau": TAU,
+            "tol_rel": doc["tol_rel"], "walk_m": float(chain[-1]), **det, "ranges": ranges,
+            "input_stamp": doc["stamp"], "measurement": source,
+            "inputs_sha256": inputs_sha256(delta, zbar, theta, MIN_CHUNK_FRAMES,
+                                           H_LENGTHS_PER_CHUNK),
+            # how close every ℓ sat to flipping (point 15; None on a measurement older than it)
+            "tau_margin_min": doc.get("tau_margin_min"),
+            # the windows this measurement was read from (a measurement persisted before the
+            # layout was recorded: windows.json is the stamped one, so read it there) and the
+            # layout H was calibrated at — recorded side by side, never acted on (review
+            # 2026-10-06; the decision is the user's)
+            "window_layout": doc.get("window_layout") or window_layout(scan_dir),
+            "H_calibration_layout": H_CALIBRATION_LAYOUT}
+
+
+def plan_session(scan_dir: Path, *, cache_path: Optional[Path] = None,
+                 log: Callable = print) -> Dict[str, Any]:
+    """The session's chunk plan: {"ranges": [(start, end), ...], "report": {...}}. The report
+    carries n, D_total, H, tol_rel, every chunk's D / frames / metres / seam depth, the cuts, the
+    flags, every bar's margin, the input stamp and the sha256 of exactly what the planner read.
+    It depends on the co-visibility measurement ONLY — never on the card (USER 2026-10-06).
+
+    THE PLAN IS FROZEN PER SESSION (docs/plan_determinismo.md point 15, 2026-10-07): the first
+    plan of a keyframe set is written to ``<session>/intake/chunk_plan_frozen.json`` and every
+    later run over the SAME keyframes and planner constants returns it — a re-measurement whose
+    integer ℓ or DP thresholds flip on noise never re-plans the session (it is DECLARED, with the
+    plan it would have given). Another keyframe set plans again and freezes that plan. With the
+    keyframes known from walk.json, the frozen plan needs no measurement at all."""
+    scan_dir = Path(scan_dir)
+    planner = _planner_constants()
+    frozen = _load_frozen(scan_dir)
+    fpath = scan_dir / "intake" / FROZEN_NAME
+
+    def _frozen_for(frames: Optional[List[int]]) -> bool:
+        return (frozen is not None and frames is not None and frozen.get("planner") == planner
+                and [int(f) for f in frozen.get("keyframes", [])] == [int(f) for f in frames])
+
+    def _from_frozen(doc_now: Optional[Dict[str, Any]], source: str) -> Dict[str, Any]:
+        ranges = [(int(a), int(b)) for a, b in frozen["ranges"]]
+        rep = dict(frozen["report"], ranges=ranges, measurement=source, plan_frozen=str(fpath))
+        if doc_now is not None:
+            now = _report_of(scan_dir, doc_now, "reused")
+            # the informational fields follow the CURRENT measurement (the window layout it was
+            # read from, the τ margins) — recorded, never acted on; the ranges are the frozen ones
+            for k in ("window_layout", "tau_margin_min"):
+                if now.get(k) is not None:
+                    rep[k] = now[k]
+            if [tuple(r) for r in now["ranges"]] != ranges:
+                rep["replan_declined"] = {"ranges_now": now["ranges"],
+                                          "input_stamp_now": now["input_stamp"],
+                                          "margins_now": now.get("margins")}
+                log(f"{LOG_TAG} ⚠ the current measurement (stamp {now['input_stamp'][:12]}) would "
+                    f"plan {now['ranges']}; the session's FROZEN plan {ranges} stays (point 15 — "
+                    f"declared; delete {fpath.name} to plan again)")
+        log(f"{LOG_TAG} the session's frozen chunk plan reused ({fpath.name}: "
+            f"{len(ranges)} chunk(s) over {len(frozen['keyframes'])} keyframes)")
+        return {"ranges": ranges, "report": rep}
+
+    if _frozen_for(_walk_keyframes(scan_dir)):
+        return _from_frozen(_reusable_measurement(scan_dir, cache_path), "frozen")
+    doc, source = covis_inputs(scan_dir, cache_path=cache_path, log=log)
+    if _frozen_for(doc["frames"]):
+        return _from_frozen(doc, "frozen")
+    report = _report_of(scan_dir, doc, source)
+    ranges = [(int(a), int(b)) for a, b in report["ranges"]]
+    if frozen is not None:
+        log(f"{LOG_TAG} {fpath.name} froze another keyframe set or planner — this one is planned "
+            f"and frozen instead")
+    fz = {"version": FROZEN_VERSION, "keyframes": [int(f) for f in doc["frames"]],
+          "planner": planner, "ranges": [[a, b] for a, b in ranges],
+          "report": json.loads(json.dumps(report))}
+    fpath.parent.mkdir(parents=True, exist_ok=True)
+    tmp = fpath.with_name(fpath.name + ".tmp")
+    tmp.write_text(json.dumps(fz, indent=1))
+    os.replace(tmp, fpath)
+    report["plan_frozen"] = str(fpath)
     return {"ranges": ranges, "report": report}
 
 
 def format_plan(rep: Dict[str, Any]) -> List[str]:
-    out = [f"{LOG_TAG} plan {rep.get('session', '')}: {rep['n']} keyframes, "
+    out = [f"{LOG_TAG} plan {rep.get('session', '')}: {rep['n']} keyframes"
+           + (f" ({rep['n_plan']} parallax planned on, {rep['n_rotation_keyframes']} rotation inside the chunks)"
+              if rep.get("n_plan") is not None else "") + ", "
            f"walk {rep.get('walk_m', float('nan')):.1f} m, tol_rel {rep.get('tol_rel', float('nan')) * 100:.1f} %, "
            f"D_total {rep['D_total']:.2f}, H {rep['H']:g} → "
            + ("ONE pass" if rep["single_pass"] else f"{len(rep['ranges'])} chunks ({len(rep['blocks'])} blocks)")
@@ -714,6 +917,15 @@ def format_plan(rep: Dict[str, Any]) -> List[str]:
         out.append(f"  optimum: {o['blocks']} blocks, worst seam z̄ {o['worst_seam_depth_m']}, "
                    f"worst cut {o['worst_cut_deg']}°, block budget {o['block_budget']}, "
                    f"over budget {o['over_budget_blocks']}")
+    mg = rep.get("margins")
+    if mg:
+        out.append(f"  margins: D_total − H {mg['D_total_over_H']:+.4f}"
+                   + (f", tightest block H/2 − D {mg['min_block_margin']:.4f}"
+                      if mg.get("min_block_margin") is not None else "")
+                   + (f", block budget H/2 − {mg['block_budget_margin']:.4f}"
+                      if mg.get("block_budget_margin") is not None else "")
+                   + (f", tightest co-visibility test |c − τ| {rep['tau_margin_min']:.4f}"
+                      if rep.get("tau_margin_min") is not None else ""))
     wl = rep.get("window_layout")
     if wl:
         cal = rep.get("H_calibration_layout") or H_CALIBRATION_LAYOUT
@@ -726,7 +938,8 @@ def format_plan(rep: Dict[str, Any]) -> List[str]:
                                  else "the card that sized these windows is not recorded")
                       + ": H is not known to hold on this window layout (declared, not acted on)"))
     out.append(f"  input stamp {rep.get('input_stamp', '')[:16]}  inputs sha256 "
-               f"{rep.get('inputs_sha256', '')[:16]}  measurement {rep.get('measurement', '')}")
+               f"{rep.get('inputs_sha256', '')[:16]}  measurement {rep.get('measurement', '')}"
+               + (f"  frozen in {Path(rep['plan_frozen']).name}" if rep.get("plan_frozen") else ""))
     return out
 
 

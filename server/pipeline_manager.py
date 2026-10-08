@@ -626,12 +626,22 @@ class PipelineManager:
         USER 2026-09-28: "cuando lanzo reconstruir que borra todo, debe borrar
         todo, no debe dejar nada más que los frames y el video original ... ningún
         archivo, carpeta, absolutamente nada más". What survives: the frame images
-        (``frames/*.jpg|jpeg|png``) and ``source_video.*``. Everything else in the
+        (``frames/*.jpg|jpeg|png``) with their seal ``frames/manifest.json``
+        (docs/plan_determinismo.md points 67 / 76: what the frames ARE — decoder,
+        encoder, every frame's sha256), ``source_video.*`` and ``inputs/`` — the
+        rest of the CAPTURE (points 73 / 77, DECIDIDO 2026-10-07: the user's rule
+        taken with the whole capture as the original — the VIO trajectory that sets
+        the scale, the Stray export F0's K and the gauge read, the WebXR camera
+        data). Capture data still sitting in the scan's legacy places (the scan
+        root, ``stray/``) is MOVED into ``inputs/`` first, never deleted
+        (``ingestors.capture_inputs.move_legacy_capture``; two different copies of
+        one file FAIL the wipe before anything is touched). Everything else in the
         session directory goes, whatever wrote it — output/, intake/ (its marker
         made I0/I1 reuse a previous run's keyframes), the SAM3 ``frames_valid/``
         copy, the intake's JSON inside frames/, viewer prefs, the corrections
         ledger, a half-deleted ``.*.wiping-*`` directory. output/ is recreated
-        empty for the run.
+        empty for the run. Refused while the scan's frames are being written
+        (``intake.frames_manifest.extraction_in_progress``).
 
         Per-stage cleanup is not enough: it only ran for stages about to run, after
         the resume probes — a session whose every stage probed "complete" skipped
@@ -663,14 +673,25 @@ class PipelineManager:
 
         deleted = []
         from intake.quality import FRAME_SUFFIXES   # the frame images the intake reads
+        from intake import frames_manifest as _FM
+        from ingestors import capture_inputs as _CI
+        _busy = _FM.extraction_in_progress(session_dir)
+        if _busy:
+            raise RuntimeError(f"[Pipeline] Replace refused for {session_dir}: {_busy}")
+        # the capture data still in the scan's legacy places goes to inputs/ — never deleted
+        _moved = _CI.move_legacy_capture(session_dir, log=lambda m: logger.info(f"[Pipeline] {m}"))
         frames_dir = session_dir / "frames"
         for entry in sorted(session_dir.iterdir()) if session_dir.is_dir() else []:
             if entry.is_file() and entry.name.startswith("source_video"):
                 continue                                    # the original video
+            if entry.name == _CI.INPUTS_DIRNAME and entry.is_dir() and not entry.is_symlink():
+                continue                                    # the rest of the capture
             if entry == frames_dir and entry.is_dir() and not entry.is_symlink():
                 for f in sorted(entry.iterdir()):
                     if f.is_file() and f.suffix.lower() in FRAME_SUFFIXES:
                         continue                            # a frame image
+                    if f.is_file() and f.name == _FM.MANIFEST_NAME:
+                        continue                            # the frames' seal
                     if f.is_dir() and not f.is_symlink():
                         _rm_tree(f)
                     else:
@@ -712,7 +733,8 @@ class PipelineManager:
                     deleted.append(f.name)
 
         logger.info(f"[Pipeline] 🗑️ Replace: wiped {', '.join(deleted) or 'nothing'} "
-                    f"— every stage re-runs from scratch")
+                    f"— every stage re-runs from scratch"
+                    + (f"; capture data moved into inputs/: {', '.join(_moved)}" if _moved else ""))
 
     @staticmethod
     def _cleanup_stage_outputs(output_dir: Path, stage_id: StageId,
@@ -824,13 +846,42 @@ class PipelineManager:
         recon_requested = any(
             s.stage.enabled and s.stage.id == StageId.RECONSTRUCTION
             for s in job.stages)
+        # NOTHING STARTS while the scan's frames are being written (docs/plan_determinismo.md
+        # point 76): a video upload extracting right now (this process's writer claim) or the
+        # temp dir an extraction fills — or left behind when the backend restarted mid-way.
+        # The job fails with the reason instead of measuring a truncated video.
+        from intake.frames_manifest import extraction_in_progress
+        _busy = extraction_in_progress(session_dir)
+        if _busy:
+            await self._fail_before_stages(
+                job, f"Refused: the frames of this scan are not ready — {_busy}",
+                on_progress, on_complete)
+            return
         wiped_this_run = False
         if replace:
             wiped_this_run = True
-            self._wipe_outputs_for_replace(Path(session_dir), output_dir)
+            try:
+                self._wipe_outputs_for_replace(Path(session_dir), output_dir)
+            except Exception as e:  # noqa: BLE001 — the job fails with the reason, never hangs
+                await self._fail_before_stages(job, f"Replace refused: {e}", on_progress,
+                                               on_complete)
+                return
         elif recon_requested:
             logger.info("[Pipeline] reconstruction requested without replace → RESUME: "
                         "output/ kept, each stage reuses what its own guards accept")
+
+        # THE JOB'S CONFIGURATION, FROZEN (docs/plan_determinismo.md point 69, 2026-10-07):
+        # output/run_config.yaml + its sha256, written once here — after the replace wipe,
+        # before the first stage — from the dict every worker of this job receives. Every
+        # step reads THAT copy (the intake refuses a configuration that is not it) and stamps
+        # its products with its sha256; nothing re-reads config.yaml from disk mid-job.
+        from intake.run_config import freeze_run_config
+        _frozen = freeze_run_config(
+            session_dir, config,
+            stages={s.stage.id.value: dict(s.stage.config) for s in job.stages if s.stage.config},
+            log=lambda m: logger.info(f"[Pipeline] {m}"))
+        logger.info(f"[Pipeline] run configuration frozen: {_frozen['path']} "
+                    f"(sha256 {_frozen['sha256'][:12]})")
 
         # RESUME MODE (no wipe): the pipeline detects on its own which stages
         # this session already completed (artifact + freshness probes) and only
@@ -915,6 +966,26 @@ class PipelineManager:
         # the card is free — whoever is waiting goes in (USER 2026-09-23). It
         # runs after on_complete so the finished session has already published
         # its cloud before the next one takes the GPU.
+        await self._start_next_queued()
+
+    async def _fail_before_stages(self, job: PipelineJob, message: str,
+                                  on_progress: Optional[ProgressCallback],
+                                  on_complete: Optional[Callable[[str, bool], Awaitable[None]]]
+                                  ) -> None:
+        """End a job that cannot start (its frames are being written, the replace wipe was
+        refused): the first enabled stage carries the reason, the job is FAILED, the callbacks
+        run and the queue moves on — the same ending as a failed stage."""
+        logger.error(f"[Pipeline] {job.session_id}: {message}")
+        first = next((ss for ss in job.stages if ss.stage.enabled), None)
+        if first is not None:
+            first.status = JobStatus.FAILED
+            first.message = message
+        job.status = JobStatus.FAILED
+        job.ended_at = time.time()
+        if on_progress:
+            await on_progress(job.session_id, job.to_dict())
+        if on_complete:
+            await on_complete(job.session_id, False)
         await self._start_next_queued()
 
     async def _run_stage(

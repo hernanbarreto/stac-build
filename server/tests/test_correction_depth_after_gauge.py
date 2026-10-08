@@ -47,7 +47,18 @@ def _scfg():
 
 
 def _gauge(out: Path, applied: bool = True) -> None:
-    (out / "gauge.json").write_text(json.dumps({"version": 1, "applied": applied}))
+    """gauge.json as F2 leaves it: stamped (plan point 146 — gauge_applied verifies the stamp
+    against the session and the applied epoch against the live lineage)."""
+    from correction.epoch import current_epoch, reconstruction_id_or_none
+    from precision import gauge as G
+    from precision.config import load_precision_config
+    from reconstruction.loops.config import improvement_error_factor
+    from config import cfg as raw_cfg
+    params = G.gauge_params(load_precision_config().gauge, improvement_error_factor(raw_cfg))
+    (out / "gauge.json").write_text(json.dumps(
+        {"version": 1, "applied": applied, "params": params,
+         "epoch_to": int(current_epoch(out)) if applied else None,
+         G.GAUGE_STAMP_KEY: G.gauge_stamp(out.parent, params, reconstruction_id_or_none(out))}))
 
 
 def _rows(out: Path, rows, epoch: int = 0) -> None:

@@ -14,6 +14,12 @@ What an epoch of poses carries, through the same journaled swap as every epoch:
 ``scale_diagnostics.json`` regenerated, ``geometry_epoch.json`` and the exact
 per-keyframe transform ``corrections/epoch_<N>.npz`` (replayable). No cloud, no
 octree, no instance store.
+
+Reproducible (docs/plan_determinismo.md points 36 / 45): the correction id is DERIVED from what the
+epoch is — its kind, the epochs it goes from / to, the poses it started from, the transform and
+its diagnosis — so two runs of the same chain write the same id, ledger line, epoch record and
+report; the poses are written float64 round-trip exact; no wall clock enters any of these files
+(when the run happened is in ``corrections.timing.jsonl``).
 """
 
 from __future__ import annotations
@@ -74,8 +80,12 @@ def apply_pose_epoch(output_dir: Path, R_kf: np.ndarray, t_kf: np.ndarray,
     if R_kf.shape != (n, 3, 3) or t_kf.shape != (n, 3) or k_kf.shape != (n,):
         raise PosesEpochError(f"{kind}: transform shapes {R_kf.shape} / {t_kf.shape} / "
                               f"{k_kf.shape} do not match the {n} keyframes")
-    cid = ledger.new_correction_id()
     epoch_from, epoch_to = int(current_epoch(out)), int(next_epoch(out))
+    # the id is what the epoch IS, not when it was made (point 36)
+    # (the diagnosis enters as the text its report is written with — json, default=float)
+    cid = ledger.new_correction_id("poses_epoch", kind, epoch_from, epoch_to,
+                                   [int(f) for f in frames], poses, R_kf, t_kf, k_kf,
+                                   json.dumps(list(diagnosis), sort_keys=True, default=float))
     tx = out / f"{TX_PREFIX}{epoch_to}"
     if tx.exists():
         shutil.rmtree(tx)
@@ -121,6 +131,11 @@ def apply_pose_epoch(output_dir: Path, R_kf: np.ndarray, t_kf: np.ndarray,
     # 3) scale diagnostics regenerated for the epoch
     diag = diag_mod.regenerate_scale_diagnostics(out, {}, epoch_to, cid)
     if diag is not None:
+        # the history entry this call appended carries a wall clock: it is recorded in the
+        # ledger's timing file (record_run below), never in the compared artifact (point 36)
+        for e in diag.get("epochs") or []:
+            if isinstance(e, dict) and e.get("correction_id") == cid:
+                e.pop("created_at", None)
         (tx / "scale_diagnostics.json").write_text(json.dumps(diag, indent=2))
         art("scale_diagnostics.json")
 

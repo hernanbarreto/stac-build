@@ -795,11 +795,16 @@ intake:
     focal_probe_res: native            # DA3 process_res of the probe: the frames' long side (USER
                                        # 2026-09-28: maximum resolution, never an upsampling)
     focal_probe_model: depth-anything/DA3NESTED-GIANT-LARGE-1.1   # the gauge's DA3 model
-    vram_calibration_frames: 2         # BOUND: the one DA3 window that MEASURES the card's footprint at the
-                                       # session's native resolution (intake/vram.py); every DA3 window of
-                                       # the probe and of the gauge is then sized from that measurement
-                                       # (zaragoza 2026-10-04: 1080p, 2 frames = 25.8 GiB; 16 did not fit)
-    vram_margin_frac: 0.15             # BOUND: share of the free VRAM a window leaves unused
+    vram_calibration_frames: 2         # BOUND: frames of the one DA3 window the CALIBRATION CLI (`python -m
+                                       # intake.vram --calibrate`, run BY HAND on a new card or resolution)
+                                       # measures the card's footprint on; the entry it writes to
+                                       # server/card_table.json is committed and NO RUN measures or caches
+                                       # it (docs/plan_determinismo.md 5/6, 2026-10-07; the per-session
+                                       # da3_vram.json cache is gone). zaragoza 2026-10-04: 1080p, 2 frames
+                                       # = 25.8 GiB; 16 did not fit
+    vram_margin_frac: 0.15             # BOUND: share of the card's TOTAL memory (the card table's, never the
+                                       # free memory of the moment) a DA3 window — and Omega's resolution —
+                                       # leaves unused; a window or pass that still does not fit FAILS (point 4)
     reference_tol: 1.0e-12             # declared convergence tolerance of the rotation fit (step,
                                        # cost change and gradient): the reading is the minimum, not
                                        # wherever a loose stop left it (USER 2026-09-28: identical
@@ -2391,6 +2396,14 @@ reconstruction:
       min_rows: 20                      # a keyframe whose window holds fewer landmark rows keeps Omega's depth
                                         #   (k = 1) — epoch 7
       min_depth_m: 0.05                 # landmark rows where Omega's depth is under this are not used (epoch 7)
+      # USER 2026-10-07 (docs/plan_determinismo.md points 48 / 49): the per-keyframe fit is JUDGED —
+      # c1, c2 enter only if |c| >= improvement_error_factor x their measured fit error; c0 is verified
+      # on >= 5 held-out rows of that keyframe by the rule of point 1 (else the pooled fit of its
+      # neighbours); the window is the smoothest whose held-out error is within that factor x the
+      # measured error of the best. The confidence is the chain's declared one (as refine / gauge).
+      heldout_confidence: 0.95          # declared confidence (as everywhere else)
+      bootstrap: 2000                   # BOUND (cost): resamples (as refine.permutations / metric_lock)
+      seed: 0                           # their fixed seed
     flyers:                             # Phase 0 of the mono-detail work (claude_stac.txt 2026-10-04): flyer
                                         # diagnosis of the published cloud (precision/flyers.py). A flyer is an
                                         # ISOLATED point or one BETWEEN two surfaces of its own frame; classes
@@ -2429,6 +2442,10 @@ reconstruction:
       dinov3_dir: vendor/pointdit/pretrained/dinov3
       norm_max: 2.9                     # output norm above this = invalid pixel (the paper: sky dome at 3.0)
       verify_sha256: true               # every checkpoint checked against the prefix in its name, once per file
+      seed: 0                           # docs/plan_determinismo.md point 54: every inference runs under
+                                        #   repro.deterministic_torch(seed) — strict deterministic kernels, TF32
+                                        #   off, cuDNN fixed; the ODE starts from zeros and draws nothing, the
+                                        #   seed completes the record (card + numerics land in depth_on_f5.json)
       tile_px: 512                      # BOUND (model): native tile side = PointDiT's training size
       tile_overlap_frac: 0.25           # share of a tile its neighbour repeats; feathered after the alignment
       context_scale: 1.0                # 1.0 = native tiles (finest detail); 2.0 = twice the window, downscaled
@@ -2468,10 +2485,20 @@ reconstruction:
       max_points: 6000000               # BOUND (cost): subsample of the cloud
       score_stride: 10                  # BOUND (cost): every 10th point scores a RANSAC candidate
       seed: 0
-      edge_max_objects: 20              # BOUND (cost): the largest objects the edge metric measures in the acta
-                                        #   (pccr 2026-10-04: ~1 min per object; one object held the in-process call
-                                        #   for over 30 min → the metric now runs in a subprocess under the timeout)
-      edge_timeout_s: 900               # BOUND (cost): the whole edge metric is killed past this and declared unmeasured
+      # docs/plan_determinismo.md point 138 (2026-10-07): the edge metric is bounded by WORK, never by a
+      # clock — zaragoza 2026-10-05 lost the acta's edges to a 900 s wall-clock timeout that pccr never hit.
+      # The objects are the `edge_max_objects` largest by point count (ties by instance id) and each enters
+      # with at most `edge_max_points_per_object` points, chosen by a stable per-point key (the point's
+      # frame / pixel, else its float32 bits — the same sample every run, whatever the load).
+      edge_max_objects: 20              # BOUND (work): the objects the acta measures (the 2026-10-04 bound)
+      edge_max_points_per_object: 380000  # BOUND (work), DERIVED from the 900 s budget the user accepted for 20
+                                        #   objects (45 s each) on this box's MEASURED rate (2026-10-07, one thread,
+                                        #   AMD EPYC 7763, a two-plane object with one crease: 200,000 pts → 18.1 s,
+                                        #   800,000 → 127.5 s, i.e. t ∝ n^1.41): n = 200,000 × (45 / 18.1)^(1 / 1.41)
+                                        #   ≈ 380,000 points; VALIDATED the same day: 380,000 pts → 37.4 s and 37.8 s
+                                        #   (two runs), under the 45 s per object. The rate is this box's; another
+                                        #   box changes the time, never the sample (the rule is stable).
+      # NO edge_timeout_s (point 138): a hung process is the cancel path's to kill, never a verdict on the metric.
     chunk_check:                        # USER 2026-09-29: per-chunk AND per-keyframe verification of
                                         # the corrected geometry against the floor/ceiling, DA3 as the
                                         # independent instrument (precision/chunk_check.py). Verdict per
@@ -2482,7 +2509,11 @@ reconstruction:
       band_m: 0.08                      # half-height of the band around that percentile
       min_points: 200                   # BOUND: fewer band samples = the keyframe does not see it
       pixel_stride: 4                   # BOUND (cost): every 4th pixel of the depth maps
-      plane_min_inlier_frac: 0.2        # RANSAC acceptance of the session floor plane (pooled bands)
+      # NO plane_min_inlier_frac (USER 2026-10-07, docs/plan_determinismo.md point 140): the floor plane
+      # is always fitted (seeded RANSAC, point 50) and reported with its inlier share and interval —
+      # zaragoza 2026-10-05 measured 19.0 % against the 20 % bar and the whole session read UNDECIDED.
+      # The per-chunk verdicts follow the user's rule (>= 5 keyframe judges, CI at `confidence`,
+      # effect >= improvement_error_factor x the band's measured resolution). A leftover key fails the load.
       confidence: 0.95                  # declared confidence (as heldout_confidence)
       bootstrap: 400                    # BOUND (cost)
       seed: 0
@@ -2493,7 +2524,12 @@ reconstruction:
                                         # rate is compared with the expected one (abort with reason)
       python_da3: /workspace/miniforge3/envs/da3/bin/python
       python_mapanything: /workspace/miniforge3/envs/mapanything/bin/python
-      threads: 8                        # BOUND: fixed CPU threads of every step (determinism)
+      threads: 8                        # BOUND: fixed CPU threads of every step (determinism). F5 included:
+                                        # VERIFIED 2026-10-07 (plan point 58, tests/test_precision_refine.py
+                                        # test_the_solve_is_bit_identical_under_the_runners_blas_threads) — two
+                                        # F5 ladder solves at 8 BLAS threads hash identically, and identically
+                                        # to the 1-thread solve; the step env also pins OPENBLAS_CORETYPE=HASWELL
+                                        # (point 38, precision/runner.py) and records the CPU in every step record
 
 
 # ── Post-Processing (CloudCompPy) ──────────────────────────────────
@@ -3360,9 +3396,11 @@ correction_graph:
     min_correspondences: 20000      # ...and at least this many exact correspondences per side
     corr_per_frame: 20000           # exact correspondences kept per shared frame (equal voice)
     fit_sample: 200000              # IRLS sample per fit (robust_rigid / robust_sim3)
-    scale_tol_log: 0.05             # |log s_ab| beyond ~5 % → scale_break: the edge is KEPT
-                                    # with σ inflated and the seams between the chunks flagged
-    scale_break_sigma_factor: 4.0
+    # NO scale_tol_log / scale_break_sigma_factor (USER 2026-10-07, docs/plan_determinismo.md
+    # point 17 — "sin umbral ni factor"): a bridge's MEASURED scale disagreement is added IN
+    # QUADRATURE to its σ (|log s| x its lever arm for the pose edge, |log r| for its scale
+    # row), growing continuously — the ×4 beyond a 5 % step is gone. A leftover key fails the
+    # load.
     starved_sigma_m: 0.30           # σ recorded for the vendor point-map fallback (its
                                     # measured tolerance is 25–30 cm) — low confidence, never
                                     # silent, never in the optimizer (> max_edge_sigma_m)
@@ -3508,18 +3546,26 @@ correction_graph:
                                     # rejected a measured 12 % improvement. This is a declared
                                     # CONFIDENCE (how sure before we move geometry), not a
                                     # magnitude someone chose.
-    loop_holdout_frac: 0.25         # USER 2026-10-06: THE JUDGE of the in-run pose graph is a held-out
-                                    # share of the loop closures themselves — one in four, by chunk
-                                    # pair (every pair keeps a fitted edge), never fitted — measured
-                                    # at the chain and at the solution: the graph is applied ONLY
-                                    # when they improve beyond their own noise (heldout_change).
-                                    # The local held-out surface pairs (intra-chunk, a few frames
-                                    # apart) measure smoothness, not the global drift a closure
-                                    # corrects: on pccr 2408 they vetoed the only correction that
-                                    # mattered; applied unjudged ("la 2", the same day) bridges
-                                    # disagreeing by metres would have bent the chain.
-    loop_holdout_min_edges: 4       # BOUND: with fewer loop edges nothing can be held out — the
-                                    # local held-out pairs judge instead (2026-09-28), declared
+    # NO loop_holdout_frac / loop_holdout_min_edges (USER 2026-10-07, docs/plan_determinismo.md
+    # points 1-2): THE JUDGE of the in-run pose graph is EVERY loop closure, once — the graph is
+    # solved n times leaving one closure out, and that closure's residual is measured at the
+    # chain and at the solution that never saw it (leave-one-out; n judges = n closures). The
+    # share held out "one in four, by chunk pair" changed with the edge count and could never
+    # reach 5 judges on pccr's 10 edges in 7 chunk pairs. With fewer than
+    # min_judge_closures(heldout_confidence) closures (5 at 0.95) the graph is declared before
+    # solving and NOT applied; otherwise it applies only under the rule of
+    # improvement_error_factor below (error = the median own σ of the closures that pass the cycle
+    # consistency filter — USER 2026-10-07, never the largest of all). A leftover key fails the load.
+    improvement_error_factor: 1.1   # USER 2026-10-07: 1.1 in EVERY case ("el error ya es bastante grande";
+                                    # was 1.3, before that 2.0 — docs/plan_determinismo.md
+                                    # point 1 — "mejora ≥ 2 × el error"): THE USER'S RULE (metric_lock.decide_change)
+                                    # applies a correction only when (a) the whole bootstrap CI of the
+                                    # paired change is on the improving side, (b) at least
+                                    # min_judge_closures(heldout_confidence) judges testify (5 at
+                                    # 0.95) and (c) the median improvement is >= THIS FACTOR x the
+                                    # measured error of what is judged. ONE factor for every user of
+                                    # the rule (pose graph, scale drift, depth graph, F2 instrument,
+                                    # F5 camera, F6 c0): the precision stages read it here too.
     gate_mode: advisory             # advisory | veto. USER 2026-09-09 ("siempre debe aplicarse la
                                     # corrección de duplicados, no importa lo mucho que haya que
                                     # corregir") + pccr 2026-09-13 19:25: the four measured

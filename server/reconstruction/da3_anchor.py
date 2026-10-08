@@ -54,8 +54,16 @@ def extract_anchor_depths(frames_dir, output_dir, anchor_files: Iterable[str],
            "--model", str(model_id), "--per_frame"]
     log(f"DA3 anchor: isolated per-frame depth on {len(anchor_files)} frames "
         f"({model_id}) — no streaming")
+    # the deterministic environment (cuBLAS workspace, hash seed) and the ONE Hugging Face cache,
+    # offline, whoever launched this — map_worker or the fork (docs/plan_determinismo.md 27, 43)
+    import sys as _sys
+    if str(server_dir) not in _sys.path:
+        _sys.path.insert(0, str(server_dir))
+    import da3_weights
+    import repro
+    env = da3_weights.hf_env(repro.deterministic_env())
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1)
+                            text=True, bufsize=1, env=env)
     # A LONG STAGE MUST SAY WHERE IT IS (USER 2026-09-22). The extractor prints
     # almost nothing, and with every keyframe anchoring this runs for ~15 min on
     # a 216-frame session; counting what it has already written on disk is the

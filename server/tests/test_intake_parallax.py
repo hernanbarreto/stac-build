@@ -123,7 +123,7 @@ def _cloud(rng, n=600):
 
 def _reading(a, b, K):
     T = P.image_normaliser((640, 480))
-    x, H, _cost = P.fit_rotation(a, b, T, PCFG, T @ K)
+    x, H, _cost, _nfev = P.fit_rotation(a, b, T, PCFG, T @ K)
     return float(np.median(P.symmetric_transfer_error(H, P._inv3(H), a, b)))
 
 
@@ -155,11 +155,11 @@ def test_rotation_fit_is_bit_identical_and_converged():
     junk, seen = [], set()
     for k in range(12):
         junk.append(np.empty(k * 13 + 5))           # a different allocation history
-        x, H, cost = P.fit_rotation(a, b, T, PCFG, Kn)
+        x, H, cost, nfev = P.fit_rotation(a, b, T, PCFG, Kn)
         seen.add(hashlib.sha256(np.ascontiguousarray(H).tobytes()).hexdigest())
     assert len(seen) == 1
     # a start from elsewhere converges to the same minimum (well-posed)
-    x2, H2, _ = P.fit_rotation(a, b, T, PCFG, Kn, np.array([0.05, -0.02, 0.01]))
+    x2, H2, _, _ = P.fit_rotation(a, b, T, PCFG, Kn, np.array([0.05, -0.02, 0.01]))
     assert np.allclose(H2, H, atol=1e-9)
     assert P.fit_rotation(a, b, T, replace(PCFG, reference_max_eval=1), Kn) is None
 
@@ -262,7 +262,53 @@ def test_written_selection_satisfies_the_v2_contract(translation):
     assert warn["warning_kinds"] == list(P.WARNING_KINDS)
     for doc in (sel, wit, warn):
         assert doc["provenance"] == "tool_measured"
-        assert "geometry_epoch" in doc and "camera_epoch" in doc and "params" in doc
+        assert doc["geometry_epoch"] == 0 and doc["camera_epoch"] == 0 and "params" in doc
+        # no absolute path, no time: the inputs are session-relative (plan point 70) and the
+        # CPU environment is recorded (74 / 79)
+        assert doc["inputs"]["frames_dir"] == "frames"
+        assert str(sess.session_dir) not in json.dumps(doc)
+        assert doc["environment"]["libs"]["numpy"] and doc["environment"]["jpeg_decoders"]
+        assert doc["K"] == res["K"]
+
+
+def test_every_window_records_its_margins(translation):
+    """Plan point 65: the chain is kept; every window records how far each hard bar was from
+    flipping — the closing reading over hi, the band candidates' distance to the band edges,
+    the gap between the two best sharp_ranks, the worst forward-backward margin, the tracks
+    margin and the rotation fit's evaluations against its bound."""
+    _sess, _q, res = translation
+    q, band = PCFG.parallax_quantum_px, PCFG.keyframe_band_frac
+    lo, hi = q * (1 - band), q * (1 + band)
+    keys = {"closing_margin_px", "band_edge_min_px", "outside_band_nearest_px", "sharp_rank_gap",
+            "sharp_rank_frame_gap", "fb_margin_min_px", "tracks_margin", "nfev_max",
+            "nfev_margin"}
+    assert res["windows"] and all(set(w["margins"]) == keys for w in res["windows"])
+    by_frame = {r["frame"]: r for r in res["frames"]}
+    quantum = [w for w in res["windows"] if w["closed_by"] == "quantum"]
+    assert quantum
+    for w in quantum:
+        m = w["margins"]
+        if m["closing_margin_px"] is not None:
+            assert m["closing_margin_px"] > 0                    # p > hi closed it
+        assert m["band_edge_min_px"] is not None and 0 <= m["band_edge_min_px"] <= q * band
+        assert m["fb_margin_min_px"] is not None and m["fb_margin_min_px"] <= PCFG.fb_max_px
+        assert m["tracks_margin"] >= 0                             # every measured frame had enough
+        assert 1 <= m["nfev_max"] <= PCFG.reference_max_eval
+        assert m["nfev_margin"] == PCFG.reference_max_eval - m["nfev_max"]
+        if m["sharp_rank_gap"] is not None:
+            assert 0 <= m["sharp_rank_gap"] <= 1 and m["sharp_rank_frame_gap"] >= 1
+        # the recorded band-edge margin is at most the least distance of a recorded band
+        # reading of this window to lo / hi (a record is a frame's LAST measurement: a later
+        # window may have re-measured a frame this window saw, so the records are a subset)
+        in_band = [r["parallax_px"] for r in by_frame.values()
+                   if r["anchor"] == w["anchor"] and not r["lost"] and lo <= r["parallax_px"] <= hi]
+        if in_band:
+            assert m["band_edge_min_px"] <= min(min(p - lo, hi - p) for p in in_band) + 1e-9
+    # the margins land in selected_frames.json with the windows
+    sel = json.loads((_sess.frames_dir / P.SELECTED_FRAMES_NAME).read_text()) \
+        if (_sess.frames_dir / P.SELECTED_FRAMES_NAME).exists() else \
+        P.selected_frames_document(res, PCFG)
+    assert all("margins" in w for w in sel["windows"])
 
 
 def test_two_runs_are_identical(tmp_path, scene, cam):

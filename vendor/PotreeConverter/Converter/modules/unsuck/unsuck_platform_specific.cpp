@@ -1,6 +1,30 @@
 
 #include "unsuck.hpp"
 
+#include <cstdlib>
+#include <iostream>
+#include <thread>
+
+// STAC 2026-10-07 (docs/plan_determinismo.md point 57): POTREE_NUM_THREADS pins the number of worker
+// threads of the chunker and the indexer. MEASURED: two conversions of one LAS at the default count
+// (std::thread::hardware_concurrency, 252 on the pod, whatever the affinity) gave different
+// octree.bin / hierarchy.bin bytes - the node byte offsets are handed out by an atomic fetch_add in
+// the order the threads finish, and the chunks are flushed by parallel writers. Unset = the vendor's
+// behaviour; a value that is not a positive integer is refused (exit 2), never replaced.
+static int stacConfiguredProcessors() {
+	const char* s = std::getenv("POTREE_NUM_THREADS");
+	if (s == nullptr || *s == '\0') {
+		return int(std::thread::hardware_concurrency());
+	}
+	char* end = nullptr;
+	long n = std::strtol(s, &end, 10);
+	if (end == s || *end != '\0' || n < 1) {
+		std::cerr << "POTREE_NUM_THREADS=" << s << " is not a positive integer" << std::endl;
+		std::exit(2);
+	}
+	return int(n);
+}
+
 #ifdef _WIN32
 	#include "TCHAR.h"
 	#include "pdh.h"
@@ -102,7 +126,7 @@ void init() {
 
 	GetSystemInfo(&sysInfo);
 	// numProcessors = sysInfo.dwNumberOfProcessors;
-	numProcessors = std::thread::hardware_concurrency();
+	numProcessors = stacConfiguredProcessors();
 
 	GetSystemTimeAsFileTime(&ftime);
 	memcpy(&lastCPU, &ftime, sizeof(FILETIME));
@@ -303,7 +327,7 @@ static bool initialized = false;
 static unsigned long long lastTotalUser, lastTotalUserLow, lastTotalSys, lastTotalIdle;
 
 void init() {
-	numProcessors = std::thread::hardware_concurrency();
+	numProcessors = stacConfiguredProcessors();
 	
 	FILE* file = fopen("/proc/stat", "r");
     fscanf(file, "cpu %llu %llu %llu %llu", &lastTotalUser, &lastTotalUserLow, &lastTotalSys, &lastTotalIdle);

@@ -320,9 +320,29 @@ def _vertices_to_las(data: np.ndarray, las_path: Path, class_dir: Path, label: s
     return len(data)
 
 
+# ── one thread (docs/plan_determinismo.md point 57) ──────────────────────────────────────
+# The vendored converter (vendor/PotreeConverter, built with the STAC patches of 2026-10-07)
+# reads POTREE_NUM_THREADS: the chunker's and the indexer's worker count. MEASURED 2026-10-07 on
+# a 2.2 M-point synthetic cloud with exact coordinate ties: at the vendor's default (every
+# hardware thread) three conversions gave three different octree.bin / hierarchy.bin — the node
+# byte offsets are handed out by an atomic fetch_add in the order the threads FINISH; pinned to
+# ONE thread, three conversions were byte-identical (4.0 s vs 2.2 s on 16 cores). The octree is a
+# product of the epoch (what the viewer shows), so it is built on one thread, always.
+POTREE_THREADS_ENV = "POTREE_NUM_THREADS"
+POTREE_THREADS = "1"
+
+
+def potree_env() -> dict:
+    """The environment every PotreeConverter run gets: the caller's, with the thread count
+    pinned (never inherited from the shell — a stray value would change the bytes)."""
+    env = dict(os.environ)
+    env[POTREE_THREADS_ENV] = POTREE_THREADS
+    return env
+
+
 def _run_potree_converter(las_path: Path, output_dir: Path) -> bool:
-    """Run PotreeConverter 2.1 CLI on a LAS file.
-    
+    """Run PotreeConverter 2.1 CLI on a LAS file, on ONE thread (point 57).
+
     Returns True on success.
     """
     if not POTREE_BIN.exists():
@@ -347,7 +367,7 @@ def _run_potree_converter(las_path: Path, output_dir: Path) -> bool:
         "--encoding", "UNCOMPRESSED",
     ]
 
-    logger.info(f"[Potree] Running: {' '.join(cmd)}")
+    logger.info(f"[Potree] Running: {' '.join(cmd)} ({POTREE_THREADS_ENV}={POTREE_THREADS})")
 
     # NO wall-clock timeout (2026-09-28): 600 s on a slow disk discarded a whole
     # correction epoch as if its geometry were wrong. Duration is not a verdict;
@@ -356,6 +376,7 @@ def _run_potree_converter(las_path: Path, output_dir: Path) -> bool:
         cmd,
         capture_output=True,
         text=True,
+        env=potree_env(),
     )
 
     if result.returncode != 0:

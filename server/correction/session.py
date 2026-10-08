@@ -102,8 +102,12 @@ def read_poses(path: Path) -> np.ndarray:
 
 
 def write_poses(path: Path, poses: np.ndarray) -> None:
-    Path(path).write_text("\n".join(
-        " ".join(f"{x:.9f}" for x in P.reshape(-1)) for P in poses) + "\n")
+    """(N,4,4) c2w → camera_poses.txt, float64 ROUND-TRIP EXACT (docs/plan_determinismo.md point
+    45: '{:.9f}' / '{:.8g}' text rounded the poses on every pass between stages — F5 re-run from
+    the 'same' F2 poses started from another cost, 3.2625 vs 3.2395 px). Written atomically by
+    ``repro.write_poses_exact``; :func:`read_poses` and np.loadtxt read it back bit for bit."""
+    from repro import write_poses_exact
+    write_poses_exact(path, np.asarray(poses, dtype=np.float64))
 
 
 @dataclass(frozen=True)

@@ -116,22 +116,76 @@ def floor_metric(X: np.ndarray, c2w: np.ndarray, cfg, seed: int = 0) -> dict:
             "band_share": float(len(B) / max(len(X), 1)), "points_measured": int(len(X))}
 
 
-def _edge_metric_subprocess(out: Path, ply: Path, seg: Path, ids, timeout_s: float, log: Callable) -> dict:
-    """precision/edge_metric.py in its own process, killed at ``timeout_s`` (pccr 2026-10-04: one object,
-    electrical_panel_5, held the certify stage for over half an hour in the in-process call; a report
-    may never hold the pipeline). Returns the parsed report; raises on a timeout or a failure."""
+EDGE_REPORT = "edge_metric.json"
+EDGE_OBJECTS = "edge_metric_objects.json"      # the sampled instances handed to the subprocess (transient)
+_KEY_FIELDS = ("frame_global", "pixel_row", "pixel_col")
+
+
+def select_edge_objects(instances: list, n_max: int) -> list:
+    """The ``n_max`` LARGEST instances by point count, ties broken by instance id — a stable rule
+    (docs/plan_determinismo.md point 138), not the order a JSON happened to list them in.
+    Returns [(n_points, instance_id, instance)]."""
+    rows = []
+    for inst in instances:
+        gi = inst.get("globalIndices") or []
+        n = int(inst.get("total_points") or len(gi))
+        iid = int(inst.get("instance_id", inst.get("id")))
+        rows.append((n, iid, inst))
+    rows.sort(key=lambda t: (-t[0], t[1]))
+    return rows[:int(n_max)]
+
+
+def _splitmix64(x: np.ndarray) -> np.ndarray:
+    """A fixed 64-bit mix (SplitMix64's finaliser) — a point's rank in the sample never depends
+    on its neighbours or on the cloud's size."""
+    z = x.astype(np.uint64) + np.uint64(0x9E3779B97F4A7C15)
+    z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+    z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+    return z ^ (z >> np.uint64(31))
+
+
+def stable_point_keys(fields: dict, rows: np.ndarray) -> np.ndarray:
+    """One int64 per row that names the POINT, not its position: (frame_global, pixel_row,
+    pixel_col) when the cloud carries its provenance (the key precision/edge_metric.py pairs
+    epochs with), else the float32 bits of x, y, z."""
+    rows = np.asarray(rows, np.int64)
+    if all(k in fields for k in _KEY_FIELDS):
+        fg = np.asarray(fields["frame_global"])[rows].astype(np.int64)
+        pr = np.asarray(fields["pixel_row"])[rows].astype(np.int64) & 0xFFFF
+        pc = np.asarray(fields["pixel_col"])[rows].astype(np.int64) & 0xFFFF
+        return (fg << 32) | (pr << 16) | pc
+    bits = [np.ascontiguousarray(np.asarray(fields[k], np.float32)[rows]).view(np.uint32).astype(np.uint64)
+            for k in ("x", "y", "z")]
+    return ((bits[0] << np.uint64(32)) | bits[1] ^ (bits[2] << np.uint64(16))).astype(np.int64)
+
+
+def stable_point_sample(fields: dict, rows: np.ndarray, n_max: int) -> np.ndarray:
+    """At most ``n_max`` of ``rows``, the ones whose mixed stable key ranks lowest (ties — identical
+    points — by row order, stable sort), returned in row order: the same points every run, on
+    every machine (point 138; the construction of point 11's stable pixel keys)."""
+    rows = np.asarray(rows, np.int64)
+    if len(rows) <= int(n_max):
+        return rows
+    h = _splitmix64(stable_point_keys(fields, rows).view(np.uint64))
+    order = np.argsort(h, kind="stable")[:int(n_max)]
+    return np.sort(rows[order])
+
+
+def _edge_metric_subprocess(out: Path, ply: Path, seg: Path, ids, log: Callable) -> dict:
+    """precision/edge_metric.py in its own process (pccr 2026-10-04: one object held the certify
+    stage for over half an hour in the in-process call). No wall clock bounds it (point 138): the
+    work is bounded by the objects and the points per object handed to it; a hung process is the
+    cancel path's to kill, never a verdict on the metric. The previous report is deleted first, so
+    a failed run never leaves another run's edges on disk. Returns the parsed report."""
     import subprocess
     import sys as _sys
-    out_path = out / "precision" / "edge_metric.json"
+    out_path = out / "precision" / EDGE_REPORT
+    if out_path.exists():
+        out_path.unlink()
     cmd = [_sys.executable, "-m", "precision.edge_metric", "--session-output", str(out), "--ply", str(ply),
            "--seg", str(seg), "--out", str(out_path), "--instance-ids", *[str(i) for i in ids]]
     server_dir = Path(__file__).resolve().parents[1]
-    t0 = time.time()
-    try:
-        proc = subprocess.run(cmd, cwd=str(server_dir), capture_output=True, text=True, timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        raise CloudMetricsError(f"edge metric killed after {timeout_s:.0f} s (precision.cloud_metrics.edge_timeout_s) "
-                                f"on {len(ids)} object(s) — not measured this run")
+    proc = subprocess.run(cmd, cwd=str(server_dir), capture_output=True, text=True)
     for line in (proc.stdout or "").splitlines():
         if line.startswith("[edge]"):
             log(line)
@@ -141,8 +195,46 @@ def _edge_metric_subprocess(out: Path, ply: Path, seg: Path, ids, timeout_s: flo
     if not out_path.exists():
         raise CloudMetricsError("edge metric wrote no report")
     rep = json.loads(out_path.read_text())
-    rep["seconds"] = rep.get("seconds", round(time.time() - t0, 1))
+    secs = rep.pop("seconds", None)                       # the clock leaves the compared report
+    out_path.write_text(json.dumps(rep, indent=1, allow_nan=False))
+    rep["_seconds"] = secs
     return rep
+
+
+def edge_work(out: Path, ply: Path, seg: Path, cfg, log: Callable) -> tuple:
+    """The WORK the edge metric gets (point 138): the ``edge_max_objects`` largest instances, each
+    sampled to ``edge_max_points_per_object`` points by the stable key. Writes the sampled
+    instances as ``precision/edge_metric_objects.json`` (what the subprocess measures; removed
+    after the run) and returns (that path, the instance ids, the per-object record)."""
+    from segmentation.perfect_object import _read_ply_fields
+    doc = json.loads(seg.read_text())
+    chosen = select_edge_objects(doc.get("instances", []), int(cfg.edge_max_objects))
+    if not chosen:
+        raise CloudMetricsError("no segmented instance to measure" if int(cfg.edge_max_objects) > 0
+                                else "edge_max_objects is 0 — the edge metric is off")
+    fields = _read_ply_fields(ply)
+    n_rows = len(fields["x"])
+    cap = int(cfg.edge_max_points_per_object)
+    insts, record = [], []
+    for n, iid, inst in chosen:
+        gi = np.asarray(inst.get("globalIndices") or [], np.int64)
+        gi = gi[(gi >= 0) & (gi < n_rows)]
+        kept = stable_point_sample(fields, gi, cap)
+        insts.append({"instance_id": iid, "label": inst.get("label", "segment"),
+                      "globalIndices": [int(v) for v in kept], "total_points": int(len(gi))})
+        record.append({"instance_id": iid, "label": inst.get("label", "segment"), "points": int(len(gi)),
+                       "points_measured": int(len(kept)), "sampled": bool(len(kept) < len(gi))})
+    p = out / "precision" / EDGE_OBJECTS
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"instances": insts, "rule": "largest edge_max_objects by point count (ties by "
+                                                          "instance id); per object the edge_max_points_per_object "
+                                                          "points of lowest stable key (point 138)"},
+                            separators=(",", ":")))
+    log(f"{LOG_TAG} edges: {len(insts)} object(s) of {len(doc.get('instances', []))}, "
+        f"{sum(r['points_measured'] for r in record):,} points measured "
+        f"({sum(1 for r in record if r['sampled'])} sampled to {cap:,}; keyed by "
+        f"{'frame/pixel' if all(k in fields for k in _KEY_FIELDS) else 'xyz bits'})")
+    return p, [iid for _, iid, _ in chosen], record
 
 
 def _epoch(out: Path) -> Optional[int]:
@@ -158,13 +250,18 @@ def run_cloud_metrics(session_dir: Path, pcfg, stage: str, log: Callable = print
     """Measure the live cloud of ``session_dir`` (floor always; edges when asked and a segmentation
     exists), write output/precision/cloud_metrics.json, return the report. A metric that cannot be
     measured is declared in the report, never silent, and never fails the caller."""
+    from correction.epoch import RECONSTRUCTION_ID_KEY, reconstruction_id_or_none
     from correction.session import read_ply
+    from precision.corrected_cloud import write_timing
     from precision.depth_sweep import _read_poses
     t0 = time.time()
     session_dir = Path(session_dir); out = session_dir / "output"
     cfg = pcfg.cloud_metrics
+    # no clock in the report (point 36 / 56): when it was measured goes to the timing sidecar;
+    # the reconstruction id names the geometry independently of the epoch history (point 63)
     rep: dict = {"version": 1, "provenance": PROVENANCE, "stage": stage, "geometry_epoch": _epoch(out),
-                 "measured_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+                 RECONSTRUCTION_ID_KEY: reconstruction_id_or_none(out)}
+    times: dict = {"stage": stage, "measured_at": time.strftime("%Y-%m-%d %H:%M:%S")}
     ply = out / "cleaned_cloud.ply"
     try:
         if not ply.exists():
@@ -183,28 +280,34 @@ def run_cloud_metrics(session_dir: Path, pcfg, stage: str, log: Callable = print
         log(f"{LOG_TAG} floor not measured: {e}")
     if edges:
         seg = out / "segmentation_result.json"
+        objects_path = None
         try:
             if not seg.exists():
                 raise CloudMetricsError("no segmentation_result.json — the edge metric needs the projected objects")
-            doc = json.loads(seg.read_text())
-            inst = sorted(doc.get("instances", []), key=lambda i: -int(i.get("total_points") or len(i.get("globalIndices") or [])))
-            ids = [int(i.get("instance_id", i.get("id"))) for i in inst[:int(cfg.edge_max_objects)]]
-            if not ids:
-                raise CloudMetricsError("edge_max_objects is 0 — the edge metric is off")
-            er = _edge_metric_subprocess(out, ply, seg, ids, float(cfg.edge_timeout_s), log)
+            t_e = time.time()
+            objects_path, ids, record = edge_work(out, ply, seg, cfg, log)
+            er = _edge_metric_subprocess(out, ply, objects_path, ids, log)
             objs = er.get("reference", {}).get("objects", [])
             summ = [o["summary"] for o in objs if o.get("summary") and o["summary"].get("n_creases")]
+            times["edges_seconds"] = er.get("_seconds")
+            times["edges_seconds_total"] = round(time.time() - t_e, 1)
             rep["edges"] = {"objects_measured": len(objs), "objects_with_creases": len(summ),
-                            "objects_bound": int(cfg.edge_max_objects), "seconds": er.get("seconds"),
+                            "work": {"objects_bound": int(cfg.edge_max_objects),
+                                     "points_per_object_bound": int(cfg.edge_max_points_per_object),
+                                     "objects": record},
                             "r_hat_m_median": (float(np.median([s["r_hat_m"] for s in summ if s.get("r_hat_m") is not None]))
                                                if any(s.get("r_hat_m") is not None for s in summ) else None),
-                            "report": str(out / "precision" / "edge_metric.json")}
+                            "report": str(out / "precision" / EDGE_REPORT)}
             log(f"{LOG_TAG} edges: {len(summ)} object(s) with creases of {len(objs)} measured, r̂ median "
-                f"{(rep['edges']['r_hat_m_median'] or 0) * 1000:.1f} mm ({er.get('seconds')} s)")
+                f"{(rep['edges']['r_hat_m_median'] or 0) * 1000:.1f} mm ({er.get('_seconds')} s)")
         except Exception as e:  # noqa: BLE001
             rep["edges"] = {"error": f"{type(e).__name__}: {e}"}
             log(f"{LOG_TAG} edges not measured: {e}")
-    rep["seconds"] = round(time.time() - t0, 1)
+        finally:
+            if objects_path is not None and objects_path.exists():
+                objects_path.unlink()
+    times["seconds"] = round(time.time() - t0, 1)
     pdir = out / "precision"; pdir.mkdir(parents=True, exist_ok=True)
     (pdir / REPORT).write_text(json.dumps(rep, indent=1, default=float))
+    write_timing(pdir / REPORT, times)
     return rep

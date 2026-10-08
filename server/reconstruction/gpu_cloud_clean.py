@@ -116,18 +116,30 @@ def _voxel_keep_dev(xyz_np: np.ndarray, cells_np: np.ndarray, origin: np.ndarray
 
 def _voxel_keep(xyz_np: np.ndarray, voxel: float, *, tile_points: int,
                 device: str) -> np.ndarray:
-    """Global indices surviving the voxel pick. ONE grid (origin = the cloud's
-    minimum, cells in float64); the cloud is cut into slabs of WHOLE cells along
-    its longest axis, their count from N and the declared ``tile_points`` BOUND
-    only — the same slabs on any card, and the same survivors for any count."""
+    """Global indices surviving the voxel pick. ONE grid ANCHORED AT THE WORLD ORIGIN
+    (docs/plan_determinismo.md point 102, DECIDIDO 2026-10-07): cell = floor(x / voxel) in
+    float64 from (0, 0, 0). The grid used to start at the cloud's MINIMUM, so one extra extreme
+    point — a flyer 1.3 mm below min-x — moved every cell boundary and the survivor of almost
+    every cell (measured on 200k points in a 0.4×0.2×0.2 m box at 5 mm: 60,274 of 101,209
+    survivors changed); now an extra point changes only its own cell. The old grid's boundaries
+    sat (min mod voxel) past this one's — below one voxel by construction, within 2 × the cloud's
+    measured error (the user's decision): reported in the log. The cloud is cut into slabs of
+    WHOLE cells along its longest axis, their count from N and the declared ``tile_points``
+    BOUND only — the same slabs on any card, and the same survivors for any count."""
     n = len(xyz_np)
     if n == 0:
         return np.empty(0, np.int64)
-    origin = xyz_np.min(0).astype(np.float64)
-    ax = int(np.argmax(xyz_np.max(0).astype(np.float64) - origin))
-    ca = np.floor((xyz_np[:, ax].astype(np.float64) - origin[ax]) / voxel).astype(np.int64)
+    origin = np.zeros(3, np.float64)                     # the world origin, float64
+    lo = xyz_np.min(0).astype(np.float64)
+    shift = lo - np.floor(lo / voxel) * voxel            # the old min-anchored grid's offset
+    print(f"  [voxel] grid anchored at the world origin ({voxel * 1000:g} mm cells, float64): "
+          f"the cloud's minimum sits {np.round(shift * 1000, 3).tolist()} mm past its cell "
+          f"boundaries — the offset of the old min-anchored grid, below one voxel")
+    ax = int(np.argmax(xyz_np.max(0).astype(np.float64) - lo))
+    ca = np.floor(xyz_np[:, ax].astype(np.float64) / voxel).astype(np.int64)
     n_tiles = max(1, -(-n // int(tile_points)))
-    bounds = _slab_bounds(ca, n_tiles)
+    ca0 = int(ca.min())                                  # slab bounds counted from the lowest cell
+    bounds = _slab_bounds(ca - ca0, n_tiles) + ca0
     if n_tiles > 1:
         print(f"  [tiles] {n:,} pts → {n_tiles} slabs of whole {voxel * 1000:g} mm "
               f"cells (bound {int(tile_points):,} pts/slab)")
@@ -140,7 +152,7 @@ def _voxel_keep(xyz_np: np.ndarray, voxel: float, *, tile_points: int,
         cells = np.empty((len(sl), 3), np.int64)
         for a in range(3):
             cells[:, a] = (ca[sl] if a == ax else np.floor(
-                (xyz_np[sl, a].astype(np.float64) - origin[a]) / voxel).astype(np.int64))
+                xyz_np[sl, a].astype(np.float64) / voxel).astype(np.int64))
         out.append(sl[_voxel_keep_dev(xyz_np[sl], cells, origin, voxel, device)])
         del cells
     _empty_cache(device)

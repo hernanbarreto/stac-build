@@ -239,9 +239,11 @@ def test_instance_detector_two_clusters_then_zero_after_correction(tmp_path, ses
     if led_p.exists():
         rows = [json.loads(l) for l in led_p.read_text().strip().splitlines() if l]
         assert not [r for r in rows if r.get("type") == "instance_split"], rows
-    # loop_closures.txt carries the instance candidate with its source
-    txt = (root / "output" / "maplong_run" / "loop_closures.txt").read_text()
-    assert "instance" in txt
+    # the instance candidate goes to the POST-HOC file (stamped against the SALAD file —
+    # plan point 8), never into SALAD's own loop_closures.txt
+    txt = (root / "output" / "maplong_run" / "loop_closures_posthoc.txt").read_text()
+    assert "instance" in txt and txt.startswith("# stac-stamp: ")
+    assert not (root / "output" / "maplong_run" / "loop_closures.txt").exists()
     # a non-structural class never drops the candidate (USER 2026-09-13): the
     # same session with the default class 'movable' writes the same pairs,
     # tagged with the class so the verifier inflates σ instead
@@ -252,7 +254,7 @@ def test_instance_detector_two_clusters_then_zero_after_correction(tmp_path, ses
                                                 "loops.semantic.default_class": "movable"}))
     rep_m = detect_instance_loops(root_m / "output", root_m, cfg=cfg_m, log=lambda m: None)
     assert rep_m["n_written"] == rep["n_written"] >= 1
-    txt_m = (root_m / "output" / "maplong_run" / "loop_closures.txt").read_text()
+    txt_m = (root_m / "output" / "maplong_run" / "loop_closures_posthoc.txt").read_text()
     assert "instance:movable" in txt_m
     # duplicates metric present
     dup = json.loads((root / "output" / "duplicates.json").read_text())
@@ -300,9 +302,11 @@ def test_production_yaml_loads_and_flattens():
     raw = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
     cfg = load_loops_config(raw)
     d = fork_model_loops(cfg, "/srv")
-    for k in ("anchors_per_bridge", "max_edge_sigma_m", "scale_tol_log", "spatial",
+    for k in ("anchors_per_bridge", "max_edge_sigma_m", "spatial",
               "bridge_extra_frames", "stac_server_dir", "intra_chunk_loops"):
         assert k in d
+    # USER 2026-10-07 (plan point 17): no scale-break threshold, no σ factor reaches the fork
+    assert "scale_tol_log" not in d and "scale_break_sigma_factor" not in d
     assert fork_model_scale(cfg)["verify_max_dev"] == cfg.scale.verify_max_dev
 
 

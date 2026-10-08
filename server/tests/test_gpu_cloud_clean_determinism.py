@@ -72,9 +72,9 @@ def test_voxel_pick_is_the_nearest_to_each_cell_centre():
     voxel = 0.01
     keep = G._voxel_keep(xyz, voxel, tile_points=100, device=DEV)
     p = xyz.astype(np.float64)
-    o = p.min(0)
-    c = np.floor((p - o) / voxel).astype(np.int64)
-    ctr = o + (c + 0.5) * voxel
+    # the grid is anchored at the WORLD origin (plan point 102): cell = floor(x / voxel)
+    c = np.floor(p / voxel).astype(np.int64)
+    ctr = (c + 0.5) * voxel
     d2 = ((p - ctr) ** 2).sum(1)
     best = {}
     for i, key in enumerate(map(tuple, c)):
@@ -216,3 +216,31 @@ def test_missing_key_fails_naming_it(tmp_path, monkeypatch, section, key):
     dotted = ".".join(section + (key,))
     with pytest.raises(KeyError, match=dotted.replace(".", r"\.")):
         G._clean_bounds() if section[-1] == "clean_bounds" else G._sor_reach(0.005)
+
+
+def test_voxel_grid_is_world_anchored_an_extra_point_changes_only_its_cell(capsys):
+    """docs/plan_determinismo.md point 102 (DECIDIDO): the grid used to start at the cloud's
+    minimum, so one flyer 1.3 mm below min-x moved every cell boundary and 59.6 % of the survivors
+    (measured). Anchored at the world origin, the extra point changes only its own cell — on a
+    cloud with negative coordinates and over several slabs — and the old grid's offset (the
+    minimum modulo the voxel) is reported below one voxel."""
+    voxel = 0.005
+    xyz = _cloud(3, n_surf=4000, n_fly=20) - np.array([0.7, 0.3, 0.2])      # negative coordinates too
+    keep = G._voxel_keep(xyz, voxel, tile_points=900, device=DEV)
+    out = capsys.readouterr().out
+    assert "anchored at the world origin" in out and "below one voxel" in out
+    extra = xyz.min(0) - np.array([0.0013, 0.0, 0.0])                        # 1.3 mm below min-x
+    xyz2 = np.vstack([xyz, extra[None]])
+    keep2 = G._voxel_keep(xyz2, voxel, tile_points=900, device=DEV)
+    cell = lambda p: tuple(np.floor(np.asarray(p, np.float64) / voxel).astype(np.int64))   # noqa: E731
+    touched = cell(extra)
+    old = {i for i in keep if cell(xyz[i]) != touched}
+    new = {i for i in keep2 if i < len(xyz) and cell(xyz[i]) != touched}
+    assert old == new, "survivors outside the extra point's cell must not change"
+    assert len(keep2) in (len(keep), len(keep) + 1)
+    # the SAME survivors whatever the slab count, with negative cells
+    assert np.array_equal(keep, G._voxel_keep(xyz, voxel, tile_points=len(xyz), device=DEV))
+    assert np.array_equal(keep, G._voxel_keep(xyz, voxel, tile_points=137, device=DEV))
+    # the old grid's boundaries sat (min mod voxel) past the world grid's: below one voxel
+    shift = xyz.min(0) - np.floor(xyz.min(0) / voxel) * voxel
+    assert np.all(shift >= 0) and np.all(shift < voxel)

@@ -126,11 +126,36 @@ def extract_rgb_frames(mp4_path: Path, depth_dir: Path, frames_out: Path, proces
     Stray Scanner guarantees 1:1 correspondence between video frames and depth files
     (numbered 000000, 000001, ...).
     """
-    frames_out.mkdir(parents=True, exist_ok=True)
+    # the scan's frames are SEALED (docs/plan_determinismo.md points 67 / 76,
+    # intake.frames_manifest): written into <scan>/frames.extracting/ and renamed to frames/ with
+    # frames/manifest.json only when complete; a scan that already holds frames keeps them as
+    # they are (only processed_images/ is made from the video then)
+    from intake import frames_manifest as FM
+    scan_dir = frames_out.parent
+    if frames_out.name != FM.FRAMES_DIRNAME:
+        raise ValueError(f"{frames_out} is not a scan's {FM.FRAMES_DIRNAME}/ directory")
+    have = FM.frames_present(scan_dir)
+    sealer = token = None
+    if have["n_frames"] or have["manifest"]:
+        print(f"[Stray→DA3] {frames_out} already holds {have['n_frames']} frame(s) — kept as "
+              f"they are (sealed frames are never rewritten)")
+    else:
+        token = FM.claim_writer(scan_dir, FM.ORIGIN_STRAY)
+        sealer = FM.FrameSealer(scan_dir)
+        if sealer.shas:
+            FM.release_writer(scan_dir, token)
+            raise FM.FramesManifestError(f"{sealer.tmp} holds an interrupted extraction — remove "
+                                         f"it first")
     processed_out.mkdir(parents=True, exist_ok=True)
 
-    cap = cv2.VideoCapture(str(mp4_path))
+    cap = cv2.VideoCapture(str(mp4_path), cv2.CAP_FFMPEG)
+    if not cap.isOpened():
+        raise IOError(f"OpenCV's FFMPEG backend cannot open {mp4_path}")
+    if not cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, FM.ORIENTATION_AUTO):
+        raise FM.FramesManifestError(f"the decoder refuses CAP_PROP_ORIENTATION_AUTO="
+                                     f"{FM.ORIENTATION_AUTO}")
     total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    jpeg = FM.jpeg_params(cv2)
     print(f"[Stray→DA3] Video has {total_video_frames} frames, extracting {len(frame_indices)} depth-aligned frames")
 
     depth_h, depth_w = depth_shape
@@ -156,9 +181,12 @@ def extract_rgb_frames(mp4_path: Path, depth_dir: Path, frames_out: Path, proces
 
         current_video_frame += 1
 
-        # Full-resolution frame for STAC frames/ dir
-        if not frames_dst.exists():
-            cv2.imwrite(str(frames_dst), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        # Full-resolution frame for STAC frames/ dir (sealed at the end)
+        if sealer is not None:
+            ok_enc, buf = cv2.imencode(".jpg", frame, jpeg)
+            if not ok_enc:
+                raise IOError(f"the JPEG encoder failed on frame {frame_idx}")
+            sealer.add(frame_idx, buf.tobytes(), ".jpg")
 
         # Resized to depth resolution for processed_images/
         if not processed_dst.exists():
@@ -169,7 +197,26 @@ def extract_rgb_frames(mp4_path: Path, depth_dir: Path, frames_out: Path, proces
         if extracted % 100 == 0 or extracted == len(frame_indices):
             print(f"  Extracted {extracted}/{len(frame_indices)} frames")
 
+    decoder = {"library": "opencv", "opencv_version": str(cv2.__version__),
+               "api_preference": "CAP_FFMPEG", "backend": str(cap.getBackendName()),
+               "video_io": FM.video_io_build_record(),
+               "orientation_auto": float(cap.get(cv2.CAP_PROP_ORIENTATION_AUTO)),
+               "orientation_meta": float(cap.get(cv2.CAP_PROP_ORIENTATION_META)),
+               "seek": "CAP_PROP_POS_FRAMES to each depth-aligned frame"}
     cap.release()
+    if sealer is not None:
+        try:
+            try:
+                video = FM.video_record(mp4_path, scan_dir)
+            except FM.FramesManifestError:          # the Stray export sits outside the scan
+                video = {"name": Path(mp4_path).name, "size": int(Path(mp4_path).stat().st_size),
+                         "sha256": FM._sha256_file(mp4_path), "outside_the_scan": True}
+            sealer.seal(origin=FM.ORIGIN_STRAY, video=video, decoder=decoder,
+                        encoder=FM.jpeg_encoder_record(),
+                        extra={"frame_count_reported": total_video_frames,
+                               "frames_selected": "depth ∩ odometry frame numbers"})
+        finally:
+            FM.release_writer(scan_dir, token)
     return extracted
 
 

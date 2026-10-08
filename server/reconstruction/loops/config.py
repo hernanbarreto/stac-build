@@ -73,8 +73,9 @@ class LoopEdgeConfig:
     min_correspondences: int        # geometric acceptance: exact correspondences per side
     corr_per_frame: int             # exact correspondences kept per shared frame
     fit_sample: int                 # IRLS sample per fit
-    scale_tol_log: float            # |log s_ab| beyond this → scale_break (kept, σ inflated)
-    scale_break_sigma_factor: float
+    # NO scale_tol_log / scale_break_sigma_factor (USER 2026-10-07, plan point 17): a bridge's
+    # measured scale disagreement enters its σ in quadrature, continuously. A leftover key
+    # fails the load.
     starved_sigma_m: float          # σ of the vendor coarse-fit fallback (recorded, low confidence)
     ambiguous_sigma_factor: float   # σ inflation for a spatially ambiguous candidate
     movable_labels: Tuple[str, ...]  # labels that never count for/against a semantic match
@@ -239,9 +240,12 @@ class GraphConfig:
     heldout_confidence: float       # gate: the held-out surface pairs may not worsen beyond
                                     # THEIR OWN NOISE — the bar is bootstrapped from the pairs
                                     # (metric_lock.heldout_change), not a tolerated magnitude
-    loop_holdout_frac: float        # USER 2026-10-06: share of the loop closures held out of the
-                                    # in-run solve as ITS JUDGE (applied only when they improve)
-    loop_holdout_min_edges: int     # BOUND: fewer loop edges → nothing held out, local pairs judge
+    # NO loop_holdout_frac / loop_holdout_min_edges (USER 2026-10-07, plan points 1-2): every
+    # loop closure judges once, left out of its own solve (loop_judge.judge_leave_one_out).
+    # A leftover key fails the load.
+    improvement_error_factor: float # USER 2026-10-07: THE USER'S RULE (metric_lock.decide_change) —
+                                    # a correction applies only when its median improvement is >= this
+                                    # factor x the measured error (and significant, and >= 5 judges)
     gate_mode: str                  # advisory | veto — advisory: the gates (gain, held-out,
                                     # authority) are measured and declared, the closure is
                                     # APPLIED (USER 2026-09-13); veto: a failed gate → identity
@@ -521,6 +525,12 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
     if not isinstance(lp, dict):
         raise LoopsConfigError("config section correction_graph.loop is missing")
     P = "correction_graph.loop"
+    for gone in ("scale_tol_log", "scale_break_sigma_factor"):
+        if gone in lp:
+            raise LoopsConfigError(
+                f"config key {P}.{gone} must not exist: a bridge's measured scale disagreement "
+                f"is added in quadrature to its σ, continuously — no threshold, no factor "
+                f"(USER 2026-10-07, docs/plan_determinismo.md point 17)")
     loop = LoopEdgeConfig(
         anchors_per_bridge=_num(lp, "anchors_per_bridge", P, lo=0, integer=True),
         max_edge_sigma_m=_num(lp, "max_edge_sigma_m", P, lo=0, lo_excl=True),
@@ -528,8 +538,6 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         min_correspondences=_num(lp, "min_correspondences", P, lo=1, integer=True),
         corr_per_frame=_num(lp, "corr_per_frame", P, lo=1, integer=True),
         fit_sample=_num(lp, "fit_sample", P, lo=1, integer=True),
-        scale_tol_log=_num(lp, "scale_tol_log", P, lo=0, lo_excl=True),
-        scale_break_sigma_factor=_num(lp, "scale_break_sigma_factor", P, lo=1.0),
         starved_sigma_m=_num(lp, "starved_sigma_m", P, lo=0, lo_excl=True),
         ambiguous_sigma_factor=_num(lp, "ambiguous_sigma_factor", P, lo=1.0),
         movable_labels=_str_list(lp, "movable_labels", P),
@@ -670,6 +678,12 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
                 f"config key {G}.{gone} must not exist: the odometry σ per link is "
                 f"measured from the graph's own held-out pairs and a loop edge's σ_rot "
                 f"from its σ_t over the lever arm of its correspondences (2026-09-25)")
+    for gone in ("loop_holdout_frac", "loop_holdout_min_edges"):
+        if gone in gp:
+            raise LoopsConfigError(
+                f"config key {G}.{gone} must not exist: every loop closure judges the in-run "
+                f"pose graph once, left out of its own solve — n judges = n closures "
+                f"(USER 2026-10-07, docs/plan_determinismo.md points 1-2)")
     graph = GraphConfig(
         odo_sigma_from_drift=_bool(gp, "odo_sigma_from_drift", G),
         odo_sigma_min_m=_num(gp, "odo_sigma_min_m", G, lo=0, lo_excl=True),
@@ -698,8 +712,7 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         pcg_max_iters=_num(gp, "pcg_max_iters", G, lo=1, integer=True),
         min_loop_gain=_num(gp, "min_loop_gain", G, lo=0, hi=1.0),
         heldout_confidence=_num(gp, "heldout_confidence", G, lo=0.5, hi=1.0, lo_excl=True),
-        loop_holdout_frac=_num(gp, "loop_holdout_frac", G, lo=0, hi=0.5),
-        loop_holdout_min_edges=_num(gp, "loop_holdout_min_edges", G, lo=2, integer=True),
+        improvement_error_factor=improvement_error_factor(raw),
         gate_mode=_choice(gp, "gate_mode", G, ("advisory", "veto")),
         holdout_offsets=tuple(int(x) for x in ho),
         holdout_stride=_num(gp, "holdout_stride", G, lo=1, integer=True),
@@ -983,6 +996,20 @@ def fork_loop_salad(cfg: MetricGraphConfig) -> Dict[str, Any]:
             "nms_threshold": int(s.nms_threshold),
             "min_gap": int(s.min_gap_keyframes),
             "min_gap_frac": float(s.min_gap_frac)}
+
+
+def improvement_error_factor(raw: Dict[str, Any]) -> float:
+    """THE USER'S factor of the rule (2026-10-07, docs/plan_determinismo.md point 1: "mejora ≥ 2 × el
+    error"), read from ``correction_graph.graph.improvement_error_factor`` of the WHOLE config dict —
+    the one place it is declared, for every user of metric_lock.decide_change (the fork receives it
+    in Model.graph; the precision stages call this). Missing / non-numeric / not > 0 FAILS naming
+    the key — never a default."""
+    G = "correction_graph.graph"
+    cg = raw.get("correction_graph") if isinstance(raw, dict) else None
+    gp = cg.get("graph") if isinstance(cg, dict) else None
+    if not isinstance(gp, dict):
+        raise LoopsConfigError(f"config section {G} is missing")
+    return _num(gp, "improvement_error_factor", G, lo=0, lo_excl=True)
 
 
 def fork_model_graph(cfg: MetricGraphConfig) -> Dict[str, Any]:

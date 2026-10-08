@@ -2244,7 +2244,7 @@ function App() {
             onEraseBoxSelected={setEraseBoxSel}
             showAxes={showAxes}
             showGrid={showGrid}
-            pipelineRunning={!!pipelineRunning && pipelineRunning.status === 'running'}
+            pipelineRunning={pipelineActiveHere}
             onPointCount={n => { setPointCount(n); if (n > 0) { lastCloudLoadAtRef.current = Date.now(); setCloudEverShown(true) } }}
             onFps={setFps}
             onStatusMessage={setStatusMessage}

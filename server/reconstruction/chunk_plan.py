@@ -7,7 +7,8 @@
 # THAT list (`omega_chunk_ranges`: what the fork ran, chunk_sim3.json; else what the
 # run was configured with) — none rebuilds chunks from a size, an overlap or a fixed
 # divisor. The card never shapes the plan: Omega's processing resolution adapts so
-# that the largest planned chunk fits it (`omega_resolution_for`).
+# that the largest planned chunk fits it (`omega_resolution_for`) — decided once per session
+# from the committed card table (`session_omega_resolution`, `omega_card`).
 #
 # `walk_length_m` stays because the walk is still worth REPORTING. `chunk_ranges` is
 # the vendor's UNIFORM layout (step = size − overlap) — the layout of the legacy
@@ -20,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -42,8 +44,9 @@ OMEGA_REF_GRID_WH = (832, 464)
 # margin the I3 DA3 windows leave (intake.parallax.vram_margin_frac, 0.15) — memory.total includes
 # what CUDA reserves for itself and the 0.086 GB/frame of 832x464 is extrapolated linearly in
 # pixels to grids never run (without it: zaragoza 183 keyframes at 1808, predicted 79.48 of 80.00
-# GB). And an Omega pass that still runs out of memory is retried ONE patch step lower, declared
-# in the log and in the report (workers/map_worker.py, the Omega pass).
+# GB). An Omega pass that still runs out of memory FAILS (docs/plan_determinismo.md point 4,
+# 2026-10-07): the retry one patch step lower made the resolution a function of what else held the
+# card at that moment.
 
 
 class ChunkLayoutError(RuntimeError):
@@ -140,50 +143,47 @@ def omega_capacity(total_gb: float, grid_w: int, grid_h: int, margin_frac: float
     return int((float(total_gb) * (1.0 - float(margin_frac)) - OMEGA_BASE_GB) / per_frame)
 
 
-# ── what the card MEASURED (USER 2026-10-06: "guardar el pico de memoria medido") ──
+# ── what the card MEASURED: a COMMITTED constant per card (docs/plan_determinismo.md 3, 24) ──
 # zaragoza 183 keyframes at 1664 (grid 1664x928): predicted 66.95 GiB, an OOM with 77.06 GiB in use
-# and 4.21 GiB more asked — the linear 0.086 GB/frame model under-reads large grids. Every OOM of
-# an Omega pass records need ≥ (total − free + asked) against the prediction; the factor (≥ 1) is
-# kept PER CARD and multiplies the per-frame footprint from then on. It only ever grows.
-FOOTPRINT_FILE = Path(__file__).resolve().parents[2] / "weights" / "omega_footprint.json"
+# and 4.21 GiB more asked — the linear 0.086 GB/frame model under-reads large grids, by a factor
+# per card. That factor USED TO BE LEARNED: every OOM of any session raised a per-card value in
+# weights/omega_footprint.json (never lowered, counting other processes' memory, read only when
+# torch printed the allocation in GiB — M-06), so a third session's crash moved another session's
+# Omega grid (zaragoza 1664 → 1520 between two runs of the same scan). It is now the committed
+# server/card_table.json entry of the card (repro.card_key), written only by the calibration CLI
+# below (``--omega-footprint``) and committed; no run writes it and an OOM FAILS the run (point 4).
 
 
-def omega_footprint_factor(card: str, path: Path = None) -> float:
-    p = Path(path) if path is not None else FOOTPRINT_FILE
-    try:
-        doc = json.loads(p.read_text())
-        return max(1.0, float(doc.get(card, {}).get("factor", 1.0)))
-    except (OSError, ValueError, TypeError, AttributeError):
-        return 1.0
+def omega_card(card_key: str, table_path: Optional[Path] = None) -> Dict[str, Any]:
+    """{card, total_gb, footprint_factor, footprint_provenance} of ``card_key`` from the committed
+    card table — the card's total memory every resolution is sized on and Omega's measured
+    footprint factor. No entry → card_table.CardTableError naming the calibration CLI."""
+    import card_table
+    ent = card_table.card_entry(card_key, table_path)
+    return {"card": str(card_key), "total_gb": card_table.sizing_total_gib(ent),
+            "footprint_factor": card_table.omega_footprint_factor(ent, card_key),
+            "footprint_provenance": str((ent.get("omega") or {}).get("provenance", ""))}
 
 
-def record_omega_oom(card: str, predicted_peak_gb: float, oom_text: str, evidence: Dict[str, Any],
-                     path: Path = None) -> Optional[float]:
-    """From torch's OOM message ('Tried to allocate X GiB … total capacity T GiB of which Y GiB is
-    free') the pass needed at least T − Y + X; factor = that / the predicted peak. Stored per card
-    (never lowered). Returns the new factor, None when the message cannot be read."""
+def footprint_factor_from_oom(oom_text: str, predicted_peak_gb: float) -> Dict[str, float]:
+    """CALIBRATION ONLY (the ``--omega-footprint`` CLI): Omega's own need from torch's OOM message
+    — 'this process has X GiB memory in use' + 'Tried to allocate Y GiB|MiB' (never the card's
+    total minus free, which counts other processes) — over the pass's predicted peak. Raises
+    ChunkLayoutError when the message does not carry both numbers."""
     import re
-    m_a = re.search(r"Tried to allocate ([0-9.]+) GiB", oom_text)
-    m_t = re.search(r"total capacity of ([0-9.]+) GiB of which ([0-9.]+) (GiB|MiB) is free", oom_text)
-    if not (m_a and m_t) or not predicted_peak_gb or predicted_peak_gb <= 0:
-        return None
-    free = float(m_t.group(2)) / (1024.0 if m_t.group(3) == "MiB" else 1.0)
-    need = float(m_t.group(1)) - free + float(m_a.group(1))
-    p = Path(path) if path is not None else FOOTPRINT_FILE
-    try:
-        doc = json.loads(p.read_text())
-    except (OSError, ValueError):
-        doc = {}
-    old = max(1.0, float(doc.get(card, {}).get("factor", 1.0)))
-    # the prediction already carried the old factor: scale it by what was missing
-    new = max(old, old * need / float(predicted_peak_gb))
-    doc[card] = {"factor": round(new, 4), "last": {**evidence, "need_min_gib": round(need, 3),
-                                                   "predicted_peak_gib": round(float(predicted_peak_gb), 3)}}
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(doc, indent=1))
-    tmp.replace(p)
-    return new
+    m_a = re.search(r"Tried to allocate ([0-9.]+) (GiB|MiB)", oom_text)
+    m_p = re.search(r"this process has ([0-9.]+) (GiB|MiB) memory in use", oom_text)
+    if not (m_a and m_p):
+        raise ChunkLayoutError("the OOM text does not say both what this process held and what it "
+                               "asked for ('this process has … memory in use', 'Tried to allocate …')")
+    if not predicted_peak_gb or float(predicted_peak_gb) <= 0:
+        raise ChunkLayoutError(f"predicted peak {predicted_peak_gb} is not a memory size")
+
+    def _gib(m) -> float:
+        return float(m.group(1)) / (1024.0 if m.group(2) == "MiB" else 1.0)
+    need = _gib(m_p) + _gib(m_a)
+    return {"need_min_gib": need, "predicted_peak_gib": float(predicted_peak_gb),
+            "factor": max(1.0, need / float(predicted_peak_gb))}
 
 
 def omega_resolution_for(n_frames: int, total_gb: float, native_wh: Tuple[int, int], mode: str,
@@ -242,6 +242,63 @@ def omega_resolution_for(n_frames: int, total_gb: float, native_wh: Tuple[int, i
                            f"{float(margin_frac):.0%}) even at one Omega patch ({OMEGA_PATCH_SIZE} px)")
 
 
+# ── Omega's resolution, FIXED PER SESSION (docs/plan_determinismo.md point 14) ──
+# omega_resolution_for takes an integer floor of the capacity with no hysteresis: zaragoza's last
+# runs planned 1520 at capacity 183 for a 183-frame chunk — zero frames of margin. A run decides it
+# once from the committed card table; every later run of the SAME plan (ranges, keyframes, native
+# frame, mode, configured ceiling, margin) reuses it, whatever the table or the card say then (a
+# difference is DECLARED). A new plan decides again. Persisted next to the plan's measurement.
+OMEGA_RESOLUTION_NAME = "omega_resolution.json"
+OMEGA_RESOLUTION_VERSION = 1
+
+
+def session_omega_resolution(session_dir: Path, ranges: Sequence[Sequence[int]], native_wh,
+                             mode: str, ceiling: int, margin_frac: float, card: Dict[str, Any],
+                             log=print) -> Dict[str, Any]:
+    """The Omega resolution report of this session's plan: reused from
+    ``<session>/intake/omega_resolution.json`` when it was decided for this exact plan, otherwise
+    decided now (omega_resolution_for over ``card`` — omega_card's dict — and persisted). The
+    report carries ``"persisted": "reused" | "decided"`` and the card it was decided on."""
+    r = as_ranges(ranges)
+    key = {"chunk_ranges": [[a, b] for a, b in r], "n_keyframes": int(r[-1][1]) if r else 0,
+           "native_wh": [int(native_wh[0]), int(native_wh[1])], "mode": str(mode),
+           "ceiling": int(ceiling), "margin_frac": float(margin_frac)}
+    p = Path(session_dir) / "intake" / OMEGA_RESOLUTION_NAME
+    if p.exists():
+        try:
+            doc = json.loads(p.read_text())
+        except (OSError, ValueError) as e:
+            raise ChunkLayoutError(f"{p} is unreadable ({e}) — the session's Omega resolution "
+                                   f"cannot be read back; delete it to decide again") from e
+        if doc.get("version") == OMEGA_RESOLUTION_VERSION and doc.get("key") == key:
+            rep = dict(doc["report"], persisted="reused")
+            log(f"[omega-res] the session's Omega resolution {rep['resolution']} reused "
+                f"({p.name}: decided for this exact plan on {doc.get('card', {}).get('card')})")
+            was = doc.get("card") or {}
+            if (was.get("card") != card.get("card")
+                    or was.get("footprint_factor") != card.get("footprint_factor")
+                    or was.get("total_gb") != card.get("total_gb")):
+                log(f"[omega-res] ⚠ decided on {was.get('card')} (factor "
+                    f"{was.get('footprint_factor')}, {was.get('total_gb')} GB), this run is on "
+                    f"{card.get('card')} (factor {card.get('footprint_factor')}, "
+                    f"{card.get('total_gb')} GB) — the session keeps its resolution (declared; "
+                    f"delete {p.name} to decide again)")
+            return rep
+        log(f"[omega-res] {p.name} was decided for another plan — deciding again")
+    rep = omega_resolution_for(max(chunk_lengths(r)), card["total_gb"], (int(native_wh[0]),
+                               int(native_wh[1])), mode, ceiling, margin_frac=margin_frac,
+                               footprint_factor=card["footprint_factor"])
+    rep["card"] = card.get("card")
+    doc = {"version": OMEGA_RESOLUTION_VERSION, "key": key,
+           "card": {k: card.get(k) for k in ("card", "total_gb", "footprint_factor")},
+           "report": rep}
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=1))
+    os.replace(tmp, p)
+    return dict(rep, persisted="decided")
+
+
 # ── the layout a run used, for every reader after Omega ──
 
 def _ranges_of(doc: Any, key: str) -> Optional[List[Tuple[int, int]]]:
@@ -296,3 +353,53 @@ def omega_chunk_ranges(output_dir: Path) -> Optional[Tuple[List[Tuple[int, int]]
         if r is not None:
             return r, str(pp)
     return None
+
+
+# ── the calibration CLI: the ONLY writer of a card's Omega footprint ──────────────────────────
+
+def main(argv=None) -> int:
+    import argparse
+    import sys as _sys
+    ap = argparse.ArgumentParser(prog="python -m reconstruction.chunk_plan",
+                                 description="Write THIS card's Omega footprint factor into "
+                                             "server/card_table.json (then commit it).")
+    ap.add_argument("--omega-footprint", action="store_true", required=True)
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--from-oom-log", help="a log holding torch's Omega OOM message")
+    g.add_argument("--linear", action="store_true",
+                   help="factor 1.0: the measured linear model (0.086 GB/frame at 832x464), no "
+                        "OOM measured on this card")
+    ap.add_argument("--predicted-peak-gib", type=float, default=None,
+                    help="the failed pass's predicted peak ([omega-res] line of the same log)")
+    ap.add_argument("--provenance", required=True, help="what was measured, where, when")
+    a = ap.parse_args(argv)
+    _server = str(Path(__file__).resolve().parents[1])
+    if _server not in _sys.path:
+        _sys.path.insert(0, _server)
+    import card_table
+    import repro
+    card_table.require_one_visible_card()                    # point 78: THE device, one card
+    # the card MODEL key and its board memory (nvidia-smi memory.total of this uuid) — the same
+    # identity every run looks the entry up with; card_identity raises when nvidia-smi does not
+    # list the card
+    ident = repro.card_identity(0)
+    key = repro.card_key(ident)
+    if a.linear:
+        factor = 1.0
+    else:
+        if a.predicted_peak_gib is None:
+            ap.error("--from-oom-log needs --predicted-peak-gib")
+        m = footprint_factor_from_oom(Path(a.from_oom_log).read_text(errors="replace"),
+                                      a.predicted_peak_gib)
+        factor = m["factor"]
+        print(f"[omega-footprint] need ≥ {m['need_min_gib']:.3f} GiB vs predicted "
+              f"{m['predicted_peak_gib']:.3f} → factor {factor:.4f}")
+    path = card_table.write_omega_entry(key, int(ident["memory_total_mib"]), factor,
+                                        a.provenance)
+    print(f"[omega-footprint] {key}: factor {factor:.4f} → {path} (commit it)")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    _sys.exit(main())

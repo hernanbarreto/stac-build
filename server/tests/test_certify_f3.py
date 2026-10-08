@@ -305,7 +305,7 @@ def test_instance_copies_become_pose_edges_whatever_the_class(tmp_path, truth):
     assert cands, det["candidates"]
     assert all(c["class"] == "movable" for c in cands)
     assert det["n_written"] == len(cands)
-    txt = (out / "maplong_run" / "loop_closures.txt").read_text()
+    txt = (out / "maplong_run" / "loop_closures_posthoc.txt").read_text()   # plan point 8
     assert "instance:movable" in txt
     session = load_session(out)
     edges = instance_edges(session, cands, make_correction_cfg(), cfg, log=lambda m: None)

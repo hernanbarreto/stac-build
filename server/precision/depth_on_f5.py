@@ -19,7 +19,22 @@ Per keyframe i (cameras and poses = the session's, i.e. F5's after f5_refine):
     Omega's depth (k = 1), exactly as epoch 7 did (the 'borrow the nearest k' variant belonged to the
     first, discarded epoch 8). REPRODUCED 2026-10-04 on pccr's F5 files with this code, steps 1-4,
     nothing published: held-out 7.25 → 2.80 % at ±0, tau 1.93 %, kept 63.1 %, contradicted 15.1 %,
-    repaired 8.5 %, admitted 0.4 %, coverage 71.0 % — the hand-built epoch 8's own numbers;
+    repaired 8.5 %, admitted 0.4 %, coverage 71.0 % — the hand-built epoch 8's own numbers.
+    JUDGED since 2026-10-07 (docs/plan_determinismo.md, USER's DECIDIDO lines; pccr 2026-08-31 run B:
+    keyframes 720 / 723 got c0 2.16 / 2.01 with c1, c2 of ±1.5 on a handful of rows — k from 0.74 to
+    3.6 across the image — through a fit gated by a row COUNT alone, and ±0 beat ±1 by 1 % of the
+    median with no tie margin):
+      point 48  c1 and c2 enter only if |c| >= improvement_error_factor × their measured fit error
+                (the IRLS covariance); c0 is VERIFIED on >= min_judge_closures(confidence) held-out
+                rows of that keyframe by THE USER'S RULE (metric_lock.decide_change: significant,
+                enough judges, improvement >= factor × the fit's own error of c0); a keyframe whose
+                fit does not verify takes the pooled fit of its neighbours — the next wider window
+                that verifies, else the widest (declared) — and every keyframe records what it got
+                and why (`per_frame`);
+      point 49  the window is the SMOOTHEST (widest) whose half-A held-out error is within factor ×
+                the measured error of the best (the standard error of the best's median under a
+                bootstrap by keyframe, fixed seed) — the curve and the bar are in the report;
+      point 60  landmark tracks that do not round-trip through F5's lens are dropped and counted.
  3. validity: Omega's ONE confidence floor (`reconstruction.simple.conf_min_norm`, min-max per Omega
     chunk) and not sky (epoch0_cloud.SKY_CONF);
  4. vote over the keyframe offsets `bend.neighbors`: a pixel LEAVES when more neighbours see free space
@@ -38,7 +53,7 @@ import sys
 import time
 import types
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -46,10 +61,16 @@ LOG_TAG = "[depth-on-f5]"
 REPORT = "depth_on_f5.json"
 TX_TMP = "_tx_depth_on_f5"
 MAD_TO_SIGMA = 1.0 / 0.6744897501960817          # 1.4826: σ of a normal from its MAD
+IDENTITY = np.array([1.0, 0.0, 0.0])             # k = 1: Omega's depth as it is (epoch 7's fallback)
 
 
 class DepthOnF5Error(RuntimeError):
     pass
+
+
+def _vendor_path() -> None:
+    from precision.refine import _vendor_path as vp
+    vp()
 
 
 # ── pure helpers (tested on synthetic data) ───────────────────────────────
@@ -68,11 +89,16 @@ def design(u: np.ndarray, v: np.ndarray, W: int, H: int) -> np.ndarray:
     return np.c_[np.ones(len(u)), (u - W / 2) / W, (v - H / 2) / H]
 
 
-def irls_huber(A: np.ndarray, r: np.ndarray, k: float, iterations: int) -> np.ndarray:
+def irls_huber_fit(A: np.ndarray, r: np.ndarray, k: float, iterations: int) -> Tuple[np.ndarray, np.ndarray]:
     """pccr epoch 7's robust fit, exactly (omega_bent_epoch7.py `irls`; USER 2026-10-01 "exactamente el
     mismo ajuste que la 7"): `iterations` Huber IRLS steps from the least-squares start, weights at k·σ,
     σ = 1.4826·MAD of the residual. Iterated to convergence instead, the re-estimated MAD keeps shrinking
-    and the bend fits worse: 3.90 % held-out on pccr against 2.80 %."""
+    and the bend fits worse: 3.90 % held-out on pccr against 2.80 %.
+
+    Returns (c, σ_c): the coefficients (bit for bit what `irls_huber` returned before 2026-10-07) and
+    their MEASURED fit error — the IRLS covariance at the last weights, σ_c² = s²·diag((AᵀW²A)⁻¹),
+    s² the weighted residual sum of squares per degree of freedom (docs/plan_determinismo.md point 48:
+    "su error medido del ajuste"). A singular normal matrix gives σ = inf: nothing is significant."""
     w = np.ones(len(r))
     c = np.zeros(A.shape[1])
     for _ in range(iterations):
@@ -80,23 +106,210 @@ def irls_huber(A: np.ndarray, r: np.ndarray, k: float, iterations: int) -> np.nd
         e = r - A @ c
         s = MAD_TO_SIGMA * np.median(np.abs(e)) + 1e-12
         w = np.sqrt(np.minimum(1.0, k * s / np.maximum(np.abs(e), 1e-12)))
-    return c
+    Aw = A * w[:, None]
+    p = A.shape[1]
+    # no error is MEASURABLE without a degree of freedom left or with a rank-deficient design (one
+    # pixel repeated, every landmark on one line): σ = inf, so nothing passes a significance bar
+    if len(r) <= p or np.linalg.matrix_rank(Aw) < p:
+        return c, np.full(p, np.inf)
+    s2 = float(np.sum((w * (r - A @ c)) ** 2)) / (len(r) - p)
+    try:
+        cov = s2 * np.linalg.inv(Aw.T @ Aw)
+        sigma = np.sqrt(np.maximum(np.diag(cov), 0.0))
+    except np.linalg.LinAlgError:
+        sigma = np.full(p, np.inf)
+    return c, sigma
+
+
+def irls_huber(A: np.ndarray, r: np.ndarray, k: float, iterations: int) -> np.ndarray:
+    """Epoch 7's coefficients alone (see `irls_huber_fit`)."""
+    return irls_huber_fit(A, r, k, iterations)[0]
+
+
+def significant_bend(A: np.ndarray, r: np.ndarray, huber_k: float, iterations: int,
+                     error_factor: float) -> Tuple[np.ndarray, dict]:
+    """Point 48 on one fit: the full model k = c0 + c1·u + c2·v is fitted; c1 and c2 ENTER only when
+    |c| >= error_factor × their measured fit error, and the model is REFITTED on the kept columns
+    (c0 always; a dropped term is exactly 0). Returns (c (3,), info): the full fit's σ, which terms
+    were kept with their margins |c| − factor·σ, and the σ of the fit actually used (σ_c0 is what
+    the keyframe's c0 verification is held to)."""
+    c_full, s_full = irls_huber_fit(A, r, huber_k, iterations)
+    fac = float(error_factor)
+    keep = [True] + [bool(abs(c_full[j]) >= fac * s_full[j]) for j in (1, 2)]
+    if all(keep):
+        c, sig = c_full, s_full
+    else:
+        cols = [j for j in range(3) if keep[j]]
+        cr, sr = irls_huber_fit(A[:, cols], r, huber_k, iterations)
+        c = np.zeros(3); sig = np.full(3, np.nan)
+        c[cols] = cr; sig[cols] = sr
+    info = {"rows": int(len(r)), "sigma_full": [float(x) for x in s_full],
+            "kept": {"c1": keep[1], "c2": keep[2]},
+            "margins": {"c1": float(abs(c_full[1]) - fac * s_full[1]),
+                        "c2": float(abs(c_full[2]) - fac * s_full[2])},
+            "sigma": [float(x) for x in sig], "fallback": None}
+    return c, info
 
 
 def bend_coefficients(rows: Dict[int, tuple], n: int, window: int, min_rows: int, huber_k: float,
-                      iterations: int) -> Dict[int, np.ndarray]:
-    """{i: (c0, c1, c2)} — each keyframe fitted on the rows of i−w … i+w; one with fewer than `min_rows`
-    rows there keeps Omega's depth (k = 1), as epoch 7 did."""
+                      iterations: int, error_factor: float) -> Tuple[Dict[int, np.ndarray], Dict[int, dict]]:
+    """({i: (c0, c1, c2)}, {i: info}) — each keyframe fitted on the rows of i−w … i+w with the judged
+    terms of `significant_bend` (point 48); one with fewer than `min_rows` rows there keeps Omega's
+    depth (k = 1), as epoch 7 did (info['fallback'] = 'identity')."""
     out: Dict[int, np.ndarray] = {}
+    infos: Dict[int, dict] = {}
     for i in range(n):
         js = range(max(0, i - window), min(n, i + window + 1))
         A = [rows[j][0] for j in js if j in rows and len(rows[j][1])]
         r = [rows[j][1] for j in js if j in rows and len(rows[j][1])]
-        if A and sum(len(x) for x in r) >= min_rows:
-            out[i] = irls_huber(np.vstack(A), np.concatenate(r), huber_k, iterations)
+        n_rows = sum(len(x) for x in r)
+        if A and n_rows >= min_rows:
+            out[i], infos[i] = significant_bend(np.vstack(A), np.concatenate(r), huber_k, iterations,
+                                                error_factor)
         else:
-            out[i] = np.array([1.0, 0.0, 0.0])
-    return out
+            out[i] = IDENTITY.copy()
+            infos[i] = {"rows": int(n_rows), "sigma_full": None, "kept": None, "margins": None,
+                        "sigma": None, "fallback": "identity"}
+        infos[i]["window"] = int(window)
+    return out, infos
+
+
+def heldout_rows(obs_held: np.ndarray, zmap: np.ndarray, min_depth_m: float, half: Optional[int]):
+    """(u, v, z_landmark, z_omega) of a keyframe's held-out landmark rows on Omega's depth; ``half``
+    0 = the even rows (half A: selection — the window and the per-keyframe verification), 1 = the
+    odd rows (half B: the report), None = all. Rows under ``min_depth_m`` of Omega depth are out."""
+    h = np.asarray(obs_held, np.float64).reshape(-1, 3)
+    if half is not None:
+        h = h[(np.arange(len(h)) % 2) == int(half)]
+    if not len(h):
+        return np.zeros(0), np.zeros(0), np.zeros(0), np.zeros(0)
+    zz = bilinear(zmap, h[:, 0], h[:, 1])
+    ok = zz > float(min_depth_m)
+    return h[ok, 0], h[ok, 1], h[ok, 2], zz[ok]
+
+
+def rel_errors(u, v, z_lm, z_omega, coef: np.ndarray, W: int, H: int) -> np.ndarray:
+    """|z_omega·k(u, v) − z_landmark| / z_landmark per row (k = 1 with the identity coefficients)."""
+    if not len(u):
+        return np.zeros(0)
+    return np.abs(z_omega * (design(u, v, W, H) @ coef) - z_lm) / z_lm
+
+
+def cluster_bootstrap_se(groups: Sequence[np.ndarray], n_boot: int, seed: int) -> float:
+    """The standard error of the POOLED MEDIAN of ``groups`` (one array of errors per keyframe)
+    under a bootstrap that resamples whole keyframes (rows of one keyframe share its pose and
+    camera — point 46's clustering, applied to the window choice of point 49). Fixed seed."""
+    groups = [np.asarray(g, np.float64) for g in groups if len(g)]
+    if len(groups) < 2:
+        return 0.0
+    rng = np.random.default_rng(int(seed))
+    k = len(groups)
+    meds = np.empty(int(n_boot))
+    for b in range(int(n_boot)):
+        pick = rng.integers(0, k, size=k)
+        meds[b] = np.median(np.concatenate([groups[j] for j in pick]))
+    return float(np.std(meds, ddof=1))
+
+
+def choose_window(score: Dict[int, float], errs: Dict[int, Dict[int, np.ndarray]], error_factor: float,
+                  n_boot: int, seed: int) -> Tuple[int, dict]:
+    """Point 49 (USER 2026-10-07): the SMOOTHEST (widest) window whose half-A held-out error is
+    within ``error_factor`` × the measured error of the best — the standard error of the best's
+    pooled median under the keyframe bootstrap. ``score[w]`` = the pooled median per window,
+    ``errs[w]`` = {keyframe: its rows' errors}. A strict argmin flipped on a 1 % near-tie (pccr
+    ±0 2.85 % vs ±1 2.88 %). Returns (window, the rule with every margin)."""
+    best = min(score, key=lambda w: (score[w], w))
+    se = cluster_bootstrap_se(list(errs[best].values()), n_boot, seed)
+    bar = float(score[best]) + float(error_factor) * se
+    within = [w for w in score if score[w] <= bar]
+    pick = max(within)
+    return int(pick), {"rule": "smoothest window within error_factor x the standard error of the best's "
+                               "median (bootstrap by keyframe)",
+                       "window_best": int(best), "heldout_best": float(score[best]), "heldout_best_se": se,
+                       "error_factor": float(error_factor), "bar": bar, "window": int(pick),
+                       "margin": float(bar - score[pick]),
+                       "curve": {str(w): {"heldout_median": float(score[w]), "margin_to_bar": float(bar - score[w]),
+                                          "within": bool(score[w] <= bar)} for w in sorted(score)}}
+
+
+def verify_keyframes(windows: Sequence[int], wb: int, coefs: Dict[int, Dict[int, np.ndarray]],
+                     infos: Dict[int, Dict[int, dict]], rows_A: Dict[int, tuple], N: int, W: int, H: int,
+                     error_factor: float, confidence: float, n_boot: int, seed: int,
+                     min_rows: int) -> Tuple[Dict[int, np.ndarray], Dict[int, dict]]:
+    """Point 48's c0 verification per keyframe. The candidates for keyframe i are the chosen window
+    ``wb`` then every wider window of ``windows`` (the pooled fits of its neighbours). A candidate is
+    VERIFIED when THE USER'S RULE (metric_lock.decide_change) says the bent depth improves the
+    keyframe's own half-A held-out rows over Omega's unbent depth — significant, >= min_judge_closures
+    (confidence) rows, median improvement >= error_factor × σ_c0 of that fit. The first verified
+    candidate is the keyframe's; none → the widest candidate that has a fit (declared 'unverified
+    pooled'); fewer judge rows than required → the first pooled candidate wider than ``wb`` with a
+    fit (declared 'unverifiable'), else ``wb``'s own. Returns ({i: c}, {i: provenance})."""
+    _vendor_path()
+    from loop_utils.loop_judge import min_judge_closures
+    from loop_utils.metric_lock import decide_change
+    need = int(min_judge_closures(float(confidence)))
+    order = [int(wb)] + sorted(int(w) for w in windows if int(w) > int(wb))
+    out: Dict[int, np.ndarray] = {}
+    prov: Dict[int, dict] = {}
+    for i in range(N):
+        u, v, z_lm, zo = rows_A[i]
+        before = rel_errors(u, v, z_lm, zo, IDENTITY, W, H)
+        cands = [(w, coefs[w][i], infos[w][i]) for w in order if infos[w][i].get("fallback") != "identity"]
+        trials = []
+        chosen = None
+        if len(before) < need:
+            reason = f"unverifiable: {len(before)} held-out row(s) of this keyframe, {need} required"
+            pooled = [c for c in cands if c[0] > int(wb)]
+            pick = pooled[0] if pooled else (cands[0] if cands else None)
+            status = "unverifiable_pooled" if pooled else ("unverifiable_own" if cands else "identity")
+        else:
+            for w, c, info in cands:
+                sig0 = float(info["sigma"][0]) if info.get("sigma") else float("nan")
+                if not np.isfinite(sig0):
+                    trials.append({"window": w, "verdict": None, "reason": "sigma_c0 not finite"})
+                    continue
+                after = rel_errors(u, v, z_lm, zo, c, W, H)
+                d = decide_change(before, after, error=sig0, error_factor=float(error_factor),
+                                  confidence=float(confidence), n_boot=int(n_boot), seed=int(seed))
+                trials.append({"window": w, "verdict": {k: d[k] for k in ("improves", "significant", "enough_judges",
+                                                                          "beyond_error", "median_delta", "ci_low",
+                                                                          "ci_high", "n_judges", "min_judges",
+                                                                          "error", "required_delta", "error_margin")},
+                               "reason": d["reason"]})
+                if d["improves"]:
+                    chosen = (w, c, info)
+                    break
+            if chosen is not None:
+                pick, status, reason = chosen, "verified", f"c0 verified on {len(before)} held-out rows at ±{chosen[0]}"
+            else:
+                pick = cands[-1] if cands else None
+                status = "unverified_pooled" if cands else "identity"
+                reason = ("no candidate window verified c0 on this keyframe's held-out rows — the widest "
+                          "pooled fit stands" if cands else f"no window holds {min_rows} landmark rows")
+        if pick is None:
+            out[i] = IDENTITY.copy()
+            prov[i] = {"status": "identity", "window": None, "reason": reason, "fit": None, "trials": trials,
+                       "heldout_rows_A": int(len(before))}
+        else:
+            w, c, info = pick
+            out[i] = np.asarray(c, np.float64)
+            prov[i] = {"status": status, "window": int(w), "reason": reason, "fit": info, "trials": trials,
+                       "heldout_rows_A": int(len(before))}
+    return out, prov
+
+
+def confidence_floor(values: np.ndarray, floor_norm: float) -> Tuple[float, float]:
+    """THE ONE CONFIDENCE FLOOR of the pipeline (USER 2026-09-23, reconstruction.simple.conf_min_norm),
+    per Omega chunk: ``thr = min + floor_norm × (max − min)`` over the chunk's valid confidences and
+    ``cmax = max`` — the min-max fraction the viewer slider runs (ui PotreeLoader.ts: (c − confMin) /
+    confRange). KEPT as is by docs/plan_determinismo.md point 52 (it rests on the chunk's two most
+    extreme samples, deterministic with the same input); tests pin this arithmetic so a change is
+    noticed, never silent."""
+    v = np.asarray(values, np.float64).ravel()
+    if v.size == 0:
+        raise DepthOnF5Error("no valid confidence in this Omega chunk — the floor cannot be set")
+    lo, hi = float(v.min()), float(v.max())
+    return lo + float(floor_norm) * (hi - lo), hi
 
 
 def interior(passed: np.ndarray) -> np.ndarray:
@@ -106,16 +319,48 @@ def interior(passed: np.ndarray) -> np.ndarray:
     return binary_erosion(passed, structure=np.ones((3, 3), bool), border_value=0)
 
 
+def masks_stamp_check(output_dir: Path, masks) -> Tuple[bool, str]:
+    """Point 51: SAM3 masks enter F6 only when they are STAMPED for THIS reconstruction — the npz
+    carries a ``reconstruction_id`` member, or ``segmentation.json`` next to it carries the key,
+    equal to ``correction.epoch.reconstruction_id`` of the session. A store left by an earlier
+    segmentation (SAM3 runs after the cloud since 2026-10-05; a resumed run or a `--from f6_bend`
+    finds the previous one) is matched by keyframe number only and would snap pixels or not
+    depending on the session's history. Returns (taken, reason)."""
+    from correction.epoch import RECONSTRUCTION_ID_KEY, reconstruction_id_or_none, same_reconstruction
+    out = Path(output_dir)
+    rid = reconstruction_id_or_none(out)
+    doc = None
+    if RECONSTRUCTION_ID_KEY in getattr(masks, "files", []):
+        doc = {RECONSTRUCTION_ID_KEY: str(np.asarray(masks[RECONSTRUCTION_ID_KEY]).reshape(-1)[0])}
+        where = f"seg_masks.npz['{RECONSTRUCTION_ID_KEY}']"
+    else:
+        sj = out / "segmentation.json"
+        where = f"segmentation.json['{RECONSTRUCTION_ID_KEY}']"
+        if sj.exists():
+            try:
+                d = json.loads(sj.read_text())
+                doc = d if isinstance(d, dict) and RECONSTRUCTION_ID_KEY in d else None
+            except ValueError:
+                doc = None
+    taken, why = same_reconstruction(doc, rid)
+    return taken, f"{where}: {why}"
+
+
 def mask_labels(output_dir: Path, H: int, W: int, log: Callable = print):
     """``position -> label map`` of the SAM3 masks (masklet id + 1, 0 = no mask, -1 = two masks
-    overlap) on Omega's grid, or None when the session holds no masks on that grid (then no mixed
-    pixel is snapped — declared)."""
+    overlap) on Omega's grid, or None when the session holds no masks on that grid, or holds masks
+    NOT stamped for this reconstruction (point 51) — then no mixed pixel is snapped, declared."""
     from precision.silhouette_filter import masks_by_keyframe
     p = Path(output_dir) / "seg_masks.npz"
     if not p.exists():
         log(f"{LOG_TAG} no seg_masks.npz — mixed pixels are not snapped (they go to the vote as they are)")
         return None
     masks = np.load(p)
+    taken, why = masks_stamp_check(output_dir, masks)
+    if not taken:
+        log(f"{LOG_TAG} seg_masks.npz IGNORED — not stamped for this reconstruction ({why}); mixed pixels "
+            f"are not snapped (point 51)")
+        return None
     by_kf = masks_by_keyframe(Path(output_dir), masks)
     probe = next((key for lst in by_kf.values() for _, key in lst), None)
     if probe is None or tuple(np.asarray(masks[probe]).shape) != (H, W):
@@ -147,7 +392,8 @@ def labels_on_undistorted(labels: Callable, maps) -> Callable:
 
 def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict[int, np.ndarray],
                       passed: Dict[int, np.ndarray], K: np.ndarray, c2w: Dict[int, np.ndarray], labels,
-                      neighbors, tau_quantile: float, repair_min_views: int, log: Callable = print):
+                      neighbors, tau_quantile: float, repair_min_views: int, log: Callable = print,
+                      bars_out: Optional[dict] = None):
     """pccr EPOCH 8 (USER 2026-10-01: "es la mejor, incorporar al pipeline"), on the bent depth
     `dep` (every `valid` pixel; `passed` = above the ONE confidence floor):
      1. tau = the `tau_quantile` percentile of the neighbour disagreement on INTERIOR pixels;
@@ -157,7 +403,9 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
         floor-passing pixels stay with contra ≤ agree (median of the agreeing views), a
         contradicted one is repaired to the median of the neighbours when ≥ `repair_min_views`
         agree, else it leaves; a below-floor EDGE pixel enters when agree ≥ 1 and contra ≤ agree.
-    Returns ({frame: (depth map, agree count map)}, tau, totals)."""
+    Returns ({frame: (depth map, agree count map)}, tau, totals). ``bars_out`` (a dict) receives the
+    vote's bar τ and every keyframe's pixel margins to it (point 53) — kept out of ``totals``, which
+    stays numeric for its readers."""
     from precision import corrected_cloud as CC
     H, W = next(iter(dep.values())).shape
     inner = {f: interior(passed[f]) for f in frames}
@@ -172,10 +420,23 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
             dep[f] = d.astype(np.float32); n_mixed += int(mixed.sum()); n_snap += int(sn.sum())
     w2c = {f: np.linalg.inv(c2w[f]) for f in frames}
     final, tot = {}, {}
+    tau_margins: Dict[int, Optional[dict]] = {}
     for i, f in enumerate(frames):
         cand = valid[f] & (passed[f] | edge[f])           # below-floor interior pixels stay out
         v = CC.two_sided_vote(i, frames, dep, passed, cand, K, c2w, w2c, neighbors, tau)
         rr, cc, agree, contra = v["rr"], v["cc"], v["agree"], v["contra"]
+        # point 53: every judged pixel's margin to τ — the nearest neighbour surface on its ray
+        # against its own depth, (τ − |Δz|/z) / τ (positive = agrees with its nearest witness)
+        s = v["splats"]
+        if s.size:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                rel = np.abs(s - v["z"][None, :]) / np.where(s > 0, s, np.nan)
+                dmin = np.nanmin(np.where(np.isfinite(rel), rel, np.inf), axis=0)
+            seen = np.isfinite(dmin)
+            from precision.mono_detail import margin_quantiles
+            tau_margins[f] = margin_quantiles((tau - dmin[seen]) / max(tau, 1e-12)) if seen.any() else None
+        else:
+            tau_margins[f] = None
         pas, edg = passed[f][rr, cc], edge[f][rr, cc]
         contradicted = pas & (contra > agree)
         rep_ok = np.zeros(len(rr), bool); zrep = np.full(len(rr), np.nan); nrep = np.zeros(len(rr), np.int32)
@@ -194,6 +455,14 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
                      ("out", int((zmap > 0).sum()))):
             tot[k] = tot.get(k, 0) + n
     tot.update(mixed=n_mixed, snapped=n_snap, tau=tau)
+    # the bars of the vote and the margins to them (point 53): τ itself (the session's own
+    # tau_quantile percentile) and, per keyframe, the distribution of the pixels' margins to it
+    if bars_out is not None:
+        med = [m["p50"] for m in tau_margins.values() if m]
+        bars_out.update({"tau": tau, "tau_quantile": float(tau_quantile),
+                         "tau_is": "this percentile of the session's own neighbour disagreement on interior pixels",
+                         "tau_margin_rel": {"per_frame": {str(f): m for f, m in tau_margins.items()},
+                                            "median_of_frame_medians": float(np.median(med)) if med else None}})
     nv = max(tot["valid"], 1)
     log(f"{LOG_TAG} tau {tau * 100:.2f} % (interior); edge pixels {tot['edge'] / nv * 100:.2f} % of the valid; "
         f"mixed {n_mixed:,} ({n_mixed / nv * 100:.2f} %), {n_snap:,} snapped to their mask's side")
@@ -210,9 +479,10 @@ def camera_travels(tmp: Path, params, n_kf: int, log: Callable = print) -> Path:
     corrected_cloud.publish registers it as an epoch artifact: the previous epoch keeps its own file
     (filed with its delta, restored when it is selected again) and the new one carries the camera it
     was built with — a copy written after the swap left the next epoch without one."""
-    p = tmp / "intrinsic.txt"
-    p.write_text("".join(f"{params[0]:.10g} {params[1]:.10g} {params[2]:.10g} {params[3]:.10g}\n"
-                         for _ in range(n_kf)))
+    from repro import write_intrinsics_exact
+    # float64 round-trip exact (docs/plan_determinismo.md point 45): '.10g' rounded the camera
+    p = write_intrinsics_exact(tmp / "intrinsic.txt",
+                               np.tile(np.asarray(params[:4], np.float64)[None], (int(n_kf), 1)))
     log(f"{LOG_TAG} intrinsic.txt = the camera of this cloud ({params[0]:.1f} / {params[1]:.1f}), "
         f"an artifact of the epoch")
     return p
@@ -263,7 +533,8 @@ def apply_mono_detail(pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out
         valid[f] = valid[f] & alive
         passed[f] = passed[f] & alive
     rep.params["tau_bent"] = tau0
-    rep.params["footprint"] = runner.footprint()
+    rep.params["footprint"] = runner.footprint()          # device, model, steps, seed, card, numerics (point 54)
+    rep.params["timing"] = runner.timing()                # peak VRAM: the timing sidecar's, not the report's
     return dep2, valid, passed, src, rep
 
 
@@ -290,13 +561,19 @@ def source_column(data, src_maps) -> np.ndarray:
 
 
 def mono_report(rep, md) -> dict:
+    """The mono-detail section of depth_on_f5.json — no timing in it (that is `mono_timing`)."""
     tiles = [dict(frame=int(f), **t) for f, per in rep.per_frame.items() for t in per["tiles"]]
     frames = {str(f): {k: v for k, v in per.items() if k != "tiles"} for f, per in rep.per_frame.items()}
-    return {"enabled": True, "model": md.model, "steps": int(md.steps), "params": rep.params,
+    params = {k: v for k, v in rep.params.items() if k != "timing"}
+    return {"enabled": True, "model": md.model, "steps": int(md.steps), "params": params,
             "tiles": {"total": rep.tiles, "accepted": rep.accepted, "rejected_support": rep.rejected_support,
                       "rejected_residual": rep.rejected_residual, "residual_bar_rel": rep.residual_bar},
-            "pixels": rep.totals, "seconds_pointdit": rep.seconds_pointdit, "seconds_total": rep.seconds_total,
-            "per_frame": frames, "per_tile": tiles}
+            "pixels": rep.totals, "per_frame": frames, "per_tile": tiles}
+
+
+def mono_timing(rep) -> dict:
+    return {"seconds_pointdit": rep.seconds_pointdit, "seconds_total": rep.seconds_total,
+            **(rep.params.get("timing") or {})}
 
 
 def write_mono_layers(pdir: Path, data, source: np.ndarray, rep, K, c2w, log) -> None:
@@ -332,7 +609,11 @@ LAYER_MAX_POINTS = 2_000_000
 
 # ── the step ─────────────────────────────────────────────────────────────
 
-def _landmark_rows(session_dir: Path, pcfg, frames: List[int], w2c: np.ndarray, params) -> Dict[int, dict]:
+def _landmark_rows(session_dir: Path, pcfg, frames: List[int], w2c: np.ndarray, params,
+                   log: Callable = print) -> Tuple[Dict[int, dict], dict]:
+    """({split: {keyframe: (u, v, z) rows}}, {split: dropped}) — F5's tracks triangulated with
+    THESE poses and camera; a track whose observations do not round-trip through the lens is
+    dropped and counted (point 60), never a failure of the stage."""
     from precision.camera import undistort_solver
     from precision.tracks import load_tracks_v2
     from precision import refine as RF
@@ -340,11 +621,12 @@ def _landmark_rows(session_dir: Path, pcfg, frames: List[int], w2c: np.ndarray, 
     tr = load_tracks_v2(session_dir)
     split_of = dict(zip(tr["track_query_id"].tolist(), tr["track_split"].tolist()))
     split = np.array([split_of[int(t)] for t in tr["obs_track"]], np.int8)
-    out = {}
+    out, dropped = {}, {}
     for sp in (0, 1):
         m = split == sp
         g = RF.group_tracks(tr["obs_track"][m], tr["obs_frame"][m], tr["obs_uv_native"][m], frames)
-        X = RF.triangulate_tracks(g, w2c, params, solver, pcfg.refine.min_tri_deg)
+        dropped[sp] = {"tracks": 0, "observations": 0}
+        X = RF.triangulate_tracks(g, w2c, params, solver, pcfg.refine.min_tri_deg, dropped=dropped[sp])
         rows = {i: [] for i in range(len(frames))}
         for t, lst in g.items():
             if t in X:
@@ -353,7 +635,10 @@ def _landmark_rows(session_dir: Path, pcfg, frames: List[int], w2c: np.ndarray, 
                     if z > 0:
                         rows[i].append((uv[0], uv[1], z))
         out[sp] = {i: np.array(v, float).reshape(-1, 3) for i, v in rows.items()}
-    return out
+    if any(d["tracks"] for d in dropped.values()):
+        log(f"{LOG_TAG} landmark tracks dropped (no round trip through F5's lens — point 60): fit "
+            f"{dropped[0]['tracks']}, held-out {dropped[1]['tracks']}")
+    return out, {"fit": dropped[0], "held_out": dropped[1]}
 
 
 def compute(session_dir: Path, pcfg, log: Callable = print,
@@ -404,7 +689,7 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     else:
         grid_note = f"Omega's record on the camera grid {W}x{H}, no lens — read as it is"
     _p(3, f"{N} keyframes, camera fx {K[0, 0]:.1f} fy {K[1, 1]:.1f} ({W}x{H}); {grid_note}; F5's landmarks")
-    obs = _landmark_rows(session_dir, pcfg, frames, w2c, params)
+    obs, dropped_tracks = _landmark_rows(session_dir, pcfg, frames, w2c, params, log=log)
     if lens:
         # the tracks were observed where the lens put them (the original frame) → the undistorted frame
         from precision.camera import undistort_points, undistort_solver
@@ -432,11 +717,12 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     for k in sorted(set(chunk.values())):
         v = np.concatenate([conf[f][np.isfinite(conf[f]) & (conf[f] > SKY_CONF)].ravel()
                             for f in frames if chunk[f] == k])
-        thr[k] = float(v.min() + floor_norm * (v.max() - v.min()))
-        cmax[k] = float(v.max())
+        thr[k], cmax[k] = confidence_floor(v, floor_norm)           # THE ONE floor (point 52: kept, pinned)
 
     # 2. the bend
     _p(25, "bending Omega's depth to F5's landmarks")
+    from reconstruction.loops.config import improvement_error_factor
+    fac = float(improvement_error_factor(raw_cfg))                   # the user's 2 (point 1), ONE place
     rows = {}
     for i, f in enumerate(frames):
         o = obs[0][i]
@@ -444,27 +730,44 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
         ok = zz > bc.min_depth_m
         rows[i] = (design(o[ok, 0], o[ok, 1], W, H), o[ok, 2] / zz[ok])
     # the window is chosen on half A of the held-out (its even rows), half B reports — epoch 7
-    score, coefs = {}, {}
+    rows_A = {i: heldout_rows(obs[1][i], zo[f], bc.min_depth_m, 0) for i, f in enumerate(frames)}
+    rows_B = {i: heldout_rows(obs[1][i], zo[f], bc.min_depth_m, 1) for i, f in enumerate(frames)}
+    score, coefs, infos, errs_A = {}, {}, {}, {}
     for w in bc.windows:
-        cw = bend_coefficients(rows, N, int(w), bc.min_rows, gc.huber_k, bc.irls_iterations)
-        errs = []
-        for i, f in enumerate(frames):
-            h = obs[1][i]
-            h = h[(np.arange(len(h)) % 2) == 0]
-            if len(h):
-                zz = bilinear(zo[f], h[:, 0], h[:, 1]); ok = zz > bc.min_depth_m
-                errs.append(np.abs(zz[ok] * (design(h[ok, 0], h[ok, 1], W, H) @ cw[i]) - h[ok, 2]) / h[ok, 2])
-        coefs[w] = cw; score[w] = float(np.median(np.concatenate(errs)))
+        cw, inf = bend_coefficients(rows, N, int(w), bc.min_rows, gc.huber_k, bc.irls_iterations, fac)
+        per_kf = {i: rel_errors(*rows_A[i], cw[i], W, H) for i in range(N)}
+        per_kf = {i: e for i, e in per_kf.items() if len(e)}
+        if not per_kf:
+            raise DepthOnF5Error("no held-out landmark row on Omega's depth — the bend cannot be judged")
+        coefs[int(w)] = cw; infos[int(w)] = inf; errs_A[int(w)] = per_kf
+        score[int(w)] = float(np.median(np.concatenate(list(per_kf.values()))))
     raw_err = []
     for i, f in enumerate(frames):
         h = obs[1][i]
         if len(h):
             zz = bilinear(zo[f], h[:, 0], h[:, 1]); ok = zz > 0
             raw_err.append(np.abs(zz[ok] - h[ok, 2]) / h[ok, 2])
-    wb = min(score, key=score.get)
-    c0 = np.array([coefs[wb][i][0] for i in range(N)])
-    _p(40, f"held-out |dz|/z: unbent {np.median(np.concatenate(raw_err)) * 100:.2f} %, "
-           + ", ".join(f"±{w} {score[w] * 100:.2f} %" for w in bc.windows) + f" → ±{wb}; scale "
+    # point 49: the smoothest window within error_factor x the measured error of the best
+    wb, window_rule = choose_window(score, errs_A, fac, bc.bootstrap, bc.seed)
+    # point 48: every keyframe's c0 verified on its own held-out rows; the pooled fit otherwise
+    final_coefs, provenance = verify_keyframes(bc.windows, wb, coefs, infos, rows_A, N, W, H, fac,
+                                               bc.heldout_confidence, bc.bootstrap, bc.seed, bc.min_rows)
+    status_counts: Dict[str, int] = {}
+    for p_ in provenance.values():
+        status_counts[p_["status"]] = status_counts.get(p_["status"], 0) + 1
+    kept_c1 = sum(1 for p_ in provenance.values() if p_["fit"] and p_["fit"]["kept"] and p_["fit"]["kept"]["c1"])
+    kept_c2 = sum(1 for p_ in provenance.values() if p_["fit"] and p_["fit"]["kept"] and p_["fit"]["kept"]["c2"])
+    # half B (the report): the final coefficients' held-out error, never used to choose anything
+    errs_B = [rel_errors(*rows_B[i], final_coefs[i], W, H) for i in range(N)]
+    errs_B = [e for e in errs_B if len(e)]
+    score_B = float(np.median(np.concatenate(errs_B))) if errs_B else float("nan")
+    c0 = np.array([final_coefs[i][0] for i in range(N)])
+    _p(40, f"held-out |dz|/z (half A): unbent {np.median(np.concatenate(raw_err)) * 100:.2f} %, "
+           + ", ".join(f"±{w} {score[w] * 100:.2f} %" for w in sorted(score))
+           + f" → ±{wb} (best ±{window_rule['window_best']}, bar {window_rule['bar'] * 100:.2f} % = best + "
+           f"{fac:g} x se {window_rule['heldout_best_se'] * 100:.3f} %); per keyframe: "
+           + ", ".join(f"{k} {v}" for k, v in sorted(status_counts.items()))
+           + f"; c1 kept on {kept_c1}, c2 on {kept_c2} of {N}; half B {score_B * 100:.2f} %; scale "
            f"{np.median(c0):.4f} [{c0.min():.4f}, {c0.max():.4f}], largest consecutive jump {np.abs(np.diff(c0)).max():.3f}")
     uu, vv = np.meshgrid(np.arange(W), np.arange(H))
     Dm = design(uu.ravel(), vv.ravel(), W, H)
@@ -474,7 +777,7 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
         valid[f] = np.isfinite(zo[f]) & (zo[f] > 0) & np.isfinite(conf[f]) & (conf[f] > SKY_CONF)
         passed[f] = valid[f] & (conf[f] >= thr[chunk[f]])
         # the bent map in float32 first, then the mask — epoch 8's arithmetic, bit for bit
-        bent = (zo[f] * (Dm @ coefs[wb][i]).reshape(H, W)).astype(np.float32)
+        bent = (zo[f] * (Dm @ final_coefs[i]).reshape(H, W)).astype(np.float32)
         dep[f] = np.where(valid[f], bent, 0).astype(np.float32)
         if md.enabled:
             # the session's calibrated confidence as a weight in 0..1 above its own floor (per chunk)
@@ -491,15 +794,22 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     labels = mask_labels(out, H, W, log)
     if labels is not None and lens:
         labels = labels_on_undistorted(labels, inp.maps)       # the masks live on the original frame
+    vote_bars: dict = {}
     voted, tau, vst = edge_keeping_vote(frames, dep, valid, passed, K, c2w, labels,
-                                        bc.neighbors, bc.tau_quantile, int(pcfg.cloud.repair_min_views), log)
+                                        bc.neighbors, bc.tau_quantile, int(pcfg.cloud.repair_min_views), log,
+                                        bars_out=vote_bars)
     cover = vst["out"] / float(N * H * W)
     _p(65, f"vote done: coverage {cover * 100:.1f} %")
     del dep, valid, passed
     return types.SimpleNamespace(session_dir=session_dir, out=out, inp=inp, frames=frames, N=N, W=W, H=H, K=K,
                                  c2w=c2w, params=params, chunk=chunk, voted=voted, tau=tau, vst=vst, cover=cover,
-                                 wb=wb, score=score, coefs=coefs, c0=c0, obs=obs, src_maps=src_maps, md_rep=md_rep,
-                                 md=md, uu=uu, vv=vv, t0=t0, _p=_p, seconds_compute=round(time.time() - t0, 1),
+                                 wb=wb, score=score, score_B=score_B, window_rule=window_rule, coefs=final_coefs,
+                                 vote_bars=vote_bars,
+                                 provenance=provenance, status_counts=status_counts, c0=c0, obs=obs,
+                                 dropped_tracks=dropped_tracks, error_factor=fac,
+                                 floor={str(k): {"threshold": thr[k]} for k in sorted(thr)}, floor_norm=floor_norm,
+                                 src_maps=src_maps, md_rep=md_rep, md=md, uu=uu, vv=vv, t0=t0, _p=_p,
+                                 seconds_compute=round(time.time() - t0, 1),
                                  rec_hw=rec_hw, carry=carry, lens=lens, grid_note=grid_note)
 
 
@@ -513,6 +823,7 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
     params, chunk, voted, tau, vst, cover, wb, score, coefs, c0 = (C.params, C.chunk, C.voted, C.tau, C.vst, C.cover,
                                                                    C.wb, C.score, C.coefs, C.c0)
     src_maps, md_rep, md, uu, vv, t0, _p = C.src_maps, C.md_rep, C.md, C.uu, C.vv, C.t0, C._p
+    t_publish = time.time()
 
     # 5. the cloud
     tmp = out / TX_TMP
@@ -554,15 +865,25 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
                   # grid, the original frame) carried onto it through the lens + grid when they differ
                   "grid_of_the_bend": {"undistorted_native": [W, H], "record": [C.rec_hw[1], C.rec_hw[0]],
                                        "lens": bool(C.lens), "carried": bool(C.carry), "note": C.grid_note},
-                  "bend": {"window": int(wb), "held_out": score,
+                  "bend": {"window": int(wb), "held_out": {str(w): v for w, v in sorted(score.items())},
+                           "held_out_half_B_final": C.score_B, "window_rule": C.window_rule,
+                           "improvement_error_factor": C.error_factor,
+                           "heldout_confidence": float(pcfg.bend.heldout_confidence),
+                           "keyframe_status": C.status_counts,
+                           "landmark_tracks_dropped": C.dropped_tracks,
                            "scale": {"median": float(np.median(c0)), "min": float(c0.min()),
                                      "max": float(c0.max())}},
+                  "confidence_floor": {"conf_min_norm": C.floor_norm, "per_chunk": C.floor,
+                                       "rule": "min + conf_min_norm x (max - min) of the chunk's valid "
+                                               "confidences (THE ONE floor, shared with the viewer; point 52)"},
                   # what each keyframe's depth was multiplied by — the chunk check (f6_check) measures
-                  # the PUBLISHED cloud with it: s_k = c0, bend = (c1, c2) of precision.depth_on_f5.design
-                  "per_frame": {str(f): {"s_k": float(coefs[wb][i][0]),
-                                         "bend": [float(coefs[wb][i][1]), float(coefs[wb][i][2])]}
+                  # the PUBLISHED cloud with it: s_k = c0, bend = (c1, c2) of precision.depth_on_f5.design —
+                  # and WHY it got that fit (point 48: status, window, the terms kept, the margins)
+                  "per_frame": {str(f): {"s_k": float(coefs[i][0]),
+                                         "bend": [float(coefs[i][1]), float(coefs[i][2])],
+                                         **C.provenance[i]}
                                 for i, f in enumerate(frames)},
-                  "vote": {"tau": tau, "coverage": cover,
+                  "vote": {"tau": tau, "coverage": cover, "bars": C.vote_bars,
                            **{k: (float(v) / max(vst["valid"], 1) if k not in ("tau", "valid") else v)
                               for k, v in vst.items() if k != "tau"}},
                   "raw_points": n_raw}
@@ -576,10 +897,15 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
         rep = CC.publish(session_dir, tmp, report, log, columns=cols)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    rep["seconds"] = round(time.time() - t0, 1)
     (out / "precision").mkdir(exist_ok=True)
     (out / "precision" / REPORT).write_text(json.dumps(rep, indent=1, default=float))
-    _p(100, f"depth on F5 published epoch {rep['epoch_to']} ({rep['n_points']:,} pts, {rep['seconds']} s)")
+    # the clocks live next to the report, never in it (points 36 / 56)
+    times = {"seconds_compute": C.seconds_compute, "seconds_publish": round(time.time() - t_publish, 1),
+             "seconds": round(time.time() - t0, 1)}
+    if md_rep is not None:
+        times["mono_detail"] = mono_timing(md_rep)
+    CC.write_timing(out / "precision" / REPORT, times)
+    _p(100, f"depth on F5 published epoch {rep['epoch_to']} ({rep['n_points']:,} pts, {times['seconds']} s)")
     return rep
 
 

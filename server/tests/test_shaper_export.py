@@ -384,3 +384,22 @@ def test_a_camera_behind_a_wall_is_not_a_view_of_the_object():
     assert not occluded_points(pts, c2w, u, v, inside, 100, 80, None, 0.05).any()
     D2 = np.full((40, 50), 2.0, np.float32)                               # a coarser depth grid maps by scale
     assert occluded_points(pts, c2w, u, v, inside, 100, 80, D2, 0.05).tolist() == [True, True, False]
+
+
+def test_stray_data_is_taken_from_the_scans_own_directory_only(tmp_path):
+    """Plan point 35 (the same fix as precision.camera and session_io): a sibling scan's Stray
+    calibration is another recording's — never read; the scan dir, then its stray/ subdir."""
+    scan = tmp_path / "scans" / "src_default"
+    sib = tmp_path / "scans" / "src_other"
+    for d in (scan, sib):
+        d.mkdir(parents=True)
+    (sib / "odometry.csv").write_text("timestamp,frame,x,y,z,qx,qy,qz,qw\n")
+    (sib / "camera_matrix.csv").write_text("1,0,0\n0,1,0\n0,0,1\n")
+    assert SE._find_stray_dir(scan) is None
+    (scan / "stray").mkdir()
+    (scan / "stray" / "odometry.csv").write_text("timestamp,frame,x,y,z,qx,qy,qz,qw\n")
+    (scan / "stray" / "camera_matrix.csv").write_text("1,0,0\n0,1,0\n0,0,1\n")
+    assert SE._find_stray_dir(scan) == scan / "stray"
+    (scan / "odometry.csv").write_text("timestamp,frame,x,y,z,qx,qy,qz,qw\n")
+    (scan / "camera_matrix.csv").write_text("1,0,0\n0,1,0\n0,0,1\n")
+    assert SE._find_stray_dir(scan) == scan

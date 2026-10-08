@@ -211,12 +211,21 @@ def _normal_scatter_eigs(normals: np.ndarray) -> np.ndarray:
 
 def fit_plane_ransac(points: np.ndarray, dist_thresh: float = 0.012,
                      iters: int = 300, min_inlier_frac: float = 0.30,
-                     measure_curvature: bool = True) -> Optional[PlaneFit]:
+                     measure_curvature: bool = True,
+                     seed: Optional[int] = None) -> Optional[PlaneFit]:
     """Robust plane fit. Returns ``None`` if no plane gathers ``min_inlier_frac``.
 
     `curvature` (when `measure_curvature`): magnitude of the dominant quadratic
     coefficient of (perpendicular residual vs in-plane coords) of the inliers —
     a flat surface has ~0; a curved one has a meaningful value (≈ 1/R).
+
+    ``seed`` (docs/plan_determinismo.md point 50): when given, the RANSAC is numpy's,
+    seeded with it and single-threaded by construction — the same plane every run.
+    Open3D's ``segment_plane`` draws from a global engine seeded from random_device
+    inside an OpenMP loop whose early break follows the thread order: MEASURED
+    2026-10-07, the same 60k-point input in three processes gave three planes (inliers
+    18369 / 18379 / 17472). ``None`` keeps Open3D (fast, not reproducible) for the
+    callers that only need a plane, exactly as before.
     """
     pts = np.asarray(points, dtype=np.float64)
     n = len(pts)
@@ -225,7 +234,7 @@ def fit_plane_ransac(points: np.ndarray, dist_thresh: float = 0.012,
 
     normal = d = None
     inliers = None
-    if o3d is not None:
+    if o3d is not None and seed is None:
         try:
             pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
             model, idx = pcd.segment_plane(distance_threshold=float(dist_thresh),
@@ -237,9 +246,9 @@ def fit_plane_ransac(points: np.ndarray, dist_thresh: float = 0.012,
             inliers[np.asarray(idx, dtype=int)] = True
         except Exception:
             normal = None
-    if normal is None:  # numpy RANSAC fallback
+    if normal is None:  # numpy RANSAC: seeded (point 50), or the fallback where Open3D is absent
         best = (0, None, None, None)
-        rng = np.random.default_rng(0)
+        rng = np.random.default_rng(0 if seed is None else int(seed))
         for _ in range(iters):
             s = rng.choice(n, 3, replace=False)
             p0, p1, p2 = pts[s]

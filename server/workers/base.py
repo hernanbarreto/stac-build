@@ -4,6 +4,7 @@
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
 
 import signal
+import sys
 import time
 import traceback
 from multiprocessing.connection import Connection
@@ -133,14 +134,19 @@ def run_worker_safe(worker_fn, conn: Connection, *args, **kwargs):
         pipe.send_done(success=False, elapsed=time.time() - t0, detail=str(exc))
     finally:
         pipe.close()
-        # Cleanup GPU if torch available
+        # Release this process's cached VRAM — only when it initialised CUDA (it ran GPU work).
+        # A worker that never touched the card must not create a CUDA context on its way out
+        # (torch.cuda.synchronize creates one) just to synchronise nothing: for those seconds
+        # it is a compute process on the card the next step checks free
+        # (repro.require_exclusive_gpu). torch is read from sys.modules: never imported here =
+        # never initialised here.
         try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-        except (ImportError, RuntimeError):
-            pass  # CUDA not available or not initialized in this process
+            _torch = sys.modules.get("torch")
+            if _torch is not None and _torch.cuda.is_initialized():
+                _torch.cuda.empty_cache()
+                _torch.cuda.synchronize()
+        except RuntimeError:
+            pass  # a CUDA error on the way out changes nothing of what the worker reported
         import gc
         gc.collect()
 
@@ -172,50 +178,176 @@ def gpu_free_gb() -> Optional[float]:
         return None
 
 
+# The stop's schedule (the numbers of 2026-10-05, unchanged, named so the VRAM wait below reuses
+# them): up to 6 kill attempts — SIGTERM for the first 3, then SIGKILL — each followed by up to
+# 10 looks at the process table 2 s apart.
+_STOP_ATTEMPTS = 6
+_STOP_SIGTERM_ATTEMPTS = 3
+_STOP_POLLS = 10
+_STOP_POLL_S = 2.0
+# The wait for the card to let go of the stopped processes gets the budget the processes had to
+# die (6 attempts x 10 looks x 2 s = 120 s). A BOUND, not a decision: past it nothing is assumed
+# — the GPU step's own repro.require_exclusive_gpu reads the card and names what still holds it.
+_RELEASE_POLLS = _STOP_ATTEMPTS * _STOP_POLLS
+
+
 def stop_semantic_service(pipe: Optional["WorkerPipe"] = None, stage: str = "",
-                          log=None) -> None:
+                          log=None) -> Optional[dict]:
     """EXCLUSIVE GPU for a heavy stage: stop the vLLM semantic service (its ~40 GB
     resident VRAM starves Omega single passes and long SAM3 sessions). Any later
     consumer restarts it (semantic.service.ensure_service — the VLM worker AND the
     spatial-Q&A route), so this is a stage-scoped handover, not a shutdown. No-op
     when vLLM isn't running.
 
+    Once the processes are gone it WAITS for the card to let go of them
+    (:func:`await_vram_release`) — the next GPU step's repro.require_exclusive_gpu reads the
+    card right after, and a context still being torn down reads as a busy card.
+
     ``log`` is for callers that are not workers and have no pipe — the epoch
     transaction's re-consolidation is one (correction/apply.py).
+
+    Returns None when no vLLM was running (or the stop itself failed — declared in the log),
+    otherwise the release record of :func:`await_vram_release` (None there too when the
+    processes outlived every attempt: the verified stopper names them).
     """
     _say = (pipe.send_log if pipe is not None else (log or (lambda m, **k: None)))
     try:
         if not vllm_pids():
-            return
+            return None
         _say(f"[gpu] stopping vLLM semantic service — {stage or 'this stage'} "
              f"gets the whole GPU (it auto-restarts on next VLM use)")
+        # what the card holds and for whom, read BEFORE the first signal (which pids are vLLM's
+        # is only known from the process table, and only while they are alive)
+        before = _gpu_snapshot()
         # the launcher chain (serve_semantic.sh → semantic.serve → vllm serve) is killed as a
         # whole and the kill is REPEATED until nothing is left: a vLLM still starting turns into
         # a new 'vllm serve' process right after the first signal (zaragoza 2026-10-05, launched
         # one second after the backend came up)
-        for attempt in range(6):
-            kill_vllm_pids(signal.SIGTERM if attempt < 3 else signal.SIGKILL)
-            for _ in range(10):
-                time.sleep(2)
+        signalled = set()
+        for attempt in range(_STOP_ATTEMPTS):
+            signalled.update(kill_vllm_pids(
+                signal.SIGTERM if attempt < _STOP_SIGTERM_ATTEMPTS else signal.SIGKILL))
+            for _ in range(_STOP_POLLS):
+                time.sleep(_STOP_POLL_S)
                 if not vllm_pids():
                     break
             if not vllm_pids():
                 break
+        rec = None
+        if not vllm_pids():
+            rec = await_vram_release(sorted(signalled), before, _say)
         free = gpu_free_gb()
         if free is not None:
             _say(f"[gpu] vLLM stopped — {free:.0f} GB VRAM free")
+        return rec
     except Exception as e:  # noqa: BLE001
         _say(f"[gpu] could not stop vLLM ({e}) — continuing with shared GPU")
+        return None
+
+
+def _gpu_snapshot() -> dict:
+    """What nvidia-smi says now, through repro's readers: ``{"used_mib": {card uuid: MiB},
+    "procs": [{"pid", "name", "used_mib", "gpu_uuid"}], "here": [listed pids that are
+    processes of this pid namespace at this moment]}``, or ``{"error": reason}`` when
+    nvidia-smi cannot answer (a box without it, a driver that does not respond)."""
+    import os
+    import repro
+    try:
+        used = {c["uuid"]: int(c["used_mib"]) for c in repro.gpu_cards()}
+        procs = repro.gpu_compute_processes()
+    except repro.ReproError as e:
+        return {"error": str(e)}
+    return {"used_mib": used, "procs": procs,
+            "here": sorted({p["pid"] for p in procs if os.path.exists(f"/proc/{p['pid']}")})}
+
+
+def await_vram_release(pids, before: dict, say=None, *, polls: int = _RELEASE_POLLS,
+                       poll_s: float = _STOP_POLL_S) -> dict:
+    """WAIT until the card let go of the stopped vLLM processes ``pids``: nvidia-smi lists none
+    of them as a compute process AND every card's used memory has dropped by what nvidia-smi
+    attributed to them in ``before`` (a :func:`_gpu_snapshot` taken before the first signal).
+
+    The process table alone does not say it: a process in exit has already lost its command
+    line (``pgrep -f`` no longer matches it, so the stop sees nothing left) while the driver is
+    still tearing its CUDA context down; the next step's repro.require_exclusive_gpu, run right
+    after, would read that card as busy. Checked at once, then every ``poll_s`` up to ``polls``
+    times (a BOUND — past it the step's own exclusive-GPU check decides).
+
+    Declared limit: when nvidia-smi listed compute processes before the stop but none of the
+    stopped pids, and some listed pid is not a process of this pid namespace (a container whose
+    driver reports host pids), the release cannot be attributed and is not awaited.
+
+    Returns ``{"awaited", "released" (True | False | None = could not tell), "pids",
+    "held_mib" ({uuid: MiB} attributed to them before the stop), "still_listed" (stopped pids
+    nvidia-smi lists at the end), "used_mib_after", "polls", "why"}``."""
+    say = say or (lambda m, **k: None)
+    pids = sorted({int(p) for p in pids})
+    rec = {"awaited": False, "released": None, "pids": pids, "held_mib": {},
+           "still_listed": [], "used_mib_after": None, "polls": 0, "why": ""}
+    if before.get("error"):
+        rec["why"] = f"nvidia-smi could not be read before the stop ({before['error']})"
+        say(f"[gpu] ⚠ the release of vLLM's VRAM is not awaited: {rec['why']} — the step's own "
+            f"exclusive-GPU check decides")
+        return rec
+    mine = [p for p in before["procs"] if p["pid"] in pids]
+    here = set(before.get("here") or ())
+    other_ns = sorted(p["pid"] for p in before["procs"] if p["pid"] not in here)
+    if not mine and other_ns:
+        rec["why"] = (f"nvidia-smi listed compute process(es) {sorted(p['pid'] for p in before['procs'])} "
+                      f"before the stop, none of them a stopped vLLM pid {pids}, and {other_ns} "
+                      f"is no process of this pid namespace — the release cannot be attributed")
+        say(f"[gpu] ⚠ the release of vLLM's VRAM is not awaited: {rec['why']}; the step's own "
+            f"exclusive-GPU check decides")
+        return rec
+    held: dict = {}
+    for p in mine:
+        if p["used_mib"] is not None:
+            held[p["gpu_uuid"]] = held.get(p["gpu_uuid"], 0) + int(p["used_mib"])
+    rec.update(awaited=True, held_mib=held)
+    listed: list = []
+    pending: dict = {}
+    for i in range(int(polls) + 1):
+        snap = _gpu_snapshot()
+        if snap.get("error"):
+            rec.update(released=None, polls=i, why=f"nvidia-smi could not be read ({snap['error']})")
+            say(f"[gpu] ⚠ the release of vLLM's VRAM could not be checked: {rec['why']} — the "
+                f"step's own exclusive-GPU check decides")
+            return rec
+        listed = sorted({p["pid"] for p in snap["procs"] if p["pid"] in pids})
+        pending = {u: snap["used_mib"].get(u) for u, h in held.items()
+                   if snap["used_mib"].get(u, 0) > before["used_mib"].get(u, 0) - h}
+        if not listed and not pending:
+            rec.update(released=True, polls=i, used_mib_after=snap["used_mib"])
+            say(f"[gpu] vLLM's VRAM released: nvidia-smi lists none of the stopped process(es) "
+                f"{pids}" + (f", {sum(held.values())} MiB they held are back" if held else "")
+                + (f" (after {i * poll_s:.0f} s)" if i else ""))
+            return rec
+        if i < int(polls):
+            time.sleep(poll_s)
+    rec.update(released=False, polls=int(polls), still_listed=listed, used_mib_after=snap["used_mib"],
+               why=(f"after {int(polls) * poll_s:.0f} s nvidia-smi still lists the stopped "
+                    f"process(es) {listed}" if listed else
+                    f"after {int(polls) * poll_s:.0f} s the card still uses {pending} MiB, more than "
+                    f"before the stop less the {held} MiB vLLM held"))
+    say(f"[gpu] ⚠ vLLM's VRAM not released: {rec['why']}")
+    return rec
 
 
 VLLM_PROCESS_PATTERN = "vllm serve"      # what stop_semantic_service kills and pgrep looks for
 # the whole launcher chain, each ANCHORED to the start of the command line so a shell whose
 # command text merely mentions these words (a terminal, a tool, a test) is never matched:
-#   bash /…/scripts/serve_semantic.sh  →  /…/envs/semantic/bin/python -m semantic.serve
-#   →  /…/envs/semantic/bin/python /…/bin/vllm serve …  →  its engine (proctitle VLLM::EngineCore)
+#   bash [/…/]scripts/serve_semantic.sh  →  python -m semantic.serve  →  /…/envs/semantic/bin/
+#   python3.11 /…/bin/vllm serve …  →  its engine (proctitle VLLM::EngineCore)
+# (one pid through the first three: each exec()s the next). The launcher's path is relative when
+# init_pod.sh's tmux session starts it (`bash scripts/serve_semantic.sh`) and absolute when the
+# backend does (semantic/service.py); bash's `exec python -m semantic.serve` keeps argv[0] as
+# typed — `python`, no directory. Missing either form, a stop that looked during those first
+# seconds found nothing and the launcher became a 'vllm serve' right after (2026-10-07 07:24:
+# two chains alive at once — pid 1349 launched from a tmux shell, pid 2387 by the backend's
+# boot kick).
 VLLM_PATTERNS = (r"^\S+/python[0-9.]* \S+/bin/vllm serve",
-                 r"^\S+/python[0-9.]* -m semantic\.serve",
-                 r"^(\S*/)?bash \S*/scripts/serve_semantic\.sh",
+                 r"^(\S*/)?python[0-9.]* -m semantic\.serve",
+                 r"^(\S*/)?bash (\S*/)?scripts/serve_semantic\.sh",
                  r"^VLLM::")
 
 
@@ -257,24 +389,34 @@ def stop_semantic_service_verified(pipe: Optional["WorkerPipe"] = None, stage: s
     """:func:`stop_semantic_service`, then VERIFY no ``vllm serve`` process is left
     (stop_semantic_service swallows its own failures and, after its wait, logs
     "vLLM stopped" without looking again). Raises RuntimeError naming the PIDs
-    still alive — a stage that needs the whole GPU must not start on a shared one.
+    still alive — a stage that needs the whole GPU must not start on a shared one —
+    and naming the stopped PIDs nvidia-smi still lists on the card once the stop's
+    VRAM wait (:func:`await_vram_release`) ran out.
     Returns the check for the caller's report: ``{"service_stopped": True,
     "check": "pgrep -f 'vllm serve'", "remaining_pids": [], "free_gb": float|None}``."""
     # the backend kicks vLLM at its own boot through an HTTP probe that takes seconds: a pipeline
     # launched right after a restart stops nothing, then the launcher appears (zaragoza 2026-10-05,
     # twice) — so stop + verify is REPEATED until a verification finds nothing
     left = []
-    for _ in range(6):
-        stop_semantic_service(pipe, stage=stage, log=log)
+    release = None                       # the record of the LAST stop that killed something
+    for _ in range(_STOP_ATTEMPTS):
+        r = stop_semantic_service(pipe, stage=stage, log=log)
+        if isinstance(r, dict):
+            release = r
         left = vllm_pids()
         if not left:
             break
-        time.sleep(2)
+        time.sleep(_STOP_POLL_S)
     if left:
         raise RuntimeError(
             f"{stage or 'this stage'} needs the GPU without the semantic service, but "
             f"{len(left)} '{VLLM_PROCESS_PATTERN}' process(es) are still running after the "
             f"stop (PIDs {left}) — stop them (pkill -f '{VLLM_PROCESS_PATTERN}') and re-run")
+    if release is not None and release.get("still_listed"):
+        raise RuntimeError(
+            f"{stage or 'this stage'} needs the GPU without the semantic service, but the card "
+            f"did not let go of the stopped vLLM: {release['why']} (they left the process table; "
+            f"nvidia-smi still lists their CUDA context) — check `nvidia-smi` and re-run")
     return {"service_stopped": True, "check": f"pgrep -f '{VLLM_PROCESS_PATTERN}'",
             "remaining_pids": [], "free_gb": gpu_free_gb()}
 

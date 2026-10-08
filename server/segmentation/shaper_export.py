@@ -111,15 +111,20 @@ class CameraSource:
         return self.intrinsics_map.get(frame_idx)
 
 
+# where a scan's OWN Stray Scanner data sits, in reading order: ``inputs/stray/`` (the capture
+# data the replace wipe never touches — docs/plan_determinismo.md point 77), then the scan
+# directory itself and its ``stray/`` subdirectory (ingestors.capture_inputs.stray_candidates,
+# the places every Stray reader shares)
+
+
 def _find_stray_dir(session_dir: Path) -> Optional[Path]:
-    """Stray Scanner data is a sibling directory containing odometry+depth."""
-    candidates = [session_dir]
-    if session_dir.parent.exists():
-        candidates += [c for c in session_dir.parent.iterdir() if c.is_dir()]
-    for c in candidates:
-        if (c / "odometry.csv").exists() and (c / "camera_matrix.csv").exists():
-            return c
-    return None
+    """Stray Scanner data (odometry.csv + camera_matrix.csv) of THIS scan only: ``inputs/stray/``
+    first, then the scan directory, then its ``stray/`` subdirectory. Never a sibling scan of the
+    same day (docs/plan_determinismo.md point 35): that is another recording, its calibration and
+    odometry are not this camera's, and which sibling an unsorted directory listing named first
+    was the filesystem's choice."""
+    from ingestors.capture_inputs import find_stray_dir
+    return find_stray_dir(Path(session_dir), required=("odometry.csv", "camera_matrix.csv"))
 
 
 def _load_stray_source(stray_dir: Path) -> Optional[CameraSource]:
@@ -135,12 +140,13 @@ def _load_stray_source(stray_dir: Path) -> Optional[CameraSource]:
     intr_map = {fi: K for fi in frame_indices}
 
     # Stray RGB resolution from any frame. Camera_matrix.csv is at RGB res.
+    from ingestors.capture_inputs import scan_dir_of as _scan_dir_of
     H, W = None, None
     rgb_dir = stray_dir.parent
     # Probe a frame to confirm resolution
     for fi in frame_indices[:3]:
         for jpg_dir in [stray_dir.parent / "src_default" / "frames",
-                        stray_dir / "frames"]:
+                        stray_dir / "frames", _scan_dir_of(stray_dir) / "frames"]:
             jpg_path = jpg_dir / f"{fi:06d}.jpg"
             if jpg_path.exists():
                 with Image.open(str(jpg_path)) as im:

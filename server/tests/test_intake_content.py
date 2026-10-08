@@ -1,9 +1,11 @@
 """I2 — content tags are vlm_proposed and land in intake/content_tags.json;
 exclusion PNGs are 255 inside the segmenter's mask on the NATIVE grid;
 flagged_ranges claims the witnesses between a tagged keyframe and its
-neighbours only; a VLM answer that does not parse tags the batch all-False
-with notes 'vlm_parse_failed' and is counted; enabled=false writes the JSON
-and constructs / calls nothing; SAM3 prompts come from the config only; the
+neighbours only; a VLM answer that does not parse FAILS the stage naming the
+batch (plan point 75); enabled=false writes the JSON, clears the masks a
+previous run left and constructs / calls nothing (points 68 / 84); the mask
+inventory is stamped and a consumer takes only the stamped masks
+(valid_exclusion_masks); SAM3 prompts come from the config only; the
 GPU is handed over (``before_sam3``) after the last tag and before the first
 SAM3 call — the VLM and SAM3 never share the card."""
 
@@ -123,8 +125,18 @@ def test_run_content_writes_tags_and_masks(session):
     assert p.exists() and not p.with_name(p.name + ".tmp").exists()
     disk = json.loads(p.read_text())
     assert disk == rep
-    assert rep["version"] == 1 and rep["provenance"] == "vlm_proposed"
+    assert rep["version"] == Cn.CONTENT_VERSION == 2 and rep["provenance"] == "vlm_proposed"
     assert rep["geometry_epoch"] == 0 and rep["camera_epoch"] == 0
+    # no absolute path in the product (point 70): the mask dir and the frames dir are
+    # session-relative, and the inventory carries its stamp (points 68 / 84)
+    assert rep["exclusion_masks"]["dir"] == "intake/exclusion_masks"
+    assert rep["inputs"]["frames_dir"] == "frames"
+    assert str(session.session_dir) not in json.dumps(rep)
+    st = rep["exclusion_masks"]["stamp"]
+    assert set(st["inputs"]) == {f"intake/exclusion_masks/{f:06d}.png"
+                                 for f in (0, 10, 20, 30, 40, 50, 60)}
+    assert "server/intake/content.py" in st["code"] and st["config"]["params"]
+    assert rep["stamp"] == st                  # the readers' key (precision.tracks, point 68)
     assert rep["enabled"] is True and rep["backend"] == "qwen_local"
     assert rep["sam3_handover"] == {"called": False, "verified": False, "check": None,
                                     "reason": "no before_sam3 hook given by the caller"}
@@ -158,8 +170,8 @@ def test_run_content_writes_tags_and_masks(session):
     assert em["prompts"] == {"dynamic": ["person", "train"], "occluder": ["hand"]}
     assert sorted(int(k) for k in em["frames"]) == expected
     assert em["n_frames_written"] == len(expected)
-    masks_dir = Path(em["dir"])
-    assert masks_dir == session.session_dir / "intake" / "exclusion_masks"
+    masks_dir = session.session_dir / em["dir"]
+    assert masks_dir == Cn.exclusion_masks_dir(session.session_dir)
     want = _rect_mask(["person", "train"])
     for f in expected:
         png = masks_dir / f"{f:06d}.png"
@@ -236,7 +248,7 @@ def test_scope_all_segments_every_frame(session):
     assert all(c[1] == FRAME_NUMBERS for c in seg.calls)
     assert sorted(int(k) for k in rep["exclusion_masks"]["frames"]) == FRAME_NUMBERS
     want = _rect_mask(["person", "train", "hand"])
-    arr = Cn.read_mask_png(Path(rep["exclusion_masks"]["dir"]) / "000050.png")
+    arr = Cn.read_mask_png(session.session_dir / rep["exclusion_masks"]["dir"] / "000050.png")
     assert np.array_equal(arr, want)
     assert Cn.scope_frames(KEYFRAMES, _tags(set()), [7, 3], "dynamic", "all") == [0, 3, 7, 30, 60, 90, 120]
     with pytest.raises(Cn.ContentError, match="sam3_scope"):
@@ -273,7 +285,9 @@ def _good_answer(n, flags=None, fenced=False, shuffle=False):
     return f"```json\n{txt}\n```" if fenced else txt
 
 
-def test_qwen_tagger_parses_and_fails_without_crashing(session):
+def test_qwen_tagger_parses_and_fails_the_stage_on_a_bad_answer(session):
+    """Plan point 75: a malformed answer used to tag the whole batch all-False; now it raises
+    VLMParseError naming the frames — nothing is tagged 'nothing'."""
     imgs = [Cn.read_rgb(Cn.frame_file(session.frames_dir, f)) for f in (0, 30, 60)]
     client = FakeClient([
         _good_answer(3, {1: {"dynamic": True, "notes": "worker"}}, fenced=True, shuffle=True),
@@ -297,23 +311,24 @@ def test_qwen_tagger_parses_and_fails_without_crashing(session):
     assert len(call["messages"][1].images) == 3                      # ≤ batch, one user message
     assert "image" in call["messages"][1].text and "low_info" in call["messages"][1].text
 
-    out = tagger.tag(imgs, [0, 30, 60])
-    assert out == [Cn.failed_tags()] * 3
-    assert all(t["notes"] == "vlm_parse_failed" and not any(t[c] for c in CONTENT_CLASSES)
-               for t in out)
+    with pytest.raises(Cn.VLMParseError, match=r"frames \[0, 30, 60\].*plan point 75"):
+        tagger.tag(imgs, [0, 30, 60])                                # no JSON at all
     assert tagger.parse_failures == 1
-
-    out = tagger.tag(imgs, [0, 30, 60])                              # 2 objects for 3 images
-    assert out == [Cn.failed_tags()] * 3 and tagger.parse_failures == 2
+    with pytest.raises(Cn.VLMParseError, match="did not follow the contract"):
+        tagger.tag(imgs, [0, 30, 60])                                # 2 objects for 3 images
+    assert tagger.parse_failures == 2
+    assert issubclass(Cn.VLMParseError, Cn.ContentError)
 
     out = tagger.tag(imgs[:1], [0])
     assert out == [{"dynamic": True, "occluder": False, "reflective": False,
                     "low_info": False, "notes": ""}]
     assert tagger.parse_failures == 2
 
-    assert tagger.tag(imgs[:1], [0]) == [Cn.failed_tags()] and tagger.parse_failures == 3
-    assert tagger.tag(imgs[:1], [0]) == [Cn.failed_tags()] and tagger.parse_failures == 4
-    assert tagger.n_calls == 6
+    with pytest.raises(Cn.VLMParseError):                            # not a boolean
+        tagger.tag(imgs[:1], [0])
+    with pytest.raises(Cn.VLMParseError):                            # a class key missing
+        tagger.tag(imgs[:1], [0])
+    assert tagger.parse_failures == 4 and tagger.n_calls == 6
 
     with pytest.raises(Cn.ContentError, match="exceed"):
         tagger.tag(imgs + imgs, [0, 30, 60, 1, 2, 3])
@@ -322,19 +337,24 @@ def test_qwen_tagger_parses_and_fails_without_crashing(session):
     assert tagger.tag([], []) == []
 
 
-def test_run_content_counts_parse_failures_per_frame(session):
+def test_run_content_fails_on_an_unparsed_answer_and_segments_nothing(session):
+    """Plan point 75: the stage fails at the bad batch; SAM3 is never called and no report of
+    'nothing tagged' is written for it."""
     client = FakeClient(["garbage", _good_answer(2, {0: {"reflective": True}})])
     tagger = Cn.QwenTagger(CFG, client=client)
     seg = RectSegmenter()
-    rep = Cn.run_content(session.session_dir, KEYFRAMES, WITNESSES, CFG, tagger=tagger,
-                         segmenter=seg, log=QUIET, heartbeat_s=1e-6)
-    assert rep["parse_failures"] == 3                                # the first batch of 3
-    assert rep["vlm_calls"] == {"n_calls": 2, "n_parse_failed": 1}
-    for k in ("0", "30", "60"):
-        assert rep["frames"][k] == Cn.failed_tags()
-    assert rep["frames"]["90"]["reflective"] is True and rep["weights"]["reflective"] == [90]
-    assert rep["exclusion_masks"]["requested"] == {"dynamic": 0, "occluder": 0}
-    assert seg.calls == [] and rep["exclusion_masks"]["frames"] == {}
+    p = Cn.content_tags_path(session.session_dir)
+    before = p.read_bytes() if p.exists() else None
+    with pytest.raises(Cn.VLMParseError, match=r"frames \[0, 30, 60\]"):
+        Cn.run_content(session.session_dir, KEYFRAMES, WITNESSES, CFG, tagger=tagger,
+                       segmenter=seg, log=QUIET, heartbeat_s=1e-6)
+    assert tagger.n_calls == 1 and tagger.parse_failures == 1 and seg.calls == []
+    assert (p.read_bytes() if p.exists() else None) == before       # nothing written
+    # a good run reports zero parse failures by construction
+    rep = Cn.run_content(session.session_dir, KEYFRAMES, WITNESSES, CFG,
+                         tagger=Cn.QwenTagger(CFG, client=FakeClient([_good_answer(3), _good_answer(2)])),
+                         segmenter=RectSegmenter(), log=QUIET, heartbeat_s=1e-6)
+    assert rep["parse_failures"] == 0 and rep["vlm_calls"] == {"n_calls": 2, "n_parse_failed": 0}
 
 
 # ── the disabled path ────────────────────────────────────────────────────
@@ -345,16 +365,34 @@ def test_disabled_path_writes_json_and_calls_nothing(session, monkeypatch):
     cfg = replace(CFG, enabled=False)
     tagger, seg = SpyTagger({30: {"dynamic": True}}), RectSegmenter()
     logs = []
+    # masks a previous run with I2 ON left on disk (the tests above wrote some): the disabled
+    # branch removes them too (plan points 68 / 84 — F4 used to read them by existence)
+    masks_dir = Cn.exclusion_masks_dir(session.session_dir)
+    masks_dir.mkdir(parents=True, exist_ok=True)
+    Cn.write_mask_png(Cn.mask_path(masks_dir, 77), np.ones((H, W), bool))
+    n_before = len(list(masks_dir.glob("*.png")))
+    assert n_before >= 1
     rep = Cn.run_content(session.session_dir, KEYFRAMES, WITNESSES, cfg, tagger=tagger,
                          segmenter=seg, log=logs.append, heartbeat_s=1e-6)
     assert tagger.calls == [] and seg.calls == [] and seg.closed == 0
+    assert "stale_removed" not in rep["exclusion_masks"]        # history never reaches the product
+    assert list(masks_dir.glob("*.png")) == []
+    assert any("removed" in m and "previous run" in m for m in logs)
+    assert any(f"{n_before} stale mask file(s) removed" in m for m in logs)
+    # the inventory is stamped — and lists exactly the valid masks: none
+    st = rep["exclusion_masks"]["stamp"]
+    assert st["inputs"] == {} and st["config"]["enabled"] and st["sha256"] and rep["stamp"] == st
+    _write_i1_files(session.frames_dir, KEYFRAMES, WITNESSES)      # the lists the stamp names
+    taken, rec = Cn.valid_exclusion_masks(session.session_dir, log=QUIET)
+    assert taken == {} and rec["taken"] is True and rec["n_listed"] == 0
     # production defaults are not even constructed
     rep2 = Cn.run_content(session.session_dir, KEYFRAMES, WITNESSES, cfg, log=QUIET,
                           heartbeat_s=1e-6)
-    assert rep2 == rep
+    assert rep2 == rep                                           # the same bytes whatever ran before
     disk = json.loads((session.session_dir / "intake" / "content_tags.json").read_text())
     assert disk == rep
-    assert rep["enabled"] is False and rep["provenance"] == "vlm_proposed" and rep["version"] == 1
+    assert rep["enabled"] is False and rep["provenance"] == "vlm_proposed" and rep["version"] == 2
+    assert rep["exclusion_masks"]["dir"] == "intake/exclusion_masks"
     assert "enabled is false" in rep["reason"]
     assert rep["frames"] == {} and rep["parse_failures"] == 0 and rep["vlm_calls"] is None
     assert rep["exclusion_masks"]["frames"] == {} and rep["exclusion_masks"]["requested"] == {}
@@ -472,17 +510,25 @@ def test_rerun_removes_stale_masks_and_closes_an_owned_segmenter(session, monkey
 
     owned = RectSegmenter()
     monkeypatch.setattr(Cn, "Sam3Segmenter", lambda *a, **k: owned)
+    logs = []
     rep = Cn.run_content(session.session_dir, KEYFRAMES, WITNESSES, CFG,
-                         tagger=SpyTagger({120: {"dynamic": True}}), log=QUIET, heartbeat_s=1e-6)
+                         tagger=SpyTagger({120: {"dynamic": True}}), log=logs.append,
+                         heartbeat_s=1e-6)
     assert owned.closed == 1                                          # constructed here → closed here
-    assert rep["exclusion_masks"]["stale_removed"] == 7
+    assert "stale_removed" not in rep["exclusion_masks"]         # the count stays in the log
+    assert any("7 stale mask file(s)" in m for m in logs)
     assert sorted(p.name for p in masks_dir.iterdir()) == ["000090.png", "000100.png",
                                                             "000110.png", "000120.png"]
     assert sorted(int(k) for k in rep["exclusion_masks"]["frames"]) == [90, 100, 110, 120]
 
 
-def test_epochs_are_read_from_the_session(session):
+def test_products_carry_epoch_zero_whatever_the_session_holds(session):
+    """Plan points 63 / 70: the report is the input of the reconstruction's epoch 0 by
+    construction; the session's epochs at run time never reach it — same bytes whatever ran."""
     out = session.session_dir / "output"
+    a = Cn.run_content(session.session_dir, KEYFRAMES, WITNESSES, CFG, tagger=SpyTagger(),
+                       segmenter=RectSegmenter(), log=QUIET, heartbeat_s=1e-6)
+    bytes_a = Cn.content_tags_path(session.session_dir).read_bytes()
     (out / "geometry_epoch.json").write_text(json.dumps({"epoch": 3}))
     from precision.camera import save_camera_json
     cam = replace(session.cam.to_precision_camera(), camera_epoch=1)
@@ -490,10 +536,77 @@ def test_epochs_are_read_from_the_session(session):
     try:
         rep = Cn.run_content(session.session_dir, KEYFRAMES, WITNESSES, CFG, tagger=SpyTagger(),
                              segmenter=RectSegmenter(), log=QUIET, heartbeat_s=1e-6)
-        assert rep["geometry_epoch"] == 3 and rep["camera_epoch"] == 1
+        assert rep["geometry_epoch"] == 0 and rep["camera_epoch"] == 0 and rep == a
+        assert Cn.content_tags_path(session.session_dir).read_bytes() == bytes_a
     finally:
         (out / "geometry_epoch.json").unlink()
         (out / "camera.json").unlink()
+
+
+def _write_i1_files(frames_dir, keyframes, witnesses):
+    (frames_dir / "selected_frames.json").write_text(json.dumps({
+        "version": "2.0", "method": "parallax_lk_12", "total_frames": 13,
+        "selected_count": len(keyframes), "selected_files": [f"{k:06d}.jpg" for k in keyframes]}))
+    (frames_dir / "witness_frames.json").write_text(json.dumps({
+        "version": 1, "provenance": "tool_measured", "method": "parallax_lk",
+        "frames": [{"frame": f, "file": f"{f:06d}.jpg"} for f in witnesses],
+        "selected_files": [f"{f:06d}.jpg" for f in witnesses]}))
+
+
+def test_consumers_take_only_the_stamped_masks(session):
+    """Plan points 68 / 84: a consumer (F4's tracks, the depth sweep) reads the exclusion masks
+    through valid_exclusion_masks — exactly the PNGs content_tags.json lists, and only while
+    the inventory's stamp (the PNGs' bytes, the I2 parameters, the keyframe / witness lists on
+    disk, the intake code) matches; a PNG on disk the report does not list is never read."""
+    sd, fd = session.session_dir, session.frames_dir
+    _write_i1_files(fd, KEYFRAMES, WITNESSES)
+    rep = Cn.run_content(sd, KEYFRAMES, WITNESSES, CFG, tagger=SpyTagger({30: {"dynamic": True}}),
+                         segmenter=RectSegmenter(), log=QUIET, heartbeat_s=1e-6)
+    listed = sorted(int(f) for f in rep["exclusion_masks"]["frames"])
+    assert listed == [0, 10, 20, 30, 40, 50, 60]
+    masks_dir = Cn.exclusion_masks_dir(sd)
+    logs = []
+    taken, rec = Cn.valid_exclusion_masks(sd, log=logs.append)
+    assert sorted(taken) == listed and all(taken[f] == Cn.mask_path(masks_dir, f) for f in listed)
+    assert rec["taken"] and rec["n_taken"] == 7 and rec["differences"] == []
+    # F4's own reader (precision.tracks.exclusion_mask_paths, package C's point 68) takes the
+    # same masks from the same report
+    from precision.tracks import exclusion_mask_paths
+    f4, f4rep = exclusion_mask_paths(sd)
+    assert sorted(f4) == listed and f4rep["taken"] and f4rep["n"] == 7
+    # a PNG on disk that the report does not list is not a mask
+    Cn.write_mask_png(Cn.mask_path(masks_dir, 120), np.ones((H, W), bool))
+    taken, rec = Cn.valid_exclusion_masks(sd, log=QUIET)
+    assert 120 not in taken and sorted(taken) == listed and rec["taken"]
+    # a listed PNG whose bytes changed: NONE is taken, the difference is named
+    png = Cn.mask_path(masks_dir, 30)
+    data = png.read_bytes()
+    Cn.write_mask_png(png, np.zeros((H, W), bool))
+    taken, rec = Cn.valid_exclusion_masks(sd, log=logs.append)
+    assert taken == {} and not rec["taken"] and "000030.png" in " ".join(rec["differences"])
+    assert exclusion_mask_paths(sd)[1]["taken"] is False               # F4 sees it too
+    png.write_bytes(data)
+    assert Cn.valid_exclusion_masks(sd, log=QUIET)[1]["taken"]
+    # the keyframe list on disk is not the one the masks were built for → none
+    _write_i1_files(fd, KEYFRAMES[:-1], WITNESSES)
+    taken, rec = Cn.valid_exclusion_masks(sd, log=QUIET)
+    assert taken == {} and any("keyframes" in d for d in rec["differences"])
+    _write_i1_files(fd, KEYFRAMES, WITNESSES)
+    # a listed PNG missing from disk → none, said
+    png.unlink()
+    taken, rec = Cn.valid_exclusion_masks(sd, log=QUIET)
+    assert taken == {} and "missing" in rec["reason"]
+    png.write_bytes(data)
+    # no report at all → none, said
+    p = Cn.content_tags_path(sd)
+    saved = p.read_bytes()
+    p.unlink()
+    taken, rec = Cn.valid_exclusion_masks(sd, log=QUIET)
+    assert taken == {} and "does not exist" in rec["reason"]
+    p.write_bytes(saved)
+    assert Cn.valid_exclusion_masks(sd, log=QUIET)[1]["taken"]
+    for f in (120,):
+        Cn.mask_path(masks_dir, f).unlink()
 
 
 def test_heartbeat_is_required(session):
@@ -605,7 +718,8 @@ def test_cli_disabled_path(session, monkeypatch, capsys):
 
     fake = SimpleNamespace(content=replace(CFG, enabled=False),
                            runtime=SimpleNamespace(heartbeat_s=1.0))
-    monkeypatch.setattr(Cn, "load_intake_config", lambda raw=None: fake)
+    import intake.run_config as RC                       # the CLI reads the frozen run config
+    monkeypatch.setattr(RC, "cli_intake_config", lambda session_dir, log=print: (fake, "0" * 64))
     monkeypatch.setattr(Cn, "QwenTagger", Boom)
     monkeypatch.setattr(Cn, "Sam3Segmenter", Boom)
     assert Cn.main(["--session", str(session.session_dir)]) == 0

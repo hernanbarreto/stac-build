@@ -1,0 +1,46 @@
+{
+ "version": 1,
+ "about": "COMMITTED per-card constants (docs/plan_determinismo.md points 3, 5, 6, 24, 25, 41). No run writes this file: an entry is added by a calibration CLI run by hand (python -m intake.vram --calibrate ..., python -m reconstruction.chunk_plan --omega-footprint ...) and committed. Keys are repro.card_key(repro.card_identity()) = '<name> | <board MiB> MiB | sm_<compute capability>': the card MODEL (name and capability read through torch, the board memory = nvidia-smi memory.total of the same card, matched by uuid) — never the instance (uuid) nor torch's usable-memory bytes. Each entry's nvidia_smi_memory_total_mib must equal the MiB its key names (card_table.load_table checks it).",
+ "cards": {
+  "NVIDIA A100 80GB PCIe | 81920 MiB | sm_8.0": {
+   "card_key_provenance": "re-keyed 2026-10-07 from 'NVIDIA A100 80GB PCIe | 85097971712 B | sm_8.0' (the old key carried torch's total_memory) to the board memory nvidia-smi reports; every value of this entry is unchanged. torch read 85097971712 B when this entry was written (~06:21) and 85094825984 B (3 MiB less) after the pod restart of ~07:17, in all four conda envs (da3 torch 2.9.1+cu128, mapanything 2.11.0+cu128, pgsr 2.9.1+cu128, semantic 2.10.0+cu128) on GPU-9e73f3cf-a20b-ef36-85c3-9cc06ba2b7d5, while nvidia-smi read memory.total 81920 MiB (driver 595.91.07, CUDA 13.2, ECC enabled, 0 remapped rows): torch's figure is the memory usable after the driver's reservation, not the card model, and the first validation run (pccr, logs/server_20261007_071903.log) died in the focal probe on 'the card ... 85094825984 B ... has no entry'.",
+   "nvidia_smi_memory_total_mib": 81920,
+   "nvidia_smi_memory_total_provenance": "nvidia-smi --query-gpu=memory.total on this card (81920 MiB, driver 595.91.07, 2026-10-07); every window and Omega resolution of the validated runs was sized on it (80.0 GiB in the logs)",
+   "omega": {
+    "footprint_factor": 1.2139,
+    "provenance": "zaragoza 2026-10-06 (183 keyframes, grid 1664x928): an Omega OOM with 'Tried to allocate 4.21 GiB ... total capacity of 79.25 GiB of which 2.19 GiB is free' against a predicted peak of 66.952 GiB -> need >= 79.25 - 2.19 + 4.21 = 81.27 GiB -> factor 81.27 / 66.952 = 1.2139 (weights/omega_footprint.json as of 2026-10-06 19:20, the value every run since used). DECLARED: that need counted a foreign process's 416 MiB on the card; this process's own reading (76.64 + 4.21) / 66.952 = 1.2076 gives the same resolutions (pccr 832, zaragoza 1520), so the value in use is kept."
+   },
+   "da3": {
+    "depth-anything/DA3NESTED-GIANT-LARGE-1.1": {
+     "840": {
+      "weights_gib": 6.36,
+      "peak_gib": 11.09,
+      "frames": 2,
+      "tokens_per_frame": 1980,
+      "provenance": "pccr 2026-10-06 (464x832, process_res 840): 2-frame calibration window, '[DA3 windows] model loaded: 6.36 GiB allocated' and peak 11.09 GiB (output/intake/da3_vram.json: per_token 1.19444e-3 GiB, logged '1.194 MiB/token'); I3 window 32 -> 26 on this card"
+     },
+     "1932": {
+      "weights_gib": 6.36,
+      "peak_gib": 25.8,
+      "frames": 2,
+      "tokens_per_frame": 10764,
+      "provenance": "zaragoza 2026-10-04/06 (1920x1080, process_res 1932): 2-frame calibration window, weights 6.36 GiB, peak logged '25.8 GiB' (0.903 MiB/token); every peak consistent with the logged per-token value (25.79-25.81 GiB) gives the same window (6 frames)"
+     }
+    }
+   }
+  }
+ },
+ "da3_probe_layout": {
+  "about": "docs/plan_determinismo.md point 64 (2026-10-07): the FOCAL PROBE's window layout per (model, process_res) — the probe's 16 frames go into windows of this many frames on EVERY card; it used to be sized by the card's memory (and halved on an OOM), so the session K and every keyframe depended on the card and its co-tenants. An entry is the layout the validated run at that resolution used; a resolution without one FAILS naming it.",
+  "depth-anything/DA3NESTED-GIANT-LARGE-1.1": {
+   "840": {
+    "window_frames": 16,
+    "provenance": "pccr 2026-08-31 / 2026-10-06 (464x832, process_res 840): the 16 probe frames in ONE window ('[intake.vram] window 16 frame(s) fits: predicted peak 44.2 GiB of 80.0'); fx 387.52 measured three times from it"
+   },
+   "1932": {
+    "window_frames": 6,
+    "provenance": "zaragoza 2026-10-04/06 (1920x1080, process_res 1932): windows [6, 6, 4] ('[intake.vram] window 16 → 6 frame(s)'); fx 2255.83 fy 1699.49 measured three times from them"
+   }
+  }
+ }
+}

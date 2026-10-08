@@ -72,3 +72,32 @@ def test_a_row_of_desks_walked_past_one_by_one_is_split():
     floor = _box((2.0, 0.0, -1.0), 60000, ext=(8.0, 0.02, 6.0))
     inst, added = _run(desks, [range(0, 3), range(3, 6), range(6, 9)], CAMS, extra=floor)
     assert added == 2 and len(inst) == 3
+
+
+def test_the_gap_grid_is_world_anchored_an_extra_point_changes_only_its_cell(monkeypatch):
+    """docs/plan_determinismo.md point 102 (DECIDIDO): the gap grid used to start at the instance's
+    minimum. Two fragments 0.10 m apart sit in ADJACENT world cells (x ∈ [0, 0.05] → cell 0,
+    x ∈ [0.15, 0.199] → cell 1): ONE component. One extra point at x = −0.002 moved the old grid
+    by 2 mm and put the fragments in cells 0 and 2 — two components, a split candidate out of a
+    flyer. World-anchored, the extra point lands in cell −1, adjacent to cell 0: still one."""
+    import scipy.ndimage as ndi                       # the module the split calls `ndimage.label` on
+    seen = []
+    real = ndi.label
+
+    def _label(grid, structure=None):
+        lab, n = real(grid, structure=structure)
+        seen.append(int(n))
+        return lab, n
+    monkeypatch.setattr(ndi, "label", _label)
+    rng = np.random.default_rng(5)
+    a = np.column_stack([rng.uniform(0.0, 0.05, 3000), rng.uniform(0.0, 0.05, 3000), rng.uniform(0.0, 0.05, 3000)])
+    b = np.column_stack([rng.uniform(0.15, 0.199, 3000), rng.uniform(0.0, 0.05, 3000), rng.uniform(0.0, 0.05, 3000)])
+    for extra in (None, np.array([[-0.002, 0.02, 0.02]])):
+        xyz = np.vstack([a, b] + ([extra] if extra is not None else []))
+        fr = rng.choice(10, len(xyz)).astype(np.int32)
+        inst = [{"id": 9, "instance_id": 10, "label": "x", "globalIndices": list(range(len(xyz)))}]
+        added = _split_covisible_components(inst, xyz, fr, gap_m=0.10, min_points=1000, covis_share=0.5,
+                                            cam_centre={f: np.asarray(c, float) for f, c in CAMS.items()},
+                                            min_walk_m=1.0)
+        assert added == 0 and len(inst) == 1
+    assert seen == [1, 1], f"components with / without the extra point: {seen} — the grid moved"

@@ -409,3 +409,48 @@ def test_converged_points_pass_at_the_float64_floor_of_large_frames():
     assert np.linalg.norm(C.distort_points(a, cam) - uv, axis=1).max() > solver["eps_px"]
     with pytest.raises(C.CameraError, match="did not converge"):
         C.undistort_points(uv, cam, **{**solver, "max_iter": 5})
+
+
+def test_stray_k_comes_only_from_the_scans_own_directory(tmp_path):
+    """Plan point 35: a sibling scan of the same day holds ANOTHER recording's calibration — F0
+    never takes it, whatever the directory order; the scan's own dir or its stray/ subdir only."""
+    sess, g, rows = _fake_session(tmp_path)                       # scan/src_default, no Stray
+    sib = tmp_path / "scan" / "src_other"
+    sib.mkdir()
+    np.savetxt(sib / "camera_matrix.csv", np.array([[999.0, 0, 1], [0, 999.0, 1], [0, 0, 1]]), delimiter=",")
+    (sib / "odometry.csv").write_text("timestamp,frame,x,y,z,qx,qy,qz,qw\n")
+    assert C.find_stray_camera_matrix(sess) is None
+    cam = C.build_session_camera(sess, _CamCfg("auto"), log=lambda *a: None)
+    assert cam.source == "omega" and cam.fx != 999.0
+    # the scan's own stray/ subdirectory counts
+    (sess / "stray").mkdir()
+    np.savetxt(sess / "stray" / "camera_matrix.csv",
+               np.array([[400.0, 0, 464 / 2], [0, 400.0, 832 / 2], [0, 0, 1]]), delimiter=",")
+    (sess / "stray" / "odometry.csv").write_text("timestamp,frame,x,y,z,qx,qy,qz,qw\n")
+    assert C.find_stray_camera_matrix(sess) == sess / "stray" / "camera_matrix.csv"
+    # two different calibrations in the scan's own places: refused, naming both
+    np.savetxt(sess / "camera_matrix.csv", np.array([[401.0, 0, 464 / 2], [0, 401.0, 832 / 2], [0, 0, 1]]),
+               delimiter=",")
+    (sess / "odometry.csv").write_text("timestamp,frame,x,y,z,qx,qy,qz,qw\n")
+    with pytest.raises(C.CameraError, match="two different Stray calibrations"):
+        C.find_stray_camera_matrix(sess)
+    # the same pattern in segmentation.session_io (point 35, same fix)
+    from segmentation.session_io import _find_stray_dir
+    assert _find_stray_dir(sib.parent / "src_default") == sess
+    (sess / "camera_matrix.csv").unlink(); (sess / "odometry.csv").unlink()
+    assert _find_stray_dir(sess) == sess / "stray"
+    import shutil
+    shutil.rmtree(sess / "stray")
+    assert _find_stray_dir(sess) is None                           # never the sibling
+
+
+def test_camera_json_does_not_depend_on_a_later_stages_masks(tmp_path):
+    """Plan point 36: F0 runs before any segmentation — camera.json is byte-identical whether or
+    not a seg_masks.npz of an earlier run happens to be on disk (the same session, built twice)."""
+    sess, _g, _r = _fake_session(tmp_path, masks=True)
+    C.build_session_camera(sess, _CamCfg(), log=lambda *a: None)
+    with_masks = (sess / "output" / "camera.json").read_bytes()
+    (sess / "output" / "seg_masks.npz").unlink()
+    C.build_session_camera(sess, _CamCfg(), log=lambda *a: None)
+    assert (sess / "output" / "camera.json").read_bytes() == with_masks
+    assert b"mask_grid_shape_hw" not in with_masks

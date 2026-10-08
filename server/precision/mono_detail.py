@@ -262,6 +262,21 @@ class FrameRefinement:
     band: np.ndarray                   # the discontinuity band
     detail: np.ndarray                 # the detail term applied (0 elsewhere)
     counts: Dict[str, int] = field(default_factory=dict)
+    margins: Dict[str, object] = field(default_factory=dict)   # per-pixel margins to the bars (point 53)
+
+
+def margin_quantiles(x: np.ndarray) -> Optional[dict]:
+    """The distribution of a per-pixel MARGIN to a bar (positive = on the accepted side), as the
+    report records it (docs/plan_determinismo.md point 53: the bars stay — the validated recipe — and
+    every margin to them is written down): n and the 5 / 25 / 50 / 75 / 95 % quantiles. None when
+    nothing was judged."""
+    v = np.asarray(x, np.float64).ravel()
+    v = v[np.isfinite(v)]
+    if v.size == 0:
+        return None
+    q = np.percentile(v, [5, 25, 50, 75, 95])
+    return {"n": int(v.size), "p05": float(q[0]), "p25": float(q[1]), "p50": float(q[2]),
+            "p75": float(q[3]), "p95": float(q[4]), "share_beyond": float(np.mean(v < 0))}
 
 
 def refine_frame(z_cal: np.ndarray, valid_cal: np.ndarray, z_al: np.ndarray, al_valid: np.ndarray,
@@ -293,13 +308,20 @@ def refine_frame(z_cal: np.ndarray, valid_cal: np.ndarray, z_al: np.ndarray, al_
     d = (z_al.astype(np.float64) - lp_a)
     z_new = lp_c + d
     m &= z_new > 0
+    margins: Dict[str, object] = {}
     if detail_scope == "edges":
         from scipy.ndimage import binary_dilation
         r = max(1, int(detail_zone_px))
         zone = binary_dilation(disc, structure=np.ones((2 * r + 1, 2 * r + 1), bool))
         # the change must stay within the session's own tolerance: beyond it PointDiT and Omega
         # disagree on the SURFACE, and the surface is Omega's
-        within = np.abs(z_new - z_cal.astype(np.float64)) <= float(tau) * np.maximum(z_cal.astype(np.float64), 1e-9)
+        zc64 = np.maximum(z_cal.astype(np.float64), 1e-9)
+        rel_change = np.abs(z_new - z_cal.astype(np.float64)) / zc64
+        within = rel_change <= float(tau)
+        # point 53: the margin of every zone pixel to the τ bar, in units of τ (positive = within)
+        judged = m & zone
+        margins["detail_within_tau"] = margin_quantiles(
+            (float(tau) - rel_change[judged]) / max(float(tau), 1e-12)) if judged.any() else None
         m &= zone & within
     elif detail_scope != "surfaces":
         raise MonoDetailError(f"detail_scope must be 'edges' or 'surfaces', got {detail_scope!r}")
@@ -323,11 +345,23 @@ def refine_frame(z_cal: np.ndarray, valid_cal: np.ndarray, z_al: np.ndarray, al_
     out[to_front] = zf[to_front].astype(np.float32); src[to_front] = SRC_BAND_FRONT
     out[to_back] = zb[to_back].astype(np.float32); src[to_back] = SRC_BAND_BACK
     out[unresolved] = 0.0; src[unresolved] = SRC_UNRESOLVED
+    # point 53: the margins of the band tests, in units of their bar (positive = on the side taken)
+    dv = distinct & valid_cal
+    if dv.any():
+        with np.errstate(divide="ignore", invalid="ignore"):
+            # how far INSIDE the gap a band pixel's calibrated depth sits (both > 0 = mixed)
+            inside = np.minimum((zc - zf * (1.0 + tau)) / (zf * tau), (zb * (1.0 - tau) - zc) / (zb * tau))
+            margins["mixed_inside_gap"] = margin_quantiles(inside[dv])
+    if judged.any():
+        with np.errstate(divide="ignore", invalid="ignore"):
+            # the nearer side's test: margin / |z_al − side| in units of the margin (positive = resolved)
+            side = np.minimum(np.abs(za - zf) / (margin * zf), np.abs(za - zb) / (margin * zb))
+            margins["band_side_within_margin"] = margin_quantiles(1.0 - side[judged])
     counts = {"valid": int(valid_cal.sum()), "covered": int(both.sum()), "detail": int(m.sum()),
               "band": int(band.sum()), "mixed": int(mixed.sum()), "band_front": int(to_front.sum()),
               "band_back": int(to_back.sum()), "mixed_unresolved": int(unresolved.sum()),
               "mixed_unjudged": int((mixed & ~judged).sum())}
-    return FrameRefinement(depth=out, source=src, band=band, detail=detail, counts=counts)
+    return FrameRefinement(depth=out, source=src, band=band, detail=detail, counts=counts, margins=margins)
 
 
 # ── the stage: every keyframe, two passes (fit all tiles, then the session's residual bar) ─
@@ -413,10 +447,20 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
         raise MonoDetailError("no tile had enough support for an affine fit — nothing can be aligned")
     bar = float(np.percentile(all_res, float(mcfg.tile_residual_quantile)))
     rep.residual_bar = bar
+    # point 53: the bars this stage judges with — the validated recipe's, written down as such,
+    # with every tile's and pixel's margin to them below
+    rep.params["bars"] = {"tile_residual_bar_rel": bar,
+                          "tile_residual_quantile": float(mcfg.tile_residual_quantile),
+                          "tile_residual_bar_is": "the session's own percentile of its tile residuals "
+                                                  "(self-referential: about 1 - q of the tiles fall above it)",
+                          "min_support_frac": float(mcfg.min_support_frac), "tau": float(tau),
+                          "tau_is": "bend.tau_quantile percentile of the session's neighbour disagreement"}
     # pass 2: accept / reject, blend, refine
     out_dep: Dict[int, np.ndarray] = {}
     out_src: Dict[int, np.ndarray] = {}
     totals: Dict[str, int] = {}
+    tile_margins: List[float] = []
+    support_margins: List[float] = []
     for n, f in enumerate(frames):
         zc = dep[f]; vc = valid[f] & (zc > 0)
         num = np.zeros((H, W), np.float64); den = np.zeros((H, W), np.float64)
@@ -433,9 +477,16 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
                 ok = z_al > 0
                 num[sl] += np.where(ok, z_al, 0.0) * wmap[sl]
                 den[sl] += np.where(ok, wmap[sl], 0.0)
+            # margins to the two tile bars (positive = accepted side), in the bar's own unit
+            m_res = (bar - tf.residual) if np.isfinite(tf.residual) else float("nan")
+            m_sup = tf.support_frac - float(mcfg.min_support_frac)
+            if np.isfinite(m_res):
+                tile_margins.append(m_res)
+            support_margins.append(m_sup)
             per["tiles"].append({"y0": tf.tile.y0, "x0": tf.tile.x0, "s": tf.s, "b": tf.b, "residual": tf.residual,
                                  "inlier_ratio": tf.inlier_ratio, "support_frac": round(tf.support_frac, 4),
-                                 "accepted": tf.accepted, "reason": tf.reason})
+                                 "accepted": tf.accepted, "reason": tf.reason,
+                                 "margin_to_residual_bar": m_res, "margin_to_support_bar": m_sup})
         al_valid = den > 1e-6
         with np.errstate(divide="ignore", invalid="ignore"):
             z_al_f = np.where(al_valid, num / np.maximum(den, 1e-12), 0.0).astype(np.float32)
@@ -447,7 +498,7 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
         ur, uc = np.nonzero(fr.source == SRC_UNRESOLVED)
         if len(ur):
             rep.unresolved[int(f)] = (ur, uc, zc[ur, uc].astype(np.float32))
-        per.update(fr.counts); per["align_err"] = align_err
+        per.update(fr.counts); per["align_err"] = align_err; per["margins"] = fr.margins
         rep.per_frame[int(f)] = per
         for k, v in fr.counts.items():
             totals[k] = totals.get(k, 0) + v
@@ -456,6 +507,8 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
         if progress is not None and (n % 10 == 0 or n == len(frames) - 1):
             progress(50 + 50 * (n + 1) / len(frames), f"mono detail {n + 1}/{len(frames)} keyframes")
     rep.totals = totals
+    rep.params["bars"]["tile_margins"] = {"residual": margin_quantiles(np.array(tile_margins)),
+                                          "support": margin_quantiles(np.array(support_margins))}
     rep.seconds_total = round(time.time() - t_start, 1)
     nv = max(totals.get("valid", 1), 1)
     log(f"{LOG_TAG} tiles {rep.accepted}/{rep.tiles} accepted (support {rep.rejected_support}, residual "

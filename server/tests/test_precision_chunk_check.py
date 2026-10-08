@@ -65,9 +65,11 @@ def build_session(tmp_path: Path, case: str) -> tuple:
         poses.append(T); chain.append(STEP_M * i)
     (out / "camera_frames.txt").write_text("\n".join(str(f) for f in frames) + "\n")
     np.savetxt(out / "camera_poses.txt", np.array(poses).reshape(N_KF, 16))
+    from precision.camera import grid_full_frame_resize
     (out / "camera.json").write_text(json.dumps({"width": W, "height": H, "model": "OPENCV",
                                                   "params": [F, F, CX, CY, 0, 0, 0, 0], "camera_epoch": 1,
-                                                  "omega_grid": {"scale_x": 1.0, "crop_x": 0, "pad_left": 0}}))
+                                                  "source": "omega",
+                                                  "omega_grid": grid_full_frame_resize(W, H, W, H, "omega").to_dict()}))
     (out / "geometry_epoch.json").write_text(json.dumps({"epoch": 2}))
     return frames, np.array(chain)
 

@@ -1,4 +1,4 @@
-# Final reconstruction pipeline — STATE OF 2026-10-04 (read this first in a new session)
+# Final reconstruction pipeline — STATE OF 2026-10-07 (read this first in a new session)
 
 This file is the single source of truth for: what the reconstruction pipeline IS today, what each
 stage does, the user decisions behind it, and EVERY pending item (two lists at the end: A = the
@@ -87,6 +87,105 @@ segments). Next sessions run this recipe unchanged; the user is reconstructing a
 4. **ONE epoch: the final one** (*"debe quedar una sola época que es la final"*).
 5. **Work one task at a time**, never several agents at once on the user's session; never change what
    works on a hypothesis — measure first, and reproduce validated numbers exactly when porting.
+
+## ⭐ DETERMINISM — USER 2026-10-07 ("STAC Build es una herramienta de ingeniería, debe dar siempre lo mismo")
+The whole pipeline must be BIT-FOR-BIT deterministic: the same input gives the same bytes, whatever ran before,
+whatever else is on the machine. Trigger: two pccr 2026-08-31 runs with identical input diverged at the in-run pose
+graph (a code change between them), F5 then took rung R2 (a false lens, p2 −0.007) on a 0.0005 px "improvement"
+over 128k tracks, F6 resampled every Omega map through it: floor undulation 14.6 → 45.1 cm.
+- THE PLAN: `docs/plan_determinismo.md` — 166 points (1-63 Omega→F6, 64-166 intake / VLM+SAM3 / cloud+segmentation /
+  corrections+certification / orchestration), each with its fix or the user's decision (DECIDIDO). Wave 1 = the whole
+  RECONSTRUCTION (1-79 + 102, 138, 140, 146) implemented 2026-10-07; wave 2 (after the cloud) follows while the user
+  tests reconstructions.
+- THE USER'S RULE (point 1, delegated to all judges): a change is APPLIED only if (a) significant — 95 % CI of the
+  paired change entirely on the improving side (cluster bootstrap when judges share a keyframe), (b) ≥ 5 judges
+  (`loop_judge.min_judge_closures(0.95)`), (c) the median improvement ≥ `correction_graph.graph.improvement_error_factor`
+  (2.0, USER) × the MEASURED error. One function: `loop_utils/metric_lock.decide_change`. Users: the in-run pose graph
+  (leave-one-out judges, every closure judges once; < 5 closures → declared before solving, not applied), the depth
+  graph, the F2 instrument switch, the F5 rung ladder (error = the solver's own continuation error; R2 warm-started
+  from R1; R3 report-only), the F6 per-keyframe bend (c1/c2 enter only ≥ 2× their fit error; c0 verified on the
+  keyframe's own held-out rows, else the pooled neighbours' fit), the chunk check verdicts, the zoom exclusion and the
+  scale-drift gate. argmins (gauge λ, bend window) take the SMOOTHEST option within 2× the measured error of the best.
+- SHARED MECHANISMS: `server/repro.py` — `deterministic_torch` / `enable_deterministic_torch` (STRICT deterministic
+  algorithms, TF32 off, cudnn benchmark off, seeds, cuBLAS workspace), `require_exclusive_gpu` (any co-tenant on the
+  card FAILS the GPU step: no resolution step-down, no window halving — ever), `card_identity` (torch, no 'unknown'),
+  `environment_record` (card, driver, torch/cuDNN, CPU, BLAS core, libs, git of repo+forks), `stamp`/`check_stamp`
+  (inputs + code + config sha256 on every reused file), `stable_id` (no uuid in artifacts), exact float64 writers
+  for every pose/intrinsics text file. Per-card constants COMMITTED in `server/card_table.json` (DA3 window sizing,
+  focal-probe layout, Omega footprint factor) — nothing learned from OOMs at run time (`weights/omega_footprint.json`
+  gone). DA3 weights pinned by revision + sha256 (`server/da3_weights.py`), ONE HF cache (`/workspace/hf_cache`).
+  OPENBLAS_CORETYPE=HASWELL pinned in the chain's step env. PotreeConverter pinned to 1 thread + total-order sorts
+  (rebuilt; measured byte-identical). Timings/clock → `*.timing.json`, never in compared artifacts.
+- RESUME: every chain step stamps what it consumed (`chain_state.json` STATE_VERSION 2: old files are ignored → re-run
+  from F0); Omega has a stamped completion marker (`maplong_run/omega_complete.json`, `fork_stamp.json`); every reused
+  file (windows, walk, covis, loop closures, scale rows, calibration, masks, gauge.json) is taken only on a matching
+  stamp, otherwise recomputed or refused with the reason.
+- INTAKE (points 64-66, 69-71, 74, 75, 78, 79, 84 — package E, 2026-10-07): the I0/I1/I2 marker (`intake/intake_state.json`
+  v2) keys every step on a `repro.stamp` — every frame's bytes under `frames/<name>`, the intake + DA3-extractor code
+  (`intake.stamps.INTAKE_CODE_FILES`), the step's parameters, K + the focal probe's stamp, the CPU environment
+  (`intake.stamps.cpu_environment_record`: numpy/scipy/OpenCV/Pillow versions, CPU, BLAS core, OpenCV dispatch + IPP,
+  BOTH JPEG decoders with their libjpeg-turbo builds, numpy's FFT dtype) — never a version bumped by hand; the log
+  names what differs. No time, epoch or absolute path in any intake product (epochs = 0 by construction: the intake
+  feeds the reconstruction's epoch 0; the session's epochs at run time, times and absolute paths go to
+  `intake/intake_state.timing.json`). I0's FFT in explicit float64 (bit-identical to the numpy-1.26 float32 path);
+  numpy / scipy / opencv-python / pillow PINNED in requirements.txt + environment.yml to env da3's versions. The job's
+  configuration is FROZEN once by the pipeline manager after the replace wipe (`output/run_config.yaml` +
+  `run_config.sha256`, `intake.run_config`); the intake refuses an intake configuration that is not the frozen one and
+  records the sha (not a key: a change elsewhere in config.yaml re-runs nothing); the CLIs freeze their own. Every I1
+  window records its decision margins in `selected_frames.json` (`windows[].margins`: closing p − hi, band-edge
+  distance, top-2 sharp_rank gap, worst fb margin, tracks margin, TRF nfev vs the bound). I2 (off): the disabled branch
+  deletes leftover `intake/exclusion_masks/*.png` and `content_tags.json` carries the stamp of exactly the valid masks
+  (root `stamp` + `exclusion_masks.stamp`; readers: `precision.tracks.exclusion_mask_paths` / `intake.content.
+  valid_exclusion_masks`); a VLM answer that does not parse FAILS the stage (`VLMParseError`), never 'nothing'. The
+  focal probe is reused on its stamp only (frames' bytes, committed layout, card, weights, dtype, versions —
+  `intake.focal_probe`); the SALAD revisit bars carry their bootstrap error and pairs within 2× it are in neither
+  class; the non-local band is min_walk_m of the FROZEN walk with its margin recorded.
+- FRAMES SEALED + CAPTURE IN inputs/ (points 67, 73, 76, 77 — 2026-10-07): every frame writer (video upload,
+  Stray `rgb.mp4` — `ingestors/stray_scanner.py`, `convert_stray_to_da3.py` —, the WebXR `/ws/scan` socket) fills
+  `<scan>/frames.extracting/` through `intake.frames_manifest.FrameSealer` (duplicate frame numbers refused) and
+  renames it to `frames/` only when complete, `frames/manifest.json` written LAST: video name/size/sha256, decoder
+  (OpenCV version, FFMPEG requested explicitly, the Video I/O build lines, `CAP_PROP_ORIENTATION_AUTO` SET to 0 —
+  measured to be OpenCV 4.11.0's default: bufferStop's / fosa_pan's −90° videos have unrotated frames on disk —
+  and the container's orientation), encoder (`cv2.imencode` with every JPEG option explicit, the same bytes as the
+  old `imwrite` q95 — tested), reported vs decoded count, every frame's sha256; deterministic bytes, no clock. An
+  upload into a scan WITH frames → 409 naming the count (the UI has no replace-video action). While a writer works
+  (in-process claim) or the temp dir exists (a restart mid-extraction) the pipeline fails the job with the reason,
+  the wipe and the intake refuse; the next upload removes the temp dir. The legacy `/ws/camera` stream (no client)
+  is refused. The intake checks the frames against the manifest (names + count, then the sha256 of its OWN I0 stamp)
+  and fails naming the first difference; a manifest-less `frames/` (all five sessions today) is ADOPTED once
+  (origin `adopted`, decoder/encoder null, DECLARED in the log). `quality.list_frames` refuses two files with one
+  frame number. CAPTURE: `inputs/stray/`, `inputs/vio_trajectory.*` / `inputs/vio/`, `inputs/webxr/`
+  (`ingestors/capture_inputs.py`); every Stray / VIO reader reads `inputs/` first, then the scan's own legacy
+  places (never a sibling); the replace wipe keeps `frames/manifest.json` + `inputs/` and MOVES legacy capture data
+  into `inputs/` (two different copies of one file refuse the wipe before anything is touched). `camera.json`
+  `report.k_source` = source + file + sha256; `scale_diagnostics.json` `scale_source_file` / `vio_sha256`;
+  `gauge.json` (+ its v2 block) `scale_source` / `scale_inputs`. No session has VIO/Stray: a no-op for them but
+  the adoption (and F0+ re-runs once: `frames/` now holds the manifest the chain's `frames` stamp hashes).
+- DECLARED for the first run after this: F5 solves each rung twice (continuation = solver error); PointDiT and DA3
+  run STRICT — an op without a deterministic CUDA kernel RAISES (fail, never degrade); Potree on one thread ≈ 0.55 M
+  pts/s; F2's algebra on Haswell kernels (last-bit changes vs earlier runs); F6 numbers change by design (points 48/49).
+- VERIFICATION: run the same session twice (replace ON) and compare the sha256 of every product; any difference is a
+  bug of this plan, not noise.
+- 2026-10-07 (evening, USER — after the first deterministic pccr run showed the turn at frames 558–723 torn by 39 cm and
+  the table doubled): (1) I1 also makes a keyframe by ROTATION — the quantum is a QUARTER of the co-visibility bound,
+  (1 − τ)·FOV_h/4 (pccr 10.8°: co-visible with the next three keyframes, ℓ ≥ 4); measured on pccr, half the bound
+  (21.6°) still left 19–27° jumps ("huecos") and the session's own 7° stacked 30 keyframes 2–3 cm apart ("solapados");
+  pccr 289 → 295 keyframes, the turn 16 → 21, largest frame gap 70 → 51. (2) THE CHUNK PLAN IS MEASURED ON THE
+  PARALLAX KEYFRAMES ONLY (covis.json plan_index; COVIS_VERSION 4): counted, the rotation keyframes made turns cheap
+  (D_total 34.7 → 31.9, 5 chunks → 4 longer ones spanning the turn, Omega drifted −54 cm inside them — floor undulation
+  13.5 → 32.7 cm). They fill the turns inside the chunks; every range maps to full keyframe indices. (3) Ownership of a
+  shared block = split at its midpoint (the frame at the midpoint to the earlier chunk — bit-identical to the old
+  nearest-centre rule on uniform layouts); the centre rule gave the whole block to the smaller chunk (pccr: 63/63 vs
+  50/139). (4) TRIED AND REMOVED the same evening: a top-view (silhouette correlation) witness corroborating loop closures
+  — on real bridge windows it read false shifts (67 cm on a local closure, 1.7–5.1 m start↔end) and the graph applied
+  metres; ownership by co-visibility company (untested on its own); F6 landmark-precision weights (measured: do not move
+  s_k at the turn) and nearest-side edge pixels (a recipe change). The start↔end closure (~1 m, bridge 284↔8) stays
+  measured, not applied: the certification is the validated corrector of that loop.
+- 2026-10-07 (night): the ZOOM rule's error was each chunk's own per-frame focal scatter (2–5 px); Omega gives the
+  SAME frames focals that differ by up to 21.8 px between two chunks' inferences (pccr seams: +1.4, +11.8, −1.9,
+  +21.8 px), so its per-inference noise read as a zoom on 4 of 5 chunks, their DA3 anchors were dropped and the scale
+  verification failed by 18.6 %. The error is now max(own scatter, Omega's focal error between inferences measured on
+  the shared frames = RMS of the seams' median offsets / √2, pccr 8.8 px) — metric_lock.inference_focal_error.
 
 ## The pipeline ("Reconstruir"), stage by stage
 

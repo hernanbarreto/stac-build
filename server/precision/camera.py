@@ -686,16 +686,35 @@ def read_omega_preprocessing(output_dir: os.PathLike) -> Tuple[str, int]:
     return str(model["omega_mode"]), int(model["omega_resolution"])
 
 
-def read_omega_intrinsics(output_dir: os.PathLike) -> np.ndarray:
-    """intrinsic.txt rows [fx fy cx cy] on the omega grid (one per keyframe)."""
+def omega_intrinsics_path(output_dir: os.PathLike) -> Path:
+    """The intrinsic.txt :func:`read_omega_intrinsics` reads (output/ first, then maplong_run/)."""
     out = Path(output_dir)
     for cand in (out / INTRINSIC_NAME, out / "maplong_run" / INTRINSIC_NAME):
         if cand.exists():
-            rows = np.loadtxt(str(cand), dtype=np.float64, ndmin=2)
-            if rows.shape[1] < 4:
-                raise CameraError(f"{cand}: expected 'fx fy cx cy' rows, got shape {rows.shape}")
-            return rows[:, :4]
+            return cand
     raise CameraError(f"no {INTRINSIC_NAME} under {out} — the omega run did not write intrinsics")
+
+
+def read_omega_intrinsics(output_dir: os.PathLike) -> np.ndarray:
+    """intrinsic.txt rows [fx fy cx cy] on the omega grid (one per keyframe)."""
+    cand = omega_intrinsics_path(output_dir)
+    rows = np.loadtxt(str(cand), dtype=np.float64, ndmin=2)
+    if rows.shape[1] < 4:
+        raise CameraError(f"{cand}: expected 'fx fy cx cy' rows, got shape {rows.shape}")
+    return rows[:, :4]
+
+
+def k_source_record(source: str, path: os.PathLike, session_dir: os.PathLike) -> Dict[str, Any]:
+    """Where the session camera's K came from (docs/plan_determinismo.md point 77): the source,
+    the file (relative to the session) and its sha256 — camera.json carries it, so a camera
+    that changed because its input changed says so."""
+    import repro
+    p, root = Path(path), Path(session_dir)
+    try:
+        rel = p.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        raise CameraError(f"the K source {p} is not inside the session {root}") from None
+    return {"source": str(source), "file": rel, "sha256": repro.sha256_file(p)}
 
 
 def omega_depth_shape(output_dir: os.PathLike) -> Optional[Tuple[int, int]]:
@@ -733,16 +752,21 @@ def mask_grid_for(native_w: int, native_h: int, mask_hw: Tuple[int, int]) -> Gri
 
 
 def find_stray_camera_matrix(session_dir: os.PathLike) -> Optional[Path]:
-    """Stray Scanner's camera_matrix.csv next to an odometry.csv (the session
-    itself or a sibling directory — the layout ``session_io`` recognises)."""
+    """Stray Scanner's camera_matrix.csv next to an odometry.csv of THIS scan only, in reading
+    order: ``inputs/stray/`` (the capture data the replace wipe never touches —
+    docs/plan_determinismo.md point 77, DECIDIDO 2026-10-07), then the scan directory, then its
+    ``stray/`` subdirectory (ingestors.capture_inputs.stray_candidates — point 35: a sibling scan
+    of the same day is another recording, its calibration is not this camera's, and which sibling
+    an unsorted directory listing named first was the filesystem's choice). Two different
+    matrices in the scan's own places are refused, naming both."""
+    from ingestors.capture_inputs import stray_dirs
     root = Path(session_dir)
-    cands = [root]
-    if root.parent.exists():
-        cands += [c for c in root.parent.iterdir() if c.is_dir()]
-    for c in cands:
-        if (c / "odometry.csv").exists() and (c / "camera_matrix.csv").exists():
-            return c / "camera_matrix.csv"
-    return None
+    found = [d / "camera_matrix.csv"
+             for d in stray_dirs(root, required=("odometry.csv", "camera_matrix.csv"))]
+    if len(found) > 1 and len({p.read_bytes() for p in found}) > 1:
+        raise CameraError(f"two different Stray calibrations in this scan: "
+                          f"{', '.join(str(p) for p in found)} — keep the one of this recording")
+    return found[0] if found else None
 
 
 def build_session_camera(session_dir: os.PathLike, cam_cfg, output_subdir: str = "output",
@@ -760,9 +784,11 @@ def build_session_camera(session_dir: os.PathLike, cam_cfg, output_subdir: str =
     hw = omega_depth_shape(out)
     if hw is not None:
         verify_omega_grid(grid, hw)
-    mhw = mask_grid_shape(out)
-    mask_grid = mask_grid_for(nw, nh, mhw) if mhw is not None else \
-        mask_grid_for(nw, nh, (grid.h, grid.w))
+    # the camera's mask grid is the full-frame grid at Omega's size, ALWAYS: F0 runs before any
+    # segmentation and its camera.json must not depend on whether a seg_masks.npz of an earlier
+    # run happened to be on disk (point 36). Every reader of real masks derives their grid from
+    # the masks' own scaled_res (mask_grid_for / mask_grid_shape).
+    mask_grid = mask_grid_for(nw, nh, (grid.h, grid.w))
     rows = read_omega_intrinsics(out)
     epoch = read_geometry_epoch(out)
     omega_cam = camera_from_omega(rows, grid, cam_cfg.fx_spread_warn_pct, mask_grid=mask_grid)
@@ -783,7 +809,9 @@ def build_session_camera(session_dir: os.PathLike, cam_cfg, output_subdir: str =
     report["frames"] = frames_rep
     report["omega_preprocessing"] = {"mode": mode, "resolution": res,
                                      "depth_shape_hw": list(hw) if hw else None}
-    report["mask_grid_shape_hw"] = list(mhw) if mhw else None
+    # the K source and the sha256 of the file K came from (point 77, DECIDIDO 2026-10-07)
+    report["k_source"] = (k_source_record("stray", stray_csv, root) if stray_csv is not None
+                          else k_source_record("omega", omega_intrinsics_path(out), root))
     cam = replace(cam, report=report)
     p = save_camera_json(out / CAMERA_JSON_NAME, cam, geometry_epoch=epoch)
     log(f"[precision.camera] {p}: {cam.source} K=({cam.fx:.2f},{cam.fy:.2f},{cam.cx:.2f},"

@@ -126,6 +126,13 @@ def _sub(section: Any, key: str, path: str) -> Dict[str, Any]:
     return v
 
 
+def _gone(section: Any, key: str, path: str, why: str) -> None:
+    """A key that was REMOVED by a decision: a leftover in config.yaml fails the load naming it
+    and the decision — it would otherwise sit there looking like it still decided something."""
+    if isinstance(section, dict) and key in section:
+        raise PrecisionConfigError(f"'{SECTION}.{path}.{key}' no longer exists — {why}; remove it")
+
+
 # ── F0: session camera ───────────────────────────────────────────────────
 
 CAMERA_MODELS = ("OPENCV",)
@@ -340,6 +347,10 @@ class BendConfig:
     irls_iterations: int        # Huber IRLS steps (pccr epoch 7's fit, USER 2026-10-01)
     min_rows: int               # fewer landmark rows in the window → k = 1 (epoch 7)
     min_depth_m: float          # landmark rows on Omega depth under this are not used (epoch 7)
+    heldout_confidence: float   # declared confidence of the per-keyframe c0 verification and of the
+                                # window choice's error bar (docs/plan_determinismo.md points 48 / 49)
+    bootstrap: int              # BOUND (cost): resamples of those bootstraps
+    seed: int                   # their fixed seed
 
 
 # ── flyer diagnosis (claude_stac.txt 2026-10-04, Phase 0) ──────────────────
@@ -370,6 +381,8 @@ class MonoDetailConfig:
     dinov3_dir: str             # the gated DINOv3 encoder weights
     norm_max: float             # output norm above this = invalid pixel (the paper's sky dome sits at 3.0)
     verify_sha256: bool         # check every checkpoint against the prefix in its name (once per file)
+    seed: int                   # the torch seed of repro.deterministic_torch around every inference
+                                # (point 54; the ODE draws nothing — the record is complete)
     tile_px: int                # BOUND (model): the native tile side PointDiT runs at (512 = its training size)
     tile_overlap_frac: float    # share of a tile its neighbour repeats (feathered)
     context_scale: float        # 1.0 = native tile; 2.0 = a window twice as large downscaled to the tile
@@ -404,8 +417,11 @@ class CloudMetricsConfig:
     max_points: int             # BOUND (cost): subsample of the cloud
     score_stride: int           # BOUND (cost): every n-th point scores a RANSAC candidate
     seed: int
-    edge_max_objects: int       # BOUND (cost): largest objects measured by the edge metric
-    edge_timeout_s: float       # BOUND (cost): the edge metric runs in its own process and is killed past this
+    edge_max_objects: int       # BOUND (work): the largest objects (by point count, ties by instance id)
+                                # the edge metric measures
+    edge_max_points_per_object: int   # BOUND (work): points per object the edge metric sees — a stable
+                                      # per-point key sample above it (docs/plan_determinismo.md point 138:
+                                      # a limit by WORK, never by clock)
 
 
 # ── chunk / keyframe floor check (USER 2026-09-29: "verificación interna e intrachunk") ──
@@ -419,7 +435,6 @@ class ChunkCheckConfig:
     min_points: int             # BOUND: fewer band samples than this = the keyframe does not
                                 # see that surface (reported as such, never guessed)
     pixel_stride: int           # BOUND (cost): every n-th pixel of the depth maps
-    plane_min_inlier_frac: float  # RANSAC acceptance of the session's floor plane over the pooled bands
     confidence: float           # declared confidence of the bootstrap intervals that decide
     bootstrap: int              # BOUND (cost): bootstrap resamples
     seed: int                   # determinism
@@ -679,13 +694,15 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
                                                  lo_excl=True),
                         repair_min_views=_num(cl, "repair_min_views", "cloud", lo=1, integer=True))
     cc = _sub(sec, "chunk_check", "")
+    _gone(cc, "plane_min_inlier_frac", "chunk_check",
+          "USER 2026-10-07 (docs/plan_determinismo.md point 140): no acceptance bar on the floor plane — "
+          "it is always fitted and reported with its inlier fraction and interval")
     chunk_check = ChunkCheckConfig(
         low_pct=_num(cc, "low_pct", "chunk_check", lo=0.0, hi=50.0),
         high_pct=_num(cc, "high_pct", "chunk_check", lo=50.0, hi=100.0),
         band_m=_num(cc, "band_m", "chunk_check", lo=0.0, lo_excl=True),
         min_points=_num(cc, "min_points", "chunk_check", lo=1, integer=True),
         pixel_stride=_num(cc, "pixel_stride", "chunk_check", lo=1, integer=True),
-        plane_min_inlier_frac=_num(cc, "plane_min_inlier_frac", "chunk_check", lo=0.0, hi=1.0, lo_excl=True),
         confidence=_num(cc, "confidence", "chunk_check", lo=0.5, hi=1.0),
         bootstrap=_num(cc, "bootstrap", "chunk_check", lo=10, integer=True),
         seed=_num(cc, "seed", "chunk_check", lo=0, integer=True),
@@ -701,7 +718,12 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
                       tau_quantile=_num(bd, "tau_quantile", "bend", lo=0.0, hi=100.0, lo_excl=True),
                       irls_iterations=_num(bd, "irls_iterations", "bend", lo=1, integer=True),
                       min_rows=_num(bd, "min_rows", "bend", lo=3, integer=True),
-                      min_depth_m=_num(bd, "min_depth_m", "bend", lo=0.0))
+                      min_depth_m=_num(bd, "min_depth_m", "bend", lo=0.0),
+                      heldout_confidence=_num(bd, "heldout_confidence", "bend", lo=0.0, hi=1.0, lo_excl=True),
+                      bootstrap=_num(bd, "bootstrap", "bend", lo=1, integer=True),
+                      seed=_num(bd, "seed", "bend", lo=0, integer=True))
+    if bend.heldout_confidence >= 1.0:
+        raise PrecisionConfigError(f"'{SECTION}.bend.heldout_confidence' must be below 1")
     fl = _sub(sec, "flyers", "")
     flyers = FlyersConfig(knn_k=_num(fl, "knn_k", "flyers", lo=1, integer=True),
                           isolated_quantile=_num(fl, "isolated_quantile", "flyers", lo=0.0, hi=100.0, lo_excl=True),
@@ -730,6 +752,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
                                    dinov3_dir=str(_require(md, "dinov3_dir", "mono_detail")),
                                    norm_max=_num(md, "norm_max", "mono_detail", lo=0.0, lo_excl=True),
                                    verify_sha256=_bool(md, "verify_sha256", "mono_detail"),
+                                   seed=_num(md, "seed", "mono_detail", lo=0, integer=True),
                                    tile_px=_num(md, "tile_px", "mono_detail", lo=16, integer=True),
                                    tile_overlap_frac=_num(md, "tile_overlap_frac", "mono_detail", lo=0.0, hi=0.95),
                                    context_scale=_num(md, "context_scale", "mono_detail", lo=1.0),
@@ -760,7 +783,10 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
         score_stride=_num(cm, "score_stride", "cloud_metrics", lo=1, integer=True),
         seed=_num(cm, "seed", "cloud_metrics", lo=0, integer=True),
         edge_max_objects=_num(cm, "edge_max_objects", "cloud_metrics", lo=0, integer=True),
-        edge_timeout_s=_num(cm, "edge_timeout_s", "cloud_metrics", lo=1.0))
+        edge_max_points_per_object=_num(cm, "edge_max_points_per_object", "cloud_metrics", lo=1, integer=True))
+    _gone(cm, "edge_timeout_s", "cloud_metrics",
+          "docs/plan_determinismo.md point 138 (2026-10-07): the edge metric is bounded by WORK "
+          "(edge_max_objects x edge_max_points_per_object), never by a wall clock")
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,
                            tracks=tracks, refine=refine, depth=depth, fuse=fuse,
                            cloud=cloud, bend=bend, flyers=flyers, mono_detail=mono_detail,

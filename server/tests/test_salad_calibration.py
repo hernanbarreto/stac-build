@@ -21,11 +21,13 @@ from tests.test_intake_walk import G, _trajectory, _write_windows   # noqa: E402
 
 def _ref(n=60):
     """A walk that comes back: keyframes k and n-1-k stand at the same place,
-    looking the same way."""
+    looking the same way. The bars carry their measured error (plan point 71; exact
+    here) and the user's error factor."""
     c = np.array([[min(k, n - 1 - k) * 2.0, 0.0, 0.0] for k in range(n)])    # 2 m apart
     f = np.tile([0.0, 0.0, 1.0], (n, 1))
     return {"frames": list(range(n)), "centres": c.tolist(), "forward": f.tolist(),
-            "dist_bar_m": 1.0, "cos_bar": float(np.cos(np.radians(30)))}
+            "dist_bar_m": 1.0, "cos_bar": float(np.cos(np.radians(30))),
+            "dist_bar_err_m": 0.0, "cos_bar_err": 0.0, "error_factor": 2.0}
 
 
 def test_the_bar_separates_the_revisits_from_the_rest():
@@ -57,6 +59,10 @@ def test_no_revisit_leaves_the_configured_bar():
 
 
 def test_the_reference_bars_come_from_the_windows(tmp_path):
+    import yaml
+    from intake import run_config as RC
+    with open(Path(W.__file__).resolve().parents[1] / "config.yaml") as f:
+        RC.freeze_run_config(tmp_path, yaml.safe_load(f), log=lambda m: None)   # point 69
     truth = _trajectory(64)
     _write_windows(tmp_path, truth, noise_m=0.0)
     doc = W.revisit_reference(tmp_path)

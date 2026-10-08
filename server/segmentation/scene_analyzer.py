@@ -147,7 +147,14 @@ def _select_model_and_dtype(model_id: str = None):
         logger.warning("No CUDA GPU — using 2B model on CPU (slow)")
         return SMALL_MODEL, torch.float32, "cpu"
 
-    gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+    # torch's own total memory of device 0, read through repro.card_identity: in this process
+    # when it already initialised CUDA, otherwise in a short torch subprocess — the size probe
+    # never leaves a CUDA context behind in the caller (the backend runs this fallback
+    # in-process; when the model load that follows fails — InternVL3's weights are not in the
+    # local cache, local_files_only — a context created here stayed on the card as a co-tenant
+    # that repro.require_exclusive_gpu refuses, 2026-10-07)
+    import repro
+    gpu_mem_gb = repro.card_identity(0)["total_memory_bytes"] / (1024 ** 3)
     logger.info(f"GPU memory: {gpu_mem_gb:.1f} GB")
 
     if gpu_mem_gb >= 16:

@@ -132,9 +132,21 @@ def _is_float(x: str) -> bool:
 
 def video_fps(session_dir: Path) -> Optional[float]:
     """FPS of the session's source video (frame number / fps = frame timestamp).
-    Uses OpenCV; returns None when no video is found (caller decides fatality)."""
+    Uses OpenCV; returns None when no video is found (caller decides fatality).
+
+    The video is the one the frames were extracted from when ``frames/manifest.json`` names
+    it (docs/plan_determinismo.md point 67: the frame numbers are that video's), else the
+    first ``source_video.*`` by name."""
     session = Path(session_dir)
     vids = sorted(session.glob("source_video.*"))
+    try:
+        from intake.frames_manifest import load_manifest
+        named = ((load_manifest(session) or {}).get("video") or {}).get("name")
+    except Exception as e:  # noqa: BLE001 — the intake refuses a broken manifest, not this probe
+        logger.warning(f"frames manifest unreadable for the fps probe: {e}")
+        named = None
+    if named and (session / named).is_file():
+        vids = [session / named]
     if not vids:
         return None
     try:

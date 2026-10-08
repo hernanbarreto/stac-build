@@ -676,11 +676,22 @@ def read_gray_undistorted(frames_dir: Path, frame: int, maps) -> Tuple[np.ndarra
     return und, val
 
 
+_EXCLUSION_CACHE: Dict[str, Dict[int, Path]] = {}
+
+
 def read_exclusion(session_dir: Path, frame: int, maps) -> Optional[np.ndarray]:
+    """I2's exclusion mask of ``frame`` on the undistorted grid, or None. Plan point 68: ONLY the
+    masks intake/content_tags.json lists under a stamp that matches the PNGs are read
+    (precision.tracks.exclusion_mask_paths — the one reader F4 uses); a PNG on disk by itself is a
+    leftover of an earlier run and is never applied."""
     import cv2
-    from intake.content import EXCLUSION_MASKS_DIRNAME, read_mask_png
-    p = Path(session_dir) / "intake" / EXCLUSION_MASKS_DIRNAME / f"{frame:06d}.png"
-    if not p.exists():
+    from intake.content import read_mask_png
+    from precision.tracks import exclusion_mask_paths
+    key = str(Path(session_dir).resolve())
+    if key not in _EXCLUSION_CACHE:
+        _EXCLUSION_CACHE[key] = exclusion_mask_paths(Path(session_dir))[0]
+    p = _EXCLUSION_CACHE[key].get(int(frame))
+    if p is None:
         return None
     m = read_mask_png(p).astype(np.float32)
     return cv2.remap(m, maps[0], maps[1], cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT,
@@ -1197,7 +1208,8 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
     probe = out / "omega_probe.json"
     doc = {"version": REPORT_VERSION, "provenance": PROVENANCE, **inp.epochs,
            "params": asdict(dcfg),
-           "device": str(dev), "seconds": round(time.time() - t_start, 1),
+           # no clock / run device in the compared report (docs/plan_determinismo.md points 36 / 56):
+           # both go to the timing sidecar next to it
            "n_keyframes": n_kf, "n_swept": len(swept), "n_written": len(written),
            "prior_only_keyframes": [inp.kf[i] for i in prior_only],
            "no_prior_keyframes": [inp.kf[i] for i in range(n_kf) if not has_prior[i]],
@@ -1219,6 +1231,9 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
            "calibration": str(cal_path.relative_to(out)),
            "per_frame": per_frame, "colmap_ab": None}
     (ddir / REPORT_NAME).write_text(json.dumps(doc, indent=1, default=float))
+    from precision.corrected_cloud import write_timing
+    seconds = round(time.time() - t_start, 1)
+    write_timing(ddir / REPORT_NAME, {"device": str(dev), "seconds": seconds})
     shutil.rmtree(work, ignore_errors=True)
     pc = doc["percent"]
     log(f"{LOG_TAG} tier 0 {pc['tier0']:.1f} %, tier 1 {pc['tier1_prior_fill']:.1f} % "
@@ -1226,7 +1241,7 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
         f"(contradicted {pc['contradicted']:.1f} %, no prior {pc['no_prior']:.1f} %, low conf "
         f"{pc['prior_low_conf']:.1f} %, excluded {pc['excluded_mask']:.1f} %, no signal "
         f"{pc['no_signal']:.1f} %, inconsistent {pc['inconsistent']:.1f} %) in "
-        f"{doc['seconds'] / 60:.1f} min → {ddir / REPORT_NAME}")
+        f"{seconds / 60:.1f} min → {ddir / REPORT_NAME}")
     return doc
 
 

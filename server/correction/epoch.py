@@ -1,8 +1,16 @@
 """Geometry epoch — the version number of the session's geometry.
 
 What it persists: ``output/geometry_epoch.json``
-``{"epoch": N, "created_at": ..., "correction_id": ..., "parent_epoch": N-1}``.
-A session with no file is epoch 0 (the original reconstruction).
+``{"epoch": N, "correction_id": ..., "parent_epoch": N-1, "kind": ...}``.
+A session with no file is epoch 0 (the original reconstruction). No wall clock
+since 2026-10-07 (docs/plan_determinismo.md point 36: the record is compared
+byte for byte between two runs; when a run happened is in
+``corrections.timing.jsonl``, correction.ledger).
+
+It also names the RECONSTRUCTION an artifact was measured on
+(:func:`reconstruction_id`): epoch numbers restart at 0 with every new
+reconstruction, so "measured on epoch 0" alone cannot tell this reconstruction
+from the previous one (points 33 / 34).
 
 What it decides: nothing geometric. It gives every derived artifact a way to
 say WHICH geometry it was computed from (``stamp``) and every consumer a way to
@@ -13,7 +21,6 @@ refuse or flag geometry from another epoch (``check``). Kept dependency-free
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -67,10 +74,69 @@ def make_epoch_record(epoch: int, correction_id: str,
     if kind not in EPOCH_KINDS:
         raise ValueError(f"unknown epoch kind {kind!r} (one of {EPOCH_KINDS})")
     return {"epoch": int(epoch),
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "correction_id": correction_id,
             "parent_epoch": int(parent_epoch),
             "kind": kind}
+
+
+# What makes a reconstruction THIS reconstruction, as Omega left it (paths relative to output/):
+# the keyframe list, the Omega run's own config, its per-keyframe records (depth, confidence, pose,
+# K — written once by map_worker._emit_omega_depth, never rewritten by an epoch) and the global
+# scale / orientation markers scale_align and orient left on epoch 0. Every epoch's poses and
+# clouds DERIVE from these; none of them is touched by a correction.
+RECONSTRUCTION_ID_FILES = ("camera_frames.txt", "vggt_omega_config.yaml",
+                           "omega_run/results_output", ".metric_scale_applied",
+                           ".orientation_applied")
+RECONSTRUCTION_ID_KEY = "reconstruction_id"
+
+
+class ReconstructionIdError(RuntimeError):
+    """The session has no reconstruction to name — with the exact reason."""
+
+
+def reconstruction_id(output_dir) -> str:
+    """The identity of the session's reconstruction: sha256 (``repro.stamp``) of
+    :data:`RECONSTRUCTION_ID_FILES` — the ones present, and which are absent. An artifact that
+    other stages read across runs (scale rows, known dimensions, instance loops, the confidence
+    calibration) carries it under :data:`RECONSTRUCTION_ID_KEY`; a reader takes the artifact only
+    when it equals this one (:func:`same_reconstruction`). RAISES when the session holds no Omega
+    records — there is then no reconstruction to name."""
+    from repro import stamp
+    out = Path(output_dir)
+    rec = out / "omega_run" / "results_output"
+    if not rec.is_dir() or not any(rec.glob("frame_*.npz")):
+        raise ReconstructionIdError(f"{rec} holds no Omega record (frame_*.npz) — the session has "
+                                    f"no reconstruction to name")
+    if not (out / "camera_frames.txt").is_file():
+        raise ReconstructionIdError(f"{out / 'camera_frames.txt'} is missing — the keyframe list "
+                                    f"is part of the reconstruction's identity")
+    present = {rel: out / rel for rel in RECONSTRUCTION_ID_FILES if (out / rel).exists()}
+    absent = sorted(set(RECONSTRUCTION_ID_FILES) - set(present))
+    return stamp(inputs=present, config={"absent": absent})["sha256"]
+
+
+def reconstruction_id_or_none(output_dir) -> Optional[str]:
+    """:func:`reconstruction_id`, or None for a session with no Omega records (a synthetic or
+    partial one). For WRITERS: an artifact stamped None is taken by no reader."""
+    try:
+        return reconstruction_id(output_dir)
+    except ReconstructionIdError:
+        return None
+
+
+def same_reconstruction(doc: Optional[Dict[str, Any]], rid: Optional[str]) -> Tuple[bool, str]:
+    """(taken, reason): an artifact ``doc`` belongs to the reconstruction ``rid`` only when it
+    carries that very id — no id, another id, or no reconstruction to compare with is a refusal,
+    with the reason for the report (points 33 / 34)."""
+    if rid is None:
+        return False, "the session has no reconstruction id (no Omega records)"
+    if not isinstance(doc, dict) or RECONSTRUCTION_ID_KEY not in doc:
+        return False, f"it carries no {RECONSTRUCTION_ID_KEY} (written before 2026-10-07 or by hand)"
+    got = doc.get(RECONSTRUCTION_ID_KEY)
+    if got != rid:
+        return False, (f"it was measured on another reconstruction ({str(got)[:12]}…, this one is "
+                       f"{rid[:12]}…)")
+    return True, "same reconstruction"
 
 
 def _epoch_record_path(output_dir: Path, epoch: int) -> Path:

@@ -2133,14 +2133,21 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
             new_list.append(inst)
             continue
         P = xyz_display[gi]
-        k = np.floor((P - P.min(0)) / gap_m).astype(np.int64)
-        grid = np.zeros(k.max(0) + 1, dtype=bool)
-        grid[tuple(k.T)] = True
+        # the gap grid ANCHORED AT THE WORLD ORIGIN (docs/plan_determinismo.md point 102,
+        # DECIDIDO): cell = floor(x / gap) in float64 from (0, 0, 0) — anchored at the instance's
+        # minimum, one extra extreme point moved every cell boundary and with it which fragments
+        # touched; now an extra point changes only its own cell. The array index is shifted by the
+        # lowest cell (labelling is translation-invariant: the components are the same).
+        k = np.floor(P.astype(np.float64) / gap_m).astype(np.int64)
+        k0 = k.min(0)
+        ki = k - k0
+        grid = np.zeros(ki.max(0) + 1, dtype=bool)
+        grid[tuple(ki.T)] = True
         lab, n = ndimage.label(grid, structure=np.ones((3, 3, 3)))
         if n < 2:
             new_list.append(inst)
             continue
-        comp = lab[tuple(k.T)] - 1
+        comp = lab[tuple(ki.T)] - 1
         size = np.bincount(comp, minlength=n)
         cand = [c for c in np.argsort(-size) if size[c] >= min_points]
         if len(cand) < 2:

@@ -319,9 +319,12 @@ MODES = ("measure", "apply", "verify")
 
 
 def _stamp_out(output_dir: Path, name: str, doc: dict) -> Path:
-    from correction.epoch import current_epoch
+    # stamped with the RECONSTRUCTION too (docs/plan_determinismo.md point 34): epoch numbers
+    # restart with every reconstruction; F2 / F4 take these files only with THIS id
+    from correction.epoch import RECONSTRUCTION_ID_KEY, current_epoch, reconstruction_id_or_none
     doc = {"version": 1, "source": "correction.visit_drift",
            "measured_on_epoch": int(current_epoch(output_dir)),
+           RECONSTRUCTION_ID_KEY: reconstruction_id_or_none(output_dir),
            "provenance": "tool_measured", **doc}
     p = Path(output_dir) / name
     tmp = p.with_name(p.name + ".tmp")
@@ -393,13 +396,14 @@ def _write_scale_rows(output_dir: Path, mrep: dict,
     radial signal these rows are made of. `scale_stage` declares the stamp
     rather than assuming it is current.
     """
-    from correction.epoch import current_epoch
+    from correction.epoch import RECONSTRUCTION_ID_KEY, current_epoch, reconstruction_id_or_none
 
     rows = (mrep or {}).get("scale_rows") or []
     if not rows:
         return
     doc = {"version": 1, "source": "correction.visit_drift",
            "measured_on_epoch": int(current_epoch(output_dir)),
+           RECONSTRUCTION_ID_KEY: reconstruction_id_or_none(output_dir),   # point 34
            "provenance": "tool_measured", "rows": rows}
     (Path(output_dir) / "scale_loop_rows.json").write_text(json.dumps(doc, indent=1))
     log(f"[visit-drift] {len(rows)} scale loop row(s) written for the scale "

@@ -204,6 +204,9 @@ def _transform_poses_file(path: Path, R: np.ndarray, t: np.ndarray,
                           backup_suffix: str = ".txt.preorient") -> None:
     if not path.exists():
         return
+    # float64 round-trip EXACT text (docs/plan_determinismo.md point 45) and the backup REFRESHED
+    # on every fresh pass (point 10: the backup is the poses THIS pass transformed)
+    import repro
     T = np.eye(4)
     T[:3, :3] = R
     T[:3, 3] = t
@@ -213,13 +216,22 @@ def _transform_poses_file(path: Path, R: np.ndarray, t: np.ndarray,
         if len(v) == 16:
             m = np.array(list(map(float, v)), np.float64).reshape(4, 4)
             m = T @ m
-            ln = " ".join(f"{x:.8g}" for x in m.reshape(-1))
+            ln = repro.exact_row(m.reshape(-1))
         out.append(ln)
     bak = path.with_suffix(backup_suffix)
-    if not bak.exists():
-        shutil.copy(path, bak)
+    shutil.copy(path, bak)
     path.write_text("\n".join(out) + "\n")
-    logger.info(f"  oriented {path} (backup {bak.name})")
+    logger.info(f"  oriented {path} (backup {bak.name} refreshed)")
+
+
+def transformed_files(output_dir: Path) -> list:
+    """Every file run() writes (the marker's sidecar records their sha256 after the pass)."""
+    output_dir = Path(output_dir)
+    files = sorted(output_dir.glob("chunk_*.ply"))
+    files += sorted((output_dir / "maplong_run" / "_tmp_results_aligned").glob("chunk_*.npy"))
+    files += [b / "camera_poses.txt" for b in (output_dir, output_dir / "maplong_run",
+                                                output_dir / "da3_run")]
+    return [f for f in files if f.is_file()]
 
 
 def _transform_aligned_worldpoints(output_dir: Path, R: np.ndarray, t: np.ndarray,
@@ -254,11 +266,20 @@ def run(output_dir: Path, floor_percentile: float = 1.0, log=None) -> Optional[n
     (or the identity read back from the marker) — None only on genuine failure."""
     _log = log if log is not None else (lambda m: logger.info(m))
     output_dir = Path(output_dir)
+    # the marker is honoured only while the files it transformed are the ones on disk
+    # (docs/plan_determinismo.md point 10, reconstruction/applied_marker): a fresh fork pass
+    # that rewrote camera_poses.txt makes it STALE and the orientation is redone
+    from reconstruction import applied_marker as AM
     marker = output_dir / MARKER_NAME
-    if marker.exists():
-        _log(f"ALREADY ORIENTED: marker present ({marker.read_text().strip()}) — skipping "
-             f"(Replace clears the marker to re-orient)")
+    status, info = AM.state(marker, base=output_dir)
+    if status in ("current", "unstamped"):
+        _log(f"ALREADY ORIENTED: {AM.describe(status, info)} — skipping (Replace clears the "
+             f"marker to re-orient)")
         return np.eye(4)
+    if status == "stale":
+        _log(f"⚠ {AM.describe(status, info)} — the products on disk are NOT the ones this marker "
+             f"oriented: the orientation is redone from the poses on disk (point 10)")
+        AM.clear(marker)
 
     est = estimate_gravity(output_dir, log=_log)
     if est is None:
@@ -304,7 +325,9 @@ def run(output_dir: Path, floor_percentile: float = 1.0, log=None) -> Optional[n
     T[:3, :3] = R
     T[:3, 3] = t
     ang = float(np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))))
-    marker.write_text(f"angle_deg={ang:.2f} ty={t[1]:.4f} align={align:.3f}\n")
+    AM.record(marker, f"angle_deg={ang:.2f} ty={t[1]:.4f} align={align:.3f}",
+              transformed_files(output_dir), base=output_dir,
+              extra={"T": T.tolist(), "angle_deg": ang, "ty": float(t[1]), "align": float(align)})
     _log(f"✅ upright orientation baked: rotation {ang:.1f}°, floor offset {t[1]:+.3f} m, "
          f"{n_ply} chunk(s)")
     return T

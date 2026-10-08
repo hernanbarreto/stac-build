@@ -26,7 +26,9 @@ def detect_stray_data(session_dir) -> dict:
 
     Args:
         session_dir: Path to session root (e.g., src_xxx/ or scans/session_id/).
-                     Can be str or Path.
+                     Can be str or Path. The export is looked for in
+                     ``<session>/inputs/stray/`` first, then in the session
+                     directory and its ``stray/`` (ingestors.capture_inputs).
 
     Returns:
         dict with keys:
@@ -39,7 +41,13 @@ def detect_stray_data(session_dir) -> dict:
             camera_matrix (Path|None): Path to camera_matrix.csv
             depth_count (int):      Number of depth files found
     """
-    session = Path(session_dir)
+    # the scan's Stray export: inputs/stray/ first (the capture data the replace wipe never
+    # touches — docs/plan_determinismo.md point 77), then the scan's own legacy places (the scan
+    # directory, its stray/); never a sibling scan. None of them → the scan directory, which
+    # then reports nothing present.
+    from ingestors.capture_inputs import STRAY_MARKERS, find_stray_dir
+    session = find_stray_dir(Path(session_dir), any_of=STRAY_MARKERS + ("depth", "confidence")) \
+        or Path(session_dir)
 
     depth_dir = session / "depth"
     confidence_dir = session / "confidence"

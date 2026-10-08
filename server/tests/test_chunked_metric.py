@@ -16,6 +16,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..",
@@ -652,14 +653,76 @@ def test_write_depth_cap_math():
 
 # ── zoom detection ───────────────────────────────────────────────────
 
+def _zoom_session(rng_, medians, n_frames=40, spread=6.0):
+    """Per-frame focals of each chunk: its median plus the frame-to-frame scatter Omega's
+    per-frame intrinsics show (a few px)."""
+    return {k: m + rng_.normal(0.0, spread, n_frames) for k, m in medians.items()}
+
+
+def _zoom_verdicts(fx, factor=2.0, confidence=0.95):
+    from loop_utils.metric_lock import zoom_anchor_test
+    return {k: zoom_anchor_test(fx[k], np.concatenate([fx[j] for j in sorted(fx) if j != k]),
+                                error_factor=factor, confidence=confidence)
+            for k in sorted(fx)}
+
+
 def test_flag_sick_chunks_zoom():
+    """The health label is the zoom RULE's verdict (USER 2026-10-07, plan point 18) — no
+    second criterion (the robust z > 3.5 is gone)."""
     from loop_utils.metric_lock import flag_sick_chunks
+    rng_ = np.random.default_rng(41)
     tri = {k: 0.09 for k in range(13)}                        # parallax fine everywhere
-    fx = {k: 550.0 + 3.0 * (k % 5) for k in range(10)}
-    fx.update({10: 904.0, 11: 1317.0, 12: 1199.0})            # test4's zoom tail
-    sick = flag_sick_chunks(tri, {}, fx_median=fx)
+    med = {k: 550.0 + 3.0 * (k % 5) for k in range(10)}
+    med.update({10: 904.0, 11: 1317.0, 12: 1199.0})           # test4's zoom tail
+    zoom = _zoom_verdicts(_zoom_session(rng_, med))
+    sick = flag_sick_chunks(tri, {}, zoom=zoom)
     assert set(sick) == {10, 11, 12}, sick
     assert all(any("ZOOM" in r for r in sick[k]) for k in sick)
+    assert flag_sick_chunks(tri, {}) == {}
+
+
+def test_zoom_rule_is_significance_and_twice_the_measured_error():
+    """USER 2026-10-07 (plan point 18): a chunk's DA3 anchors are excluded only when its focal
+    differs from the session's SIGNIFICANTLY (95 % CI of the median difference off zero) AND
+    by >= the user's factor x the chunk's own measured fx error (the scatter of its per-frame
+    focals). Every margin is reported; same input, same verdict."""
+    from loop_utils.metric_lock import zoom_anchor_test, fx_frame_error
+    rng_ = np.random.default_rng(42)
+    body = {k: 550.0 for k in range(5)}
+    fx = _zoom_session(rng_, {**body, 5: 700.0})
+    v = _zoom_verdicts(fx)
+    assert v[5]["zoomed"] and v[5]["significant"] and v[5]["beyond_error"], v[5]
+    assert not any(v[k]["zoomed"] for k in range(5)), v
+    for key in ("ci_low", "ci_high", "fx_error_px", "required_px", "error_margin_px"):
+        assert key in v[5]
+    assert v[5]["required_px"] == pytest.approx(2.0 * v[5]["fx_error_px"])
+    assert v[5]["fx_error_px"] == pytest.approx(fx_frame_error(fx[5]))
+    # the same focals give the same verdict, to the bit
+    assert _zoom_verdicts(fx)[5] == v[5]
+    # a SIGNIFICANT difference within 2 x a frame's own focal scatter is not a zoom: many
+    # frames resolve a 3 px shift, but one frame's focal scatters by 6 px — condition (c)
+    small = _zoom_session(rng_, {**body, 5: 553.0}, n_frames=400)
+    vs = zoom_anchor_test(small[5], np.concatenate([small[k] for k in range(5)]),
+                          error_factor=2.0, confidence=0.95)
+    assert vs["significant"] and not vs["beyond_error"] and not vs["zoomed"], vs
+    assert vs["error_margin_px"] < 0
+    # one frame cannot measure its own error: no exclusion, declared
+    one = zoom_anchor_test([700.0], np.full(50, 550.0), error_factor=2.0, confidence=0.95)
+    assert not one["zoomed"] and one["fx_error_px"] is None and "too few" in one["reason"]
+
+
+def test_zoom_bars_are_gone_from_the_fork():
+    """The robust-z 3.5 cut of the zoom exclusion and the 0.75 ratio of the drift gate do not
+    exist any more (plan point 18)."""
+    import inspect
+    from loop_utils import metric_lock as ML
+    assert "zoom_z_cut" not in inspect.signature(ML.flag_sick_chunks).parameters
+    sig = inspect.signature(ML.scale_drift_gate).parameters
+    assert "improve" not in sig and "min_holdout" not in sig
+    assert {"error_factor", "confidence", "seam_frames", "seam_err"} <= set(sig)
+    src = (Path(ML.__file__).resolve().parents[1] / "vggt_long.py").read_text()
+    assert "z > 3.5" not in src and "1.4826 * _fmad" not in src
+    assert "zoom_anchor_test(fx_frames[k], _rest" in src
 
 
 # ── per-chunk scale DRIFT (linear log-scale model, self-gated) ───────
@@ -700,26 +763,62 @@ def test_solve_scale_drift_recovers_linear_drift():
     assert np.all(np.abs(np.log(s1 / s1_true)) < 0.03), (s1, s1_true)
 
 
+def _seam_meta(seam_obs, err):
+    """Global frame of each seam observation (seam k's 9 shared frames start at 20 k) and its
+    measured error (``err`` in log units — seam_scale_error's resolution)."""
+    frames = {k: [20 * k + i for i in range(len(obs))] for k, obs in seam_obs.items()}
+    errs = {k: [err] * len(obs) for k, obs in seam_obs.items()}
+    return frames, errs
+
+
 def test_scale_drift_gate_accepts_drift_rejects_noise():
-    """The self-gate: real intra-chunk drift must pass; a constant-scale
-    session with noisy anchors must NOT earn a drift correction."""
+    """The self-gate, by THE USER'S RULE (2026-10-07, plan point 18 — the 0.75 ratio is
+    gone): real intra-chunk drift passes (significant, >= 5 held-out seam frames, improvement
+    >= 2 x their measured error); a constant-scale session with noisy anchors does not; an
+    improvement within 2 x the measured error does not either."""
     from loop_utils.metric_lock import scale_drift_gate
     rng9 = np.random.default_rng(32)
+    rule = {"error_factor": 2.0, "confidence": 0.95}
     anchors, seam_obs, _, _ = _drift_session(rng9, drift_pct=(18.0, -14.0, 22.0, -9.0))
     s_const = {k: float(np.median([r for _, r in a])) for k, a in anchors.items()}
-    ok, info = scale_drift_gate(anchors, s_const, seam_obs, 4)
+    fr, er = _seam_meta(seam_obs, 0.001)
+    ok, info = scale_drift_gate(anchors, s_const, seam_obs, 4, seam_frames=fr, seam_err=er,
+                                **rule)
     assert ok, info
+    d = info["decision"]
+    assert d["improves"] and d["n_judges"] >= 5 and d["error"] == pytest.approx(0.001)
+    assert d["median_delta"] >= 2.0 * 0.001 and d["ci_low"] > 0
+    # held out by the frame's GLOBAL index (2 mod 3): stable, not by position in the list
+    assert info["n_holdout"] == sum(1 for k in fr for g in fr[k] if g % 3 == 2)
+    # same input → the same verdict and the same numbers
+    ok_b, info_b = scale_drift_gate(anchors, s_const, seam_obs, 4, seam_frames=fr,
+                                    seam_err=er, **rule)
+    assert ok_b == ok and info_b == info
+
+    # the same drift judged against a measured error it does not clear by 2x: NOT applied
+    fr2, er2 = _seam_meta(seam_obs, 0.5)
+    ok2, info2 = scale_drift_gate(anchors, s_const, seam_obs, 4, seam_frames=fr2,
+                                  seam_err=er2, **rule)
+    assert not ok2 and "error" in info2["decision"]["failed"], info2
 
     anchors0, seam0, _, _ = _drift_session(rng9, drift_pct=(0, 0, 0, 0),
                                            anchor_noise=0.08)
     s_const0 = {k: float(np.median([r for _, r in a])) for k, a in anchors0.items()}
-    ok0, info0 = scale_drift_gate(anchors0, s_const0, seam0, 4)
+    fr0, er0 = _seam_meta(seam0, 0.001)
+    ok0, info0 = scale_drift_gate(anchors0, s_const0, seam0, 4, seam_frames=fr0,
+                                  seam_err=er0, **rule)
     assert not ok0, info0
 
     # starved sessions never earn the correction
     thin = {0: anchors[0][:2]}
-    okt, infot = scale_drift_gate(thin, s_const, {}, 1)
-    assert not okt and "thin" in infot["reason"]
+    okt, infot = scale_drift_gate(thin, s_const, {}, 1, seam_frames={}, seam_err={}, **rule)
+    assert not okt and "no held-out" in infot["reason"]
+    # fewer than 5 held-out judges: refused by condition (b)
+    one_seam = {0: seam_obs[0]}
+    fr1, er1 = _seam_meta(one_seam, 0.001)
+    ok1, info1 = scale_drift_gate(anchors, s_const, one_seam, 4, seam_frames=fr1,
+                                  seam_err=er1, **rule)
+    assert info1["n_holdout"] < 5 and not ok1 and "judges" in info1["decision"]["failed"]
 
 
 def _drift_chunk_data(rng_, S=5, H=6, W=8):
@@ -843,14 +942,25 @@ def test_depth_graph_verdict_ladder():
     meas = [pair(f, f + d) for d in (1, 2, 3, 5) for f in range(N - d)]
     held = [pair(f, f + d) for d in (4,) for f in range(N - d)]
 
+    rule = {"error_factor": 2.0, "confidence": 0.95}
+    held_err = [1e-4] * len(held)                      # each held-out pair's measured resolution
     a_s, b_s = solve_depth_graph(meas, N, scale_only=True)
-    v_s = depth_graph_verdict(a_s, b_s, meas, held)
+    v_s = depth_graph_verdict(a_s, b_s, meas, held, held_err=held_err, **rule)
     assert v_s["bounded"] and v_s["improves"], v_s
+    # THE USER'S RULE (plan point 19): significant, >= 5 judges, improvement >= 2 x the error
+    d = v_s["decision"]
+    assert d["n_judges"] >= 5 and d["ci_low"] > 0 and d["median_delta"] >= 2e-4
+    # the same improvement within 2 x a coarser measured error is NOT a reason to re-depth
+    v_e = depth_graph_verdict(a_s, b_s, meas, held, held_err=[0.05] * len(held), **rule)
+    assert v_e["bounded"] and not v_e["improves"] and "error" in v_e["decision"]["failed"]
+    # a held-out pair without a measured error cannot testify (counted)
+    v_n = depth_graph_verdict(a_s, b_s, meas, held, held_err=[None] * len(held), **rule)
+    assert not v_n["improves"] and v_n["decision"]["n_pairs_without_error"] == len(held)
 
     # poison the affine rung with a wild offset field (what test4's b did)
     a_w = a_s.copy()
     b_w = np.linspace(-1.0, 1.0, N)                    # ±1 m warp
-    v_w = depth_graph_verdict(a_w, b_w, meas, held)
+    v_w = depth_graph_verdict(a_w, b_w, meas, held, held_err=held_err, **rule)
     assert not v_w["bounded"], v_w
 
 
@@ -1014,13 +1124,14 @@ def test_the_order_is_i3_then_the_plan_then_the_resolution_then_one_pass():
     i_walk = src.index("_walk_doc = measure_walk(output_dir.parent")
     i_da3 = src.index("DA3 metric anchor on ALL")
     i_plan = src.index("_cplan = plan_session(output_dir.parent, log=pipe.send_log)")
-    i_card = src.index("_total_gb = _gpu_total_gb()")
-    i_res = src.index("_res = omega_resolution_for(")
+    i_card = src.index("_ident = repro.card_identity(0)")
+    i_res = src.index("_res = session_omega_resolution(")
     i_pass = src.index("_ok = _omega_pass(vggt_config, _tag1)")
     assert i_stop < i_walk < i_da3 < i_plan < i_card < i_res < i_pass
     assert src.count("_omega_pass(vggt_config") == 1, "ONE Omega pass, never a re-run"
     assert "re-run CHUNKED" not in src and "_phase2" not in src and "_probe_sel" not in src
-    assert "_gpu_free_gb()" not in src[i_plan:i_pass], "the card's TOTAL memory, never the free"
+    assert "_gpu_free_gb" not in src and "_gpu_total_gb" not in src, \
+        "the card's TOTAL memory from the committed table, never nvidia-smi of the moment"
 
 
 def test_a_resume_without_windows_replans_from_the_persisted_measurement():
@@ -1079,36 +1190,36 @@ def test_every_chunk_of_the_covis_layout_gets_its_anchors():
         assert sum(start <= i < end for i in idx) >= 3, (start, end)
 
 
-def test_omega_resolution_leaves_the_margin_and_retries_lower_on_oom():
-    """USER 2026-10-06: the Omega resolution leaves the I3 windows' margin on the card, and a pass
-    that still runs out of memory is retried one patch step lower — the plan never changes."""
+def test_omega_resolution_leaves_the_margin_and_an_oom_fails_the_run():
+    """USER 2026-10-06: the Omega resolution leaves the I3 windows' margin on the card. SINCE
+    2026-10-07 (docs/plan_determinismo.md point 4) a pass that still runs out of memory FAILS — the
+    retry one patch step lower made the resolution a function of what else held the card."""
     from reconstruction.chunk_plan import omega_resolution_for
     no = omega_resolution_for(183, 80.0, (1920, 1080), "max_size", 1920, margin_frac=0.0)
     yes = omega_resolution_for(183, 80.0, (1920, 1080), "max_size", 1920, margin_frac=0.15)
     assert yes["resolution"] < no["resolution"] and yes["margin_applied"] and not no["margin_applied"]
     assert yes["predicted_peak_gb"] <= 80.0 * 0.85 + 1e-6
     src = (Path(__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
-    assert "margin_frac=_omega_margin" in src and "parallax.vram_margin_frac" in src
-    assert '_omega_oom["hit"] = True' in src and "_prev - _OPS" in src
+    assert "parallax.vram_margin_frac" in src
+    assert '_omega_oom["hit"] = True' in src and "ran OUT OF MEMORY" in src
+    assert "_prev - _OPS" not in src and "retrying at" not in src and "record_omega_oom" not in src
 
 
-def test_an_omega_oom_teaches_the_card_its_real_footprint(tmp_path):
-    """USER 2026-10-06 ("guardar el pico de memoria medido"): zaragoza at 1664 OOM'd with 77.06 GiB in
-    use and 4.21 GiB more asked against a 66.95 GiB prediction; the factor is stored per card, never
-    lowered, and the next choice uses it."""
-    from reconstruction.chunk_plan import omega_footprint_factor, omega_resolution_for, record_omega_oom
-    f = tmp_path / "fp.json"
-    msg = ("torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 4.21 GiB. GPU 0 has a total "
-           "capacity of 79.25 GiB of which 2.19 GiB is free.")
-    assert omega_footprint_factor("cardA", f) == 1.0
-    r0 = omega_resolution_for(183, 80.0, (1920, 1080), "max_size", 1920, margin_frac=0.15)
-    k = record_omega_oom("cardA", r0["predicted_peak_gb"], msg, {"resolution": r0["resolution"]}, f)
-    assert k is not None and abs(k - (79.25 - 2.19 + 4.21) / r0["predicted_peak_gb"]) < 1e-9
-    assert omega_footprint_factor("cardA", f) == round(k, 4) and omega_footprint_factor("cardB", f) == 1.0
-    r1 = omega_resolution_for(183, 80.0, (1920, 1080), "max_size", 1920, margin_frac=0.15,
-                              footprint_factor=omega_footprint_factor("cardA", f))
-    assert r1["resolution"] < r0["resolution"]
-    # never lowered by a milder OOM; an unreadable message records nothing
-    record_omega_oom("cardA", 1000.0, msg, {}, f)
-    assert omega_footprint_factor("cardA", f) == round(k, 4)
-    assert record_omega_oom("cardA", 50.0, "killed", {}, f) is None
+def test_the_card_footprint_is_the_committed_tables_never_learned_from_an_oom():
+    """docs/plan_determinismo.md points 3 / 24: zaragoza's 2026-10-06 OOM is the PROVENANCE of the
+    A100 entry in server/card_table.json (factor 1.2139 — the value every run since used); no run
+    writes a footprint, the learner is gone, and the resolutions it gave are reproduced."""
+    import reconstruction.chunk_plan as CP
+    assert not hasattr(CP, "record_omega_oom")
+    card = CP.omega_card("NVIDIA A100 80GB PCIe | 81920 MiB | sm_8.0")
+    assert card["footprint_factor"] == 1.2139 and card["total_gb"] == 80.0
+    z = CP.omega_resolution_for(183, card["total_gb"], (1920, 1080), "max_size", 1920,
+                                margin_frac=0.15, footprint_factor=card["footprint_factor"])
+    assert z["resolution"] == 1520 and z["capacity_frames"] == 183        # the bad-run log, line 1233
+    p = CP.omega_resolution_for(139, card["total_gb"], (464, 832), "max_size", 832,
+                                margin_frac=0.15, footprint_factor=card["footprint_factor"])
+    assert p["resolution"] == 832 and not p["reduced"]                     # pccr, far from the edge
+    # the calibration CLI's reading of an OOM message uses THIS process's memory, never total − free
+    m = CP.footprint_factor_from_oom("Tried to allocate 4.21 GiB … this process has 76.64 GiB memory "
+                                     "in use", 66.952)
+    assert abs(m["factor"] - 80.85 / 66.952) < 1e-9

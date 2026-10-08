@@ -136,6 +136,28 @@ def test_fft_matches_the_legacy_formula():
     assert Q.fft_score(g) == pytest.approx(compute_fft_score(g), rel=1e-6)
 
 
+def test_fft_is_explicit_float64_and_bit_identical_to_the_numpy_1x_float32_path():
+    """Plan point 74: the legacy call fed float32, which numpy 1.x upcasts to complex128 and
+    numpy 2.x computes natively — the explicit float64 FFT gives EXACTLY the numpy-1.26 result
+    (uint8 pixels are exact in float32 and float64, so the inputs are the same numbers)."""
+    import ast
+    src = Path(Q.__file__).read_text()
+    body = src[src.index("def fft_score"):src.index("def laplacian_score")]
+    assert "astype(np.float64)" in body and "float32" not in body.split('"""')[-1]
+    for seed in range(5):
+        for g in (_sharp(seed), _blurred(seed, sigma=1.0 + seed), _dark(seed), _clipped(seed)):
+            small = Q.downscale_gray(g, CFG.fft_max_side, cv2.INTER_AREA)
+            # the numpy-1.26 arithmetic of the old call, spelled out: complex128 throughout
+            f = np.fft.fftshift(np.fft.fft2(small.astype(np.float32).astype(np.complex128)))
+            mag = np.abs(f)
+            h, w = mag.shape
+            cy, cx, r = h // 2, w // 2, min(h, w) // 8
+            mag[cy - r:cy + r, cx - r:cx + r] = 0
+            legacy = float(np.mean(mag))
+            assert Q.fft_score(small) == legacy                      # bit-identical, not approx
+    assert np.fft.fft2(np.zeros((2, 2), np.float64)).dtype == np.complex128
+
+
 def test_sharp_ranks():
     r = Q.sharp_ranks(np.array([3.0, 1.0, 2.0, 5.0]))
     assert np.allclose(r, [2 / 3, 0.0, 1 / 3, 1.0])
@@ -151,9 +173,16 @@ def test_analyze_frames_report_contract(tmp_path):
     frames_dir, names, numbers = _mixed_session(tmp_path)
     logs = []
     rep = Q.analyze_frames(frames_dir, CFG, log=logs.append, heartbeat_s=1e-6)
-    assert rep["version"] == 1 and rep["provenance"] == "tool_measured"
-    assert rep["geometry_epoch"] == 0 and rep["camera_epoch"] == 0
+    assert rep["version"] == Q.QUALITY_VERSION == 2 and rep["provenance"] == "tool_measured"
+    assert rep["geometry_epoch"] == 0 and rep["camera_epoch"] == 0 == Q.INTAKE_EPOCH
     assert (rep["native_w"], rep["native_h"]) == (W, H)
+    # the CPU environment the readings depend on (points 74 / 79), paths relative to the session
+    env = rep["environment"]
+    assert env["libs"]["numpy"] == np.__version__
+    assert env["libs"]["opencv-python"].startswith(cv2.__version__)
+    assert env["jpeg_decoders"]["opencv"]["libjpeg"] and env["jpeg_decoders"]["pillow"]["version"]
+    assert env["cpu_model"] and env["numpy_fft_dtype"] == "complex128"
+    assert rep["inputs"]["frames_dir"] == "frames" and "/" not in json.dumps(rep["inputs"])
     assert rep["n_frames"] == 6 and rep["n_usable"] == 3
     assert rep["rejected"] == {"dark": 1, "bright": 1, "clipped": 1}
     assert rep["params"]["luma_lo"] == CFG.luma_lo and rep["params"]["clip_lo"] == 5
@@ -258,10 +287,16 @@ def test_cancel_stops_the_loop_naming_where(tmp_path):
     assert not (frames_dir / "quality_features.json").exists()       # nothing half-written
 
 
-def test_epochs_are_stamped_as_given_and_read_from_the_session(tmp_path):
+def test_products_carry_epoch_zero_whatever_the_session_holds(tmp_path, monkeypatch):
+    """Plan points 63 / 70: an intake product belongs to the reconstruction's epoch 0 by
+    construction (the intake precedes every reconstruction); the session's epochs at run time
+    are read for the RUN RECORD only, so the same frames give the same bytes whatever ran
+    before. The CLI reads the frozen run configuration (point 69)."""
     frames_dir, _, _ = _mixed_session(tmp_path)
     session = frames_dir.parent
     assert Q.read_session_epochs(session) == {"geometry_epoch": 0, "camera_epoch": 0}
+    a = Q.run_quality(frames_dir, CFG, log=lambda *a: None, heartbeat_s=1e-6)
+    bytes_a = {n: (frames_dir / n).read_bytes() for n in ("quality_features.json", "frame_quality.json")}
     out = session / "output"
     out.mkdir()
     (out / "geometry_epoch.json").write_text(json.dumps({"epoch": 4}))
@@ -269,16 +304,30 @@ def test_epochs_are_stamped_as_given_and_read_from_the_session(tmp_path):
     from tests import synth_precision as S
     cam = replace(S.default_camera(W, H).to_precision_camera(), camera_epoch=2)
     save_camera_json(out / "camera.json", cam, geometry_epoch=4)
-    ep = Q.read_session_epochs(session)
-    assert ep == {"geometry_epoch": 4, "camera_epoch": 2}
-    rep = Q.run_quality(frames_dir, CFG, log=lambda *a: None, heartbeat_s=1e-6, **ep)
-    assert (rep["geometry_epoch"], rep["camera_epoch"]) == (4, 2)
-    for name in ("quality_features.json", "frame_quality.json"):
-        doc = json.loads((frames_dir / name).read_text())
-        assert (doc["geometry_epoch"], doc["camera_epoch"]) == (4, 2), name
-    # the CLI reads them from the session the frames belong to
+    assert Q.read_session_epochs(session) == {"geometry_epoch": 4, "camera_epoch": 2}
+    with pytest.raises(TypeError):                         # epochs are no longer a parameter
+        Q.run_quality(frames_dir, CFG, log=lambda *a: None, heartbeat_s=1e-6, geometry_epoch=4)
+    b = Q.run_quality(frames_dir, CFG, log=lambda *a: None, heartbeat_s=1e-6)
+    assert a == b and (b["geometry_epoch"], b["camera_epoch"]) == (0, 0)
+    for name, before in bytes_a.items():
+        assert (frames_dir / name).read_bytes() == before, name       # byte-identical
+    # the CLI: no frozen run configuration in the session → the server's is frozen first
+    import intake.run_config as RC
+    monkeypatch.setattr(RC, "cli_intake_config",
+                        lambda session_dir, log=print: (
+                            __import__("intake.config", fromlist=["load_intake_config"])
+                            .load_intake_config(_raw_with(CFG)), "0" * 64))
     assert Q.main(["--frames-dir", str(frames_dir)]) == 0
-    assert json.loads((frames_dir / "frame_quality.json").read_text())["geometry_epoch"] == 4
+    assert json.loads((frames_dir / "frame_quality.json").read_text())["geometry_epoch"] == 0
+
+
+def _raw_with(qcfg):
+    import yaml
+    from dataclasses import asdict
+    with open(Path(Q.__file__).resolve().parents[1] / "config.yaml") as f:
+        raw = yaml.safe_load(f)
+    raw["intake"]["quality"] = asdict(qcfg)
+    return raw
 
 
 def test_bounds_come_from_the_config_object(tmp_path):

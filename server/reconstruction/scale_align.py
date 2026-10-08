@@ -320,6 +320,11 @@ def apply_scale(output_dir: Path, s: float, dry_run: bool = False) -> None:
     _scale_aligned_depth(output_dir, s, dry_run=dry_run)
 
     # ── 3) the camera centres (every camera_poses.txt copy) ──
+    # float64 round-trip EXACT text (docs/plan_determinismo.md point 45: the '{:.8g}' this wrote
+    # rounded every pose on every pass through the file — F5 on the "same" F2 poses started from
+    # another cost); the `.prescale` backup is REFRESHED on every fresh pass (point 10: a backup
+    # left from an earlier pass of the same plan was not the raw poses of this one)
+    import repro
     for base in (output_dir, output_dir / "maplong_run", output_dir / "da3_run"):
         pp = base / "camera_poses.txt"
         if not pp.exists():
@@ -331,16 +336,26 @@ def apply_scale(output_dir: Path, s: float, dry_run: bool = False) -> None:
             if len(v) == 16:
                 m = np.array([float(x) for x in v], np.float64).reshape(4, 4)
                 m[:3, 3] *= s                          # c2w camera centre → metric
-                ln = " ".join(f"{x:.8g}" for x in m.reshape(-1))
+                ln = repro.exact_row(m.reshape(-1))
             out.append(ln)
         if dry_run:
             logger.info(f"[dry-run] would scale {pp}")
             continue
         bak = pp.with_suffix(".txt.prescale")
-        if not bak.exists():
-            shutil.copy(pp, bak)
+        shutil.copy(pp, bak)
         pp.write_text("\n".join(out) + "\n")
-        logger.info(f"  scaled {pp} (backup {bak.name})")
+        logger.info(f"  scaled {pp} (backup {bak.name} refreshed)")
+
+
+def transformed_files(output_dir: Path) -> list:
+    """Every file apply_scale writes (the marker's sidecar records their sha256 after the pass):
+    the chunk PLYs, the aligned per-frame copies and every camera_poses.txt copy."""
+    output_dir = Path(output_dir)
+    files = sorted(output_dir.glob("chunk_*.ply"))
+    files += sorted((output_dir / "maplong_run" / "_tmp_results_aligned").glob("chunk_*.npy"))
+    files += [b / "camera_poses.txt" for b in (output_dir, output_dir / "maplong_run",
+                                                output_dir / "da3_run")]
+    return [f for f in files if f.is_file()]
 
 
 def _kf_centres_and_times(output_dir: Path, session_dir: Path):
@@ -426,7 +441,11 @@ def estimate_v2(output_dir: Path, log=None, near_frac: float = 0.25,
                 segment_s=float(cfg.get("vio_segment_s", 5.0)),
                 min_segments=int(cfg.get("vio_min_segments", 8)),
                 min_coverage=float(cfg.get("vio_min_coverage", 0.5)))
-            vio_info["file"] = det["vio_path"].name
+            # the file VIO set the scale from, relative to the scan, and its sha256 (point 73)
+            from ingestors.capture_inputs import file_record
+            vio_rec = file_record(det["vio_path"], session_dir)
+            vio_info["file"] = vio_rec["file"]
+            vio_info["sha256"] = vio_rec["sha256"]
             vio_info.pop("segments", None)      # keep the JSON compact; ratios summarized
             s_vio = vio_info["s_vio"]
             _log(f"VIO scale s={s_vio:.4f} (median over {vio_info['n_segments']} segments, "
@@ -447,6 +466,11 @@ def estimate_v2(output_dir: Path, log=None, near_frac: float = 0.25,
     else:
         s_applied, source = s_da3, "da3"
     diag["scale_source"] = source
+    # the sha256 of the VIO trajectory that set the scale; null when none did (point 73,
+    # DECIDIDO 2026-10-07: VIO lives in <scan>/inputs/, which the replace wipe never touches)
+    diag["scale_source_file"] = ({"file": vio_info["file"], "sha256": vio_info["sha256"]}
+                                 if source == "vio" else None)
+    diag["vio_sha256"] = vio_info["sha256"] if source == "vio" else None
     diag["vio"] = vio_info
     diag["s_applied"] = s_applied
 
@@ -506,17 +530,27 @@ def run(output_dir: Path, dry_run: bool = False, log=None,
     _log = log if log is not None else (lambda m: logger.info(m))
     # Idempotency guard: a metric scale is a one-shot global similarity. If a resume
     # re-enters here after it already ran, scaling again would DOUBLE it (cloud + poses
-    # ×s²). The marker records it was applied. (Replace clears the marker → re-scales.)
+    # ×s²). The marker records it was applied AND WHAT IT TRANSFORMED (docs/plan_determinismo.md
+    # point 10, reconstruction/applied_marker): it is honoured only while the files it wrote are
+    # the ones on disk — a fresh fork pass that rewrote camera_poses.txt makes it STALE and the
+    # scale is redone from those raw poses. (Replace clears the marker → re-scales.)
+    from reconstruction import applied_marker as AM
     marker = output_dir / ".metric_scale_applied"
-    if marker.exists() and not dry_run:
-        txt = marker.read_text().strip()
-        try:
-            s_prev = float(txt.split("=")[-1])
-        except Exception:
-            s_prev = float("nan")
-        _log(f"ALREADY METRIC: marker present ({txt}) → output already scaled, not re-scaling "
-             f"(Replace clears the marker to re-scale)")
-        return s_prev          # non-None → caller knows it IS metric (not a failure)
+    if not dry_run:
+        status, info = AM.state(marker, base=output_dir)
+        if status in ("current", "unstamped"):
+            txt = info.get("text", "")
+            try:
+                s_prev = float(txt.split("=")[-1])
+            except Exception:
+                s_prev = float("nan")
+            _log(f"ALREADY METRIC: {AM.describe(status, info)} → output already scaled, not "
+                 f"re-scaling (Replace clears the marker to re-scale)")
+            return s_prev          # non-None → caller knows it IS metric (not a failure)
+        if status == "stale":
+            _log(f"⚠ {AM.describe(status, info)} — the products on disk are NOT the ones this "
+                 f"marker scaled: the scale is redone from the poses on disk (point 10)")
+            AM.clear(marker)
     s, diag = estimate_v2(output_dir, log=log, near_frac=near_frac,
                           conf_top_frac=conf_top_frac, cfg=cfg, session_dir=session_dir)
     diag["dry_run"] = bool(dry_run)
@@ -529,7 +563,11 @@ def run(output_dir: Path, dry_run: bool = False, log=None,
         return None            # genuine failure → caller makes it FATAL
     apply_scale(output_dir, s, dry_run=dry_run)
     if not dry_run:
-        marker.write_text(f"s={s:.6f}\n")
+        import repro
+        # the marker's first line stays `s=<value>` (its readers parse float(text.split('=')[-1]));
+        # the value is the exact float64 text (point 45), the sidecar names what was transformed
+        AM.record(marker, f"s={repro.exact_float(s)}", transformed_files(output_dir),
+                  base=output_dir, extra={"s": float(s), "scale_source": diag.get("scale_source")})
     _log(f"✅ metric scale {'(dry-run) ' if dry_run else ''}s={s:.4f} applied "
          f"(source={diag.get('scale_source', 'da3')})")
     return s

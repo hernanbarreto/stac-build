@@ -160,14 +160,35 @@ def test_the_split_is_deterministic_and_per_track(sess):
     assert abs(a.mean() - TCFG.heldout_frac) < 0.05
 
 
-def test_exclusion_masks_keep_their_pixels_out_of_the_queries(sess):
+def _write_masks(sess, frames, listed=None, stamp=True, enabled=True):
+    """I2's artifacts as the content stage leaves them: the PNGs and content_tags.json listing
+    ``listed`` (default: every mask) under the stamp of plan point 68."""
     mdir = sess.session_dir / "intake" / "exclusion_masks"
     mdir.mkdir(parents=True, exist_ok=True)
     H, W = sess.renders[0].depth.shape
-    for f in KF:                               # the left half of every keyframe is excluded
+    for f in frames:                           # the left half of the frame is excluded
         m = np.zeros((H, W), np.uint8)
         m[:, : W // 2] = 255
         cv2.imwrite(str(mdir / f"{f:06d}.png"), m)
+    listed = list(frames) if listed is None else list(listed)
+    doc = {"version": 1, "enabled": enabled,
+           "exclusion_masks": {"dir": str(mdir), "frames": {str(f): 100 for f in listed}}}
+    if stamp:
+        doc["stamp"] = T.exclusion_masks_stamp(mdir, listed)
+    (sess.session_dir / "intake" / "content_tags.json").write_text(json.dumps(doc))
+    return mdir
+
+
+def _clear_masks(sess):
+    mdir = sess.session_dir / "intake" / "exclusion_masks"
+    for p in mdir.glob("*.png"):
+        p.unlink()
+    (sess.session_dir / "intake" / "content_tags.json").unlink(missing_ok=True)
+
+
+def test_exclusion_masks_keep_their_pixels_out_of_the_queries(sess):
+    H, W = sess.renders[0].depth.shape
+    _write_masks(sess, KF)
     try:
         rep = T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
         tr = T.load_tracks_v2(sess.session_dir)
@@ -175,9 +196,57 @@ def test_exclusion_masks_keep_their_pixels_out_of_the_queries(sess):
         kf_q = np.isin(tr["track_query_frame"], KF)
         assert (qn[kf_q, 0] >= W // 2 - 0.5).all()
         assert rep["n_queries_dropped_excluded_or_edge"] > 0
+        assert rep["exclusion_masks"]["taken"] and rep["exclusion_masks"]["n"] == len(KF)
+        assert f"intake/exclusion_masks/{KF[0]:06d}.png" in T.chain_inputs(sess.session_dir)
     finally:
-        for p in mdir.glob("*.png"):
-            p.unlink()
+        _clear_masks(sess)
+
+
+def test_a_leftover_mask_without_a_matching_stamp_is_not_applied(sess):
+    """Plan point 68: a PNG on disk is not an instruction. Only the masks content_tags.json lists
+    under a stamp that matches the files are applied; a report with I2 off (no frame listed), no
+    stamp, an unlisted PNG or a changed PNG leaves every query in place — declared in tracks.json."""
+    H, W = sess.renders[0].depth.shape
+
+    def left_half_kept() -> bool:
+        T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+        tr = T.load_tracks_v2(sess.session_dir)
+        qn = grid_to_native(tr["track_query_uv"].astype(np.float64), _gmap(sess))
+        kf_q = np.isin(tr["track_query_frame"], KF)
+        return bool((qn[kf_q, 0] < W // 2 - 0.5).any())
+
+    def report():
+        return json.loads((sess.session_dir / "output" / "precision" / T.REPORT_NAME).read_text())["exclusion_masks"]
+    try:
+        # the previous run's masks are on disk, I2 now off: the report lists none
+        _write_masks(sess, KF, listed=[], enabled=False)
+        assert left_half_kept()
+        r = report()
+        assert not r["taken"] and r["unlisted_on_disk"] == len(KF) and "disabled" in r["reason"]
+        assert not any(k.startswith("intake/exclusion_masks/") for k in T.chain_inputs(sess.session_dir))
+        # listed but no stamp
+        _write_masks(sess, KF, stamp=False)
+        assert left_half_kept() and "no stamp" in report()["reason"]
+        # stamped, then one PNG replaced after the fact
+        _write_masks(sess, KF)
+        m = np.full((H, W), 255, np.uint8)
+        cv2.imwrite(str(sess.session_dir / "intake" / "exclusion_masks" / f"{KF[1]:06d}.png"), m)
+        assert left_half_kept() and "not the mask content_tags.json was stamped with" in report()["reason"]
+        # stamped for a subset: the unlisted PNG is ignored, the listed ones apply
+        _write_masks(sess, KF, listed=KF[:2])
+        T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+        r = report()
+        assert r["taken"] and r["n"] == 2 and r["unlisted_on_disk"] == len(KF) - 2
+        tr = T.load_tracks_v2(sess.session_dir)
+        qn = grid_to_native(tr["track_query_uv"].astype(np.float64), _gmap(sess))
+        in_listed = np.isin(tr["track_query_frame"], KF[:2])
+        in_other = np.isin(tr["track_query_frame"], KF[2:])
+        assert (qn[in_listed, 0] >= W // 2 - 0.5).all() and (qn[in_other, 0] < W // 2 - 0.5).any()
+        # a listed mask whose PNG is gone: nothing applied, declared
+        (sess.session_dir / "intake" / "exclusion_masks" / f"{KF[0]:06d}.png").unlink()
+        assert left_half_kept() and "missing on disk" in report()["reason"]
+    finally:
+        _clear_masks(sess)
 
 
 def test_witnesses_are_tracked_between_their_keyframes(sess):
@@ -224,3 +293,70 @@ def test_depth_edges_flag_a_step():
     d[:, 5:] = 4.0
     e = T.depth_edges(d, 0.05)
     assert e[:, 4].all() and not e[:, :4].any() and not e[:, 6:].any()
+
+
+def test_the_split_is_a_function_of_the_tracks_own_key(sess):
+    """Plan point 28: membership comes from a hash of (seed, query frame, query pixel) — one query
+    more or less anywhere leaves every other track where it was (the old positional draw moved
+    ~32 % of the later tracks), and the same key lands in the same set in every window."""
+    rng = np.random.default_rng(3)
+    frames = rng.integers(0, 50, 5000)
+    uv = rng.uniform(0, 600, (5000, 2)).astype(np.float32)
+    a = T.track_split_of(TCFG.seed, frames, uv, TCFG.heldout_frac)
+    # one query inserted at the front: everyone else keeps their membership
+    b = T.track_split_of(TCFG.seed, np.r_[7, frames], np.r_[[[1.0, 2.0]], uv].astype(np.float32),
+                         TCFG.heldout_frac)
+    assert np.array_equal(a, b[1:])
+    # the same key is the same set, whatever came before it; another seed is another split
+    c = T.track_split_of(TCFG.seed, frames[::-1], uv[::-1], TCFG.heldout_frac)
+    assert np.array_equal(a, c[::-1])
+    assert not np.array_equal(a, T.track_split_of(TCFG.seed + 1, frames, uv, TCFG.heldout_frac))
+    assert abs(a.mean() - TCFG.heldout_frac) < 0.02
+    assert set(np.unique(a)) <= {T.SPLIT_FIT, T.SPLIT_HELDOUT}
+    # the split written by run_tracks IS this function of the queries it stored
+    tr = T.load_tracks_v2(sess.session_dir)
+    want = T.track_split_of(TCFG.seed, tr["track_query_frame"], tr["track_query_uv"], TCFG.heldout_frac)
+    assert np.array_equal(tr["track_split"], want)
+
+
+def test_the_report_holds_no_clock_and_the_timing_file_does(sess):
+    """Plan points 36 / 37: tracks.json is the same bytes twice (environment and numerics
+    recorded, no elapsed time); the elapsed time lives in tracks.timing.json."""
+    pdir = sess.session_dir / "output" / "precision"
+    T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+    first = (pdir / T.REPORT_NAME).read_bytes()
+    T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+    assert (pdir / T.REPORT_NAME).read_bytes() == first
+    rep = json.loads(first)
+    assert "elapsed_s" not in rep and "elapsed_s" in json.loads((pdir / T.TIMING_NAME).read_text())
+    assert rep["environment"]["cpu"]["model"] and rep["environment"]["blas"]
+    assert rep["instance_loops"] == {"present": False, "taken": False}
+
+
+def test_instance_loops_enter_only_with_this_reconstructions_id(tmp_path, sess):
+    """Plan point 34: instance_loops.json's keyframe indices are taken only when the file was
+    measured on THIS reconstruction (its reconstruction_id), else reported and ignored."""
+    import shutil
+    from correction.epoch import RECONSTRUCTION_ID_KEY, reconstruction_id
+    sd = tmp_path / "sess"
+    shutil.copytree(sess.session_dir, sd)
+    out = sd / "output"
+    (out / "camera_frames.txt").write_text("\n".join(str(k) for k in KF) + "\n")
+    rec = out / "omega_run" / "results_output"
+    rec.mkdir(parents=True)
+    np.savez(rec / f"frame_{KF[0]}.npz", depth=np.ones((8, 8), np.float32))
+    loops = {"loops": [{"i": 0, "j": 4}]}
+    (out / T.INSTANCE_LOOPS_NAME).write_text(json.dumps(loops))
+    pairs, rep = T.instance_loops(out)
+    assert pairs == [] and rep["present"] and not rep["taken"] and "reconstruction_id" in rep["reason"]
+    (out / T.INSTANCE_LOOPS_NAME).write_text(json.dumps({**loops, RECONSTRUCTION_ID_KEY: "f" * 64}))
+    pairs, rep = T.instance_loops(out)
+    assert pairs == [] and "another reconstruction" in rep["reason"]
+    rid = reconstruction_id(out)
+    (out / T.INSTANCE_LOOPS_NAME).write_text(json.dumps({**loops, RECONSTRUCTION_ID_KEY: rid}))
+    pairs, rep = T.instance_loops(out)
+    assert pairs == [(0, 4)] and rep["taken"]
+    assert f"output/{T.INSTANCE_LOOPS_NAME}" in T.chain_inputs(sd)
+    T.run_tracks(sd, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+    doc = json.loads((out / "precision" / T.REPORT_NAME).read_text())
+    assert doc["instance_loops"]["taken"] and doc["n_windows_by_kind"]["loop"] >= 1
