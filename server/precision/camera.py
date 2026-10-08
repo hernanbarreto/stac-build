@@ -434,6 +434,41 @@ def undistort_normalized(uv: np.ndarray, K: np.ndarray, dist: Sequence[float], *
                                roundtrip_ulps).reshape(uv.shape)
 
 
+def undistort_normalized_tracks(uv: np.ndarray, K: np.ndarray, dist: Sequence[float], starts: np.ndarray,
+                                counts: np.ndarray, *, max_iter: int, eps_px: float,
+                                roundtrip_ulps: int) -> Tuple[np.ndarray, np.ndarray]:
+    """:func:`undistort_normalized` for MANY tracks at once (USER 2026-10-08, speed): ``uv`` holds the
+    observations of every track contiguously (track q = rows starts[q] : starts[q] + counts[q]).
+    ONE cv2 solver call and ONE re-distortion for all of them (both are per point), each track
+    then judged with ITS OWN round-trip tolerance — eps_px + ulps × ulp of the largest magnitude of
+    its own pixels and the camera, exactly what a per-track call of :func:`_undistort_verified`
+    computes. Returns (normalised coordinates of every row, per-track converged mask): a track
+    that does not converge is reported, never a failure of the call (its caller drops it)."""
+    _check_solver(max_iter, eps_px, roundtrip_ulps)
+    cv2 = _cv2()
+    uv = np.asarray(uv, dtype=np.float64).reshape(-1, 2)
+    starts = np.asarray(starts, np.int64)
+    counts = np.asarray(counts, np.int64)
+    K = np.asarray(K, np.float64)
+    dist = np.asarray(dist, np.float64)
+    if uv.shape[0] == 0:
+        return uv.copy(), np.ones(len(starts), bool)
+    pts = uv.reshape(-1, 1, 2)
+    crit = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, int(max_iter), float(eps_px))
+    xn = cv2.undistortPointsIter(pts, K, dist, None, None, crit).reshape(-1, 2)
+    obj = np.stack([xn[:, 0], xn[:, 1], np.ones(len(xn))], axis=1).reshape(-1, 1, 3)
+    back, _ = cv2.projectPoints(obj, np.zeros(3), np.zeros(3), K, dist)
+    err = np.linalg.norm(back.reshape(-1, 2) - pts.reshape(-1, 2), axis=1)
+    cam_mag = max(abs(float(K[0, 0])), abs(float(K[1, 1])), abs(float(K[0, 2])), abs(float(K[1, 2])))
+    pt_mag = np.maximum.reduceat(np.abs(uv).max(axis=1), starts)
+    mag = np.maximum(pt_mag, cam_mag)
+    tol = float(eps_px) + int(roundtrip_ulps) * np.spacing(mag)
+    tol_row = np.repeat(tol, counts)
+    bad_row = ~(err <= tol_row)                                   # NaN is not converged either
+    ok_track = ~np.logical_or.reduceat(bad_row, starts)
+    return xn, ok_track
+
+
 def undistort_solver(camera_cfg) -> dict:
     """``{"max_iter", "eps_px", "roundtrip_ulps"}`` for :func:`undistort_points`
     from a loaded ``precision.config.CameraConfig``."""

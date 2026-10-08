@@ -10,6 +10,18 @@
 # pipeline consumes (written to output/vlm_analysis.json) -> optionally run SAM3
 # to emit segmentation.json + seg_masks.npz.
 #
+# DETERMINISM (docs/plan_determinismo.md points 82, 86, 87, 88, 89, 94, 97, 159 —
+# 2026-10-08): vlm_analysis.json carries the STAMP of everything it was derived from
+# (repro.stamp: the bytes of every keyframe shown, the effective understanding prompt, the
+# merge / bound / fallback keys, the sampling, the grouping rule, the served engine's
+# identity, the code); when a later run of the session computes the SAME stamp the whole
+# file is reused and the understanding is NOT re-run — when it differs, everything is
+# derived again and the log names what changed. Every VLM call is recorded (the sha1 of the
+# image sent, finish_reason, tokens, what was rescued from a cut answer), every integer
+# cut-off records its margin, the effective prompt text travels with its sha and origin, no
+# clock enters the file (times go to vlm_analysis.timing.json), and the file's bytes never
+# follow a hash seed.
+#
 # PROVENANCE: ours. Every label/box is vlm_proposed; masks come from SAM3;
 # geometry/tools measure. Reuses the existing run_segmentation machinery.
 #
@@ -17,14 +29,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 import numpy as np
 from PIL import Image
@@ -32,6 +44,10 @@ from PIL import Image
 from .associate import Instance, associate_detections
 from .detector import Detection, GroundedDetector
 from .vocabulary import Vocabulary, load_vocabulary
+
+VLM_ANALYSIS_NAME = "vlm_analysis.json"
+VLM_TIMING_NAME = "vlm_analysis.timing.json"      # the run's clock, outside the compared file
+CONCEPTS_NAME = "autoprompt_concepts.json"
 
 
 @dataclass
@@ -49,6 +65,7 @@ class AutoPromptResult:
     sam3_ran: bool = False
     per_class_counts: dict[str, int] = field(default_factory=dict)
     scene_type: str = ""
+    reused: bool = False                 # vlm_analysis.json taken whole under its stamp
 
     def summary(self) -> str:
         return (
@@ -61,6 +78,17 @@ class AutoPromptResult:
 
 def _frame_num(filename: str) -> int:
     return int(os.path.splitext(os.path.basename(filename))[0])
+
+
+def _write_json(path: Path, doc) -> None:
+    """Every JSON product of this stage is written atomically (point 149)."""
+    from atomic_io import atomic_write_json
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(path, doc, indent=2, ensure_ascii=False)
+
+
+def prompt_sha256(text: str) -> str:
+    return hashlib.sha256(str(text).encode("utf-8")).hexdigest()
 
 
 def with_category(description: str, category: str) -> str:
@@ -116,7 +144,9 @@ def build_shape_descriptions(understanding, phrases: list[str], synonyms: dict,
     prepares the ShapeR descriptions. Aggregated like the fallback prompts: every
     call's ``shape`` entry for a kind folded into the prompt it became (same name,
     then the merge pass), the MOST FREQUENT wording wins, ties go to the first
-    seen. A prompt no call described has no entry — nothing is invented."""
+    seen. A prompt no call described has no entry — nothing is invented.
+    ``generated`` is the caption's stable id (never a clock — point 86); None lets
+    ``shape_caption`` derive it from the caption's own content."""
     from segmentation.object_captioner import shape_caption
     pset = set(phrases)
     votes: dict[str, Counter] = {}
@@ -140,14 +170,54 @@ def build_shape_descriptions(understanding, phrases: list[str], synonyms: dict,
             first.setdefault((c, text), n)
             n += 1
     out: dict[str, dict] = {}
-    stamp = generated or datetime.now().isoformat(timespec="seconds")
     for c in phrases:
         cnt = votes.get(c)
         if not cnt:
             continue
         best = sorted(cnt, key=lambda t: (-cnt[t], first[(c, t)]))[0]
-        out[c] = shape_caption(fields_of[(c, best)], c, "concept", generated=stamp)
+        out[c] = shape_caption(fields_of[(c, best)], c, "concept", generated=generated)
     return out
+
+
+def image_encoding_record() -> dict:
+    """How the client encodes the images it sends (point 94): the JPEG format and quality
+    ``semantic.types._encode_image`` re-encodes a PIL image with, and the Pillow / libjpeg
+    build doing it (``intake.stamps.pillow_record``) — the pixels the VLM sees depend on
+    them, so they are recorded with every run."""
+    import inspect
+    from semantic.types import _encode_image
+    sig = inspect.signature(_encode_image).parameters
+    rec = {"format": sig["fmt"].default, "quality": sig["quality"].default}
+    try:
+        from intake.stamps import pillow_record
+        rec["pillow"] = pillow_record()
+    except Exception as e:  # noqa: BLE001 — recorded as what it is: unreadable
+        rec["pillow"] = {"error": f"{type(e).__name__}: {e}"}
+    return rec
+
+
+def vlm_stage_stamp(session_dir: Path, keyframes: list[str], config_sections: dict) -> dict:
+    """The stamp of a VLM analysis (point 82): the BYTES of every keyframe the VLM is shown
+    (and frames/selected_frames.json, the list they came from, when it exists), the code
+    that turns answers into prompts and encodes the images, and every configuration
+    section that decides (``config_sections``, named — the effective prompt by its sha256
+    and origin, the sampling, the bounds, the merge keys, the served engine's identity)."""
+    import repro
+    from semantic import _parse as semantic_parse
+    from semantic import backends as semantic_backends
+    from semantic import types as semantic_types
+    from segmentation import object_captioner
+    from . import consolidate_prompts, coverage_sample, detector, scene_understanding
+    from . import session_builder, vlm_sampling
+    frames_dir = Path(session_dir) / "frames"
+    inputs = {f"frames/{fn}": frames_dir / fn for fn in keyframes}
+    sel = frames_dir / "selected_frames.json"
+    if sel.exists():
+        inputs["frames/selected_frames.json"] = sel
+    code = [scene_understanding, consolidate_prompts, session_builder, vlm_sampling,
+            coverage_sample, detector, object_captioner, semantic_types, semantic_backends,
+            semantic_parse]
+    return repro.stamp(inputs=inputs, code=code, config=dict(config_sections))
 
 
 class AutoPrompter:
@@ -313,13 +383,75 @@ class AutoPrompter:
 
         return provider
 
+    # ── the stamp of this run's analysis (point 82) ──────────────────
+    def _prompt_record(self) -> dict:
+        """The effective understanding prompt, its sha256 and its origin (point 97)."""
+        return {"text": self.understand_prompt,
+                "sha256": prompt_sha256(self.understand_prompt),
+                "source": "session" if self.understand_prompt_overridden else "shipped"}
+
+    def _stamp(self, kf: list[str], service: dict | None) -> dict:
+        from .scene_understanding import GROUPING_VERSION
+        from .vlm_sampling import load_max_sam3_prompts, load_vlm_sampling
+        from segmentation.object_captioner import load_object_captions
+        prec = self._prompt_record()
+        sections = {
+            "vlm_sampling": asdict(load_vlm_sampling(self._config)),
+            "max_sam3_prompts": load_max_sam3_prompts(self._config),
+            "understand": {"enabled": bool(self.understand_enabled),
+                           "cover": bool(self.understand_cover),
+                           "cover_voxel_m": self.understand_cover_voxel_m,
+                           "cover_overlap": self.understand_cover_overlap,
+                           "max_tokens": int(load_object_captions(self._config).understand_max_tokens)},
+            "understand_prompt": {"sha256": prec["sha256"], "source": prec["source"]},
+            "merge": {"merge_synonyms": bool(self.merge_synonyms),
+                      "merge_max_phrases_per_call": self.cfg.get("merge_max_phrases_per_call"),
+                      "merge_max_tokens": self.cfg.get("merge_max_tokens")},
+            "consolidate": {"consolidate_prompts": bool(self.consolidate_prompts),
+                            "consolidate_passes": int(self.consolidate_passes)},
+            "sam3_fallback_max": self.cfg.get("sam3_fallback_max"),
+            "grouping": GROUPING_VERSION,
+            "backend": self.backend_name,
+            "prompts_only": bool(self.prompts_only),
+            "max_keyframes": self.max_keyframes,
+            # the engine that answers: weights, versions, flags, card (semantic.serve's
+            # identity); None when no identity was handed in (a CLI without the stage's engine)
+            "service": dict(service) if service else None,
+        }
+        return vlm_stage_stamp(self.session_dir, kf, sections)
+
+    def _reusable_analysis(self, stamp: dict) -> tuple[dict | None, str]:
+        """The session's vlm_analysis.json when its stamp equals ``stamp`` — reused WHOLE
+        (prompts, fallbacks, shape descriptions, census): point 82. Otherwise (None, why)."""
+        import repro
+        p = self.output_dir / VLM_ANALYSIS_NAME
+        if not self.reuse_vocabulary:
+            return None, "autoprompt.reuse_vocabulary is false"
+        if not p.exists():
+            return None, "no vlm_analysis.json in the session"
+        try:
+            doc = json.loads(p.read_text())
+        except (OSError, ValueError) as e:
+            return None, f"vlm_analysis.json unreadable ({e})"
+        if not isinstance(doc, dict) or not str(doc.get("prompt") or "").strip():
+            return None, "vlm_analysis.json carries no prompt"
+        diffs = repro.check_stamp(doc.get("stamp"), stamp)
+        if diffs:
+            return None, "its stamp differs: " + "; ".join(diffs[:6]) + (
+                f" (+{len(diffs) - 6} more)" if len(diffs) > 6 else "")
+        return doc, "stamp identical"
+
     # ── main run ────────────────────────────────────────────────────
     def run(
         self,
         keyframe_files: list[str] | None = None,
         run_sam3: bool = False,
         on_progress: Callable[[int, str], None] | None = None,
+        service: dict | None = None,
     ) -> AutoPromptResult:
+        """``service`` is the verified identity of the engine answering (semantic.service.
+        job_engine): it enters the stamp and the file, so an analysis made by another
+        engine (other weights, flags, card) is never taken for this one."""
         from semantic.client import get_semantic_client
 
         def prog(pct, msg):
@@ -327,6 +459,29 @@ class AutoPrompter:
                 on_progress(pct, msg)
 
         kf = self._keyframe_files(keyframe_files)
+        stamp = self._stamp(kf, service)
+        timing: dict = {}
+        # ── the whole analysis, reused under an identical stamp (point 82) ─────
+        if self.prompts_only and self.understand_enabled:
+            doc, why = self._reusable_analysis(stamp)
+            if doc is not None:
+                phrases = [c.strip() for c in str(doc.get("prompt", "")).split(";") if c.strip()]
+                su = doc.get("scene_understanding") or {}
+                print(f"[autoprompt] ♻ vlm_analysis.json REUSED whole (stamp "
+                      f"{stamp['sha256'][:12]}: {why}) — {len(phrases)} SAM3 prompt(s), "
+                      f"the understanding is not re-run (autoprompt.reuse_vocabulary)")
+                prog(100, f"prompts ready (reused): {len(phrases)} concepts → SAM3")
+                return AutoPromptResult(
+                    n_keyframes=len(kf), n_detections=0, n_instances=0,
+                    n_accepted=0, n_review=0, prompt=";".join(phrases), frame_map={},
+                    vlm_analysis_path=str(self.output_dir / VLM_ANALYSIS_NAME),
+                    review_queue_path=str(self.output_dir / "autoprompt_review_queue.json"),
+                    instances_path=str(self.output_dir / "autoprompt_instances.json"),
+                    per_class_counts={p: 1 for p in phrases},
+                    scene_type=str(su.get("scene_type") or ""), reused=True)
+            print(f"[autoprompt] vlm_analysis.json NOT reused ({why}) — deriving everything "
+                  f"again under stamp {stamp['sha256'][:12]}")
+
         # BA poses drive the adaptive sampling and the association of the
         # GROUNDED-DETECTION path only; the SIMPLE path never reads them (it used
         # to compute them anyway and log "(48 to the VLM)" for frames nobody sent)
@@ -345,12 +500,10 @@ class AutoPrompter:
         targets: list[str] | None = None
         plan = None                       # which frames / crops the VLM was shown
         calls: list[dict] = []            # one entry per VLM call, parsed or not
-        signature = None                  # what the session vocabulary is derived under
         if self.understand_enabled:
-            from .scene_understanding import GROUPING_VERSION, understand_frame, aggregate
-            from .vlm_sampling import (crop_for_vlm, load_max_sam3_prompts,
-                                       load_vlm_sampling, plan_vlm_frames, tile_boxes,
-                                       walk_chainage)
+            from .scene_understanding import understand_frame, aggregate
+            from .vlm_sampling import (crop_for_vlm, load_vlm_sampling, plan_vlm_frames,
+                                       tile_boxes, walk_chainage)
             # WHAT THE VLM NEVER SEES, IT CANNOT NAME — and in the SIMPLE
             # pipeline these phrases ARE the SAM3 prompts, so a frame left out
             # here is an object left out of the segmentation entirely.
@@ -361,11 +514,6 @@ class AutoPrompter:
             # coverage cover with an 8-frame linspace fallback — and at the
             # intake there is no cloud, so pccr 2026-09-29 got the 8.
             vcfg = load_vlm_sampling(self._config)
-            signature = {"vlm_sampling": asdict(vcfg),
-                         # a list derived under another prompt bound is another list
-                         "max_sam3_prompts": load_max_sam3_prompts(self._config),
-                         "understand_cover": bool(self.understand_cover),
-                         "grouping": GROUPING_VERSION}
             preselected = None
             if self.understand_cover:
                 from .coverage_sample import cover_keyframes
@@ -384,8 +532,8 @@ class AutoPrompter:
             prog(2, f"auto-prompt: {len(kf)} keyframes → {len(plan.frames)} to the VLM, "
                     f"{plan.n_calls} call(s)")
             # The answer now carries one ShapeR shape entry per kind (USER 2026-10-01),
-            # and a truncated answer does not parse — the FRAME's categories (= SAM3
-            # prompts) would be lost with it. Its bound is declared, never a literal.
+            # and a CUT answer keeps its complete objects (point 88). Its bound is
+            # declared, never a literal.
             from segmentation.object_captioner import load_object_captions
             understand_max_tokens = int(load_object_captions(self._config).understand_max_tokens)
             fus = []
@@ -397,32 +545,34 @@ class AutoPrompter:
                                                     vcfg.tile_cols, vcfg.tile_overlap_frac)
                 for tid, box in views:
                     view = img if box is None else crop_for_vlm(img, box)
+                    rec = {"frame": fr["frame"], "file": fn,
+                           "keyframe_index": fr["keyframe_index"],
+                           "position": fr["position"], "tile": tid,
+                           "box": list(box) if box else None}
                     fu = understand_frame(client, view, fr["frame"], tile=tid,
                                           max_tokens=understand_max_tokens,
-                                          prompt=self.understand_prompt)
-                    calls.append({"frame": fr["frame"], "file": fn,
-                                  "keyframe_index": fr["keyframe_index"],
-                                  "position": fr["position"], "tile": tid,
-                                  "box": list(box) if box else None,
-                                  "parsed": fu is not None,
-                                  "n_objects": len(fu.objects) if fu else 0})
+                                          prompt=self.understand_prompt, record=rec)
+                    rec.update(parsed=fu is not None, n_objects=len(fu.objects) if fu else 0)
+                    calls.append(rec)
                     if fu:
                         fus.append(fu)
                 prog(2 + int(20 * len(calls) / max(1, plan.n_calls)),
                      f"understanding {fn} ({len(views)} view(s), {len(calls)}/"
                      f"{plan.n_calls} calls)")
+            timing["understanding_s"] = round(time.time() - t0, 1)
             n_bad = sum(1 for c in calls if not c["parsed"])
+            n_cut = sum(1 for c in calls if c.get("truncated"))
+            n_salv = sum(1 for c in calls if c.get("salvaged"))
             print(f"[autoprompt] VLM understanding: {len(calls)} call(s) in "
-                  f"{time.time() - t0:.0f} s; {n_bad} answer(s) did not parse")
+                  f"{timing['understanding_s']:.0f} s; {n_bad} answer(s) did not parse; "
+                  f"{n_cut} cut at max_tokens, {n_salv} of them rescued (point 88)")
             understanding = aggregate(fus)
             targets = understanding.objects
             if understanding.merged:
                 print(f"[autoprompt] {len(understanding.merged)} phrase(s) folded into the "
                       f"SAME NAME (case / plural / article / punctuation only): "
-                      f"{understanding.merged}")
-            (self.output_dir).mkdir(parents=True, exist_ok=True)
-            (self.output_dir / "scene_understanding.json").write_text(
-                json.dumps(understanding.to_dict(), indent=2, ensure_ascii=False))
+                      f"{dict(sorted(understanding.merged.items()))}")
+            _write_json(self.output_dir / "scene_understanding.json", understanding.to_dict())
             prog(22, f"scene: {understanding.scene_type} — {len(targets)} object types understood")
 
         # ── SIMPLE pipeline: understanding IS the whole VLM job ──────────
@@ -437,84 +587,83 @@ class AutoPrompter:
             if not phrases:
                 raise RuntimeError("scene understanding produced no objects — "
                                    "cannot build SAM3 prompts")
-            # THE SESSION'S VOCABULARY IS AN ARTIFACT (USER 2026-09-22): once
-            # written it is the answer, so re-running the semantic stages on the
-            # same session segments the same concepts. Only the list is reused —
-            # the understanding still runs and still describes the scene.
-            # REPRODUCIBLE MEANS SAME INPUTS → SAME LIST: a vocabulary derived
-            # under another VLM sampling (or another folding rule) answers a
-            # different question, so it is not reused — declared, never silent.
-            # A record written before the stamp existed carries none.
-            _rec_path = self.output_dir / "autoprompt_concepts.json"
-            _reused = None
-            if getattr(self, "reuse_vocabulary", False) and _rec_path.exists():
-                try:
-                    _prev = json.loads(_rec_path.read_text())
-                    if _prev.get("derived_under") != signature:
-                        print(f"[autoprompt] session vocabulary NOT reused: it was derived "
-                              f"under {_prev.get('derived_under')} and this run samples "
-                              f"under {signature} — deriving it again")
-                    else:
-                        _reused = [p for p in (_prev.get("prompts") or []) if p and p.strip()]
-                except Exception as _e:                      # noqa: BLE001
-                    print(f"[autoprompt] ⚠ could not read the session vocabulary "
-                          f"({_e}) — deriving it again")
-                    _reused = None
-            if _reused:
-                print(f"[autoprompt] ♻ session vocabulary REUSED: "
-                      f"{len(_reused)} concept(s) from autoprompt_concepts.json "
-                      f"(the understanding named {len(phrases)} this time) — "
-                      f"autoprompt.reuse_vocabulary")
-                phrases = _reused
-                consolidation = None
-                prompt = ";".join(phrases)
-                prog(25, f"{len(phrases)} concepts (reused)")
+            # ── THE MERGE PASS (USER 2026-09-29): a second VLM pass over the NAMES
+            # fuses the ones that mean the same thing, BEFORE the bound — the bound
+            # then spends its budget on distinct objects, not on wordings (pccr, first
+            # run with every keyframe × 5 views: 1 900 names, 150 prompts spent on
+            # 'white wall' / 'white painted wall' / 'beige wall' …, 'black office
+            # desk' never prompted). A call that fails fails the stage (point 88).
+            synonyms: dict[str, str] = {}
+            merge_calls: list[dict] = []
+            merge_bound = int(self.cfg["merge_max_phrases_per_call"]) if self.merge_synonyms else None
+            if self.merge_synonyms and len(phrases) > 1:
+                from .consolidate_prompts import merge_synonyms
+                from .scene_understanding import _head_noun
+                prog(23, f"merging synonyms over {len(phrases)} names")
+                t1 = time.time()
+                synonyms = merge_synonyms(
+                    client, understanding.scene_type if understanding else "", phrases,
+                    _head_noun, max_phrases_per_call=merge_bound,
+                    max_tokens=int(self.cfg["merge_max_tokens"]),
+                    log=lambda m: print(f"[autoprompt] {m}"), calls=merge_calls)
+                timing["merge_s"] = round(time.time() - t1, 1)
+            # proposals per name AFTER the folds (same name, then the merge pass): the
+            # order of the prompts and the margin at the bound both read it
+            _props: Counter = Counter()
+            for fu in (understanding.per_frame if understanding else []):
+                for o in dict.fromkeys(fu.objects):
+                    c = understanding.merged.get(o, o)
+                    _props[synonyms.get(c, c)] += 1
+            if synonyms:
+                _order = {p: i for i, p in enumerate(phrases)}
+                phrases = sorted((p for p in phrases if p not in synonyms),
+                                 key=lambda p: (-_props[p], _order[p]))
             # ── the BOUND on SAM3 prompts (autoprompt.max_sam3_prompts) ────
             # `aggregate` keeps every distinct name and the consolidation removes
             # none, so the prompt count follows the VLM's phrasing — and SAM3
             # time is linear in it. Past the bound the names proposed by the
             # FEWEST calls are not prompted (the understanding's own order:
             # proposals incl. same-name variants, then first seen), each one
-            # declared here, in autoprompt_concepts.json and in the census.
-            # ── THE MERGE PASS (USER 2026-09-29): a second VLM pass over the NAMES
-            # fuses the ones that mean the same thing, BEFORE the bound — the bound
-            # then spends its budget on distinct objects, not on wordings (pccr, first
-            # run with every keyframe × 5 views: 1 900 names, 150 prompts spent on
-            # 'white wall' / 'white painted wall' / 'beige wall' …, 'black office
-            # desk' never prompted).
-            synonyms: dict[str, str] = {}
-            if self.merge_synonyms and not _reused and len(phrases) > 1:
-                from .consolidate_prompts import merge_synonyms
-                from .scene_understanding import _head_noun
-                prog(23, f"merging synonyms over {len(phrases)} names")
-                synonyms = merge_synonyms(
-                    client, understanding.scene_type if understanding else "", phrases,
-                    _head_noun, max_phrases_per_call=int(self.cfg["merge_max_phrases_per_call"]),
-                    max_tokens=int(self.cfg["merge_max_tokens"]),
-                    log=lambda m: print(f"[autoprompt] {m}"))
-                if synonyms:
-                    _props = Counter()
-                    for fu in (understanding.per_frame if understanding else []):
-                        for o in dict.fromkeys(fu.objects):
-                            c = understanding.merged.get(o, o)
-                            _props[synonyms.get(c, c)] += 1
-                    _order = {p: i for i, p in enumerate(phrases)}
-                    phrases = sorted((p for p in phrases if p not in synonyms),
-                                     key=lambda p: (-_props[p], _order[p]))
+            # declared here, in autoprompt_concepts.json and in the census — with the
+            # MARGIN at the cut (point 89): the proposals of the last name admitted and of
+            # the first left out (equal = a tie decided by first-seen order).
             from .vlm_sampling import load_max_sam3_prompts
             max_prompts = load_max_sam3_prompts(self._config)
             overflow: list[str] = []
-            if not _reused and len(phrases) > max_prompts:
+            n_names = len(phrases)
+            if len(phrases) > max_prompts:
                 overflow = phrases[max_prompts:]
                 phrases = phrases[:max_prompts]
                 print(f"[autoprompt] SAM3 prompt BOUND REACHED (autoprompt.max_sam3_prompts "
-                      f"= {max_prompts}): {len(overflow)} of {len(phrases) + len(overflow)} "
+                      f"= {max_prompts}): {len(overflow)} of {n_names} "
                       f"name(s) NOT prompted, the least proposed: {overflow}")
             print(f"[autoprompt] {len(phrases)} SAM3 prompt(s) (bound {max_prompts}) — "
                   f"SAM3 time is linear in this count; its stage logs the measured s/prompt")
+            last_in = phrases[-1] if phrases else None
+            first_out = overflow[0] if overflow else None
             prompt_bound = {"max_sam3_prompts": max_prompts,
-                            "n_names": len(phrases) + len(overflow),
-                            "bound_reached": bool(overflow), "not_prompted": overflow}
+                            "n_names": n_names,
+                            "bound_reached": bool(overflow), "not_prompted": overflow,
+                            "last_admitted": ({"name": last_in, "n_proposals": _props[last_in]}
+                                              if last_in else None),
+                            "first_excluded": ({"name": first_out, "n_proposals": _props[first_out]}
+                                               if first_out else None),
+                            "margin_proposals": ((_props[last_in] - _props[first_out])
+                                                 if (last_in and first_out) else None)}
+            votes = list((getattr(understanding, "scene_type_votes", None) or {}).items())
+            decisions = {
+                "merge_strategy": ({"n_phrases": n_names if not synonyms else len(_props),
+                                    "n_names_before_merge": len(targets or []),
+                                    "merge_max_phrases_per_call": merge_bound,
+                                    "one_call": (len(targets or []) <= merge_bound),
+                                    "margin": merge_bound - len(targets or [])}
+                                   if merge_bound is not None else None),
+                "prompt_bound": prompt_bound,
+                "scene_type": {"winner": (understanding.scene_type if understanding else None),
+                               "votes": dict(votes),
+                               "margin": ((votes[0][1] - votes[1][1]) if len(votes) > 1
+                                          else (votes[0][1] if votes else 0))},
+            }
             # ── the CONSOLIDATION pass (USER 2026-09-16) ─────────────────
             # The understanding ran frame by frame and no frame ever saw the
             # others' answers, so the union carries the same object under
@@ -524,8 +673,7 @@ class AutoPrompter:
             # one thing is a language judgement over the WHOLE list, which is
             # exactly what a per-frame prompt can never have.
             consolidation = None
-            if self.consolidate_prompts and not self.merge_synonyms and len(phrases) > 1 \
-                    and not _reused:
+            if self.consolidate_prompts and not self.merge_synonyms and len(phrases) > 1:
                 from .consolidate_prompts import consolidate
                 prog(23, f"consolidating {len(phrases)} concepts")
                 consolidation = consolidate(
@@ -559,9 +707,8 @@ class AutoPrompter:
                 # the fragment merge. Words propose; the cloud decides.
                 # The cost is SAM3 time, linear in the number of concepts.
                 _grouped = list(consolidation.objects)
-                (self.output_dir).mkdir(parents=True, exist_ok=True)
-                (self.output_dir / "prompt_consolidation.json").write_text(
-                    json.dumps(consolidation.to_dict(), indent=2, ensure_ascii=False))
+                _write_json(self.output_dir / "prompt_consolidation.json",
+                            consolidation.to_dict())
                 _folded = [p for p in phrases if p not in set(_grouped)]
                 if _folded:
                     print(f"[autoprompt] [consolidate] {len(_grouped)} group(s) for "
@@ -572,31 +719,25 @@ class AutoPrompter:
             # (USER 2026-09-22: *"vocabulario, no debe cambiar en silencio,
             # debe ser lo mas determinista posible, debe ser reproducible"*).
             # The record below is the session's vocabulary: the raw union, the
-            # grouping, every pass and every failure. `reuse_vocabulary` then
-            # makes it the ANSWER on any later run of this session — the engine
-            # cannot promise the same tokens twice (it batches, the reduction
-            # order moves, a near-tie falls the other way: 61/32/34/39/38/34/36
-            # concepts over seven runs of pccr from an understanding that gave
-            # 60-61 types every single time), so the guarantee has to be the
-            # artifact, not the model.
+            # grouping, every pass and every failure — stamped (point 82 / 159) with
+            # the same stamp as vlm_analysis.json, which is the ONE file reused.
             _rec = {
-                "version": 1,
+                "version": 2,
                 "raw": list(targets or []),
                 "prompts": list(phrases),
+                "prompt_source": "vlm_proposed",
                 "groups": (consolidation.to_dict() if consolidation else None),
                 "passes": (consolidation.passes if consolidation else 0),
-                "reused": bool(_reused),
                 "not_prompted_bound": overflow,
                 "synonyms": synonyms,
-                "derived_under": signature,
+                "stamp": stamp["sha256"],
                 "scene_type": (understanding.scene_type if understanding else None),
             }
             if consolidation is not None and consolidation.passes == 0:
                 _rec["warning"] = ("the consolidation pass returned nothing "
                                    "parseable — the list is the raw union")
                 print(f"[autoprompt] ⚠ {_rec['warning']}")
-            (self.output_dir / "autoprompt_concepts.json").write_text(
-                json.dumps(_rec, indent=2, ensure_ascii=False))
+            _write_json(self.output_dir / CONCEPTS_NAME, _rec)
             prompt = ";".join(phrases)
             # THE FALLBACKS (USER 2026-09-30: "si hay un prompt que no produjo nada es que a
             # SAM3 le falta detalle — a ese se lo puede probar con los que se originó"): per
@@ -605,13 +746,12 @@ class AutoPrompter:
             # category confirms nothing (segmentation.pipeline._run_sam3_batched).
             fallback_prompts = (build_fallback_prompts(understanding, phrases, synonyms,
                                                        int(self.cfg["sam3_fallback_max"]))
-                                if (understanding is not None and not _reused) else {})
+                                if understanding is not None else {})
             # THE SHAPER DESCRIPTIONS (USER 2026-10-01: "el VLM, para preparar los prompts,
             # pasa SAM3 y las descripciones para ShapeR"): per prompt, the description the
             # understanding gave that kind — every projected instance of the concept
             # inherits it (segmentation/pipeline.py, source 'concept') until the per-object
-            # pass after the certification refines it. Built on a REUSED list as well: the
-            # understanding still ran and still described the kinds it named.
+            # pass after the certification refines it.
             shape_descriptions = (build_shape_descriptions(understanding, phrases, synonyms)
                                   if understanding is not None else {})
             _undescribed = [p for p in phrases if p not in shape_descriptions]
@@ -619,13 +759,17 @@ class AutoPrompter:
                   f"{len(phrases)} prompt(s) described by the understanding"
                   + (f"; without one (concept only, no caption inherited): {_undescribed}"
                      if _undescribed else ""))
-            self.output_dir.mkdir(parents=True, exist_ok=True)
             vlm_analysis = {
                 "source": "qwen3vl_autoprompt_simple",
                 "backend": self.backend_name,
+                # the engine that answered (semantic.serve identity, point 155) — None only
+                # when the run had no engine of its own (a CLI)
+                "service": (dict(service) if service else None),
+                "understand_prompt": self._prompt_record(),
                 "scene_understanding": understanding.to_dict() if understanding else None,
                 "consolidation": consolidation.to_dict() if consolidation else None,
                 "prompt": prompt,
+                "prompt_source": "vlm_proposed",
                 "fallback_prompts": fallback_prompts,
                 "shape_descriptions": shape_descriptions,
                 "frame_map": {},          # empty → SAM3 runs every phrase on ALL frames
@@ -638,17 +782,21 @@ class AutoPrompter:
                 # proposed — read by segmentation/census.py after SAM3
                 "census": self._census_record(
                     plan, calls, self._concept_fates(
-                        understanding, phrases, reused=bool(_reused),
+                        understanding, phrases, reused=False,
                         consolidation=consolidation, bounded_out=prompt_bound,
                         synonyms=synonyms),
-                    reused=bool(_reused), prompt_bound=prompt_bound),
+                    reused=False, prompt_bound=prompt_bound, decisions=decisions,
+                    merge_calls=merge_calls),
+                "stamp": stamp,
             }
-            vlm_path = self.output_dir / "vlm_analysis.json"
-            vlm_path.write_text(json.dumps(vlm_analysis, indent=2, ensure_ascii=False))
+            vlm_path = self.output_dir / VLM_ANALYSIS_NAME
+            _write_json(vlm_path, vlm_analysis)
+            _write_json(self.output_dir / VLM_TIMING_NAME,
+                        dict(timing, n_calls=len(calls), n_merge_calls=len(merge_calls)))
             review_path = self.output_dir / "autoprompt_review_queue.json"
-            review_path.write_text(json.dumps({"instances": []}, indent=2))
+            _write_json(review_path, {"instances": []})
             inst_path = self.output_dir / "autoprompt_instances.json"
-            inst_path.write_text(json.dumps({"accepted": [], "review": []}, indent=2))
+            _write_json(inst_path, {"accepted": [], "review": []})
             prog(100, f"prompts ready: {len(phrases)} rich concepts → SAM3")
             print(f"[autoprompt] SIMPLE: {len(phrases)} rich concept prompts for SAM3: "
                   f"{phrases}")
@@ -711,12 +859,14 @@ class AutoPrompter:
         dubious_labels = sorted({i.label for i in review} - accepted_labels)
 
         # persist the integration contract + audit artifacts
-        self.output_dir.mkdir(parents=True, exist_ok=True)
         vlm_analysis = {
             "source": "qwen3vl_autoprompt",
             "backend": self.backend_name,
+            "service": (dict(service) if service else None),
+            "understand_prompt": self._prompt_record(),
             "scene_understanding": understanding.to_dict() if understanding else None,
             "prompt": prompt,
+            "prompt_source": "vlm_proposed",
             "frame_map": frame_map,
             # the understanding's descriptions, keyed by its own phrases; the detector's
             # labels only inherit one when they coincide with a phrase (declared)
@@ -740,23 +890,22 @@ class AutoPrompter:
                     understanding, [], reused=False, consolidation=None,
                     detection_path=True),
                 reused=False),
+            "stamp": stamp,
         }
-        vlm_path = self.output_dir / "vlm_analysis.json"
-        vlm_path.write_text(json.dumps(vlm_analysis, indent=2, ensure_ascii=False))
+        vlm_path = self.output_dir / VLM_ANALYSIS_NAME
+        _write_json(vlm_path, vlm_analysis)
+        _write_json(self.output_dir / VLM_TIMING_NAME, dict(timing, n_calls=len(calls)))
 
         review_path = self.output_dir / "autoprompt_review_queue.json"
-        review_path.write_text(json.dumps(
-            {"note": "dubious instances (below confidence threshold) — for human "
-                     "review; NOT discarded. May vote in Phase R but generate no "
-                     "pose residual until validated.",
-             "instances": [i.to_dict() for i in review]},
-            indent=2, ensure_ascii=False))
+        _write_json(review_path,
+                    {"note": "dubious instances (below confidence threshold) — for human "
+                             "review; NOT discarded. May vote in Phase R but generate no "
+                             "pose residual until validated.",
+                     "instances": [i.to_dict() for i in review]})
 
         inst_path = self.output_dir / "autoprompt_instances.json"
-        inst_path.write_text(json.dumps(
-            {"accepted": [i.to_dict() for i in accepted],
-             "review": [i.to_dict() for i in review]},
-            indent=2, ensure_ascii=False))
+        _write_json(inst_path, {"accepted": [i.to_dict() for i in accepted],
+                                "review": [i.to_dict() for i in review]})
 
         per_class: dict[str, int] = {}
         for inst in accepted:
@@ -849,8 +998,9 @@ class AutoPrompter:
                 rec.update(fate="not_prompted", prompt=None,
                            reason="the session vocabulary was reused "
                                   "(autoprompt.reuse_vocabulary → output/"
-                                  "autoprompt_concepts.json): this run's understanding "
-                                  "describes the scene, the list is the pinned one")
+                                  "vlm_analysis.json under its stamp): this run's "
+                                  "understanding describes the scene, the list is the "
+                                  "pinned one")
             else:
                 rec.update(fate="unaccounted", prompt=None,
                            reason="no rule removed it and it is not a prompt — a bug")
@@ -861,17 +1011,27 @@ class AutoPrompter:
 
     @staticmethod
     def _census_record(plan, calls: list[dict], fates: list[dict], *,
-                       reused: bool, prompt_bound: dict | None = None) -> dict:
+                       reused: bool, prompt_bound: dict | None = None,
+                       decisions: dict | None = None,
+                       merge_calls: list[dict] | None = None) -> dict:
         """The VLM half of output/segmentation_census.json, written INTO the
         contract SAM3 reads (vlm_analysis.json) so it can never describe
-        another run's prompts."""
+        another run's prompts. Since 2026-10-08 every call carries the sha1 of the
+        image sent, its finish_reason and what a cut answer still yielded (points
+        88 / 94), the merge calls are listed, and ``decisions`` records every integer
+        cut-off with its margin (point 89)."""
         return {
-            "version": 1,
+            "version": 2,
             "origin": "vlm_proposed",
             "sampling": plan.to_dict() if plan is not None else None,
             "calls": calls,
             "n_calls": len(calls),
             "n_parsed": sum(1 for c in calls if c["parsed"]),
+            "n_truncated": sum(1 for c in calls if c.get("truncated")),
+            "n_salvaged": sum(1 for c in calls if c.get("salvaged")),
+            "image_encoding": image_encoding_record(),
+            "merge_calls": list(merge_calls or []),
+            "decisions": decisions,
             "concepts": fates,
             "vocabulary_reused": bool(reused),
             "prompt_bound": prompt_bound,

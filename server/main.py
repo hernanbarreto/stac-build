@@ -194,215 +194,14 @@ def load_ply_to_numpy(ply_path: Path) -> Optional[np.ndarray]:
         traceback.print_exc()
         return None
 
-# --- CloudCompPy Post-Processing ---
-# Sessions whose on-load rebuild chain is running — while set, any incoming
-# run_pipeline for that session is REJECTED (USER 2026-09-05: one and only one)
-_onload_busy: dict = {}
-# the on-load mask→cloud projection of a session, a SUBPROCESS so a Reconstruir can kill it
-# (USER 2026-10-05: "si puse reemplazar debió haber borrado todo" — nothing of the old session
-# may keep running, nor write anything, once a reconstruction is ordered)
-_onload_projection: dict = {}
-
-
-def _stop_onload_projection(session_id: str, why: str) -> None:
-    proc = _onload_projection.pop(session_id, None)
-    if proc is not None and proc.poll() is None:
-        try:
-            proc.kill()
-            proc.wait(timeout=10)
-        except Exception:  # noqa: BLE001
-            pass
-        print(f"[Viewer] on-load mask projection of {session_id} stopped — {why}")
-
-
-async def _run_cloudcompy_postprocess(session_id: str, postproc_config: dict, websocket=None):
-    """Run CloudCompPy post-processing on reconstruction chunk PLYs as subprocess."""
-    import subprocess
-    import logging as _logging
-    _olog = _logging.getLogger("onload-cloudcompy")  # → server.log (root RotatingFileHandler)
-    _onload_busy[session_id] = True
-    try:
-        return await _run_cloudcompy_postprocess_inner(
-            session_id, postproc_config, websocket, _olog)
-    finally:
-        _onload_busy.pop(session_id, None)
-
-
-async def _run_cloudcompy_postprocess_inner(session_id: str, postproc_config: dict,
-                                            websocket, _olog):
-    import subprocess
-    ctx = _ctx(session_id)
-    scans_dir = ctx.output_dir
-    # UNIFIED PATH (USER 2026-09-04, after this legacy path built a cloud
-    # BYPASSING the pipeline's GPU clean + DINOv3 fases): the canonical
-    # artifact is output/cleaned_cloud.ply — same target, same machinery
-    # (GPU clean, consolidate, fase-2/3 score+filter) as the pipeline stage;
-    # merged_cloud becomes a symlink to it, exactly like the worker does.
-    output_ply = scans_dir / "cleaned_cloud.ply"
-    script_path = Path(__file__).parent / "run_cloudcompy.sh"
-
-    voxel_size = postproc_config.get("voxel_size", 0.001)
-    max_points = postproc_config.get("max_points", 0)
-
-    if not script_path.exists():
-        _olog.warning("[on-load PostProc] run_cloudcompy.sh not found, skipping")
-        return
-
-    # Check if chunks exist
-    chunks = sorted(scans_dir.glob("chunk_*.ply"))
-    if not chunks:
-        _olog.warning(f"[on-load PostProc] No chunk PLYs found in {scans_dir}, skipping")
-        return
-
-    _olog.info(f"[on-load PostProc] Starting CloudCompPy on {len(chunks)} chunks, "
-               f"voxel={voxel_size*1000:.1f}mm (session={session_id})")
-    
-    if websocket:
-        try:
-            await viewer_manager.send_text(websocket, json.dumps({
-                "type": "status",
-                "message": f"Post-processing {len(chunks)} chunks with CloudCompPy..."
-            }))
-        except:
-            pass
-    
-    # same builder selection as the pipeline stage (GPU by default)
-    if bool(postproc_config.get("gpu_clean", True)):
-        cmd = ["/workspace/miniforge3/envs/da3/bin/python", "-m",
-               "reconstruction.gpu_cloud_clean"]
-    else:
-        cmd = ["bash", str(script_path)]
-    cmd += [
-        "--input-dir", str(scans_dir),
-        "--output", str(output_ply),
-        "--voxel-size", str(voxel_size),
-        "--sor-knn", str(postproc_config.get("sor_knn", 6)),
-        "--sor-sigma", str(postproc_config.get("sor_sigma", 1.0)),
-        "--noise-radius", str(postproc_config.get("noise_radius", 0.01)),
-        "--noise-sigma", str(postproc_config.get("noise_sigma", 1.0)),
-        "--conf-min-norm", str(postproc_config.get("conf_min_norm", 0.0)),
-    ]
-    # §6 witnesses before the net — the SAME flag cloudcompy_worker.py passes.
-    # This builder calls itself the UNIFIED PATH and then omitted it: without
-    # `--witness` gpu_cloud_clean computes no per-point status and the
-    # `witness.drop_statuses` deletion never runs, so the single_witness points
-    # the user ordered removed (11.6 % of pccr chunked, 60.1 % of pccr in one
-    # chunk) stay in the cloud — and everything downstream loses the per-point
-    # status. Silent: exit 0, a cloud appears, and the chunks are deleted right
-    # after. Found 2026-09-23.
-    if bool(postproc_config.get("gpu_clean", True)):
-        try:
-            import yaml as _wy
-            _wfull = (_wy.safe_load((Path(__file__).parent / "config.yaml")
-                                    .read_text()) or {})
-            from reconstruction.loops.config import load_loops_config as _wllc
-            if _wllc(_wfull).witness.at_merge:
-                cmd.append("--witness")
-        except Exception as _we:  # noqa: BLE001
-            print(f"[CloudCompy] ⚠ witness flag not resolved ({_we}) — "
-                  f"the per-point status will be missing from this cloud")
-    if max_points > 0:
-        cmd.extend(["--max-points", str(max_points)])
-    if postproc_config.get("skip_duplicates", False):
-        cmd.append("--skip-duplicates")
-    if postproc_config.get("skip_sor", False):
-        cmd.append("--skip-sor")
-    if postproc_config.get("skip_noise", False):
-        cmd.append("--skip-noise")
-    if postproc_config.get("skip_normals", False):
-        cmd.append("--skip-normals")
-    
-    try:
-        # Run as async subprocess
-        process = _track_worker(await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            preexec_fn=_die_with_parent_sigkill,
-            cwd=str(Path(__file__).parent),   # `-m reconstruction.…` needs it
-        ))
-        
-        # Read output line by line
-        while True:
-            line = await process.stdout.readline()
-            if not line:
-                break
-            line_str = line.decode('utf-8', errors='replace').strip()
-            if line_str:
-                print(f"  [on-load cloudcompy] {line_str}", flush=True)  # → console
-                _olog.info(f"[on-load cloudcompy] {line_str}")           # → server.log
-        
-        await process.wait()
-        
-        if process.returncode == 0 and output_ply.exists():
-            file_size_mb = output_ply.stat().st_size / (1024 * 1024)
-            print(f"[PostProc] ✅ Cleaned cloud saved: {output_ply} ({file_size_mb:.1f} MB)")
-
-            # ── SAME machinery as the pipeline stage (USER 2026-09-04: one
-            # single builder path): consolidate + DINOv3 fase-2/3 score and
-            # filter, config fresh from disk, heavy work OFF the event loop.
-            def _finish_canonical():
-                import yaml as _y
-                _pc = (_y.safe_load((Path(__file__).parent / "config.yaml")
-                                    .read_text()) or {})
-                _sc = (_pc.get("postprocessing") or {}).get(
-                    "scene_consolidate", {}) or {}
-                if _sc.get("enabled", True):
-                    from reconstruction.surface_fit.consolidate import \
-                        scene_consolidate
-                    _st = scene_consolidate(
-                        scans_dir, radius_m=_sc.get("radius_m"),
-                        min_radius_m=float(_sc.get("min_radius_m", 0.02)),
-                        max_radius_m=float(_sc.get("max_radius_m", 0.06)),
-                        iterations=int(_sc.get("iterations", 2)),
-                        normal_gate=float(_sc.get("normal_gate", 0.25)))
-                    print(f"[PostProc] [consolidate] {_st}")
-                # (DINOv3 score DELETED by USER ORDER 2026-09-05)
-            try:
-                await asyncio.get_event_loop().run_in_executor(
-                    None, _finish_canonical)
-            except BaseException:
-                # an unconsolidated cloud left on disk would be taken as done by
-                # the next open and by the pipeline's resume probe; the chunks
-                # are still there, so the next open rebuilds from them
-                for _p in (output_ply, scans_dir / "cleaned_cloud_raw.ply"):
-                    _p.unlink(missing_ok=True)
-                raise
-            # Cascade cleanup (same as the pipeline cloudcompy worker): once cleaned_cloud
-            # exists, the per-chunk PLYs are baked in → delete them so they don't linger
-            # and don't re-trigger a rebuild on the next open. AFTER the consolidation
-            # (2026-09-28): it now fails loudly, and without the chunks nothing could
-            # rebuild the cloud it failed on.
-            _removed = 0
-            for _pat in ("chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json"):
-                for _f in scans_dir.glob(_pat):
-                    try:
-                        _f.unlink(); _removed += 1
-                    except Exception:
-                        pass
-            if _removed:
-                print(f"[PostProc] [cleanup] removed {_removed} chunk files (baked into cleaned_cloud)")
-            # merged_cloud → symlink to the canonical cloud (worker parity)
-            try:
-                _mc = ctx.merged_cloud
-                _mc.parent.mkdir(parents=True, exist_ok=True)
-                if _mc.exists() or _mc.is_symlink():
-                    _mc.unlink()
-                os.symlink(os.path.relpath(str(output_ply),
-                                           str(_mc.parent)), str(_mc))
-                print(f"[PostProc] merged_cloud.ply → {output_ply.name}")
-            except Exception as _se:  # noqa: BLE001 — link, not data
-                print(f"[PostProc] merged symlink failed: {_se}")
-        else:
-            raise RuntimeError(f"[PostProc] cloud build FAILED (exit "
-                               f"{process.returncode}) — nothing fails "
-                               f"silently")
-
-    except Exception as e:
-        print(f"[PostProc] ❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
+# --- The viewer never builds (docs/plan_determinismo.md points 111 / 157 / 158, 2026-10-08) ---
+# The on-load cloud rebuild (Omega chunks → cleaned_cloud.ply, in a server subprocess that then
+# deleted the chunks), the on-load octree conversion and the on-load mask projection (a server
+# subprocess a Reconstruir killed mid-fusion) are gone from this process: opening a session
+# only READS what the pipeline left; a missing cloud, octree or projection is ORDERED as a job
+# of the pipeline manager (_enqueue_service_job — queued, session-serialised, deterministic
+# environment, exclusive card) and the viewer receives the result through the same broadcast
+# every job sends when it ends.
 
 def _align_cloud_to_floor(output_data: np.ndarray, session_dir: Path = None) -> np.ndarray:
     """
@@ -437,41 +236,12 @@ def _align_cloud_to_floor(output_data: np.ndarray, session_dir: Path = None) -> 
                 print(f"[FloorAlign] ✅ Floor aligned to y=0 (range: {y_min:.3f} to {y_max:.3f})")
                 return result
         
-        # ── Compute alignment (first time) ──
-        from alignment_manager import get_alignment_manager
-        am = get_alignment_manager()
-        
-        # compute_leveling_from_points expects [N, 3+] with XYZ in first 3 cols
-        s, R, t = am.compute_leveling_from_points(output_data[:, :3])
-        
-        # Check if alignment is identity (no floor found)
-        if np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3)):
-            print("[FloorAlign] ⚠️ No floor plane detected — sending unaligned")
-            return output_data
-        
-        # Apply: P' = s * (R @ P) + t
-        xyz = output_data[:, :3]
-        xyz_aligned = s * (xyz @ R.T) + t
-        
-        result = output_data.copy()
-        result[:, :3] = xyz_aligned
-        
-        # Save transform to disk for consistent future loads
-        if session_dir:
-            transform_path = Path(session_dir) / "output" / "floor_transform.npz"
-            try:
-                transform_path.parent.mkdir(parents=True, exist_ok=True)
-                np.savez(transform_path, s=np.array(s), R=R, t=t)
-                print(f"[FloorAlign] 💾 Saved floor transform to {transform_path}")
-            except Exception as e:
-                print(f"[FloorAlign] ⚠️ Could not save transform: {e}")
-        
-        # Log stats
-        y_min = xyz_aligned[:, 1].min()
-        y_max = xyz_aligned[:, 1].max()
-        print(f"[FloorAlign] ✅ Floor aligned to y=0 (range: {y_min:.3f} to {y_max:.3f})")
-        
-        return result
+        # no floor_transform.npz: IDENTITY, declared — this process only READS the floor
+        # transform (docs/plan_determinismo.md points 110 / 158: the cloud stage computes
+        # and writes it, seeded; a raw-cloud send never computes or saves one)
+        print("[FloorAlign] DECLARED: no floor_transform.npz on disk — the raw cloud is sent "
+              "in its own frame (identity); nothing is computed or saved")
+        return output_data
     except Exception as e:
         print(f"[FloorAlign] ❌ Error: {e}")
         import traceback
@@ -1015,6 +785,101 @@ alignment_manager = None
 pipeline_manager = PipelineManager()  # Pipeline orchestrator (subprocess workers)
 
 
+def _pipeline_busy() -> bool:
+    """A pipeline job is running or queued (whatever session): the card and the engine are
+    the pipeline's (points 81 / 154 / 157)."""
+    return any(j.get("status") in ("running", "queued")
+               for j in pipeline_manager.get_all_jobs().values())
+
+
+def _scan_key_of(ctx) -> Optional[str]:
+    """The 'date/source' key of a resolved scan context (None for a legacy layout)."""
+    date, source = getattr(ctx, "date", None), getattr(ctx, "source_name", None)
+    return f"{date}/{source}" if date and source else None
+
+
+def _read_segments_payload(output_dir: Path) -> dict:
+    """READ the projection a stage left (segmentation_result.json, each instance with its
+    class byte) — never project here: the server process runs no stage code (points 157 /
+    160). {} when there is no result; an unreadable one is declared and gives {} too."""
+    res = Path(output_dir) / "segmentation_result.json"
+    if not res.exists():
+        return {}
+    try:
+        data = json.loads(res.read_text())
+    except (OSError, ValueError) as e:
+        print(f"[Segments] {res} unreadable ({e}) — nothing is sent; the projection stage "
+              f"rewrites it")
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    from segmentation.pipeline import with_class_bytes
+    return with_class_bytes(Path(output_dir), data)
+
+
+async def _service_job_progress(sid: str, job_dict: dict) -> None:
+    """The progress of a job the SERVER ordered on the session's behalf, broadcast like any
+    other job's (the UI's jobs list polls /api/pipelines/active as well)."""
+    try:
+        await viewer_manager.broadcast_text(json.dumps({"type": "pipeline_progress",
+                                                        "session_id": sid, **job_dict}))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _service_job_complete(sid: str, success: bool) -> None:
+    """A job the server ordered (the cloud / octree of a session opened without them, a
+    projection, the Segmentation Manager's close) ended: the chat comes back when nothing
+    else is queued, the viewer gets what the stages left — READ, never rebuilt here."""
+    asyncio.get_running_loop().run_in_executor(None, _semantic_reload_if_idle, "service job finished")
+    if not success:
+        try:
+            await viewer_manager.broadcast_text(json.dumps({
+                "type": "error", "message": f"Pipeline failed for {sid}. Check server logs."}))
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    _job_dir = pipeline_manager.job_session_dir(sid)
+    output_dir = Path(_job_dir) / "output" if _job_dir else _ctx(sid).output_dir
+    await _correction_notify_viewer(sid, output_dir)        # potree_ready from the stage's octree
+    try:
+        seg = await asyncio.get_running_loop().run_in_executor(None, _read_segments_payload, output_dir)
+        if seg.get("instances"):
+            seg.pop("reload_potree", None)
+            await viewer_manager.broadcast_text(json.dumps(seg))
+            print(f"[Pipeline] sent {len(seg['instances'])} segments of {sid}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[Pipeline] segments broadcast failed (non-fatal): {e}")
+    try:
+        await viewer_manager.broadcast_text(json.dumps({"type": "status",
+                                                        "message": f"Pipeline complete for {sid}"}))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _enqueue_service_job(session_id: str, scan_key: Optional[str], stage_ids, kind: str,
+                               why: str):
+    """ORDER a job of the pipeline manager on the session's behalf (points 111 / 158 / 160):
+    exactly ``stage_ids`` (pipeline_manager.service_stages), the configuration read once
+    now, forced (the server asked for these stages), nothing wiped. Returns the job, or None
+    when the order could not be taken (the same order already pending, an unreadable
+    configuration) — declared in the log, never run in this process instead."""
+    from pipeline_manager import JobStatus as _JS, read_config_once, service_stages
+    try:
+        config = read_config_once()
+        stages = service_stages(stage_ids)
+        job = await pipeline_manager.start_pipeline(
+            session_id=session_id, stages=stages, config=dict(config),
+            on_progress=_service_job_progress, on_complete=_service_job_complete,
+            replace=False, scan_key=scan_key, force=True, kind=kind)
+    except Exception as e:  # noqa: BLE001 — OrderRefused, the one-and-only-one refusal
+        print(f"[Pipeline] {kind} job for {session_id} (scan {scan_key or 'auto'}) NOT ordered: {e}")
+        return None
+    print(f"[Pipeline] {kind} job {'queued' if job.status == _JS.QUEUED else 'started'} for "
+          f"{session_id} (scan {scan_key or 'auto'}): {why}")
+    return job
+
+
 def _semantic_unload_for_gpu(reason: str = "") -> None:
     """Kill the vLLM chat service for GPU-heavy interactive work (USER ORDER
     2026-09-06 after SAM3 OOM'd with Qwen's 24 GB resident: "debe matarse el
@@ -1086,6 +951,18 @@ def _session_intel_when_chat_up(session_id: str, objects: bool,
         else:
             print(f"[analysis] {session_id}: chat service never came up — "
                   "the chat generates dossiers on demand instead")
+            return
+        # ONE permit to the engine (point 81): a job's process holding the engine lease, or a
+        # pipeline job running / queued (its stages take the card and write the session's
+        # artifacts), means the intel waits — deferred, declared, never co-batched with a
+        # stage's calls and never written on a session a job is about to rewrite (point 157)
+        from semantic.service import engine_available_to
+        ok, why = engine_available_to()
+        if not ok:
+            print(f"[analysis] {session_id}: engine busy ({why}) — intel deferred")
+            return
+        if _pipeline_busy():
+            print(f"[analysis] {session_id}: a pipeline job is running or queued — intel deferred")
             return
         ctx = _ctx(session_id)
         from segmentation.object_analysis import ensure_session_analyses
@@ -2325,20 +2202,20 @@ async def get_segments(session_id: str):
     try:
         ctx = _ctx(session_id)
         output_dir = ctx.output_dir
-        
-        # Use display-time matching (masks → cloud)
-        masks_file = output_dir / "seg_masks.npz"
+
+        # the projection the pipeline left — READ only (points 157 / 160: the server never
+        # projects; a session with masks and no result gets its projection as a job when it
+        # is opened in the viewer)
         seg_file = output_dir / "segmentation.json"
-        if masks_file.exists() and seg_file.exists():
-            from segmentation_pipeline import apply_segmentation_to_cloud
+        if (output_dir / "segmentation_result.json").exists():
             loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, apply_segmentation_to_cloud, output_dir)
-        
+            return await loop.run_in_executor(None, _read_segments_payload, output_dir)
+
         # Fallback to legacy formats
         if seg_file.exists():
             with open(seg_file, 'r') as f:
                 return json.load(f)
-        
+
         return {"object_types": [], "instances": []}
     except Exception as e:
         print(f"Error serving segments: {e}")
@@ -2701,7 +2578,7 @@ async def save_alignment(session_id: str, request: Request):
     # Save to floor_transform.npz (capture the OLD transform first — the OBB
     # re-projection below needs the old→new delta)
     transform_path = output_dir / "floor_transform.npz"
-    np.savez(transform_path, s=np.array(s), R=R, t=t)
+    _write_floor_transform(output_dir, s, R, t)          # atomic (point 149)
     print(f"[Alignment] ✅ Saved floor_transform.npz for {session_id}")
     print(f"[Alignment]   s={s:.6f}")
     print(f"[Alignment]   R=\n{R}")
@@ -2850,17 +2727,152 @@ async def get_floor_level(session_id: str):
     return {"ok": True, "candidates": candidates, "selected": selected}
 
 
-def level_floor_core(output_dir, result_path, cloud_path, fl_path,
-                     req_iid=None, mode="auto", session_id=""):
-    """Level the selected (or lowest) segmented floor to y=0.
+def _floor_level_rule(config: Optional[dict] = None) -> dict:
+    """The parameters of the explicit floor levelling, from the configuration — nothing
+    invented (docs/plan_determinismo.md point 161): THE USER'S RULE (error_factor,
+    confidence — correction.config.judge_of: correction_graph.graph.improvement_error_factor
+    / heldout_confidence) and the cell of the floor metric every run is measured on
+    (reconstruction.precision.cloud_metrics.cell_m / cell_min_points — the 1 m cell of the
+    floor-layer statistics), which is the judges' cell here. A missing key FAILS naming it."""
+    from types import SimpleNamespace
+    from correction.config import judge_of
+    raw = config if config is not None else cfg
+    fac, conf = judge_of(SimpleNamespace(raw=raw))
+    cm = (((raw.get("reconstruction") or {}).get("precision") or {}).get("cloud_metrics") or {})
+    cell_m, cell_min = cm.get("cell_m"), cm.get("cell_min_points")
+    if isinstance(cell_m, bool) or not isinstance(cell_m, (int, float)) or float(cell_m) <= 0:
+        raise ValueError("config.yaml 'reconstruction.precision.cloud_metrics.cell_m' must be a "
+                         f"positive number (the floor judges' cell), got {cell_m!r}")
+    if isinstance(cell_min, bool) or not isinstance(cell_min, int) or cell_min < 1:
+        raise ValueError("config.yaml 'reconstruction.precision.cloud_metrics.cell_min_points' must "
+                         f"be a positive integer (points a judge cell needs), got {cell_min!r}")
+    return {"error_factor": float(fac), "confidence": float(conf),
+            "cell_m": float(cell_m), "cell_min_points": int(cell_min)}
 
-    Extracted from the endpoint so the correction loop can re-level after
-    every epoch (USER 2026-09-18: "se debe aplicar floor transform en cada
-    ajuste tambien") without duplicating a line of the decision logic.
+
+def _rotation_to_up(n_disp: np.ndarray) -> np.ndarray:
+    """The minimal rotation taking the unit normal ``n_disp`` to +Y (Rodrigues)."""
+    up = np.array([0.0, 1.0, 0.0])
+    v = n_disp / max(np.linalg.norm(n_disp), 1e-12)
+    axis = np.cross(v, up)
+    ln = np.linalg.norm(axis)
+    if ln < 1e-9:
+        return np.eye(3)
+    axis /= ln
+    ang = float(np.arccos(np.clip(v @ up, -1, 1)))
+    K = np.array([[0, -axis[2], axis[1]],
+                  [axis[2], 0, -axis[0]],
+                  [-axis[1], axis[0], 0]])
+    return np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * (K @ K)
+
+
+def floor_level_decision(xyz_disp: np.ndarray, *, cell_m: float, cell_min_points: int,
+                         error_factor: float, confidence: float, seed: int) -> dict:
+    """THE USER'S RULE on the explicit floor levelling (docs/plan_determinismo.md point 161;
+    the 1 cm / 0.5° bar is gone): the floor's plane is fitted in the CURRENT display frame
+    (seeded RANSAC, point 50 — the same plane every run) and the move that would put it at
+    y=0 is applied only if it IMPROVES the floor's height significantly at ``confidence``,
+    with at least the rule's judges, by at least ``error_factor`` × the plane's own
+    measured error (loop_utils.metric_lock.decide_change).
+
+    Judges: the plan cells of the floor — a world-anchored grid of ``cell_m`` (origin 0,
+    as the floor-layer metric of every run) holding ≥ ``cell_min_points`` inlier points,
+    in a fixed order; before = |median y| of a cell's inliers now, after = the same points
+    under the proposed move (the rotation about the inlier centroid, the centroid at y=0 —
+    the same y every point gets from the transform the caller writes). A tilt shows as
+    cells high on one side and low on the other, so the one test covers height AND tilt.
+    Error: the σ of the plane's height by the seeded Poisson bootstrap of its points
+    (correction.floor._bootstrap_plane — the floor correction's own instrument).
+
+    Returns {apply, reason, decision, n_disp, c_disp, tilt_deg, height_m, sigma_height_m,
+    sigma_tilt_deg, n_judges, inliers}; ``apply`` False with the reason when the plane
+    cannot be fitted, too few cells can judge, or the move is not an improvement."""
+    from reconstruction.geometry.primitives import fit_plane_ransac
+    from correction.floor import _bootstrap_plane, _vendor_path
+    _vendor_path()
+    from loop_utils.metric_lock import decide_change
+
+    P_all = np.asarray(xyz_disp, dtype=np.float64)
+    # the RANSAC parameters are the levelling's own since 2026-08 (unchanged); only the
+    # draw is seeded now
+    pf = fit_plane_ransac(P_all, dist_thresh=0.02, iters=400, min_inlier_frac=0.2,
+                          measure_curvature=False, seed=int(seed))
+    if pf is None:
+        return {"apply": False, "reason": "floor plane fit failed", "decision": None}
+    n_disp = np.asarray(pf.normal, dtype=np.float64)
+    n_disp = n_disp / max(np.linalg.norm(n_disp), 1e-12)
+    if n_disp[1] < 0:
+        n_disp = -n_disp
+    inl = np.asarray(pf.inliers, dtype=bool)
+    P = P_all[inl]
+    c_disp = P.mean(0)
+    tilt = float(np.degrees(np.arccos(np.clip(n_disp[1], -1, 1))))
+    height = float(c_disp[1])
+    R_delta = _rotation_to_up(n_disp)
+    y_after = ((P - c_disp) @ R_delta.T)[:, 1]          # the plane's centroid at y = 0
+    sigma_tilt, sigma_h = _bootstrap_plane(P, int(seed))
+    # the judges: the floor's plan cells, world-anchored, in a fixed order
+    cells = np.stack([np.floor(P[:, 0] / float(cell_m)), np.floor(P[:, 2] / float(cell_m))], 1)
+    cells = cells.astype(np.int64)
+    keys, inverse, counts = np.unique(cells, axis=0, return_inverse=True, return_counts=True)
+    inverse = np.asarray(inverse).ravel()
+    before, after, judges = [], [], []
+    for k in range(len(keys)):
+        if int(counts[k]) < int(cell_min_points):
+            continue
+        sel = inverse == k
+        before.append(abs(float(np.median(P[sel, 1]))))
+        after.append(abs(float(np.median(y_after[sel]))))
+        judges.append([int(keys[k][0]), int(keys[k][1]), int(counts[k])])
+    measured = {"n_disp": n_disp, "c_disp": c_disp, "tilt_deg": tilt, "height_m": height,
+                "sigma_height_m": float(sigma_h), "sigma_tilt_deg": float(sigma_tilt),
+                "n_judges": len(judges), "judges": judges, "inliers": int(inl.sum()),
+                "cell_m": float(cell_m), "cell_min_points": int(cell_min_points)}
+    if not np.isfinite(sigma_h):
+        return {"apply": False, "reason": "the plane's height error cannot be measured (too few "
+                                         "inlier points to resample)", "decision": None, **measured}
+    dec = decide_change(np.asarray(before, np.float64), np.asarray(after, np.float64),
+                        error=float(sigma_h), error_factor=float(error_factor),
+                        confidence=float(confidence))
+    reason = (f"floor {height * 1000:+.1f} mm, {tilt:.2f}° off horizontal (σ height "
+              f"{sigma_h * 1000:.1f} mm, σ tilt {sigma_tilt:.3f}°), {len(judges)} cell judge(s) of "
+              f"{cell_m:g} m — {dec.get('reason')}")
+    return {"apply": bool(dec.get("improves")), "reason": reason, "decision": dec, **measured}
+
+
+def _write_floor_transform(output_dir: Path, s: float, R: np.ndarray, t: np.ndarray) -> Path:
+    """floor_transform.npz written ATOMICALLY (a temporary file in the same directory, then
+    one rename): a reader never sees a half-written transform (point 149)."""
+    import tempfile
+    target = Path(output_dir) / "floor_transform.npz"
+    fd, tmp = tempfile.mkstemp(prefix=".floor_transform.", suffix=".npz.tmp", dir=str(output_dir))
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            np.savez(fh, s=np.array(s), R=np.asarray(R), t=np.asarray(t))
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return target
+
+
+def level_floor_core(output_dir, result_path, cloud_path, fl_path,
+                     req_iid=None, mode="auto", session_id="", config=None):
+    """Level the selected (or lowest) segmented floor to y=0 — the EXPLICIT floor action
+    (docs/plan_determinismo.md points 158 / 161: never at load; applied only under the
+    user's rule — floor_level_decision — with a seeded plane; the 1 cm / 0.5° bar is gone).
+    Its result is sealed: floor_level.json carries the decision, what was measured and the
+    identity of the geometry it levelled (the reconstruction id, the cloud's sha256), and
+    floor_transform.npz / segmentation_result.json are written atomically.
     """
     import open3d as o3d
-    from reconstruction.geometry.primitives import fit_plane_ransac
+    import repro
 
+    rule = _floor_level_rule(config)
     with open(result_path) as f:
         result_data = json.load(f)
     candidates = _floor_candidates_from_result(result_data)
@@ -2882,8 +2894,8 @@ def level_floor_core(output_dir, result_path, cloud_path, fl_path,
     s, R, t = _load_floor_transform_srt(output_dir)
 
     def _measure(iid):
-        """Fit the floor plane of one candidate. Returns its display-space
-        normal, centre, tilt and share of the floor points, or a refusal."""
+        """Fit the floor plane of one candidate in the display frame and judge the move
+        (floor_level_decision). Returns the measurement, or a refusal."""
         inst = next((i for i in result_data["instances"]
                      if i.get("instance_id", i.get("id")) == iid), None)
         gi = np.asarray((inst or {}).get("globalIndices") or [], dtype=np.int64)
@@ -2892,22 +2904,21 @@ def level_floor_core(output_dir, result_path, cloud_path, fl_path,
         gi = gi[(gi >= 0) & (gi < len(pts))]
         seg = pts[gi]
         if len(seg) > 200_000:
-            seg = seg[np.random.default_rng(0).choice(len(seg), 200_000,
-                                                      replace=False)]
-        pf = fit_plane_ransac(seg, dist_thresh=0.02, iters=400,
-                              min_inlier_frac=0.2, measure_curvature=False)
-        if pf is None:
-            return None, "floor plane fit failed"
-        n_raw = pf.normal
-        n_disp = R @ n_raw
-        if n_disp[1] < 0:
-            n_raw, n_disp = -n_raw, -n_disp
-        c_disp = s * (R @ seg[pf.inliers].mean(0)) + t
-        tilt = float(np.degrees(np.arccos(np.clip(n_disp[1], -1, 1))))
-        share = next((c["n_points"] for c in candidates
-                      if c["instance_id"] == iid), 0) / floor_pts
-        return {"n_disp": n_disp, "c_disp": c_disp, "tilt": tilt,
-                "share": share}, None
+            # the same bound as before (200 k points), taken by a fixed stride over the
+            # instance's own point order — deterministic, never a draw
+            seg = seg[np.linspace(0, len(seg) - 1, 200_000).astype(np.int64)]
+        xyz_disp = s * (seg @ R.T) + t
+        seed = int(repro.stable_id("floor_level", int(iid), n_hex=8), 16)
+        m = floor_level_decision(xyz_disp, cell_m=rule["cell_m"],
+                                 cell_min_points=rule["cell_min_points"],
+                                 error_factor=rule["error_factor"],
+                                 confidence=rule["confidence"], seed=seed)
+        if m.get("decision") is None and not m.get("n_judges"):
+            return None, m.get("reason", "floor plane fit failed")
+        m["tilt"] = float(m["tilt_deg"])
+        m["share"] = next((c["n_points"] for c in candidates
+                           if c["instance_id"] == iid), 0) / floor_pts
+        return m, None
 
     def _implausible(m):
         """A big rotation is only believable from the DOMINANT floor. A
@@ -2978,43 +2989,36 @@ def level_floor_core(output_dir, result_path, cloud_path, fl_path,
                 "candidates": candidates}
 
     n_disp, c_disp = meas["n_disp"], meas["c_disp"]
-    tilt_deg, height = meas["tilt"], float(meas["c_disp"][1])
+    tilt_deg, height = float(meas["tilt_deg"]), float(meas["height_m"])
+    decision = meas.get("decision")
+    measured = {k: meas[k] for k in ("tilt_deg", "height_m", "sigma_height_m", "sigma_tilt_deg",
+                                     "n_judges", "judges", "inliers", "cell_m", "cell_min_points")}
 
-    already = tilt_deg < 0.5 and abs(height) < 0.01
-    if mode == "auto_if_needed" and already:
-        return {"ok": True, "leveled": True, "changed": False,
+    if not meas.get("apply"):
+        # THE RULE SAYS NO (not significant, too few judges, or under the plane's own
+        # error): nothing moves, nothing is written — declared, with every margin
+        print(f"[FloorLevel] {session_id}: instance {selected} NOT re-levelled — {meas['reason']}")
+        return {"ok": True, "leveled": False, "changed": False,
+                "reason": meas["reason"], "decision": decision, "measured": measured,
                 "selected": selected, "candidates": candidates,
                 "residual_mm": round(height * 1000, 1),
                 "matrix": _srt_to_threejs_col_major(s, R, t)}
 
     # minimal delta rotation in DISPLAY space: n_disp → +Y
-    up = np.array([0.0, 1.0, 0.0])
-    v = n_disp / max(np.linalg.norm(n_disp), 1e-12)
-    axis = np.cross(v, up)
-    ln = np.linalg.norm(axis)
-    if ln < 1e-9:
-        R_delta = np.eye(3)
-    else:
-        axis /= ln
-        ang = float(np.arccos(np.clip(v @ up, -1, 1)))
-        K = np.array([[0, -axis[2], axis[1]],
-                      [axis[2], 0, -axis[0]],
-                      [-axis[1], axis[0], 0]])
-        R_delta = np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * (K @ K)
+    R_delta = _rotation_to_up(n_disp)
 
     R_new = R_delta @ R
     t_new = t.copy()
     # keep lateral placement; put the fitted plane exactly at y=0
     c_disp_new = R_delta @ (c_disp - t) + t
     t_new[1] = t[1] - c_disp_new[1]
-    np.savez(output_dir / "floor_transform.npz",
-             s=np.array(s), R=R_new, t=np.array([t[0], t_new[1], t[2]]))
+    t_final = np.array([t[0], t_new[1], t[2]])
+    _write_floor_transform(output_dir, s, R_new, t_final)
 
     # Recompute EVERY OBB from the cloud under the new transform (delta
     # re-projection preserves any historical drift between result OBBs
     # and the npz — see _recompute_result_obbs). No DBSCAN rerun; the
     # rewrite also keeps the result-cache mtime valid vs the new npz.
-    t_final = np.array([t[0], t_new[1], t[2]])
     n_obb = _recompute_result_obbs(output_dir, result_data, s, R_new, t_final)
     print(f"[FloorLevel]   recomputed {n_obb} OBBs under the new frame")
     atomic_write_json(result_path, result_data)
@@ -3027,32 +3031,44 @@ def level_floor_core(output_dir, result_path, cloud_path, fl_path,
     except Exception as e:
         print(f"[FloorLevel]   store rebuild failed (non-fatal): {e}")
 
-    fl_path.write_text(json.dumps({
+    # the SEAL of the result (point 158): the geometry it levelled — the reconstruction's
+    # identity (None for a session without Omega records: taken by no reader) and the
+    # cloud's bytes — with the decision and what was measured; a reader (a stage) takes
+    # floor_transform.npz / floor_level.json only when this is the geometry it processes
+    from correction.epoch import reconstruction_id_or_none
+    stamp = {"reconstruction_id": reconstruction_id_or_none(output_dir),
+             "cloud_sha256": repro.sha256_file(cloud_path),
+             "rule": {"error_factor": rule["error_factor"], "confidence": rule["confidence"],
+                      "cell_m": rule["cell_m"], "cell_min_points": rule["cell_min_points"]}}
+    atomic_write_json(fl_path, {
         "selected_instance_id": selected,
         "candidates": candidates,
         "leveled_height_before_mm": round(height * 1000, 1),
         "tilt_before_deg": round(tilt_deg, 3),
-    }, indent=2))
+        "decision": decision,
+        "measured": measured,
+        "stamp": stamp,
+    }, indent=2, sort_keys=True)
 
     print(f"[FloorLevel] {session_id}: floor inst {selected} → y=0 "
-          f"(was {height*1000:+.1f} mm, tilt {tilt_deg:.2f}°)")
+          f"(was {height*1000:+.1f} mm, tilt {tilt_deg:.2f}°) — {meas['reason']}")
     return {"ok": True, "leveled": True, "changed": True,
             "selected": selected, "candidates": candidates,
             "residual_before_mm": round(height * 1000, 1),
-            "matrix": _srt_to_threejs_col_major(
-                s, R_new, np.array([t[0], t_new[1], t[2]]))}
+            "decision": decision, "measured": measured,
+            "matrix": _srt_to_threejs_col_major(s, R_new, t_final)}
 
 
 @app.post("/api/segmentation/level_floor")
 async def level_floor(request: Request):
-    """Level the selected (or lowest) segmented floor to y=0.
+    """Level the selected (or lowest) segmented floor to y=0 — the EXPLICIT floor action.
 
-    Body: { session_id, instance_id?: int,
-            mode?: "auto" | "explicit" | "auto_if_needed" }
+    Body: { session_id, instance_id?: int, mode?: "auto" | "explicit" }
       - auto: previously selected floor if it still exists, else the LOWEST
       - explicit: the given instance_id (combobox change)
-      - auto_if_needed: no-op when the floor already sits at y=0 (within 1 cm
-        and 0.5° of horizontal) — used on session load
+    "auto_if_needed" (the old on-load levelling) writes NOTHING any more (docs/
+    plan_determinismo.md points 158 / 161: opening never writes; when levelling is asked
+    for, the user's rule decides, not a 1 cm / 0.5° bar).
     """
     body = await request.json()
     session_id = body.get("session_id")
@@ -3060,6 +3076,10 @@ async def level_floor(request: Request):
     mode = body.get("mode", "explicit" if req_iid is not None else "auto")
     if not session_id:
         raise HTTPException(status_code=400, detail="Missing session_id")
+    if mode == "auto_if_needed":
+        return {"ok": True, "leveled": False, "changed": False,
+                "reason": "levelling never runs at load (docs/plan_determinismo.md point 158) "
+                          "— level explicitly from the floor combobox"}
 
     ctx = _ctx(session_id)
     output_dir = ctx.output_dir
@@ -3068,6 +3088,14 @@ async def level_floor(request: Request):
     if not result_path.exists() or not cloud_path.exists():
         return {"ok": True, "leveled": False,
                 "reason": "no segmentation/cloud yet"}
+
+    # The viewer does not write while a job is active on the session (point 111): a stage
+    # rewrites the segmentation and the floor transform this action rewrites too.
+    if pipeline_manager.is_active(session_id):
+        raise HTTPException(409, detail={
+            "error": "a pipeline job of this session is queued or running — it rewrites the "
+                     "segmentation and the floor frame; level the floor when it ends",
+            "busy": True})
 
     # This endpoint REWRITES segmentation_result.json and rebuilds scene_r.db.
     # A certification (another process) rewrites the same files on every split,
@@ -6107,21 +6135,51 @@ async def autosegment_save(session_id: str, request: Request):
     understanding prompt; empty or the default removes the override) and
     `sam3_prompts` (a list — written into vlm_analysis.json, what the SAM3 stage
     reads; a VLM run afterwards replaces them, declared in the window)."""
-    from segmentation.autoprompt.autosegment import save_vlm_prompt, set_sam3_prompts, state
+    from segmentation.autoprompt.autosegment import (default_vlm_prompt, sam3_prompts,
+                                                     save_vlm_prompt, set_sam3_prompts, state,
+                                                     vlm_prompt_for)
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(400, "a JSON object is expected")
-    ctx = _ctx(session_id, body.get("scan") or None)   # per SCAN (USER 2026-10-06)
-    out = {}
-    if "vlm_prompt" in body:
-        out["vlm_prompt_overridden"] = save_vlm_prompt(ctx.output_dir, body.get("vlm_prompt"))
+    scan = body.get("scan") or None
+    ctx = _ctx(session_id, scan)                        # per SCAN (USER 2026-10-06)
+    prompts = None
     if "sam3_prompts" in body:
         prompts = body.get("sam3_prompts")
         if not isinstance(prompts, list):
             raise HTTPException(400, "sam3_prompts must be a list of strings")
-        out["sam3_prompts"] = set_sam3_prompts(ctx.output_dir, [str(p) for p in prompts])
+        prompts = [str(p) for p in prompts]
+    # THE PROMPTS TRAVEL WITH THE JOB (docs/plan_determinismo.md point 162): a job of this
+    # scan that is queued or running carries the prompts it was ordered with — a save that
+    # would CHANGE the session's prompts meanwhile is refused (409), never applied under a
+    # running stage; a save that changes nothing is a no-op and passes.
+    changes = []
+    if "vlm_prompt" in body:
+        want = (body.get("vlm_prompt") or "").strip()
+        want_eff = want if (want and want != default_vlm_prompt().strip()) else None
+        cur, over = vlm_prompt_for(ctx.output_dir)
+        if want_eff != (cur if over else None):
+            changes.append("vlm_prompt")
+    if prompts is not None:
+        clean: list = []
+        for c in prompts:
+            c = " ".join(str(c).split()).strip().strip(";")
+            if c and c.lower() not in {x.lower() for x in clean}:
+                clean.append(c)
+        if clean != sam3_prompts(ctx.output_dir):
+            changes.append("sam3_prompts")
+    if changes and pipeline_manager.is_active(session_id, scan):
+        raise HTTPException(409, detail={
+            "error": f"a job of this scan is queued or running and carries the prompts it was "
+                     f"ordered with — {', '.join(changes)} cannot change until it ends (point 162)",
+            "busy": True})
+    out = {}
+    if "vlm_prompt" in body:
+        out["vlm_prompt_overridden"] = save_vlm_prompt(ctx.output_dir, body.get("vlm_prompt"))
+    if prompts is not None:
+        out["sam3_prompts"] = set_sam3_prompts(ctx.output_dir, prompts)
     _audit_log("autosegment_prompts", session_id, detail=", ".join(sorted(out)))
-    return {"ok": True, **state(ctx.output_dir)}
+    return {"ok": True, "changed": changes, **state(ctx.output_dir)}
 
 
 @app.get("/api/segmentation/tsdf/status/{session_id}")
@@ -6364,13 +6422,10 @@ async def _erase_finalize(session_id: str, delay: float = 2.5):
         ctx = _ctx(session_id)
         output_dir = ctx.output_dir
         try:
-            # same source the segmentation pipeline uses: corrected cloud when
-            # face projections exist, cleaned cloud otherwise
-            _corr = output_dir / "corrected_cloud.ply"
-            await convert_ply_to_potree_async(
-                ctx.session_dir, force=True,
-                ply_override=_corr if _corr.exists()
-                else output_dir / "cleaned_cloud.ply")
+            # the octree is built from the published cloud ONLY — cleaned_cloud.ply of the
+            # live epoch (docs/plan_determinismo.md point 120: the corrected_cloud.ply route
+            # is gone; the projection stamps the octree it builds, potree_stamp.json)
+            await convert_ply_to_potree_async(ctx.session_dir, force=True)
             print(f"[Erase] octree recolored for {session_id}")
         except Exception as e:  # noqa: BLE001
             print(f"[Erase] octree rebuild failed (non-fatal): {e}")
@@ -6794,88 +6849,49 @@ async def resume_run(body: dict):
 
 @app.post("/api/segmentation/refresh")
 async def refresh_segmentation(body: dict):
-    """Delete segmentation_result.json and regenerate with full DBSCAN + matching."""
-    from task_manager import task_manager
+    """The Segmentation Manager closed with changes: its masks are re-projected onto the
+    cloud and — when certify.auto_after_segmentation is on — certified, as ONE job of the
+    pipeline manager (docs/plan_determinismo.md point 160: one launcher — the frozen
+    configuration, the deterministic environment, the stages' own steps, the object
+    descriptions included; the server process runs no stage code). The viewer receives the
+    result through the job's completion broadcast; this answers {ok, queued, job}."""
     session_id = body.get("session_id")
     if not session_id:
         raise HTTPException(400, "session_id required")
     ctx = _ctx(session_id)
-    output_dir = ctx.output_dir
-    result_path = output_dir / "segmentation_result.json"
-
     loop = asyncio.get_event_loop()
-    tid = task_manager.start(session_id, "dbscan_refresh", "Refreshing segmentation (DBSCAN)")
 
-    def _refresh():
-        try:
-            import time as _time
-            # Content-based freshness: only rebuild if masks have changed
-            from segmentation.pipeline import segmentation_result_is_stale
-            stale, why = segmentation_result_is_stale(output_dir)
-            if result_path.exists():
-                if not stale:
-                    with open(result_path) as f:
-                        result = json.load(f)
-                    age = _time.time() - result_path.stat().st_mtime
-                    print(f"[SegRefresh] Result is up-to-date ({why}, {age:.0f}s old) — skipping rebuild")
-                    task_manager.finish(tid)
-                    return {"instances": result.get("instances", [])}
-                result_path.unlink()
-                print(f"[SegRefresh] Stale result deleted for {session_id}: {why}")
-            from segmentation_pipeline import _match_and_save_result
-            task_manager.update(tid, pct=10, detail="Running DBSCAN + cloud matching...")
-            print(f"[SegRefresh] Regenerating segmentation_result.json...")
-            result = _match_and_save_result(output_dir)
-            # DINOv3 fase 4 runs INSIDE _match_and_save_result (the single
-            # instance-building point, every caller covered). An error-dict
-            # here must not pass as an empty success (nothing fails silently).
-            if result.get("error"):
-                raise RuntimeError(f"segmentation matching failed: "
-                                   f"{result['error']}")
-            instances = result.get("instances", [])
-            print(f"[SegRefresh] ✅ Done: {len(instances)} instances")
-
-            task_manager.finish(tid)
-            return {"instances": instances}
-        except Exception as e:
-            task_manager.fail(tid, str(e))
-            raise
-
-    result = await loop.run_in_executor(None, _refresh)
-
-    # USER ORDER 2026-09-06: closing the Segmentation Manager (this refresh)
-    # brings the chat back up — SAM3's exclusive-GPU window is over.
+    # USER ORDER 2026-09-06: closing the Segmentation Manager ends SAM3's interactive window
+    # — the model loaded in THIS process gives the card back before the job takes it
     try:
         from segmentation.sam3_wrapper import get_sam3_wrapper as _gsw
         _sw = _gsw()
         if getattr(_sw, "predictor", None) is not None:
             await loop.run_in_executor(None, _sw.unload_model)
-            print("[SegRefresh] SAM3 unloaded — GPU freed for the chat")
+            print("[SegRefresh] SAM3 unloaded — GPU freed for the projection job")
     except Exception as _e:  # noqa: BLE001
         print(f"[SegRefresh] SAM3 unload skipped: {_e}")
-    loop.run_in_executor(None, _semantic_reload_if_idle,
-                         "segmentation manager closed")
+
+    from pipeline_manager import StageId as _SI, read_config_once as _rco
+    try:
+        _cfg_once = _rco()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"the configuration cannot be read: {e}")
+    _auto_certify = (bool((_cfg_once.get("certify") or {}).get("auto_after_segmentation", True))
+                     and bool((_cfg_once.get("pipeline") or {}).get("auto_segment", True)))
+    _ids = {_SI.PROJECTION} | ({_SI.CERTIFY} if _auto_certify else set())
+    job = await _enqueue_service_job(session_id, _scan_key_of(ctx), _ids, kind="refresh",
+                                     why="the Segmentation Manager closed with changes")
+    if job is None:
+        raise HTTPException(409, "the re-projection could not be ordered: a job of this scan "
+                                 "with the same order is already queued or running, or the "
+                                 "configuration is unreadable — see the server log")
 
     # NO automatic meshing here (user decision 2026-08-28): closing the
-    # Segmentation Manager must only re-run DBSCAN + matching and produce the
+    # Segmentation Manager must only re-run the projection and produce the
     # instances/OBBs. Per-object meshes are built EXCLUSIVELY on demand via
     # /api/segmentation/tsdf/export (TSDF + texrecon).
-
-    # USER 2026-09-04: the segments exist NOW — this is where the chat's
-    # per-segment dossiers are generated (background; cached ones skipped).
-    if result.get("instances"):
-        asyncio.get_event_loop().run_in_executor(
-            None, _session_intel_when_chat_up, session_id, True)
-        # claude_stac.txt §9: the instances exist now — the certification
-        # loop (instance loops → scale → poses → depth → witnesses, one
-        # one epoch per iteration, selectable in the kit) runs in the
-        # background when certify.auto_after_segmentation is on.
-        from reconstruction.loops.config import load_loops_config as _llc_cert
-        if _llc_cert().certify.auto_after_segmentation:
-            from reconstruction.certify import api as _certify_api
-            _cert_loop = asyncio.get_event_loop()
-            _cert_loop.run_in_executor(None, _certify_api.auto_run, session_id, _cert_loop)
-    return {"ok": True, **result}
+    return {"ok": True, "queued": True, "job": job.to_dict(), "instances": []}
 
 
 @app.get("/api/tasks/{session_id}")
@@ -7445,8 +7461,6 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
     {"ok": bool, ...}; a rejection (one and only one) carries its reason."""
     # Pipeline-based reconstruction (subprocess workers)
     session_id = cmd.get("session_id")
-    if session_id:
-        _stop_onload_projection(session_id, "a reconstruction was ordered")
 
     # ONE AND ONLY ONE (USER ORDER 2026-09-05: "para reconstruccion
     # no debe haber cola de comandos, hay uno y solo uno"): a
@@ -7464,9 +7478,8 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
     _busy = bool(session_id) and any(
         pipeline_manager.is_active(session_id, _sk or None, _kind)
         for _sk in (list(cmd.get("scans") or []) or [None]))
-    if _busy or _onload_busy.get(session_id):
-        _why = ("a pipeline is already running"
-                if _busy else "the on-load rebuild chain is running")
+    if _busy:
+        _why = "a pipeline is already running"
         print(f"[Pipeline] ✋ run_pipeline REJECTED for "
               f"{session_id}: {_why} (one and only one)")
         await viewer_manager.send_text(websocket, json.dumps({
@@ -7477,13 +7490,25 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
         return {"ok": False, "error": _why}
     print(f"[Pipeline] 🔧 Starting pipeline for session {session_id}")
 
+    # THE ORDER'S CONFIGURATION, READ ONCE (docs/plan_determinismo.md point 151): the bytes
+    # of config.yaml as they stand NOW — every job of this order carries this one dict, the
+    # manager freezes it into output/run_config.yaml when the job starts and every stage
+    # reads that copy. An unreadable configuration refuses the order; it never becomes {}.
+    from pipeline_manager import build_pipeline_stages, read_config_once
+    try:
+        _run_cfg = read_config_once()
+    except Exception as e:  # noqa: BLE001 — OrderRefused, named
+        print(f"[Pipeline] ✋ run_pipeline REJECTED for {session_id}: {e}")
+        await viewer_manager.send_text(websocket, json.dumps({
+            "type": "error", "message": f"Reconstruction command rejected: {e}"}))
+        return {"ok": False, "error": str(e)}
+
     # The pipeline runs reconstruction → cloudcompy and ends at the
     # cleaned cloud (pipeline.auto_tsdf false, user 2026-08-28: the
     # mesh is on-demand only). Any stage selection the client might
     # still send is deliberately ignored (see build_pipeline_stages).
-    from pipeline_manager import build_pipeline_stages
-    _recon_backend = cfg.get("reconstruction", {}).get("backend", "da3")
-    stages = build_pipeline_stages(backend=_recon_backend)
+    _recon_backend = (_run_cfg.get("reconstruction") or {}).get("backend", "da3")
+    stages = build_pipeline_stages(backend=_recon_backend, config=_run_cfg)
 
     # Progress callback: relay to this websocket + broadcast
     from task_manager import task_manager as _tm
@@ -7592,7 +7617,9 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
             print(f"[Pipeline] preview cloud error (non-fatal): {e}")
 
     async def _notify_cloud_ready(sid):
-        # Convert to Potree octree and notify viewer
+        # Broadcast the octree THE STAGE BUILT — never rebuilt here (docs/plan_determinismo.md
+        # point 157: the octree is built once, by the stage that changed the cloud, stamped;
+        # the server only broadcasts it)
         try:
             # The scan the JOB ran on, not the session's ACTIVE scan:
             # a project holds several and they are not the same. On
@@ -7603,19 +7630,15 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
             # had just been built correctly.
             _job_dir = pipeline_manager.job_session_dir(sid)
             session_path = Path(_job_dir) if _job_dir else _ctx(sid).session_dir
-            await viewer_manager.broadcast_text(json.dumps({
-                "type": "status",
-                "message": "Building LOD octree..."
-            }))
-            success = await convert_ply_to_potree_async(session_path, force=True)
+            success = (session_path / "output" / "potree" / "metadata.json").exists()
+            if not success:
+                print(f"[Pipeline] DECLARED: the cloud stage of {sid} left no octree "
+                      f"(output/potree/metadata.json) — nothing is built in the server")
             if success:
                 # Offload file reads to thread pool
                 _pipe_loop = asyncio.get_event_loop()
                 def _load_pipe_metadata():
-                    _pipe_ctx = _ctx(sid)
-                    potree_meta_path = _pipe_ctx.merged_potree / "metadata.json"
-                    if not potree_meta_path.exists():
-                        potree_meta_path = session_path / "output" / "potree" / "metadata.json"
+                    potree_meta_path = session_path / "output" / "potree" / "metadata.json"
                     potree_meta = json.loads(potree_meta_path.read_text())
                     floor_transform_4x4 = None
                     ft_path = session_path / "output" / "floor_transform.npz"
@@ -7657,12 +7680,16 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
                 await viewer_manager.broadcast_text(json.dumps(pipe_msg))
                 print(f"[Pipeline] ✅ Potree ready for {sid}")
             else:
-                print(f"[Pipeline] ⚠️ Potree conversion failed, sending raw cloud")
+                print(f"[Pipeline] ⚠️ no octree on disk, sending raw cloud")
                 await _send_cleaned_cloud_broadcast(sid)
         except Exception as e:
             print(f"[Pipeline] Send cloud error: {e}")
 
-    # Completion callback: send cloud + segmentation data
+    # Completion callback: send cloud + segmentation data — READ ONLY (docs/
+    # plan_determinismo.md point 157): everything that writes a session artifact is a
+    # stage of the job; the session intel (scene description into scene_r.db, outside the
+    # stage graph, racing the next queued job) is no longer launched from here — the chat's
+    # describe_scene tool makes it on demand
     async def _on_pipeline_complete(sid, success, restart_chat=True):
         # Chat back up the moment the GPU is free — success OR failure
         # (user decision 2026-08-28: the chat is always available; the
@@ -7672,14 +7699,6 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
         if restart_chat:
             asyncio.get_running_loop().run_in_executor(
                 None, _semantic_reload_if_idle, "pipeline finished")
-            # USER 2026-09-04: at pipeline end there are NO
-            # segments (only scene + cloud) — generate ONLY the
-            # scene description. Per-segment dossiers happen when
-            # the SEGMENTATION finishes (see /api/segmentation/
-            # refresh).
-            if success:
-                asyncio.get_running_loop().run_in_executor(
-                    None, _session_intel_when_chat_up, sid, False)
 
         if not success:
             _tm.fail(_pipeline_tid, "Pipeline failed")
@@ -7698,8 +7717,11 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
         # certified cloud (the acta says which epoch it left)
         _certified = False
         _new_epoch = None
+        # the scan the JOB wrote, never the session's ACTIVE scan (point 157)
+        _job_dir = pipeline_manager.job_session_dir(sid)
+        _job_out = Path(_job_dir) / "output" if _job_dir else _ctx(sid).output_dir
         try:
-            _acta_p = _ctx(sid).output_dir / "certify_acta.json"
+            _acta_p = _job_out / "certify_acta.json"
             if _acta_p.exists():
                 _acta = json.loads(_acta_p.read_text())
                 _certified = (_acta.get("epoch_final") is not None
@@ -7714,8 +7736,8 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
         # the same probe pipeline_manager uses to call the stage done)
         try:
             from precision.product import product_is_live as _product_is_live
-            _p_live, _p_why = _product_is_live(_ctx(sid).output_dir)
-            _ge_p = _ctx(sid).output_dir / "geometry_epoch.json"
+            _p_live, _p_why = _product_is_live(_job_out)
+            _ge_p = _job_out / "geometry_epoch.json"
             if _p_live and _ge_p.exists():
                 _live = json.loads(_ge_p.read_text()).get("epoch")
                 if _live is not None and _live != 0:
@@ -7731,23 +7753,18 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
             # the new epoch — broadcast it, do not rebuild
             print(f"[Pipeline] the pipeline produced epoch {_new_epoch} — "
                   f"reloading the viewer with that cloud")
-            await _correction_notify_viewer(sid, _ctx(sid).output_dir)
+            await _correction_notify_viewer(sid, _job_out)
         else:
             _cloud_ready_sent.add(sid)
             await _notify_cloud_ready(sid)
 
-        # Send segmentation result (with floor-aligned OBBs) if available
-        # Use apply_segmentation_to_cloud (same as session reload) to ensure
-        # proper cache invalidation and OBB recalculation
+        # Send the segmentation the stages left (segmentation_result.json of the job's scan)
+        # — READ, never projected here (points 157 / 160)
         try:
-            from segmentation_pipeline import apply_segmentation_to_cloud
             _pipe_loop = asyncio.get_event_loop()
-            _seg_ctx = _ctx(sid)
-            _seg_output_dir = _seg_ctx.output_dir
-            seg_data = await _pipe_loop.run_in_executor(
-                None, apply_segmentation_to_cloud, _seg_output_dir
-            )
+            seg_data = await _pipe_loop.run_in_executor(None, _read_segments_payload, _job_out)
             if seg_data and seg_data.get("instances"):
+                seg_data.pop("reload_potree", None)
                 await viewer_manager.broadcast_text(json.dumps(seg_data))
                 print(f"[Pipeline] Sent {len(seg_data['instances'])} segments")
         except Exception as e:
@@ -7779,7 +7796,6 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
     _segment_keys = cmd.get("segment")
     _auto = cmd.get("autosegment") if isinstance(cmd.get("autosegment"), dict) else None
     _force = False
-    _run_cfg = dict(cfg)
     _only = None
     if _auto is not None:
         _want = _auto.get("stages") if isinstance(_auto.get("stages"), dict) else {}
@@ -7791,10 +7807,16 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
                 "message": "Autosegment: no stage selected — nothing to run"}))
             return {"ok": False, "error": "no stage selected"}
         if not _want.get("captions", True):
-            _seg0 = dict(cfg.get("segmentation") or {})
+            # a per-ORDER choice goes into the certification STAGE's overrides (frozen under
+            # _stages of run_config.yaml), never into the base configuration: the session is
+            # ONE base configuration and a job that continues it with another is refused
+            # (point 151)
+            _seg0 = dict(_run_cfg.get("segmentation") or {})
             _seg0["object_captions"] = {**dict(_seg0.get("object_captions") or {}),
                                         "enabled": False}
-            _run_cfg["segmentation"] = _seg0
+            for _st in stages:
+                if _st.id == StageId.CERTIFY:
+                    _st.config["segmentation"] = _seg0
         _force, replace = True, False
         print(f"[Pipeline] autosegment for {session_id}: "
               f"{sorted(s_.value for s_ in _only)}"
@@ -7962,9 +7984,8 @@ async def viewer_websocket(websocket: WebSocket):
                                  # Resend the cleaned cloud
                                  sent = await _send_cleaned_cloud(websocket, session_id)
                                  
-                                 # Apply segmentation against current cloud (offloaded)
-                                 from segmentation_pipeline import apply_segmentation_to_cloud
-                                 seg_data = await loop.run_in_executor(None, apply_segmentation_to_cloud, frame_storage.current_session.output_dir)
+                                 # the projection on disk, READ (the server never projects — point 160)
+                                 seg_data = await loop.run_in_executor(None, _read_segments_payload, frame_storage.current_session.output_dir)
                                  if seg_data.get("instances"):
                                      await viewer_manager.send_text(websocket, json.dumps(seg_data))
                                  
@@ -8080,78 +8101,71 @@ async def viewer_websocket(websocket: WebSocket):
                         except Exception as _e:  # noqa: BLE001
                             print(f"[Viewer] loadable-scan fallback skipped: {_e}")
 
-                    # Auto-cleanup: stale display-space data from previous code version
-                    display_marker = output_dir / ".display_space"
-                    if display_marker.exists():
-                        print("[Viewer] ⚠️ Stale .display_space marker found — cleaning cached data")
-                        display_marker.unlink()
-                        for stale in ["corrected_cloud.ply", "segmentation_result.json", "classification.npy"]:
-                            p = output_dir / stale
-                            if p.exists():
-                                p.unlink()
-                        stale_potree = output_dir / "potree"
-                        if stale_potree.exists():
-                            import shutil
-                            shutil.rmtree(stale_potree)
-
-                    # ── Potree LOD: always convert before serving ──
+                    # OPENING NEVER WRITES (docs/plan_determinismo.md points 111 / 158): no
+                    # cleanup of a previous code version's files, no cloud built from Omega's
+                    # chunks, no octree converted, no masks projected, no floor levelled in this
+                    # process. What is missing is ORDERED as a job of the pipeline manager
+                    # (queued, session-serialised, deterministic environment, exclusive card) and
+                    # the viewer receives it through the job's completion broadcast.
                     cleaned_ply = output_dir / "cleaned_cloud.ply"
                     # Check both merged/potree (migrated) and output/potree (newly converted)
                     potree_metadata = _load_ctx.merged_potree / "metadata.json"
                     if not potree_metadata.exists():
                         potree_metadata = output_dir / "potree" / "metadata.json"
-                    
+                    _load_scan_key = cmd.get("scan_key") or _scan_key_of(_load_ctx)
+
                     if not cleaned_ply.exists():
                         chunk_plys = sorted(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []
                         # USER 2026-10-05: a session whose precision chain is mid-way (its product not
-                        # live) gets NO on-load rebuild — that build (Omega's raw cloud, minutes of GPU)
+                        # live) gets NO cloud build — that build (Omega's raw cloud, minutes of GPU)
                         # blocked the one-and-only-one reconstruct command three times on zaragoza; the
                         # chain publishes the cloud itself when it resumes.
                         _chain_midway = (output_dir / "precision" / "chain_state.json").exists()
                         if chunk_plys and _chain_midway:
-                            print(f"[Viewer] No cleaned_cloud.ply: the precision chain is mid-way — no on-load "
-                                  f"rebuild; resume the reconstruction (replace off) to publish the cloud")
+                            print(f"[Viewer] No cleaned_cloud.ply: the precision chain is mid-way — no "
+                                  f"cloud job; resume the reconstruction (replace off) to publish the cloud")
                             await viewer_manager.send_text(websocket, json.dumps({
                                 "type": "status",
                                 "message": "No cloud yet: the reconstruction stopped mid-chain — resume it (replace off)"
                             }))
                         elif chunk_plys:
-                            # The order is reconstruction → cloudcompy → VLM → SAM3, so the
-                            # cloud no longer waits on the semantic stages: there is nothing
-                            # to jump ahead of. This guard used to refuse the on-load cleanup
-                            # until VLM and SAM3 had run, which is why a session whose SAM3
-                            # had failed showed "no cloud" while seven perfectly good chunks
-                            # sat on disk.
-                            print(f"[Viewer] No cleaned_cloud.ply found. Running CloudCompPy on {len(chunk_plys)} chunks...")
+                            # Omega's chunks without their cleaned cloud: the CLOUD STAGE is ordered
+                            # as a job (the same stage "Reconstruir" runs — merge, clean, octree),
+                            # never run in this process (point 158)
+                            from pipeline_manager import StageId as _SI
+                            _job = await _enqueue_service_job(
+                                session_id, _load_scan_key, {_SI.CLOUDCOMPY}, kind="cloud",
+                                why=f"opened without cleaned_cloud.ply, {len(chunk_plys)} Omega chunk(s) on disk")
                             await viewer_manager.send_text(websocket, json.dumps({
                                 "type": "status",
-                                "message": f"Building cleaned cloud from {len(chunk_plys)} chunks..."
+                                "message": (f"No cloud yet: the cloud stage was queued on {len(chunk_plys)} "
+                                            f"chunk(s) — the cloud arrives when it ends"
+                                            if _job is not None else
+                                            "No cloud yet and the cloud stage could not be queued — see the server log")
                             }))
-                            postproc_config = cfg.get("postprocessing", {})
-                            await _run_cloudcompy_postprocess(session_id, postproc_config, websocket)
                         else:
                             await viewer_manager.send_text(websocket, json.dumps({"type": "error", "message": "No point clouds found for this session"}))
                             raise Exception("No PLY data")
-                    
+
                     await asyncio.sleep(0)  # Yield to process pings
-                    
+
                     if cleaned_ply.exists():
-                        # Ensure Potree octree exists (convert if needed)
+                        # the octree is the cloud stage's product (point 157): a cloud without one
+                        # gets the cloud stage ordered as a job (its light resume builds the
+                        # octree); nothing is converted here
                         if not potree_metadata.exists():
+                            from pipeline_manager import StageId as _SI
+                            _job = await _enqueue_service_job(
+                                session_id, _load_scan_key, {_SI.CLOUDCOMPY}, kind="cloud",
+                                why="opened with cleaned_cloud.ply but no octree")
                             await viewer_manager.send_text(websocket, json.dumps({
                                 "type": "status",
-                                "message": "Building LOD octree (first load)..."
+                                "message": ("No octree yet: the cloud stage was queued — the cloud arrives when it ends"
+                                            if _job is not None else
+                                            "No octree and the cloud stage could not be queued — see the server log")
                             }))
-                            session_path = _load_ctx.session_dir
-                            success = await convert_ply_to_potree_async(
-                                session_path,
-                                on_progress=lambda msg: viewer_manager.send_text(
-                                    websocket, json.dumps({"type": "status", "message": msg}))
-                            )
-                            if not success:
-                                await viewer_manager.send_text(websocket, json.dumps({"type": "error", "message": "Potree conversion failed"}))
-                                raise Exception("Potree conversion failed")
-                        
+                            raise Exception("No octree yet (queued)")
+
                         await asyncio.sleep(0)  # Yield to process pings
                         
                         # Offload file reads to thread pool
@@ -8180,32 +8194,12 @@ async def viewer_websocket(websocket: WebSocket):
                                 # in a frame the octree was not shown in). Identity, nothing saved.
                                 print("[Viewer] orientation baked from camera poses — floor transform identity")
                             else:
-                                # Fallback: compute from cleaned_cloud.ply if available
-                                cleaned_path = output_dir / "cleaned_cloud.ply"
-                                if cleaned_path.exists():
-                                    try:
-                                        from alignment_manager import get_alignment_manager
-                                        from plyfile import PlyData
-                                        plydata = PlyData.read(str(cleaned_path))
-                                        vx = plydata['vertex']
-                                        xyz = np.column_stack([
-                                            np.array(vx['x'], dtype=np.float64),
-                                            np.array(vx['y'], dtype=np.float64),
-                                            np.array(vx['z'], dtype=np.float64),
-                                        ])
-                                        am = get_alignment_manager()
-                                        s_val, R, t = am.compute_leveling_from_points(xyz)
-                                        if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
-                                            np.savez(transform_path, s=np.array(s_val), R=R, t=t)
-                                            M = np.eye(4)
-                                            M[:3, :3] = s_val * R
-                                            M[:3, 3] = t
-                                            floor_transform_4x4 = _display_matrix(session_id, M)
-                                            print(f"[Viewer] Floor transform computed and saved")
-                                        else:
-                                            print(f"[Viewer] No floor plane detected")
-                                    except Exception as e:
-                                        print(f"[Viewer] ⚠️ Floor alignment fallback failed: {e}")
+                                # no floor_transform.npz: IDENTITY, declared — the viewer only READS the
+                                # transform (points 110 / 158: the cloud stage computes and writes it,
+                                # seeded; opening a session never computes or saves one)
+                                print("[Viewer] DECLARED: no floor_transform.npz on disk — the cloud is "
+                                      "shown in its own frame (identity); nothing is computed or saved "
+                                      "at load")
                             # Detect IFC files in session directory
                             ifc_files = [f.name for f in sorted(_load_ctx.ifcs_dir.glob('*.ifc'))] if _load_ctx.ifcs_dir.exists() else []
                             # Check if cleaned_cloud.ply has confidence data
@@ -8256,50 +8250,30 @@ async def viewer_websocket(websocket: WebSocket):
                         
                         await asyncio.sleep(0)  # Yield to process pings
                         
-                        # Offload segmentation loading to thread pool — ONLY the cached projection
-                        # (segmentation_result.json). USER 2026-10-05: with masks but no projection the
-                        # full mask→cloud matching ran here, inline, for 10+ min on zaragoza's 114 M
-                        # points and this connection stopped reading commands — Reconstruir sat in the
-                        # socket. The projection belongs to the pipeline's cloud stage.
-                        from segmentation_pipeline import apply_segmentation_to_cloud
+                        # Offload segmentation loading to thread pool — ONLY the projection a stage
+                        # left (segmentation_result.json), READ. USER 2026-10-05: with masks but no
+                        # projection the full mask→cloud matching ran here, inline, for 10+ min on
+                        # zaragoza's 114 M points. Since 2026-10-08 (points 158 / 160) masks without
+                        # their projection get the PROJECTION STAGE ordered as a job of the pipeline
+                        # manager — never a process of this server's own.
                         if (output_dir / "segmentation_result.json").exists():
-                            seg_data = await loop.run_in_executor(None, apply_segmentation_to_cloud, output_dir)
+                            seg_data = await loop.run_in_executor(None, _read_segments_payload, output_dir)
                         else:
                             seg_data = {}
-                            _job_active = pipeline_manager.is_active(session_id)
-                            if (output_dir / "segmentation.json").exists() and not _job_active \
-                                    and session_id not in _onload_projection:
-                                # masks but no projection yet (USER 2026-10-05): project in a SUBPROCESS —
-                                # this handler keeps reading commands, and a Reconstruir for this session
-                                # kills it (nothing of the old session runs or writes after that order)
-                                print(f"[Viewer] masks not projected yet for {session_id} — projecting in a "
-                                      f"background process (killed by any Reconstruir of this session)")
-                                import subprocess as _sp
-                                _code = ("from segmentation_pipeline import apply_segmentation_to_cloud as f; "
-                                         f"import pathlib; f(pathlib.Path({str(output_dir)!r}))")
-                                _proc = _sp.Popen([sys.executable, "-c", _code], cwd=str(Path(__file__).parent),
-                                                  stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-                                _onload_projection[session_id] = _proc
-
-                                async def _collect(ws=websocket, od=output_dir, sid=session_id, pr=_proc):
-                                    try:
-                                        while pr.poll() is None:
-                                            await asyncio.sleep(2)
-                                        if _onload_projection.get(sid) is not pr:
-                                            return                       # killed by a reconstruction
-                                        _onload_projection.pop(sid, None)
-                                        if pr.returncode == 0 and (od / "segmentation_result.json").exists():
-                                            data = await loop.run_in_executor(None, apply_segmentation_to_cloud, od)
-                                            if data.get("instances"):
-                                                data.pop("reload_potree", None)
-                                                await viewer_manager.send_text(ws, json.dumps(data))
-                                                print(f"[Viewer] on-load projection done for {sid}: "
-                                                      f"{len(data['instances'])} segments")
-                                        else:
-                                            print(f"[Viewer] on-load projection of {sid} ended with code {pr.returncode}")
-                                    except Exception as _e:  # noqa: BLE001 — declared, never fatal
-                                        print(f"[Viewer] on-load projection of {sid} did not finish: {_e}")
-                                asyncio.create_task(_collect())
+                            if ((output_dir / "segmentation.json").exists()
+                                    and (output_dir / "seg_masks.npz").exists()
+                                    and not pipeline_manager.is_active(session_id)):
+                                from pipeline_manager import StageId as _SI
+                                _job = await _enqueue_service_job(
+                                    session_id, _load_scan_key, {_SI.PROJECTION}, kind="projection",
+                                    why="opened with SAM3 masks but no projection")
+                                await viewer_manager.send_text(websocket, json.dumps({
+                                    "type": "status",
+                                    "message": ("Masks not projected yet: the projection stage was queued — "
+                                                "the segments arrive when it ends"
+                                                if _job is not None else
+                                                "Masks not projected and the projection could not be queued — see the server log")
+                                }))
                         if seg_data.get("instances"):
                             should_reload_potree = seg_data.pop("reload_potree", False)
                             await viewer_manager.send_text(websocket, json.dumps(seg_data))

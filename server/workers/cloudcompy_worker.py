@@ -10,7 +10,12 @@ import re
 from pathlib import Path
 from multiprocessing.connection import Connection
 
-from workers.base import WorkerPipe, run_worker_safe, stop_semantic_service
+from workers.base import WorkerPipe, run_worker_safe, stop_semantic_service_verified
+
+# the mask→cloud PROJECTION's products: functions of the cloud AND the masks; a cloud
+# rebuilt here makes every one of them stale (docs/plan_determinismo.md point 96)
+PROJECTION_PRODUCTS = ("segmentation_result.json", "seg_broadcast.json", "classification.npy",
+                       "class_map.json", "scene_r.db", "scene_r.db-wal", "scene_r.db-shm")
 
 
 def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
@@ -73,8 +78,15 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         # "scene consolidation failed (non-fatal, cloud kept raw)", so the
         # session shipped a cloud that still carried its onion layers and
         # nothing in the run said the quality had dropped. The VLM stage that
-        # follows brings vLLM back up on its own.
-        stop_semantic_service(pipe, stage="cloud cleaning")
+        # follows brings its own vLLM up. Since 2026-10-08 (point 154) the stop is
+        # VERIFIED and the card must be FREE (repro.require_exclusive_gpu): a shared
+        # card fails the stage, nothing runs on whatever memory was left.
+        stop_semantic_service_verified(pipe, stage="cloud cleaning")
+        import sys as _sys0
+        if str(server_dir) not in _sys0.path:
+            _sys0.path.insert(0, str(server_dir))
+        import repro
+        repro.require_exclusive_gpu(log=pipe.send_log)
 
         # USER ORDER 2026-09-04 ("porta ahora cloudcompy a gpu"): the cleaning
         # stage runs on GPU by default (torch grid-hash voxel+SOR, minutes vs
@@ -127,6 +139,9 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
             stderr=subprocess.STDOUT,
             text=True,
             cwd=str(server_dir),   # the GPU path runs `-m reconstruction.…`
+            # the deterministic environment of every step subprocess (point 152):
+            # PYTHONHASHSEED=0, the cuBLAS workspace pinned
+            env=repro.deterministic_env(),
         )
 
         # Parse progress from CloudCompy stdout
@@ -333,80 +348,38 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
                 else:
                     pipe.send_log("No floor plane detected, skipping alignment", level="warning")
             except Exception as e:
-                pipe.send_log(f"Floor alignment computation failed: {e}", level="warning")
+                # the display frame is part of the deliverable (every OBB sits in it):
+                # a floor that could not be computed fails the stage (point 164) — it
+                # used to be a warning and the session shipped in whatever frame was left
+                raise RuntimeError(f"Floor alignment computation failed: {e}") from e
 
-        # ── Deferred mask→cloud projection (USER 2026-09-28: VLM + SAM3 run ONCE,
-        # at the intake, on the keyframes; the points they are projected onto
-        # exist only once the precision core published its cloud). A segmentation.json without a
-        # segmentation_result.json as new as the cloud → project now. No model
-        # is involved; a failure FAILS the stage with the reason.
-        seg_path = output_dir / "segmentation.json"
-        res_path = output_dir / "segmentation_result.json"
-
-        def _result_is_stale() -> bool:
-            if not res_path.exists():
-                return True
-            if res_path.stat().st_mtime < output_ply.stat().st_mtime:
-                return True
-            try:      # F7 stages a "pending" stub next to its cloud: no instances yet
-                doc = json.loads(res_path.read_text())
-                return bool(doc.get("pending")) or not doc.get("instances")
-            except (OSError, ValueError):
-                return True
-
-        if seg_path.exists() and _result_is_stale():
-            pipe.send_progress(95.5, "Projecting the SAM3 masks onto the cloud...",
-                               stage="cloudcompy")
-            import json as _json
-            import sys as _sys2
-            _srv2 = str(Path(__file__).resolve().parent.parent)
-            if _srv2 not in _sys2.path:
-                _sys2.path.insert(0, _srv2)
-            from segmentation.pipeline import map_segmentation_to_cloud
-            seg_data = map_segmentation_to_cloud(output_dir)
-            if seg_data.get("error"):
-                raise RuntimeError(f"mask→cloud projection failed: {seg_data['error']}")
-            n_applied = len(seg_data.get("instances", []))
-            cov = seg_data.get("coverage")
-            pipe.send_log(f"Mapped {n_applied} instances onto the cloud"
-                          + (f" ({cov * 100:.1f}% coverage)" if cov is not None else ""))
-            (output_dir / "seg_broadcast.json").write_text(_json.dumps(seg_data))
-            # THE SECOND VLM PASS over what stayed unsegmented (USER 2026-10-01; segmentation/
-            # second_pass.py): vLLM up for the calls, down for SAM3 on the new prompts, the
-            # projection again. Its failure is declared, never the stage's — the first projection stands.
-            if not pipe.check_cancel():
-                try:
-                    from segmentation.second_pass import run_second_pass
-                    from workers.base import stop_semantic_service_verified
-                    pipe.send_progress(96, "Second VLM pass over the unsegmented points...", stage="cloudcompy")
-                    sp = run_second_pass(session_path, config, log=pipe.send_log,
-                                         progress=lambda pct, m: pipe.send_progress(96 + 0.02 * pct, m, stage="cloudcompy"),
-                                         cancelled=pipe.check_cancel,
-                                         stop_vllm=lambda: stop_semantic_service_verified(pipe, stage="second pass SAM3"))
-                    if sp.get("new_prompts"):
-                        # the broadcast and the census describe what the store holds NOW
-                        res_path = output_dir / "segmentation_result.json"
-                        if res_path.exists():
-                            (output_dir / "seg_broadcast.json").write_text(res_path.read_text())
-                        try:
-                            from segmentation.census import build_census, visit_gap_kf
-                            vlm_doc = _json.loads((output_dir / "vlm_analysis.json").read_text())
-                            build_census(output_dir, prompt=str(vlm_doc.get("prompt") or ""), vlm_doc=vlm_doc,
-                                         gap_kf=visit_gap_kf(config), frames_dir=session_path / "frames",
-                                         prompt_status=sp.get("prompt_status"), log=pipe.send_log)
-                        except Exception as _ce:  # noqa: BLE001
-                            pipe.send_log(f"[second-pass] census not rewritten: {_ce}", level="warning")
-                    _b = sp.get("before", {}).get("unmasked_share"); _a = sp.get("after", {}).get("unmasked_share")
-                    pipe.send_log("[second-pass] " + (sp.get("skipped") or sp.get("note") or
-                                  f"{len(sp.get('new_prompts', []))} new prompt(s); unmasked points "
-                                  f"{(_b or 0) * 100:.1f} % → {((_a if _a is not None else _b) or 0) * 100:.1f} %"))
-                except Exception as _spe:  # noqa: BLE001 — declared
-                    pipe.send_log(f"[second-pass] not run: {type(_spe).__name__}: {_spe}", level="warning")
+        # ── NO projection of masks here (docs/plan_determinismo.md point 96, 2026-10-08).
+        # In the stage order cloud → VLM → SAM3 a segmentation.json on disk at this point
+        # belongs to an EARLIER run (other keyframes, other prompts): it used to be
+        # projected onto the new cloud, judged fresh by file dates, and with 'Segment when
+        # done' off that projection of stale masks was the session's deliverable. The SAM3
+        # stage projects its own masks the moment it makes them; this stage leaves no
+        # segmentation_result.json of its own. A cloud REBUILT here makes every product
+        # of a previous projection stale (they are functions of the cloud): removed,
+        # declared. (The second VLM pass that ran here is gone with the projection — it was
+        # rejected by the user on 2026-10-04 and `autoprompt.second_pass.enabled` is false.)
+        if not light_resume:
+            stale = [n for n in PROJECTION_PRODUCTS if (output_dir / n).exists()]
+            for n in stale:
+                (output_dir / n).unlink()
+            if stale:
+                pipe.send_log(f"[cloud] the cloud was rebuilt: {len(stale)} product(s) of a "
+                              f"previous mask→cloud projection removed ({', '.join(stale)}) — "
+                              f"the SAM3 stage projects its masks onto THIS cloud (point 96)")
+        elif (output_dir / "segmentation.json").exists():
+            pipe.send_log("[cloud] light resume: the masks on disk are not projected here "
+                          "(the SAM3 stage projects what it segments — point 96)")
 
         # ── Build Potree LOD octree (so the first viewer load is instant) ──
         # Runs as the final reconstruction step. Carries the per-point
         # confidence + origin (frame_global/pixel_row/pixel_col) into the octree
-        # (see potree_converter._ply_to_las LAS extra dims). Non-fatal.
+        # (see potree_converter._ply_to_las LAS extra dims). The octree is part of
+        # the deliverable: its failure FAILS the stage (point 164).
         def _mirror_merged_potree():
             # Mirror merged/potree symlink for new-style projects (serving
             # checks merged_potree first, then output/potree).
@@ -446,21 +419,18 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
                 pipe.send_log("Potree octree up to date — skipped (light resume)")
         if postproc.get("build_potree", True) and _potree_stale:
             pipe.send_progress(96, "Building Potree LOD octree...", stage="cloudcompy")
-            try:
-                import sys
-                server_dir_str = str(Path(__file__).resolve().parent.parent)
-                if server_dir_str not in sys.path:
-                    sys.path.insert(0, server_dir_str)
-                from potree_converter import convert_ply_to_potree
+            import sys
+            server_dir_str = str(Path(__file__).resolve().parent.parent)
+            if server_dir_str not in sys.path:
+                sys.path.insert(0, server_dir_str)
+            from potree_converter import convert_ply_to_potree
 
-                ok = convert_ply_to_potree(session_path, force=True)
-                if ok:
-                    pipe.send_log(f"Potree octree built → {output_dir / 'potree'}")
-                    _mirror_merged_potree()
-                else:
-                    pipe.send_log("Potree conversion returned False (non-critical)", level="warning")
-            except Exception as e:
-                pipe.send_log(f"Potree build failed (non-critical): {e}", level="warning")
+            ok = convert_ply_to_potree(session_path, force=True)
+            if not ok:
+                raise RuntimeError("Potree conversion failed (returned False) — the octree is "
+                                   "part of the deliverable (point 164)")
+            pipe.send_log(f"Potree octree built → {output_dir / 'potree'}")
+            _mirror_merged_potree()
     else:
         pipe.send_log("Warning: cleaned_cloud.ply not created", level="warning")
 

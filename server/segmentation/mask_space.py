@@ -49,8 +49,54 @@ SPACES = (SPACE_KEYFRAME, SPACE_VIDEO)
 #: npz key holding the declaration. Deliberately NOT starting with "f": half
 #: the readers iterate ``npz.files`` filtering on ``key.startswith("f")``.
 NPZ_KEY = "mask_frame_space"
+#: npz key holding the KEYFRAME LIST the store was segmented on (the video frame number of
+#: every position, int32), written by the batch pipeline (docs/plan_determinismo.md point
+#: 114). A reader compares it with ``camera_frames.txt`` and REFUSES a store made on another
+#: list: masks keyed by position would otherwise be applied to the wrong frames silently.
+KEYFRAMES_KEY = "keyframes"
 
 _MASK_KEY_RE = re.compile(r"^f(\d+)_o(\d+)$")
+
+
+class KeyframeListMismatch(RuntimeError):
+    """The mask store was segmented on a keyframe list that is not the session's
+    ``camera_frames.txt`` (point 114): the masks cannot be applied to this cloud."""
+
+
+def declared_keyframes(masks) -> Optional[List[int]]:
+    """The keyframe list the store declares (:data:`KEYFRAMES_KEY`), or None for
+    a store written before the declaration existed / by the interactive manager."""
+    try:
+        files = getattr(masks, "files", None)
+        keys = files if files is not None else list(masks)
+        if KEYFRAMES_KEY not in keys:
+            return None
+        return [int(x) for x in np.asarray(masks[KEYFRAMES_KEY]).ravel()]
+    except Exception:  # noqa: BLE001 — an unreadable declaration is no declaration
+        return None
+
+
+def check_keyframes(declared: Optional[Sequence[int]], session: Optional[Sequence[int]],
+                    where: str = "seg_masks.npz") -> None:
+    """RAISES :class:`KeyframeListMismatch` when the store's declared keyframe
+    list differs from the session's (``camera_frames.txt``), naming the first
+    position that differs; a store with no declaration, or a session with no
+    keyframe list, is not checked (nothing to compare)."""
+    if declared is None or session is None:
+        return
+    d = [int(x) for x in declared]
+    s = [int(x) for x in session]
+    for i, (a, b) in enumerate(zip(d, s)):
+        if a != b:
+            raise KeyframeListMismatch(
+                f"{where} was segmented on a keyframe list that differs from camera_frames.txt "
+                f"at position {i}: video frame {a} vs {b} ({len(d)} vs {len(s)} keyframes) — "
+                f"the masks belong to another keyframe selection; re-run the SAM3 stage")
+    if len(d) != len(s):
+        raise KeyframeListMismatch(
+            f"{where} was segmented on {len(d)} keyframes and camera_frames.txt lists {len(s)} "
+            f"(they agree up to position {min(len(d), len(s)) - 1}) — the masks belong to "
+            f"another keyframe selection; re-run the SAM3 stage")
 
 
 # ── the keyframe list (position → video frame number) ────────────────────
@@ -249,25 +295,37 @@ def measure_space(mask_frames: Sequence[int], keyframes: Optional[Sequence[int]]
 _CACHE: Dict[str, Tuple[tuple, MaskSpace]] = {}
 
 
-def _stamp(p: Path) -> tuple:
-    try:
-        st = p.stat()
-        return (st.st_mtime_ns, st.st_size)
-    except OSError:
-        return (0, 0)
+def _stamp(out: Path) -> tuple:
+    """The identity of what :func:`resolve` reads — the sha256 of the mask store
+    AND of the keyframe list (``camera_frames.txt`` / ``frame_list.json``), not
+    an mtime (docs/plan_determinismo.md points 114 / 115: the result depends on
+    both files, and a copied or restored file keeps no mtime)."""
+    from repro import sha256_file
+    parts = []
+    for name in ("seg_masks.npz", "camera_frames.txt", "da3_run/camera_frames.txt",
+                 "frame_list.json", "da3_run/frame_list.json"):
+        p = out / name
+        parts.append(sha256_file(p) if p.is_file() else None)
+    return tuple(parts)
 
 
 def resolve(output_dir, masks=None, log=None) -> MaskSpace:
-    """The session's mask frame space. Cached per store file (invalidated by
-    its mtime), so every call site pays for the measurement once.
+    """The session's mask frame space. Cached per store (keyed by the sha256 of
+    the store and of the keyframe list), so every call site pays for the
+    measurement once.
 
     ``masks`` is an already-open NpzFile when the caller has one; otherwise
     the store is opened here.
+
+    A store that DECLARES the keyframe list it was segmented on (the batch
+    pipeline writes it, :data:`KEYFRAMES_KEY`) is compared with the session's
+    list and REFUSED when they differ (:class:`KeyframeListMismatch`, point 114):
+    its positions would name other frames.
     """
     out = Path(output_dir)
     p = out / "seg_masks.npz"
     key = str(out.resolve()) if out.exists() else str(out)
-    stamp = _stamp(p)
+    stamp = _stamp(out)
     hit = _CACHE.get(key)
     if hit is not None and hit[0] == stamp:
         return hit[1]
@@ -281,26 +339,29 @@ def resolve(output_dir, masks=None, log=None) -> MaskSpace:
             masks = None
     frames = mask_frames_of(masks) if masks is not None else []
 
-    space = declared_space(masks) if masks is not None else None
-    if space is not None:
-        _sp, _pos, _vid, stray, amb = measure_space(frames, kf)
-        # the declaration decides; the measurement still runs so a store the
-        # declaration does not fit is reported instead of silently believed
-        if _sp != space:
-            stray = sorted(set(frames) - (
-                {f for f in frames if 0 <= f < len(kf or [])} if space == SPACE_KEYFRAME
-                else {f for f in frames if f in {int(x) for x in (kf or [])}}))
-        ms = MaskSpace(space, kf, "declared", frames, stray, amb)
-    else:
-        sp, _pos, _vid, stray, amb = measure_space(frames, kf)
-        src = "measured" if kf else "no camera_frames.txt — ordinal is the frame"
-        ms = MaskSpace(sp, kf, src, frames, stray, amb)
-
-    if opened is not None:
-        try:
-            opened.close()
-        except Exception:  # noqa: BLE001
-            pass
+    try:
+        if masks is not None:
+            check_keyframes(declared_keyframes(masks), kf, where=str(p))
+        space = declared_space(masks) if masks is not None else None
+        if space is not None:
+            _sp, _pos, _vid, stray, amb = measure_space(frames, kf)
+            # the declaration decides; the measurement still runs so a store the
+            # declaration does not fit is reported instead of silently believed
+            if _sp != space:
+                stray = sorted(set(frames) - (
+                    {f for f in frames if 0 <= f < len(kf or [])} if space == SPACE_KEYFRAME
+                    else {f for f in frames if f in {int(x) for x in (kf or [])}}))
+            ms = MaskSpace(space, kf, "declared", frames, stray, amb)
+        else:
+            sp, _pos, _vid, stray, amb = measure_space(frames, kf)
+            src = "measured" if kf else "no camera_frames.txt — ordinal is the frame"
+            ms = MaskSpace(sp, kf, src, frames, stray, amb)
+    finally:
+        if opened is not None:
+            try:
+                opened.close()
+            except Exception:  # noqa: BLE001
+                pass
     _CACHE[key] = (stamp, ms)
     if log is not None:
         log(ms.describe())

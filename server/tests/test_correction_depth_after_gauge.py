@@ -14,6 +14,13 @@ identity (the floor still publishes its epoch); a tangential false identity cann
 move a chunk; the DA3 / anchor rows do not double-apply the gauge; stale closures do
 not drive anything; depth and floor publish ONE epoch; the per-chunk factor pivots on
 the first keyframe each chunk OWNS, so an overlapping plan keeps the walk continuous.
+
+CHANGED 2026-10-08 with docs/plan_determinismo.md points 127 and 134: the depth solution is
+applied only by THE USER'S RULE on the closures (leave-one-out judges, >= 5 of them, 95 % CI,
+median improvement >= the factor x their error), so every fixture that expects an applied
+depth carries at least 5 closures; the rows file is taken on its evidence STAMP, never on
+the equality of an epoch number, so the fixture writes stamped rows (``stale=True`` writes
+a stamp that is not the session's).
 """
 
 import json
@@ -39,7 +46,11 @@ FRAME_STEP = 10
 PLAN = {"chunk_ranges": [[0, 20], [10, 30]], "chunk_size": 20, "overlap": 10,
         "n_keyframes": N_KF}
 C_INJECTED = 0.92          # chunk 1 reconstructed 8 % small against chunk 0
-LOCK_DRIFT = 1.25          # what the DA3 anchors said at the lock (the gauge removed it)
+LOCK_DRIFT = 1.15          # what the DA3 anchors said at the lock (the gauge removed it);
+                           # 2026-10-08: 1.25 -> 1.15 — the drift-rate ramp pinned at the
+                           # start (point 127) puts the whole correction on the last chunk,
+                           # and log 1.25 = 0.223 lies beyond the declared bound
+                           # certify.scale.max_correction_log 0.2 (a refusal, not a judge)
 
 
 def _scfg():
@@ -61,10 +72,19 @@ def _gauge(out: Path, applied: bool = True) -> None:
          G.GAUGE_STAMP_KEY: G.gauge_stamp(out.parent, params, reconstruction_id_or_none(out))}))
 
 
-def _rows(out: Path, rows, epoch: int = 0) -> None:
-    (out / "scale_loop_rows.json").write_text(json.dumps(
-        {"version": 1, "source": "correction.visit_drift", "measured_on_epoch": epoch,
-         "provenance": "tool_measured", "rows": rows}))
+def _rows(out: Path, rows, epoch: int = 0, stale: bool = False, cfg=None) -> None:
+    """scale_loop_rows.json as visit_drift writes it (stamped, point 134; ``cfg`` = the
+    correction configuration the reader will verify the stamp with, None = the server's);
+    ``epoch`` is the recorded measured_on_epoch (a record, not the freshness test); ``stale``
+    writes a stamp that is not this session's (what a file measured on another geometry
+    carries)."""
+    V._stamp_out(out, "scale_loop_rows.json", {"rows": rows}, cfg=cfg)
+    p = out / "scale_loop_rows.json"
+    doc = json.loads(p.read_text())
+    doc["measured_on_epoch"] = int(epoch)
+    if stale:
+        doc[V.EVIDENCE_STAMP_KEY] = dict(doc[V.EVIDENCE_STAMP_KEY], sha256="0" * 64)
+    p.write_text(json.dumps(doc))
 
 
 def _row(i, j, s_ab, residual_m=0.005, extent_m=1.0, iid=1, label="desk"):
@@ -74,11 +94,13 @@ def _row(i, j, s_ab, residual_m=0.005, extent_m=1.0, iid=1, label="desk"):
 
 
 def _closures(s_ab):
-    """What three objects seen at the start (chunk 0) and again at the end
+    """What six objects seen at the start (chunk 0) and again at the end
     (chunk 1) read when chunk 1 is `s_ab` times chunk 0 — radial, no tangential
-    part (the silhouette instrument itself is tested in test_visit_drift_*)."""
+    part (the silhouette instrument itself is tested in test_visit_drift_*). Six:
+    the user's rule needs at least 5 judges (point 127)."""
     return [_row(4, 24, s_ab, iid=1, label="wall1"), _row(6, 26, s_ab, iid=2, label="box1"),
-            _row(8, 28, s_ab, iid=3, label="col1")]
+            _row(8, 28, s_ab, iid=3, label="col1"), _row(3, 23, s_ab, iid=4, label="shelf1"),
+            _row(5, 25, s_ab, iid=5, label="wall2"), _row(7, 27, s_ab, iid=6, label="box2")]
 
 
 def _lock_diag(out: Path, frames, owner, drift_by_chunk, rounded_history: bool = True):
@@ -122,12 +144,15 @@ def test_da3_trend_and_anchor_rows_do_not_double_apply_the_gauge(tmp_path):
     sess = _mock_session()
     _ranges, owner = S.chunk_of_keyframes(out, N_KF)
     _lock_diag(out, sess.frames, owner, {0: 1.0, 1: LOCK_DRIFT})
-    _rows(out, _closures(1.0))                 # the closures: nothing left to correct
-    # control — no gauge: the lock-time trend is still a row and moves the chunks
+    # control — no gauge: the lock-time trend is still a row and moves the chunks (the
+    # closures, the judges of point 127, corroborate it: chunk 1 reads small by the drift)
+    _rows(out, _closures(1.0 / LOCK_DRIFT))
     ctl = S.solve_scale_stage(out, sess, [], _scfg(), log=lambda m: None)
     assert ctl["applied"] and ctl["da3_trend_rows"], ctl
     assert ctl["r"][1] / ctl["r"][0] > 1.05, ctl["r"]
-    # the gauge applied: the drift it removed is not asked for again
+    # the gauge applied: the drift it removed is not asked for again — the closures measured
+    # on the current geometry say nothing is left
+    _rows(out, _closures(1.0))
     _gauge(out)
     rep = S.solve_scale_stage(out, sess, [], _scfg(), log=lambda m: None)
     assert not rep["applied"] and rep["r"] == [1.0, 1.0], rep
@@ -146,11 +171,12 @@ def test_stale_closures_do_not_drive_the_graph_after_the_gauge(tmp_path):
     (out / "geometry_epoch.json").write_text(json.dumps(
         {"epoch": 2, "parent_epoch": 1, "kind": "new_cloud", "correction_id": "x"}))
     _gauge(out)
-    _rows(out, _closures(0.80), epoch=1)       # measured before the corrected cloud
+    _rows(out, _closures(0.80), epoch=1, stale=True)   # measured on another geometry
     rep = S.solve_scale_stage(out, sess, [], _scfg(), log=lambda m: None)
     assert not rep["applied"] and rep["loop_rows"] == [], rep
     assert rep["stood_down_for_gauge"]["visit_drift_rows_stale"] == {
-        "n": 3, "measured_on_epoch": 1}
+        "n": 6, "measured_on_epoch": 1}
+    assert rep["loop_rows_refused"]["why"], rep["loop_rows_refused"]
 
 
 def test_solve_depth_remeasures_a_stale_stamp_and_never_solves_the_old_rows(tmp_path, monkeypatch):
@@ -158,7 +184,7 @@ def test_solve_depth_remeasures_a_stale_stamp_and_never_solves_the_old_rows(tmp_
     (out / "geometry_epoch.json").write_text(json.dumps(
         {"epoch": 2, "parent_epoch": 1, "kind": "new_cloud", "correction_id": "x"}))
     _gauge(out)
-    _rows(out, _closures(0.80), epoch=1)
+    _rows(out, _closures(0.80), epoch=1, stale=True)
     called = []
 
     def _measure(o, c, r, log=print):
@@ -193,18 +219,24 @@ def test_a_tangential_false_identity_cannot_move_a_chunk(tmp_path):
                                 oid=iid - 1, points=np.arange(len(ks))), ks)
 
     rows = {}
-    # the genuine closure: copy B sits 10 % short ALONG the rays of its cameras
-    truth = np.array([12.0, 0.8, 3.5])
+    # the genuine closures: copy B sits 10 % short ALONG the rays of its cameras — five of
+    # them (the user's rule judges with at least 5 closures, point 127)
     cam_b = C[22:27].mean(0)
-    A = blob(truth)
-    B = blob(cam_b + (truth - cam_b) / 1.10)
-    (c, ks) = cand(1, "desk", A, B)
-    dr = SimpleNamespace(t=A.mean(0) - B.mean(0), worst_disagreement=0.01)
-    rows["desk"] = vd.scale_rows([(c, dr)], poses, ks, log=lambda m: None)[0]
+    genuine = []
+    for n_, truth in enumerate([np.array([12.0, 0.8, 3.5]), np.array([11.0, 1.2, 2.5]),
+                                np.array([13.0, 0.5, 4.0]), np.array([12.5, 1.0, -2.0]),
+                                np.array([11.5, 0.7, -3.0])]):
+        A = blob(truth)
+        B = blob(cam_b + (truth - cam_b) / 1.10)
+        (c, ks) = cand(1 + n_, "desk", A, B)
+        dr = SimpleNamespace(t=A.mean(0) - B.mean(0), worst_disagreement=0.01)
+        genuine.append(vd.scale_rows([(c, dr)], poses, ks, log=lambda m: None)[0])
+    rows["desk"] = genuine[0]
+    truth = np.array([12.0, 0.8, 3.5])
     # the false identity: another monitor 2.8 m to the side and 0.6 m nearer
     A = blob(truth + np.array([2.8, 0.0, 0.0]))
     B = blob(truth + np.array([0.0, 0.0, 0.6]))
-    (c, ks) = cand(2, "monitor", A, B)
+    (c, ks) = cand(9, "monitor", A, B)
     dr = SimpleNamespace(t=A.mean(0) - B.mean(0), worst_disagreement=0.01)
     rows["monitor"] = vd.scale_rows([(c, dr)], poses, ks, log=lambda m: None)[0]
     mon, desk = rows["monitor"], rows["desk"]
@@ -217,9 +249,9 @@ def test_a_tangential_false_identity_cannot_move_a_chunk(tmp_path):
     _rows(out, [mon])
     alone = S.solve_scale_stage(out, sess, [], _scfg(), log=lambda m: None)
     assert not alone["applied"] and alone["r"] == [1.0, 1.0], alone
-    _rows(out, [desk])
+    _rows(out, genuine)
     good = S.solve_scale_stage(out, sess, [], _scfg(), log=lambda m: None)
-    _rows(out, [desk, mon])
+    _rows(out, genuine + [mon])
     both = S.solve_scale_stage(out, sess, [], _scfg(), log=lambda m: None)
     assert good["applied"] and both["applied"]
     assert np.max(np.abs(np.log(both["r"]) - np.log(good["r"]))) < 0.002, (good["r"], both["r"])
@@ -294,7 +326,7 @@ def test_a_radial_residual_in_one_chunk_is_corrected_after_the_gauge(tmp_path):
     from reconstruction.certify.run import transformed_session
     scene, owner = _scene(tmp_path)
     out = scene.output_dir
-    _rows(out, _closures(C_INJECTED))
+    _rows(out, _closures(C_INJECTED), cfg=make_correction_cfg())
     k_kf, t_kf, srep = V.solve_depth(out, log=lambda m: None, cfg=make_correction_cfg())
     assert k_kf is not None and srep["applied"], srep
     r = np.asarray(srep["r"])
@@ -326,8 +358,8 @@ def _epochs(out):
 def test_depth_and_floor_compose_into_one_epoch_after_the_gauge(tmp_path):
     scene, owner = _scene(tmp_path)
     out = scene.output_dir
-    _rows(out, _closures(C_INJECTED))
     cfg = make_correction_cfg(**{"gates.mode": "advisory"})
+    _rows(out, _closures(C_INJECTED), cfg=cfg)
     assert cfg.visit_drift.skip_when_gauge_applied is False
     res = V.run(tmp_path, log=lambda m: None, cfg=cfg)
     names = [s["stage"] for s in res["stages"]]
@@ -347,9 +379,9 @@ def test_depth_and_floor_compose_into_one_epoch_after_the_gauge(tmp_path):
 def test_the_switch_still_stands_the_depth_down_when_asked(tmp_path):
     scene, owner = _scene(tmp_path)
     out = scene.output_dir
-    _rows(out, _closures(C_INJECTED))
     cfg = make_correction_cfg(**{"gates.mode": "advisory",
                                  "visit_drift.skip_when_gauge_applied": True})
+    _rows(out, _closures(C_INJECTED), cfg=cfg)
     res = V.run(tmp_path, log=lambda m: None, cfg=cfg)
     assert [s["stage"] for s in res["stages"]] == ["depth", "floor_plane"], res["stages"]
     dep = res["stages"][0]
@@ -362,7 +394,7 @@ def test_the_switch_still_stands_the_depth_down_when_asked(tmp_path):
 def test_no_residual_is_identity_and_the_floor_still_applies(tmp_path):
     scene, _owner = _scene(tmp_path, c=1.0)
     out = scene.output_dir
-    _rows(out, _closures(1.0))
+    _rows(out, _closures(1.0), cfg=make_correction_cfg(**{"gates.mode": "advisory"}))
     res = V.run(tmp_path, log=lambda m: None,
                 cfg=make_correction_cfg(**{"gates.mode": "advisory"}))
     assert [s["stage"] for s in res["stages"]] == ["depth", "floor_plane"], res["stages"]
@@ -472,7 +504,7 @@ def test_a_depth_applied_alone_after_the_gauge_says_what_drove_it(tmp_path, monk
     from correction import ledger
     scene, _owner = _scene(tmp_path)
     out = scene.output_dir
-    _rows(out, _closures(C_INJECTED))
+    _rows(out, _closures(C_INJECTED), cfg=make_correction_cfg(**{"gates.mode": "advisory"}))
 
     def _no_floor(*a, **k):
         raise RuntimeError("floor unavailable in this test")

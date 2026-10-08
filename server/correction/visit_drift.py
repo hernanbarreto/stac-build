@@ -140,14 +140,18 @@ def masklet_visits(output_dir, log: Callable[[str], None] = print
 
     from segmentation import mask_space
 
+    from segmentation import fuse_parent
+
     output_dir = Path(output_dir)
-    doc = json.loads((output_dir / "segmentation.json").read_text())
+    # the FUSED objects (USER 2026-09-20: the certification measures the fused instances,
+    # never the parts): the fusion map applied over the immutable raw store (plan point 100)
+    doc = fuse_parent.fused_parent(output_dir)
     entries = doc.get("instances") or []
     masks_path = output_dir / str(doc.get("mask_file") or "seg_masks.npz")
     if not masks_path.exists():
         raise RuntimeError(f"{masks_path} does not exist — the masklets' "
                            f"visits cannot be read without the masks")
-    masks = np.load(masks_path)
+    masks = fuse_parent.FusedMasks(output_dir)
     space = mask_space.resolve(output_dir, masks=masks, log=log)
     n_kf = len(mask_space.keyframe_numbers(output_dir) or [])
     if not n_kf:
@@ -273,9 +277,10 @@ def points_of_masklets(output_dir, frame_global: np.ndarray,
 
     from segmentation import mask_space
 
+    from segmentation import fuse_parent
+
     output_dir = Path(output_dir)
-    doc = json.loads((output_dir / "segmentation.json").read_text())
-    masks = np.load(output_dir / str(doc.get("mask_file") or "seg_masks.npz"))
+    masks = fuse_parent.FusedMasks(output_dir)            # the fused objects' masks (point 100)
     space = mask_space.resolve(output_dir, masks=masks, log=lambda m: None)
     kfs = mask_space.keyframe_numbers(output_dir) or []
     n_kf = len(kfs)
@@ -426,12 +431,20 @@ def filter_chain(masklets: Sequence[Masklet], points_by_oid: Dict[int, np.ndarra
     """
     steps = {"masklets": len(masklets), "enough_points": 0, "two_visits": 0,
              "visits_dropped_close": 0, "after_close": 0,
-             "visits_dropped_share": 0, "after_share": 0}
+             "visits_dropped_share": 0, "after_share": 0,
+             # the margin of every candidate to the user's bars (points 132 / 133): points
+             # over min_points per masklet (on the fused object when it belongs to one),
+             # walk over min_walk_m per visit — recorded, never retuned
+             "margins": {"min_points": int(min_points), "min_walk_m": float(min_walk_m),
+                         "points": [], "walk": []}}
 
     def _size(m) -> int:
         own = len(points_by_oid.get(m.oid, ()))
         return int((group_points or {}).get(int(m.oid), own))
 
+    for m in masklets:
+        steps["margins"]["points"].append({"oid": int(m.oid), "points": _size(m),
+                                           "margin": int(_size(m) - int(min_points))})
     a = [m for m in masklets if _size(m) > int(min_points)]
     steps["enough_points"] = len(a)
     b = [m for m in a if m.n_visits >= 2]
@@ -441,7 +454,11 @@ def filter_chain(masklets: Sequence[Masklet], points_by_oid: Dict[int, np.ndarra
     for m in b:
         v = [m.visits[0]]
         for cur in m.visits[1:]:
-            if chainage_kf[cur[0]] - chainage_kf[v[-1][1]] <= float(min_walk_m):
+            walk = float(chainage_kf[cur[0]] - chainage_kf[v[-1][1]])
+            steps["margins"]["walk"].append({"oid": int(m.oid), "visit": [int(cur[0]), int(cur[1])],
+                                             "walk_m": round(walk, 4),
+                                             "margin_m": round(walk - float(min_walk_m), 4)})
+            if walk <= float(min_walk_m):
                 steps["visits_dropped_close"] += 1
             else:
                 v.append(cur)
@@ -512,31 +529,43 @@ def filter_chain(masklets: Sequence[Masklet], points_by_oid: Dict[int, np.ndarra
 
 def ambiguity(copy_a: np.ndarray, oid: int, label: str,
               points_by_oid: Dict[int, np.ndarray], label_of: Dict[int, str],
-              xyz: np.ndarray, magnitude_m: float, sample: int = 4000,
-              seed: int = 0) -> Tuple[int, List[int]]:
-    """(count, oids) of other masklets of the same label within ``magnitude_m``.
+              xyz: np.ndarray, magnitude_m: float
+              ) -> Tuple[int, List[int], Dict[int, float]]:
+    """(count, oids, margins) of other masklets of the same label within ``magnitude_m``.
 
     Distance is nearest point to nearest point, not centroid to centroid: an
     extended object (a wall, a strip of floor) has no meaningful centre, and
     what makes it a candidate for confusion is that some of it is where the
     displacement says this object could have come from.
+
+    EXACT over ALL points (docs/plan_determinismo.md point 131, 2026-10-08): a k-d tree
+    of copy A queried with every point of every same-label masklet, in masklet order — no
+    random subsample, no generator (the 4000-point draws of one chained generator made a
+    rival's verdict depend on the size of the masklets scanned before it). The query is
+    bounded by the bar itself (a point farther than ``magnitude_m`` from copy A cannot make
+    its masklet a rival, and the bound is what keeps an exact search over every point of
+    every wall of a session affordable). ``margins``: per RIVAL, ``magnitude − nearest
+    distance`` (≥ 0: how far inside the bar it came); a same-label masklet with no point
+    within the bar is clear and is not listed.
     """
     from scipy.spatial import cKDTree
 
-    rng = np.random.default_rng(seed)
-
-    def _sub(a: np.ndarray) -> np.ndarray:
-        return a if len(a) <= sample else a[rng.choice(len(a), sample, replace=False)]
-
-    tree = cKDTree(_sub(np.asarray(copy_a, np.float64)))
+    tree = cKDTree(np.asarray(copy_a, np.float64))
+    mag = float(magnitude_m)
+    bound = float(np.nextafter(mag, np.inf))            # the bar itself included
     hits: List[int] = []
-    for other, idx in points_by_oid.items():
+    margins: Dict[int, float] = {}
+    for other in sorted(points_by_oid):
+        idx = points_by_oid[other]
         if other == oid or label_of.get(other) != label or not len(idx):
             continue
-        dd, _ = tree.query(_sub(xyz[idx]), k=1)
-        if float(dd.min()) <= float(magnitude_m):
+        dd, _ = tree.query(np.asarray(xyz[idx], np.float64), k=1, workers=1,
+                           distance_upper_bound=bound)
+        d_min = float(dd.min())
+        if np.isfinite(d_min) and d_min <= mag:
             hits.append(int(other))
-    return len(hits), sorted(hits)
+            margins[int(other)] = mag - d_min
+    return len(hits), sorted(hits), margins
 
 
 def drop_ambiguous(pairs: Sequence[Tuple["Candidate", "Drift"]],
@@ -554,12 +583,16 @@ def drop_ambiguous(pairs: Sequence[Tuple["Candidate", "Drift"]],
             raise RuntimeError(
                 f"{c.label}#{c.instance_id} carries no copies — build the "
                 f"candidates with `filter_chain(..., xyz=xyz)`")
-        n, hits = ambiguity(c.copies[0], c.oid, c.label, points_by_oid,
-                            label_of, xyz, dr.magnitude)
+        n, hits, margins = ambiguity(c.copies[0], c.oid, c.label, points_by_oid,
+                                     label_of, xyz, dr.magnitude)
         ok = n < int(max_ambiguity)
         report.append({"oid": c.oid, "instance_id": c.instance_id,
                        "label": c.label, "magnitude_m": round(dr.magnitude, 4),
-                       "ambiguity": n, "rivals": hits[:20], "kept": ok})
+                       "visit_b": [int(dr.visit_b[0]), int(dr.visit_b[1])],
+                       "ambiguity": n, "rivals": hits[:20], "kept": ok,
+                       # every rival's margin inside the bar, the 20 deepest first
+                       "rival_margins_m": [[int(o), round(float(m), 5)] for o, m in
+                                           sorted(margins.items(), key=lambda kv: (-kv[1], kv[0]))[:20]]})
         if ok:
             kept.append((c, dr))
     log(f"[visit-drift] step 2b: {len(kept)} of {len(pairs)} objects have "
@@ -604,17 +637,61 @@ def walked_between(chainage: np.ndarray, a_end: int, b_start: int) -> float:
 
 # ── the object's own frame ───────────────────────────────────────────────
 
-def obb_axes(P: np.ndarray, up: np.ndarray) -> np.ndarray:
-    """(L, W, U): the object's long horizontal axis, the one across it, and
-    the scene vertical. Computed on ONE copy — the union of two displaced
-    copies has its principal axis dragged by the displacement itself."""
-    Q = np.asarray(P, np.float64) - np.asarray(P, np.float64).mean(0)
+def obb_axes_info(P: np.ndarray, up: np.ndarray, error_factor: float
+                  ) -> Tuple[np.ndarray, dict]:
+    """(axes (L, W, U), info): the object's long horizontal axis, the one across it, and
+    the scene vertical. Computed on ONE copy — the union of two displaced copies has its
+    principal axis dragged by the displacement itself.
+
+    THE AXIS IS A DECISION, judged with its error (docs/plan_determinismo.md point 130,
+    2026-10-08): the two horizontal eigenvalues λ1 ≥ λ2 of the plan covariance carry the
+    sampling error of a variance estimated on n points, λ·√(2/(n−1)) (the standard error of a
+    sample variance), combined in quadrature. When λ1 − λ2 clears ``error_factor`` × that error
+    the principal direction is the long axis; when it does not (a near-isotropic object: a
+    square table, a column seen from above) the eigenvector would be a coin flip and the views
+    with it, so the long axis is taken by a STABLE RULE — the world X axis projected to the
+    horizontal (world Z when X is vertical) — and the margin is recorded either way. The sign
+    of L is fixed (L·X ≥ 0, else L·Z ≥ 0): an eigenvector's sign is arbitrary.
+    """
+    P = np.asarray(P, np.float64)
+    up = np.asarray(up, np.float64)
+    Q = P - P.mean(0)
     Qh = Q - np.outer(Q @ up, up)
     w, v = np.linalg.eigh(Qh.T @ Qh)
-    L = v[:, int(np.argmax(w))]
+    order = np.argsort(w)[::-1]                       # descending: λ1 (long), λ2 (across), ~0 (up)
+    l1, l2 = float(w[order[0]]), float(w[order[1]])
+    n = int(len(P))
+    err = float(np.sqrt(2.0 / max(n - 1, 1)) * np.hypot(l1, l2))
+    margin = (l1 - l2) - float(error_factor) * err
+    x_w = np.array([1.0, 0.0, 0.0])
+    z_w = np.array([0.0, 0.0, 1.0])
+    if margin > 0.0:
+        L = v[:, order[0]]
+        rule = "principal"
+    else:
+        L = x_w - (x_w @ up) * up
+        if np.linalg.norm(L) < 1e-9:
+            L = z_w - (z_w @ up) * up
+        rule = "world_x"
     L = L - (L @ up) * up
     L = L / (np.linalg.norm(L) + 1e-9)
-    return np.stack([L, np.cross(up, L), up])
+    ref = x_w if abs(L @ x_w) > 1e-9 else z_w
+    if L @ ref < 0:
+        L = -L
+    axes = np.stack([L, np.cross(up, L), up])
+    info = {"rule": rule, "eigenvalues": [l1, l2], "eigen_error": err,
+            "error_factor": float(error_factor), "margin": margin, "n_points": n,
+            "provenance": "tool_measured"}
+    return axes, info
+
+
+def obb_axes(P: np.ndarray, up: np.ndarray, error_factor: Optional[float] = None) -> np.ndarray:
+    """(L, W, U) — :func:`obb_axes_info` without the record; the error factor is the user's
+    (``correction_graph.graph.improvement_error_factor``) when not given."""
+    if error_factor is None:
+        from correction.config import judge_of
+        error_factor = judge_of(None)[0]
+    return obb_axes_info(P, up, error_factor)[0]
 
 
 def iqr_extent(P: np.ndarray, axes: np.ndarray) -> np.ndarray:
@@ -668,29 +745,111 @@ def _silhouette(P: np.ndarray, ax: np.ndarray, ay: np.ndarray,
     return g
 
 
+# MAD → sigma of a normal distribution, 1/Φ⁻¹(3/4): a constant of the estimator, not a decision
+_MAD_TO_SIGMA = 1.0 / 0.6744897501960817
+
+
+def _sub_cell(cm: float, c0: float, cp: float) -> float:
+    """The offset (in cells, within ±0.5) of a parabola's vertex through three equally spaced
+    samples around a maximum ``c0``; 0 when the three do not describe a peak."""
+    denom = cm - 2.0 * c0 + cp
+    if not (denom < 0.0):
+        return 0.0
+    return float(np.clip(0.5 * (cm - cp) / denom, -0.5, 0.5))
+
+
+def _wrap(i: float, n: int) -> float:
+    """A circular-correlation index as a signed shift: past the middle of the raster it is a
+    NEGATIVE shift wrapped around (2·i > n, written without a divisor so the package keeps
+    none)."""
+    return i - n if 2 * i > n else i
+
+
 def view_shift(A: np.ndarray, B: np.ndarray, ax: np.ndarray, ay: np.ndarray,
                cell_m: float, margin_m: float, close_px: int,
-               blur_px: float) -> Tuple[float, float, float]:
-    """(du, dv, peak): the in-plane shift that takes B's silhouette onto A's,
+               blur_px: float, error_factor: Optional[float] = None
+               ) -> Tuple[float, float, float, dict]:
+    """(du, dv, peak, info): the in-plane shift that takes B's silhouette onto A's,
     by normalised cross-correlation. The peak is reported so a view that did
-    not lock on can be seen for what it is."""
+    not lock on can be seen for what it is.
+
+    CONTINUOUS, WITH ITS AMBIGUITY (docs/plan_determinismo.md point 130, 2026-10-08):
+    the peak is located to a fraction of a cell by a parabola through the maximum and its two
+    neighbours on each axis (the shift no longer jumps by whole centimetres), and the SECOND
+    highest local maximum of the correlation surface is recorded with it. When the two peaks
+    lie within the correlation's own noise times ``error_factor`` (the user's factor) the view
+    is AMBIGUOUS (a repeated object: rails, tiles, beams) and ``info['ambiguity_m']`` is the
+    separation of the two peaks: the σ the closure pays for it instead of the argmax deciding
+    between them. Otherwise it is 0 and the margin says by how much the first peak won. THE
+    NOISE is measured on the data: the silhouettes are rasters of point samples, so the two
+    peaks' difference is re-measured on four deterministic quarter samples (every 4th point of
+    each copy) and the noise is their spread over √4 (the sampling error of the full-sample
+    difference), floored by the robust σ (MAD) of the correlation surface.
+    """
+    if error_factor is None:
+        from correction.config import judge_of
+        error_factor = judge_of(None)[0]
     pa = np.stack([A @ ax, A @ ay])
     pb = np.stack([B @ ax, B @ ay])
     lo = np.minimum(pa.min(1), pb.min(1)) - margin_m
     hi = np.maximum(pa.max(1), pb.max(1)) + margin_m
     shape = tuple(((hi - lo) / cell_m).astype(int) + 1)
-    a = _silhouette(A, ax, ay, lo, shape, cell_m, close_px, blur_px)
-    b = _silhouette(B, ax, ay, lo, shape, cell_m, close_px, blur_px)
-    a = (a - a.mean()) / (a.std() + 1e-9)
-    b = (b - b.mean()) / (b.std() + 1e-9)
-    c = np.fft.irfft2(np.fft.rfft2(a) * np.conj(np.fft.rfft2(b)), s=shape) / a.size
+
+    def _corr(PA, PB):
+        a = _silhouette(PA, ax, ay, lo, shape, cell_m, close_px, blur_px)
+        b = _silhouette(PB, ax, ay, lo, shape, cell_m, close_px, blur_px)
+        a = (a - a.mean()) / (a.std() + 1e-9)
+        b = (b - b.mean()) / (b.std() + 1e-9)
+        return np.asarray(np.fft.irfft2(np.fft.rfft2(a) * np.conj(np.fft.rfft2(b)), s=shape) / a.size,
+                          np.float64)
+
+    c = _corr(A, B)
+    n0, n1 = int(c.shape[0]), int(c.shape[1])
     p = np.unravel_index(int(np.argmax(c)), c.shape)
-    # the correlation is circular: a peak past the middle of the raster is a
-    # NEGATIVE shift wrapped around (2*i > n is i > n//2 on integers, written
-    # without a divisor so the package keeps none)
-    du = p[0] - shape[0] if 2 * p[0] > shape[0] else p[0]
-    dv = p[1] - shape[1] if 2 * p[1] > shape[1] else p[1]
-    return du * cell_m, dv * cell_m, float(c.max())
+    peak = float(c[p])
+    # sub-cell vertex on each axis, with circular neighbours
+    d0 = _sub_cell(float(c[(p[0] - 1) % n0, p[1]]), peak, float(c[(p[0] + 1) % n0, p[1]]))
+    d1 = _sub_cell(float(c[p[0], (p[1] - 1) % n1]), peak, float(c[p[0], (p[1] + 1) % n1]))
+    du = _wrap(p[0] + d0, n0) * cell_m
+    dv = _wrap(p[1] + d1, n1) * cell_m
+    # the second peak: the highest local maximum (strictly above its 8 circular neighbours)
+    # other than the first
+    is_max = np.ones(c.shape, bool)
+    for s0 in (-1, 0, 1):
+        for s1 in (-1, 0, 1):
+            if s0 == 0 and s1 == 0:
+                continue
+            is_max &= c > np.roll(np.roll(c, s0, axis=0), s1, axis=1)
+    is_max[p] = False
+    noise_mad = float(_MAD_TO_SIGMA * np.median(np.abs(c - np.median(c))))
+    info = {"peak": peak, "noise": noise_mad, "noise_mad": noise_mad, "noise_peaks": None,
+            "error_factor": float(error_factor),
+            "peak2": None, "shift2_m": None, "separation_m": None, "margin": None,
+            "ambiguity_m": 0.0}
+    if is_max.any():
+        flat = np.flatnonzero(is_max)
+        q_flat = int(flat[np.argmax(c.ravel()[flat])])
+        q = np.unravel_index(q_flat, c.shape)
+        peak2 = float(c[q])
+        du2 = _wrap(float(q[0]), n0) * cell_m
+        dv2 = _wrap(float(q[1]), n1) * cell_m
+        sep = float(np.hypot(du2 - du, dv2 - dv))
+        noise = noise_mad
+        if len(A) >= 8 and len(B) >= 8:
+            # four deterministic quarter samples (every 4th point of each copy): the spread
+            # of the peaks' difference over them, over √4, is the full sample's own error
+            ds = []
+            for k in range(4):
+                ck = _corr(A[k::4], B[k::4])
+                ds.append(float(ck[p] - ck[q]))
+            noise_peaks = float(np.std(ds, ddof=1) / 2.0)
+            noise = max(noise_mad, noise_peaks)
+            info["noise_peaks"] = noise_peaks
+        info["noise"] = noise
+        margin = (peak - peak2) - float(error_factor) * noise
+        info.update({"peak2": peak2, "shift2_m": [du2, dv2], "separation_m": sep,
+                     "margin": margin, "ambiguity_m": (sep if margin <= 0.0 else 0.0)})
+    return du, dv, peak, info
 
 
 @dataclass
@@ -709,6 +868,9 @@ class Drift:
     disagreement: np.ndarray          # per component, between its two views
     n_a: int
     n_b: int
+    ambiguity_m: float = 0.0          # the worst two-peak separation of its views (point 130)
+    converged: bool = True            # refine_drift settled (False: the mean of its cycle)
+    cycle_period: int = 0             # the period of that cycle when it did not
 
     @property
     def magnitude(self) -> float:
@@ -726,6 +888,8 @@ class Drift:
                 "magnitude_m": round(self.magnitude, 5),
                 "disagreement_m": [round(float(x), 5) for x in self.disagreement],
                 "worst_disagreement_m": round(self.worst_disagreement, 5),
+                "ambiguity_m": round(float(self.ambiguity_m), 5),
+                "converged": bool(self.converged), "cycle_period": int(self.cycle_period),
                 "per_view": {k: [round(float(x), 5) for x in v]
                              for k, v in self.per_view.items()},
                 "n_points": [self.n_a, self.n_b],
@@ -734,13 +898,17 @@ class Drift:
 
 def drift_by_views(A: np.ndarray, B: np.ndarray, axes: np.ndarray,
                    cell_m: float, margin_m: float, close_px: int,
-                   blur_px: float) -> Tuple[np.ndarray, Dict[str, tuple], np.ndarray]:
+                   blur_px: float, error_factor: Optional[float] = None
+                   ) -> Tuple[np.ndarray, Dict[str, tuple], np.ndarray, dict]:
     """The displacement from the three orthogonal views, each component
-    measured twice, plus how much its two measurements disagree."""
+    measured twice, plus how much its two measurements disagree, plus the
+    views' ambiguity record (``ambiguity_m`` = the worst two-peak separation
+    among the three views, 0 when every view's first peak won by more than
+    the correlation noise — point 130)."""
     L, W, U = axes[0], axes[1], axes[2]
-    dl1, dw1, p1 = view_shift(A, B, L, W, cell_m, margin_m, close_px, blur_px)
-    dl2, du2, p2 = view_shift(A, B, L, U, cell_m, margin_m, close_px, blur_px)
-    dw3, du3, p3 = view_shift(A, B, W, U, cell_m, margin_m, close_px, blur_px)
+    dl1, dw1, p1, i1 = view_shift(A, B, L, W, cell_m, margin_m, close_px, blur_px, error_factor)
+    dl2, du2, p2, i2 = view_shift(A, B, L, U, cell_m, margin_m, close_px, blur_px, error_factor)
+    dw3, du3, p3, i3 = view_shift(A, B, W, U, cell_m, margin_m, close_px, blur_px, error_factor)
     comp = np.array([(dl1 + dl2) / 2.0, (dw1 + dw3) / 2.0, (du2 + du3) / 2.0])
     dis = np.array([abs(dl1 - dl2), abs(dw1 - dw3), abs(du2 - du3)])
     t = comp[0] * L + comp[1] * W + comp[2] * U
@@ -754,9 +922,12 @@ def drift_by_views(A: np.ndarray, B: np.ndarray, axes: np.ndarray,
     ca, cb = A.mean(0), B.mean(0)
     if np.linalg.norm((cb + t) - ca) > np.linalg.norm((cb - t) - ca):
         t = -t
-    per_view = {"plan_LW": (dl1, dw1, p1), "side_LU": (dl2, du2, p2),
-                "front_WU": (dw3, du3, p3)}
-    return t, per_view, dis
+    per_view = {"plan_LW": (dl1, dw1, p1, i1["ambiguity_m"]),
+                "side_LU": (dl2, du2, p2, i2["ambiguity_m"]),
+                "front_WU": (dw3, du3, p3, i3["ambiguity_m"])}
+    amb = {"ambiguity_m": float(max(i1["ambiguity_m"], i2["ambiguity_m"], i3["ambiguity_m"])),
+           "views": {"plan_LW": i1, "side_LU": i2, "front_WU": i3}}
+    return t, per_view, dis, amb
 
 
 # ── STEPS 4-5-6 — the common region, and the measurement inside it ───────
@@ -1030,15 +1201,17 @@ def birth_systematic(project: Callable[[np.ndarray, int], Tuple[np.ndarray, np.n
 
 
 def mask_store_hw(output_dir) -> Tuple[int, int]:
-    """(H, W) of the session's SAM3 mask grid, read off the store itself."""
+    """(H, W) of the session's SAM3 mask grid, read off the (fused) store itself."""
+    from segmentation import fuse_parent
     output_dir = Path(output_dir)
-    doc = json.loads((output_dir / "segmentation.json").read_text())
-    p = output_dir / str(doc.get("mask_file") or "seg_masks.npz")
-    with np.load(p) as masks:
+    masks = fuse_parent.FusedMasks(output_dir)
+    try:
         key = next((k for k in masks.files if k.startswith("f") and "_o" in k), None)
         if key is None:
-            raise RuntimeError(f"{p} holds no mask — the mask grid is unknown")
+            raise RuntimeError(f"the mask store of {output_dir} holds no mask — the mask grid is unknown")
         a = masks[key]
+    finally:
+        masks.close()
     return int(a.shape[0]), int(a.shape[1])
 
 
@@ -1156,8 +1329,8 @@ class Visibility:
         self.tol = float(depth_tol_m)
         self.min_depth = float(_vd_cfg().min_depth_m if min_depth_m is None
                                else min_depth_m)
-        doc = json.loads((self.dir / "segmentation.json").read_text())
-        self.masks = np.load(self.dir / str(doc.get("mask_file") or "seg_masks.npz"))
+        from segmentation import fuse_parent
+        self.masks = fuse_parent.FusedMasks(self.dir)      # the fused objects' masks (point 100)
         self.space = mask_space.resolve(self.dir, masks=self.masks,
                                         log=lambda m: None)
         kfs = mask_space.keyframe_numbers(self.dir) or []
@@ -1283,23 +1456,73 @@ def common_region(vis: Visibility, oid: int, visits, grid: Grid,
     return s1 & s2
 
 
+def _pair_of(cand: "Candidate", dr: Optional["Drift"] = None, visit_b=None) -> int:
+    """Which of the candidate's visits is the SECOND copy of a measurement: the one
+    ``dr.visit_b`` (or ``visit_b``) names, else the second visit (the first measurement's).
+    Every visit after the earliest is measured against it (point 144), each one its own
+    row; the earliest (``copies[0]``) is always the reference."""
+    vb = visit_b if visit_b is not None else getattr(dr, "visit_b", None)
+    if vb is None:
+        return 1
+    want = (int(vb[0]), int(vb[1]))
+    for i, v in enumerate(cand.visits):
+        if (int(v[0]), int(v[1])) == want:
+            return i
+    raise RuntimeError(f"{cand.label}#{cand.instance_id}: visit {want} is not one of its visits "
+                       f"{[list(v) for v in cand.visits]}")
+
+
+def _cycle_mean(ts: List[np.ndarray], tol: float) -> Tuple[np.ndarray, int]:
+    """(mean, period) of the cycle a non-converging iteration fell into: the smallest period
+    p whose last two occurrences agree within ``tol``; with none, the whole history past the
+    seed is the cycle (declared by period = len − 1)."""
+    n = len(ts)
+    for p in range(1, n):
+        if float(np.linalg.norm(ts[-1] - ts[-1 - p])) <= tol:
+            return np.mean(np.stack(ts[-p:]), 0), p
+    return np.mean(np.stack(ts[1:]), 0), n - 1
+
+
 def refine_drift(vis: Visibility, cand: "Candidate", axes: np.ndarray,
                  t0: np.ndarray, cfg, max_iter: int = 6,
-                 log: Callable[[str], None] = print
+                 log: Callable[[str], None] = print, visit_b=None
                  ) -> Tuple[Optional[np.ndarray], Optional[dict], Optional[np.ndarray], dict]:
     """Measure again using ONLY what both visits saw, until ``t`` stops moving.
 
     Returns (t, per_view, disagreement, report). ``t`` is None when the two
     visits share no voxel — nothing was observed twice and the object cannot
-    testify about a pose error (step 6).
+    testify about a pose error (step 6). ``visit_b`` names the visit measured
+    against the earliest (default: the second).
+
+    WITHOUT CONVERGENCE (point 130): the iteration used to return whatever ``t`` it held
+    after ``max_iter`` rounds, mid-oscillation. Now it returns the MEAN of the cycle it fell
+    into (the smallest period whose last two occurrences agree within a cell), re-measures
+    the views at that ``t`` and declares it (``converged: False``, ``cycle_period``).
     """
-    A, B = cand.copies[0], cand.copies[1]
+    from correction.config import judge_of
+    fac = judge_of(cfg)[0]
+    ib_ = _pair_of(cand, visit_b=visit_b)
+    A, B = cand.copies[0], cand.copies[ib_]
+    visits = [cand.visits[0], cand.visits[ib_]]
     step = float(cfg.voxel_m)
+    cell = float(cfg.silhouette_cell_m)
     t = np.asarray(t0, np.float64).copy()
-    hist, per_view, dis = [], None, None
+    hist, per_view, dis, amb = [], None, None, {"ambiguity_m": 0.0}
+    ts: List[np.ndarray] = [t.copy()]
     grid = make_grid([A, B], axes, step, pad_m=float(np.linalg.norm(t)) + step)
+    converged = False
+    period = 0
+
+    def _common_at(t_at):
+        common = common_region(vis, cand.oid, visits, grid, t_at, [A, B + t_at])
+        ia = grid.index_of(A)
+        ib = grid.index_of(B + t_at)
+        ka = (ia >= 0) & common[np.maximum(ia, 0)]
+        kb = (ib >= 0) & common[np.maximum(ib, 0)]
+        return common, ka, kb
+
     for it in range(int(max_iter)):
-        common = common_region(vis, cand.oid, cand.visits, grid, t, [A, B + t])
+        common, ka, kb = _common_at(t)
         n_common = int(common.sum())
         hist.append({"iter": it, "t_m": [round(float(x), 5) for x in t],
                      "magnitude_m": round(float(np.linalg.norm(t)), 5),
@@ -1309,10 +1532,6 @@ def refine_drift(vis: Visibility, cand: "Candidate", axes: np.ndarray,
                 "reason": "the two visits share no voxel — nothing was "
                           "observed twice", "voxel_m": step, "history": hist,
                 "common_voxels": 0, "provenance": "tool_measured"}
-        ia = grid.index_of(A)
-        ib = grid.index_of(B + t)
-        ka = (ia >= 0) & common[np.maximum(ia, 0)]
-        kb = (ib >= 0) & common[np.maximum(ib, 0)]
         if ka.sum() < 3 or kb.sum() < 3:
             return None, None, None, {
                 "reason": f"the common region holds {n_common} voxel(s) but "
@@ -1320,18 +1539,30 @@ def refine_drift(vis: Visibility, cand: "Candidate", axes: np.ndarray,
                 "voxel_m": step, "history": hist,
                 "common_voxels": n_common, "provenance": "tool_measured"}
         # the copies restricted to what BOTH saw; B is scored where it lands
-        t_new, per_view, dis = drift_by_views(
-            A[ka], B[kb] + t, axes, float(cfg.silhouette_cell_m),
-            float(cfg.search_margin_m), int(cfg.silhouette_close_px),
-            float(cfg.silhouette_blur_px))
+        t_new, per_view, dis, amb = drift_by_views(
+            A[ka], B[kb] + t, axes, cell, float(cfg.search_margin_m),
+            int(cfg.silhouette_close_px), float(cfg.silhouette_blur_px), fac)
         t_new = t + t_new
         moved = float(np.linalg.norm(t_new - t))
         t = t_new
-        if moved <= float(cfg.silhouette_cell_m):
+        ts.append(t.copy())
+        if moved <= cell:
+            converged = True
             break
+    if not converged:
+        t, period = _cycle_mean(ts, cell)
+        common, ka, kb = _common_at(t)
+        if int(common.sum()) and ka.sum() >= 3 and kb.sum() >= 3:
+            _dt, per_view, dis, amb = drift_by_views(
+                A[ka], B[kb] + t, axes, cell, float(cfg.search_margin_m),
+                int(cfg.silhouette_close_px), float(cfg.silhouette_blur_px), fac)
+        hist.append({"iter": "cycle_mean", "t_m": [round(float(x), 5) for x in t],
+                     "magnitude_m": round(float(np.linalg.norm(t)), 5),
+                     "common_voxels": int(common.sum()), "period": period})
     return t, per_view, dis, {"voxel_m": step, "history": hist,
                               "common_voxels": int(common.sum()),
-                              "iterations": len(hist),
+                              "iterations": len(hist), "converged": converged,
+                              "cycle_period": period, "ambiguity": amb,
                               "provenance": "tool_measured"}
 
 
@@ -1376,9 +1607,21 @@ def rival_sigma_factor(n_rivals: int) -> float:
     return float(np.sqrt(max(0, int(n_rivals)) + 1))
 
 
+def chunk_shares(ks: np.ndarray, owner: np.ndarray) -> Dict[int, float]:
+    """{chunk: share} of the points born in keyframes each chunk OWNS — how a copy is spread
+    over the reconstruction's chunks (point 132: a closure is attributed to chunk PAIRS by
+    these shares, continuously, instead of by the owner of one rounded midpoint keyframe)."""
+    ks = np.asarray(ks, np.int64)
+    own = np.asarray(owner, np.int64)[ks]
+    cnt = np.bincount(own[own >= 0])
+    n = float(max(int((own >= 0).sum()), 1))
+    return {int(c): float(cnt[c]) / n for c in np.flatnonzero(cnt)}
+
+
 def scale_rows(kept: Sequence[Tuple["Candidate", "Drift"]], poses: np.ndarray,
                ks_of_point: np.ndarray, log: Callable[[str], None] = print,
-               rivals_of: Optional[Dict[int, int]] = None
+               rivals_of: Optional[Dict[int, int]] = None,
+               owner: Optional[np.ndarray] = None
                ) -> List[dict]:
     """Every closure as the DEPTH ratio between the two chunks it spans.
 
@@ -1396,13 +1639,21 @@ def scale_rows(kept: Sequence[Tuple["Candidate", "Drift"]], poses: np.ndarray,
     rejected by a threshold nobody measured (the doctrine of `verify_loop`,
     USER 2026-09-16: *"no debes rechazar correcciones por umbrales
     arbitrarios"*). pccr's one false identity, `glass_door#121`, is 91 %
-    tangential and prices itself out on its own evidence.
+    tangential and prices itself out on its own evidence. The views'
+    AMBIGUITY (point 130: two correlation peaks within the noise) enters the
+    residual the same way, in quadrature — it is paid, never decided.
+
+    Each closure is one visit measured against the EARLIEST (``dr.visit_b``
+    names it, point 144); ``owner`` (chunk of each keyframe) adds the copies'
+    chunk shares (``chunks_a`` / ``chunks_b``, point 132) — the keyframe
+    midpoints ``i`` / ``j`` stay for the readers that key on a keyframe pair.
     """
     C = np.asarray(poses, np.float64)[:, :3, 3]
     out: List[dict] = []
     for cand, dr in kept:
-        A, B = cand.copies[0], cand.copies[1]
-        (a1, b1), (a2, b2) = cand.visits[0], cand.visits[1]
+        ib_ = _pair_of(cand, dr)
+        A, B = cand.copies[0], cand.copies[ib_]
+        (a1, b1), (a2, b2) = cand.visits[0], cand.visits[ib_]
         kk = np.asarray(ks_of_point, np.int64)[cand.points]
         kA = kk[(kk >= a1) & (kk <= b1)]
         kB = kk[(kk >= a2) & (kk <= b2)]
@@ -1427,23 +1678,31 @@ def scale_rows(kept: Sequence[Tuple["Candidate", "Drift"]], poses: np.ndarray,
         ext = np.asarray(B, np.float64)
         extent = float(np.linalg.norm(np.percentile(ext, 98, axis=0)
                                       - np.percentile(ext, 2, axis=0)))
-        residual = float(np.hypot(tangential, dr.worst_disagreement))
+        amb = float(getattr(dr, "ambiguity_m", 0.0) or 0.0)
+        residual = float(np.sqrt(tangential ** 2 + dr.worst_disagreement ** 2 + amb ** 2))
         _riv = int((rivals_of or {}).get(int(cand.oid), 0))
         _fac = rival_sigma_factor(_riv)
         residual *= _fac
-        out.append({"instance_id": int(cand.instance_id), "label": cand.label,
-                    "rivals": _riv, "sigma_factor": round(_fac, 3),
-                    "i": int(round((a1 + b1) / 2.0)),
-                    "j": int(round((a2 + b2) / 2.0)),
-                    "s_ab": float(1.0 / k_b), "k_b": float(k_b),
-                    "residual_m": residual, "extent_m": extent,
-                    "radial_m": radial, "tangential_m": tangential,
-                    "D_b_m": D_b, "scale_trusted": True,
-                    "source": "visit_drift", "provenance": "tool_measured"})
+        row = {"instance_id": int(cand.instance_id), "label": cand.label,
+               "rivals": _riv, "sigma_factor": round(_fac, 3),
+               "visit_a": [int(a1), int(b1)], "visit_b": [int(a2), int(b2)],
+               "i": int(round((a1 + b1) / 2.0)),
+               "j": int(round((a2 + b2) / 2.0)),
+               "s_ab": float(1.0 / k_b), "k_b": float(k_b),
+               "residual_m": residual, "extent_m": extent,
+               "radial_m": radial, "tangential_m": tangential,
+               "ambiguity_m": amb, "disagreement_m": float(dr.worst_disagreement),
+               "D_b_m": D_b, "scale_trusted": True,
+               "source": "visit_drift", "provenance": "tool_measured"}
+        if owner is not None:
+            row["chunks_a"] = {str(c): v for c, v in sorted(chunk_shares(kA, owner).items())}
+            row["chunks_b"] = {str(c): v for c, v in sorted(chunk_shares(kB, owner).items())}
+        out.append(row)
         log(f"[visit-drift] scale row {cand.label}#{cand.instance_id}: "
-            f"kf {out[-1]['i']}<->{out[-1]['j']}, depth x{k_b:.4f} "
+            f"kf {row['i']}<->{row['j']}, depth x{k_b:.4f} "
             f"(radial {radial * 100:+.1f} cm of {np.linalg.norm(t) * 100:.1f} "
             f"at {D_b:.2f} m, tangential {tangential * 100:.1f} cm"
+            + (f", ambiguity {amb * 100:.1f} cm" if amb else "")
             + (f", {_riv} rival(s) → σ x{_fac:.2f}" if _riv else "") + ")")
     return out
 
@@ -1456,12 +1715,15 @@ class FilterReport:
     dropped_objects: int = 0
     dropped_visits: int = 0
     detail: List[dict] = field(default_factory=list)
+    margins: List[dict] = field(default_factory=list)      # every object's margin to min_points
+    votes: Optional[Dict[str, np.ndarray]] = None          # the ballot of every deleted point
 
     def as_dict(self) -> dict:
         return {"dropped_points": self.dropped_points,
                 "dropped_objects": self.dropped_objects,
                 "dropped_visits": self.dropped_visits,
-                "detail": self.detail[:50], "provenance": "tool_measured"}
+                "detail": self.detail[:50], "margins": self.margins,
+                "provenance": "tool_measured"}
 
 
 def fused_object_roots(output_dir) -> Dict[int, int]:
@@ -1558,7 +1820,8 @@ def _top_frames(vis, oid: int, visit: Tuple[int, int], n: int) -> List[Tuple[int
 
 def other_mask_votes(vis, P: np.ndarray, birth: np.ndarray,
                      own_views: Dict[int, np.ndarray], rival_masks: Callable[[int], Optional[np.ndarray]],
-                     dilate_px: int, occlusion_tol_rel: float, min_tri_deg: float
+                     dilate_px: int, occlusion_tol_rel: float, min_tri_deg: float,
+                     record: Optional[list] = None
                      ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """RULE 4's ballot for the points ``P`` of one object X (birth keyframe per point
     in ``birth``): (n_votes, n_own, n_other) per point.
@@ -1609,14 +1872,49 @@ def other_mask_votes(vis, P: np.ndarray, birth: np.ndarray,
         occluded = measured & (z > zb * (1.0 + tol))
         on_surface = measured & (np.abs(z - zb) <= tol * zb)
         vote = (np.abs(cos) <= cos_max) & ~occluded
-        own = _dilated(own_views[kf], int(dilate_px))[r, c] > 0
+        own_mask = _dilated(own_views[kf], int(dilate_px))
+        own = own_mask[r, c] > 0
         fm = rival_masks(int(kf))
         other = (~own & on_surface & (fm[r, c] > 0)) if fm is not None \
             else np.zeros(len(wo), bool)
         n_votes[wo] += vote.astype(np.int32)
         n_own[wo] += (vote & own).astype(np.int32)
         n_other[wo] += (vote & other).astype(np.int32)
+        if record is not None and vote.any():
+            # the ballot itself (points 106 / 133): every counting vote with the signed
+            # distance (px, + inside) of its pixel to the edge of the mask it was judged
+            # against — the point's own dilated mask and the other objects' mask
+            v = np.flatnonzero(vote)
+            d_own = _edge_distance(own_mask)[r[v], c[v]]
+            d_oth = (_edge_distance(fm)[r[v], c[v]] if fm is not None
+                     else np.full(len(v), np.nan, np.float32))
+            record.append({"pt": wo[v], "kf": np.full(len(v), int(kf), np.int32),
+                           "d_own": d_own.astype(np.float32), "d_other": d_oth.astype(np.float32),
+                           "own": own[v], "other": other[v]})
     return n_votes, n_own, n_other
+
+
+def _edge_distance(mask: np.ndarray) -> np.ndarray:
+    """Signed distance (px) of every pixel to the edge of ``mask``: positive inside, negative
+    outside (exact Euclidean, cv2.DIST_MASK_PRECISE). A mask without an edge (all set or all
+    clear) reads the raster's diagonal — farther than any pixel can be."""
+    import cv2
+    m = (np.asarray(mask) > 0).astype(np.uint8)
+    far = float(np.hypot(*m.shape))
+    if not m.any() or m.all():
+        return np.full(m.shape, far if m.all() else -far, np.float32)
+    inside = cv2.distanceTransform(m, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+    outside = cv2.distanceTransform(1 - m, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+    return np.clip(inside - outside, -far, far).astype(np.float32)
+
+
+def write_votes(path, votes: Dict[str, np.ndarray]) -> None:
+    """The mask filter's vote record (points 106 / 133) as one compressed npz: per deleted
+    point its index into the cloud the filter judged, masklet, rule, the counts of the views
+    that saw it / had it inside / voted / own / other, and — CSR over ``vote_offsets`` — every
+    counting vote's keyframe, rule and the signed pixel distances to the own and the other
+    mask edges. Deterministic bytes (zlib over the same arrays)."""
+    np.savez_compressed(path, **{k: np.asarray(v) for k, v in sorted(votes.items())})
 
 
 def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
@@ -1690,6 +1988,13 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
     off_mask = 0
     off_other = 0
     roots = group_roots or {}
+    # the ballot of every point that leaves (points 106 / 133): the summary of its views and,
+    # CSR, every counting vote with its pixel's distance to the mask edge it was judged against
+    rec: Dict[str, list] = {k: [] for k in ("point_index", "oid", "rule", "n_saw", "n_inside",
+                                             "n_votes", "n_own", "n_other")}
+    det: Dict[str, list] = {k: [] for k in ("vote_kf", "vote_rule", "vote_dist_own_px",
+                                             "vote_dist_other_px", "vote_inside_own", "vote_on_other",
+                                             "n_detail")}
 
     def _root_of(o: int) -> int:
         return int(roots.get(int(o), int(o) + 1))
@@ -1737,6 +2042,9 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
         label = m.label if m is not None else "object"
         _own = len(idx)
         _grp = int((group_points or {}).get(int(oid), _own))
+        # every object's margin to the user's bar is recorded, kept or not (point 133)
+        rep.margins.append({"oid": int(oid), "label": label, "points": int(_own),
+                            "object_points": int(_grp), "margin": int(_grp - int(min_points))})
         if _grp < int(min_points):
             rep.dropped_objects += 1
             rep.detail.append({"oid": int(oid), "label": label,
@@ -1768,12 +2076,14 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
         # RULE 1 — the cross-view test, over the keyframes of the OTHER visits
         sub = idx[alive]
         sub_ks = ks[alive]
-        saw = np.zeros(len(sub), bool)
-        inside = np.zeros(len(sub), bool)
+        n_saw = np.zeros(len(sub), np.int32)
+        n_inside = np.zeros(len(sub), np.int32)
         own_views: Dict[int, np.ndarray] = {}
+        rule1_views: List[Tuple[int, int, int, np.ndarray]] = []   # (visit a, b, kf, mask)
         for vi, (a, b) in enumerate(visits):
             for kf, mm in _top_frames(vis, oid, (a, b), max_frames_per_visit):
                 own_views[int(kf)] = mm
+                rule1_views.append((int(a), int(b), int(kf), mm))
                 other = sub_ks < a
                 other |= sub_ks > b               # born outside this visit
                 if not other.any():
@@ -1786,12 +2096,18 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
                 visible = ~(zpix < (z - vis.tol))     # nothing in front
                 hit = _dilated(mm, int(dilate_px))[r, c] > 0
                 wo = w[ok]
-                saw[wo[visible]] = True
-                inside[wo[visible & hit]] = True
+                n_saw[wo[visible]] += 1
+                n_inside[wo[visible & hit]] += 1
+        saw = n_saw > 0
+        inside = n_inside > 0
 
         # RULE 4 — on ANOTHER object's surface, by the majority of the views that saw it
         conflict = np.zeros(len(sub), bool)
+        nv = np.zeros(len(sub), np.int32)
+        no = np.zeros(len(sub), np.int32)
+        nt = np.zeros(len(sub), np.int32)
         my_root = _root_of(int(oid))
+        _rival_mask = None
         if own_views:
             def _rival_mask(kf: int, _me=my_root) -> Optional[np.ndarray]:
                 """Pixels where ANOTHER object (another fused root) drew a mask."""
@@ -1813,6 +2129,22 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
         alive_idx = np.flatnonzero(alive)
         keep[idx[alive_idx[~drop]]] = True
 
+        # THE RECORD of what left (points 106 / 133): the ballot replayed on the deleted
+        # points only — their views, and every counting vote with its pixel's distance to
+        # the edge of the mask it was judged against
+        d_idx = np.flatnonzero(drop)
+        if len(d_idx):
+            _ballot_record(vis, xyz, sub[d_idx], sub_ks[d_idx], rule1_views, own_views,
+                           _rival_mask, dilate_px, occlusion_tol_rel, min_tri_deg, det)
+            rec["point_index"].append(sub[d_idx].astype(np.int64))
+            rec["oid"].append(np.full(len(d_idx), int(oid), np.int32))
+            rec["rule"].append(np.where(drop_own[d_idx], 1, 4).astype(np.uint8))
+            rec["n_saw"].append(n_saw[d_idx].astype(np.int16))
+            rec["n_inside"].append(n_inside[d_idx].astype(np.int16))
+            rec["n_votes"].append(nv[d_idx].astype(np.int16))
+            rec["n_own"].append(no[d_idx].astype(np.int16))
+            rec["n_other"].append(nt[d_idx].astype(np.int16))
+
     # UNSEGMENTED points are never touched
     keep |= ~seg
     kill = ~keep
@@ -1820,6 +2152,7 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
     rep.detail.append({"reason": "on another object's surface, inside its mask, in "
                                  "the majority of the views that saw it",
                        "points": int(off_other)})
+    rep.votes = _assemble_votes(rec, det)
     log(f"[visit-drift] step 12: {rep.dropped_points:,} of {n_points:,} points "
         f"leave ({off_mask:,} still off their own mask after the correction, "
         f"{off_other:,} on another object's surface in ≥ {min_inside_frac:.0%} of "
@@ -1828,6 +2161,81 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
         f"{rep.dropped_visits} visit(s) at or under {min_visit_share:.0%}); "
         f"{int((~seg).sum()):,} unsegmented points untouched")
     return kill, rep
+
+
+def _ballot_record(vis, xyz: np.ndarray, pts: np.ndarray, ks: np.ndarray,
+                   rule1_views: List[Tuple[int, int, int, np.ndarray]],
+                   own_views: Dict[int, np.ndarray], rival_masks, dilate_px: int,
+                   occlusion_tol_rel: float, min_tri_deg: float,
+                   det: Dict[str, list]) -> None:
+    """Replay the two rules on the deleted points ``pts`` (cloud rows, birth keyframes ``ks``)
+    and append every counting vote to ``det`` — CSR rows in point order: for each point its
+    rule-1 views (the other visits' top frames that saw it: keyframe, the signed distance of
+    its pixel to the edge of the own DILATED mask, whether that put it inside) then its rule-4
+    votes (keyframe, distance to the own dilated mask edge, distance to the other objects'
+    mask edge, inside own / on other); ``det['n_detail']`` gets the per-point vote count.
+    Vectorised: the votes of every view are gathered as arrays and put in point order by ONE
+    stable sort (the order inside a point is the order the views were judged in)."""
+    n = len(pts)
+    P = xyz[pts]
+    blocks: List[Tuple[np.ndarray, ...]] = []      # (pt, kf, rule, d_own, d_other, inside, other)
+    # rule 1: the other visits' frames, as the verdict saw them
+    for (a, b, kf, mm) in rule1_views:
+        other = (ks < a) | (ks > b)
+        if not other.any():
+            continue
+        w = np.flatnonzero(other)
+        ok, r, c, z = vis.project(P[w], kf)
+        if not ok.any():
+            continue
+        zpix = vis.zbuf(kf)[r, c]
+        visible = ~(zpix < (z - vis.tol))
+        q = np.flatnonzero(visible)
+        if not len(q):
+            continue
+        dm = _dilated(mm, int(dilate_px))
+        blocks.append((w[ok][q].astype(np.int64), np.full(len(q), int(kf), np.int32),
+                       np.full(len(q), 1, np.uint8), _edge_distance(dm)[r[q], c[q]].astype(np.float32),
+                       np.full(len(q), np.nan, np.float32), dm[r[q], c[q]] > 0,
+                       np.zeros(len(q), bool)))
+    # rule 4: the own-mask keyframes' ballot
+    if own_views and rival_masks is not None:
+        rec4: list = []
+        other_mask_votes(vis, P, ks, own_views, rival_masks, dilate_px, occlusion_tol_rel,
+                         min_tri_deg, record=rec4)
+        for blk in rec4:
+            m = len(blk["pt"])
+            blocks.append((np.asarray(blk["pt"], np.int64), np.asarray(blk["kf"], np.int32),
+                           np.full(m, 4, np.uint8), np.asarray(blk["d_own"], np.float32),
+                           np.asarray(blk["d_other"], np.float32), np.asarray(blk["own"], bool),
+                           np.asarray(blk["other"], bool)))
+    keys = ("vote_kf", "vote_rule", "vote_dist_own_px", "vote_dist_other_px", "vote_inside_own",
+            "vote_on_other")
+    if blocks:
+        pt = np.concatenate([bk[0] for bk in blocks])
+        order = np.argsort(pt, kind="stable")
+        for i, k in enumerate(keys, start=1):
+            det[k].append(np.concatenate([bk[i] for bk in blocks])[order])
+        det["n_detail"].append(np.bincount(pt, minlength=n).astype(np.int64))
+    else:
+        det["n_detail"].append(np.zeros(n, np.int64))
+
+
+def _assemble_votes(rec: Dict[str, list], det: Dict[str, list]) -> Dict[str, np.ndarray]:
+    """The vote record as flat arrays (CSR over ``vote_offsets``), empty arrays when nothing
+    left the cloud."""
+    out: Dict[str, np.ndarray] = {}
+    for k, dt in (("point_index", np.int64), ("oid", np.int32), ("rule", np.uint8),
+                  ("n_saw", np.int16), ("n_inside", np.int16), ("n_votes", np.int16),
+                  ("n_own", np.int16), ("n_other", np.int16)):
+        out[k] = (np.concatenate(rec[k]) if rec[k] else np.zeros(0, dt)).astype(dt)
+    counts = (np.concatenate(det["n_detail"]) if det.get("n_detail") else np.zeros(0, np.int64))
+    out["vote_offsets"] = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
+    for k, dt in (("vote_kf", np.int32), ("vote_rule", np.uint8), ("vote_dist_own_px", np.float32),
+                  ("vote_dist_other_px", np.float32), ("vote_inside_own", bool),
+                  ("vote_on_other", bool)):
+        out[k] = (np.concatenate(det[k]) if det[k] else np.zeros(0, dt)).astype(dt)
+    return out
 
 
 def _dilated(mask: np.ndarray, px: int) -> np.ndarray:

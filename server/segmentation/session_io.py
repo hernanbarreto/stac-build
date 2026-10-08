@@ -159,9 +159,31 @@ class CameraSource:
     intrinsics_map: Dict[int, np.ndarray]      # frame_idx -> (3,3) K (RGB res)
     source_resolution: Optional[Tuple[int, int]]  # (H, W) of K reference, or None
     backend: str
+    # the LENS of the cloud's camera (precision.camera.CameraModel, native grid) when it has
+    # one, and the native → `source_resolution` grid scale (sx, sy): :meth:`pixels` projects
+    # through it, so a session refined with a lens rung (F5 R2 — pccr 2026-10-07: k1 0.008)
+    # lands on the pixels its masks were drawn on; None = a linear camera
+    lens: Optional[object] = None
+    native_to_grid: Optional[Tuple[float, float]] = None
 
     def K_for(self, frame_idx: int) -> Optional[np.ndarray]:
         return self.intrinsics_map.get(frame_idx)
+
+    def pixels(self, frame_idx: int, pcam: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Camera-frame points [N, 3] with z > 0 → (u, v) on the `source_resolution` grid.
+        Linear with K when the camera has no lens; with a lens: the undistorted native pixel,
+        the lens applied (precision.camera.distort_points), then the grid scale."""
+        pcam = np.asarray(pcam, dtype=np.float64)
+        z = pcam[:, 2]
+        if self.lens is None:
+            K = self.K_for(frame_idx)
+            return K[0, 0] * pcam[:, 0] / z + K[0, 2], K[1, 1] * pcam[:, 1] / z + K[1, 2]
+        from precision.camera import distort_points
+        cam = self.lens
+        uv = np.stack([cam.fx * pcam[:, 0] / z + cam.cx, cam.fy * pcam[:, 1] / z + cam.cy], axis=1)
+        uv = distort_points(uv, cam)
+        sx, sy = self.native_to_grid
+        return uv[:, 0] * sx, uv[:, 1] * sy
 
 
 # where a scan's OWN Stray Scanner data sits, in reading order: ``inputs/stray/`` (the capture
@@ -446,6 +468,59 @@ def _load_neural_source(output_dir: Path) -> Optional[CameraSource]:
     intr_map = {fi: K for fi in pose_map}
     return CameraSource(pose_map=pose_map, intrinsics_map=intr_map,
                         source_resolution=None, backend="da3/mapanything")
+
+
+class CloudCameraError(RuntimeError):
+    """The camera the cloud was built with cannot be established for this session."""
+
+
+def load_cloud_camera_source(output_dir) -> CameraSource:
+    """THE CAMERA THE CLOUD WAS BUILT WITH — for everything that JUDGES the cloud
+    (the mask audit, the hole audit's z-buffers): ``camera.json`` (the session
+    camera, F0 refined by F5) with K expressed on the RECORD grid the cloud's
+    ``pixel_row`` / ``pixel_col`` live on (``correction.visit_drift.trace_grid``,
+    declared — docs/plan_determinismo.md point 108), and the poses of the LIVE
+    epoch, ``camera_poses.txt`` keyed by ``camera_frames.txt`` (point 113: never
+    Stray's ARKit odometry, never ``intrinsic.txt`` — Omega's record of another
+    camera once F5 refined the session's). ``source_resolution`` = (H, W) of the
+    record grid. Anything missing RAISES :class:`CloudCameraError`; a camera
+    with a lens (non-zero distortion) is refused too — this loader projects
+    linearly and the lens would be silently dropped."""
+    from correction.visit_drift import trace_grid
+    from precision.camera import (CAMERA_JSON_NAME, K_native_to_grid, grid_like,
+                                  load_camera_json)
+    out = Path(output_dir)
+    cam_p = out / CAMERA_JSON_NAME
+    if not cam_p.exists():
+        raise CloudCameraError(f"{cam_p} does not exist — the camera the cloud was built with "
+                               f"is unknown (run precision.camera, F0)")
+    cam = load_camera_json(cam_p)
+    lens = cam if np.any(cam.dist() != 0.0) else None     # projected through CameraSource.pixels
+    Ht, Wt = trace_grid(out)
+    g = cam.omega_grid
+    rec = g if (int(g.w), int(g.h)) == (Wt, Ht) else grid_like(g, Wt, Ht, "record")
+    K = np.asarray(K_native_to_grid(cam.K(), rec), np.float64)
+    poses_p = out / "camera_poses.txt"
+    if not poses_p.exists():
+        raise CloudCameraError(f"{poses_p} does not exist — the poses of the live epoch are unknown")
+    lines = _parse_da3_poses_text(poses_p)
+    if not lines:
+        raise CloudCameraError(f"{poses_p} holds no 4x4 pose")
+    frame_map = _load_frame_index_map(out)
+    if not frame_map:
+        raise CloudCameraError(f"{out / 'camera_frames.txt'} is missing — the keyframe list that "
+                               f"keys the poses is unknown")
+    if len(frame_map) != len(lines):
+        raise CloudCameraError(f"camera_frames.txt lists {len(frame_map)} keyframes and "
+                               f"camera_poses.txt holds {len(lines)} poses — they are not one list")
+    pose_map = {int(frame_map[i]): lines[i] for i in sorted(lines)}
+    return CameraSource(pose_map=pose_map, intrinsics_map={f: K for f in pose_map},
+                        source_resolution=(int(Ht), int(Wt)),
+                        backend=f"{CAMERA_JSON_NAME} ({cam.source}, camera epoch "
+                                f"{cam.camera_epoch}) on the {Wt}x{Ht} record grid"
+                                + (f", lens {cam.dist().tolist()}" if lens is not None else ""),
+                        lens=lens,
+                        native_to_grid=(float(Wt) / float(cam.width), float(Ht) / float(cam.height)))
 
 
 def _load_camera_source(session_dir: Path, output_dir: Path) -> Optional[CameraSource]:

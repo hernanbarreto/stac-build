@@ -351,16 +351,14 @@ def test_every_masklet_is_saved_once_with_its_own_masks(tmp_path, monkeypatch):
     category: the first save gave SAM3's 1-based ids store ids 0,1,…, the second
     found 1,… already 'existing' and wrote raw id k over store id k — a duplicate
     object and chimera masks (pccr 2026-09-29: SAM3 166 objects, store 167).
-    Now each category saves only its own masks, once; a category that fails is
-    recorded and the others still run."""
+    Now each category saves only its own masks, once."""
     import torch
     import segmentation.sam3_wrapper as w
     from segmentation import pipeline as P
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     script = {"chair": {0: {0: 1}, 1: {0: 1, 1: 2}, 2: {1: 2}},     # two chairs
               "box": {0: {0: 3}}}                                  # one box
-    monkeypatch.setattr(w, "get_sam3_wrapper",
-                        lambda: _FakeSAM3(script, fail={"conduit"}))
+    monkeypatch.setattr(w, "get_sam3_wrapper", lambda: _FakeSAM3(script))
     frames = tmp_path / "frames_valid"
     frames.mkdir()
     files = [f"{i:06d}.jpg" for i in range(3)]
@@ -370,7 +368,7 @@ def test_every_masklet_is_saved_once_with_its_own_masks(tmp_path, monkeypatch):
     out.mkdir()
     status = {}
     all_masks, labels, seg_meta = P._run_sam3_batched(
-        frames, files, ["chair", "conduit", "box"], 10, 2, 0.3, 0.9, output_dir=out,
+        frames, files, ["chair", "box"], 10, 2, 0.3, 0.9, output_dir=out,
         cfg={"visualization": {"segment_colors": [[1, 2, 3]]}}, prompt_status=status)
     doc = json.loads((out / "segmentation.json").read_text())
     assert sorted(i["label"] for i in doc["instances"]) == ["box", "chair", "chair"], \
@@ -387,9 +385,36 @@ def test_every_masklet_is_saved_once_with_its_own_masks(tmp_path, monkeypatch):
         ((0, 1), (1, 1)), ((1, 2), (2, 2)), ((0, 3),)])
     assert status["chair"]["status"] == "ran" and status["chair"]["n_objects"] == 2
     assert status["box"]["n_objects"] == 1
-    assert status["conduit"]["status"] == "failed"
-    assert "exploded" in status["conduit"]["reason"]
+    assert all("seconds" not in st for st in status.values()), "no clock in the status (point 125)"
     assert all_masks == {}, "the saved masks are not held a second time in RAM"
+
+
+def test_a_category_that_errors_fails_the_run_never_a_partial_result(tmp_path, monkeypatch):
+    """docs/plan_determinismo.md point 92 (2026-10-08): a SAM3 error in any prompt FAILS
+    the run — it used to be recorded as `failed` while the other prompts went on and
+    the store shipped without it. The failing prompt's status names the error; the
+    prompts after it are never reached."""
+    import torch
+    import segmentation.sam3_wrapper as w
+    from segmentation import pipeline as P
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    script = {"chair": {0: {0: 1}}, "box": {0: {0: 3}}}
+    monkeypatch.setattr(w, "get_sam3_wrapper", lambda: _FakeSAM3(script, fail={"conduit"}))
+    frames = tmp_path / "frames_valid"
+    frames.mkdir()
+    files = [f"{i:06d}.jpg" for i in range(3)]
+    for f in files:
+        (frames / f).write_bytes(b"")
+    out = tmp_path / "output"
+    out.mkdir()
+    status = {}
+    with pytest.raises(RuntimeError, match="conduit exploded"):
+        P._run_sam3_batched(frames, files, ["chair", "conduit", "box"], 10, 2, 0.3, 0.9,
+                            output_dir=out, cfg={"visualization": {"segment_colors": [[1, 2, 3]]}},
+                            prompt_status=status)
+    assert status["chair"]["status"] == "ran"
+    assert status["conduit"]["status"] == "failed" and "exploded" in status["conduit"]["reason"]
+    assert "box" not in status, "never reached"
 
 
 def test_the_store_is_appended_not_rewritten(tmp_path):

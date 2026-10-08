@@ -128,13 +128,21 @@ class SceneUnderstanding:
     # every phrase folded into another because it is the SAME NAME
     # (`same_name_key`): {phrase: the phrase that carries it}
     merged: dict[str, str] = field(default_factory=dict)
+    # the scene-type vote (point 89): every answer counted, most voted first, so the
+    # margin of the winner over the runner-up is on record
+    scene_type_votes: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
+        votes = list(self.scene_type_votes.items())
         return {
             "scene_type": self.scene_type,
             "summary": self.summary,
             "objects": self.objects,
-            "merged_same_name": self.merged,
+            # sorted by key (point 87): the bytes of this file never follow a hash seed
+            "merged_same_name": dict(sorted(self.merged.items())),
+            "scene_type_votes": dict(votes),
+            "scene_type_margin": ((votes[0][1] - votes[1][1]) if len(votes) > 1
+                                  else (votes[0][1] if votes else 0)),
             "grouping": GROUPING_VERSION,
             "origin": "vlm_proposed",
             "per_frame": [
@@ -158,27 +166,80 @@ def _parse(txt: str) -> dict | None:
         return None
 
 
+_SALVAGE_FIELD = {"scene_type": re.compile(r'"scene_type"\s*:\s*"((?:[^"\\]|\\.)*)"'),
+                  "summary": re.compile(r'"summary"\s*:\s*"((?:[^"\\]|\\.)*)"')}
+
+
+def parse_or_salvage(txt: str) -> tuple[dict | None, int | None]:
+    """The answer's JSON, or what a CUT answer still holds (docs/plan_determinismo.md point
+    88 — DECIDIDO: the complete JSON objects of a truncated answer are rescued, as the
+    detector already does, instead of the whole frame's objects being thrown away because
+    one token hit max_tokens). Returns ``(doc, n_salvaged)``: ``n_salvaged`` is None when the
+    answer parsed whole, the number of complete ``objects`` entries recovered otherwise —
+    ``scene_type`` / ``summary`` come from their own fields when they were written before the
+    cut. ``(None, None)`` when nothing at all is usable."""
+    d = _parse(txt)
+    if d is not None:
+        return d, None
+    if not txt:
+        return None, None
+    from .detector import _salvage_objects
+    k = txt.find('"objects"')
+    tail = txt[k:] if k >= 0 else txt
+    entries = [o for o in _salvage_objects(tail) if isinstance(o, dict)
+               and (o.get("category") or o.get("name"))]
+    if not entries:
+        return None, None
+    doc: dict = {"objects": entries}
+    for key, rx in _SALVAGE_FIELD.items():
+        m = rx.search(txt[:k] if k >= 0 else txt)
+        if m:
+            try:
+                doc[key] = json.loads('"' + m.group(1) + '"')
+            except ValueError:
+                doc[key] = m.group(1)
+    return doc, len(entries)
+
+
 def _norm_obj(s: str) -> str:
     return re.sub(r"\s+", " ", str(s).strip().lower())
 
 
 def understand_frame(client, image: Image.Image, frame_id: int, max_tokens: int = 512,
                      tile: str | None = None, extra: str | None = None,
-                     prompt: str | None = None) -> FrameUnderstanding | None:
+                     prompt: str | None = None,
+                     record: dict | None = None) -> FrameUnderstanding | None:
     """One VLM call on one image — a keyframe, or (``tile``) a crop of it shown
     at the frame's size. The prompt is the same for both: a crop is still an
     image of the scene; ``extra`` (the second pass over the unsegmented region,
     segmentation/second_pass.py) adds one instruction in front of it, the rules
     stay. ``prompt`` replaces the shipped understanding prompt — the session's own
     (USER 2026-10-05: edited and saved from the Autosegment window,
-    segmentation/autoprompt/autosegment.py). None when the answer does not parse."""
+    segmentation/autoprompt/autosegment.py). None when nothing of the answer is
+    usable (a cut answer keeps its complete objects — :func:`parse_or_salvage`).
+
+    ``record`` (a dict the caller owns) is filled with the call's facts for the census
+    (points 88 / 94): the sha1 of every image sent (as encoded by the client — the bytes
+    the engine saw), ``finish_reason``, the token usage, whether the answer was cut
+    (``truncated``), how many objects were salvaged from a cut answer, ``parsed``."""
     from semantic.types import system, user
     from segmentation.object_captioner import fields_from_shape_entry
     base = prompt if (prompt and prompt.strip()) else _PROMPT
     prompt = (f"{extra}\n" + base) if extra else base
-    resp = client.chat([system(_SYSTEM), user(prompt, images=[image])],
-                        max_tokens=max_tokens, consumer="phase1.understand")
-    d = _parse(resp.content or "")
+    msg = user(prompt, images=[image])
+    if record is not None:
+        record["image_sha1"] = [r.sha1 for r in msg.images]
+    resp = client.chat([system(_SYSTEM), msg], max_tokens=max_tokens,
+                       consumer="phase1.understand")
+    d, n_salvaged = parse_or_salvage(resp.content or "")
+    if record is not None:
+        usage = getattr(resp, "usage", None) or {}
+        finish = getattr(resp, "finish_reason", None)
+        record.update(finish_reason=finish,
+                      completion_tokens=usage.get("completion_tokens") if isinstance(usage, dict) else None,
+                      prompt_tokens=usage.get("prompt_tokens") if isinstance(usage, dict) else None,
+                      truncated=(finish == "length"), salvaged=n_salvaged,
+                      parsed=d is not None)
     if d is None:
         return None
     objs, descs, shapes = [], {}, {}
@@ -280,11 +341,17 @@ def aggregate(frames: list[FrameUnderstanding]) -> SceneUnderstanding:
         return SceneUnderstanding("unknown", "", [], [])
     full = [f for f in frames if f.tile is None] or frames
     type_counts = Counter(f.scene_type for f in full if f.scene_type)
-    scene_type = type_counts.most_common(1)[0][0] if type_counts else "unknown"
+    # most voted first; a tie goes to the type seen first (Counter.most_common is a stable
+    # sort over insertion order) — recorded with its margin (point 89)
+    votes = type_counts.most_common()
+    scene_type = votes[0][0] if votes else "unknown"
     # representative summary = a frame whose type == consensus, longest summary
     cand = [f for f in full if f.scene_type == scene_type] or full
     summary = max((f.summary for f in cand), key=len, default="")
-    obj_counts = Counter(o for f in frames for o in set(f.objects))
+    # ORDERED dedupe per frame (point 87): a str set iterates in the order of the process's
+    # hash seed, which then wrote by_key / merged / the file's bytes in another order on
+    # every run (verified with 4 seeds)
+    obj_counts = Counter(o for f in frames for o in dict.fromkeys(f.objects))
     first_seen: dict[str, int] = {}
     for i, f in enumerate(frames):
         for o in f.objects:
@@ -306,4 +373,5 @@ def aggregate(frames: list[FrameUnderstanding]) -> SceneUnderstanding:
     objects.sort(key=lambda o: (-sum(obj_counts[v] for v in by_key[same_name_key(o)]),
                                 first_seen[o], o))
     return SceneUnderstanding(scene_type=scene_type, summary=summary,
-                              objects=objects, per_frame=frames, merged=merged)
+                              objects=objects, per_frame=frames, merged=merged,
+                              scene_type_votes=dict(votes))

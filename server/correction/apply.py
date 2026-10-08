@@ -37,6 +37,7 @@ TX_PREFIX = "_tx_epoch_"
 PREV_PREFIX = EPOCH_DIR_PREFIX
 SWAP_JOURNAL = "_tx_swap_journal.json"
 MANIFEST_NAME = "_manifest.json"
+MASK_FILTER_VOTES_NAME = "mask_filter_votes.npz"
 
 _SERVER_DIR = str(Path(__file__).resolve().parents[1])
 if _SERVER_DIR not in sys.path:
@@ -178,9 +179,14 @@ def reconsolidation_decision(cfg: CorrectionConfig,
     while the product cloud keeps its own; it can never switch it on against
     the user's switch.
 
-    ``raw`` is the server config dict (None = the server-wide ``config.cfg``).
+    ``raw`` is the configuration dict (None = the one ``cfg`` was loaded from when it
+    carries the precision section — the job's frozen run configuration — else the
+    server-wide ``config.cfg``; correction.config.precision_raw).
     """
     from precision.config import load_precision_config
+    if raw is None:
+        from correction.config import precision_raw
+        raw = precision_raw(cfg)
     if not load_precision_config(raw).cloud.consolidate:
         return False, ("reconstruction.precision.cloud.consolidate is false (USER "
                        "2026-09-30) — the cloud ships as warped; the MLS would "
@@ -227,11 +233,18 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
                       *, correction_id: str, scale_diag_new: Optional[dict],
                       floor_npz: Optional[dict] = None,
                       log=print, progress=None,
-                      b_kf: Optional[np.ndarray] = None) -> dict:
+                      b_kf: Optional[np.ndarray] = None,
+                      record_extra: Optional[dict] = None,
+                      extra_files: Optional[Dict[str, bytes]] = None) -> dict:
     """Build every new-epoch artifact under output/_tx_epoch_<N>/. Returns
     {"tx_dir", "epoch_from", "epoch_to", "artifacts": [...],
      "pose_copies_skipped": [...], "points_moved": int}. Raises on any
-    problem — nothing outside the tx dir is touched."""
+    problem — nothing outside the tx dir is touched.
+
+    ``record_extra``: fields sealed into the epoch's ``geometry_epoch.json`` (the
+    certification's run-configuration sha256 and input stamp, points 126 / 139).
+    ``extra_files``: {relative path: bytes} more epoch artifacts to stage (the
+    mask filter's vote record, point 106 / 133)."""
     output_dir = session.output_dir
     assert_no_interrupted_swap(output_dir)
     # read BEFORE anything is staged: a configuration that cannot say whether
@@ -333,35 +346,30 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
         (tx / "segmentation_result.json").write_text(res_path.read_text())
         _art("segmentation_result.json")
 
-    # 5) depth-correction sidecar (cumulative affine z'' = k·(k₀z + b₀) + b) --
-    from segmentation.session_io import DEPTH_CORRECTION_NAME, \
-        load_depth_affine
-    old_kb = load_depth_affine(output_dir) or {}
-    new_kb = dict(old_kb)
-    for kf in range(session.n_kf):
-        kv = float(k_kf[kf])
-        bv = float(b_kf[kf]) if b_kf is not None else 0.0
-        if kv != 1.0 or bv != 0.0:
-            frame = session.frames[kf]
-            k0, b0 = new_kb.get(frame, (1.0, 0.0))
-            new_kb[frame] = (k0 * kv, kv * b0 + bv)
-    if new_kb or old_kb:
-        (tx / DEPTH_CORRECTION_NAME).write_text(json.dumps(
-            {"version": 2, "epoch": epoch_to,
-             "k": {str(f): round(v[0], 6) for f, v in sorted(new_kb.items())},
-             "b": {str(f): round(v[1], 6) for f, v in sorted(new_kb.items())}},
-            indent=1))
-        _art(DEPTH_CORRECTION_NAME)
+    # 5) depth-correction sidecar, DERIVED FROM THE EPOCH CHAIN -----------
+    # (docs/plan_determinismo.md point 135, 2026-10-08): the affine z' = k·z + b
+    # of this epoch over the reconstruction's PRODUCT epoch = every transform
+    # epoch between them composed from their persisted warps, then this one.
+    # It used to read-modify-write whatever sidecar was live — a previous
+    # certification's factors, a previous reconstruction's — and served that
+    # compound to the TSDF, the hole audit and the VLM/SAM3 depth provider.
+    from segmentation.session_io import DEPTH_CORRECTION_NAME
+    from correction.chain import depth_sidecar
+    sidecar = depth_sidecar(output_dir, session.frames, epoch_to, k_kf, b_kf,
+                            live=epoch_from)
+    (tx / DEPTH_CORRECTION_NAME).write_text(json.dumps(sidecar, indent=1, sort_keys=True))
+    _art(DEPTH_CORRECTION_NAME)
 
     # 6) scale diagnostics regenerated per epoch --------------------------
     if scale_diag_new is not None:
         (tx / "scale_diagnostics.json").write_text(
-            json.dumps(scale_diag_new, indent=2))
+            json.dumps(scale_diag_new, indent=2, sort_keys=True))
         _art("scale_diagnostics.json")
 
     # 7) geometry epoch ---------------------------------------------------
     (tx / EPOCH_FILE).write_text(json.dumps(
-        make_epoch_record(epoch_to, correction_id, epoch_from), indent=1))
+        make_epoch_record(epoch_to, correction_id, epoch_from, **(record_extra or {})),
+        indent=1, sort_keys=True))
     _art(EPOCH_FILE)
 
     # 8) exact per-keyframe transform -------------------------------------
@@ -373,6 +381,11 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
     if floor_npz is not None:
         np.savez(tx / "floor_transform.npz", **floor_npz)
         _art("floor_transform.npz")
+    for rel, payload in sorted((extra_files or {}).items()):
+        p_extra = tx / rel
+        p_extra.parent.mkdir(parents=True, exist_ok=True)
+        p_extra.write_bytes(payload)
+        _art(rel)
 
     # 9a) THE MASK FILTER — last, and INSIDE this transaction ------------
     # USER 2026-09-19: *"al final de todo como último paso antes de la
@@ -398,9 +411,17 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
                 cfg, log=log)
             frep, kept_mask = out if out is not None else (None, None)
             if frep is not None:
+                votes = frep.pop("_votes", None)
                 (tx / "mask_filter.json").write_text(json.dumps(frep, indent=1,
-                                                                default=float))
+                                                                default=float,
+                                                                sort_keys=True))
                 _art("mask_filter.json")
+                if votes is not None:
+                    # the ballot of every point the filter deleted (points 106 /
+                    # 133): an epoch artifact like the filter report
+                    from correction.visit_drift import write_votes
+                    write_votes(tx / MASK_FILTER_VOTES_NAME, votes)
+                    _art(MASK_FILTER_VOTES_NAME)
                 # the epoch npz was written at step 8, before this filter knew
                 # what it would delete. An epoch that moved 22 M points AND
                 # deleted a quarter million is not reproduced by the motion
@@ -595,7 +616,7 @@ def swap_transaction(output_dir: Path, tx_info: dict, log=print) -> None:
             shutil.rmtree(prev, ignore_errors=True)
             journal_path.unlink(missing_ok=True)
             raise
-        (prev / MANIFEST_NAME).write_text(json.dumps(journal, indent=1))
+        (prev / MANIFEST_NAME).write_text(json.dumps(journal, indent=1, sort_keys=True))
         journal_path.unlink()
     shutil.rmtree(tx, ignore_errors=True)
     log(f"  swap complete: epoch {tx_info['epoch_from']} → "

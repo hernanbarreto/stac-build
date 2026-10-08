@@ -190,14 +190,22 @@ def _liar_depth_stage(monkeypatch):
 
 def test_veto_mode_rejected_iteration_keeps_the_previous_epoch_bit_for_bit(tmp_path, truth, monkeypatch):
     """certify.gates.mode = veto (evaluation): a failed gate rejects the
-    iteration and the previous epoch stays bit for bit."""
+    iteration and the previous epoch stays bit for bit.
+
+    CHANGED 2026-10-08 (docs/plan_determinismo.md points 126 / 150): a certification
+    starts from the reconstruction's PRODUCT epoch — never from a certified one — so
+    the "previous epoch" of the second run is the product (epoch 0), the first run's
+    certified epoch is a superseded certification of the same product and goes, and
+    the second run is another job because its configuration differs (a same-input
+    run would be REUSED, not stacked)."""
     sess = truth
     root = _write(tmp_path / "s", sess, _drift(sess))
     out = root / "output"
+    snap0 = session_files_snapshot(out)
     cfg = _cfg(**{"certify.gates.mode": "veto"})
     acta1 = _run(root, sess, cfg, max_iters=1)
     assert acta1["epoch_final"] >= 1, acta1["stop_reason"]
-    snap1 = session_files_snapshot(out)
+    assert acta1["base"]["base_epoch"] == 0 and acta1["input_stamp"]
     _liar_depth_stage(monkeypatch)
     # Since 2026-09-18 the CORRECTION runs at the head of every certification
     # (certify/run.py, unconditional when apply=True) and publishes its own
@@ -213,18 +221,24 @@ def test_veto_mode_rejected_iteration_keeps_the_previous_epoch_bit_for_bit(tmp_p
         lambda session_dir, log=print, **_: {
             "stages": [{"stage": "stood_down_by_test", "status": "skipped"}],
             "elapsed_s": 0.0, "epoch": None, "provenance": "tool_measured"})
-    acta2 = _run(root, sess, cfg, max_iters=1)
+    cfg2 = _cfg(**{"certify.gates.mode": "veto", "certify.eps": 0.051})   # another job: another stamp
+    acta2 = _run(root, sess, cfg2, max_iters=1)
+    assert acta2["base"]["base_epoch"] == 0 and acta2["input_stamp"] != acta1["input_stamp"]
     it = acta2["iterations"][0]
     assert it["verdict"] == "rejected", it
     assert it["gate_mode"] == "veto"
     assert "vs" in it["reason"] and any(not g["passed"] for g in it["gates"])
     assert "rejected" in acta2["stop_reason"]
+    # the product epoch is what the rejected iteration left, bit for bit
     snap2 = session_files_snapshot(out)
     for rel in GEOMETRY_FILES:
-        assert snap2.get(rel) == snap1.get(rel), f"{rel} changed by a rejected iteration"
+        assert snap2.get(rel) == snap0.get(rel), f"{rel} changed by a rejected iteration"
     from correction import ledger
+    from correction.apply import available_epochs
     rows = ledger.ledger_view(out)
     assert rows[-1]["kind"] == "certify" and rows[-1]["verdict"] == "rejected"
+    # nothing stacked: the first run's certified epoch is not on disk any more
+    assert [e["epoch"] for e in available_epochs(out)] == [0]
 
 
 def test_advisory_mode_failed_gate_is_applied_and_declared(tmp_path, truth, monkeypatch):
@@ -232,39 +246,37 @@ def test_advisory_mode_failed_gate_is_applied_and_declared(tmp_path, truth, monk
     the UI receives is the corrected one): the same lying depth stage fails
     a gate, the gate is DECLARED (acta warning, kit ⚠, attention list) and the
     iteration is still APPLIED as a new epoch — the user judges it by
-    selecting between the epochs, which all stay on disk (USER 2026-09-16)."""
+    selecting between the epochs, which all stay on disk (USER 2026-09-16).
+
+    CHANGED 2026-10-08 (points 126 / 136 / 150): the second run starts from the
+    product epoch and its epoch is named product + 1 — it never stacks on the
+    first run's epoch, which is superseded."""
     sess = truth
     root = _write(tmp_path / "s", sess, _drift(sess))
     out = root / "output"
+    snap0 = session_files_snapshot(out)
     cfg = _cfg()
     assert cfg.certify.gates.mode == "advisory"
     acta1 = _run(root, sess, cfg, max_iters=1)
     assert acta1["epoch_final"] >= 1, acta1["stop_reason"]
-    snap1 = session_files_snapshot(out)
     _liar_depth_stage(monkeypatch)
-    # Since 2026-09-18 the CORRECTION runs at the head of every certification
-    # (certify/run.py, unconditional when apply=True) and publishes its own
-    # epoch before any iteration is judged — so a second certify_session can
-    # never leave the geometry untouched. What this test protects is the
-    # ITERATION's veto, not the correction, so the correction is stood down
-    # for the second run only and every assertion below is unchanged.
     import correction.visit_drift_run as _vdr
     monkeypatch.setattr(
         _vdr, "run",
-        # **_ so the stand-in keeps working as the real signature grows
-        # (it gained `cfg` and then `progress`)
         lambda session_dir, log=print, **_: {
             "stages": [{"stage": "stood_down_by_test", "status": "skipped"}],
             "elapsed_s": 0.0, "epoch": None, "provenance": "tool_measured"})
-    acta2 = _run(root, sess, cfg, max_iters=1)
+    cfg2 = _cfg(**{"certify.eps": 0.051})                                  # another job: another stamp
+    acta2 = _run(root, sess, cfg2, max_iters=1)
     it = acta2["iterations"][0]
     assert it["verdict"] == "applied", it
     assert it["gate_mode"] == "advisory" and it["gate_warnings"], it["gates"]
     failed = [g for g in it["gates"] if not g["passed"]]
     assert failed and all(g.get("advisory") for g in failed)
-    assert acta2["epoch_final"] > acta1["epoch_final"]
+    # named relative to the product: product 0 + 1, whatever the first run published
+    assert acta2["base"]["base_epoch"] == 0 and acta2["epoch_final"] == 1
     snap2 = session_files_snapshot(out)
-    assert snap2.get("cleaned_cloud.ply") != snap1.get("cleaned_cloud.ply")
+    assert snap2.get("cleaned_cloud.ply") != snap0.get("cleaned_cloud.ply")
     from correction import ledger
     rows = ledger.ledger_view(out)
     assert rows[-1]["kind"] == "certify" and rows[-1]["verdict"] == "applied"
@@ -272,15 +284,15 @@ def test_advisory_mode_failed_gate_is_applied_and_declared(tmp_path, truth, monk
     att = attention_list(out)
     warn = [a for a in att["items"] if a["kind"] == "gate_warning"]
     assert warn and all("advisory" in a["text"] for a in warn)
-    # the kit can still SHOW the previous epoch, bit for bit — and the declared
+    # the kit can still SHOW the product epoch, bit for bit — and the declared
     # one stays on disk instead of being destroyed by the comparison
     from correction.run import run_select
     from correction.apply import available_epochs
     from correction.epoch import current_epoch
-    run_select(out, acta1["epoch_final"], "test")
-    assert current_epoch(out) == acta1["epoch_final"]
+    run_select(out, 0, "test")
+    assert current_epoch(out) == 0
     for rel in GEOMETRY_FILES:
-        assert session_files_snapshot(out).get(rel) == snap1.get(rel), rel
+        assert session_files_snapshot(out).get(rel) == snap0.get(rel), rel
     assert acta2["epoch_final"] in [e["epoch"] for e in available_epochs(out)]
     run_select(out, acta2["epoch_final"], "test")
     for rel in GEOMETRY_FILES:

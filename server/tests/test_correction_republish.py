@@ -222,10 +222,23 @@ def test_ids_past_the_byte_get_a_compact_index_not_the_same_colour(tmp_path):
     assert class_byte(tmp_path, 270) == cls[-1]
 
 
-def test_more_objects_than_codes_is_refused_not_collapsed(tmp_path):
-    from segmentation.republish import _encode
-    with pytest.raises(ValueError, match="one class byte"):
-        _encode(list(range(300, 300 + 256)))
+def test_more_objects_than_codes_overflow_the_byte_but_never_the_session(tmp_path):
+    """docs/plan_determinismo.md point 107 (DECIDIDO 2026-10-08): no ceiling. The
+    256th object used to RAISE here and the SAM3 stage shipped no segmentation at
+    all; now the byte runs out for the objects with the largest ids (listed in
+    `byte_overflow`, byte 0) while every object keeps its full id in the 16-bit
+    `instance_ids.npy` the LAS writer carries as the `instance` dimension."""
+    from segmentation.republish import INSTANCE_IDS, _encode
+    ids = list(range(300, 300 + 256))
+    m = _encode(ids)
+    assert m["encoding"] == "compact" and m["byte_overflow"] == [555]
+    assert len(m["class_of"]) == 255 and "555" not in m["class_of"]
+    _result(tmp_path, [_inst(i, [n]) for n, i in enumerate(ids)])
+    republish_membership(tmp_path, n_points=len(ids), log=lambda m: None)
+    cls = np.load(tmp_path / CLASSIFICATION)
+    full = np.load(tmp_path / INSTANCE_IDS)
+    assert full.dtype == np.uint16 and full.tolist() == ids
+    assert cls[-1] == 0 and len(set(cls[:-1].tolist())) == 255
 
 
 def test_a_session_with_no_map_reads_as_identity(tmp_path):

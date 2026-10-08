@@ -12,6 +12,12 @@ The motive, measured on pccr 2026-08-31: `wooden_desk#230` (69,608 pts, kf
 which the matcher had already absorbed into it as a fragment. Fused, the same
 object gives visits kf 0-12 and kf 199-215, shares 34.1 %/65.9 %, and a closure
 of 68.9 cm with 3.0 cm of disagreement against a 9.5 cm bar.
+
+2026-10-08 (docs/plan_determinismo.md point 100): the fusion no longer REWRITES the
+parent. The raw store is immutable; the verdict lives in `fusion_map.json`, tied to
+the raw files' sha256, and readers apply it over the raw masks (`fused_parent`,
+`FusedMasks`). The tests below that asserted the rewrite now assert the fused VIEW
+— the same objects, the same ids, the same motive.
 """
 
 import json
@@ -23,8 +29,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from segmentation.fuse_parent import (MAP, MASKS, PARENT, apply_fusion,
-                                      high_water, oids_of, plan_fusion)
+from segmentation.fuse_parent import (MAP, MASKS, PARENT, FusedMasks, FusionStale,
+                                      apply_fusion, fused_parent, high_water, load_map,
+                                      oids_of, plan_fusion)
 
 
 # ── a session on disk: the parent, its masks, and the matcher's record ───
@@ -78,12 +85,14 @@ def test_the_plan_is_remove_only_and_spares_what_is_part_of_nothing(tmp_path):
                     "3": {"into": None, "reason": "too_small"},
                     "4": {"into": None, "reason": "unmatched"}})
     apply_fusion(tmp_path, res, log=lambda m: None)
-    doc = _parent(tmp_path)
+    doc = fused_parent(tmp_path)
     got = {e["instance_id"]: e for e in doc["instances"]}
     assert sorted(got) == [1, 3, 4, 5], \
         "only the absorbed PART leaves; into:None and the unrecorded stay"
     assert [p["instance_id"] for p in got[1]["parts"]] == [2]
     assert "parts" not in got[3] and "parts" not in got[5]
+    # the RAW parent on disk still lists every masklet (point 100: never rewritten)
+    assert sorted(e["instance_id"] for e in _parent(tmp_path)["instances"]) == [1, 2, 3, 4, 5]
 
 
 def test_a_mask_propagated_after_the_matching_is_never_deleted(tmp_path):
@@ -97,7 +106,7 @@ def test_a_mask_propagated_after_the_matching_is_never_deleted(tmp_path):
                              "color": "#000000"})
     (tmp_path / PARENT).write_text(json.dumps(doc))
     apply_fusion(tmp_path, res, log=lambda m: None)
-    assert 9 in {e["instance_id"] for e in _parent(tmp_path)["instances"]}
+    assert 9 in {e["instance_id"] for e in fused_parent(tmp_path)["instances"]}
 
 
 def test_a_record_naming_a_target_the_parent_lacks_is_refused(tmp_path):
@@ -112,17 +121,20 @@ def test_the_parts_masks_are_ored_into_the_survivor_and_their_keys_retire(tmp_pa
     res = _session(tmp_path, [(1, "a"), (2, "a")], {1: [0, 1], 2: [1, 9]},
                    {"2": {"into": 1, "reason": "fragment"}})
     before = _keys(tmp_path)
+    raw_bytes = (tmp_path / MASKS).read_bytes()
     assert "f1_o1" in before
     apply_fusion(tmp_path, res, log=lambda m: None)
-    z = np.load(tmp_path / MASKS)
+    assert (tmp_path / MASKS).read_bytes() == raw_bytes, "the raw store is immutable (point 100)"
+    z = FusedMasks(tmp_path)
     ks = set(z.files)
-    assert not any(k.endswith("_o1") for k in ks), "the part's oid retires"
+    assert not any(k.endswith("_o1") for k in ks), "the part's oid retires (in the fused view)"
     assert {"f0_o0", "f1_o0", "f9_o0"} <= ks, "the survivor gains its frames"
     # frame 1 had both: the union carries the part's own pixel
     assert z["f1_o0"][1 % 8, 0] == 1 and z["f1_o0"][2 % 8, 0] == 1
     assert list(z["obj_ids"]) == [0]
     assert str(z["mask_frame_space"]) == "keyframe_position"
     assert list(z["scaled_res"]) == [8, 4]
+    assert z.frames_for(0) == [(0, "f0_o0"), (1, "f1_o0"), (9, "f9_o0")]
 
 
 def test_masks_of_different_shapes_are_refused_not_ored(tmp_path):
@@ -131,8 +143,9 @@ def test_masks_of_different_shapes_are_refused_not_ored(tmp_path):
     store = dict(np.load(tmp_path / MASKS))
     store["f0_o1"] = np.zeros((4, 4), np.uint8)
     np.savez_compressed(tmp_path / MASKS, **store)
+    apply_fusion(tmp_path, res, log=lambda m: None)
     with pytest.raises(ValueError, match="cannot be one object"):
-        apply_fusion(tmp_path, res, log=lambda m: None)
+        FusedMasks(tmp_path)["f0_o0"]
 
 
 # ── idempotence and the mtime contract ───────────────────────────────────
@@ -144,11 +157,14 @@ def test_a_second_pass_writes_nothing_at_all(tmp_path):
                    {"2": {"into": 1, "reason": "fragment"}})
     apply_fusion(tmp_path, res, log=lambda m: None)
     st = [(p.stat().st_mtime_ns, p.stat().st_size)
-          for p in (tmp_path / PARENT, tmp_path / MASKS)]
+          for p in (tmp_path / PARENT, tmp_path / MASKS, tmp_path / MAP)]
+    first = (tmp_path / MAP).read_bytes()
     apply_fusion(tmp_path, res, log=lambda m: None)
     assert st == [(p.stat().st_mtime_ns, p.stat().st_size)
-                  for p in (tmp_path / PARENT, tmp_path / MASKS)]
-    assert len(json.loads((tmp_path / MAP).read_text())["rounds"]) == 1
+                  for p in (tmp_path / PARENT, tmp_path / MASKS, tmp_path / MAP)]
+    assert (tmp_path / MAP).read_bytes() == first, "one verdict, one byte sequence (point 118)"
+    doc = json.loads(first)
+    assert "rounds" not in doc and "at" not in doc and "archive" not in doc
 
 
 def test_an_empty_record_leaves_the_session_untouched(tmp_path):
@@ -169,7 +185,7 @@ def test_the_survivor_keeps_both_of_its_ids(tmp_path):
                    {1: [0], 2: [9], 7: [3]},
                    {"2": {"into": 1, "reason": "fragment"}})
     apply_fusion(tmp_path, res, log=lambda m: None)
-    got = {e["instance_id"]: e["id"] for e in _parent(tmp_path)["instances"]}
+    got = {e["instance_id"]: e["id"] for e in fused_parent(tmp_path)["instances"]}
     assert got == {1: 0, 7: 6}, "ids unchanged, and non-contiguous is fine"
 
 
@@ -188,22 +204,34 @@ def test_the_split_gate_still_sees_more_than_one_mask(tmp_path):
     res = _session(tmp_path, [(1, "a"), (2, "a")], {1: [0], 2: [9]},
                    {"2": {"into": 1, "reason": "fragment"}})
     apply_fusion(tmp_path, res, log=lambda m: None)
-    surv = _parent(tmp_path)["instances"][0]
+    surv = fused_parent(tmp_path)["instances"][0]
     assert oids_of(surv) == [0, 1]
 
 
 # ── the archive, and back ────────────────────────────────────────────────
 
-def test_the_raw_sam3_output_is_archived_and_restores(tmp_path):
+def test_the_raw_store_is_the_archive_and_the_map_is_tied_to_it(tmp_path):
+    """Point 100: no generations — the raw SAM3 output never changes, so there is
+    nothing to restore; dropping the map IS the unfuse. And a map written for
+    another raw store is refused, never applied."""
     res = _session(tmp_path, [(1, "a"), (2, "a")], {1: [0], 2: [9]},
                    {"2": {"into": 1, "reason": "fragment"}})
+    raw = [(tmp_path / f).read_bytes() for f in (PARENT, MASKS)]
     apply_fusion(tmp_path, res, log=lambda m: None)
-    assert len(_parent(tmp_path)["instances"]) == 1
-    from segmentation.unfuse import generations, unfuse
-    assert [g.name for g in generations(tmp_path)] == ["gen_000"]
-    unfuse(tmp_path, log=lambda m: None)
-    assert len(_parent(tmp_path)["instances"]) == 2
-    assert "f9_o1" in _keys(tmp_path)
+    assert [(tmp_path / f).read_bytes() for f in (PARENT, MASKS)] == raw
+    assert not (tmp_path / "_sam3_raw").exists()
+    assert len(fused_parent(tmp_path)["instances"]) == 1
+    (tmp_path / MAP).unlink()
+    assert len(fused_parent(tmp_path)["instances"]) == 2
+    # a map for another store (the raw masks changed under it) is refused
+    apply_fusion(tmp_path, res, log=lambda m: None)
+    store = dict(np.load(tmp_path / MASKS))
+    store["f3_o1"] = np.ones((8, 4), np.uint8)
+    np.savez_compressed(tmp_path / MASKS, **store)
+    with pytest.raises(FusionStale, match="another raw store"):
+        load_map(tmp_path)
+    with pytest.raises(FusionStale):
+        fused_parent(tmp_path)
 
 
 def test_the_ledger_records_the_round_and_its_reasons(tmp_path):
@@ -213,40 +241,51 @@ def test_the_ledger_records_the_round_and_its_reasons(tmp_path):
                     "3": {"into": 1, "reason": "overlap_dedupe"}})
     apply_fusion(tmp_path, res, log=lambda m: None)
     led = json.loads((tmp_path / MAP).read_text())
-    r = led["rounds"][0]
-    assert r["applied"] == 2
-    assert r["by_reason"] == {"fragment": 1, "overlap_dedupe": 1}
-    assert [p["instance_id"] for p in r["map"]["1"]["parts"]] == [2, 3]
+    assert led["applied"] == 2
+    assert led["by_reason"] == {"fragment": 1, "overlap_dedupe": 1}
+    assert [p["instance_id"] for p in led["map"]["1"]["parts"]] == [2, 3]
     assert led["masks_total"] == 3 and led["objects"] == 1
+    assert led["parent"]["seg_masks_sha256"] and led["parent"]["segmentation_json_sha256"]
 
 
 # ── the motive, pinned ───────────────────────────────────────────────────
 
+def _visits_of_fused(tmp_path, gap=1):
+    """Visits per fused object read through the fused view — the construction
+    `correction.visit_drift.masklet_visits` makes over the parent and the masks."""
+    from segmentation.census import visits_of
+    doc = fused_parent(tmp_path)
+    fm = FusedMasks(tmp_path)
+    out = {}
+    for e in doc["instances"]:
+        kfs = [f for f, k in fm.frames_for(int(e["id"])) if fm[k].any()]
+        out[int(e["instance_id"])] = visits_of(kfs, gap)
+    return out
+
+
 def test_fusion_turns_one_visit_into_the_closure_the_correction_needs(tmp_path):
     """The desk, in miniature: two masklets of ONE object, one seen at the
     start of the walk and one at the end. As parts each reads a single visit
-    and dies at the gate; fused, the object has two."""
-    from correction import visit_drift as vd
+    and dies at the gate; fused, the object has two. (Point 100: the readers
+    that measure objects — the certification's masklet_visits / Visibility —
+    read the fused view, `fused_parent` + `FusedMasks`, not the raw files.)"""
     res = _session(tmp_path, [(1, "desk"), (2, "desk")],
                    {1: list(range(0, 10)), 2: list(range(199, 216))},
                    {"2": {"into": 1, "reason": "fragment"}})
-    raw = vd.masklet_visits(tmp_path, log=lambda m: None)
-    assert sorted(m.n_visits for m in raw) == [1, 1], "as parts: one visit each"
+    raw = _visits_of_fused(tmp_path)
+    assert sorted(len(v) for v in raw.values()) == [1, 1], "as parts: one visit each"
     apply_fusion(tmp_path, res, log=lambda m: None)
-    fused = vd.masklet_visits(tmp_path, log=lambda m: None)
-    assert len(fused) == 1
-    assert fused[0].n_visits == 2, "fused: the revisit becomes measurable"
-    assert fused[0].visits == [(0, 9), (199, 215)]
+    fused = _visits_of_fused(tmp_path)
+    assert list(fused) == [1]
+    assert fused[1] == [[0, 9], [199, 215]], "fused: the revisit becomes measurable"
 
 
 def test_contiguous_parts_collapse_to_one_visit_and_that_is_the_cost(tmp_path):
     """The other side of the trade, stated so nobody rediscovers it as a bug:
     parts that tile one surface WITHOUT a gap fuse into a single continuous
     visit. The pccr floor is 81 such parts."""
-    from correction import visit_drift as vd
     res = _session(tmp_path, [(1, "floor"), (2, "floor")],
                    {1: list(range(0, 100)), 2: list(range(100, 200))},
                    {"2": {"into": 1, "reason": "fragment"}})
     apply_fusion(tmp_path, res, log=lambda m: None)
-    fused = vd.masklet_visits(tmp_path, log=lambda m: None)
-    assert fused[0].n_visits == 1
+    assert _visits_of_fused(tmp_path)[1] == [[0, 199]]

@@ -220,22 +220,10 @@ def _rgb_undistorted(frames_dir: Path, frame: int, maps) -> np.ndarray:
 def _splat(depth: np.ndarray, enter: np.ndarray, K: np.ndarray, c2w_src: np.ndarray,
            w2c_dst: np.ndarray, shape) -> np.ndarray:
     """The surface one keyframe sees, carried into another keyframe's image: per pixel the
-    nearest depth (z-buffer), +inf where nothing lands."""
-    H, W = shape
-    rr, cc = np.nonzero(enter)
-    z = depth[rr, cc].astype(np.float64)
-    X = np.stack([(cc - K[0, 2]) / K[0, 0] * z, (rr - K[1, 2]) / K[1, 1] * z, z], 1)
-    Xw = X @ c2w_src[:3, :3].T + c2w_src[:3, 3]
-    Xd = Xw @ w2c_dst[:3, :3].T + w2c_dst[:3, 3]
-    zd = Xd[:, 2]
-    ok = zd > 0                                   # in front of the camera
-    zs = np.where(ok, zd, 1.0)
-    u = np.rint(K[0, 0] * Xd[:, 0] / zs + K[0, 2]).astype(np.int64)
-    v = np.rint(K[1, 1] * Xd[:, 1] / zs + K[1, 2]).astype(np.int64)
-    ok &= (u >= 0) & (u < W) & (v >= 0) & (v < H)
-    out = np.full(H * W, np.inf, np.float64)
-    np.minimum.at(out, v[ok] * W + u[ok], zd[ok])
-    return out.reshape(H, W)
+    nearest depth (z-buffer), +inf where nothing lands (f6_torch.splat: a stable sort, no scatter —
+    USER 2026-10-08, the maps on the card)."""
+    from precision import f6_torch as FT
+    return FT._np(FT.splat(depth, enter, K, c2w_src, w2c_dst, shape))
 
 
 def repair_contradicted(depth: Dict[int, np.ndarray], enter: Dict[int, np.ndarray],
@@ -245,34 +233,28 @@ def repair_contradicted(depth: Dict[int, np.ndarray], enter: Dict[int, np.ndarra
     still sees a surface: the neighbours' surfaces are carried onto its ray and, when at least
     `min_views` of them agree within `tau` (relative) of their median, the pixel takes that median;
     otherwise it leaves, as before. Returns {frame: (rows, cols, depth)} of the repaired pixels."""
+    import torch
+    from precision import f6_torch as FT
     w2c = {f: np.linalg.inv(c2w[f]) for f in order}
     out: Dict[int, tuple] = {}
     for i, f in enumerate(order):
         bad = contradicted[f]
         if not bad.any():
             continue
-        rr, cc = np.nonzero(bad)
         cand = []
         for d in neighbors:
             j = i + int(d)
             if 0 <= j < len(order):
                 g = order[j]
-                cand.append(_splat(depth[g], enter[g], K, c2w[g], w2c[f], bad.shape)[rr, cc])
+                cand.append(FT.splat(depth[g], enter[g], K, c2w[g], w2c[f], bad.shape))
         if not cand:
             continue
-        C = np.vstack(cand)
-        C[~np.isfinite(C)] = np.nan
-        if not np.isfinite(C).any():
-            continue
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)          # all-NaN columns: nothing landed
-            med = np.nanmedian(C, 0)
-            agree = np.abs(C - med) <= tau * med
-            ok = (agree.sum(0) >= min_views) & np.isfinite(med)
-            if ok.any():
-                zz = np.nanmedian(np.where(agree, C, np.nan)[:, ok], 0)
-                out[f] = (rr[ok], cc[ok], zz.astype(np.float32))
+        C = torch.stack(cand)                                   # [V, H, W], +inf where nothing landed
+        ok, zz, _ = FT.agreeing_median(C, tau, int(min_views))
+        sel = ok & FT._t(bad, torch.bool)
+        if bool(sel.any()):
+            rc = sel.nonzero()
+            out[f] = (FT._np(rc[:, 0]), FT._np(rc[:, 1]), FT._np(zz[sel], np.float32))
     return out
 
 
@@ -280,23 +262,12 @@ def measured_tau(depth: Dict[int, np.ndarray], enter: Dict[int, np.ndarray], K: 
                  c2w: Dict[int, np.ndarray], order: List[int], neighbors, quantile: float,
                  stride: int = 6) -> float:
     """The session's own neighbour disagreement (|z_i→j − d_j| / d_j over pixels both keep),
-    its `quantile` — the tolerance the repair accepts, measured on every run."""
-    w2c = {f: np.linalg.inv(c2w[f]) for f in order}
-    samp = []
-    for i in range(0, len(order), stride):
-        f = order[i]
-        for d in neighbors:
-            j = i + int(d)
-            if not 0 <= j < len(order):
-                continue
-            g = order[j]
-            s = _splat(depth[f], enter[f], K, c2w[f], w2c[g], depth[g].shape)
-            m = np.isfinite(s) & enter[g]
-            if m.any():
-                samp.append((np.abs(s[m] - depth[g][m]) / depth[g][m])[::7])
-    if not samp:
+    its `quantile` — the tolerance the repair accepts, measured on every run (f6_torch.measured_tau)."""
+    from precision import f6_torch as FT
+    tau = FT.measured_tau(depth, enter, K, c2w, order, neighbors, quantile, stride=stride)
+    if not np.isfinite(tau):
         raise CorrectedCloudError("no two keyframes share a surface — the repair has no tolerance to measure")
-    return float(np.percentile(np.concatenate(samp), quantile))
+    return float(tau)
 
 
 def write_chunks(inp, f6: dict, raw_cfg: dict, tmp: Path, log: Callable, ccfg=None) -> List[dict]:
@@ -733,36 +704,18 @@ def write_timing(report_path: Path, times: dict) -> Path:
 # tests/test_corrected_cloud_edges.py. No tolerance of their own: tau is always the session's
 # measured neighbour disagreement (measured_tau), min_views the declared repair_min_views.
 
-_NB8 = ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1))   # 4-neighbours first
-
-
-def _shift(a: np.ndarray, dy: int, dx: int, fill) -> np.ndarray:
-    """out[r, c] = a[r + dy, c + dx]; `fill` where that falls outside the image."""
-    H, W = a.shape
-    out = np.full((H, W), fill, dtype=a.dtype)
-    ys, yd = (slice(dy, H), slice(0, H - dy)) if dy >= 0 else (slice(0, H + dy), slice(-dy, H))
-    xs, xd = (slice(dx, W), slice(0, W - dx)) if dx >= 0 else (slice(0, W + dx), slice(-dx, W))
-    out[yd, xd] = a[ys, xs]
-    return out
-
-
 def window_extremes(depth: np.ndarray, valid: np.ndarray) -> tuple:
     """(min, max) of the VALID depths of each pixel's 3x3 window (inf / 0 where it holds none)."""
-    lo = np.where(valid, depth, np.inf).astype(np.float64)
-    hi = np.where(valid, depth, 0.0).astype(np.float64)
-    mn, mx = lo.copy(), hi.copy()
-    for dy, dx in _NB8:
-        mn = np.minimum(mn, _shift(lo, dy, dx, np.inf))
-        mx = np.maximum(mx, _shift(hi, dy, dx, 0.0))
-    return mn, mx
+    from precision import f6_torch as FT
+    mn, mx = FT.window_extremes(FT._t(depth), FT._t(valid, FT.torch.bool))
+    return FT._np(mn), FT._np(mx)
 
 
 def mixed_pixels(depth: np.ndarray, valid: np.ndarray, tau: float) -> np.ndarray:
     """Pixels on NEITHER surface of a depth step — more than tau (relative to that surface, as the
     vote measures) from both extremes of their 3x3 window: Omega's ramp across an occluding contour."""
-    mn, mx = window_extremes(depth, valid)
-    z = depth.astype(np.float64)
-    return valid & (z > mn * (1.0 + tau)) & (z < mx * (1.0 - tau))
+    from precision import f6_torch as FT
+    return FT._np(FT.mixed_pixels(FT._t(depth), FT._t(valid, FT.torch.bool), tau))
 
 
 def depth_steps(depth: np.ndarray, valid: np.ndarray, tau: float) -> np.ndarray:
@@ -772,8 +725,8 @@ def depth_steps(depth: np.ndarray, valid: np.ndarray, tau: float) -> np.ndarray:
     side. (A band MEASURED from the floor's pass rate per ring away from a step does not exist on pccr:
     9.7 % at the step, 50.8 % at 5 rings, 80 % at 25, 100 % only at 193 — no ring separates the step's
     erosion from the scene's, so the user's own 3x3 window decides.)"""
-    mn, mx = window_extremes(depth, valid)
-    return valid & (mx * (1.0 - tau) > mn * (1.0 + tau))
+    from precision import f6_torch as FT
+    return FT._np(FT.depth_steps(FT._t(depth), FT._t(valid, FT.torch.bool), tau))
 
 
 def snap_mixed(depth: np.ndarray, valid: np.ndarray, labels: np.ndarray, tau: float) -> tuple:
@@ -785,39 +738,9 @@ def snap_mixed(depth: np.ndarray, valid: np.ndarray, labels: np.ndarray, tau: fl
     depth of the nearest of them (4-neighbours before diagonals, their median). When none exists, or
     its label spans both sides (the mask does not follow this step), it is left as it is — the vote
     judges it. Returns (depth, mixed, snapped)."""
-    mixed = mixed_pixels(depth, valid, tau)
-    out = np.array(depth, copy=True)
-    snapped = np.zeros_like(mixed)
-    if not mixed.any():
-        return out, mixed, snapped
-    mn, mx = window_extremes(depth, valid)
-    rr, cc = np.nonzero(mixed)
-    lab = labels[rr, cc]
-    good = valid & ~mixed
-    d64 = depth.astype(np.float64)
-    lab_all = labels.astype(np.int64)
-    Z = np.full((len(_NB8), len(rr)), np.nan)
-    for k, (dy, dx) in enumerate(_NB8):
-        ok = (_shift(good, dy, dx, False)[rr, cc] & (_shift(lab_all, dy, dx, -1)[rr, cc] == lab)
-              & (lab >= 0))
-        Z[k] = np.where(ok, _shift(d64, dy, dx, np.nan)[rr, cc], np.nan)
-    lo, hi = mn[rr, cc], mx[rr, cc]
-    has = np.isfinite(Z)
-    near = has & (np.where(has, Z, 0.0) - lo <= hi - np.where(has, Z, 0.0))
-    far = has & ~near
-    to_near = near.any(0) & ~far.any(0)
-    to_far = far.any(0) & ~near.any(0)
-    decided = to_near | to_far
-    if not decided.any():
-        return out, mixed, snapped
-    pick = np.where(to_near[None], near, far) & decided[None]
-    four = pick[:4].any(0)                                    # a 4-neighbour is nearer than a diagonal
-    is4 = (np.arange(len(_NB8)) < 4)[:, None]
-    sel = np.where(four[None], pick & is4, pick)
-    z_new = np.nanmedian(np.where(sel, Z, np.nan)[:, decided], 0)
-    out[rr[decided], cc[decided]] = z_new
-    snapped[rr[decided], cc[decided]] = True
-    return out, mixed, snapped
+    from precision import f6_torch as FT
+    out, mixed, snapped = FT.snap_mixed(FT._t(depth), FT._t(valid, FT.torch.bool), FT._t(labels, FT.torch.int64), tau)
+    return FT._np(out).astype(depth.dtype), FT._np(mixed), FT._np(snapped)
 
 
 def consecutive_ratio(dep_a: np.ndarray, ok_a: np.ndarray, dep_b: np.ndarray, ok_b: np.ndarray,
@@ -859,52 +782,15 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
     Returns rr, cc, z, agree, contra, contra_fwd (the one-sided count alone), zmed (median of the
     pixel's own depth and the agreeing views' depths along its ray) and splats (views × pixels: each
     neighbour's surface on the pixel's ray, NaN where none lands — what a repair reads)."""
+    from precision import f6_torch as FT
     f = order[i]
-    H, W = depth[f].shape
     rr, cc = np.nonzero(cand)
-    z = depth[f][rr, cc].astype(np.float64)
-    ray = np.stack([(cc - K[0, 2]) / K[0, 0], (rr - K[1, 2]) / K[1, 1], np.ones(len(rr))], 1) @ c2w[f][:3, :3].T
-    C = c2w[f][:3, 3]
-    n = len(z)
-    agree = np.zeros(n, np.int32)
-    contra = np.zeros(n, np.int32)
-    contra_fwd = np.zeros(n, np.int32)
-    cands, splats = [z], []
-    for d in neighbors:
-        j = i + int(d)
-        if not 0 <= j < len(order):
-            continue
-        g = order[j]
-        T = w2c[g]
-        a = T[2, :3] @ C + T[2, 3]
-        b = ray @ T[2, :3]
-        Xg = (C + z[:, None] * ray) @ T[:3, :3].T + T[:3, 3]
-        zg = Xg[:, 2]
-        ok = zg > 0
-        zs = np.where(ok, zg, 1.0)
-        u = np.rint(K[0, 0] * Xg[:, 0] / zs + K[0, 2]).astype(np.int64)
-        v = np.rint(K[1, 1] * Xg[:, 1] / zs + K[1, 2]).astype(np.int64)
-        ok &= (u >= 0) & (u < W) & (v >= 0) & (v < H)
-        dg = np.zeros(n)
-        dg[ok] = depth[g][v[ok], u[ok]]
-        jg = np.zeros(n, bool)
-        jg[ok] = judge[g][v[ok], u[ok]]
-        ok &= jg & (dg > 0)
-        e = np.zeros(n)
-        e[ok] = (zg[ok] - dg[ok]) / dg[ok]
-        ag = ok & (np.abs(e) <= tau) & (np.abs(b) > 0)
-        fwd = ok & (e < -tau)
-        s = _splat(depth[g], judge[g], K, c2w[g], w2c[f], (H, W))[rr, cc]
-        landed = np.isfinite(s)
-        front = landed & (z - np.where(landed, s, 0.0) > tau * np.where(landed, s, 0.0))
-        agree += ag
-        contra_fwd += fwd
-        contra += fwd | front
-        cands.append(np.where(ag, (dg - a) / np.where(np.abs(b) > 0, b, 1.0), np.nan))
-        splats.append(np.where(landed, s, np.nan))
-    zmed = np.nanmedian(np.vstack(cands), 0)
-    return {"rr": rr, "cc": cc, "z": z, "agree": agree, "contra": contra, "contra_fwd": contra_fwd,
-            "zmed": zmed, "splats": np.vstack(splats) if splats else np.zeros((0, n))}
+    v = FT.two_sided_vote(i, order, depth, judge, cand, K, c2w, w2c, neighbors, tau)   # dense, on the card
+    pick = lambda t: FT._np(t)[rr, cc]   # noqa: E731
+    sp = FT._np(v["splats"])
+    return {"rr": rr, "cc": cc, "z": pick(v["z"]), "agree": pick(v["agree"]), "contra": pick(v["contra"]),
+            "contra_fwd": pick(v["contra_fwd"]), "zmed": pick(v["zmed"]),
+            "splats": sp[:, rr, cc] if sp.shape[0] else np.zeros((0, len(rr)))}
 
 
 def agreeing_median(C: np.ndarray, tau: float, min_views: int) -> tuple:
@@ -912,22 +798,13 @@ def agreeing_median(C: np.ndarray, tau: float, min_views: int) -> tuple:
     (relative) of the column's median and, where at least `min_views` of them agree, their median —
     repair_contradicted's rule on values already carried onto the pixels' rays.
     Returns (ok, depth, n_agree)."""
+    from precision import f6_torch as FT
+    C = np.asarray(C, np.float64)
     n = C.shape[1] if C.ndim == 2 else 0
-    ok = np.zeros(n, bool)
-    zz = np.full(n, np.nan)
     if C.ndim != 2 or C.shape[0] == 0 or n == 0:
-        return ok, zz, np.zeros(n, np.int32)
-    C = np.where(np.isfinite(C), C, np.nan)
-    import warnings
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)              # all-NaN columns: nothing landed
-        med = np.nanmedian(C, 0)
-        agree = np.abs(C - med) <= tau * med
-        n_ag = agree.sum(0).astype(np.int32)
-        ok = (n_ag >= min_views) & np.isfinite(med)
-        if ok.any():
-            zz[ok] = np.nanmedian(np.where(agree, C, np.nan)[:, ok], 0)
-    return ok, zz, n_ag
+        return np.zeros(n, bool), np.full(n, np.nan), np.zeros(n, np.int32)
+    ok, zz, n_ag = FT.agreeing_median(FT._t(C), tau, int(min_views))
+    return FT._np(ok), FT._np(zz), FT._np(n_ag, np.int32)
 
 
 def edge_vote_decision(passed: np.ndarray, edge: np.ndarray, agree: np.ndarray, contra: np.ndarray,
@@ -952,7 +829,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--session", required=True)
     args = ap.parse_args(argv)
     from precision.config import load_precision_config
-    run_corrected_cloud(Path(args.session), load_precision_config())
+    from precision import f6_torch as FT
+    pcfg = load_precision_config()
+    # USER 2026-10-08: the splats / medians of the repair run on the card, strict deterministic torch
+    rec = FT.require_cuda(int(pcfg.mono_detail.seed))
+    print(f"{LOG_TAG} maps on {rec['device']} ({rec['card']}), torch {rec['torch']}, deterministic strict")
+    run_corrected_cloud(Path(args.session), pcfg)
     return 0
 
 

@@ -62,7 +62,13 @@ def test_shape_caption_is_the_interface_and_narrative():
     assert set(cap) == IFACE
     assert cap["caption"] == "Desk, rectangular box, painted steel. two drawers on the left"
     assert cap["provenance"] == "vlm_proposed" and cap["source"] == "concept"
-    datetime.fromisoformat(cap["generated"])
+    # docs/plan_determinismo.md point 86 (2026-10-08): 'generated' is the caption's stable
+    # id, derived from its content — the same caption gives the same id, never a clock
+    assert len(cap["generated"]) == 16 and cap["generated"] == shape_caption(
+        {"category": "desk", "shape": "rectangular box", "material": "painted steel",
+         "detail": "two drawers on the left"}, "desk", "concept")["generated"]
+    with pytest.raises(ValueError):
+        datetime.fromisoformat(cap["generated"])
     with pytest.raises(ValueError):
         shape_caption({}, "desk", "manual")
     # no fields at all → the label alone is the caption, the category the label
@@ -242,8 +248,11 @@ def test_projected_instances_inherit_their_concept_and_objects_are_never_downgra
            {"id": 1, "instance_id": 2, "label": "floor"},
            {"id": 2, "instance_id": 3, "label": "window"},            # relabelled: not the same object
            {"id": 5, "instance_id": 6, "label": "black_office_desk", CAPTION_KEY: dict(obj)}]
-    assert carry_object_captions(prev, new) == 1
-    assert new[0][CAPTION_KEY] == obj, "the object caption replaces the re-projected concept one"
+    # docs/plan_determinismo.md point 85 (2026-10-08): NOTHING is carried by instance id —
+    # an id is a counter a re-segmentation reassigns; an object caption is reused only
+    # through its stamp, by caption_session_objects
+    assert carry_object_captions(prev, new) == 0
+    assert new[0][CAPTION_KEY] == cap, "the re-projected concept caption stays until the pass"
     assert CAPTION_KEY not in new[1], "a concept caption is not carried — it is re-derived"
     assert CAPTION_KEY not in new[2]
     assert new[3][CAPTION_KEY] == obj
@@ -259,7 +268,10 @@ def test_the_pipeline_attaches_and_carries_at_the_two_spots():
     assert 'instance["shape_caption"] = _cap' in body
     writer = src[src.index("def _match_and_save_result_locked("):
                  src.index("atomic_write_json(result_path, merged_result)")]
-    assert "carry_object_captions(prev_instances, merged)" in writer
+    # docs/plan_determinismo.md point 85 (2026-10-08): nothing is carried by instance id —
+    # the writer no longer copies object captions across a re-projection; an object
+    # caption is reused only through its stamp (caption_session_objects)
+    assert "carry_object_captions(" not in writer
 
 
 # ── (c) the per-object pass over a synthetic session ──────────────────────
@@ -331,80 +343,118 @@ def test_every_object_gets_its_caption_from_its_largest_mask_views(tmp_path):
     logs = []
     res = caption_session_objects(out, tmp_path, views=2, client=q, log=logs.append)
     assert res["generated"] == 2 and res["kept"] == 0 and res["failed"] == 0 and res["skipped"] == 0
-    assert q.images == [2, 1], "desk: its two largest masks; door: the only mask it has"
+    assert q.images == [2, 1], "desk: two views; door: the only mask it has"
     assert "The images are views of the SAME object" in q.prompts[0]
     assert "tagged as: desk" in q.prompts[0] and "tagged as: door" in q.prompts[1]
     by = _insts(out)
     cap = by[1][CAPTION_KEY]
-    assert set(cap) == IFACE
+    # the interface plus the object caption's stamp and view record (docs/plan_determinismo.md
+    # points 98 / 141, 2026-10-08)
+    assert IFACE <= set(cap) and {"stamp", "views", "view_selection", "images_sha1"} <= set(cap)
     assert cap["source"] == "object" and cap["provenance"] == "vlm_proposed"
     assert cap["category"] == "desk" and cap["shape"] == "rectangular box"
     assert cap["detail"] == "black top with two drawers", "the meta prefix is stripped"
     assert cap["caption"] == "Desk, rectangular box, painted steel. black top with two drawers"
-    datetime.fromisoformat(cap["generated"])
+    # point 86: 'generated' is the caption's stable id, never a clock
+    assert len(cap["generated"]) == 16 and not cap["generated"].startswith("20")
     assert by[2][CAPTION_KEY]["source"] == "object"
     assert by[1]["globalIndices"] == [0, 1, 2], "the rest of the instance is untouched"
     assert not (out / ".matching.lock").exists() or True   # the lock file may remain, never held
-    # a second pass does nothing until asked to refresh
+    # a second pass with the SAME inputs reuses every caption through its stamp
     q2 = _Qwen()
     res2 = caption_session_objects(out, tmp_path, views=2, client=q2, log=logs.append)
-    assert res2 == {"generated": 0, "kept": 2, "failed": 0, "skipped": 0, "n_instances": 2,
-                    "views": 2} and q2.images == []
+    assert (res2["generated"], res2["kept"], res2["undescribed"]) == (0, 2, 0) and q2.images == []
     res3 = caption_session_objects(out, tmp_path, views=1, refresh=True, client=q2, log=logs.append)
     assert res3["generated"] == 2 and q2.images == [1, 1], "views is honoured"
+    # other inputs (one view instead of two) = another stamp: described again without refresh
+    q3 = _Qwen()
+    res4 = caption_session_objects(out, tmp_path, views=2, client=q3, log=logs.append)
+    assert res4["generated"] == 1 and res4["kept"] == 1, "the desk's views changed, the door's did not"
 
 
-def test_views_bounds_the_images_and_the_largest_masks_are_chosen(tmp_path):
-    from segmentation.object_captioner import _instance_views
+def test_views_are_chosen_with_the_area_error_and_ties_break_by_position(tmp_path):
+    """docs/plan_determinismo.md point 98 (DECIDIDO 2026-10-08): masks within 2 × the measured
+    frame-to-frame area dispersion of the n-th largest are TIED with it and the tie breaks by
+    keyframe position — a one-pixel difference no longer swaps a view. On this fixture the
+    areas (4, 9, 1, 6 px at positions 0-3) scatter by 5 px frame to frame, so every mask is
+    within 2 × 5 of the n-th: position decides."""
+    from segmentation.object_captioner import _instance_views, area_error, select_views
     out = _session(tmp_path)
     z = np.load(out / "seg_masks.npz", allow_pickle=True)
     space = mask_space.resolve(out, masks=z)
+    areas = {0: 4, 1: 9, 2: 1, 3: 6}
+    assert area_error(areas) == 5
+    chosen, rec = select_views(areas, 3)
+    assert chosen == [1, 0, 2] and rec["n_tied"] == 4 and rec["nth_area"] == 4
     frames, masks = _instance_views(z, space, tmp_path / "frames", [0], 3)
-    assert [Path(f).name for f in frames] == ["000007.jpg", "000021.jpg", "000000.jpg"], \
-        "largest mask first, named by the VIDEO frame of the keyframe position"
+    assert [Path(f).name for f in frames] == ["000007.jpg", "000000.jpg", "000014.jpg"], \
+        "the tied positions 0, 1, 2 — largest first, named by the VIDEO frame of the position"
     assert masks["000007.jpg"].sum() == 9
     frames1, _ = _instance_views(z, space, tmp_path / "frames", [0], 1)
     assert len(frames1) == 1
     # several oids of one instance: their masks are OR-ed per keyframe
-    frames2, masks2 = _instance_views(z, space, tmp_path / "frames", [0, 1], 1)
+    frames2, masks2 = _instance_views(z, space, tmp_path / "frames", [0, 1], 2)
     assert masks2["000007.jpg"].sum() == 9                  # f1_o1 ⊂ f1_o0 here
+    # a clear winner is never displaced by the tie rule: four still frames (dispersion 0),
+    # the n-th (8000) exactly tied with itself, 9000 above the band
+    chosen, rec = select_views({0: 1000, 1: 1000, 2: 1000, 3: 1000, 4: 9000, 5: 8000}, 2)
+    assert chosen == [4, 5] and rec["area_error"] == 0 and rec["n_above"] == 1 and rec["n_tied"] == 1
+    # a near-tie at the n-th slot (2990 vs 3000, dispersion 5 → band ±10) goes to the
+    # EARLIER keyframe, whichever of the two is the larger
+    chosen, rec = select_views({0: 1000, 1: 1000, 2: 1000, 3: 1000, 4: 9000, 5: 2990, 6: 3000}, 2)
+    assert rec["area_error"] == 5 and rec["n_tied"] == 2 and chosen == [4, 5]
 
 
-def test_service_down_records_nothing_and_says_why(tmp_path, monkeypatch):
+def test_service_down_fails_the_pass_and_writes_nothing(tmp_path, monkeypatch):
+    """docs/plan_determinismo.md points 85 / 156 (2026-10-08): a service that does not come
+    up FAILS the pass — nothing is recorded for a later run to complete."""
+    import contextlib
     import semantic.service as svc
+    from segmentation.object_captioner import CaptionError
     out = _session(tmp_path)
     before = (out / "segmentation_result.json").read_text()
     said = []
-    monkeypatch.setattr(svc, "ensure_service", lambda *a, **k: (said.append("asked"), False)[1])
+
+    @contextlib.contextmanager
+    def down(config, **kw):
+        said.append(kw.get("stage"))
+        raise svc.EngineUnavailable("object descriptions: vLLM did not come up within the startup bound")
+        yield None
+
+    monkeypatch.setattr(svc, "job_engine", down)
     logs = []
-    res = caption_session_objects(out, tmp_path, views=4, log=logs.append)
-    assert said == ["asked"], "the service is brought up through ensure_service, not assumed"
-    assert res["generated"] == 0 and res["skipped"] == 2 and "unavailable" in res["reason"]
+    with pytest.raises(CaptionError, match="did not come up"):
+        caption_session_objects(out, tmp_path, views=4, log=logs.append,
+                                config={"semantic": {"service": {}}, "autoprompt": {}})
+    assert said == ["object descriptions"], "the pass runs on its own engine (job_engine)"
     assert (out / "segmentation_result.json").read_text() == before, "nothing recorded"
     assert _insts(out)[1][CAPTION_KEY]["source"] == "concept", "the concept caption stays"
-    assert any("unavailable" in m and "nothing recorded" in m for m in logs)
     # the stand-alone call raises instead of returning the label as if the VLM wrote it
+    monkeypatch.setattr(svc, "ensure_service", lambda *a, **k: False)
     with pytest.raises(RuntimeError, match="did not come up"):
         caption_object_qwen([str(tmp_path / "frames" / "000007.jpg")],
                             {"000007.jpg": _mask(9).astype(bool)}, "desk")
 
 
-def test_a_failed_object_is_declared_and_the_others_are_written(tmp_path):
+def test_a_failed_object_fails_the_pass_and_an_object_without_a_view_is_declared(tmp_path):
+    """docs/plan_determinismo.md points 85 / 88 / 156 (2026-10-08): ALL OR NOTHING — a call
+    that fails fails the pass and nothing is written; an instance without any SAM3 mask
+    view on disk cannot be described by any model: declared, not a failure."""
+    from segmentation.object_captioner import CaptionError
     out = _session(tmp_path, with_concept=False)
+    before = (out / "segmentation_result.json").read_text()
     q = _Qwen(fail_label="tagged as: door")
     logs = []
-    res = caption_session_objects(out, tmp_path, views=2, client=q, log=logs.append)
-    assert res["generated"] == 1 and res["failed"] == 1
-    by = _insts(out)
-    assert by[1][CAPTION_KEY]["source"] == "object"
-    assert CAPTION_KEY not in by[2], "no caption is invented for the failed one"
-    assert any("#2 'door'" in m and "failed" in m for m in logs)
-    # an instance without any mask on disk is declared too
+    with pytest.raises(CaptionError, match="#2 'door'"):
+        caption_session_objects(out, tmp_path, views=2, client=q, log=logs.append)
+    assert (out / "segmentation_result.json").read_text() == before, "nothing written"
+    # an instance without any mask on disk is declared, the rest is described
     (out / "segmentation.json").write_text(json.dumps({"prompt": "desk", "instances": [
         {"id": 0, "label": "desk", "instance_id": 1}]}))
     res2 = caption_session_objects(out, tmp_path, views=2, client=_Qwen(), log=logs.append)
-    assert res2["failed"] == 1 and res2["kept"] == 1 and res2["generated"] == 0
+    assert res2["undescribed"] == 1 and res2["generated"] == 1 and res2["kept"] == 0
     assert any("#2 'door': no SAM3 mask view" in m for m in logs)
+    assert _insts(out)[1][CAPTION_KEY]["source"] == "object" and CAPTION_KEY not in _insts(out)[2]
 
 
 def test_absorbed_masklets_and_split_children_find_their_masks(tmp_path):
@@ -424,7 +474,9 @@ def test_absorbed_masklets_and_split_children_find_their_masks(tmp_path):
     assert out_res["generated"] == 3 and q.images == [2, 1, 2], "the child uses its parent's masks"
 
 
-# ── the certification worker runs it last, never fatally ─────────────────
+# ── the certification worker runs it last — ALL OR NOTHING (docs/plan_determinismo.md
+#    point 148, 2026-10-08: a service that does not come up or a call that fails FAILS the
+#    stage; this test changed with that decision — it used to pin "never fails the stage")
 
 class _Pipe:
     def __init__(self):
@@ -440,9 +492,9 @@ class _Pipe:
         return False
 
 
-def test_the_worker_captions_after_certify_and_a_failure_never_fails_the_stage(tmp_path, monkeypatch):
+def test_the_worker_captions_after_certify_and_a_failure_fails_the_stage(tmp_path, monkeypatch):
     import segmentation.object_captioner as oc
-    from workers.certify_worker import _caption_objects
+    from workers.certify_worker import CaptionsFailed, _caption_objects
     cfg = load_object_captions(yaml.safe_load(CONFIG_YAML.read_text()))
     seen = {}
 
@@ -463,9 +515,19 @@ def test_the_worker_captions_after_certify_and_a_failure_never_fails_the_stage(t
 
     monkeypatch.setattr(oc, "caption_session_objects", boom)
     pipe = _Pipe()
-    assert _caption_objects(pipe, tmp_path, {}, cfg) is None
-    assert any(l == "warning" and "vLLM exploded" in m and "concept descriptions stay" in m
-               for l, m in pipe.logs)
+    with pytest.raises(CaptionsFailed, match="vLLM exploded"):
+        _caption_objects(pipe, tmp_path, {}, cfg)
+
+    # a run that described only part of the objects fails too: no later run fills the gaps
+    def partial(*a, **k):
+        return {"generated": 2, "kept": 0, "failed": 1, "skipped": 1, "n_instances": 4,
+                "reason": "semantic service unavailable"}
+
+    monkeypatch.setattr(oc, "caption_session_objects", partial)
+    pipe = _Pipe()
+    with pytest.raises(CaptionsFailed, match="1 object\\(s\\) failed and 1 were skipped"):
+        _caption_objects(pipe, tmp_path, {}, cfg)
+    assert any(l == "warning" and "semantic service unavailable" in m for l, m in pipe.logs)
 
     off = type(cfg)(enabled=False, views=cfg.views, understand_max_tokens=cfg.understand_max_tokens)
     pipe = _Pipe()

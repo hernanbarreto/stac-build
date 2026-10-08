@@ -15,11 +15,16 @@
 from __future__ import annotations
 
 import sqlite3
-import time
 from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
+
+# docs/plan_determinismo.md point 118: `created_ns` used to be the wall clock, so scene_r.db —
+# rebuilt on every projection — differed on every run. It is a column readers never consult;
+# the record of WHEN a run happened lives in the stage's timing sidecars, not in a compared
+# artifact. 0 = "no clock in this file" (the plan's own alternative).
+CREATED_NS = 0
 
 
 def _blob(a: np.ndarray) -> bytes:
@@ -187,7 +192,7 @@ class InstanceStore:
                  first_frame=excluded.first_frame, last_frame=excluded.last_frame,
                  scene_type=excluded.scene_type""",
             (instance_id, label, int(known), source, confidence, status, label_origin,
-             n_views, first_frame, last_frame, scene_type, int(time.time() * 1e9)),
+             n_views, first_frame, last_frame, scene_type, CREATED_NS),
         )
         self.conn.commit()
 
@@ -397,7 +402,7 @@ class InstanceStore:
         cur = self.conn.execute(
             "INSERT INTO user_volumes (name,center,size,yaw_deg,created_ns) VALUES (?,?,?,?,?)",
             (name, _blob(np.asarray(center, np.float32)), _blob(np.asarray(size, np.float32)),
-             float(yaw_deg), int(time.time() * 1e9)))
+             float(yaw_deg), CREATED_NS))
         self.conn.commit()
         return int(cur.lastrowid)
 

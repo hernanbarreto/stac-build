@@ -9,14 +9,16 @@ Persists:
     (R_kf, t_kf, k_kf, real frame numbers) for bit-faithful replay without
     recomputing slerp, and for re-applying corrections to a
     re-reconstruction of the same scene (re-keyed by frame_global).
-  * a mirror of the ledger in the instance store's ``scene_meta`` (the jsonl
-    stays authoritative; the mirror is refreshed on every append so a store
-    rebuild only loses it until the next entry).
   * ``output/corrections.timing.jsonl`` — WHEN each run was recorded (wall
-    clock), keyed by its correction id. Kept apart from the ledger since
-    2026-10-07 (docs/plan_determinismo.md point 36): the ledger, the epoch
-    record and the per-run report are compared byte for byte between two runs
-    of the same session, and a clock never repeats.
+    clock) and how long it took, keyed by its correction id. Kept apart from
+    the ledger since 2026-10-07 (docs/plan_determinismo.md point 36): the
+    ledger, the epoch record and the per-run report are compared byte for byte
+    between two runs of the same session, and a clock never repeats.
+
+The ledger is HISTORY: it is never mirrored into scene_r.db any more (point
+136, 2026-10-08 — the mirror made the store's bytes depend on every run that
+ever reached the session) and no compared product counts its lines
+(``correction.epoch.corrections_summary`` reads the live LINEAGE instead).
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import json
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -43,13 +45,26 @@ def new_correction_id(*parts: Any) -> str:
     epochs it goes from / to, the digest of the poses it started from and of the transform it
     applies ...) the id is DERIVED from them (``repro.stable_id``, the ledger's 8 hex characters)
     — a re-run of the same correction on the same session writes the same id, the same ledger
-    line and the same report file (docs/plan_determinismo.md points 36 / 56: every producer of the
-    Omega → F6 chain passes its parts). Without parts it stays the random id of the stages that
-    have not been converted (certification / witness / post-hoc graph, outside that chain)."""
+    line and the same report file (docs/plan_determinismo.md points 36 / 56 / 137: every producer
+    of the Omega → F6 chain AND every writer of the correction / certification passes its parts).
+    Without parts it is still the random id of the callers outside both (precision/fuse.py,
+    reconstruction/witness/run.py, reconstruction/witness/depth_tracks.py,
+    reconstruction/loops/kf_graph.py — to convert in their own packages); nothing in this
+    package calls it that way."""
     if parts:
         from repro import stable_id
         return stable_id("correction", *parts, n_hex=CORRECTION_ID_HEX)
     return str(uuid.uuid4())[:CORRECTION_ID_HEX]
+
+
+def transform_parts(kind: str, epoch_from: int, frames: Sequence[int], R_kf: np.ndarray,
+                    t_kf: np.ndarray, k_kf: np.ndarray, b_kf: Optional[np.ndarray] = None,
+                    *extra: Any) -> List[Any]:
+    """The parts of a transform epoch's id: what it applies, to which keyframes, on top of which
+    epoch — the same inputs give the same id (:func:`new_correction_id`)."""
+    return [str(kind), int(epoch_from), [int(f) for f in frames], np.asarray(R_kf, np.float64),
+            np.asarray(t_kf, np.float64), np.asarray(k_kf, np.float64),
+            (np.asarray(b_kf, np.float64) if b_kf is not None else np.zeros(len(k_kf))), *extra]
 
 
 def record_timing(output_dir, correction_id: str, **times: Any) -> None:
@@ -85,31 +100,10 @@ def read_ledger(output_dir) -> List[dict]:
 
 
 def _append(output_dir, entry: dict) -> None:
+    # the ledger line is written with sorted keys and no clock: the same run writes the
+    # same bytes (point 36); no mirror into scene_r.db (point 136)
     with open(_ledger_path(output_dir), "a") as f:
-        f.write(json.dumps(entry) + "\n")
-    _mirror_to_store(output_dir)
-
-
-def _mirror_to_store(output_dir) -> None:
-    """Best-effort mirror into scene_r.db scene_meta (jsonl is authoritative;
-    a session without a store simply has no mirror — that is declared here,
-    not swallowed)."""
-    db = Path(output_dir) / "scene_r.db"
-    if not db.exists():
-        return
-    try:
-        import sys
-        server_dir = str(Path(__file__).resolve().parents[1])
-        if server_dir not in sys.path:
-            sys.path.insert(0, server_dir)
-        from phase_r.instance_store import InstanceStore
-        store = InstanceStore(db)
-        store.set_meta("corrections_ledger",
-                       json.dumps(read_ledger(output_dir)))
-        store.close()
-    except Exception as e:  # noqa: BLE001 — mirror only; jsonl already holds the truth
-        print(f"[Correction] ledger mirror to instance store failed "
-              f"(jsonl is authoritative): {e}", flush=True)
+        f.write(json.dumps(entry, sort_keys=True, default=float) + "\n")
 
 
 def record_run(output_dir, *, correction_id: str, epoch_from: int,
@@ -117,11 +111,11 @@ def record_run(output_dir, *, correction_id: str, epoch_from: int,
                instance_ids: List[int], visits: list, observability: list,
                diagnosis: list, anchors: list, gates: list,
                overrides: Optional[dict], report_path: str,
-               verdict: str = "applied") -> dict:
+               verdict: str = "applied", elapsed_s: Optional[float] = None) -> dict:
     if verdict not in ("applied", "rejected"):
         raise RuntimeError(f"invalid verdict {verdict!r}")
-    # no wall clock in the ledger line (point 36): when the run happened goes to
-    # corrections.timing.jsonl, keyed by the same correction id
+    # no wall clock in the ledger line (point 36): when the run happened — and how long it took
+    # (``elapsed_s``, point 166) — go to corrections.timing.jsonl, keyed by the same id
     entry = {
         "type": "run", "correction_id": correction_id,
         "epoch_from": int(epoch_from), "epoch_to": int(epoch_to),
@@ -133,7 +127,10 @@ def record_run(output_dir, *, correction_id: str, epoch_from: int,
         "report": report_path, "algorithm_version": ALGORITHM_VERSION,
     }
     _append(output_dir, entry)
-    record_timing(output_dir, correction_id, epoch_to=int(epoch_to), kind=kind)
+    times: Dict[str, Any] = {"epoch_to": int(epoch_to), "kind": kind}
+    if elapsed_s is not None:
+        times["elapsed_s"] = round(float(elapsed_s), 1)
+    record_timing(output_dir, correction_id, **times)
     return entry
 
 

@@ -1,8 +1,11 @@
 
 #include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <execution>
 #include <algorithm>
+#include <fstream>
+#include <iterator>
 
 #include "indexer.h"
 
@@ -1581,8 +1584,157 @@ void Writer::closeAndWait() {
 
 
 
+// STAC 2026-10-08 (docs/plan_determinismo.md point 103): CANONICAL node offsets. The vendor hands
+// every node its octree.bin offset by an atomic fetch_add at flush time, i.e. in the order the
+// sampler threads FINISH, so the layout of octree.bin (and every byteOffset in hierarchy.bin)
+// followed the scheduling. After the indexing the nodes are re-laid in breadth-first order of
+// their names (r, r0..r7, r00..) - the order hierarchy.bin lists them in - octree.bin is rewritten
+// in that order and the flushed hierarchy records are updated, so two conversions of one cloud
+// give one layout whatever the thread count. Any inconsistency (a record whose bytes are not in
+// the file, overlapping nodes) FAILS the conversion: nothing is guessed.
+namespace stac_canonical {
 
+	struct Rec {
+		string name;
+		uint32_t numPoints = 0;
+		int64_t byteOffset = 0;
+		uint32_t byteSize = 0;
+	};
 
+	static bool breadthFirst(const string& a, const string& b) {
+		if (a.size() != b.size()) {
+			return a.size() < b.size();
+		}
+		return a < b;
+	}
+
+	static void fail(const string& msg) {
+		cout << "ERROR: canonical octree layout: " << msg << endl;
+		exit(123);
+	}
+
+	void canonicalizeOctree(string targetDir, string hierarchyDir) {
+		vector<fs::path> batchFiles;
+		for (auto& entry : fs::directory_iterator(hierarchyDir)) {
+			if (entry.path().extension() == ".bin") {
+				batchFiles.push_back(entry.path());
+			}
+		}
+		std::sort(batchFiles.begin(), batchFiles.end());
+
+		// every record of every batch file (a batch root is recorded twice: in its parent batch
+		// and in its own - both copies carry the same bytes and are updated alike)
+		unordered_map<string, Rec> byName;
+		vector<pair<fs::path, vector<char>>> batches;
+		for (auto& path : batchFiles) {
+			std::ifstream fin(path, ios::binary);
+			vector<char> buf((std::istreambuf_iterator<char>(fin)), std::istreambuf_iterator<char>());
+			if (buf.size() % 48 != 0) {
+				fail("batch file " + path.string() + " is not a multiple of 48 bytes");
+			}
+			for (size_t i = 0; i < buf.size() / 48; i++) {
+				const char* r = buf.data() + 48 * i;
+				string name(r, 31);
+				name.erase(std::remove(name.begin(), name.end(), ' '), name.end());
+				Rec rec;
+				rec.name = name;
+				memcpy(&rec.numPoints, r + 31, 4);
+				memcpy(&rec.byteOffset, r + 35, 8);
+				memcpy(&rec.byteSize, r + 43, 4);
+				auto it = byName.find(name);
+				if (it == byName.end()) {
+					byName[name] = rec;
+				} else if (it->second.byteOffset != rec.byteOffset || it->second.byteSize != rec.byteSize) {
+					fail("node " + name + " is recorded with two different byte ranges");
+				}
+			}
+			batches.emplace_back(path, std::move(buf));
+		}
+
+		vector<Rec> nodes;
+		nodes.reserve(byName.size());
+		for (auto& kv : byName) {
+			nodes.push_back(kv.second);
+		}
+		std::sort(nodes.begin(), nodes.end(), [](const Rec& a, const Rec& b) {
+			return breadthFirst(a.name, b.name);
+		});
+
+		// the old ranges must tile the file exactly: no gap, no overlap, nothing unrecorded
+		string octreePath = targetDir + "/octree.bin";
+		int64_t fileSize = int64_t(fs::file_size(octreePath));
+		{
+			vector<const Rec*> byOffset;
+			for (auto& rec : nodes) {
+				if (rec.byteSize > 0) {
+					byOffset.push_back(&rec);
+				}
+			}
+			std::sort(byOffset.begin(), byOffset.end(), [](const Rec* a, const Rec* b) {
+				return a->byteOffset < b->byteOffset;
+			});
+			int64_t expect = 0;
+			for (auto rec : byOffset) {
+				if (rec->byteOffset != expect) {
+					fail("node " + rec->name + " starts at " + to_string(rec->byteOffset)
+						+ ", expected " + to_string(expect) + " (gap or overlap in octree.bin)");
+				}
+				expect += int64_t(rec->byteSize);
+			}
+			if (expect != fileSize) {
+				fail("the records cover " + to_string(expect) + " bytes, octree.bin holds "
+					+ to_string(fileSize));
+			}
+		}
+
+		// new offsets in canonical order, octree.bin rewritten in that order
+		unordered_map<string, int64_t> newOffset;
+		{
+			string tmpPath = targetDir + "/octree.bin.canonical";
+			std::ifstream fin(octreePath, ios::binary);
+			std::ofstream fout(tmpPath, ios::binary | ios::trunc);
+			vector<char> buf;
+			int64_t cursor = 0;
+			for (auto& rec : nodes) {
+				newOffset[rec.name] = cursor;
+				if (rec.byteSize == 0) {
+					continue;
+				}
+				buf.resize(rec.byteSize);
+				fin.seekg(rec.byteOffset);
+				fin.read(buf.data(), rec.byteSize);
+				if (!fin) {
+					fail("could not read the bytes of node " + rec.name);
+				}
+				fout.write(buf.data(), rec.byteSize);
+				cursor += int64_t(rec.byteSize);
+			}
+			fin.close();
+			fout.close();
+			if (cursor != fileSize) {
+				fail("rewrote " + to_string(cursor) + " bytes of " + to_string(fileSize));
+			}
+			fs::rename(tmpPath, octreePath);
+		}
+
+		// the flushed records now carry the canonical offsets (same files, same record order)
+		for (auto& [path, buf] : batches) {
+			for (size_t i = 0; i < buf.size() / 48; i++) {
+				char* r = buf.data() + 48 * i;
+				string name(r, 31);
+				name.erase(std::remove(name.begin(), name.end(), ' '), name.end());
+				int64_t off = newOffset.at(name);
+				memcpy(r + 35, &off, 8);
+			}
+			std::ofstream fout(path, ios::binary | ios::trunc);
+			fout.write(buf.data(), buf.size());
+			fout.close();
+		}
+
+		cout << "canonical octree layout: " << nodes.size() << " nodes re-laid in hierarchy order" << endl;
+	}
+
+}
 
 
 void doIndexing(string targetDir, State& state, Options& options, Sampler& sampler) {
@@ -1768,6 +1920,10 @@ void doIndexing(string targetDir, State& state, Options& options, Sampler& sampl
 	indexer.hierarchyFlusher->flush(hierarchyStepSize);
 
 	string hierarchyDir = indexer.targetDir + "/.hierarchyChunks";
+	// STAC (point 103): one layout of octree.bin whatever the order the nodes were flushed in
+	stac_canonical::canonicalizeOctree(targetDir, hierarchyDir);
+	printElapsedTime("canonical layout", tStart);
+
 	HierarchyBuilder builder(hierarchyDir, hierarchyStepSize);
 	builder.build();
 

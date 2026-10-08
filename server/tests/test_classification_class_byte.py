@@ -87,8 +87,18 @@ def test_no_instance_is_left_without_a_class_byte(tmp_path, writer):
         "an instance with no class byte cannot be painted in the octree")
 
 
-def test_more_than_255_instances_refuses_instead_of_colliding(tmp_path, writer):
+def test_more_than_255_instances_overflow_the_byte_never_the_session(tmp_path, writer):
+    """docs/plan_determinismo.md point 107 (DECIDIDO 2026-10-08): no ceiling on the object
+    count. The 256th object used to raise here and the SAM3 stage shipped no segmentation;
+    now the byte runs out for the LARGEST ids (byte 0, listed in class_map.json
+    `byte_overflow`) and every object keeps its full id in the 16-bit instance_ids.npy."""
+    import json
+    import numpy as np
     ids = list(range(1, 300))
     inst, n = _instances(ids, per=1)
-    with pytest.raises(ValueError, match="cannot be carried in one class byte"):
-        writer(tmp_path, inst, n)
+    cls = writer(tmp_path, inst, n)
+    cmap = json.loads((tmp_path / "class_map.json").read_text())
+    assert cmap["encoding"] == "compact" and cmap["byte_overflow"] == list(range(256, 300))
+    assert len(set(cls[cls > 0].tolist())) == 255
+    full = np.load(tmp_path / "instance_ids.npy")
+    assert full.dtype == np.uint16 and sorted(set(full.tolist())) == ids

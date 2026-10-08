@@ -31,6 +31,7 @@ import numpy as np
 from correction import diagnose, floor as floor_mod, gates, ledger, solve
 from correction.apply import (assert_no_interrupted_swap, available_epochs,
                               stage_transaction, swap_transaction)
+from correction.chain import applied_depth_factor, compose_moves  # noqa: F401 — re-exported
 from correction.config import CorrectionConfig, load_correction_config
 from correction.epoch import (EPOCH_KIND_NEW_CLOUD, current_epoch, epoch_kind,
                               epoch_path)
@@ -58,7 +59,8 @@ def run_floor(output_dir, model: Optional[str], keyframes: Optional[List[int]],
               operator: str, log: Callable = print,
               progress: Callable = _noop_progress,
               cfg: Optional[CorrectionConfig] = None,
-              pre: Optional[dict] = None) -> dict:
+              pre: Optional[dict] = None,
+              record_extra: Optional[dict] = None) -> dict:
     """Floor alignment (kind=floor): same gates, same transactional apply,
     same ledger.
 
@@ -83,13 +85,16 @@ def run_floor(output_dir, model: Optional[str], keyframes: Optional[List[int]],
     stage is answerable for its own motion (the depth stage has its own
     `max_correction_log`), and a floor whose steps are fine should not be
     vetoed for a depth correction that already passed.
+
+    The correction id is DERIVED from what the run applies (point 137); the
+    elapsed time goes to corrections.timing.jsonl, never into the report
+    (point 166); ``record_extra`` is sealed into the epoch record (point 139).
     """
     t0 = time.time()
     output_dir = Path(output_dir)
     if cfg is None:
         cfg = load_correction_config()
     _check_ready(output_dir)
-    correction_id = ledger.new_correction_id()
     epoch_from = current_epoch(output_dir)
     model = model or cfg.floor.model_default
     rng = np.random.default_rng(cfg.solve.seed)
@@ -102,6 +107,9 @@ def run_floor(output_dir, model: Optional[str], keyframes: Optional[List[int]],
     session = load_session(output_dir)
 
     def _reject(reason, gates_list, sol=None):
+        # a rejection has no transform to name itself by: its id is what was rejected
+        correction_id = ledger.new_correction_id("floor", "rejected", str(model), int(epoch_from),
+                                                 [int(f) for f in session.frames], str(reason))
         report = build_report(
             correction_id=correction_id, kind="floor", operator=operator,
             status="rejected", instance_ids=None, visits=None,
@@ -111,7 +119,7 @@ def run_floor(output_dir, model: Optional[str], keyframes: Optional[List[int]],
                        if sol else None),
             distribution=None, gates=gates_list, overrides=None,
             epoch_from=epoch_from, epoch_to=None, rejection_reason=reason,
-            elapsed_s=time.time() - t0)
+            extra=(dict(record_extra) if record_extra else None))
         path = save_report(output_dir, report)
         ledger.record_run(
             output_dir, correction_id=correction_id, epoch_from=epoch_from,
@@ -120,7 +128,7 @@ def run_floor(output_dir, model: Optional[str], keyframes: Optional[List[int]],
             diagnosis=[{"model": model}], anchors=[], gates=gates_list,
             overrides=None,
             report_path=str(path.relative_to(output_dir)),
-            verdict="rejected")
+            verdict="rejected", elapsed_s=time.time() - t0)
         _p(100, f"❌ floor alignment REJECTED: {reason}")
         return report
 
@@ -190,11 +198,19 @@ def run_floor(output_dir, model: Optional[str], keyframes: Optional[List[int]],
     _p(50, ("staging the transaction — "
             + (f"{len(warnings)} advisory gate(s) failed and are declared "
                f"(gates.mode: advisory)" if warnings else "all gates passed")))
+    # the id is what the epoch applies — the composed transform over this epoch (point 137)
+    correction_id = ledger.new_correction_id(
+        *ledger.transform_parts("floor", epoch_from, session.frames, R_kf, t_kf, k_kf, None,
+                                str(model)))
+    k_applied = {int(f): float(k) for f, k in
+                 zip(session.frames, applied_depth_factor(output_dir, session.frames))}
     tx_info = stage_transaction(
         session, cfg, R_kf, t_kf, k_kf, correction_id=correction_id,
         scale_diag_new=diagnose.regenerate_scale_diagnostics(
-            output_dir, {}, epoch_from + 1, correction_id),
-        floor_npz=sol["floor_npz"], log=log, progress=progress)
+            output_dir, {int(f): float(k_kf[i]) for i, f in enumerate(session.frames)},
+            epoch_from + 1, correction_id, k_applied_by_frame=k_applied),
+        floor_npz=sol["floor_npz"], log=log, progress=progress,
+        record_extra=record_extra)
     _p(90, "atomic swap...")
     swap_transaction(output_dir, tx_info, log=log)
     _p(93, "updating the instance store in place...")
@@ -214,8 +230,10 @@ def run_floor(output_dir, model: Optional[str], keyframes: Optional[List[int]],
         extra={"points_moved": tx_info["points_moved"],
                "pose_copies_skipped": tx_info["pose_copies_skipped"],
                "instance_store": store_summary,
-               "warnings": warnings},
-        elapsed_s=time.time() - t0)
+               "warnings": warnings,
+               # the run's configuration digest and input stamp (point 139), when the caller
+               # is the certification
+               **(record_extra or {})})
     path = save_report(output_dir, report)
     ledger.record_run(
         output_dir, correction_id=correction_id, epoch_from=epoch_from,
@@ -223,7 +241,7 @@ def run_floor(output_dir, model: Optional[str], keyframes: Optional[List[int]],
         instance_ids=[], visits=[], observability=[],
         diagnosis=[{"model": model, "model_params": sol["model_params"]}],
         anchors=sol["anchors"], gates=gate_results, overrides=None,
-        report_path=str(path.relative_to(output_dir)))
+        report_path=str(path.relative_to(output_dir)), elapsed_s=time.time() - t0)
     _p(100, f"✅ floor alignment applied (epoch {tx_info['epoch_to']}, "
             f"model {model}) — select any epoch to compare")
     return report
@@ -245,47 +263,8 @@ def _session_frames(output_dir: Path, moves: list) -> List[int]:
     return out
 
 
-def compose_moves(moves: list, frames: List[int], log: Callable = print):
-    """ONE per-keyframe transform equal to applying ``moves`` in order.
-
-    Each move is ``(npz, inverse)``: the persisted warp of one epoch —
-    ``p' = R·(c + (p − c)·(k z + b)/z) + t`` about the keyframe's own camera
-    ``c`` and optical axis, ``z`` the depth along it — applied inverted while
-    climbing to the common ancestor. Two such warps compose into one of the
-    same form: ``R = R₂R₁``, ``t = R₂t₁ + t₂``, ``k = k₁k₂``, ``b = k₂b₁ + b₂``
-    (the camera moves rigidly with the pose, so the second depth op acts along
-    the same ray at ``z₁ = k₁z + b₁``). With no move it is the identity —
-    what a ``new_cloud`` edge is worth. Keyed by real frame number; a frame a
-    transform names that the session no longer has is declared and skipped.
-    """
-    n = len(frames)
-    R = np.tile(np.eye(3), (n, 1, 1))
-    t = np.zeros((n, 3))
-    k = np.ones(n)
-    b = np.zeros(n)
-    idx = {int(f): i for i, f in enumerate(frames)}
-    for mv, inverse in moves:
-        Rm, tm, km = mv["R_kf"], mv["t_kf"], mv["k_kf"]
-        bm = np.asarray(mv["b_kf"])
-        if inverse:
-            Rm = np.transpose(Rm, (0, 2, 1))
-            tm = -np.einsum('nij,nj->ni', Rm, mv["t_kf"])
-            km = 1.0 / mv["k_kf"]
-            bm = -bm / mv["k_kf"]      # inverse of z' = k z + b is z = z'/k − b/k
-        missing = 0
-        for j, f in enumerate(mv["frames"]):
-            i = idx.get(int(f))
-            if i is None:
-                missing += 1
-                continue
-            R[i] = Rm[j] @ R[i]
-            t[i] = Rm[j] @ t[i] + tm[j]
-            b[i] = km[j] * b[i] + bm[j]
-            k[i] = k[i] * km[j]
-        if missing:
-            log(f"  {missing} keyframe(s) of a stored transform are not in the "
-                f"session's frame list — their findings cannot follow")
-    return R, t, k, b
+# `compose_moves` lives in correction.chain since 2026-10-08 (the epoch chain is the one
+# source of what the session applied — points 135 / 136); re-exported above.
 
 
 def run_select(output_dir, epoch: int, operator: str = "user",
@@ -350,7 +329,7 @@ def run_select(output_dir, epoch: int, operator: str = "user",
     if current_epoch(output_dir) != epoch:
         from correction.epoch import make_epoch_record, EPOCH_FILE
         (output_dir / EPOCH_FILE).write_text(json.dumps(make_epoch_record(
-            epoch, f"select/epoch_{epoch}", max(epoch - 1, 0)), indent=2))
+            epoch, f"select/epoch_{epoch}", max(epoch - 1, 0)), indent=2, sort_keys=True))
         log(f"  epoch record did not travel with the geometry — rewritten to "
             f"epoch {epoch}")
 

@@ -219,16 +219,48 @@ def _merge_prompt(scene_type: str, phrases: list[str]) -> str:
     )
 
 
+class MergeError(RuntimeError):
+    """A merge call failed or answered nothing usable (docs/plan_determinismo.md point 88,
+    DECIDIDO: a fusion call that fails fails the stage — never 'kept as is', where one
+    token decided whether 134 names were merged or not)."""
+
+
+def _groups_or_salvage(txt: str) -> tuple[list | None, int | None]:
+    """The ``groups`` list of the merge answer, whole — or the complete group objects a CUT
+    answer still holds (point 88: rescued, as the detector does). ``(groups, n_salvaged)``;
+    ``n_salvaged`` is None when the answer parsed whole; ``(None, None)`` when nothing is
+    usable."""
+    d = _parse(txt)
+    if d is not None and isinstance(d.get("groups"), list):
+        return d["groups"], None
+    if not txt:
+        return None, None
+    from .detector import _salvage_objects
+    k = txt.find('"groups"')
+    entries = [g for g in _salvage_objects(txt[k:] if k >= 0 else txt)
+               if isinstance(g, dict) and g.get("name")]
+    if not entries:
+        return None, None
+    return entries, len(entries)
+
+
 def merge_synonyms(client, scene_type: str, phrases: list[str], head_of: Callable[[str], str],
                    max_phrases_per_call: int = 0, max_tokens: int = 4096,
-                   log: Callable[[str], None] = print) -> dict[str, str]:
+                   log: Callable[[str], None] = print,
+                   calls: list | None = None) -> dict[str, str]:
     """USER 2026-09-29: *"una segunda pasada de VLM sobre los prompts para fundir los
     que significan lo mismo"*. One VLM call per HEAD-NOUN family with 2+ phrases
     (all the '… wall's together, all the '… door's together): the question is
     small and focused, and two phrases with different heads are never merged.
     Returns {alias: name}; every phrase not in it stays a prompt. Only 'same
     meaning' merges (the 2026-09-22 lesson: colour / material / kind differences
-    are different objects — 'white workbench' ← 'desk' destroyed a desk)."""
+    are different objects — 'white workbench' ← 'desk' destroyed a desk).
+
+    Point 88 (DECIDIDO): a call that fails, or answers nothing usable, RAISES
+    :class:`MergeError` — the stage fails instead of silently merging nothing; a cut
+    answer (max_tokens, a repetition loop) keeps the complete groups it holds. ``calls``
+    (a list the caller owns) receives one record per call for the census: family, size,
+    finish_reason, token usage, whether it was cut, groups salvaged, groups applied."""
     from semantic.types import system, user
     # the whole list in ONE call when it fits the bound (a kind is often named with
     # different head nouns: 'floor tiles' / 'floor'); per head-noun family otherwise
@@ -244,18 +276,32 @@ def merge_synonyms(client, scene_type: str, phrases: list[str], head_of: Callabl
         if len(fam) < 2:
             continue
         n_calls += 1
+        rec: dict = {"family": head, "n_phrases": len(fam)}
+        if calls is not None:
+            calls.append(rec)
         try:
             resp = client.chat([system(_MERGE_SYSTEM), user(_merge_prompt(scene_type, fam))],
                                max_tokens=max_tokens, consumer="phase1.merge_synonyms")
-        except Exception as e:  # noqa: BLE001 — declared: the family stays unmerged
-            log(f"[merge] '{head}' ({len(fam)} phrases): call failed ({e}) — kept as is")
-            continue
-        d = _parse(resp.content or "")
-        if d is None or not isinstance(d.get("groups"), list):
-            log(f"[merge] '{head}' ({len(fam)} phrases): nothing parseable — kept as is")
-            continue
+        except Exception as e:  # noqa: BLE001 — declared, and the stage fails with it
+            rec.update(error=f"{type(e).__name__}: {e}")
+            raise MergeError(f"[merge] '{head}' ({len(fam)} phrases): the VLM call failed "
+                             f"({e}) — the merge pass cannot be completed (point 88)") from e
+        groups, n_salvaged = _groups_or_salvage(resp.content or "")
+        usage = getattr(resp, "usage", None) or {}
+        finish = getattr(resp, "finish_reason", None)
+        rec.update(finish_reason=finish, truncated=(finish == "length"),
+                   completion_tokens=usage.get("completion_tokens") if isinstance(usage, dict) else None,
+                   salvaged=n_salvaged, parsed=groups is not None)
+        if groups is None:
+            raise MergeError(f"[merge] '{head}' ({len(fam)} phrases): the answer holds no "
+                             f"usable group (finish_reason {finish!r}) — the merge pass cannot "
+                             f"be completed (point 88)")
+        if n_salvaged is not None:
+            log(f"[merge] '{head}' ({len(fam)} phrases): the answer was CUT (finish_reason "
+                f"{finish!r}) — {n_salvaged} complete group(s) rescued from it")
         known = {_norm(p): p for p in fam}
-        for g in d["groups"]:
+        n_before = len(alias_of)
+        for g in groups:
             if not isinstance(g, dict):
                 continue
             name = known.get(_norm(g.get("name", "")))
@@ -267,6 +313,7 @@ def merge_synonyms(client, scene_type: str, phrases: list[str], head_of: Callabl
                         any(v == other for v in alias_of.values()):
                     continue
                 alias_of[other] = name
+        rec["n_merged"] = len(alias_of) - n_before
     # a name that was itself merged away points to its final carrier
     for a in list(alias_of):
         seen = {a}

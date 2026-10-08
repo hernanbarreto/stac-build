@@ -227,9 +227,11 @@ def test_the_vocabulary_is_recorded_and_reusable():
            / "segmentation" / "autoprompt" / "session_builder.py").read_text()
     assert "autoprompt_concepts.json" in src, "the session must record its vocabulary"
     assert "reuse_vocabulary" in src, "and be able to reuse it"
-    i = src.index("if _reused:")
+    # docs/plan_determinismo.md point 82 (2026-10-08): the whole analysis is reused under
+    # its stamp BEFORE any VLM call — the understanding, the merge and the consolidation
+    i = src.index("self._reusable_analysis(stamp)")
     j = src.index("if self.consolidate_prompts", i)
-    assert i < j, "a reused vocabulary must short-circuit the consolidation"
+    assert i < j, "a reused analysis must short-circuit the consolidation"
     import yaml
     cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
     assert cfg["autoprompt"]["reuse_vocabulary"] is True

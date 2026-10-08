@@ -38,11 +38,29 @@ def test_merges_only_what_the_vlm_calls_the_same_within_a_family():
     assert all(len(h) == 1 for h in heads) and len(vlm.asked) == 2
 
 
-def test_a_broken_answer_keeps_the_family():
+def test_a_broken_answer_fails_the_merge_instead_of_keeping_the_family():
+    """docs/plan_determinismo.md point 88 (DECIDIDO 2026-10-08): a fusion call that answers
+    nothing usable fails the stage — 'kept as is' let one token decide whether 134 names
+    were merged. A CUT answer keeps the complete groups it holds (salvaged)."""
+    import pytest
+    from segmentation.autoprompt.consolidate_prompts import MergeError
+
     class Bad:
         def chat(self, *a, **k):
-            return SimpleNamespace(content="no json")
-    assert merge_synonyms(Bad(), "x", ["red door", "red doors door"], _head_noun, log=lambda m: None) == {}
+            return SimpleNamespace(content="no json", finish_reason="stop")
+    with pytest.raises(MergeError, match="no usable group"):
+        merge_synonyms(Bad(), "x", ["red door", "red doors door"], _head_noun, log=lambda m: None)
+
+    class Cut:
+        def chat(self, *a, **k):
+            return SimpleNamespace(
+                content='{"groups": [{"name": "red door", "same_as": ["red doors door"]}, {"name": "red',
+                finish_reason="length")
+    calls = []
+    alias = merge_synonyms(Cut(), "x", ["red door", "red doors door"], _head_noun,
+                           log=lambda m: None, calls=calls)
+    assert alias == {"red doors door": "red door"}
+    assert calls[0]["truncated"] is True and calls[0]["salvaged"] == 1 and calls[0]["n_merged"] == 1
 
 
 def test_production_turns_it_on_with_one_pass_per_keyframe():

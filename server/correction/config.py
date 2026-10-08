@@ -10,8 +10,8 @@ defaults and their provenance).
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, Tuple
 
 
 class CorrectionConfigError(RuntimeError):
@@ -194,6 +194,13 @@ class VisitDriftConfig:
     skip_when_gauge_applied: bool   # true: the depth (scale) stage stands down when the
                                     # precision gauge already applied its epoch (§4-F2);
                                     # false: it corrects the residual, closures only
+    # the whole configuration this block was loaded from (see CorrectionConfig.raw): the
+    # measurement reads the judge's factor and the loops config through it
+    raw: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
+
+    def as_params(self) -> Dict[str, Any]:
+        """The parameters as a plain dict (what a stamp seals) — without ``raw``."""
+        return {k: v for k, v in self.__dict__.items() if k != "raw"}
 
 
 @dataclass(frozen=True)
@@ -211,6 +218,75 @@ class CorrectionConfig:
     posegraph: PoseGraphConfig
     apply: ApplyConfig
     runtime: RuntimeConfig
+    # the WHOLE configuration dict this one was loaded from (docs/plan_determinismo.md point 139,
+    # 2026-10-08): the keys the correction reads outside its own section — the mask filter's,
+    # the silhouette filter's, the loops config's certify.scale, the judge's factor — are read
+    # from HERE (:func:`raw_param`, :func:`loops_raw`), never from ``config.cfg`` re-read from
+    # disk by a spawned process. Not compared: two configs with the same sections are the same
+    raw: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
+
+
+def raw_param(cfg: Any, dotted: str) -> Any:
+    """The value at ``dotted`` ('segmentation.mask_filter.dilate_px') of the configuration the
+    correction runs with: ``cfg.raw`` when it holds the path — a job's frozen run configuration
+    is complete — else the server's ``config.cfg`` (a partial dict built for a test or a CLI
+    completes itself from the server's; the fallback never fires on the pipeline path). A key
+    missing from both RAISES naming it: there is no hidden default."""
+    raw = getattr(cfg, "raw", None)
+    node = raw
+    ok = isinstance(node, dict)
+    for k in dotted.split("."):
+        if not isinstance(node, dict) or k not in node:
+            ok = False
+            break
+        node = node[k]
+    if ok:
+        return node
+    from config import get_param                            # server/config.py
+    _missing = object()
+    v = get_param(dotted, _missing)
+    if v is _missing:
+        raise CorrectionConfigError(f"config.yaml is missing '{dotted}' — the correction reads it "
+                                    f"and assumes no value in its place")
+    return v
+
+
+def precision_raw(cfg: Any) -> Dict[str, Any]:
+    """The configuration dict ``precision.config.load_precision_config`` reads
+    (``reconstruction.precision`` + what it cross-reads): ``cfg.raw`` when it carries that
+    section, else the server's (same rule as :func:`raw_param`)."""
+    raw = getattr(cfg, "raw", None)
+    if isinstance(raw, dict) and isinstance(raw.get("reconstruction"), dict) \
+            and "precision" in raw["reconstruction"]:
+        return raw
+    from config import cfg as raw_cfg
+    return raw_cfg
+
+
+def loops_raw(cfg: Any) -> Dict[str, Any]:
+    """The configuration dict ``reconstruction.loops.config.load_loops_config`` reads
+    (correction_graph / certify / witness / loops ...): ``cfg.raw`` when it carries those
+    sections, else the server's (same rule as :func:`raw_param`)."""
+    raw = getattr(cfg, "raw", None)
+    if isinstance(raw, dict) and all(k in raw for k in ("correction_graph", "certify", "loops")):
+        return raw
+    from config import cfg as raw_cfg
+    return raw_cfg
+
+
+def judge_of(cfg: Any) -> Tuple[float, float]:
+    """(error_factor, confidence) of THE USER'S RULE (metric_lock.decide_change) as this
+    configuration declares them: ``correction_graph.graph.improvement_error_factor`` (1.1, USER
+    2026-10-07) and ``correction_graph.graph.heldout_confidence`` (0.95)."""
+    from reconstruction.loops.config import improvement_error_factor
+    raw = loops_raw(cfg)
+    fac = float(improvement_error_factor(raw))
+    gp = (raw.get("correction_graph") or {}).get("graph") or {}
+    conf = gp.get("heldout_confidence")
+    if isinstance(conf, bool) or not isinstance(conf, (int, float)) or not (0.5 < float(conf) < 1.0):
+        raise CorrectionConfigError("config.yaml 'correction_graph.graph.heldout_confidence' must be a "
+                                    f"number in (0.5, 1), got {conf!r}")
+    return fac, float(conf)
 
 
 def _require(section: Dict[str, Any], key: str, path: str) -> Any:
@@ -293,6 +369,7 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
         grid_aspect_tol=_num(vd_, "grid_aspect_tol", "visit_drift", lo=0.0, lo_excl=True),
         min_depth_m=_num(vd_, "min_depth_m", "visit_drift", lo=0.0, lo_excl=True),
         skip_when_gauge_applied=_bool(vd_, "skip_when_gauge_applied", "visit_drift"),
+        raw=(raw if isinstance(raw, dict) else None),
     )
 
     ev = section.get("evidence")
@@ -528,4 +605,5 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
                             solve=solve, gates=gates, floor=floor,
                             revisit=revisit, consistency=consistency,
                             kfgraph=kfgraph, photo=photo, posegraph=posegraph,
-                            apply=apply_cfg, runtime=runtime)
+                            apply=apply_cfg, runtime=runtime,
+                            raw=(raw if isinstance(raw, dict) else None))

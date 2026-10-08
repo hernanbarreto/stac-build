@@ -264,7 +264,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--overlays", action="store_true", help="per-keyframe PNGs of the 'on' variants under <out>/overlays_<variant>/")
     args = ap.parse_args(argv)
     from precision.config import load_precision_config
+    from precision import f6_torch as FT
     pcfg = load_precision_config()
+    # USER 2026-10-08: the maps on the card, strict deterministic torch — as the stage runs them
+    rec = FT.require_cuda(int(pcfg.mono_detail.seed))
+    print(f"{LOG_TAG} maps on {rec['device']} ({rec['card']}), torch {rec['torch']}, deterministic strict", flush=True)
     session_dir = Path(args.session).resolve()
     out = Path(args.out).resolve(); out.mkdir(parents=True, exist_ok=True)
     inp = f5_inputs(session_dir) if args.f5_files else None

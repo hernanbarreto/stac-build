@@ -541,7 +541,11 @@ int main(int argc, char** argv) {
 	}
 	cout << "target directory: '" << targetDir << "'" << endl;
 	fs::create_directories(targetDir);
-	logger::addOutputFile(targetDir + "/log.txt");
+	// STAC 2026-10-08 (docs/plan_determinismo.md point 124): no log.txt inside the octree. The
+	// vendor logged "finished indexing chunk <id>" into targetDir/log.txt in the order the threads
+	// finished (and with the wall clock in the report), so the octree directory differed between
+	// two conversions of one cloud even with octree.bin and hierarchy.bin identical. The octree
+	// is a product compared byte for byte (point 57); WARN / ERROR lines still go to stdout.
 
 	State state;
 	state.pointsTotal = stats.totalPoints;

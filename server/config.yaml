@@ -372,7 +372,11 @@ segmentation:
     ransac_iters: 200         # BOUND: RANSAC hypotheses per plane
     dist_m: 0.02              # inlier band of a plane (the cloud's surface noise, ~2 cm)
     vertical_tol_deg: 10.0    # a plane is vertical when its normal is within this of horizontal
-    min_plane_frac: 0.1       # a plane counts when it holds this share of the sample
+                              # (min_plane_frac REMOVED 2026-10-08 — docs/plan_determinismo.md
+                              # point 143, DECIDIDO: every vertical RANSAC plane is a candidate;
+                              # among footprints within improvement_error_factor x their
+                              # measured error of the minimum the most SUPPORTED one wins. A
+                              # leftover key fails the load.)
     max_planes: 4             # BOUND: planes extracted per object
     sample: 20000             # BOUND (cost): points sampled per object (deterministic)
     seed: 0
@@ -849,7 +853,16 @@ models:
 
     # SAM 3.1 Multiplex
     multiplex_count: 16                # objects per multiplex bucket (8 if <12GB VRAM)
-    max_num_objects: 32
+    max_num_objects: -1                # NO CAP — the vendor's own "no limit" value (docs/
+                                       # plan_determinismo.md point 90, DECIDIDO 2026-10-08):
+                                       # 32 was an invented number that ERASED objects — once
+                                       # a concept tracked 32 masklets every later detection
+                                       # was dropped ('wall' hit it 223 times on pccr 2408),
+                                       # and which 32 filled it followed the frame order. Out
+                                       # of memory under no cap = the stage FAILS and says so
+                                       # (point 4), never a drop. vendor/sam31 is patched so
+                                       # "no limit" sizes its buffers by the objects present,
+                                       # not by the 10000 the vendor substitutes for -1.
     compile: false                     # torch.compile (~2x speedup, warmup time)
     use_fa3: false                     # FlashAttention 3 (requires flash-attn-3)
     checkpoint_path: null              # null = auto-download from HuggingFace
@@ -2465,6 +2478,9 @@ reconstruction:
       detail_zone_px: 12                # BOUND (resolution): reach of the detail around a discontinuity ('edges')
       side_reach_px: 3                  # BOUND (resolution): pixels past the band where front / back are read
       overlays: false                   # per-keyframe PNGs under output/precision/mono_overlays/ for the eye
+      tile_batch: 0                     # tiles of a keyframe per PointDiT forward pass: 0 = all of them at once
+                                        #   (USER 2026-10-08: speed; the batch is part of the run's config, so its
+                                        #   bits repeat); a card that cannot hold it FAILS the stage, never halves it
       ab_edge_gradient_quantile: 90.0   # the Phase 8 A/B's edge band = image gradient energy above this percentile
                                         #   of the session's pixels, or a step of the calibrated depth (never PointDiT)
     cloud_metrics:                      # the floor + edge metrics of EVERY run (precision/cloud_metrics.py;
@@ -3095,7 +3111,15 @@ correction:
                                   # llevarlo a cero" — ONE rigid motion per Omega chunk: its SEGMENTED
                                   # floor plane → horizontal at y = 0. The per-keyframe `level` failed the
                                   # continuity gate on pccr and layered the floor (11.5 → 16.9 cm).
-    chunk_floor_labels: [floor]   # the segmentation labels that ARE the floor (the VLM's category name)
+    chunk_floor_labels: [floor]   # a HINT only since 2026-10-08 (docs/plan_determinismo.md point 128, the
+                                  # user's floor concept): the floor of a chunk is GEOMETRIC — the dominant
+                                  # support plane UNDER its cameras (floor, platform, andén, walkway,
+                                  # whatever it is called), a deterministic robust fit (correction/floor.py
+                                  # solve_floor_by_chunk); the labelled floor only reports whether it agrees.
+                                  # Several floors (a platform and the track bed) stay separate levels; a
+                                  # second level is a real floor by the user's rule (>= 5 keyframe judges,
+                                  # 95 % CI, >= improvement_error_factor x the session's repeatability);
+                                  # the camera's change of surface is kept as a step, never corrected.
     # (was) model_default: level  # USER 2026-09-29: ONE floor level ("no está fusionado el escalón …
                                   # esto lo teníamos resuelto"): with `plane` the solver kept chunk 0's
                                   # 13.6 cm as a real level change on pccr. (History: plane + local trend;
@@ -3121,7 +3145,11 @@ correction:
                                   # produced 75 mm inter-keyframe steps — but 0.3 deg of
                                   # NOISE is exactly what the scatter measures.
     max_tilt_deg: 10.0            # anchor guard: floor normal tilt beyond this → demoted
-    min_inliers: 5000             # anchor guard: RANSAC inliers below this → demoted
+    min_inliers: 5000             # anchor guard of the per-keyframe models (level / plane / profile):
+                                  # RANSAC inliers below this → demoted. NOT a cut of the chunk model
+                                  # since 2026-10-08 (point 129): a chunk's floor is judged against its
+                                  # own bootstrap error; one whose correction does not clear it takes the
+                                  # motion blended between its measurable neighbours, never identity
     min_inlier_ratio: 0.5         # accepted plane must hold ≥ ratio × min_inliers
     ransac_tol_m: 0.02            # floor RANSAC inlier distance
     ransac_refit_band_m: 0.03     # SVD refit band around the RANSAC plane
@@ -3733,14 +3761,20 @@ certify:                            # §4.8 ensemble witness + §9 certification
     max_verified_drop_frac: 0.05    # the verified share of the cloud may not fall more than this
     duplicates_must_not_increase: true
   scale:                            # §5 post-hoc scale rows from the two copies of an instance
-    sigma_loop_min_log: 0.01        # floor of a copy-to-copy scale row σ (log units)
+    sigma_loop_min_log: 0.01        # floor of a copy-to-copy scale row σ (log units) — a σ FLOOR only;
+                                    # since 2026-10-08 (point 127) it is no longer the switch that applied
+                                    # a solution (|log r| > it): the solution is applied by the user's rule
+                                    # on the closures (scale_stage.judge_models: every closure a judge,
+                                    # >= 5, 95 % CI, improvement >= improvement_error_factor x each
+                                    # closure's own σ; identity < ramp < free, the simplest within the error)
     sigma_seam_log: 0.02            # a correction that differs between neighbouring chunks
     sigma_anchor_log: 0.03          # per-chunk DA3 anchor agreement rows
     min_copy_points: 300
     max_copy_residual_m: 0.05       # copy fit residual beyond this → the row is not trusted
     icp_iters: 30
     icp_trim: 0.8
-    max_correction_log: 0.2         # |log r_k| beyond this → the scale stage is IDENTITY
+    max_correction_log: 0.2         # |log r_k| beyond this → the scale stage is IDENTITY: a declared BOUND
+                                    # ('bounded', as point 19), reported with its margin — never a judge
   visit_loops:                      # §4.4 post-hoc: geometric revisits (correction.revisit) → loop edges
     sigma_floor_m: 0.01             # translation σ floor (the joint closure's ICP rms is the measurement)
     unobserved_sigma_m: 5.0         # a direction the visit does not observe (a floor's in-plane) — huge σ

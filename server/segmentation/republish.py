@@ -29,9 +29,16 @@ import numpy as np
 
 CLASSIFICATION = "classification.npy"
 CLASS_MAP = "class_map.json"
+#: the per-point INSTANCE id in 16 bits (docs/plan_determinismo.md point 107, DECIDIDO: no
+#: ceiling on the object count) — written beside the class byte by the same writer; the LAS
+#: writer carries it into the octree as the `instance` extra dimension the viewer keys on
+INSTANCE_IDS = "instance_ids.npy"
+INSTANCE_IDS_DTYPE = np.uint16
 OUT_OF_PLACE = "out_of_place.npy"
 RESULT = "segmentation_result.json"
 BROADCAST = "seg_broadcast.json"
+# the codes one class byte holds (0 = unsegmented): a property of the byte, not a decision
+BYTE_CODES = 255
 
 
 def _encode(ids: List[int]) -> dict:
@@ -49,26 +56,27 @@ def _encode(ids: List[int]) -> dict:
     So the byte is the instance id WHILE THE IDS FIT, which is every ordinary
     session and keeps the array byte-identical to what every reader already
     expects; and a compact 1..N index when they do not, with `class_map.json`
-    beside it saying which is which. Above 255 OBJECTS there is no byte left
-    and it says so instead of painting them the same colour.
+    beside it saying which is which. Above 255 OBJECTS the byte has no code
+    left: those objects (the ones with the LARGEST ids, listed in
+    `byte_overflow`) carry byte 0 in the octree and their full id in
+    :data:`INSTANCE_IDS` (point 107: the count is no longer a ceiling — the
+    stage used to FAIL at the 256th object and ship no segmentation at all).
     """
     ids = sorted({int(i) for i in ids if int(i) > 0})
     if not ids:
-        return {"encoding": "identity", "class_of": {}, "instance_of": {}}
-    if ids[-1] <= 255:
+        return {"encoding": "identity", "class_of": {}, "instance_of": {}, "byte_overflow": []}
+    overflow: List[int] = []
+    if ids[-1] <= BYTE_CODES:
         code = {i: i for i in ids}
         enc = "identity"
     else:
-        if len(ids) > 255:
-            raise ValueError(
-                f"{len(ids)} instances cannot be carried in one class byte "
-                f"(255 codes, 0 reserved for unsegmented) — the octree would "
-                f"paint different objects the same colour")
-        code = {iid: n for n, iid in enumerate(ids, start=1)}
+        coded, overflow = ids[:BYTE_CODES], ids[BYTE_CODES:]
+        code = {iid: n for n, iid in enumerate(coded, start=1)}
         enc = "compact"
     return {"encoding": enc,
             "class_of": {str(k): int(v) for k, v in code.items()},
-            "instance_of": {str(v): int(k) for k, v in code.items()}}
+            "instance_of": {str(v): int(k) for k, v in code.items()},
+            "byte_overflow": [int(i) for i in overflow]}
 
 
 def class_of(dirpath) -> dict:
@@ -134,13 +142,26 @@ def write_classification(dirpath: Path, instances: List[dict],
     m = _encode(ids)
     code = {int(k): int(v) for k, v in m["class_of"].items()}
     classification = np.zeros(int(n_points), dtype=np.uint8)
-    for inst in instances:
+    # the per-point INSTANCE id itself, 16 bits (point 107): every object, whatever the count
+    id_max = int(np.iinfo(INSTANCE_IDS_DTYPE).max)
+    too_big = sorted(i for i in set(ids) if i > id_max)
+    if too_big:
+        raise ValueError(f"instance id(s) {too_big[:5]} exceed {id_max}, the 16-bit per-point id "
+                         f"of {INSTANCE_IDS} (point 107)")
+    instance_ids = np.zeros(int(n_points), dtype=INSTANCE_IDS_DTYPE)
+    # written in id order: a point two instances name (the exclusivity invariant forbids it)
+    # ends with the LARGER id either way, independent of the list order
+    for inst in sorted(instances, key=lambda i: int(i.get("instance_id", i.get("id", 0)))):
         gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
         gi = gi[(gi >= 0) & (gi < int(n_points))]
         iid = int(inst.get("instance_id", inst.get("id", 0)))
         classification[gi] = code.get(iid, 0)
+        instance_ids[gi] = max(iid, 0)
     np.save(dirpath / CLASSIFICATION, classification)
-    (dirpath / CLASS_MAP).write_text(json.dumps(m, indent=1))
+    np.save(dirpath / INSTANCE_IDS, instance_ids)
+    m["instance_ids_file"] = INSTANCE_IDS
+    m["instance_ids_dtype"] = np.dtype(INSTANCE_IDS_DTYPE).name
+    (dirpath / CLASS_MAP).write_text(json.dumps(m, indent=1, sort_keys=True))
     return classification
 
 
@@ -201,16 +222,18 @@ def republish_membership(dirpath, *, n_points: int,
     #    a per-point array longer than its cloud is never left behind ────────
     if result is not None:
         write_classification(dirpath, result.get("instances") or [], n_points)
-        written.extend((CLASSIFICATION, CLASS_MAP))
+        written.extend((CLASSIFICATION, CLASS_MAP, INSTANCE_IDS))
     elif source_dir is not None and (source_dir / CLASSIFICATION).exists():
-        src = np.load(source_dir / CLASSIFICATION)
-        if len(src) == (len(keep) if keep is not None else n_points):
-            np.save(dirpath / CLASSIFICATION,
-                    src[keep] if keep is not None else src)
-            written.append(CLASSIFICATION)
-        else:
-            log(f"  republish: {CLASSIFICATION} in the source has {len(src):,} "
-                f"values and cannot be carried — not staged")
+        for name in (CLASSIFICATION, INSTANCE_IDS):
+            if not (source_dir / name).exists():
+                continue
+            src = np.load(source_dir / name)
+            if len(src) == (len(keep) if keep is not None else n_points):
+                np.save(dirpath / name, src[keep] if keep is not None else src)
+                written.append(name)
+            else:
+                log(f"  republish: {name} in the source has {len(src):,} "
+                    f"values and cannot be carried — not staged")
 
     # ── out_of_place.npy — a MEASUREMENT, carried, never recomputed ────────
     if source_dir is not None and (source_dir / OUT_OF_PLACE).exists():

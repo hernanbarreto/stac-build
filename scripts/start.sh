@@ -49,6 +49,14 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 # half-blind: ShapeR could start/crash and its prints stayed invisible.
 export PYTHONUNBUFFERED=1
 
+# DETERMINISM (docs/plan_determinismo.md point 152, 2026-10-08): the backend process and
+# everything it spawns run with Python's string hashing fixed and the cuBLAS workspace
+# pinned — the same values repro.deterministic_env() gives every stage process (the
+# backend's own interactive SAM3 load calls repro.ensure_cublas_workspace(), which refuses
+# a process that initialised CUDA without it).
+export PYTHONHASHSEED=0
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
+
 exec python -m uvicorn main:app --host 0.0.0.0 --port $PORT \
     --ssl-keyfile "$KEY_FILE" \
     --ssl-certfile "$CERT_FILE" \

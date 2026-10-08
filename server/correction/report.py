@@ -5,12 +5,16 @@ report under ``output/corrections/report_<correction_id>.json`` (H5: the old
 single ``correction_report.json`` was overwritten each run). The report
 carries every stage's numbers, every gate's verdict, and the provenance tags:
 measurements are ``tool_measured``; anything applied is ``human_directed``.
+
+No wall clock inside it (docs/plan_determinismo.md points 137 / 166, 2026-10-08):
+the report is compared byte for byte between two runs; when a run happened and
+how long it took live in ``corrections.timing.jsonl`` (correction.ledger), keyed
+by the same correction id.
 """
 
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -28,12 +32,13 @@ def build_report(*, correction_id: str, kind: str, operator: str,
                  rejection_reason: Optional[str] = None,
                  suggestion: Optional[str] = None,
                  elapsed_s: Optional[float] = None) -> Dict[str, Any]:
+    """``elapsed_s`` is accepted for the callers that measure it and is NOT written into the
+    report (point 166) — pass it to ``ledger.record_run(elapsed_s=...)`` instead."""
     report: Dict[str, Any] = {
         "correction_id": correction_id,
         "kind": kind,
         "operator": operator,
         "status": status,                    # applied | rejected
-        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "instance_ids": instance_ids,
         "visits": visits,
         "observability": observability,
@@ -46,7 +51,6 @@ def build_report(*, correction_id: str, kind: str, operator: str,
         "epoch_to": epoch_to,
         "rejection_reason": rejection_reason,
         "suggestion": suggestion,
-        "elapsed_s": (round(elapsed_s, 1) if elapsed_s is not None else None),
         "algorithm_version": ALGORITHM_VERSION,
         "provenance": "tool_measured",
         "human_directed": True,
@@ -61,5 +65,5 @@ def save_report(output_dir, report: Dict[str, Any]) -> Path:
     d.mkdir(parents=True, exist_ok=True)
     p = d / f"report_{report['correction_id']}.json"
     stamp(report, output_dir)
-    p.write_text(json.dumps(report, indent=1))
+    p.write_text(json.dumps(report, indent=1, sort_keys=True, default=float))
     return p

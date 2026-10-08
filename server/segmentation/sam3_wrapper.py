@@ -48,18 +48,54 @@ class SAM3ConfigError(RuntimeError):
     "thresholds too strict"."""
 
 
+class SAM3DeviceError(RuntimeError):
+    """The configured SAM model cannot be built where this process runs (no CUDA):
+    docs/plan_determinismo.md point 165 — the configured version is a REQUIREMENT, the
+    CPU model of another version is never built in its place."""
+
+
+class SAM3RunError(RuntimeError):
+    """SAM3 failed inside a prompt (add_prompt, the propagation): the category's masks
+    are NOT returned partially — point 92. Carries the phase and the prompt."""
+
+
+class SAM3OutOfMemory(SAM3RunError):
+    """CUDA out of memory inside a prompt (point 92: a failure — never a retry on a card
+    whose free memory depends on what else was on it, never a skipped prompt)."""
+
+
+SAM3_VERSIONS = ("sam3", "sam3.1")
+# the seed of the deterministic torch state the model runs under — the one every GPU
+# step of this repo uses (extract_da3_depth.DETERMINISTIC_SEED, 2026-10-07); SAM3's
+# inference samples nothing, the seed only fixes what torch would otherwise draw
+SAM3_DETERMINISTIC_SEED = 0
+
+
 def segmentation_config() -> dict:
     """``models.segmentation`` of the config ``load_model`` builds from."""
     return (cfg.get("models", {}) or {}).get("segmentation", {}) or {}
 
 
 def sam3_build_version(scfg: dict) -> str:
-    """The model ``load_model`` BUILDS for ``scfg`` — and so the threshold block
-    that applies: 3.1 only when configured AND on CUDA; every other case builds
-    the 3.0 video model (GPU, or the CPU fallback), whatever the configured
-    version."""
+    """The model ``load_model`` BUILDS for ``scfg`` — the CONFIGURED version, and so the
+    threshold block that applies. It no longer depends on CUDA (point 165): without a
+    card ``load_model`` FAILS instead of building the 3.0 CPU model under a 3.1
+    configuration. A version outside :data:`SAM3_VERSIONS` fails naming it."""
     version = str((scfg or {}).get("version", "sam3"))
-    return "sam3.1" if (version == "sam3.1" and torch.cuda.is_available()) else "sam3"
+    if version not in SAM3_VERSIONS:
+        raise SAM3ConfigError(f"'models.segmentation.version' = {version!r} — expected one of "
+                              f"{list(SAM3_VERSIONS)}")
+    return version
+
+
+def require_cuda(version: str) -> None:
+    """The configured SAM runs on the GPU only; CUDA not visible = the stage fails (165)."""
+    if not torch.cuda.is_available():
+        raise SAM3DeviceError(
+            f"SAM {version} is configured but CUDA is not visible to this process "
+            f"(CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r}) — the "
+            f"configured version is a requirement; the CPU model is another model and is "
+            f"never built in its place (docs/plan_determinismo.md point 165)")
 
 
 def check_sam3_thresholds(scfg: Optional[dict] = None) -> Dict[str, Any]:
@@ -108,6 +144,14 @@ def sam3_thresholds(scfg: dict, version: str) -> Dict[str, Any]:
     return out
 
 
+def _repo_relative(path) -> str:
+    """A path relative to the repo root (a recorded path never carries the pod's prefix)."""
+    try:
+        return str(Path(path).resolve().relative_to(Path(vendor_paths._PROJECT_ROOT).resolve()))
+    except (ValueError, OSError, AttributeError):
+        return str(path)
+
+
 def apply_sam3_thresholds(predictor, version: str, values: Dict[str, Any]) -> Dict[str, Any]:
     """Write ``values`` (already validated by :func:`sam3_thresholds`) onto
     ``predictor.model`` and return ``{"version", "applied", "vendor_built"}``.
@@ -150,6 +194,10 @@ class SAM3Wrapper:
         self._batch_session: Optional[Tuple[str, str]] = None  # (batch_dir, session_id)
         # what apply_sam3_thresholds wrote on the last model built (the census reads it)
         self.applied_thresholds: Optional[Dict[str, Any]] = None
+        # the model built: version, checkpoint (path + sha256), device, dtype, the torch
+        # numerics it runs under, the builder's arguments (points 91 / 165; the census and
+        # segmentation.json record it)
+        self.model_record: Optional[Dict[str, Any]] = None
         logger.info("SAM3 Wrapper initialized (Lazy Loading Enabled: Model will load on first prompt).")
 
     # ── Batch session reuse ──────────────────────────────────────────
@@ -226,17 +274,25 @@ class SAM3Wrapper:
             if self.is_loaded:
                 return
 
+            import repro
             scfg = segmentation_config()
-            version = str(scfg.get("version", "sam3"))
             # the thresholds of the model about to be built are validated BEFORE
             # the vendor builder: a bad key fails in milliseconds, naming it,
             # instead of after a full model build per prompt (SAM3ConfigError is
             # re-raised by the per-category loop, never skipped)
-            built_version = sam3_build_version(scfg)
-            thresholds = sam3_thresholds(scfg, built_version)
-            logger.info(f"Loading SAM Model (version={version}, builds {built_version})...")
+            version = sam3_build_version(scfg)
+            thresholds = sam3_thresholds(scfg, version)
+            # the configured version is a requirement (point 165): no CUDA = no model
+            require_cuda(version)
+            # the cuBLAS workspace must be in the environment BEFORE this process's first
+            # CUDA call (point 91): set here when CUDA is still untouched, refused when it
+            # is already up without it — launch the process with repro.deterministic_env()
+            repro.ensure_cublas_workspace()
+            logger.info(f"Loading SAM Model (version={version})...")
             try:
-                if version == "sam3.1" and torch.cuda.is_available():
+                builder_args: Dict[str, Any] = {}
+                ckpt_rec: Dict[str, Any]
+                if version == "sam3.1":
                     # SAM 3.1 Object Multiplex: joint multi-object tracking.
                     # Same handle_request / handle_stream_request API as 3.0,
                     # so everything below load_model() is version-agnostic.
@@ -248,40 +304,50 @@ class SAM3Wrapper:
                         raise FileNotFoundError(
                             f"SAM 3.1 checkpoint not found at {ckpt} — download "
                             "facebook/sam3.1 sam3.1_multiplex.pt to weights/sam31/")
-                    self.predictor = build_sam3_multiplex_video_predictor(
-                        checkpoint_path=ckpt,
-                        max_num_objects=int(scfg.get("max_num_objects", 32)),
+                    # the cap: -1 = the vendor's no limit (point 90, DECIDIDO) — a cap that is
+                    # reached drops objects by frame order, so there is none
+                    builder_args = dict(
+                        max_num_objects=int(scfg.get("max_num_objects", -1)),
                         multiplex_count=int(scfg.get("multiplex_count", 16)),
                         use_fa3=bool(scfg.get("use_fa3", False)),
                         compile=bool(scfg.get("compile", False)),
                     )
+                    self.predictor = build_sam3_multiplex_video_predictor(
+                        checkpoint_path=ckpt, **builder_args)
+                    ckpt_rec = {"path": _repo_relative(ckpt), "sha256": repro.sha256_file(ckpt)}
                     self.applied_thresholds = apply_sam3_thresholds(
                         self.predictor, "sam3.1", thresholds)
-                    torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
-                    logger.info("SAM 3.1 Multiplex loaded on GPU (bfloat16 autocast active).")
-                elif torch.cuda.is_available():
-                    # SAM 3.0 GPU path: MultiGPU predictor with bfloat16 autocast
+                else:
+                    # SAM 3.0 GPU path: MultiGPU predictor with bfloat16 autocast; the
+                    # vendor builder resolves (auto-downloads) the checkpoint itself
                     from sam3.model_builder import build_sam3_video_predictor
                     gpus_to_use = [torch.cuda.current_device()]
+                    builder_args = {"gpus_to_use": [int(g) for g in gpus_to_use]}
                     self.predictor = build_sam3_video_predictor(gpus_to_use=gpus_to_use)
+                    ckpt_rec = {"path": None, "sha256": None,
+                                "note": "resolved by the vendor builder (not a local file)"}
                     self.applied_thresholds = apply_sam3_thresholds(
                         self.predictor, "sam3", thresholds)
-                    torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
-                    logger.info("SAM3 Model loaded on GPU (bfloat16 autocast active).")
-                else:
-                    if version == "sam3.1":
-                        logger.warning("SAM 3.1 requires CUDA — falling back to SAM 3.0 CPU path")
-                    # CPU path: use single-device Sam3VideoPredictor (no MultiGPU)
-                    from sam3.model.sam3_video_predictor import Sam3VideoPredictor
-                    self.predictor = Sam3VideoPredictor()
-                    # the model BUILT here is the 3.0 video model whatever the
-                    # configured version, so its thresholds are the "sam3" block
-                    self.applied_thresholds = apply_sam3_thresholds(
-                        self.predictor, "sam3", thresholds)
-                    logger.info("SAM3 Model loaded on CPU (float32, slower but functional).")
+                # DETERMINISTIC NUMERICS after the build (point 91): the vendor turns TF32 on
+                # at import and at the predictor's construction (sam3_multiplex_base.py:36,
+                # sam3_multiplex_video_predictor.py:48) — off again here, deterministic
+                # algorithms STRICT (an op without a deterministic kernel RAISES, never a
+                # silent other result), cuDNN deterministic, seeds fixed. bf16 stays the
+                # validated dtype (recorded, not changed).
+                numerics = repro.enable_deterministic_torch(SAM3_DETERMINISTIC_SEED)
+                torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+                self.model_record = {
+                    "version": version, "checkpoint": ckpt_rec, "device": "cuda",
+                    "dtype": "bfloat16 (autocast)", "builder_args": builder_args,
+                    "numerics": numerics,
+                    "thresholds": dict(self.applied_thresholds or {}),
+                }
+                logger.info(f"SAM {version} loaded on GPU (bfloat16 autocast active; TF32 off, "
+                            f"deterministic algorithms strict, seed {SAM3_DETERMINISTIC_SEED}; "
+                            f"checkpoint sha256 {str(ckpt_rec.get('sha256'))[:12]}).")
 
                 self.is_loaded = True
-                
+
             except Exception as e:
                 logger.error(f"Failed to load SAM3 model: {e}")
                 import traceback
@@ -657,7 +723,8 @@ class SAM3Wrapper:
         batch_path = Path(batch_dir)
         batch_size = len(index_mapping)
         results = {}
-        
+        phase = "start_session"
+
         try:
             logger.info(f"[SAM3-Batch] Processing {batch_size} frames from {batch_dir}")
             _vram_before = 0
@@ -686,30 +753,31 @@ class SAM3Wrapper:
             else:
                 f_idx = 0
 
-            try:
-                request = dict(
-                    type="add_prompt",
-                    session_id=session_id,
-                    frame_index=f_idx,
-                    text=prompt_text,
-                )
-                seeds = (boxes_by_local or {}).get(f_idx)
-                if seeds:
-                    request["bounding_boxes"] = [[float(c) for c in b] for b in seeds]
-                    request["bounding_box_labels"] = [1] * len(seeds)
-                prompt_response = self.predictor.handle_request(request=request)
-                # Log what SAM3 detected at the prompt frame
-                if prompt_response:
-                    n_objs = 0
-                    if "out_obj_ids" in prompt_response:
-                        ids = prompt_response["out_obj_ids"]
-                        n_objs = len(ids) if hasattr(ids, '__len__') else 0
-                    has_mask = "out_binary_masks" in prompt_response
-                    logger.info(f"[SAM3-Batch] Prompt '{prompt_text}' @ frame {f_idx}: {n_objs} objects, has_mask={has_mask}")
-            except Exception as e:
-                logger.warning(f"Could not add prompt to batch frame {f_idx}: {e}")
-            
+            # an add_prompt that fails is the prompt failing (point 92): it used to be a
+            # warning, and the propagation then ran over a session with no prompt in it
+            phase = "add_prompt"
+            request = dict(
+                type="add_prompt",
+                session_id=session_id,
+                frame_index=f_idx,
+                text=prompt_text,
+            )
+            seeds = (boxes_by_local or {}).get(f_idx)
+            if seeds:
+                request["bounding_boxes"] = [[float(c) for c in b] for b in seeds]
+                request["bounding_box_labels"] = [1] * len(seeds)
+            prompt_response = self.predictor.handle_request(request=request)
+            # Log what SAM3 detected at the prompt frame
+            if prompt_response:
+                n_objs = 0
+                if "out_obj_ids" in prompt_response:
+                    ids = prompt_response["out_obj_ids"]
+                    n_objs = len(ids) if hasattr(ids, '__len__') else 0
+                has_mask = "out_binary_masks" in prompt_response
+                logger.info(f"[SAM3-Batch] Prompt '{prompt_text}' @ frame {f_idx}: {n_objs} objects, has_mask={has_mask}")
+
             # 3. Propagate (save ALL frames, keyframe_interval=1)
+            phase = "propagate_in_video"
             for response in self._stream(
                 request=dict(
                     type="propagate_in_video",
@@ -741,14 +809,19 @@ class SAM3Wrapper:
             
         except Exception as e:
             is_oom = "out of memory" in str(e).lower()
-            logger.error(f"Error during batch processing: {e}")
+            logger.error(f"Error during batch processing ({phase}): {e}")
             import traceback
             traceback.print_exc()
             # the reused session may be in a bad state (and on OOM its frames are
-            # the memory we need back) — drop it, the next concept reopens one
+            # the memory we need back) — drop it
             self.release_batch_session()
-            if is_oom:
-                raise  # Let caller handle OOM recovery
+            # NEVER partial results (point 92): an error midway through the propagation
+            # used to return the frames done so far as the category's masks, recorded as
+            # 'ran'. The prompt fails, with its phase; an OOM is a failure like any other
+            # (no retry on a card whose free memory depends on its co-tenants, no skip).
+            cls = SAM3OutOfMemory if is_oom else SAM3RunError
+            raise cls(f"SAM3 {phase} failed for prompt '{prompt_text}' "
+                      f"({type(e).__name__}: {e})") from e
         finally:
             # NOTE: the session stays OPEN for the next concept — release_batch_session()
             # closes it when the frame set changes or segmentation ends.

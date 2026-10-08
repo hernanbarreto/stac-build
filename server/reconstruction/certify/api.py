@@ -13,9 +13,14 @@ shown — there is no approving and no undoing).
     POST /api/certify/select  {session_id, epoch}               → show that epoch (correction.run)
 
 The certification itself RUNS INSIDE the reconstruction pipeline (stage
-``certify``, workers/certify_worker.py — USER 2026-09-13: nothing manual) and
-again through ``auto_run`` when the Segmentation Manager closes; there is no
-endpoint to trigger it by hand.
+``certify``, workers/certify_worker.py — USER 2026-09-13: nothing manual), and
+ONLY there (docs/plan_determinismo.md point 160, 2026-10-08: ONE launcher — the
+frozen run configuration, the deterministic environment, the worker's steps
+including the object descriptions). Closing the Segmentation Manager ORDERS a
+job of the pipeline manager (main.py ``/api/segmentation/refresh`` →
+``_enqueue_service_job``: projection + certification); the server process never
+runs stage code — the thread hook that lived here (``auto_run``) is gone. There
+is no endpoint to trigger it by hand.
 """
 
 from __future__ import annotations
@@ -104,41 +109,14 @@ async def _run_locked(session_id: str, label: str, fn: Callable, output_dir=None
     return result
 
 
-def auto_run(session_id: str, loop=None) -> None:
-    """The post-segmentation hook (certify.auto_after_segmentation): runs the
-    loop as operator ``auto`` under the session lock (in an executor thread;
-    ``loop`` is the event loop the viewer broadcast must run on); failures
-    are logged, never swallowed into silence."""
-    from task_manager import task_manager
-    try:
-        ctx = _ctx(session_id)
-    except HTTPException as e:
-        _log(f"auto certification skipped for {session_id}: {e.detail}")
-        return
-    tid = task_manager.start(session_id, "certify", "certification loop (auto)")
-    try:
-        _acquire(session_id, tid)
-    except HTTPException:
-        task_manager.fail(tid, "conflict")
-        _log(f"auto certification skipped for {session_id}: another certification is running")
-        return
-    try:
-        from reconstruction.certify.run import certify_session
-        acta = certify_session(_session_dir(ctx), operator="auto", log=_log)
-        task_manager.finish(tid)
-        _log(f"auto certification of {session_id}: {acta.get('stop_reason')} (epoch {acta.get('epoch_final')})")
-        if _notify_viewer is not None and loop is not None:
-            asyncio.run_coroutine_threadsafe(_notify_viewer(session_id, Path(ctx.output_dir)), loop)
-    except Exception as e:  # noqa: BLE001 — declared in the task + log
-        task_manager.fail(tid, str(e))
-        _log(f"auto certification of {session_id} FAILED: {e}")
-    finally:
-        _release(session_id)
-
-
-def _acta_summary(acta: dict) -> dict:
-    return {k: acta.get(k) for k in ("started_at", "operator", "max_iters", "stopped_at", "stop_reason",
-                                     "epoch_initial", "epoch_final", "elapsed_s")} | {
+def _acta_summary(acta: dict, timing: Optional[dict] = None) -> dict:
+    # the clock lives in certify_acta.timing.json (point 166): merged into the summary the
+    # kit shows, never into the acta itself
+    timing = timing or {}
+    return {k: acta.get(k) for k in ("operator", "max_iters", "stopped_at", "stop_reason",
+                                     "epoch_initial", "epoch_final", "base", "input_stamp",
+                                     "run_config_sha256", "reused")} | {
+        "started_at": timing.get("started_at"), "elapsed_s": timing.get("elapsed_s"),
         "iterations": [{k: it.get(k) for k in ("iteration", "verdict", "reason", "epoch_from", "epoch_to",
                                                 "objective", "objective_prev", "improvement", "gates")}
                        for it in acta.get("iterations", [])],
@@ -152,10 +130,15 @@ async def state(session_id: str):
     from correction.epoch import current_epoch
     from correction.apply import available_epochs
     from correction import ledger
-    from reconstruction.certify.run import ACTA_JSON
+    from reconstruction.certify.run import ACTA_JSON, ACTA_TIMING_JSON
     from reconstruction.witness.fields import WITNESS_FIELDS
     acta_p = out / ACTA_JSON
     acta = json.loads(acta_p.read_text()) if acta_p.exists() else None
+    timing_p = out / ACTA_TIMING_JSON
+    try:
+        timing = json.loads(timing_p.read_text()) if timing_p.exists() else None
+    except (OSError, ValueError):
+        timing = None
     has_fields = False
     ply = out / "cleaned_cloud.ply"
     if ply.exists():
@@ -169,7 +152,7 @@ async def state(session_id: str):
                               "epoch_to": r["epoch_to"], "operator": r["operator"]}
                              for r in ledger.applied_runs(out)],
             "witness_fields": has_fields, "running_task": running,
-            "acta": _acta_summary(acta) if acta else None}
+            "acta": _acta_summary(acta, timing) if acta else None}
 
 
 @router.get("/acta/{session_id}")

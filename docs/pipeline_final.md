@@ -186,6 +186,65 @@ over 128k tracks, F6 resampled every Omega map through it: floor undulation 14.6
   +21.8 px), so its per-inference noise read as a zoom on 4 of 5 chunks, their DA3 anchors were dropped and the scale
   verification failed by 18.6 %. The error is now max(own scatter, Omega's focal error between inferences measured on
   the shared frames = RMS of the seams' median offsets / √2, pccr 8.8 px) — metric_lock.inference_focal_error.
+- 2026-10-08 — WAVE 1 VALIDATED and COMMITTED (main 1c466f4, fork 67f30e9) on pccr 2026-08-31 (floor undulation
+  10.0 cm, thickness 4.8 cm, worst in-chunk drift 8 cm; USER: "pccr se ve bien, con menos errores que hoy a la mañana")
+  and zaragoza 2026-06-03 (ONE pass, D_total 5.01; floor 27.8 cm, as before). Hashes of the run and a full copy of the
+  session under /workspace/stac-keep/ (docs/determinism_work/verification_runs.md). The bit-for-bit two-run comparison
+  of the reconstruction was NOT run (USER: wave 2 first).
+- 2026-10-08 — F6 ON THE CARD, STRICT (USER: "todos los pasos que son CPU y pueden ser GPU estricto deben ser gpu
+  estricto … la premisa es que cada paso sea lo más veloz posible, manteniendo la calidad y el determinismo"; bit
+  identity with the numpy recipe NOT required, run-to-run identity IS). `precision/f6_torch.py`: every map operation of
+  mono_detail (per-tile affine fit in closed form, blend, Gaussian lowpass as matrix products with explicit 'nearest'
+  boundaries, band, sides) and of the edge-keeping vote (splat by stable sort — no scatter, no atomics —, dense
+  projections, sort-based medians, snap, repair) on torch tensors on ONE device: the stage entries (`depth_on_f5.main`,
+  `corrected_cloud.main`, `mono_ab.main`) call `f6_torch.require_cuda(seed)` (no card → fail; strict deterministic mode
+  for the whole process; a CUDA run with the mode off FAILS), the synthetic tests run the same code on the CPU
+  (`use_device`). PointDiT runs a keyframe's tiles as ONE batch (`PointDiTRunner.depth_batch`, `mono_detail.tile_batch`
+  0 = all; a card that cannot hold it fails, never halves). `depth_on_f5.json` carries `maps_numerics` (device, card,
+  torch flags). VERIFIED 2026-10-08 on two fresh copies of pccr (precision.mono_ab, variant 'on'): cleaned cloud
+  byte-identical (sha f548f2f985b9a566), reports identical but the timings; F6 compute 16–18 min vs 32 in the
+  pipeline (PointDiT 411–479 s vs 819 at batch 2; the map phases 26 s vs 186). Still CPU inside F6: the bend
+  (landmark IRLS + bootstrap, ~9 min on pccr) — the next port. Expected on zaragoza (15 tiles/keyframe): PointDiT 56
+  min → to be measured.
+- 2026-10-08 — SEGMENTATION IN ROUNDS (USER DECISION, to implement after wave 2's P2: "si si, es la manera correcta,
+  porque sino el tiempo que se ahorra ahora lo pierde después el humano fusionando o diciendo que 5 cosas son lo
+  mismo"): round k — the VLM sees every keyframe with everything already segmented GREYED OUT and names only what is
+  still visible, with the most specific common name of ONE object (desk, chair — never 'furniture'); the synonym merge
+  over the new names; SAM3 runs the new prompts over all keyframes into the same (staged) store; the unsegmented
+  remainder per keyframe is recomputed; stop when a round names nothing new (plus a declared bound of rounds). Then the
+  VLM describes every segment (ShapeR + chat). Duplicates are prevented by construction, completeness is measured; the
+  after-the-fact dedupes stay as safety nets. Cost ~2–3 h on pccr vs ~2 h, plus one vLLM start per round (never
+  vLLM and SAM3 together on the card).
+- 2026-10-08 — THE FLOOR IS GEOMETRIC, AND THERE MAY BE SEVERAL (USER): "piso" = the horizontal SUPPORT surface the
+  camera walks over — the dominant horizontal plane under the cameras, nearest to y=0 or parallel to it — whatever it
+  is called (floor, platform, andén, walkway, slab, deck); labels are only a hint (plan point 128). A session can hold
+  several floors at different heights, each a segmented object; the floor of a keyframe/chunk is the surface under the
+  camera at that moment and a real change of level (stepping down from the platform) is PRESERVED as a step, never
+  corrected as drift; a second level with significant support by the user's rule is a real floor, not noise. Applies
+  to the certification's floor alignment, the re-level after each epoch, the chunk check and the cloud metrics.
+- 2026-10-08 — WAVE 2 (after the cloud), packages P2–P5 of docs/determinism_work/impl_spec2.md, running/landed the same
+  day (reports in the session log; summary here when all four are in):
+  P2 VLM + SAM3 (landed): each VLM stage launches its OWN vLLM from the frozen config (no prefix cache, one sequence,
+  batch invariance, eager, seed, FLASH_ATTN pinned) and stops it at the end (`semantic.service.job_engine`; identity
+  verified and written to vlm_analysis.json); weights pinned by sha256 (`semantic.serve.PINNED_WEIGHTS`); engine LEASE
+  (`logs/semantic_engine_lease.json`): chat/intel wait while a job holds it; `vlm_analysis.json` stamped over every
+  input and reused WHOLE only on an identical stamp; per-call records (image sha1, finish_reason, salvage); captions
+  stamped, never carried by id, all-or-nothing; SAM3 strict deterministic (TF32 off, repro flags after the build), NO
+  object cap (vendor/sam31 patched: no 320 GB pin), any error/OOM fails the stage; InternVL3 fallback gone; the cloud
+  stage never projects masks (a rebuilt cloud deletes the previous projection products).
+  P3 cloud + segmentation geometry (landed): the raw SAM3 store is IMMUTABLE and sealed (staged, swapped atomically,
+  `reconstruction_id` + stamp), the fusion lives in `fusion_map.json` tied to the raw store's sha (readers:
+  `fuse_parent.fused_parent` / `FusedMasks`), `seg_masks.npz` canonical (object, frame) order; mask identity, space
+  dedupe, label-fragment contiguity, co-visibility splits and OBB core/yaw all by the user's rule with margins
+  recorded (`decisions` in the result); the projection is PURE (no previous result; error or empty → fails and deletes
+  the old one), stamped over every input, reused only on an identical stamp; octree built only from the cloud the masks
+  were projected on, `potree_stamp.json`; PotreeConverter canonical octree layout (byte-identical conversions, no
+  log.txt; POTREE_NUM_THREADS=1 still required); leveling seeded and cache-keyed by the cloud's sha; 16-bit instance ids
+  (`instance_ids.npy`, LAS extra dim `instance`; the viewer still keys on the uint8 class — pending); caches keyed by
+  content; no clock in any compared artifact (`segmentation_timing.json`). Mask audit projects through the cloud
+  camera's LENS (`session_io.CameraSource.pixels`) — a lens-refined session (pccr R2) is no longer refused.
+  DECLARED: octrees change bytes and rebuild once; sessions projected before 2026-10-08 re-project once; legacy
+  sessions without camera.json cannot be projected; `segmentation.obb_orientation.min_plane_frac` removed.
 
 ## The pipeline ("Reconstruir"), stage by stage
 

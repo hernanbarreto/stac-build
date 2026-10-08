@@ -5,9 +5,16 @@ keyframes and answers a JSON with the class — nothing else. It never moves a
 point: the class only decides whether an instance may PROPOSE a loop
 candidate (structural), is ignored (movable) or is excluded (dynamic), and
 feeds the per-session movable label list of the verifier. Classes are cached
-in the instance store (``scene_r.db`` meta ``loop_class_<iid>``), provenance
-``vlm_proposed``. When the VLM is unavailable the configured default class is
-recorded with provenance ``default`` — never silently structural.
+in the instance store (``scene_r.db``), provenance ``vlm_proposed``.
+
+DETERMINISM (docs/plan_determinismo.md point 95 — 2026-10-08): the cache is keyed by the
+CONTENT the verdict depends on — the sha1 of every crop sent, the label, the prompt text,
+the served model's identity, the token bound — never by the instance id (an id reassigned
+by a re-segmentation inherited another object's class). When the semantic service cannot
+be brought up, or a call answers nothing usable, the classification FAILS: a 'default'
+class is never recorded for a service that was down. The configured default class is
+recorded only for an instance that has NO crop to show (no mask on disk) — a fact of the
+data, provenance ``default``.
 """
 
 from __future__ import annotations
@@ -19,6 +26,8 @@ from typing import Callable, Dict, List, Optional
 import numpy as np
 
 CLASSES = ("structural", "movable", "dynamic")
+CACHE_PREFIX = "loop_class_"               # scene_r.db meta key: loop_class_<content sha>
+CACHE_VERSION = 2                          # v1 keyed by instance id (never read again)
 
 _SYSTEM = ("You classify one object of a construction / infrastructure site for a "
            "measurement system. Answer ONLY the JSON requested.")
@@ -32,6 +41,11 @@ _SCHEMA = {
     },
     "required": ["class", "confidence"],
 }
+
+
+class LoopClassError(RuntimeError):
+    """The classes could not be measured (service down, a call that answered nothing
+    usable) — declared, never a default."""
 
 
 def _prompt(label: str) -> str:
@@ -57,7 +71,8 @@ def _mask_crop(output_dir: Path, session_dir: Path, iid: int, oid: Optional[int]
     numbers that collide by accident: pccr 2026-09-14 classified 4 instances of
     61 and the other 57 fell to the default class, while the few that did
     "hit" paired an image with another keyframe's mask and raised
-    IndexError out of the crop.
+    IndexError out of the crop. Ties of mask area break by frame number (the
+    sort key), so the same masks pick the same crops on every run.
     """
     from segmentation.shape_proposer import _load_frame_rgb, _isolated_crop
     p = output_dir / "seg_masks.npz"
@@ -70,7 +85,7 @@ def _mask_crop(output_dir: Path, session_dir: Path, iid: int, oid: Optional[int]
         if key in z.files:
             m = z[key]
             cand.append((int(m.sum()), int(f), key))
-    cand.sort(reverse=True)
+    cand.sort(key=lambda t: (-t[0], t[1]))
     out = []
     for _area, f, key in cand[:crops]:
         img = _load_frame_rgb(session_dir, f)
@@ -85,75 +100,106 @@ def _mask_crop(output_dir: Path, session_dir: Path, iid: int, oid: Optional[int]
     return out
 
 
+def _model_identity() -> Optional[dict]:
+    """The stable identity of the engine answering (semantic.serve's record of the live
+    vLLM), None when none is recorded — recorded as such in the cache key."""
+    try:
+        from semantic.service import service_identity
+        doc = service_identity()
+    except Exception:  # noqa: BLE001
+        return None
+    return dict(doc["identity"]) if doc else None
+
+
+def cache_key(label: str, crop_sha1s: List[str], max_tokens: int,
+              model: Optional[dict]) -> str:
+    """The content a verdict depends on (point 95): crops, label, prompt, model, bound."""
+    from repro import stable_id
+    return CACHE_PREFIX + stable_id(CACHE_VERSION, str(label), _prompt(label), _SYSTEM,
+                                    list(crop_sha1s), int(max_tokens), model, n_hex=24)
+
+
 def classify_instances(output_dir, session_dir, instances: List[dict], cfg,
                        oid_of: Dict[int, Optional[int]], frames_of: Dict[int, List[int]],
                        cloud_to_mask: Optional[Dict[int, int]] = None,
                        log: Callable[[str], None] = print) -> Dict[int, dict]:
     """{instance_id: {class, confidence, provenance}} for every instance,
-    cached in the instance store. ``cfg`` = LoopsConfig.semantic."""
+    cached in the instance store by the CONTENT of the question (:func:`cache_key`).
+    ``cfg`` = LoopsConfig.semantic. Raises :class:`LoopClassError` when the service
+    cannot answer (never a default for a service that was down)."""
     from phase_r.instance_store import InstanceStore
+    from semantic.types import system, user
     output_dir, session_dir = Path(output_dir), Path(session_dir)
     store = InstanceStore(output_dir / "scene_r.db")
     out: Dict[int, dict] = {}
-    client = None
-    # The class of an object is a property of the OBJECT: a desk is still a
-    # desk after the cloud is corrected. Every instance already classified is
-    # read from the store below — so the service is only worth starting when
-    # something is actually missing. It used to start unconditionally: on pccr
-    # 2026-09-21 certify booted vLLM (24 GB, ~4 min) and then classified ZERO
-    # instances, every one of them already cached.
-    _pending = [i for i in instances
-                if not store.get_meta(
-                    f"loop_class_{int(i.get('instance_id', i.get('id')))}")]
-    if not _pending:
-        log(f"[loop-class] all {len(instances)} instance(s) already classified "
-            f"— the semantic service is not started")
-    if cfg.enabled and _pending:
-        try:
-            # the service may be DOWN here (SAM3 stops vLLM for its exclusive
-            # window): bring it up and wait, exactly as the VLM stage does —
-            # pccr 2026-09-13 21:03: with it down every instance fell to the
-            # default class → 0 instance loops, 0 structural constraints
-            from config import cfg as _server_cfg
-            from semantic.service import ensure_service
-            if not ensure_service(_server_cfg, log=log):
-                raise RuntimeError("semantic service did not come up")
-            from semantic.client import get_semantic_client
-            client = get_semantic_client(consumer="loops.classify")
-            if not client.health().get("ok", True):
-                raise RuntimeError("semantic service unhealthy after start")
-        except Exception as e:  # noqa: BLE001 — declared below, never silent
-            log(f"[loop-class] semantic service unavailable ({e}) — default class "
-                f"'{cfg.default_class}' recorded for unclassified instances")
-            client = None
+    if not cfg.enabled:
+        for inst in instances:
+            iid = int(inst.get("instance_id", inst.get("id")))
+            out[iid] = {"class": cfg.default_class, "confidence": 0.0, "provenance": "default",
+                        "label": str(inst.get("label", "segment")),
+                        "reason": "loops.semantic.enabled is false"}
+        return out
+    # the crops first: they are the cache key, and an instance without any crop (no mask
+    # on disk) is classified by the data, not by the model
+    model = _model_identity()
+    prepared = []
+    pending = 0
     for inst in instances:
         iid = int(inst.get("instance_id", inst.get("id")))
         label = str(inst.get("label", "segment"))
-        cached = store.get_meta(f"loop_class_{iid}")
+        crops = _mask_crop(output_dir, session_dir, iid, oid_of.get(iid),
+                           frames_of.get(iid, []), cfg.crops_per_instance, cloud_to_mask or {})
+        msg = user(_prompt(label), images=crops) if crops else None
+        sha1s = [r.sha1 for r in msg.images] if msg is not None else []
+        key = cache_key(label, sha1s, cfg.max_tokens, model)
+        cached = store.get_meta(key)
+        rec = None
         if cached:
             try:
-                out[iid] = json.loads(cached)
-                continue
+                rec = json.loads(cached)
             except json.JSONDecodeError:
-                pass
-        rec = {"class": cfg.default_class, "confidence": 0.0, "provenance": "default",
-               "label": label}
-        if client is not None:
-            crops = _mask_crop(output_dir, session_dir, iid, oid_of.get(iid),
-                               frames_of.get(iid, []), cfg.crops_per_instance,
-                               cloud_to_mask or {})
-            if crops:
+                rec = None
+        if rec is None and crops:
+            pending += 1
+        prepared.append((iid, label, msg, key, rec))
+    client = None
+    if pending:
+        # the service may be DOWN here (SAM3 stops vLLM for its exclusive window): bring
+        # it up and wait, exactly as the VLM stage does — pccr 2026-09-13 21:03: with it
+        # down every instance fell to the default class → 0 instance loops, 0 structural
+        # constraints. Since 2026-10-08 that outcome is a FAILURE, not a default.
+        from config import cfg as _server_cfg
+        from semantic.service import ensure_service
+        if not ensure_service(_server_cfg, log=log):
+            raise LoopClassError("the semantic service did not come up — the instance classes "
+                                 "cannot be measured and no default is recorded (point 95)")
+        from semantic.client import get_semantic_client
+        client = get_semantic_client(consumer="loops.classify")
+        if not client.health().get("ok", True):
+            raise LoopClassError("the semantic service is unhealthy after its start — the "
+                                 "instance classes cannot be measured (point 95)")
+    else:
+        log(f"[loop-class] all {len(instances)} instance(s) already classified under their "
+            f"content key (or have no crop) — the semantic service is not started")
+    for iid, label, msg, key, rec in prepared:
+        if rec is None:
+            if msg is None:
+                rec = {"class": cfg.default_class, "confidence": 0.0, "provenance": "default",
+                       "label": label, "reason": "no SAM3 mask crop on disk for this instance"}
+            else:
                 from segmentation.shape_proposer import _chat_json
-                from semantic.types import system, user
-                parsed, _raw = _chat_json(
-                    client, [system(_SYSTEM), user(_prompt(label), images=crops)],
-                    _SCHEMA, cfg.max_tokens, log=log)
-                if isinstance(parsed, dict) and parsed.get("class") in CLASSES:
-                    rec = {"class": str(parsed["class"]),
-                           "confidence": float(parsed.get("confidence", 0.0)),
-                           "why": str(parsed.get("why", "")), "provenance": "vlm_proposed",
-                           "label": label}
-        store.set_meta(f"loop_class_{iid}", json.dumps(rec))
+                parsed, raw = _chat_json(client, [system(_SYSTEM), msg], _SCHEMA,
+                                         cfg.max_tokens, log=log)
+                if not (isinstance(parsed, dict) and parsed.get("class") in CLASSES):
+                    raise LoopClassError(f"instance {iid} '{label}': the VLM answered nothing "
+                                         f"usable ({raw[:120]!r}) — no default is recorded "
+                                         f"(point 95)")
+                rec = {"class": str(parsed["class"]),
+                       "confidence": float(parsed.get("confidence", 0.0)),
+                       "why": str(parsed.get("why", "")), "provenance": "vlm_proposed",
+                       "label": label}
+            rec["cache_key"] = key
+            store.set_meta(key, json.dumps(rec, sort_keys=True))
         out[iid] = rec
         log(f"[loop-class] instance {iid} '{label}' → {rec['class']} ({rec['provenance']})")
     return out

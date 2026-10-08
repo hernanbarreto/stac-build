@@ -1288,8 +1288,10 @@ function App() {
     } catch { /* panel simply hides the combobox */ }
   }, [])
 
+  // the EXPLICIT floor action (the floor combobox): the server applies it only under the
+  // user's rule — docs/plan_determinismo.md point 161 — and never at load (point 158)
   const applyFloorLevel = useCallback(async (
-    sessionId: string, mode: 'auto' | 'explicit' | 'auto_if_needed', instanceId?: number
+    sessionId: string, mode: 'auto' | 'explicit', instanceId?: number
   ) => {
     try {
       const res = await fetch('/api/segmentation/level_floor', {
@@ -1308,16 +1310,17 @@ function App() {
     } catch { /* non-fatal */ }
   }, [])
 
-  // Floory=0 on session load: once the cloud is actually in the viewer
-  // (pointCount > 0), detect an un-leveled segmented floor and fix it —
-  // the server no-ops when it is already level. Once per session.
+  // On session load (once the cloud is in the viewer) only the floor candidates are READ
+  // for the combobox. OPENING NEVER WRITES (docs/plan_determinismo.md points 158 / 161,
+  // 2026-10-08): the automatic re-levelling that ran here ('auto_if_needed' — a 1 cm /
+  // 0.5° bar on an unseeded plane, rewriting the floor frame, every OBB and the store at
+  // every open) is gone; levelling is the explicit floor action, judged by the user's rule.
   useEffect(() => {
     if (!activeSession || pointCount <= 0) return
     if (floorLevelCheckedRef.current === activeSession) return
     floorLevelCheckedRef.current = activeSession
-    applyFloorLevel(activeSession, 'auto_if_needed')
     refreshFloorLevel(activeSession)
-  }, [activeSession, pointCount, applyFloorLevel, refreshFloorLevel])
+  }, [activeSession, pointCount, refreshFloorLevel])
 
   const handleReconstruct = useCallback(async (sessionId: string) => {
     setPipelineDialogSession(sessionId)
@@ -1933,6 +1936,15 @@ function App() {
       const res = await fetch('/api/segmentation/refresh', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sid }) })
       if (res.ok) {
         const data = await res.json()
+        if (data.queued) {
+          // the re-projection (+ certification) is a JOB of the pipeline manager now
+          // (docs/plan_determinismo.md point 160): the segments, the octree and the floor
+          // arrive through the job's completion broadcast, like any other run; the floor is
+          // re-levelled by the certification itself, never from here
+          report('Re-projection queued — the segments and the octree arrive when the job ends', 'ok')
+          setSessionLoading(null)
+          return
+        }
         report(t('segmentation.refreshed', { n: data.instances?.length || 0 }), 'ok')
         if (Array.isArray(data.instances)) {
           setSegments(data.instances.map((inst: any) => ({
@@ -1948,13 +1960,12 @@ function App() {
         }
         viewportRef.current?.refreshSegmentOBBs(sid)
         refreshUnsegmentedCount(sid)
-        await applyFloorLevel(sid, 'auto')
         refreshFloorLevel(sid)
         viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: sid })
       }
     } catch { /* silent */ }
     finally { setSessionLoading(null) }
-  }, [interactiveSessionId, reloadSegments, refreshUnsegmentedCount, applyFloorLevel, refreshFloorLevel, report, t])
+  }, [interactiveSessionId, reloadSegments, refreshUnsegmentedCount, refreshFloorLevel, report, t])
 
   // ── Menus (File / View / Tools / Help) — the same actions as before ──
   const menus: HeaderMenu[] = [

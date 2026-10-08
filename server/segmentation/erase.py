@@ -213,7 +213,10 @@ def _mask_obj_by_iid(output_dir: Path) -> Dict[int, int]:
     if not seg_json.exists():
         return out
     try:
-        for e in (json.loads(seg_json.read_text()).get("instances") or []):
+        # the FUSED view (plan point 100): the raw store is immutable, the fusion is applied by
+        # every reader from fusion_map.json
+        from segmentation.fuse_parent import fused_parent
+        for e in (fused_parent(output_dir).get("instances") or []):
             if e.get("id") is not None and e.get("instance_id") is not None:
                 out[int(e["instance_id"])] = int(e["id"])
     except Exception:  # noqa: BLE001
@@ -234,8 +237,8 @@ def _mask_oids_by_iid(output_dir: Path) -> Dict[int, List[int]]:
     if not seg_json.exists():
         return out
     try:
-        from segmentation.fuse_parent import oids_of
-        for e in (json.loads(seg_json.read_text()).get("instances") or []):
+        from segmentation.fuse_parent import fused_parent, oids_of
+        for e in (fused_parent(output_dir).get("instances") or []):
             if e.get("id") is not None and e.get("instance_id") is not None:
                 # after the fusion the survivor's PARTS are those other mask
                 # ids: reading only `id` would make every instance single-mask
@@ -282,9 +285,7 @@ def verify_octree_classification(output_dir: Path,
         if (output_dir / "potree").exists() else output_dir.parent / "potree"
     meta_p = potree / "metadata.json"
     cls_p = output_dir / "classification.npy"
-    src = output_dir / "corrected_cloud.ply"
-    if not src.exists():
-        src = output_dir / "cleaned_cloud.ply"
+    src = output_dir / "cleaned_cloud.ply"          # the ONE cloud of the live epoch (plan point 120)
     if not (meta_p.exists() and cls_p.exists() and src.exists()):
         return None
     try:
@@ -615,7 +616,10 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
         if oid is None or not masks:
             continue
         for f in np.unique(fg[removed]):
-            key = f"f{cloud_to_mask.get(int(f), int(f))}_o{int(oid)}"
+            mf = cloud_to_mask.get(int(f))           # exact (plan point 121): no mask position for this frame → nothing to clear
+            if mf is None:
+                continue
+            key = f"f{mf}_o{int(oid)}"
             m = masks.get(key)
             if m is None:
                 continue
@@ -671,7 +675,10 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
                         else next(m.shape[:2] for k, m in masks.items()
                                   if k.startswith("f"))
                     for f in np.unique(fg[added]):
-                        key = f"f{cloud_to_mask.get(int(f), int(f))}_o{int(toid)}"
+                        mf = cloud_to_mask.get(int(f))   # exact (plan point 121)
+                        if mf is None:
+                            continue
+                        key = f"f{mf}_o{int(toid)}"
                         m = masks.get(key)
                         if m is None:
                             m = np.zeros((mh0, mw0), dtype=np.uint8)
@@ -728,9 +735,6 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
         keep = np.ones(N, dtype=bool)
         keep[pending_delete] = False
         ok_del = _rewrite_ply_keep(output_dir / "cleaned_cloud.ply", keep)
-        corr = output_dir / "corrected_cloud.ply"
-        if ok_del and corr.exists():
-            ok_del = _rewrite_ply_keep(corr, keep)
         if ok_del:
             # every stored index shifts — remap all instances onto the new
             # cloud (deleted points were unsegmented, so instances only shift)

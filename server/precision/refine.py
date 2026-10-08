@@ -170,13 +170,11 @@ def count_dropped(dropped: Optional[dict], obs) -> None:
         dropped["observations"] = int(dropped.get("observations", 0)) + len(obs)
 
 
-def triangulate_tracks(groups: Dict[int, List], w2c: np.ndarray, params: Sequence[float],
-                       solver: dict, min_tri_deg: float,
-                       dropped: Optional[dict] = None) -> Dict[int, np.ndarray]:
-    """{track: X} of every track seen from ≥ 2 views whose rays span ≥ ``min_tri_deg`` in front
-    of its cameras. A track whose observations cannot be undistorted under this camera (the
-    round trip of ``precision.camera._undistort_verified`` fails) is dropped and counted in
-    ``dropped`` (docs/plan_determinismo.md point 60) — it used to fail the whole call."""
+def triangulate_tracks_per_track(groups: Dict[int, List], w2c: np.ndarray, params: Sequence[float],
+                                 solver: dict, min_tri_deg: float,
+                                 dropped: Optional[dict] = None) -> Dict[int, np.ndarray]:
+    """The one-track-at-a-time reference of :func:`triangulate_tracks` (kept for the equivalence
+    test: the batched form must give the same tracks and the same bits)."""
     from precision.camera import CameraError
     out = {}
     for t, obs in groups.items():
@@ -192,6 +190,76 @@ def triangulate_tracks(groups: Dict[int, List], w2c: np.ndarray, params: Sequenc
         if front and ang >= min_tri_deg and np.all(np.isfinite(X)):
             out[t] = X
     return out
+
+
+# observations per batch of the batched triangulation: a BOUND on memory (the DLT's U of a k-view
+# track is (2k)^2 doubles), not a decision — the result does not depend on it
+_TRI_BATCH_OBS = 400_000
+
+
+def triangulate_tracks(groups: Dict[int, List], w2c: np.ndarray, params: Sequence[float],
+                       solver: dict, min_tri_deg: float,
+                       dropped: Optional[dict] = None) -> Dict[int, np.ndarray]:
+    """{track: X} of every track seen from ≥ 2 views whose rays span ≥ ``min_tri_deg`` in front
+    of its cameras. A track whose observations cannot be undistorted under this camera (the
+    round trip of ``precision.camera._undistort_verified`` fails) is dropped and counted in
+    ``dropped`` (docs/plan_determinismo.md point 60) — it used to fail the whole call.
+
+    BATCHED (USER 2026-10-08, speed: the per-track loop was 475 of F6's 655 CPU seconds on pccr,
+    1.75 M tracks): every observation undistorted in ONE solver call with each TRACK's own
+    round-trip tolerance (``precision.camera.undistort_normalized_tracks``), the DLTs of all the
+    tracks with k views solved as one stack (numpy's batched SVD = the same LAPACK routine per
+    matrix), the same front / angle tests — the result equals :func:`triangulate_tracks_per_track`
+    (tests/test_triangulate_batched.py)."""
+    from precision.camera import undistort_normalized_tracks
+    tracks = [t for t, obs in groups.items() if len(obs) >= 2]
+    if not tracks:
+        return {}
+    counts = np.fromiter((len(groups[t]) for t in tracks), np.int64, len(tracks))
+    starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
+    ii = np.fromiter((i for t in tracks for i, _ in groups[t]), np.int64, int(counts.sum()))
+    uv = np.array([p for t in tracks for _, p in groups[t]], np.float64).reshape(-1, 2)
+    xn, ok_track = undistort_normalized_tracks(uv, K_of(params), np.asarray(params[4:8], np.float64),
+                                               starts, counts, **solver)
+    if dropped is not None and not ok_track.all():
+        bad = np.nonzero(~ok_track)[0]
+        dropped["tracks"] = int(dropped.get("tracks", 0)) + len(bad)
+        dropped["observations"] = int(dropped.get("observations", 0)) + int(counts[bad].sum())
+    w2c = np.asarray(w2c, np.float64)
+    keep = np.zeros(len(tracks), bool)
+    Xall = np.full((len(tracks), 3), np.nan)
+    deg_eps = np.finfo(float).eps
+    for k in np.unique(counts):
+        sel_all = np.nonzero((counts == k) & ok_track)[0]
+        step = max(1, _TRI_BATCH_OBS // int(k))
+        for b0 in range(0, len(sel_all), step):
+            sel = sel_all[b0:b0 + step]
+            idx = starts[sel][:, None] + np.arange(int(k))[None, :]          # (n, k) observations
+            x = xn[idx]                                                    # (n, k, 2)
+            T = w2c[ii[idx]]                                               # (n, k, 4, 4)
+            P = T[:, :, :3, :4]
+            rx = x[:, :, 0:1] * P[:, :, 2, :] - P[:, :, 0, :]              # (n, k, 4)
+            ry = x[:, :, 1:2] * P[:, :, 2, :] - P[:, :, 1, :]
+            A = np.stack([rx, ry], axis=2).reshape(len(sel), 2 * int(k), 4)  # x-row, y-row per view
+            _u, _s, Vt = np.linalg.svd(A)
+            Xh = Vt[:, -1, :]
+            ok = ~(np.abs(Xh[:, 3]) < deg_eps)
+            X = np.where(ok[:, None], Xh[:, :3] / np.where(ok, Xh[:, 3], 1.0)[:, None], np.nan)
+            R = T[:, :, :3, :3]
+            t = T[:, :, :3, 3]
+            # the per-track tests, stacked: depth in every camera, the camera centres, the widest
+            # pair of rays (X itself is the SVD's, bit for bit; these only gate it)
+            z = (R[:, :, 2, 0] * X[:, None, 0] + R[:, :, 2, 1] * X[:, None, 1]
+                 + R[:, :, 2, 2] * X[:, None, 2] + t[:, :, 2])
+            C = -np.einsum("nkji,nkj->nki", R, t)
+            rays = X[:, None, :] - C
+            rays /= np.linalg.norm(rays, axis=2, keepdims=True)
+            cosm = np.clip(np.einsum("nki,nli->nkl", rays, rays), -1.0, 1.0)
+            ang = np.degrees(np.arccos(cosm.reshape(len(sel), -1).min(axis=1)))
+            good = ok & (z > 0).all(axis=1) & (ang >= min_tri_deg) & np.isfinite(X).all(axis=1)
+            keep[sel[good]] = True
+            Xall[sel[good]] = X[good]
+    return {tracks[q]: Xall[q] for q in np.nonzero(keep)[0]}
 
 
 def heldout_rms(groups: Dict[int, List], w2c: np.ndarray, params: Sequence[float],

@@ -301,6 +301,18 @@ struct SamplerPoissonAverage : public Sampler {
 				if (add != bdd) {
 					return add < bdd;
 				}
+				// STAC 2026-10-08 (point 103): the tie-break the plan names - the coordinates before the
+				// point's identity, so two points at one distance are ordered by WHERE they are, and
+				// only exact duplicates fall back to (child, index) of the canonically ordered input
+				if (a.x != b.x) {
+					return a.x < b.x;
+				}
+				if (a.y != b.y) {
+					return a.y < b.y;
+				}
+				if (a.z != b.z) {
+					return a.z < b.z;
+				}
 				if (a.childIndex != b.childIndex) {
 					return a.childIndex < b.childIndex;
 				}

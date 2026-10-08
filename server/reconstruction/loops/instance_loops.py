@@ -354,7 +354,7 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
             if not snap.exists():
                 import shutil as _sh
                 snap.mkdir(parents=True, exist_ok=True)
-                for _n in ("segmentation.json", "seg_masks.npz",
+                for _n in ("segmentation.json", "seg_masks.npz", "fusion_map.json",
                            "segmentation_result.json", "scene_r.db", "classification.npy"):
                     _src = output_dir / _n
                     if _src.exists():

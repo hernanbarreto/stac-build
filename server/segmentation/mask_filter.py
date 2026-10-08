@@ -66,15 +66,13 @@ class MaskAudit:
         self._m2c: Dict[int, int] = {}
         self.res: Optional[Tuple[int, int]] = None
         self.stats: List[dict] = []
+        # docs/plan_determinismo.md point 122: the audit is a step of the projection and
+        # a step that cannot run FAILS the stage, naming why — it used to be skipped
+        # (`mask_filter = None`) and the run shipped without its marks
         if not self.ok:
-            self.log("[mask-audit] no mask/camera evidence — audit skipped")
-            return
-        try:
-            self.obj_of = _mask_obj_by_iid(self.output_dir)
-        except Exception as e:  # noqa: BLE001 — declared, never silent
-            self.log(f"[mask-audit] instance→oid map unavailable ({e}) — audit skipped")
-            self.ok = False
-            return
+            raise RuntimeError(f"mask audit: no mask/camera evidence — "
+                               f"{getattr(self.ev, 'reason', None) or 'unknown reason'}")
+        self.obj_of = _mask_obj_by_iid(self.output_dir)
         # the store's own declaration is the default; an explicit
         # cloud_to_mask (the matcher's) still wins so a caller can audit a
         # translation it built itself
@@ -85,8 +83,8 @@ class MaskAudit:
         self._m2c = {int(m): int(c) for c, m in c2m.items()}
         self.res = self._mask_res()
         if self.res is None:
-            self.log("[mask-audit] no mask resolution — audit skipped")
-            self.ok = False
+            raise RuntimeError("mask audit: the mask store declares no resolution (scaled_res) "
+                               "and holds no mask to read it from")
 
     # ── session-level lookups ────────────────────────────────────────────
 
@@ -230,7 +228,11 @@ class MaskAudit:
                 m = self._mask_of(mf, oid)
                 if m is not None and m.any():
                     ranked.append((int(m.sum()), int(mf), m))
-            ranked.sort(key=lambda r: -r[0])
+            # the frames showing MOST of the object first; two of EQUAL area are
+            # ordered by keyframe (docs/plan_determinismo.md point 119, DECIDIDO:
+            # the tie-break is the keyframe, so which frames are judged never
+            # depends on the order the keys were read in)
+            ranked.sort(key=lambda r: (-r[0], r[1]))
             zbuf: Dict[int, Optional[np.ndarray]] = {}
             for _area, mf, m in ranked[:max_frames]:
                 from segmentation.shape_proposer import _visible_in_frame
@@ -271,8 +273,14 @@ class MaskAudit:
         # call a marked point CURED when the masks looked at it again.
         rec["judged"] = judged = seen_views > 0
         rec["out_of_place"] = out = judged & (off_views > 0)
+        # per point, the views that judged it and the ones that left it outside
+        # (point 119: the mark is one view's verdict among the judged; the counts
+        # travel with it so a reader can see on how many views each mark rests)
+        rec["judged_views"] = seen_views
+        rec["off_views"] = off_views
         rec["n_judged"] = int(judged.sum())
         rec["n_out_of_place"] = int(out.sum())
+        rec["n_out_of_place_by_one_view"] = int((out & (off_views == 1)).sum())
         self.stats.append(rec)
         return rec
 
@@ -284,7 +292,7 @@ class MaskAudit:
     # Leaving them in cost pccr its whole second moment on 2026-09-15 — the
     # report raised "Object of type ndarray is not JSON serializable", the
     # writer caught it as non-fatal, and out_of_place.npy was never saved.
-    _PER_POINT = ("out_of_place", "judged")
+    _PER_POINT = ("out_of_place", "judged", "judged_views", "off_views")
 
     def report(self) -> dict:
         """What the audit found, per instance and in total. No verdict of the

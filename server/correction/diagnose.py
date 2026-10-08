@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import math
-import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -158,25 +157,41 @@ def scale_check(output_dir, k_by_frame: Dict[int, float],
             "mad_after": round(mad_after, 4)}
 
 
+def _baseline_agreements(diag: dict) -> Optional[Dict[int, float]]:
+    """The per-anchor agreement at the METRIC LOCK (epoch 0: s_f / s_applied, the original
+    estimate every epoch preserves untouched)."""
+    s_applied = diag.get("s_applied")
+    frames = ((diag.get("anchors") or {}).get("frames")) or []
+    if not s_applied or not frames:
+        return None
+    return {int(fr["num"]): float(fr["s_f"]) / float(s_applied) for fr in frames if fr.get("s_f")}
+
+
 def regenerate_scale_diagnostics(output_dir, k_by_frame: Dict[int, float],
-                                 epoch: int, correction_id: str
+                                 epoch: int, correction_id: str,
+                                 k_applied_by_frame: Optional[Dict[int, float]] = None
                                  ) -> Optional[dict]:
-    """New scale_diagnostics content for the given epoch: the original
-    estimate is preserved untouched; an ``epochs`` history entry appends the
-    per-anchor agreement AFTER this correction. Returns the new dict (the
-    caller persists it inside the transaction) or None when the session has
-    no diagnostics (declared upstream — the scale gate already dealt with
-    it)."""
+    """New scale_diagnostics content for the given epoch — REBUILT, never appended
+    (docs/plan_determinismo.md point 135, 2026-10-08): the original estimate is preserved
+    untouched and the ``epochs`` history holds ONE entry, the state of this epoch, with the
+    per-anchor agreement = the lock-time agreement over the depth factor the geometry now
+    holds: ``k_applied_by_frame`` (what the epoch chain already applied to each frame, from
+    the product epoch to the live one — ``correction.chain.applied_depth_factor``; the caller
+    passes it; None = the chain applied nothing) composed with ``k_by_frame`` (this epoch's
+    own factor). A history that grew with every run made the file depend on how many times
+    the session had been corrected, and a 'now' read from its last entry restated whatever
+    the previous run had written. No clock (point 137). Returns the new dict (the caller
+    persists it inside the transaction) or None when the session has no diagnostics."""
     diag = _load_diag(output_dir)
     if diag is None:
         return None
-    agreements = _current_agreements(diag)
-    if agreements is None:
+    base = _baseline_agreements(diag)
+    if base is None:
         return None
-    new_agreement = {str(f): round(a / k_by_frame.get(f, 1.0), 6)
-                     for f, a in agreements.items()}
-    entry = {"epoch": int(epoch), "correction_id": correction_id,
-             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-             "agreement": new_agreement}
-    diag.setdefault("epochs", []).append(entry)
-    return diag
+    applied = k_applied_by_frame or {}
+    new_agreement = {str(f): round(a / (float(applied.get(f, 1.0)) * float(k_by_frame.get(f, 1.0))), 6)
+                     for f, a in sorted(base.items())}
+    out = {k: v for k, v in diag.items() if k != "epochs"}
+    out["epochs"] = [{"epoch": int(epoch), "correction_id": correction_id,
+                      "agreement": new_agreement}]
+    return out

@@ -6,8 +6,11 @@ window that shows the VLM prompt (scene understanding — the SAM3 vocabulary) a
 SAM3 prompts the session has, both editable, and a checkbox per remaining stage (VLM,
 SAM3 + mask projection, certification, object descriptions). An edited VLM prompt is
 SAVED IN THE SESSION (``output/autosegment.json``) and used by every later VLM pass of
-that session; edited SAM3 prompts go straight into ``vlm_analysis.json`` (what the SAM3
-stage reads), stamped human_validated.
+that session; edited SAM3 prompts go into ``vlm_analysis.json`` (what the SAM3 stage reads)
+AND ``autoprompt_concepts.json`` (the session's vocabulary record) — one edit, one source
+(docs/plan_determinismo.md point 159) — stamped human_validated, with the sha256 of the
+text (point 97). No clock enters either file: when a prompt was saved or edited goes to
+``autosegment.timing.json`` (points 86 / 166).
 
 Provenance rule: the prompt is an instruction, never a measurement — what the VLM
 answers is still vlm_proposed.
@@ -15,13 +18,41 @@ answers is still vlm_proposed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
 from typing import Optional
 
 AUTOSEGMENT_FILE = "autosegment.json"
+AUTOSEGMENT_TIMING_FILE = "autosegment.timing.json"   # when prompts were saved — not compared
 VLM_ANALYSIS_FILE = "vlm_analysis.json"
+CONCEPTS_FILE = "autoprompt_concepts.json"
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(str(text).encode("utf-8")).hexdigest()
+
+
+def _write_json(path: Path, doc: dict) -> None:
+    from atomic_io import atomic_write_json
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(path, doc, indent=2, ensure_ascii=False)
+
+
+def _note_time(output_dir: Path, key: str) -> None:
+    """The wall clock of a save, in the record nobody compares."""
+    p = Path(output_dir) / AUTOSEGMENT_TIMING_FILE
+    doc: dict = {}
+    if p.exists():
+        try:
+            doc = json.loads(p.read_text())
+            if not isinstance(doc, dict):
+                doc = {}
+        except (OSError, ValueError):
+            doc = {}
+    doc[key] = time.strftime("%Y-%m-%d %H:%M:%S")
+    _write_json(p, doc)
 
 
 def default_vlm_prompt() -> str:
@@ -60,14 +91,17 @@ def save_vlm_prompt(output_dir, prompt: Optional[str]) -> bool:
     text = (prompt or "").strip()
     if not text or text == default_vlm_prompt().strip():
         doc.pop("vlm_prompt", None)
-        doc.pop("vlm_prompt_saved_at", None)
+        doc.pop("vlm_prompt_sha256", None)
+        doc.pop("vlm_prompt_saved_at", None)      # a record written before 2026-10-08
         overridden = False
     else:
         doc["vlm_prompt"] = text
-        doc["vlm_prompt_saved_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        doc["vlm_prompt_sha256"] = _sha256(text)
+        doc.pop("vlm_prompt_saved_at", None)
         doc["provenance"] = "human_validated"
         overridden = True
-    (out / AUTOSEGMENT_FILE).write_text(json.dumps(doc, indent=2, ensure_ascii=False))
+    _write_json(out / AUTOSEGMENT_FILE, doc)
+    _note_time(out, "vlm_prompt_saved_at" if overridden else "vlm_prompt_restored_at")
     return overridden
 
 
@@ -87,8 +121,11 @@ def sam3_prompts(output_dir) -> list[str]:
 def set_sam3_prompts(output_dir, prompts: list[str]) -> list[str]:
     """Write the SAM3 prompts the SAM3 stage will read (``vlm_analysis.json``
     ``prompt``) — the rest of the file (shape descriptions, fallbacks) stays; a
-    session with no VLM analysis gets a minimal one. Unchanged prompts write
-    nothing (the file's mtime drives the SAM3 resume probe)."""
+    session with no VLM analysis gets a minimal one. The session's vocabulary record
+    (``autoprompt_concepts.json``) takes the same list, so there is ONE source (point
+    159). Unchanged prompts write nothing (the file's mtime drives the SAM3 resume
+    probe). The edit is stamped human_validated with the sha256 of the list; the clock
+    goes to the timing record."""
     clean: list[str] = []
     for c in prompts:
         c = " ".join(str(c).split()).strip().strip(";")
@@ -105,11 +142,27 @@ def set_sam3_prompts(output_dir, prompts: list[str]) -> list[str]:
     if sam3_prompts(out) == clean and p.exists():
         return clean
     out.mkdir(parents=True, exist_ok=True)
-    doc["prompt"] = ";".join(clean)
+    joined = ";".join(clean)
+    doc["prompt"] = joined
     doc.setdefault("frame_map", {})
     doc["prompt_source"] = "human_validated"
-    doc["prompt_edited_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    p.write_text(json.dumps(doc, indent=2, ensure_ascii=False))
+    doc["prompt_sha256"] = _sha256(joined)
+    doc.pop("prompt_edited_at", None)             # a record written before 2026-10-08
+    _write_json(p, doc)
+    cp = out / CONCEPTS_FILE
+    rec: dict = {}
+    if cp.exists():
+        try:
+            rec = json.loads(cp.read_text())
+            if not isinstance(rec, dict):
+                rec = {}
+        except (OSError, ValueError):
+            rec = {}
+    rec["prompts"] = list(clean)
+    rec["prompt_source"] = "human_validated"
+    rec["prompt_sha256"] = doc["prompt_sha256"]
+    _write_json(cp, rec)
+    _note_time(out, "sam3_prompts_edited_at")
     return clean
 
 

@@ -1,0 +1,75 @@
+From a3c52e5c5228f47d74f88a1c09ecfe9a54943663 Mon Sep 17 00:00:00 2001
+From: hernanbarreto <barretohernanm@hotmail.com>
+Date: Thu, 8 Oct 2026 06:31:24 +0000
+Subject: [PATCH] STAC determinism (plan points 90/91): no object cap (no
+ 10000-track pinned buffer), padding only under compile_model
+
+---
+ sam3/model/sam3_base_predictor.py     | 8 ++++++++
+ sam3/model/sam3_multiplex_base.py     | 8 +++++++-
+ sam3/model/sam3_multiplex_tracking.py | 9 +++++++--
+ 3 files changed, 22 insertions(+), 3 deletions(-)
+
+diff --git a/sam3/model/sam3_base_predictor.py b/sam3/model/sam3_base_predictor.py
+index 13bd464..962b77b 100644
+--- a/sam3/model/sam3_base_predictor.py
++++ b/sam3/model/sam3_base_predictor.py
+@@ -133,6 +133,14 @@ class Sam3BasePredictor:
+             init_kwargs["async_loading_frames"] = self.async_loading_frames
+         if hasattr(self, "video_loader_type"):
+             init_kwargs["video_loader_type"] = self.video_loader_type
++        # STAC-BUILD PATCH (see server/patches/README.md): the multiplex
++        # model's init_state() does not accept every kwarg this base class
++        # forwards (e.g. offload_state_to_cpu) — filter by its signature.
++        import inspect
++        _sig = inspect.signature(self.model.init_state)
++        if not any(p.kind is p.VAR_KEYWORD for p in _sig.parameters.values()):
++            init_kwargs = {k: v for k, v in init_kwargs.items()
++                           if k in _sig.parameters}
+         inference_state = self.model.init_state(**init_kwargs)
+ 
+         if not session_id:
+diff --git a/sam3/model/sam3_multiplex_base.py b/sam3/model/sam3_multiplex_base.py
+index e4df5d3..7130e3a 100644
+--- a/sam3/model/sam3_multiplex_base.py
++++ b/sam3/model/sam3_multiplex_base.py
+@@ -1958,7 +1958,13 @@ class Sam3MultiplexBase(Sam3VideoBase):
+                 ).squeeze(1)
+ 
+         with torch.profiler.record_function("associate_det_trk_compilable"):
+-            if trk_masks.shape[0] < self.max_num_objects:
++            # STAC-BUILD PATCH (docs/plan_determinismo.md point 90, 2026-10-08): the
++            # padding to max_num_objects exists for torch.compile's static shapes. With
++            # no cap (max_num_objects=-1 → 10000) and no compilation it would allocate
++            # 10000 masks per association; without compile_model the tracks go as they
++            # are (same arithmetic: the padded rows are zeros).
++            if (getattr(self, "compile_model", False)
++                    and trk_masks.shape[0] < self.max_num_objects):
+                 padding_size = self.max_num_objects - trk_masks.shape[0]
+                 trk_masks_padded = torch.cat(
+                     [
+diff --git a/sam3/model/sam3_multiplex_tracking.py b/sam3/model/sam3_multiplex_tracking.py
+index 35183a5..abc73db 100644
+--- a/sam3/model/sam3_multiplex_tracking.py
++++ b/sam3/model/sam3_multiplex_tracking.py
+@@ -1092,10 +1092,15 @@ class Sam3MultiplexTracking(Sam3MultiplexBase):
+         total_objects = final_obj_ids.shape[0]
+ 
+         # Initialize or resize batched CPU buffer
+-        batched_buffer_size = self.postprocess_batch_size * self.max_num_objects
++        # STAC-BUILD PATCH (docs/plan_determinismo.md point 90, 2026-10-08): the pinned
++        # CPU buffer is sized by the objects PRESENT, not by max_num_objects — with no cap
++        # (max_num_objects=-1 → 10000) the vendor's sizing would pin
++        # postprocess_batch_size (16) x 10000 masks at video resolution (~320 GB at 1080p).
++        # It grows when more objects appear and is never shrunk (the resize test below).
++        batched_buffer_size = max(int(total_objects), 1)
+         needs_buffer_init = not hasattr(self, "buffer_cpu_batched")
+         needs_buffer_resize = not needs_buffer_init and (
+-            self.buffer_cpu_batched["out_binary_masks"].shape[0] != batched_buffer_size
++            self.buffer_cpu_batched["out_binary_masks"].shape[0] < batched_buffer_size
+             or self.buffer_cpu_batched["out_binary_masks"].shape[1] != H_video
+             or self.buffer_cpu_batched["out_binary_masks"].shape[2] != W_video
+         )
+-- 
+2.43.0
+

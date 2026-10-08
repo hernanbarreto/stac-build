@@ -200,6 +200,9 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
         seen = sorted({k for m in ms for k in positions.get(m["oid"], [])})
         st = dict((prompt_status or {}).get(p) or {"status": "unknown",
                                                     "reason": "no SAM3 execution record"})
+        # no clock in a compared artifact (point 125): the per-prompt seconds live in the
+        # SAM3 stage's timing sidecar (segmentation_timing.json), never here
+        st.pop("seconds", None)
         row = {"prompt": p, "label": labels[p],
                "raw_concepts": carried.get(p, []),
                "sam3_status": st,
@@ -287,6 +290,11 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
             "calls": calls,
             "vocabulary_reused": (rec or {}).get("vocabulary_reused"),
             "prompt_bound": (rec or {}).get("prompt_bound"),
+            # the VLM stage's own decisions and their margins, its merge calls, how the
+            # images were encoded, the answers truncated / salvaged (docs/plan_determinismo.md
+            # points 88 / 89 / 94 — written by the VLM worker into vlm_analysis.json `census`)
+            **{k: (rec or {}).get(k) for k in ("decisions", "merge_calls", "image_encoding",
+                                                "n_truncated", "n_salvaged")},
         },
         "concepts": concepts,
         "prompts": prompt_rows,

@@ -65,7 +65,11 @@ def test_vlm_prompt_default_then_saved_then_restored(tmp_path):
     p, over = AS.vlm_prompt_for(out)
     assert over and p.startswith("Name every object")
     doc = json.loads((out / AS.AUTOSEGMENT_FILE).read_text())
-    assert doc["provenance"] == "human_validated" and doc["vlm_prompt_saved_at"]
+    # no clock in the compared file (docs/plan_determinismo.md points 86 / 166, 2026-10-08):
+    # the prompt's sha256 identifies it; when it was saved lives in the timing record
+    assert doc["provenance"] == "human_validated" and len(doc["vlm_prompt_sha256"]) == 64
+    assert "vlm_prompt_saved_at" not in doc
+    assert json.loads((out / AS.AUTOSEGMENT_TIMING_FILE).read_text())["vlm_prompt_saved_at"]
     # the default itself, or nothing, removes the override
     assert AS.save_vlm_prompt(out, AS.default_vlm_prompt()) is False
     assert AS.vlm_prompt_for(out) == (AS.default_vlm_prompt(), False)

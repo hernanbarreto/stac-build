@@ -122,17 +122,17 @@ struct ConcurrentWriter {
 					return;
 				} else {
 
-					auto it = todo.begin();
-
-					while (it != todo.end()) {
-
-						string path = it->first;
-
-						if (locks.find(path) == locks.end()) {
-							break;
+					// STAC 2026-10-08 (docs/plan_determinismo.md point 103): the pending chunk file with the
+					// SMALLEST path is flushed first - the vendor took unordered_map's first entry, an order
+					// of the hash table, not of the chunks
+					auto it = todo.end();
+					for (auto cand = todo.begin(); cand != todo.end(); cand++) {
+						if (locks.find(cand->first) != locks.end()) {
+							continue;
 						}
-
-						it++;
+						if (it == todo.end() || cand->first < it->first) {
+							it = cand;
+						}
 					}
 
 

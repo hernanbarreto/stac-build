@@ -33,6 +33,172 @@ from segmentation import mask_space
 
 logger = logging.getLogger("SegPipeline")
 
+# ═══════════════════════════════════════════════════════════════════
+#  DETERMINISM (docs/plan_determinismo.md, wave 2 — 2026-10-08)
+# ═══════════════════════════════════════════════════════════════════
+#
+# Every decision of this module that used to hang on a bare bar — one frame's IoU
+# (point 93), a share of 0.5 (104), a count ratio and a ray majority (105), the
+# footprint argmin of an OBB (109 / 143 / 145) — is now judged by THE USER'S RULE
+# (point 1, `loop_utils/metric_lock.decide_change`): the judges' values exceed the
+# bar significantly (the 95 % interval of their paired difference entirely above
+# it), with at least `min_judge_closures(confidence)` judges (5 at 0.95), and by a
+# margin of at least `correction_graph.graph.improvement_error_factor` × the
+# MEASURED error. Otherwise the simplest outcome — separate, whole, every point —
+# and the margin is recorded in the result (`decisions`). The user's own criteria
+# (dedupe_overlap 0.5, min_points 1000, min_walk_m 1 m, mask_dedupe_iou 0.90, the
+# four mask-filter rules) are UNCHANGED: only how close a case sits to them is
+# measured and declared.
+
+#: the staging directory the SAM3 stage builds its fresh store in (point 83); swapped
+#: into output/ only when the whole run finished
+SAM3_STAGING_DIRNAME = "_sam3_store.staging"
+#: per-prompt seconds and the run's total — a separate record, never a compared artifact (point 125)
+SEGMENTATION_TIMING_NAME = "segmentation_timing.json"
+#: the identity of the octree beside output/potree (point 123: rebuilt only on a changed stamp)
+POTREE_STAMP_NAME = "potree_stamp.json"
+#: per-point view counts of the mask audit (point 119): judged views / views that left it outside
+OUT_OF_PLACE_VIEWS_NAME = "out_of_place_views.npz"
+#: the config sections the projection reads — the parts of the frozen run configuration it is
+#: stamped with (point 123); a key missing from the configuration is a missing section, not a default
+PROJECTION_CONFIG_SECTIONS = ("segmentation", "visualization", "correction_graph",
+                              "models", "correction", "alignment")
+
+
+def _fork_on_path() -> None:
+    """vendor/VGGT-Long on sys.path (as precision/refine.py does) for `loop_utils`."""
+    import sys as _sys
+    from repro import FORK_ROOT
+    p = str(FORK_ROOT)
+    if p not in _sys.path:
+        _sys.path.insert(0, p)
+
+
+def _decision_params(raw_cfg: dict) -> Tuple[float, float, int]:
+    """(error_factor, confidence, min_judges) of the user's rule, from the configuration
+    the stage runs with: `correction_graph.graph.improvement_error_factor` (1.1, USER
+    2026-10-07 "1.1 en todos los casos") and `heldout_confidence` (0.95); the judges
+    minimum is `loop_judge.min_judge_closures(confidence)` (5 at 0.95)."""
+    from reconstruction.loops.config import improvement_error_factor
+    _fork_on_path()
+    from loop_utils.loop_judge import min_judge_closures
+    fac = float(improvement_error_factor(raw_cfg))
+    try:
+        conf = float(raw_cfg["correction_graph"]["graph"]["heldout_confidence"])
+    except (KeyError, TypeError) as e:
+        raise KeyError("config.yaml is missing correction_graph.graph.heldout_confidence") from e
+    return fac, conf, int(min_judge_closures(conf))
+
+
+def _robust_sigma(values) -> float:
+    """The measured spread of the judges' values: 1.4826 × MAD (the normal-consistent
+    scale, robust to one judge off) — the 'error' decide_change's margin is taken against
+    when the quantity has no instrument error of its own."""
+    v = np.asarray(values, np.float64).ravel()
+    if v.size == 0:
+        return 0.0
+    return float(1.4826 * np.median(np.abs(v - np.median(v))))
+
+
+def _decide_above_bar(values, bar: float, error: float, *, factor: float, confidence: float,
+                      min_judges: int) -> dict:
+    """THE USER'S RULE applied to 'do the judges' values exceed ``bar``':
+    `decide_change(before=values, after=bar)` — paired difference value − bar,
+    positive = above. `improves` is the verdict; the dict carries every margin."""
+    _fork_on_path()
+    from loop_utils.metric_lock import decide_change
+    v = np.asarray(values, np.float64).ravel()
+    out = decide_change(v, np.full(v.size, float(bar)), error=float(error),
+                        error_factor=float(factor), confidence=float(confidence),
+                        min_judges=int(min_judges))
+    out["bar"] = float(bar)
+    return out
+
+
+def _stable_point_keys(P: np.ndarray, quantum_m: float = 1e-4) -> np.ndarray:
+    """A deterministic key per point from its OWN coordinates (point 109: the sample of
+    an object is chosen by a stable per-point key, never by position in a list that one
+    extra point reorders): the coordinates quantised at ``quantum_m`` (0.1 mm — finer
+    than any cloud of this pipeline resolves, so no two distinct points of an object
+    collide except exact duplicates, which get the same key and the same fate), mixed
+    by splitmix64. Sorting by the key is a fixed order of the point SET."""
+    q = np.floor(np.asarray(P, np.float64) / float(quantum_m)).astype(np.int64)
+    h = (q[:, 0].astype(np.uint64) * np.uint64(0x9E3779B97F4A7C15)
+         ^ q[:, 1].astype(np.uint64) * np.uint64(0xBF58476D1CE4E5B9)
+         ^ q[:, 2].astype(np.uint64) * np.uint64(0x94D049BB133111EB))
+    h ^= h >> np.uint64(30)
+    h *= np.uint64(0xBF58476D1CE4E5B9)
+    h ^= h >> np.uint64(27)
+    h *= np.uint64(0x94D049BB133111EB)
+    h ^= h >> np.uint64(31)
+    return h
+
+
+def _stable_sample(P: np.ndarray, n: int) -> np.ndarray:
+    """The ``n`` points of ``P`` with the smallest stable keys (all of them when fewer)."""
+    if len(P) <= int(n):
+        return np.arange(len(P))
+    keys = _stable_point_keys(P)
+    order = np.argsort(keys, kind="stable")
+    return np.sort(order[: int(n)])
+
+
+def _pack_voxels(v: np.ndarray) -> np.ndarray:
+    """World-anchored integer voxel coordinates (N, 3) → one int64 key each (21 bits per
+    axis around the origin: ±1 048 576 cells, 52 km at 5 cm — a BOUND of the packing,
+    checked, never a decision)."""
+    v = np.asarray(v, np.int64)
+    half = np.int64(1 << 20)
+    if len(v) and (np.abs(v).max() >= half):
+        raise ValueError(f"voxel coordinates reach {int(np.abs(v).max())} cells from the origin "
+                         f"— beyond the {int(half)} the packing holds")
+    return ((v[:, 0] + half) << np.int64(42)) | ((v[:, 1] + half) << np.int64(21)) | (v[:, 2] + half)
+
+
+def _projection_config(output_dir: Path) -> Tuple[dict, str]:
+    """(configuration, source) the projection runs with: the job's FROZEN
+    `output/run_config.yaml` when the session holds one (point 69: every stage reads
+    the frozen copy), else the backend's config.yaml (a session projected outside a
+    pipeline job — the viewer's refresh); the source is recorded in the stamp."""
+    try:
+        from intake.run_config import has_run_config, load_run_config
+        session_dir = Path(output_dir).parent
+        if has_run_config(session_dir):
+            doc, sha = load_run_config(session_dir)
+            return doc, f"run_config.yaml {sha}"
+    except ImportError:
+        pass
+    from config import cfg as _cfg
+    return _cfg, "config.yaml"
+
+
+def projection_stamp(output_dir, ply_path=None, cfg: Optional[dict] = None,
+                     cfg_source: Optional[str] = None) -> dict:
+    """The identity of a projection's product (point 123): every INPUT (the cloud, the
+    raw mask store and its metadata, the keyframe list, the poses, the session camera,
+    the floor transform and the record-grid declaration when they exist), the CODE of
+    this module and of everything it calls to decide, and the configuration sections
+    it reads. `segmentation_result.json` carries it; a result is reused only on an
+    identical stamp, and the octree beside it is keyed the same way."""
+    from repro import stamp as _stamp
+    out = Path(output_dir)
+    if cfg is None:
+        cfg, cfg_source = _projection_config(out)
+    ply = Path(ply_path) if ply_path is not None else out / "cleaned_cloud.ply"
+    inputs = {"cloud": ply}
+    for name in ("seg_masks.npz", "segmentation.json", "camera_frames.txt", "camera_poses.txt",
+                 "camera.json", "floor_transform.npz", "corrected_cloud.json"):
+        if (out / name).is_file():
+            inputs[name] = out / name
+    code = ["segmentation.pipeline", "segmentation.mask_filter", "segmentation.mask_space",
+            "segmentation.fuse_parent", "segmentation.republish", "segmentation.session_io",
+            "segmentation.shape_proposer", "segmentation.object_captioner",
+            "reconstruction.surface_fit.hole_audit", "alignment_manager"]
+    sections = {k: (cfg.get(k) if isinstance(cfg, dict) else None)
+                for k in PROJECTION_CONFIG_SECTIONS}
+    sections["config_source"] = str(cfg_source)
+    return _stamp(inputs=inputs, code=code, config=sections)
+
 
 def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
                      frame_map: dict = None, on_progress=None,
@@ -63,10 +229,10 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
                    completed from one it ran and that confirmed nothing.
     """
     from config import cfg
-    
+
     frames_dir = Path(frames_dir).resolve()
     output_dir = Path(output_dir).resolve()
-    
+
     seg_cfg = cfg["models"]["segmentation"]
     batch_size = seg_cfg.get("batch_size", 50)
     batch_overlap = seg_cfg.get("batch_overlap", 10)
@@ -74,12 +240,12 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
     # SAM3 sometimes hands out several object ids for ONE observation; masks that
     # agree above this IoU inside a frame are collapsed (segmentation.mask_dedupe_iou)
     mask_dedupe_iou = float((cfg.get("segmentation", {}) or {}).get("mask_dedupe_iou", 0.90))
-    
+
     # Split prompt by ';' for multi-category support
     categories = [c.strip() for c in prompt.split(";") if c.strip()]
     if not categories:
         return {"error": "Empty prompt", "instances": []}
-    
+
     if prompt_status is not None:
         for c in categories:
             prompt_status[c] = {"status": "not_reached",
@@ -87,22 +253,33 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
 
     print(f"[SegPipeline] Starting segmentation for {len(categories)} categories: {categories}")
     print(f"[SegPipeline] Frames: {frames_dir}  |  Batch: {batch_size} frames, {batch_overlap} overlap")
-    
+
     # ── Step 1: Prepare valid frames (matching reconstruction's blur + novelty filter) ──
     frame_sel_cfg = cfg.get("frame_selection", {})
     frame_stride = cfg.get("server", {}).get("frame_stride", 1)
-    seg_frames_dir, frame_files, frames_valid_dir = _prepare_valid_frames(
+    seg_frames_dir, frame_files, frames_valid_dir, keyframe_numbers = _prepare_valid_frames(
         frames_dir, frame_stride, frame_sel_cfg
     )
-    
+
     total_frames = len(frame_files)
     print(f"[SegPipeline] Using {total_frames} valid frames for segmentation")
-    
+
     if total_frames == 0:
         for c in (prompt_status or {}):
             prompt_status[c] = {"status": "skipped", "reason": "no keyframes to segment"}
         return {"error": "No frames found", "instances": []}
-    
+
+    # ── A FRESH STORE (docs/plan_determinismo.md point 83): SAM3 writes into a staging
+    # directory — ids from the first masklet, no upsert into what a previous run left —
+    # and the finished store replaces output/'s at the end, in one move. A run that fails
+    # leaves the previous store exactly as it was (and its staging directory deleted).
+    staging = output_dir / SAM3_STAGING_DIRNAME
+    if staging.exists():
+        shutil.rmtree(str(staging))
+    staging.mkdir(parents=True)
+    timing = {"prompts": {}, "seconds": None}
+    t_run = _time.time()
+
     try:
         # ── Steps 2+3: SAM3 in batches with IoU matching, per category, each
         # category's masks SAVED as it finishes (frames_valid/ is numbered
@@ -113,18 +290,28 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
         all_masks, obj_labels, seg_meta = _run_sam3_batched(
             seg_frames_dir, frame_files, categories,
             batch_size, batch_overlap, iou_threshold, mask_dedupe_iou,
-            output_dir=output_dir, cfg=cfg,
+            output_dir=staging, cfg=cfg,
             frame_map=frame_map,
             on_progress=on_progress,
             boxes_map=boxes_map,
             prompt_status=prompt_status,
             fallback_prompts=fallback_prompts,
+            session_output_dir=output_dir,
+            timing=timing["prompts"],
         )
-        
+
         if seg_meta is None:
             print("[SegPipeline] ⚠️ SAM3 produced no masks")
+            shutil.rmtree(str(staging), ignore_errors=True)
             return {"error": "No masks generated", "instances": []}
-        
+
+        # the finished store: canonical member order, compact, sealed with the keyframe
+        # list it was segmented on and the reconstruction it belongs to — then swapped in
+        seg_meta = finalize_sam3_store(staging, output_dir, keyframe_numbers, categories, cfg,
+                                       log=lambda m: print(f"[SegPipeline] {m}"))
+        timing["seconds"] = round(_time.time() - t_run, 1)
+        atomic_write_json(output_dir / SEGMENTATION_TIMING_NAME, timing, indent=1)
+
         # ── Step 4: Match masks to cloud and cache final result (ONCE) ──
         # In the anchored pipeline order (recon → vlm → sam3 → phase_r →
         # cloudcompy → tsdf) the cleaned cloud does not exist yet — the
@@ -143,15 +330,231 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
         if result.get("instances"):
             return result
         return seg_meta
-    
+
     finally:
         # the memoized SAM3 symlink dirs (idempotent; _run_sam3_batched clears
         # them itself on the normal path, not when a category raises)
         _clear_batch_dirs()
+        if staging.exists():                      # a run that did not finish: nothing of it stays
+            shutil.rmtree(str(staging), ignore_errors=True)
         # ── Cleanup: vaciar frames_valid/ completamente ──
         if frames_valid_dir and frames_valid_dir.exists():
             shutil.rmtree(str(frames_valid_dir), ignore_errors=True)
             print(f"[SegPipeline] 🧹 frames_valid/ vaciado")
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  THE SAM3 STORE: canonical, compact, sealed (points 83 / 101 / 114)
+# ═══════════════════════════════════════════════════════════════════
+
+#: the npz members that are not masks, in the order the canonical store writes them (last)
+STORE_META_KEYS = ("obj_ids", "frames", "scaled_res", mask_space.NPZ_KEY, mask_space.KEYFRAMES_KEY,
+                   "reconstruction_id")
+#: zip entry time of every member of a canonical store (the zip format stores one; a clock
+#: there made two identical stores differ in bytes)
+STORE_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
+
+
+def _mask_key_parts(key: str) -> Optional[Tuple[int, int]]:
+    m = mask_space._MASK_KEY_RE.match(str(key))
+    return (int(m.group(2)), int(m.group(1))) if m else None          # (oid, frame)
+
+
+def write_canonical_store(path: Path, members: Dict[str, np.ndarray],
+                          source=None) -> None:
+    """Write a mask store with its members in CANONICAL order — every mask by
+    (object, frame), then the metadata members in :data:`STORE_META_KEYS` order —
+    compact (no dead bytes of a replaced entry) and with a fixed zip entry time,
+    so one logical store is one byte sequence (point 101). ``members`` holds the
+    arrays to write; ``source`` (an open NpzFile) supplies any mask named in
+    ``members`` with the value None — read one at a time, never all in RAM.
+    Atomic: a temporary file, then rename."""
+    import zipfile
+    path = Path(path)
+    mask_keys = sorted((k for k in members if _mask_key_parts(k) is not None), key=_mask_key_parts)
+    meta_keys = [k for k in STORE_META_KEYS if k in members]
+    stray = sorted(set(members) - set(mask_keys) - set(meta_keys))
+    if stray:
+        raise ValueError(f"the mask store cannot hold members {stray[:5]} — not masks "
+                         f"(f<frame>_o<oid>) nor known metadata")
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp.npz")
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+            for k in mask_keys + meta_keys:
+                arr = members[k]
+                if arr is None:
+                    arr = source[k]
+                import io as _io
+                buf = _io.BytesIO()
+                np.lib.format.write_array(buf, np.asanyarray(arr), allow_pickle=False)
+                info = zipfile.ZipInfo(k + ".npy", date_time=STORE_ZIP_TIME)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0o600 << 16
+                zf.writestr(info, buf.getvalue())
+        os.replace(tmp, path)
+        if path.name == "seg_masks.npz":
+            mask_space.invalidate(path.parent)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def write_npz_canonical(path: Path, arrays: Dict[str, np.ndarray]) -> None:
+    """An .npz with its members in NAME order, deflated, with the fixed zip entry
+    time of :data:`STORE_ZIP_TIME` — np.savez_compressed stamps the wall clock
+    into every entry, so one array set gave another byte sequence on every run.
+    Atomic (temporary file, then rename)."""
+    import io as _io
+    import zipfile
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp.npz")
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+            for k in sorted(arrays):
+                buf = _io.BytesIO()
+                np.lib.format.write_array(buf, np.asanyarray(arrays[k]), allow_pickle=False)
+                info = zipfile.ZipInfo(k + ".npy", date_time=STORE_ZIP_TIME)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0o600 << 16
+                zf.writestr(info, buf.getvalue())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def compact_mask_store(path: Path) -> int:
+    """Rewrite an existing store canonically (:func:`write_canonical_store`) from
+    its own members, one at a time. Returns the number of masks."""
+    path = Path(path)
+    z = np.load(path)
+    try:
+        members: Dict[str, Optional[np.ndarray]] = {}
+        for k in z.files:
+            if _mask_key_parts(k) is not None:
+                members[k] = None
+            elif k in STORE_META_KEYS:
+                members[k] = np.asarray(z[k])
+            else:
+                raise ValueError(f"{path} holds the member {k!r}, neither a mask nor known metadata")
+        write_canonical_store(path, members, source=z)
+        return sum(1 for k in members if _mask_key_parts(k) is not None)
+    finally:
+        z.close()
+
+
+def sam3_store_seal(cfg: dict, categories: List[str], keyframes: List[int],
+                    scaled_res, reconstruction_id: Optional[str], npz_path: Path) -> dict:
+    """The seal of a store (point 83): the mask bytes (``npz_path``), the prompts,
+    the keyframe list, the SAM3 model (version, checkpoint, thresholds as applied,
+    the batch parameters) and the code that ran it — a `repro.stamp`."""
+    from repro import stamp as _stamp
+    scfg = dict((cfg.get("models") or {}).get("segmentation") or {})
+    applied = None
+    try:
+        from segmentation.sam3_wrapper import get_sam3_wrapper
+        applied = getattr(get_sam3_wrapper(), "applied_thresholds", None)
+    except Exception:  # noqa: BLE001 — no wrapper (a synthetic run): recorded as None
+        applied = None
+    ckpt = scfg.get("checkpoint_path")
+    ckpt_sha = None
+    if ckpt and Path(str(ckpt)).is_file():
+        from repro import sha256_file
+        ckpt_sha = sha256_file(Path(str(ckpt)))
+    seg = dict(cfg.get("segmentation") or {})
+    return _stamp(inputs={"seg_masks.npz": Path(npz_path)},
+                  code=["segmentation.pipeline", "segmentation.sam3_wrapper",
+                        "segmentation.mask_space"],
+                  config={"prompts": list(categories),
+                          "keyframes": [int(k) for k in keyframes],
+                          "sam3": {"version": scfg.get("version"), "checkpoint_path": ckpt,
+                                   "checkpoint_sha256": ckpt_sha,
+                                   "thresholds_configured": scfg.get("sam3_thresholds"),
+                                   "thresholds_applied": applied,
+                                   "batch_size": scfg.get("batch_size"),
+                                   "batch_overlap": scfg.get("batch_overlap"),
+                                   "iou_match_threshold": scfg.get("iou_match_threshold"),
+                                   "multiplex_count": scfg.get("multiplex_count"),
+                                   "max_num_objects": scfg.get("max_num_objects")},
+                          "mask_dedupe_iou": seg.get("mask_dedupe_iou"),
+                          "scaled_res": [int(x) for x in scaled_res],
+                          "reconstruction_id": reconstruction_id})
+
+
+def finalize_sam3_store(staging: Path, output_dir: Path, keyframes: List[int],
+                        categories: List[str], cfg: dict, log=print) -> dict:
+    """The staging store → the session's store: the npz rewritten canonically with
+    the keyframe list and the reconstruction id as members (points 101 / 114 / 51),
+    `segmentation.json` sealed (`stamp`, `reconstruction_id`, `keyframes_sha256`),
+    both moved into ``output_dir`` replacing what was there, and the products of
+    the previous store (the projection result, the fusion map, the broadcast)
+    removed — they described another store. Returns the metadata document."""
+    from correction.epoch import RECONSTRUCTION_ID_KEY, reconstruction_id_or_none
+    from repro import sha256_json
+    src_npz, src_json = staging / "seg_masks.npz", staging / "segmentation.json"
+    if not (src_npz.exists() and src_json.exists()):
+        raise RuntimeError(f"the SAM3 run saved no store in {staging}")
+    rid = reconstruction_id_or_none(output_dir)
+    z = np.load(src_npz)
+    try:
+        members: Dict[str, Optional[np.ndarray]] = {k: None for k in z.files
+                                                    if _mask_key_parts(k) is not None}
+        for k in STORE_META_KEYS:
+            if k in z.files:
+                members[k] = np.asarray(z[k])
+        members[mask_space.KEYFRAMES_KEY] = np.asarray([int(k) for k in keyframes], np.int32)
+        members["reconstruction_id"] = np.array(str(rid) if rid else "")
+        scaled_res = [int(x) for x in np.asarray(members["scaled_res"]).ravel()]
+        write_canonical_store(src_npz, members, source=z)
+        n_masks = sum(1 for k in members if _mask_key_parts(k) is not None)
+    finally:
+        z.close()
+    doc = json.loads(src_json.read_text())
+    doc[RECONSTRUCTION_ID_KEY] = rid
+    doc["keyframes_sha256"] = sha256_json([int(k) for k in keyframes])
+    doc["n_keyframes"] = int(len(keyframes))
+    doc["stamp"] = sam3_store_seal(cfg, categories, keyframes, scaled_res, rid, src_npz)
+    atomic_write_json(src_json, doc, indent=1, sort_keys=True)
+    # the swap: masks first, then the metadata that seals them (a reader that finds a
+    # segmentation.json whose stamp names other mask bytes refuses it)
+    for name in ("segmentation_result.json", "fusion_map.json", "seg_broadcast.json"):
+        p = output_dir / name
+        if p.exists():
+            p.unlink()
+    os.replace(src_npz, output_dir / "seg_masks.npz")
+    os.replace(src_json, output_dir / "segmentation.json")
+    mask_space.invalidate(output_dir)
+    shutil.rmtree(str(staging), ignore_errors=True)
+    log(f"store sealed: {n_masks} masks, {len(doc.get('instances') or [])} masklets, "
+        f"{len(keyframes)} keyframes, reconstruction {str(rid)[:12] if rid else 'none'} — "
+        f"replaced output/seg_masks.npz + segmentation.json")
+    return doc
+
+
+def check_store_seal(output_dir) -> List[str]:
+    """What differs between `segmentation.json`'s seal and the store on disk — []
+    for a sealed store that is intact; the reasons otherwise (no seal, other mask
+    bytes). A store the interactive manager edited is unsealed by construction."""
+    from repro import sha256_file
+    out = Path(output_dir)
+    p = out / "segmentation.json"
+    if not p.exists():
+        return ["no segmentation.json"]
+    doc = json.loads(p.read_text())
+    st = doc.get("stamp")
+    if not isinstance(st, dict) or "sha256" not in st:
+        return ["segmentation.json carries no seal (a store written before 2026-10-08, or "
+                "edited by the interactive manager)"]
+    want = (st.get("inputs") or {}).get("seg_masks.npz")
+    npz = out / "seg_masks.npz"
+    if not npz.exists():
+        return ["seg_masks.npz is missing"]
+    have = sha256_file(npz)
+    if want != have:
+        return [f"seg_masks.npz changed since it was sealed ({str(want)[:12]} -> {have[:12]})"]
+    return []
 
 
 def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
@@ -176,14 +579,16 @@ def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
         frame_sel_cfg: frame_selection config section (for novelty filter)
     
     Returns:
-        (seg_frames_dir, frame_files, frames_valid_dir)
+        (seg_frames_dir, frame_files, frames_valid_dir, keyframe_numbers) — the last one
+        the VIDEO frame number of every position (the keyframe list the masks are
+        segmented on, written into the store: docs/plan_determinismo.md point 114)
     """
     import shutil
-    
+
     # ── Try visual novelty filter first (selected_frames.json) ──
     sel_path = frames_dir / "selected_frames.json"
     use_novelty = False
-    
+
     # selected_frames.json is the single source of truth (always written by map_worker
     # step 2 for every frames_selector mode: dino / stride / none). Consume it if present.
     if sel_path.exists():
@@ -196,21 +601,21 @@ def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
                 print(f"[SegPipeline] 🎯 Using visual novelty keyframes: {len(valid_filenames)} frames")
         except ImportError:
             print("[SegPipeline] ⚠️ frame_selector not available, falling back to stride")
-    
+
     if not use_novelty:
         # ── Fallback: blur filter + stride ──
         fq_path = frames_dir / "frame_quality.json"
         if not fq_path.exists():
             print(f"[SegPipeline] No frame_quality.json found — using all frames")
             frame_files = sorted([
-                f for f in os.listdir(frames_dir) 
+                f for f in os.listdir(frames_dir)
                 if f.lower().endswith(('.jpg', '.jpeg', '.png'))
             ], key=lambda f: int(os.path.splitext(f)[0]))
             if frame_stride > 1:
                 original = len(frame_files)
                 frame_files = frame_files[::frame_stride]
                 print(f"[SegPipeline] 📐 Frame stride {frame_stride}: {original} → {len(frame_files)} frames")
-            return frames_dir, frame_files, None
+            return frames_dir, frame_files, None, [int(os.path.splitext(f)[0]) for f in frame_files]
         
         with open(fq_path) as f:
             fq_data = json.load(f)
@@ -231,8 +636,8 @@ def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
         print(f"[SegPipeline] Frame quality filter: {len(valid_filenames)}/{total} valid ({rejected} blurry removed)")
     
     if not valid_filenames:
-        return frames_dir, [], None
-    
+        return frames_dir, [], None, []
+
     # Crear frames_valid/ limpio (borrar cualquier resto de runs anteriores)
     frames_valid_dir = frames_dir.parent / "frames_valid"
     if frames_valid_dir.exists():
@@ -255,6 +660,7 @@ def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
     index_mapping = {}
     seq_frame_files = []
     
+    keyframe_numbers = []
     for seq_idx, orig_filename in enumerate(valid_filenames):
         src = frames_dir / orig_filename
         ext = src.suffix
@@ -262,10 +668,15 @@ def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
         dst = frames_valid_dir / new_name
         shutil.copyfile(str(src), str(dst))
         seq_frame_files.append(new_name)
-    
+        m = re.search(r"(\d+)", os.path.splitext(orig_filename)[0])
+        if m is None:
+            raise ValueError(f"keyframe file {orig_filename!r} carries no frame number — the "
+                             f"store cannot declare the keyframe list it is segmented on")
+        keyframe_numbers.append(int(m.group(1)))
+
     print(f"[SegPipeline] Copied {len(seq_frame_files)} valid frames to {frames_valid_dir}")
-    
-    return frames_valid_dir, seq_frame_files, frames_valid_dir
+
+    return frames_valid_dir, seq_frame_files, frames_valid_dir, keyframe_numbers
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -280,9 +691,17 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                       on_progress=None,
                       boxes_map: dict = None,
                       prompt_status: dict = None,
-                      fallback_prompts: dict = None):
+                      fallback_prompts: dict = None,
+                      session_output_dir: Path = None,
+                      timing: dict = None):
     """
     Process frames in overlapping batches, one category at a time.
+
+    ``output_dir`` is where the store is WRITTEN (the staging directory of
+    docs/plan_determinismo.md point 83); ``session_output_dir`` the session's
+    output/ (the keyframe list and the frames' resolution are read there), the
+    same directory when not given. ``timing`` (optional) receives the seconds per
+    prompt — a separate record (point 125), never part of ``prompt_status``.
     Each category gets its own SAM3 pass; obj_ids are remapped to avoid collisions.
 
     With ``output_dir`` and ``cfg`` every category's masks are SAVED as the
@@ -511,11 +930,13 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                         print(f"[SegPipeline] Batch {batch_idx}: no valid masks after parsing")
                         continue
 
-                    batch_masks, n_dup_ids = _dedupe_masks_per_frame(batch_masks, mask_dedupe_iou)
+                    batch_masks, n_dup_ids = _dedupe_masks_per_frame(
+                        batch_masks, mask_dedupe_iou, cfg=cfg, record=decisions)
                     if n_dup_ids:
                         print(f"[SegPipeline] Batch {batch_idx}: {n_dup_ids} object id(s) were "
-                              f"the same observation (IoU ≥ {mask_dedupe_iou:g}) — collapsed")
-                    
+                              f"the same observation (IoU ≥ {mask_dedupe_iou:g} in the majority "
+                              f"of their shared frames, point 93) — collapsed")
+
                     if batch_idx == 0:
                         id_remap = {}
                         batch_obj_ids = set()
@@ -527,13 +948,14 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                     else:
                         overlap_start_frame = b_start
                         overlap_end_frame = prev_overlap_start + batch_step + batch_overlap - 1 if prev_overlap_start is not None else b_start + batch_overlap - 1
-                        
+
                         id_remap, next_global_id = _match_ids_iou(
                             prev_batch_masks, batch_masks,
                             overlap_start=overlap_start_frame,
                             overlap_end=min(overlap_end_frame, b_end - 1),
                             iou_threshold=iou_threshold,
-                            next_global_id=next_global_id
+                            next_global_id=next_global_id,
+                            cfg=cfg, record=decisions,
                         )
                     
                     remapped_batch = {}
@@ -562,30 +984,17 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
             
             return cat_masks
         
-        def _recover_sam3(sam3):
-            """Full SAM3 unload/reload cycle to recover from CUDA OOM."""
-            print("[SegPipeline] 🔄 OOM detected — unloading SAM3 for recovery...")
-            sam3.unload_model()
-            for _ in range(3):
-                gc.collect()
-            if torch.cuda.is_available():
-                try:
-                    torch.cuda.synchronize()
-                    torch.cuda.empty_cache()
-                    torch.cuda.reset_peak_memory_stats()
-                except Exception:
-                    pass
-            _log_vram("  after OOM cleanup")
-            print("[SegPipeline] 🔄 Reloading SAM3...")
-            sam3.load_model()
-            _log_vram("  after SAM3 reload")
-        
-        # ── Try category, recover from OOM once, skip if OOM again ──
-        # A SAM3ConfigError (models.segmentation.sam3_thresholds, a vendor
-        # rename) is NOT a category failure: every category would fail the same
-        # way and the run would end as "No masks generated" — re-raised.
+        # ── Run the category. ANY SAM3 error FAILS THE RUN (docs/plan_determinismo.md
+        # point 92, 2026-10-08): `sam3_wrapper.process_batch` raises SAM3RunError /
+        # SAM3OutOfMemory and they propagate — no one-OOM retry, no "failed twice,
+        # skipping", no prompt recorded as failed while the others go on. A run
+        # delivers every prompt or nothing (the staging store is discarded by the
+        # caller, the previous store stays as it was). A SAM3ConfigError
+        # (models.segmentation.sam3_thresholds, a vendor rename) is the same: the
+        # prompt's status names it before the error leaves.
         cat_masks = {}
         t_cat = _time.time()
+        decisions: list = []                 # the identity decisions of this prompt (point 93)
         cat_status = {"status": "ran"}
         try:
             cat_masks = _process_category(
@@ -597,38 +1006,16 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
             status[category] = {"status": "failed", "reason": f"SAM3ConfigError: {e}"}
             raise
         except Exception as e:
-            if "out of memory" in str(e).lower():
-                _recover_sam3(sam3)
-                print(f"[SegPipeline] 🔄 Retrying category '{category}'...")
-                try:
-                    cat_masks = _process_category(
-                        category, cat_batches, frames_dir, cat_frame_files, sam3,
-                        batch_size, batch_overlap, iou_threshold, mask_dedupe_iou,
-                        boxes_by_pos=cat_boxes
-                    )
-                    cat_status["note"] = "ran after one CUDA out-of-memory recovery"
-                except SAM3ConfigError as e2:
-                    status[category] = {"status": "failed", "reason": f"SAM3ConfigError: {e2}"}
-                    raise
-                except Exception as e2:
-                    if "out of memory" in str(e2).lower():
-                        print(f"[SegPipeline] ⛔ Category '{category}' failed twice with OOM — skipping")
-                        cat_status = {"status": "failed",
-                                      "reason": "CUDA out of memory twice (recovered once)"}
-                        _recover_sam3(sam3)
-                    else:
-                        print(f"[SegPipeline] ⚠️ Category '{category}' retry failed: {e2}")
-                        cat_status = {"status": "failed",
-                                      "reason": f"after an OOM recovery: "
-                                                f"{type(e2).__name__}: {e2}"}
-            else:
-                print(f"[SegPipeline] ⚠️ Category '{category}' failed: {e}")
-                cat_status = {"status": "failed", "reason": f"{type(e).__name__}: {e}"}
+            status[category] = {"status": "failed", "reason": f"{type(e).__name__}: {e}"}
+            print(f"[SegPipeline] ⛔ Category '{category}' failed ({type(e).__name__}: {e}) — "
+                  f"the run fails: no partial segmentation (point 92)")
+            raise
         
         # THE FALLBACK (USER 2026-09-30): the bare category confirmed NOTHING → SAM3
         # lacks detail; try its origins (the VLM's descriptions, the merged names) in
-        # order, keep the first that finds something — under THIS category's label
-        if cat_status["status"] == "ran" and not any(len(fm) for fm in cat_masks.values()):
+        # order, keep the first that finds something — under THIS category's label.
+        # An origin that errors fails the run like the category itself (point 92).
+        if not any(len(fm) for fm in cat_masks.values()):
             _tried = []
             for _alt in (fallback_prompts or {}).get(category, []) or []:
                 _tried.append(_alt)
@@ -638,11 +1025,10 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                         _alt, cat_batches, frames_dir, cat_frame_files, sam3,
                         batch_size, batch_overlap, iou_threshold, mask_dedupe_iou,
                         boxes_by_pos=cat_boxes)
-                except SAM3ConfigError:
+                except Exception as _e:
+                    status[category] = {"status": "failed",
+                                        "reason": f"origin '{_alt}': {type(_e).__name__}: {_e}"}
                     raise
-                except Exception as _e:  # noqa: BLE001 — declared, the next origin is tried
-                    print(f"[SegPipeline] ⚠️ fallback '{_alt}' failed: {_e}")
-                    continue
                 if any(len(fm) for fm in _alt_masks.values()):
                     cat_masks = _alt_masks
                     cat_status["fallback_prompt"] = _alt
@@ -658,7 +1044,13 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         print(f"[SegPipeline] Category '{category}': {len(cat_obj_ids)} objects across {len(cat_masks)} frames")
         if cat_status["status"] == "ran":
             cat_status.update(n_objects=len(cat_obj_ids), n_frames=len(cat_masks))
-        cat_status["seconds"] = round(_time.time() - t_cat, 1)
+        # the clock goes to the timing record, never into the status the census copies
+        # (point 125: segmentation_census.json differed on every run by these seconds)
+        cat_seconds = round(_time.time() - t_cat, 1)
+        if timing is not None:
+            timing[category] = cat_seconds
+        if decisions:
+            cat_status["identity_decisions"] = decisions
         status[category] = cat_status
         
         # Remap this category's IDs to global space (offset by previous categories)
@@ -692,9 +1084,14 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         if persist:
             if cat_global:
                 try:
+                    # appended into the STAGING store (compacted canonically once, at
+                    # the end of the run — finalize_sam3_store); the keyframe list and
+                    # the frames' resolution come from the session's output/
                     seg_meta = _save_masks(output_dir, cat_global, categories[:cat_idx + 1],
                                            obj_labels, cfg,
-                                           frame_space=mask_space.SPACE_KEYFRAME)
+                                           frame_space=mask_space.SPACE_KEYFRAME,
+                                           session_output_dir=session_output_dir,
+                                           compact=False)
                 except Exception as e:
                     status[category] = {**cat_status, "status": "failed",
                                         "reason": f"its masks could not be saved: "
@@ -712,7 +1109,7 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         per_prompt = (_time.time() - t_sam3) / n_done
         n_left = len(categories) - (cat_idx + 1)
         print(f"[SegPipeline] ⏱ prompt {cat_idx+1}/{len(categories)} took "
-              f"{cat_status['seconds']:.0f} s; {per_prompt:.0f} s/prompt so far → "
+              f"{cat_seconds:.0f} s; {per_prompt:.0f} s/prompt so far → "
               f"~{per_prompt * n_left / 60:.0f} min for the {n_left} left")
         if on_progress and n_left:
             on_progress(((cat_idx + 1) / max(len(categories), 1)) * 100,
@@ -859,11 +1256,28 @@ def _parse_raw_masks(raw_results: Dict[int, dict]) -> Dict[int, Dict[int, np.nda
 
 
 
+def _identity_judge(ious, bar: float, cfg: Optional[dict]) -> dict:
+    """THE USER'S RULE for 'are these two SAM3 ids one object' (docs/plan_determinismo.md
+    point 93, DECIDIDO): the IoUs of the frames where BOTH ids appear are the judges —
+    the ids join only when the majority of those frames exceeds the bar (the median
+    above it, its 95 % interval entirely above it) with at least 5 judges. The
+    DECIDIDO names no error term, so the margin condition is void (error 0): the
+    verdict is the significance and the judges. The dict carries every margin."""
+    if cfg is None:
+        from config import cfg as _cfg
+        cfg = _cfg
+    fac, conf, min_j = _decision_params(cfg)
+    out = _decide_above_bar(ious, bar, 0.0, factor=fac, confidence=conf, min_judges=min_j)
+    out["n_frames_above_bar"] = int(np.sum(np.asarray(ious, np.float64) >= bar))
+    return out
+
+
 def _match_ids_iou(prev_masks: Dict[int, Dict[int, np.ndarray]],
                    curr_masks: Dict[int, Dict[int, np.ndarray]],
                    overlap_start: int, overlap_end: int,
                    iou_threshold: float,
-                   next_global_id: int) -> Tuple[Dict[int, int], int]:
+                   next_global_id: int, cfg: Optional[dict] = None,
+                   record: Optional[list] = None) -> Tuple[Dict[int, int], int]:
     """
     Match object IDs between batches using IoU in the overlap region.
 
@@ -875,6 +1289,11 @@ def _match_ids_iou(prev_masks: Dict[int, Dict[int, np.ndarray]],
     reconstruction (perceptual aliasing). Objects with no overlap-frame IoU
     link get a FRESH global id — never a similarity-based merge.
 
+    A link is decided by :func:`_identity_judge` over the overlap frames where
+    both ids appear (point 93): no longer an average IoU over the whole overlap
+    compared with the bar in one shot. Pairs that pass are matched greedily by
+    their median IoU; every judged pair lands in ``record`` with its margins.
+
     Returns:
         (id_remap, next_global_id) where id_remap = {curr_local_id → global_id}
     """
@@ -884,7 +1303,7 @@ def _match_ids_iou(prev_masks: Dict[int, Dict[int, np.ndarray]],
         for fidx in range(overlap_start, overlap_end + 1):
             if fidx in prev_masks and fidx in curr_masks:
                 overlap_frames.append(fidx)
-    
+
     if not overlap_frames:
         # No overlap — assign fresh IDs to all objects
         curr_obj_ids = set()
@@ -896,82 +1315,79 @@ def _match_ids_iou(prev_masks: Dict[int, Dict[int, np.ndarray]],
             next_global_id += 1
         print(f"[SegPipeline] IoU: No overlap frames → {len(id_remap)} new IDs")
         return id_remap, next_global_id
-    
+
     # Collect all object IDs from each batch in the overlap region
     prev_obj_ids = set()
     curr_obj_ids = set()
     for fidx in overlap_frames:
         prev_obj_ids.update(prev_masks[fidx].keys())
         curr_obj_ids.update(curr_masks[fidx].keys())
-    
+
     prev_obj_ids = sorted(prev_obj_ids)
     curr_obj_ids = sorted(curr_obj_ids)
-    
-    # Compute aggregated IoU matrix: prev_obj × curr_obj
-    iou_matrix = np.zeros((len(prev_obj_ids), len(curr_obj_ids)))
-    
+
+    # the IoU of every (prev, curr) pair in every overlap frame where BOTH appear
+    ious: Dict[Tuple[int, int], List[float]] = {}
     for fidx in overlap_frames:
         prev_fm = prev_masks.get(fidx, {})
         curr_fm = curr_masks.get(fidx, {})
-        
-        for pi, pid in enumerate(prev_obj_ids):
+
+        for pid in prev_obj_ids:
             if pid not in prev_fm:
                 continue
             pmask = prev_fm[pid].astype(bool)
-            
-            for ci, cid in enumerate(curr_obj_ids):
+
+            for cid in curr_obj_ids:
                 if cid not in curr_fm:
                     continue
                 cmask = curr_fm[cid].astype(bool)
-                
+
                 # Handle resolution mismatch
                 if pmask.shape != cmask.shape:
-                    cmask = cv2.resize(cmask.astype(np.uint8), 
+                    cmask = cv2.resize(cmask.astype(np.uint8),
                                       (pmask.shape[1], pmask.shape[0]),
                                       interpolation=cv2.INTER_NEAREST).astype(bool)
-                
+
                 intersection = np.logical_and(pmask, cmask).sum()
                 union = np.logical_or(pmask, cmask).sum()
                 if union > 0:
-                    iou_matrix[pi, ci] += intersection / union
-    
-    # Average across frames
-    iou_matrix /= max(len(overlap_frames), 1)
-    
+                    ious.setdefault((pid, cid), []).append(float(intersection / union))
+
+    # the judge, pair by pair (point 93); only the pairs that pass may link
+    pairs = []
+    for (pid, cid), vals in sorted(ious.items()):
+        if max(vals) < iou_threshold:
+            continue                                  # no frame reaches the bar: nothing to judge
+        d = _identity_judge(vals, iou_threshold, cfg)
+        if record is not None:
+            record.append({"kind": "batch_link", "prev": int(pid), "curr": int(cid),
+                           "n_judges": int(d["n_judges"]), "median_iou": float(np.median(vals)),
+                           "linked": bool(d["improves"]), "ci_margin": d["ci_margin"],
+                           "judges_margin": d["judges_margin"], "reason": d["reason"]})
+        if d["improves"]:
+            pairs.append((float(np.median(vals)), pid, cid))
+    pairs.sort(key=lambda t: (-t[0], t[1], t[2]))
+
     # Greedy matching (Hungarian would be ideal but greedy is simpler and sufficient)
     id_remap = {}
     used_prev = set()
-    
-    # Build previous batch's local-id → global-id mapping
-    # Previous batch masks already have global IDs from earlier remapping
-    prev_local_to_global = {pid: pid for pid in prev_obj_ids}  # Already global IDs
-    
-    # Sort by IoU descending for greedy matching
-    pairs = []
-    for pi, pid in enumerate(prev_obj_ids):
-        for ci, cid in enumerate(curr_obj_ids):
-            if iou_matrix[pi, ci] >= iou_threshold:
-                pairs.append((iou_matrix[pi, ci], pid, cid))
-    pairs.sort(reverse=True)
-    
     used_curr = set()
     for iou_val, pid, cid in pairs:
         if pid in used_prev or cid in used_curr:
             continue
-        # Match: current object cid maps to previous global ID pid
-        global_id = prev_local_to_global.get(pid, pid)
-        id_remap[cid] = global_id
+        # Match: current object cid maps to previous global ID pid (already global)
+        id_remap[cid] = pid
         used_prev.add(pid)
         used_curr.add(cid)
-        print(f"[SegPipeline] IoU: obj {cid} → global {global_id} (IoU={iou_val:.3f})")
-    
+        print(f"[SegPipeline] IoU: obj {cid} → global {pid} (median IoU={iou_val:.3f})")
+
     # Unmatched current objects get new global IDs
     for cid in curr_obj_ids:
         if cid not in id_remap:
             id_remap[cid] = next_global_id
             print(f"[SegPipeline] IoU: obj {cid} → NEW global {next_global_id}")
             next_global_id += 1
-    
+
     return id_remap, next_global_id
 
 
@@ -981,12 +1397,22 @@ def _match_ids_iou(prev_masks: Dict[int, Dict[int, np.ndarray]],
 
 def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
                 categories: List[str], obj_labels: Dict[int, str], cfg: dict,
-                *, frame_space: str):
+                *, frame_space: str, session_output_dir: Optional[Path] = None,
+                compact: bool = True):
     """
     Save SAM3 masks as compressed NPZ + metadata JSON.
     Upsert logic: if an obj_id already exists in the NPZ (same object from a
     previous incremental save), keep its ID and overwrite its masks.
     If it's genuinely new, assign a new ID.
+
+    ``output_dir`` is the directory of the STORE being written; ``session_output_dir``
+    (default: the same) the session's output/, where the keyframe list and the
+    frames live — the batch pipeline writes a fresh store in a staging directory
+    (docs/plan_determinismo.md point 83) and the interactive manager upserts into
+    the session's own (the one place the incremental update is allowed to stay).
+    ``compact`` (default True) rewrites the store canonically after the save —
+    members in (object, frame) order, no dead bytes, fixed zip times (point 101);
+    the batch pipeline passes False and compacts once at the end of the run.
 
     ``frame_space`` (mandatory, keyword-only) DECLARES which index space
     ``all_masks`` is keyed by — ``mask_space.SPACE_KEYFRAME`` for the batch
@@ -1004,27 +1430,31 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     from segmentation import mask_space as _mspace
 
     colors = cfg["visualization"]["segment_colors"]
+    output_dir = Path(output_dir)
+    session_output_dir = Path(session_output_dir) if session_output_dir is not None else output_dir
 
     # ── ONE space per store (see the docstring) ──
-    all_masks, frame_space = _mspace.normalize_masks(
-        output_dir, all_masks, frame_space,
-        log=lambda m: print(f"[SegPipeline] {m}"))
-    
-    # Load resolution from chunk metadata (DA3/MapAnything backends)
-    meta_files = sorted(output_dir.glob("chunk_*_meta.json"))
-    scaled_res = None   # Will be detected from actual mask shape if not available
-    original_res = None  # Will be detected from actual frames if not available
-    if meta_files:
-        with open(meta_files[0]) as f:
-            meta = json.load(f)
-            scaled_res = meta.get("scaled_resolution")
-            original_res = meta.get("original_resolution")
-    
-    # Detect original resolution from frames on disk if not in metadata
+    # the store's space is the store's; a translation (interactive masks in video
+    # numbers into a positional store) reads the SESSION's keyframe list
+    dst_space = _mspace.store_space(output_dir, frame_space)
+    if dst_space != frame_space:
+        conv = _mspace.convert_frames(session_output_dir, all_masks.keys(), frame_space, dst_space)
+        all_masks = {conv[int(f)]: v for f, v in all_masks.items()}
+        print(f"[SegPipeline] [MaskSpace] incoming masks are in {frame_space}, the store is "
+              f"in {dst_space} — translated {len(all_masks)} frames")
+    frame_space = dst_space
+
+    # the mask resolution is what SAM3 produced; the frames' resolution is read from the
+    # frames on disk (never from chunk_*_meta.json leftovers — point 108: a previous
+    # run's Omega chunk metadata is not a declaration of this store's grid)
+    scaled_res = None   # detected from the actual mask shape
+    original_res = None  # detected from the actual frames
+
+    # Detect original resolution from frames on disk
     if original_res is None:
-        frames_dir = output_dir.parent / "frames"
+        frames_dir = session_output_dir.parent / "frames"
         if not frames_dir.exists():
-            frames_dir = output_dir / "frames"
+            frames_dir = session_output_dir / "frames"
         if frames_dir.exists():
             sample_frames = sorted([f for f in frames_dir.iterdir() if f.suffix.lower() in ('.jpg', '.png', '.jpeg')])
             if sample_frames:
@@ -1048,6 +1478,7 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     max_existing_id = -1
     existing_frames = set()
     existing_obj_ids = set()
+    old_meta: dict = {}
     
     if masks_path.exists():
         try:
@@ -1156,9 +1587,17 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     # of 2,211 masks, 814 MB decompressed in RAM).
     from segmentation.erase import _atomic_append_npz, _atomic_savez
     if store_readable:
+        # the store's own metadata members (the keyframe list it was segmented on, its
+        # reconstruction id) travel with it through an upsert
+        with np.load(masks_path) as old_data:
+            for k in STORE_META_KEYS:
+                if k in old_data.files and k not in npz_data:
+                    npz_data[k] = np.asarray(old_data[k])
         _atomic_append_npz(masks_path, npz_data, keep=existing_mask_keys)
     else:
         _atomic_savez(masks_path, npz_data)
+    if compact:
+        compact_mask_store(masks_path)
     _mspace.invalidate(output_dir)
     masks_mb = masks_path.stat().st_size / (1024 * 1024)
     new_count = mask_count
@@ -1223,9 +1662,20 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
         "instances": all_instances,
         "mask_file": "seg_masks.npz",
     }
-    
-    with open(seg_path, 'w') as f:
-        json.dump(segmentation, f, indent=2)
+    # an upsert keeps the store's identity members (the reconstruction id, the keyframe
+    # list's digest) but NOT its seal: the seal names the mask bytes the SAM3 stage wrote,
+    # and this store no longer holds exactly those (point 83 — the interactive manager's
+    # edits are unsealed by construction)
+    for k in ("reconstruction_id", "keyframes_sha256", "n_keyframes"):
+        if isinstance(old_meta, dict) and k in old_meta:
+            segmentation[k] = old_meta[k]
+    # THE MODEL that drew these masks (points 91 / 165): version, checkpoint path + sha256,
+    # device, dtype, numerics, builder args, thresholds — the wrapper's record of the model
+    # it built (None when the wrapper built none, e.g. a test double: recorded as such)
+    from segmentation.sam3_wrapper import get_sam3_wrapper
+    segmentation["sam3_model"] = getattr(get_sam3_wrapper(), "model_record", None)
+
+    atomic_write_json(seg_path, segmentation, indent=2)
     print(f"[SegPipeline] ✅ Saved metadata: {seg_path.name} "
           f"({new_count} new + {len(existing_instances)} existing = "
           f"{len(all_instances)} total instances)")
@@ -1277,51 +1727,6 @@ def _load_ply_origins(ply_path: Path):
         print(f"[SegPipeline] Error loading PLY origins from {ply_path}: {e}")
         return None
 
-def _write_corrected_ply(src_path: Path, dst_path: Path, xyz_corrected: np.ndarray):
-    """Write a corrected PLY by replacing xyz in the original binary PLY.
-    Preserves all other fields (colors, normals, confidence, origins).
-    """
-    _ply_type = {
-        'float': '<f4', 'float32': '<f4', 'double': '<f8', 'float64': '<f8',
-        'uchar': 'u1', 'uint8': 'u1', 'char': 'i1', 'int8': 'i1',
-        'ushort': '<u2', 'uint16': '<u2', 'short': '<i2', 'int16': '<i2',
-        'uint': '<u4', 'uint32': '<u4', 'int': '<i4', 'int32': '<i4',
-    }
-    with open(src_path, 'rb') as f:
-        header_lines = []
-        n_pts = 0
-        props = []
-        while True:
-            line = f.readline().decode('ascii').strip()
-            header_lines.append(line)
-            if line.startswith('element vertex'):
-                n_pts = int(line.split()[-1])
-            elif line.startswith('property') and n_pts > 0:
-                parts = line.split()
-                if len(parts) >= 3:
-                    np_type = _ply_type.get(parts[1])
-                    if np_type:
-                        props.append((parts[2], np_type))
-            elif line == 'end_header':
-                break
-        
-        dtype = np.dtype(props)
-        data = np.frombuffer(f.read(), dtype=dtype).copy()
-    
-    # Replace xyz
-    data['x'] = xyz_corrected[:, 0].astype(data['x'].dtype)
-    data['y'] = xyz_corrected[:, 1].astype(data['y'].dtype)
-    data['z'] = xyz_corrected[:, 2].astype(data['z'].dtype)
-    
-    # Write corrected PLY
-    header = '\n'.join(header_lines) + '\n'
-    with open(dst_path, 'wb') as f:
-        f.write(header.encode('ascii'))
-        f.write(data.tobytes())
-    
-    print(f"[SegPipeline] Wrote corrected cloud: {dst_path.name} ({n_pts:,} pts)")
-
-
 def _voxel_components(pts: np.ndarray, voxel_m: float):
     """Labels of the 26-connected components of the occupied-voxel grid.
 
@@ -1371,7 +1776,23 @@ def _voxel_components(pts: np.ndarray, voxel_m: float):
     return roots[inv]
 
 
-def _obb_core_points(points_xyz: np.ndarray, cfg: dict):
+def _share_verdict(n_part: int, n: int, bar: float, factor: float) -> Tuple[str, float, float]:
+    """Does a share ``n_part / n`` sit above, below or AT a bar? (docs/plan_determinismo.md
+    point 145, DECIDIDO): the share's own sampling error is the binomial
+    ``sqrt(s (1 - s) / n)`` — measured from the counts, nothing chosen — and the share
+    differs from the bar only when it does so by at least ``factor`` × that error.
+    Returns ('above' | 'below' | 'tie', share, error)."""
+    n = max(int(n), 1)
+    s = float(n_part) / n
+    err = float(np.sqrt(max(s * (1.0 - s), 0.0) / n))
+    if s - bar >= factor * err:
+        return "above", s, err
+    if bar - s >= factor * err:
+        return "below", s, err
+    return "tie", s, err
+
+
+def _obb_core_points(points_xyz: np.ndarray, cfg: dict, factor: Optional[float] = None):
     """The points that actually make up the element, flyers left out.
 
     An OBB from ``.min()``/``.max()`` is decided by its two most extreme
@@ -1383,52 +1804,95 @@ def _obb_core_points(points_xyz: np.ndarray, cfg: dict):
 
     USER's criterion: find where the concentration of points is. A flyer (or a
     small stray blob) is its own tiny connected component of the occupied-voxel
-    grid, so every component holding less than ``min_component_frac`` of the
-    instance is left out of the EXTENT. Nothing is deleted — the instance keeps
-    all its points, only the box stops being defined by its strays.
+    grid (world-anchored), so every component holding less than
+    ``min_component_frac`` of the instance is left out of the EXTENT. Nothing is
+    deleted — the instance keeps all its points, only the box stops being
+    defined by its strays.
 
-    Returns (core_indices, n_dropped). Falls back to every point whenever the
-    filter would keep less than ``min_keep_frac``: that is not a flyer
-    problem, that is an instance the test does not understand.
+    THE CUTS ARE JUDGED WITH THEIR SAMPLING ERROR (point 145, DECIDIDO): a
+    component leaves only when its share sits below the bar by ≥ ``factor`` ×
+    the share's binomial error, and stays otherwise (a 1.99 % blob and a 2.01 %
+    one get the same fate: the simplest, in); the core replaces every point only
+    when its kept share clears ``min_keep_frac`` by the same margin, else every
+    point is used (the simplest). ``factor`` = correction_graph.graph.
+    improvement_error_factor (read from the configuration when not given).
+
+    Returns (core_indices, n_dropped, record). ``core_indices`` is None when
+    every point is used.
     """
     n = len(points_xyz)
+    rec = {"rule": "component share vs min_component_frac with its binomial error (point 145)",
+           "n_points": int(n), "components": [], "kept_share": None, "kept_verdict": None,
+           "used": "all"}
     if not cfg.get("enabled", True) or n < int(cfg.get("min_points", 200)):
-        return None, 0
+        rec["used"] = "all (disabled or under min_points)"
+        return None, 0, rec
+    if factor is None:
+        from config import cfg as _server_cfg
+        factor = _decision_params(_server_cfg)[0]
     lab = _voxel_components(points_xyz, float(cfg.get("voxel_m", 0.05)))
     uniq, counts = np.unique(lab, return_counts=True)
     if len(uniq) == 1:
-        return None, 0
-    keep_lab = uniq[counts >= float(cfg.get("min_component_frac", 0.02)) * n]
-    if len(keep_lab) == 0:
-        return None, 0
-    core = np.flatnonzero(np.isin(lab, keep_lab))
-    if len(core) < float(cfg.get("min_keep_frac", 0.5)) * n or len(core) < 4:
-        return None, 0
-    return core, int(n - len(core))
+        rec["used"] = "all (one component)"
+        return None, 0, rec
+    bar = float(cfg.get("min_component_frac", 0.02))
+    keep_lab = []
+    for u, c in sorted(zip(uniq.tolist(), counts.tolist()), key=lambda t: (-t[1], t[0])):
+        verdict, share, err = _share_verdict(c, n, bar, factor)
+        rec["components"].append({"points": int(c), "share": share, "error": err,
+                                  "margin": share - bar, "verdict": verdict,
+                                  "in_extent": verdict != "below"})
+        if verdict != "below":
+            keep_lab.append(u)
+    if not keep_lab:
+        rec["used"] = "all (no component clears the bar)"
+        return None, 0, rec
+    core = np.flatnonzero(np.isin(lab, np.asarray(keep_lab)))
+    verdict, share, err = _share_verdict(len(core), n, float(cfg.get("min_keep_frac", 0.5)), factor)
+    rec["kept_share"], rec["kept_error"], rec["kept_verdict"] = share, err, verdict
+    if verdict != "above" or len(core) < 4:
+        rec["used"] = "all (the kept share does not clear min_keep_frac by its error)"
+        return None, 0, rec
+    rec["used"] = "core"
+    return core, int(n - len(core)), rec
 
+
+def _fold_yaw(a: float) -> float:
+    """A yaw into the canonical [0, π/2) range (point 109): a box is the same box
+    at yaw θ, θ + 90° (extents swapped) and θ + 180°, so every candidate is
+    expressed by the one representative and perpendicular faces give one byte
+    sequence instead of a flip."""
+    q = np.pi / 2.0
+    return float(np.mod(float(a), q))
 
 
 def _vertical_plane_yaws(points_xyz: np.ndarray, vcfg: dict) -> list:
-    """Yaw (atan2(n_z, n_x)) of each VERTICAL plane of an object, found by sequential RANSAC
-    on a deterministic sample of its points (segmentation.obb_orientation): a plane counts
-    when its normal is within ``vertical_tol_deg`` of horizontal and it holds at least
-    ``min_plane_frac`` of the sample."""
-    keys = ("ransac_iters", "dist_m", "vertical_tol_deg", "min_plane_frac", "max_planes", "sample", "seed")
+    """[(yaw, support)] of each VERTICAL plane of an object, found by sequential
+    RANSAC (seeded) on a STABLE sample of its points — the ``sample`` points with
+    the smallest per-point key (:func:`_stable_sample`, point 109: one point more
+    or fewer no longer redraws the whole sample). A plane counts when its normal
+    is within ``vertical_tol_deg`` of horizontal; EVERY such plane is a candidate
+    with its inlier count as support (point 143, DECIDIDO: no 10 % cut — a key
+    ``min_plane_frac`` left in the configuration FAILS the load). The yaw is
+    folded into [0, π/2)."""
+    keys = ("ransac_iters", "dist_m", "vertical_tol_deg", "max_planes", "sample", "seed")
     missing = [k for k in keys if k not in vcfg]
     if missing:
         raise KeyError(f"config.yaml segmentation.obb_orientation is missing {missing}")
+    if "min_plane_frac" in vcfg:
+        raise KeyError("config.yaml segmentation.obb_orientation.min_plane_frac was removed "
+                       "(docs/plan_determinismo.md point 143: every vertical RANSAC plane is a "
+                       "candidate, its support decides among footprint ties) — delete the key")
     P = np.asarray(points_xyz, np.float64)
     if len(P) < 10:
         return []
     rng = np.random.default_rng(int(vcfg["seed"]))
-    if len(P) > int(vcfg["sample"]):
-        P = P[rng.choice(len(P), int(vcfg["sample"]), replace=False)]
+    P = P[_stable_sample(P, int(vcfg["sample"]))]
     sin_tol = np.sin(np.radians(float(vcfg["vertical_tol_deg"])))
-    min_n = max(10, int(float(vcfg["min_plane_frac"]) * len(P)))
     dist = float(vcfg["dist_m"])
     yaws, rest = [], P
     for _ in range(int(vcfg["max_planes"])):
-        if len(rest) < min_n:
+        if len(rest) < 3:
             break
         best_n, best_cnt, best_a = None, 0, None
         for _it in range(int(vcfg["ransac_iters"])):
@@ -1443,24 +1907,35 @@ def _vertical_plane_yaws(points_xyz: np.ndarray, vcfg: dict) -> list:
             cnt = int((np.abs((rest - a) @ n) < dist).sum())
             if cnt > best_cnt:
                 best_cnt, best_n, best_a = cnt, n, a
-        if best_n is None or best_cnt < min_n:
+        if best_n is None or best_cnt < 3:
             break
         inl = np.abs((rest - best_a) @ best_n) < dist
         Q = rest[inl]
         c0 = Q.mean(0)
         n = np.linalg.svd(Q - c0, full_matrices=False)[2][2]      # least-squares normal
-        yaws.append(float(np.arctan2(n[2], n[0])))
+        yaws.append((_fold_yaw(np.arctan2(n[2], n[0])), int(best_cnt)))
         rest = rest[~inl]
     return yaws
 
+
 def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
     """Compute minimum Oriented Bounding Box for floor-aligned coordinates.
-    
+
     If face_normals is provided (list of (normal, n_points) tuples from RANSAC),
     uses the dominant face normal to orient the OBB on the XZ plane.
     Otherwise falls back to convex hull + rotating calipers.
     Coordinates must be floor-aligned (Y = up).
+
+    THE YAW (docs/plan_determinismo.md points 109 / 143, DECIDIDO): every
+    candidate yaw is folded into [0, π/2); among the candidates whose footprint
+    lies within ``factor`` × its MEASURED error of the minimum — the error
+    propagated from the inlier band ``dist_m`` (the cloud's surface noise): a
+    box of extents (ex, ez) measured to ±dist has δA = dist·(ex + ez) — the
+    DOMINANT plane (most support) wins, the user's "coplanar con el plano
+    dominante"; the record carries every candidate with its margin. THE EXTENT
+    (point 145): the core points by :func:`_obb_core_points`, or every point.
     """
+    points_xyz = np.asarray(points_xyz, np.float64)
     if len(points_xyz) < 4:
         center = points_xyz.mean(axis=0)
         return {
@@ -1473,9 +1948,10 @@ def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
     # most extreme ones — see _obb_core_points. Everything below reads
     # points_xyz, so the substitution is the whole change.
     from config import cfg as _server_cfg
+    factor = _decision_params(_server_cfg)[0]
     _ocfg = ((_server_cfg.get("segmentation", {}) or {}).get("obb_core", {}) or {})
     _all = points_xyz
-    _core, _n_dropped = _obb_core_points(points_xyz, _ocfg)
+    _core, _n_dropped, _core_rec = _obb_core_points(points_xyz, _ocfg, factor)
     if _core is not None:
         points_xyz = points_xyz[_core]
 
@@ -1484,10 +1960,10 @@ def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
     y_max = points_xyz[:, 1].max()
     half_y = (y_max - y_min) / 2.0
     cy = (y_min + y_max) / 2.0
-    
+
     # Project to XZ plane for 2D bounding rectangle
     pts_xz = points_xyz[:, [0, 2]]  # (N, 2): [x, z]
-    
+
     best_angle = 0.0
     # THE YAW (USER 2026-09-30: "el cálculo de los OBB debe ser por RANSAC para saber cómo
     # orientarlo — muchas veces queda cruzado —, coplanar con el plano dominante, dejando el
@@ -1497,21 +1973,43 @@ def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
     # whose box leaves the least empty footprint. No vertical plane → the minimum-area
     # rectangle (rotating calipers), as before.
     _vcfg = ((_server_cfg.get("segmentation", {}) or {}).get("obb_orientation", {}) or {})
-    cands = _vertical_plane_yaws(points_xyz, _vcfg) if _vcfg.get("enabled", False) else []
+    cands = list(_vertical_plane_yaws(points_xyz, _vcfg)) if _vcfg.get("enabled", False) else []
     for fn in (face_normals or []):
         n3 = np.asarray(fn[0], np.float64)
         nxz = np.array([n3[0], n3[2]])
         if np.linalg.norm(nxz) > 0.1:
-            cands.append(float(np.arctan2(nxz[1], nxz[0])))
+            cands.append((_fold_yaw(np.arctan2(nxz[1], nxz[0])), int(fn[1]) if len(fn) > 1 else 0))
 
-    def _footprint(a):
+    def _extents(a):
         c, s_ = np.cos(-a), np.sin(-a)
         r = pts_xz @ np.array([[c, -s_], [s_, c]]).T
-        e = r.max(axis=0) - r.min(axis=0)
-        return float(e[0] * e[1])
+        return r.max(axis=0) - r.min(axis=0)
 
+    yaw_rec = {"rule": "dominant plane among footprints within factor x error of the minimum "
+                       "(points 109 / 143)", "candidates": [], "chosen": None}
     if cands:
-        best_angle = min(cands, key=_footprint)
+        if "dist_m" not in _vcfg:
+            raise KeyError("config.yaml segmentation.obb_orientation.dist_m is needed to judge "
+                           "the footprint of the OBB candidates")
+        dist = float(_vcfg["dist_m"])
+        rows = []
+        for yaw, support in cands:
+            e = _extents(yaw)
+            rows.append((float(yaw), int(support), float(e[0] * e[1]), float(dist * (e[0] + e[1]))))
+        a_min = min(r[2] for r in rows)
+        err_min = next(r[3] for r in rows if r[2] == a_min)
+        tied = [r for r in rows if r[2] - a_min <= factor * err_min]
+        # the dominant plane among the tied; a tie of support → the smaller footprint, then
+        # the smaller yaw: a total order, so two runs pick one candidate
+        chosen = max(tied, key=lambda r: (r[1], -r[2], -r[0]))
+        best_angle = chosen[0]
+        for r in sorted(rows, key=lambda r: (r[2], -r[1], r[0])):
+            yaw_rec["candidates"].append({"yaw_deg": float(np.degrees(r[0])), "support": r[1],
+                                          "footprint_m2": r[2], "footprint_error_m2": r[3],
+                                          "margin_m2": r[2] - a_min,
+                                          "tied_with_minimum": bool(r[2] - a_min <= factor * err_min)})
+        yaw_rec["chosen"] = {"yaw_deg": float(np.degrees(best_angle)), "support": chosen[1],
+                             "footprint_m2": chosen[2], "n_tied": len(tied)}
     else:
         # Fallback: convex hull + rotating calipers
         try:
@@ -1520,30 +2018,34 @@ def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
             hull_pts = pts_xz[hull.vertices]
         except Exception:
             hull_pts = pts_xz
-        
+
         n_hull = len(hull_pts)
         best_area = float('inf')
-        
+
         for i in range(n_hull):
             edge = hull_pts[(i + 1) % n_hull] - hull_pts[i]
             edge_len = np.linalg.norm(edge)
             if edge_len < 1e-10:
                 continue
-            angle = np.arctan2(edge[1], edge[0])
-            
+            angle = _fold_yaw(np.arctan2(edge[1], edge[0]))
+
             cos_a = np.cos(-angle)
             sin_a = np.sin(-angle)
             rot2d = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
-            
+
             rotated = hull_pts @ rot2d.T
             rmin = rotated.min(axis=0)
             rmax = rotated.max(axis=0)
             area = (rmax[0] - rmin[0]) * (rmax[1] - rmin[1])
-            
-            if area < best_area:
+
+            # a strictly smaller area, or the same area at a smaller yaw: a total order
+            if area < best_area or (area == best_area and angle < best_angle):
                 best_area = area
                 best_angle = angle
-    
+        yaw_rec["chosen"] = {"yaw_deg": float(np.degrees(best_angle)), "support": None,
+                             "footprint_m2": float(best_area) if np.isfinite(best_area) else None,
+                             "n_tied": None, "source": "rotating calipers (no vertical plane)"}
+
     # Compute extents using best_angle
     cos_a = np.cos(-best_angle)
     sin_a = np.sin(-best_angle)
@@ -1551,29 +2053,29 @@ def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
     rotated = pts_xz @ rot2d.T
     rmin = rotated.min(axis=0)
     rmax = rotated.max(axis=0)
-    
+
     half_x = (rmax[0] - rmin[0]) / 2.0
     half_z = (rmax[1] - rmin[1]) / 2.0
-    
+
     # Center in rotated 2D space → world XZ
     cx_rot = (rmax[0] + rmin[0]) / 2.0
     cz_rot = (rmax[1] + rmin[1]) / 2.0
-    
+
     cos_back = np.cos(best_angle)
     sin_back = np.sin(best_angle)
     rot_back = np.array([[cos_back, -sin_back], [sin_back, cos_back]])
     center_xz = rot_back @ np.array([cx_rot, cz_rot])
-    
+
     center = [float(center_xz[0]), float(cy), float(center_xz[1])]
     half_extents = [float(half_x), float(half_y), float(half_z)]
-    
+
     # Rotation matrix: Y-axis rotation by best_angle
     rotation = [
         [float(cos_back), 0.0, float(-sin_back)],
         [0.0, 1.0, 0.0],
         [float(sin_back), 0.0, float(cos_back)]
     ]
-    
+
     return {
         "center": center,
         "half_extents": half_extents,
@@ -1582,7 +2084,9 @@ def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
         # never mistaken for a measured one
         "n_points": int(len(_all)),
         "n_points_used": int(len(points_xyz)),
-        "n_flyers_excluded": int(_n_dropped)
+        "n_flyers_excluded": int(_n_dropped),
+        # the decisions and their margins (points 109 / 143 / 145)
+        "decisions": {"yaw": yaw_rec, "extent": _core_rec},
     }
 
 
@@ -1729,6 +2233,7 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
     # ── Step 2: RANSAC iterative plane detection ──
     remaining_mask = np.ones(len(points), dtype=bool)
     faces = []
+    _rng = np.random.default_rng(0)        # seeded: one cloud, one set of faces
     
     for face_i in range(max_faces):
         remaining_idx = np.where(remaining_mask)[0]
@@ -1743,7 +2248,7 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
         n_iters = min(500, max(50, len(rem_pts) // 10))
         
         for _ in range(n_iters):
-            sample_idx = np.random.choice(len(rem_pts), 3, replace=False)
+            sample_idx = _rng.choice(len(rem_pts), 3, replace=False)
             p0, p1, p2 = rem_pts[sample_idx]
             v1 = p1 - p0
             v2 = p2 - p0
@@ -1946,7 +2451,8 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
     return result_indices, voxel_data, face_normals_summary, face_planes, local_face_id
 
 
-def _dedupe_masks_per_frame(batch_masks, iou_threshold: float):
+def _dedupe_masks_per_frame(batch_masks, iou_threshold: float, cfg: Optional[dict] = None,
+                            record: Optional[list] = None):
     """Collapse object ids that SAM3 handed out for the SAME observation.
 
     The tracker occasionally returns one region under several ids: on pccr
@@ -1954,12 +2460,17 @@ def _dedupe_masks_per_frame(batch_masks, iou_threshold: float):
     pixels each, IoU 1.0, and frame 0 carried a second identical pair. Each
     copy then became its own 3-D instance and stole points from the other.
 
-    Two ids whose masks coincide in ANY frame are the same object: the union
-    is taken over the whole batch (so the tracks stay consistent frame to
-    frame) and the lowest id survives. Masks that merely overlap — a monitor
-    inside a desk, a sign against a wall — have a low IoU and are untouched;
-    an IoU of 0.9 already demands the areas agree within 10%, which is used
-    to skip almost every pair without touching the pixels.
+    Two ids are the same object when the MAJORITY of the frames where both
+    appear agree above the bar (docs/plan_determinismo.md point 93, DECIDIDO:
+    `_identity_judge` — the median IoU of those frames above `mask_dedupe_iou`,
+    its 95 % interval entirely above it, at least 5 judge frames; otherwise they
+    stay separate and the decision records its margin). One frame used to
+    decide for the whole batch. The union is taken over the batch (so the
+    tracks stay consistent frame to frame) and the lowest id survives. Masks
+    that merely overlap — a monitor inside a desk, a sign against a wall —
+    have a low IoU and are untouched; an IoU of 0.9 already demands the areas
+    agree within 10 %, which is used to skip almost every pair without
+    touching the pixels.
 
     Returns (deduped_masks, n_ids_collapsed); the input is not mutated.
     """
@@ -1978,25 +2489,53 @@ def _dedupe_masks_per_frame(batch_masks, iou_threshold: float):
         if ra != rb:
             parent[max(ra, rb)] = min(ra, rb)
 
-    for frame_masks in batch_masks.values():
+    # every frame where both ids appear is a judge: its IoU (0 when the areas are too far
+    # apart to reach the bar — the pixels need not be touched to know that)
+    ious: Dict[Tuple[int, int], List[float]] = {}
+    for frame_idx in sorted(batch_masks):
+        frame_masks = batch_masks[frame_idx]
         items = []
         for oid, m in frame_masks.items():
             mb = m.astype(bool, copy=False)
-            items.append((int(mb.sum()), oid, mb))
-        items.sort()                                  # by area: IoU >= t needs areas within t
+            items.append((int(mb.sum()), int(oid), mb))
+        items.sort(key=lambda t: (t[0], t[1]))         # by area: IoU >= t needs areas within t
+        oids = sorted(int(o) for o in frame_masks)
         for a in range(len(items)):
             area_a, oid_a, mask_a = items[a]
             if area_a == 0:
                 continue
             for b in range(a + 1, len(items)):
                 area_b, oid_b, mask_b = items[b]
+                pair = (min(oid_a, oid_b), max(oid_a, oid_b))
                 if area_a < iou_threshold * area_b:    # areas too far apart — and sorted, so
                     break                              # every later b is farther still
                 if mask_a.shape != mask_b.shape:
                     continue
                 inter = int(np.logical_and(mask_a, mask_b).sum())
-                if inter and inter / float(area_a + area_b - inter) >= iou_threshold:
-                    union(oid_a, oid_b)
+                iou = inter / float(area_a + area_b - inter) if inter else 0.0
+                ious.setdefault(pair, []).append(iou)
+        # frames where both appear but one is far smaller / disjoint: IoU 0 — a judge too
+        for i, oa in enumerate(oids):
+            for ob in oids[i + 1:]:
+                ious.setdefault((oa, ob), [])
+    for pair in list(ious):
+        n_both = sum(1 for fm in batch_masks.values() if pair[0] in fm and pair[1] in fm)
+        vals = ious[pair]
+        if n_both > len(vals):                          # frames judged without touching pixels
+            vals = vals + [0.0] * (n_both - len(vals))
+        ious[pair] = vals
+    for (oid_a, oid_b), vals in sorted(ious.items()):
+        if not vals or max(vals) < iou_threshold:
+            continue                                   # no frame reaches the bar: nothing to judge
+        d = _identity_judge(vals, iou_threshold, cfg)
+        if record is not None:
+            record.append({"kind": "same_observation", "ids": [int(oid_a), int(oid_b)],
+                           "n_judges": int(d["n_judges"]), "median_iou": float(np.median(vals)),
+                           "n_frames_above_bar": d["n_frames_above_bar"],
+                           "collapsed": bool(d["improves"]), "ci_margin": d["ci_margin"],
+                           "judges_margin": d["judges_margin"], "reason": d["reason"]})
+        if d["improves"]:
+            union(oid_a, oid_b)
 
     if not parent:
         return batch_masks, 0
@@ -2036,29 +2575,28 @@ def _record_overlap(record: dict, absorbed: dict, keeper: dict,
                         "overlap": round(float(overlap_ratio), 3)}
 
 
-def _gap_is_free_space(A: np.ndarray, B: np.ndarray, tree, cams: np.ndarray, gap_m: float,
-                       reach_m: float) -> bool:
-    """Is the gap between two components of one instance EMPTY SPACE the cameras see through?
+def _gap_rays(A: np.ndarray, B: np.ndarray, tree, cams: np.ndarray, gap_m: float,
+              reach_m: float) -> List[int]:
+    """The RAY JUDGES of 'is the gap between two components of one instance EMPTY SPACE the
+    cameras see through' (docs/plan_determinismo.md point 105): one judge per INFORMATIVE
+    ray (a camera × a sample of the gap with nothing standing before the sample), 1 when
+    the ray meets measured geometry BEHIND the sample (the camera sees through the gap — air
+    between three desks shows the floor behind), 0 when it meets nothing (a hole in one
+    floor: nothing lies beyond it). The caller judges the list with the user's rule.
 
-    Three desks side by side leave AIR between them: a camera looking across the gap sees what is
-    behind it (the floor, a wall). The fragments of one floor, wall or ceiling are separated by
-    HOLES the cleaning left: behind the hole the camera saw that same surface, so nothing lies
-    beyond it. pccr 2026-09-30: a split without this test cut the floor in 2 and the ceiling in 3.
-    Interior samples of the segment between the two closest points (every `gap_m`); for every
-    camera in `cams` (seeing both components) the ray through a sample is walked beyond it every
-    `gap_m` up to `reach_m`. A ray with a point in FRONT of the sample says nothing (occluded);
-    otherwise it sees through when it meets a point behind. Free space = most informative rays see
-    through."""
+    Interior samples of the segment between the two closest points (every `gap_m`, at most
+    20 — a BOUND of the cost, the samples themselves are a fixed linspace); for every camera
+    the ray through a sample is walked beyond it every `gap_m` up to `reach_m`."""
     from scipy.spatial import cKDTree
     d, ia = cKDTree(A).query(B, k=1)
     jb = int(np.argmin(d))
     a, b = A[ia[jb]], B[jb]
     n = int(np.floor(np.linalg.norm(b - a) / gap_m))
     if n < 2:
-        return False
+        return []
     samples = a + (b - a) * (np.linspace(1, n - 1, min(n - 1, 20))[:, None] / n)   # BOUND (cost): ≤ 20
-    through = informative = 0
     steps = np.arange(1, max(int(reach_m / gap_m), 1) + 1) * gap_m
+    rays: List[int] = []
     for C in cams:
         for smp in samples:
             ray = smp - C
@@ -2069,11 +2607,25 @@ def _gap_is_free_space(A: np.ndarray, B: np.ndarray, tree, cams: np.ndarray, gap
             front = C + ray * np.arange(gap_m, L - gap_m, gap_m)[:, None]
             if len(front) and np.isfinite(tree.query(front, k=1, distance_upper_bound=gap_m / 2)[0]).any():
                 continue                                     # something stands before the gap
-            informative += 1
             behind = smp + ray * steps[:, None]
-            if np.isfinite(tree.query(behind, k=1, distance_upper_bound=gap_m / 2)[0]).any():
-                through += 1
-    return informative > 0 and through > informative / 2
+            rays.append(int(np.isfinite(tree.query(behind, k=1, distance_upper_bound=gap_m / 2)[0]).any()))
+    return rays
+
+
+def _gap_is_free_space(A: np.ndarray, B: np.ndarray, tree, cams: np.ndarray, gap_m: float,
+                       reach_m: float, *, factor: float, confidence: float,
+                       min_judges: int) -> dict:
+    """Free space between two components, by THE USER'S RULE over the ray judges of
+    :func:`_gap_rays`: the share of rays that see through exceeds one half significantly
+    (95 %), with ≥ 5 informative rays, by ≥ ``factor`` × its binomial error. Returns the
+    decision dict (``improves`` = free space)."""
+    rays = _gap_rays(A, B, tree, cams, gap_m, reach_m)
+    p = float(np.mean(rays)) if rays else 0.0
+    err = float(np.sqrt(max(p * (1.0 - p), 0.0) / max(len(rays), 1)))
+    d = _decide_above_bar(rays, 0.5, err, factor=factor, confidence=confidence,
+                          min_judges=min_judges)
+    d.update({"n_rays": len(rays), "share_through": p})
+    return d
 
 
 def _camera_returned(fa: set, fb: set, cam_centre: Dict[int, np.ndarray], chain: Dict[int, float],
@@ -2092,31 +2644,59 @@ def _camera_returned(fa: set, fb: set, cam_centre: Dict[int, np.ndarray], chain:
     return bool((near & far_walk).any())
 
 
+def _covisible(kf_a: set, kf_b: set, covis_share: float, *, factor: float, confidence: float,
+               min_judges: int) -> dict:
+    """Are two components SEEN TOGETHER? (point 105, DECIDIDO) The judges are the keyframes of
+    the component seen in FEWER keyframes; each says 1 when it also sees the other. The share
+    exceeds `covis_share` (segmentation.dedupe_overlap) significantly, with ≥ 5 judges, by ≥
+    ``factor`` × the share's binomial error — else they are NOT co-visible (the simplest)."""
+    small, other = (kf_a, kf_b) if len(kf_a) <= len(kf_b) else (kf_b, kf_a)
+    judges = [1 if f in other else 0 for f in sorted(small)]
+    p = float(np.mean(judges)) if judges else 0.0
+    err = float(np.sqrt(max(p * (1.0 - p), 0.0) / max(len(judges), 1)))
+    d = _decide_above_bar(judges, covis_share, err, factor=factor, confidence=confidence,
+                          min_judges=min_judges)
+    d.update({"n_keyframes_small": len(small), "n_common": int(sum(judges)), "share": p})
+    return d
+
+
 def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_arr: np.ndarray,
                                 gap_m: float, min_points: int, covis_share: float,
                                 cam_centre: Optional[Dict[int, np.ndarray]] = None,
-                                max_cams: int = 12, min_walk_m: Optional[float] = None) -> int:
+                                max_cams: int = 12, min_walk_m: Optional[float] = None,
+                                id_base: Optional[int] = None,
+                                decision: Optional[Tuple[float, float, int]] = None,
+                                record: Optional[list] = None) -> int:
     """Split an instance that is several objects seen TOGETHER (pccr 2026-09-30, USER: "está mal
     que junte tres desk separados en uno solo ID").
 
     SAM3 can draw ONE mask over several neighbouring objects (desk #174: 2–3 separate blobs in 32
     of its 58 masks), and the space dedupe then absorbs each object's own instance into it. The
     instance's points are split into components separated by more than `gap_m` (the same gap
-    under which `_merge_label_fragments` calls pieces contiguous). A component is a candidate
-    object when it has `min_points` (correction.visit_drift.min_points: below it an object cannot
-    be measured); smaller crumbs join the nearest candidate. Two candidates are DIFFERENT objects
-    when (1) they are seen together — by at least `covis_share` (segmentation.dedupe_overlap) of the
-    keyframes of the smaller one: one frame cannot see one object in two places — OR the walk never
-    CAME BACK between them (`_camera_returned`, `min_walk_m` = correction.visit_drift.min_walk_m): a
-    drift duplicate needs a second pass near the first, while a row of desks is walked past once, one
-    after the other, never all in one frame (pccr desk #174, 2026-09-30) — AND (2) the gap
-    between them is free space the cameras see through (`_gap_is_free_space`): the fragments of ONE
-    floor or wall, split by the holes the cleaning left, are seen together too, but nothing lies
-    behind a hole. Candidates that are not different are joined (a drift duplicate, never seen
-    together, stays whole for the certification, which
-    measures and corrects it). Without `cam_centre` nothing is split. Returns the number of
-    instances added. Mutates `instances`."""
+    under which `_merge_label_fragments` calls pieces contiguous), on the world-anchored grid
+    (point 102). A component is a candidate object when it has `min_points`
+    (correction.visit_drift.min_points, the USER's 1000: below it an object cannot be
+    measured); smaller crumbs join the nearest candidate. Two candidates are DIFFERENT objects
+    when (1) they are seen together — `_covisible`: the keyframes of the smaller one judge,
+    by the user's rule against `covis_share` (segmentation.dedupe_overlap) — OR the walk never
+    CAME BACK between them (`_camera_returned`, `min_walk_m` = correction.visit_drift.min_walk_m,
+    the USER's 1 m: a drift duplicate needs a second pass near the first, while a row of desks
+    is walked past once, one after the other) — AND (2) the gap between them is free space
+    the cameras see through (`_gap_is_free_space`: the informative rays judge, by the same
+    rule; EVERY camera that sees both components votes, in keyframe order — point 105: no
+    stride subsample). A decision that does not pass leaves the instance whole (the simplest)
+    and its margins are recorded. Without `cam_centre` nothing is split.
+
+    Child ids (point 105): numbered from ``id_base`` + 1 — the raw store's highest id, which
+    no merge of this projection moves — in the order (parent instance id, the child's stable
+    spatial key: its centroid's cell on the world-anchored gap grid), never from the maximum
+    id among whatever survived the merges. ``max_cams`` is accepted for the old callers and
+    ignored. Returns the number of instances added. Mutates `instances`."""
     from scipy import ndimage
+    if decision is None:
+        from config import cfg as _server_cfg
+        decision = _decision_params(_server_cfg)
+    factor, confidence, min_judges = decision
     added = 0
     chain = {}
     if cam_centre and min_walk_m is not None:                # walked distance at every keyframe
@@ -2125,12 +2705,12 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
         run = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(C, axis=0), axis=1))]
         chain = dict(zip(order, run.tolist()))
     tree_box = [None]                                         # the cloud's KD-tree, built on first need
-    next_id = max([int(i.get("id", 0)) for i in instances] + [0]) + 1
-    new_list = []
+    if id_base is None:
+        id_base = max([int(i.get("id", 0)) for i in instances] + [0])
+    splits = []                                               # (parent iid, inst, groups, P, comp, owner, gi)
     for inst in instances:
         gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
         if len(gi) < 2 * min_points:
-            new_list.append(inst)
             continue
         P = xyz_display[gi]
         # the gap grid ANCHORED AT THE WORLD ORIGIN (docs/plan_determinismo.md point 102,
@@ -2145,13 +2725,11 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
         grid[tuple(ki.T)] = True
         lab, n = ndimage.label(grid, structure=np.ones((3, 3, 3)))
         if n < 2:
-            new_list.append(inst)
             continue
         comp = lab[tuple(ki.T)] - 1
         size = np.bincount(comp, minlength=n)
-        cand = [c for c in np.argsort(-size) if size[c] >= min_points]
+        cand = [c for c in np.argsort(-size, kind="stable") if size[c] >= min_points]
         if len(cand) < 2:
-            new_list.append(inst)
             continue
         ctr = {c: P[comp == c].mean(0) for c in cand}
         kfs = {c: set(np.unique(frame_arr[gi[comp == c]]).tolist()) for c in cand}
@@ -2165,30 +2743,49 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
             while parent[x] != x:
                 x = parent[x]
             return x
+        iid = int(inst.get("instance_id", inst.get("id", 0)))
         for ia_, c1 in enumerate(cand):
             for c2 in cand[ia_ + 1:]:
-                common = kfs[c1] & kfs[c2]
-                covis = len(common) >= covis_share * min(len(kfs[c1]), len(kfs[c2]))
+                cv = _covisible(kfs[c1], kfs[c2], covis_share, factor=factor,
+                                confidence=confidence, min_judges=min_judges)
+                covis = bool(cv["improves"])
                 # a drift duplicate needs the camera to COME BACK: seen from two passes whose cameras
                 # stand within min_walk_m of each other with more than min_walk_m of walk between them.
                 # A row of desks walked past once never has that — two objects, not two copies.
                 dup_possible = (not covis) and bool(chain) and _camera_returned(kfs[c1], kfs[c2], cam_centre,
                                                                                  chain, min_walk_m)
                 distinct = False
+                fs_rec = None
                 if not dup_possible and cam_centre:
+                    # every camera that sees both components, in keyframe order (point 105)
+                    common = kfs[c1] & kfs[c2]
                     fs = sorted(f for f in (common or (kfs[c1] | kfs[c2])) if f in cam_centre)
-                    fs = fs[:: max(1, len(fs) // max_cams)][:max_cams]      # BOUND (cost): cameras asked
                     cams = np.array([cam_centre[f] for f in fs]) if fs else np.zeros((0, 3))
-                    distinct = len(cams) > 0 and _gap_is_free_space(
-                        P[comp == c1], P[comp == c2], tree_box[0], cams, gap_m, reach)
+                    if len(cams):
+                        fs_rec = _gap_is_free_space(P[comp == c1], P[comp == c2], tree_box[0], cams,
+                                                    gap_m, reach, factor=factor,
+                                                    confidence=confidence, min_judges=min_judges)
+                        distinct = bool(fs_rec["improves"])
+                if record is not None:
+                    record.append({"kind": "covisible_split", "instance_id": iid,
+                                   "components": [int(size[c1]), int(size[c2])],
+                                   "covisible": {k_: cv[k_] for k_ in ("improves", "n_judges", "share",
+                                                                      "ci_margin", "judges_margin",
+                                                                      "error_margin", "reason")},
+                                   "camera_returned": bool(dup_possible),
+                                   "free_space": ({k_: fs_rec[k_] for k_ in ("improves", "n_rays",
+                                                                             "share_through", "ci_margin",
+                                                                             "judges_margin", "error_margin",
+                                                                             "reason")}
+                                                  if fs_rec is not None else None),
+                                   "distinct": bool(distinct)})
                 if not distinct:
                     parent[_root(c2)] = _root(c1)
         roots = {}
         for c in cand:
             roots.setdefault(_root(c), []).append(c)
-        groups = sorted(roots.values(), key=lambda g: -sum(size[x] for x in g))
+        groups = sorted(roots.values(), key=lambda g: (-sum(size[x] for x in g), min(g)))
         if len(groups) < 2:
-            new_list.append(inst)
             continue
         owner = np.full(n, -1, dtype=np.int64)
         for gidx, g in enumerate(groups):
@@ -2196,7 +2793,30 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
         for c in range(n):                                   # crumbs -> the nearest candidate's group
             if owner[c] < 0:
                 cc = P[comp == c].mean(0)
-                owner[c] = owner[min(cand, key=lambda m: np.linalg.norm(cc - ctr[m]))]
+                owner[c] = owner[min(cand, key=lambda m: (float(np.linalg.norm(cc - ctr[m])), m))]
+        splits.append((iid, inst, groups, P, comp, owner, gi))
+
+    if not splits:
+        return 0
+    # the children's ids: by (parent instance id, the child's stable spatial key), from the raw
+    # store's highest id — the same input gives the same ids whatever merged upstream
+    children = []
+    for iid, inst, groups, P, comp, owner, gi in splits:
+        pt_group = owner[comp]
+        for gidx in range(1, len(groups)):
+            sel_pts = P[pt_group == gidx]
+            key = tuple(int(v) for v in np.floor(sel_pts.mean(0) / gap_m).astype(np.int64))
+            children.append((iid, key, inst, gidx))
+    children.sort(key=lambda t: (t[0], t[1], t[3]))
+    child_id = {(iid, gidx): int(id_base) + 1 + k for k, (iid, _key, _inst, gidx) in enumerate(children)}
+    by_inst = {id(inst): (iid, groups, P, comp, owner, gi) for iid, inst, groups, P, comp, owner, gi in splits}
+    new_list = []
+    for inst in instances:
+        hit = by_inst.get(id(inst))
+        if hit is None:
+            new_list.append(inst)
+            continue
+        iid, groups, P, comp, owner, gi = hit
         pt_group = owner[comp]
         for gidx in range(len(groups)):
             sel = sorted(gi[pt_group == gidx].tolist())
@@ -2206,21 +2826,23 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
                 inst["split_into"] = len(groups)
                 new_list.append(inst)
             else:
-                nid = next_id; next_id += 1
+                nid = child_id[(iid, gidx)]
                 new_list.append({**{k_: v for k_, v in inst.items()
                                     if k_ not in ("globalIndices", "obb", "split_into")},
                                  "id": nid, "instance_id": nid + 1, "globalIndices": sel,
                                  "total_points": len(sel),
-                                 "split_from": int(inst.get("instance_id", inst.get("id", 0)))})
+                                 "split_from": int(iid)})
                 added += 1
-        print(f"[SegPipeline]   ✂ '{inst.get('label')}' #{inst.get('instance_id', inst.get('id'))}: "
-              f"{len(groups)} objects seen together — split ({[int(size[g[0]]) for g in groups]} pts)")
+        print(f"[SegPipeline]   ✂ '{inst.get('label')}' #{iid}: "
+              f"{len(groups)} objects seen together — split "
+              f"({[int((pt_group == g_).sum()) for g_ in range(len(groups))]} pts)")
     instances[:] = new_list
     return added
 
 
 def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
-                           record=None):
+                           record=None, min_adjacent_pairs: Optional[int] = None,
+                           decisions: Optional[list] = None):
     """Consolidate instances of the SAME label whose points are contiguous.
 
     SAM3 returns one mask per visually separable region, so one physical
@@ -2232,9 +2854,12 @@ def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
     duplicate detector with nothing to find.
 
     Geometry decides, as everywhere else: two instances with the SAME label
-    whose occupied voxels touch within ``gap_m`` are one object. Two rules
-    keep this away from the containment merge that ``merge_duplicates``
-    disabled after it collapsed 147 instances to 3:
+    whose occupied voxels touch within ``gap_m`` are one object — touching
+    through at least ``min_adjacent_pairs`` distinct adjacent voxel pairs
+    (docs/plan_determinismo.md point 104, DECIDIDO: 5, the judges' minimum of
+    the user's rule; one flyer voxel used to weld two objects). Two rules keep
+    this away from the containment merge that ``merge_duplicates`` disabled
+    after it collapsed 147 instances to 3:
       * different labels are NEVER merged, so a wall cannot swallow the signs
         resting against it;
       * the test is CONTIGUITY, not containment, so nothing is absorbed for
@@ -2245,10 +2870,14 @@ def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
     Mutates ``instances`` in place; returns the number of instances absorbed.
     ``record``, when given, receives ``absorbed_instance_id -> keeper`` so the
     session can say where every mask ended up instead of leaving it as a
-    zero-point ghost in the list (USER 2026-09-17).
+    zero-point ghost in the list (USER 2026-09-17). ``decisions`` receives every
+    touching pair with its count of adjacent voxel pairs and the verdict.
     """
     if gap_m <= 0 or len(instances) < 2:
         return 0
+    if min_adjacent_pairs is None:
+        from config import cfg as _server_cfg
+        min_adjacent_pairs = _decision_params(_server_cfg)[2]
     from collections import defaultdict
 
     by_label = defaultdict(list)
@@ -2310,12 +2939,28 @@ def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
             a, b = allo[hit], owner_sorted[pos[hit]]
             diff = a != b
             if diff.any():
-                pairs.append(np.stack([np.minimum(a[diff], b[diff]),
-                                       np.maximum(a[diff], b[diff])], axis=1))
+                # the adjacent VOXEL pair (both cells) with its instance pair: distinct
+                # pairs are what the contiguity is counted on
+                va, vb = packed[hit][diff], nb[hit][diff]
+                pairs.append(np.stack([np.minimum(a[diff], b[diff]), np.maximum(a[diff], b[diff]),
+                                       np.minimum(va, vb), np.maximum(va, vb)], axis=1))
         if pairs:
             # millions of voxel adjacencies collapse to a handful of instance
-            # pairs — unique them before touching the union-find
-            for a, b in np.unique(np.concatenate(pairs), axis=0):
+            # pairs — unique them (by voxel pair) and COUNT them per instance pair
+            allp = np.unique(np.concatenate(pairs), axis=0)
+            inst_pairs, counts = np.unique(allp[:, :2], axis=0, return_counts=True)
+            for (a, b), cnt in zip(inst_pairs, counts):
+                contiguous = int(cnt) >= int(min_adjacent_pairs)
+                if decisions is not None:
+                    decisions.append({"kind": "fragment_contiguity", "label": label,
+                                      "instance_ids": [int(instances[a].get("instance_id", instances[a].get("id"))),
+                                                       int(instances[b].get("instance_id", instances[b].get("id")))],
+                                      "adjacent_voxel_pairs": int(cnt),
+                                      "min_adjacent_pairs": int(min_adjacent_pairs),
+                                      "margin": int(cnt) - int(min_adjacent_pairs),
+                                      "merged": contiguous})
+                if not contiguous:
+                    continue
                 ra, rb = find(int(a)), find(int(b))
                 if ra != rb:
                     parent[max(ra, rb)] = min(ra, rb)
@@ -2324,10 +2969,10 @@ def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
     for k in range(len(instances)):
         groups[find(k)].append(k)
     absorbed = 0
-    for root, members in groups.items():
+    for root, members in sorted(groups.items()):
         if len(members) < 2:
             continue
-        members.sort(key=lambda k: -len(instances[k].get("globalIndices") or []))
+        members.sort(key=lambda k: (-len(instances[k].get("globalIndices") or []), k))
         keep = members[0]
         idx = set(instances[keep].get("globalIndices") or [])
         for k in members[1:]:
@@ -2477,27 +3122,35 @@ def _enforce_exclusive_ownership(instances: list, n_pts: int) -> int:
 
 
 def segmentation_result_is_stale(output_dir) -> tuple:
-    """(stale, reason) — is output/segmentation_result.json older than any input
-    it was derived from?
-
-    The result is a function of three files: the masks, the instance metadata
-    and the cloud the masks are projected onto. Freshness used to be judged
-    against the masks alone, in two places that then disagreed with each other,
-    and a result that predated the cloud entirely passed as current.
-
-    Plain dependency tracking, one answer for every caller.
-    """
-    from pathlib import Path as _P
-    out = _P(output_dir)
+    """(stale, reason) — may output/segmentation_result.json be REUSED for this
+    state of the session? Only on an IDENTICAL stamp (docs/plan_determinismo.md
+    point 123): the sha256 of every input the projection reads (the cloud, the
+    raw mask store and its metadata, the keyframe list, the poses, the session
+    camera, the floor transform, the record-grid declaration), the code that
+    decides and the configuration sections it reads. A result with no stamp
+    (written before 2026-10-08) is stale; an mtime never decides."""
+    from repro import check_stamp
+    out = Path(output_dir)
     res = out / "segmentation_result.json"
     if not res.exists():
         return True, "no segmentation_result.json"
-    r_mt = res.stat().st_mtime
-    for name in ("seg_masks.npz", "segmentation.json", "cleaned_cloud.ply"):
-        f = out / name
-        if f.exists() and r_mt < f.stat().st_mtime:
-            return True, f"older than {name}"
-    return False, "newer than the masks, the metadata and the cloud"
+    try:
+        doc = json.loads(res.read_text())
+    except ValueError as e:
+        return True, f"segmentation_result.json is unreadable ({e})"
+    saved = doc.get("stamp") if isinstance(doc, dict) else None
+    if not isinstance(saved, dict):
+        return True, "segmentation_result.json carries no stamp (written before 2026-10-08)"
+    if not doc.get("instances"):
+        return True, "segmentation_result.json holds no instance"
+    try:
+        now = projection_stamp(out, out / "cleaned_cloud.ply")
+    except FileNotFoundError as e:
+        return True, f"an input of the projection is missing ({e})"
+    diffs = check_stamp(saved, now)
+    if diffs:
+        return True, "stamp differs: " + "; ".join(diffs[:6]) + (" …" if len(diffs) > 6 else "")
+    return False, "identical stamp (inputs, code and configuration)"
 
 
 def _mask_frame_lookup(output_dir: Path, mask_frames, cloud_frames):
@@ -2622,46 +3275,72 @@ def _encode_classification(instances: list, classification: np.ndarray,
     return classification, code, class_map
 
 
-def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_obj_ids=None) -> dict:
+def _frame_groups_of(frame_arr: np.ndarray) -> Dict[int, np.ndarray]:
+    """{cloud frame: indices of the points born in it}, each sorted ascending."""
+    order = np.argsort(frame_arr, kind="stable")
+    sorted_f = frame_arr[order]
+    uniq, starts = np.unique(sorted_f, return_index=True)
+    ends = np.r_[starts[1:], len(sorted_f)]
+    return {int(f): np.sort(order[s:e]) for f, s, e in zip(uniq.tolist(), starts, ends)}
+
+
+def _area_variation_by_oid(areas: Dict[int, Dict[int, float]]) -> Dict[int, float]:
+    """Per object, the MEASURED frame-to-frame variation of its mask area: the median
+    |Δarea| between consecutive mask keyframes (point 117: the noise two near-equal
+    areas are compared against); 0 for an object with one frame."""
+    out = {}
+    for oid, by_frame in areas.items():
+        a = np.asarray([by_frame[f] for f in sorted(by_frame)], np.float64)
+        out[int(oid)] = float(np.median(np.abs(np.diff(a)))) if len(a) > 1 else 0.0
+    return out
+
+
+def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
     """
-    Core processing: match SAM3 masks against PLY cloud with erosion,
-    deconfliction, DBSCAN filtering, and OBB computation.
-    
+    Core processing: match SAM3 masks against the PLY cloud — the mask→point
+    assignment, the audit, the merges, the split, the attach, the OBBs, the
+    class bytes, the octree — and return the result document.
+
+    A PURE FUNCTION of its inputs (docs/plan_determinismo.md points 99 / 122):
+    the cloud, the RAW mask store and its metadata (never a fused parent, never
+    a previous result), the keyframe list, the poses, the session camera, the
+    floor transform, the frozen configuration and this code. It starts from an
+    empty result; every step is FATAL — a step that cannot run raises, names
+    itself, and no result is written (the caller deletes a stale one). The
+    result carries its ``stamp`` (point 123) and every decision's margin
+    (``decisions``).
+
     This is CPU-intensive. Called once after segmentation to produce
     segmentation_result.json. Use apply_segmentation_to_cloud() for cached loading.
-    
-    Args:
-        skip_filter_ids: Optional set of instance IDs whose DBSCAN/SOR filtering
-                         was already done in a previous incremental run. Their
-                         cached globalIndices will be reused as-is.
-        only_obj_ids: Optional set of obj_ids to process. When set, only these
-                      obj_ids will be matched against the cloud (for incremental
-                      per-category matching). Other obj_ids are skipped entirely.
     """
-    from config import cfg
-    
+    cfg, cfg_source = _projection_config(Path(output_dir))
     output_dir = Path(output_dir)
-    
-    # Load metadata
+    error_factor, confidence, min_judges = _decision_params(cfg)
+    decisions: Dict[str, object] = {
+        "rule": ("USER 2026-10-07 (metric_lock.decide_change): a merge / split / link is applied "
+                 "only when significant at the declared confidence, with >= min_judges judges, "
+                 "by >= error_factor x the measured error; otherwise the simplest outcome"),
+        "error_factor": error_factor, "confidence": confidence, "min_judges": min_judges}
+
+    # Load metadata (the RAW parent: the store SAM3 wrote, plus the interactive manager's
+    # masklets — never the fused view, which is what this very function derives)
     seg_path = output_dir / "segmentation.json"
     if not seg_path.exists():
-        return {"error": "No segmentation.json", "instances": []}
-    
+        raise RuntimeError(f"{seg_path} does not exist — nothing to project")
     with open(seg_path) as f:
         metadata = json.load(f)
-    
+
     # Load masks
     masks_path = output_dir / metadata.get("mask_file", "seg_masks.npz")
     if not masks_path.exists():
-        # Legacy format (v2.0) — return as-is for backward compatibility
-        metadata["type"] = "segmentation"
-        return metadata
-    
+        raise RuntimeError(f"{masks_path} does not exist — the masks to project are missing")
+
     masks_data = np.load(masks_path)
-    obj_ids = masks_data["obj_ids"].tolist()
+    mask_keys = set(masks_data.files)
+    obj_ids = sorted(int(o) for o in masks_data["obj_ids"].tolist())
     keyframes = masks_data["frames"].tolist()
-    scaled_res = masks_data["scaled_res"].tolist()
-    
+    scaled_res = [int(x) for x in masks_data["scaled_res"].tolist()]
+
     # The scene cloud, or nothing. A chunk used to stand in for it when it was
     # missing, which cannot work: a chunk is one seventh of the scene and
     # carries no per-point provenance, so the match silently degraded to
@@ -2670,53 +3349,22 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     # exist yet, so there is nothing to map onto.
     if ply_path is None:
         ply_path = output_dir / "cleaned_cloud.ply"
-        if not ply_path.exists():
-            return {"error": f"no cleaned_cloud.ply in {output_dir} — the cloud "
-                             f"does not exist yet, nothing to map masks onto",
-                    "instances": []}
     ply_path = Path(ply_path)
-    
+    if not ply_path.exists():
+        raise RuntimeError(f"no {ply_path.name} in {output_dir} — the cloud does not exist yet, "
+                           f"nothing to map masks onto")
+
     # Load cloud origins
     origins = _load_ply_origins(ply_path)
     if origins is None:
-        print(f"[SegPipeline] ⚠️ PLY {ply_path.name} has no origin fields. Falling back to 2D-only instances.")
-        
-        # Build lookup from obj_id → instance metadata (label, color)
-        instance_meta = {}
-        for inst in metadata.get("instances", []):
-            instance_meta[inst["id"]] = inst
-            
-        # Group obj_ids by instance_id
-        from collections import defaultdict
-        instance_groups = defaultdict(list)
-        for obj_id in obj_ids:
-            meta = instance_meta.get(obj_id)
-            if meta:
-                iid = meta.get("instance_id", obj_id)
-                instance_groups[iid].append(obj_id)
-                
-        colors = cfg["visualization"]["segment_colors"]
-        dummy_instances = []
-        for iid, group_obj_ids in instance_groups.items():
-            meta_inst = instance_meta.get(group_obj_ids[0], {})
-            label = meta_inst.get("label", "object")
-            color = meta_inst.get("color", colors[len(dummy_instances) % len(colors)])
-            dummy_instances.append({
-                "id": int(iid),
-                "label": label,
-                "instance_id": int(iid),
-                "color": color,
-                "total_points": 0,
-                "globalIndices": [],
-            })
-            
-        return {"warning": "PLY has no origins (2D only)", "instances": dummy_instances}
-    
+        raise RuntimeError(f"{ply_path.name} carries no origin fields (frame_global / pixel_row / "
+                           f"pixel_col) — the masks cannot be projected onto it")
+
     xyz, frame_global, pixel_row, pixel_col = origins
     n_pts = len(frame_global)
     cloud_label = ply_path.stem
     print(f"[SegPipeline] Matching masks against {cloud_label} ({n_pts:,} points)...")
-    
+
     # Apply SAME floor alignment the viewer uses (from saved transform)
     xyz_display = xyz  # default: use raw xyz
     s, R, t = 1.0, np.eye(3), np.zeros(3)  # identity transform defaults
@@ -2731,17 +3379,13 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     # `.orientation_applied` now only suppresses the legacy auto-compute
     # fallback, which WOULD double-rotate a baked cloud.
     if transform_path.exists():
-        try:
-            data = np.load(transform_path)
-            s = float(data["s"])
-            R = data["R"]
-            t = data["t"]
-            if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
-                xyz_display = s * (xyz @ R.T) + t
-                print(f"[SegPipeline]   Floor alignment loaded from {transform_path.name}")
-        except Exception as e:
-            print(f"[SegPipeline]   ⚠️ Could not load floor_transform.npz: {e}")
-            s, R, t = 1.0, np.eye(3), np.zeros(3)
+        data = np.load(transform_path)
+        s = float(data["s"])
+        R = data["R"]
+        t = data["t"]
+        if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
+            xyz_display = s * (xyz @ R.T) + t
+            print(f"[SegPipeline]   Floor alignment loaded from {transform_path.name}")
     elif (output_dir / ".orientation_applied").exists():
         # reconstruction/orient.py baked +Y up and the floor at y=0 into the cloud
         # itself, measured from the camera-pose gravity over every frame. The raw
@@ -2749,42 +3393,48 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         # time and _compute_obb's Y-up assumption would then hold in no frame at all.
         print("[SegPipeline]   Orientation baked from camera poses — display frame is identity")
     else:
-        # Fallback: compute alignment (for legacy sessions without saved transform)
-        try:
-            from alignment_manager import get_alignment_manager
-            am = get_alignment_manager()
-            s, R, t = am.compute_leveling_from_points(xyz)
-            if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
-                xyz_display = s * (xyz @ R.T) + t
-                print(f"[SegPipeline]   Floor alignment computed (no saved transform)")
-        except Exception as e:
-            print(f"[SegPipeline]   ⚠️ Floor alignment unavailable for OBB: {e}")
-    
+        # Fallback: compute alignment (legacy sessions without a saved transform) —
+        # seeded and keyed by the cloud (point 110)
+        from alignment_manager import get_alignment_manager
+        am = get_alignment_manager()
+        s, R, t = am.compute_leveling_from_points(xyz)
+        if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
+            xyz_display = s * (xyz @ R.T) + t
+            print(f"[SegPipeline]   Floor alignment computed (no saved transform)")
+
     # Group cloud points by frame for efficient lookup
-    frame_groups = {}  # frame_idx → array of point indices
     frame_arr = frame_global.astype(np.int32)
-    for pt_idx in range(n_pts):
-        f = int(frame_arr[pt_idx])
-        if f not in frame_groups:
-            frame_groups[f] = []
-        frame_groups[f].append(pt_idx)
-    # Convert to numpy arrays for vectorized operations
-    for f in frame_groups:
-        frame_groups[f] = np.array(frame_groups[f], dtype=np.int64)
-    
+    frame_groups = _frame_groups_of(frame_arr)
     print(f"[SegPipeline]   {len(frame_groups)} unique frames in cloud")
-    # the masks and the cloud index their frames differently — translate
-    cloud_to_mask = _mask_frame_lookup(output_dir, keyframes, frame_groups.keys())
-    
+
+    # the masks and the cloud index their frames differently — translate, EXACTLY
+    # (point 121): a cloud frame that is not in camera_frames.txt FAILS the stage,
+    # a keyframe without a mask contributes no point; the identity fallback that
+    # read a video number as a position is gone. (A store declaring the keyframe
+    # list it was segmented on is checked against camera_frames.txt here — point 114.)
+    ms = mask_space.resolve(output_dir, masks=masks_data,
+                            log=lambda m: print(f"[SegPipeline]   {m}"))
+    mask_frame_of: Dict[int, int] = {}
+    for cloud_frame in sorted(frame_groups):
+        mf = ms.to_mask(cloud_frame)
+        if mf is None:
+            if ms.keyframes:
+                raise RuntimeError(f"cloud frame {cloud_frame} is not in camera_frames.txt "
+                                   f"({len(ms.keyframes)} keyframes) — the cloud and the keyframe "
+                                   f"list are not one reconstruction")
+            mf = cloud_frame                      # no keyframe list: the ordinal IS the frame
+        mask_frame_of[cloud_frame] = int(mf)
+    cloud_to_mask = {} if ms.is_identity else {f: m for f, m in mask_frame_of.items()}
+
     # Match each object's masks against cloud points
     # Uses erosion for tighter boundaries + deconfliction (each point → one obj_id)
     colors = cfg["visualization"]["segment_colors"]
-    
+
     # Build lookup from obj_id → instance metadata (label, color)
     instance_meta = {}
     for inst in metadata.get("instances", []):
         instance_meta[inst["id"]] = inst
-    
+
     # ── Filter out orphaned obj_ids (exist in NPZ but deleted from segmentation.json) ──
     # MUST happen before Phase 1: orphaned obj_ids in deconfliction would "steal" points
     # from valid objects, then get discarded in Phase 2, leaving those points unassigned.
@@ -2793,117 +3443,62 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         removed = len(obj_ids) - len(valid_obj_ids)
         print(f"[SegPipeline]   Skipping {removed} orphaned obj_ids (deleted from segmentation.json)")
         obj_ids = valid_obj_ids
-    
+
     # Erosion kernel (configurable)
     # USER ORDER 2026-08-29: erosion OFF by default — it was the #1 point
     # eater on test3 (131k mask-covered points excluded, 35.7% of the
     # unsegmented). Re-enable via segmentation.mask_erosion_iterations if
     # boundary bleed (masks claiming the neighbour's points) returns.
-    try:
-        erosion_iterations = int((cfg.get("segmentation", {}) or {})
-                                 .get("mask_erosion_iterations", 0))
-    except Exception:
-        erosion_iterations = 0
+    erosion_iterations = int((cfg.get("segmentation", {}) or {}).get("mask_erosion_iterations", 0))
     erosion_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    
+
+    # ── THE GRIDS (point 108, DECIDIDO): the cloud's birth pixels live on the DECLARED
+    # record grid (camera.json / corrected_cloud.json, `trace_grid`) and the masks on
+    # their declared `scaled_res`; the exact grid maps of precision.camera take one to
+    # the other (SessionProjection.record_to_mask — what the certification already
+    # does). Nothing is inferred from the surviving pixels' maxima or from chunk
+    # metadata; a session that declares no grid FAILS here.
+    from correction.visit_drift import SessionProjection, trace_grid
+    from precision.camera import CAMERA_JSON_NAME, grid_like, load_camera_json, mask_grid_for
+    cam = load_camera_json(output_dir / CAMERA_JSON_NAME)
+    Ht, Wt = trace_grid(output_dir)
+    g = cam.omega_grid
+    rec_grid = g if (int(g.w), int(g.h)) == (Wt, Ht) else grid_like(g, Wt, Ht, "record")
+    mask_grid = mask_grid_for(cam.width, cam.height, (scaled_res[0], scaled_res[1]))
+    proj = SessionProjection(cam, rec_grid, mask_grid,
+                             source=f"{CAMERA_JSON_NAME} ({cam.source}, camera epoch {cam.camera_epoch})")
+    if n_pts and (int(pixel_row.max()) >= Ht or int(pixel_col.max()) >= Wt
+                  or int(pixel_row.min()) < 0 or int(pixel_col.min()) < 0):
+        raise RuntimeError(f"the cloud's birth pixels span rows {int(pixel_row.min())}..{int(pixel_row.max())}, "
+                           f"cols {int(pixel_col.min())}..{int(pixel_col.max())} outside the declared "
+                           f"{Wt}x{Ht} record grid — the cloud and the camera do not describe one grid")
+    rows_m, cols_m = proj.record_to_mask(pixel_row, pixel_col)        # -1 where the mask grid ends
+    mask_h_ref, mask_w_ref = scaled_res[0], scaled_res[1]
+    print(f"[SegPipeline]   Record grid: {Wt}x{Ht} ({rec_grid.name}), mask grid: {mask_w_ref}x{mask_h_ref} "
+          f"— exact grid maps of {proj.source}")
+
     # ── Phase 1: Match all objects, track per-point best assignment ──
     # For deconfliction: each point goes to the object with the smallest mask area
+    # (the user's rule, kept — point 117, DECIDIDO: the smaller area wins, a tie the
+    # lower id; the runner-up is tracked so the NEAR-TIES can be counted and declared)
     point_obj_id = np.full(n_pts, -1, dtype=np.int32)     # winning obj_id per point
     point_mask_area = np.full(n_pts, np.inf, dtype=np.float64)  # smaller wins
-    
+    second_obj_id = np.full(n_pts, -1, dtype=np.int32)    # the runner-up and its area
+    second_area = np.full(n_pts, np.inf, dtype=np.float64)
+
     obj_mask_areas = {}  # obj_id → average mask area (for priority)
-    
-    # Precompute original image resolution for pixel coord scaling
-    # Sources (priority): 1) chunk metadata, 2) actual frame dimensions, 3) pixel coord max
-    orig_h, orig_w = None, None
-    
-    # Try 1: chunk metadata (DA3, MapAnything backends)
-    meta_files = sorted(output_dir.glob("chunk_*_meta.json"))
-    if meta_files:
-        try:
-            with open(meta_files[0]) as f:
-                chunk_meta = json.load(f)
-            orig_res = chunk_meta.get("original_resolution")
-            if orig_res:
-                orig_h, orig_w = float(orig_res[0]), float(orig_res[1])  # [H, W]
-        except Exception:
-            pass
-    
-    # Try 2: read actual frame image from disk
-    if orig_h is None:
-        frames_dir = output_dir.parent / "frames"
-        if not frames_dir.exists():
-            frames_dir = output_dir / "frames"
-        if frames_dir.exists():
-            sample_frames = sorted([f for f in frames_dir.iterdir() if f.suffix.lower() in ('.jpg', '.png', '.jpeg')])
-            if sample_frames:
-                try:
-                    sample_img = cv2.imread(str(sample_frames[0]))
-                    if sample_img is not None:
-                        orig_h, orig_w = float(sample_img.shape[0]), float(sample_img.shape[1])
-                except Exception:
-                    pass
-    
-    # Fallback 3: pixel coord max (last resort, works when coords span full image)
-    if orig_h is None:
-        orig_h = float(pixel_row.max() + 1)
-        orig_w = float(pixel_col.max() + 1)
-        print(f"[SegPipeline]   ⚠️ Original resolution estimated from pixel coords (fallback)")
+    areas_by_oid_frame: Dict[int, Dict[int, float]] = {}
 
-    # ── Consistency guard ────────────────────────────────────────────────
-    # pixel_row/pixel_col are the GROUND TRUTH of the projection space: the cloud
-    # is projected at the reconstruction backend's resolution (e.g. DA3 ~688x384,
-    # multiples of 16), but the RGB frames / SAM3 masks may have been saved at a
-    # DIFFERENT resolution (e.g. 360x640). If we scale mask lookups using the
-    # on-disk frame resolution while the points live in the projection resolution,
-    # the per-axis factor is wrong and points map off-target — worse the farther
-    # from the image center (objects near the border drift). If the detected orig
-    # is smaller than the actual pixel-coord extent, it cannot be the projection
-    # resolution, so anchor to the pixel coords instead.
-    px_h = float(pixel_row.max() + 1)
-    px_w = float(pixel_col.max() + 1)
-    # The frame/metadata resolution can disagree with the projection in EITHER
-    # direction: frames saved SMALLER than the projection (px > orig) OR LARGER
-    # (px < orig, e.g. 1920x1080 originals while VGGT/DA3 ran at 688x384). In the
-    # second case the old "px > orig" check never fired, so the mask scale stayed
-    # ~1.0 (should be ~2.8) and every point mapped into a corner → 0% coverage.
-    # For a full-scene cloud the projected points span the whole image, so
-    # (px_h, px_w) IS the projection resolution. Anchor to it whenever it
-    # disagrees with orig but shares the mask's aspect ratio (the aspect check
-    # rules out transposed / partial-frame false positives).
-    proj_ar = px_w / max(px_h, 1.0)
-    mask_ar = float(scaled_res[1]) / max(float(scaled_res[0]), 1.0)
-    disagrees = (abs(px_h - orig_h) > 2.0) or (abs(px_w - orig_w) > 2.0)
-    if disagrees and abs(proj_ar - mask_ar) < 0.10:
-        print(f"[SegPipeline]   ⚠️ Detected orig {orig_w:.0f}x{orig_h:.0f} ≠ projection "
-              f"{px_w:.0f}x{px_h:.0f} (cloud traced at the backend resolution; frames/masks "
-              f"saved at another) — using projection resolution for mask scaling")
-        orig_h, orig_w = px_h, px_w
-    elif px_h > orig_h or px_w > orig_w:
-        print(f"[SegPipeline]   ⚠️ Detected orig {orig_w:.0f}x{orig_h:.0f} is smaller than the "
-              f"pixel-coord extent {px_w:.0f}x{px_h:.0f} (frames saved at a different resolution "
-              f"than the projection); using projection resolution from pixel coords")
-        orig_h = max(orig_h, px_h)
-        orig_w = max(orig_w, px_w)
-
-    mask_h_ref, mask_w_ref = scaled_res[0], scaled_res[1]
-    print(f"[SegPipeline]   Original resolution: {orig_w:.0f}x{orig_h:.0f}, mask: {mask_h_ref}x{mask_w_ref}")
-    print(f"[SegPipeline]   Scale factors: row={mask_h_ref/orig_h:.4f}, col={mask_w_ref/orig_w:.4f}")
-    
     # A LONG STAGE MUST SAY WHERE IT IS (USER 2026-09-22: *"etapas largas mudas
     # se puede y se debe solucionar ahora porque voy a lanzar desde ui y sino no
     # voy a recibir nada por mucho tiempo"*). This loop projects every masklet
     # over the whole cloud and printed nothing until it finished — 10 minutes of
     # silence on pccr, indistinguishable from a hang.
     _t_match = _time.time()
-    _n_obj = len(obj_ids) if only_obj_ids is None else len(
-        [o for o in obj_ids if o in only_obj_ids])
+    _n_obj = len(obj_ids)
     _step = max(1, _n_obj // 20)          # ~20 lines, whatever the session size
     _done = 0
-    for i, obj_id in enumerate(obj_ids):
-        # Skip obj_ids not in the incremental set
-        if only_obj_ids is not None and obj_id not in only_obj_ids:
-            continue
+    for obj_id in obj_ids:
         _done += 1
         if _done == 1 or _done % _step == 0 or _done == _n_obj:
             _el = _time.time() - _t_match
@@ -2914,18 +3509,21 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                   flush=True)
         # Compute average mask area for this object (across all frames)
         frame_areas = []
-        
-        for cloud_frame, pt_indices in frame_groups.items():
+
+        for cloud_frame in sorted(frame_groups):
+            pt_indices = frame_groups[cloud_frame]
             # EXACT MATCH ONLY: if SAM3 didn't generate a mask for this exact frame, skip these points.
-            # No fuzzy "nearest frame" matching, because that maps background points from unsegmented frames 
+            # No fuzzy "nearest frame" matching, because that maps background points from unsegmented frames
             # to masks from completely different timestamps.
-            mask_frame = cloud_to_mask.get(cloud_frame, cloud_frame)
-            mask_key = f"f{mask_frame}_o{obj_id}"
-            if mask_key not in masks_data:
+            mask_key = f"f{mask_frame_of[cloud_frame]}_o{obj_id}"
+            if mask_key not in mask_keys:
                 continue
-            
+
             mask = masks_data[mask_key].astype(np.uint8)
-            
+            if mask.shape[0] != mask_h_ref or mask.shape[1] != mask_w_ref:
+                raise RuntimeError(f"mask {mask_key} is {mask.shape[0]}x{mask.shape[1]} and the store "
+                                   f"declares {mask_h_ref}x{mask_w_ref} — one store, one grid")
+
             # ── Erosion: shrink mask edges for tighter boundaries ──
             # Adaptive: skip/reduce erosion for small masks to avoid eliminating them
             raw_area = float(np.sum(mask > 0))
@@ -2939,36 +3537,66 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                 # Large object — full erosion
                 mask = cv2.erode(mask, erosion_kernel, iterations=erosion_iterations)
             mask = mask.astype(bool)
-            
+
             mask_area = float(np.sum(mask))
             if mask_area == 0:
                 continue
             frame_areas.append(mask_area)
-            
-            # Look up each point's pixel in the eroded mask
-            # pixel_row/pixel_col are in ORIGINAL resolution,
-            # masks are at scaled_res — must rescale before lookup
-            mask_h, mask_w = mask.shape[:2]
-            orig_rows = pixel_row[pt_indices].astype(np.float32)
-            orig_cols = pixel_col[pt_indices].astype(np.float32)
-            scaled_rows = (orig_rows * (mask_h / orig_h)).astype(np.int32)
-            scaled_cols = (orig_cols * (mask_w / orig_w)).astype(np.int32)
-            rows = np.clip(scaled_rows, 0, mask_h - 1)
-            cols = np.clip(scaled_cols, 0, mask_w - 1)
-            in_mask = mask[rows, cols]
-            
+            areas_by_oid_frame.setdefault(int(obj_id), {})[int(cloud_frame)] = mask_area
+
+            # Look up each point's pixel in the (eroded) mask through the exact grid maps
+            r = rows_m[pt_indices]
+            c = cols_m[pt_indices]
+            ok = (r >= 0) & (c >= 0)
+            in_mask = np.zeros(len(pt_indices), bool)
+            in_mask[ok] = mask[r[ok], c[ok]]
+
             matched = pt_indices[in_mask]
-            
+
             # ── Deconfliction: assign point to smallest-mask object ──
-            # Vectorized: only update points where this mask_area is smaller
-            wins = mask_area < point_mask_area[matched]
+            # Vectorized: only update points where this mask_area is smaller;
+            # the previous winner becomes the runner-up, a loser that beats the
+            # runner-up replaces it (the near-tie count reads both)
+            cur = point_mask_area[matched]
+            wins = mask_area < cur
             winning_pts = matched[wins]
+            second_obj_id[winning_pts] = point_obj_id[winning_pts]
+            second_area[winning_pts] = cur[wins]
             point_obj_id[winning_pts] = obj_id
             point_mask_area[winning_pts] = mask_area
-        
+            losing = matched[~wins]
+            better_second = mask_area < second_area[losing]
+            second_obj_id[losing[better_second]] = obj_id
+            second_area[losing[better_second]] = mask_area
+
         avg_area = np.mean(frame_areas) if frame_areas else 0
         obj_mask_areas[obj_id] = avg_area
-    
+
+    # the NEAR-TIES of the smaller-area rule (point 117): contested points whose two
+    # smallest areas differ by less than error_factor x the measured frame-to-frame
+    # variation of those masks' areas — counted and declared, the rule unchanged
+    area_var = _area_variation_by_oid(areas_by_oid_frame)
+    contested = np.flatnonzero(np.isfinite(second_area))
+    if len(contested):
+        var_best = np.asarray([area_var.get(int(o), 0.0) for o in point_obj_id[contested]])
+        var_second = np.asarray([area_var.get(int(o), 0.0) for o in second_obj_id[contested]])
+        gap = second_area[contested] - point_mask_area[contested]
+        near = gap < error_factor * np.maximum(var_best, var_second)
+        n_near = int(near.sum())
+        exact = int((gap == 0).sum())
+    else:
+        n_near, exact = 0, 0
+    decisions["mask_area_near_ties"] = {
+        "rule": "a point inside two masks goes to the smaller area (tie: the lower id) — kept; "
+                "near-ties = gap < error_factor x the masks' measured frame-to-frame area variation",
+        "n_points_contested": int(len(contested)), "n_points_near_tie": n_near,
+        "n_points_exact_tie": exact,
+        "area_variation_median_px": float(np.median(list(area_var.values()))) if area_var else 0.0}
+    if n_near:
+        print(f"[SegPipeline]   ⚖ {n_near:,} of {len(contested):,} contested point(s) sit within the "
+              f"masks' own area variation of the smaller-area rule — declared, rule unchanged")
+    del second_area, second_obj_id
+
     # ── Phase 2: Build instances by merging obj_ids with the same instance_id ──
     # Each logical object may have multiple obj_ids (one per batch), merge them.
     # Skip orphaned obj_ids that have no metadata in segmentation.json (deleted).
@@ -2981,7 +3609,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
             continue
         iid = meta.get("instance_id", obj_id)
         instance_groups[iid].append(obj_id)
-    
+
     instances = []
     total_segmented = 0
     # Where every mask of segmentation.json ended up. Without this the list
@@ -2991,25 +3619,20 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     # "aparecen muchisimos en cero ... deben ser los que despues se
     # fusionaron, pero quedaron en cero y siguen apareciendo en la lista").
     absorbed_into: Dict[int, dict] = {}
-    
+
     # ── AUDIT of the cloud against the masks (USER 2026-09-15) ──────────────
     # "no hay nada que cortar, es la auditoría de tu propia nube contra el
     # ground truth de la máscara". It MEASURES where each instance's mass falls
     # relative to its mask and removes nothing — the numbers travel to whoever
-    # corrects the geometry.
+    # corrects the geometry. A configured audit that cannot be built FAILS the
+    # projection (point 122) — it used to be skipped.
     mask_filter = None
     mf_cfg = (cfg.get("segmentation", {}) or {}).get("mask_filter", {}) or {}
     if mf_cfg.get("enabled"):
-        try:
-            from segmentation.mask_filter import MaskAudit
-            mask_filter = MaskAudit(output_dir, Path(output_dir).parent, mf_cfg,
-                                    cloud_to_mask=cloud_to_mask,
-                                    log=lambda m: print(f"[SegPipeline] {m}"))
-            if not mask_filter.ok:
-                mask_filter = None
-        except Exception as e:  # noqa: BLE001 — declared, the run continues
-            print(f"[SegPipeline] ⚠️ mask audit unavailable: {e}")
-            mask_filter = None
+        from segmentation.mask_filter import MaskAudit
+        mask_filter = MaskAudit(output_dir, Path(output_dir).parent, mf_cfg,
+                                cloud_to_mask=cloud_to_mask,
+                                log=lambda m: print(f"[SegPipeline] {m}"))
 
     # Marked, never removed. A point landing off its own mask in any view that
     # sees it is in the wrong PLACE; the certification may still move it there,
@@ -3019,6 +3642,8 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     # sacar" — the sacar is the SECOND pass, at the tail of the certification,
     # reading this file.
     out_of_place = np.zeros(n_pts, bool)
+    judged_views = np.zeros(n_pts, np.uint16)           # point 119: the views that judged each point
+    off_views = np.zeros(n_pts, np.uint16)              # and the ones that left it outside
 
     # The ShapeR description every instance inherits from its CONCEPT (USER 2026-10-01:
     # the VLM pass that named the SAM3 prompts also described each kind —
@@ -3027,7 +3652,8 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     from segmentation.object_captioner import concept_caption_lookup
     _concept_caption = concept_caption_lookup(output_dir)
 
-    for iid, group_obj_ids in instance_groups.items():
+    for iid in sorted(instance_groups):
+        group_obj_ids = instance_groups[iid]
         # Merge all points assigned to any obj_id in this instance group
         all_matched = np.where(np.isin(point_obj_id, group_obj_ids))[0].astype(np.int64)
 
@@ -3039,29 +3665,27 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
             _o = _a.get("out_of_place")
             if _o is not None and len(_o) == len(all_matched):
                 out_of_place[all_matched[_o]] = True
+                judged_views[all_matched] = np.minimum(_a["judged_views"], 65535).astype(np.uint16)
+                off_views[all_matched] = np.minimum(_a["off_views"], 65535).astype(np.uint16)
 
         # ── Per-instance DBSCAN outlier removal ──
-        # Skip if already filtered in a previous incremental run
         pre_filter_count = len(all_matched)
         voxel_mesh_data = []
         face_normals_data = []
         face_planes_data = []
         face_id_data = np.array([], dtype=np.int32)
-        if skip_filter_ids and iid in skip_filter_ids:
-            # Reuse cached filtered indices (already cleaned)
-            pass  # all_matched stays as-is from mask matching
-        elif pre_filter_count >= 20:
+        if pre_filter_count >= 20:
             all_matched, voxel_mesh_data, face_normals_data, face_planes_data, face_id_data = _clean_segment_subcloud(
                 xyz_display, all_matched, iid
             )
-        
+
         total_segmented += len(all_matched)
-        
+
         # Look up label/color from the first obj_id's metadata
         meta_inst = instance_meta.get(group_obj_ids[0], {})
         label = meta_inst.get("label", "object")
         color = meta_inst.get("color", colors[len(instances) % len(colors)])
-        
+
         # Build instance data
         instance = {
             "id": int(iid),
@@ -3082,31 +3706,22 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                 "count": len(voxel_mesh_data),
                 "data": voxel_mesh_data,  # [[cx,cy,cz,nx,ny,nz], ...]
             }
-        
+
         # Compute OBB from snapped voxel centroids (corrected geometry)
         if voxel_mesh_data and len(voxel_mesh_data) >= 4:
             voxel_centers = np.array([[v[0], v[1], v[2]] for v in voxel_mesh_data])
             instance["obb"] = _compute_obb(voxel_centers, face_normals=face_normals_data)
         elif len(all_matched) >= 4:
             instance["obb"] = _compute_obb(xyz_display[all_matched], face_normals=face_normals_data)
-        
-        # Store face projection data for point correction
-        if face_planes_data and len(face_id_data) > 0:
-            instance["_face_planes"] = face_planes_data
-            instance["_face_id"] = face_id_data
-        
+
         instances.append(instance)
         removed = pre_filter_count - len(all_matched)
         filter_info = f" (filtered {removed} outliers)" if removed > 0 else ""
         print(f"[SegPipeline]   Object '{label}' #{iid}: "
               f"{len(all_matched):,} points{filter_info}")
-    
+
     # ── Instance post-processing config ────────────────────────────────
-    try:
-        from config import cfg as _seg_global_cfg
-        _dd = (_seg_global_cfg.get("segmentation", {}) or {})
-    except Exception:
-        _dd = {}
+    _dd = (cfg.get("segmentation", {}) or {})
     _merge_on = bool(_dd.get("merge_duplicates", False))
 
     # ── Phase 3: Cross-category Re-ID — merge instances with high 3D overlap ──
@@ -3115,25 +3730,28 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     # The test is MUTUAL (segmentation.dedupe_mutual): both instances must be
     # mostly the intersection. `intersection / smaller` alone is CONTAINMENT and
     # lets a large instance absorb anything lying inside it.
+    # (Phase 1 gives every point ONE obj id and instances are groups of obj ids, so
+    # instance index sets are disjoint and this merge cannot fire — kept as the
+    # recipe's step; the space dedupe below is the one that decides.)
     if _merge_on and len(instances) > 1:
         merge_threshold = float(_dd.get("dedupe_overlap", 0.8))
         _mutual_idx = bool(_dd.get("dedupe_mutual", True))
         merged_away = set()  # indices of instances absorbed by others
-        
+
         for i in range(len(instances)):
             if i in merged_away:
                 continue
             set_i = set(instances[i]["globalIndices"])
-            
+
             for j in range(i + 1, len(instances)):
                 if j in merged_away:
                     continue
                 set_j = set(instances[j]["globalIndices"])
-                
+
                 intersection = len(set_i & set_j)
                 if intersection == 0:
                     continue
-                
+
                 overlap_ratio = intersection / min(len(set_i), len(set_j))
                 if _mutual_idx:
                     overlap_ratio = intersection / max(len(set_i), len(set_j))
@@ -3163,7 +3781,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                               f"into '{instances[j]['label']}' #{instances[j]['id']} "
                               f"(overlap={overlap_ratio:.0%})")
                         break  # i is merged away, stop inner loop
-        
+
         if merged_away:
             pre_merge = len(instances)
             instances = [inst for idx, inst in enumerate(instances) if idx not in merged_away]
@@ -3197,28 +3815,42 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         print("[SegPipeline]   Instance merging DISABLED "
               "(segmentation.merge_duplicates: false) — instances kept distinct")
 
+    dedupe_decisions: list = []
     if _merge_on and len(instances) > 1 and _vox > 0:
-        vox_sets = []
+        # per instance: its voxels (world-anchored, packed) and, per keyframe that
+        # saw it, the voxels of the points born in that keyframe — the JUDGES of
+        # point 104 are the keyframes that saw BOTH instances
+        vox_all: List[np.ndarray] = []
+        vox_by_kf: List[Dict[int, np.ndarray]] = []
         for inst in instances:
             idxs = np.asarray(inst["globalIndices"], dtype=np.int64)
             if len(idxs) == 0:
-                vox_sets.append(set())
+                vox_all.append(np.zeros(0, np.int64))
+                vox_by_kf.append({})
                 continue
-            v = np.floor(xyz_display[idxs] / _vox).astype(np.int64)
-            vox_sets.append(set(map(tuple, v)))
+            keys = _pack_voxels(np.floor(xyz_display[idxs] / _vox).astype(np.int64))
+            vox_all.append(np.unique(keys))
+            fr = frame_arr[idxs]
+            per = {}
+            order = np.argsort(fr, kind="stable")
+            fs, starts = np.unique(fr[order], return_index=True)
+            ends = np.r_[starts[1:], len(order)]
+            for f_, s_, e_ in zip(fs.tolist(), starts, ends):
+                per[int(f_)] = np.unique(keys[order[s_:e_]])
+            vox_by_kf.append(per)
         absorbed = set()
-        order = sorted(range(len(instances)), key=lambda k: -len(vox_sets[k]))
+        order = sorted(range(len(instances)), key=lambda k: (-len(vox_all[k]), k))
         for a_pos, i in enumerate(order):
-            if i in absorbed or not vox_sets[i]:
+            if i in absorbed or not len(vox_all[i]):
                 continue
             for j in order[a_pos + 1:]:
-                if j in absorbed or not vox_sets[j]:
+                if j in absorbed or not len(vox_all[j]):
                     continue
-                inter = len(vox_sets[i] & vox_sets[j])
+                inter = int(np.isin(vox_all[j], vox_all[i], assume_unique=True).sum())
                 if not inter:
                     continue
-                share_i = inter / len(vox_sets[i])
-                share_j = inter / len(vox_sets[j])
+                share_i = inter / len(vox_all[i])
+                share_j = inter / len(vox_all[j])
                 # IDENTITY, not containment (USER 2026-09-14: "que ambas
                 # instancias compartan mas del 80% de los puntos"). Dividing
                 # only by the smaller asks "is B inside A", which every sign
@@ -3226,13 +3858,40 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                 # instances to 3. Asking BOTH to be mostly the intersection
                 # separates "the same object under two names" from "one object
                 # standing on another".
-                if (min(share_i, share_j) if _mutual else share_j) >= _dup_thr:
+                # THE JUDGES (point 104, DECIDIDO): every keyframe that saw both —
+                # its share of j's voxels inside i's space (and of i's inside j's,
+                # the mutual test) — must exceed the user's bar significantly, with
+                # >= min_judges judges, by >= error_factor x the judges' measured
+                # spread; otherwise the two stay distinct and the margin is recorded
+                common_kf = sorted(set(vox_by_kf[i]) & set(vox_by_kf[j]))
+                judges = []
+                for f_ in common_kf:
+                    vi_f, vj_f = vox_by_kf[i][f_], vox_by_kf[j][f_]
+                    sj = float(np.isin(vj_f, vox_all[i], assume_unique=True).sum()) / len(vj_f)
+                    si = float(np.isin(vi_f, vox_all[j], assume_unique=True).sum()) / len(vi_f)
+                    judges.append(min(si, sj) if _mutual else sj)
+                d = _decide_above_bar(judges, _dup_thr, _robust_sigma(judges), factor=error_factor,
+                                      confidence=confidence, min_judges=min_judges)
+                dedupe_decisions.append({
+                    "kind": "space_dedupe", "instance_ids": [
+                        int(instances[i].get("instance_id", instances[i]["id"])),
+                        int(instances[j].get("instance_id", instances[j]["id"]))],
+                    "share": round(float(share_j), 3), "share_other": round(float(share_i), 3),
+                    "n_judges": int(d["n_judges"]),
+                    "median_judge_share": float(d["median_delta"] + _dup_thr),
+                    "ci_margin": d["ci_margin"], "judges_margin": d["judges_margin"],
+                    "error_margin": d["error_margin"], "merged": bool(d["improves"]),
+                    "reason": d["reason"]})
+                if d["improves"]:
                     # j is the same physical object as i → absorb
                     merged_idx = sorted(set(instances[i]["globalIndices"])
                                         | set(instances[j]["globalIndices"]))
                     instances[i]["globalIndices"] = merged_idx
                     instances[i]["total_points"] = len(merged_idx)
-                    vox_sets[i] |= vox_sets[j]
+                    vox_all[i] = np.union1d(vox_all[i], vox_all[j])
+                    for f_, v_ in vox_by_kf[j].items():
+                        vox_by_kf[i][f_] = (np.union1d(vox_by_kf[i][f_], v_)
+                                            if f_ in vox_by_kf[i] else v_)
                     absorbed.add(j)
                     absorbed_into[int(instances[j].get("instance_id", instances[j]["id"]))] = {
                         "into": int(instances[i].get("instance_id", instances[i]["id"])),
@@ -3240,12 +3899,18 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                         "reason": "space_dedupe",
                         "share": round(float(share_j), 3),
                         "share_other": round(float(share_i), 3),
+                        "n_judges": int(d["n_judges"]),
+                        "error_margin": d["error_margin"],
                     }
                     print(f"[SegPipeline]   🔗 Space-dedupe: '{instances[j]['label']}' "
                           f"#{instances[j]['id']} is the same object as "
                           f"'{instances[i]['label']}' #{instances[i]['id']} "
                           f"(they share {share_j:.0%} / {share_i:.0%} of their "
-                          f"space) — merged")
+                          f"space; {d['n_judges']} keyframes judge, {d['reason']}) — merged")
+                else:
+                    print(f"[SegPipeline]   ↔ Space-dedupe: '{instances[j]['label']}' "
+                          f"#{instances[j]['id']} vs '{instances[i]['label']}' #{instances[i]['id']} "
+                          f"share {share_j:.0%} / {share_i:.0%} — kept distinct ({d['reason']})")
         if absorbed:
             pre = len(instances)
             instances = [inst for k, inst in enumerate(instances) if k not in absorbed]
@@ -3254,6 +3919,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                 if len(m) >= 4:
                     inst["obb"] = _compute_obb(xyz_display[m])
             print(f"[SegPipeline]   Space-dedupe: {pre} → {len(instances)} instances")
+    decisions["space_dedupe"] = dedupe_decisions
 
     # ── Same-label fragment consolidation ──────────────────────────────
     # SAM3 returns one mask per visually separable region, so one physical
@@ -3263,44 +3929,56 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     # starts from consolidated surfaces instead of 48 competing fragments.
     _frag_on = bool(_dd.get("merge_label_fragments", True))
     _frag_gap = float(_dd.get("fragment_gap_m", 0.10))
+    frag_decisions: list = []
     if _frag_on and len(instances) > 1:
-        try:
-            pre = len(instances)
-            n_abs = _merge_label_fragments(instances, xyz_display, gap_m=_frag_gap,
-                                           record=absorbed_into)
-            if n_abs:
-                for inst in instances:
-                    m = np.asarray(inst["globalIndices"], dtype=np.int64)
-                    if len(m) >= 4:
-                        inst["obb"] = _compute_obb(xyz_display[m])
-                print(f"[SegPipeline]   🧩 Fragment consolidation: {pre} → "
-                      f"{len(instances)} instances (same label, contiguous "
-                      f"within {_frag_gap*100:.0f} cm)")
-        except Exception as e:
-            print(f"[SegPipeline] fragment consolidation failed (non-fatal): {e}")
+        pre = len(instances)
+        n_abs = _merge_label_fragments(instances, xyz_display, gap_m=_frag_gap,
+                                       record=absorbed_into, min_adjacent_pairs=min_judges,
+                                       decisions=frag_decisions)
+        if n_abs:
+            for inst in instances:
+                m = np.asarray(inst["globalIndices"], dtype=np.int64)
+                if len(m) >= 4:
+                    inst["obb"] = _compute_obb(xyz_display[m])
+            print(f"[SegPipeline]   🧩 Fragment consolidation: {pre} → "
+                  f"{len(instances)} instances (same label, contiguous "
+                  f"within {_frag_gap*100:.0f} cm through >= {min_judges} adjacent voxel pairs)")
+    decisions["fragments"] = frag_decisions
 
     # ── One instance, several objects seen together → split (USER 2026-09-30) ──
+    split_decisions: list = []
     if bool(_dd.get("split_covisible", True)) and instances:
-        from config import cfg as _cfg_all
-        _mp = int(_cfg_all["correction"]["visit_drift"]["min_points"])
+        _mp = int(cfg["correction"]["visit_drift"]["min_points"])
         _cc = None
-        try:                                                  # camera centres, display frame
-            _P = np.loadtxt(output_dir / "camera_poses.txt").reshape(-1, 4, 4)
-            _F = [int(float(x)) for x in (output_dir / "camera_frames.txt").read_text().split()]
-            if len(_F) == len(_P):
-                _C = s * (_P[:, :3, 3] @ R.T) + t
-                _cc = {f: _C[k] for k, f in enumerate(_F)}
-        except Exception as _e:                               # noqa: BLE001 — declared: no split
-            print(f"[SegPipeline]   ✂ co-visible split: no camera centres ({_e}) — nothing split")
+        # camera centres, display frame — the poses of the live epoch keyed by
+        # camera_frames.txt; a session without them splits nothing, declared
+        _poses_p, _frames_p = output_dir / "camera_poses.txt", output_dir / "camera_frames.txt"
+        if _poses_p.exists() and _frames_p.exists():
+            _P = np.loadtxt(_poses_p).reshape(-1, 4, 4)
+            _F = [int(float(x)) for x in _frames_p.read_text().split()]
+            if len(_F) != len(_P):
+                raise RuntimeError(f"camera_frames.txt lists {len(_F)} keyframes and camera_poses.txt "
+                                   f"holds {len(_P)} poses — they are not one list")
+            _C = s * (_P[:, :3, 3] @ R.T) + t
+            _cc = {f: _C[k] for k, f in enumerate(_F)}
+        else:
+            print("[SegPipeline]   ✂ co-visible split: no camera poses / keyframe list — nothing split")
+        # the raw store's highest id: the base the children's ids count from (point 105)
+        _id_base = max([int(i.get("id", 0)) for i in (metadata.get("instances") or [])]
+                       + [int(metadata.get("id_high_water") or 0)])
         n_split = _split_covisible_components(instances, xyz_display, frame_arr, gap_m=_frag_gap,
                                               min_points=_mp, covis_share=_dup_thr, cam_centre=_cc,
-                                              min_walk_m=float(_cfg_all["correction"]["visit_drift"]["min_walk_m"]))
+                                              min_walk_m=float(cfg["correction"]["visit_drift"]["min_walk_m"]),
+                                              id_base=_id_base,
+                                              decision=(error_factor, confidence, min_judges),
+                                              record=split_decisions)
         if n_split:
             for inst in instances:
                 m = np.asarray(inst["globalIndices"], dtype=np.int64)
                 if len(m) >= 4:
                     inst["obb"] = _compute_obb(xyz_display[m])
             print(f"[SegPipeline]   ✂ Co-visible split: +{n_split} instance(s)")
+    decisions["covisible_split"] = split_decisions
 
     # ── Geometric completion — "pegar los puntos al lugar correcto" (USER
     # 2026-08-29): SAM3 runs on the KEYFRAMES and the mask→cloud step only
@@ -3315,33 +3993,27 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     _att_rounds = int(_dd.get("attach_rounds", 4))
     _att_votes = int(_dd.get("attach_votes", 3))
     if _att_on and instances:
-        try:
-            n_att, grown = _attach_unsegmented(instances, xyz_display,
-                                               attach_dist_m=_att_d,
-                                               rounds=_att_rounds, votes=_att_votes)
-            for k in grown:   # OBBs must include the attached points
-                m = np.asarray(instances[k]["globalIndices"], dtype=np.int64)
-                if len(m) >= 4:
-                    instances[k]["obb"] = _compute_obb(xyz_display[m])
-            if n_att:
-                print(f"[SegPipeline]   📎 attach: {n_att:,} unsegmented points "
-                      f"glued to their surfaces ({_att_rounds} round(s) of "
-                      f"≤{_att_d*100:.0f} cm, {_att_votes}-neighbour vote)")
-        except Exception as e:
-            print(f"[SegPipeline] attach step failed (non-fatal): {e}")
+        n_att, grown = _attach_unsegmented(instances, xyz_display,
+                                           attach_dist_m=_att_d,
+                                           rounds=_att_rounds, votes=_att_votes)
+        for k in grown:   # OBBs must include the attached points
+            m = np.asarray(instances[k]["globalIndices"], dtype=np.int64)
+            if len(m) >= 4:
+                instances[k]["obb"] = _compute_obb(xyz_display[m])
+        if n_att:
+            print(f"[SegPipeline]   📎 attach: {n_att:,} unsegmented points "
+                  f"glued to their surfaces ({_att_rounds} round(s) of "
+                  f"≤{_att_d*100:.0f} cm, {_att_votes}-neighbour vote)")
 
     # ── EXCLUSIVITY INVARIANT (USER 2026-08-31): every point belongs to ONE
     # instance or none — never two. Masks can claim the same points for
     # different segments; merges/attach/incremental unions could double-own.
     # Conflicts resolve to the SMALLEST instance (a point on a small object
     # belongs to the object, not the big surface behind it) and are reported.
-    try:
-        _n_dup = _enforce_exclusive_ownership(instances, n_pts)
-        if _n_dup:
-            print(f"[SegPipeline]   ⚠ exclusivity enforced: {_n_dup:,} "
-                  f"double-owned point(s) resolved")
-    except Exception as e:
-        print(f"[SegPipeline] exclusivity enforcement failed (non-fatal): {e}")
+    _n_dup = _enforce_exclusive_ownership(instances, n_pts)
+    if _n_dup:
+        print(f"[SegPipeline]   ⚠ exclusivity enforced: {_n_dup:,} "
+              f"double-owned point(s) resolved")
 
     # ── Minimum object size — judged on the FINAL point count ────────────
     # It used to run before the attach, when it was a sliver filter reading a
@@ -3350,7 +4022,8 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
     # object ends up being: the attach glues on the points the keyframe masks
     # never reached, and exclusivity can take some back. A piece that grows
     # into a real surface is a real surface; one that does not is a sliver
-    # either way.
+    # either way. The USER's 1000 stays a strict count (point 116, DECIDIDO);
+    # every object records its margin to the bar.
     if _min_pts > 0:
         _sz = {id(i): int(len(i.get("globalIndices") or ())) for i in instances}
         tiny = [inst for inst in instances if _sz[id(inst)] < _min_pts]
@@ -3363,54 +4036,47 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
                 absorbed_into[int(t.get("instance_id", t["id"]))] = {
                     "into": None, "into_label": None, "reason": "too_small",
                     "label": t.get("label"),
-                    "points": _sz[id(t)], "min_points": int(_min_pts)}
+                    "points": _sz[id(t)], "min_points": int(_min_pts),
+                    "margin": int(_sz[id(t)] - _min_pts)}
             instances = [inst for inst in instances if _sz[id(inst)] >= _min_pts]
+        for inst in instances:
+            inst["min_points_margin"] = int(len(inst.get("globalIndices") or ()) - _min_pts)
 
     # ── Canonical instance store (scene_r.db) — THE single source of objects
     # for spatial Q&A (phase5), classification (phase2), findings (phase3) and
     # reports (phase6). Rebuilt from scratch on every segmentation, straight
     # from the CLEAN instances: points/OBBs in the DISPLAY frame (the exact
     # geometry the viewer renders and the user measures against).
-    try:
-        _write_instance_store(output_dir, instances, xyz_display)
-    except Exception as e:
-        print(f"[SegPipeline] instance store build failed (non-fatal): {e}")
+    _write_instance_store(output_dir, instances, xyz_display)
 
     if mask_filter is not None:
         # The MARKS first, in their own block. They are the first moment of the
-        # geometric cleanup cycle and the second moment cannot run without them,
-        # while the report is only a report — on 2026-09-15 the report raised on
-        # an ndarray, the shared try swallowed it as non-fatal, and pccr lost
-        # out_of_place.npy along with the whole second moment.
-        try:
-            np.save(output_dir / "out_of_place.npy", out_of_place)
-            print(f"[SegPipeline]    {int(out_of_place.sum()):,} point(s) marked out of "
-                  f"place (off their own mask in a view that sees them) — "
-                  f"kept, for the correction to move")
-        except Exception as e:  # noqa: BLE001
-            print(f"[SegPipeline] ⚠ out_of_place.npy NOT saved ({e}) — the "
-                  f"geometric cleanup will have nothing to re-measure")
-        try:
-            rep = mask_filter.report()
-            try:    # every derived artifact carries the geometry epoch it was
-                from correction.epoch import stamp   # measured on
-                stamp(rep, output_dir)
-            except Exception:  # noqa: BLE001 — a session with no epoch machinery
-                pass
-            rep["points_out_of_place"] = int(out_of_place.sum())
-            atomic_write_json(output_dir / "mask_audit.json", rep, indent=1)
-            byv = rep.get("instances_by_verdict") or {}
-            frac = rep.get("on_mask_fraction")
-            print(f"[SegPipeline] 🔍 mask audit: "
-                  + (f"{frac*100:.1f}% of the observations land on their mask; "
-                     if frac is not None else "")
-                  + ", ".join(f"{len(v)} {k}" for k, v in sorted(byv.items()))
-                  + f" (of {rep['instances']} instances) — nothing removed")
-            for k in ("drift_duplicate", "unsupported"):
-                if byv.get(k):
-                    print(f"[SegPipeline]    {k}: instances {byv[k]}")
-        except Exception as e:  # noqa: BLE001 — the report is not the run
-            print(f"[SegPipeline] mask audit report failed (non-fatal): {e}")
+        # geometric cleanup cycle and the second moment cannot run without them.
+        np.save(output_dir / "out_of_place.npy", out_of_place)
+        write_npz_canonical(output_dir / OUT_OF_PLACE_VIEWS_NAME,
+                            {"judged_views": judged_views, "off_views": off_views})
+        print(f"[SegPipeline]    {int(out_of_place.sum()):,} point(s) marked out of "
+              f"place (off their own mask in a view that sees them) — "
+              f"kept, for the correction to move")
+        rep = mask_filter.report()
+        # every derived artifact carries the reconstruction it was measured on (point 118:
+        # the identity of the reconstruction, not the epoch counter)
+        from correction.epoch import RECONSTRUCTION_ID_KEY, reconstruction_id_or_none
+        rep[RECONSTRUCTION_ID_KEY] = reconstruction_id_or_none(output_dir)
+        rep["points_out_of_place"] = int(out_of_place.sum())
+        rep["points_out_of_place_by_one_view"] = int((out_of_place & (off_views == 1)).sum())
+        rep["views_file"] = OUT_OF_PLACE_VIEWS_NAME
+        atomic_write_json(output_dir / "mask_audit.json", rep, indent=1)
+        byv = rep.get("instances_by_verdict") or {}
+        frac = rep.get("on_mask_fraction")
+        print(f"[SegPipeline] 🔍 mask audit: "
+              + (f"{frac*100:.1f}% of the observations land on their mask; "
+                 if frac is not None else "")
+              + ", ".join(f"{len(v)} {k}" for k, v in sorted(byv.items()))
+              + f" (of {rep['instances']} instances) — nothing removed")
+        for k in ("drift_duplicate", "unsupported"):
+            if byv.get(k):
+                print(f"[SegPipeline]    {k}: instances {byv[k]}")
 
     total_segmented = sum(inst["total_points"] for inst in instances)
     coverage = round(total_segmented / max(1, n_pts), 4)
@@ -3432,6 +4098,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
         # used to render as a zero-point row (USER 2026-09-17).
         "absorbed": {str(k): v for k, v in _mask_fates(metadata, instances,
                                                        absorbed_into).items()},
+        "decisions": decisions,
     }
     _fates = result["absorbed"]
     if _fates:
@@ -3442,112 +4109,48 @@ def _match_masks_to_cloud(output_dir, ply_path=None, skip_filter_ids=None, only_
 
     print(f"[SegPipeline] ✅ {len(instances)} instances matched against {cloud_label}, "
           f"{total_segmented:,}/{n_pts:,} points ({coverage*100:.1f}% coverage)")
-    
-    # ── Phase 4: Project assigned points to face planes → corrected cloud ──
-    # Project in display space (where face planes live), then convert back
-    # to raw space for PLY output. Potree re-applies floorTransform on load.
-    n_projected = 0
-    # In incremental mode, start from corrected_cloud to preserve previous projections
-    corrected_path = output_dir / "corrected_cloud.ply"
-    if only_obj_ids is not None and corrected_path.exists():
-        prev_origins = _load_ply_origins(corrected_path)
-        if prev_origins is not None and len(prev_origins[0]) == len(xyz):
-            xyz_corrected = prev_origins[0].copy()
-        else:
-            xyz_corrected = xyz.copy()
-    else:
-        xyz_corrected = xyz.copy()  # RAW space
-    # Load existing classification to preserve previous objects in incremental mode
-    class_path = output_dir / "classification.npy"
-    prev_map = None
-    if class_path.exists() and only_obj_ids is not None:
-        classification = np.load(class_path)
-        if len(classification) != len(xyz):
-            classification = np.zeros(len(xyz), dtype=np.uint8)
-        else:
-            _pm = output_dir / "class_map.json"
-            prev_map = json.loads(_pm.read_text()) if _pm.exists() else {}
-    else:
-        classification = np.zeros(len(xyz), dtype=np.uint8)
-    classification, class_code, class_map = _encode_classification(instances, classification, prev_map)
 
-    for inst in instances:
-        face_planes = inst.pop("_face_planes", None)
-        face_id = inst.pop("_face_id", None)
+    # ── The per-point siblings of the cloud: the class byte + the 16-bit instance id
+    # (ONE writer, segmentation.republish.write_classification — point 107)
+    from repro import sha256_file
+    from segmentation.republish import CLASSIFICATION, INSTANCE_IDS, write_classification
+    write_classification(output_dir, instances, n_pts)
 
-        # SIEMPRE asignar la clasificación del objeto (aunque no tenga caras planas)
-        global_indices = np.array(inst["globalIndices"], dtype=np.int64)
-        classification[global_indices] = class_code.get(_instance_id(inst), 0)
+    # ── THE STAMP of this result (point 123): every input, the code, the configuration
+    result["stamp"] = projection_stamp(output_dir, ply_path, cfg, cfg_source)
 
-        # Si no hay caras planas, saltamos la corrección geométrica (proyección)
-        if face_planes is None or face_id is None or len(face_id) == 0:
-            continue
-        
-        pts_display = xyz_display[global_indices].copy()
-        
-        for fi, (fn, fd) in enumerate(face_planes):
-            mask = face_id == fi
-            n_mask = int(np.sum(mask))
-            if n_mask == 0:
-                continue
-            pts_fi = pts_display[mask]
-            dists = pts_fi @ fn + fd
-            projected = pts_fi - np.outer(dists, fn)
-            pts_display[mask] = projected
-            n_projected += int(n_mask)
-        
-        # Convert projected display coords back to raw: raw = (display - t) @ R / s
-        if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
-            pts_raw = (pts_display - t) @ R / s
-        else:
-            pts_raw = pts_display
-        xyz_corrected[global_indices] = pts_raw
-    
-    # Save classification sidecar — and remember whether it actually CHANGED
-    # (USER 2026-09-06 "ajustá todo lo que sobra": a re-match after a chunk
-    # correction produces the IDENTICAL classification, and the 5-minute
-    # Potree rebuild that always ran here was pure waste).
-    class_path = output_dir / "classification.npy"
-    classification_changed = True
-    if class_path.exists():
+    # ── The octree: ONLY from the cloud the masks were projected on (point 120 — the
+    # corrected_cloud.ply route is gone), rebuilt when its own stamp changed or it is
+    # missing (point 123); a build that fails FAILS the projection (point 122)
+    from potree_converter import POTREE_BIN, convert_ply_to_potree
+    potree_dir = output_dir / "potree"
+    oct_stamp = {"cloud_sha256": result["stamp"]["inputs"]["cloud"],
+                 "classification_sha256": sha256_file(output_dir / CLASSIFICATION),
+                 "instance_ids_sha256": sha256_file(output_dir / INSTANCE_IDS),
+                 "converter_sha256": sha256_file(POTREE_BIN) if POTREE_BIN.exists() else None}
+    stamp_p = output_dir / POTREE_STAMP_NAME
+    saved_oct = None
+    if stamp_p.exists():
         try:
-            old_cls = np.load(class_path, mmap_mode="r")
-            classification_changed = not (
-                len(old_cls) == len(classification)
-                and np.array_equal(old_cls, classification))
-        except Exception:  # noqa: BLE001
-            pass
-    np.save(class_path, classification)
-    (output_dir / "class_map.json").write_text(json.dumps(class_map, indent=1))
-
-    if n_projected > 0:
-        corrected_path = output_dir / "corrected_cloud.ply"
-        _write_corrected_ply(ply_path, corrected_path, xyz_corrected)
-        print(f"[SegPipeline] ✏️ Projected {n_projected:,} points → {corrected_path.name} (raw space)")
-        ply_override = corrected_path
+            saved_oct = json.loads(stamp_p.read_text())
+        except ValueError:
+            saved_oct = None
+    potree_missing = not (potree_dir / "metadata.json").exists()
+    if potree_missing or saved_oct != oct_stamp:
+        session_dir = output_dir.parent
+        if stamp_p.exists():
+            stamp_p.unlink()
+        success = convert_ply_to_potree(session_dir, force=True, ply_override=ply_path)
+        if not success:
+            raise RuntimeError(f"the Potree octree could not be built from {ply_path.name} — "
+                               f"the projection is not published without its octree")
+        atomic_write_json(stamp_p, oct_stamp, indent=1, sort_keys=True)
+        print(f"[SegPipeline] 🌲 Potree octree rebuilt from {ply_path.name}")
+        result["reload_potree"] = True
     else:
-        corrected_path = output_dir / "corrected_cloud.ply"
-        ply_override = corrected_path if corrected_path.exists() else ply_path
+        print("[SegPipeline] Potree untouched — same cloud, classification and converter "
+              "(identical stamp, nothing to rebuild)")
 
-    # Rebuild Potree ONLY when something the octree carries actually changed:
-    # projected geometry, a different classification, or no octree at all.
-    potree_missing = not (output_dir / "potree" / "metadata.json").exists()
-    if n_projected > 0 or classification_changed or potree_missing:
-        try:
-            from potree_converter import convert_ply_to_potree
-            session_dir = output_dir.parent
-            success = convert_ply_to_potree(session_dir, force=True, ply_override=ply_override)
-            if success:
-                print(f"[SegPipeline] 🌲 Potree octree rebuilt from {ply_override.name}")
-                result["reload_potree"] = True
-            else:
-                print(f"[SegPipeline] ⚠️ Potree rebuild failed")
-        except Exception as e:
-            print(f"[SegPipeline] ⚠️ Potree rebuild error: {e}")
-    else:
-        print("[SegPipeline] Potree untouched — classification identical, "
-              "no projections (nothing to rebuild)")
-    
     return result
 
 
@@ -3556,33 +4159,27 @@ def map_segmentation_to_cloud(output_dir) -> dict:
     matching + per-instance cleaning ONCE against the (corrected, merged)
     cleaned cloud, then refresh the Phase R store's canonical OBBs so the
     assistant's boxes coincide exactly with the viewer's. Called by the
-    cloudcompy stage when segmentation.json exists."""
+    cloudcompy stage when segmentation.json exists.
+
+    ONCE means once: a `segmentation_result.json` whose STAMP (point 123 — the
+    sha256 of every input, the code and the configuration) equals the one this
+    state would produce is reused; any difference re-projects. An mtime never
+    decides."""
     output_dir = Path(output_dir)
     if not (output_dir / "segmentation.json").exists():
         return {"error": "no segmentation.json", "instances": []}
     if not (output_dir / "cleaned_cloud.ply").exists():
         return {"error": "no cleaned_cloud.ply", "instances": []}
-    # ONCE means once. `run_segmentation` already matches when the cloud is on
-    # disk — which it always is since CloudCompy moved ahead of the semantic
-    # stages — so this call ran the whole thing a SECOND time on every session:
-    # the same 22.7 M points re-projected, the store rebuilt and the Potree
-    # octree reconstructed over a cloud that had not changed (pccr 2026-09-22:
-    # two octrees, and the fusion opened a round 2 that applied 3 merges the
-    # first round had already reached). The freshness question already has one
-    # answer for every caller — ask it.
     _stale, _why = segmentation_result_is_stale(output_dir)
     if not _stale:
-        import json as _json
-        try:
-            _cached = _json.loads(
-                (output_dir / "segmentation_result.json").read_text())
-        except Exception:                                   # noqa: BLE001
-            _cached = None
-        if _cached and _cached.get("instances"):
+        _cached = json.loads((output_dir / "segmentation_result.json").read_text())
+        if _cached.get("instances"):
             print(f"[SegPipeline] ♻ segmentation_result.json reused "
                   f"({len(_cached['instances'])} instance(s), {_why}) — the "
                   f"mask→cloud matching already ran on this state")
             return _cached
+    else:
+        print(f"[SegPipeline] projecting: {_why}")
     result = _match_and_save_result(output_dir)
     # scene_r.db is (re)built inside the mask→cloud matching itself — points,
     # labels and OBBs all in the display frame, single source for phases 2-6.
@@ -3701,13 +4298,9 @@ def _merge_absorbed(prev, new, instances) -> dict:
     return out
 
 
-def _match_and_save_result(output_dir, ply_path=None, new_obj_ids=None):
+def _match_and_save_result(output_dir, ply_path=None):
     """
     Run mask→cloud matching and save to segmentation_result.json.
-
-    When new_obj_ids is provided (incremental mode), only matches those
-    obj_ids against the cloud and merges them with the existing result.
-    This avoids re-processing all previous instances after each category.
 
     Takes the session's matching lock (`segmentation.match_lock`) — an OS
     lock, honoured ACROSS PROCESSES. It used to take none, so the pipeline's
@@ -3717,75 +4310,40 @@ def _match_and_save_result(output_dir, ply_path=None, new_obj_ids=None):
     """
     from segmentation.match_lock import matching_lock
     with matching_lock(output_dir, log=lambda m: print(f"[SegPipeline]{m}")):
-        return _match_and_save_result_locked(output_dir, ply_path, new_obj_ids)
+        return _match_and_save_result_locked(output_dir, ply_path)
 
 
-def _match_and_save_result_locked(output_dir, ply_path=None, new_obj_ids=None):
+def _match_and_save_result_locked(output_dir, ply_path=None):
+    """The projection, FULL and PURE (docs/plan_determinismo.md point 99): it
+    starts from an empty result, never merges a previous `segmentation_result.json`
+    (no carried instances, no carried captions — the per-object descriptions
+    are made again by the stage that makes them), and on an error or an empty
+    projection it FAILS, deleting the previous result: a result on disk is
+    always the product of the inputs beside it. The fusion map (point 100) is
+    written beside the raw store before the result."""
     output_dir = Path(output_dir)
     result_path = output_dir / "segmentation_result.json"
-    
-    # Load previous result for incremental merge
-    prev_instances = []
-    prev_result = {}
-    if result_path.exists():
-        try:
-            with open(result_path) as f:
-                prev_result = json.load(f)
-            prev_instances = prev_result.get("instances", [])
-        except Exception:
-            pass
-    
+
+    def _drop_previous(why: str):
+        if result_path.exists():
+            result_path.unlink()
+            print(f"[SegPipeline] previous segmentation_result.json deleted — {why}")
+
     try:
-        # Incremental: only match new category's objects
-        result = _match_masks_to_cloud(
-            output_dir, ply_path,
-            only_obj_ids=new_obj_ids
-        )
-        
-        if "error" in result:
-            # Fatal error, abort save
-            if prev_instances:
-                return prev_result
-            return result
-        
-        if not result.get("instances"):
-            # No new matches generated
-            if prev_instances:
-                return prev_result
-            return result
-        
-        new_instances = result["instances"]
-        new_ids = {inst["id"] for inst in new_instances}
-        
-        # Merge: keep old instances (not replaced by new), add new
-        merged = [inst for inst in prev_instances if inst["id"] not in new_ids]
-        merged.extend(new_instances)
-        # a per-OBJECT ShapeR description survives the re-projection of its instance
-        # (same instance_id + label) — never downgraded to the concept's (USER 2026-10-01)
-        from segmentation.object_captioner import carry_object_captions
-        carry_object_captions(prev_instances, merged)
+        result = _match_masks_to_cloud(output_dir, ply_path)
+        if "error" in result or not result.get("instances"):
+            raise RuntimeError(f"the projection produced no instance for {output_dir} — "
+                               f"{result.get('error') or 'no mask landed on the cloud'}")
 
-        total_pts = result.get("total_points", prev_result.get("total_points", 0))
-        # EXCLUSIVITY INVARIANT (USER 2026-08-31): a new category's masks can
-        # claim points already owned by old instances (this merge was THE
-        # double-ownership source). Smallest instance keeps contested points.
-        try:
-            _n_dup = _enforce_exclusive_ownership(merged, int(total_pts))
-            if _n_dup:
-                print(f"[SegPipeline]   ⚠ exclusivity (incremental merge): "
-                      f"{_n_dup:,} double-owned point(s) resolved")
-        except Exception as e:
-            print(f"[SegPipeline] exclusivity enforcement failed (non-fatal): {e}")
-
-        # Recompute coverage from merged set
+        merged = result["instances"]
+        total_pts = int(result.get("total_points") or 0)
         total_segmented = sum(inst.get("total_points", 0) for inst in merged)
         coverage = round(total_segmented / max(1, total_pts), 4)
-        
         merged_result = {
             "type": "segmentation",
             "version": "3.0",
-            "prompt": result.get("prompt", prev_result.get("prompt", "")),
-            "prompts": result.get("prompts", prev_result.get("prompts", [])),
+            "prompt": result.get("prompt", ""),
+            "prompts": result.get("prompts", []),
             "cloud_source": result.get("cloud_source", ""),
             "total_points": total_pts,
             "segmented_points": total_segmented,
@@ -3796,38 +4354,32 @@ def _match_and_save_result_locked(output_dir, ply_path=None, new_obj_ids=None):
             # This dict is rebuilt key by key, so anything the matcher returns
             # has to be carried here explicitly or it never reaches disk — the
             # record printed to the log but vanished from the file on pccr
-            # 2026-09-17. In incremental mode the previous record is kept and
-            # the new one layered on top, then any mask that is now a live
-            # instance is dropped: a survivor is never a fate.
-            "absorbed": _merge_absorbed(prev_result.get("absorbed"),
-                                        result.get("absorbed"), merged),
+            # 2026-09-17.
+            "absorbed": _merge_absorbed(None, result.get("absorbed"), merged),
+            "decisions": result.get("decisions", {}),
+            "stamp": result.get("stamp"),
         }
-        
-        # ── THE FUSION BECOMES REAL IN THE PARENT (USER 2026-09-20) ──────
-        # Until now the matcher's verdict lived only in this file and the
-        # parent kept the parts, so every downstream measurement read pieces.
-        # It runs BEFORE the result is written: the pipeline decides whether
-        # the mask->cloud mapping is current by comparing mtimes, so the
-        # result has to end up the newest of the three. Never fatal — a
-        # session whose parent could not be folded is still a valid session,
-        # it only keeps measuring parts.
-        try:
-            from segmentation import fuse_parent
-            fuse_parent.apply_fusion(output_dir, merged_result,
-                                     log=lambda m: print(f"[SegPipeline]{m}"))
-        except Exception as e:  # noqa: BLE001 — declared, never silent
-            print(f"[SegPipeline] ⚠️ parent fusion skipped ({e}) — the parent "
-                  f"keeps the individual masklets")
+        # ── THE FUSION, beside the raw store (USER 2026-09-20 / point 100): the
+        # matcher's verdict as fusion_map.json tied to the raw store's sha256; the
+        # parent is never rewritten. Fatal like every step (point 122).
+        from segmentation import fuse_parent
+        fuse_parent.apply_fusion(output_dir, merged_result,
+                                 log=lambda m: print(f"[SegPipeline]{m}"))
 
         atomic_write_json(result_path, merged_result)
-        print(f"[SegPipeline] 💾 Saved segmentation_result.json "
-              f"({len(merged)} instances, {coverage*100:.1f}% coverage)")
-        return merged_result
-    except Exception as e:
-        print(f"[SegPipeline] ⚠️ Match-and-save failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e), "instances": []}
+        # a transient for the caller (the viewer reloads the octree once), never part of
+        # the file: the same projection writes the same bytes whether the octree was
+        # rebuilt or reused
+        if result.get("reload_potree"):
+            merged_result["reload_potree"] = True
+    except BaseException as e:
+        # a result on disk is always the product of the inputs beside it: none survives
+        # a projection that did not finish (point 99)
+        _drop_previous(f"the projection failed ({type(e).__name__}: {e})")
+        raise
+    print(f"[SegPipeline] 💾 Saved segmentation_result.json "
+          f"({len(merged)} instances, {coverage*100:.1f}% coverage)")
+    return merged_result
 
 
 # Per-session lock to prevent parallel matching runs on the same output dir
@@ -3926,39 +4478,9 @@ def _apply_segmentation_to_cloud_impl(output_dir, ply_path=None) -> dict:
 
 
 def _apply_segmentation_slow(output_dir, ply_path, result_path):
-    """The matching itself. The caller already holds the session lock."""
-    if True:
-        print(f"[SegPipeline] No cached result, running full mask matching (will cache for next time)...")
-        result = _match_masks_to_cloud(output_dir, ply_path)
-        
-        # Cache the result so next load is instant — but ONLY a result that
-        # actually mapped. `coverage` is written by the matching path and by no
-        # other; a degraded result (a cloud without per-point provenance, which
-        # yields instances with empty globalIndices) carries a `warning`
-        # instead, and used to pass this guard because a warning is not an
-        # error. Caching it made it the session's segmentation of record.
-        if ("error" not in result and result.get("instances")
-                and result.get("coverage") is not None):
-            try:
-                result_path = output_dir / "segmentation_result.json"
-                # Strip transient flags — only needed for first load after segmentation
-                cache_result = {k: v for k, v in result.items()
-                                if k not in ("reload_potree", "corrected_is_display_space")}
-                # the cold-load path caches a result WITHOUT going through
-                # `_match_and_save_result`, so the parent would stay unfused
-                # until something else re-matched. Same call, same order (the
-                # result is written last), and it is idempotent.
-                try:
-                    from segmentation import fuse_parent
-                    fuse_parent.apply_fusion(
-                        output_dir, cache_result,
-                        log=lambda m: print(f"[SegPipeline]{m}"))
-                except Exception as e:  # noqa: BLE001 — declared, never silent
-                    print(f"[SegPipeline] ⚠️ parent fusion skipped ({e})")
-                atomic_write_json(result_path, cache_result)
-                print(f"[SegPipeline] 💾 Cached result for instant future loads")
-            except Exception as e:
-                print(f"[SegPipeline] ⚠️ Failed to cache result: {e}")
-        
-        return result
-
+    """The matching itself (the viewer's cold load of a session with masks and no
+    result). The caller already holds the session lock. The same pure projection
+    as the pipeline's, cached only when it produced objects (point 99: an empty
+    projection is an error, never a cached result)."""
+    print(f"[SegPipeline] No cached result, running full mask matching (will cache for next time)...")
+    return _match_and_save_result_locked(Path(output_dir), ply_path)

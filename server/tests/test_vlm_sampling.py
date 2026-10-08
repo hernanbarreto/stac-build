@@ -259,21 +259,26 @@ def test_a_vocabulary_derived_under_another_sampling_is_not_reused(tmp_path, mon
     _session(tmp_path, n_kf=10)
     out = tmp_path / "output"
     out.mkdir()
-    # pccr's record: written before the stamp existed
+    # pccr's record and analysis: written before the stamp existed (docs/plan_determinismo.md
+    # points 82 / 159, 2026-10-08: the analysis is reused WHOLE only under an identical
+    # stamp of every input; an unstamped one is derived again)
     (out / "autoprompt_concepts.json").write_text(json.dumps(
         {"version": 1, "prompts": ["only the old list"]}))
+    (out / "vlm_analysis.json").write_text(json.dumps({"prompt": "only the old list"}))
     monkeypatch.setattr(sc, "get_semantic_client", lambda **kw: _FakeVLM((64, 36)))
     cfg = _config(all_keyframes=False, spacing_kf=8, tile_rows=1, tile_cols=1, max_calls=300)
     res = AutoPrompter(tmp_path, out, config=cfg).run()
-    assert "only the old list" not in res.prompt
+    assert "only the old list" not in res.prompt and res.reused is False
+    vlm = json.loads((out / "vlm_analysis.json").read_text())
     rec = json.loads((out / "autoprompt_concepts.json").read_text())
-    assert rec["derived_under"]["vlm_sampling"]["spacing_kf"] == 8
-    assert rec["reused"] is False
-    # same sampling next run → the pinned list IS the answer, and the census says why
+    assert rec["stamp"] == vlm["stamp"]["sha256"] and "vlm_sampling" in vlm["stamp"]["config"]
+    # the same inputs next run → the analysis IS the answer, untouched
     res2 = AutoPrompter(tmp_path, out, config=cfg).run()
-    assert res2.prompt == res.prompt
-    rec2 = json.loads((out / "autoprompt_concepts.json").read_text())
-    assert rec2["reused"] is True
+    assert res2.prompt == res.prompt and res2.reused is True
+    assert json.loads((out / "vlm_analysis.json").read_text()) == vlm
+    # another sampling → another stamp → derived again
+    cfg2 = _config(all_keyframes=False, spacing_kf=4, tile_rows=1, tile_cols=1, max_calls=300)
+    assert AutoPrompter(tmp_path, out, config=cfg2).run().reused is False
 
 
 # ── the BOUND on SAM3 prompts: declared, never a silent drop ─────────────
@@ -313,7 +318,7 @@ def test_past_the_prompt_bound_every_name_is_recorded_not_prompted(tmp_path, mon
         assert "BOUND REACHED" in fates[name]["reason"]
     rec = json.loads((tmp_path / "output" / "autoprompt_concepts.json").read_text())
     assert set(rec["not_prompted_bound"]) == set(bound["not_prompted"])
-    assert rec["derived_under"]["max_sam3_prompts"] == 2
+    assert rec["stamp"] == vlm["stamp"]["sha256"] and "max_sam3_prompts" in vlm["stamp"]["config"]
     doc = build_census(tmp_path / "output", prompt=res.prompt, vlm_doc=vlm, gap_kf=1,
                        frames_dir=tmp_path / "frames", log=lambda m: None)
     assert doc["accounting"]["closed"] is True

@@ -70,13 +70,21 @@ def current_epoch(output_dir) -> int:
 
 def make_epoch_record(epoch: int, correction_id: str,
                       parent_epoch: int,
-                      kind: str = EPOCH_KIND_TRANSFORM) -> Dict[str, Any]:
+                      kind: str = EPOCH_KIND_TRANSFORM, **extra: Any) -> Dict[str, Any]:
+    """The epoch record. ``extra``: what the writer seals into it — the certification writes
+    the sha256 of the frozen run configuration and its input stamp (points 126 / 139); the
+    reconstruction's callers pass nothing and get the record they always got."""
     if kind not in EPOCH_KINDS:
         raise ValueError(f"unknown epoch kind {kind!r} (one of {EPOCH_KINDS})")
-    return {"epoch": int(epoch),
-            "correction_id": correction_id,
-            "parent_epoch": int(parent_epoch),
-            "kind": kind}
+    rec: Dict[str, Any] = {"epoch": int(epoch),
+                           "correction_id": correction_id,
+                           "parent_epoch": int(parent_epoch),
+                           "kind": kind}
+    for k, v in sorted(extra.items()):
+        if k in rec:
+            raise ValueError(f"make_epoch_record: {k!r} is a fixed field of the record")
+        rec[k] = v
+    return rec
 
 
 # What makes a reconstruction THIS reconstruction, as Omega left it (paths relative to output/):
@@ -239,30 +247,45 @@ def epoch_path(output_dir, frm: int, to: int) -> List[Tuple[int, bool]]:
 
 
 def corrections_summary(output_dir) -> Dict[str, Any]:
-    """{applied: N, overridden: [correction_id…]} from the ledger.
+    """{applied: N, overridden: [correction_id…]} of the geometry being SHOWN.
 
-    It used to count only the runs whose verdict was "approved". There is no
-    approving any more (USER 2026-09-16: every epoch stays on disk and is
-    selected, never approved or undone), so what a derived artifact needs to
-    know is how many corrections REACHED the session — every run that was
-    applied, which is every run the ledger holds with an epoch of its own.
+    ``applied`` counts the transform epochs of the LIVE LINEAGE over the reconstruction's
+    PRODUCT epoch — the corrections the geometry on screen actually holds over the published
+    cloud — never the ledger's line count (docs/plan_determinismo.md
+    point 136, 2026-10-08: the ledger is append-only history, so its count grew with every run
+    that ever reached the session, rejected branches and superseded certifications included,
+    and that number went into every derived artifact). ``overridden`` lists the ledger runs of
+    those epochs that carried an override (none since the manual flow went, 2026-09-24).
+    There is no approving (USER 2026-09-16): ``approved`` equals ``applied``.
     """
-    p = Path(output_dir) / LEDGER_FILE
-    applied = 0
+    output_dir = Path(output_dir)
+    live = current_epoch(output_dir)
+    lineage = epoch_lineage(output_dir, live)
+    # over the PRODUCT epoch (the most recent new-cloud epoch of the lineage: the cloud the
+    # reconstruction published) — the corrections the certification applied to the deliverable
+    base = 0
+    for e in reversed(lineage):
+        if int(e) == 0 or epoch_kind(output_dir, int(e)) == EPOCH_KIND_NEW_CLOUD:
+            base = int(e)
+            break
+    after = lineage[lineage.index(base) + 1:]
+    applied_epochs = [int(e) for e in after if epoch_kind(output_dir, int(e)) == EPOCH_KIND_TRANSFORM]
     overridden: List[str] = []
-    if p.exists():
+    p = output_dir / LEDGER_FILE
+    if p.exists() and applied_epochs:
+        wanted = set(applied_epochs)
         for line in p.read_text().splitlines():
             if not line.strip():
                 continue
-            entry = json.loads(line)
-            if entry.get("type") != "run":
+            try:
+                entry = json.loads(line)
+            except ValueError:
                 continue
-            if entry.get("verdict") == "rejected":
-                continue          # never touched a byte of the session
-            applied += 1
-            if entry.get("overrides"):
-                overridden.append(entry["correction_id"])
-    return {"applied": applied, "approved": applied, "overridden": overridden}
+            if (entry.get("type") == "run" and entry.get("verdict") != "rejected"
+                    and entry.get("epoch_to") in wanted and entry.get("overrides")):
+                overridden.append(str(entry.get("correction_id")))
+    n = len(applied_epochs)
+    return {"applied": n, "approved": n, "overridden": sorted(set(overridden))}
 
 
 def stamp(meta: Dict[str, Any], output_dir) -> Dict[str, Any]:

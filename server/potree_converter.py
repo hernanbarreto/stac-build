@@ -245,6 +245,22 @@ def _vertices_to_las(data: np.ndarray, las_path: Path, class_dir: Path, label: s
         else:
             logger.warning(f"[Potree] Classification size mismatch: {len(class_arr)} vs {len(data)} pts")
 
+    # Per-point INSTANCE id as a 16-bit extra dim (docs/plan_determinismo.md point 107: no
+    # 255-object ceiling — segmentation.republish.write_classification writes instance_ids.npy
+    # next to the uint8 classification.npy; the viewer keys on `instance` when the octree has it)
+    inst_npy = Path(class_dir) / "instance_ids.npy"
+    if inst_npy.exists():
+        inst_arr = np.load(inst_npy)
+        if len(inst_arr) == len(data):
+            if inst_arr.size and int(inst_arr.max()) > 65535:
+                raise ValueError(f"{inst_npy}: instance id {int(inst_arr.max())} does not fit uint16")
+            las.add_extra_dim(laspy.ExtraBytesParams(name="instance", type=np.uint16))
+            las.instance = inst_arr.astype(np.uint16)
+            logger.info(f"[Potree] Instance ids written as LAS extra dim 'instance' (uint16, max "
+                        f"{int(inst_arr.max()) if inst_arr.size else 0})")
+        else:
+            logger.warning(f"[Potree] instance_ids.npy size mismatch: {len(inst_arr)} vs {len(data)} pts — not written")
+
     # Intensity is the FALLBACK channel, for a cloud that carries no `confidence`
     # extra dim. It must be NORMALIZED here: the old code asserted "already
     # normalized to [0,1] by VGGT-Long" and clipped — false for this pipeline,

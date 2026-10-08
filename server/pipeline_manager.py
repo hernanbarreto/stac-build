@@ -3,20 +3,166 @@
 # Each stage runs in its own multiprocessing.Process with Pipe IPC.
 # The server process never loads GPU models — it only spawns workers.
 #
+# DETERMINISM (docs/plan_determinismo.md, orchestration points — 2026-10-08):
+#   151/112 — ONE configuration per job: the bytes of config.yaml are read ONCE when the
+#     order is given (:func:`read_config_once`; any error fails the order), frozen into
+#     output/run_config.yaml at job start (intake.run_config) and every stage reads that copy.
+#     A job that continues a session (replace off) must carry the configuration the session
+#     was frozen with: another base configuration is REFUSED before any stage runs.
+#   152/87 — every stage process is spawned with the deterministic environment
+#     (repro.deterministic_env: PYTHONHASHSEED=0, the cuBLAS workspace; fixed CPU threads
+#     from precision.runner.threads — precision.runner.step_env, the chain's own env).
+#   153 — the interpreter of every stage is the configured one (precision.runner.python_da3,
+#     passed to the spawn context explicitly; the job verifies it is its own), Omega's launcher
+#     gets precision.runner.python_mapanything through STAC_PYTHON_MAPANYTHING and fails without
+#     it; the environment of the job and of every stage is recorded (output/run_environment.json).
+#   154/81 — ONE engine permit per job: the manager holds the semantic engine lease
+#     (semantic.service) from the job's start to its end; it releases it only while a stage
+#     whose WORKER takes the engine itself runs (STAGE_REGISTRY "engine": the VLM stage and the
+#     certification's description pass, which launch their own vLLM under their own pid).
+#   149 — a resume or an Autosegment cleans the previous run's VLM / SAM3 products before the
+#     stage runs again (:func:`_cleanup_for_resume`); the stamped carriers the stages verify
+#     themselves (vlm_analysis.json, autoprompt_concepts.json — point 82 —, the projection's
+#     result and the certification's acta — points 123 / 126) are kept, cleaned_cloud.ply and
+#     the reconstruction never.
+#   162 — the prompts travel WITH the job: snapshotted when the order is enqueued
+#     (:func:`snapshot_job_inputs`), frozen under ``_stages`` of run_config.yaml and delivered
+#     to the session right before the stage that reads them starts.
+#   160/158 — the mask→cloud projection is a stage of this manager (:data:`StageId.PROJECTION`,
+#     worker :func:`run_projection_stage`): closing the Segmentation Manager and opening a
+#     session with unprojected masks ENQUEUE it; the server process never runs it.
+#
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
 
 import asyncio
+import contextlib
 import json
 import logging
+import os
+import sys
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from multiprocessing import Process, get_context
 from multiprocessing.connection import Connection
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Awaitable
+from typing import Any, Callable, Dict, List, Optional, Awaitable
 
 logger = logging.getLogger(__name__)
+
+# the record of what ran the job: the manager's environment, the interpreter and the
+# environment handed to every stage (point 153) — no clock, no pid
+RUN_ENVIRONMENT_NAME = "run_environment.json"
+
+
+class OrderRefused(RuntimeError):
+    """An order the manager cannot take as given: unreadable configuration, a continuation
+    of a session frozen with another configuration, a missing interpreter ... — named."""
+
+
+def read_config_once(path: Optional[os.PathLike] = None) -> Dict[str, Any]:
+    """The configuration an order carries: the bytes of ``config.yaml`` read ONCE, now
+    (docs/plan_determinismo.md point 151). An unreadable or unparseable file, or one that is
+    not a mapping, FAILS the order naming the file and the error — it never becomes ``{}``
+    (config.py's loader returns an empty dict on any error and every ``.get(key, default)``
+    then runs on defaults)."""
+    import yaml
+    if path is None:
+        from config import CONFIG_PATH
+        path = CONFIG_PATH
+    p = Path(path)
+    try:
+        data = p.read_bytes()
+    except OSError as e:
+        raise OrderRefused(f"the configuration {p} cannot be read ({e}) — the order is refused "
+                           f"(point 151: an unreadable configuration never runs on defaults)") from e
+    try:
+        doc = yaml.safe_load(data.decode("utf-8"))
+    except (ValueError, yaml.YAMLError) as e:
+        raise OrderRefused(f"the configuration {p} is not readable YAML ({e}) — the order is "
+                           f"refused (point 151)") from e
+    if not isinstance(doc, dict):
+        raise OrderRefused(f"the configuration {p} holds a {type(doc).__name__}, not a mapping — "
+                           f"the order is refused (point 151)")
+    return doc
+
+
+def runner_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """The interpreters and the thread count every stage runs with, from the job's
+    configuration (``reconstruction.precision.runner``: python_da3, python_mapanything,
+    threads — the chain's own declaration, point 153 / 152). A missing or empty key FAILS
+    naming it; the interpreters must exist (no fallback to the PATH's python)."""
+    runner = (((config.get("reconstruction") or {}).get("precision") or {}).get("runner") or {})
+    out: Dict[str, Any] = {}
+    for key in ("python_da3", "python_mapanything"):
+        v = runner.get(key)
+        if not isinstance(v, str) or not v.strip():
+            raise OrderRefused(f"config.yaml 'reconstruction.precision.runner.{key}' is missing — "
+                               f"the interpreter of every stage is fixed by absolute path (point 153)")
+        p = Path(v)
+        if not p.is_absolute():
+            raise OrderRefused(f"reconstruction.precision.runner.{key} = {v!r} is not an absolute path "
+                               f"(point 153)")
+        if not p.is_file() or not os.access(str(p), os.X_OK):
+            raise OrderRefused(f"reconstruction.precision.runner.{key} = {v!r} does not exist or is not "
+                               f"executable — no stage runs on another interpreter (point 153)")
+        out[key] = str(p)
+    thr = runner.get("threads")
+    if isinstance(thr, bool) or not isinstance(thr, int) or thr < 1:
+        raise OrderRefused(f"config.yaml 'reconstruction.precision.runner.threads' must be a positive "
+                           f"integer, got {thr!r} (point 152: fixed CPU threads of every stage)")
+    out["threads"] = int(thr)
+    return out
+
+
+def verify_own_interpreter(python_da3: str) -> str:
+    """The process launching the stages must BE the configured stage interpreter
+    (``sys.executable`` resolves to ``python_da3``): a backend started under another
+    environment would spawn its workers with other torch / CUDA / library versions
+    (point 153). Returns the resolved path; a difference FAILS naming both."""
+    mine = Path(sys.executable).resolve()
+    want = Path(python_da3).resolve()
+    if mine != want:
+        raise OrderRefused(f"this backend runs on {sys.executable} (→ {mine}) but the configured stage "
+                           f"interpreter is {python_da3} (→ {want}) — the job is refused: every stage "
+                           f"runs on the configured interpreter and the launcher must be it (point 153)")
+    return str(want)
+
+
+def stage_environment(rcfg: Dict[str, Any], stage_id: "StageId") -> Dict[str, str]:
+    """The variables a stage process is spawned with, on top of the launcher's environment:
+    the deterministic set every launcher of this repo shares (``precision.runner.step_env``:
+    PYTHONHASHSEED=0, the cuBLAS workspace, OMP / MKL / OpenBLAS threads = runner.threads,
+    MKL's reproducible mode, the OpenBLAS kernel pin), OpenCV's threads pinned to the same
+    count (the VLM / SAM3 stages decode and resize images through it), and the configured
+    interpreters for the launchers a stage runs (Omega's run_mapanything.sh reads
+    STAC_PYTHON_MAPANYTHING; the DA3 steps run on python_da3 — point 153).
+    ``repro.deterministic_env`` REFUSES a launcher environment that disagrees on a
+    deterministic variable: that refusal fails the stage, declared."""
+    from precision.runner import step_env
+    env = step_env(int(rcfg["threads"]), base=os.environ)
+    env["OPENCV_NUM_THREADS"] = str(int(rcfg["threads"]))
+    env["STAC_PYTHON_DA3"] = str(rcfg["python_da3"])
+    env["STAC_PYTHON_MAPANYTHING"] = str(rcfg["python_mapanything"])
+    # only what the stage gets on top of the launcher's environment
+    return {k: v for k, v in env.items() if os.environ.get(k) != v}
+
+
+@contextlib.contextmanager
+def _environment(env: Dict[str, str]):
+    """``os.environ`` set to ``env`` for the duration of the block (a spawn child copies the
+    launcher's environment at ``start()``), the previous values restored afterwards — the
+    server process keeps its own environment for everything else it launches."""
+    saved = {k: os.environ.get(k) for k in env}
+    try:
+        os.environ.update({k: str(v) for k, v in env.items()})
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 # ── Stage Definitions ────────────────────────────────────────
@@ -28,18 +174,26 @@ class StageId(str, Enum):
     TSDF = "tsdf"
     VLM = "vlm"
     SAM3 = "sam3"
+    PROJECTION = "projection"
     CERTIFY = "certify"
     INSTANCE_CLEANER = "instance_cleaner"
 
 
+# "module" / "entry": the worker the stage process runs (``module.entry(conn, session_dir,
+# config)``; entry defaults to ``run``). "engine": the stage's WORKER takes the semantic
+# engine lease itself (its own vLLM under its own pid — semantic.service.job_engine): the
+# manager hands the job's permit over for that stage and takes it back when it ends
+# (point 154; the lease is per process, a worker never inherits the manager's).
 STAGE_REGISTRY = {
     StageId.RECONSTRUCTION:   {"label": "Reconstruction (intake · VLM+SAM3 · Ω · F0-F6 bend)", "icon": "🔨", "module": "workers.map_worker"},
     StageId.CLOUDCOMPY:       {"label": "Cloud → viewer (octree + segmentation)", "icon": "🧹", "module": "workers.cloudcompy_worker"},
     StageId.PGSR:             {"label": "Precision (PGSR)",  "icon": "💎", "module": "workers.pgsr_worker"},
     StageId.TSDF:             {"label": "TSDF Mesh",         "icon": "🧊", "module": "workers.tsdf_worker"},
-    StageId.VLM:              {"label": "Scene Analysis",    "icon": "🔍", "module": "workers.vlm_worker"},
+    StageId.VLM:              {"label": "Scene Analysis",    "icon": "🔍", "module": "workers.vlm_worker", "engine": True},
     StageId.SAM3:             {"label": "Segmentation",      "icon": "🏷️", "module": "workers.sam3_worker"},
-    StageId.CERTIFY:          {"label": "Certification",     "icon": "📐", "module": "workers.certify_worker"},
+    StageId.PROJECTION:       {"label": "Mask projection (masks → cloud + octree)", "icon": "🧷",
+                               "module": "pipeline_manager", "entry": "run_projection_stage"},
+    StageId.CERTIFY:          {"label": "Certification",     "icon": "📐", "module": "workers.certify_worker", "engine": True},
     StageId.INSTANCE_CLEANER: {"label": "Instance Cleaning", "icon": "✨", "module": "workers.instance_cleaner_worker"},
 }
 
@@ -71,6 +225,12 @@ DEFAULT_STAGE_ORDER: List[StageId] = [
                            # cloud: it is on screen before segmentation starts.
     StageId.VLM,
     StageId.SAM3,
+    StageId.PROJECTION,    # the masks → cloud projection as a stage of its own (points 158 /
+                           # 160): SAM3 projects what it segments, so after a SAM3 that ran this
+                           # stage REUSES the result on an identical stamp (seconds) — and it is
+                           # the one launcher of a projection ordered alone: a resume whose SAM3
+                           # left masks without a result, a session opened with unprojected
+                           # masks, the Segmentation Manager's close
     StageId.CERTIFY,
     StageId.PGSR,          # precision mode only: no-ops unless backend is
                            # vggtomega_pgsr (seeds from cleaned_cloud, so it runs
@@ -141,6 +301,11 @@ class PipelineJob:
     # 0 = running or next to run; N = N jobs ahead of it in the queue
     queue_position: int = 0
     ended_at: float = 0.0
+    # the inputs the order carries besides the configuration (point 162): the session's VLM
+    # prompt and SAM3 prompt list as they stood when the order was ENQUEUED
+    # (:func:`snapshot_job_inputs`) — frozen under ``_stages`` of run_config.yaml and
+    # delivered to the session right before the stage that reads them starts
+    inputs: dict = field(default_factory=dict)
     _process: Optional[Process] = field(default=None, repr=False)
     _server_conn: Optional[Connection] = field(default=None, repr=False)
     _task: Optional[asyncio.Task] = field(default=None, repr=False)
@@ -285,6 +450,14 @@ class PipelineManager:
 
         job.session_dir = session_dir
 
+        # THE PROMPTS TRAVEL WITH THE JOB (point 162): the session's VLM prompt and SAM3
+        # prompt list are read NOW, when the order is enqueued — not when the stage starts,
+        # hours later, after other jobs of the queue may have rewritten or wiped them. They
+        # are frozen under ``_stages`` of run_config.yaml and delivered to the session right
+        # before the stage that reads them (``_run_stage``).
+        job.inputs = snapshot_job_inputs(session_dir, stages, replace)
+        apply_job_inputs(stages, job.inputs)
+
         # ONE GPU, ONE PIPELINE — anything already running sends this one to the
         # back of the queue instead of sharing the card (USER 2026-09-23).
         _pending = {"job": job, "session_dir": session_dir, "config": config,
@@ -333,11 +506,40 @@ class PipelineManager:
         # in an unexpected place. Both paths are guarded by `_running_session`,
         # so whichever gets there first is the only one that starts anything.
         def _then(_t, _self=self):
+            # a task that ended outside the stage loop (cancelled at an await, killed by an
+            # exception) never reached the release at the end of _run_pipeline: the job's
+            # engine permit goes with it when no job holds the card any more (point 154)
+            if _self._running_session() is None:
+                _self._release_job_lease(job)
             try:
                 asyncio.create_task(_self._start_next_queued())
             except RuntimeError:            # loop already closing
                 pass
         job._task.add_done_callback(_then)
+
+    # ── the job's engine permit (points 81 / 154) ────────────────────────────
+    # ONE permit to start or query the semantic engine (vLLM) and, with it, the card: the
+    # manager takes the lease (semantic.service, a file every process sees) when a job
+    # starts and drops it when the job ends — between stages the chat and the background
+    # intel get 'busy' instead of starting vLLM on the card the next stage is about to take.
+    # The lease is per PROCESS: a stage whose worker launches its own vLLM (STAGE_REGISTRY
+    # "engine") must take it under its own pid, so the manager hands it over for exactly that
+    # stage and takes it back when the stage ends.
+
+    @staticmethod
+    def _acquire_job_lease(job: "PipelineJob") -> None:
+        from semantic.service import acquire_engine_lease
+        acquire_engine_lease("pipeline", stage="job",
+                             session=PipelineManager.job_key(job.session_id, job.scan_key, job.kind))
+
+    @staticmethod
+    def _release_job_lease(job: Optional["PipelineJob"] = None) -> bool:
+        try:
+            from semantic.service import release_engine_lease
+            return bool(release_engine_lease())
+        except Exception as e:  # noqa: BLE001 — a release that fails is logged, never fatal
+            logger.warning(f"[Pipeline] the engine lease could not be released: {e}")
+            return False
 
     async def _start_next_queued(self) -> None:
         """The card is free: start the next one in. Called when a pipeline ends,
@@ -540,28 +742,60 @@ class PipelineManager:
                              "corrected_cloud.ply"],
         StageId.PGSR: ["pgsr_scene", "pgsr_model", "pgsr_render"],
         StageId.TSDF: ["tsdf/scene"],
-        StageId.VLM: ["scene_analysis.json", "vlm_analysis.json",
+        StageId.VLM: ["scene_analysis.json", "vlm_analysis.json", "vlm_analysis.timing.json",
                       "scene_understanding.json", "autoprompt_instances.json",
-                      "autoprompt_review_queue.json"],
+                      "autoprompt_review_queue.json", "autoprompt_concepts.json"],
         # the mask→cloud mapping now runs inside SAM3 (the cloud already
         # exists when it finishes) → its products are SAM3's outputs
         StageId.SAM3: ["segmentation.json", "segmentation_result.json",
                        "seg_masks.npz", "seg_broadcast.json", "scene_r.db",
-                       "classification.npy", "class_map.json",
+                       "scene_r.db-wal", "scene_r.db-shm",
+                       "classification.npy", "instance_ids.npy", "class_map.json",
                        # the fusion folds the parent and archives the raw SAM3
                        # output beside it; both belong to the stage that
                        # produced them, so a re-run starts from masklets again
                        "fusion_map.json", "_sam3_raw",
+                       # the store written in a staging directory and swapped in at the end
+                       # (point 83) — a transient of an interrupted run
+                       "_sam3_store.staging",
                        # the census describes THIS stage's prompts and masklets
-                       "segmentation_census.json"],
+                       "segmentation_census.json", "segmentation_timing.json",
+                       # the projection's own records (points 106 / 119 / 123)
+                       "potree_stamp.json", "out_of_place_views.npz", "out_of_place.npy",
+                       "mask_audit.json"],
+        # the masks → cloud projection's products: functions of the cloud, the masks and
+        # the configuration (point 123 — the result carries their stamp; a re-projection
+        # reuses it only on an identical one)
+        StageId.PROJECTION: ["segmentation_result.json", "seg_broadcast.json",
+                             "classification.npy", "instance_ids.npy", "class_map.json",
+                             "scene_r.db", "scene_r.db-wal", "scene_r.db-shm",
+                             "fusion_map.json", "potree_stamp.json",
+                             "out_of_place_views.npz", "out_of_place.npy", "mask_audit.json"],
         # the certification's records (the acta, the per-epoch quality reports,
         # the post-hoc graph, the candidates/duplicates lists). Its epochs are
         # correction artifacts: a NEW reconstruction wipes output/ (epoch 0
         # again), the ledger included (USER 2026-09-28).
         StageId.CERTIFY: ["certify_acta.json", "visit_drift_report.json", "quality",
                           "keyframe_graph.json", "loop_candidates.json", "duplicates.json",
-                          "loop_semantics.json"],
+                          "loop_semantics.json", "object_captions.timing.json"],
         StageId.INSTANCE_CLEANER: ["instance_*.ply", "inst_cleaned_cloud.ply"],
+    }
+
+    # What a RESUME or an Autosegment cleans before a stage of the semantic chain runs
+    # again (docs/plan_determinismo.md point 149): the previous run's products of the VLM
+    # and SAM3 stages — never the reconstruction, never cleaned_cloud.ply, and never a
+    # STAMPED carrier the stage verifies itself and reuses on an identical stamp:
+    #   vlm_analysis.json + autoprompt_concepts.json  the VLM stage's reuse (point 82)
+    #   segmentation_result.json & co.                the projection's (point 123 — it starts
+    #                                                 from an empty result on any difference)
+    #   certify_acta.json & co.                       the certification's (point 126)
+    # The SAM3 stage replaces its store whole (point 83): its previous products go.
+    RESUME_CLEANUP: Dict[StageId, List[StageId]] = {
+        StageId.VLM: [StageId.VLM, StageId.SAM3],       # a new vocabulary → new masks
+        StageId.SAM3: [StageId.SAM3],
+    }
+    RESUME_KEEP: Dict[StageId, tuple] = {
+        StageId.VLM: ("vlm_analysis.json", "autoprompt_concepts.json"),
     }
 
     # Files in frames/ dir that should be regenerated on reconstruction
@@ -587,6 +821,7 @@ class PipelineManager:
             StageId.CLOUDCOMPY,       # cleaned_cloud depends on chunks
             StageId.VLM,              # scene analysis ran on old keyframes
             StageId.SAM3,             # segmentation ran on old frames
+            StageId.PROJECTION,
             StageId.CERTIFY,          # the acta certified the old geometry
             StageId.PGSR,             # PGSR trained on old poses/cloud
             StageId.TSDF,             # TSDF mesh integrated old depth/poses
@@ -594,17 +829,24 @@ class PipelineManager:
         ],
         StageId.VLM: [
             StageId.SAM3,             # SAM3 uses VLM categories
+            StageId.PROJECTION,       # the projection is of SAM3's masks
             StageId.CERTIFY,          # instance loops come from the segmentation
             StageId.INSTANCE_CLEANER,
         ],
         StageId.SAM3: [
+            StageId.PROJECTION,       # the projection is of THESE masks
             StageId.CERTIFY,          # instance loops come from the segmentation
             StageId.PGSR,             # dynamic masks come from SAM3 artifacts
             StageId.INSTANCE_CLEANER, # instances depend on segmentation
         ],
+        StageId.PROJECTION: [
+            StageId.CERTIFY,          # the certification reads the projected instances
+            StageId.INSTANCE_CLEANER,
+        ],
         StageId.CLOUDCOMPY: [
             StageId.VLM,              # the semantic stages read THIS cloud
             StageId.SAM3,             # masks are projected onto THIS cloud
+            StageId.PROJECTION,
             StageId.CERTIFY,          # the loop certifies THIS cleaned cloud
             StageId.PGSR,             # the Gaussian seed is the cleaned cloud
             StageId.TSDF,             # TSDF masks to the old cleaned_cloud
@@ -678,6 +920,11 @@ class PipelineManager:
         _busy = _FM.extraction_in_progress(session_dir)
         if _busy:
             raise RuntimeError(f"[Pipeline] Replace refused for {session_dir}: {_busy}")
+        # USER 2026-10-05 (point 97): the VLM prompt saved in the session goes with the rest —
+        # Replace leaves the frames and the video only; DECLARED in the log when it happens
+        if (output_dir / "autosegment.json").exists():
+            logger.info("[Pipeline] Replace discards the session's saved VLM prompt "
+                        "(output/autosegment.json)")
         # the capture data still in the scan's legacy places goes to inputs/ — never deleted
         _moved = _CI.move_legacy_capture(session_dir, log=lambda m: logger.info(f"[Pipeline] {m}"))
         frames_dir = session_dir / "frames"
@@ -813,6 +1060,119 @@ class PipelineManager:
                 cascade_label = f" (+cascade: {', '.join(s.value for s in stages_to_clean[1:])})"
             logger.info(f"[Pipeline] 🗑️ Replace mode{cascade_label}: deleted {', '.join(all_deleted)}")
 
+    @staticmethod
+    def _cleanup_for_resume(output_dir: Path, stage_id: StageId, log=None) -> List[str]:
+        """A stage of the semantic chain about to run in a job that did NOT wipe output/
+        (a resume, an Autosegment, a projection or certification ordered alone) starts from
+        its own clean slate (docs/plan_determinismo.md point 149): the previous run's products
+        of that stage — and of the stages its outputs feed (:data:`RESUME_CLEANUP`) — are
+        deleted first, except the stamped carriers a stage verifies itself and reuses on an
+        identical stamp (:data:`RESUME_KEEP`). Never cleaned_cloud.ply, never the
+        reconstruction: those are reused by stamp only (points 23 / 31). Returns what went."""
+        import shutil as _shutil
+        gone: List[str] = []
+        kept: set = set()
+        for sid in PipelineManager.RESUME_CLEANUP.get(stage_id, []):
+            keep = set(PipelineManager.RESUME_KEEP.get(sid, ()))
+            kept |= keep
+            for pattern in PipelineManager.STAGE_OUTPUT_FILES.get(sid, []):
+                if pattern in keep:
+                    continue
+                targets = list(output_dir.glob(pattern)) if "*" in pattern else [output_dir / pattern]
+                for f in targets:
+                    if f.name in keep or not (f.exists() or f.is_symlink()):
+                        continue
+                    if f.is_dir() and not f.is_symlink():
+                        _shutil.rmtree(f, ignore_errors=True)
+                    else:
+                        f.unlink(missing_ok=True)
+                    gone.append(f.name)
+        if gone:
+            (log or logger.info)(f"[Pipeline] {stage_id.value} runs again on this session: "
+                                 f"{len(gone)} product(s) of the previous run removed first "
+                                 f"({', '.join(sorted(gone))}) — kept by stamp: "
+                                 f"{', '.join(sorted(kept)) or 'nothing'} (point 149)")
+        return gone
+
+    # ── one configuration per session (point 151) ─────────────────────────────
+
+    @staticmethod
+    def _continuation_refused(session_dir: str, config: dict) -> Optional[str]:
+        """Why a job that continues ``session_dir`` (replace off) cannot run with ``config``:
+        the session was frozen with another BASE configuration (``_stages`` overrides are
+        the job's own). None when it may run — or when the session was never frozen (it is
+        frozen now by this job; declared in the log). An unreadable / edited frozen file
+        raises (the caller refuses the job with that reason)."""
+        from intake.run_config import (canonical_yaml, effective_config, has_run_config,
+                                       load_run_config, STAGES_KEY)
+        if not has_run_config(session_dir):
+            logger.info("[Pipeline] DECLARED: this session carries no frozen configuration "
+                        "(reconstructed before the freeze existed) — this job freezes its own")
+            return None
+        frozen, _sha = load_run_config(session_dir)           # verified against its digest
+        import repro
+        have = canonical_yaml(effective_config(frozen))
+        want = canonical_yaml({k: v for k, v in dict(config).items() if k != STAGES_KEY})
+        if have == want:
+            return None
+        sha_have = repro.sha256_bytes(have.encode("utf-8"))[:12]
+        sha_want = repro.sha256_bytes(want.encode("utf-8"))[:12]
+        a, b = effective_config(frozen), {k: v for k, v in dict(config).items() if k != STAGES_KEY}
+        differing = sorted(k for k in set(a) | set(b)
+                           if canonical_yaml({k: a.get(k)}) != canonical_yaml({k: b.get(k)}))
+        return (f"this session's products were made with configuration {sha_have}… "
+                f"(output/run_config.yaml) and this order carries {sha_want}… — a session is ONE "
+                f"configuration (docs/plan_determinismo.md point 151); sections that differ: "
+                f"{', '.join(differing[:8])}{' …' if len(differing) > 8 else ''}. Run with Replace "
+                f"to start the session over on the new configuration, or restore the old one")
+
+    # ── the record of what runs the job (point 153) ───────────────────────────
+
+    @staticmethod
+    def _record_job_environment(job: "PipelineJob", output_dir: Path, rcfg: dict,
+                                run_config_sha: str) -> Path:
+        """``output/run_environment.json``: the manager's environment (repro.environment_record,
+        gpu=False — python, CPU, BLAS, libraries, git of the repo and the forks), the job's
+        interpreters and thread count, the frozen configuration's sha256; the stages add
+        themselves as they start. No clock, no pid: the same on every run of the same
+        machine and code. Any part that cannot be read RAISES (never a guessed record)."""
+        import repro
+        from atomic_io import atomic_write_json
+        rec = {"record": "run_environment", "version": 1,
+               "job": {"kind": job.kind, "session_id": job.session_id, "scan_key": job.scan_key,
+                       "run_config_sha256": run_config_sha,
+                       "python_da3": rcfg["python_da3"],
+                       "python_mapanything": rcfg["python_mapanything"],
+                       "threads": int(rcfg["threads"])},
+               "manager": repro.environment_record(gpu=False),
+               "stages": {}}
+        output_dir.mkdir(parents=True, exist_ok=True)
+        p = output_dir / RUN_ENVIRONMENT_NAME
+        atomic_write_json(p, rec, indent=1, sort_keys=True)
+        return p
+
+    @staticmethod
+    def _record_stage_environment(output_dir: Path, stage_id: StageId, module_name: str,
+                                  interpreter: str, env: Dict[str, str], reg: dict) -> None:
+        """Add the stage to ``output/run_environment.json``: its worker, the interpreter it
+        was spawned on and the variables it was spawned with (the stage's own GPU / library
+        record is the worker's — SAM3's census, the VLM's identity, the chain's step records)."""
+        from atomic_io import atomic_write_json
+        p = output_dir / RUN_ENVIRONMENT_NAME
+        try:
+            rec = json.loads(p.read_text())
+            if not isinstance(rec, dict):
+                raise ValueError("not a mapping")
+        except (OSError, ValueError) as e:
+            logger.warning(f"[Pipeline] {p.name} unreadable ({e}) — the stage record starts anew")
+            rec = {"record": "run_environment", "version": 1, "stages": {}}
+        rec.setdefault("stages", {})[stage_id.value] = {
+            "module": module_name, "entry": reg.get("entry", "run"), "interpreter": interpreter,
+            "engine_lease": "worker" if reg.get("engine") else "manager",
+            "env": {k: env[k] for k in sorted(env)
+                    if k in repro_env_keys() or k.startswith("STAC_PYTHON_")}}
+        atomic_write_json(p, rec, indent=1, sort_keys=True)
+
     async def _run_pipeline(
         self,
         job: PipelineJob,
@@ -870,6 +1230,22 @@ class PipelineManager:
             logger.info("[Pipeline] reconstruction requested without replace → RESUME: "
                         "output/ kept, each stage reuses what its own guards accept")
 
+        # ONE CONFIGURATION PER SESSION (docs/plan_determinismo.md point 151): a job that
+        # CONTINUES a session (replace off — a resume, an Autosegment, a projection or a
+        # certification ordered alone) must carry the base configuration the session was
+        # frozen with; another one is REFUSED before any stage runs — the session's products
+        # would otherwise come from two configurations. Stage overrides (``_stages``) are
+        # the job's own and do not count. A session frozen by no job yet (reconstructed
+        # before 2026-10-07) is frozen now, DECLARED.
+        if not replace:
+            try:
+                _why = self._continuation_refused(session_dir, config)
+            except Exception as e:  # noqa: BLE001 — an unreadable frozen file is a refusal too
+                _why = str(e)
+            if _why:
+                await self._fail_before_stages(job, f"Refused: {_why}", on_progress, on_complete)
+                return
+
         # THE JOB'S CONFIGURATION, FROZEN (docs/plan_determinismo.md point 69, 2026-10-07):
         # output/run_config.yaml + its sha256, written once here — after the replace wipe,
         # before the first stage — from the dict every worker of this job receives. Every
@@ -882,6 +1258,28 @@ class PipelineManager:
             log=lambda m: logger.info(f"[Pipeline] {m}"))
         logger.info(f"[Pipeline] run configuration frozen: {_frozen['path']} "
                     f"(sha256 {_frozen['sha256'][:12]})")
+
+        # THE INTERPRETERS AND THE ENVIRONMENT OF THE JOB (points 152 / 153): the configured
+        # stage interpreter must be this process's own (spawn runs the workers on it), the
+        # launchers' interpreters must exist, and what runs the job is recorded. A refusal
+        # here fails the job with its reason, before any stage.
+        try:
+            rcfg = runner_config(config)
+            verify_own_interpreter(rcfg["python_da3"])
+            await asyncio.get_running_loop().run_in_executor(
+                None, self._record_job_environment, job, output_dir, rcfg, _frozen["sha256"])
+        except Exception as e:  # noqa: BLE001 — named, never run around
+            await self._fail_before_stages(job, f"Refused: {e}", on_progress, on_complete)
+            return
+
+        # THE JOB'S ENGINE PERMIT (points 81 / 154): held from here to the job's end; another
+        # live holder (a stage process of another job that did not end, a CLI) refuses the
+        # job — one permit, never two users of the engine and the card
+        try:
+            self._acquire_job_lease(job)
+        except Exception as e:  # noqa: BLE001 — EngineBusy, or the lease file unwritable
+            await self._fail_before_stages(job, f"Refused: {e}", on_progress, on_complete)
+            return
 
         # RESUME MODE (no wipe): the pipeline detects on its own which stages
         # this session already completed (artifact + freshness probes) and only
@@ -901,7 +1299,7 @@ class PipelineManager:
 
             if not upstream_ran:
                 done, why = self._stage_is_complete(
-                    output_dir, Path(session_dir), stage_state.stage.id)
+                    output_dir, Path(session_dir), stage_state.stage.id, config)
                 if done:
                     stage_state.status = JobStatus.DONE
                     stage_state.pct = 100
@@ -921,6 +1319,14 @@ class PipelineManager:
                     output_dir, stage_state.stage.id,
                     session_dir=Path(session_dir)
                 )
+            # A RESUME / AUTOSEGMENT cleans the previous run's products of the semantic
+            # stage about to run (point 149) — a job that wiped output/ has nothing to clean
+            if not wiped_this_run and output_dir.exists():
+                self._cleanup_for_resume(output_dir, stage_state.stage.id)
+            # the prompts the job carries are delivered to the session now — the stage reads
+            # them from the session's files, as they stood when the order was enqueued (162)
+            for line in deliver_job_inputs(output_dir, stage_state.stage.id, job.inputs):
+                logger.info(f"[Pipeline] {line}")
 
             job.current_stage_idx = idx
             stage_state.status = JobStatus.RUNNING
@@ -930,8 +1336,26 @@ class PipelineManager:
             if on_progress:
                 await on_progress(job.session_id, job.to_dict())
 
+            # a stage whose worker launches its own vLLM takes the engine lease under its
+            # own pid: the job's permit is handed over for exactly this stage and taken
+            # back when it ends (point 154). The worker is gone by then (its own lease with
+            # it — a dead holder is stale); a LIVE holder in its place means someone else
+            # took the engine during the stage: the job stops, named.
+            engine_stage = bool(STAGE_REGISTRY[stage_state.stage.id].get("engine", False))
+            if engine_stage:
+                self._release_job_lease(job)
             try:
                 ok = await self._run_stage(job, stage_state, session_dir, config, on_progress, replace)
+                if engine_stage and job.status != JobStatus.CANCELLED:
+                    try:
+                        self._acquire_job_lease(job)
+                    except Exception as e:  # noqa: BLE001
+                        msg = (f"the engine permit could not be taken back after "
+                               f"{stage_state.stage.id.value}: {e} — the job stops (one permit, "
+                               f"point 154)")
+                        logger.error(f"[Pipeline] {msg}")
+                        stage_state.message = msg
+                        ok = False
                 if not ok:
                     stage_state.status = JobStatus.FAILED
                     success = False
@@ -955,6 +1379,9 @@ class PipelineManager:
         if job.status != JobStatus.CANCELLED:
             job.status = JobStatus.DONE if success else JobStatus.FAILED
         job.ended_at = time.time()           # job_of: the completion handler sees THIS job
+        # the job is over: its engine permit goes BEFORE the completion handler, which
+        # brings the chat's vLLM back when nothing else is queued (point 154)
+        self._release_job_lease(job)
 
         if on_progress:
             await on_progress(job.session_id, job.to_dict())
@@ -982,6 +1409,7 @@ class PipelineManager:
             first.message = message
         job.status = JobStatus.FAILED
         job.ended_at = time.time()
+        self._release_job_lease(job)
         if on_progress:
             await on_progress(job.session_id, job.to_dict())
         if on_complete:
@@ -1008,9 +1436,17 @@ class PipelineManager:
         # Import the worker module dynamically
         import importlib
         worker_mod = importlib.import_module(module_name)
+        target = getattr(worker_mod, reg.get("entry", "run"))
 
-        # Spawn process (MUST use 'spawn' to avoid CUDA fork errors)
+        # THE STAGE'S INTERPRETER AND ENVIRONMENT (points 152 / 153): the spawn context is
+        # told the configured interpreter EXPLICITLY (verified at job start to be this
+        # process's own), and the child copies the launcher's environment at start() — the
+        # deterministic variables, the fixed thread counts and the launchers' interpreters
+        # are set around it and restored right after (the server keeps its own environment)
+        rcfg = runner_config(config)
+        env = stage_environment(rcfg, stage_id)
         ctx = get_context('spawn')
+        ctx.set_executable(rcfg["python_da3"])
         server_conn, worker_conn = ctx.Pipe()
         job._server_conn = server_conn
 
@@ -1019,15 +1455,20 @@ class PipelineManager:
         # user disabled "Replace existing outputs" (only map_worker reads it).
         merged_config = {**config, **stage_state.stage.config, "_pipeline_replace": replace}
 
+        output_dir = Path(session_dir) / "output"
+        self._record_stage_environment(output_dir, stage_id, module_name,
+                                       rcfg["python_da3"], env, reg)
+
         proc = ctx.Process(
-            target=worker_mod.run,
+            target=target,
             args=(worker_conn, session_dir, merged_config),
             daemon=True,
         )
         job._process = proc
 
         t0 = time.time()
-        proc.start()
+        with _environment(env):
+            proc.start()
         worker_conn.close()  # Server doesn't write to worker side
 
         # Poll pipe for messages (non-blocking via asyncio)
@@ -1125,16 +1566,25 @@ class PipelineManager:
     # ── resume-mode probes ────────────────────────────────────
     @staticmethod
     def _stage_is_complete(output_dir: Path, session_dir: Path,
-                           stage_id: StageId) -> tuple:
+                           stage_id: StageId, config: Optional[dict] = None) -> tuple:
         """(complete, reason) — does this session already have the stage's
         outputs, fresh w.r.t. its inputs? Drives automatic resume: the user
         never picks stages, the pipeline continues from wherever the session
-        actually is. Probes are ARTIFACT-based (survive restarts/crashes)."""
+        actually is. Probes are ARTIFACT-based (survive restarts/crashes).
+        ``config`` is the JOB's configuration (point 112: a probe never re-reads
+        config.yaml from disk; the server's dict is the fallback of a caller without one)."""
         def mt(p: Path) -> float:
             try:
                 return p.stat().st_mtime
             except OSError:
                 return 0.0
+
+        if config is None:
+            try:
+                from config import cfg as _c5
+                config = _c5
+            except Exception:  # noqa: BLE001
+                config = {}
 
         if stage_id == StageId.RECONSTRUCTION:
             poses = [output_dir / d / "camera_poses.txt"
@@ -1150,13 +1600,8 @@ class PipelineManager:
             # reconstruction is complete only when the core's published cloud (f6_bend)
             # is the live epoch — or the live epoch descends from it through the
             # certification's transform epochs (precision.product)
-            precision_on = False
-            try:
-                from config import cfg as _c5
-                precision_on = bool(((_c5.get("reconstruction") or {}).get("precision") or {})
-                                    .get("enabled", False))
-            except Exception:
-                pass
+            precision_on = bool((((config or {}).get("reconstruction") or {}).get("precision") or {})
+                                .get("enabled", False))
             if precision_on:
                 from precision.product import product_is_live
                 return product_is_live(output_dir)
@@ -1206,16 +1651,23 @@ class PipelineManager:
                     pass
             return True, "segmentation.json + masks on disk"
 
+        if stage_id == StageId.PROJECTION:
+            # the projection's own product; whether it is the projection OF THIS cloud and
+            # these masks is the stage's (it reuses the result on an identical stamp only,
+            # point 123, and re-projects otherwise — minutes, never hours)
+            if not ((output_dir / "segmentation.json").exists()
+                    and (output_dir / "seg_masks.npz").exists()):
+                return False, "no masks to project"
+            if not (output_dir / "segmentation_result.json").exists():
+                return False, "masks on disk but no projection (segmentation_result.json)"
+            return True, "segmentation_result.json on disk"
+
         if stage_id == StageId.PGSR:
             # active only under backend vggtomega_pgsr — for every other backend the
             # worker no-ops, so "complete" here is simply "nothing pending" unless
             # the render products are expected and missing.
-            from config import load_config as _lc
-            try:
-                _backend = str((_lc().get("reconstruction", {}) or {})
-                               .get("backend", "")).lower()
-            except Exception:
-                _backend = ""
+            _backend = str(((config or {}).get("reconstruction", {}) or {})
+                           .get("backend", "")).lower()
             if _backend != "vggtomega_pgsr":
                 return True, "backend is not vggtomega_pgsr — stage not applicable"
             render_dir = output_dir / "pgsr_render"
@@ -1252,7 +1704,8 @@ class PipelineManager:
 
 # ── Helpers ──────────────────────────────────────────────────
 
-def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
+def build_pipeline_stages(backend: Optional[str] = None,
+                          config: Optional[dict] = None) -> List[PipelineStage]:
     """Build THE pipeline stage list — always the full DEFAULT_STAGE_ORDER
     (reconstruction → cloudcompy → tsdf), end to end. There is deliberately no
     per-stage client selection: a reconstruction is only usable once the cloud
@@ -1263,33 +1716,33 @@ def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
         backend: Reconstruction backend name (e.g., "da3", "gaus_slam").
                  GauS-SLAM backends skip CloudCompPy (Gaussian surfels are
                  already clean — the stage has nothing to consume).
+        config: the configuration the ORDER carries (read once, point 151) — the
+                switches below are read from it; None = the server's dict (a caller
+                without an order of its own).
     """
     _gaus_backends = ("gaus_slam", "gaus_slam_lidar", "gaus_slam_da3", "gaus_slam_hybrid")
     skip_cloudcompy = backend in _gaus_backends
     if skip_cloudcompy:
         logger.info(f"[Pipeline] CloudCompPy skipped (backend={backend})")
 
+    if config is None:
+        try:
+            from config import cfg as config
+        except Exception:  # noqa: BLE001
+            config = {}
+    config = config or {}
+
     # `pipeline.auto_segment: false` disables the automatic semantic chain
     # (VLM auto-prompt → SAM3) and restores the on-demand flow.
-    auto_segment = True
-    try:
-        from config import cfg
-        auto_segment = bool(cfg.get("pipeline", {}).get("auto_segment", True))
-    except Exception:
-        pass
-    _semantic_stages = {StageId.VLM, StageId.SAM3}
+    auto_segment = bool((config.get("pipeline") or {}).get("auto_segment", True))
+    _semantic_stages = {StageId.VLM, StageId.SAM3, StageId.PROJECTION}
     if not auto_segment:
         logger.info("[Pipeline] auto_segment off — VLM/SAM3 stages disabled")
 
     # `pipeline.auto_tsdf: false` stops the pipeline at the cleaned cloud — the
     # TSDF/texrecon takes hours and the user wants the cloud on screen first;
     # the mesh is then triggered manually.
-    auto_tsdf = True
-    try:
-        from config import cfg as _c2
-        auto_tsdf = bool(_c2.get("pipeline", {}).get("auto_tsdf", True))
-    except Exception:
-        pass
+    auto_tsdf = bool((config.get("pipeline") or {}).get("auto_tsdf", True))
     if not auto_tsdf:
         logger.info("[Pipeline] auto_tsdf off — pipeline ends at the cleaned cloud")
 
@@ -1297,12 +1750,7 @@ def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
     # certification, and it has to gate BOTH of its triggers: the CERTIFY stage
     # here and the re-run when the Segmentation Manager closes (certify.api
     # auto_run). Without this the stage ran whatever the switch said.
-    auto_certify = True
-    try:
-        from config import cfg as _c3
-        auto_certify = bool(_c3.get("certify", {}).get("auto_after_segmentation", True))
-    except Exception:
-        pass
+    auto_certify = bool((config.get("certify") or {}).get("auto_after_segmentation", True))
     if not auto_certify:
         logger.info("[Pipeline] auto_after_segmentation off — CERTIFY stage disabled")
 
@@ -1317,6 +1765,10 @@ def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
     def _enabled(stage_id: StageId) -> bool:
         if skip_cloudcompy and stage_id == StageId.CLOUDCOMPY:
             return False
+        if stage_id == StageId.PROJECTION:
+            return False   # the SAM3 stage projects what it segments; the manager switches
+                           # this stage on only when a resume finds masks without their
+                           # projection (_run_pipeline), the server when it orders one alone
         if not auto_segment and stage_id in _semantic_stages:
             return False
         if stage_id == StageId.CERTIFY and not (auto_certify and auto_segment):
@@ -1339,6 +1791,8 @@ def build_pipeline_stages(backend: Optional[str] = None) -> List[PipelineStage]:
 # feeds on it (USER 2026-10-05: a per-scan check in "Reconstruir" turns them off;
 # the Autosegment window runs any subset of them later)
 SEGMENTATION_CHAIN = (StageId.VLM, StageId.SAM3, StageId.CERTIFY)
+# ... plus the projection stage, which only exists after SAM3's masks
+SEGMENT_WHEN_DONE = SEGMENTATION_CHAIN + (StageId.PROJECTION,)
 
 
 def select_stages(stages: List[PipelineStage], *, segment: bool = True,
@@ -1355,7 +1809,148 @@ def select_stages(stages: List[PipelineStage], *, segment: bool = True,
         enabled = bool(s.enabled)
         if only is not None:
             enabled = enabled and s.id in only
-        elif not segment and s.id in SEGMENTATION_CHAIN:
+        elif not segment and s.id in SEGMENT_WHEN_DONE:
             enabled = False
         out.append(PipelineStage(id=s.id, enabled=enabled, config=dict(s.config)))
     return out
+
+
+def service_stages(ids) -> List[PipelineStage]:
+    """The stage list of a job ordered by the SERVER on the session's behalf (points 158 /
+    160): exactly ``ids`` (a set of StageId), enabled, in DEFAULT_STAGE_ORDER — the cloud
+    stage of a session opened without its cloud or its octree, the projection of masks a
+    session was opened with, the projection + certification of the Segmentation Manager's
+    close. No config switch applies: the server asked for THESE stages."""
+    want = set(ids)
+    unknown = [str(i) for i in want if i not in DEFAULT_STAGE_ORDER]
+    if unknown:
+        raise ValueError(f"service_stages: not stages of the pipeline: {unknown}")
+    return [PipelineStage(id=s, enabled=True) for s in DEFAULT_STAGE_ORDER if s in want]
+
+
+def repro_env_keys() -> tuple:
+    """The environment variables a stage record carries (repro.ENV_KEYS: the ones that change
+    numerics, threading or which files a run reads)."""
+    import repro
+    return tuple(repro.ENV_KEYS)
+
+
+# ── the prompts travel with the job (point 162) ──────────────────────────────────
+
+VLM_PROMPT_KEY = "vlm_prompt"          # under _stages.vlm of run_config.yaml
+SAM3_PROMPTS_KEY = "sam3_prompts"      # under _stages.sam3 of run_config.yaml
+
+
+def snapshot_job_inputs(session_dir: str, stages: List[PipelineStage], replace: bool) -> dict:
+    """What the order carries besides the configuration, read NOW from the scan's files
+    (segmentation.autoprompt.autosegment — the session's saved VLM prompt, the SAM3 prompt
+    list the window edited): ``{"vlm_prompt": str | None}`` when the VLM stage runs (None =
+    the shipped prompt), ``{"sam3_prompts": [...]}`` when SAM3 runs WITHOUT a VLM pass (a
+    VLM pass makes the list). A job that WIPES the session carries nothing: the user's rule
+    (point 97) leaves the frames and the video only, the saved prompt included — DECLARED
+    by the wipe. An unreadable prompt file is read as 'no override' by the loader (P2's
+    autosegment.load_autosegment) — the stage that reads the delivered file fails on it."""
+    if replace:
+        return {}
+    enabled = {s.id for s in stages if s.enabled}
+    out: dict = {}
+    output_dir = Path(session_dir) / "output"
+    from segmentation.autoprompt.autosegment import load_autosegment, sam3_prompts
+    if StageId.VLM in enabled:
+        saved = load_autosegment(output_dir).get(VLM_PROMPT_KEY)
+        out[VLM_PROMPT_KEY] = saved if isinstance(saved, str) and saved.strip() else None
+    if StageId.SAM3 in enabled and StageId.VLM not in enabled:
+        out[SAM3_PROMPTS_KEY] = [str(p) for p in sam3_prompts(output_dir)]
+    return out
+
+
+def apply_job_inputs(stages: List[PipelineStage], inputs: dict) -> None:
+    """Record the job's inputs as the stage overrides the manager freezes under ``_stages``
+    of run_config.yaml (the run's record of the prompts it ran with; the worker's config
+    carries them too). ``stages`` are this job's own copies (select_stages)."""
+    for s in stages:
+        if s.id == StageId.VLM and VLM_PROMPT_KEY in inputs:
+            s.config[VLM_PROMPT_KEY] = inputs[VLM_PROMPT_KEY]
+        elif s.id == StageId.SAM3 and SAM3_PROMPTS_KEY in inputs:
+            s.config[SAM3_PROMPTS_KEY] = list(inputs[SAM3_PROMPTS_KEY])
+
+
+def deliver_job_inputs(output_dir: Path, stage_id: StageId, inputs: dict) -> List[str]:
+    """Put the job's frozen prompts back in the session's files right before the stage that
+    reads them starts — through the same writers the Autosegment window uses (atomic, the
+    sha256 of the text recorded): the VLM stage reads the session's saved prompt, the SAM3
+    stage reads vlm_analysis.json's ``prompt``. Whatever another job of the queue did to those
+    files in between (a Reconstruir's VLM pass, a wipe) no longer decides what THIS job
+    runs with. Returns the log lines of what was delivered."""
+    lines: List[str] = []
+    if stage_id == StageId.VLM and VLM_PROMPT_KEY in inputs:
+        from segmentation.autoprompt.autosegment import save_vlm_prompt, vlm_prompt_for
+        want = inputs[VLM_PROMPT_KEY]
+        have, overridden = vlm_prompt_for(output_dir)
+        if (want or None) != (have if overridden else None):
+            save_vlm_prompt(output_dir, want)
+            which = "the session's saved prompt" if want else "the shipped prompt"
+            lines.append(f"vlm: the job's frozen VLM prompt delivered to the session ({which}; "
+                         f"point 162)")
+    elif stage_id == StageId.SAM3 and SAM3_PROMPTS_KEY in inputs:
+        from segmentation.autoprompt.autosegment import sam3_prompts, set_sam3_prompts
+        want = [str(p) for p in inputs[SAM3_PROMPTS_KEY]]
+        if want and sam3_prompts(output_dir) != want:
+            set_sam3_prompts(output_dir, want)
+            lines.append(f"sam3: the job's frozen SAM3 prompt list ({len(want)}) delivered to "
+                         f"the session's vlm_analysis.json (point 162)")
+    return lines
+
+
+# ── the projection stage (points 158 / 160): the masks → cloud projection as a job ───
+
+def _projection_work(pipe, session_dir: str, config: dict) -> None:
+    """Project the session's SAM3 masks onto its published cloud — the SAME pure projection
+    the SAM3 stage runs after segmenting (segmentation.pipeline.map_segmentation_to_cloud:
+    reused on an identical stamp, else from an empty result; its octree stamped), under the
+    stage's deterministic environment and, like SAM3, with the card to itself. Fails naming
+    the missing input; a failed projection fails the stage (nothing partial)."""
+    server_dir = str(Path(__file__).resolve().parent)
+    if server_dir not in sys.path:
+        sys.path.insert(0, server_dir)
+    import repro
+    repro.ensure_cublas_workspace()
+    output_dir = (Path(session_dir) / "output").resolve()
+    for name in ("cleaned_cloud.ply", "segmentation.json", "seg_masks.npz"):
+        if not (output_dir / name).exists():
+            raise RuntimeError(f"projection: no {name} in {output_dir} — nothing to project "
+                               f"(the cloud stage and the SAM3 stage must have run)")
+    if pipe.check_cancel():
+        return
+    # the same exclusive-card rule as the SAM3 stage (points 92 / 154), the same switch
+    _simple = ((config.get("reconstruction", {}) or {}).get("simple", {}) or {})
+    if bool(_simple.get("enabled", False)) and bool(_simple.get("exclusive_gpu", True)):
+        from workers.base import stop_semantic_service_verified
+        stop_semantic_service_verified(pipe, stage="projection")
+        repro.require_exclusive_gpu(log=pipe.send_log)
+    else:
+        pipe.send_log("[gpu] DECLARED: reconstruction.simple.exclusive_gpu is off — the card was "
+                      "not checked before the projection", level="warning")
+    pipe.send_progress(5, "Projecting the masks onto the cloud...", stage=StageId.PROJECTION.value)
+    # the masks are projected on the reconstruction's PRODUCT epoch — the cloud the
+    # certification starts from, never a certified one (point 150)
+    from correction.chain import select_product_epoch
+    select_product_epoch(output_dir, log=pipe.send_log)
+    from segmentation_pipeline import map_segmentation_to_cloud
+    seg_data = map_segmentation_to_cloud(output_dir)
+    if seg_data.get("error"):
+        raise RuntimeError(f"mask→cloud projection failed: {seg_data['error']}")
+    from atomic_io import atomic_write_json
+    atomic_write_json(output_dir / "seg_broadcast.json", seg_data)
+    n = len(seg_data.get("instances", []))
+    cov = seg_data.get("coverage")
+    pipe.send_log(f"Mapped {n} instances onto the cloud"
+                  + (f" ({cov * 100:.1f}% coverage)" if cov is not None else ""))
+    pipe.send_progress(100, f"Projection complete: {n} objects", stage=StageId.PROJECTION.value)
+
+
+def run_projection_stage(conn: Connection, session_dir: str, config: dict) -> None:
+    """Entry point of the PROJECTION stage (STAGE_REGISTRY), run by the manager in a stage
+    process like every worker — the server process never projects (point 160)."""
+    from workers.base import run_worker_safe
+    run_worker_safe(_projection_work, conn, session_dir, config)

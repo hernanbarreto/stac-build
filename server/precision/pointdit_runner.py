@@ -36,7 +36,7 @@ import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -232,16 +232,24 @@ class PointDiTRunner:
 
     # ── inference ────────────────────────────────────────────────────
 
-    def infer(self, image: np.ndarray, size: Optional[Tuple[int, int]] = None) -> Tuple[np.ndarray, np.ndarray]:
-        """(point map [3, h, w] float32 in the model's normalised space, valid [h, w]) for one RGB image
-        (uint8 or float 0..1, H x W x 3), run at ``size`` = (h, w) — multiples of 16 — or at the image's
-        own size when it already is."""
+    def infer_batch(self, images: Sequence[np.ndarray], size: Optional[Tuple[int, int]] = None) -> Tuple[np.ndarray, np.ndarray]:
+        """(point maps [B, 3, h, w] float32 in the model's normalised space, valid [B, h, w]) for B RGB
+        images of ONE size (uint8 or float 0..1, H x W x 3), run at ``size`` = (h, w) — multiples of
+        16 — or at the images' own size when they already are. ONE forward pass for the batch (USER
+        2026-10-08: the tiles of a keyframe together — speed; the batch composition is fixed by the
+        tile plan and the run's config, so the bits repeat)."""
         import torch
         self.load()
-        img = np.asarray(image)
-        if img.ndim != 3 or img.shape[2] != 3:
-            raise PointDiTError(f"the image must be H x W x 3, got {img.shape}")
-        x = torch.from_numpy(img.astype(np.float32) / (255 if img.dtype == np.uint8 else 1)).permute(2, 0, 1)[None]
+        if len(images) == 0:
+            raise PointDiTError("an empty batch")
+        imgs = [np.asarray(im) for im in images]
+        for img in imgs:
+            if img.ndim != 3 or img.shape[2] != 3:
+                raise PointDiTError(f"the image must be H x W x 3, got {img.shape}")
+            if img.shape != imgs[0].shape:
+                raise PointDiTError(f"one size per batch: {img.shape} next to {imgs[0].shape}")
+        x = torch.stack([torch.from_numpy(img.astype(np.float32) / (255 if img.dtype == np.uint8 else 1)).permute(2, 0, 1)
+                         for img in imgs])
         H, W = int(x.shape[2]), int(x.shape[3])
         if size is None:
             size = (H, W)
@@ -269,15 +277,25 @@ class PointDiTRunner:
                     out = self._model.generate(x)
             else:
                 out = self._model.generate(x)
-        P = out.float()[0].cpu().numpy().astype(np.float32)
-        valid = np.linalg.norm(P, axis=0) <= self.norm_max
+        P = out.float().cpu().numpy().astype(np.float32)
+        valid = np.linalg.norm(P, axis=1) <= self.norm_max
         return P, valid
 
+    def infer(self, image: np.ndarray, size: Optional[Tuple[int, int]] = None) -> Tuple[np.ndarray, np.ndarray]:
+        """(point map [3, h, w], valid [h, w]) for one image — a batch of one."""
+        P, valid = self.infer_batch([image], size)
+        return P[0], valid[0]
+
+    def depth_batch(self, images: Sequence[np.ndarray], size: Optional[Tuple[int, int]] = None) -> Tuple[np.ndarray, np.ndarray]:
+        """(z [B, h, w] float32 — the point maps' z, zero-centred and mean-normalised, i.e. depth up to
+        an affine map — and their valid masks [B, h, w]) for a batch of images of one size."""
+        P, valid = self.infer_batch(images, size)
+        return P[:, 2], valid
+
     def depth(self, image: np.ndarray, size: Optional[Tuple[int, int]] = None) -> Tuple[np.ndarray, np.ndarray]:
-        """(z [h, w] float32 — the point map's z, zero-centred and mean-normalised, i.e. depth up to an
-        affine map — and its valid mask)."""
-        P, valid = self.infer(image, size)
-        return P[2], valid
+        """(z [h, w] float32, valid [h, w]) for one image — a batch of one."""
+        z, valid = self.depth_batch([image], size)
+        return z[0], valid[0]
 
     def card(self) -> Optional[dict]:
         """The card the model runs on (repro.card_identity: name, memory, capability, uuid), read

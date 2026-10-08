@@ -38,49 +38,82 @@ import numpy as np
 
 logger = logging.getLogger("SurfaceFit")
 
-# per-process cache: trace grid (K's pixel grid) per output dir
-_TRACE_GRID: Dict[str, Tuple[int, int]] = {}
+# the files the evidence is built from — its identity (docs/plan_determinismo.md point 115:
+# the cache below is keyed by their sha256, never by the directory alone, so an epoch that
+# replaced the cloud or the poses is never audited with another epoch's z-buffers)
+EVIDENCE_INPUTS = ("cleaned_cloud.ply", "corrected_cloud.json", "camera.json", "camera_poses.txt",
+                   "camera_frames.txt", "seg_masks.npz")
+
+# sha256 memo per file version: (path, inode, size, mtime_ns) → digest. The memo only spares
+# re-hashing a file that is demonstrably the same version; the IDENTITY compared is the digest.
+_SHA_MEMO: Dict[tuple, str] = {}
+
+
+def _file_sha(p: Path) -> str:
+    from repro import sha256_file
+    st = p.stat()
+    k = (str(p), st.st_ino, st.st_size, st.st_mtime_ns)
+    h = _SHA_MEMO.get(k)
+    if h is None:
+        h = sha256_file(p)
+        _SHA_MEMO[k] = h
+    return h
+
+
+def evidence_identity(output_dir: Path) -> str:
+    """sha256 over (name, sha256) of every :data:`EVIDENCE_INPUTS` file present —
+    what two evidence builds must share to be the same evidence."""
+    from repro import sha256_json
+    out = Path(output_dir)
+    rows = [[name, _file_sha(out / name)] for name in EVIDENCE_INPUTS if (out / name).is_file()]
+    return sha256_json(rows)
 
 
 def _k_grid(output_dir: Path):
-    """(W, H, cloud_xyz): the intrinsics' pixel grid = the cloud traceability
-    grid (session_io builds K at the reconstruction grid, not the RGB grid —
-    verified on test3: cx,cy sit at the centre of the 384x688 trace grid),
-    plus the cloud points for the per-frame Z-buffers."""
-    key = str(output_dir)
-    if key in _TRACE_GRID:
-        return _TRACE_GRID[key]
-    try:
-        from segmentation.pipeline import _load_ply_origins
-        origins = _load_ply_origins(Path(output_dir) / "cleaned_cloud.ply")
-        if origins is None:
-            return None
-        xyz, _fg, pr, pc = origins
-        out = (int(pc.max()) + 1, int(pr.max()) + 1, np.asarray(xyz))  # (W, H, pts)
-        _TRACE_GRID[key] = out
-        return out
-    except Exception as e:  # noqa: BLE001
-        logger.warning("hole_audit: could not derive K grid: %s", e)
-        return None
+    """(W, H, cloud_xyz): the DECLARED grid the cloud's ``pixel_row`` /
+    ``pixel_col`` live on (``correction.visit_drift.trace_grid`` — camera.json /
+    corrected_cloud.json; point 108: never the maxima of the surviving pixels,
+    which moved with whichever point happened to survive in the last row), plus
+    the cloud points for the per-frame Z-buffers. RAISES when the grid is not
+    declared or the cloud carries no provenance."""
+    from correction.visit_drift import trace_grid
+    from segmentation.pipeline import _load_ply_origins
+    Ht, Wt = trace_grid(Path(output_dir))
+    origins = _load_ply_origins(Path(output_dir) / "cleaned_cloud.ply")
+    if origins is None:
+        raise RuntimeError(f"{Path(output_dir) / 'cleaned_cloud.ply'} carries no per-point "
+                           f"provenance (frame_global / pixel_row / pixel_col)")
+    xyz, _fg, pr, pc = origins
+    if len(pr) and (int(pr.max()) >= Ht or int(pc.max()) >= Wt):
+        raise RuntimeError(f"the cloud's birth pixels reach ({int(pr.max())}, {int(pc.max())}) "
+                           f"outside the declared {Wt}x{Ht} record grid — the cloud and the "
+                           f"camera do not describe one grid")
+    return (int(Wt), int(Ht), np.asarray(xyz))  # (W, H, pts)
 
 
 class _Evidence:
-    """Masks + cameras for one session, shared across instances."""
+    """Masks + cameras for one session, shared across instances.
+
+    The camera is THE ONE THE CLOUD WAS BUILT WITH (``session_io.
+    load_cloud_camera_source``: camera.json on the record grid + the live
+    epoch's poses — point 113, never a Stray sibling's ARKit odometry). When
+    the evidence cannot be built, ``ok`` is False and ``reason`` says why — the
+    projection's mask audit FAILS on it (point 122); the on-demand hole-audit
+    tools skip, declared."""
 
     def __init__(self, output_dir: Path, session_dir: Path):
         self.ok = False
+        self.reason: Optional[str] = None
         self._others_cache: Dict[Tuple[int, int], Optional[np.ndarray]] = {}
         p = Path(output_dir) / "seg_masks.npz"
         if not p.exists():
+            self.reason = f"{p} does not exist"
             return
         try:
             self.masks = np.load(p, allow_pickle=True)
-            from segmentation.session_io import _load_camera_source
-            self.cam = _load_camera_source(Path(session_dir), Path(output_dir))
-            grid = _k_grid(Path(output_dir))
-            if self.cam is None or grid is None:
-                return
-            self.kw, self.kh, self._cloud = grid
+            from segmentation.session_io import load_cloud_camera_source
+            self.cam = load_cloud_camera_source(Path(output_dir))
+            self.kw, self.kh, self._cloud = _k_grid(Path(output_dir))
             self._zbuf_cache: Dict[int, Optional[np.ndarray]] = {}
             # The npz keys are NOT the frame the poses are keyed by. Measured
             # (or declared) once here; every lookup below goes through it.
@@ -89,8 +122,9 @@ class _Evidence:
             if self.space.mixed:
                 logger.warning("hole_audit: %s", self.space.describe())
             self.ok = True
-        except Exception as e:  # noqa: BLE001
-            logger.warning("hole_audit: evidence load failed: %s", e)
+        except Exception as e:  # noqa: BLE001 — declared in `reason`, never silent
+            self.reason = f"{type(e).__name__}: {e}"
+            logger.warning("hole_audit: evidence load failed: %s", self.reason)
 
     # ── frame spaces: a mask key is NOT a camera key ─────────────────
     #
@@ -140,8 +174,7 @@ class _Evidence:
         p = (M[:3, :3] @ self._cloud.T).T + M[:3, 3]
         z = p[:, 2]
         ok = z > 0.05
-        u = K[0, 0] * p[ok, 0] / z[ok] + K[0, 2]
-        v = K[1, 1] * p[ok, 1] / z[ok] + K[1, 2]
+        u, v = self.cam.pixels(fidx, p[ok])          # the cloud's camera, its lens included
         mu = (u * mw / self.kw).astype(np.int64)
         mv = (v * mh / self.kh).astype(np.int64)
         inb = (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
@@ -213,8 +246,7 @@ class _Evidence:
             front = z > 0.05
             u = np.full(n, -1.0)
             v = np.full(n, -1.0)
-            u[front] = K[0, 0] * pcam[front, 0] / z[front] + K[0, 2]
-            v[front] = K[1, 1] * pcam[front, 1] / z[front] + K[1, 2]
+            u[front], v[front] = self.cam.pixels(self.cloud_frame(fidx), pcam[front])   # lens included
             mu = (u * mw / self.kw).astype(np.int64)
             mv = (v * mh / self.kh).astype(np.int64)
             inb = front & (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
@@ -268,8 +300,7 @@ class _Evidence:
             front = z > 0.05
             u = np.full(n, -1.0)
             v = np.full(n, -1.0)
-            u[front] = K[0, 0] * pcam[front, 0] / z[front] + K[0, 2]
-            v[front] = K[1, 1] * pcam[front, 1] / z[front] + K[1, 2]
+            u[front], v[front] = self.cam.pixels(fidx, pcam[front])                     # lens included
             mu = (u * mw / self.kw).astype(np.int64)
             mv = (v * mh / self.kh).astype(np.int64)
             inb = front & (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
@@ -305,14 +336,25 @@ class _Evidence:
         return None
 
 
-_EVIDENCE_CACHE: Dict[str, _Evidence] = {}
+_EVIDENCE_CACHE: Dict[Tuple[str, str], _Evidence] = {}
 
 
 def _evidence(output_dir: Path, session_dir: Path) -> _Evidence:
-    key = str(output_dir)
+    """The session's evidence, cached by the IDENTITY of its inputs
+    (:func:`evidence_identity`): the same directory with another cloud, other
+    poses or another mask store is another evidence (point 115). One entry per
+    directory — the previous version is dropped with its open npz handle."""
+    out = Path(output_dir)
+    key = (str(out), evidence_identity(out))
     ev = _EVIDENCE_CACHE.get(key)
     if ev is None:
-        ev = _Evidence(output_dir, session_dir)
+        for old in [k for k in _EVIDENCE_CACHE if k[0] == key[0]]:
+            stale = _EVIDENCE_CACHE.pop(old)
+            try:
+                stale.masks.close()
+            except Exception:  # noqa: BLE001
+                pass
+        ev = _Evidence(out, session_dir)
         _EVIDENCE_CACHE[key] = ev
     return ev
 
@@ -538,8 +580,7 @@ def silhouette_report(verts_world: np.ndarray,
         front = z > 0.05
         if front.sum() < 50:
             continue
-        u = K[0, 0] * pcam[front, 0] / z[front] + K[0, 2]
-        v = K[1, 1] * pcam[front, 1] / z[front] + K[1, 2]
+        u, v = ev.cam.pixels(ev.cloud_frame(fidx), pcam[front])                    # lens included
         mu = (u * mw / ev.kw).astype(np.int64)
         mv = (v * mh / ev.kh).astype(np.int64)
         inb = (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)

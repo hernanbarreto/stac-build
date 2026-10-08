@@ -118,6 +118,11 @@ def test_the_backend_boot_kick_launches_vllm_without_touching_cuda(monkeypatch, 
     cuda = FakeCuda(initialised=False)
     monkeypatch.setitem(sys.modules, "torch", _fake_torch(cuda))
     monkeypatch.setattr(svc, "is_alive", lambda config=None, timeout_s=3.0: False)
+    # no launcher chain alive and no engine lease held (docs/plan_determinismo.md point 155,
+    # 2026-10-08: a chain already starting is awaited, never duplicated — on a pod whose
+    # vLLM is up the process table would otherwise say 'starting' and nothing would launch)
+    monkeypatch.setattr(svc, "is_starting", lambda: False)
+    monkeypatch.setattr(svc, "engine_available_to", lambda pid=None: (True, "no lease held"))
     launcher = tmp_path / "serve_semantic.sh"
     launcher.write_text("#!/bin/bash\n")
     monkeypatch.setattr(svc, "_LAUNCHER", launcher)

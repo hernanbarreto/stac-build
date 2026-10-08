@@ -74,32 +74,49 @@ def _resolve_images(body: dict, store_path: str) -> list:
     return images
 
 
+def _engine_busy() -> str | None:
+    """Why the chat may not start or query vLLM now (docs/plan_determinismo.md points 81 /
+    154): a pipeline job is running or queued (its stages take the GPU and the engine for
+    themselves — vLLM rests at ~40 GB of VRAM, and a chat question mid-SAM3 used to start
+    it on the card the stage holds), or another process holds the engine lease (the VLM
+    stage's or the description pass's own vLLM: its answers are co-batched with nobody).
+    None when the chat may go ahead."""
+    try:
+        from main import pipeline_manager           # late import: avoids a cycle
+        if any(j.get("status") in ("running", "queued")
+               for j in pipeline_manager.get_all_jobs().values()):
+            return "a pipeline is using the GPU — the chat waits for it to end"
+    except Exception:  # noqa: BLE001 — no manager (a test, a CLI): nothing to wait for
+        pass
+    try:
+        from semantic.service import engine_available_to
+        ok, why = engine_available_to()
+    except Exception:  # noqa: BLE001
+        return None
+    return None if ok else why
+
+
 @router.get("/semantic/status")
 async def semantic_status(warmup: bool = False):
     """State of the Qwen3-VL service, so the chat can say "loading…" the moment it
     opens instead of only after the user has waited on a question.
 
-    `warmup=true` also starts it — but never while a pipeline is running: vLLM rests
-    at ~40 GB of VRAM and the reconstruction stages stop it precisely to get the GPU
-    back. Warming up mid-reconstruction would OOM the very run the user is waiting on.
+    `warmup=true` also starts it — but never while a pipeline is running or a job holds
+    the engine lease: vLLM rests at ~40 GB of VRAM and the reconstruction stages stop it
+    precisely to get the GPU back. Warming up mid-reconstruction would OOM the very run
+    the user is waiting on.
     """
     from semantic.service import is_alive, is_starting, ensure_service
 
+    busy = _engine_busy()
+    if busy:
+        return JSONResponse({"status": "busy", "detail": busy})
     if is_alive():
         return JSONResponse({"status": "up"})
     if is_starting():
         return JSONResponse({"status": "loading"})
 
     if warmup:
-        try:
-            from main import pipeline_manager           # late import: avoids a cycle
-            busy = any(j.get("status") in ("running", "queued")
-                       for j in pipeline_manager.get_all_jobs().values())
-        except Exception:  # noqa: BLE001
-            busy = False
-        if busy:
-            return JSONResponse({"status": "busy",
-                                 "detail": "a pipeline is using the GPU"})
         ensure_service(log=print, timeout_s=0.0)        # fire and forget
         return JSONResponse({"status": "loading"})
 
@@ -111,6 +128,12 @@ async def spatial_qa(body: dict):
     question = (body or {}).get("question")
     if not question:
         return JSONResponse({"error": "missing 'question'"}, status_code=400)
+    # ONE permit to the engine per job (point 81): while a pipeline job runs, or a job's
+    # process holds the engine lease, the chat neither starts vLLM nor queries it — it
+    # gets 'busy' and the client retries when the stage ends.
+    busy = _engine_busy()
+    if busy:
+        return JSONResponse({"status": "busy", "error": busy}, status_code=503)
     # The reconstruction / SAM3 stages stop vLLM to get the whole GPU, so by the
     # time the user opens the chat the service is usually down. Kick the launcher
     # and return immediately with status=loading: the weights take minutes, and

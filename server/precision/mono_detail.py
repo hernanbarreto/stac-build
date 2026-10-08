@@ -34,6 +34,12 @@ step 2) and the edge-keeping vote (step 4):
 Per-pixel provenance (``SRC_*``) reaches the cloud's ``source`` column; the per-tile fits, the band
 accounting and the timing reach ``depth_on_f5.json`` (``mono_detail``). With ``mono_detail.enabled``
 false nothing here runs and the output is epoch 8's bit for bit.
+
+USER 2026-10-08 (speed with determinism): every map operation here runs on torch tensors on the
+device of :mod:`precision.f6_torch` (the card in the pipeline, strict deterministic mode; the CPU in
+the synthetic tests), and PointDiT runs ALL the tiles of a keyframe as one batch
+(``PointDiTRunner.depth_batch``, ``mono_detail.tile_batch``). The numpy-facing functions below keep
+their signatures (the tests and loger_pdit use them) and convert at the boundary.
 """
 from __future__ import annotations
 
@@ -44,17 +50,15 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from precision import f6_torch as FT
+from precision.f6_torch import (SRC_BAND_BACK, SRC_BAND_FRONT, SRC_DETAIL, SRC_OMEGA,  # noqa: F401 — re-exported
+                                SRC_UNRESOLVED)
+
 LOG_TAG = "[mono-detail]"
 PATCH = 16
-MAD_TO_SIGMA = 1.0 / 0.6744897501960817   # σ of a normal from its MAD (1.4826)
+MAD_TO_SIGMA = FT.MAD_TO_SIGMA              # σ of a normal from its MAD (1.4826)
 INLIER_K = 3                              # a declared SUMMARY: support within k·residual (never a gate)
 
-# per-pixel provenance of the refined depth
-SRC_OMEGA = 0            # Omega bent (no tile covered it, or a band pixel on a surface)
-SRC_DETAIL = 1           # lowpass(Omega) + PointDiT detail
-SRC_BAND_FRONT = 2       # a mixed pixel resolved to the FRONT surface
-SRC_BAND_BACK = 3        # … to the BACK surface
-SRC_UNRESOLVED = 4       # mixed, PointDiT intermediate too → excluded from the measurement tier
 SRC_NAMES = ("omega_bent", "mono_detail", "band_front", "band_back", "mixed_unresolved")
 
 
@@ -135,10 +139,10 @@ def feather_weights(H: int, W: int, tiles: Sequence[Tile]) -> List[np.ndarray]:
 
 def resize_to(img: np.ndarray, h: int, w: int, nearest: bool = False) -> np.ndarray:
     """Bilinear (or nearest) resize of a 2-D map / H x W x C image to (h, w)."""
-    import cv2
     if img.shape[0] == h and img.shape[1] == w:
         return img
-    return cv2.resize(img, (w, h), interpolation=cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR)
+    out = FT._np(FT.resize(FT._t(img), int(h), int(w), nearest=nearest))
+    return out.astype(img.dtype)
 
 
 # ── Phase 3: affine per tile ─────────────────────────────────────────────────
@@ -159,77 +163,41 @@ class TileFit:
 def irls_affine(x: np.ndarray, y: np.ndarray, w: np.ndarray, huber_k: float, iterations: int) -> Tuple[float, float]:
     """y ≈ s·x + b by Huber IRLS from the weighted least-squares start (weights ``w`` ≥ 0 = the
     session's calibrated confidence), the construction of epoch 7's bend fit."""
-    A = np.c_[x, np.ones(len(x))]
-    sw = np.sqrt(np.maximum(w, 0.0))
-    ww = sw.copy()
-    c = np.zeros(2)
-    for _ in range(int(iterations)):
-        c = np.linalg.lstsq(A * ww[:, None], y * ww, rcond=None)[0]
-        e = y - A @ c
-        s = MAD_TO_SIGMA * np.median(np.abs(e[sw > 0])) + 1e-12
-        ww = sw * np.sqrt(np.minimum(1.0, huber_k * s / np.maximum(np.abs(e), 1e-12)))
-    return float(c[0]), float(c[1])
+    return FT.irls_affine(FT._t(np.asarray(x, np.float64)), FT._t(np.asarray(y, np.float64)),
+                          FT._t(np.asarray(w, np.float64)), huber_k, iterations)
 
 
 def align_tile(z_cal: np.ndarray, z_mono: np.ndarray, support: np.ndarray, weight: np.ndarray,
                fit_space: str, huber_k: float, iterations: int) -> Tuple[np.ndarray, float, float, float]:
     """(z_al, s, b, residual): PointDiT's tile mapped onto the calibrated depth. ``fit_space`` 'depth':
     z_cal ≈ s·z_mono + b; 'inverse': 1/z_cal ≈ s·z_mono + b. z_al is 0 where the map is not positive."""
-    x = z_mono[support].astype(np.float64); yz = z_cal[support].astype(np.float64)
-    w = weight[support].astype(np.float64)
-    if fit_space == "inverse":
-        s, b = irls_affine(x, 1.0 / yz, w, huber_k, iterations)
-        den = s * z_mono.astype(np.float64) + b
-        with np.errstate(divide="ignore", invalid="ignore"):
-            z_al = np.where(den > 1e-9, 1.0 / den, 0.0)
-    elif fit_space == "depth":
-        s, b = irls_affine(x, yz, w, huber_k, iterations)
-        z_al = s * z_mono.astype(np.float64) + b
-    else:
-        raise MonoDetailError(f"fit_space must be 'depth' or 'inverse', got {fit_space!r}")
-    z_al = np.where(z_al > 0, z_al, 0.0).astype(np.float32)
-    r = (yz - z_al[support]) / yz
-    residual = float(MAD_TO_SIGMA * np.median(np.abs(r - np.median(r)))) if len(r) else float("nan")
-    return z_al, s, b, residual
+    try:
+        z_al, s, b, res = FT.align_tile(FT._t(z_cal), FT._t(z_mono), FT._t(support, FT.torch.bool),
+                                        FT._t(weight), fit_space, huber_k, iterations)
+    except FT.F6TorchError as e:
+        raise MonoDetailError(str(e)) from e
+    return FT._np(z_al, np.float32), s, b, res
 
 
 # ── Phase 4: discontinuities, band, lowpass, detail ──────────────────────────
 
 def relative_jump(z: np.ndarray, valid: np.ndarray) -> np.ndarray:
     """Per pixel the largest 1-pixel relative depth jump |Δz| / min(z) to a valid 4-neighbour."""
-    H, W = z.shape
-    out = np.zeros((H, W), np.float64)
-    zz = z.astype(np.float64)
-    for dy, dx in ((0, 1), (1, 0)):
-        a = zz[:H - dy, :W - dx]; b = zz[dy:, dx:]
-        va = valid[:H - dy, :W - dx] & valid[dy:, dx:]
-        j = np.where(va, np.abs(a - b) / np.maximum(np.minimum(a, b), 1e-9), 0.0)
-        out[:H - dy, :W - dx] = np.maximum(out[:H - dy, :W - dx], j)
-        out[dy:, dx:] = np.maximum(out[dy:, dx:], j)
-    return out
+    return FT._np(FT.relative_jump(FT._t(z), FT._t(valid, FT.torch.bool)))
 
 
 def discontinuity_band(z: np.ndarray, valid: np.ndarray, tau: float, band_px: int) -> Tuple[np.ndarray, np.ndarray]:
     """(discontinuity, band): the pixels where a 1-pixel jump of ``z`` exceeds ``tau`` (relative), and
     that set dilated by ``band_px`` (≥ 1) restricted to the valid pixels."""
-    from scipy.ndimage import binary_dilation
-    disc = valid & (relative_jump(z, valid) > tau)
-    r = max(1, int(band_px))
-    band = binary_dilation(disc, structure=np.ones((2 * r + 1, 2 * r + 1), bool)) & valid
-    return disc, band
+    disc, band = FT.discontinuity_band(FT._t(z), FT._t(valid, FT.torch.bool), tau, band_px)
+    return FT._np(disc), FT._np(band)
 
 
 def masked_lowpass(z: np.ndarray, mask: np.ndarray, sigma_px: float) -> Tuple[np.ndarray, np.ndarray]:
     """(lowpass, ok): Gaussian lowpass of ``z`` over the ``mask`` pixels only (normalised by the mask's
     own blur), and where it is defined (enough mask weight under the kernel)."""
-    from scipy.ndimage import gaussian_filter
-    m = mask.astype(np.float64)
-    num = gaussian_filter(np.where(mask, z, 0.0).astype(np.float64), sigma_px, mode="nearest")
-    den = gaussian_filter(m, sigma_px, mode="nearest")
-    ok = den > 0.5                         # at least half the kernel's weight on measured pixels
-    with np.errstate(divide="ignore", invalid="ignore"):
-        lp = np.where(ok, num / den, 0.0)
-    return lp, ok
+    lp, ok = FT.masked_lowpass(FT._t(z), FT._t(mask, FT.torch.bool), sigma_px)
+    return FT._np(lp), FT._np(ok)
 
 
 def lowpass_sigma_px(omega_patch_px: int, native_px_per_omega_px: float, patch_fraction: float) -> float:
@@ -248,11 +216,8 @@ def band_half_width_px(context_scale: float) -> int:
 def side_depths(z_cal: np.ndarray, usable: np.ndarray, reach_px: int) -> Tuple[np.ndarray, np.ndarray]:
     """(z_front, z_back): the nearest and the farthest calibrated depth among the ``usable`` (valid,
     non-band) pixels within ``reach_px`` of each pixel (inf / −inf where there is none)."""
-    from scipy.ndimage import maximum_filter, minimum_filter
-    size = 2 * int(reach_px) + 1
-    big = np.where(usable, z_cal, np.inf).astype(np.float64)
-    small = np.where(usable, z_cal, -np.inf).astype(np.float64)
-    return minimum_filter(big, size=size, mode="nearest"), maximum_filter(small, size=size, mode="nearest")
+    zf, zb = FT.side_depths(FT._t(z_cal), FT._t(usable, FT.torch.bool), reach_px)
+    return FT._np(zf), FT._np(zb)
 
 
 @dataclass
@@ -270,13 +235,13 @@ def margin_quantiles(x: np.ndarray) -> Optional[dict]:
     report records it (docs/plan_determinismo.md point 53: the bars stay — the validated recipe — and
     every margin to them is written down): n and the 5 / 25 / 50 / 75 / 95 % quantiles. None when
     nothing was judged."""
-    v = np.asarray(x, np.float64).ravel()
-    v = v[np.isfinite(v)]
-    if v.size == 0:
-        return None
-    q = np.percentile(v, [5, 25, 50, 75, 95])
-    return {"n": int(v.size), "p05": float(q[0]), "p25": float(q[1]), "p50": float(q[2]),
-            "p75": float(q[3]), "p95": float(q[4]), "share_beyond": float(np.mean(v < 0))}
+    return FT.margin_quantiles(FT._t(np.asarray(x, np.float64).ravel()))
+
+
+def _refinement(fr: dict) -> FrameRefinement:
+    return FrameRefinement(depth=FT._np(fr["depth"], np.float32), source=FT._np(fr["source"], np.uint8),
+                           band=FT._np(fr["band"]), detail=FT._np(fr["detail"], np.float32),
+                           counts=fr["counts"], margins=fr["margins"])
 
 
 def refine_frame(z_cal: np.ndarray, valid_cal: np.ndarray, z_al: np.ndarray, al_valid: np.ndarray,
@@ -294,74 +259,12 @@ def refine_frame(z_cal: np.ndarray, valid_cal: np.ndarray, z_al: np.ndarray, al_
                   lies near its own two discontinuities) and only where it stays within the
                   session's own tolerance (|detail| ≤ τ·z); every other pixel keeps Omega untouched.
       'surfaces'  the detail everywhere PointDiT covers (the first run's recipe, kept for the A/B)."""
-    H, W = z_cal.shape
-    both = valid_cal & al_valid & (z_al > 0) & (z_cal > 0)
-    disc, band = discontinuity_band(z_al, both, tau, band_px)
-    out = np.where(valid_cal, z_cal, 0.0).astype(np.float32)
-    src = np.zeros((H, W), np.uint8)
-    detail = np.zeros((H, W), np.float32)
-    # Phase 4: outside the band, Omega's coarse + PointDiT's fine
-    surf = both & ~band
-    lp_c, ok_c = masked_lowpass(z_cal, surf, sigma_px)
-    lp_a, ok_a = masked_lowpass(z_al, surf, sigma_px)
-    m = surf & ok_c & ok_a
-    d = (z_al.astype(np.float64) - lp_a)
-    z_new = lp_c + d
-    m &= z_new > 0
-    margins: Dict[str, object] = {}
-    if detail_scope == "edges":
-        from scipy.ndimage import binary_dilation
-        r = max(1, int(detail_zone_px))
-        zone = binary_dilation(disc, structure=np.ones((2 * r + 1, 2 * r + 1), bool))
-        # the change must stay within the session's own tolerance: beyond it PointDiT and Omega
-        # disagree on the SURFACE, and the surface is Omega's
-        zc64 = np.maximum(z_cal.astype(np.float64), 1e-9)
-        rel_change = np.abs(z_new - z_cal.astype(np.float64)) / zc64
-        within = rel_change <= float(tau)
-        # point 53: the margin of every zone pixel to the τ bar, in units of τ (positive = within)
-        judged = m & zone
-        margins["detail_within_tau"] = margin_quantiles(
-            (float(tau) - rel_change[judged]) / max(float(tau), 1e-12)) if judged.any() else None
-        m &= zone & within
-    elif detail_scope != "surfaces":
-        raise MonoDetailError(f"detail_scope must be 'edges' or 'surfaces', got {detail_scope!r}")
-    out[m] = z_new[m].astype(np.float32)
-    detail[m] = d[m].astype(np.float32)
-    src[m] = SRC_DETAIL
-    # Phase 6: the band — mixed pixels of the calibrated depth go to a side, never in between
-    usable = valid_cal & (z_cal > 0) & ~band
-    zf, zb = side_depths(z_cal, usable, int(band_px) + int(reach_px))
-    distinct = band & np.isfinite(zf) & np.isfinite(zb) & (zb > zf * (1.0 + tau))
-    zc = z_cal.astype(np.float64)
-    mixed = distinct & valid_cal & (zc > zf * (1.0 + tau)) & (zc < zb * (1.0 - tau))
-    margin = max(float(tau), float(align_err))
-    za = z_al.astype(np.float64)
-    near_f = np.abs(za - zf) <= margin * zf
-    near_b = np.abs(za - zb) <= margin * zb
-    judged = mixed & al_valid & (z_al > 0)
-    to_front = judged & near_f & ~(near_b & (np.abs(za - zb) < np.abs(za - zf)))
-    to_back = judged & near_b & ~to_front
-    unresolved = judged & ~to_front & ~to_back
-    out[to_front] = zf[to_front].astype(np.float32); src[to_front] = SRC_BAND_FRONT
-    out[to_back] = zb[to_back].astype(np.float32); src[to_back] = SRC_BAND_BACK
-    out[unresolved] = 0.0; src[unresolved] = SRC_UNRESOLVED
-    # point 53: the margins of the band tests, in units of their bar (positive = on the side taken)
-    dv = distinct & valid_cal
-    if dv.any():
-        with np.errstate(divide="ignore", invalid="ignore"):
-            # how far INSIDE the gap a band pixel's calibrated depth sits (both > 0 = mixed)
-            inside = np.minimum((zc - zf * (1.0 + tau)) / (zf * tau), (zb * (1.0 - tau) - zc) / (zb * tau))
-            margins["mixed_inside_gap"] = margin_quantiles(inside[dv])
-    if judged.any():
-        with np.errstate(divide="ignore", invalid="ignore"):
-            # the nearer side's test: margin / |z_al − side| in units of the margin (positive = resolved)
-            side = np.minimum(np.abs(za - zf) / (margin * zf), np.abs(za - zb) / (margin * zb))
-            margins["band_side_within_margin"] = margin_quantiles(1.0 - side[judged])
-    counts = {"valid": int(valid_cal.sum()), "covered": int(both.sum()), "detail": int(m.sum()),
-              "band": int(band.sum()), "mixed": int(mixed.sum()), "band_front": int(to_front.sum()),
-              "band_back": int(to_back.sum()), "mixed_unresolved": int(unresolved.sum()),
-              "mixed_unjudged": int((mixed & ~judged).sum())}
-    return FrameRefinement(depth=out, source=src, band=band, detail=detail, counts=counts, margins=margins)
+    try:
+        fr = FT.refine_frame(FT._t(z_cal), FT._t(valid_cal, FT.torch.bool), FT._t(z_al), FT._t(al_valid, FT.torch.bool),
+                             tau, band_px, sigma_px, reach_px, align_err, detail_scope, detail_zone_px)
+    except FT.F6TorchError as e:
+        raise MonoDetailError(str(e)) from e
+    return _refinement(fr)
 
 
 # ── the stage: every keyframe, two passes (fit all tiles, then the session's residual bar) ─
@@ -381,6 +284,13 @@ class StageReport:
     unresolved: Dict[int, tuple] = field(default_factory=dict)   # frame → (rows, cols, Omega's depth there)
 
 
+def _batches(n: int, size: int) -> List[Tuple[int, int]]:
+    """The tiles of a keyframe in batches of ``size`` (0 = all of them at once), in tile order."""
+    if size <= 0 or size >= n:
+        return [(0, n)]
+    return [(a, min(a + size, n)) for a in range(0, n, size)]
+
+
 def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int, np.ndarray],
               weight: Dict[int, np.ndarray], image_of: Callable[[int], np.ndarray], runner, mcfg,
               tau: float, native_px_per_omega_px: float, huber_k: float, log: Callable = print,
@@ -388,23 +298,32 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
               overlay_dir=None) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray], StageReport]:
     """Refine every keyframe's bent depth IN PLACE semantics: returns (refined depth maps, source maps,
     report). ``image_of(f)`` gives the RGB frame on the camera grid; ``weight[f]`` the calibrated
-    confidence weight in 0..1 (0 under the floor); ``tau`` the session's agreement tolerance."""
+    confidence weight in 0..1 (0 under the floor); ``tau`` the session's agreement tolerance.
+    PointDiT runs the tiles of a keyframe as ONE batch (``runner.depth_batch``; ``mcfg.tile_batch``
+    0 = all of them, otherwise batches of that many, a bound of the card — the batch composition is
+    part of the run's config, so it is the same on every run)."""
+    import torch
     t_start = time.time()
     first = dep[frames[0]]
     H, W = first.shape
     tiles = plan_tiles(H, W, int(mcfg.tile_px), float(mcfg.tile_overlap_frac), float(mcfg.context_scale))
     weights = feather_weights(H, W, tiles)
+    weights_t = [FT._t(w) for w in weights]
     band_px = band_half_width_px(float(mcfg.context_scale))
     sigma_px = lowpass_sigma_px(PATCH, native_px_per_omega_px, float(mcfg.lowpass_patch_fraction))
+    tile_batch = int(getattr(mcfg, "tile_batch", 0))
     rep = StageReport(params={"detail_scope": str(mcfg.detail_scope), "detail_zone_px": int(mcfg.detail_zone_px),
                               "tiles_per_frame": len(tiles), "tile": [tiles[0].h, tiles[0].w],
                               "run_size": [tiles[0].run_h, tiles[0].run_w], "band_px": band_px,
                               "lowpass_sigma_px": round(sigma_px, 2), "tau": tau, "fit_space": mcfg.fit_space,
-                              "context_scale": float(mcfg.context_scale)})
+                              "context_scale": float(mcfg.context_scale), "tile_batch": tile_batch,
+                              "maps_numerics": FT.record()})
     log(f"{LOG_TAG} {len(frames)} keyframes × {len(tiles)} tile(s) of {tiles[0].w}x{tiles[0].h} px run at "
         f"{tiles[0].run_w}x{tiles[0].run_h} (context {mcfg.context_scale:g}); band ±{band_px} px, lowpass σ "
-        f"{sigma_px:.1f} px, τ {tau * 100:.2f} %")
-    # pass 1: PointDiT on every tile, the affine fit, the aligned tile kept for the blend
+        f"{sigma_px:.1f} px, τ {tau * 100:.2f} %; tiles per PointDiT batch {tile_batch or len(tiles)}; maps on "
+        f"{FT.device()}")
+    # pass 1: PointDiT on every tile (the keyframe's tiles as one batch), the affine fit, the aligned
+    # tile kept for the blend
     fits: Dict[int, List[TileFit]] = {}
     aligned: Dict[int, List[Optional[np.ndarray]]] = {}
     t_pd = 0.0
@@ -413,31 +332,46 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
         if img.shape[0] != H or img.shape[1] != W:
             raise MonoDetailError(f"frame {f} is {img.shape[1]}x{img.shape[0]}, the depth grid {W}x{H}")
         fits[f] = []; aligned[f] = []
-        zc = dep[f]; vc = valid[f] & (zc > 0); wc = weight[f]
-        for t, wmap in zip(tiles, weights):
-            sl = (slice(t.y0, t.y0 + t.h), slice(t.x0, t.x0 + t.w))
+        zc = FT._t(dep[f]); vc = FT._t(valid[f], torch.bool) & (zc > 0); wc = FT._t(weight[f])
+        # every tile of a frame runs at the same size (plan_tiles); PointDiT sees them as one batch
+        mono: List[Tuple[np.ndarray, np.ndarray]] = []
+        for a, b in _batches(len(tiles), tile_batch):
+            crops = [img[t.y0:t.y0 + t.h, t.x0:t.x0 + t.w] for t in tiles[a:b]]
+            sizes = {(t.run_h, t.run_w) for t in tiles[a:b]}
+            if len(sizes) != 1:
+                raise MonoDetailError(f"the tiles of frame {f} run at different sizes {sorted(sizes)} — one batch, one size")
             t0 = time.time()
-            z_mono_run, v_run = runner.depth(img[sl], size=(t.run_h, t.run_w))
+            zb, vb = runner.depth_batch(crops, size=next(iter(sizes)))
             t_pd += time.time() - t0
-            z_mono = resize_to(z_mono_run, t.h, t.w) if (t.run_h, t.run_w) != (t.h, t.w) else z_mono_run
-            v_mono = resize_to(v_run.astype(np.uint8), t.h, t.w, nearest=True).astype(bool) \
-                if (t.run_h, t.run_w) != (t.h, t.w) else v_run
+            mono.extend((np.asarray(zb[k]), np.asarray(vb[k])) for k in range(len(crops)))
+        for t, (z_mono_run, v_run) in zip(tiles, mono):
+            sl = (slice(t.y0, t.y0 + t.h), slice(t.x0, t.x0 + t.w))
+            z_mono = FT._t(z_mono_run)
+            v_mono = FT._t(v_run, torch.bool)
+            if (t.run_h, t.run_w) != (t.h, t.w):
+                z_mono = FT.resize(z_mono, t.h, t.w)
+                v_mono = FT.resize(v_mono, t.h, t.w, nearest=True)
             tf = TileFit(tile=t)
             sup = vc[sl] & v_mono & (wc[sl] > 0)
             tf.support = int(sup.sum()); tf.support_frac = tf.support / float(t.h * t.w)
             if tf.support_frac < float(mcfg.min_support_frac) or tf.support < 3:
                 tf.reason = "support"; fits[f].append(tf); aligned[f].append(None); continue
-            z_al, s, b, res = align_tile(zc[sl], z_mono, sup, wc[sl], mcfg.fit_space, huber_k, int(mcfg.irls_iterations))
-            # second pass: the band of the aligned map is no support for the fit
-            _, band = discontinuity_band(z_al, sup & (z_al > 0), tau, band_px)
-            sup2 = sup & ~band
-            if sup2.sum() >= 3:
-                z_al, s, b, res = align_tile(zc[sl], z_mono, sup2, wc[sl], mcfg.fit_space, huber_k, int(mcfg.irls_iterations))
+            try:
+                z_al, s, b, res = FT.align_tile(zc[sl], z_mono, sup, wc[sl], mcfg.fit_space, huber_k, int(mcfg.irls_iterations))
+                # second pass: the band of the aligned map is no support for the fit
+                _, band = FT.discontinuity_band(z_al, sup & (z_al > 0), tau, band_px)
+                sup2 = sup & ~band
+                if int(sup2.sum()) >= 3:
+                    z_al, s, b, res = FT.align_tile(zc[sl], z_mono, sup2, wc[sl], mcfg.fit_space, huber_k, int(mcfg.irls_iterations))
+                    supj = sup2
+                else:
+                    supj = sup
+            except FT.F6TorchError as e:
+                raise MonoDetailError(str(e)) from e
             tf.s, tf.b, tf.residual = s, b, res
-            r = np.abs((zc[sl][sup2 if sup2.sum() >= 3 else sup] - z_al[sup2 if sup2.sum() >= 3 else sup])
-                       / zc[sl][sup2 if sup2.sum() >= 3 else sup])
-            tf.inlier_ratio = float((r <= INLIER_K * max(res, 1e-9)).mean()) if len(r) else 0.0
-            fits[f].append(tf); aligned[f].append(z_al)
+            r = torch.abs((zc[sl][supj] - z_al.to(torch.float64)[supj]) / zc[sl][supj])
+            tf.inlier_ratio = float((r <= INLIER_K * max(res, 1e-9)).to(torch.float64).mean()) if r.numel() else 0.0
+            fits[f].append(tf); aligned[f].append(FT._np(z_al, np.float32))
         if progress is not None and (n % 10 == 0 or n == len(frames) - 1):
             progress(50 * (n + 1) / len(frames), f"PointDiT {n + 1}/{len(frames)} keyframes")
     rep.seconds_pointdit = round(t_pd, 1)
@@ -462,10 +396,10 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
     tile_margins: List[float] = []
     support_margins: List[float] = []
     for n, f in enumerate(frames):
-        zc = dep[f]; vc = valid[f] & (zc > 0)
-        num = np.zeros((H, W), np.float64); den = np.zeros((H, W), np.float64)
+        zc = FT._t(dep[f]); vc = FT._t(valid[f], torch.bool) & (zc > 0)
+        num = torch.zeros((H, W), dtype=torch.float64, device=zc.device); den = torch.zeros_like(num)
         per = {"tiles": []}
-        for tf, z_al, wmap in zip(fits[f], aligned[f], weights):
+        for tf, z_al, wmap in zip(fits[f], aligned[f], weights_t):
             rep.tiles += 1
             if z_al is None:
                 rep.rejected_support += 1
@@ -474,9 +408,11 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
             else:
                 tf.accepted = True; rep.accepted += 1
                 t = tf.tile; sl = (slice(t.y0, t.y0 + t.h), slice(t.x0, t.x0 + t.w))
-                ok = z_al > 0
-                num[sl] += np.where(ok, z_al, 0.0) * wmap[sl]
-                den[sl] += np.where(ok, wmap[sl], 0.0)
+                za = FT._t(z_al)
+                ok = za > 0
+                zero = torch.zeros_like(za)
+                num[sl] = num[sl] + torch.where(ok, za, zero) * wmap[sl]
+                den[sl] = den[sl] + torch.where(ok, wmap[sl], zero)
             # margins to the two tile bars (positive = accepted side), in the bar's own unit
             m_res = (bar - tf.residual) if np.isfinite(tf.residual) else float("nan")
             m_sup = tf.support_frac - float(mcfg.min_support_frac)
@@ -488,22 +424,25 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
                                  "accepted": tf.accepted, "reason": tf.reason,
                                  "margin_to_residual_bar": m_res, "margin_to_support_bar": m_sup})
         al_valid = den > 1e-6
-        with np.errstate(divide="ignore", invalid="ignore"):
-            z_al_f = np.where(al_valid, num / np.maximum(den, 1e-12), 0.0).astype(np.float32)
+        z_al_f = torch.where(al_valid, num / torch.clamp(den, min=1e-12), torch.zeros_like(num)).to(torch.float32)
         acc = [tf.residual for tf in fits[f] if tf.accepted]
         align_err = float(np.median(acc)) if acc else 0.0
-        fr = refine_frame(zc, vc, z_al_f, al_valid, tau, band_px, sigma_px, int(mcfg.side_reach_px), align_err,
-                          detail_scope=str(mcfg.detail_scope), detail_zone_px=int(mcfg.detail_zone_px))
+        try:
+            frt = FT.refine_frame(zc, vc, z_al_f, al_valid, tau, band_px, sigma_px, int(mcfg.side_reach_px), align_err,
+                                  detail_scope=str(mcfg.detail_scope), detail_zone_px=int(mcfg.detail_zone_px))
+        except FT.F6TorchError as e:
+            raise MonoDetailError(str(e)) from e
+        fr = _refinement(frt)
         out_dep[f] = fr.depth; out_src[f] = fr.source
         ur, uc = np.nonzero(fr.source == SRC_UNRESOLVED)
         if len(ur):
-            rep.unresolved[int(f)] = (ur, uc, zc[ur, uc].astype(np.float32))
+            rep.unresolved[int(f)] = (ur, uc, dep[f][ur, uc].astype(np.float32))
         per.update(fr.counts); per["align_err"] = align_err; per["margins"] = fr.margins
         rep.per_frame[int(f)] = per
         for k, v in fr.counts.items():
             totals[k] = totals.get(k, 0) + v
         if overlay_dir is not None:
-            write_overlay(overlay_dir, f, image_of(f), zc, z_al_f, fr)
+            write_overlay(overlay_dir, f, image_of(f), dep[f], FT._np(z_al_f, np.float32), fr)
         if progress is not None and (n % 10 == 0 or n == len(frames) - 1):
             progress(50 + 50 * (n + 1) / len(frames), f"mono detail {n + 1}/{len(frames)} keyframes")
     rep.totals = totals

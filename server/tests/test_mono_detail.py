@@ -78,6 +78,11 @@ def test_tile_without_support_is_rejected_and_seams_show_no_step():
         return (a * tile + b).astype(np.float32), np.ones((h, w), bool)
     class R:
         depth = staticmethod(runner_depth)
+
+        @staticmethod
+        def depth_batch(imgs, size):      # the stage runs a keyframe's tiles as one batch (USER 2026-10-08)
+            outs = [runner_depth(im, size) for im in imgs]
+            return np.stack([o[0] for o in outs]), np.stack([o[1] for o in outs])
     img_of = lambda f: np.repeat(z_cal[:, :, None], 3, 2)
     valid = {0: np.ones((H, W), bool)}
     weight = {0: np.ones((H, W))}

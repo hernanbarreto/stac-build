@@ -122,11 +122,15 @@ def test_every_configured_value_reaches_the_gpu_model(stubbed, version, key):
                                                           else VENDOR_30)
 
 
-def test_the_cpu_fallback_builds_the_30_model_and_takes_its_block(stubbed):
+def test_without_cuda_the_configured_version_fails_instead_of_the_cpu_fallback(stubbed):
+    """docs/plan_determinismo.md point 165 (2026-10-08): the configured SAM is a requirement;
+    without CUDA the load FAILS — the 3.0 CPU model is another model and is never built
+    under a 3.1 configuration (it used to be, with only a warning)."""
+    from segmentation.sam3_wrapper import SAM3DeviceError
     load, built = stubbed
-    wrapper = load("sam3.1", {"sam3.1": dict(VENDOR_31), "sam3": dict(TUNED)}, cuda=False)
-    assert all(getattr(built["cpu"].model, k) == TUNED[k] for k in KEYS)
-    assert wrapper.applied_thresholds["version"] == "sam3"
+    with pytest.raises(SAM3DeviceError, match="CUDA is not visible"):
+        load("sam3.1", {"sam3.1": dict(VENDOR_31), "sam3": dict(TUNED)}, cuda=False)
+    assert "cpu" not in built and "sam3" not in built, "a model was built without CUDA"
 
 
 @pytest.mark.parametrize("missing", KEYS)

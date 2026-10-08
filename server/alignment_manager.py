@@ -17,6 +17,11 @@ import vendor_paths
 
 from config import cfg
 
+# the fixed seed of the standalone floor leveling (docs/plan_determinismo.md point 110): the
+# fit is a RANSAC over a subsample, both seeded here so one cloud gives one transform; the
+# fit itself is pure numpy over 5 000 points (single-threaded by construction)
+LEVELING_SEED = 0
+
 
 @dataclass
 class AlignedChunk:
@@ -180,27 +185,35 @@ class AlignmentManager:
         """
         if points is None or len(points) < 100:
              return 1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32)
-        
-        # Return cached result if available (ensures OBB uses same transform as cloud)
-        if self._leveling_cache is not None:
-            print("[AlignStandalone] Using cached leveling transform")
-            return self._leveling_cache
 
-        # 1. Subsample
-        if len(points) > 5000:
-             idx = np.random.choice(len(points), 5000, replace=False)
-             pts_sub = points[idx, :3]
+        # docs/plan_determinismo.md point 110: the cache is keyed by the sha256 of the
+        # points it was computed on — the singleton used to hand one session's leveling
+        # to the next (keyed by nothing), and the fit drew from the global np.random
+        # (unseeded): another transform on every run
+        import hashlib
+        pts_in = np.ascontiguousarray(np.asarray(points)[:, :3], dtype=np.float64)
+        cloud_key = hashlib.sha256(pts_in.tobytes()).hexdigest()
+        cached = self._leveling_cache
+        if cached is not None and cached[0] == cloud_key:
+            print("[AlignStandalone] Using cached leveling transform (same cloud)")
+            return cached[1]
+        rng = np.random.default_rng(LEVELING_SEED)
+
+        # 1. Subsample (seeded; the 5000 is a cost bound, not a decision)
+        if len(pts_in) > 5000:
+             idx = np.sort(rng.choice(len(pts_in), 5000, replace=False))
+             pts_sub = pts_in[idx]
         else:
-             pts_sub = points[:, :3]
+             pts_sub = pts_in
 
         # 2. RANSAC for Plane
         best_plane = None
         max_inliers = 0
         # Config defaults if not available
         thresh = cfg.get("alignment", {}).get("auto_leveling", {}).get("ransac_threshold", 0.05)
-        
+
         for _ in range(50): # Fast iterations
-             idxs = np.random.choice(len(pts_sub), 3, replace=False)
+             idxs = rng.choice(len(pts_sub), 3, replace=False)
              p1, p2, p3 = pts_sub[idxs]
              v1 = p2 - p1
              v2 = p3 - p1
@@ -253,7 +266,7 @@ class AlignmentManager:
         
         print(f"[AlignStandalone] Correction found: d={d:.3f}")
         result = (1.0, R, t)
-        self._leveling_cache = result  # Cache for reuse
+        self._leveling_cache = (cloud_key, result)  # reused for THIS cloud only
         return result
 
     def _accumulate_sim3_transforms(self, transforms):

@@ -26,7 +26,9 @@ VIEWER_FUNCS = (
     "viewer_websocket",
     "_send_cleaned_cloud",
     "_send_sabana_cloud",
-    "_run_cloudcompy_postprocess_inner",
+    # `_run_cloudcompy_postprocess_inner` (the on-load cloud rebuild) was REMOVED on
+    # 2026-10-08 — docs/plan_determinismo.md points 111 / 158: opening a session never
+    # builds; the cloud stage is ordered as a pipeline job instead
 )
 
 

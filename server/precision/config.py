@@ -397,6 +397,8 @@ class MonoDetailConfig:
     overlays: bool              # per-keyframe PNG overlays (bent | aligned | detail | band + status) for the eye
     ab_edge_gradient_quantile: float  # the A/B's edge band: image gradient energy above this percentile of the
                                       # session's pixels, or a step of the CALIBRATED depth — never PointDiT's
+    tile_batch: int             # tiles of a keyframe per PointDiT forward pass (0 = all of them at once — USER
+                                # 2026-10-08: speed; part of the run's config, so the batch's bits repeat)
 
 
 # ── cloud metrics of every run (floor + edges; pending A "run checks", 2026-10-04) ──
@@ -765,7 +767,8 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
                                    detail_zone_px=_num(md, "detail_zone_px", "mono_detail", lo=1, integer=True),
                                    side_reach_px=_num(md, "side_reach_px", "mono_detail", lo=1, integer=True),
                                    overlays=_bool(md, "overlays", "mono_detail"),
-                                   ab_edge_gradient_quantile=_num(md, "ab_edge_gradient_quantile", "mono_detail", lo=0.0, hi=100.0, lo_excl=True))
+                                   ab_edge_gradient_quantile=_num(md, "ab_edge_gradient_quantile", "mono_detail", lo=0.0, hi=100.0, lo_excl=True),
+                                   tile_batch=_num(md, "tile_batch", "mono_detail", lo=0, integer=True))
     cm = _sub(sec, "cloud_metrics", "")
     cloud_metrics = CloudMetricsConfig(
         ransac_iterations=_num(cm, "ransac_iterations", "cloud_metrics", lo=1, integer=True),

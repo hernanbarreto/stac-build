@@ -315,8 +315,8 @@ def confidence_floor(values: np.ndarray, floor_norm: float) -> Tuple[float, floa
 def interior(passed: np.ndarray) -> np.ndarray:
     """Floor-passing pixels whose whole 3x3 window passed too — Omega's confidence collapses at
     contours, so tau is measured where it does not (pccr epoch 8)."""
-    from scipy.ndimage import binary_erosion
-    return binary_erosion(passed, structure=np.ones((3, 3), bool), border_value=0)
+    from precision import f6_torch as FT
+    return FT._np(FT.interior(FT._t(passed, FT.torch.bool)))
 
 
 def masks_stamp_check(output_dir: Path, masks) -> Tuple[bool, str]:
@@ -406,7 +406,9 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
     Returns ({frame: (depth map, agree count map)}, tau, totals). ``bars_out`` (a dict) receives the
     vote's bar τ and every keyframe's pixel margins to it (point 53) — kept out of ``totals``, which
     stays numeric for its readers."""
+    import torch
     from precision import corrected_cloud as CC
+    from precision import f6_torch as FT
     H, W = next(iter(dep.values())).shape
     inner = {f: interior(passed[f]) for f in frames}
     tau = CC.measured_tau(dep, inner, K, c2w, frames, neighbors, tau_quantile)
@@ -421,38 +423,44 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
     w2c = {f: np.linalg.inv(c2w[f]) for f in frames}
     final, tot = {}, {}
     tau_margins: Dict[int, Optional[dict]] = {}
+    # USER 2026-10-08: the vote on the card — dense [H, W] tensors per keyframe (f6_torch), the
+    # decisions below are the same rules on the candidate pixels
     for i, f in enumerate(frames):
         cand = valid[f] & (passed[f] | edge[f])           # below-floor interior pixels stay out
-        v = CC.two_sided_vote(i, frames, dep, passed, cand, K, c2w, w2c, neighbors, tau)
-        rr, cc, agree, contra = v["rr"], v["cc"], v["agree"], v["contra"]
+        v = FT.two_sided_vote(i, frames, dep, passed, cand, K, c2w, w2c, neighbors, tau)
+        candt = FT._t(cand, torch.bool)
+        agree, contra, z, s = v["agree"], v["contra"], v["z"], v["splats"]
         # point 53: every judged pixel's margin to τ — the nearest neighbour surface on its ray
         # against its own depth, (τ − |Δz|/z) / τ (positive = agrees with its nearest witness)
-        s = v["splats"]
-        if s.size:
-            with np.errstate(invalid="ignore", divide="ignore"):
-                rel = np.abs(s - v["z"][None, :]) / np.where(s > 0, s, np.nan)
-                dmin = np.nanmin(np.where(np.isfinite(rel), rel, np.inf), axis=0)
-            seen = np.isfinite(dmin)
-            from precision.mono_detail import margin_quantiles
-            tau_margins[f] = margin_quantiles((tau - dmin[seen]) / max(tau, 1e-12)) if seen.any() else None
+        if s.shape[0]:
+            nan = torch.full_like(s, float("nan"))
+            rel = torch.abs(s - z[None]) / torch.where(s > 0, s, nan)
+            dmin = torch.where(torch.isfinite(rel), rel, torch.full_like(rel, float("inf"))).amin(0)
+            seen = torch.isfinite(dmin) & candt
+            tau_margins[f] = FT.margin_quantiles((tau - dmin[seen]) / max(tau, 1e-12)) if bool(seen.any()) else None
+            rep_ok, zrep, nrep = FT.agreeing_median(s, tau, int(repair_min_views))
         else:
             tau_margins[f] = None
-        pas, edg = passed[f][rr, cc], edge[f][rr, cc]
+            rep_ok = torch.zeros((H, W), dtype=torch.bool, device=z.device)
+            zrep = torch.full((H, W), float("nan"), dtype=torch.float64, device=z.device)
+            nrep = torch.zeros((H, W), dtype=torch.int32, device=z.device)
+        pas = FT._t(passed[f], torch.bool) & candt
+        edg = FT._t(edge[f], torch.bool) & candt
         contradicted = pas & (contra > agree)
-        rep_ok = np.zeros(len(rr), bool); zrep = np.full(len(rr), np.nan); nrep = np.zeros(len(rr), np.int32)
-        if contradicted.any():
-            ok, z_, n_ = CC.agreeing_median(v["splats"][:, contradicted], tau, int(repair_min_views))
-            rep_ok[contradicted] = ok; zrep[contradicted] = z_; nrep[contradicted] = n_
+        rep_ok = rep_ok & contradicted
         keep, repair, admit = CC.edge_vote_decision(pas, edg, agree, contra, rep_ok)
-        zmap = np.zeros((H, W), np.float32); amap = np.zeros((H, W), np.int16)
         m = keep | admit
-        zmap[rr[m], cc[m]] = v["zmed"][m]; amap[rr[m], cc[m]] = agree[m]
-        zmap[rr[repair], cc[repair]] = zrep[repair]; amap[rr[repair], cc[repair]] = nrep[repair]
-        final[f] = (zmap, amap)
+        zero = torch.zeros_like(z)
+        zmap = torch.where(m, v["zmed"], zero)
+        zmap = torch.where(repair, zrep, zmap)
+        amap = torch.where(m, agree, torch.zeros_like(agree))
+        amap = torch.where(repair, nrep, amap)
+        zmap_np = FT._np(zmap, np.float32); amap_np = FT._np(amap, np.int16)
+        final[f] = (zmap_np, amap_np)
         for k, n in (("valid", int(valid[f].sum())), ("edge", int(edge[f].sum())), ("kept", int(keep.sum())),
                      ("contradicted", int(contradicted.sum())), ("repaired", int(repair.sum())),
                      ("admitted", int(admit.sum())), ("edge_below", int((~pas & edg).sum())),
-                     ("out", int((zmap > 0).sum()))):
+                     ("out", int((zmap_np > 0).sum()))):
             tot[k] = tot.get(k, 0) + n
     tot.update(mixed=n_mixed, snapped=n_snap, tau=tau)
     # the bars of the vote and the margins to them (point 53): τ itself (the session's own
@@ -892,6 +900,8 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
             report["source_counts"] = {SRC_CLOUD_NAMES[int(v)]: int(c) for v, c in
                                        zip(*np.unique(cols["source"], return_counts=True))}
             write_mono_layers(out / "precision", data, cols["source"], md_rep, K, c2w, log)
+        from precision import f6_torch as FT
+        report["maps_numerics"] = FT.record()          # the device and torch numerics of every map here (USER 2026-10-08)
         camera_travels(tmp, params, len(frames), log)
         _p(85, "publishing the epoch (octree, atomic swap)")
         rep = CC.publish(session_dir, tmp, report, log, columns=cols)
@@ -922,7 +932,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--session", required=True)
     args = ap.parse_args(argv)
     from precision.config import load_precision_config
-    run_depth_on_f5(Path(args.session), load_precision_config())
+    from precision import f6_torch as FT
+    pcfg = load_precision_config()
+    # USER 2026-10-08: the maps run on the card, strict deterministic torch for the whole process
+    # (PointDiT's own context re-applies the same flags); no card, no stage
+    rec = FT.require_cuda(int(pcfg.mono_detail.seed))
+    print(f"{LOG_TAG} maps on {rec['device']} ({rec['card']}), torch {rec['torch']}, deterministic strict")
+    run_depth_on_f5(Path(args.session), pcfg)
     return 0
 
 

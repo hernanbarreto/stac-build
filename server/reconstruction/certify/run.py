@@ -35,6 +35,25 @@ check ran, every stored epoch directory is deleted and the live epoch is the
 ONE deliverable (`correction.apply.keep_only_live_epoch`; the acta lists them
 as ``epochs_discarded``). The acta (output/certify_acta.json) lists the
 iterations, their metrics, gates and where and why the loop stopped.
+
+DETERMINISM (docs/plan_determinismo.md, 2026-10-08):
+  * points 126 / 150 — the certification is a function of the reconstruction's
+    PRODUCT epoch (the cloud precision/corrected_cloud.publish wrote,
+    ``corrected_cloud.json``): it SELECTS that epoch before anything, verifies
+    the cloud's sha256 against the report, refuses an input that is not it (a
+    product epoch no longer on disk fails, by name) and never stacks on a
+    certified epoch; with the same input stamp it REUSES the certified epoch it
+    already produced. The epochs outside the product's lineage (a previous
+    certification of this product, a previous reconstruction's leftovers) are
+    deleted first, so the certified epoch is always named product + 1 (136).
+  * point 139 — every loader reads the configuration the stage was handed
+    (the job's frozen ``output/run_config.yaml``), and its sha256, the
+    environment and the code's git state are sealed into the epoch record,
+    the acta and the reports.
+  * point 142 — after the certification scene_r.db is rebuilt into a new file
+    from segmentation_result.json in a fixed order.
+  * points 137 / 166 — the correction ids are derived from what they apply;
+    no clock inside the acta (``certify_acta.timing.json`` holds the times).
 """
 
 from __future__ import annotations
@@ -46,7 +65,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -59,6 +78,37 @@ from reconstruction.witness.mask_votes import load_mask_store
 from reconstruction.witness.run import dynamic_instance_ids, witness_fields
 
 ACTA_JSON = "certify_acta.json"
+ACTA_TIMING_JSON = "certify_acta.timing.json"
+_PCT_DONE = 100                                # the bar's end (a reused epoch reports it at once)
+# the configuration sections the certification reads — what its input stamp seals
+CERTIFY_CONFIG_SECTIONS = ("certify", "correction", "correction_graph", "witness", "loops",
+                           "authority", "structural", "scale", "segmentation")
+# the session files the certification is a function of (those present enter the stamp,
+# the absent ones are listed in it)
+CERTIFY_INPUT_FILES = ("cleaned_cloud.ply", "cleaned_cloud_raw.ply", "camera_poses.txt",
+                       "camera_frames.txt", "camera.json", "intrinsic.txt",
+                       "segmentation_result.json", "segmentation.json", "chunk_plan.json",
+                       "scale_diagnostics.json", "scale_absolute_rows.json", "gauge.json",
+                       "corrected_cloud.json", "floor_transform.npz", "fusion_map.json",
+                       # the session's own repeatability (reconstruction.certify.repeatability)
+                       "uncertainty.json", "elastic_seams.json", "intra_chunk.json",
+                       "maplong_run/uncertainty.json", "maplong_run/elastic_seams.json",
+                       "maplong_run/intra_chunk.json")
+# the code the certification's product is a function of, repo-relative (directories are hashed
+# file by file, bytecode excluded): the correction and the certification, and every package they
+# call to measure — the masks, the fused objects, the loops and witnesses, the precision
+# instruments (gauge, chunk check, cloud metrics), the object store, the user's rule in the fork.
+# Generous on purpose: a code change outside this list could REUSE a stale certification, one
+# inside it only costs a recomputation.
+CERTIFY_CODE = ("server/correction", "server/reconstruction/certify", "server/reconstruction/loops",
+                "server/reconstruction/witness", "server/segmentation", "server/precision",
+                "server/phase_r", "server/repro.py", "server/workers/certify_worker.py",
+                "vendor/VGGT-Long/loop_utils")
+
+
+class CertifyInputError(RuntimeError):
+    """The certification cannot start from what the session holds — with the exact reason
+    (the product epoch is gone, the segmentation was not projected on it ...)."""
 
 
 def _vendor_on_path():
@@ -140,6 +190,161 @@ def _gates(m: dict, prev: Optional[dict], gcfg) -> List[dict]:
     return out
 
 
+# ── the base epoch, the input stamp, the reuse ────────────────────────────
+
+def _cfg_record(obj: Any) -> Any:
+    """A typed configuration as a stampable record (its ``raw`` dict left out: the typed
+    fields ARE what the run reads)."""
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        return {k: _cfg_record(v) for k, v in dataclasses.asdict(obj).items() if k != "raw"}
+    return obj
+
+
+def certify_input_stamp(output_dir, raw_config: Dict[str, Any], operator: str = "",
+                        configs: Optional[Dict[str, Any]] = None) -> dict:
+    """The identity of a certification's INPUTS (points 126 / 150): ``repro.stamp`` over the
+    session files it is a function of (those present; the absent ones listed), the code of the
+    correction and the certification (the two packages, by content), the configurations the
+    run READS (``configs``: the typed loops / correction / precision configurations in use —
+    the frozen file's on the pipeline, a caller's own in a harness; else the raw sections)
+    and the reconstruction id. The operator is not part of it: the same inputs certify the
+    same whoever asked."""
+    from correction.epoch import reconstruction_id_or_none
+    from repro import stamp
+    out = Path(output_dir)
+    names = list(CERTIFY_INPUT_FILES)
+    seg = out / "segmentation.json"
+    if seg.exists():
+        try:
+            names.append(str(json.loads(seg.read_text()).get("mask_file") or "seg_masks.npz"))
+        except (OSError, ValueError):
+            names.append("seg_masks.npz")
+    present = {n: out / n for n in names if (out / n).exists()}
+    absent = sorted(set(names) - set(present))
+    repo = Path(__file__).resolve().parents[3]
+    inputs: Dict[str, Any] = dict(present)
+    for rel in CERTIFY_CODE:
+        inputs[f"code:{rel}"] = repo / rel
+    if configs:
+        cfg = {f"typed.{k}": _cfg_record(v) for k, v in sorted(configs.items())}
+        seg_cfg = raw_config.get("segmentation") or {}
+        cfg["segmentation.mask_filter"] = seg_cfg.get("mask_filter") if isinstance(seg_cfg, dict) else None
+    else:
+        cfg = {sec: raw_config.get(sec) for sec in CERTIFY_CONFIG_SECTIONS}
+        rp = raw_config.get("reconstruction") or {}
+        cfg["reconstruction.precision"] = rp.get("precision") if isinstance(rp, dict) else None
+    cfg["absent"] = absent
+    cfg["reconstruction.id"] = reconstruction_id_or_none(out)
+    return stamp(inputs=inputs, config=cfg)
+
+
+def resolve_base_epoch(output_dir, log: Callable[[str], None] = print) -> dict:
+    """SELECT the reconstruction's product epoch as the certification's input (points 126 /
+    150): the epoch ``corrected_cloud.json`` (or ``fuse_report.json``) names — epoch 0 for a
+    session without a published product (a legacy or synthetic one, declared). A live epoch
+    that is not it (a previous certification's, one the user picked in the kit) is swapped
+    out for it; a product epoch no longer on disk FAILS. The published cloud's sha256 is
+    verified against the report. The segmentation must index that cloud: one projected on
+    another epoch fails, by name (the SAM3 stage projects on the product epoch, point 150)."""
+    from correction.chain import ChainError, product_epoch, select_product_epoch
+    from repro import sha256_file
+    out = Path(output_dir)
+    base, rep = product_epoch(out)
+    try:
+        info: Dict[str, Any] = select_product_epoch(out, log=log)
+    except ChainError as e:
+        raise CertifyInputError(
+            f"the certification starts from the reconstruction's product epoch {base}: {e} — the "
+            f"certification is refused (docs/plan_determinismo.md point 150)") from e
+    if rep is None:
+        info["reason"] = ("no published product (corrected_cloud.json / fuse_report.json): the "
+                          "base is epoch 0, DECLARED")
+    if info["selected"]:
+        log(f"[certify] the session showed epoch {info['live_before']} — the product epoch {base} is "
+            f"the certification's input (point 126: never a transformed epoch)")
+    if rep is not None and rep.get("cloud_sha256"):
+        sha = sha256_file(out / "cleaned_cloud.ply")
+        if sha != rep["cloud_sha256"]:
+            raise CertifyInputError(
+                f"cleaned_cloud.ply at epoch {base} (sha256 {sha[:12]}) is not the cloud "
+                f"{rep.get('product_file')} published ({str(rep['cloud_sha256'])[:12]}) — the product "
+                f"epoch's cloud was replaced; the certification is refused")
+        info["cloud_sha256"] = sha
+    info["base_epoch"] = base
+    # the MASKS must be this reconstruction's (segmentation.json carries the reconstruction id
+    # the SAM3 stage sealed it with — never an epoch number, points 134 / 150); the seal of the
+    # raw store is recorded (a store the interactive manager edited is unsealed by construction)
+    seg_meta_p = out / "segmentation.json"
+    if seg_meta_p.exists():
+        from correction.epoch import RECONSTRUCTION_ID_KEY, reconstruction_id_or_none
+        try:
+            seg_meta = json.loads(seg_meta_p.read_text())
+        except (OSError, ValueError) as e:
+            raise CertifyInputError(f"segmentation.json is unreadable ({e})") from e
+        rid_masks = seg_meta.get(RECONSTRUCTION_ID_KEY)
+        rid_now = reconstruction_id_or_none(out)
+        if rid_masks and rid_now and rid_masks != rid_now:
+            raise CertifyInputError(
+                f"the SAM3 masks (segmentation.json) belong to reconstruction {str(rid_masks)[:12]} and "
+                f"the session is reconstruction {str(rid_now)[:12]} — segment this reconstruction before "
+                f"the certification (point 150)")
+        if not rid_masks:
+            log("[certify] DECLARED: segmentation.json names no reconstruction id (written before "
+                "2026-10-08, or a synthetic session) — the masks are taken on the projection's stamp")
+        from segmentation.pipeline import check_store_seal
+        info["mask_store_seal"] = check_store_seal(out) or "intact"
+    # the segmentation must be this cloud's
+    seg_p = out / "segmentation_result.json"
+    if seg_p.exists():
+        try:
+            seg = json.loads(seg_p.read_text())
+        except (OSError, ValueError) as e:
+            raise CertifyInputError(f"segmentation_result.json is unreadable ({e})") from e
+        if seg.get("pending") and not seg.get("instances"):
+            raise CertifyInputError(
+                f"segmentation_result.json at the product epoch {base} is the publish placeholder "
+                f"('{seg.get('pending')}') — the SAM3 projection did not run on this epoch; it has "
+                f"to be projected on the product epoch before the certification (point 150)")
+        if isinstance(seg.get("stamp"), dict):
+            # the projection's own stamp (segmentation.pipeline, point 123): a result projected
+            # on another cloud, with other masks or another code is refused, by name
+            from segmentation.pipeline import segmentation_result_is_stale
+            stale, why = segmentation_result_is_stale(out)
+            if stale:
+                raise CertifyInputError(
+                    f"segmentation_result.json is not the projection of the product epoch {base} "
+                    f"as it is now ({why}) — project the masks on it before the certification "
+                    f"(point 150)")
+            info["segmentation_stamp"] = seg["stamp"].get("sha256")
+        else:
+            log("[certify] DECLARED: segmentation_result.json carries no projection stamp (written "
+                "before 2026-10-08, or a synthetic session) — taken on its point count alone")
+        n_seg = seg.get("total_points")
+        if n_seg is not None:
+            from correction.session import read_ply
+            _, data = read_ply(out / "cleaned_cloud.ply")
+            if int(n_seg) != len(data):
+                raise CertifyInputError(
+                    f"segmentation_result.json indexes a cloud of {int(n_seg):,} points and the "
+                    f"product epoch {base}'s cloud has {len(data):,} — the masks were projected on "
+                    f"another epoch; project them on the product epoch first (point 150)")
+    return info
+
+
+def _read_acta(output_dir) -> Optional[dict]:
+    p = Path(output_dir) / ACTA_JSON
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_json(path: Path, doc: dict) -> None:
+    path.write_text(json.dumps(doc, indent=1, sort_keys=True, default=float))
+
+
 def certify_session(session_dir, *args, **kwargs) -> dict:
     """Run the certification holding the session lock.
 
@@ -164,8 +369,14 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
                     tracks=None, loop_density: float = 1.0, detect_loops: bool = True,
                     extra_loop_edges: Optional[Sequence[dict]] = None, use_fork_edges: bool = True,
                     max_iters: Optional[int] = None, apply: bool = True,
-                    progress: Optional[Callable[[int, str], None]] = None) -> dict:
+                    progress: Optional[Callable[[int, str], None]] = None,
+                    raw_config: Optional[Dict[str, Any]] = None,
+                    config_sha256: Optional[str] = None) -> dict:
     """Run the loop; returns the acta (also output/certify_acta.json).
+
+    ``raw_config``: the configuration dict this run reads EVERY loader from (the job's
+    frozen run configuration; None = the server's, declared); ``config_sha256``: its
+    digest, sealed into the epoch record, the acta and the reports.
 
     `progress(pct, message)` reports the REAL advance of each stage. It used
     to report nothing: the worker sent 5 % on entry and 100 % on exit, so the
@@ -184,21 +395,75 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
     from correction.session import load_session
     from correction.apply import stage_transaction, swap_transaction, assert_no_interrupted_swap
     from correction.config import load_correction_config
-    from correction.invalidate import update_instance_store
+    from correction.invalidate import rebuild_store_fresh, update_instance_store
     from correction import ledger
     from reconstruction.loops.config import load_loops_config
     from reconstruction.loops.kf_graph import run_keyframe_graph
     from reconstruction.loops.instance_loops import detect_instance_loops
     from reconstruction.witness.depth_tracks import depth_stage, contour_observations, load_images
     _vendor_on_path()
-    cfg = cfg or load_loops_config()
-    ccfg = correction_cfg or load_correction_config()
+    if raw_config is None:
+        from config import cfg as _server_cfg
+        raw_config = _server_cfg
+        log("[certify] DECLARED: no frozen run configuration handed — the loaders read the "
+            "server's configuration")
+    cfg = cfg or load_loops_config(raw_config)
+    ccfg = correction_cfg or load_correction_config(raw_config)
+    from precision.config import load_precision_config
+    _pcfg = load_precision_config(raw_config)
     ccert = cfg.certify
     session_dir = Path(session_dir)
     output_dir = session_dir / "output"
     t_start = time.time()
+    timing: Dict[str, Any] = {"started_at": time.strftime("%Y-%m-%d %H:%M:%S"), "iterations": []}
     assert_no_interrupted_swap(output_dir)
     n_iters = int(max_iters if max_iters is not None else ccert.max_iters)
+    from correction.epoch import current_epoch
+
+    # ── THE INPUT: the product epoch, its stamp, the reuse ───────────────
+    base_info: Dict[str, Any] = {}
+    # what the session held BEFORE this run (the epoch it showed, the leftovers removed) is
+    # history: it goes to certify_acta.timing.json, never into the compared acta (point 136)
+    history: Dict[str, Any] = {}
+    timing["history"] = history
+    if apply:
+        base_info = resolve_base_epoch(output_dir, log=log)
+        for _k in ("live_before", "selected"):
+            if _k in base_info:
+                history[_k] = base_info.pop(_k)
+    input_stamp = certify_input_stamp(output_dir, raw_config, operator,
+                                      configs={"loops": cfg, "correction": ccfg, "precision": _pcfg})
+    from repro import environment_record
+    env = environment_record(gpu=False)
+    if apply:
+        prev_acta = _read_acta(output_dir)
+        if (prev_acta is not None and prev_acta.get("input_stamp") == input_stamp["sha256"]
+                and prev_acta.get("epoch_final") is not None):
+            from correction.apply import available_epochs
+            from correction.run import run_select
+            from correction.chain import epoch_record_of
+            fin = int(prev_acta["epoch_final"])
+            _rec_fin = (epoch_record_of(output_dir, fin)
+                        if fin in [e["epoch"] for e in available_epochs(output_dir)] else None)
+            # the certified epoch itself must carry the stamp (its geometry_epoch.json) — an acta
+            # left beside another epoch with the same number proves nothing
+            if _rec_fin is not None and _rec_fin.get("certify_input_stamp") == input_stamp["sha256"]:
+                if current_epoch(output_dir) != fin:
+                    run_select(output_dir, fin, "certify", log=log)
+                log(f"[certify] REUSED: the inputs' stamp {input_stamp['sha256'][:12]} is the one the "
+                    f"certified epoch {fin} was produced from — nothing recomputed, nothing stacked "
+                    f"(point 126)")
+                acta = dict(prev_acta, reused=True)
+                _pc(_PCT_DONE, f"certification: reused epoch {fin}")
+                return acta
+        # the epochs outside the product's lineage — a previous certification of this product,
+        # a previous reconstruction's leftovers — go, so this epoch is product + 1 (point 136)
+        from correction.chain import lineage_cleanup
+        from correction.epoch import epoch_lineage
+        base = int(base_info.get("base_epoch", current_epoch(output_dir)))
+        history["lineage_cleanup"] = lineage_cleanup(output_dir, epoch_lineage(output_dir, base), log=log)
+    record_extra = {"run_config_sha256": config_sha256, "certify_input_stamp": input_stamp["sha256"]}
+
     # σ FLOOR — measured, not derived from another constant (USER 2026-09-16).
     # No edge may claim more precision than this session can repeat; the session
     # measures exactly that (two copies of a shared frame, the seam residual, or
@@ -211,8 +476,12 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
                                       fallback_m=ccert.visit_loops.sigma_floor_m,
                                       log=log)
     sigma_floor_m = float(rep_floor["sigma_floor_m"])
-    acta = {"version": 1, "started_at": time.strftime("%Y-%m-%d %H:%M:%S"), "operator": operator,
+    acta = {"version": 2, "operator": operator,
             "max_iters": n_iters, "eps": ccert.eps, "loop_density": float(loop_density),
+            # the identity of this certification: what it ran on, with what, where (no clock:
+            # certify_acta.timing.json, point 166)
+            "base": base_info, "input_stamp": input_stamp["sha256"], "input_stamp_detail": input_stamp,
+            "run_config_sha256": config_sha256, "environment": env,
             # what this session can repeat — every σ in the graph is floored by
             # it, and the acta says whether it was MEASURED or declared
             "sigma_floor": {"m": sigma_floor_m, **{k: v for k, v in rep_floor.items()
@@ -238,8 +507,9 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
                           log=_log, sigma_floor_m=sigma_floor_m)
         return _subsample(inst, loop_density) + _subsample(vis, loop_density)
 
-    base = base_frames if base_frames is not None else load_session_frames(output_dir, log)
-    from correction.epoch import current_epoch
+    # the witness frames (every keyframe's depth) are loaded only when the §9 measurement
+    # runs — a deliverable-only certification never reads them
+    base = base_frames
     acta["epoch_initial"] = current_epoch(output_dir)
 
     # ── THE CORRECTION ───────────────────────────────────────────────────
@@ -304,6 +574,8 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
     # final"*, docs/pipeline_final.md §10): read here, acted on at the end —
     # after the correction published and the chunk check measured the result
     _single_final = bool(getattr(ccert, "single_final_epoch", False))
+    if base is None and (n_iters > 0 or (apply and not _deliverable_only)):
+        base = load_session_frames(output_dir, log)
     if apply and not _deliverable_only:
         s0 = load_session(output_dir)
         i0 = _instances()
@@ -324,10 +596,12 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         # correction re-read production config.yaml behind the caller's back
         # (found 2026-09-21: on a synthetic session `floor.min_inliers: 5000`
         # demoted every keyframe and no epoch was ever published)
+        t_corr = time.time()
         vd = run_correction(session_dir, log=log, cfg=ccfg,
+                            record_extra=record_extra,
                             progress=lambda p, m: _pc(35 + int(p * 0.27), m))
+        timing["correction_elapsed_s"] = vd.get("elapsed_s", round(time.time() - t_corr, 1))
         acta["correction"] = {"stages": vd["stages"],
-                              "elapsed_s": vd["elapsed_s"],
                               # the correction's own epoch and provenance tag:
                               # the acta used to drop both
                               "epoch": vd.get("epoch"),
@@ -337,8 +611,6 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         # "verificación interna e intrachunk … que quede todo en el pipeline") — a
         # report; its failure is declared, never the stage's
         try:
-            from precision.config import load_precision_config
-            _pcfg = load_precision_config()
             if _pcfg.enabled:
                 from precision.chunk_check import run_check
                 _chk = run_check(session_dir, _pcfg, log=log)
@@ -350,19 +622,28 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
             acta["chunk_check"] = {"error": str(_e)}
         # the floor + edge metrics of the CERTIFIED cloud (precision/cloud_metrics.py) — reports
         try:
-            from precision.config import load_precision_config as _lpc
-            _pc2 = _lpc()
-            if _pc2.enabled:
+            if _pcfg.enabled:
                 from precision.cloud_metrics import run_cloud_metrics
-                acta["cloud_metrics"] = run_cloud_metrics(session_dir, _pc2, stage="certify", log=log, edges=True)
+                acta["cloud_metrics"] = run_cloud_metrics(session_dir, _pcfg, stage="certify", log=log, edges=True)
+                # the acta names files relative to output/ — an absolute path would make two copies
+                # of one session write different actas
+                _edges = (acta["cloud_metrics"] or {}).get("edges") or {}
+                if isinstance(_edges.get("report"), str):
+                    try:
+                        _edges["report"] = Path(_edges["report"]).resolve().relative_to(
+                            output_dir.resolve()).as_posix()
+                    except ValueError:
+                        _edges["report"] = Path(_edges["report"]).name
         except Exception as _e:  # noqa: BLE001
             log(f"[certify] cloud metrics not run: {_e}")
             acta["cloud_metrics"] = {"error": str(_e)}
-        base = load_session_frames(output_dir, log)   # poses moved under us
+        if n_iters > 0:
+            base = load_session_frames(output_dir, log)   # poses moved under us
 
     for it in range(n_iters):
         t_it = time.time()
-        rec = {"iteration": it, "epoch_from": current_epoch(output_dir)}
+        # the run's configuration digest and input stamp travel with every report (point 139)
+        rec = {"iteration": it, "epoch_from": current_epoch(output_dir), **record_extra}
         session = load_session(output_dir)
         instances = _instances()
         store = load_mask_store(output_dir) if instances else None
@@ -402,7 +683,8 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
                 f"{prev['seam_residual']['median_m']} | closure {prev['closure']['median_m']} | "
                 f"verified {prev['witnesses']['status_fraction']['verified']:.3f}")
         # 2) scale FIRST
-        srep = solve_scale_stage(output_dir, session, scale_meas, ccert.scale, log=log)
+        srep = solve_scale_stage(output_dir, session, scale_meas, ccert.scale, log=log,
+                                 graph=cfg.graph, ccfg=ccfg)
         ranges, owner = chunk_of_keyframes(output_dir, N)
         I3 = np.tile(np.eye(3), (N, 1, 1))
         if srep.get("applied"):
@@ -488,6 +770,16 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         failed = [g for g in gates if not g["passed"]]
         advisory = ccert.gates.mode == "advisory"
         gate_warnings = [f"{g['name']}: {g['value']} vs {g['threshold']} ({g['detail']})" for g in failed]
+        # the scale stage's own declarations (point 127): a model the closures favoured that the
+        # user's rule refused, or a solution beyond the declared bound — never silent
+        if not srep.get("applied"):
+            # identity by the user's rule, too few judges, no closure at all: the instrument
+            # that did not correct says so (the known-answer harness reads these warnings)
+            gate_warnings.append(f"scale_not_applied: {srep.get('reason')}")
+        _bound = srep.get("gate")
+        if _bound and not _bound.get("passed"):
+            gate_warnings.append(f"max_correction_log: {_bound['value']:.4f} vs {_bound['threshold']} "
+                                 f"({srep.get('reason')})")
         if failed and advisory:
             for g in failed:
                 g["advisory"] = True
@@ -512,21 +804,22 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
                     "metrics": m, "gates": gates, "gate_mode": ccert.gates.mode,
                     "gate_warnings": gate_warnings, "geometry_moved": moved,
                     "objective": m["objective"], "objective_prev": prev["objective"],
-                    "improvement": improvement, "regressed": regressed,
-                    "elapsed_s": round(time.time() - t_it, 1)})
+                    "improvement": improvement, "regressed": regressed})
+        timing["iterations"].append({"iteration": it, "elapsed_s": round(time.time() - t_it, 1)})
         if failed and not advisory:
             rec["verdict"] = "rejected"
             rec["reason"] = "; ".join(f"{g['name']}: {g['value']} vs {g['threshold']}" for g in failed)
-            cid = ledger.new_correction_id()
+            cid = ledger.new_correction_id("certify", "rejected", int(rec["epoch_from"]), it, rec["reason"],
+                                           input_stamp["sha256"])
             rep_path = output_dir / "corrections" / f"report_{cid}.json"
             rep_path.parent.mkdir(parents=True, exist_ok=True)
-            rep_path.write_text(json.dumps(rec, indent=1, default=float))
+            _write_json(rep_path, rec)
             ledger.record_run(output_dir, correction_id=cid, epoch_from=rec["epoch_from"],
                               epoch_to=rec["epoch_from"], kind="certify", operator=operator,
                               instance_ids=[int(mm["instance_id"]) for mm in scale_meas],
                               visits=[], observability=[], diagnosis=[], anchors=[], gates=gates,
                               overrides={}, report_path=str(rep_path.relative_to(output_dir)),
-                              verdict="rejected")
+                              verdict="rejected", elapsed_s=time.time() - t_it)
             rec["correction_id"] = cid
             acta["iterations"].append(rec)
             acta["stopped_at"] = it
@@ -548,22 +841,27 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
             if rd is not None and len(rd) == len(d2):
                 rh, rd = add_fields(rh, rd, fields)
             sess_tx = dataclasses.replace(session, header=h2, data=d2, raw_header=rh, raw_data=rd)
-            cid = ledger.new_correction_id()
+            # the id is what the epoch applies (point 137)
+            cid = ledger.new_correction_id(*ledger.transform_parts(
+                "certify", int(rec["epoch_from"]), session.frames, R_tot, t_tot, k_tot, b_tot))
+            from correction.chain import applied_depth_factor
             from correction.diagnose import regenerate_scale_diagnostics
+            k_applied = {int(f): float(k) for f, k in
+                         zip(session.frames, applied_depth_factor(output_dir, session.frames))}
             scale_diag_new = regenerate_scale_diagnostics(
                 output_dir, {int(f): float(k_tot[k]) for f, k in session.kf_index.items()},
-                current_epoch(output_dir) + 1, cid)
+                current_epoch(output_dir) + 1, cid, k_applied_by_frame=k_applied)
             tx = stage_transaction(sess_tx, ccfg, R_tot, t_tot, k_tot, correction_id=cid,
                                    scale_diag_new=scale_diag_new, floor_npz=None, log=log,
                                    progress=lambda p, m: _pc(78 + int(p * 0.18), m),
-                                   b_kf=b_tot)
+                                   b_kf=b_tot, record_extra=record_extra)
             swap_transaction(output_dir, tx, log=log)
             update_instance_store(output_dir, R_tot, t_tot, k_tot, session.frames, log=log, b_kf=b_tot)
             rep_path = output_dir / "corrections" / f"report_{cid}.json"
             rep_path.parent.mkdir(parents=True, exist_ok=True)
             rec["correction_id"] = cid
             rec["epoch_to"] = tx["epoch_to"]
-            rep_path.write_text(json.dumps(rec, indent=1, default=float))
+            _write_json(rep_path, rec)
             ledger.record_run(output_dir, correction_id=cid, epoch_from=tx["epoch_from"],
                               epoch_to=tx["epoch_to"], kind="certify", operator=operator,
                               instance_ids=[int(mm["instance_id"]) for mm in scale_meas], visits=[],
@@ -571,9 +869,11 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
                               anchors=[{"kf": int(mm["i"]), "kf2": int(mm["j"]), "sigma_m": float(mm["sigma_m"]),
                                         "observes": mm.get("observability")} for mm in edges_s if "Z" in mm],
                               gates=gates + [g for g in [srep.get("gate")] if g], overrides={},
-                              report_path=str(rep_path.relative_to(output_dir)))
+                              report_path=str(rep_path.relative_to(output_dir)),
+                              elapsed_s=time.time() - t_it)
             write_epoch_report(output_dir, tx["epoch_to"], m, prev,
-                               extra={"iteration": it, "correction_id": cid, "stages": rec["stages"]})
+                               extra={"iteration": it, "correction_id": cid, "stages": rec["stages"],
+                                      **record_extra})
         rec["verdict"] = "applied" if apply else "measured"
         acta["iterations"].append(rec)
         log(f"[certify] iteration {it}: objective {prev['objective']:.4f} → {m['objective']:.4f} "
@@ -606,7 +906,12 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
     # clouds already carry them from the merge (`witness.at_merge`), and
     # rewriting values a second time would make a rejected iteration look like
     # it had touched the session.
-    if apply and last_fields is not None:
+    _base_epoch = int(base_info.get("base_epoch", 0)) if base_info else None
+    if apply and last_fields is not None and _base_epoch is not None \
+            and current_epoch(output_dir) == _base_epoch:
+        log("[certify] witness columns NOT written: the live epoch is the reconstruction's "
+            "product epoch, which the certification reads only (point 126)")
+    elif apply and last_fields is not None:
         try:
             from correction.session import read_ply, write_ply
             from reconstruction.witness.fields import add_fields as _add
@@ -642,7 +947,7 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         write_epoch_report(output_dir, int(e),
                            last_m if last_m is not None else acta.get("metrics_initial", {}),
                            acta.get("metrics_initial"),
-                           extra={"correction": acta.get("correction")})
+                           extra={"correction": acta.get("correction"), **record_extra})
 
     # ── the second moment of the geometric cleanup cycle ──────────────────
     # The mask audit MARKED, at match time, every point landing off its own
@@ -701,13 +1006,22 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
             log(f"[certify] ⚠ stored epochs NOT discarded ({e}) — the live epoch "
                 f"is still the deliverable")
             acta["epochs_discarded"] = {"error": str(e)}
+    # ── the object store, rebuilt into a new file (point 142) ─────────────
+    if apply:
+        try:
+            acta["instance_store"] = rebuild_store_fresh(output_dir, log=log)
+        except Exception as e:  # noqa: BLE001 — declared in the acta, the geometry is published
+            log(f"[certify] ⚠ scene_r.db could not be rebuilt ({e}) — the store on disk is the "
+                f"in-place one")
+            acta["instance_store"] = {"store": "rebuild_failed", "error": str(e)}
     acta["metrics_final"] = (last_m if last_m is not None else
                              (prev if prev is not None else acta.get("metrics_initial")))
     acta["epoch_final"] = current_epoch(output_dir)
-    acta["elapsed_s"] = round(time.time() - t_start, 1)
-    (output_dir / ACTA_JSON).write_text(json.dumps(acta, indent=1, default=float))
+    timing["elapsed_s"] = round(time.time() - t_start, 1)
+    (output_dir / ACTA_JSON).write_text(json.dumps(acta, indent=1, sort_keys=True, default=float))
+    (output_dir / ACTA_TIMING_JSON).write_text(json.dumps(timing, indent=1, sort_keys=True, default=float))
     _pc(97, "certification: writing the acta")
-    log(f"[certify] stopped: {acta['stop_reason']} (epoch {acta['epoch_final']}, {acta['elapsed_s']}s)")
+    log(f"[certify] stopped: {acta['stop_reason']} (epoch {acta['epoch_final']}, {timing['elapsed_s']}s)")
     return acta
 
 
@@ -717,7 +1031,19 @@ def main(argv=None) -> int:
     ap.add_argument("--operator", default="cli")
     ap.add_argument("--max-iters", type=int, default=None)
     args = ap.parse_args(argv)
-    certify_session(args.session, operator=args.operator, max_iters=args.max_iters)
+    # a CLI is its own job: it reads the session's frozen configuration when there is one,
+    # else freezes the server's now (point 139; intake.run_config's rule)
+    from intake.run_config import effective_config, freeze_run_config, has_run_config, load_run_config
+    sd = Path(args.session)
+    if has_run_config(sd):
+        frozen, sha = load_run_config(sd)
+    else:
+        from config import cfg as raw_cfg
+        sha = freeze_run_config(sd, raw_cfg)["sha256"]
+        frozen, _ = load_run_config(sd)
+    raw = effective_config(frozen, "certify")
+    certify_session(args.session, operator=args.operator, max_iters=args.max_iters,
+                    raw_config=raw, config_sha256=sha)
     return 0
 
 
