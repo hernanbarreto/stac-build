@@ -887,13 +887,23 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
             """Process all batches for a single category. Raises on OOM.
             boxes_by_pos: {category-local frame position: [xywh boxes]} from the
             Phase 1 auto-prompter — seeded into SAM3 alongside the text prompt."""
+            from segmentation.sam3_wrapper import SAM3PropagationStopped
             batch_step = batch_size - batch_overlap
             cat_masks = {}
             next_global_id = 1
             prev_batch_masks = None
             prev_overlap_start = None
-
-            for batch_idx, (b_start, b_end) in enumerate(batches):
+            prev_end = None
+            # the work list grows by a CONTINUATION batch when the vendor tracker stops midway
+            # (SAM3PropagationStopped): the frames it completed are kept and the rest of the
+            # batch is propagated again from (stop − overlap), linked by the same overlap rule
+            # as any two batches — deterministic, since the stop is (measured on pccr 'pipe')
+            work = list(batches)
+            wi = 0
+            while wi < len(work):
+                batch_idx = wi
+                b_start, b_end = work[wi]
+                wi += 1
                 batch_frame_files = frame_files[b_start:b_end]
                 batch_len = len(batch_frame_files)
 
@@ -915,11 +925,29 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                         print(f"[SegPipeline]   box seeds on {len(batch_boxes)} frame(s)")
 
                 try:
-                    raw_results = sam3.process_batch(
-                        str(batch_dir), category, index_mapping,
-                        boxes_by_local=batch_boxes or None,
-                    )
-                    
+                    try:
+                        raw_results = sam3.process_batch(
+                            str(batch_dir), category, index_mapping,
+                            boxes_by_local=batch_boxes or None,
+                        )
+                    except SAM3PropagationStopped as stop:
+                        n_done = int(stop.frames_done)
+                        if n_done <= batch_overlap:
+                            # no progress past the overlap: a continuation would start where
+                            # this one did — the prompt fails (point 92)
+                            raise
+                        raw_results = stop.partial
+                        b_end = b_start + n_done
+                        work.insert(wi, (b_end - batch_overlap, work[wi - 1][1]))
+                        work[wi - 1] = (b_start, b_end)
+                        decisions.append({"kind": "vendor_stop_continuation", "category": category,
+                                          "batch": [int(b_start), int(work[wi][1])],
+                                          "frames_done": n_done,
+                                          "continuation": [int(work[wi][0]), int(work[wi][1])]})
+                        print(f"[SegPipeline]   ⤷ the vendor tracker stopped after {n_done} frame(s) "
+                              f"({b_start}–{b_end - 1} kept); the rest is propagated again from "
+                              f"{work[wi][0]} (overlap {batch_overlap}) — declared in the census")
+
                     if not raw_results:
                         print(f"[SegPipeline] Batch {batch_idx}: no masks produced")
                         continue
@@ -947,7 +975,12 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                             next_global_id += 1
                     else:
                         overlap_start_frame = b_start
-                        overlap_end_frame = prev_overlap_start + batch_step + batch_overlap - 1 if prev_overlap_start is not None else b_start + batch_overlap - 1
+                        # the overlap ends where the PREVIOUS batch's frames end (a full batch:
+                        # prev start + batch_size − 1; a batch the vendor stopped: its last frame)
+                        overlap_end_frame = (prev_end - 1 if prev_end is not None
+                                             else prev_overlap_start + batch_step + batch_overlap - 1
+                                             if prev_overlap_start is not None
+                                             else b_start + batch_overlap - 1)
 
                         id_remap, next_global_id = _match_ids_iou(
                             prev_batch_masks, batch_masks,
@@ -969,6 +1002,7 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                     
                     prev_batch_masks = remapped_batch
                     prev_overlap_start = b_start
+                    prev_end = b_end
                     
                     unique_objects = set()
                     for fm in batch_masks.values():

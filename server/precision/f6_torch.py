@@ -34,7 +34,7 @@ import torch
 import torch.nn.functional as F
 
 MAD_TO_SIGMA = 1.0 / 0.6744897501960817   # σ of a normal from its MAD (1.4826)
-GAUSS_TRUNCATE = 4.0                       # scipy.ndimage.gaussian_filter's default: kernel radius int(4σ + 0.5)
+GAUSS_TRUNCATE = 4                         # scipy.ndimage.gaussian_filter's default: kernel radius int(4σ + 0.5)
 
 # per-pixel provenance of the refined depth (mono_detail re-exports them)
 SRC_OMEGA = 0            # Omega bent (no tile covered it, or a band pixel on a surface)
@@ -166,7 +166,7 @@ def margin_quantiles(x: torch.Tensor) -> Optional[dict]:
     v = v[torch.isfinite(v)]
     if v.numel() == 0:
         return None
-    q = quantile(v, [0.05, 0.25, 0.5, 0.75, 0.95]).tolist()
+    q = quantile(v, [p / 100 for p in (5, 25, 50, 75, 95)]).tolist()   # the report's percentiles
     return {"n": int(v.numel()), "p05": float(q[0]), "p25": float(q[1]), "p50": float(q[2]),
             "p75": float(q[3]), "p95": float(q[4]), "share_beyond": float((v < 0).to(torch.float64).mean().item())}
 

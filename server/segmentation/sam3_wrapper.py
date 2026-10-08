@@ -64,6 +64,27 @@ class SAM3OutOfMemory(SAM3RunError):
     whose free memory depends on what else was on it, never a skipped prompt)."""
 
 
+# the vendor tracker's own message when, midway through a propagation, one of its multiplex
+# states holds objects but no conditioning frame (sam3/model/video_tracking_multiplex_demo.py
+# propagate_in_video). MEASURED 2026-10-08 on pccr 'pipe': deterministic — the same frame on
+# every run, with or without the object cap, the association padding or torch's deterministic
+# mode — so the frames before it are a complete, repeatable result and the rest of the batch
+# is propagated again from there (segmentation.pipeline, the continuation batch)
+VENDOR_STATE_WITHOUT_CONDITIONING = "No points are provided; please add points first"
+
+
+class SAM3PropagationStopped(SAM3RunError):
+    """The vendor tracker stopped midway through a propagation with
+    :data:`VENDOR_STATE_WITHOUT_CONDITIONING`. ``partial`` holds the frames completed before
+    it (``frames_done`` leading local frames, 0 … frames_done − 1, complete); the caller
+    propagates the rest of the batch again from there. Any other error stays a failure."""
+
+    def __init__(self, msg: str, partial: Dict[int, Any], frames_done: int):
+        super().__init__(msg)
+        self.partial = partial
+        self.frames_done = int(frames_done)
+
+
 SAM3_VERSIONS = ("sam3", "sam3.1")
 # the seed of the deterministic torch state the model runs under — the one every GPU
 # step of this repo uses (extract_da3_depth.DETERMINISTIC_SEED, 2026-10-07); SAM3's
@@ -723,6 +744,7 @@ class SAM3Wrapper:
         batch_path = Path(batch_dir)
         batch_size = len(index_mapping)
         results = {}
+        done_locals: List[int] = []
         phase = "start_session"
 
         try:
@@ -801,7 +823,8 @@ class SAM3Wrapper:
                         outputs["out_obj_ids"] = oids.cpu().numpy()
                 
                 results[orig_idx] = outputs
-            
+                done_locals.append(int(local_idx))
+
             _vram_after = 0
             if torch.cuda.is_available():
                 _vram_after = torch.cuda.memory_allocated() / (1024**3)
@@ -815,6 +838,17 @@ class SAM3Wrapper:
             # the reused session may be in a bad state (and on OOM its frames are
             # the memory we need back) — drop it
             self.release_batch_session()
+            # the vendor tracker's deterministic midway stop: the leading frames it completed
+            # are a complete result and go back to the caller, who propagates the rest again
+            # (only when they are the frames 0 … n−1 of the batch, propagated forward)
+            if (phase == "propagate_in_video" and not is_oom
+                    and VENDOR_STATE_WITHOUT_CONDITIONING in str(e)):
+                n_done = len(done_locals)
+                if n_done and sorted(done_locals) == list(range(n_done)):
+                    raise SAM3PropagationStopped(
+                        f"SAM3 propagation for prompt '{prompt_text}' stopped by the vendor tracker "
+                        f"after {n_done} of {batch_size} frame(s) ({VENDOR_STATE_WITHOUT_CONDITIONING})",
+                        partial=results, frames_done=n_done) from e
             # NEVER partial results (point 92): an error midway through the propagation
             # used to return the frames done so far as the category's masks, recorded as
             # 'ran'. The prompt fails, with its phase; an OOM is a failure like any other

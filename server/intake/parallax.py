@@ -323,7 +323,7 @@ def rotation_quantum(K: np.ndarray, native_w: int) -> Dict[str, float]:
                             f"{fx}, W {w}")
     tau = covis_tau()
     fov_h = 2.0 * math.degrees(math.atan(w / (2.0 * fx)))
-    return {"theta_q_deg": (1.0 - tau) * fov_h / 4.0, "fov_h_deg": fov_h,
+    return {"theta_q_deg": (1.0 - tau) * fov_h / 4, "fov_h_deg": fov_h,
             "tau": tau, "fx_px": fx, "native_w": w,
             "derivation": "theta_q = (1 - tau) * fov_h / 4; fov_h = 2 * atan(W / (2 * fx))"}
 
