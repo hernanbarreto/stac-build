@@ -116,6 +116,77 @@ def floor_metric(X: np.ndarray, c2w: np.ndarray, cfg, seed: int = 0) -> dict:
             "band_share": float(len(B) / max(len(X), 1)), "points_measured": int(len(X))}
 
 
+def cloud_floor_levels(out: Path, fields: dict, frames, c2w: np.ndarray, raw_cfg: dict,
+                       max_points: int) -> dict:
+    """The floor of every Omega chunk of the published cloud — ``correction.floor.
+    chunk_floor_levels``, the certification's own choice (USER 2026-10-08: one floor concept for
+    the certification, the chunk check and this metric) — on the deterministic subsample of at
+    most ``max_points`` points (:func:`stable_point_sample`), with the surface each chunk's floor
+    is (``correction.floor.chosen_surfaces``). Returns {levels, surfaces, X, ks, ck}; raises
+    CloudMetricsError when the cloud carries no keyframe provenance."""
+    from correction.config import judge_of, load_correction_config
+    from correction.floor import (chosen_surfaces, chunk_floor_levels, omega_chunk_of_frames,
+                                  repeatability_of)
+    if "frame_global" not in fields:
+        raise CloudMetricsError("the cloud carries no frame_global — the floor of each chunk "
+                                "cannot be measured")
+    fr = np.asarray(list(frames), np.int64)
+    order = np.argsort(fr, kind="stable")
+    fg = np.asarray(fields["frame_global"], np.int64)
+    at = np.clip(np.searchsorted(fr[order], fg), 0, len(fr) - 1)
+    ks_all = np.where(fr[order][at] == fg, order[at], -1)
+    rows = stable_point_sample(fields, np.flatnonzero(ks_all >= 0), int(max_points))
+    X = np.stack([np.asarray(fields[k], np.float64)[rows] for k in ("x", "y", "z")], 1)
+    ks = ks_all[rows]
+    ck = omega_chunk_of_frames(out, fr.tolist())
+    cams = np.asarray(c2w, np.float64)[:, :3, 3]
+    ccfg = load_correction_config(raw_cfg)
+    fac, conf = judge_of(ccfg)
+    levels = chunk_floor_levels(X, ks, cams, ck, ccfg.floor, repeatability_of(out, ccfg), fac, conf)
+    return {"levels": levels, "surfaces": chosen_surfaces(levels, cams), "X": X, "ks": ks, "ck": ck}
+
+
+def floor_by_surface(X: np.ndarray, c2w: np.ndarray, cfg, fl: Optional[dict]) -> dict:
+    """The floor metric per FLOOR SURFACE (USER 2026-10-08: a session can hold several floors —
+    a platform and the track bed below it — and each is measured against its own plane, never the
+    other one's): one surface, or no chunk floors measured (``fl`` None) → :func:`floor_metric`
+    on the whole cloud, exactly as before; several → :func:`floor_metric` on each surface's points
+    (every point of its chunks within ``band_m`` of that chunk's floor, the cameras of those
+    chunks), the surface with the most cells reported at the top level and every surface under
+    ``floor_surfaces``."""
+    surfaces = sorted(set((fl or {}).get("surfaces", {}).values()))
+    if len(surfaces) <= 1:
+        res = floor_metric(X, c2w, cfg, seed=int(cfg.seed))
+        res["floor_surfaces"] = ({"n": len(surfaces), "chunks": {str(c): s for c, s in fl["surfaces"].items()}}
+                                 if fl is not None else {"n": None, "reason": "the chunk floors were not measured"})
+        return res
+    lv, names = fl["levels"], fl["surfaces"]
+    per: dict = {}
+    for s in surfaces:
+        chunks_s = sorted(c for c, nm in names.items() if nm == s)
+        sel = np.zeros(len(fl["X"]), bool)
+        for c in chunks_s:
+            q = lv["chosen"][c]
+            rows = np.flatnonzero(np.isin(fl["ks"], np.flatnonzero(fl["ck"] == c)))
+            near = np.abs((fl["X"][rows] - q["centroid"]) @ q["normal"]) < float(cfg.band_m)
+            sel[rows[near]] = True
+        kfs = np.flatnonzero(np.isin(fl["ck"], chunks_s))
+        try:
+            per[s] = floor_metric(fl["X"][sel], np.asarray(c2w)[kfs], cfg, seed=int(cfg.seed))
+        except CloudMetricsError as e:
+            per[s] = {"error": str(e)}
+        per[s]["chunks"] = [int(c) for c in chunks_s]
+    measured = [s for s in surfaces if "cells" in per[s]]
+    if not measured:
+        raise CloudMetricsError("no floor surface could be measured: " +
+                                "; ".join(f"{s}: {per[s]['error']}" for s in surfaces))
+    top = max(measured, key=lambda s: (per[s]["cells"], -surfaces.index(s)))
+    res = {k: v for k, v in per[top].items() if k != "chunks"}
+    res["floor_surfaces"] = {"n": len(surfaces), "reported_at_top": top, "per_surface": per,
+                             "chunks": {str(c): s for c, s in names.items()}}
+    return res
+
+
 EDGE_REPORT = "edge_metric.json"
 EDGE_OBJECTS = "edge_metric_objects.json"      # the sampled instances handed to the subprocess (transient)
 _KEY_FIELDS = ("frame_global", "pixel_row", "pixel_col")
@@ -246,10 +317,11 @@ def _epoch(out: Path) -> Optional[int]:
 
 
 def run_cloud_metrics(session_dir: Path, pcfg, stage: str, log: Callable = print,
-                      edges: bool = False) -> dict:
+                      edges: bool = False, floor_levels: Optional[dict] = None) -> dict:
     """Measure the live cloud of ``session_dir`` (floor always; edges when asked and a segmentation
     exists), write output/precision/cloud_metrics.json, return the report. A metric that cannot be
-    measured is declared in the report, never silent, and never fails the caller."""
+    measured is declared in the report, never silent, and never fails the caller. ``floor_levels``:
+    the chunk floors of :func:`cloud_floor_levels` when the caller measured them already."""
     from correction.epoch import RECONSTRUCTION_ID_KEY, reconstruction_id_or_none
     from correction.session import read_ply
     from precision.corrected_cloud import write_timing
@@ -269,12 +341,29 @@ def run_cloud_metrics(session_dir: Path, pcfg, stage: str, log: Callable = print
         _, data = read_ply(ply)
         X = np.stack([data["x"], data["y"], data["z"]], 1)
         frames, c2w = _read_poses(out / "camera_poses.txt", out / "camera_frames.txt")
-        rep["floor"] = floor_metric(X, c2w, cfg, seed=int(cfg.seed))
+        fl = floor_levels
+        if fl is None:
+            try:
+                from precision.config import raw_of
+                fl = cloud_floor_levels(out, {k: data[k] for k in data.dtype.names}, frames, c2w,
+                                        raw_of(pcfg), int(cfg.max_points))   # the job's config (point 69)
+            except (RuntimeError, OSError) as e:
+                # the measurement's own errors (a session that cannot be measured: no keyframe
+                # provenance, no Omega record, no floor plane, a file missing) are declared and
+                # ONE plane for the session stands in, as before; a TypeError / KeyError /
+                # IndexError is a bug and reaches the outer catch, which NAMES its type in the
+                # report instead of measuring a fallback over it
+                log(f"{LOG_TAG} the floor of each chunk was not measured ({type(e).__name__}: {e}) "
+                    f"— one floor plane for the session, DECLARED")
+        rep["floor"] = floor_by_surface(X, c2w, cfg, fl)
         rep["floor"]["points_total"] = int(len(X))
         f = rep["floor"]
         log(f"{LOG_TAG} floor: {f['cells']} cells, thickness median {f['thickness_m']['median'] * 100:.1f} cm "
             f"(p90 {f['thickness_m']['p90'] * 100:.1f}), undulation {f['undulation_m'] * 100:.1f} cm, tilt vs camera-up "
-            f"{f['plane']['tilt_vs_camera_up_deg']:.1f}°, cameras {f['cameras_above_floor_m']['median']:.2f} m above")
+            f"{f['plane']['tilt_vs_camera_up_deg']:.1f}°, cameras {f['cameras_above_floor_m']['median']:.2f} m above"
+            + (f"; surface {f['floor_surfaces']['reported_at_top']} of {f['floor_surfaces']['n']} floor surfaces, "
+               f"each measured on its own plane" if (f.get("floor_surfaces") or {}).get("n", 0) and
+               f["floor_surfaces"]["n"] > 1 else ""))
     except Exception as e:  # noqa: BLE001 — declared, never the caller's failure
         rep["floor"] = {"error": f"{type(e).__name__}: {e}"}
         log(f"{LOG_TAG} floor not measured: {e}")

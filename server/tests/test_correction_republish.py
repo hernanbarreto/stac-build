@@ -226,7 +226,7 @@ def test_more_objects_than_codes_overflow_the_byte_but_never_the_session(tmp_pat
     """docs/plan_determinismo.md point 107 (DECIDIDO 2026-10-08): no ceiling. The
     256th object used to RAISE here and the SAM3 stage shipped no segmentation at
     all; now the byte runs out for the objects with the largest ids (listed in
-    `byte_overflow`, byte 0) while every object keeps its full id in the 16-bit
+    `byte_overflow`, byte 0) while every object keeps its full id in the 32-bit
     `instance_ids.npy` the LAS writer carries as the `instance` dimension."""
     from segmentation.republish import INSTANCE_IDS, _encode
     ids = list(range(300, 300 + 256))
@@ -237,7 +237,7 @@ def test_more_objects_than_codes_overflow_the_byte_but_never_the_session(tmp_pat
     republish_membership(tmp_path, n_points=len(ids), log=lambda m: None)
     cls = np.load(tmp_path / CLASSIFICATION)
     full = np.load(tmp_path / INSTANCE_IDS)
-    assert full.dtype == np.uint16 and full.tolist() == ids
+    assert full.dtype == np.uint32 and full.tolist() == ids
     assert cls[-1] == 0 and len(set(cls[:-1].tolist())) == 255
 
 

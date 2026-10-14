@@ -9,9 +9,11 @@ that cloud merged and FILTERED before the core ran ("¿por qué filtramos una nu
 vamos a usar todavía?").
 
 What an epoch of poses carries, through the same journaled swap as every epoch:
-``camera_poses.txt`` (+ the copies that exist), the cumulative depth-correction sidecar
-(the per-keyframe k of the transform, the rule of ``stage_transaction`` step 5),
-``scale_diagnostics.json`` regenerated, ``geometry_epoch.json`` and the exact
+``camera_poses.txt`` (+ the copies that exist), the depth-correction sidecar DERIVED from
+the epoch chain (the per-keyframe k of every transform epoch over the product epoch composed
+with this one's — ``correction.chain.depth_sidecar``, the rule of ``stage_transaction`` step
+5; docs/plan_determinismo.md point 135: never read-modify-written from the live file),
+``scale_diagnostics.json`` rebuilt from the same chain, ``geometry_epoch.json`` and the exact
 per-keyframe transform ``corrections/epoch_<N>.npz`` (replayable). No cloud, no
 octree, no instance store.
 
@@ -68,7 +70,7 @@ def apply_pose_epoch(output_dir: Path, R_kf: np.ndarray, t_kf: np.ndarray,
     from correction.epoch import EPOCH_FILE, current_epoch, make_epoch_record
     from correction.ledger import EPOCH_NPZ_DIR, save_epoch_npz
     from correction.session import POSE_COPY_RELPATHS, read_poses, write_poses
-    from segmentation.session_io import DEPTH_CORRECTION_NAME, load_depth_affine
+    from segmentation.session_io import DEPTH_CORRECTION_NAME
 
     out = Path(output_dir)
     assert_no_interrupted_swap(out)
@@ -113,30 +115,29 @@ def apply_pose_epoch(output_dir: Path, R_kf: np.ndarray, t_kf: np.ndarray,
     if skipped:
         log(f"  pose copies skipped (declared): {skipped}")
 
-    # 2) depth-correction sidecar: cumulative k per keyframe (stage_transaction step 5)
-    old_kb = load_depth_affine(out) or {}
-    new_kb = dict(old_kb)
-    for i in range(n):
-        kv = float(k_kf[i])
-        if kv != 1.0:
-            k0, b0 = new_kb.get(frames[i], (1.0, 0.0))
-            new_kb[frames[i]] = (k0 * kv, kv * b0)
-    if new_kb or old_kb:
-        (tx / DEPTH_CORRECTION_NAME).write_text(json.dumps(
-            {"version": 2, "epoch": epoch_to,
-             "k": {str(f): round(v[0], 6) for f, v in sorted(new_kb.items())},
-             "b": {str(f): round(v[1], 6) for f, v in sorted(new_kb.items())}}, indent=1))
-        art(DEPTH_CORRECTION_NAME)
+    # 2) depth-correction sidecar, DERIVED FROM THE EPOCH CHAIN (docs/plan_determinismo.md
+    # point 135, 2026-10-08 — the rule of stage_transaction step 5): the affine z' = k·z + b
+    # this epoch holds over the reconstruction's PRODUCT epoch = every transform epoch between
+    # them composed from their persisted warps (corrections/epoch_<N>.npz), then this one's k.
+    # It used to read-modify-write whatever sidecar was LIVE — a previous certification's
+    # factors, a previous reconstruction's — and hand that compound to the TSDF, the hole audit
+    # and the VLM/SAM3 depth provider. Written whether or not a factor differs from 1 (the
+    # reader's convention: an identity lists no frame), stamped with the chain it came from.
+    from correction.chain import applied_depth_factor, depth_sidecar
+    sidecar = depth_sidecar(out, frames, epoch_to, k_kf, None, live=epoch_from)
+    (tx / DEPTH_CORRECTION_NAME).write_text(json.dumps(sidecar, indent=1, sort_keys=True))
+    art(DEPTH_CORRECTION_NAME)
 
-    # 3) scale diagnostics regenerated for the epoch
-    diag = diag_mod.regenerate_scale_diagnostics(out, {}, epoch_to, cid)
+    # 3) scale diagnostics REBUILT for the epoch (point 135: never appended) — the same factors
+    # the sidecar was composed from: what the chain already applied to each keyframe (the product
+    # epoch to the live one) and this epoch's own k; the entry carries no clock (point 137)
+    k_applied = {int(f): float(k) for f, k in
+                 zip(frames, applied_depth_factor(out, frames, live=epoch_from))}
+    diag = diag_mod.regenerate_scale_diagnostics(
+        out, {int(f): float(k_kf[i]) for i, f in enumerate(frames)}, epoch_to, cid,
+        k_applied_by_frame=k_applied)
     if diag is not None:
-        # the history entry this call appended carries a wall clock: it is recorded in the
-        # ledger's timing file (record_run below), never in the compared artifact (point 36)
-        for e in diag.get("epochs") or []:
-            if isinstance(e, dict) and e.get("correction_id") == cid:
-                e.pop("created_at", None)
-        (tx / "scale_diagnostics.json").write_text(json.dumps(diag, indent=2))
+        (tx / "scale_diagnostics.json").write_text(json.dumps(diag, indent=2, sort_keys=True))
         art("scale_diagnostics.json")
 
     # 4) the epoch record and its exact, replayable transform

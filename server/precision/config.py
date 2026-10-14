@@ -6,14 +6,38 @@ geometry is touched. There is NO default in code — a missing key aborts the
 load naming it (the YAML documents every value and its provenance: BOUND /
 MEASURED / USER DECISION). Each phase of claude_stac.txt §4 adds its section
 here and in config.yaml in the same commit.
+
+WHICH CONFIGURATION (docs/plan_determinismo.md point 69, DECIDIDO USER 2026-10-08: the
+precision chain takes the FROZEN configuration of the run, never the disk): every step of
+the chain runs as its own process (``python -m precision.<module> --session <dir>``) and
+used to call ``load_precision_config()`` with no argument — ``from config import cfg``,
+config.yaml AS IT STOOD ON DISK when that process started — while the worker that launched
+it held the job's dict; the steps' own ``raw:`` reads (the confidence floor, the cloud
+recipe, the user's factor) came from the disk too. Edit config.yaml during a run and F0,
+F2 and F6 ran on three configurations, none recorded. Now ONE accessor,
+:func:`raw_config_of`, answers "the configuration of this session's job": the frozen
+``output/run_config.yaml`` (``intake.run_config.load_run_config`` verifies its digest; the
+stage's overrides applied) when the session holds one, else the server's configuration,
+DECLARED in the log (a CLI on a session nobody froze). :func:`load_precision_config`
+builds from it (``session_dir=``), keeps the dict it was built from on the result
+(``PrecisionConfig.raw``, the convention of ``correction.config.CorrectionConfig.raw``),
+and :func:`raw_of` is where a step reads its ``raw:`` sections from — never
+``config.cfg``. The worker verifies the dict it was handed against the frozen file
+(:func:`frozen_config`, the same check the certification worker runs) before anything runs.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 SECTION = "reconstruction.precision"
+# the pipeline stage the precision chain runs INSIDE (USER 2026-09-28: "f0 a f7 es etapa de
+# reconstrucción"): the stage whose overrides (``_stages`` of run_config.yaml) apply to it
+STAGE = "reconstruction"
+LOG_TAG = "[precision.config]"
 
 
 class PrecisionConfigError(RuntimeError):
@@ -471,15 +495,104 @@ class PrecisionConfig:
     cloud_metrics: CloudMetricsConfig
     chunk_check: ChunkCheckConfig
     runner: RunnerConfig
+    # the WHOLE configuration dict this one was loaded from (point 69, 2026-10-08): the
+    # ``raw:`` sections a step reads outside its own block — reconstruction.simple's
+    # confidence floor, postprocessing's cloud recipe, correction_graph's factor, the loops
+    # and correction configs — come from HERE (:func:`raw_of`), never from ``config.cfg``
+    # re-read from disk by a step process. Not compared: two configs with the same sections
+    # are the same configuration
+    raw: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
 
 
-def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConfig:
-    """Validated PrecisionConfig from the raw config dict (defaults to the
-    server-wide ``config.cfg``). Raises PrecisionConfigError naming the first
-    offending key."""
+def raw_config_of(session_dir: os.PathLike, *, stage: str = STAGE,
+                  log: Callable[[str], Any] = print) -> Tuple[Dict[str, Any], Optional[str]]:
+    """THE configuration of this session's job (point 69): (the raw dict, its sha256).
+
+    The frozen ``output/run_config.yaml`` when the session holds one — read through
+    ``intake.run_config.load_run_config`` (the digest file must match: an edited copy is
+    REFUSED naming it) with the ``stage``'s overrides applied (``effective_config``) — else the
+    server's ``config.cfg``, DECLARED in the log with sha256 None: that is a command-line step
+    on a session nobody froze (the chain CLI, ``precision.runner``, freezes its own first, as
+    the intake and certification CLIs do). Never ``config.cfg`` while a frozen file exists."""
+    from intake.run_config import (OUTPUT_DIRNAME, RUN_CONFIG_NAME, effective_config,
+                                   has_run_config, load_run_config)
+    sd = Path(session_dir)
+    if has_run_config(sd):
+        frozen, sha = load_run_config(sd)
+        log(f"{LOG_TAG} configuration: the job's frozen {OUTPUT_DIRNAME}/{RUN_CONFIG_NAME} "
+            f"(sha256 {sha[:12]}; stage {stage!r} overrides applied)")
+        return effective_config(frozen, stage), sha
+    from config import cfg as raw_cfg                     # server/config.py, read ONCE here
+    log(f"{LOG_TAG} DECLARED: {sd / OUTPUT_DIRNAME / RUN_CONFIG_NAME} does not exist — no job "
+        f"froze this session's configuration; the server's config.yaml is read (a CLI on an "
+        f"unfrozen session; point 69)")
+    return raw_cfg, None
+
+
+def frozen_config(session_dir: os.PathLike, handed: Dict[str, Any], *, stage: str = STAGE,
+                  log: Callable[[str], Any] = print) -> Tuple[Dict[str, Any], str]:
+    """(the configuration a stage worker runs with, its sha256): the job's frozen
+    ``output/run_config.yaml`` with the ``stage``'s overrides, verified against the dict the
+    pipeline manager handed the worker (the same job's) — a difference FAILS naming the first
+    key (two configurations in one run is what points 69 / 139 end). The same check
+    ``workers.certify_worker._frozen_config`` runs for the certification; the precision worker
+    runs it before the chain starts, so the steps' processes (which read the frozen file through
+    :func:`raw_config_of`) and the worker that launched them hold ONE configuration."""
+    from intake.run_config import canonical_yaml, effective_config, load_run_config
+    frozen, sha = load_run_config(session_dir)
+    raw = effective_config(frozen, stage)
+    mine = {k: v for k, v in dict(handed).items() if not str(k).startswith("_")}
+    for key in sorted(set(mine) | set(raw)):
+        a, b = mine.get(key), raw.get(key)
+        if canonical_yaml({key: a}) != canonical_yaml({key: b}):
+            raise PrecisionConfigError(
+                f"the configuration handed to the precision core differs from the job's frozen "
+                f"output/run_config.yaml at '{key}' — a step never runs on a configuration nobody "
+                f"froze (points 69 / 139)")
+    log(f"{LOG_TAG} configuration: the job's frozen run_config.yaml (sha256 {sha[:12]}), verified "
+        f"against the dict the manager handed this worker")
+    return raw, sha
+
+
+_RAW_FALLBACK_DECLARED = False       # the DECLARED line of raw_of's fallback, once per process
+
+
+def raw_of(pcfg: PrecisionConfig, log: Callable[[str], Any] = print) -> Dict[str, Any]:
+    """The configuration dict ``pcfg`` was loaded from — where a step reads every ``raw:``
+    section (point 69). A PrecisionConfig built by hand without one (a test's) completes itself
+    from the server's ``config.cfg``, as ``correction.config.precision_raw`` does — DECLARED in
+    the log the first time it happens in a process: on the pipeline path (the worker's dict, a
+    step's ``session_dir=``) ``raw`` is always set, so that line in a step's log is the one
+    sign a step read the disk again, and a regression is visible instead of silent."""
+    global _RAW_FALLBACK_DECLARED
+    raw = getattr(pcfg, "raw", None)
+    if isinstance(raw, dict) and isinstance(raw.get("reconstruction"), dict) \
+            and "precision" in raw["reconstruction"]:
+        return raw
+    from config import cfg as raw_cfg
+    if not _RAW_FALLBACK_DECLARED:
+        _RAW_FALLBACK_DECLARED = True
+        log(f"{LOG_TAG} DECLARED: PrecisionConfig carries no configuration dict — the server's "
+            f"config.cfg is read (a config built by hand; never the pipeline's path, whose steps "
+            f"load the job's frozen run_config.yaml — point 69)")
+    return raw_cfg
+
+
+def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
+                          session_dir: Optional[os.PathLike] = None, stage: str = STAGE,
+                          log: Callable[[str], Any] = print) -> PrecisionConfig:
+    """Validated PrecisionConfig from ``raw``; with ``session_dir`` and no ``raw``, from the
+    session's job configuration (:func:`raw_config_of`: the frozen run_config.yaml, else the
+    server's, declared) — what every step CLI passes (``--session``). With neither: the
+    server-wide ``config.cfg`` (tests, tools that hold no session) — DECLARED here: that path
+    is never the pipeline's. The dict read is kept on the result (``raw``). Raises
+    PrecisionConfigError naming the first offending key."""
     if raw is None:
-        from config import cfg as raw_cfg     # server/config.py
-        raw = raw_cfg
+        if session_dir is not None:
+            raw, _sha = raw_config_of(session_dir, stage=stage, log=log)
+        else:
+            from config import cfg as raw_cfg     # server/config.py: no session, no job
+            raw = raw_cfg
     recon = (raw or {}).get("reconstruction")
     if not isinstance(recon, dict) or not isinstance(recon.get("precision"), dict):
         raise PrecisionConfigError(
@@ -793,4 +906,5 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None) -> PrecisionConf
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,
                            tracks=tracks, refine=refine, depth=depth, fuse=fuse,
                            cloud=cloud, bend=bend, flyers=flyers, mono_detail=mono_detail,
-                           cloud_metrics=cloud_metrics, chunk_check=chunk_check, runner=runner)
+                           cloud_metrics=cloud_metrics, chunk_check=chunk_check, runner=runner,
+                           raw=(raw if isinstance(raw, dict) else None))

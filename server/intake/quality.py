@@ -186,6 +186,22 @@ def read_gray(path: os.PathLike) -> np.ndarray:
     return g
 
 
+def frame_file(frames_dir: os.PathLike, frame: int) -> Path:
+    """``frames/<frame:06d>.<ext>`` for the first existing suffix of :data:`FRAME_SUFFIXES`;
+    QualityError when the frame has no file. The one frame-number → file rule of the session
+    (it lived in intake/content.py until I2 was removed, USER 2026-10-08, plan point 75; the
+    readers outside the intake — the precision stages, the segmentation second pass — take
+    it from here)."""
+    frames_dir = Path(frames_dir)
+    for suffix in FRAME_SUFFIXES:
+        p = frames_dir / f"{int(frame):06d}{suffix}"
+        if p.exists():
+            return p
+    raise QualityError(
+        f"frame {int(frame)} has no file {int(frame):06d}{{{','.join(FRAME_SUFFIXES)}}} in "
+        f"{frames_dir} — the keyframe / witness lists name a frame that is not on disk")
+
+
 def downscale_gray(gray: np.ndarray, max_side: int, interpolation: int) -> np.ndarray:
     """``gray`` resized so its longest side is ≤ ``max_side`` (never upscaled),
     with the legacy arithmetic (scale = max_side / max(h, w), fx = fy = scale)

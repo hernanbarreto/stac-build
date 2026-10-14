@@ -3,7 +3,8 @@
 #   from segmentation_pipeline import run_segmentation, apply_segmentation_to_cloud
 #   from segmentation_manager import SegmentationManager
 #   from sam3_wrapper import get_sam3_wrapper
-#   from scene_analyzer import analyze_scene, classify_occluders
+# (the InternVL3 scene analyzer is no longer re-exported: docs/plan_determinismo.md point 156,
+#  2026-10-08 — the pipeline has no VLM fallback; its module is not imported by any stage)
 
 from segmentation.pipeline import (
     run_segmentation,
@@ -14,5 +15,4 @@ from segmentation.pipeline import (
     _load_ply_origins,
 )
 from segmentation.sam3_wrapper import get_sam3_wrapper, SAM3Wrapper
-from segmentation.scene_analyzer import analyze_scene, classify_occluders
 from segmentation.manager import SegmentationManager

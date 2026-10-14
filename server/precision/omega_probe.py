@@ -93,14 +93,18 @@ def window_disagreement(pred: Dict[str, np.ndarray], pair_samples: int) -> Dict[
             "p90_rel_mismatch": float(np.percentile(m, 90)) if m.size else None}
 
 
-def omega_infer(session_dir: Path) -> Infer:
+def omega_infer(session_dir: Path, raw_cfg: Optional[dict] = None) -> Infer:
     """The production Omega (vendor/VGGT-Long VGGTOmegaAdapter, the session's own
-    vendor config), loaded once; each call sets the resolution and mode."""
+    vendor config), loaded once; each call sets the resolution and mode. ``raw_cfg``: the
+    job's configuration the vendor config is built from — the session's frozen one by
+    default (precision.config.raw_config_of, point 69), never config.yaml read from disk."""
     _vendor_path()
     import torch
-    from config import cfg as raw_cfg
     from workers.map_worker import _build_vggtomega_config
     from base_models.vggtomega_adapter import VGGTOmegaAdapter
+    if raw_cfg is None:
+        from precision.config import raw_config_of
+        raw_cfg, _sha = raw_config_of(Path(session_dir))
     if not torch.cuda.is_available():
         # no CPU fallback (other kernels, another product — point 12's rule, applied to F3)
         raise ProbeError("torch sees no CUDA device — Omega's probe runs on the card, never on "
@@ -193,7 +197,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                                  description="Omega resolution probe on the central window.")
     ap.add_argument("--session", required=True)
     args = ap.parse_args(argv)
-    pc = load_precision_config().omega.resolution_probe
+    # the session's job configuration (point 69): the frozen run_config.yaml, else declared
+    pc = load_precision_config(session_dir=Path(args.session)).omega.resolution_probe
     if not pc.enabled:
         print(f"{LOG_TAG} reconstruction.precision.omega.resolution_probe.enabled is false")
         return 0

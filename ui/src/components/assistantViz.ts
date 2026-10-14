@@ -47,8 +47,9 @@ const GUIDE = () => tokenHex(VP.ptSingle)
 
 interface Animator { update: (now: number) => boolean } // returns true when done
 
-function labelSprite(text: string, color = tokenColor(VP.text1), bg = tokenColor(VP.labelBg)): THREE.Sprite {
-    const pad = 12, font = 44
+function labelSprite(text: string, color = tokenColor(VP.text1), bg = tokenColor(VP.labelBg),
+                     screenHeight = 0): THREE.Sprite {
+    const pad = 12, font = screenHeight > 0 ? 64 : 44
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d')!
     ctx.font = `600 ${font}px Inter, system-ui, sans-serif`
@@ -65,12 +66,89 @@ function labelSprite(text: string, color = tokenColor(VP.text1), bg = tokenColor
     ctx.fillText(text, w / 2, h / 2 + 2)
     const tex = new THREE.CanvasTexture(canvas)
     tex.anisotropy = 4
-    const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true })
+    // ``screenHeight`` > 0: the label keeps that height on screen (a share of the viewport) at
+    // any distance — the dimension values are read, not hunted for (USER 2026-10-09: "las cotas
+    // correctas grandes")
+    const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true,
+                                           sizeAttenuation: !(screenHeight > 0) })
     const sprite = new THREE.Sprite(mat)
-    const scale = 0.0016
-    sprite.scale.set(w * scale, h * scale, 1)
+    if (screenHeight > 0) sprite.scale.set(screenHeight * w / h, screenHeight, 1)
+    else { const scale = 0.0016; sprite.scale.set(w * scale, h * scale, 1) }
     sprite.renderOrder = 2000
     return sprite
+}
+
+const DIM_LABEL_SCREEN = 0.055     // a dimension value: 5.5 % of the viewport's height
+const Y_AXIS = new THREE.Vector3(0, 1, 0)
+
+/** A thick segment (a cylinder) from ``a`` to ``b`` — WebGL draws every THREE.Line one pixel
+ *  wide whatever its linewidth. */
+export function thickSegment(a: THREE.Vector3, b: THREE.Vector3, radius: number, mat: THREE.Material): THREE.Mesh {
+    const len = Math.max(a.distanceTo(b), 1e-6)
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, len, 12), mat)
+    m.position.copy(a).lerp(b, 0.5)
+    m.quaternion.setFromUnitVectors(Y_AXIS, b.clone().sub(a).normalize())
+    m.renderOrder = 1998
+    return m
+}
+
+/** The line of a DIMENSION (cota, USER 2026-10-09): a thick shaft between ``a`` and ``b`` with an
+ *  arrowhead at each end pointing at its point (no label). */
+export function arrowDimension(a: THREE.Vector3, b: THREE.Vector3, color: number): THREE.Group {
+    const len = a.distanceTo(b)
+    const r = THREE.MathUtils.clamp(len * 0.004, 0.004, 0.015)
+    const head = Math.min(THREE.MathUtils.clamp(len * 0.08, 0.05, 0.25), len * 0.45)
+    const mat = new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true })
+    const g = new THREE.Group()
+    const dir = b.clone().sub(a).normalize()
+    g.add(thickSegment(a.clone().addScaledVector(dir, head * 0.9), b.clone().addScaledVector(dir, -head * 0.9), r, mat))
+    for (const [tip, d] of [[a, dir.clone().negate()], [b, dir]] as [THREE.Vector3, THREE.Vector3][]) {
+        const cone = new THREE.Mesh(new THREE.ConeGeometry(r * 3.5, head, 16), mat)
+        cone.quaternion.setFromUnitVectors(Y_AXIS, d)
+        cone.position.copy(tip).addScaledVector(d, -head / 2)
+        cone.renderOrder = 1998
+        g.add(cone)
+    }
+    return g
+}
+
+/** A thick box outline (a cylinder per edge) of half-extents ``half``, centred at the origin. */
+export function thickBox(half: number[], mat: THREE.Material): THREE.Group {
+    const g = new THREE.Group()
+    const r = THREE.MathUtils.clamp(Math.max(...half) * 0.012, 0.005, 0.025)
+    const pos = new THREE.EdgesGeometry(new THREE.BoxGeometry(half[0] * 2, half[1] * 2, half[2] * 2)).getAttribute('position')
+    for (let k = 0; k < pos.count; k += 2) {
+        g.add(thickSegment(new THREE.Vector3().fromBufferAttribute(pos, k), new THREE.Vector3().fromBufferAttribute(pos, k + 1), r, mat))
+    }
+    return g
+}
+
+/** An object's OBB rig in its own frame (centred at the origin): a thick outline and an
+ *  arrowed DIMENSION along each side with its length in a large label (USER 2026-10-09). */
+export function objectDims(half: number[], color: number, labelColor: string): THREE.Group {
+    const rig = new THREE.Group()
+    rig.add(thickBox(half, new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true })))
+    const off = Math.max(...half) * 0.15
+    const corner = new THREE.Vector3(-half[0], -half[1], -half[2])
+    const outward = [new THREE.Vector3(0, -1, -1), new THREE.Vector3(-1, 0, -1), new THREE.Vector3(-1, -1, 0)]
+    for (let ax = 0; ax < 3; ax++) {
+        const len = half[ax] * 2
+        if (!(len > 0.02)) continue
+        const a = corner.clone().addScaledVector(outward[ax].clone().normalize(), off)
+        const b = a.clone(); b.setComponent(ax, a.getComponent(ax) + len)
+        rig.add(dimension(a, b, color, getFmt().lengthText(len), labelColor))
+    }
+    return rig
+}
+
+/** A DIMENSION with its value in a large label at the middle. */
+function dimension(a: THREE.Vector3, b: THREE.Vector3, color: number, text: string,
+                   labelColor = tokenColor(VP.measure)): THREE.Group {
+    const g = arrowDimension(a, b, color)
+    const label = labelSprite(text, labelColor, tokenColor(VP.labelBg), DIM_LABEL_SCREEN)
+    label.position.copy(a).lerp(b, 0.5)
+    g.add(label)
+    return g
 }
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
@@ -183,25 +261,14 @@ export class AssistantViz {
         }
     }
 
-    private drawSpan(r: Record<string, unknown>, a: Record<string, unknown>, now: number): THREE.Box3 | null {
+    private drawSpan(r: Record<string, unknown>, a: Record<string, unknown>, _now: number): THREE.Box3 | null {
         let pA = Array.isArray(r.point_a_m) ? new THREE.Vector3().fromArray(r.point_a_m as number[]) : null
         let pB = Array.isArray(r.point_b_m) ? new THREE.Vector3().fromArray(r.point_b_m as number[]) : null
         if (!pA || !pB) { pA = this.objCenter(a.id1 as number); pB = this.objCenter(a.id2 as number) }
         if (!pA || !pB) return null
         const dist = (r.clearance_m ?? r.distance_m) as number
-        const g = new THREE.Group()
-        g.add(marker(pA, ACCENT())); g.add(marker(pB, ACCENT()))
-        const lineGeom = new THREE.BufferGeometry().setFromPoints([pA.clone(), pA.clone()])
-        const line = new THREE.Line(lineGeom, new THREE.LineBasicMaterial({ color: ACCENT(), depthTest: false, transparent: true }))
-        line.renderOrder = 1998
-        g.add(line)
-        const label = labelSprite(getFmt().lengthText(dist ?? pA.distanceTo(pB)), tokenColor(VP.measure))
-        label.position.copy(pA.clone().lerp(pB, 0.5))
-        label.visible = false
-        g.add(label)
+        const g = dimension(pA, pB, ACCENT(), getFmt().lengthText(dist ?? pA.distanceTo(pB)))
         this.group.add(g)
-        // animate: line grows AB over 500ms, then label fades in
-        this.animators.push(revealLine(line, pA, pB, label, now, 550))
         return new THREE.Box3().setFromPoints([pA, pB])
     }
 
@@ -211,13 +278,28 @@ export class AssistantViz {
         if (!o?.obb) return null
         const M = matrixFromStore(o.obb.transform)
         const half = o.obb.half_extents
-        const box = new THREE.BoxGeometry(half[0] * 2, half[1] * 2, half[2] * 2)
-        const edges = new THREE.LineSegments(
-            new THREE.EdgesGeometry(box),
-            new THREE.LineBasicMaterial({ color: ACCENT2(), depthTest: false, transparent: true }))
+        // thick edges (a cylinder per box edge) and a DIMENSION along each side, with arrows and
+        // its length in a large label (USER 2026-10-09)
+        const edges = new THREE.Group()
+        const edgeMat = new THREE.MeshBasicMaterial({ color: ACCENT2(), depthTest: false, transparent: true })
+        const edgeR = THREE.MathUtils.clamp(Math.max(...half) * 0.012, 0.003, 0.012)
+        const pos = new THREE.EdgesGeometry(new THREE.BoxGeometry(half[0] * 2, half[1] * 2, half[2] * 2)).getAttribute('position')
+        for (let k = 0; k < pos.count; k += 2) {
+            edges.add(thickSegment(new THREE.Vector3().fromBufferAttribute(pos, k),
+                                   new THREE.Vector3().fromBufferAttribute(pos, k + 1), edgeR, edgeMat))
+        }
         edges.applyMatrix4(M)
-        edges.renderOrder = 1998
         const g = new THREE.Group(); g.add(edges)
+        const corner = new THREE.Vector3(-half[0], -half[1], -half[2])
+        const off = Math.max(...half) * 0.15
+        const outward = [new THREE.Vector3(0, -1, -1), new THREE.Vector3(-1, 0, -1), new THREE.Vector3(-1, -1, 0)]
+        for (let ax = 0; ax < 3; ax++) {
+            const len = half[ax] * 2
+            if (!(len > 0.02)) continue
+            const a = corner.clone().addScaledVector(outward[ax].clone().normalize(), off)
+            const b = a.clone(); b.setComponent(ax, a.getComponent(ax) + len)
+            g.add(dimension(a.applyMatrix4(M), b.applyMatrix4(M), ACCENT2(), getFmt().lengthText(len), tokenColor(VP.warn)))
+        }
         // dimension label
         const dims = (r.width_m != null)
             ? `${r.width_m}×${r.height_m}×${r.depth_m} m`
@@ -496,6 +578,26 @@ export class AssistantViz {
         const g = this.volumes.get(id)
         if (g) { this.group.remove(g); disposeDeep(g); this.volumes.delete(id) }
         this.volumesMeta.delete(id)
+    }
+
+    setVolumeVisible(id: number, visible: boolean) {
+        const g = this.volumes.get(id)
+        if (g) g.visible = visible
+    }
+
+    /** The volume's OBB (USER 2026-10-09): a thick outline and an arrowed dimension along each of
+     *  its three sides, in its own frame. */
+    setVolumeObb(id: number, on: boolean) {
+        const g = this.volumes.get(id) as THREE.Group | undefined
+        if (!g) return
+        const old = g.getObjectByName('volume-obb')
+        if (old) { g.remove(old); disposeDeep(old) }
+        if (!on) return
+        const size = (g.userData.baseSize as number[]) ?? [1, 1, 1]
+        const half = size.map(x => x / 2)
+        const rig = objectDims(half, ACCENT2(), tokenColor(VP.warn))
+        rig.name = 'volume-obb'
+        g.add(rig)
     }
 
     getVolumeGroup(id: number): THREE.Group | null {

@@ -55,11 +55,33 @@ UNDO_DIR = "corrections"
 CLOUD_FILES = ("cleaned_cloud.ply", "cleaned_cloud_raw.ply", "corrected_cloud.ply")
 
 
-def _cfg(cfg: Optional[dict]) -> dict:
+def _full_cfg(cfg: Optional[dict], output_dir=None) -> dict:
+    """THE configuration this cleanup runs with — ONE dict for every reader of the step
+    (docs/plan_determinismo.md point 112: the audit's `segmentation` section AND the OBB
+    refit's error factor, `correction_graph.graph.improvement_error_factor`, come from the
+    same place; they used to come from two — the frozen file and the server's config.yaml):
+    the caller's full configuration when given; else the session's FROZEN
+    `output/run_config.yaml` when it holds one (a stage never re-reads config.yaml — the
+    certification calls this with no configuration); else the server's config.yaml (a
+    session cleaned outside a job)."""
     if cfg:
         return cfg
+    if output_dir is not None:
+        try:
+            from intake.run_config import has_run_config, load_run_config
+            session_dir = Path(output_dir).parent
+            if has_run_config(session_dir):
+                frozen, _sha = load_run_config(session_dir)
+                return frozen
+        except ImportError:
+            pass
     from config import cfg as server_cfg
-    return (server_cfg.get("segmentation") or {})
+    return server_cfg
+
+
+def _cfg(cfg: Optional[dict], output_dir=None) -> dict:
+    """The `segmentation` section of :func:`_full_cfg` (``cfg`` is the FULL configuration)."""
+    return (_full_cfg(cfg, output_dir).get("segmentation") or {})
 
 
 def _load_marks(output_dir: Path) -> Optional[np.ndarray]:
@@ -137,7 +159,7 @@ def measure(output_dir, session_dir=None, cfg: Optional[dict] = None,
         log(f"[cleanup] {rep['reason']}")
         return None, None, rep
 
-    seg_cfg = _cfg(cfg)
+    seg_cfg = _cfg(cfg, output_dir)                 # the frozen `segmentation` section
     mf_cfg = seg_cfg.get("mask_filter") or {}
     z = np.load(masks_npz, allow_pickle=True)
     c2m = _mask_frame_lookup(output_dir, z["frames"].tolist(),
@@ -228,7 +250,8 @@ def geometric_cleanup(output_dir, session_dir=None, cfg: Optional[dict] = None,
         _write_report(output_dir, rep)
         return rep
 
-    ok, detail = _remove(output_dir, still, marks & ~measured, log=log)
+    ok, detail = _remove(output_dir, still, marks & ~measured, log=log,
+                         cfg=_full_cfg(cfg, output_dir))
     rep.update(detail)
     rep["applied"] = bool(ok)
     if not ok:
@@ -252,56 +275,54 @@ def _write_report(output_dir: Path, rep: dict) -> None:
 
 
 def _refit_obbs(output_dir: Path, touched: List[dict], n_new: int,
-                log: Callable[[str], None] = print) -> int:
+                log: Callable[[str], None] = print, cfg: Optional[dict] = None) -> int:
     """Recompute the box of every instance that lost points.
 
     Not a courtesy: the flyers the cleanup just removed are exactly what was
     inflating those boxes, and an inflated box is not cosmetic — the floor
     levelling picks its candidate by height and the duplicate measurements read
     the extent. Leaving the old box would keep the error the removal cured.
+
+    The boxes sit in the DISPLAY frame of every stage — `segmentation.pipeline.
+    _display_transform`, ONE rule (point 158): floor_transform.npz only with the
+    seal of this geometry, else the baked orientation, else the seeded leveling
+    — the frame the matcher's result and the viewer share. A step that cannot run
+    FAILS the cleanup naming itself (point 122): it used to turn any error into
+    'boxes not refitted' and ship the stale boxes. ``cfg``: the FULL configuration
+    the cleanup runs with (:func:`_full_cfg`) — the OBB's error factor comes from
+    the same dict as the audit's section (point 112).
     """
     if not touched:
         return 0
-    try:
-        import open3d as o3d
-        from segmentation.pipeline import _compute_obb
-        xyz = np.asarray(o3d.io.read_point_cloud(
-            str(output_dir / "cleaned_cloud.ply")).points)
-        if len(xyz) != n_new:
-            log(f"[cleanup] boxes left alone: the cloud reads {len(xyz):,} "
-                f"points against {n_new:,} kept")
-            return 0
-        # the display frame the matcher and the viewer both use
-        tp = output_dir / "floor_transform.npz"
-        if tp.is_file():
-            d = np.load(tp)
-            s, R, t = float(d["s"]), np.asarray(d["R"]), np.asarray(d["t"])
-            if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
-                xyz = s * (xyz @ R.T) + t
-    except Exception as e:  # noqa: BLE001 — declared; a stale box is not a corrupt one
-        log(f"[cleanup] boxes not refitted ({e}) — they keep the extent the "
-            f"removed points gave them")
-        return 0
+    import open3d as o3d
+    from segmentation.pipeline import _compute_obb, _display_transform
+    cfg = _full_cfg(cfg, output_dir)
+    ply = output_dir / "cleaned_cloud.ply"
+    xyz = np.asarray(o3d.io.read_point_cloud(str(ply)).points)
+    if len(xyz) != n_new:
+        raise RuntimeError(f"OBB refit: the cloud reads {len(xyz):,} points against {n_new:,} "
+                           f"kept — the clouds are out of step")
+    s, R, t, frame = _display_transform(output_dir, ply, xyz, log=lambda m: log(f"[cleanup] {m}"))
+    if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
+        xyz = s * (xyz @ R.T) + t
     done = 0
     for inst in touched:
         gi = np.asarray(inst.get("globalIndices") or [], np.int64)
         if len(gi) == 0:
             continue
-        try:
-            inst["obb"] = _compute_obb(xyz[gi])
-            done += 1
-        except Exception as e:  # noqa: BLE001
-            log(f"[cleanup] box of instance {_instance_id(inst)} kept ({e})")
-    log(f"[cleanup] {done} box(es) refitted on the cleaned points")
+        inst["obb"] = _compute_obb(xyz[gi], cfg=cfg)
+        done += 1
+    log(f"[cleanup] {done} box(es) refitted on the cleaned points (display frame: {frame})")
     return done
 
 
 def _remove(output_dir: Path, drop: np.ndarray, keep_marks: np.ndarray,
-            log: Callable[[str], None] = print) -> Tuple[bool, dict]:
+            log: Callable[[str], None] = print, cfg: Optional[dict] = None) -> Tuple[bool, dict]:
     """Physically remove ``drop`` from every cloud and carry every index with it.
 
     The undo snapshot is written BEFORE the first cloud is touched, so a failure
-    midway is always recoverable.
+    midway is always recoverable. ``cfg``: the full configuration (:func:`_full_cfg`),
+    for the OBB refit.
     """
     from segmentation.erase import _rewrite_ply_keep, _write_classification
     from correction.session import read_ply
@@ -388,7 +409,7 @@ def _remove(output_dir: Path, drop: np.ndarray, keep_marks: np.ndarray,
             touched.append(inst)
         inst["globalIndices"] = ng.tolist()
         inst["total_points"] = int(len(ng))
-    _refit_obbs(output_dir, touched, int(keep.sum()), log=log)
+    _refit_obbs(output_dir, touched, int(keep.sum()), log=log, cfg=cfg)
     doc["total_points"] = int(keep.sum())
     doc["segmented_points"] = sum(int(i.get("total_points") or 0) for i in instances)
     doc["coverage"] = round(doc["segmented_points"] / max(1, doc["total_points"]), 4)
@@ -426,12 +447,13 @@ def _remove(output_dir: Path, drop: np.ndarray, keep_marks: np.ndarray,
     return True, detail
 
 
-def undo_cleanup(output_dir, undo_path=None, log: Callable[[str], None] = print) -> dict:
+def undo_cleanup(output_dir, undo_path=None, log: Callable[[str], None] = print,
+                 cfg: Optional[dict] = None) -> dict:
     """Put back exactly what the last cleanup removed.
 
     The rows return to their original positions, so every index that was valid
     before the cleanup is valid again. Instance indices are re-expanded through
-    the inverse of the remap.
+    the inverse of the remap. ``cfg``: the full configuration (:func:`_full_cfg`).
     """
     from correction.session import read_ply, write_ply
     from segmentation.erase import _write_classification
@@ -493,7 +515,7 @@ def undo_cleanup(output_dir, undo_path=None, log: Callable[[str], None] = print)
         doc["total_points"] = int(n_before)
         doc["segmented_points"] = sum(int(i.get("total_points") or 0) for i in instances)
         doc["coverage"] = round(doc["segmented_points"] / max(1, n_before), 4)
-        _refit_obbs(output_dir, touched, n_before, log=log)
+        _refit_obbs(output_dir, touched, n_before, log=log, cfg=_full_cfg(cfg, output_dir))
         atomic_write_json(res_path, doc)
         try:
             _write_classification(output_dir, instances, n_before)

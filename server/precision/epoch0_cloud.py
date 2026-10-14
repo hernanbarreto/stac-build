@@ -323,12 +323,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--finish", action="store_true",
                     help="publish an already cleaned output/_tx_epoch0/cleaned_cloud.ply (octree + register)")
     args = ap.parse_args(argv)
-    from config import cfg
     if args.finish:
         s = Path(args.session)
         finish_epoch0(s, s / "output" / TMP_DIRNAME)
         shutil.rmtree(s / "output" / TMP_DIRNAME, ignore_errors=True)
         return 0
+    from precision.config import raw_config_of
+    cfg, _sha = raw_config_of(Path(args.session))   # the session's job configuration (point 69)
     build_epoch0_cloud(Path(args.session), cfg, from_records=args.from_omega_npz)
     return 0
 

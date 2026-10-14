@@ -19,10 +19,16 @@ def _precision_work(pipe: WorkerPipe, session_dir: str, config: dict):
     server_dir = str(Path(__file__).resolve().parent.parent)
     if server_dir not in sys.path:
         sys.path.insert(0, server_dir)
-    from precision.config import load_precision_config
+    from precision.config import frozen_config, load_precision_config
     from precision.runner import ChainError, run_chain
     from workers.base import stop_semantic_service_verified
 
+    # from here on the configuration IS the job's frozen output/run_config.yaml (point 69,
+    # USER 2026-10-08): verified against the dict the manager handed this worker — a
+    # difference fails here, before any step runs — and every step process reads that same
+    # frozen copy through precision.config.raw_config_of (the chain's step records carry its
+    # sha256). The same check workers.certify_worker._frozen_config runs for the certification.
+    config, _config_sha = frozen_config(Path(session_dir), config, log=pipe.send_log)
     pcfg = load_precision_config(config)
     out = Path(session_dir) / "output"
     for need in ("camera_poses.txt", "camera_frames.txt"):

@@ -744,7 +744,12 @@ def run_depth_stage(output_dir, session_dir, cfg=None, frames: Optional[Dict[int
     if rep["applied"] and epoch:
         session = load_session(output_dir)
         _depth_epoch(output_dir, session, rep, operator, log, correction_cfg)
-    (output_dir / "depth_tracks.json").write_text(json.dumps(rep, indent=1, default=float))
+    # no clock in the compared artifact (point 137): the stage's duration goes to the timing
+    # sidecar (depth_tracks.timing.json); the returned dict keeps it for the caller's log
+    (output_dir / "depth_tracks.json").write_text(json.dumps(
+        {k: v for k, v in rep.items() if k != "elapsed_s"}, indent=1, default=float))
+    from precision.corrected_cloud import write_timing
+    write_timing(output_dir / "depth_tracks.json", {"elapsed_s": rep.get("elapsed_s")})
     return rep
 
 
@@ -765,7 +770,12 @@ def _depth_epoch(output_dir: Path, session, rep: dict, operator: str, log, ccfg=
     N = session.n_kf
     k_kf, b_kf = affine_per_keyframe(rep, session.frames)
     R_kf = np.tile(np.eye(3), (N, 1, 1)); t_kf = np.zeros((N, 3))
-    cid = ledger.new_correction_id()
+    # the id is what the epoch applies — the per-keyframe affine over the live epoch — never a
+    # random draw (point 137): the same depth stage on the same session writes the same id,
+    # ledger line, report file and epoch record
+    from correction.epoch import current_epoch
+    cid = ledger.new_correction_id(*ledger.transform_parts(
+        "depth_tracks", int(current_epoch(output_dir)), session.frames, R_kf, t_kf, k_kf, b_kf))
     tx = stage_transaction(session, ccfg, R_kf, t_kf, k_kf, correction_id=cid, scale_diag_new=None,
                            floor_npz=None, log=log, progress=None, b_kf=b_kf)
     swap_transaction(output_dir, tx, log=log)

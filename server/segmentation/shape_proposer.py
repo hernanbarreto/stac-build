@@ -191,8 +191,7 @@ def _inst_zbuf(ev, fidx: int, mh: int, mw: int, inst_pts: np.ndarray,
         cache[fidx] = None
         return None
     u, v, z, front = pr
-    mu = (u * mw / ev.kw).astype(np.int64)
-    mv = (v * mh / ev.kh).astype(np.int64)
+    mu, mv = ev.mask_pixels(u, v, mh, mw)     # the exact grid maps (point 108), never a scale
     inb = front & (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
     zb = np.full((mh, mw), np.inf, dtype=np.float64)
     np.minimum.at(zb, (mv[inb], mu[inb]), z[inb])
@@ -214,8 +213,7 @@ def _visible_in_frame(ev, fidx: int, mh: int, mw: int, pts: np.ndarray,
     if pr is None:
         return None
     u, v, z, front = pr
-    mu = (u * mw / ev.kw).astype(np.int64)
-    mv = (v * mh / ev.kh).astype(np.int64)
+    mu, mv = ev.mask_pixels(u, v, mh, mw)     # the exact grid maps (point 108), never a scale
     inb = front & (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
     vis = inb.copy()
     if not inb.any():
@@ -268,8 +266,7 @@ def _calibrate_oid_lenient(ev, inst_pts: np.ndarray, instance_id: int,
             if pr is None:
                 continue
             u, v, z, front = pr
-            mu = (u * mw / ev.kw).astype(np.int64)
-            mv = (v * mh / ev.kh).astype(np.int64)
+            mu, mv = ev.mask_pixels(u, v, mh, mw)   # the exact grid maps (point 108)
             inb = front & (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
             hits += int((m[mv[inb], mu[inb]] > 0).sum())
             tot += int(inb.sum())

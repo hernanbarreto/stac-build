@@ -115,9 +115,15 @@ def render(session_dir: Path, output_dir: Path, iid: int, out_dir: Path,
         v = np.full(len(pts), -1e9)
         u[front] = K[0, 0] * p[front, 0] / z[front] + K[0, 2]
         v[front] = K[1, 1] * p[front, 1] / z[front] + K[1, 2]
-        px = np.rint(u * iw / ev.kw).astype(np.int64)
-        py = np.rint(v * ih / ev.kh).astype(np.int64)
+        # K lives on the RECORD grid: the photograph is the native frame (Omega's crop and
+        # scale undone through the exact map, point 108 — a scale alone ignored the crop) and
+        # the mask is addressed through the store's declared grid (ev.mask_pixels)
+        from precision.camera import grid_to_native
+        nat = grid_to_native(np.stack([u, v], -1), ev.record_grid)
+        px = np.rint(nat[:, 0]).astype(np.int64)
+        py = np.rint(nat[:, 1]).astype(np.int64)
         inb = front & (px >= 0) & (px < iw) & (py >= 0) & (py < ih)
+        mu_all, mv_all = ev.mask_pixels(u, v, mh, mw)
         is_own = born == int(cf)
 
         stat = {}
@@ -128,9 +134,9 @@ def render(session_dir: Path, output_dir: Path, iid: int, out_dir: Path,
                 continue
             xs, ys = px[sel], py[sel]
             canvas[ys, xs] = col
-            mu = np.clip(xs * mw // iw, 0, mw - 1)
-            mv = np.clip(ys * mh // ih, 0, mh - 1)
-            stat[name] = (int(m[mv, mu].sum()), int(sel.sum()))
+            mu, mv = mu_all[sel], mv_all[sel]
+            inm = (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
+            stat[name] = (int(m[mv[inm], mu[inm]].sum()), int(sel.sum()))
 
         big = cv2.resize(m.astype(np.uint8), (iw, ih),
                          interpolation=cv2.INTER_NEAREST).astype(bool)

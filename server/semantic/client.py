@@ -36,6 +36,15 @@ class SemanticClient:
     def health(self) -> dict[str, Any]:
         return self.backend.health()
 
+    def engine_kv_cache(self) -> dict[str, Any]:
+        """The served engine's KV cache ``{num_gpu_blocks, block_size, source}`` (the backend's
+        reading; RAISES when it has none) — what semantic.parallel derives how many requests may
+        be in flight from (USER 2026-10-09: "Mandemos la mayor cantidad que podamos"). This
+        client is safe to call from several threads at once: one HTTP request per call, the
+        consumer passed per call, the JSONL log written one whole line at a time under a lock
+        (semantic.call_log)."""
+        return self.backend.engine_kv_cache()
+
     # ── single call ─────────────────────────────────────────────────
     def chat(
         self,
@@ -165,17 +174,33 @@ def _to_text(result: Any) -> str:
 _clients: dict[str, SemanticClient] = {}
 
 
-def get_semantic_client(backend: str | None = None, consumer: str = "unknown") -> SemanticClient:
+def get_semantic_client(backend: str | None = None, consumer: str = "unknown", *,
+                        no_read_timeout: bool = False) -> SemanticClient:
     """Return a SemanticClient for the named backend (default from config).
 
     Cached per backend name; `consumer` is set on the returned view so logs are
     attributed. Safe to call from any conda env / process.
+
+    ``no_read_timeout`` (2026-10-09, the merge pass): a client whose HTTP call waits for
+    the engine's answer however long it takes. The call is non-streaming, so no byte
+    arrives before the answer is complete, and ``service.request_timeout_s`` (600 s) is a
+    bound on the WHOLE answer: on pccr's engine (~25 tok/s) it cuts any answer past ~15 k
+    tokens, below the ``max_tokens`` a caller derived from the served context. For a call
+    already bounded on the engine side by its own ``max_tokens``, the read bound is set to
+    None on a COPY of the semantic config — the configuration itself, and the engine
+    identity that digests it, are untouched. A dead engine still ends the call (the
+    connection closes). Cached apart from the ordinary client of the same backend.
     """
     cfg = load_semantic_config()
     name = backend or cfg.get("default_backend", "qwen_local")
-    if name not in _clients:
-        _clients[name] = SemanticClient(make_backend(name, cfg), consumer=consumer, cfg=cfg)
-    client = _clients[name]
+    key = f"{name}#no_read_timeout" if no_read_timeout else name
+    if key not in _clients:
+        if no_read_timeout:
+            import copy
+            cfg = copy.deepcopy(cfg)      # the merged defaults are never mutated
+            cfg.setdefault("service", {})["request_timeout_s"] = None
+        _clients[key] = SemanticClient(make_backend(name, cfg), consumer=consumer, cfg=cfg)
+    client = _clients[key]
     client.consumer = consumer
     return client
 

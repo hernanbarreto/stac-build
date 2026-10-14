@@ -257,16 +257,16 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
                           gc.holdout_samples, gc.holdout_max_nn_m)
     odo_meas = _odometry_sigma(held, T0)
     if odo_meas is None:
-        report = {"version": 1, "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        report = {"version": 1,
                   "verdict": "IDENTITY", "operator": operator, "n_kf": N,
                   "n_loop_edges": len(loops), "n_loop_edges_active": 0,
                   "s_metric_applied": s_metric,
                   "identity_reason": "no held-out surface pair measures the chain — its "
                                      "odometry cannot be weighed against the loop edges "
                                      "(nothing is assumed in its place)",
-                  "gate_mode": gc.gate_mode, "gate_warnings": [],
-                  "elapsed_s": time.time() - t0}
+                  "gate_mode": gc.gate_mode, "gate_warnings": []}
         (output_dir / REPORT_JSON).write_text(json.dumps(report, indent=1))
+        _write_graph_timing(output_dir, t0)
         log(f"[kf-graph] IDENTITY: {report['identity_reason']}")
         return report
     sigma_odo_m, sigma_odo_deg, odo_rep = odo_meas
@@ -564,7 +564,10 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
     cov = st.loop_coverage(centres, [(e["i"], e["j"]) for eid, e in loop_ids
                                      if pg._edges[eid]["active"]],
                            cfg.loops.coverage_radius_m)
-    report = {"version": 1, "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    # no clock inside the report (docs/plan_determinismo.md point 137): keyframe_graph.json is a
+    # certification artifact compared between two runs — when it was written and how long it took
+    # go to keyframe_graph.timing.json next to it (``_write_graph_timing``)
+    report = {"version": 1,
               "verdict": verdict, "operator": operator, "n_kf": N,
               "n_loop_edges": len(loop_ids), "n_loop_edges_active": n_active,
               "s_metric_applied": s_metric,
@@ -603,7 +606,6 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
               "coverage_ok": cov["coverage"] >= cfg.loops.min_coverage,
               "solver": {k: v for k, v in pg.report.items() if k != "per_edge"},
               "xi": [se3_log(M).tolist() for M in Xc] if verdict == "APPLY" else None,
-              "elapsed_s": round(time.time() - t0, 1),
               "provenance": "tool_measured"}
     log(f"[kf-graph] loop {loop_before * 100:.1f}→{loop_after * 100:.1f} cm (gain {gain * 100:.0f}%) "
         f"| held-out {held_before * 100:.2f}→{held_after * 100:.2f} cm | authority {frac * 100:.0f}% "
@@ -620,10 +622,14 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
         # had ever applied a correction — the graph simply stacks a new epoch
         # on the one being shown. A half-finished swap is still fatal.
         ccfg = load_correction_config()
-        cid = ledger.new_correction_id()
         R_kf = Xc[:, :3, :3].copy()
         t_kf = Xc[:, :3, 3].copy()
         k_kf = np.ones(N)
+        # the id is what the epoch applies, to which keyframes, on top of which epoch (point
+        # 137: ``ledger.transform_parts``) — a re-run of the same graph on the same session writes
+        # the same id, ledger line and report file; it used to be a uuid4 draw
+        cid = ledger.new_correction_id(*ledger.transform_parts(
+            "keyframe_graph", int(epoch_mod.current_epoch(output_dir)), session.frames, R_kf, t_kf, k_kf))
         tx = stage_transaction(session, ccfg, R_kf, t_kf, k_kf, correction_id=cid,
                                scale_diag_new=None, floor_npz=None, log=log, progress=None)
         swap_transaction(output_dir, tx, log=log)
@@ -642,4 +648,15 @@ def run_keyframe_graph(output_dir, session_dir, cfg: Optional[MetricGraphConfig]
         report["correction_id"] = cid
         report["epoch"] = tx["epoch_to"]
     (output_dir / REPORT_JSON).write_text(json.dumps(report, indent=1, default=float))
+    _write_graph_timing(output_dir, t0)
     return report
+
+
+def _write_graph_timing(output_dir: Path, t0: float) -> Path:
+    """``keyframe_graph.timing.json`` next to the report: when the graph was solved and how long
+    it took (the repo's timing convention, precision.corrected_cloud.write_timing) — the clock
+    never enters the compared report (point 137)."""
+    from precision.corrected_cloud import write_timing
+    return write_timing(Path(output_dir) / REPORT_JSON,
+                        {"generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                         "elapsed_s": round(time.time() - t0, 1)})

@@ -9,11 +9,22 @@
 # answered 500 ConnectionRefused after any pipeline run.
 #
 # DETERMINISM (docs/plan_determinismo.md points 81, 154, 155, 156 — 2026-10-08):
-#   * ONE permit to use the engine per job — the ENGINE LEASE (logs/semantic_engine_lease.json,
-#     a file so the backend process, its stage subprocesses and the chat all see it): while a
-#     job's process holds it, only that process starts or queries vLLM; the chat and the
-#     background session intel get 'busy' (phase5_qa/api.py, :func:`ensure_service`) and wait.
-#     A lease whose holder pid is dead is stale and ignored.
+#   * ONE permit to use the engine AND the card per job — the ENGINE LEASE
+#     (logs/semantic_engine_lease.json, a file so the backend process, its stage subprocesses
+#     and the chat all see it): while a job's process holds it, only that process starts or
+#     queries vLLM; the chat and the background session intel get 'busy' (phase5_qa/api.py,
+#     :func:`ensure_service`) and wait. The lease names its holder by pid AND the pid's START
+#     TIME (/proc/<pid>/stat field 22) with the kernel's boot id, plus an OWNER (the role:
+#     'pipeline' for the manager's job permit, 'vlm_worker', 'object_captioner', 'server' for
+#     the server's own GPU tasks) and a TOKEN (the job's id): a lease whose pid was REUSED
+#     after a container restart is stale (2026-10-08 — it used to block every job until the
+#     file was removed by hand), and a caller of the backend process asks "does a JOB hold
+#     the lease?" by its own owner — the manager's job permit lives under the backend's own
+#     pid and a pid-only check used to let the chat, the intel and the on-demand captioner
+#     through in the middle of a stage (point 81). The server's GPU tasks (meshing, the
+#     Segmentation Manager's SAM3, the legacy auto-segmentation) take the SAME lease
+#     (:func:`server_gpu_permit`, point 154): a pipeline job refuses them while it holds the
+#     card and WAITS for them when they hold it (pipeline_manager).
 #   * the VLM stage (and the per-object description pass) runs on ITS OWN vLLM, launched from
 #     the job's FROZEN configuration with the deterministic flags of semantic.serve and stopped
 #     at the end (:func:`job_engine`): never on a long-lived engine whose prefix cache, launch
@@ -34,12 +45,15 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional
+
+logger = logging.getLogger(__name__)
 
 _STAC_ROOT = Path(__file__).resolve().parents[2]
 _LAUNCHER = _STAC_ROOT / "scripts" / "serve_semantic.sh"
@@ -97,6 +111,20 @@ def is_starting() -> bool:
 
 # ── the engine lease (point 81 / 154) ────────────────────────────────────────────────────
 
+# the owners of a lease — a ROLE, never a free string: the manager's job permit (held under
+# the backend's own pid for the stages that run in other processes), the stage workers that
+# take the engine themselves, and the server's own GPU tasks (point 154)
+JOB_PERMIT_OWNER = "pipeline"
+SERVER_TASK_OWNER = "server"
+# the token of the Segmentation Manager's SAM3 session — the ONE server task whose permit is
+# deliberately re-entered by its own token: a Manager opened again takes over the one SAM3
+# model of this process (start_session resets the previous sessions), and its permit goes
+# only when the Manager closes (/api/segmentation/refresh) or a session is loaded. Declared
+# here (not in main.py) so the pipeline manager can say, while a job waits for it, HOW it is
+# released (point 154).
+SAM3_MANAGER_TOKEN = "sam3-manager"
+
+
 def lease_path() -> Path:
     return _logs_dir() / LEASE_NAME
 
@@ -112,65 +140,241 @@ def _pid_alive(pid: int) -> bool:
         return True            # no /proc: the signal reached it, it is alive
 
 
+def _boot_id() -> Optional[str]:
+    """The kernel's boot id (a reboot changes it; a lease from another boot is stale)."""
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip() or None
+    except OSError:
+        return None
+
+
+def _proc_start(pid: int) -> Optional[int]:
+    """The START TIME of ``pid`` (/proc/<pid>/stat field 22: clock ticks since boot) — what
+    tells a process from a later one that got the same pid after a restart. None without
+    /proc (the pid alone then identifies the holder, as before 2026-10-08)."""
+    try:
+        stat = Path(f"/proc/{int(pid)}/stat").read_text()
+    except (OSError, ValueError, TypeError):
+        return None
+    # the command name (field 2) is parenthesised and may hold spaces: split after it
+    tail = stat.rsplit(")", 1)[-1].split()
+    try:
+        return int(tail[19])              # fields 3.. follow the ')': field 22 is index 19
+    except (IndexError, ValueError):
+        return None
+
+
+def _holder_alive(doc: Dict[str, Any]) -> bool:
+    """Is the process the lease names still THAT process: alive, from this boot, and started
+    when the lease says (a reused pid fails the start-time check)."""
+    pid = doc.get("pid", -1)
+    if not _pid_alive(pid):
+        return False
+    boot = doc.get("boot_id")
+    if boot is not None and _boot_id() is not None and boot != _boot_id():
+        return False
+    start = doc.get("pid_start")
+    now = _proc_start(pid)
+    if start is not None and now is not None and int(start) != int(now):
+        return False
+    return True
+
+
+def _same_process(doc: Dict[str, Any], pid: Optional[int] = None) -> bool:
+    """Does the lease name ``pid`` (default: this process) — the pid and, when both sides know
+    it, the start time."""
+    me = int(pid if pid is not None else os.getpid())
+    if int(doc.get("pid", -1)) != me:
+        return False
+    start = doc.get("pid_start")
+    now = _proc_start(me)
+    return start is None or now is None or int(start) == int(now)
+
+
+def _is_mine(doc: Dict[str, Any], owner: Optional[str] = None,
+             token: Optional[str] = None) -> bool:
+    """The lease is this process's AND, when named, this owner's / this token's."""
+    if not _same_process(doc):
+        return False
+    if owner is not None and doc.get("owner") != owner:
+        return False
+    if token is not None and doc.get("token") != token:
+        return False
+    return True
+
+
 def engine_lease_holder() -> Optional[Dict[str, Any]]:
-    """The live holder of the engine lease ({pid, owner, stage, session, acquired_unix}),
-    or None. A lease whose process is gone is stale: removed, None."""
+    """The live holder of the engine lease ({pid, pid_start, boot_id, owner, token, stage,
+    session, acquired_unix}), or None. A lease whose process is gone — or whose pid now
+    belongs to another process (a reused pid after a restart) — is stale: removed, None.
+
+    A lease file that is not a JSON object names no holder at all: it is removed and
+    DECLARED in the log (2026-10-08 — it used to be read as 'no lease' while the file stayed,
+    so every acquire then lost at the exclusive create and the whole server was refused until
+    someone removed it by hand). It cannot be a live holder's: :func:`acquire_engine_lease`
+    links a COMPLETE document into place, never a file being written. A lease that exists but
+    cannot be READ (permissions, I/O) is a failure that names the file — never 'no lease',
+    which would put two users on the card."""
     p = lease_path()
     try:
-        doc = json.loads(p.read_text())
-    except (OSError, ValueError):
+        raw = p.read_text()
+    except FileNotFoundError:
         return None
-    if not isinstance(doc, dict) or not _pid_alive(doc.get("pid", -1)):
+    except OSError as e:
+        raise EngineBusy(f"the engine lease {p} exists but cannot be read ({e}) — nothing takes "
+                         f"the engine or the card until it can") from e
+    try:
+        doc = json.loads(raw)
+    except ValueError as e:
+        doc = None
+        why = f"not JSON ({e})"
+    else:
+        why = f"a {type(doc).__name__}, not an object"
+    if not isinstance(doc, dict):
+        logger.warning(f"[semantic] DECLARED: the engine lease {p} is {why} — it names no holder; "
+                       f"removed (a lease is linked into place complete, so this is no live "
+                       f"holder's file)")
+        with contextlib.suppress(OSError):
+            p.unlink()
+        return None
+    if not _holder_alive(doc):
         with contextlib.suppress(OSError):
             p.unlink()
         return None
     return doc
 
 
-def engine_available_to(pid: Optional[int] = None) -> tuple:
+def _busy_reason(holder: Dict[str, Any]) -> str:
+    """Why the caller is busy, worded by what holds the lease: a server task (meshing, the
+    Segmentation Manager) ends by itself or when the Manager closes; anything else is a
+    job's stage."""
+    owner = holder.get("owner")
+    if owner == SERVER_TASK_OWNER:
+        until = ("until the Segmentation Manager closes or a session is loaded"
+                 if holder.get("token") == SAM3_MANAGER_TOKEN else "until that task ends")
+    else:
+        until = "until that job's stage ends"
+    return (f"the semantic engine is leased to pid {holder.get('pid')} "
+            f"({owner}, {holder.get('stage')}, session "
+            f"{holder.get('session')}) — busy {until}")
+
+
+def engine_available_to(pid: Optional[int] = None, owner: Optional[str] = None,
+                        token: Optional[str] = None) -> tuple:
     """(available, reason): whether ``pid`` (default: this process) may start or query the
-    engine now — True with no live holder, or when the holder IS this process."""
+    engine now — True with no live holder; otherwise only when the holder IS this process
+    and, with ``owner`` named, THIS OWNER (and ``token``, when named).
+
+    A caller that names no owner asks by pid, as before — with ONE exception (point 81): the
+    manager's job permit (owner ``pipeline``) stands for a job whose stages run in other
+    processes; nothing in the backend process may use the engine or the card under it, so
+    it is never 'mine' to a pid-only caller (the chat, the intel, the on-demand captioner
+    used to pass that check mid-stage). A server GPU task's own permit IS available to a
+    pid-only caller of the same process (its captions, say)."""
     holder = engine_lease_holder()
-    me = int(pid if pid is not None else os.getpid())
-    if holder is None or int(holder.get("pid", -1)) == me:
-        return True, "no lease held" if holder is None else "this process holds the lease"
-    return False, (f"the semantic engine is leased to pid {holder.get('pid')} "
-                   f"({holder.get('owner')}, {holder.get('stage')}, session "
-                   f"{holder.get('session')}) — busy until that job's stage ends")
+    if holder is None:
+        return True, "no lease held"
+    if owner is None:
+        if _same_process(holder, pid) and holder.get("owner") != JOB_PERMIT_OWNER:
+            return True, "this process holds the lease"
+        return False, _busy_reason(holder)
+    if pid is None and _is_mine(holder, owner, token):
+        return True, f"this process holds the lease as {owner}"
+    return False, _busy_reason(holder)
 
 
-def acquire_engine_lease(owner: str, *, stage: str, session: Optional[str] = None) -> Dict[str, Any]:
-    """Take the engine lease for THIS process (idempotent for the holder). Another live holder
-    RAISES :class:`EngineBusy`. Created with O_EXCL so two processes cannot both win."""
+def holds_engine_lease(owner: str, token: Optional[str] = None) -> bool:
+    """Does THIS process hold the lease as ``owner`` (and ``token``, when named) right now —
+    a held permit, not merely an available one (no holder at all is False)."""
+    holder = engine_lease_holder()
+    return holder is not None and _is_mine(holder, owner, token)
+
+
+def acquire_engine_lease(owner: str, *, stage: str, session: Optional[str] = None,
+                         token: Optional[str] = None) -> Dict[str, Any]:
+    """Take the engine lease for THIS process as ``owner`` (idempotent for the same owner —
+    and the same ``token``, when the holder's is known — of this process). Another live
+    holder RAISES :class:`EngineBusy` — another process, or ANOTHER OWNER of this very
+    process (the manager's job permit vs a server GPU task, point 154).
+
+    The lease is taken ATOMICALLY AND COMPLETE: the document is written to a sibling temp
+    file of this process and LINKED to the lease path — ``os.link`` fails with EEXIST when
+    another holder won, and a lease file can never exist half-written (2026-10-08: the
+    O_EXCL create followed by the dump left an empty file behind a crash between the two,
+    which blocked every job, the chat and every server task until removed by hand)."""
     p = lease_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    doc = {"pid": os.getpid(), "owner": str(owner), "stage": str(stage),
+    doc = {"version": 2, "pid": os.getpid(), "pid_start": _proc_start(os.getpid()),
+           "boot_id": _boot_id(), "owner": str(owner),
+           "token": (str(token) if token is not None else None), "stage": str(stage),
            "session": (str(session) if session is not None else None),
            "acquired_unix": time.time()}
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
     for _ in range(2):
         holder = engine_lease_holder()          # drops a stale lease
         if holder is not None:
-            if int(holder.get("pid", -1)) == os.getpid():
+            if _is_mine(holder, str(owner), None if token is None else str(token)):
                 return holder
-            raise EngineBusy(engine_available_to()[1])
+            raise EngineBusy(_busy_reason(holder))
+        tmp.write_text(json.dumps(doc))
         try:
-            fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            os.link(str(tmp), str(p))
         except FileExistsError:
             continue                              # lost the race: read the winner
-        with os.fdopen(fd, "w") as fh:
-            json.dump(doc, fh)
+        finally:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
         return doc
-    raise EngineBusy(engine_available_to()[1])
-
-
-def release_engine_lease() -> bool:
-    """Drop the lease when THIS process holds it. True when something was released."""
     holder = engine_lease_holder()
-    if holder is None or int(holder.get("pid", -1)) != os.getpid():
+    raise EngineBusy(_busy_reason(holder) if holder
+                     else f"the lease {p} could not be taken: another holder won it twice in a "
+                          f"row (taken and released between two looks)")
+
+
+def release_engine_lease(owner: Optional[str] = None, token: Optional[str] = None) -> bool:
+    """Drop the lease when THIS process holds it — as ``owner`` / with ``token`` when named
+    (a server task never drops the manager's job permit, nor the other way round). True
+    when something was released."""
+    holder = engine_lease_holder()
+    if holder is None or not _is_mine(holder, owner, token):
         return False
     with contextlib.suppress(OSError):
         lease_path().unlink()
     return True
+
+
+# ── the server's own GPU tasks take the SAME permit (point 154) ───────────────────────────
+
+def acquire_server_gpu_permit(task: str, *, session: Optional[str] = None,
+                              token: Optional[str] = None) -> Dict[str, Any]:
+    """The ONE GPU permit for a GPU task the SERVER process runs itself — the meshing
+    endpoints (ShapeR, the per-object meshes), the Segmentation Manager's SAM3, the legacy
+    auto-segmentation, the retroactive segmentation (point 154): the engine lease under the
+    owner ``server``. Raises :class:`EngineBusy` naming the holder while a pipeline job
+    holds the card (the manager's permit) or another server task does; the pipeline
+    manager, for its part, WAITS while a server task holds it."""
+    return acquire_engine_lease(SERVER_TASK_OWNER, stage=task, session=session, token=token)
+
+
+def release_server_gpu_permit(token: Optional[str] = None) -> bool:
+    """Drop the server's GPU permit (only a ``server`` lease of this process, and only the
+    one with ``token`` when named). True when something was released."""
+    return release_engine_lease(SERVER_TASK_OWNER, token)
+
+
+@contextlib.contextmanager
+def server_gpu_permit(task: str, *, session: Optional[str] = None,
+                      token: Optional[str] = None) -> Iterator[Dict[str, Any]]:
+    """:func:`acquire_server_gpu_permit` for the block, released on the way out — unless the
+    permit was already held by this task (re-entered: left to the outer holder)."""
+    held = engine_lease_holder()
+    reentered = held is not None and _is_mine(held, SERVER_TASK_OWNER, token)
+    doc = acquire_server_gpu_permit(task, session=session, token=token)
+    try:
+        yield doc
+    finally:
+        if not reentered:
+            release_server_gpu_permit(token)
 
 
 # ── the identity of the running engine (point 155) ───────────────────────────────────────
@@ -368,13 +572,17 @@ def _launcher_log_tail(n: int = 12) -> str:
 def ensure_service(config: Optional[dict] = None,
                    log: Optional[Callable[[str], Any]] = None,
                    cancelled: Optional[Callable[[], bool]] = None,
-                   timeout_s: Optional[float] = None) -> bool:
+                   timeout_s: Optional[float] = None,
+                   owner: Optional[str] = None) -> bool:
     """Healthcheck the semantic service; if down, start it and wait until it serves.
 
     Returns True once the endpoint is healthy, False on timeout / launch error — and False,
-    declared, when another live process holds the engine lease (the chat and the session
-    intel wait for the job's stage to end: point 81) or when a launcher chain is already
-    starting (awaited, never duplicated: point 155).
+    declared, when the engine lease is held by someone else (point 81: the chat and the
+    session intel wait for the job's stage to end; ``owner`` names the caller — 'chat',
+    'intel' — so a lease of THIS process under another owner, the manager's job permit or
+    a server GPU task, is 'busy' too; without it the pid-only rule of
+    :func:`engine_available_to` applies) or when a launcher chain is already starting
+    (awaited, never duplicated: point 155).
     Loading Qwen3-VL weights takes minutes — pass a short `timeout_s` from
     request handlers that must not block, and report the wait to the user.
     """
@@ -382,7 +590,7 @@ def ensure_service(config: Optional[dict] = None,
         if log:
             log(msg)
 
-    ok, why = engine_available_to()
+    ok, why = engine_available_to() if owner is None else engine_available_to(owner=owner)
     if not ok:
         _log(f"Semantic service busy — {why}")
         return False
@@ -500,6 +708,11 @@ def job_engine(config: Mapping[str, Any], *, backend: str, owner: str, stage: st
     semantic_cfg = dict((config.get("semantic") or {}))
     if not semantic_cfg:
         raise EngineUnavailable("the job's configuration has no 'semantic' block")
+    # a lease this owner already holds (a server task that took the GPU permit for the whole
+    # of its work and now wants the engine for part of it, point 154) is re-entered and left
+    # to that holder on the way out; one taken here is released here
+    held = engine_lease_holder()
+    reentered = held is not None and _is_mine(held, str(owner))
     acquire_engine_lease(owner, stage=stage, session=(str(session_dir) if session_dir else None))
     launched = None
     try:
@@ -545,4 +758,5 @@ def job_engine(config: Mapping[str, Any], *, backend: str, owner: str, stage: st
                 log(f"[semantic] {stage}: this job's vLLM stopped (verified)")
             except Exception as e:  # noqa: BLE001 — declared; the lease still goes
                 log(f"[semantic] {stage}: the engine shutdown could not be verified: {e}")
-        release_engine_lease()
+        if not reentered:
+            release_engine_lease(str(owner))

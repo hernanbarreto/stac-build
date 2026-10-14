@@ -873,9 +873,9 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     split_obs = np.array([split_of_track[int(t)] for t in tr["obs_track"]], np.int8)
     sigma_rel, inst = _gauge_sigma(out)
     log(f"{LOG_TAG} {len(kf)} keyframes, {len(tid):,} tracks, gauge σ {sigma_rel:.4f} ({inst})")
-    from config import cfg as raw_cfg
+    from precision.config import raw_of
     from reconstruction.loops.config import improvement_error_factor
-    fac = float(improvement_error_factor(raw_cfg))
+    fac = float(improvement_error_factor(raw_of(pcfg)))   # the job's frozen configuration (point 69)
     core = refine_core(w2c0, cam.params, (cam.width, cam.height), tr["obs_track"], tr["obs_frame"],
                        tr["obs_uv_native"], split_obs, kf, sigma_rel, cfg, solver,
                        error_factor=fac, log=log)
@@ -989,7 +989,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--session", required=True)
     ap.add_argument("--no-apply", action="store_true")
     args = ap.parse_args(argv)
-    run_refine(Path(args.session), load_precision_config(), apply=not args.no_apply)
+    run_refine(Path(args.session), load_precision_config(session_dir=Path(args.session)),
+               apply=not args.no_apply)
     return 0
 
 

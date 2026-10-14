@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from abc import ABC, abstractmethod
 from typing import Any
@@ -46,6 +47,47 @@ class LLMBackend(ABC):
     def health(self) -> dict[str, Any]:
         """Return {ok, served_models, error} — does the service answer and
         serve this backend's model?"""
+
+    def engine_kv_cache(self) -> dict[str, Any]:
+        """The served engine's KV cache ``{num_gpu_blocks, block_size, source}`` — what bounds
+        how many requests may be in flight (semantic.parallel). A backend that cannot read it
+        RAISES; the caller then sends one request at a time, declared."""
+        raise NotImplementedError(f"backend '{getattr(self, 'name', '?')}' publishes no record "
+                                  f"of its engine's KV cache")
+
+
+# the Prometheus gauge vLLM sets ONCE the engine is initialised, after num_gpu_blocks is known
+# (vllm 0.19 v1/metrics/loggers.py:1007-1029, PrometheusStatLogger.log_engine_initialized): an
+# info-style gauge whose labels are the engine's CacheConfig (config/cache.py metrics_info)
+CACHE_CONFIG_INFO = "vllm:cache_config_info"
+_LABEL_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)="((?:[^"\\]|\\.)*)"')
+
+
+def parse_cache_config_info(text: str, source: str = "/metrics") -> dict[str, Any]:
+    """``{num_gpu_blocks, block_size, source}`` from a Prometheus exposition: the labels of every
+    ``vllm:cache_config_info`` sample (one per engine; the smallest cache wins — a request may
+    land on any). RAISES naming what is missing (the gauge, a label, a label that is no
+    integer — 'None' while the engine has not sized its cache)."""
+    found: list[tuple[int, int]] = []
+    for line in (text or "").splitlines():
+        if not line.startswith(CACHE_CONFIG_INFO + "{"):
+            continue
+        labels = dict(_LABEL_RE.findall(line[len(CACHE_CONFIG_INFO) + 1:line.rfind("}")]))
+        try:
+            found.append((int(labels["num_gpu_blocks"]), int(labels["block_size"])))
+        except (KeyError, ValueError) as e:
+            raise RuntimeError(f"{source}: {CACHE_CONFIG_INFO} carries no integer "
+                               f"num_gpu_blocks / block_size ({e}; labels "
+                               f"num_gpu_blocks={labels.get('num_gpu_blocks')!r}, "
+                               f"block_size={labels.get('block_size')!r})") from e
+    if not found:
+        raise RuntimeError(f"{source}: no {CACHE_CONFIG_INFO} sample — the engine publishes no "
+                           f"record of its KV cache")
+    if len({bs for _n, bs in found}) != 1:
+        raise RuntimeError(f"{source}: the engines disagree on the KV block size {found}")
+    n, bs = min(found)
+    return {"num_gpu_blocks": n, "block_size": bs,
+            "source": f"GET {source} {CACHE_CONFIG_INFO}"}
 
 
 class QwenLocalBackend(LLMBackend):
@@ -125,6 +167,21 @@ class QwenLocalBackend(LLMBackend):
             }
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "served_models": [], "error": str(e)}
+
+    def engine_kv_cache(self) -> dict[str, Any]:
+        """The engine's KV cache from its own Prometheus endpoint (GET <root>/metrics, served by
+        every ``vllm serve`` — vllm/entrypoints/serve/instrumentator/metrics.py): the
+        ``vllm:cache_config_info`` labels num_gpu_blocks and block_size (USER 2026-10-09,
+        semantic.parallel: how many requests may be in flight is derived from them). A read
+        bound like the chat call's (``service.request_timeout_s``). RAISES when it cannot be
+        read."""
+        root = self._base_url[:-len("/v1")] if self._base_url.endswith("/v1") else self._base_url
+        url = f"{root}/metrics"
+        resp = requests.get(url, headers={"Authorization": f"Bearer {self._api_key}"},
+                            timeout=self._timeout)
+        if resp.status_code != 200:
+            raise RuntimeError(f"HTTP {resp.status_code} at {url}")
+        return parse_cache_config_info(resp.text, url)
 
 
 def make_backend(name: str | None = None, cfg: dict[str, Any] | None = None) -> LLMBackend:

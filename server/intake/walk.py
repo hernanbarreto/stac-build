@@ -23,15 +23,21 @@ Every window also yields the per-frame metric anchors the scale stages read
 frame taken from the window where it sits most centrally — one DA3 round.
 
 REPRODUCIBLE (docs/plan_determinismo.md points 4, 21, 26, 27, 41, 42, 44, 2026-10-07):
-``windows.json`` is the plan AND what it depends on — the windows, process_res, model, the
-window size from the committed card table with its numbers (``window_sizing``) and the DA3
-identity of the extracting interpreter (``da3_environment``: pinned weights, extractor and DA3
-code, torch / CUDA / cuDNN, card, driver, numerics — ``extract_da3_depth.py --identity``). The
-card must be free before DA3 runs (repro.require_exclusive_gpu) and a window that does not fit
-FAILS — never halved. ``walk.json`` records the spec it was measured on (its sha256), every
-window's content sha256 and the reference view DA3 picked: a REGENERATION of deleted window
-files (F2, a resume of the co-visibility plan) must be of that exact spec and reproduce those
-exact windows, or it fails and says what differs.
+``windows.json`` is the plan AND what it depends on — the windows (SESSION-RELATIVE paths,
+``frames/<name>``, point 70, USER 2026-10-08: the plan's sha256 is the walk's reuse key and
+a copied session keeps it), process_res, model, the window size from the committed card table
+with its numbers (``window_sizing``) and the DA3 identity of the extracting interpreter
+(``da3_environment``: pinned weights, extractor and DA3 code, torch / CUDA / cuDNN, card,
+driver, numerics — ``extract_da3_depth.py --identity``). The card must be free before DA3 runs
+(repro.require_exclusive_gpu) and a window that does not fit FAILS — never halved.
+``walk.json`` records the spec it was measured on (its sha256), every window's content sha256
+and the reference view DA3 picked: a REGENERATION of deleted window files (F2, a resume of the
+co-visibility plan) must be of that exact spec and reproduce those exact windows, or it fails
+and says what differs. The SALAD revisit reference (:func:`revisit_reference`) is NEVER reused:
+deleted and recomputed whole on every reconstruction (point 66, USER 2026-10-08) — from
+``walk.json``'s RECORD of the windows (every keyframe's chained pose, each window's median depth
+and FOV, written by :func:`measure_walk` while the window files are on disk), never from the
+window files themselves: a resume whose window files F2 deleted needs no DA3 to recompute it.
 """
 
 from __future__ import annotations
@@ -51,7 +57,10 @@ import numpy as np
 WALK_NAME = "walk.json"
 WINDOWS_DIRNAME = "da3_windows"
 REFERENCE_VIEWS_NAME = "reference_views.json"   # extract_da3_depth.REFERENCE_VIEWS_NAME
-WALK_VERSION = 2          # 2: the spec sha, the DA3 identity and every window's content sha
+WALK_VERSION = 3          # 2: the spec sha, the DA3 identity and every window's content sha
+                          # 3: every keyframe's chained pose (c2w) and each window's median
+                          #    depth + FOV — what the SALAD revisit reference is computed from
+                          #    without the window files (point 66, USER 2026-10-08)
 PROVENANCE = "tool_measured"
 LOG_TAG = "[intake.walk]"
 
@@ -333,8 +342,12 @@ def planned_spec(session_dir: Path, gcfg, python: str, log: Callable = print, *,
                          card_key=str(ident["card"]), log=log)
     w_frames = int(sizing["window_frames"])
     plan = plan_windows(len(files), w_frames, gcfg.window_overlap_frac)
-    spec = {"windows": [[str(frames_dir / f) for f in files[a:b]] for a, b in plan],
-            "process_res": res, "model_id": gcfg.model_id,
+    # the windows name their frames RELATIVE to the session (``frames/<name>``, point 70, USER
+    # 2026-10-08 — as intake.focal_probe.probe_spec does): the plan's sha256 is walk.json's reuse
+    # key and a copied session keeps it; the extractor resolves them against --windows_root
+    from intake import stamps as St
+    rel = [[St.rel_to_session(frames_dir / f, session_dir) for f in files[a:b]] for a, b in plan]
+    spec = {"windows": rel, "process_res": res, "model_id": gcfg.model_id,
             "window_sizing": sizing, "da3_environment": ident}
     return spec, list(files), frames_dir
 
@@ -429,9 +442,11 @@ def run_da3_windows(session_dir: Path, gcfg, python: str, log: Callable = print,
         spec_path.write_text(json.dumps(spec))
     w_frames = int(spec["window_sizing"]["window_frames"])
     server_dir = Path(__file__).resolve().parent.parent
+    # the spec's session-relative window paths resolve against --windows_root (the session)
     cmd = [str(python), str(server_dir / "extract_da3_depth.py"), "--image_dir",
            str(frames_dir), "--output_dir", str(wdir), "--model", gcfg.model_id,
-           "--process_res", str(spec["process_res"]), "--windows_json", str(spec_path)]
+           "--process_res", str(spec["process_res"]), "--windows_json", str(spec_path),
+           "--windows_root", str(session_dir)]
     log(f"{LOG_TAG} I3: DA3 {gcfg.model_id} over {len(windows)} window(s) of "
         f"{w_frames} keyframes ({len(files)} keyframes, overlap "
         f"{gcfg.window_overlap_frac:g}; configured {gcfg.window_frames})")
@@ -483,28 +498,25 @@ def walk_is_current(session_dir: Path, files: Sequence[str], frames_dir: Path, g
                     run_cfg: Optional[Dict[str, Any]] = None) -> bool:
     """True when ``intake/walk.json`` was measured on EXACTLY the window plan this run would
     extract (same keyframes, window size from the card table, model, resolution AND DA3
-    identity — weights, code, torch, card) and the revisit reference is on disk — the walk, the
-    anchors and the revisit reference are then reused and the window depth files are NOT
-    regenerated (USER 2026-10-06: a resume regenerated 153 windows, 20 min of GPU, only because
-    their files had been deleted to save disk). F2 regenerates the files when IT needs them
-    (run_da3_windows, which then verifies they reproduce the walk's)."""
+    identity — weights, code, torch, card) — the walk and the anchors are then reused and the
+    window depth files are NOT regenerated (USER 2026-10-06: a resume regenerated 153 windows,
+    20 min of GPU, only because their files had been deleted to save disk). F2 regenerates
+    the files when IT needs them (run_da3_windows, which then verifies they reproduce the
+    walk's). The SALAD revisit reference is NOT part of this: it is never reused — the
+    reconstruction deletes and recomputes it every time from walk.json's record of the windows,
+    which a reused walk carries (:func:`revisit_reference`, point 66, USER 2026-10-08)."""
     session_dir = Path(session_dir)
     walk = load_walk(session_dir)
     spec_path = session_dir / "output" / WINDOWS_DIRNAME / "windows.json"
-    ref = session_dir / "output" / REVISIT_REFERENCE_NAME
-    if walk is None or not spec_path.exists() or not ref.exists():
+    if walk is None or not spec_path.exists():
         return False
     try:
         old = json.loads(spec_path.read_text())
-        ref_doc = json.loads(ref.read_text())
     except (OSError, ValueError):
         return False
     spec, files, _fd = planned_spec(session_dir, gcfg, python, log=lambda *_: None,
                                     frames_dir=frames_dir, files=files, run_cfg=run_cfg)
     why = _walk_spec_check(session_dir, spec)
-    if why is None and not revisit_reference_is_of(ref_doc, spec):
-        why = (f"{REVISIT_REFERENCE_NAME} was measured on another windows plan (or predates the "
-               f"stamp, version {ref_doc.get('version')})")
     same = (old == spec and why is None and int(walk.get("n_keyframes", -1)) == len(files)
             and int(walk.get("n_windows", -1)) == len(spec["windows"]))
     if same:
@@ -520,7 +532,8 @@ def walk_is_current(session_dir: Path, files: Sequence[str], frames_dir: Path, g
 def delete_windows(session_dir: Path, log: Callable = print) -> int:
     """Remove the window depth files (``window_*.npz``) of ``output/da3_windows`` — F0's only
     reader is through; ``windows.json`` (the plan), ``walk.json`` and the anchors stay, so
-    ``run_da3_windows`` regenerates exactly these windows when a step needs them again. Returns
+    ``run_da3_windows`` regenerates exactly these windows when a step needs them again (the
+    SALAD revisit reference is not such a step: it reads walk.json's record, point 66). Returns
     the bytes freed."""
     wdir = Path(session_dir) / "output" / WINDOWS_DIRNAME
     freed = 0
@@ -539,7 +552,9 @@ def delete_windows(session_dir: Path, log: Callable = print) -> int:
 def measure_walk(session_dir: Path, gcfg, log: Callable = print, *,
                  geometry_epoch: int = 0, camera_epoch: int = 0) -> Dict[str, Any]:
     """Chain the I3 windows, write ``intake/walk.json`` and the per-frame anchors.
-    Returns the walk document."""
+    Returns the walk document. The walk records, per keyframe, its chained pose and, per
+    window, its median depth and FOV — what :func:`revisit_reference` is computed from once
+    the window files are gone (point 66)."""
     session_dir = Path(session_dir)
     wdir = session_dir / "output" / WINDOWS_DIRNAME
     spec = json.loads((wdir / "windows.json").read_text())
@@ -560,9 +575,20 @@ def measure_walk(session_dir: Path, gcfg, log: Callable = print, *,
         with np.load(w["path"]) as z:
             refs = [int(x) for x in z["ref_views"]] if "ref_views" in z.files else None
             stamp_i = str(z["stamp"]) if "stamp" in z.files else None
+            # what the SALAD revisit reference is computed from (point 66, USER 2026-10-08): the
+            # window's median valid DA3 depth and its median horizontal FOV from its own K —
+            # recorded HERE, the one time the window files are certainly on disk (F2 deletes them
+            # after the chain, gauge.delete_windows_after_chain), so the reference never needs
+            # them: a resume recomputes it with no DA3 (USER 2026-10-06). A window with no valid
+            # depth records null and is left out of the distance bar, as it always was.
+            d, c, K = z["depth"], z["conf"], z["intrinsics"]
+            valid = (c > 0) & np.isfinite(d) & (d > 0)
+            med_depth = float(np.median(d[valid])) if valid.any() else None
+            hfov = float(np.median(2.0 * np.arctan(d.shape[-1] / (2.0 * K[:, 0, 0]))))
         win_rec.append({"index": i, "frames": [w["frames"][0], w["frames"][-1]],
                         "n": len(w["frames"]), "scale_factor": w["scale_factor"],
                         "is_metric": w["is_metric"], "reference_views": refs, "stamp": stamp_i,
+                        "median_depth_m": med_depth, "hfov_rad": hfov,
                         "content_sha256": window_content_sha256(Path(w["path"]))})
     doc = {
         "version": WALK_VERSION,
@@ -589,7 +615,11 @@ def measure_walk(session_dir: Path, gcfg, log: Callable = print, *,
         "walk_length_m": walk_m,
         "local_error_median_m": float(np.median(dis)) if dis else 0.0,
         "local_error_max_m": float(max(dis)) if dis else 0.0,
-        "chainage": [{"frame": f, "chainage_m": c} for f, c in zip(frames, chainage)],
+        # every keyframe's chainage AND its chained DA3 pose (camera-to-world, 3 rows of 4):
+        # the SALAD revisit reference reads each camera's centre and viewing direction from
+        # here (point 66) — JSON keeps the float64 exactly (shortest round-trip repr)
+        "chainage": [{"frame": f, "chainage_m": c, "c2w": poses[f][:3, :].tolist()}
+                     for f, c in zip(frames, chainage)],
         "windows": win_rec,
         "seams": seams,
         "n_anchors_written": n_anchor,
@@ -611,7 +641,28 @@ def measure_walk(session_dir: Path, gcfg, log: Callable = print, *,
 REVISIT_REFERENCE_NAME = "salad_revisit_reference.json"
 
 
-def revisit_reference(session_dir: Path) -> Dict[str, Any]:
+def _reference_record(walk: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """walk.json's record the revisit reference is computed from — (the chainage entries, each
+    with its chained pose ``c2w``; the window entries, each with ``median_depth_m`` and
+    ``hfov_rad``). A walk without it (an older version, or a hand-written one) FAILS naming
+    re-run I3: nothing falls back to the window files (point 66 — they are deleted after F2's
+    chain and a reused walk never regenerates them)."""
+    chain = walk.get("chainage") or []
+    wins = walk.get("windows") or []
+    lacks = (int(walk.get("version", 0)) != WALK_VERSION or not chain or not wins
+             or any(not isinstance(e, dict) or "c2w" not in e for e in chain)
+             or any(not isinstance(w, dict) or "median_depth_m" not in w or "hfov_rad" not in w
+                    for w in wins))
+    if lacks:
+        raise WalkError(f"intake/walk.json (version {walk.get('version')}) does not record the "
+                        f"chained poses and each window's median depth and FOV (walk version "
+                        f"{WALK_VERSION}) — the revisit reference is computed from that record, "
+                        f"never from the window files (point 66, USER 2026-10-08): re-run I3 "
+                        f"(the windows AND the walk)")
+    return chain, wins
+
+
+def revisit_reference(session_dir: Path, log: Callable = print) -> Dict[str, Any]:
     """The GEOMETRIC revisits the loop detector's appearance bar is calibrated on
     (``LoopModels.LoopModel.calibrate_threshold``): the I3 windows chained into one
     metric trajectory give every keyframe's camera centre and viewing direction;
@@ -621,24 +672,39 @@ def revisit_reference(session_dir: Path) -> Dict[str, Any]:
     own K) — both bars measured on the session. Written to
     ``output/salad_revisit_reference.json``; returns it.
 
+    NEVER REUSED (docs/plan_determinismo.md point 66, USER 2026-10-08): the file on disk is
+    DELETED first and the reference is recomputed whole every time a reconstruction reaches
+    the loop stage — from ``walk.json``'s RECORD of the I3 windows (every keyframe's chained
+    pose, each window's median depth and FOV: :func:`measure_walk` writes them while the window
+    files are on disk), so it reads NO window file: F2 deletes those after the chain
+    (``gauge.delete_windows_after_chain``) and a resume that reuses the walk must not spend
+    20 min of DA3 to regenerate them for a CPU median (USER 2026-10-06). A walk without the
+    record FAILS naming re-run I3 (:func:`_reference_record`); nothing falls back to the files.
+    Its ``stamp`` records what it was computed from (every window's content sha256 as walk.json
+    recorded it, the windows plan's sha256, the chaining code, the bootstrap and the user's
+    error factor) FOR THE RECORD only; nothing compares it to decide a reuse.
+
     Why: SALAD's fixed 0.65 (measured on pccr 2026-08-31, 216 keyframes) proposed
     six pairs on pccr 2026-08-24 (746 keyframes), all 11-13 keyframes apart,
     while this trajectory held 26 revisit episodes > 10 m of walk apart."""
     session_dir = Path(session_dir)
-    wdir = session_dir / "output" / WINDOWS_DIRNAME
-    spec = json.loads((wdir / "windows.json").read_text())
-    windows = [load_window(wdir / f"window_{i:04d}.npz") for i in range(len(spec["windows"]))]
-    poses, _seams = chain_windows(windows)
-    frames = sorted(poses)
-    med_depth, hfov_w = [], []          # per WINDOW: its median depth, its median half-FOV input
-    for w in windows:
-        with np.load(w["path"]) as z:
-            d, c, K = z["depth"], z["conf"], z["intrinsics"]
-            valid = (c > 0) & np.isfinite(d) & (d > 0)
-            if valid.any():
-                med_depth.append(float(np.median(d[valid])))
-            width = d.shape[-1]
-            hfov_w.append(float(np.median(2.0 * np.arctan(width / (2.0 * K[:, 0, 0])))))
+    out = session_dir / "output" / REVISIT_REFERENCE_NAME
+    if out.exists():
+        out.unlink()
+        log(f"{LOG_TAG} {REVISIT_REFERENCE_NAME} deleted: the revisit reference is never "
+            f"reused — recomputed whole from this walk's record of its windows (point 66, "
+            f"USER 2026-10-08)")
+    walk = load_walk(session_dir)
+    if walk is None:
+        raise WalkError("no intake/walk.json — the revisit reference is computed from the walk's "
+                        "record of the I3 windows: run I3 (the windows AND the walk) first")
+    chain, wins = _reference_record(walk)
+    c2w = {int(e["frame"]): np.asarray(e["c2w"], dtype=np.float64) for e in chain}
+    frames = sorted(c2w)
+    # per WINDOW, as walk.json recorded them: its median depth (null = no valid depth, left out
+    # of the distance bar) and its median FOV — the two medians over the windows are the bars
+    med_depth = [float(w["median_depth_m"]) for w in wins if w["median_depth_m"] is not None]
+    hfov_w = [float(w["hfov_rad"]) for w in wins]
     if not med_depth or not hfov_w:
         raise WalkError("the I3 windows carry no valid depth — no revisit reference")
     import repro
@@ -658,10 +724,23 @@ def revisit_reference(session_dir: Path) -> Dict[str, Any]:
     pick_h = rng.integers(0, hw.size, size=(BAR_BOOTSTRAP_N, hw.size))
     dist_err = float(np.std(np.median(md[pick], axis=1)))
     cos_err = float(np.std(np.cos(0.5 * np.median(hw[pick_h], axis=1))))
+    # the record of what this document was computed from (never a reuse key): the windows'
+    # content as walk.json recorded it (the window files, hashed once there, when the walk
+    # read them), the plan the walk was measured on, the code, the bootstrap and the user's
+    # factor
+    record = {"inputs": {f"output/{WINDOWS_DIRNAME}/window_{int(w['index']):04d}.npz":
+                         w.get("content_sha256") for w in wins},
+              "windows_spec_sha256": walk.get("windows_spec_sha256"),
+              "walk_version": int(walk["version"]),
+              "code": repro.stamp(code=[__file__])["code"],
+              "config": {"error_factor": factor,
+                         "bar_bootstrap": {"n_windows": int(md.size), "n_boot": BAR_BOOTSTRAP_N,
+                                           "seed": BAR_BOOTSTRAP_SEED}}}
+    record["sha256"] = repro.sha256_json(record)
     doc = {"version": REVISIT_REFERENCE_VERSION, "provenance": PROVENANCE,
            "frames": [int(f) for f in frames],
-           "centres": [poses[f][:3, 3].tolist() for f in frames],
-           "forward": [poses[f][:3, 2].tolist() for f in frames],
+           "centres": [c2w[f][:3, 3].tolist() for f in frames],
+           "forward": [c2w[f][:3, 2].tolist() for f in frames],
            "dist_bar_m": float(np.median(md)),
            "cos_bar": float(np.cos(0.5 * float(np.median(hw)))),       # half the FOV
            "hfov_rad": float(np.median(hw)),
@@ -670,29 +749,25 @@ def revisit_reference(session_dir: Path) -> Dict[str, Any]:
            "bar_bootstrap": {"n_windows": int(md.size), "n_boot": BAR_BOOTSTRAP_N,
                              "seed": BAR_BOOTSTRAP_SEED},
            # what it was measured on (docs/plan_determinismo.md point 16: the SALAD bar is
-           # calibrated on this reference; it is reused only for the exact windows plan — the
-           # fork stamps the file's bytes into its loop stamp, point 8)
-           "windows_spec_sha256": spec_sha256(spec),
-           "code": repro.stamp(code=[__file__])["code"]}
-    out = session_dir / "output" / REVISIT_REFERENCE_NAME
+           # calibrated on this reference; the fork stamps the file's bytes into its loop
+           # stamp, point 8) — FOR THE RECORD: it is recomputed on every reconstruction
+           "windows_spec_sha256": walk.get("windows_spec_sha256"),
+           "code": record["code"],
+           "stamp": record}
     tmp = out.with_name(out.name + ".tmp")
     tmp.write_text(json.dumps(doc))
     os.replace(tmp, out)
     return doc
 
 
-REVISIT_REFERENCE_VERSION = 3       # 2: stamped with the windows plan it was measured on
-                                    # 3: each bar with its measured error + the user's error
-                                    #    factor (plan point 71, 2026-10-07)
+# The document's SCHEMA version — a field of the record the fork's calibration names in its
+# error ("version >= 3": each bar with its measured error + the user's error factor, plan
+# point 71, 2026-10-07). It is NOT a reuse key: nothing compares it (point 66, USER 2026-10-08
+# — the reference is recomputed on every reconstruction; the reuse-by-version path is gone).
+REVISIT_REFERENCE_VERSION = 3
 # the repo's fixed-key bootstrap (loop_utils/metric_lock.heldout_change / decide_change)
 BAR_BOOTSTRAP_N = 2000
 BAR_BOOTSTRAP_SEED = 0
-
-
-def revisit_reference_is_of(doc: Dict[str, Any], spec: Dict[str, Any]) -> bool:
-    """True when a revisit reference was measured on exactly the windows plan ``spec``."""
-    return (isinstance(doc, dict) and int(doc.get("version", 0)) == REVISIT_REFERENCE_VERSION
-            and doc.get("windows_spec_sha256") == spec_sha256(spec))
 
 
 def load_walk(session_dir: Path) -> Optional[Dict[str, Any]]:

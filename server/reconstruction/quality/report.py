@@ -26,6 +26,26 @@ import numpy as np
 
 QUALITY_DIR = "quality"
 REPORT_JSON = "report.json"
+#: where the per-epoch report's clock lives: ``quality/timing/report_epoch_<N>.timing.json``. A
+#: sub-directory, not a sibling — every reader of the quality directory (certify/api.py's
+#: ``available_epochs``, correction.chain.lineage_cleanup, the tests) globs
+#: ``report_epoch_*.json`` and parses the epoch out of the stem, and a sibling named
+#: ``report_epoch_3.timing.json`` matched that glob (int('3.timing') → 500 on GET
+#: /api/certify/report after every certification — found by review 2026-10-08, point 137)
+TIMING_DIR = "timing"
+
+
+def epoch_report_path(output_dir, epoch: int) -> Path:
+    """``quality/report_epoch_<N>.json``."""
+    return Path(output_dir) / QUALITY_DIR / f"report_epoch_{int(epoch)}.json"
+
+
+def epoch_report_timing_path(output_dir, epoch: int) -> Path:
+    """The timing sidecar of epoch ``epoch``'s report (the repo's ``<report>.timing.json``
+    convention, under :data:`TIMING_DIR`) — pruned with the report by
+    correction.chain.lineage_cleanup."""
+    from precision.corrected_cloud import timing_path
+    return timing_path(Path(output_dir) / QUALITY_DIR / TIMING_DIR / f"report_epoch_{int(epoch)}.json")
 
 
 def _median(vals) -> Optional[float]:
@@ -209,12 +229,22 @@ def compare(current: dict, previous: Optional[dict]) -> dict:
 
 def write_epoch_report(output_dir, epoch: int, metrics: dict, previous: Optional[dict] = None,
                        extra: Optional[dict] = None) -> Path:
+    """``quality/report_epoch_<N>.json`` (+ the ``report.json`` copy of the latest): a product
+    compared byte for byte between two runs of the same session, so no clock inside it
+    (docs/plan_determinismo.md point 137, 2026-10-08) — when it was written goes to
+    ``quality/timing/report_epoch_<N>.timing.json`` (:func:`epoch_report_timing_path`: the
+    repo's timing convention, ``precision.corrected_cloud.write_timing``, in a sub-directory so
+    it never enters the ``report_epoch_*.json`` glob of the readers)."""
     qdir = Path(output_dir) / QUALITY_DIR
     qdir.mkdir(parents=True, exist_ok=True)
-    rep = {"version": 1, "epoch": int(epoch), "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    rep = {"version": 1, "epoch": int(epoch),
            "metrics": metrics, "comparison_vs_previous": compare(metrics, previous),
            "previous_epoch_objective": (previous or {}).get("objective"), **(extra or {})}
-    p = qdir / f"report_epoch_{int(epoch)}.json"
+    p = epoch_report_path(output_dir, epoch)
     p.write_text(json.dumps(rep, indent=1, default=float))
     (qdir / REPORT_JSON).write_text(json.dumps(rep, indent=1, default=float))
+    tp = epoch_report_timing_path(output_dir, epoch)
+    tp.parent.mkdir(parents=True, exist_ok=True)
+    tp.write_text(json.dumps({"generated_at": time.strftime("%Y-%m-%d %H:%M:%S"), "epoch": int(epoch)},
+                             indent=1, sort_keys=True))
     return p

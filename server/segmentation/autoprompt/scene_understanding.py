@@ -32,7 +32,7 @@ _PROMPT = (
     'Study this image and return JSON:\n'
     '{"scene_type": "<short phrase: what kind of place/space is this>",\n'
     ' "summary": "<1-2 sentences: the setting and what is happening>",\n'
-    ' "objects": [{"category": "<the COMMON NAME of the kind of object>", '
+    ' "objects": [{"category": "<the COMMON NAME of ONE WHOLE object>", '
     '"description": "<2-5 words that describe THIS one visually: colour, material, '
     'shape>", '
     '"shape": {"form": "<the dominant geometric form, e.g. flat vertical surface, '
@@ -60,12 +60,17 @@ _PROMPT = (
     # variant made SAM3 segment the same object 20 times under 20 names.
     # GENERIC (USER 2026-09-30: "no es un prompt genérico, es un prompt hecho para pccr"):
     # rules only, no example object from any particular scene
-    "Each 'category' is the plain CATEGORY NAME of an object type, 1-2 words, the way a "
-    "person would name it, at the level of generality of: furniture, tool, vehicle, "
-    "pipe, column, beam, wall, floor, ceiling, door, window, stair, cable, equipment, "
-    "container, sign, light. "
-    # USER 2026-09-30: "agregale furniture, tools, vehicle, structural, pipes, column, etc"
-    # — the GRANULARITY, stated with generic classes that fit any scene
+    # THE NAME OF ONE OBJECT, NOT OF ITS CLASS (USER 2026-10-08, the segmentation rounds:
+    # "the most specific common name of ONE object (desk, chair — never 'furniture')"). The
+    # 2026-09-30 list ("agregale furniture, tools, vehicle, structural, pipes, column, etc")
+    # used to be the level of generality of the NAME; it stays as the SCOPE — every kind of
+    # thing is to be named — and each thing is named by its own common name.
+    "Each 'category' is the plain COMMON NAME of ONE WHOLE OBJECT, 1-2 words, the way a "
+    "person would name it: its most specific common name, never the class it belongs to "
+    "(a chair is 'chair', never 'furniture'; never 'equipment', 'device' or 'object' when "
+    "the thing has a name of its own). Name every kind of thing you see: furniture, "
+    "tools, vehicles, pipes, columns, beams, walls, floors, ceilings, doors, windows, "
+    "stairs, cables, equipment, containers, signs, lights, each by its own name. "
     "NEVER colour, material, finish, size, state or position words "
     "in the category; colour and material go in 'description' only. One entry PER KIND "
     "of object (every instance of a kind is one entry). "
@@ -74,17 +79,37 @@ _PROMPT = (
     # so a compound phrase asks the segmenter for a mask spanning two different
     # things and a second name for the same thing asks for a duplicate of it.
     # USER 2026-09-15: "son objetos compuestos, eso no está bien".
-    "THREE RULES ABOUT THE LIST, and they matter more than richness:\n"
-    "1. ATOMIC objects only. Never a compound and never a phrase joining two "
+    "FOUR RULES ABOUT THE LIST, and they matter more than richness:\n"
+    # USER 2026-10-09: "los objetos deben ser el más grande posible, si tengo mil baldosas
+    # que forman el piso el objeto es piso no baldosa. Si tengo un desk no lo voy a
+    # segmentar en sus patas la tabla etc, es un objeto único". pccr the same night: the
+    # list carried 'tile' (the floor's tiles), 'panel', 'frame', 'rod', 'tape', 'sheet',
+    # 'drywall', and SAM3's session for 'tile' grew from 8 to 77.7 GB — every floor tile
+    # became an object — until the card ran out at category 42 of 45; zaragoza's carried
+    # 'wheel' (of the train). A part is not segmentable apart from its whole and a unit of
+    # a surface multiplies one object into hundreds, so the rule is stated FIRST. The
+    # examples are generic (USER 2026-09-30), never one scene's objects.
+    "1. WHOLE OBJECTS, NEVER THEIR PIECES. Each entry is ONE WHOLE OBJECT: the largest "
+    "physical unit a person would call one thing (a floor, a wall, a ceiling, a door, a "
+    "chair, a car). NEVER its parts or components (legs, top, drawers, wheels, handles, "
+    "the frame of a door or window). NEVER the units a surface or structure is made of "
+    "(the tiles, bricks, boards or panels of a floor, wall or ceiling). NEVER a material "
+    "or finish (drywall, plaster, concrete, paint, tape used as a covering). A part, a "
+    "unit or a covering belongs to the object it is part of: name that whole object "
+    "instead, once. A floor made of a thousand tiles is ONE entry, 'floor'. A separate "
+    "object that only touches another (a cable lying on the floor) is its own entry.\n"
+    # 'atomic' means ONE thing per entry (no compound phrase), never the smallest piece:
+    # rule 1 above says which unit the thing is.
+    "2. ATOMIC entries, one thing each. Never a compound and never a phrase joining two "
     "things with 'with', 'and', 'containing' or 'on': two things are two entries. "
     "The description may describe the object itself (material, colour, shape) but "
     "never a DIFFERENT object attached to it.\n"
-    "2. ONE name per object. Do not name the same physical thing twice under "
+    "3. ONE name per object. Do not name the same physical thing twice under "
     "different words. Pick the one name that fits it best and use only that.\n"
     # USER 2026-09-15: "ojo que Qwen no segmentó una puerta, la puerta
     # principal por ejemplo, es fundamental; puertas, ventanas, paredes, pisos,
     # techos, columnas, etc., eso es estructural, debe estar".
-    "3. THE ENVELOPE IS NOT BACKGROUND. The structure that encloses the space "
+    "4. THE ENVELOPE IS NOT BACKGROUND. The structure that encloses the space "
     "is the most important thing in the image, not scenery to skip: every "
     "floor, ceiling, wall, DOOR, window, opening, column, beam and stair you "
     "can see must appear in the list. A door is an object even when it is "
@@ -295,7 +320,10 @@ _LEADING = ("a", "an", "the", "some", "several", "multiple", "many", "two", "thr
             "four", "five", "six", "seven", "eight", "nine", "ten")
 # Bumped whenever the rule that folds one phrase into another changes: a
 # session vocabulary derived under another rule is not reused (session_builder).
-GROUPING_VERSION = "category_names_v2"   # 2026-09-30: plain category names + kind merge
+# 2026-09-30 v2: plain category names + kind merge. 2026-10-09 v3 (USER: "los objetos deben
+# ser el más grande posible"): one WHOLE object per name, and the merge pass folds a part /
+# component / building unit / material INTO the listed whole it belongs to.
+GROUPING_VERSION = "whole_objects_v3"
 
 
 def _singular(w: str) -> str:

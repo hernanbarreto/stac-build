@@ -866,7 +866,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--session", required=True, help="session directory (holds frames/ and output/)")
     args = ap.parse_args(argv)
     from precision.config import load_precision_config
-    cfg = load_precision_config()
+    cfg = load_precision_config(session_dir=Path(args.session))   # the job's frozen config (point 69)
     build_session_camera(args.session, cfg.camera)
     return 0
 

@@ -205,7 +205,8 @@ def run_pointdit(session: Path, n_frames: int, repeat: int) -> Dict[str, Any]:
     from precision.pointdit_runner import PointDiTRunner
     repro.ensure_cublas_workspace()                 # f6_bend runs under the step env: same here
     out: Dict[str, Any] = {"model": "pointdit", "cotenants_at_start": _gpu_cotenants()}
-    md = load_precision_config().mono_detail
+    # the session's job configuration (point 69: its frozen run_config.yaml, else declared)
+    md = load_precision_config(session_dir=session).mono_detail
     out["config"] = {"model": md.model, "steps": int(md.steps), "seed": int(md.seed),
                      "tile_px": int(md.tile_px), "tile_overlap_frac": float(md.tile_overlap_frac),
                      "context_scale": float(md.context_scale), "enabled": bool(md.enabled)}

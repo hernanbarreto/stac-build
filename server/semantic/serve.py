@@ -9,9 +9,9 @@
 # DETERMINISM (docs/plan_determinismo.md points 80, 94, 155 — 2026-10-08): every answer of
 # the engine must be a pure function of its request, whatever ran before and whatever else
 # is on the machine. The launcher therefore
-#   * serves WITHOUT prefix caching, ONE sequence at a time, a FIXED token batch of the
-#     model's own length (so no prefill is ever split by a card-dependent default — vLLM 0.19
-#     picks 8192 or 2048 by the card's memory, arg_utils.py:2053), WITHOUT compilation
+#   * serves WITHOUT prefix caching, a FIXED token batch of the model's own length (so a
+#     request's prefill is never split by a card-dependent default — vLLM 0.19 picks 8192 or
+#     2048 by the card's memory, arg_utils.py:2053), WITHOUT compilation
 #     (enforce-eager: Inductor's benchmark_combo_kernel picks kernels by TIMING and caches
 #     them in /root/.cache/vllm, outside /workspace), with vLLM's OWN generation defaults
 #     (the model's generation_config.json would inject top_k 20 / top_p 0.8 / temperature
@@ -20,6 +20,12 @@
 #     backend (batch_invariant.py:1008: None is not a supported backend) and installs its
 #     batch-invariant matmul on sm_80 / sm_89 / sm_100 and the cuBLAS-workspace form on any
 #     other card (batch_invariant.py:938-957): which form applies is RECORDED, never guessed;
+#   * SEVERAL sequences at once since 2026-10-09 (USER: "Mandemos la mayor cantidad que
+#     podamos"): '--max-num-seqs 1' is gone (:func:`deterministic_serve_args`). The answers
+#     stay a function of the request alone — that is what batch invariance is for — and every
+#     pass that sends several at once re-asks a sample alone and compares the answers byte for
+#     byte (semantic.parallel.self_check, declared in the census); how many are in flight is
+#     derived by the client from this engine's KV cache (semantic.parallel);
 #   * loads ONLY the local weights (:data:`PINNED_WEIGHTS`): their directory must exist and
 #     every pinned file must hash to its pinned sha256 (a missing directory used to fall back
 #     to the Hugging Face id at an unpinned revision);
@@ -28,19 +34,26 @@
 #     semantic configuration block) BEFORE exec — the pid is the same after exec, so a
 #     reader can tell whether the vLLM answering /health is the one this launch described
 #     (semantic.service.service_identity). The VLM stage copies that identity into
-#     vlm_analysis.json and refuses an engine whose identity is not the frozen one.
+#     vlm_analysis.json and refuses an engine whose identity is not the frozen one;
+#   * computes that SAME identity WITHOUT starting vLLM (``--identity-only``, run by
+#     :func:`expected_identity` in the semantic env): the weights verified by sha256, the
+#     card, the versions, the flags — everything the launch would record, printed and not
+#     written. The VLM stage asks it when the session's analysis is reusable in every other
+#     part of its stamp (point 82): a reuse then costs the weights' verification, not a
+#     model load and a verified stop (2026-10-08: ~3 min of vLLM per reused session).
 #
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, Iterator, List, Mapping, Optional
 
 # Allow `python semantic/serve.py` and `python -m semantic.serve` alike.
 _SERVER_DIR = Path(__file__).resolve().parents[1]
@@ -53,6 +66,13 @@ from semantic.semantic_config import (_DEFAULTS, _deep_merge, backend_config,  #
 
 IDENTITY_NAME = "semantic_service.json"      # logs/<this>: the identity of the vLLM serving now
 IDENTITY_VERSION = 1
+# the last stdout line of ``--identity-only`` (the identity document as one JSON line, after
+# the launcher's own log lines) — what :func:`expected_identity` parses
+IDENTITY_ONLY_MARK = "[semantic.serve] IDENTITY "
+# the conda root the launcher script activates the `semantic` env from
+# (scripts/serve_semantic.sh: CONDA_ROOT=/workspace/miniforge3); scripts/start.sh exports it
+CONDA_ROOT_DEFAULT = "/workspace/miniforge3"
+SEMANTIC_ENV_NAME = "semantic"
 # the attention backend every launch pins (vLLM 0.19's default on Ampere; batch invariance
 # requires it to be named explicitly — batch_invariant.py:990-1017)
 ATTENTION_BACKEND = "FLASH_ATTN"
@@ -180,11 +200,30 @@ def weights_identity(b: Mapping[str, Any], log=print) -> Dict[str, Any]:
 # ── the command line ─────────────────────────────────────────────────────────────────────
 
 def deterministic_serve_args(max_model_len: int, seed: int) -> List[str]:
-    """The vLLM flags of point 80 (every launch, never a switch): no prefix caching, one
-    sequence at a time, a token batch of the model's own length, no compilation, vLLM's
-    generation defaults, a fixed seed and the pinned attention backend."""
+    """The vLLM flags of point 80 (every launch, never a switch): no prefix caching, a token
+    batch of the model's own length, no compilation, vLLM's generation defaults, a fixed seed
+    and the pinned attention backend.
+
+    NOT one sequence at a time any more (USER 2026-10-09: "Mandemos la mayor cantidad que
+    podamos"): '--max-num-seqs 1' made every consumer wait for the previous answer (pccr: 295
+    understanding calls, 80-100 min). The flag is REMOVED, not set to a number: the engine's
+    own limit applies — vLLM 0.19's default for the OpenAI server (arg_utils.py
+    get_batch_defaults: 256; 1024 on a card of >= 70 GB that is not an A100), a function of the
+    vLLM version and the card, both part of the identity this launcher records. How many
+    requests are actually in flight is derived by the CLIENT from this engine's KV cache
+    (semantic.parallel: no request is ever preempted) and stays far below that limit on the
+    engines measured (pccr 2026-10-09: 138 800 KV tokens, ~4.9 k per understanding call ≈ 28);
+    a request beyond it would only wait in the engine's queue, holding no KV cache.
+    WHY IT STAYS DETERMINISTIC: batch invariance (VLLM_BATCH_INVARIANT=1, :func:`service_
+    environment`) makes what a request computes independent of what else is in the batch — a
+    prefill that now shares the token budget with other requests and is chunked included
+    (attention without split-KV, the batch-invariant matmul); and it is MEASURED on every pass
+    that sends several at once: a sample re-asked alone must answer byte for byte as in the
+    pass (semantic.parallel.self_check — a mismatch is declared in the census, never hidden).
+    Removing the flag changes the identity (``deterministic_args``, ``argv``): the stamps that
+    carry it (the VLM analysis, the object captions) are derived again — honestly another
+    engine."""
     return ["--no-enable-prefix-caching",
-            "--max-num-seqs", "1",
             "--max-num-batched-tokens", str(int(max_model_len)),
             "--enforce-eager",
             "--generation-config", "vllm",
@@ -323,6 +362,93 @@ def write_identity(doc: Mapping[str, Any], path: Optional[os.PathLike] = None) -
     return p
 
 
+# ── the identity without a launch ───────────────────────────────────────────────────────
+
+def semantic_env_python() -> Path:
+    """The python of the `semantic` conda env — where vLLM, its torch and the launcher's
+    versions live (scripts/serve_semantic.sh activates it from CONDA_ROOT). Missing: RAISES,
+    the identity of an engine that cannot be launched cannot be computed either."""
+    root = Path(os.environ.get("CONDA_ROOT") or CONDA_ROOT_DEFAULT)
+    p = root / "envs" / SEMANTIC_ENV_NAME / "bin" / "python"
+    if not p.is_file():
+        raise ServeError(f"the semantic env's python is not at {p} (CONDA_ROOT={root}) — the "
+                         f"engine's identity cannot be computed outside that env")
+    return p
+
+
+def expected_identity(backend: str, config_path: Optional[os.PathLike] = None, *,
+                      log=print, python: Optional[os.PathLike] = None,
+                      timeout_s: float = float(repro.PROBE_TIMEOUT_S) * 4) -> Dict[str, Any]:
+    """The identity the launcher WOULD write for ``backend`` under ``config_path`` (the
+    job's frozen run configuration; None: server/config.yaml), computed by this module's
+    ``--identity-only`` in the semantic env — the weights verified by sha256, the card
+    probed, the versions read THERE — without starting vLLM. Returns the stable
+    ``identity`` dict (what a product records). RAISES :class:`ServeError` with the
+    launcher's own words when the identity cannot be made (weights not pinned or not the
+    pinned ones, no card, the env missing): the launch would fail the same way.
+
+    ``timeout_s`` is a hang guard (4 × repro.PROBE_TIMEOUT_S: the weights' sha256 over
+    16 GB plus the card probe), not a decision — past it the call FAILS."""
+    import subprocess
+    py = Path(python) if python is not None else semantic_env_python()
+    argv = [str(py), "-m", "semantic.serve", "--backend", str(backend), "--identity-only"]
+    if config_path is not None:
+        argv += ["--config", str(config_path)]
+    env = service_environment(os.environ)
+    env["PYTHONUNBUFFERED"] = "1"
+    log(f"[semantic.serve] computing the identity of the '{backend}' engine without "
+        f"launching it (weights sha256, card, versions — in the semantic env)")
+    try:
+        r = subprocess.run(argv, cwd=str(_SERVER_DIR), env=env, capture_output=True, text=True,
+                           timeout=float(timeout_s))
+    except subprocess.TimeoutExpired as e:
+        raise ServeError(f"the identity-only launcher did not answer in {timeout_s:.0f} s") from e
+    except OSError as e:
+        raise ServeError(f"the identity-only launcher could not be run ({e})") from e
+    lines = [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
+    if r.returncode != 0:
+        tail = "\n".join((lines + (r.stderr or "").splitlines())[-12:])
+        raise ServeError(f"the identity-only launcher failed (exit {r.returncode}):\n{tail}")
+    marked = [ln for ln in lines if ln.startswith(IDENTITY_ONLY_MARK)]
+    if not marked:
+        raise ServeError("the identity-only launcher printed no identity line: "
+                         + "\n".join(lines[-6:]))
+    try:
+        doc = json.loads(marked[-1][len(IDENTITY_ONLY_MARK):])
+    except ValueError as e:
+        raise ServeError(f"the identity-only launcher's identity line is not JSON ({e})") from e
+    ident = doc.get("identity") if isinstance(doc, dict) else None
+    if not isinstance(ident, dict) or not ident.get("sha256"):
+        raise ServeError("the identity-only launcher answered without an identity")
+    for ln in lines:
+        if ln.startswith("[semantic.serve] weights of "):
+            log(ln)
+    log(f"[semantic.serve] expected engine identity {ident['sha256'][:12]} — "
+        f"{ident.get('served_model_name')} on {(ident.get('card') or {}).get('key')}, no vLLM "
+        f"launched")
+    return dict(ident)
+
+
+@contextlib.contextmanager
+def engine_as_expected(engine, expected: Mapping[str, Any], *,
+                       stage: str = "this job") -> Iterator[Dict[str, Any]]:
+    """``engine`` (semantic.service.job_engine — a context manager yielding the live
+    engine's verified identity) whose identity must be the one :func:`expected_identity`
+    computed WITHOUT a launch: a decision was taken on that identity (a reuse refused, a
+    cache key built — the VLM stage, the loop classes), so an engine that comes up as
+    another one is a contradiction — RAISES :class:`ServeError`, declared, never used
+    (point 155). ONE check for every consumer. Yields the live identity."""
+    with engine as identity:
+        got = identity.get("sha256") if isinstance(identity, Mapping) else None
+        if got != expected.get("sha256"):
+            raise ServeError(
+                f"{stage}: the vLLM that came up has identity {str(got)[:12]}, the identity "
+                f"computed for this job without a launch was "
+                f"{str(expected.get('sha256'))[:12]} — the engine is not the one this job "
+                f"describes (point 155); nothing is answered by it")
+        yield identity
+
+
 # ── entry point ──────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -336,6 +462,10 @@ def main() -> None:
     ap.add_argument("--print-only", action="store_true", help="print the vllm command and exit")
     ap.add_argument("--verify-weights-only", action="store_true",
                     help="verify the backend's local weights against the pinned sha256s and exit")
+    ap.add_argument("--identity-only", action="store_true",
+                    help="verify the weights, compute the identity this launch would write and "
+                         "print it (one JSON line) WITHOUT starting vLLM and without writing "
+                         "logs/semantic_service.json")
     args = ap.parse_args()
 
     cfg = semantic_config_from(args.config)
@@ -355,6 +485,11 @@ def main() -> None:
     argv = build_argv(backend, overrides, cfg, model_ref=b["weights_path_abs"])
     env = service_environment()
     doc = identity_record(backend, cfg, argv, weights, env, args.config)
+    if args.identity_only:
+        # the identity a launch under this configuration would write — printed for
+        # semantic.serve.expected_identity, never written: no vLLM is serving it
+        print(IDENTITY_ONLY_MARK + json.dumps(doc, sort_keys=True), flush=True)
+        return
     p = write_identity(doc)
     print(f"[semantic.serve] identity {doc['identity']['sha256'][:12]} written to {p} "
           f"(card {doc['identity']['card']['key']}, batch invariance "

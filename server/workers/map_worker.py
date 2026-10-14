@@ -82,8 +82,8 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         save_manifest(str(frames_dir), fq)
 
     # ── Step 2: Frame selection — ALWAYS produce frames/selected_frames.json, the SINGLE
-    # source of truth for the processed frame set (read by SAM3 / scene_analyzer / TSDF /
-    # da3 / mapanything backends). Mode = reconstruction.frames_selector:
+    # source of truth for the processed frame set (read by SAM3 / TSDF / da3 / mapanything
+    # backends). Mode = reconstruction.frames_selector:
     #   "dino"   → blur + DINO-cosine keyframes (params in config.frame_selection)
     #   "stride" → all blur-valid frames, uniform 1-of-N (mapanything.frame_stride)
     #   "none"   → all blur-valid frames (no decimation)
@@ -104,10 +104,10 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
         mode = _sel
     sf_path = frames_dir / "selected_frames.json"
     if mode == "parallax_lk":
-        # Intake I0 → I1 → I2 in-process (CPU; I2's VLM / SAM3 only when
-        # intake.content.enabled). replace on or off, the intake's marker decides step
-        # by step what is already measured (intake/run.py): nothing measured is redone,
-        # a missing or incomplete step runs.
+        # Intake I0 → I1 in-process (CPU + the DA3 focal probe; I2's VLM / SAM3 are gone,
+        # USER 2026-10-08). replace on or off, the intake's marker decides step by step what
+        # is already measured (intake/run.py): nothing measured is redone, a missing or
+        # incomplete step runs.
         _run_intake_selection(pipe, session_path, frames_dir, config, replace)
     elif not replace and sf_path.exists():
         pipe.send_log("Reusing existing selected_frames.json (replace=off)")
@@ -989,7 +989,7 @@ def _run_da3(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     pipe.send_progress(85, "DA3 complete, post-processing...", stage="reconstruction")
 
     # ── Post-process DA3 output (same format as VGGT-Long) ──
-    _postprocess_reconstruction(pipe, da3_save_dir, output_dir, da3_config, backend="da3")
+    _postprocess_reconstruction(pipe, da3_save_dir, output_dir, da3_config, config, backend="da3")
     return da3_save_dir
 
 
@@ -1117,7 +1117,8 @@ def _run_hybrid_or_lidar(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     pipe.send_progress(75, f"DA3 {mode} complete, post-processing...", stage="reconstruction")
 
     # ── Post-process reconstruction output (chunks → output/) ──
-    _postprocess_reconstruction(pipe, da3_save_dir, output_dir, da3_config, backend=f"da3_{mode}")
+    _postprocess_reconstruction(pipe, da3_save_dir, output_dir, da3_config, config,
+                                backend=f"da3_{mode}")
 
     # ── Generate LiDAR cloud (hybrid: complement, lidar: primary) ──
     if mode in ("hybrid", "lidar"):
@@ -1428,7 +1429,8 @@ def _run_mapanything(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
 
     pipe.send_progress(85, "VGGT-Long complete, post-processing...", stage="reconstruction")
 
-    _postprocess_reconstruction(pipe, vggt_save_dir, output_dir, vggt_config, backend="mapanything")
+    _postprocess_reconstruction(pipe, vggt_save_dir, output_dir, vggt_config, config,
+                                backend="mapanything")
 
 
 def _apply_stac_model_keys(cfg: dict, config: dict) -> dict:
@@ -1679,7 +1681,8 @@ def _motion_keyframes(frames_dir: Path, quantum: float):
     return chosen, len(entries), soft[0]
 
 
-# ── frame selection 'parallax_lk' (intake I0 → I1 → I2; claude_stac.txt §4-F1) ──
+# ── frame selection 'parallax_lk' (intake I0 → I1; claude_stac.txt §4-F1; I2 removed
+# USER 2026-10-08) ──
 
 FRAME_SELECTIONS = ("parallax_lk", "motion", "fps", "dino", "hf")
 
@@ -1715,49 +1718,19 @@ def _resolve_frame_selection(recon_cfg: dict) -> str:
     return sel
 
 
-def _ensure_semantic_or_fail(pipe: WorkerPipe, config: dict) -> None:
-    """Intake I2 (VLM content tags) needs the semantic service: healthcheck, auto-start
-    and wait exactly as the VLM worker does (semantic.service.ensure_service). When it
-    does not come up the stage FAILS with the reason the service reported — the intake
-    never tags nothing and calls it done."""
-    from semantic.service import ensure_service
-    said = []
-
-    def _log(m):
-        said.append(str(m))
-        pipe.send_log(m)
-
-    svc = (config.get("semantic") or {}).get("service") or {}
-    pipe.send_progress(4, "Intake I2: semantic service (Qwen3-VL) for the content tags...",
-                       stage="reconstruction")
-    if ensure_service(config, log=_log, cancelled=pipe.check_cancel):
-        return
-    if pipe.check_cancel():
-        raise RuntimeError("cancelled while waiting for the semantic service (intake I2)")
-    reason = said[-1] if said else "ensure_service returned False without a message"
-    raise RuntimeError(
-        f"intake I2 (content tags; intake.content.enabled: true) needs the semantic service "
-        f"at http://{svc.get('host', '127.0.0.1')}:{svc.get('port', 8799)} and it is not "
-        f"reachable — {reason}. Start it (bash scripts/serve_semantic.sh) or set "
-        f"intake.content.enabled: false; the intake does not fall back to untagged frames")
-
-
 def _run_intake_selection(pipe: WorkerPipe, session_path: Path, frames_dir: Path,
                           config: dict, replace: bool) -> None:
-    """Frame selection 'parallax_lk': intake I0 → I1 → I2 in-process.
+    """Frame selection 'parallax_lk': intake I0 → I1 in-process.
 
     ALWAYS through intake.run.run_intake and its marker (<session>/intake/
     intake_state.json): a step whose parameters, frame inventory and upstream
     inputs match the marker is skipped — nothing already measured is re-measured
     or overwritten — and a step that is missing or incomplete runs. So replace=off
-    reuses a finished intake as-is, and a previous run that died in I2 (the
-    semantic service did not come up, SAM3 failed) gets its I2 on the retry
-    instead of silently going on without content tags or exclusion masks (the old
-    shortcut reused selected_frames.json + witness_frames.json without reading the
-    marker). With intake.content.enabled the semantic service is ensured right
-    before I2 runs (a service that does not come up fails the stage with the
-    reason) and stopped — and verified gone — after the last tag, before the first
-    SAM3 call. A cancel is honoured inside every intake loop
+    reuses a finished intake as-is (the old shortcut reused selected_frames.json +
+    witness_frames.json without reading the marker). I2 (VLM content tags + SAM3
+    exclusion masks) is GONE (USER 2026-10-08, plan point 75): no semantic service
+    is ensured here and no SAM3 runs in the intake — the one GPU step is the DA3
+    focal probe. A cancel is honoured inside every intake loop
     (intake.quality.IntakeCancelled names where)."""
     from intake.config import load_intake_config
     from intake.run import run_intake
@@ -1765,23 +1738,10 @@ def _run_intake_selection(pipe: WorkerPipe, session_path: Path, frames_dir: Path
     pipe.send_log(f"Frame selection 'parallax_lk' (replace={'on' if replace else 'off'}): the "
                   f"intake marker decides step by step what is already measured")
     icfg = load_intake_config(config)
-    pipe.send_progress(3, "Intake: quality features → parallax keyframes"
-                       + (" → content tags" if icfg.content.enabled else "") + "...",
+    pipe.send_progress(3, "Intake: quality features → parallax keyframes...",
                        stage="reconstruction")
-    # I2 (content tags + exclusion masks) is OFF by default since 2026-10-05 (USER:
-    # "olvidate de la exclusión de personas y objetos en movimiento"); it stays
-    # selectable (intake.content.enabled). When on, GPU exclusivity is the SAM3
-    # stage's own rule: vLLM serves the I2 tags, then is stopped — VERIFIED (no
-    # 'vllm serve' left) — before SAM3 segments the exclusion masks; the VLM stage
-    # after the cloud stage restarts it (ensure_service).
-
-    def _before_sam3():
-        # the verification travels into content_tags.json (sam3_handover)
-        return stop_semantic_service_verified(pipe, stage="intake I2 SAM3")
-
-    # the FIRST GPU step of the intake is the DA3 focal probe (zaragoza 2026-10-04: it ran with
-    # vLLM loading beside it and died in OOM) — the card is handed over there, verified; I2's
-    # VLM brings vLLM back (before_content) and hands it over again before SAM3
+    # the one GPU step of the intake is the DA3 focal probe (zaragoza 2026-10-04: it ran with
+    # vLLM loading beside it and died in OOM) — the card is handed over there, verified
     from intake.focal import default_probe
     _probe = default_probe()
 
@@ -1789,9 +1749,7 @@ def _run_intake_selection(pipe: WorkerPipe, session_path: Path, frames_dir: Path
         stop_semantic_service_verified(pipe, stage="intake focal probe (DA3)")
         return _probe(*a, **k)
 
-    res = run_intake(session_path, icfg, log=pipe.send_log, progress=None,
-                     before_content=lambda: _ensure_semantic_or_fail(pipe, config),
-                     before_sam3=_before_sam3, focal=_focal,
+    res = run_intake(session_path, icfg, log=pipe.send_log, progress=None, focal=_focal,
                      cancelled=pipe.check_cancel)
     ran = [k for k, v in res["steps"].items() if v.get("ran")]
     pipe.send_log(f"Intake steps run this time: {ran or 'none (every marker matched)'}")
@@ -2265,7 +2223,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
 
         pipe.send_progress(78, f"VGGT-Long[Omega] {tag} complete, post-processing...",
                            stage="reconstruction")
-        _postprocess_reconstruction(pipe, vggt_save_dir, output_dir, cfg_v, backend="mapanything")
+        _postprocess_reconstruction(pipe, vggt_save_dir, output_dir, cfg_v, config,
+                                    backend="mapanything")
         return True
 
     _chunked_already = False
@@ -2427,18 +2386,30 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             _sal["band_margin_m"] = float(_band_margin_m)
         if _sal is not None:
             # SALAD's appearance bar calibrated on the session's GEOMETRIC revisits
-            # (the DA3-window walk) — LoopModels.LoopModel.calibrate_threshold
+            # (the DA3-window walk) — LoopModels.LoopModel.calibrate_threshold. NEVER
+            # reused (docs/plan_determinismo.md point 66, USER 2026-10-08): deleted and
+            # recomputed whole on every reconstruction, the walk reused or not, from
+            # walk.json's RECORD of the windows (every keyframe's chained pose, each
+            # window's median depth and FOV) — no window file is read, so a resume whose
+            # window files F2 deleted needs no DA3 for it (USER 2026-10-06)
             from intake.walk import revisit_reference, REVISIT_REFERENCE_NAME
-            _ref_p = output_dir / REVISIT_REFERENCE_NAME
-            if _walk_reused and _ref_p.exists():
-                _ref = json.loads(_ref_p.read_text())     # measured with the reused walk
-            else:
-                _ref = revisit_reference(output_dir.parent)
+            _ref = revisit_reference(output_dir.parent, log=pipe.send_log)
             _sal["revisit_reference"] = str(output_dir / REVISIT_REFERENCE_NAME)
             pipe.send_log(f"[loops] SALAD revisit reference: {len(_ref['frames'])} "
                           f"keyframes, revisit = cameras < {_ref['dist_bar_m']:.2f} m "
                           f"(scene median depth) and < "
                           f"{math_deg(_ref['hfov_rad']) / 2.0:.1f}° apart (half the FOV)")
+        else:
+            # point 66 holds without SALAD too: the file on disk is this reconstruction's or
+            # absent — a previous reconstruction's reference (kept across a plan wipe by
+            # _PLAN_INDEPENDENT_OUTPUT, hashed into the launch stamp) is deleted, said
+            from intake.walk import REVISIT_REFERENCE_NAME
+            _stale_ref = output_dir / REVISIT_REFERENCE_NAME
+            if _stale_ref.exists():
+                _stale_ref.unlink()
+                pipe.send_log(f"[loops] no SALAD in this launch — the previous reconstruction's "
+                              f"{REVISIT_REFERENCE_NAME} deleted (never reused, point 66, USER "
+                              f"2026-10-08)")
         _persist_chunk_plan(_ranges, _n_selected, _walk0, _covis_rep, _res)
         pipe.send_log(f"CHUNKED-METRIC (I4): walk {_walk0:.1f} m, D_total "
                       f"{_covis_rep['D_total']:.2f} > H {_covis_rep['H']:g} → "
@@ -2841,11 +2812,16 @@ def _wipe_plan_products(output_dir: Path, why: str, log=print) -> int:
     return freed
 
 
-def _cleanup_recon_temps(save_dir: Path, output_dir: Path, backend: str, pipe: WorkerPipe):
+def _cleanup_recon_temps(save_dir: Path, output_dir: Path, backend: str, pipe: WorkerPipe,
+                         job_config: dict):
     """Delete reconstruction temporaries that are dead once chunks + origins exist:
     maplong_run/{_tmp_results_unaligned,_tmp_results_loop,pcd} and (mapanything only)
     da3_run/da3_full except results_output (kept for the texture bake). KEEPS
     _tmp_results_aligned — the TSDF reads per-frame depth from it.
+
+    ``job_config``: the JOB's configuration dict (the one the worker received; docs/
+    plan_determinismo.md point 69, 2026-10-08) — ``certify.keep_aligned_chunks`` is read from
+    it, never from config.yaml re-read off the disk at this moment.
 
     Idempotent (skips what's already gone), so it is safe — and now called — on BOTH the
     normal path AND the resume early-exit. Previously the resume path returned before the
@@ -2853,8 +2829,7 @@ def _cleanup_recon_temps(save_dir: Path, output_dir: Path, backend: str, pipe: W
     _keep_loop = False
     try:
         from reconstruction.loops.config import load_loops_config as _llc
-        from config import cfg as _cfg_all
-        _keep_loop = bool(_llc(_cfg_all).certify.keep_aligned_chunks)
+        _keep_loop = bool(_llc(job_config).certify.keep_aligned_chunks)
     except Exception as _e:  # noqa: BLE001 — a cleanup must never abort a finished reconstruction
         pipe.send_log(f"[cleanup] certify config unavailable ({_e}) — loop bridges deleted",
                       level="warning")
@@ -2896,11 +2871,14 @@ def _cleanup_recon_temps(save_dir: Path, output_dir: Path, backend: str, pipe: W
 
 
 def _postprocess_reconstruction(pipe: WorkerPipe, save_dir: Path, output_dir: Path,
-                                 run_config: dict, backend: str = "da3"):
+                                 run_config: dict, job_config: dict, backend: str = "da3"):
     """Post-process reconstruction output (shared by DA3 and MapAnything).
-    
+
     Both backends produce identical output layout:
       save_dir/pcd/N_pcd.ply, camera_poses.txt, intrinsic.txt
+
+    ``run_config`` is the VENDOR config the backend ran with; ``job_config`` the JOB's
+    configuration dict the worker received (point 69) — what the cleanup reads.
     """
     # ── Copy PLY files to output dir ──
     pcd_dir = save_dir / "pcd"
@@ -2944,7 +2922,7 @@ def _postprocess_reconstruction(pipe: WorkerPipe, save_dir: Path, output_dir: Pa
                     pipe.send_log(f"Origins regeneration failed ({_e})", level="warning")
             # Still reclaim dead temporaries on a resume — they accumulate (tens of GB)
             # across resumed runs because this path used to return before any cleanup.
-            _cleanup_recon_temps(save_dir, output_dir, backend, pipe)
+            _cleanup_recon_temps(save_dir, output_dir, backend, pipe, job_config)
             pipe.send_progress(100, f"{backend.upper()} already complete", stage="reconstruction")
             return
         raise FileNotFoundError(f"No chunk PLY files found in {pcd_dir}")
@@ -3014,7 +2992,7 @@ def _postprocess_reconstruction(pipe: WorkerPipe, save_dir: Path, output_dir: Pa
     # Cascade cleanup (step 1/3): chunks were copied to output/chunk_NNN.ply and origins
     # generated from _tmp_results_aligned, so the unaligned/loop/pcd temps + the consumed
     # DA3 priors are dead → free them (keeps _tmp_results_aligned for the TSDF depth).
-    _cleanup_recon_temps(save_dir, output_dir, backend, pipe)
+    _cleanup_recon_temps(save_dir, output_dir, backend, pipe, job_config)
 
     import gc
     gc.collect()

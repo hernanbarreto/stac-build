@@ -7,6 +7,7 @@ import time
 import logging
 import re
 import gc
+import itertools
 import os
 import sys
 import threading
@@ -217,16 +218,15 @@ def _align_cloud_to_floor(output_data: np.ndarray, session_dir: Path = None) -> 
         return output_data
     
     try:
-        # ── Try loading cached transform from disk ──
+        # ── the sealed transform on disk, under the ONE rule of the viewer (point 158:
+        # segmentation.floor_frame — applied only with the seal of this cloud, else identity,
+        # declared) ──
         if session_dir:
-            transform_path = Path(session_dir) / "output" / "floor_transform.npz"
-            if transform_path.exists():
-                data = np.load(transform_path)
-                s_val = float(data['s'])
-                R = data['R']
-                t = data['t']
-                print(f"[FloorAlign] ✅ Loaded cached floor transform from disk")
-                
+            from segmentation.floor_frame import sealed_floor_transform
+            srt = sealed_floor_transform(Path(session_dir) / "output", tag="FloorAlign")
+            if srt is not None:
+                s_val, R, t = srt
+
                 xyz = output_data[:, :3]
                 xyz_aligned = s_val * (xyz @ R.T) + t
                 result = output_data.copy()
@@ -236,11 +236,11 @@ def _align_cloud_to_floor(output_data: np.ndarray, session_dir: Path = None) -> 
                 print(f"[FloorAlign] ✅ Floor aligned to y=0 (range: {y_min:.3f} to {y_max:.3f})")
                 return result
         
-        # no floor_transform.npz: IDENTITY, declared — this process only READS the floor
-        # transform (docs/plan_determinismo.md points 110 / 158: the cloud stage computes
-        # and writes it, seeded; a raw-cloud send never computes or saves one)
-        print("[FloorAlign] DECLARED: no floor_transform.npz on disk — the raw cloud is sent "
-              "in its own frame (identity); nothing is computed or saved")
+        # no SEALED floor_transform.npz: IDENTITY, declared — this process only READS the
+        # floor transform (docs/plan_determinismo.md points 110 / 158: the cloud stage
+        # computes and writes it, seeded; a raw-cloud send never computes or saves one)
+        print("[FloorAlign] DECLARED: no sealed floor_transform.npz on disk — the raw cloud is "
+              "sent in its own frame (identity); nothing is computed or saved")
         return output_data
     except Exception as e:
         print(f"[FloorAlign] ❌ Error: {e}")
@@ -526,7 +526,9 @@ async def _send_cleaned_cloud_broadcast(session_id: str):
         output_data[:, 6] = 0.0
         
         # ── Floor Alignment ──
-        output_data = _align_cloud_to_floor(output_data, session_dir=ctx.session_dir)
+        # off the event loop: the seal verdict may hash the cloud (USER 2026-10-09)
+        output_data = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: _align_cloud_to_floor(output_data, session_dir=ctx.session_dir))
         
         binary_bytes = output_data.tobytes()
         
@@ -792,6 +794,132 @@ def _pipeline_busy() -> bool:
                for j in pipeline_manager.get_all_jobs().values())
 
 
+# ── ONE GPU PERMIT for every GPU task of the server (docs/plan_determinismo.md point 154,
+# 2026-10-08): the meshing endpoints (ShapeR, the per-object and scene meshes), the
+# Segmentation Manager's SAM3, the legacy auto-segmentation and the retroactive
+# segmentation used to run on the card beside whatever the pipeline manager had there. They
+# now take the SAME permit the manager holds for its jobs — the engine lease of
+# semantic.service, owner 'server' — through these helpers: refused with 409 naming the job
+# while a pipeline job holds the card; a job that starts while one of them holds it WAITS
+# (pipeline_manager._take_job_lease). The chat never starts vLLM while the permit is held
+# (ensure_service asked as 'chat').
+
+from semantic.service import SAM3_MANAGER_TOKEN as SAM3_MANAGER_PERMIT  # noqa: E402 — the Manager's token
+
+# every other server task gets a token of ITS OWN REQUEST (2026-10-08): a constant per
+# session made a second request of the same kind on the same session RE-ENTER the permit
+# of the first one still on the card (acquire is idempotent for owner + token) and release
+# it on its own way out — a ShapeR batch left running with no permit, a queued job starting
+# beside it. With a token per request the second request is refused 409 naming the first
+# (another token is another holder), and a release drops only the permit its request took.
+# The Segmentation Manager is the ONE deliberate re-entry (SAM3_MANAGER_TOKEN: a Manager
+# opened again takes over the single SAM3 model of this process).
+_permit_counter = itertools.count(1)
+
+
+def _permit_token(kind: str, session_id: str) -> str:
+    """The token of one server GPU request: ``kind:session#n`` — unique in this process."""
+    return f"{kind}:{session_id}#{next(_permit_counter)}"
+
+
+def _gpu_permit_refusal(task: str, e: Exception) -> HTTPException:
+    """The 409 of a server GPU task that could not take the permit: names the holder — the
+    pipeline job (the lease's session is the job's key) or the server task."""
+    from semantic.service import JOB_PERMIT_OWNER, engine_lease_holder
+    h = engine_lease_holder() or {}
+    if h.get("owner") == JOB_PERMIT_OWNER:
+        who = f"the pipeline job {h.get('session')} holds the GPU"
+    elif h:
+        who = f"{h.get('stage')} (session {h.get('session')}) holds the GPU"
+    else:
+        who = str(e)
+    return HTTPException(409, detail={
+        "error": f"{task} refused: {who} — one GPU permit for every GPU task (point 154); "
+                 f"try again when it ends",
+        "busy": True,
+        "holder": ({k: h.get(k) for k in ("owner", "stage", "session", "token")} if h else None)})
+
+
+def _take_gpu_permit(task: str, session_id: str, token: str) -> dict:
+    """Take the server's GPU permit for ``task`` (re-entrant for the same token), or raise
+    the 409 that names the holder.
+
+    A pipeline job that is RUNNING refuses FIRST, lease or no lease (2026-10-08): during an
+    engine stage (the VLM, the certification — STAGE_REGISTRY "engine") the manager hands
+    its lease to the stage's worker, which takes it under its own pid only around its
+    job_engine — the certify worker only for its caption pass at the END — so for the whole
+    of the closures, the epochs, the CUDA pose-graph solve and the octree NOBODY holds the
+    lease, and in the handover windows (worker spawn, worker exit → manager re-acquire)
+    neither; a lease-only check granted ShapeR, the TSDF, the Segmentation Manager and the
+    legacy auto-segmentation the card beside the stage, and the manager's re-acquire then
+    failed and stopped the job. The same rule the chat applies (phase5_qa._engine_busy /
+    _pipeline_busy): a running job IS the card's holder. A QUEUED job is not refused here:
+    it waits for the server task by design (pipeline_manager._take_job_lease)."""
+    from semantic.service import EngineBusy, acquire_server_gpu_permit
+    running = pipeline_manager._running_session()
+    if running is not None:
+        raise HTTPException(409, detail={
+            "error": f"{task} refused: the pipeline job {running} holds the GPU — one GPU "
+                     f"permit for every GPU task (point 154); try again when it ends",
+            "busy": True,
+            "holder": {"owner": "pipeline", "stage": "job", "session": running, "token": running}})
+    try:
+        doc = acquire_server_gpu_permit(task, session=session_id, token=token)
+    except EngineBusy as e:
+        raise _gpu_permit_refusal(task, e) from e
+    print(f"[gpu] permit taken: {task} (session {session_id}, token {token})")
+    return doc
+
+
+def _drop_gpu_permit(token: str, why: str = "") -> bool:
+    """Release the server's GPU permit ``token`` when this process holds it (idempotent)."""
+    from semantic.service import release_server_gpu_permit
+    released = release_server_gpu_permit(token)
+    if released:
+        print(f"[gpu] permit released: {token}{' — ' + why if why else ''}")
+    return released
+
+
+def _gpu_permit_held(token: str) -> bool:
+    """Does this process hold the server's GPU permit ``token`` right now (a HELD permit —
+    nobody holding anything is False)."""
+    from semantic.service import SERVER_TASK_OWNER, holds_engine_lease
+    return holds_engine_lease(SERVER_TASK_OWNER, token)
+
+
+def _gpu_permit_state() -> Optional[dict]:
+    """Who holds the GPU permit — what the progress endpoints show (None = nobody)."""
+    from semantic.service import engine_lease_holder
+    h = engine_lease_holder()
+    return None if h is None else {k: h.get(k) for k in ("owner", "stage", "session", "token", "pid")}
+
+
+def _session_job_config(session_dir) -> tuple:
+    """(config, run_config_path) for a server task on a scan: the scan's FROZEN configuration
+    when it has one (intake.run_config — output/run_config.yaml verified against its digest,
+    its base sections), else config.yaml read ONCE now (pipeline_manager.read_config_once;
+    an unreadable file raises) — never the import-time ``cfg`` (point 112). An edited
+    frozen file raises."""
+    from intake.run_config import (effective_config, has_run_config, load_run_config,
+                                   run_config_path)
+    from pipeline_manager import read_config_once
+    session_dir = Path(session_dir)
+    if has_run_config(session_dir):
+        frozen, _sha = load_run_config(session_dir)
+        return effective_config(frozen), run_config_path(session_dir)
+    return read_config_once(), None
+
+
+def _segmentation_config_source(tag: str, run_cfg_path) -> str:
+    """The log line that DECLARES which configuration a server-side segmentation runs on
+    (`_session_job_config`): the scan's frozen file, or — declared — the server's config.yaml
+    when the scan was never frozen (points 112 / 151)."""
+    if run_cfg_path is not None:
+        return f"[{tag}] configuration: the scan's frozen {run_cfg_path}"
+    return (f"[{tag}] DECLARED: the scan has no frozen output/run_config.yaml — the segmentation "
+            f"runs on the server's config.yaml read now (a job of the pipeline freezes one)")
+
+
 def _scan_key_of(ctx) -> Optional[str]:
     """The 'date/source' key of a resolved scan context (None for a legacy layout)."""
     date, source = getattr(ctx, "date", None), getattr(ctx, "source_name", None)
@@ -805,16 +933,21 @@ def _read_segments_payload(output_dir: Path) -> dict:
     res = Path(output_dir) / "segmentation_result.json"
     if not res.exists():
         return {}
-    try:
-        data = json.loads(res.read_text())
-    except (OSError, ValueError) as e:
-        print(f"[Segments] {res} unreadable ({e}) — nothing is sent; the projection stage "
-              f"rewrites it")
-        return {}
+    data = _segments_view(res)
     if not isinstance(data, dict):
         return {}
     from segmentation.pipeline import with_class_bytes
     return with_class_bytes(Path(output_dir), data)
+
+
+SEGMENTS_VIEW_NAME = "segmentation_view.json"
+
+
+def _segments_view(res: Path) -> Optional[dict]:
+    """segmentation_result.json without the per-point index lists — the light copy the viewer
+    reads (`segmentation.segments_view`, cached outside the session)."""
+    from segmentation.segments_view import segments_view
+    return segments_view(res)
 
 
 async def _service_job_progress(sid: str, job_dict: dict) -> None:
@@ -857,8 +990,34 @@ async def _service_job_complete(sid: str, success: bool) -> None:
         pass
 
 
+async def _order_descriptions(session_id: str, ctx, why: str) -> bool:
+    """Queue the per-object descriptions job (kind "captions": the certification stage runs
+    ONLY the descriptions) on the session's OWN frozen configuration — a rename must not
+    re-freeze the session with the server's config.yaml. Nothing is ordered when the
+    descriptions are disabled in that configuration. A captions job already pending takes
+    the new name too (it re-reads the names when it ends)."""
+    try:
+        from intake.run_config import effective_config, has_run_config, load_run_config
+        cfg = None
+        if has_run_config(ctx.session_dir):
+            frozen, _sha = load_run_config(ctx.session_dir)
+            cfg = effective_config(frozen)
+        from segmentation.object_captioner import load_object_captions
+        from pipeline_manager import read_config_once
+        if not load_object_captions(cfg if cfg is not None else read_config_once()).enabled:
+            print(f"[Rename] descriptions are disabled for {session_id} — none ordered")
+            return False
+    except Exception as e:  # noqa: BLE001 — the name is kept; the description waits
+        print(f"[Rename] descriptions job not ordered ({e})")
+        return False
+    from pipeline_manager import StageId as _SI
+    job = await _enqueue_service_job(session_id, _scan_key_of(ctx), {_SI.CERTIFY}, kind="captions",
+                                     why=why, config=cfg)
+    return job is not None
+
+
 async def _enqueue_service_job(session_id: str, scan_key: Optional[str], stage_ids, kind: str,
-                               why: str):
+                               why: str, config: Optional[dict] = None):
     """ORDER a job of the pipeline manager on the session's behalf (points 111 / 158 / 160):
     exactly ``stage_ids`` (pipeline_manager.service_stages), the configuration read once
     now, forced (the server asked for these stages), nothing wiped. Returns the job, or None
@@ -866,7 +1025,7 @@ async def _enqueue_service_job(session_id: str, scan_key: Optional[str], stage_i
     configuration) — declared in the log, never run in this process instead."""
     from pipeline_manager import JobStatus as _JS, read_config_once, service_stages
     try:
-        config = read_config_once()
+        config = dict(config) if config is not None else read_config_once()
         stages = service_stages(stage_ids)
         job = await pipeline_manager.start_pipeline(
             session_id=session_id, stages=stages, config=dict(config),
@@ -922,12 +1081,31 @@ def _semantic_reload_if_idle(reason: str = "") -> None:
             print(f"[Semantic] chat reload skipped ({reason or 'n/a'}) — "
                   "a pipeline is still using the GPU")
             return
+        from phase5_qa.api import CHAT_OWNER
         from semantic.service import ensure_service
         print(f"[Semantic] chat reload kicked ({reason or 'n/a'})")
-        ensure_service(log=print, timeout_s=0.0)
+        # asked as the CHAT (point 81 / 154): a lease held by anyone — the manager's job
+        # permit under this very pid, a server GPU task (meshing, the Segmentation Manager's
+        # SAM3) — means vLLM is not started; ensure_service says so and returns False
+        ensure_service(log=print, timeout_s=0.0, owner=CHAT_OWNER)
     except Exception as e:  # noqa: BLE001 — never break the caller over the chat
         print(f"[Semantic] chat reload failed (non-fatal): {e}")
 
+
+
+def _intel_engine_busy() -> Optional[str]:
+    """Why the background session intel may NOT use the engine now (None = it may): the
+    engine lease held by anyone — asked by the intel's own owner, so the manager's job
+    permit under this very pid counts (point 81) — or a pipeline job running / queued
+    (points 154 / 157). The one gate, asked at the intel's entry AND before every call of
+    its loop."""
+    from semantic.service import engine_available_to
+    ok, why = engine_available_to(owner="intel")
+    if not ok:
+        return f"engine busy ({why})"
+    if _pipeline_busy():
+        return "a pipeline job is running or queued"
+    return None
 
 
 def _session_intel_when_chat_up(session_id: str, objects: bool,
@@ -955,65 +1133,79 @@ def _session_intel_when_chat_up(session_id: str, objects: bool,
         # ONE permit to the engine (point 81): a job's process holding the engine lease, or a
         # pipeline job running / queued (its stages take the card and write the session's
         # artifacts), means the intel waits — deferred, declared, never co-batched with a
-        # stage's calls and never written on a session a job is about to rewrite (point 157)
-        from semantic.service import engine_available_to
-        ok, why = engine_available_to()
-        if not ok:
-            print(f"[analysis] {session_id}: engine busy ({why}) — intel deferred")
-            return
-        if _pipeline_busy():
-            print(f"[analysis] {session_id}: a pipeline job is running or queued — intel deferred")
+        # stage's calls and never written on a session a job is about to rewrite (point 157).
+        # Asked by the intel's OWN owner: the manager's job permit lives under this very pid
+        why = _intel_engine_busy()
+        if why:
+            print(f"[analysis] {session_id}: {why} — intel deferred")
             return
         ctx = _ctx(session_id)
+        import inspect
         from segmentation.object_analysis import ensure_session_analyses
-        ensure_session_analyses(ctx.output_dir, objects=objects, log=print)
+        # the SAME gate, asked before EVERY call of the loop (minutes of describe_scene and
+        # per-object dossiers): a job that starts meanwhile stops the chat's vLLM and brings
+        # its own up on the same port minutes later — an intel still running would then be
+        # co-batched with the stage's calls and keep writing scene_r.db on a scan the job
+        # rewrites (point 157). The loop is P2's (segmentation.object_analysis); it is
+        # handed the gate as ``cancelled`` the moment it accepts one — until then the entry
+        # check alone stands, DECLARED here
+        _gate = {"cancelled": lambda: _intel_engine_busy() is not None}
+        if "cancelled" not in inspect.signature(ensure_session_analyses).parameters:
+            print(f"[analysis] {session_id}: DECLARED — ensure_session_analyses takes no "
+                  f"'cancelled' gate yet; the engine is checked at the entry only")
+            _gate = {}
+        ensure_session_analyses(ctx.output_dir, objects=objects, log=print, **_gate)
     except Exception as e:  # noqa: BLE001 — intel is best-effort, never fatal
         print(f"[analysis] {session_id}: session intel failed: {e}")
 
 
-def _resolve_segmentation_prompt(prompt: str, frames_dir: str) -> tuple:
-    """
-    Resolve segmentation prompt: if 'auto' or empty, run the Phase 1 Qwen3-VL
-    auto-prompter (default path, same as the pipeline); InternVL3 analyze_scene
-    stays as fallback.
+def _resolve_segmentation_prompt(prompt: str, session_dir, config: dict,
+                                 run_config_path=None, log=print) -> tuple:
+    """Resolve the segmentation prompt of a server-side segmentation (the legacy
+    /api/segmentation/auto, the retroactive segmentation of the viewer socket): 'auto' or
+    empty → the Qwen3-VL auto-prompter, the pipeline's own path, on THIS TASK'S OWN ENGINE
+    (semantic.service.job_engine: the verified stop of the chat's vLLM, no foreign tenant on
+    the card, launched from the scan's frozen configuration — ``run_config_path`` — with the
+    deterministic flags, its identity VERIFIED and written into vlm_analysis.json by the
+    auto-prompter, stopped on the way out before SAM3 takes the card). The caller holds the
+    GPU permit (point 154); the engine re-enters it.
 
-    Returns:
-        (prompt, frame_map) where frame_map maps category label → list of frame filenames
-    """
+    NO other answer (docs/plan_determinismo.md point 156, 2026-10-08): the InternVL3
+    fallback and the generic 'floor;wall;…' list are gone — an engine that does not come up
+    (EngineUnavailable), another engine answering (EngineIdentityError), an analysis that
+    fails or names nothing RAISES, named; the served model is recorded.
+
+    Returns (prompt, frame_map, boxes_map)."""
     if prompt and prompt.lower() != "auto":
-        return prompt, {}
-
-    frames_path = Path(frames_dir)
-    if cfg.get("autoprompt", {}).get("enabled", True):
-        try:
-            print("[AutoPrompt] Auto-detecting categories with Qwen3-VL (Phase 1)...")
-            from segmentation.autoprompt.session_builder import AutoPrompter
-            ap = AutoPrompter(frames_path.parent, frames_path.parent / "output",
-                              backend=cfg.get("autoprompt", {}).get("backend", "qwen_local"),
-                              config=cfg)
-            r = ap.run(run_sam3=False)
-            if r.prompt:
-                print(f"[AutoPrompt] ✅ Auto-detected prompt: '{r.prompt}'")
-                return r.prompt, r.frame_map
-        except Exception as e:  # noqa: BLE001
-            print(f"[AutoPrompt] ⚠️ Auto-prompter failed ({e}); falling back to InternVL3")
-
-    print("[SceneAnalyzer] Auto-detecting categories with InternVL3 (fallback)...")
+        return prompt, {}, None
+    acfg = (config.get("autoprompt") or {})
+    if not acfg.get("enabled", True):
+        raise RuntimeError("autoprompt.enabled is false and the InternVL3 fallback is gone (docs/"
+                           "plan_determinismo.md point 156): nothing else understands the scene — "
+                           "set autoprompt.enabled: true")
+    from segmentation.autoprompt.session_builder import AutoPrompter
+    from semantic.service import SERVER_TASK_OWNER, job_engine
+    session_dir = Path(session_dir)
+    backend = acfg.get("backend", "qwen_local")
+    with job_engine(config, backend=backend, owner=SERVER_TASK_OWNER,
+                    stage="auto-segmentation VLM", session_dir=session_dir,
+                    run_config_path=run_config_path, log=log) as identity:
+        log(f"[AutoPrompt] Qwen3-VL auto-prompter on this task's own engine: "
+            f"{identity.get('served_model_name')} @ {str(identity.get('sha256', ''))[:12]}")
+        ap = AutoPrompter(session_dir, session_dir / "output", backend=backend, config=config)
+        r = ap.run(run_sam3=False, service=identity)
+    if not r.prompt:
+        raise RuntimeError("the auto-prompter named no object (empty prompt) — nothing to "
+                           "segment (point 156: no generic list stands in)")
+    # the analysis the auto-prompter just wrote (boxes feed SAM3); unreadable → fails naming it
     try:
-        from scene_analyzer import analyze_scene
-        scene_cfg = cfg.get("scene_analysis", {})
-        auto_prompt, frame_map = analyze_scene(frames_dir, scene_cfg)
-        if auto_prompt:
-            print(f"[SceneAnalyzer] ✅ Auto-detected prompt: '{auto_prompt}'")
-            return auto_prompt, frame_map
-        else:
-            print("[SceneAnalyzer] ⚠️ No categories detected, falling back to generic")
-            return "floor;wall;ceiling;door;window;furniture;object", {}
-    except Exception as e:
-        print(f"[SceneAnalyzer] ❌ Error: {e}. Using fallback categories.")
-        import traceback
-        traceback.print_exc()
-        return "floor;wall;ceiling;door;window;furniture;object", {}
+        boxes_map = json.loads(Path(r.vlm_analysis_path).read_text()).get("boxes") or None
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"{r.vlm_analysis_path} written by the auto-prompter cannot be read "
+                           f"({e})") from e
+    log(f"[AutoPrompt] ✅ Auto-detected prompt: '{r.prompt}' (served model "
+        f"{identity.get('served_model_name')} recorded in vlm_analysis.json)")
+    return r.prompt, r.frame_map, boxes_map
 
 
 # --- Lifecycle ---
@@ -1046,6 +1238,27 @@ async def lifespan(app: FastAPI):
     # in a thread — the weights take minutes and must not delay the API.
     asyncio.get_running_loop().run_in_executor(
         None, _semantic_reload_if_idle, "server startup")
+
+    # Warm the floor-seal memo of every scan at boot, in one low-priority thread (USER
+    # 2026-10-09: "las nubes deben cargarse inmediatamente"): a verdict missing from the
+    # on-disk memo hashes the cloud, and that must happen before the user opens it, not
+    # while the viewer waits. A scan whose memo is already on disk costs a few stat calls.
+    def _warm_floor_seals():
+        try:
+            os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 15)
+        except Exception:  # noqa: BLE001
+            pass
+        from segmentation.floor_frame import floor_seal_verdict
+        for _npz in sorted(Path(PROJECTS_DIR).glob("*/scans/*/*/output/floor_transform.npz")):
+            try:
+                _t0 = time.time()
+                floor_seal_verdict(_npz.parent)
+                _dt = time.time() - _t0
+                if _dt > 1.0:
+                    print(f"[Server] floor seal verdict warmed for {_npz.parent} ({_dt:.1f} s)")
+            except Exception as _e:  # noqa: BLE001
+                print(f"[Server] floor seal warm-up skipped for {_npz.parent}: {_e}")
+    threading.Thread(target=_warm_floor_seals, name="floor-seal-warmup", daemon=True).start()
 
     yield
 
@@ -1116,6 +1329,27 @@ async def serve_epoch_potree_files(session_id: str, epoch: int, file_path: str):
     return FileResponse(str(full_path), media_type=content_type, headers={"Cache-Control": "no-cache"})
 
 
+@app.get("/api/potree_preview/{session_id}")
+async def serve_potree_preview(session_id: str, scan_key: Optional[str] = None):
+    """The LIGHT CLOUD of the octree the viewer is about to load (USER 2026-10-09: "las nubes
+    deben cargarse inmediatamente en versión bien liviana"): ~300 k points, ~2-3 MB
+    (`potree_preview`) — the same octree `/potree/{session_id}/` serves, so the two coincide
+    under the same floor transform. Built in memory when the octree predates the preview file
+    (opening never writes)."""
+    from potree_preview import preview_bytes
+    # the scan the load_session that announced it resolved — its bytes and the floor
+    # transform in the message come from the same scan
+    ctx = _ctx(session_id, scan_key) if scan_key else _ctx(session_id)
+    pdir = ctx.output_dir / "potree"
+    if not (pdir / "metadata.json").exists():
+        pdir = ctx.merged_potree
+    data = await asyncio.get_running_loop().run_in_executor(None, preview_bytes, pdir)
+    if data is None:
+        raise HTTPException(status_code=404, detail="no octree to preview")
+    return Response(content=data, media_type="application/octet-stream",
+                    headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/potree/{session_id}/{file_path:path}")
 async def serve_potree_files(session_id: str, file_path: str):
     """Serve Potree octree files for a session."""
@@ -1144,8 +1378,8 @@ async def serve_potree_files(session_id: str, file_path: str):
     # file is still an honest 404. octree.bin keeps FileResponse (Range requests).
     if full_path.suffix in (".json", ".bin") and full_path.name != "octree.bin":
         try:
-            return Response(content=full_path.read_bytes(),
-                            media_type=content_type, headers=headers)
+            data = await asyncio.get_running_loop().run_in_executor(None, full_path.read_bytes)
+            return Response(content=data, media_type=content_type, headers=headers)
         except OSError:
             raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
 
@@ -1963,16 +2197,15 @@ async def get_session_scans(session_id: str):
             # potree_ready message carries) — layers compose it with the
             # project composition transform in the viewer
             floor16 = None
-            tp = ctx.output_dir / "floor_transform.npz"
-            if tp.exists():
-                try:
-                    d = np.load(tp)
-                    M = np.eye(4)
-                    M[:3, :3] = float(d["s"]) * d["R"]
-                    M[:3, 3] = d["t"]
-                    floor16 = M.T.flatten().tolist()
-                except Exception:  # noqa: BLE001
-                    pass
+            # applied only under the seal of this scan's cloud (point 158: the one rule of
+            # segmentation.floor_frame — a transform of another cloud, or nobody's, is identity)
+            from segmentation.floor_frame import sealed_floor_matrix
+            # off the event loop: a cold verdict hashes the cloud (USER 2026-10-09 — the whole
+            # server, the viewer socket included, waited on it)
+            _M = await asyncio.get_running_loop().run_in_executor(
+                None, lambda _o=ctx.output_dir: sealed_floor_matrix(_o, tag="Scans"))
+            if _M is not None:
+                floor16 = _M.T.flatten().tolist()
             scans.append({
                 "date": date,
                 "source": source,
@@ -2293,6 +2526,19 @@ async def start_interactive_segmentation(session_id: str):
                            if f.suffix.lower() in ('.jpg', '.jpeg', '.png')])
         print(f"[InteractiveSeg] No selected_frames.json, using all {len(keyframes)} frames")
 
+    # THE ONE GPU PERMIT (point 154): the Manager's SAM3 lives on the card from here until
+    # the Manager closes (/refresh) or another session is loaded — a pipeline job holding
+    # the card refuses the Manager (409 naming the job) instead of being OOM'd by it, and a
+    # job ordered meanwhile WAITS for the Manager to close. The refusal is ALSO written as
+    # the init status (2026-10-08): the Manager's poll of /init_status ends with the reason
+    # instead of spinning on 'loading model' against an 'idle' answer.
+    try:
+        _take_gpu_permit("Segmentation Manager (SAM3)", session_id, SAM3_MANAGER_PERMIT)
+    except HTTPException as e:
+        _sam3_init_status[session_id] = {
+            "status": "error",
+            "message": (e.detail.get("error") if isinstance(e.detail, dict) else str(e.detail))}
+        raise
     _sam3_init_status[session_id] = {"status": "loading", "message": "Loading SAM3 model..."}
 
     async def _background_init():
@@ -2339,9 +2585,22 @@ async def start_interactive_segmentation(session_id: str):
             import traceback
             traceback.print_exc()
             _sam3_init_status[session_id] = {"status": "error", "message": str(e)}
+            _drop_gpu_permit(SAM3_MANAGER_PERMIT, "the Manager's SAM3 did not start")
 
     asyncio.create_task(_background_init())
     return JSONResponse({"ok": True, "status": "loading"}, status_code=202)
+
+
+def _require_sam3_manager_permit() -> None:
+    """The interactive SAM3 calls (add_prompt, propagate, resume) run on the model the
+    Manager loaded under its GPU permit (point 154); without it — the backend restarted,
+    the Manager was closed, a job took the card — they are refused, never run beside the
+    card's holder."""
+    if not _gpu_permit_held(SAM3_MANAGER_PERMIT):
+        raise HTTPException(409, detail={
+            "error": "the Segmentation Manager's SAM3 session does not hold the GPU permit "
+                     "(open the Segmentation Manager again) — one GPU permit for every GPU "
+                     "task (point 154)", "busy": True, "holder": _gpu_permit_state()})
 
 
 @app.get("/api/segmentation/init_status/{session_id}")
@@ -2433,7 +2692,8 @@ async def add_interactive_prompt(request: Request):
     
     if not all([state_id, frame_idx is not None, points, labels]):
         raise HTTPException(status_code=400, detail="Missing required parameters")
-    
+    _require_sam3_manager_permit()
+
     prompt_key = f"{state_id}:{frame_idx}:{points}:{labels}"
     now = _time.time()
 
@@ -2579,6 +2839,11 @@ async def save_alignment(session_id: str, request: Request):
     # re-projection below needs the old→new delta)
     transform_path = output_dir / "floor_transform.npz"
     _write_floor_transform(output_dir, s, R, t)          # atomic (point 149)
+    # THE SEAL (point 158, 2026-10-08): the same floor_level.json seal the cloud stage and the
+    # explicit level_floor write — written AFTER the npz — or the stages and the viewer ignore
+    # the gizmo's transform (a transform nobody sealed is never applied to a cloud)
+    _seal_floor_level(output_dir, leveled_by=f"alignment gizmo (/api/sessions/{session_id}/alignment)",
+                      log=lambda m: print(f"[Alignment] {m}"))
     print(f"[Alignment] ✅ Saved floor_transform.npz for {session_id}")
     print(f"[Alignment]   s={s:.6f}")
     print(f"[Alignment]   R=\n{R}")
@@ -2632,14 +2897,23 @@ async def save_alignment(session_id: str, request: Request):
 # viewer updates instantly.
 
 def _load_floor_transform_srt(output_dir):
+    """The BASE the explicit level composes its delta onto: the transform on disk, whatever
+    its seal. This is not a read that APPLIES the transform to a cloud (those — the viewer,
+    the tools, the stages — go through the one rule of `segmentation.floor_frame`, point
+    158): the floor plane is fitted in this base frame and the delta brings it to y = 0, so
+    the RESULT levels the raw cloud whatever the base was; the base only carries the yaw and
+    the lateral placement over, and the result is what gets sealed (`_floor_seal`). Levelling
+    twice therefore changes nothing the second time, on a session with a reconstruction to
+    name and on one without."""
     s, R, t = 1.0, np.eye(3), np.zeros(3)
-    p = output_dir / "floor_transform.npz"
+    p = Path(output_dir) / "floor_transform.npz"
     if p.exists():
         try:
             d = np.load(p)
-            s, R, t = float(d["s"]), d["R"], d["t"]
-        except Exception:
-            pass
+            s, R, t = float(d["s"]), np.asarray(d["R"], np.float64), np.asarray(d["t"], np.float64)
+        except Exception as e:  # noqa: BLE001 — an unreadable base is identity, declared
+            print(f"[FloorLevel] DECLARED: {p.name} unreadable ({e}) — the level starts from the "
+                  f"cloud's own frame")
     return s, R, t
 
 
@@ -2712,8 +2986,10 @@ async def get_floor_level(session_id: str):
     result_path = output_dir / "segmentation_result.json"
     if not result_path.exists():
         return {"ok": True, "candidates": [], "selected": None}
-    with open(result_path) as f:
-        result_data = json.load(f)
+    # the light copy, off the event loop (zaragoza 2026-10-09: the 934 MB file read here held
+    # the server 9 s on every call and the session never showed)
+    result_data = await asyncio.get_running_loop().run_in_executor(None, _segments_view,
+                                                                    result_path) or {}
     candidates = _floor_candidates_from_result(result_data)
     selected = None
     fl = output_dir / "floor_level.json"
@@ -2858,6 +3134,53 @@ def _write_floor_transform(output_dir: Path, s: float, R: np.ndarray, t: np.ndar
             pass
         raise
     return target
+
+
+def _floor_seal(output_dir: Path, cloud_path: Optional[Path] = None) -> dict:
+    """The seal of a floor transform (docs/plan_determinismo.md point 158): the geometry it
+    levelled — the reconstruction's identity (None for a session without Omega records: taken
+    by no reader), the published cloud's sha256 (None when the cloud does not exist: sealed to
+    nothing, applied by nobody) — and the sha256 of floor_transform.npz as written. ONE shape
+    for every writer (the cloud stage's seeded leveling, the explicit level_floor, the
+    alignment gizmo) and ONE reader (`segmentation.pipeline._floor_seal_status`, which the
+    stages and the viewer — `segmentation.floor_frame` — share)."""
+    import repro
+    from correction.epoch import reconstruction_id_or_none
+    output_dir = Path(output_dir)
+    cloud = Path(cloud_path) if cloud_path is not None else output_dir / "cleaned_cloud.ply"
+    npz = output_dir / "floor_transform.npz"
+    return {"reconstruction_id": reconstruction_id_or_none(output_dir),
+            "cloud_sha256": repro.sha256_file(cloud) if cloud.is_file() else None,
+            "floor_transform_sha256": repro.sha256_file(npz) if npz.is_file() else None}
+
+
+def _seal_floor_level(output_dir: Path, *, leveled_by: str, log=print) -> dict:
+    """floor_level.json for a transform written by a tool that measured nothing (the alignment
+    gizmo): the seal of `_floor_seal` and who wrote it; the floor combobox's remembered
+    selection is carried over from the previous file (a UI preference, not a measurement).
+    Without a cloud the seal names none — declared — and no stage or viewer applies it."""
+    output_dir = Path(output_dir)
+    fl_path = output_dir / "floor_level.json"
+    selected = None
+    if fl_path.is_file():
+        try:
+            selected = (json.loads(fl_path.read_text()) or {}).get("selected_instance_id")
+        except (OSError, ValueError, AttributeError):
+            selected = None
+    stamp = _floor_seal(output_dir)
+    atomic_write_json(fl_path, {"leveled_by": leveled_by, "selected_instance_id": selected,
+                                "stamp": stamp}, indent=2, sort_keys=True)
+    if stamp["cloud_sha256"] is None:
+        log("DECLARED: floor_transform.npz written with no cleaned_cloud.ply beside it — the seal "
+            "names no cloud, so no stage and no viewer applies it until the floor is levelled "
+            "again on the published cloud")
+    elif stamp["reconstruction_id"] is None:
+        log("DECLARED: the session has no reconstruction id (no Omega records) — the seal names "
+            "none, so no stage applies this transform")
+    else:
+        log(f"floor_level.json sealed for reconstruction {stamp['reconstruction_id'][:12]} and "
+            f"cloud {stamp['cloud_sha256'][:12]} (point 158)")
+    return stamp
 
 
 def level_floor_core(output_dir, result_path, cloud_path, fl_path,
@@ -3032,12 +3355,11 @@ def level_floor_core(output_dir, result_path, cloud_path, fl_path,
         print(f"[FloorLevel]   store rebuild failed (non-fatal): {e}")
 
     # the SEAL of the result (point 158): the geometry it levelled — the reconstruction's
-    # identity (None for a session without Omega records: taken by no reader) and the
-    # cloud's bytes — with the decision and what was measured; a reader (a stage) takes
+    # identity (None for a session without Omega records: taken by no reader), the cloud's
+    # bytes and the npz's own (`_floor_seal`, the shape every writer uses) — with the
+    # decision and what was measured; a reader (a stage, the viewer) takes
     # floor_transform.npz / floor_level.json only when this is the geometry it processes
-    from correction.epoch import reconstruction_id_or_none
-    stamp = {"reconstruction_id": reconstruction_id_or_none(output_dir),
-             "cloud_sha256": repro.sha256_file(cloud_path),
+    stamp = {**_floor_seal(output_dir, cloud_path),
              "rule": {"error_factor": rule["error_factor"], "confidence": rule["confidence"],
                       "cell_m": rule["cell_m"], "cell_min_points": rule["cell_min_points"]}}
     atomic_write_json(fl_path, {
@@ -3281,7 +3603,8 @@ async def propagate_interactive_segmentation(request: Request):
     
     if not state_id or not session_id:
         raise HTTPException(status_code=400, detail="Missing state_id or session_id")
-        
+    _require_sam3_manager_permit()
+
     # Unload any DINOv2 models before running SAM3 propagation (free CPU RAM)
     from segmentation.dino_evaluator import get_dino_evaluator
     loop = asyncio.get_event_loop()
@@ -3557,8 +3880,10 @@ async def get_segmentation_instances(session_id: str):
         result_data: Optional[Dict[str, Any]] = None
         if result_path.exists():
             try:
-                with open(result_path) as f:
-                    result_data = json.load(f)
+                # the light copy: the per-point index lists are never sent (zaragoza 2026-10-09:
+                # the enriched answer was ~1 GB and broke mid-transfer)
+                result_data = (await asyncio.get_running_loop().run_in_executor(
+                    None, _segments_view, result_path)) or {}
                 for inst in result_data.get("instances", []):
                     iid = inst.get("instance_id", inst.get("id"))
                     if iid is not None:
@@ -3594,8 +3919,8 @@ async def get_segmentation_instances(session_id: str):
         from segmentation.mask_fates import created_by_projection
         merged.extend(created_by_projection(enriched_by_id, merged, hidden))
 
-        from segmentation.republish import class_of
-        code = class_of(output_dir)
+        from segmentation.republish import viewer_key_of
+        code = viewer_key_of(output_dir)
         if code:
             for m in merged:
                 iid = m.get("instance_id", m.get("id"))
@@ -3698,8 +4023,7 @@ async def get_instance_mask(session_id: str, instance_id: int, frame: str = "", 
             # Try segmentation_result.json first (grouped instances)
             result_path = output_dir / "segmentation_result.json"
             if result_path.exists():
-                with open(result_path) as f:
-                    result_data = json.load(f)
+                result_data = _segments_view(result_path) or {}   # already off the loop (_render)
                 for inst in result_data.get("instances", []):
                     if inst.get("id") == instance_id:
                         color_hex = inst.get("color", color_hex)
@@ -3812,82 +4136,128 @@ async def get_instance_mask(session_id: str, instance_id: int, frame: str = "", 
 
 @app.post("/api/segmentation/rename")
 async def rename_segmentation_instance(request: Request):
-    """Rename an instance label and optionally toggle its exclusion flag.
-    Updates both segmentation.json and segmentation_result.json."""
+    """Rename a segment and/or toggle its exclusion flag.
+
+    THE NAME (USER 2026-10-09: "si le edito el nombre a un segmento, ¿eso se guarda también en
+    los datos del chat?"): kept in output/label_overrides.json as the user's
+    (human_validated) — the SAM3 store is NOT rewritten, so the fusion map, the projection stamp
+    and the certification stay valid, and every projection / epoch select / descriptions pass
+    applies it again (segmentation.label_overrides). Here: the chat's store gets it and forgets
+    the object's dossier (written under the old name — the chat regenerates it), the object's
+    mesh folders and meta follow it, the result and the viewer's light copy are rewritten in a
+    separate process (zaragoza's result is ~1 GB), and the object's ShapeR description is
+    re-made under the new name by a descriptions job queued for when the GPU is free. Matched by
+    ``instance_id`` ONLY (the co-visible split children share an ``id`` with a sibling)."""
     body = await request.json()
     session_id = body.get("session_id")
     instance_id = body.get("instance_id")
     new_label = body.get("label")
     excluded = body.get("excluded")
-    # instance_id alone can collide across writers; the UI sends the row's
-    # current label so the match is exact (None keeps old behavior)
-    old_label_hint = body.get("old_label")
-
     if not session_id or instance_id is None:
         raise HTTPException(status_code=400, detail="Missing session_id or instance_id")
-
-    def _match(inst, id_field):
-        if inst.get(id_field) != instance_id:
-            return False
-        return old_label_hint is None or inst.get("label", "") == old_label_hint
+    try:
+        instance_id = int(instance_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="instance_id must be an integer")
+    if new_label is not None:
+        new_label = str(new_label).strip()
+        if not new_label:
+            raise HTTPException(status_code=400, detail="empty label")
 
     ctx = _ctx(session_id)
     output_dir = ctx.output_dir
     seg_path = output_dir / "segmentation.json"
     result_path = output_dir / "segmentation_result.json"
+    if not result_path.exists() and not seg_path.exists():
+        raise HTTPException(status_code=404, detail="No segmentation")
+    loop = asyncio.get_running_loop()
+    out = {"ok": True}
 
-    if not seg_path.exists():
-        raise HTTPException(status_code=404, detail="No segmentation.json")
+    if new_label is not None:
+        def _rename():
+            from segmentation import label_overrides as LO
+            view = _segments_view(result_path) if result_path.exists() else None
+            inst = next((i for i in (view or {}).get("instances") or []
+                         if int(i.get("instance_id", -1)) == instance_id), None)
+            if inst is None and seg_path.exists():
+                # a masklet the Segmentation Manager propagated and nothing projected yet: the
+                # override is recorded under its id and SAM3 name; the projection applies it
+                raw = json.loads(seg_path.read_text())
+                inst = next((i for i in raw.get("instances") or []
+                             if int(i.get("instance_id", -1)) == instance_id), None)
+            if inst is None:
+                raise HTTPException(status_code=404, detail=f"segment {instance_id} not found")
+            current = LO.current_label(output_dir, instance_id) or str(inst.get("label") or "")
+            if new_label == current:
+                return None                          # nothing changed (a blur, a re-type)
+            sam3 = LO.sam3_label_of(inst)
+            pts = None
+            if (output_dir / "scene_r.db").exists():
+                from phase_r.instance_store import InstanceStore
+                _st = InstanceStore(output_dir / "scene_r.db")
+                try:
+                    pts = _st.get_points(instance_id)
+                finally:
+                    _st.conn.close()
+            rec = LO.record(output_dir, instance_id, new_label, sam3_label=sam3,
+                            anchors=LO.anchors_from(pts))
+            LO.update_store(output_dir, {instance_id: new_label if rec else None},
+                            forget_dossier=True, sam3_names={instance_id: sam3} if sam3 else None)
+            LO.rename_object_files(output_dir, current, new_label, instance_id)
+            return current
+        try:
+            old_label = await loop.run_in_executor(None, _rename)
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"rename failed: {e}")
+        if old_label is None:
+            out["unchanged"] = True
+        else:
+            out["old_label"] = old_label
+            # the ~1 GB result is rewritten in its own process (no GIL shared with the server),
+            # under the session's matching lock; a projection holding it applies the name itself
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "segmentation.label_overrides", "--apply", str(output_dir),
+                "--lock-timeout", "5",
+                cwd=str(Path(__file__).resolve().parent),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            so, _ = await proc.communicate()
+            tail = (so or b"").decode(errors="replace").strip().splitlines()[-3:]
+            if proc.returncode == 3:
+                out["applied_by_projection"] = True
+                print(f"[Rename] #{instance_id} '{old_label}' → '{new_label}' recorded; a projection "
+                      f"is running on {session_id} — it applies the name")
+            elif proc.returncode != 0:
+                print(f"[Rename] applying the name to the result failed: {' | '.join(tail)}")
+                raise HTTPException(status_code=500, detail="the name was recorded but the "
+                                    "result could not be rewritten — see the server log")
+            else:
+                print(f"[Rename] #{instance_id} '{old_label}' → '{new_label}' — result, chat store "
+                      f"and light copy updated")
+            # the ShapeR description, re-made under the new name when the GPU is free (only the
+            # objects whose caption stamp changed are described again), on the session's own
+            # frozen configuration
+            out["description_job"] = await _order_descriptions(
+                session_id, ctx, why=f"#{instance_id} renamed '{old_label}' → '{new_label}'")
 
-    try:
-        # Update segmentation.json (raw instances)
-        with open(seg_path) as f:
-            data = json.load(f)
-
-        # Save old label BEFORE updating (for shape folder rename)
-        old_label = None
-        for inst in data.get("instances", []):
-            if _match(inst, "instance_id"):
-                old_label = inst.get("label")
-                break
-
-        updated = False
-        for inst in data.get("instances", []):
-            if _match(inst, "instance_id"):
-                if new_label is not None:
-                    inst["label"] = new_label
-                if excluded is not None:
-                    inst["excluded"] = excluded
-                updated = True
-                break  # Only rename ONE instance
-
-        if updated:
-            with open(seg_path, "w") as f:
-                json.dump(data, f, indent=2)
-
-        # Also update segmentation_result.json (grouped instances)
-        if result_path.exists():
-            with open(result_path) as f:
-                result_data = json.load(f)
-            for inst in result_data.get("instances", []):
-                if _match(inst, "id") or _match(inst, "instance_id"):
-                    if new_label is not None:
-                        inst["label"] = new_label
-                    if excluded is not None:
-                        inst["excluded"] = excluded
-            with open(result_path, "w") as f:
-                json.dump(result_data, f, indent=2)
-
-        # Sync shape folder if label changed
-        if new_label is not None and old_label and old_label != new_label:
-            from segmentation.session_io import rename_shape_folder
-            rename_shape_folder(output_dir, old_label, new_label, instance_id)
-
-        return {"ok": True}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    if excluded is not None:
+        def _exclude():
+            # the exclusion flag still lives in both files (the projection honours it)
+            for path, fields in ((seg_path, ("instance_id",)), (result_path, ("instance_id",))):
+                if not path.exists():
+                    continue
+                data = json.loads(path.read_text())
+                hit = False
+                for inst in data.get("instances", []):
+                    if any(inst.get(f) == instance_id for f in fields):
+                        inst["excluded"] = bool(excluded)
+                        hit = True
+                if hit:
+                    from atomic_io import atomic_write_json
+                    atomic_write_json(path, data)          # no indent: the C encoder
+        await loop.run_in_executor(None, _exclude)
+    return out
 
 
 @app.post("/api/segmentation/delete")
@@ -4072,6 +4442,10 @@ async def delete_segmentation_instance(request: Request):
                 from segmentation import mask_space as _mspace
                 _mspace.invalidate(output_dir)
                 print(f"[SegDelete]   seg_masks.npz: removed {removed_keys} mask keys")
+                # the seal names the bytes just written, or the projection refuses the
+                # store (point 83: `segmentation.erase.reseal_store`)
+                from segmentation.erase import reseal_store as _reseal
+                _reseal(output_dir, by="delete", log=lambda m: print(f"[SegDelete]   {m}"))
 
             # 4) Delete shape folder if it exists
             try:
@@ -4150,6 +4524,23 @@ _shape_subprocess_lock = asyncio.Lock()
 _bg_tasks: set = set()
 
 
+def _keep_bg_task(coro, tag: str) -> "asyncio.Task":
+    """Schedule a background coroutine and KEEP it (strong reference in ``_bg_tasks``, dropped
+    when it ends; an exception that killed it before it could log is printed). Every task
+    whose ``finally`` releases the GPU permit goes through here (2026-10-08): a dropped task
+    left the 'server' permit held until a backend restart — every queued job waiting, every
+    meshing refused."""
+    t = asyncio.create_task(coro)
+    _bg_tasks.add(t)
+
+    def _done(_t):
+        _bg_tasks.discard(_t)
+        if not _t.cancelled() and _t.exception() is not None:
+            print(f"[{tag}] ❌ background task died before logging: {_t.exception()!r}", flush=True)
+    t.add_done_callback(_done)
+    return t
+
+
 def _shape_set(session_id: str, inst_id: int, **kw):
     """Synchronous helper — safe to call from worker threads."""
     state = _shape_progress.setdefault(session_id, {})
@@ -4166,7 +4557,8 @@ def _shape_set_overall(session_id: str, **kw):
 async def _run_shape_subprocess(session_id: str, output_dir: Path,
                                    ply_paths: List[Path],
                                    inst_id_by_pkl: Dict[str, int],
-                                   engine: str = "shaper"):
+                                   engine: str = "shaper",
+                                   permit_token: Optional[str] = None):
     """Spawn the generative batch and parse its [BATCH] events for live UI progress.
 
     ``engine="shaper"`` (config.yaml ``shaper.engine``, the default): run_shaper.sh →
@@ -4176,6 +4568,9 @@ async def _run_shape_subprocess(session_id: str, output_dir: Path,
     was removed 2026-10-04 — its legacy ``<stem>_visual.glb`` outputs are still READ below.)
     Both are GENERATIVE assets (trusted for presence / position / extent, never
     metric deliverables). Single-flight globally (see _shape_subprocess above).
+    ``permit_token``: the GPU permit the export took (point 154) — released the moment the
+    generative batch leaves the card (the texture bake is CPU), so the chat's vLLM can come
+    back and a waiting job can start.
     """
     global _shape_subprocess
 
@@ -4356,6 +4751,8 @@ async def _run_shape_subprocess(session_id: str, output_dir: Path,
             _shape_set(session_id, inst_id, **update)
 
     rc = await proc.wait()
+    if permit_token:
+        _drop_gpu_permit(permit_token, "ShapeR left the card")
     if engine == "shaper":
         # The chat VLM comes back the moment ShapeR frees the GPU (USER 2026-08-28:
         # always on). _semantic_reload_if_idle BLOCKS (health probe + Popen) — in
@@ -4445,6 +4842,16 @@ async def export_shape_inputs(request: Request):
             print(f"[Shape] ✅ returning cached result ({age:.0f}s old) for {inflight_key}")
             return _shape_in_flight["result"]
         print(f"[Shape] ⚠ in-flight wait expired without fresh result — falling through")
+
+    # THE ONE GPU PERMIT (point 154): taken for the whole of it — the PKL export with its
+    # on-demand captions (the chat's vLLM, under this same permit), then the generative
+    # batch on the card — refused 409 naming the job while a pipeline job holds the GPU.
+    # Released when the batch leaves the card (_run_shape_subprocess), or here when nothing
+    # is chained or the export fails. The token is THIS request's: a second export on the
+    # session while the batch runs is refused naming it, never re-entered.
+    permit_token = _permit_token("shape", session_id)
+    _take_gpu_permit("ShapeR meshing", session_id, permit_token)
+    permit_handed_over = False
 
     # Claim the in-flight slot. The completion_event is signaled in `finally`
     # so any duplicate retry that arrived during processing wakes up and reads
@@ -4583,12 +4990,13 @@ async def export_shape_inputs(request: Request):
 
         if auto_reconstruct and exported:
             print(f"[Shape] auto_reconstruct=True — scheduling the background {engine} batch", flush=True)
+            permit_handed_over = True          # the batch releases the permit when it leaves the card
             async def _bg():
                 print(f"[Shape] _bg ENTER — about to call _run_shape_subprocess", flush=True)
                 try:
                     await _run_shape_subprocess(
                         session_id, output_dir, exported,
-                        inst_id_by_stem, engine=engine,
+                        inst_id_by_stem, engine=engine, permit_token=permit_token,
                     )
                 except Exception as e:
                     import traceback
@@ -4596,16 +5004,12 @@ async def export_shape_inputs(request: Request):
                     traceback.print_exc()
                     async with _shape_progress_lock:
                         _shape_set_overall(session_id, phase="error", error=str(e))
+                finally:
+                    _drop_gpu_permit(permit_token, "the generative batch ended")
             # Keep a STRONG reference: the loop only holds a weak ref to the task,
             # so a bare create_task() can be GC'd before it runs. Also surface any
             # exception that kills the task before it can log it itself.
-            t = asyncio.create_task(_bg())
-            _bg_tasks.add(t)
-            def _on_bg_done(_t):
-                _bg_tasks.discard(_t)
-                if not _t.cancelled() and _t.exception() is not None:
-                    print(f"[Shape] ❌ _bg task died before logging: {_t.exception()!r}", flush=True)
-            t.add_done_callback(_on_bg_done)
+            _keep_bg_task(_bg(), "Shape")
             response["reconstructing"] = True
         elif not auto_reconstruct:
             print(f"[Shape] auto_reconstruct=False — stopping after PLY export")
@@ -4632,17 +5036,21 @@ async def export_shape_inputs(request: Request):
         # waiters' freshness check fail. Stale entries are filtered by the
         # `< 60s` freshness gate, not by clearing.
         completion_event.set()
+        if not permit_handed_over:
+            _drop_gpu_permit(permit_token, "the ShapeR export ended without a batch")
 
 
 @app.get("/api/segmentation/shape/progress/{session_id}")
 async def shape_progress(session_id: str):
-    """Live state for the shape pipeline. UI polls this every ~1s during a run."""
+    """Live state for the shape pipeline. UI polls this every ~1s during a run.
+    ``gpu_permit``: who holds the one GPU permit right now (point 154), None when nobody."""
     async with _shape_progress_lock:
         state = _shape_progress.get(session_id, {})
         # Shallow copy to avoid mutation under our feet
         per_instance = [v for k, v in state.items() if k != "__overall__"]
         overall = state.get("__overall__", {"phase": "idle"})
-    return {"ok": True, "overall": overall, "instances": per_instance}
+    return {"ok": True, "overall": overall, "instances": per_instance,
+            "gpu_permit": _gpu_permit_state()}
 
 
 @app.get("/api/segmentation/shape/status/{session_id}")
@@ -4656,8 +5064,8 @@ async def shape_status(session_id: str):
     if not result_path.exists():
         return {"ok": True, "instances": []}
 
-    with open(result_path) as f:
-        result_data = json.load(f)
+    result_data = await asyncio.get_running_loop().run_in_executor(None, _segments_view,
+                                                                    result_path) or {}
 
     statuses = []
     for inst in result_data.get("instances", []):
@@ -5479,11 +5887,11 @@ def _camera_poses_payload(output_dir: Path, frames_dir: Optional[Path]):
     if poses_path is None:
         return None
     try:
-        ft_s, ft_R, ft_t = 1.0, np.eye(3), np.zeros(3)
-        transform_path = output_dir / "floor_transform.npz"
-        if transform_path.exists():
-            ft_data = np.load(transform_path)
-            ft_s, ft_R, ft_t = float(ft_data["s"]), ft_data["R"], ft_data["t"]
+        # the ONE rule of the viewer (point 158, segmentation.floor_frame): the markers
+        # follow the cloud — the sealed transform, else the cloud's own frame
+        from segmentation.floor_frame import sealed_floor_transform
+        ft_s, ft_R, ft_t = (sealed_floor_transform(output_dir, tag="Viewer")
+                            or (1.0, np.eye(3), np.zeros(3)))
         c2w_list = []
         with open(poses_path) as pf:
             for line in pf:
@@ -5544,16 +5952,18 @@ async def _correction_notify_viewer(session_id: str, output_dir: Path):
                "url": f"/potree/{session_id}/",
                "points": json.loads(meta_path.read_text()).get("points", 0),
                "hasConfidence": _has_conf}
-        tp = output_dir / "floor_transform.npz"
-        if tp.exists():
-            d = np.load(tp)
-            M = np.eye(4)
-            M[:3, :3] = float(d["s"]) * d["R"]
-            M[:3, 3] = d["t"]
+        from segmentation.floor_frame import sealed_floor_matrix
+        _loop = asyncio.get_running_loop()
+        # off the event loop: the job just rewrote the cloud, so the verdict is cold and
+        # hashes it (USER 2026-10-09 — the viewer waited on it)
+        M = await _loop.run_in_executor(
+            None, lambda: sealed_floor_matrix(output_dir, tag="Correction"))   # point 158
+        if M is not None:
             msg["floorTransform"] = _display_matrix(session_id, M)
         # the camera markers follow the epoch (its poses + camera are artifacts)
         try:
-            cams = _camera_poses_payload(output_dir, _ctx(session_id).frames_dir)
+            cams = await _loop.run_in_executor(
+                None, lambda: _camera_poses_payload(output_dir, _ctx(session_id).frames_dir))
         except Exception:  # noqa: BLE001
             cams = None
         if cams:
@@ -5578,7 +5988,34 @@ async def _correction_notify_viewer(session_id: str, output_dir: Path):
 # ── Certification loop + acta (claude_stac.txt §9–§11) ─────────────────────
 from reconstruction.certify import api as certify_api
 certify_api.configure(resolve_ctx=_ctx, notify_viewer=_correction_notify_viewer)
-app.include_router(certify_api.router)
+
+
+async def _certify_select_guard(request: Request) -> None:
+    """POST /api/certify/select swaps the session's live epoch (correction.run.run_select —
+    cloud, poses, segmentation, octree); a pipeline job of that session queued or running
+    reads and rewrites those very files (docs/plan_determinismo.md point 111: the viewer
+    never writes with a job active on the session). The guard is a dependency of the
+    certify router mounted HERE (the router is the certification package's): the select
+    is refused with 409 naming the job; every other route of the router (state, acta,
+    report, attention — reads the kit polls during a run) passes untouched."""
+    if request.method != "POST" or not request.url.path.rstrip("/").endswith("/select"):
+        return
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 — a malformed body is the endpoint's own 400
+        return
+    sid = body.get("session_id") if isinstance(body, dict) else None
+    if sid and pipeline_manager.is_active(str(sid)):
+        job = pipeline_manager.job_of(str(sid))
+        raise HTTPException(409, detail={
+            "error": f"a pipeline job of session {sid} is "
+                     f"{job.status.value if job else 'active'}"
+                     f"{' (' + job.kind + (', scan ' + job.scan_key if job.scan_key else '') + ')' if job else ''}"
+                     f" — the epoch cannot be selected until it ends (point 111)",
+            "busy": True})
+
+
+app.include_router(certify_api.router, dependencies=[Depends(_certify_select_guard)])
 
 
 @app.post("/api/segmentation/perfect/export")
@@ -5708,6 +6145,12 @@ async def export_tsdf_endpoint(request: Request):
     print(f"[TSDF]   mode=surface_fit-first + per-object TSDF  "
           f"voxel={voxel_length}m trunc={sdf_trunc}m depth_max={depth_trunc}m "
           f"dilate={dilate_radius}px")
+
+    # THE ONE GPU PERMIT (point 154): the per-object PGSR stage trains on the card — refused
+    # 409 naming the job while a pipeline job holds it; released when the background work
+    # ends (this request's own token: a second export meanwhile is refused, not re-entered)
+    permit_token = _permit_token("tsdf", session_id)
+    _take_gpu_permit("per-object meshing", session_id, permit_token)
 
     async with _tsdf_progress_lock:
         sess_state = _tsdf_progress.setdefault(session_id, {})
@@ -5839,8 +6282,10 @@ async def export_tsdf_endpoint(request: Request):
             traceback.print_exc()
             async with _tsdf_progress_lock:
                 _tsdf_set_overall(session_id, phase="error", error=str(e))
+        finally:
+            _drop_gpu_permit(permit_token, "the per-object meshing ended")
 
-    asyncio.create_task(_bg())
+    _keep_bg_task(_bg(), "TSDF")          # kept: its finally releases the permit
 
     return {"ok": True, "started": True, "count": len(target_ids)}
 
@@ -5968,6 +6413,11 @@ async def export_tsdf_scene_endpoint(request: Request):
     print(f"[TSDF-scene]   session={session_id}")
     print(f"[TSDF-scene]   params (config tsdf + body overrides): {params}")
 
+    # THE ONE GPU PERMIT (point 154): the scene TSDF integrates on the card (this request's
+    # own token)
+    permit_token = _permit_token("tsdf-scene", session_id)
+    _take_gpu_permit("scene TSDF meshing", session_id, permit_token)
+
     async with _tsdf_progress_lock:
         sess_state = _tsdf_progress.setdefault(session_id, {})
         sess_state["__scene__"] = {
@@ -5978,8 +6428,13 @@ async def export_tsdf_scene_endpoint(request: Request):
     # Heavy GPU/Open3D work runs in a SEPARATE PROCESS — see
     # _run_scene_tsdf_subprocess (params already built above from config.yaml
     # `tsdf:` + body overrides).
-    asyncio.create_task(
-        _run_scene_tsdf_subprocess(session_id, output_dir, frames_dir, params))
+    async def _bg_scene():
+        try:
+            await _run_scene_tsdf_subprocess(session_id, output_dir, frames_dir, params)
+        finally:
+            _drop_gpu_permit(permit_token, "the scene TSDF ended")
+
+    _keep_bg_task(_bg_scene(), "TSDF-scene")   # kept: its finally releases the permit
 
     return {"ok": True, "started": True}
 
@@ -6111,7 +6566,7 @@ async def tsdf_progress(session_id: str):
         scene = state.get("__scene__", {"phase": "idle"})
         poisson = state.get("__poisson_scene__", {"phase": "idle"})
     return {"ok": True, "overall": overall, "instances": per_instance,
-            "scene": scene, "poisson": poisson}
+            "scene": scene, "poisson": poisson, "gpu_permit": _gpu_permit_state()}
 
 
 # ── Autosegment (USER 2026-10-05): the segmentation chain on demand, prompts editable ──
@@ -6161,12 +6616,8 @@ async def autosegment_save(session_id: str, request: Request):
         if want_eff != (cur if over else None):
             changes.append("vlm_prompt")
     if prompts is not None:
-        clean: list = []
-        for c in prompts:
-            c = " ".join(str(c).split()).strip().strip(";")
-            if c and c.lower() not in {x.lower() for x in clean}:
-                clean.append(c)
-        if clean != sam3_prompts(ctx.output_dir):
+        from pipeline_manager import clean_sam3_prompts
+        if clean_sam3_prompts(prompts) != sam3_prompts(ctx.output_dir):
             changes.append("sam3_prompts")
     if changes and pipeline_manager.is_active(session_id, scan):
         raise HTTPException(409, detail={
@@ -6193,8 +6644,8 @@ async def tsdf_status(session_id: str):
     if not result_path.exists():
         return {"ok": True, "instances": []}
 
-    with open(result_path) as f:
-        result_data = json.load(f)
+    result_data = await asyncio.get_running_loop().run_in_executor(None, _segments_view,
+                                                                    result_path) or {}
 
     statuses = []
     for inst in result_data.get("instances", []):
@@ -6484,12 +6935,11 @@ async def _erase_finalize(session_id: str, delay: float = 2.5):
                        "url": f"/potree/{session_id}/",
                        "points": json.loads(meta_path.read_text()).get("points", 0),
                        "hasConfidence": _has_conf}
-                tp = output_dir / "floor_transform.npz"
-                if tp.exists():
-                    d = np.load(tp)
-                    M = np.eye(4)
-                    M[:3, :3] = float(d["s"]) * d["R"]
-                    M[:3, 3] = d["t"]
+                from segmentation.floor_frame import sealed_floor_matrix
+                # off the event loop: every erase rewrites the cloud, so the verdict is cold
+                M = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: sealed_floor_matrix(output_dir, tag="Erase"))   # point 158
+                if M is not None:
                     msg["floorTransform"] = _display_matrix(session_id, M)
                 await viewer_manager.broadcast_text(json.dumps(msg))
                 print("[Erase] potree_ready broadcast (viewer reloads octree)")
@@ -6575,11 +7025,14 @@ async def segmentation_erase(request: Request):
     if (rep.get("ledger") or {}).get("deleted_points"):
         # physical deletion re-indexed the cloud — every stored undo's indices
         # now point at the wrong rows; the whole stack is void
+        _retire_merge_snapshots(output_dir, st["undo"])
         st["undo"] = []
         print("[Erase] undo stack cleared (physical deletion re-indexed "
               "the cloud)")
     if rep.get("undo"):
-        st["undo"] = (st["undo"] + [rep["undo"]])[-10:]
+        _stack = st["undo"] + [rep["undo"]]
+        _retire_merge_snapshots(output_dir, _stack[:-10])
+        st["undo"] = _stack[-10:]
     if rep.get("mesh_instances"):
         try:
             result = json.loads(
@@ -6614,6 +7067,51 @@ async def segmentation_erase(request: Request):
             "ledger": rep.get("ledger")}
 
 
+@app.post("/api/segmentation/merge")
+async def segmentation_merge(request: Request):
+    """Fuse whole segments into one (USER 2026-10-09): {session_id, target_id,
+    source_ids[]} — every point and mask of the sources joins the target, the
+    sources are removed. One entry on the brush undo stack."""
+    body = await request.json()
+    session_id = body.get("session_id")
+    target = body.get("target_id")
+    sources = body.get("source_ids") or []
+    if not session_id or target is None or not sources:
+        raise HTTPException(status_code=400,
+                            detail="need session_id, target_id and source_ids[]")
+    ctx = _ctx(session_id)
+    from segmentation.erase import merge_instances
+    loop = asyncio.get_event_loop()
+    st = _erase_state(session_id)
+    # the snapshots the live undo stack still refers to; every other one is pruned
+    _keep = [u["snapshot"] for u in st["undo"] if isinstance(u, dict) and u.get("kind") == "merge"]
+    try:
+        rep = await loop.run_in_executor(
+            None, lambda: merge_instances(ctx.output_dir, int(target),
+                                          [int(s) for s in sources], keep_snapshots=_keep))
+    except (ValueError, FileNotFoundError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    _stack = st["undo"] + [rep["undo"]]
+    _retire_merge_snapshots(ctx.output_dir, _stack[:-10])
+    st["undo"] = _stack[-10:]
+    for iid in rep.get("mesh_instances") or []:
+        st["touched_mesh"].add(int(iid))   # the target's mesh is refit, its OBB from the mesh
+    if st.get("task"):
+        st["task"].cancel()
+    st["task"] = asyncio.create_task(_erase_finalize(session_id, delay=0.1))
+    return {"ok": True, "merged": rep["merged"], "target": rep["target"],
+            "moved_points": rep["moved_points"], "ledger": rep["ledger"]}
+
+
+def _retire_merge_snapshots(output_dir: Path, dropped: list) -> None:
+    """Undo entries leaving the stack (trimmed past 10, or voided by a physical deletion) take
+    their merge snapshots with them (CLAUDE.md storage rule)."""
+    import shutil as _sh
+    for u in dropped or []:
+        if isinstance(u, dict) and u.get("kind") == "merge" and u.get("snapshot"):
+            _sh.rmtree(u["snapshot"], ignore_errors=True)
+
+
 @app.post("/api/segmentation/erase/undo")
 async def segmentation_erase_undo(request: Request):
     body = await request.json()
@@ -6629,9 +7127,14 @@ async def segmentation_erase_undo(request: Request):
     loop = asyncio.get_event_loop()
     rep = await loop.run_in_executor(
         None, lambda: undo_erase(ctx.output_dir, undo))
+    if rep.get("detail"):
+        # a merge undo refused (the session changed since): nothing was restored
+        return {"ok": False, "detail": rep["detail"]}
     # restored points change meshes too → same debounced finalize
     for iid_s in (undo.get("indices") or {}):
         st["touched_mesh"].add(int(iid_s))
+    if undo.get("kind") == "merge":
+        st["touched_mesh"].add(int(undo["target"]))
     if st.get("task"):
         st["task"].cancel()
     st["task"] = asyncio.create_task(_erase_finalize(session_id))
@@ -6697,6 +7200,7 @@ async def resume_run(body: dict):
     if not state_id or not kf_mapping:
         raise HTTPException(409, "SAM3 interactive session not ready — open "
                             "the Segmentation Manager first")
+    _require_sam3_manager_permit()
     # real frame number → SAM3 sequential index
     real_to_seq = {}
     for seq, name in kf_mapping.items():
@@ -6871,6 +7375,9 @@ async def refresh_segmentation(body: dict):
             print("[SegRefresh] SAM3 unloaded — GPU freed for the projection job")
     except Exception as _e:  # noqa: BLE001
         print(f"[SegRefresh] SAM3 unload skipped: {_e}")
+    # the Manager's GPU permit goes with its model (point 154): the job ordered below — and
+    # any job waiting on it — may take the card now
+    _drop_gpu_permit(SAM3_MANAGER_PERMIT, "the Segmentation Manager closed")
 
     from pipeline_manager import StageId as _SI, read_config_once as _rco
     try:
@@ -7198,6 +7705,10 @@ async def paint_mask(request: Request):
         np.savez_compressed(tmp_path, **npz)
         os.replace(tmp_path, str(masks_path))
         _mspace.invalidate(output_dir)
+        # the seal names the bytes just written, or the projection refuses the store
+        # (point 83: `segmentation.erase.reseal_store`)
+        from segmentation.erase import reseal_store as _reseal
+        _reseal(output_dir, by="mask_paint", log=lambda m: print(f"[MaskPaint] {m}"))
 
         # Generate updated mask PNG
         # Get instance color
@@ -7290,7 +7801,12 @@ async def add_text_prompt_endpoint(request: Request):
 
 @app.post("/api/segmentation/auto/{session_id}")
 async def run_auto_segmentation(session_id: str):
-    """Full auto-segmentation: VLM scene analysis → SAM3 pipeline."""
+    """Full auto-segmentation (legacy endpoint): VLM scene analysis → SAM3 pipeline, in
+    the server process. It takes the ONE GPU permit (point 154) for the whole of it —
+    refused 409 naming the job while a pipeline job holds the card — runs the VLM on this
+    task's own engine (point 156: no InternVL3, no generic list; a failure fails the request
+    naming it, the served model is recorded) and stops that engine BEFORE SAM3 takes the
+    card (never both on it). The configuration is the scan's frozen one when it has one."""
     from task_manager import task_manager
     ctx = _ctx(session_id)
     frames_dir = ctx.frames_dir
@@ -7300,43 +7816,27 @@ async def run_auto_segmentation(session_id: str):
         raise HTTPException(status_code=404, detail="Frames directory not found")
     output_dir.mkdir(parents=True, exist_ok=True)
     loop = asyncio.get_event_loop()
+    token = _permit_token("auto-segmentation", session_id)
+    _take_gpu_permit("auto-segmentation (VLM + SAM3)", session_id, token)
     tid = task_manager.start(session_id, "auto_seg", "Auto-segmentation (VLM + SAM3)")
 
     try:
         def _auto():
             try:
-                # Phase 1 DEFAULT: Qwen3-VL grounded auto-prompter — the same
-                # path as the pipeline's vlm_worker, so this endpoint and the
-                # pipeline behave identically. InternVL3 stays as fallback.
-                prompt, frame_map, boxes_map = "", {}, None
-                autoprompt_cfg = cfg.get("autoprompt", {})
-                if autoprompt_cfg.get("enabled", True):
-                    try:
-                        task_manager.update(tid, pct=10, detail="Auto-prompting with Qwen3-VL...")
-                        from segmentation.autoprompt.session_builder import AutoPrompter
-                        ap = AutoPrompter(frames_dir.parent, output_dir,
-                                          backend=autoprompt_cfg.get("backend", "qwen_local"),
-                                          config=cfg)
-                        r = ap.run(run_sam3=False)
-                        prompt, frame_map = r.prompt, r.frame_map
-                        boxes_map = json.loads(Path(r.vlm_analysis_path).read_text()).get("boxes") or None
-                    except Exception as ap_err:  # noqa: BLE001
-                        print(f"[AutoSeg] Auto-prompter failed ({ap_err}); falling back to InternVL3")
-                if not prompt:
-                    task_manager.update(tid, pct=10, detail="Analyzing scene with VLM (fallback)...")
-                    from scene_analyzer import analyze_scene
-                    vlm_result = analyze_scene(str(frames_dir), str(output_dir))
-                    categories = vlm_result.get("categories", [])
-                    frame_map = vlm_result.get("frame_map", {})
-                    if not categories:
-                        task_manager.finish(tid)
-                        return {"error": "VLM found no categories", "instances": []}
-                    labels = [c["label"] if isinstance(c, dict) else c for c in categories]
-                    prompt = ";".join(labels)
+                config, run_cfg_path = _session_job_config(ctx.session_dir)
+                task_manager.update(tid, pct=10, detail="Auto-prompting with Qwen3-VL (this "
+                                                        "task's own engine)...")
+                prompt, frame_map, boxes_map = _resolve_segmentation_prompt(
+                    "auto", ctx.session_dir, config, run_cfg_path, log=print)
                 task_manager.update(tid, pct=40, detail=f"Segmenting: {prompt[:80]}")
                 from segmentation_pipeline import run_segmentation
+                # the SAME configuration for the whole stage (points 112 / 151): the scan's
+                # frozen output/run_config.yaml when it has one, else the server's config.yaml
+                # read once — declared either way, never the vendor's re-read of config.yaml
+                print(_segmentation_config_source("AutoSeg", run_cfg_path))
                 result = run_segmentation(str(frames_dir), str(output_dir), prompt,
-                                          frame_map=frame_map, boxes_map=boxes_map)
+                                          frame_map=frame_map, boxes_map=boxes_map,
+                                          config=config)
                 # The instance store (scene_r.db) is rebuilt inside the mask→cloud
                 # matching itself — no separate anchoring step (Phase R removed).
                 task_manager.finish(tid)
@@ -7352,6 +7852,10 @@ async def run_auto_segmentation(session_id: str):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _drop_gpu_permit(token, "auto-segmentation ended")
+        # the chat comes back once nothing holds the card (USER 2026-08-28: always available)
+        loop.run_in_executor(None, _semantic_reload_if_idle, "auto-segmentation done")
 
 
 @app.post("/api/segmentation/clean_instance")
@@ -7641,19 +8145,11 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
                     potree_meta_path = session_path / "output" / "potree" / "metadata.json"
                     potree_meta = json.loads(potree_meta_path.read_text())
                     floor_transform_4x4 = None
-                    ft_path = session_path / "output" / "floor_transform.npz"
-                    if ft_path.exists():
-                        try:
-                            data = np.load(ft_path)
-                            s_val = float(data['s'])
-                            R = data['R']
-                            t = data['t']
-                            M = np.eye(4)
-                            M[:3, :3] = s_val * R
-                            M[:3, 3] = t
-                            floor_transform_4x4 = _display_matrix(sid, M)
-                        except Exception:
-                            pass
+                    # point 158: the sealed transform of this cloud, else none (declared)
+                    from segmentation.floor_frame import sealed_floor_matrix
+                    _M = sealed_floor_matrix(session_path / "output", tag="Pipeline")
+                    if _M is not None:
+                        floor_transform_4x4 = _display_matrix(sid, _M)
                     # Check confidence in PLY
                     has_confidence = False
                     cp = session_path / "output" / "cleaned_cloud.ply"
@@ -7701,6 +8197,20 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
                 None, _semantic_reload_if_idle, "pipeline finished")
 
         if not success:
+            # a job the USER cancelled runs to this handler too (point 111: its stage is
+            # given its chance to stop, the task is no longer cancelled while a stage
+            # process exists) — it is reported as cancelled, never as a failure
+            _job = pipeline_manager.job_of(sid)
+            if _job is not None and _job.status == JobStatus.CANCELLED:
+                _tm.cancel(_pipeline_tid, "the user cancelled the pipeline")
+                try:
+                    await viewer_manager.broadcast_text(json.dumps({
+                        "type": "info",
+                        "message": f"Pipeline cancelled for {sid}"
+                    }))
+                except Exception:
+                    pass
+                return
             _tm.fail(_pipeline_tid, "Pipeline failed")
             try:
                 await viewer_manager.broadcast_text(json.dumps({
@@ -7797,6 +8307,7 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
     _auto = cmd.get("autosegment") if isinstance(cmd.get("autosegment"), dict) else None
     _force = False
     _only = None
+    _inputs = None
     if _auto is not None:
         _want = _auto.get("stages") if isinstance(_auto.get("stages"), dict) else {}
         _only = {sid_ for key_, sid_ in (("vlm", StageId.VLM), ("sam3", StageId.SAM3),
@@ -7806,11 +8317,33 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
                 "type": "error",
                 "message": "Autosegment: no stage selected — nothing to run"}))
             return {"ok": False, "error": "no stage selected"}
+        # THE PROMPTS TRAVEL WITH THE ORDER (docs/plan_determinismo.md point 162): the window
+        # sends the VLM prompt and the SAM3 list in the command itself (it also saves them in
+        # each scan for the session's record); the manager makes them the job's inputs —
+        # frozen under _stages of run_config.yaml, delivered right before the stage that
+        # reads them — and falls back to the scan's saved prompts when the command carries
+        # none (an older client). A value of the wrong type rejects the command.
+        _inputs = {k_: _auto[k_] for k_ in ("vlm_prompt", "sam3_prompts") if k_ in _auto}
+        _bad = ([f"vlm_prompt must be a string, got {type(_inputs['vlm_prompt']).__name__}"]
+                if "vlm_prompt" in _inputs and not isinstance(_inputs["vlm_prompt"], (str, type(None)))
+                else []) + (
+               ["sam3_prompts must be a list of strings"]
+               if "sam3_prompts" in _inputs and not (isinstance(_inputs["sam3_prompts"], list) and
+                                                     all(isinstance(p_, str) for p_ in _inputs["sam3_prompts"]))
+               else [])
+        if _bad:
+            await viewer_manager.send_text(websocket, json.dumps({
+                "type": "error", "message": f"Autosegment rejected: {'; '.join(_bad)}"}))
+            return {"ok": False, "error": "; ".join(_bad)}
+        if not _inputs:
+            _inputs = None
         if not _want.get("captions", True):
             # a per-ORDER choice goes into the certification STAGE's overrides (frozen under
-            # _stages of run_config.yaml), never into the base configuration: the session is
-            # ONE base configuration and a job that continues it with another is refused
-            # (point 151)
+            # _stages of run_config.yaml), never into the base configuration: a job that
+            # continues the session with another base configuration runs and freezes its own
+            # with the differing sections DECLARED (point 151, USER 2026-10-08:
+            # pipeline_manager._continuation_config_change) — an order's choice is not a
+            # change of the base
             _seg0 = dict(_run_cfg.get("segmentation") or {})
             _seg0["object_captions"] = {**dict(_seg0.get("object_captions") or {}),
                                         "enabled": False}
@@ -7852,6 +8385,7 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
             scan_key=_sk,
             force=_force,
             kind=_kind,
+            inputs=_inputs,
         )
         _state = "queued" if _job.status == JobStatus.QUEUED else "started"
         await viewer_manager.send_text(websocket, json.dumps({
@@ -7944,20 +8478,38 @@ async def viewer_websocket(websocket: WebSocket):
                          
                          # Run in background to not block socket
                          def _retro_process_active():
+                             # the ONE GPU permit (point 154): refused, declared, while a
+                             # pipeline job or another server task holds the card; the VLM on
+                             # this task's own engine, stopped before SAM3 (point 156: no fallback)
+                             session = frame_storage.current_session
+                             if not session: return False
+                             token = _permit_token("retro-segmentation", session.session_id)
                              try:
-                                 session = frame_storage.current_session
-                                 if not session: return False
-
+                                 # the same rule as every server GPU task: a RUNNING job
+                                 # refuses first, then the lease (_take_gpu_permit)
+                                 _take_gpu_permit("retroactive segmentation", session.session_id, token)
+                             except HTTPException as e:
+                                 why = e.detail.get("error") if isinstance(e.detail, dict) else e.detail
+                                 print(f"[Retro] {why}")
+                                 return False
+                             try:
+                                 config, run_cfg_path = _session_job_config(session.base_dir)
                                  # Resolve prompt (auto-detect if needed)
-                                 resolved_prompt, frame_map = _resolve_segmentation_prompt(prompt, str(session.frames_dir))
+                                 resolved_prompt, frame_map, boxes_map = _resolve_segmentation_prompt(
+                                     prompt, session.base_dir, config, run_cfg_path, log=print)
 
-                                 # Run segmentation pipeline
+                                 # Run segmentation pipeline — on the scan's frozen
+                                 # configuration when it has one, else the server's,
+                                 # declared (points 112 / 151)
                                  from segmentation_pipeline import run_segmentation
+                                 print(_segmentation_config_source("Retro", run_cfg_path))
                                  result = run_segmentation(
                                      frames_dir=str(session.frames_dir),
                                      output_dir=str(session.output_dir),
                                      prompt=resolved_prompt,
-                                     frame_map=frame_map
+                                     frame_map=frame_map,
+                                     boxes_map=boxes_map,
+                                     config=config,
                                  )
 
                                  if "error" in result:
@@ -7971,6 +8523,9 @@ async def viewer_websocket(websocket: WebSocket):
                                  import traceback
                                  traceback.print_exc()
                                  return False
+                             finally:
+                                 _drop_gpu_permit(token, "retroactive segmentation ended")
+                                 _semantic_reload_if_idle("retroactive segmentation done")
                          
                          # Execute in thread
                          async def _run_retro_active():
@@ -8014,6 +8569,8 @@ async def viewer_websocket(websocket: WebSocket):
                         await loop.run_in_executor(None, _sam3.unload_model)
                 except Exception:
                     pass
+                # the Manager's GPU permit goes with its model (point 154)
+                _drop_gpu_permit(SAM3_MANAGER_PERMIT, "another session was loaded")
                 
                 # Clear current view (lightweight, no I/O)
                 alignment_manager.reset()
@@ -8167,25 +8724,49 @@ async def viewer_websocket(websocket: WebSocket):
                             raise Exception("No octree yet (queued)")
 
                         await asyncio.sleep(0)  # Yield to process pings
-                        
+
+                        # THE LIGHT CLOUD FIRST (USER 2026-10-09: "las nubes deben cargarse
+                        # inmediatamente en versión bien liviana"): the viewer draws the octree's
+                        # top levels (~300 k points, /api/potree_preview) under the same floor
+                        # transform the octree will get — before camera poses, scene, BIM and
+                        # segments, which ride on potree_ready as before
+                        from urllib.parse import quote as _urlquote
+
+                        def _preview_frame():
+                            if not (output_dir / "floor_transform.npz").exists():
+                                return None
+                            from segmentation.floor_frame import sealed_floor_matrix
+                            _Mp = sealed_floor_matrix(output_dir, tag="Viewer")
+                            return _display_matrix(session_id, _Mp) if _Mp is not None else None
+                        try:
+                            _ft_preview = await loop.run_in_executor(None, _preview_frame)
+                            _pmsg = {"type": "potree_preview", "session_id": session_id,
+                                     "scan_key": _load_scan_key,
+                                     "url": (f"/api/potree_preview/{session_id}"
+                                             + (f"?scan_key={_urlquote(_load_scan_key, safe='')}"
+                                                if _load_scan_key else ""))}
+                            if _ft_preview:
+                                _pmsg["floorTransform"] = _ft_preview
+                            await viewer_manager.send_text(websocket, json.dumps(_pmsg))
+                        except Exception as _e:  # noqa: BLE001 — the preview never costs the cloud
+                            print(f"[Viewer] light preview not sent ({_e}) — the octree loads as before")
+
                         # Offload file reads to thread pool
                         def _load_metadata():
                             potree_meta = json.loads(potree_metadata.read_text())
                             floor_transform_4x4 = None
                             transform_path = output_dir / "floor_transform.npz"
                             if transform_path.exists():
-                                try:
-                                    data = np.load(transform_path)
-                                    s_val = float(data['s'])
-                                    R = data['R']
-                                    t = data['t']
-                                    M = np.eye(4)
-                                    M[:3, :3] = s_val * R
-                                    M[:3, 3] = t
-                                    floor_transform_4x4 = _display_matrix(session_id, M)
-                                    print(f"[Viewer] Floor transform loaded for Potree cloud")
-                                except Exception as e:
-                                    print(f"[Viewer] ⚠️ Could not load floor_transform: {e}")
+                                # THE ONE RULE (point 158, segmentation.floor_frame): the npz is
+                                # applied only with the seal of this reconstruction and this cloud
+                                # — the same verdict the stages project under; an unsealed or
+                                # foreign transform is ignored, declared, and the cloud is shown
+                                # in its own frame (nothing is computed or saved at load)
+                                from segmentation.floor_frame import sealed_floor_matrix
+                                _M = sealed_floor_matrix(output_dir, tag="Viewer")
+                                if _M is not None:
+                                    floor_transform_4x4 = _display_matrix(session_id, _M)
+                                    print(f"[Viewer] Floor transform loaded for Potree cloud (sealed)")
                             elif (output_dir / ".orientation_applied").exists():
                                 # reconstruction/orient.py baked +Y up and the floor at y=0 from
                                 # the camera poses: the raw cloud IS the display frame. A RANSAC
@@ -8369,15 +8950,33 @@ async def viewer_websocket(websocket: WebSocket):
                 await _run_pipeline_command(cmd, websocket)
             elif cmd.get("type") == "cancel_pipeline":
                 session_id = cmd.get("session_id")
-                await pipeline_manager.cancel_pipeline(session_id)
-                # A hard task-cancel can skip the on_complete callback — make sure
-                # the chat still comes back once the GPU is released.
-                asyncio.get_running_loop().run_in_executor(
-                    None, _semantic_reload_if_idle, "pipeline cancelled")
+                # THE CANCEL IS COOPERATIVE WITH A BOUND (point 111): a running stage gets up
+                # to CANCEL_ACK_BOUND_S to stop at a safe point before its tree is killed.
+                # That wait must not block THIS socket's command loop (load_session, status
+                # and every other command would queue behind it for up to the bound): the
+                # cancel runs as a kept task, the socket is told at once what is happening,
+                # and the outcome is reported when the cancel ends — a running job's end
+                # (_on_pipeline_complete) also announces 'cancelled' and brings the chat back
+                from pipeline_manager import CANCEL_ACK_BOUND_S as _cancel_bound
                 await viewer_manager.send_text(websocket, json.dumps({
                     "type": "info",
-                    "message": f"Pipeline cancelled for {session_id}"
+                    "message": f"Cancelling {session_id} — a running stage gets up to "
+                               f"{_cancel_bound:.0f} s to stop at a safe point"
                 }))
+
+                async def _cancel_and_report(sid=session_id, ws=websocket):
+                    try:
+                        await pipeline_manager.cancel_pipeline(sid)
+                    finally:
+                        # a queued job dropped from the queue never reaches on_complete —
+                        # the chat still comes back once nothing holds the GPU
+                        asyncio.get_running_loop().run_in_executor(
+                            None, _semantic_reload_if_idle, "pipeline cancelled")
+                        await viewer_manager.send_text(ws, json.dumps({
+                            "type": "info",
+                            "message": f"Pipeline cancelled for {sid}"
+                        }))
+                _keep_bg_task(_cancel_and_report(), "Pipeline")
 
             elif cmd.get("type") == "get_pipeline_status":
                 session_id = cmd.get("session_id")

@@ -73,10 +73,16 @@ def split_instance(output_dir, iid: int, idx_new: np.ndarray, reason: dict,
     new_iid = max(new_iid, _hi_iid + 1)
     color = _NEW_SEGMENT_COLORS[(new_iid - 1) % len(_NEW_SEGMENT_COLORS)]
     label = str(src.get("label", "segment"))
+    # the RAW store gets the segmentation's name, never the user's (segmentation.label_overrides
+    # keeps the user's beside it); the new instance carries both, like its source
+    sam3_label = str(src.get("label_sam3") or label)
     new_inst = {"id": int(new_iid), "label": label, "instance_id": int(new_iid),
                 "color": color, "total_points": int(len(moving)),
                 "globalIndices": moving.tolist(),
                 "split_from": int(iid)}
+    for _k in ("label_sam3", "label_origin"):
+        if src.get(_k):
+            new_inst[_k] = src[_k]
     if len(moving) >= 4:
         new_inst["obb"] = _compute_obb(raw_to_display(output_dir, xyz[moving]))
     src["globalIndices"] = remaining.tolist()
@@ -85,7 +91,7 @@ def split_instance(output_dir, iid: int, idx_new: np.ndarray, reason: dict,
         src["obb"] = _compute_obb(raw_to_display(output_dir, xyz[remaining]))
     instances.append(new_inst)
     meta_insts.append({"id": int(new_oid), "instance_id": int(new_iid),
-                       "label": label, "color": color})
+                       "label": sam3_label, "color": color})
     meta["instances"] = meta_insts
     seg_json.write_text(json.dumps(meta, indent=2))
 

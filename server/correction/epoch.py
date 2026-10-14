@@ -192,8 +192,13 @@ def epoch_kind(output_dir, epoch: int) -> str:
     return EPOCH_KIND_TRANSFORM
 
 
+class EpochRecordError(RuntimeError):
+    """A stored epoch record (``_epoch_<N>/geometry_epoch.json``, or the live one) exists and
+    cannot be read — raised by :func:`epoch_lineage` in strict mode, always naming the file."""
+
+
 def epoch_lineage(output_dir, epoch: int,
-                  live: Optional[int] = None) -> List[int]:
+                  live: Optional[int] = None, strict: bool = False) -> List[int]:
     """The ancestry of ``epoch``, root first — [0, …, epoch].
 
     Each state carries its own ``geometry_epoch.json`` (the live one in the
@@ -201,6 +206,18 @@ def epoch_lineage(output_dir, epoch: int,
     ``parent_epoch`` the correction ran on top of. A session that never
     branched gives the plain [0, 1, …, N]; one where a correction ran on top of
     a re-selected older epoch gives the real line.
+
+    ``strict`` (the lineage a DESTRUCTIVE operation keeps — correction.chain.lineage_cleanup at
+    the product publish and at the certification start, review 2026-10-08 on point 136): a
+    record that EXISTS and cannot be read, or whose ``parent_epoch`` is not an integer, RAISES
+    :class:`EpochRecordError` naming the file instead of standing in the linear guess
+    ``N − 1`` — a corrupt record would otherwise decide which epochs are "outside the lineage"
+    and get deleted (the repo's rule: a broken input never becomes a default). DECLARED, the
+    two cases that stay the linear guess in strict mode because nothing is broken: a record
+    WITHOUT ``parent_epoch`` (the format before epochs were selected, 2026-09-16, when every
+    epoch was ``current + 1`` — linear by construction) and a stored directory without a record
+    (before 2026-09-18 the record did not travel with the geometry; ``run_select`` repairs it).
+    The lenient default serves display and selection, where a guess costs nothing.
     """
     output_dir = Path(output_dir)
     live = current_epoch(output_dir) if live is None else int(live)
@@ -218,10 +235,15 @@ def epoch_lineage(output_dir, epoch: int,
         if rec_p.is_file():                    # parent was recorded is linear
             try:
                 data = json.loads(rec_p.read_text())
+                if not isinstance(data, dict):
+                    raise TypeError(f"not a JSON object ({type(data).__name__})")
                 if data.get("parent_epoch") is not None:
                     parent = int(data["parent_epoch"])
-            except (OSError, ValueError, TypeError):
-                pass
+            except (OSError, ValueError, TypeError) as exc:
+                if strict:
+                    raise EpochRecordError(
+                        f"{rec_p} (the record of epoch {e}) cannot be read: {exc} — the lineage "
+                        f"of epoch {epoch} is undecidable, nothing is pruned on a guess") from exc
         e = parent
     return list(reversed(chain))
 

@@ -16,10 +16,25 @@ import numpy as np
 from correction import floor as FL
 
 
-def _session(tmp_path, tilt_deg=3.0, offset=0.12):
+def _session(tmp_path, tilt_deg=3.0, offset=0.12, noise1_m=0.005, seed1=8):
+    """Chunk 0's floor is tilted 3° and 12 cm up (noiseless); chunk 1's is level at y = 0 with
+    ``noise1_m`` of Gaussian scatter (within the fit's 1 cm tolerance) drawn with its own seed.
+    THE USER'S RULE at 1.1 × the error (point 1 / 98, USER 2026-10-07): a chunk applies its own
+    tilt or height only when it clears 1.1 × its bootstrap error. Chunk 1 used to be a NOISELESS
+    plane, which has no error at all (σ = 0): its margin |dy| − factor × 0 was a floating-point
+    residue, and the role it got — 'anchor', the residue read as clearing — was the SAME under
+    the old factor 2 and under 1.1 (measured 2026-10-08 against HEAD's floor.py and the working
+    tree: roles ['anchor', 'anchor'], σ_height = σ_tilt = 0, margin +0.0). So this test did not
+    fail because of the factor; it failed because the geometric floor (points 128 / 129) measures
+    a real error and the fixture had none to measure. With real scatter the errors are real: with
+    seed 8 chunk 1's measured tilt is 0.65 × its σ and its height 0.50 × its σ, inside the bar by
+    its own measurement, and the rule is what decides. DECLARED for the code (floor.py, the
+    margin): σ = 0 makes any non-zero residue 'clear' — a degenerate case no real session reaches
+    (a measured floor always scatters)."""
     out = tmp_path / "output"
     (out / "omega_run" / "results_output").mkdir(parents=True)
     rng = np.random.default_rng(0)
+    rng1 = np.random.default_rng(seed1)
     n_kf, per = 20, 400
     xyz, ks = [], []
     th = np.radians(tilt_deg)
@@ -29,9 +44,10 @@ def _session(tmp_path, tilt_deg=3.0, offset=0.12):
         np.savez(out / "omega_run" / "results_output" / f"frame_{100 + k}.npz", chunk=np.int64(chunk))
         x = rng.uniform(-2, 2, per) + (0 if chunk == 0 else 5)
         z = rng.uniform(-2, 2, per)
-        y = np.zeros(per)
         if chunk == 0:                        # chunk 0: tilted about z and 12 cm up
             y = x * np.tan(th) + offset
+        else:                                 # chunk 1: level at 0, measured with real scatter
+            y = rng1.normal(0.0, noise1_m, per)
         xyz.append(np.stack([x, y, z], 1)); ks.append(np.full(per, k))
         # the camera walks 1.6 m over its floor (the floor is measured under the cameras)
         poses[k, :3, 3] = [(0 if chunk == 0 else 5) + 0.2 * (k % 10) - 1.0, 1.6 + (offset if chunk == 0 else 0.0), 0.0]
@@ -66,9 +82,12 @@ def test_each_chunk_moves_rigidly_to_a_level_floor_at_zero(tmp_path):
     sol2 = FL.solve_floor_by_chunk(s, _cfg(), np.random.default_rng(5), log=lambda m: None)
     assert np.array_equal(sol2["R_kf"], R) and np.array_equal(sol2["t_kf"], t)
     per = sol["per_kf_report"]
-    # chunk 0 moves by its own measurement; chunk 1 (level, measured to the millimetre) would
-    # take the neighbours' blend by point 129 — its own measurement contradicts that blend
-    # beyond its error, so its own (identity) value stands, declared
+    # chunk 0 moves by its own measurement; chunk 1 (level within 1.1 × its own bootstrap error
+    # on both the tilt and the height — see _session) would take the neighbours' blend by point
+    # 129 — its own measurement contradicts that blend beyond its error, so its own (identity)
+    # value stands, declared
+    assert per[1]["tilt_deg"] < 1.1 * per[1]["sigma_tilt_deg"] and not per[1]["tilt_applied"]
+    assert abs(per[1]["offset_m"]) < 1.1 * per[1]["sigma_height_m"] and not per[1]["height_applied"]
     assert [c["role"] for c in per] == ["anchor", "own_within_error"], per
     assert per[1]["blend_contradicted"] and per[1]["blended_from"] == [0]
     assert all(c["levels"][0]["real"] for c in per)

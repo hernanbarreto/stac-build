@@ -74,12 +74,18 @@ def _resolve_images(body: dict, store_path: str) -> list:
     return images
 
 
+CHAT_OWNER = "chat"      # the chat's name at the engine lease: it never holds one
+
+
 def _engine_busy() -> str | None:
     """Why the chat may not start or query vLLM now (docs/plan_determinismo.md points 81 /
     154): a pipeline job is running or queued (its stages take the GPU and the engine for
     themselves — vLLM rests at ~40 GB of VRAM, and a chat question mid-SAM3 used to start
-    it on the card the stage holds), or another process holds the engine lease (the VLM
-    stage's or the description pass's own vLLM: its answers are co-batched with nobody).
+    it on the card the stage holds), or SOMEONE holds the engine lease — asked by the chat's
+    OWN owner, pid or no pid: the manager's job permit lives under the backend's own pid
+    (a pid-only check let the chat through mid-stage, point 81), a stage worker's own vLLM
+    (its answers are co-batched with nobody), a server GPU task (meshing, the Segmentation
+    Manager's SAM3 — the chat never starts vLLM beside them, point 154).
     None when the chat may go ahead."""
     try:
         from main import pipeline_manager           # late import: avoids a cycle
@@ -90,10 +96,19 @@ def _engine_busy() -> str | None:
         pass
     try:
         from semantic.service import engine_available_to
-        ok, why = engine_available_to()
+        ok, why = engine_available_to(owner=CHAT_OWNER)
     except Exception:  # noqa: BLE001
         return None
     return None if ok else why
+
+
+def _engine_busy_response() -> JSONResponse | None:
+    """The 503 'busy' answer when the engine is not the chat's right now — asked right
+    BEFORE a call (point 81: a job can start while a question is being typed)."""
+    busy = _engine_busy()
+    if busy:
+        return JSONResponse({"status": "busy", "error": busy}, status_code=503)
+    return None
 
 
 @router.get("/semantic/status")
@@ -117,7 +132,7 @@ async def semantic_status(warmup: bool = False):
         return JSONResponse({"status": "loading"})
 
     if warmup:
-        ensure_service(log=print, timeout_s=0.0)        # fire and forget
+        ensure_service(log=print, timeout_s=0.0, owner=CHAT_OWNER)   # fire and forget
         return JSONResponse({"status": "loading"})
 
     return JSONResponse({"status": "down"})
@@ -131,9 +146,9 @@ async def spatial_qa(body: dict):
     # ONE permit to the engine per job (point 81): while a pipeline job runs, or a job's
     # process holds the engine lease, the chat neither starts vLLM nor queries it — it
     # gets 'busy' and the client retries when the stage ends.
-    busy = _engine_busy()
-    if busy:
-        return JSONResponse({"status": "busy", "error": busy}, status_code=503)
+    busy = _engine_busy_response()
+    if busy is not None:
+        return busy
     # The reconstruction / SAM3 stages stop vLLM to get the whole GPU, so by the
     # time the user opens the chat the service is usually down. Kick the launcher
     # and return immediately with status=loading: the weights take minutes, and
@@ -141,7 +156,7 @@ async def spatial_qa(body: dict):
     # error. The client keeps its pending bubble and retries.
     from semantic.service import ensure_service, is_alive
     if not is_alive():
-        ensure_service(log=print, timeout_s=0.0)   # fire and forget
+        ensure_service(log=print, timeout_s=0.0, owner=CHAT_OWNER)   # fire and forget
         return JSONResponse(
             {"status": "loading",
              "error": "Loading the model (Qwen3-VL). It was unloaded to free the "
@@ -163,7 +178,15 @@ async def spatial_qa(body: dict):
     # (verified live 2026-08-29: backend /health 000 with a question in flight).
     import asyncio as _aio
 
+    class _Busy(Exception):
+        pass
+
     def _run():
+        # the semantic client is asked for right BEFORE the call (point 81): the store was
+        # resolved meanwhile and a job may have taken the engine
+        why = _engine_busy()
+        if why:
+            raise _Busy(why)
         from phase5_qa.orchestrator import SpatialQA
         qa = SpatialQA(store_path, backend=backend)
         try:
@@ -173,7 +196,10 @@ async def spatial_qa(body: dict):
         finally:
             qa.close()
 
-    res = await _aio.get_running_loop().run_in_executor(None, _run)
+    try:
+        res = await _aio.get_running_loop().run_in_executor(None, _run)
+    except _Busy as e:
+        return JSONResponse({"status": "busy", "error": str(e)}, status_code=503)
     return JSONResponse(res)
 
 
@@ -199,6 +225,10 @@ async def _general_chat(question: str, body: dict, backend: str) -> JSONResponse
     from semantic.types import system, user
 
     t0 = time.time()
+    # the semantic client is asked for right BEFORE the call (point 81)
+    busy = _engine_busy_response()
+    if busy is not None:
+        return busy
     try:
         client = get_semantic_client(backend=backend, consumer="phase5.qa.general")
         images = list(body.get("images") or [])

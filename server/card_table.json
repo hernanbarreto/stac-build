@@ -25,6 +25,13 @@
       "frames": 2,
       "tokens_per_frame": 10764,
       "provenance": "zaragoza 2026-10-04/06 (1920x1080, process_res 1932): 2-frame calibration window, weights 6.36 GiB, peak logged '25.8 GiB' (0.903 MiB/token); every peak consistent with the logged per-token value (25.79-25.81 GiB) gives the same window (6 frames)"
+     },
+     "1036": {
+      "weights_gib": 6.36,
+      "peak_gib": 12.84,
+      "frames": 2,
+      "tokens_per_frame": 3108,
+      "provenance": "intake.vram --calibrate on src_default (1024x576, process_res 1036), 2026-10-09: 2-frame window, weights 6.36 GiB, peak 12.84 GiB"
      }
     }
    }
@@ -40,6 +47,10 @@
    "1932": {
     "window_frames": 6,
     "provenance": "zaragoza 2026-10-04/06 (1920x1080, process_res 1932): windows [6, 6, 4] ('[intake.vram] window 16 → 6 frame(s)'); fx 2255.83 fy 1699.49 measured three times from them"
+   },
+   "1036": {
+    "window_frames": 16,
+    "provenance": "observatorio 2026-10-09 (1024x576, process_res 1036): derived with the committed formula (intake.vram.window_sizing) over this card's DA3 footprint at 1036 (weights 6.36 GiB, 2-frame peak 12.84 GiB, 3108 tokens/frame): 19.02 frames fit 80 GiB less the 15 % margin, so the 16 probe frames go in ONE window (predicted peak 58.2 GiB), as pccr's at 840; first validated by observatorio's own run"
    }
   }
  }

@@ -972,6 +972,7 @@ def run(session_dir, log: Callable[[str], None] = print, cfg=None,
             stages.append({"stage": "depth_alone", "status": "failed",
                            "reason": str(e2)})
 
+    declare_unsealed_floor(output_dir, log)
     from correction.epoch import current_epoch
     out = {"stages": stages, "epoch": int(current_epoch(output_dir)),
            "elapsed_s": round(time.time() - t0, 1),
@@ -979,6 +980,33 @@ def run(session_dir, log: Callable[[str], None] = print, cfg=None,
     log(f"[correction] done in {out['elapsed_s']:.0f} s — session at epoch "
         f"{out['epoch']}")
     return out
+
+
+def declare_unsealed_floor(output_dir, log: Callable[[str], None] = print) -> Optional[str]:
+    """ONE DECLARED line when the LIVE ``floor_transform.npz`` is not sealed for the live
+    ``cleaned_cloud.ply`` (point 158; ``segmentation.pipeline._floor_seal_status``, the stages'
+    own verdict) — returns the reason, None when sealed or when no transform exists.
+
+    Only a transaction that carries a floor transform stages one and seals it (correction.apply
+    step 12); a depth or witness epoch leaves the live transform with its previous seal, naming
+    the PREVIOUS cloud, and the re-level after every epoch (the user's rule) is what re-seals.
+    When that re-level publishes no epoch (a solve failure, 'rejected'), the certified session
+    ends with a stale seal and the next Autosegment's projection REFUSES the transform naming it
+    — the right rule (nothing is carried forward unmeasured), but until now nothing in the
+    correction's own log said the final live epoch is unsealed. Said here, before the next stage
+    finds it."""
+    out = Path(output_dir)
+    tp = out / "floor_transform.npz"
+    if not tp.exists():
+        return None
+    from segmentation.pipeline import _floor_seal_status
+    ok, why = _floor_seal_status(out, out / "cleaned_cloud.ply")
+    if ok:
+        return None
+    log(f"[correction] DECLARED: the live {tp.name} is NOT sealed for the live cleaned_cloud.ply "
+        f"— {why} (point 158): the stages that project on this cloud will refuse the transform "
+        f"until the floor is re-levelled (a re-level seals it) or the file is removed")
+    return why
 
 
 def main(argv=None) -> int:

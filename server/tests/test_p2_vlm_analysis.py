@@ -237,3 +237,112 @@ def test_an_edited_sam3_list_has_one_source_and_no_clock(tmp_path):
     assert "prompt_edited_at" not in vlm and "edited_at" not in json.dumps(rec)
     assert json.loads((out / AS.AUTOSEGMENT_TIMING_FILE).read_text())["sam3_prompts_edited_at"]
     assert vlm["stamp"] == {"sha256": "x"}, "the rest of the analysis stays"
+
+
+# ── 2026-10-09: the per-image understanding reused when only the merge changed ───────
+
+class _Counting(_VLM):
+    """Understanding answers as _VLM; the merge call folds nothing. Counts each kind."""
+
+    def __init__(self):
+        super().__init__()
+        self.n_understand = 0
+        self.n_merge = 0
+
+    def chat(self, messages, max_tokens=None, consumer=None):
+        if consumer == "phase1.merge_synonyms":
+            self.n_merge += 1
+            return SimpleNamespace(content=json.dumps({"groups": []}), finish_reason="stop",
+                                   usage={"completion_tokens": 5})
+        self.n_understand += 1
+        return super().chat(messages, max_tokens, consumer)
+
+
+def test_only_the_merge_changed_the_understanding_is_reused_and_the_merge_re_derived(
+        tmp_path, monkeypatch, capsys):
+    from segmentation.autoprompt.session_builder import AutoPrompter, understanding_stamp
+    raw = _session(tmp_path)
+    raw["autoprompt"]["merge_synonyms"] = True
+    service = {"sha256": "engine-a", "served_model_name": "qwen_local"}
+    vlm = _Counting()
+    res = _run(tmp_path, raw, monkeypatch, vlm, service=service)
+    doc = json.loads(Path(res.vlm_analysis_path).read_text())
+    # one merge question per phrase since 2026-10-09 (classify_phrases)
+    assert vlm.n_understand == 3 and vlm.n_merge >= len(doc["census"]["merge_calls"]) >= 1
+    assert doc["understanding_stamp"] == understanding_stamp(doc["stamp"]), \
+        "recorded beside the full stamp: its projection"
+    assert doc["understanding_reused"] is None and doc["census"]["understanding_reused"] is False
+    assert "merge_max_tokens" not in json.dumps(doc["stamp"]), "no such key any more"
+
+    # only the merge changes (another merge key) → the full stamp differs, the
+    # understanding's does not: the per-image calls are NOT re-run, the merge is
+    raw2 = json.loads(json.dumps(raw))
+    raw2["autoprompt"]["merge_max_phrases_per_call"] = raw["autoprompt"]["merge_max_phrases_per_call"] - 1
+    pending, _why = AutoPrompter(tmp_path, tmp_path / "output", config=raw2).reuse_awaits_engine_identity()
+    ok, why = AutoPrompter(tmp_path, tmp_path / "output", config=raw2).understanding_awaits_engine_identity()
+    assert pending is False and ok is True, why
+    capsys.readouterr()
+    vlm2 = _Counting()
+    res2 = _run(tmp_path, raw2, monkeypatch, vlm2, service=service)
+    out = capsys.readouterr().out
+    doc2 = json.loads(Path(res2.vlm_analysis_path).read_text())
+    assert vlm2.n_understand == 0 and vlm2.n_merge >= len(doc2["census"]["merge_calls"]) >= 1, \
+        "only the merge questions are asked"
+    assert "understanding reused, merge re-derived" in out
+    assert doc2["stamp"]["sha256"] != doc["stamp"]["sha256"]
+    assert doc2["understanding_stamp"] == doc["understanding_stamp"]
+    assert doc2["scene_understanding"] == doc["scene_understanding"]
+    assert doc2["census"]["calls"] == doc["census"]["calls"]
+    assert doc2["census"]["sampling"] == doc["census"]["sampling"]
+    assert doc2["census"]["understanding_reused"] is True
+    assert doc2["understanding_reused"] == {
+        "from_stamp": doc["stamp"]["sha256"], "understanding_stamp": doc["understanding_stamp"]["sha256"],
+        "understanding_stamp_origin": "recorded", "n_calls_not_rerun": 3}
+    assert res2.prompt == res.prompt and doc2["shape_descriptions"] == doc["shape_descriptions"]
+    assert doc2["census"]["concepts"] == doc["census"]["concepts"]
+    timing = json.loads((tmp_path / "output" / "vlm_analysis.timing.json").read_text())
+    assert timing["understanding_reused"] is True and timing["n_calls"] == 0
+
+    # an analysis written BEFORE the split (no understanding stamp): derived from its full
+    # stamp's parts — pccr's 2026-10-09 05:02 file
+    p = tmp_path / "output" / "vlm_analysis.json"
+    old = json.loads(p.read_text())
+    del old["understanding_stamp"], old["understanding_reused"]
+    p.write_text(json.dumps(old))
+    raw3 = json.loads(json.dumps(raw))
+    vlm3 = _Counting()
+    doc3 = json.loads(Path(_run(tmp_path, raw3, monkeypatch, vlm3, service=service)
+                           .vlm_analysis_path).read_text())
+    assert vlm3.n_understand == 0 and vlm3.n_merge >= len(doc3["census"]["merge_calls"]) >= 1
+    assert doc3["understanding_reused"]["understanding_stamp_origin"] == \
+        "derived from the saved full stamp's parts"
+
+    # a document that does not hold every per-image result is not reused
+    bad = json.loads(p.read_text())
+    del bad["scene_understanding"]["per_frame"][0]["shapes"]
+    p.write_text(json.dumps(bad))
+    vlm4 = _Counting()
+    _run(tmp_path, raw2, monkeypatch, vlm4, service=service)
+    assert vlm4.n_understand == 3
+
+    # another engine → the understanding is derived again
+    vlm5 = _Counting()
+    _run(tmp_path, raw, monkeypatch, vlm5, service=dict(service, sha256="engine-b"))
+    assert vlm5.n_understand == 3
+    # a changed keyframe → derived again, and the worker's question says why
+    Image.new("RGB", (64, 36), (9, 9, 9)).save(tmp_path / "frames" / "000000.jpg")
+    ok, why = AutoPrompter(tmp_path, tmp_path / "output", config=raw2).understanding_awaits_engine_identity()
+    assert ok is False and "frames/000000.jpg" in why
+    vlm6 = _Counting()
+    _run(tmp_path, raw2, monkeypatch, vlm6, service=dict(service, sha256="engine-b"))
+    assert vlm6.n_understand == 3
+
+
+def test_the_understanding_stamp_is_the_per_image_part_of_the_stamp():
+    from segmentation.autoprompt import session_builder as SB
+    keys = SB._understanding_code_keys()
+    assert any(k.endswith("autoprompt/scene_understanding.py") for k in keys)
+    assert not any(k.endswith("consolidate_prompts.py") or k.endswith("session_builder.py")
+                   for k in keys), "the merge and the orchestrator are not the per-image path"
+    assert "service" in SB.UNDERSTANDING_SECTIONS and "merge" not in SB.UNDERSTANDING_SECTIONS
+    assert SB.understanding_stamp(None) is None and SB.understanding_stamp({"sha256": "x"}) is None

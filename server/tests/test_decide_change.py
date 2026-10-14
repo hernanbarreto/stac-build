@@ -1,7 +1,10 @@
 """THE USER'S RULE (2026-10-07, docs/plan_determinismo.md point 1): a correction applies only when
 it is significant (whole bootstrap CI on the improving side), at least min_judge_closures(confidence)
-judges testify (5 at 0.95), and the median improvement is >= the user's factor (2, from
-correction_graph.graph.improvement_error_factor) x the measured error. metric_lock.decide_change."""
+judges testify (5 at 0.95), and the median improvement is >= the user's factor (1.1 since
+2026-10-07 — "el error ya es bastante grande" — from correction_graph.graph.improvement_error_factor,
+ONE key for every user of the rule) x the measured error. metric_lock.decide_change. The synthetic
+cases below pass their own factor (FACTOR) to the function; only the production test reads the
+config."""
 
 import copy
 import json
@@ -20,7 +23,8 @@ import loop_utils.metric_lock as ml  # noqa: E402
 from loop_utils.loop_judge import min_judge_closures  # noqa: E402
 from loop_utils.metric_lock import _pooled_median, decide_change, heldout_change  # noqa: E402
 
-FACTOR = 2.0          # the user's factor; the production value is asserted below
+FACTOR = 2.0          # the factor of the SYNTHETIC cases (exact in binary: 0.25 = 2 x 0.125);
+                      # the production value (the user's 1.1) is asserted below from config.yaml
 
 
 def _rule(before, after, error, **kw):
@@ -188,14 +192,17 @@ def _raw():
 
 
 def test_production_config_declares_the_users_factor_and_the_fork_receives_it():
+    """USER 2026-10-07: the factor is 1.1 in EVERY case ("el error ya es bastante grande"; was 1.3,
+    before that 2.0 — docs/plan_determinismo.md point 1). Updated 2026-10-08 with the user's OK:
+    the test asserts the same thing — ONE declared factor, read by the fork — at his value."""
     from reconstruction.loops.config import (fork_model_graph, improvement_error_factor,
                                              load_loops_config)
     raw = _raw()
     cfg = load_loops_config(raw)
-    assert cfg.graph.improvement_error_factor == 2.0 == improvement_error_factor(raw)
-    assert fork_model_graph(cfg)["improvement_error_factor"] == 2.0
+    assert cfg.graph.improvement_error_factor == 1.1 == improvement_error_factor(raw)
+    assert fork_model_graph(cfg)["improvement_error_factor"] == 1.1
     txt = (ROOT / "server" / "config.yaml").read_text()
-    assert "improvement_error_factor: 2.0   # USER 2026-10-07" in txt
+    assert "improvement_error_factor: 1.1   # USER 2026-10-07: 1.1 in EVERY case" in txt
 
 
 @pytest.mark.parametrize("bad", ["missing", 0.0, -2.0, "two", True])

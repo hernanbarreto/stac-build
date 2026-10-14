@@ -55,10 +55,21 @@ logger = logging.getLogger("SegPipeline")
 SAM3_STAGING_DIRNAME = "_sam3_store.staging"
 #: per-prompt seconds and the run's total — a separate record, never a compared artifact (point 125)
 SEGMENTATION_TIMING_NAME = "segmentation_timing.json"
-#: the identity of the octree beside output/potree (point 123: rebuilt only on a changed stamp)
+#: the projection's RECORD of the octree it was published with (point 123; a product of the
+#: projection — potree_converter.POTREE_STAMP_NAME, the same name). The octree's own identity
+#: lives INSIDE output/potree (potree_converter.OCTREE_STAMP_NAME), written by every build and
+#: travelling with the directory; that one decides the reuse, this one records it
 POTREE_STAMP_NAME = "potree_stamp.json"
 #: per-point view counts of the mask audit (point 119): judged views / views that left it outside
 OUT_OF_PLACE_VIEWS_NAME = "out_of_place_views.npz"
+#: the staging directory the projection writes its products into before swapping them in
+#: (point 122: the products land LAST, the result last of all; a projection that fails leaves
+#: none of them — neither staged nor published)
+PROJECTION_STAGING_DIRNAME = "_projection.staging"
+#: the marker `finalize_sam3_store` holds while it replaces the session's store (the npz, then
+#: the metadata that seals it): a reader that finds it has caught a swap that did not complete —
+#: a kill between the two renames — and refuses the store naming it
+SAM3_SWAP_MARKER = ".sam3_store.swapping"
 #: the config sections the projection reads — the parts of the frozen run configuration it is
 #: stamped with (point 123); a key missing from the configuration is a missing section, not a default
 PROJECTION_CONFIG_SECTIONS = ("segmentation", "visualization", "correction_graph",
@@ -172,6 +183,46 @@ def _projection_config(output_dir: Path) -> Tuple[dict, str]:
     return _cfg, "config.yaml"
 
 
+def _sam3_wrapper(cfg: Optional[dict] = None):
+    """The SAM3 wrapper built on ``cfg`` — `get_sam3_wrapper(config=cfg)`, the P2 contract
+    of point 112: the job's frozen configuration reaches the model, never config.yaml
+    re-read at import. A refusal of the wrapper (another models.segmentation block, a
+    checkpoint that is not the pinned one) PROPAGATES: the stage fails naming it. The REAL
+    wrapper without the keyword is a wrapper that cannot take the job's configuration and
+    FAILS here too — never a silent fall back to the server's config.yaml. Only a stand-in
+    from outside `segmentation.sam3_wrapper` (a test double) is called as it allows."""
+    import inspect
+    import segmentation.sam3_wrapper as _w
+    get_sam3_wrapper = _w.get_sam3_wrapper
+    if cfg is None:
+        return get_sam3_wrapper()
+    try:
+        params = inspect.signature(get_sam3_wrapper).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "config" in params:
+        return get_sam3_wrapper(config=cfg)
+    if getattr(get_sam3_wrapper, "__module__", None) == _w.__name__:
+        raise RuntimeError("segmentation.sam3_wrapper.get_sam3_wrapper takes no `config` — the "
+                           "SAM3 stage cannot run on the job's frozen configuration (point 112)")
+    return get_sam3_wrapper()                   # a stand-in: it reads no configuration at all
+
+
+def _cfg_get(cfg: Optional[dict], path: str, default):
+    """``cfg[a][b][c]`` for a dotted ``path`` — the job's configuration when ``cfg`` is given
+    (point 112), else the server's `config.get_param` (the CLI / manager path), with the same
+    default semantics."""
+    if cfg is None:
+        from config import get_param
+        return get_param(path, default)
+    val = cfg
+    for k in path.split("."):
+        if not isinstance(val, dict) or k not in val:
+            return default
+        val = val[k]
+    return val
+
+
 def projection_stamp(output_dir, ply_path=None, cfg: Optional[dict] = None,
                      cfg_source: Optional[str] = None) -> dict:
     """The identity of a projection's product (point 123): every INPUT (the cloud, the
@@ -186,29 +237,46 @@ def projection_stamp(output_dir, ply_path=None, cfg: Optional[dict] = None,
         cfg, cfg_source = _projection_config(out)
     ply = Path(ply_path) if ply_path is not None else out / "cleaned_cloud.ply"
     inputs = {"cloud": ply}
+    # floor_level.json is an input too (point 158): it carries the SEAL that decides whether
+    # floor_transform.npz is applied to this geometry at all
     for name in ("seg_masks.npz", "segmentation.json", "camera_frames.txt", "camera_poses.txt",
-                 "camera.json", "floor_transform.npz", "corrected_cloud.json"):
+                 "camera.json", "floor_transform.npz", "floor_level.json", "corrected_cloud.json"):
         if (out / name).is_file():
             inputs[name] = out / name
     code = ["segmentation.pipeline", "segmentation.mask_filter", "segmentation.mask_space",
             "segmentation.fuse_parent", "segmentation.republish", "segmentation.session_io",
             "segmentation.shape_proposer", "segmentation.object_captioner",
             "reconstruction.surface_fit.hole_audit", "alignment_manager"]
+    # the identity of the configuration is the CONTENT of the sections read — never where
+    # it came from: `cfg_source` names the caller (the frozen file, the dict a worker
+    # handed), and stamped it made two projections of identical inputs through two callers
+    # write different bytes and judge each other stale (points 112 / 123). It is logged only.
     sections = {k: (cfg.get(k) if isinstance(cfg, dict) else None)
                 for k in PROJECTION_CONFIG_SECTIONS}
-    sections["config_source"] = str(cfg_source)
     return _stamp(inputs=inputs, code=code, config=sections)
 
 
 def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
                      frame_map: dict = None, on_progress=None,
                      boxes_map: dict = None, prompt_status: dict = None,
-                     fallback_prompts: dict = None, defer_cloud_mapping: bool = False) -> dict:
+                     fallback_prompts: dict = None, defer_cloud_mapping: bool = False,
+                     config: Optional[dict] = None, append_store: bool = False) -> dict:
     """
+    ``append_store`` (the segmentation ROUNDS, USER 2026-10-09: "las pasadas son recursivas"):
+    the staging store starts as a copy of the session's current one, the new prompts' ids start
+    above every id it holds, and the finished store carries every round's prompts — what earlier
+    rounds segmented is kept, byte for byte.
+
     Full segmentation pipeline: batched SAM3 → IoU ID matching → mask-to-point mapping.
     ``defer_cloud_mapping`` skips the in-run mask→cloud matching even when the cloud exists —
     the caller projects itself (the second VLM pass: the in-run full match took 1 h 52 min on
     pccr 2026-10-04 against the cloud stage's 23 min projection that followed it anyway).
+
+    ``config`` (docs/plan_determinismo.md points 112 / 151) is THE configuration the whole
+    stage runs with — the job's frozen `output/run_config.yaml` as the SAM3 worker hands it —
+    threaded to every reader it reaches (the batch loop, the SAM3 wrapper, the store's seal,
+    the OBBs, the projection). None = the CLI / manager path: the session's frozen copy when
+    it holds one, else the backend's config.yaml, declared in the log either way.
 
     Supports multiple categories separated by ';' (e.g., "sofa;cushion;table").
     Uses the same blur-filtered frame set as reconstruction to ensure frame_global indices match.
@@ -228,15 +296,20 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
                    an exception, so the census can tell a prompt SAM3 never
                    completed from one it ran and that confirmed nothing.
     """
-    from config import cfg
-
     frames_dir = Path(frames_dir).resolve()
     output_dir = Path(output_dir).resolve()
+
+    if config is not None:
+        cfg, cfg_source = config, "the configuration handed by the caller (the job's)"
+    else:
+        cfg, cfg_source = _projection_config(output_dir)
+    print(f"[SegPipeline] configuration: {cfg_source} (point 112: one configuration for the "
+          f"whole stage — SAM3, the store's seal, the OBBs and the projection)")
 
     seg_cfg = cfg["models"]["segmentation"]
     batch_size = seg_cfg.get("batch_size", 50)
     batch_overlap = seg_cfg.get("batch_overlap", 10)
-    iou_threshold = seg_cfg.get("iou_match_threshold", 0.3)
+    iou_threshold = seg_cfg["iou_match_threshold"]
     # SAM3 sometimes hands out several object ids for ONE observation; masks that
     # agree above this IoU inside a frame are collapsed (segmentation.mask_dedupe_iou)
     mask_dedupe_iou = float((cfg.get("segmentation", {}) or {}).get("mask_dedupe_iou", 0.90))
@@ -244,6 +317,11 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
     # Split prompt by ';' for multi-category support
     categories = [c.strip() for c in prompt.split(";") if c.strip()]
     if not categories:
+        if append_store:
+            # a segmentation ROUND with nothing to prompt: an empty round is never an error
+            # (USER 2026-10-09) — the store stays as it is and the rounds go on
+            print("[SegPipeline] round: no category to prompt — the store is unchanged")
+            return {"instances": [], "round_empty": True}
         return {"error": "Empty prompt", "instances": []}
 
     if prompt_status is not None:
@@ -271,12 +349,33 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
 
     # ── A FRESH STORE (docs/plan_determinismo.md point 83): SAM3 writes into a staging
     # directory — ids from the first masklet, no upsert into what a previous run left —
-    # and the finished store replaces output/'s at the end, in one move. A run that fails
-    # leaves the previous store exactly as it was (and its staging directory deleted).
+    # and the finished store replaces output/'s at the end (finalize_sam3_store). A run
+    # that fails BEFORE the swap leaves the previous store exactly as it was (and its
+    # staging directory deleted); a swap caught half way leaves a marker and/or no
+    # segmentation.json, which every reader refuses naming it.
     staging = output_dir / SAM3_STAGING_DIRNAME
     if staging.exists():
         shutil.rmtree(str(staging))
     staging.mkdir(parents=True)
+    id_offset_start, seal_categories = 0, categories
+    if append_store:
+        prev_prompts: List[str] = []
+        for name in ("seg_masks.npz", "segmentation.json"):
+            if (output_dir / name).is_file():
+                shutil.copy2(str(output_dir / name), str(staging / name))
+        if (staging / "segmentation.json").is_file():
+            prev = json.loads((staging / "segmentation.json").read_text())
+            prev_prompts = list(prev.get("prompts") or [])
+            ids = [int(i.get("id", -1)) for i in prev.get("instances") or []]
+            ids.append(int(prev.get("id_high_water") or -1))
+            if (staging / "seg_masks.npz").is_file():
+                with np.load(staging / "seg_masks.npz") as old:
+                    if "obj_ids" in old.files:
+                        ids += [int(x) for x in old["obj_ids"].ravel()]
+            id_offset_start = max(max(ids, default=0), 0)
+        seal_categories = prev_prompts + [c for c in categories if c not in prev_prompts]
+        print(f"[SegPipeline] ROUND: appending {len(categories)} prompt(s) to the store of "
+              f"{len(prev_prompts)} — new ids start above {id_offset_start}")
     timing = {"prompts": {}, "seconds": None}
     t_run = _time.time()
 
@@ -298,16 +397,24 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
             fallback_prompts=fallback_prompts,
             session_output_dir=output_dir,
             timing=timing["prompts"],
+            id_offset_start=id_offset_start,
         )
 
         if seg_meta is None:
             print("[SegPipeline] ⚠️ SAM3 produced no masks")
             shutil.rmtree(str(staging), ignore_errors=True)
+            if append_store:
+                # a segmentation ROUND whose prompts SAM3 ran and confirmed nothing for
+                # (observatorio 2026-10-09, round 5: 'vehicle', 0 masklets): the store stays
+                # exactly as it is, the prompts are recorded as tried in seg_rounds.json, and
+                # the rounds go on — an answer of "nothing there" is not a failure
+                print("[SegPipeline] round: no new masklet — the store is unchanged")
+                return {"instances": [], "round_empty": True}
             return {"error": "No masks generated", "instances": []}
 
         # the finished store: canonical member order, compact, sealed with the keyframe
         # list it was segmented on and the reconstruction it belongs to — then swapped in
-        seg_meta = finalize_sam3_store(staging, output_dir, keyframe_numbers, categories, cfg,
+        seg_meta = finalize_sam3_store(staging, output_dir, keyframe_numbers, seal_categories, cfg,
                                        log=lambda m: print(f"[SegPipeline] {m}"))
         timing["seconds"] = round(_time.time() - t_run, 1)
         atomic_write_json(output_dir / SEGMENTATION_TIMING_NAME, timing, indent=1)
@@ -318,7 +425,7 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
         # mapping is DEFERRED to the cloudcompy stage, which calls
         # map_segmentation_to_cloud() after the (corrected) merge.
         if (output_dir / "cleaned_cloud.ply").exists() and not defer_cloud_mapping:
-            result = _match_and_save_result(output_dir)
+            result = _match_and_save_result(output_dir, config=cfg, config_source=cfg_source)
         else:
             print("[SegPipeline] ⏭ mask→cloud mapping deferred to the caller"
                   + ("" if defer_cloud_mapping else " (no cleaned_cloud.ply yet — the cloudcompy stage projects)"))
@@ -452,12 +559,11 @@ def sam3_store_seal(cfg: dict, categories: List[str], keyframes: List[int],
     the batch parameters) and the code that ran it — a `repro.stamp`."""
     from repro import stamp as _stamp
     scfg = dict((cfg.get("models") or {}).get("segmentation") or {})
-    applied = None
-    try:
-        from segmentation.sam3_wrapper import get_sam3_wrapper
-        applied = getattr(get_sam3_wrapper(), "applied_thresholds", None)
-    except Exception:  # noqa: BLE001 — no wrapper (a synthetic run): recorded as None
-        applied = None
+    # the thresholds AS APPLIED by the wrapper built on this configuration; a wrapper that
+    # refuses the configuration fails the seal (and the stage) — it used to be swallowed into
+    # None, a seal that said nothing about a model that was never built. None only when the
+    # wrapper carries no record (a stand-in in a synthetic run), recorded as such.
+    applied = getattr(_sam3_wrapper(cfg), "applied_thresholds", None)
     ckpt = scfg.get("checkpoint_path")
     ckpt_sha = None
     if ckpt and Path(str(ckpt)).is_file():
@@ -517,14 +623,26 @@ def finalize_sam3_store(staging: Path, output_dir: Path, keyframes: List[int],
     doc["n_keyframes"] = int(len(keyframes))
     doc["stamp"] = sam3_store_seal(cfg, categories, keyframes, scaled_res, rid, src_npz)
     atomic_write_json(src_json, doc, indent=1, sort_keys=True)
-    # the swap: masks first, then the metadata that seals them (a reader that finds a
-    # segmentation.json whose stamp names other mask bytes refuses it)
-    for name in ("segmentation_result.json", "fusion_map.json", "seg_broadcast.json"):
-        p = output_dir / name
-        if p.exists():
-            p.unlink()
+    # THE SWAP. Two files, two renames — a kill between them used to leave the new npz
+    # beside the OLD segmentation.json, a pair nothing refused (check_store_seal only
+    # reported it). Now: (1) a marker says a swap is in progress — a reader that finds it
+    # refuses the store; (2) the OLD metadata is deleted FIRST, so no moment holds a new
+    # npz with an old seal (a kill then leaves a store with no segmentation.json, which
+    # every reader refuses naming it); (3) the masks move in; (4) the metadata that seals
+    # them moves in LAST, its stamp naming the npz bytes beside it; (5) the marker goes.
+    # A single-rename swap was weighed and declined: the two files are read at fixed
+    # names by every module and the viewer, and Linux's atomic directory exchange has no
+    # portable Python binding — the marker + delete-first ordering gives the same
+    # guarantee at no cost. The products of the previous store go with its metadata
+    # (segmentation.republish.PROJECTION_PRODUCTS — they described another store).
+    from segmentation.republish import delete_projection_products
+    marker = output_dir / SAM3_SWAP_MARKER
+    marker.write_text(f"replacing the SAM3 store from {staging.name}\n")
+    delete_projection_products(output_dir, log=log, why="they described the previous store")
+    (output_dir / "segmentation.json").unlink(missing_ok=True)
     os.replace(src_npz, output_dir / "seg_masks.npz")
     os.replace(src_json, output_dir / "segmentation.json")
+    marker.unlink()
     mask_space.invalidate(output_dir)
     shutil.rmtree(str(staging), ignore_errors=True)
     log(f"store sealed: {n_masks} masks, {len(doc.get('instances') or [])} masklets, "
@@ -533,28 +651,82 @@ def finalize_sam3_store(staging: Path, output_dir: Path, keyframes: List[int],
     return doc
 
 
-def check_store_seal(output_dir) -> List[str]:
+#: the seal reasons that make a store UNUSABLE — a reader refuses them naming the reason: half
+#: of two runs, no store at all, an unreadable seal, and a seal that LIES (segmentation.json
+#: names mask bytes that are not the ones on disk: erase / delete rewrite the npz and keep the
+#: stamp — a seal naming other bytes is refused, as the certification refuses it). The one
+#: reason that is declared, not fatal: a store with NO seal at all — written before
+#: 2026-10-08, or the interactive manager's upsert, which drops the seal by construction (the
+#: certification's rule too: "a store with no seal is not a broken seal")
+STORE_SEAL_FATAL = ("swap did not complete", "no segmentation.json", "seg_masks.npz is missing",
+                    "unreadable", "changed since it was sealed")
+
+
+def check_store_seal(output_dir, log=None) -> List[str]:
     """What differs between `segmentation.json`'s seal and the store on disk — []
-    for a sealed store that is intact; the reasons otherwise (no seal, other mask
-    bytes). A store the interactive manager edited is unsealed by construction."""
+    for a sealed store that is intact; the reasons otherwise (a swap caught half way,
+    no seal, other mask bytes). A store the interactive manager edited is unsealed by
+    construction. :func:`store_seal_verdict` says which reasons refuse the store.
+
+    A swap marker beside a COMPLETE store — the seal names the npz bytes on disk and the
+    staging directory holds no half — is the one state a kill between the last rename and
+    the marker's removal leaves (`finalize_sam3_store` deletes the old seal FIRST, so a
+    sealed segmentation.json present with the marker can only be the new one): the swap
+    did complete; the marker is removed here, declared through ``log``, and the store is
+    intact. Any other state under the marker is refused."""
     from repro import sha256_file
     out = Path(output_dir)
+    marker = out / SAM3_SWAP_MARKER
     p = out / "segmentation.json"
+    npz = out / "seg_masks.npz"
+    if marker.exists():
+        staging = out / SAM3_STAGING_DIRNAME
+        complete = (p.is_file() and npz.is_file()
+                    and not (staging / "seg_masks.npz").exists()
+                    and not (staging / "segmentation.json").exists())
+        if complete:
+            try:
+                st = (json.loads(p.read_text()) or {}).get("stamp")
+            except ValueError:
+                st = None
+            want = (st.get("inputs") or {}).get("seg_masks.npz") if isinstance(st, dict) else None
+            complete = bool(want) and want == sha256_file(npz)
+        if not complete:
+            return [f"a SAM3 store swap did not complete ({marker.name} is present: the npz and "
+                    f"segmentation.json on disk may be halves of two runs) — re-run the SAM3 stage"]
+        marker.unlink()
+        if log is not None:
+            log(f"DECLARED: {marker.name} was left by a swap that had completed (the seal names "
+                f"the mask bytes on disk, nothing is staged) — marker removed, the store is intact")
     if not p.exists():
         return ["no segmentation.json"]
-    doc = json.loads(p.read_text())
-    st = doc.get("stamp")
+    if not npz.exists():
+        return ["seg_masks.npz is missing"]
+    try:
+        doc = json.loads(p.read_text())
+    except ValueError as e:
+        return [f"segmentation.json is unreadable ({e})"]
+    st = doc.get("stamp") if isinstance(doc, dict) else None
     if not isinstance(st, dict) or "sha256" not in st:
         return ["segmentation.json carries no seal (a store written before 2026-10-08, or "
                 "edited by the interactive manager)"]
     want = (st.get("inputs") or {}).get("seg_masks.npz")
-    npz = out / "seg_masks.npz"
-    if not npz.exists():
-        return ["seg_masks.npz is missing"]
     have = sha256_file(npz)
     if want != have:
         return [f"seg_masks.npz changed since it was sealed ({str(want)[:12]} -> {have[:12]})"]
     return []
+
+
+def store_seal_verdict(output_dir, log=None) -> Tuple[List[str], List[str]]:
+    """(fatal, declared) over :func:`check_store_seal`'s reasons: ``fatal`` names what makes
+    the store unusable — a swap that did not complete, a missing half, an unreadable seal,
+    a seal naming other mask bytes (:data:`STORE_SEAL_FATAL`) — and a reader REFUSES the
+    store on any of them; ``declared`` is the one reason that is not a broken seal: no seal
+    at all (the interactive manager's upsert, a store written before the seal existed),
+    which the reader records and projects as it is."""
+    reasons = check_store_seal(output_dir, log=log)
+    fatal = [r for r in reasons if any(k in r for k in STORE_SEAL_FATAL)]
+    return fatal, [r for r in reasons if r not in fatal]
 
 
 def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
@@ -683,6 +855,67 @@ def _prepare_valid_frames(frames_dir: Path, frame_stride: int = 1,
 #  BATCHED SAM3 PROCESSING
 # ═══════════════════════════════════════════════════════════════════
 
+# SAM3 phases where nothing has been propagated yet (sam3_wrapper.process_batch's `phase`)
+_SAM3_PROMPT_PHASES = ("start_session", "add_prompt")
+
+
+def _plan_oom_continuation(b_start: int, b_end: int, frontier: Optional[int], n_done: int,
+                           batch_overlap: int, phase: str, prompt_retried: bool) -> dict:
+    """What the batch loop does after CUDA ran out of memory in the batch [b_start, b_end)
+    (USER 2026-10-09: "no debe nunca fallar por colapso del GPU" — it replaces points 90 / 92's
+    "an OOM fails the stage"). ``n_done`` leading frames were completed before the stop;
+    ``frontier`` is where the frames already kept end (the previous kept batch's end, None
+    before the first), so the batch's first ``L = frontier − b_start`` frames are an overlap
+    already held. Positions are category-local. Returns ``{"action", "kept", "continuation",
+    "overlap", "leading_overlap", "progress"}`` with action:
+
+    * ``continue`` — progress past the overlap (n_done > L): frames b_start … b_start+n_done−1
+      are kept and the rest of the batch is propagated again in a FRESH session from
+      (stop − overlap), linked to the kept frames by the same overlap rule as any two
+      batches. The overlap is ``batch_overlap``, but never as long as the session that just
+      stopped: a session started where this one did replays it to the same stop (same card,
+      exclusive GPU), so it is at most n_done − 1 — the longest that still lets the measured
+      capacity reach past the stop.
+    * ``complete`` — the stop came after the batch's last frame: all of it is kept.
+    * ``reduce`` — no progress past the overlap (n_done ≤ L): nothing new is kept and the
+      same remainder is propagated again from (frontier − overlap) with the overlap REDUCED
+      to n_done − 1 (strictly shorter, down to 0: a fresh session from the frontier itself,
+      linked by nothing — the objects of that seam get fresh ids, declared). This is the
+      progress guarantee: every step keeps frames or shortens the overlap.
+    * ``retry_prompt`` — the out-of-memory came before any frame (start_session / add_prompt):
+      the memory was freed and the batch runs ONCE more in a fresh session.
+    * ``fail`` — a session that cannot complete even ONE frame on the card (overlap already
+      0 and nothing done), or a second out-of-memory before any frame of the same batch:
+      physically impossible on this card, the one out-of-memory that fails the stage.
+    """
+    lead = max(0, int(frontier) - int(b_start)) if frontier is not None else 0
+    out = {"action": None, "kept": None, "continuation": None, "overlap": None,
+           "leading_overlap": lead, "progress": False}
+    if phase in _SAM3_PROMPT_PHASES:
+        if prompt_retried:
+            out["action"] = "fail"
+        else:
+            out.update(action="retry_prompt", continuation=(int(b_start), int(b_end)),
+                       overlap=lead)
+        return out
+    n_done = int(n_done)
+    if n_done > lead:
+        stop = int(b_start) + n_done
+        out.update(progress=True, kept=(int(b_start), min(stop, int(b_end))))
+        if stop >= int(b_end):
+            out["action"] = "complete"
+            return out
+        ov = max(0, min(int(batch_overlap), n_done - 1))
+        out.update(action="continue", continuation=(stop - ov, int(b_end)), overlap=ov)
+        return out
+    if lead == 0:
+        out["action"] = "fail"
+        return out
+    ov = max(0, n_done - 1)
+    out.update(action="reduce", continuation=(int(frontier) - ov, int(b_end)), overlap=ov)
+    return out
+
+
 def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List[str],
                       batch_size: int, batch_overlap: int,
                       iou_threshold: float, mask_dedupe_iou: float,
@@ -693,9 +926,11 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                       prompt_status: dict = None,
                       fallback_prompts: dict = None,
                       session_output_dir: Path = None,
-                      timing: dict = None):
+                      timing: dict = None,
+                      id_offset_start: int = 0):
     """
     Process frames in overlapping batches, one category at a time.
+    ``id_offset_start``: the ids of this run start above it (a round appending to a store).
 
     ``output_dir`` is where the store is WRITTEN (the staging directory of
     docs/plan_determinismo.md point 83); ``session_output_dir`` the session's
@@ -721,7 +956,10 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
     ``prompt_status`` (optional, filled in place): per category ``ran`` (with
     the objects / frames it produced and its seconds), ``skipped`` (no frames
     to run on) or ``failed`` (+ reason). A :class:`SAM3ConfigError` is never a
-    per-category failure: it is re-raised and fails the run.
+    per-category failure: it is re-raised and fails the run. A propagation that STOPPED
+    midway — the vendor tracker's stop or CUDA out of memory (USER 2026-10-09: never a
+    failure) — is continued and the prompt still ``ran``; each continuation is an entry
+    of its ``identity_decisions`` (``vendor_stop_continuation`` / ``oom_continuation``).
 
     Returns:
         (all_masks, obj_labels, seg_meta)
@@ -731,7 +969,7 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         - seg_meta: what the last save wrote (segmentation.json), None when
           nothing was saved
     """
-    from segmentation.sam3_wrapper import SAM3ConfigError, get_sam3_wrapper
+    from segmentation.sam3_wrapper import SAM3ConfigError
     import time as _time
 
     persist = output_dir is not None and cfg is not None
@@ -771,7 +1009,7 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         except Exception as e:
             print(f"[VRAM] {label}: error reading - {e}")
     
-    sam3 = get_sam3_wrapper()
+    sam3 = _sam3_wrapper(cfg)                   # built on the job's configuration (point 112)
     # Start clean: a previous run that crashed mid-way leaves its reused session
     # and symlink dirs behind (both are released on the normal path below).
     sam3.release_batch_session()
@@ -780,7 +1018,7 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
     # Master state across all categories
     all_masks = {}  # orig_frame_idx -> {global_obj_id: mask}
     obj_labels = {}  # global_obj_id -> category_label
-    global_id_offset = 0  # Offset to remap IDs between categories
+    global_id_offset = int(id_offset_start)  # Offset to remap IDs between categories
     
     for cat_idx, category in enumerate(categories):
         print(f"\n[SegPipeline] === Category {cat_idx+1}/{len(categories)}: '{category}' ===")
@@ -884,22 +1122,35 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         def _process_category(category, batches, frames_dir, frame_files, sam3,
                               batch_size, batch_overlap, iou_threshold,
                               mask_dedupe_iou, boxes_by_pos=None):
-            """Process all batches for a single category. Raises on OOM.
+            """Process all batches for a single category. A CUDA out-of-memory is continued,
+            never a failure (USER 2026-10-09) — only a session that cannot complete even one
+            frame on the card raises (SAM3OutOfMemory); any other SAM3 error raises.
             boxes_by_pos: {category-local frame position: [xywh boxes]} from the
             Phase 1 auto-prompter — seeded into SAM3 alongside the text prompt."""
-            from segmentation.sam3_wrapper import SAM3PropagationStopped
+            from segmentation.sam3_wrapper import (SAM3OutOfMemory, SAM3PropagationStopped,
+                                                   STOP_OUT_OF_MEMORY)
             batch_step = batch_size - batch_overlap
             cat_masks = {}
             next_global_id = 1
             prev_batch_masks = None
             prev_overlap_start = None
             prev_end = None
-            # the work list grows by a CONTINUATION batch when the vendor tracker stops midway
+            # where the frames already KEPT end (a batch with no masks included) — the
+            # out-of-memory continuation measures its progress against it
+            frontier = None
+            prompt_retried = set()           # batches re-run once after an OOM before any frame
+            # the work list grows by a CONTINUATION batch when the propagation stops midway
             # (SAM3PropagationStopped): the frames it completed are kept and the rest of the
             # batch is propagated again from (stop − overlap), linked by the same overlap rule
-            # as any two batches — deterministic, since the stop is (measured on pccr 'pipe')
+            # as any two batches. Two causes: the vendor tracker's own stop (deterministic,
+            # measured on pccr 'pipe', USER 2026-10-08 point 92) and CUDA running out of memory
+            # (USER 2026-10-09: "no debe nunca fallar por colapso del GPU" — pccr's 'tile', one
+            # session grew 8 → 77.7 GB with every floor tile an object). The out-of-memory stop
+            # depends on the card's memory: the same card with the GPU exclusive stops at the
+            # same frame, and every continuation is declared in the census (oom_continuation)
             work = list(batches)
             wi = 0
+            vendor_stopped = False     # after the vendor's stop: frames handed back one by one
             while wi < len(work):
                 batch_idx = wi
                 b_start, b_end = work[wi]
@@ -929,24 +1180,151 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                         raw_results = sam3.process_batch(
                             str(batch_dir), category, index_mapping,
                             boxes_by_local=batch_boxes or None,
+                            **({"per_frame_output": True} if vendor_stopped else {}),
                         )
                     except SAM3PropagationStopped as stop:
                         n_done = int(stop.frames_done)
-                        if n_done <= batch_overlap:
-                            # no progress past the overlap: a continuation would start where
-                            # this one did — the prompt fails (point 92)
-                            raise
-                        raw_results = stop.partial
-                        b_end = b_start + n_done
-                        work.insert(wi, (b_end - batch_overlap, work[wi - 1][1]))
-                        work[wi - 1] = (b_start, b_end)
-                        decisions.append({"kind": "vendor_stop_continuation", "category": category,
-                                          "batch": [int(b_start), int(work[wi][1])],
-                                          "frames_done": n_done,
-                                          "continuation": [int(work[wi][0]), int(work[wi][1])]})
-                        print(f"[SegPipeline]   ⤷ the vendor tracker stopped after {n_done} frame(s) "
-                              f"({b_start}–{b_end - 1} kept); the rest is propagated again from "
-                              f"{work[wi][0]} (overlap {batch_overlap}) — declared in the census")
+                        if getattr(stop, "cause", None) == STOP_OUT_OF_MEMORY:
+                            # CUDA OUT OF MEMORY — continued, never a failure (USER
+                            # 2026-10-09); the plan and its progress guarantee are
+                            # _plan_oom_continuation's
+                            plan = _plan_oom_continuation(
+                                b_start, b_end, frontier, n_done, batch_overlap,
+                                getattr(stop, "phase", "propagate_in_video"),
+                                (b_start, b_end) in prompt_retried)
+                            mem = getattr(stop, "memory", None) or {}
+                            at = mem.get("at_stop") or {}
+                            after = mem.get("after_release") or {}
+                            card = {"total_mib": at.get("total_mib", after.get("total_mib")),
+                                    "free_mib_at_stop": at.get("free_mib"),
+                                    "free_mib_after_release": after.get("free_mib")}
+                            if plan["action"] == "fail":
+                                if stop.phase in _SAM3_PROMPT_PHASES:
+                                    pos = b_start + int(getattr(stop, "prompt_frame", None) or 0)
+                                    what = (f"its {stop.phase} ran out of CUDA memory twice, each "
+                                            f"time in a fresh session with the memory freed")
+                                else:
+                                    pos = b_start
+                                    what = ("a fresh session ran out of CUDA memory before "
+                                            "completing its first frame, with no overlap left "
+                                            "to shorten")
+                                    if int(getattr(stop, "frames_propagated", 0) or 0):
+                                        what += (f" (it propagated {stop.frames_propagated} "
+                                                 f"frame(s) from its prompt frame "
+                                                 f"{stop.prompt_frame} — box seeds — but none "
+                                                 f"from its first: not a leading run a "
+                                                 f"continuation can start after)")
+                                fname = frame_files[pos] if 0 <= pos < len(frame_files) else "?"
+                                raise SAM3OutOfMemory(
+                                    f"SAM3 cannot complete even ONE frame of prompt "
+                                    f"'{category}' on this card at category frame {pos} "
+                                    f"({fname}): {what}; card total {card['total_mib']} MiB, "
+                                    f"free {card['free_mib_at_stop']} MiB at the stop and "
+                                    f"{card['free_mib_after_release']} MiB after the release "
+                                    f"— physically impossible on this card, the one "
+                                    f"out-of-memory that fails the stage (USER 2026-10-09). "
+                                    f"[{stop}]") from stop
+                            cont = plan["continuation"]
+                            rec = {"kind": "oom_continuation", "category": category,
+                                   "phase": stop.phase,
+                                   "batch": [int(b_start), int(b_end)],
+                                   "frames_done": n_done,
+                                   "leading_overlap": int(plan["leading_overlap"]),
+                                   "progress": bool(plan["progress"]),
+                                   "kept": list(plan["kept"]) if plan["kept"] else None,
+                                   "continuation": [int(cont[0]), int(cont[1])] if cont else None,
+                                   "overlap": plan["overlap"],
+                                   "action": plan["action"],
+                                   "card_memory": card}
+                            if cont and plan["overlap"] == 0 and plan["action"] != "retry_prompt":
+                                rec["seam"] = ("linked by nothing: the continuation starts at "
+                                               "the stop itself, the objects of this seam get "
+                                               "fresh ids")
+                            decisions.append(rec)
+                            mem_txt = (f"card: free {card['free_mib_at_stop']} of "
+                                       f"{card['total_mib']} MiB at the stop, "
+                                       f"{card['free_mib_after_release']} MiB after the release")
+                            if plan["action"] in ("retry_prompt", "reduce"):
+                                if plan["action"] == "retry_prompt":
+                                    prompt_retried.add((b_start, b_end))
+                                    print(f"[SegPipeline]   ⤷ CUDA out of memory in {stop.phase} "
+                                          f"(no frame propagated, {mem_txt}); the batch "
+                                          f"{b_start}–{b_end - 1} runs once more in a fresh "
+                                          f"session — declared in the census (oom_continuation)")
+                                else:
+                                    print(f"[SegPipeline]   ⤷ CUDA out of memory after {n_done} "
+                                          f"frame(s), no progress past the {plan['leading_overlap']}"
+                                          f"-frame overlap ({mem_txt}); propagated again from "
+                                          f"{cont[0]} with the overlap reduced to "
+                                          f"{plan['overlap']}"
+                                          + (" — linked by nothing, fresh ids at this seam"
+                                             if plan["overlap"] == 0 else "")
+                                          + " — declared in the census (oom_continuation)")
+                                work[wi - 1] = (int(cont[0]), int(cont[1]))
+                                wi -= 1
+                                continue
+                            raw_results = stop.partial
+                            b_end = int(plan["kept"][1])
+                            if plan["action"] == "continue":
+                                work.insert(wi, (int(cont[0]), int(cont[1])))
+                                work[wi - 1] = (b_start, b_end)
+                                print(f"[SegPipeline]   ⤷ CUDA out of memory after {n_done} "
+                                      f"frame(s) ({b_start}–{b_end - 1} kept, {mem_txt}); the "
+                                      f"rest is propagated again from {cont[0]} (overlap "
+                                      f"{plan['overlap']}) in a fresh session — the stop "
+                                      f"depends on the card's memory (same card, exclusive "
+                                      f"GPU = same stop); declared in the census "
+                                      f"(oom_continuation)")
+                            else:
+                                print(f"[SegPipeline]   ⤷ CUDA out of memory after the batch's "
+                                      f"last frame ({b_start}–{b_end - 1} all kept, {mem_txt}) "
+                                      f"— declared in the census (oom_continuation)")
+                        else:
+                            # THE VENDOR TRACKER'S STOP never fails the prompt (USER 2026-10-09:
+                            # "no quiero más fallas"): every continuation makes progress.
+                            #   progress past the frames already kept → the rest again from
+                            #     (stop − overlap), linked by the overlap as any two batches;
+                            #   no progress (it stopped where the previous one did) → the rest
+                            #     from the STOP frame itself in a fresh session, overlap 0 (the
+                            #     objects of that seam get fresh ids);
+                            #   not even the first frame → that ONE frame has no mask of this
+                            #     prompt, the rest from the next frame.
+                            # Each case is declared in the census (identity_decisions).
+                            vendor_stopped = True
+                            orig_end = work[wi - 1][1]
+                            stop_at = b_start + n_done
+                            if n_done == 0:
+                                raw_results = {}
+                                b_end = b_start + 1
+                                cont, ov, kind = (b_end, orig_end), 0, "vendor_stop_frame_skipped"
+                            elif frontier is not None and stop_at <= frontier:
+                                raw_results = stop.partial
+                                b_end = stop_at
+                                cont, ov, kind = (stop_at, orig_end), 0, "vendor_stop_fresh_session"
+                            else:
+                                raw_results = stop.partial
+                                b_end = stop_at
+                                ov = min(batch_overlap, n_done)
+                                cont, kind = (stop_at - ov, orig_end), "vendor_stop_continuation"
+                            work[wi - 1] = (b_start, b_end)
+                            if cont[0] < cont[1]:
+                                work.insert(wi, (int(cont[0]), int(cont[1])))
+                            decisions.append({"kind": kind, "category": category,
+                                              "batch": [int(b_start), int(orig_end)],
+                                              "frames_done": n_done, "overlap": int(ov),
+                                              "continuation": ([int(cont[0]), int(cont[1])]
+                                                               if cont[0] < cont[1] else None)})
+                            print(f"[SegPipeline]   ⤷ the vendor tracker stopped after {n_done} "
+                                  f"frame(s) at frame {stop_at}"
+                                  + (f" — frame {b_start} gets no mask of this prompt"
+                                     if n_done == 0 else f" ({b_start}–{b_end - 1} kept)")
+                                  + (f"; the rest from {cont[0]} (overlap {ov}"
+                                     + (", a fresh session: new ids at this seam" if ov == 0 else "")
+                                     + ")" if cont[0] < cont[1] else "")
+                                  + f" — declared in the census ({kind})")
+
+                    # these frames are KEPT (masks or none): the frontier moves to their end
+                    frontier = b_end if frontier is None else max(frontier, b_end)
 
                     if not raw_results:
                         print(f"[SegPipeline] Batch {batch_idx}: no masks produced")
@@ -995,7 +1373,7 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                     for orig_idx, frame_masks in batch_masks.items():
                         remapped = {}
                         for local_id, mask in frame_masks.items():
-                            global_id = id_remap.get(local_id, local_id)
+                            global_id = id_remap[local_id]
                             remapped[global_id] = mask
                         cat_masks[orig_idx] = {**cat_masks.get(orig_idx, {}), **remapped}
                         remapped_batch[orig_idx] = remapped
@@ -1019,13 +1397,18 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
             return cat_masks
         
         # ── Run the category. ANY SAM3 error FAILS THE RUN (docs/plan_determinismo.md
-        # point 92, 2026-10-08): `sam3_wrapper.process_batch` raises SAM3RunError /
-        # SAM3OutOfMemory and they propagate — no one-OOM retry, no "failed twice,
-        # skipping", no prompt recorded as failed while the others go on. A run
-        # delivers every prompt or nothing (the staging store is discarded by the
-        # caller, the previous store stays as it was). A SAM3ConfigError
-        # (models.segmentation.sam3_thresholds, a vendor rename) is the same: the
-        # prompt's status names it before the error leaves.
+        # point 92, 2026-10-08): `sam3_wrapper.process_batch` raises SAM3RunError and it
+        # propagates — no "failed twice, skipping", no prompt recorded as failed while the
+        # others go on. A run delivers every prompt or nothing (the staging store is
+        # discarded by the caller, the previous store stays as it was). A SAM3ConfigError
+        # (models.segmentation.sam3_thresholds, a vendor rename) is the same: the prompt's
+        # status names it before the error leaves. TWO STOPS ARE NOT ERRORS and are
+        # continued inside _process_category, every frame kept, every object linked by the
+        # overlap rule, nothing skipped or dropped: the vendor tracker's midway stop (USER
+        # 2026-10-08) and CUDA running out of memory (USER 2026-10-09: "no debe nunca fallar
+        # por colapso del GPU" — it replaces point 92's "an OOM fails, no retry"). The only
+        # out-of-memory that still fails is SAM3OutOfMemory: a session that cannot complete
+        # even one frame on the card.
         cat_masks = {}
         t_cat = _time.time()
         decisions: list = []                 # the identity decisions of this prompt (point 93)
@@ -1415,8 +1798,13 @@ def _match_ids_iou(prev_masks: Dict[int, Dict[int, np.ndarray]],
         used_curr.add(cid)
         print(f"[SegPipeline] IoU: obj {cid} → global {pid} (median IoU={iou_val:.3f})")
 
-    # Unmatched current objects get new global IDs
-    for cid in curr_obj_ids:
+    # Every unmatched object of the batch gets a new global id — the ones the overlap
+    # frames never show included: a raw per-session SAM3 id must never reach the
+    # category's id space, where it would fuse with the object holding that number
+    all_curr_ids = set()
+    for fm in curr_masks.values():
+        all_curr_ids.update(fm.keys())
+    for cid in sorted(all_curr_ids):
         if cid not in id_remap:
             id_remap[cid] = next_global_id
             print(f"[SegPipeline] IoU: obj {cid} → NEW global {next_global_id}")
@@ -1706,8 +2094,7 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
     # THE MODEL that drew these masks (points 91 / 165): version, checkpoint path + sha256,
     # device, dtype, numerics, builder args, thresholds — the wrapper's record of the model
     # it built (None when the wrapper built none, e.g. a test double: recorded as such)
-    from segmentation.sam3_wrapper import get_sam3_wrapper
-    segmentation["sam3_model"] = getattr(get_sam3_wrapper(), "model_record", None)
+    segmentation["sam3_model"] = getattr(_sam3_wrapper(cfg), "model_record", None)
 
     atomic_write_json(seg_path, segmentation, indent=2)
     print(f"[SegPipeline] ✅ Saved metadata: {seg_path.name} "
@@ -1952,7 +2339,115 @@ def _vertical_plane_yaws(points_xyz: np.ndarray, vcfg: dict) -> list:
     return yaws
 
 
-def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
+#: resamples of the footprint bootstrap: the floor's own (correction.floor.N_BOOT_FLOOR, the
+#: resolution of decide_change's interval) — one construction, one number, read from there
+#: the extreme values of a rotated axis that can be a resample's maximum (or minimum): the
+#: k-th largest survives a Poisson(1) resample with probability 1 − e⁻¹ each, so the chance
+#: that ALL of the T largest are dropped is e⁻ᵀ — at T = 64, 1.6e-28 (never in the life of
+#: the pipeline); below that the resample's extent is EXACTLY the full resample's
+FOOTPRINT_EXTREMES = 64
+
+
+def _footprint_identity(points_xz: np.ndarray) -> Tuple[np.ndarray, str]:
+    """(the stable key of every point, the sha256 of the sorted keys) — the identity of the
+    point SET a footprint is bootstrapped over (point 109: 'muestra por clave estable de cada
+    punto'). Computed ONCE per OBB (`_compute_obb`), not per candidate yaw: it does not
+    depend on the yaw, and hashing and sorting the keys of a floor's millions of points
+    once per candidate was most of the cost."""
+    from repro import sha256_bytes
+    P = np.asarray(points_xz, np.float64)
+    P3 = np.c_[P[:, 0], np.zeros(len(P)), P[:, 1]]
+    keys = _stable_point_keys(P3)
+    return keys, sha256_bytes(np.sort(keys).tobytes())
+
+
+def _footprint_seed(identity_digest: str, yaw: float) -> int:
+    """The bootstrap seed of a candidate's footprint — DERIVED from the points (the digest of
+    their sorted stable keys: the same set of points, in any order, gives one seed) and the
+    yaw, never drawn (repro.stable_id, as correction.floor._chunk_seed)."""
+    from repro import exact_float, stable_id
+    return int(stable_id("obb_footprint_bootstrap", str(identity_digest), exact_float(yaw),
+                         n_hex=8), 16)
+
+
+def _extreme_indices(v: np.ndarray, keys: np.ndarray, T: int, largest: bool) -> np.ndarray:
+    """The indices of the ``T`` largest (or smallest) values of ``v``, ordered from the most
+    extreme inward, ties by the points' stable KEY — a function of the point SET, never of
+    its order: an argpartition picks arbitrarily among ties at the T-th value, so the exact
+    set is 'every value strictly beyond the T-th, then the ties at it in key order'."""
+    n = len(v)
+    s = -v if largest else v
+    if n <= T:
+        idx = np.arange(n)
+    else:
+        part = np.argpartition(s, T - 1)[:T]
+        vT = s[part].max()
+        strict = np.flatnonzero(s < vT)
+        ties = np.flatnonzero(s == vT)
+        ties = ties[np.argsort(keys[ties], kind="stable")][: T - len(strict)]
+        idx = np.concatenate([strict, ties])
+    return idx[np.lexsort((keys[idx], s[idx]))]
+
+
+def _footprint_error(points_xz: np.ndarray, yaw: float, n_boot: Optional[int] = None,
+                     identity: Optional[Tuple[np.ndarray, str]] = None
+                     ) -> Tuple[float, int, int]:
+    """(σ of the footprint area at ``yaw`` in m², n_boot, seed): the MEASURED sampling error
+    of the footprint, by a Poisson bootstrap over the instance's points (weights ~ Poisson(1),
+    seeded — the construction of correction.floor._bootstrap_plane, point 109). The footprint
+    at a yaw is (max − min) of the rotated x times (max − min) of the rotated z, so a
+    resample's area depends only on which of each axis's EXTREME values it kept: the weights
+    are drawn for the ``FOOTPRINT_EXTREMES`` largest and smallest values of each axis (the
+    union of those points, one weight per point), which is the full resample's area exactly
+    (see the constant). σ = the sample standard deviation over the resamples.
+
+    A FUNCTION OF THE POINT SET: the candidates are ordered by their stable key, so the k-th
+    draw lands on the same point whatever order the instance's points arrive in (an epoch
+    replay, a store rebuilt from indices, a merge concatenating in another order) — measured
+    on 4000 points, an index order gave σ 0.0061999 vs 0.0061671 on the permuted set. ALL the
+    resamples are drawn as one (n_boot × candidates) matrix: a point is kept by a resample iff
+    its Poisson(1) weight is ≥ 1, i.e. its uniform ≥ e⁻¹ — the first step of
+    correction.floor._poisson1_weights, on the same seeded stream; per axis the first kept
+    entry of the ordered extremes is the resample's extreme (argmax over the kept flags), so
+    no Python loop runs over the resamples (it cost 0.65 s per candidate, × 3–5 candidates ×
+    4 OBB passes per instance per projection — USER 2026-10-08: every step as fast as possible).
+    ``identity``: :func:`_footprint_identity` of the points, computed once by the caller."""
+    from correction.floor import N_BOOT_FLOOR, _POISSON1_CDF
+    n_boot = int(N_BOOT_FLOOR if n_boot is None else n_boot)
+    P = np.asarray(points_xz, np.float64)
+    n = len(P)
+    keys, digest = identity if identity is not None else _footprint_identity(P)
+    if len(keys) != n:
+        raise ValueError(f"_footprint_error: an identity of {len(keys)} keys for {n} points")
+    seed = _footprint_seed(digest, float(yaw))
+    if n < 4:
+        return float("inf"), n_boot, seed
+    c, s_ = np.cos(-float(yaw)), np.sin(-float(yaw))
+    r = P @ np.array([[c, -s_], [s_, c]]).T                      # the rotated frame
+    T = min(int(FOOTPRINT_EXTREMES), n)
+    order = {ax: (_extreme_indices(r[:, ax], keys, T, True),       # descending maxima
+                  _extreme_indices(r[:, ax], keys, T, False))     # ascending minima
+             for ax in (0, 1)}
+    cand = np.unique(np.concatenate([np.concatenate(order[0]), np.concatenate(order[1])]))
+    cand = cand[np.lexsort((cand, keys[cand]))]                    # by stable key
+    pos = np.full(n, -1, np.int64)
+    pos[cand] = np.arange(len(cand))
+    rng = np.random.default_rng(seed)
+    kept = rng.random((n_boot, len(cand))) >= _POISSON1_CDF[0]    # weight ≥ 1 ⇔ u ≥ e⁻¹
+    full_ext = r.max(0) - r.min(0)
+    ext = np.empty((n_boot, 2))
+    for ax in (0, 1):
+        hi_o, lo_o = order[ax]
+        kh, kl = kept[:, pos[hi_o]], kept[:, pos[lo_o]]
+        hi = r[hi_o[np.argmax(kh, axis=1)], ax]
+        lo = r[lo_o[np.argmax(kl, axis=1)], ax]
+        # every extreme dropped (probability e⁻ᵀ): the full extent stands in
+        ext[:, ax] = np.where(kh.any(axis=1) & kl.any(axis=1), hi - lo, full_ext[ax])
+    areas = ext[:, 0] * ext[:, 1]
+    return float(np.std(areas, ddof=1)) if n_boot > 1 else 0.0, n_boot, seed
+
+
+def _compute_obb(points_xyz: np.ndarray, face_normals=None, cfg: Optional[dict] = None) -> dict:
     """Compute minimum Oriented Bounding Box for floor-aligned coordinates.
 
     If face_normals is provided (list of (normal, n_points) tuples from RANSAC),
@@ -1962,12 +2457,16 @@ def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
 
     THE YAW (docs/plan_determinismo.md points 109 / 143, DECIDIDO): every
     candidate yaw is folded into [0, π/2); among the candidates whose footprint
-    lies within ``factor`` × its MEASURED error of the minimum — the error
-    propagated from the inlier band ``dist_m`` (the cloud's surface noise): a
-    box of extents (ex, ez) measured to ±dist has δA = dist·(ex + ez) — the
-    DOMINANT plane (most support) wins, the user's "coplanar con el plano
-    dominante"; the record carries every candidate with its margin. THE EXTENT
-    (point 145): the core points by :func:`_obb_core_points`, or every point.
+    lies within ``factor`` × its MEASURED error of the minimum — the error of
+    the footprint area by a seeded Poisson bootstrap over the instance's points
+    (:func:`_footprint_error`; it used to be the configuration band
+    dist_m × (ex + ez), a bound, not a measurement) — the DOMINANT plane (most
+    support) wins, the user's "coplanar con el plano dominante"; the record
+    carries every candidate with its margin, its error, the bootstrap's size and
+    seed. THE EXTENT (point 145): the core points by :func:`_obb_core_points`,
+    or every point. ``cfg`` is the configuration the caller runs with (the
+    projection's frozen one — point 112; the certification calls this same
+    function, point 143); None reads the server's config.yaml.
     """
     points_xyz = np.asarray(points_xyz, np.float64)
     if len(points_xyz) < 4:
@@ -1981,7 +2480,10 @@ def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
     # The EXTENT is taken from where the points concentrate, not from the two
     # most extreme ones — see _obb_core_points. Everything below reads
     # points_xyz, so the substitution is the whole change.
-    from config import cfg as _server_cfg
+    if cfg is None:
+        from config import cfg as _server_cfg
+    else:
+        _server_cfg = cfg
     factor = _decision_params(_server_cfg)[0]
     _ocfg = ((_server_cfg.get("segmentation", {}) or {}).get("obb_core", {}) or {})
     _all = points_xyz
@@ -2020,16 +2522,17 @@ def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
         return r.max(axis=0) - r.min(axis=0)
 
     yaw_rec = {"rule": "dominant plane among footprints within factor x error of the minimum "
-                       "(points 109 / 143)", "candidates": [], "chosen": None}
+                       "(points 109 / 143); error = sigma of the footprint area by a seeded "
+                       "Poisson bootstrap over the points (correction.floor's construction)",
+               "candidates": [], "chosen": None}
     if cands:
-        if "dist_m" not in _vcfg:
-            raise KeyError("config.yaml segmentation.obb_orientation.dist_m is needed to judge "
-                           "the footprint of the OBB candidates")
-        dist = float(_vcfg["dist_m"])
         rows = []
+        identity = _footprint_identity(pts_xz)          # once per box, not per candidate
         for yaw, support in cands:
             e = _extents(yaw)
-            rows.append((float(yaw), int(support), float(e[0] * e[1]), float(dist * (e[0] + e[1]))))
+            err, n_boot, seed = _footprint_error(pts_xz, float(yaw), identity=identity)
+            rows.append((float(yaw), int(support), float(e[0] * e[1]), float(err), int(n_boot),
+                         int(seed)))
         a_min = min(r[2] for r in rows)
         err_min = next(r[3] for r in rows if r[2] == a_min)
         tied = [r for r in rows if r[2] - a_min <= factor * err_min]
@@ -2040,10 +2543,12 @@ def _compute_obb(points_xyz: np.ndarray, face_normals=None) -> dict:
         for r in sorted(rows, key=lambda r: (r[2], -r[1], r[0])):
             yaw_rec["candidates"].append({"yaw_deg": float(np.degrees(r[0])), "support": r[1],
                                           "footprint_m2": r[2], "footprint_error_m2": r[3],
+                                          "error_n_boot": r[4], "error_seed": r[5],
                                           "margin_m2": r[2] - a_min,
                                           "tied_with_minimum": bool(r[2] - a_min <= factor * err_min)})
         yaw_rec["chosen"] = {"yaw_deg": float(np.degrees(best_angle)), "support": chosen[1],
-                             "footprint_m2": chosen[2], "n_tied": len(tied)}
+                             "footprint_m2": chosen[2], "footprint_error_m2": err_min,
+                             "error_factor": float(factor), "n_tied": len(tied)}
     else:
         # Fallback: convex hull + rotating calipers
         try:
@@ -2145,9 +2650,10 @@ def _find_nearest_keyframe(frame_idx: int, keyframes: list, max_dist: int = 5) -
 
 
 def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
-                             obj_id: int) -> tuple:
+                             obj_id: int, cfg: Optional[dict] = None) -> tuple:
     """
     Clean a segmented sub-cloud using voxel grid + local PCA + depth peeling.
+    ``cfg``: the job's configuration (point 112); None reads the server's config.yaml.
     
     Pipeline:
       1. DBSCAN → keep largest cluster (remove satellite misattributions)
@@ -2167,13 +2673,13 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
         Tuple of (filtered_indices, voxel_data) where voxel_data is a list of
         [cx, cy, cz, nx, ny, nz] for each planar voxel
     """
-    from config import get_param
-    
+    # the job's configuration when the projection hands it (point 112), else the server's
     cfg_prefix = 'models.segmentation.segment_cleaning'
+    get_param = lambda path, default: _cfg_get(cfg, path, default)   # noqa: E731
     enabled = get_param(f'{cfg_prefix}.enabled', True)
     if not enabled:
         return indices, [], [], [], np.array([], dtype=np.int32)
-    
+
     voxel_size = get_param(f'{cfg_prefix}.voxel_size', 0.05)
     min_pts_voxel = get_param(f'{cfg_prefix}.min_points_per_voxel', 10)
     planarity_thresh = get_param(f'{cfg_prefix}.planarity_threshold', 0.3)
@@ -3329,7 +3835,89 @@ def _area_variation_by_oid(areas: Dict[int, Dict[int, float]]) -> Dict[int, floa
     return out
 
 
-def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
+def _floor_seal_status(output_dir: Path, ply_path: Path) -> Tuple[bool, str]:
+    """May ``floor_transform.npz`` be applied to the geometry being processed (docs/
+    plan_determinismo.md point 158)? Only when ``floor_level.json`` beside it carries the
+    SEAL its writer put there — main.py's explicit level_floor, the cloud stage's seeded
+    leveling — the reconstruction's identity and the sha256 of the cloud it levelled, and
+    both equal THIS reconstruction and THIS cloud; a seal that also names the npz's own
+    bytes (`floor_transform_sha256`, the cloud stage's) is held to them too. Returns
+    (sealed for this geometry, reason)."""
+    from correction.epoch import reconstruction_id_or_none
+    from repro import sha256_file
+    fl = output_dir / "floor_level.json"
+    if not fl.is_file():
+        return False, "no floor_level.json carries its seal"
+    try:
+        doc = json.loads(fl.read_text())
+    except ValueError as e:
+        return False, f"floor_level.json is unreadable ({e})"
+    st = doc.get("stamp") if isinstance(doc, dict) else None
+    if not isinstance(st, dict) or "reconstruction_id" not in st or "cloud_sha256" not in st:
+        return False, "floor_level.json carries no seal (levelled before 2026-10-08)"
+    rid = reconstruction_id_or_none(output_dir)
+    if rid is None:
+        return False, "the session has no reconstruction id (no Omega records) — no seal can match"
+    if st.get("reconstruction_id") != rid:
+        return False, (f"the seal names reconstruction {str(st.get('reconstruction_id'))[:12]}, "
+                       f"this one is {rid[:12]}")
+    have = sha256_file(ply_path)
+    if st.get("cloud_sha256") != have:
+        return False, (f"the seal names cloud {str(st.get('cloud_sha256'))[:12]}, "
+                       f"{ply_path.name} is {have[:12]}")
+    tp = output_dir / "floor_transform.npz"
+    if "floor_transform_sha256" in st and tp.is_file():
+        npz_have = sha256_file(tp)
+        if st.get("floor_transform_sha256") != npz_have:
+            return False, (f"the seal names a floor_transform.npz of {str(st.get('floor_transform_sha256'))[:12]}, "
+                           f"the one on disk is {npz_have[:12]} (rewritten after it was sealed)")
+    return True, f"sealed for this reconstruction ({rid[:12]}) and this cloud ({have[:12]})"
+
+
+def _display_transform(output_dir: Path, ply_path: Path, xyz: np.ndarray, log=print
+                       ) -> Tuple[float, np.ndarray, np.ndarray, str]:
+    """(s, R, t, source) — the display frame the projection works in (the viewer's).
+
+    PRECEDENCE: a saved floor_transform.npz wins — and it is applied ONLY when it carries
+    the seal of the geometry being processed (point 158: a stage reads floor_transform.npz
+    / floor_level.json only with the seal of its own reconstruction and cloud). A transform
+    on disk WITHOUT that seal — left by another cloud, by a writer that does not seal (the
+    alignment gizmo, a certification epoch's re-level, a session levelled before the seal
+    existed) — FAILS the stage naming the file: the viewer applies the npz to the cloud it
+    shows, so projecting in any other frame would put every OBB and scene_r.db off by the
+    leveling delta (the 2026-08-28 bug), and an input that cannot be verified never becomes
+    a default silently. The remedy is in the message (level the floor explicitly — it
+    seals —, or remove the file). With no npz: a baked orientation (`.orientation_applied`:
+    reconstruction/orient.py put +Y up and the floor at y=0 into the cloud itself) is the
+    identity; else the seeded leveling keyed by the cloud (point 110), the same function
+    the cloud stage runs and seals."""
+    s, R, t = 1.0, np.eye(3), np.zeros(3)
+    tp = output_dir / "floor_transform.npz"
+    if tp.exists():
+        ok, why = _floor_seal_status(output_dir, ply_path)
+        if not ok:
+            raise RuntimeError(
+                f"{tp} cannot be applied to the geometry being processed — {why} (point 158: a "
+                f"stage applies a floor transform only with the seal of the geometry it processes; "
+                f"the viewer shows the cloud through this file, so projecting without it would put "
+                f"every box in another frame). Level the floor explicitly (the action seals its "
+                f"result in floor_level.json) or remove the file, then run again")
+        data = np.load(tp)
+        s, R, t = float(data["s"]), np.asarray(data["R"], np.float64), np.asarray(data["t"], np.float64)
+        log(f"Floor alignment loaded from {tp.name} — {why}")
+        return s, R, t, f"floor_transform.npz ({why})"
+    if (output_dir / ".orientation_applied").exists():
+        log("Orientation baked from camera poses — display frame is identity")
+        return s, R, t, "identity (.orientation_applied)"
+    from alignment_manager import get_alignment_manager
+    s, R, t = get_alignment_manager().compute_leveling_from_points(xyz)
+    log("Floor alignment computed (no sealed transform, no baked orientation) — seeded, keyed "
+        "by the cloud")
+    return s, R, t, "computed (seeded leveling of the cloud)"
+
+
+def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
+                          cfg_source: Optional[str] = None, stage_dir=None) -> dict:
     """
     Core processing: match SAM3 masks against the PLY cloud — the mask→point
     assignment, the audit, the merges, the split, the attach, the OBBs, the
@@ -3340,21 +3928,54 @@ def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
     a previous result), the keyframe list, the poses, the session camera, the
     floor transform, the frozen configuration and this code. It starts from an
     empty result; every step is FATAL — a step that cannot run raises, names
-    itself, and no result is written (the caller deletes a stale one). The
+    itself, and no result is written (the caller deletes every product). The
     result carries its ``stamp`` (point 123) and every decision's margin
     (``decisions``).
+
+    ``cfg`` / ``cfg_source``: the configuration the projection runs with (the
+    caller's — the job's frozen one, point 112); None = `_projection_config`.
+    ``stage_dir``: where the per-point products (the store, the audit's marks and
+    report) are WRITTEN — the caller's staging directory, swapped into
+    ``output_dir`` at the end (point 122); ``output_dir`` itself when not given.
+    The class arrays go to ``output_dir`` before the octree is built (the
+    converter bakes them in from the cloud's directory).
 
     This is CPU-intensive. Called once after segmentation to produce
     segmentation_result.json. Use apply_segmentation_to_cloud() for cached loading.
     """
-    cfg, cfg_source = _projection_config(Path(output_dir))
+    if cfg is None:
+        cfg, cfg_source = _projection_config(Path(output_dir))
+    elif cfg_source is None:
+        cfg_source = "the configuration handed by the caller (the job's)"
     output_dir = Path(output_dir)
+    stage_dir = Path(stage_dir) if stage_dir is not None else output_dir
+    # where the configuration came from is LOGGED, never written: the result's identity is
+    # the content of the sections it reads (projection_stamp), the same whoever handed them
+    print(f"[SegPipeline]   configuration: {cfg_source}")
     error_factor, confidence, min_judges = _decision_params(cfg)
     decisions: Dict[str, object] = {
         "rule": ("USER 2026-10-07 (metric_lock.decide_change): a merge / split / link is applied "
                  "only when significant at the declared confidence, with >= min_judges judges, "
                  "by >= error_factor x the measured error; otherwise the simplest outcome"),
         "error_factor": error_factor, "confidence": confidence, "min_judges": min_judges}
+
+    # THE STORE'S SEAL (point 83 / the swap): a store caught half way through the SAM3
+    # stage's swap, missing a half, unreadable, or whose seal names OTHER mask bytes than
+    # the ones on disk (a seal that lies — erase / delete rewrote the npz and kept the
+    # stamp) is REFUSED naming it, on every path, as the certification refuses it; the one
+    # state projected as it is, declared, is a store with NO seal (the interactive manager's
+    # upsert drops it by construction; a store written before 2026-10-08)
+    seal_fatal, seal_declared = store_seal_verdict(
+        output_dir, log=lambda m: print(f"[SegPipeline]   {m}"))
+    if seal_fatal:
+        raise RuntimeError("the SAM3 store cannot be projected — " + "; ".join(seal_fatal)
+                           + " (point 83: a store is projected only as its seal names it; "
+                           "re-run the SAM3 stage, or save the store through the writer "
+                           "that seals it)")
+    for why in seal_declared:
+        print(f"[SegPipeline]   DECLARED: the mask store carries no seal — {why}; projected as "
+              f"it is (its bytes are in the result's stamp)")
+    decisions["store_seal"] = {"intact": not seal_declared, "declared": list(seal_declared)}
 
     # Load metadata (the RAW parent: the store SAM3 wrote, plus the interactive manager's
     # masklets — never the fused view, which is what this very function derives)
@@ -3399,42 +4020,17 @@ def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
     cloud_label = ply_path.stem
     print(f"[SegPipeline] Matching masks against {cloud_label} ({n_pts:,} points)...")
 
-    # Apply SAME floor alignment the viewer uses (from saved transform)
+    # Apply the SAME floor alignment the viewer uses — a saved floor_transform.npz wins
+    # (fixed 2026-08-28: the viewer applies it to the cloud unconditionally, and a result
+    # matched in the RAW frame put every OBB off by the leveling delta on test3) — and it is
+    # applied ONLY with the seal of this reconstruction and this cloud (point 158:
+    # _display_transform; an unsealed or foreign transform FAILS the projection naming it)
     xyz_display = xyz  # default: use raw xyz
-    s, R, t = 1.0, np.eye(3), np.zeros(3)  # identity transform defaults
-    transform_path = output_dir / "floor_transform.npz"
-    # PRECEDENCE (fixed 2026-08-28): a saved floor_transform.npz ALWAYS wins —
-    # the viewer applies it to the cloud unconditionally (potree_ready), and
-    # level_floor / the alignment gizmo compose their deltas into it EVEN on
-    # sessions with baked orientation (fine floor snap). The old order
-    # (.orientation_applied → identity, npz ignored) computed freshly matched
-    # OBBs in the RAW frame while the viewer showed the leveled cloud: every
-    # box displaced by exactly the leveling delta (test3, 2026-08-28).
-    # `.orientation_applied` now only suppresses the legacy auto-compute
-    # fallback, which WOULD double-rotate a baked cloud.
-    if transform_path.exists():
-        data = np.load(transform_path)
-        s = float(data["s"])
-        R = data["R"]
-        t = data["t"]
-        if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
-            xyz_display = s * (xyz @ R.T) + t
-            print(f"[SegPipeline]   Floor alignment loaded from {transform_path.name}")
-    elif (output_dir / ".orientation_applied").exists():
-        # reconstruction/orient.py baked +Y up and the floor at y=0 into the cloud
-        # itself, measured from the camera-pose gravity over every frame. The raw
-        # cloud IS the display frame — any further leveling would rotate it a second
-        # time and _compute_obb's Y-up assumption would then hold in no frame at all.
-        print("[SegPipeline]   Orientation baked from camera poses — display frame is identity")
-    else:
-        # Fallback: compute alignment (legacy sessions without a saved transform) —
-        # seeded and keyed by the cloud (point 110)
-        from alignment_manager import get_alignment_manager
-        am = get_alignment_manager()
-        s, R, t = am.compute_leveling_from_points(xyz)
-        if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
-            xyz_display = s * (xyz @ R.T) + t
-            print(f"[SegPipeline]   Floor alignment computed (no saved transform)")
+    s, R, t, _ft_source = _display_transform(output_dir, ply_path, xyz,
+                                             log=lambda m: print(f"[SegPipeline]   {m}"))
+    if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
+        xyz_display = s * (xyz @ R.T) + t
+    decisions["display_frame"] = _ft_source
 
     # Group cloud points by frame for efficient lookup
     frame_arr = frame_global.astype(np.int32)
@@ -3710,7 +4306,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
         face_id_data = np.array([], dtype=np.int32)
         if pre_filter_count >= 20:
             all_matched, voxel_mesh_data, face_normals_data, face_planes_data, face_id_data = _clean_segment_subcloud(
-                xyz_display, all_matched, iid
+                xyz_display, all_matched, iid, cfg=cfg
             )
 
         total_segmented += len(all_matched)
@@ -3744,9 +4340,10 @@ def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
         # Compute OBB from snapped voxel centroids (corrected geometry)
         if voxel_mesh_data and len(voxel_mesh_data) >= 4:
             voxel_centers = np.array([[v[0], v[1], v[2]] for v in voxel_mesh_data])
-            instance["obb"] = _compute_obb(voxel_centers, face_normals=face_normals_data)
+            instance["obb"] = _compute_obb(voxel_centers, face_normals=face_normals_data, cfg=cfg)
         elif len(all_matched) >= 4:
-            instance["obb"] = _compute_obb(xyz_display[all_matched], face_normals=face_normals_data)
+            instance["obb"] = _compute_obb(xyz_display[all_matched], face_normals=face_normals_data,
+                                           cfg=cfg)
 
         instances.append(instance)
         removed = pre_filter_count - len(all_matched)
@@ -3826,7 +4423,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
                 inst["total_points"] = len(matched)
                 total_segmented += len(matched)
                 if len(matched) >= 4:
-                    inst["obb"] = _compute_obb(xyz_display[matched])
+                    inst["obb"] = _compute_obb(xyz_display[matched], cfg=cfg)
             print(f"[SegPipeline]   Cross-category merge: {pre_merge} → {len(instances)} instances")
 
     # ── Same-SPACE dedupe + small-instance filter ──────────────────────
@@ -3951,7 +4548,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
             for inst in instances:
                 m = np.array(inst["globalIndices"], dtype=np.int64)
                 if len(m) >= 4:
-                    inst["obb"] = _compute_obb(xyz_display[m])
+                    inst["obb"] = _compute_obb(xyz_display[m], cfg=cfg)
             print(f"[SegPipeline]   Space-dedupe: {pre} → {len(instances)} instances")
     decisions["space_dedupe"] = dedupe_decisions
 
@@ -3973,7 +4570,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
             for inst in instances:
                 m = np.asarray(inst["globalIndices"], dtype=np.int64)
                 if len(m) >= 4:
-                    inst["obb"] = _compute_obb(xyz_display[m])
+                    inst["obb"] = _compute_obb(xyz_display[m], cfg=cfg)
             print(f"[SegPipeline]   🧩 Fragment consolidation: {pre} → "
                   f"{len(instances)} instances (same label, contiguous "
                   f"within {_frag_gap*100:.0f} cm through >= {min_judges} adjacent voxel pairs)")
@@ -4010,7 +4607,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
             for inst in instances:
                 m = np.asarray(inst["globalIndices"], dtype=np.int64)
                 if len(m) >= 4:
-                    inst["obb"] = _compute_obb(xyz_display[m])
+                    inst["obb"] = _compute_obb(xyz_display[m], cfg=cfg)
             print(f"[SegPipeline]   ✂ Co-visible split: +{n_split} instance(s)")
     decisions["covisible_split"] = split_decisions
 
@@ -4033,7 +4630,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
         for k in grown:   # OBBs must include the attached points
             m = np.asarray(instances[k]["globalIndices"], dtype=np.int64)
             if len(m) >= 4:
-                instances[k]["obb"] = _compute_obb(xyz_display[m])
+                instances[k]["obb"] = _compute_obb(xyz_display[m], cfg=cfg)
         if n_att:
             print(f"[SegPipeline]   📎 attach: {n_att:,} unsegmented points "
                   f"glued to their surfaces ({_att_rounds} round(s) of "
@@ -4080,15 +4677,31 @@ def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
     # for spatial Q&A (phase5), classification (phase2), findings (phase3) and
     # reports (phase6). Rebuilt from scratch on every segmentation, straight
     # from the CLEAN instances: points/OBBs in the DISPLAY frame (the exact
-    # geometry the viewer renders and the user measures against).
-    _write_instance_store(output_dir, instances, xyz_display)
+    # geometry the viewer renders and the user measures against). Written into
+    # the STAGING directory (point 122): it lands in output/ with the result.
+    # ── The USER's names (USER 2026-10-09): applied over what the segmentation named, after
+    # the fusion (an object's fragments fuse under their SAM3 name first) and before the
+    # chat's store is written — segmentation.label_overrides. An object the ids no longer name
+    # is found again by its geometry. A failure here never costs the projection: declared.
+    try:
+        from segmentation.label_overrides import apply as _apply_labels
+        _apply_labels(output_dir, instances,
+                      points_of=lambda _i: xyz_display[np.asarray(_i.get("globalIndices") or [],
+                                                                  dtype=np.int64)])
+    except Exception as _e:  # noqa: BLE001
+        print(f"[SegPipeline] DECLARED: the user's segment names were not applied ({_e})")
+
+    _write_instance_store(output_dir, instances, xyz_display, dest_dir=stage_dir)
 
     if mask_filter is not None:
         # The MARKS first, in their own block. They are the first moment of the
         # geometric cleanup cycle and the second moment cannot run without them.
-        np.save(output_dir / "out_of_place.npy", out_of_place)
-        write_npz_canonical(output_dir / OUT_OF_PLACE_VIEWS_NAME,
-                            {"judged_views": judged_views, "off_views": off_views})
+        # Written into the STAGING directory (point 122), published with the result.
+        def _write_marks(output_dir: Path) -> None:
+            np.save(output_dir / "out_of_place.npy", out_of_place)
+            write_npz_canonical(output_dir / OUT_OF_PLACE_VIEWS_NAME,
+                                {"judged_views": judged_views, "off_views": off_views})
+        _write_marks(stage_dir)
         print(f"[SegPipeline]    {int(out_of_place.sum()):,} point(s) marked out of "
               f"place (off their own mask in a view that sees them) — "
               f"kept, for the correction to move")
@@ -4100,7 +4713,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
         rep["points_out_of_place"] = int(out_of_place.sum())
         rep["points_out_of_place_by_one_view"] = int((out_of_place & (off_views == 1)).sum())
         rep["views_file"] = OUT_OF_PLACE_VIEWS_NAME
-        atomic_write_json(output_dir / "mask_audit.json", rep, indent=1)
+        atomic_write_json(stage_dir / "mask_audit.json", rep, indent=1)
         byv = rep.get("instances_by_verdict") or {}
         frac = rep.get("on_mask_fraction")
         print(f"[SegPipeline] 🔍 mask audit: "
@@ -4144,46 +4757,50 @@ def _match_masks_to_cloud(output_dir, ply_path=None) -> dict:
     print(f"[SegPipeline] ✅ {len(instances)} instances matched against {cloud_label}, "
           f"{total_segmented:,}/{n_pts:,} points ({coverage*100:.1f}% coverage)")
 
-    # ── The per-point siblings of the cloud: the class byte + the 16-bit instance id
-    # (ONE writer, segmentation.republish.write_classification — point 107)
-    from repro import sha256_file
-    from segmentation.republish import CLASSIFICATION, INSTANCE_IDS, write_classification
+    # ── The per-point siblings of the cloud: the class byte + the 32-bit instance id
+    # (ONE writer, segmentation.republish.write_classification — point 107). They land in
+    # output/ NOW, before everything else of this projection: the octree bakes them in
+    # from the cloud's own directory. A failure from here on removes them with the rest.
+    from segmentation.republish import write_classification
     write_classification(output_dir, instances, n_pts)
 
     # ── THE STAMP of this result (point 123): every input, the code, the configuration
     result["stamp"] = projection_stamp(output_dir, ply_path, cfg, cfg_source)
 
     # ── The octree: ONLY from the cloud the masks were projected on (point 120 — the
-    # corrected_cloud.ply route is gone), rebuilt when its own stamp changed or it is
-    # missing (point 123); a build that fails FAILS the projection (point 122)
-    from potree_converter import POTREE_BIN, convert_ply_to_potree
+    # corrected_cloud.ply route is gone), reused ONLY on an identical stamp (point 123:
+    # the cloud's bytes, the class arrays baked in, the converter and its launch
+    # parameters — potree_converter.octree_matches; no file date), else rebuilt; a build
+    # that fails FAILS the projection (point 122)
+    from potree_converter import (convert_ply_to_potree, octree_matches, potree_stamp_for,
+                                  write_octree_record, write_potree_stamp)
     potree_dir = output_dir / "potree"
-    oct_stamp = {"cloud_sha256": result["stamp"]["inputs"]["cloud"],
-                 "classification_sha256": sha256_file(output_dir / CLASSIFICATION),
-                 "instance_ids_sha256": sha256_file(output_dir / INSTANCE_IDS),
-                 "converter_sha256": sha256_file(POTREE_BIN) if POTREE_BIN.exists() else None}
-    stamp_p = output_dir / POTREE_STAMP_NAME
-    saved_oct = None
-    if stamp_p.exists():
-        try:
-            saved_oct = json.loads(stamp_p.read_text())
-        except ValueError:
-            saved_oct = None
-    potree_missing = not (potree_dir / "metadata.json").exists()
-    if potree_missing or saved_oct != oct_stamp:
+    # the cloud's digest is already in the result's stamp: the octree checks take it (a
+    # multi-gigabyte cloud is hashed once per projection, not three times)
+    _cloud_sha = result["stamp"]["inputs"]["cloud"]
+    _oct_ok, _oct_why = octree_matches(potree_dir, ply_path, cloud_sha256=_cloud_sha)
+    if not _oct_ok:
         session_dir = output_dir.parent
-        if stamp_p.exists():
-            stamp_p.unlink()
+        (output_dir / POTREE_STAMP_NAME).unlink(missing_ok=True)
         success = convert_ply_to_potree(session_dir, force=True, ply_override=ply_path)
         if not success:
             raise RuntimeError(f"the Potree octree could not be built from {ply_path.name} — "
                                f"the projection is not published without its octree")
-        atomic_write_json(stamp_p, oct_stamp, indent=1, sort_keys=True)
-        print(f"[SegPipeline] 🌲 Potree octree rebuilt from {ply_path.name}")
+        # the converter writes the stamp INSIDE what it built; written again here with the
+        # same content so the octree's identity never depends on WHICH builder ran (a
+        # stand-in in a test writes none) — idempotent, one file, one content
+        write_potree_stamp(potree_dir, potree_stamp_for(ply_path, cloud_sha256=_cloud_sha))
+        print(f"[SegPipeline] 🌲 Potree octree rebuilt from {ply_path.name} — {_oct_why}")
         result["reload_potree"] = True
     else:
-        print("[SegPipeline] Potree untouched — same cloud, classification and converter "
-              "(identical stamp, nothing to rebuild)")
+        print(f"[SegPipeline] Potree untouched — {_oct_why}; nothing to rebuild")
+    # the projection's RECORD of the octree it is published with (output/potree_stamp.json —
+    # a product of the projection, removed with the result; the octree's own stamp stays
+    # inside the octree). A projection that fails after this point leaves output/potree
+    # with THIS projection's class bytes baked in: its stamp then names class arrays that
+    # are gone, so it is never reused — the next build replaces it (declared; the viewer
+    # has no result to colour by until then).
+    write_octree_record(output_dir, potree_stamp_for(ply_path, cloud_sha256=_cloud_sha))
 
     return result
 
@@ -4221,12 +4838,14 @@ def map_segmentation_to_cloud(output_dir) -> dict:
 
 
 def _write_instance_store(output_dir: Path, instances: list,
-                          xyz_display: np.ndarray) -> None:
+                          xyz_display: np.ndarray, dest_dir=None) -> None:
     """Write scene_r.db from clean instances + the display-frame cloud.
     Shared by the segmentation matcher (in-memory instances) and
-    ``rebuild_instance_store`` (instances reloaded from disk)."""
+    ``rebuild_instance_store`` (instances reloaded from disk). ``dest_dir``
+    (default ``output_dir``) is where the file is written — the projection's
+    staging directory (point 122)."""
     from phase_r.instance_store import InstanceStore
-    _sp = output_dir / "scene_r.db"
+    _sp = (Path(dest_dir) if dest_dir is not None else Path(output_dir)) / "scene_r.db"
     for _suffix in ("", "-wal", "-shm"):
         _f = Path(str(_sp) + _suffix)
         if _f.exists():
@@ -4237,7 +4856,8 @@ def _write_instance_store(output_dir: Path, instances: list,
         _m = np.asarray(inst["globalIndices"], dtype=np.int64)
         _st.upsert_instance(_iid, str(inst["label"]), source="sam3_concepts",
                             status="proposed", n_views=0,
-                            label_origin="vlm_proposed")
+                            # a name the user gave is the user's (provenance rule)
+                            label_origin=str(inst.get("label_origin") or "vlm_proposed"))
         _st.set_points(_iid, xyz_display[_m])
         _obb = inst.get("obb") or {}
         if _obb.get("center") and _obb.get("half_extents"):
@@ -4282,11 +4902,13 @@ def rebuild_instance_store(output_dir) -> bool:
         xyz = np.asarray(o3d.io.read_point_cloud(str(ply_path)).points)
         if not len(xyz):
             return False
-        # Same display frame the matcher uses (viewer geometry): a saved
-        # floor_transform.npz ALWAYS wins (the viewer applies it to the cloud
-        # unconditionally — even on baked-orientation sessions, where
-        # level_floor may have composed a fine-snap delta into it); baked
-        # orientation without an npz → identity; else raw.
+        # The VIEWER's display frame, not a stage's (point 158 applies to stages): a
+        # saved floor_transform.npz ALWAYS wins here — the viewer applies it to the
+        # cloud unconditionally, and this rebuild is called by main.py's explicit
+        # level_floor right after it wrote the npz and BEFORE it writes the seal
+        # (floor_level.json), so a seal test here would put the store in the raw
+        # frame while the viewer shows the levelled cloud. Baked orientation without
+        # an npz → identity; else raw.
         xyz_display = xyz
         transform_path = output_dir / "floor_transform.npz"
         if transform_path.exists():
@@ -4332,7 +4954,8 @@ def _merge_absorbed(prev, new, instances) -> dict:
     return out
 
 
-def _match_and_save_result(output_dir, ply_path=None):
+def _match_and_save_result(output_dir, ply_path=None, config: Optional[dict] = None,
+                           config_source: Optional[str] = None):
     """
     Run mask→cloud matching and save to segmentation_result.json.
 
@@ -4340,31 +4963,74 @@ def _match_and_save_result(output_dir, ply_path=None):
     lock, honoured ACROSS PROCESSES. It used to take none, so the pipeline's
     worker and the API process matched the same cloud at the same time
     (pccr 2026-09-21: four passes, four octrees, and the session's object
-    count decided by arrival order).
+    count decided by arrival order). ``config``: the configuration the
+    projection runs with (point 112); None = the session's frozen one, else
+    the server's. ``config_source`` names where it came from, for the log only.
     """
     from segmentation.match_lock import matching_lock
     with matching_lock(output_dir, log=lambda m: print(f"[SegPipeline]{m}")):
-        return _match_and_save_result_locked(output_dir, ply_path)
+        return _match_and_save_result_locked(output_dir, ply_path, config, config_source)
 
 
-def _match_and_save_result_locked(output_dir, ply_path=None):
+# the order the staged products are swapped into output/ (point 122): the per-point
+# siblings and the records first, the fusion map, and the RESULT last of all — a reader
+# that finds a result finds every product beside it
+_STAGED_PRODUCT_ORDER = ("scene_r.db-wal", "scene_r.db-shm", "scene_r.db", "out_of_place.npy",
+                         OUT_OF_PLACE_VIEWS_NAME, "mask_audit.json", "fusion_map.json",
+                         "segmentation_result.json")
+
+
+def _publish_staged_products(stage_dir: Path, output_dir: Path, log=print) -> List[str]:
+    """Move the projection's staged products into ``output_dir`` (one rename each, the
+    result last). A product this projection did not make (no audit → no marks; nothing to
+    fold → no fusion map) is REMOVED from ``output_dir``: nothing of another projection
+    stays beside this result. `seg_broadcast.json` is such a product: it is written only by
+    the STAGES after they project (the SAM3 worker, the projection stage — a snapshot of the
+    result they return), never here, so a previous run's copy is removed with the rest.
+    Returns the names published."""
+    published: List[str] = []
+    # the previous store's journal files belong to the previous store: never beside a new one
+    for name in ("scene_r.db-wal", "scene_r.db-shm", "seg_broadcast.json"):
+        (output_dir / name).unlink(missing_ok=True)
+    for name in _STAGED_PRODUCT_ORDER:
+        src, dst = stage_dir / name, output_dir / name
+        if src.exists():
+            os.replace(src, dst)
+            published.append(name)
+        else:
+            dst.unlink(missing_ok=True)
+    log(f"  published {len(published)} product(s) of the projection: {', '.join(published)}")
+    return published
+
+
+def _match_and_save_result_locked(output_dir, ply_path=None, config: Optional[dict] = None,
+                                  config_source: Optional[str] = None):
     """The projection, FULL and PURE (docs/plan_determinismo.md point 99): it
     starts from an empty result, never merges a previous `segmentation_result.json`
     (no carried instances, no carried captions — the per-object descriptions
     are made again by the stage that makes them), and on an error or an empty
-    projection it FAILS, deleting the previous result: a result on disk is
-    always the product of the inputs beside it. The fusion map (point 100) is
-    written beside the raw store before the result."""
+    projection it FAILS, deleting EVERY product of a projection (point 122:
+    the result, the class arrays, the store, the fusion map, the audit and its
+    marks, the octree record, the broadcast — `segmentation.republish.
+    PROJECTION_PRODUCTS`, the same list the cloud stage and the pipeline
+    manager use): what is on disk is always the product of the inputs beside
+    it. The products are STAGED (`_projection.staging/`) and swapped in at the
+    end, the result last; only the class arrays land earlier, because the
+    octree bakes them in (a failure after that build leaves an octree whose own
+    stamp names class arrays that are gone — never reused, replaced by the next
+    build). The fusion map (point 100) is written beside the raw store with the
+    result."""
+    from segmentation.republish import delete_projection_products
     output_dir = Path(output_dir)
-    result_path = output_dir / "segmentation_result.json"
-
-    def _drop_previous(why: str):
-        if result_path.exists():
-            result_path.unlink()
-            print(f"[SegPipeline] previous segmentation_result.json deleted — {why}")
+    staging = output_dir / PROJECTION_STAGING_DIRNAME
+    if staging.exists():
+        shutil.rmtree(str(staging))
+    staging.mkdir(parents=True)
+    result_path = staging / "segmentation_result.json"       # staged; published last
 
     try:
-        result = _match_masks_to_cloud(output_dir, ply_path)
+        result = _match_masks_to_cloud(output_dir, ply_path, cfg=config, cfg_source=config_source,
+                                       stage_dir=staging)
         if "error" in result or not result.get("instances"):
             raise RuntimeError(f"the projection produced no instance for {output_dir} — "
                                f"{result.get('error') or 'no mask landed on the cloud'}")
@@ -4395,22 +5061,31 @@ def _match_and_save_result_locked(output_dir, ply_path=None):
         }
         # ── THE FUSION, beside the raw store (USER 2026-09-20 / point 100): the
         # matcher's verdict as fusion_map.json tied to the raw store's sha256; the
-        # parent is never rewritten. Fatal like every step (point 122).
+        # parent is never rewritten. Fatal like every step (point 122). Staged with
+        # the result, published with it.
         from segmentation import fuse_parent
         fuse_parent.apply_fusion(output_dir, merged_result,
-                                 log=lambda m: print(f"[SegPipeline]{m}"))
+                                 log=lambda m: print(f"[SegPipeline]{m}"), dest_dir=staging)
 
         atomic_write_json(result_path, merged_result)
+        _publish_staged_products(staging, output_dir, log=lambda m: print(f"[SegPipeline]{m}"))
         # a transient for the caller (the viewer reloads the octree once), never part of
         # the file: the same projection writes the same bytes whether the octree was
         # rebuilt or reused
         if result.get("reload_potree"):
             merged_result["reload_potree"] = True
     except BaseException as e:
-        # a result on disk is always the product of the inputs beside it: none survives
-        # a projection that did not finish (point 99)
-        _drop_previous(f"the projection failed ({type(e).__name__}: {e})")
+        # what is on disk is always the product of the inputs beside it: NO product of a
+        # projection survives one that did not finish (points 99 / 122) — not the result,
+        # not the class arrays or the store written earlier in this call, not the stamp
+        gone = delete_projection_products(output_dir)
+        shutil.rmtree(str(staging), ignore_errors=True)
+        print(f"[SegPipeline] the projection failed ({type(e).__name__}: {e}) — "
+              f"{len(gone)} product(s) removed ({', '.join(gone) or 'none were on disk'}), "
+              f"nothing of it stays")
         raise
+    finally:
+        shutil.rmtree(str(staging), ignore_errors=True)
     print(f"[SegPipeline] 💾 Saved segmentation_result.json "
           f"({len(merged)} instances, {coverage*100:.1f}% coverage)")
     return merged_result
@@ -4440,9 +5115,10 @@ def apply_segmentation_to_cloud(output_dir, ply_path=None) -> dict:
 
 
 def with_class_bytes(output_dir: Path, result: dict) -> dict:
-    """Attach each instance's class byte (`segmentation.republish.class_of`; no map = identity)."""
-    from segmentation.republish import class_of
-    code = class_of(output_dir)
+    """Attach each instance's viewer key as `class_byte` (`segmentation.republish.viewer_key_of`:
+    the instance id when the octree carries it, else the class byte; no map = identity)."""
+    from segmentation.republish import viewer_key_of
+    code = viewer_key_of(output_dir)
     for inst in (result or {}).get("instances") or []:
         iid = inst.get("instance_id", inst.get("id"))
         if iid is not None:

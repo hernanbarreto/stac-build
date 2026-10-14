@@ -29,13 +29,15 @@ sources that produce the SAME dict (``shape_caption``):
     instance ISOLATED in its best SAM3-mask views to the session's Qwen3-VL and
     refines the description per object.
 
-DETERMINISM (docs/plan_determinismo.md points 85, 86, 88, 98, 141, 156, 163 — 2026-10-08):
+DETERMINISM (docs/plan_determinismo.md points 85, 86, 88, 94, 98, 141, 156, 163 — 2026-10-08):
   * every ``object`` caption carries a STAMP — the sha1 of every crop sent (the bytes the
     engine saw), the prompt, the number of views, the served engine's identity, the sampling
-    parameters and this module's code; on a later pass an instance is described again
-    unless its caption's stamp equals the stamp computed now. Nothing is carried by
-    instance id any more (``carry_object_captions`` carries nothing: an id reassigned by a
-    re-segmentation inherited another object's description);
+    parameters, the client's image encoder (Pillow / libjpeg-turbo build and the JPEG
+    quality the crops are re-encoded with — point 94: another build gives other pixels)
+    and this module's code; on a later pass an instance is described again unless its
+    caption's stamp equals the stamp computed now. Nothing is carried by instance id any
+    more (``carry_object_captions`` carries nothing: an id reassigned by a re-segmentation
+    inherited another object's description);
   * the views are chosen by a rule with a tolerance: the ``views`` largest masks, where
     every mask whose area lies within 2 × the measured frame-to-frame area dispersion of
     that object of the n-th largest counts as TIED with it and the tie breaks by keyframe
@@ -46,7 +48,13 @@ DETERMINISM (docs/plan_determinismo.md points 85, 86, 88, 98, 141, 156, 163 — 
     never a mixed state a later run completes. An instance without any SAM3 mask view on
     disk cannot be described by any model: declared, not described, not a failure;
   * no clock: ``generated`` is the caption's stable id (derived from its content), never a
-    time.
+    time;
+  * SEVERAL DESCRIPTIONS IN FLIGHT since 2026-10-09 (USER: "Mandemos la mayor cantidad que
+    podamos"; semantic.parallel): as many calls as the engine's KV cache holds, each bounded by
+    the served context, admitted and taken in the instances' order — the captions, the counts
+    and the log lines are the one-at-a-time loop's; a sample is asked again ALONE and compared
+    byte for byte (the result's ``self_check``, with the bound in ``concurrency`` — also in
+    object_captions.timing.json). A mismatch is declared, never a failure.
 
 The interface every consumer reads (segmentation/shaper_export.py):
 
@@ -407,11 +415,6 @@ def _select_best_views(frames: List[str], masks: Dict[str, np.ndarray],
     return [fp for fp, _ in scored[:max_views]]
 
 
-def _fallback(label: str) -> Dict[str, str]:
-    return {"category": label or "object", "shape": "", "material": "",
-            "detail": "", "caption": label or "object"}
-
-
 def _crops_for(frames: List[str], masks: Dict[str, np.ndarray], max_views: int
                ) -> List[Image.Image]:
     crops = []
@@ -427,74 +430,10 @@ def _crops_for(frames: List[str], masks: Dict[str, np.ndarray], max_views: int
     return crops
 
 
-def caption_object(
-    frames: List[str],
-    masks: Dict[str, np.ndarray],
-    label: str,
-    max_views: int = 4,
-    model_id: str = None,
-) -> Dict[str, str]:
-    """Generate a structured description of a segmented object (InternVL3,
-    the stand-alone path — the pipeline uses :func:`caption_object_qwen`).
-
-    Returns a dict ``{category, shape, material, detail, caption}``. ``caption``
-    is the narrative string for ShapeR conditioning; the rest feed the
-    reconstruction classifier. On any failure, returns the label across all
-    fields so callers never crash.
-    """
-    if not frames or not masks:
-        logger.warning(f"No frames/masks for '{label}' — using label")
-        return _fallback(label)
-
-    t0 = time.time()
-    crops = _crops_for(frames, masks, max_views)
-    if not crops:
-        logger.warning(f"No valid views for '{label}' — using label")
-        return _fallback(label)
-    logger.info(f"Captioning '{label}': {len(crops)} best views selected")
-
-    try:
-        from segmentation.scene_analyzer import (
-            _load_model, _build_transform, _dynamic_preprocess,
-        )
-        import torch
-
-        model, tokenizer = _load_model(model_id)
-        prompt = _CAPTION_PROMPT.format(label=label)
-
-        best_crop = crops[0]  # largest mask area
-        transform = _build_transform(input_size=448)
-        images = _dynamic_preprocess(best_crop, image_size=448,
-                                     use_thumbnail=True, max_num=4)
-        pixel_values = torch.stack([transform(im) for im in images])
-        dtype = next(model.parameters()).dtype
-        device = next(model.parameters()).device
-        pixel_values = pixel_values.to(dtype).to(device)
-
-        generation_config = dict(max_new_tokens=512, do_sample=False)
-        raw = model.chat(tokenizer, pixel_values, prompt, generation_config)
-
-        fields = _parse_fields(raw, fallback_label=label)
-        fields["caption"] = _compose_caption(fields, fallback_label=label)
-
-        elapsed = time.time() - t0
-        logger.info(f"Caption for '{label}' ({elapsed:.1f}s): "
-                    f"[{fields['category']}] {fields['caption'][:90]}...")
-        logger.debug(f"  raw VLM output: {raw[:200]!r}")
-
-        del model, tokenizer
-        import gc
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        return fields
-
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"InternVL captioning failed for '{label}': {e}")
-        import traceback
-        traceback.print_exc()
-        return _fallback(label)
+# The stand-alone InternVL3 captioner (``caption_object``: scene_analyzer's model loaded in
+# this process, the label returned on any failure) is GONE — docs/plan_determinismo.md point
+# 156 (2026-10-08): the pipeline has ONE engine, the session's Qwen3-VL below, and a caption
+# that cannot be produced is declared, never silently the label.
 
 
 # ── the session's Qwen3-VL ──────────────────────────────────────────
@@ -542,15 +481,35 @@ def _sampling_record(client) -> dict:
             "seed": getattr(be, "_seed", None)}
 
 
-def caption_stamp(refs: list, prompt: str, service: Optional[dict], sampling: dict) -> str:
-    """The stamp of one description (points 141 / 163): the sha1 of every crop sent, the
-    prompt, the served engine's identity, the sampling parameters and this module's code
-    (repro.stamp) — what the VLM was shown and what answered."""
+def client_image_encoding_record() -> dict:
+    """How THIS process (the VLM client) encodes the images it sends (point 94): the JPEG
+    format and quality ``semantic.types._encode_image`` re-encodes every crop / frame with,
+    and the Pillow build doing it — version, JPEG codec version, libjpeg-turbo build — as
+    ``intake.stamps.pillow_record`` records the same decoder for the intake (one record, not
+    two). The pixels the engine sees depend on them, so they enter every stamp an image
+    enters (the VLM analysis, the per-object captions). A Pillow without a JPEG codec cannot
+    encode what the engine needs: it RAISES (intake.stamps.IntakeStampError), never a blank."""
+    import inspect
+    from intake.stamps import pillow_record
+    from semantic.types import _encode_image
+    sig = inspect.signature(_encode_image).parameters
+    return {"format": sig["fmt"].default, "quality": sig["quality"].default,
+            "pillow": pillow_record()}
+
+
+def caption_stamp(refs: list, prompt: str, service: Optional[dict], sampling: dict,
+                  image_encoding: Optional[dict] = None) -> str:
+    """The stamp of one description (points 141 / 163 / 94): the sha1 of every crop sent,
+    the prompt, the served engine's identity, the sampling parameters, the client's image
+    encoder (:func:`client_image_encoding_record` — read here when not handed in) and this
+    module's code (repro.stamp) — what the VLM was shown, by what, and what answered."""
     import repro
     from segmentation import object_captioner as me
+    enc = client_image_encoding_record() if image_encoding is None else dict(image_encoding)
     return repro.stamp(code=[me], config={
         "images_sha1": [r.sha1 for r in refs], "prompt": prompt,
-        "service": (dict(service) if service else None), "sampling": dict(sampling)})["sha256"]
+        "service": (dict(service) if service else None), "sampling": dict(sampling),
+        "image_encoding": enc})["sha256"]
 
 
 def _ask(client, prompt: str, refs: list, label: str, record: Optional[dict] = None
@@ -640,15 +599,21 @@ def area_error(areas_by_position: Dict[int, int]) -> int:
 
 
 def select_views(areas_by_position: Dict[int, int], n_views: int,
-                 error_factor: float = 2.0) -> Tuple[List[int], dict]:
+                 error_factor: Optional[float] = None) -> Tuple[List[int], dict]:
     """Which keyframe positions the VLM is shown (point 98, DECIDIDO): the ``n_views``
     largest masks, where every mask whose area lies within ``error_factor`` × the measured
     area dispersion (:func:`area_error`) of the n-th largest counts as TIED with it —
     masks above that band are in, masks below are out, the tied ones take the remaining
     slots in keyframe-position order (a one-pixel difference no longer swaps a view).
+    ``error_factor`` None: the user's factor, ``correction_graph.graph.
+    improvement_error_factor`` of the configuration — the one place it is declared.
     Returns (positions, largest first — ties by position; the selection record)."""
     if n_views < 1:
         raise ValueError(f"n_views must be >= 1, got {n_views}")
+    if error_factor is None:
+        from config import cfg
+        from reconstruction.loops.config import improvement_error_factor
+        error_factor = float(improvement_error_factor(cfg))
     items = sorted(((int(a), int(p)) for p, a in areas_by_position.items() if int(a) > 0),
                    key=lambda t: (-t[0], t[1]))
     if not items:
@@ -688,7 +653,8 @@ def _instance_areas(z, oids: List[int]) -> Tuple[Dict[int, int], Dict[int, np.nd
     return areas, masks
 
 
-def _instance_views_record(z, space, frames_dir: Path, oids: List[int], n_views: int):
+def _instance_views_record(z, space, frames_dir: Path, oids: List[int], n_views: int,
+                           error_factor: Optional[float] = None):
     """The instance's views by :func:`select_views` over the keyframes whose JPEG is on
     disk, as ``(frame paths, {filename: mask}, record)`` — the record carries the chosen
     positions / frames / areas and the tie record, for the caption. The npz keys are
@@ -703,7 +669,7 @@ def _instance_views_record(z, space, frames_dir: Path, oids: List[int], n_views:
         p = frames_dir / f"{int(cf):06d}.jpg"
         if p.exists():
             on_disk[pos] = p
-    chosen, sel = select_views({p: areas[p] for p in on_disk}, n_views)
+    chosen, sel = select_views({p: areas[p] for p in on_disk}, n_views, error_factor)
     frames: List[str] = []
     masks: Dict[str, np.ndarray] = {}
     views = []
@@ -717,9 +683,11 @@ def _instance_views_record(z, space, frames_dir: Path, oids: List[int], n_views:
     return frames, masks, {"views": views, "view_selection": sel}
 
 
-def _instance_views(z, space, frames_dir: Path, oids: List[int], n_views: int):
+def _instance_views(z, space, frames_dir: Path, oids: List[int], n_views: int,
+                    error_factor: Optional[float] = None):
     """``(frame paths, {filename: mask})`` of :func:`_instance_views_record`."""
-    frames, masks, _rec = _instance_views_record(z, space, frames_dir, oids, n_views)
+    frames, masks, _rec = _instance_views_record(z, space, frames_dir, oids, n_views,
+                                                 error_factor)
     return frames, masks
 
 
@@ -731,16 +699,18 @@ def caption_session_objects(output_dir, session_dir, *, views: int, refresh: boo
     """One ``object`` caption per instance of ``segmentation_result.json`` whose
     caption's STAMP is not the one computed now (every instance with ``refresh``):
     its ``views`` by :func:`select_views`, isolated crops, ONE Qwen3-VL call per
-    instance, every caption written back AT ONCE under the session's matching lock
-    with ``atomic_write_json`` — all or nothing.
+    instance (several in flight since 2026-10-09, taken in the instances' order —
+    semantic.parallel), every caption written back AT ONCE under the session's matching
+    lock with ``atomic_write_json`` — all or nothing.
 
     ``client`` None (the pipeline): the pass runs on ITS OWN engine
     (semantic.service.job_engine with ``config``: lease, verified stop, launch from the
     frozen configuration, identity verified, stopped at the end — point 155). A service
     that cannot come up or a call that fails RAISES (:class:`CaptionError` /
     :class:`SemanticServiceUnavailable`) and nothing is written (points 85 / 156).
-    Returns ``{generated, kept, undescribed, n_instances, views}``; ``undescribed`` are
-    the instances without any SAM3 mask view on disk — declared, never a failure."""
+    Returns ``{generated, kept, undescribed, n_instances, views}`` (+ ``concurrency`` and
+    ``self_check`` when the pass ran — semantic.parallel); ``undescribed`` are the instances
+    without any SAM3 mask view on disk — declared, never a failure."""
     output_dir, session_dir = Path(output_dir), Path(session_dir)
     views = int(views)
     if views < 1:
@@ -780,6 +750,9 @@ def caption_session_objects(output_dir, session_dir, *, views: int, refresh: boo
                             log=log, cancelled=cancelled)
 
     from segmentation import mask_space
+    from reconstruction.loops.config import improvement_error_factor
+    from semantic.parallel import (AnswerCapture, Job, concurrency_plan, cost_of, engine_kv_cache,
+                                   plan_line, run_ordered)
     t0 = time.time()
     new_caps: Dict[int, dict] = {}
     try:
@@ -789,15 +762,17 @@ def caption_session_objects(output_dir, session_dir, *, views: int, refresh: boo
                 client = get_semantic_client(consumer="shaper.caption")
                 service = identity if isinstance(identity, dict) else None
             sampling = _sampling_record(client)
+            image_encoding = client_image_encoding_record()      # once per pass (point 94)
+            view_factor = float(improvement_error_factor(config)) if config else None
             z = np.load(masks_p, allow_pickle=True)
             try:
                 space = mask_space.resolve(output_dir, masks=z,
                                            log=lambda m: log(f"[captions]   {m}"))
                 frames_dir = session_dir / "frames"
-                for n, inst in enumerate(instances, 1):
-                    if cancelled is not None and cancelled():
-                        raise CaptionError(f"cancelled after {n - 1} of {len(instances)} — "
-                                           f"nothing written")
+
+                def _views_of(inst):
+                    """(iid, label, frames, masks, views record) of one instance — on the
+                    caller's thread only (the npz handle is not shared with the workers)."""
                     iid = int(inst.get("instance_id", inst.get("id", -1)))
                     label = str(inst.get("label", "object"))
                     oids = list(oids_of.get(iid, []))
@@ -805,24 +780,36 @@ def caption_session_objects(output_dir, session_dir, *, views: int, refresh: boo
                         # a co-visible split child is a piece of its parent's masklet:
                         # the parent's masks are the only views SAM3 drew of it
                         oids = list(oids_of.get(int(inst["split_from"]), []))
-                    frames, masks, vrec = (_instance_views_record(z, space, frames_dir, oids, views)
+                    frames, masks, vrec = (_instance_views_record(z, space, frames_dir, oids, views,
+                                                                  view_factor)
                                            if oids else ([], {}, {"views": [],
                                                                   "view_selection": None}))
-                    if not frames:
-                        out["undescribed"] += 1
-                        log(f"[captions] #{iid} '{label}': no SAM3 mask view on disk — cannot "
-                            f"be described (declared)")
-                        continue
-                    prompt, refs = prepare_caption_request(frames, masks, label, views)
-                    stamp = caption_stamp(refs, prompt, service, sampling)
-                    cap = inst.get(CAPTION_KEY)
-                    if (not refresh and isinstance(cap, dict)
-                            and cap.get("source") == SOURCE_OBJECT and cap.get("stamp") == stamp):
-                        out["kept"] += 1
-                        continue
+                    return iid, label, frames, masks, vrec
+
+                # SEVERAL DESCRIPTIONS IN FLIGHT (USER 2026-10-09: "Mandemos la mayor cantidad
+                # que podamos"; semantic.parallel): the instances are prepared IN ORDER on this
+                # thread (views, crops, stamp, the kept test), the calls admitted while their KV
+                # blocks fit the engine's cache — each bounded by the SERVED CONTEXT: the crops'
+                # sizes vary per object and nothing measures a call's tokens before it is made,
+                # and the engine accepts no request longer than its context — and every result,
+                # log line and count is taken in the instances' order, as the one-at-a-time loop
+                # took them. A failure is the first failing instance's, after what is in flight
+                # finishes; nothing is written (all or nothing, as before).
+                kv = engine_kv_cache(client, log=lambda m: log(f"[captions] {m}"))
+                ctx = _served_context(service, config)
+                conc = concurrency_plan(
+                    kv, [ctx[0]] if ctx else [], n_requests=len(instances),
+                    footprint_source=(f"the served context {ctx[0]} ({ctx[1]}): a description's "
+                                      f"crops vary per object, nothing bounds its tokens tighter "
+                                      f"before the call" if ctx else "no served context known"))
+                answers: Dict[int, Optional[str]] = {}
+                asked: Dict[int, tuple] = {}
+
+                def _describe(n, iid, label, prompt, refs, stamp, vrec, n_frames):
                     rec: dict = {}
+                    capt = AnswerCapture(client)
                     try:
-                        fields = _ask(client, prompt, refs, label, record=rec)
+                        fields = _ask(capt, prompt, refs, label, record=rec)
                     except Exception as e:  # noqa: BLE001 — declared, and the pass fails
                         raise CaptionError(f"#{iid} '{label}': the VLM description failed "
                                            f"({type(e).__name__}: {e}) — nothing written "
@@ -832,11 +819,55 @@ def caption_session_objects(output_dir, session_dir, *, views: int, refresh: boo
                                finish_reason=rec.get("finish_reason"),
                                service=(service.get("sha256") if service else None),
                                **vrec)
-                    new_caps[iid] = cap
-                    out["generated"] += 1
-                    log(f"[captions] #{iid} '{label}' ({n}/{len(instances)}, {len(frames)} "
-                        f"view(s) {[v['frame'] for v in vrec['views']]}): "
-                        f"{cap['caption'][:100]}")
+                    return "described", n, iid, label, (cap, n_frames, capt.last)
+
+                def _items():
+                    for n, inst in enumerate(instances, 1):
+                        if cancelled is not None and cancelled():
+                            raise CaptionError(f"cancelled after {n - 1} of {len(instances)} — "
+                                               f"nothing written")
+                        iid, label, frames, masks, vrec = _views_of(inst)
+                        if not frames:
+                            yield Job(value=("undescribed", n, iid, label, None))
+                            continue
+                        prompt, refs = prepare_caption_request(frames, masks, label, views)
+                        stamp = caption_stamp(refs, prompt, service, sampling, image_encoding)
+                        cap = inst.get(CAPTION_KEY)
+                        if (not refresh and isinstance(cap, dict)
+                                and cap.get("source") == SOURCE_OBJECT and cap.get("stamp") == stamp):
+                            yield Job(value=("kept", n, iid, label, None))
+                            continue
+                        yield Job(fn=(lambda a=(n, iid, label, prompt, refs, stamp, vrec,
+                                                len(frames)): _describe(*a)),
+                                  cost=cost_of(conc, ctx[0] if ctx else None))
+
+                def _deliver(i, item):
+                    kind, n, iid, label, payload = item
+                    if kind == "undescribed":
+                        out["undescribed"] += 1
+                        log(f"[captions] #{iid} '{label}': no SAM3 mask view on disk — cannot "
+                            f"be described (declared)")
+                    elif kind == "kept":
+                        out["kept"] += 1
+                    else:
+                        cap, n_frames, text = payload
+                        new_caps[iid] = cap
+                        out["generated"] += 1
+                        answers[i], asked[i] = text, (n, iid, label, cap["images_sha1"])
+                        log(f"[captions] #{iid} '{label}' ({n}/{len(instances)}, {n_frames} "
+                            f"view(s) {[v['frame'] for v in cap['views']]}): "
+                            f"{cap['caption'][:100]}")
+
+                stats = run_ordered(_items(), capacity=conc["capacity_blocks"],
+                                    threads=conc["threads"], on_result=_deliver)
+                conc["observed"] = stats
+                log(f"[captions] {plan_line(conc, stats)}")
+                out["concurrency"] = conc
+                # THE SELF-CHECK (USER 2026-10-09, byte identity): a sample of the descriptions
+                # made with others in flight is asked again ALONE and compared byte for byte —
+                # the user's rule of judges; declared in the result, never a failure
+                out["self_check"] = _self_check_captions(
+                    stats, answers, asked, instances, _views_of, client, views, config, log)
             finally:
                 try:
                     z.close()
@@ -854,6 +885,55 @@ def caption_session_objects(output_dir, session_dir, *, views: int, refresh: boo
         f"{out['undescribed']} without a mask view in {time.time() - t0:.0f} s "
         f"({views} view(s) per object)")
     return out
+
+
+def _served_context(service: Optional[dict], config: Optional[dict]) -> Optional[Tuple[int, str]]:
+    """The context the engine serves — the upper bound of one description's tokens (the engine
+    accepts no request longer): its launch line's --max-model-len, else the configuration's
+    ``semantic.backends.<backend>.max_model_len`` (consolidate_prompts.served_context_len, the
+    one reader). None when neither is known: the descriptions then go one at a time."""
+    from segmentation.autoprompt.consolidate_prompts import MergeError, served_context_len
+    backend = ((config or {}).get("autoprompt", {}) or {}).get("backend", "qwen_local")
+    try:
+        return served_context_len(service, config, backend)
+    except MergeError:
+        return None
+
+
+def _self_check_captions(stats: dict, answers: Dict[int, Optional[str]], asked: Dict[int, tuple],
+                         instances: list, views_of: Callable, client, views: int,
+                         config: Optional[dict], log: Callable[[str], None]) -> dict:
+    """The per-object pass's byte-identity SELF-CHECK (USER 2026-10-09, semantic.parallel): when
+    descriptions were made with others in flight, a sample of them — the user's rule of judges,
+    ``min_judge_closures(correction_graph.graph.heldout_confidence)``, spread evenly over the
+    instances' order — is asked again ALONE (the same views re-derived, their crops' sha1
+    checked against the ones sent) and each answer's text compared byte for byte with the
+    pass's. A mismatch or a failed re-ask is DECLARED (log + the pass's result), never a
+    failure."""
+    from semantic.parallel import (SELF_CHECK_SUFFIX, AnswerCapture, not_checked,
+                                   sample_positions, self_check, self_check_judges)
+    if int(stats.get("max_in_flight") or 0) <= 1:
+        return not_checked("every description ran alone — nothing to compare")
+    n, judges = self_check_judges(config)
+    if n is None:
+        log(f"[captions] [concurrency] ⚠ DECLARED: the self-check is not run — {judges['error']}")
+        return not_checked(judges["error"], judges)
+
+    def _alone(i: int):
+        nth, iid, label, sent_sha1 = asked[i]
+        _iid, _label, frames, masks, _vrec = views_of(instances[nth - 1])
+        prompt, refs = prepare_caption_request(frames, masks, label, views)
+        if [r.sha1 for r in refs] != list(sent_sha1):
+            raise RuntimeError("the crops re-derived for the re-ask are not the ones the pass "
+                               "sent — nothing to compare")
+        cap = AnswerCapture(client, consumer_suffix=SELF_CHECK_SUFFIX)
+        _ask(cap, prompt, refs, label)
+        return cap.last
+
+    return self_check(sample_positions(sorted(asked), n), answers, _alone,
+                      describe=lambda i: {"instance_id": asked[i][1], "label": asked[i][2]},
+                      judges=judges, what="object descriptions",
+                      log=lambda m: log(f"[captions] {m}"))
 
 
 def _write_timing(output_dir: Path, doc: dict) -> None:
@@ -893,16 +973,30 @@ def _main(argv=None) -> int:
     server_dir = str(Path(__file__).resolve().parent.parent)
     if server_dir not in sys.path:
         sys.path.insert(0, server_dir)
-    from config import cfg
-    ccfg = load_object_captions(cfg)
     ap = argparse.ArgumentParser(description="ShapeR description per segmented object (Qwen3-VL)")
     ap.add_argument("--session", required=True, help="session dir (holds frames/ and output/)")
-    ap.add_argument("--views", type=int, default=ccfg.views,
-                    help=f"mask keyframes shown per object (config: {ccfg.views})")
+    ap.add_argument("--views", type=int, default=None,
+                    help="mask keyframes shown per object (default: the configuration's "
+                         "object_captions.views)")
     ap.add_argument("--refresh", action="store_true", help="describe every object again")
     args = ap.parse_args(argv)
     session = Path(args.session)
-    res = caption_session_objects(session / "output", session, views=args.views,
+    # ONE configuration (points 112 / 151, 2026-10-08): the session's frozen job when it holds
+    # one — what the engine is launched from, so its identity is verified against the same
+    # block — else the server's config.yaml (a CLI on a session nobody froze)
+    from intake.run_config import effective_config, has_run_config, load_run_config
+    if has_run_config(session):
+        cfg, sha = load_run_config(session)
+        cfg = effective_config(cfg)
+        print(f"[captions] configuration: the session's frozen output/run_config.yaml "
+              f"(sha256 {sha[:12]})")
+    else:
+        from config import cfg
+        print("[captions] configuration: the server's config.yaml (no frozen run "
+              "configuration in the session)")
+    ccfg = load_object_captions(cfg)
+    views = ccfg.views if args.views is None else int(args.views)
+    res = caption_session_objects(session / "output", session, views=views,
                                   refresh=args.refresh, log=print, config=cfg)
     print(json.dumps(res, indent=2))
     return 0

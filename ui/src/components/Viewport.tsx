@@ -11,7 +11,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { PotreeOctreeLoader } from './PotreeLoader'
-import { AssistantViz, type SceneObject, type UserVolume, type TraceEntry } from './assistantViz'
+import { AssistantViz, arrowDimension, objectDims, thickBox, thickSegment, type SceneObject, type UserVolume, type TraceEntry } from './assistantViz'
 import { Eye, EyeOff, Focus, RotateCw, Move, Save, Trash2, X, Box as BoxIcon, Scaling, RefreshCw, MonitorX } from 'lucide-react'
 import { getT, getFmt } from '../i18n'
 import { tokenColor, tokenHex, edgeColorHex, VP } from './viewport/palette'
@@ -95,11 +95,11 @@ interface ViewportProps {
 export interface SegmentInstance {
     key: string
     id: number
-    /** The class BYTE the octree carries for this instance — what the
+    /** The per-point key the octree carries for this instance — what the
      *  visibility texture, the node culling and the raycast filter are keyed
-     *  by. It equals `id` while the instance ids fit in a byte, and is a
-     *  compact index when they do not (pccr 2026-09-20: eight instances above
-     *  254 all saturated to 255, one toggle switched all eight). */
+     *  by: the instance id itself when the octree has the 'instance' dimension
+     *  (no ceiling, USER 2026-10-08), else the class byte of older octrees (a
+     *  compact index above 255 ids). The backend sends it as `class_byte`. */
     classId: number
     /** World-space centre and radius of the instance's own OBB, so selecting
      *  it in the list can frame it (USER 2026-09-21: "un fly to de three al
@@ -156,6 +156,10 @@ export interface ViewportHandle {
     removeSelectedSceneObject: () => Promise<void>
     removeSceneObject: (id: number) => Promise<void>
     setSceneObjectVisible: (id: number, visible: boolean) => void
+    /** a placed object's OBB: its bounding box, thick, with arrowed dimensions (USER 2026-10-09) */
+    setSceneObjectObb: (id: number, on: boolean) => void
+    setVolumeVisible: (volumeId: number, visible: boolean) => void
+    setVolumeObb: (volumeId: number, on: boolean) => void
     getSceneAlignTargets: () => Array<{ key: string; label: string }>
     alignSceneObject: (op: 'floor' | 'same_base' | 'on_top' | 'center_xz' | 'center_y', targetKey?: string) => void
     /** Preview the brush confidence filter: points below thr light up red. null = off. */
@@ -171,9 +175,9 @@ export interface ViewportHandle {
     refreshSegmentOBBs: (sessionId: string) => void
     setFloorTransform: (arr: number[]) => void
     setOBBsVisible: (visible: boolean) => void
-    /** `segId` is the CLASS BYTE (`SegmentInstance.classId`), not the
-     *  instance id — the texture, the node culling and the raycast filter all
-     *  speak in class bytes. 0 is the unsegmented remainder. */
+    /** `segId` is the segment KEY (`SegmentInstance.classId`) — the texture,
+     *  the node culling and the raycast filter all speak in it. 0 is the
+     *  unsegmented remainder. */
     setSegmentVisibility: (segId: number, visible: boolean) => void
     setCloudObjectVisible: (visible: boolean) => void
     reloadShapes: (sessionId: string) => Promise<void>
@@ -187,6 +191,10 @@ export interface ViewportHandle {
     clearReconScene: () => void
     // Flythrough (synced video3D): drive the camera to a per-frame c2w pose.
     setFlythroughActive: (active: boolean) => void
+    /** Prefetch the octree nodes the flythrough path needs (pinned while it plays). Resolves
+     *  when they are in memory; ``onProgress`` gets the fraction. */
+    prefetchFlythrough: (c2wRowMajor: number[][], fovYDeg: number,
+                         onProgress?: (frac: number) => void, isCancelled?: () => boolean) => Promise<void>
     setCameraToPose: (c2wRowMajor: number[]) => void
     // Match the 3D camera's vertical FOV to the real camera (from intrinsics) so
     // the flythrough frames the scene exactly like the video. Restored on close.
@@ -235,11 +243,15 @@ interface TsdfListEntry {
 }
 
 // Vertex shader — matches FusionRenderer.js point size formula
-// 256×1 single-channel lookup texture backing uSegVisTex (255 = visible).
-// Mutated in place by setSegmentVisibility (write texel + needsUpdate).
+// SEG_VIS_SIDE² single-channel lookup texture backing uSegVisTex (255 = visible), one texel
+// per segment key: 2048² = 4,194,304 segments (USER 2026-10-08: no 255 ceiling — "un número
+// bien grande"); 2048 is the texture side every WebGL2 device must support, and every key
+// below 2^24 is exact in the float attribute. Mutated in place by setSegmentVisibility.
+const SEG_VIS_SIDE = 2048
+const SEG_VIS_SLOTS = SEG_VIS_SIDE * SEG_VIS_SIDE
 const makeSegVisTexture = () => {
-    const tex = new THREE.DataTexture(new Uint8Array(256).fill(255), 256, 1,
-                                      THREE.RedFormat, THREE.UnsignedByteType)
+    const tex = new THREE.DataTexture(new Uint8Array(SEG_VIS_SLOTS).fill(255), SEG_VIS_SIDE,
+                                      SEG_VIS_SIDE, THREE.RedFormat, THREE.UnsignedByteType)
     tex.minFilter = THREE.NearestFilter
     tex.magFilter = THREE.NearestFilter
     tex.needsUpdate = true
@@ -264,13 +276,13 @@ const vertexShader = `
   varying float vSpritePx;
   varying float vFocalPx;
   uniform float pointSize;
+  uniform float uSpriteMax;
   // point shape (USER 2026-10-04: "cubos como en la página de PointDiT"): 0 = disc, 1 = cube — a
   // world-axis-aligned cube of the point's own size, ray-cast per fragment (see the fragment shader)
   uniform int uPointShape;
   uniform float uViewportH;      // pixels — with projectionMatrix[1][1] it gives the focal length in px
-  // 256 segment-visibility slots via a 256×1 LOOKUP TEXTURE (one texel per
-  // instance id). The old float[16] uniform chain capped the viewer at 16
-  // instances (test2: 46+). A texel fetch in the vertex shader is the
+  // segment-visibility slots via a SEG_VIS_SIDE² LOOKUP TEXTURE (one texel per
+  // segment key, row-major). A texel fetch in the vertex shader is the
   // lowest-common-denominator path every driver handles — no dynamic uniform
   // indexing, no uniform-vector pressure.
   uniform sampler2D uSegVisTex;
@@ -287,8 +299,10 @@ ${POINT_SHADOW_VERT_MAIN}
     if (classId < 0.0) {
       vSegVisible = 1.0; // always visible (e.g. sábana)
     } else {
-      float u = (clamp(classId, 0.0, 255.0) + 0.5) / 256.0;
-      vSegVisible = texture2D(uSegVisTex, vec2(u, 0.5)).r;
+      float row = floor(classId / ${SEG_VIS_SIDE}.0);
+      float col = classId - row * ${SEG_VIS_SIDE}.0;
+      vSegVisible = texture2D(uSegVisTex, vec2((col + 0.5) / ${SEG_VIS_SIDE}.0,
+                                               (row + 0.5) / ${SEG_VIS_SIDE}.0)).r;
     }
 
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
@@ -303,7 +317,7 @@ ${POINT_SHADOW_VERT_MAIN}
     float depth = -mvPosition.z;
     float size = pointSize * 20.0 / depth;
     vViewPos = mvPosition.xyz;
-    vSpritePx = clamp(size, 0.25, 40.0);
+    vSpritePx = clamp(size, 0.25, uSpriteMax);
     vFocalPx = projectionMatrix[1][1] * uViewportH * 0.5;   // projectionMatrix exists in the vertex stage only
     // a cube's projection is wider than its face: the sprite grows by sqrt(3) so no corner is clipped
     gl_PointSize = (uPointShape == 1) ? min(vSpritePx * 1.7321, 69.0) : vSpritePx;
@@ -562,6 +576,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
     const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
+    // THE FLYTHROUGH RENDER PROFILE (USER 2026-10-10: "debe ser absolutamente fluido"): while
+    // the synced video plays, the camera walks at eye level through the cloud — cube sprites
+    // up to 69 px, the full point budget, shadows and the full pixel ratio saturated the GPU
+    // in seconds (and a saturated GPU starves the video too). What was set is restored on exit.
+    const flythroughRef = useRef<null | { shape: number; spriteMax: number; transparent: boolean;
+        shadows: boolean; pixelRatio: number; budget: number }>(null)
     const sceneRef = useRef<THREE.Scene | null>(null)
     const cameraRef = useRef<THREE.PerspectiveCamera | null>(null)
     const controlsRef = useRef<OrbitControls | null>(null)
@@ -1054,6 +1074,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const lastLodUpdateRef = useRef(0)
     const sabanaLoadIdRef = useRef(0)  // monotonic counter to discard stale sábana loads
     const sessionFramedRef = useRef<string | null>(null)  // track which session has been framed
+    // the LIGHT CLOUD drawn the instant a session opens, until the octree covers it (USER 2026-10-09)
+    const previewRef = useRef<{ group: THREE.Group; n: number; session: string; shownAt: number } | null>(null)
     const preserveCameraRef = useRef<{ pos: THREE.Vector3; target: THREE.Vector3 } | null>(null)
     const floorTransformRef = useRef<THREE.Matrix4 | null>(null)
     const gridRef = useRef<THREE.GridHelper | null>(null)
@@ -1968,12 +1990,14 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const clearSegmentSelection = useCallback(() => {
         obbMapRef.current.forEach(c => {
             const rig = c.getObjectByName('obb-dims')
-            if (rig) { rig.traverse(o => { const m = o as THREE.Line; m.geometry?.dispose(); (m.material as THREE.Material)?.dispose?.() }); c.remove(rig) }
-            const wire = c.getObjectByName('obb-wire') as THREE.LineSegments | undefined
-            if (wire && wire.userData.origColor != null) {
-                (wire.material as THREE.LineBasicMaterial).color.setHex(wire.userData.origColor as number)
+            if (rig) { rig.traverse(o => { const m = o as THREE.Mesh; m.geometry?.dispose(); (m.material as THREE.Material)?.dispose?.() }); c.remove(rig) }
+            const wire = c.getObjectByName('obb-wire')
+            const wmat = wire?.userData.mat as THREE.MeshBasicMaterial | undefined
+            if (wire && wmat && wire.userData.origColor != null) {
+                wmat.color.setHex(wire.userData.origColor as number)
                 wire.userData.origColor = null
             }
+            c.visible = !!c.userData.userObb            // a deselected OBB goes back to the list's choice
         })
         readoutsWorldRef.current = readoutsWorldRef.current.filter(r => !r.id.startsWith('dim-'))
     }, [])
@@ -1985,11 +2009,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const c = obbMapRef.current.get(key)
         const half = c?.userData.halfExtents as number[] | undefined
         if (!c || !half || half.length !== 3) return
-        const wire = c.getObjectByName('obb-wire') as THREE.LineSegments | undefined
-        if (wire) {
-            const mat = wire.material as THREE.LineBasicMaterial
-            wire.userData.origColor = mat.color.getHex()
-            mat.color.setHex(tokenHex(VP.marker))
+        c.visible = true                                 // the selected object's OBB is always shown
+        const wire = c.getObjectByName('obb-wire')
+        const wmat = wire?.userData.mat as THREE.MeshBasicMaterial | undefined
+        if (wire && wmat) {
+            wire.userData.origColor = wmat.color.getHex()
+            wmat.color.setHex(tokenHex(VP.marker))
         }
         c.updateMatrixWorld(true)
         // which local axis is the HEIGHT (the one closest to world up); of the other two the longer is the width
@@ -2002,7 +2027,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         const unit = (i: number, v: number) => { const a = [0, 0, 0]; a[i] = v; return new THREE.Vector3(a[0], a[1], a[2]) }
         const rig = new THREE.Group(); rig.name = 'obb-dims'
         const col = tokenHex(VP.measure)
-        const mkLine = (a: THREE.Vector3, b: THREE.Vector3) => new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), new THREE.LineBasicMaterial({ color: col, depthTest: false, transparent: true }))
+        const mkLine = (a: THREE.Vector3, b: THREE.Vector3) => thickSegment(a, b, THREE.MathUtils.clamp(a.distanceTo(b) * 0.004, 0.003, 0.012), new THREE.MeshBasicMaterial({ color: col, depthTest: false, transparent: true }))
         const dims: Array<{ axis: number; tag: string; at: THREE.Vector3; tick: THREE.Vector3 }> = [
             // height: along hAxis at the (+w, +d) corner, pushed out along w and d
             { axis: hAxis, tag: 'H', at: unit(wAxis, half[wAxis] + o).add(unit(dAxis, half[dAxis] + o)), tick: unit(wAxis, 1) },
@@ -2014,7 +2039,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         readoutsWorldRef.current = readoutsWorldRef.current.filter(r => !r.id.startsWith('dim-'))
         for (const d of dims) {
             const a = d.at.clone().add(unit(d.axis, -half[d.axis])), b = d.at.clone().add(unit(d.axis, half[d.axis]))
-            rig.add(mkLine(a, b))
+            rig.add(arrowDimension(a, b, col))            // a cota: thick, an arrow at each end
             const tk = d.tick.clone().multiplyScalar(o * 0.35)
             rig.add(mkLine(a.clone().sub(tk), a.clone().add(tk)), mkLine(b.clone().sub(tk), b.clone().add(tk)))
             const mid = c.localToWorld(d.at.clone())
@@ -2300,7 +2325,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         },
         toggleOBB: (key: string, visible: boolean) => {
             const mesh = obbMapRef.current.get(key)
-            if (mesh) mesh.visible = visible
+            if (!mesh) return
+            mesh.userData.userObb = visible
+            mesh.visible = visible || selectedSegKeyRef.current === key
         },
         setAssistantObjects: (objects: SceneObject[]) => {
             assistantVizRef.current?.setObjects(objects)
@@ -2532,9 +2559,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             potreeLoaderRef.current?.setClassVisibility(hidden)
             const mat = materialRef.current
             if (!mat) return
-            const idx = Math.max(0, Math.min(segId, 255))
+            if (segId < 0 || segId >= SEG_VIS_SLOTS) {
+                console.warn('[Viewport] segment key outside the visibility texture', segId)
+                return
+            }
             const tex = mat.uniforms.uSegVisTex.value as THREE.DataTexture
-            ;(tex.image.data as Uint8Array)[idx] = visible ? 255 : 0
+            ;(tex.image.data as Uint8Array)[segId] = visible ? 255 : 0
             tex.needsUpdate = true
         },
         setCloudObjectVisible: (visible: boolean) => {
@@ -2933,6 +2963,23 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             if (selSceneObjRef.current != null) await _removeSceneObject(selSceneObjRef.current)
         },
         removeSceneObject: async (id: number) => { await _removeSceneObject(id) },
+        setSceneObjectObb: (id: number, on: boolean) => {
+            const g = sceneObjByIdRef.current.get(id)
+            const scene = sceneRef.current
+            if (!g || !scene) return
+            const old = scene.getObjectByName(`placed-obb-${id}`)
+            if (old) { scene.remove(old); disposeDeep(old) }
+            if (!on) return
+            const box = new THREE.Box3().setFromObject(g)
+            if (box.isEmpty()) return
+            const size = box.getSize(new THREE.Vector3())
+            const rig = objectDims([size.x / 2, size.y / 2, size.z / 2], tokenHex(VP.angle), tokenColor(VP.warn))
+            rig.name = `placed-obb-${id}`
+            rig.position.copy(box.getCenter(new THREE.Vector3()))
+            scene.add(rig)
+        },
+        setVolumeVisible: (volumeId: number, visible: boolean) => assistantVizRef.current?.setVolumeVisible(volumeId, visible),
+        setVolumeObb: (volumeId: number, on: boolean) => assistantVizRef.current?.setVolumeObb(volumeId, on),
         setSceneObjectVisible: (id: number, visible: boolean) => {
             const g = sceneObjByIdRef.current.get(id)
             if (!g) return
@@ -3116,6 +3163,40 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         setFlythroughActive: (active: boolean) => {
             // disable orbit controls while the flythrough drives the camera
             if (controlsRef.current) controlsRef.current.enabled = !active
+            {
+                const u = materialRef.current?.uniforms
+                const renderer = rendererRef.current
+                const loader = potreeLoaderRef.current
+                if (active && !flythroughRef.current) {
+                    flythroughRef.current = {
+                        shape: u?.uPointShape?.value ?? 1, spriteMax: u?.uSpriteMax?.value ?? 40,
+                        transparent: !!materialRef.current?.transparent,
+                        shadows: !!shadowsRef.current?.isEnabled,
+                        pixelRatio: renderer?.getPixelRatio() ?? window.devicePixelRatio,
+                        budget: loader?.getPointBudget() ?? pointBudget,
+                    }
+                    if (u?.uPointShape) u.uPointShape.value = 0          // discs: no per-fragment ray cast
+                    if (u?.uSpriteMax) u.uSpriteMax.value = 9.0          // small sprites at eye level
+                    if (materialRef.current) materialRef.current.transparent = false
+                    shadowsRef.current?.setEnabled(false)
+                    renderer?.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1))
+                    loader?.setPointBudget(Math.min(flythroughRef.current.budget, 3_000_000))
+                    loader?.setMinNodePixelSize(30)
+                } else if (!active && flythroughRef.current) {
+                    const was = flythroughRef.current
+                    flythroughRef.current = null
+                    if (u?.uPointShape) u.uPointShape.value = was.shape
+                    if (u?.uSpriteMax) u.uSpriteMax.value = was.spriteMax
+                    if (materialRef.current) materialRef.current.transparent = was.transparent
+                    shadowsRef.current?.setEnabled(was.shadows)
+                    renderer?.setPixelRatio(was.pixelRatio)
+                    loader?.setPointBudget(was.budget)
+                    loader?.setMinNodePixelSize(15)
+                    loader?.unpinAll()
+                    // the orbit target sits 2 m ahead of the last pose: the controls resume there
+                    controlsRef.current?.update()
+                }
+            }
             // hide the camera-pose markers during playback; restore on close
             // (on normal load they're shown + toggleable). cameraGroupRef holds them.
             if (cameraGroupRef.current) cameraGroupRef.current.visible = !active
@@ -3131,6 +3212,19 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     cam.updateProjectionMatrix()
                 }
             }
+        },
+        prefetchFlythrough: async (c2wRowMajor, fovYDeg, onProgress, isCancelled) => {
+            const loader = potreeLoaderRef.current
+            const renderer = rendererRef.current
+            if (!loader || !loader.isLoaded || !c2wRowMajor.length) { onProgress?.(1); return }
+            const w = renderer?.domElement.clientWidth || 800, h = renderer?.domElement.clientHeight || 600
+            // every keyframe's view at the flythrough's own LOD (a smaller budget per view, the
+            // coarser node size); the union capped so the download stays light
+            const names = await loader.planPath(c2wRowMajor, fovYDeg, w / Math.max(1, h), h,
+                                                1_500_000, 30, 4_000_000)
+            if (isCancelled?.()) return
+            await loader.prefetch(names, (d, n) => onProgress?.(n ? d / n : 1), isCancelled)
+            onProgress?.(1)
         },
         setCameraFov: (fovYDeg: number) => {
             const cam = cameraRef.current
@@ -3373,7 +3467,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 uTint: { value: new THREE.Color(tokenHex(VP.epochTint)) },
                 uTintMix: { value: 0.0 },
                 uConfHl: { value: -1.0 },
-                // 256-slot visibility lookup texture (see vertex shader)
+                // segment visibility lookup texture (see makeSegVisTexture)
                 uSegVisTex: { value: makeSegVisTexture() },
                 time: { value: 0 },
                 sectionBoxEnabled: { value: false },
@@ -3382,6 +3476,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 uSelBoxOn: { value: false },
                 uSelBoxInv: { value: new THREE.Matrix4() },
                 uPointShape: { value: 1 },   // cubes by default (USER 2026-10-04; App.tsx cubesOn)
+                uSpriteMax: { value: 40.0 },  // the flythrough lowers it (fill rate at eye level)
                 uViewportH: { value: container.clientHeight || 1 },
                 uViewRotInv: { value: new THREE.Matrix3() },
                 ...pointShadowU,
@@ -3410,7 +3505,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // Render loop
         const animate = () => {
             animFrameRef.current = requestAnimationFrame(animate)
-            controls.update()
+            const flying = !!flythroughRef.current
+            // OrbitControls.update() ends in camera.lookAt(target): during the flythrough it
+            // threw away the pose's roll every frame (the video's sway) — the pose drives
+            if (!flying) controls.update()
             const frameDt = physicsClock.getDelta()
             physics.step(frameDt)
             shadows.update(frameDt)
@@ -3421,7 +3519,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             // This prevents logarithmic zoom from stalling at close range.
             // Safe because we modify target AFTER update() wrote camera.position.
             const orbitDist = camera.position.distanceTo(controls.target)
-            if (orbitDist < 0.5) {
+            if (orbitDist < 0.5 && !flying) {
                 const forward = new THREE.Vector3(0, 0, -1)
                     .transformDirection(camera.matrixWorld)
                 controls.target.copy(camera.position).addScaledVector(forward, 0.5)
@@ -3451,7 +3549,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     return { id: r.id, kind: r.kind, tag: r.tag, x: Math.round(x), y: Math.round(y), ax: Math.round((v.x * 0.5 + 0.5) * w), ay: Math.round((-v.y * 0.5 + 0.5) * h), metres: r.metres, degrees: r.degrees, visible }
                 })
                 const key = out.map(r => `${r.id}:${r.x}:${r.y}:${r.visible ? 1 : 0}`).join('|')
-                if (key !== lastReadoutKeyRef.current) { lastReadoutKeyRef.current = key; onReadoutsRef.current?.(out) }
+                // during the flythrough the readouts would re-render the app every frame
+                if (!flying && key !== lastReadoutKeyRef.current) { lastReadoutKeyRef.current = key; onReadoutsRef.current?.(out) }
                 const mpp = (2 * orbitDist * Math.tan((camera.fov * Math.PI / 180) / 2)) / Math.max(1, h)
                 if (Math.abs(mpp - lastMppRef.current) > lastMppRef.current * 0.01) { lastMppRef.current = mpp; onViewScaleRef.current?.(mpp) }
             }
@@ -3460,7 +3559,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             assistantVizRef.current?.update(now)
 
             // Potree LOD: update visible nodes based on camera (~10 Hz, not every frame)
-            if (potreeLoaderRef.current?.isLoaded && now - lastLodUpdateRef.current > 100) {
+            if (potreeLoaderRef.current?.isLoaded && now - lastLodUpdateRef.current > (flying ? 250 : 100)) {
                 lastLodUpdateRef.current = now
                 // Skip Potree's LOD/node-loading work when the cloud is hidden.
                 // We can't check octreeGroup.visible: setCloudObjectVisible
@@ -3470,6 +3569,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     if (entry.visible) entry.loader.updateVisibility()
                 }
                 // under octreeGroup stay visible. cloudHiddenRef is the truth.
+                if (previewRef.current) previewRef.current.group.visible = !cloudHiddenRef.current
                 if (cloudHiddenRef.current) {
                     if (totalPointsRef.current !== 0) {
                         totalPointsRef.current = 0
@@ -3479,7 +3579,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     potreeLoaderRef.current.updateVisibility()
                     // Report visible points back to UI
                     const visiblePts = potreeLoaderRef.current.getVisiblePointCount()
-                    if (visiblePts !== totalPointsRef.current) {
+                    // the octree now shows at least what the light cloud did — or it has been
+                    // streaming for 20 s with points on screen (hidden segments can keep it under
+                    // the preview's count forever): it takes over
+                    if (previewRef.current && (visiblePts >= previewRef.current.n
+                        || (visiblePts > 0 && now - previewRef.current.shownAt > 20000))) disposePreview()
+                    if (!flying && visiblePts !== totalPointsRef.current && !(previewRef.current && visiblePts < previewRef.current.n)) {
                         totalPointsRef.current = visiblePts
                         onPointCount(visiblePts)
                     }
@@ -3537,12 +3642,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const octreeGroup = sceneRef.current?.getObjectByName('potree-octree')
             octreeGroup?.children.forEach(c => { if ((c.name || '').startsWith('potree-node-') && c.visible) targets.push(c) })
             const hit = rc.intersectObjects(targets, false).find(h => h.index != null && hitIsVisible(h))
-            if (!hit) return
+            if (!hit) { onSegmentPickedRef.current(-1); return }     // a click on nothing deselects
             const geo = (hit.object as THREE.Points).geometry as THREE.BufferGeometry
             const attr = geo.getAttribute('classId') as THREE.BufferAttribute | undefined
             if (!attr) return
-            const cls = attr.getX(hit.index as number)
-            if (cls >= 0) onSegmentPickedRef.current(cls)
+            onSegmentPickedRef.current(attr.getX(hit.index as number))
         }
         const onContextMenu = (e: MouseEvent) => {
             if (activeToolRef.current === 'measure-distance' || activeToolRef.current === 'measure-angle') {
@@ -4434,6 +4538,18 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }))
     }, [activeSession])  
 
+    /** Remove the light cloud (the octree covers the scene, or the session changed). */
+    const disposePreview = useCallback(() => {
+        const p = previewRef.current
+        if (!p) return
+        previewRef.current = null
+        p.group.removeFromParent()
+        p.group.traverse(o => {
+            const pts = o as THREE.Points
+            if (pts.isPoints) { pts.geometry.dispose(); (pts.material as THREE.Material).dispose() }
+        })
+    }, [])
+
     // Clear geometry and OBBs
     const clearScene = useCallback(() => {
         // Reset stale view-state refs so a fresh load is never blocked:
@@ -4447,6 +4563,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         cloudHiddenRef.current = false
         preserveCameraRef.current = null
         sessionFramedRef.current = null
+        disposePreview()
         // Dispose Potree loader if active
         if (potreeLoaderRef.current) {
             potreeLoaderRef.current.dispose()
@@ -4612,7 +4729,66 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
             return
         }
+        if (msg.type === 'potree_preview') {
+            // THE LIGHT CLOUD (USER 2026-10-09: "las nubes deben cargarse inmediatamente en
+            // versión bien liviana"): ~300 k points of the octree's top levels, drawn under the
+            // floor transform the octree will get; the octree replaces it once it covers as much
+            const sid = msg.session_id as string
+            if (!sid || sid !== activeSessionRef.current) return
+            const ft = msg.floorTransform as number[] | undefined
+            fetch(msg.url as string, { cache: 'no-store' })
+                .then(r => (r.ok ? r.arrayBuffer() : null))
+                .then(buf => {
+                    const scene = sceneRef.current
+                    if (!buf || !scene || sid !== activeSessionRef.current) return
+                    // the octree already covers more than the preview would: nothing to add
+                    if (potreeLoaderRef.current?.isLoaded && potreeLoaderRef.current.getVisiblePointCount() > 0) return
+                    const dv = new DataView(buf)
+                    if (buf.byteLength < 40 || dv.getUint32(0, false) !== 0x53545056 /* 'STPV' */) return
+                    const n = dv.getUint32(8, true)
+                    if (buf.byteLength < 40 + 9 * n) return
+                    const lo = [dv.getFloat32(12, true), dv.getFloat32(16, true), dv.getFloat32(20, true)]
+                    const hi = [dv.getFloat32(24, true), dv.getFloat32(28, true), dv.getFloat32(32, true)]
+                    const spacing = dv.getFloat32(36, true)
+                    const geom = new THREE.BufferGeometry()
+                    geom.setAttribute('position', new THREE.BufferAttribute(new Uint16Array(buf, 40, n * 3), 3, true))
+                    geom.setAttribute('color', new THREE.BufferAttribute(new Uint8Array(buf, 40 + 6 * n, n * 3), 3, true))
+                    const span = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2])
+                    const mat = new THREE.PointsMaterial({
+                        size: spacing > 0 ? spacing * 1.6 : span / 400, sizeAttenuation: true, vertexColors: true,
+                    })
+                    const pts = new THREE.Points(geom, mat)
+                    pts.raycast = () => { }   // never a target of the measuring / picking tools
+                    pts.position.set(lo[0], lo[1], lo[2])
+                    pts.scale.set(Math.max(hi[0] - lo[0], 1e-9), Math.max(hi[1] - lo[1], 1e-9), Math.max(hi[2] - lo[2], 1e-9))
+                    const group = new THREE.Group()
+                    group.name = 'potree-preview'
+                    if (ft && ft.length === 16) {
+                        new THREE.Matrix4().fromArray(ft).decompose(group.position, group.quaternion, group.scale)
+                    }
+                    group.add(pts)
+                    disposePreview()
+                    scene.add(group)
+                    previewRef.current = { group, n, session: sid, shownAt: performance.now() }
+                    group.updateMatrixWorld(true)
+                    const box = new THREE.Box3().setFromObject(pts)
+                    if (!box.isEmpty() && cameraRef.current && controlsRef.current) {
+                        cloudBBoxRef.current = box.clone()
+                        if (sessionFramedRef.current !== sid && !preserveCameraRef.current) {
+                            frameCloud(box, cameraRef.current, controlsRef.current)
+                            sessionFramedRef.current = sid
+                        }
+                        adaptGrid(box, scene, gridRef, showGridRef.current)
+                    }
+                    onPointCount(n)
+                })
+                .catch(() => { /* the octree loads as before */ })
+            return
+        }
         if (msg.type === 'potree_ready') {
+            // another session's broadcast (a pipeline running elsewhere) never replaces the
+            // cloud on screen (USER 2026-10-09)
+            if (msg.session_id && activeSessionRef.current && msg.session_id !== activeSessionRef.current) return
             const url = msg.url as string
             const pts = msg.points as number
             const floorTransform = msg.floorTransform as number[] | undefined
@@ -5028,7 +5204,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // Preserve the user's choices across re-renders (user 2026-08-30:
         // recomputing a bbox must not bring every hidden box/segment back)
         const prevObbVis = new Map<string, boolean>()
-        obbMapRef.current.forEach((c, k) => prevObbVis.set(k, c.visible))
+        obbMapRef.current.forEach((c, k) => prevObbVis.set(k, !!c.userData.userObb))
 
         // Clear old OBBs (deep: containers hold LineSegments + label Sprites
         // with CanvasTextures — see disposeDeep)
@@ -5090,9 +5266,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 halfExtents[1] * 2,
                 halfExtents[2] * 2
             )
-            const edges = new THREE.EdgesGeometry(geom)
-            const mat = new THREE.LineBasicMaterial({ color: hexColor, linewidth: 2 })
-            const wireframe = new THREE.LineSegments(edges, mat)
+            // THICK edges (a cylinder per edge — WebGL draws lines one pixel wide), USER 2026-10-09:
+            // "los obb bastante gruesos como para que se vean bien"
+            const mat = new THREE.MeshBasicMaterial({ color: hexColor })
+            const wireframe = thickBox(halfExtents.map(Number), mat)
+            wireframe.userData.mat = mat
 
             // Create a group for wireframe + label
             const obbContainer = new THREE.Group()
@@ -5218,7 +5396,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             labelSprite.position.set(0, halfExtents[1] + spriteH * 0.7, 0)
             obbContainer.add(labelSprite)
 
-            obbContainer.visible = prevObbVis.get(globalKey) ?? true
+            // OBBs are OFF by default (USER 2026-10-09); the list's OBB box turns one on, a
+            // selection shows it while selected
+            obbContainer.userData.userObb = prevObbVis.get(globalKey) ?? false
+            obbContainer.visible = obbContainer.userData.userObb || selectedSegKeyRef.current === globalKey
             group.add(obbContainer)
             obbMapRef.current.set(globalKey, obbContainer)
             if (selectedSegKeyRef.current === globalKey) applySegmentSelection(globalKey)   // a rebuilt OBB keeps its rig

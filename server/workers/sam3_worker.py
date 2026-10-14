@@ -9,12 +9,27 @@
 #   * the card is EXCLUSIVE before SAM3 starts: the semantic service is stopped with the
 #     VERIFIED stop and repro.require_exclusive_gpu refuses a shared card — never a run on
 #     whatever memory was left (an OOM used to be retried once, then the prompt skipped);
-#   * NO partial result: a prompt SAM3 did not run to the end (failed, not reached, an OOM
-#     recovery) fails the stage naming it; the mask→cloud projection is part of the
+#   * NO partial result: a prompt SAM3 did not run to the end (failed, not reached, a
+#     recovery note) fails the stage naming it — a propagation that STOPPED midway and was
+#     continued to the end (the vendor tracker's stop, 2026-10-08; CUDA out of memory, USER
+#     2026-10-09 "no debe nunca fallar por colapso del GPU") RAN, every frame kept, and is
+#     declared in the census (identity_decisions); the mask→cloud projection is part of the
 #     deliverable and its failure fails the stage; the per-object mesh crop runs only from
 #     a scene mesh STAMPED for this reconstruction and its failure fails the stage too;
 #   * the model built (version, checkpoint sha256, device, numerics, the card and the
 #     environment) is recorded in the census.
+# Points 112 / 151 / 150 / 159 (2026-10-08, the wave-2 close):
+#   * the stage runs on the JOB's configuration — the dict this worker received (the frozen
+#     output/run_config.yaml the manager handed it): the thresholds check, the wrapper's
+#     every ``models.segmentation`` key (``get_sam3_wrapper(config=...)``) and
+#     ``run_segmentation(config=...)`` read that one dict, never the server's config.yaml;
+#   * ONE projection, on the reconstruction's PRODUCT epoch: that epoch is made live BEFORE
+#     SAM3 runs (a product epoch no longer on disk fails the stage before a frame is
+#     touched), the in-run projection of run_segmentation is deferred, and the masks are
+#     projected exactly once afterwards (pccr 2026-10-04: the in-run projection on the live
+#     epoch took 1 h 52 and the worker projected AGAIN on the product epoch, 23 min);
+#   * the census carries the sha256 of its inputs and nothing that varies between
+#     identical runs (segmentation.census).
 #
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
 
@@ -52,9 +67,18 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # Same for the SAM3 detection / confirmation thresholds of the model that will
     # be built (models.segmentation.sam3_thresholds): the wrapper loads the model
     # lazily inside the first prompt, and a bad key must fail the stage here,
-    # naming it — not end as every prompt at zero masklets.
+    # naming it — not end as every prompt at zero masklets. Of the JOB's configuration
+    # (points 112 / 151): the block the model is built from below.
     from segmentation.sam3_wrapper import check_sam3_thresholds
-    check_sam3_thresholds()
+    check_sam3_thresholds(config=config)
+
+    # SEGMENTATION IN ROUNDS (segmentation.autoprompt.rounds, USER 2026-10-09): round k >= 2
+    # segments the round's NEW prompts into the same store; the masks are projected on the
+    # cloud ONCE, after the last round (``_defer_projection`` on every round, then one call
+    # with ``_projection_only``)
+    seg_round = int(config.get("_seg_round") or 1)
+    projection_only = bool(config.get("_projection_only"))
+    defer_projection = bool(config.get("_defer_projection"))
 
     # Read VLM analysis if available (written by vlm_worker)
     vlm_path = output_dir / "vlm_analysis.json"
@@ -98,7 +122,46 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
                 "the VLM stage must run first. Re-run the pipeline; it resumes "
                 "from the missing stage automatically.")
 
+    if seg_round >= 2 and not projection_only:
+        from segmentation.autoprompt.rounds import round_prompts
+        new = round_prompts(output_dir, seg_round)
+        if not new:
+            raise RuntimeError(f"round {seg_round} recorded no new prompt in seg_rounds.json — "
+                               f"the SAM3 stage of a round runs only on new prompts")
+        prompt = ";".join(new)
+        frame_map, boxes_map, fallback_prompts = {}, None, None
+        pipe.send_log(f"[rounds] round {seg_round}: SAM3 on {len(new)} new prompt(s), appended "
+                      f"to the store: '{prompt}'")
+
     if pipe.check_cancel():
+        return
+
+    # THE PRODUCT EPOCH, BEFORE SAM3 (point 150): the masks are projected on the cloud the
+    # certification starts from — the reconstruction's product epoch — never on a certified
+    # or user-selected one. It is made live HERE, before a frame is touched: a product epoch
+    # that is no longer on disk fails the stage now (correction.chain.ChainError), not after
+    # the hours of SAM3. Without a cloud there is nothing to select and nothing to project.
+    has_cloud = (output_dir / "cleaned_cloud.ply").exists()
+    if has_cloud:
+        from correction.chain import select_product_epoch
+        epoch_info = select_product_epoch(output_dir, log=pipe.send_log)
+        pipe.send_log(f"the masks will be projected on the reconstruction's product epoch "
+                      f"{epoch_info.get('base_epoch')}"
+                      + (f" (made live again; the session showed epoch "
+                         f"{epoch_info.get('live_before')})" if epoch_info.get("selected")
+                         else " (already live)"))
+
+    if projection_only:
+        n_all = len(json.loads((output_dir / "segmentation.json").read_text())
+                    .get("instances", []))
+        if not has_cloud:
+            pipe.send_log("No cloud on disk — the projection after the last round has nothing "
+                          "to project on")
+            pipe.send_progress(100, f"Segmentation complete: {n_all} objects (2-D)", stage="sam3")
+            return
+        pipe.send_log(f"[rounds] the rounds ended — the masks of every round ({n_all} "
+                      f"instance(s)) are projected on the cloud once")
+        _project_and_crop(pipe, output_dir, n_all)
         return
 
     # EXCLUSIVE GPU (points 92 / 154): the VLM analysis is already on disk — vLLM is not
@@ -141,9 +204,11 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
 
     def _sam3_record():
         from segmentation.sam3_wrapper import get_sam3_wrapper
-        w = get_sam3_wrapper()
+        w = get_sam3_wrapper(config=config)
         rec = dict(getattr(w, "applied_thresholds", None) or {})
         rec["model"] = getattr(w, "model_record", None)
+        # the exclusive-GPU check as a fact of the run; its per-card memory reading of the
+        # moment is dropped by the census (point 159) — it is in this stage's log
         rec["exclusive_gpu"] = gpu_record
         try:
             import torch
@@ -154,6 +219,12 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
         return rec
 
     def _census(seg_error):
+        if seg_round >= 2:
+            # the census describes round 1's vocabulary; a round's prompts, their fate and their
+            # status are recorded in output/seg_rounds.json and this stage's log
+            pipe.send_log(f"[rounds] round {seg_round}: prompt status "
+                          f"{json.dumps(prompt_status, default=str)[:2000]}")
+            return
         try:
             from segmentation.census import build_census
             build_census(output_dir, prompt=prompt, vlm_doc=vlm_data, gap_kf=gap_kf,
@@ -166,6 +237,10 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
                           f"masks are kept, output/segmentation_census.json is not written",
                           level="warning")
 
+    # ``config``: the job's frozen configuration — the SAM3 stage's one configuration
+    # (points 112 / 151; segmentation.pipeline reads its keys from it, never from the
+    # server's config.yaml). ``defer_cloud_mapping``: the in-run projection does NOT run —
+    # the ONE projection of this stage is below, on the product epoch made live above.
     try:
         result = run_segmentation(
             frames_dir=str(frames_dir),
@@ -176,6 +251,9 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
             on_progress=_seg_progress,
             prompt_status=prompt_status,
             fallback_prompts=fallback_prompts,
+            config=config,
+            defer_cloud_mapping=True,
+            **({"append_store": True} if seg_round >= 2 else {}),
         )
     except Exception as e:
         _census(f"{type(e).__name__}: {e}")
@@ -191,9 +269,11 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
 
     # NEVER A PARTIAL RESULT (point 92): every prompt SAM3 received must have RUN to the
     # end on the first attempt. A prompt that failed, was skipped or never reached, or
-    # one that ran only after an out-of-memory recovery (the work done then depends on
-    # the card's free memory), fails the stage naming it — the census above already
-    # describes what happened.
+    # one that carries a recovery note, fails the stage naming it — the census above already
+    # describes what happened. An out-of-memory continuation is NOT a note (USER 2026-10-09,
+    # "no debe nunca fallar por colapso del GPU"): the prompt ran every frame, the stop is
+    # declared in its identity_decisions (oom_continuation) and depends only on the card
+    # (exclusive GPU, same card = same stop).
     incomplete = []
     for p, st in sorted((prompt_status or {}).items()):
         st = st or {}
@@ -212,13 +292,25 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # Segmented at the INTAKE (USER 2026-09-28: VLM + SAM3 run once, before any
     # geometry): there is no cloud yet. The 2-D masks are the deliverable of this
     # run; the cloud stage projects them onto the cloud the precision core publishes.
-    if not (output_dir / "cleaned_cloud.ply").exists():
+    if not has_cloud:
         pipe.send_log("No cloud on disk yet — the 2-D masks are kept; the mask→cloud "
                       "projection runs once a cloud exists")
         pipe.send_progress(100, f"Segmentation complete: {n_instances} objects (2-D)",
                            stage="sam3")
         return
 
+    if defer_projection:
+        pipe.send_log("[rounds] the mask→cloud projection waits for the last round")
+        pipe.send_progress(100, f"Segmentation complete: {n_instances} objects (the projection "
+                                f"runs after the last round)", stage="sam3")
+        return
+    _project_and_crop(pipe, output_dir, n_instances)
+
+
+
+def _project_and_crop(pipe: WorkerPipe, output_dir: Path, n_instances: int):
+    """The mask→cloud projection (and the per-object mesh crop) of the stage — after the
+    only round, or once after the last of the segmentation rounds."""
     # Apply to cleaned cloud
     pipe.send_progress(80, "Applying to point cloud...", stage="sam3")
 
@@ -227,9 +319,8 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # deliverable (segmentation_result.json, classification, the store): its failure
     # FAILS the stage with the reason (point 164) — it used to be "non-fatal", and the
     # stage went green with whatever an earlier run had left on disk.
-    # On the reconstruction's PRODUCT epoch — the cloud the certification starts from (point 150).
-    from correction.chain import select_product_epoch
-    select_product_epoch(output_dir, log=pipe.send_log)
+    # ONCE, on the reconstruction's PRODUCT epoch made live BEFORE SAM3 ran (point 150):
+    # the in-run projection was deferred above, so this is the stage's only projection.
     from segmentation_pipeline import map_segmentation_to_cloud
     seg_data = map_segmentation_to_cloud(output_dir)
     if seg_data.get("error"):

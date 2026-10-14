@@ -431,7 +431,7 @@
   position: absolute;
   left: 0;
   top: 0;
-  bottom: var(--ctl-h);
+  bottom: var(--sync-bar-h);
   width: 50%;
   display: flex;
   align-items: center;
@@ -475,25 +475,163 @@
 
 .stac-sync__loading--3d {
   left: 50%;
-  bottom: var(--ctl-h);
+  bottom: var(--sync-bar-h);
 }
 
-.stac-sync__controls {
+/* the player's bar (USER 2026-10-10: "la barra de progreso casi no se ve, mucho menos el
+   puntero"): a thick high-contrast track with the elapsed part filled, a large playhead, the
+   keyframes marked, and a row with time, frame, speed and the controls */
+.stac-sync__bar {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
-  height: var(--ctl-h);
+  height: var(--sync-bar-h);
   display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: 0 var(--sp-3);
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-3) var(--sp-2);
   background: var(--surface-1);
-  border-top: var(--bw) solid var(--border-1);
+  border-top: var(--bw) solid var(--border-2);
   pointer-events: auto;
 }
 
-.stac-sync__seek {
+.stac-sync__track {
+  position: relative;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  touch-action: none;
+  outline: none;
+}
+
+.stac-sync__track--off {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.stac-sync__track:focus-visible .stac-sync__handle {
+  box-shadow: var(--ring-focus), var(--elev-2);
+}
+
+.stac-sync__rail {
+  position: relative;
+  width: 100%;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--border-ctl);
+  overflow: hidden;
+  transition: height 120ms ease;
+}
+
+.stac-sync__track:hover .stac-sync__rail {
+  height: 8px;
+}
+
+.stac-sync__loaded {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: calc(var(--dl, 0) * 100%);
+  background: var(--text-3);
+  opacity: 0.35;
+}
+
+.stac-sync__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: calc(var(--p, 0) * 100%);
+  background: var(--brand-orange);
+}
+
+.stac-sync__tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--x) * 100%);
+  width: 1px;
+  background: var(--surface-0);
+  opacity: 0.55;
+}
+
+.stac-sync__handle {
+  position: absolute;
+  left: calc(var(--p, 0) * 100%);
+  top: 50%;
+  width: 16px;
+  height: 16px;
+  margin: -8px 0 0 -8px;
+  border-radius: 50%;
+  background: var(--brand-orange);
+  border: 2px solid var(--text-1);
+  box-shadow: var(--elev-2);
+  pointer-events: none;
+  transition: transform 120ms ease;
+}
+
+.stac-sync__track:hover .stac-sync__handle,
+.stac-sync__track:active .stac-sync__handle {
+  transform: scale(1.25);
+}
+
+.stac-sync__hover {
+  position: absolute;
+  bottom: 100%;
+  left: calc(var(--h, 0) * 100%);
+  transform: translateX(-50%);
+  padding: 2px var(--sp-1);
+  border-radius: var(--r-1);
+  background: var(--surface-3);
+  color: var(--text-1);
+  font-size: var(--fs-1);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+}
+
+.stac-sync__track:hover .stac-sync__hover {
+  opacity: 1;
+}
+
+.stac-sync__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.stac-sync__time {
+  color: var(--text-1);
+  font-size: var(--fs-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stac-sync__info {
+  color: var(--text-2);
+  font-size: var(--fs-1);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stac-sync__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  color: var(--text-2);
+  font-size: var(--fs-1);
+  white-space: nowrap;
+}
+
+.stac-sync__chip svg {
+  width: 14px;
+  height: 14px;
+}
+
+.stac-sync__spacer {
   flex: 1;
 }
 

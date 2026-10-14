@@ -63,10 +63,11 @@ def _footprint(ev, fidx: int, pts: np.ndarray, mh: int, mw: int,
         if pr is None:
             return None
         u, v, _z, front = pr
-        # K lives on the TRACE grid; the masks on SAM3's. Per axis, off the
-        # measured extent — 832/688 and 464/384 are not the same number.
-        mu = (u * mw / ev.kw).astype(np.int64)
-        mv = (v * mh / ev.kh).astype(np.int64)
+        # K lives on the RECORD grid; the masks on their DECLARED grid. The record pixel goes
+        # to the mask pixel through the EXACT grid maps (record → native crop/scale → mask
+        # resize, docs/plan_determinismo.md point 108: never a scale alone, which ignored
+        # Omega's crop and truncated) — the same path _visible_in_frame takes
+        mu, mv = ev.mask_pixels(u, v, mh, mw)
         keep = front & (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
     if keep.sum() < 8:
         return None

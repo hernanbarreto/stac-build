@@ -20,6 +20,12 @@ if not logger.handlers:
     _handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
     logger.addHandler(_handler)
 logger.propagate = False
+# The SERVER's configuration — the default of every no-argument call (the viewer's
+# interactive SAM3 routes in main.py, the CLIs; intake I2's exclusion masks are gone, USER
+# 2026-10-08). The SAM3 STAGE never
+# runs on it: the worker hands the JOB's frozen configuration (output/run_config.yaml,
+# the dict it received) to ``get_sam3_wrapper(config=...)`` / ``check_sam3_thresholds``
+# (docs/plan_determinismo.md points 112 / 151, 2026-10-08) — one stage, one configuration.
 from config import cfg
 
 # ── detection / confirmation thresholds (models.segmentation.sam3_thresholds) ──
@@ -60,8 +66,12 @@ class SAM3RunError(RuntimeError):
 
 
 class SAM3OutOfMemory(SAM3RunError):
-    """CUDA out of memory inside a prompt (point 92: a failure — never a retry on a card
-    whose free memory depends on what else was on it, never a skipped prompt)."""
+    """The ONE out-of-memory that fails the stage (USER 2026-10-09, "no debe nunca fallar por
+    colapso del GPU", replacing point 92's "an OOM fails"): a fresh SAM3 session that cannot
+    complete even ONE frame on the card, or a prompt whose add_prompt / start_session runs
+    out of memory twice in a fresh session — physically impossible on this card, raised by
+    ``segmentation.pipeline`` naming the frame and the memory. Every other out-of-memory is
+    a :class:`SAM3PropagationStopped` with ``cause`` :data:`STOP_OUT_OF_MEMORY`, continued."""
 
 
 # the vendor tracker's own message when, midway through a propagation, one of its multiplex
@@ -72,17 +82,85 @@ class SAM3OutOfMemory(SAM3RunError):
 # is propagated again from there (segmentation.pipeline, the continuation batch)
 VENDOR_STATE_WITHOUT_CONDITIONING = "No points are provided; please add points first"
 
+# why a propagation stopped midway (SAM3PropagationStopped.cause)
+STOP_VENDOR_STATE = "vendor_state_without_conditioning"   # the tracker's own stop (2026-10-08)
+STOP_OUT_OF_MEMORY = "out_of_memory"                      # the card ran out (USER 2026-10-09)
+
+_MIB = 1 << 20
+
+
+def is_cuda_oom(exc: Optional[BaseException]) -> bool:
+    """True when ``exc`` — or an error in its cause / context chain (a vendor that wraps the
+    allocator's error while handling it) — is CUDA running out of memory: torch's
+    ``OutOfMemoryError`` or the message the allocator and the driver both carry ("out of
+    memory", the rule this wrapper used since point 92)."""
+    oom_types = tuple(t for t in (getattr(torch, "OutOfMemoryError", None),
+                                  getattr(torch.cuda, "OutOfMemoryError", None))
+                      if isinstance(t, type))
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if (oom_types and isinstance(exc, oom_types)) or "out of memory" in str(exc).lower():
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def card_memory_mib() -> Optional[Dict[str, int]]:
+    """The card's memory as this process reads it, in MiB: the driver's free / total
+    (``torch.cuda.mem_get_info``) and torch's allocated / reserved. None when CUDA is not up
+    or the reading fails — a reading that cannot be made is recorded as absent, never
+    invented."""
+    try:
+        if not torch.cuda.is_available():
+            return None
+        free, total = torch.cuda.mem_get_info()
+        return {"free_mib": int(free) // _MIB, "total_mib": int(total) // _MIB,
+                "allocated_mib": int(torch.cuda.memory_allocated()) // _MIB,
+                "reserved_mib": int(torch.cuda.memory_reserved()) // _MIB}
+    except Exception:  # noqa: BLE001 — unreadable is None, never a number
+        return None
+
+
+def _leading_run(done_locals: List[int]) -> int:
+    """How many LEADING local frames (0, 1, … n − 1) a propagation completed — the frames a
+    continuation can start after. Frames past a gap (a prompt frame > 0: box seeds, outside
+    the SIMPLE pipeline) are not a leading run and are propagated again by the continuation."""
+    done = set(int(f) for f in done_locals)
+    n = 0
+    while n in done:
+        n += 1
+    return n
+
 
 class SAM3PropagationStopped(SAM3RunError):
-    """The vendor tracker stopped midway through a propagation with
-    :data:`VENDOR_STATE_WITHOUT_CONDITIONING`. ``partial`` holds the frames completed before
-    it (``frames_done`` leading local frames, 0 … frames_done − 1, complete); the caller
-    propagates the rest of the batch again from there. Any other error stays a failure."""
+    """A propagation that stopped midway, the frames before the stop kept: ``partial`` holds
+    the ``frames_done`` LEADING local frames (0 … frames_done − 1, complete) and the caller
+    propagates the rest of the batch again from there, in a fresh session.
 
-    def __init__(self, msg: str, partial: Dict[int, Any], frames_done: int):
+    ``cause`` says why: :data:`STOP_VENDOR_STATE` — the vendor tracker's own stop
+    (:data:`VENDOR_STATE_WITHOUT_CONDITIONING`, USER 2026-10-08 point 92: "que no falle, que
+    lo reporte sin fallar") — or :data:`STOP_OUT_OF_MEMORY` — the card ran out (USER
+    2026-10-09: "no debe nunca fallar por colapso del GPU"); for an out-of-memory ``phase``
+    may also be ``start_session`` / ``add_prompt`` (nothing propagated, ``frames_done`` 0).
+    ``memory`` (out-of-memory only) is the card at the stop and after the session was
+    released (:func:`card_memory_mib`; None where unreadable); ``frames_propagated`` the
+    distinct frames the propagation yielded, leading or not. Any other error stays a
+    :class:`SAM3RunError` that fails the stage."""
+
+    def __init__(self, msg: str, partial: Dict[int, Any], frames_done: int,
+                 cause: str = STOP_VENDOR_STATE, phase: str = "propagate_in_video",
+                 memory: Optional[Dict[str, Any]] = None,
+                 frames_propagated: Optional[int] = None, prompt_frame: Optional[int] = None):
         super().__init__(msg)
         self.partial = partial
         self.frames_done = int(frames_done)
+        self.cause = cause
+        self.phase = phase
+        self.memory = memory
+        self.frames_propagated = int(frames_done if frames_propagated is None
+                                     else frames_propagated)
+        self.prompt_frame = prompt_frame
 
 
 SAM3_VERSIONS = ("sam3", "sam3.1")
@@ -92,9 +170,19 @@ SAM3_VERSIONS = ("sam3", "sam3.1")
 SAM3_DETERMINISTIC_SEED = 0
 
 
-def segmentation_config() -> dict:
-    """``models.segmentation`` of the config ``load_model`` builds from."""
-    return (cfg.get("models", {}) or {}).get("segmentation", {}) or {}
+def segmentation_config(config: Optional[dict] = None) -> dict:
+    """``models.segmentation`` of the configuration ``load_model`` builds from: ``config``
+    (the job's frozen configuration — what the SAM3 worker hands in, points 112 / 151) or,
+    with None, the server's config.yaml (the CLI / viewer paths)."""
+    src = cfg if config is None else config
+    return ((src or {}).get("models", {}) or {}).get("segmentation", {}) or {}
+
+
+def _segmentation_block_key(scfg: dict) -> str:
+    """Canonical text of a ``models.segmentation`` block — two configurations are the same
+    for the wrapper when their blocks are (key order never counts)."""
+    import json
+    return json.dumps(scfg, sort_keys=True, default=str)
 
 
 def sam3_build_version(scfg: dict) -> str:
@@ -119,11 +207,14 @@ def require_cuda(version: str) -> None:
             f"never built in its place (docs/plan_determinismo.md point 165)")
 
 
-def check_sam3_thresholds(scfg: Optional[dict] = None) -> Dict[str, Any]:
+def check_sam3_thresholds(scfg: Optional[dict] = None, *,
+                          config: Optional[dict] = None) -> Dict[str, Any]:
     """Validate the threshold block of the model that WILL be built (the SAM3
     worker calls this before any frame is touched; ``load_model`` before the
-    vendor builder). Raises :class:`SAM3ConfigError` naming the key."""
-    scfg = segmentation_config() if scfg is None else scfg
+    vendor builder). ``scfg`` is the ``models.segmentation`` block itself; without it,
+    the block of ``config`` (the job's frozen configuration) or of the server's.
+    Raises :class:`SAM3ConfigError` naming the key."""
+    scfg = segmentation_config(config) if scfg is None else scfg
     return sam3_thresholds(scfg, sam3_build_version(scfg))
 
 
@@ -205,14 +296,27 @@ class SAM3Wrapper:
     and propagation across video chunks.
     """
     
-    def __init__(self, device: str = "cuda"):
+    JOB_CONFIG_SOURCE = "job (the frozen run configuration)"
+    SERVER_CONFIG_SOURCE = "server config.yaml"
+
+    def __init__(self, device: str = "cuda", config: Optional[dict] = None):
         self.device = device if torch.cuda.is_available() else "cpu"
         self.predictor = None
         self.is_loaded = False
         self.lock = Lock()
+        # the configuration every ``models.segmentation`` key of this model is read from:
+        # the JOB's frozen one when the SAM3 stage built the wrapper (points 112 / 151),
+        # the server's config.yaml for the no-argument (viewer / CLI) paths
+        self._config: Optional[dict] = config
+        self.config_source = self.JOB_CONFIG_SOURCE if config is not None \
+            else self.SERVER_CONFIG_SOURCE
         self._interactive_sessions: Dict[str, dict] = {}  # state_id → session info dict
-        # ONE batch session kept open and reused across concepts (see _session_for).
-        self._batch_session: Optional[Tuple[str, str]] = None  # (batch_dir, session_id)
+        # batch sessions kept open and reused across concepts (see _session_for):
+        # batch_dir → session_id, oldest first, and the card memory each one's frames took
+        self._batch_sessions: Dict[str, str] = {}
+        self._session_bytes: Dict[str, int] = {}
+        # the largest growth one prompt's propagation took on the card, measured (bytes)
+        self._prompt_peak_bytes: int = 0
         # what apply_sam3_thresholds wrote on the last model built (the census reads it)
         self.applied_thresholds: Optional[Dict[str, Any]] = None
         # the model built: version, checkpoint (path + sha256), device, dtype, the torch
@@ -230,30 +334,67 @@ class SAM3Wrapper:
     # benchmark `forward()` does the opposite: init_state ONCE, then loop
     # add_prompt → propagate over the prompts. Same masks, a fraction of the I/O.
 
+    def _session_budget_bytes(self) -> Optional[int]:
+        """Card memory the open sessions' frames may hold: the card's TOTAL less the declared
+        margin (intake.parallax.vram_margin_frac), less what the model holds, less the largest
+        growth one prompt has taken in this run. None (= keep one session, as before) until a
+        prompt has been measured or when the card cannot be read."""
+        if self._prompt_peak_bytes <= 0 or not torch.cuda.is_available():
+            return None
+        try:
+            _free, total = torch.cuda.mem_get_info()
+        except Exception:  # noqa: BLE001 — unreadable: keep one session
+            return None
+        margin = float(((self._config or cfg)["intake"]["parallax"])["vram_margin_frac"])
+        frames = sum(self._session_bytes.values())
+        model = int(torch.cuda.memory_allocated()) - frames
+        return int(total * (1.0 - margin)) - model - self._prompt_peak_bytes
+
     def _session_for(self, batch_dir: str) -> str:
-        """Session for this frame set, opened once and reused across concepts."""
-        if self._batch_session and self._batch_session[0] == batch_dir:
-            return self._batch_session[1]
-        self.release_batch_session()          # only ever one open at a time
+        """Session for this frame set, opened once and reused across concepts.
+
+        USER 2026-10-09 ("hacerlo como dice la documentación"): SAM 3.1's own recipe loads a
+        video's frames ONCE into a session and switches prompt by resetting it. With more
+        frames than one batch (pccr: 0–249 and 240–294) the categories loop over the batches,
+        and a single open session was closed and re-decoded TWICE PER PROMPT. Every batch's
+        session now stays open while the frames of all of them fit the card's budget
+        (:meth:`_session_budget_bytes`); past it the oldest is closed first."""
+        if batch_dir in self._batch_sessions:
+            return self._batch_sessions[batch_dir]
+        budget = self._session_budget_bytes()
+        while self._batch_sessions and (
+                budget is None
+                or sum(self._session_bytes.values()) + max(self._session_bytes.values(),
+                                                           default=0) > budget):
+            self._close_session(next(iter(self._batch_sessions)))
+            budget = self._session_budget_bytes()
+        before = int(torch.cuda.memory_allocated()) if torch.cuda.is_available() else 0
         response = self.predictor.handle_request(
             request=dict(type="start_session", resource_path=batch_dir)
         )
-        self._batch_session = (batch_dir, response["session_id"])
-        logger.info(f"[SAM3-Batch] Opened session for {batch_dir} (reused across concepts)")
+        after = int(torch.cuda.memory_allocated()) if torch.cuda.is_available() else 0
+        self._batch_sessions[batch_dir] = response["session_id"]
+        self._session_bytes[batch_dir] = max(after - before, 0)
+        logger.info(f"[SAM3-Batch] Opened session for {batch_dir} (reused across concepts; "
+                    f"{len(self._batch_sessions)} batch session(s) open)")
         return response["session_id"]
 
-    def release_batch_session(self):
-        """Close the reused batch session and free its frames. Call when the frame
-        set changes, on error, and once segmentation is done."""
-        if not self._batch_session:
-            return
-        _, session_id = self._batch_session
-        self._batch_session = None
+    def _close_session(self, batch_dir: str):
+        session_id = self._batch_sessions.pop(batch_dir)
+        self._session_bytes.pop(batch_dir, None)
         try:
             self.predictor.handle_request(
                 request=dict(type="close_session", session_id=session_id))
         except Exception as e:  # noqa: BLE001
             logger.error(f"Error closing batch session: {e}")
+
+    def release_batch_session(self):
+        """Close every open batch session and free their frames. Call on error and once
+        segmentation is done."""
+        if not self._batch_sessions:
+            return
+        for batch_dir in list(self._batch_sessions):
+            self._close_session(batch_dir)
         gc.collect()
         try:
             if torch.cuda.is_available():
@@ -296,7 +437,7 @@ class SAM3Wrapper:
                 return
 
             import repro
-            scfg = segmentation_config()
+            scfg = segmentation_config(self._config)
             # the thresholds of the model about to be built are validated BEFORE
             # the vendor builder: a bad key fails in milliseconds, naming it,
             # instead of after a full model build per prompt (SAM3ConfigError is
@@ -362,6 +503,7 @@ class SAM3Wrapper:
                     "dtype": "bfloat16 (autocast)", "builder_args": builder_args,
                     "numerics": numerics,
                     "thresholds": dict(self.applied_thresholds or {}),
+                    "config_source": self.config_source,
                 }
                 logger.info(f"SAM {version} loaded on GPU (bfloat16 autocast active; TF32 off, "
                             f"deterministic algorithms strict, seed {SAM3_DETERMINISTIC_SEED}; "
@@ -430,8 +572,8 @@ class SAM3Wrapper:
         
         # Load default from config if needed
         if keyframe_interval is None:
-            keyframe_interval = cfg["models"]["segmentation"]["keyframe_interval"]
-            
+            keyframe_interval = segmentation_config(self._config)["keyframe_interval"]
+
         session_id = None
         results = {}
         
@@ -469,8 +611,8 @@ class SAM3Wrapper:
             # Frame 15 produces sofa mask.
             # SAM3 handles this. 
             # So the strategy: Prompt at configured frames (e.g. 0 and 15)
-            prompts_to_add = cfg["models"]["segmentation"]["prompt_search_frames"]
-            
+            prompts_to_add = segmentation_config(self._config)["prompt_search_frames"]
+
             # Filter out frames that exceed the actual chunk length
             max_frame_idx = len(os.listdir(frames_path)) - 1
             valid_prompts = [p for p in prompts_to_add if p <= max_frame_idx]
@@ -611,8 +753,8 @@ class SAM3Wrapper:
             self.load_model()
         
         if keyframe_interval is None:
-            keyframe_interval = cfg["models"]["segmentation"]["keyframe_interval"]
-        
+            keyframe_interval = segmentation_config(self._config)["keyframe_interval"]
+
         frames_path = Path(frames_dir)
         masks_dir = frames_path.parent / "masks"
         masks_dir.mkdir(exist_ok=True)
@@ -637,11 +779,11 @@ class SAM3Wrapper:
             )
             session_id = response["session_id"]
             
-            # 2. Add Prompts (a frames clave distribuidos)
-            prompt_frames = cfg["models"]["segmentation"]["prompt_search_frames"]
-            # Distribuir prompts a lo largo de la secuencia
+            # 2. Add the prompts (on keyframes spread over the sequence)
+            prompt_frames = segmentation_config(self._config)["prompt_search_frames"]
+            # spread the prompts along the sequence
             if total_frames > 100:
-                # Para secuencias largas, añadir prompts adicionales
+                # a long sequence gets prompts at four more evenly spaced frames
                 step = total_frames // 5
                 prompt_frames = list(set(prompt_frames + [0, step, step*2, step*3, step*4]))
             
@@ -720,7 +862,8 @@ class SAM3Wrapper:
     def process_batch(self, batch_dir: str, prompt_text: str,
                       index_mapping: Dict[int, int],
                       prompt_frames: List[int] = None,
-                      boxes_by_local: Dict[int, list] = None) -> Dict[int, Any]:
+                      boxes_by_local: Dict[int, list] = None,
+                      per_frame_output: bool = False) -> Dict[int, Any]:
         """
         Process a batch of frames in a temporary directory.
 
@@ -737,24 +880,47 @@ class SAM3Wrapper:
 
         Returns:
             Dict[original_frame_idx → {"out_binary_masks": ndarray, "out_obj_ids": ndarray}]
+
+        Raises:
+            SAM3PropagationStopped: the propagation stopped midway — the vendor tracker's own
+                stop, or CUDA out of memory anywhere in the prompt (USER 2026-10-09: "no debe
+                nunca fallar por colapso del GPU"). It carries the leading frames completed
+                before the stop; on an out-of-memory the session is RELEASED first (its GPU
+                memory back on the card, measured) so the caller continues in a fresh one.
+            SAM3RunError: any other error, in any phase — the prompt fails (point 92).
         """
         if not self.is_loaded:
             self.load_model()
-        
+
         batch_path = Path(batch_dir)
         batch_size = len(index_mapping)
         results = {}
         done_locals: List[int] = []
         phase = "start_session"
+        f_idx = None
+        _vram_before = 0
+        oom: Optional[Dict[str, Any]] = None     # an out-of-memory stop, raised past the handler
+        prompt_base: Optional[int] = None        # card memory allocated when the prompt started
 
+        # ``per_frame_output`` (a continuation after the vendor tracker's stop, 2026-10-09): the
+        # model hands its frames back ONE BY ONE instead of in postprocessing batches, so a stop
+        # reports the frames really done — pccr's 'pipe' stopped before its first batch of 16
+        # was handed back, read as 0 frames done, and the continuation skipped frame by frame
+        pp_model = getattr(self.predictor, "model", None)
+        pp_saved = getattr(pp_model, "postprocess_batch_size", None)
+        if per_frame_output and pp_saved is not None:
+            pp_model.postprocess_batch_size = 1
         try:
             logger.info(f"[SAM3-Batch] Processing {batch_size} frames from {batch_dir}")
-            _vram_before = 0
             if torch.cuda.is_available():
                 _vram_before = torch.cuda.memory_allocated() / (1024**3)
 
             # 1. Session for this frame set — opened once, reused for every concept
             session_id = self._session_for(batch_dir)
+            prompt_base = None
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+                prompt_base = int(torch.cuda.memory_allocated())
 
             # 2. ONE add_prompt. A text prompt is not tied to a frame ("text prompts
             # are NOT associated with a particular frame ... they apply to all frames",
@@ -831,32 +997,59 @@ class SAM3Wrapper:
             logger.info(f"[SAM3-Batch] Produced masks for {len(results)} frames (VRAM: {_vram_before:.2f}→{_vram_after:.2f} GB)")
             
         except Exception as e:
-            is_oom = "out of memory" in str(e).lower()
+            is_oom = is_cuda_oom(e)
+            # the card at the moment of the stop, before anything is released (out-of-memory
+            # only: the census records it, USER 2026-10-09)
+            at_stop = card_memory_mib() if is_oom else None
             logger.error(f"Error during batch processing ({phase}): {e}")
             import traceback
             traceback.print_exc()
+            stop_like = is_oom or (phase == "propagate_in_video"
+                                   and VENDOR_STATE_WITHOUT_CONDITIONING in str(e))
+            if stop_like:
+                # the locals of every frame the error unwound through go NOW — the vendor's
+                # propagation holds the session's memory bank and the frame's features there,
+                # and a traceback kept alive (an exception chained to the stop the caller is
+                # handling) would keep them on the card while the continuation's FRESH session
+                # starts (USER 2026-10-09). This frame (still executing) keeps ``results``.
+                traceback.clear_frames(e.__traceback__)
             # the reused session may be in a bad state (and on OOM its frames are
             # the memory we need back) — drop it
             self.release_batch_session()
-            # the vendor tracker's deterministic midway stop: the leading frames it completed
-            # are a complete result and go back to the caller, who propagates the rest again
-            # (only when they are the frames 0 … n−1 of the batch, propagated forward)
-            if (phase == "propagate_in_video" and not is_oom
-                    and VENDOR_STATE_WITHOUT_CONDITIONING in str(e)):
-                n_done = len(done_locals)
-                if n_done and sorted(done_locals) == list(range(n_done)):
-                    raise SAM3PropagationStopped(
-                        f"SAM3 propagation for prompt '{prompt_text}' stopped by the vendor tracker "
-                        f"after {n_done} of {batch_size} frame(s) ({VENDOR_STATE_WITHOUT_CONDITIONING})",
-                        partial=results, frames_done=n_done) from e
-            # NEVER partial results (point 92): an error midway through the propagation
-            # used to return the frames done so far as the category's masks, recorded as
-            # 'ran'. The prompt fails, with its phase; an OOM is a failure like any other
-            # (no retry on a card whose free memory depends on its co-tenants, no skip).
-            cls = SAM3OutOfMemory if is_oom else SAM3RunError
-            raise cls(f"SAM3 {phase} failed for prompt '{prompt_text}' "
-                      f"({type(e).__name__}: {e})") from e
+            if is_oom:
+                # CUDA OUT OF MEMORY IS A STOP, NOT A FAILURE (USER 2026-10-09: "no debe nunca
+                # fallar por colapso del GPU" — it replaces point 92's "an OOM fails"): the
+                # leading frames completed before it go back to the caller exactly like the
+                # vendor tracker's stop, and the batch loop continues the rest in a fresh
+                # session. It is raised AFTER this handler, unchained, so nothing of the
+                # stopped propagation outlives the release.
+                n_lead = _leading_run(done_locals)
+                oom = {"error": f"{type(e).__name__}: {e}", "n_done": n_lead,
+                       "n_propagated": len(set(done_locals)), "at_stop": at_stop,
+                       "partial": {index_mapping.get(i, i): results[index_mapping.get(i, i)]
+                                   for i in range(n_lead)
+                                   if index_mapping.get(i, i) in results}}
+            else:
+                # the vendor tracker's deterministic midway stop: the leading frames it
+                # completed are a complete result and go back to the caller, who propagates the
+                # rest again (only when they are the frames 0 … n−1 of the batch, propagated
+                # forward)
+                if (phase == "propagate_in_video"
+                        and VENDOR_STATE_WITHOUT_CONDITIONING in str(e)):
+                    n_done = len(done_locals)
+                    if sorted(done_locals) == list(range(n_done)):   # 0 frames too: the caller skips that frame
+                        raise SAM3PropagationStopped(
+                            f"SAM3 propagation for prompt '{prompt_text}' stopped by the vendor tracker "
+                            f"after {n_done} of {batch_size} frame(s) ({VENDOR_STATE_WITHOUT_CONDITIONING})",
+                            partial=results, frames_done=n_done) from e
+                # NEVER partial results (point 92): an error midway through the propagation
+                # used to return the frames done so far as the category's masks, recorded as
+                # 'ran'. The prompt fails, with its phase.
+                raise SAM3RunError(f"SAM3 {phase} failed for prompt '{prompt_text}' "
+                                   f"({type(e).__name__}: {e})") from e
         finally:
+            if per_frame_output and pp_saved is not None:
+                pp_model.postprocess_batch_size = pp_saved
             # NOTE: the session stays OPEN for the next concept — release_batch_session()
             # closes it when the frame set changes or segmentation ends.
             # Free GPU tensors from propagation after each batch
@@ -866,7 +1059,36 @@ class SAM3Wrapper:
                     torch.cuda.empty_cache()
             except:
                 pass
-        
+
+        if oom is not None:
+            # VERIFIED, not assumed: the card after the release (the handler's exception, and
+            # with it the stopped propagation's frames, is gone; gc + empty_cache ran above).
+            # The log puts it beside the reading at the stop and torch's allocation when the
+            # prompt started, so a release that did not give the memory back is visible.
+            after = card_memory_mib()
+            at_stop = oom["at_stop"]
+            mem_line = (
+                f"card at the stop: free {at_stop['free_mib']} of {at_stop['total_mib']} MiB, "
+                f"allocated {at_stop['allocated_mib']} MiB; after the release: free "
+                f"{after['free_mib']} MiB, allocated {after['allocated_mib']} MiB (allocated "
+                f"when the prompt started: {_vram_before * 1024:.0f} MiB)"
+                if at_stop and after else "card memory not readable from this process")
+            logger.warning(
+                f"[SAM3-Batch] CUDA OUT OF MEMORY in {phase} for prompt '{prompt_text}' after "
+                f"{oom['n_done']} of {batch_size} frame(s) — session released, {mem_line}. "
+                f"The stop point depends on the card's memory: the same card with the GPU "
+                f"exclusive stops at the same frame (USER 2026-10-09: continued, never a "
+                f"failure)")
+            raise SAM3PropagationStopped(
+                f"SAM3 {phase} for prompt '{prompt_text}' ran out of CUDA memory after "
+                f"{oom['n_done']} of {batch_size} frame(s) ({oom['error']}) — {mem_line}",
+                partial=oom["partial"], frames_done=oom["n_done"], cause=STOP_OUT_OF_MEMORY,
+                phase=phase, memory={"at_stop": at_stop, "after_release": after},
+                frames_propagated=oom["n_propagated"], prompt_frame=f_idx)
+
+        if prompt_base is not None:
+            self._prompt_peak_bytes = max(self._prompt_peak_bytes,
+                                          int(torch.cuda.max_memory_allocated()) - prompt_base)
         return results
     
     # ── Interactive Segmentation (point-based prompts) ──────────────────
@@ -1525,8 +1747,35 @@ class SAM3Wrapper:
 # Singleton instance
 _sam3_wrapper: Optional[SAM3Wrapper] = None
 
-def get_sam3_wrapper() -> SAM3Wrapper:
+
+def get_sam3_wrapper(config: Optional[dict] = None) -> SAM3Wrapper:
+    """The process's one SAM3 wrapper. ``config`` is the configuration its
+    ``models.segmentation`` keys are read from — the JOB's frozen one in the SAM3 stage
+    (points 112 / 151); None keeps the server's config.yaml (viewer, intake, CLI paths —
+    the no-argument call every existing caller makes). ONE configuration per process: a
+    wrapper already built under another ``models.segmentation`` block is replaced while
+    its model is not loaded, and REFUSED once it is — a stage never runs on two."""
     global _sam3_wrapper
     if _sam3_wrapper is None:
-        _sam3_wrapper = SAM3Wrapper()
+        _sam3_wrapper = SAM3Wrapper(config=config)
+    elif config is not None:
+        want = _segmentation_block_key(segmentation_config(config))
+        have = _segmentation_block_key(segmentation_config(_sam3_wrapper._config))
+        if want != have:
+            if _sam3_wrapper.is_loaded:
+                raise SAM3ConfigError(
+                    "get_sam3_wrapper(config=...) was handed a 'models.segmentation' block "
+                    "that differs from the one the loaded SAM3 model of this process was built "
+                    f"with ({_sam3_wrapper.config_source}) — a stage never runs on two "
+                    "configurations (docs/plan_determinismo.md points 112 / 151)")
+            _sam3_wrapper = SAM3Wrapper(config=config)
+        elif _sam3_wrapper._config is None:
+            # the SAME block, first asked for by a no-argument call (the server's
+            # config.yaml): the job's dict is adopted, so every key read from now on and the
+            # record (model_record / census ``config_source``) name the configuration the
+            # stage ran on — nothing the model was built with changes, the blocks are equal
+            _sam3_wrapper._config = config
+            _sam3_wrapper.config_source = SAM3Wrapper.JOB_CONFIG_SOURCE
+            if isinstance(_sam3_wrapper.model_record, dict):
+                _sam3_wrapper.model_record["config_source"] = SAM3Wrapper.JOB_CONFIG_SOURCE
     return _sam3_wrapper

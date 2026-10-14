@@ -1071,10 +1071,12 @@ class SessionProjection:
         return int(self.mask_grid.h), int(self.mask_grid.w)
 
     def continuous(self, P_world: np.ndarray, pose: np.ndarray, min_depth: float,
-                   grid) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+                   grid, lens: Optional[bool] = None
+                   ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """(front, x, y, z): ``front`` per point (in front of the camera by more
         than ``min_depth``); x (column), y (row) on ``grid`` and the camera depth
-        z, for the points in front only."""
+        z, for the points in front only. ``lens`` False projects onto the
+        UNDISTORTED image (the camera's K alone); None = the camera's own lens."""
         from precision.camera import distort_points, native_to_grid
         P = np.asarray(P_world, np.float64).reshape(-1, 3)
         M = np.linalg.inv(_c2w(pose))
@@ -1087,7 +1089,7 @@ class SessionProjection:
         zf = z[front]
         uv = np.stack([self.K[0, 0] * q[front, 0] / zf + self.K[0, 2],
                        self.K[1, 1] * q[front, 1] / zf + self.K[1, 2]], 1)
-        if self._lens:
+        if self._lens and lens is not False:
             uv = distort_points(uv, self.cam)
         g = native_to_grid(uv, grid)
         return front, g[:, 0], g[:, 1], zf
@@ -1215,6 +1217,19 @@ def mask_store_hw(output_dir) -> Tuple[int, int]:
     return int(a.shape[0]), int(a.shape[1])
 
 
+def _birth_grid_undistorted(output_dir) -> bool:
+    """True when the published cloud was built on the UNDISTORTED image: its report
+    (corrected_cloud.json) declares the bend carried Omega's record through the lens."""
+    p = Path(output_dir) / "corrected_cloud.json"
+    if not p.exists():
+        return False
+    try:
+        g = (json.loads(p.read_text()) or {}).get("grid_of_the_bend") or {}
+    except (OSError, ValueError):
+        return False
+    return bool(isinstance(g, dict) and g.get("lens") and g.get("carried"))
+
+
 def projection_camera(output_dir, xyz: np.ndarray, ks_of_point: np.ndarray,
                       poses: np.ndarray, pixel_row: np.ndarray, pixel_col: np.ndarray,
                       min_depth_m: Optional[float] = None,
@@ -1251,9 +1266,18 @@ def projection_camera(output_dir, xyz: np.ndarray, ks_of_point: np.ndarray,
                              source=f"{p.name} ({cam.source}, camera epoch "
                                     f"{cam.camera_epoch})")
     md = float(_vd_cfg().min_depth_m if min_depth_m is None else min_depth_m)
+    # THE GRID THE BIRTH PIXELS LIVE ON (observatorio 2026-10-10): a cloud bent through the lens
+    # was built on the UNDISTORTED image — corrected_cloud.json ``grid_of_the_bend`` says so
+    # (``lens`` + ``carried``) — and each point's birth pixel is a pixel of that corrected image.
+    # The check verifies the camera against the image the cloud was built on: without the lens
+    # then. Projecting with the lens put the corrected pixels on the ORIGINAL image and read the
+    # lens itself as a camera mismatch (5.52 px on observatorio, k1 0.057). The masks are on the
+    # original frames: everything projected onto them keeps the lens.
+    undistorted_birth = _birth_grid_undistorted(output_dir)
 
     def _session(P, k):
-        front, x, y, _z = proj.continuous(P, poses[k], md, rec)
+        front, x, y, _z = proj.continuous(P, poses[k], md, rec,
+                                          lens=False if undistorted_birth else None)
         return front, x, y
 
     chk = birth_systematic(_session, xyz, ks, len(poses), pixel_row, pixel_col, (Wt, Ht))
@@ -1288,7 +1312,9 @@ def projection_camera(output_dir, xyz: np.ndarray, ks_of_point: np.ndarray,
             f"{chk['worst_keyframes'][:3]}) against the {BIRTH_PIXEL_PRECISION_PX} px "
             f"the birth pixel is stored at{alt} — the mask filter does not mix cameras")
     log(f"[visit-drift] camera: {proj.source} K=({cam.fx:.2f}, {cam.fy:.2f}, "
-        f"{cam.cx:.2f}, {cam.cy:.2f}) reproduces the cloud's birth pixels — "
+        f"{cam.cx:.2f}, {cam.cy:.2f}) reproduces the cloud's birth pixels"
+        + (" on the UNDISTORTED image the cloud was built on (corrected_cloud.json: the lens "
+           "was carried; the masks keep it)" if undistorted_birth else "") + " — "
         f"systematic {chk['systematic_px']:.3f} px, median |residual| "
         f"{chk['median_abs_px']:.3f} px over {chk['n_in_front']:,} points / "
         f"{chk['n_keyframes']} keyframes; record grid {Wt}x{Ht}, mask grid "

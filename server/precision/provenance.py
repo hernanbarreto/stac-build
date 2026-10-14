@@ -55,6 +55,11 @@ REJECT_REASONS = {"insufficient_witnesses": 1, "inconsistent": 2, "prior_fill_dr
                                                 # written any more; kept so older files still read
                   "voxel": 12}              # the cleaning recipe's voxel pick (postprocessing.voxel_size)
 REJECT_NAMES = {v: k for k, v in REJECT_REASONS.items()}
+# DECLARED (point 75, USER 2026-10-08, I2 eliminated): the origins v2 column ``content_flags``
+# is ALWAYS 0 since 2026-10-08 — its only writer, the I2 content pass (content_tags.json), no
+# longer exists and nothing under intake/ is read by any precision stage. The column stays in
+# the published format so every reader of older and newer origins files reads the same layout;
+# retiring it is a FORMAT change (the readers go with it), for a later wave, not tonight.
 CONTENT_FLAG_BITS = {"reflective": 1, "low_info": 2}
 
 

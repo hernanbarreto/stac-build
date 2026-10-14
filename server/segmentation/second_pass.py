@@ -151,7 +151,7 @@ def propose(client, frames_dir: Path, maps: Dict[int, np.ndarray], keyframes: Se
     """One understanding call per selected keyframe (most unmasked first, at most ``max_calls``) on the
     highlighted image. Returns (name counts, per-keyframe descriptions, the calls' records)."""
     from PIL import Image
-    from intake.content import frame_file
+    from intake.quality import frame_file
     from segmentation.autoprompt.scene_understanding import understand_frame
     ranked = sorted(maps.items(), key=lambda kv: -int(kv[1].sum()))[:int(spcfg.max_calls)]
     counts: Counter = Counter()

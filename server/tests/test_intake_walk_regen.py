@@ -4,6 +4,7 @@ interpreter, the card is checked free before DA3, an OOM FAILS (never halves), t
 every window's content and DA3's reference views, and a REGENERATION must be of the walk's exact
 plan and reproduce its windows bit for bit — or it fails naming the difference. The extractor is
 a fake subprocess: it writes deterministic window files from the plan it is handed."""
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -45,12 +46,17 @@ class FakeExtractor:
     def __call__(self, cmd, **kw):
         self.calls += 1
         self.kw = kw
+        self.cmd = list(cmd)
         args = dict(zip(cmd, cmd[1:]))
         spec = json.loads(Path(args["--windows_json"]).read_text())
         out = Path(args["--output_dir"])
         proc = self
         if self.exit_code == 0:
             for i, win in enumerate(spec["windows"]):
+                # the plan's paths are session-relative (point 70): the real extractor resolves
+                # them against --windows_root; every frame named must exist there
+                assert all(not Path(p).is_absolute() for p in win), win
+                assert all((Path(args["--windows_root"]) / p).is_file() for p in win), win
                 idx = np.array([int(Path(p).stem) for p in win])
                 c2w = self.truth[idx]
                 h, w = 4, 6
@@ -100,6 +106,11 @@ def test_the_plan_is_sized_from_the_table_under_the_da3_identity(session):
     assert spec["da3_environment"] == IDENT and spec["process_res"] == 840 and spec["model_id"] == MODEL
     assert [len(w) for w in spec["windows"]] == [26] * len(spec["windows"])
     assert spec == W.planned_spec(sess, G, "python", log=lambda m: None)[0], "deterministic"
+    # point 70 (USER 2026-10-08): the plan names its frames RELATIVE to the session — no
+    # absolute path in windows.json, so its sha256 (the walk's key) survives a copied session
+    assert spec["windows"][0][:2] == ["frames/000000.jpg", "frames/000001.jpg"]
+    assert str(sess) not in json.dumps(spec)
+    assert W.spec_sha256(spec) == W.spec_sha256(json.loads(json.dumps(spec)))
     # the identity (the card) decides the size: another card has no entry → FAIL naming the CLI
     import card_table
     W.da3_identity = lambda python, model_id, log=print: dict(IDENT, card="NVIDIA RTX A6000 | 49140 MiB | sm_8.6")
@@ -116,6 +127,11 @@ def test_i3_runs_on_a_free_card_measures_the_walk_and_is_reused_on_the_same_iden
     assert gpu_checks == [1] and fake.calls == 1 and len(windows) == len(list(wdir.glob("window_*.npz")))
     assert not (sess / "output" / "intake" / "da3_vram.json").exists()
     assert any("da3_vram.json deleted" in m for m in logs)
+    # the launcher hands the extractor the session as the root of the plan's relative paths
+    assert fake.cmd[fake.cmd.index("--windows_root") + 1] == str(sess)
+    assert fake.cmd[fake.cmd.index("--image_dir") + 1] == str(frames)
+    spec_on_disk = json.loads((wdir / "windows.json").read_text())
+    assert str(sess) not in json.dumps(spec_on_disk) and spec_on_disk["windows"][0][0] == "frames/000000.jpg"
     env = fake.kw["env"]
     assert env["HF_HOME"] == "/workspace/hf_cache" and env["HF_HUB_OFFLINE"] == "1"
     assert env[repro.CUBLAS_WORKSPACE_ENV] == repro.CUBLAS_WORKSPACE_VALUE and env["PYTHONHASHSEED"] == "0"
@@ -125,23 +141,41 @@ def test_i3_runs_on_a_free_card_measures_the_walk_and_is_reused_on_the_same_iden
     assert all(len(w["content_sha256"]) == 64 and w["reference_views"] is not None and w["stamp"] == "fake"
                for w in walk["windows"])
     assert abs(walk["walk_length_m"] - 149 * 0.08) < 1e-6              # 149 steps of 0.08 m
-    ref = W.revisit_reference(sess)
-    assert ref["version"] == W.REVISIT_REFERENCE_VERSION
-    spec = json.loads((wdir / "windows.json").read_text())
-    assert W.revisit_reference_is_of(ref, spec) and "server/intake/walk.py" in ref["code"]
-    # the same identity: reused, nothing regenerated
+    # the walk is reused on the same identity — BEFORE any revisit reference exists: the
+    # reference is no part of the reuse (point 66, USER 2026-10-08)
+    assert not (sess / "output" / W.REVISIT_REFERENCE_NAME).exists()
     assert W.walk_is_current(sess, files, frames, G, "python", log=logs.append)
     assert any("I3 reused" in m for m in logs)
-    # another identity (other weights): not reusable, said
+    ref = W.revisit_reference(sess, log=logs.append)
+    assert not any("deleted" in m and W.REVISIT_REFERENCE_NAME in m for m in logs), "nothing to delete yet"
+    spec = json.loads((wdir / "windows.json").read_text())
+    # for the record (never compared): what it was computed from — the plan, the windows'
+    # content as the walk recorded it, the chaining code, the bootstrap and the user's factor
+    assert ref["version"] == W.REVISIT_REFERENCE_VERSION and ref["windows_spec_sha256"] == W.spec_sha256(spec)
+    st = ref["stamp"]
+    assert st["windows_spec_sha256"] == W.spec_sha256(spec) and "server/intake/walk.py" in st["code"]
+    assert st["inputs"] == {f"output/{W.WINDOWS_DIRNAME}/window_{w['index']:04d}.npz": w["content_sha256"]
+                            for w in walk["windows"]}
+    assert st["config"]["bar_bootstrap"]["seed"] == W.BAR_BOOTSTRAP_SEED and len(st["sha256"]) == 64
+    assert not hasattr(W, "revisit_reference_is_of"), "the reuse-by-version path is gone (point 66)"
+    # NEVER reused: a file on disk — whatever it says — is deleted and the reference recomputed
+    # whole from the walk's windows, bit for bit the same
+    tampered = dict(ref, dist_bar_m=99.0, windows_spec_sha256="0" * 64)
+    (sess / "output" / W.REVISIT_REFERENCE_NAME).write_text(json.dumps(tampered))
+    again = W.revisit_reference(sess, log=logs.append)
+    assert again == ref and json.loads((sess / "output" / W.REVISIT_REFERENCE_NAME).read_text()) == ref
+    assert any("deleted" in m and "never" in m and W.REVISIT_REFERENCE_NAME in m for m in logs)
+    # another identity (other weights): the walk is not reusable, said
     W.da3_identity = lambda python, model_id, log=print: dict(IDENT, weights={"revision": "other"})
     assert not W.walk_is_current(sess, files, frames, G, "python", log=logs.append)
     assert any("I3 not reusable" in m and "weights" in m for m in logs)
-    # a revisit reference of another plan: not reusable either
+    # no reuse path of the reference is left in the launcher either
     W.da3_identity = lambda python, model_id, log=print: dict(IDENT)
-    ref["windows_spec_sha256"] = "0" * 64
-    (sess / "output" / W.REVISIT_REFERENCE_NAME).write_text(json.dumps(ref))
-    assert not W.walk_is_current(sess, files, frames, G, "python", log=logs.append)
-    assert any(W.REVISIT_REFERENCE_NAME in m for m in logs)
+    mw = (Path(W.__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
+    i0 = mw.index("from intake.walk import revisit_reference")
+    blk = mw[i0:mw.index("_persist_chunk_plan(_ranges", i0)]
+    assert "revisit_reference(output_dir.parent" in blk and "_ref_p.exists()" not in blk
+    assert "read_text()" not in blk, "the launcher never reads a revisit reference back"
 
 
 def test_a_new_walk_declares_a_card_change_but_not_an_old_format_key(session):
@@ -213,6 +247,64 @@ def test_a_regeneration_must_be_of_the_walks_plan_and_reproduce_its_windows(sess
     with pytest.raises(W.WalkError, match="cannot be regenerated") as e:
         W.run_da3_windows(sess, G, "python", log=logs.append)
     assert "torch" in str(e.value) and fake.calls == calls
+
+
+def test_the_revisit_reference_needs_no_window_file(session):
+    """Point 66 (USER 2026-10-08) on a RESUME: F2 deletes the window files after the chain
+    (gauge.delete_windows_after_chain) and a reused walk never regenerates them, so a reference
+    recomputed from the files killed every replace-OFF 'Reconstruir' of a finished session on
+    window_0000.npz (the first cut of point 66; USER 2026-10-06: no 20-min DA3 regeneration on a
+    resume). walk.json now RECORDS what the reference needs — every keyframe's chained pose, each
+    window's median depth and FOV — and the reference reads only that: the same document, bit for
+    bit, with the window files gone; a walk without the record is refused naming re-run I3, never
+    served from the files."""
+    sess, frames, files, fake, _g = session
+    W.run_da3_windows(sess, G, "python", log=lambda m: None, for_new_walk=True)
+    walk = W.measure_walk(sess, G, log=lambda m: None)
+    assert walk["version"] == W.WALK_VERSION == 3
+    assert all(len(e["c2w"]) == 3 and len(e["c2w"][0]) == 4 for e in walk["chainage"])
+    # the fake extractor's window i has depth i + 1 everywhere and K = I on 6-px-wide maps
+    assert all(w["median_depth_m"] == float(w["index"]) + 1.0 for w in walk["windows"])
+    assert all(abs(w["hfov_rad"] - 2 * np.arctan(3.0)) < 1e-12 for w in walk["windows"])
+    ref = W.revisit_reference(sess, log=lambda m: None)
+    e0 = walk["chainage"][0]
+    assert ref["frames"][0] == e0["frame"]
+    assert ref["centres"][0] == [e0["c2w"][r][3] for r in range(3)]
+    assert ref["forward"][0] == [e0["c2w"][r][2] for r in range(3)]
+    assert ref["dist_bar_m"] == float(np.median([float(w["index"]) + 1.0 for w in walk["windows"]]))
+    assert ref["stamp"]["walk_version"] == 3 and None not in ref["stamp"]["inputs"].values()
+    # the window files deleted (after F2's chain): the same reference, bit for bit, no DA3
+    W.delete_windows(sess, log=lambda m: None)
+    wdir = sess / "output" / W.WINDOWS_DIRNAME
+    assert not list(wdir.glob("window_*.npz")) and fake.calls == 1
+    logs = []
+    again = W.revisit_reference(sess, log=logs.append)
+    assert again == ref and fake.calls == 1
+    assert json.loads((sess / "output" / W.REVISIT_REFERENCE_NAME).read_text()) == ref
+    assert any("deleted" in m and "never" in m for m in logs)
+    src = inspect.getsource(W.revisit_reference)
+    assert "load_window(" not in src and "np.load(" not in src and "windows.json" not in src
+    # a walk without the record (the previous version) is refused naming re-run I3 — and the
+    # stale file is already gone (deleted first), nothing on disk lies
+    wp = sess / "intake" / W.WALK_NAME
+    old = json.loads(wp.read_text())
+    old["version"] = 2
+    for e in old["chainage"]:
+        e.pop("c2w")
+    wp.write_text(json.dumps(old))
+    with pytest.raises(W.WalkError, match="re-run I3"):
+        W.revisit_reference(sess, log=lambda m: None)
+    assert not (sess / "output" / W.REVISIT_REFERENCE_NAME).exists()
+    assert "predates" in (W._walk_spec_check(sess, json.loads((wdir / "windows.json").read_text()))
+                          or ""), "an old walk is re-measured by I3, never reused"
+    wp.unlink()
+    with pytest.raises(W.WalkError, match="run I3"):
+        W.revisit_reference(sess, log=lambda m: None)
+    # the launcher: without SALAD the previous reconstruction's reference is deleted too
+    mw = (Path(W.__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
+    i0 = mw.index("from intake.walk import revisit_reference")
+    blk = mw[i0:mw.index("_persist_chunk_plan(_ranges", i0)]
+    assert "no SALAD in this launch" in blk and "_stale_ref.unlink()" in blk
 
 
 def test_i3_reads_the_jobs_configuration_never_config_yaml_at_spawn(session):

@@ -105,9 +105,11 @@ def test_frames_are_stamped_by_bytes_under_relative_keys(tmp_path):
 
 def test_step_stamps_are_keyed_on_the_intake_and_da3_code(tmp_path):
     names = {p.name for p in St.INTAKE_CODE_FILES}
-    assert {"quality.py", "parallax.py", "content.py", "run.py", "focal.py", "walk.py", "vram.py",
+    # (content.py — I2 — left the package on 2026-10-08, USER: plan point 75)
+    assert {"quality.py", "parallax.py", "run.py", "focal.py", "walk.py", "vram.py",
             "stamps.py", "run_config.py", "focal_probe.py", "extract_da3_depth.py", "repro.py",
             "da3_weights.py", "card_table.py"} <= names
+    assert "content.py" not in names
     assert all(p.is_file() for p in St.INTAKE_CODE_FILES)
     st = St.step_stamp({}, {"params": {"a": 1}})
     assert "server/intake/quality.py" in st["code"] and "server/extract_da3_depth.py" in st["code"]

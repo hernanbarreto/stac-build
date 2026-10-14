@@ -654,9 +654,10 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     """Steps 1-4 (landmarks, bend, mono detail, vote) — nothing written into the session. ``inp`` (a
     depth_sweep.SweepInputs) may be injected: the A/B (precision/mono_ab.py) feeds F5's files directly.
     Returns everything ``publish_cloud`` needs, plus the held-out landmark rows for the judges."""
-    from config import cfg as raw_cfg
+    from precision.config import raw_of
     from precision import depth_sweep as DS
     from precision.epoch0_cloud import SKY_CONF
+    raw_cfg = raw_of(pcfg)                   # the job's frozen configuration (point 69), never the disk
     t0 = time.time()
     session_dir = Path(session_dir)
     out = session_dir / "output"
@@ -823,10 +824,11 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
 
 def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict:
     """Step 5: the voted maps → chunks → the cloud stage's cleaner → the new-cloud epoch (transaction)."""
-    from config import cfg as raw_cfg
+    from precision.config import raw_of
     from precision import corrected_cloud as CC
     from precision.epoch0_cloud import _write_ply_xyzrgb
     from correction.session import read_ply
+    raw_cfg = raw_of(pcfg)                   # the job's frozen configuration (point 69), never the disk
     session_dir, out, inp, frames, W, H, K, c2w = (C.session_dir, C.out, C.inp, C.frames, C.W, C.H, C.K, C.c2w)
     params, chunk, voted, tau, vst, cover, wb, score, coefs, c0 = (C.params, C.chunk, C.voted, C.tau, C.vst, C.cover,
                                                                    C.wb, C.score, C.coefs, C.c0)
@@ -904,14 +906,20 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
         report["maps_numerics"] = FT.record()          # the device and torch numerics of every map here (USER 2026-10-08)
         camera_travels(tmp, params, len(frames), log)
         _p(85, "publishing the epoch (octree, atomic swap)")
-        rep = CC.publish(session_dir, tmp, report, log, columns=cols)
+        # what the publish removed OUTSIDE the new product's lineage (point 136: the previous
+        # certification's epochs, another reconstruction's leftovers) depends on the session's
+        # history, not on the inputs: CC.publish writes it into ``history`` and it goes to the
+        # timing sidecar below, never into the compared report (the same as corrected_cloud's
+        # own step; wave-2 cross item 136)
+        history: dict = {}
+        rep = CC.publish(session_dir, tmp, report, log, columns=cols, history=history)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     (out / "precision").mkdir(exist_ok=True)
     (out / "precision" / REPORT).write_text(json.dumps(rep, indent=1, default=float))
-    # the clocks live next to the report, never in it (points 36 / 56)
+    # the clocks and the session's history live next to the report, never in it (points 36 / 56 / 136)
     times = {"seconds_compute": C.seconds_compute, "seconds_publish": round(time.time() - t_publish, 1),
-             "seconds": round(time.time() - t0, 1)}
+             "seconds": round(time.time() - t0, 1), "history": history}
     if md_rep is not None:
         times["mono_detail"] = mono_timing(md_rep)
     CC.write_timing(out / "precision" / REPORT, times)
@@ -933,7 +941,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = ap.parse_args(argv)
     from precision.config import load_precision_config
     from precision import f6_torch as FT
-    pcfg = load_precision_config()
+    pcfg = load_precision_config(session_dir=Path(args.session))   # the job's frozen config (point 69)
     # USER 2026-10-08: the maps run on the card, strict deterministic torch for the whole process
     # (PointDiT's own context re-applies the same flags); no card, no stage
     rec = FT.require_cuda(int(pcfg.mono_detail.seed))

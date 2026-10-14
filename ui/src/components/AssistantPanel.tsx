@@ -41,6 +41,28 @@ interface Props {
   viewport: React.RefObject<ViewportHandle | null>
   /** Model state changes (up | loading | busy | down) — drives the header icon. */
   onVlmStatus?: (status: 'up' | 'loading' | 'busy' | 'down') => void
+  /** The objects an answer is about, in the order its tools named them — the viewer selects and
+   *  flies to them as a click would (USER 2026-10-09). */
+  onFocusObjects?: (ids: number[]) => void
+  /** a volume was added or removed here — the app's list (Instances) follows */
+  onVolumesChanged?: () => void
+  /** an action on the viewer one of the answer's tools returned (focus, show/hide, OBB, view,
+   *  orbit, travel, colour, clear) — USER 2026-10-09: the chat drives the viewer */
+  onViewerAction?: (action: Record<string, unknown>) => void
+}
+
+// the object ids the answer's tools were called on (get_position(id), measure_between(id1, id2),
+// fits_through(opening_id) …), first mention first
+function objectsOfTrace(trace: TraceEntry[]): number[] {
+  const ids: number[] = []
+  for (const e of trace) {
+    for (const k of ['id', 'id1', 'id2', 'opening_id']) {
+      const v = e.arguments?.[k]
+      const n = typeof v === 'number' ? v : typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : null
+      if (n != null && !ids.includes(n)) ids.push(n)
+    }
+  }
+  return ids
 }
 
 const SUGGESTION_KEYS = ['count', 'clearance', 'plumb', 'defects', 'freeSpace'] as const
@@ -49,7 +71,7 @@ function api(session: string | null, path: string, body: Record<string, unknown>
   return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: session, ...body }) })
 }
 
-export default function AssistantPanel({ sessionId, viewport, onVlmStatus }: Props) {
+export default function AssistantPanel({ sessionId, viewport, onVlmStatus, onFocusObjects, onVolumesChanged, onViewerAction }: Props) {
   const t = useT()
   const fmt = useFmt()
   const [messages, setMessages] = useState<Message[]>([])
@@ -92,6 +114,11 @@ export default function AssistantPanel({ sessionId, viewport, onVlmStatus }: Pro
   }, [sessionId, viewport, refreshVolumes])
 
   useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' }) }, [messages])
+
+  // CLOSING THE CHAT (its tab left or the inspector closed — the panel unmounts): the answers'
+  // measurements leave the scene and the questions start over (USER 2026-10-09); the volumes
+  // stay, they are the scene's
+  useEffect(() => () => { viewport.current?.clearAssistantViz() }, [viewport])
 
   // The reconstruction stages stop Qwen3-VL to free the GPU, so it is usually down
   // when the chat opens. Ask for its state and start it right away (the server
@@ -142,14 +169,22 @@ export default function AssistantPanel({ sessionId, viewport, onVlmStatus }: Pro
         } catch { /* keep whatever objects we had */ }
       }
       viewport.current?.visualizeMeasurement(trace)
-      if (trace.some(x => x.tool === 'define_volume')) await refreshVolumes()
+      const focusIds = objectsOfTrace(trace)
+      if (focusIds.length) onFocusObjects?.(focusIds)
+      // the viewer actions, in the order the tools were called (after the focus: a travel or a
+      // view the user asked for wins)
+      for (const e of trace) {
+        const act = (e.result as Record<string, unknown> | undefined)?.viewer
+        if (act && typeof act === 'object') onViewerAction?.(act as Record<string, unknown>)
+      }
+      if (trace.some(x => x.tool === 'define_volume')) { await refreshVolumes(); onVolumesChanged?.() }
       setMessages(m => replaceLast(m, { role: 'assistant', text: String(d.answer || t('assistant.noAnswer')), trace }))
     } catch (e) {
       setMessages(m => replaceLast(m, { role: 'assistant', error: true, text: t('assistant.couldNotAnswer', { detail: e instanceof Error ? e.message : String(e) }) }))
     } finally {
       setBusy(false)
     }
-  }, [sessionId, busy, viewport, refreshVolumes, t])
+  }, [sessionId, busy, viewport, refreshVolumes, t, onFocusObjects, onVolumesChanged, onViewerAction])
 
   const addVolume = useCallback(async () => {
     if (!sessionId) return
@@ -161,17 +196,19 @@ export default function AssistantPanel({ sessionId, viewport, onVlmStatus }: Pro
     if (v.volume_id != null) {
       setVolumes(prev => [...prev, v])
       viewport.current?.addUserVolume(v)
+      onVolumesChanged?.()
       setShowVolForm(false)
       ask(t('assistant.evaluateVolumeQuestion', { name: v.name }))
     }
-  }, [sessionId, volForm, viewport, ask, t])
+  }, [sessionId, volForm, viewport, ask, t, onVolumesChanged])
 
   const removeVolume = useCallback(async (id: number) => {
     if (!sessionId) return
     await api(sessionId, '/api/scene/volumes/delete', { volume_id: id })
     setVolumes(prev => prev.filter(v => v.volume_id !== id))
     viewport.current?.removeUserVolume(id)
-  }, [sessionId, viewport])
+    onVolumesChanged?.()
+  }, [sessionId, viewport, onVolumesChanged])
 
   const inputPlaceholder = vlmStatus === 'up' ? t('assistant.placeholder') : vlmStatus === 'loading' ? t('assistant.modelLoading') : vlmStatus === 'busy' ? t('assistant.modelBusy') : t('assistant.modelStarting')
 

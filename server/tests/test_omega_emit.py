@@ -68,10 +68,8 @@ def _layout_case(tmp_path, N, chunks):
                                                     for _ in frames) + "\n")
     (out / "camera_frames.txt").write_text(" ".join(str(f) for f in frames))
     _emit_omega_depth(save, out, chunks, str(tmp_path / "sel.json"), _Pipe())
-    centres = [(a + b) / 2.0 for a, b in chunks]
     for g in frames:
-        own = min((k for k, (a, b) in enumerate(chunks) if a <= g < b),
-                  key=lambda k: (abs(g - centres[k]), k))
+        own = _midpoint_owner(chunks, g)
         with np.load(out / "omega_run" / "results_output" / f"frame_{g}.npz") as r:
             assert int(r["chunk"]) == own, g
             assert int(r["frame_global"]) == g, g
@@ -79,18 +77,40 @@ def _layout_case(tmp_path, N, chunks):
     return out, save
 
 
+def _midpoint_owner(chunks, g):
+    """The owner rule of USER 2026-10-07 (wave 1; loop_utils.metric_lock.frame_owner, the
+    same rule in the fork): the shared block [a_{k+1}, b_k) of two consecutive chunks is
+    split at its MIDPOINT — its first half AND the midpoint frame belong to the earlier
+    chunk k, the rest to k+1; a frame of one chunk only belongs to that chunk. (Wave 0
+    recorded a shared frame from the chunk whose CENTRE was nearest.)"""
+    holders = [k for k, (a, b) in enumerate(chunks) if a <= g < b]
+    assert holders, g
+    if len(holders) == 1:
+        return holders[0]
+    k = holders[0]                                   # the earlier of the two sharing chunks
+    a, b = chunks[k + 1][0], chunks[k][1]            # the shared block
+    return k if g <= a + (b - a) // 2 else k + 1
+
+
 def test_a_shared_frame_is_recorded_from_its_owner_chunk_in_numeric_order(tmp_path):
     """12 keyframes in chunks of 4 with overlap 2 (5 chunks — chunk_10-style names
     sort wrong lexicographically only past 10, so the owner rule is what is tested
-    here): every record carries the chunk whose centre is nearest, and its depth."""
+    here): every record carries the chunk the MIDPOINT rule assigns the frame to
+    (USER 2026-10-07: the shared block split at its midpoint, the midpoint frame to the
+    earlier chunk), and its depth."""
     N, CS, OV = 12, 4, 2
     _layout_case(tmp_path, N, [(i * 2, min(i * 2 + CS, N)) for i in range((N - OV + 2 - 1) // 2)])
 
 
 def test_an_explicit_uneven_layout_is_recorded_from_its_own_ranges(tmp_path):
     """USER 2026-10-06: the co-visibility plan's variable chunks (here lengths 8/24/14, seams
-    4/6) — chunk k's local frame j is keyframe ranges[k][0] + j, never k·step."""
-    _layout_case(tmp_path, 30, [(0, 8), (4, 28), (22, 30)])
+    4/6) — chunk k's local frame j is keyframe ranges[k][0] + j, never k·step. The seams'
+    midpoints (USER 2026-10-07): [4, 8) → 4, 5, 6 to chunk 0 and 7 to chunk 1; [22, 28) → 22..25
+    to chunk 1 and 26, 27 to chunk 2."""
+    out, _save = _layout_case(tmp_path, 30, [(0, 8), (4, 28), (22, 30)])
+    owners = {g: int(np.load(out / "omega_run" / "results_output" / f"frame_{g}.npz")["chunk"])
+              for g in (3, 4, 6, 7, 8, 21, 22, 25, 26, 27, 28)}
+    assert owners == {3: 0, 4: 0, 6: 0, 7: 1, 8: 1, 21: 1, 22: 1, 25: 1, 26: 2, 27: 2, 28: 2}
 
 
 def test_a_chunk_of_another_layout_fails_loudly(tmp_path):

@@ -13,9 +13,45 @@ from multiprocessing.connection import Connection
 from workers.base import WorkerPipe, run_worker_safe, stop_semantic_service_verified
 
 # the mask→cloud PROJECTION's products: functions of the cloud AND the masks; a cloud
-# rebuilt here makes every one of them stale (docs/plan_determinismo.md point 96)
-PROJECTION_PRODUCTS = ("segmentation_result.json", "seg_broadcast.json", "classification.npy",
-                       "class_map.json", "scene_r.db", "scene_r.db-wal", "scene_r.db-shm")
+# (re)built or republished before this stage makes every one of them stale
+# (docs/plan_determinismo.md point 96). ONE list for every deleter — the projection's own
+# failure path and the pipeline manager's STAGE_OUTPUT_FILES[PROJECTION] hold the same set:
+# segmentation.republish.PROJECTION_PRODUCTS (imported where it is used — the segmentation
+# package pulls torch in, and this worker's merge path must stay light).
+
+
+def _delete_projection_products(output_dir: Path, log) -> list:
+    from segmentation.republish import delete_projection_products
+    return delete_projection_products(
+        output_dir, log=lambda m: log(f"[cloud] {m}"),
+        why="the cloud of this stage is the one the SAM3 stage projects onto (point 96)")
+
+
+def _write_sealed_floor_transform(output_dir: Path, cloud_path: Path, s, R, t) -> None:
+    """floor_transform.npz (canonical bytes: `segmentation.pipeline.write_npz_canonical` — a
+    fixed zip entry time, atomic; np.savez stamps the wall clock into every entry and the npz
+    is an input of the projection's stamp) and, written AFTER it, floor_level.json carrying
+    the SEAL a stage verifies before applying the transform (docs/plan_determinismo.md point
+    158; `segmentation.pipeline._floor_seal_status`): the reconstruction's identity (None for
+    a session without Omega records — taken by no reader), the sha256 of the cloud levelled
+    and of the npz itself — the same shape main.py's explicit level_floor writes (its
+    `stamp`), so one reader serves both writers."""
+    import numpy as np
+    from atomic_io import atomic_write_json
+    from correction.epoch import reconstruction_id_or_none
+    from repro import sha256_file
+    from segmentation.pipeline import write_npz_canonical
+    target = Path(output_dir) / "floor_transform.npz"
+    write_npz_canonical(target, {"s": np.asarray(s, np.float64), "R": np.asarray(R, np.float64),
+                                 "t": np.asarray(t, np.float64)})
+    atomic_write_json(Path(output_dir) / "floor_level.json", {
+        "leveled_by": "cloud stage: seeded leveling of the cloud (alignment_manager."
+                      "compute_leveling_from_points, point 110)",
+        "selected_instance_id": None,
+        "stamp": {"reconstruction_id": reconstruction_id_or_none(output_dir),
+                  "cloud_sha256": sha256_file(cloud_path),
+                  "floor_transform_sha256": sha256_file(target)},
+    }, indent=2, sort_keys=True)
 
 
 def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
@@ -300,9 +336,21 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
             sys.path.insert(0, server_dir_str)
         # (DINOv3 score/filter DELETED by USER ORDER 2026-09-05)
 
-        # Compute and save floor alignment transform (kept as-is on light
-        # resume — it may carry the user's gizmo edits)
+        # Compute and save the floor alignment transform — SEALED for this cloud (docs/
+        # plan_determinismo.md point 158: a stage applies floor_transform.npz only with
+        # the seal of the geometry it processes, and the stage that makes the transform
+        # is the one that seals it). On a light resume a transform on disk is kept ONLY
+        # when it carries that seal for this very cloud (the user's explicit level_floor,
+        # or this stage's own); an unsealed one — the alignment gizmo, a session levelled
+        # before the seal existed — would make the next projection FAIL naming it, so it
+        # is replaced by the seeded leveling of this cloud and the replacement declared.
         pipe.send_progress(95, "Computing floor alignment...", stage="cloudcompy")
+        import sys
+        server_dir_str = str(Path(__file__).resolve().parent.parent)
+        if server_dir_str not in sys.path:
+            sys.path.insert(0, server_dir_str)
+        _tp = output_dir / "floor_transform.npz"
+        _fl = output_dir / "floor_level.json"
         if (output_dir / ".orientation_applied").exists():
             # reconstruction/orient.py already baked upright (+Y up, floor at y=0) into
             # the cloud AND the poses, from the camera-pose gravity — a measurement over
@@ -312,46 +360,58 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
             # rotation RE-TILTS the scene. Everything downstream that consumes
             # floor_transform.npz (xyz_display, and therefore every instance OBB) then
             # works in a bogus frame. The baked frame IS the display frame: identity.
-            _tp = output_dir / "floor_transform.npz"
-            if _tp.exists():
-                _tp.unlink()
+            # The seal goes with the transform it sealed (a floor_level.json of another
+            # cloud must not outlive it).
+            for _p in (_tp, _fl):
+                if _p.exists():
+                    _p.unlink()
             pipe.send_log("Orientation already baked from camera poses (.orientation_applied) "
                           "— floor transform is identity, skipping RANSAC leveling")
-        elif light_resume and (output_dir / "floor_transform.npz").exists():
-            pipe.send_log("Floor transform already present — kept (light resume)")
         else:
-            try:
-                import sys
-                server_dir_str = str(Path(__file__).resolve().parent.parent)
-                if server_dir_str not in sys.path:
-                    sys.path.insert(0, server_dir_str)
-
-                import numpy as np
-                from plyfile import PlyData
-
-                plydata = PlyData.read(str(output_ply))
-                vx = plydata['vertex']
-                xyz = np.column_stack([
-                    np.array(vx['x'], dtype=np.float64),
-                    np.array(vx['y'], dtype=np.float64),
-                    np.array(vx['z'], dtype=np.float64),
-                ])
-
-                from alignment_manager import get_alignment_manager
-                am = get_alignment_manager()
-                s, R, t = am.compute_leveling_from_points(xyz)
-
-                if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
-                    transform_path = output_dir / "floor_transform.npz"
-                    np.savez(transform_path, s=np.array(s), R=R, t=t)
-                    pipe.send_log(f"Floor transform saved to {transform_path.name}")
+            from segmentation.pipeline import _floor_seal_status
+            _kept = False
+            if light_resume and _tp.exists():
+                _sealed, _why = _floor_seal_status(output_dir, output_ply)
+                if _sealed:
+                    pipe.send_log(f"Floor transform already present — kept (light resume; {_why})")
+                    _kept = True
                 else:
-                    pipe.send_log("No floor plane detected, skipping alignment", level="warning")
-            except Exception as e:
-                # the display frame is part of the deliverable (every OBB sits in it):
-                # a floor that could not be computed fails the stage (point 164) — it
-                # used to be a warning and the session shipped in whatever frame was left
-                raise RuntimeError(f"Floor alignment computation failed: {e}") from e
+                    pipe.send_log(f"DECLARED: {_tp.name} on disk is REPLACED — {_why} (point 158: "
+                                  f"a transform without the seal of this cloud is taken by no "
+                                  f"stage; the seeded leveling of this cloud is computed and "
+                                  f"sealed in its place)")
+            if not _kept:
+                try:
+                    import numpy as np
+                    from plyfile import PlyData
+
+                    plydata = PlyData.read(str(output_ply))
+                    vx = plydata['vertex']
+                    xyz = np.column_stack([
+                        np.array(vx['x'], dtype=np.float64),
+                        np.array(vx['y'], dtype=np.float64),
+                        np.array(vx['z'], dtype=np.float64),
+                    ])
+
+                    from alignment_manager import get_alignment_manager
+                    am = get_alignment_manager()
+                    s, R, t = am.compute_leveling_from_points(xyz)
+
+                    # whatever was there described another cloud (or carried no seal)
+                    for _p in (_tp, _fl):
+                        if _p.exists():
+                            _p.unlink()
+                    if not (np.allclose(R, np.eye(3)) and np.allclose(t, np.zeros(3))):
+                        _write_sealed_floor_transform(output_dir, output_ply, s, R, t)
+                        pipe.send_log(f"Floor transform saved to {_tp.name}, sealed for this "
+                                      f"cloud in {_fl.name} (seeded leveling, point 110)")
+                    else:
+                        pipe.send_log("No floor plane detected, skipping alignment", level="warning")
+                except Exception as e:
+                    # the display frame is part of the deliverable (every OBB sits in it):
+                    # a floor that could not be computed fails the stage (point 164) — it
+                    # used to be a warning and the session shipped in whatever frame was left
+                    raise RuntimeError(f"Floor alignment computation failed: {e}") from e
 
         # ── NO projection of masks here (docs/plan_determinismo.md point 96, 2026-10-08).
         # In the stage order cloud → VLM → SAM3 a segmentation.json on disk at this point
@@ -359,20 +419,20 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
         # projected onto the new cloud, judged fresh by file dates, and with 'Segment when
         # done' off that projection of stale masks was the session's deliverable. The SAM3
         # stage projects its own masks the moment it makes them; this stage leaves no
-        # segmentation_result.json of its own. A cloud REBUILT here makes every product
-        # of a previous projection stale (they are functions of the cloud): removed,
-        # declared. (The second VLM pass that ran here is gone with the projection — it was
-        # rejected by the user on 2026-10-04 and `autoprompt.second_pass.enabled` is false.)
-        if not light_resume:
-            stale = [n for n in PROJECTION_PRODUCTS if (output_dir / n).exists()]
-            for n in stale:
-                (output_dir / n).unlink()
-            if stale:
-                pipe.send_log(f"[cloud] the cloud was rebuilt: {len(stale)} product(s) of a "
-                              f"previous mask→cloud projection removed ({', '.join(stale)}) — "
-                              f"the SAM3 stage projects its masks onto THIS cloud (point 96)")
-        elif (output_dir / "segmentation.json").exists():
-            pipe.send_log("[cloud] light resume: the masks on disk are not projected here "
+        # segmentation_result.json of its own. The products of a previous projection are
+        # functions of the cloud, and the cloud this stage ends with is ALWAYS a new one
+        # for them: in production the precision core has already PUBLISHED it (f6_bend) and
+        # this stage takes the light-resume path — the merge branch is never the one that
+        # ran, so a cleanup placed there left the previous run's result, class arrays,
+        # store and fusion map beside the new cloud. Removed on EVERY path, declared. (The
+        # second VLM pass that ran here is gone with the projection — it was rejected by the
+        # user on 2026-10-04 and `autoprompt.second_pass.enabled` is false.) The octree is
+        # NOT a projection product: its own stamp lives INSIDE output/potree and decides its
+        # reuse below (output/potree_stamp.json, removed here, is only the projection's
+        # record of the octree it was published with).
+        _delete_projection_products(output_dir, pipe.send_log)
+        if (output_dir / "segmentation.json").exists():
+            pipe.send_log("[cloud] the masks on disk are not projected here "
                           "(the SAM3 stage projects what it segments — point 96)")
 
         # ── Build Potree LOD octree (so the first viewer load is instant) ──
@@ -410,26 +470,30 @@ def _cloudcompy_work(pipe: WorkerPipe, session_dir: str, config: dict):
                 pipe.send_log(f"merged/potree symlink failed (non-critical): {e}",
                               level="warning")
 
-        _potree_stale = True
-        if light_resume:
-            _oct = output_dir / "potree" / "metadata.json"
-            _potree_stale = (not _oct.exists()
-                             or _oct.stat().st_mtime < output_ply.stat().st_mtime)
-            if not _potree_stale:
-                pipe.send_log("Potree octree up to date — skipped (light resume)")
-        if postproc.get("build_potree", True) and _potree_stale:
-            pipe.send_progress(96, "Building Potree LOD octree...", stage="cloudcompy")
+        if postproc.get("build_potree", True):
             import sys
             server_dir_str = str(Path(__file__).resolve().parent.parent)
             if server_dir_str not in sys.path:
                 sys.path.insert(0, server_dir_str)
-            from potree_converter import convert_ply_to_potree
-
-            ok = convert_ply_to_potree(session_path, force=True)
-            if not ok:
-                raise RuntimeError("Potree conversion failed (returned False) — the octree is "
-                                   "part of the deliverable (point 164)")
-            pipe.send_log(f"Potree octree built → {output_dir / 'potree'}")
+            from potree_converter import convert_ply_to_potree, octree_matches
+            # The octree is reused ONLY on an identical stamp (docs/plan_determinismo.md
+            # point 123): the cloud's bytes, the class arrays baked in (none at this point —
+            # the previous projection's were removed above), the converter and its launch
+            # parameters — read from the stamp INSIDE output/potree, which came with the
+            # directory through the precision core's transaction swap: on the production
+            # light path f6_bend's own octree of this very cloud is reused, not rebuilt.
+            # A newer metadata.json than the PLY used to decide here.
+            _ok, _why = octree_matches(output_dir / "potree", output_ply)
+            if _ok:
+                pipe.send_log(f"Potree octree reused — {_why}")
+            else:
+                pipe.send_progress(96, "Building Potree LOD octree...", stage="cloudcompy")
+                pipe.send_log(f"Potree octree rebuilt — {_why}")
+                ok = convert_ply_to_potree(session_path, force=True)
+                if not ok:
+                    raise RuntimeError("Potree conversion failed (returned False) — the octree is "
+                                       "part of the deliverable (point 164)")
+                pipe.send_log(f"Potree octree built → {output_dir / 'potree'}")
             _mirror_merged_potree()
     else:
         pipe.send_log("Warning: cleaned_cloud.ply not created", level="warning")

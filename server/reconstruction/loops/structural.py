@@ -180,7 +180,7 @@ def wall_edges(session, instances: List[dict], classes: Dict[int, str], cfg,
         iid = int(inst.get("instance_id", inst.get("id")))
         if classes.get(iid, "movable") != "structural":
             continue
-        if str(inst.get("label", "")).lower() not in labels:
+        if str(inst.get("label_sam3") or inst.get("label", "")).lower() not in labels:
             continue
         gi = np.asarray(inst.get("globalIndices") or [], np.int64)
         gi = gi[(gi >= 0) & (gi < session.n_points)]
@@ -222,7 +222,7 @@ def axis_edges(session, instances: List[dict], classes: Dict[int, str], cfg,
         iid = int(inst.get("instance_id", inst.get("id")))
         if classes.get(iid, "movable") != "structural":
             continue
-        if str(inst.get("label", "")).lower() not in labels:
+        if str(inst.get("label_sam3") or inst.get("label", "")).lower() not in labels:
             continue
         gi = np.asarray(inst.get("globalIndices") or [], np.int64)
         gi = gi[(gi >= 0) & (gi < session.n_points)]
@@ -315,7 +315,7 @@ def regulated_rows(session, instances: List[dict], classes: Dict[int, str],
             iid = int(inst.get("instance_id", inst.get("id")))
             if classes.get(iid, "movable") != "structural":
                 continue
-            if str(inst.get("label", "")).lower() != str(d["label"]).lower():
+            if str(inst.get("label_sam3") or inst.get("label", "")).lower() != str(d["label"]).lower():
                 continue
             gi = np.asarray(inst.get("globalIndices") or [], np.int64)
             gi = gi[(gi >= 0) & (gi < session.n_points)]

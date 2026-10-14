@@ -114,6 +114,27 @@ class _Evidence:
             from segmentation.session_io import load_cloud_camera_source
             self.cam = load_cloud_camera_source(Path(output_dir))
             self.kw, self.kh, self._cloud = _k_grid(Path(output_dir))
+            # THE TWO GRIDS (docs/plan_determinismo.md point 108, DECIDIDO): the camera
+            # projects onto the RECORD grid (camera.json's omega grid — Omega's crop of the
+            # native frame, resized — at the declared trace size) and the masks live on
+            # their DECLARED grid (the store's `scaled_res`: a full-frame resize of the
+            # native frame, precision.camera.mask_grid_for). `mask_pixels` takes one to the
+            # other through the exact maps, as the matcher and the certification do; a
+            # store that declares no grid FAILS here — nothing is deduced from the data.
+            from precision.camera import (CAMERA_JSON_NAME, grid_like, load_camera_json,
+                                          mask_grid_for)
+            cm = load_camera_json(Path(output_dir) / CAMERA_JSON_NAME)
+            g = cm.omega_grid
+            self.record_grid = (g if (int(g.w), int(g.h)) == (self.kw, self.kh)
+                                else grid_like(g, self.kw, self.kh, "record"))
+            if "scaled_res" not in self.masks.files:
+                raise RuntimeError(f"{p} declares no mask grid (no `scaled_res` member) — the "
+                                   f"masks cannot be addressed without their declared grid")
+            sr = np.asarray(self.masks["scaled_res"]).ravel()
+            if sr.size < 2 or int(sr[0]) <= 0 or int(sr[1]) <= 0:
+                raise RuntimeError(f"{p} declares an invalid mask grid scaled_res={sr.tolist()}")
+            self.mask_hw: Tuple[int, int] = (int(sr[0]), int(sr[1]))
+            self.mask_grid = mask_grid_for(cm.width, cm.height, self.mask_hw)
             self._zbuf_cache: Dict[int, Optional[np.ndarray]] = {}
             # The npz keys are NOT the frame the poses are keyed by. Measured
             # (or declared) once here; every lookup below goes through it.
@@ -152,6 +173,29 @@ class _Evidence:
         cf = self.cloud_frame(fidx)
         return None if cf is None else self._zbuf(cf, mh, mw)
 
+    def mask_pixels(self, u: np.ndarray, v: np.ndarray, mh: int, mw: int
+                    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Continuous pixel coordinates on the RECORD grid (what :meth:`CameraSource.pixels`
+        returns, centres at integers) → the MASK-grid pixel (column, row) that shows them,
+        through the exact grid maps (point 108): record → native (Omega's crop and scale) →
+        mask (a full-frame resize) → the nearest pixel centre. A scale alone
+        (``u * mw / kw``) ignored the crop and truncated. ``(mh, mw)`` must be the store's
+        declared grid: one store, one grid. Out-of-frame inputs come back out of bounds —
+        the caller's bounds test is unchanged."""
+        if (int(mh), int(mw)) != self.mask_hw:
+            raise RuntimeError(f"a mask of {int(mh)}x{int(mw)} px against a store that declares "
+                               f"{self.mask_hw[0]}x{self.mask_hw[1]} — one store, one grid")
+        from precision.camera import grid_to_native, native_to_grid
+        uv = np.stack([np.asarray(u, np.float64), np.asarray(v, np.float64)], -1)
+        g = native_to_grid(grid_to_native(uv, self.record_grid), self.mask_grid)
+        with np.errstate(invalid="ignore"):
+            mu = np.rint(g[..., 0])
+            mv = np.rint(g[..., 1])
+        # a non-finite input (a point behind the camera) is out of bounds, never a crash
+        mu = np.where(np.isfinite(mu), mu, -1.0).astype(np.int64)
+        mv = np.where(np.isfinite(mv), mv, -1.0).astype(np.int64)
+        return mu, mv
+
     def _zbuf(self, cloud_fidx: int, mh: int, mw: int) -> Optional[np.ndarray]:
         """Per-frame Z-buffer from the FULL cloud at mask resolution: what
         measured geometry is closest along each pixel ray. THE depth check
@@ -175,8 +219,7 @@ class _Evidence:
         z = p[:, 2]
         ok = z > 0.05
         u, v = self.cam.pixels(fidx, p[ok])          # the cloud's camera, its lens included
-        mu = (u * mw / self.kw).astype(np.int64)
-        mv = (v * mh / self.kh).astype(np.int64)
+        mu, mv = self.mask_pixels(u, v, mh, mw)      # the exact grid maps (point 108)
         inb = (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
         zb = np.full((mh, mw), np.inf, dtype=np.float64)
         np.minimum.at(zb, (mv[inb], mu[inb]), z[ok][inb])
@@ -247,8 +290,7 @@ class _Evidence:
             u = np.full(n, -1.0)
             v = np.full(n, -1.0)
             u[front], v[front] = self.cam.pixels(self.cloud_frame(fidx), pcam[front])   # lens included
-            mu = (u * mw / self.kw).astype(np.int64)
-            mv = (v * mh / self.kh).astype(np.int64)
+            mu, mv = self.mask_pixels(u, v, mh, mw)                                    # point 108
             inb = front & (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
             valid[inb] += 1
             occ = np.zeros(n, dtype=bool)
@@ -275,11 +317,7 @@ class _Evidence:
         the point (the camera sees PAST it); 'at_depth' counts frames that
         measure geometry AT the point's depth (±depth_tol) — testimony the
         surface is real. Rays with no finite Z-buffer say nothing (not valid)."""
-        try:
-            sr = self.masks["scaled_res"]
-            mh, mw = int(sr[0]), int(sr[1])
-        except Exception:  # noqa: BLE001
-            mh, mw = 640, 360
+        mh, mw = self.mask_hw                    # the store's DECLARED grid, never a default
         n = len(world_pts)
         valid = np.zeros(n, dtype=np.int32)
         at_depth = np.zeros(n, dtype=np.int32)
@@ -301,8 +339,7 @@ class _Evidence:
             u = np.full(n, -1.0)
             v = np.full(n, -1.0)
             u[front], v[front] = self.cam.pixels(fidx, pcam[front])                     # lens included
-            mu = (u * mw / self.kw).astype(np.int64)
-            mv = (v * mh / self.kh).astype(np.int64)
+            mu, mv = self.mask_pixels(u, v, mh, mw)                                    # point 108
             inb = front & (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
             zpix = np.full(n, np.inf)
             zpix[inb] = zb[mv[inb], mu[inb]]
@@ -581,8 +618,7 @@ def silhouette_report(verts_world: np.ndarray,
         if front.sum() < 50:
             continue
         u, v = ev.cam.pixels(ev.cloud_frame(fidx), pcam[front])                    # lens included
-        mu = (u * mw / ev.kw).astype(np.int64)
-        mv = (v * mh / ev.kh).astype(np.int64)
+        mu, mv = ev.mask_pixels(u, v, mh, mw)                                       # point 108
         inb = (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
         if inb.sum() < 50:
             continue

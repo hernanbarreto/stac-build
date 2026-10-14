@@ -59,13 +59,52 @@ class ChunkCheckError(RuntimeError):
 
 def unproject(depth: np.ndarray, K: np.ndarray, c2w: np.ndarray, stride: int) -> np.ndarray:
     """(N,3) world points of the valid pixels of a depth map, every ``stride``-th pixel."""
+    return unproject_uv(depth, K, c2w, stride)[0]
+
+
+def unproject_uv(depth: np.ndarray, K: np.ndarray, c2w: np.ndarray, stride: int
+                 ) -> Tuple[np.ndarray, np.ndarray]:
+    """:func:`unproject` and the (N,2) pixel (u, v) of every point, on the depth map's grid."""
     d = np.asarray(depth, np.float64)[::stride, ::stride]
     H, W = d.shape
     v, u = np.mgrid[0:H, 0:W].astype(np.float64) * stride
     ok = np.isfinite(d) & (d > 0)
     X = np.stack([(u - K[0, 2]) / K[0, 0] * d, (v - K[1, 2]) / K[1, 1] * d, d], -1)[ok]
     T = np.asarray(c2w, np.float64)
+    return X @ T[:3, :3].T + T[:3, 3], np.stack([u[ok], v[ok]], 1)
+
+
+def depth_points_at(uv: np.ndarray, K: np.ndarray, depth: np.ndarray, Kd: np.ndarray,
+                    c2w: np.ndarray) -> np.ndarray:
+    """World points of ANOTHER depth map of the same view (``depth`` with its own intrinsics
+    ``Kd`` — DA3's) along the rays of the pixels ``uv`` of the ``K`` grid: each ray's normalized
+    coordinates land on the nearest pixel of ``depth``; rays off its grid or on an invalid depth
+    are dropped. The two instruments then measure the SAME pixels of the same surface."""
+    uv = np.asarray(uv, np.float64)
+    xn = (uv[:, 0] - K[0, 2]) / K[0, 0]
+    yn = (uv[:, 1] - K[1, 2]) / K[1, 1]
+    dd = np.asarray(depth, np.float64)
+    H, W = dd.shape
+    ud = np.rint(xn * Kd[0, 0] + Kd[0, 2]).astype(np.int64)
+    vd = np.rint(yn * Kd[1, 1] + Kd[1, 2]).astype(np.int64)
+    ok = (ud >= 0) & (ud < W) & (vd >= 0) & (vd < H)
+    z = np.full(len(uv), np.nan)
+    z[ok] = dd[vd[ok], ud[ok]]
+    ok &= np.isfinite(z) & (z > 0)
+    X = np.stack([xn[ok] * z[ok], yn[ok] * z[ok], z[ok]], 1)
+    T = np.asarray(c2w, np.float64)
     return X @ T[:3, :3].T + T[:3, 3]
+
+
+def spread_height(h: np.ndarray, min_points: int) -> Tuple[float, int, float]:
+    """(median, n, robust σ) of heights already selected as one surface — :func:`band_height`
+    without the percentile band; NaN under ``min_points`` samples."""
+    h = np.asarray(h, np.float64)
+    h = h[np.isfinite(h)]
+    if h.size < min_points:
+        return float("nan"), int(h.size), float("nan")
+    med = float(np.median(h))
+    return med, int(h.size), float(_MAD_TO_SIGMA * np.median(np.abs(h - med)))
 
 
 def band_height(h: np.ndarray, pct: float, band_m: float, min_points: int) -> Tuple[float, int, float]:
@@ -302,13 +341,25 @@ def scale_map(s_k: float, bend, H: int, W: int):
 
 def measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir: Path, da3_dir: Path, cfg,
                  log: Callable = print, bend: Optional[Dict[int, tuple]] = None,
-                 offset: Optional[Dict[int, float]] = None) -> Tuple[List[Row], dict]:
+                 offset: Optional[Dict[int, float]] = None,
+                 floor_planes: Optional[Dict[int, Tuple[np.ndarray, np.ndarray]]] = None
+                 ) -> Tuple[List[Row], dict]:
     """Two passes over the depth maps: the dominant floor plane, then every height.
     ``offset`` (metres along the ray, per keyframe) is the affine part a transform epoch
-    composed on the published depth — added only where Omega measured a depth."""
+    composed on the published depth — added only where Omega measured a depth.
+
+    ``floor_planes`` (chunk → (normal, point)): the floor UNDER THE CAMERA of every chunk
+    (correction.floor.chunk_floor_levels on the published cloud — the certification's choice,
+    USER 2026-10-08: a session can hold several floors). A keyframe's floor is then its points
+    within ``band_m`` of its chunk's floor (never the lowest surface it happens to see: from the
+    platform, the track bed below), and DA3's floor is DA3's depth at those same pixels. None:
+    each keyframe's lowest band, as before (a keyframe of a chunk with no floor under the camera
+    sees no floor)."""
     t0 = time.time()
     floor_pool = []
     world_pts: Dict[int, np.ndarray] = {}
+    floor_sel: Dict[int, Optional[np.ndarray]] = {}
+    floor_uv: Dict[int, np.ndarray] = {}
     # K is the camera's (undistorted native frame); Omega's record is the ORIGINAL frame on Omega's own
     # grid — the same frame only without a lens and on the camera's grid (pccr). Otherwise the record
     # is carried onto the undistorted native grid first (the bend's own grid, corrected_cloud.record_on_native)
@@ -332,14 +383,26 @@ def measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir: Path, da3_dir: Pa
             off = float(offset.get(f, 0.0)) if offset else 0.0
             if off != 0.0:
                 d = np.where(np.isfinite(d0) & (d0 > 0), d + off, d)
-        X = unproject(d, K, c2w[i], cfg.pixel_stride)
+        X, uv = unproject_uv(d, K, c2w[i], cfg.pixel_stride)
         world_pts[f] = X
-        if len(X):
+        if floor_planes is not None:
+            plane = floor_planes.get(int(chunk[f]))
+            if plane is None:
+                floor_sel[f] = None
+            else:
+                nrm, cen = plane
+                sel = np.abs((X - cen) @ nrm) <= cfg.band_m
+                floor_sel[f] = sel
+                floor_uv[f] = uv[sel]
+                if sel.any():
+                    floor_pool.append(X[sel])
+        elif len(X):
             y = X[:, 1]
             q = np.percentile(y, cfg.low_pct)
             floor_pool.append(X[np.abs(y - q) <= cfg.band_m])
     if not floor_pool:
-        raise ChunkCheckError("no Omega depth to measure")
+        raise ChunkCheckError("no Omega depth to measure" if floor_planes is None else
+                              "no keyframe sees the floor under its camera")
     n, c, pinfo = dominant_plane(np.concatenate(floor_pool), cfg.band_m, cfg.seed, cfg.confidence,
                                  cfg.bootstrap)
     tilt = float(np.degrees(np.arccos(np.clip(n @ UP, -1, 1))))
@@ -348,17 +411,26 @@ def measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir: Path, da3_dir: Pa
     for i, f in enumerate(frames):
         X = world_pts[f]
         h = (X - c) @ n
-        floor_h, n_floor, floor_res = band_height(h, cfg.low_pct, cfg.band_m, cfg.min_points)
+        if floor_planes is not None:
+            sel = floor_sel.get(f)
+            floor_h, n_floor, floor_res = (spread_height(h[sel], cfg.min_points) if sel is not None
+                                           else (float("nan"), 0, float("nan")))
+        else:
+            floor_h, n_floor, floor_res = band_height(h, cfg.low_pct, cfg.band_m, cfg.min_points)
         ceil_h, n_ceil, ceil_res = band_height(h, cfg.high_pct, cfg.band_m, cfg.min_points)
         cam_h = float((c2w[i][:3, 3] - c) @ n)
         cf_da3 = float("nan")
         p = da3_dir / f"frame_{f}.npz"
-        if p.exists():
+        if p.exists() and (floor_planes is None or np.isfinite(floor_h)):
             with np.load(p) as z:
                 dd = np.asarray(z["depth"], np.float64)
                 Kd = np.asarray(z["intrinsics"], np.float64) if "intrinsics" in z.files else K
-            hd = (unproject(dd, Kd, c2w[i], cfg.pixel_stride) - c) @ n
-            fd, _, _ = band_height(hd, cfg.low_pct, cfg.band_m, cfg.min_points)
+            if floor_planes is not None:
+                fd, _, _ = spread_height((depth_points_at(floor_uv[f], K, dd, Kd, c2w[i]) - c) @ n,
+                                         cfg.min_points)
+            else:
+                hd = (unproject(dd, Kd, c2w[i], cfg.pixel_stride) - c) @ n
+                fd, _, _ = band_height(hd, cfg.low_pct, cfg.band_m, cfg.min_points)
             if np.isfinite(fd):
                 cf_da3 = cam_h - fd
                 n_da3 += 1
@@ -367,7 +439,12 @@ def measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir: Path, da3_dir: Pa
                         cam_h - floor_h if np.isfinite(floor_h) else float("nan"), cf_da3, float(s_k[f]),
                         floor_res, ceil_res))
     plane = {"normal": [float(v) for v in n], "point": [float(v) for v in c], "tilt_deg": tilt,
-             "n_floor_band_points": int(sum(len(p) for p in floor_pool)), **pinfo}
+             "n_floor_band_points": int(sum(len(p) for p in floor_pool)),
+             "floor_band": ("the floor under the camera: each keyframe's points within band_m of its "
+                            "chunk's floor (correction.floor.chunk_floor_levels on the published cloud), "
+                            "DA3 at the same pixels" if floor_planes is not None else
+                            "each keyframe's lowest band (low_pct) — the chunk floors were not measured"),
+             **pinfo}
     log(f"{LOG_TAG} floor plane tilt {tilt:.2f}° from {plane['n_floor_band_points']:,} band points, holding "
         f"{pinfo['inlier_frac'] * 100:.1f} % of them (CI {pinfo['inlier_frac_ci'][0] * 100:.1f}–"
         f"{pinfo['inlier_frac_ci'][1] * 100:.1f} %, no acceptance bar); "
@@ -684,17 +761,42 @@ def run_check(session_dir: Path, pcfg, log: Callable = print, chainage: Optional
     t0 = time.time()
     session_dir = Path(session_dir)
     cfg = pcfg.chunk_check
-    from config import cfg as raw_cfg
+    from precision.config import raw_of
     from reconstruction.loops.config import improvement_error_factor
+    raw_cfg = raw_of(pcfg)                   # the job's frozen configuration (point 69), never the disk
     fac = float(improvement_error_factor(raw_cfg))                  # the user's 2 (point 1), ONE place
     (frames, c2w, K, s_k, s_k_source, chunk, chain, omega_dir, da3_dir, bend,
      composed) = load_inputs(session_dir, log)
     if chainage is not None:
         chain = np.asarray(chainage, np.float64)
     pool_m = float(pcfg.gauge.knot_walk_m) / 2.0
+    # THE FLOOR UNDER THE CAMERA of every chunk, measured ONCE on the published cloud with the
+    # certification's own choice (USER 2026-10-08: several floors; correction.floor.
+    # chunk_floor_levels) — shared by this check and the floor metric below
+    floor_levels, floor_planes = None, None
+    try:
+        from correction.session import read_ply
+        from precision.cloud_metrics import cloud_floor_levels
+        _, data = read_ply(session_dir / "output" / "cleaned_cloud.ply")
+        floor_levels = cloud_floor_levels(session_dir / "output", {k: data[k] for k in data.dtype.names},
+                                          frames, c2w, raw_cfg, int(pcfg.cloud_metrics.max_points))
+        del data
+        floor_planes = {int(c): (q["normal"], q["centroid"])
+                        for c, q in floor_levels["levels"]["chosen"].items()}
+        log(f"{LOG_TAG} the floor under the camera measured on the published cloud for "
+            f"{len(floor_planes)} of {len(floor_levels['levels']['chunks'])} chunk(s), surface(s) "
+            f"{sorted(set(floor_levels['surfaces'].values()))}")
+    except (RuntimeError, OSError) as e:
+        # the MEASUREMENT'S OWN errors — a session that cannot be measured (CloudMetricsError,
+        # CorrectionConfigError, the floor module's RuntimeError: no Omega record, no floor plane;
+        # a file missing or unreadable) — are declared and the keyframe's lowest band stands in,
+        # as before. A TypeError / KeyError / IndexError is a BUG in the measurement and
+        # propagates: a broad catch read one as "not measured" and the fallback hid it
+        log(f"{LOG_TAG} ⚠ the floor of each chunk was not measured on the published cloud "
+            f"({type(e).__name__}: {e}) — each keyframe's lowest band is its floor, DECLARED")
     try:
         rows, plane = measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir, da3_dir, cfg, log,
-                                   bend=bend, offset=composed["offset"])
+                                   bend=bend, offset=composed["offset"], floor_planes=floor_planes)
         verdicts = judge(rows, cfg, pool_m, log, error_factor=fac)
     except NoFloorPlane as e:
         # DECLARED, not fatal (USER 2026-10-05): a report step that cannot measure says so and the
@@ -718,7 +820,12 @@ def run_check(session_dir: Path, pcfg, log: Callable = print, chainage: Optional
                       "seed": int(cfg.seed), "improvement_error_factor": fac,
                       "floor_plane": "seeded numpy RANSAC (point 50), no acceptance bar (point 140)",
                       "s_k_source": s_k_source, "depth_epochs_composed": composed["epochs_composed"]},
-           "plane": plane, **verdicts}
+           "plane": plane,
+           "floor_levels": ({"surfaces": {str(c): s for c, s in floor_levels["surfaces"].items()},
+                             "reference_camera_height_m": floor_levels["levels"]["reference_camera_height_m"],
+                             "per_chunk": floor_levels["levels"]["per_chunk"]}
+                            if floor_levels is not None else None),
+           **verdicts}
     seconds_check = round(time.time() - t0, 1)
     pdir = out / "precision"
     pdir.mkdir(parents=True, exist_ok=True)
@@ -730,7 +837,8 @@ def run_check(session_dir: Path, pcfg, log: Callable = print, chainage: Optional
     # the floor metric of the published cloud (precision/cloud_metrics.py; edges need the projection)
     from precision.cloud_metrics import run_cloud_metrics
     try:
-        rep["cloud_metrics"] = run_cloud_metrics(session_dir, pcfg, stage="f6_check", log=log, edges=False)
+        rep["cloud_metrics"] = run_cloud_metrics(session_dir, pcfg, stage="f6_check", log=log, edges=False,
+                                                 floor_levels=floor_levels)
     except Exception as e:  # noqa: BLE001 — a metric that cannot be measured is declared, never fatal
         log(f"{LOG_TAG} ⚠ cloud metrics not measured: {e}")
         rep["cloud_metrics"] = {"measured": False, "reason": str(e)}
@@ -747,7 +855,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--session", required=True)
     args = ap.parse_args(argv)
     from precision.config import load_precision_config
-    run_check(Path(args.session), load_precision_config())
+    run_check(Path(args.session), load_precision_config(session_dir=Path(args.session)))
     return 0
 
 

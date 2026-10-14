@@ -209,7 +209,7 @@ def trace_normals_from(frames: Dict[int, dict]) -> Callable:
 
 def _rgb_undistorted(frames_dir: Path, frame: int, maps) -> np.ndarray:
     import cv2
-    from intake.content import frame_file
+    from intake.quality import frame_file      # the one frame-number → file rule (I2 gone, point 75)
     bgr = cv2.imread(str(frame_file(frames_dir, frame)), cv2.IMREAD_COLOR)
     if bgr is None:
         raise CorrectedCloudError(f"frame image {frame_file(frames_dir, frame)} is unreadable")
@@ -495,20 +495,51 @@ def provenance_columns(tmp: Path, inp, f6: dict, log: Callable) -> Dict[str, np.
 
 
 def publish(session_dir: Path, tmp: Path, report: dict, log: Callable,
-            columns: Optional[Dict[str, np.ndarray]] = None) -> dict:
+            columns: Optional[Dict[str, np.ndarray]] = None,
+            history: Optional[dict] = None) -> dict:
     """The new-cloud epoch: the same transaction F7 runs (PLY + raw, origins v2, epoch
     record, octree, atomic swap, ledger). ``columns``: v2 columns measured by the caller
-    (row-aligned with the PLY) — they win over the PLY's fields and the defaults."""
+    (row-aligned with the PLY) — they win over the PLY's fields and the defaults.
+
+    THE PRODUCT EPOCH (docs/plan_determinismo.md points 135 / 136, 2026-10-08): the epoch this
+    publishes is the base every certification composes from, so it (a) stages the IDENTITY
+    ``depth_correction.json`` stamped with its (empty) chain — ``correction.chain.product_sidecar``
+    — so the sidecar a previous certification left live goes out with the previous epoch instead
+    of being served to the TSDF, the hole audit and the VLM/SAM3 depth provider, and the
+    ``scale_diagnostics.json`` of a product (``correction.chain.product_diagnostics``: the lock's
+    estimate with an EMPTY epochs history — the product applied nothing), and (b) once swapped
+    in, deletes every stored epoch, persisted warp and quality report OUTSIDE its own lineage
+    (``correction.chain.lineage_cleanup``: a previous certification of the previous product,
+    another reconstruction's leftovers). That lineage is read STRICTLY and BEFORE anything is
+    staged: a stored epoch record that cannot be read fails the publish naming it, nothing
+    published, nothing pruned on a guess; and the cleanup itself runs after the swap and the
+    ledger line, so a failure in it (a permission on a stored directory) is DECLARED in the log
+    and in ``history`` and never undoes a product that is already live and recorded. What the
+    cleanup removed depends on the session's history, not on the inputs: it goes to ``history``
+    (the caller's dict, written to the timing sidecar), never into the compared report. DECLARED:
+    the product's epoch NUMBER still counts the session's history (``next_epoch`` over every
+    epoch ever held, its stored dirs and warps); renumbering to 0/1 is the user's pending
+    (docs/pipeline_final.md list A) and is not done here."""
     from correction import ledger
     from correction.apply import TX_PREFIX, assert_no_interrupted_swap, next_epoch, swap_transaction
-    from correction.epoch import EPOCH_FILE, current_epoch, make_epoch_record
+    from correction.chain import lineage_cleanup, product_diagnostics, product_sidecar
+    from correction.epoch import (EPOCH_FILE, EpochRecordError, current_epoch, epoch_lineage,
+                                  make_epoch_record)
     from correction.session import read_ply, write_ply
+    from segmentation.session_io import DEPTH_CORRECTION_NAME
     import precision.provenance as PV
     out = Path(session_dir) / "output"
     assert_no_interrupted_swap(out)
     header, data = read_ply(tmp / "cleaned_cloud.ply")
     n = len(data)
     epoch_from, epoch_to = current_epoch(out), next_epoch(out)
+    # the lineage the new epoch WILL have (its parent is the live epoch): the stored records are
+    # read strictly here, before the transaction exists — a record that cannot be read refuses
+    # the publish by name instead of deciding, by a guess, what the cleanup deletes
+    try:
+        keep = [int(e) for e in epoch_lineage(out, epoch_from, strict=True)] + [int(epoch_to)]
+    except EpochRecordError as e:
+        raise CorrectedCloudError(f"{e} — nothing published") from e
     tx = out / f"{TX_PREFIX}{epoch_to}"
     if tx.exists():
         shutil.rmtree(tx)
@@ -577,6 +608,17 @@ def publish(session_dir: Path, tmp: Path, report: dict, log: Callable,
             np.save(tx / sib, np.zeros(n, dt)); art(sib)
     (tx / EPOCH_FILE).write_text(json.dumps(make_epoch_record(epoch_to, cid, epoch_from, kind="new_cloud"), indent=1))
     art(EPOCH_FILE)
+    # the identity depth sidecar of the product epoch, stamped with its chain (point 135): staged
+    # whether or not one is live, so a reader never finds another epoch's factors under this cloud
+    (tx / DEPTH_CORRECTION_NAME).write_text(json.dumps(product_sidecar(out, epoch_to), indent=1,
+                                                       sort_keys=True))
+    art(DEPTH_CORRECTION_NAME)
+    # the product's scale_diagnostics.json: the lock's estimate with an empty epochs history (the
+    # same writer format as every epoch's, correction.apply / precision.poses_epoch)
+    diag = product_diagnostics(out)
+    if diag is not None:
+        (tx / "scale_diagnostics.json").write_text(json.dumps(diag, indent=2, default=float))
+        art("scale_diagnostics.json")
     from potree_converter import convert_ply_to_potree
     ok = convert_ply_to_potree(Path(session_dir), force=True, ply_override=tx / "cleaned_cloud.ply",
                                potree_dir_override=tx / "potree")
@@ -590,6 +632,20 @@ def publish(session_dir: Path, tmp: Path, report: dict, log: Callable,
                       diagnosis=[{"stage": "corrected_cloud"}], gates=[], overrides={}, verdict="applied",
                       report_path=CLOUD_REPORT)
     log(f"{LOG_TAG} published epoch {epoch_to} ({n:,} points; epoch {epoch_from} kept, selectable)")
+    # the epochs outside the new product's lineage go (point 136); the record of what went is
+    # history — the caller writes it next to the timing, never into the compared report. The
+    # product is live and in the ledger: a cleanup that fails is declared, never a reason to
+    # fail the step (a retry would publish ANOTHER number on top of this one)
+    try:
+        gone: dict = lineage_cleanup(out, keep, log=log)
+    except OSError as e:
+        gone = {"failed": f"{type(e).__name__}: {e}"}
+        log(f"{LOG_TAG} DECLARED: the cleanup of the epochs outside the lineage {keep} failed ({e}) — "
+            f"epoch {epoch_to} is published and recorded; the leftovers stay until the next publish "
+            f"or certification prunes them")
+    if history is not None:
+        history["lineage_cleanup"] = gone
+        history["lineage"] = list(keep)
     return rep
 
 
@@ -597,8 +653,9 @@ def run_corrected_cloud(session_dir: Path, pcfg, log: Callable = print,
                         progress: Optional[Callable[[float, str], None]] = None) -> dict:
     """The step: F6's depth → chunks → clean → witnesses → silhouettes → consolidate →
     provenance → publish."""
-    from config import cfg as raw_cfg
+    from precision.config import raw_of
     from precision import depth_sweep as DS
+    raw_cfg = raw_of(pcfg)                   # the job's frozen configuration (point 69), never the disk
     t0 = time.time()
     session_dir = Path(session_dir)
     out = session_dir / "output"
@@ -672,12 +729,15 @@ def run_corrected_cloud(session_dir: Path, pcfg, log: Callable = print,
         t = cols["source"]
         report["tiers_in_cloud"] = {"tier0": int((t == 0).sum()), "tier1": int((t == 1).sum())}
         _p(85, "publishing the epoch (octree, atomic swap)")
-        rep = publish(session_dir, tmp, report, log, columns=cols)
+        history: dict = {}
+        rep = publish(session_dir, tmp, report, log, columns=cols, history=history)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     seconds = round(time.time() - t0, 1)
     (out / CLOUD_REPORT).write_text(json.dumps(rep, indent=1, default=float))
-    write_timing(out / CLOUD_REPORT, {"seconds": seconds})
+    # the clock and the session's history (what the publish removed outside its lineage, point
+    # 136) live in the timing sidecar: neither is a function of the inputs
+    write_timing(out / CLOUD_REPORT, {"seconds": seconds, "history": history})
     _p(100, f"corrected cloud is epoch {rep['epoch_to']} ({rep['n_points']:,} pts, {seconds} s)")
     return rep
 
@@ -830,7 +890,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = ap.parse_args(argv)
     from precision.config import load_precision_config
     from precision import f6_torch as FT
-    pcfg = load_precision_config()
+    pcfg = load_precision_config(session_dir=Path(args.session))   # the job's frozen config (point 69)
     # USER 2026-10-08: the splats / medians of the repair run on the card, strict deterministic torch
     rec = FT.require_cuda(int(pcfg.mono_detail.seed))
     print(f"{LOG_TAG} maps on {rec['device']} ({rec['card']}), torch {rec['torch']}, deterministic strict")

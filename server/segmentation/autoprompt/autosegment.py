@@ -67,9 +67,15 @@ def load_autosegment(output_dir) -> dict:
         return {}
     try:
         d = json.loads(p.read_text())
-        return d if isinstance(d, dict) else {}
-    except (OSError, ValueError):
-        return {}
+        if isinstance(d, dict):
+            return d
+        why = "not a JSON object"
+    except (OSError, ValueError) as e:
+        why = str(e)
+    # a broken file is redone, never a failure (USER 2026-10-08) — and said, never silent
+    print(f"[autoprompt] DECLARED: the session's saved prompts ({p.name}) are unreadable ({why}) — "
+          f"the shipped prompt is used; the next save writes the file again", flush=True)
+    return {}
 
 
 def vlm_prompt_for(output_dir) -> tuple[str, bool]:

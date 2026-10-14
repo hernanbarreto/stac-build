@@ -135,9 +135,10 @@ def vote_in_band(C, band: Dict[int, np.ndarray]) -> dict:
 def clean_cloud(C, pcfg, scratch: Path, log: Callable) -> Path:
     """The voted maps through the cloud stage's own cleaner, outside the session (the publish step's
     chunk writer, without the epoch)."""
-    from config import cfg as raw_cfg
+    from precision.config import raw_of
     from precision import corrected_cloud as CC
     from precision.epoch0_cloud import _write_ply_xyzrgb
+    raw_cfg = raw_of(pcfg)                   # the job's frozen configuration (point 69), never the disk
     tmp = scratch / "tmp"
     shutil.rmtree(tmp, ignore_errors=True)
     (tmp / "chunks").mkdir(parents=True)
@@ -265,7 +266,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = ap.parse_args(argv)
     from precision.config import load_precision_config
     from precision import f6_torch as FT
-    pcfg = load_precision_config()
+    pcfg = load_precision_config(session_dir=Path(args.session))   # the job's frozen config (point 69)
     # USER 2026-10-08: the maps on the card, strict deterministic torch — as the stage runs them
     rec = FT.require_cuda(int(pcfg.mono_detail.seed))
     print(f"{LOG_TAG} maps on {rec['device']} ({rec['card']}), torch {rec['torch']}, deterministic strict", flush=True)

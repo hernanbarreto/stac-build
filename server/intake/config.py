@@ -1,11 +1,16 @@
 """Typed, validated load of the top-level ``intake:`` section (server/config.yaml).
 
 Decides nothing: it guarantees that every parameter the intake stages (I0
-quality features, I1 parallax keyframes, I2 content tags) use exists, has the
-right type and sits inside its declared bounds BEFORE a single frame is read.
-There is NO default in code — a missing key aborts the load naming it (the
-YAML documents every value and its provenance: BOUND / MEASURED / USER
-DECISION). The loader pattern is ``precision/config.py``.
+quality features, I1 parallax keyframes) use exists, has the right type and
+sits inside its declared bounds BEFORE a single frame is read. There is NO
+default in code — a missing key aborts the load naming it (the YAML documents
+every value and its provenance: BOUND / MEASURED / USER DECISION). The loader
+pattern is ``precision/config.py``.
+
+I2 (VLM content tags + SAM3 exclusion masks, ``intake.content``) was REMOVED
+from the pipeline (USER 2026-10-08, docs/plan_determinismo.md point 75: "ya no
+corre VLM ahí"): a leftover ``intake.content`` section fails the load naming
+it (:data:`REMOVED_SECTIONS`).
 """
 
 from __future__ import annotations
@@ -67,14 +72,6 @@ def _str(section, key, path) -> str:
     return v
 
 
-def _enum(section, key, path, allowed: Sequence[str]) -> str:
-    v = _str(section, key, path)
-    if v not in allowed:
-        raise IntakeConfigError(
-            f"'{SECTION}.{path}.{key}' must be one of {tuple(allowed)}, got {v!r}")
-    return v
-
-
 def _num_list(section, key, path, lo=None, integer=False, min_len=1,
               increasing=False) -> Tuple[float, ...]:
     v = _require(section, key, path)
@@ -101,24 +98,6 @@ def _num_list(section, key, path, lo=None, integer=False, min_len=1,
     return tuple(out)
 
 
-def _str_list(section, key, path, allowed: Optional[Sequence[str]] = None,
-              min_len=0) -> Tuple[str, ...]:
-    v = _require(section, key, path)
-    if not isinstance(v, (list, tuple)) or len(v) < min_len:
-        raise IntakeConfigError(
-            f"'{SECTION}.{path}.{key}' must be a list of at least {min_len} "
-            f"string(s), got {v!r}")
-    for i, x in enumerate(v):
-        if not isinstance(x, str) or not x:
-            raise IntakeConfigError(
-                f"'{SECTION}.{path}.{key}[{i}]' must be a non-empty string, got {x!r}")
-        if allowed is not None and x not in allowed:
-            raise IntakeConfigError(
-                f"'{SECTION}.{path}.{key}[{i}]' must be one of {tuple(allowed)}, "
-                f"got {x!r}")
-    return tuple(v)
-
-
 def _sub(section: Any, key: str, path: str) -> Dict[str, Any]:
     v = _require(section, key, path)
     if not isinstance(v, dict):
@@ -131,8 +110,6 @@ def _sub(section: Any, key: str, path: str) -> Dict[str, Any]:
 
 GRAY_MAX = 255          # 8-bit gray: the range luma / clip bounds live in
 
-CONTENT_CLASSES = ("dynamic", "occluder", "reflective", "low_info")
-SAM3_SCOPES = ("flagged_ranges", "all")
 # Keys the loader REFUSES because the code that read them is gone — a leftover in a
 # config or a session YAML fails the load naming the key and the reason (a key
 # nothing reads would only pretend to configure something).
@@ -153,6 +130,13 @@ REMOVED_KEYS: Dict[str, Dict[str, str]] = {
                       "reference is always the warp twin + the chain's forward-backward "
                       "error (intake/parallax.py)"),
     },
+}
+# Whole SECTIONS the loader refuses, for the same reason (the stage is gone).
+REMOVED_SECTIONS: Dict[str, str] = {
+    "content": ("intake I2 — VLM content tags + SAM3 exclusion masks — was removed from the "
+                "pipeline (USER 2026-10-08, docs/plan_determinismo.md point 75: the VLM runs "
+                "once, as the stage after the cloud stage; no exclusion masks, no "
+                "content_tags.json) — delete the section"),
 }
 
 
@@ -211,26 +195,10 @@ class ParallaxConfig:
 
 
 @dataclass(frozen=True)
-class ContentConfig:
-    """I2 — VLM content tags (vlm_proposed) and SAM3 exclusion masks."""
-    enabled: bool
-    backend: str                        # semantic-service backend name (semantic.backends.<name>)
-    batch: int                          # BOUND: images per VLM call (≤ the backend's max_images_per_prompt)
-    max_tokens: int                     # BOUND: VLM generation cap per call
-    exclusion_classes: Tuple[str, ...]  # classes whose SAM3 masks EXCLUDE observations
-    weight_classes: Tuple[str, ...]     # classes that only WEIGH (provenance + report)
-    sam3_scope: str                     # flagged_ranges | all
-    prompts: Dict[str, Tuple[str, ...]]  # SAM3 prompts per exclusion class (keys ⊇ exclusion_classes)
-    sam3_batch: int                     # frames per SAM3 session — models.segmentation.batch_size
-                                        # (the segmentation stage's own key, validated here)
-
-
-@dataclass(frozen=True)
 class IntakeConfig:
     runtime: RuntimeConfig
     quality: QualityConfig
     parallax: ParallaxConfig
-    content: ContentConfig
 
 
 # ── section readers ──────────────────────────────────────────────────────
@@ -335,90 +303,14 @@ def _load_parallax(sec: Dict[str, Any]) -> ParallaxConfig:
     return out
 
 
-def _load_content(sec: Dict[str, Any], raw: Optional[Dict[str, Any]]) -> ContentConfig:
-    c = _sub(sec, "content", "")
-    # sam3_batch is read from models.segmentation.batch_size, not from this section
-    _refuse_unknown(c, "content", tuple(k for k in _fields(ContentConfig) if k != "sam3_batch"))
-    exclusion = _str_list(c, "exclusion_classes", "content", allowed=CONTENT_CLASSES)
-    weight = _str_list(c, "weight_classes", "content", allowed=CONTENT_CLASSES)
-    overlap = sorted(set(exclusion) & set(weight))
-    if overlap:
-        raise IntakeConfigError(
-            f"'{SECTION}.content.exclusion_classes' and "
-            f"'{SECTION}.content.weight_classes' must be disjoint — {overlap} appear in "
-            f"both (a class either excludes observations or only weighs them)")
-    if len(set(exclusion)) != len(exclusion):
-        raise IntakeConfigError(
-            f"'{SECTION}.content.exclusion_classes' lists a class twice: {exclusion}")
-    if len(set(weight)) != len(weight):
-        raise IntakeConfigError(
-            f"'{SECTION}.content.weight_classes' lists a class twice: {weight}")
-
-    prompts_raw = _sub(c, "prompts", "content")
-    prompts: Dict[str, Tuple[str, ...]] = {}
-    for cls in prompts_raw:
-        if cls not in CONTENT_CLASSES:
+def _refuse_removed_sections(sec: Dict[str, Any]) -> None:
+    """A section of ``intake:`` whose stage is gone fails the load naming it and why
+    (:data:`REMOVED_SECTIONS`) — a section nothing reads would only pretend to configure a
+    stage that does not run."""
+    for key in sec:
+        if key in REMOVED_SECTIONS:
             raise IntakeConfigError(
-                f"'{SECTION}.content.prompts.{cls}' names an unknown class — allowed "
-                f"{CONTENT_CLASSES}")
-        prompts[cls] = _str_list(prompts_raw, cls, "content.prompts", min_len=1)
-    missing = [cls for cls in exclusion if cls not in prompts]
-    if missing:
-        raise IntakeConfigError(
-            f"'{SECTION}.content.prompts' lacks the SAM3 prompts of exclusion class(es) "
-            f"{missing} — every exclusion class needs at least one prompt")
-
-    backend = _str(c, "backend", "content")
-    batch = _num(c, "batch", "content", lo=1, integer=True)
-    # cross-section consistency: the VLM call carries `batch` images and the
-    # semantic service caps images per prompt per backend — a batch above that
-    # cap fails at the first call, so it fails here, naming both keys.
-    sem = (raw or {}).get("semantic") if isinstance(raw, dict) else None
-    backends = (sem or {}).get("backends") if isinstance(sem, dict) else None
-    if isinstance(backends, dict):
-        if backend not in backends:
-            raise IntakeConfigError(
-                f"'{SECTION}.content.backend' = {backend!r} is not declared under "
-                f"'semantic.backends' ({sorted(backends)})")
-        cap = backends[backend].get("max_images_per_prompt") \
-            if isinstance(backends[backend], dict) else None
-        if isinstance(cap, (int, float)) and not isinstance(cap, bool) and batch > cap:
-            raise IntakeConfigError(
-                f"'{SECTION}.content.batch' = {batch} exceeds "
-                f"'semantic.backends.{backend}.max_images_per_prompt' = {cap}")
-
-    return ContentConfig(
-        enabled=_bool(c, "enabled", "content"),
-        backend=backend,
-        batch=batch,
-        max_tokens=_num(c, "max_tokens", "content", lo=1, integer=True),
-        exclusion_classes=exclusion,
-        weight_classes=weight,
-        sam3_scope=_enum(c, "sam3_scope", "content", SAM3_SCOPES),
-        prompts=prompts,
-        sam3_batch=_sam3_batch(raw),
-    )
-
-
-def _sam3_batch(raw: Optional[Dict[str, Any]]) -> int:
-    """``models.segmentation.batch_size`` — the SAM3 session length the
-    segmentation stage uses; I2 segments its exclusion masks with the same one.
-    It lives outside ``intake:`` (one key, one owner) and is validated here so
-    a bad value fails at load, before the VLM has tagged a single frame."""
-    key = "models.segmentation.batch_size"
-    models = raw.get("models") if isinstance(raw, dict) else None
-    seg = models.get("segmentation") if isinstance(models, dict) else None
-    if not isinstance(seg, dict) or "batch_size" not in seg:
-        raise IntakeConfigError(
-            f"config.yaml is missing '{key}' — intake I2 segments its exclusion masks "
-            f"with the segmentation stage's SAM3 batch ('{SECTION}.content' reads it); "
-            f"there is no hidden default in code")
-    v = seg["batch_size"]
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or int(v) != v or v < 1:
-        raise IntakeConfigError(
-            f"'{key}' must be a positive integer (read by '{SECTION}.content' for the SAM3 "
-            f"exclusion masks), got {v!r}")
-    return int(v)
+                f"'{SECTION}.{key}' is no longer a section — {REMOVED_SECTIONS[key]}")
 
 
 def load_intake_config(raw: Optional[Dict[str, Any]] = None) -> IntakeConfig:
@@ -432,11 +324,10 @@ def load_intake_config(raw: Optional[Dict[str, Any]] = None) -> IntakeConfig:
     if not isinstance(sec, dict):
         raise IntakeConfigError(
             "config.yaml has no top-level 'intake:' section — the intake "
-            "(I0 quality, I1 parallax keyframes, I2 content) cannot run without "
-            "its parameters")
+            "(I0 quality, I1 parallax keyframes) cannot run without its parameters")
+    _refuse_removed_sections(sec)
     return IntakeConfig(
         runtime=_load_runtime(sec),
         quality=_load_quality(sec),
         parallax=_load_parallax(sec),
-        content=_load_content(sec, raw),
     )

@@ -104,7 +104,7 @@ DISCARD_NO_PRIOR = 2             # Omega left no depth here: no hypothesis to sw
 DISCARD_NO_SIGNAL = 3            # no ZNCC over the floor and the prior is not confirmed
 DISCARD_INCONSISTENT = 4         # ZNCC signal, but the other views do not confirm the depth
 DISCARD_PRIOR_FILL_DROPPED = 5   # tier 1 under prior_fill: drop
-DISCARD_EXCLUDED = 6             # I2 exclusion mask
+DISCARD_EXCLUDED = 6             # I2 exclusion mask (I2 eliminated 2026-10-08, point 75: no writer left)
 DISCARD_LOW_CONF = 7             # tier-1 prior under the pipeline's ONE confidence floor
 DISCARD_CONTRADICTED = 8         # a consistency view sees FREE SPACE through the point
 DISCARD_NOT_INDEPENDENT = 9      # RETIRED 2026-09-29 (the 'independent witness ≥ 1 m of walk'
@@ -663,7 +663,7 @@ def load_inputs(session_dir: Path, pcfg) -> SweepInputs:
 def read_gray_undistorted(frames_dir: Path, frame: int, maps) -> Tuple[np.ndarray, np.ndarray]:
     """(gray in [0, 1], valid) of one frame in the undistorted native frame."""
     import cv2
-    from intake.content import frame_file
+    from intake.quality import frame_file      # the one frame-number → file rule (I2 gone, point 75)
     p = frame_file(frames_dir, frame)
     g = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
     if g is None:
@@ -676,26 +676,11 @@ def read_gray_undistorted(frames_dir: Path, frame: int, maps) -> Tuple[np.ndarra
     return und, val
 
 
-_EXCLUSION_CACHE: Dict[str, Dict[int, Path]] = {}
-
-
-def read_exclusion(session_dir: Path, frame: int, maps) -> Optional[np.ndarray]:
-    """I2's exclusion mask of ``frame`` on the undistorted grid, or None. Plan point 68: ONLY the
-    masks intake/content_tags.json lists under a stamp that matches the PNGs are read
-    (precision.tracks.exclusion_mask_paths — the one reader F4 uses); a PNG on disk by itself is a
-    leftover of an earlier run and is never applied."""
-    import cv2
-    from intake.content import read_mask_png
-    from precision.tracks import exclusion_mask_paths
-    key = str(Path(session_dir).resolve())
-    if key not in _EXCLUSION_CACHE:
-        _EXCLUSION_CACHE[key] = exclusion_mask_paths(Path(session_dir))[0]
-    p = _EXCLUSION_CACHE[key].get(int(frame))
-    if p is None:
-        return None
-    m = read_mask_png(p).astype(np.float32)
-    return cv2.remap(m, maps[0], maps[1], cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT,
-                     borderValue=0) > 0
+# No exclusion mask enters the sweep: I2 (content tags + exclusion masks) was ELIMINATED from
+# the pipeline (docs/plan_determinismo.md point 75, USER 2026-10-08) — the reader of
+# intake/content_tags.json that lived here (read_exclusion) is gone; DISCARD_EXCLUDED stays a
+# provenance code (assign_tiers' ``excl`` and the readers of older depth maps), never written
+# by this stage any more.
 
 
 def record_grid(cam, shape_hw: Tuple[int, int]):
@@ -846,7 +831,7 @@ def run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> Di
 
 def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> Dict[str, Any]:
     from precision import confidence as CAL
-    from intake.content import frame_file
+    from intake.quality import frame_file      # the one frame-number → file rule (I2 gone, point 75)
     import cv2
     session_dir = Path(session_dir)
     out = session_dir / "output"
@@ -956,8 +941,7 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
             if len(img_cache) > 4 * int(dcfg.n_views):
                 img_cache.pop(next(iter(img_cache)))
             g, val = read_gray_undistorted(inp.frames_dir, frame_of(j), inp.maps)
-            ex = read_exclusion(session_dir, frame_of(j), inp.maps)
-            img_cache[j] = (g, val & ~ex if ex is not None else val)
+            img_cache[j] = (g, val)
         return img_cache[j]
 
     def beta_map(i):
@@ -1037,7 +1021,8 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
         f"pair(s)), τ_px {inp.tau_px:.2f} px")
 
     # pass 2: consistency, tiers, outputs
-    from config import cfg as _raw_cfg
+    from precision.config import raw_of
+    _raw_cfg = raw_of(pcfg)                  # the job's frozen configuration (point 69), never the disk
     try:
         conf_floor = float(_raw_cfg["reconstruction"]["simple"]["conf_min_norm"])
     except (KeyError, TypeError, ValueError) as e:
@@ -1137,7 +1122,7 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
             b_p = np.where(b_p_all.astype(np.int32) > g_p_all.astype(np.int32), b_p_all, 0).astype(np.uint8)
         else:
             b_s, b_p = b_s_near, b_p_near
-        excl = read_exclusion(session_dir, f, inp.maps)
+        excl = None                                   # I2 is gone (point 75): nothing excluded
         low = conf_floor_mask(c0, z0 > 0, conf_floor)
         src = assign_tiers(sig, n_s, z0, n_p, excl, dcfg.min_consistent_views,
                            dcfg.prior_fill_min_views, dcfg.prior_fill,
@@ -1253,7 +1238,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = ap.parse_args(argv)
     from precision.tracks import ensure_cublas_workspace
     ensure_cublas_workspace()                   # before torch initialises CUDA
-    run_sweep(Path(args.session), load_precision_config())
+    run_sweep(Path(args.session), load_precision_config(session_dir=Path(args.session)))
     return 0
 
 

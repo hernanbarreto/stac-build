@@ -18,6 +18,9 @@ const tt = (key: string, vars?: Record<string, string | number | null | undefine
 
 interface InstanceInfo {
     id: number
+    /** the segment's instance_id — what a rename names (USER 2026-10-09: a rename sent `id`,
+     *  the masklet id, and could name the previous masklet or a split sibling) */
+    iid?: number
     label: string
     color: string
     total_points: number
@@ -149,6 +152,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                     const segData = await segRes.json()
                     setInstances((segData.instances || []).map((inst: any, i: number) => ({
                         id: inst.id,
+                        iid: inst.instance_id ?? inst.id,
                         label: inst.label || tt('seg.objectFallback', { id: inst.id }),
                         color: inst.color || instanceColors()[i % instanceColors().length],
                         total_points: inst.total_points || 0,
@@ -167,9 +171,16 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                 setKfIndex(0)
                 setSelectedFrames(new Set(kfList.map((_, i) => i)))
 
-                // Fire-and-forget: kick off SAM3 init (server returns 202 immediately)
+                // Kick off SAM3 init (the server answers 202 at once and loads in the background) —
+                // and READ the answer: a 409 means a pipeline job or another GPU task holds the card
+                // (one GPU permit, point 154) and the Manager cannot open; its reason is shown instead
+                // of polling 'loading model' forever against an init status that never changes
                 setStatus(tt('seg.initModel', { n: kfList.length }))
-                fetch(`/api/segmentation/start_session/${sessionId}`, { method: 'POST' }).catch(() => { })
+                const startRes = await fetch(`/api/segmentation/start_session/${sessionId}`, { method: 'POST' })
+                if (!startRes.ok) {
+                    const d = await startRes.json().catch(() => ({}))
+                    throw new Error(d.detail?.error || (typeof d.detail === 'string' ? d.detail : '') || tt('seg.initFailed'))
+                }
 
                 // Poll lightweight status endpoint every 2s until ready
                 const startTime = Date.now()
@@ -817,7 +828,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                                     if (segRes.ok) {
                                         const segData = await segRes.json()
                                         setInstances((segData.instances || []).map((inst: any, i: number) => ({
-                                            id: inst.id,
+                                            id: inst.id, iid: inst.instance_id ?? inst.id,
                                             label: inst.label || tt('seg.objectFallback', { id: inst.id }),
                                             color: inst.color || instanceColors()[i % instanceColors().length],
                                             total_points: inst.total_points || 0,
@@ -879,7 +890,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                     if (segRes.ok) {
                         const segData = await segRes.json()
                         setInstances((segData.instances || []).map((inst: any, i: number) => ({
-                            id: inst.id,
+                            id: inst.id, iid: inst.instance_id ?? inst.id,
                             label: inst.label || tt('seg.objectFallback', { id: inst.id }),
                             color: inst.color || instanceColors()[i % instanceColors().length],
                             total_points: inst.total_points || 0,
@@ -913,7 +924,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             if (segRes.ok) {
                 const segData = await segRes.json()
                 setInstances((segData.instances || []).map((inst: any, i: number) => ({
-                    id: inst.id,
+                    id: inst.id, iid: inst.instance_id ?? inst.id,
                     label: inst.label || tt('seg.objectFallback', { id: inst.id }),
                     color: inst.color || instanceColors()[i % instanceColors().length],
                     total_points: inst.total_points || 0,
@@ -930,15 +941,20 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     // ── Rename handler ──────────────────────────────────
     const handleRename = useCallback(async (instId: number, newLabel: string) => {
         try {
-            await fetch(`/api/segmentation/rename`, {
+            const r = await fetch(`/api/segmentation/rename`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ session_id: sessionId, instance_id: instId, label: newLabel })
+                body: JSON.stringify({ session_id: sessionId, instance_id: instances.find(i => i.id === instId)?.iid ?? instId, label: newLabel })
             })
+            if (!r.ok) {
+                const d = await r.json().catch(() => ({}))
+                setStatus(tt('instances.renameFailed', { detail: d.detail || r.status }))
+                return
+            }
             setInstances(prev => prev.map(i => i.id === instId ? { ...i, label: newLabel } : i))
             onUpdate?.()
         } catch { /* silent */ }
-    }, [sessionId, onUpdate])
+    }, [sessionId, onUpdate, instances])
 
     // ── Exclusion toggle ──────────────────────────────────
     const handleToggleExclude = useCallback(async (instId: number, excluded: boolean) => {
@@ -946,12 +962,12 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             await fetch(`/api/segmentation/rename`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ session_id: sessionId, instance_id: instId, excluded })
+                body: JSON.stringify({ session_id: sessionId, instance_id: instances.find(i => i.id === instId)?.iid ?? instId, excluded })
             })
             setInstances(prev => prev.map(i => i.id === instId ? { ...i, excluded } : i))
             onUpdate?.()
         } catch { /* silent */ }
-    }, [sessionId, onUpdate])
+    }, [sessionId, onUpdate, instances])
 
     // ── Delete instance ──────────────────────────────────
     const handleDelete = useCallback(async (instId: number, label: string) => {

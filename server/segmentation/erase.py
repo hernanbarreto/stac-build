@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -23,11 +24,16 @@ import numpy as np
 
 
 def _load_floor_transform(output_dir: Path):
-    p = Path(output_dir) / "floor_transform.npz"
-    if not p.exists():
+    """The DISPLAY frame the zones were drawn in — the viewer's: floor_transform.npz applied
+    only under the seal of the geometry on disk (docs/plan_determinismo.md point 158,
+    `segmentation.floor_frame`: the one rule for the viewer, the tools and the stages), else
+    identity, declared. A zone drawn on a cloud shown in its own frame must be tested in
+    that frame, or the brush lands beside the points it covered."""
+    from segmentation.floor_frame import sealed_floor_transform
+    srt = sealed_floor_transform(Path(output_dir), tag="Erase")
+    if srt is None:
         return 1.0, np.eye(3), np.zeros(3)
-    d = np.load(p)
-    return float(d["s"]), np.asarray(d["R"], float), np.asarray(d["t"], float)
+    return srt
 
 
 def _display_sphere_to_raw(output_dir: Path, center, radius: float):
@@ -61,6 +67,130 @@ def _atomic_savez(path: Path, arrays: Dict[str, np.ndarray]) -> None:
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+
+#: the segmentation.json key that counts the interactive edits of a sealed store, per tool
+STORE_EDITS_KEY = "edits"
+
+
+def reseal_store(output_dir: Path, *, by: str, log=print) -> dict:
+    """Re-seal the SAM3 store after an interactive edit rewrote ``seg_masks.npz`` (the erase
+    / undo of `segmentation.erase`, main.py's delete and mask paint), so the projection and
+    the certification ACCEPT it again: they refuse a store whose seal names other mask bytes
+    than the ones on disk (`segmentation.pipeline.check_store_seal`, point 83 — a seal that
+    lies), and an edit used to leave exactly that behind.
+
+    The seal is the stamp `finalize_sam3_store` wrote (`sam3_store_seal`): its ``inputs``
+    now name the bytes on disk; its ``code`` and ``config`` digests — the SAM3 code, the
+    prompts, the keyframes, the model and its thresholds that DREW the masks — are carried
+    over unchanged, because an edit changes none of them and recomputing them here would
+    hash the checkpoint and build the wrapper on every brush stroke in the server process;
+    the digest is recomputed as `repro.stamp` computes it. The edit itself is RECORDED in
+    segmentation.json (``edits``: a count per tool, no clock), so the store's provenance says
+    it is the stage's masks plus human edits. A store that carries NO seal (written before
+    2026-10-08, or the interactive manager's upsert, which drops it by construction) is left
+    as it is — a store with no seal is declared by its readers, not refused — and nothing is
+    invented for it. Returns {resealed, reason, sha256}."""
+    from atomic_io import atomic_write_json
+    from repro import sha256_file, sha256_json
+    output_dir = Path(output_dir)
+    seg_json = output_dir / "segmentation.json"
+    npz = output_dir / "seg_masks.npz"
+    if not seg_json.is_file() or not npz.is_file():
+        why = "no segmentation.json / seg_masks.npz to seal"
+        log(f"[Erase] DECLARED: store not re-sealed after {by} — {why}")
+        return {"resealed": False, "reason": why, "sha256": None}
+    try:
+        doc = json.loads(seg_json.read_text())
+    except ValueError as e:
+        why = f"segmentation.json is unreadable ({e})"
+        log(f"[Erase] DECLARED: store not re-sealed after {by} — {why}")
+        return {"resealed": False, "reason": why, "sha256": None}
+    old = doc.get("stamp") if isinstance(doc, dict) else None
+    if not isinstance(old, dict) or "sha256" not in old or not isinstance(old.get("inputs"), dict):
+        why = ("the store carries no seal (written before 2026-10-08, or edited by the "
+               "interactive manager) — left unsealed, as its readers declare it")
+        log(f"[Erase] DECLARED: store not re-sealed after {by} — {why}")
+        return {"resealed": False, "reason": why, "sha256": None}
+    have = sha256_file(npz)
+    body = {"stamp_version": old.get("stamp_version"),
+            "inputs": {**old["inputs"], "seg_masks.npz": have},
+            "code": dict(old.get("code") or {}),
+            "config": dict(old.get("config") or {})}
+    body["sha256"] = sha256_json(body)
+    edits = dict(doc.get(STORE_EDITS_KEY) or {})
+    edits[str(by)] = int(edits.get(str(by), 0)) + 1
+    doc["stamp"] = body
+    doc[STORE_EDITS_KEY] = edits
+    atomic_write_json(seg_json, doc, indent=1, sort_keys=True)
+    log(f"[Erase] store re-sealed after {by}: seg_masks.npz {have[:12]} (edits so far: "
+        + ", ".join(f"{k} x{v}" for k, v in sorted(edits.items())) + ")")
+    return {"resealed": True, "reason": "sealed to the mask bytes on disk", "sha256": have}
+
+
+def reseal_floor(output_dir: Path, *, by: str, held_before: Tuple[bool, str], log=print) -> dict:
+    """Carry the floor seal to the cloud an interactive edit just REWROTE — the delete mode of
+    the brush (``conf_below`` over the unsegmented points: they leave ``cleaned_cloud.ply``
+    physically) — so the stages and the viewer keep applying ``floor_transform.npz``. The seal
+    in floor_level.json names the cloud's sha256 (docs/plan_determinismo.md point 158,
+    `segmentation.pipeline._floor_seal_status`); the edit changed the bytes — points left, none
+    moved — not the frame the transform levels, exactly as `reseal_store` carries the SAM3
+    store's seal over an edit. Without this the next projection (the Segmentation Manager's
+    close, the certification) FAILS naming the old cloud, and the viewer, the ``potree_ready``
+    of the erase and the erase tools all drop the transform: the cloud shown unlevelled, the
+    next zone tested in identity while the previous one was tested in the levelled frame.
+
+    ``held_before`` is the verdict `segmentation.floor_frame.floor_seal_verdict` gave BEFORE
+    the rewrite (measured by the caller, memoised: the zones were tested under it). The seal is
+    carried over ONLY when it held for the bytes that were edited. One that did not hold —
+    another cloud's, another reconstruction's, nobody's, levelled before the seal existed — is
+    left exactly as it is, declared: sealing it to the new bytes would turn a transform the
+    viewer was NOT applying into one it applies, and the zones were drawn in the frame the
+    viewer showed. ``reconstruction_id`` and ``floor_transform_sha256`` are unchanged (neither
+    the reconstruction nor the npz moved); the edit is recorded under ``edits`` (a count per
+    tool, no clock) like the store's. With no npz beside the cloud nothing applies a transform
+    to it and there is nothing to carry (silent). Returns {resealed, reason, cloud_sha256}."""
+    from atomic_io import atomic_write_json
+    from repro import sha256_file
+    output_dir = Path(output_dir)
+    fl = output_dir / "floor_level.json"
+    npz = output_dir / "floor_transform.npz"
+    cloud = output_dir / "cleaned_cloud.ply"
+    if not npz.is_file() or not fl.is_file():
+        return {"resealed": False, "cloud_sha256": None,
+                "reason": "no floor_transform.npz / floor_level.json beside the cloud — nothing "
+                          "applies a transform to it, nothing to carry"}
+    ok_before, why_before = held_before
+    if not ok_before:
+        why = (f"the seal did not hold before the edit ({why_before}) — left as it is: the viewer "
+               f"showed the cloud in its own frame and the zones were tested there")
+        log(f"[Erase] DECLARED: floor seal not carried after {by} — {why}")
+        return {"resealed": False, "reason": why, "cloud_sha256": None}
+    try:
+        doc = json.loads(fl.read_text())
+    except ValueError as e:
+        why = f"floor_level.json is unreadable ({e})"
+        log(f"[Erase] DECLARED: floor seal not carried after {by} — {why}")
+        return {"resealed": False, "reason": why, "cloud_sha256": None}
+    st = doc.get("stamp") if isinstance(doc, dict) else None
+    if not isinstance(st, dict) or "reconstruction_id" not in st or "cloud_sha256" not in st:
+        why = "floor_level.json carries no seal — left as it is, as its readers declare it"
+        log(f"[Erase] DECLARED: floor seal not carried after {by} — {why}")
+        return {"resealed": False, "reason": why, "cloud_sha256": None}
+    if not cloud.is_file():
+        why = "no cleaned_cloud.ply to seal to"
+        log(f"[Erase] DECLARED: floor seal not carried after {by} — {why}")
+        return {"resealed": False, "reason": why, "cloud_sha256": None}
+    have = sha256_file(cloud)
+    doc["stamp"] = {**st, "cloud_sha256": have}
+    edits = dict(doc.get(STORE_EDITS_KEY) or {})
+    edits[str(by)] = int(edits.get(str(by), 0)) + 1
+    doc[STORE_EDITS_KEY] = edits
+    atomic_write_json(fl, doc, indent=2, sort_keys=True)
+    log(f"[Erase] floor seal carried to the edited cloud after {by}: cleaned_cloud.ply {have[:12]} "
+        f"(reconstruction and floor_transform.npz unchanged; edits so far: "
+        + ", ".join(f"{k} x{v}" for k, v in sorted(edits.items())) + ")")
+    return {"resealed": True, "reason": "sealed to the cloud bytes on disk", "cloud_sha256": have}
 
 
 def _atomic_append_npz(path: Path, arrays: Dict[str, np.ndarray], *, keep) -> None:
@@ -728,14 +858,25 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
 
     if (undo_pixels or target_pixels) and masks_path.exists():
         _atomic_savez(masks_path, masks)
+        # the seal names the bytes just written, or the projection refuses the store (point 83)
+        reseal_store(output_dir, by="erase")
 
     # ── PHYSICAL DELETION of low-confidence unsegmented points ──
     n_deleted = 0
     if pending_delete is not None and len(pending_delete):
+        # the floor seal's verdict on the cloud ABOUT TO BE rewritten (memoised — the zones
+        # were tested under it): carried to the new bytes by `reseal_floor` only when it
+        # held, or the next projection refuses the npz and the viewer drops the frame
+        from segmentation.floor_frame import floor_seal_verdict
+        floor_held = (floor_seal_verdict(output_dir)
+                      if (output_dir / "floor_transform.npz").is_file()
+                      else (False, "no floor_transform.npz"))
         keep = np.ones(N, dtype=bool)
         keep[pending_delete] = False
         ok_del = _rewrite_ply_keep(output_dir / "cleaned_cloud.ply", keep)
         if ok_del:
+            # the seal names the cloud's bytes — the edit changed them, not the frame
+            reseal_floor(output_dir, by="erase_delete", held_before=floor_held)
             # every stored index shifts — remap all instances onto the new
             # cloud (deleted points were unsegmented, so instances only shift)
             new_idx = np.full(N, -1, dtype=np.int64)
@@ -884,12 +1025,328 @@ def erase_spheres(output_dir: Path, spheres: List[dict],
             "ledger": ledger}
 
 
+MERGE_UNDO_DIR = "_merge_undo"
+
+
+def _stat_sig(path: Path) -> Optional[list]:
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return None
+    return [int(st.st_ino), int(st.st_size), int(st.st_mtime_ns)]
+
+
+def _points_fingerprint(instances: List[dict]) -> str:
+    """Which instances exist and how many points each owns — what a re-projection changes and
+    an OBB refresh does not."""
+    import hashlib
+    rows = sorted((int(i.get("instance_id", i.get("id"))), int(i.get("total_points") or 0))
+                  for i in instances)
+    return hashlib.sha256(json.dumps(rows).encode("utf-8")).hexdigest()
+
+
+def _mesh_folders(output_dir: Path, label: str, iid: int) -> List[Path]:
+    """Every published per-object mesh folder of one instance: tsdf/<safe>, its Poisson twin
+    tsdf/<safe>_poisson, and the ShapeR shape/<safe>."""
+    from segmentation.tsdf_export import _safe_label
+    safe = _safe_label(label or "segment", int(iid))
+    out = []
+    for sub in ("tsdf", "shape"):
+        d = Path(output_dir) / sub
+        if not d.is_dir():
+            continue
+        for f in d.iterdir():
+            if f.is_dir() and (f.name == safe or f.name.startswith(safe + "_")):
+                out.append(f)
+    return out
+
+
+def prune_merge_snapshots(output_dir: Path, keep: List[str]) -> int:
+    """Delete every merge snapshot no live undo entry refers to (the undo stack lives in the
+    server process: an entry trimmed off it, cleared by a physical deletion or lost to a
+    restart leaves its snapshot behind — CLAUDE.md storage rule 2026-10-05)."""
+    import shutil
+    root = Path(output_dir) / MERGE_UNDO_DIR
+    if not root.is_dir():
+        return 0
+    keep_set = {str(Path(k).resolve()) for k in keep or []}
+    n = 0
+    for d in root.iterdir():
+        if d.is_dir() and str(d.resolve()) not in keep_set:
+            shutil.rmtree(d, ignore_errors=True)
+            n += 1
+    return n
+
+
+def merge_instances(output_dir: Path, target_iid: int,
+                    source_iids: List[int], keep_snapshots: Optional[List[str]] = None) -> dict:
+    """Fuse whole segments into one (USER 2026-10-09: *"3 segmentos son lo mismo
+    fusionarlos"*): every point of every source joins ``target_iid``, every mask
+    of every source is OR-ed into the target's masks in the same keyframe, and
+    the sources stop existing (result, segmentation.json, seg_masks.npz, their
+    published meshes). The target keeps its label, ids and colour. A human edit
+    of the raw store, like the brush reassign: recorded in the seal's ``edits``
+    (``merge``), so a re-projection keeps it. Only segments that HAVE a SAM3
+    masklet can be merged: one the projection created (a split child) has no mask
+    of its own, and a merge that does not move masks would be undone by the next
+    projection — refused, with the reason.
+
+    The raw mask store, the fusion map and the sources' mesh folders go into a
+    snapshot (output/_merge_undo/<k>) so one undo restores them; snapshots no live
+    undo entry refers to (``keep_snapshots``) are pruned first. Returns
+    {merged, target, moved_points, mesh_instances, undo, ledger}."""
+    import shutil
+    from segmentation.pipeline import _load_ply_origins, _compute_obb
+    from segmentation.fuse_parent import (MAP, FusionStale, load_map, high_water,
+                                          parent_identity, _canonical_bytes,
+                                          _atomic_bytes)
+
+    output_dir = Path(output_dir)
+    target_iid = int(target_iid)
+    sources = sorted({int(s) for s in source_iids} - {target_iid})
+    if not sources:
+        raise ValueError("merge needs at least one source segment besides the target")
+    res_path = output_dir / "segmentation_result.json"
+    ply = output_dir / "cleaned_cloud.ply"
+    if not ply.exists() or not res_path.exists():
+        raise FileNotFoundError("session has no cleaned cloud / segmentation")
+    result = json.loads(res_path.read_text())
+    instances = result.get("instances") or []
+    by_iid = {int(i.get("instance_id", i.get("id"))): i for i in instances}
+    missing = [s for s in [target_iid] + sources if s not in by_iid]
+    if missing:
+        raise ValueError(f"segment(s) {missing} not found")
+
+    # mask ids: the FUSED view (a survivor owns its parts' masks too); a stale
+    # or absent fusion map falls back to the raw store's own ids
+    oids = _mask_oids_by_iid(output_dir)
+    seg_json = output_dir / "segmentation.json"
+    meta = json.loads(seg_json.read_text()) if seg_json.exists() else {}
+    if not oids:
+        for e in meta.get("instances") or []:
+            if e.get("id") is not None and e.get("instance_id") is not None:
+                oids.setdefault(int(e["instance_id"]), []).append(int(e["id"]))
+    t_oids = oids.get(target_iid) or []
+    t_oid = _mask_obj_by_iid(output_dir).get(target_iid, t_oids[0] if t_oids else None)
+    def _name(i):
+        return f"{by_iid[i].get('label', 'segment')} {i}"
+    no_mask = [i for i in [target_iid] + sources
+               if (t_oid is None if i == target_iid else not oids.get(i))]
+    if no_mask:
+        raise ValueError("no SAM3 masklet of its own (the projection created it): "
+                         + ", ".join(_name(i) for i in no_mask)
+                         + " — a merge that cannot move masks would be undone by the next "
+                           "projection; merge the segment it was split from instead")
+    src_oids = sorted({o for s in sources for o in (oids.get(s) or [])} - set(t_oids))
+    origins = _load_ply_origins(ply)
+    if origins is None:
+        raise RuntimeError("cloud has no origin fields")
+    xyz = origins[0]
+    N = len(xyz)
+
+    # snapshot for the undo: the raw store + the fusion map, byte for byte
+    prune_merge_snapshots(output_dir, keep_snapshots or [])
+    snap_root = output_dir / MERGE_UNDO_DIR
+    snap_root.mkdir(exist_ok=True)
+    k = 1 + max([int(p.name) for p in snap_root.iterdir() if p.name.isdigit()],
+                default=0)
+    snap = snap_root / str(k)
+    snap.mkdir()
+    for name in ("segmentation.json", "seg_masks.npz", MAP):
+        if (output_dir / name).exists():
+            shutil.copy2(output_dir / name, snap / name)
+    # the sources' published meshes leave with them (else they stay in the scene as ghosts
+    # of objects that no longer exist) — into the snapshot, so the undo brings them back
+    moved_meshes = []
+    for s_ in sources:
+        for f in _mesh_folders(output_dir, by_iid[s_].get("label", ""), s_):
+            dest = snap / "meshes" / f.parent.name / f.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(f), str(dest))
+            moved_meshes.append([f"{f.parent.name}/{f.name}", str(dest)])
+
+    map_ok = False
+    try:
+        map_ok = load_map(output_dir) is not None
+    except FusionStale as e:
+        print(f"[Merge] DECLARED: fusion map stale before the merge ({e}) — left as it is")
+
+    # ── masks: OR every source mask into the target's, then drop the source ids
+    masks_path = output_dir / "seg_masks.npz"
+    n_mask_frames = 0
+    if masks_path.exists() and src_oids:
+        z = np.load(masks_path, allow_pickle=True)
+        masks = {kk: z[kk] for kk in z.files}
+        src_set = set(src_oids)
+        for kk in [kk for kk in list(masks) if kk.startswith("f")]:
+            m_ = re.match(r"^f(\d+)_o(\d+)$", kk)
+            if not m_ or int(m_.group(2)) not in src_set:
+                continue
+            tk = f"f{m_.group(1)}_o{t_oid}"
+            src = masks.pop(kk)
+            if tk in masks and masks[tk].shape == src.shape:
+                masks[tk] = ((masks[tk] > 0) | (src > 0)).astype(masks[tk].dtype)
+            else:
+                masks[tk] = (src > 0).astype(np.uint8)
+            n_mask_frames += 1
+        if "obj_ids" in masks:
+            arr = np.asarray(masks["obj_ids"], dtype=np.int32)
+            masks["obj_ids"] = arr[~np.isin(arr, np.asarray(src_oids, np.int32))]
+        _atomic_savez(masks_path, masks)
+    if meta.get("instances") is not None and src_oids:
+        # the merged ids RETIRE: the high-water marks keep them from being handed out again
+        # (a new brush segment or a SAM3 round would otherwise reuse a merged source's ids)
+        hi_id, hi_iid = high_water(output_dir)
+        meta["id_high_water"] = max(int(meta.get("id_high_water") or 0), int(hi_id))
+        meta["instance_id_high_water"] = max(int(meta.get("instance_id_high_water") or 0),
+                                             int(hi_iid))
+        meta["instances"] = [e for e in meta["instances"]
+                             if int(e.get("id", -1)) not in set(src_oids)]
+        seg_json.write_text(json.dumps(meta, indent=2))
+    if masks_path.exists() and seg_json.exists():
+        reseal_store(output_dir, by="merge")
+
+    # the fusion map was tied to the old store: drop the sources' records and
+    # re-tie it to the bytes now on disk (only when it held before the edit)
+    if map_ok and (output_dir / MAP).exists():
+        doc = json.loads((output_dir / MAP).read_text())
+        mp = {kk: v for kk, v in (doc.get("map") or {}).items()
+              if int(kk) not in set(sources)}
+        for v in mp.values():
+            v["parts"] = [p for p in v.get("parts") or []
+                          if int(p.get("id", -1)) not in set(src_oids)]
+        mp = {kk: v for kk, v in mp.items() if v["parts"]}
+        if mp:
+            doc["map"] = mp
+            doc["applied"] = sum(len(v["parts"]) for v in mp.values())
+            doc["parent"] = parent_identity(output_dir)
+            n_parent = len(meta.get("instances") or [])
+            doc["objects"] = n_parent - doc["applied"]
+            _atomic_bytes(output_dir / MAP, _canonical_bytes(doc))
+        else:
+            (output_dir / MAP).unlink()
+
+    # ── points: the target absorbs every source; the sources leave the result
+    tgt = by_iid[target_iid]
+    parts = [np.asarray(tgt.get("globalIndices") or [], dtype=np.int64)]
+    removed_entries = []
+    moved = 0
+    for s in sources:
+        gi = np.asarray(by_iid[s].get("globalIndices") or [], dtype=np.int64)
+        gi = gi[(gi >= 0) & (gi < N)]
+        parts.append(gi)
+        moved += int(len(gi))
+        removed_entries.append(by_iid[s])
+    merged = np.unique(np.concatenate(parts))
+    tgt["globalIndices"] = merged.tolist()
+    tgt["total_points"] = int(len(merged))
+    if len(merged) >= 4:
+        tgt["obb"] = _compute_obb(raw_to_display(output_dir, xyz[merged]))
+    result["instances"] = [i for i in instances
+                           if int(i.get("instance_id", i.get("id"))) not in set(sources)]
+    result["segmented_points"] = sum(
+        int(i.get("total_points") or 0) for i in result["instances"])
+    res_path.write_text(json.dumps(result))
+    _write_classification(output_dir, result["instances"], N)
+    try:
+        from segmentation.pipeline import rebuild_instance_store
+        rebuild_instance_store(output_dir)
+    except Exception as e:  # noqa: BLE001
+        print(f"[Merge] store rebuild failed (non-fatal): {e}")
+    # the target's own mesh now covers only its old part: refit it (its OBB then comes from
+    # the mesh, the project's rule once a mesh exists)
+    mesh_instances = ([target_iid] if published_mesh_path(output_dir, tgt.get("label", ""),
+                                                          target_iid) else [])
+    ledger = {"mode": "merge",
+              "target": {"instance_id": target_iid, "label": str(tgt.get("label", ""))},
+              "merged": {f"{e.get('label', 'segment')}_{int(e.get('instance_id', e.get('id')))}":
+                         int(e.get("total_points") or 0) for e in removed_entries},
+              "moved_points": moved, "mask_frames_moved": n_mask_frames,
+              "mask_ids_removed": src_oids,
+              "meshes_retired": [m[0] for m in moved_meshes]}
+    print(f"[Merge] ledger: {json.dumps(ledger)}")
+    # what the undo must find to be allowed: the store, the cloud and the instances exactly
+    # as this merge left them (a re-projection, an Autosegment or an epoch select in between
+    # makes the snapshot a different session's — the undo is refused, never applied blind)
+    undo = {"kind": "merge", "snapshot": str(snap), "target": target_iid,
+            "target_before": np.asarray(parts[0]).tolist(), "removed": removed_entries,
+            "meshes": moved_meshes,
+            "after": {"segmentation.json": _stat_sig(seg_json),
+                      "seg_masks.npz": _stat_sig(masks_path),
+                      "cleaned_cloud.ply": _stat_sig(ply),
+                      "points": _points_fingerprint(result["instances"])}}
+    return {"merged": sources, "target": target_iid, "moved_points": moved,
+            "mesh_instances": mesh_instances, "undo": undo, "ledger": ledger}
+
+
+def _undo_merge(output_dir: Path, undo: dict) -> dict:
+    """Put the raw store + fusion map + the sources' meshes back byte for byte and the sources
+    back into the result, with the target's own points — only when the session is still the
+    one the merge left."""
+    import shutil
+    from segmentation.pipeline import _load_ply_origins, _compute_obb
+    from segmentation.fuse_parent import MAP
+    snap = Path(undo["snapshot"])
+    res_path = output_dir / "segmentation_result.json"
+    result = json.loads(res_path.read_text())
+    after = undo.get("after") or {}
+    now = {"segmentation.json": _stat_sig(output_dir / "segmentation.json"),
+           "seg_masks.npz": _stat_sig(output_dir / "seg_masks.npz"),
+           "cleaned_cloud.ply": _stat_sig(output_dir / "cleaned_cloud.ply"),
+           "points": _points_fingerprint(result.get("instances") or [])}
+    changed = [k for k in after if after[k] != now.get(k)]
+    if changed or not snap.is_dir():
+        shutil.rmtree(snap, ignore_errors=True)
+        why = (f"the session changed since the merge ({', '.join(changed)})" if changed
+               else "its snapshot is gone")
+        print(f"[Merge] undo REFUSED: {why} — nothing restored")
+        return {"restored": 0, "detail": f"merge not undone: {why}"}
+    for name in ("segmentation.json", "seg_masks.npz", MAP):
+        if (snap / name).exists():
+            shutil.copy2(snap / name, output_dir / name)
+        elif name == MAP and (output_dir / name).exists():
+            (output_dir / name).unlink()
+    for rel, src in undo.get("meshes") or []:
+        dest = output_dir / rel
+        if Path(src).exists() and not dest.exists():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(src, str(dest))
+    origins = _load_ply_origins(output_dir / "cleaned_cloud.ply")
+    xyz = origins[0] if origins else None
+    tid = int(undo["target"])
+    for inst in result.get("instances") or []:
+        if int(inst.get("instance_id", inst.get("id"))) == tid:
+            gi = np.asarray(undo.get("target_before") or [], dtype=np.int64)
+            inst["globalIndices"] = gi.tolist()
+            inst["total_points"] = int(len(gi))
+            if xyz is not None and len(gi) >= 4:
+                inst["obb"] = _compute_obb(raw_to_display(output_dir, xyz[gi]))
+    result["instances"] = (result.get("instances") or []) + list(undo.get("removed") or [])
+    result["instances"].sort(key=lambda i: int(i.get("instance_id", i.get("id"))))
+    result["segmented_points"] = sum(
+        int(i.get("total_points") or 0) for i in result["instances"])
+    res_path.write_text(json.dumps(result))
+    if xyz is not None:
+        _write_classification(output_dir, result["instances"], len(xyz))
+    try:
+        from segmentation.pipeline import rebuild_instance_store
+        rebuild_instance_store(output_dir)
+    except Exception as e:  # noqa: BLE001
+        print(f"[Merge] store rebuild failed (non-fatal): {e}")
+    shutil.rmtree(snap, ignore_errors=True)
+    n = sum(int(e.get("total_points") or 0) for e in undo.get("removed") or [])
+    print(f"[Merge] undone: {len(undo.get('removed') or [])} segment(s) restored")
+    return {"restored": n}
+
+
 def undo_erase(output_dir: Path, undo: dict) -> dict:
     """Restore one erase stroke (indices back into their instances, mask
     pixels back on). Returns {restored: n}."""
     from segmentation.pipeline import _load_ply_origins, _compute_obb
 
     output_dir = Path(output_dir)
+    if undo.get("kind") == "merge":
+        return _undo_merge(output_dir, undo)
     res_path = output_dir / "segmentation_result.json"
     result = json.loads(res_path.read_text())
     by_iid = {int(i.get("instance_id", i.get("id"))): i
@@ -971,6 +1428,8 @@ def undo_erase(output_dir: Path, undo: dict) -> dict:
                     arr = np.asarray(masks["obj_ids"], dtype=np.int32)
                     masks["obj_ids"] = arr[arr != np.int32(c_oid)]
             _atomic_savez(masks_path, masks)
+            # the seal names the bytes just written, or the projection refuses the store
+            reseal_store(output_dir, by="undo_erase")
 
     result["segmented_points"] = sum(
         int(i.get("total_points") or 0) for i in (result.get("instances") or []))

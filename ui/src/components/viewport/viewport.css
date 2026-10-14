@@ -83,6 +83,15 @@
   min-width: 0;
 }
 
+.stac-vppopover__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  max-height: 11rem;
+  overflow-y: auto;
+  padding-right: var(--sp-1);
+}
+
 .stac-vppopover__row .stac-slider {
   flex: 1;
 }

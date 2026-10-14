@@ -3,7 +3,7 @@ points 99, 100, 107, 108, 120, 121, 122, 123 — 2026-10-08), on a rendered scen
 10 cm in front of a wall, seen by seven keyframes of the SESSION camera (camera.json),
 the cloud carrying every point's birth keyframe and pixel on the declared record grid.
 
-* two projections give the same bytes — the result, the class byte, the 16-bit ids, the
+* two projections give the same bytes — the result, the class byte, the 32-bit ids, the
   audit, its marks, the store, the fusion map — and the raw mask store is untouched;
 * the result carries its stamp; a result whose stamp matches is reused and the octree is
   not rebuilt; a changed input makes it stale;
@@ -151,7 +151,7 @@ def test_two_projections_write_the_same_bytes_and_leave_the_raw_store_alone(tmp_
     assert by[1]["total_points"] == n_plate, "every plate point on its mask through the exact grid maps"
     assert by[1]["min_points_margin"] == n_plate - 1000                                        # point 116
     ids = np.load(out / "instance_ids.npy")
-    assert ids.dtype == np.uint16 and set(ids.tolist()) == {1, 2}                               # point 107
+    assert ids.dtype == np.uint32 and set(ids.tolist()) == {1, 2}                               # point 107
     assert np.array_equal(np.load(out / "classification.npy"), ids.astype(np.uint8))
     assert res1["decisions"]["error_factor"] == 1.1 and res1["decisions"]["min_judges"] == 5
     assert res1["stamp"]["inputs"]["cloud"] and "server/segmentation/pipeline.py" in res1["stamp"]["code"]

@@ -291,12 +291,16 @@ def test_a_calibration_of_a_later_epoch_or_another_reconstruction_is_not_f2s_inp
 
 def test_scale_rows_and_known_dimensions_need_this_reconstructions_id(tmp_path):
     """Plan point 34: an epoch NUMBER does not name a reconstruction — the rows enter only with
-    this reconstruction's id, verified on read; unstamped files are refused and reported."""
+    this reconstruction's id, verified on read; unstamped files are refused and reported.
+    Since point 134 (2026-10-08) the scale rows also carry the evidence stamp of what they were
+    measured on (``correction.visit_drift_run.evidence_stamp``) and are taken on it: the fixture
+    writes them with that stamp, as the measurement does."""
     from correction.epoch import RECONSTRUCTION_ID_KEY, reconstruction_id
+    from correction.visit_drift_run import EVIDENCE_STAMP_KEY, evidence_stamp
     out, _t = _calibrated_session(tmp_path)
     frames = list(range(96))
     chainage = {f: f * WALK_M / 95 for f in frames}
-    rows = {"version": 1, "measured_on_epoch": 0,
+    rows = {"version": 1, "measured_on_epoch": 0, EVIDENCE_STAMP_KEY: evidence_stamp(out),
             "rows": [{"i": 5, "j": 80, "k_b": 1.1, "residual_m": 0.01, "D_b_m": 3.0}]}
     (out / "scale_loop_rows.json").write_text(json.dumps(rows))
     dims = {"dimensions": [{"role": "gauge", "frames": [10, 11], "measured_m": 1.0, "true_m": 1.05,

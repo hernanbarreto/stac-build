@@ -222,6 +222,13 @@ def certify_input_stamp(output_dir, raw_config: Dict[str, Any], operator: str = 
     present = {n: out / n for n in names if (out / n).exists()}
     absent = sorted(set(names) - set(present))
     repo = Path(__file__).resolve().parents[3]
+    # the segmentation the certification measures is its OBJECTS, not what they are called
+    # nor how they are described: the names the user gives (segmentation.label_overrides) and
+    # the per-object descriptions written after the acta are left out of its identity, so a
+    # rename or a new description never invalidates a certification (USER 2026-10-09)
+    canon_result = None
+    if "segmentation_result.json" in present:
+        canon_result = _result_identity(present.pop("segmentation_result.json"))
     inputs: Dict[str, Any] = dict(present)
     for rel in CERTIFY_CODE:
         inputs[f"code:{rel}"] = repo / rel
@@ -235,7 +242,27 @@ def certify_input_stamp(output_dir, raw_config: Dict[str, Any], operator: str = 
         cfg["reconstruction.precision"] = rp.get("precision") if isinstance(rp, dict) else None
     cfg["absent"] = absent
     cfg["reconstruction.id"] = reconstruction_id_or_none(out)
+    if canon_result is not None:
+        cfg["segmentation_result.objects"] = canon_result
     return stamp(inputs=inputs, config=cfg)
+
+
+#: the per-instance fields that are not the certification's business (see certify_input_stamp)
+_NAME_FIELDS = ("label_sam3", "label_origin", "shape_caption")
+
+
+def _result_identity(path: Path) -> str:
+    """sha256 of segmentation_result.json with every instance under its SEGMENTATION name
+    (a user's name replaced by ``label_sam3``) and without its description."""
+    from repro import sha256_json
+    doc = json.loads(Path(path).read_text())
+    for inst in doc.get("instances") or []:
+        if isinstance(inst, dict):
+            if inst.get("label_origin") == "human_validated" and inst.get("label_sam3"):
+                inst["label"] = inst["label_sam3"]
+            for k in _NAME_FIELDS:
+                inst.pop(k, None)
+    return sha256_json(doc)
 
 
 def resolve_base_epoch(output_dir, log: Callable[[str], None] = print) -> dict:
@@ -291,8 +318,32 @@ def resolve_base_epoch(output_dir, log: Callable[[str], None] = print) -> dict:
         if not rid_masks:
             log("[certify] DECLARED: segmentation.json names no reconstruction id (written before "
                 "2026-10-08, or a synthetic session) — the masks are taken on the projection's stamp")
-        from segmentation.pipeline import check_store_seal
-        info["mask_store_seal"] = check_store_seal(out) or "intact"
+        # THE STORE SEAL (points 83 / 99): ONE verdict for every reader of the raw store —
+        # ``segmentation.pipeline.store_seal_verdict`` (``STORE_SEAL_FATAL`` there is the
+        # definition; the projection reads the store through the same call), never a split
+        # re-derived here (review 2026-10-08: this block used to decide 'sealed and differing →
+        # fail, unsealed → go on' on its own, and went on over a half-swapped or npz-less store
+        # whenever the meta carried no seal). FATAL — a SAM3 swap that did not complete, a
+        # missing half, an unreadable seal, a seal naming other mask bytes — refuses the
+        # certification naming it, sealed or not: re-run the SAM3 stage. DECLARED — a store with
+        # NO seal: written before 2026-10-08, or the interactive manager's upsert, which drops
+        # the seal by construction (the manager's incremental update the plan keeps, point 83) —
+        # is recorded and the masks are taken on the projection's stamp and this run's input
+        # stamp, which both hash the mask bytes as they are. A swap marker left beside a
+        # COMPLETE store is repaired by the shared check and declared through ``log``.
+        from segmentation.pipeline import store_seal_verdict
+        seal_fatal, seal_declared = store_seal_verdict(out, log=lambda m: log(f"[certify] {m}"))
+        if seal_fatal:
+            raise CertifyInputError(
+                f"the SAM3 mask store cannot be certified: {'; '.join(seal_fatal)} — re-run the SAM3 "
+                f"stage (the store is refused by every reader, point 83)")
+        if seal_declared:
+            info["mask_store_seal"] = f"declared: {'; '.join(seal_declared)}"
+            log(f"[certify] DECLARED: the mask store is not sealed as the SAM3 stage left it "
+                f"({'; '.join(seal_declared)}) — taken on the projection's stamp and this run's "
+                f"input stamp, which hash the mask bytes as they are")
+        else:
+            info["mask_store_seal"] = "intact"
     # the segmentation must be this cloud's
     seg_p = out / "segmentation_result.json"
     if seg_p.exists():
@@ -457,11 +508,18 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
                 _pc(_PCT_DONE, f"certification: reused epoch {fin}")
                 return acta
         # the epochs outside the product's lineage — a previous certification of this product,
-        # a previous reconstruction's leftovers — go, so this epoch is product + 1 (point 136)
+        # a previous reconstruction's leftovers — go, so this epoch is product + 1 (point 136).
+        # The lineage is read STRICTLY: a stored record that cannot be read refuses the
+        # certification by name, nothing is pruned on a linear guess (review 2026-10-08)
         from correction.chain import lineage_cleanup
-        from correction.epoch import epoch_lineage
+        from correction.epoch import EpochRecordError, epoch_lineage
         base = int(base_info.get("base_epoch", current_epoch(output_dir)))
-        history["lineage_cleanup"] = lineage_cleanup(output_dir, epoch_lineage(output_dir, base), log=log)
+        try:
+            keep = epoch_lineage(output_dir, base, strict=True)
+        except EpochRecordError as e:
+            raise CertifyInputError(f"{e} — the certification is refused before it prunes or "
+                                    f"publishes anything") from e
+        history["lineage_cleanup"] = lineage_cleanup(output_dir, keep, log=log)
     record_extra = {"run_config_sha256": config_sha256, "certify_input_stamp": input_stamp["sha256"]}
 
     # σ FLOOR — measured, not derived from another constant (USER 2026-09-16).
@@ -543,7 +601,7 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         if detect_loops and insts:
             cn = [c for c in detect_instance_loops(
                 output_dir, session_dir, cfg, log=lambda m: None,
-                apply_splits=False)["candidates"]
+                apply_splits=False, raw_config=raw_config)["candidates"]
                   if c["verdict"] in ("loop", "ambiguous")]
         return _state_metrics(sess, fr, _all_edges(sess, cn, quiet=True), {}, insts, fl)
 
@@ -654,7 +712,9 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         #    the pose edges; the same measurement is this iteration's "before"
         cands = []
         if detect_loops and instances:
-            det = detect_instance_loops(output_dir, session_dir, cfg, log=log, apply_splits=True)
+            # the job's frozen configuration reaches the loop classifier's own engine (point 95)
+            det = detect_instance_loops(output_dir, session_dir, cfg, log=log, apply_splits=True,
+                                        raw_config=raw_config)
             cands = det.get("candidates", [])
             if det.get("splits"):
                 session = load_session(output_dir)

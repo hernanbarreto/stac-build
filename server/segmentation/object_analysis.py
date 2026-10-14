@@ -183,14 +183,31 @@ def analyze_object(output_dir: Path, instance_id: int,
 
 
 def ensure_session_analyses(output_dir: Path, objects: bool = True,
-                            log=print) -> dict:
+                            log=print, cancelled=None) -> dict:
     """Fill what the chat must ALWAYS know (user 2026-09-04), respecting the
     session's real state: the scene description always; the per-instance
     dossiers only when ``objects`` — i.e. AFTER segmentation has produced
     instances (at pipeline end there are none: only scene + cloud). Skips
-    everything already cached; call only while the semantic service is up."""
+    everything already cached; call only while the semantic service is up.
+
+    ``cancelled()`` (optional) is the caller's gate — main.py hands the one it
+    checked at the entry (the engine is busy: a job started meanwhile and owns
+    vLLM, docs/plan_determinismo.md point 157, 2026-10-08) — polled BEFORE every
+    :func:`analyze_object` call and before ``describe_scene``: the loop stops at
+    the first True ('intel deferred'), so an intel never runs co-batched with a
+    stage's calls or keeps writing scene_r.db on a scan a job rewrites. What was
+    done stays cached; the next idle moment resumes where it stopped."""
     out = Path(output_dir)
     done = skipped = failed = 0
+    deferred = False
+
+    def _deferred(where: str) -> bool:
+        if cancelled is not None and cancelled():
+            log(f"[analysis] intel deferred before {where}: the engine is no longer "
+                f"this intel's (a job owns it) — stopping here, nothing half-written")
+            return True
+        return False
+
     res_path = out / "segmentation_result.json"
     instances = []
     if objects and res_path.exists():
@@ -205,6 +222,9 @@ def ensure_session_analyses(output_dir: Path, objects: bool = True,
         if get_cached_analysis(out, iid):
             skipped += 1
             continue
+        if _deferred(f"instance {iid}"):
+            deferred = True
+            break
         try:
             if analyze_object(out, iid, log=log):
                 done += 1
@@ -213,15 +233,18 @@ def ensure_session_analyses(output_dir: Path, objects: bool = True,
         except Exception as e:  # noqa: BLE001 — one object never sinks the rest
             failed += 1
             log(f"[analysis] instance {iid} failed: {e}")
-    # scene-level fallback/context: always make sure a description exists
-    try:
-        st = _store(out)
-        if st is not None and not st.get_meta("scene_description"):
-            from phase5_qa.tools import SpatialTools
-            SpatialTools(st).describe_scene()
-            log("[analysis] scene description generated")
-    except Exception as e:  # noqa: BLE001
-        log(f"[analysis] scene description failed: {e}")
+    # scene-level context: make sure a description exists (unless the gate closed)
+    if not deferred and not _deferred("describe_scene"):
+        try:
+            st = _store(out)
+            if st is not None and not st.get_meta("scene_description"):
+                from phase5_qa.tools import SpatialTools
+                SpatialTools(st).describe_scene()
+                log("[analysis] scene description generated")
+        except Exception as e:  # noqa: BLE001
+            log(f"[analysis] scene description failed: {e}")
+    else:
+        deferred = True
     log(f"[analysis] session dossiers: {done} generated, {skipped} cached, "
-        f"{failed} failed")
-    return {"generated": done, "cached": skipped, "failed": failed}
+        f"{failed} failed" + (" — intel deferred" if deferred else ""))
+    return {"generated": done, "cached": skipped, "failed": failed, "deferred": deferred}

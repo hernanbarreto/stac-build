@@ -1001,6 +1001,157 @@ class SpatialTools:
         return {"notes": blob, "n_notes": len(blob), "source": "vlm_proposed"}
 
     # ── tool-calling schemas for the orchestrator ───────────────────
+    # ── VIEWER CONTROL (USER 2026-10-09: "el chat debe manejar en todo momento la nube … mostrar,
+    #    apagar, encender objetos, rotar, viajar de un lugar a otro") ──────────────────────────
+    # These tools MEASURE nothing: each returns a ``viewer`` action the viewer performs as the
+    # answer arrives (AssistantPanel → App). Object ids are checked against the store.
+    _VIEWS = ("top", "front", "back", "left", "right", "bottom", "iso", "home")
+    _COLOR_MODES = {"rgb": "rgb", "color": "rgb", "status": "status", "confidence": "status",
+                    "votes": "mv_votes", "mv_votes": "mv_votes", "deviation": "deviation"}
+
+    def _known_ids(self, ids) -> tuple[list[int], list]:
+        have = {int(i["instance_id"]) for i in self.store.list_instances()}
+        ok, bad = [], []
+        for x in (ids if isinstance(ids, (list, tuple)) else [ids]):
+            try:
+                v = int(x)
+            except (TypeError, ValueError):
+                bad.append(x)
+                continue
+            (ok if v in have else bad).append(v)
+        return ok, bad
+
+    def focus_object(self, id: int) -> dict:
+        ok, _ = self._known_ids([id])
+        if not ok:
+            return _insufficient(f"no object with id {id}")
+        return {"viewer": {"action": "focus", "ids": ok}, "label": self._label_of(ok[0]),
+                "done": "the object is selected: its OBB and dimensions are shown and the "
+                        "camera travels to it"}
+
+    def show_objects(self, ids: list, visible: bool = True) -> dict:
+        ok, bad = self._known_ids(ids)
+        if not ok:
+            return _insufficient(f"no known object among {ids}")
+        return {"viewer": {"action": "visibility", "ids": ok, "visible": bool(visible)},
+                "labels": [self._label_of(i) for i in ok], "unknown_ids": bad}
+
+    def show_only(self, ids: list) -> dict:
+        ok, bad = self._known_ids(ids)
+        if not ok:
+            return _insufficient(f"no known object among {ids}")
+        return {"viewer": {"action": "show_only", "ids": ok},
+                "labels": [self._label_of(i) for i in ok], "unknown_ids": bad}
+
+    def show_all_objects(self) -> dict:
+        return {"viewer": {"action": "show_all"}}
+
+    def set_obb(self, ids: list, on: bool = True) -> dict:
+        ok, bad = self._known_ids(ids)
+        if not ok:
+            return _insufficient(f"no known object among {ids}")
+        return {"viewer": {"action": "obb", "ids": ok, "on": bool(on)}, "unknown_ids": bad}
+
+    def set_view(self, view: str) -> dict:
+        v = str(view or "").lower()
+        if v not in self._VIEWS:
+            return _insufficient(f"unknown view {view!r}; one of {list(self._VIEWS)}")
+        return {"viewer": {"action": "view", "view": v}}
+
+    def rotate_view(self, yaw_deg: float = 0.0, pitch_deg: float = 0.0) -> dict:
+        return {"viewer": {"action": "orbit", "yaw_deg": float(yaw_deg or 0.0),
+                           "pitch_deg": float(pitch_deg or 0.0)}}
+
+    def travel(self, from_id: int, to_id: int) -> dict:
+        ok, _ = self._known_ids([from_id, to_id])
+        if len(ok) < 2:
+            return _insufficient(f"both objects must exist (got {from_id}, {to_id})")
+        return {"viewer": {"action": "travel", "ids": ok},
+                "labels": [self._label_of(i) for i in ok]}
+
+    def color_cloud(self, mode: str) -> dict:
+        m = self._COLOR_MODES.get(str(mode or "").lower())
+        if m is None:
+            return _insufficient(f"unknown colour mode {mode!r}; one of {sorted(self._COLOR_MODES)}")
+        return {"viewer": {"action": "color", "mode": m}}
+
+    def clear_view(self) -> dict:
+        return {"viewer": {"action": "clear"}}
+
+    # ── THE METHOD (USER 2026-10-09: "debe saber explicar el método completo del pipeline, cómo
+    #    se reconstruyó, qué confianza tienen los puntos") ─────────────────────────────────────
+    def explain_reconstruction(self) -> dict:
+        """How THIS session was reconstructed, segmented and certified: the pipeline's stages and
+        the session's own records (keyframes, chunks, epochs, segmentation rounds, coverage,
+        certification, the per-point confidence the cloud carries). Facts are read from the
+        session's files (tool_measured); the stage descriptions are the method's own."""
+        import json as _json
+        out = Path(self.store.path).parent
+        sd = out.parent
+
+        def _read(rel):
+            q = out / rel
+            try:
+                return _json.loads(q.read_text()) if q.is_file() else None
+            except (OSError, ValueError):
+                return None
+
+        facts: dict = {}
+        frames = sd / "frames"
+        facts["video_frames"] = len(list(frames.glob("*.jpg"))) if frames.is_dir() else None
+        covis = None
+        for cand in (sd / "intake" / "covis.json",):
+            try:
+                covis = _json.loads(cand.read_text()) if cand.is_file() else None
+            except (OSError, ValueError):
+                covis = None
+        if isinstance(covis, dict):
+            ch = covis.get("chunks") or covis.get("chunk_ranges") or []
+            facts["omega_chunks"] = len(ch) if isinstance(ch, list) else None
+        ep = _read("geometry_epoch.json")
+        if isinstance(ep, dict):
+            facts["geometry_epoch"] = {k: ep.get(k) for k in ("epoch", "kind", "parent_epoch")}
+        meta = _read("potree/metadata.json")
+        if isinstance(meta, dict):
+            facts["cloud_points"] = meta.get("points")
+            conf = next((a for a in meta.get("attributes", []) if a.get("name") == "confidence"), None)
+            if conf:
+                facts["point_confidence_range"] = {"min": conf.get("min"), "max": conf.get("max")}
+        rounds = _read("seg_rounds.json")
+        if isinstance(rounds, dict):
+            facts["segmentation_rounds"] = [
+                {"round": r.get("round"), "new_prompts": len(r.get("new_prompts") or [])}
+                for r in rounds.get("rounds", [])]
+        seg = _read("segmentation_view.json")
+        if isinstance(seg, dict) and isinstance(seg.get("data"), dict):
+            d = seg["data"]
+            facts["segmentation"] = {"objects": len(d.get("instances") or []),
+                                     "coverage": d.get("coverage"),
+                                     "prompts": len(d.get("prompts") or [])}
+        acta = _read("certify_acta.json")
+        if isinstance(acta, dict):
+            facts["certification"] = {k: acta.get(k) for k in
+                                      ("verdict", "epoch_final", "stopped_reason", "n_iters",
+                                       "deliverable_only") if k in acta}
+        cm = _read("precision/cloud_metrics.json")
+        if isinstance(cm, dict):
+            fl = cm.get("floor") if isinstance(cm.get("floor"), dict) else None
+            if fl:
+                facts["floor_metrics"] = {k: fl.get(k) for k in
+                                          ("thickness_median_m", "thickness_p90_m",
+                                           "undulation_m", "tilt_deg") if k in fl}
+        method = [
+            "1. INTAKE: the video's keyframes are chosen by parallax; DA3 metric depth measures the scale; the walk is measured.",
+            "2. RECONSTRUCTION (VGGT-Omega): poses and dense depth per keyframe, in chunks planned by co-visibility (50 % overlap), each chunk metric-locked by DA3 anchors.",
+            "3. PRECISION CORE F0–F6: gauge of scale along the walk, camera refinement, pose correction (loop closures judged by held-out pairs), Omega's depth bent to the refined landmarks — the cloud is re-projected from it.",
+            "4. CLOUD: confidence gate per chunk, voxel + outlier filtering, witness filter (points seen consistently by several keyframes), consolidation; every point keeps its keyframe, pixel and confidence.",
+            "5. SEGMENTATION IN ROUNDS: the VLM names the objects on every keyframe; SAM3 segments and tracks each name over all keyframes; the VLM looks again with what is segmented painted grey, until nothing new is named. Masks are projected on the cloud (each point gets its object).",
+            "6. CERTIFICATION: closures (objects seen twice) correct depth per chunk, the floor is aligned, the mask filter removes points inside other objects' masks; a final epoch is published.",
+            "7. DESCRIPTIONS: the VLM describes each object (vlm_proposed); every figure comes from tools over the geometry (tool_measured).",
+            "Point confidence: Omega's own per-pixel confidence, normalised per chunk; points under the 10 % floor never enter the cloud; colour the cloud by 'confidence' (status) to see it.",
+        ]
+        return {"method": method, "session": facts, "source": "tool_measured"}
+
     def impls(self) -> dict:
         """Tool implementations. Every returned measurement is stamped with
         the session's geometry epoch + human-directed-corrections count
@@ -1049,6 +1200,11 @@ class SpatialTools:
             "evaluate_volume": self.evaluate_volume,
             "objects_in_volume": self.objects_in_volume,
             "fits_in_volume": self.fits_in_volume,
+            "focus_object": self.focus_object, "show_objects": self.show_objects,
+            "show_only": self.show_only, "show_all_objects": self.show_all_objects,
+            "set_obb": self.set_obb, "set_view": self.set_view, "rotate_view": self.rotate_view,
+            "travel": self.travel, "color_cloud": self.color_cloud, "clear_view": self.clear_view,
+            "explain_reconstruction": self.explain_reconstruction,
         }
 
     def openai_schemas(self) -> list[dict]:
@@ -1176,6 +1332,37 @@ class SpatialTools:
                "fraction inside. Pass volume_id OR center+size(+yaw).",
                {"volume_id": {"type": "integer"}, "center": arr, "size": arr,
                 "yaw_deg": {"type": "number"}}),
+            fn("focus_object",
+               "VIEWER: select ONE object — its OBB and dimensions light up and the camera "
+               "travels to it. Call it whenever the answer is about a specific object.",
+               {"id": idp}, ["id"]),
+            fn("show_objects", "VIEWER: show (visible=true) or hide (false) objects.",
+               {"ids": {"type": "array", "items": {"type": "integer"}},
+                "visible": {"type": "boolean"}}, ["ids"]),
+            fn("show_only", "VIEWER: show ONLY these objects, hide every other one.",
+               {"ids": {"type": "array", "items": {"type": "integer"}}}, ["ids"]),
+            fn("show_all_objects", "VIEWER: show every object again."),
+            fn("set_obb", "VIEWER: turn the OBB (bounding box + dimensions) of objects on/off.",
+               {"ids": {"type": "array", "items": {"type": "integer"}}, "on": {"type": "boolean"}},
+               ["ids"]),
+            fn("set_view", "VIEWER: camera to a standard view of the scene.",
+               {"view": {"type": "string", "enum": ["top", "front", "back", "left", "right",
+                                                     "bottom", "iso", "home"]}}, ["view"]),
+            fn("rotate_view", "VIEWER: orbit the camera around its target (degrees; yaw = around "
+               "the vertical, pitch = up/down).",
+               {"yaw_deg": {"type": "number"}, "pitch_deg": {"type": "number"}}),
+            fn("travel", "VIEWER: travel from one object to another (the camera flies from the "
+               "first to the second).", {"from_id": idp, "to_id": idp}, ["from_id", "to_id"]),
+            fn("color_cloud", "VIEWER: colour the cloud: rgb (real colour), confidence/status "
+               "(per-point witness status), votes (multi-view votes), deviation (vs BIM).",
+               {"mode": {"type": "string", "enum": ["rgb", "confidence", "status", "votes",
+                                                     "deviation"]}}, ["mode"]),
+            fn("clear_view", "VIEWER: deselect, clear measurements and OBBs shown by the chat."),
+            fn("explain_reconstruction",
+               "HOW this session was made: the pipeline's method step by step and the "
+               "session's own records (keyframes, chunks, epoch, segmentation rounds, coverage, "
+               "certification, point confidence). Call for any question about the method, the "
+               "reconstruction, the segmentation or how reliable the points are."),
             fn("fits_in_volume",
                "Check whether an item of size [w,h,d] metres fits in the FREE space "
                "of a user-defined volume; returns a candidate placement.",

@@ -271,14 +271,17 @@ def choose_lambda(rows: Sequence[Row], knots: np.ndarray, grid: Sequence[float],
     return LambdaChoice(pick["lambda"], pick["heldout_mean"], curve, rule)
 
 
-def _error_factor(error_factor: Optional[float]) -> float:
-    """``correction_graph.graph.improvement_error_factor`` (the user's 2 — THE one factor of the
-    rule, read where it is declared) unless the caller passes the value it already read."""
+def _error_factor(error_factor: Optional[float], raw: Optional[Mapping[str, Any]] = None) -> float:
+    """``correction_graph.graph.improvement_error_factor`` (the user's 1.1 — THE one factor of
+    the rule, read where it is declared) unless the caller passes the value it already read.
+    ``raw``: the job's configuration (the frozen one, point 69); None = the server's — the
+    tests' and tools' path, never the pipeline's (``run_gauge`` is handed the frozen dict)."""
     if error_factor is not None:
         return float(error_factor)
-    from config import cfg as raw_cfg
     from reconstruction.loops.config import improvement_error_factor
-    return float(improvement_error_factor(raw_cfg))
+    if raw is None:
+        from config import cfg as raw
+    return float(improvement_error_factor(raw))
 
 
 def measure_sigma(rows: List[Row], knots: np.ndarray, grid: Sequence[float],
@@ -718,7 +721,12 @@ def _evidence_doc(output_dir: Path, name: str, rid: Optional[str],
         if report is not None:
             report[name] = {"present": False, "taken": False}
         return None
-    doc = json.loads(p.read_text())
+    try:
+        doc = json.loads(p.read_text())
+    except (OSError, ValueError) as e:
+        # never a default in its place: an evidence file that is there and cannot be read fails
+        # the step naming it (the repo's rule; visit_drift_run.read_evidence names it the same way)
+        raise GaugeError(f"{p} is unreadable ({e}) — re-run the measurement that writes it") from e
     taken, why = same_reconstruction(doc, reconstruction_id_or_none(output_dir) if rid is None
                                      else rid)
     if report is not None:
@@ -751,19 +759,35 @@ def known_dim_rows(output_dir: Path, chainage: Dict[int, float],
 
 def visit_rows(output_dir: Path, frames: List[int], chainage: Dict[int, float],
                group_of: Callable[[float], int], epoch: int, rid: Optional[str] = None,
-               report: Optional[Dict[str, Any]] = None) -> List[Row]:
-    """visit_drift's closures (scale_loop_rows.json) measured on THIS reconstruction (its
-    ``reconstruction_id`` — epoch numbers restart with every reconstruction, point 34) and on
-    THIS epoch: x(c_j) − x(c_i) = log k_b, σ = the closure's residual over its ray distance."""
+               report: Optional[Dict[str, Any]] = None, cfg=None) -> List[Row]:
+    """visit_drift's closures (scale_loop_rows.json): x(c_j) − x(c_i) = log k_b, σ = the
+    closure's residual over its ray distance.
+
+    TAKEN ON THEIR EVIDENCE STAMP (docs/plan_determinismo.md point 134, 2026-10-08): the rows
+    carry the ``repro.stamp`` ``correction.visit_drift_run`` wrote over what they were measured on
+    — the cloud, the poses, the keyframe list, the camera, the segmentation and its masks, the
+    fused objects, the chunk plan, the measurement's code and parameters — and
+    ``visit_drift_run.evidence_fresh`` (the same verifier the depth and scale readers use) says
+    whether that is the session AS IT IS NOW. Never the equality of an epoch number: an epoch N
+    re-selected in the kit and re-segmented is "epoch N" again with other masks, and the pending
+    0/1 renumbering would make every run's epoch read as current. The reconstruction id is
+    verified with it (point 34). ``epoch`` is the epoch F2 measures, written into the refusal's
+    reason only; ``cfg`` the correction configuration the stamp is computed with (None: the
+    process's, the same source the gauge reads everything else from). ``report[name]`` records
+    what was taken or refused, and why."""
     name = "scale_loop_rows.json"
     doc = _evidence_doc(output_dir, name, rid, report)
     if doc is None:
         return []
-    if int(doc.get("measured_on_epoch", -1)) != int(epoch):
+    from correction.visit_drift_run import evidence_fresh
+    fresh, why = evidence_fresh(output_dir, doc, cfg)
+    if not fresh:
         if report is not None:
             report[name] = {"present": True, "taken": False,
-                            "reason": f"measured on epoch {doc.get('measured_on_epoch')}, F2 "
-                                      f"measures epoch {epoch}"}
+                            "reason": ("its evidence stamp is not the session's as it is now "
+                                       f"(F2 measures epoch {epoch}; the rows say epoch "
+                                       f"{doc.get('measured_on_epoch')}): " + "; ".join(why[:4])),
+                            "stamp_differences": list(why)}
         return []
     rows = []
     for r in doc.get("rows", []):
@@ -868,7 +892,12 @@ def chain_inputs(session_dir: Path, gcfg, rid: Optional[str] = None) -> Dict[str
     rep: Dict[str, Any] = {}
     if "known_dims" in inst:
         known_dim_rows(out, {}, lambda c: 0, rid, rep)
-    visit_rows(out, [], {}, lambda c: 0, 0, rid, rep)
+    # whether scale_loop_rows.json is an INPUT of F2 is decided by its ownership alone (this
+    # reconstruction's id): a file of this reconstruction is an input whether or not its evidence
+    # stamp is fresh today — when it is re-measured its bytes change and the chain's stamp with
+    # them. The freshness test (point 134: a sha256 over the cloud, the masks, the poses…) is
+    # run_gauge's, once; running it here on every resume probe bought nothing for the listing
+    _evidence_doc(out, "scale_loop_rows.json", rid, rep)
     for name, r in rep.items():
         if r.get("taken"):
             found[f"output/{name}"] = out / name
@@ -879,10 +908,14 @@ def chain_inputs(session_dir: Path, gcfg, rid: Optional[str] = None) -> Dict[str
 
 
 def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = print,
-              error_factor: Optional[float] = None) -> Dict[str, Any]:
+              error_factor: Optional[float] = None,
+              raw: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """Rows → model → (optionally) the epoch. Writes output/gauge.json and the v2 block
     of scale_diagnostics.json. Runs on epoch 0 only (the rows are measured against
-    Omega's own depth)."""
+    Omega's own depth). ``raw``: the job's configuration (the frozen run_config.yaml the
+    step reads through precision.config, points 69 / 134) — the user's factor and the
+    correction configuration the visit rows' evidence stamp is verified with come from it;
+    None = the server's, the tests' path."""
     _vendor_path()
     from correction.epoch import current_epoch, reconstruction_id_or_none
     from intake.walk import load_walk
@@ -896,7 +929,13 @@ def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = pr
     if walk is None:
         raise GaugeError(f"{session_dir / 'intake' / 'walk.json'} is missing — run the walk "
                          f"(python -m intake.walk --session <dir>)")
-    fac = _error_factor(error_factor)
+    fac = _error_factor(error_factor, raw)
+    ccfg = None
+    if raw is not None:
+        # the evidence stamp of scale_loop_rows.json (point 134) is computed with the job's
+        # correction configuration, not one re-read from disk by this process
+        from correction.config import load_correction_config
+        ccfg = load_correction_config(raw)
     # the window depth files are deleted once the chain is through (gauge.delete_windows_after_chain);
     # a re-run from F0 brings them back from the same plan (windows.json) — this interpreter is the
     # da3 env's, the one the windows were extracted with
@@ -945,7 +984,7 @@ def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = pr
         rows += sr or []
         if not sr:
             absent.append("stray")
-    rows += visit_rows(out, frames, chainage, group_of, epoch, rid, evidence)
+    rows += visit_rows(out, frames, chainage, group_of, epoch, rid, evidence, cfg=ccfg)
     for name, r in evidence.items():
         if r.get("present") and not r.get("taken"):
             log(f"{LOG_TAG} {name} NOT taken: {r.get('reason')}")
@@ -1078,6 +1117,23 @@ def gauge_applied(output_dir: Path) -> bool:
         raise GaugeError(f"{p} records no params — re-run F2")
     now = gauge_stamp(out.parent, params, reconstruction_id_or_none(out))
     diffs = check_stamp(saved, now)
+    # WHETHER the gauge applied its epoch to THIS reconstruction is a fact of its inputs, its
+    # params and the reconstruction id; code edited after it ran does not change what it applied
+    # (zaragoza 2026-10-09: the certification refused a session reconstructed before the day's
+    # edits). A code difference is DECLARED, never a refusal; any other difference refuses.
+    # Likewise an input that did not exist when it ran cannot have shaped it, and the closures'
+    # rows (scale_loop_rows.json) are REWRITTEN by the certification that asks this question
+    # (zaragoza 2026-10-09: the certification wrote them, then refused the gauge over them).
+    def _later(d: str) -> bool:
+        return (d.startswith("code ") or " is new (not in the saved stamp)" in d
+                or d.startswith("input 'output/scale_loop_rows.json'"))
+    later = [d for d in diffs if _later(d)]
+    diffs = [d for d in diffs if not _later(d)]
+    if later:
+        print(f"[gauge] DECLARED: since {p.name} was made, {len(later)} thing(s) it did not "
+              f"depend on changed (" + "; ".join(later[:3]) + (" …" if len(later) > 3 else "")
+              + ") — its other inputs, params and reconstruction match: what it applied to "
+              f"this reconstruction stands")
     if diffs:
         raise GaugeError(f"{p} is not the gauge of this session as it is now — "
                          + "; ".join(diffs[:6]) + (" …" if len(diffs) > 6 else "")
@@ -1102,15 +1158,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--session", required=True)
     ap.add_argument("--no-apply", action="store_true", help="measure and report only")
     args = ap.parse_args(argv)
-    g = load_precision_config().gauge
+    from precision.config import raw_of
     sd = Path(args.session)
+    pcfg = load_precision_config(session_dir=sd)      # the job's frozen configuration (point 69)
+    g = pcfg.gauge
     from intake.walk import load_walk, run_da3_windows, measure_walk
     if load_walk(sd) is None:
         from repro import require_exclusive_gpu
         require_exclusive_gpu(log=print)             # the card is the extractor's alone (point 4)
         run_da3_windows(sd, g, sys.executable)
         measure_walk(sd, g)
-    run_gauge(sd, g, apply=not args.no_apply)
+    run_gauge(sd, g, apply=not args.no_apply, raw=raw_of(pcfg))
     return 0
 
 

@@ -27,7 +27,7 @@ máscaras, correcciones, época 1"; "chunks de 15 m siempre"; "olvidate de la ex
 movimiento"; "como mucho la original y la final, ninguna intermedia".** Zaragoza (17.8 m) at 5 m chunks came out
 in 6 chunks (metric lock spread ×1.39, pose graph held-out 12.5 cm and rejected, floor tilted 2.5–5.8° per chunk,
 the certification then applied 2.64 m of translation) — "muchísimo peor que Omega en un solo chunk". Wired:
-`chunk_walk_m: 15`; `intake.content.enabled: false` (I2 selectable, off); the VLM and SAM3 are pipeline STAGES after
+`chunk_walk_m: 15`; I2 REMOVED (USER 2026-10-08 night: "ya no corre VLM ahí" — the `intake.content` section is gone, a leftover fails the intake loader); the VLM and SAM3 are pipeline STAGES after
 the cloud stage again (`pipeline_manager.DEFAULT_STAGE_ORDER`: reconstruction → cloudcompy → vlm → sam3 → certify;
 the reconstruction stage hosts no semantics; the cloud stage hands the published cloud to the viewer at once and its
 resume probe no longer keys on the segmentation; the SAM3 stage projects its masks on the cloud on disk; the
@@ -100,7 +100,7 @@ over 128k tracks, F6 resampled every Omega map through it: floor undulation 14.6
 - THE USER'S RULE (point 1, delegated to all judges): a change is APPLIED only if (a) significant — 95 % CI of the
   paired change entirely on the improving side (cluster bootstrap when judges share a keyframe), (b) ≥ 5 judges
   (`loop_judge.min_judge_closures(0.95)`), (c) the median improvement ≥ `correction_graph.graph.improvement_error_factor`
-  (2.0, USER) × the MEASURED error. One function: `loop_utils/metric_lock.decide_change`. Users: the in-run pose graph
+  (1.1 since 2026-10-07, USER "1.1 en todos los casos"; was 2.0) × the MEASURED error. One function: `loop_utils/metric_lock.decide_change`. Users: the in-run pose graph
   (leave-one-out judges, every closure judges once; < 5 closures → declared before solving, not applied), the depth
   graph, the F2 instrument switch, the F5 rung ladder (error = the solver's own continuation error; R2 warm-started
   from R1; R3 report-only), the F6 per-keyframe bend (c1/c2 enter only ≥ 2× their fit error; c0 verified on the
@@ -245,13 +245,95 @@ over 128k tracks, F6 resampled every Omega map through it: floor undulation 14.6
   camera's LENS (`session_io.CameraSource.pixels`) — a lens-refined session (pccr R2) is no longer refused.
   DECLARED: octrees change bytes and rebuild once; sessions projected before 2026-10-08 re-project once; legacy
   sessions without camera.json cannot be projected; `segmentation.obb_orientation.min_plane_frac` removed.
+- 2026-10-08 (evening, USER OK) — SAM3 CROSS-BATCH CHIMERAS FIXED (`segmentation/pipeline._match_ids_iou` + the
+  batch loop of `_run_sam3_batched`): an object of batch ≥ 1 that the overlap frames never show kept its raw
+  per-session SAM3 id (`id_remap.get(local_id, local_id)`), which collides with the ids 1..N the first batch was
+  given — it fused with whatever same-category object held that number, no IoU test, no record (bug since
+  2026-03-15; every category of a session with more keyframes than one batch, 250: pccr 295 → 2 batches, plus the
+  vendor-stop continuations; zaragoza 183 = one batch, unaffected). Measured on pccr 2026-10-08: 'door' batch 1
+  had 9 objects, 2 linked or new, 7 fused into batch-0 doors. Now every unlinked object of the batch gets a fresh
+  id (the docstring's "INVIOLABLE RULE") and the remap is strict. Test: `tests/test_sam3_batch_link.py`.
+  The cross-batch link bar `models.segmentation.iou_match_threshold` 0.3 → 0.90, the same as within a batch
+  (point 93, USER 2026-10-08).
+- 2026-10-08 (evening, USER) — a CONTINUATION WITH ANOTHER CONFIGURATION RUNS
+  (`pipeline_manager._continuation_config_change`, point 151): a resume / Autosegment / projection / certification
+  ordered with a config.yaml that differs from the session's frozen `output/run_config.yaml` is no longer refused —
+  the differing sections are DECLARED in the log and the job freezes its own. An edited frozen file still refuses.
+- 2026-10-08 (evening, USER) — ONE PLACE FOR THE RULE'S FACTOR: every user of "≥ factor × the error" reads
+  `correction_graph.graph.improvement_error_factor` (1.1). The only one that did not — the object descriptions'
+  view ties (`object_captioner.select_views`, a fixed 2.0, point 98) — now reads it (the job's frozen config in
+  the pipeline). object_captioner.py is in the VLM analysis stamp: the next run of each session re-runs the VLM.
+- 2026-10-08 (evening, USER: "no tiene por qué tener el límite de 255") — NO 255-OBJECT CEILING IN THE VIEWER:
+  per-point instance ids in 32 bits (`segmentation.republish.INSTANCE_IDS_DTYPE`, the octree's `instance` LAS extra
+  dim, `potree_converter`); the viewer reads `instance` when the octree has it (`PotreeLoader`), else the class byte
+  of older octrees; the visibility texture is 2048 × 2048 = 4,194,304 segments (`Viewport.makeSegVisTexture`, the
+  side every WebGL2 device supports); the payloads' `class_byte` is the instance id when the octree carries
+  `instance` (`republish.viewer_key_of`). Tests: `test_segmentation_payload_class_byte`, `test_p3_potree_canonical`
+  (the real converter keeps ids 70,000 and 4,000,000 in a uint32 `instance`).
+- 2026-10-08 (evening, USER) — ONE FLOOR CONCEPT IN THE REPORTS TOO (point 128): steps 1–4 of the certification's
+  chunk floor are `correction.floor.chunk_floor_levels` (the certification calls it — same result), measured ONCE
+  on the published cloud (`precision.cloud_metrics.cloud_floor_levels`, stable subsample of `max_points`) by the
+  chunk check. The chunk check's floor of a keyframe is its points within `band_m` of its chunk's floor UNDER THE
+  CAMERA — never the lowest surface it sees (zaragoza measured the camera 2.25 m over the "floor": the track bed
+  from the platform) — and DA3 is read at those same pixels; without the cloud it falls back to the lowest band,
+  declared. The floor metric names each chunk's floor's surface (`correction.floor.chosen_surfaces`, the seam
+  identity rule without the correction's tilt) and, with several surfaces, measures each on its own plane (one
+  surface: exactly the old metric). Test: `tests/test_chunk_check_floor_under_camera.py` (platform + track bed).
+- 2026-10-08 (night) — WAVE 2 CLOSED (the remaining points, four packages in parallel, two skeptics each, fixes, the
+  whole suite: 1702 passed; the 12 failures left were tests written BEFORE the user's 2026-10-07 decisions — updated
+  in the close-out below). P2: the client's Pillow/libjpeg record in the VLM stamp + per-call records + caption stamp
+  (94); loop classes keyed by the job's frozen config and the engine's expected identity, no 'default' (95); the census
+  carries the prompt sha, the analysis stamp sha, the engine sha and the SAM3 list sha, and no run-varying field
+  (`used_mib`, temp paths, seconds) — byte-identical between identical runs (159); the SAM3 stage runs on the JOB's
+  frozen config (`get_sam3_wrapper(config=)`, `run_segmentation(config=)`); the product epoch is selected BEFORE SAM3
+  and the masks are projected ONCE (150); a reused VLM analysis verifies the engine identity WITHOUT launching vLLM
+  (`semantic.serve --identity-only`). P3: a rebuilt cloud always deletes the previous projection products (96); one
+  Potree thread pinned in code and recorded in the octree stamp (103 closed by 57's rule); the mask audit / shape
+  proposer use the declared grids' exact maps (108); the OBB footprint error is a seeded Poisson bootstrap of the
+  points (109); every `from config import cfg` of the projection reads the frozen config (112/151); a failed projection
+  deletes every product (122); octrees reused only on their content stamp, never mtime (123); `floor_transform.npz`
+  read only under its seal (`floor_level.json`: reconstruction id + cloud sha + npz sha) (158); the SAM3 store seal
+  is fatal for every reader (`store_seal_verdict`). P4: gauge rows taken on their evidence stamp (134); the product
+  publish writes the identity `depth_correction.json` and a product `scale_diagnostics.json`, and prunes the epochs
+  outside the live lineage (135/136 — the epoch NUMBER still counts history: renumbering = list A); clocks out of the
+  quality report (`quality/timing/`), correction ids derived from the transform (137); the certification refuses a
+  non-intact store. P5: the engine lease carries the holder's start time + boot id and an owner (a reused pid is
+  stale; backend threads cannot bypass it) (81); cooperative cancel with a derived bound (40.5 s) before the kill,
+  `/api/certify/select` refused while a job is active (111); `config.py` raises on a broken or missing config.yaml
+  (112/151); ONE GPU permit for meshing, the Segmentation Manager's SAM3, the legacy auto-segmentation and the
+  retro-segmentation (154); the InternVL3 fallback is gone from main.py (156); the Autosegment order CARRIES its
+  prompts (162). Earlier the same evening (USER): cross-batch SAM3 chimeras fixed and the link bar 0.90 (93); a
+  continuation with another configuration runs and declares (151); one place for the 1.1 factor (98); no 255-object
+  ceiling (107); the floor under the camera in the chunk check and the metric (128); 105/129 kept as the code does;
+  the stale acta removed by a segmentation run without the certification, broken prompt files redone (149).
+- 2026-10-08 (night) — WAVE 1 AUDITED AND CLOSED OUT (USER's decisions per point in docs/plan_determinismo.md):
+  73 of 83 points closed as written, 3 no-action, 63 = the user's renumbering (list A); the six gaps decided: 11 NOT
+  touched (it would move the validated chunk plan); 16 the SALAD margin per candidate recorded in loop_edges.json,
+  the bar read from loop_closures.txt's stamp on a fresh or resumed pass (`loop_bridges.salad_applied_threshold`,
+  the detector cross-checks it); 66 `salad_revisit_reference.json` is NEVER reused — recomputed every reconstruction
+  (`REVISIT_REFERENCE_VERSION` and `revisit_reference_is_of` gone); 69 the precision chain reads the FROZEN
+  `output/run_config.yaml` (`precision.config.raw_config_of(session_dir)` / `load_precision_config(session_dir=)`,
+  the runner's raw sections and every former `from config import cfg`; a CLI on an unfrozen session: the server's
+  config, declared; the code-version half stays open, declared); 70 `windows.json` session-relative (`frames/<name>`,
+  the extractor resolves against `--image_dir`; the next RECONSTRUCTION re-runs I3's DA3 windows once); 75 I2 REMOVED
+  (the stage, `intake/content.py`, the config section, the exclusion masks and every reader; `intake.quality.
+  frame_file` is the one frame-number → file rule). Wave-2 cross items closed the same night: InternVL3
+  (`scene_analyzer.py`) unreferenced; the session intel polls `cancelled`; `precision/tracks.instance_loops` on the
+  evidence stamp (134); `poses_epoch` derives the depth sidecar from the chain (135); the f6_bend publish records
+  `history` (136); witness / fuse / fuse_scans ids and clocks (137); the re-level's `floor_transform.npz` SEALED in the
+  certification's transaction and by the gizmo / level_floor writers, the viewer applies it under the same seal (158);
+  the erase / delete paths re-seal the SAM3 store; the interactive SAM3 runs on the session's frozen config; the
+  reprojection tools use the exact maps (108). The 12 pre-2026-10-07 tests updated to the user's decisions (factor 1.1
+  and the median closure σ, selected_frames required by the plan, rotation keyframes, midpoint ownership, the
+  exclusive-GPU rule). Still open, declared: the fork's own two stage fixtures (`vendor/VGGT-Long/tests`, the frustum
+  rule of 2026-10-05) and the two-run byte comparison of a reconstruction (needs a reconstruction run).
 
 ## The pipeline ("Reconstruir"), stage by stage
 
 | # | Stage | Code | What it does |
 |---|---|---|---|
-| 1 | Intake I0, I1, I3 | `intake/`, `workers/map_worker.py` | frames, parallax keyframes, DA3 to measure (K, walk). I2 (content tags + exclusion masks) is OFF (`intake.content.enabled: false`, USER 2026-10-05) |
-| 2 | VLM + SAM3 — **AFTER the cloud stage** (USER 2026-10-05) | `workers/vlm_worker.py`, `workers/sam3_worker.py` (pipeline stages `vlm`, `sam3`), `segmentation/autoprompt/` | ONCE, on EVERY keyframe (+2×2 crops); the same VLM call names the SAM3 prompts AND describes each kind for ShapeR (`vlm_analysis.json` `shape_descriptions`); the SAM3 stage projects its masks on the published cloud (stage 8) |
+| 1 | Intake I0, I1, I3 | `intake/`, `workers/map_worker.py` | frames, parallax keyframes, DA3 to measure (K, walk). I2 (content tags + exclusion masks) was OFF since 2026-10-05 and is REMOVED since 2026-10-08 (USER): no `intake/content.py`, no `content_tags.json`, no exclusion masks, no readers |
+| 2 | VLM + SAM3 — **AFTER the cloud stage** (USER 2026-10-05) | `workers/vlm_worker.py`, `workers/sam3_worker.py` (pipeline stages `vlm`, `sam3`), `segmentation/autoprompt/` | ONCE, on EVERY keyframe (one call each; the 2×2 crops were removed 2026-09-29, c07575a); the same VLM call names the SAM3 prompts AND describes each kind for ShapeR (`vlm_analysis.json` `shape_descriptions`); the SAM3 stage projects its masks on the published cloud (stage 8) |
 | 3 | Omega | `workers/map_worker.py` `_run_vggtomega`, planner `reconstruction/chunk_covis.py`, resolution `reconstruction/chunk_plan.omega_resolution_for` | chunks = the **co-visibility plan** (USER 2026-10-06, always, no switch): ONE pass when the whole walk is ≤ H = 13.67 co-visibility lengths, else variable-size chunks at 50 % overlap (each seam its own block), handed to the fork as `Model.chunk_ranges`, persisted in `output/chunk_plan.json` (+ covis report); Omega's resolution = the largest patch-aligned one at which the LARGEST chunk fits the card (native when it fits); poses, metric scale, per-keyframe depth + conf (`omega_run/results_output/frame_<f>.npz`) |
 | 4 | F0, F2, F4 (F3 report) | `precision/` runner steps | session camera, continuous gauge, native-pixel tracks |
 | 5 | F5 | `precision/refine.py` | corrected poses + camera (rung chosen by held-out; pccr R1, fx 364→392) |

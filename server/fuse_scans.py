@@ -483,11 +483,17 @@ def run_fuse(paths: ProjectPaths, scan_keys: List[str],
             "membership": "classification.npy", "total_points": int(len(merged)),
             "instances": instances, "fused_from": [ref] + scan_keys,
             "read_only": True}))
+        # no clock in the compared artifact (docs/plan_determinismo.md point 137): when the
+        # fusion was made goes to the timing sidecar next to it. DECLARED: the fused scan's KEY
+        # (its directory, ``<FUSED_DAY>/<stamp>``) is still the wall clock — it names a project
+        # entry, not a product compared between runs
         (out_dir / "fused_meta.json").write_text(json.dumps({
-            "reference": ref, "scans": scan_keys, "created_at": stamp,
+            "reference": ref, "scans": scan_keys,
             "reference_scale": ref_scale,
             "transforms": {st["key"]: st["T_scan"].reshape(-1).tolist() for st in scan_states},
             "report": report}, indent=1))
+        from precision.corrected_cloud import write_timing
+        write_timing(out_dir / "fused_meta.json", {"created_at": stamp})
         _p(85, "Potree of the merged cloud…")
         from potree_converter import convert_ply_to_potree
         if not convert_ply_to_potree(fused_ctx.source_dir, force=True):

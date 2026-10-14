@@ -329,9 +329,13 @@ def merge_loop_closures(output_dir: Path, new: List[dict], log=print) -> Path:
 
 def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConfig] = None,
                           log: Callable[[str], None] = print, apply_splits: bool = True,
-                          budget_override: Optional[Dict[str, float]] = None) -> dict:
+                          budget_override: Optional[Dict[str, float]] = None,
+                          raw_config: Optional[dict] = None) -> dict:
     """Run the detector over every instance of the session. Returns the
-    report written to output/loop_candidates.json."""
+    report written to output/loop_candidates.json. ``raw_config``: the job's frozen
+    configuration dict (what the certification was handed, points 95 / 139) — the loop
+    classifier launches its own VLM engine from it (semantic_classes.classify_instances
+    ``config=``); None = the server's config.yaml, for a CLI."""
     from correction.session import load_session
     from segmentation.erase import _mask_obj_by_iid, _mask_oids_by_iid
     from reconstruction.loops.semantic_classes import classify_instances
@@ -395,7 +399,7 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
         log(f"[loop-class] mask frame lookup unavailable ({e}) — keys used as-is")
         cloud_to_mask = {}
     classes = classify_instances(output_dir, session_dir, instances, cfg.loops.semantic,
-                                 oid_of, frames_of, cloud_to_mask, log=log)
+                                 oid_of, frames_of, cloud_to_mask, log=log, config=raw_config)
     # per-frame label lists for the verifier (§4.2.4) — keyed by REAL frame number
     per_frame: Dict[str, Dict[str, List[str]]] = {}
     for inst in instances:

@@ -105,7 +105,9 @@ def run_witnesses(output_dir, cfg=None, frames: Optional[Dict[int, dict]] = None
     fields = witness_fields(session.xyz, session.fg, session.data["pixel_row"],
                             session.data["pixel_col"], frames, wcfg, instances, store,
                             dynamic_instance_ids(output_dir), device=device)
-    report = {"version": 1, "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    # no clock in the report (point 137): when it ran and how long go to the timing sidecar
+    # (witness_report.timing.json), never into the compared artifact
+    report = {"version": 1,
               "params": {"n_neighbors": wcfg.n_neighbors, "tau_rel": wcfg.tau_rel,
                          "mask_erosion_px": wcfg.mask_erosion_px,
                          "occlusion_tol_rel": wcfg.occlusion_tol_rel,
@@ -120,13 +122,16 @@ def run_witnesses(output_dir, cfg=None, frames: Optional[Dict[int, dict]] = None
         raw = output_dir / "cleaned_cloud_raw.ply"
         if raw.exists():
             write_fields(raw, fields)
-    report["elapsed_s"] = round(time.time() - t0, 1)
+    elapsed_s = round(time.time() - t0, 1)
     (output_dir / REPORT_JSON).write_text(json.dumps(report, indent=1, default=float))
+    from precision.corrected_cloud import write_timing
+    write_timing(output_dir / REPORT_JSON,
+                 {"generated_at": time.strftime("%Y-%m-%d %H:%M:%S"), "elapsed_s": elapsed_s})
     c = report["status_counts"]
     log(f"[witness] {report['n_points']:,} pts: verified {c['verified']:,}, single_witness "
         f"{c['single_witness']:,}, mask_conflict {c['mask_conflict']:,}, dynamic {c['dynamic']:,}, "
         f"unobserved {c['unobserved']:,} | mv_votes mean {report['mv_votes_mean']:.2f} | "
-        f"conflicts {report['mask_conflicts_total']:,} ({report['elapsed_s']}s)")
+        f"conflicts {report['mask_conflicts_total']:,} ({elapsed_s}s)")
     return report
 
 
@@ -149,7 +154,13 @@ def _witness_epoch(output_dir: Path, session, fields, report, operator, log, ccf
     sess2 = dataclasses.replace(session, header=h2, data=d2, raw_header=rh, raw_data=rd)
     N = session.n_kf
     R_kf = np.tile(np.eye(3), (N, 1, 1)); t_kf = np.zeros((N, 3)); k_kf = np.ones(N)
-    cid = ledger.new_correction_id()
+    # the id is what the epoch IS — the identity transform over the live epoch plus the witness
+    # fields it writes into the cloud — never a random draw (point 137): the same witnesses on
+    # the same cloud write the same id, ledger line, report file and epoch record
+    from correction.epoch import current_epoch
+    cid = ledger.new_correction_id(*ledger.transform_parts(
+        "witness", int(current_epoch(output_dir)), session.frames, R_kf, t_kf, k_kf, None,
+        {k: np.asarray(fields[k]) for k in sorted(fields)}))
     tx = stage_transaction(sess2, ccfg, R_kf, t_kf, k_kf, correction_id=cid,
                            scale_diag_new=None, floor_npz=None, log=log, progress=None)
     swap_transaction(output_dir, tx, log=log)

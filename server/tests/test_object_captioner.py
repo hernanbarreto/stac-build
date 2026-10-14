@@ -373,11 +373,12 @@ def test_every_object_gets_its_caption_from_its_largest_mask_views(tmp_path):
 
 
 def test_views_are_chosen_with_the_area_error_and_ties_break_by_position(tmp_path):
-    """docs/plan_determinismo.md point 98 (DECIDIDO 2026-10-08): masks within 2 × the measured
-    frame-to-frame area dispersion of the n-th largest are TIED with it and the tie breaks by
-    keyframe position — a one-pixel difference no longer swaps a view. On this fixture the
-    areas (4, 9, 1, 6 px at positions 0-3) scatter by 5 px frame to frame, so every mask is
-    within 2 × 5 of the n-th: position decides."""
+    """docs/plan_determinismo.md point 98 (DECIDIDO 2026-10-08): masks within the user's factor
+    (correction_graph.graph.improvement_error_factor, 1.1 — USER 2026-10-08: read from that one
+    place) × the measured frame-to-frame area dispersion of the n-th largest are TIED with it
+    and the tie breaks by keyframe position — a one-pixel difference no longer swaps a view. On
+    this fixture the areas (4, 9, 1, 6 px at positions 0-3) scatter by 5 px frame to frame, so
+    every mask is within 1.1 × 5 of the n-th: position decides."""
     from segmentation.object_captioner import _instance_views, area_error, select_views
     out = _session(tmp_path)
     z = np.load(out / "seg_masks.npz", allow_pickle=True)
@@ -399,10 +400,14 @@ def test_views_are_chosen_with_the_area_error_and_ties_break_by_position(tmp_pat
     # the n-th (8000) exactly tied with itself, 9000 above the band
     chosen, rec = select_views({0: 1000, 1: 1000, 2: 1000, 3: 1000, 4: 9000, 5: 8000}, 2)
     assert chosen == [4, 5] and rec["area_error"] == 0 and rec["n_above"] == 1 and rec["n_tied"] == 1
-    # a near-tie at the n-th slot (2990 vs 3000, dispersion 5 → band ±10) goes to the
+    # a near-tie at the n-th slot (2995 vs 3000, dispersion 10 → band ±11) goes to the
     # EARLIER keyframe, whichever of the two is the larger
+    chosen, rec = select_views({0: 1000, 1: 1010, 2: 1000, 3: 1010, 4: 9000, 5: 2995, 6: 3000}, 2)
+    assert rec["area_error"] == 10 and rec["n_tied"] == 2 and chosen == [4, 5]
+    assert rec["error_factor"] == 1.1, "the factor comes from the configuration"
+    # 2990 vs 3000 with dispersion 5 → band ±5.5: no tie, the larger keeps the slot
     chosen, rec = select_views({0: 1000, 1: 1000, 2: 1000, 3: 1000, 4: 9000, 5: 2990, 6: 3000}, 2)
-    assert rec["area_error"] == 5 and rec["n_tied"] == 2 and chosen == [4, 5]
+    assert rec["area_error"] == 5 and rec["n_tied"] == 1 and chosen == [4, 6]
 
 
 def test_service_down_fails_the_pass_and_writes_nothing(tmp_path, monkeypatch):
@@ -539,7 +544,12 @@ def test_the_worker_captions_after_certify_and_a_failure_fails_the_stage(tmp_pat
 def test_the_worker_runs_the_captions_after_the_certification():
     src = (SERVER / "workers" / "certify_worker.py").read_text()
     body = src[src.index("def _certify_work("):]
-    assert body.index("certify_session(session_path") < body.index("_caption_objects(pipe") \
-        < body.index("send_progress(100")
+    # the descriptions-only job a segment rename orders runs them without a certification
+    # (USER 2026-10-09) — its branch returns before the certification; the full flow below it
+    # still certifies first
+    full = body[body.index("if captions_only:"):]
+    full = full[full.index("        return\n", full.index("_caption_objects(pipe")) + 1:]
+    assert full.index("certify_session(session_path") < full.index("_caption_objects(pipe") \
+        < full.rindex("send_progress(100")
     assert body.index("load_object_captions(config)") < body.index("certify_session(session_path"), \
         "the keys are read before the hour of certification"

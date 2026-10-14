@@ -1,141 +1,95 @@
-CONTEXTO
-Repo hernanbarreto/stac-build (precision pipeline). Integrar PointDiT
-(google-research/pointdit, ICML 2026, Apache 2.0) como fuente de HIPÓTESIS para
-el plane-sweep guiado sobre witness frames, con dos objetivos:
-(1) nitidez en bordes y estructura fina;
-(2) eliminar los voladores de borde (píxeles mezclados con profundidad
-    intermedia entre frente y fondo).
-PointDiT es monocular y afín-invariante: propone, la multivista decide. Nunca
-participa en escala, gauge, poses, intrínsecos, BA ni en la pasada Ω/DA3.
+PROMPT PARA CLAUDE CODE · STAC-BUILD · BATERÍA DE EVALUACIÓN MÉTRICA
 
-REGLAS
-- Entregable: código corregido y tests. No crear ni modificar archivos .md (ni
-  README, ni planes, ni análisis, ni documentación). Lo necesario va en docstrings.
-- Ejecutá todas las fases en orden, cada una con sus tests en verde y su commit,
-  sin pedir permiso para continuar entre fases.
-- Implementá y medí, pero no declares el resultado validado: la validación es
-  visual y la hago yo.
-- Nada hardcodeado: umbrales derivados por sesión (percentiles, pesos de
-  confianza calibrados existentes) o en config.
-- Marcar, nunca borrar. Todo punto aportado lleva provenance.
-- Feature flag mono_detail.enabled (default false) para que el baseline siga
-  reproducible.
-- Reusá las convenciones existentes de módulos, config, store SQLite y esquema
-  de testigos. Ubicá vos el plane-sweep guiado, la fusión por testigos y la
-  reproyección held-out.
+Contexto
+STAC-BUILD convierte un video de celular en una nube de puntos métrica, segmentada y certificada (intake → Omega → núcleo de precisión F0–F6 → publicación → VLM + SAM 3.1 → OBB → certificación). Hoy no existe ninguna medición del error contra una referencia externa. Tu tarea es construir una batería de evaluación que mida, sobre las mismas escenas, cuánto se equivoca la cadena, cómo crece el error, cuánto aporta cada etapa, cuánto cuesta cada etapa y si los resultados son repetibles. No tenés que mejorar la cadena: tenés que medirla.
 
-FASE 0 — Diagnóstico de origen de voladores (baseline, sin PointDiT)
-- Definición de volador, independiente de PointDiT y reusada en la Fase 8:
-  punto de la nube final aislado (distancia k-NN sobre el percentil de sesión) o
-  ubicado en la línea de visión entre dos superficies confirmadas.
-- Clasificar cada volador por provenance en:
-  (a) borde mezclado en su frame fuente (cae en banda de discontinuidad de la
-      profundidad calibrada, con profundidad intermedia entre frente y fondo);
-  (b) inconsistencia entre vistas o chunks (soportado en su frame, contradicho
-      por otras vistas o desplazado respecto de la superficie: duplicados,
-      cebolla, deriva);
-  (c) baja textura o reflejo (score fotométrico bajo);
-  (d) otro.
-- Correr sobre las sesiones de prueba existentes. Escribir CSV con conteos y %
-  por clase y por sesión, más una capa del viewer coloreada por clase.
-- Imprimir el % de (a) en terminal y seguir sin esperar.
-- Tests: escenas sintéticas con un volador de cada clase → clasificación
-  correcta.
+Reglas
+1. El entregable es código y tests. No escribas archivos .md de ningún tipo: ni análisis, ni planes, ni documentación, ni reportes. Los resultados de cada corrida se escriben como JSON, CSV y PNG dentro del directorio de la corrida.
+2. Implementá todo. Trabajá por fases, en el orden indicado, con tests y un commit por fase. No pidas permiso para pasar de una fase a la siguiente.
+3. Implementás y medís, pero nunca declarás un resultado como válido, bueno o malo, ni lo interpretás. La validación es visual y la hace Hernán. Al final de cada fase informá solo qué se implementó, qué tests pasan y dónde quedaron los resultados.
+4. No cambies el comportamiento de la cadena de producción. La batería la envuelve. Si para apagar una etapa hace falta un flag nuevo, su valor por defecto tiene que reproducir exactamente el comportamiento actual, y tiene que haber un test que lo verifique.
+5. Reusá lo que existe antes de crear algo nuevo: server/config.yaml, el ledger corrections.jsonl, el instance store, los campos por punto del LAS (frame_global, pixel_row/col, confidence, instance, mv_votes, mask_votes, mask_conflicts, status), las épocas y el soporte de ground truth con roles gauge/test, si ya existe.
+6. GPU: respetá server/card_table.json. Nunca corras un paso de GPU en paralelo con otro proceso que use la GPU. Los tests automáticos no pueden requerir GPU: usá datos sintéticos y etapas simuladas.
+7. Ningún precio, tolerancia ni ruta queda fijo en el código: todo va a config.yaml, bajo una sección nueva `evaluation:`.
 
-FASE 1 — Dependencia y runner
-- Clonar google-research/pointdit en third_party/, fijado a un commit. Reusar la
-  instalación y los pesos de DINOv3 existentes (DINOV3_WEIGHTS_DIR). Si falta el
-  código dinov3 para torch.hub, clonarlo en third_party/.
-- Checkpoints de HF haofeixu/pointdit:
-  pointdith-512-mixdata-nodinov3-cb01dd3b.pth (default, DINOv3 ViT-H+/16) y
-  pointditl-512-mixdata-nodinov3-240c1a4f.pth (alternativa ViT-L).
-  Verificar el sha256 contra el prefijo del nombre.
-- No cambiar la versión de torch del entorno. Si PointDiT no corre con ella,
-  aislarlo en un venv/proceso aparte con interfaz por archivos.
-- Runner: inicialización en ceros (determinista), pasos configurables
-  (default 2), salida z por píxel + máscara de validez (descartar norma > 2.9 en
-  el espacio normalizado, como en el paper).
-- Tests: misma entrada → salida bit-idéntica; error claro si falta el encoder;
-  test GPU marcado que se saltea si no hay pesos. El resto de los tests usa el
-  modelo mockeado.
+Fase 0 · Referencias de verdad (ground truth)
+- Revisá si ya existe la carga de cotas de referencia con roles `gauge` (para calibrar) y `test` (para medir). Si existe, completala; si no, implementala.
+- Cada cota es una distancia medida a mano entre dos puntos físicos, con: valor en metros, incertidumbre de la medición, rol (gauge | test), herramienta (cinta, láser, total) y nota.
+- Cada extremo se ancla en el espacio de imagen: uno o más pares (keyframe, píxel). No se ancla en coordenadas 3D, porque cada variante de la cadena produce otra nube y la cota se tiene que poder reconstruir en todas.
+- Sumá también regiones planas de referencia (piso, pared, andén) definidas como polígonos sobre uno o más keyframes, para medir ruido sin cinta.
+- Formato: un JSON por sesión, versionado y validado con esquema. Carga desde el visor: herramienta "Cota de referencia" (dos clics sobre un keyframe, valor, rol) y herramienta "Plano de referencia" (polígono). Ambas guardan en ese JSON.
+- Tests: validación del esquema, ida y vuelta de lectura y escritura, rechazo de cotas sin al menos un gauge y un test.
 
-FASE 2 — Tiling a resolución nativa
-- Trabajar en la misma grilla de píxeles de la profundidad calibrada del
-  pipeline, sin introducir otra rectificación.
-- Tiles con solapamiento configurable. Parámetro context_scale: tile nativo 512
-  (1.0) o ventana mayor reducida a 512 (p. ej. 2.0) para dar más contexto; ambos
-  medibles.
-- Tests: cobertura completa del frame incluidos los bordes; los pesos de mezcla
-  suman 1.
+Fase 1 · Error por cota
+- Para una corrida cualquiera: reconstruí cada extremo en 3D a partir de la profundidad y la pose de esa corrida. Si un extremo tiene varias observaciones, usá la mediana y guardá su dispersión.
+- Calibración: el factor de escala se calcula solo con las cotas gauge (una o varias, por mínimos cuadrados) y se aplica a toda la nube. El error se mide solo sobre las cotas test. Nunca se evalúa sobre la misma cota que calibró.
+- Guardá por cota: medido crudo, medido calibrado, real, error absoluto, error relativo, distancia a la cámara de cada extremo y recorrido acumulado desde la cota gauge más cercana.
+- Resumen por escena: mediana, P95 y máximo del error absoluto y del relativo, y factor de escala aplicado.
+- Tests: escena sintética con cámara, profundidad y poses conocidas donde el resultado se puede calcular a mano. Escala exacta da error cero; un sesgo de escala conocido se recupera con el gauge.
 
-FASE 3 — Alineación afín por tile
-- Por tile: z_cal ≈ s·z_mono + b, por mínimos cuadrados robustos (IRLS/Huber),
-  ponderado con los pesos de confianza calibrados por sesión y solo sobre
-  soporte confiable fuera de las bandas de discontinuidad. Variante en
-  profundidad inversa como opción de config.
-- Guardar s, b, residuo y ratio de inliers por tile. Rechazar tiles con soporte
-  insuficiente o con residuo sobre el percentil de sesión configurado.
-- Mezcla feathered en los solapamientos, después de alinear.
-- Tests: recupera s,b conocidos con 30 % de outliers; tile sin soporte →
-  rechazado; costuras sin escalón en datos sintéticos.
+Fase 2 · Curvas de error
+- Error contra distancia a la cámara: tramos configurables (por defecto 0–2, 2–5, 5–10, 10–20 y 20–30 m). Por tramo: n, mediana, P95 y error relativo.
+- Error contra recorrido: el mismo análisis según el recorrido desde el punto de calibración.
+- Ruido por punto: residuo RMS de un plano ajustado sobre cada región plana de referencia, agrupado por distancia a la cámara. La distancia de cada punto se calcula desde su frame de origen (frame_global, pixel_row/col).
+- Resolución: espaciado medio entre vecinos (mm) y densidad (puntos/m²) sobre las regiones planas, por tramo de distancia.
+- Ajuste de modelos de crecimiento: a + b·Z y a + c·Z², con coeficientes, residuos y AIC de cada uno. Solo informar números, sin elegir ni interpretar.
+- Distancia de confianza: para cada tolerancia configurada (por defecto 0,02, 0,05 y 0,10 m), la máxima distancia en la que el P95 del tramo queda por debajo de la tolerancia. Si no hay datos suficientes en un tramo, se informa como "sin datos", no se extrapola.
+- Salidas: CSV por curva y gráficos PNG con ejes rotulados y n por tramo.
+- Tests sintéticos con ruido de crecimiento conocido (lineal y cuadrático): el ajuste recupera los coeficientes dentro de una tolerancia.
 
-FASE 4 — Detalle y banda de discontinuidad
-- detail = z_mono_alineado − pasabajos(z_mono_alineado). La escala del pasabajos
-  se deriva de la resolución efectiva de la profundidad calibrada.
-- Mapa de discontinuidades de PointDiT. La banda de discontinuidad es ese mapa
-  dilatado según la relación entre la resolución efectiva de PointDiT y la
-  nativa.
-- Tests: plano o rampa → detail ≈ 0; escalón → discontinuidad localizada y
-  banda del ancho esperado.
+Fase 3 · Aporte de cada etapa
+- Implementá un ejecutor de variantes que corre la cadena sobre una escena con overrides de configuración, sin tocar los valores por defecto.
+- Variantes mínimas (mapealas a las claves reales de config.yaml; si una etapa no se puede apagar, agregá el flag según la regla 4):
+  a. cadena completa actual (referencia);
+  b. sin corrección de deriva (visit_drift y correcciones de certificación);
+  c. sin refinamiento de profundidad F6;
+  d. sin detalle PointDiT;
+  e. sin ajuste de haces F5;
+  f. fuente de escala MapAnything en lugar de DA3, si el entorno mapanything está disponible; si no, registrarla como no ejecutada;
+  g. Omega con escala solo por gauge, sin modelo de profundidad para la escala;
+  h. fotogrametría clásica sola, como línea de base: COLMAP 4.x (trae integrado el mapper global de GLOMAP) instalado en un entorno separado, sin tocar el pycolmap que usa la cadena. Cámara única por sesión; features SIFT; matching secuencial más detección de loops por árbol de vocabulario; dos mapeos sobre la misma base de datos, incremental (h1) y global (h2), registrando todos los modelos desconectados y no solo el más grande; nube densa con image_undistorter, patch_match_stereo y stereo_fusion. Mismos frames de entrada que la referencia, ningún modelo aprendido en ninguna etapa, escala solo por las mismas cotas gauge. La configuración usada se guarda completa en el manifiesto;
+  h3. igual que h2, pero con features y matching aprendidos de COLMAP (ALIKED + LightGlue). Separa cuánto aporta el matching aprendido de cuánto aportan la profundidad y las poses aprendidas de la cadena.
+  Si COLMAP 4.x no está instalado, registrar h1, h2 y h3 como no ejecutadas con el motivo.
+- Reconstrucción de extremos en variantes sin mapa de profundidad propio (h y las importadas): con dos o más observaciones, triangulación con las poses de la variante; con una sola, profundidad del píxel ancla obtenida proyectando la nube densa de la variante sobre ese keyframe (z-buffer).
+- Cobertura, para todas las variantes: porcentaje de frames registrados, cantidad de modelos desconectados, porcentaje de extremos test reconstruibles y porcentaje de la superficie de cada plano de referencia con puntos. Una cota que una variante no puede reconstruir se registra como "no reconstruida" y entra en la cobertura; nunca se descarta en silencio ni se excluye del resumen.
+- Importación externa: un comando que recibe una reconstrucción hecha fuera de la cadena (por ejemplo RealityScan o Metashape) exportada en formato COLMAP (cameras, images, points3D) más su nube densa, y la evalúa como una variante más con las fases 1 y 2 y la cobertura.
+- Cada variante pasa por las fases 1 y 2. Se guarda una tabla comparativa por escena y por variante, con la diferencia respecto de la referencia y la cobertura.
+- La lista de variantes es configurable. Una variante que falla se registra con su error y no detiene las demás.
+- Tests: el ejecutor arma bien los overrides, una variante con todos los flags por defecto es idéntica a la referencia, y los fallos quedan aislados (con etapas simuladas). Además: triangulación y z-buffer de extremos sobre una escena sintética con poses conocidas, cálculo de cobertura con frames y cotas faltantes, e importación de un modelo sintético en formato COLMAP.
 
-FASE 5 — Hipótesis en el plane-sweep guiado (fuera de la banda)
-- Por píxel de witness frame fuera de la banda: agregar las hipótesis
-  {z_cal + detail, z_mono_alineado} a las existentes.
-- Usar las discontinuidades para no agregar costo a través de bordes en las
-  ventanas de soporte, en todo el frame.
-- Deciden el costo fotométrico multivista y los chequeos de consistencia
-  existentes. Una hipótesis mono nunca gana sola.
-- Tests: escena sintética multivista donde la arista mono es real → aceptada;
-  arista alucinada en superficie sin textura → rechazada; con el flag off, salida
-  idéntica al baseline.
+Fase 4 · Costo de cada etapa
+- Instrumentá tiempo de pared y tiempo de GPU por etapa, memoria de GPU pico (torch y muestreo de nvidia-smi) y RAM pico.
+- Costo en dinero = horas de GPU × precio por hora configurado por tipo de tarjeta en `evaluation:`. Sin precios en el código.
+- Totales por variante y por minuto de video de entrada.
+- Tests: la instrumentación no cambia resultados y suma bien los tiempos (con etapas simuladas que duermen tiempos conocidos).
 
-FASE 6 — Resolución de píxeles mezclados (dentro de la banda)
-- En cada píxel de la banda, estimar profundidad de frente y de fondo de forma
-  robusta a partir de la profundidad calibrada a cada lado, fuera de la banda y
-  siguiendo la dirección del gradiente.
-- Hipótesis permitidas: frente, fondo y z_mono_alineado. Prohibidas las
-  profundidades intermedias entre frente y fondo más allá de un margen derivado
-  por sesión.
-- Decide la multivista. Si ningún lado queda confirmado: status
-  mixed_unresolved, marcado y excluido del tier de medición, nunca borrado.
-- Aplicar el mismo marcado a los puntos existentes de la época 0 cuyo píxel
-  fuente cae en banda con profundidad intermedia.
-- Tests: borde sintético con píxeles mezclados → cada píxel asignado a frente o
-  fondo según la evidencia multivista; sin soporte → mixed_unresolved; ningún
-  punto de la banda queda a profundidad intermedia en el tier de medición.
+Fase 5 · Confianza calibrada
+- Sobre los puntos de las regiones planas y de los extremos test: agrupá el error según confidence, status, mv_votes y mask_votes.
+- Por grupo: n, mediana y P95 del error. Correlación de Spearman entre confianza y error.
+- Tabla de confiabilidad: si los puntos "verified" tienen menos error que "single_witness", eso queda medido; si no, también.
+- Tests sintéticos donde la confianza correlaciona y donde no correlaciona.
 
-FASE 7 — Fusión, provenance y viewer
-- Puntos aceptados por hipótesis mono: tier mono_detail en el esquema de
-  testigos existente, con mv_votes y status.
-- Píxeles de banda resueltos: registrar el lado asignado (frente/fondo) y sus
-  votos.
-- Hipótesis rechazadas y mixed_unresolved: registradas con su status, nunca
-  como geometría del tier de medición.
-- Viewer: capa conmutable para mono_detail y para mixed_unresolved, más overlay
-  por frame (z_mono alineado, detail, banda, máscara aceptado/rechazado) como
-  imágenes.
-- Tests: tier, lado y votos persistidos en SQLite; rechazadas y
-  mixed_unresolved fuera del tier de medición.
+Fase 6 · Repetibilidad y determinismo
+- Modo `evaluation.deterministic: true`:
+  - semillas fijas y registradas en RANSAC, muestreos, difusión de PointDiT, SAM y el VLM (temperatura 0, seed fija);
+  - torch.use_deterministic_algorithms(True), CUBLAS_WORKSPACE_CONFIG y cudnn.benchmark=False;
+  - orden de procesamiento fijo.
+  Si alguna operación no tiene versión determinística, registrala por nombre, no la ocultes.
+- Manifiesto de cada corrida: hash del video de entrada, hash de cada checkpoint, revisión de cada modelo, versiones de librerías, driver, CUDA, GPU, config efectiva completa y semillas.
+- Prueba de repetibilidad: misma escena y misma config, dos corridas. Compará puntos emparejados por procedencia (frame, píxel): diferencia máxima, mediana y P95 de posición; diferencia en conteos, objetos y métricas de las fases 1 y 2. Informar números, sin dictamen.
+- Tests: el manifiesto es completo y estable, y dos corridas sintéticas con semilla fija son idénticas bit a bit.
 
-FASE 8 — Medición A/B
-- Script que corre la misma sesión con el flag off y on, más las variantes
-  context_scale, pasos y H vs L, y escribe métricas en JSON/CSV:
-  - voladores por clase (a/b/c/d) con la definición de la Fase 0;
-  - reproyección held-out global y en banda de bordes. Esta banda se define por
-    gradiente de imagen + discontinuidades de la profundidad calibrada, nunca por
-    PointDiT;
-  - % de hipótesis mono aceptadas y rechazadas, píxeles de banda resueltos a
-    frente/fondo/mixed_unresolved, y puntos por tier;
-  - error contra ground truth cuando exista (roles test|gauge), "pendiente" si no;
-  - tiempo por frame y VRAM.
-- Imprimir el resumen en terminal, sin conclusiones de validación.
+Fase 7 · Frontera costo–error y perfiles
+- Agregá todas las variantes: P95 del error contra costo (dinero y minutos). Calculá la frontera de Pareto.
+- Perfiles: para cada tolerancia configurada, la variante más barata cuyo P95 en todas las escenas queda por debajo de la tolerancia y cuya cobertura de extremos test alcanza el mínimo configurado en `evaluation:`. Si ninguna cumple, "ninguna cumple". Es un cálculo, no una recomendación.
+- Salidas: pareto.json, profiles.json y gráfico PNG de error contra costo con cada variante rotulada.
+- Tests sobre tablas sintéticas con frontera conocida.
+
+Fase 8 · Ejecución y consulta
+- CLI: `python -m server.evaluation run --scenes <ids> --variants <lista|all> [--repeat 2]` crea runs/eval/<fecha_hora>/ con manifest.json, todos los CSV, JSON y PNG de las fases 1 a 7, y un log por variante.
+- Endpoint de solo lectura que lista las corridas y sirve sus archivos.
+- Panel "Evaluación" en el visor: elegir corrida y ver las tablas y los gráficos, sin nada editable salvo las cotas y planos de la fase 0.
+- Tests del CLI con escenas sintéticas y etapas simuladas, y del endpoint.
+
+Cierre
+Al terminar la fase 8, informá: lista de commits, tests que pasan, cómo correr la batería sobre una escena real y qué variantes no se pudieron ejecutar y por qué. No incluyas conclusiones sobre la calidad de los resultados.

@@ -267,13 +267,16 @@ def _plain(v: Any) -> Any:
 
 def step_config(step: Step, pcfg, raw_cfg: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """The config sections ``step`` reads, by name: PrecisionConfig fields (a wrong name FAILS)
-    and ``raw:`` sections of config.yaml (the section ``reconstruction`` without its ``precision``
-    block, which the precision fields already cover)."""
+    and ``raw:`` sections of the job's configuration (the section ``reconstruction`` without its
+    ``precision`` block, which the precision fields already cover). ``raw_cfg`` defaults to the
+    dict ``pcfg`` was loaded from (``precision.config.raw_of`` — the frozen run configuration on
+    the pipeline path, point 69), never config.yaml re-read from disk."""
     out: Dict[str, Any] = {}
     for name in step.config:
         if name.startswith("raw:"):
             if raw_cfg is None:
-                from config import cfg as raw_cfg  # noqa: F811  (server/config.py, config.yaml)
+                from precision.config import raw_of
+                raw_cfg = raw_of(pcfg)
             sec = _section(raw_cfg, name[4:])
             if name[4:] == "reconstruction" and isinstance(sec, Mapping):
                 sec = {k: v for k, v in sec.items() if k != "precision"}
@@ -294,6 +297,9 @@ def _dynamic_reads(step: Step, session_dir: Path, pcfg, rid: Optional[str]) -> D
         return dict(chain_inputs(session_dir, pcfg.gauge, rid))
     if step.key == "f4_tracks":
         from precision.tracks import chain_inputs
+        # the instance loops are an input by OWNERSHIP (this reconstruction's, point 34) — the
+        # gauge's rule for its evidence files; their evidence stamp (point 134) is verified
+        # once, by run_tracks, with the job's correction configuration (point 69)
         return dict(chain_inputs(session_dir, rid))
     return {}
 
@@ -530,6 +536,20 @@ def _reconstruction_id(out: Path) -> Optional[str]:
     return reconstruction_id_or_none(out)
 
 
+def _run_config_sha(session_dir: Path, log: Callable) -> Optional[str]:
+    """The sha256 of the session's frozen ``output/run_config.yaml`` (verified: an edited copy
+    FAILS the chain naming it), None — declared — when no job froze one (point 69)."""
+    from intake.run_config import RunConfigError, has_run_config, load_run_config
+    if not has_run_config(session_dir):
+        log(f"{LOG_TAG} DECLARED: no frozen output/run_config.yaml in this session — the steps "
+            f"read the server's config.yaml (a chain launched by hand on an unfrozen session)")
+        return None
+    try:
+        return load_run_config(session_dir)[1]
+    except RunConfigError as e:
+        raise ChainError(str(e)) from e
+
+
 def run_chain(session_dir: Path, pcfg, *, log: Callable = print,
               progress: Optional[Callable[[float, str], None]] = None,
               cancelled: Optional[Callable[[], bool]] = None,
@@ -557,6 +577,11 @@ def run_chain(session_dir: Path, pcfg, *, log: Callable = print,
     # the reconstruction's identity enters every step's stamp (its Omega records are its inputs,
     # hashed ONCE here instead of once per step)
     rid = _reconstruction_id(out)
+    # the job's frozen configuration (point 69): every step process reads it through
+    # precision.config.raw_config_of; its sha256 is RECORDED on every step record (not a stamp
+    # input: a change elsewhere in config.yaml re-runs nothing — the sections a step reads are
+    # what its stamp compares). None, declared, on a session nobody froze (a CLI by hand)
+    run_config_sha = _run_config_sha(session_dir, log)
     code_of: Dict[str, Tuple[List[Path], Dict[str, Path]]] = {}
 
     def _code(s: Step) -> Tuple[List[Path], Dict[str, Path]]:
@@ -641,6 +666,7 @@ def run_chain(session_dir: Path, pcfg, *, log: Callable = print,
         rec = {"key": s.key, "epoch_before": epoch_before, "epoch_after": _epoch(session_dir),
                "gpu": bool(gpu), "stamp_in": stamp_in,
                "stamp_out": _files_stamp(step_products(s, session_dir)),
+               "run_config_sha256": run_config_sha,
                "environment": {"blas": blas, "gpu": gpu_rec}}
         state["done"].append(rec)
         _save_state(session_dir, state)
@@ -682,7 +708,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     def _before_gpu(label: str) -> None:
         stop_semantic_service_verified(None, stage=f"precision {label}", log=print)
 
-    run_chain(Path(args.session), load_precision_config(), before_gpu=_before_gpu, from_step=args.from_step)
+    # a CLI is its own job (point 69; the intake's and the certification's rule): it reads the
+    # session's frozen configuration when there is one, else freezes the server's NOW — so the
+    # step processes it launches read the same frozen copy, never config.yaml as it changes
+    sd = Path(args.session)
+    from intake.run_config import freeze_run_config, has_run_config
+    if not has_run_config(sd):
+        from config import cfg as raw_cfg
+        freeze_run_config(sd, raw_cfg, log=print)
+    run_chain(sd, load_precision_config(session_dir=sd), before_gpu=_before_gpu,
+              from_step=args.from_step)
     return 0
 
 

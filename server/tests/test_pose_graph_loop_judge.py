@@ -2,9 +2,12 @@
 EVERY loop closure judges once — the graph is solved n times leaving one closure out, and
 that closure's residual is measured at the chain and at the solution that never saw it. The
 graph applies only by THE USER'S RULE (metric_lock.decide_change): significant at 95 %,
->= min_judge_closures(0.95) = 5 judges, median improvement >= 2 x the largest bridge σ.
-Fewer than 5 closures: declared BEFORE solving, nothing solved. The old every-k-th split by
-chunk pair (which changed with the edge count and never reached 5 judges on pccr) is gone."""
+>= min_judge_closures(0.95) = 5 judges, median improvement >= the user's factor (1.1 in production
+since 2026-10-07; the synthetic cases below pass 2.0 to the function) x the MEDIAN own σ of the
+closures that passed the cycle-consistency filter (USER 2026-10-07: never the largest of all —
+one bad bridge set pccr's bar at 2 x 556 cm). Fewer than 5 closures: declared BEFORE solving,
+nothing solved. The old every-k-th split by chunk pair (which changed with the edge count and
+never reached 5 judges on pccr) is gone."""
 
 import sys
 from pathlib import Path
@@ -123,18 +126,40 @@ def test_every_closure_judges_once_and_a_real_closure_is_applied():
     assert res2 == res
 
 
-def test_an_improvement_within_twice_the_largest_bridge_sigma_is_not_applied():
-    """Condition (c): the same closures, but ONE bridge measured with a σ so large that
-    twice it exceeds what the closures improve — significant, enough judges, NOT applied."""
+def test_an_improvement_within_the_factor_times_the_median_bridge_sigma_is_not_applied():
+    """Condition (c) under the USER's rule of 2026-10-07 (docs/plan_determinismo.md point 1; the
+    fixture updated 2026-10-08 with his OK): the error is the MEDIAN own σ of the closures that
+    passed the cycle filter. The same closures, but MOST bridges measured with a σ so large that
+    the factor times their median exceeds what the closures improve — significant, enough judges,
+    NOT applied. (Before: ONE bridge at σ 2.0 set the bar as the LARGEST σ; that rule is gone —
+    see the next test.)"""
     T_true, T0 = _circle_walk()
     edges = _closures(T_true, PAIRS, 0.01)
-    edges[2]["sigma_m"] = 2.0                       # the LARGEST σ is the error
+    for q in (1, 2, 4, 5):
+        edges[q]["sigma_m"] = 2.0                   # 4 of 6: the MEDIAN σ is 2.0, the error
     res = judge_leave_one_out(edges, T0, _solver(T0), error_factor=2.0, confidence=0.95,
                               log=lambda *a: None)
     d = res["decision"]
-    assert res["error_m"] == pytest.approx(2.0)
+    assert res["error_m"] == pytest.approx(2.0) and "median" in res["error_source"]
+    assert d["required_delta"] == pytest.approx(4.0)
     assert d["enough_judges"] and not d["beyond_error"] and not res["improves"]
-    assert "error" in d["failed"] and d["error_margin"] < 0
+    # condition (c) is the ONLY one that fails: significant at 95 %, enough judges
+    assert d["significant"] and d["failed"] == ["error"] and d["error_margin"] < 0
+
+
+def test_one_bad_bridge_does_not_set_the_bar_the_median_does():
+    """USER 2026-10-07: 'the error is that of the closures that PASSED the cycle' — their median
+    own σ, never the largest of all (one bad bridge set pccr's bar at 2 x 556 cm). ONE bridge
+    with σ 2.0 among five at 1 cm leaves the error at 1 cm and the correction applies."""
+    T_true, T0 = _circle_walk()
+    edges = _closures(T_true, PAIRS, 0.01)
+    edges[2]["sigma_m"] = 2.0                       # the LARGEST σ — no longer the error
+    res = judge_leave_one_out(edges, T0, _solver(T0), error_factor=2.0, confidence=0.95,
+                              log=lambda *a: None)
+    d = res["decision"]
+    assert res["error_m"] == pytest.approx(0.01) and d["required_delta"] == pytest.approx(0.02)
+    assert d["enough_judges"] and d["beyond_error"] and d["significant"] and res["improves"]
+    assert d["failed"] == [] and d["error_margin"] > 0
 
 
 def test_a_leave_one_out_solve_that_did_not_converge_cannot_testify():
@@ -192,10 +217,12 @@ def test_the_old_split_is_gone_and_the_fork_uses_leave_one_out():
 
 
 def test_production_config_has_the_rule_and_no_holdout_share():
+    """USER 2026-10-07: the factor is 1.1 in EVERY case ("el error ya es bastante grande"; was
+    1.3, before that 2.0). Expected value updated 2026-10-08 with the user's OK."""
     from reconstruction.loops.config import LoopsConfigError, load_loops_config
     raw = yaml.safe_load((ROOT / "server" / "config.yaml").read_text())
     g = load_loops_config(raw).graph
-    assert g.heldout_confidence == 0.95 and g.improvement_error_factor == 2.0
+    assert g.heldout_confidence == 0.95 and g.improvement_error_factor == 1.1
     assert not hasattr(g, "loop_holdout_frac") and not hasattr(g, "loop_holdout_min_edges")
     for k, v in (("loop_holdout_frac", 0.25), ("loop_holdout_min_edges", 4)):
         bad = yaml.safe_load((ROOT / "server" / "config.yaml").read_text())

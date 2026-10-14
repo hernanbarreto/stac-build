@@ -162,6 +162,12 @@ def main():
                              "depth, conf, extrinsics w2c, intrinsics, scale_factor, "
                              "is_metric, stamp, ref_views). Window files are reused only when "
                              "EVERY one on disk carries this run's stamp.")
+    parser.add_argument("--windows_root", type=str, default=None,
+                        help="the directory a RELATIVE window path of --windows_json resolves "
+                             "against — the session, for intake I3's session-relative "
+                             "'frames/<name>' (docs/plan_determinismo.md point 70, 2026-10-08); "
+                             "absolute paths (the focal probe's transient spec) need none. A "
+                             "relative path without it is an error.")
     args = parser.parse_args()
 
     if args.identity:
@@ -272,11 +278,34 @@ def _np(x):
     return x.cpu().numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
 
 
-def window_stamp(identity: dict, spec: dict, i: int) -> str:
+def resolve_window_paths(spec: dict, root) -> list:
+    """The spec's windows as ABSOLUTE paths: an absolute entry stands, a relative one (intake
+    I3's session-relative ``frames/<name>``, plan point 70) resolves against ``root``
+    (``--windows_root``); a relative entry with no root is an error naming it — the extractor
+    never guesses a session from the output directory."""
+    out = []
+    for i, win in enumerate(spec["windows"]):
+        paths = []
+        for p in win:
+            p = str(p)
+            if os.path.isabs(p):
+                paths.append(p)
+            elif root:
+                paths.append(os.path.join(str(root), p))
+            else:
+                raise ValueError(f"window {i}: '{p}' is a relative path and no --windows_root "
+                                 f"was given to resolve it against")
+        out.append(paths)
+    return out
+
+
+def window_stamp(identity: dict, spec: dict, i: int, root=None) -> str:
     """The stamp of window ``i``: everything its depth depends on — the DA3 identity, the model
     and process_res of the plan, the window's index and its frames (basename + sha256 of each
-    file's bytes). sha256 hex of their canonical JSON."""
-    paths = spec["windows"][i]
+    file's bytes). sha256 hex of their canonical JSON. ``root`` resolves relative window paths
+    (:func:`resolve_window_paths`); the stamp carries basenames, so a session-relative plan and
+    an absolute one of the same frames stamp alike."""
+    paths = resolve_window_paths(spec, root)[i]
     return repro.sha256_json({"identity": identity, "model_id": spec.get("model_id"),
                               "process_res": spec.get("process_res"), "index": int(i),
                               "frames": [[os.path.basename(p), repro.sha256_file(p)]
@@ -356,7 +385,9 @@ def run_windows(args):
     with open(args.windows_json) as f:
         spec = json.load(f)
     spec_sha = repro.sha256_json(spec)          # intake.walk.spec_sha256: the plan's identity
-    windows = spec["windows"]
+    # the plan names its frames relative to the session (point 70): resolved here, once, for
+    # the inference and the stamps; the plan's sha256 above is of the paths AS WRITTEN
+    windows = resolve_window_paths(spec, args.windows_root)
     # THIS process must be the DA3 environment the plan was made for (point 27): the launcher
     # recorded it in windows.json from an --identity probe of the same interpreter
     identity = da3_identity(args.model)
@@ -369,7 +400,7 @@ def run_windows(args):
         sys.exit(IDENTITY_EXIT)
     # PER-WINDOW STAMPS (point 44): a window file on disk is reused only when EVERY one carries
     # the stamp this run would write; one mismatch and all of them go
-    stamps = [window_stamp(identity, spec, i) for i in range(len(windows))]
+    stamps = [window_stamp(identity, spec, i, root=args.windows_root) for i in range(len(windows))]
     on_disk, bad = stale_window_files(args.output_dir, stamps)
     if bad:
         print(f"[DA3 windows] {len(bad)} window file(s) on disk are not this run's "

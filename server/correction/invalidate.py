@@ -98,7 +98,7 @@ def update_instance_store(output_dir, R_kf: np.ndarray, t_kf: np.ndarray,
             if iid not in known:
                 store.upsert_instance(iid, str(inst.get("label") or "segment"),
                                       source="sam3_concepts", status="proposed",
-                                      label_origin="vlm_proposed")
+                                      label_origin=str(inst.get("label_origin") or "vlm_proposed"))
                 known.add(iid)
             if not indices_hold:
                 continue

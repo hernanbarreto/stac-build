@@ -357,6 +357,8 @@
     "floorAuto": "automático: el más bajo",
     "floorLeveled": "Piso nivelado a y = 0 (estaba {mm} mm desviado)",
     "placedObjects": "Objetos colocados ({n})",
+    "volumes": "Volúmenes ({n})",
+    "deleteVolume": "Borrar este volumen",
     "objectMeshes": "Mallas de objeto ({n})",
     "meshes": "Mallas ({n})",
     "removePlacedHint": "Quitar solo de esta escena; el archivo fuente no se toca",
@@ -377,7 +379,7 @@
     "absorbed": "{n} máscara(s) fusionadas en estos",
     "deleteShapeTitle": "Borrar objeto generado",
     "deleteShapeMessage": "¿Borrar \"{label}\" y su carpeta entera ({folder}: PKL, malla, metadatos)? No se puede deshacer.",
-    "renameFailed": "No se pudo renombrar {status}"
+    "renameFailed": "No se pudo renombrar: {detail}"
   },
   "toolbar": {
     "label": "Herramientas del visor",
@@ -426,7 +428,13 @@
     "undo": "Deshacer pincel",
     "undone": "Pincel deshecho: {n} puntos restaurados",
     "nothingToUndo": "No hay nada para deshacer",
-    "undoFailed": "No se pudo deshacer el pincel."
+    "undoFailed": "No se pudo deshacer el pincel.",
+    "mergeTitle": "Fusionar segmentos",
+    "mergeFilter": "Filtrar segmentos",
+    "mergeInto": "Fusionar en",
+    "merge": "Fusionar ({n})",
+    "merged": "{n} segmento(s) fusionado(s) en {target}",
+    "mergeFailed": "La fusión falló: {detail}"
   },
   "display": {
     "pointSize": "Tamaño de punto",
@@ -1027,7 +1035,14 @@
     "play": "Reproducir",
     "pause": "Pausar",
     "seek": "Posición del video",
-    "close": "Cerrar el recorrido"
+    "close": "Cerrar el recorrido",
+    "frameInfo": "KF {k}/{n} · cuadro {f}/{total}",
+    "stepBack": "Cuadro anterior",
+    "stepForward": "Cuadro siguiente",
+    "speed": "Velocidad",
+    "stalled": "Esperando el video…",
+    "cloudLoading": "Cargando la nube del recorrido {pct}",
+    "videoDecodeFailed": "El navegador no puede reproducir este video (¿códec HEVC?)."
   },
   "video": {
     "extracting": "Extrayendo cuadros: {saved}{total} ({pct} %)",

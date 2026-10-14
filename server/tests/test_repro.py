@@ -254,12 +254,25 @@ def test_exclusive_gpu_fails_listing_every_other_process(monkeypatch):
 
 
 def test_exclusive_gpu_fails_on_memory_used_by_a_process_it_cannot_see(monkeypatch):
-    """Inside a container nvidia-smi may list no process at all while another container holds the
-    card: the memory in use says so."""
+    """USER DECISION 2026-10-07 (repro.require_exclusive_gpu): memory in use with NO compute
+    process listed on the card never stops a run — pccr: 4 MiB of 81920 the driver had not
+    freed yet right after vLLM was stopped. The step goes on, the MiB are DECLARED in the log
+    and recorded; there is no bound on the MiB (none was decided — the rule is the absence of a
+    process, not an amount). A foreign PROCESS still fails, whatever memory it reports (N/A
+    included): that case is never weakened. (Before the decision this test asserted the
+    refusal.)"""
     monkeypatch.setattr(repro, "_nvidia_smi", _smi(CARD_ROW.format(used=512), ""))
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.delitem(sys.modules, "torch", raising=False)
-    with pytest.raises(repro.ReproError, match="512 MiB of 81920 MiB in use"):
+    logs = []
+    rec = repro.require_exclusive_gpu(logs.append)
+    assert rec["cards"][0]["used_mib"] == 512 and rec["compute_processes"] == 0
+    assert any("DECLARED" in m and "512 MiB in use with no process listed" in m for m in logs)
+    assert logs[-1].startswith("[gpu] exclusive")
+    # the same 512 MiB with a process the card lists — even one whose memory reads N/A: refused
+    monkeypatch.setattr(repro, "_nvidia_smi", _smi(CARD_ROW.format(used=512),
+                                                   f"777, python, [N/A], {UUID}\n"))
+    with pytest.raises(repro.ReproError, match="pid 777 python N/A MiB"):
         repro.require_exclusive_gpu(lambda m: None)
 
 

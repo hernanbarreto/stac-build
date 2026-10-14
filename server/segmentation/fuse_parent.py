@@ -146,7 +146,7 @@ def _atomic_bytes(path: Path, data: bytes) -> None:
 # ── writing the map ──────────────────────────────────────────────────────
 
 def apply_fusion(output_dir, result: dict, *,
-                 log: Callable[[str], None] = print) -> dict:
+                 log: Callable[[str], None] = print, dest_dir=None) -> dict:
     """Write the matcher's verdict as `fusion_map.json` beside the raw store.
     Returns `result` unchanged. The parent files are never touched.
 
@@ -154,10 +154,15 @@ def apply_fusion(output_dir, result: dict, *,
     inputs write the same bytes, and a file that already holds them is left
     alone (its mtime included). With nothing to fold there is no map — a
     leftover from another store is removed, never left to be applied.
+
+    ``dest_dir`` (default ``output_dir``) is where the map is WRITTEN: the
+    projection stages its products and swaps them in at the end
+    (docs/plan_determinismo.md point 122), so the map lands in the staging
+    directory first; the raw store is still read from ``output_dir``.
     """
     output_dir = Path(output_dir)
     parent_p = output_dir / PARENT
-    map_p = output_dir / MAP
+    map_p = (Path(dest_dir) if dest_dir is not None else output_dir) / MAP
     if not parent_p.exists():
         return result
     parent = json.loads(parent_p.read_text())

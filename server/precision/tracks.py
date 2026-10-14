@@ -8,9 +8,11 @@ pixels by the exact grid mapping of F0 (``precision.camera.grid_full_frame_resiz
 standard deviation of its fine similarity heatmap (``compute_score``, which the
 vendor's ``forward`` switches off) — carried to native pixels as well.
 
-Queries: a grid plus Shi-Tomasi corners of the query frame, dropped where I2's
-exclusion masks cover them (``intake/exclusion_masks``) and where the prior's depth
-jumps (``depth_edge_tol_rel`` over a 2×2 neighbourhood of Omega's depth).
+Queries: a grid plus Shi-Tomasi corners of the query frame, dropped where the prior's
+depth jumps (``depth_edge_tol_rel`` over a 2×2 neighbourhood of Omega's depth). Nothing
+else excludes a query: I2 (content tags + exclusion masks) was ELIMINATED from the pipeline
+(docs/plan_determinismo.md point 75, USER 2026-10-08 "ya no corre VLM ahí") — no reader of
+``intake/content_tags.json`` / ``intake/exclusion_masks`` is left here.
 
 Windows:
   keyframes  overlapping runs of ``window_frames`` keyframes (``window_overlap_frac``)
@@ -39,10 +41,12 @@ F5's fit and held-out sets (point 28). The same query point tracked in two windo
 lands in the same set (no leak between fit and held-out).
 
 Instance loops (``instance_loops.json``) enter only when stamped with THIS
-reconstruction's id (``correction.epoch.same_reconstruction``, point 34); the report
-says why one was not taken. I2's exclusion masks enter only when ``intake/content_tags.json``
-lists them under a stamp that matches the PNGs (:func:`exclusion_mask_paths`, point 68 —
-a PNG on disk by itself is a leftover). Timings go to ``tracks.timing.json`` (point 36).
+reconstruction's id (``correction.epoch.same_reconstruction``, point 34) AND when their
+EVIDENCE STAMP — the ``repro.stamp`` ``correction.visit_drift_run`` wrote over the session
+files the closures were measured on (cloud, poses, keyframes, camera, segmentation and masks,
+the measurement's code and parameters) — is the session's as it is now
+(``visit_drift_run.read_evidence``, point 134: never the equality of an epoch number); the
+report says why one was not taken. Timings go to ``tracks.timing.json`` (point 36).
 
 Output ``output/precision/tracks.npz`` (v2 = the v1 keys at the
 tracker grid + ``obs_uv_native``, ``obs_uv_sigma``, ``track_split``,
@@ -345,139 +349,79 @@ def track_split_of(seed: int, query_frames: np.ndarray, query_uv: np.ndarray,
 
 # ── inputs that come from outside the chain ─────────────────────────────
 
-def instance_loops(out_dir: Path, rid: Optional[str] = None) -> Tuple[List[Tuple[int, int]], dict]:
-    """(keyframe-index pairs, report) of ``instance_loops.json`` — taken only when it was measured
-    on THIS reconstruction (its ``reconstruction_id``; point 34). ``rid``: the session's id when
-    the caller already has it."""
+def instance_loops_owned(out_dir: Path, rid: Optional[str] = None) -> Tuple[Optional[dict], dict]:
+    """(the ``instance_loops.json`` document when it belongs to THIS reconstruction — its
+    ``reconstruction_id``, point 34 — else None, report). The same rule as the gauge's
+    ``_evidence_doc`` for the same evidence class: an absent file is ``present: False``; a file
+    that is there and cannot be read FAILS the step naming it — never a default in its place
+    (``precision.gauge`` raises GaugeError for the identical situation; F4 applies the same
+    rule, not its opposite); a file of another reconstruction is refused, reported."""
     from correction.epoch import reconstruction_id_or_none, same_reconstruction
     p = Path(out_dir) / INSTANCE_LOOPS_NAME
     if not p.exists():
-        return [], {"present": False, "taken": False}
-    doc = json.loads(p.read_text())
+        return None, {"present": False, "taken": False}
+    try:
+        doc = json.loads(p.read_text())
+    except (OSError, ValueError) as e:
+        raise TracksError(f"{p} is unreadable ({e}) — re-run the measurement that writes it "
+                          f"(python -m correction.visit_drift_run --mode measure)") from e
+    if not isinstance(doc, dict):
+        raise TracksError(f"{p} is not an evidence document (a JSON {type(doc).__name__}) — "
+                          f"re-run the measurement that writes it")
     rid = reconstruction_id_or_none(out_dir) if rid is None else rid
-    taken, why = same_reconstruction(doc, rid)
+    taken, why_rid = same_reconstruction(doc, rid)
     if not taken:
-        return [], {"present": True, "taken": False, "reason": why}
+        return None, {"present": True, "taken": False, "reason": why_rid}
+    return doc, {"present": True, "taken": True}
+
+
+def instance_loops(out_dir: Path, rid: Optional[str] = None,
+                   cfg=None) -> Tuple[List[Tuple[int, int]], dict]:
+    """(keyframe-index pairs, report) of ``instance_loops.json`` — taken only when it was measured
+    on THIS reconstruction (its ``reconstruction_id``; point 34 — :func:`instance_loops_owned`)
+    AND on the session AS IT IS NOW: ``correction.visit_drift_run.evidence_fresh`` verifies the
+    EVIDENCE STAMP the measurement wrote (point 134 — the cloud, the poses, the keyframe list,
+    the camera, the segmentation and its masks, the fused objects, the chunk plan, the code and
+    the parameters of the measurement); a file without that stamp, or with one that differs, is
+    REFUSED and the report says what differs. The reconstruction id alone used to decide: the
+    loops measured on the previous masks (an epoch re-selected in the kit and re-segmented) read
+    as current. ``rid``: the session's id when the caller already has it; ``cfg``: the correction
+    configuration the stamp is computed with (the job's frozen one on the pipeline path — point
+    69; None = the process's). A file that exists and cannot be read raises TracksError."""
+    from correction.visit_drift_run import evidence_fresh
+    doc, rep = instance_loops_owned(out_dir, rid)
+    if doc is None:
+        return [], rep
+    fresh, why = evidence_fresh(Path(out_dir), doc, cfg)
+    if not fresh:
+        return [], {"present": True, "taken": False,
+                    "reason": ("its evidence stamp is not the session's as it is now (point 134): "
+                               + "; ".join(why[:4])),
+                    "stamp_differences": list(why)}
     pairs = [(int(l["i"]), int(l["j"])) for l in doc.get("loops", [])]
     return pairs, {"present": True, "taken": True, "n": len(pairs)}
 
 
-# ── I2's exclusion masks (plan point 68) ─────────────────────────────────
-#
-# THE CONTRACT between intake I2 (the writer, intake/content.py) and its readers (F4 here, the
-# depth sweep's read_exclusion): a mask PNG is applied ONLY when intake/content_tags.json lists
-# its frame under ``exclusion_masks.frames`` AND the report carries a ``stamp`` — a repro.stamp
-# whose ``inputs`` name every listed mask by :func:`exclusion_mask_key` (``exclusion_masks/
-# <frame:06d>.png``) with the sha256 of the file — that matches the files on disk now. With I2
-# off the report lists no frame (no mask). A PNG on disk the report does not list is a leftover
-# of an earlier run and is never applied; a report without a stamp, with an edited digest, or
-# naming a mask that is absent / unstamped / changed yields NO masks, with the reason declared.
-
-EXCLUSION_STAMP_KEY = "stamp"
-CONTENT_TAGS_RELPATH = "intake/content_tags.json"
-EXCLUSION_MASKS_RELDIR = "intake/exclusion_masks"
-
-
-def exclusion_mask_key(frame: int) -> str:
-    """The stamp key of frame ``frame``'s mask (relative to the intake directory)."""
-    return f"exclusion_masks/{int(frame):06d}.png"
-
-
-def exclusion_masks_stamp(masks_dir: Path, frames: Sequence[int], **more_inputs: Path) -> Dict[str, Any]:
-    """The stamp the WRITER puts in content_tags.json: every mask of ``frames`` by its key and
-    content (plus any other input the writer names, e.g. the keyframe list). A listed frame whose
-    PNG does not exist RAISES — a stamp of something absent says nothing."""
-    from repro import stamp
-    masks_dir = Path(masks_dir)
-    ins: Dict[str, Path] = {exclusion_mask_key(f): masks_dir / f"{int(f):06d}.png" for f in frames}
-    ins.update({str(k): Path(v) for k, v in more_inputs.items()})
-    return stamp(inputs=ins)
-
-
-def _stamp_is_consistent(st: Any) -> bool:
-    from repro import sha256_json
-    if not isinstance(st, dict) or not isinstance(st.get("inputs"), dict) or "sha256" not in st:
-        return False
-    body = {k: st.get(k) for k in ("stamp_version", "inputs", "code", "config")}
-    return sha256_json(body) == st.get("sha256")
-
-
-def exclusion_mask_paths(session_dir: Path) -> Tuple[Dict[int, Path], Dict[str, Any]]:
-    """(frame → mask PNG) F4 may apply, and the report of why — see the contract above. The
-    report: ``present`` (content_tags.json exists), ``taken`` (masks are applied), ``n`` (how
-    many), ``listed`` (frames the report names), ``unlisted_on_disk`` (PNGs on disk the report
-    does not name — never applied), ``reason`` when nothing is taken."""
-    from repro import sha256_file
-    sd = Path(session_dir)
-    report_p = sd / CONTENT_TAGS_RELPATH
-    mdir = sd / EXCLUSION_MASKS_RELDIR
-    on_disk = sorted(p.name for p in mdir.glob("*.png")) if mdir.is_dir() else []
-    rep: Dict[str, Any] = {"present": report_p.exists(), "taken": False, "n": 0, "listed": 0,
-                           "unlisted_on_disk": len(on_disk)}
-    if not report_p.exists():
-        rep["reason"] = f"{CONTENT_TAGS_RELPATH} is missing — no mask is applied"
-        return {}, rep
-    try:
-        doc = json.loads(report_p.read_text())
-    except ValueError as e:
-        rep["reason"] = f"{CONTENT_TAGS_RELPATH} is unreadable ({e}) — no mask is applied"
-        return {}, rep
-    listed_raw = ((doc.get("exclusion_masks") or {}).get("frames") or {}) if isinstance(doc, dict) else {}
-    try:
-        listed = sorted({int(f) for f in (listed_raw.keys() if isinstance(listed_raw, dict) else listed_raw)})
-    except (TypeError, ValueError):
-        rep["reason"] = f"{CONTENT_TAGS_RELPATH}: exclusion_masks.frames is not a list of frames"
-        return {}, rep
-    rep["listed"] = len(listed)
-    if not listed:
-        rep["reason"] = ("content_tags.json lists no exclusion mask"
-                         + ("" if doc.get("enabled", True) else " (intake.content disabled)"))
-        rep["unlisted_on_disk"] = len(on_disk)
-        return {}, rep
-    st = doc.get(EXCLUSION_STAMP_KEY)
-    if not _stamp_is_consistent(st):
-        rep["reason"] = (f"{CONTENT_TAGS_RELPATH} carries no stamp of its masks (or an edited one) — "
-                         f"its {len(listed)} mask(s) are not applied")
-        return {}, rep
-    paths: Dict[int, Path] = {}
-    for f in listed:
-        key = exclusion_mask_key(f)
-        want = st["inputs"].get(key)
-        if want is None:
-            tail = "/" + key.split("/")[-1]
-            hits = [v for k, v in st["inputs"].items() if k == key.split("/")[-1] or k.endswith(tail)]
-            want = hits[0] if len(hits) == 1 else None
-        p = mdir / f"{f:06d}.png"
-        if want is None:
-            rep["reason"] = f"the stamp of {CONTENT_TAGS_RELPATH} names no mask for frame {f} ({key})"
-            return {}, rep
-        if not p.exists():
-            rep["reason"] = f"{p.name} is listed and stamped but missing on disk"
-            return {}, rep
-        if sha256_file(p) != want:
-            rep["reason"] = f"{p.name} is not the mask content_tags.json was stamped with"
-            return {}, rep
-        paths[f] = p
-    rep.update({"taken": True, "n": len(paths),
-                "unlisted_on_disk": len(set(on_disk) - {p.name for p in paths.values()})})
-    return paths, rep
-
-
 def chain_inputs(session_dir: Path, rid: Optional[str] = None) -> Dict[str, Path]:
     """The files F4 reads that no step of the chain writes (the runner stamps them, point 31):
-    the keyframe and witness lists, SALAD's pairs, I2's content report with the exclusion masks
-    it TAKES (point 68) and the instance loops it TAKES (point 34). The frames, Omega's records
-    (depth edges) and the config are stamped by the runner."""
+    the keyframe and witness lists, SALAD's pairs and the instance loops of THIS reconstruction
+    (point 34). The frames, Omega's records (depth edges) and the config are stamped by the
+    runner.
+
+    Whether instance_loops.json is an INPUT of F4 is decided by its OWNERSHIP alone (this
+    reconstruction's id), the gauge's rule for scale_loop_rows.json: a file of this
+    reconstruction is an input whether or not its evidence stamp is fresh today — when it is
+    re-measured its bytes change and the chain's stamp with them, so F4 re-runs and takes it.
+    The freshness test (point 134: a sha256 over the cloud, the masks, the poses…) is
+    ``run_tracks``'s, once; running it here on every resume probe of the chain re-hashed the
+    published cloud for a listing it never changed."""
     sd = Path(session_dir)
     out = sd / "output"
     cand = {"frames/selected_frames.json": sd / "frames" / "selected_frames.json",
             "frames/witness_frames.json": sd / "frames" / "witness_frames.json",
-            "output/maplong_run/loop_closures.txt": out / "maplong_run" / "loop_closures.txt",
-            CONTENT_TAGS_RELPATH: sd / CONTENT_TAGS_RELPATH}
+            "output/maplong_run/loop_closures.txt": out / "maplong_run" / "loop_closures.txt"}
     found = {k: p for k, p in cand.items() if p.exists()}
-    for f, p in exclusion_mask_paths(sd)[0].items():
-        found[f"{EXCLUSION_MASKS_RELDIR}/{f:06d}.png"] = p
-    if instance_loops(out, rid)[1]["taken"]:
+    if instance_loops_owned(out, rid)[1]["taken"]:
         found[f"output/{INSTANCE_LOOPS_NAME}"] = out / INSTANCE_LOOPS_NAME
     return found
 
@@ -494,7 +438,10 @@ def _read_list(p: Path, key: str) -> List[int]:
 
 
 def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
-               log: Callable = print) -> Dict[str, Any]:
+               log: Callable = print, ccfg=None) -> Dict[str, Any]:
+    """F4 on a session. ``ccfg``: the correction configuration the instance loops' evidence
+    stamp is verified with (point 134) — the job's frozen one on the pipeline path (point 69);
+    None = the process's (the tests' path)."""
     import cv2
     from precision.camera import grid_full_frame_resize, grid_to_native, grid_like
     session_dir = Path(session_dir)
@@ -516,7 +463,7 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
     kidx = {f: i for i, f in enumerate(kf)}
     idx_pairs = [(kidx[a], kidx[b]) for a, b in pairs_f if a in kidx and b in kidx]
     n_salad = len(idx_pairs)
-    il_pairs, il_rep = instance_loops(out_dir)
+    il_pairs, il_rep = instance_loops(out_dir, cfg=ccfg)
     if il_rep["present"] and not il_rep["taken"]:
         log(f"{LOG_TAG} {INSTANCE_LOOPS_NAME} NOT taken: {il_rep['reason']}")
     idx_pairs += il_pairs
@@ -549,22 +496,8 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
         return cv2.resize(cv2.cvtColor(im, cv2.COLOR_BGR2RGB), (tw, th),
                           interpolation=cv2.INTER_AREA)
 
-    # point 68: only the masks content_tags.json lists under a matching stamp; the rest of the
-    # PNGs on disk (an earlier run's) never touch a query — and the report says so
-    excl_paths, excl_rep = exclusion_mask_paths(session_dir)
-    if not excl_rep["taken"]:
-        log(f"{LOG_TAG} exclusion masks: none applied — {excl_rep.get('reason')}"
-            + (f" ({excl_rep['unlisted_on_disk']} PNG(s) on disk ignored)" if excl_rep["unlisted_on_disk"] else ""))
-    else:
-        log(f"{LOG_TAG} exclusion masks: {excl_rep['n']} applied (stamped by content_tags.json)"
-            + (f"; {excl_rep['unlisted_on_disk']} unlisted PNG(s) on disk ignored" if excl_rep["unlisted_on_disk"] else ""))
-
-    def exclusion(f):
-        p = excl_paths.get(int(f))
-        m = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE) if p is not None else None
-        if p is not None and m is None:
-            raise TracksError(f"exclusion mask {p} is unreadable")
-        return (m == 255) if m is not None else None
+    # no exclusion mask touches a query: I2 is gone (point 75, USER 2026-10-08) — a PNG under
+    # intake/exclusion_masks or a content_tags.json left by an older run is never read
 
     def edges(f):
         p = out_dir / "omega_run" / "results_output" / f"frame_{f}.npz"
@@ -591,7 +524,7 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
     tq = {k: [] for k in ("id", "frame", "uv")}
     wit_set = set(wit) - set(kf)
     next_tid, t0 = 0, time.time()
-    n_dropped_excl = 0
+    n_dropped_edge = 0
     for wi, win in enumerate(windows):
         imgs = np.stack([image(f) for f in win.frames]).astype(np.float32) / GRAY_MAX
         for qf in win.query_frames:
@@ -600,8 +533,8 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
             q = query_points(gray, tcfg.grid_side, tcfg.max_corners, tcfg.corner_quality,
                              tcfg.corner_min_distance_px)
             e, emap = edges(qf)
-            keep = keep_mask(grid_to_native(q, gmap), exclusion(qf), e, emap)
-            n_dropped_excl += int((~keep).sum())
+            keep = keep_mask(grid_to_native(q, gmap), None, e, emap)
+            n_dropped_edge += int((~keep).sum())
             q = q[keep]
             if len(q) == 0:
                 continue
@@ -674,14 +607,13 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
                                  for k in ("keyframes", "loop", "witness")},
            "n_obs": len(obs["track"]), "n_tracks": int(len(tids)),
            "n_heldout_tracks": int(split.sum()),
-           "n_queries_dropped_excluded_or_edge": n_dropped_excl,
+           "n_queries_dropped_edge": n_dropped_edge,
            "depth_edge_filter": omap is not None,
            "keyframes_covered": len(set(obs["frame"]) & set(kf)), "n_keyframes": len(kf),
            "witnesses_covered": len(set(obs["frame"]) & wit_set), "n_witnesses": len(wit_set),
            "sigma_native_px": {"median": float(np.median(sig)),
                                "p90": float(np.percentile(sig, 90))},
            "instance_loops": il_rep,
-           "exclusion_masks": excl_rep,
            "split": "sha256 of (seed, query frame, query pixel float32 bits) per track"}
     (pdir / REPORT_NAME).write_text(json.dumps(rep, indent=1))
     # the wall clock lives apart from the compared report (point 36)
@@ -712,7 +644,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     from repro import require_exclusive_gpu
     require_exclusive_gpu(log=print)
     ensure_cublas_workspace()                   # before torch initialises CUDA
-    run_tracks(Path(args.session), load_precision_config().tracks)
+    # the job's frozen configuration (point 69): the tracks' parameters and the correction
+    # configuration the instance loops' evidence stamp is verified with (point 134)
+    from correction.config import load_correction_config
+    from precision.config import raw_of
+    pcfg = load_precision_config(session_dir=Path(args.session))
+    run_tracks(Path(args.session), pcfg.tracks, ccfg=load_correction_config(raw_of(pcfg)))
     return 0
 
 

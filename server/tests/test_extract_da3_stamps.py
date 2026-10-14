@@ -53,6 +53,31 @@ def test_window_stamp_is_of_the_identity_the_plan_and_the_frames_bytes(tmp_path)
     assert X.window_stamp(IDENT, spec2, 1) == X.window_stamp(IDENT, spec, 1)
 
 
+def test_session_relative_window_paths_resolve_against_the_root_and_stamp_alike(tmp_path):
+    """Plan point 70 (USER 2026-10-08): intake I3's windows.json names its frames relative to
+    the session ('frames/<name>'); the extractor resolves them against --windows_root (the
+    session) — never guessing a root — and the per-window stamp (basename + bytes) is the
+    same whether the plan is written relative or absolute. A relative path without a root is
+    an error naming the window and the path; an absolute path never needs one."""
+    spec_abs = _spec(tmp_path)
+    spec_rel = {**spec_abs, "windows": [[f"frames/{Path(p).name}" for p in w] for w in spec_abs["windows"]]}
+    assert X.resolve_window_paths(spec_rel, str(tmp_path)) == spec_abs["windows"]
+    assert X.resolve_window_paths(spec_abs, None) == spec_abs["windows"]
+    assert X.resolve_window_paths(spec_abs, str(tmp_path / "elsewhere")) == spec_abs["windows"]
+    with pytest.raises(ValueError, match=r"window 1: 'frames/000002.jpg' is a relative path"):
+        X.resolve_window_paths({**spec_rel, "windows": [spec_abs["windows"][0], spec_rel["windows"][1]]}, None)
+    for i in range(2):
+        assert X.window_stamp(IDENT, spec_rel, i, root=str(tmp_path)) == X.window_stamp(IDENT, spec_abs, i)
+    with pytest.raises(ValueError, match="windows_root"):
+        X.window_stamp(IDENT, spec_rel, 0)
+    # the plan's own sha256 is of the paths AS WRITTEN — session-relative, so a copied session
+    # keeps it (what intake.walk keys walk.json on); the launcher hands the root on the command line
+    assert repro.sha256_json(spec_rel) != repro.sha256_json(spec_abs)
+    blk = SRC[SRC.index("def run_windows"):]
+    assert "resolve_window_paths(spec, args.windows_root)" in blk
+    assert 'parser.add_argument("--windows_root"' in SRC
+
+
 def test_one_stale_window_file_sends_all_of_them(tmp_path):
     spec = _spec(tmp_path)
     out = tmp_path / "out"

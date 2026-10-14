@@ -357,6 +357,8 @@
     "floorAuto": "automatic: lowest",
     "floorLeveled": "Floor leveled to y = 0 (was {mm} mm off)",
     "placedObjects": "Placed objects ({n})",
+    "volumes": "Volumes ({n})",
+    "deleteVolume": "Delete this volume",
     "objectMeshes": "Object meshes ({n})",
     "meshes": "Meshes ({n})",
     "removePlacedHint": "Remove from this scene only; the source file is never touched",
@@ -377,7 +379,7 @@
     "absorbed": "{n} mask(s) fused into these",
     "deleteShapeTitle": "Delete generated object",
     "deleteShapeMessage": "Delete \"{label}\" and its whole folder ({folder}: PKL, mesh, metadata)? This cannot be undone.",
-    "renameFailed": "Rename failed {status}"
+    "renameFailed": "Rename failed: {detail}"
   },
   "toolbar": {
     "label": "Viewport tools",
@@ -426,7 +428,13 @@
     "undo": "Undo brush",
     "undone": "Brush undone: {n} points restored",
     "nothingToUndo": "Nothing to undo",
-    "undoFailed": "Could not undo the brush."
+    "undoFailed": "Could not undo the brush.",
+    "mergeTitle": "Merge segments",
+    "mergeFilter": "Filter segments",
+    "mergeInto": "Merge into",
+    "merge": "Merge ({n})",
+    "merged": "{n} segment(s) merged into {target}",
+    "mergeFailed": "Merge failed: {detail}"
   },
   "display": {
     "pointSize": "Point size",
@@ -1027,7 +1035,14 @@
     "play": "Play",
     "pause": "Pause",
     "seek": "Video position",
-    "close": "Close the flythrough"
+    "close": "Close the flythrough",
+    "frameInfo": "KF {k}/{n} · frame {f}/{total}",
+    "stepBack": "Previous frame",
+    "stepForward": "Next frame",
+    "speed": "Speed",
+    "stalled": "Waiting for the video…",
+    "cloudLoading": "Loading the path's cloud {pct}",
+    "videoDecodeFailed": "The browser cannot play this video (HEVC codec?)."
   },
   "video": {
     "extracting": "Extracting frames: {saved}{total} ({pct} %)",

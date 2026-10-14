@@ -119,18 +119,16 @@ def _load_inputs(session_dir: Path, pcfg):
     cam = load_camera_json(out / "camera.json")
     kf, c2w = _read_poses(out / "camera_poses.txt", out / "camera_frames.txt")
     m1, m2, K = undistort_maps(cam)
-    tags = {}
-    try:
-        from intake.content import load_content
-        tags = {int(f): t for f, t in (load_content(session_dir).get("frames") or {}).items()}
-    except Exception:                                   # I2 absent: no weights, declared
-        tags = {}
+    # no I2 content tags: the stage was ELIMINATED (point 75, USER 2026-10-08) — every
+    # keyframe's content flags are 0 (precision.provenance.content_flags_of(None)); nothing
+    # is read from intake/content_tags.json, a leftover of an older run included
+    tags: Dict[int, dict] = {}
     return rep, epochs, cam, kf, c2w, (m1, m2), K, tags
 
 
 def _rgb_undistorted(frames_dir: Path, frame: int, maps) -> np.ndarray:
     import cv2
-    from intake.content import frame_file
+    from intake.quality import frame_file      # the one frame-number → file rule (I2 gone, point 75)
     bgr = cv2.imread(str(frame_file(frames_dir, frame)), cv2.IMREAD_COLOR)
     if bgr is None:
         raise FuseError(f"cannot read frame {frame}")
@@ -177,8 +175,9 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
     PLY header lines, 'origins': v2 columns, 'rejected': columns, 'report': dict}."""
     from precision.depth_sweep import DEPTH_DIRNAME, SOURCE_PRIOR_FILL, SOURCE_SWEEP
     fcfg, dcfg = pcfg.fuse, pcfg.depth
-    from config import cfg as _raw                       # the postprocessing recipe's parameters
-    session_dir = Path(session_dir)
+    from precision.config import raw_of
+    _raw = raw_of(pcfg)                      # the postprocessing recipe's parameters, from the job's
+    session_dir = Path(session_dir)          # frozen configuration (point 69), never the disk
     out = session_dir / "output"
     ddir = out / DEPTH_DIRNAME
     rep, epochs, cam, kf, c2w, maps, K, tags = _load_inputs(session_dir, pcfg)
@@ -512,7 +511,12 @@ def publish(session_dir: Path, result: Dict[str, Any], log: Callable = print) ->
     # the raw twin: nothing consolidates the fused cloud — it IS the measurement
     write_ply(tx / "cleaned_cloud_raw.ply", header, data)
     art("cleaned_cloud_raw.ply")
-    cid = ledger.new_correction_id()
+    # the id of this publication is WHAT it publishes — the cloud's bytes and its provenance
+    # columns — never a random draw (point 137; the same rule as corrected_cloud.publish): the
+    # same fusion published twice writes the same id, ledger line, epoch record and origins meta
+    from repro import sha256_file
+    cid = ledger.new_correction_id("fuse", sha256_file(tx / "cleaned_cloud.ply"),
+                                   {k: np.asarray(v) for k, v in sorted(result["origins"].items())})
     meta = {"stage": "fuse", "correction_id": cid, "epoch": epoch_to}
     o = dict(result["origins"])
     o["geometry_epoch"] = np.full(len(data), epoch_to, np.int16)
@@ -582,7 +586,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--session", required=True)
     ap.add_argument("--no-publish", action="store_true")
     args = ap.parse_args(argv)
-    run_fuse(Path(args.session), load_precision_config(), publish_epoch=not args.no_publish)
+    run_fuse(Path(args.session), load_precision_config(session_dir=Path(args.session)),
+             publish_epoch=not args.no_publish)
     return 0
 
 

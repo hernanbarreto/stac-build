@@ -28,20 +28,36 @@ def _resolve_projects_dir():
 
 PROJECTS_DIR = _resolve_projects_dir()
 
-def load_config():
-    """Load configuration from YAML file."""
-    if not CONFIG_PATH.exists():
-        print(f"[Config] ⚠️ Config file not found at {CONFIG_PATH}. Using empty defaults.")
-        return {}
+class ConfigError(RuntimeError):
+    """config.yaml cannot be read, parsed, or is not a mapping: the server does not start."""
 
+
+def load_config():
+    """Load configuration from YAML file.
+
+    DETERMINISM (docs/plan_determinismo.md points 112 / 151, 2026-10-08): a missing,
+    unreadable or unparseable config.yaml — or one that is not a mapping — RAISES
+    :class:`ConfigError` naming the file and the error. It used to become ``{}`` and every
+    ``.get(key, default)`` caller then ran the server on defaults nobody declared; the order
+    time already refuses (pipeline_manager.read_config_once) and the server start does the
+    same: it never runs on a broken configuration."""
+    if not CONFIG_PATH.exists():
+        raise ConfigError(f"the configuration {CONFIG_PATH} does not exist — the server does not "
+                          f"start on an empty configuration (point 151)")
     try:
         with open(CONFIG_PATH, 'r') as f:
             config = yaml.safe_load(f)
-        print(f"[Config] Loaded configuration from {CONFIG_PATH}")
-        return config
-    except Exception as e:
-        print(f"[Config] ❌ Error loading config: {e}")
-        return {}
+    except (OSError, UnicodeDecodeError) as e:
+        raise ConfigError(f"the configuration {CONFIG_PATH} cannot be read ({e}) — the server "
+                          f"does not start on defaults (point 151)") from e
+    except yaml.YAMLError as e:
+        raise ConfigError(f"the configuration {CONFIG_PATH} is not readable YAML ({e}) — the "
+                          f"server does not start on defaults (point 151)") from e
+    if not isinstance(config, dict):
+        raise ConfigError(f"the configuration {CONFIG_PATH} holds a {type(config).__name__}, not "
+                          f"a mapping — the server does not start on defaults (point 151)")
+    print(f"[Config] Loaded configuration from {CONFIG_PATH}")
+    return config
 
 # Load global config
 _config_data = load_config()

@@ -156,7 +156,7 @@ def compare(sweep_npz: Path, colmap_depth: np.ndarray) -> Dict[str, Any]:
 def run_colmap(session_dir: Path, pcfg, keep_workspace: bool = False,
                log: Callable = print) -> Dict[str, Any]:
     import cv2
-    from intake.content import frame_file
+    from intake.quality import frame_file      # the one frame-number → file rule (I2 gone, point 75)
     from precision import depth_sweep as DS
     session_dir = Path(session_dir)
     out = session_dir / "output"
@@ -308,7 +308,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--session", required=True)
     ap.add_argument("--keep-workspace", action="store_true")
     args = ap.parse_args(argv)
-    run_colmap(Path(args.session), load_precision_config(), keep_workspace=args.keep_workspace)
+    run_colmap(Path(args.session), load_precision_config(session_dir=Path(args.session)),
+               keep_workspace=args.keep_workspace)
     return 0
 
 

@@ -92,3 +92,24 @@ def test_the_vendored_source_carries_the_canonical_patches():
         assert "if (a.x != b.x) {" in src and "if (a.z != b.z) {" in src, name
         assert "return a.pointIndex < b.pointIndex;" in src
         assert "\r\n" in src                                        # the vendor's CRLF endings, untouched
+
+
+@pytest.mark.skipif(not PC.POTREE_BIN.exists(), reason="PotreeConverter is not built on this machine")
+def test_the_octree_carries_the_full_32_bit_instance_id(tmp_path):
+    """USER 2026-10-08 (no 255 ceiling, "un número bien grande"): instance_ids.npy beside the PLY
+    becomes the octree's `instance` attribute, 4 bytes per point, with ids far above 65535 intact."""
+    pytest.importorskip("laspy")
+    ply = tmp_path / "cloud.ply"
+    _ply_with_ties(ply, 20_000)
+    n = 22_000
+    ids = np.zeros(n, np.uint32)
+    ids[: n // 2] = 70_000
+    ids[n // 2:] = 4_000_000
+    np.save(tmp_path / "instance_ids.npy", ids)
+    las = tmp_path / "cloud.las"
+    PC._ply_to_las(ply, las)
+    od = tmp_path / "octree"
+    assert PC._run_potree_converter(las, od)
+    attrs = {a["name"]: a for a in json.loads((od / "metadata.json").read_text())["attributes"]}
+    assert attrs["instance"]["size"] == 4 and attrs["instance"]["type"] == "uint32"
+    assert attrs["instance"]["min"] == [70_000] and attrs["instance"]["max"] == [4_000_000]

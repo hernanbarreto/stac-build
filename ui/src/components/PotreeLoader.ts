@@ -71,6 +71,47 @@ interface OctreeNode {
     lastUsed: number             // LRU tick: last time this node was shown
 }
 
+/** A binary max-heap of (weight, name) on parallel arrays — no per-push objects. */
+class _MaxHeap {
+    private w: number[] = []
+    private n: string[] = []
+    get size(): number { return this.w.length }
+    clear(): void { this.w.length = 0; this.n.length = 0 }
+    push(weight: number, name: string): void {
+        const w = this.w, n = this.n
+        let i = w.length
+        w.push(weight); n.push(name)
+        while (i > 0) {
+            const p = (i - 1) >> 1
+            if (w[p] >= w[i]) break
+            const tw = w[p]; w[p] = w[i]; w[i] = tw
+            const tn = n[p]; n[p] = n[i]; n[i] = tn
+            i = p
+        }
+    }
+    pop(): string | undefined {
+        const w = this.w, n = this.n
+        if (!w.length) return undefined
+        const top = n[0]
+        const lw = w.pop()!, ln = n.pop()!
+        if (w.length) {
+            w[0] = lw; n[0] = ln
+            let i = 0
+            for (;;) {
+                const l = 2 * i + 1, r = l + 1
+                let m = i
+                if (l < w.length && w[l] > w[m]) m = l
+                if (r < w.length && w[r] > w[m]) m = r
+                if (m === i) break
+                const tw = w[m]; w[m] = w[i]; w[i] = tw
+                const tn = n[m]; n[m] = n[i]; n[i] = tn
+                i = m
+            }
+        }
+        return top
+    }
+}
+
 // ── Potree Octree Loader ───────────────────────────────────────────────
 
 export class PotreeOctreeLoader {
@@ -100,6 +141,11 @@ export class PotreeOctreeLoader {
     // (~10 Hz), so the backlog drains naturally without losing any node.
     private readonly _maxConcurrentFetches = 6
     private _inFlightFetches = 0
+    /** smallest projected node radius (px) the LOD descends into — raised during a flythrough
+     *  so the walk through the scene does not pull in thousands of tiny deep nodes */
+    private _minNodePx = 15
+    /** nodes the flythrough prefetched along its path: never evicted from the cache */
+    private _pinned = new Set<string>()
     // In-memory node cache: nodes leaving the frustum keep their parsed geometry
     // (just removed from the scene) so re-entering is instant — no HTTP re-fetch.
     // Bounded by an LRU cap to keep client RAM in check.
@@ -121,6 +167,7 @@ export class PotreeOctreeLoader {
     private _groupInv = new THREE.Matrix4()
     private _ctr = new THREE.Vector3()
     private _sz = new THREE.Vector3()
+    private _heap = new _MaxHeap()
 
     constructor(
         scene: THREE.Scene,
@@ -170,6 +217,114 @@ export class PotreeOctreeLoader {
     setPointBudget(budget: number): void {
         this.pointBudget = budget
     }
+
+    getPointBudget(): number { return this.pointBudget }
+
+    setMinNodePixelSize(px: number): void { this._minNodePx = Math.max(1, px) }
+
+    /** The nodes the LOD would show from a camera — side-effect free (nothing fetched,
+     *  attached or unloaded). ``camPos``/``frustum`` in the octree's LOCAL frame. Proxy nodes
+     *  met on the way are returned so their hierarchy can be fetched and the plan redone. */
+    private _plan(camPos: THREE.Vector3, frustum: THREE.Frustum, slope: number, viewH: number,
+                  budget: number, minPx: number): { names: string[]; proxies: OctreeNode[] } {
+        const names: string[] = []
+        const proxies: OctreeNode[] = []
+        const heap = new _MaxHeap()
+        if (this.nodes.has('r')) heap.push(Number.MAX_VALUE, 'r')
+        let n = 0
+        while (heap.size) {
+            const name = heap.pop()!
+            const node = this.nodes.get(name)
+            if (!node || !frustum.intersectsBox(node.boundingBox)) continue
+            if (n + node.numPoints > budget) break
+            n += node.numPoints
+            if (node.nodeType === 2) { if (!node.hierarchyLoaded) proxies.push(node) } else names.push(name)
+            for (let c = 0; c < 8; c++) {
+                if (!(node.childMask & (1 << c))) continue
+                const child = this.nodes.get(name + c)
+                if (!child) continue
+                const ctr = child.boundingBox.getCenter(this._ctr)
+                const d = camPos.distanceTo(ctr)
+                const r = child.boundingBox.getSize(this._sz).length() * 0.5
+                let px = r * (0.5 * viewH) / (slope * Math.max(d, 0.001))
+                if (d - r < 0) px = Number.MAX_VALUE
+                if (px < minPx) continue
+                heap.push(px, name + c)
+            }
+        }
+        return { names, proxies }
+    }
+
+    /** Plan the nodes a camera PATH needs (the flythrough's poses, c2w in the cloud's native
+     *  frame — the octree's local frame — OpenCV axes), fetching the hierarchy chunks met on
+     *  the way. The union is ordered by first use along the path and capped at ``capPoints``. */
+    async planPath(c2wRowMajor: number[][], fovYDeg: number, aspect: number, viewH: number,
+                   perPoseBudget: number, minPx: number, capPoints: number): Promise<string[]> {
+        if (!this.metadata) return []
+        const proj = new THREE.Matrix4().makePerspective(-1, 1, 1, -1, 0.05, 1000)
+        const cam = new THREE.PerspectiveCamera(fovYDeg, aspect, 0.05, 1000)
+        cam.updateProjectionMatrix()
+        proj.copy(cam.projectionMatrix)
+        const cvToGl = new THREE.Matrix4().makeScale(1, -1, -1)
+        const slope = Math.tan((fovYDeg * Math.PI / 180) / 2)
+        const fr = new THREE.Frustum()
+        const view = new THREE.Matrix4(), c2w = new THREE.Matrix4(), pv = new THREE.Matrix4()
+        const pos = new THREE.Vector3()
+        const order: string[] = []
+        const seen = new Set<string>()
+        let total = 0
+        for (let i = 0; i < c2wRowMajor.length; i++) {
+            if (i % 8 === 7) await new Promise(r => setTimeout(r, 0))   // never a long task
+            c2w.fromArray(c2wRowMajor[i]).transpose().multiply(cvToGl)
+            pos.setFromMatrixPosition(c2w)
+            view.copy(c2w).invert()
+            pv.multiplyMatrices(proj, view)
+            fr.setFromProjectionMatrix(pv)
+            let plan = this._plan(pos, fr, slope, viewH, perPoseBudget, minPx)
+            for (let round = 0; round < 3 && plan.proxies.length; round++) {
+                await Promise.all(plan.proxies.map(p => this.loadProxyHierarchy(p)))
+                plan = this._plan(pos, fr, slope, viewH, perPoseBudget, minPx)
+            }
+            for (const name of plan.names) {
+                if (seen.has(name)) continue
+                const node = this.nodes.get(name)
+                if (!node) continue
+                if (total + node.numPoints > capPoints) return order
+                seen.add(name)
+                order.push(name)
+                total += node.numPoints
+            }
+        }
+        return order
+    }
+
+    /** Fetch and keep ``names`` (pinned: the cache never evicts them) — at most the loader's
+     *  own concurrency; the next LOD tick shows what the view needs and keeps the rest cached. */
+    async prefetch(names: string[], onProgress?: (done: number, total: number) => void,
+                   isCancelled?: () => boolean): Promise<void> {
+        for (const n of names) this._pinned.add(n)
+        const todo = names.slice()
+        const total = todo.length
+        let done = 0
+        const step = () => { done++; onProgress?.(done, total) }
+        const worker = async () => {
+            while (todo.length) {
+                if (isCancelled?.() || !this.metadata) return
+                const node = this.nodes.get(todo.shift()!)
+                if (!node || node.points || node.nodeType === 2) { step(); continue }
+                while (this._inFlightFetches >= this._maxConcurrentFetches || node.loading) {
+                    if (isCancelled?.() || !this.metadata) return
+                    await new Promise(r => setTimeout(r, 15))
+                }
+                if (!node.points) await this.loadNode(node)
+                step()
+            }
+        }
+        await Promise.all([worker(), worker(), worker(), worker()])
+    }
+
+    /** Release the flythrough's pins (the cache may evict those nodes again). */
+    unpinAll(): void { this._pinned.clear(); this._evictCache() }
 
     /** Load a Potree 2.0 dataset from a base URL */
     async load(baseUrl: string): Promise<number> {
@@ -422,28 +577,23 @@ export class PotreeOctreeLoader {
 
         // Minimum projected pixel size for a child to be queued (Potree default: 15-30)
         // Set to 15 to ensure the deepest LOD nodes load properly when zoomed in.
-        const minimumNodePixelSize = 15;
+        const minimumNodePixelSize = this._minNodePx
 
-        // Priority queue: [weight, nodeName] — process highest weight first
-        // Using simple sorted array (adequate for ~500 nodes)
-        const queue: Array<{ weight: number; name: string }> = []
+        // Priority queue: highest projected size first — a BINARY HEAP (the octrees here have
+        // 8k–41k nodes: the old linear scan + splice was O(n²) and stalled every LOD tick)
+        const queue = this._heap
+        queue.clear()
 
         // Seed with root at maximum priority
         if (this.nodes.has('r')) {
-            queue.push({ weight: Number.MAX_VALUE, name: 'r' })
+            queue.push(Number.MAX_VALUE, 'r')
         }
 
         const renderSet = new Set<string>()
         let numVisiblePoints = 0
 
-        while (queue.length > 0) {
-            // Pop highest weight (parents should always have higher weight than children)
-            let bestIdx = 0
-            for (let i = 1; i < queue.length; i++) {
-                if (queue[i].weight > queue[bestIdx].weight) bestIdx = i
-            }
-            const entry = queue[bestIdx]
-            queue.splice(bestIdx, 1)
+        while (queue.size > 0) {
+            const entry = { name: queue.pop()! }
 
             const node = this.nodes.get(entry.name)
             if (!node) continue
@@ -502,7 +652,7 @@ export class PotreeOctreeLoader {
                 // Only add to queue if projected large enough
                 if (screenPixelRadius < minimumNodePixelSize) continue
 
-                queue.push({ weight: screenPixelRadius, name: childName })
+                queue.push(screenPixelRadius, childName)
             }
         }
 
@@ -549,6 +699,7 @@ export class PotreeOctreeLoader {
             node.loaded = true
             node.lastUsed = ++this._tick
             this.totalLoadedPoints += node.numPoints
+            this._cachedPoints -= node.numPoints      // back on screen: no longer off-screen cache
             return
         }
 
@@ -625,12 +776,17 @@ export class PotreeOctreeLoader {
         // mv_votes in the validation kit
         let statusOffset = -1
         let mvVotesOffset = -1
+        // the full per-point INSTANCE id (LAS extra dim 'instance', uint32 — uint16 in octrees
+        // built before 2026-10-08): no 255-object ceiling; the class byte is the fallback
+        let instanceOffset = -1
+        let instanceSize = 0
         let attrOffset = 0
         for (const attr of meta.attributes) {
             if (attr.name === 'position') posOffset = attrOffset
             else if (attr.name === 'rgb') rgbOffset = attrOffset
             else if (attr.name === 'intensity') intensityOffset = attrOffset
             else if (attr.name === 'classification') classOffset = attrOffset
+            else if (attr.name === 'instance') { instanceOffset = attrOffset; instanceSize = attr.size }
             else if (attr.name === 'confidence') confidenceOffset = attrOffset
             else if (attr.name === 'status') statusOffset = attrOffset
             else if (attr.name === 'mv_votes') mvVotesOffset = attrOffset
@@ -698,6 +854,11 @@ export class PotreeOctreeLoader {
             // Classification (segment ID: 0=unsegmented, 1..N=segment, -1=always visible)
             if (this._forceClassId !== undefined) {
                 classIds[validPoints] = this._forceClassId
+            } else if (instanceOffset >= 0 && (instanceSize === 4 || instanceSize === 2)
+                       && base + instanceOffset + instanceSize <= dvLen) {
+                classIds[validPoints] = instanceSize === 4
+                    ? nodeData.getUint32(base + instanceOffset, true)
+                    : nodeData.getUint16(base + instanceOffset, true)
             } else if (classOffset >= 0 && base + classOffset + 1 <= dvLen) {
                 classIds[validPoints] = nodeData.getUint8(base + classOffset)
             } else {
@@ -771,8 +932,6 @@ export class PotreeOctreeLoader {
         node.loading = false
         node.lastUsed = ++this._tick
         this.totalLoadedPoints += node.numPoints
-        this._cachedPoints += node.numPoints
-        this._evictCache()
     }
 
     // ── Class-based whole-node culling ─────────────────────────────────
@@ -813,7 +972,11 @@ export class PotreeOctreeLoader {
         this.octreeGroup.remove(node.points)
         node.loaded = false
         this.totalLoadedPoints -= node.numPoints
-        // geometry stays in node.points (cached); _evictCache() frees it later
+        // geometry stays in node.points (cached); _evictCache() frees it later — the cap
+        // counts OFF-SCREEN points only (it used to count the on-screen ones too, so a node
+        // was disposed the moment it left the view and re-fetched when the view came back)
+        this._cachedPoints += node.numPoints
+        this._evictCache()
     }
 
     /** LRU eviction: when cached (off-screen) geometry exceeds the cap, dispose
@@ -827,7 +990,7 @@ export class PotreeOctreeLoader {
 
         const evictable: OctreeNode[] = []
         for (const [, n] of this.nodes) {
-            if (n.points && !n.loaded) evictable.push(n)
+            if (n.points && !n.loaded && !this._pinned.has(n.name)) evictable.push(n)
         }
         evictable.sort((a, b) => a.lastUsed - b.lastUsed)  // oldest first
 

@@ -34,6 +34,10 @@ SESSION:
 SCENE INVENTORY (from the reconstruction; ids are stable; y[lo..hi] is each object's vertical extent in metres):
 {inventory}
 
+NAMES: the inventory's names are the CURRENT ones. "name=given-by-user" marks a name the user
+gave the object — always call it by that name. Notes from earlier conversations
+(recall_notes) may use an object's older name: the id is what identifies it.
+
 SPATIAL AWARENESS:
 - Objects have PARTS. measure_between accepts feature1/feature2: top/upper,
   bottom/base/lower (real surface bands), highest/lowest (extreme points),
@@ -50,6 +54,15 @@ SPATIAL AWARENESS:
   floor" is define_volume(name, volume_m3=2). Measure from a volume with
   measure_volume; list them with list_volumes. The user can then move/rotate/
   resize the box with the viewer gizmo.
+
+YOU DRIVE THE VIEWER (USER 2026-10-09: the chat must be interactive with the cloud):
+- Whenever your answer is about a specific object, call focus_object(id) so the user SEES it
+  (OBB + dimensions + the camera travels there). Two objects: focus the first, measure the pair.
+- "show / hide / only / all" → show_objects, show_only, show_all_objects. "box / OBB" → set_obb.
+- "from above / plan / front / side / iso" → set_view. "rotate / turn around" → rotate_view.
+- "take me from X to Y / go to" → travel / focus_object. "confidence / colour" → color_cloud.
+- Questions about HOW the scene was reconstructed, the method, the segmentation or how reliable
+  the points are → explain_reconstruction, then explain in plain words.
 
 RULES:
 - You NEVER estimate or invent numbers. EVERY figure must come from a tool call.
@@ -100,6 +113,8 @@ def _inventory(store: InstanceStore, limit: int = 60) -> str:
                 extra += f" y[{w[:, 1].min():.2f}..{w[:, 1].max():.2f}]m"
         except Exception:  # noqa: BLE001
             pass
+        if i.get("label_origin") == "human_validated":
+            extra += " name=given-by-user"
         lines.append(f"  id={iid} {i['label']}{extra} "
                      f"(status={i['status']}, views={i['n_views']})")
     return "\n".join(lines) if lines else "  (no objects in store)"

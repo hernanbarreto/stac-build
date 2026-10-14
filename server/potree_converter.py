@@ -7,6 +7,7 @@ Hernán Barreto — Ingerop IN3 Session IV
 
 import asyncio
 import errno
+import json
 import logging
 import math
 import os
@@ -16,7 +17,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Optional, Awaitable
+from typing import Callable, Optional, Awaitable, Tuple
 
 import numpy as np
 
@@ -165,13 +166,16 @@ def _read_ply_vertices(ply_path: Path) -> np.ndarray:
         return np.frombuffer(f.read(), dtype=ply_dtype, count=n_pts)
 
 
-def _ply_to_las(ply_path: Path, las_path: Path) -> int:
+def _ply_to_las(ply_path: Path, las_path: Path, class_dir: Optional[Path] = None) -> int:
     """Convert binary PLY (with or without origin/confidence fields) to LAS 1.4 with RGB.
 
     If PLY contains a `confidence` field, it is mapped to LAS `intensity` (uint16, 0–65535).
+    ``class_dir`` is where ``classification.npy`` / ``instance_ids.npy`` are read from (the
+    PLY's own directory when not given — the projection stages them elsewhere, point 122).
     Returns the number of points converted.
     """
-    return _vertices_to_las(_read_ply_vertices(ply_path), las_path, ply_path.parent,
+    return _vertices_to_las(_read_ply_vertices(ply_path), las_path,
+                            Path(class_dir) if class_dir is not None else ply_path.parent,
                             ply_path.name)
 
 
@@ -245,18 +249,18 @@ def _vertices_to_las(data: np.ndarray, las_path: Path, class_dir: Path, label: s
         else:
             logger.warning(f"[Potree] Classification size mismatch: {len(class_arr)} vs {len(data)} pts")
 
-    # Per-point INSTANCE id as a 16-bit extra dim (docs/plan_determinismo.md point 107: no
+    # Per-point INSTANCE id as a 32-bit extra dim (docs/plan_determinismo.md point 107: no
     # 255-object ceiling — segmentation.republish.write_classification writes instance_ids.npy
     # next to the uint8 classification.npy; the viewer keys on `instance` when the octree has it)
     inst_npy = Path(class_dir) / "instance_ids.npy"
     if inst_npy.exists():
         inst_arr = np.load(inst_npy)
         if len(inst_arr) == len(data):
-            if inst_arr.size and int(inst_arr.max()) > 65535:
-                raise ValueError(f"{inst_npy}: instance id {int(inst_arr.max())} does not fit uint16")
-            las.add_extra_dim(laspy.ExtraBytesParams(name="instance", type=np.uint16))
-            las.instance = inst_arr.astype(np.uint16)
-            logger.info(f"[Potree] Instance ids written as LAS extra dim 'instance' (uint16, max "
+            if inst_arr.size and int(inst_arr.max()) > int(np.iinfo(np.uint32).max):
+                raise ValueError(f"{inst_npy}: instance id {int(inst_arr.max())} does not fit uint32")
+            las.add_extra_dim(laspy.ExtraBytesParams(name="instance", type=np.uint32))
+            las.instance = inst_arr.astype(np.uint32)
+            logger.info(f"[Potree] Instance ids written as LAS extra dim 'instance' (uint32, max "
                         f"{int(inst_arr.max()) if inst_arr.size else 0})")
         else:
             logger.warning(f"[Potree] instance_ids.npy size mismatch: {len(inst_arr)} vs {len(data)} pts — not written")
@@ -346,6 +350,13 @@ def _vertices_to_las(data: np.ndarray, las_path: Path, class_dir: Path, label: s
 # product of the epoch (what the viewer shows), so it is built on one thread, always.
 POTREE_THREADS_ENV = "POTREE_NUM_THREADS"
 POTREE_THREADS = "1"
+#: the converter's encoding flag — part of the octree's identity (the stamp below)
+POTREE_ENCODING = "UNCOMPRESSED"
+# Point 103 (the converter's offsets follow the threads' completion order; the chunker's and
+# the samplers' orders too) is CLOSED by point 57's own rule — "si difieren, fijar los hilos":
+# the thread count is pinned HERE, in code, on every launch (potree_env), never left to the
+# caller's shell, and recorded in the octree's stamp; the vendored source also carries the
+# canonical-layout patches (tests/test_p3_potree_canonical.py). No further C++ change.
 
 
 def potree_env() -> dict:
@@ -354,6 +365,127 @@ def potree_env() -> dict:
     env = dict(os.environ)
     env[POTREE_THREADS_ENV] = POTREE_THREADS
     return env
+
+
+# ── the octree's identity (docs/plan_determinismo.md point 123) ───────────────────────────
+# An octree is a function of the cloud it was built from, the per-point class / instance
+# arrays baked into it, the converter binary and its launch parameters. Its STAMP records the
+# sha256 of each, INSIDE the octree directory (`<potree_dir>/stac_stamp.json`), written by the
+# build into the temporary directory BEFORE the swap — so it travels with the octree it
+# describes wherever that directory is renamed: a correction / precision transaction
+# (`_tx_epoch_<N>/potree` → `output/potree`), `select_epoch`, an `_epoch_<N>/` store. A stamp
+# beside the directory (`output/potree_stamp.json`, where it first lived on 2026-10-08) was
+# discarded by every transaction swap, so the cloud stage rebuilt f6_bend's own octree on
+# every production run (zaragoza 114 M points ≈ 4 min on one thread). That name stays as the
+# PROJECTION's product record (:data:`POTREE_STAMP_NAME`, the file the pipeline manager
+# lists among the projection's products: the stamp of the octree the result was published
+# with, a copy). An octree is reused ONLY on an identical stamp. No file date decides
+# anything: the mtime tests this replaced (newer metadata.json than the PLY) reused an octree
+# that another classification, converter or cloud of the same age had produced, and could not
+# tell a copied or restored file from a fresh one.
+POTREE_STAMP_NAME = "potree_stamp.json"
+OCTREE_STAMP_NAME = "stac_stamp.json"
+POTREE_STAMP_VERSION = 1
+
+
+def potree_stamp_path(potree_dir: Path) -> Path:
+    """The stamp file of an octree directory: inside it, :data:`OCTREE_STAMP_NAME`."""
+    return Path(potree_dir) / OCTREE_STAMP_NAME
+
+
+def potree_stamp_for(ply_path: Path, class_dir: Optional[Path] = None,
+                     cloud_sha256: Optional[str] = None) -> dict:
+    """The stamp a build from ``ply_path`` (with the class arrays of ``class_dir``, the PLY's
+    directory by default — what :func:`_vertices_to_las` bakes in) produces. A missing class
+    array is recorded as None: an octree without classification is a different octree.
+    ``cloud_sha256``: the cloud's digest when the caller already holds it (the projection's
+    result stamp hashes the same file) — a multi-gigabyte cloud is not read again for a
+    number that is known; never a memo keyed by file dates."""
+    from repro import sha256_file
+    ply_path = Path(ply_path)
+    class_dir = Path(class_dir) if class_dir is not None else ply_path.parent
+    if not ply_path.is_file():
+        raise FileNotFoundError(f"{ply_path} does not exist — no octree stamp without its cloud")
+
+    def _opt(name: str) -> Optional[str]:
+        p = class_dir / name
+        return sha256_file(p) if p.is_file() else None
+
+    return {"stamp_version": POTREE_STAMP_VERSION,
+            "cloud_sha256": str(cloud_sha256) if cloud_sha256 else sha256_file(ply_path),
+            "classification_sha256": _opt("classification.npy"),
+            "instance_ids_sha256": _opt("instance_ids.npy"),
+            "converter_sha256": sha256_file(POTREE_BIN) if POTREE_BIN.is_file() else None,
+            "threads": POTREE_THREADS,
+            "encoding": POTREE_ENCODING}
+
+
+def read_potree_stamp(potree_dir: Path) -> Optional[dict]:
+    """The saved stamp of an octree directory, None when there is none or it is unreadable."""
+    p = potree_stamp_path(potree_dir)
+    if not p.is_file():
+        return None
+    try:
+        doc = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _write_json_atomic(p: Path, doc: dict) -> Path:
+    """``doc`` as sorted, indented JSON at ``p``: a temporary file in the same directory, one
+    rename — a reader never sees half a stamp."""
+    text = json.dumps(doc, indent=1, sort_keys=True) + "\n"
+    fd, tmp = tempfile.mkstemp(prefix=f".{p.name}.", suffix=".tmp", dir=str(p.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, p)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return p
+
+
+def write_potree_stamp(potree_dir: Path, stamp: dict) -> Path:
+    """Write the stamp of the octree in ``potree_dir`` (inside it, atomically)."""
+    potree_dir = Path(potree_dir)
+    if not potree_dir.is_dir():
+        raise FileNotFoundError(f"{potree_dir} is not a directory — an octree stamp lives inside "
+                                f"the octree it describes")
+    return _write_json_atomic(potree_stamp_path(potree_dir), stamp)
+
+
+def write_octree_record(output_dir: Path, stamp: dict) -> Path:
+    """The PROJECTION's record of the octree it was published with — ``output/potree_stamp.json``
+    (:data:`POTREE_STAMP_NAME`, a product of the projection: removed with the result, listed by
+    the pipeline manager). A copy of the octree's own stamp; nothing decides on it."""
+    return _write_json_atomic(Path(output_dir) / POTREE_STAMP_NAME, stamp)
+
+
+def octree_matches(potree_dir: Path, ply_path: Path, class_dir: Optional[Path] = None,
+                   cloud_sha256: Optional[str] = None) -> Tuple[bool, str]:
+    """(reusable, reason): may the octree in ``potree_dir`` stand for a build from ``ply_path``
+    + the class arrays of ``class_dir``? Only when it exists, is not a chunk preview, and its
+    saved stamp EQUALS the one such a build would write (``cloud_sha256``: the cloud's digest
+    when already known, see :func:`potree_stamp_for`)."""
+    potree_dir = Path(potree_dir)
+    if not (potree_dir / "metadata.json").is_file():
+        return False, "no octree (metadata.json missing)"
+    if (potree_dir / PREVIEW_MARKER).exists():
+        return False, "the octree is a preview of the raw chunks"
+    saved = read_potree_stamp(potree_dir)
+    if saved is None:
+        return False, f"the octree has no stamp ({potree_dir.name}/{OCTREE_STAMP_NAME} missing or " \
+                      f"unreadable — built before 2026-10-08, or by hand)"
+    now = potree_stamp_for(ply_path, class_dir, cloud_sha256)
+    diffs = sorted(k for k in set(saved) | set(now) if saved.get(k) != now.get(k))
+    if diffs:
+        return False, "the octree's stamp differs (" + ", ".join(diffs) + ")"
+    return True, "identical stamp (cloud, class arrays, converter, threads, encoding)"
 
 
 def _run_potree_converter(las_path: Path, output_dir: Path) -> bool:
@@ -380,7 +512,7 @@ def _run_potree_converter(las_path: Path, output_dir: Path) -> bool:
         str(POTREE_BIN),
         "-i", str(las_path),
         "-o", str(output_dir),
-        "--encoding", "UNCOMPRESSED",
+        "--encoding", POTREE_ENCODING,
     ]
 
     logger.info(f"[Potree] Running: {' '.join(cmd)} ({POTREE_THREADS_ENV}={POTREE_THREADS})")
@@ -428,16 +560,19 @@ PREVIEW_MARKER = ".preview"
 
 
 def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: Path = None,
-                          potree_dir_override: Path = None) -> bool:
+                          potree_dir_override: Path = None, class_dir: Path = None) -> bool:
     """Full pipeline: PLY → LAS → Potree octree.
 
     Args:
         session_dir: Path to session dir (e.g. server/scans/live_xxx)
-        force: If True, skip mtime cache check and always reconvert.
+        force: If True, always reconvert; False reuses the octree ONLY when its stamp
+            equals the one this build would write (:func:`octree_matches`, point 123).
         ply_override: Optional path to use instead of cleaned_cloud.ply
         potree_dir_override: Optional target directory instead of
             output/potree — used by the correction module to build the octree
             INSIDE its transaction directory before the atomic swap.
+        class_dir: where classification.npy / instance_ids.npy are read from
+            (the PLY's directory by default; the projection stages them, point 122).
 
     Returns:
         True if potree/ directory was created successfully.
@@ -445,6 +580,7 @@ def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: 
     output_dir = session_dir / "output"
     ply_path = Path(ply_override) if ply_override else output_dir / "cleaned_cloud.ply"
     potree_dir = Path(potree_dir_override) if potree_dir_override else output_dir / "potree"
+    class_dir = Path(class_dir) if class_dir is not None else None
 
     if not ply_path.exists():
         logger.warning(f"[Potree] No {ply_path.name} found in {output_dir}")
@@ -474,34 +610,35 @@ def convert_ply_to_potree(session_dir: Path, force: bool = False, ply_override: 
     try:
         with _potree_lock(output_dir):
             if waited:
-                # the build we waited for may have produced exactly what we
-                # need: same source PLY, octree newer than it → reuse
-                meta = potree_dir / "metadata.json"
-                if meta.exists() and ply_path.exists() \
-                        and not (potree_dir / PREVIEW_MARKER).exists() \
-                        and meta.stat().st_mtime > ply_path.stat().st_mtime:
-                    logger.info("[Potree] finished build already covers the "
-                                "current cloud — reusing it")
+                # the build we waited for may have produced exactly what we need: the
+                # SAME stamp (cloud, class arrays, converter, launch parameters) → its
+                # octree is this build's, byte for byte (point 123 — a newer file date
+                # used to decide here, even under force=True)
+                ok, why = octree_matches(potree_dir, ply_path, class_dir)
+                if ok:
+                    logger.info(f"[Potree] the finished build already covers this cloud — "
+                                f"reusing it ({why})")
                     return True
             return _convert_ply_to_potree_inner(
-                output_dir, ply_path, potree_dir, force)
+                output_dir, ply_path, potree_dir, force, class_dir)
     finally:
         with _potree_reg:
             _potree_active.pop(key, None)
 
 
 def _convert_ply_to_potree_inner(output_dir: Path, ply_path: Path,
-                                 potree_dir: Path, force: bool) -> bool:
+                                 potree_dir: Path, force: bool,
+                                 class_dir: Optional[Path] = None) -> bool:
 
-    # Skip if already converted and PLY hasn't changed (unless forced); a preview
-    # octree of the raw chunks is never the clean cloud's
-    if not force and potree_dir.exists() and (potree_dir / "metadata.json").exists() \
-            and not (potree_dir / PREVIEW_MARKER).exists():
-        potree_mtime = (potree_dir / "metadata.json").stat().st_mtime
-        ply_mtime = ply_path.stat().st_mtime
-        if potree_mtime > ply_mtime:
-            logger.info(f"[Potree] Octree already up-to-date, skipping conversion")
+    # Reuse ONLY on an identical stamp (point 123): the cloud's bytes, the class arrays
+    # baked in, the converter and its launch parameters. A preview octree of the raw
+    # chunks, an unstamped octree or any difference → rebuild. No file date decides.
+    if not force:
+        ok, why = octree_matches(potree_dir, ply_path, class_dir)
+        if ok:
+            logger.info(f"[Potree] octree reused — {why}")
             return True
+        logger.info(f"[Potree] octree rebuilt — {why}")
 
     logger.info(f"[Potree] 🌲 Starting PLY → Potree conversion using pure Linux I/O...")
 
@@ -516,14 +653,35 @@ def _convert_ply_to_potree_inner(output_dir: Path, ply_path: Path,
             tmp_las_path = tmpdir_path / "cleaned_cloud.las"
             tmp_potree_dir = tmpdir_path / "potree"
 
-            n_points = _ply_to_las(ply_path, tmp_las_path)
+            # the stamp is taken BEFORE the build from the very files it reads: what the
+            # octree is a function of, as it was converted
+            stamp = potree_stamp_for(ply_path, class_dir)
+            n_points = (_ply_to_las(ply_path, tmp_las_path) if class_dir is None
+                        else _ply_to_las(ply_path, tmp_las_path, class_dir))
             logger.info(f"[Potree] Converted {n_points:,} points to LAS in RAM/tmp")
 
             success = _run_potree_converter(tmp_las_path, tmp_potree_dir)
 
             if success:
+                # the stamp is written INTO the new octree before it moves: the directory
+                # and its identity are swapped in as one, and travel together through
+                # every later rename (a transaction swap, select_epoch); the old octree
+                # leaves with its own stamp inside it
+                write_potree_stamp(tmp_potree_dir, stamp)
+                # the light cloud the viewer draws the instant the session opens (USER
+                # 2026-10-09) — the octree's own top levels, written beside it so it travels
+                # with it; a viewer convenience, never a reason to lose the octree
+                try:
+                    from potree_preview import write_preview
+                    write_preview(tmp_potree_dir)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[Potree] DECLARED: preview.bin not written ({e}) — the "
+                                   f"viewer builds it from the octree when the session opens")
                 _swap_in(tmp_potree_dir, potree_dir, output_dir)
-                logger.info(f"[Potree] octree swapped into {potree_dir}")
+                logger.info(f"[Potree] octree swapped into {potree_dir} "
+                            f"(stamp {OCTREE_STAMP_NAME} inside it: cloud "
+                            f"{stamp['cloud_sha256'][:12]}, classification "
+                            f"{str(stamp['classification_sha256'])[:12]})")
 
             return success
 
@@ -631,12 +789,11 @@ def convert_sabana_to_potree(session_dir: Path, force: bool = False) -> bool:
         logger.warning(f"[Potree] No sabana_cloud.ply found in {session_dir}")
         return False
 
-    # Skip if already converted and PLY hasn't changed
-    if not force and potree_dir.exists() and (potree_dir / "metadata.json").exists():
-        potree_mtime = (potree_dir / "metadata.json").stat().st_mtime
-        ply_mtime = ply_path.stat().st_mtime
-        if potree_mtime > ply_mtime:
-            logger.info("[Potree] Sábana octree already up-to-date, skipping conversion")
+    # Reuse ONLY on an identical stamp (point 123) — the same rule as the session octree
+    if not force:
+        ok, why = octree_matches(potree_dir, ply_path)
+        if ok:
+            logger.info(f"[Potree] Sábana octree reused — {why}")
             return True
 
     logger.info("[Potree] 🌲 Starting sábana PLY → Potree conversion...")
@@ -644,9 +801,13 @@ def convert_sabana_to_potree(session_dir: Path, force: bool = False) -> bool:
     las_path = session_dir / "sabana_cloud.las"
 
     try:
+        stamp = potree_stamp_for(ply_path)
         n_points = _ply_to_las(ply_path, las_path)
         logger.info(f"[Potree] Converted {n_points:,} sábana points to LAS")
+        # the converter removes the previous directory (its stamp inside it) before it writes
         success = _run_potree_converter(las_path, potree_dir)
+        if success:
+            write_potree_stamp(potree_dir, stamp)
         return success
     except Exception as e:
         logger.error(f"[Potree] ❌ Sábana conversion failed: {e}")

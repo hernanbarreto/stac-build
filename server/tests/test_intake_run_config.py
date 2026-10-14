@@ -86,10 +86,11 @@ def test_verify_intake_config_names_the_field_that_differs(tmp_path):
         RC.verify_intake_config(tmp_path, other)
     d = RC.intake_config_differences(icfg, other)
     assert list(d) == ["parallax.grid_side"]
-    # a typed configuration back to a raw one whose load IS it
+    # a typed configuration back to a raw one whose load IS it (no intake.content: I2 is
+    # gone, USER 2026-10-08)
     back = RC.raw_with_intake(raw, other)
     assert load_intake_config(back) == other
-    assert back["models"]["segmentation"]["batch_size"] == other.content.sam3_batch
+    assert set(back["intake"]) == {"runtime", "quality", "parallax"}
     RC.freeze_run_config(tmp_path, back, log=lambda m: None)
     assert RC.verify_intake_config(tmp_path, other)
 

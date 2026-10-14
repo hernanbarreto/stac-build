@@ -20,6 +20,9 @@ export interface TreeNodeData<T = unknown> {
   color?: string
   visible?: boolean
   onVisible?: (v: boolean) => void
+  /** the object's OBB on / off (USER 2026-10-09: every row of the instances list has both boxes) */
+  obb?: boolean
+  onObb?: (v: boolean) => void
   actions?: ReactNode
   /** render meta + actions on a second line (always visible) instead of inline */
   twoLine?: boolean
@@ -100,6 +103,12 @@ function TreeRow<T>({ node, depth, selectedId, activeId, onSelect, onActivate }:
         {node.onVisible && (
           <span className="stac-tree__check" onClick={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()}>
             <Checkbox checked={node.visible ?? true} onChange={node.onVisible} aria-label={typeof node.label === 'string' ? node.label : undefined} />
+          </span>
+        )}
+        {node.onObb && (
+          <span className="stac-tree__check stac-tree__obb" title="OBB" onClick={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()}>
+            <Checkbox checked={node.obb ?? false} onChange={node.onObb} label="OBB"
+              aria-label={typeof node.label === 'string' ? `OBB ${node.label}` : 'OBB'} />
           </span>
         )}
         {node.color && <ColorDot color={node.color} />}

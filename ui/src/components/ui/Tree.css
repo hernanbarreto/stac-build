@@ -177,3 +177,6 @@
   row-gap: var(--sp-half);
   max-width: 100%;
 }
+
+/* the OBB box of an instances row (USER 2026-10-09): a compact second checkbox */
+.stac-tree__obb .stac-check__label { font-size: 10px; letter-spacing: 0.02em; opacity: 0.75; margin-left: 2px; }

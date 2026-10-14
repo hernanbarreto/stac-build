@@ -340,6 +340,21 @@ def run_select(output_dir, epoch: int, operator: str = "user",
     except RuntimeError as e:
         log(f"  instance-store refresh failed (the geometry IS at epoch "
             f"{epoch}; the store stays stale until the next rebuild): {e}")
+    # the user's segment names follow every epoch (USER 2026-10-09): the swapped-in result
+    # was written before some of them — segmentation.label_overrides
+    # In its own process: the result can be ~1 GB and this runs in the server (the GIL).
+    try:
+        import subprocess
+        import sys
+        if (output_dir / "label_overrides.json").exists():
+            r = subprocess.run([sys.executable, "-m", "segmentation.label_overrides", "--apply",
+                                str(output_dir)], cwd=str(Path(__file__).resolve().parents[1]),
+                               capture_output=True, text=True, timeout=1800)
+            if r.returncode != 0:
+                log(f"  ⚠ the user's segment names were not applied to epoch {epoch}: "
+                    f"{(r.stdout + r.stderr).strip().splitlines()[-1:]}")
+    except Exception as e:  # noqa: BLE001 — the epoch IS selected; the names are declared
+        log(f"  ⚠ the user's segment names were not applied to epoch {epoch}: {e}")
     res["ok"] = True
     res["available"] = [e["epoch"] for e in available_epochs(output_dir)]
     log(f"[correction] session shown at epoch {epoch} "

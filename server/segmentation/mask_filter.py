@@ -36,7 +36,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -64,7 +63,7 @@ class MaskAudit:
         self.ok = bool(self.ev is not None and getattr(self.ev, "ok", False))
         self.obj_of: Dict[int, int] = {}
         self._m2c: Dict[int, int] = {}
-        self.res: Optional[Tuple[int, int]] = None
+        self.res: Tuple[int, int] = (0, 0)
         self.stats: List[dict] = []
         # docs/plan_determinismo.md point 122: the audit is a step of the projection and
         # a step that cannot run FAILS the stage, naming why — it used to be skipped
@@ -81,30 +80,12 @@ class MaskAudit:
         else:
             c2m = dict(cloud_to_mask)
         self._m2c = {int(m): int(c) for c, m in c2m.items()}
-        self.res = self._mask_res()
-        if self.res is None:
-            raise RuntimeError("mask audit: the mask store declares no resolution (scaled_res) "
-                               "and holds no mask to read it from")
+        # (mh, mw) of the mask grid: the store's DECLARED grid, already validated by the
+        # evidence (`_Evidence.mask_hw` — point 108, DECIDIDO: never deduced from a mask's
+        # shape; a store that declares none fails there, naming it)
+        self.res: Tuple[int, int] = tuple(int(x) for x in self.ev.mask_hw)
 
     # ── session-level lookups ────────────────────────────────────────────
-
-    def _mask_res(self) -> Optional[Tuple[int, int]]:
-        """(mh, mw) of the mask grid."""
-        files = getattr(self.ev, "masks", None)
-        if files is None:
-            return None
-        try:
-            if "scaled_res" in files.files:
-                r = np.asarray(files["scaled_res"]).ravel()
-                if r.size >= 2:
-                    return int(r[0]), int(r[1])
-        except Exception:  # noqa: BLE001 — fall through to probing a mask
-            pass
-        for k in files.files:
-            if re.match(r"^f\d+_o\d+$", k):
-                m = files[k]
-                return int(m.shape[0]), int(m.shape[1])
-        return None
 
     def _cloud_frame(self, mask_idx: int) -> int:
         """Mask keyframe position → the real frame the poses are keyed by."""

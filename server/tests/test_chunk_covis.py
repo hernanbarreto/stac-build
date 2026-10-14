@@ -182,6 +182,16 @@ def _synthetic_session(root, n=40, wf=8):
     (wdir / "windows.json").write_text(json.dumps({"windows": spec, "process_res": w,
                                                    "model_id": "synthetic"}))
     (root / "intake" / "walk.json").write_text(json.dumps({"version": 1, "n_keyframes": n}))
+    # the keyframe selection the planner reads its keyframes' kinds from (planning_indices,
+    # wave 1 — USER 2026-10-07: rotation keyframes are excluded from the plan): every keyframe
+    # of these windows is a parallax one, as intake/parallax.py writes it (frame, file, closed_by)
+    (root / "frames").mkdir(exist_ok=True)
+    files = [f"{10 * i:06d}.jpg" for i in range(n)]
+    (root / "frames" / "selected_frames.json").write_text(json.dumps(
+        {"version": "2.0", "method": "parallax_lk_12", "total_frames": 10 * n,
+         "selected_count": n, "selected_files": files,
+         "keyframes": [{"frame": 10 * i, "file": f, "closed_by": "quantum"}
+                       for i, f in enumerate(files)]}))
     return wdir
 
 

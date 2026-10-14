@@ -37,8 +37,10 @@ def test_production_pipeline_runs_the_whole_chain():
     assert raw["reconstruction"]["precision"]["enabled"] is True
     assert raw["certify"]["auto_after_segmentation"] is True, \
         "the correction after the cloud stage is part of 'Reconstruir'"
-    assert raw["intake"]["content"]["enabled"] is False, \
-        "I2 (exclusion masks) is OFF — the VLM runs once, as the stage after the cloud"
+    # USER 2026-10-08: I2 (content tags + exclusion masks) is REMOVED, not off — the section is
+    # gone from config.yaml (a leftover fails the intake loader); the VLM runs once, after the cloud
+    assert "content" not in raw["intake"], \
+        "I2 was removed on 2026-10-08 — intake.content must not come back"
     stages = build_pipeline_stages(backend=str(raw["reconstruction"]["backend"]))
     enabled = [s.id for s in stages if s.enabled]
     want = [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.VLM, StageId.SAM3,

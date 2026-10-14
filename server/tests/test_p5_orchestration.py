@@ -112,7 +112,7 @@ def test_read_config_once_is_strict(tmp_path):
         read_config_once(tmp_path / "missing.yaml")
 
 
-def test_a_continuation_with_another_base_configuration_is_refused_before_any_stage(tmp_path, lease, monkeypatch):
+def test_a_continuation_with_another_base_configuration_runs_and_refreezes(tmp_path, lease, monkeypatch):
     s = _session(tmp_path)
     pm = PipelineManager()
     ran = []
@@ -139,14 +139,14 @@ def test_a_continuation_with_another_base_configuration_is_refused_before_any_st
     assert frozen["_stages"]["certify"]["segmentation"]["object_captions"]["enabled"] is False
     assert frozen["segmentation"]["object_captions"]["enabled"] is True, "the base is untouched"
 
-    # another base configuration: refused, naming the section, nothing runs
+    # another base configuration (USER 2026-10-08: no refusal): the job runs and freezes its own
     other = _base_config(pipeline={"auto_segment": True, "auto_tsdf": True})
     job3 = _job(s, [StageId.CERTIFY])
     ran.clear()
-    assert _run(pm, job3, other) is False
-    assert ran == [] and job3.status == JobStatus.FAILED
-    assert "ONE configuration" in job3.stages[0].message and "pipeline" in job3.stages[0].message
-    assert (s / "output" / "run_config.sha256").read_text().strip() == sha2, "nothing re-frozen"
+    assert _run(pm, job3, other) is True and ran == [StageId.CERTIFY]
+    assert (s / "output" / "run_config.sha256").read_text().strip() != sha2, "re-frozen"
+    frozen = yaml.safe_load((s / "output" / "run_config.yaml").read_text())
+    assert frozen["pipeline"]["auto_tsdf"] is True, "the job's own base configuration"
 
     # Replace starts the session over on the new configuration
     job4 = _job(s, [StageId.CLOUDCOMPY])
@@ -521,3 +521,27 @@ def test_start_sh_exports_the_deterministic_environment():
     src = (SERVER_DIR.parent / "scripts" / "start.sh").read_text()
     assert "export PYTHONHASHSEED=0" in src and "export CUBLAS_WORKSPACE_CONFIG=:4096:8" in src
     assert src.index("export PYTHONHASHSEED=0") < src.index("exec python -m uvicorn")
+
+
+def test_a_segmentation_run_without_the_certification_removes_the_stale_acta_not_the_epochs(tmp_path):
+    """USER 2026-10-08 (point 149): with the certification in the job its stamp decides the reuse;
+    a VLM / SAM3 run WITHOUT it leaves no acta describing a segmentation that no longer exists —
+    the acta and its reports go, the epochs stay."""
+    out = tmp_path / "output"
+    out.mkdir()
+    records = ["certify_acta.json", "visit_drift_report.json", "keyframe_graph.json"]
+    epochs = ["geometry_epoch.json", "cleaned_cloud.ply"]
+    for n in records + epochs + ["segmentation.json"]:
+        (out / n).write_text("x")
+    (out / "quality").mkdir()
+    (out / "corrections").mkdir()
+    (out / "corrections" / "epoch_1.npz").write_text("x")
+    # with the certification in the job: its records stay (its stamp decides)
+    PipelineManager._cleanup_for_resume(out, StageId.SAM3, certify_runs=True)
+    assert all((out / n).exists() for n in records) and (out / "quality").exists()
+    (out / "segmentation.json").write_text("x")
+    # without it: the acta and its reports go, the epochs and the cloud stay
+    removed = PipelineManager._cleanup_for_resume(out, StageId.SAM3, certify_runs=False)
+    assert not any((out / n).exists() for n in records) and not (out / "quality").exists()
+    assert set(records) | {"quality", "segmentation.json"} <= set(removed)
+    assert all((out / n).exists() for n in epochs) and (out / "corrections" / "epoch_1.npz").exists()

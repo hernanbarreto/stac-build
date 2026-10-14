@@ -1,7 +1,8 @@
 """I1 — keyframes by parallax (claude_stac.txt §4-F1), as the spec asks:
 
-  * a pure rotation earns no keyframe beyond the first and is warned
-    pure_rotation;
+  * a pure rotation earns keyframes by the ROTATION QUANTUM θ_q = (1 − τ)·FOV_h / 4 derived
+    from the session camera (USER 2026-10-07, wave 1 — no parallax, no baseline: each is
+    closed_by 'rotation', its reading in θ_q's band) and is still warned pure_rotation;
   * a translation earns keyframes at parallax intervals — each keyframe's
     reading lies in the quantum band, the sharpest frame of the band wins;
   * a light change without motion earns no keyframe beyond the first;
@@ -198,10 +199,40 @@ def test_forward_walk_reads_its_baseline():
 
 # ── the sequences ────────────────────────────────────────────────────────
 
-def test_pure_rotation_earns_no_keyframe_and_is_warned(rotation):
-    _sess, _q, res = rotation
-    assert res["n_keyframes"] == 1
+def test_pure_rotation_earns_keyframes_by_the_rotation_quantum_and_is_warned(rotation, cam):
+    """USER 2026-10-07 (wave 1, docs/plan_determinismo.md): a pure rotation EARNS keyframes by
+    the rotation quantum θ_q = (1 − τ)·FOV_h / 4 derived from the measured K (pccr: at half the
+    bound the turn jumped 19–27° per keyframe, "huecos"; at 7° it gave 30 near-duplicate views,
+    "solapados") — before wave 1 it earned none ("a pure rotation earns no keyframe"). The
+    30-frame pan at 1.5°/frame (43.5°) of the 70° test camera: θ_q = 0.7 × 70 / 4 = 12.25°, so
+    every keyframe after the first is closed by ROTATION with its reading in θ_q's band, has no
+    parallax (no baseline) — and the pure_rotation warning is still raised."""
+    _sess, q, res = rotation
+    rot = res["rotation_quantum"]
+    # τ is the planner's own (reconstruction/chunk_covis.TAU through intake.parallax.covis_tau),
+    # pinned at its source — a wrong τ in the record must not pass by deriving the band from it
+    assert rot["tau"] == P.covis_tau()
+    expect_q = (1.0 - rot["tau"]) * rot["fov_h_deg"] / 4.0
+    assert abs(rot["fov_h_deg"] - 70.0) < 1e-6 and abs(rot["theta_q_deg"] - expect_q) < 1e-9
+    kfs = res["keyframes"]
+    assert kfs[0]["closed_by"] == "first_usable_frame"
+    assert len(kfs) > 1, "a pure rotation earns keyframes by the rotation quantum (2026-10-07)"
+    lo_r, hi_r = expect_q * (1 - PCFG.keyframe_band_frac), expect_q * (1 + PCFG.keyframe_band_frac)
+    for k in kfs[1:]:
+        assert k["closed_by"] == "rotation", k
+        assert lo_r <= k["rotation_deg"] <= hi_r, k
+        assert k["parallax_px"] < PCFG.witness_min_parallax_px, k      # no baseline
+    frames = [k["frame"] for k in kfs]
+    assert frames == sorted(frames) and len(set(frames)) == len(frames)
+    # the count follows the pan: one keyframe per quantum band at least
+    total_pan_deg = 1.5 * 29
+    assert len(kfs) - 1 >= int(total_pan_deg // hi_r)
+    assert all(w["closed_by"] == "rotation" for w in res["windows"])
     assert "pure_rotation" in _kinds(res)
+    # the selection document carries the derived quantum (what the chunk planner reads)
+    doc = P.selected_frames_document(res, PCFG)
+    assert abs(doc["rotation_quantum_deg"] - expect_q) < 1e-9
+    assert all(k["closed_by"] == "rotation" for k in doc["keyframes"][1:])
 
 
 def test_translation_keyframes_at_parallax_intervals(translation):

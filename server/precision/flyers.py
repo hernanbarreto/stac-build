@@ -335,7 +335,7 @@ def texture_scores(session_dir: Path, cam, frames: Sequence[int], frame: np.ndar
     """Per cloud point the gradient energy and the mean gray at its source pixel (frames resized to the
     camera grid when they are not on it, as the cloud's pixels are)."""
     from PIL import Image
-    from intake.content import frame_file
+    from intake.quality import frame_file      # the one frame-number → file rule (I2 gone, point 75)
     frames_dir = Path(session_dir) / "frames"
     H, W = int(cam.height), int(cam.width)
     energy = np.full(len(frame), np.nan); gray_mean = np.full(len(frame), np.nan)
@@ -460,11 +460,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--no-write", action="store_true", help="measure and print only")
     args = ap.parse_args(argv)
     from precision.config import load_precision_config
-    pcfg = load_precision_config()
     rows = []
     for s in args.session:
         try:
-            rep = run(Path(s), pcfg, write=not args.no_write, workers=args.workers)
+            # each session's own job configuration (point 69: its frozen run_config.yaml, else declared)
+            rep = run(Path(s), load_precision_config(session_dir=Path(s)), write=not args.no_write,
+                      workers=args.workers)
         except FlyersError as e:
             print(f"{LOG_TAG} {s}: NOT measured — {e}", flush=True)
             continue

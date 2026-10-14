@@ -29,16 +29,52 @@ import numpy as np
 
 CLASSIFICATION = "classification.npy"
 CLASS_MAP = "class_map.json"
-#: the per-point INSTANCE id in 16 bits (docs/plan_determinismo.md point 107, DECIDIDO: no
-#: ceiling on the object count) — written beside the class byte by the same writer; the LAS
-#: writer carries it into the octree as the `instance` extra dimension the viewer keys on
+#: the per-point INSTANCE id in 32 bits (docs/plan_determinismo.md point 107, DECIDIDO: no
+#: ceiling on the object count; USER 2026-10-08: "un número bien grande") — written beside the
+#: class byte by the same writer; the LAS writer carries it into the octree as the `instance`
+#: extra dimension the viewer keys on
 INSTANCE_IDS = "instance_ids.npy"
-INSTANCE_IDS_DTYPE = np.uint16
+INSTANCE_IDS_DTYPE = np.uint32
 OUT_OF_PLACE = "out_of_place.npy"
+OUT_OF_PLACE_VIEWS = "out_of_place_views.npz"
 RESULT = "segmentation_result.json"
 BROADCAST = "seg_broadcast.json"
+MASK_AUDIT = "mask_audit.json"
+FUSION_MAP = "fusion_map.json"
+POTREE_STAMP = "potree_stamp.json"
+INSTANCE_STORE = "scene_r.db"
 # the codes one class byte holds (0 = unsegmented): a property of the byte, not a decision
 BYTE_CODES = 255
+
+#: EVERY product of the mask→cloud projection — functions of the cloud, the raw mask store and
+#: the configuration (docs/plan_determinismo.md points 96 / 122 / 123). ONE list for every
+#: deleter: a cloud rebuilt by the cloud stage makes all of them stale, a projection that fails
+#: leaves none of them behind, and the pipeline manager's STAGE_OUTPUT_FILES[PROJECTION] is
+#: the same set (a test holds the two together). The octree directory itself is NOT a product
+#: of the projection: it carries its own stamp INSIDE it (`potree/stac_stamp.json`, written by
+#: the build and travelling with the directory through every transaction swap) and is rebuilt
+#: only when that stamp is gone or differs; `potree_stamp.json` here is the projection's RECORD
+#: of the octree it was published with (a copy of that stamp — nothing decides on it).
+PROJECTION_PRODUCTS = (RESULT, BROADCAST, CLASSIFICATION, INSTANCE_IDS, CLASS_MAP,
+                       INSTANCE_STORE, INSTANCE_STORE + "-wal", INSTANCE_STORE + "-shm",
+                       FUSION_MAP, POTREE_STAMP, OUT_OF_PLACE_VIEWS, OUT_OF_PLACE, MASK_AUDIT)
+
+
+def delete_projection_products(dirpath, log: Optional[Callable[[str], None]] = None,
+                               why: str = "") -> List[str]:
+    """Remove every :data:`PROJECTION_PRODUCTS` file that exists in ``dirpath``; returns the
+    names removed (declared through ``log`` when given)."""
+    dirpath = Path(dirpath)
+    gone: List[str] = []
+    for name in PROJECTION_PRODUCTS:
+        p = dirpath / name
+        if p.exists() or p.is_symlink():
+            p.unlink()
+            gone.append(name)
+    if gone and log is not None:
+        log(f"{len(gone)} product(s) of a previous mask→cloud projection removed "
+            f"({', '.join(gone)}){' — ' + why if why else ''}")
+    return gone
 
 
 def _encode(ids: List[int]) -> dict:
@@ -109,6 +145,23 @@ def class_byte(dirpath, instance_id: int) -> int:
     return int(class_of(dirpath).get(int(instance_id), int(instance_id)))
 
 
+def octree_has_instance_ids(dirpath) -> bool:
+    """Whether the session's octree (``<dirpath>/potree``) carries every point's full instance
+    id — the LAS extra dimension ``instance`` the viewer then reads instead of the class byte."""
+    try:
+        attrs = json.loads((Path(dirpath) / "potree" / "metadata.json").read_text()).get("attributes")
+    except (OSError, ValueError):
+        return False
+    return any(isinstance(a, dict) and a.get("name") == "instance" for a in (attrs or []))
+
+
+def viewer_key_of(dirpath) -> dict:
+    """instance id → the per-point key the viewer's octree carries for it: the id itself (an
+    empty map = identity) when the octree has the ``instance`` dimension, else the class byte
+    of :func:`class_of` — what the viewer payloads send as ``class_byte``."""
+    return {} if octree_has_instance_ids(dirpath) else class_of(dirpath)
+
+
 def as_instance_ids(dirpath, cls: np.ndarray) -> np.ndarray:
     """A class-byte array read back as INSTANCE ids (int32, 0 = unsegmented).
     Identity when the session has no map, so it is always safe to call."""
@@ -142,11 +195,11 @@ def write_classification(dirpath: Path, instances: List[dict],
     m = _encode(ids)
     code = {int(k): int(v) for k, v in m["class_of"].items()}
     classification = np.zeros(int(n_points), dtype=np.uint8)
-    # the per-point INSTANCE id itself, 16 bits (point 107): every object, whatever the count
+    # the per-point INSTANCE id itself, 32 bits (point 107): every object, whatever the count
     id_max = int(np.iinfo(INSTANCE_IDS_DTYPE).max)
     too_big = sorted(i for i in set(ids) if i > id_max)
     if too_big:
-        raise ValueError(f"instance id(s) {too_big[:5]} exceed {id_max}, the 16-bit per-point id "
+        raise ValueError(f"instance id(s) {too_big[:5]} exceed {id_max}, the 32-bit per-point id "
                          f"of {INSTANCE_IDS} (point 107)")
     instance_ids = np.zeros(int(n_points), dtype=INSTANCE_IDS_DTYPE)
     # written in id order: a point two instances name (the exclusivity invariant forbids it)

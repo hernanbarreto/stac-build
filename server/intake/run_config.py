@@ -157,20 +157,15 @@ def verify_intake_config(session_dir: os.PathLike, icfg: IntakeConfig,
 
 
 def raw_with_intake(base_raw: Mapping[str, Any], icfg: IntakeConfig) -> Dict[str, Any]:
-    """``base_raw`` (a full configuration dict) with its ``intake:`` section and the SAM3 batch
-    key replaced by the values of ``icfg`` — so that ``load_intake_config`` of the result equals
-    ``icfg``. For callers that hold a typed configuration and must freeze the raw one (tests, a
-    CLI that overrides a parameter)."""
+    """``base_raw`` (a full configuration dict) with its ``intake:`` section replaced by the
+    values of ``icfg`` — so that ``load_intake_config`` of the result equals ``icfg``. For
+    callers that hold a typed configuration and must freeze the raw one (tests, a CLI that
+    overrides a parameter). (The ``intake.content`` section and the SAM3 batch it cross-read
+    went with I2, USER 2026-10-08.)"""
     raw = json.loads(json.dumps(dict(base_raw)))
     d = asdict(icfg)
-    content = dict(d["content"])
-    sam3_batch = content.pop("sam3_batch")
-    content["prompts"] = {k: list(v) for k, v in content["prompts"].items()}
-    content["exclusion_classes"] = list(content["exclusion_classes"])
-    content["weight_classes"] = list(content["weight_classes"])
     raw["intake"] = {"runtime": dict(d["runtime"]), "quality": dict(d["quality"]),
-                     "parallax": dict(d["parallax"]), "content": content}
-    raw.setdefault("models", {}).setdefault("segmentation", {})["batch_size"] = int(sam3_batch)
+                     "parallax": dict(d["parallax"])}
     return raw
 
 

@@ -157,7 +157,12 @@ def test_back_to_back_builds_never_mix(tmp_path, monkeypatch):
     for tag in ("a", "b"):
         monkeypatch.setattr(PC, "_run_potree_converter", _fake_converter(tag))
         assert PC.convert_ply_to_potree(tmp_path, force=True)
-    assert sorted(p.name for p in (out / "potree").iterdir()) == ["b.bin", "metadata.json"]
+    # the converter's files of build "b" alone — plus the octree's own stamp, which every build
+    # writes INSIDE the directory it swaps in (docs/plan_determinismo.md point 123: the stamp
+    # travels with the octree; 2026-10-08) and which here is build "b"'s
+    assert sorted(p.name for p in (out / "potree").iterdir()) == \
+        ["b.bin", "metadata.json", PC.OCTREE_STAMP_NAME]
+    assert PC.read_potree_stamp(out / "potree") == PC.potree_stamp_for(ply)
 
 
 def test_rename_failure_fails_the_build_and_keeps_the_old_octree(tmp_path, monkeypatch):

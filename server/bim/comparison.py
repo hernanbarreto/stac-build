@@ -1187,53 +1187,11 @@ def run_comparison(
     n_unmatched = sum(1 for r in results if r.get("status") == "unmatched")
     n_error = sum(1 for r in results if r.get("status") == "error")
     
-    # ── Post-process: VLM occluder classification ──
-    if ce_enabled and cov_store is not None:
-        try:
-            from scene_analyzer import classify_occluders
-            from bim.coverage_store import OccluderType
-            
-            # Collect unique occluder labels across all elements
-            all_occluder_labels = set()
-            for key in cov_store.get_all_elements():
-                ec = cov_store.load_element(key)
-                if ec is not None:
-                    for lbl in ec.occluder_labels:
-                        if lbl and lbl != "":
-                            all_occluder_labels.add(str(lbl))
-            
-            if all_occluder_labels:
-                print(f"[BIM-Compare] Classifying {len(all_occluder_labels)} occluder labels...")
-                classifications = classify_occluders(
-                    list(all_occluder_labels), session_dir
-                )
-                
-                # Update coverage store with occluder types
-                for key in cov_store.get_all_elements():
-                    ec = cov_store.load_element(key)
-                    if ec is None:
-                        continue
-                    updated = False
-                    for i in range(ec.n_samples):
-                        lbl = str(ec.occluder_labels[i])
-                        if lbl and lbl in classifications:
-                            otype = (OccluderType.TEMPORARY 
-                                    if classifications[lbl] == "temporary"
-                                    else OccluderType.PERMANENT)
-                            if ec.occluder_types[i] != otype:
-                                ec.occluder_types[i] = otype
-                                updated = True
-                    if updated:
-                        # Recompute state with updated occluder types
-                        ec.element_state = CoverageStore._compute_state(
-                            ec, completion_threshold, quality_threshold
-                        )
-                        cov_store.save_element(ec)
-                
-                print(f"[BIM-Compare] Occluder classification: {classifications}")
-        except Exception as _vlm_err:
-            print(f"[BIM-Compare] VLM occluder classification skipped: {_vlm_err}")
-    
+    # The InternVL3 occluder classification (scene_analyzer.classify_occluders: a heuristic
+    # lookup, then a VLM of its own that never served) is GONE — docs/plan_determinismo.md
+    # point 156 (2026-10-08): the pipeline has no second VLM and no silent fallback; the
+    # coverage store keeps the occluder types its own engine measured.
+
     print(f"[BIM-Compare] Summary: {n_evaluated} evaluated, "
           f"{n_unmatched} unmatched (not built), {n_error} errors, "
           f"{total} total elements")

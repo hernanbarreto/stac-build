@@ -17,7 +17,7 @@ import {
 } from 'lucide-react'
 import { IconButton } from '../ui/IconButton'
 import { Button } from '../ui/Button'
-import { Slider, Select, SegmentedControl } from '../ui/Field'
+import { Slider, Select, SegmentedControl, Checkbox, SearchInput } from '../ui/Field'
 import { Badge } from '../ui/Badge'
 import { Sep } from '../ui/Panel'
 import { useFmt, useT } from '../../i18n'
@@ -50,6 +50,8 @@ export interface BrushState {
   onAssign: () => void
   onClearMarks: () => void
   onUndo: () => void
+  /** fuse whole segments into one (USER 2026-10-09: "3 segmentos son lo mismo — fusionarlos") */
+  onMerge: (target: number, sources: number[]) => Promise<void>
 }
 
 export interface DisplayState {
@@ -124,6 +126,10 @@ export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeas
   const t = useT()
   const fmt = useFmt()
   const [popover, setPopover] = useState<Popover>(null)
+  const [mergeFilter, setMergeFilter] = useState('')
+  const [mergePicked, setMergePicked] = useState<number[]>([])
+  const [mergeTarget, setMergeTarget] = useState('')
+  const [merging, setMerging] = useState(false)
   const toggle = (p: Popover) => setPopover(cur => (cur === p ? null : p))
   const brushOn = activeTool === 'erase'
 
@@ -224,6 +230,32 @@ export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeas
             <Select<string> size="sm" value={brush.target} onChange={brush.onTarget} placeholder={t('brush.reassignTo')}
               options={[...brush.targets.map(s => ({ value: String(s.id), label: `${s.label} ${s.id}` })), { value: 'new', label: t('brush.newSegment') }]} />
             <Button size="sm" icon={<Check aria-hidden />} disabled={brush.marks === 0 || brush.target === ''} onClick={brush.onAssign} title={t('brush.assignHint')}>{t('brush.assign')}</Button>
+          </div>
+          <div className="stac-vppopover__title">{t('brush.mergeTitle')}</div>
+          <SearchInput size="sm" value={mergeFilter} onChange={e => setMergeFilter(e.target.value)} onClear={() => setMergeFilter('')} placeholder={t('brush.mergeFilter')} />
+          <div className="stac-vppopover__list">
+            {brush.targets
+              .filter(s => !mergeFilter || `${s.label} ${s.id}`.toLowerCase().includes(mergeFilter.toLowerCase()) || mergePicked.includes(s.id))
+              .map(s => (
+                <Checkbox key={s.id} checked={mergePicked.includes(s.id)} label={`${s.label} ${s.id}`}
+                  onChange={on => {
+                    const next = on ? [...mergePicked, s.id] : mergePicked.filter(i => i !== s.id)
+                    setMergePicked(next)
+                    if (!next.includes(Number(mergeTarget))) setMergeTarget(next.length ? String(next[0]) : '')
+                  }} />
+              ))}
+          </div>
+          <div className="stac-vppopover__row">
+            <Select<string> size="sm" value={mergeTarget} onChange={setMergeTarget} placeholder={t('brush.mergeInto')}
+              options={brush.targets.filter(s => mergePicked.includes(s.id)).map(s => ({ value: String(s.id), label: `${s.label} ${s.id}` }))} />
+            <Button size="sm" variant="primary" icon={merging ? <Loader2 className="stac-spin" aria-hidden /> : <Check aria-hidden />}
+              disabled={merging || mergePicked.length < 2 || mergeTarget === ''}
+              onClick={async () => {
+                const tid = Number(mergeTarget)
+                setMerging(true)
+                try { await brush.onMerge(tid, mergePicked.filter(i => i !== tid)) } finally { setMerging(false) }
+                setMergePicked([]); setMergeTarget('')
+              }}>{t('brush.merge', { n: mergePicked.length })}</Button>
           </div>
           <div className="stac-vppopover__row">
             <Button size="sm" block icon={<X aria-hidden />} disabled={brush.marks === 0} onClick={brush.onClearMarks}>{t('brush.clearMarks')}</Button>

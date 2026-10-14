@@ -601,11 +601,15 @@ def detect_revisits(session: CorrectionSession, cfg: CorrectionConfig,
               "n_pairs": n_pairs, "regions": regions,
               "closures": [{k: v for k, v in c.items() if k not in ("R", "t")}
                            for c in closures],
-              "elapsed_s": round(time.time() - t0, 1),
               "provenance": "tool_measured"}
     (session.output_dir / "corrections").mkdir(exist_ok=True)
     (session.output_dir / "corrections" / REPORT_NAME).write_text(
         json.dumps(report, indent=1))
+    # the duration lives next to the report, never in it (point 137): revisits.json is a
+    # certification artifact compared between two runs of the same session
+    from precision.corrected_cloud import write_timing
+    write_timing(session.output_dir / "corrections" / REPORT_NAME,
+                 {"elapsed_s": round(time.time() - t0, 1)})
     _p(100, f"revisit detection done: {len(regions)} region(s), "
             f"{sum(1 for r in regions if r.get('duplicated'))} duplicated, "
             f"{sum(1 for c in closures if c['accepted'])} closure(s) accepted")

@@ -27,25 +27,112 @@
 # PROVENANCE: the phrases are vlm_proposed; spans, visits and counts are
 # tool_measured over SAM3's masks. Nothing here decides anything.
 #
+# DETERMINISM (docs/plan_determinismo.md point 159 — 2026-10-08): the census is a COMPARED
+# artifact — two identical runs give byte-identical segmentation_census.json. So it carries
+# the identity of its INPUTS (``inputs``: the sha256 of the effective understanding prompt,
+# of the vlm_analysis.json stamp, of the served engine's identity and of the SAM3 prompt list
+# as run) and NOTHING that varies between identical runs: no clock (the per-prompt seconds
+# live in segmentation_timing.json), no pid, no memory-in-use reading (the exclusive-GPU
+# check's ``used_mib`` is a driver reading of the moment — it stays in the stage log), no
+# temporary path (the per-prompt frame directories are ``tempfile.mkdtemp`` names — a reason
+# or error that quotes one is written with the name's variable part removed).
+#
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 CENSUS_NAME = "segmentation_census.json"
-CENSUS_VERSION = 1
+CENSUS_VERSION = 2                      # 2 (2026-10-08): ``inputs`` block, run-varying fields out
 FATES = ("prompt", "merged", "not_prompted", "unaccounted")
 # the run_segmentation statuses of a prompt SAM3 did NOT run to the end (its
 # zero is not a zero); "ran" is the one whose zero is real
 _SAM3_NOT_COMPLETED = ("skipped", "failed", "not_reached")
 _MASK_KEY = re.compile(r"^f(\d+)_o(\d+)$")
+# the per-prompt frame directory SAM3 reads (segmentation.pipeline: tempfile.mkdtemp with
+# prefix 'sam3_batch_'; the wrapper's interactive session: 'sam3_kf_'): its random suffix is
+# the one path that differs between runs — reduced to '<sam3_batch_dir>' / '<sam3_kf_dir>'
+_SAM3_TMP_DIR = re.compile(r"\S*sam3_(batch|kf)_[A-Za-z0-9_]+")
+
+
+def _sam3_tmp_dir_text(m: "re.Match[str]") -> str:
+    return f"<sam3_{m.group(1)}_dir>"
+# the fields of the exclusive-GPU record (repro.require_exclusive_gpu) that are a reading of
+# the moment, not a fact of the run
+_GPU_CARD_VARYING = ("used_mib",)
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(str(text).encode("utf-8")).hexdigest()
+
+
+def without_temp_paths(text: Optional[str]) -> Optional[str]:
+    """``text`` with every per-run SAM3 temporary directory name reduced to its kind
+    (``<sam3_batch_dir>`` / ``<sam3_kf_dir>``; the rest of the message stays: what failed,
+    where)."""
+    if text is None:
+        return None
+    return _SAM3_TMP_DIR.sub(_sam3_tmp_dir_text, str(text))
+
+
+def _stable_status(st: dict) -> dict:
+    """A prompt's SAM3 execution record as the census stores it: no clock (``seconds``), no
+    temporary path in its reason / note."""
+    st = dict(st or {})
+    st.pop("seconds", None)
+    for k in ("reason", "note"):
+        if isinstance(st.get(k), str):
+            st[k] = without_temp_paths(st[k])
+    return st
+
+
+def stable_sam3_record(rec: Optional[dict]) -> Optional[dict]:
+    """The SAM3 model / environment record (``sam3.thresholds``) with the run-varying
+    readings removed: the exclusive-GPU check's per-card ``used_mib`` (0 or the few MiB the
+    driver had not freed yet — a value of the moment; the check itself already passed, which
+    is the fact recorded). Everything else in it is the same on every run of the same
+    machine, code and configuration (repro.environment_record's contract)."""
+    if not isinstance(rec, dict):
+        return rec
+    out = dict(rec)
+    gpu = out.get("exclusive_gpu")
+    if isinstance(gpu, dict) and isinstance(gpu.get("cards"), list):
+        gpu = dict(gpu)
+        gpu["cards"] = [{k: v for k, v in dict(c).items() if k not in _GPU_CARD_VARYING}
+                        if isinstance(c, dict) else c for c in gpu["cards"]]
+        out["exclusive_gpu"] = gpu
+    return out
+
+
+def census_inputs(prompt: str, vlm_doc: Optional[dict]) -> Dict[str, Any]:
+    """The identity of what this census describes (point 159): the sha256 of the effective
+    understanding prompt text (vlm_analysis.json ``understand_prompt``), of the analysis'
+    stamp, of the served engine's identity (``service``), and of the SAM3 prompt list AS RUN
+    (the ';'-joined list the worker handed to run_segmentation — the same text
+    autosegment.set_sam3_prompts hashes, so an edited list matches its ``prompt_sha256``).
+    A record the analysis does not carry is null — a fact, not an unknown."""
+    doc = vlm_doc if isinstance(vlm_doc, dict) else {}
+    up = doc.get("understand_prompt") if isinstance(doc.get("understand_prompt"), dict) else {}
+    st = doc.get("stamp") if isinstance(doc.get("stamp"), dict) else {}
+    sv = doc.get("service") if isinstance(doc.get("service"), dict) else {}
+    prompts = split_prompt(prompt)
+    return {
+        "vlm_prompt_sha256": up.get("sha256"),
+        "vlm_prompt_source": up.get("source"),
+        "vlm_analysis_stamp_sha256": st.get("sha256"),
+        "service_sha256": sv.get("sha256"),
+        "sam3_prompts_sha256": _sha256_text(";".join(prompts)),
+        "sam3_prompts_source": doc.get("prompt_source"),
+        "n_sam3_prompts": len(prompts),
+    }
 
 
 def concept_label(prompt: str) -> str:
@@ -198,11 +285,11 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
                        "last_frame": _video(ks[-1]) if ks else None,
                        "visits": vis, "n_visits": len(vis)})
         seen = sorted({k for m in ms for k in positions.get(m["oid"], [])})
-        st = dict((prompt_status or {}).get(p) or {"status": "unknown",
-                                                    "reason": "no SAM3 execution record"})
         # no clock in a compared artifact (point 125): the per-prompt seconds live in the
-        # SAM3 stage's timing sidecar (segmentation_timing.json), never here
-        st.pop("seconds", None)
+        # SAM3 stage's timing sidecar (segmentation_timing.json), never here — and no
+        # temporary path (point 159)
+        st = _stable_status((prompt_status or {}).get(p) or {"status": "unknown",
+                                                              "reason": "no SAM3 execution record"})
         row = {"prompt": p, "label": labels[p],
                "raw_concepts": carried.get(p, []),
                "sam3_status": st,
@@ -244,7 +331,7 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
         if c.get("prompt") in zero_set:
             c["zero_masklets"] = True
         if c.get("prompt") in nc_set:
-            c["sam3_not_completed"] = (prompt_status or {}).get(c["prompt"])
+            c["sam3_not_completed"] = _stable_status((prompt_status or {}).get(c["prompt"]))
     names = [c.get("concept") for c in concepts]
     duplicated = sorted({n for n in names if names.count(n) > 1})
     accounting = {
@@ -280,6 +367,10 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
     doc = {
         "version": CENSUS_VERSION,
         "provenance": {"concepts": "vlm_proposed", "masklets": "tool_measured"},
+        # what this census describes (point 159): the prompt, the analysis, the engine, the
+        # SAM3 list — by their sha256; the census of another run's inputs is never mistaken
+        # for this one's
+        "inputs": census_inputs(prompt, vlm_doc),
         "vlm": {
             "source": (vlm_doc or {}).get("source") if isinstance(vlm_doc, dict) else None,
             "sampling": sampling,
@@ -300,9 +391,10 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
         "prompts": prompt_rows,
         "zero_masklet_prompts": zero,
         "prompts_not_completed_by_sam3": not_completed,
-        "sam3": {"error": seg_error, "frame_space": space_note, "visit_gap_kf": gap_kf,
+        "sam3": {"error": without_temp_paths(seg_error), "frame_space": space_note,
+                 "visit_gap_kf": gap_kf,
                  "n_keyframes": len(kf_files) if kf_files else None,
-                 "thresholds": sam3_thresholds},
+                 "thresholds": stable_sam3_record(sam3_thresholds)},
         "accounting": accounting,
     }
     out = output_dir / CENSUS_NAME

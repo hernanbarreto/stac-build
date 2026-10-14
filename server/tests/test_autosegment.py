@@ -141,3 +141,15 @@ def test_the_websocket_command_carries_segment_and_autosegment():
     assert "for _i, _sk in enumerate(_keys):" in src
     assert '@app.get("/api/autosegment/{session_id}")' in src
     assert '@app.post("/api/autosegment/{session_id}")' in src
+
+
+def test_a_broken_prompts_file_is_redone_with_the_shipped_prompt_and_said(tmp_path, capsys):
+    """USER 2026-10-08 (point 149): a broken autosegment.json is redone, never a failure — the
+    shipped prompt is used, the next save writes the file again, and the log says so."""
+    from segmentation.autoprompt.autosegment import (AUTOSEGMENT_FILE, default_vlm_prompt,
+                                                     save_vlm_prompt, vlm_prompt_for)
+    (tmp_path / AUTOSEGMENT_FILE).write_text("{ broken")
+    assert vlm_prompt_for(tmp_path) == (default_vlm_prompt(), False)
+    assert "DECLARED" in capsys.readouterr().out
+    assert save_vlm_prompt(tmp_path, "my own prompt") is True
+    assert vlm_prompt_for(tmp_path) == ("my own prompt", True)

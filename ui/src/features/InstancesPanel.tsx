@@ -17,6 +17,7 @@ import { useFmt, useT } from '../i18n'
 
 export interface MeshListItem { instanceId: number; label: string; folder: string; visible: boolean }
 export interface PlacedObject { id: number; name: string; visible: boolean }
+export interface VolumeItem { volume_id: number; name: string }
 export interface ListedRows { segmentKeys: string[]; unsegmented: boolean; placedIds: number[]; shapeFolders: string[]; tsdfFolders: string[] }
 export interface FloorLevelState { candidates: { instance_id: number; label: string; height_m: number | null }[]; selected: number | null }
 
@@ -29,6 +30,20 @@ interface InstancesPanelProps {
   absorbedCount: number | null
   floorLevel: FloorLevelState
   placedObjects: PlacedObject[]
+  /** evaluation volumes (the assistant's or the user's): listed, framed on click, deletable —
+   *  they stay in the scene when the chat closes (USER 2026-10-09) */
+  volumes: VolumeItem[]
+  onFocusVolume: (id: number) => void
+  onDeleteVolume: (id: number) => void
+  /** every row has a VISIBLE box and an OBB box (USER 2026-10-09): visible on, OBB off by default */
+  obbKeys: Set<string>
+  onToggleObb: (segKey: string, on: boolean) => void
+  placedObb: Set<number>
+  onTogglePlacedObb: (id: number, on: boolean) => void
+  volumeHidden: Set<number>
+  volumeObb: Set<number>
+  onToggleVolume: (id: number, visible: boolean) => void
+  onToggleVolumeObb: (id: number, on: boolean) => void
   shapeMeshes: MeshListItem[]
   tsdfMeshes: MeshListItem[]
   selectedSegmentId: number | null
@@ -77,10 +92,11 @@ export function InstancesPanel(p: InstancesPanelProps) {
   const placed = p.placedObjects.filter(o => hit(o.name, o.id))
   const shapes = p.shapeMeshes.filter(m => hit(m.label, m.folder, m.instanceId))
   const tsdfs = p.tsdfMeshes.filter(m => hit(m.label, m.folder, m.instanceId))
+  const vols = p.volumes.filter(v => hit(v.name, v.volume_id))
   const unsegListed = hit(t('instances.unsegmented'))
   const listed: ListedRows = { segmentKeys: segs.map(s => s.key), unsegmented: unsegListed, placedIds: placed.map(o => o.id),
                                shapeFolders: shapes.map(m => m.folder), tsdfFolders: tsdfs.map(m => m.folder) }
-  const anyListed = segs.length + placed.length + shapes.length + tsdfs.length > 0 || unsegListed
+  const anyListed = segs.length + placed.length + shapes.length + tsdfs.length + vols.length > 0 || unsegListed
   const commitPlaced = async (o: PlacedObject) => {
     const v = editValue.trim()
     setEditing(null)
@@ -92,6 +108,12 @@ export function InstancesPanel(p: InstancesPanelProps) {
     if (v && v !== m.label) await p.onRenameShape(m, v)
   }
 
+  // a generated mesh's OBB is its instance's
+  const obbOf = (instanceId: number): Partial<TreeNodeData> => {
+    const key = p.segments.find(s => s.id === instanceId)?.key
+    return key ? { obb: p.obbKeys.has(key), onObb: (v: boolean) => p.onToggleObb(key, v) } : {}
+  }
+
   const segNodes: TreeNodeData<SegmentInstance>[] = segs
     .map(seg => ({
       id: seg.key,
@@ -99,6 +121,8 @@ export function InstancesPanel(p: InstancesPanelProps) {
       color: seg.color,
       visible: seg.visible,
       onVisible: v => p.onToggleSegment(seg, v),
+      obb: p.obbKeys.has(seg.key),
+      onObb: v => p.onToggleObb(seg.key, v),
       label: editing === seg.key ? (
         <Input size="sm" autoFocus value={editValue} onChange={e => setEditValue(e.target.value)} onClick={e => e.stopPropagation()}
           onKeyDown={e => { if (e.key === 'Enter') commit(seg); if (e.key === 'Escape') setEditing(null) }} onBlur={() => commit(seg)} aria-label={t('instances.renameLabel')} />
@@ -160,6 +184,7 @@ export function InstancesPanel(p: InstancesPanelProps) {
               onSelect={n => { const o = placed.find(x => `pobj-${x.id}` === n.id); if (o) p.onFocusItem('placed', o.id) }}
               nodes={placed.map(o => ({
               id: `pobj-${o.id}`, icon: <Box aria-hidden />, visible: o.visible, onVisible: v => p.onTogglePlaced(o.id, v),
+              obb: p.placedObb.has(o.id), onObb: v => p.onTogglePlacedObb(o.id, v),
               label: editing === `pobj-${o.id}` ? (
                 <Input size="sm" autoFocus value={editValue} onChange={e => setEditValue(e.target.value)} onClick={e => e.stopPropagation()}
                   onKeyDown={e => { if (e.key === 'Enter') commitPlaced(o); if (e.key === 'Escape') setEditing(null) }} onBlur={() => commitPlaced(o)} aria-label={t('instances.renameLabel')} />
@@ -173,12 +198,25 @@ export function InstancesPanel(p: InstancesPanelProps) {
             }))} />
           </Section>
         )}
+        {vols.length > 0 && (
+          <Section title={t('instances.volumes', { n: vols.length })} flush>
+            <Tree ariaLabel={t('instances.volumes', { n: vols.length })} dense
+              onSelect={n => { const v = vols.find(x => `vol-${x.volume_id}` === n.id); if (v) p.onFocusVolume(v.volume_id) }}
+              nodes={vols.map(v => ({
+              id: `vol-${v.volume_id}`, icon: <Box aria-hidden />, label: v.name, meta: `#${v.volume_id}`,
+              visible: !p.volumeHidden.has(v.volume_id), onVisible: on => p.onToggleVolume(v.volume_id, on),
+              obb: p.volumeObb.has(v.volume_id), onObb: on => p.onToggleVolumeObb(v.volume_id, on),
+              actions: <IconButton size="sm" variant="danger" label={t('instances.deleteVolume')} icon={<Trash2 aria-hidden />} onClick={() => p.onDeleteVolume(v.volume_id)} />,
+            }))} />
+          </Section>
+        )}
         {shapes.length > 0 && (
           <Section title={t('instances.objectMeshes', { n: shapes.length })} flush>
             <Tree ariaLabel={t('instances.objectMeshes', { n: shapes.length })} dense
               onSelect={n => { const m = shapes.find(x => `shape-${x.folder}` === n.id); if (m) p.onFocusItem('shape', m.instanceId, m.instanceId) }}
               nodes={shapes.map(m => ({
               id: `shape-${m.folder}`, visible: m.visible, onVisible: v => p.onToggleShape(m, v),
+              ...obbOf(m.instanceId),
               label: editing === `shape-${m.folder}` ? (
                 <Input size="sm" autoFocus value={editValue} onChange={e => setEditValue(e.target.value)} onClick={e => e.stopPropagation()}
                   onKeyDown={e => { if (e.key === 'Enter') commitShape(m); if (e.key === 'Escape') setEditing(null) }} onBlur={() => commitShape(m)} aria-label={t('instances.renameLabel')} />
@@ -198,6 +236,7 @@ export function InstancesPanel(p: InstancesPanelProps) {
               onSelect={n => { const m = tsdfs.find(x => `tsdf-${x.folder}` === n.id); if (m) p.onFocusItem('tsdf', m.folder, m.instanceId) }}
               nodes={tsdfs.map(m => ({
               id: `tsdf-${m.folder}`, label: m.label, meta: m.folder, visible: m.visible, onVisible: v => p.onToggleTsdf(m, v),
+              ...obbOf(m.instanceId),
               actions: <IconButton size="sm" variant="danger" label={t('instances.deleteMeshHint', { folder: m.folder })} icon={<Trash2 aria-hidden />} onClick={() => p.onDeleteTsdf(m)} />,
             }))} />
           </Section>

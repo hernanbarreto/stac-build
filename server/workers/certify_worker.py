@@ -110,6 +110,8 @@ def _certify_work(pipe: WorkerPipe, session_dir: str, config: dict):
     if server_dir not in sys.path:
         sys.path.insert(0, server_dir)
 
+    # the descriptions job a segment rename orders (pipeline_manager, kind "captions")
+    captions_only = bool(config.get("_captions_only"))
     # from here on `config` IS the job's frozen configuration (point 139)
     config, config_sha = _frozen_config(session_path, config, pipe.send_log)
     from reconstruction.loops.config import load_loops_config
@@ -120,6 +122,30 @@ def _certify_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # certification: a missing / bad key fails the stage naming it, now
     from segmentation.object_captioner import load_object_captions
     captions_cfg = load_object_captions(config)
+
+    if captions_only:
+        # USER 2026-10-09: a renamed segment's ShapeR description is re-made under its new name.
+        # The user's names go onto the result first; the pass then describes again only the
+        # objects whose caption stamp changed (the prompt carries the name) and keeps the rest.
+        from segmentation.label_overrides import FILE as _LOF, apply_to_session
+        if not (output_dir / "segmentation_result.json").exists():
+            pipe.send_log("[captions] no segmentation_result.json — nothing to describe")
+            return
+
+        def _names_sig():
+            p = output_dir / _LOF
+            return p.read_bytes() if p.exists() else b""
+        # names given WHILE this job describes (its order was refused: one was running) are
+        # taken too — once more, until the names stop changing (three passes at most)
+        for _pass in range(3):
+            before = _names_sig()
+            apply_to_session(output_dir, log=pipe.send_log)
+            _caption_objects(pipe, session_path, config, captions_cfg)
+            if _names_sig() == before:
+                break
+            pipe.send_log("[captions] names changed while describing — describing again")
+        pipe.send_progress(100, "Object descriptions updated", stage=STAGE)
+        return
 
     cloud = output_dir / "cleaned_cloud.ply"
     if not cloud.exists():

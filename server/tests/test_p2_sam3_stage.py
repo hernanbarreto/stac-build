@@ -121,10 +121,16 @@ def test_a_propagation_error_fails_the_prompt_instead_of_returning_partial_frame
     wrapper.predictor = _Predictor(RuntimeError("tracker exploded"))
     with pytest.raises(w.SAM3RunError, match="propagate_in_video failed for prompt 'desk'"):
         wrapper.process_batch("/tmp/batch", "desk", {0: 0, 1: 1})
-    assert wrapper._batch_session is None, "the session is dropped, not reused"
+    assert not wrapper._batch_sessions, "the session is dropped, not reused"
+    # USER 2026-10-09 ("no debe nunca fallar por colapso del GPU", replacing point 92's "an
+    # OOM is a failure"): an out-of-memory midway is a STOP — the frames completed before it
+    # come back with the session released, and the batch loop continues the rest
     wrapper.predictor = _Predictor(RuntimeError("CUDA out of memory"))
-    with pytest.raises(w.SAM3OutOfMemory, match="out of memory"):
+    with pytest.raises(w.SAM3PropagationStopped, match="out of CUDA memory") as stop:
         wrapper.process_batch("/tmp/batch", "desk", {0: 0, 1: 1})
+    assert stop.value.cause == w.STOP_OUT_OF_MEMORY and stop.value.frames_done == 1
+    assert sorted(stop.value.partial) == [0], "only the frame completed before the stop"
+    assert not wrapper._batch_sessions, "the session is released for a fresh one"
 
     class _NoPrompt(_Predictor):
         def handle_request(self, request):
@@ -169,7 +175,7 @@ def test_the_sam3_worker_fails_the_stage_on_any_prompt_not_run_to_the_end(tmp_pa
     out, cfg = _worker_session(tmp_path, ["desk", "floor", "door"])
 
     def partial(frames_dir, output_dir, prompt, frame_map, boxes_map, on_progress,
-                prompt_status, fallback_prompts=None):
+                prompt_status, fallback_prompts=None, config=None, defer_cloud_mapping=False):
         prompt_status["desk"] = {"status": "ran", "n_objects": 1}
         prompt_status["floor"] = {"status": "ran", "n_objects": 1,
                                   "note": "ran after one CUDA out-of-memory recovery"}
@@ -190,7 +196,7 @@ def test_the_sam3_worker_fails_the_stage_when_the_projection_fails(tmp_path, mon
     (out / "cleaned_cloud.ply").write_bytes(b"ply")
 
     def ok(frames_dir, output_dir, prompt, frame_map, boxes_map, on_progress,
-           prompt_status, fallback_prompts=None):
+           prompt_status, fallback_prompts=None, config=None, defer_cloud_mapping=False):
         prompt_status["desk"] = {"status": "ran", "n_objects": 1}
         return {"instances": [{"id": 0}]}
 
@@ -209,7 +215,7 @@ def test_the_sam3_worker_crops_meshes_only_from_a_scene_mesh_stamped_for_this_re
     (out / "cleaned_cloud.ply").write_bytes(b"ply")
 
     def ok(frames_dir, output_dir, prompt, frame_map, boxes_map, on_progress,
-           prompt_status, fallback_prompts=None):
+           prompt_status, fallback_prompts=None, config=None, defer_cloud_mapping=False):
         prompt_status["desk"] = {"status": "ran", "n_objects": 1}
         return {"instances": [{"id": 0}]}
 
@@ -244,7 +250,12 @@ def test_the_cloud_worker_projects_nothing_and_removes_stale_projection_products
     src = (SERVER / "workers" / "cloudcompy_worker.py").read_text()
     assert "map_segmentation_to_cloud" not in src and "_result_is_stale" not in src
     assert "run_second_pass" not in src
-    assert "PROJECTION_PRODUCTS" in src and '"segmentation_result.json"' in src
+    # the stale products are removed through the ONE list every deleter shares
+    # (segmentation.republish.PROJECTION_PRODUCTS — moved there from this worker on
+    # 2026-10-08, the wave-2 close of point 96), and it names the projection's result
+    from segmentation.republish import PROJECTION_PRODUCTS, delete_projection_products  # noqa: F401
+    assert "delete_projection_products" in src
+    assert "segmentation_result.json" in PROJECTION_PRODUCTS and "scene_r.db" in PROJECTION_PRODUCTS
     assert "stop_semantic_service_verified(pipe" in src and "require_exclusive_gpu" in src
     assert "Potree build failed (non-critical)" not in src
 
@@ -268,33 +279,83 @@ def test_loop_classes_are_keyed_by_content_and_a_dead_service_fails(tmp_path, mo
     monkeypatch.setattr("phase_r.instance_store.InstanceStore", _Store)
     crop = np.zeros((4, 4, 3), np.uint8)
     monkeypatch.setattr(sc, "_mask_crop", lambda *a, **k: [crop])
-    monkeypatch.setattr(sc, "_model_identity", lambda: {"sha256": "engine-a"})
+    # the engine is THIS JOB's own (semantic.service.job_engine, launched from the job's
+    # configuration — point 95, close of wave 2 2026-10-08): its verified identity, read once
+    # it is up, is the model in every cache key
     import semantic.service as svc
-    monkeypatch.setattr(svc, "ensure_service", lambda *a, **k: False)
+    engine = {"identity": {"sha256": "engine-a"}, "up": False, "launched": []}
+
+    @contextlib.contextmanager
+    def job_engine(config, **kw):
+        engine["launched"].append((kw.get("stage"), kw.get("run_config_path"), config))
+        if not engine["up"]:
+            raise svc.EngineUnavailable("loop classes: vLLM did not come up within the startup bound")
+        yield dict(engine["identity"])
+
+    monkeypatch.setattr(svc, "job_engine", job_engine)
+    # the identity that engine WOULD have, computed without a launch (semantic.serve.
+    # expected_identity — the weights' sha256 in the semantic env; stubbed: the test never
+    # hashes 16 GB): the keys are built with it, and vLLM comes up only for an instance the
+    # store does not hold under its key (close of wave 2, 2026-10-08)
+    import semantic.serve as serve
+    asked = []
+    monkeypatch.setattr(serve, "expected_identity",
+                        lambda backend, config_path=None, log=print, **kw: (
+                            asked.append((backend, config_path)), dict(engine["identity"]))[1])
+    job_cfg = {"semantic": {"service": {}}, "autoprompt": {"backend": "qwen_local"}}
     insts = [{"instance_id": 1, "label": "desk"}]
     with pytest.raises(sc.LoopClassError, match="did not come up"):
-        sc.classify_instances(out, tmp_path, insts, cfg, {1: 0}, {1: [0]})
+        sc.classify_instances(out, tmp_path, insts, cfg, {1: 0}, {1: [0]}, config=job_cfg)
     assert not meta, "no default recorded for a service that was down"
+    assert engine["launched"][-1][0] == "loop classes" and engine["launched"][-1][2] is job_cfg, \
+        "launched from the JOB's configuration, as this job's own engine"
+    assert asked == [("qwen_local", None)], "the identity computed first (no frozen file here)"
     # the service up: the verdict is cached under the CONTENT key, not the instance id
-    monkeypatch.setattr(svc, "ensure_service", lambda *a, **k: True)
+    engine["up"] = True
     import semantic.client as scl
     client = SimpleNamespace(health=lambda: {"ok": True})
     monkeypatch.setattr(scl, "get_semantic_client", lambda **kw: client)
     import segmentation.shape_proposer as sp
     monkeypatch.setattr(sp, "_chat_json", lambda *a, **k: ({"class": "movable", "confidence": 0.9}, "{}"))
-    res = sc.classify_instances(out, tmp_path, insts, cfg, {1: 0}, {1: [0]})
+    res = sc.classify_instances(out, tmp_path, insts, cfg, {1: 0}, {1: [0]}, config=job_cfg)
     assert res[1]["class"] == "movable" and res[1]["provenance"] == "vlm_proposed"
     key = next(iter(meta))
     assert key.startswith(sc.CACHE_PREFIX) and "loop_class_1" not in meta
-    # the same crops under another instance id hit the cache; another model does not
+    from semantic.types import user as _user
+    crop_sha1 = _user("x", images=[crop]).images[0].sha1
+    assert key == sc.cache_key("desk", [crop_sha1], 64, {"sha256": "engine-a"}), \
+        "keyed by the identity of the engine that is UP"
+    # the same crops under another instance id hit the cache — and launch NO engine (the
+    # identity computed without a launch closes the key); another model does not hit
     monkeypatch.setattr(sp, "_chat_json", lambda *a, **k: (_ for _ in ()).throw(AssertionError("called")))
-    res2 = sc.classify_instances(out, tmp_path, [{"instance_id": 7, "label": "desk"}], cfg, {7: 0}, {7: [0]})
+    n_launched = len(engine["launched"])
+    res2 = sc.classify_instances(out, tmp_path, [{"instance_id": 7, "label": "desk"}], cfg, {7: 0}, {7: [0]},
+                                 config=job_cfg)
     assert res2[7]["class"] == "movable"
-    monkeypatch.setattr(sc, "_model_identity", lambda: {"sha256": "engine-b"})
+    assert len(engine["launched"]) == n_launched, "every verdict cached: no vLLM launched"
+    engine["identity"] = {"sha256": "engine-b"}
     monkeypatch.setattr(sp, "_chat_json", lambda *a, **k: ({"class": "structural", "confidence": 0.8}, "{}"))
-    assert sc.classify_instances(out, tmp_path, insts, cfg, {1: 0}, {1: [0]})[1]["class"] == "structural"
+    assert sc.classify_instances(out, tmp_path, insts, cfg, {1: 0}, {1: [0]},
+                                 config=job_cfg)[1]["class"] == "structural"
     # an unusable answer is a failure, never a default
-    monkeypatch.setattr(sc, "_model_identity", lambda: {"sha256": "engine-c"})
+    engine["identity"] = {"sha256": "engine-c"}
     monkeypatch.setattr(sp, "_chat_json", lambda *a, **k: (None, "garbage"))
     with pytest.raises(sc.LoopClassError, match="nothing usable"):
-        sc.classify_instances(out, tmp_path, insts, cfg, {1: 0}, {1: [0]})
+        sc.classify_instances(out, tmp_path, insts, cfg, {1: 0}, {1: [0]}, config=job_cfg)
+    # a caller holding an engine passes it with its identity; without any identity: a failure
+    engine["launched"].clear()
+    asked.clear()
+    monkeypatch.setattr(sp, "_chat_json", lambda *a, **k: ({"class": "dynamic", "confidence": 0.7}, "{}"))
+    res3 = sc.classify_instances(out, tmp_path, insts, cfg, {1: 0}, {1: [0]}, client=client,
+                                 service={"sha256": "engine-d"})
+    assert res3[1]["class"] == "dynamic" and not engine["launched"] and not asked, \
+        "no second engine, no identity computed: the caller's engine answers"
+    monkeypatch.setattr(sc, "_live_identity", lambda: None)
+    with pytest.raises(sc.LoopClassError, match="no identity record"):
+        sc.classify_instances(out, tmp_path, [{"instance_id": 2, "label": "door"}], cfg, {2: 0}, {2: [0]},
+                              client=client)
+    # no instance with a crop: classified by the data, no engine at all
+    monkeypatch.setattr(sc, "_mask_crop", lambda *a, **k: [])
+    res4 = sc.classify_instances(out, tmp_path, insts, cfg, {1: None}, {1: []}, config=job_cfg)
+    assert res4[1]["provenance"] == "default" and "no SAM3 mask crop" in res4[1]["reason"]
+    assert not engine["launched"] and not asked

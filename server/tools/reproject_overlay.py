@@ -114,9 +114,11 @@ def _instance_mask(ev, sess, gi: np.ndarray, fnum: int, mask_frame: int,
             if mask.ndim > 2:
                 mask = mask[..., 0]
             mh, mw = mask.shape[:2]
-            mv = np.clip((pr * mh // ev.kh).astype(np.int64), 0, mh - 1)
-            mu = np.clip((pc * mw // ev.kw).astype(np.int64), 0, mw - 1)
-            if not (mask[mv, mu] > 0).any():
+            # the point's birth pixel (record grid) → the mask pixel through the exact grid
+            # maps (point 108), never a scale alone
+            mu, mv = ev.mask_pixels(pc.astype(np.float64), pr.astype(np.float64), mh, mw)
+            inm = (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
+            if not (mask[mv[inm], mu[inm]] > 0).any():
                 continue
             acc = (mask > 0) if acc is None else (acc | (mask > 0))
     if acc is None and fallback_oid is not None:
@@ -210,11 +212,17 @@ def render(session_dir: Path, output_dir: Path, kf_indices: List[int],
                 continue
             u = K[0, 0] * p[front, 0] / z[front] + K[0, 2]
             v = K[1, 1] * p[front, 1] / z[front] + K[1, 2]
-            # K lives on the TRACE grid (ev.kw x ev.kh) — rescale to the image
-            px = np.rint(u * iw / ev.kw).astype(np.int64)
-            py = np.rint(v * ih / ev.kh).astype(np.int64)
+            # K lives on the RECORD grid: the photograph is the native frame, reached through
+            # the exact map (Omega's crop and scale undone — point 108, never a scale alone);
+            # the mask through the store's declared grid (ev.mask_pixels)
+            from precision.camera import grid_to_native
+            nat = grid_to_native(np.stack([u, v], -1), ev.record_grid)
+            px = np.rint(nat[:, 0]).astype(np.int64)
+            py = np.rint(nat[:, 1]).astype(np.int64)
+            mu_all, mv_all = ev.mask_pixels(u, v, mh, mw)
             inb = (px >= 0) & (px < iw) & (py >= 0) & (py < ih)
             px, py = px[inb], py[inb]
+            mu_all, mv_all = mu_all[inb], mv_all[inb]
             if not len(px):
                 continue
             r = max(int(point_size), 0)
@@ -223,10 +231,9 @@ def render(session_dir: Path, output_dir: Path, kf_indices: List[int],
                     if dx * dx + dy * dy > r * r:
                         continue
                     canvas[np.clip(py + dy, 0, ih - 1), np.clip(px + dx, 0, iw - 1)] = col
-            # how many of them landed inside their own silhouette
-            mu = np.clip((px * mw // iw), 0, mw - 1)
-            mv = np.clip((py * mh // ih), 0, mh - 1)
-            inside = int(m[mv, mu].sum())
+            # how many of them landed inside their own silhouette (the exact mask pixel)
+            inm = (mu_all >= 0) & (mu_all < mw) & (mv_all >= 0) & (mv_all < mh)
+            inside = int(m[mv_all[inm], mu_all[inm]].sum())
             legend.append((col, str(inst.get("label", "?"))[:28] + f"#{iid}", inside, len(px)))
 
         # the outlines go on last: the eye needs the boundary to judge the dots

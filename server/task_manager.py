@@ -85,6 +85,15 @@ class TaskManager:
             if task:
                 print(f"[TaskManager] ❌ Failed {task.task_type} [{task_id}]: {error}")
 
+    def cancel(self, task_id: str, reason: str = ""):
+        """Remove a task the USER stopped (a pipeline cancel, point 111) — not a failure:
+        the log says cancelled."""
+        with self._lock:
+            task = self._tasks.pop(task_id, None)
+            if task:
+                print(f"[TaskManager] ⏹ Cancelled {task.task_type} [{task_id}]"
+                      f"{': ' + reason if reason else ''}")
+
     def get_active(self, session_id: Optional[str] = None) -> List[dict]:
         """Get all running tasks, optionally filtered by session_id."""
         with self._lock:

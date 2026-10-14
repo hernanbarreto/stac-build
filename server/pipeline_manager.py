@@ -7,8 +7,9 @@
 #   151/112 — ONE configuration per job: the bytes of config.yaml are read ONCE when the
 #     order is given (:func:`read_config_once`; any error fails the order), frozen into
 #     output/run_config.yaml at job start (intake.run_config) and every stage reads that copy.
-#     A job that continues a session (replace off) must carry the configuration the session
-#     was frozen with: another base configuration is REFUSED before any stage runs.
+#     A job that continues a session (replace off) runs with its own order's configuration:
+#     what differs from the session's frozen one is DECLARED and the job freezes its own
+#     (USER 2026-10-08 — it used to be refused); an edited frozen file is still refused.
 #   152/87 — every stage process is spawned with the deterministic environment
 #     (repro.deterministic_env: PYTHONHASHSEED=0, the cuBLAS workspace; fixed CPU threads
 #     from precision.runner.threads — precision.runner.step_env, the chain's own env).
@@ -20,6 +21,14 @@
 #     (semantic.service) from the job's start to its end; it releases it only while a stage
 #     whose WORKER takes the engine itself runs (STAGE_REGISTRY "engine": the VLM stage and the
 #     certification's description pass, which launch their own vLLM under their own pid).
+#     The lease carries the owner 'pipeline' and the job's key as its token; the server's own
+#     GPU tasks (meshing, the Segmentation Manager's SAM3, the legacy auto-segmentation) take
+#     the SAME lease as 'server' — they are refused (409) while a job holds it, and a job that
+#     starts while one of them holds it WAITS (:meth:`_take_job_lease`).
+#   111 — a cancel is COOPERATIVE with a bound (:meth:`_cancel_job`): the stage is told, it
+#     exits at a safe point (the workers poll check_cancel between steps, never inside a
+#     transaction — the epoch swap, the projection's store swap), and only past the bound is
+#     its tree killed; the log says which happened.
 #   149 — a resume or an Autosegment cleans the previous run's VLM / SAM3 products before the
 #     stage runs again (:func:`_cleanup_for_resume`); the stamped carriers the stages verify
 #     themselves (vlm_analysis.json, autoprompt_concepts.json — point 82 —, the projection's
@@ -53,6 +62,28 @@ logger = logging.getLogger(__name__)
 # the record of what ran the job: the manager's environment, the interpreter and the
 # environment handed to every stage (point 153) — no clock, no pid
 RUN_ENVIRONMENT_NAME = "run_environment.json"
+
+# THE CANCEL'S BOUND (point 111, 2026-10-08): after {"type": "cancel"} is sent, the stage
+# gets this long to exit at a safe point before its tree is killed. DERIVED from the cascade
+# the cancel already travels through, not chosen: a stage that HOSTS another worker
+# (workers.base.run_stage_inline — the reconstruction stage hosting the semantics and the
+# precision core) forwards the cancel to its child and gives it ``cancel_grace_s`` (30 s) to
+# reach a safe point, then terminates it and waits ``proc.wait(timeout=10)`` for it to go
+# (10 s) before it exits itself — so the manager's bound is that grace plus that wait, 40 s,
+# plus the manager's own detection latency (it looks at the process every CANCEL_POLL_S: a
+# host that exits at the last instant of its cascade is seen gone up to one poll later — two
+# polls of margin, so a stage that IS exiting is never logged as killed); the longest
+# TRANSACTION a stage cannot be interrupted in — the certification's epoch swap and the
+# projection's store swap (correction.apply.swap_transaction: a journaled sequence of
+# renames, the octree directory moved as ONE rename, O(1) on the same filesystem; the octree
+# is BUILT in the staging directory before the swap, where a kill loses nothing) — is far
+# inside it. A stage that has not exited by then is not between transactions: it is killed,
+# and the log says so.
+# how often the cancel looks at the stage process, and a waiting job at the GPU permit:
+# the stage loop's own pipe poll (0.25 s) — a cadence, not a decision
+CANCEL_POLL_S = 0.25
+LEASE_POLL_S = 0.25
+CANCEL_ACK_BOUND_S = 30.0 + 10.0 + 2 * CANCEL_POLL_S
 
 
 class OrderRefused(RuntimeError):
@@ -376,9 +407,10 @@ class PipelineManager:
         scan_key: Optional[str] = None,
         force: bool = False,
         kind: str = "reconstruct",
+        inputs: Optional[dict] = None,
     ) -> PipelineJob:
         """Start a pipeline for the given session.
-        
+
         Args:
             session_id: Session directory name (e.g. "2026-01-31-22-23-52")
             stages: Ordered list of stages to run (only enabled ones execute)
@@ -393,6 +425,10 @@ class PipelineManager:
             force: run every ENABLED stage even when its resume probe says it is
                    complete (the Autosegment window: the user asked for THESE stages
                    again, on purpose — nothing is wiped).
+            inputs: the prompts the COMMAND carries (point 162: ``vlm_prompt``, a string,
+                    and/or ``sam3_prompts``, a list) — they become the job's inputs; a
+                    command without them leaves the job to the snapshot of the scan's
+                    saved prompts, as before.
         """
         # ONE AND ONLY ONE (USER ORDER 2026-09-05): the SAME order on the SAME scan while the
         # first is pending is REFUSED loudly (never cancel-and-replace). Everything else queues
@@ -450,12 +486,14 @@ class PipelineManager:
 
         job.session_dir = session_dir
 
-        # THE PROMPTS TRAVEL WITH THE JOB (point 162): the session's VLM prompt and SAM3
-        # prompt list are read NOW, when the order is enqueued — not when the stage starts,
-        # hours later, after other jobs of the queue may have rewritten or wiped them. They
-        # are frozen under ``_stages`` of run_config.yaml and delivered to the session right
-        # before the stage that reads them (``_run_stage``).
-        job.inputs = snapshot_job_inputs(session_dir, stages, replace)
+        # THE PROMPTS TRAVEL WITH THE JOB (point 162): the COMMAND's prompts when it carries
+        # them (the Autosegment window sends the VLM prompt and the SAM3 list in the order
+        # itself), else the session's saved VLM prompt and SAM3 prompt list read NOW, when
+        # the order is enqueued — not when the stage starts, hours later, after other jobs
+        # of the queue may have rewritten or wiped them. They are frozen under ``_stages``
+        # of run_config.yaml and delivered to the session right before the stage that reads
+        # them (``_run_stage``).
+        job.inputs = snapshot_job_inputs(session_dir, stages, replace, command=inputs)
         apply_job_inputs(stages, job.inputs)
 
         # ONE GPU, ONE PIPELINE — anything already running sends this one to the
@@ -522,24 +560,72 @@ class PipelineManager:
     # manager takes the lease (semantic.service, a file every process sees) when a job
     # starts and drops it when the job ends — between stages the chat and the background
     # intel get 'busy' instead of starting vLLM on the card the next stage is about to take.
-    # The lease is per PROCESS: a stage whose worker launches its own vLLM (STAGE_REGISTRY
-    # "engine") must take it under its own pid, so the manager hands it over for exactly that
-    # stage and takes it back when the stage ends.
+    # The lease is per PROCESS AND OWNER: a stage whose worker launches its own vLLM
+    # (STAGE_REGISTRY "engine") must take it under its own pid, so the manager hands it over
+    # for exactly that stage and takes it back when the stage ends; the manager's own is
+    # owned by 'pipeline' with the job's key as its token, so a server GPU task of this very
+    # process (owner 'server') can neither pass for it nor release it.
 
     @staticmethod
     def _acquire_job_lease(job: "PipelineJob") -> None:
-        from semantic.service import acquire_engine_lease
-        acquire_engine_lease("pipeline", stage="job",
-                             session=PipelineManager.job_key(job.session_id, job.scan_key, job.kind))
+        from semantic.service import JOB_PERMIT_OWNER, acquire_engine_lease
+        key = PipelineManager.job_key(job.session_id, job.scan_key, job.kind)
+        acquire_engine_lease(JOB_PERMIT_OWNER, stage="job", session=key, token=key)
 
     @staticmethod
     def _release_job_lease(job: Optional["PipelineJob"] = None) -> bool:
         try:
-            from semantic.service import release_engine_lease
-            return bool(release_engine_lease())
+            from semantic.service import JOB_PERMIT_OWNER, release_engine_lease
+            key = (PipelineManager.job_key(job.session_id, job.scan_key, job.kind)
+                   if job is not None else None)
+            return bool(release_engine_lease(JOB_PERMIT_OWNER, key))
         except Exception as e:  # noqa: BLE001 — a release that fails is logged, never fatal
             logger.warning(f"[Pipeline] the engine lease could not be released: {e}")
             return False
+
+    async def _take_job_lease(self, job: "PipelineJob", on_progress: Optional[ProgressCallback]
+                              ) -> None:
+        """Take the job's permit — WAITING while a GPU task of the server itself holds it
+        (point 154: the meshing endpoints, the Segmentation Manager's SAM3, the legacy
+        auto-segmentation take the same lease as 'server'; a queued job waits for them,
+        declared in the log and in the first stage's message, which says how the permit is
+        released). Any other live holder (a stage process of another job that did not end,
+        a CLI) raises at once: that is a refusal, not a wait. A holder that is GONE by the
+        time it is looked at (the task ended between the refused acquire and the look — the
+        poll is LEASE_POLL_S, a meshing batch ends any moment) is retried, never a refusal
+        (2026-10-08: that window turned a wait into 'Refused: the lease could not be taken'
+        on a free card)."""
+        from semantic.service import (EngineBusy, SAM3_MANAGER_TOKEN, SERVER_TASK_OWNER,
+                                      _same_process, engine_lease_holder)
+        first = next((ss for ss in job.stages if ss.stage.enabled), None)
+        said = None
+        while True:
+            try:
+                self._acquire_job_lease(job)
+                if said is not None:
+                    logger.info(f"[Pipeline] {job.session_id}: the GPU permit is free again after "
+                                f"{time.time() - said:.0f} s — the job starts")
+                return
+            except EngineBusy:
+                holder = engine_lease_holder()
+                if holder is None:
+                    await asyncio.sleep(LEASE_POLL_S)     # released in the window: try again
+                    continue
+                if not (_same_process(holder) and holder.get("owner") == SERVER_TASK_OWNER):
+                    raise
+                how = ("released when the Segmentation Manager closes or a session is loaded"
+                       if holder.get("token") == SAM3_MANAGER_TOKEN
+                       else "released when that task ends")
+                msg = (f"waiting for the GPU: {holder.get('stage')} of session "
+                       f"{holder.get('session')} holds the permit — {how} (point 154)")
+                if said is None:
+                    said = time.time()
+                    logger.info(f"[Pipeline] {job.session_id}: {msg}")
+                    if first is not None:
+                        first.message = msg
+                    if on_progress:
+                        await on_progress(job.session_id, job.to_dict())
+                await asyncio.sleep(LEASE_POLL_S)
 
     async def _start_next_queued(self) -> None:
         """The card is free: start the next one in. Called when a pipeline ends,
@@ -586,26 +672,49 @@ class PipelineManager:
                         f"({len(self._queue)} still waiting)")
             return
 
-        # Send cancel via pipe
-        if job._server_conn:
-            try:
-                job._server_conn.send({"type": "cancel"})
-            except Exception:
-                pass
-
-        # Terminate the WHOLE stage process group (workers call os.setsid(),
-        # so bash/DA3/CloudCompy children die with them — a bare terminate()
-        # left GPU-holding orphans behind), then the worker itself as fallback.
-        if job._process and job._process.is_alive():
-            self._kill_stage_tree(job._process)
-
-        # Cancel the asyncio task
-        if job._task and not job._task.done():
-            job._task.cancel()
-
+        # The job is cancelled FIRST, so the orchestration loop starts no further stage
+        # while the running one is given its chance to stop.
         job.status = JobStatus.CANCELLED
         if 0 <= job.current_stage_idx < len(job.stages):
             job.stages[job.current_stage_idx].status = JobStatus.CANCELLED
+
+        # COOPERATIVE, WITH A BOUND (point 111): the stage is told, and gets up to
+        # CANCEL_ACK_BOUND_S to exit at a safe point — the workers poll pipe.check_cancel()
+        # between their steps, never inside a transaction (the certification's epoch swap,
+        # the projection's store swap), so a stage that acknowledges leaves nothing
+        # half-written. A stage that does not acknowledge within the bound is not between
+        # transactions: its WHOLE process group is killed (workers call os.setsid(), so
+        # bash/DA3/CloudCompy children die with them — a bare terminate() left GPU-holding
+        # orphans behind). The log says which of the two happened.
+        proc = job._process
+        sent = False
+        if job._server_conn:
+            try:
+                job._server_conn.send({"type": "cancel"})
+                sent = True
+            except Exception:  # noqa: BLE001 — the pipe is gone with the stage
+                pass
+        if proc is not None and proc.is_alive():
+            t0 = time.time()
+            if sent:
+                while proc.is_alive() and time.time() - t0 < CANCEL_ACK_BOUND_S:
+                    await asyncio.sleep(CANCEL_POLL_S)
+            if not proc.is_alive():
+                logger.info(f"[Pipeline] {session_id}: the stage acknowledged the cancel and "
+                            f"exited at a safe point after {time.time() - t0:.1f} s — nothing "
+                            f"was killed (point 111)")
+            else:
+                logger.warning(
+                    f"[Pipeline] {session_id}: the stage "
+                    + (f"did not exit within the cancel bound ({CANCEL_ACK_BOUND_S:.0f} s)"
+                       if sent else "could not be told (its pipe is gone)")
+                    + " — killing its process tree (point 111)")
+                self._kill_stage_tree(proc)
+        else:
+            # no stage process to wait for: the task is between stages, waiting for the GPU
+            # permit or before its first stage — it is cancelled where it waits
+            if job._task and not job._task.done():
+                job._task.cancel()
 
     def kill_all_stages(self, reason: str = "server shutdown") -> int:
         """SIGKILL the whole process tree of every stage still running (USER 2026-10-06:
@@ -1061,18 +1170,27 @@ class PipelineManager:
             logger.info(f"[Pipeline] 🗑️ Replace mode{cascade_label}: deleted {', '.join(all_deleted)}")
 
     @staticmethod
-    def _cleanup_for_resume(output_dir: Path, stage_id: StageId, log=None) -> List[str]:
+    def _cleanup_for_resume(output_dir: Path, stage_id: StageId, log=None,
+                            certify_runs: bool = True) -> List[str]:
         """A stage of the semantic chain about to run in a job that did NOT wipe output/
         (a resume, an Autosegment, a projection or certification ordered alone) starts from
         its own clean slate (docs/plan_determinismo.md point 149): the previous run's products
         of that stage — and of the stages its outputs feed (:data:`RESUME_CLEANUP`) — are
         deleted first, except the stamped carriers a stage verifies itself and reuses on an
         identical stamp (:data:`RESUME_KEEP`). Never cleaned_cloud.ply, never the
-        reconstruction: those are reused by stamp only (points 23 / 31). Returns what went."""
+        reconstruction: those are reused by stamp only (points 23 / 31). Returns what went.
+
+        ``certify_runs`` False (the job does not run the certification): a VLM or SAM3 run also
+        removes the previous certification's records — the acta and its reports, never the
+        epochs — which describe a segmentation that no longer exists (USER 2026-10-08); with
+        the certification in the job its stamp decides the reuse (point 126)."""
         import shutil as _shutil
         gone: List[str] = []
         kept: set = set()
-        for sid in PipelineManager.RESUME_CLEANUP.get(stage_id, []):
+        sids = list(PipelineManager.RESUME_CLEANUP.get(stage_id, []))
+        if not certify_runs and stage_id in (StageId.VLM, StageId.SAM3):
+            sids.append(StageId.CERTIFY)
+        for sid in sids:
             keep = set(PipelineManager.RESUME_KEEP.get(sid, ()))
             kept |= keep
             for pattern in PipelineManager.STAGE_OUTPUT_FILES.get(sid, []):
@@ -1097,11 +1215,11 @@ class PipelineManager:
     # ── one configuration per session (point 151) ─────────────────────────────
 
     @staticmethod
-    def _continuation_refused(session_dir: str, config: dict) -> Optional[str]:
-        """Why a job that continues ``session_dir`` (replace off) cannot run with ``config``:
-        the session was frozen with another BASE configuration (``_stages`` overrides are
-        the job's own). None when it may run — or when the session was never frozen (it is
-        frozen now by this job; declared in the log). An unreadable / edited frozen file
+    def _continuation_config_change(session_dir: str, config: dict) -> Optional[str]:
+        """What changes when a job continues ``session_dir`` (replace off) with ``config``: the
+        BASE sections that differ from the configuration the session was frozen with
+        (``_stages`` overrides are the job's own). None when nothing differs — or when the
+        session was never frozen (declared in the log). An unreadable / edited frozen file
         raises (the caller refuses the job with that reason)."""
         from intake.run_config import (canonical_yaml, effective_config, has_run_config,
                                        load_run_config, STAGES_KEY)
@@ -1121,10 +1239,8 @@ class PipelineManager:
         differing = sorted(k for k in set(a) | set(b)
                            if canonical_yaml({k: a.get(k)}) != canonical_yaml({k: b.get(k)}))
         return (f"this session's products were made with configuration {sha_have}… "
-                f"(output/run_config.yaml) and this order carries {sha_want}… — a session is ONE "
-                f"configuration (docs/plan_determinismo.md point 151); sections that differ: "
-                f"{', '.join(differing[:8])}{' …' if len(differing) > 8 else ''}. Run with Replace "
-                f"to start the session over on the new configuration, or restore the old one")
+                f"(output/run_config.yaml) and this job runs with {sha_want}…; sections that "
+                f"differ: {', '.join(differing[:8])}{' …' if len(differing) > 8 else ''}")
 
     # ── the record of what runs the job (point 153) ───────────────────────────
 
@@ -1230,21 +1346,21 @@ class PipelineManager:
             logger.info("[Pipeline] reconstruction requested without replace → RESUME: "
                         "output/ kept, each stage reuses what its own guards accept")
 
-        # ONE CONFIGURATION PER SESSION (docs/plan_determinismo.md point 151): a job that
-        # CONTINUES a session (replace off — a resume, an Autosegment, a projection or a
-        # certification ordered alone) must carry the base configuration the session was
-        # frozen with; another one is REFUSED before any stage runs — the session's products
-        # would otherwise come from two configurations. Stage overrides (``_stages``) are
-        # the job's own and do not count. A session frozen by no job yet (reconstructed
-        # before 2026-10-07) is frozen now, DECLARED.
+        # A job that CONTINUES a session (replace off — a resume, an Autosegment, a projection
+        # or a certification ordered alone) runs with its order's configuration (USER
+        # 2026-10-08: no refusal): the base sections that differ from the session's frozen
+        # configuration are DECLARED and the job freezes its own below. Stage overrides
+        # (``_stages``) are the job's own and do not count. An unreadable or edited frozen
+        # file still refuses the job.
         if not replace:
             try:
-                _why = self._continuation_refused(session_dir, config)
-            except Exception as e:  # noqa: BLE001 — an unreadable frozen file is a refusal too
-                _why = str(e)
-            if _why:
-                await self._fail_before_stages(job, f"Refused: {_why}", on_progress, on_complete)
+                _change = self._continuation_config_change(session_dir, config)
+            except Exception as e:  # noqa: BLE001 — an unreadable frozen file is a refusal
+                await self._fail_before_stages(job, f"Refused: {e}", on_progress, on_complete)
                 return
+            if _change:
+                logger.info(f"[Pipeline] DECLARED: {_change} — this job freezes its own "
+                            f"configuration")
 
         # THE JOB'S CONFIGURATION, FROZEN (docs/plan_determinismo.md point 69, 2026-10-07):
         # output/run_config.yaml + its sha256, written once here — after the replace wipe,
@@ -1272,11 +1388,16 @@ class PipelineManager:
             await self._fail_before_stages(job, f"Refused: {e}", on_progress, on_complete)
             return
 
-        # THE JOB'S ENGINE PERMIT (points 81 / 154): held from here to the job's end; another
-        # live holder (a stage process of another job that did not end, a CLI) refuses the
-        # job — one permit, never two users of the engine and the card
+        # THE JOB'S ENGINE PERMIT (points 81 / 154): held from here to the job's end; a GPU
+        # task of the server itself holding it (meshing, the Segmentation Manager's SAM3) is
+        # WAITED for; any other live holder (a stage process of another job that did not
+        # end, a CLI) refuses the job — one permit, never two users of the engine and the card
         try:
-            self._acquire_job_lease(job)
+            await self._take_job_lease(job, on_progress)
+        except asyncio.CancelledError:
+            await self._fail_before_stages(job, "cancelled while waiting for the GPU permit",
+                                           on_progress, on_complete, status=JobStatus.CANCELLED)
+            return
         except Exception as e:  # noqa: BLE001 — EngineBusy, or the lease file unwritable
             await self._fail_before_stages(job, f"Refused: {e}", on_progress, on_complete)
             return
@@ -1322,7 +1443,10 @@ class PipelineManager:
             # A RESUME / AUTOSEGMENT cleans the previous run's products of the semantic
             # stage about to run (point 149) — a job that wiped output/ has nothing to clean
             if not wiped_this_run and output_dir.exists():
-                self._cleanup_for_resume(output_dir, stage_state.stage.id)
+                self._cleanup_for_resume(
+                    output_dir, stage_state.stage.id,
+                    certify_runs=any(s.stage.id == StageId.CERTIFY and s.stage.enabled
+                                     for s in job.stages))
             # the prompts the job carries are delivered to the session now — the stage reads
             # them from the session's files, as they stood when the order was enqueued (162)
             for line in deliver_job_inputs(output_dir, stage_state.stage.id, job.inputs):
@@ -1344,9 +1468,28 @@ class PipelineManager:
             engine_stage = bool(STAGE_REGISTRY[stage_state.stage.id].get("engine", False))
             if engine_stage:
                 self._release_job_lease(job)
+            rounds = (stage_state.stage.id == StageId.SAM3
+                      and self._segmentation_rounds_on(job, config))
+            stage_config = (dict(config, _defer_projection=True) if rounds else config)
+            if stage_state.stage.id == StageId.CERTIFY and job.kind == "captions":
+                # the descriptions job a segment rename orders (USER 2026-10-09): the
+                # certification worker runs ONLY the per-object descriptions — the objects
+                # whose caption stamp changed (the renamed ones) are described again
+                stage_config = dict(stage_config, _captions_only=True)
             try:
-                ok = await self._run_stage(job, stage_state, session_dir, config, on_progress, replace)
-                if engine_stage and job.status != JobStatus.CANCELLED:
+                ok = await self._run_stage(job, stage_state, session_dir,
+                                           stage_config, on_progress, replace)
+                if ok and rounds and job.status != JobStatus.CANCELLED:
+                    ok = await self._segmentation_rounds(job, stage_state, session_dir, config,
+                                                         on_progress, replace)
+                if job.status == JobStatus.CANCELLED:
+                    # the stage ended because it was cancelled (it acknowledged and exited at
+                    # a safe point, or its tree was killed past the bound — point 111): a
+                    # worker that returns cleanly reports success, which is not this job's
+                    stage_state.status = JobStatus.CANCELLED
+                    success = False
+                    break
+                if engine_stage:
                     try:
                         self._acquire_job_lease(job)
                     except Exception as e:  # noqa: BLE001
@@ -1378,6 +1521,8 @@ class PipelineManager:
 
         if job.status != JobStatus.CANCELLED:
             job.status = JobStatus.DONE if success else JobStatus.FAILED
+        else:
+            success = False                  # a cancelled job never completes
         job.ended_at = time.time()           # job_of: the completion handler sees THIS job
         # the job is over: its engine permit goes BEFORE the completion handler, which
         # brings the chat's vLLM back when nothing else is queued (point 154)
@@ -1395,19 +1540,89 @@ class PipelineManager:
         # its cloud before the next one takes the GPU.
         await self._start_next_queued()
 
+    @staticmethod
+    def _segmentation_rounds_on(job: "PipelineJob", config: dict) -> bool:
+        """The segmentation runs in ROUNDS (USER 2026-10-09: "las pasadas son recursivas") when
+        ``autoprompt.segmentation_rounds`` is on and this job runs the VLM stage too (a round is
+        a VLM pass followed by a SAM3 pass). Strict: a missing key fails naming it."""
+        ap = config.get("autoprompt")
+        if ap is None:
+            return False                  # no auto-prompter at all (a test's minimal config)
+        if "segmentation_rounds" not in ap:
+            raise KeyError("config.yaml is missing 'autoprompt.segmentation_rounds'")
+        return bool(ap["segmentation_rounds"]) and any(
+            s.stage.id == StageId.VLM and s.stage.enabled for s in job.stages)
+
+    async def _segmentation_rounds(self, job: "PipelineJob", sam3_state: "StageState",
+                                   session_dir: str, config: dict,
+                                   on_progress: Optional[ProgressCallback], replace: bool) -> bool:
+        """Rounds 2, 3, … after round 1's SAM3 (segmentation.autoprompt.rounds): the VLM sees
+        every keyframe with what is segmented painted grey and names only what is left; SAM3
+        appends the round's new prompts to the store. It ends when a round names nothing new;
+        then every round's masks are projected on the cloud ONCE."""
+        from segmentation.autoprompt.rounds import reset_rounds, round_prompts
+        out = Path(session_dir) / "output"
+        vlm_state = next(s for s in job.stages if s.stage.id == StageId.VLM)
+        reset_rounds(out)
+        k = 2
+        while True:
+            if job.status == JobStatus.CANCELLED:
+                return False
+            logger.info(f"[Pipeline] {job.session_id}: segmentation round {k} — the VLM sees the "
+                        f"keyframes with what is already segmented painted grey")
+            vlm_state.status = JobStatus.RUNNING
+            vlm_state.message = f"Round {k}"
+            self._release_job_lease(job)
+            ok = await self._run_stage(job, vlm_state, session_dir, dict(config, _seg_round=k),
+                                       on_progress, replace)
+            if job.status == JobStatus.CANCELLED:
+                return False
+            try:
+                self._acquire_job_lease(job)
+            except Exception as e:  # noqa: BLE001
+                sam3_state.message = (f"the engine permit could not be taken back after round "
+                                      f"{k}'s VLM: {e} — the job stops (one permit, point 154)")
+                logger.error(f"[Pipeline] {sam3_state.message}")
+                return False
+            if not ok:
+                vlm_state.status = JobStatus.FAILED
+                return False
+            vlm_state.status = JobStatus.DONE
+            new = round_prompts(out, k)
+            if not new:
+                logger.info(f"[Pipeline] {job.session_id}: round {k} names nothing new — the "
+                            f"segmentation rounds end")
+                break
+            logger.info(f"[Pipeline] {job.session_id}: round {k} — SAM3 on {len(new)} new "
+                        f"prompt(s): {new}")
+            sam3_state.status = JobStatus.RUNNING
+            sam3_state.message = f"Round {k}: {len(new)} new prompt(s)"
+            ok = await self._run_stage(job, sam3_state, session_dir,
+                                       dict(config, _seg_round=k, _defer_projection=True),
+                                       on_progress, replace)
+            if not ok or job.status == JobStatus.CANCELLED:
+                return False
+            k += 1
+        sam3_state.status = JobStatus.RUNNING
+        sam3_state.message = "Projecting every round's masks on the cloud"
+        return await self._run_stage(job, sam3_state, session_dir,
+                                     dict(config, _projection_only=True), on_progress, replace)
+
     async def _fail_before_stages(self, job: PipelineJob, message: str,
                                   on_progress: Optional[ProgressCallback],
-                                  on_complete: Optional[Callable[[str, bool], Awaitable[None]]]
-                                  ) -> None:
+                                  on_complete: Optional[Callable[[str, bool], Awaitable[None]]],
+                                  status: JobStatus = JobStatus.FAILED) -> None:
         """End a job that cannot start (its frames are being written, the replace wipe was
-        refused): the first enabled stage carries the reason, the job is FAILED, the callbacks
-        run and the queue moves on — the same ending as a failed stage."""
-        logger.error(f"[Pipeline] {job.session_id}: {message}")
+        refused — or it was CANCELLED while waiting for the GPU permit): the first enabled
+        stage carries the reason, the job is ``status``, the callbacks run and the queue
+        moves on — the same ending as a failed stage."""
+        (logger.info if status == JobStatus.CANCELLED else logger.error)(
+            f"[Pipeline] {job.session_id}: {message}")
         first = next((ss for ss in job.stages if ss.stage.enabled), None)
         if first is not None:
-            first.status = JobStatus.FAILED
+            first.status = status
             first.message = message
-        job.status = JobStatus.FAILED
+        job.status = status
         job.ended_at = time.time()
         self._release_job_lease(job)
         if on_progress:
@@ -1841,26 +2056,66 @@ VLM_PROMPT_KEY = "vlm_prompt"          # under _stages.vlm of run_config.yaml
 SAM3_PROMPTS_KEY = "sam3_prompts"      # under _stages.sam3 of run_config.yaml
 
 
-def snapshot_job_inputs(session_dir: str, stages: List[PipelineStage], replace: bool) -> dict:
-    """What the order carries besides the configuration, read NOW from the scan's files
+def clean_sam3_prompts(prompts) -> List[str]:
+    """The SAM3 prompt list as the session stores it (the same normalisation as
+    segmentation.autoprompt.autosegment.set_sam3_prompts: whitespace collapsed, a trailing
+    ';' dropped, empties and case-insensitive duplicates removed, order kept) — so a list the
+    command carries compares equal to the one on disk."""
+    clean: List[str] = []
+    for c in list(prompts or []):
+        c = " ".join(str(c).split()).strip().strip(";")
+        if c and c.lower() not in {x.lower() for x in clean}:
+            clean.append(c)
+    return clean
+
+
+def snapshot_job_inputs(session_dir: str, stages: List[PipelineStage], replace: bool,
+                        command: Optional[dict] = None) -> dict:
+    """What the order carries besides the configuration: ``{"vlm_prompt": str | None}`` when
+    the VLM stage runs (None = the shipped prompt), ``{"sam3_prompts": [...]}`` when SAM3
+    runs WITHOUT a VLM pass (a VLM pass makes the list). Each comes from the COMMAND when it
+    carries it (point 162: the Autosegment window sends ``vlm_prompt`` and ``sam3_prompts``
+    in the order itself — the prompt text as typed, the list as typed; normalised here as the
+    session's writers would), else read NOW from the scan's files
     (segmentation.autoprompt.autosegment — the session's saved VLM prompt, the SAM3 prompt
-    list the window edited): ``{"vlm_prompt": str | None}`` when the VLM stage runs (None =
-    the shipped prompt), ``{"sam3_prompts": [...]}`` when SAM3 runs WITHOUT a VLM pass (a
-    VLM pass makes the list). A job that WIPES the session carries nothing: the user's rule
+    list the window edited). A job that WIPES the session carries nothing: the user's rule
     (point 97) leaves the frames and the video only, the saved prompt included — DECLARED
     by the wipe. An unreadable prompt file is read as 'no override' by the loader (P2's
-    autosegment.load_autosegment) — the stage that reads the delivered file fails on it."""
+    autosegment.load_autosegment) — the stage that reads the delivered file fails on it.
+    A command value of the wrong type FAILS the order (ValueError), never a default."""
     if replace:
         return {}
     enabled = {s.id for s in stages if s.enabled}
     out: dict = {}
     output_dir = Path(session_dir) / "output"
-    from segmentation.autoprompt.autosegment import load_autosegment, sam3_prompts
+    command = dict(command or {})
+    from segmentation.autoprompt.autosegment import (default_vlm_prompt, load_autosegment,
+                                                     sam3_prompts)
     if StageId.VLM in enabled:
-        saved = load_autosegment(output_dir).get(VLM_PROMPT_KEY)
-        out[VLM_PROMPT_KEY] = saved if isinstance(saved, str) and saved.strip() else None
+        if VLM_PROMPT_KEY in command:
+            want = command[VLM_PROMPT_KEY]
+            if want is not None and not isinstance(want, str):
+                raise ValueError(f"the command's {VLM_PROMPT_KEY} must be a string, got "
+                                 f"{type(want).__name__}")
+            text = (want or "").strip()
+            # empty, or the shipped prompt itself, is 'no override' — as save_vlm_prompt stores it
+            out[VLM_PROMPT_KEY] = text if (text and text != default_vlm_prompt().strip()) else None
+            logger.info(f"[Pipeline] vlm: the job carries the COMMAND's VLM prompt "
+                        f"({'the shipped prompt' if out[VLM_PROMPT_KEY] is None else 'an override'}; "
+                        f"point 162)")
+        else:
+            saved = load_autosegment(output_dir).get(VLM_PROMPT_KEY)
+            out[VLM_PROMPT_KEY] = saved if isinstance(saved, str) and saved.strip() else None
     if StageId.SAM3 in enabled and StageId.VLM not in enabled:
-        out[SAM3_PROMPTS_KEY] = [str(p) for p in sam3_prompts(output_dir)]
+        if SAM3_PROMPTS_KEY in command:
+            want = command[SAM3_PROMPTS_KEY]
+            if not isinstance(want, list) or not all(isinstance(p, str) for p in want):
+                raise ValueError(f"the command's {SAM3_PROMPTS_KEY} must be a list of strings")
+            out[SAM3_PROMPTS_KEY] = clean_sam3_prompts(want)
+            logger.info(f"[Pipeline] sam3: the job carries the COMMAND's SAM3 prompt list "
+                        f"({len(out[SAM3_PROMPTS_KEY])}; point 162)")
+        else:
+            out[SAM3_PROMPTS_KEY] = [str(p) for p in sam3_prompts(output_dir)]
     return out
 
 

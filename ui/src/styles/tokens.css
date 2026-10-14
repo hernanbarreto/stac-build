@@ -279,6 +279,7 @@ html[data-density='compact'] {
   --fs-4: 18px;
   --fs-5: 24px;
   --ctl-h: 28px;                  /* buttons, inputs, selects */
+  --sync-bar-h: 76px;             /* the synced player's two-tier bar (scrubber + controls) */
   --ctl-h-sm: 24px;
   --row-h: 28px;                  /* table / tree rows */
   --panel-pad: var(--sp-3);

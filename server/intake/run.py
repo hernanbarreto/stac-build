@@ -1,13 +1,23 @@
 """The one intake command: I0 quality features → I1 parallax keyframes +
-witness frames → I2 VLM content tags + SAM3 exclusion masks, with a resume
-marker (claude_stac.txt §4-F1; ``python -m intake.run --session <dir>``).
+witness frames, with a resume marker (claude_stac.txt §4-F1;
+``python -m intake.run --session <dir>``).
+
+I2 (VLM content tags + SAM3 exclusion masks) was REMOVED from the pipeline
+(USER 2026-10-08, docs/plan_determinismo.md point 75: "ya no corre VLM ahí"):
+no step of the intake touches the VLM or SAM3 any more, ``content_tags.json``
+and ``intake/exclusion_masks/`` are never written — a leftover of either from
+an older run is deleted (said in the log) so no reader can take it for a
+product of this intake — and a marker that still lists a ``content`` step is
+read as what it also says about I0 / I1 (:func:`load_state` drops the entry
+of a step that no longer exists, declared in the log; the marker version is
+unchanged because the I0 / I1 entries mean exactly what they meant).
 
 Resume by STAMP (docs/plan_determinismo.md point 66, 2026-10-07; conventions
 rule 6). ``<session>/intake/intake_state.json`` records, per step, the
 :func:`repro.stamp` of everything its product depends on — the sha256 of
 EVERY frame's bytes (keyed by its session-relative path), the step's upstream
-products (I0's report for I1; I1's lists for I2), the intake and DA3-extractor
-code (:data:`intake.stamps.INTAKE_CODE_FILES`), its parameters, the session
+products (I0's report for I1), the intake and DA3-extractor code
+(:data:`intake.stamps.INTAKE_CODE_FILES`), its parameters, the session
 camera K and the focal probe's own stamp (I1), and the CPU environment
 (library versions, CPU, BLAS core, JPEG decoders — points 74 / 79). A step
 whose saved stamp matches the one computed now (artifacts present and
@@ -37,24 +47,17 @@ the intake precedes every reconstruction and feeds its epoch 0).
 Keying on inputs rather than on "did the previous step run" means a
 deterministic step that re-ran and produced the same output does NOT drag the
 steps after it along: a reconstruction with "replace" deletes ``frames/
-selected_frames.json`` (pipeline_manager.FRAMES_DIR_FILES), I1 re-measures
-the same frames into the same keyframes, and I2 — the only step that needs
-the VLM and SAM3 — stays skipped.
-
-I2's exclusion masks are consumed downstream only through
-``intake.content.valid_exclusion_masks`` (the inventory + its stamp); I1 does
-not re-read its keyframes under them.
+selected_frames.json`` (pipeline_manager.FRAMES_DIR_FILES) and I1 re-measures
+the same frames into the same keyframes.
 
 The configuration every step runs on is the job's FROZEN copy,
 ``output/run_config.yaml`` (point 69): the pipeline manager freezes it at job
 start, a CLI freezes its own, and :func:`run_intake` refuses an intake
 configuration that is not the frozen one.
 
-This module decides nothing about frames: every threshold lives in the three
-stage modules and in ``config.yaml intake:``. It runs on CPU except for what
-I2 delegates to the semantic service / SAM3, and it constructs neither: the
-production tagger / segmenter are built lazily by ``intake.content.
-run_content`` only when ``intake.content.enabled`` and the step runs.
+This module decides nothing about frames: every threshold lives in the two
+stage modules and in ``config.yaml intake:``. It runs on CPU except for the
+focal probe (DA3, I1's instrument).
 """
 
 from __future__ import annotations
@@ -71,7 +74,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from intake import content as Cn
 from intake import frames_manifest as FM
 from intake import parallax as P
 from intake import quality as Q
@@ -86,7 +88,10 @@ STATE_NAME = "intake_state.json"
 TIMING_NAME = "intake_state.timing.json"      # the run record: times, epochs, absolute paths
 STATE_VERSION = 2                             # 2: stamps replace the (name, size, version) keys
 PROVENANCE = "tool_measured"
-STEPS = ("quality", "parallax", "content")
+STEPS = ("quality", "parallax")
+# The products of the removed I2 (USER 2026-10-08, plan point 75): never written again; a
+# leftover from an older run is deleted by :func:`remove_i2_leftovers` and said in the log.
+I2_LEFTOVERS = ("content_tags.json", "exclusion_masks")
 LOG_TAG = "[intake.run]"
 
 # Why a step ran / did not run — every decision names one of these (rule 5).
@@ -100,7 +105,6 @@ REASON_CODE_CHANGED = "code_changed"          # a file of the intake / DA3 code 
 REASON_INPUTS_CHANGED = "inputs_changed"      # frames, upstream products, environment, K ...
 REASON_ARTIFACT = "artifact"
 REASON_MATCHES = "marker_matches"
-REASON_SKIP_CONTENT = "skip_content"
 
 Progress = Callable[[int, str], Any]
 
@@ -144,24 +148,64 @@ def timing_path(session_dir: os.PathLike) -> Path:
     return Path(session_dir) / INTAKE_DIRNAME / TIMING_NAME
 
 
-def load_state(session_dir: os.PathLike) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """``(marker, problem)``. ``(None, None)`` when there is no marker;
-    ``(None, "marker_unreadable: <why>")`` when a marker exists but cannot be
-    read as a JSON object — every step then re-runs with THAT reason on record
-    (the marker is only a resume hint: nothing is lost by re-measuring, and
-    the rewrite replaces the broken file)."""
+def load_state(session_dir: os.PathLike, log: Optional[Callable] = None
+               ) -> Tuple[Optional[Dict[str, Any]], Optional[str], List[str]]:
+    """``(marker, problem, dropped_steps)``. ``(None, None, [])`` when there is no
+    marker; ``(None, "marker_unreadable: <why>", [])`` when a marker exists but
+    cannot be read as a JSON object — every step then re-runs with THAT reason
+    on record (the marker is only a resume hint: nothing is lost by
+    re-measuring, and the rewrite replaces the broken file).
+
+    A marker written before I2 was removed (USER 2026-10-08) may list a
+    ``content`` step: the entry is DROPPED here (named in ``dropped_steps`` and
+    said through ``log``; the caller rewrites the marker without it) and the
+    I0 / I1 entries are read as they are — they meant exactly what they mean
+    now (their stamps never depended on I2), so the marker version stays and
+    nothing measured is re-measured for a step that no longer exists."""
     p = state_path(session_dir)
     if not p.exists():
-        return None, None
+        return None, None, []
     try:
         with open(p) as f:
             st = json.load(f)
     except (OSError, ValueError) as e:
-        return None, f"{REASON_MARKER_UNREADABLE}: {p.name} ({type(e).__name__}: {e})"
+        return None, f"{REASON_MARKER_UNREADABLE}: {p.name} ({type(e).__name__}: {e})", []
     if not isinstance(st, dict):
         return None, (f"{REASON_MARKER_UNREADABLE}: {p.name} holds a "
-                      f"{type(st).__name__}, not a JSON object")
-    return st, None
+                      f"{type(st).__name__}, not a JSON object"), []
+    steps = st.get("steps")
+    gone: List[str] = []
+    if isinstance(steps, dict):
+        gone = sorted(k for k in steps if k not in STEPS)
+        if gone:
+            st = dict(st, steps={k: v for k, v in steps.items() if k in STEPS})
+            if log is not None:
+                log(f"{LOG_TAG} {p.name} lists step(s) {gone} that no longer exist (I2 was "
+                    f"removed, USER 2026-10-08) — their entries are dropped; I0 / I1 read as "
+                    f"recorded")
+    return st, None, gone
+
+
+def remove_i2_leftovers(session_dir: os.PathLike, log: Callable = print) -> List[str]:
+    """Delete ``intake/content_tags.json`` and ``intake/exclusion_masks/`` left by a run that
+    predates the removal of I2 (USER 2026-10-08, plan point 75): nothing writes them, nothing
+    may read them as a product of this intake. Returns the session-relative paths removed."""
+    import shutil
+    session_dir = Path(session_dir)
+    removed: List[str] = []
+    for name in I2_LEFTOVERS:
+        p = session_dir / INTAKE_DIRNAME / name
+        if p.is_dir():
+            shutil.rmtree(p)
+        elif p.exists():
+            p.unlink()
+        else:
+            continue
+        removed.append(f"{INTAKE_DIRNAME}/{name}")
+    if removed:
+        log(f"{LOG_TAG} deleted the products of the removed I2 (USER 2026-10-08): "
+            f"{', '.join(removed)} — no content tags, no exclusion masks")
+    return removed
 
 
 def write_state(session_dir: os.PathLike, state: Dict[str, Any]) -> Path:
@@ -243,24 +287,6 @@ def _parallax_problem(session_dir: Path) -> Optional[str]:
     p_warn = session_dir / INTAKE_DIRNAME / P.COVERAGE_WARNINGS_NAME
     if not p_warn.exists():
         return f"{p_warn} does not exist"
-    return None
-
-
-def _content_problem(session_dir: Path) -> Optional[str]:
-    try:
-        report = Cn.load_content(session_dir)
-    except Cn.ContentError as e:
-        return str(e)
-    masks = report.get("exclusion_masks")
-    if not isinstance(masks, dict) or not isinstance(masks.get("dir"), str) \
-            or not isinstance(masks.get("frames"), dict) or not isinstance(masks.get("stamp"), dict):
-        return (f"{Cn.content_tags_path(session_dir)} lacks exclusion_masks.dir / "
-                f"exclusion_masks.frames / exclusion_masks.stamp (always written by intake I2)")
-    masks_dir = St.in_session(masks["dir"], session_dir)
-    missing = [f for f in masks["frames"] if not Cn.mask_path(masks_dir, int(f)).exists()]
-    if missing:
-        return (f"{len(missing)} exclusion mask PNG(s) named by content_tags.json are "
-                f"missing from {masks_dir} (first: {missing[0]})")
     return None
 
 
@@ -382,34 +408,16 @@ def _said(log: Callable, step: str, reason: str, diffs: Sequence[str]) -> None:
 
 # ── the command ──────────────────────────────────────────────────────────
 
-def run_intake(session_dir: os.PathLike, icfg: IntakeConfig, *, tagger: Optional[Cn.VLMTagger] = None,
-               segmenter: Optional[Cn.Segmenter] = None, log: Callable = print,
+def run_intake(session_dir: os.PathLike, icfg: IntakeConfig, *, log: Callable = print,
                progress: Optional[Progress] = None, force: bool = False,
-               skip_content: bool = False,
-               before_content: Optional[Callable[[], Any]] = None,
-               before_sam3: Optional[Callable[[], Any]] = None,
                focal: Optional[Callable[..., Any]] = None,
                cancelled: Q.Cancelled = None,
                run_config: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
-    """I0 → I1 → I2 on ``<session>/frames`` with the resume marker
+    """I0 → I1 on ``<session>/frames`` with the resume marker
     ``<session>/intake/intake_state.json`` (stamps) and the run record
     ``intake_state.timing.json`` beside it.
 
-    ``force`` re-runs every step. ``skip_content`` leaves I2 out of this pass:
-    nothing is tagged, no VLM or SAM3 is touched, ``content_tags.json`` is NOT
-    written; a previous run's ``content_tags.json`` stays on disk untouched
-    and the marker's ``content`` entry records ``done`` false, ``skipped``
-    true and whether that file is now STALE (its stamp no longer matches the
-    current keyframes / witnesses). ``tagger`` / ``segmenter`` None → the
-    production QwenTagger / Sam3Segmenter, constructed by
-    :func:`intake.content.run_content` only when ``intake.content.enabled``
-    and I2 actually runs. ``before_content`` (optional) is called right before
-    I2 runs, and only when it runs with ``content.enabled`` — the place a
-    caller makes sure the semantic service is reachable and fails with the
-    reason when it is not. ``before_sam3`` (optional, default: nothing) is
-    forwarded to :func:`intake.content.run_content`, which calls it after the
-    last VLM tag and before the first SAM3 call — the place a caller hands the
-    GPU over (the map_worker stops vLLM there: the two never share the card).
+    ``force`` re-runs every step.
     ``focal(session_dir, quality, parallax_cfg, log, cancelled)`` returns the session
     camera's K (native px) that I1's rotation reference uses — default the DA3 probe
     of :mod:`intake.focal` (GPU, in this interpreter), reused on its own stamp; K and
@@ -425,10 +433,11 @@ def run_intake(session_dir: os.PathLike, icfg: IntakeConfig, *, tagger: Optional
     every step entry record the frozen configuration's sha256.
 
     Returns the run record: ``steps`` {step: {ran, reason, differences ...}},
-    the three stage reports as they stand on disk after the pass
+    the two stage reports as they stand on disk after the pass
     (``quality``, ``parallax`` {selected_frames, witness_frames,
-    coverage_warnings}, ``content`` or None), ``summary`` counts,
-    ``artifacts`` paths (absolute, for the caller) and the marker path."""
+    coverage_warnings}), ``summary`` counts, ``artifacts`` paths (absolute,
+    for the caller), the marker path and ``i2_leftovers_removed`` (what an
+    older run's I2 had left, deleted now)."""
     t_run = time.monotonic()
     session_dir = Path(session_dir)
     frames_dir = session_dir / FRAMES_DIRNAME
@@ -455,7 +464,8 @@ def run_intake(session_dir: os.PathLike, icfg: IntakeConfig, *, tagger: Optional
     inventory = frame_inventory(frames_dir)
     log(f"{LOG_TAG} session {session_dir}: {inventory['n_frames']} frame(s) "
         f"{inventory['first']}..{inventory['last']} ({inventory['bytes_total']} bytes), "
-        f"force={force}, skip_content={skip_content}, run config {frozen_sha[:12]}")
+        f"force={force}, run config {frozen_sha[:12]}")
+    i2_removed = remove_i2_leftovers(session_dir, log)
     environment = St.cpu_environment_record()
     frame_inputs = St.frame_inputs(frames_dir, session_dir)
     if manifest is not None:                              # names and count first: no hashing yet
@@ -465,7 +475,7 @@ def run_intake(session_dir: os.PathLike, icfg: IntakeConfig, *, tagger: Optional
         except FM.FramesManifestError as e:
             raise IntakeRunError(str(e)) from e
 
-    old_state, marker_problem = load_state(session_dir)
+    old_state, marker_problem, dropped_steps = load_state(session_dir, log)
     if marker_problem:
         log(f"{LOG_TAG} {marker_problem} — every step re-runs and the marker is rewritten")
     if old_state is not None and old_state.get("version") != STATE_VERSION:
@@ -589,61 +599,6 @@ def run_intake(session_dir: os.PathLike, icfg: IntakeConfig, *, tagger: Optional
                               "coverage_warnings.json")
     steps_out["parallax"] = {"ran": run1, "reason": why1, "differences": d1}
 
-    # ── I2 content ───────────────────────────────────────────────────────
-    _progress(progress, 40, "intake I2: content tags + exclusion masks")
-    keyframes, witnesses = Cn.read_i1_frames(session_dir)
-    st2 = St.step_stamp({f"{FRAMES_DIRNAME}/{P.SELECTED_FRAMES_NAME}":
-                         frames_dir / P.SELECTED_FRAMES_NAME,
-                         f"{FRAMES_DIRNAME}/{P.WITNESS_FRAMES_NAME}":
-                         frames_dir / P.WITNESS_FRAMES_NAME},
-                        {**common, "params": _jsonable_params(icfg.content)})
-    run2, why2, d2 = decide(old_state, "content", st2, force,
-                            lambda: _content_problem(session_dir), marker_problem)
-    content: Optional[Dict[str, Any]] = None
-    content_step: Dict[str, Any] = {"ran": False, "reason": why2, "skipped": False,
-                                    "differences": d2}
-    if not run2:
-        log(f"{LOG_TAG} content: skipped ({why2}: same keyframes / witnesses, parameters, "
-            f"code and environment) — reusing {Cn.CONTENT_TAGS_NAME}")
-        content = Cn.load_content(session_dir)
-    elif skip_content:
-        stale = Cn.content_tags_path(session_dir).exists()
-        reason = (f"{REASON_SKIP_CONTENT}: I2 not run in this pass (it would have run: "
-                  f"{why2})")
-        log(f"{LOG_TAG} content: skipped ({reason})"
-            + (f" — WARNING: the existing {Cn.CONTENT_TAGS_NAME} predates the current "
-               f"keyframes / witnesses and is STALE" if stale else ""))
-        state["steps"]["content"] = {
-            "done": False, "skipped": True, "reason": reason, "stamp": dict(st2),
-            "run_config_sha256": frozen_sha, "stale_artifact": stale,
-        }
-        timing["steps"]["content"] = {"finished_at": _now_iso(), "elapsed_s": 0.0,
-                                      "skipped": True}
-        write_state(session_dir, state)
-        write_timing(session_dir, timing)
-        content_step = {"ran": False, "reason": REASON_SKIP_CONTENT, "skipped": True,
-                        "would_have_run": why2, "stale_artifact": stale, "differences": d2}
-    else:
-        _said(log, "content", why2, d2)
-        log(f"{LOG_TAG} content: enabled={icfg.content.enabled}, backend={icfg.content.backend}")
-        if icfg.content.enabled and before_content is not None:
-            before_content()
-        t0 = time.monotonic()
-        content = Cn.run_content(session_dir, keyframes, witnesses, icfg.content,
-                                 tagger=tagger, segmenter=segmenter, log=log, heartbeat_s=hb,
-                                 before_sam3=before_sam3, cancelled=cancelled)
-        state["steps"]["content"] = _entry(
-            st2, [Cn.content_tags_path(session_dir)], session_dir,
-            {"enabled": content["enabled"],
-             "tagged": content["summary"]["tagged"],
-             "parse_failures": content["parse_failures"],
-             "n_exclusion_masks": content["exclusion_masks"]["n_frames_written"]}, frozen_sha)
-        timing["steps"]["content"] = _timing_entry(t0)
-        write_state(session_dir, state)
-        write_timing(session_dir, timing)
-        content_step = {"ran": True, "reason": why2, "skipped": False, "differences": d2}
-    steps_out["content"] = content_step
-
     _progress(progress, 100, "intake done")
     summary = {
         "n_frames": int(quality["n_frames"]),
@@ -651,20 +606,17 @@ def run_intake(session_dir: os.PathLike, icfg: IntakeConfig, *, tagger: Optional
         "n_keyframes": int(selected["selected_count"]),
         "n_witness": len(witness["frames"]),
         "n_warnings": len(warnings_doc["warnings"]),
-        "content_enabled": (bool(content["enabled"]) if content is not None else None),
-        "n_exclusion_masks": (int(content["exclusion_masks"]["n_frames_written"])
-                              if content is not None else None),
     }
     timing["elapsed_s"] = round(time.monotonic() - t_run, 3)
     timing["finished_at"] = _now_iso()
     write_timing(session_dir, timing)
-    if state != old_state:            # e.g. only the recorded run configuration changed; an
-        write_state(session_dir, state)   # identical pass leaves the marker's bytes alone
+    # e.g. only the recorded run configuration changed, or the marker on disk still listed a
+    # step that no longer exists (dropped on read); an identical pass leaves the marker's bytes
+    if state != old_state or dropped_steps:
+        write_state(session_dir, state)
     log(f"{LOG_TAG} done in {time.monotonic() - t_run:.1f} s: {summary['n_usable']}/"
         f"{summary['n_frames']} usable frames, {summary['n_keyframes']} keyframes, "
-        f"{summary['n_witness']} witnesses, {summary['n_warnings']} coverage warning(s), "
-        f"content {'not run' if content is None else summary['n_exclusion_masks']}"
-        f"{'' if content is None else ' exclusion mask(s)'}; steps "
+        f"{summary['n_witness']} witnesses, {summary['n_warnings']} coverage warning(s); steps "
         + ", ".join(f"{k}={'ran' if v['ran'] else 'skipped'}" for k, v in steps_out.items()))
     return {
         "version": STATE_VERSION,
@@ -674,23 +626,18 @@ def run_intake(session_dir: os.PathLike, icfg: IntakeConfig, *, tagger: Optional
         "run_config_sha256": frozen_sha,
         "frames_manifest": frames_manifest,
         "force": bool(force),
-        "skip_content": bool(skip_content),
         "steps": steps_out,
         "quality": quality,
         "parallax": {"selected_frames": selected, "witness_frames": witness,
                      "coverage_warnings": warnings_doc},
-        "content": content,
         "summary": summary,
+        "i2_leftovers_removed": i2_removed,
         "artifacts": {
             "quality_features": str(frames_dir / Q.QUALITY_FEATURES_NAME),
             "frame_quality": str(frames_dir / Q.LEGACY_FRAME_QUALITY_NAME),
             "selected_frames": str(frames_dir / P.SELECTED_FRAMES_NAME),
             "witness_frames": str(frames_dir / P.WITNESS_FRAMES_NAME),
             "coverage_warnings": str(session_dir / INTAKE_DIRNAME / P.COVERAGE_WARNINGS_NAME),
-            "content_tags": (str(Cn.content_tags_path(session_dir)) if content is not None
-                             else None),
-            "exclusion_masks_dir": (str(Cn.exclusion_masks_dir(session_dir))
-                                    if content is not None else None),
             "state": str(state_path(session_dir)),
             "timing": str(timing_path(session_dir)),
         },
@@ -703,28 +650,21 @@ def run_intake(session_dir: os.PathLike, icfg: IntakeConfig, *, tagger: Optional
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         prog="python -m intake.run",
-        description="Intake: I0 quality features → I1 parallax keyframes + witness frames → "
-                    "I2 VLM content tags + SAM3 exclusion masks, resumed by stamp.")
+        description="Intake: I0 quality features → I1 parallax keyframes + witness frames, "
+                    "resumed by stamp.")
     ap.add_argument("--session", required=True,
                     help="session directory (frames in <session>/frames/<frame:06d>.jpg)")
     ap.add_argument("--force", action="store_true",
                     help="re-run every step even when its marker matches")
-    ap.add_argument("--skip-content", action="store_true",
-                    help="leave I2 out of this pass (no VLM, no SAM3; content_tags.json not "
-                         "written)")
     args = ap.parse_args(argv)
     # the configuration of this job: the session's frozen copy when there is one, else the
     # server's — frozen now, this command is the job's start (point 69)
     icfg, _sha = cli_intake_config(Path(args.session), log=print)
-    res = run_intake(Path(args.session), icfg, log=print, force=args.force,
-                     skip_content=args.skip_content,
-                     before_content=Cn.cli_before_content(print),
-                     before_sam3=Cn.cli_before_sam3(print))
+    res = run_intake(Path(args.session), icfg, log=print, force=args.force)
     s = res["summary"]
     print(f"{LOG_TAG} keyframes={s['n_keyframes']} witnesses={s['n_witness']} "
-          f"warnings={s['n_warnings']} usable={s['n_usable']}/{s['n_frames']} "
-          f"content={'skipped' if res['content'] is None else ('enabled' if s['content_enabled'] else 'disabled')}"
-          f" exclusion_masks={s['n_exclusion_masks']}; marker {res['artifacts']['state']}")
+          f"warnings={s['n_warnings']} usable={s['n_usable']}/{s['n_frames']}; marker "
+          f"{res['artifacts']['state']}")
     return 0
 
 

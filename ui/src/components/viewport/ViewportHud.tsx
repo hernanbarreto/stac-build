@@ -16,7 +16,7 @@ import { Legend } from '../ui/Legend'
 import { Tooltip } from '../ui/Tooltip'
 import { ViewCube } from './ViewCube'
 import { useFmt, useT } from '../../i18n'
-import { EDGE_TOKENS, STATUS_TOKENS, DEV_RAMP } from './palette'
+import { STATUS_TOKENS, DEV_RAMP } from './palette'
 import type { ColorMode } from './FloatingToolbar'
 
 export type ViewPreset = 'top' | 'front' | 'right' | 'left' | 'back' | 'bottom' | 'iso'
@@ -55,7 +55,7 @@ interface ViewportHudProps {
 
 const SCALE_STEPS_M = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100]
 
-export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, metersPerPixel, colorMode, mvThreshold, statusFractions, deviationRange, showEdges, readouts, banner }: ViewportHudProps) {
+export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, metersPerPixel, colorMode, mvThreshold, statusFractions, deviationRange, readouts, banner }: ViewportHudProps) {
   const t = useT()
   const fmt = useFmt()
 
@@ -91,7 +91,7 @@ export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, 
         )}
       </div>
 
-      {(colorMode !== 'rgb' || showEdges) && (
+      {colorMode !== 'rgb' && (
         <div className="stac-hud__legend">
           {colorMode === 'status' && (
             <Legend glass title={t('colorMode.status')} categories={Object.entries(STATUS_TOKENS).map(([k, tok]) => ({
@@ -107,9 +107,6 @@ export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, 
           {colorMode === 'deviation' && (
             <Legend glass title={t('colorMode.deviation')} ramp={DEV_RAMP} min={fmt.number(0, 0)} max={deviationRange ? fmt.number(deviationRange.maxMm, 0) : undefined} unit="mm"
               categories={deviationRange ? [{ color: '--measure', label: t('deviation.tolerance'), value: fmt.mm(deviationRange.toleranceMm, 0) }] : undefined} />
-          )}
-          {showEdges && (
-            <Legend glass title={t('edges.title')} categories={Object.entries(EDGE_TOKENS).map(([k, tok]) => ({ color: tok, label: t(`edgeKind.${k}`) }))} />
           )}
         </div>
       )}

@@ -378,8 +378,17 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
     _art(f"{EPOCH_NPZ_DIR}/epoch_{epoch_to}.npz")
 
     # 9) floor transform (floor-align kind only) --------------------------
+    # canonical bytes (segmentation.pipeline.write_npz_canonical — np.savez stamps the wall
+    # clock into every zip entry and the npz is an input of the projection's stamp); its SEAL
+    # (floor_level.json, point 158) is written at the end of this transaction, once the staged
+    # cloud it levels has its final bytes (the mask filter and the re-consolidation below
+    # rewrite it) — see step 12
     if floor_npz is not None:
-        np.savez(tx / "floor_transform.npz", **floor_npz)
+        from segmentation.pipeline import write_npz_canonical
+        write_npz_canonical(tx / "floor_transform.npz",
+                            {"s": np.asarray(floor_npz["s"], np.float64),
+                             "R": np.asarray(floor_npz["R"], np.float64),
+                             "t": np.asarray(floor_npz["t"], np.float64)})
         _art("floor_transform.npz")
     for rel, payload in sorted((extra_files or {}).items()):
         p_extra = tx / rel
@@ -509,6 +518,28 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
                 log("  re-consolidation returned nothing — cloud left as warped")
         except Exception as e:  # noqa: BLE001 — declared, never fatal
             log(f"  re-consolidation failed ({e}) — cloud left as warped")
+
+    # 12) the SEAL of the re-level (docs/plan_determinismo.md point 158, wave-2 cross) -------
+    # A stage applies floor_transform.npz / floor_level.json only when the seal beside it
+    # names the geometry it processes (segmentation.pipeline._floor_seal_status: the
+    # reconstruction's identity, the sha256 of the cloud levelled, the npz's own bytes). The
+    # re-level's transform used to be staged UNSEALED, so the next Autosegment on a certified
+    # session refused its own floor. Written here, after every rewrite of the staged cloud
+    # (the mask filter, the re-consolidation) and before the octree, with the SAME fields the
+    # cloud stage's writer (workers.cloudcompy_worker._write_sealed_floor_transform) and
+    # main.py's explicit level_floor put under ``stamp``; an epoch artifact like the npz, so
+    # a seal of another cloud never stays live under this one.
+    if floor_npz is not None:
+        from correction.epoch import reconstruction_id_or_none
+        from repro import sha256_file
+        seal = {"leveled_by": f"certification: floor alignment epoch {epoch_to} "
+                              f"(correction.floor, kind floor; correction_id {correction_id})",
+                "selected_instance_id": None,
+                "stamp": {"reconstruction_id": reconstruction_id_or_none(output_dir),
+                          "cloud_sha256": sha256_file(tx / "cleaned_cloud.ply"),
+                          "floor_transform_sha256": sha256_file(tx / "floor_transform.npz")}}
+        (tx / "floor_level.json").write_text(json.dumps(seal, indent=2, sort_keys=True))
+        _art("floor_level.json")
 
     # 10) Potree inside the transaction -----------------------------------
     if cfg.apply.potree_rebuild:

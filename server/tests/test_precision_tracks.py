@@ -1,9 +1,10 @@
 """F4 — native-pixel tracks (claude_stac.txt §4-F4), on a rendered scene with a
 ground-truth tracker standing in for the network: every observation lands in
 native pixels with the error the tracker had (RMS vs ground truth reported), the
-held-out split is deterministic, I2's exclusion masks keep their pixels out of
-the queries, witness frames are tracked between their keyframes, loop pairs get
-their windows and SALAD's index file is read through its own image list."""
+held-out split is deterministic, nothing on disk under intake/ excludes a query
+(I2 eliminated, plan point 75), witness frames are tracked between their keyframes,
+loop pairs get their windows and SALAD's index file is read through its own image
+list; the instance loops enter on their evidence stamp (point 134)."""
 
 import json
 import sys
@@ -160,93 +161,37 @@ def test_the_split_is_deterministic_and_per_track(sess):
     assert abs(a.mean() - TCFG.heldout_frac) < 0.05
 
 
-def _write_masks(sess, frames, listed=None, stamp=True, enabled=True):
-    """I2's artifacts as the content stage leaves them: the PNGs and content_tags.json listing
-    ``listed`` (default: every mask) under the stamp of plan point 68."""
+def test_nothing_under_intake_excludes_a_query_i2_is_gone(sess):
+    """Plan point 75 (DECIDIDO USER 2026-10-08: I2 is ELIMINATED — "ya no corre VLM ahí"): the
+    readers of intake/content_tags.json and intake/exclusion_masks are gone from F4. A PNG and a
+    content report left on disk by an older run (listing every keyframe, under a stamp of the
+    old contract) change nothing: the queries cover the whole frame, the report has no
+    exclusion key and the chain's inputs name no mask. (Until 2026-10-08 the same files kept
+    the left half of every keyframe out of the queries.)"""
+    H, W = sess.renders[0].depth.shape
     mdir = sess.session_dir / "intake" / "exclusion_masks"
     mdir.mkdir(parents=True, exist_ok=True)
-    H, W = sess.renders[0].depth.shape
-    for f in frames:                           # the left half of the frame is excluded
+    for f in KF:                           # the left half of the frame "excluded", as I2 wrote it
         m = np.zeros((H, W), np.uint8)
         m[:, : W // 2] = 255
         cv2.imwrite(str(mdir / f"{f:06d}.png"), m)
-    listed = list(frames) if listed is None else list(listed)
-    doc = {"version": 1, "enabled": enabled,
-           "exclusion_masks": {"dir": str(mdir), "frames": {str(f): 100 for f in listed}}}
-    if stamp:
-        doc["stamp"] = T.exclusion_masks_stamp(mdir, listed)
-    (sess.session_dir / "intake" / "content_tags.json").write_text(json.dumps(doc))
-    return mdir
-
-
-def _clear_masks(sess):
-    mdir = sess.session_dir / "intake" / "exclusion_masks"
-    for p in mdir.glob("*.png"):
-        p.unlink()
-    (sess.session_dir / "intake" / "content_tags.json").unlink(missing_ok=True)
-
-
-def test_exclusion_masks_keep_their_pixels_out_of_the_queries(sess):
-    H, W = sess.renders[0].depth.shape
-    _write_masks(sess, KF)
+    (sess.session_dir / "intake" / "content_tags.json").write_text(json.dumps(
+        {"version": 1, "enabled": True,
+         "exclusion_masks": {"dir": str(mdir), "frames": {str(f): 100 for f in KF}}}))
     try:
         rep = T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
         tr = T.load_tracks_v2(sess.session_dir)
         qn = grid_to_native(tr["track_query_uv"].astype(np.float64), _gmap(sess))
         kf_q = np.isin(tr["track_query_frame"], KF)
-        assert (qn[kf_q, 0] >= W // 2 - 0.5).all()
-        assert rep["n_queries_dropped_excluded_or_edge"] > 0
-        assert rep["exclusion_masks"]["taken"] and rep["exclusion_masks"]["n"] == len(KF)
-        assert f"intake/exclusion_masks/{KF[0]:06d}.png" in T.chain_inputs(sess.session_dir)
+        assert (qn[kf_q, 0] < W // 2 - 0.5).any() and (qn[kf_q, 0] >= W // 2 - 0.5).any()
+        assert "exclusion_masks" not in rep and "n_queries_dropped_excluded_or_edge" not in rep
+        assert "n_queries_dropped_edge" in rep
+        assert not any("exclusion" in k or "content_tags" in k for k in T.chain_inputs(sess.session_dir))
+        assert not hasattr(T, "exclusion_mask_paths") and not hasattr(T, "CONTENT_TAGS_RELPATH")
     finally:
-        _clear_masks(sess)
-
-
-def test_a_leftover_mask_without_a_matching_stamp_is_not_applied(sess):
-    """Plan point 68: a PNG on disk is not an instruction. Only the masks content_tags.json lists
-    under a stamp that matches the files are applied; a report with I2 off (no frame listed), no
-    stamp, an unlisted PNG or a changed PNG leaves every query in place — declared in tracks.json."""
-    H, W = sess.renders[0].depth.shape
-
-    def left_half_kept() -> bool:
-        T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
-        tr = T.load_tracks_v2(sess.session_dir)
-        qn = grid_to_native(tr["track_query_uv"].astype(np.float64), _gmap(sess))
-        kf_q = np.isin(tr["track_query_frame"], KF)
-        return bool((qn[kf_q, 0] < W // 2 - 0.5).any())
-
-    def report():
-        return json.loads((sess.session_dir / "output" / "precision" / T.REPORT_NAME).read_text())["exclusion_masks"]
-    try:
-        # the previous run's masks are on disk, I2 now off: the report lists none
-        _write_masks(sess, KF, listed=[], enabled=False)
-        assert left_half_kept()
-        r = report()
-        assert not r["taken"] and r["unlisted_on_disk"] == len(KF) and "disabled" in r["reason"]
-        assert not any(k.startswith("intake/exclusion_masks/") for k in T.chain_inputs(sess.session_dir))
-        # listed but no stamp
-        _write_masks(sess, KF, stamp=False)
-        assert left_half_kept() and "no stamp" in report()["reason"]
-        # stamped, then one PNG replaced after the fact
-        _write_masks(sess, KF)
-        m = np.full((H, W), 255, np.uint8)
-        cv2.imwrite(str(sess.session_dir / "intake" / "exclusion_masks" / f"{KF[1]:06d}.png"), m)
-        assert left_half_kept() and "not the mask content_tags.json was stamped with" in report()["reason"]
-        # stamped for a subset: the unlisted PNG is ignored, the listed ones apply
-        _write_masks(sess, KF, listed=KF[:2])
-        T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
-        r = report()
-        assert r["taken"] and r["n"] == 2 and r["unlisted_on_disk"] == len(KF) - 2
-        tr = T.load_tracks_v2(sess.session_dir)
-        qn = grid_to_native(tr["track_query_uv"].astype(np.float64), _gmap(sess))
-        in_listed = np.isin(tr["track_query_frame"], KF[:2])
-        in_other = np.isin(tr["track_query_frame"], KF[2:])
-        assert (qn[in_listed, 0] >= W // 2 - 0.5).all() and (qn[in_other, 0] < W // 2 - 0.5).any()
-        # a listed mask whose PNG is gone: nothing applied, declared
-        (sess.session_dir / "intake" / "exclusion_masks" / f"{KF[0]:06d}.png").unlink()
-        assert left_half_kept() and "missing on disk" in report()["reason"]
-    finally:
-        _clear_masks(sess)
+        for p in mdir.glob("*.png"):
+            p.unlink()
+        (sess.session_dir / "intake" / "content_tags.json").unlink(missing_ok=True)
 
 
 def test_witnesses_are_tracked_between_their_keyframes(sess):
@@ -333,11 +278,16 @@ def test_the_report_holds_no_clock_and_the_timing_file_does(sess):
     assert rep["instance_loops"] == {"present": False, "taken": False}
 
 
-def test_instance_loops_enter_only_with_this_reconstructions_id(tmp_path, sess):
-    """Plan point 34: instance_loops.json's keyframe indices are taken only when the file was
-    measured on THIS reconstruction (its reconstruction_id), else reported and ignored."""
+def test_instance_loops_enter_only_with_this_reconstructions_id_and_a_fresh_evidence_stamp(tmp_path, sess):
+    """Plan points 34 and 134: instance_loops.json's keyframe indices are taken only when the
+    file was measured on THIS reconstruction (its reconstruction_id) AND carries the evidence
+    stamp correction.visit_drift_run wrote over the session as it is NOW (the files the closures
+    were measured on, the code, the parameters) — never the equality of an epoch number. Without
+    the stamp, or with the stamp of another state of the session, the file is refused, naming
+    what differs (the loops measured on the previous masks read as current until 2026-10-08)."""
     import shutil
     from correction.epoch import RECONSTRUCTION_ID_KEY, reconstruction_id
+    from correction.visit_drift_run import EVIDENCE_STAMP_KEY, evidence_stamp
     sd = tmp_path / "sess"
     shutil.copytree(sess.session_dir, sd)
     out = sd / "output"
@@ -352,11 +302,53 @@ def test_instance_loops_enter_only_with_this_reconstructions_id(tmp_path, sess):
     (out / T.INSTANCE_LOOPS_NAME).write_text(json.dumps({**loops, RECONSTRUCTION_ID_KEY: "f" * 64}))
     pairs, rep = T.instance_loops(out)
     assert pairs == [] and "another reconstruction" in rep["reason"]
+    # another reconstruction's file is no input of F4's chain stamp either
+    assert f"output/{T.INSTANCE_LOOPS_NAME}" not in T.chain_inputs(sd)
     rid = reconstruction_id(out)
+    # this reconstruction's id but NO evidence stamp (a file written before 2026-10-08, or by hand)
     (out / T.INSTANCE_LOOPS_NAME).write_text(json.dumps({**loops, RECONSTRUCTION_ID_KEY: rid}))
+    pairs, rep = T.instance_loops(out)
+    assert pairs == [] and not rep["taken"] and "evidence stamp" in rep["reason"] and "point 134" in rep["reason"]
+    assert rep["stamp_differences"]
+    # … but it IS an input of the chain by OWNERSHIP (the gauge's rule for its evidence files):
+    # re-measured, its bytes change and the chain's stamp with them; the freshness verdict is
+    # run_tracks', once — never a hash of the cloud on every resume probe of the chain
+    assert f"output/{T.INSTANCE_LOOPS_NAME}" in T.chain_inputs(sd)
+    # the stamp of the session as it is now: taken
+    stamped = {**loops, RECONSTRUCTION_ID_KEY: rid, EVIDENCE_STAMP_KEY: evidence_stamp(out)}
+    (out / T.INSTANCE_LOOPS_NAME).write_text(json.dumps(stamped))
     pairs, rep = T.instance_loops(out)
     assert pairs == [(0, 4)] and rep["taken"]
     assert f"output/{T.INSTANCE_LOOPS_NAME}" in T.chain_inputs(sd)
     T.run_tracks(sd, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
     doc = json.loads((out / "precision" / T.REPORT_NAME).read_text())
     assert doc["instance_loops"]["taken"] and doc["n_windows_by_kind"]["loop"] >= 1
+    # the session moves on (a segmentation appears — the same reconstruction, other masks):
+    # the same file is stale, by name
+    (out / "segmentation.json").write_text(json.dumps({"mask_file": "seg_masks.npz"}))
+    pairs, rep = T.instance_loops(out)
+    assert pairs == [] and not rep["taken"] and "point 134" in rep["reason"]
+    assert any("segmentation.json" in d for d in rep["stamp_differences"])
+
+
+def test_an_unreadable_instance_loops_file_fails_f4_never_a_default(tmp_path, sess):
+    """The gauge's rule for the same evidence class (``precision.gauge._evidence_doc``): an
+    instance_loops.json that is THERE and cannot be read fails the step naming it — never 'no
+    loops' with a reason in the report, which is a default in place of a broken input. An absent
+    file is still 'present: False'; another reconstruction's file is refused, reported."""
+    import shutil
+    sd = tmp_path / "sess"
+    shutil.copytree(sess.session_dir, sd)
+    out = sd / "output"
+    assert T.instance_loops(out) == ([], {"present": False, "taken": False})
+    assert T.instance_loops_owned(out) == (None, {"present": False, "taken": False})
+    (out / T.INSTANCE_LOOPS_NAME).write_text("{not json")
+    with pytest.raises(T.TracksError, match="is unreadable"):
+        T.instance_loops(out)
+    with pytest.raises(T.TracksError, match="is unreadable"):
+        T.chain_inputs(sd)
+    with pytest.raises(T.TracksError, match="is unreadable"):
+        T.run_tracks(sd, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+    (out / T.INSTANCE_LOOPS_NAME).write_text("[1, 2]")
+    with pytest.raises(T.TracksError, match="not an evidence document"):
+        T.instance_loops(out)

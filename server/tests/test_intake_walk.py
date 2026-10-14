@@ -51,15 +51,29 @@ def _w2c(c2w):
 
 
 def _write_windows(session, truth, noise_m, seed=0):
+    """The I3 product of a synthetic walk: the windows plan and files of ``truth`` — AND
+    ``intake/walk.json`` measured on them (point 66, USER 2026-10-08: the SALAD revisit
+    reference is computed from the walk's record of the windows, never from the window files,
+    so a session with windows and no walk has no reference). Returns the plan."""
     rng = np.random.default_rng(seed)
     n = len(truth)
     plan = W.plan_windows(n, G.window_frames, G.window_overlap_frac)
     wdir = session / "output" / W.WINDOWS_DIRNAME
     wdir.mkdir(parents=True)
     files = [f"{k:06d}.jpg" for k in range(n)]
-    json.dump({"windows": [[str(session / "frames" / f) for f in files[a:b]] for a, b in plan],
+    # the plan names its frames RELATIVE to the session (plan point 70, USER 2026-10-08)
+    json.dump({"windows": [[f"frames/{f}" for f in files[a:b]] for a, b in plan],
                "process_res": G.process_res, "model_id": G.model_id},
               open(wdir / "windows.json", "w"))
+    # the keyframe selection the chunk planner reads its keyframes' kinds from
+    # (reconstruction.chunk_covis.planning_indices, wave 1: rotation keyframes are excluded
+    # from the plan) — here every keyframe is a parallax one, as intake/parallax.py writes it
+    (session / "frames").mkdir(exist_ok=True)
+    json.dump({"version": "2.0", "method": "parallax_lk_12", "total_frames": n,
+               "selected_count": n, "selected_files": files,
+               "keyframes": [{"frame": k, "file": f, "closed_by": "quantum"}
+                             for k, f in enumerate(files)]},
+              open(session / "frames" / "selected_frames.json", "w"))
     for i, (a, b) in enumerate(plan):
         gauge = np.eye(4)                   # every window in its own arbitrary frame
         gauge[:3, :3] = _rot("y", rng.uniform(-180, 180)) @ _rot("x", rng.uniform(-20, 20))
@@ -72,6 +86,7 @@ def _write_windows(session, truth, noise_m, seed=0):
                  conf=np.ones((b - a, h, w), np.float32), extrinsics=_w2c(c2w),
                  intrinsics=np.tile(np.eye(3), (b - a, 1, 1)),
                  scale_factor=np.float64(1.0), is_metric=np.int64(1))
+    W.measure_walk(session, G, log=lambda *a: None)
     return plan
 
 

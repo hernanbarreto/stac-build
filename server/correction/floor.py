@@ -136,10 +136,14 @@ MAD_TO_SIGMA = 1.0 / 0.6744897501960817
 
 
 def _session_repeatability(session: CorrectionSession, cfg) -> float:
-    """What this session can repeat, measured by itself. The same cascade the
-    correction already uses (uncertainty.json → elastic seam residual →
-    intra-chunk agreement), with the config fallback only for a session that
-    wrote no evidence at all."""
+    """What this session can repeat, measured by itself (:func:`repeatability_of`)."""
+    return repeatability_of(session.output_dir, cfg)
+
+
+def repeatability_of(output_dir, cfg) -> float:
+    """What the session in ``output_dir`` can repeat, measured by itself. The same cascade the
+    correction already uses (uncertainty.json → elastic seam residual → intra-chunk agreement),
+    with the config fallback only for a session that wrote no evidence at all."""
     fb = float(cfg.visit_drift.default_repeatability_m)
     try:
         from reconstruction.certify.repeatability import session_repeatability
@@ -147,8 +151,7 @@ def _session_repeatability(session: CorrectionSession, cfg) -> float:
         # the bare except below swallowed, so this always fell back to the
         # config and never used what the session measured, against its own
         # docstring (found 2026-09-21). `visit_drift_run:56` reads it right.
-        v = session_repeatability(session.output_dir, fallback_m=fb,
-                                  log=lambda m: None)
+        v = session_repeatability(output_dir, fallback_m=fb, log=lambda m: None)
         sig = float((v or {}).get("sigma_floor_m") or 0.0)
         return sig if sig > 0 else fb
     except Exception:  # noqa: BLE001 — a session with no evidence keeps the fallback
@@ -579,10 +582,16 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
 #    llevarlo a cero") ─────────────────────────────────────────────────────────────────
 
 def _omega_chunk_of_keyframes(session: CorrectionSession) -> np.ndarray:
-    """The Omega chunk that OWNS each keyframe (the reconstruction's own records)."""
-    out = np.full(session.n_kf, -1, np.int64)
-    rec = Path(session.output_dir) / "omega_run" / "results_output"
-    for i, f in enumerate(session.frames):
+    """The Omega chunk that OWNS each keyframe (:func:`omega_chunk_of_frames`)."""
+    return omega_chunk_of_frames(session.output_dir, session.frames)
+
+
+def omega_chunk_of_frames(output_dir, frames) -> np.ndarray:
+    """The Omega chunk that OWNS each of ``frames`` (the reconstruction's own records)."""
+    frames = list(frames)
+    out = np.full(len(frames), -1, np.int64)
+    rec = Path(output_dir) / "omega_run" / "results_output"
+    for i, f in enumerate(frames):
         p = rec / f"frame_{int(f)}.npz"
         if p.exists():
             with np.load(p) as z:
@@ -888,26 +897,49 @@ def solve_floor_by_chunk(session: CorrectionSession, cfg: CorrectionConfig,
     hint_mask[hint_rows] = True
     cams = np.asarray(session.poses, np.float64)[:, :3, 3]
     n_kf = session.n_kf
+    lv = chunk_floor_levels(session.xyz, session.ks, cams, ck, fl, rep_m, fac, conf,
+                            hint_mask=hint_mask)
+    chunks, per_chunk, by_chunk = lv["chunks"], lv["per_chunk"], lv["by_chunk"]
+    cands_of, chosen, first_kf = lv["cands_of"], lv["chosen"], lv["first_kf"]
+    return _solve_floor_motions(session, cfg, log, fl, fac, conf, rep_m, ck, cams, n_kf, chunks,
+                                per_chunk, by_chunk, cands_of, chosen, first_kf)
+
+
+def chunk_floor_levels(xyz: np.ndarray, ks: np.ndarray, cams: np.ndarray, ck: np.ndarray, fl,
+                       rep_m: float, fac: float, conf: float,
+                       hint_mask: Optional[np.ndarray] = None) -> dict:
+    """Steps 1–4 of the block comment above — THE floor of every Omega chunk, the one concept the
+    certification, the chunk check and the floor metric share (USER 2026-10-08): per chunk, its
+    floor LEVELS below the cameras (each further one real by the user's rule) and the level UNDER
+    THE CAMERA (a 45° footprint; among those, camera-height continuity with the session).
+    ``xyz`` / ``ks``: the points and the keyframe INDEX each was born in; ``cams``: the keyframes'
+    camera centres; ``ck``: the Omega chunk of every keyframe; ``hint_mask`` (optional): the rows
+    the segmentation labels as floor — a hint, recorded, never deciding. Returns {chunks,
+    per_chunk (the records), by_chunk, cands_of, chosen (chunk → its level under the camera),
+    reference_camera_height_m, first_kf}."""
+    xyz = np.asarray(xyz, np.float64)
+    ks = np.asarray(ks)
+    cams = np.asarray(cams, np.float64)
+    ck = np.asarray(ck)
     chunks = sorted(set(int(c) for c in ck.tolist()))
     per_chunk: List[dict] = []
     cands_of: Dict[int, List[dict]] = {}
     cam_xz: Dict[int, Tuple[float, float]] = {}
-    cam_y_of: Dict[int, float] = {}
     first_kf: Dict[int, int] = {}
     for c in chunks:
         kfs = np.flatnonzero(ck == c)
         first_kf[c] = int(kfs[0])
-        sel = np.isin(session.ks, kfs)
-        P = session.xyz[sel]
-        ks_c = session.ks[sel]
+        sel = np.isin(ks, kfs)
+        P = xyz[sel]
+        ks_c = ks[sel]
+        hint_c = hint_mask[sel] if hint_mask is not None else np.zeros(len(P), bool)
         cam_y_min = float(cams[kfs, 1].min())
         cam_y_med = float(np.median(cams[kfs, 1]))
-        cam_y_of[c] = cam_y_med
         cam_xz[c] = (float(np.median(cams[kfs, 0])), float(np.median(cams[kfs, 2])))
         below = P[:, 1] < cam_y_min
         info = {"chunk": int(c), "keyframes": [int(kfs[0]), int(kfs[-1])],
                 "points": int(len(P)), "points_below_cameras": int(below.sum()),
-                "hint_points": int((hint_mask[sel] & below).sum()),
+                "hint_points": int((hint_c & below).sum()),
                 "camera_y_median_m": cam_y_med, "repeatability_m": float(rep_m)}
         cands = (_chunk_candidates(P[below], ks_c[below], fl, c, rep_m, fac, conf)
                  if int(below.sum()) >= 3 else [])
@@ -926,7 +958,7 @@ def solve_floor_by_chunk(session: CorrectionSession, cfg: CorrectionConfig,
                                      if q["judge"] else None)} for q in cands]
         info["levels_bound_reached"] = bool(len(cands) >= MAX_LEVELS and cands[-1]["real"])
         if info["hint_points"] >= 3:
-            info["hint_floor_y_m"] = round(float(np.median(P[(hint_mask[sel] & below)][:, 1])), 4)
+            info["hint_floor_y_m"] = round(float(np.median(P[(hint_c & below)][:, 1])), 4)
         per_chunk.append(info)
     by_chunk = {int(i["chunk"]): i for i in per_chunk}
 
@@ -971,7 +1003,49 @@ def solve_floor_by_chunk(session: CorrectionSession, cfg: CorrectionConfig,
         if "hint_floor_y_m" in info:
             info["hint_agrees"] = bool(abs(info["hint_floor_y_m"] - pick["floor_y_m"]) < float(fl.band_m))
         chosen[c] = pick
+    return {"chunks": chunks, "per_chunk": per_chunk, "by_chunk": by_chunk, "cands_of": cands_of,
+            "chosen": chosen, "reference_camera_height_m": H_ref, "first_kf": first_kf}
 
+
+def chosen_surfaces(levels: dict, cams: np.ndarray) -> Dict[int, str]:
+    """chunk → the SURFACE its floor under the camera is, by the identity rule of step 6 on the
+    levels of :func:`chunk_floor_levels` as measured (the reports' side: the chunk check and the
+    floor metric — without the tilt the correction turns them by): the walk's first chunk with a
+    floor names its real levels S1, S2, …; at every seam (the first keyframe the next chunk owns)
+    each real level of the next chunk takes the name of the NEAREST real level of the previous
+    chunk, both evaluated at that (x, z). Chunks with no floor under the camera are skipped, as
+    the correction skips them."""
+    cams = np.asarray(cams, np.float64)
+    names: Dict[Tuple[int, int], str] = {}
+    out: Dict[int, str] = {}
+    prev: Optional[int] = None
+    n = 0
+    for c in levels["chunks"]:
+        q = levels["chosen"].get(c)
+        if q is None:
+            continue
+        real = [r for r in levels["cands_of"][c] if r["real"]]
+        kf = int(levels["first_kf"][c])
+        x, z = float(cams[kf, 0]), float(cams[kf, 2])
+        if prev is None:
+            for r in real:
+                n += 1
+                names[(c, int(r["rank"]))] = f"S{n}"
+        else:
+            prev_at = [(names[(prev, int(r["rank"]))], _plane_y_at(r["normal"], r["centroid"], x, z))
+                       for r in levels["cands_of"][prev] if r["real"]]
+            for r in real:
+                y = _plane_y_at(r["normal"], r["centroid"], x, z)
+                names[(c, int(r["rank"]))] = min(prev_at, key=lambda t: abs(y - t[1]))[0]
+        out[c] = names[(c, int(q["rank"]))]
+        prev = c
+    return out
+
+
+def _solve_floor_motions(session, cfg, log, fl, fac, conf, rep_m, ck, cams, n_kf, chunks,
+                         per_chunk, by_chunk, cands_of, chosen, first_kf) -> dict:
+    """Steps 5–7 of the block comment above: the chunks' tilts, heights (surfaces by identity)
+    and motions, from the levels :func:`chunk_floor_levels` chose."""
     # the TILT of every chunk's floor under the camera, by the user's rule on its own error
     R_of: Dict[int, np.ndarray] = {}
     for c in chunks:

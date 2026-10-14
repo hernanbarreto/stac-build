@@ -29,3 +29,19 @@ def test_without_a_map_the_byte_is_the_id(tmp_path):
     insts = [{"id": 4, "instance_id": 5, "label": "x", "globalIndices": [0]}]
     (tmp_path / "segmentation_result.json").write_text(json.dumps({"instances": insts, "total_points": 1}))
     assert apply_segmentation_to_cloud(tmp_path)["instances"][0]["class_byte"] == 5
+
+
+def test_an_octree_with_the_instance_dimension_is_keyed_by_the_id(tmp_path):
+    """USER 2026-10-08 (no 255 ceiling): an octree that carries the per-point `instance` dimension
+    is read by the viewer through it, so the key the payload sends is the instance id itself —
+    never the compact byte of class_map.json, which that octree no longer drives."""
+    insts = [{"id": 299, "instance_id": 300, "label": "desk", "globalIndices": [0, 1]},
+             {"id": 49, "instance_id": 50, "label": "door", "globalIndices": [2]}]
+    write_classification(tmp_path, insts, 3)                      # ids > 255 -> compact + class_map.json
+    (tmp_path / "segmentation_result.json").write_text(json.dumps({"instances": insts, "total_points": 3}))
+    (tmp_path / "potree").mkdir()
+    (tmp_path / "potree" / "metadata.json").write_text(json.dumps({"attributes": [
+        {"name": "position", "size": 12}, {"name": "classification", "size": 1},
+        {"name": "instance", "size": 4, "type": "uint32"}]}))
+    out = apply_segmentation_to_cloud(tmp_path)
+    assert {i["instance_id"]: i["class_byte"] for i in out["instances"]} == {300: 300, 50: 50}

@@ -34,8 +34,11 @@ def test_the_serve_line_carries_every_deterministic_flag_and_only_local_weights(
         else argv[2].endswith("weights/qwen3vl/8b-instruct")
     for tok in ("--no-enable-prefix-caching", "--enforce-eager"):
         assert tok in argv
-    i = argv.index("--max-num-seqs")
-    assert argv[i + 1] == "1"
+    # USER 2026-10-09 ("Mandemos la mayor cantidad que podamos"): no longer one sequence at a
+    # time — the client derives how many are in flight from the engine's KV cache
+    # (semantic.parallel); batch invariance + the self-check keep the answers the request's own
+    assert "--max-num-seqs" not in argv
+    assert "--max-num-seqs" not in serve.deterministic_serve_args(24576, 0)
     i = argv.index("--max-num-batched-tokens")
     assert argv[i + 1] == str(int(b["max_model_len"])), "the token batch IS the model length"
     i = argv.index("--generation-config")

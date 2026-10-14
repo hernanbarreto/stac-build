@@ -18,6 +18,7 @@ session holds none (a legacy or synthetic session).
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -164,6 +165,41 @@ def depth_sidecar(output_dir, frames: Sequence[int], epoch_to: int,
             "b": {str(f): round(v[1], 6) for f, v in sorted(kb.items())}}
 
 
+def product_sidecar(output_dir, epoch_to: int) -> Dict[str, Any]:
+    """``depth_correction.json`` of a PRODUCT epoch (point 135): the IDENTITY, stamped with the
+    chain it heads — an empty chain, since the product is the base every later transform epoch
+    composes from (:func:`depth_sidecar`). precision/corrected_cloud.publish writes it inside the
+    publish transaction, so a sidecar a previous certification left live (its factors for a cloud
+    this one never applied to) is swapped out with the previous epoch instead of being served to
+    the TSDF, the hole audit and the VLM/SAM3 depth provider; every reader then finds a sidecar
+    that names its epoch. Same format as :func:`depth_sidecar` (version 2, {k, b} per frame — none
+    listed: the reader's convention for the identity)."""
+    return {"version": 2, "epoch": int(epoch_to), "base_epoch": int(epoch_to),
+            "chain": [int(epoch_to)], "chain_stamp": chain_stamp(output_dir, []),
+            "k": {}, "b": {}}
+
+
+def product_diagnostics(output_dir) -> Optional[Dict[str, Any]]:
+    """``scale_diagnostics.json`` of a PRODUCT epoch (point 135, review 2026-10-08): the live
+    file — the lock-time estimate, the anchors, the gauge's ``v2`` block — with its ``epochs``
+    history EMPTY, because the product applied nothing over the lock: its chain is empty and
+    the current per-anchor agreement IS the baseline (``correction.diagnose._current_agreements``
+    reads ``s_f / s_applied`` when the history holds no entry; the certification's
+    ``regenerate_scale_diagnostics`` then writes its ONE entry over this base). Staged by
+    precision/corrected_cloud.publish inside the transaction, so a history a previous
+    certification left live (a resume with a certified epoch live) goes out with the previous
+    epoch instead of being read as the product's current state by the scale gate and the next
+    pose epoch. None when the session has no diagnostics (a synthetic session); a corrupt file
+    RAISES naming it (``_load_diag``), never a default."""
+    from correction.diagnose import _load_diag
+    diag = _load_diag(Path(output_dir))
+    if diag is None:
+        return None
+    out = {k: v for k, v in diag.items() if k != "epochs"}
+    out["epochs"] = []
+    return out
+
+
 def applied_depth_factor(output_dir, frames: Sequence[int], base: Optional[int] = None,
                          live: Optional[int] = None) -> np.ndarray:
     """The cumulative depth factor K per keyframe the live epoch holds over the base — the
@@ -171,56 +207,94 @@ def applied_depth_factor(output_dir, frames: Sequence[int], base: Optional[int] 
     return np.asarray(chain_transform(output_dir, frames, base=base, live=live)["k"], np.float64)
 
 
+_EPOCH_DIR_RE = re.compile(r"^" + re.escape(EPOCH_DIR_PREFIX) + r"(\d+)$")
+_EPOCH_NPZ_RE = re.compile(r"^epoch_(\d+)\.npz$")
+_QUALITY_REPORT_RE = re.compile(r"^report_epoch_(\d+)\.json$")
+
+
 def lineage_cleanup(output_dir, keep: Sequence[int], log: Callable = print) -> Dict[str, List[int]]:
     """Delete every stored epoch directory, every persisted warp and every per-epoch quality
-    report of an epoch NOT in ``keep`` (the live lineage of the product epoch, point 136): the
-    leftovers of a previous certification of this product or of a previous reconstruction. They
-    are what made ``next_epoch`` count from the session's history instead of from the product.
-    The ledger is history and stays. Returns what was deleted, per kind."""
+    report (with its timing sidecar) of an epoch NOT in ``keep`` (the live lineage of the
+    product epoch, point 136): the leftovers of a previous certification of this product or of
+    a previous reconstruction. They are what made ``next_epoch`` count from the session's
+    history instead of from the product. The ledger is history and stays. The ``keep`` list is
+    the caller's — computed STRICTLY (``correction.epoch.epoch_lineage(strict=True)``: a stored
+    record that cannot be read fails the caller naming the file, never a linear guess that
+    would decide what is "outside" a destructive operation). Names are matched exactly
+    (``report_epoch_<N>.json``, not the glob: a sibling that only starts with the prefix is
+    never parsed as an epoch, never deleted). ``quality/report.json`` — the copy of the latest
+    report — is replaced by the newest KEPT report when the one it copied is pruned, or removed
+    when none is kept, so the kit never serves a pruned epoch's report. Returns what was
+    deleted, per kind."""
     out = Path(output_dir)
     keep_set = {int(e) for e in keep}
     gone: Dict[str, List[int]] = {"dirs": [], "npz": [], "quality": []}
-    for d in sorted(out.glob(f"{EPOCH_DIR_PREFIX}*")):
-        if not d.is_dir() or d.is_symlink():
+    for d in sorted(out.iterdir()) if out.is_dir() else []:
+        m = _EPOCH_DIR_RE.match(d.name)
+        if m is None or not d.is_dir() or d.is_symlink():
             continue
-        try:
-            e = int(d.name[len(EPOCH_DIR_PREFIX):])
-        except ValueError:
-            continue
+        e = int(m.group(1))
         if e not in keep_set:
             shutil.rmtree(d)
             gone["dirs"].append(e)
     npz_dir = out / EPOCH_NPZ_DIR
-    for q in sorted(npz_dir.glob("epoch_*.npz")) if npz_dir.is_dir() else []:
-        try:
-            e = int(q.stem.split("_")[-1])
-        except ValueError:
+    for q in sorted(npz_dir.iterdir()) if npz_dir.is_dir() else []:
+        m = _EPOCH_NPZ_RE.match(q.name)
+        if m is None or not q.is_file():
             continue
+        e = int(m.group(1))
         if e not in keep_set:
             q.unlink()
             gone["npz"].append(e)
     qdir = out / QUALITY_DIR
-    for q in sorted(qdir.glob("report_epoch_*.json")) if qdir.is_dir() else []:
-        try:
-            e = int(q.stem.split("_")[-1])
-        except ValueError:
+    kept_reports: List[int] = []
+    for q in sorted(qdir.iterdir()) if qdir.is_dir() else []:
+        m = _QUALITY_REPORT_RE.match(q.name)
+        if m is None or not q.is_file():
             continue
-        if e not in keep_set:
-            q.unlink()
-            gone["quality"].append(e)
+        e = int(m.group(1))
+        if e in keep_set:
+            kept_reports.append(e)
+            continue
+        q.unlink()
+        gone["quality"].append(e)
+        # the clock of a pruned report goes with it (reconstruction.quality.report writes it
+        # under quality/timing/; imported here, not at module level: cycles)
+        from reconstruction.quality.report import epoch_report_timing_path
+        epoch_report_timing_path(out, e).unlink(missing_ok=True)
+    if gone["quality"]:
+        from reconstruction.quality.report import REPORT_JSON, epoch_report_path
+        copy = qdir / REPORT_JSON
+        if copy.is_file():
+            try:
+                copied: Optional[int] = int(json.loads(copy.read_text()).get("epoch"))
+            except (OSError, ValueError, TypeError, AttributeError):
+                copied = None                  # unreadable, or no epoch: not a kept report's copy
+            if copied is None or copied in gone["quality"]:
+                if kept_reports:
+                    shutil.copyfile(epoch_report_path(out, max(kept_reports)), copy)
+                else:
+                    copy.unlink()
     if any(gone.values()):
         log(f"  epochs outside the lineage {sorted(keep_set)} removed — stored dirs {gone['dirs']}, "
             f"warps {gone['npz']}, quality reports {gone['quality']} (the ledger keeps their history)")
     return gone
 
 
-def product_epoch(output_dir) -> Tuple[int, Optional[dict]]:
+def product_epoch(output_dir, log: Optional[Callable] = None) -> Tuple[int, Optional[dict]]:
     """(the reconstruction's PRODUCT epoch, its report): the epoch ``corrected_cloud.json`` (or
     ``fuse_report.json``) names — precision.product.product_report —, epoch 0 and None for a
-    session the core published no cloud for (a legacy or synthetic session)."""
+    session the core published no cloud for (a legacy or synthetic session). DECIDED (wave-2
+    cross, 2026-10-08): such a session is NOT refused — legacy sessions must still open, be
+    projected and certified — it is taken as epoch 0 and DECLARED through ``log`` when one is
+    given (the stage's log: select_product_epoch passes its own)."""
     from precision.product import product_report
     rep = product_report(Path(output_dir))
     if rep is None or rep.get("epoch_to") is None:
+        if log is not None:
+            log(f"  DECLARED: {Path(output_dir)} holds no product report (corrected_cloud.json / "
+                f"fuse_report.json): the cloud is taken as the reconstruction's product at epoch 0 "
+                f"— a legacy or synthetic session, not refused")
         return 0, None
     return int(rep["epoch_to"]), rep
 
@@ -234,7 +308,7 @@ def select_product_epoch(output_dir, log: Callable = print) -> Dict[str, Any]:
     live_before, selected, product_file, product_correction_id}."""
     from correction.run import run_select
     out = Path(output_dir)
-    base, rep = product_epoch(out)
+    base, rep = product_epoch(out, log=log)
     live = int(current_epoch(out))
     info: Dict[str, Any] = {"base_epoch": base, "live_before": live, "selected": False,
                             "product_file": (rep or {}).get("product_file"),

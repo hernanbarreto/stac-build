@@ -110,8 +110,9 @@ Validated list, implemented and merged the same night (tests: 353 green on main)
 - **Segmentation** (intake): the VLM saw **8 of 289 keyframes** (the coverage cover needs a
   cloud that does not exist at I2) and `aggregate` dropped **22 of 52 phrases** silently
   (one per head noun). Now `autoprompt.vlm_sampling.all_keyframes: true` (USER: *"el VLM debe
-  ver todos los KF"*: every keyframe + 2×2 crops, 1 445 sequential calls on pccr; the density
-  keys and `max_calls` are not applied in that mode), only true synonyms merge, every phrase's
+  ver todos los KF"*: every keyframe, ONE call each — the 2×2 crops were removed the same night,
+  c07575a, USER: *"es una pasada con prompt correcto sobre todos los frames"*: 295 calls on pccr
+  2408; the density keys and `max_calls` are not applied in that mode), only true synonyms merge, every phrase's
   fate is recorded in `output/segmentation_census.json` (+ `[census]` log), SAM3 prompts
   bounded by `autoprompt.max_sam3_prompts` (150; ~49 s per prompt at 289 kf), SAM3
   detection/confirmation thresholds in `models.segmentation.sam3_thresholds` per version

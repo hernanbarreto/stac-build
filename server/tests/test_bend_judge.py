@@ -39,12 +39,18 @@ def _rows(n, k0, k1=0.0, k2=0.0, noise=1e-3, seed=0):
 # ── point 48: the terms ────────────────────────────────────────────────────
 
 def test_insignificant_tilt_terms_are_dropped_exactly_and_a_real_tilt_is_kept():
-    A, r, _, _ = _rows(300, 0.9)
+    """The rule under the user's factor 1.1 (USER 2026-10-07 "1.1 en todos los casos", was 2.0):
+    a tilt term enters only when |c| >= 1.1 × its measured fit error. On pure noise the fitted
+    c1 / c2 are themselves noise (|c|/σ ~ N(0, 1)), so a fixture can only be a FIXED draw: seed 1
+    (noise 1e-3, 300 rows) has both terms under the bar — under 2.0 the old seed 0 did too, under
+    1.1 its c2 (margin +1.6e-4) crossed it — and a 0.2 tilt added to the same draw is kept with
+    c2 still dropped. The assertions are the rule's, unchanged; only the draw moved."""
+    A, r, _, _ = _rows(300, 0.9, seed=1)
     c, info = D.significant_bend(A, r, 1.345, 10, FAC)
     assert c[1] == 0.0 and c[2] == 0.0 and info["kept"] == {"c1": False, "c2": False}
     assert info["margins"]["c1"] < 0 and info["margins"]["c2"] < 0 and abs(c[0] - 0.9) < 1e-3
     assert all(np.isfinite(info["sigma_full"])) and info["sigma"][0] > 0
-    A, r, _, _ = _rows(300, 0.9, k1=0.2)
+    A, r, _, _ = _rows(300, 0.9, k1=0.2, seed=1)
     c, info = D.significant_bend(A, r, 1.345, 10, FAC)
     assert info["kept"]["c1"] is True and info["margins"]["c1"] > 0 and abs(c[1] - 0.2) < 2e-2
     assert info["kept"]["c2"] is False and c[2] == 0.0

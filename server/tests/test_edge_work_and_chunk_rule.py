@@ -201,11 +201,14 @@ def test_chunk_verdicts_are_the_users_rule_with_keyframe_judges_and_margins():
     assert by[0]["verdict"] == "ok" and by[0]["floor_rule"]["departs"] is False
     assert by[2]["verdict"] == "ok"
     assert rep["session"]["improvement_error_factor"] == fac and "decide_change" in rep["session"]["rule"]
-    # a 1.5 cm floor move: significant over 10 keyframes at 1 cm noise, but under 2 x the 1 cm resolution
-    rows2 = _rows([10, 10, 10], [0.0, 0.015, 0.0], [3.0, 3.0, 3.0])
+    # a 0.6 cm floor move: significant over 30 keyframes at 1 cm noise (the CI clears zero), but
+    # under the user's 1.1 x the 1 cm resolution (point 1 / 98, USER 2026-10-07: the factor is 1.1 —
+    # the fixture's 1.5 cm move was under the old 2 x and is a real departure under 1.1 x)
+    rows2 = _rows([30, 30, 30], [0.0, 0.006, 0.0], [3.0, 3.0, 3.0])
     rep2 = CC.judge(rows2, cfg, 1.0, log=QUIET, error_factor=fac)
     c1 = {c["chunk"]: c for c in rep2["chunks"]}[1]
-    assert c1["verdict"] == "ok" and "error" in c1["floor_rule"]["failed"] and c1["floor_rule"]["margin_m"] < 0
+    assert c1["floor_rule"]["ci_m"][0] > 0 and abs(c1["floor_rule"]["median_delta_m"]) < fac * 0.01
+    assert c1["verdict"] == "ok" and c1["floor_rule"]["failed"] == ["error"] and c1["floor_rule"]["margin_m"] < 0
     # a real level change: the floor departs, the ceiling does not
     rows3 = _rows([10, 10, 10], [0.0, -0.14, 0.0], [3.0, 3.0, 3.0])
     rep3 = CC.judge(rows3, cfg, 1.0, log=QUIET, error_factor=fac)

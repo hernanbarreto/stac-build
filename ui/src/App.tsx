@@ -10,6 +10,7 @@
  */
 import { useState, useCallback, useEffect, useRef } from 'react'
 import Viewport, { ViewportHandle, SegmentInstance } from './components/Viewport'
+import type { UserVolume } from './components/assistantViz'
 import { SyncPlayer } from './components/SyncPlayer'
 import { BIMAnalysisPanel } from './components/BIMAnalysisPanel'
 import TeamPanel from './components/TeamPanel'
@@ -52,7 +53,7 @@ import { useToast } from './components/ui/Toast'
 import type { MenuEntry } from './components/ui/Menu'
 import type { ProgressStage } from './components/ui/Progress'
 import { FloatingToolbar, type ColorMode } from './components/viewport/FloatingToolbar'
-import { ViewportHud, type ReadoutAnchor } from './components/viewport/ViewportHud'
+import { ViewportHud, type ReadoutAnchor, type ViewPreset } from './components/viewport/ViewportHud'
 import { SplashOverlay } from './components/viewport/SplashOverlay'
 import { WelcomeScreen } from './components/viewport/WelcomeScreen'
 import { tokenColor } from './components/viewport/palette'
@@ -104,6 +105,8 @@ interface PipelineState {
 }
 
 type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align' | 'erase'
+
+const THREE_DEG = Math.PI / 180
 
 function App() {
   // auth first: token feeds the handlers' deps below (TDZ)
@@ -1164,6 +1167,8 @@ function App() {
       .catch(() => { setActivePanel('bim'); setSessionLoading(null) })
   }, [bimModels, activeSession])
 
+  // the overlay text the tasks poll put up, so it takes down exactly that one
+  const taskOverlayRef = useRef<string | null>(null)
   // Poll server for active tasks (survives reconnect)
   useEffect(() => {
     if (!activeSession || !connected) return
@@ -1176,7 +1181,11 @@ function App() {
         const res = await fetch(`/api/tasks/${activeSession}`)
         if (!res.ok || cancelled) return
         const data = await res.json()
-        const tasks = data.tasks as { label: string; pct: number; detail: string }[]
+        // a PIPELINE job (running or waiting its turn in the queue) is never a session load:
+        // it has its own progress, and taking it for one hid the toolbar of a session whose
+        // segmentation sat queued behind another scan for hours (USER 2026-10-09, observatorio)
+        const tasks = ((data.tasks || []) as { label: string; pct: number; detail: string; task_type?: string }[])
+          .filter(tk => tk.task_type !== 'pipeline')
         if (tasks && tasks.length > 0) {
           const t = tasks[0]  // show the first active task
           const msg = t.detail ? `${t.label} — ${t.detail}` : t.label
@@ -1184,14 +1193,18 @@ function App() {
           const pr = pipelineRunningRef.current
           const pipelineActive = pr && (pr.status === 'running' || pr.status === 'queued') && pr.session_id === activeSession
           if (!pipelineActive) {
+            taskOverlayRef.current = msg
             setSessionLoading(msg)
           }
           // Keep polling while tasks are active
           timer = setTimeout(poll, 3000)
         } else {
-          // Tasks done — if overlay was showing a server task, dismiss it
-          if (sessionLoading && pointCount > 0) {
-            setSessionLoading(null)
+          // Tasks done — if overlay was showing a server task, dismiss it (the one THIS poll
+          // put up: the closure's sessionLoading/pointCount are the values of the effect's start)
+          if (taskOverlayRef.current) {
+            const shown = taskOverlayRef.current
+            taskOverlayRef.current = null
+            setSessionLoading(cur => (cur === shown ? null : cur))
             // Refresh segments in case segmentation tasks finished
             try {
               await reloadSegments(activeSession)
@@ -1403,23 +1416,37 @@ function App() {
 
   const runAutosegment = useCallback(async (vlmPrompt: string, sam3Prompts: string[], stages: AutosegmentStages) => {
     if (!activeSession || autosegScans.length === 0) return
-    // the prompts are saved in EACH marked scan, then ONE order queues one task per scan
+    // the SAM3 prompts travel only when SAM3 runs WITHOUT a new VLM pass (a VLM pass makes them)
+    const sam3List = stages.sam3 && !stages.vlm ? sam3Prompts : undefined
+    // the prompts are saved in EACH marked scan (the session's record), then ONE order queues one task per scan.
+    // A save the server refuses as BUSY (409: a job of that scan is queued or running with other prompts —
+    // point 162) does not stop the order: the order carries its own prompts and the job writes them into the
+    // scan when it runs (deliver_job_inputs); the refusal is only reported.
+    const deferred: string[] = []
     for (const scan of autosegScans) {
       const body: Record<string, unknown> = { vlm_prompt: vlmPrompt, scan }
-      // the SAM3 prompts are saved only when SAM3 runs WITHOUT a new VLM pass (a VLM pass rewrites them)
-      if (stages.sam3 && !stages.vlm) body.sam3_prompts = sam3Prompts
+      if (sam3List) body.sam3_prompts = sam3List
       const r = await fetch(`/api/autosegment/${activeSession}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       const d = await r.json().catch(() => ({}))
-      if (!r.ok || !d.ok) { setStatusMessage(d.detail || d.error || `autosegment ${scan}: prompts not saved`); return }
+      if (!r.ok || !d.ok) {
+        const busy = r.status === 409 && (d.busy === true || d.detail?.busy === true)
+        if (!busy) { setStatusMessage(d.detail?.error || d.detail || d.error || `autosegment ${scan}: prompts not saved`); return }
+        deferred.push(scan)
+      }
     }
+    // THE PROMPTS TRAVEL WITH THE ORDER (docs/plan_determinismo.md point 162): the command itself carries
+    // the VLM prompt and the SAM3 list — the job runs with THESE, whatever the scan's files say by then
+    const autosegment: Record<string, unknown> = { stages, vlm_prompt: vlmPrompt }
+    if (sam3List) autosegment.sam3_prompts = sam3List
     const rr = await fetch('/api/pipeline/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: activeSession, replace: false, scans: autosegScans, autosegment: { stages } }),
+      body: JSON.stringify({ session_id: activeSession, replace: false, scans: autosegScans, autosegment }),
     })
     const dd = await rr.json().catch(() => ({}))
     if (!rr.ok || !dd.ok) { setStatusMessage(dd.detail || dd.error || 'autosegment: command rejected'); return }
     setAutosegOpen(false)
-    setStatusMessage(tt('autosegment.started', { session: `${activeSession} (${autosegScans.length})` }))
+    const note = deferred.length ? ` — ${deferred.join(', ')}: a job is active, the queued job writes the prompts when it runs` : ''
+    setStatusMessage(tt('autosegment.started', { session: `${activeSession} (${autosegScans.length})` }) + note)
   }, [activeSession, autosegScans])
 
   const handlePipelineCancel = useCallback(() => {
@@ -1646,6 +1673,126 @@ function App() {
   // as it would look without its single-witness mass. Nothing is deleted.
   const [mvHide, setMvHide] = useState(false)
   const [selectedSegmentId, setSelectedSegmentId] = useState<number | null>(null)
+  // Select an object and FLY TO it (USER 2026-09-21) — the instance list's click, and the
+  // assistant's answer about an object (USER 2026-10-09: "debe mover la escena y enfocar
+  // exactamente el elemento como si lo hubiera clickeado"). The frame comes from the
+  // instance's own OBB, so a 9 m floor and a 20 cm light both fill the view; an instance with
+  // no OBB (just propagated, no points) simply does not move the camera.
+  const selectSegmentRef = useRef<(id: number | null) => void>(() => {})
+  const selectSegment = useCallback((id: number | null) => selectSegmentRef.current(id), [])
+  const focusSegmentsRef = useRef<(ids: number[]) => void>(() => {})
+  const focusSegments = useCallback((ids: number[]) => focusSegmentsRef.current(ids), [])
+  selectSegmentRef.current = (id: number | null) => {
+    setSelectedSegmentId(id)
+    if (id == null) return
+    // the chat stays open when it is the inspector's tab (switching would close it)
+    if (layout.state.inspectorTab !== 'assistant') layout.openInspector('properties')
+    const seg = segments.find(s => s.id === id)
+    if (seg?.focus) viewportRef.current?.flyToPoint(seg.focus.center, seg.focus.radius)
+  }
+  // several objects (a distance, a clearance): the first is selected, the view frames them all
+  // (from the assistant: the chat stays open — no inspector switch, it would close the chat)
+  focusSegmentsRef.current = (ids: number[]) => {
+    const segs = ids.map(i => segments.find(s => s.id === i)).filter((s): s is SegmentInstance => !!s)
+    if (!segs.length) return
+    setSelectedSegmentId(segs[0].id)
+    const framed = segs.filter(s => s.focus).map(s => s.focus!)
+    if (!framed.length) return
+    const c = [0, 1, 2].map(k => framed.reduce((a, f) => a + f.center[k], 0) / framed.length) as [number, number, number]
+    const r = Math.max(...framed.map(f => Math.hypot(f.center[0] - c[0], f.center[1] - c[1], f.center[2] - c[2]) + f.radius))
+    viewportRef.current?.flyToPoint(c, r)
+  }
+  // Evaluation volumes are the SCENE's, whoever made them (the assistant or the user): drawn,
+  // listed in Instances, deletable — they do not leave with the chat (USER 2026-10-09)
+  const [userVolumes, setUserVolumes] = useState<UserVolume[]>([])
+  const refreshVolumes = useCallback(async () => {
+    if (!activeSession) { setUserVolumes([]); return }
+    try {
+      const r = await fetch('/api/scene/volumes/list', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                        body: JSON.stringify({ session_id: activeSession }) })
+      const d = await r.json()
+      const vols: UserVolume[] = Array.isArray(d.volumes) ? d.volumes : []
+      setUserVolumes(vols)
+      for (const v of vols) viewportRef.current?.addUserVolume(v)
+    } catch { /* no instance store yet */ }
+  }, [activeSession])
+  useEffect(() => { refreshVolumes() }, [refreshVolumes, cloudEverShown])
+  const deleteVolume = useCallback(async (id: number) => {
+    try {
+      await fetch('/api/scene/volumes/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                 body: JSON.stringify({ session_id: activeSession, volume_id: id }) })
+    } catch { /* the list below is refreshed either way */ }
+    viewportRef.current?.removeUserVolume(id)
+    setUserVolumes(prev => prev.filter(v => v.volume_id !== id))
+  }, [activeSession])
+  const focusVolume = useCallback((id: number) => {
+    const v = userVolumes.find(x => x.volume_id === id)
+    if (v) viewportRef.current?.flyToPoint(v.center as [number, number, number], Math.max(0.5, Math.hypot(v.size[0], v.size[1], v.size[2]) / 2))
+  }, [userVolumes])
+  // Esc deselects the object: its OBB and dimensions go (USER 2026-10-09)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      const el = e.target as HTMLElement | null
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return
+      setSelectedSegmentId(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+  // the list's OBB / visible boxes for every kind of row (USER 2026-10-09): OBBs off by default
+  const [obbKeys, setObbKeys] = useState<Set<string>>(new Set())
+  const [placedObb, setPlacedObb] = useState<Set<number>>(new Set())
+  const [volumeHidden, setVolumeHidden] = useState<Set<number>>(new Set())
+  const [volumeObb, setVolumeObb] = useState<Set<number>>(new Set())
+  const flip = <K,>(set: Set<K>, k: K, on: boolean) => { const n = new Set(set); if (on) n.add(k); else n.delete(k); return n }
+  const toggleObb = useCallback((key: string, on: boolean) => {
+    setObbKeys(prev => flip(prev, key, on)); viewportRef.current?.toggleOBB(key, on)
+  }, [])
+  const togglePlacedObb = useCallback((id: number, on: boolean) => {
+    setPlacedObb(prev => flip(prev, id, on)); viewportRef.current?.setSceneObjectObb(id, on)
+  }, [])
+  const toggleVolume = useCallback((id: number, visible: boolean) => {
+    setVolumeHidden(prev => flip(prev, id, !visible)); viewportRef.current?.setVolumeVisible(id, visible)
+  }, [])
+  const toggleVolumeObb = useCallback((id: number, on: boolean) => {
+    setVolumeObb(prev => flip(prev, id, on)); viewportRef.current?.setVolumeObb(id, on)
+  }, [])
+  useEffect(() => { setObbKeys(new Set()); setPlacedObb(new Set()); setVolumeHidden(new Set()); setVolumeObb(new Set()) }, [activeSession])
+  // THE CHAT DRIVES THE VIEWER (USER 2026-10-09): every `viewer` action its tools return is
+  // performed here, with the same handlers the list and the view controls use
+  const viewerActionRef = useRef<(a: Record<string, unknown>) => void>(() => {})
+  const runViewerAction = useCallback((a: Record<string, unknown>) => viewerActionRef.current(a), [])
+  viewerActionRef.current = (a: Record<string, unknown>) => {
+    const ids = Array.isArray(a.ids) ? (a.ids as number[]) : []
+    const vp = viewportRef.current
+    const setVis = (pick: (s: SegmentInstance) => boolean | null) => {
+      const next = segments.map(s => { const v = pick(s); return v == null ? s : { ...s, visible: v } })
+      next.forEach(s => { vp?.setSegmentVisibility(s.classId, s.visible); vp?.toggleOBB(s.key, s.visible && obbKeys.has(s.key)) })
+      setSegments(next)
+    }
+    switch (a.action) {
+      case 'focus': focusSegmentsRef.current(ids); break
+      case 'visibility': setVis(s => (ids.includes(s.id) ? !!a.visible : null)); break
+      case 'show_only': setVis(s => ids.includes(s.id)); break
+      case 'show_all': setVis(() => true); break
+      case 'obb': ids.forEach(id => { const seg = segments.find(s => s.id === id); if (seg) toggleObb(seg.key, !!a.on) }); break
+      case 'view': if (a.view === 'home') vp?.resetCamera(); else vp?.setStandardView(a.view as ViewPreset); break
+      case 'orbit': {
+        // a visible turn, not a jump: the orbit in steps over ~1 s
+        const steps = 40, yaw = THREE_DEG * Number(a.yaw_deg || 0) / steps, pitch = -THREE_DEG * Number(a.pitch_deg || 0) / steps
+        for (let k = 1; k <= steps; k++) setTimeout(() => viewportRef.current?.orbitBy(yaw, pitch), k * 25)
+        break
+      }
+      case 'travel': {
+        focusSegmentsRef.current(ids.slice(0, 1))
+        if (ids.length > 1) setTimeout(() => focusSegmentsRef.current(ids.slice(1, 2)), 2200)
+        break
+      }
+      case 'color': setColorMode(a.mode as ColorMode); break
+      case 'clear': setSelectedSegmentId(null); vp?.clearAssistantViz(); break
+    }
+  }
   const [cursor, setCursor] = useState<{ x: number; y: number; z: number } | null>(null)
   const [readouts, setReadouts] = useState<ReadoutAnchor[]>([])
   const [metersPerPixel, setMetersPerPixel] = useState<number | null>(null)
@@ -1734,9 +1881,10 @@ function App() {
     try {
       const r = await fetch('/api/segmentation/erase/undo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession }) })
       const d = await r.json()
-      report(d.ok ? t('brush.undone', { n: fmt.integer(d.restored || 0) }) : t('brush.nothingToUndo'), d.ok ? 'ok' : 'warn')
+      report(d.ok ? t('brush.undone', { n: fmt.integer(d.restored || 0) }) : (d.detail || t('brush.nothingToUndo')), d.ok ? 'ok' : 'warn')
+      if (d.ok) await reloadSegments(activeSession)
     } catch { report(t('brush.undoFailed'), 'err') }
-  }, [activeSession, report, t, fmt])
+  }, [activeSession, report, t, fmt, reloadSegments])
 
   const toggleFullscreen = useCallback(() => {
     if (document.fullscreenElement) document.exitFullscreen()
@@ -1786,13 +1934,20 @@ function App() {
 
   const renameSegment = useCallback(async (seg: SegmentInstance, newLabel: string) => {
     if (!activeSession) return
-    await fetch('/api/segmentation/rename', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: newLabel, old_label: seg.label.replace(/ #\d+$/, '') }),
-    })
+    try {
+      const r = await fetch('/api/segmentation/rename', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, label: newLabel }),
+      })
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}))
+        report(t('instances.renameFailed', { detail: d.detail || r.status }), 'err')
+        return
+      }
+    } catch (e) { report(t('instances.renameFailed', { detail: String(e) }), 'err'); return }
     setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, label: newLabel } : s)))
     viewportRef.current?.refreshSegmentOBBs(activeSession)
-  }, [activeSession])
+  }, [activeSession, report, t])
 
   const deleteSegment = useCallback(async (seg: SegmentInstance) => {
     const ok = await confirmDanger(t('instances.deleteMessage', { label: seg.label }), t('instances.deleteTitle'))
@@ -2132,25 +2287,15 @@ function App() {
                 onFuse={openFuse} onOpenScan={openScanFromTree} onSetReference={setReference} />
             )}
             {layout.state.leftTab === 'instances' && activeSession && (
-              <InstancesPanel segments={segments} unsegmentedVisible={unsegmentedVisible} unsegmentedCount={unsegmentedCount} absorbedCount={absorbedCount} floorLevel={floorLevel}
+              <InstancesPanel volumes={userVolumes} onFocusVolume={focusVolume} onDeleteVolume={deleteVolume} obbKeys={obbKeys} onToggleObb={toggleObb} placedObb={placedObb} onTogglePlacedObb={togglePlacedObb} volumeHidden={volumeHidden} volumeObb={volumeObb} onToggleVolume={toggleVolume} onToggleVolumeObb={toggleVolumeObb} segments={segments} unsegmentedVisible={unsegmentedVisible} unsegmentedCount={unsegmentedCount} absorbedCount={absorbedCount} floorLevel={floorLevel}
                 placedObjects={placedObjects} shapeMeshes={shapeMeshes} tsdfMeshes={tsdfMeshes} selectedSegmentId={selectedSegmentId}
-                onSelectSegment={id => {
-                  setSelectedSegmentId(id)
-                  if (id == null) return
-                  layout.openInspector('properties')
-                  // FLY TO the object (USER 2026-09-21). The frame comes from
-                  // the instance's own OBB, so a 9 m floor and a 20 cm light
-                  // both fill the view; an instance with no OBB (just
-                  // propagated, no points) simply does not move the camera.
-                  const seg = segments.find(s => s.id === id)
-                  if (seg?.focus) viewportRef.current?.flyToPoint(seg.focus.center, seg.focus.radius)
-                }}
+                onSelectSegment={selectSegment}
                 onSetAllVisible={(v, listed) => {
                   // every row the list shows (USER 2026-10-01): segments, Unsegmented, placed objects,
                   // generated objects, meshes
                   const keys = new Set(listed.segmentKeys)
                   setSegments(prev => prev.map(s => (keys.has(s.key) ? { ...s, visible: v } : s)))
-                  segments.forEach(s => { if (keys.has(s.key)) { viewportRef.current?.toggleOBB(s.key, v); viewportRef.current?.setSegmentVisibility(s.classId, v) } })
+                  segments.forEach(s => { if (keys.has(s.key)) { viewportRef.current?.toggleOBB(s.key, v && obbKeys.has(s.key)); viewportRef.current?.setSegmentVisibility(s.classId, v) } })
                   if (listed.unsegmented) { setUnsegmentedVisible(v); viewportRef.current?.setSegmentVisibility(0, v) }
                   listed.placedIds.forEach(id => viewportRef.current?.setSceneObjectVisible(id, v))
                   const sf = new Set(listed.shapeFolders), tf = new Set(listed.tsdfFolders)
@@ -2159,7 +2304,7 @@ function App() {
                   setTsdfMeshes(prev => prev.map(x => (tf.has(x.folder) ? { ...x, visible: v } : x)))
                   tsdfMeshes.forEach(m => { if (tf.has(m.folder)) viewportRef.current?.setTsdfVisibility(m.folder, v) })
                 }}
-                onToggleSegment={(seg, vis) => { setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, visible: vis } : s))); viewportRef.current?.toggleOBB(seg.key, vis); viewportRef.current?.setSegmentVisibility(seg.classId, vis) }}
+                onToggleSegment={(seg, vis) => { setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, visible: vis } : s))); viewportRef.current?.toggleOBB(seg.key, vis && obbKeys.has(seg.key)); viewportRef.current?.setSegmentVisibility(seg.classId, vis) }}
                 onRenameSegment={renameSegment} onDeleteSegment={deleteSegment}
                 onToggleUnsegmented={v => { setUnsegmentedVisible(v); viewportRef.current?.setSegmentVisibility(0, v) }}
                 onFloorLevel={iid => applyFloorLevel(activeSession, 'explicit', iid)}
@@ -2287,7 +2432,12 @@ function App() {
             onHasCameraPoses={setHasCameraPoses}
             onCursor={setCursor}
             onReadouts={setReadouts}
-            onSegmentPicked={cls => { const seg = segments.find(s => s.classId === cls); if (seg) { setSelectedSegmentId(seg.id); layout.setLeftTab('instances'); layout.openInspector('properties') } }}
+            onSegmentPicked={cls => {
+              // a point of an object: select it (OBB + dimensions) and travel to it; a click on
+              // nothing or on unsegmented points deselects (USER 2026-10-09)
+              const seg = segments.find(s => s.classId === cls)
+              if (seg) { layout.setLeftTab('instances'); selectSegment(seg.id) } else selectSegment(null)
+            }}
             onViewScale={setMetersPerPixel}
           />
 
@@ -2315,6 +2465,18 @@ function App() {
                   setEraseTarget('')
                 },
                 onClearMarks: () => viewportRef.current?.clearEraseMarks(), onUndo: undoBrush,
+                onMerge: async (target, sources) => {
+                  if (!activeSession) return
+                  try {
+                    const r = await fetch('/api/segmentation/merge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, target_id: target, source_ids: sources }) })
+                    const d = await r.json()
+                    if (!r.ok) { report(t('brush.mergeFailed', { detail: d.detail || r.status }), 'err'); return }
+                    const tgt = segments.find(s => s.id === target)
+                    report(t('brush.merged', { n: sources.length, target: tgt ? `${tgt.label} ${tgt.id}` : String(target) }), 'ok')
+                    await reloadSegments(activeSession)
+                    viewportRef.current?.refreshSegmentOBBs(activeSession)
+                  } catch (e) { report(t('brush.mergeFailed', { detail: String(e) }), 'err') }
+                },
               }}
               display={{ pointSize, onPointSize: setPointSize, budgetM: pointBudget / 1_000_000, onBudgetM: v => setPointBudget(v * 1_000_000), hasConfidence, confidence: confidenceThreshold, onConfidence: setConfidenceThreshold }}
               view={{ hasCameraPoses, showCameraPoses, onToggleCameraPoses: () => setShowCameraPoses(v => !v), showGrid, onToggleGrid: () => setShowGrid(v => !v), showAxes, onToggleAxes: () => setShowAxes(v => !v), onFullscreen: toggleFullscreen }}
@@ -2414,7 +2576,7 @@ function App() {
                   {sabanaFullMeta && activeSession && <BIMAnalysisPanel meta={sabanaFullMeta} sessionId={activeSession} />}
                 </div>
               ),
-              assistant: <AssistantPanel sessionId={activeSession} viewport={viewportRef} onVlmStatus={setVlmStatus} />,
+              assistant: <AssistantPanel sessionId={activeSession} viewport={viewportRef} onVlmStatus={setVlmStatus} onFocusObjects={focusSegments} onVolumesChanged={refreshVolumes} onViewerAction={runViewerAction} />,
             }} />
         )}
       </div>
