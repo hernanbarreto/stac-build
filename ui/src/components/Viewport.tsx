@@ -2237,8 +2237,13 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const inScene = group.children.some(c => c.name === `tsdf-${sh.folder}`)
             if (inScene || tsdfPendingRef.current.has(sh.folder) || tsdfLoadingRef.current.has(sh.folder)) continue
             added += 1
-            if (typeof sh.meta?.instance_id === 'number') { tsdfPendingRef.current.set(sh.folder, sh); continue }
+            // a mesh that APPEARS while the session is open (a Mesh / Object stage, the backend's
+            // folder watch) is what the user is waiting for: it loads into the scene at once,
+            // per-instance or not (USER 2026-10-15: "no se están cargando automáticamente los
+            // glb"); the lazy rule of loadTsdfIntoGroup is for the listing at session open only
+            tsdfLoadingRef.current.add(sh.folder)
             try { await loadTsdfMeshEntry(sh) } catch (e) { console.warn(`[Viewport] failed to load TSDF mesh ${sh.glb_url}`, e) }
+            finally { tsdfLoadingRef.current.delete(sh.folder) }
         }
         return added
     }, [loadTsdfIntoGroup, loadTsdfMeshEntry])

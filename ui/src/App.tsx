@@ -825,8 +825,11 @@ function App() {
           // load) that dropped them back to not-loaded, so their checkbox
           // always resets to unchecked — checking it triggers the on-demand
           // download in the Viewport (setTsdfVisibility).
+          // A per-instance mesh that is NEW in a refresh that keeps visibility (tsdf_ready, the
+          // refresh button) was just loaded into the scene by the Viewport (addNewTsdfEntries)
+          // and shows checked (USER 2026-10-15).
           visible: typeof s.meta?.instance_id === 'number'
-            ? (resetVisibility ? false : (prevVis.get(s.folder) ?? false))
+            ? (resetVisibility ? false : (prevVis.get(s.folder) ?? true))
             : (prevVis.get(s.folder) ?? true),
         }))
       })
