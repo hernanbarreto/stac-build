@@ -3963,6 +3963,8 @@ async def get_segmentation_instances(session_id: str):
             except Exception:
                 total_pts = segmented_pts = None
 
+        from segmentation import manhattan as _MAN
+        _MAN.annotate(output_dir, merged)       # the user's Manhattan marks (default on)
         return {
             "instances": merged,
             "prompts": prompts,
@@ -4155,6 +4157,7 @@ async def rename_segmentation_instance(request: Request):
     instance_id = body.get("instance_id")
     new_label = body.get("label")
     excluded = body.get("excluded")
+    manhattan = body.get("manhattan")        # USER 2026-10-15: the Manhattan mark, default on
     if not session_id or instance_id is None:
         raise HTTPException(status_code=400, detail="Missing session_id or instance_id")
     try:
@@ -4259,6 +4262,10 @@ async def rename_segmentation_instance(request: Request):
                     from atomic_io import atomic_write_json
                     atomic_write_json(path, data)          # no indent: the C encoder
         await loop.run_in_executor(None, _exclude)
+    if manhattan is not None:
+        from segmentation import manhattan as _MAN
+        await loop.run_in_executor(None, _MAN.set_flag, output_dir, instance_id, bool(manhattan))
+        out["manhattan"] = bool(manhattan)
     return out
 
 

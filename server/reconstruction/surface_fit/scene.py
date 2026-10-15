@@ -33,7 +33,7 @@ from reconstruction.elements import json_safe
 from .models import FittedSurface
 from .plane import PlaneModel
 from .regularize import RegularizeReport, regularize_planes, snap_edges
-from .runner import (build_surface_fit_kwargs, evaluate_model, export_artifacts,
+from .runner import (_UP, build_surface_fit_kwargs, evaluate_model, export_artifacts,
                      fit_segment, load_instances, segment_points)
 
 logger = logging.getLogger("SurfaceFit")
@@ -62,7 +62,7 @@ def scene_config_kwargs(config: Optional[dict]) -> dict:
               "hole_interp_max_cells", "texture_objects", "decompose",
               "decompose_min_points", "decompose_max_primitives",
               "decompose_inlier_dist_m", "decompose_min_frac",
-              "contour_regularize", "contour_tol_m"):
+              "contour_regularize", "contour_tol_m", "manhattan", "manhattan_snap_deg"):
         if k in scfg:
             out[k] = scfg[k]
     return out
@@ -94,6 +94,8 @@ def fit_scene(session_dir: Path,
               decompose_min_frac: float = 0.10,
               contour_regularize: bool = True,
               contour_tol_m: float = 0.08,
+              manhattan: bool = True,
+              manhattan_snap_deg: float = 15.0,
               instance_ids: Optional[Sequence[int]] = None,
               progress_cb: Optional[Callable] = None) -> dict:
     """Fit every architectural instance of a session, regularize the planes
@@ -160,6 +162,15 @@ def fit_scene(session_dir: Path,
         if progress_cb:
             progress_cb(**kw)
 
+    # MANHATTAN (USER 2026-10-15): every object is marked unless the user unmarked it
+    # (segmentation.manhattan); a marked object is fitted as a PLANE and, below, snapped to the
+    # scene frame; one that is not planar (p95 over the gate) says so and follows the ladder
+    from segmentation import manhattan as _MAN
+    man_off = _MAN.off_set(session_dir / "output") if manhattan else set()
+    man_planes: set = set()
+    man_rejected: Dict[int, float] = {}
+    man_report = None
+
     for inst in instances:
         iid = inst.get("instance_id", inst.get("id"))
         label = inst.get("label", "")
@@ -172,11 +183,32 @@ def fit_scene(session_dir: Path,
         pts = segment_points(inst, cloud_pts)
         raw_seg = segment_points(inst, raw_pts) if raw_pts is not None else pts
         _cb(instance_id=iid, phase="fit", elapsed=time.time() - t0)
+        man_on = bool(manhattan) and int(iid) not in man_off
+        fs = None
         try:
-            fs = fit_segment(pts, instance_id=iid, label=label,
-                             original_xyz=raw_seg,
-                             scene_centroid=centroid,
-                             progress_cb=progress_cb, **kwargs)
+            if man_on:
+                fs = fit_segment(pts, instance_id=iid, label=label,
+                                 original_xyz=raw_seg,
+                                 scene_centroid=centroid,
+                                 progress_cb=progress_cb, **{**kwargs, "models": ["plane"]})
+                if fs is not None and float(fs.report.stats.p95_mm) > float(accept_p95_mm):
+                    man_rejected[int(iid)] = float(fs.report.stats.p95_mm)
+                    logger.info("scene: %s_%s — marked Manhattan but not planar (p95 %.1fmm > "
+                                "%.0fmm): the configured ladder decides", label, iid,
+                                fs.report.stats.p95_mm, accept_p95_mm)
+                    fs = None
+                if fs is not None:
+                    man_planes.add(int(iid))
+                elif [str(m) for m in (kwargs.get("models") or [])] != ["plane"]:
+                    fs = fit_segment(pts, instance_id=iid, label=label,
+                                     original_xyz=raw_seg,
+                                     scene_centroid=centroid,
+                                     progress_cb=progress_cb, **kwargs)
+            else:
+                fs = fit_segment(pts, instance_id=iid, label=label,
+                                 original_xyz=raw_seg,
+                                 scene_centroid=centroid,
+                                 progress_cb=progress_cb, **kwargs)
         except Exception as e:
             logger.exception("scene: %s_%s failed: %s", label, iid, e)
             fs = None
@@ -224,6 +256,33 @@ def fit_scene(session_dir: Path,
         seg_points[iid] = raw_seg   # stage-4 reference = raw measurement
         gi_map[iid] = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
 
+    # ── Manhattan: the marked planes snap to the scene frame, re-evaluated honestly ──
+    if manhattan and fitted:
+        m_idx = [i for i, f in enumerate(fitted)
+                 if int(f.instance_id) in man_planes and isinstance(f.model, PlaneModel)]
+        if m_idx:
+            from .manhattan import regularize_manhattan
+            snapped, man_report = regularize_manhattan(
+                [fitted[i].model for i in m_idx],
+                [float(fitted[i].n_input_points) for i in m_idx],
+                [seg_points[fitted[i].instance_id] for i in m_idx],
+                up_hint=_UP, snap_deg=float(manhattan_snap_deg),
+                coplanar_tol_mm=float(coplanar_tol_mm),
+                ids=[int(fitted[i].instance_id) for i in m_idx])
+            for i, m_new, rec in zip(m_idx, snapped, man_report["objects"]):
+                old = fitted[i]
+                _cb(instance_id=old.instance_id, phase="manhattan", elapsed=time.time() - t0)
+                fs2 = evaluate_model(
+                    m_new, kind="plane", escalation_path=old.escalation_path,
+                    orig=seg_points[old.instance_id],
+                    instance_id=old.instance_id, label=old.label, **eval_kwargs)
+                fs2.regularized = bool(rec.get("snapped"))
+                fs2.manhattan = rec
+                fitted[i] = fs2
+            man_report["not_planar"] = {str(k): round(v, 2) for k, v in man_rejected.items()}
+    elif manhattan:
+        man_report = {"objects": [], "not_planar": {str(k): round(v, 2) for k, v in man_rejected.items()}}
+
     # ── stage 3: scene-wide plane regularization + honest re-evaluation ──
     reg_report = RegularizeReport()
     if regularize and fitted:
@@ -243,6 +302,9 @@ def fit_scene(session_dir: Path,
                 "mesh_resolution_m", "support_dist_m")}
             for i, m_new in zip(plane_idx, snapped):
                 old = fitted[i]
+                if (getattr(old, "manhattan", None) or {}).get("snapped"):
+                    continue    # the Manhattan frame is the authority for a marked plane: it
+                    #             anchors the others' clusters and is never moved by them
                 moved = float(np.rad2deg(np.arccos(np.clip(
                     old.model.normal @ m_new.normal, -1, 1))))
                 d_shift = abs(m_new.d - (old.model.d if old.model.normal @ m_new.normal > 0
@@ -256,6 +318,8 @@ def fit_scene(session_dir: Path,
                     orig=seg_points[old.instance_id],
                     instance_id=old.instance_id, label=old.label, **eval_keys)
                 fs2.regularized = True
+                if getattr(old, "manhattan", None):
+                    fs2.manhattan = old.manhattan
                 fitted[i] = fs2
         snap_edges([f for f in fitted if isinstance(f.model, PlaneModel)],
                    snap_dist_m=snap_edge_dist_m, report=reg_report)
@@ -515,6 +579,10 @@ def fit_scene(session_dir: Path,
         export_artifacts(fs, seg_points[fs.instance_id], out_dir,
                          grid_cell_m=kwargs.get("grid_cell_m", 0.05),
                          heatmap_vmax_mm=kwargs.get("heatmap_vmax_mm"))
+        if getattr(fs, "manhattan", None):
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "manhattan.json").write_text(json.dumps(
+                {**fs.manhattan, "frame": (man_report or {}).get("frame")}, indent=2))
         _export_glb(fs, out_dir)
         # Stage-3: real texture from the scan frames (user: "siempre con
         # textura, con los colores correctos") — texrecon atlas over the
@@ -531,6 +599,7 @@ def fit_scene(session_dir: Path,
                                "untextured): %s", fs.label, fs.instance_id, e)
         results.append({"instance_id": fs.instance_id, "label": fs.label,
                         "kind": fs.kind, "regularized": fs.regularized,
+                        "manhattan": getattr(fs, "manhattan", None),
                         "rms_mm": fs.report.stats.rms_mm,
                         "p95_mm": fs.report.stats.p95_mm,
                         "flatness_pass": fs.report.stats.flatness_pass,
@@ -556,6 +625,7 @@ def fit_scene(session_dir: Path,
         "skipped_to_tsdf": skipped,
         "regularization": reg_report.to_dict(),
         "elapsed_s": round(time.time() - t0, 1),
+        "manhattan": man_report,
     })
     out_base.mkdir(parents=True, exist_ok=True)
     from correction.epoch import stamp_nearest as _stamp_epoch

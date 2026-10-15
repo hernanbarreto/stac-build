@@ -301,6 +301,8 @@
     "segmentManual": "Interactive segmentation",
     "unload": "Unload {@session}",
     "rename": "Rename",
+    "manhattanOn": "Manhattan: on — the model snaps straight to the scene frame (click to turn off)",
+    "manhattanOff": "Manhattan: off — modelled as measured (click to turn on)",
     "renameLabel": "New name",
     "delete": "Delete {@session}",
     "create": "Create",

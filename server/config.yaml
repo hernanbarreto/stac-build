@@ -2850,6 +2850,17 @@ surface_fit:
   # the deviation gate; the mesh is rebuilt with CAD-crisp edges.
   contour_regularize: true
   contour_tol_m: 0.12         # p95 boundary deviation gate for accepting a shape template
+  # ── Manhattan world (USER 2026-10-15: "manhattan world para que piso, paredes, puerta y todo lo
+  # que se indique como manhattan queden bien rectos, BIM perfecto" / "debe indicarlo el usuario,
+  # por defecto marcado como manhattan"): every object is Manhattan unless the user unmarks it
+  # (output/manhattan.json, Instances panel); a marked object is fitted as a plane and snapped
+  # EXACTLY to the scene frame measured on the marked planes (up = the heaviest plane, the
+  # horizontal axes = the walls' dominant direction), coplanar pieces become one plane, every
+  # deviation is recorded (reconstruction/surface_fit/manhattan.py). The cloud and the poses are
+  # untouched: a modelling constraint, never a reconstruction one.
+  manhattan: true
+  manhattan_snap_deg: 15.0    # BOUND (declared): a plane further than this from every frame axis is
+                              # not a Manhattan surface — kept as measured, said in the report
                               # (fitted against the CLOSED support outline — the boundary's
                               # intent — so grid raggedness doesn't force everything to 'raw')
   # ── REGULARIZED POISSON (USER 2026-08-29: "poisson primero, y sobre poisson

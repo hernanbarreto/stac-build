@@ -5,7 +5,7 @@
  * footer buttons open Segmentation and Meshing.
  */
 import { useState } from 'react'
-import { Box, CheckSquare, Crosshair, Pencil, Puzzle, Square, Tag, Trash2, Wand2 } from 'lucide-react'
+import { Box, CheckSquare, Crosshair, Pencil, Puzzle, Spline, Square, Tag, Trash2, Wand2 } from 'lucide-react'
 import type { SegmentInstance } from '../components/Viewport'
 import { Panel, Section, Stack } from '../components/ui/Panel'
 import { Tree, type TreeNodeData } from '../components/ui/Tree'
@@ -53,6 +53,8 @@ interface InstancesPanelProps {
   onSetAllVisible: (visible: boolean, listed: ListedRows) => void
   onToggleSegment: (seg: SegmentInstance, visible: boolean) => void
   onRenameSegment: (seg: SegmentInstance, label: string) => Promise<void>
+  /** the Manhattan mark (USER 2026-10-15), on by default */
+  onToggleManhattan: (seg: SegmentInstance, on: boolean) => Promise<void>
   onDeleteSegment: (seg: SegmentInstance) => void
   onToggleUnsegmented: (visible: boolean) => void
   onFloorLevel: (instanceId: number) => void
@@ -131,6 +133,9 @@ export function InstancesPanel(p: InstancesPanelProps) {
       muted: seg.excluded,
       actions: (
         <>
+          <IconButton size="sm" label={seg.manhattan !== false ? t('instances.manhattanOn') : t('instances.manhattanOff')}
+            icon={seg.manhattan !== false ? <Box aria-hidden /> : <Spline aria-hidden />}
+            onClick={() => p.onToggleManhattan(seg, seg.manhattan === false)} />
           <IconButton size="sm" label={t('instances.rename')} icon={<Pencil aria-hidden />} onClick={() => { setEditing(seg.key); setEditValue(seg.label) }} />
           <IconButton size="sm" variant="danger" label={t('instances.delete')} icon={<Trash2 aria-hidden />} onClick={() => p.onDeleteSegment(seg)} />
         </>

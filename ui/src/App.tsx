@@ -685,6 +685,7 @@ function App() {
             totalPoints: inst.total_points || 0,
             visible: vis.get(inst.instance_id || inst.id) ?? true,
             excluded: inst.excluded || false,
+            manhattan: inst.manhattan ?? true,
           }))
         })
       }
@@ -1958,6 +1959,23 @@ function App() {
     setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, label: newLabel } : s)))
     viewportRef.current?.refreshSegmentOBBs(activeSession)
   }, [activeSession, report, t])
+  // the Manhattan mark (USER 2026-10-15: "debe indicarlo el usuario, por defecto marcado como
+  // manhattan"): kept in output/manhattan.json, read by the Mesh stage (surface_fit)
+  const setManhattanSegment = useCallback(async (seg: SegmentInstance, on: boolean) => {
+    if (!activeSession) return
+    try {
+      const r = await fetch('/api/segmentation/rename', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, manhattan: on }),
+      })
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}))
+        report(t('instances.renameFailed', { detail: d.detail || r.status }), 'err')
+        return
+      }
+    } catch (e) { report(t('instances.renameFailed', { detail: String(e) }), 'err'); return }
+    setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, manhattan: on } : s)))
+  }, [activeSession, report, t])
 
   const deleteSegment = useCallback(async (seg: SegmentInstance) => {
     const ok = await confirmDanger(t('instances.deleteMessage', { label: seg.label }), t('instances.deleteTitle'))
@@ -2121,6 +2139,7 @@ function App() {
             totalPoints: inst.total_points || 0,
             visible: true,
             excluded: inst.excluded || false,
+            manhattan: inst.manhattan ?? true,
           })))
         }
         viewportRef.current?.refreshSegmentOBBs(sid)
@@ -2318,7 +2337,7 @@ function App() {
                   tsdfMeshes.forEach(m => { if (tf.has(m.folder)) viewportRef.current?.setTsdfVisibility(m.folder, v) })
                 }}
                 onToggleSegment={(seg, vis) => { setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, visible: vis } : s))); viewportRef.current?.toggleOBB(seg.key, vis && obbKeys.has(seg.key)); viewportRef.current?.setSegmentVisibility(seg.classId, vis) }}
-                onRenameSegment={renameSegment} onDeleteSegment={deleteSegment}
+                onRenameSegment={renameSegment} onDeleteSegment={deleteSegment} onToggleManhattan={setManhattanSegment}
                 onToggleUnsegmented={v => { setUnsegmentedVisible(v); viewportRef.current?.setSegmentVisibility(0, v) }}
                 onFloorLevel={iid => applyFloorLevel(activeSession, 'explicit', iid)}
                 onTogglePlaced={(id, v) => viewportRef.current?.setSceneObjectVisible(id, v)} onRemovePlaced={id => viewportRef.current?.removeSceneObject(id)}

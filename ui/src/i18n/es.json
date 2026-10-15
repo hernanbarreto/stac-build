@@ -301,6 +301,8 @@
     "segmentManual": "Segmentación interactiva",
     "unload": "Descargar {@session}",
     "rename": "Renombrar",
+    "manhattanOn": "Manhattan: sí — el modelo queda recto al frame de la escena (clic para quitar)",
+    "manhattanOff": "Manhattan: no — se modela como se midió (clic para marcar)",
     "renameLabel": "Nuevo nombre",
     "delete": "Eliminar {@session}",
     "create": "Crear",

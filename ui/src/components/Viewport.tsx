@@ -111,6 +111,8 @@ export interface SegmentInstance {
     totalPoints: number
     visible: boolean
     excluded?: boolean
+    /** Manhattan mark (USER 2026-10-15): the object's model snaps to the scene frame; on by default */
+    manhattan?: boolean
 }
 
 export type PrecisionLayer = 'flyers' | 'mono_detail' | 'mixed_unresolved'
