@@ -55,6 +55,12 @@ def main() -> int:
                     help="'<iid>:poisson' or '<iid>:pgsr' — which mesh of the "
                          "segment to perfect (default: poisson, else pgsr)")
     args = ap.parse_args()
+    # USER 2026-10-15: the per-object meshing stage runs on the card — the hole-audit evidence
+    # (z-buffers, votes) projects on `surface_fit.evidence_device` under torch's deterministic
+    # mode STRICT, cuBLAS workspace pinned, seeded (repro.enable_deterministic_torch; the same
+    # entry F6 and DA3 use). Before anything touches CUDA.
+    import repro
+    repro.enable_deterministic_torch(0)
     source_by_iid = {}
     for s in args.source:
         try:

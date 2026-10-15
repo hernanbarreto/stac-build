@@ -2763,6 +2763,13 @@ surface_fit:
                               # frames, surface continuity is inferred behind the occluder
                               # (provenance occlusion_inferred — e.g. floor behind the ladder)
   hole_min_votes: 2           # minimum observing keyframes for a verdict
+  evidence_device: cuda       # USER 2026-10-15 ("toda esa etapa debe correr en gpu"): where the
+                              # audit's evidence projects — the per-frame z-buffers of the FULL
+                              # cloud, the mask votes, the see-through tallies (hole_audit._Evidence,
+                              # also mask_filter / poisson fills / shape proposer). cuda | cpu; an
+                              # unavailable device FAILS the step — no silent fallback. MEASURED on
+                              # pccr 2408 (19.35 M pts, 295 kf, lens): numpy 3.3 s per z-buffer,
+                              # the floor's audit 22.5 min; torch on the A100 ≈ 30 ms per z-buffer
   hole_interp_max_cells: 30   # tiny ENCLOSED gaps with no image verdict, up to this many cells
                               # (~0.075 m² at 5 cm), are interpolated across the fitted surface —
                               # the same bounded bridging Poisson does implicitly (provenance

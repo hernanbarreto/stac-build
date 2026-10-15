@@ -32,11 +32,109 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import torch
 
 logger = logging.getLogger("SurfaceFit")
+
+# ── the device (USER 2026-10-15: "toda esa etapa debe correr en gpu, no puede demorar tanto y
+# correrlo en cpu") ─────────────────────────────────────────────────────────────────
+# Every projection of the evidence — the per-frame z-buffers of the FULL cloud, the mask votes,
+# the see-through tallies — runs on torch tensors on ONE device: the card the config declares
+# (`surface_fit.evidence_device: cuda`, the meshing workers) or the CPU (the synthetic tests,
+# tests/conftest.py → :func:`use_device`). The same code path on both, never a silent fallback:
+# a declared cuda with no card FAILS. MEASURED on pccr 2408 (19.35 M points, 295 keyframes,
+# F5's lens): one numpy z-buffer took 3.3 s (cv2.projectPoints on the whole cloud 2.7 s of it)
+# and the floor's audit 22.5 min (07:01 → 07:23, run.log 2026-10-15) — every keyframe's z-buffer
+# plus the calibration votes of 724 mask candidates. Deterministic by construction on the card:
+# the z-buffer is a stable SORT by (depth, pixel) and the first entry of each pixel (no scatter,
+# no atomics — precision.f6_torch.splat's recipe), votes are gathers and sums of 0/1, the 5-px
+# minimum filter is a max-pool (precision.f6_torch.min_filter). The workers that mesh objects
+# (run_surface_fit / run_poisson_objects / run_perfect_objects) run under torch's deterministic
+# mode STRICT (repro.enable_deterministic_torch); the record of each evidence says whether its
+# process was (``torch_record``).
+_KEY_RE = re.compile(r"^f(\d+)_o(\d+)$")
+_DEVICE: Optional[str] = None
+_DEVICES = ("cuda", "cpu")
+
+
+def use_device(dev: Optional[str]) -> Optional[str]:
+    """The ONE device of every evidence built after this call ('cpu' in the synthetic tests);
+    None = resolve `surface_fit.evidence_device` at the next evidence."""
+    global _DEVICE
+    _DEVICE = None if dev is None else str(dev)
+    return _DEVICE
+
+
+def evidence_device() -> str:
+    """The device the evidence projects on: :func:`use_device` when set, else the declared
+    `surface_fit.evidence_device` (cuda | cpu). A missing key, an unknown value or a cuda with
+    no visible card FAILS naming the key — nothing runs somewhere else."""
+    if _DEVICE is not None:
+        dev = _DEVICE
+    else:
+        from config import cfg
+        sf = (cfg.get("surface_fit") or {}) if hasattr(cfg, "get") else {}
+        if "evidence_device" not in sf:
+            raise RuntimeError("surface_fit.evidence_device is missing (cuda | cpu) — the hole-audit "
+                               "evidence projects on one declared device, nothing is assumed")
+        dev = str(sf["evidence_device"])
+    if dev not in _DEVICES:
+        raise RuntimeError(f"surface_fit.evidence_device = {dev!r} — one of {list(_DEVICES)}")
+    if dev == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("surface_fit.evidence_device is cuda and no CUDA device is visible — the "
+                           "evidence fails instead of running somewhere else")
+    return dev
+
+
+def torch_strict() -> bool:
+    """torch's deterministic mode STRICT in this process (raise, never warn)."""
+    return bool(torch.are_deterministic_algorithms_enabled()
+                and not torch.is_deterministic_algorithms_warn_only_enabled())
+
+
+def _to(a, dev: str, dtype=None) -> torch.Tensor:
+    """numpy → a tensor on ``dev``; floats as float64 unless asked otherwise."""
+    if isinstance(a, torch.Tensor):
+        t = a.to(dev)
+        return t if dtype is None else t.to(dtype)
+    a = np.ascontiguousarray(a)
+    if dtype is None:
+        if a.dtype == np.bool_:
+            dtype = torch.bool
+        elif np.issubdtype(a.dtype, np.floating):
+            dtype = torch.float64
+        elif np.issubdtype(a.dtype, np.integer):
+            dtype = torch.int64
+    return torch.as_tensor(a, device=dev).to(dtype)
+
+
+def _np(t: torch.Tensor, dtype=None) -> np.ndarray:
+    a = t.detach().cpu().numpy()
+    return a if dtype is None else a.astype(dtype)
+
+
+def zbuffer_min(pix: torch.Tensor, z: torch.Tensor, mh: int, mw: int) -> torch.Tensor:
+    """Per-pixel nearest depth of the (pixel, depth) pairs — +inf where nothing lands —
+    as a stable SORT by depth, then by pixel, with one +inf sentinel per pixel, and the
+    first entry of each pixel: ``np.minimum.at`` without a scatter (deterministic on every
+    device; precision.f6_torch.splat's recipe)."""
+    n_pix = int(mh) * int(mw)
+    dev = z.device
+    p_all = torch.cat([torch.arange(n_pix, dtype=torch.int64, device=dev), pix.to(torch.int64)])
+    z_all = torch.cat([torch.full((n_pix,), float("inf"), dtype=torch.float64, device=dev),
+                       z.to(torch.float64)])
+    o1 = torch.sort(z_all, stable=True).indices
+    p1 = p_all[o1]
+    z1 = z_all[o1]
+    o2 = torch.sort(p1, stable=True).indices
+    p2 = p1[o2]
+    z2 = z1[o2]
+    first = torch.ones_like(p2, dtype=torch.bool)
+    first[1:] = p2[1:] != p2[:-1]
+    return z2[first.nonzero()[:, 0]].reshape(int(mh), int(mw))
 
 # the files the evidence is built from — its identity (docs/plan_determinismo.md point 115:
 # the cache below is keyed by their sha256, never by the directory alone, so an epoch that
@@ -135,7 +233,16 @@ class _Evidence:
                 raise RuntimeError(f"{p} declares an invalid mask grid scaled_res={sr.tolist()}")
             self.mask_hw: Tuple[int, int] = (int(sr[0]), int(sr[1]))
             self.mask_grid = mask_grid_for(cm.width, cm.height, self.mask_hw)
-            self._zbuf_cache: Dict[int, Optional[np.ndarray]] = {}
+            # the z-buffers live on the device (``_zbuf_t``); :meth:`_zbuf` hands numpy copies
+            self._zbuf_cache: Dict[int, Optional[torch.Tensor]] = {}
+            self.device = evidence_device()
+            self.torch_record = {"device": self.device, "deterministic_strict": torch_strict()}
+            if self.device == "cuda" and not self.torch_record["deterministic_strict"]:
+                logger.info("hole_audit: evidence on cuda in a process without torch's strict "
+                            "deterministic mode (its own kernels are deterministic by construction)")
+            self._cloud_t: Optional[torch.Tensor] = None   # uploaded at the first z-buffer — the
+            #   backend's in-process readers (object_analysis) never need the cloud on the card
+            self._frames_by_oid = self._index_frames()
             # The npz keys are NOT the frame the poses are keyed by. Measured
             # (or declared) once here; every lookup below goes through it.
             from segmentation import mask_space
@@ -196,50 +303,126 @@ class _Evidence:
         mv = np.where(np.isfinite(mv), mv, -1.0).astype(np.int64)
         return mu, mv
 
-    def _zbuf(self, cloud_fidx: int, mh: int, mw: int) -> Optional[np.ndarray]:
-        """Per-frame Z-buffer from the FULL cloud at mask resolution: what
-        measured geometry is closest along each pixel ray. THE depth check
-        the 2-D masks lack (without it, a phantom plane cell beyond the wall
-        edge projected onto some other surface and voted 'occluded').
+    # ── the projection on tensors (CameraSource.pixels + mask_pixels, point 108) ──
 
-        ``cloud_fidx`` is a CLOUD/POSE frame number — the camera's own space.
-        Use :meth:`zbuf_of_mask_frame` when holding a mask key's index."""
+    def _cloud_tensor(self) -> torch.Tensor:
+        if self._cloud_t is None:
+            self._cloud_t = _to(self._cloud, self.device, torch.float64)
+        return self._cloud_t
+
+    def _cam_t(self, c2w) -> Tuple[torch.Tensor, torch.Tensor]:
+        """(R, t) of world → camera for a c2w pose, on the device."""
+        c2w4 = np.eye(4)
+        c2w4[:c2w.shape[0], :c2w.shape[1]] = c2w
+        M = np.linalg.inv(c2w4)
+        return _to(M[:3, :3], self.device), _to(M[:3, 3], self.device)
+
+    def _lens(self) -> Optional[tuple]:
+        cam = self.cam.lens
+        if cam is None:
+            return None
+        k1, k2, p1, p2 = [float(x) for x in cam.dist()]
+        sx, sy = self.cam.native_to_grid
+        return (float(cam.fx), float(cam.fy), float(cam.cx), float(cam.cy), k1, k2, p1, p2,
+                float(sx), float(sy))
+
+    def _record_px_t(self, cloud_fidx: int, pcam: torch.Tensor, front: torch.Tensor
+                     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """``CameraSource.pixels`` on tensors: camera-frame points → continuous RECORD-grid
+        pixels, the lens included (cv2.projectPoints' Brown–Conrady k1 k2 p1 p2 on the
+        normalised point, rvec = tvec = 0). Rows outside ``front`` carry no meaning."""
+        z = torch.where(front, pcam[:, 2], torch.ones_like(pcam[:, 2]))
+        x = pcam[:, 0] / z
+        y = pcam[:, 1] / z
+        lens = self._lens()
+        if lens is None:
+            K = np.asarray(self.cam.K_for(cloud_fidx), np.float64)
+            return float(K[0, 0]) * x + float(K[0, 2]), float(K[1, 1]) * y + float(K[1, 2])
+        fx, fy, cx, cy, k1, k2, p1, p2, sx, sy = lens
+        r2 = x * x + y * y
+        radial = 1.0 + k1 * r2 + k2 * r2 * r2
+        xd = x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x)
+        yd = y * radial + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y
+        return (fx * xd + cx) * sx, (fy * yd + cy) * sy
+
+    def _mask_px_t(self, u: torch.Tensor, v: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """:meth:`mask_pixels` on tensors: record grid → native (Omega's crop and scale) → mask
+        grid (a full-frame resize) → the nearest pixel centre (round half to even, np.rint's);
+        a non-finite input lands at −1 (out of bounds)."""
+        rg, mg = self.record_grid, self.mask_grid
+        xn = (u - rg.pad_left + 0.5) * rg.scale_x - 0.5 + rg.crop_x
+        yn = (v - rg.pad_top + 0.5) * rg.scale_y - 0.5 + rg.crop_y
+        gx = (xn - mg.crop_x + 0.5) / mg.scale_x - 0.5 + mg.pad_left
+        gy = (yn - mg.crop_y + 0.5) / mg.scale_y - 0.5 + mg.pad_top
+        mu = torch.round(gx)
+        mv = torch.round(gy)
+        mu = torch.where(torch.isfinite(mu), mu, torch.full_like(mu, -1.0)).to(torch.int64)
+        mv = torch.where(torch.isfinite(mv), mv, torch.full_like(mv, -1.0)).to(torch.int64)
+        return mu, mv
+
+    def _project_t(self, cloud_fidx: int, c2w, X: torch.Tensor):
+        """World points on the device → (mask column, mask row, depth, in-bounds-and-in-front)
+        in the camera of ``cloud_fidx`` (a CLOUD/POSE frame)."""
+        mh, mw = self.mask_hw
+        R, t = self._cam_t(c2w)
+        pcam = X @ R.T + t
+        z = pcam[:, 2]
+        front = z > 0.05
+        u, v = self._record_px_t(int(cloud_fidx), pcam, front)
+        mu, mv = self._mask_px_t(u, v)
+        inb = front & (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
+        return mu, mv, z, inb
+
+    def _zbuf_t(self, cloud_fidx: int, mh: int, mw: int) -> Optional[torch.Tensor]:
+        """Per-frame Z-buffer from the FULL cloud at mask resolution, on the device: what
+        measured geometry is closest along each pixel ray. THE depth check the 2-D masks lack
+        (without it, a phantom plane cell beyond the wall edge projected onto some other
+        surface and voted 'occluded'). ``cloud_fidx`` is a CLOUD/POSE frame number — the
+        camera's own space; :meth:`zbuf_of_mask_frame` takes a mask key's index."""
         fidx = int(cloud_fidx)
         if fidx in self._zbuf_cache:
             return self._zbuf_cache[fidx]
+        if (int(mh), int(mw)) != self.mask_hw:
+            raise RuntimeError(f"a z-buffer of {int(mh)}x{int(mw)} px against a store that declares "
+                               f"{self.mask_hw[0]}x{self.mask_hw[1]} — one store, one grid")
         c2w = self.cam.pose_map.get(fidx)
         K = self.cam.K_for(fidx)
         if c2w is None or K is None:
             self._zbuf_cache[fidx] = None
             return None
-        c2w4 = np.eye(4)
-        c2w4[:c2w.shape[0], :c2w.shape[1]] = c2w
-        M = np.linalg.inv(c2w4)
-        p = (M[:3, :3] @ self._cloud.T).T + M[:3, 3]
-        z = p[:, 2]
-        ok = z > 0.05
-        u, v = self.cam.pixels(fidx, p[ok])          # the cloud's camera, its lens included
-        mu, mv = self.mask_pixels(u, v, mh, mw)      # the exact grid maps (point 108)
-        inb = (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
-        zb = np.full((mh, mw), np.inf, dtype=np.float64)
-        np.minimum.at(zb, (mv[inb], mu[inb]), z[ok][inb])
+        from precision.f6_torch import min_filter
+        mu, mv, z, inb = self._project_t(fidx, c2w, self._cloud_tensor())
+        zb = zbuffer_min((mv * mw + mu)[inb], z[inb], mh, mw)
         # window-min: the cloud is sparse at mask resolution, so single pixels
         # along a ray are often unmeasured (inf) while their NEIGHBOURS are —
         # wall3's arch kept filling because the background seen through it had
         # no point on the exact pixel (user 2026-08-29). A 5-px minimum filter
-        # gives every pixel the closest measured depth nearby.
-        from scipy import ndimage as _ndi
-        zb = _ndi.minimum_filter(zb, size=5, mode="nearest")
+        # (scipy's minimum_filter(size=5, mode='nearest'), as a max-pool) gives
+        # every pixel the closest measured depth nearby.
+        zb = min_filter(zb, 5)
         self._zbuf_cache[fidx] = zb
         return zb
 
-    def frames_for(self, oid: int):
-        out = []
+    def _zbuf(self, cloud_fidx: int, mh: int, mw: int) -> Optional[np.ndarray]:
+        """:meth:`_zbuf_t` as a numpy map (the readers outside this module)."""
+        zb = self._zbuf_t(cloud_fidx, mh, mw)
+        return None if zb is None else _np(zb)
+
+    def _index_frames(self) -> Dict[int, List[Tuple[int, str]]]:
+        """``f<frame>_o<oid>`` keys of the store, by oid, in frame order — ONE pass over the
+        members (the calibration tries hundreds of oids; a regex pass each was minutes)."""
+        idx: Dict[int, List[Tuple[int, str]]] = {}
         for k in self.masks.files:
-            m = re.match(rf"^f(\d+)_o{oid}$", k)
+            m = _KEY_RE.match(k)
             if m:
-                out.append((int(m.group(1)), k))
-        return sorted(out)
+                idx.setdefault(int(m.group(2)), []).append((int(m.group(1)), k))
+        for v in idx.values():
+            v.sort()
+        return idx
+
+    def frames_for(self, oid: int) -> List[Tuple[int, str]]:
+        """(mask frame index, npz key) of every mask of ``oid``, in frame order."""
+        return list(self._frames_by_oid.get(int(oid), []))
 
     def _others_mask(self, fidx: int, oid: int) -> Optional[np.ndarray]:
         """Union of every OTHER instance's mask in a frame — the occluders."""
@@ -268,47 +451,46 @@ class _Evidence:
         - neither (empty): visible, and the pixel is not this instance — the
           frame sees PAST the surface (or a coplanar in-fill object like a
           door leaf occupies it) → witness the surface is NOT there.
-        Returns (covered, occluded, valid)."""
+        Returns (covered, occluded, valid) as int32 arrays."""
         n = len(world_pts)
-        covered = np.zeros(n, dtype=np.int32)
-        occluded = np.zeros(n, dtype=np.int32)
-        valid = np.zeros(n, dtype=np.int32)
+        dev = self.device
+        covered = torch.zeros(n, dtype=torch.int32, device=dev)
+        occluded = torch.zeros(n, dtype=torch.int32, device=dev)
+        valid = torch.zeros(n, dtype=torch.int32, device=dev)
+        if n == 0:
+            return _np(covered), _np(occluded), _np(valid)
+        X = _to(np.asarray(world_pts, dtype=np.float64), dev)
+        mh, mw = self.mask_hw
+        inf = torch.full((n,), float("inf"), dtype=torch.float64, device=dev)
         for fidx, key in self.frames_for(oid):
             c2w = self.pose_at(fidx)
             K = self.K_at(fidx)
             if c2w is None or K is None:
                 continue
-            m = self.masks[key]
-            mh, mw = m.shape
-            zb = self.zbuf_of_mask_frame(fidx, mh, mw)
-            c2w4 = np.eye(4)
-            c2w4[:c2w.shape[0], :c2w.shape[1]] = c2w
-            M = np.linalg.inv(c2w4)
-            pcam = (M[:3, :3] @ world_pts.T).T + M[:3, 3]
-            z = pcam[:, 2]
-            front = z > 0.05
-            u = np.full(n, -1.0)
-            v = np.full(n, -1.0)
-            u[front], v[front] = self.cam.pixels(self.cloud_frame(fidx), pcam[front])   # lens included
-            mu, mv = self.mask_pixels(u, v, mh, mw)                                    # point 108
-            inb = front & (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
-            valid[inb] += 1
-            occ = np.zeros(n, dtype=bool)
-            behind = np.zeros(n, dtype=bool)
+            m = np.asarray(self.masks[key])
+            if m.shape != (mh, mw):
+                raise RuntimeError(f"a mask of {m.shape[0]}x{m.shape[1]} px against a store that "
+                                   f"declares {mh}x{mw} — one store, one grid")
+            cf = self.cloud_frame(fidx)
+            zb = self._zbuf_t(cf, mh, mw)
+            mu, mv, z, inb = self._project_t(cf, c2w, X)
+            lin = torch.where(inb, mv * mw + mu, torch.zeros_like(mu))
+            valid += inb.to(torch.int32)
             if zb is not None:
-                zpix = np.full(n, np.inf)
-                zpix[inb] = zb[mv[inb], mu[inb]]
+                zpix = torch.where(inb, zb.reshape(-1)[lin], inf)
                 occ = zpix < (z - depth_tol)
                 # measured geometry BEHIND the surface through this cell: the
                 # camera sees PAST it (wall3's arch: through the arch you see
                 # the attached cone — same instance, so the 2-D mask covered
                 # it and the arch got filled; depth says OPEN)
-                behind = np.isfinite(zpix) & (zpix > (z + depth_tol))
-            occluded[occ] += 1
-            hit = np.zeros(n, dtype=bool)
-            hit[inb] = m[mv[inb], mu[inb]] > 0
-            covered[hit & ~occ & ~behind] += 1
-        return covered, occluded, valid
+                behind = torch.isfinite(zpix) & (zpix > (z + depth_tol))
+            else:
+                occ = torch.zeros(n, dtype=torch.bool, device=dev)
+                behind = torch.zeros(n, dtype=torch.bool, device=dev)
+            occluded += occ.to(torch.int32)
+            hit = inb & _to(m > 0, dev).reshape(-1)[lin]
+            covered += (hit & ~occ & ~behind).to(torch.int32)
+        return _np(covered), _np(occluded), _np(valid)
 
     def see_through(self, world_pts: np.ndarray, depth_tol: float = 0.15):
         """Per-point (valid, at_depth, behind) tallies over ALL posed keyframes
@@ -319,35 +501,30 @@ class _Evidence:
         surface is real. Rays with no finite Z-buffer say nothing (not valid)."""
         mh, mw = self.mask_hw                    # the store's DECLARED grid, never a default
         n = len(world_pts)
-        valid = np.zeros(n, dtype=np.int32)
-        at_depth = np.zeros(n, dtype=np.int32)
-        behind = np.zeros(n, dtype=np.int32)
+        dev = self.device
+        valid = torch.zeros(n, dtype=torch.int32, device=dev)
+        at_depth = torch.zeros(n, dtype=torch.int32, device=dev)
+        behind = torch.zeros(n, dtype=torch.int32, device=dev)
+        if n == 0:
+            return _np(valid), _np(at_depth), _np(behind)
+        X = _to(np.asarray(world_pts, dtype=np.float64), dev)
+        inf = torch.full((n,), float("inf"), dtype=torch.float64, device=dev)
         for fidx in sorted(self.cam.pose_map.keys()):
             c2w = self.cam.pose_map.get(fidx)
             K = self.cam.K_for(fidx)
             if c2w is None or K is None:
                 continue
-            zb = self._zbuf(fidx, mh, mw)
+            zb = self._zbuf_t(fidx, mh, mw)
             if zb is None:
                 continue
-            c2w4 = np.eye(4)
-            c2w4[:c2w.shape[0], :c2w.shape[1]] = c2w
-            M = np.linalg.inv(c2w4)
-            pcam = (M[:3, :3] @ world_pts.T).T + M[:3, 3]
-            z = pcam[:, 2]
-            front = z > 0.05
-            u = np.full(n, -1.0)
-            v = np.full(n, -1.0)
-            u[front], v[front] = self.cam.pixels(fidx, pcam[front])                     # lens included
-            mu, mv = self.mask_pixels(u, v, mh, mw)                                    # point 108
-            inb = front & (mu >= 0) & (mu < mw) & (mv >= 0) & (mv < mh)
-            zpix = np.full(n, np.inf)
-            zpix[inb] = zb[mv[inb], mu[inb]]
-            measured = np.isfinite(zpix)
-            valid[measured] += 1
-            at_depth[measured & (np.abs(zpix - z) <= depth_tol)] += 1
-            behind[measured & (zpix > z + depth_tol)] += 1
-        return valid, at_depth, behind
+            mu, mv, z, inb = self._project_t(fidx, c2w, X)
+            lin = torch.where(inb, mv * mw + mu, torch.zeros_like(mu))
+            zpix = torch.where(inb, zb.reshape(-1)[lin], inf)
+            measured = torch.isfinite(zpix)
+            valid += measured.to(torch.int32)
+            at_depth += (measured & (torch.abs(zpix - z) <= depth_tol)).to(torch.int32)
+            behind += (measured & (zpix > z + depth_tol)).to(torch.int32)
+        return _np(valid), _np(at_depth), _np(behind)
 
     def calibrate_oid(self, world_pts: np.ndarray, instance_id: int) -> Optional[int]:
         """Find the npz object id for this instance by projecting its OWN

@@ -1,5 +1,23 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ 2026-10-15 — THE MESHING STAGE RUNS ON THE CARD (USER: "toda esa etapa debe correr en gpu")
+- The hole-audit EVIDENCE (`reconstruction/surface_fit/hole_audit._Evidence`: the per-keyframe z-buffer of the
+  FULL cloud, the mask votes, the see-through tallies — also behind mask_filter, the Poisson fills, the shape
+  proposer, the loop reprojection) runs on torch on ONE declared device, `surface_fit.evidence_device: cuda`
+  (unavailable = FAIL, tests on cpu via tests/conftest.py), F6's deterministic recipe (stable-sort z-buffer,
+  gathers, max-pool min filter). MEASURED on pccr 2408: numpy 3.3 s per z-buffer (cv2 lens projection of
+  19.35 M points), the floor's audit 22.5 min; torch 34 ms each, 295 in 10 s, bit for bit numpy's. The
+  meshing workers (run_surface_fit / run_poisson_objects / run_perfect_objects) enter with
+  `repro.enable_deterministic_torch(0)` (STRICT). Still CPU, declared: WLOP (CGAL; the torch MLS is a recipe
+  change → his call), Open3D Poisson (no GPU Poisson anywhere), texrecon (10 s).
+- Mesh verdicts of the day (ladder #397): "model, horrible, p2c mal, parts mal pero no tanto, poisson mal
+  pero no tanto"; floor p2c "no está tan mal pero hubiera salido mucho mejor con un tsdf, o un ransac
+  nuestro"; the wooden stick (a cylinder) came out of RANSAC as three planes ("una mierda") → a BAR test
+  (PCA one long axis + cm-scale section → the cylinder fitter alone) is the next fix in
+  `segmentation/perfect_object._detect_and_snap_cloud`, pending.
+- Autosegment of 2026-10-15 on pccr validated ("quedó mucho mejor segmentado"); the other sessions are
+  NOT to be launched without his explicit order ("no no lances nada").
+
 ## ⭐⭐⭐ 2026-10-06 — CHUNKS PLANNED BY CO-VISIBILITY (USER: "no existe una receta que se ajuste a todos los casos")
 - The Omega chunk plan is ALWAYS `reconstruction/chunk_covis.plan_session` (no switch): VGG-T3-style co-visibility by
   depth consistency on the I3 DA3 windows → each keyframe's co-visibility length ℓ → VGGT-Motion-style budget δ=1/ℓ;

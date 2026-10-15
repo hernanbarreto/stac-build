@@ -104,6 +104,12 @@ def main():
     ap.add_argument("--params", default="{}",
                     help="JSON of fit_segment config kwargs (overrides config.yaml surface_fit section)")
     args = ap.parse_args()
+    # USER 2026-10-15: the per-object meshing stage runs on the card — the hole-audit evidence
+    # (z-buffers, votes) projects on `surface_fit.evidence_device` under torch's deterministic
+    # mode STRICT, cuBLAS workspace pinned, seeded (repro.enable_deterministic_torch; the same
+    # entry F6 and DA3 use). Before anything touches CUDA.
+    import repro
+    repro.enable_deterministic_torch(0)
 
     import numpy as np
     from config import cfg

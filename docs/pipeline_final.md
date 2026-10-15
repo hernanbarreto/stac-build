@@ -410,7 +410,24 @@ gives them a neighbour's label); the fallback retry carries the category (DONE 2
    grab and throw, the cloud is solid, spheres with the STAC Build logo), the reference human in Add
    object, ShapeR objects drawn in their segment colour, rename / delete of generated and placed objects,
    one search + show / hide all over every list, fly-to on every row, fixed-size dialogs.
-8. Keep this file updated with every change of the above.
+8. **Meshing → Mesh on the card (USER 2026-10-15: "toda esa etapa debe correr en gpu, no puede demorar
+   tanto y correrlo en cpu")** — MEASURED on pccr 2408 (floor #8, 19.35 M pts, 295 kf) before the port:
+   WLOP 171 s, B-spline fit 3 s, **hole audit 22.5 min** (the per-keyframe z-buffer of the FULL cloud in
+   numpy/cv2 with the lens: 3.3 s each × 295, plus the calibration votes of 724 mask candidates — and it
+   ended "no matching mask, audit skipped": the floor's own mask covers < 50 % of its on-surface points
+   unoccluded, so floors get no image-supported fills, OPEN), texture bake 10 s; per-object TSDF 78 s;
+   point2cad 6–7 min per object (the vendor's INR, already on the card). DONE the same day: the evidence
+   (`reconstruction/surface_fit/hole_audit._Evidence` — z-buffers, mask votes, see-through; it also serves
+   mask_filter, the Poisson fills, the shape proposer, the loop reprojection) runs on torch on ONE declared
+   device (`surface_fit.evidence_device: cuda`, no fallback; tests on cpu via tests/conftest.py), F6's
+   recipe (stable sort z-buffer, gathers, max-pool min filter): 295 z-buffers in 10 s (34 ms each), bit
+   for bit numpy's (0 px differ on 3 frames), 3.2 GiB VRAM; the three meshing workers (run_surface_fit /
+   run_poisson_objects / run_perfect_objects) run under torch STRICT deterministic (repro.
+   enable_deterministic_torch). STILL CPU, declared: WLOP (CGAL subprocess; the torch MLS exists as
+   `consolidate_method: mls`, a recipe change → the user's call), Open3D Poisson (no GPU Poisson in any
+   env; ~1 min/object pinned), texrecon. Open3D's CUDA tensor TSDF (`VoxelBlockGrid`) is available in env
+   da3 for the per-object TSDF if it joins the stage.
+9. Keep this file updated with every change of the above.
 
 ## §11 · Deliverables for the BIM comparison (USER 2026-09-30)
 
