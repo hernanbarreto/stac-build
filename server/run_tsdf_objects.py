@@ -2,8 +2,10 @@
 """Per-object TSDF worker (USER 2026-10-15 "todo tiene que correr sobre todo lo corregido"): the
 PUBLISHED cloud of the live epoch is the depth (segmentation.tsdf_export, depth_source live_cloud),
 on the card, torch STRICT deterministic. Protocol (stdout):
-    [TOBJ-PROGRESS]{"instance_id": i, "phase": "starting|integrating|extracting|done|error", "elapsed": s}
-    [TOBJ-RESULT]{"written": ["...glb", ...]}
+    [TOBJ-PROGRESS]{"instance_id": i, "phase": "starting|integrating|extracting|done|error|texture", "elapsed": s}
+    [TOBJ-RESULT]{"written": ["...glb", ...], "textured": [...], "untextured": [...]}
+After every TSDF the mesh is textured with texrecon from the scan frames (USER 2026-10-15
+"cuando corre el tsdf luego debe correr texrecon para texturizar").
 """
 import os
 
@@ -73,7 +75,28 @@ def main() -> int:
         depth_source=str(oc["depth_source"]), device=str(oc["device"]),
         live_fill_px=int(oc["fill_px"]), weight_threshold=float(oc["weight_threshold"]),
         block_count=int(oc["block_count"]))
+    # USER 2026-10-15: after the TSDF, texrecon textures the mesh from the scan frames
+    # (reconstruction.texture_bake.bake_object_glb — the same bake every object mesh gets);
+    # a bake that fails leaves the untextured mesh and is declared, never silent
+    textured, untextured = [], []
+    from reconstruction.texture_bake import bake_object_glb
+    for g in glbs:
+        iid = None
+        try:
+            iid = json.loads(Path(g).with_suffix(".meta.json").read_text()).get("instance_id")
+        except Exception:  # noqa: BLE001
+            pass
+        print("[TOBJ-PROGRESS]" + json.dumps({"instance_id": iid, "phase": "texture",
+                                               "elapsed": round(time.time() - t0, 1),
+                                               "mesh": str(g)}), flush=True)
+        try:
+            ok = bool(bake_object_glb(Path(g), session_dir, out))
+        except Exception as e:  # noqa: BLE001
+            print(f"[TOBJ] texture bake failed on {Path(g).name}: {type(e).__name__}: {e}", flush=True)
+            ok = False
+        (textured if ok else untextured).append(str(g))
     print("[TOBJ-RESULT]" + json.dumps({"written": [str(g) for g in glbs],
+                                         "textured": textured, "untextured": untextured,
                                          "elapsed_s": round(time.time() - t0, 1)}), flush=True)
     return 0 if glbs else 1
 

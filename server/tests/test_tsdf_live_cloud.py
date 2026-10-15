@@ -2,6 +2,7 @@
 que correr sobre todo lo corregido") — never the original depth maps — on one declared device, and
 the same voxels give the same bytes twice (canonical mesh order)."""
 import json
+from pathlib import Path
 
 import numpy as np
 import open3d as o3d
@@ -75,3 +76,40 @@ def test_on_cuda_the_mesh_equals_the_cpu_one(tmp_path, monkeypatch):
     g_gpu = _run(tmp_path, out, "cuda", monkeypatch)
     v_gpu = np.asarray(trimesh.load(str(g_gpu), force="mesh").vertices, float)
     assert v_cpu.shape == v_gpu.shape and np.allclose(v_cpu, v_gpu, atol=1e-5)
+
+
+def test_the_worker_textures_every_tsdf_mesh_after_writing_it(tmp_path, monkeypatch):
+    """run_tsdf_objects: TSDF first, then texrecon on each GLB; a failed bake is declared."""
+    import run_tsdf_objects as RT
+    import reconstruction.texture_bake as TB
+    out = tmp_path / "output"
+    out.mkdir()
+    (out / "segmentation_result.json").write_text(json.dumps({"instances": []}))
+    g1, g2 = out / "a_1_tsdf.glb", out / "b_2_tsdf.glb"
+    for g in (g1, g2):
+        g.write_bytes(b"glb")
+        g.with_suffix(".meta.json").write_text(json.dumps({"instance_id": int(g.name[2])}))
+    monkeypatch.setattr(RT, "export_tsdf_meshes", lambda *a, **k: [g1, g2], raising=False)
+    import segmentation.tsdf_export as T
+    monkeypatch.setattr(T, "export_tsdf_meshes", lambda *a, **k: [g1, g2])
+    calls = []
+
+    def _bake(glb, session_dir, output_dir, **k):
+        calls.append((Path(glb).name, Path(session_dir), Path(output_dir)))
+        if Path(glb).name.startswith("b_"):
+            raise RuntimeError("texrecon died")
+        return True
+    monkeypatch.setattr(TB, "bake_object_glb", _bake)
+    monkeypatch.setattr("repro.enable_deterministic_torch", lambda seed: {})
+    monkeypatch.setattr("sys.argv", ["run_tsdf_objects.py", "--output-dir", str(out),
+                                     "--instance-id", "1", "--instance-id", "2"])
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = RT.main()
+    assert rc == 0
+    assert [c[0] for c in calls] == ["a_1_tsdf.glb", "b_2_tsdf.glb"], "TSDF first, then every mesh"
+    assert calls[0][1] == tmp_path and calls[0][2] == out
+    res = json.loads([ln for ln in buf.getvalue().splitlines() if ln.startswith("[TOBJ-RESULT]")][-1][13:])
+    assert res["textured"] == [str(g1)] and res["untextured"] == [str(g2)]
+    assert "texrecon died" in buf.getvalue()
