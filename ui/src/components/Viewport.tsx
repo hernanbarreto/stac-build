@@ -189,6 +189,9 @@ export interface ViewportHandle {
     /** add the meshes written since the last load without unloading the shown ones (2026-10-15) */
     refreshMeshes: (sessionId: string) => Promise<void>
     setTsdfVisibility: (folder: string, visible: boolean) => void
+    /** draw a GLB as wireframe (USER 2026-10-15): 'shape' keyed by instance id, 'tsdf' by folder; a mesh
+     *  not loaded yet gets it when it loads */
+    setMeshWireframe: (kind: 'shape' | 'tsdf', key: number | string, on: boolean) => void
     clearTsdf: () => void
     reloadReconScene: (sessionId: string) => Promise<void>
     setReconElementVisibility: (instanceId: number, visible: boolean) => void
@@ -629,6 +632,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // the whole-scene mesh is). Entries wait here (folder  list item) until
     // setTsdfVisibility(folder, true) pulls them in on demand.
     const tsdfPendingRef = useRef<Map<string, TsdfListEntry>>(new Map())
+    // the GLBs drawn as wireframe (USER 2026-10-15), keyed 'shape-<instanceId>' / 'tsdf-<folder>'
+    const wireframeRef = useRef<Set<string>>(new Set())
     const tsdfLoadingRef = useRef<Set<string>>(new Set())
     // Reconstruction-v2 scene — typed elements (parametric surfaces / swept solids
     // / boxes / linear-repeats + free-form ShapeR meshes). Same lifecycle as
@@ -2223,6 +2228,18 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // not yet in the scene — loaded meshes keep their visibility; per-instance TSDF meshes stay
     // lazy (pending until toggled), ShapeR meshes load at once as the full load does. Without a
     // group yet (no mesh was ever loaded) the full loader runs.
+    const applyWireframe = useCallback((obj: THREE.Object3D, on: boolean) => {
+        obj.traverse(o => {
+            const m = o as THREE.Mesh
+            if (!m.isMesh) return
+            const mats = Array.isArray(m.material) ? m.material : [m.material]
+            for (const mat of mats) {
+                const w = mat as THREE.Material & { wireframe?: boolean }
+                if (w && 'wireframe' in w) { w.wireframe = on; w.needsUpdate = true }
+            }
+        })
+    }, [])
+
     const addNewTsdfEntries = useCallback(async (sessionId: string): Promise<number> => {
         const parent = potreeLoaderRef.current?.getOctreeGroup() || sceneRef.current
         if (!parent) return 0
@@ -2244,11 +2261,14 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             // per-instance or not (USER 2026-10-15: "no se están cargando automáticamente los
             // glb"); the lazy rule of loadTsdfIntoGroup is for the listing at session open only
             tsdfLoadingRef.current.add(sh.folder)
-            try { await loadTsdfMeshEntry(sh) } catch (e) { console.warn(`[Viewport] failed to load TSDF mesh ${sh.glb_url}`, e) }
+            try {
+                const g = await loadTsdfMeshEntry(sh)
+                if (g && wireframeRef.current.has(`tsdf-${sh.folder}`)) applyWireframe(g, true)
+            } catch (e) { console.warn(`[Viewport] failed to load TSDF mesh ${sh.glb_url}`, e) }
             finally { tsdfLoadingRef.current.delete(sh.folder) }
         }
         return added
-    }, [loadTsdfIntoGroup, loadTsdfMeshEntry])
+    }, [loadTsdfIntoGroup, loadTsdfMeshEntry, applyWireframe])
 
     const addNewShapeEntries = useCallback(async (sessionId: string): Promise<number> => {
         const parent = potreeLoaderRef.current?.getOctreeGroup() || sceneRef.current
@@ -2718,6 +2738,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 tsdfLoadingRef.current.delete(folder)
                 if (g) {
                     tsdfPendingRef.current.delete(folder)
+                    if (wireframeRef.current.has(`tsdf-${folder}`)) applyWireframe(g, true)
                     if (onStatusMessage) onStatusMessage(tt('vp.meshLoaded', { folder }))
                 }
             }).catch((e) => {
@@ -2726,6 +2747,14 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 console.warn(`[Viewport] on-demand TSDF load failed for ${folder}`, e)
                 if (onStatusMessage) onStatusMessage(tt('vp.meshLoadFailed', { folder }))
             })
+        },
+        setMeshWireframe: (kind: 'shape' | 'tsdf', key: number | string, on: boolean) => {
+            const id = kind === 'shape' ? `shape-${key}` : `tsdf-${key}`
+            if (on) wireframeRef.current.add(id); else wireframeRef.current.delete(id)
+            const obj = kind === 'shape'
+                ? shapesByInstanceRef.current.get(Number(key))
+                : tsdfGroupRef.current?.children.find(c => c.name === `tsdf-${key}`)
+            if (obj) applyWireframe(obj, on)
         },
         clearTsdf: () => clearAllTsdf(),
         reloadReconScene: async (sessionId: string) => {

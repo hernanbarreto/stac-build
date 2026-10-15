@@ -2343,6 +2343,8 @@ function App() {
                 onTogglePlaced={(id, v) => viewportRef.current?.setSceneObjectVisible(id, v)} onRemovePlaced={id => viewportRef.current?.removeSceneObject(id)}
                 onToggleShape={(m, v) => { setShapeMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, visible: v } : x))); viewportRef.current?.setShapeVisibility(m.instanceId, v) }}
                 onToggleTsdf={(m, v) => { setTsdfMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, visible: v } : x))); viewportRef.current?.setTsdfVisibility(m.folder, v) }}
+                onToggleShapeWireframe={(m, on) => { setShapeMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, wireframe: on } : x))); viewportRef.current?.setMeshWireframe('shape', m.instanceId, on) }}
+                onToggleTsdfWireframe={(m, on) => { setTsdfMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, wireframe: on } : x))); viewportRef.current?.setMeshWireframe('tsdf', m.folder, on) }}
                 onDeleteTsdf={deleteTsdfMesh} onRenameShape={renameShapeObject} onDeleteShape={deleteShapeObject}
                 onRenamePlaced={async (id, name) => {
                   if (!activeSession) return

@@ -365,6 +365,8 @@
     "objectMeshes": "Object meshes ({n})",
     "meshes": "Meshes ({n})",
     "removePlacedHint": "Remove from this scene only; the source file is never touched",
+    "wireframeOn": "Wireframe",
+    "wireframeOff": "Solid",
     "deleteMeshHint": "Delete the mesh {folder}. This cannot be undone",
     "segmentation": "Segmentation",
     "meshing": "Meshing",

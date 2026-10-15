@@ -5,7 +5,7 @@
  * footer buttons open Segmentation and Meshing.
  */
 import { useState } from 'react'
-import { Box, CheckSquare, Crosshair, Pencil, Puzzle, Spline, Square, Tag, Trash2, Wand2 } from 'lucide-react'
+import { Box, CheckSquare, Crosshair, Grid3x3, Pencil, Puzzle, Spline, Square, Tag, Trash2, Wand2 } from 'lucide-react'
 import type { SegmentInstance } from '../components/Viewport'
 import { Panel, Section, Stack } from '../components/ui/Panel'
 import { Tree, type TreeNodeData } from '../components/ui/Tree'
@@ -15,7 +15,7 @@ import { Input, SearchInput, Select, Field } from '../components/ui/Field'
 import { EmptyState } from '../components/ui/EmptyState'
 import { useFmt, useT } from '../i18n'
 
-export interface MeshListItem { instanceId: number; label: string; folder: string; visible: boolean }
+export interface MeshListItem { instanceId: number; label: string; folder: string; visible: boolean; wireframe?: boolean }
 export interface PlacedObject { id: number; name: string; visible: boolean }
 export interface VolumeItem { volume_id: number; name: string }
 export interface ListedRows { segmentKeys: string[]; unsegmented: boolean; placedIds: number[]; shapeFolders: string[]; tsdfFolders: string[] }
@@ -67,6 +67,9 @@ interface InstancesPanelProps {
   onRenameShape: (m: MeshListItem, label: string) => Promise<void>
   onDeleteShape: (m: MeshListItem) => void
   onToggleTsdf: (m: MeshListItem, visible: boolean) => void
+  /** draw a GLB as wireframe (USER 2026-10-15) */
+  onToggleShapeWireframe: (m: MeshListItem, on: boolean) => void
+  onToggleTsdfWireframe: (m: MeshListItem, on: boolean) => void
   onDeleteTsdf: (m: MeshListItem) => void
   onOpenSegmentation: () => void
   onOpenMeshing: () => void
@@ -228,6 +231,8 @@ export function InstancesPanel(p: InstancesPanelProps) {
               ) : m.label,
               actions: (
                 <>
+                  <IconButton size="sm" label={m.wireframe ? t('instances.wireframeOff') : t('instances.wireframeOn')} icon={<Grid3x3 aria-hidden />}
+                    onClick={() => p.onToggleShapeWireframe(m, !m.wireframe)} />
                   <IconButton size="sm" label={t('instances.rename')} icon={<Pencil aria-hidden />} onClick={() => { setEditing(`shape-${m.folder}`); setEditValue(m.label) }} />
                   <IconButton size="sm" variant="danger" label={t('instances.delete')} icon={<Trash2 aria-hidden />} onClick={() => p.onDeleteShape(m)} />
                 </>
@@ -242,7 +247,13 @@ export function InstancesPanel(p: InstancesPanelProps) {
               nodes={tsdfs.map(m => ({
               id: `tsdf-${m.folder}`, label: m.label, meta: m.folder, visible: m.visible, onVisible: v => p.onToggleTsdf(m, v),
               ...obbOf(m.instanceId),
-              actions: <IconButton size="sm" variant="danger" label={t('instances.deleteMeshHint', { folder: m.folder })} icon={<Trash2 aria-hidden />} onClick={() => p.onDeleteTsdf(m)} />,
+              actions: (
+                <>
+                  <IconButton size="sm" label={m.wireframe ? t('instances.wireframeOff') : t('instances.wireframeOn')} icon={<Grid3x3 aria-hidden />}
+                    onClick={() => p.onToggleTsdfWireframe(m, !m.wireframe)} />
+                  <IconButton size="sm" variant="danger" label={t('instances.deleteMeshHint', { folder: m.folder })} icon={<Trash2 aria-hidden />} onClick={() => p.onDeleteTsdf(m)} />
+                </>
+              ),
             }))} />
           </Section>
         )}

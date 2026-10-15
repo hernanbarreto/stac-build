@@ -365,6 +365,8 @@
     "objectMeshes": "Mallas de objeto ({n})",
     "meshes": "Mallas ({n})",
     "removePlacedHint": "Quitar solo de esta escena; el archivo fuente no se toca",
+    "wireframeOn": "Alambre (wireframe)",
+    "wireframeOff": "Sólido",
     "deleteMeshHint": "Eliminar la malla {folder}. No se puede deshacer",
     "segmentation": "Segmentación",
     "meshing": "Mallado",
