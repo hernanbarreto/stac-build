@@ -62,10 +62,127 @@ def scene_config_kwargs(config: Optional[dict]) -> dict:
               "hole_interp_max_cells", "texture_objects", "decompose",
               "decompose_min_points", "decompose_max_primitives",
               "decompose_inlier_dist_m", "decompose_min_frac",
-              "contour_regularize", "contour_tol_m", "manhattan", "manhattan_snap_deg", "manhattan_min_inlier_frac", "manhattan_part_min_frac"):
+              "contour_regularize", "contour_tol_m", "manhattan", "manhattan_snap_deg", "manhattan_min_inlier_frac", "manhattan_part_min_frac",
+              "manhattan_bar_aspect_min", "manhattan_bar_round_tol"):
         if k in scfg:
             out[k] = scfg[k]
     return out
+
+
+def _measured_part(fs, kind: str, V: np.ndarray, F: np.ndarray, n_points: int, rec: dict):
+    """A mesh that joins the object's parts as measured (no fitted model, no snap)."""
+    from types import SimpleNamespace
+    p = SimpleNamespace(kind=kind, mesh_vertices=np.asarray(V, np.float64), mesh_faces=np.asarray(F, np.int64),
+                        n_input_points=int(n_points), model=None, instance_id=fs.instance_id, label=fs.label,
+                        report=SimpleNamespace(stats=SimpleNamespace(rms_mm=None)), manhattan=rec)
+    return p
+
+
+def _residue_components(pts: np.ndarray, mask: np.ndarray, cell: float):
+    """Connected pieces of the residue points: 3-D occupancy at ``cell``, 26-connected."""
+    from scipy import ndimage as _ndi
+    idx = np.nonzero(mask)[0]
+    if len(idx) == 0:
+        return []
+    P = np.asarray(pts[idx], np.float64)
+    o = P.min(0)
+    c = np.floor((P - o) / cell).astype(np.int64)
+    occ = np.zeros(tuple(int(x) + 1 for x in c.max(0)), dtype=bool)
+    occ[c[:, 0], c[:, 1], c[:, 2]] = True
+    lab, n = _ndi.label(occ, structure=np.ones((3, 3, 3), dtype=bool))
+    comp = lab[c[:, 0], c[:, 1], c[:, 2]]
+    out = []
+    for k in range(1, n + 1):
+        sel = comp == k
+        m = np.zeros(len(pts), dtype=bool)
+        m[idx[sel]] = True
+        out.append(m)
+    out.sort(key=lambda m: -int(m.sum()))
+    return out
+
+
+def _bar_cylinder(P: np.ndarray, frame_axes: dict, sd: float, snap_deg: float,
+                  aspect_min: float, round_tol: float):
+    """A BAR (one long axis, a section of centimetres) as a straight cylinder on the frame:
+    axis = the PCA axis snapped to the nearest frame axis within snap_deg, radius = the median
+    radial distance; None when the piece is not a bar or its section is not round (radial
+    p90 − p10 over round_tol support distances). Returns (CylinderModel, record)."""
+    from reconstruction.geometry.primitives import _angular_extent, _orthobasis
+    from .quadric import CylinderModel
+    P = np.asarray(P, np.float64)
+    if len(P) < 50:
+        return None
+    ctr = P.mean(0)
+    _, _, vt = np.linalg.svd(P - ctr, full_matrices=False)
+    e1 = vt[0] / max(float(np.linalg.norm(vt[0])), 1e-12)
+    s_ = (P - ctr) @ e1
+    length = float(np.percentile(s_, 95) - np.percentile(s_, 5))
+    rad0 = np.linalg.norm((P - ctr) - np.outer(s_, e1), axis=1)
+    diameter = 2.0 * float(np.percentile(rad0, 95))
+    if diameter <= 1e-6 or length < float(aspect_min) * diameter:
+        return None
+    best = None
+    for name, a in frame_axes.items():
+        ang = float(np.rad2deg(np.arccos(np.clip(abs(e1 @ a), 0.0, 1.0))))
+        if best is None or ang < best[2]:
+            best = (name, a * (1.0 if e1 @ a >= 0 else -1.0), ang)
+    axis_name, axis, moved = best
+    snapped = moved <= float(snap_deg)
+    if not snapped:
+        axis, axis_name = e1, None
+    q = P - ctr
+    s2 = q @ axis
+    rad = np.linalg.norm(q - np.outer(s2, axis), axis=1)
+    radius = float(np.median(rad))
+    spread = float(np.percentile(rad, 90) - np.percentile(rad, 10))
+    if radius <= 1e-4 or spread > float(round_tol) * sd:
+        return None
+    u, v = _orthobasis(axis)
+    ang_pts = np.arctan2((q - np.outer(s2, axis)) @ v, (q - np.outer(s2, axis)) @ u)
+    t0, t1 = _angular_extent(ang_pts)
+    d = rad - radius
+    inl = np.abs(d) <= sd
+    model = CylinderModel(axis_point=ctr.copy(), axis_dir=np.asarray(axis, np.float64), radius=radius,
+                          theta_ref=u, theta0=float(t0), theta_span=float(t1 - t0),
+                          rms=float(np.sqrt(np.mean(d[inl] ** 2))) if inl.any() else float("inf"),
+                          inlier_frac=float(inl.mean()), n_points=int(len(P)))
+    rec = {"kind": "cylinder", "n_points": int(len(P)), "axis": axis_name, "snapped": bool(snapped),
+           "moved_deg": round(moved, 4), "radius_m": round(radius, 4), "length_m": round(length, 4),
+           "radial_spread_m": round(spread, 4)}
+    return model, rec
+
+
+def _manhattan_residue(pts: np.ndarray, rmask: np.ndarray, frame_axes: dict, sd: float, snap_deg: float,
+                       part_min_frac: float, aspect_min: float, round_tol: float,
+                       iid: int, label: str, eval_kwargs: dict):
+    """The rest of a marked object: its connected pieces, each a straight cylinder when it is a
+    round bar (evaluated honestly on its own points), the others pooled for the TSDF.
+    Returns (parts, record) — record['_tsdf_mask'] = the points left for the TSDF."""
+    n_obj = max(len(pts), 1)
+    parts, cyl_recs = [], []
+    tsdf_mask = np.zeros(len(pts), dtype=bool)
+    for comp in _residue_components(pts, rmask, 2.0 * sd):
+        if int(comp.sum()) < max(int(part_min_frac * n_obj), 100):
+            tsdf_mask |= comp
+            continue
+        r = _bar_cylinder(pts[comp], frame_axes, sd, snap_deg, aspect_min, round_tol)
+        if r is None:
+            tsdf_mask |= comp
+            continue
+        model, rec = r
+        try:
+            fk = evaluate_model(model, kind="cylinder", escalation_path=["manhattan_bar"],
+                                orig=pts[comp], instance_id=iid, label=label, **eval_kwargs)
+        except Exception as e:  # noqa: BLE001 — the piece goes to the TSDF, declared
+            rec["unmeshed"] = f"{type(e).__name__}: {e}"
+            cyl_recs.append(rec)
+            tsdf_mask |= comp
+            continue
+        fk.from_decompose = True
+        fk.manhattan = rec
+        parts.append(fk)
+        cyl_recs.append(rec)
+    return parts, {"cylinders": cyl_recs, "_tsdf_mask": tsdf_mask}
 
 
 def _plane_components(pts: np.ndarray, mask: np.ndarray, model, cell: float):
@@ -94,6 +211,15 @@ def _plane_components(pts: np.ndarray, mask: np.ndarray, model, cell: float):
         out.append(m)
     out.sort(key=lambda m: -int(m.sum()))
     return out
+
+
+def _is_thin(pts: np.ndarray, model, sd: float) -> bool:
+    """A plane part is a SURFACE of the object, not a slice through a lump: the object's points
+    on the plane's shoulder (sd < |d| ≤ 2·sd) are at most half of those in its core (|d| ≤ sd)."""
+    d = np.abs(np.asarray(model.signed_distance(np.asarray(pts, np.float64))))
+    core = int((d <= sd).sum())
+    shoulder = int(((d > sd) & (d <= 2.0 * sd)).sum())
+    return core > 0 and shoulder <= 0.5 * core
 
 
 def _panel_width(P: np.ndarray, model) -> float:
@@ -156,6 +282,8 @@ def fit_scene(session_dir: Path,
               manhattan_snap_deg: float = 15.0,
               manhattan_min_inlier_frac: float = 0.75,
               manhattan_part_min_frac: float = 0.05,
+              manhattan_bar_aspect_min: float = 4.0,
+              manhattan_bar_round_tol: float = 2.0,
               instance_ids: Optional[Sequence[int]] = None,
               progress_cb: Optional[Callable] = None) -> dict:
     """Fit every architectural instance of a session, regularize the planes
@@ -296,12 +424,32 @@ def fit_scene(session_dir: Path,
                     # and a piece is a PANEL when it is at least four support distances wide in
                     # its narrowest in-plane direction (p5–p95): a 6 cm tubular leg lies within
                     # 4 cm of a plane through its axis and is NOT a plane — it is residue
+                    # … and THIN: a plane sliced through a solid lump holds as many of the
+                    # object's points on its shoulder (sd..2·sd) as in its core; a panel's
+                    # shoulder is its noise tail
                     split = []
                     for _k, m_, mask_ in parts:
+                        if not _is_thin(pts, m_, sd):
+                            continue
                         for comp in _plane_components(pts, mask_, m_, 2.0 * sd):
                             if int(comp.sum()) >= part_min and _panel_width(pts[comp], m_) >= 4.0 * sd:
                                 split.append(("plane", m_, comp))
-                    parts = sorted(split, key=lambda t: -int(t[2].sum()))
+                    # the greedy extraction let a rejected slice claim points first (a blob's
+                    # slice took 250 of the plate's points): every kept panel RECLAIMS, largest
+                    # first, the object's points within the tolerance of its plane that are
+                    # connected to it
+                    claimed = np.zeros(n_obj, dtype=bool)
+                    reclaimed = []
+                    for _k, m_, comp in sorted(split, key=lambda t: -int(t[2].sum())):
+                        mem = (np.abs(np.asarray(m_.signed_distance(pts))) <= sd) & ~claimed
+                        grown = np.zeros(n_obj, dtype=bool)
+                        for c2 in _plane_components(pts, mem, m_, 2.0 * sd):
+                            if (c2 & comp).any():
+                                grown |= c2
+                        if int(grown.sum()) >= part_min:
+                            claimed |= grown
+                            reclaimed.append(("plane", m_, grown))
+                    parts = sorted(reclaimed, key=lambda t: -int(t[2].sum()))
                     explained = float(sum(int(m.sum()) for _k, _m, m in parts)) / n_obj
                     if not parts:
                         man_rejected[int(iid)] = within
@@ -332,18 +480,17 @@ def fit_scene(session_dir: Path,
                             fs.manhattan_parts = [(m, raw_seg[mask]) for _k, m, mask in parts]
                         fs.manhattan_residue = residue
                         fs.manhattan_partial = partial
-                        gi_full = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
-                        if partial and residue >= float(manhattan_part_min_frac) \
-                                and len(gi_full) == n_obj:
-                            forced_leftover[int(iid)] = gi_full[residue_mask]   # meshed as measured
-                        else:
-                            forced_leftover[int(iid)] = np.zeros(0, dtype=np.int64)   # declared only
+                        # the rest (USER 2026-10-15 "probar con cilindros, y si no, tsdf sin
+                        # poisson"): handled in the Manhattan stage below — bars become
+                        # cylinders on the frame, what is neither a plane nor a bar gets the
+                        # live-cloud TSDF; NEVER Poisson (forced_leftover stays empty)
+                        fs.manhattan_residue_mask = residue_mask if (partial and residue >= float(manhattan_part_min_frac)) else None
+                        forced_leftover[int(iid)] = np.zeros(0, dtype=np.int64)
                         logger.info("scene: %s_%s — marked Manhattan: %d plane(s) explain %.0f%% "
                                     "(one plane %.0f%%), residue %.0f%% %s", label, iid, len(parts),
                                     100 * explained, 100 * within, 100 * residue,
-                                    "meshed as measured next to the planes (not a surface)"
-                                    if int(iid) in forced_leftover and len(forced_leftover[int(iid)])
-                                    else "declared")
+                                    "→ bars / TSDF next to the planes (not a surface)"
+                                    if fs.manhattan_residue_mask is not None else "declared")
                 if fs is not None:
                     man_planes.add(int(iid))
                 elif [str(m) for m in (kwargs.get("models") or [])] != ["plane"]:
@@ -441,6 +588,7 @@ def fit_scene(session_dir: Path,
                         orig=seg_points[old.instance_id],
                         instance_id=old.instance_id, label=old.label, **eval_kwargs)
                     fs2.regularized = bool(rec.get("snapped"))
+                    fs2.manhattan_residue_mask = getattr(old, "manhattan_residue_mask", None)
                     fs2.manhattan = {**rec, "decomposed": False,
                                      "residue_frac": round(float(getattr(old, "manhattan_residue", 0.0)), 4),
                                      "partial": bool(getattr(old, "manhattan_partial", False)),
@@ -460,6 +608,7 @@ def fit_scene(session_dir: Path,
                     fk.manhattan = {**rec, "part": int(k), "n_points": int(len(pts_k))}
                     surfs.append(fk)
                 primary = surfs[0]
+                primary.manhattan_residue_mask = getattr(old, "manhattan_residue_mask", None)
                 primary.manhattan = {**primary.manhattan, "decomposed": True,
                                      "parts": [sf.manhattan for sf in surfs],
                                      "residue_frac": round(float(getattr(old, "manhattan_residue", 0.0)), 4),
@@ -471,6 +620,52 @@ def fit_scene(session_dir: Path,
                 logger.info("scene: %s_%s — Manhattan decomposition: %d plane(s) on the frame, "
                             "residue %.0f%% declared", old.label, old.instance_id, len(surfs),
                             100 * float(getattr(old, "manhattan_residue", 0.0)))
+            # THE REST of a marked object that is not a surface: bars → straight cylinders on
+            # the frame, the remainder → the live-cloud TSDF, never Poisson (USER 2026-10-15)
+            frame_axes = {k: np.asarray(man_report["frame"][k], np.float64) for k in ("up", "X", "Z")}
+            origins = None
+            for i in m_idx:
+                f = fitted[i]
+                rmask = getattr(f, "manhattan_residue_mask", None)
+                if rmask is None or not rmask.any():
+                    continue
+                pts_i = seg_points[f.instance_id]
+                sd_i = float(kwargs.get("support_dist_m", 0.04))
+                rest_parts, rest_rec = _manhattan_residue(
+                    pts_i, rmask, frame_axes, sd_i, float(manhattan_snap_deg),
+                    float(manhattan_part_min_frac), float(manhattan_bar_aspect_min),
+                    float(manhattan_bar_round_tol), f.instance_id, f.label, eval_kwargs)
+                tsdf_mask = rest_rec.pop("_tsdf_mask", None)
+                if tsdf_mask is not None and tsdf_mask.any():
+                    gi_i = gi_map.get(f.instance_id)
+                    try:
+                        if origins is None:
+                            from segmentation.pipeline import _load_ply_origins
+                            origins = _load_ply_origins(session_dir / "output" / "cleaned_cloud.ply")
+                        if origins is None or gi_i is None or len(gi_i) != len(pts_i):
+                            raise RuntimeError("no per-point provenance for the TSDF frames")
+                        from segmentation.tsdf_export import object_tsdf_config, tsdf_mesh_of_points
+                        oc = object_tsdf_config(config or {})
+                        frames = np.unique(np.asarray(origins[1])[gi_i[tsdf_mask]]).tolist()
+                        r = tsdf_mesh_of_points(session_dir / "output", pts_i[tsdf_mask], frames, oc)
+                        if r is None:
+                            raise RuntimeError("the TSDF integrated nothing")
+                        V_t, F_t = r
+                        rest_parts.append(_measured_part(f, "tsdf", V_t, F_t, int(tsdf_mask.sum()),
+                                                         {"kind": "tsdf", "n_points": int(tsdf_mask.sum()),
+                                                          "frames": len(frames), "source": "live cloud"}))
+                        rest_rec["tsdf"] = {"n_points": int(tsdf_mask.sum()), "frames": len(frames),
+                                            "vertices": int(len(V_t)), "faces": int(len(F_t))}
+                    except Exception as e:  # noqa: BLE001 — declared, never Poisson
+                        rest_rec["tsdf"] = {"n_points": int(tsdf_mask.sum()), "unmeshed": f"{type(e).__name__}: {e}"}
+                        logger.warning("scene: %s_%s residue TSDF not meshed (declared): %s", f.label, f.instance_id, e)
+                if rest_parts:
+                    extra_parts.setdefault(int(f.instance_id), []).extend(rest_parts)
+                f.manhattan = {**f.manhattan, "residue": rest_rec}
+                logger.info("scene: %s_%s — residue: %d cylinder(s), tsdf %s", f.label, f.instance_id,
+                            len(rest_rec.get("cylinders", [])),
+                            "meshed" if "vertices" in (rest_rec.get("tsdf") or {}) else
+                            ("none" if "tsdf" not in rest_rec else "declared"))
             man_report["not_a_surface"] = {str(k): round(v, 3) for k, v in man_rejected.items()}
     elif manhattan:
         man_report = {"objects": [], "not_a_surface": {str(k): round(v, 3) for k, v in man_rejected.items()}}

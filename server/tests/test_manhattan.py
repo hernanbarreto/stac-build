@@ -217,9 +217,55 @@ def test_a_desk_top_with_tubular_legs_is_a_straight_top_plus_the_legs_as_measure
     by = {r["instance_id"]: r for r in rep["fitted"]}
     m = by[1]["manhattan"]
     assert by[1]["kind"] == "plane" and m["snapped"] and m["axis"] == "up"
-    assert m["partial"] and m["residue_meshed"] and 0.25 < m["residue_frac"] < 0.35, m
-    rest = np.load(out / "surface_fit" / "desk_1" / "unexplained_idx.npy")
-    assert len(rest) == pytest.approx(len(legs), rel=0.1), "the legs, as measured, next to the straight top"
+    assert m["partial"] and not m["residue_meshed"] and 0.25 < m["residue_frac"] < 0.35, m
+    assert not (out / "surface_fit" / "desk_1" / "unexplained_idx.npy").exists(), "never Poisson"
+    cyl = m["residue"]["cylinders"]
+    assert len(cyl) == 4 and all(c["snapped"] and c["axis"] == "up" for c in cyl), cyl
+    assert all(abs(c["radius_m"] - 0.03) < 0.006 and 0.6 < c["length_m"] < 0.8 for c in cyl), cyl
+    assert "tsdf" not in m["residue"], "every leg is a bar — nothing left for the TSDF"
+    import trimesh
+    mesh = trimesh.load(str(out / "surface_fit" / "desk_1" / "surface.glb"), force="mesh")
+    V = np.asarray(mesh.vertices, float)
+    assert V[:, 2].min() < 0.05 and V[:, 2].max() > 0.7, "the published mesh holds the top AND the legs"
+
+
+def test_the_rest_that_is_neither_plane_nor_bar_gets_the_live_cloud_tsdf(tmp_path):
+    """A marked object = a plate (plane) with a blob under it: the blob is not a bar → the
+    live-cloud TSDF, never Poisson (USER 2026-10-15 "y si no, tsdf sin poisson")."""
+    from test_hole_audit_torch import _session as _cam_session
+    from reconstruction.surface_fit.scene import fit_scene
+    out, xyz, plate = _cam_session(tmp_path)          # a camera, poses, a record grid, provenance
+    rng = np.random.default_rng(17)
+    blob = rng.normal(0, 0.08, (2500, 3)) + np.array([0.0, 0.0, 1.75])     # under the plate (z = 1.5)
+    # append the blob to the cloud with provenance, re-write the PLY
+    from test_p3_projection import PLY_DTYPE, _write_ply
+    from segmentation.pipeline import _load_ply_origins
+    o = _load_ply_origins(out / "cleaned_cloud.ply")
+    xyz0, fg, pr, pc = o
+    d = np.zeros(len(xyz0) + len(blob), PLY_DTYPE)
+    d["x"] = np.concatenate([xyz0[:, 0], blob[:, 0]]); d["y"] = np.concatenate([xyz0[:, 1], blob[:, 1]])
+    d["z"] = np.concatenate([xyz0[:, 2], blob[:, 2]])
+    frames3 = np.asarray(sorted(set(int(x) for x in fg)))[:3]
+    d["frame_global"] = np.concatenate([fg, frames3[np.arange(len(blob)) % len(frames3)]])   # seen from every keyframe
+    d["pixel_row"] = np.concatenate([pr, np.zeros(len(blob), int)]); d["pixel_col"] = np.concatenate([pc, np.zeros(len(blob), int)])
+    d["confidence"] = 0.9
+    _write_ply(out / "cleaned_cloud.ply", d)
+    n_wall = 5000
+    idx = list(range(n_wall, n_wall + 1200)) + list(range(len(xyz0), len(xyz0) + len(blob)))
+    (out / "segmentation_result.json").write_text(json.dumps(
+        {"instances": [{"id": 1, "instance_id": 1, "label": "thing", "globalIndices": idx}]}))
+    cfg = {"surface_fit": {}, "tsdf": {"object": {"depth_source": "live_cloud", "device": "cpu", "voxel_length": 0.02,
+                                                   "sdf_trunc": 0.06, "depth_min": 0.1, "depth_trunc": 5.0, "fill_px": 1,
+                                                   "weight_threshold": 1.0, "block_count": 5000}}}
+    rep = fit_scene(tmp_path, config=cfg, overrides={"consolidate_method": "none", "models": ["plane"]},
+                    hole_audit=False, texture_objects=False, decompose=False,
+                    manhattan_min_inlier_frac=0.75, manhattan_part_min_frac=0.05)
+    by = {r["instance_id"]: r for r in rep["fitted"]}
+    m = by[1]["manhattan"]
+    assert m["snapped"] and m["partial"] and 0.6 < m["residue_frac"] < 0.7, m
+    assert m["residue"]["cylinders"] == [] and "vertices" in m["residue"]["tsdf"], m["residue"]
+    assert m["residue"]["tsdf"]["n_points"] >= 0.98 * len(blob) and m["residue"]["tsdf"]["vertices"] > 50
+    assert not (out / "surface_fit" / "thing_1" / "unexplained_idx.npy").exists()
 
 
 def test_an_s_shaped_wall_becomes_frame_aligned_planes_with_exact_offsets(tmp_path):

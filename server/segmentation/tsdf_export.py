@@ -30,7 +30,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Sequence, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
@@ -734,6 +734,67 @@ def _extract_canonical(o3d, volume, weight_threshold: float):
     grids, the scene path's lesson) in canonical order."""
     tm = volume.cpu().extract_triangle_mesh(weight_threshold=float(weight_threshold)).to_legacy()
     return canonical_mesh(o3d, np.asarray(tm.vertices), np.asarray(tm.triangles))
+
+
+_OBJECT_TSDF_KEYS = ("depth_source", "device", "voxel_length", "sdf_trunc", "depth_min", "depth_trunc",
+                     "fill_px", "weight_threshold", "block_count")
+
+
+def object_tsdf_config(cfg) -> dict:
+    """`tsdf.object`, every key required — a missing one fails naming it."""
+    obj = ((cfg.get("tsdf") or {}).get("object") or {}) if hasattr(cfg, "get") else {}
+    missing = [k for k in _OBJECT_TSDF_KEYS if k not in obj]
+    if missing:
+        raise RuntimeError(f"tsdf.object is missing {missing} — nothing is assumed")
+    return {k: obj[k] for k in _OBJECT_TSDF_KEYS}
+
+
+def tsdf_mesh_of_points(output_dir: Path, xyz: np.ndarray, frames: Sequence[int], oc: dict
+                        ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """The live-cloud TSDF of an arbitrary set of published points (USER 2026-10-15: the rest
+    of a Manhattan object that is neither a plane nor a bar — "tsdf sin poisson"): the points'
+    z-buffers through the camera the cloud was built with, over ``frames`` (the keyframes that
+    observed them), VoxelBlockGrid on the declared device, the mesh in canonical order.
+    Returns (vertices, faces) or None when nothing integrated."""
+    import open3d as o3d
+    from correction.visit_drift import trace_grid
+    from segmentation.session_io import load_cloud_camera_source
+    output_dir = Path(output_dir)
+    cam = load_cloud_camera_source(output_dir)
+    H, W = trace_grid(output_dir)
+    dev = _live_device(str(oc["device"]))
+    loader, _hw = _resolve_live_cloud_depth(cam, np.asarray(xyz, np.float64), (H, W), int(oc["fill_px"]), dev)
+    volume = _make_object_volume(o3d, dev, float(oc["voxel_length"]), int(oc["block_count"]))
+    trunc_mult = max(1.0, float(oc["sdf_trunc"]) / float(oc["voxel_length"]))
+    n_int = 0
+    for f in sorted({int(x) for x in frames}):
+        pair = loader(f)
+        if pair is None:
+            continue
+        depth = np.asarray(pair["depth"], np.float32)
+        mask = np.asarray(pair["valid"], bool) & (depth > float(oc["depth_min"])) & (depth < float(oc["depth_trunc"]))
+        if not mask.any():
+            continue
+        c2w = cam.pose_map[f]
+        c2w4 = np.eye(4)
+        c2w4[:c2w.shape[0], :c2w.shape[1]] = c2w
+        if _vbg_integrate(o3d, volume, dev, np.where(mask, depth, 0.0).astype(np.float32),
+                          np.asarray(pair["K"], np.float64), np.linalg.inv(c2w4),
+                          float(oc["depth_trunc"]), trunc_mult):
+            n_int += 1
+    if n_int == 0:
+        return None
+    try:
+        mesh = _extract_canonical(o3d, volume, float(oc["weight_threshold"]))
+    except RuntimeError as e:          # an empty isosurface (too few agreeing frames) raises inside Open3D
+        if "shape {0}" in str(e) or "expected to have" in str(e):
+            return None
+        raise
+    V = np.asarray(mesh.vertices, np.float64)
+    F = np.asarray(mesh.triangles, np.int64)
+    if not len(V) or not len(F):
+        return None
+    return V, F
 
 
 def _rasterize_cloud_depth(xyz: np.ndarray, c2w: np.ndarray, K: np.ndarray,

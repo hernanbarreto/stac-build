@@ -2879,6 +2879,14 @@ surface_fit:
                               # keeps a plane as a PART when it holds at least this share of the
                               # object's points — an S-wall's runs (20 % each) are parts, a floor's
                               # clutter planes are not; one surviving part = a single plane
+  manhattan_bar_aspect_min: 4.0  # BOUND (declared): a piece of the rest is a BAR when its length along
+                              # the principal axis is at least this many times its section diameter —
+                              # a bar becomes a straight cylinder on the frame (USER 2026-10-15 "probar
+                              # con cilindros")
+  manhattan_bar_round_tol: 2.0  # BOUND (declared): the bar's section is round when the radial p90−p10
+                              # is within this many support distances; otherwise the piece, like
+                              # everything that is neither plane nor bar, gets the live-cloud TSDF
+                              # ("y si no, tsdf sin poisson")
                               # (fitted against the CLOSED support outline — the boundary's
                               # intent — so grid raggedness doesn't force everything to 'raw')
   # ── REGULARIZED POISSON (USER 2026-08-29: "poisson primero, y sobre poisson

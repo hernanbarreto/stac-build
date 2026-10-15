@@ -30,17 +30,7 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
-_KEYS = ("depth_source", "device", "voxel_length", "sdf_trunc", "depth_min", "depth_trunc",
-         "fill_px", "weight_threshold", "block_count")
-
-
-def object_tsdf_config(cfg) -> dict:
-    """`tsdf.object`, every key required — a missing one fails naming it."""
-    obj = ((cfg.get("tsdf") or {}).get("object") or {}) if hasattr(cfg, "get") else {}
-    missing = [k for k in _KEYS if k not in obj]
-    if missing:
-        raise RuntimeError(f"tsdf.object is missing {missing} — nothing is assumed")
-    return {k: obj[k] for k in _KEYS}
+from segmentation.tsdf_export import object_tsdf_config  # noqa: E402
 
 
 def main() -> int:
