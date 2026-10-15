@@ -2791,6 +2791,16 @@ surface_fit:
   # perfect-engine regions (openings excluded by intent+measurement) go to
   # vendor point2cad (env point2cad) for fit+sew; result is denormalized,
   # evidence-trimmed and published as tsdf/<safe>_p2c/.
+  # USER 2026-10-15 ("dale, probemos"): the Mesh button runs point2cad on every selected object
+  # that the GEOMETRY makes a CAD candidate — never by its label — and keeps RANSAC + Poisson
+  # for the rest; the decision and its shares land in output/shape_p2c/<label>/decision.json
+  mesh_runs_p2c: true         # false = the Mesh button stays RANSAC + Poisson only
+  p2c_min_explained_frac: 0.5 # BOUND (declared): share of the object's points the detected analytic
+                              # primitives (plane / cylinder / sphere / cone) must explain for point2cad
+                              # to run; below it the object keeps Poisson / ShapeR. Freeform residues
+                              # do not count: they are what point2cad's INR fits worst on our clouds
+  p2c_propose: true           # the VLM shape proposal (opening regions excluded) when the semantic
+                              # service is up; unavailable → point2cad runs without it, declared
   p2c_trim_m: 0.06            # evidence clip: B-rep kept within this of cloud
   p2c_parallel: 4             # CUDA workers (8 OOM'd next to the chat vLLM)
   p2c_max_pts_region: 4000    # per-surface point cap for the .xyzc

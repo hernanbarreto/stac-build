@@ -124,6 +124,30 @@ def _evidence_trim(V: np.ndarray, F: np.ndarray, cloud: np.ndarray,
 
 # ── main entry (worker mode 'p2c') ───────────────────────────────────────
 
+def cad_candidate(regions: List[dict], n_points: int, cfg: Optional[dict] = None) -> tuple:
+    """THE CHOOSER BY GEOMETRY (USER 2026-10-15, "dale, probemos"): an object is a point2cad
+    candidate when the analytic primitives the detector found (plane / cylinder / sphere / cone
+    regions, never the freeform residues) explain at least ``p2c_min_explained_frac`` of its
+    points. Below that bar the object keeps RANSAC + Poisson / ShapeR — never by its label.
+    Returns (candidate, record) with the shares the decision rests on."""
+    cfg = cfg or {}
+    bar = float(cfg.get("p2c_min_explained_frac", 0.5))
+    prim = [r for r in regions if r.get("kind") != "freeform"]
+    free = [r for r in regions if r.get("kind") == "freeform"]
+    n_prim_pts = int(sum(len(r["v_idx"]) for r in prim))
+    n_free_pts = int(sum(len(r["v_idx"]) for r in free))
+    n = max(int(n_points), 1)
+    explained = n_prim_pts / n
+    rec = {"explained_frac": round(explained, 4), "freeform_frac": round(n_free_pts / n, 4),
+           "unlabeled_frac": round(max(0, n - n_prim_pts - n_free_pts) / n, 4),
+           "n_primitives": len(prim), "n_freeform": len(free), "n_points": int(n_points),
+           "min_explained_frac": bar, "margin": round(explained - bar, 4),
+           "kinds": sorted({str(r.get("kind")) for r in prim}),
+           "rule": "point2cad when the primitive regions explain >= p2c_min_explained_frac of the "
+                   "object's points (surface_fit.p2c_min_explained_frac); by geometry, never by label"}
+    return explained >= bar, rec
+
+
 def build_p2c_object(output_dir: Path, instance_id: int,
                      cfg: Optional[dict] = None,
                      source: Optional[str] = None,
@@ -178,6 +202,21 @@ def build_p2c_object(output_dir: Path, instance_id: int,
         regions, _ = _detect_and_snap(tm, F, Vd, cfg, safe, log)
     if not regions:
         raise RuntimeError(f"{safe}: no regions for point2cad")
+    # the chooser by geometry (USER 2026-10-15): declared either way, in the work dir
+    is_cand, choice = cad_candidate(regions, len(Vd), cfg)
+    work = out / "shape_p2c" / safe
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "decision.json").write_text(json.dumps(
+        {"instance_id": int(instance_id), "label": label, "candidate": bool(is_cand), **choice,
+         "source": src_name}, indent=2))
+    if not is_cand:
+        log(f"[p2c:{safe}] NOT a CAD candidate: the primitives explain "
+            f"{choice['explained_frac']:.0%} of {len(Vd):,} pts (< {choice['min_explained_frac']:.0%}; "
+            f"freeform {choice['freeform_frac']:.0%}) — keeps RANSAC + Poisson / ShapeR")
+        return None
+    log(f"[p2c:{safe}] CAD candidate: {choice['n_primitives']} primitive region(s) explain "
+        f"{choice['explained_frac']:.0%} of {len(Vd):,} pts (bar {choice['min_explained_frac']:.0%}, "
+        f"{choice['n_freeform']} freeform)")
 
     # per-surface intent: openings out of the B-rep (double lock)
     proposal = _load_shape_proposal(out, safe)
@@ -206,8 +245,6 @@ def build_p2c_object(output_dir: Path, instance_id: int,
             P = P[rng.choice(len(P), max_pts_region, replace=False)]
         rows.append(np.column_stack([P, np.full(len(P), i, float)]))
     xyzc = np.vstack(rows)
-    work = out / "shape_p2c" / safe
-    work.mkdir(parents=True, exist_ok=True)
     xyzc_path = work / "input.xyzc"
     np.savetxt(xyzc_path, xyzc, fmt="%.6f %.6f %.6f %d")
     log(f"[p2c:{safe}] {len(xyzc):,} labeled pts, "
@@ -276,6 +313,7 @@ def build_p2c_object(output_dir: Path, instance_id: int,
         "source_mesh": src_name,
         "evidence_trim_m": trim_m,
         "n_surfaces_in": len(regions) - len(drop_open),
+        "chooser": choice,
         "openings_excluded": sorted(int(i) for i in drop_open),
         "shape_proposal_object": (proposal or {}).get("object"),
         "n_triangles_untrimmed": int(n_untrimmed),

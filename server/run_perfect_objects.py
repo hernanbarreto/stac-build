@@ -86,9 +86,17 @@ def main() -> int:
                      if int(i.get("instance_id", i.get("id"))) == int(iid)),
                     {})
         safe = _safe_label(str(inst.get("label", "segment")), int(iid))
-        if not (Path(output_dir) / "shape_proposals"
-                / f"{safe}_proposal.json").exists():
-            propose_object(output_dir, iid, cfg=cfg, source=source, log=log)
+        want_proposal = bool((cfg or {}).get("p2c_propose", True))
+        if want_proposal and not (Path(output_dir) / "shape_proposals"
+                                  / f"{safe}_proposal.json").exists():
+            # the VLM proposal (opening regions excluded from the B-rep) needs the semantic
+            # service; without it point2cad still runs — declared (USER 2026-10-15: the Mesh
+            # button must not depend on the chat's vLLM being up)
+            try:
+                propose_object(output_dir, iid, cfg=cfg, source=source, log=log)
+            except Exception as e:  # noqa: BLE001
+                log(f"[p2c:{safe}] shape proposal unavailable ({type(e).__name__}: {e}) — "
+                    f"point2cad runs without the opening exclusion (declared)")
         return build_p2c_object(output_dir, iid, cfg=cfg, source=source,
                                 log=log)
 
@@ -106,6 +114,10 @@ def main() -> int:
             if glb is not None:
                 written.append(str(glb))
                 _progress(iid, "done", f"{round(time.time() - t0, 1)}s")
+            elif args.mode == "p2c":
+                skipped.append({"instance_id": int(iid),
+                                "reason": "not a CAD candidate by geometry (shape_p2c/<label>/decision.json)"})
+                _progress(iid, "skipped", "not a CAD candidate by geometry")
             else:
                 skipped.append({"instance_id": iid, "reason": "no output"})
                 _progress(iid, "error", "no output")
