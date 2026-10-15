@@ -68,6 +68,49 @@ def scene_config_kwargs(config: Optional[dict]) -> dict:
     return out
 
 
+def _plane_components(pts: np.ndarray, mask: np.ndarray, model, cell: float):
+    """The connected pieces of a plane part: occupancy of its points' UV at ``cell``,
+    8-connected labelling (scipy.ndimage), one boolean mask over ``pts`` per piece, the
+    largest first."""
+    from scipy import ndimage as _ndi
+    idx = np.nonzero(mask)[0]
+    if len(idx) == 0:
+        return []
+    uv = np.asarray(model.to_uv(np.asarray(pts[idx], np.float64)), np.float64)
+    u0, v0 = uv.min(0)
+    ii = np.floor((uv[:, 0] - u0) / cell).astype(np.int64)
+    jj = np.floor((uv[:, 1] - v0) / cell).astype(np.int64)
+    occ = np.zeros((int(jj.max()) + 1, int(ii.max()) + 1), dtype=bool)
+    occ[jj, ii] = True
+    lab, n = _ndi.label(occ, structure=np.ones((3, 3), dtype=bool))
+    if n <= 1:
+        return [mask.copy()]
+    comp_of_pt = lab[jj, ii]
+    out = []
+    for c in range(1, n + 1):
+        sel = comp_of_pt == c
+        m = np.zeros(len(pts), dtype=bool)
+        m[idx[sel]] = True
+        out.append(m)
+    out.sort(key=lambda m: -int(m.sum()))
+    return out
+
+
+def _panel_width(P: np.ndarray, model) -> float:
+    """The narrowest in-plane extent (p5–p95 along the in-plane principal directions) of a
+    plane part's points — what tells a panel from a bar lying within the tolerance."""
+    uv = np.asarray(model.to_uv(np.asarray(P, np.float64)), np.float64)
+    if len(uv) < 10:
+        return 0.0
+    c = uv - uv.mean(0)
+    _, _, vt = np.linalg.svd(c, full_matrices=False)
+    ext = []
+    for ax in vt:
+        q = c @ ax
+        ext.append(float(np.percentile(q, 95) - np.percentile(q, 5)))
+    return float(min(ext))
+
+
 def _session_up(output_dir: Path) -> np.ndarray:
     """The session's UP in the cloud's own frame: the display frame is three.js Y-up (the floor
     leveling writes floor_transform.npz so that display = s·R·raw + t puts the floor at y = 0),
@@ -229,52 +272,78 @@ def fit_scene(session_dir: Path,
                     within = (float(np.mean(np.abs(np.asarray(fs.model.signed_distance(raw_seg))) <= sd))
                               if len(raw_seg) else 0.0)
                     # MANHATTAN DECOMPOSITION (USER 2026-10-15, the S-shaped wall), ALWAYS tried:
-                    # one plane explained 76 % of pccr's wall 59 and passed the share while its
-                    # other two runs sat 30 cm away (p95 648 mm). Planes, the largest first; a
-                    # part counts when it holds manhattan_part_min_frac of the object (the floor's
-                    # clutter never does, an S-wall's runs always do); each part is snapped to the
-                    # frame below (parallel runs on one axis with their exact offsets, the returns
-                    # perpendicular), coplanar runs one plane, exact edges between them; what no
-                    # plane explains is declared, never meshed as a blob
+                    # planes, the largest first, down to manhattan_part_min_frac of the object
+                    # (a desk's side panels, an S-wall's returns — never a floor's clutter);
+                    # each part is snapped to the frame below (parallel runs on one axis with
+                    # their exact offsets, the returns perpendicular), coplanar runs one plane,
+                    # exact edges between them.
                     from .decompose import extract_primitives
                     from .escalate import FitContext
+                    n_obj = max(len(pts), 1)
+                    part_min = max(int(float(manhattan_part_min_frac) * n_obj), 100)
                     ctx_m = FitContext(world_up=man_up, scene_centroid=centroid,
                                        dist_thresh=sd,
                                        ransac_iters=int(kwargs.get("ransac_iters", 500)),
                                        min_inlier_frac=0.02)
                     parts, rem = extract_primitives(
-                        pts, ctx_m, inlier_dist=sd,
-                        min_points=int(decompose_min_points),
-                        min_frac_remaining=float(decompose_min_frac),
+                        pts, ctx_m, inlier_dist=sd, min_points=part_min,
+                        min_frac_remaining=float(manhattan_part_min_frac),
                         max_primitives=int(decompose_max_primitives),
                         tag=f"manhattan {label}_{iid}", kinds=("plane",))
-                    n_obj = max(len(pts), 1)
-                    parts = sorted([t for t in parts
-                                    if int(t[2].sum()) >= float(manhattan_part_min_frac) * n_obj],
-                                   key=lambda t: -int(t[2].sum()))
+                    # a plane claims whatever lies within the tolerance — two legs 1.4 m apart
+                    # in one vertical plane, a run and its coplanar twin — so each part is split
+                    # into its CONNECTED pieces in the plane (occupancy at 2 support distances),
+                    # and a piece is a PANEL when it is at least four support distances wide in
+                    # its narrowest in-plane direction (p5–p95): a 6 cm tubular leg lies within
+                    # 4 cm of a plane through its axis and is NOT a plane — it is residue
+                    split = []
+                    for _k, m_, mask_ in parts:
+                        for comp in _plane_components(pts, mask_, m_, 2.0 * sd):
+                            if int(comp.sum()) >= part_min and _panel_width(pts[comp], m_) >= 4.0 * sd:
+                                split.append(("plane", m_, comp))
+                    parts = sorted(split, key=lambda t: -int(t[2].sum()))
                     explained = float(sum(int(m.sum()) for _k, _m, m in parts)) / n_obj
-                    if len(parts) >= 2 and explained >= float(manhattan_min_inlier_frac):
-                        k0, m0, mask0 = parts[0]
-                        fs = evaluate_model(m0, kind="plane",
-                                            escalation_path=["plane", "manhattan_parts"],
-                                            orig=raw_seg[mask0], instance_id=iid, label=label,
-                                            **eval_kwargs)
-                        fs.from_decompose = True
-                        fs.manhattan_parts = [(m, raw_seg[mask]) for _k, m, mask in parts]
-                        fs.manhattan_residue = max(0.0, 1.0 - explained)
-                        logger.info("scene: %s_%s — marked Manhattan: one plane explains %.0f%%, "
-                                    "%d planes explain %.0f%% (residue %.0f%% declared)",
-                                    label, iid, 100 * within, len(parts), 100 * explained,
-                                    100 * fs.manhattan_residue)
-                    elif within < float(manhattan_min_inlier_frac):
-                        man_rejected[int(iid)] = max(within, explained)
-                        logger.info("scene: %s_%s — marked Manhattan but not a surface: one plane "
-                                    "explains %.0f%%, %d plane(s) %.0f%% of its points within "
-                                    "%.0f mm, under manhattan_min_inlier_frac %.2f (p95 %.1f mm): "
-                                    "the configured ladder decides", label, iid, 100 * within,
-                                    len(parts), 100 * explained, 1000 * sd,
-                                    manhattan_min_inlier_frac, fs.report.stats.p95_mm)
+                    if not parts:
+                        man_rejected[int(iid)] = within
+                        logger.info("scene: %s_%s — marked Manhattan but no plane holds %.0f%% of "
+                                    "its points (one plane: %.0f%% within %.0f mm): the configured "
+                                    "ladder decides", label, iid, 100 * manhattan_part_min_frac,
+                                    100 * within, 1000 * sd)
                         fs = None
+                    else:
+                        # THE MODEL: the planes found, straight; the rest of the object —
+                        # whatever no plane holds — is declared, and when the planes do not
+                        # make a SURFACE (under manhattan_min_inlier_frac: a desk top with
+                        # tubular legs) it is meshed AS MEASURED next to them (the published
+                        # GLB fuses unexplained_idx.npy), never bent into a spline. A surface's
+                        # leftovers (a floor's clutter) are declared only.
+                        residue_mask = np.ones(n_obj, dtype=bool)
+                        for _k, _m, m in parts:
+                            residue_mask &= ~m
+                        residue = float(residue_mask.mean())
+                        partial = explained < float(manhattan_min_inlier_frac)
+                        if len(parts) >= 2:
+                            k0, m0, mask0 = parts[0]
+                            fs = evaluate_model(m0, kind="plane",
+                                                escalation_path=["plane", "manhattan_parts"],
+                                                orig=raw_seg[mask0], instance_id=iid, label=label,
+                                                **eval_kwargs)
+                            fs.from_decompose = True
+                            fs.manhattan_parts = [(m, raw_seg[mask]) for _k, m, mask in parts]
+                        fs.manhattan_residue = residue
+                        fs.manhattan_partial = partial
+                        gi_full = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
+                        if partial and residue >= float(manhattan_part_min_frac) \
+                                and len(gi_full) == n_obj:
+                            forced_leftover[int(iid)] = gi_full[residue_mask]   # meshed as measured
+                        else:
+                            forced_leftover[int(iid)] = np.zeros(0, dtype=np.int64)   # declared only
+                        logger.info("scene: %s_%s — marked Manhattan: %d plane(s) explain %.0f%% "
+                                    "(one plane %.0f%%), residue %.0f%% %s", label, iid, len(parts),
+                                    100 * explained, 100 * within, 100 * residue,
+                                    "meshed as measured next to the planes (not a surface)"
+                                    if int(iid) in forced_leftover and len(forced_leftover[int(iid)])
+                                    else "declared")
                 if fs is not None:
                     man_planes.add(int(iid))
                 elif [str(m) for m in (kwargs.get("models") or [])] != ["plane"]:
@@ -372,7 +441,10 @@ def fit_scene(session_dir: Path,
                         orig=seg_points[old.instance_id],
                         instance_id=old.instance_id, label=old.label, **eval_kwargs)
                     fs2.regularized = bool(rec.get("snapped"))
-                    fs2.manhattan = rec
+                    fs2.manhattan = {**rec, "decomposed": False,
+                                     "residue_frac": round(float(getattr(old, "manhattan_residue", 0.0)), 4),
+                                     "partial": bool(getattr(old, "manhattan_partial", False)),
+                                     "residue_meshed": bool(len(forced_leftover.get(int(old.instance_id), ())))}
                     fitted[i] = fs2
                     continue
                 # a decomposed object: every part evaluated on its OWN points with its snapped
@@ -390,7 +462,9 @@ def fit_scene(session_dir: Path,
                 primary = surfs[0]
                 primary.manhattan = {**primary.manhattan, "decomposed": True,
                                      "parts": [sf.manhattan for sf in surfs],
-                                     "residue_frac": round(float(getattr(old, "manhattan_residue", 0.0)), 4)}
+                                     "residue_frac": round(float(getattr(old, "manhattan_residue", 0.0)), 4),
+                                     "partial": bool(getattr(old, "manhattan_partial", False)),
+                                     "residue_meshed": bool(len(forced_leftover.get(int(old.instance_id), ())))}
                 fitted[i] = primary
                 if len(surfs) > 1:
                     extra_parts[int(old.instance_id)] = surfs[1:]

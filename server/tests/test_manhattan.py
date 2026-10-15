@@ -188,7 +188,38 @@ def test_a_cluttered_floor_is_still_a_straight_plane_and_a_blob_is_not(tmp_path)
     by = {r["instance_id"]: r for r in rep["fitted"]}
     assert by[1]["kind"] == "plane" and by[1]["manhattan"]["snapped"] and by[1]["p95_mm"] > 60.0, \
         "the clutter's p95 is reported, the floor stays a straight plane"
-    assert 2 not in by and "2" in rep["manhattan"]["not_a_surface"] and rep["manhattan"]["not_a_surface"]["2"] < 0.75
+    assert not by[1]["manhattan"]["partial"] and not by[1]["manhattan"]["residue_meshed"]
+    assert not (out / "surface_fit" / "floor_1" / "unexplained_idx.npy").exists(), "a surface's clutter is declared, never meshed"
+    assert 2 not in by and "2" in rep["manhattan"]["not_a_surface"]
+
+
+def test_a_desk_top_with_tubular_legs_is_a_straight_top_plus_the_legs_as_measured(tmp_path):
+    """pccr desk 351 (2026-10-15): one plane held 69 % and the ladder bent it (bspline rejected,
+    generic remainder primitives + Poisson). Now: the top is the Manhattan plane and the legs,
+    which no plane holds, are meshed AS MEASURED next to it (unexplained_idx.npy), declared partial."""
+    import open3d as o3d
+    from reconstruction.surface_fit.scene import fit_scene
+    rng = np.random.default_rng(13)
+    top = _plane_pts(np.array([0, 0, 1.0]), -0.75, (0.8, 0.4), 35000, 61)   # z = 0.75, tilted 0°
+    legs = []
+    for cx, cy in ((-0.7, -0.3), (0.7, -0.3), (-0.7, 0.3), (0.7, 0.3)):
+        a = rng.uniform(0, 2 * np.pi, 4000); z = rng.uniform(0, 0.75, 4000)
+        legs.append(np.column_stack([cx + 0.03 * np.cos(a), cy + 0.03 * np.sin(a), z]))
+    legs = np.vstack(legs)
+    cloud = np.vstack([top, legs])
+    out = tmp_path / "output"
+    out.mkdir()
+    o3d.io.write_point_cloud(str(out / "cleaned_cloud.ply"), o3d.geometry.PointCloud(o3d.utility.Vector3dVector(cloud)))
+    seg = {"instances": [{"id": 1, "instance_id": 1, "label": "desk", "globalIndices": list(range(len(cloud)))}]}
+    (out / "segmentation_result.json").write_text(json.dumps(seg))
+    rep = fit_scene(tmp_path, overrides={"consolidate_method": "none", "models": ["bspline"]},
+                    hole_audit=False, texture_objects=False, decompose=False)
+    by = {r["instance_id"]: r for r in rep["fitted"]}
+    m = by[1]["manhattan"]
+    assert by[1]["kind"] == "plane" and m["snapped"] and m["axis"] == "up"
+    assert m["partial"] and m["residue_meshed"] and 0.25 < m["residue_frac"] < 0.35, m
+    rest = np.load(out / "surface_fit" / "desk_1" / "unexplained_idx.npy")
+    assert len(rest) == pytest.approx(len(legs), rel=0.1), "the legs, as measured, next to the straight top"
 
 
 def test_an_s_shaped_wall_becomes_frame_aligned_planes_with_exact_offsets(tmp_path):
@@ -228,16 +259,18 @@ def test_an_s_shaped_wall_becomes_frame_aligned_planes_with_exact_offsets(tmp_pa
                     decompose_min_points=1500, decompose_min_frac=0.05, decompose_max_primitives=8)
     by = {r["instance_id"]: r for r in rep["fitted"]}
     w = by[2]["manhattan"]
-    # the first and third runs are ONE plane (x = 0) — the extraction claims them together
-    assert w["decomposed"] and len(w["parts"]) == 4, w
+    # the first and third runs lie in ONE plane (x = 0): the extraction claims them together,
+    # the connectivity split makes them two pieces, the coplanar merge keeps them one plane
+    assert w["decomposed"] and len(w["parts"]) == 5, w
     assert all(p["snapped"] for p in w["parts"])
-    axes = [p["axis"] for p in w["parts"]]
-    assert axes[0] == "X" and axes[1] == "X" and axes[2] == "Z" and axes[3] == "Z", axes
-    assert 39000 < w["parts"][0]["n_points"] < 43000 and 19000 < w["parts"][1]["n_points"] < 23000   # corners shared within 4 cm
+    axes = sorted(p["axis"] for p in w["parts"])
+    assert axes == ["X", "X", "X", "Z", "Z"], axes
+    runs = [p for p in w["parts"] if p["axis"] == "X"]
+    assert sum(1 for p in runs if p.get("coplanar_group")) == 2, "the first and third runs: one plane"
     assert w["residue_frac"] < 0.05
     assert rep["manhattan"]["frame"]["up_from_instance"] == 1, "up = the floor, not the heavier wall"
     side = json.loads((out / "surface_fit" / "wall_2" / "manhattan.json").read_text())
-    assert side["decomposed"] and len(side["parts"]) == 4
+    assert side["decomposed"] and len(side["parts"]) == 5
     # the exported mesh spans the whole S: both offsets and the full length
     import trimesh
     mesh = trimesh.load(str(out / "surface_fit" / "wall_2" / "surface.glb"), force="mesh")
