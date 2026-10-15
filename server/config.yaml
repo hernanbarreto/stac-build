@@ -1039,6 +1039,23 @@ bim:
 # per-frame cutoffs (distance / confidence / weight / edge) that were dropping real
 # surfaces (distant walls/doors) that show fine in the cloud.
 tsdf:
+  # ── PER-OBJECT TSDF (USER 2026-10-15 "todo tiene que correr sobre todo lo corregido"): the depth
+  # integrated is the PUBLISHED cloud of the live epoch — per keyframe the z-buffer of the object's
+  # own live points through the camera the cloud was built with (camera.json K on the record grid,
+  # the live epoch's poses) — never Omega's / DA3's / Stray's original depth, which is epoch 0's
+  # geometry (pccr's floor came out duplicated against the epoch-4 cloud, 2026-10-15). On the card
+  # (Open3D VoxelBlockGrid), the mesh in canonical vertex order (the same bytes twice).
+  object:
+    depth_source: live_cloud  # live_cloud | legacy_chain (Stray → PGSR renders → chunk depth → DA3; A/B only)
+    device: cuda              # cpu | cuda — an unavailable device FAILS the step, no fallback
+    voxel_length: 0.015       # m (the 2026-08-29 per-object values)
+    sdf_trunc: 0.04           # m
+    depth_min: 0.15           # m
+    depth_trunc: 12.0         # m (a door 5.3–7 m from every camera integrated ZERO frames at 5 m)
+    fill_px: 1                # BOUND: the cloud is sparse at pixel scale — a (2·fill+1)-px minimum
+                              # filter closes single-pixel gaps (1 px ≈ 8 mm at 3 m, under the voxel)
+    weight_threshold: 2.0     # ≥ 2 keyframes must agree per voxel (the scene recipe's tsdf_weight_thresh)
+    block_count: 50000        # VoxelBlockGrid hash slots (grows on demand)
   mesh_method: "tsdf"          # MAX-PRECISION RUN (user 2026-08-18): raster-TSDF + the
                                # per-pixel PGSR blend (pgsr_blend_tau_m) — PGSR trains
                                # cloud-anchored under backend vggtomega_pgsr. NKSR was

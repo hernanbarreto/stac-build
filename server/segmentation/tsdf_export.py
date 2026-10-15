@@ -592,6 +592,150 @@ def _build_segment_mask_at_depth(pr_rgb: np.ndarray, pc_rgb: np.ndarray,
     return _dilate_mask(seed, dilate_radius)
 
 
+# ── THE LIVE CLOUD AS THE DEPTH (USER 2026-10-15: "claro que todo tiene que correr sobre todo lo
+# corregido") ──────────────────────────────────────────────────────────────────────
+# The per-object TSDF used to integrate the ORIGINAL depth maps (Omega's chunk depth / DA3 /
+# Stray) at the live epoch's poses: epoch 0's geometry with epoch 4's cameras — F6's bend and
+# every per-epoch correction missing — so pccr's floor came out duplicated against the published
+# cloud (2026-10-15). Now the depth integrated is the published cloud itself: per keyframe the
+# z-buffer of the object's own LIVE points through the camera the cloud was built with
+# (camera.json's K on the record grid, the live epoch's poses — the same pinhole (K, pose) Open3D
+# unprojects with, so every depth sample IS a cloud point of the live epoch). On the device the
+# config declares (`tsdf.object.device`), deterministic: a stable-sort z-buffer (no scatter), a
+# max-pool minimum filter, and the mesh in CANONICAL vertex/face order after the extraction.
+
+_OBJECT_TSDF_DEVICES = ("cuda", "cpu")
+
+
+def _live_device(name: Optional[str]) -> str:
+    """The device of the live-cloud TSDF: the argument, else `tsdf.object.device`; cpu | cuda, a
+    cuda that is not there (torch or Open3D) FAILS — nothing runs somewhere else."""
+    import open3d as o3d
+    import torch
+    if name is None:
+        from config import cfg
+        obj = ((cfg.get("tsdf") or {}).get("object") or {}) if hasattr(cfg, "get") else {}
+        if "device" not in obj:
+            raise RuntimeError("tsdf.object.device is missing (cuda | cpu) — the per-object TSDF runs "
+                               "on one declared device, nothing is assumed")
+        name = str(obj["device"])
+    name = str(name)
+    if name not in _OBJECT_TSDF_DEVICES:
+        raise RuntimeError(f"tsdf.object.device = {name!r} — one of {list(_OBJECT_TSDF_DEVICES)}")
+    if name == "cuda" and not (torch.cuda.is_available() and o3d.core.cuda.is_available()):
+        raise RuntimeError("tsdf.object.device is cuda and no CUDA device is visible to torch and "
+                           "Open3D — the step fails instead of running somewhere else")
+    return name
+
+
+def _o3d_device(name: str):
+    import open3d.core as o3c
+    return o3c.Device("CUDA:0" if name == "cuda" else "CPU:0")
+
+
+def _resolve_live_cloud_depth(cam, xyz_obj: np.ndarray, hw: Tuple[int, int],
+                              fill_px: int, device: str):
+    """Depth loader of the LIVE cloud for one object: ``loader(frame) → {depth, valid, K, mask}``
+    (None without a pose) — the z-buffer of ``xyz_obj`` (the object's published points) on the
+    (H, W) record grid through the frame's live pose and ``cam.K_for`` (pinhole, as Open3D
+    unprojects), +inf → 0 where no point lands, single-pixel gaps closed by a (2·fill_px+1)-px
+    minimum filter (the cloud is sparse at pixel scale). ``mask`` = the pixels that carry a
+    point: the object's own silhouette, no other mask needed."""
+    import torch
+    from precision.f6_torch import min_filter
+    from reconstruction.surface_fit.hole_audit import zbuffer_min
+    H, W = int(hw[0]), int(hw[1])
+    X = torch.as_tensor(np.ascontiguousarray(np.asarray(xyz_obj, np.float64)), device=device)
+
+    def _load(frame_idx: int) -> Optional[dict]:
+        c2w = cam.pose_map.get(int(frame_idx))
+        K = cam.K_for(int(frame_idx))
+        if c2w is None or K is None:
+            return None
+        K = np.asarray(K, np.float64)
+        c2w4 = np.eye(4)
+        c2w4[:c2w.shape[0], :c2w.shape[1]] = c2w
+        M = np.linalg.inv(c2w4)
+        R = torch.as_tensor(np.ascontiguousarray(M[:3, :3]), device=device)
+        t = torch.as_tensor(np.ascontiguousarray(M[:3, 3]), device=device)
+        p = X @ R.T + t
+        z = p[:, 2]
+        front = z > 1e-6
+        zs = torch.where(front, z, torch.ones_like(z))
+        u = torch.round(float(K[0, 0]) * p[:, 0] / zs + float(K[0, 2])).to(torch.int64)
+        v = torch.round(float(K[1, 1]) * p[:, 1] / zs + float(K[1, 2])).to(torch.int64)
+        inb = front & (u >= 0) & (u < W) & (v >= 0) & (v < H)
+        zb = zbuffer_min((v * W + u)[inb], z[inb], H, W)
+        if int(fill_px) > 0:
+            zb = min_filter(zb, 2 * int(fill_px) + 1)
+        valid = torch.isfinite(zb)
+        depth = torch.where(valid, zb, torch.zeros_like(zb)).to(torch.float32)
+        valid_np = valid.cpu().numpy()
+        return {"depth": depth.cpu().numpy(), "valid": valid_np, "K": K, "mask": valid_np.copy()}
+
+    return _load, (H, W)
+
+
+def _make_object_volume(o3d, device: str, voxel_length: float, block_count: int):
+    """A fresh VoxelBlockGrid (tsdf + weight) per object on ``device``."""
+    import open3d.core as o3c
+    return o3d.t.geometry.VoxelBlockGrid(
+        attr_names=("tsdf", "weight"), attr_dtypes=(o3c.float32, o3c.float32),
+        attr_channels=(o3c.SizeVector((1,)), o3c.SizeVector((1,))),
+        voxel_size=float(voxel_length), block_resolution=8, block_count=int(block_count),
+        device=_o3d_device(device))
+
+
+def _vbg_integrate(o3d, volume, device: str, depth_masked: np.ndarray, K_d: np.ndarray,
+                   extrinsic: np.ndarray, depth_trunc: float, trunc_mult: float) -> bool:
+    """One depth frame into the VoxelBlockGrid (depth in metres, depth_scale 1). False when the
+    frame touches no block (all depth out of range) — the caller counts it, never aborts."""
+    import open3d.core as o3c
+    dev = _o3d_device(device)
+    depth_t = o3d.t.geometry.Image(o3c.Tensor(np.ascontiguousarray(depth_masked, np.float32), device=dev))
+    K_t = o3c.Tensor(np.ascontiguousarray(K_d, np.float64), o3c.float64)
+    ext_t = o3c.Tensor(np.ascontiguousarray(extrinsic, np.float64), o3c.float64)
+    try:
+        coords = volume.compute_unique_block_coordinates(
+            depth_t, K_t, ext_t, depth_scale=1.0, depth_max=float(depth_trunc),
+            trunc_voxel_multiplier=float(trunc_mult))
+        volume.integrate(coords, depth_t, K_t, ext_t, depth_scale=1.0, depth_max=float(depth_trunc),
+                         trunc_voxel_multiplier=float(trunc_mult))
+    except RuntimeError as e:
+        if "No block is touched" in str(e):
+            return False
+        raise
+    return True
+
+
+def canonical_mesh(o3d, verts, faces):
+    """The same mesh in ONE order whatever the extraction produced: exact-duplicate vertices
+    merged, vertices sorted lexicographically, each face rotated to start at its smallest index
+    (orientation kept), degenerate and duplicate faces dropped, faces sorted — the same bytes
+    for the same voxels (the hash map's iteration order is not)."""
+    V = np.asarray(verts, np.float64).reshape(-1, 3)
+    F = np.asarray(faces, np.int64).reshape(-1, 3)
+    if len(V) == 0 or len(F) == 0:
+        return o3d.geometry.TriangleMesh()
+    uv, inv = np.unique(V, axis=0, return_inverse=True)
+    F2 = np.asarray(inv).reshape(-1)[F]
+    F2 = F2[(F2[:, 0] != F2[:, 1]) & (F2[:, 1] != F2[:, 2]) & (F2[:, 0] != F2[:, 2])]
+    if len(F2):
+        k = np.argmin(F2, axis=1)
+        rows = np.arange(len(F2))
+        F2 = np.stack([F2[rows, (k + i) % 3] for i in range(3)], axis=1)
+        F2 = np.unique(F2, axis=0)
+    return o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(uv),
+                                     o3d.utility.Vector3iVector(F2.astype(np.int32)))
+
+
+def _extract_canonical(o3d, volume, weight_threshold: float):
+    """The VoxelBlockGrid's isosurface (on the CPU copy — a CUDA extraction segfaults on big
+    grids, the scene path's lesson) in canonical order."""
+    tm = volume.cpu().extract_triangle_mesh(weight_threshold=float(weight_threshold)).to_legacy()
+    return canonical_mesh(o3d, np.asarray(tm.vertices), np.asarray(tm.triangles))
+
+
 def _rasterize_cloud_depth(xyz: np.ndarray, c2w: np.ndarray, K: np.ndarray,
                            depth_h: int, depth_w: int,
                            splat_radius: int = 0,
@@ -1079,6 +1223,13 @@ def export_tsdf_meshes(
     progress_cb: Optional[Callable[[int, str, Optional[float], Optional[str]], None]] = None,
     pgsr_render_dir: Optional[Path] = None,   # per-object PGSR renders (forces this source)
     name_suffix: str = "",                    # e.g. "_pgsr" → tsdf/<label>_<id>_pgsr/
+    depth_source: str = "legacy_chain",       # "live_cloud" (USER 2026-10-15: the published cloud
+                                              #   is the depth) | "legacy_chain" (the original
+                                              #   depth maps — epoch 0's geometry; A/B only)
+    device: Optional[str] = None,             # live_cloud: cpu | cuda (None = tsdf.object.device)
+    live_fill_px: int = 1,                    # live_cloud: (2·n+1)-px minimum filter on the z-buffer
+    weight_threshold: float = 2.0,            # live_cloud: keyframes that must agree per voxel
+    block_count: int = 50_000,                # live_cloud: VoxelBlockGrid hash slots
 ) -> List[Path]:
     """Reconstruct one TSDF mesh per segmented instance.
 
@@ -1132,12 +1283,25 @@ def export_tsdf_meshes(
     logger.info(f"[TSDF] PLY: {len(xyz):,} points, "
                 f"{len(np.unique(fg_all))} unique frames, traceability ≈ {ply_w}x{ply_h}")
 
-    # Camera source (poses + RGB-resolution K). Stray preferred — has native depth.
-    cam = _load_camera_source(session_dir, output_dir)
-    if cam is None:
-        logger.error("[TSDF] no camera source — aborting")
-        return []
-    logger.info(f"[TSDF] backend={cam.backend}  poses={len(cam.pose_map)}")
+    live = str(depth_source) == "live_cloud" and pgsr_render_dir is None
+    if str(depth_source) not in ("live_cloud", "legacy_chain"):
+        raise ValueError(f"depth_source {depth_source!r} — live_cloud | legacy_chain")
+    if live:
+        # THE camera the cloud was built with (camera.json on the record grid + the live epoch's
+        # poses) — never Stray's odometry, never Omega's record of another camera; missing = FAIL
+        from correction.visit_drift import trace_grid
+        from segmentation.session_io import load_cloud_camera_source
+        cam = load_cloud_camera_source(output_dir)
+        live_hw = trace_grid(output_dir)
+        dev = _live_device(device)
+        logger.info(f"[TSDF] camera={cam.backend}  poses={len(cam.pose_map)}  device={dev}")
+    else:
+        # Camera source (poses + RGB-resolution K). Stray preferred — has native depth.
+        cam = _load_camera_source(session_dir, output_dir)
+        if cam is None:
+            logger.error("[TSDF] no camera source — aborting")
+            return []
+        logger.info(f"[TSDF] backend={cam.backend}  poses={len(cam.pose_map)}")
 
     # Depth source chain (2026-08-29: per-object TSDF is THE individual-mesh
     # path again — no whole-scene bake). Stray native depth first, then the
@@ -1146,51 +1310,63 @@ def export_tsdf_meshes(
     # VGGT-Long via maplong_run), then legacy DA3 .npy. The pgsr/mapanything
     # loaders use the dict contract {depth, valid, K, ...} and carry their own
     # per-frame K at depth resolution.
-    stray_depth = None
-    from segmentation.session_io import _find_stray_dir
-    if pgsr_render_dir is not None:
-        # PER-OBJECT PGSR (user 2026-08-30): this instance's own masked-trained
-        # renders are THE depth source — no fallback chain
-        forced = _resolve_pgsr_render_depth(output_dir, pgsr_render_dir)
-        if forced is None:
-            raise RuntimeError(f"no PGSR renders in {pgsr_render_dir}")
-        logger.info(f"[TSDF] depth source: per-object PGSR renders "
-                    f"({Path(pgsr_render_dir).name})")
-        stray_depth, dict_depth = None, forced
-        stray_dir = None
+    if live:
+        # the depth is built PER OBJECT from its own live points (below); the original depth
+        # maps are not consulted at all
+        stray_depth = dict_depth = da3_depth = None
+        _dict_contract = True
+        depth_loader = None
+        depth_h, depth_w = int(live_hw[0]), int(live_hw[1])
+        trunc_mult = max(1.0, float(sdf_trunc) / float(voxel_length))
+        logger.info(f"[TSDF] depth source: the LIVE cloud (z-buffer of each object's published "
+                    f"points on the {depth_w}x{depth_h} record grid, fill {int(live_fill_px)} px, "
+                    f"trunc_mult {trunc_mult:.2f}, weight_threshold {float(weight_threshold):g})")
     else:
-        stray_dir = _find_stray_dir(session_dir)
-    if stray_dir is not None:
-        stray_depth = _resolve_stray_depth(stray_dir, output_dir=output_dir)
-        if stray_depth is not None:
-            logger.info(f"[TSDF] depth source: Stray {stray_dir} "
-                        f"(shape={stray_depth[1][1]}x{stray_depth[1][0]})")
-    if pgsr_render_dir is None:
-        dict_depth = None
-    if stray_depth is None and dict_depth is None:
-        dict_depth = _resolve_pgsr_render_depth(output_dir)
-        if dict_depth is not None:
-            logger.info(f"[TSDF] depth source: PGSR renders "
-                        f"(shape={dict_depth[1][1]}x{dict_depth[1][0]})")
+        stray_depth = None
+        from segmentation.session_io import _find_stray_dir
+        if pgsr_render_dir is not None:
+            # PER-OBJECT PGSR (user 2026-08-30): this instance's own masked-trained
+            # renders are THE depth source — no fallback chain
+            forced = _resolve_pgsr_render_depth(output_dir, pgsr_render_dir)
+            if forced is None:
+                raise RuntimeError(f"no PGSR renders in {pgsr_render_dir}")
+            logger.info(f"[TSDF] depth source: per-object PGSR renders "
+                        f"({Path(pgsr_render_dir).name})")
+            stray_depth, dict_depth = None, forced
+            stray_dir = None
         else:
-            dict_depth = _resolve_mapanything_depth(output_dir)
+            stray_dir = _find_stray_dir(session_dir)
+        if stray_dir is not None:
+            stray_depth = _resolve_stray_depth(stray_dir, output_dir=output_dir)
+            if stray_depth is not None:
+                logger.info(f"[TSDF] depth source: Stray {stray_dir} "
+                            f"(shape={stray_depth[1][1]}x{stray_depth[1][0]})")
+        if pgsr_render_dir is None:
+            dict_depth = None
+        if stray_depth is None and dict_depth is None:
+            dict_depth = _resolve_pgsr_render_depth(output_dir)
             if dict_depth is not None:
-                logger.info(f"[TSDF] depth source: backend chunk depth "
+                logger.info(f"[TSDF] depth source: PGSR renders "
                             f"(shape={dict_depth[1][1]}x{dict_depth[1][0]})")
-    da3_depth = None
-    if stray_depth is None and dict_depth is None:
-        da3_depth = _resolve_da3_depth(output_dir)
-        if da3_depth is not None:
-            logger.info(f"[TSDF] depth source: DA3 .npy "
-                        f"(shape={da3_depth[1][1]}x{da3_depth[1][0]})")
+            else:
+                dict_depth = _resolve_mapanything_depth(output_dir)
+                if dict_depth is not None:
+                    logger.info(f"[TSDF] depth source: backend chunk depth "
+                                f"(shape={dict_depth[1][1]}x{dict_depth[1][0]})")
+        da3_depth = None
+        if stray_depth is None and dict_depth is None:
+            da3_depth = _resolve_da3_depth(output_dir)
+            if da3_depth is not None:
+                logger.info(f"[TSDF] depth source: DA3 .npy "
+                            f"(shape={da3_depth[1][1]}x{da3_depth[1][0]})")
 
-    if stray_depth is None and dict_depth is None and da3_depth is None:
-        logger.error("[TSDF] no depth source found (no Stray depth/, no PGSR "
-                     "renders, no backend chunk depth, no DA3 *_depth.npy)")
-        return []
+        if stray_depth is None and dict_depth is None and da3_depth is None:
+            logger.error("[TSDF] no depth source found (no Stray depth/, no PGSR "
+                         "renders, no backend chunk depth, no DA3 *_depth.npy)")
+            return []
 
-    _dict_contract = dict_depth is not None
-    depth_loader, (depth_h, depth_w) = stray_depth or dict_depth or da3_depth
+        _dict_contract = dict_depth is not None
+        depth_loader, (depth_h, depth_w) = stray_depth or dict_depth or da3_depth
 
     # RGB resolution — needed to scale K from RGB→depth and PLY pixel coords→depth.
     rgb_h: Optional[int] = None
@@ -1236,11 +1412,16 @@ def export_tsdf_meshes(
 
         # Per-instance TSDF volume — Open3D recommends new volume per object so
         # voxel hashes don't bleed across segments.
-        volume = o3d.pipelines.integration.ScalableTSDFVolume(
-            voxel_length=voxel_length,
-            sdf_trunc=sdf_trunc,
-            color_type=o3d.pipelines.integration.TSDFVolumeColorType.Gray32,
-        )
+        if live:
+            depth_loader, _hw = _resolve_live_cloud_depth(
+                cam, xyz[gi], (depth_h, depth_w), int(live_fill_px), dev)
+            volume = _make_object_volume(o3d, dev, voxel_length, block_count)
+        else:
+            volume = o3d.pipelines.integration.ScalableTSDFVolume(
+                voxel_length=voxel_length,
+                sdf_trunc=sdf_trunc,
+                color_type=o3d.pipelines.integration.TSDFVolumeColorType.Gray32,
+            )
 
         t_inst = time.time()
         n_integrated = 0
@@ -1266,11 +1447,15 @@ def export_tsdf_meshes(
 
             # Build the per-frame mask in depth-grid coords from this segment's
             # projected points — sparse seeds + dilation gives a usable region.
-            seg_mask_pix = sub_fg == fidx
-            mask = _build_segment_mask_at_depth(
-                sub_pr[seg_mask_pix], sub_pc[seg_mask_pix],
-                depth_h, depth_w, ply_h, ply_w, dilate_radius,
-            )
+            if live:
+                # the object's own live silhouette: every pixel carrying one of its points
+                mask = np.asarray(depth_pair["mask"], dtype=bool).copy()
+            else:
+                seg_mask_pix = sub_fg == fidx
+                mask = _build_segment_mask_at_depth(
+                    sub_pr[seg_mask_pix], sub_pc[seg_mask_pix],
+                    depth_h, depth_w, ply_h, ply_w, dilate_radius,
+                )
             mask &= depth_valid
             mask &= depth_m > depth_min
             mask &= depth_m < depth_trunc
@@ -1282,11 +1467,12 @@ def export_tsdf_meshes(
             # wall behind. Those pixels project onto neither surface accurately
             # and create the "extra layer" artifact behind the object. We drop
             # any pixel where a 1-step neighbour differs by > edge_thresh metres.
-            edge_thresh = 0.08  # 8 cm jump = silhouette boundary
-            d = np.where(mask, depth_m, 0.0)
-            gx = np.abs(np.diff(d, axis=1, prepend=d[:, :1]))
-            gy = np.abs(np.diff(d, axis=0, prepend=d[:1, :]))
-            mask &= (gx < edge_thresh) & (gy < edge_thresh)
+            if not live:     # every live sample IS a cloud point: no flying pixels to drop
+                edge_thresh = 0.08  # 8 cm jump = silhouette boundary
+                d = np.where(mask, depth_m, 0.0)
+                gx = np.abs(np.diff(d, axis=1, prepend=d[:, :1]))
+                gy = np.abs(np.diff(d, axis=0, prepend=d[:1, :]))
+                mask &= (gx < edge_thresh) & (gy < edge_thresh)
 
             if not mask.any():
                 skipped_empty_mask += 1
@@ -1315,19 +1501,24 @@ def export_tsdf_meshes(
             # care about texturing the comparison mesh. Gray32 color_type
             # requires float32 single-channel (uint8 single-channel triggers
             # "Unsupported image format" in ScalableTSDFVolume::Integrate).
-            color_np = np.full((depth_h, depth_w), 0.78, dtype=np.float32)
-            o3d_color = o3d.geometry.Image(color_np)
-            o3d_depth = o3d.geometry.Image(depth_masked)
-            rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-                o3d_color, o3d_depth,
-                depth_scale=1.0, depth_trunc=depth_trunc,
-                convert_rgb_to_intensity=False,
-            )
-
             c2w_4 = np.eye(4, dtype=np.float64)
             c2w_4[:c2w.shape[0], :c2w.shape[1]] = c2w
             extrinsic = np.linalg.inv(c2w_4)  # world → cam, what Open3D expects
-            volume.integrate(rgbd, intrinsic, extrinsic)
+            if live:
+                if not _vbg_integrate(o3d, volume, dev, depth_masked, K_d, extrinsic,
+                                      depth_trunc, trunc_mult):
+                    skipped_empty_mask += 1
+                    continue
+            else:
+                color_np = np.full((depth_h, depth_w), 0.78, dtype=np.float32)
+                o3d_color = o3d.geometry.Image(color_np)
+                o3d_depth = o3d.geometry.Image(depth_masked)
+                rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                    o3d_color, o3d_depth,
+                    depth_scale=1.0, depth_trunc=depth_trunc,
+                    convert_rgb_to_intensity=False,
+                )
+                volume.integrate(rgbd, intrinsic, extrinsic)
             n_integrated += 1
 
             if progress_cb and n_integrated % 25 == 0:
@@ -1346,7 +1537,10 @@ def export_tsdf_meshes(
         if progress_cb:
             progress_cb(int(inst_id), "extracting", time.time() - t_inst, None)
 
-        mesh = volume.extract_triangle_mesh()
+        if live:
+            mesh = _extract_canonical(o3d, volume, weight_threshold)
+        else:
+            mesh = volume.extract_triangle_mesh()
         mesh.compute_vertex_normals()
 
         # Drop floating shells: cluster the mesh and keep only components with
@@ -1425,6 +1619,13 @@ def export_tsdf_meshes(
             "depth_resolution": [int(depth_w), int(depth_h)],
             "rgb_resolution": [int(rgb_w), int(rgb_h)],
             "backend": cam.backend,
+            "depth_source": "live_cloud" if live else "legacy_chain",
+            "device": dev if live else "cpu",
+            "weight_threshold": float(weight_threshold) if live else None,
+            "live_fill_px": int(live_fill_px) if live else None,
+            "provenance": ("every depth sample is a point of the PUBLISHED cloud (live epoch) "
+                           "z-buffered through the camera the cloud was built with"
+                           if live else "the original depth maps at the live poses"),
         }
         from correction.epoch import stamp_nearest as _stamp_epoch
         _stamp_epoch(meta, Path(meta_path).parent)
