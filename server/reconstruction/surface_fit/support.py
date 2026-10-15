@@ -46,8 +46,8 @@ def support_grid(uv: np.ndarray, cell: float,
     return occ, u0, v0
 
 
-def trimmed_quad_mesh(uv: np.ndarray, resolution: float,
-                      support_radius: float) -> TrimmedMesh:
+def trimmed_quad_mesh_np(uv: np.ndarray, resolution: float,
+                         support_radius: float) -> TrimmedMesh:
     """Regular grid mesh over the UV bounds at ``resolution``, keeping only
     quads whose center is supported (points within ``support_radius``).
 
@@ -111,6 +111,14 @@ def trimmed_quad_mesh(uv: np.ndarray, resolution: float,
     return TrimmedMesh(vertices_uv=verts_uv, faces=faces,
                        support_fraction=float(n_keep) / float(nu * nv),
                        area_m2=float(n_keep) * resolution * resolution)
+
+
+def trimmed_quad_mesh(uv: np.ndarray, resolution: float,
+                      support_radius: float) -> TrimmedMesh:
+    """The support mesh on the declared device (reconstruction.surface_fit.fit_torch —
+    USER 2026-10-15); :func:`trimmed_quad_mesh_np` is the numpy recipe it reproduces."""
+    from .fit_torch import trimmed_quad_mesh_t
+    return trimmed_quad_mesh_t(uv, resolution, support_radius)
 
 
 def mesh_on_surface(uv: np.ndarray, uv_to_world: Callable[[np.ndarray], np.ndarray],

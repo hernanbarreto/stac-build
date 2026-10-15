@@ -108,7 +108,7 @@ def fit_segment(xyz: np.ndarray,
 
     # fit on a bounded random subsample (deterministic); measure on everything
     fit_pts = xyz
-    if len(xyz) > max_fit_points:
+    if int(max_fit_points) > 0 and len(xyz) > int(max_fit_points):   # 0 = every point (the card scores them all)
         sel = np.random.default_rng(0).choice(len(xyz), max_fit_points, replace=False)
         fit_pts = xyz[sel]
         logger.info("%s: fitting on %d of %d points (residuals use all)",

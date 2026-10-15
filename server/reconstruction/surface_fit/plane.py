@@ -83,9 +83,12 @@ def fit_plane(points: np.ndarray,
     """RANSAC + LS plane with oriented normal and anchored UV basis.
     Returns ``None`` when no plane gathers ``min_inlier_frac`` of the points."""
     pts = np.asarray(points, dtype=np.float64)
-    pf: Optional[PlaneFit] = fit_plane_ransac(
+    # the RANSAC on the declared device, every point scored, seeded (fit_torch — USER
+    # 2026-10-15); Open3D's segment_plane drew from an unseeded engine (point 50)
+    from .fit_torch import fit_plane_ransac_t
+    pf: Optional[PlaneFit] = fit_plane_ransac_t(
         pts, dist_thresh=float(dist_thresh), iters=int(ransac_iters),
-        min_inlier_frac=float(min_inlier_frac), measure_curvature=False)
+        min_inlier_frac=float(min_inlier_frac), seed=0)
     if pf is None:
         return None
 

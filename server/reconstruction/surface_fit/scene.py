@@ -195,7 +195,8 @@ def fit_scene(session_dir: Path,
                                  original_xyz=raw_seg,
                                  scene_centroid=centroid,
                                  progress_cb=progress_cb,
-                                 **{**kwargs, "models": ["plane"], "consolidate_method": "none"})
+                                 **{**kwargs, "models": ["plane"], "consolidate_method": "none",
+                                    "max_fit_points": 0})
                 if fs is None:
                     man_rejected[int(iid)] = 0.0     # no plane gathers its points at all
                     logger.info("scene: %s_%s — marked Manhattan but no plane explains it: the "

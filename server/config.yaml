@@ -2780,6 +2780,10 @@ surface_fit:
                               # frames, surface continuity is inferred behind the occluder
                               # (provenance occlusion_inferred — e.g. floor behind the ladder)
   hole_min_votes: 2           # minimum observing keyframes for a verdict
+  fit_device: cuda            # USER 2026-10-15: where the plane RANSAC (every point scored, seeded)
+                              # and the support mesh run (reconstruction/surface_fit/fit_torch.py);
+                              # cuda | cpu, an unavailable device FAILS the step. MEASURED on pccr's
+                              # floor (4.58 M pts): numpy 3.3 s per plane fit, 2.0 s of it the mesh
   evidence_device: cuda       # USER 2026-10-15 ("toda esa etapa debe correr en gpu"): where the
                               # audit's evidence projects — the per-frame z-buffers of the FULL
                               # cloud, the mask votes, the see-through tallies (hole_audit._Evidence,
