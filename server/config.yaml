@@ -2820,6 +2820,10 @@ surface_fit:
   # USER 2026-10-15 ("dale, probemos"): the Mesh button runs point2cad on every selected object
   # that the GEOMETRY makes a CAD candidate — never by its label — and keeps RANSAC + Poisson
   # for the rest; the decision and its shares land in output/shape_p2c/<label>/decision.json
+  mesh_button_stages: [surface_fit]   # USER 2026-10-15 ("deja solo el manhattan al mandar mesh por
+                              # ahora"): the stages the Mesh button runs, in this order — the full
+                              # chain is [surface_fit, poisson, pgsr, p2c]; surface_fit = the Manhattan /
+                              # RANSAC model of every selected object (tsdf/<label>_<id>/)
   mesh_runs_p2c: true         # false = the Mesh button stays RANSAC + Poisson only
   p2c_min_explained_frac: 0.5 # BOUND (declared): share of the object's points the detected analytic
                               # primitives (plane / cylinder / sphere / cone) must explain for point2cad

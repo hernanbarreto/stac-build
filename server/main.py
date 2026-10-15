@@ -6389,25 +6389,34 @@ async def export_tsdf_endpoint(request: Request):
             # tries surface_fit FIRST"; the key was declared and read by nothing): the Mesh
             # button's first stage, where every object the user left marked Manhattan
             # (2026-10-15) becomes its straight plane — published as tsdf/<label>_<id>/
-            if selected and bool((cfg.get("surface_fit") or {}).get("export_first", False)):
+            # THE STAGES THE MESH BUTTON RUNS (surface_fit.mesh_button_stages — USER 2026-10-15
+            # "deja solo el manhattan al mandar mesh por ahora": [surface_fit]; the full chain is
+            # [surface_fit, poisson, pgsr, p2c]); a stage not listed does not run
+            stages = [str(x) for x in ((cfg.get("surface_fit") or {}).get("mesh_button_stages") or [])]
+            if not stages:
+                raise RuntimeError("surface_fit.mesh_button_stages is missing or empty — the Mesh "
+                                   "button runs the stages it declares, nothing is assumed")
+            if selected and "surface_fit" in stages:
                 async with _tsdf_progress_lock:
                     _tsdf_set_overall(session_id, phase="surface_fit")
                 fitted_ids = set(await _surface_fit_for_export(
                     session_id, frames_dir.parent, output_dir, selected, _progress_cb))
                 if fitted_ids:
                     await _notify_tsdf_ready(session_id, "surface_fit", len(fitted_ids))
-            async with _tsdf_progress_lock:
-                _tsdf_set_overall(session_id, phase="poisson")
-            poisson_ids = await _run_poisson_stage(selected, set())
-            # USER 2026-08-31: each stage's meshes go to the UI the moment
-            # they are published — no more waiting for a manual reload
-            if poisson_ids:
-                await _notify_tsdf_ready(session_id, "poisson",
-                                         len(poisson_ids))
+            poisson_ids: List[int] = []
+            if selected and "poisson" in stages:
+                async with _tsdf_progress_lock:
+                    _tsdf_set_overall(session_id, phase="poisson")
+                poisson_ids = await _run_poisson_stage(selected, set())
+                # USER 2026-08-31: each stage's meshes go to the UI the moment
+                # they are published — no more waiting for a manual reload
+                if poisson_ids:
+                    await _notify_tsdf_ready(session_id, "poisson",
+                                             len(poisson_ids))
 
             pgsr_ids: List[int] = []
-            if selected and bool((cfg.get("surface_fit") or {})
-                                 .get("pgsr_objects", True)):
+            if selected and "pgsr" in stages and bool((cfg.get("surface_fit") or {})
+                                                       .get("pgsr_objects", True)):
                 async with _tsdf_progress_lock:
                     _tsdf_set_overall(session_id, phase="pgsr")
                 pgsr_ids = await _run_pgsr_object_stage(
@@ -6418,7 +6427,7 @@ async def export_tsdf_endpoint(request: Request):
 
             p2c_ids: set = set()
             p2c_skipped: list = []
-            if selected and bool((cfg.get("surface_fit") or {}).get("mesh_runs_p2c", False)):
+            if selected and "p2c" in stages and bool((cfg.get("surface_fit") or {}).get("mesh_runs_p2c", False)):
                 # USER 2026-10-15: point2cad on every selected object the geometry allows
                 async with _tsdf_progress_lock:
                     _tsdf_set_overall(session_id, phase="p2c")
@@ -6427,10 +6436,10 @@ async def export_tsdf_endpoint(request: Request):
                     await _notify_tsdf_ready(session_id, "p2c", len(p2c_ids))
             async with _tsdf_progress_lock:
                 _tsdf_set_overall(session_id, phase="done",
-                                  done=len(set(poisson_ids) | set(pgsr_ids) | set(p2c_ids)),
+                                  done=len(set(fitted_ids) | set(poisson_ids) | set(pgsr_ids) | set(p2c_ids)),
                                   finished_at=time.time())
-            print(f"[Mesh] ✅ {len(poisson_ids)} poisson + {len(pgsr_ids)} "
-                  f"pgsr + {len(p2c_ids)} point2cad mesh(es)"
+            print(f"[Mesh] ✅ stages {stages}: {len(fitted_ids)} surface_fit + {len(poisson_ids)} poisson + "
+                  f"{len(pgsr_ids)} pgsr + {len(p2c_ids)} point2cad mesh(es)"
                   + (f"; point2cad skipped {len(p2c_skipped)} by geometry" if p2c_skipped else ""))
         except Exception as e:
             import traceback
