@@ -531,6 +531,10 @@ autoprompt:
   # ventanas puertas paredes etc, todo lo estructural … no debe olvidarse lo estructural nunca").
   # Read by segmentation/autoprompt/consolidate_prompts.merge_policy (every key required).
   support_surfaces: [floor, ground, platform, slab, base, deck, walkway, pavement, anden, andén]
+                                      # USER 2026-10-15 (observatorio): ALSO the only labels whose contiguous
+                                      # pieces the projection consolidates ("solo debe unir elementos de
+                                      # piso"); every other label keeps its pieces apart. A duplicate under
+                                      # two names (the MUTUAL identity test) still collapses to one.
                                       # the SUPPORT surfaces (head nouns, plural folded): the only wholes a
                                       # part, a building unit or a material may be folded INTO ('tile' →
                                       # 'floor'); the user's own list — the floor is geometric and there may

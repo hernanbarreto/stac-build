@@ -192,6 +192,32 @@ def test_space_dedupe_merges_different_labels_only_into_a_support_surface():
     assert not _cross_label_merge_allowed("desk", "monitor", POLICY)
     assert not _cross_label_merge_allowed("wall", "cabinet", POLICY)           # the wall is not support
     assert _cross_label_merge_allowed("desk", "monitor", CP.LEGACY_POLICY)
+    # the MUTUAL identity test (the same object under two names) may merge any pair — a
+    # duplicate, not a part folded into a whole (USER 2026-10-15, observatorio)
+    assert _cross_label_merge_allowed("desk", "monitor", POLICY, mutual=True)
+    assert _cross_label_merge_allowed("wall", "cabinet", POLICY, mutual=True)
+
+
+def test_fragments_of_one_label_are_consolidated_only_for_a_support_surface():
+    """USER 2026-10-15 (observatorio): 'unió varios elementos que no debiera haber unido; solo debe
+    unir elementos de piso' — two touching beams under one label stay two instances; two touching
+    floor pieces become one."""
+    import numpy as np
+    from segmentation import pipeline as P
+    from test_p3_decisions import _frag_instances
+    for label, expect_merge in (("floor", True), ("beam", False), ("wall", False)):
+        inst, xyz = _frag_instances(6)
+        for i in inst:
+            i["label"] = label
+        dec = []
+        n = P._merge_label_fragments(inst, xyz, gap_m=0.10, record={}, decisions=dec, policy=POLICY)
+        assert (n == 1) == expect_merge and len(inst) == (1 if expect_merge else 2), (label, n, dec)
+        if not expect_merge:
+            assert dec[0]["merged"] is False and "not a support surface" in dec[0]["reason"]
+    inst, xyz = _frag_instances(6)
+    for i in inst:
+        i["label"] = "beam"
+    assert P._merge_label_fragments(inst, xyz, gap_m=0.10, record={}, decisions=[]) == 1, "no policy = the legacy weld"
 
 
 # ── end to end through the auto-prompter: the census shows the structure per keyframe ──

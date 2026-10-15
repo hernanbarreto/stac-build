@@ -3458,7 +3458,7 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
 
 def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
                            record=None, min_adjacent_pairs: Optional[int] = None,
-                           decisions: Optional[list] = None):
+                           decisions: Optional[list] = None, policy=None):
     """Consolidate instances of the SAME label whose points are contiguous.
 
     SAM3 returns one mask per visually separable region, so one physical
@@ -3514,6 +3514,18 @@ def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
 
     for label, members in by_label.items():
         if len(members) < 2:
+            continue
+        # USER 2026-10-15 (observatorio: "unió varios elementos que no debiera haber unido; solo debe
+        # unir elementos de piso si es que aplica, pero nada más"): contiguous pieces of ONE label
+        # are consolidated only when the label is a SUPPORT surface (autoprompt.support_surfaces);
+        # two touching beams, desks or walls under one name stay two instances — the co-visible
+        # split and the duplicate machinery judge them, never a weld by contiguity
+        if policy is not None and getattr(policy, "support", None) is not None \
+                and _label_head(label) not in policy.support:
+            if decisions is not None:
+                decisions.append({"kind": "fragments", "label": str(label), "members": len(members),
+                                  "merged": False,
+                                  "reason": "not a support surface — its pieces stay separate (USER 2026-10-15)"})
             continue
         keys, owners = [], []
         for k in members:
@@ -3626,11 +3638,16 @@ def _label_head(label: Optional[str]) -> str:
     return _fold_word(_head_noun(text)) if text else ""
 
 
-def _cross_label_merge_allowed(survivor_label: Optional[str], other_label: Optional[str], policy) -> bool:
+def _cross_label_merge_allowed(survivor_label: Optional[str], other_label: Optional[str], policy,
+                               mutual: bool = False) -> bool:
     """USER 2026-10-15: instances of two different labels merge only into a SUPPORT surface
     (the survivor's head noun in ``autoprompt.support_surfaces``); the same label (one object
-    SAM3 split, or named twice) merges as before; the legacy policy allows any pair."""
-    if policy.support is None:
+    SAM3 split, or named twice) merges as before; the legacy policy allows any pair.
+    ``mutual``: the pair is judged by the MUTUAL identity test (both instances mostly the
+    intersection — the same object, whatever SAM3 called it each time): then any pair may
+    merge — a duplicate under another name is what the user sees as "elementos repetidos con
+    diferente nombre" (observatorio 2026-10-15), not a part folded into a whole."""
+    if policy.support is None or mutual:
         return True
     if _label_head(survivor_label) == _label_head(other_label):
         return True
@@ -4588,7 +4605,8 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
                     continue
                 share_i = inter / len(vox_all[i])
                 share_j = inter / len(vox_all[j])
-                if not _cross_label_merge_allowed(instances[i].get("label"), instances[j].get("label"), _policy):
+                if not _cross_label_merge_allowed(instances[i].get("label"), instances[j].get("label"), _policy,
+                                                  mutual=bool(_mutual)):
                     dedupe_decisions.append({
                         "kind": "space_dedupe", "instance_ids": [
                             int(instances[i].get("instance_id", instances[i]["id"])),
@@ -4682,7 +4700,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
         pre = len(instances)
         n_abs = _merge_label_fragments(instances, xyz_display, gap_m=_frag_gap,
                                        record=absorbed_into, min_adjacent_pairs=min_judges,
-                                       decisions=frag_decisions)
+                                       decisions=frag_decisions, policy=_merge_policy_of(cfg))
         if n_abs:
             for inst in instances:
                 m = np.asarray(inst["globalIndices"], dtype=np.int64)
