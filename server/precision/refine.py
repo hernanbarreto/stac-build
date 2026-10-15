@@ -578,9 +578,11 @@ def _rung_and_continuation(name: str, start: RungResult, wh, fit_g, held_g, sig,
 def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
                 track: np.ndarray, frame: np.ndarray, uv: np.ndarray, split: np.ndarray,
                 kf_frames: Sequence[int], sigma_rel: float, cfg, solver: dict, *,
-                error_factor: float, log: Callable = print) -> Dict[str, Any]:
+                error_factor: float, log: Callable = print, solve: bool = True) -> Dict[str, Any]:
     """The ladder over the keyframes. ``split`` per OBSERVATION (its track's split).
-    ``error_factor``: ``correction_graph.graph.improvement_error_factor`` (the user's 2)."""
+    ``error_factor``: ``correction_graph.graph.improvement_error_factor`` (the user's 2).
+    ``solve=False`` (``refine.enabled: false``, the evaluation battery): no rung is solved — the
+    initial state is the result (its held-out measured, its landmarks the witnesses' map)."""
     import pycolmap
     pycolmap.set_random_seed(int(cfg.seed))           # COLMAP's PRNG: identical runs, identical bits
     fac = float(error_factor)
@@ -600,6 +602,15 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
                       X=X0)
     held: Dict[str, Dict[int, float]] = {}
     held["init"], dropped_init = _heldout_of(base, held_g, solver, cfg)
+    if not solve:
+        log(f"{LOG_TAG} refine.enabled: false — no rung solved; the initial poses and camera stand "
+            f"(held-out median {np.median(list(held['init'].values())) if held['init'] else float('nan'):.3f} px "
+            f"over {len(held['init'])} tracks)")
+        return {"best": base, "rungs": {}, "held": held, "X": X0, "X0": X0, "fit_groups": fit_g,
+                "held_groups": held_g, "prior_sigma_m": sig, "per_frame_heldout": {},
+                "solver_errors": {}, "clusters": clusters, "ladder": [],
+                "ladder_restricted_by": "refine.enabled: false", "error_factor": fac,
+                "dropped": {"fit_init": dropped_fit, "heldout_init": dropped_init}, "timing": {}}
     errors: Dict[str, dict] = {}
     rungs: Dict[str, Any] = {}
     best: Optional[RungResult] = None       # the rung the session takes (the held-out's verdict)
@@ -878,7 +889,7 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     fac = float(improvement_error_factor(raw_of(pcfg)))   # the job's frozen configuration (point 69)
     core = refine_core(w2c0, cam.params, (cam.width, cam.height), tr["obs_track"], tr["obs_frame"],
                        tr["obs_uv_native"], split_obs, kf, sigma_rel, cfg, solver,
-                       error_factor=fac, log=log)
+                       error_factor=fac, log=log, solve=bool(cfg.enabled))
     best = core["best"]
     bound = heldout_bound(heldout_leave_one_view_out(core["held_groups"], best, solver, cfg,
                                                      max_px=float(np.hypot(cam.width, cam.height))), cfg)

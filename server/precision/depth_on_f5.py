@@ -151,6 +151,17 @@ def significant_bend(A: np.ndarray, r: np.ndarray, huber_k: float, iterations: i
     return c, info
 
 
+def disabled_bend(n: int):
+    """``bend.enabled: false`` (the evaluation battery's variant "sin F6"): k = 1 for every keyframe,
+    no window chosen, every keyframe's provenance 'disabled'. Returns (wb, window_rule, coefs,
+    provenance) in the shapes `compute` carries on."""
+    rule = {"window_best": None, "bar": float("nan"), "heldout_best_se": float("nan"), "disabled": True,
+            "reason": "reconstruction.precision.bend.enabled: false — Omega's depth stands (k = 1) on F5's poses"}
+    coefs = {i: IDENTITY.copy() for i in range(n)}
+    prov = {i: {"status": "disabled", "window": None, "fit": None, "reason": rule["reason"]} for i in range(n)}
+    return None, rule, coefs, prov
+
+
 def bend_coefficients(rows: Dict[int, tuple], n: int, window: int, min_rows: int, huber_k: float,
                       iterations: int, error_factor: float) -> Tuple[Dict[int, np.ndarray], Dict[int, dict]]:
     """({i: (c0, c1, c2)}, {i: info}) — each keyframe fitted on the rows of i−w … i+w with the judged
@@ -742,7 +753,7 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     rows_A = {i: heldout_rows(obs[1][i], zo[f], bc.min_depth_m, 0) for i, f in enumerate(frames)}
     rows_B = {i: heldout_rows(obs[1][i], zo[f], bc.min_depth_m, 1) for i, f in enumerate(frames)}
     score, coefs, infos, errs_A = {}, {}, {}, {}
-    for w in bc.windows:
+    for w in (bc.windows if bc.enabled else ()):
         cw, inf = bend_coefficients(rows, N, int(w), bc.min_rows, gc.huber_k, bc.irls_iterations, fac)
         per_kf = {i: rel_errors(*rows_A[i], cw[i], W, H) for i in range(N)}
         per_kf = {i: e for i, e in per_kf.items() if len(e)}
@@ -756,11 +767,15 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
         if len(h):
             zz = bilinear(zo[f], h[:, 0], h[:, 1]); ok = zz > 0
             raw_err.append(np.abs(zz[ok] - h[ok, 2]) / h[ok, 2])
-    # point 49: the smoothest window within error_factor x the measured error of the best
-    wb, window_rule = choose_window(score, errs_A, fac, bc.bootstrap, bc.seed)
-    # point 48: every keyframe's c0 verified on its own held-out rows; the pooled fit otherwise
-    final_coefs, provenance = verify_keyframes(bc.windows, wb, coefs, infos, rows_A, N, W, H, fac,
-                                               bc.heldout_confidence, bc.bootstrap, bc.seed, bc.min_rows)
+    if bc.enabled:
+        # point 49: the smoothest window within error_factor x the measured error of the best
+        wb, window_rule = choose_window(score, errs_A, fac, bc.bootstrap, bc.seed)
+        # point 48: every keyframe's c0 verified on its own held-out rows; the pooled fit otherwise
+        final_coefs, provenance = verify_keyframes(bc.windows, wb, coefs, infos, rows_A, N, W, H, fac,
+                                                   bc.heldout_confidence, bc.bootstrap, bc.seed, bc.min_rows)
+    else:
+        wb, window_rule, final_coefs, provenance = disabled_bend(N)
+        log(f"{LOG_TAG} bend.enabled: false — Omega's depth stands (k = 1) on F5's poses for every keyframe")
     status_counts: Dict[str, int] = {}
     for p_ in provenance.values():
         status_counts[p_["status"]] = status_counts.get(p_["status"], 0) + 1
@@ -875,7 +890,7 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
                   # grid, the original frame) carried onto it through the lens + grid when they differ
                   "grid_of_the_bend": {"undistorted_native": [W, H], "record": [C.rec_hw[1], C.rec_hw[0]],
                                        "lens": bool(C.lens), "carried": bool(C.carry), "note": C.grid_note},
-                  "bend": {"window": int(wb), "held_out": {str(w): v for w, v in sorted(score.items())},
+                  "bend": {"window": (int(wb) if wb is not None else None), "held_out": {str(w): v for w, v in sorted(score.items())},
                            "held_out_half_B_final": C.score_B, "window_rule": C.window_rule,
                            "improvement_error_factor": C.error_factor,
                            "heldout_confidence": float(pcfg.bend.heldout_confidence),

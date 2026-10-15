@@ -260,6 +260,11 @@ class TracksConfig:
 
 @dataclass(frozen=True)
 class RefineConfig:
+    enabled: bool               # false = NO bundle adjustment: the gauge's poses and F0's camera pass
+                                # through unchanged (an identity F5 epoch, the witnesses localised
+                                # against the initial landmarks) — the evaluation battery's variant
+                                # "sin ajuste de haces F5" (claude_stac.txt 2026-10-14, rule 4: the
+                                # default reproduces the chain exactly)
     min_tri_deg: float          # BOUND: a landmark's rays must span at least this (degrees)
     huber_px: float             # BOUND: Huber scale of the reprojection loss (native px)
     max_iterations: int         # BOUND: Ceres iterations per rung (reconstruction.colmap_ba)
@@ -364,6 +369,10 @@ class CloudConfig:
 
 @dataclass(frozen=True)
 class BendConfig:
+    enabled: bool               # false = NO per-keyframe bend: Omega's depth stands (k = 1) on F5's
+                                # poses; the vote and the cleaner still run — the evaluation battery's
+                                # variant "sin refinamiento de profundidad F6" (rule 4: default = the
+                                # validated recipe bit for bit)
     windows: Tuple[int, ...]    # BOUND (search): smoothing windows (± keyframes) the held-out chooses among
     neighbors: Tuple[int, ...]  # keyframe offsets that vote on a pixel
     tau_quantile: float         # agreement tolerance = this percentile of the session's OWN neighbour
@@ -697,6 +706,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
 
     rf = _sub(sec, "refine", "")
     refine = RefineConfig(
+        enabled=_bool(rf, "enabled", "refine"),
         min_tri_deg=_num(rf, "min_tri_deg", "refine", lo=0.0, lo_excl=True),
         huber_px=_num(rf, "huber_px", "refine", lo=0.0, lo_excl=True),
         max_iterations=_num(rf, "max_iterations", "refine", lo=1, integer=True),
@@ -829,7 +839,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         raise PrecisionConfigError(f"'{SECTION}.bend.windows' must be non-negative keyframe counts, got {windows}")
     if not neighbors or 0 in neighbors:
         raise PrecisionConfigError(f"'{SECTION}.bend.neighbors' must be non-zero keyframe offsets, got {neighbors}")
-    bend = BendConfig(windows=windows, neighbors=neighbors,
+    bend = BendConfig(enabled=_bool(bd, "enabled", "bend"), windows=windows, neighbors=neighbors,
                       tau_quantile=_num(bd, "tau_quantile", "bend", lo=0.0, hi=100.0, lo_excl=True),
                       irls_iterations=_num(bd, "irls_iterations", "bend", lo=1, integer=True),
                       min_rows=_num(bd, "min_rows", "bend", lo=3, integer=True),

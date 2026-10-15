@@ -3,6 +3,7 @@ fronto-parallel plane sampled at every pixel with exact provenance, references a
 projecting known world points. Every number can be checked by hand."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -54,7 +55,7 @@ def plane_point(uv: np.ndarray, K: np.ndarray, c2w: np.ndarray) -> np.ndarray:
 
 def make_session(tmp: Path, *, lens: bool = False, scale: float = 1.0, frames: Optional[List[int]] = None,
                  v_max: int = H, stride: int = 1, seed: int = 0, witness_fields: bool = False,
-                 noise_m: float = 0.0) -> SynthScene:
+                 noise_m: float = 0.0, omega_records: bool = False) -> SynthScene:
     """A session dir with camera.json, camera_frames.txt, camera_poses.txt and a cloud whose
     every point is the plane z = Z0 seen through pixel (row, col) of its keyframe — rows up to
     ``v_max`` only, so anchors beyond it are not reconstructible. ``scale`` multiplies every
@@ -104,6 +105,21 @@ def make_session(tmp: Path, *, lens: bool = False, scale: float = 1.0, frames: O
     write_poses_exact(out / "camera_poses.txt", scaled)
     write_ply(out / "cleaned_cloud.ply", data)
     (tmp / "frames").mkdir(exist_ok=True)
+    (tmp / "frames" / "selected_frames.json").write_text(json.dumps(
+        {"selected_files": [f"{f:06d}.jpg" for f in frames], "keyframes": [{"frame": f, "file": f"{f:06d}.jpg"} for f in frames]}))
+    for f in frames:
+        (tmp / "frames" / f"{f:06d}.jpg").write_bytes(b"")
+    if omega_records:
+        rec = out / "omega_run" / "results_output"
+        rec.mkdir(parents=True, exist_ok=True)
+        for i, f in enumerate(frames):
+            vv, uu = np.mgrid[0:H, 0:W]
+            uv = np.stack([uu.ravel(), vv.ravel()], axis=1).astype(np.float64)
+            depth = plane_point(uv, K, c2w[i])            # TRUE world → camera depth, unscaled: Omega's own units
+            w2c = np.linalg.inv(c2w[i])
+            z = (depth @ w2c[:3, :3].T + w2c[:3, 3])[:, 2].reshape(H, W).astype(np.float32)
+            np.savez(rec / f"frame_{f}.npz", depth=z, conf=np.ones((H, W), np.float32), pose_c2w=c2w[i],
+                     chunk=np.int64(0), frame_global=np.int64(i), K_omega=K)
     return SynthScene(tmp, K, c2w, frames, scale, lens, cam)
 
 

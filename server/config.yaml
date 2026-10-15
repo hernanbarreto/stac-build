@@ -2227,6 +2227,9 @@ reconstruction:
       tracker_weights_sha256: 451f1d218be1ef661c81d6254cbc633a5190e7d6069fe51621cc29ba5d90a404
     # F5 — joint pose + session camera refinement, witness localisation (precision/refine.py)
     refine:
+      enabled: true                     # false = no bundle adjustment (the evaluation battery's variant "sin F5",
+                                        #   claude_stac.txt 2026-10-14): an identity F5 epoch, F0's camera stands.
+                                        #   NEVER change in production — true is the validated chain
       min_tri_deg: 2.0                  # BOUND: a landmark's rays span at least this (degrees)
       huber_px: 1.0                     # BOUND: Huber scale of the reprojection loss (native px)
       max_iterations: 500               # BOUND: Ceres iterations per rung (colmap_ba._tune_ceres)
@@ -2387,6 +2390,8 @@ reconstruction:
                                         #   disagreement (pccr ≈ 3 %), measured on every run
       repair_min_views: 2               # one neighbour is an opinion, two agreeing are evidence
     bend:                               # USER 2026-10-01 — the depth on F5 (precision/depth_on_f5.py)
+      enabled: true                     # false = no per-keyframe bend, Omega's depth stands (k = 1) on F5's poses
+                                        #   (the evaluation battery's variant "sin F6"). NEVER change in production
       windows: [0, 1, 2, 4, 8]          # BOUND (search): ± keyframes pooled per bend; the HELD-OUT tracks choose
                                         #   (pccr: ±0, held-out |dz|/z 7.25 % unbent → 2.80 %)
       neighbors: [-12, -6, -3, 3, 6, 12]  # keyframe offsets that vote on each pixel (same as the repair)
@@ -4089,3 +4094,89 @@ evaluation:
     min_test_coverage: 0.9            # share of the test ends a variant must reconstruct to enter a profile
   deterministic: true                 # phase 6: seeds fixed and recorded, strict torch, fixed order (the chain's own
                                       # determinism plan; the manifest records what is NOT deterministic by name)
+  variants_keep: cloud                # after a scene's variants are evaluated: all | cloud (the published products the
+                                      # viewer and a re-evaluation need) | none — a chain copy is a whole session
+                                      # (pccr 7.5 GB, zaragoza 33 GB) and the /workspace quota is 400 GB
+  coverage:
+    cell_px: 8                        # BOUND: cell of the plane-surface coverage raster (keyframe pixels)
+  variants:                           # phase 3 — the list is configurable; a failing variant is recorded, the rest run.
+                                      # overrides = dotted config keys set on a COPY of the order's configuration
+                                      # (server/config.yaml never changes); stages_off = pipeline stages disabled
+    reference:
+      kind: chain
+      description: the full chain as configured (a)
+    no_drift_correction:
+      kind: chain
+      description: (b) without the certification's corrections (visit drift, floor, mask filter) — the CERTIFY stage off
+      stages_off: [certify]
+    no_f6_bend:
+      kind: chain
+      description: (c) without F6's depth refinement — no per-keyframe bend (k = 1) and no PointDiT detail
+      overrides:
+        "reconstruction.precision.bend.enabled": false
+        "reconstruction.precision.mono_detail.enabled": false
+    no_pointdit:
+      kind: chain
+      description: (d) without PointDiT's detail at the edges
+      overrides:
+        "reconstruction.precision.mono_detail.enabled": false
+    no_f5:
+      kind: chain
+      description: (e) without F5's bundle adjustment — the gauge's poses and F0's camera pass through
+      overrides:
+        "reconstruction.precision.refine.enabled": false
+    scale_mapanything:
+      kind: not_executed
+      description: (f) MapAnything as the scale source instead of DA3
+      reason: >-
+        the chain has no MapAnything scale instrument: the metric lock inside Omega and F2's gauge read DA3
+        (windows / mono), VIO, Stray or known dimensions (reconstruction.precision.gauge.instruments); MapAnything
+        exists only as the legacy whole-backend `reconstruction.backend: mapanything`, which produces no
+        intake/walk.json and cannot feed the precision chain. The env /workspace/miniforge3/envs/mapanything is
+        present (mapanything 1.1); a MapAnything instrument would be a chain change, not a flag.
+    scale_gauge_only:
+      kind: chain_continuation
+      base: reference
+      description: >-
+        (g) scale by the gauge distances only at F2: the finished reference copy continues with
+        gauge.instruments = [known_dims] over output/known_dimensions.json (the gauges measured on Omega's own
+        record). DECLARED LIMIT: Omega's chunk metric lock still uses DA3 (scale_align off breaks the chunk plan);
+        only F2's gauge is the reference distances
+      overrides:
+        "reconstruction.precision.gauge.instruments": [known_dims]
+    colmap_incremental:
+      kind: colmap
+      description: (h1) COLMAP 4.x, SIFT, sequential + vocab-tree loops, incremental mapper, dense per model
+      colmap: {features: SIFT, matcher: SIFT_BRUTEFORCE, mapper: incremental}
+    colmap_global:
+      kind: colmap
+      description: (h2) as h1 with the global mapper (GLOMAP) on the same database
+      colmap: {features: SIFT, matcher: SIFT_BRUTEFORCE, mapper: global}
+    colmap_global_aliked_lightglue:
+      kind: colmap
+      description: (h3) as h2 with learned features and matching (ALIKED + LightGlue)
+      colmap: {features: ALIKED_N16ROT, matcher: ALIKED_LIGHTGLUE, mapper: global}
+  colmap:                             # the baseline's own configuration (recorded whole in each variant's manifest)
+    binary: /workspace/miniforge3/envs/colmap/bin/colmap     # COLMAP 4.2.0 (CUDA), its own env
+    camera_model: OPENCV              # one camera per session (ImageReader.single_camera)
+    use_gpu: true
+    sift: {max_num_features: 8192}
+    aliked: {max_num_features: 2048}  # the extractor's own default
+    sequential:
+      overlap: 10
+      quadratic_overlap: true
+      loop_detection: true
+      loop_detection_period: 10
+      loop_detection_num_images: 50
+    vocab_tree:                       # COLMAP's "<url>;<name>;<sha256>" URIs, cached in ~/.cache/colmap
+      sift: "https://github.com/colmap/colmap/releases/download/3.11.1/vocab_tree_faiss_flickr100K_words256K.bin;vocab_tree_faiss_flickr100K_words256K.bin;96ca8ec8ea60b1f73465aaf2c401fd3b3ca75cdba2d3c50d6a2f6f760f275ddc"
+      aliked_n16rot: "https://github.com/colmap/colmap/releases/download/3.13.0/vocab_tree_faiss_flickr100K_words64K_aliked_n16rot.bin;vocab_tree_faiss_flickr100K_words64K_aliked_n16rot.bin;8b2f9bdc44ca7204d8543bb3adab4c03ba9336c84ef41220b5007991036f075e"
+      aliked_n32: "https://github.com/colmap/colmap/releases/download/3.13.0/vocab_tree_faiss_flickr100K_words64K_aliked_n32.bin;vocab_tree_faiss_flickr100K_words64K_aliked_n32.bin;65619481045b8f933268f10c31ad180eb1ee7881182873efe0f5753972ef6a20"
+    mapper_options: {}                # extra `--Key value` options of `colmap mapper` (none: the vendor's defaults)
+    global_mapper_options: {}         # idem for `colmap global_mapper`
+    dense:
+      max_image_size: -1              # -1 = native
+      geom_consistency: true
+      fusion_min_num_pixels: 5        # StereoFusion.min_num_pixels (the vendor's default)
+    min_model_images: 3               # a model with fewer registered images gets no dense cloud (recorded)
+    timeout_s: 21600                  # BOUND: per COLMAP command

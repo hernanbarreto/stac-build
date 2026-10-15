@@ -220,7 +220,7 @@ def run_variant(name: str, session_dir: Path, pcfg, inp, scratch: Path, log: Cal
               "pixels": r.totals, "seconds_pointdit": r.seconds_pointdit, "seconds_total": r.seconds_total,
               "params": r.params}
     rep = {"variant": name, "overrides": over, "seconds_compute": round(t_compute, 1),
-           "seconds_per_frame": round(t_compute / max(C.N, 1), 2), "bend": {"window": int(C.wb), "held_out_A": C.score},
+           "seconds_per_frame": round(t_compute / max(C.N, 1), 2), "bend": {"window": (int(C.wb) if C.wb is not None else None), "held_out_A": C.score},
            "vote": vote, "vote_band": vband, "heldout": held, "flyers": fl, "mono_detail": md,
            "ground_truth": "pending (no gauge / test role on this session)", "cleaned_cloud": str(cleaned)}
     log(f"{LOG_TAG} {name}: held-out {held['median_rel'] * 100 if held['median_rel'] is not None else float('nan'):.2f} % "
