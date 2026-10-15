@@ -6385,6 +6385,17 @@ async def export_tsdf_endpoint(request: Request):
             # points (as-is) AND a per-object PGSR-TSDF trained ONLY on the
             # instance's SAM3 masks ("con las máscaras eh!!!"), published as
             # <label>_<id>_poisson/ and <label>_<id>_pgsr/.
+            # SURFACE FIT FIRST (surface_fit.export_first — USER 2026-08-28 "individual meshing
+            # tries surface_fit FIRST"; the key was declared and read by nothing): the Mesh
+            # button's first stage, where every object the user left marked Manhattan
+            # (2026-10-15) becomes its straight plane — published as tsdf/<label>_<id>/
+            if selected and bool((cfg.get("surface_fit") or {}).get("export_first", False)):
+                async with _tsdf_progress_lock:
+                    _tsdf_set_overall(session_id, phase="surface_fit")
+                fitted_ids = set(await _surface_fit_for_export(
+                    session_id, frames_dir.parent, output_dir, selected, _progress_cb))
+                if fitted_ids:
+                    await _notify_tsdf_ready(session_id, "surface_fit", len(fitted_ids))
             async with _tsdf_progress_lock:
                 _tsdf_set_overall(session_id, phase="poisson")
             poisson_ids = await _run_poisson_stage(selected, set())
