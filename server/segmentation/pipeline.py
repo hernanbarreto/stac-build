@@ -17,6 +17,7 @@ Usage from main.py:
 import os
 import re
 import json
+import time
 import shutil
 import torch
 import numpy as np
@@ -3128,6 +3129,9 @@ def _gap_rays(A: np.ndarray, B: np.ndarray, tree, cams: np.ndarray, gap_m: float
     20 — a BOUND of the cost, the samples themselves are a fixed linspace); for every camera
     the ray through a sample is walked beyond it every `gap_m` up to `reach_m`."""
     from scipy.spatial import cKDTree
+    from segmentation.gap_rays_torch import FreeSpaceIndex, gap_rays_t
+    if isinstance(tree, FreeSpaceIndex):                        # the same judges, on the card
+        return gap_rays_t(A, B, tree, cams, gap_m, reach_m)
     d, ia = cKDTree(A).query(B, k=1)
     jb = int(np.argmin(d))
     a, b = A[ia[jb]], B[jb]
@@ -3274,8 +3278,10 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
         ctr = {c: P[comp == c].mean(0) for c in cand}
         kfs = {c: set(np.unique(frame_arr[gi[comp == c]]).tolist()) for c in cand}
         if tree_box[0] is None and cam_centre:
-            from scipy.spatial import cKDTree
-            tree_box[0] = cKDTree(xyz_display)
+            # the cloud indexed ONCE on the card for the ray judges (USER 2026-10-15: the cKDTree
+            # over observatorio's 99 M points queried per ray sample ran for hours)
+            from segmentation.gap_rays_torch import FreeSpaceIndex
+            tree_box[0] = FreeSpaceIndex(xyz_display, gap_m / 2.0)
         reach = float(np.linalg.norm(xyz_display.max(0) - xyz_display.min(0)))
         parent = {c: c for c in cand}
 
@@ -3284,6 +3290,7 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
                 x = parent[x]
             return x
         iid = int(inst.get("instance_id", inst.get("id", 0)))
+        _t_inst = time.time()
         for ia_, c1 in enumerate(cand):
             for c2 in cand[ia_ + 1:]:
                 cv = _covisible(kfs[c1], kfs[c2], covis_share, factor=factor,
@@ -3325,6 +3332,9 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
         for c in cand:
             roots.setdefault(_root(c), []).append(c)
         groups = sorted(roots.values(), key=lambda g: (-sum(size[x] for x in g), min(g)))
+        print(f"[SegPipeline]   ✂ co-visible split: instance {iid}: {n} component(s), {len(cand)} candidate(s), "
+              f"{len(cand) * (len(cand) - 1) // 2} pair(s) judged in {time.time() - _t_inst:.1f}s → {len(groups)} group(s)",
+              flush=True)
         if len(groups) < 2:
             continue
         owner = np.full(n, -1, dtype=np.int64)
