@@ -361,9 +361,14 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
         e = looked.setdefault(c.get("frame"), {"frame": c.get("frame"), "file": c.get("file"),
                                                "keyframe_index": c.get("keyframe_index"),
                                                "position": c.get("position"),
-                                               "n_calls": 0, "n_parsed": 0})
+                                               "n_calls": 0, "n_parsed": 0, "n_structural": 0})
         e["n_calls"] += 1
         e["n_parsed"] += int(bool(c.get("parsed")))
+        # USER 2026-10-15: how many structural names each keyframe's answer carried (the
+        # 'structure' field + the structural object names); a parsed keyframe with none is listed
+        e["n_structural"] += int(c.get("n_structural") or 0)
+    no_structure = sorted((e["frame"] for e in looked.values()
+                           if e["n_parsed"] and not e["n_structural"]), key=lambda f: (f is None, f or 0))
     doc = {
         "version": CENSUS_VERSION,
         "provenance": {"concepts": "vlm_proposed", "masklets": "tool_measured"},
@@ -378,6 +383,10 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
                                                                e["keyframe_index"] or 0)),
             "n_calls": len(calls),
             "n_parsed": sum(1 for c in calls if c.get("parsed")),
+            # USER 2026-10-15 ("no debe olvidarse lo estructural nunca"): the keyframes whose
+            # parsed answer named NO structural element — declared, never silently accepted
+            "keyframes_without_structure": no_structure,
+            "n_keyframes_without_structure": len(no_structure),
             "calls": calls,
             "vocabulary_reused": (rec or {}).get("vocabulary_reused"),
             "prompt_bound": (rec or {}).get("prompt_bound"),

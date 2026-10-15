@@ -213,7 +213,7 @@ def test_the_autoprompter_writes_shape_descriptions_into_the_sam3_contract(tmp_p
     monkeypatch.setattr(sc, "get_semantic_client", lambda **kw: fake)
     res = AutoPrompter(tmp_path, tmp_path / "output", config=raw).run()
     vlm = json.loads(Path(res.vlm_analysis_path).read_text())
-    assert vlm["prompt"] == "desk;floor" and vlm["fallback_prompts"] == {"desk": ["black metal desk"],
+    assert vlm["prompt"] == "floor;desk" and vlm["fallback_prompts"] == {"desk": ["black metal desk"],
                                                                          "floor": ["grey tiles floor"]}
     assert set(vlm["shape_descriptions"]) == {"desk"}
     assert vlm["shape_descriptions"]["desk"]["caption"] == "Desk, rectangular box, steel. two drawers"

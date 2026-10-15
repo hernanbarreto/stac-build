@@ -137,8 +137,9 @@ def test_vlm_analysis_is_stamped_recorded_and_reused_whole_under_the_same_stamp(
     # point 89: the margins of every integer cut-off
     dec = doc["census"]["decisions"]
     assert dec["prompt_bound"]["bound_reached"] is False and dec["prompt_bound"]["margin_proposals"] is None
-    assert dec["prompt_bound"]["last_admitted"] == {"name": "floor", "n_proposals": 3}, \
-        "the last name admitted is the list's last (desk;floor), with its proposals"
+    assert dec["prompt_bound"]["last_admitted"] == {"name": "desk", "n_proposals": 3}, \
+        "the last name admitted is the list's last (floor;desk — the structural floor goes first, " \
+        "USER 2026-10-15), with its proposals"
     assert dec["scene_type"] == {"winner": "server room", "votes": {"server room": 3}, "margin": 3}
     assert dec["merge_strategy"] is None, "the merge pass is off in this configuration"
     # point 86: no clock in the file; the times are beside it
@@ -147,12 +148,12 @@ def test_vlm_analysis_is_stamped_recorded_and_reused_whole_under_the_same_stamp(
     timing = json.loads((tmp_path / "output" / "vlm_analysis.timing.json").read_text())
     assert "understanding_s" in timing and timing["n_calls"] == 3
     rec = json.loads((tmp_path / "output" / "autoprompt_concepts.json").read_text())
-    assert rec["stamp"] == st["sha256"] and rec["prompts"] == ["desk", "floor"]
+    assert rec["stamp"] == st["sha256"] and rec["prompts"] == ["floor", "desk"]   # structure first (2026-10-15)
 
     # the SAME inputs → the file is reused WHOLE, the VLM is not called
     vlm2 = _VLM()
     res2 = _run(tmp_path, raw, monkeypatch, vlm2, service=service)
-    assert res2.reused is True and vlm2.calls == 0 and res2.prompt == "desk;floor"
+    assert res2.reused is True and vlm2.calls == 0 and res2.prompt == "floor;desk"   # structure first (2026-10-15)
     assert json.loads(Path(res2.vlm_analysis_path).read_text()) == doc, "not rewritten"
 
     # another engine identity → derived again (and the log says why)
@@ -213,9 +214,11 @@ def test_the_bound_records_the_margin_at_the_cut(tmp_path, monkeypatch):
     res = _run(tmp_path, raw, monkeypatch, _Three())
     doc = json.loads(Path(res.vlm_analysis_path).read_text())
     pb = doc["census"]["decisions"]["prompt_bound"]
-    assert pb["bound_reached"] and pb["not_prompted"] == ["floor", "chair"]
-    assert pb["last_admitted"] == {"name": "desk", "n_proposals": 3}
-    assert pb["first_excluded"] == {"name": "floor", "n_proposals": 3} and pb["margin_proposals"] == 0, \
+    # USER 2026-10-15 (structural_always): the floor — structure — is prompted FIRST and the
+    # bound cuts the rest; the tie at the cut is still on record as margin 0
+    assert pb["bound_reached"] and pb["not_prompted"] == ["desk", "chair"]
+    assert pb["last_admitted"] == {"name": "floor", "n_proposals": 3}
+    assert pb["first_excluded"] == {"name": "desk", "n_proposals": 3} and pb["margin_proposals"] == 0, \
         "a tie at the cut (decided by first-seen order) is on record as margin 0"
 
 

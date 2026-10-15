@@ -305,12 +305,14 @@ def test_past_the_prompt_bound_every_name_is_recorded_not_prompted(tmp_path, mon
     cfg["autoprompt"]["max_sam3_prompts"] = 2
     res = AutoPrompter(tmp_path, tmp_path / "output", config=cfg).run()
     # every crop names the two small things, every full frame the other four:
-    # 'fire extinguisher' (30 calls incl. its plural) and 'doorbell panel' (24) lead
-    assert res.prompt.split(";") == ["fire extinguisher", "doorbell panel"]
+    # 'fire extinguisher' (30 calls incl. its plural) and 'doorbell panel' (24) lead — but the
+    # structural 'white tiled floor' goes FIRST whatever its count (USER 2026-10-15,
+    # structural_always: a bound never cuts the envelope), so it takes one of the two places
+    assert res.prompt.split(";") == ["white tiled floor", "fire extinguisher"]
     vlm = json.loads((tmp_path / "output" / "vlm_analysis.json").read_text())
     bound = vlm["census"]["prompt_bound"]
     assert bound["bound_reached"] and bound["max_sam3_prompts"] == 2
-    assert set(bound["not_prompted"]) == {"white tiled floor", "cardboard box",
+    assert set(bound["not_prompted"]) == {"doorbell panel", "cardboard box",
                                           "red fire alarm box"}
     fates = {c["concept"]: c for c in vlm["census"]["concepts"]}
     for name in bound["not_prompted"]:

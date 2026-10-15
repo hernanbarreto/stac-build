@@ -85,7 +85,7 @@ def test_the_merge_prompt_folds_a_part_into_its_whole():
 
 def test_the_grouping_rule_is_versioned():
     """A vocabulary derived under the old rule is not reused (the stamp's 'grouping')."""
-    assert SU.GROUPING_VERSION == "whole_objects_v3"
+    assert SU.GROUPING_VERSION == "support_folds_v4"      # USER 2026-10-15: folds only into support, structure always
 
 
 # ── the merge parser ─────────────────────────────────────────────────────────────────
@@ -197,6 +197,9 @@ class _SceneVLM:
             asked = q.split('"')[1]
             if "WHOLE object on its own" in q:
                 ans = "piece" if asked == "tile" else "whole"
+            elif "units or pieces that a" in q:
+                # the unit-of-surface question (2026-10-10): only the tile is one of the floor's
+                ans = "yes" if asked == "tile" else "no"
             elif "Answer yes or no" in q:
                 ans = "yes"
             elif "piece, unit or material of which" in q:
@@ -245,7 +248,7 @@ def test_the_autoprompter_folds_the_tile_into_the_floor_and_the_census_closes(
     assert prompts == ["floor", "cable"]
     assert "tile" in vlm.merge_listing and "floor" in vlm.merge_listing
     doc = json.loads(Path(res.vlm_analysis_path).read_text())
-    assert doc["scene_understanding"]["grouping"] == "whole_objects_v3"
+    assert doc["scene_understanding"]["grouping"] == "support_folds_v4"
     assert "grouping" in doc["stamp"]["config"], "the rule's version is a stamped section"
 
     # the census: both spellings of the part are MERGED into the floor, with the reason

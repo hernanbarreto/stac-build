@@ -177,6 +177,33 @@ def greyed(image, mask: Optional[np.ndarray]):
     return Image.fromarray(img)
 
 
+def select_fresh(counts: Counter, have: set, policy) -> tuple:
+    """The names a round proposes for the first time: (fresh, single_witness_dropped,
+    generic_dropped), most proposed first. A name already prompted or decided (``have``, by
+    same_name_key) is skipped; a generic name ('object', 'item') is never a prompt; a name ONE
+    keyframe named is dropped (two witnesses, pccr 2026-10-09) — unless it is STRUCTURAL under
+    ``policy.structural_always`` (USER 2026-10-15: one keyframe naming a door is a door)."""
+    from segmentation.autoprompt.consolidate_prompts import is_structural
+    from segmentation.autoprompt.scene_understanding import same_name_key
+    fresh: List[str] = []
+    fkeys = set()
+    single_witness: List[str] = []
+    generic: List[str] = []
+    for name, n in counts.most_common():
+        key = same_name_key(name)
+        if key in have or key in fkeys:
+            continue
+        if is_generic_name(name):
+            generic.append(name)
+            continue
+        if n < 2 and not (policy.structural_always and is_structural(name)):
+            single_witness.append(name)
+            continue
+        fkeys.add(key)
+        fresh.append(name)
+    return fresh, single_witness, generic
+
+
 def run_round(session_dir, config: dict, k: int, *, log: Callable[[str], None] = print,
               progress: Optional[Callable[[float, str], None]] = None,
               cancelled: Optional[Callable[[], bool]] = None) -> dict:
@@ -187,7 +214,7 @@ def run_round(session_dir, config: dict, k: int, *, log: Callable[[str], None] =
     from semantic.parallel import (Job, concurrency_plan, cost_of, engine_kv_cache, plan_line,
                                    run_ordered, self_check_judges)
     from segmentation.autoprompt.autosegment import vlm_prompt_for
-    from segmentation.autoprompt.consolidate_prompts import classify_phrases
+    from segmentation.autoprompt.consolidate_prompts import classify_phrases, is_structural, merge_policy
     from segmentation.autoprompt.scene_understanding import same_name_key, understand_frame
     from segmentation.autoprompt.vlm_sampling import load_max_sam3_prompts
     from segmentation.object_captioner import load_object_captions
@@ -217,6 +244,7 @@ def run_round(session_dir, config: dict, k: int, *, log: Callable[[str], None] =
     base_prompt, _ = vlm_prompt_for(out)
     max_tokens = int(load_object_captions(config).understand_max_tokens)
     backend = (config.get("autoprompt") or {}).get("backend", "qwen_local")
+    policy = merge_policy(config.get("autoprompt") or {})
 
     _p(2, f"round {k}: painting what {len(existing)} prompt(s) already segmented grey on "
           f"{len(frames)} keyframe(s)")
@@ -260,28 +288,7 @@ def run_round(session_dir, config: dict, k: int, *, log: Callable[[str], None] =
     log(f"{LOG_TAG} {plan_line(conc, stats)}")
 
     have = {same_name_key(p) for p in existing} | {same_name_key(p) for p in decided_names(out, k)}
-    fresh: List[str] = []
-    fkeys = set()
-    single_witness: List[str] = []
-    generic: List[str] = []
-    for name, n in counts.most_common():
-        key = same_name_key(name)
-        if key in have or key in fkeys:
-            continue
-        if is_generic_name(name):
-            # NAMES NO KIND OF THING (USER 2026-10-09): 'object', 'red object', 'item' — never a
-            # SAM3 prompt, recorded as dropped
-            generic.append(name)
-            continue
-        if n < 2:
-            # TWO WITNESSES (pccr 2026-10-09): on images mostly painted grey the VLM fills one
-            # answer with a list of things that are not there (round 3: sink, toaster, blender,
-            # washing machine … all 19 from ONE keyframe); a name counts when two keyframes
-            # name it — the rule the project already applies to single-witness points
-            single_witness.append(name)
-            continue
-        fkeys.add(key)
-        fresh.append(name)
+    fresh, single_witness, generic = select_fresh(counts, have, policy)
     rec: dict = {"round": int(k), "keyframes": len(frames), "proposed": dict(counts),
                  "prompts_before": existing, "fresh": fresh,
                  "single_witness_dropped": single_witness, "generic_dropped": generic,
@@ -310,7 +317,7 @@ def run_round(session_dir, config: dict, k: int, *, log: Callable[[str], None] =
     synonyms = classify_phrases(merge_client, scene_type,
                                 [p for p in existing if not is_generic_name(p)] + fresh,
                                 log=lambda m: log(f"{LOG_TAG} {m}"), calls=merge_calls, kv=kv,
-                                judges=self_check_judges(config), record=merge_exec)
+                                judges=self_check_judges(config), record=merge_exec, policy=policy)
 
     def _carrier(p: str) -> str:
         return synonyms.get(p, p)
@@ -330,10 +337,14 @@ def run_round(session_dir, config: dict, k: int, *, log: Callable[[str], None] =
             fates[n] = "new prompt"
     bound = int(load_max_sam3_prompts(config))
     room = max(bound - len(existing), 0)
+    if policy.structural_always:
+        # USER 2026-10-15: the envelope is prompted FIRST — a bound never cuts a structural name
+        new = sorted(new, key=lambda n_: 0 if is_structural(n_) else 1)
     for n in new[room:]:
         fates[n] = "not prompted (autoprompt.max_sam3_prompts reached)"
     new = new[:room]
-    rec.update(new_prompts=new, fates=fates, merge_calls=merge_calls,
+    rec.update(new_prompts=new, fates=fates, merge_calls=merge_calls, merge_policy=policy.to_dict(),
+               structural_single_witness_kept=[n for n in fresh if counts[n] < 2 and is_structural(n)],
                merge_concurrency=merge_exec.get("concurrency"),
                merge_self_check=merge_exec.get("self_check"),
                seconds=round(time.time() - t0, 1))

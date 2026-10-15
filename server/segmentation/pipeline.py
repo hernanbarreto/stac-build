@@ -3536,6 +3536,31 @@ def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
     return absorbed
 
 
+def _merge_policy_of(cfg: Optional[dict]):
+    """The merge policy of the job's configuration (consolidate_prompts.merge_policy); the legacy
+    policy when the configuration carries no autoprompt section (tests, old sessions)."""
+    from segmentation.autoprompt.consolidate_prompts import merge_policy
+    return merge_policy(((cfg or {}).get("autoprompt") or {}))
+
+
+def _label_head(label: Optional[str]) -> str:
+    from segmentation.autoprompt.consolidate_prompts import _fold_word
+    from segmentation.autoprompt.scene_understanding import _head_noun
+    text = str(label or "").replace("_", " ").strip().lower()
+    return _fold_word(_head_noun(text)) if text else ""
+
+
+def _cross_label_merge_allowed(survivor_label: Optional[str], other_label: Optional[str], policy) -> bool:
+    """USER 2026-10-15: instances of two different labels merge only into a SUPPORT surface
+    (the survivor's head noun in ``autoprompt.support_surfaces``); the same label (one object
+    SAM3 split, or named twice) merges as before; the legacy policy allows any pair."""
+    if policy.support is None:
+        return True
+    if _label_head(survivor_label) == _label_head(other_label):
+        return True
+    return _label_head(survivor_label) in policy.support
+
+
 def _attach_unsegmented(instances, xyz_display: np.ndarray,
                         attach_dist_m: float, rounds: int, votes: int,
                         block: int = 4_000_000):
@@ -4470,6 +4495,11 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
                 per[int(f_)] = np.unique(keys[order[s_:e_]])
             vox_by_kf.append(per)
         absorbed = set()
+        # USER 2026-10-15 ("solo debe fusionar lo que es de la parte de apoyo … el resto de
+        # elementos no"): two instances of DIFFERENT labels merge only when the survivor (the
+        # larger) is a SUPPORT surface; any other pair of labels stays distinct whatever their
+        # overlap — recorded with its shares, never silently
+        _policy = _merge_policy_of(cfg)
         order = sorted(range(len(instances)), key=lambda k: (-len(vox_all[k]), k))
         for a_pos, i in enumerate(order):
             if i in absorbed or not len(vox_all[i]):
@@ -4482,6 +4512,17 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
                     continue
                 share_i = inter / len(vox_all[i])
                 share_j = inter / len(vox_all[j])
+                if not _cross_label_merge_allowed(instances[i].get("label"), instances[j].get("label"), _policy):
+                    dedupe_decisions.append({
+                        "kind": "space_dedupe", "instance_ids": [
+                            int(instances[i].get("instance_id", instances[i]["id"])),
+                            int(instances[j].get("instance_id", instances[j]["id"]))],
+                        "share": round(float(share_j), 3), "share_other": round(float(share_i), 3),
+                        "merged": False,
+                        "reason": (f"different labels ('{instances[j].get('label')}' vs "
+                                   f"'{instances[i].get('label')}') and the survivor is not a support "
+                                   f"surface — kept distinct (USER 2026-10-15)")})
+                    continue
                 # IDENTITY, not containment (USER 2026-09-14: "que ambas
                 # instancias compartan mas del 80% de los puntos"). Dividing
                 # only by the smaller asks "is B inside A", which every sign
@@ -4658,6 +4699,20 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
     if _min_pts > 0:
         _sz = {id(i): int(len(i.get("globalIndices") or ())) for i in instances}
         tiny = [inst for inst in instances if _sz[id(inst)] < _min_pts]
+        # USER 2026-10-15 ("no debe olvidarse lo estructural nunca"): a STRUCTURAL instance (a
+        # distant window, a narrow pipe) is never dropped for its size under structural_always —
+        # kept, with its margin recorded as negative
+        _pol = _merge_policy_of(cfg)
+        if _pol.structural_always and tiny:
+            from segmentation.autoprompt.consolidate_prompts import is_structural as _is_struct
+            kept_struct = [t for t in tiny if _is_struct(str(t.get("label") or "").replace("_", " "))]
+            if kept_struct:
+                print(f"[SegPipeline]   {len(kept_struct)} structural instance(s) under {_min_pts} pts "
+                      f"KEPT (structural_always, USER 2026-10-15): "
+                      + ", ".join("{}#{}({})".format(t["label"], t["id"], _sz[id(t)]) for t in kept_struct[:10]))
+                for t in kept_struct:
+                    t["kept_structural_under_min_points"] = True
+                tiny = [t for t in tiny if t not in kept_struct]
         if tiny:
             _tiny_desc = ", ".join("{}#{}({})".format(t["label"], t["id"], _sz[id(t)])
                                    for t in tiny[:10])
@@ -4669,7 +4724,8 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
                     "label": t.get("label"),
                     "points": _sz[id(t)], "min_points": int(_min_pts),
                     "margin": int(_sz[id(t)] - _min_pts)}
-            instances = [inst for inst in instances if _sz[id(inst)] >= _min_pts]
+            _drop = {id(t) for t in tiny}
+            instances = [inst for inst in instances if id(inst) not in _drop]
         for inst in instances:
             inst["min_points_margin"] = int(len(inst.get("globalIndices") or ()) - _min_pts)
 

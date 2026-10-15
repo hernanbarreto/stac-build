@@ -94,7 +94,14 @@ _STRUCTURAL = ("floor", "floors", "ceiling", "ceilings", "wall", "walls",
                "door", "doors", "doorway", "doorways", "window", "windows",
                "opening", "openings", "column", "columns", "pillar", "pillars",
                "beam", "beams", "stair", "stairs", "staircase", "vault",
-               "ground", "slab", "roof")
+               "ground", "slab", "roof",
+               # USER 2026-10-15 ("todo lo estructural … no debe olvidarse lo estructural
+               # nunca"): the rest of the envelope and what is built into it
+               "railing", "railings", "handrail", "handrails", "balustrade", "parapet",
+               "duct", "ducts", "pipe", "pipes", "platform", "platforms", "deck", "ramp",
+               "ramps", "truss", "trusses", "lintel", "lintels", "gate", "gates", "hatch",
+               "skylight", "skylights", "track", "tracks", "rail", "rails", "tunnel", "arch",
+               "arches", "girder", "girders", "joist", "joists", "shaft", "chimney")
 
 
 #: the structural SURFACES — what a mass of small units (tiles, bricks, stones) is built into
@@ -122,6 +129,76 @@ def is_structural(phrase: str) -> bool:
     return _head_noun(str(phrase).lower()) in _STRUCTURAL
 
 
+# ── THE MERGE POLICY (USER 2026-10-15) ─────────────────────────────────────────────
+#
+# "Solo debe fusionar lo que es de la parte de apoyo, suelo piso base, pero el resto de
+# elementos no. Y debe segmentar a máximo detalle." A part, a building unit or a material is
+# folded ONLY into a SUPPORT surface (the floor, the ground, a platform, a slab, a deck …:
+# `autoprompt.support_surfaces`, the user's own list); a piece of anything else keeps its own
+# prompt and its own instance. Two phrases are the SAME KIND only when they share their head
+# noun ('black desk' / 'desk'); two different heads are two prompts, whatever the model says
+# ('desk' / 'table'), unless the carrier is a support surface ('floor tiles' → 'floor' is a
+# unit fold). The envelope (walls, doors, windows, columns, beams, ceilings, stairs …) is
+# always its own object AND is never dropped by a bound or a witness rule
+# (`structural_always`). The policy is read from the configuration; None = the rules before
+# this date (any listed whole may absorb a part, any kind may merge).
+
+POLICY_KEYS = ("support_surfaces", "fold_only_into_support", "same_kind_same_head_only",
+               "structural_always")
+
+
+@dataclass(frozen=True)
+class MergePolicy:
+    support: tuple[str, ...] | None       # head nouns a part may be folded into; None = any whole
+    same_head_only: bool                  # same-kind merges only between phrases of one head noun
+    structural_always: bool               # structural names never cut by a bound / witness rule
+    support_surfaces: tuple[str, ...] = ()    # the configured list as written (for the records)
+
+    def to_dict(self) -> dict:
+        return {"support_surfaces": list(self.support_surfaces),
+                "fold_only_into_support": self.support is not None,
+                "same_kind_same_head_only": self.same_head_only,
+                "structural_always": self.structural_always, "decided": "USER 2026-10-15"}
+
+
+LEGACY_POLICY = MergePolicy(None, False, False)
+
+
+def merge_policy(autoprompt_cfg: dict | None) -> MergePolicy:
+    """The policy of an ``autoprompt:`` section. An EMPTY section (a caller without a
+    configuration) is the legacy policy; a section that exists must carry every key
+    (``POLICY_KEYS``) — a missing one fails the load naming it (the repo's rule)."""
+    cfg = autoprompt_cfg or {}
+    if not cfg:
+        return LEGACY_POLICY
+    for k in POLICY_KEYS:
+        if k not in cfg:
+            raise KeyError(f"config.yaml is missing 'autoprompt.{k}' (USER 2026-10-15: the merge "
+                           f"policy — parts fold only into support surfaces, same kind = same head "
+                           f"noun, structure always segmented); there is no hidden default")
+    surfaces = cfg["support_surfaces"]
+    if not isinstance(surfaces, list) or not all(isinstance(x, str) and x.strip() for x in surfaces):
+        raise KeyError("'autoprompt.support_surfaces' must be a list of head nouns (floor, ground …)")
+    heads = tuple(dict.fromkeys(_fold_word(_norm(x).split()[-1]) for x in surfaces))
+    return MergePolicy(heads if bool(cfg["fold_only_into_support"]) else None,
+                       bool(cfg["same_kind_same_head_only"]), bool(cfg["structural_always"]),
+                       tuple(str(x) for x in surfaces))
+
+
+def is_support(phrase: str, support: tuple[str, ...] | None) -> bool:
+    """True when the phrase's head noun is one of the SUPPORT surfaces (plural folded). With
+    ``support`` None (the legacy policy) every phrase counts as a whole a part may join."""
+    if support is None:
+        return True
+    from .scene_understanding import _head_noun
+    return _fold_word(_head_noun(str(phrase).lower())) in support
+
+
+def same_head(a: str, b: str) -> bool:
+    from .scene_understanding import _head_noun
+    return _fold_word(_head_noun(str(a).lower())) == _fold_word(_head_noun(str(b).lower()))
+
+
 @dataclass
 class Consolidation:
     objects: list[str]                       # the surviving prompts, in order
@@ -129,13 +206,15 @@ class Consolidation:
     parts: dict[str, list[str]] = field(default_factory=dict)    # name → parts
     kept_unmentioned: list[str] = field(default_factory=list)
     kept_structural: list[str] = field(default_factory=list)
+    kept_detail: list[str] = field(default_factory=list)   # parts of a non-support whole (2026-10-15)
     passes: int = 0
 
     def to_dict(self) -> dict:
         return {"origin": "vlm_proposed", "objects": self.objects,
                 "merged": self.merged, "parts": self.parts,
                 "kept_unmentioned": self.kept_unmentioned,
-                "kept_structural": self.kept_structural, "passes": self.passes}
+                "kept_structural": self.kept_structural, "kept_detail": self.kept_detail,
+                "passes": self.passes}
 
 
 def _parse(txt: str) -> Optional[dict]:
@@ -156,7 +235,7 @@ def _norm(s: str) -> str:
 
 
 def _one_pass(client, scene_type: str, phrases: list[str], max_tokens: int,
-              log: Callable[[str], None]) -> Optional[Consolidation]:
+              log: Callable[[str], None], policy: MergePolicy = LEGACY_POLICY) -> Optional[Consolidation]:
     from semantic.types import system, user
 
     resp = client.chat([system(_SYSTEM), user(_prompt(scene_type, phrases))],
@@ -189,6 +268,15 @@ def _one_pass(client, scene_type: str, phrases: list[str], max_tokens: int,
                 if key == "parts" and is_structural(other):
                     out.objects.append(other)
                     out.kept_structural.append(other)
+                    seen.add(_norm(other))
+                    continue
+                # USER 2026-10-15: a part folds only into a SUPPORT surface; an alias of
+                # another head noun is another kind — both stay their own prompt (detail)
+                if ((key == "parts" and not is_support(name, policy.support))
+                        or (key == "aliases" and policy.same_head_only and not same_head(name, other)
+                            and not is_support(name, policy.support))):
+                    out.objects.append(other)
+                    out.kept_detail.append(other)
                     seen.add(_norm(other))
                     continue
                 bucket.setdefault(name, []).append(other)
@@ -365,7 +453,8 @@ def suffix_merges(phrases: list[str]) -> dict[str, str]:
 def classify_phrases(client, scene_type: str, phrases: list[str], *,
                      log: Callable[[str], None] = print, calls: list | None = None,
                      part_of: dict | None = None, kv: dict | None = None,
-                     judges: tuple | None = None, record: dict | None = None) -> dict[str, str]:
+                     judges: tuple | None = None, record: dict | None = None,
+                     policy: MergePolicy = LEGACY_POLICY) -> dict[str, str]:
     """The merge pass as SHORT QUESTIONS PER PHRASE, in two steps a small model answers (pccr
     2026-10-09: asked 'own | same | part' in one question, Qwen3-VL 8B answered 'tile: own' and
     folded nothing). 1. whole or piece? 2. a piece: of which listed thing? — folded into it; a
@@ -407,15 +496,32 @@ def classify_phrases(client, scene_type: str, phrases: list[str], *,
             f"{dict(sorted(pre.items()))}")
     ask = [p_ for p_ in phrases if p_ not in pre]
 
-    def _messages(question: str, without: str | None = None) -> list:
+    def _messages(question: str, without: str | None = None, shown: list[str] | None = None) -> list:
         # ``without``: the phrase asked about is left out of the listing when the answer must
-        # name ANOTHER phrase (pccr 2026-10-09: listed, 'tile' was answered 'tile')
-        shown = [q for q in phrases if q != without] if without else phrases
+        # name ANOTHER phrase (pccr 2026-10-09: listed, 'tile' was answered 'tile');
+        # ``shown``: a listing restricted on purpose (the same-kind question under
+        # same_kind_same_head_only shows only the phrases of the asked phrase's head noun)
+        if shown is None:
+            shown = [q for q in phrases if q != without] if without else phrases
         return [system(_SHORT_SYSTEM), user(_listing_question(scene_type, shown, question))]
 
-    def _ask(chat_client, p: str, question: str, without: str | None = None) -> str:
+    def _same_kind_candidates(p: str) -> list[str]:
+        """The phrases ``p`` may be the same kind as: every other one, or — USER 2026-10-15
+        (same_kind_same_head_only) — only those of its own head noun ('black desk' / 'desk';
+        a unit of a support surface named with another head, 'floor tiles' / 'floor', is the
+        unit-of question's business, never a same-kind merge)."""
+        if not policy.same_head_only:
+            return [q for q in phrases if q != p]
+        return [q for q in phrases if q != p and same_head(p, q)]
+
+    def _may_fold_into(whole: str) -> bool:
+        """USER 2026-10-15: a part, unit or material is folded ONLY into a support surface."""
+        return is_support(whole, policy.support)
+
+    def _ask(chat_client, p: str, question: str, without: str | None = None,
+             shown: list[str] | None = None) -> str:
         try:
-            resp = chat_client.chat(_messages(question, without), max_tokens=bound,
+            resp = chat_client.chat(_messages(question, without, shown), max_tokens=bound,
                                     consumer="phase1.merge_synonyms")
         except Exception as e:  # noqa: BLE001 — point 88: a merge call that fails fails the stage
             raise MergeError(f"[merge] '{p}': the VLM call failed ({e}) — the merge pass cannot be "
@@ -446,6 +552,7 @@ def classify_phrases(client, scene_type: str, phrases: list[str], *,
         cap = AnswerCapture(client)
         rec: dict = {"phrase": p}
         kind, other = None, None
+        detail_kept = False
         if not is_structural(p):
             first = _ask(cap, p, _whole_or_piece_question(p))
             rec["whole_or_piece"] = first
@@ -453,12 +560,17 @@ def classify_phrases(client, scene_type: str, phrases: list[str], *,
                 ans = _ask(cap, p, _piece_of_question(p), without=p)
                 rec["piece_of"] = ans
                 kind, other = "part", _listed_in(ans, known, p)
-                if other is not None:
+                if other is not None and not _may_fold_into(other):
+                    # USER 2026-10-15: a piece of something that is NOT a support surface keeps
+                    # its own prompt and its own instance (maximum detail) — recorded
+                    rec["piece_of_kept"] = other
+                    kind, other, detail_kept = None, None, True
+                elif other is not None:
                     yes = _ask(cap, p, _confirm_question("part", p, other))
                     rec["part_confirmed"] = yes
                     if not _confirmed(yes):
                         kind, other = None, None
-                if other is None:
+                if other is None and not detail_kept:
                     # USER 2026-10-09 ("todo es piso, no queremos un segmento por baldosa"): a
                     # piece whose whole the model did not name (pccr: 'tile' → "none") is asked,
                     # yes or no, whether it is a UNIT a listed whole is built of — the STRUCTURE
@@ -468,6 +580,8 @@ def classify_phrases(client, scene_type: str, phrases: list[str], *,
                     tried = {}
                     wholes = ([q for q in phrases if q != p and is_structural(q)]
                               + [q for q in phrases if q != p and not is_structural(q)])
+                    # USER 2026-10-15: only a support surface may absorb a unit
+                    wholes = [q for q in wholes if _may_fold_into(q)]
                     for s_ in wholes:
                         yes = _ask(cap, p, _unit_of_structure_question(p, s_))
                         tried[s_] = yes
@@ -481,7 +595,7 @@ def classify_phrases(client, scene_type: str, phrases: list[str], *,
                 # of the gravel ground; USER: "si tengo mil baldosas que forman el piso el objeto
                 # es piso"): asked, yes or no, against every listed surface; the first yes folds it
                 tried = {}
-                for s_ in [q for q in phrases if q != p and is_surface(q)]:
+                for s_ in [q for q in phrases if q != p and is_surface(q) and _may_fold_into(q)]:
                     yes = _ask(cap, p, _unit_of_structure_question(p, s_))
                     tried[s_] = yes
                     if _confirmed(yes):
@@ -490,15 +604,22 @@ def classify_phrases(client, scene_type: str, phrases: list[str], *,
                 if tried:
                     rec["unit_of_surface"] = tried
         if other is None:
-            ans = _ask(cap, p, _same_kind_question(p), without=p)
-            rec["same_as"] = ans
-            other = _listed_in(ans, known, p)
-            kind = "same" if other is not None else None
-            if other is not None:
-                yes = _ask(cap, p, _confirm_question("same", p, other))
-                rec["same_confirmed"] = yes
-                if not _confirmed(yes):
-                    kind, other = None, None
+            cands = _same_kind_candidates(p)
+            if cands:
+                ans = _ask(cap, p, _same_kind_question(p), without=p, shown=cands)
+                rec["same_as"] = ans
+                other = _listed_in(ans, {_norm(q): q for q in cands}, p)
+                kind = "same" if other is not None else None
+                if other is not None:
+                    yes = _ask(cap, p, _confirm_question("same", p, other))
+                    rec["same_confirmed"] = yes
+                    if not _confirmed(yes):
+                        kind, other = None, None
+            else:
+                # USER 2026-10-15: no other phrase of this head noun — nothing it could be the
+                # same kind as; not asked, declared
+                rec["same_as"] = None
+                rec["same_kind_not_asked"] = "no other phrase with this head noun"
         return rec, kind, other, (cap.contents[0] if cap.contents else None)
 
     first_answers: dict[int, str | None] = {}
@@ -510,7 +631,11 @@ def classify_phrases(client, scene_type: str, phrases: list[str], *,
         first_answers[i] = text
         if other is None:
             rec["decision"] = "own"
-            if kind is None and rec.get("piece_of") and _norm(rec["piece_of"]) != "none":
+            if rec.get("piece_of_kept"):
+                rec["decision"] = "detail_kept"
+                rec["reason"] = (f"a piece of '{rec['piece_of_kept']}', which is not a support "
+                                 f"surface — its own prompt and instance (USER 2026-10-15)")
+            elif kind is None and rec.get("piece_of") and _norm(rec["piece_of"]) != "none":
                 unusable.append(p)
         elif is_structural(p) and not is_structural(other):
             # structure is the WHOLE: a wall is never renamed into its drywall (pccr 2026-10-09)
@@ -573,9 +698,14 @@ def classify_phrases(client, scene_type: str, phrases: list[str], *,
             folds[a] = x
     if part_of is not None:
         part_of.update(folds)
+    detail = [c["phrase"] for c in (calls or []) if isinstance(c, dict) and c.get("decision") == "detail_kept"]
     log(f"[merge] {len(phrases)} phrase(s), short questions each (answers ≤ {bound} tokens): "
         f"{len(final) - len(folds)} merged as the same thing, "
         f"{len(folds)} folded into their whole object → {len(phrases) - len(final)} concept(s)"
+        + (f"; {len(detail)} piece(s) of a non-support object kept as their own prompt (USER "
+           f"2026-10-15): {detail}" if detail else "")
+        + (f"; policy: folds only into {list(policy.support)}, same kind = same head noun"
+           if policy.support is not None else "; policy: legacy (any whole absorbs a part)")
         + (f"; folds: {dict(sorted(folds.items()))}" if folds else "")
         + (f"; same: {dict(sorted((a, c) for a, c in final.items() if a not in folds))}"
            if len(final) > len(folds) else "")
@@ -753,7 +883,8 @@ def merge_synonyms(client, scene_type: str, phrases: list[str], head_of: Callabl
                    max_phrases_per_call: int = 0, *, context_len: int,
                    log: Callable[[str], None] = print,
                    calls: list | None = None,
-                   part_of: dict | None = None) -> dict[str, str]:
+                   part_of: dict | None = None,
+                   policy: MergePolicy = LEGACY_POLICY) -> dict[str, str]:
     """USER 2026-09-29: *"una segunda pasada de VLM sobre los prompts para fundir los
     que significan lo mismo"*. The whole list in ONE call while it fits
     ``max_phrases_per_call``; past it, one VLM call per HEAD-NOUN family with 2+ phrases
@@ -831,6 +962,7 @@ def merge_synonyms(client, scene_type: str, phrases: list[str], head_of: Callabl
         n_before = len(alias_of)
         n_parts = 0
         kept_structural: list[str] = []
+        kept_detail: list[str] = []       # USER 2026-10-15: pieces / other kinds of a non-support whole
         carriers_here: set[str] = set()   # names THIS answer merged something into
         for g in groups:
             if not isinstance(g, dict):
@@ -865,6 +997,14 @@ def merge_synonyms(client, scene_type: str, phrases: list[str], head_of: Callabl
                         if other not in kept_structural:
                             kept_structural.append(other)
                         continue
+                    # USER 2026-10-15: a part folds only into a SUPPORT surface; a 'same' of
+                    # another head noun is another kind — both stay their own prompt
+                    if ((kind == "part" and not is_support(name, policy.support))
+                            or (kind == "same" and policy.same_head_only and not same_head(name, other)
+                                and not is_support(name, policy.support))):
+                        if other not in kept_detail:
+                            kept_detail.append(other)
+                        continue
                     alias_of[other] = name
                     kind_of[other] = kind
                     carriers_here.add(name)
@@ -872,6 +1012,10 @@ def merge_synonyms(client, scene_type: str, phrases: list[str], head_of: Callabl
         rec["n_merged"] = len(alias_of) - n_before
         rec["n_parts"] = n_parts
         rec["structural_kept"] = kept_structural
+        rec["detail_kept"] = kept_detail
+        if kept_detail:
+            log(f"[merge] {label}: {len(kept_detail)} phrase(s) filed as a part or the same kind of "
+                f"a non-support object and KEPT as their own prompt (USER 2026-10-15): {kept_detail}")
         if kept_structural:
             log(f"[merge] {label}: {len(kept_structural)} structural phrase(s) filed as a "
                 f"part and KEPT as their own prompt (structure is never a part): "
@@ -1014,7 +1158,7 @@ def merge_synonyms(client, scene_type: str, phrases: list[str], head_of: Callabl
 
 def consolidate(client, scene_type: str, phrases: list[str],
                 max_passes: int = 3, max_tokens: int = 4096,
-                log: Callable[[str], None] = print) -> Consolidation:
+                log: Callable[[str], None] = print, policy: MergePolicy = LEGACY_POLICY) -> Consolidation:
     """Merge the words that name one thing and drop what is only a part.
 
     Runs the pass again while it still CHANGES the list and stops when a pass
@@ -1028,10 +1172,11 @@ def consolidate(client, scene_type: str, phrases: list[str],
     parts: dict[str, list[str]] = {}
     unmentioned: list[str] = []
     structural: list[str] = []
+    detail: list[str] = []
     done = 0
     for _ in range(max(1, int(max_passes))):
         try:
-            res = _one_pass(client, scene_type, current, max_tokens, log)
+            res = _one_pass(client, scene_type, current, max_tokens, log, policy)
         except Exception as e:  # noqa: BLE001 — declared, never fatal
             log(f"[consolidate] pass failed ({e}) — keeping the list as it is")
             break
@@ -1044,6 +1189,7 @@ def consolidate(client, scene_type: str, phrases: list[str],
             parts.setdefault(name, []).extend(pt)
         unmentioned.extend(res.kept_unmentioned)
         structural.extend(res.kept_structural)
+        detail.extend(res.kept_detail)
         if res.objects == current:
             break                       # converged: the pass changed nothing
         log(f"[consolidate] pass {done}: {len(current)} → {len(res.objects)} concept(s)")
@@ -1051,13 +1197,16 @@ def consolidate(client, scene_type: str, phrases: list[str],
 
     out = Consolidation(objects=current, merged=merged, parts=parts,
                         kept_unmentioned=sorted(set(unmentioned)),
-                        kept_structural=sorted(set(structural)), passes=done)
+                        kept_structural=sorted(set(structural)), kept_detail=sorted(set(detail)),
+                        passes=done)
     n_al = sum(len(v) for v in merged.values())
     n_pt = sum(len(v) for v in parts.values())
     log(f"[consolidate] {len(phrases)} → {len(current)} concept(s) in {done} pass(es): "
         f"{n_al} alias(es) merged, {n_pt} part(s) folded into their object"
         + (f", {len(out.kept_structural)} structural entr(y/ies) rescued from 'parts'"
            if out.kept_structural else "")
+        + (f", {len(out.kept_detail)} kept as their own prompt (a part or another kind of a "
+           f"non-support object, USER 2026-10-15)" if out.kept_detail else "")
         + (f", {len(out.kept_unmentioned)} kept because the pass never mentioned them"
            if out.kept_unmentioned else ""))
     return out

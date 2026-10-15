@@ -524,6 +524,31 @@ autoprompt:
                                       # — the same KIND merges whatever the colour or material (2026-09-30), BEFORE the
                                       # bound; every merge recorded in the census. (Replaces the
                                       # grouping-only consolidation pass while true.)
+  # ── THE MERGE POLICY (USER 2026-10-15: "solo debe fusionar lo que es de la parte de apoyo, suelo
+  # piso base, pero el resto de elementos no; debe segmentar a máximo detalle; debe segmentar siempre
+  # ventanas puertas paredes etc, todo lo estructural … no debe olvidarse lo estructural nunca").
+  # Read by segmentation/autoprompt/consolidate_prompts.merge_policy (every key required).
+  support_surfaces: [floor, ground, platform, slab, base, deck, walkway, pavement, anden, andén]
+                                      # the SUPPORT surfaces (head nouns, plural folded): the only wholes a
+                                      # part, a building unit or a material may be folded INTO ('tile' →
+                                      # 'floor'); the user's own list — the floor is geometric and there may
+                                      # be several (2026-10-08). Also the only survivors a DIFFERENT label
+                                      # may be merged into by the projection's space dedupe
+  fold_only_into_support: true        # true = a piece of anything else ('drawer' of a desk, 'handle' of a
+                                      # door, 'panel' of a wall) keeps its own prompt and its own instance
+                                      # (maximum detail). false = the 2026-10-09 rule (any listed whole
+                                      # absorbs its parts)
+  same_kind_same_head_only: true      # true = two phrases are the same KIND only when they share their head
+                                      # noun ('black desk' / 'desk'); 'desk' / 'table' stay two prompts, a
+                                      # duplicate segment being the lesser evil than a destroyed object.
+                                      # A support surface may still carry a unit named with another head
+                                      # ('floor tiles' → 'floor'). false = any kind may merge (2026-09-30)
+  structural_always: true             # true = the envelope (floor, ceiling, wall, door, window, opening,
+                                      # column, beam, stair …) is listed by the VLM per keyframe in a field
+                                      # of its own, is prompted FIRST under max_sam3_prompts (never cut by
+                                      # the bound) and a round keeps a structural name named by ONE
+                                      # keyframe (the two-witness rule does not drop it); the census lists
+                                      # the keyframes where the VLM named no structure
   segmentation_rounds: true           # USER 2026-10-09 ("las pasadas son recursivas"): after SAM3 the
                                       # VLM sees every keyframe with what is segmented painted grey and
                                       # names what is left; SAM3 appends those prompts; until a round

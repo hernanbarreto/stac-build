@@ -32,6 +32,12 @@ _PROMPT = (
     'Study this image and return JSON:\n'
     '{"scene_type": "<short phrase: what kind of place/space is this>",\n'
     ' "summary": "<1-2 sentences: the setting and what is happening>",\n'
+    # USER 2026-10-15 ("debe segmentar siempre ventanas puertas paredes etc, todo lo estructural …
+    # no debe olvidarse lo estructural nunca"): the envelope is asked for in a field OF ITS OWN,
+    # before the objects, so a plain wall or a shut door is never left out of a long list; every
+    # name here is also an object (the parser adds what the objects list forgot)
+    ' "structure": ["<EVERY structural element visible, each by its plain name: floor, ceiling, '
+    'wall, door, window, opening, column, beam, stair, railing, duct, pipe …>", ...],\n'
     ' "objects": [{"category": "<the COMMON NAME of ONE WHOLE object>", '
     '"description": "<2-5 words that describe THIS one visually: colour, material, '
     'shape>", '
@@ -113,7 +119,17 @@ _PROMPT = (
     "is the most important thing in the image, not scenery to skip: every "
     "floor, ceiling, wall, DOOR, window, opening, column, beam and stair you "
     "can see must appear in the list. A door is an object even when it is "
-    "shut and flush with its wall.\n"
+    "shut and flush with its wall. List EVERY structural element you can see in "
+    "'structure' as well — each wall, floor, ceiling, door, window, opening, column, "
+    "beam, stair, railing, duct and pipe, even when plain, partly visible or at the "
+    "edge of the image — and give each one its own 'objects' entry too.\n"
+    # USER 2026-10-15: "debe segmentar a máximo detalle" — every distinct thing is its own
+    # entry; a whole object is never hidden inside a bigger one it stands on or hangs from
+    "5. MAXIMUM DETAIL. Every distinct thing that is an object of its own gets its own "
+    "entry, however small, and nothing is folded into the floor, the wall or the furniture "
+    "it stands on, hangs from or is fixed to: a screen standing on a bench, a sign on a "
+    "wall, a cabinet against a wall, a lamp hanging from the ceiling are each their own "
+    "entry. Only the parts, units and coverings of rule 1 are not entries.\n"
     "Output ONLY the JSON."
 )
 
@@ -139,6 +155,9 @@ class FrameUnderstanding:
     objects: list[str] = field(default_factory=list)
     tile: str | None = None               # None = the full frame; "r<i>c<j>" = a crop of it
     descriptions: dict[str, str] = field(default_factory=dict)   # category → its visual description
+    # the structural elements the answer listed in its 'structure' field (USER 2026-10-15),
+    # normalised; every one is also in ``objects``
+    structure: list[str] = field(default_factory=list)
     # category → the ShapeR fields {category, shape, material, detail} the call gave
     # that kind (USER 2026-10-01); absent when the answer carried none
     shapes: dict[str, dict] = field(default_factory=dict)
@@ -268,6 +287,15 @@ def understand_frame(client, image: Image.Image, frame_id: int, max_tokens: int 
     if d is None:
         return None
     objs, descs, shapes = [], {}, {}
+    # the envelope named apart (USER 2026-10-15): every entry of 'structure' is an object too —
+    # added when the objects list forgot it, in the answer's order
+    structure = []
+    raw_struct = d.get("structure")
+    if isinstance(raw_struct, list):
+        for s_ in raw_struct:
+            name = _norm_obj(str(s_.get("category") or s_.get("name") or "") if isinstance(s_, dict) else str(s_))
+            if name and name not in structure:
+                structure.append(name)
     for o in d.get("objects", []) or []:
         if isinstance(o, dict):                   # {"category", "description", "shape"}
             cat = _norm_obj(o.get("category") or o.get("name") or "")
@@ -281,6 +309,11 @@ def understand_frame(client, image: Image.Image, frame_id: int, max_tokens: int 
                     shapes.setdefault(cat, sh)
         elif str(o).strip():                      # a bare string (older answers)
             objs.append(_norm_obj(o))
+    have = {same_name_key(o) for o in objs}
+    for name in structure:
+        if same_name_key(name) not in have:
+            objs.append(name)
+            have.add(same_name_key(name))
     return FrameUnderstanding(
         frame_id=frame_id,
         scene_type=str(d.get("scene_type", "")).strip(),
@@ -289,6 +322,7 @@ def understand_frame(client, image: Image.Image, frame_id: int, max_tokens: int 
         tile=tile,
         descriptions=descs,
         shapes=shapes,
+        structure=structure,
     )
 
 
@@ -323,7 +357,7 @@ _LEADING = ("a", "an", "the", "some", "several", "multiple", "many", "two", "thr
 # 2026-09-30 v2: plain category names + kind merge. 2026-10-09 v3 (USER: "los objetos deben
 # ser el más grande posible"): one WHOLE object per name, and the merge pass folds a part /
 # component / building unit / material INTO the listed whole it belongs to.
-GROUPING_VERSION = "whole_objects_v3"
+GROUPING_VERSION = "support_folds_v4"     # USER 2026-10-15: folds only into support, structure always
 
 
 def _singular(w: str) -> str:

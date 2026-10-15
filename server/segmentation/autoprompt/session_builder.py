@@ -64,6 +64,11 @@ from .associate import Instance, associate_detections
 from .detector import Detection, GroundedDetector
 from .vocabulary import Vocabulary, load_vocabulary
 
+
+def _is_structural(name: str) -> bool:
+    from .consolidate_prompts import is_structural
+    return is_structural(name)
+
 VLM_ANALYSIS_NAME = "vlm_analysis.json"
 VLM_TIMING_NAME = "vlm_analysis.timing.json"      # the run's clock, outside the compared file
 CONCEPTS_NAME = "autoprompt_concepts.json"
@@ -359,6 +364,10 @@ class AutoPrompter:
             raise KeyError("config.yaml is missing 'autoprompt.merge_synonyms' (true: a second "
                            "VLM pass fuses the names that mean the same thing)")
         self.merge_synonyms = bool(cfg.get("merge_synonyms")) if cfg else False
+        # USER 2026-10-15: parts fold only into support surfaces, same kind = same head noun,
+        # structure always (consolidate_prompts.merge_policy; every key required when cfg exists)
+        from .consolidate_prompts import merge_policy
+        self.merge_policy = merge_policy(cfg)
         # a merge key REMOVED from the configuration and still present fails naming it (a
         # leftover would look like a decision; the repo's convention, vlm_sampling.REMOVED_KEYS)
         from .consolidate_prompts import REMOVED_MERGE_KEYS
@@ -944,7 +953,12 @@ class AutoPrompter:
                 fu = understand_frame(cap, view, fr["frame"], tile=tid,
                                       max_tokens=understand_max_tokens,
                                       prompt=self.understand_prompt, record=rec)
-                rec.update(parsed=fu is not None, n_objects=len(fu.objects) if fu else 0)
+                rec.update(parsed=fu is not None, n_objects=len(fu.objects) if fu else 0,
+                           # USER 2026-10-15: what the answer said about the envelope (the
+                           # 'structure' field + the structural object names) — the census
+                           # lists the keyframes that named none
+                           n_structural=(len([o for o in fu.objects if _is_structural(o)]) if fu else 0),
+                           structure=(list(fu.structure) if fu else []))
                 return rec, fu, cap.last
 
             def _deliver(i, out):
@@ -1084,7 +1098,8 @@ class AutoPrompter:
                     merge_client, understanding.scene_type if understanding else "", phrases,
                     log=lambda m: print(f"[autoprompt] {m}"), calls=merge_calls,
                     part_of=part_of, kv=self._engine_kv(merge_client),
-                    judges=self_check_judges(self._config), record=merge_exec)
+                    judges=self_check_judges(self._config), record=merge_exec,
+                    policy=self.merge_policy)
                 timing["merge_s"] = round(time.time() - t1, 1)
             # proposals per name AFTER the folds (same name, then the merge pass): the
             # order of the prompts and the margin at the bound both read it
@@ -1097,6 +1112,12 @@ class AutoPrompter:
                 _order = {p: i for i, p in enumerate(phrases)}
                 phrases = sorted((p for p in phrases if p not in synonyms),
                                  key=lambda p: (-_props[p], _order[p]))
+            structural_first: list[str] = []
+            if self.merge_policy.structural_always:
+                # USER 2026-10-15 ("no debe olvidarse lo estructural nunca"): the envelope goes
+                # FIRST, so the bound on SAM3 prompts below never cuts a structural name
+                structural_first = [p for p in phrases if _is_structural(p)]
+                phrases = structural_first + [p for p in phrases if not _is_structural(p)]
             # ── the BOUND on SAM3 prompts (autoprompt.max_sam3_prompts) ────
             # `aggregate` keeps every distinct name and the consolidation removes
             # none, so the prompt count follows the VLM's phrasing — and SAM3
@@ -1170,7 +1191,7 @@ class AutoPrompter:
                 consolidation = consolidate(
                     client, understanding.scene_type if understanding else "",
                     phrases, max_passes=self.consolidate_passes,
-                    log=lambda m: print(f"[autoprompt] {m}"))
+                    log=lambda m: print(f"[autoprompt] {m}"), policy=self.merge_policy)
                 # THE CONSOLIDATION GROUPS, IT DOES NOT DELETE (USER 2026-09-22:
                 # *"tampoco segmento una puerta, de entrada una locura"* ... *"no
                 # lo fuerces sino que debe ser generico"*). Every phrase the
@@ -1224,6 +1245,12 @@ class AutoPrompter:
                 # the subset of ``synonyms`` that is a PART folded into its whole (USER
                 # 2026-10-09), sorted: the file's bytes never follow the answer's order
                 "parts_folded": dict(sorted(part_of.items())),
+                # USER 2026-10-15: the policy the merge ran under, the pieces of a non-support
+                # object kept as their own prompt, the structural names prompted first
+                "merge_policy": self.merge_policy.to_dict(),
+                "parts_kept_detail": sorted(c["phrase"] for c in merge_calls
+                                            if isinstance(c, dict) and c.get("decision") == "detail_kept"),
+                "structural_first": structural_first,
                 "stamp": stamp["sha256"],
                 "scene_type": (understanding.scene_type if understanding else None),
             }
