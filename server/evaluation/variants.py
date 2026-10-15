@@ -273,13 +273,16 @@ def write_known_dimensions(session_dir: Path, doc: Dict[str, Any], log: Callable
 def evaluate_product(product: Product, doc: Dict[str, Any], out_dir: Path, cfg: EvaluationConfig,
                      keyframes: Sequence[int], *, n_models: int = 1, models: Optional[List[dict]] = None,
                      plots: bool = True) -> Dict[str, Any]:
+    from evaluation import confidence as CF
     rows, summary, recs = D.evaluate(doc, product, cfg)
     D.write_phase1(out_dir, rows, summary, recs)
     p2 = CURVES.run_phase2(doc, rows, summary, product, cfg, out_dir, plots=plots)
     cov = compute_coverage(product, keyframes, doc, recs, int(cfg.raw["coverage"]["cell_px"]), n_models, models)
     D.write_json(out_dir / "coverage.json", cov)
+    p5 = CF.run_phase5(doc, rows, recs, summary, product, cfg.curves, cfg.confidence, cfg.endpoints.depth_window_px,
+                       out_dir)
     return {"rows": rows, "summary": summary, "phase2": {k: v for k, v in p2.items() if k != "paths"},
-            "coverage": cov, "recs": recs}
+            "coverage": cov, "recs": recs, "confidence": {k: v for k, v in p5.items() if k != "groups"}}
 
 
 # ── one variant ───────────────────────────────────────────────────────────
@@ -371,7 +374,8 @@ def run_variant(scene: SceneSpec, spec: VariantSpec, scene_dir: Path, cfg: Evalu
             monitor.stage("evaluation", "start")
         ev = evaluate_product(product, doc, out_dir, cfg, kfs, n_models=n_models, models=models, plots=plots)
         rec.update(status="finished", summary=ev["summary"], coverage=ev["coverage"],
-                   confidence_distance=ev["phase2"]["confidence_distance"], growth_models=ev["phase2"]["growth_models"])
+                   confidence_distance=ev["phase2"]["confidence_distance"], growth_models=ev["phase2"]["growth_models"],
+                   confidence=ev["confidence"])
         rec["product"] = (rec.get("product") or {}) | ev["summary"]["product"]
         return _record(out_dir, rec)
     except Exception as e:  # noqa: BLE001 — isolated: the record carries it, the other variants run
@@ -383,6 +387,8 @@ def run_variant(scene: SceneSpec, spec: VariantSpec, scene_dir: Path, cfg: Evalu
         if monitor is not None:
             try:
                 rec["cost"] = monitor.stop()
+                from evaluation.cost import attach_torch_peaks
+                attach_torch_peaks(rec)
             except Exception as e:  # noqa: BLE001
                 rec["cost"] = {"error": f"{type(e).__name__}: {e}"}
             _record(out_dir, rec)
