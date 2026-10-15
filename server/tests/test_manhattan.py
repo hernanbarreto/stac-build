@@ -148,4 +148,29 @@ def test_the_keys_are_declared():
     from config import cfg
     from reconstruction.surface_fit.scene import scene_config_kwargs
     kw = scene_config_kwargs(cfg)
-    assert kw["manhattan"] is True and kw["manhattan_snap_deg"] > 0
+    assert kw["manhattan"] is True and kw["manhattan_snap_deg"] > 0 and 0 < kw["manhattan_min_inlier_frac"] < 1
+
+
+def test_a_cluttered_floor_is_still_a_straight_plane_and_a_blob_is_not(tmp_path):
+    """pccr's floor: 87 % of its points within 4 cm of the plane, p95 88 mm (clutter) — Manhattan
+    keeps the plane and reports the deviation; a blob (nothing within 4 cm) follows the ladder."""
+    import open3d as o3d
+    from reconstruction.surface_fit.scene import fit_scene
+    rng = np.random.default_rng(9)
+    floor = _plane_pts(np.array([0, 0, 1.0]), 0.0, (3, 2), 40000, 31)
+    clutter = np.column_stack([rng.uniform(-3, 3, 8000), rng.uniform(-2, 2, 8000), rng.uniform(0.1, 0.4, 8000)])
+    blob = rng.normal(0, 0.3, (6000, 3)) + np.array([2.0, 1.5, 1.0])
+    cloud = np.vstack([floor, clutter, blob])
+    out = tmp_path / "output"
+    out.mkdir()
+    o3d.io.write_point_cloud(str(out / "cleaned_cloud.ply"), o3d.geometry.PointCloud(o3d.utility.Vector3dVector(cloud)))
+    nf = len(floor) + len(clutter)
+    seg = {"instances": [{"id": 1, "instance_id": 1, "label": "floor", "globalIndices": list(range(nf))},
+                         {"id": 2, "instance_id": 2, "label": "thing", "globalIndices": list(range(nf, nf + len(blob)))}]}
+    (out / "segmentation_result.json").write_text(json.dumps(seg))
+    rep = fit_scene(tmp_path, overrides={"consolidate_method": "none", "models": ["plane"]},
+                    hole_audit=False, texture_objects=False, decompose=False)
+    by = {r["instance_id"]: r for r in rep["fitted"]}
+    assert by[1]["kind"] == "plane" and by[1]["manhattan"]["snapped"] and by[1]["p95_mm"] > 60.0, \
+        "the clutter's p95 is reported, the floor stays a straight plane"
+    assert 2 not in by and "2" in rep["manhattan"]["not_a_surface"] and rep["manhattan"]["not_a_surface"]["2"] < 0.75

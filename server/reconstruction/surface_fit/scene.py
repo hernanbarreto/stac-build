@@ -62,7 +62,7 @@ def scene_config_kwargs(config: Optional[dict]) -> dict:
               "hole_interp_max_cells", "texture_objects", "decompose",
               "decompose_min_points", "decompose_max_primitives",
               "decompose_inlier_dist_m", "decompose_min_frac",
-              "contour_regularize", "contour_tol_m", "manhattan", "manhattan_snap_deg"):
+              "contour_regularize", "contour_tol_m", "manhattan", "manhattan_snap_deg", "manhattan_min_inlier_frac"):
         if k in scfg:
             out[k] = scfg[k]
     return out
@@ -96,6 +96,7 @@ def fit_scene(session_dir: Path,
               contour_tol_m: float = 0.08,
               manhattan: bool = True,
               manhattan_snap_deg: float = 15.0,
+              manhattan_min_inlier_frac: float = 0.75,
               instance_ids: Optional[Sequence[int]] = None,
               progress_cb: Optional[Callable] = None) -> dict:
     """Fit every architectural instance of a session, regularize the planes
@@ -191,12 +192,27 @@ def fit_scene(session_dir: Path,
                                  original_xyz=raw_seg,
                                  scene_centroid=centroid,
                                  progress_cb=progress_cb, **{**kwargs, "models": ["plane"]})
-                if fs is not None and float(fs.report.stats.p95_mm) > float(accept_p95_mm):
-                    man_rejected[int(iid)] = float(fs.report.stats.p95_mm)
-                    logger.info("scene: %s_%s — marked Manhattan but not planar (p95 %.1fmm > "
-                                "%.0fmm): the configured ladder decides", label, iid,
-                                fs.report.stats.p95_mm, accept_p95_mm)
-                    fs = None
+                if fs is None:
+                    man_rejected[int(iid)] = 0.0     # no plane gathers its points at all
+                    logger.info("scene: %s_%s — marked Manhattan but no plane explains it: the "
+                                "configured ladder decides", label, iid)
+                if fs is not None:
+                    # A marked object IS a surface when its plane explains most of its points
+                    # within the support distance — the SHARE, not the p95: pccr's floor is 87 %
+                    # within 4 cm of its plane and its p95 is 88 mm (chair bases, clutter, the
+                    # 7.6 cm undulation the certification measured) — that p95 is the FINDING a
+                    # straight BIM floor reports, not a reason to model the floor as a spline.
+                    sd = float(kwargs.get("support_dist_m", 0.04))
+                    within = (float(np.mean(np.abs(np.asarray(fs.model.signed_distance(raw_seg))) <= sd))
+                              if len(raw_seg) else 0.0)
+                    if within < float(manhattan_min_inlier_frac):
+                        man_rejected[int(iid)] = within
+                        logger.info("scene: %s_%s — marked Manhattan but not a surface: %.0f%% of its "
+                                    "points within %.0f mm of the plane, under "
+                                    "manhattan_min_inlier_frac %.2f (p95 %.1f mm): the configured "
+                                    "ladder decides", label, iid, 100 * within, 1000 * sd,
+                                    manhattan_min_inlier_frac, fs.report.stats.p95_mm)
+                        fs = None
                 if fs is not None:
                     man_planes.add(int(iid))
                 elif [str(m) for m in (kwargs.get("models") or [])] != ["plane"]:
@@ -214,7 +230,10 @@ def fit_scene(session_dir: Path,
             fs = None
         if fs is not None:
             p95 = float(fs.report.stats.p95_mm)
-            if p95 > float(accept_p95_mm):
+            if int(iid) in man_planes:
+                logger.info("scene: %s_%s — Manhattan plane kept (p95 %.1fmm: the deviation is "
+                            "the finding, declared in its residual report)", label, iid, p95)
+            elif p95 > float(accept_p95_mm):
                 logger.info("scene: %s_%s — %s REJECTED by geometry "
                             "(p95 %.1fmm > %.0fmm) — trying primitive "
                             "decomposition",
@@ -279,9 +298,9 @@ def fit_scene(session_dir: Path,
                 fs2.regularized = bool(rec.get("snapped"))
                 fs2.manhattan = rec
                 fitted[i] = fs2
-            man_report["not_planar"] = {str(k): round(v, 2) for k, v in man_rejected.items()}
+            man_report["not_a_surface"] = {str(k): round(v, 3) for k, v in man_rejected.items()}
     elif manhattan:
-        man_report = {"objects": [], "not_planar": {str(k): round(v, 2) for k, v in man_rejected.items()}}
+        man_report = {"objects": [], "not_a_surface": {str(k): round(v, 3) for k, v in man_rejected.items()}}
 
     # ── stage 3: scene-wide plane regularization + honest re-evaluation ──
     reg_report = RegularizeReport()

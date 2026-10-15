@@ -2861,6 +2861,12 @@ surface_fit:
   manhattan: true
   manhattan_snap_deg: 15.0    # BOUND (declared): a plane further than this from every frame axis is
                               # not a Manhattan surface — kept as measured, said in the report
+  manhattan_min_inlier_frac: 0.75  # BOUND (declared): a marked object is a SURFACE when at least this
+                              # share of its points lies within support_dist_m of its plane — the
+                              # share, never the p95: pccr's floor is 87 % within 4 cm and its p95 is
+                              # 88 mm (clutter, chair bases, the measured undulation) — that p95 is the
+                              # finding a straight floor reports. Under the share (a chair, a valve)
+                              # the configured ladder decides
                               # (fitted against the CLOSED support outline — the boundary's
                               # intent — so grid raggedness doesn't force everything to 'raw')
   # ── REGULARIZED POISSON (USER 2026-08-29: "poisson primero, y sobre poisson
