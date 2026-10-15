@@ -911,8 +911,13 @@ models:
     # the two builders ship DIFFERENT values, and the CPU fallback builds the 3.0 model.
     sam3_thresholds:
       "sam3.1":                        # vendor/sam31 build_sam3_multiplex_video_predictor
-        score_threshold_detection: 0.4 # a detection below this never enters NMS / matching
-        new_det_thresh: 0.65           # score a detection needs to START a new masklet
+        # USER 2026-10-15 ("detalle absoluto … hay muchos elementos que no están segmentados"):
+        # observatorio's census — 13 of 51 prompts got ZERO masklets at the vendor's 0.4 / 0.65
+        # (door, opening, window, stair, ladder, overhead crane, scaffolding, bench…), objects
+        # plainly in the frames. Lower bars: more masks enter; the mask audit, min_instance_points
+        # and the duplicate machinery judge them downstream. (vendor: 0.4 / 0.65)
+        score_threshold_detection: 0.3 # a detection below this never enters NMS / matching
+        new_det_thresh: 0.5            # score a detection needs to START a new masklet
         hotstart_delay: 15             # frames a new masklet's output is held back while judged
         hotstart_unmatch_thresh: 8     # ...dropped if unmatched by detections this many of them
         hotstart_dup_thresh: 8         # ...dropped if overlapping an earlier one this many
