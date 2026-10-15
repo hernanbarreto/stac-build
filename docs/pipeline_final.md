@@ -427,7 +427,27 @@ gives them a neighbour's label); the fallback retry carries the category (DONE 2
    `consolidate_method: mls`, a recipe change → the user's call), Open3D Poisson (no GPU Poisson in any
    env; ~1 min/object pinned), texrecon. Open3D's CUDA tensor TSDF (`VoxelBlockGrid`) is available in env
    da3 for the per-object TSDF if it joins the stage.
-9. Keep this file updated with every change of the above.
+9. **Manhattan world (USER 2026-10-15: "BIM perfecto"; "debe indicarlo el usuario, por defecto marcado
+   como manhattan"; "deja solo el manhattan al mandar mesh por ahora"; "probar con cilindros etc, y si
+   no, tsdf sin poisson")** — DONE the same day, in `reconstruction/surface_fit/manhattan.py` + `scene.py`,
+   `segmentation/manhattan.py`, the Instances panel toggle (Box = on, Spline = off; only the exceptions in
+   `output/manhattan.json`). The Mesh button runs `surface_fit.mesh_button_stages` = `[surface_fit]` (the
+   full chain `[surface_fit, poisson, pgsr, p2c]`). A marked object: its planes extracted (largest
+   first, down to 5 % of its points), each a connected THIN panel ≥ 4 support distances wide, snapped
+   EXACTLY to the scene frame (up = the session's own up from `floor_transform.npz`, X = the heaviest
+   wall's direction, Z = up × X; within `manhattan_snap_deg` 15°, else kept as measured and declared),
+   coplanar pieces one plane, exact edges between parts and neighbours; the rest: BARS (length ≥ 4× the
+   section, round) → straight cylinders on the frame, the remainder → the live-cloud TSDF
+   (`tsdf_export.tsdf_mesh_of_points`), NEVER Poisson; a surface's leftovers (a floor's clutter) are
+   declared only. Every object gets `surface_fit/<name>/manhattan.json` (axes, degrees moved, offsets,
+   parts, cylinders, tsdf, residue) and the scene report the frame. The plane fit skips WLOP and runs
+   its RANSAC + support mesh on the card (`surface_fit.fit_device`, `fit_torch.py`; pccr's floor 3.3 s →
+   1.5 s per object). The per-object TSDF integrates the PUBLISHED cloud of the live epoch
+   (`tsdf.object`, `run_tsdf_objects.py`, texrecon after it) — the original depth maps are epoch 0's
+   geometry (pccr's floor came out duplicated). Pending: the user's eye on pccr's floor / door 18 /
+   wall 59 / desk 351 with the final rules; boxes for rectangular bars; the Manhattan frame for
+   point2cad's regions.
+10. Keep this file updated with every change of the above.
 
 ## §11 · Deliverables for the BIM comparison (USER 2026-09-30)
 

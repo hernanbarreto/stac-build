@@ -1,5 +1,22 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ 2026-10-15 (afternoon) — MANHATTAN WORLD, THE MESH BUTTON = SURFACE FIT ONLY, NO POISSON FOR THE REST
+- USER: "manhattan world … BIM perfecto" / "debe indicarlo el usuario, por defecto marcado como manhattan" /
+  "deja solo el manhattan al mandar mesh por ahora" / "probar con cilindros etc, y si no, tsdf sin poisson".
+  Every object is Manhattan unless unmarked in Instances (`output/manhattan.json`, exceptions only). The
+  Mesh button runs `surface_fit.mesh_button_stages: [surface_fit]`. A marked object = connected thin
+  panels snapped EXACTLY to the scene frame (up from `floor_transform.npz` — the fit's z-up default read
+  pccr's Y-up floor as a wall; X = the heaviest wall; `manhattan_snap_deg` 15°), coplanar pieces one
+  plane, exact edges; bars → straight cylinders on the frame; the remainder → the live-cloud TSDF; NEVER
+  Poisson, never the bspline ladder (that bent desk 351). Records: `surface_fit/<name>/manhattan.json`.
+  See docs/pipeline_final.md B.9. Per-object TSDF integrates the PUBLISHED cloud (`tsdf.object`,
+  `run_tsdf_objects.py` + texrecon) — the original depth maps duplicated pccr's floor.
+- The plane RANSAC and the support mesh run on torch (`surface_fit.fit_device: cuda`, `fit_torch.py`),
+  deterministic and equal to the numpy recipes; WLOP skipped for Manhattan planes (171 s per object).
+- The Autosegment with the new merge policy was launched by the USER on observatorio → zaragoza →
+  bufferStop at 10:29 (observatorio's live output had lost its segmentation products; cause unknown,
+  no deletion logged). An IFC that is a saved GitHub HTML page faults web-ifc: the upload validates STEP.
+
 ## ⭐⭐⭐ 2026-10-15 — THE MESHING STAGE RUNS ON THE CARD (USER: "toda esa etapa debe correr en gpu")
 - The hole-audit EVIDENCE (`reconstruction/surface_fit/hole_audit._Evidence`: the per-keyframe z-buffer of the
   FULL cloud, the mask votes, the see-through tallies — also behind mask_filter, the Poisson fills, the shape
