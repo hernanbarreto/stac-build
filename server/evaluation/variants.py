@@ -460,19 +460,41 @@ def keep_policy(results: Dict[str, Dict[str, Any]], policy: str, log: Callable) 
         log(f"[variants] {name}: session copy trimmed to its products (evaluation.variants_keep: cloud)")
 
 
+REPEAT_SUFFIX = "__rep"
+
+
+def repeated_specs(specs: Sequence[VariantSpec], repeat: int) -> List[VariantSpec]:
+    """``--repeat N``: every executable variant N times (``<name>__rep2`` …), the same spec."""
+    out = list(specs)
+    for k in range(2, int(repeat) + 1):
+        for s in specs:
+            if s.kind in ("chain", "colmap", "chain_continuation") and s.enabled:
+                out.append(VariantSpec(f"{s.name}{REPEAT_SUFFIX}{k}", s.kind, s.description, dict(s.overrides),
+                                       list(s.stages_off), s.base, dict(s.colmap), s.reason, s.enabled))
+    return out
+
+
 def run_scene(scene: SceneSpec, specs: Sequence[VariantSpec], run_dir: Path, cfg: EvaluationConfig, runner: ChainRunner,
               base_config: Dict[str, Any], log: Callable, monitor_factory: Optional[Callable] = None,
-              reference: str = "reference", plots: bool = True) -> Dict[str, Any]:
+              reference: str = "reference", plots: bool = True, repeat: int = 1) -> Dict[str, Any]:
     from evaluation.references import load_references
     scene_dir = run_dir / scene.name
     scene_dir.mkdir(parents=True, exist_ok=True)
     doc = load_references(scene.session_dir / "output", cfg.references.file, require_roles=True)
     kf_files = keyframes_of_scene(scene)
     results: Dict[str, Dict[str, Any]] = {}
-    order = sorted(specs, key=lambda s: 1 if s.kind == "chain_continuation" else 0)   # bases first
+    all_specs = repeated_specs(specs, repeat)
+    order = sorted(all_specs, key=lambda s: 1 if s.kind == "chain_continuation" else 0)   # bases first
     for spec in order:
         results[spec.name] = run_variant(scene, spec, scene_dir, cfg, runner, base_config, doc, kf_files, log,
                                          results, monitor_factory, plots=plots)
+    if repeat > 1:
+        from evaluation.determinism import repeatability
+        for s in specs:
+            for k in range(2, int(repeat) + 1):
+                rep = f"{s.name}{REPEAT_SUFFIX}{k}"
+                if rep in results:
+                    repeatability(scene_dir, s.name, rep, results[s.name], results[rep], log)
     rows = comparison_rows(scene.name, results, reference)
     D.write_csv(scene_dir / "comparison.csv", rows, COMPARISON_COLUMNS)
     D.write_json(scene_dir / "comparison.json", {"scene": scene.name, "reference": reference, "rows": rows,
