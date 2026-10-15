@@ -3468,9 +3468,18 @@ async def upload_bim(
     if not ctx.session_dir.exists():
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Save file
-    dest = ctx.ifcs_dir / file.filename
+    # Save file — a STEP IFC only (USER 2026-10-15: a GitHub HTML page saved as .ifc made web-ifc
+    # fault with "memory access out of bounds" on every session load; the format is checked HERE,
+    # with a message that says what the file actually is)
     content = await file.read()
+    head = content[:4096].lstrip(b"\xef\xbb\xbf \r\n\t")
+    if not head.startswith(b"ISO-10303-21") or b"FILE_SCHEMA" not in content[:65536]:
+        looks = ("an HTML page (a browser 'view' page saved as .ifc — download the RAW file)"
+                 if head[:64].lower().lstrip().startswith((b"<!doctype", b"<html", b"<?xml"))
+                 else "not a STEP file (it does not start with ISO-10303-21)")
+        raise HTTPException(status_code=400,
+                            detail=f"{file.filename} is not an IFC: {looks}")
+    dest = ctx.ifcs_dir / file.filename
     dest.write_bytes(content)
     print(f"[BIM] ✅ Uploaded {file.filename} ({len(content)/1024:.0f} KB) to {session_id}")
 
