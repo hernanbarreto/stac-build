@@ -188,10 +188,14 @@ def fit_scene(session_dir: Path,
         fs = None
         try:
             if man_on:
+                # a PLANE needs no consolidation: RANSAC + the median offset are robust to the
+                # double layers WLOP collapses for the splines, and the residual report uses
+                # the raw points anyway — WLOP was 171 s of the floor's 3 min (pccr 2026-10-15)
                 fs = fit_segment(pts, instance_id=iid, label=label,
                                  original_xyz=raw_seg,
                                  scene_centroid=centroid,
-                                 progress_cb=progress_cb, **{**kwargs, "models": ["plane"]})
+                                 progress_cb=progress_cb,
+                                 **{**kwargs, "models": ["plane"], "consolidate_method": "none"})
                 if fs is None:
                     man_rejected[int(iid)] = 0.0     # no plane gathers its points at all
                     logger.info("scene: %s_%s — marked Manhattan but no plane explains it: the "
