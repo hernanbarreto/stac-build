@@ -185,3 +185,6 @@ vendor/point2cad/
 # checkpoints + a vendored clone; re-clone from Junyi42/LoGeR when the km-scale
 # case arrives.
 vendor/LoGeR/
+
+# Evaluation battery runs (python -m server.evaluation run → runs/eval/<date_time>/, GBs of variant sessions)
+/runs/
