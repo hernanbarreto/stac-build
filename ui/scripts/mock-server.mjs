@@ -198,6 +198,11 @@ const server = http.createServer(async (req, res) => {
   if (p.startsWith('/api/segmentation/')) return json(res, { ok: true })
   if (p.startsWith('/api/objects/scene/')) return json(res, { objects: [] })
   if (p === '/api/objects/library') return json(res, { items: [{ source: 'collection', name: 'durmiente_tipo.glb', url: '/static/durmiente.glb', size_mb: 1.2 }, { source: 'project', session: 'estacion-sur', name: 'banco_poisson.glb', url: '/static/banco.glb', size_mb: 4.8 }] })
+  // evaluation battery (viewer side): no runs, an empty reference document, no keyframes
+  if (p === '/api/evaluation/runs') return json(res, { runs: [] })
+  if (p.startsWith('/api/evaluation/runs/')) return json(res, { run_id: decodeURIComponent(p.split('/')[4] || ''), manifest: null, files: [] })
+  if (p.startsWith('/api/evaluation/references/')) return json(res, { session_id: p.split('/')[4] || '', scan_key: url.searchParams.get('scan_key'), path: '', document: { schema_version: 1, image_size: null, distances: [], planes: [] } })
+  if (p.startsWith('/api/sessions/') && p.endsWith('/keyframes')) return json(res, { keyframes: [], total: 0 })
   if (p.startsWith('/api/bim/auto_match/')) return json(res, { matches: COMPARE.results.map(r => ({ segment_label: r.label, element_key: r.element_key, ifc_type: r.ifc_type })) })
   if (p === '/api/bim/compare') return json(res, COMPARE)
   if (p.startsWith('/api/project/')) return json(res, { ok: true, scans: {} })

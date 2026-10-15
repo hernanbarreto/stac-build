@@ -14,6 +14,7 @@ import { useState, type ReactNode } from 'react'
 import {
   Axis3D, Box, Brush, Camera, Check, Circle, Eraser, Grid3X3, Home, Maximize, Move, Package, Palette,
   RotateCcw, Ruler, Scale, Scissors, SlidersHorizontal, Square, Thermometer, Trash2, TriangleRight, Undo2, Unlock, X, ArrowDownToLine, AlignVerticalJustifyEnd, ArrowUpToLine, AlignHorizontalJustifyCenter, AlignVerticalJustifyCenter, Loader2,
+  Pin, Pentagon,
 } from 'lucide-react'
 import { IconButton } from '../ui/IconButton'
 import { Button } from '../ui/Button'
@@ -109,6 +110,9 @@ interface FloatingToolbarProps {
   onTool: (t: Tool) => void
   onResetCamera: () => void
   onClearMeasurements: () => void
+  /** reference distance / plane on keyframe images (evaluation battery): modal dialogs, not viewport tools */
+  onReferenceDistance: () => void
+  onReferencePlane: () => void
   onAddObject: () => void
   onResetSection: () => void
   brush: BrushState
@@ -122,7 +126,7 @@ interface FloatingToolbarProps {
 
 type Popover = 'brush' | 'display' | 'color' | null
 
-export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeasurements, onAddObject, onResetSection, brush, display, view, color, compare, placed, sabanaVisible }: FloatingToolbarProps) {
+export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeasurements, onReferenceDistance, onReferencePlane, onAddObject, onResetSection, brush, display, view, color, compare, placed, sabanaVisible }: FloatingToolbarProps) {
   const t = useT()
   const fmt = useFmt()
   const [popover, setPopover] = useState<Popover>(null)
@@ -153,6 +157,8 @@ export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeas
               <IconButton size="lg" tone="measure" label={t('toolbar.measureDistance')} shortcut="M" icon={<Ruler aria-hidden />} active={activeTool === 'measure-distance'} onClick={() => onTool('measure-distance')} />
               <IconButton size="lg" tone="measure" label={t('toolbar.measureAngle')} shortcut="A" icon={<TriangleRight aria-hidden />} active={activeTool === 'measure-angle'} onClick={() => onTool('measure-angle')} />
               <IconButton size="lg" label={t('toolbar.clearMeasurements')} icon={<Trash2 aria-hidden />} onClick={onClearMeasurements} />
+              <IconButton size="lg" tone="measure" label={t('toolbar.referenceDistance')} icon={<Pin aria-hidden />} onClick={onReferenceDistance} />
+              <IconButton size="lg" tone="measure" label={t('toolbar.referencePlane')} icon={<Pentagon aria-hidden />} onClick={onReferencePlane} />
             </Group>
             <Sep />
             <Group>

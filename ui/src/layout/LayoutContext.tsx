@@ -16,7 +16,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 
 export type LeftTab = 'sessions' | 'instances' | 'scans' | 'bim' | 'team'
 export type InspectorTab = 'properties' | 'acta' | 'assistant'
-export type DockTab = 'console' | 'jobs' | 'timeline' | 'report'
+export type DockTab = 'console' | 'jobs' | 'timeline' | 'report' | 'evaluation'
 export type Density = 'compact' | 'comfortable'
 
 export interface LayoutState {

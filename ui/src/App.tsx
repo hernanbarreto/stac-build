@@ -31,7 +31,7 @@ import {
   Move, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D, Building2, Package, ArrowUpFromLine, Trash2, Unlock,
   Clock, Scale, BarChart3, Home, Camera, SlidersHorizontal, Sparkles, Undo2, Brush, Layers, Star, Terminal,
   ListTodo, FileCheck2, Puzzle, PanelLeftClose, PanelLeftOpen, Wand2,
-  Circle, Sun,
+  Circle, Sun, FlaskConical, Pin, Pentagon,
 } from 'lucide-react'
 import { useI18n, getT } from './i18n'
 import { useLayout } from './layout/LayoutContext'
@@ -65,6 +65,8 @@ import { ResumeDialog } from './features/ResumeDialog'
 import { ObjectLibraryDialog } from './features/ObjectLibraryDialog'
 import { MeshingDialog } from './features/MeshingDialog'
 import { AutosegmentDialog, type AutosegmentState, type AutosegmentStages } from './features/AutosegmentDialog'
+import { ReferenceDialog, type ReferenceMode } from './features/ReferenceDialog'
+import { EvaluationPanel } from './features/EvaluationPanel'
 import { PhysicsPanel } from './features/PhysicsPanel'
 import { ConsolePanel, JobsPanel, PropertiesPanel } from './features/DockPanels'
 
@@ -116,6 +118,8 @@ function App() {
   const [activeSession, setActiveSession] = useState<string | null>(null)
   const [selectedSession, setSelectedSession] = useState<string | null>(null)
   const [activeTool, setActiveTool] = useState<Tool>('navigate')
+  // reference distance / plane dialog of the evaluation battery (keyframe images); null = closed
+  const [referenceDialog, setReferenceDialog] = useState<ReferenceMode | null>(null)
   const [eraseRadius, setEraseRadius] = useState(0.15)
   const [eraseMarks, setEraseMarks] = useState(0)
   const [eraseTarget, setEraseTarget] = useState<string>('')
@@ -2159,6 +2163,8 @@ function App() {
       { id: 'distance', label: t('toolbar.measureDistance'), icon: <Ruler aria-hidden />, shortcut: 'M', checked: activeTool === 'measure-distance', onSelect: () => setActiveTool('measure-distance') },
       { id: 'angle', label: t('toolbar.measureAngle'), icon: <TriangleRight aria-hidden />, shortcut: 'A', checked: activeTool === 'measure-angle', onSelect: () => setActiveTool('measure-angle') },
       { id: 'clearm', label: t('toolbar.clearMeasurements'), icon: <Trash2 aria-hidden />, onSelect: () => viewportRef.current?.clearMeasurements() },
+      { id: 'refdistance', label: t('toolbar.referenceDistance'), icon: <Pin aria-hidden />, disabled: !activeSession, onSelect: () => setReferenceDialog('distance') },
+      { id: 'refplane', label: t('toolbar.referencePlane'), icon: <Pentagon aria-hidden />, disabled: !activeSession, onSelect: () => setReferenceDialog('plane') },
       { type: 'separator', id: 's2' },
       { id: 'brush', label: t('toolbar.brush'), icon: <Brush aria-hidden />, checked: activeTool === 'erase', onSelect: () => setActiveTool(activeTool === 'erase' ? 'navigate' : 'erase') },
       { id: 'undobrush', label: t('brush.undo'), icon: <Undo2 aria-hidden />, onSelect: undoBrush },
@@ -2208,6 +2214,7 @@ function App() {
     { id: 'nav.assistant', label: t('assistant.title'), group: t('palette.navigate'), icon: <Sparkles aria-hidden />, run: () => layout.openInspector('assistant') },
     { id: 'nav.acta', label: t('inspector.acta'), group: t('palette.navigate'), icon: <FileCheck2 aria-hidden />, run: () => layout.openInspector('acta') },
     { id: 'nav.report', label: t('dock.report'), group: t('palette.navigate'), icon: <BarChart3 aria-hidden />, run: () => layout.openDock('report') },
+    { id: 'nav.evaluation', label: t('dock.evaluation'), group: t('palette.navigate'), icon: <FlaskConical aria-hidden />, run: () => layout.openDock('evaluation') },
     { id: 'nav.timeline', label: t('dock.timeline'), group: t('palette.navigate'), icon: <Clock aria-hidden />, run: () => layout.openDock('timeline') },
   ]
 
@@ -2445,6 +2452,7 @@ function App() {
             <FloatingToolbar
               activeTool={activeTool} onTool={setActiveTool} onResetCamera={() => viewportRef.current?.resetCamera()}
               onClearMeasurements={() => viewportRef.current?.clearMeasurements()} onAddObject={openObjectLibrary}
+              onReferenceDistance={() => setReferenceDialog('distance')} onReferencePlane={() => setReferenceDialog('plane')}
               onResetSection={() => viewportRef.current?.resetSectionBox()} sabanaVisible={sabanaVisible}
               brush={{
                 shape: eraseShape, onShape: setEraseShape, radiusM: eraseRadius, onRadiusM: setEraseRadius, yawDeg: eraseYawDeg, onYawDeg: setEraseYawDeg,
@@ -2539,6 +2547,7 @@ function App() {
                 { id: 'jobs', label: t('dock.jobs'), icon: <ListTodo aria-hidden />, badge: pipelineRunning ? 1 : undefined },
                 { id: 'timeline', label: t('dock.timeline'), icon: <Clock aria-hidden /> },
                 { id: 'report', label: t('dock.report'), icon: <BarChart3 aria-hidden /> },
+                { id: 'evaluation', label: t('dock.evaluation'), icon: <FlaskConical aria-hidden /> },
               ]}
               panels={{
                 console: <ConsolePanel logs={consoleLogs} />,
@@ -2550,6 +2559,7 @@ function App() {
                 report: activeSession && bimModels.length > 0 && segments.length > 0
                   ? <DeviationOverlay sessionId={activeSession} viewportRef={viewportRef} onClose={() => layout.setDockOpen(false)} />
                   : <EmptyState compact icon={<BarChart3 aria-hidden />} title={t('report.emptyTitle')} description={t('report.emptyDesc')} />,
+                evaluation: <EvaluationPanel />,
               }} />
           </div>
         )}
@@ -2660,6 +2670,11 @@ function App() {
         selectedScans={autosegScans}
         onToggleScan={(key, on) => setAutosegScans(prev => (on ? [...prev.filter(k => k !== key), key] : prev.filter(k => k !== key)))}
         onClose={() => setAutosegOpen(false)} onRun={runAutosegment} />
+
+      {activeSession && (
+        <ReferenceDialog open={referenceDialog !== null} sessionId={activeSession} scanKey={activeScanTab} initialMode={referenceDialog ?? 'distance'}
+          onClose={() => setReferenceDialog(null)} />
+      )}
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />

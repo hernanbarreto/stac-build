@@ -6017,6 +6017,11 @@ async def _certify_select_guard(request: Request) -> None:
 
 app.include_router(certify_api.router, dependencies=[Depends(_certify_select_guard)])
 
+# ── evaluation battery (claude_stac.txt 2026-10-14): references of a scan + read-only runs ──
+from evaluation import api as evaluation_api
+evaluation_api.configure(resolve_ctx=_ctx, audit_log=_audit_log)
+app.include_router(evaluation_api.router)
+
 
 @app.post("/api/segmentation/perfect/export")
 async def export_perfect_endpoint(request: Request):

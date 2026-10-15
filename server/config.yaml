@@ -4042,3 +4042,50 @@ scale:                              # scale graph sources beyond DA3 + seams (§
                                     # best by this Δχ² — one cycle alone cannot place a jump;
                                     # the absolute rows (anchors/VIO) break the tie, or the
                                     # report says "ambiguous" with the ranking
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EVALUATION BATTERY — claude_stac.txt 2026-10-14 (server/evaluation/). It MEASURES the chain against
+# hand-measured references and never changes it. Rule 7: every price, tolerance and path lives here.
+# Every key is required (a missing one fails the load naming it).
+# ═══════════════════════════════════════════════════════════════════════════════
+evaluation:
+  references:
+    file: reference_measures.json     # under output/ of the scan: hand-measured distances + planar regions anchored
+                                      # on keyframe pixels (phase 0; schema server/evaluation/reference_schema.json).
+                                      # NOT output/known_dimensions.json (F8: per-object dimensions read by the gauge)
+  runs_dir: runs/eval                 # where `python -m server.evaluation run` writes runs/<date_time>/ (relative to
+                                      # the repo root, or absolute)
+  scenes: {}                          # scene name → session (scan) dir, for the CLI's --scenes; the CLI also takes a
+                                      # path or a project/scan key directly ("pccr/2026-08-31/default")
+  endpoints:                          # how an anchored endpoint (keyframe, pixel) becomes a 3-D point (phase 1 / 3)
+    depth_window_px: 3                # BOUND: half-window around the anchor pixel whose product depths (the published
+                                      #   cloud's own points of that keyframe, by provenance) are pooled — median;
+                                      #   0 = the anchor pixel alone. The published cloud keeps ~17 % of a keyframe's
+                                      #   pixels after voxel/SOR/mask filter (pccr), so a 1-px lookup misses often
+    zbuffer_window_px: 2              # BOUND: half-window of the z-buffer read (a variant without provenance: the
+                                      #   dense cloud projected on the keyframe, the nearest splat wins)
+    min_triangulation_deg: 1.0        # BOUND: two observations whose rays cross under this parallax do not
+                                      #   triangulate — the end is "not reconstructed" by that method
+  curves:                             # phase 2
+    distance_bins_m: [0, 2, 5, 10, 20, 30]    # camera-distance bins (edges, m)
+    walk_bins_m: [0, 2, 5, 10, 20, 30]        # walk from the nearest gauge distance (edges, m)
+    distance_statistic: mean          # a distance's camera distance for the bins = mean | max of its two ends'
+    tolerances_m: [0.02, 0.05, 0.10]          # the "confidence distance" tolerances
+    min_bin_n: 3                      # BOUND: a bin with fewer samples reports "no data" (never extrapolated)
+    plane_fit:
+      max_points: 200000              # BOUND: stable subsample of a reference region before the plane fit
+      seed: 0                         # seed of that subsample (recorded)
+      neighbour_k: 1                  # k of the k-NN spacing that measures the resolution
+  cost:                               # phase 4
+    sample_interval_s: 1.0            # nvidia-smi / RSS sampling period of the stage monitor (s)
+    gpu_price_per_hour:               # USD per GPU hour by card key (repro.card_key); "default" = an unlisted card.
+                                      # TO CONFIRM BY THE USER: RunPod's A100 80 GB PCIe on-demand price of 2026-10
+      "NVIDIA A100 80GB PCIe | 81920 MiB | sm_8.0": 1.64
+      default: 1.64
+  confidence:                         # phase 5
+    bins: 5                           # BOUND: quantile bins of the confidence column
+    min_group_n: 3                    # BOUND: a group with fewer points reports "no data"
+  profiles:                           # phase 7
+    min_test_coverage: 0.9            # share of the test ends a variant must reconstruct to enter a profile
+  deterministic: true                 # phase 6: seeds fixed and recorded, strict torch, fixed order (the chain's own
+                                      # determinism plan; the manifest records what is NOT deterministic by name)

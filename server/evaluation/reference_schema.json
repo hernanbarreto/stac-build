@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stac-build/evaluation/reference_measures/v1",
+  "title": "Reference measures of one scan (evaluation battery, phase 0)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "image_size", "distances", "planes"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "provenance": {"const": "human_validated"},
+    "image_size": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "array", "minItems": 2, "maxItems": 2,
+         "items": {"type": "integer", "minimum": 1}}
+      ]
+    },
+    "distances": {"type": "array", "items": {"$ref": "#/$defs/distance"}},
+    "planes": {"type": "array", "items": {"$ref": "#/$defs/plane"}}
+  },
+  "$defs": {
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frame", "u", "v"],
+      "properties": {
+        "frame": {"type": "integer", "minimum": 0},
+        "file": {"type": "string"},
+        "u": {"type": "number", "minimum": 0},
+        "v": {"type": "number", "minimum": 0}
+      }
+    },
+    "end": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observations"],
+      "properties": {
+        "observations": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/observation"}}
+      }
+    },
+    "distance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "value_m", "sigma_m", "role", "tool", "note", "ends"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "value_m": {"type": "number", "exclusiveMinimum": 0},
+        "sigma_m": {"type": "number", "minimum": 0},
+        "role": {"enum": ["gauge", "test"]},
+        "tool": {"enum": ["tape", "laser", "total_station"]},
+        "note": {"type": "string"},
+        "ends": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/end"}}
+      }
+    },
+    "polygon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frame", "points"],
+      "properties": {
+        "frame": {"type": "integer", "minimum": 0},
+        "file": {"type": "string"},
+        "points": {
+          "type": "array", "minItems": 3,
+          "items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number", "minimum": 0}}
+        }
+      }
+    },
+    "plane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "note", "polygons"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "label": {"type": "string"},
+        "note": {"type": "string"},
+        "polygons": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/polygon"}}
+      }
+    }
+  }
+}
