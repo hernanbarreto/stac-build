@@ -3117,7 +3117,7 @@ def _record_overlap(record: dict, absorbed: dict, keeper: dict,
 
 
 def _gap_rays(A: np.ndarray, B: np.ndarray, tree, cams: np.ndarray, gap_m: float,
-              reach_m: float) -> List[int]:
+              reach_m: float, tree_a=None, tree_b=None) -> List[int]:
     """The RAY JUDGES of 'is the gap between two components of one instance EMPTY SPACE the
     cameras see through' (docs/plan_determinismo.md point 105): one judge per INFORMATIVE
     ray (a camera × a sample of the gap with nothing standing before the sample), 1 when
@@ -3131,7 +3131,7 @@ def _gap_rays(A: np.ndarray, B: np.ndarray, tree, cams: np.ndarray, gap_m: float
     from scipy.spatial import cKDTree
     from segmentation.gap_rays_torch import FreeSpaceIndex, gap_rays_t
     if isinstance(tree, FreeSpaceIndex):                        # the same judges, on the card
-        return gap_rays_t(A, B, tree, cams, gap_m, reach_m)
+        return gap_rays_t(A, B, tree, cams, gap_m, reach_m, tree_a, tree_b)
     d, ia = cKDTree(A).query(B, k=1)
     jb = int(np.argmin(d))
     a, b = A[ia[jb]], B[jb]
@@ -3158,12 +3158,12 @@ def _gap_rays(A: np.ndarray, B: np.ndarray, tree, cams: np.ndarray, gap_m: float
 
 def _gap_is_free_space(A: np.ndarray, B: np.ndarray, tree, cams: np.ndarray, gap_m: float,
                        reach_m: float, *, factor: float, confidence: float,
-                       min_judges: int) -> dict:
+                       min_judges: int, tree_a=None, tree_b=None) -> dict:
     """Free space between two components, by THE USER'S RULE over the ray judges of
     :func:`_gap_rays`: the share of rays that see through exceeds one half significantly
     (95 %), with ≥ 5 informative rays, by ≥ ``factor`` × its binomial error. Returns the
     decision dict (``improves`` = free space)."""
-    rays = _gap_rays(A, B, tree, cams, gap_m, reach_m)
+    rays = _gap_rays(A, B, tree, cams, gap_m, reach_m, tree_a, tree_b)
     p = float(np.mean(rays)) if rays else 0.0
     err = float(np.sqrt(max(p * (1.0 - p), 0.0) / max(len(rays), 1)))
     d = _decide_above_bar(rays, 0.5, err, factor=factor, confidence=confidence,
@@ -3204,13 +3204,55 @@ def _covisible(kf_a: set, kf_b: set, covis_share: float, *, factor: float, confi
     return d
 
 
+def _label_occupied_cells(ki: np.ndarray) -> Tuple[np.ndarray, int]:
+    """The connected components (26-connected, as ndimage.label with the full 3×3×3 structure)
+    of the OCCUPIED cells of an integer grid, without the dense grid: a fragmented floor with one
+    stray point 146 m away made the dense grid ~10⁹ cells and the split sat in ndimage.label for
+    minutes (pccr / observatorio 2026-10-15). Unique cells, their 26 neighbours by searchsorted,
+    scipy's connected components on that graph; labels 0..n-1 in order of the smallest cell key
+    (deterministic). Returns (component per point, n)."""
+    import scipy.sparse as sp
+    from scipy.sparse.csgraph import connected_components
+    ki = np.asarray(ki, np.int64)
+    dims = ki.max(0) + 1
+    key = (ki[:, 0] * int(dims[1]) + ki[:, 1]) * int(dims[2]) + ki[:, 2]
+    cells, inv = np.unique(key, return_inverse=True)
+    m = len(cells)
+    cz = cells // (int(dims[1]) * int(dims[2])); rest = cells % (int(dims[1]) * int(dims[2]))
+    cy = rest // int(dims[2]); cx = rest % int(dims[2])
+    rows, cols = [], []
+    for dz in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if (dz, dy, dx) <= (0, 0, 0):
+                    continue                                   # each unordered pair once
+                nz, ny, nx = cz + dz, cy + dy, cx + dx
+                ok = (nz >= 0) & (nz < dims[0]) & (ny >= 0) & (ny < dims[1]) & (nx >= 0) & (nx < dims[2])
+                nk = (nz * int(dims[1]) + ny) * int(dims[2]) + nx
+                pos = np.searchsorted(cells, nk)
+                hit = ok & (pos < m)
+                hit[hit] &= cells[pos[hit]] == nk[hit]
+                rows.append(np.nonzero(hit)[0]); cols.append(pos[hit])
+    r = np.concatenate(rows) if rows else np.zeros(0, np.int64)
+    c = np.concatenate(cols) if cols else np.zeros(0, np.int64)
+    g = sp.coo_matrix((np.ones(len(r), dtype=np.int8), (r, c)), shape=(m, m))
+    n, lab_cell = connected_components(g, directed=False)
+    # relabel by the smallest cell key of each component: a fixed order of the point set
+    first = np.full(n, m, dtype=np.int64)
+    np.minimum.at(first, lab_cell, np.arange(m))
+    order = np.argsort(first, kind="stable")
+    remap = np.empty(n, dtype=np.int64); remap[order] = np.arange(n)
+    return remap[lab_cell][inv], int(n)
+
+
 def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_arr: np.ndarray,
                                 gap_m: float, min_points: int, covis_share: float,
                                 cam_centre: Optional[Dict[int, np.ndarray]] = None,
                                 max_cams: int = 12, min_walk_m: Optional[float] = None,
                                 id_base: Optional[int] = None,
                                 decision: Optional[Tuple[float, float, int]] = None,
-                                record: Optional[list] = None) -> int:
+                                record: Optional[list] = None,
+                                use_torch: bool = True) -> int:
     """Split an instance that is several objects seen TOGETHER (pccr 2026-09-30, USER: "está mal
     que junte tres desk separados en uno solo ID").
 
@@ -3265,12 +3307,9 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
         k = np.floor(P.astype(np.float64) / gap_m).astype(np.int64)
         k0 = k.min(0)
         ki = k - k0
-        grid = np.zeros(ki.max(0) + 1, dtype=bool)
-        grid[tuple(ki.T)] = True
-        lab, n = ndimage.label(grid, structure=np.ones((3, 3, 3)))
+        comp, n = _label_occupied_cells(ki)                 # sparse: no dense grid over the bbox
         if n < 2:
             continue
-        comp = lab[tuple(ki.T)] - 1
         size = np.bincount(comp, minlength=n)
         cand = [c for c in np.argsort(-size, kind="stable") if size[c] >= min_points]
         if len(cand) < 2:
@@ -3291,8 +3330,34 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
             return x
         iid = int(inst.get("instance_id", inst.get("id", 0)))
         _t_inst = time.time()
-        for ia_, c1 in enumerate(cand):
+        n_pairs = len(cand) * (len(cand) - 1) // 2
+        print(f"[SegPipeline]   ✂ co-visible split: instance {iid}: {n} component(s), {len(cand)} candidate(s), "
+              f"{n_pairs} pair(s) to judge", flush=True)
+        if use_torch and cam_centre:
+            # every pair judged in batches on the card (segmentation.covis_split_torch) — the
+            # same rule, the loop below is its reference
+            from segmentation.covis_split_torch import judge_pairs
+            parent = judge_pairs(P, comp, ki, cand, size, kfs, cam_centre, chain, min_walk_m, covis_share,
+                                 (factor, confidence, min_judges), gap_m, reach, tree_box[0], iid, record)
+            n_skipped = sum(1 for r_ in (record or []) if r_.get("instance_id") == iid and r_.get("skipped"))
+        n_skipped = 0 if not (use_torch and cam_centre) else n_skipped
+        # the components' trees ONCE each (the closest pair of every pair of components queried
+        # them per pair — the CPU cost left after the ray judges moved to the card)
+        _ctree: Dict[int, object] = {}
+
+        def _tree_of(c):
+            if c not in _ctree:
+                from scipy.spatial import cKDTree
+                _ctree[c] = cKDTree(P[comp == c])
+            return _ctree[c]
+        for ia_, c1 in enumerate(cand) if not (use_torch and cam_centre) else []:
             for c2 in cand[ia_ + 1:]:
+                if _root(c1) == _root(c2):
+                    # already one group through other components: the grouping is the
+                    # transitive closure of 'not distinct', which this pair's verdict cannot
+                    # change either way — the same groups, this pair's judges spared
+                    n_skipped += 1
+                    continue
                 cv = _covisible(kfs[c1], kfs[c2], covis_share, factor=factor,
                                 confidence=confidence, min_judges=min_judges)
                 covis = bool(cv["improves"])
@@ -3311,7 +3376,8 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
                     if len(cams):
                         fs_rec = _gap_is_free_space(P[comp == c1], P[comp == c2], tree_box[0], cams,
                                                     gap_m, reach, factor=factor,
-                                                    confidence=confidence, min_judges=min_judges)
+                                                    confidence=confidence, min_judges=min_judges,
+                                                    tree_a=_tree_of(c1), tree_b=_tree_of(c2))
                         distinct = bool(fs_rec["improves"])
                 if record is not None:
                     record.append({"kind": "covisible_split", "instance_id": iid,
@@ -3332,8 +3398,8 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
         for c in cand:
             roots.setdefault(_root(c), []).append(c)
         groups = sorted(roots.values(), key=lambda g: (-sum(size[x] for x in g), min(g)))
-        print(f"[SegPipeline]   ✂ co-visible split: instance {iid}: {n} component(s), {len(cand)} candidate(s), "
-              f"{len(cand) * (len(cand) - 1) // 2} pair(s) judged in {time.time() - _t_inst:.1f}s → {len(groups)} group(s)",
+        print(f"[SegPipeline]   ✂ co-visible split: instance {iid}: {n_pairs - n_skipped} pair(s) judged "
+              f"({n_skipped} already grouped) in {time.time() - _t_inst:.1f}s → {len(groups)} group(s)",
               flush=True)
         if len(groups) < 2:
             continue

@@ -39,9 +39,9 @@ class FreeSpaceIndex:
         lin_s = lin[self.order]
         self.cells, self.counts = torch.unique_consecutive(lin_s, return_counts=True)
         self.starts = torch.searchsorted(lin_s, self.cells)
-        n_cells = int(self.dims[0]) * int(self.dims[1]) * int(self.dims[2])
-        self.occ = torch.zeros(n_cells, dtype=torch.bool, device=dev)
-        self.occ = torch.isin(torch.arange(n_cells, device=dev), self.cells)
+        # NO dense bitmap over the bbox: one stray point 146 m away made it billions of cells
+        # (pccr 2026-10-15); occupancy is a searchsorted hit on the sorted occupied cells
+        self.n_cells = int(self.dims[0]) * int(self.dims[1]) * int(self.dims[2])
         off = torch.arange(-1, 2, device=dev)
         dz, dy, dx = torch.meshgrid(off, off, off, indexing="ij")
         self.block = (dz.reshape(-1) * self.strides[0] + dy.reshape(-1) * self.strides[1] + dx.reshape(-1))
@@ -65,13 +65,15 @@ class FreeSpaceIndex:
         lin, inside = self._cell_of(S_t)
         # the margin ring keeps every neighbour id of an inside cell inside the grid
         nb = lin[:, None] + self.block[None, :]                                        # (M, 27)
-        nb = torch.clamp(nb, 0, int(self.occ.numel()) - 1)
-        maybe = inside & self.occ[nb].any(dim=1)
+        nb = torch.clamp(nb, 0, self.n_cells - 1)
+        pos_all = torch.clamp(torch.searchsorted(self.cells, nb), max=len(self.cells) - 1)   # (M, 27)
+        hit_all = self.cells[pos_all] == nb
+        maybe = inside & hit_all.any(dim=1)
         idx_m = maybe.nonzero()[:, 0]
         if len(idx_m) == 0:
             return out.cpu().numpy()
-        pos = torch.clamp(torch.searchsorted(self.cells, nb[idx_m]), max=len(self.cells) - 1)   # (m, 27)
-        hit = self.cells[pos] == nb[idx_m]
+        pos = pos_all[idx_m]
+        hit = hit_all[idx_m]
         st = self.starts[pos]
         ct = torch.where(hit, self.counts[pos], torch.zeros_like(pos))
         K = int(ct.max())
@@ -93,15 +95,28 @@ class FreeSpaceIndex:
         return out.cpu().numpy()
 
 
+def closest_pair(A: np.ndarray, B: np.ndarray, tree_a=None, tree_b=None):
+    """The closest points (a ∈ A, b ∈ B): the SMALLER set queries the other's tree (the pair is
+    the same either way; the trees may come cached from the caller — one per component instead
+    of one per pair, the CPU cost that was left in the split)."""
+    from scipy.spatial import cKDTree
+    if len(B) <= len(A):
+        tree = tree_a if tree_a is not None else cKDTree(A)
+        d, ia = tree.query(B, k=1)
+        jb = int(np.argmin(d))
+        return A[ia[jb]], B[jb]
+    tree = tree_b if tree_b is not None else cKDTree(B)
+    d, ib = tree.query(A, k=1)
+    ja = int(np.argmin(d))
+    return A[ja], B[ib[ja]]
+
+
 def gap_rays_t(A: np.ndarray, B: np.ndarray, index: FreeSpaceIndex, cams: np.ndarray,
-               gap_m: float, reach_m: float) -> List[int]:
+               gap_m: float, reach_m: float, tree_a=None, tree_b=None) -> List[int]:
     """:func:`segmentation.pipeline._gap_rays` on the index: the same samples, rays, steps and
     judge order; the radius tests exact on the device."""
-    from scipy.spatial import cKDTree
     gap_m = float(gap_m)
-    d, ia = cKDTree(A).query(B, k=1)
-    jb = int(np.argmin(d))
-    a, b = A[ia[jb]], B[jb]
+    a, b = closest_pair(A, B, tree_a, tree_b)
     n = int(np.floor(np.linalg.norm(b - a) / gap_m))
     if n < 2 or len(cams) == 0:
         return []

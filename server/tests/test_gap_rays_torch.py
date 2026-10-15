@@ -55,3 +55,52 @@ def test_on_cuda_the_judges_equal_the_cpu_ones():
     cpu = gap_rays_t(da, db, FreeSpaceIndex(cloud, gap / 2.0, device="cpu"), cams, gap, reach)
     gpu = [gap_rays_t(da, db, FreeSpaceIndex(cloud, gap / 2.0, device="cuda"), cams, gap, reach) for _ in range(2)]
     assert gpu[0] == cpu and gpu[1] == cpu
+
+
+def _split_instances():
+    """ONE instance holding two desks and a floor patch between them, plus the wall as another: the
+    desks are seen together and the gap between them is free space → the split separates them."""
+    cloud, da, db, cams = _scene()
+    n_floor, n_wall = 60000, 30000
+    idx_desks = np.arange(n_floor + n_wall, len(cloud))
+    inst = [{"id": 1, "instance_id": 2, "label": "desk", "globalIndices": idx_desks.tolist()},
+            {"id": 2, "instance_id": 3, "label": "wall", "globalIndices": np.arange(n_floor, n_floor + n_wall).tolist()}]
+    # every point's keyframe = its nearest camera (frames 10, 20, 30, 40)
+    frames = np.array([10, 20, 30, 40])
+    d = np.linalg.norm(cloud[:, None, :] - cams[None, :, :], axis=2)
+    frame_arr = frames[np.argmin(d, axis=1)]
+    cam_centre = {int(f): cams[i] for i, f in enumerate(frames)}
+    return cloud, inst, frame_arr, cam_centre
+
+
+def test_the_batched_split_equals_the_reference_loop():
+    import copy
+    cloud, inst, frame_arr, cam_centre = _split_instances()
+    outs = []
+    for use_torch in (False, True):
+        instances = copy.deepcopy(inst)
+        rec = []
+        n = P._split_covisible_components(instances, cloud, frame_arr, gap_m=0.10, min_points=1000,
+                                          covis_share=0.5, cam_centre=cam_centre, min_walk_m=1.0,
+                                          id_base=10, decision=(2.0, 0.95, 5), record=rec, use_torch=use_torch)
+        outs.append((n, [(i["id"], i["instance_id"], len(i["globalIndices"]), sorted(i["globalIndices"])[:5]) for i in instances],
+                     [(r["components"], r.get("distinct"), r.get("camera_returned"), (r.get("free_space") or {}).get("n_rays"))
+                      for r in rec if "skipped" not in r]))
+    assert outs[0][0] == outs[1][0] >= 1, "the desks are split in both paths"
+    assert outs[0][1] == outs[1][1], "the same children, the same points, the same ids"
+    assert outs[0][2] == outs[1][2], "the same verdicts, the same judges"
+
+
+def test_sparse_cell_labelling_equals_ndimage_label():
+    from scipy import ndimage
+    rng = np.random.default_rng(11)
+    pts = np.vstack([rng.uniform(0, 3, (5000, 3)), rng.uniform(5, 7, (3000, 3)), rng.uniform(0, 3, (200, 3)) + np.array([0, 0, 9.0])])
+    ki = np.floor(pts / 0.3).astype(np.int64); ki -= ki.min(0)
+    grid = np.zeros(ki.max(0) + 1, dtype=bool); grid[tuple(ki.T)] = True
+    lab, n = ndimage.label(grid, structure=np.ones((3, 3, 3)))
+    ref = lab[tuple(ki.T)] - 1
+    got, n2 = P._label_occupied_cells(ki)
+    assert n2 == n >= 3
+    # the same partition (labels may be numbered differently)
+    pairs = set(zip(ref.tolist(), got.tolist()))
+    assert len(pairs) == n and len({a for a, _ in pairs}) == n and len({b for _, b in pairs}) == n

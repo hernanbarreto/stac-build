@@ -80,15 +80,15 @@ def test_the_gap_grid_is_world_anchored_an_extra_point_changes_only_its_cell(mon
     x ∈ [0.15, 0.199] → cell 1): ONE component. One extra point at x = −0.002 moved the old grid
     by 2 mm and put the fragments in cells 0 and 2 — two components, a split candidate out of a
     flyer. World-anchored, the extra point lands in cell −1, adjacent to cell 0: still one."""
-    import scipy.ndimage as ndi                       # the module the split calls `ndimage.label` on
+    import segmentation.pipeline as _pl                # the split labels the occupied cells (sparse)
     seen = []
-    real = ndi.label
+    real = _pl._label_occupied_cells
 
-    def _label(grid, structure=None):
-        lab, n = real(grid, structure=structure)
+    def _label(ki):
+        comp, n = real(ki)
         seen.append(int(n))
-        return lab, n
-    monkeypatch.setattr(ndi, "label", _label)
+        return comp, n
+    monkeypatch.setattr(_pl, "_label_occupied_cells", _label)
     rng = np.random.default_rng(5)
     a = np.column_stack([rng.uniform(0.0, 0.05, 3000), rng.uniform(0.0, 0.05, 3000), rng.uniform(0.0, 0.05, 3000)])
     b = np.column_stack([rng.uniform(0.15, 0.199, 3000), rng.uniform(0.0, 0.05, 3000), rng.uniform(0.0, 0.05, 3000)])
