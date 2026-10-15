@@ -174,3 +174,59 @@ def test_a_cluttered_floor_is_still_a_straight_plane_and_a_blob_is_not(tmp_path)
     assert by[1]["kind"] == "plane" and by[1]["manhattan"]["snapped"] and by[1]["p95_mm"] > 60.0, \
         "the clutter's p95 is reported, the floor stays a straight plane"
     assert 2 not in by and "2" in rep["manhattan"]["not_a_surface"] and rep["manhattan"]["not_a_surface"]["2"] < 0.75
+
+
+def test_an_s_shaped_wall_becomes_frame_aligned_planes_with_exact_offsets(tmp_path):
+    """USER 2026-10-15: a wall of three parallel runs (0, +0.30 m, 0) joined by two returns — one
+    plane cannot explain it; the Manhattan decomposition gives five planes on the frame: the runs
+    on one axis with their exact offsets (the first and third ONE plane), the returns on the other."""
+    import open3d as o3d
+    from reconstruction.surface_fit.scene import fit_scene
+    rng = np.random.default_rng(41)
+
+    def patch(n, x, y0, y1, z0, z1, normal):
+        # points on a vertical patch: x fixed (normal x) or y fixed (normal y)
+        if normal == "x":
+            P = np.column_stack([np.full(n, x), rng.uniform(y0, y1, n), rng.uniform(z0, z1, n)])
+            P[:, 0] += rng.normal(0, 0.003, n)
+        else:
+            P = np.column_stack([rng.uniform(y0, y1, n), np.full(n, x), rng.uniform(z0, z1, n)])
+            P[:, 1] += rng.normal(0, 0.003, n)
+        return P
+    run1 = patch(20000, 0.0, 0.0, 2.0, 0.0, 2.5, "x")
+    run2 = patch(20000, 0.3, 2.0, 4.0, 0.0, 2.5, "x")
+    run3 = patch(20000, 0.0, 4.0, 6.0, 0.0, 2.5, "x")
+    ret1 = patch(5000, 2.0, 0.0, 0.3, 0.0, 2.5, "y")     # the return at y = 2, x ∈ [0, 0.3]
+    ret2 = patch(5000, 4.0, 0.0, 0.3, 0.0, 2.5, "y")
+    wall = np.vstack([run1, run2, run3, ret1, ret2])
+    floor = _plane_pts(np.array([0, 0, 1.0]), 0.0, (4, 4), 30000, 42) + np.array([1.0, 3.0, 0.0])
+    cloud = np.vstack([floor, wall])
+    out = tmp_path / "output"
+    out.mkdir()
+    o3d.io.write_point_cloud(str(out / "cleaned_cloud.ply"), o3d.geometry.PointCloud(o3d.utility.Vector3dVector(cloud)))
+    seg = {"instances": [{"id": 1, "instance_id": 1, "label": "floor", "globalIndices": list(range(len(floor)))},
+                         {"id": 2, "instance_id": 2, "label": "wall",
+                          "globalIndices": list(range(len(floor), len(floor) + len(wall)))}]}
+    (out / "segmentation_result.json").write_text(json.dumps(seg))
+    rep = fit_scene(tmp_path, overrides={"consolidate_method": "none", "models": ["plane"]},
+                    hole_audit=False, texture_objects=False, decompose=False,
+                    decompose_min_points=1500, decompose_min_frac=0.05, decompose_max_primitives=8)
+    by = {r["instance_id"]: r for r in rep["fitted"]}
+    w = by[2]["manhattan"]
+    # the first and third runs are ONE plane (x = 0) — the extraction claims them together
+    assert w["decomposed"] and len(w["parts"]) == 4, w
+    assert all(p["snapped"] for p in w["parts"])
+    axes = [p["axis"] for p in w["parts"]]
+    assert axes[0] == "X" and axes[1] == "X" and axes[2] == "Z" and axes[3] == "Z", axes
+    assert 39000 < w["parts"][0]["n_points"] < 43000 and 19000 < w["parts"][1]["n_points"] < 23000   # corners shared within 4 cm
+    assert w["residue_frac"] < 0.05
+    assert rep["manhattan"]["frame"]["up_from_instance"] == 1, "up = the floor, not the heavier wall"
+    side = json.loads((out / "surface_fit" / "wall_2" / "manhattan.json").read_text())
+    assert side["decomposed"] and len(side["parts"]) == 4
+    # the exported mesh spans the whole S: both offsets and the full length
+    import trimesh
+    mesh = trimesh.load(str(out / "surface_fit" / "wall_2" / "surface.glb"), force="mesh")
+    V = np.asarray(mesh.vertices, float)
+    assert V[:, 0].min() < 0.02 and V[:, 0].max() > 0.28 and V[:, 1].min() < 0.1 and V[:, 1].max() > 5.9
+    xs = np.unique(np.round(V[:, 0], 2))
+    assert 0.0 in xs and 0.3 in xs, f"the runs sit at exactly 0 and 0.30 m: {xs[:8]}"

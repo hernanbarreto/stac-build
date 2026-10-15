@@ -51,9 +51,18 @@ def scene_frame(normals: Sequence[np.ndarray], weights: Sequence[float], up_hint
         e1, e2 = _orthobasis(up_hint)
         return {"up": up_hint, "X": e1, "Z": e2, "up_from": None, "up_tilt_deg": 0.0,
                 "azimuth_deg": 0.0, "n_walls": 0}
-    # up = the heaviest marked plane, sign along the hint
-    h = int(np.argmax(w))
-    up = n[h] * (1.0 if n[h] @ up_hint >= 0 else -1.0)
+    # up = the heaviest marked plane among those near the hint (within snap_deg of it — the
+    # floor on every scene shot so far; a scene with no such plane keeps the hint), sign along
+    # the hint. Never the heaviest plane blindly: a long wall outweighing a small floor patch
+    # would turn the frame on its side.
+    cos_min = float(np.cos(np.deg2rad(snap_deg)))
+    near = [i for i in range(len(n)) if abs(float(n[i] @ up_hint)) >= cos_min]
+    if near:
+        h = int(near[int(np.argmax(w[near]))])
+        up = n[h] * (1.0 if n[h] @ up_hint >= 0 else -1.0)
+    else:
+        h = None
+        up = up_hint
     tilt = float(np.rad2deg(np.arccos(np.clip(abs(up @ up_hint), 0.0, 1.0))))
     e1, e2 = _orthobasis(up)
     # the walls: normals within snap_deg of horizontal (relative to the measured up)

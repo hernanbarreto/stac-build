@@ -19,7 +19,7 @@ Hernán Barreto - Ingerop IN3 Session IV - STAC
 from __future__ import annotations
 
 import logging
-from typing import List, Tuple
+from typing import Optional, Sequence, List, Tuple
 
 import numpy as np
 
@@ -37,8 +37,10 @@ def extract_primitives(pts: np.ndarray, ctx: FitContext,
                        min_frac_remaining: float = 0.10,
                        max_primitives: int = 6,
                        max_fit_points: int = 200_000,
-                       tag: str = "") -> Tuple[List[tuple], np.ndarray]:
-    """Iterative largest-support-first primitive extraction.
+                       tag: str = "",
+                       kinds: Optional[Sequence[str]] = None) -> Tuple[List[tuple], np.ndarray]:
+    """Iterative largest-support-first primitive extraction (``kinds``: the primitives tried,
+    default every one — the Manhattan decomposition asks for planes only).
 
     Returns (parts, remaining_mask): ``parts`` is a list of
     ``(kind, model, member_mask)`` with ``member_mask`` over the INPUT points;
@@ -59,7 +61,7 @@ def extract_primitives(pts: np.ndarray, ctx: FitContext,
         else:
             fit_pts = sub
         best = None
-        for kind in PRIMITIVES:
+        for kind in (kinds or PRIMITIVES):
             fitter = FITTERS.get(kind)
             if fitter is None:
                 continue

@@ -206,13 +206,48 @@ def fit_scene(session_dir: Path,
                     within = (float(np.mean(np.abs(np.asarray(fs.model.signed_distance(raw_seg))) <= sd))
                               if len(raw_seg) else 0.0)
                     if within < float(manhattan_min_inlier_frac):
-                        man_rejected[int(iid)] = within
-                        logger.info("scene: %s_%s — marked Manhattan but not a surface: %.0f%% of its "
-                                    "points within %.0f mm of the plane, under "
-                                    "manhattan_min_inlier_frac %.2f (p95 %.1f mm): the configured "
-                                    "ladder decides", label, iid, 100 * within, 1000 * sd,
-                                    manhattan_min_inlier_frac, fs.report.stats.p95_mm)
-                        fs = None
+                        # MANHATTAN DECOMPOSITION (USER 2026-10-15, the S-shaped wall): one plane
+                        # does not explain it — planes, the largest first, each snapped to the
+                        # frame below (parallel runs on one axis with their exact offsets, the
+                        # returns perpendicular), coplanar runs one plane, exact edges between
+                        # them; what no plane explains is declared, never meshed as a blob
+                        from .decompose import extract_primitives
+                        from .escalate import FitContext
+                        ctx_m = FitContext(world_up=_UP, scene_centroid=centroid,
+                                           dist_thresh=sd,
+                                           ransac_iters=int(kwargs.get("ransac_iters", 500)),
+                                           min_inlier_frac=0.02)
+                        parts, rem = extract_primitives(
+                            pts, ctx_m, inlier_dist=sd,
+                            min_points=int(decompose_min_points),
+                            min_frac_remaining=float(decompose_min_frac),
+                            max_primitives=int(decompose_max_primitives),
+                            tag=f"manhattan {label}_{iid}", kinds=("plane",))
+                        explained = (float(sum(int(m.sum()) for _k, _m, m in parts)) / len(pts)
+                                     if len(pts) else 0.0)
+                        if parts and explained >= float(manhattan_min_inlier_frac):
+                            parts = sorted(parts, key=lambda t: -int(t[2].sum()))
+                            k0, m0, mask0 = parts[0]
+                            fs = evaluate_model(m0, kind="plane",
+                                                escalation_path=["plane", "manhattan_parts"],
+                                                orig=raw_seg[mask0], instance_id=iid, label=label,
+                                                **eval_kwargs)
+                            fs.from_decompose = True
+                            fs.manhattan_parts = [(m, raw_seg[mask]) for _k, m, mask in parts]
+                            fs.manhattan_residue = float(rem.mean()) if len(rem) else 0.0
+                            logger.info("scene: %s_%s — marked Manhattan: one plane explains %.0f%%, "
+                                        "%d planes explain %.0f%% (residue %.0f%% declared)",
+                                        label, iid, 100 * within, len(parts), 100 * explained,
+                                        100 * fs.manhattan_residue)
+                        else:
+                            man_rejected[int(iid)] = max(within, explained)
+                            logger.info("scene: %s_%s — marked Manhattan but not a surface: one plane "
+                                        "explains %.0f%%, %d planes %.0f%% of its points within "
+                                        "%.0f mm, under manhattan_min_inlier_frac %.2f (p95 %.1f mm): "
+                                        "the configured ladder decides", label, iid, 100 * within,
+                                        len(parts), 100 * explained, 1000 * sd,
+                                        manhattan_min_inlier_frac, fs.report.stats.p95_mm)
+                            fs = None
                 if fs is not None:
                     man_planes.add(int(iid))
                 elif [str(m) for m in (kwargs.get("models") or [])] != ["plane"]:
@@ -281,23 +316,60 @@ def fit_scene(session_dir: Path,
                  if int(f.instance_id) in man_planes and isinstance(f.model, PlaneModel)]
         if m_idx:
             from .manhattan import regularize_manhattan
+            # every marked plane of the scene: the single-plane objects and every part of the
+            # decomposed ones — ONE frame, one snap, coplanar merge across objects
+            entries = []           # (fitted index, part index or None, model, points)
+            for i in m_idx:
+                f = fitted[i]
+                parts_i = getattr(f, "manhattan_parts", None)
+                if parts_i:
+                    for k, (m, pk) in enumerate(parts_i):
+                        entries.append((i, k, m, pk))
+                else:
+                    entries.append((i, None, f.model, seg_points[f.instance_id]))
             snapped, man_report = regularize_manhattan(
-                [fitted[i].model for i in m_idx],
-                [float(fitted[i].n_input_points) for i in m_idx],
-                [seg_points[fitted[i].instance_id] for i in m_idx],
-                up_hint=_UP, snap_deg=float(manhattan_snap_deg),
+                [e[2] for e in entries], [float(len(e[3])) for e in entries],
+                [e[3] for e in entries], up_hint=_UP, snap_deg=float(manhattan_snap_deg),
                 coplanar_tol_mm=float(coplanar_tol_mm),
-                ids=[int(fitted[i].instance_id) for i in m_idx])
-            for i, m_new, rec in zip(m_idx, snapped, man_report["objects"]):
+                ids=[int(fitted[e[0]].instance_id) for e in entries])
+            by_obj: Dict[int, list] = {}
+            for e, m_new, rec in zip(entries, snapped, man_report["objects"]):
+                by_obj.setdefault(e[0], []).append((e[1], m_new, rec, e[3]))
+            for i, rows in by_obj.items():
                 old = fitted[i]
                 _cb(instance_id=old.instance_id, phase="manhattan", elapsed=time.time() - t0)
-                fs2 = evaluate_model(
-                    m_new, kind="plane", escalation_path=old.escalation_path,
-                    orig=seg_points[old.instance_id],
-                    instance_id=old.instance_id, label=old.label, **eval_kwargs)
-                fs2.regularized = bool(rec.get("snapped"))
-                fs2.manhattan = rec
-                fitted[i] = fs2
+                if rows[0][0] is None:                       # a single plane
+                    _k, m_new, rec, pts_i = rows[0]
+                    fs2 = evaluate_model(
+                        m_new, kind="plane", escalation_path=old.escalation_path,
+                        orig=seg_points[old.instance_id],
+                        instance_id=old.instance_id, label=old.label, **eval_kwargs)
+                    fs2.regularized = bool(rec.get("snapped"))
+                    fs2.manhattan = rec
+                    fitted[i] = fs2
+                    continue
+                # a decomposed object: every part evaluated on its OWN points with its snapped
+                # plane; the largest is the instance's surface, the others its parts
+                surfs = []
+                for k, m_new, rec, pts_k in sorted(rows, key=lambda r: -len(r[3])):
+                    fk = evaluate_model(m_new, kind="plane",
+                                        escalation_path=["plane", "manhattan_parts"],
+                                        orig=pts_k, instance_id=old.instance_id, label=old.label,
+                                        **eval_kwargs)
+                    fk.regularized = bool(rec.get("snapped"))
+                    fk.from_decompose = True
+                    fk.manhattan = {**rec, "part": int(k), "n_points": int(len(pts_k))}
+                    surfs.append(fk)
+                primary = surfs[0]
+                primary.manhattan = {**primary.manhattan, "decomposed": True,
+                                     "parts": [sf.manhattan for sf in surfs],
+                                     "residue_frac": round(float(getattr(old, "manhattan_residue", 0.0)), 4)}
+                fitted[i] = primary
+                if len(surfs) > 1:
+                    extra_parts[int(old.instance_id)] = surfs[1:]
+                logger.info("scene: %s_%s — Manhattan decomposition: %d plane(s) on the frame, "
+                            "residue %.0f%% declared", old.label, old.instance_id, len(surfs),
+                            100 * float(getattr(old, "manhattan_residue", 0.0)))
             man_report["not_a_surface"] = {str(k): round(v, 3) for k, v in man_rejected.items()}
     elif manhattan:
         man_report = {"objects": [], "not_a_surface": {str(k): round(v, 3) for k, v in man_rejected.items()}}
@@ -340,7 +412,11 @@ def fit_scene(session_dir: Path,
                 if getattr(old, "manhattan", None):
                     fs2.manhattan = old.manhattan
                 fitted[i] = fs2
-        snap_edges([f for f in fitted if isinstance(f.model, PlaneModel)],
+        # the decomposition parts of the Manhattan objects meet their neighbours — and each
+        # other (the S-wall's returns) — on exact intersection lines too
+        snap_edges([f for f in fitted if isinstance(f.model, PlaneModel)]
+                   + [pp for parts in extra_parts.values() for pp in parts
+                      if isinstance(pp.model, PlaneModel)],
                    snap_dist_m=snap_edge_dist_m, report=reg_report)
 
     # ── export ──
