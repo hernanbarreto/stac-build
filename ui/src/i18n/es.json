@@ -973,7 +973,9 @@
     "objectStarted": "Objeto: reconstruyendo {n} objetos en segundo plano",
     "objectError": "El objeto generativo falló. {detail}",
     "meshStarted": "Malla: RANSAC + Poisson para {n} objetos en segundo plano",
-    "meshError": "El mallado falló. {detail}"
+    "meshError": "El mallado falló. {detail}",
+    "refresh": "Actualizar lista",
+    "refreshHint": "Vuelve a listar los meshes en disco y agrega los nuevos sin descargar la {@session}"
   },
   "resume": {
     "title": "Segmentación incompleta",

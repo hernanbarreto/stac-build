@@ -973,7 +973,9 @@
     "objectStarted": "Object: reconstructing {n} objects in the background",
     "objectError": "The generative object failed. {detail}",
     "meshStarted": "Mesh: RANSAC + Poisson for {n} objects in the background",
-    "meshError": "Meshing failed. {detail}"
+    "meshError": "Meshing failed. {detail}",
+    "refresh": "Refresh list",
+    "refreshHint": "Re-list the meshes on disk and add the new ones without unloading the {@session}"
   },
   "resume": {
     "title": "Incomplete segmentation",

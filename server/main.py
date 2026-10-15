@@ -1238,6 +1238,8 @@ async def lifespan(app: FastAPI):
     # in a thread — the weights take minutes and must not delay the API.
     asyncio.get_running_loop().run_in_executor(
         None, _semantic_reload_if_idle, "server startup")
+    # the mesh folder watch (USER 2026-10-15): meshes from any writer reach the open viewers
+    _keep_bg_task(_mesh_watch_loop(float(cfg["server"]["mesh_watch_interval_s"])), "MeshWatch")
 
     # Warm the floor-seal memo of every scan at boot, in one low-priority thread (USER
     # 2026-10-09: "las nubes deben cargarse inmediatamente"): a verdict missing from the
@@ -5100,6 +5102,7 @@ async def shape_list(session_id: str):
     a second roundtrip per object.
     """
     ctx = _ctx(session_id)
+    _mesh_watch_register(session_id, ctx.output_dir)
     shape_dir = ctx.output_dir / "shape"
     if not shape_dir.exists():
         return {"ok": True, "shapes": []}
@@ -5430,6 +5433,70 @@ def _fuse_unexplained_poisson(output_dir: Path, frames_dir: Path, iid: int,
     print(f"[Mesh] {label}_{iid}: fused fitted surface + Poisson remainder "
           f"({len(gi):,} unexplained pts) → {dst_glb.name}")
     return int(len(gi))
+
+
+# ── MESH FOLDER WATCH (USER 2026-10-15: "al generarse el glb de cualquier método se cargue
+# automáticamente en la lista") — a mesh written by ANY writer (the Mesh / Object buttons, the
+# perfection modes, a CLI run outside the backend) appears in every open viewer without
+# unloading the session: the backend snapshots the mesh folders of every session a viewer
+# listed (tsdf/<folder>/*.glb, shape/<folder>/*.glb) and, every
+# `server.mesh_watch_interval_s`, broadcasts tsdf_ready for the folders that appeared.
+_mesh_watch: Dict[str, Dict[str, Any]] = {}      # session_id → {"output_dir", "tsdf": set, "shape": set}
+_mesh_watch_lock = threading.Lock()
+
+
+def _mesh_folders(output_dir: Path) -> Dict[str, set]:
+    out = {}
+    for kind in ("tsdf", "shape"):
+        d = Path(output_dir) / kind
+        names = set()
+        if d.is_dir():
+            for f in d.iterdir():
+                try:
+                    if f.is_dir() and any(f.glob("*.glb")):
+                        names.add(f.name)
+                except OSError:
+                    continue
+        out[kind] = names
+    return out
+
+
+def _mesh_watch_register(session_id: str, output_dir: Path) -> None:
+    """Start (or keep) watching a session's mesh folders. The first registration snapshots what is
+    there NOW; a later one never overwrites the snapshot (a mesh that landed between a listing and
+    the next tick must still be announced)."""
+    with _mesh_watch_lock:
+        if session_id in _mesh_watch:
+            _mesh_watch[session_id]["output_dir"] = Path(output_dir)
+            return
+        snap = _mesh_folders(Path(output_dir))
+        _mesh_watch[session_id] = {"output_dir": Path(output_dir), **snap}
+
+
+async def _mesh_watch_loop(interval_s: float) -> None:
+    while True:
+        await asyncio.sleep(interval_s)
+        with _mesh_watch_lock:
+            items = [(sid, dict(rec)) for sid, rec in _mesh_watch.items()]
+        for sid, rec in items:
+            try:
+                now = await asyncio.get_running_loop().run_in_executor(None, _mesh_folders, rec["output_dir"])
+            except Exception:  # noqa: BLE001 — a vanished session is simply not announced
+                continue
+            for kind in ("tsdf", "shape"):
+                new = sorted(now[kind] - rec[kind])
+                if new:
+                    try:
+                        await viewer_manager.broadcast_text(json.dumps(
+                            {"type": "tsdf_ready", "session_id": sid, "stage": f"watch:{kind}",
+                             "count": len(new), "folders": new}))
+                        print(f"[Mesh] watch: {len(new)} new {kind} mesh folder(s) in {sid}: {new}")
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[Mesh] watch notify failed (non-fatal): {e}")
+            with _mesh_watch_lock:
+                if sid in _mesh_watch:
+                    _mesh_watch[sid]["tsdf"] = now["tsdf"]
+                    _mesh_watch[sid]["shape"] = now["shape"]
 
 
 async def _notify_tsdf_ready(session_id: str, stage: str, count: int) -> None:
@@ -6867,6 +6934,7 @@ async def scene_objects_remove(request: Request):
 async def tsdf_list(session_id: str):
     """List all TSDF meshes for a session (viewer auto-load)."""
     ctx = _ctx(session_id)
+    _mesh_watch_register(session_id, ctx.output_dir)
     tsdf_dir = ctx.output_dir / "tsdf"
     if not tsdf_dir.exists():
         return {"ok": True, "shapes": []}

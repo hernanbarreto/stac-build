@@ -797,7 +797,10 @@ function App() {
   }, [])
 
   // Same for TSDF mesh list.
-  const refreshTsdfMeshList = useCallback(async (sessionId: string) => {
+  // `resetVisibility` (default true) follows a viewer reset (reloadTsdf / session load) that drops
+  // every per-instance mesh; false = an in-place refresh (USER 2026-10-15: a new mesh folder from any
+  // writer joins the list while the shown meshes keep their state)
+  const refreshTsdfMeshList = useCallback(async (sessionId: string, resetVisibility: boolean = true) => {
     try {
       const res = await fetch(`/api/segmentation/tsdf/list/${sessionId}`)
       if (!res.ok) { setTsdfMeshes([]); return }
@@ -823,7 +826,7 @@ function App() {
           // always resets to unchecked — checking it triggers the on-demand
           // download in the Viewport (setTsdfVisibility).
           visible: typeof s.meta?.instance_id === 'number'
-            ? false
+            ? (resetVisibility ? false : (prevVis.get(s.folder) ?? false))
             : (prevVis.get(s.folder) ?? true),
         }))
       })
@@ -2413,7 +2416,7 @@ function App() {
             onStatusMessage={setStatusMessage}
             onSegments={list => { setSegments(list); refreshUnsegmentedCount(activeSession) }}
             onEraseLedger={() => reloadSegments(activeSession)}
-            onTsdfReady={sid => refreshTsdfMeshList(sid)}
+            onTsdfReady={sid => { refreshTsdfMeshList(sid, false); refreshShapeMeshList(sid) }}
             onSceneObjectsChanged={setPlacedObjects}
             onSceneObjectSelected={id => { setSceneObjSel(id); setAlignTarget(''); setAlignTargets(id != null ? (viewportRef.current?.getSceneAlignTargets() || []) : []) }}
             onPipelineProgress={handlePipelineProgress}
@@ -2663,7 +2666,8 @@ function App() {
         onToggle={id => setTsdfSelected(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })}
         onSetSelected={ids => setTsdfSelected(ids)}
         tsdfStatus={tsdfStatus} tsdfProgress={tsdfProgress} tsdfOverall={tsdfOverall} tsdfRunning={tsdfRunning} shapeRunning={shapeRunning} shapeProgress={shapeProgress} shapeOverall={shapeOverall}
-        onObject={runObjectMeshing} onMesh={runMesh} />
+        onObject={runObjectMeshing} onMesh={runMesh}
+        onRefresh={async () => { if (!activeSession) return; await viewportRef.current?.refreshMeshes?.(activeSession); await refreshTsdfMeshList(activeSession, false); await refreshShapeMeshList(activeSession) }} />
 
       <AutosegmentDialog open={autosegOpen} sessionId={activeSession} state={autosegState} loading={autosegLoading}
         scans={projectScans.filter((sc: any) => sc.kind !== 'fused').map((sc: any) => ({ key: sc.key, label: `${sc.date} ${sc.label}` }))}

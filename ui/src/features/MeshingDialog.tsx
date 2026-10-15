@@ -5,7 +5,7 @@
  * Live phase per instance for BOTH jobs; existing meshes are overwritten.
  */
 import { useEffect, useState } from 'react'
-import { Box, CheckSquare, Puzzle, Square } from 'lucide-react'
+import { Box, CheckSquare, Puzzle, RefreshCw, Square } from 'lucide-react'
 import type { SegmentInstance } from '../components/Viewport'
 import { Dialog } from '../components/ui/Dialog'
 import { Button } from '../components/ui/Button'
@@ -38,6 +38,8 @@ interface MeshingDialogProps {
   shapeOverall: OverallProgress
   onObject: () => void
   onMesh: () => void
+  /** re-list the session's mesh folders and add the new ones in place (USER 2026-10-15) */
+  onRefresh?: () => void
 }
 
 const PHASE_TONE: Record<string, BadgeTone> = { starting: 'info', integrating: 'brand', extracting: 'info', surface_fit: 'brand', done: 'ok', error: 'err' }
@@ -73,6 +75,11 @@ export function MeshingDialog(p: MeshingDialogProps) {
     <Dialog open={p.open} title={t('meshing.title')} onClose={p.onClose} icon={<Puzzle aria-hidden />} size="lg"
       footer={
         <>
+          {p.onRefresh && (
+            <Button variant="ghost" icon={<RefreshCw aria-hidden />} onClick={p.onRefresh} title={t('meshing.refreshHint')}>
+              {t('meshing.refresh')}
+            </Button>
+          )}
           <Button variant="secondary" icon={<Box aria-hidden />} loading={p.shapeRunning} disabled={busy || p.selected.size === 0} onClick={p.onObject} title={t('meshing.objectHint')}>
             {p.shapeRunning ? t('meshing.objectRunning', shapeCounts) : t('meshing.object', { n: p.selected.size })}
           </Button>

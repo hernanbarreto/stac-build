@@ -184,6 +184,8 @@ export interface ViewportHandle {
     setShapeVisibility: (instanceId: number, visible: boolean) => void
     clearShapes: () => void
     reloadTsdf: (sessionId: string) => Promise<void>
+    /** add the meshes written since the last load without unloading the shown ones (2026-10-15) */
+    refreshMeshes: (sessionId: string) => Promise<void>
     setTsdfVisibility: (folder: string, visible: boolean) => void
     clearTsdf: () => void
     reloadReconScene: (sessionId: string) => Promise<void>
@@ -2214,6 +2216,70 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
     }, [clearAllTsdf, loadTsdfMeshEntry, onStatusMessage])
 
+    // ── INCREMENTAL mesh refresh (USER 2026-10-15: a GLB from any method must appear in the
+    // list and the scene without unloading the session): list again and add only the folders
+    // not yet in the scene — loaded meshes keep their visibility; per-instance TSDF meshes stay
+    // lazy (pending until toggled), ShapeR meshes load at once as the full load does. Without a
+    // group yet (no mesh was ever loaded) the full loader runs.
+    const addNewTsdfEntries = useCallback(async (sessionId: string): Promise<number> => {
+        const parent = potreeLoaderRef.current?.getOctreeGroup() || sceneRef.current
+        if (!parent) return 0
+        if (!tsdfGroupRef.current) { await loadTsdfIntoGroup(sessionId, parent); return tsdfPendingRef.current.size }
+        let res: Response
+        try { res = await fetch(`/api/segmentation/tsdf/list/${sessionId}`) } catch { return 0 }
+        if (!res.ok) return 0
+        const data = await res.json()
+        const meshes = (data?.shapes || []) as TsdfListEntry[]
+        const group = tsdfGroupRef.current
+        if (!group) return 0
+        let added = 0
+        for (const sh of meshes) {
+            const inScene = group.children.some(c => c.name === `tsdf-${sh.folder}`)
+            if (inScene || tsdfPendingRef.current.has(sh.folder) || tsdfLoadingRef.current.has(sh.folder)) continue
+            added += 1
+            if (typeof sh.meta?.instance_id === 'number') { tsdfPendingRef.current.set(sh.folder, sh); continue }
+            try { await loadTsdfMeshEntry(sh) } catch (e) { console.warn(`[Viewport] failed to load TSDF mesh ${sh.glb_url}`, e) }
+        }
+        return added
+    }, [loadTsdfIntoGroup, loadTsdfMeshEntry])
+
+    const addNewShapeEntries = useCallback(async (sessionId: string): Promise<number> => {
+        const parent = potreeLoaderRef.current?.getOctreeGroup() || sceneRef.current
+        if (!parent) return 0
+        if (!shapesGroupRef.current) { await loadShapesIntoGroup(sessionId, parent); return shapesByInstanceRef.current.size }
+        let res: Response
+        try { res = await fetch(`/api/segmentation/shape/list/${sessionId}`) } catch { return 0 }
+        if (!res.ok) return 0
+        const data = await res.json()
+        const shapes = (data?.shapes || []) as Array<{ folder: string; glb_url: string; meta: any }>
+        const group = shapesGroupRef.current
+        if (!group) return 0
+        if (!gltfLoaderRef.current) gltfLoaderRef.current = makeGltfLoader()
+        const loader = gltfLoaderRef.current
+        let added = 0
+        for (const sh of shapes) {
+            if (group.children.some(c => c.name === `shape-${sh.folder}`)) continue
+            try {
+                const gltf = await loader.loadAsync(sh.glb_url)
+                if (shapesGroupRef.current !== group) return added
+                const meshGroup = new THREE.Group()
+                meshGroup.name = `shape-${sh.folder}`
+                meshGroup.userData = { meta: sh.meta, folder: sh.folder }
+                meshGroup.add(gltf.scene)
+                group.add(meshGroup)
+                const iid = sh.meta?.instance_id
+                if (typeof iid === 'number') {
+                    shapesByInstanceRef.current.set(iid, meshGroup)
+                    paintShape(meshGroup, instColorRef.current.get(iid))
+                }
+                added += 1
+            } catch (e) {
+                console.warn(`[Viewport] failed to load mesh ${sh.glb_url}`, e)
+            }
+        }
+        return added
+    }, [loadShapesIntoGroup, paintShape])
+
     // ── Reconstruction-v2 scene loader (mirrors ShapeR / TSDF; own group) ──
     const clearAllReconScene = useCallback(() => {
         const group = reconSceneGroupRef.current
@@ -2621,6 +2687,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const parent = loader?.getOctreeGroup() || sceneRef.current
             if (!parent) return
             await loadTsdfIntoGroup(sessionId, parent)
+        },
+        refreshMeshes: async (sessionId: string) => {
+            // USER 2026-10-15: pick up every mesh folder written since the last load, in place
+            await addNewTsdfEntries(sessionId)
+            await addNewShapeEntries(sessionId)
         },
         setTsdfVisibility: (folder: string, visible: boolean) => {
             const meshGroup = tsdfGroupRef.current?.children
@@ -4706,15 +4777,16 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const handleJsonMessage = useCallback((msg: Record<string, unknown>) => {
         // ── Potree LOD: load octree via HTTP ──
         if (msg.type === 'tsdf_ready') {
-            // freshly-published meshes (poisson / pgsr stage finished) — load
-            // them into the scene and let App refresh the panel list
+            // freshly-published meshes (a Mesh / Object stage, a perfection mode, the backend's
+            // folder watch for any other writer) — added to the scene WITHOUT unloading what is
+            // shown (USER 2026-10-15), then App refreshes the panel lists
             // (user 2026-08-31: meshes must appear the moment they finish)
             const sid = msg.session_id as string
+            const stage = String(msg.stage || '')
             if (sid && sid === activeSessionRef.current) {
-                const parent = potreeLoaderRef.current?.getOctreeGroup() || sceneRef.current
-                if (parent) loadTsdfIntoGroup(sid, parent)
-                onTsdfReadyRef.current?.(sid, msg.stage as string)
-                if (onStatusMessage) onStatusMessage(tt('vp.meshesReady', { n: msg.count as number, stage: msg.stage as string }))
+                const job = stage.includes('shape') ? addNewShapeEntries(sid) : addNewTsdfEntries(sid)
+                job.then(() => onTsdfReadyRef.current?.(sid, stage)).catch(() => onTsdfReadyRef.current?.(sid, stage))
+                if (onStatusMessage) onStatusMessage(tt('vp.meshesReady', { n: msg.count as number, stage }))
             }
             return
         }

@@ -37,6 +37,8 @@ server:
   host: "0.0.0.0"
   port: 8765
   static_dir: "../static"   # Relative to server/
+  mesh_watch_interval_s: 5  # USER 2026-10-15: every open viewer learns of a new per-object mesh folder
+                            # (output/tsdf/*, output/shape/*) from ANY writer within this many seconds
 
   # Access-log lines the UI generates by POLLING, dropped from console AND file
   # (both come from the same stream — scripts/start.sh tees it). USER
