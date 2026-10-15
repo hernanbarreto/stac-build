@@ -13,17 +13,17 @@ point for the border snap), the RANSAC 0.6 s on a 400 k subsample, the residual 
   pinned cuBLAS workspace, no scatter.
 - :func:`trimmed_quad_mesh_t`: the occupancy is ``isin`` over the unique cell ids (no index
   write), the disc dilation a convolution, the kept quads gathers, the node remap
-  ``searchsorted`` over the unique corners; the border snap keeps its exact cKDTree nearest
-  point but over the points of the cells near the overhanging vertices only (every
-  overhanging vertex is within support_radius + cell of a point, so a 4-cell band holds its
-  nearest point) — the same vertices as the numpy recipe.
+  ``searchsorted`` over the unique corners; the border snap finds each vertex's exact nearest
+  point on the device (fine-cell test for the surely-interior vertices, chunked ``cdist`` over
+  the points of the cells around the others) — the same vertices as the numpy recipe, without
+  the cKDTree over every point (2 s on pccr's floor).
 
 The device: ``surface_fit.fit_device`` (cuda | cpu; cuda with no card FAILS) or
 :func:`use_device` (the synthetic tests → cpu, tests/conftest.py). The meshing workers run
 under torch's deterministic mode STRICT."""
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 import torch
@@ -183,26 +183,82 @@ def trimmed_quad_mesh_t(uv: np.ndarray, resolution: float, support_radius: float
     verts_uv = torch.stack([umin + gi.to(torch.float64) * res, vmin + gj.to(torch.float64) * res], dim=1)
 
     # border snap (support.py's rule): every vertex farther than ~half a cell from ANY measured
-    # point moves onto its nearest point — searched among the points of the cells within a
-    # 4-cell band of the overhanging vertices (every such vertex is within support_radius +
-    # cell of a point: the band holds its nearest point; the tree is thousands of points, not
-    # millions)
+    # point moves onto its nearest point. On the device, exact and bounded: a vertex whose own
+    # FINE cell (half the tolerance) holds a point is within the tolerance for sure; the others
+    # get their exact nearest point among the points of the cells around them (cdist in
+    # chunks, the first minimum); the overhanging ones get their exact nearest point within
+    # support_radius + cell (every such vertex has one). The cKDTree over every point (2 s on
+    # pccr's floor) is gone; the vertices are the numpy recipe's.
+    tol = max(0.6 * res, 1e-6)
+    fine = tol / 2.0
+    fw = int(torch.floor((U[:, 0] - u0) / fine).max()) + 2
+    fh = int(torch.floor((U[:, 1] - v0) / fine).max()) + 2
+    pfi = torch.clamp(torch.floor((U[:, 0] - u0) / fine).to(torch.int64), 0, fw - 1)
+    pfj = torch.clamp(torch.floor((U[:, 1] - v0) / fine).to(torch.int64), 0, fh - 1)
+    plin = pfj * fw + pfi
+    occ_f = torch.isin(torch.arange(fh * fw, device=dev), torch.unique(plin)).reshape(fh, fw)
+    vfi = torch.clamp(torch.floor((verts_uv[:, 0] - u0) / fine).to(torch.int64), 0, fw - 1)
+    vfj = torch.clamp(torch.floor((verts_uv[:, 1] - v0) / fine).to(torch.int64), 0, fh - 1)
+    unsure = (~occ_f[vfj, vfi]).nonzero()[:, 0]
+
+    # the points sorted by fine cell (a CSR over the grid: cell → [start, start + count))
+    order = torch.sort(plin, stable=True).indices
+    plin_s = plin[order]
+    cells_u, counts = torch.unique_consecutive(plin_s, return_counts=True)
+    starts = torch.searchsorted(plin_s, cells_u)
+    K = int(counts.max())
+    n_cells = int(len(cells_u))
+
+    def _nearest(vsel: torch.Tensor, radius_cells: int):
+        """(distance, global point index) of the EXACT nearest point of each selected vertex
+        among the points of the fine cells within ``radius_cells`` of the vertex's cell — every
+        point of every such cell is tested (the cells' counts are read, the longest decides the
+        gather width), chunked over the vertices; +inf and index −1 with no point there."""
+        nv_ = int(len(vsel))
+        if nv_ == 0:
+            return (torch.zeros(0, dtype=torch.float64, device=dev),
+                    torch.zeros(0, dtype=torch.int64, device=dev))
+        r_ = int(radius_cells)
+        off = torch.arange(-r_, r_ + 1, device=dev)
+        dj, di = torch.meshgrid(off, off, indexing="ij")
+        dj = dj.reshape(-1)
+        di = di.reshape(-1)                                     # (C,)
+        C = int(len(dj))
+        kk = torch.arange(K, device=dev)
+        d_all = torch.empty(nv_, dtype=torch.float64, device=dev)
+        i_all = torch.empty(nv_, dtype=torch.int64, device=dev)
+        step = max(1, int(2e7 // max(C * K, 1)))
+        for a in range(0, nv_, step):
+            vs = vsel[a:a + step]
+            cj = vfj[vs][:, None] + dj[None, :]
+            ci = vfi[vs][:, None] + di[None, :]
+            inside = (cj >= 0) & (cj < fh) & (ci >= 0) & (ci < fw)
+            cid = torch.clamp(cj, 0, fh - 1) * fw + torch.clamp(ci, 0, fw - 1)
+            pos = torch.clamp(torch.searchsorted(cells_u, cid), max=n_cells - 1)
+            hit = inside & (cells_u[pos] == cid)
+            st = starts[pos]
+            ct = torch.where(hit, counts[pos], torch.zeros_like(counts[pos]))
+            idx = st[:, :, None] + kk[None, None, :]              # (v, C, K)
+            valid = kk[None, None, :] < ct[:, :, None]
+            pidx = order[torch.clamp(idx, max=len(order) - 1)]
+            diff = U[pidx] - verts_uv[vs][:, None, None, :]
+            dist = torch.sqrt((diff * diff).sum(dim=-1))
+            dist = torch.where(valid, dist, torch.full_like(dist, float("inf")))
+            dm, im = torch.min(dist.reshape(len(vs), -1), dim=1)    # the FIRST minimum
+            d_all[a:a + step] = dm
+            i_all[a:a + step] = torch.where(torch.isfinite(dm), pidx.reshape(len(vs), -1).gather(1, im[:, None])[:, 0],
+                                            torch.full_like(im, -1))
+        return d_all, i_all
+
+    d_un, _ = _nearest(unsure, int(np.ceil(tol / fine)) + 1)
+    over = unsure[d_un > tol]
     verts_np = verts_uv.cpu().numpy()
     faces_np = faces.cpu().numpy().astype(np.int64)
-    vi = torch.clamp(torch.floor((verts_uv[:, 0] - u0) / occ_cell).to(torch.int64), 0, w - 1)
-    vj = torch.clamp(torch.floor((verts_uv[:, 1] - v0) / occ_cell).to(torch.int64), 0, h - 1)
-    vcells = torch.zeros(h * w, dtype=torch.bool, device=dev)
-    vcells = torch.isin(torch.arange(h * w, device=dev), torch.unique(vj * w + vi)).reshape(h, w)
-    band_r = int(np.ceil((float(support_radius) + res) / occ_cell)) + 1
-    band = _dilate(vcells, band_r)
-    cand = band.reshape(-1)[lin].cpu().numpy()
-    from scipy.spatial import cKDTree
-    sub = uv_np[cand] if cand.any() else uv_np
-    d, nearest = cKDTree(sub).query(verts_np, k=1)
-    overhang = d > max(0.6 * res, 1e-6)
-    if overhang.any():
+    if len(over):
+        _, i_ov = _nearest(over, int(np.ceil((float(support_radius) + res) / fine)) + 1)
+        found = i_ov >= 0                                       # a vertex with no point in reach stays
         verts_np = verts_np.copy()
-        verts_np[overhang] = sub[nearest[overhang]]
+        verts_np[over[found].cpu().numpy()] = U[i_ov[found]].cpu().numpy()
         tri = verts_np[faces_np]
         area2 = np.abs((tri[:, 1, 0] - tri[:, 0, 0]) * (tri[:, 2, 1] - tri[:, 0, 1])
                        - (tri[:, 2, 0] - tri[:, 0, 0]) * (tri[:, 1, 1] - tri[:, 0, 1]))
