@@ -2875,6 +2875,10 @@ surface_fit:
                               # 88 mm (clutter, chair bases, the measured undulation) — that p95 is the
                               # finding a straight floor reports. Under the share (a chair, a valve)
                               # the configured ladder decides
+  manhattan_part_min_frac: 0.05  # BOUND (declared): the decomposition (always tried on a marked object)
+                              # keeps a plane as a PART when it holds at least this share of the
+                              # object's points — an S-wall's runs (20 % each) are parts, a floor's
+                              # clutter planes are not; one surviving part = a single plane
                               # (fitted against the CLOSED support outline — the boundary's
                               # intent — so grid raggedness doesn't force everything to 'raw')
   # ── REGULARIZED POISSON (USER 2026-08-29: "poisson primero, y sobre poisson

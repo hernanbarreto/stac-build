@@ -149,6 +149,21 @@ def test_the_keys_are_declared():
     from reconstruction.surface_fit.scene import scene_config_kwargs
     kw = scene_config_kwargs(cfg)
     assert kw["manhattan"] is True and kw["manhattan_snap_deg"] > 0 and 0 < kw["manhattan_min_inlier_frac"] < 1
+    assert 0 < kw["manhattan_part_min_frac"] < 0.5
+
+
+def test_the_frame_takes_the_sessions_up_from_the_floor_transform(tmp_path):
+    """pccr's raw cloud is Y-up (baked orientation, floor_transform.npz = identity): the Manhattan
+    up is Rᵀ·ŷ, never the fit's z-up default — which read the floor as a wall (2026-10-15)."""
+    from reconstruction.surface_fit.scene import _session_up
+    out = tmp_path / "output"
+    out.mkdir()
+    assert np.allclose(_session_up(out), [0, 0, 1]), "no transform: the fit's default"
+    np.savez(out / "floor_transform.npz", s=1.0, R=np.eye(3), t=np.zeros(3))
+    assert np.allclose(_session_up(out), [0, 1, 0])
+    R = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], float)       # display y = raw z
+    np.savez(out / "floor_transform.npz", s=1.0, R=R, t=np.zeros(3))
+    assert np.allclose(_session_up(out), [0, 0, 1])
 
 
 def test_a_cluttered_floor_is_still_a_straight_plane_and_a_blob_is_not(tmp_path):
