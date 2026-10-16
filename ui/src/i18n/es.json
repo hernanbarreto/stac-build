@@ -194,8 +194,7 @@
     "flyers": "Voladores (diagnóstico)",
     "monoDetail": "Capa de detalle PointDiT",
     "mixedUnresolved": "Píxeles mezclados sin resolver",
-    "cubes": "Puntos como cubos",
-    "ambient": "Luz ambiente"
+    "cubes": "Puntos como cubos"
   },
   "palette": {
     "title": "Paleta de comandos",
@@ -446,6 +445,7 @@
   },
   "display": {
     "pointSize": "Tamaño de punto",
+    "light": "Luz",
     "detail": "Detalle",
     "millionPoints": "{n} M puntos",
     "confidence": "Confianza"

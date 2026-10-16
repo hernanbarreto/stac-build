@@ -31,7 +31,7 @@ import {
   Move, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D, Building2, Package, ArrowUpFromLine, Trash2, Unlock,
   Clock, Scale, BarChart3, Home, Camera, SlidersHorizontal, Sparkles, Undo2, Brush, Layers, Star, Terminal,
   ListTodo, FileCheck2, Puzzle, PanelLeftClose, PanelLeftOpen, Wand2,
-  Circle, Sun, Lightbulb, FlaskConical, Pin, Pentagon,
+  Circle, Sun, FlaskConical, Pin, Pentagon,
 } from 'lucide-react'
 import { useI18n, getT } from './i18n'
 import { useLayout } from './layout/LayoutContext'
@@ -144,9 +144,10 @@ function App() {
   // 2026-10-16 (USER: "destildado … para que siempre arranque con puntos")
   const [cubesOn, setCubesOn] = useState(false)
   useEffect(() => { viewportRef.current?.setPointShape(cubesOn ? 'cube' : 'disc') }, [cubesOn])
-  // ambient light (USER 2026-10-16: "luz ambiente en la escena para que se vea mejor la nube"); on by default
-  const [ambientOn, setAmbientOn] = useState(true)
-  useEffect(() => { viewportRef.current?.setAmbientLight(ambientOn) }, [ambientOn])
+  // light intensity (USER 2026-10-16: "luz ambiente en la escena para que se vea mejor la nube" /
+  // "¿se puede agregar intensidad de luz?"): the Display slider, 1 = the captured colour, saved in the prefs
+  const [lightIntensity, setLightIntensity] = useState(1.0)
+  useEffect(() => { viewportRef.current?.setAmbientLight(lightIntensity) }, [lightIntensity])
   // the precision core's diagnostic layers (flyers, mono detail, mixed unresolved): off by default, per session
   const [flyersOn, setFlyersOn] = useState(false)
   const [monoDetailOn, setMonoDetailOn] = useState(false)
@@ -1551,12 +1552,14 @@ function App() {
         setPointSize(typeof prefs.pointSize === 'number' ? prefs.pointSize : 5.0)
         setConfidenceThreshold(typeof prefs.confidenceThreshold === 'number' ? prefs.confidenceThreshold : 0.0)
         setPointBudget(typeof prefs.pointBudget === 'number' ? prefs.pointBudget : 10_000_000)
+        setLightIntensity(typeof prefs.lightIntensity === 'number' ? prefs.lightIntensity : 1.0)
         setTimeout(() => { prefsLoadedRef.current = true }, 300)
       })
       .catch(() => {
         setPointSize(5.0)
         setConfidenceThreshold(0.0)
         setPointBudget(10_000_000)
+        setLightIntensity(1.0)
         prefsLoadedRef.current = true
       })
   }, [pointCount])  
@@ -1573,11 +1576,11 @@ function App() {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ pointSize, confidenceThreshold, pointBudget })
+        body: JSON.stringify({ pointSize, confidenceThreshold, pointBudget, lightIntensity })
       }).catch(() => {})
     }, 500)
     return () => { if (prefsSaveTimer.current) clearTimeout(prefsSaveTimer.current) }
-  }, [pointSize, confidenceThreshold, pointBudget])  
+  }, [pointSize, confidenceThreshold, pointBudget, lightIntensity])  
 
   // ── Sábana: Generate comparison (auto_match  compare  show via Potree) ──
   // Open the comparison dialog (shows toggle inside)
@@ -2174,7 +2177,6 @@ function App() {
       { id: 'fullscreen', label: t('toolbar.fullscreen'), icon: <Maximize aria-hidden />, shortcut: 'F11', onSelect: toggleFullscreen },
       { id: 'shadows', label: t('menu.shadows'), icon: <Sun aria-hidden />, checked: shadowsOn, onSelect: () => setShadowsOn(v => !v) },
       { id: 'cubes', label: t('menu.cubes'), icon: <Package aria-hidden />, checked: cubesOn, onSelect: () => setCubesOn(v => !v) },
-      { id: 'ambient', label: t('menu.ambient'), icon: <Lightbulb aria-hidden />, checked: ambientOn, onSelect: () => setAmbientOn(v => !v) },
       { id: 'flyers', label: t('menu.flyers'), icon: <Circle aria-hidden />, checked: flyersOn, disabled: !hasSession, onSelect: () => setFlyersOn(v => !v) },
       { id: 'monoDetail', label: t('menu.monoDetail'), icon: <Circle aria-hidden />, checked: monoDetailOn, disabled: !hasSession, onSelect: () => setMonoDetailOn(v => !v) },
       { id: 'mixedUnresolved', label: t('menu.mixedUnresolved'), icon: <Circle aria-hidden />, checked: unresolvedOn, disabled: !hasSession, onSelect: () => setUnresolvedOn(v => !v) },
@@ -2518,7 +2520,7 @@ function App() {
                   } catch (e) { report(t('brush.mergeFailed', { detail: String(e) }), 'err') }
                 },
               }}
-              display={{ pointSize, onPointSize: setPointSize, budgetM: pointBudget / 1_000_000, onBudgetM: v => setPointBudget(v * 1_000_000), hasConfidence, confidence: confidenceThreshold, onConfidence: setConfidenceThreshold }}
+              display={{ pointSize, onPointSize: setPointSize, light: lightIntensity, onLight: setLightIntensity, budgetM: pointBudget / 1_000_000, onBudgetM: v => setPointBudget(v * 1_000_000), hasConfidence, confidence: confidenceThreshold, onConfidence: setConfidenceThreshold }}
               view={{ hasCameraPoses, showCameraPoses, onToggleCameraPoses: () => setShowCameraPoses(v => !v), showGrid, onToggleGrid: () => setShowGrid(v => !v), showAxes, onToggleAxes: () => setShowAxes(v => !v), onFullscreen: toggleFullscreen }}
               color={{
                 mode: sabanaVisible ? 'deviation' : colorMode, hasWitness, hasDeviation: hasSabanaResult, mvThreshold, onMvThreshold: setMvThreshold,

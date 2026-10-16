@@ -126,9 +126,9 @@ export interface ViewportHandle {
     setShadows: (on: boolean) => void
     /** how a point is drawn: a disc, or a cube of its own size (USER 2026-10-04, as PointDiT's page) */
     setPointShape: (shape: 'disc' | 'cube') => void
-    /** ambient light (USER 2026-10-16): the cloud at its captured colour and the scene's ambient raised
-     *  for the meshes; off = the previous look */
-    setAmbientLight: (on: boolean) => void
+    /** light intensity (USER 2026-10-16): the cloud's colour × intensity (1 = as captured, 0.85 = the
+     *  previous look, up to 2) and the scene's ambient light 0.25 + 0.30 × intensity for the meshes */
+    setAmbientLight: (intensity: number) => void
     /** a diagnostic layer of the precision core (/api/precision/layer): 'flyers' (a red mixed edge ·
      *  b orange view-inconsistent · c blue low texture · d grey other), 'mono_detail' (grey detail ·
      *  green front · blue back), 'mixed_unresolved' (red) */
@@ -347,9 +347,9 @@ const fragmentShader = `
   varying float vSpritePx;
   varying float vFocalPx;
   uniform int uPointShape;
-  // ambient light on the cloud (USER 2026-10-16: "luz ambiente en la escena para que se vea mejor la
-  // nube"): 1 = the points at their captured colour and the cubes' faces lifted by a soft ambient;
-  // 0 = the previous look (every point darkened by 15 %, cube faces from 0.62)
+  // light intensity on the cloud (USER 2026-10-16: "luz ambiente en la escena para que se vea mejor la
+  // nube" / "¿se puede agregar intensidad de luz?"): the points' captured colour times this (1 = as
+  // captured, 0.85 = the previous look, up to 2); the cubes' faces lifted with it
   uniform float uAmbient;
   uniform mat3 uViewRotInv;      // view → world rotation (the cube's axes are the world's)
   uniform float highlightIntensity;
@@ -433,14 +433,14 @@ ${POINT_SHADOW_FRAG_DECL}
       else if (tn == tmin.y) n = vec3(0.0, -sign(dirW.y), 0.0);
       else n = vec3(0.0, 0.0, -sign(dirW.z));
       vec3 L = normalize(vec3(0.35, 0.85, 0.4));
-      float base = mix(0.62, 0.80, uAmbient);
+      float base = clamp(0.62 + 0.18 * uAmbient, 0.62, 0.92);
       cubeShade = base + (1.0 - base) * max(dot(n, L), 0.0) + 0.08 * abs(n.y);
     } else {
       if (dist > 0.5) discard;
       alpha = 1.0 - smoothstep(0.35, 0.5, dist);
     }
     
-    vec3 finalColor = vColor * mix(0.85, 1.0, uAmbient) * cubeShade;
+    vec3 finalColor = vColor * uAmbient * cubeShade;
 
     if (uColorMode == 1) {
       // status: verified green, single_witness yellow, mask_conflict red,
@@ -3129,13 +3129,13 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const ep = epochLayerRef.current?.material.uniforms
             if (ep && ep.uPointShape) ep.uPointShape.value = v
         },
-        setAmbientLight: (on: boolean) => {
-            const v = on ? 1.0 : 0.0
+        setAmbientLight: (intensity: number) => {
+            const v = Math.min(2.0, Math.max(0.0, Number.isFinite(intensity) ? intensity : 1.0))
             const u = materialRef.current?.uniforms
             if (u && u.uAmbient) u.uAmbient.value = v
             const ep = epochLayerRef.current?.material.uniforms
             if (ep && ep.uAmbient) ep.uAmbient.value = v
-            if (ambientLightRef.current) ambientLightRef.current.intensity = on ? 0.55 : 0.25
+            if (ambientLightRef.current) ambientLightRef.current.intensity = 0.25 + 0.30 * v
         },
         setPrecisionLayer: async (name: PrecisionLayer, on: boolean, sessionId: string | null) => {
             const old = precisionLayersRef.current.get(name)
@@ -3468,8 +3468,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
         // Discrete lights (still useful for shadow direction / sharper highlights;
         // env map provides the soft ambient/diffuse).
-        // USER 2026-10-16 ("luz ambiente en la escena"): 0.55 with the View-menu option on (the meshes'
-        // textures read at their colour), 0.25 (the previous look) off — setAmbientLight
+        // USER 2026-10-16 ("luz ambiente en la escena" / "intensidad de luz"): 0.25 + 0.30 × the Display
+        // slider's intensity (1 → 0.55: the meshes' textures read at their colour; 0 → the previous 0.25)
         const ambientLight = new THREE.AmbientLight(tokenHex(VP.light), 0.55)
         ambientLightRef.current = ambientLight
         scene.add(ambientLight)
@@ -3603,7 +3603,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 uSelBoxOn: { value: false },
                 uSelBoxInv: { value: new THREE.Matrix4() },
                 uPointShape: { value: 0 },   // DISCS by default (USER 2026-10-16: "que siempre arranque con puntos"; the cubes of 2026-10-04 are the View-menu option)
-                uAmbient: { value: 1.0 },    // ambient light on the cloud, on by default (USER 2026-10-16; App.tsx ambientOn)
+                uAmbient: { value: 1.0 },    // light intensity on the cloud (USER 2026-10-16; App.tsx lightIntensity, the Display slider)
                 uSpriteMax: { value: 40.0 },  // the flythrough lowers it (fill rate at eye level)
                 uViewportH: { value: container.clientHeight || 1 },
                 uViewRotInv: { value: new THREE.Matrix3() },
