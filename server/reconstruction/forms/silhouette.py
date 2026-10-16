@@ -25,7 +25,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 import numpy as np
 import torch
 
-from .fit import REL_TOL, fit_cloud, huber, subsample
+from .fit import fit_cloud, huber, subsample
 from .templates import Template, _t
 
 Z_FRONT = 0.05   # m: a point closer than this to the camera is behind / at its centre (no pixel)
@@ -217,15 +217,24 @@ class Silhouettes:
         """(precision distances of the visible samples, recall distances of the boundary pixels),
         both in metres at the object's depth; None when the view cannot judge."""
         px, py, z, visible, inside = self._project(view, X)
-        if int(visible.sum()) == 0 or int(view.boundary.shape[0]) == 0:
+        H, W = view.hw
+        front = (z > Z_FRONT) & (px >= 0) & (px <= W - 1) & (py >= 0) & (py <= H - 1)
+        if int(visible.sum()) == 0 or int(front.sum()) == 0 or int(view.boundary.shape[0]) == 0:
             return None, None
-        P = torch.stack([px[visible], py[visible]], 1)           # (S, 2)
-        D = torch.cdist(P, view.boundary)                        # (S, B) pixels
-        d_s = D.min(dim=1).values
+        # PRECISION: the VISIBLE samples outside the mask (a hidden sample tells nothing)
+        Pv = torch.stack([px[visible], py[visible]], 1)          # (Sv, 2)
+        Dv = torch.cdist(Pv, view.boundary)                      # (Sv, B) pixels
+        d_s = Dv.min(dim=1).values
         prec_px = torch.where(inside[visible], torch.zeros_like(d_s), d_s)
         foot_s = z[visible] / float(view.f_px)                    # one pixel at the sample's depth
         prec_m = prec_px * foot_s
-        rec_px = D.min(dim=0).values                              # (B,)
+        # RECALL: every mask boundary pixel against EVERY sample in front of the camera — the
+        # object's outline in the photo must be reached by the form's outline whichever of its
+        # samples happen to be hidden (recall over the visible samples alone chased the few left
+        # visible under furniture into a runaway — pccr work_surface_1108)
+        Pf = torch.stack([px[front], py[front]], 1)              # (Sf, 2)
+        Df = torch.cdist(Pf, view.boundary)                      # (Sf, B)
+        rec_px = Df.min(dim=0).values                             # (B,)
         foot_b = view.z_boundary / float(view.f_px)
         rec_m = rec_px * foot_b
         return (prec_m, foot_s), (rec_m, foot_b)
@@ -309,36 +318,40 @@ def correct(template: Template, P: np.ndarray, sigma: float, sil: Silhouettes, *
     t0 = time.time()
     Pc = _t(subsample(P, surface_samples, seed), dev)
     bar = sil.chamfer(Pc)                                    # the instrument's own agreement
-    history: List[np.ndarray] = []
+    with torch.no_grad():
+        start = sil.chamfer(template.samples(int(surface_samples)))
+    history: List[np.ndarray] = [start]                      # block −1 = the start: judged too
     medians: List[float] = []
     changes: List[dict] = []
     losses: List[float] = []
+    states: List[list] = [template.state()]                  # the state of every block, the start first
+    best = {"i": 0, "median": float(np.nanmedian(start)) if np.isfinite(start).any() else float("inf")}
 
     def judge(block: int, loss: float) -> bool:
-        """Stop when the block neither lowered the joint loss beyond the optimiser's own
-        tolerance nor improved the per-view consensus beyond the views' own noise (the paired
-        bootstrap over the views: with hundreds of views it is sharp, with a handful the loss
-        tolerance carries)."""
+        """After every block: the per-view consensus against the previous block's (the paired
+        bootstrap over the views). The best block so far is remembered — "iterar hasta
+        encontrar la forma con el mejor consenso" — and the fit stops when a block no longer
+        improves the consensus beyond the views' own noise."""
         with torch.no_grad():
             X = template.samples(int(surface_samples))
         ch = sil.chamfer(X)
         history.append(ch)
         losses.append(float(loss))
-        medians.append(float(np.nanmedian(ch)) if np.isfinite(ch).any() else float("nan"))
-        if len(history) < 2:
-            return False
+        states.append(template.state())
+        med = float(np.nanmedian(ch)) if np.isfinite(ch).any() else float("inf")
+        medians.append(med)
+        if med < best["median"]:
+            best["i"], best["median"] = len(states) - 1, med
         c = _heldout_change(history[-2], history[-1], confidence, seed)
-        prev, last = losses[-2], losses[-1]
-        loss_moves = (prev - last) > REL_TOL * max(abs(prev), 1e-12)
-        changes.append({"block": block, "loss_moves": bool(loss_moves), **c})
-        return not (c["improves"] or loss_moves)
+        changes.append({"block": block, **c})
+        return not c["improves"]
 
-    with torch.no_grad():
-        start = sil.chamfer(template.samples(int(surface_samples)))
     rec = fit_cloud(template, P, sigma, lr=lr, block_iterations=block_iterations, max_blocks=max_blocks,
                     huber_k=huber_k, max_points=max_points, seed=seed, dev=dev,
                     extra_loss=lambda: sil.loss(template, surface_samples), judge=judge,
                     measure_extents=False, log=log)
+    # the form with the best consensus is the one published, never the last step
+    template.load_state(states[best["i"]])
     with torch.no_grad():
         X = template.samples(int(surface_samples))
         final = sil.chamfer(X)
@@ -351,6 +364,7 @@ def correct(template: Template, P: np.ndarray, sigma: float, sil: Silhouettes, *
     else:
         verdict = "undecided"
     out = {"blocks": rec["blocks"], "iterations": rec["iterations"], "stop": rec["stop"],
+           "best_block": int(best["i"]) - 1,                 # −1 = the start (nothing improved it)
            "n_views": len(sil.views), "n_views_judging": int(np.isfinite(final).sum()),
            "consensus_start_m": float(np.nanmedian(start)) if np.isfinite(start).any() else None,
            "consensus_m": medians, "consensus_final_m": float(np.nanmedian(final)) if np.isfinite(final).any() else None,
@@ -365,8 +379,8 @@ def correct(template: Template, P: np.ndarray, sigma: float, sil: Silhouettes, *
            "seconds": round(time.time() - t0, 2)}
     log(f"[forms] corrector: {out['n_views_judging']}/{len(sil.views)} view(s), consensus "
         f"{(out['consensus_start_m'] or 0) * 100:.2f} → {(out['consensus_final_m'] or 0) * 100:.2f} cm "
-        f"(bar {(out['bar_m'] or 0) * 100:.2f} cm), {rec['blocks']} block(s), IoU "
-        f"{(out['iou_median'] or 0):.2f} → {verdict}")
+        f"(bar {(out['bar_m'] or 0) * 100:.2f} cm), {rec['blocks']} block(s), best block "
+        f"{out['best_block']}, IoU {(out['iou_median'] or 0):.2f} → {verdict}")
     return out
 
 

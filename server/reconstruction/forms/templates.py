@@ -295,6 +295,23 @@ class Section:
         holes = [r for r in rings if r is not outer]
         return Polygon(outer, holes=holes)
 
+    def bbox_t(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Half-extents of the section's bounding box as TENSORS — the sample grid of a plate or a
+        cap scales with the section's parameters, so the silhouette term can push an outline (a
+        detached bbox left a panel's outline with no gradient: only its centre moved, into a
+        runaway — pccr work_surface_1108, 2026-10-16)."""
+        s = self.size()
+        k = self.kind
+        if k in ("rect", "rect_hollow"):
+            return s["bx"], s["by"]
+        if k in ("circle", "ring"):
+            return s["r"], s["r"]
+        if k in ("I", "T", "C", "L"):
+            return s["b"] / 2, s["h"] / 2
+        if k == "arch":
+            return s["b"] / 2, s["H"] / 2
+        raise ValueError(k)
+
     def bbox(self) -> Tuple[float, float]:
         """Half-extents of the section's bounding box (numpy)."""
         s = self.sizes_np()
@@ -483,7 +500,7 @@ class Extrusion(Template):
         dev = self.dev
         if self.flat:
             gx, gy = _grid(n, dev)
-            bx, by = self.section.bbox()
+            bx, by = self.section.bbox_t()
             x, y = gx * bx, gy * by
             keep = self.section.sdf(x, y) <= _KEEP_TOL
             z = torch.zeros_like(x)
@@ -501,7 +518,7 @@ class Extrusion(Template):
             g = torch.linspace(-1.0, 1.0, k_cap, dtype=torch.float64, device=dev)
             gx, gy = torch.meshgrid(g, g, indexing="ij")
             gx, gy = gx.reshape(-1), gy.reshape(-1)
-            cbx, cby = self.section.bbox()
+            cbx, cby = self.section.bbox_t()
             cx, cy = gx * cbx, gy * cby
             keep = self.section.sdf(cx, cy) <= _KEEP_TOL
             cx, cy = cx[keep], cy[keep]

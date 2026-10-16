@@ -67,7 +67,8 @@ class FormsConfig:
     max_views: int                # BOUND (cost): views per object in the corrector, largest masks first
     block_iterations: int         # the optimiser runs in blocks; the consensus is judged after each
     max_blocks: int               # BOUND: blocks per fit
-    lr: float                     # the optimiser's step
+    lr: float                     # the optimiser's step (the cloud-only fit)
+    lr_corrector: float           # the optimiser's step in the corrector (metres per step on a centre)
     review_views: int             # overlays shown to the VLM in a review round (the worst views)
     ransac_iters: int             # BOUND (cost): hypotheses per part extraction of a composite
     seed: int                     # every subsample / bootstrap of the stage
@@ -96,6 +97,7 @@ def load_forms_config(config: Dict[str, Any]) -> FormsConfig:
         boundary_px_per_view=int(_req(sec, "boundary_px_per_view")),
         max_views=int(_req(sec, "max_views")), block_iterations=int(_req(sec, "block_iterations")),
         max_blocks=int(_req(sec, "max_blocks")), lr=float(_req(sec, "lr")),
+        lr_corrector=float(_req(sec, "lr_corrector")),
         review_views=int(_req(sec, "review_views")), ransac_iters=int(_req(sec, "ransac_iters")),
         seed=int(_req(sec, "seed")), raw=dict(sec))
     for k in ("views", "max_rounds", "max_tokens", "max_points", "surface_samples",
@@ -103,8 +105,8 @@ def load_forms_config(config: Dict[str, Any]) -> FormsConfig:
               "ransac_iters"):
         if int(getattr(out, k)) < 1:
             raise FormsConfigError(f"forms.{k} must be >= 1, got {getattr(out, k)}")
-    if out.lr <= 0:
-        raise FormsConfigError(f"forms.lr must be > 0, got {out.lr}")
+    if out.lr <= 0 or out.lr_corrector <= 0:
+        raise FormsConfigError(f"forms.lr / lr_corrector must be > 0, got {out.lr} / {out.lr_corrector}")
     if out.device not in ("cuda", "cpu"):
         raise FormsConfigError(f"forms.device must be cuda or cpu, got {out.device!r}")
     return out

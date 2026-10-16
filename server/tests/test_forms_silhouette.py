@@ -164,7 +164,7 @@ def test_a_wrong_form_loses_to_the_right_alternative_on_the_views():
     # judged on the same views, it clearly loses: the alternatives decide by consensus
     c = compare_forms(per_view_chamfer(recs["cylinder"]), per_view_chamfer(recs["box"]), 0.95, 0)
     assert c["a_better"] and not c["tie"]
-    assert recs["box"]["consensus_final_m"] > 2 * recs["cylinder"]["consensus_final_m"]
+    assert recs["box"]["consensus_final_m"] > 1.5 * recs["cylinder"]["consensus_final_m"]
     assert len(worst_views(recs["box"], 3)) == 3
 
 

@@ -2758,7 +2758,9 @@ forms:
   block_iterations: 25        # the optimiser runs in blocks of this many steps; after each block
                               # the consensus is measured and the stop is judged by its own noise
   max_blocks: 40              # BOUND: blocks per fit (a fit that never converges is declared)
-  lr: 0.02                    # the optimiser's step (Adam on the template's parameters)
+  lr: 0.02                    # the optimiser's step (Adam on the template's parameters, the cloud fit)
+  lr_corrector: 0.005         # the corrector's step: Adam moves a centre by up to this many metres
+                              # per step — 0.02 ran a plate 2 m away in four blocks (pccr 2026-10-16)
   review_views: 3             # overlays shown to the VLM in a review round (the worst views)
   ransac_iters: 500           # BOUND (cost): hypotheses per part extraction of a composite (the
                               # RANSAC of the part's own form, scored by support density)

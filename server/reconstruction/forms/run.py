@@ -125,7 +125,7 @@ def fit_candidate(ans: FormAnswer, P: np.ndarray, frame: Frame, sigma: float, fc
     out = {"answer": ans.to_dict(), "template": None, "build": build_rec, "cloud_fit": cloud_rec,
            "corrector": None, "residual": None, "seconds": None}
     if sil is not None and sil.views:
-        out["corrector"] = correct(tpl, P, sigma, sil, lr=fcfg.lr, block_iterations=fcfg.block_iterations,
+        out["corrector"] = correct(tpl, P, sigma, sil, lr=fcfg.lr_corrector, block_iterations=fcfg.block_iterations,
                                    max_blocks=fcfg.max_blocks, huber_k=huber_k, max_points=fcfg.max_points,
                                    surface_samples=fcfg.surface_samples, seed=fcfg.seed, dev=dev,
                                    confidence=confidence, log=log)
