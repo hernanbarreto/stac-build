@@ -71,6 +71,8 @@ class FormsConfig:
     lr_corrector: float           # the optimiser's step in the corrector (metres per step on a centre)
     review_views: int             # overlays shown to the VLM in a review round (the worst views)
     ransac_iters: int             # BOUND (cost): hypotheses per part extraction of a composite
+    mesh: str                     # hull | template — what is published: the measured envelope (the visual
+                                  # hull carved by the TSDF of the object's points) or the fitted form alone
     seed: int                     # every subsample / bootstrap of the stage
     raw: Dict[str, Any] = field(default_factory=dict, compare=False)
 
@@ -99,7 +101,7 @@ def load_forms_config(config: Dict[str, Any]) -> FormsConfig:
         max_blocks=int(_req(sec, "max_blocks")), lr=float(_req(sec, "lr")),
         lr_corrector=float(_req(sec, "lr_corrector")),
         review_views=int(_req(sec, "review_views")), ransac_iters=int(_req(sec, "ransac_iters")),
-        seed=int(_req(sec, "seed")), raw=dict(sec))
+        mesh=str(_req(sec, "mesh")), seed=int(_req(sec, "seed")), raw=dict(sec))
     for k in ("views", "max_rounds", "max_tokens", "max_points", "surface_samples",
               "boundary_px_per_view", "max_views", "block_iterations", "max_blocks", "review_views",
               "ransac_iters"):
@@ -109,6 +111,8 @@ def load_forms_config(config: Dict[str, Any]) -> FormsConfig:
         raise FormsConfigError(f"forms.lr / lr_corrector must be > 0, got {out.lr} / {out.lr_corrector}")
     if out.device not in ("cuda", "cpu"):
         raise FormsConfigError(f"forms.device must be cuda or cpu, got {out.device!r}")
+    if out.mesh not in ("hull", "template"):
+        raise FormsConfigError(f"forms.mesh must be hull or template, got {out.mesh!r}")
     return out
 
 

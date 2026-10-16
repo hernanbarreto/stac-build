@@ -24,12 +24,14 @@ from .composite import build_composite
 from .fit import fit_cloud, residual_report
 from .query import form_of_record, load_record, query_session_forms
 from .review import apply_review, ask_review, overlays_for, review_prompt, verdict_record
+from .hull import hull_mesh
 from .silhouette import Silhouettes, compare_forms, correct, per_view_chamfer, views_from_evidence, worst_views
 from .templates import Frame, Template, build_template
 
 DIR = "forms"
 METHOD = "form"
 METHOD_TSDF = "form_tsdf"
+METHOD_HULL = "hull"
 
 
 # ── the scene frame ────────────────────────────────────────────────────────────
@@ -159,6 +161,7 @@ def run_object(*, iid: int, label: str, safe: str, P: np.ndarray, ans: Optional[
                frame: Frame, sigma: float, fcfg: FormsConfig, huber_k: float, error_factor: float,
                confidence: float, dev, views: list, client=None, catalog: Optional[List[str]] = None,
                frames_dir: Optional[Path] = None, to_native=None, batch_params: Optional[dict] = None,
+               sil: Optional[Silhouettes] = None,
                log: Callable[[str], None] = lambda m: None) -> dict:
     """The whole chain of one object: candidates (the VLM's form, its alternatives in doubt), the
     review rounds in doubt, the chosen template. Returns the record with ``_tpl`` (the template to
@@ -171,7 +174,8 @@ def run_object(*, iid: int, label: str, safe: str, P: np.ndarray, ans: Optional[
         rec["why"] = ("the VLM called it freeform" if ans is not None
                       else "no usable form answer (declared in the form record)")
         return rec
-    sil = Silhouettes(views, sigma, huber_k, dev, **(batch_params or {})) if views else None
+    if sil is None:
+        sil = Silhouettes(views, sigma, huber_k, dev, **(batch_params or {})) if views else None
     cands: List[dict] = []
     catalog = catalog or list(fcfg.catalog)
 
@@ -404,12 +408,34 @@ def run_session(session_dir, *, instance_ids: Optional[List[int]], fcfg: FormsCo
             elif evidence is not None:
                 views = views_from_evidence(evidence, oids_of.get(iid, []), sigma, fcfg.max_views,
                                             fcfg.boundary_px_per_view, fcfg.seed, log)
+            sil = Silhouettes(views, sigma, huber_k, dev, **(batch_params or {})) if views else None
+            hull_rec: Optional[dict] = None
+            Vh = Fh = None
+            if fcfg.mesh == "hull" and sil is not None:
+                if progress:
+                    progress(iid, "hull")
+                oc = dict((raw_cfg.get("tsdf") or {}).get("object") or {})
+                pc = raw_cfg["reconstruction"]["precision"]["cloud"]      # the silhouette filter's majority
+                scene_t = evidence._cloud_tensor() if evidence is not None else None
+                Vh, Fh, hull_rec = hull_mesh(P, sil.batches, voxel=float(oc["voxel_length"]),
+                                             trunc=float(oc["sdf_trunc"]), fill_px=int(oc["fill_px"]),
+                                             min_votes=int(pc["silhouette_min_votes"]),
+                                             min_inside_frac=float(pc["silhouette_min_inside_frac"]),
+                                             sigma=sigma, dev=dev, scene=scene_t, session_key=str(out), log=log)
+                if len(Vh) == 0:
+                    Vh = Fh = None
             rec = run_object(iid=iid, label=label, safe=safe, P=P, ans=forms.get(iid), frame=frame, sigma=sigma,
                              fcfg=fcfg, huber_k=huber_k, error_factor=error_factor, confidence=confidence,
                              dev=dev, views=views, client=client, catalog=list(fcfg.catalog),
-                             frames_dir=frames_dir, to_native=to_native, batch_params=batch_params, log=log)
+                             frames_dir=frames_dir, to_native=to_native, batch_params=batch_params, sil=sil,
+                             log=log)
+            rec["hull"] = hull_rec
             tpl: Optional[Template] = rec.get("_tpl")
-            if tpl is not None:
+            if Vh is not None:
+                # the measured envelope is what is published; the fitted form stays in the record
+                V, F = Vh, Fh
+                method = METHOD_HULL
+            elif tpl is not None:
                 if progress:
                     progress(iid, "mesh")
                 V, F = tpl.mesh()
@@ -432,7 +458,11 @@ def run_session(session_dir, *, instance_ids: Optional[List[int]], fcfg: FormsCo
             chosen = (rec["candidates"][rec["chosen"]] if rec.get("chosen") is not None else {})
             cons = chosen.get("corrector") or {}
             meta = {"method": method, "kind": rec.get("form") or "freeform", "instance_id": iid, "label": label,
-                    "textured": False, "provenance": {"form": "vlm_proposed", "pose_and_dims": "tool_measured"},
+                    "textured": False, "provenance": {"form": "vlm_proposed", "pose_and_dims": "tool_measured",
+                                                      "mesh": ("the visual hull of the masks carved by the TSDF of the "
+                                                               "object's points (tool_measured)" if method == METHOD_HULL
+                                                               else "the fitted form")},
+                    "hull": ({k: v for k, v in hull_rec.items() if k != "rounds"} if hull_rec else None),
                     "form": rec.get("form"), "verdict": rec.get("verdict"), "status": rec["status"],
                     "dims_m": chosen.get("dims_m"), "consensus_m": cons.get("consensus_final_m"),
                     "bar_m": cons.get("bar_m"), "iou": cons.get("iou_median"), "n_views": len(views),
@@ -459,6 +489,7 @@ def run_session(session_dir, *, instance_ids: Optional[List[int]], fcfg: FormsCo
     (out / DIR).mkdir(parents=True, exist_ok=True)
     (out / DIR / "forms_run.json").write_text(json.dumps(summary, indent=1))
     log(f"[forms] {len(ok)} published ({sum(1 for o in ok if o['method'] == METHOD)} forms, "
-        f"{sum(1 for o in ok if o['method'] == METHOD_TSDF)} as measured), {len(failed)} failed, "
+        f"{sum(1 for o in ok if o['method'] == METHOD_TSDF)} as measured, "
+        f"{sum(1 for o in ok if o['method'] == METHOD_HULL)} hull), {len(failed)} failed, "
         f"{len(skipped)} skipped in {summary['seconds']} s")
     return summary

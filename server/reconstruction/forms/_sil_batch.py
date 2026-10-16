@@ -103,6 +103,38 @@ class ViewBatch:
             inside = self.mask[idx, ri, ci]
         return px, py, z, front & inb, visible, inside
 
+    def project_one(self, i: int, X: torch.Tensor):
+        """One view of the batch: (px, py, z, front-and-in-bounds) for many points (the scene's
+        whole cloud) without the batch dimension."""
+        R, t = self.R[i], self.t[i]
+        pcam = X @ R.T + t
+        z = pcam[:, 2]
+        front = z > Z_FRONT
+        zs = torch.where(front, z, torch.ones_like(z))
+        x = pcam[:, 0] / zs
+        y = pcam[:, 1] / zs
+        if self.lens is not None:
+            k1, k2, p1, p2, sx, sy = self.lens
+            r2 = x * x + y * y
+            radial = 1.0 + k1 * r2 + k2 * r2 * r2
+            xd = x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x)
+            yd = y * radial + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y
+            u = (self.fx[i] * xd + self.cx[i]) * sx
+            v = (self.fy[i] * yd + self.cy[i]) * sy
+        else:
+            u = self.fx[i] * x + self.cx[i]
+            v = self.fy[i] * y + self.cy[i]
+        if self.grids is not None:
+            rg, mg = self.grids
+            xn = (u - rg.pad_left + 0.5) * rg.scale_x - 0.5 + rg.crop_x
+            yn = (v - rg.pad_top + 0.5) * rg.scale_y - 0.5 + rg.crop_y
+            px = (xn - mg.crop_x + 0.5) / mg.scale_x - 0.5 + mg.pad_left
+            py = (yn - mg.crop_y + 0.5) / mg.scale_y - 0.5 + mg.pad_top
+        else:
+            px, py = u, v
+        inb = front & (px >= 0) & (px <= self.W - 1) & (py >= 0) & (py <= self.H - 1)
+        return px, py, z, inb
+
     def terms(self, X: torch.Tensor):
         """Per view: (precision Huber mean, recall Huber mean, chamfer metres, judges) — the
         Huber means differentiable; ``judges`` marks the views that can judge."""

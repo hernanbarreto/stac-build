@@ -87,20 +87,21 @@ def test_the_session_runs_end_to_end_with_forms_and_as_measured(tmp_path, monkey
                             points_fn=lambda inst: points[int(inst["instance_id"])], sigma=0.005, texture=False)
     assert [o["instance_id"] for o in summary["ok"]] == [1, 2]      # the largest first
     col, plant = summary["ok"]
-    assert col["method"] == "form" and col["form"] == "cylinder" and col["verdict"] == "coincides"
-    assert plant["method"] == "form_tsdf" and plant["status"] == "as_measured"
+    assert col["method"] == "hull" and col["form"] == "cylinder" and col["verdict"] == "coincides"
+    assert plant["method"] == "hull" and plant["status"] == "as_measured"   # views given: its envelope
     assert summary["failed"] == [] and summary["skipped"] == []
     # one query per object, no review (the column coincided)
     assert vlm.calls == ["forms.query", "forms.query"]
     # the published copies the viewer lists, with their meta
     meta = json.loads((out / "tsdf" / "column_1" / "column_1.meta.json").read_text())
-    assert meta["method"] == "form" and meta["kind"] == "cylinder" and meta["dims_m"]["radius_m"] == pytest.approx(0.10, abs=0.004)
-    assert meta["provenance"] == {"form": "vlm_proposed", "pose_and_dims": "tool_measured"}
+    assert meta["method"] == "hull" and meta["kind"] == "cylinder" and meta["dims_m"]["radius_m"] == pytest.approx(0.10, abs=0.004)
+    assert meta["hull"]["n_faces"] > 500 and "visual hull" in meta["provenance"]["mesh"]
+    assert meta["provenance"]["form"] == "vlm_proposed" and meta["provenance"]["pose_and_dims"] == "tool_measured"
     assert (out / "tsdf" / "column_1" / "column_1.glb").exists() and (out / "forms" / "column_1" / "form.glb").exists()
     fit = json.loads((out / "forms" / "column_1" / "form_fit.json").read_text())
     assert fit["chosen"] == 0 and fit["candidates"][0]["corrector"]["n_views"] == 6 and "_tpl" not in fit
     pm = json.loads((out / "tsdf" / "plant_2" / "plant_2.meta.json").read_text())
-    assert pm["method"] == "form_tsdf" and "freeform" in pm["why"]
+    assert pm["method"] == "hull" and "freeform" in pm["why"]
     run = json.loads((out / "forms" / "forms_run.json").read_text())
     assert run["n_instances"] == 2 and run["sigma_m"] == 0.005 and "frame" in run
 
@@ -131,7 +132,7 @@ def test_a_doubt_opens_the_review_and_the_views_choose(tmp_path, monkeypatch):
                             views_fn=lambda iid, oids: views,
                             points_fn=lambda inst: points[int(inst["instance_id"])], sigma=0.005, texture=False)
     col = summary["ok"][0]
-    assert col["form"] == "cylinder" and col["method"] == "form"
+    assert col["form"] == "cylinder" and col["method"] == "hull"
     assert vlm.calls == ["forms.query", "forms.review"]
     fit = json.loads((out / "forms" / "column_1" / "form_fit.json").read_text())
     assert fit["rounds"][0]["kind"] == "review" and fit["rounds"][0]["applied"] is True
