@@ -2297,16 +2297,7 @@ function App() {
   useEffect(() => { viewportRef.current?.setSelectedSegment(selectedSegment?.key ?? null) }, [selectedSegment?.key])
   const hasSabanaResult = !!sessions.find(s => s.id === activeSession)?.hasSabana
 
-  if (authLoading) {
-    return (
-      <div className="stac-login">
-        <SplashOverlay title={t('app.name')} status={t('common.loading')} boot />
-      </div>
-    )
-  }
-
-  if (!user) return <LoginPage />
-
+  // (a hook: before the early returns below — React counts hooks per render)
   // the Instances list's callbacks, stable (the list is memoized — see InstancesPanel)
   const instancesCb = useStableCallbacks({
     onFocusVolume: focusVolume,
@@ -2363,6 +2354,17 @@ function App() {
     onOpenMeshing: openTsdfModal,
     onOpenAutosegment: openAutosegment,
   })
+
+  if (authLoading) {
+    return (
+      <div className="stac-login">
+        <SplashOverlay title={t('app.name')} status={t('common.loading')} boot />
+      </div>
+    )
+  }
+
+  if (!user) return <LoginPage />
+
 
   return (
     <div
