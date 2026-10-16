@@ -158,7 +158,7 @@ def _pick(cands: List[dict], confidence: float, seed: int, log) -> int:
 def run_object(*, iid: int, label: str, safe: str, P: np.ndarray, ans: Optional[FormAnswer],
                frame: Frame, sigma: float, fcfg: FormsConfig, huber_k: float, error_factor: float,
                confidence: float, dev, views: list, client=None, catalog: Optional[List[str]] = None,
-               frames_dir: Optional[Path] = None, to_native=None,
+               frames_dir: Optional[Path] = None, to_native=None, batch_params: Optional[dict] = None,
                log: Callable[[str], None] = lambda m: None) -> dict:
     """The whole chain of one object: candidates (the VLM's form, its alternatives in doubt), the
     review rounds in doubt, the chosen template. Returns the record with ``_tpl`` (the template to
@@ -171,7 +171,7 @@ def run_object(*, iid: int, label: str, safe: str, P: np.ndarray, ans: Optional[
         rec["why"] = ("the VLM called it freeform" if ans is not None
                       else "no usable form answer (declared in the form record)")
         return rec
-    sil = Silhouettes(views, sigma, huber_k, dev) if views else None
+    sil = Silhouettes(views, sigma, huber_k, dev, **(batch_params or {})) if views else None
     cands: List[dict] = []
     catalog = catalog or list(fcfg.catalog)
 
@@ -374,9 +374,12 @@ def run_session(session_dir, *, instance_ids: Optional[List[int]], fcfg: FormsCo
         res = json.loads((out / "segmentation_result.json").read_text())
         oids_of = _oids_by_instance(parent, res.get("absorbed") or {})
     to_native = None
+    batch_params = None
     if evidence is not None:
         from .review import _mask_to_native
+        from .silhouette import batch_params_from_evidence
         to_native = _mask_to_native(evidence.mask_grid)
+        batch_params = batch_params_from_evidence(evidence)
     frame = scene_frame(out, points_of, {k: v for k, v in forms.items() if v is not None}, sigma, huber_k,
                         fcfg.ransac_iters, fcfg.seed, log)
     ok, failed, skipped = [], [], []
@@ -401,7 +404,7 @@ def run_session(session_dir, *, instance_ids: Optional[List[int]], fcfg: FormsCo
             rec = run_object(iid=iid, label=label, safe=safe, P=P, ans=forms.get(iid), frame=frame, sigma=sigma,
                              fcfg=fcfg, huber_k=huber_k, error_factor=error_factor, confidence=confidence,
                              dev=dev, views=views, client=client, catalog=list(fcfg.catalog),
-                             frames_dir=frames_dir, to_native=to_native, log=log)
+                             frames_dir=frames_dir, to_native=to_native, batch_params=batch_params, log=log)
             tpl: Optional[Template] = rec.get("_tpl")
             if tpl is not None:
                 if progress:

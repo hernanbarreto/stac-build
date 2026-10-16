@@ -46,6 +46,10 @@ class View:
     f_px: float                     # focal length on the mask grid (px) — pixels ↔ metres at a depth
     area: int                       # mask pixels
     ztol: Optional[torch.Tensor] = None   # (H, W) float32: the z-buffer's own local spread (see z_spread)
+    fx: float = 0.0                 # the camera of the batched projector (_sil_batch): the record
+    fy: float = 0.0                 # grid's K without a lens, the lens camera's with one
+    cx: float = 0.0
+    cy: float = 0.0
 
     @property
     def hw(self):
@@ -124,7 +128,8 @@ def pinhole_view(fidx: int, c2w: np.ndarray, K: np.ndarray, mask: np.ndarray, zb
     zb = torch.as_tensor(np.asarray(zbuf, np.float32), device=dev)
     b, zb_at = boundary_pixels(m, zb, sigma, fx, boundary_px, seed)
     return View(fidx=int(fidx), cloud_frame=int(fidx), R=R, t=t, proj=proj, mask=m, zbuf=zb,
-                boundary=b, z_boundary=zb_at, f_px=fx, area=int(m.sum()), ztol=z_spread(zb))
+                boundary=b, z_boundary=zb_at, f_px=fx, area=int(m.sum()), ztol=z_spread(zb),
+                fx=fx, fy=fy, cx=cx, cy=cy)
 
 
 def views_from_evidence(ev, oids: Sequence[int], sigma: float, max_views: int, boundary_px: int,
@@ -174,22 +179,43 @@ def views_from_evidence(ev, oids: Sequence[int], sigma: float, max_views: int, b
             return gx, gy
 
         b, zb_at = boundary_pixels(m, zb, sigma, f_px, boundary_px, seed)
+        lens = ev._lens()
+        if lens is None:
+            fx_, fy_, cx_, cy_ = float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])
+        else:
+            fx_, fy_, cx_, cy_ = lens[0], lens[1], lens[2], lens[3]
         views.append(View(fidx=int(fidx), cloud_frame=int(cf), R=R.to(torch.float64), t=t.to(torch.float64),
                           proj=proj, mask=m, zbuf=zb.to(torch.float32), boundary=b, z_boundary=zb_at,
-                          f_px=f_px, area=area, ztol=z_spread(zb)))
+                          f_px=f_px, area=area, ztol=z_spread(zb), fx=fx_, fy=fy_, cx=cx_, cy=cy_))
     log(f"[forms] {len(views)} view(s) of {len(entries)} with a mask (largest first, "
         f"{sum(int(v.boundary.shape[0]) for v in views)} boundary px)")
     return views
 
 
+def batch_params_from_evidence(ev) -> dict:
+    """What the batched projector needs beside the views: the lens (k1 k2 p1 p2, the native →
+    record scales) and the record → mask grid maps."""
+    lens = ev._lens()
+    return {"lens": (None if lens is None else tuple(float(x) for x in lens[4:10])),
+            "grids": (ev.record_grid, ev.mask_grid)}
+
+
 # ── the silhouette term ────────────────────────────────────────────────────────
 
 class Silhouettes:
-    def __init__(self, views: List[View], sigma: float, huber_k: float, dev):
+    def __init__(self, views: List[View], sigma: float, huber_k: float, dev, *, lens=None, grids=None,
+                 chunk: int = 16):
         self.views = list(views)
         self.sigma = max(float(sigma), 1e-6)
         self.k = float(huber_k)
         self.dev = dev
+        from ._sil_batch import ViewBatch
+        self.batches = []
+        for i in range(0, len(self.views), int(chunk)):
+            vb = ViewBatch(self.views[i:i + int(chunk)], dev, lens, grids)
+            vb.k = self.k
+            vb.sigma_t = self.sigma
+            self.batches.append(vb)
 
     def _project(self, view: View, X: torch.Tensor):
         """World points → (px, py, z, visible, inside): visible = in front, in bounds and not
@@ -240,33 +266,36 @@ class Silhouettes:
         return (prec_m, foot_s), (rec_m, foot_b)
 
     def loss(self, template: Template, n_samples: int) -> torch.Tensor:
-        """Mean over the views of (precision + recall) Huber at σ — differentiable in the template."""
-        X = template.samples(int(n_samples))
+        """Mean over the judging views of (precision + recall) Huber — the IMAGE's own resolution
+        (one pixel at the element's depth) is the scale of its evidence (USER: "la nube deforma
+        mucho": where masks and points disagree beyond their noises the images decide the
+        extents, the points the position). Batched over the views, float32, differentiable."""
+        X = template.samples(int(n_samples)).to(torch.float32)
         acc, n = None, 0
-        for v in self.views:
-            prec, rec = self._terms(v, X)
-            if prec is None:
+        for vb in self.batches:
+            prec_h, rec_h, _ch, judges = vb.terms(X)
+            if int(judges.sum()) == 0:
                 continue
-            # the IMAGE's own resolution is the scale of its evidence: one pixel at the depth of
-            # the element (USER: "la nube deforma mucho" — where the masks and the points disagree
-            # beyond their noises, the images decide the extents, the points the position)
-            (prec_m, foot_s), (rec_m, foot_b) = prec, rec
-            term = huber(prec_m / foot_s.detach(), self.k).mean() + huber(rec_m / foot_b, self.k).mean()
+            term = torch.where(judges, prec_h + rec_h, torch.zeros_like(prec_h)).sum()
             acc = term if acc is None else acc + term
-            n += 1
+            n += int(judges.sum())
         if acc is None:
             return torch.zeros((), dtype=torch.float64, device=self.dev)
-        return acc / n
+        return (acc / n).to(torch.float64)
 
     @torch.no_grad()
     def chamfer(self, X: torch.Tensor) -> np.ndarray:
         """Per view: the mean precision + recall distance in metres (NaN: the view cannot judge)."""
         out = np.full(len(self.views), np.nan)
-        for i, v in enumerate(self.views):
-            prec, rec = self._terms(v, X)
-            if prec is None:
-                continue
-            out[i] = 0.5 * (float(prec[0].mean()) + float(rec[0].mean()))
+        X32 = X.to(torch.float32)
+        i = 0
+        for vb in self.batches:
+            _p, _r, ch, judges = vb.terms(X32)
+            chn = ch.detach().cpu().numpy()
+            jn = judges.detach().cpu().numpy()
+            for j in range(vb.n):
+                out[i + j] = float(chn[j]) if jn[j] else np.nan
+            i += vb.n
         return out
 
     @torch.no_grad()
@@ -328,10 +357,10 @@ def correct(template: Template, P: np.ndarray, sigma: float, sil: Silhouettes, *
     best = {"i": 0, "median": float(np.nanmedian(start)) if np.isfinite(start).any() else float("inf")}
 
     def judge(block: int, loss: float) -> bool:
-        """After every block: the per-view consensus against the previous block's (the paired
-        bootstrap over the views). The best block so far is remembered — "iterar hasta
-        encontrar la forma con el mejor consenso" — and the fit stops when a block no longer
-        improves the consensus beyond the views' own noise."""
+        """After every block: the per-view consensus (its median over the views; the paired
+        bootstrap against the previous block is recorded). The best block so far is remembered —
+        "iterar hasta encontrar la forma con el mejor consenso" — and the fit stops at the first
+        block that does not lower it."""
         with torch.no_grad():
             X = template.samples(int(surface_samples))
         ch = sil.chamfer(X)
@@ -339,12 +368,15 @@ def correct(template: Template, P: np.ndarray, sigma: float, sil: Silhouettes, *
         losses.append(float(loss))
         states.append(template.state())
         med = float(np.nanmedian(ch)) if np.isfinite(ch).any() else float("inf")
+        prev_best = best["median"]
         medians.append(med)
         if med < best["median"]:
             best["i"], best["median"] = len(states) - 1, med
         c = _heldout_change(history[-2], history[-1], confidence, seed)
-        changes.append({"block": block, **c})
-        return not c["improves"]
+        changes.append({"block": block, **c, "median_m": med})
+        # stop at the first block that does not lower the best consensus so far (the best state
+        # is what gets published, so a noisy block costs nothing but time)
+        return not (med < prev_best)
 
     rec = fit_cloud(template, P, sigma, lr=lr, block_iterations=block_iterations, max_blocks=max_blocks,
                     huber_k=huber_k, max_points=max_points, seed=seed, dev=dev,
@@ -356,10 +388,17 @@ def correct(template: Template, P: np.ndarray, sigma: float, sil: Silhouettes, *
         X = template.samples(int(surface_samples))
         final = sil.chamfer(X)
         ious = sil.iou(template.samples(int(surface_samples) * 8))
+    # the verdict: a form within the IMAGE's own resolution coincides — one pixel at the object's
+    # depth, per view (the masks cannot testify below it); beyond a pixel it still coincides when
+    # it is not clearly worse than the cloud's own agreement with the masks (the bar); in doubt
+    # only when it is clearly beyond the pixel AND clearly worse than the cloud
+    foot = np.array([(float(v.z_boundary.median()) / v.f_px if v.z_boundary.numel() else np.nan)
+                     for v in sil.views], np.float64)
+    vs_pixel = _heldout_change(foot, final, confidence, seed)        # worsens = clearly beyond a pixel
     vs_bar = _heldout_change(bar, final, confidence, seed)
-    if vs_bar["worsens"]:
+    if vs_pixel["worsens"] and vs_bar["worsens"]:
         verdict = "doubt"
-    elif vs_bar["improves"] or vs_bar["n"] >= 2:
+    elif vs_pixel["n"] >= 2 or vs_bar["n"] >= 2:
         verdict = "coincides"
     else:
         verdict = "undecided"
@@ -370,7 +409,9 @@ def correct(template: Template, P: np.ndarray, sigma: float, sil: Silhouettes, *
            "consensus_m": medians, "consensus_final_m": float(np.nanmedian(final)) if np.isfinite(final).any() else None,
            "bar_m": float(np.nanmedian(bar)) if np.isfinite(bar).any() else None,
            "bar_is": "the object's own cloud points against the same masks (the instrument's agreement)",
-           "changes": changes, "verdict": verdict, "vs_bar": vs_bar,
+           "changes": changes, "verdict": verdict, "vs_bar": vs_bar, "vs_pixel": vs_pixel,
+           "pixel_m": float(np.nanmedian(foot)) if np.isfinite(foot).any() else None,
+           "consensus_px": (float(np.nanmedian(final / foot)) if np.isfinite(final / foot).any() else None),
            "iou_median": float(np.nanmedian(ious)) if np.isfinite(ious).any() else None,
            "per_view": [{"fidx": v.fidx, "chamfer_m": (None if not np.isfinite(final[i]) else float(final[i])),
                          "bar_m": (None if not np.isfinite(bar[i]) else float(bar[i])),
@@ -379,6 +420,7 @@ def correct(template: Template, P: np.ndarray, sigma: float, sil: Silhouettes, *
            "seconds": round(time.time() - t0, 2)}
     log(f"[forms] corrector: {out['n_views_judging']}/{len(sil.views)} view(s), consensus "
         f"{(out['consensus_start_m'] or 0) * 100:.2f} → {(out['consensus_final_m'] or 0) * 100:.2f} cm "
+        f"= {out['consensus_px'] if out['consensus_px'] is not None else float('nan'):.1f} px "
         f"(bar {(out['bar_m'] or 0) * 100:.2f} cm), {rec['blocks']} block(s), best block "
         f"{out['best_block']}, IoU {(out['iou_median'] or 0):.2f} → {verdict}")
     return out

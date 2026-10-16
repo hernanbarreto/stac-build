@@ -783,8 +783,10 @@ def _section_for(ans: FormAnswer, kind_hint: Optional[str], ex_u: float, ex_v: f
     if form == "box":
         return Section("rect", {"bx": ex_u / 2, "by": ex_v / 2}, dev)
     if form == "cylinder":
+        # a hollow cylinder seen from outside shows its lateral surface only: a disc section, the
+        # extrusion OPEN (no caps); the wall is unmeasurable and stays recorded as "hollow"
         r = max(radial, 1e-3)
-        return Section("ring", {"r": r, "t": r * 0.2}, dev) if hollow else Section("circle", {"r": r}, dev)
+        return Section("circle", {"r": r}, dev)
     if form == "profile":
         p = ans.profile
         b, h = max(ex_u, 1e-3), max(ex_v, 1e-3)
@@ -795,8 +797,7 @@ def _section_for(ans: FormAnswer, kind_hint: Optional[str], ex_u: float, ex_v: f
         if p == "rect_hollow":
             return Section("rect_hollow", {"bx": b / 2, "by": h / 2, "t": min(b, h) * 0.1}, dev)
         if p == "round_tube":
-            r = max(radial, 1e-3)
-            return Section("ring", {"r": r, "t": r * 0.2}, dev)
+            return Section("circle", {"r": max(radial, 1e-3)}, dev)
         if p == "rail":
             return Section("I", {"b": b, "h": h, "tf": h * 0.2, "tw": b * 0.3}, dev)
         return Section("rect", {"bx": b / 2, "by": h / 2}, dev)
@@ -875,6 +876,6 @@ def build_template(ans: FormAnswer, P: np.ndarray, frame: Frame, dev, *,
         if panel:
             return Extrusion(form, sec, pose, None, True, dev)
         half = (float(np.percentile(zn, 99.5)) - float(np.percentile(zn, 0.5))) / 2
-        open_ = bool(ans.hollow) and form == "cylinder"
+        open_ = bool(ans.hollow) and (form == "cylinder" or (form == "profile" and ans.profile == "round_tube"))
         return Extrusion(form, sec, pose, max(half, 1e-3), open_, dev)
     raise ValueError(f"no single template for form {form!r}")

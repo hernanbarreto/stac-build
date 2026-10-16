@@ -341,9 +341,9 @@ def build_composite(ans: FormAnswer, P: np.ndarray, frame: Frame, sigma: float, 
     tail = TAIL_SIGMAS * max(float(sigma), 1e-6)
     rho = cloud_density(P, seed)
     rec["band_m"], rec["tail_m"], rec["cloud_density_per_m2"] = band, tail, rho
-    rec["acceptance"] = (f"a part is real when its support density reaches the cloud's own "
-                         f"({rho:.0f} pts/m²) or the spec's first instance's, over the user's "
-                         f"error factor {error_factor:g}")
+    rec["acceptance"] = (f"every instance the VLM named is extracted (≥ 10 inliers); a support density "
+                         f"under the cloud's own ({rho:.0f} pts/m²) or the spec's first instance's, over "
+                         f"the user's error factor {error_factor:g}, is declared weak_support")
     for si, spec in enumerate(ans.parts):
         pa = _part_answer(ans, spec)
         shared = shares_section(spec)
@@ -358,11 +358,17 @@ def build_composite(ans: FormAnswer, P: np.ndarray, frame: Frame, sigma: float, 
                                            ransac_iters, seed + 97 * si + k)
             if inl is None or int(inl.sum()) < 10:
                 break
+            # the VLM's count is the form (USER: "si vlm dice una forma es esa forma"): every
+            # instance it named is extracted; a weak support (the density under the cloud's own,
+            # or the spec's first instance's, over the user's error factor) is DECLARED, never a
+            # veto — a chair's backrest seen from the front alone has a tenth of the seat's
+            # density and is no less real (pccr chair_609, 2026-10-16); the review round and the
+            # consensus judge the whole
             ref = rho if first_density is None else min(rho, first_density)
-            if density < ref / float(error_factor):
+            weak = bool(density < ref / float(error_factor))
+            if weak:
                 log(f"[forms] composite part {spec.name} #{k + 1}: the best {spec.form} has a support "
-                    f"density of {density:.0f} pts/m² against {ref:.0f} — not a part of the cloud")
-                break
+                    f"density of {density:.0f} pts/m² against {ref:.0f} — kept, declared weak")
             sel = idx[inl]
             try:
                 t = build_template(pa, P[sel], frame, dev)
@@ -385,7 +391,7 @@ def build_composite(ans: FormAnswer, P: np.ndarray, frame: Frame, sigma: float, 
             name = f"{spec.name}_{got}" if spec.count > 1 else spec.name
             parts.append((name, t))
             rec["parts"].append({"name": name, "form": spec.form, "points": int(len(sel)),
-                                 "support_density_per_m2": float(density),
+                                 "support_density_per_m2": float(density), "weak_support": weak,
                                  "init": f"the RANSAC of a {spec.form} on the unassigned points "
                                          f"(inliers within {band * 100:.1f} cm = Huber k × σ; "
                                          f"takes its points to {tail * 100:.1f} cm = {TAIL_SIGMAS:g} σ)"})
