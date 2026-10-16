@@ -150,6 +150,8 @@ def test_the_keys_are_declared():
     kw = scene_config_kwargs(cfg)
     assert kw["manhattan"] is True and kw["manhattan_snap_deg"] > 0 and 0 < kw["manhattan_min_inlier_frac"] < 1
     assert 0 < kw["manhattan_part_min_frac"] < 0.5
+    assert kw["manhattan_residue"] == "declare" and kw["tolerance"] == "measured"     # USER 2026-10-16
+    assert kw["tolerance_k"] > 0 and kw["noise_k_neighbours"] >= 4 and kw["noise_sample"] >= 1000
 
 
 def test_the_frame_takes_the_sessions_up_from_the_floor_transform(tmp_path):
@@ -193,10 +195,8 @@ def test_a_cluttered_floor_is_still_a_straight_plane_and_a_blob_is_not(tmp_path)
     assert 2 not in by and "2" in rep["manhattan"]["not_a_surface"]
 
 
-def test_a_desk_top_with_tubular_legs_is_a_straight_top_plus_the_legs_as_measured(tmp_path):
-    """pccr desk 351 (2026-10-15): one plane held 69 % and the ladder bent it (bspline rejected,
-    generic remainder primitives + Poisson). Now: the top is the Manhattan plane and the legs,
-    which no plane holds, are meshed AS MEASURED next to it (unexplained_idx.npy), declared partial."""
+def _desk_session(tmp_path):
+    """pccr desk 351 (2026-10-15): a straight top with four tubular legs no plane holds."""
     import open3d as o3d
     from reconstruction.surface_fit.scene import fit_scene
     rng = np.random.default_rng(13)
@@ -212,13 +212,46 @@ def test_a_desk_top_with_tubular_legs_is_a_straight_top_plus_the_legs_as_measure
     o3d.io.write_point_cloud(str(out / "cleaned_cloud.ply"), o3d.geometry.PointCloud(o3d.utility.Vector3dVector(cloud)))
     seg = {"instances": [{"id": 1, "instance_id": 1, "label": "desk", "globalIndices": list(range(len(cloud)))}]}
     (out / "segmentation_result.json").write_text(json.dumps(seg))
+    return out
+
+
+def test_a_desk_top_is_a_straight_plane_and_its_legs_are_declared_never_cylinders(tmp_path):
+    """USER 2026-10-16: "olvídate de los cilindros … puede estar facetado … sino va a forzar cilindros
+    en donde no aplica". The top is the Manhattan plane; the legs, which no plane holds, are DECLARED
+    with their share and stay as points — no cylinder, no TSDF, no Poisson. The tolerance is the
+    desk's own measured noise (3 mm × k), recorded."""
+    from reconstruction.surface_fit.scene import fit_scene
+    out = _desk_session(tmp_path)
     rep = fit_scene(tmp_path, overrides={"consolidate_method": "none", "models": ["bspline"]},
                     hole_audit=False, texture_objects=False, decompose=False)
     by = {r["instance_id"]: r for r in rep["fitted"]}
     m = by[1]["manhattan"]
     assert by[1]["kind"] == "plane" and m["snapped"] and m["axis"] == "up"
     assert m["partial"] and not m["residue_meshed"] and 0.25 < m["residue_frac"] < 0.35, m
+    assert m["residue"]["declared"] and m["residue"]["n_points"] > 10000 and "cylinders" not in m["residue"], m["residue"]
     assert not (out / "surface_fit" / "desk_1" / "unexplained_idx.npy").exists(), "never Poisson"
+    tol = m["tolerance"]
+    assert tol["from"] == "measured" and 0.002 < tol["noise_sigma_m"] < 0.006 and \
+        abs(tol["tolerance_m"] - tol["tolerance_k"] * tol["noise_sigma_m"]) < 2e-5, tol      # recorded to 5 decimals
+    assert by[1]["parts"] == [], "nothing but the planes is meshed"
+    import trimesh
+    mesh = trimesh.load(str(out / "surface_fit" / "desk_1" / "surface.glb"), force="mesh")
+    V = np.asarray(mesh.vertices, float)
+    assert V[:, 2].min() > 0.7 and V[:, 2].max() < 0.8, "the published mesh is the top alone"
+    side = json.loads((out / "surface_fit" / "desk_1" / "manhattan.json").read_text())
+    assert side["residue"]["declared"] and side["tolerance"]["from"] == "measured"
+
+
+def test_the_bars_route_of_2026_10_15_stays_selectable(tmp_path):
+    """`manhattan_residue: bars_tsdf`: the legs become straight cylinders on the frame, as before."""
+    from reconstruction.surface_fit.scene import fit_scene
+    out = _desk_session(tmp_path)
+    rep = fit_scene(tmp_path, overrides={"consolidate_method": "none", "models": ["bspline"]},
+                    hole_audit=False, texture_objects=False, decompose=False,
+                    manhattan_residue="bars_tsdf", tolerance="declared")
+    by = {r["instance_id"]: r for r in rep["fitted"]}
+    m = by[1]["manhattan"]
+    assert m["partial"] and 0.25 < m["residue_frac"] < 0.35 and m["tolerance"]["from"] == "declared", m
     cyl = m["residue"]["cylinders"]
     assert len(cyl) == 4 and all(c["snapped"] and c["axis"] == "up" for c in cyl), cyl
     assert all(abs(c["radius_m"] - 0.03) < 0.006 and 0.6 < c["length_m"] < 0.8 for c in cyl), cyl
@@ -229,9 +262,21 @@ def test_a_desk_top_with_tubular_legs_is_a_straight_top_plus_the_legs_as_measure
     assert V[:, 2].min() < 0.05 and V[:, 2].max() > 0.7, "the published mesh holds the top AND the legs"
 
 
+def test_the_objects_own_noise_is_measured_not_declared():
+    from reconstruction.surface_fit.noise import local_thickness_sigma
+    for sig in (0.003, 0.012):
+        pts = _plane_pts(np.array([0, 0, 1.0]), 0.0, (2, 1), 30000, 5)
+        pts[:, 2] = np.random.default_rng(1).normal(0, sig, len(pts))      # a plane with that noise
+        nz = local_thickness_sigma(pts, k=24, n_max=5000)
+        assert abs(nz["sigma_m"] - sig) < 0.25 * sig, (sig, nz)
+        assert nz["n_sampled"] == 5000 and nz["k"] == 24
+    assert local_thickness_sigma(np.zeros((3, 3)))["n_sampled"] == 0
+
+
 def test_the_rest_that_is_neither_plane_nor_bar_gets_the_live_cloud_tsdf(tmp_path):
-    """A marked object = a plate (plane) with a blob under it: the blob is not a bar → the
-    live-cloud TSDF, never Poisson (USER 2026-10-15 "y si no, tsdf sin poisson")."""
+    """A marked object = a plate (plane) with a blob under it: under the SELECTABLE 2026-10-15 route
+    (`manhattan_residue: bars_tsdf`) the blob is not a bar → the live-cloud TSDF, never Poisson
+    ("y si no, tsdf sin poisson"). The default since 2026-10-16 declares it (the desk test)."""
     from test_hole_audit_torch import _session as _cam_session
     from reconstruction.surface_fit.scene import fit_scene
     out, xyz, plate = _cam_session(tmp_path)          # a camera, poses, a record grid, provenance
@@ -259,7 +304,8 @@ def test_the_rest_that_is_neither_plane_nor_bar_gets_the_live_cloud_tsdf(tmp_pat
                                                    "weight_threshold": 1.0, "block_count": 5000}}}
     rep = fit_scene(tmp_path, config=cfg, overrides={"consolidate_method": "none", "models": ["plane"]},
                     hole_audit=False, texture_objects=False, decompose=False,
-                    manhattan_min_inlier_frac=0.75, manhattan_part_min_frac=0.05)
+                    manhattan_min_inlier_frac=0.75, manhattan_part_min_frac=0.05,
+                    manhattan_residue="bars_tsdf", tolerance="declared")      # the 2026-10-15 route, selectable
     by = {r["instance_id"]: r for r in rep["fitted"]}
     m = by[1]["manhattan"]
     assert m["snapped"] and m["partial"] and 0.6 < m["residue_frac"] < 0.7, m

@@ -2874,9 +2874,12 @@ surface_fit:
   # sacamos uno con licencia de encima" — CC-BY-NC): vendor/point2cad, env point2cad, the worker mode
   # 'p2c', the Mesh stage and its keys are gone. The `p2c_*` keys below are the CLOUD DETECTOR's
   # (perfect / propose / the edge metric read them) — the name is historical.
-  mesh_button_stages: [forms]         # USER 2026-10-16: the FORMS stage (reconstruction/forms — the VLM
-                              # decides the form, the cloud measures, the masks of every view correct);
-                              # [surface_fit] = the 2026-10-15 Manhattan planes; the full chain is
+  mesh_button_stages: [surface_fit]   # USER 2026-10-16 (evening): PLANES ONLY — the Manhattan planes of
+                              # reconstruction/surface_fit (our RANSAC, snapped exactly to the frame,
+                              # the object's own measured noise as the tolerance, what no plane holds
+                              # declared). The fitted FORMS ("están horribles … no respeta la nube") and
+                              # the hull/TSDF ("todo el ruido y prácticamente ningún dato") were judged
+                              # the same day: [forms] stays selectable; the full chain is
                               # [forms, surface_fit, poisson, pgsr]
                               # (2026-10-15: "deja solo el manhattan al mandar mesh por
                               # ahora"): the stages the Mesh button runs, in this order; surface_fit =
@@ -2929,7 +2932,21 @@ surface_fit:
   manhattan_bar_round_tol: 2.0  # BOUND (declared): the bar's section is round when the radial p90−p10
                               # is within this many support distances; otherwise the piece, like
                               # everything that is neither plane nor bar, gets the live-cloud TSDF
-                              # ("y si no, tsdf sin poisson")
+                              # ("y si no, tsdf sin poisson") — only under manhattan_residue: bars_tsdf
+  manhattan_residue: declare  # USER 2026-10-16: "olvídate de los cilindros … puede estar facetado … sino
+                              # va a forzar cilindros en donde no aplica, ya pasó en la corrida anterior".
+                              # declare = what no plane holds within the tolerance is RECORDED with its
+                              # share (manhattan.json residue) and stays as points — never a cylinder, a
+                              # TSDF or Poisson; bars_tsdf = the 2026-10-15 route (bars → cylinders on
+                              # the frame, the rest → the live-cloud TSDF), selectable
+  tolerance: measured         # USER 2026-10-16: the tolerance of a marked object's planes (RANSAC
+                              # inlier distance, membership, the support band of the audit) is its OWN
+                              # measured noise — the local thickness of its cloud (surface_fit/noise.py)
+                              # × tolerance_k — recorded in manhattan.json; declared = support_dist_m
+                              # for every object (the 2026-10-15 behaviour)
+  tolerance_k: 3.0            # the standard robust k over the measured σ (a bound, not a decision)
+  noise_k_neighbours: 24      # the neighbourhood of the local-thickness measurement (a size, declared)
+  noise_sample: 20000         # the points sampled for it (a cap, declared; seeded)
                               # (fitted against the CLOSED support outline — the boundary's
                               # intent — so grid raggedness doesn't force everything to 'raw')
   # ── REGULARIZED POISSON (USER 2026-08-29: "poisson primero, y sobre poisson

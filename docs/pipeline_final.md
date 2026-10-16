@@ -438,8 +438,14 @@ gives them a neighbour's label); the fallback retry carries the category (DONE 2
    inside the mask in ≥ the cloud's own inside share of the views that see it; outside only when nothing closer
    hides the pixel, by the scene z-buffer) carved by the TSDF of the scene's dense per-keyframe z-buffer (free
    beyond trunc in front of the measured surface, own where the pixel is in the mask within ±trunc), marching
-   cubes, `method: hull`; `forms.mesh: template` publishes the fitted form instead. Pending on his verdict over the
-   9 pccr hulls: the form as a regularisation of the hull mesh only where it explains the measured mesh within σ.
+   cubes, `method: hull`; `forms.mesh: template` publishes the fitted form instead. HIS VERDICT on the 9 pccr hulls
+   (the same evening): "un desastre … tiene todo el ruido y prácticamente ningún dato" — measured: 81–96 % of every
+   hull mesh lay on no point at all (the mask cones extruded to the grid's walls, 40 k–2 M fragments). **The Mesh
+   button since then: `mesh_button_stages: [surface_fit]`, PLANES ONLY** ("olvídate de los cilindros … puede estar
+   facetado … sino va a forzar cilindros en donde no aplica"): the Manhattan planes with the object's OWN measured
+   noise as the tolerance (`surface_fit.tolerance: measured`, `noise.py` local thickness × `tolerance_k`), what no
+   plane holds DECLARED and left as points (`manhattan_residue: declare`; `bars_tsdf` = the 2026-10-15 route,
+   selectable). forms and hull stay selectable stages.
    **Repeatability (σ floor) since 2026-10-16:** `reconstruction/certify/repeatability.py` reads, in order,
    `uncertainty.json` (two copies of a shared frame) → `elastic_seams.json` → `intra_chunk.json` (OFF since
    2026-09-28, never written) → **`precision/depth_on_f5.json` `bend.held_out_half_B_final_m`** (F6's held-out

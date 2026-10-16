@@ -23,9 +23,16 @@
   a level: identity, declared. `chunk` stays selectable. DECLARED LIMIT: one motion cannot remove a drift
   that grows along the walk (the depth stage's job). Tests: tests/test_correction_floor_session.py.
 - SAME EVENING, meshing: "olvídate de los cilindros … puede estar facetado … sino va a forzar cilindros
-  en donde no aplica, ya pasó en la corrida anterior" → the object mesh is PLANES ONLY (our RANSAC, Manhattan
-  snap, extents bounded by the inlier footprint and the masks, the object's own measured noise as the
-  tolerance); what no plane explains is declared and stays as points. No cylinder, no hull, no TSDF.
+  en donde no aplica, ya pasó en la corrida anterior" → `surface_fit.mesh_button_stages: [surface_fit]`,
+  PLANES ONLY: the Manhattan planes (our RANSAC on the card, snapped exactly to the frame, coplanar merge,
+  contours, hole audit by the masks) with the object's OWN measured noise as the tolerance
+  (`surface_fit.tolerance: measured`: `surface_fit/noise.py local_thickness_sigma` — the median local
+  thickness of the object's cloud over k-NN covariances — × `tolerance_k` 3; the connectivity cell of a
+  plane's pieces ≥ the cloud's own p99 sampling gap, so a sparse surface is not fragmented); what no plane
+  holds is DECLARED (`manhattan_residue: declare`, `manhattan.json` residue {n_points, frac}) and stays
+  as points — never a cylinder, a TSDF or Poisson (`bars_tsdf` = the 2026-10-15 route, selectable; the
+  forms and the hull stay selectable stages). Measured on the 8 hull GLBs before they were deleted: 81–96 %
+  of every mesh on no point at all, 40 k–2 M fragments, extents 3–10× the object. Tests: tests/test_manhattan.py.
 
 ## ⭐⭐ 2026-10-16 — MASK FILTER RULE 1 CHANGED (USER: "hay que contrastarlo contra la suya y las demás")
 - `correction/visit_drift.cloud_filter_masklets` step 12: a point is now tested against its OWN object's
