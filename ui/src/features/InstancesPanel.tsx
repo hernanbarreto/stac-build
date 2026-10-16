@@ -4,7 +4,7 @@
  * objects, generated meshes (Object / Mesh) and the floor-at-y=0 selector;
  * footer buttons open Segmentation and Meshing.
  */
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import { Box, CheckSquare, Crosshair, Grid3x3, Pencil, Puzzle, Spline, Square, Tag, Trash2, Wand2 } from 'lucide-react'
 import type { SegmentInstance } from '../components/Viewport'
 import { Panel, Section, Stack } from '../components/ui/Panel'
@@ -77,7 +77,7 @@ interface InstancesPanelProps {
   onOpenAutosegment: () => void
 }
 
-export function InstancesPanel(p: InstancesPanelProps) {
+function InstancesPanelImpl(p: InstancesPanelProps) {
   const t = useT()
   const fmt = useFmt()
   const [search, setSearch] = useState('')
@@ -261,3 +261,9 @@ export function InstancesPanel(p: InstancesPanelProps) {
     </Panel>
   )
 }
+
+/** memoized (USER 2026-10-16: "se pone muy lenta la UI al mover la nube con la lista de instancias
+ *  abierta"): the App re-renders on every status update (visible points, fps) and this list's
+ *  hundreds of rows re-rendered with it; its data props are state, its callbacks come stable from
+ *  App.useStableCallbacks, so it renders only when the list itself changes */
+export const InstancesPanel = memo(InstancesPanelImpl)

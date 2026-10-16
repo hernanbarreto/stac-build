@@ -58,7 +58,7 @@ import { SplashOverlay } from './components/viewport/SplashOverlay'
 import { WelcomeScreen } from './components/viewport/WelcomeScreen'
 import { tokenColor } from './components/viewport/palette'
 import { SessionsPanel } from './features/SessionsPanel'
-import { InstancesPanel } from './features/InstancesPanel'
+import { InstancesPanel, type ListedRows } from './features/InstancesPanel'
 import { ScansPanel } from './features/ScansPanel'
 import { PipelineDialog } from './features/PipelineDialog'
 import { ResumeDialog } from './features/ResumeDialog'
@@ -109,6 +109,25 @@ interface PipelineState {
 type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align' | 'erase'
 
 const THREE_DEG = Math.PI / 180
+
+/** stable identities for a bag of callbacks re-created on every render: each returned function calls
+ *  the LATEST one, so a memoized child never sees a stale closure and never re-renders for a new
+ *  function identity (USER 2026-10-16: the Instances list, re-rendered on every status update of the
+ *  App, made the viewport crawl while the cloud moved) */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function useStableCallbacks<T extends Record<string, (...args: any[]) => any>>(fns: T): T {
+  const latest = useRef<T>(fns)
+  latest.current = fns
+  const stable = useRef<T | null>(null)
+  if (!stable.current) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const out: Record<string, (...args: any[]) => any> = {}
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    for (const k of Object.keys(fns)) out[k] = (...args: any[]) => (latest.current[k] as (...a: any[]) => any)(...args)
+    stable.current = out as T
+  }
+  return stable.current
+}
 
 function App() {
   // auth first: token feeds the handlers' deps below (TDZ)
@@ -2288,6 +2307,63 @@ function App() {
 
   if (!user) return <LoginPage />
 
+  // the Instances list's callbacks, stable (the list is memoized — see InstancesPanel)
+  const instancesCb = useStableCallbacks({
+    onFocusVolume: focusVolume,
+    onDeleteVolume: deleteVolume,
+    onToggleObb: toggleObb,
+    onTogglePlacedObb: togglePlacedObb,
+    onToggleVolume: toggleVolume,
+    onToggleVolumeObb: toggleVolumeObb,
+    onSelectSegment: selectSegment,
+    onSetAllVisible: (v: boolean, listed: ListedRows) => {
+                  // every row the list shows (USER 2026-10-01): segments, Unsegmented, placed objects,
+                  // generated objects, meshes
+                  const keys = new Set(listed.segmentKeys)
+                  setSegments(prev => prev.map(s => (keys.has(s.key) ? { ...s, visible: v } : s)))
+                  segments.forEach(s => { if (keys.has(s.key)) { viewportRef.current?.toggleOBB(s.key, v && obbKeys.has(s.key)); viewportRef.current?.setSegmentVisibility(s.classId, v) } })
+                  if (listed.unsegmented) { setUnsegmentedVisible(v); viewportRef.current?.setSegmentVisibility(0, v) }
+                  listed.placedIds.forEach(id => viewportRef.current?.setSceneObjectVisible(id, v))
+                  const sf = new Set(listed.shapeFolders), tf = new Set(listed.tsdfFolders)
+                  setShapeMeshes(prev => prev.map(x => (sf.has(x.folder) ? { ...x, visible: v } : x)))
+                  shapeMeshes.forEach(m => { if (sf.has(m.folder)) viewportRef.current?.setShapeVisibility(m.instanceId, v) })
+                  setTsdfMeshes(prev => prev.map(x => (tf.has(x.folder) ? { ...x, visible: v } : x)))
+                  tsdfMeshes.forEach(m => { if (tf.has(m.folder)) viewportRef.current?.setTsdfVisibility(m.folder, v) })
+                },
+    onToggleSegment: (seg, vis) => { setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, visible: vis } : s))); viewportRef.current?.toggleOBB(seg.key, vis && obbKeys.has(seg.key)); viewportRef.current?.setSegmentVisibility(seg.classId, vis) },
+    onRenameSegment: renameSegment,
+    onDeleteSegment: deleteSegment,
+    onToggleManhattan: setManhattanSegment,
+    onToggleUnsegmented: v => { setUnsegmentedVisible(v); viewportRef.current?.setSegmentVisibility(0, v) },
+    onFloorLevel: (iid: number) => { if (activeSession) applyFloorLevel(activeSession, 'explicit', iid) },
+    onTogglePlaced: (id, v) => viewportRef.current?.setSceneObjectVisible(id, v),
+    onRemovePlaced: id => viewportRef.current?.removeSceneObject(id),
+    onToggleShape: (m, v) => { setShapeMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, visible: v } : x))); viewportRef.current?.setShapeVisibility(m.instanceId, v) },
+    onToggleTsdf: (m, v) => { setTsdfMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, visible: v } : x))); viewportRef.current?.setTsdfVisibility(m.folder, v) },
+    onToggleShapeWireframe: (m, on) => { setShapeMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, wireframe: on } : x))); viewportRef.current?.setMeshWireframe('shape', m.instanceId, on) },
+    onToggleTsdfWireframe: (m, on) => { setTsdfMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, wireframe: on } : x))); viewportRef.current?.setMeshWireframe('tsdf', m.folder, on) },
+    onDeleteTsdf: deleteTsdfMesh,
+    onRenameShape: renameShapeObject,
+    onDeleteShape: deleteShapeObject,
+    onRenamePlaced: async (id, name) => {
+                  if (!activeSession) return
+                  try {
+                    const r = await fetch('/api/objects/scene/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, id, name }) })
+                    if (r.ok) setPlacedObjects(prev => prev.map(o => (o.id === id ? { ...o, name } : o)))
+                    else report(t('instances.renameFailed', { status: r.status }), 'err')
+                  } catch { report(t('instances.renameFailed', { status: '' }), 'err') }
+                },
+    onFocusItem: (kind, key, instanceId) => {
+                  // the object's own bounds; a mesh not loaded yet → its instance's OBB
+                  if (viewportRef.current?.flyToObject(kind, key)) return
+                  const seg = instanceId != null ? segments.find(s => s.id === instanceId) : undefined
+                  if (seg?.focus) viewportRef.current?.flyToPoint(seg.focus.center, seg.focus.radius)
+                },
+    onOpenSegmentation: () => { if (activeSession) openSegmentationManager(activeSession) },
+    onOpenMeshing: openTsdfModal,
+    onOpenAutosegment: openAutosegment,
+  })
+
   return (
     <div
       className={`stac-app ${layout.state.leftTab ? '' : 'stac-app--left-closed'} ${layout.state.inspectorOpen ? '' : 'stac-app--inspector-closed'}`.trim()}
@@ -2326,48 +2402,9 @@ function App() {
                 onFuse={openFuse} onOpenScan={openScanFromTree} onSetReference={setReference} />
             )}
             {layout.state.leftTab === 'instances' && activeSession && (
-              <InstancesPanel volumes={userVolumes} onFocusVolume={focusVolume} onDeleteVolume={deleteVolume} obbKeys={obbKeys} onToggleObb={toggleObb} placedObb={placedObb} onTogglePlacedObb={togglePlacedObb} volumeHidden={volumeHidden} volumeObb={volumeObb} onToggleVolume={toggleVolume} onToggleVolumeObb={toggleVolumeObb} segments={segments} unsegmentedVisible={unsegmentedVisible} unsegmentedCount={unsegmentedCount} absorbedCount={absorbedCount} floorLevel={floorLevel}
+              <InstancesPanel {...instancesCb} volumes={userVolumes}   obbKeys={obbKeys}  placedObb={placedObb}  volumeHidden={volumeHidden} volumeObb={volumeObb}   segments={segments} unsegmentedVisible={unsegmentedVisible} unsegmentedCount={unsegmentedCount} absorbedCount={absorbedCount} floorLevel={floorLevel}
                 placedObjects={placedObjects} shapeMeshes={shapeMeshes} tsdfMeshes={tsdfMeshes} selectedSegmentId={selectedSegmentId}
-                onSelectSegment={selectSegment}
-                onSetAllVisible={(v, listed) => {
-                  // every row the list shows (USER 2026-10-01): segments, Unsegmented, placed objects,
-                  // generated objects, meshes
-                  const keys = new Set(listed.segmentKeys)
-                  setSegments(prev => prev.map(s => (keys.has(s.key) ? { ...s, visible: v } : s)))
-                  segments.forEach(s => { if (keys.has(s.key)) { viewportRef.current?.toggleOBB(s.key, v && obbKeys.has(s.key)); viewportRef.current?.setSegmentVisibility(s.classId, v) } })
-                  if (listed.unsegmented) { setUnsegmentedVisible(v); viewportRef.current?.setSegmentVisibility(0, v) }
-                  listed.placedIds.forEach(id => viewportRef.current?.setSceneObjectVisible(id, v))
-                  const sf = new Set(listed.shapeFolders), tf = new Set(listed.tsdfFolders)
-                  setShapeMeshes(prev => prev.map(x => (sf.has(x.folder) ? { ...x, visible: v } : x)))
-                  shapeMeshes.forEach(m => { if (sf.has(m.folder)) viewportRef.current?.setShapeVisibility(m.instanceId, v) })
-                  setTsdfMeshes(prev => prev.map(x => (tf.has(x.folder) ? { ...x, visible: v } : x)))
-                  tsdfMeshes.forEach(m => { if (tf.has(m.folder)) viewportRef.current?.setTsdfVisibility(m.folder, v) })
-                }}
-                onToggleSegment={(seg, vis) => { setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, visible: vis } : s))); viewportRef.current?.toggleOBB(seg.key, vis && obbKeys.has(seg.key)); viewportRef.current?.setSegmentVisibility(seg.classId, vis) }}
-                onRenameSegment={renameSegment} onDeleteSegment={deleteSegment} onToggleManhattan={setManhattanSegment}
-                onToggleUnsegmented={v => { setUnsegmentedVisible(v); viewportRef.current?.setSegmentVisibility(0, v) }}
-                onFloorLevel={iid => applyFloorLevel(activeSession, 'explicit', iid)}
-                onTogglePlaced={(id, v) => viewportRef.current?.setSceneObjectVisible(id, v)} onRemovePlaced={id => viewportRef.current?.removeSceneObject(id)}
-                onToggleShape={(m, v) => { setShapeMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, visible: v } : x))); viewportRef.current?.setShapeVisibility(m.instanceId, v) }}
-                onToggleTsdf={(m, v) => { setTsdfMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, visible: v } : x))); viewportRef.current?.setTsdfVisibility(m.folder, v) }}
-                onToggleShapeWireframe={(m, on) => { setShapeMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, wireframe: on } : x))); viewportRef.current?.setMeshWireframe('shape', m.instanceId, on) }}
-                onToggleTsdfWireframe={(m, on) => { setTsdfMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, wireframe: on } : x))); viewportRef.current?.setMeshWireframe('tsdf', m.folder, on) }}
-                onDeleteTsdf={deleteTsdfMesh} onRenameShape={renameShapeObject} onDeleteShape={deleteShapeObject}
-                onRenamePlaced={async (id, name) => {
-                  if (!activeSession) return
-                  try {
-                    const r = await fetch('/api/objects/scene/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, id, name }) })
-                    if (r.ok) setPlacedObjects(prev => prev.map(o => (o.id === id ? { ...o, name } : o)))
-                    else report(t('instances.renameFailed', { status: r.status }), 'err')
-                  } catch { report(t('instances.renameFailed', { status: '' }), 'err') }
-                }}
-                onFocusItem={(kind, key, instanceId) => {
-                  // the object's own bounds; a mesh not loaded yet → its instance's OBB
-                  if (viewportRef.current?.flyToObject(kind, key)) return
-                  const seg = instanceId != null ? segments.find(s => s.id === instanceId) : undefined
-                  if (seg?.focus) viewportRef.current?.flyToPoint(seg.focus.center, seg.focus.radius)
-                }}
-                onOpenSegmentation={() => openSegmentationManager(activeSession)} onOpenMeshing={openTsdfModal} onOpenAutosegment={openAutosegment} />
+ />
             )}
             {layout.state.leftTab === 'scans' && (
               <ScansPanel sessionId={activeSession} scans={projectScans} activeScanKey={activeScanTab}

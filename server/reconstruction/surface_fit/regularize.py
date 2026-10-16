@@ -202,13 +202,31 @@ def snap_edges(fitted_planes: List, snap_dist_m: float = 0.10,
     plane onto the intersection) — interior geometry never deforms and nothing
     extends further than the snap band, so no extrapolation.
     """
+    # USER 2026-10-16 ("es un desastre, horrible": astillas de metros): with the plane SEGMENTS a
+    # scene holds hundreds of planes, and a plane is infinite — a boundary vertex of a pipe's
+    # facet lay within the band of some unrelated plane across the room and slid along its own
+    # plane "onto the intersection", a metre away. Two surfaces share an edge only where BOTH
+    # exist: a vertex moves only when the other MESH has a vertex within the band of it, and
+    # never farther than the band (a longer slide means the planes meet elsewhere).
+    from scipy.spatial import cKDTree
     n_edges = 0
     bnd_cache: Dict[int, np.ndarray] = {}
+    tree_cache: Dict[int, cKDTree] = {}
+    boxes: Dict[int, tuple] = {}
 
     def _bnd(idx: int, F) -> np.ndarray:
         if idx not in bnd_cache:
             bnd_cache[idx] = _boundary_vertices(F.mesh_faces)
         return bnd_cache[idx]
+
+    def _tree(idx: int, F) -> cKDTree:
+        if idx not in tree_cache:
+            tree_cache[idx] = cKDTree(np.asarray(F.mesh_vertices, np.float64))
+        return tree_cache[idx]
+
+    for i, F in enumerate(fitted_planes):
+        V = np.asarray(F.mesh_vertices, np.float64)
+        boxes[i] = (V.min(0), V.max(0)) if len(V) else None
 
     for a_i in range(len(fitted_planes)):
         for b_i in range(a_i + 1, len(fitted_planes)):
@@ -217,13 +235,18 @@ def snap_edges(fitted_planes: List, snap_dist_m: float = 0.10,
                 continue
             if not isinstance(A.model, PlaneModel) or not isinstance(B.model, PlaneModel):
                 continue
+            ba, bb = boxes.get(a_i), boxes.get(b_i)
+            if ba is None or bb is None:
+                continue
+            if (ba[0] > bb[1] + snap_dist_m).any() or (bb[0] > ba[1] + snap_dist_m).any():
+                continue                                        # the two meshes never come near
             nA, nB = A.model.normal, B.model.normal
             if np.linalg.norm(np.cross(nA, nB)) < 0.1:    # near-parallel: no edge
                 continue
             moved = 0
-            for idx, F, G in ((a_i, A, B), (b_i, B, A)):
+            for idx, jdx, F, G in ((a_i, b_i, A, B), (b_i, a_i, B, A)):
                 V = F.mesh_vertices
-                if len(V) == 0:
+                if len(V) == 0 or len(G.mesh_vertices) == 0:
                     continue
                 bnd = _bnd(idx, F)
                 if len(bnd) == 0:
@@ -231,6 +254,11 @@ def snap_edges(fitted_planes: List, snap_dist_m: float = 0.10,
                 sd = G.model.signed_distance(V[bnd])
                 near = np.abs(sd) < snap_dist_m
                 if not near.any():
+                    continue
+                # the other SURFACE has to be there, not only its plane
+                d_other, _ = _tree(jdx, G).query(np.asarray(V[bnd[near]], np.float64), k=1)
+                near_idx = np.flatnonzero(near)[d_other <= snap_dist_m]
+                if len(near_idx) == 0:
                     continue
                 # slide inside F's plane, along the direction that closes the
                 # distance to G's plane → lands exactly on the intersection line
@@ -243,9 +271,13 @@ def snap_edges(fitted_planes: List, snap_dist_m: float = 0.10,
                 denom = float(ng @ d_in)
                 if abs(denom) < 0.1:
                     continue
-                ids = bnd[near]
-                V[ids] = V[ids] - (sd[near] / denom)[:, None] * d_in
-                moved += int(near.sum())
+                slide = sd[near_idx] / denom
+                ok = np.abs(slide) <= snap_dist_m                 # never farther than the band
+                if not ok.any():
+                    continue
+                ids = bnd[near_idx[ok]]
+                V[ids] = V[ids] - slide[ok][:, None] * d_in
+                moved += int(ok.sum())
             if moved:
                 n_edges += 1
                 if report is not None:
