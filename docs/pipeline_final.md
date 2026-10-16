@@ -418,6 +418,14 @@ gives them a neighbour's label); the fallback retry carries the category (DONE 2
    form → the live-cloud TSDF as `form_tsdf`; texture from the frames). Worker `run_forms.py`; main.py
    `_forms_for_export`. The provenance rule restated: the VLM decides the form and never measures. All the
    invented bars of the Manhattan route (4 cm, 16 cm, aspect 4, 15°, 5 %, 75 %) are gone from this path.
+   **The mesh since the evening of 2026-10-16 is the HULL** (`forms.mesh: hull`, `reconstruction/forms/hull.py`): the
+   user judged the fitted forms "horribles … no respeta la nube, sobresale por todas partes … no todo es cubo
+   cilindro o esfera". The visual hull of the object's masks (a voxel at tsdf.object's voxel is in when it projects
+   inside the mask in ≥ the cloud's own inside share of the views that see it; outside only when nothing closer
+   hides the pixel, by the scene z-buffer) carved by the TSDF of the scene's dense per-keyframe z-buffer (free
+   beyond trunc in front of the measured surface, own where the pixel is in the mask within ±trunc), marching
+   cubes, `method: hull`; `forms.mesh: template` publishes the fitted form instead. Pending on his verdict over the
+   9 pccr hulls: the form as a regularisation of the hull mesh only where it explains the measured mesh within σ.
    **Repeatability (σ floor) since 2026-10-16:** `reconstruction/certify/repeatability.py` reads, in order,
    `uncertainty.json` (two copies of a shared frame) → `elastic_seams.json` → `intra_chunk.json` (OFF since
    2026-09-28, never written) → **`precision/depth_on_f5.json` `bend.held_out_half_B_final_m`** (F6's held-out

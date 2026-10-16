@@ -43,6 +43,20 @@
   measured (hollow recorded), elbows are not fitted (declared), the IoU in the record is a sample-footprint
   approximation, the cloud-only extents carry the noise tail until the corrector sees the masks.
   mapbox_earcut 2.1.0 was installed in env da3 (trimesh had no triangulation engine).
+- SAME DAY, HIS VERDICT on the forms published over the four sessions: "están horribles … no respeta la nube,
+  sobresale por todas partes … no está bien que me haga cubos o incluso cilindros gigantes, no todo es cubo
+  cilindro o esfera, debe respetar la forma, sino no sirve"; "tampoco está bien proyectada la imagen sobre las
+  mallas"; "el tsdf nos está dando mallas espantosas". The form meshes were REMOVED from the four sessions (the
+  `*.form.json` VLM records stay). The published mesh is now `forms.mesh: hull` (`reconstruction/forms/hull.py`,
+  commit e70b1bb): the VISUAL HULL of the object's masks — a voxel (tsdf.object's voxel) is in when it projects
+  inside the mask in ≥ the cloud's own inside share of the views that see it, outside only when nothing closer
+  hides the pixel (the scene z-buffer) — CARVED by the TSDF of the scene's dense min z-buffer per keyframe (free
+  beyond trunc in front of the measured surface, own where the pixel is in the mask within ±trunc), marching
+  cubes, published as `method: hull` (`forms.mesh: template` keeps the fitted form). The 9 pccr objects were
+  re-meshed as hulls for his review (8 published; the chair 609 was in progress when I stopped the run — my
+  worker held the card and his station reconstruction's DA3 step refused: NEVER a GPU trial while he may
+  launch). PENDING on his verdict: step 3 = the VLM's form as a REGULARISATION of the hull mesh only where the
+  template explains the measured mesh within σ, the rest stays as measured.
 
 ## ⭐⭐ 2026-10-16 — THE σ FLOOR OF A SINGLE-PASS SESSION IS F6'S HELD-OUT IN METRES
 - zaragoza and observatorio (ONE chunk each) had NO measured repeatability: `uncertainty.json` needs a shared
