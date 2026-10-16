@@ -5711,6 +5711,73 @@ async def _surface_fit_for_export(session_id: str, session_dir: Path,
     return published
 
 
+async def _forms_for_export(session_id: str, session_dir: Path, output_dir: Path,
+                            ids: List[int], progress_cb) -> List[int]:
+    """FORMS stage of /tsdf/export (USER 2026-10-16: the VLM decides the FORM, the cloud
+    measures pose and dimensions, the masks of every view correct it — reconstruction/forms).
+    Runs run_forms.py for the requested instances; the worker publishes each mesh into
+    ``output/tsdf/<label>_<id>/`` itself (``method`` form | form_tsdf) and announces the
+    instance ids back. Returns the published ids."""
+    global _surface_fit_subprocess
+    async with _surface_fit_lock:
+        if (_surface_fit_subprocess is not None
+                and _surface_fit_subprocess.returncode is None):
+            print("[Mesh] forms busy (another run in progress) — skipped")
+            return []
+    worker = Path(SERVER_DIR) / "run_forms.py"
+    cmd = [sys.executable, str(worker), "--session-dir", str(session_dir)]
+    for iid in ids:
+        cmd += ["--instance-id", str(int(iid))]
+    result = None
+    try:
+        proc = _track_worker(await asyncio.create_subprocess_exec(
+            *cmd, cwd=str(SERVER_DIR),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            preexec_fn=_die_with_parent_sigkill,
+        ))
+        async with _surface_fit_lock:
+            _surface_fit_subprocess = proc
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            line = raw.decode("utf-8", "ignore").rstrip()
+            if not line:
+                continue
+            if line.startswith("[FORMS-PROGRESS]"):
+                try:
+                    upd = json.loads(line[len("[FORMS-PROGRESS]"):])
+                    iid = upd.get("instance_id")
+                    if iid is not None:
+                        phase = str(upd.get("phase", "fit"))
+                        progress_cb(int(iid), "done" if phase == "done" else f"forms:{phase}", None, None)
+                except Exception:  # noqa: BLE001
+                    pass
+            elif line.startswith("[FORMS-RESULT]"):
+                try:
+                    result = json.loads(line[len("[FORMS-RESULT]"):])
+                except Exception:  # noqa: BLE001
+                    result = None
+            else:
+                try:
+                    print(f"[Forms] {line}", flush=True)
+                except (BrokenPipeError, OSError):
+                    pass
+        await proc.wait()
+    except Exception as e:  # noqa: BLE001
+        print(f"[Mesh] forms stage failed: {e}")
+        return []
+    finally:
+        async with _surface_fit_lock:
+            _surface_fit_subprocess = None
+    published = [int(e["instance_id"]) for e in (result or {}).get("ok") or []]
+    if published:
+        print(f"[Mesh] forms: {len(published)} mesh(es) published → tsdf/ (instances {sorted(published)})")
+    for e in (result or {}).get("failed") or []:
+        print(f"[Mesh] forms: instance {e.get('instance_id')} ({e.get('label')}) failed: {e.get('reason')}")
+    return published
+
+
 # ── Reconstruction v2 (semantic-geometric, neighbor-aware) ─────────────
 # Additive to /shape/export: classifies every instance, reconstructs parametric
 # surfaces/swept solids/boxes/linear-repeats directly (no subprocess) and uses
@@ -6405,10 +6472,19 @@ async def export_tsdf_endpoint(request: Request):
             if not stages:
                 raise RuntimeError("surface_fit.mesh_button_stages is missing or empty — the Mesh "
                                    "button runs the stages it declares, nothing is assumed")
+            fitted_ids: set = set()
+            if selected and "forms" in stages:
+                # USER 2026-10-16: the VLM decides the form, the cloud measures, the masks correct
+                async with _tsdf_progress_lock:
+                    _tsdf_set_overall(session_id, phase="forms")
+                fitted_ids |= set(await _forms_for_export(
+                    session_id, frames_dir.parent, output_dir, selected, _progress_cb))
+                if fitted_ids:
+                    await _notify_tsdf_ready(session_id, "forms", len(fitted_ids))
             if selected and "surface_fit" in stages:
                 async with _tsdf_progress_lock:
                     _tsdf_set_overall(session_id, phase="surface_fit")
-                fitted_ids = set(await _surface_fit_for_export(
+                fitted_ids |= set(await _surface_fit_for_export(
                     session_id, frames_dir.parent, output_dir, selected, _progress_cb))
                 if fitted_ids:
                     await _notify_tsdf_ready(session_id, "surface_fit", len(fitted_ids))

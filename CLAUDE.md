@@ -1,5 +1,32 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ 2026-10-16 — FORMS: THE VLM DECIDES THE FORM, THE CLOUD MEASURES, THE MASKS CORRECT (USER)
+- USER: "vlm ve la forma, la nube puede mostrar plano un cilindro por deformación, pero es un cilindro … acá me
+  bajo de la idea de que vlm no decide. Vlm dice cómo es y cómo debe ser y la nube orienta sobre dónde está y
+  qué tamaño tiene … si vlm dice una forma es esa forma … debe iterar hasta encontrar la forma con el mejor
+  consenso". The Mesh button now runs `surface_fit.mesh_button_stages: [forms]` (`reconstruction/forms/`,
+  worker `run_forms.py`, docs/pipeline_final.md B): one structured VLM answer per object from a CLOSED
+  catalogue (panel, box, cylinder, sphere, cone, profile I/L/C/T/rect/rect_hollow/round_tube/rail, revolution,
+  composite with a part list, freeform); a parametric template of THAT form in torch (a section extruded along
+  an axis / a revolution / a sphere) fitted to the object's points with Huber at the session's own σ (the
+  repeatability of the same day); THE CORRECTOR: the form projected into EVERY keyframe that masks it, judged
+  against the SAM3 mask (precision = too big, recall = too small / a part missing), occlusion-verified by the
+  cloud's z-buffer, Huber at the IMAGE's own pixel footprint, optimised jointly with the points in blocks
+  until the per-view consensus stops improving beyond its own noise (metric_lock.heldout_change); the bar of
+  "coincides" is the cloud's own agreement with the masks; alternatives and the review's corrections are
+  ranked by the same paired bootstrap; composites decomposed GUIDED by the VLM's part list (the RANSAC of
+  each part's own form, accepted by support density, "equal" parts share one section, missing parts
+  DECLARED); a second VLM round only in doubt, with the fitted form DRAWN over the worst views; freeform or
+  no form → the live-cloud TSDF, as measured. "vertical"/"horizontal"/"axis_aligned" fix the pose to the
+  scene frame EXACTLY (up from the floor levelling, X from the vertical panels). NO invented bar decides a
+  form: the Manhattan route's 4 cm / 16 cm / aspect 4 / 15° / 5 % / 75 % are gone from this path (it stays
+  selectable as `[surface_fit]`). Provenance restated: the VLM decides the FORM and never measures; every
+  number is tool_measured and recorded (`output/forms/<safe>/form_fit.json`, meta `method: form`).
+  Declared limits: a plate's thickness is unmeasurable from one side (a surface), a tube's wall is not
+  measured (hollow recorded), elbows are not fitted (declared), the IoU in the record is a sample-footprint
+  approximation, the cloud-only extents carry the noise tail until the corrector sees the masks.
+  mapbox_earcut 2.1.0 was installed in env da3 (trimesh had no triangulation engine).
+
 ## ⭐⭐ 2026-10-16 — THE σ FLOOR OF A SINGLE-PASS SESSION IS F6'S HELD-OUT IN METRES
 - zaragoza and observatorio (ONE chunk each) had NO measured repeatability: `uncertainty.json` needs a shared
   frame between chunks, `elastic_seams.json` 2+ chunks, and `intra_chunk` is OFF since 2026-09-28 — so the

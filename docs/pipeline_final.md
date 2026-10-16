@@ -398,6 +398,24 @@ gives them a neighbour's label); the fallback retry carries the category (DONE 2
 3. **BIM comparison** (§11): register to the BIM on the structure; per element deviation of position /
    dimensions / flatness / plumbness with its margin; objects present / missing / displaced; a deviation
    below the session's own repeatability (pccr ~5 cm) is reported as not measurable.
+   **FORMS (USER 2026-10-16, the Mesh button's stage, `surface_fit.mesh_button_stages: [forms]`):** "vlm dice
+   cómo es y cómo debe ser; la nube orienta sobre dónde está y qué tamaño tiene … si vlm dice una forma es esa
+   forma". `reconstruction/forms/`: `catalog` (panel, box, cylinder, sphere, cone, profile, revolution, composite,
+   freeform; the typed `forms:` config), `query` (one structured Qwen3-VL answer per object from its isolated
+   mask views → `output/forms/<safe>.form.json`, stamped), `templates` (a 2-D section extruded along an axis, or
+   a revolution, or a sphere — torch, differentiable; "vertical"/"horizontal"/"axis_aligned" fix the pose to the
+   scene frame EXACTLY), `fit` (Huber at the session's σ; solid faces fitted by the distance, a plate's outline
+   measured, extents bounded to the last measured point), `silhouette` (THE CORRECTOR: the form projected into
+   every keyframe that masks it, occlusion-verified by the cloud's z-buffer; precision + recall in metres at the
+   depth, Huber at the image's own pixel footprint; blocks until the per-view consensus stops improving beyond
+   its own noise; the bar = the cloud's own agreement with the masks; alternatives ranked by the same paired
+   bootstrap), `composite` (parts extracted by the RANSAC of their own form, accepted by support density,
+   "equal" parts share a section, missing parts declared), `review` (the fitted form drawn over the worst views
+   → a structured verdict, applied only when the form changes), `run` (per session: records
+   `output/forms/<safe>/form_fit.json`, GLB published in `output/tsdf/<safe>/` as `method: form`, freeform or no
+   form → the live-cloud TSDF as `form_tsdf`; texture from the frames). Worker `run_forms.py`; main.py
+   `_forms_for_export`. The provenance rule restated: the VLM decides the form and never measures. All the
+   invented bars of the Manhattan route (4 cm, 16 cm, aspect 4, 15°, 5 %, 75 %) are gone from this path.
    **Repeatability (σ floor) since 2026-10-16:** `reconstruction/certify/repeatability.py` reads, in order,
    `uncertainty.json` (two copies of a shared frame) → `elastic_seams.json` → `intra_chunk.json` (OFF since
    2026-09-28, never written) → **`precision/depth_on_f5.json` `bend.held_out_half_B_final_m`** (F6's held-out

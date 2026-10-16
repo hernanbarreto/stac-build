@@ -2868,7 +2868,11 @@ surface_fit:
   # USER 2026-10-15 ("dale, probemos"): the Mesh button runs point2cad on every selected object
   # that the GEOMETRY makes a CAD candidate — never by its label — and keeps RANSAC + Poisson
   # for the rest; the decision and its shares land in output/shape_p2c/<label>/decision.json
-  mesh_button_stages: [surface_fit]   # USER 2026-10-15 ("deja solo el manhattan al mandar mesh por
+  mesh_button_stages: [forms]         # USER 2026-10-16: the FORMS stage (reconstruction/forms — the VLM
+                              # decides the form, the cloud measures, the masks of every view correct);
+                              # [surface_fit] = the 2026-10-15 Manhattan planes; the full chain is
+                              # [forms, surface_fit, poisson, pgsr, p2c]
+                              # (2026-10-15: "deja solo el manhattan al mandar mesh por
                               # ahora"): the stages the Mesh button runs, in this order — the full
                               # chain is [surface_fit, poisson, pgsr, p2c]; surface_fit = the Manhattan /
                               # RANSAC model of every selected object (tsdf/<label>_<id>/)
