@@ -194,7 +194,8 @@
     "flyers": "Flyers (diagnosis)",
     "monoDetail": "PointDiT detail layer",
     "mixedUnresolved": "Mixed unresolved pixels",
-    "cubes": "Points as cubes"
+    "cubes": "Points as cubes",
+    "ambient": "Ambient light"
   },
   "palette": {
     "title": "Command palette",

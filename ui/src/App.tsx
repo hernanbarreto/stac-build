@@ -31,7 +31,7 @@ import {
   Move, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D, Building2, Package, ArrowUpFromLine, Trash2, Unlock,
   Clock, Scale, BarChart3, Home, Camera, SlidersHorizontal, Sparkles, Undo2, Brush, Layers, Star, Terminal,
   ListTodo, FileCheck2, Puzzle, PanelLeftClose, PanelLeftOpen, Wand2,
-  Circle, Sun, FlaskConical, Pin, Pentagon,
+  Circle, Sun, Lightbulb, FlaskConical, Pin, Pentagon,
 } from 'lucide-react'
 import { useI18n, getT } from './i18n'
 import { useLayout } from './layout/LayoutContext'
@@ -140,9 +140,13 @@ function App() {
   // shadows: meshes cast + receive, the cloud receives (USER 2026-10-01); on by default
   const [shadowsOn, setShadowsOn] = useState(true)
   useEffect(() => { viewportRef.current?.setShadows(shadowsOn) }, [shadowsOn])
-  // points as cubes (USER 2026-10-04: "cubos como en la página de PointDiT"); on by default
-  const [cubesOn, setCubesOn] = useState(true)
+  // points as cubes (USER 2026-10-04: "cubos como en la página de PointDiT"); OFF by default since
+  // 2026-10-16 (USER: "destildado … para que siempre arranque con puntos")
+  const [cubesOn, setCubesOn] = useState(false)
   useEffect(() => { viewportRef.current?.setPointShape(cubesOn ? 'cube' : 'disc') }, [cubesOn])
+  // ambient light (USER 2026-10-16: "luz ambiente en la escena para que se vea mejor la nube"); on by default
+  const [ambientOn, setAmbientOn] = useState(true)
+  useEffect(() => { viewportRef.current?.setAmbientLight(ambientOn) }, [ambientOn])
   // the precision core's diagnostic layers (flyers, mono detail, mixed unresolved): off by default, per session
   const [flyersOn, setFlyersOn] = useState(false)
   const [monoDetailOn, setMonoDetailOn] = useState(false)
@@ -2170,6 +2174,7 @@ function App() {
       { id: 'fullscreen', label: t('toolbar.fullscreen'), icon: <Maximize aria-hidden />, shortcut: 'F11', onSelect: toggleFullscreen },
       { id: 'shadows', label: t('menu.shadows'), icon: <Sun aria-hidden />, checked: shadowsOn, onSelect: () => setShadowsOn(v => !v) },
       { id: 'cubes', label: t('menu.cubes'), icon: <Package aria-hidden />, checked: cubesOn, onSelect: () => setCubesOn(v => !v) },
+      { id: 'ambient', label: t('menu.ambient'), icon: <Lightbulb aria-hidden />, checked: ambientOn, onSelect: () => setAmbientOn(v => !v) },
       { id: 'flyers', label: t('menu.flyers'), icon: <Circle aria-hidden />, checked: flyersOn, disabled: !hasSession, onSelect: () => setFlyersOn(v => !v) },
       { id: 'monoDetail', label: t('menu.monoDetail'), icon: <Circle aria-hidden />, checked: monoDetailOn, disabled: !hasSession, onSelect: () => setMonoDetailOn(v => !v) },
       { id: 'mixedUnresolved', label: t('menu.mixedUnresolved'), icon: <Circle aria-hidden />, checked: unresolvedOn, disabled: !hasSession, onSelect: () => setUnresolvedOn(v => !v) },

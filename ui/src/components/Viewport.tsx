@@ -126,6 +126,9 @@ export interface ViewportHandle {
     setShadows: (on: boolean) => void
     /** how a point is drawn: a disc, or a cube of its own size (USER 2026-10-04, as PointDiT's page) */
     setPointShape: (shape: 'disc' | 'cube') => void
+    /** ambient light (USER 2026-10-16): the cloud at its captured colour and the scene's ambient raised
+     *  for the meshes; off = the previous look */
+    setAmbientLight: (on: boolean) => void
     /** a diagnostic layer of the precision core (/api/precision/layer): 'flyers' (a red mixed edge ·
      *  b orange view-inconsistent · c blue low texture · d grey other), 'mono_detail' (grey detail ·
      *  green front · blue back), 'mixed_unresolved' (red) */
@@ -344,6 +347,10 @@ const fragmentShader = `
   varying float vSpritePx;
   varying float vFocalPx;
   uniform int uPointShape;
+  // ambient light on the cloud (USER 2026-10-16: "luz ambiente en la escena para que se vea mejor la
+  // nube"): 1 = the points at their captured colour and the cubes' faces lifted by a soft ambient;
+  // 0 = the previous look (every point darkened by 15 %, cube faces from 0.62)
+  uniform float uAmbient;
   uniform mat3 uViewRotInv;      // view → world rotation (the cube's axes are the world's)
   uniform float highlightIntensity;
   uniform float uOpacity;
@@ -426,13 +433,14 @@ ${POINT_SHADOW_FRAG_DECL}
       else if (tn == tmin.y) n = vec3(0.0, -sign(dirW.y), 0.0);
       else n = vec3(0.0, 0.0, -sign(dirW.z));
       vec3 L = normalize(vec3(0.35, 0.85, 0.4));
-      cubeShade = 0.62 + 0.38 * max(dot(n, L), 0.0) + 0.08 * abs(n.y);
+      float base = mix(0.62, 0.80, uAmbient);
+      cubeShade = base + (1.0 - base) * max(dot(n, L), 0.0) + 0.08 * abs(n.y);
     } else {
       if (dist > 0.5) discard;
       alpha = 1.0 - smoothstep(0.35, 0.5, dist);
     }
     
-    vec3 finalColor = vColor * 0.85 * cubeShade;
+    vec3 finalColor = vColor * mix(0.85, 1.0, uAmbient) * cubeShade;
 
     if (uColorMode == 1) {
       // status: verified green, single_witness yellow, mask_conflict red,
@@ -594,6 +602,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const controlsRef = useRef<OrbitControls | null>(null)
     const pointCloudRef = useRef<THREE.Points | null>(null)
     const materialRef = useRef<THREE.ShaderMaterial | null>(null)
+    const ambientLightRef = useRef<THREE.AmbientLight | null>(null)
     // Cloud-hidden flag — driven by App (`setCloudObjectVisible`) and by the
     // confidence-slider useEffect. Read by the Potree LOD gate to short-
     // circuit `updateVisibility()` when the cloud is off. We never set
@@ -3120,6 +3129,14 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const ep = epochLayerRef.current?.material.uniforms
             if (ep && ep.uPointShape) ep.uPointShape.value = v
         },
+        setAmbientLight: (on: boolean) => {
+            const v = on ? 1.0 : 0.0
+            const u = materialRef.current?.uniforms
+            if (u && u.uAmbient) u.uAmbient.value = v
+            const ep = epochLayerRef.current?.material.uniforms
+            if (ep && ep.uAmbient) ep.uAmbient.value = v
+            if (ambientLightRef.current) ambientLightRef.current.intensity = on ? 0.55 : 0.25
+        },
         setPrecisionLayer: async (name: PrecisionLayer, on: boolean, sessionId: string | null) => {
             const old = precisionLayersRef.current.get(name)
             if (old) { disposeMeshGroup(old); old.removeFromParent(); precisionLayersRef.current.delete(name) }
@@ -3276,7 +3293,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const loader = potreeLoaderRef.current
                 if (active && !flythroughRef.current) {
                     flythroughRef.current = {
-                        shape: u?.uPointShape?.value ?? 1, spriteMax: u?.uSpriteMax?.value ?? 40,
+                        shape: u?.uPointShape?.value ?? 0, spriteMax: u?.uSpriteMax?.value ?? 40,
                         transparent: !!materialRef.current?.transparent,
                         shadows: !!shadowsRef.current?.isEnabled,
                         pixelRatio: renderer?.getPixelRatio() ?? window.devicePixelRatio,
@@ -3451,7 +3468,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
         // Discrete lights (still useful for shadow direction / sharper highlights;
         // env map provides the soft ambient/diffuse).
-        const ambientLight = new THREE.AmbientLight(tokenHex(VP.light), 0.25)
+        // USER 2026-10-16 ("luz ambiente en la escena"): 0.55 with the View-menu option on (the meshes'
+        // textures read at their colour), 0.25 (the previous look) off — setAmbientLight
+        const ambientLight = new THREE.AmbientLight(tokenHex(VP.light), 0.55)
+        ambientLightRef.current = ambientLight
         scene.add(ambientLight)
         const dirLight = new THREE.DirectionalLight(tokenHex(VP.light), 0.85)
         dirLight.position.set(10, 20, 10)
@@ -3582,7 +3602,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 sectionBoxMax: { value: new THREE.Vector3(100, 100, 100) },
                 uSelBoxOn: { value: false },
                 uSelBoxInv: { value: new THREE.Matrix4() },
-                uPointShape: { value: 1 },   // cubes by default (USER 2026-10-04; App.tsx cubesOn)
+                uPointShape: { value: 0 },   // DISCS by default (USER 2026-10-16: "que siempre arranque con puntos"; the cubes of 2026-10-04 are the View-menu option)
+                uAmbient: { value: 1.0 },    // ambient light on the cloud, on by default (USER 2026-10-16; App.tsx ambientOn)
                 uSpriteMax: { value: 40.0 },  // the flythrough lowers it (fill rate at eye level)
                 uViewportH: { value: container.clientHeight || 1 },
                 uViewRotInv: { value: new THREE.Matrix3() },
