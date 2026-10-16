@@ -205,7 +205,7 @@ def run_object(*, iid: int, label: str, safe: str, P: np.ndarray, ans: Optional[
     rounds = 1
     current = ans
     while (client is not None and frames_dir is not None and sil is not None and rounds < fcfg.max_rounds
-           and _verdict(cands[best]) == "doubt"):
+           and _verdict(cands[best]) == "doubt" and cands[best].get("_tpl") is not None):
         rounds += 1
         c = cands[best]
         tpl = c["_tpl"]
@@ -229,8 +229,11 @@ def run_object(*, iid: int, label: str, safe: str, P: np.ndarray, ans: Optional[
         new = apply_review(current, got["verdict"])
         if new is None:
             rnd["applied"] = False
-            log(f"[forms] {safe}: review round {rounds}: "
-                f"{'matches' if (got['verdict'] or {}).get('matches') else 'no change to apply'}")
+            matched = bool((got["verdict"] or {}).get("matches"))
+            log(f"[forms] {safe}: review round {rounds}: {'matches' if matched else 'no change to apply'}")
+            if matched and cands[best].get("corrector"):
+                # the VLM confirms the drawn form on the views it doubted: the verdict says so
+                cands[best]["corrector"]["verdict"] = "coincides_by_review"
             break
         rnd["applied"] = True
         current = new

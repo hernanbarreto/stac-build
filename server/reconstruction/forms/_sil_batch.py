@@ -15,6 +15,18 @@ import torch
 from .fit import huber
 
 Z_FRONT = 0.05
+_D_EPS = 1e-8    # px²: the distances' floor — torch.cdist's backward is NaN at an exact zero
+#                  (a sample landing on a boundary pixel), and one NaN sinks the whole fit
+
+
+def safe_cdist(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+    """Euclidean distances (c, S, B) between (c, S, 2) and (c, B, 2) with a finite gradient
+    everywhere: the squared distance by expansion, floored, then the square root."""
+    aa = (A * A).sum(-1, keepdim=True)                 # (c, S, 1)
+    bb = (B * B).sum(-1).unsqueeze(1)                  # (c, 1, B)
+    ab = torch.bmm(A, B.transpose(1, 2))                # (c, S, B)
+    d2 = torch.clamp(aa + bb - 2.0 * ab, min=_D_EPS)
+    return torch.sqrt(d2)
 
 
 class ViewBatch:
@@ -96,7 +108,7 @@ class ViewBatch:
         Huber means differentiable; ``judges`` marks the views that can judge."""
         px, py, z, front, visible, inside = self.project(X)
         P = torch.stack([px, py], -1)                                      # (c, S, 2)
-        D = torch.cdist(P, self.B)                                         # (c, S, Bmax)
+        D = safe_cdist(P, self.B)                                          # (c, S, Bmax)
         inf = torch.tensor(float("inf"), dtype=D.dtype, device=D.device)
         D = torch.where(self.bvalid[:, None, :], D, inf)
         # precision: visible samples outside the mask → their distance to the boundary

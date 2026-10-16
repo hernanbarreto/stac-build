@@ -361,6 +361,11 @@ def correct(template: Template, P: np.ndarray, sigma: float, sil: Silhouettes, *
         bootstrap against the previous block is recorded). The best block so far is remembered —
         "iterar hasta encontrar la forma con el mejor consenso" — and the fit stops at the first
         block that does not lower it."""
+        if not np.isfinite(loss) or any(not np.all(np.isfinite(st)) for st in template.state()):
+            # a non-finite step: the best state so far is restored and the fit stops (declared)
+            template.load_state(states[best["i"]])
+            changes.append({"block": block, "non_finite": True})
+            return True
         with torch.no_grad():
             X = template.samples(int(surface_samples))
         ch = sil.chamfer(X)
