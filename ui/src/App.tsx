@@ -167,6 +167,8 @@ function App() {
   // "¿se puede agregar intensidad de luz?"): the Display slider, 1 = the captured colour, saved in the prefs
   const [lightIntensity, setLightIntensity] = useState(1.0)
   useEffect(() => { viewportRef.current?.setAmbientLight(lightIntensity) }, [lightIntensity])
+  const [pointOpacity, setPointOpacity] = useState(1.0)
+  useEffect(() => { viewportRef.current?.setPointOpacity(pointOpacity) }, [pointOpacity])
   // the precision core's diagnostic layers (flyers, mono detail, mixed unresolved): off by default, per session
   const [flyersOn, setFlyersOn] = useState(false)
   const [monoDetailOn, setMonoDetailOn] = useState(false)
@@ -1572,6 +1574,7 @@ function App() {
         setConfidenceThreshold(typeof prefs.confidenceThreshold === 'number' ? prefs.confidenceThreshold : 0.0)
         setPointBudget(typeof prefs.pointBudget === 'number' ? prefs.pointBudget : 10_000_000)
         setLightIntensity(typeof prefs.lightIntensity === 'number' ? prefs.lightIntensity : 1.0)
+        setPointOpacity(typeof prefs.pointOpacity === 'number' ? prefs.pointOpacity : 1.0)
         setTimeout(() => { prefsLoadedRef.current = true }, 300)
       })
       .catch(() => {
@@ -1595,11 +1598,11 @@ function App() {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ pointSize, confidenceThreshold, pointBudget, lightIntensity })
+        body: JSON.stringify({ pointSize, confidenceThreshold, pointBudget, lightIntensity, pointOpacity })
       }).catch(() => {})
     }, 500)
     return () => { if (prefsSaveTimer.current) clearTimeout(prefsSaveTimer.current) }
-  }, [pointSize, confidenceThreshold, pointBudget, lightIntensity])  
+  }, [pointSize, confidenceThreshold, pointBudget, lightIntensity, pointOpacity])
 
   // ── Sábana: Generate comparison (auto_match  compare  show via Potree) ──
   // Open the comparison dialog (shows toggle inside)
@@ -2559,7 +2562,7 @@ function App() {
                   } catch (e) { report(t('brush.mergeFailed', { detail: String(e) }), 'err') }
                 },
               }}
-              display={{ pointSize, onPointSize: setPointSize, light: lightIntensity, onLight: setLightIntensity, budgetM: pointBudget / 1_000_000, onBudgetM: v => setPointBudget(v * 1_000_000), hasConfidence, confidence: confidenceThreshold, onConfidence: setConfidenceThreshold }}
+              display={{ pointSize, onPointSize: setPointSize, light: lightIntensity, onLight: setLightIntensity, pointOpacity, onPointOpacity: setPointOpacity, budgetM: pointBudget / 1_000_000, onBudgetM: v => setPointBudget(v * 1_000_000), hasConfidence, confidence: confidenceThreshold, onConfidence: setConfidenceThreshold }}
               view={{ hasCameraPoses, showCameraPoses, onToggleCameraPoses: () => setShowCameraPoses(v => !v), showGrid, onToggleGrid: () => setShowGrid(v => !v), showAxes, onToggleAxes: () => setShowAxes(v => !v), onFullscreen: toggleFullscreen }}
               color={{
                 mode: sabanaVisible ? 'deviation' : colorMode, hasWitness, hasDeviation: hasSabanaResult, mvThreshold, onMvThreshold: setMvThreshold,

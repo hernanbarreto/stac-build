@@ -61,6 +61,9 @@ export interface DisplayState {
   /** light intensity on the cloud and the meshes (USER 2026-10-16): 1 = the captured colour */
   light: number
   onLight: (v: number) => void
+  /** point opacity (USER 2026-10-16: "que estén pero no se vean"): 0 = the cloud hidden, the meshes alone */
+  pointOpacity: number
+  onPointOpacity: (v: number) => void
   budgetM: number
   onBudgetM: (v: number) => void
   hasConfidence: boolean
@@ -277,6 +280,7 @@ export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeas
         <div className="stac-vppopover" role="group" aria-label={t('toolbar.display')}>
           <Slider min={0.01} max={5} step={0.01} value={display.pointSize} onChange={display.onPointSize} label={t('display.pointSize')} digits={2} />
           <Slider min={0} max={2} step={0.05} value={display.light} onChange={display.onLight} label={t('display.light')} format={v => fmt.percent(v)} />
+          <Slider min={0} max={1} step={0.05} value={display.pointOpacity} onChange={display.onPointOpacity} label={t('display.pointOpacity')} format={v => fmt.percent(v)} />
           <Slider min={2} max={40} step={1} value={display.budgetM} onChange={display.onBudgetM} label={t('display.detail')} format={v => t('display.millionPoints', { n: fmt.integer(v) })} />
           {display.hasConfidence && (
             <Slider min={0} max={1} step={0.01} value={display.confidence} onChange={display.onConfidence} label={t('display.confidence')} format={v => fmt.percent(v)} />

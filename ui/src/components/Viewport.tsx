@@ -21,6 +21,7 @@ import { Slider } from './ui/Field'
 import type { ReadoutAnchor, ViewPreset } from './viewport/ViewportHud'
 import { PhysicsSandbox } from './physics'
 import { SceneShadows, pointShadowUniforms, POINT_SHADOW_VERT_DECL, POINT_SHADOW_VERT_MAIN, POINT_SHADOW_FRAG_DECL } from './shadows'
+import { SceneLights } from './sceneLights'
 
 /** Translator for callbacks (the active language is read at call time). */
 const tt = (key: string, vars?: Record<string, string | number | null | undefined>) => getT()(key, vars)
@@ -129,6 +130,9 @@ export interface ViewportHandle {
     /** light intensity (USER 2026-10-16): the cloud's colour × intensity (1 = as captured, 0.85 = the
      *  previous look, up to 2) and the scene's ambient light 0.25 + 0.30 × intensity for the meshes */
     setAmbientLight: (intensity: number) => void
+    /** point opacity (USER 2026-10-16: "que estén pero no se vean"): under 1 the points stop writing depth so
+     *  the meshes show through; at 0 they are discarded */
+    setPointOpacity: (opacity: number) => void
     /** a diagnostic layer of the precision core (/api/precision/layer): 'flyers' (a red mixed edge ·
      *  b orange view-inconsistent · c blue low texture · d grey other), 'mono_detail' (grey detail ·
      *  green front · blue back), 'mixed_unresolved' (red) */
@@ -380,6 +384,7 @@ const fragmentShader = `
 ${POINT_SHADOW_FRAG_DECL}
   void main() {
     // Segment visibility filter (computed in vertex shader for precision)
+    if (uOpacity < 0.005) discard;
     if (vSegVisible < 0.5) discard;
 
     // Confidence filter: discard points below threshold
@@ -775,6 +780,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const physicsRef = useRef<PhysicsSandbox | null>(null)
     const throwEndRef = useRef<(() => void) | null>(null)
     const shadowsRef = useRef<SceneShadows | null>(null)
+    const lightsRef = useRef<SceneLights | null>(null)      // the segmentation's lamps and windows as light sources
     const shapeLoadGenRef = useRef(0)
     const tsdfLoadGenRef = useRef(0)
     // PLACING a sphere (USER 2026-10-01: "debe aparecer en el mouse y al hacer click se debe soltar"):
@@ -3137,6 +3143,15 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const ep = epochLayerRef.current?.material.uniforms
             if (ep && ep.uAmbient) ep.uAmbient.value = v
             if (ambientLightRef.current) ambientLightRef.current.intensity = 0.25 + 0.30 * v
+            shadowsRef.current?.setIntensity(v)
+            lightsRef.current?.setScale(v)
+        },
+        setPointOpacity: (opacity: number) => {
+            const v = Math.min(1.0, Math.max(0.0, Number.isFinite(opacity) ? opacity : 1.0))
+            const mat = materialRef.current
+            if (mat) { mat.uniforms.uOpacity.value = v; mat.depthWrite = v >= 0.999 }
+            const ep = epochLayerRef.current?.material
+            if (ep) { ep.uniforms.uOpacity.value = v; ep.depthWrite = v >= 0.999 }
         },
         setPrecisionLayer: async (name: PrecisionLayer, on: boolean, sessionId: string | null) => {
             const old = precisionLayersRef.current.get(name)
@@ -3622,6 +3637,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         shadows.setRoots(() => [physics.group, sceneObjectsGroupRef.current, shapesGroupRef.current, tsdfGroupRef.current,
                                 reconSceneGroupRef.current].filter((g): g is THREE.Group => !!g))
         shadowsRef.current = shadows
+        // LIGHT SOURCES FROM THE SEGMENTS (USER 2026-10-16): rebuilt whenever the OBB list arrives
+        lightsRef.current = new SceneLights(scene)
 
         // Empty point cloud geometry (will be populated from server data)
         const geometry = new THREE.BufferGeometry()
@@ -5306,6 +5323,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const renderOBBs = useCallback((instances: Array<Record<string, unknown>>) => {
         const group = obbGroupRef.current
         if (!group) return
+        lightsRef.current?.rebuild(instances)
 
         // A different instance → class-byte map means the hidden bytes name other
         // objects now: forget them (every segment visible; the Unsegmented byte 0

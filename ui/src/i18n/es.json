@@ -448,7 +448,8 @@
     "light": "Luz",
     "detail": "Detalle",
     "millionPoints": "{n} M puntos",
-    "confidence": "Confianza"
+    "confidence": "Confianza",
+    "pointOpacity": "Opacidad de puntos"
   },
   "colorMode": {
     "rgb": "RGB",

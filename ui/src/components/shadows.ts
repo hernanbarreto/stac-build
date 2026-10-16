@@ -40,6 +40,7 @@ export class SceneShadows {
     private rt: THREE.WebGLRenderTarget
     private depthMat = new THREE.MeshDepthMaterial()
     private enabled = true
+    private base = 0.8
     private casters: THREE.Object3D[] = []
     private roots: () => THREE.Object3D[] = () => []
     private sinceScan = Infinity
@@ -51,6 +52,7 @@ export class SceneShadows {
         renderer.shadowMap.enabled = true
         renderer.shadowMap.type = THREE.PCFSoftShadowMap
         this.light = new THREE.DirectionalLight(replaces ? replaces.color.getHex() : 0xffffff, replaces ? replaces.intensity : 0.8)
+        this.base = this.light.intensity
         if (replaces) replaces.visible = false
         this.light.name = 'shadow-sun'
         this.light.castShadow = true
@@ -76,6 +78,9 @@ export class SceneShadows {
     }
 
     get isEnabled() { return this.enabled }
+
+    /** the Display light slider (USER 2026-10-16: "parece que la luz no cambia"): the sun × scale */
+    setIntensity(scale: number) { this.light.intensity = this.base * scale }
 
     private scan() {
         const list: THREE.Object3D[] = []
