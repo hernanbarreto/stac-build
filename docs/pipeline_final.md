@@ -445,7 +445,16 @@ gives them a neighbour's label); the fallback retry carries the category (DONE 2
    facetado … sino va a forzar cilindros en donde no aplica"): the Manhattan planes with the object's OWN measured
    noise as the tolerance (`surface_fit.tolerance: measured`, `noise.py` local thickness × `tolerance_k`), what no
    plane holds DECLARED and left as points (`manhattan_residue: declare`; `bars_tsdf` = the 2026-10-15 route,
-   selectable). forms and hull stay selectable stages.
+   selectable). forms and hull stay selectable stages. **The same night: PLANE SEGMENTS** (USER: "segmentos de
+   plano, no único plano que describe todo … depende qué objeto sea y el tamaño de voxelización"):
+   `surface_fit/facets.py grow_plane_segments` — region growing over cells of the object's own resolution
+   (`facet_cell_m` 0.10 = the user's cell; an object's cell = its smallest extent / `facets_across`, never under
+   four sampling gaps), tolerance = half the cell, a cell seeds/joins only when it holds a SURFACE (thickness or
+   spread ≤ tol/3), the plane refitted and re-validated every ring. A flat wall one segment, a curved wall a chain
+   of facets, a step two parallel segments with their exact offset, a ramp its own tilted segment, a volume
+   residue. Snap: the majority segment (`manhattan_dominant_min_frac`) and the parts whose far edge would move
+   less than the tolerance; facets of curves and ramps keep their measured normals. pccr: door one plane (90 %),
+   cabinet two faces, floor one plane + its 5° ramp segment, pipe six facets, extinguisher body + dome facets.
    **Repeatability (σ floor) since 2026-10-16:** `reconstruction/certify/repeatability.py` reads, in order,
    `uncertainty.json` (two copies of a shared frame) → `elastic_seams.json` → `intra_chunk.json` (OFF since
    2026-09-28, never written) → **`precision/depth_on_f5.json` `bend.held_out_half_B_final_m`** (F6's held-out

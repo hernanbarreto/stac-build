@@ -23,16 +23,34 @@
   a level: identity, declared. `chunk` stays selectable. DECLARED LIMIT: one motion cannot remove a drift
   that grows along the walk (the depth stage's job). Tests: tests/test_correction_floor_session.py.
 - SAME EVENING, meshing: "olvídate de los cilindros … puede estar facetado … sino va a forzar cilindros
-  en donde no aplica, ya pasó en la corrida anterior" → `surface_fit.mesh_button_stages: [surface_fit]`,
-  PLANES ONLY: the Manhattan planes (our RANSAC on the card, snapped exactly to the frame, coplanar merge,
-  contours, hole audit by the masks) with the object's OWN measured noise as the tolerance
-  (`surface_fit.tolerance: measured`: `surface_fit/noise.py local_thickness_sigma` — the median local
-  thickness of the object's cloud over k-NN covariances — × `tolerance_k` 3; the connectivity cell of a
-  plane's pieces ≥ the cloud's own p99 sampling gap, so a sparse surface is not fragmented); what no plane
-  holds is DECLARED (`manhattan_residue: declare`, `manhattan.json` residue {n_points, frac}) and stays
-  as points — never a cylinder, a TSDF or Poisson (`bars_tsdf` = the 2026-10-15 route, selectable; the
-  forms and the hull stay selectable stages). Measured on the 8 hull GLBs before they were deleted: 81–96 %
-  of every mesh on no point at all, 40 k–2 M fragments, extents 3–10× the object. Tests: tests/test_manhattan.py.
+  en donde no aplica" → `surface_fit.mesh_button_stages: [surface_fit]`, PLANES ONLY; never a cylinder, a
+  TSDF or Poisson (`manhattan_residue: declare`; `bars_tsdf` = the 2026-10-15 route, selectable; forms and
+  hull stay selectable stages). Measured on the 8 hull GLBs before deleting them: 81–96 % of every mesh on
+  no point at all, 40 k–2 M fragments, extents 3–10× the object.
+- THEN, THE SAME NIGHT — PLANE SEGMENTS (USER: "no estás pensando con claridad, te vas de un extremo a otro
+  … con planos podés reconstruir geometrías, curvaturas … una pared curvada: planos que van describiendo la
+  geometría, SEGMENTOS de plano, no único plano que describe todo … por ahí perdés algo de detalle, depende
+  qué objeto sea y el tamaño de voxelización" / "es importante entender la geometría, qué es lo que estamos
+  reconstruyendo, cómo se ve, cuáles son los puntos que la describen"): `reconstruction/surface_fit/facets.py
+  grow_plane_segments` — region growing over cells of the object's OWN resolution (`object_cell`: its
+  smallest extent / `facets_across` 4, never under four of its sampling gaps, never over `facet_cell_m`
+  0.10, the user's cell), the tolerance = half the cell (what the resolution cannot resolve; the measured
+  noise is recorded, never a floor — a volume's thickness is large), a cell seeds a plane when it holds a
+  surface (thickness ≤ tol/3), joins a region when the points it holds in the plane are a surface there
+  (≥ a seed's worth or all of a sparse cell's, spread ≤ tol/3: a corner cell gives each surface its own
+  points, a volume's cell joins nothing), the plane refitted and re-validated every ring (no drift along a
+  curve). A flat wall = one segment, a curved wall = a chain of facets (chord ≈ 2√(2·r·tol)), a step = two
+  parallel segments with their exact offset, a ramp = its own tilted segment, a volume = residue, declared.
+  SNAP (manhattan.py): the dominant segment when it holds the MAJORITY (`manhattan_dominant_min_frac` 0.5);
+  other segments ≥ `manhattan_part_min_frac` only when the snap would move their far edge by less than the
+  tolerance (a cabinet's second face, an S-wall's runs — never a ramp, never the facets of a curve); small
+  facets never. Each segment is meshed on its own points at the object's resolution, facets meet on their
+  intersection lines (snap_edges). MEASURED on pccr's 9 (epoch 4's cloud): at the cloud's noise (1 cm) the
+  door split into 134 pieces (its two revisit copies 3 cm apart) and the floor into 1,768 — at half a 10 cm
+  cell the door is one plane (90 %), the cabinet two faces (54/45), the floor one plane (82 %) plus a 5°
+  segment (its ramp), the pipe six vertical facets at its own 6.7 cm cell, the extinguisher two body facets
+  + three of the dome, the desk a mess the points describe (62 % at 15° off vertical). The floor takes 26 s,
+  the rest < 2 s. Tests: tests/test_facets.py, tests/test_manhattan.py (updated), test_surface_fit_scene.py.
 
 ## ⭐⭐ 2026-10-16 — MASK FILTER RULE 1 CHANGED (USER: "hay que contrastarlo contra la suya y las demás")
 - `correction/visit_drift.cloud_filter_masklets` step 12: a point is now tested against its OWN object's

@@ -2939,11 +2939,35 @@ surface_fit:
                               # share (manhattan.json residue) and stays as points — never a cylinder, a
                               # TSDF or Poisson; bars_tsdf = the 2026-10-15 route (bars → cylinders on
                               # the frame, the rest → the live-cloud TSDF), selectable
-  tolerance: measured         # USER 2026-10-16: the tolerance of a marked object's planes (RANSAC
-                              # inlier distance, membership, the support band of the audit) is its OWN
-                              # measured noise — the local thickness of its cloud (surface_fit/noise.py)
-                              # × tolerance_k — recorded in manhattan.json; declared = support_dist_m
-                              # for every object (the 2026-10-15 behaviour)
+  # ── PLANE SEGMENTS (USER 2026-10-16: "con planos podés reconstruir geometrías, curvaturas … una pared
+  # curvada: planos que van describiendo la geometría, segmentos de plano, no único plano que describe
+  # todo … por ahí perdés algo de detalle, depende qué objeto sea y el tamaño de voxelización"): a marked
+  # object's surface = the planar pieces its points describe at ITS resolution (surface_fit/facets.py,
+  # region growing over cells, the plane refitted and re-validated as it grows): a flat wall one segment,
+  # a curved wall a chain of facets, a step two parallel segments with their exact offset, a ramp its own
+  # tilted segment; what no segment holds is declared (manhattan_residue).
+  facet_cell_m: 0.10          # THE USER'S RESOLUTION: the largest cell an object is segmented at (its own
+                              # cell is smaller for small objects — see facets_across)
+  facets_across: 4            # an object's cell = its smallest extent / this (at least four facets across
+                              # a pipe's section, never one slab), never under four of its own sampling
+                              # gaps (a cell needs points for a plane), never over facet_cell_m
+  facet_seed_points: 12       # the points a cell needs to seed a plane (a bound; growth into sparse
+                              # cells needs none — their points are tested against the plane found)
+  manhattan_dominant_min_frac: 0.5   # the MAJORITY: an object IS its dominant segment (a door, a floor, a
+                              # wall → snapped to the frame, its deviation the finding) when that segment
+                              # holds at least this share; otherwise only the segments of at least
+                              # manhattan_part_min_frac snap, and only when the snap would move their far
+                              # edge by less than the object's tolerance (a cabinet's second face, an
+                              # S-wall's runs — never a ramp, never the facets of a curve)
+  tolerance: measured         # USER 2026-10-16: the tolerance of a marked object's segments (membership,
+                              # the support band of the audit) is what its resolution cannot resolve —
+                              # half its cell. Its OWN measured noise (the local thickness of its cloud,
+                              # surface_fit/noise.py) is recorded next to it and, when tolerance_k × σ
+                              # exceeds the tolerance, declared (noise_exceeds_tolerance) — never a floor
+                              # of it: a volume's local thickness is large and would read its slabs as
+                              # planes. pccr: at the noise alone (1 cm) the door split into 134 pieces
+                              # (its two revisit copies) and the floor into 1,768; at half a 10 cm cell
+                              # the door is one plane, the floor one plus its ramp. declared = support_dist_m
   tolerance_k: 3.0            # the standard robust k over the measured σ (a bound, not a decision)
   noise_k_neighbours: 24      # the neighbourhood of the local-thickness measurement (a size, declared)
   noise_sample: 20000         # the points sampled for it (a cap, declared; seeded)

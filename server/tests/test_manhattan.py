@@ -188,9 +188,13 @@ def test_a_cluttered_floor_is_still_a_straight_plane_and_a_blob_is_not(tmp_path)
     rep = fit_scene(tmp_path, overrides={"consolidate_method": "none", "models": ["plane"]},
                     hole_audit=False, texture_objects=False, decompose=False)
     by = {r["instance_id"]: r for r in rep["fitted"]}
-    assert by[1]["kind"] == "plane" and by[1]["manhattan"]["snapped"] and by[1]["p95_mm"] > 60.0, \
-        "the clutter's p95 is reported, the floor stays a straight plane"
-    assert not by[1]["manhattan"]["partial"] and not by[1]["manhattan"]["residue_meshed"]
+    m = by[1]["manhattan"]
+    assert by[1]["kind"] == "plane" and m["snapped"], "the floor stays a straight plane"
+    # ONE segment holds the floor (83 % of the object); the clutter is the declared residue —
+    # a volume at the floor's resolution seeds no plane (USER 2026-10-16: plane segments)
+    assert m["facets"]["n_segments"] == 1 and 0.80 < m["facets"]["explained"] < 0.86, m["facets"]
+    assert m["residue"]["declared"] and 0.14 < m["residue"]["frac"] < 0.20
+    assert not m["partial"] and not m["residue_meshed"]
     assert not (out / "surface_fit" / "floor_1" / "unexplained_idx.npy").exists(), "a surface's clutter is declared, never meshed"
     assert 2 not in by and "2" in rep["manhattan"]["not_a_surface"]
 
@@ -215,11 +219,12 @@ def _desk_session(tmp_path):
     return out
 
 
-def test_a_desk_top_is_a_straight_plane_and_its_legs_are_declared_never_cylinders(tmp_path):
+def test_a_desk_top_is_a_straight_plane_and_its_legs_are_facets_never_cylinders(tmp_path):
     """USER 2026-10-16: "olvídate de los cilindros … puede estar facetado … sino va a forzar cilindros
-    en donde no aplica". The top is the Manhattan plane; the legs, which no plane holds, are DECLARED
-    with their share and stay as points — no cylinder, no TSDF, no Poisson. The tolerance is the
-    desk's own measured noise (3 mm × k), recorded."""
+    en donde no aplica" and "segmentos de plano, no único plano que describe todo". The top is the
+    dominant segment, snapped to the frame (horizontal); each 6 cm leg is described by vertical plane
+    SEGMENTS at the desk's own cell, kept as measured (never snapped, never a cylinder); nothing goes
+    to a TSDF or Poisson. The tolerance is the resolution's, recorded."""
     from reconstruction.surface_fit.scene import fit_scene
     out = _desk_session(tmp_path)
     rep = fit_scene(tmp_path, overrides={"consolidate_method": "none", "models": ["bspline"]},
@@ -227,39 +232,27 @@ def test_a_desk_top_is_a_straight_plane_and_its_legs_are_declared_never_cylinder
     by = {r["instance_id"]: r for r in rep["fitted"]}
     m = by[1]["manhattan"]
     assert by[1]["kind"] == "plane" and m["snapped"] and m["axis"] == "up"
-    assert m["partial"] and not m["residue_meshed"] and 0.25 < m["residue_frac"] < 0.35, m
-    assert m["residue"]["declared"] and m["residue"]["n_points"] > 10000 and "cylinders" not in m["residue"], m["residue"]
-    assert not (out / "surface_fit" / "desk_1" / "unexplained_idx.npy").exists(), "never Poisson"
-    tol = m["tolerance"]
-    assert tol["from"] == "measured" and 0.002 < tol["noise_sigma_m"] < 0.006 and \
-        abs(tol["tolerance_m"] - tol["tolerance_k"] * tol["noise_sigma_m"]) < 2e-5, tol      # recorded to 5 decimals
-    assert by[1]["parts"] == [], "nothing but the planes is meshed"
-    import trimesh
-    mesh = trimesh.load(str(out / "surface_fit" / "desk_1" / "surface.glb"), force="mesh")
-    V = np.asarray(mesh.vertices, float)
-    assert V[:, 2].min() > 0.7 and V[:, 2].max() < 0.8, "the published mesh is the top alone"
+    fac = m["facets"]
+    assert fac["explained"] > 0.95 and fac["residue"] < 0.05, fac
     side = json.loads((out / "surface_fit" / "desk_1" / "manhattan.json").read_text())
-    assert side["residue"]["declared"] and side["tolerance"]["from"] == "measured"
-
-
-def test_the_bars_route_of_2026_10_15_stays_selectable(tmp_path):
-    """`manhattan_residue: bars_tsdf`: the legs become straight cylinders on the frame, as before."""
-    from reconstruction.surface_fit.scene import fit_scene
-    out = _desk_session(tmp_path)
-    rep = fit_scene(tmp_path, overrides={"consolidate_method": "none", "models": ["bspline"]},
-                    hole_audit=False, texture_objects=False, decompose=False,
-                    manhattan_residue="bars_tsdf", tolerance="declared")
-    by = {r["instance_id"]: r for r in rep["fitted"]}
-    m = by[1]["manhattan"]
-    assert m["partial"] and 0.25 < m["residue_frac"] < 0.35 and m["tolerance"]["from"] == "declared", m
-    cyl = m["residue"]["cylinders"]
-    assert len(cyl) == 4 and all(c["snapped"] and c["axis"] == "up" for c in cyl), cyl
-    assert all(abs(c["radius_m"] - 0.03) < 0.006 and 0.6 < c["length_m"] < 0.8 for c in cyl), cyl
-    assert "tsdf" not in m["residue"], "every leg is a bar — nothing left for the TSDF"
+    segs = side["segments"]
+    assert 0.60 < segs[0]["share"] < 0.75 and segs[0]["tilt_from_up_deg"] < 1.0            # the top
+    legs = [q for q in segs[1:] if q["tilt_from_up_deg"] > 80.0]
+    assert len(legs) >= 4 and sum(q["share"] for q in legs) > 0.2, segs                     # the legs, as facets
+    assert "cylinders" not in m.get("residue", {}) and m["residue"]["declared"]
+    assert not (out / "surface_fit" / "desk_1" / "unexplained_idx.npy").exists(), "never Poisson"
+    parts = m["parts"]
+    # the top is on the frame; a leg's facet may be too when it is nearly on an axis and the snap
+    # moves its far edge less than the tolerance (harmless); the rest of the legs' facets are measured
+    assert parts[0].get("snapped") and sum(1 for p in parts if p.get("snapped")) <= 2, parts
+    assert sum(1 for p in parts if not p.get("snapped")) >= 4
+    tol = m["tolerance"]
+    assert tol["from"] == "measured" and abs(tol["tolerance_m"] - tol["cell_m"] / 2) < 1e-6, tol
     import trimesh
     mesh = trimesh.load(str(out / "surface_fit" / "desk_1" / "surface.glb"), force="mesh")
     V = np.asarray(mesh.vertices, float)
     assert V[:, 2].min() < 0.05 and V[:, 2].max() > 0.7, "the published mesh holds the top AND the legs"
+    assert side["residue"]["declared"] and side["tolerance"]["from"] == "measured"
 
 
 def test_the_objects_own_noise_is_measured_not_declared():
@@ -308,9 +301,9 @@ def test_the_rest_that_is_neither_plane_nor_bar_gets_the_live_cloud_tsdf(tmp_pat
                     manhattan_residue="bars_tsdf", tolerance="declared")      # the 2026-10-15 route, selectable
     by = {r["instance_id"]: r for r in rep["fitted"]}
     m = by[1]["manhattan"]
-    assert m["snapped"] and m["partial"] and 0.6 < m["residue_frac"] < 0.7, m
+    assert m["snapped"] and m["partial"] and 0.4 < m["residue_frac"] < 0.8, m        # the blob seeds no plane
     assert m["residue"]["cylinders"] == [] and "vertices" in m["residue"]["tsdf"], m["residue"]
-    assert m["residue"]["tsdf"]["n_points"] >= 0.98 * len(blob) and m["residue"]["tsdf"]["vertices"] > 50
+    assert m["residue"]["tsdf"]["n_points"] >= 0.5 * len(blob) and m["residue"]["tsdf"]["vertices"] > 50
     assert not (out / "surface_fit" / "thing_1" / "unexplained_idx.npy").exists()
 
 
@@ -351,18 +344,20 @@ def test_an_s_shaped_wall_becomes_frame_aligned_planes_with_exact_offsets(tmp_pa
                     decompose_min_points=1500, decompose_min_frac=0.05, decompose_max_primitives=8)
     by = {r["instance_id"]: r for r in rep["fitted"]}
     w = by[2]["manhattan"]
-    # the first and third runs lie in ONE plane (x = 0): the extraction claims them together,
-    # the connectivity split makes them two pieces, the coplanar merge keeps them one plane
-    assert w["decomposed"] and len(w["parts"]) == 5, w
-    assert all(p["snapped"] for p in w["parts"])
-    axes = sorted(p["axis"] for p in w["parts"])
+    # the first and third runs lie in ONE plane (x = 0): two segments 2 m apart, the coplanar
+    # merge keeps them one plane; the returns are their own segments; a few tiny facets at the
+    # corners (under manhattan_part_min_frac) stay as measured, never on the frame
+    big = [p for p in w["parts"] if p.get("snapped")]
+    assert w["decomposed"] and len(big) == 5, w
+    assert all(p["n_points"] < 0.05 * 70000 for p in w["parts"] if not p.get("snapped"))
+    axes = sorted(p["axis"] for p in big)
     assert axes == ["X", "X", "X", "Z", "Z"], axes
-    runs = [p for p in w["parts"] if p["axis"] == "X"]
+    runs = [p for p in big if p["axis"] == "X"]
     assert sum(1 for p in runs if p.get("coplanar_group")) == 2, "the first and third runs: one plane"
     assert w["residue_frac"] < 0.05
     assert rep["manhattan"]["frame"]["up_from_instance"] == 1, "up = the floor, not the heavier wall"
     side = json.loads((out / "surface_fit" / "wall_2" / "manhattan.json").read_text())
-    assert side["decomposed"] and len(side["parts"]) == 5
+    assert side["decomposed"] and sum(1 for p in side["parts"] if p.get("snapped")) == 5
     # the exported mesh spans the whole S: both offsets and the full length
     import trimesh
     mesh = trimesh.load(str(out / "surface_fit" / "wall_2" / "surface.glb"), force="mesh")

@@ -64,6 +64,7 @@ def scene_config_kwargs(config: Optional[dict]) -> dict:
               "decompose_inlier_dist_m", "decompose_min_frac",
               "contour_regularize", "contour_tol_m", "manhattan", "manhattan_snap_deg", "manhattan_min_inlier_frac", "manhattan_part_min_frac",
               "manhattan_bar_aspect_min", "manhattan_bar_round_tol", "manhattan_residue",
+              "manhattan_dominant_min_frac", "facet_cell_m", "facets_across", "facet_seed_points",
               "tolerance", "tolerance_k", "noise_k_neighbours", "noise_sample"):
         if k in scfg:
             out[k] = scfg[k]
@@ -77,6 +78,17 @@ def _measured_part(fs, kind: str, V: np.ndarray, F: np.ndarray, n_points: int, r
                         n_input_points=int(n_points), model=None, instance_id=fs.instance_id, label=fs.label,
                         report=SimpleNamespace(stats=SimpleNamespace(rms_mm=None)), manhattan=rec)
     return p
+
+
+def _facet_eval_kwargs(eval_kwargs: dict, cell: float, tol: float) -> dict:
+    """The evaluation of a plane segment at the object's resolution: the mesh no coarser than
+    half its cell, the support radius no wider than the cell, the on-surface band = its
+    tolerance (the declared keys stay the ceiling)."""
+    out = dict(eval_kwargs)
+    out["mesh_resolution_m"] = float(min(float(eval_kwargs.get("mesh_resolution_m", 0.05)), 0.5 * float(cell)))
+    out["support_radius_m"] = float(min(float(eval_kwargs.get("support_radius_m", 0.08)), float(cell)))
+    out["support_dist_m"] = float(tol)
+    return out
 
 
 def _residue_components(pts: np.ndarray, mask: np.ndarray, cell: float):
@@ -286,6 +298,10 @@ def fit_scene(session_dir: Path,
               manhattan_bar_aspect_min: float = 4.0,
               manhattan_bar_round_tol: float = 2.0,
               manhattan_residue: str = "declare",
+              manhattan_dominant_min_frac: float = 0.5,
+              facet_cell_m: float = 0.10,
+              facets_across: int = 4,
+              facet_seed_points: int = 12,
               tolerance: str = "measured",
               tolerance_k: float = 3.0,
               noise_k_neighbours: int = 24,
@@ -383,154 +399,108 @@ def fit_scene(session_dir: Path,
         tol_rec = None
         try:
             if man_on:
-                # THE TOLERANCE of a marked object is its OWN measured noise (USER 2026-10-16:
-                # "tolerancia = el ruido local medido del propio objeto", not the session's
-                # repeatability — pccr's 8.7 cm made every form coincide — and not a declared
-                # bar): the local thickness of its cloud, times the standard robust k. The
-                # declared support_dist_m stays selectable (`tolerance: declared`).
+                # PLANE SEGMENTS (USER 2026-10-16: "con planos podés reconstruir geometrías,
+                # curvaturas … segmentos de plano, no único plano que describe todo"): the object's
+                # surface is the set of planar pieces its points describe at its own resolution
+                # (reconstruction/surface_fit/facets.py) — a flat wall one segment, a curved one a
+                # chain of facets, a step two parallel segments with their exact offset, a ramp its
+                # own tilted segment. THE RESOLUTION: at least `facets_across` facets across the
+                # object's smallest extent, never under four of its own sampling gaps, never over
+                # `facet_cell_m` (the user's cell). THE TOLERANCE: what that resolution cannot
+                # resolve — half a cell — never under the object's own measured noise ×
+                # tolerance_k (`tolerance: declared` keeps support_dist_m). pccr 2026-10-16: at
+                # the cloud's noise (1 cm) a door split into 134 pieces (its two revisit copies
+                # 3 cm apart) and the floor into 1,768; at half a 10 cm cell the door is one plane
+                # (97 %), the floor one (83 %) plus its ramp, a 30 cm pipe four facets at its own
+                # 7 cm cell, the extinguisher six and its dome.
+                from .facets import grow_plane_segments, object_cell
+                from .models import orient_normal
+                from .noise import local_thickness_sigma
+                from .plane import _plane_basis
                 sd = float(kwargs.get("support_dist_m", 0.04))
-                cell = 2.0 * sd            # the connectivity cell of a plane's pieces (2026-10-15)
-                if str(tolerance) == "measured" and len(pts) >= 50:
-                    from .noise import local_thickness_sigma
-                    nz = local_thickness_sigma(pts, k=int(noise_k_neighbours), n_max=int(noise_sample))
-                    if np.isfinite(nz["sigma_m"]) and nz["sigma_m"] > 0:
-                        sd = float(tolerance_k) * float(nz["sigma_m"])
-                        # a plane's pieces are split on an occupancy grid: a cell at least the
-                        # largest sampling gap (the p99 nearest-neighbour distance) keeps a
-                        # continuous surface ONE piece — neighbours within a cell always share
-                        # or touch one — so only a real separation splits it
-                        cell = max(2.0 * sd, float(nz["spacing_p99_m"]))
-                        tol_rec = {"from": "measured", "noise_sigma_m": round(float(nz["sigma_m"]), 5),
-                                   "noise_p90_m": round(float(nz.get("p90_m", float("nan"))), 5),
-                                   "spacing_p50_m": round(float(nz["spacing_p50_m"]), 5),
-                                   "spacing_p99_m": round(float(nz["spacing_p99_m"]), 5),
-                                   "k_neighbours": int(nz["k"]), "n_sampled": int(nz["n_sampled"]),
-                                   "tolerance_k": float(tolerance_k), "tolerance_m": round(sd, 5),
-                                   "connectivity_cell_m": round(cell, 5)}
-                if tol_rec is None:
-                    tol_rec = {"from": "declared", "tolerance_m": round(sd, 5), "connectivity_cell_m": round(cell, 5)}
-                logger.info("scene: %s_%s — tolerance %.1f mm (%s%s)", label, iid, 1000 * sd, tol_rec["from"],
-                            f": local noise σ {1000 * tol_rec['noise_sigma_m']:.1f} mm × {tolerance_k:g}"
-                            if tol_rec["from"] == "measured" else "")
-                # a PLANE needs no consolidation: RANSAC + the median offset are robust to the
-                # double layers WLOP collapses for the splines, and the residual report uses
-                # the raw points anyway — WLOP was 171 s of the floor's 3 min (pccr 2026-10-15);
-                # the session's own up (floor_transform.npz) orients it
-                fs = fit_segment(pts, instance_id=iid, label=label,
-                                 original_xyz=raw_seg,
-                                 scene_centroid=centroid, world_up=man_up,
-                                 progress_cb=progress_cb,
-                                 **{**kwargs, "models": ["plane"], "consolidate_method": "none",
-                                    "max_fit_points": 0, "plane_dist_thresh": sd, "support_dist_m": sd})
-                if fs is None:
-                    man_rejected[int(iid)] = 0.0     # no plane gathers its points at all
-                    logger.info("scene: %s_%s — marked Manhattan but no plane explains it: the "
-                                "configured ladder decides", label, iid)
-                if fs is not None:
-                    # A marked object IS a surface when its planes explain most of its points
-                    # within the support distance — the SHARE, not the p95: pccr's floor is 87 %
-                    # within 4 cm of its plane and its p95 is 88 mm (chair bases, clutter, the
-                    # 7.6 cm undulation the certification measured) — that p95 is the FINDING a
-                    # straight BIM floor reports, not a reason to model the floor as a spline.
-                    within = (float(np.mean(np.abs(np.asarray(fs.model.signed_distance(raw_seg))) <= sd))
-                              if len(raw_seg) else 0.0)
-                    # MANHATTAN DECOMPOSITION (USER 2026-10-15, the S-shaped wall), ALWAYS tried:
-                    # planes, the largest first, down to manhattan_part_min_frac of the object
-                    # (a desk's side panels, an S-wall's returns — never a floor's clutter);
-                    # each part is snapped to the frame below (parallel runs on one axis with
-                    # their exact offsets, the returns perpendicular), coplanar runs one plane,
-                    # exact edges between them.
-                    from .decompose import extract_primitives
-                    from .escalate import FitContext
-                    n_obj = max(len(pts), 1)
-                    part_min = max(int(float(manhattan_part_min_frac) * n_obj), 100)
-                    ctx_m = FitContext(world_up=man_up, scene_centroid=centroid,
-                                       dist_thresh=sd,
-                                       ransac_iters=int(kwargs.get("ransac_iters", 500)),
-                                       min_inlier_frac=0.02)
-                    parts, rem = extract_primitives(
-                        pts, ctx_m, inlier_dist=sd, min_points=part_min,
-                        min_frac_remaining=float(manhattan_part_min_frac),
-                        max_primitives=int(decompose_max_primitives),
-                        tag=f"manhattan {label}_{iid}", kinds=("plane",))
-                    # a plane claims whatever lies within the tolerance — two legs 1.4 m apart
-                    # in one vertical plane, a run and its coplanar twin — so each part is split
-                    # into its CONNECTED pieces in the plane (occupancy at 2 support distances),
-                    # and a piece is a PANEL when it is at least four support distances wide in
-                    # its narrowest in-plane direction (p5–p95): a 6 cm tubular leg lies within
-                    # 4 cm of a plane through its axis and is NOT a plane — it is residue
-                    # … and THIN: a plane sliced through a solid lump holds as many of the
-                    # object's points on its shoulder (sd..2·sd) as in its core; a panel's
-                    # shoulder is its noise tail
-                    split = []
-                    for _k, m_, mask_ in parts:
-                        if not _is_thin(pts, m_, sd):
-                            continue
-                        for comp in _plane_components(pts, mask_, m_, cell):
-                            if int(comp.sum()) >= part_min and _panel_width(pts[comp], m_) >= 4.0 * sd:
-                                split.append(("plane", m_, comp))
-                    # the greedy extraction let a rejected slice claim points first (a blob's
-                    # slice took 250 of the plate's points): every kept panel RECLAIMS, largest
-                    # first, the object's points within the tolerance of its plane that are
-                    # connected to it
-                    claimed = np.zeros(n_obj, dtype=bool)
-                    reclaimed = []
-                    for _k, m_, comp in sorted(split, key=lambda t: -int(t[2].sum())):
-                        mem = (np.abs(np.asarray(m_.signed_distance(pts))) <= sd) & ~claimed
-                        grown = np.zeros(n_obj, dtype=bool)
-                        for c2 in _plane_components(pts, mem, m_, cell):
-                            if (c2 & comp).any():
-                                grown |= c2
-                        if int(grown.sum()) >= part_min:
-                            claimed |= grown
-                            reclaimed.append(("plane", m_, grown))
-                    parts = sorted(reclaimed, key=lambda t: -int(t[2].sum()))
-                    explained = float(sum(int(m.sum()) for _k, _m, m in parts)) / n_obj
-                    if not parts:
-                        man_rejected[int(iid)] = within
-                        logger.info("scene: %s_%s — marked Manhattan but no plane holds %.0f%% of "
-                                    "its points (one plane: %.0f%% within %.0f mm): the configured "
-                                    "ladder decides", label, iid, 100 * manhattan_part_min_frac,
-                                    100 * within, 1000 * sd)
-                        fs = None
-                    else:
-                        # THE MODEL: the planes found, straight; the rest of the object —
-                        # whatever no plane holds — is declared, and when the planes do not
-                        # make a SURFACE (under manhattan_min_inlier_frac: a desk top with
-                        # tubular legs) it is meshed AS MEASURED next to them (the published
-                        # GLB fuses unexplained_idx.npy), never bent into a spline. A surface's
-                        # leftovers (a floor's clutter) are declared only.
-                        residue_mask = np.ones(n_obj, dtype=bool)
-                        for _k, _m, m in parts:
-                            residue_mask &= ~m
-                        residue = float(residue_mask.mean())
-                        partial = explained < float(manhattan_min_inlier_frac)
-                        if len(parts) >= 2:
-                            k0, m0, mask0 = parts[0]
-                            fs = evaluate_model(m0, kind="plane",
-                                                escalation_path=["plane", "manhattan_parts"],
-                                                orig=raw_seg[mask0], instance_id=iid, label=label,
-                                                **eval_kwargs)
-                            fs.from_decompose = True
-                            fs.manhattan_parts = [(m, raw_seg[mask]) for _k, m, mask in parts]
-                        fs.manhattan_residue = residue
-                        fs.manhattan_partial = partial
-                        # the rest: DECLARED (USER 2026-10-16: "olvídate de los cilindros … puede
-                        # estar facetado … sino va a forzar cilindros en donde no aplica, ya pasó
-                        # en la corrida anterior"): what no plane holds is recorded with its share
-                        # and stays as points — never a cylinder, never a TSDF, never Poisson.
-                        # `manhattan_residue: bars_tsdf` keeps the 2026-10-15 route selectable
-                        # (bars → cylinders on the frame, the rest → the live-cloud TSDF).
-                        fs.manhattan_residue_mask = (residue_mask
-                                                     if (str(manhattan_residue) == "bars_tsdf" and partial
-                                                         and residue >= float(manhattan_part_min_frac)) else None)
-                        fs.manhattan_residue_n = int(residue_mask.sum())
-                        forced_leftover[int(iid)] = np.zeros(0, dtype=np.int64)
-                        logger.info("scene: %s_%s — marked Manhattan: %d plane(s) explain %.0f%% "
-                                    "(one plane %.0f%%), residue %.0f%% %s", label, iid, len(parts),
-                                    100 * explained, 100 * within, 100 * residue,
-                                    "→ bars / TSDF next to the planes (not a surface)"
-                                    if fs.manhattan_residue_mask is not None else "declared, left as points")
+                nz = (local_thickness_sigma(pts, k=int(noise_k_neighbours), n_max=int(noise_sample))
+                      if len(pts) >= 50 else {"sigma_m": float("nan"), "spacing_p99_m": 0.0, "k": 0, "n_sampled": 0})
+                ext = (np.percentile(pts, 99, axis=0) - np.percentile(pts, 1, axis=0)) if len(pts) else np.zeros(3)
+                cell = object_cell(ext, float(nz.get("spacing_p99_m", 0.0) or 0.0), float(facet_cell_m), int(facets_across))
+                if str(tolerance) == "measured":
+                    # half the cell — what the resolution cannot resolve. The measured noise is
+                    # recorded, never a floor of the tolerance: a VOLUME's local thickness is
+                    # large (a heap, a blob: 3–4 cm) and would hand it a tolerance that reads
+                    # its slabs as planes; a surface noisier than its tolerance fragments and
+                    # says so (noise_exceeds_tolerance)
+                    sd = cell / 2.0
+                    sig = float(nz["sigma_m"]) if np.isfinite(nz["sigma_m"]) else float("nan")
+                    tol_rec = {"from": "measured", "cell_m": round(cell, 5), "tolerance_m": round(sd, 5),
+                               "tolerance_is": "half the object's cell: what its resolution cannot resolve",
+                               "noise_sigma_m": (round(sig, 5) if np.isfinite(sig) else None),
+                               "noise_exceeds_tolerance": bool(np.isfinite(sig) and float(tolerance_k) * sig > sd),
+                               "spacing_p50_m": round(float(nz.get("spacing_p50_m", float("nan"))), 5),
+                               "spacing_p99_m": round(float(nz.get("spacing_p99_m", float("nan"))), 5),
+                               "extent_m": [round(float(x), 4) for x in ext], "facets_across": int(facets_across),
+                               "k_neighbours": int(nz["k"]), "n_sampled": int(nz["n_sampled"]),
+                               "tolerance_k": float(tolerance_k)}
+                else:
+                    tol_rec = {"from": "declared", "cell_m": round(cell, 5), "tolerance_m": round(sd, 5)}
+                logger.info("scene: %s_%s — cell %.1f cm, tolerance %.1f mm (%s)", label, iid, 100 * cell,
+                            1000 * sd, tol_rec["from"])
+                reg, segs = grow_plane_segments(pts, cell, sd, seed_points=int(facet_seed_points))
+                n_obj = max(len(pts), 1)
+                if not segs or float(segs[0]["n"]) / n_obj < float(manhattan_part_min_frac):
+                    # no segment holds even a part of the object (the bound of a part, 2026-10-15):
+                    # its cloud is not a surface at its resolution — the configured ladder decides
+                    man_rejected[int(iid)] = (float(segs[0]["n"]) / n_obj) if segs else 0.0
+                    logger.info("scene: %s_%s — marked Manhattan but no plane segment holds %.0f%% of its "
+                                "points at %.1f cm (the largest %.1f%%): the configured ladder decides",
+                                label, iid, 100 * manhattan_part_min_frac, 100 * cell,
+                                100 * man_rejected[int(iid)])
+                    fs = None
+                else:
+                    parts = []                          # (PlaneModel, mask over pts), the largest first
+                    for q in segs:
+                        mask = reg == int(q["id"])
+                        Q = pts[mask]
+                        nrm = orient_normal(np.asarray(q["normal"], np.float64), man_up, points=Q,
+                                            centroid_hint=centroid)
+                        c = np.asarray(q["centroid"], np.float64)
+                        u_, v_ = _plane_basis(nrm, man_up)
+                        parts.append((PlaneModel(normal=nrm, d=float(-(nrm @ c)), origin=c.copy(), u=u_, v=v_,
+                                                 rms=float(q["rms_m"]), inlier_frac=float(q["n"]) / n_obj,
+                                                 n_points=int(q["n"])), mask))
+                    explained = float((reg >= 0).mean())
+                    within = float(segs[0]["n"]) / n_obj          # the dominant segment's share
+                    residue_mask = reg < 0
+                    residue = float(residue_mask.mean())
+                    partial = within < float(manhattan_min_inlier_frac)
+                    m0, mask0 = parts[0]
+                    fs = evaluate_model(m0, kind="plane", escalation_path=["plane", "segments"],
+                                        orig=raw_seg[mask0], instance_id=iid, label=label,
+                                        **_facet_eval_kwargs(eval_kwargs, cell, sd))
+                    fs.from_decompose = len(parts) > 1
+                    fs.manhattan_parts = [(m, raw_seg[mask]) for m, mask in parts]
+                    fs.manhattan_residue = residue
+                    fs.manhattan_partial = partial
+                    # the rest: DECLARED (USER 2026-10-16: "olvídate de los cilindros … puede
+                    # estar facetado … sino va a forzar cilindros en donde no aplica"): what no
+                    # segment holds is recorded with its share and stays as points — never a
+                    # cylinder, a TSDF or Poisson. `manhattan_residue: bars_tsdf` keeps the
+                    # 2026-10-15 route selectable.
+                    fs.manhattan_residue_mask = (residue_mask
+                                                 if (str(manhattan_residue) == "bars_tsdf" and partial
+                                                     and residue >= float(manhattan_part_min_frac)) else None)
+                    fs.manhattan_residue_n = int(residue_mask.sum())
+                    fs.facets = {"cell_m": round(cell, 5), "tolerance_m": round(sd, 5), "n_segments": len(segs),
+                                 "explained": round(explained, 4), "residue": round(residue, 4),
+                                 "segments": [{"share": round(float(q["n"]) / n_obj, 4), "n_points": int(q["n"]),
+                                               "tilt_from_up_deg": round(float(np.degrees(np.arccos(np.clip(
+                                                   abs(float(np.asarray(q["normal"]) @ man_up)), 0.0, 1.0)))), 2),
+                                               "rms_mm": round(1000 * float(q["rms_m"]), 2), "cells": int(q["cells"])}
+                                              for q in segs]}
+                    forced_leftover[int(iid)] = np.zeros(0, dtype=np.int64)
+                    logger.info("scene: %s_%s — %d plane segment(s) at %.1f cm explain %.0f%% (the largest "
+                                "%.0f%%), residue %.0f%% %s", label, iid, len(segs), 100 * cell, 100 * explained,
+                                100 * within, 100 * residue,
+                                "→ bars / TSDF next to the planes" if fs.manhattan_residue_mask is not None
+                                else "declared, left as points")
                 if fs is not None:
                     fs.tolerance = tol_rec
                     fs.tolerance_m = sd
@@ -600,18 +570,55 @@ def fit_scene(session_dir: Path,
         m_idx = [i for i, f in enumerate(fitted)
                  if int(f.instance_id) in man_planes and isinstance(f.model, PlaneModel)]
         if m_idx:
-            from .manhattan import regularize_manhattan
-            # every marked plane of the scene: the single-plane objects and every part of the
-            # decomposed ones — ONE frame, one snap, coplanar merge across objects
+            from .manhattan import _nearest_axis, regularize_manhattan, scene_frame
+            # WHICH SEGMENTS SNAP (USER 2026-10-16, with the plane segments): the object's
+            # dominant segment when it holds the MAJORITY of the object's points (the object IS
+            # that plane — a door, a floor, a wall — and its deviation is the finding, 2026-10-15);
+            # another segment of at least manhattan_part_min_frac only when the snap would move
+            # its far edge by less than the object's tolerance (a cabinet's second face, an
+            # S-wall's runs and returns — never a ramp, never the facets of a curve: they keep
+            # their measured normals); smaller facets never. The frame is measured on the
+            # dominant planes first; ONE frame, one snap, coplanar merge across objects.
+            def _half_extent(m, pk):
+                uv = np.asarray(m.to_uv(np.asarray(pk, np.float64)))
+                return float(np.max(np.linalg.norm(uv - np.median(uv, axis=0), axis=1))) if len(uv) else 0.0
+            dom = []
+            for i in m_idx:
+                f = fitted[i]
+                parts_i = getattr(f, "manhattan_parts", None) or [(f.model, seg_points[f.instance_id])]
+                n_i = max(sum(len(pk) for _m, pk in parts_i), 1)
+                if len(parts_i[0][1]) / n_i >= float(manhattan_dominant_min_frac):
+                    dom.append((parts_i[0][0], parts_i[0][1]))
+            frame0 = scene_frame([m.normal for m, _pk in dom], [float(len(pk)) for _m, pk in dom],
+                                 man_up, float(manhattan_snap_deg))
             entries = []           # (fitted index, part index or None, model, points)
+            unsnapped: Dict[int, list] = {}      # fitted index → [(part index, model, points, why)]
             for i in m_idx:
                 f = fitted[i]
                 parts_i = getattr(f, "manhattan_parts", None)
-                if parts_i:
-                    for k, (m, pk) in enumerate(parts_i):
-                        entries.append((i, k, m, pk))
-                else:
+                tol_i = float(getattr(f, "tolerance_m", None) or kwargs.get("support_dist_m", 0.04))
+                if not parts_i:
                     entries.append((i, None, f.model, seg_points[f.instance_id]))
+                    continue
+                n_i = max(sum(len(pk) for _m, pk in parts_i), 1)
+                for k, (m, pk) in enumerate(parts_i):
+                    share = len(pk) / n_i
+                    if k == 0 and share >= float(manhattan_dominant_min_frac):
+                        entries.append((i, k, m, pk))
+                        continue
+                    if share >= float(manhattan_part_min_frac):
+                        _name, _axis, ang = _nearest_axis(m.normal, frame0)
+                        disp = _half_extent(m, pk) * float(np.sin(np.radians(ang)))
+                        if ang <= float(manhattan_snap_deg) and disp <= tol_i:
+                            entries.append((i, k, m, pk))
+                            continue
+                        why = (f"{ang:.1f}° from the nearest frame axis: the snap would move its far edge "
+                               f"{100 * disp:.1f} cm, beyond the tolerance {100 * tol_i:.1f} cm — kept as measured"
+                               if ang <= float(manhattan_snap_deg) else
+                               f"{ang:.1f}° from every frame axis — kept as measured")
+                    else:
+                        why = f"a facet of {100 * share:.1f}% of the object — kept as measured"
+                    unsnapped.setdefault(i, []).append((k, m, pk, why))
             snapped, man_report = regularize_manhattan(
                 [e[2] for e in entries], [float(len(e[3])) for e in entries],
                 [e[3] for e in entries], up_hint=man_up, snap_deg=float(manhattan_snap_deg),
@@ -620,10 +627,11 @@ def fit_scene(session_dir: Path,
             by_obj: Dict[int, list] = {}
             for e, m_new, rec in zip(entries, snapped, man_report["objects"]):
                 by_obj.setdefault(e[0], []).append((e[1], m_new, rec, e[3]))
-            for i, rows in by_obj.items():
+            for i in sorted(set(by_obj) | set(unsnapped)):
+                rows = by_obj.get(i, [])
                 old = fitted[i]
                 _cb(instance_id=old.instance_id, phase="manhattan", elapsed=time.time() - t0)
-                if rows[0][0] is None:                       # a single plane
+                if rows and rows[0][0] is None:              # a single plane
                     _k, m_new, rec, pts_i = rows[0]
                     fs2 = evaluate_model(
                         m_new, kind="plane", escalation_path=old.escalation_path,
@@ -633,8 +641,10 @@ def fit_scene(session_dir: Path,
                     fs2.manhattan_residue_mask = getattr(old, "manhattan_residue_mask", None)
                     fs2.tolerance = getattr(old, "tolerance", None)
                     fs2.tolerance_m = getattr(old, "tolerance_m", None)
+                    fs2.facets = getattr(old, "facets", None)
                     fs2.manhattan = {**rec, "decomposed": False,
                                      "tolerance": getattr(old, "tolerance", None),
+                                     "facets": {kk: vv for kk, vv in (getattr(old, "facets", None) or {}).items() if kk != "segments"},
                                      "residue_frac": round(float(getattr(old, "manhattan_residue", 0.0)), 4),
                                      "residue_points": int(getattr(old, "manhattan_residue_n", 0)),
                                      "partial": bool(getattr(old, "manhattan_partial", False)),
@@ -646,24 +656,34 @@ def fit_scene(session_dir: Path,
                                                             "points — never a cylinder, a TSDF or Poisson (USER 2026-10-16)"}
                     fitted[i] = fs2
                     continue
-                # a decomposed object: every part evaluated on its OWN points with its snapped
-                # plane; the largest is the instance's surface, the others its parts
+                # a segmented object: every segment evaluated on its OWN points — the snapped
+                # ones with their snapped plane, the others as measured — at the object's
+                # resolution; the largest is the instance's surface, the others its parts
+                fac = getattr(old, "facets", None) or {}
+                ev_i = _facet_eval_kwargs(eval_kwargs, float(fac.get("cell_m") or kwargs.get("mesh_resolution_m", 0.05) * 2),
+                                          float(getattr(old, "tolerance_m", None) or kwargs.get("support_dist_m", 0.04)))
+                todo_parts = [(k, m_new, rec, pts_k) for k, m_new, rec, pts_k in rows]
+                todo_parts += [(k, m, pk, {"instance_id": int(old.instance_id), "snapped": False, "reason": why})
+                               for k, m, pk, why in unsnapped.get(i, [])]
+                todo_parts = [(k, m, (rec if isinstance(rec, dict) else pk), (pk if isinstance(rec, dict) else rec))
+                              for k, m, rec, pk in todo_parts]
                 surfs = []
-                for k, m_new, rec, pts_k in sorted(rows, key=lambda r: -len(r[3])):
+                for k, m_new, rec, pts_k in sorted(todo_parts, key=lambda r: -len(r[3])):
                     fk = evaluate_model(m_new, kind="plane",
-                                        escalation_path=["plane", "manhattan_parts"],
-                                        orig=pts_k, instance_id=old.instance_id, label=old.label,
-                                        **eval_kwargs)
+                                        escalation_path=["plane", "segments"],
+                                        orig=pts_k, instance_id=old.instance_id, label=old.label, **ev_i)
                     fk.regularized = bool(rec.get("snapped"))
                     fk.from_decompose = True
                     fk.manhattan = {**rec, "part": int(k), "n_points": int(len(pts_k))}
                     surfs.append(fk)
                 primary = surfs[0]
+                primary.facets = fac
                 primary.manhattan_residue_mask = getattr(old, "manhattan_residue_mask", None)
                 primary.tolerance = getattr(old, "tolerance", None)
                 primary.tolerance_m = getattr(old, "tolerance_m", None)
                 primary.manhattan = {**primary.manhattan, "decomposed": True,
                                      "tolerance": getattr(old, "tolerance", None),
+                                     "facets": {kk: vv for kk, vv in fac.items() if kk != "segments"},
                                      "parts": [sf.manhattan for sf in surfs],
                                      "residue_frac": round(float(getattr(old, "manhattan_residue", 0.0)), 4),
                                      "residue_points": int(getattr(old, "manhattan_residue_n", 0)),
@@ -677,8 +697,10 @@ def fit_scene(session_dir: Path,
                 fitted[i] = primary
                 if len(surfs) > 1:
                     extra_parts[int(old.instance_id)] = surfs[1:]
-                logger.info("scene: %s_%s — Manhattan decomposition: %d plane(s) on the frame, "
+                logger.info("scene: %s_%s — %d plane segment(s): %d snapped to the frame, %d as measured, "
                             "residue %.0f%% declared", old.label, old.instance_id, len(surfs),
+                            sum(1 for sf in surfs if sf.manhattan.get("snapped")),
+                            sum(1 for sf in surfs if not sf.manhattan.get("snapped")),
                             100 * float(getattr(old, "manhattan_residue", 0.0)))
             # THE REST of a marked object that is not a surface: bars → straight cylinders on
             # the frame, the remainder → the live-cloud TSDF, never Poisson (USER 2026-10-15)
@@ -1032,8 +1054,9 @@ def fit_scene(session_dir: Path,
                          heatmap_vmax_mm=kwargs.get("heatmap_vmax_mm"))
         if getattr(fs, "manhattan", None):
             out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "manhattan.json").write_text(json.dumps(
-                {**fs.manhattan, "frame": (man_report or {}).get("frame")}, indent=2))
+            (out_dir / "manhattan.json").write_text(json.dumps(json_safe(
+                {**fs.manhattan, "frame": (man_report or {}).get("frame"),
+                 "segments": (getattr(fs, "facets", None) or {}).get("segments")}), indent=2))
         _export_glb(fs, out_dir)
         # Stage-3: real texture from the scan frames (user: "siempre con
         # textura, con los colores correctos") — texrecon atlas over the
