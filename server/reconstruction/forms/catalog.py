@@ -69,6 +69,7 @@ class FormsConfig:
     max_blocks: int               # BOUND: blocks per fit
     lr: float                     # the optimiser's step
     review_views: int             # overlays shown to the VLM in a review round (the worst views)
+    ransac_iters: int             # BOUND (cost): hypotheses per part extraction of a composite
     seed: int                     # every subsample / bootstrap of the stage
     raw: Dict[str, Any] = field(default_factory=dict, compare=False)
 
@@ -95,9 +96,11 @@ def load_forms_config(config: Dict[str, Any]) -> FormsConfig:
         boundary_px_per_view=int(_req(sec, "boundary_px_per_view")),
         max_views=int(_req(sec, "max_views")), block_iterations=int(_req(sec, "block_iterations")),
         max_blocks=int(_req(sec, "max_blocks")), lr=float(_req(sec, "lr")),
-        review_views=int(_req(sec, "review_views")), seed=int(_req(sec, "seed")), raw=dict(sec))
+        review_views=int(_req(sec, "review_views")), ransac_iters=int(_req(sec, "ransac_iters")),
+        seed=int(_req(sec, "seed")), raw=dict(sec))
     for k in ("views", "max_rounds", "max_tokens", "max_points", "surface_samples",
-              "boundary_px_per_view", "max_views", "block_iterations", "max_blocks", "review_views"):
+              "boundary_px_per_view", "max_views", "block_iterations", "max_blocks", "review_views",
+              "ransac_iters"):
         if int(getattr(out, k)) < 1:
             raise FormsConfigError(f"forms.{k} must be >= 1, got {getattr(out, k)}")
     if out.lr <= 0:

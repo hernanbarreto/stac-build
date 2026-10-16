@@ -338,11 +338,18 @@ class Template:
                 "pose": self.pose.matrix().tolist() if hasattr(self, "pose") else None}
 
     def measure_extents(self, P: torch.Tensor) -> None:
-        """The EXTENTS the points cannot push (a length, an outline) are MEASURED from the
-        points in the current pose (robust percentiles) — a point cloud only says where the
-        surface passes, never that it must stop: with the length free, the optimiser slides
-        it along a plateau (an I-beam grew 4.0 → 4.3 m). The silhouette corrector, which does
-        see where the object ends, frees them again. Default: nothing to measure."""
+        """The extents the points cannot push at all — a plate's OUTLINE: every point inside it
+        measures |z| whatever its size — are MEASURED from the points in the current pose
+        (robust percentiles). A solid's faces are pulled by their points through the distance
+        itself (a face converges to its points' median, unbiased); only where an end has no
+        points does the optimiser slide along a plateau — ``bound_extents`` stops that. The
+        silhouette corrector, which sees where the object ends, frees everything again."""
+        return None
+
+    def bound_extents(self, P: torch.Tensor, sigma: float) -> None:
+        """No surface beyond the last measured point: an extent the optimiser carried past the
+        points' extreme (momentum into the plateau — an I-beam grew 4.0 → 4.3 m) is brought
+        back to that extreme plus σ. Default: nothing to bound."""
         return None
 
     def state(self) -> List[np.ndarray]:
@@ -383,15 +390,13 @@ class Extrusion(Template):
                 else torch.exp(self.log_h[0]))
 
     def measure_extents(self, P: torch.Tensor) -> None:
+        if not self.flat:
+            return None          # a solid's faces are fitted by the distance itself
         with torch.no_grad():
             x, y, z = self.pose.local(P)
             q = torch.tensor([EXTENT_Q, 1.0 - EXTENT_Q], dtype=torch.float64, device=self.dev)
-            if not self.flat:
-                z0, z1 = torch.quantile(z, q)
-                self.pose.c += self.pose.basis()[2] * ((z0 + z1) / 2)
-                self.log_h[0] = torch.log(torch.clamp((z1 - z0) / 2, min=1e-4))
             sec = self.section
-            if self.form in ("panel", "box") and sec.kind in ("rect", "circle", "arch"):
+            if sec.kind in ("rect", "circle", "arch"):
                 x0, x1 = torch.quantile(x, q)
                 y0, y1 = torch.quantile(y, q)
                 u, v, _a = self.pose.basis()
@@ -405,6 +410,38 @@ class Extrusion(Template):
                 elif sec.kind == "arch":
                     sec.logs[sec.names.index("b")] = torch.log(ex)
                     sec.logs[sec.names.index("H")] = torch.log(torch.maximum(ey, ex * 0.75))
+
+    def bound_extents(self, P: torch.Tensor, sigma: float) -> None:
+        """Each END of the solid is brought back to the last measured point (+ σ) on its side,
+        the centre re-placed between the ends — the plateau drift moves the centre and one end
+        together (a plate grew 1.2 → 1.4 m along its own length)."""
+        if self.flat:
+            return None
+        with torch.no_grad():
+            x, y, z = self.pose.local(P)
+            s = float(sigma)
+            u, v, a = self.pose.basis()
+
+            def clamp_ends(vals: torch.Tensor, half: float):
+                lo, hi = -half, half
+                lo2 = max(lo, float(vals.min()) - s)
+                hi2 = min(hi, float(vals.max()) + s)
+                if hi2 <= lo2:
+                    return None, None
+                return (lo2 + hi2) / 2.0, max((hi2 - lo2) / 2.0, 1e-4)
+
+            mid, half = clamp_ends(z, float(torch.exp(self.log_h[0])))
+            if mid is not None:
+                self.pose.c += a * mid
+                self.log_h[0] = math.log(half)
+            sec = self.section
+            if sec.kind in ("rect", "rect_hollow"):
+                for nm, vals, axis in (("bx", x, u), ("by", y, v)):
+                    i = sec.names.index(nm)
+                    mid, half = clamp_ends(vals, float(torch.exp(sec.logs[i])))
+                    if mid is not None:
+                        self.pose.c += axis * mid
+                        sec.logs[i] = math.log(half)
 
     def distance(self, P: torch.Tensor) -> torch.Tensor:
         x, y, z = self.pose.local(P)
@@ -507,6 +544,15 @@ class Extrusion(Template):
         elif k == "arch":
             out.update(width_m=s["b"], height_m=s["H"])
         out["length_m"] = 0.0 if self.flat else 2.0 * float(self.half_length().detach())
+        # the extents along the SCENE's axes (up, X, Z) — what a BIM reads, whatever the
+        # template's own axis is (a box's extrusion axis is arbitrary)
+        with torch.no_grad():
+            u, v, a = [t.detach().cpu().numpy() for t in self.pose.basis()]
+        bx, by = self.section.bbox()
+        half = np.array([bx, by, 0.0 if self.flat else float(self.half_length().detach())])
+        fr = self.pose.frame
+        for name, ax in (("extent_up_m", fr.up), ("extent_X_m", fr.X), ("extent_Z_m", fr.Z)):
+            out[name] = 2.0 * float(abs(u @ ax) * half[0] + abs(v @ ax) * half[1] + abs(a @ ax) * half[2])
         return {k2: (float(v) if not isinstance(v, str) else v) for k2, v in out.items()}
 
 
@@ -537,13 +583,16 @@ class Revolution(Template):
     def _stations(self) -> torch.Tensor:
         return torch.linspace(-1.0, 1.0, self.K, dtype=torch.float64, device=self.dev) * self.half_length()
 
-    def measure_extents(self, P: torch.Tensor) -> None:
+    def bound_extents(self, P: torch.Tensor, sigma: float) -> None:
         with torch.no_grad():
             _x, _y, z = self.pose.local(P)
-            q = torch.tensor([EXTENT_Q, 1.0 - EXTENT_Q], dtype=torch.float64, device=self.dev)
-            z0, z1 = torch.quantile(z, q)
-            self.pose.c += self.pose.basis()[2] * ((z0 + z1) / 2)
-            self.log_h[0] = torch.log(torch.clamp((z1 - z0) / 2, min=1e-4))
+            s = float(sigma)
+            half = float(torch.exp(self.log_h[0]))
+            lo2 = max(-half, float(z.min()) - s)
+            hi2 = min(half, float(z.max()) + s)
+            if hi2 > lo2:
+                self.pose.c += self.pose.basis()[2] * ((lo2 + hi2) / 2.0)
+                self.log_h[0] = math.log(max((hi2 - lo2) / 2.0, 1e-4))
 
     def distance(self, P: torch.Tensor) -> torch.Tensor:
         x, y, z = self.pose.local(P)

@@ -59,8 +59,9 @@ def fit_cloud(template: Template, P: np.ndarray, sigma: float, *, lr: float, blo
     """Fit ``template`` to ``P`` (metres, the cloud's frame). ``extra_loss`` (the silhouette
     term) is added to the cloud term when given; ``judge(block, loss)`` may stop the fit (the
     consensus judge of the corrector) — without it the block's relative loss change decides.
-    ``measure_extents`` (the cloud-only fit): the template's extents are re-measured from the
-    points at every block (see ``Template.measure_extents``); the corrector sets it False.
+    ``measure_extents`` (the cloud-only fit): a plate's outline is re-measured from the points
+    at every block and, at the end, no extent is left beyond the last measured point (see
+    ``Template.measure_extents`` / ``bound_extents``); the corrector sets it False.
     Returns the record (blocks, iterations, losses, the stop reason)."""
     t0 = time.time()
     Ps = _t(subsample(P, max_points, seed), dev)
@@ -85,6 +86,9 @@ def fit_cloud(template: Template, P: np.ndarray, sigma: float, *, lr: float, blo
             it += 1
             last = float(loss.detach())
         losses.append(last)
+        if measure_extents:
+            template.bound_extents(Ps, s)  # every block: a drift into another part's points
+            #                                 would hand it those points at the next assignment
         if judge is not None:
             if judge(b, last):
                 stop = "judge"
@@ -95,6 +99,6 @@ def fit_cloud(template: Template, P: np.ndarray, sigma: float, *, lr: float, blo
                 stop = "converged"
                 break
     if measure_extents:
-        template.measure_extents(Ps)       # the published extents are the measured ones
+        template.measure_extents(Ps)       # a plate's outline: the measured one
     return {"blocks": len(losses), "iterations": it, "loss": losses, "stop": stop,
             "n_points_fit": int(len(Ps)), "seconds": round(time.time() - t0, 2)}

@@ -2760,6 +2760,8 @@ forms:
   max_blocks: 40              # BOUND: blocks per fit (a fit that never converges is declared)
   lr: 0.02                    # the optimiser's step (Adam on the template's parameters)
   review_views: 3             # overlays shown to the VLM in a review round (the worst views)
+  ransac_iters: 500           # BOUND (cost): hypotheses per part extraction of a composite (the
+                              # RANSAC of the part's own form, scored by support density)
   seed: 0                     # every subsample / bootstrap of the stage
 
 surface_fit:
