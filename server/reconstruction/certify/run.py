@@ -93,7 +93,7 @@ CERTIFY_INPUT_FILES = ("cleaned_cloud.ply", "cleaned_cloud_raw.ply", "camera_pos
                        # the session's own repeatability (reconstruction.certify.repeatability)
                        "uncertainty.json", "elastic_seams.json", "intra_chunk.json",
                        "maplong_run/uncertainty.json", "maplong_run/elastic_seams.json",
-                       "maplong_run/intra_chunk.json")
+                       "maplong_run/intra_chunk.json", "precision/depth_on_f5.json")
 # the code the certification's product is a function of, repo-relative (directories are hashed
 # file by file, bytecode excluded): the correction and the certification, and every package they
 # call to measure — the masks, the fused objects, the loops and witnesses, the precision
@@ -524,9 +524,10 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
 
     # σ FLOOR — measured, not derived from another constant (USER 2026-09-16).
     # No edge may claim more precision than this session can repeat; the session
-    # measures exactly that (two copies of a shared frame, the seam residual, or
-    # — in a single-chunk run — the frames of one chunk agreeing with each
-    # other). The old `max_residual_m / 4` gave 2.5 cm while pccr's own
+    # measures exactly that (two copies of a shared frame, the seam residual,
+    # the frames of one chunk agreeing with each other, or — the single-pass
+    # case since 2026-10-16 — F6's held-out against F5's landmarks in metres).
+    # The old `max_residual_m / 4` gave 2.5 cm while pccr's own
     # repeatability was 4.77 cm: the edges were claiming certainty the pipeline
     # could not reproduce.
     from reconstruction.certify.repeatability import session_repeatability

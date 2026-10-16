@@ -206,6 +206,38 @@ def rel_errors(u, v, z_lm, z_omega, coef: np.ndarray, W: int, H: int) -> np.ndar
     return np.abs(z_omega * (design(u, v, W, H) @ coef) - z_lm) / z_lm
 
 
+def abs_errors_m(u, v, z_lm, z_omega, coef: np.ndarray, W: int, H: int) -> np.ndarray:
+    """|z_omega·k(u, v) − z_landmark| per row in METRES along the ray — the same rows as rel_errors."""
+    if not len(u):
+        return np.zeros(0)
+    return np.abs(z_omega * (design(u, v, W, H) @ coef) - z_lm)
+
+
+def heldout_metres(rows_B: Dict[int, tuple], final_coefs: Dict[int, np.ndarray], n: int, W: int,
+                   H: int) -> dict:
+    """The half-B held-out error in METRES: what the PUBLISHED depth can repeat along the ray.
+
+    USER 2026-10-16: a single-pass session has no shared frame (uncertainty.json), no seam
+    (elastic_seams.json) and `intra_chunk` is OFF since 2026-09-28 (intra_chunk.json), so the
+    certification's σ floor fell back to pccr's constant on zaragoza and observatorio. This number is
+    measured in EVERY session, on the geometry the certification measures (Omega's depth bent to
+    F5's landmarks, judged on the half the bend never fitted), and
+    `reconstruction.certify.repeatability` reads it as the fourth source. Pooled over the keyframes
+    — the very rows `score_B` reads — with the landmark range they sit at and their count.
+    The relative score stays the bend's judge; this is its distance."""
+    errs, ranges = [], []
+    for i in range(n):
+        u, v, z_lm, z_om = rows_B[i]
+        e = abs_errors_m(u, v, z_lm, z_om, final_coefs[i], W, H)
+        if len(e):
+            errs.append(np.asarray(e, np.float64))
+            ranges.append(np.asarray(z_lm, np.float64))
+    if not errs:
+        return {"median_m": None, "range_m": None, "rows": 0}
+    e, z = np.concatenate(errs), np.concatenate(ranges)
+    return {"median_m": float(np.median(e)), "range_m": float(np.median(z)), "rows": int(len(e))}
+
+
 def cluster_bootstrap_se(groups: Sequence[np.ndarray], n_boot: int, seed: int) -> float:
     """The standard error of the POOLED MEDIAN of ``groups`` (one array of errors per keyframe)
     under a bootstrap that resamples whole keyframes (rows of one keyframe share its pose and
@@ -785,14 +817,19 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     errs_B = [rel_errors(*rows_B[i], final_coefs[i], W, H) for i in range(N)]
     errs_B = [e for e in errs_B if len(e)]
     score_B = float(np.median(np.concatenate(errs_B))) if errs_B else float("nan")
+    heldout_m = heldout_metres(rows_B, final_coefs, N, W, H)     # the same rows, in metres (σ floor)
     c0 = np.array([final_coefs[i][0] for i in range(N)])
     _p(40, f"held-out |dz|/z (half A): unbent {np.median(np.concatenate(raw_err)) * 100:.2f} %, "
            + ", ".join(f"±{w} {score[w] * 100:.2f} %" for w in sorted(score))
            + f" → ±{wb} (best ±{window_rule['window_best']}, bar {window_rule['bar'] * 100:.2f} % = best + "
            f"{fac:g} x se {window_rule['heldout_best_se'] * 100:.3f} %); per keyframe: "
            + ", ".join(f"{k} {v}" for k, v in sorted(status_counts.items()))
-           + f"; c1 kept on {kept_c1}, c2 on {kept_c2} of {N}; half B {score_B * 100:.2f} %; scale "
-           f"{np.median(c0):.4f} [{c0.min():.4f}, {c0.max():.4f}], largest consecutive jump {np.abs(np.diff(c0)).max():.3f}")
+           + f"; c1 kept on {kept_c1}, c2 on {kept_c2} of {N}; half B {score_B * 100:.2f} %"
+           + (f" = {heldout_m['median_m'] * 100:.2f} cm along the ray at {heldout_m['range_m']:.2f} m "
+              f"over {heldout_m['rows']} rows (the session's repeatability)"
+              if heldout_m["median_m"] is not None else " (no half-B row: no repeatability measured)")
+           + f"; scale {np.median(c0):.4f} [{c0.min():.4f}, {c0.max():.4f}], largest consecutive jump "
+           f"{np.abs(np.diff(c0)).max():.3f}")
     uu, vv = np.meshgrid(np.arange(W), np.arange(H))
     Dm = design(uu.ravel(), vv.ravel(), W, H)
     dep, valid, passed, weight = {}, {}, {}, {}
@@ -827,7 +864,8 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     del dep, valid, passed
     return types.SimpleNamespace(session_dir=session_dir, out=out, inp=inp, frames=frames, N=N, W=W, H=H, K=K,
                                  c2w=c2w, params=params, chunk=chunk, voted=voted, tau=tau, vst=vst, cover=cover,
-                                 wb=wb, score=score, score_B=score_B, window_rule=window_rule, coefs=final_coefs,
+                                 wb=wb, score=score, score_B=score_B, heldout_m=heldout_m, window_rule=window_rule,
+                                 coefs=final_coefs,
                                  vote_bars=vote_bars,
                                  provenance=provenance, status_counts=status_counts, c0=c0, obs=obs,
                                  dropped_tracks=dropped_tracks, error_factor=fac,
@@ -891,7 +929,14 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
                   "grid_of_the_bend": {"undistorted_native": [W, H], "record": [C.rec_hw[1], C.rec_hw[0]],
                                        "lens": bool(C.lens), "carried": bool(C.carry), "note": C.grid_note},
                   "bend": {"window": (int(wb) if wb is not None else None), "held_out": {str(w): v for w, v in sorted(score.items())},
-                           "held_out_half_B_final": C.score_B, "window_rule": C.window_rule,
+                           "held_out_half_B_final": C.score_B,
+                           # the same half-B rows in METRES along the ray — the session's own
+                           # repeatability, read by reconstruction.certify.repeatability (the fourth
+                           # source; USER 2026-10-16: a single pass had none and borrowed pccr's)
+                           "held_out_half_B_final_m": C.heldout_m["median_m"],
+                           "held_out_half_B_range_m": C.heldout_m["range_m"],
+                           "held_out_half_B_rows": C.heldout_m["rows"],
+                           "window_rule": C.window_rule,
                            "improvement_error_factor": C.error_factor,
                            "heldout_confidence": float(pcfg.bend.heldout_confidence),
                            "keyframe_status": C.status_counts,

@@ -5,10 +5,12 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from precision.depth_on_f5 import bend_coefficients, camera_travels, design, edge_keeping_vote  # noqa: E402
+from precision.depth_on_f5 import (bend_coefficients, camera_travels, design, edge_keeping_vote,  # noqa: E402
+                                   heldout_metres, rel_errors)
 
 H, W = 60, 80
 K = np.array([[70.0, 0, W / 2], [0, 70.0, H / 2], [0, 0, 1]])
@@ -107,3 +109,31 @@ def test_mono_detail_off_leaves_the_bend_untouched_and_the_source_is_omega():
     off = {s.key: s.gpu for s in chain_steps(pcfg)}
     on = {s.key: s.gpu for s in chain_steps(replace(pcfg, mono_detail=replace(pcfg.mono_detail, enabled=True)))}
     assert off["f6_bend"] is False and on["f6_bend"] is True and "f6_sweep" not in on
+
+
+def test_the_half_b_held_out_is_also_measured_in_metres():
+    """USER 2026-10-16: the certification's σ floor reads F6's held-out as a DISTANCE along the
+    ray (the relative score is the bend's judge, not a repeatability). Same rows as the relative
+    score, pooled over the keyframes, with their landmark range and count; a keyframe without a
+    half-B row contributes nothing, a session without any reports None."""
+    rng = np.random.default_rng(1)
+    rows_B, coefs = {}, {}
+    for i, (k, z0) in enumerate(((0.9, 2.0), (1.1, 4.0))):
+        n = 300
+        u, v = rng.uniform(0, W, n), rng.uniform(0, H, n)
+        z_lm = np.full(n, z0) + rng.normal(0, 0.02, n)      # the landmarks, 2 cm of scatter
+        z_om = z_lm / k                                       # Omega's depth, off by the scale k
+        rows_B[i] = (u, v, z_lm, z_om)
+        coefs[i] = np.array([k, 0.0, 0.0])                    # the bend recovers exactly k
+    rows_B[2] = (np.zeros(0), np.zeros(0), np.zeros(0), np.zeros(0))
+    coefs[2] = np.array([1.0, 0.0, 0.0])
+    got = heldout_metres(rows_B, coefs, 3, W, H)
+    assert got["rows"] == 600 and got["median_m"] == pytest.approx(0.0, abs=1e-9)
+    assert got["range_m"] == pytest.approx(3.0, abs=0.1)
+    # an unbent keyframe: its error in metres is the relative error times its own depth
+    coefs[0] = np.array([1.0, 0.0, 0.0])
+    got = heldout_metres({0: rows_B[0]}, {0: coefs[0]}, 1, W, H)
+    rel = rel_errors(*rows_B[0], coefs[0], W, H)
+    assert got["median_m"] == pytest.approx(float(np.median(rel * rows_B[0][2])), rel=1e-9)
+    assert got["median_m"] == pytest.approx(2.0 / 0.9 - 2.0, abs=0.01)   # |z/0.9 - z| at z = 2 m
+    assert heldout_metres({0: rows_B[2]}, {0: coefs[2]}, 1, W, H) == {"median_m": None, "range_m": None, "rows": 0}

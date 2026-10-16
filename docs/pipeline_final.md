@@ -398,6 +398,13 @@ gives them a neighbour's label); the fallback retry carries the category (DONE 2
 3. **BIM comparison** (§11): register to the BIM on the structure; per element deviation of position /
    dimensions / flatness / plumbness with its margin; objects present / missing / displaced; a deviation
    below the session's own repeatability (pccr ~5 cm) is reported as not measurable.
+   **Repeatability (σ floor) since 2026-10-16:** `reconstruction/certify/repeatability.py` reads, in order,
+   `uncertainty.json` (two copies of a shared frame) → `elastic_seams.json` → `intra_chunk.json` (OFF since
+   2026-09-28, never written) → **`precision/depth_on_f5.json` `bend.held_out_half_B_final_m`** (F6's held-out
+   against F5's landmarks in METRES along the ray, on the published geometry; measured in every session) →
+   `correction.visit_drift.default_repeatability_m` (pccr's 4.77 cm), declared in the acta. A single-pass session
+   (zaragoza, observatorio) had no fork evidence and borrowed pccr's constant; an F6 record bent before the
+   metres field exists carries only the relative score and stays on the fallback (declared: "re-run the chain").
 4. **Lock the brush during an epoch publish:** a brush reassignment while a publish ran left the
    viewer with no segmentation (pccr 2026-10-01). `correction.apply.publish_in_flight` exists; the
    erase endpoint must refuse while it returns a transaction.

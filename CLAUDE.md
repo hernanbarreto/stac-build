@@ -1,5 +1,16 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐ 2026-10-16 — THE σ FLOOR OF A SINGLE-PASS SESSION IS F6'S HELD-OUT IN METRES
+- zaragoza and observatorio (ONE chunk each) had NO measured repeatability: `uncertainty.json` needs a shared
+  frame between chunks, `elastic_seams.json` 2+ chunks, and `intra_chunk` is OFF since 2026-09-28 — so the
+  certification's bar ("determined" closure ≤ 2σ, the epoch stop) was pccr's 4.77 cm (`default_repeatability_m`,
+  `source: config_fallback`). Not an error of the reconstruction: nothing existed to measure. USER 2026-10-16
+  approved the fourth source: F6 writes `bend.held_out_half_B_final_m` (+ `_range_m`, `_rows`: the half-B
+  landmark rows in metres along the ray, `depth_on_f5.heldout_metres`) and `certify/repeatability.py` reads it
+  after the three fork sources, before the constant. Records bent before the field (all four sessions today)
+  stay on the fallback and say "re-run the chain"; no conversion of the relative score (a ratio is not a
+  distance). pccr (5 chunks, 8.70 cm) and bufferStop (3 chunks, 1.87 cm) keep their two-copy numbers.
+
 ## ⭐⭐⭐ 2026-10-15 (afternoon) — MANHATTAN WORLD, THE MESH BUTTON = SURFACE FIT ONLY, NO POISSON FOR THE REST
 - USER: "manhattan world … BIM perfecto" / "debe indicarlo el usuario, por defecto marcado como manhattan" /
   "deja solo el manhattan al mandar mesh por ahora" / "probar con cilindros etc, y si no, tsdf sin poisson".

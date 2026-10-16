@@ -14,10 +14,19 @@ Precedence, most direct evidence first:
 2. ``elastic_seams.json``: the per-shared-frame residual left after the seam
    fit — the non-rigid floor both copies share. Same idea, one stage earlier.
 3. ``intra_chunk.json`` → ``held_after_cm``: frames of the SAME chunk agreeing
-   about the surfaces they both see, measured on held-out pairs. This is the
-   one that exists in a SINGLE-CHUNK session, where there are no shared frames
-   between chunks and (1) and (2) never get written.
-4. the configured constant, used only when the session measured none of the
+   about the surfaces they both see, measured on held-out pairs. It was meant
+   to be the one that exists in a SINGLE-CHUNK session, where there are no
+   shared frames between chunks and (1) and (2) never get written — but the
+   stage is OFF since 2026-09-28 (`reconstruction.vggtomega.intra_chunk`), so
+   no single-pass session ever wrote it.
+4. ``precision/depth_on_f5.json`` → ``bend.held_out_half_B_final_m``: F6's
+   held-out error in METRES along the ray — Omega's bent depth against the
+   landmarks F5 triangulated, on the half the bend never fitted — measured in
+   EVERY session on the PUBLISHED geometry the certification measures (USER
+   2026-10-16: zaragoza and observatorio, one chunk each, had borrowed pccr's
+   constant). A record written before the field existed carries only the
+   relative score, which is not a distance: declared, never converted.
+5. the configured constant, used only when the session measured none of the
    above — and said so in the acta.
 
 The number that came out of (1) on pccr, 4.77 cm, is nearly twice the 2.5 cm the
@@ -106,6 +115,32 @@ def _from_intra_chunk(output_dir: Path) -> Optional[Dict[str, Any]]:
                        "n_chunks": len(vals)}}
 
 
+F6_REPORT = Path("precision") / "depth_on_f5.json"
+
+
+def _from_f6_heldout(output_dir: Path) -> Optional[Dict[str, Any]]:
+    """The single-pass answer: the published depth against F5's landmarks, in metres."""
+    rep = _load(Path(output_dir) / F6_REPORT)
+    if not rep:
+        return None
+    bend = rep.get("bend") or {}
+    v = bend.get("held_out_half_B_final_m")
+    if v is None or not np.isfinite(float(v)) or float(v) <= 0:
+        return None
+    return {"sigma_floor_m": float(v), "source": str(F6_REPORT),
+            "detail": {"what": "F6 held-out: Omega's bent depth vs F5's landmarks along the ray "
+                               "(half B, the published geometry)",
+                       "n_rows": bend.get("held_out_half_B_rows"),
+                       "range_m": bend.get("held_out_half_B_range_m")}}
+
+
+def _f6_predates_metres(output_dir: Path) -> bool:
+    """An F6 record with the relative score only (bent before 2026-10-16)."""
+    rep = _load(Path(output_dir) / F6_REPORT)
+    bend = (rep or {}).get("bend") or {}
+    return bend.get("held_out_half_B_final") is not None and "held_out_half_B_final_m" not in bend
+
+
 def session_repeatability(output_dir, fallback_m: Optional[float] = None,
                           log=None) -> Dict[str, Any]:
     """The session's own measurement floor, with its provenance.
@@ -115,7 +150,7 @@ def session_repeatability(output_dir, fallback_m: Optional[float] = None,
     number was declared, not observed.
     """
     output_dir = Path(output_dir)
-    for probe in (_from_uncertainty, _from_elastic_seams, _from_intra_chunk):
+    for probe in (_from_uncertainty, _from_elastic_seams, _from_intra_chunk, _from_f6_heldout):
         got = probe(output_dir)
         if got is not None:
             if log:
@@ -123,12 +158,16 @@ def session_repeatability(output_dir, fallback_m: Optional[float] = None,
                     f"— measured by this session ({got['source']}: "
                     f"{got['detail']['what']})")
             return got
+    stale = _f6_predates_metres(output_dir)
     out = {"sigma_floor_m": (float(fallback_m) if fallback_m is not None else None),
            "source": "config_fallback",
-           "detail": {"what": "nothing measured — no shared frames and no "
-                              "intra-chunk field in this session"}}
+           "detail": {"what": "nothing measured — no shared frames, no intra-chunk field and no "
+                              "F6 held-out in metres in this session"
+                              + (" (the F6 record predates the metres field: re-run the chain "
+                                 "to measure it)" if stale else "")}}
     if log:
         log(f"[repeatability] σ floor {out['sigma_floor_m']} m — DECLARED, not "
-            f"measured: this session wrote no uncertainty/seam/intra-chunk "
-            f"evidence")
+            f"measured: this session wrote no uncertainty/seam/intra-chunk/F6 "
+            f"evidence" + (" (its F6 record predates the metres field — re-run the "
+                           "chain to measure it)" if stale else ""))
     return out

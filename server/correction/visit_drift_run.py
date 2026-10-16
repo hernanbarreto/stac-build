@@ -72,7 +72,7 @@ _EVIDENCE_INPUTS = ("cleaned_cloud.ply", "camera_poses.txt", "camera_frames.txt"
                     # and the repeatability it is judged with (repeatability.session_repeatability)
                     "fusion_map.json", "uncertainty.json", "elastic_seams.json", "intra_chunk.json",
                     "maplong_run/uncertainty.json", "maplong_run/elastic_seams.json",
-                    "maplong_run/intra_chunk.json")
+                    "maplong_run/intra_chunk.json", "precision/depth_on_f5.json")
 EVIDENCE_STAMP_KEY = "stamp"
 
 
@@ -84,7 +84,8 @@ def _repeatability_m(output_dir: Path, default_m: float,
     below it is the reconstruction repeating itself, not a measurement. It is
     the SAME bar the certification floors every loop σ with, so it comes from
     the same cascade (`session_repeatability`: uncertainty.json → elastic seam
-    residual → intra-chunk agreement), never from a second opinion of its own.
+    residual → intra-chunk agreement → F6's held-out in metres), never from a
+    second opinion of its own.
     The config value is used only when the session measured nothing.
     """
     from reconstruction.certify.repeatability import session_repeatability

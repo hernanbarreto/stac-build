@@ -43,6 +43,16 @@ def _intra(out, held_after_cm):
                     for k, cm in enumerate(held_after_cm)}}))
 
 
+def _f6(out, median_m, rows=1200, range_m=3.1, relative=0.0103, with_metres=True):
+    bend = {"window": 4, "held_out_half_B_final": relative}
+    if with_metres:
+        bend.update({"held_out_half_B_final_m": median_m, "held_out_half_B_range_m": range_m,
+                     "held_out_half_B_rows": rows})
+    (out / "precision").mkdir(exist_ok=True)
+    (out / "precision" / "depth_on_f5.json").write_text(json.dumps(
+        {"version": 1, "stage": "depth_on_f5", "bend": bend}))
+
+
 def test_the_two_copy_disagreement_wins(out):
     _uncertainty(out, 0.0477)
     _elastic(out, [0.02, 0.03])
@@ -97,3 +107,48 @@ def test_the_floor_is_higher_than_the_old_formula_on_pccr(out):
     """The regression this fixes: 0.10/4 = 2.5 cm against a measured 4.77."""
     _uncertainty(out, 0.0477)
     assert session_repeatability(out)["sigma_floor_m"] > 0.10 / 4.0
+
+
+def test_a_single_pass_session_measures_itself_with_f6(out):
+    """USER 2026-10-16: zaragoza and observatorio (one chunk, `intra_chunk` OFF since
+    2026-09-28) had no fork evidence at all and borrowed pccr's 4.77 cm. F6's held-out in
+    metres — the published depth against F5's landmarks — is measured in every session."""
+    _f6(out, 0.031)
+    got = session_repeatability(out, fallback_m=0.0477)
+    assert got["sigma_floor_m"] == pytest.approx(0.031)
+    assert got["source"] == "precision/depth_on_f5.json"
+    assert got["detail"]["n_rows"] == 1200 and got["detail"]["range_m"] == pytest.approx(3.1)
+    assert "F5's landmarks" in got["detail"]["what"]
+
+
+def test_the_fork_evidence_still_comes_before_f6(out):
+    """A chunked session keeps its two-copy disagreement (validated recipe): F6 is the
+    fourth source, not a replacement."""
+    _uncertainty(out, 0.087)
+    _f6(out, 0.031)
+    got = session_repeatability(out, fallback_m=0.0477)
+    assert got["source"] == "uncertainty.json" and got["sigma_floor_m"] == pytest.approx(0.087)
+    (out / "uncertainty.json").unlink()
+    _intra(out, [2.2])
+    assert session_repeatability(out, fallback_m=0.0477)["source"] == "intra_chunk.json"
+
+
+def test_an_f6_record_without_metres_is_declared_not_converted(out):
+    """A record bent before the field existed carries the relative score only — a ratio is
+    not a distance, so nothing is converted: the fallback, and the acta says why."""
+    _f6(out, None, with_metres=False, relative=0.0103)
+    got = session_repeatability(out, fallback_m=0.0477)
+    assert got["source"] == "config_fallback" and got["sigma_floor_m"] == pytest.approx(0.0477)
+    assert "predates the metres field" in got["detail"]["what"]
+    logs = []
+    session_repeatability(out, fallback_m=0.0477, log=logs.append)
+    assert any("re-run the chain" in m for m in logs)
+
+
+def test_a_zero_or_absent_f6_number_is_not_a_measurement(out):
+    _f6(out, 0.0)
+    got = session_repeatability(out, fallback_m=0.0477)
+    assert got["source"] == "config_fallback"
+    assert "predates" not in got["detail"]["what"]        # the field exists, it measured nothing
+    (out / "precision" / "depth_on_f5.json").write_text("{not json")
+    assert session_repeatability(out, fallback_m=0.0477)["source"] == "config_fallback"
