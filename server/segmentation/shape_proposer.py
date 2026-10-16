@@ -16,7 +16,7 @@ Evidence given to the VLM per call:
 
 Provenance rule (inviolable): the VLM proposes, it NEVER measures. Every
 number it receives is tool_measured context; every field it returns is
-vlm_proposed intent. Consumers (model rebuild, Point2CAD trim) gate on
+vlm_proposed intent. Consumers (the model rebuild) gate on
 `agrees_with_fit` + confidence and keep the deterministic fit as truth.
 
 Published as output/shape_proposals/<safe>_proposal.json (+ the annotated
@@ -592,7 +592,7 @@ def propose_object(output_dir: Path, instance_id: int,
     label = str(inst.get("label", "segment"))
     safe = _safe_label(label, int(instance_id))
 
-    # 1) detection engine — the same regions the model rebuild / p2c use
+    # 1) detection engine — the same regions the model rebuild uses
     if bool(cfg.get("p2c_from_cloud", True)):
         # USER 2026-09-04: label CLOUD points, never mesh vertices — the
         # mesh already carries its own errors

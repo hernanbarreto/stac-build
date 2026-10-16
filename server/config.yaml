@@ -2863,37 +2863,23 @@ surface_fit:
   propose_max_regions: 40     # propose on the N largest regions only (a noisy
                               # source mesh can shatter into 100+ slivers)
   propose_extra_views: 4      # targeted views for regions the main views miss
-  # ── Point2CAD B-rep (worker mode 'p2c', user "vía 2" 2026-09-03): the
-  # perfect-engine regions (openings excluded by intent+measurement) go to
-  # vendor point2cad (env point2cad) for fit+sew; result is denormalized,
-  # evidence-trimmed and published as tsdf/<safe>_p2c/.
-  # USER 2026-10-15 ("dale, probemos"): the Mesh button runs point2cad on every selected object
-  # that the GEOMETRY makes a CAD candidate — never by its label — and keeps RANSAC + Poisson
-  # for the rest; the decision and its shares land in output/shape_p2c/<label>/decision.json
+  # point2cad REMOVED 2026-10-16 (USER: "elimina p2c de todo el pipeline y borra el entorno, así nos
+  # sacamos uno con licencia de encima" — CC-BY-NC): vendor/point2cad, env point2cad, the worker mode
+  # 'p2c', the Mesh stage and its keys are gone. The `p2c_*` keys below are the CLOUD DETECTOR's
+  # (perfect / propose / the edge metric read them) — the name is historical.
   mesh_button_stages: [forms]         # USER 2026-10-16: the FORMS stage (reconstruction/forms — the VLM
                               # decides the form, the cloud measures, the masks of every view correct);
                               # [surface_fit] = the 2026-10-15 Manhattan planes; the full chain is
-                              # [forms, surface_fit, poisson, pgsr, p2c]
+                              # [forms, surface_fit, poisson, pgsr]
                               # (2026-10-15: "deja solo el manhattan al mandar mesh por
-                              # ahora"): the stages the Mesh button runs, in this order — the full
-                              # chain is [surface_fit, poisson, pgsr, p2c]; surface_fit = the Manhattan /
-                              # RANSAC model of every selected object (tsdf/<label>_<id>/)
-  mesh_runs_p2c: true         # false = the Mesh button stays RANSAC + Poisson only
-  p2c_min_explained_frac: 0.5 # BOUND (declared): share of the object's points the detected analytic
-                              # primitives (plane / cylinder / sphere / cone) must explain for point2cad
-                              # to run; below it the object keeps Poisson / ShapeR. Freeform residues
-                              # do not count: they are what point2cad's INR fits worst on our clouds
-  p2c_propose: true           # the VLM shape proposal (opening regions excluded) when the semantic
-                              # service is up; unavailable → point2cad runs without it, declared
-  p2c_trim_m: 0.06            # evidence clip: B-rep kept within this of cloud
-  p2c_parallel: 4             # CUDA workers (8 OOM'd next to the chat vLLM)
-  p2c_max_pts_region: 4000    # per-surface point cap for the .xyzc
+                              # ahora"): the stages the Mesh button runs, in this order; surface_fit =
+                              # the Manhattan / RANSAC model of every selected object (tsdf/<label>_<id>/)
   # USER 2026-09-04: the CAD path labels CLOUD points, never mesh vertices —
   # "p2c necesita la nube con puntos etiquetados; el mesh ya tiene errores".
   # Regions come from RANSAC-first labeling (decompose.extract_primitives,
   # noise-robust — the crease-graph analog covered only ~10% of the raw
   # cloud) + connectivity split; big unexplained residues go in as 'freeform'
-  # labels for point2cad's INR. propose and p2c share these regions.
+  # labels. propose / perfect / the edge metric share these regions.
   p2c_from_cloud: true        # false = legacy mesh-vertex source (poisson/pgsr)
   p2c_conf_trim_pct: 20.0     # drop this % of lowest-confidence points first
   p2c_detect_max_pts: 150000  # detection subsample (labels/xyzc drawn from it)

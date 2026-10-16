@@ -611,7 +611,7 @@ def _detect_and_snap_cloud(Pd: np.ndarray, cfg: dict, safe: str,
     ``decompose.extract_primitives`` machinery — noise-robust where crease
     graphs on raw-point normals are not), each primitive split into connected
     components; large freeform residues become labeled regions of their own
-    (kind ``freeform``, no analytic model) so point2cad's INR can fit them.
+    (kind ``freeform``, no analytic model) — a labeled region the consumers mesh as measured.
     ``v_idx`` indexes into ``Pd``. Same snap gates as the mesh detector.
 
     Returns ``(regions, min_region_pts)``; with ``return_adjacency=True`` also

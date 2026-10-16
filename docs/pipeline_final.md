@@ -388,7 +388,9 @@ gives them a neighbour's label); the fallback retry carries the category (DONE 2
 
 1. **Meshing → Object (ShapeR):** validate on the fresh reconstruction (the texture frame on the
    ShapeR mesh, the view counts; pccr read-only check: backpack 15 views (was 12), monitor 271: 20).
-2. **Meshing → Mesh → point2cad (NEW, USER 2026-10-01):** pressing Mesh (instead of RANSAC +
+2. **Meshing → Mesh → point2cad — REMOVED 2026-10-16** (USER: "elimina p2c de todo el pipeline y borra el
+   entorno, así nos sacamos uno con licencia de encima" — CC-BY-NC). The Mesh button runs the FORMS stage
+   (above). The original item, for the record: pressing Mesh (instead of RANSAC +
    Poisson) runs point2cad on the structure — floor, walls, pipes, columns, beams, ducts, chosen by
    GEOMETRY, never by label. To DEFINE before building: the full pipe SAM3 instance → surface regions
    (`segmentation/perfect_object.py`) → point2cad (`segmentation/p2c_object.py`, env `point2cad`;

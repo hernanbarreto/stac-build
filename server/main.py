@@ -6190,8 +6190,8 @@ async def export_perfect_endpoint(request: Request):
     instance_ids = body.get("instance_ids")
     sources = body.get("sources") or {}   # {iid: 'poisson'|'pgsr'} — which
     #                                       mesh of the segment gets perfected
-    mode = str(body.get("mode") or "perfect")  # perfect|parts|model|propose|cad|p2c
-    if mode not in ("perfect", "parts", "model", "propose", "cad", "p2c"):
+    mode = str(body.get("mode") or "perfect")  # perfect|parts|model|propose|cad
+    if mode not in ("perfect", "parts", "model", "propose", "cad"):
         raise HTTPException(status_code=400, detail=f"unknown mode '{mode}'")
     if not session_id or not instance_ids:
         raise HTTPException(status_code=400,
@@ -6397,61 +6397,6 @@ async def export_tsdf_endpoint(request: Request):
             print(f"[Mesh] poisson stage failed (non-fatal): {e}")
         return done_ids
 
-    async def _run_p2c_stage(ids):
-        """point2cad per object (USER 2026-10-15 "dale, probemos"): run_perfect_objects.py in
-        mode p2c — the chooser by GEOMETRY inside decides per object (the share of its points the
-        detected primitives explain, surface_fit.p2c_min_explained_frac); a non-candidate keeps
-        its Poisson mesh; the result lands beside the others as tsdf/<label>_<id>_p2c/. Returns
-        (ids with a B-rep, skipped records)."""
-        worker = Path(SERVER_DIR) / "run_perfect_objects.py"
-        cmd = [sys.executable, str(worker), "--output-dir", str(output_dir), "--mode", "p2c"]
-        for i in ids:
-            cmd += ["--instance-id", str(int(i))]
-        done_ids: set = set()
-        skipped: list = []
-        try:
-            proc = _track_worker(await asyncio.create_subprocess_exec(
-                *cmd, cwd=str(SERVER_DIR),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"},
-                preexec_fn=_die_with_parent_sigkill,
-            ))
-            assert proc.stdout is not None
-            async for raw in proc.stdout:
-                line = raw.decode("utf-8", "ignore").rstrip()
-                if not line:
-                    continue
-                if line.startswith("[PERF-PROGRESS]"):
-                    try:
-                        upd = json.loads(line[len("[PERF-PROGRESS]"):])
-                        iid = int(upd.get("instance_id"))
-                        phase = str(upd.get("phase", "p2c"))
-                        if phase == "done":
-                            done_ids.add(iid)
-                            _progress_cb(iid, "done", None, f"p2c:{upd.get('detail')}")
-                        elif phase == "fit":
-                            _progress_cb(iid, "p2c", None, None)
-                        # 'skipped' / 'error': the Poisson mesh of the object stands; declared
-                    except Exception:
-                        pass
-                elif line.startswith("[PERF-RESULT]"):
-                    try:
-                        skipped = list((json.loads(line[len("[PERF-RESULT]"):]) or {}).get("skipped") or [])
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        print(f"[Mesh:p2c] {line}", flush=True)
-                    except (BrokenPipeError, OSError):
-                        pass
-            await proc.wait()
-        except Exception as e:  # noqa: BLE001
-            print(f"[Mesh] point2cad stage failed (non-fatal): {e}")
-        for sk in skipped:
-            print(f"[Mesh:p2c] skip: {sk}")
-        return done_ids, skipped
-
     async def _bg():
         try:
             selected = sorted({int(t) for t in target_ids})
@@ -6467,7 +6412,7 @@ async def export_tsdf_endpoint(request: Request):
             # (2026-10-15) becomes its straight plane — published as tsdf/<label>_<id>/
             # THE STAGES THE MESH BUTTON RUNS (surface_fit.mesh_button_stages — USER 2026-10-15
             # "deja solo el manhattan al mandar mesh por ahora": [surface_fit]; the full chain is
-            # [surface_fit, poisson, pgsr, p2c]); a stage not listed does not run
+            # [forms, surface_fit, poisson, pgsr]); a stage not listed does not run
             stages = [str(x) for x in ((cfg.get("surface_fit") or {}).get("mesh_button_stages") or [])]
             if not stages:
                 raise RuntimeError("surface_fit.mesh_button_stages is missing or empty — the Mesh "
@@ -6510,22 +6455,14 @@ async def export_tsdf_endpoint(request: Request):
                     await _notify_tsdf_ready(session_id, "pgsr",
                                              len(pgsr_ids))
 
-            p2c_ids: set = set()
-            p2c_skipped: list = []
-            if selected and "p2c" in stages and bool((cfg.get("surface_fit") or {}).get("mesh_runs_p2c", False)):
-                # USER 2026-10-15: point2cad on every selected object the geometry allows
-                async with _tsdf_progress_lock:
-                    _tsdf_set_overall(session_id, phase="p2c")
-                p2c_ids, p2c_skipped = await _run_p2c_stage(selected)
-                if p2c_ids:
-                    await _notify_tsdf_ready(session_id, "p2c", len(p2c_ids))
+            # point2cad REMOVED 2026-10-16 (USER: "elimina p2c de todo el pipeline y borra el
+            # entorno, así nos sacamos uno con licencia de encima" — CC-BY-NC)
             async with _tsdf_progress_lock:
                 _tsdf_set_overall(session_id, phase="done",
-                                  done=len(set(fitted_ids) | set(poisson_ids) | set(pgsr_ids) | set(p2c_ids)),
+                                  done=len(set(fitted_ids) | set(poisson_ids) | set(pgsr_ids)),
                                   finished_at=time.time())
-            print(f"[Mesh] ✅ stages {stages}: {len(fitted_ids)} surface_fit + {len(poisson_ids)} poisson + "
-                  f"{len(pgsr_ids)} pgsr + {len(p2c_ids)} point2cad mesh(es)"
-                  + (f"; point2cad skipped {len(p2c_skipped)} by geometry" if p2c_skipped else ""))
+            print(f"[Mesh] ✅ stages {stages}: {len(fitted_ids)} forms/surface_fit + {len(poisson_ids)} poisson + "
+                  f"{len(pgsr_ids)} pgsr mesh(es)")
         except Exception as e:
             import traceback
             traceback.print_exc()

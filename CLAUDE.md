@@ -1,5 +1,12 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐ 2026-10-16 — point2cad REMOVED (USER: "elimina p2c de todo el pipeline y borra el entorno, así nos sacamos uno con licencia de encima")
+- Gone: `vendor/point2cad` (CC-BY-NC), the conda env `point2cad` (14 GB), `segmentation/p2c_object.py`,
+  `tests/test_p2c_chooser.py`, the worker mode `p2c` of run_perfect_objects.py, the Mesh button's p2c stage and
+  `surface_fit.mesh_runs_p2c / p2c_min_explained_frac / p2c_propose / p2c_trim_m / p2c_parallel /
+  p2c_max_pts_region`. The remaining `surface_fit.p2c_*` keys are the CLOUD DETECTOR's (perfect / propose /
+  edge metric) — historical name. docs/pipeline_final.md's "Mesh → point2cad" item is closed as removed.
+
 ## ⭐⭐⭐ 2026-10-16 — FORMS: THE VLM DECIDES THE FORM, THE CLOUD MEASURES, THE MASKS CORRECT (USER)
 - USER: "vlm ve la forma, la nube puede mostrar plano un cilindro por deformación, pero es un cilindro … acá me
   bajo de la idea de que vlm no decide. Vlm dice cómo es y cómo debe ser y la nube orienta sobre dónde está y

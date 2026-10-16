@@ -43,14 +43,12 @@ def main() -> int:
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--instance-id", type=int, action="append", required=True)
     ap.add_argument("--mode", default="perfect",
-                    choices=["perfect", "parts", "model", "propose", "cad",
-                             "p2c"],
+                    choices=["perfect", "parts", "model", "propose", "cad"],
                     help="'parts' = flat-colored diagnosis view + inventory; "
                          "'propose' = VLM shape proposer (Qwen3-VL describes "
                          "the object + per-region design intent); "
-                         "'cad' = propose + model rebuild in one pass; "
-                         "'p2c' = propose (if missing) + Point2CAD sewn "
-                         "B-rep with intent trim")
+                         "'cad' = propose + model rebuild in one pass "
+                         "(point2cad REMOVED 2026-10-16: licence CC-BY-NC)")
     ap.add_argument("--source", action="append", default=[],
                     help="'<iid>:poisson' or '<iid>:pgsr' — which mesh of the "
                          "segment to perfect (default: poisson, else pgsr)")
@@ -82,33 +80,9 @@ def main() -> int:
         return build_model_object(output_dir, iid, cfg=cfg, source=source,
                                   log=log)
 
-    def _p2c(output_dir, iid, cfg=None, source=None, log=print):
-        from segmentation.tsdf_export import _safe_label
-        from segmentation.p2c_object import build_p2c_object
-        import json as _json
-        res = _json.loads((Path(output_dir) /
-                           "segmentation_result.json").read_text())
-        inst = next((i for i in res.get("instances", [])
-                     if int(i.get("instance_id", i.get("id"))) == int(iid)),
-                    {})
-        safe = _safe_label(str(inst.get("label", "segment")), int(iid))
-        want_proposal = bool((cfg or {}).get("p2c_propose", True))
-        if want_proposal and not (Path(output_dir) / "shape_proposals"
-                                  / f"{safe}_proposal.json").exists():
-            # the VLM proposal (opening regions excluded from the B-rep) needs the semantic
-            # service; without it point2cad still runs — declared (USER 2026-10-15: the Mesh
-            # button must not depend on the chat's vLLM being up)
-            try:
-                propose_object(output_dir, iid, cfg=cfg, source=source, log=log)
-            except Exception as e:  # noqa: BLE001
-                log(f"[p2c:{safe}] shape proposal unavailable ({type(e).__name__}: {e}) — "
-                    f"point2cad runs without the opening exclusion (declared)")
-        return build_p2c_object(output_dir, iid, cfg=cfg, source=source,
-                                log=log)
-
     fn = {"parts": diagnose_object, "model": build_model_object,
           "perfect": perfect_object, "propose": propose_object,
-          "cad": _cad, "p2c": _p2c}[args.mode]
+          "cad": _cad}[args.mode]
     written, skipped = [], []
     for iid in args.instance_id:
         t0 = time.time()
@@ -120,10 +94,6 @@ def main() -> int:
             if glb is not None:
                 written.append(str(glb))
                 _progress(iid, "done", f"{round(time.time() - t0, 1)}s")
-            elif args.mode == "p2c":
-                skipped.append({"instance_id": int(iid),
-                                "reason": "not a CAD candidate by geometry (shape_p2c/<label>/decision.json)"})
-                _progress(iid, "skipped", "not a CAD candidate by geometry")
             else:
                 skipped.append({"instance_id": iid, "reason": "no output"})
                 _progress(iid, "error", "no output")
