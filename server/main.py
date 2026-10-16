@@ -636,6 +636,14 @@ _ACTIVE_WORKERS: set = set()
 os.environ["STAC_BACKEND_PID"] = str(os.getpid())
 
 
+# the longest line a worker may print to its stdout pipe (asyncio's default is 64 KB): the
+# surface_fit worker's [SFIT-RESULT] line carries every object's segments and parts — pccr's nine
+# objects of 2026-10-16 (152 floor segments) made it longer than 64 KB, asyncio raised "Separator
+# is found, but chunk is longer than limit" and the stage reported a failure after the fit had
+# succeeded; nothing was published
+_WORKER_STDOUT_LIMIT = 64 * 1024 * 1024
+
+
 def _track_worker(proc):
     """Register a spawned worker and auto-deregister it when it exits."""
     _ACTIVE_WORKERS.add(proc)
@@ -4657,7 +4665,7 @@ async def _run_shape_subprocess(session_id: str, output_dir: Path,
     try:
         proc = _track_worker(await asyncio.create_subprocess_exec(
             *cmd,
-            stdout=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, limit=_WORKER_STDOUT_LIMIT,
             stderr=asyncio.subprocess.STDOUT,
             env={**os.environ},  # inherit GPU visibility
             preexec_fn=_die_with_parent_sigkill,
@@ -5288,7 +5296,7 @@ async def surface_fit_run(request: Request):
         try:
             proc = _track_worker(await asyncio.create_subprocess_exec(
                 *cmd, cwd=str(SERVER_DIR),
-                stdout=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE, limit=_WORKER_STDOUT_LIMIT,
                 stderr=asyncio.subprocess.STDOUT,
                 env={**os.environ, "PYTHONUNBUFFERED": "1"},
                 preexec_fn=_die_with_parent_sigkill,
@@ -5547,7 +5555,7 @@ async def _run_pgsr_object_stage(session_id: str, frames_dir: Path,
     try:
         proc = _track_worker(await asyncio.create_subprocess_exec(
             *cmd, cwd=str(SERVER_DIR),
-            stdout=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, limit=_WORKER_STDOUT_LIMIT,
             stderr=asyncio.subprocess.STDOUT,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
             preexec_fn=_die_with_parent_sigkill,
@@ -5613,7 +5621,7 @@ async def _surface_fit_for_export(session_id: str, session_dir: Path,
     try:
         proc = _track_worker(await asyncio.create_subprocess_exec(
             *cmd, cwd=str(SERVER_DIR),
-            stdout=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, limit=_WORKER_STDOUT_LIMIT,
             stderr=asyncio.subprocess.STDOUT,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
             preexec_fn=_die_with_parent_sigkill,
@@ -5732,7 +5740,7 @@ async def _forms_for_export(session_id: str, session_dir: Path, output_dir: Path
     try:
         proc = _track_worker(await asyncio.create_subprocess_exec(
             *cmd, cwd=str(SERVER_DIR),
-            stdout=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, limit=_WORKER_STDOUT_LIMIT,
             stderr=asyncio.subprocess.STDOUT,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
             preexec_fn=_die_with_parent_sigkill,
@@ -6211,7 +6219,7 @@ async def export_perfect_endpoint(request: Request):
                     cmd += ["--source", f"{int(i)}:{src}"]
             proc = _track_worker(await asyncio.create_subprocess_exec(
                 *cmd, cwd=str(SERVER_DIR),
-                stdout=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE, limit=_WORKER_STDOUT_LIMIT,
                 stderr=asyncio.subprocess.STDOUT,
                 env={**os.environ, "PYTHONUNBUFFERED": "1"},
                 preexec_fn=_die_with_parent_sigkill,
@@ -6357,7 +6365,7 @@ async def export_tsdf_endpoint(request: Request):
         try:
             proc = _track_worker(await asyncio.create_subprocess_exec(
                 *cmd, cwd=str(SERVER_DIR),
-                stdout=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE, limit=_WORKER_STDOUT_LIMIT,
                 stderr=asyncio.subprocess.STDOUT,
                 env={**os.environ, "PYTHONUNBUFFERED": "1"},
                 preexec_fn=_die_with_parent_sigkill,
@@ -6510,7 +6518,7 @@ async def _run_scene_tsdf_subprocess(session_id: str, output_dir: Path,
             "--session-dir", str(frames_dir.parent),
             "--params", json.dumps(params),
             cwd=str(SERVER_DIR),
-            stdout=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, limit=_WORKER_STDOUT_LIMIT,
             stderr=asyncio.subprocess.STDOUT,
             env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONFAULTHANDLER": "1"},
             preexec_fn=_die_with_parent_sigkill,
@@ -6683,7 +6691,7 @@ async def export_poisson_scene_endpoint(request: Request):
                 "--session-dir", str(frames_dir.parent),
                 "--params", json.dumps(params),
                 cwd=str(SERVER_DIR),
-                stdout=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE, limit=_WORKER_STDOUT_LIMIT,
                 stderr=asyncio.subprocess.STDOUT,
                 env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONFAULTHANDLER": "1"},
                 preexec_fn=_die_with_parent_sigkill,

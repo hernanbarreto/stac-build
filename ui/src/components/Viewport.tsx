@@ -603,6 +603,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const pointCloudRef = useRef<THREE.Points | null>(null)
     const materialRef = useRef<THREE.ShaderMaterial | null>(null)
     const ambientLightRef = useRef<THREE.AmbientLight | null>(null)
+    const pointCountReportedAtRef = useRef(0)   // the last time the visible count reached the App (throttled)
     // Cloud-hidden flag — driven by App (`setCloudObjectVisible`) and by the
     // confidence-slider useEffect. Read by the Potree LOD gate to short-
     // circuit `updateVisibility()` when the cloud is off. We never set
@@ -3712,8 +3713,15 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     // the preview's count forever): it takes over
                     if (previewRef.current && (visiblePts >= previewRef.current.n
                         || (visiblePts > 0 && now - previewRef.current.shownAt > 20000))) disposePreview()
-                    if (!flying && visiblePts !== totalPointsRef.current && !(previewRef.current && visiblePts < previewRef.current.n)) {
+                    // USER 2026-10-16 ("se pone muy lenta la UI al mover la nube con la lista de
+                    // instancias abierta"): the visible count changes almost every frame while the
+                    // camera moves (octree nodes come and go) and each report re-rendered the whole
+                    // App — the Instances list's hundreds of rows with it. The status bar needs the
+                    // number a few times a second, not per frame: reported at most every 300 ms.
+                    if (!flying && visiblePts !== totalPointsRef.current && !(previewRef.current && visiblePts < previewRef.current.n)
+                            && now - pointCountReportedAtRef.current >= 300) {
                         totalPointsRef.current = visiblePts
+                        pointCountReportedAtRef.current = now
                         onPointCount(visiblePts)
                     }
                 }
