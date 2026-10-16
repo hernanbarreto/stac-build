@@ -3327,7 +3327,8 @@ def level_floor_core(output_dir, result_path, cloud_path, fl_path,
     measured = {k: meas[k] for k in ("tilt_deg", "height_m", "sigma_height_m", "sigma_tilt_deg",
                                      "n_judges", "judges", "inliers", "cell_m", "cell_min_points")}
 
-    if not meas.get("apply"):
+    user_chosen = (mode == "explicit" and req_iid is not None)
+    if not meas.get("apply") and not user_chosen:
         # THE RULE SAYS NO (not significant, too few judges, or under the plane's own
         # error): nothing moves, nothing is written — declared, with every margin
         print(f"[FloorLevel] {session_id}: instance {selected} NOT re-levelled — {meas['reason']}")
@@ -3336,6 +3337,15 @@ def level_floor_core(output_dir, result_path, cloud_path, fl_path,
                 "selected": selected, "candidates": candidates,
                 "residual_mm": round(height * 1000, 1),
                 "matrix": _srt_to_threejs_col_major(s, R, t)}
+    if not meas.get("apply"):
+        # THE USER CHOSE THIS FLOOR (USER 2026-10-16, bufferStop: "aun seleccionando el piso en el
+        # cuadro de segments no lo toma" — its 75 k points filled 4 cells of 1 m, the rule asks
+        # 5 judges, and a floor 81.5° off horizontal stayed on its side): an explicit choice is
+        # the verdict; the rule's measurement is declared next to it, never a veto of his hand.
+        # The automatic selection still obeys the rule.
+        print(f"[FloorLevel] {session_id}: instance {selected} chosen by the user — levelled although the "
+              f"rule does not pass ({meas['reason']}): the explicit choice is the verdict, declared")
+        measured["rule_overridden_by_user"] = True
 
     # minimal delta rotation in DISPLAY space: n_disp → +Y
     R_delta = _rotation_to_up(n_disp)
