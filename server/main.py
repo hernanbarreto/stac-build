@@ -4243,7 +4243,7 @@ async def rename_segmentation_instance(request: Request):
                 sys.executable, "-m", "segmentation.label_overrides", "--apply", str(output_dir),
                 "--lock-timeout", "5",
                 cwd=str(Path(__file__).resolve().parent),
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+                stdout=asyncio.subprocess.PIPE, limit=_WORKER_STDOUT_LIMIT, stderr=asyncio.subprocess.STDOUT)
             so, _ = await proc.communicate()
             tail = (so or b"").decode(errors="replace").strip().splitlines()[-3:]
             if proc.returncode == 3:
