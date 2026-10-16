@@ -3043,7 +3043,11 @@ def _rotation_to_up(n_disp: np.ndarray) -> np.ndarray:
     axis = np.cross(v, up)
     ln = np.linalg.norm(axis)
     if ln < 1e-9:
-        return np.eye(3)
+        if float(v @ up) > 0.0:
+            return np.eye(3)
+        # antiparallel — the floor's up points straight DOWN: a half turn about X puts it up
+        # (bufferStop 2026-10-16: this returned the identity and the scene stayed upside down)
+        return np.diag([1.0, -1.0, -1.0])
     axis /= ln
     ang = float(np.arccos(np.clip(v @ up, -1, 1)))
     K = np.array([[0, -axis[2], axis[1]],
@@ -3053,7 +3057,8 @@ def _rotation_to_up(n_disp: np.ndarray) -> np.ndarray:
 
 
 def floor_level_decision(xyz_disp: np.ndarray, *, cell_m: float, cell_min_points: int,
-                         error_factor: float, confidence: float, seed: int) -> dict:
+                         error_factor: float, confidence: float, seed: int,
+                         side_points: Optional[np.ndarray] = None) -> dict:
     """THE USER'S RULE on the explicit floor levelling (docs/plan_determinismo.md point 161;
     the 1 cm / 0.5° bar is gone): the floor's plane is fitted in the CURRENT display frame
     (seeded RANSAC, point 50 — the same plane every run) and the move that would put it at
@@ -3087,7 +3092,15 @@ def floor_level_decision(xyz_disp: np.ndarray, *, cell_m: float, cell_min_points
         return {"apply": False, "reason": "floor plane fit failed", "decision": None}
     n_disp = np.asarray(pf.normal, dtype=np.float64)
     n_disp = n_disp / max(np.linalg.norm(n_disp), 1e-12)
-    if n_disp[1] < 0:
+    # WHICH SIDE IS UP: the scene stands on its floor, so the floor's up is the side the rest of
+    # the cloud lies on (``side_points``: the whole cloud) — never "the side nearer +Y": a frame
+    # on its side (bufferStop 2026-10-16, floor 81.5° off, USER: "se acomodó pero está cabeza
+    # abajo") had its floor's +Y-nearest side facing DOWN and the level turned the scene over
+    c0 = P_all[np.asarray(pf.inliers, dtype=bool)].mean(0)
+    if side_points is not None and len(side_points):
+        if float(np.median((np.asarray(side_points, np.float64) - c0) @ n_disp)) < 0.0:
+            n_disp = -n_disp
+    elif n_disp[1] < 0:
         n_disp = -n_disp
     inl = np.asarray(pf.inliers, dtype=bool)
     P = P_all[inl]
@@ -3242,10 +3255,14 @@ def level_floor_core(output_dir, result_path, cloud_path, fl_path,
             seg = seg[np.linspace(0, len(seg) - 1, 200_000).astype(np.int64)]
         xyz_disp = s * (seg @ R.T) + t
         seed = int(repro.stable_id("floor_level", int(iid), n_hex=8), 16)
+        # the whole cloud (a fixed stride, never a draw) tells which side of the floor is up
+        side = pts[np.linspace(0, len(pts) - 1, min(len(pts), 200_000)).astype(np.int64)]
+        side_disp = s * (side @ R.T) + t
         m = floor_level_decision(xyz_disp, cell_m=rule["cell_m"],
                                  cell_min_points=rule["cell_min_points"],
                                  error_factor=rule["error_factor"],
-                                 confidence=rule["confidence"], seed=seed)
+                                 confidence=rule["confidence"], seed=seed,
+                                 side_points=side_disp)
         if m.get("decision") is None and not m.get("n_judges"):
             return None, m.get("reason", "floor plane fit failed")
         m["tilt"] = float(m["tilt_deg"])
