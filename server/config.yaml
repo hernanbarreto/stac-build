@@ -2751,7 +2751,8 @@ forms:
                               # unavailable device FAILS the stage (USER: "todo en gpu")
   max_points: 200000          # BOUND (cost): object points in the fit (deterministic subsample;
                               # the residual report reads every point)
-  surface_samples: 4096       # BOUND (cost): surface samples of the form per silhouette render
+  surface_samples: 16384      # BOUND (cost): surface samples of the form per silhouette render, at
+                              # one spacing over its whole area (a 2 m column: ~9 mm, 3 px at 3 m)
   boundary_px_per_view: 512   # BOUND (cost): mask boundary pixels per view in the recall term
   max_views: 300              # BOUND (cost): views per object in the corrector, largest masks first
   block_iterations: 25        # the optimiser runs in blocks of this many steps; after each block

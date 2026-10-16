@@ -420,6 +420,27 @@ class Extrusion(Template):
         outside = torch.sqrt(torch.clamp(d2, min=0.0) ** 2 + torch.clamp(dz, min=0.0) ** 2 + _EPS)
         return torch.abs(inside + outside)
 
+    def _layout(self, n: int) -> Tuple[int, int, int]:
+        """(ring points, stations, cap grid side) for ~n samples at ONE spacing over the whole
+        surface (lateral area + caps): a long thin bar gets many stations and few ring points,
+        a plate the other way round — the silhouette term measures the form, never the gaps
+        between rings (a 1024-sample column had its rings 11 cm apart)."""
+        with torch.no_grad():
+            rings = self.section.boundary(64)
+            per = 0.0
+            for xs, ys in rings:
+                x = xs.detach().cpu().numpy(); y = ys.detach().cpu().numpy()
+                per += float(np.sum(np.hypot(np.diff(np.r_[x, x[0]]), np.diff(np.r_[y, y[0]]))))
+            L = 2.0 * float(self.half_length().detach())
+            bx, by = self.section.bbox()
+            cap_area = 0.0 if self.open else 2.0 * float(self.section.polygon().area)
+            total = max(per * L + cap_area, 1e-9)
+            d = math.sqrt(total / max(int(n), 16))
+            m_ring = int(max(16, round(per / d)))
+            s = int(max(2, round(L / d)))
+            k_cap = int(max(2, round(2.0 * max(bx, by) / d))) if cap_area > 0 else 0
+        return m_ring, s, k_cap
+
     def samples(self, n: int) -> torch.Tensor:
         h = self.half_length()
         dev = self.dev
@@ -430,17 +451,19 @@ class Extrusion(Template):
             keep = self.section.sdf(x, y) <= _KEEP_TOL
             z = torch.zeros_like(x)
             return self.pose.world(x[keep], y[keep], z[keep])
-        rings = self.section.boundary(max(16, int(math.sqrt(n * 2))))
+        m_ring, s, k_cap = self._layout(n)
+        rings = self.section.boundary(m_ring)
         bx = torch.cat([r[0] for r in rings])
         by = torch.cat([r[1] for r in rings])
         m = len(bx)
-        s = max(2, (n * 2 // 3) // max(m, 1))
         zs = torch.linspace(-1.0, 1.0, s, dtype=torch.float64, device=dev) * h
         X = bx.repeat(s)
         Y = by.repeat(s)
         Z = zs.repeat_interleave(m)
-        if not self.open:
-            gx, gy = _grid(max(16, n // 6), dev)
+        if not self.open and k_cap >= 2:
+            g = torch.linspace(-1.0, 1.0, k_cap, dtype=torch.float64, device=dev)
+            gx, gy = torch.meshgrid(g, g, indexing="ij")
+            gx, gy = gx.reshape(-1), gy.reshape(-1)
             cbx, cby = self.section.bbox()
             cx, cy = gx * cbx, gy * cby
             keep = self.section.sdf(cx, cy) <= _KEEP_TOL
@@ -543,8 +566,14 @@ class Revolution(Template):
     def samples(self, n: int) -> torch.Tensor:
         dev = self.dev
         r, zs = self.radii(), self._stations()
-        S = max(8, int(math.sqrt(n / 4)))
-        A = max(8, n // S)
+        with torch.no_grad():
+            rn = r.detach().cpu().numpy()
+            L = 2.0 * float(self.half_length().detach())
+            lateral = float(np.mean(2 * math.pi * rn)) * L
+            caps = math.pi * (float(rn[0]) ** 2 + float(rn[-1]) ** 2)
+            d = math.sqrt(max(lateral + caps, 1e-9) / max(int(n), 16))
+            S = int(max(8, round(L / d)))
+            A = int(max(8, round(float(np.mean(2 * math.pi * rn)) / d)))
         tt = torch.linspace(0.0, 1.0, S, dtype=torch.float64, device=dev)
         # linear interpolation of the profile along the stations
         pos = tt * (self.K - 1)
@@ -556,8 +585,11 @@ class Revolution(Template):
         X = (rz[:, None] * torch.cos(ang)[None, :]).reshape(-1)
         Y = (rz[:, None] * torch.sin(ang)[None, :]).reshape(-1)
         Z = zz[:, None].expand(S, A).reshape(-1)
-        # the caps
-        gx, gy = _grid(max(16, n // 8), dev)
+        # the caps, at the same spacing
+        k_cap = int(max(2, round(2.0 * float(rn.max()) / d)))
+        g = torch.linspace(-1.0, 1.0, k_cap, dtype=torch.float64, device=dev)
+        gx, gy = torch.meshgrid(g, g, indexing="ij")
+        gx, gy = gx.reshape(-1), gy.reshape(-1)
         keep = gx * gx + gy * gy <= 1.0
         gx, gy = gx[keep], gy[keep]
         X = torch.cat([X, gx * r[0], gx * r[-1]])
