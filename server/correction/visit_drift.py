@@ -1980,7 +1980,15 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
     mascaras"*, and *"lo mismo deben eliminarse de la nube los puntos de
     revisitas menores al 1%"*.
 
-    The other three rules, all on the MASKLETS — SAM3's own tracks, not the fused
+    RULE 1 CHANGED (USER 2026-10-16: "hay que contrastarlo contra la suya y las demás"): the
+    point is tested against its OWN object's silhouette with the same ballot — every mask
+    keyframe that saw it, its own visit included — and leaves when it lies inside that
+    silhouette (the union of the object's fused masklets' masks, dilated by ``dilate_px``) in
+    fewer than ``min_inside_frac`` of at least ``min_votes`` views. Until today only the
+    keyframes of OTHER visits judged (the 2026-09-29 reading), so a single-visit object was
+    never tested against its own mask and 475,358 points off their mask stayed on pccr.
+
+    The other rules, all on the MASKLETS — SAM3's own tracks, not the fused
     instances:
 
       · a point that CLAIMS to be part of an object and, with the pose already
@@ -2127,13 +2135,18 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
         saw = n_saw > 0
         inside = n_inside > 0
 
-        # RULE 4 — on ANOTHER object's surface, by the majority of the views that saw it
+        # THE BALLOT (rules 1 and 4): every keyframe where the OBJECT has a mask — its own
+        # visit included, the point's birth keyframe excluded, at a parallax of at least
+        # min_tri_deg, unoccluded — votes OWN when the point lies inside the object's dilated
+        # silhouette (the union of its fused masklets' masks: one object, one silhouette),
+        # OTHER when it lies on another object's surface inside that object's mask
         conflict = np.zeros(len(sub), bool)
         nv = np.zeros(len(sub), np.int32)
         no = np.zeros(len(sub), np.int32)
         nt = np.zeros(len(sub), np.int32)
         my_root = _root_of(int(oid))
         _rival_mask = None
+        drop_own = np.zeros(len(sub), bool)
         if own_views:
             def _rival_mask(kf: int, _me=my_root) -> Optional[np.ndarray]:
                 """Pixels where ANOTHER object (another fused root) drew a mask."""
@@ -2142,13 +2155,24 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
                     return None
                 mine = _union([o for o in vis.oids_at(kf) if _root_of(o) == _me], kf)
                 return cnt > (mine.astype(np.uint8) if mine is not None else 0)
-            nv, no, nt = other_mask_votes(vis, xyz[sub], sub_ks, own_views, _rival_mask,
+            object_views: Dict[int, np.ndarray] = {}
+            for kf, mm in own_views.items():
+                mine = _union([o for o in vis.oids_at(kf) if _root_of(o) == my_root], kf)
+                object_views[kf] = (mm > 0) | (mine > 0) if mine is not None else (mm > 0)
+            nv, no, nt = other_mask_votes(vis, xyz[sub], sub_ks, object_views, _rival_mask,
                                           dilate_px, occlusion_tol_rel, min_tri_deg)
             frac = float(min_inside_frac)
-            conflict = ((nv >= int(min_votes)) & (nt >= frac * nv) & (no < frac * nv))
-        # judged and never inside: it is not part of this object
-        drop_own = saw & ~inside
-        drop_other = conflict & ~drop_own
+            judged = nv >= int(min_votes)
+            # RULE 1 (USER 2026-10-16: "hay que contrastarlo contra la suya y las demás, regla 1
+            # cambiada"): a point of X that, among the views that saw it, lies inside X's own
+            # silhouette in fewer than min_inside_frac of them is not part of X — its own visit
+            # judges it too (until today only the views of OTHER visits did, so a single-visit
+            # object was never tested against its own mask)
+            # RULE 4 — on ANOTHER object's surface, by the majority of the views that saw it
+            # (the more specific reason: recorded as rule 4 when both hold)
+            conflict = (judged & (nt >= frac * nv) & (no < frac * nv))
+            drop_own = judged & (no < frac * nv) & ~conflict
+        drop_other = conflict
         off_mask += int(drop_own.sum())
         off_other += int(drop_other.sum())
         drop = drop_own | drop_other
@@ -2180,9 +2204,10 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
                        "points": int(off_other)})
     rep.votes = _assemble_votes(rec, det)
     log(f"[visit-drift] step 12: {rep.dropped_points:,} of {n_points:,} points "
-        f"leave ({off_mask:,} still off their own mask after the correction, "
-        f"{off_other:,} on another object's surface in ≥ {min_inside_frac:.0%} of "
+        f"leave (masklet decisions: {off_mask:,} inside their own silhouette in < {min_inside_frac:.0%} of "
         f"≥ {min_votes} views that saw them, "
+        f"{off_other:,} on another object's surface in ≥ {min_inside_frac:.0%} of them; "
+        f"a point kept by any masklet of its object stays; "
         f"{rep.dropped_objects} masklet(s) under {min_points} points, "
         f"{rep.dropped_visits} visit(s) at or under {min_visit_share:.0%}); "
         f"{int((~seg).sum()):,} unsegmented points untouched")

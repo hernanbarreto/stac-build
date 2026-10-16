@@ -199,10 +199,15 @@ def test_views_where_the_object_has_no_mask_do_not_vote():
 def test_the_foreign_mask_is_never_dilated():
     """(a) The rim tolerance belongs to the point's OWN silhouette. Column 5 is one
     pixel outside Y's mask (6-9) and outside X's (0-3, dilated by 1 → 0-4): with Y's
-    mask dilated it would be accused in every view; undilated, nothing accuses it."""
-    kill, _ = _run([1, 5, 5, 5, 5], dilate_px=1)
+    mask dilated it would be accused by rule 4 in every view; undilated, rule 4 does not
+    accuse it — but RULE 1 (USER 2026-10-16) does: outside its own silhouette in 4 of 4
+    views, it is not part of X. One column inside X's dilated rim (column 4) it stays."""
+    kill, rep = _run([1, 5, 5, 5, 5], dilate_px=1)
+    assert kill[0] and not kill[1:].any()
+    assert rep.votes is not None
+    kill, _ = _run([1, 4, 4, 4, 4], dilate_px=1)   # inside its own dilated rim: stays
     assert not kill.any()
-    kill, _ = _run([1, 6, 6, 6, 6], dilate_px=1)   # one column further: inside Y
+    kill, _ = _run([1, 6, 6, 6, 6], dilate_px=1)   # inside Y: leaves (rules 1 and 4 agree)
     assert kill[0] and not kill[1:].any()
 
 
@@ -225,9 +230,13 @@ def test_a_point_behind_another_object_is_occluded_not_on_it():
 
 def test_a_point_in_front_of_another_object_is_not_on_it():
     """(b) Inside Y's mask but 10 % NEARER than what that keyframe measured: the camera
-    saw Y through it — it is not on Y's surface, so rule 4 does not accuse it."""
-    kill, _ = _run([1, 7, 8, 7, 8], z0=2.7, zb=3.0)
-    assert not kill.any()
+    saw Y through it — it is not on Y's surface, so rule 4 does not accuse it. RULE 1
+    (USER 2026-10-16) still judges it against its OWN silhouette: outside X's mask in the
+    4 views that saw it, it leaves — by rule 1, not by rule 4."""
+    kill, rep = _run([1, 7, 8, 7, 8], z0=2.7, zb=3.0)
+    assert kill[0] and not kill[1:].any()
+    assert not any(d["reason"].startswith("on another object's surface") and d["points"]
+                   for d in rep.detail)                      # rule 1, not rule 4
 
 
 def test_a_point_within_the_relative_tolerance_is_on_the_surface():

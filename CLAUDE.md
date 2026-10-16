@@ -1,5 +1,15 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐ 2026-10-16 — MASK FILTER RULE 1 CHANGED (USER: "hay que contrastarlo contra la suya y las demás")
+- `correction/visit_drift.cloud_filter_masklets` step 12: a point is now tested against its OWN object's
+  silhouette with the rule-4 ballot — every mask keyframe that saw it (its own visit included, the birth
+  keyframe excluded, parallax ≥ `min_tri_deg`, unoccluded) — and leaves when it lies inside that silhouette
+  (the union of the fused masklets' masks, dilated) in fewer than `min_inside_frac` of ≥ `min_votes` views.
+  Until today rule 1 judged only with the keyframes of OTHER visits (the 2026-09-29 reading "no contra su
+  propia máscara"), so a single-visit object was never tested against its own mask: on pccr's epoch 4 the
+  log showed 475,358 masklet decisions off their own mask that stayed. Rule 4 (on another object's surface)
+  is recorded when both hold. Applies at the next certification (Autosegment → certify).
+
 ## ⭐ 2026-10-16 — point2cad REMOVED (USER: "elimina p2c de todo el pipeline y borra el entorno, así nos sacamos uno con licencia de encima")
 - Gone: `vendor/point2cad` (CC-BY-NC), the conda env `point2cad` (14 GB), `segmentation/p2c_object.py`,
   `tests/test_p2c_chooser.py`, the worker mode `p2c` of run_perfect_objects.py, the Mesh button's p2c stage and
