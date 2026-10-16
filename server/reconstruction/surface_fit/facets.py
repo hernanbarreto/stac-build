@@ -173,3 +173,20 @@ def object_cell(extent: np.ndarray, spacing_p99: float, max_cell: float, facets_
     needs points for a plane), never over the user's ``max_cell``."""
     ext = float(np.min(np.asarray(extent, np.float64)))
     return float(np.clip(ext / max(int(facets_across), 1), 4.0 * float(spacing_p99), float(max_cell)))
+
+
+def cell_occupancy_median(P: np.ndarray, cell: float) -> int:
+    """The median number of points an occupied cell of ``P`` holds at this resolution — what a
+    facet of one cell is worth in this object's sampling. A segment with fewer points than that is
+    under-sampled at the resolution (a mask leak's handful of points metres away, a sliver) and
+    is declared, not meshed: pccr's pipe carried 300 leaked points up to 5 m from it, in cells
+    of 12–20 points, each a facet the hole audit then bridged to (2026-10-16)."""
+    P = np.asarray(P, np.float64)
+    if len(P) == 0:
+        return 0
+    o = P.min(0) - 1e-9
+    C = np.floor((P - o) / float(cell)).astype(np.int64)
+    dims = C.max(0) + 1
+    key = (C[:, 0] * dims[1] + C[:, 1]) * dims[2] + C[:, 2]
+    _, counts = np.unique(key, return_counts=True)
+    return int(np.median(counts))

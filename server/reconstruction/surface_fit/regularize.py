@@ -213,6 +213,9 @@ def snap_edges(fitted_planes: List, snap_dist_m: float = 0.10,
     bnd_cache: Dict[int, np.ndarray] = {}
     tree_cache: Dict[int, cKDTree] = {}
     boxes: Dict[int, tuple] = {}
+    moved_ids: Dict[int, set] = {}        # a vertex lies on ONE edge: moved at most once (facets of a
+    #                                       small object are all within the band of each other —
+    #                                       moved pair after pair, a vertex walked away)
 
     def _bnd(idx: int, F) -> np.ndarray:
         if idx not in bnd_cache:
@@ -273,10 +276,13 @@ def snap_edges(fitted_planes: List, snap_dist_m: float = 0.10,
                     continue
                 slide = sd[near_idx] / denom
                 ok = np.abs(slide) <= snap_dist_m                 # never farther than the band
+                done = moved_ids.setdefault(idx, set())
+                ok &= np.array([int(v) not in done for v in bnd[near_idx]], dtype=bool)
                 if not ok.any():
                     continue
                 ids = bnd[near_idx[ok]]
                 V[ids] = V[ids] - slide[ok][:, None] * d_in
+                done.update(int(v) for v in ids)
                 moved += int(ok.sum())
             if moved:
                 n_edges += 1

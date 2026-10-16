@@ -413,7 +413,7 @@ def fit_scene(session_dir: Path,
                 # 3 cm apart) and the floor into 1,768; at half a 10 cm cell the door is one plane
                 # (97 %), the floor one (83 %) plus its ramp, a 30 cm pipe four facets at its own
                 # 7 cm cell, the extinguisher six and its dome.
-                from .facets import grow_plane_segments, object_cell
+                from .facets import cell_occupancy_median, grow_plane_segments, object_cell
                 from .models import orient_normal
                 from .noise import local_thickness_sigma
                 from .plane import _plane_basis
@@ -445,6 +445,23 @@ def fit_scene(session_dir: Path,
                             1000 * sd, tol_rec["from"])
                 reg, segs = grow_plane_segments(pts, cell, sd, seed_points=int(facet_seed_points))
                 n_obj = max(len(pts), 1)
+                # a segment worth less than one of the object's own cells is under-sampled at the
+                # resolution — a mask leak's handful of points metres away, a sliver: declared
+                # with the residue, never meshed (pccr's pipe: 300 leaked points in cells of
+                # 12–20, each a facet the hole audit bridged to across the room, 2026-10-16)
+                min_pts = cell_occupancy_median(pts, cell)
+                small = [q for q in segs if int(q["n"]) < min_pts]
+                if small:
+                    for q in small:
+                        reg[reg == int(q["id"])] = -1
+                    segs = [q for q in segs if int(q["n"]) >= min_pts]
+                    for i_, q in enumerate(segs):
+                        reg[reg == int(q["id"])] = i_ + 10_000_000      # renumber safely
+                        q["id"] = i_
+                    reg[reg >= 10_000_000] -= 10_000_000
+                dropped_small = {"n_segments": len(small), "n_points": int(sum(int(q["n"]) for q in small)),
+                                 "min_points": int(min_pts),
+                                 "what": "segments with fewer points than the object's median cell: declared, not meshed"}
                 if not segs or float(segs[0]["n"]) / n_obj < float(manhattan_part_min_frac):
                     # no segment holds even a part of the object (the bound of a part, 2026-10-15):
                     # its cloud is not a surface at its resolution — the configured ladder decides
@@ -490,6 +507,7 @@ def fit_scene(session_dir: Path,
                     fs.manhattan_residue_n = int(residue_mask.sum())
                     fs.facets = {"cell_m": round(cell, 5), "tolerance_m": round(sd, 5), "n_segments": len(segs),
                                  "explained": round(explained, 4), "residue": round(residue, 4),
+                                 "dropped_small": dropped_small,
                                  "segments": [{"share": round(float(q["n"]) / n_obj, 4), "n_points": int(q["n"]),
                                                "tilt_from_up_deg": round(float(np.degrees(np.arccos(np.clip(
                                                    abs(float(np.asarray(q["normal"]) @ man_up)), 0.0, 1.0)))), 2),
@@ -674,6 +692,7 @@ def fit_scene(session_dir: Path,
                                         orig=pts_k, instance_id=old.instance_id, label=old.label, **ev_i)
                     fk.regularized = bool(rec.get("snapped"))
                     fk.from_decompose = True
+                    fk.segment_points = pts_k
                     fk.manhattan = {**rec, "part": int(k), "n_points": int(len(pts_k))}
                     surfs.append(fk)
                 primary = surfs[0]
@@ -811,7 +830,13 @@ def fit_scene(session_dir: Path,
         if hole_audit and fs.model is not None:
             try:
                 from .hole_audit import audit_and_fill, save_report
-                raw_seg = seg_points[fs.instance_id]
+                # the audit of a plane SEGMENT works on the segment's own points: the object's
+                # other points within the tolerance of the segment's INFINITE plane (a mask
+                # leak 5 m away) stretched its grid across the room and the fills bridged to
+                # them (pccr's pipe, 2026-10-16)
+                raw_seg = getattr(fs, "segment_points", None)
+                if raw_seg is None:
+                    raw_seg = seg_points[fs.instance_id]
                 signed = np.abs(np.asarray(fs.model.signed_distance(raw_seg)))
                 sd = float(getattr(fs, "tolerance_m", None) or kwargs.get("support_dist_m", 0.04))
                 uv_sup = np.asarray(fs.model.to_uv(raw_seg[signed <= sd]))
