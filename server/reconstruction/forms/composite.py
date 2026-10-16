@@ -259,6 +259,83 @@ def cloud_density(P: np.ndarray, seed: int = 0) -> float:
     return 1.0 / (4.0 * d * d)
 
 
+def _two_populations(x: np.ndarray, bins: int = 64) -> float:
+    """The split of ``x`` into two populations that maximises the variance between them (Otsu):
+    the cells of a surface (an axial extent of the noise) against the cells of a bar (an extent
+    of its length) — the data's own split, no chosen number."""
+    x = np.asarray(x, np.float64)
+    if x.size < 2 or float(x.max() - x.min()) <= 1e-12:
+        return float(x.max()) if x.size else 0.0
+    hist, edges = np.histogram(x, bins=int(bins))
+    w = hist.astype(np.float64)
+    c = 0.5 * (edges[:-1] + edges[1:])
+    total = w.sum()
+    best, best_t = -1.0, float(np.median(x))
+    cum_w = np.cumsum(w)
+    cum_m = np.cumsum(w * c)
+    for i in range(len(w) - 1):
+        w0, w1 = cum_w[i], total - cum_w[i]
+        if w0 <= 0 or w1 <= 0:
+            continue
+        m0 = cum_m[i] / w0
+        m1 = (cum_m[-1] - cum_m[i]) / w1
+        between = w0 * w1 * (m0 - m1) ** 2
+        if between > best:
+            best, best_t = between, float(edges[i + 1])
+    return best_t
+
+
+def _extract_bar(P: np.ndarray, axis: np.ndarray, u: np.ndarray, v: np.ndarray, cell: float
+                 ) -> Tuple[Optional[np.ndarray], float]:
+    """A BAR along a known axis (a leg, a post, a rail — a cylinder or a profile the VLM said is
+    vertical/horizontal): in the section plane the bar is a compact blob of cells whose points
+    run far along the axis, while a surface in the residue (a table's underside) spreads over
+    many cells each holding a thin slab. The per-cell axial extents split into their two
+    populations (Otsu — the data's own split, no chosen number); the long cells are grouped into
+    connected blobs and the blob with the largest axial extent is the bar. Returns (inlier mask,
+    support density)."""
+    from scipy import ndimage as _ndi
+    n = len(P)
+    if n < 10:
+        return None, 0.0
+    a = P @ axis
+    P2 = np.column_stack([P @ u, P @ v])
+    o = P2.min(0)
+    ij = np.floor((P2 - o) / max(float(cell), 1e-6)).astype(np.int64)
+    shape = (int(ij[:, 0].max()) + 1, int(ij[:, 1].max()) + 1)
+    flat = ij[:, 0] * shape[1] + ij[:, 1]
+    order = np.argsort(flat, kind="stable")
+    fs = flat[order]
+    starts = np.r_[0, np.nonzero(np.diff(fs))[0] + 1]
+    ends = np.r_[starts[1:], len(fs)]
+    ext = np.zeros(shape[0] * shape[1])
+    for s0, e0 in zip(starts, ends):
+        aa = a[order[s0:e0]]
+        ext[fs[s0]] = float(aa.max() - aa.min()) if e0 - s0 > 1 else 0.0
+    occupied = ext > 0
+    if not occupied.any():
+        return None, 0.0
+    tall = (ext > _two_populations(ext[occupied])).reshape(shape)
+    lab, k = _ndi.label(tall, structure=np.ones((3, 3), dtype=bool))
+    if k == 0:
+        return None, 0.0
+    cell_lab = lab.reshape(-1)[flat]
+    best, best_ext, best_n = None, 0.0, 0
+    for comp in range(1, k + 1):
+        sel = cell_lab == comp
+        m = int(sel.sum())
+        if m < 10:
+            continue
+        e = float(np.percentile(a[sel], 99.5) - np.percentile(a[sel], 0.5))
+        if e > best_ext:
+            best, best_ext, best_n = sel, e, m
+    if best is None:
+        return None, 0.0
+    q = P2[best] - P2[best].mean(0)
+    size = max(float(np.percentile(np.linalg.norm(q, axis=1), 95)) * 2.0, 1e-3)
+    return best, best_n / (math.pi * size * max(best_ext, 1e-6))
+
+
 def extract_by_form(form: str, orientation: str, frame: Frame, P: np.ndarray, band: float,
                     iters: int, seed: int) -> Tuple[Optional[np.ndarray], float]:
     """(inlier mask, support density in points/m²) of ONE instance of ``form`` in ``P`` by the
@@ -266,26 +343,28 @@ def extract_by_form(form: str, orientation: str, frame: Frame, P: np.ndarray, ba
     P = np.asarray(P, np.float64)
     if len(P) < 10:
         return None, 0.0
-    if form in ("panel", "box", "profile"):
-        inl = _extract_plane(P, band, iters, seed)
-        return (None, 0.0) if inl is None else (inl, _plane_density(P, inl))
-    if form == "cylinder":
-        axis = None
+    axis = None
+    if form in ("cylinder", "profile") and orientation in ("vertical", "horizontal"):
         if orientation == "vertical":
             axis = frame.up
-        elif orientation == "horizontal":
+        else:
             # the horizontal direction of most variance
             q = P - np.median(P, 0)
             q = q - np.outer(q @ frame.up, frame.up)
             _, _, vt = np.linalg.svd(q[:: max(1, len(q) // 20000)], full_matrices=False)
             axis = vt[0] / max(np.linalg.norm(vt[0]), 1e-12)
-        if axis is not None:
-            u = np.cross(axis, frame.X if abs(axis @ frame.X) < 0.9 else frame.Z)
-            u /= np.linalg.norm(u)
-            v = np.cross(axis, u)
-            P2, ax = np.column_stack([P @ u, P @ v]), P @ axis
-            inl = _extract_circle(P2, ax, band, iters, seed)
-            return (None, 0.0) if inl is None else (inl, _circle_density(P2, ax, inl))
+    if form in ("panel", "box") or (form == "profile" and axis is None):
+        inl = _extract_plane(P, band, iters, seed)
+        return (None, 0.0) if inl is None else (inl, _plane_density(P, inl))
+    if form in ("cylinder", "profile") and axis is not None:
+        # a bar along the axis the VLM named: the blob of the section plane whose points run
+        # far along the axis (a leg under a table top, a post) — not a circle RANSAC, which a
+        # table's underside fools, nor a plane, which a profile's flange is not
+        u = np.cross(axis, frame.X if abs(axis @ frame.X) < 0.9 else frame.Z)
+        u /= np.linalg.norm(u)
+        v = np.cross(axis, u)
+        return _extract_bar(P, axis, u, v, 3.0 * point_spacing(P, seed))
+    if form == "cylinder":
         from reconstruction.geometry.primitives import fit_cylinder_ransac
         fit = fit_cylinder_ransac(P, dist_thresh=band, iters=int(iters), min_inlier_frac=0.0)
         if fit is None:

@@ -111,9 +111,12 @@ class ViewBatch:
         D = safe_cdist(P, self.B)                                          # (c, S, Bmax)
         inf = torch.tensor(float("inf"), dtype=D.dtype, device=D.device)
         D = torch.where(self.bvalid[:, None, :], D, inf)
-        # precision: visible samples outside the mask → their distance to the boundary
+        # precision: visible samples outside the mask → their distance to the boundary. The
+        # footprint is taken at a depth never under Z_FRONT: a sample behind the camera has a
+        # negative or zero z, and a NaN in the branch torch.where discards still poisons the
+        # gradient (the work surface's plate went NaN at the second step, 2026-10-16)
         d_s = D.min(dim=2).values                                           # (c, S)
-        foot_s = z / self.f_px[:, None]
+        foot_s = torch.clamp(torch.abs(z), min=Z_FRONT) / self.f_px[:, None]
         prec_m = torch.where(visible & ~inside, d_s, torch.zeros_like(d_s)) * foot_s
         n_vis = visible.sum(dim=1)
         prec_h = (torch.where(visible, huber(prec_m / foot_s.detach(), self.k), torch.zeros_like(prec_m)).sum(dim=1)

@@ -25,7 +25,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 import numpy as np
 import torch
 
-from .fit import fit_cloud, huber, subsample
+from .fit import REL_TOL, fit_cloud, huber, subsample
 from .templates import Template, _t
 
 Z_FRONT = 0.05   # m: a point closer than this to the camera is behind / at its centre (no pixel)
@@ -378,10 +378,12 @@ def correct(template: Template, P: np.ndarray, sigma: float, sil: Silhouettes, *
         if med < best["median"]:
             best["i"], best["median"] = len(states) - 1, med
         c = _heldout_change(history[-2], history[-1], confidence, seed)
-        changes.append({"block": block, **c, "median_m": med})
-        # stop at the first block that does not lower the best consensus so far (the best state
-        # is what gets published, so a noisy block costs nothing but time)
-        return not (med < prev_best)
+        loss_moves = (len(losses) >= 2 and (losses[-2] - losses[-1]) > REL_TOL * max(abs(losses[-2]), 1e-12))
+        changes.append({"block": block, **c, "median_m": med, "loss_moves": bool(loss_moves)})
+        # continue while the optimiser still lowers its objective (its own tolerance) or the
+        # block improved the best consensus; the best state is what gets published, so a block
+        # that got worse on the way (a bad start: the duct at 46 cm) costs nothing but time
+        return not (loss_moves or med < prev_best)
 
     rec = fit_cloud(template, P, sigma, lr=lr, block_iterations=block_iterations, max_blocks=max_blocks,
                     huber_k=huber_k, max_points=max_points, seed=seed, dev=dev,

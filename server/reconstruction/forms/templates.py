@@ -459,6 +459,12 @@ class Extrusion(Template):
                     if mid is not None:
                         self.pose.c += axis * mid
                         sec.logs[i] = math.log(half)
+            elif sec.kind in ("circle", "ring"):
+                # no lateral surface wider than the points: an open cylinder with a free radius
+                # flattens into a plane (a 1.1 m "duct" on a 20 cm run, pccr duct_296)
+                i = sec.names.index("r")
+                rmax = float(torch.sqrt(x * x + y * y).max()) + s
+                sec.logs[i] = torch.minimum(sec.logs[i], torch.log(torch.tensor(max(rmax, 1e-4), dtype=torch.float64, device=self.dev)))
 
     def distance(self, P: torch.Tensor) -> torch.Tensor:
         x, y, z = self.pose.local(P)
