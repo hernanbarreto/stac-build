@@ -83,7 +83,10 @@ segments). Next sessions run this recipe unchanged; the user is reconstructing a
    DA3** (DA3 layered objects: *"capas duplicadas y puntos voladores"*). F5 rung R1 (fx 392); the
    camera TRAVELS with the cloud (intrinsic.txt is an epoch artifact).
 3. **The certification** de-duplicates objects and collapses the floor (*"no debe haber cebolla en el
-   piso"*), respecting real steps and slopes; floor motion BLENDED across chunk overlaps (no camera step).
+   piso"*), respecting real steps and slopes. SINCE 2026-10-16 (evening, USER, bufferStop "de costado"):
+   the floor is ONE rigid motion for the whole session, measured on the SEGMENTATION's support surfaces over
+   the whole walk (`correction.floor.model_default: session`) — no chunk turns against another; `chunk`
+   (one motion per Omega chunk, blended across overlaps) stays selectable.
 4. **ONE epoch: the final one** (*"debe quedar una sola época que es la final"*).
 5. **Work one task at a time**, never several agents at once on the user's session; never change what
    works on a hypothesis — measure first, and reproduce validated numbers exactly when porting.
@@ -222,6 +225,17 @@ over 128k tracks, F6 resampled every Omega map through it: floor undulation 14.6
   camera at that moment and a real change of level (stepping down from the platform) is PRESERVED as a step, never
   corrected as drift; a second level with significant support by the user's rule is a real floor, not noise. Applies
   to the certification's floor alignment, the re-level after each epoch, the chunk check and the cloud metrics.
+- 2026-10-16 (evening) — THE FLOOR CORRECTION IS ONE RIGID MOTION PER SESSION ON THE SEGMENTED SUPPORT (USER:
+  "la época 4 debe tomar bien el suelo siempre en todos los casos, al menos un suelo … claro que debe tomar la de
+  segmentación … la correcta es la B"): bufferStop's chunk 1 had been levelled on a 19 k-point patch (7.99°, +102 cm)
+  and its neighbours, with no support plane under their cameras, took that motion blended — the scene came out on
+  its side. `correction/floor.py solve_floor_session` (`model_default: session`): the support = every instance whose
+  label's head noun is in `autoprompt.support_surfaces` (one list, `FloorConfig.support_labels`), over the whole
+  walk; levels searched along the support's own normal (no 'up' assumed), Tukey IRLS refitted over all the points
+  within the band, a further level real by the user's rule judged by the keyframes standing on it; THE floor = the
+  level under the most cameras; ONE motion for every keyframe (tilt / height each only when it clears the factor ×
+  its bootstrap σ); other levels keep their step; without a support instance the points below their own camera,
+  declared. The chunk check and the floor metric still read the per-chunk levels (`chunk_floor_levels`) as reports.
 - 2026-10-08 — WAVE 2 (after the cloud), packages P2–P5 of docs/determinism_work/impl_spec2.md, running/landed the same
   day (reports in the session log; summary here when all four are in):
   P2 VLM + SAM3 (landed): each VLM stage launches its OWN vLLM from the frozen config (no prefix cache, one sequence,
@@ -340,7 +354,7 @@ over 128k tracks, F6 resampled every Omega map through it: floor undulation 14.6
 | 6 | **Depth on F5 (`f6_bend`)** | `precision/depth_on_f5.py`, `precision.cloud.source: omega_bent`, config `precision.bend`; **mono detail** `precision/mono_detail.py` + `precision/pointdit_runner.py`, config `precision.mono_detail` (flag `enabled`) | (a) F5 FIT tracks triangulated with F5 poses + camera; (b) per keyframe Omega depth × k(u,v)=c0+c1·u+c2·v, fitted EXACTLY as epoch 7: 10-step Huber IRLS (`bend.irls_iterations`), landmark rows on depth > `bend.min_depth_m` (0.05), < `bend.min_rows` (20) rows → k = 1, window by half A of the HELD-OUT tracks (pccr ±0, 7.25 % → 2.80 %); (c) validity = the ONE confidence floor (`conf_min_norm`, min-max per Omega chunk) + not sky; (d) epoch 8's EDGE-KEEPING VOTE: τ = p75 of the neighbour disagreement on INTERIOR pixels (pccr 1.93 %), mixed pixels at contours snapped to their SAM3 mask's side, two-sided vote over ±3/±6/±12, contradicted pixels repaired to the neighbours' median when ≥ 2 agree, below-floor edge pixels admitted when confirmed; confidence column = agree count. pccr: 63.1 % kept, 15.1 % contradicted, 8.5 % repaired, 0.4 % admitted, coverage 71.0 %. **(c2) MONO DETAIL (USER 2026-10-04, `mono_detail.enabled`)** between the bend and the vote: PointDiT-H (DINOv3 ViT-H+/16, 16 Euler steps from zeros, deterministic) on native 512-px tiles with feathered overlaps → per tile z_cal ≈ s·z_mono + b (Huber IRLS weighted by the calibrated confidence, outside the band; tiles rejected by support or by the session's p95 residual) → z = lowpass(z_bent) + (z_al − lowpass(z_al)) with σ from Omega's patch; the discontinuity band (1-px jump > τ, dilated by context_scale) resolves Omega's MIXED pixels to the front or back surface by PointDiT's side, or marks them mixed_unresolved (out of the cloud). Metric and gauge are never touched (DA3's). Per-pixel provenance → cloud column `source` (1 omega_bent, 2 mono_detail, 3 band_front, 4 band_back); report `depth_on_f5.json` `mono_detail`; viewer layers View → PointDiT detail / Mixed unresolved. Flag off = epoch 8 bit for bit (tested) |
 | 7 | Cloud publish | `precision/corrected_cloud.publish` | voxel + SOR, octree, transactional epoch; `corrected_cloud.json` carries per-frame s_k + bend; intrinsic.txt inside the transaction |
 | 8 | Mask projection + OBBs | `segmentation/pipeline.py` (cloud stage) | class byte = `_encode_classification` + `class_map.json` (`class_byte` on every viewer payload); co-visible split (camera-return rule + free-space test); split children listed (`mask_fates.created_by_projection`); OBB yaw by RANSAC; every instance inherits its concept's `shape_caption` |
-| 9 | Certification | `workers/certify_worker.py`, `reconstruction/certify/run.py`, `correction/` | depth per chunk; floor per chunk BLENDED across overlaps; mask filter with the cloud's own camera (`camera.json`), rule 4 by majority of views; NO MLS (`precision.cloud.consolidate: false`); chunk check on the CERTIFIED depth (composes the transform epochs) |
+| 9 | Certification | `workers/certify_worker.py`, `reconstruction/certify/run.py`, `correction/` | depth per chunk; floor = ONE rigid motion per session on the segmented support (`floor.model_default: session`, 2026-10-16; `chunk` = per chunk blended across overlaps, selectable); mask filter with the cloud's own camera (`camera.json`), rule 4 by majority of views; NO MLS (`precision.cloud.consolidate: false`); chunk check on the CERTIFIED depth (composes the transform epochs) |
 | 10 | Two epochs: ORIGINAL + FINAL | `certify.single_final_epoch: false` (USER 2026-10-05) | the reconstruction stage discards its pose-only epochs and Omega's chunks and builds no comparison cloud; the published cloud (stage 7) is the ORIGINAL and stays stored + selectable when the certification publishes the FINAL. The epoch NUMBER is a counter (F2, F5, F6 each take one: zaragoza published 3, certified 4) — the user wants to read them as 0 and 1; renumbering is pending list A |
 | 11 | Object descriptions | `segmentation/object_captioner.caption_session_objects` (end of certify) | ONE Qwen3-VL call per object over its largest SAM3-mask views → `shape_caption` source `object` (config `segmentation.object_captions`) |
 

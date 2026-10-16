@@ -105,6 +105,9 @@ def make_correction_raw_cfg(**overrides) -> dict:
                         "grid_aspect_tol": 0.01, "min_depth_m": 0.05,
                         "skip_when_gauge_applied": False},
     }}
+    # the session floor model reads the segmentation's support list (autoprompt.support_surfaces)
+    raw["autoprompt"] = {"support_surfaces": ["floor", "ground", "platform", "slab", "base", "deck",
+                                              "walkway", "pavement", "anden", "andén"]}
     for dotted, value in overrides.items():
         node = raw["correction"]
         parts = dotted.split(".")

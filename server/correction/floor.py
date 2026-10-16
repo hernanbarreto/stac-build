@@ -43,7 +43,7 @@ from correction.config import CorrectionConfig
 from correction.session import CorrectionSession
 
 UP = np.array([0.0, 1.0, 0.0])
-FLOOR_MODELS = ("level", "plane", "profile", "chunk")
+FLOOR_MODELS = ("level", "plane", "profile", "chunk", "session")
 
 
 def _vendor_path() -> None:
@@ -111,11 +111,20 @@ def _chainage(session: CorrectionSession) -> np.ndarray:
 
 
 def _rot_between(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Rotation matrix taking unit vector a to unit vector b."""
+    """Rotation matrix taking unit vector a to unit vector b (any angle: antiparallel vectors
+    turn 180° about an axis orthogonal to ``a`` — a session whose frame came out upside down
+    is levelled like any other, USER 2026-10-16 "siempre en todos los casos")."""
+    a = np.asarray(a, np.float64)
+    b = np.asarray(b, np.float64)
     axis = np.cross(a, b)
     s = np.linalg.norm(axis)
     if s < 1e-9:
-        return np.eye(3)
+        if float(a @ b) >= 0.0:
+            return np.eye(3)
+        helper = np.eye(3)[int(np.argmin(np.abs(a)))]      # the coordinate axis least aligned with a
+        axis = np.cross(a, helper)
+        axis /= np.linalg.norm(axis)
+        return Rotation.from_rotvec(axis * np.pi).as_matrix()
     return Rotation.from_rotvec(axis / s * np.arctan2(s, float(a @ b))
                                 ).as_matrix()
 
@@ -236,6 +245,8 @@ def solve_floor(session: CorrectionSession, cfg: CorrectionConfig,
                            f"{FLOOR_MODELS}")
     if model == "chunk":
         return solve_floor_by_chunk(session, cfg, rng, log=log)
+    if model == "session":
+        return solve_floor_session(session, cfg, log=log)
     n_kf = session.n_kf
     candidates = (sorted(set(int(k) for k in keyframes))
                   if keyframes else list(range(n_kf)))
@@ -833,11 +844,22 @@ def _level_judge(P: np.ndarray, ks: np.ndarray, planes: List[Tuple[np.ndarray, n
 
 
 def _chunk_candidates(P: np.ndarray, ks: np.ndarray, fl, chunk: int, rep_m: float, fac: float,
-                      conf: float) -> List[dict]:
+                      conf: float, judge_scope: str = "any", refine_over_all: bool = False,
+                      bootstrap_cap: Optional[int] = None) -> List[dict]:
     """The floor LEVELS of a chunk's points below its cameras: the dominant support plane and,
     on what each level leaves, the next ones (up to MAX_LEVELS), each with its inliers,
     support, tilt, bootstrap errors and — from the second on — the user's-rule verdict on
-    whether it is a real floor (``real``). The search stops at the first level that is not."""
+    whether it is a real floor (``real``). The search stops at the first level that is not.
+    ``judge_scope``: whose points judge a further level — ``any``: every keyframe with points
+    within the band of ANY level found so far (the chunk model: a level has to carry the
+    chunk); ``own``: the keyframes with points within the band of the NEW level (the session
+    model: a platform walked for a fifth of the session is a level by the keyframes that
+    stand on it — still ≥ the rule's minimum of judges, still beyond the repeatability).
+    ``refine_over_all`` (the session model): the plane found from the low band is refitted
+    over EVERY point within the band of it — at session scale a tilted floor spans more than
+    the band along the seed's 'up' (bufferStop: 8° over 13 m = 1.8 m) and the band's strip
+    alone would give a short lever arm and a partial support; ``bootstrap_cap``: the most
+    inliers the bootstrap resamples (a seeded subsample — its σ is then conservative)."""
     out: List[dict] = []
     rest = np.ones(len(P), bool)
     planes: List[Tuple[np.ndarray, np.ndarray]] = []
@@ -850,11 +872,24 @@ def _chunk_candidates(P: np.ndarray, ks: np.ndarray, fl, chunk: int, rep_m: floa
         if len(band) < 3:
             break
         nrm, cen, inl, fit = _irls_plane(band, float(fl.band_m), float(fl.ransac_refit_band_m))
+        if refine_over_all and int(inl.sum()) >= 3:
+            # over every point of THIS rank's pool (what the previous levels left), never the
+            # levels already claimed: the second search would find the first floor again
+            near_all = np.abs((Q - cen) @ nrm) < float(fl.band_m)
+            if int(near_all.sum()) >= 3:
+                band = Q[near_all]
+                nrm, cen, inl, fit2 = _irls_plane(band, float(fl.band_m), float(fl.ransac_refit_band_m))
+                fit = {"stages": fit["stages"] + fit2["stages"], "iterations": fit["iterations"] + fit2["iterations"],
+                       "converged": bool(fit["converged"] and fit2["converged"]), "refined_over_all": True}
         n_in = int(inl.sum())
         if n_in < 3:
             break
         tilt = float(np.degrees(np.arccos(np.clip(float(nrm @ UP), -1.0, 1.0))))
-        s_tilt, s_h = _bootstrap_plane(band[inl], _chunk_seed(chunk, rank))
+        boot = band[inl]
+        if bootstrap_cap is not None and len(boot) > int(bootstrap_cap):
+            sel = np.random.default_rng(_chunk_seed(chunk, rank)).choice(len(boot), int(bootstrap_cap), replace=False)
+            boot = boot[np.sort(sel)]
+        s_tilt, s_h = _bootstrap_plane(boot, _chunk_seed(chunk, rank))
         planes.append((nrm, cen))
         cand = {"rank": rank, "normal": nrm, "centroid": cen, "support": n_in,
                 "tilt_deg": tilt, "floor_y_m": float(cen[1]), "sigma_tilt_deg": s_tilt,
@@ -862,8 +897,12 @@ def _chunk_candidates(P: np.ndarray, ks: np.ndarray, fl, chunk: int, rep_m: floa
                 "points": band[inl]}
         if rank >= 1:
             # the judged points: those within the user's band of ANY level found so far —
-            # the lowest band of the chunk alone never holds a higher level's points
-            near = np.min(np.stack([np.abs((P - c_) @ n_) for n_, c_ in planes], 1), 1) < float(fl.band_m)
+            # the lowest band of the chunk alone never holds a higher level's points — or,
+            # for the session model, of the NEW level alone (its own keyframes judge it)
+            if judge_scope == "own":
+                near = np.abs((P - cen) @ nrm) < float(fl.band_m)
+            else:
+                near = np.min(np.stack([np.abs((P - c_) @ n_) for n_, c_ in planes], 1), 1) < float(fl.band_m)
             dc = _level_judge(P[near], ks[near], planes, rep_m, fac, conf)
             cand["real"] = bool(dc["improves"])
             cand["judge"] = dc
@@ -1299,3 +1338,271 @@ def _blend_across_overlaps(session: CorrectionSession, owner: np.ndarray, R_kf: 
             n += 1
     return R_out, t_out, n
 
+
+
+# ── the SESSION floor: ONE rigid motion for the whole walk (USER 2026-10-16) ──────────────────
+#
+# bufferStop came out "de costado" under the chunk model: its chunk 1 was levelled on a
+# 19 k-point patch under its cameras (7.99°, +102 cm) and chunks 0 and 2, which measured no
+# support plane under theirs, took that motion blended. USER 2026-10-16: "la época 4 debe tomar
+# bien el suelo siempre en todos los casos, al menos un suelo … claro que debe tomar la de
+# segmentación, ¿de qué otra manera lo vas a hacer? … [por chunk] vas a rotar el resto de los
+# chunks, podrías romper geometría; la correcta es la B". So:
+#
+#   1. the floor's points are the SEGMENTATION's support surfaces — every instance whose label's
+#      head noun is in ``autoprompt.support_surfaces`` (floor, ground, platform, slab, …) — over
+#      the WHOLE walk. Without one, the geometric candidates of the chunk model over the whole
+#      session (the points below their own keyframe's camera), DECLARED; without those, nothing
+#      moves, declared;
+#   2. the levels among them, lowest first along the support's OWN normal (the PCA plane of the
+#      support points, oriented toward the cameras): nothing here assumes which way is up — a
+#      session whose frame came out on its side is levelled all the same. Each level by the
+#      chunk model's Tukey IRLS and the user's rule (a further level is real only when the
+#      keyframes' points say so beyond the session's repeatability), up to MAX_LEVELS;
+#   3. THE floor = the level under the MOST cameras: a level stands under a camera when it has
+#      support within the camera's own height over it of the camera's (x, z) — the 45° footprint
+#      — and of those the nearest below it; with none under any camera, the level with the most
+#      support, declared;
+#   4. ONE rigid motion for every keyframe: the floor's normal → up about the floor's centroid
+#      when the tilt clears the factor × its bootstrap σ, then the walk's start on it at y = 0
+#      when the height clears its σ. No chunk turns against another, no seam is cut, no level
+#      is flattened: a second level keeps its step (recorded as another surface).
+#   DECLARED LIMIT: one motion cannot remove a drift that grows along the walk (that is the
+#   depth stage's); what it guarantees is a scene that stands on its floor, always.
+
+import re as _re
+
+_LABEL_SPLIT = _re.compile(r"[\s_\-/,.#]+")
+SESSION_SEED_CHUNK = -1          # the bootstrap seed key of the session's levels (no chunk)
+
+
+def head_noun(label: str) -> str:
+    """The head noun of an instance label, the way the support list names surfaces: the last
+    word ('concrete_slab' → 'slab', 'white tiled floor' → 'floor'), a trailing number or '#id'
+    dropped ('floor 2' → 'floor'), a plural folded ('platforms' → 'platform'; 'ss' kept)."""
+    toks = [t for t in _LABEL_SPLIT.split(str(label).strip().lower()) if t]
+    while toks and (toks[-1].lstrip("#").isdigit() or toks[-1].startswith("#")):
+        toks.pop()
+    if not toks:
+        return ""
+    h = toks[-1]
+    if len(h) > 3 and h.endswith("s") and not h.endswith("ss"):
+        h = h[:-1]
+    return h
+
+
+def support_rows(session: CorrectionSession, labels) -> Tuple[np.ndarray, Dict[str, int]]:
+    """Rows of the cloud the segmentation labels as a SUPPORT surface — every instance whose
+    label's head noun is one of ``labels`` (the user's list, ``autoprompt.support_surfaces``),
+    over the whole session. Returns (unique rows, {label: rows it brought}); empty without a
+    segmentation or without such an instance."""
+    import json as _json
+    p = Path(session.output_dir) / "segmentation_result.json"
+    if not p.exists():
+        return np.zeros(0, np.int64), {}
+    try:
+        inst = _json.loads(p.read_text()).get("instances") or []
+    except (OSError, ValueError):
+        return np.zeros(0, np.int64), {}
+    want = {head_noun(l) for l in labels}
+    want.discard("")
+    n = len(session.xyz)
+    rows: List[np.ndarray] = []
+    used: Dict[str, int] = {}
+    for i in inst:
+        lab = str(i.get("label") or "")
+        if head_noun(lab) not in want:
+            continue
+        gi = np.asarray(i.get("globalIndices") or [], np.int64)
+        gi = gi[(gi >= 0) & (gi < n)]
+        if not len(gi):
+            continue
+        rows.append(gi)
+        used[lab] = used.get(lab, 0) + int(len(gi))
+    if not rows:
+        return np.zeros(0, np.int64), {}
+    return np.unique(np.concatenate(rows)), used
+
+
+def session_floor_levels(xyz: np.ndarray, ks: np.ndarray, cams: np.ndarray, support: np.ndarray,
+                         fl, rep_m: float, fac: float, conf: float) -> dict:
+    """The floor LEVELS of the session among its SUPPORT points, and THE floor under the cameras,
+    with nothing assumed about which way is up (steps 2–3 of the block comment above): the
+    support's own normal — the PCA plane of the support points, oriented toward the cameras —
+    is the 'up' the levels are searched along, lowest first, by the chunk model's search
+    (:func:`_chunk_candidates`, in that frame); every plane is brought back to the session's
+    frame with its normal toward the cameras. ``support``: the rows of the support points.
+    Returns {levels (the records), cands (normal, centroid, points, σ in the session frame),
+    chosen (index into cands or None), up0 (the support's normal), n_support}."""
+    xyz = np.asarray(xyz, np.float64)
+    ks = np.asarray(ks)
+    cams = np.asarray(cams, np.float64)
+    support = np.asarray(support, np.int64)
+    P = xyz[support]
+    ksP = ks[support]
+    out = {"levels": [], "cands": [], "chosen": None, "up0": None, "n_support": int(len(P))}
+    if len(P) < 3 or len(cams) == 0:
+        return out
+    n0, c0 = _weighted_plane(P, np.ones(len(P)))
+    if float(np.median((cams - c0) @ n0)) < 0.0:          # the walk is above its floor
+        n0 = -n0
+    out["up0"] = n0.tolist()
+    Rf = _rot_between(n0, UP)                             # the support's frame: its normal is up
+    Pf = (P - c0) @ Rf.T
+    camf = (cams - c0) @ Rf.T
+    cands_f = _chunk_candidates(Pf, ksP, fl, SESSION_SEED_CHUNK, rep_m, fac, conf, judge_scope="own",
+                                refine_over_all=True, bootstrap_cap=int(fl.ransac_sample))
+    if not cands_f:
+        return out
+    from scipy.spatial import cKDTree
+    cands: List[dict] = []
+    H = np.full((len(cands_f), len(camf)), np.nan)          # camera i's height over level j
+    under = np.zeros((len(cands_f), len(camf)), bool)       # level j stands under camera i
+    for j, q in enumerate(cands_f):
+        nf, cf = q["normal"], q["centroid"]
+        h = camf[:, 1] - np.array([_plane_y_at(nf, cf, float(x), float(z)) for x, z in camf[:, [0, 2]]])
+        H[j] = h
+        pts = q["points"][:, [0, 2]]
+        if len(pts):
+            # a level is UNDER a camera when it has support within the camera's own height over
+            # it of the camera's (x, z) — the 45° footprint, derived, no radius chosen
+            d, _ = cKDTree(pts).query(camf[:, [0, 2]], k=1, workers=1)
+            under[j] = (h > 0.0) & (d <= h)
+        nrm = Rf.T @ nf
+        cen = Rf.T @ cf + c0
+        if float(np.median((cams - cen) @ nrm)) < 0.0:
+            nrm = -nrm
+        tilt = float(np.degrees(np.arccos(np.clip(float(nrm @ UP), -1.0, 1.0))))
+        cands.append({"rank": int(q["rank"]), "normal": nrm, "centroid": cen,
+                      "points": q["points"] @ Rf + c0, "support": int(q["support"]),
+                      "real": bool(q["real"]), "judge": q["judge"], "fit": q["fit"],
+                      "tilt_deg": tilt, "sigma_tilt_deg": float(q["sigma_tilt_deg"]),
+                      "sigma_height_m": float(q["sigma_height_m"])})
+    # the floor under each camera: of the real levels under it, the nearest below it; THE floor
+    # of the session = the level under the most cameras (the surface the walk is over), its
+    # height = the median over those cameras
+    real = np.array([q["real"] for q in cands])
+    Hm = np.where(under & real[:, None], H, np.inf)
+    best = np.argmin(Hm, axis=0)
+    has = np.isfinite(Hm[best, np.arange(len(camf))])
+    n_under = np.array([int(((best == j) & has).sum()) for j in range(len(cands))])
+    for j, q in enumerate(cands):
+        own = (best == j) & has
+        q["cameras_under"] = int(n_under[j])
+        q["camera_over_level_m"] = float(np.median(H[j][own])) if own.any() else float(np.median(H[j]))
+        q["footprint_support"] = int(under[j].sum())
+    if n_under.max() > 0:
+        chosen = int(max(range(len(cands)), key=lambda j: (n_under[j], cands[j]["support"])))
+        under_cams = True
+    else:
+        reals = [j for j in range(len(cands)) if cands[j]["real"]] or list(range(len(cands)))
+        chosen = int(max(reals, key=lambda j: cands[j]["support"]))
+        under_cams = False
+    under = under_cams
+    for i, q in enumerate(cands):
+        out["levels"].append({
+            "rank": q["rank"], "real": q["real"], "support": q["support"],
+            "tilt_deg": round(q["tilt_deg"], 3), "sigma_tilt_deg": round(q["sigma_tilt_deg"], 4),
+            "sigma_height_m": round(q["sigma_height_m"], 5),
+            "floor_y_m": round(float(q["centroid"][1]), 4),
+            "camera_over_level_m": round(q["camera_over_level_m"], 4),
+            "cameras_under": int(q["cameras_under"]),
+            "footprint_support": int(q["footprint_support"]), "fit": q["fit"],
+            "chosen": bool(i == chosen),
+            "judge": ({k: q["judge"][k] for k in ("improves", "n_judges", "min_judges", "median_delta",
+                                                  "ci_low", "ci_high", "required_delta", "reason")}
+                      if q["judge"] else None)})
+    out.update(cands=cands, chosen=int(chosen), under_cameras=bool(under))
+    return out
+
+
+def solve_floor_session(session: CorrectionSession, cfg: CorrectionConfig, log=print) -> dict:
+    """Model ``session``: ONE rigid motion for the whole walk — the segmentation's support
+    surfaces' level under the cameras → horizontal at y = 0 (the block comment above)."""
+    fl = cfg.floor
+    fac, conf = _judge_of(cfg)
+    rep_m = _session_repeatability(session, cfg)
+    cams = np.asarray(session.poses, np.float64)[:, :3, 3]
+    n_kf = session.n_kf
+    ks = np.asarray(session.ks)
+    labels = tuple(getattr(fl, "support_labels", ()) or ())
+    rows, used = support_rows(session, labels)
+    source = "segmentation"
+    if len(rows) < 3:
+        valid = (ks >= 0) & (ks < n_kf)
+        below = np.zeros(len(ks), bool)
+        below[valid] = session.xyz[valid, 1] < cams[ks[valid], 1]
+        rows = np.flatnonzero(below)
+        source = "geometric"
+        log(f"  floor[session]: no support instance in the segmentation ({list(labels)}) — the "
+            f"points below their own keyframe's camera ({len(rows):,}) are the candidates, DECLARED")
+    lv = session_floor_levels(session.xyz, ks, cams, rows, fl, rep_m, fac, conf)
+    R_kf = np.tile(np.eye(3), (n_kf, 1, 1))
+    t_kf = np.zeros((n_kf, 3))
+    rec: Dict[str, object] = {"model": "session", "source": source, "support_labels": list(labels),
+                              "support_instances": used, "n_support": int(lv["n_support"]),
+                              "up0": lv.get("up0"), "levels": lv["levels"],
+                              "repeatability_m": float(rep_m), "error_factor": fac, "confidence": conf,
+                              "n_boot": N_BOOT_FLOOR, "max_levels": MAX_LEVELS}
+    base = {"k_kf": np.ones(n_kf), "model": "session",
+            "exam": {"anchor_floor_residuals": [], "worst_residual_mm": 0.0},
+            "floor_npz": {"s": np.float64(1.0), "R": np.eye(3), "t": np.zeros(3)}}
+    if lv["chosen"] is None:
+        rec.update(role="unmeasurable", why="no floor level among the candidates", tilt_applied=False,
+                   height_applied=False)
+        log(f"  floor[session]: NO floor level among {lv['n_support']:,} candidate point(s) "
+            f"({source}) — the floor stage moves nothing (DECLARED)")
+        return {**base, "R_kf": R_kf, "t_kf": t_kf, "anchors": [], "n_demoted": 1,
+                "per_kf_report": [rec], "model_params": rec}
+    q = lv["cands"][lv["chosen"]]
+    nrm, cen = q["normal"], q["centroid"]
+    tilt = float(q["tilt_deg"])
+    s_tilt, s_h = float(q["sigma_tilt_deg"]), float(q["sigma_height_m"])
+    m_tilt = tilt - fac * s_tilt
+    R = _rot_between(nrm, UP) if m_tilt > 0.0 else np.eye(3)
+    t = cen - R @ cen                                    # about the floor's centroid
+    cam0 = R @ cams[0] + t                               # the walk's start, turned with it
+    y0 = _plane_y_at(R @ nrm, cen, float(cam0[0]), float(cam0[2]))
+    dy = -y0
+    m_h = abs(dy) - fac * s_h
+    if m_h > 0.0:
+        t[1] += dy
+    R_kf[:] = R
+    t_kf[:] = t
+    surfaces: Dict[str, float] = {}
+    for i, r in enumerate(lv["cands"]):
+        if r["real"]:
+            y_r = _plane_y_at(R @ r["normal"], R @ (r["centroid"] - cen) + cen, float(cam0[0]), float(cam0[2]))
+            surfaces[f"S{len(surfaces) + 1}"] = round(float(y_r + (dy if m_h > 0.0 else 0.0)), 5)
+    rec.update(role="anchor", chosen_rank=int(q["rank"]), under_cameras=bool(lv.get("under_cameras")),
+               inliers=int(q["support"]), cameras_under=int(q["cameras_under"]),
+               camera_over_floor_m=round(float(q["camera_over_level_m"]), 4),
+               tilt_deg=round(tilt, 3), sigma_tilt_deg=round(s_tilt, 4), tilt_margin_deg=round(m_tilt, 4),
+               tilt_applied=bool(m_tilt > 0.0), floor_y_at_first_kf_m=round(float(y0), 4),
+               offset_m=round(float(dy), 5), sigma_height_m=round(s_h, 5), height_margin_m=round(m_h, 5),
+               height_applied=bool(m_h > 0.0), surfaces=surfaces,
+               keyframes=[0, int(n_kf - 1)], rotation_deg=round(float(solve_rot_deg(R)), 4),
+               translation_m=round(float(np.linalg.norm(t)), 4))
+    kf_mid = int(np.percentile(np.arange(n_kf), 50, method="nearest"))
+    anchors = [{"kf": kf_mid, "rot_deg": round(tilt if m_tilt > 0.0 else 0.0, 3),
+                "t_m": round(abs(float(dy)) if m_h > 0.0 else 0.0, 4), "chunk": None, "surface": "S1"}]
+    sup_txt = (", ".join(f"{k}: {v:,}" for k, v in sorted(used.items(), key=lambda kv: -kv[1])[:4])
+               if used else f"{lv['n_support']:,} pts below their cameras")
+    log(f"  floor[session]: support = {source} ({sup_txt}) → {len(lv['cands'])} level(s); the floor "
+        f"{'under the cameras' if lv.get('under_cameras') else 'with the most support (NONE under the cameras, declared)'}"
+        f" has {q['support']:,} pts (under {q['cameras_under']} of {n_kf} cameras, {q['camera_over_level_m']:.2f} m "
+        f"below them), tilt {tilt:.2f}° ± {s_tilt:.3f} "
+        f"{'→ horizontal' if m_tilt > 0.0 else '(within error)'}, floor at {y0 * 100:+.1f} cm ± "
+        f"{s_h * 100:.2f} → {'offset ' + format(dy * 100, '+.1f') + ' cm' if m_h > 0.0 else 'height within error'}"
+        f"; ONE rigid motion for all {n_kf} keyframes")
+    others = [r for r in lv["levels"] if r["real"] and not r["chosen"]]
+    if others:
+        log(f"  floor[session]: {len(others)} other real level(s) kept as steps: "
+            + ", ".join(f"rank {r['rank']} at {r['floor_y_m']:+.3f} m ({r['support']:,} pts)" for r in others))
+    return {**base, "R_kf": R_kf, "t_kf": t_kf, "anchors": anchors, "n_demoted": 0,
+            "per_kf_report": [rec], "model_params": rec}
+
+
+def solve_rot_deg(R: np.ndarray) -> float:
+    """The angle of a rotation matrix, degrees."""
+    return float(np.degrees(np.arccos(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0))))

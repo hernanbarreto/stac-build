@@ -19,7 +19,7 @@ class CorrectionConfigError(RuntimeError):
     or out of range. The message always names the offending key."""
 
 
-_FLOOR_MODELS = ("level", "plane", "profile", "chunk")
+_FLOOR_MODELS = ("level", "plane", "profile", "chunk", "session")
 _DEPTH_MODES = ("sidecar", "rewrite")
 
 
@@ -79,6 +79,8 @@ class GatesConfig:
 class FloorConfig:
     model_default: str
     chunk_floor_labels: Tuple[str, ...]   # model chunk: the segmentation labels that ARE floor
+    support_labels: Tuple[str, ...]       # model session: the SEGMENTATION's support surfaces, by head
+                                          # noun — `autoprompt.support_surfaces`, the user's one list
     band_m: float
     low_band_pct: float
     min_tilt_deg: float
@@ -469,9 +471,21 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
     if not isinstance(_cfl, list) or not _cfl or not all(isinstance(x, str) and x.strip() for x in _cfl):
         raise CorrectionConfigError("'correction.floor.chunk_floor_labels' must be a non-empty list "
                                     "of label names")
+    # the session floor reads the SEGMENTATION's definition of a support surface — the same
+    # list the autoprompt folds and consolidates by (USER 2026-10-16: "claro que debe tomar la
+    # de segmentación"); one list, nothing duplicated under correction:
+    _ap = (raw or {}).get("autoprompt")
+    if not isinstance(_ap, dict) or "support_surfaces" not in _ap:
+        raise CorrectionConfigError("config.yaml is missing mandatory key 'autoprompt.support_surfaces' "
+                                    "— the floor model 'session' levels the segmentation's support "
+                                    "surfaces; there is no hidden default in code")
+    _sup = _ap["support_surfaces"]
+    if not isinstance(_sup, list) or not _sup or not all(isinstance(x, str) and x.strip() for x in _sup):
+        raise CorrectionConfigError("'autoprompt.support_surfaces' must be a non-empty list of label names")
     floor = FloorConfig(
         model_default=model_default,
         chunk_floor_labels=tuple(x.strip().lower() for x in _cfl),
+        support_labels=tuple(x.strip().lower() for x in _sup),
         band_m=_num(fl, "band_m", "floor", lo=0.0, lo_excl=True),
         low_band_pct=_num(fl, "low_band_pct", "floor", lo=0.0, hi=50.0),
         min_tilt_deg=_num(fl, "min_tilt_deg", "floor", lo=0.0, hi=90.0),

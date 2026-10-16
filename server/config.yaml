@@ -3243,10 +3243,23 @@ correction:
     scale_agree_tol: 0.05         # max |log| worsening of a DA3 anchor agreement ratio
     scale_mad_tol: 0.03           # max growth of the anchors' MAD
   floor:
-    model_default: chunk          # USER 2026-09-30: "tenemos la segmentación de piso, el piso por chunk
+    model_default: session        # USER 2026-10-16, after bufferStop came out "de costado" under `chunk`
+                                  # (chunk 1 levelled on a 19 k-point patch under its cameras, 7.99° / +102 cm;
+                                  # chunks 0 and 2, no support plane under theirs, took that motion blended):
+                                  # "la época 4 debe tomar bien el suelo siempre en todos los casos, al menos
+                                  # un suelo … claro que debe tomar la de segmentación … [por chunk] vas a
+                                  # rotar el resto de los chunks, podrías romper geometría; la correcta es la
+                                  # B". ONE rigid motion for the whole walk: the SEGMENTATION's support
+                                  # surfaces (autoprompt.support_surfaces, by head noun) over the whole
+                                  # session → their level under the cameras horizontal at y = 0; the levels
+                                  # are searched along the support's own normal (no 'up' assumed); without
+                                  # a support instance the points below their own camera, declared. No chunk
+                                  # turns against another, no seam is cut, other levels keep their step.
+    # (was) model_default: chunk  # USER 2026-09-30: "tenemos la segmentación de piso, el piso por chunk
                                   # llevarlo a cero" — ONE rigid motion per Omega chunk: its SEGMENTED
                                   # floor plane → horizontal at y = 0. The per-keyframe `level` failed the
-                                  # continuity gate on pccr and layered the floor (11.5 → 16.9 cm).
+                                  # continuity gate on pccr and layered the floor (11.5 → 16.9 cm). Still
+                                  # selectable.
     chunk_floor_labels: [floor]   # a HINT only since 2026-10-08 (docs/plan_determinismo.md point 128, the
                                   # user's floor concept): the floor of a chunk is GEOMETRIC — the dominant
                                   # support plane UNDER its cameras (floor, platform, andén, walkway,

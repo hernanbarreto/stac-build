@@ -1,5 +1,32 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ 2026-10-16 (evening) — THE FLOOR IS ONE RIGID MOTION PER SESSION ON THE SEGMENTED SUPPORT (USER)
+- bufferStop came out "de costado" under `correction.floor.model_default: chunk`: chunk 1 was levelled on a
+  19 k-point patch under its cameras (7.99°, +102 cm) and chunks 0 and 2 — "no support plane under the
+  cameras" (in the raw frame chunk 0 has NO point below its cameras) — took that motion blended. USER:
+  "la época 4 debe tomar bien el suelo siempre en todos los casos, al menos un suelo … claro que debe tomar
+  la de segmentación, ¿de qué otra manera lo vas a hacer? … [por chunk] vas a rotar el resto de los chunks,
+  podrías romper geometría; la correcta es la B". Now `model_default: session` (`correction/floor.py`
+  `solve_floor_session`): the floor's points are the SEGMENTATION's support surfaces — every instance whose
+  label's head noun is in `autoprompt.support_surfaces` (floor, ground, platform, slab, … ; `FloorConfig.
+  support_labels` reads that one list, a missing key fails the load) — over the whole walk; the levels among
+  them are searched along the support's OWN normal (the PCA plane of the support points oriented toward the
+  cameras: nothing assumes which way is up — a frame on its side is levelled all the same, `_rot_between`
+  handles 180°), lowest first, the chunk model's Tukey IRLS refitted over every point within the band
+  (`refine_over_all`: at session scale a tilted floor spans more than the band) and the user's rule judged
+  by the keyframes standing on the new level (`judge_scope: own`, ≥ 5 judges, beyond the repeatability);
+  THE floor = the level under the MOST cameras (45° footprint, nearest below each camera); ONE rigid motion
+  for every keyframe: normal → up about the floor's centroid when the tilt clears the factor × its bootstrap σ
+  (bootstrap capped at `ransac_sample` points, seeded), the walk's start on it at y = 0 when the height
+  clears its σ. No chunk turns against another, no seam is cut, other real levels keep their step (recorded
+  as surfaces). Without a support instance: the points below their own keyframe's camera, DECLARED; without
+  a level: identity, declared. `chunk` stays selectable. DECLARED LIMIT: one motion cannot remove a drift
+  that grows along the walk (the depth stage's job). Tests: tests/test_correction_floor_session.py.
+- SAME EVENING, meshing: "olvídate de los cilindros … puede estar facetado … sino va a forzar cilindros
+  en donde no aplica, ya pasó en la corrida anterior" → the object mesh is PLANES ONLY (our RANSAC, Manhattan
+  snap, extents bounded by the inlier footprint and the masks, the object's own measured noise as the
+  tolerance); what no plane explains is declared and stays as points. No cylinder, no hull, no TSDF.
+
 ## ⭐⭐ 2026-10-16 — MASK FILTER RULE 1 CHANGED (USER: "hay que contrastarlo contra la suya y las demás")
 - `correction/visit_drift.cloud_filter_masklets` step 12: a point is now tested against its OWN object's
   silhouette with the rule-4 ballot — every mask keyframe that saw it (its own visit included, the birth
