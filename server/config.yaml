@@ -2729,6 +2729,38 @@ coverage_engine:
 # smoothed: the model is fitted and the deviations are preserved as measurement.
 # Keys mirror reconstruction.surface_fit.runner.fit_segment kwargs (introspected —
 # see build_surface_fit_kwargs; unknown keys are ignored).
+# ── FORMS (USER 2026-10-16): the VLM decides the FORM, the cloud measures pose and dimensions ──
+# "vlm dice cómo es y cómo debe ser; la nube orienta sobre dónde está y qué tamaño tiene … si vlm
+# dice una forma es esa forma". The Mesh button's per-object stage (reconstruction/forms): one
+# structured VLM answer per object from a closed catalogue, a parametric template of THAT form
+# fitted to the object's points at the session's own repeatability σ, corrected against the SAM3
+# masks of EVERY keyframe (the silhouette consensus is the objective, convergence judged by its
+# own noise), a second VLM round with the fitted form drawn over the worst views only when the
+# converged consensus is under the measured bar (the cloud's own agreement with the masks).
+# Every key below is a declared COST BOUND or an optimiser setting — none of them decides a form:
+# the form is the VLM's, the acceptance is measured.
+forms:
+  enabled: true
+  catalog: [panel, box, cylinder, sphere, cone, profile, revolution, composite, freeform]
+  views: 4                    # BOUND (cost): mask keyframes shown per object in the form query
+                              # (the captioner's rule: the largest masks, ties by the measured
+                              # area dispersion)
+  max_rounds: 3               # BOUND: VLM rounds per object — the query + the reviews
+  max_tokens: 1024            # BOUND: tokens of the structured answer
+  device: cuda                # cuda | cpu — the templates, the fit and the silhouettes; an
+                              # unavailable device FAILS the stage (USER: "todo en gpu")
+  max_points: 200000          # BOUND (cost): object points in the fit (deterministic subsample;
+                              # the residual report reads every point)
+  surface_samples: 4096       # BOUND (cost): surface samples of the form per silhouette render
+  boundary_px_per_view: 512   # BOUND (cost): mask boundary pixels per view in the recall term
+  max_views: 300              # BOUND (cost): views per object in the corrector, largest masks first
+  block_iterations: 25        # the optimiser runs in blocks of this many steps; after each block
+                              # the consensus is measured and the stop is judged by its own noise
+  max_blocks: 40              # BOUND: blocks per fit (a fit that never converges is declared)
+  lr: 0.02                    # the optimiser's step (Adam on the template's parameters)
+  review_views: 3             # overlays shown to the VLM in a review round (the worst views)
+  seed: 0                     # every subsample / bootstrap of the stage
+
 surface_fit:
   models: [bspline]           # USER ORDER 2026-08-29: EVERYTHING fits with bspline — the plane
                               # deliverables of test3 came out broken/tilted ("como el orto")
