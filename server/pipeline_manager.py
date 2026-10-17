@@ -883,7 +883,7 @@ class PipelineManager:
                           "keyframe_graph.json", "loop_candidates.json", "duplicates.json",
                           "loop_semantics.json", "object_captions.timing.json"],
         StageId.INSTANCE_CLEANER: ["instance_*.ply", "inst_cleaned_cloud.ply"],
-        StageId.GENRECON: ["tsdf/genrecon_cloud"],
+        StageId.GENRECON: ["tsdf/genrecon_photo"],
     }
 
     # What a RESUME or an Autosegment cleans before a stage of the semantic chain runs

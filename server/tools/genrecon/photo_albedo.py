@@ -4,7 +4,7 @@ re-coloured from the keyframes that SEE its surface point — the mesh's own dep
 occlusion, the view that faces the surface most closely weighs most (cos⁴/z², the best three blended) — and the
 metallic-roughness texture, the factors and the UV layout stay exactly as generated, so the look he likes is untouched.
 Texels no keyframe sees keep the generated colour, tone-matched (per part, per channel) to the photographed ones.
-    python photo_albedo.py <session src_default> <glb in> <mesh name out> [top-k 3] [max camera distance m 6]
+    python photo_albedo.py <session src_default> <glb in> <mesh name out> [top-k 3]
 Record: output/tsdf/<name>/<name>.meta.json (provenance: geometry + material vlm_generated, base colour tool_measured)."""
 import sys, os, json, time, numpy as np, torch, trimesh
 sys.path.insert(0, "/workspace/stac-build/server")
@@ -16,7 +16,6 @@ from segmentation.session_io import _load_camera_source
 
 SES = Path(sys.argv[1]); GLB = Path(sys.argv[2]); NAME = sys.argv[3]
 TOPK = int(sys.argv[4]) if len(sys.argv) > 4 else 3
-MAXD = float(sys.argv[5]) if len(sys.argv) > 5 else 6.0
 TOL_M, TOL_REL, COS_MIN, PAD_PX = 0.03, 0.01, 0.2, 3
 t0 = time.time(); dev = torch.device("cuda"); glctx = dr.RasterizeCudaContext()
 NEAR, FARP = 0.05, 100.0
@@ -27,16 +26,24 @@ fids = sorted(fi for fi in cam.pose_map if cam.K_for(fi) is not None and (SES / 
 K = np.array([np.asarray(cam.K_for(fi), np.float64) for fi in fids]); c2w = np.array([np.asarray(cam.pose_map[fi], np.float64) for fi in fids])
 w2c = np.linalg.inv(c2w); cam_pos = c2w[:, :3, 3]
 img0 = Image.open(SES / "frames" / f"{int(fids[0]):06d}.jpg"); W, H = img0.size
-assert W % 8 == 0 and H % 8 == 0, (W, H)
+W8, H8 = (W + 7) // 8 * 8, (H + 7) // 8 * 8          # the rasterizer renders a multiple of 8; the padding rows/cols are cropped
 imgs = np.stack([np.asarray(Image.open(SES / "frames" / f"{int(fi):06d}.jpg").convert("RGB")) for fi in fids])   # (n, H, W, 3) uint8
 imgs_t = torch.from_numpy(imgs).to(dev)
 print(f"{len(fids)} keyframes {W}x{H}, K[0] fx {K[0,0,0]:.1f} fy {K[0,1,1]:.1f} cx {K[0,0,2]:.1f} cy {K[0,1,2]:.1f}")
 
 # ── the mesh: GenRecon's parts, each with its UV atlas, base colour and metallic-roughness textures ───────────────
 sc = trimesh.load(str(GLB), force="scene", process=False)
-parts = [(n, g) for n, g in sc.geometry.items()]
-V_all = np.concatenate([g.vertices for _, g in parts]).astype(np.float32); off = 0; F_all = []
-for _, g in parts:
+# the scene graph carries the raw↔display transform of the session (identity on pccr, not elsewhere): every part's
+# vertices and normals are taken in the WORLD frame; the textures are written back into the same geometry objects
+node_T = {}
+for node in sc.graph.nodes_geometry:
+    T, gname = sc.graph[node]; node_T[gname] = np.asarray(T, np.float64)
+parts = []
+for n, g in sc.geometry.items():
+    T = node_T.get(n, np.eye(4)); Vw = (g.vertices @ T[:3, :3].T + T[:3, 3]).astype(np.float64)
+    parts.append((n, g, Vw))
+V_all = np.concatenate([Vw for _, _, Vw in parts]).astype(np.float32); off = 0; F_all = []
+for _, g, _ in parts:
     F_all.append(g.faces + off); off += len(g.vertices)
 F_all = np.concatenate(F_all).astype(np.int32)
 Vt = torch.from_numpy(V_all).to(dev); Ft = torch.from_numpy(F_all).to(dev)
@@ -47,17 +54,17 @@ def clip_coords(V, Kk, w2ck, flip_y):
     Pc = V @ torch.from_numpy(w2ck[:3, :3].T.astype(np.float32)).to(dev) + torch.from_numpy(w2ck[:3, 3].astype(np.float32)).to(dev)
     X, Y, Z = Pc[:, 0], Pc[:, 1], Pc[:, 2]
     fx, fy, cx, cy = float(Kk[0, 0]), float(Kk[1, 1]), float(Kk[0, 2]), float(Kk[1, 2])
-    xn = (2 * fx * X + (2 * cx - W) * Z) / W; yn = (2 * fy * Y + (2 * cy - H) * Z) / H
+    xn = (2 * fx * X + (2 * cx - W8) * Z) / W8; yn = (2 * fy * Y + (2 * cy - H8) * Z) / H8
     if flip_y: yn = -yn
     zc = (Z * (FARP + NEAR) - 2 * FARP * NEAR) / (FARP - NEAR)
     return torch.stack([xn, yn, zc, Z], 1)[None].contiguous(), Z.contiguous()
 
 def render_depth(k, flip_y):
     pos, Z = clip_coords(Vt, K[k], w2c[k], flip_y)
-    rast, _ = dr.rasterize(glctx, pos, Ft, resolution=[H, W])
+    rast, _ = dr.rasterize(glctx, pos, Ft, resolution=[H8, W8])
     z, _ = dr.interpolate(Z[None, :, None].contiguous(), rast, Ft)
     z = z[0, :, :, 0]; z = torch.where(rast[0, :, :, 3] > 0, z, torch.full_like(z, 1e6))
-    return z            # rows in nvdiffrast's order (y = −1 first); the self-check below fixes the convention
+    return z            # (H8, W8) rows in nvdiffrast's order (y = −1 first); the self-check below fixes the convention
 
 # self-check of the image-y convention against the certified cloud's own z-buffer on one keyframe
 from segmentation.perfect_object import _read_ply_fields
@@ -70,27 +77,29 @@ def cloud_zbuf(k):
 k0 = len(fids) // 2; zc0 = cloud_zbuf(k0); best = None
 for flip_y in (False, True):
     for flip_rows in (False, True):
-        zm = render_depth(k0, flip_y); zm = torch.flip(zm, [0]) if flip_rows else zm
+        zm = render_depth(k0, flip_y); zm = (torch.flip(zm, [0]) if flip_rows else zm)[:H, :W]
         both = (zc0 < 1e5) & (zm < 1e5); err = (zm[both] - zc0[both]).abs().median().item() if both.any() else 9.9
         if best is None or err < best[0]: best = (err, flip_y, flip_rows)
 ERR0, FLIP_Y, FLIP_ROWS = best
 print(f"image convention: flip_y={FLIP_Y} flip_rows={FLIP_ROWS} (mesh depth vs cloud z-buffer median |Δ| {ERR0*100:.1f} cm on keyframe {fids[k0]})")
+if ERR0 > 0.25:        # a wrong frame disagrees by metres (bufferStop before the world-frame fix: 332 cm); a right one by centimetres
+    raise SystemExit(f"bake failed: the mesh and the keyframes' poses are not in the same frame (median |Δ| {ERR0*100:.0f} cm)")
 del cloud
 
 # the mesh's own depth per keyframe (min-filtered 3×3: no leak at silhouettes), in IMAGE row order
 depth = torch.empty((len(fids), H, W), device=dev)
 for k in range(len(fids)):
-    z = render_depth(k, FLIP_Y); z = torch.flip(z, [0]) if FLIP_ROWS else z
+    z = render_depth(k, FLIP_Y); z = (torch.flip(z, [0]) if FLIP_ROWS else z)[:H, :W]
     depth[k] = -Fn.max_pool2d(-z[None, None], kernel_size=3, stride=1, padding=1)[0, 0]
 print(f"mesh depth rendered for {len(fids)} keyframes ({time.time()-t0:.0f} s)")
 
 # ── per part: rasterize the UV atlas, colour every covered texel from the views that see it ──────────────────────
 w2c_t = torch.from_numpy(w2c.astype(np.float32)).to(dev); K_t = torch.from_numpy(K.astype(np.float32)).to(dev); cam_t = torch.from_numpy(cam_pos.astype(np.float32)).to(dev)
 stats = []; new_textures = {}; UV_FLIP = None
-for pi, (pname, g) in enumerate(parts):
+for pi, (pname, g, Vw) in enumerate(parts):
     tex = g.visual.material.baseColorTexture; T = tex.size[0]; assert tex.size == (T, T) and T % 8 == 0, tex.size
     base = torch.from_numpy(np.asarray(tex.convert("RGB")).astype(np.float32)).to(dev)             # (T, T, 3) image rows
-    uv = torch.from_numpy(np.asarray(g.visual.uv, np.float32)).to(dev); Vp = torch.from_numpy(g.vertices.astype(np.float32)).to(dev)
+    uv = torch.from_numpy(np.asarray(g.visual.uv, np.float32)).to(dev); Vp = torch.from_numpy(Vw.astype(np.float32)).to(dev)
     Fp = torch.from_numpy(g.faces.astype(np.int32)).to(dev)
     pos = torch.cat([uv * 2 - 1, torch.zeros_like(uv[:, :1]), torch.ones_like(uv[:, :1])], 1)[None].contiguous()
     rast, _ = dr.rasterize(glctx, pos, Fp, resolution=[T, T])
@@ -102,11 +111,18 @@ for pi, (pname, g) in enumerate(parts):
         print(f"atlas convention: flip rows={UV_FLIP} (|Δv| top-order {e_top:.4f} vs bottom-order {e_bot:.4f})")
     Pw, _ = dr.interpolate(Vp[None].contiguous(), rast, Fp); Pw = Pw[0]; tri = rast[0, :, :, 3].long() - 1; cov = tri >= 0
     if UV_FLIP: Pw, tri, cov = torch.flip(Pw, [0]), torch.flip(tri, [0]), torch.flip(cov, [0])
-    fn = torch.from_numpy(g.face_normals.astype(np.float32)).to(dev)
+    fw = Vw[g.faces]; fn_np = np.cross(fw[:, 1] - fw[:, 0], fw[:, 2] - fw[:, 0]); fn_np /= np.linalg.norm(fn_np, axis=1, keepdims=True).clip(1e-12)
+    fn = torch.from_numpy(fn_np.astype(np.float32)).to(dev)                                           # world-frame face normals
     P = Pw[cov]; N = fn[tri[cov]]; n_tex = int(cov.sum())
-    # candidate views: cameras within MAXD of the part's box
-    lo, hi = Vp.min(0).values, Vp.max(0).values; d_box = torch.clamp(torch.maximum(lo - cam_t, cam_t - hi), min=0).norm(dim=1)
-    views = torch.nonzero(d_box <= MAXD).flatten().tolist()
+    # candidate views: every keyframe whose frustum holds a point of the part's box (its 3×3×3 lattice) or whose
+    # camera stands inside it — no distance bound: a hall's far wall is photographed from 20 m away
+    lo, hi = Vp.min(0).values, Vp.max(0).values
+    lat = torch.stack(torch.meshgrid(*[torch.linspace(float(lo[i]), float(hi[i]), 3, device=dev) for i in range(3)], indexing="ij"), -1).view(-1, 3)
+    Lc = torch.einsum("bij,nj->bni", w2c_t[:, :3, :3], lat) + w2c_t[:, :3, 3][:, None]; Zl = Lc[..., 2]; zl = torch.where(Zl > 0.1, Zl, torch.ones_like(Zl))
+    ul = K_t[:, 0, 0][:, None] * Lc[..., 0] / zl + K_t[:, 0, 2][:, None]; vl = K_t[:, 1, 1][:, None] * Lc[..., 1] / zl + K_t[:, 1, 2][:, None]
+    in_frustum = ((Zl > 0.1) & (ul >= 0) & (ul < W) & (vl >= 0) & (vl < H)).any(1)
+    inside = ((cam_t >= lo) & (cam_t <= hi)).all(1)
+    views = torch.nonzero(in_frustum | inside).flatten().tolist()
     wtop = torch.zeros((TOPK, n_tex), device=dev); ctop = torch.zeros((TOPK, n_tex, 3), device=dev)
     for v0 in range(0, len(views), 16):
         vb = views[v0:v0 + 16]; B = len(vb)
@@ -146,7 +162,7 @@ for pi, (pname, g) in enumerate(parts):
     print(f"  part {pi:2d}: {len(g.faces):>8,} faces, {n_tex:>9,} texels, {len(views):3d} candidate views, photographed {seen.float().mean()*100:5.1f} %  ({time.time()-t0:.0f} s)")
 
 # ── publish: the same mesh, the same UVs, the same metallic-roughness, only the base colour replaced ─────────────
-for pname, g in parts:
+for pname, g, _ in parts:
     g.visual.material.baseColorTexture = new_textures[pname]
 d = SES / "output" / "tsdf" / NAME; d.mkdir(parents=True, exist_ok=True)
 out = d / f"{NAME}.glb"; tmp = d / f"{NAME}.glb.part"; sc.export(str(tmp), file_type="glb"); os.replace(tmp, out)

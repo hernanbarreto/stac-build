@@ -94,7 +94,10 @@ pipeline:
 
 # ── GenRecon scene mesh (workers/genrecon_worker.py → server/tools/genrecon/run_cloud.sh) ──────────
 genrecon:
-  mesh_name: genrecon_cloud          # output/tsdf/<mesh_name>/ — what the viewer lists
+  mesh_name: genrecon_photo          # output/tsdf/<mesh_name>/ — the ONE published mesh (USER 2026-10-17): the generated
+                                     # mesh with the keyframes baked into its own atlas, its material kept; the raw
+                                     # generated mesh is kept in output/genrecon/<mesh_name>_raw/ for re-bakes
+  bake_views: 3                      # the best views (by cos⁴/z²) blended per texel
   mode: cloud                        # cloud (THE product, USER 2026-10-17) | cloud+hull (completion from the
                                      # masks) | cloud+objects | cloud+unseen — the last three are trials
   min_points_per_voxel: 10           # BOUND: a chunk voxel (32³ ≈ 11.6 cm) is active from this many cloud points

@@ -8,8 +8,14 @@
   generated colour tone-matched per part; the metallic-roughness TEXTURE (where the shine lives: GenRecon's material is metallic 1,
   roughness 1 + a per-texel metallic-roughness map), the factors and the UVs stay exactly as generated. Two self-checks decide the
   image-y and atlas-row conventions against the certified cloud's z-buffer (2.1 cm median on pccr) and the UVs themselves. pccr:
-  80.7 % of the covered texels photographed, 73 s, published as `genrecon_photo` — HIS VERDICT: the best mesh so far. NOT yet in the
-  pipeline (his OK pending for: GenRecon stage → bake → the product). `omvs_transfer.py` = the same with OpenMVS's TextureMesh
+  80.7 % of the covered texels photographed, 73 s, published as `genrecon_photo` — HIS VERDICT: "la mejor que he visto hasta ahora,
+  impresionante … debe ser la única publicada final". WIRED the same hour: `run_cloud.sh` publishes the generated mesh as `<name>_raw`,
+  bakes it (`photo_albedo.py`, env da3, nvdiffrast) and publishes `<name>` = `genrecon.mesh_name: genrecon_photo` (config `bake_views`; worker env
+  GENRECON_TOPK; artifact `tsdf/genrecon_photo`); the raw mesh moves to `output/genrecon/`. Candidate views per chunk are chosen by
+  FRUSTUM (the box's 3×3×3 lattice in the image, or the camera inside the box) — the first version's 6 m camera-distance bound left
+  11 of zaragoza's 16 chunks unphotographed (a hall's far walls are seen from 20 m). The frame self-check is BLOCKING at 25 cm
+  (bufferStop's display transform lives in the GLB's scene nodes: read the vertices in the WORLD frame or the bake projects nothing).
+  The four sessions were re-baked by hand the same night; pccr's OpenMVS trial meshes were deleted (their record stays in the docs). `omvs_transfer.py` = the same with OpenMVS's TextureMesh
   atlas (material mapped back by face correspondence), for comparison only.
 
 ## ⭐⭐ 2026-10-17 (morning) — COLMAP + OpenMVS MEASURED AGAINST THE PIPELINE ON pccr (USER: "todos hablan de que la mejor combinación es colmap+openmvs")

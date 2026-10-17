@@ -54,12 +54,13 @@ def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
     except IndexError as e:  # noqa: BLE001
         raise RuntimeError(f"session path {session_path} is not projects/<sid>/scans/<scan>/src_default") from e
     gcfg = dict(config.get("genrecon") or {})
-    name = str(gcfg.get("mesh_name", "genrecon_cloud"))
+    name = str(gcfg.get("mesh_name", "genrecon_photo"))
     mode = str(gcfg.get("mode", "cloud"))
     min_pts = int(gcfg.get("min_points_per_voxel", 10))
     env = {**os.environ, "PYTHONUNBUFFERED": "1",
            "GENRECON_SIMPLIFY": str(int(gcfg.get("simplify_faces_per_chunk", 150000))),
-           "GENRECON_TEX": str(int(gcfg.get("texture_size", 2048)))}
+           "GENRECON_TEX": str(int(gcfg.get("texture_size", 2048))),
+           "GENRECON_TOPK": str(int(gcfg.get("bake_views", 3)))}
     if not _SCRIPT.exists():
         raise FileNotFoundError(f"GenRecon runner missing: {_SCRIPT}")
     pipe.send_progress(1, f"GenRecon mesh ({mode}, ≥{min_pts} pts/voxel) for {sid}:{scan}", stage=STAGE)
@@ -85,6 +86,11 @@ def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
         if "[chunked_to_glb] baking chunk" in line:
             bake_n += 1
             pipe.send_progress(min(94, 72 + bake_n), f"baking chunk {bake_n}", stage=STAGE)
+        if line.startswith("image convention") or line.startswith("mesh depth rendered"):
+            pct = max(pct, 95); pipe.send_progress(pct, "baking the keyframes into the generated atlas", stage=STAGE)
+        if line.lstrip().startswith("part ") and "photographed" in line:
+            pct = max(pct, min(98, 95 + bake_n // 8)); bake_n += 1
+            pipe.send_progress(pct, f"photo albedo: {line.strip()[:60]}", stage=STAGE)
         if line.startswith("published "):
             published = line
         for f in _FAILS:
