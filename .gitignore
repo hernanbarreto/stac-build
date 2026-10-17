@@ -190,3 +190,14 @@ vendor/LoGeR/
 /runs/
 # GenRecon clone (kasothaphie/GenRecon @ eaf1468 + server/tools/genrecon/genrecon_stac.patch; checkpoints 13 GB, work/ outputs)
 vendor/GenRecon/
+
+# OpenMVS trial 2026-10-17 (AGPL-3.0) + VCGLib headers: clones, build and work trees (record in vendor/VENDORS.lock.md)
+vendor/openMVS/
+vendor/openMVS/_build/
+vendor/vcglib/
+vendor/TinyEXIF/
+vendor/TinyNPY/
+vendor/halfmesh/
+vendor/tinyply/
+vendor/thread-pool/
+vendor/PoseLib/

@@ -1,5 +1,17 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐ 2026-10-17 (morning) — COLMAP + OpenMVS MEASURED AGAINST THE PIPELINE ON pccr (USER: "todos hablan de que la mejor combinación es colmap+openmvs")
+- Four meshes of pccr, one instrument (`server/tools/genrecon/measure_mesh.py`), full table in `docs/openmvs_vs_genrecon_pccr.md`,
+  all published under pccr's `output/tsdf/` (`openmvs_colmap`, `openmvs_full`, `openmvs_cloud`, `colmap_sparse`; `genrecon_cloud` is the
+  product). The classical chain with COLMAP's own SfM drifts 12.3 cm rms against the certified trajectory on this 464×832 phone video
+  and its mesh sits 6–30 cm off the objects (42 % of its area within 5 cm of the cloud, 76 m²); OpenMVS's dense MVS with OUR poses agrees
+  with the certified cloud to p50 0.6 cm where it measures and covers 51 % of it; OpenMVS's Delaunay graph-cut + RefineMesh + photo
+  texture on OUR cloud is the best mesh by the numbers (1.5 cm p50, 92 % of the cloud within 5 cm, objects 1.2–2.4 cm) against
+  GenRecon's 2.0 cm / 87 % / 1.1–3.3 cm — but AGPL-3.0: his product decision; the pipeline's stage 12 stays GenRecon, `run_openmvs.sh
+  <sid>:<scan> cloud` is the hand-run alternative. Env recipe `server/tools/openmvs/setup_env.sh` (OpenMVS master needs six source
+  libraries and the PoseLib FORK its own vcpkg port pins; README there lists every trap met). COLMAP 4.2 renamed the GPU options
+  (`--FeatureExtraction.use_gpu`, `--FeatureMatching.*`). `vendor/openMVS/work/` (4.2 GB) holds the intermediates, deletable.
+
 ## ⭐⭐⭐ 2026-10-17 — THE MESHING STACK IS GONE; GENRECON IS THE LAST STAGE OF THE CHAIN (USER)
 - USER: "el botón meshing se va, porque este pipeline de mesh se hace al finalizar el autosegment … lo
   cableamos ahí, y eliminamos el entorno de shaper, eliminamos el shaper del código, y los otros que teníamos
