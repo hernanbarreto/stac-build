@@ -131,6 +131,7 @@ def bake_texture(
     data_term: str = "gmi",
     keep_work: bool = False,
     progress_cb: Optional[Callable[[str], None]] = None,
+    skip_visibility_test: bool = False,
 ) -> Optional[Path]:
     """Bake a UV-atlas texture onto ``mesh_path`` and write it to ``out_glb``.
 
@@ -247,6 +248,11 @@ def bake_texture(
             "--keep_unseen_faces",
             "--no_intermediate_results",
         ]
+        if skip_visibility_test:
+            # texrecon's ray test against the mesh ITSELF: on GenRecon's scene tiles it left 70 % of the faces
+            # unseen (self-intersections of the generated surface), 16 % without it (2026-10-17); the photometric
+            # outlier removal above still drops the views a face is hidden in
+            cmd.append("--skip_geometric_visibility_test")
         logger.info(f"[TextureBake] running: {' '.join(cmd)}")
         proc = subprocess.run(cmd, capture_output=True, text=True,
                                env=_texrecon_env())

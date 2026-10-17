@@ -77,6 +77,39 @@ if ceil_idx:
 else:
     levels.update(z_ceiling=float(np.percentile(y_d, 99.97)), ceiling_source="percentile 99.97 of the cloud (no ceiling instance)")
 (WORK / "levels.json").write_text(json.dumps(levels, indent=2))
+# STAC 2026-10-17 (USER: "debería completar lo que no ve o no tenía puntos … las patas de una mesa … pero solo eso"):
+# the boxes of the segmented OBJECTS in GenRecon's frame — the model may complete only inside them; a support
+# surface, a wall, a ceiling, a pane is never an object here (that is where the phantom floors and rooms came from)
+import re
+STAND_MAX_M = 1.2      # an object's lowest points this close to the support under it stand on it (declared)
+_STRUCTURAL = re.compile(r"\b(wall|walls|drywall|ceiling|ceilings|floor|floors|roof|slab|slabs|partition|partitions|panel|panels|sheeting|glass|window|windows|opening|openings|facade|façade)\b", re.I)
+objs = []
+for inst in seg["instances"]:
+    obb = inst.get("obb") or {}
+    if not obb.get("center") or head_noun(inst["label"]) in support or _STRUCTURAL.search(inst["label"].replace("_", " ")):
+        continue                                   # labels carry underscores: "drywall_panel" must read as words
+    c = np.asarray(obb["center"], np.float64); he = np.asarray(obb["half_extents"], np.float64); Rb = np.asarray(obb["rotation"], np.float64)
+    iid = int(inst.get("instance_id", inst.get("id", 0)))
+    objs.append({"id": iid, "label": inst["label"],
+                 "center": (M[:3, :3] @ c + M[:3, 3]).tolist(), "half_extents": (he * s_f).tolist(),
+                 "axes": (R_UP @ R_f @ Rb).tolist()})            # columns = the box axes in GenRecon's frame
+    # STANDS ON THE FLOOR (USER: "las patas que tienen pocos puntos o no tienen ninguno … la geometría real exige
+    # que sí tenga"): an object whose lowest points sit within STAND_MAX_M of the support level under it gets a
+    # second, axis-aligned box from that level up to its lowest points over its footprint, where the model may
+    # put the legs; a duct, a lamp, a cable hanging higher keeps its own box only
+    gi = np.asarray(inst["globalIndices"], np.int64)
+    if len(gi) >= 50:
+        pd = xyz[gi] @ (s_f * R_f).T + t_f                              # display frame: y up
+        y_lo = float(np.percentile(pd[:, 1], 1)); below = [l for l in levels.get("support_levels", [levels["z_floor"]]) if l <= y_lo + 0.05]
+        if below:
+            floor_y = max(below)
+            if 0.03 < (y_lo - floor_y) <= STAND_MAX_M:
+                x0, x1 = np.percentile(pd[:, 0], [1, 99]); z0, z1 = np.percentile(pd[:, 2], [1, 99])
+                cd = np.array([(x0 + x1) / 2, (floor_y + y_lo) / 2, (z0 + z1) / 2]); hd = np.array([(x1 - x0) / 2, (y_lo - floor_y) / 2, (z1 - z0) / 2])
+                objs.append({"id": iid, "label": inst["label"] + " (stand)", "center": (R_UP @ cd).tolist(),
+                             "half_extents": hd[[0, 2, 1]].tolist(), "axes": np.eye(3).tolist()})   # y-up → z-up: extents reorder
+(WORK / "objects.json").write_text(json.dumps({"frame": "genrecon (M_raw_to_genrecon applied)", "axes": "columns", "objects": objs}, indent=1))
+print(f"objects.json: {len(objs)} object boxes of {len(seg['instances'])} instances (structural and support excluded)")
 print(f"levels: z_floor {levels['z_floor']:+.3f} ({levels['source']}), z_ceiling {levels['z_ceiling']:+.3f} ({levels['ceiling_source']}); cloud_genrecon.npy {len(xyz):,} pts")
 np.save(WORK / "M_raw_to_genrecon.npy", M); np.save(WORK / "R_up.npy", R_UP)
 print(f"{n} images, {len(P):,} points; display transform {'identity' if np.allclose(R_f, np.eye(3)) and np.allclose(t_f, 0) else 'applied'}; "

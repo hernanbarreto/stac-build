@@ -14,6 +14,9 @@ t0 = time.time()
 cam = _load_camera_source(SES, SES / "output")
 k_map = {fi: np.asarray(cam.K_for(fi), np.float64) for fi in cam.pose_map if cam.K_for(fi) is not None}
 w2c = {fi: np.linalg.inv(np.asarray(cam.pose_map[fi], np.float64)) for fi in k_map}
+cam_pos = np.array([np.asarray(cam.pose_map[fi], np.float64)[:3, 3] for fi in k_map])
+from scipy.spatial import cKDTree
+cam_tree = cKDTree(cam_pos)
 img_hw = {}
 for fi in k_map:
     K = k_map[fi]; img_hw[fi] = (2.0 * K[1, 2], 2.0 * K[0, 2])          # the principal point sits near the centre
@@ -36,13 +39,36 @@ rec = {"tiles": [], "max_views": MAXV, "min_seen_share": MIN_SEEN}; out_parts = 
 for i, p in enumerate(parts):
     sel = views_seeing(np.asarray(p.vertices, np.float64))[:MAXV]
     ply = work / f"tile_{i:03d}.ply"
-    m0 = trimesh.Trimesh(np.asarray(p.vertices), np.asarray(p.faces), process=True)
-    m0.update_faces(m0.nondegenerate_faces()); m0.update_faces(m0.unique_faces()); m0.remove_unreferenced_vertices(); m0.export(str(ply))
-    t1 = time.time(); res = bake_texture(ply, SES / "frames", cam.pose_map, k_map, work / f"tile_{i:03d}.glb", frame_indices=sel, max_views=MAXV) if len(sel) >= 3 else None
-    m = trimesh.load(str(res), force="mesh") if res else m0
-    out_parts.append(m)
-    rec["tiles"].append({"tile": i, "faces": int(len(m0.faces)), "views_near": len(sel), "textured": bool(res), "s": round(time.time() - t1)})
+    # the GENERATED texture becomes the tile's vertex colours: texrecon paints the faces no keyframe sees with
+    # them (the per-object bake's rule) — photo where there is photo, the model's colour where there is none
+    try:
+        C = np.asarray(p.visual.to_color().vertex_colors)[:, :4]
+    except Exception:
+        C = None
+    m0 = trimesh.Trimesh(np.asarray(p.vertices), np.asarray(p.faces), vertex_colors=C, process=True)
+    m0.update_faces(m0.nondegenerate_faces()); m0.update_faces(m0.unique_faces()); m0.remove_unreferenced_vertices()
+    # FACE THE CAMERAS (the per-object bake's rule): texrecon labels a face pointing away from every view as
+    # unseen, and GenRecon's winding is arbitrary — flip each face toward its nearest camera
+    fc = m0.triangles_center; fn = m0.face_normals
+    _, ci = cam_tree.query(fc)
+    flip = np.einsum("ij,ij->i", fn, cam_pos[ci] - fc) < 0
+    if flip.any():
+        f = m0.faces.copy(); f[flip] = f[flip][:, ::-1]
+        m0 = trimesh.Trimesh(m0.vertices, f, vertex_colors=np.asarray(m0.visual.vertex_colors) if C is not None else None, process=False)
+    m0.export(str(ply))
+    t1 = time.time(); res = bake_texture(ply, SES / "frames", cam.pose_map, k_map, work / f"tile_{i:03d}.glb", frame_indices=sel, max_views=MAXV, skip_visibility_test=True) if len(sel) >= 3 else None
+    # keep every sub-mesh of the baked tile with ITS OWN visual (the textured atlas pieces and the
+    # unseen vertex-coloured remainder): loading as ONE mesh concatenates them and drops the texture
+    if res:
+        for g in trimesh.load(str(res), force="scene").dump(concatenate=False):
+            out_parts.append(g)
+    else:
+        out_parts.append(m0)
+    rec["tiles"].append({"tile": i, "faces": int(len(m0.faces)), "views_near": len(sel), "flipped": int(flip.sum()), "textured": bool(res), "s": round(time.time() - t1)})
     print(f"  tile {i:2d}: {len(m0.faces):,} faces, {len(sel)} views seeing it, {'textured' if res else 'NOT textured'} in {time.time()-t1:.0f}s", flush=True)
 trimesh.Scene(out_parts).export(str(OUT))
+chk = trimesh.load(str(OUT), force="scene")
+n_tex = sum(1 for g in chk.geometry.values() if type(g.visual).__name__ == "TextureVisuals")
+print(f"check: {len(chk.geometry)} geometries in the GLB, {n_tex} textured")
 json.dump(rec, open(str(OUT) + ".texture.json", "w"), indent=2)
 print(f"textured scene → {OUT} ({sum(t['textured'] for t in rec['tiles'])}/{len(parts)} tiles, {time.time()-t0:.0f}s)")
