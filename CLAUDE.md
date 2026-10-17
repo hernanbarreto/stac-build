@@ -1,5 +1,18 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐ 2026-10-17 — THE CHUNK PLANNER READS EACH WINDOW ONCE (station: 929 keyframes, 309 windows of 1092×1932)
+- station's first reconstruction sat > 40 min after the DA3 windows with no log line: `chunk_covis` read the
+  309 window files (151 MB each, compressed) TWICE in separate passes (views, then the tolerance pairs) over
+  the network volume at ~35 MB/s (46 GB per pass). Now `measure_views` reads every window ONCE at the
+  planner's WORKING resolution (`MAX_PLAN_PX` 0.6 Mpx: the calibration sessions at 464×832 stay bit-identical,
+  station reads at stride 2, K scaled), keeps only the previous window for the tolerance, logs "windows read
+  k/N" and "co-visibility a/n". Measured: station 114 s instead of > 40 min (dry run; tol_rel 38.9 %,
+  D_total 116.9 → ~18 chunks). Tests test_chunk_covis / chunk_plan green (32).
+- OBSERVED, not changed: the tolerance compares the RAW depth of a frame in two consecutive windows; where the
+  windows' metric scale factors differ (station: 5.8 vs 9.0) that difference lands in tol_rel (39 % on
+  station vs a few % indoors) — the measurement is of the windows as they are; whether it should compare
+  scaled depths is the user's call.
+
 ## ⭐⭐⭐ 2026-10-17 — THE MESHING STACK IS GONE; GENRECON IS THE LAST STAGE OF THE CHAIN (USER)
 - USER: "el botón meshing se va, porque este pipeline de mesh se hace al finalizar el autosegment … lo
   cableamos ahí, y eliminamos el entorno de shaper, eliminamos el shaper del código, y los otros que teníamos
