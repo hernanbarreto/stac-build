@@ -87,6 +87,19 @@ pipeline:
   # loops, no certification — the duplicates of a drifted revisit stay
   # (the pccr run of 2026-09-13 17:04 ran exactly that and changed nothing).
   auto_segment: true
+  # USER 2026-10-17 ("este pipeline de mesh se hace al finalizar el autosegment"): the scene mesh by
+  # GenRecon — mode cloud, the active voxels from the published cloud — as the LAST stage of the chain
+  # (the Meshing button is gone). false = the chain ends at the certification.
+  auto_genrecon: true
+
+# ── GenRecon scene mesh (workers/genrecon_worker.py → server/tools/genrecon/run_cloud.sh) ──────────
+genrecon:
+  mesh_name: genrecon_cloud          # output/tsdf/<mesh_name>/ — what the viewer lists
+  mode: cloud                        # cloud (THE product, USER 2026-10-17) | cloud+hull (completion from the
+                                     # masks) | cloud+objects | cloud+unseen — the last three are trials
+  min_points_per_voxel: 10           # BOUND: a chunk voxel (32³ ≈ 11.6 cm) is active from this many cloud points
+  simplify_faces_per_chunk: 150000   # the bake's decimation target per chunk (pccr: 25 chunks → 3.2 M faces, 250 MB)
+  texture_size: 2048                 # the bake's atlas per chunk
 
 # ── Paths ──────────────────────────────────────────────────────────
 paths:
@@ -2739,39 +2752,6 @@ coverage_engine:
 # converged consensus is under the measured bar (the cloud's own agreement with the masks).
 # Every key below is a declared COST BOUND or an optimiser setting — none of them decides a form:
 # the form is the VLM's, the acceptance is measured.
-forms:
-  enabled: true
-  catalog: [panel, box, cylinder, sphere, cone, profile, revolution, composite, freeform]
-  views: 4                    # BOUND (cost): mask keyframes shown per object in the form query
-                              # (the captioner's rule: the largest masks, ties by the measured
-                              # area dispersion)
-  max_rounds: 3               # BOUND: VLM rounds per object — the query + the reviews
-  max_tokens: 1024            # BOUND: tokens of the structured answer
-  device: cuda                # cuda | cpu — the templates, the fit and the silhouettes; an
-                              # unavailable device FAILS the stage (USER: "todo en gpu")
-  max_points: 200000          # BOUND (cost): object points in the fit (deterministic subsample;
-                              # the residual report reads every point)
-  surface_samples: 16384      # BOUND (cost): surface samples of the form per silhouette render, at
-                              # one spacing over its whole area (a 2 m column: ~9 mm, 3 px at 3 m)
-  boundary_px_per_view: 512   # BOUND (cost): mask boundary pixels per view in the recall term
-  max_views: 300              # BOUND (cost): views per object in the corrector, largest masks first
-  block_iterations: 25        # the optimiser runs in blocks of this many steps; after each block
-                              # the consensus is measured and the stop is judged by its own noise
-  max_blocks: 40              # BOUND: blocks per fit (a fit that never converges is declared)
-  lr: 0.02                    # the optimiser's step (Adam on the template's parameters, the cloud fit)
-  lr_corrector: 0.005         # the corrector's step: Adam moves a centre by up to this many metres
-                              # per step — 0.02 ran a plate 2 m away in four blocks (pccr 2026-10-16)
-  review_views: 3             # overlays shown to the VLM in a review round (the worst views)
-  ransac_iters: 500           # BOUND (cost): hypotheses per part extraction of a composite (the
-                              # RANSAC of the part's own form, scored by support density)
-  mesh: hull                  # USER 2026-10-16 ("no respeta la nube, sobresale por todas partes"): what
-                              # the stage publishes — `hull` = the measured envelope (reconstruction/forms/
-                              # hull.py: the visual hull of the masks, majority of the views that see each
-                              # voxel, carved by the TSDF of the object's own points; voxel / truncation /
-                              # fill from tsdf.object, the majority from segmentation.mask_filter) with the
-                              # fitted form kept as its record; `template` = the fitted form alone (the
-                              # first version, judged "formas muy básicas … sobresale")
-  seed: 0                     # every subsample / bootstrap of the stage
 
 surface_fit:
   models: [bspline]           # USER ORDER 2026-08-29: EVERYTHING fits with bspline — the plane
@@ -3046,51 +3026,6 @@ surface_fit:
 
 # ── ShapeR (generative per-object meshes, the Meshing dialog's 'Object' button) ──
 # ⚠ NON-METRIC: generated meshes are visual assets; the measured cloud stays the truth.
-shaper:                       # USER 2026-09-29: ShapeR REPLACES MeshFlow behind the UI's generative
-                              # (Object) button — "debe reemplazar ShapeR a meshflow". Per object: the
-                              # segment's metric points + multi-view frames (object projections as the
-                              # mask) + a Qwen3-VL description → vendor/ShapeR (env `shaper`,
-                              # checkpoints in vendor/ShapeR/checkpoints) → output/shape/<obj>/<obj>.glb
-  engine: shaper              # the ONE generative engine (MeshFlow removed 2026-10-04: code, config, 4.3 GB of weights)
-  preset: max                 # USER 2026-09-30: "la mayor cantidad que ShapeR permita" — run_shaper_batch
-                              # preset max = 32 views (every view's DINO tokens are kept at inference),
-                              # 100 steps, CFG 4. (Vendor presets: quality 16/50, balance 16/25, speed 4/10.)
-  max_views: 32               # views stored per object PKL (parallax-diverse); the preset feeds all 32
-  min_view_points: 50         # USER 2026-10-01 ("armar los pkl a máxima resolución posible"): EVERY
-                              # posed keyframe is a candidate view — all of the object's points are
-                              # projected with its camera and the frame is kept when at least this
-                              # many land inside the image in front of it (no occlusion test exists
-                              # in the exporter; none was invented). Until then only the frames where
-                              # the object's points were BORN counted, each needing this many born
-                              # there: pccr's backpack reached ShapeR with 12 views for a 32-view
-                              # preset (the vendor pads with repeats — no new evidence).
-  grayscale: true             # the released checkpoint is trained on Aria SLAM (grayscale) frames
-  image_format: png           # lossless per-view frames in the PKL
-  auto_caption: false         # USER 2026-10-01: the description is THE VLM'S, stored on the instance by
-                              # the segmentation (`shape_caption`: caption + category/shape/material/
-                              # detail, source object|concept — "object" wins). Precedence in the PKL
-                              # export: a manual caption from the UI (human_validated) > the stored
-                              # description > this on-demand captioner (Qwen3-VL over the SAM3-mask
-                              # crops of the kept views, ONLY for an instance with nothing stored,
-                              # ONLY when true) > the SAM3 label. `caption_source` in the PKL and the
-                              # mesh's .meta.json says which one it was.
-  fit_to_cloud: true          # coverage-aware fit of the generated mesh to the segment's cloud
-  simplify_faces: 125000      # quadric decimation of the generated mesh to this many faces; 0 = keep
-                              # the VAE's full triangulation. 125000 is what run_shaper_batch hardcoded
-                              # until 2026-10-01 — declared, not changed.
-  texture: true               # USER 2026-10-01 (pipeline_final.md §11): the scan-frame texture is baked
-                              # onto every generated mesh (reconstruction/texture_bake.bake_object_glb,
-                              # one texrecon at a time, non-fatal — a failed bake keeps the vertex-
-                              # coloured mesh); parts no camera saw stay untextured, never invented.
-
-
-# ── Correction (user-directed loop closure, USER 2026-09-08 redesign) ──────
-# Consumed ONLY by server/correction/config.py (typed dataclasses, validated at
-# load). EVERY key below is MANDATORY: there are no hidden code defaults — a
-# missing or out-of-range key aborts the module load naming the key. Values
-# carried over from the retired segmentation/correction_analysis.py keep the
-# user-validated behaviour; new gates were calibrated on the synthetic suite
-# (server/tests/synth_correction.py).
 correction:
   # ── the correction: visits of the object, silhouettes of its three views ──
   # USER 2026-09-18, after the floor closed with its tile lines aligned. See

@@ -24,6 +24,6 @@ rm -rf $O $OL
    --num_imgs_per_scene 999 --chunk_size_factor 1.08 --stat_std_ratio 3.0 --radius_nb_points 7 --radius_m 0.2 \
    --pipeline_config configs/pipelines/texture.json --proj_batch_voxels 2048 --colmap_subdir colmap_mast3r \
    --coords_from_points $W/cloud_genrecon.npy --coords_min_points $minpts --coords_mode $mode $EXTRA) || { echo "reconstruct failed $sid"; exit 1; }
-(cd $G && $GR chunked_to_glb.py --inputs $O/to_glb_inputs.pt --chunk_inputs $O/chunk_inputs.pt --output_dir $OL --simplify_threshold 150000 --texture_size 2048) || { echo "bake failed $sid"; exit 1; }
+(cd $G && $GR chunked_to_glb.py --inputs $O/to_glb_inputs.pt --chunk_inputs $O/chunk_inputs.pt --output_dir $OL --simplify_threshold ${GENRECON_SIMPLIFY:-150000} --texture_size ${GENRECON_TEX:-2048}) || { echo "bake failed $sid"; exit 1; }
 (cd /workspace/stac-build/server && $DA3 $T/publish.py $OL/scene.glb $SES $name $W "sparse structure FROM THE CLOUD (coords_from_points, min $minpts pts/voxel, mode $mode), chunk cubes on the session's floor/ceiling levels") || { echo "publish failed $sid"; exit 1; }
 echo "=== DONE $sid $(date +%H:%M:%S)"

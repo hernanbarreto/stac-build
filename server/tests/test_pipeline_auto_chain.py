@@ -51,8 +51,7 @@ def test_production_pipeline_runs_the_whole_chain():
     import workers.map_worker as M
     assert not hasattr(M, "_run_semantics_2d") and not hasattr(M, "_run_vlm_understand")
     assert "vlm_worker" not in inspect.getsource(M) and "sam3_worker" not in inspect.getsource(M)
-    if raw["pipeline"]["auto_tsdf"] is False:
-        assert StageId.TSDF not in enabled and StageId.PGSR not in enabled
+    assert StageId.GENRECON in enabled        # the scene mesh closes the chain (USER 2026-10-17)
 
 
 def test_production_config_loads_through_every_typed_loader():
@@ -115,7 +114,7 @@ def test_certify_stage_registered_and_cascaded():
     # every upstream stage invalidates the acta; the acta invalidates the meshes
     for up in (StageId.RECONSTRUCTION, StageId.VLM, StageId.SAM3, StageId.CLOUDCOMPY):
         assert StageId.CERTIFY in PipelineManager.CASCADE_INVALIDATION[up], up
-    assert StageId.TSDF in PipelineManager.CASCADE_INVALIDATION[StageId.CERTIFY]
+    assert StageId.GENRECON in PipelineManager.CASCADE_INVALIDATION[StageId.CERTIFY]
     assert "certify_acta.json" in PipelineManager.STAGE_OUTPUT_FILES[StageId.CERTIFY]
 
 

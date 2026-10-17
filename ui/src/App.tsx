@@ -30,7 +30,7 @@ import {
   Search, Tag, Plug, Upload, Settings, Crosshair, Maximize, Monitor, Grid3X3, RotateCcw, Ruler, TriangleRight, Scissors,
   Move, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D, Building2, Package, ArrowUpFromLine, Trash2, Unlock,
   Clock, Scale, BarChart3, Home, Camera, SlidersHorizontal, Sparkles, Undo2, Brush, Layers, Star, Terminal,
-  ListTodo, FileCheck2, Puzzle, PanelLeftClose, PanelLeftOpen, Wand2,
+  ListTodo, FileCheck2, PanelLeftClose, PanelLeftOpen, Wand2,
   Circle, Sun, FlaskConical, Pin, Pentagon,
 } from 'lucide-react'
 import { useI18n, getT } from './i18n'
@@ -63,7 +63,6 @@ import { ScansPanel } from './features/ScansPanel'
 import { PipelineDialog } from './features/PipelineDialog'
 import { ResumeDialog } from './features/ResumeDialog'
 import { ObjectLibraryDialog } from './features/ObjectLibraryDialog'
-import { MeshingDialog } from './features/MeshingDialog'
 import { AutosegmentDialog, type AutosegmentState, type AutosegmentStages } from './features/AutosegmentDialog'
 import { ReferenceDialog, type ReferenceMode } from './features/ReferenceDialog'
 import { EvaluationPanel } from './features/EvaluationPanel'
@@ -711,7 +710,6 @@ function App() {
             totalPoints: inst.total_points || 0,
             visible: vis.get(inst.instance_id || inst.id) ?? true,
             excluded: inst.excluded || false,
-            manhattan: inst.manhattan ?? true,
           }))
         })
       }
@@ -735,8 +733,6 @@ function App() {
     refreshUnsegmentedCount(activeSession)
     // running flags are per-job, progress is per-session: switching sessions
     // must not leave the Mesh buttons stuck on a job from another session
-    setTsdfRunning(false)
-    setShapeRunning(false)
   }, [activeSession, refreshUnsegmentedCount])
   useEffect(() => {
     if (!activeSession) return
@@ -753,75 +749,7 @@ function App() {
     folder: string
     visible: boolean
   }
-  const [shapeMeshes, setShapeMeshes] = useState<MeshListItem[]>([])
   const [tsdfMeshes, setTsdfMeshes] = useState<MeshListItem[]>([])
-
-  const [shapeRunning, setShapeRunning] = useState(false)
-  // Ref-based busy guard. The `disabled` prop on the Start button only gates
-  // clicks AFTER React commits the next render — between the click and that
-  // commit (a few ms in the worst case, more under load) the DOM button is
-  // still clickable. A bouncy mouse, an over-eager screen reader, or an
-  // intermediary retry can all sneak a second click through. The ref is set
-  // synchronously, so any second entry within the same JS turn is rejected.
-  const shapeBusyRef = useRef(false)
-  const [, setShapeStatus] = useState<Record<number, { has_pkl: boolean; has_mesh: boolean }>>({})
-
-  // Live progress for the in-flight shape run
-  type ShapeInstanceProgress = {
-    id: number
-    // server/main.py `_shape_progress`: exporting_ply | exporting_pkl | captioning | ply_ready |
-    // skipped | reconstructing | icp_ok | icp_skip | fit_applied | fit_noop | fit_error |
-    // texturing | done | error
-    phase: string
-    elapsed?: number
-    error?: string
-    mesh?: string
-    reason?: string
-    textured?: boolean
-  }
-  const [shapeProgress, setShapeProgress] = useState<Record<number, ShapeInstanceProgress>>({})
-  const [shapeOverall, setShapeOverall] = useState<{ phase: string; total?: number; done?: number }>({ phase: 'idle' })
-
-  const refreshShapeStatus = useCallback(async () => {
-    if (!activeSession) return
-    try {
-      const res = await fetch(`/api/segmentation/shape/status/${activeSession}`)
-      const data = await res.json()
-      if (data.ok) {
-        const statusMap: Record<number, { has_pkl: boolean; has_mesh: boolean }> = {}
-        for (const inst of data.instances) {
-          statusMap[inst.id] = { has_pkl: inst.has_pkl, has_mesh: inst.has_mesh }
-        }
-        setShapeStatus(statusMap)
-      }
-    } catch { /* ignore */ }
-  }, [activeSession])
-
-  // Refresh generated-mesh list for the sidebar (mirrors what Viewport fetches —
-  // shared endpoint). Preserves visibility for instances that already exist
-  // so a refresh after generation doesn't reset user-toggled hides.
-  const refreshShapeMeshList = useCallback(async (sessionId: string) => {
-    try {
-      const res = await fetch(`/api/segmentation/shape/list/${sessionId}`)
-      if (!res.ok) { setShapeMeshes([]); return }
-      const data = await res.json()
-      const items = (data?.shapes || []) as Array<{
-        folder: string
-        meta: { instance_id?: number; label?: string }
-      }>
-      setShapeMeshes(prev => {
-        const prevVis = new Map(prev.map(m => [m.instanceId, m.visible]))
-        return items
-          .filter(s => typeof s.meta?.instance_id === 'number')
-          .map(s => ({
-            instanceId: s.meta.instance_id as number,
-            label: (s.meta.label as string) || `object_${s.meta.instance_id}`,
-            folder: s.folder,
-            visible: prevVis.get(s.meta.instance_id as number) ?? true,
-          }))
-      })
-    } catch { /* ignore */ }
-  }, [])
 
   // Same for TSDF mesh list.
   // `resetVisibility` (default true) follows a viewer reset (reloadTsdf / session load) that drops
@@ -863,170 +791,16 @@ function App() {
     } catch { /* ignore */ }
   }, [])
 
-  // Poll progress while running
-  useEffect(() => {
-    if (!shapeRunning || !activeSession) return
-    let alive = true
-    const tick = async () => {
-      try {
-        const res = await fetch(`/api/segmentation/shape/progress/${activeSession}`)
-        const data = await res.json()
-        if (!alive) return
-        if (data.ok) {
-          const map: Record<number, ShapeInstanceProgress> = {}
-          for (const inst of (data.instances || [])) map[inst.id] = inst
-          setShapeProgress(map)
-          setShapeOverall(data.overall || { phase: 'idle' })
-          // When backend is done (or errored), refresh has_pkl/has_mesh and stop polling
-          if (data.overall?.phase === 'done' || data.overall?.phase === 'error') {
-            await refreshShapeStatus()
-            // Reload meshes into the viewport so the new .glb files appear
-            // automatically next to the point cloud.
-            if (activeSession) {
-              try { await viewportRef.current?.reloadShapes(activeSession) } catch { /* ignore */ }
-              await refreshShapeMeshList(activeSession)
-            }
-            setShapeRunning(false)
-          }
-        }
-      } catch { /* ignore transient errors */ }
-    }
-    tick()
-    const id = window.setInterval(tick, 1500)
-    return () => { alive = false; window.clearInterval(id) }
-  }, [shapeRunning, activeSession, refreshShapeStatus, refreshShapeMeshList])
-
-  // ── TSDF export state (parallel to ShapeR — same UX, different backend) ──
-  const [showTsdfModal, setShowTsdfModal] = useState(false)
-  const [tsdfRunning, setTsdfRunning] = useState(false)
-  const [tsdfSelected, setTsdfSelected] = useState<Set<number>>(new Set())
-  const [tsdfStatus, setTsdfStatus] = useState<Record<number, { has_mesh: boolean }>>({})
-  type TsdfInstanceProgress = {
-    id: number
-    phase: string  // pending | starting | integrating | extracting | done | error
-    elapsed?: number
-    error?: string
-    mesh?: string
-  }
-  const [tsdfProgress, setTsdfProgress] = useState<Record<number, TsdfInstanceProgress>>({})
-  const [tsdfOverall, setTsdfOverall] = useState<{ phase: string; total?: number; done?: number }>({ phase: 'idle' })
-
-  // Whole-scene TSDF (no instance filtering). Tracked independently from
-  // per-instance progress so both can be displayed in the same modal.
-  // (scene-level jobs no longer have UI buttons — user 2026-08-29 — but the
-  // polling effect still tracks them so an externally launched run finishes
-  // cleanly; only the setters are needed.)
-  const [tsdfSceneRunning, setTsdfSceneRunning] = useState(false)
-  const [, setTsdfScene] = useState<{ phase: string; elapsed?: number; mesh?: string; error?: string }>({ phase: 'idle' })
-  const [poissonSceneRunning, setPoissonSceneRunning] = useState(false)
-  const [, setPoissonScene] = useState<{ phase: string; elapsed?: number; mesh?: string; error?: string }>({ phase: 'idle' })
-
-  const refreshTsdfStatus = useCallback(async () => {
-    if (!activeSession) return
-    try {
-      const res = await fetch(`/api/segmentation/tsdf/status/${activeSession}`)
-      const data = await res.json()
-      if (data.ok) {
-        const statusMap: Record<number, { has_mesh: boolean }> = {}
-        for (const inst of data.instances) statusMap[inst.id] = { has_mesh: inst.has_mesh }
-        setTsdfStatus(statusMap)
-      }
-    } catch { /* ignore */ }
-  }, [activeSession])
-
-  const openTsdfModal = useCallback(async () => {
-    setTsdfProgress({})
-    setTsdfOverall({ phase: 'idle' })
-    setShowTsdfModal(true)
-    if (!activeSession) return
-    try {
-      const res = await fetch(`/api/segmentation/tsdf/status/${activeSession}`)
-      const data = await res.json()
-      if (data.ok) {
-        const statusMap: Record<number, { has_mesh: boolean }> = {}
-        for (const inst of data.instances) statusMap[inst.id] = { has_mesh: inst.has_mesh }
-        setTsdfStatus(statusMap)
-        // nothing preselected (USER 2026-10-01): the user picks — search + select / deselect all
-        setTsdfSelected(new Set())
-      }
-    } catch { /* ignore */ }
-  }, [activeSession])
-
-  // Poll TSDF progress while running (per-instance OR whole-scene)
-  useEffect(() => {
-    if ((!tsdfRunning && !tsdfSceneRunning && !poissonSceneRunning) || !activeSession) return
-    let alive = true
-    const tick = async () => {
-      try {
-        const res = await fetch(`/api/segmentation/tsdf/progress/${activeSession}`)
-        const data = await res.json()
-        if (!alive) return
-        if (data.ok) {
-          const map: Record<number, TsdfInstanceProgress> = {}
-          for (const inst of (data.instances || [])) map[inst.id] = inst
-          setTsdfProgress(map)
-          setTsdfOverall(data.overall || { phase: 'idle' })
-          const scene = data.scene || { phase: 'idle' }
-          setTsdfScene(scene)
-          const poisson = data.poisson || { phase: 'idle' }
-          setPoissonScene(poisson)
-          // Each completion block is gated on ITS running flag so a PERSISTED
-          // 'done'/'error' phase from an earlier job can't re-fire every tick
-          // (which reloaded scene.glb on a loop and hung the UI while another
-          // job — e.g. Poisson — was the one actually running).
-          // 'idle' while we think we're running = the backend has no such job
-          // (restart wiped it, or it was another session's) — unstick the
-          // button instead of blocking Meshing forever (user 2026-08-31,
-          // observatorio: "no me deja hacer meshing").
-          if (tsdfRunning && (!data.overall || data.overall.phase === 'idle')) {
-            setTsdfRunning(false)
-          }
-          if (tsdfRunning && (data.overall?.phase === 'done' || data.overall?.phase === 'error')) {
-            await refreshTsdfStatus()
-            if (activeSession) {
-              try { await viewportRef.current?.reloadTsdf?.(activeSession) } catch { /* ignore */ }
-              await refreshTsdfMeshList(activeSession)
-            }
-            setTsdfRunning(false)
-          }
-          if (tsdfSceneRunning && (scene.phase === 'done' || scene.phase === 'error')) {
-            if (scene.phase === 'done' && activeSession) {
-              // Whole-scene TSDF wrote output/tsdf/scene/scene.glb — pull it
-              // into the viewport (tsdf/list already includes the scene/ dir).
-              try { await viewportRef.current?.reloadTsdf?.(activeSession) } catch { /* ignore */ }
-              await refreshTsdfMeshList(activeSession)
-            }
-            setTsdfSceneRunning(false)
-          }
-          if (poissonSceneRunning && (poisson.phase === 'done' || poisson.phase === 'error')) {
-            if (poisson.phase === 'done' && activeSession) {
-              // Poisson wrote output/tsdf/scene_poisson/scene_poisson.glb — pull it
-              // into the viewport (tsdf/list iterates all tsdf/ subfolders).
-              try { await viewportRef.current?.reloadTsdf?.(activeSession) } catch { /* ignore */ }
-              await refreshTsdfMeshList(activeSession)
-            }
-            setPoissonSceneRunning(false)
-          }
-        }
-      } catch { /* ignore */ }
-    }
-    tick()
-    const id = window.setInterval(tick, 1200)
-    return () => { alive = false; window.clearInterval(id) }
-  }, [tsdfRunning, tsdfSceneRunning, poissonSceneRunning, activeSession, refreshTsdfStatus, refreshTsdfMeshList])
-
-  // Refresh shape/TSDF mesh lists when the active session changes (or clear
+  // Refresh the TSDF mesh list when the active session changes (or clear
   // them on session unload). The Viewport already auto-loads the GLBs into
   // the scene; this keeps the sidebar list in sync with what's on disk.
   useEffect(() => {
     if (!activeSession) {
-      setShapeMeshes([])
       setTsdfMeshes([])
       return
     }
-    refreshShapeMeshList(activeSession)
     refreshTsdfMeshList(activeSession)
-  }, [activeSession, refreshShapeMeshList, refreshTsdfMeshList])
+  }, [activeSession, refreshTsdfMeshList])
 
   const connectToServer = useCallback(async () => {
     try {
@@ -1988,23 +1762,6 @@ function App() {
     setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, label: newLabel } : s)))
     viewportRef.current?.refreshSegmentOBBs(activeSession)
   }, [activeSession, report, t])
-  // the Manhattan mark (USER 2026-10-15: "debe indicarlo el usuario, por defecto marcado como
-  // manhattan"): kept in output/manhattan.json, read by the Mesh stage (surface_fit)
-  const setManhattanSegment = useCallback(async (seg: SegmentInstance, on: boolean) => {
-    if (!activeSession) return
-    try {
-      const r = await fetch('/api/segmentation/rename', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: activeSession, instance_id: seg.id, manhattan: on }),
-      })
-      if (!r.ok) {
-        const d = await r.json().catch(() => ({}))
-        report(t('instances.renameFailed', { detail: d.detail || r.status }), 'err')
-        return
-      }
-    } catch (e) { report(t('instances.renameFailed', { detail: String(e) }), 'err'); return }
-    setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, manhattan: on } : s)))
-  }, [activeSession, report, t])
 
   const deleteSegment = useCallback(async (seg: SegmentInstance) => {
     const ok = await confirmDanger(t('instances.deleteMessage', { label: seg.label }), t('instances.deleteTitle'))
@@ -2024,28 +1781,6 @@ function App() {
 
   // a generated (ShapeR) object: rename = its label; delete = its WHOLE folder, after a confirmation
   // like a segment's (USER 2026-10-01)
-  const renameShapeObject = useCallback(async (m: MeshListItem, label: string) => {
-    if (!activeSession) return
-    try {
-      const r = await fetch('/api/segmentation/shape/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, folder: m.folder, label }) })
-      if (r.ok) setShapeMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, label } : x)))
-      else report(t('instances.renameFailed', { status: r.status }), 'err')
-    } catch { report(t('instances.renameFailed', { status: '' }), 'err') }
-  }, [activeSession, report, t])
-  const deleteShapeObject = useCallback(async (m: MeshListItem) => {
-    if (!activeSession) return
-    const ok = await confirmDanger(t('instances.deleteShapeMessage', { label: m.label, folder: m.folder }), t('instances.deleteShapeTitle'))
-    if (!ok) return
-    try {
-      const r = await fetch('/api/segmentation/shape/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, folder: m.folder }) })
-      const d = await r.json()
-      if (d.ok) {
-        report(t('instances.meshDeleted', { label: m.label }), 'ok')
-        setShapeMeshes(prev => prev.filter(x => x.folder !== m.folder))
-        await viewportRef.current?.reloadShapes(activeSession)
-      } else report(t('instances.meshDeleteFailed', { detail: d.detail || '' }), 'err')
-    } catch { report(t('instances.meshDeleteFailed', { detail: '' }), 'err') }
-  }, [activeSession, confirmDanger, report, t])
 
   const deleteTsdfMesh = useCallback(async (m: MeshListItem) => {
     if (!activeSession) return
@@ -2062,34 +1797,6 @@ function App() {
       } else report(t('instances.meshDeleteFailed', { detail: d.detail || '' }), 'err')
     } catch { report(t('instances.meshDeleteFailed', { detail: '' }), 'err') }
   }, [activeSession, confirmDanger, refreshTsdfMeshList, report, t])
-
-  const runObjectMeshing = useCallback(async () => {
-    if (!activeSession || shapeBusyRef.current) return
-    shapeBusyRef.current = true
-    setShapeRunning(true)
-    setShapeProgress({})
-    setShapeOverall({ phase: 'exporting_pkl', total: tsdfSelected.size, done: 0 })
-    try {
-      const res = await fetch('/api/segmentation/shape/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, instance_ids: [...tsdfSelected], auto_reconstruct: true }) })
-      const data = await res.json()
-      if (data.ok) { report(t('meshing.objectStarted', { n: data.count }), 'ok'); if (!data.reconstructing) setShapeRunning(false) }
-      else { report(t('meshing.objectError', { detail: data.detail || '' }), 'err'); setShapeRunning(false) }
-    } catch (err: any) { report(t('meshing.objectError', { detail: err.message }), 'err'); setShapeRunning(false) }
-    finally { shapeBusyRef.current = false }
-  }, [activeSession, tsdfSelected, report, t])
-
-  const runMesh = useCallback(async () => {
-    if (!activeSession) return
-    setTsdfRunning(true)
-    setTsdfProgress({})
-    setTsdfOverall({ phase: 'surface_fit', total: tsdfSelected.size, done: 0 })
-    try {
-      const res = await fetch('/api/segmentation/tsdf/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, instance_ids: [...tsdfSelected] }) })
-      const data = await res.json()
-      if (data.ok) report(t('meshing.meshStarted', { n: data.count }), 'ok')
-      else { report(t('meshing.meshError', { detail: data.detail || '' }), 'err'); setTsdfRunning(false) }
-    } catch (err: any) { report(t('meshing.meshError', { detail: err.message }), 'err'); setTsdfRunning(false) }
-  }, [activeSession, tsdfSelected, report, t])
 
   const resumeRun = useCallback(async () => {
     if (!resumeDialog) return
@@ -2168,7 +1875,6 @@ function App() {
             totalPoints: inst.total_points || 0,
             visible: true,
             excluded: inst.excluded || false,
-            manhattan: inst.manhattan ?? true,
           })))
         }
         viewportRef.current?.refreshSegmentOBBs(sid)
@@ -2231,7 +1937,6 @@ function App() {
       { type: 'separator', id: 's4' },
       { id: 'segmentation', label: t('instances.segmentation'), icon: <Crosshair aria-hidden />, onSelect: () => activeSession && openSegmentationManager(activeSession) },
       { id: 'autosegment', label: t('instances.autosegment'), icon: <Wand2 aria-hidden />, disabled: !activeSession, onSelect: openAutosegment },
-      { id: 'meshing', label: t('instances.meshing'), icon: <Puzzle aria-hidden />, onSelect: openTsdfModal },
       { id: 'fuse', label: t('sessions.fuse'), icon: <Layers aria-hidden />, disabled: projectScans.filter(sc => sc.kind !== 'fused').length < 2, onSelect: () => activeSession && openFuse(activeSession) },
       ...(hasCameraPoses ? [{ id: 'poses', label: t('menu.cameraPoses'), icon: <Camera aria-hidden />, checked: showCameraPoses, onSelect: () => setShowCameraPoses(v => !v) } as MenuEntry] : []),
     ] },
@@ -2318,27 +2023,20 @@ function App() {
                   segments.forEach(s => { if (keys.has(s.key)) { viewportRef.current?.toggleOBB(s.key, v && obbKeys.has(s.key)); viewportRef.current?.setSegmentVisibility(s.classId, v) } })
                   if (listed.unsegmented) { setUnsegmentedVisible(v); viewportRef.current?.setSegmentVisibility(0, v) }
                   listed.placedIds.forEach(id => viewportRef.current?.setSceneObjectVisible(id, v))
-                  const sf = new Set(listed.shapeFolders), tf = new Set(listed.tsdfFolders)
-                  setShapeMeshes(prev => prev.map(x => (sf.has(x.folder) ? { ...x, visible: v } : x)))
-                  shapeMeshes.forEach(m => { if (sf.has(m.folder)) viewportRef.current?.setShapeVisibility(m.instanceId, v) })
+                  const tf = new Set(listed.tsdfFolders)
                   setTsdfMeshes(prev => prev.map(x => (tf.has(x.folder) ? { ...x, visible: v } : x)))
                   tsdfMeshes.forEach(m => { if (tf.has(m.folder)) viewportRef.current?.setTsdfVisibility(m.folder, v) })
                 },
     onToggleSegment: (seg, vis) => { setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, visible: vis } : s))); viewportRef.current?.toggleOBB(seg.key, vis && obbKeys.has(seg.key)); viewportRef.current?.setSegmentVisibility(seg.classId, vis) },
     onRenameSegment: renameSegment,
     onDeleteSegment: deleteSegment,
-    onToggleManhattan: setManhattanSegment,
     onToggleUnsegmented: v => { setUnsegmentedVisible(v); viewportRef.current?.setSegmentVisibility(0, v) },
     onFloorLevel: (iid: number) => { if (activeSession) applyFloorLevel(activeSession, 'explicit', iid) },
     onTogglePlaced: (id, v) => viewportRef.current?.setSceneObjectVisible(id, v),
     onRemovePlaced: id => viewportRef.current?.removeSceneObject(id),
-    onToggleShape: (m, v) => { setShapeMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, visible: v } : x))); viewportRef.current?.setShapeVisibility(m.instanceId, v) },
     onToggleTsdf: (m, v) => { setTsdfMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, visible: v } : x))); viewportRef.current?.setTsdfVisibility(m.folder, v) },
-    onToggleShapeWireframe: (m, on) => { setShapeMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, wireframe: on } : x))); viewportRef.current?.setMeshWireframe('shape', m.instanceId, on) },
     onToggleTsdfWireframe: (m, on) => { setTsdfMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, wireframe: on } : x))); viewportRef.current?.setMeshWireframe('tsdf', m.folder, on) },
     onDeleteTsdf: deleteTsdfMesh,
-    onRenameShape: renameShapeObject,
-    onDeleteShape: deleteShapeObject,
     onRenamePlaced: async (id, name) => {
                   if (!activeSession) return
                   try {
@@ -2354,7 +2052,6 @@ function App() {
                   if (seg?.focus) viewportRef.current?.flyToPoint(seg.focus.center, seg.focus.radius)
                 },
     onOpenSegmentation: () => { if (activeSession) openSegmentationManager(activeSession) },
-    onOpenMeshing: openTsdfModal,
     onOpenAutosegment: openAutosegment,
   })
 
@@ -2408,7 +2105,7 @@ function App() {
             )}
             {layout.state.leftTab === 'instances' && activeSession && (
               <InstancesPanel {...instancesCb} volumes={userVolumes}   obbKeys={obbKeys}  placedObb={placedObb}  volumeHidden={volumeHidden} volumeObb={volumeObb}   segments={segments} unsegmentedVisible={unsegmentedVisible} unsegmentedCount={unsegmentedCount} absorbedCount={absorbedCount} floorLevel={floorLevel}
-                placedObjects={placedObjects} shapeMeshes={shapeMeshes} tsdfMeshes={tsdfMeshes} selectedSegmentId={selectedSegmentId}
+                placedObjects={placedObjects} tsdfMeshes={tsdfMeshes} selectedSegmentId={selectedSegmentId}
  />
             )}
             {layout.state.leftTab === 'scans' && (
@@ -2489,7 +2186,7 @@ function App() {
             onStatusMessage={setStatusMessage}
             onSegments={list => { setSegments(list); refreshUnsegmentedCount(activeSession) }}
             onEraseLedger={() => reloadSegments(activeSession)}
-            onTsdfReady={sid => { refreshTsdfMeshList(sid, false); refreshShapeMeshList(sid) }}
+            onTsdfReady={sid => { refreshTsdfMeshList(sid, false) }}
             onSceneObjectsChanged={setPlacedObjects}
             onSceneObjectSelected={id => { setSceneObjSel(id); setAlignTarget(''); setAlignTargets(id != null ? (viewportRef.current?.getSceneAlignTargets() || []) : []) }}
             onPipelineProgress={handlePipelineProgress}
@@ -2628,7 +2325,6 @@ function App() {
               panels={{
                 console: <ConsolePanel logs={consoleLogs} />,
                 jobs: <JobsPanel pipeline={pipelineRunning ? { session_id: pipelineRunning.session_id, status: pipelineRunning.status, stages: pipelineStages } : null} onCancelPipeline={handlePipelineCancel}
-                  meshing={tsdfRunning ? tsdfOverall : null} object={shapeRunning ? shapeOverall : null}
                   resume={resumeBusy ? resumeProgress : null} extracting={extractingSessions} tasks={activeTasks} />,
                 timeline: <ScansPanel variant="timeline" sessionId={activeSession} scans={projectScans} activeScanKey={activeScanTab}
                   onOpenScan={sc => activeSession && openScanFromTree(activeSession, sc)} onSetReference={sc => activeSession && setReference(activeSession, sc)} />,
@@ -2671,7 +2367,7 @@ function App() {
         <StatusBar serverAlive={serverAlive} connected={connected} sessionLabel={activeSession}
           scanLabel={activeScanRow ? `${activeScanRow.date} ${activeScanRow.label}` : null}
           message={statusMessage} epoch={epoch} storedEpochs={storedEpochs} cursor={cursor}
-          job={pipelineActiveHere && currentStage ? currentStage.label : tsdfRunning ? t('jobs.meshing') : null}
+          job={pipelineActiveHere && currentStage ? currentStage.label : null}
           jobPct={pipelineActiveHere && currentStage ? currentStage.pct : null}
           points={pointCount} fps={fps} consoleOpen={consoleOpen} onToggleConsole={() => setConsoleOpen(!consoleOpen)} />
       </div>
@@ -2735,12 +2431,6 @@ function App() {
           } catch { report(t('library.addFailed'), 'err') }
         }} />
 
-      <MeshingDialog open={showTsdfModal} onClose={() => setShowTsdfModal(false)} segments={segments} selected={tsdfSelected}
-        onToggle={id => setTsdfSelected(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })}
-        onSetSelected={ids => setTsdfSelected(ids)}
-        tsdfStatus={tsdfStatus} tsdfProgress={tsdfProgress} tsdfOverall={tsdfOverall} tsdfRunning={tsdfRunning} shapeRunning={shapeRunning} shapeProgress={shapeProgress} shapeOverall={shapeOverall}
-        onObject={runObjectMeshing} onMesh={runMesh}
-        onRefresh={async () => { if (!activeSession) return; await viewportRef.current?.refreshMeshes?.(activeSession); await refreshTsdfMeshList(activeSession, false); await refreshShapeMeshList(activeSession) }} />
 
       <AutosegmentDialog open={autosegOpen} sessionId={activeSession} state={autosegState} loading={autosegLoading}
         scans={projectScans.filter((sc: any) => sc.kind !== 'fused').map((sc: any) => ({ key: sc.key, label: `${sc.date} ${sc.label}` }))}

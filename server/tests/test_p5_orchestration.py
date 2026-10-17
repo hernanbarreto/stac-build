@@ -461,7 +461,7 @@ def test_build_pipeline_stages_reads_the_orders_configuration_not_the_servers():
     assert [s.id for s in off if s.enabled] == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY]
     on = build_pipeline_stages(backend="vggtomega", config=_base_config())
     assert [s.id for s in on if s.enabled] == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.VLM,
-                                                StageId.SAM3, StageId.CERTIFY]
+                                                StageId.SAM3, StageId.CERTIFY, StageId.GENRECON]   # the scene mesh closes the chain (USER 2026-10-17)
 
 
 def test_projection_probe_and_the_job_config_reach_the_reconstruction_probe(tmp_path):
@@ -475,11 +475,6 @@ def test_projection_probe_and_the_job_config_reach_the_reconstruction_probe(tmp_
     assert not done and why.startswith("masks on disk but no projection")
     (out / "segmentation_result.json").write_text("{}")
     assert PipelineManager._stage_is_complete(out, tmp_path, StageId.PROJECTION, _base_config())[0]
-    # the PGSR probe reads the job's backend, never config.yaml
-    cfg = _base_config()
-    cfg["reconstruction"]["backend"] = "vggtomega_pgsr"
-    assert not PipelineManager._stage_is_complete(out, tmp_path, StageId.PGSR, cfg)[0]
-    assert PipelineManager._stage_is_complete(out, tmp_path, StageId.PGSR, _base_config())[0]
 
 
 def test_replace_declares_the_discarded_vlm_prompt(tmp_path, caplog):

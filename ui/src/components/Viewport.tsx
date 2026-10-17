@@ -112,8 +112,6 @@ export interface SegmentInstance {
     totalPoints: number
     visible: boolean
     excluded?: boolean
-    /** Manhattan mark (USER 2026-10-15): the object's model snaps to the scene frame; on by default */
-    manhattan?: boolean
 }
 
 export type PrecisionLayer = 'flyers' | 'mono_detail' | 'mixed_unresolved'
@@ -189,16 +187,13 @@ export interface ViewportHandle {
      *  unsegmented remainder. */
     setSegmentVisibility: (segId: number, visible: boolean) => void
     setCloudObjectVisible: (visible: boolean) => void
-    reloadShapes: (sessionId: string) => Promise<void>
-    setShapeVisibility: (instanceId: number, visible: boolean) => void
-    clearShapes: () => void
     reloadTsdf: (sessionId: string) => Promise<void>
     /** add the meshes written since the last load without unloading the shown ones (2026-10-15) */
     refreshMeshes: (sessionId: string) => Promise<void>
     setTsdfVisibility: (folder: string, visible: boolean) => void
     /** draw a GLB as wireframe (USER 2026-10-15): 'shape' keyed by instance id, 'tsdf' by folder; a mesh
      *  not loaded yet gets it when it loads */
-    setMeshWireframe: (kind: 'shape' | 'tsdf', key: number | string, on: boolean) => void
+    setMeshWireframe: (kind: 'tsdf', key: number | string, on: boolean) => void
     clearTsdf: () => void
     reloadReconScene: (sessionId: string) => Promise<void>
     setReconElementVisibility: (instanceId: number, visible: boolean) => void
@@ -621,24 +616,6 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const totalPointsRef = useRef(0)
     const geometryRef = useRef<THREE.BufferGeometry | null>(null)
     const obbGroupRef = useRef<THREE.Group | null>(null)
-    // Shape (ShapeR) meshes — one per segmented instance. Lives as a child of
-    // the Potree octreeGroup so floor_transform / alignment edits apply
-    // automatically. Cleared/recreated when the session changes.
-    const shapesGroupRef = useRef<THREE.Group | null>(null)
-    const shapesByInstanceRef = useRef<Map<number, THREE.Group>>(new Map())
-    // instance id → its segment / OBB colour: a ShapeR object is drawn like the physics sphere — a smooth
-    // shaded solid in that colour, not the scan photo (USER 2026-10-01)
-    const instColorRef = useRef<Map<number, string>>(new Map())
-    const paintShape = useCallback((g: THREE.Object3D, color: string | undefined) => {
-        if (!color) return
-        g.traverse(o => {
-            const m = o as THREE.Mesh
-            if (!m.isMesh) return
-            const old = m.material as THREE.Material | THREE.Material[]
-            for (const mm of Array.isArray(old) ? old : [old]) mm.dispose()
-            m.material = new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: 0.45, metalness: 0.05 })
-        })
-    }, [])
     // TSDF meshes — same lifecycle as shapes, kept in a parallel group so both
     // backends can be displayed simultaneously for A/B comparison.
     const tsdfGroupRef = useRef<THREE.Group | null>(null)
@@ -781,7 +758,6 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const throwEndRef = useRef<(() => void) | null>(null)
     const shadowsRef = useRef<SceneShadows | null>(null)
     const lightsRef = useRef<SceneLights | null>(null)      // the segmentation's lamps and windows as light sources
-    const shapeLoadGenRef = useRef(0)
     const tsdfLoadGenRef = useRef(0)
     // PLACING a sphere (USER 2026-10-01: "debe aparecer en el mouse y al hacer click se debe soltar"):
     // a ghost sphere follows the pointer over the surface it points at; a click drops it there
@@ -1344,7 +1320,6 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
         }
         if (tsdfGroupRef.current) targets.push(tsdfGroupRef.current)
-        if (shapesGroupRef.current) targets.push(shapesGroupRef.current)
         if (reconSceneGroupRef.current) targets.push(reconSceneGroupRef.current)
         if (bimGroupRef.current) targets.push(bimGroupRef.current)
         // evaluation volumes are measurable like the scene (user 2026-08-29)
@@ -1487,7 +1462,6 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
         }
         if (tsdfGroupRef.current) targets.push(tsdfGroupRef.current)
-        if (shapesGroupRef.current) targets.push(shapesGroupRef.current)
         if (reconSceneGroupRef.current) targets.push(reconSceneGroupRef.current)
         if (bimGroupRef.current) targets.push(bimGroupRef.current)
         // evaluation volumes are measurable like the scene (user 2026-08-29)
@@ -2075,75 +2049,6 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         c.add(rig)
     }, [clearSegmentSelection])
 
-    // ── ShapeR mesh auto-load helpers ────────────────────────────────
-    const clearAllShapes = useCallback(() => {
-        const group = shapesGroupRef.current
-        if (group) {
-            disposeMeshGroup(group)   // geometry + materials + TEXTURES
-            const parent = group.parent
-            if (parent) parent.remove(group)
-        }
-        shapesGroupRef.current = null
-        shapesByInstanceRef.current.clear()
-    }, [])
-
-    const loadShapesIntoGroup = useCallback(async (sessionId: string, parentGroup: THREE.Object3D) => {
-        // ONE load at a time wins (pccr 2026-10-01: a finished ShapeR job triggered two overlapping
-        // reloads; both added a group, the toggle reached only one copy and the mesh never hid). A load
-        // overtaken by a newer one throws away what it built.
-        const gen = ++shapeLoadGenRef.current
-        // Reset previous shapes (different session or refresh)
-        clearAllShapes()
-
-        let res: Response
-        try {
-            res = await fetch(`/api/segmentation/shape/list/${sessionId}`)
-        } catch (e) {
-            console.warn('[Viewport] shape list fetch failed', e)
-            return
-        }
-        if (!res.ok || gen !== shapeLoadGenRef.current) return
-        const data = await res.json()
-        const shapes = (data?.shapes || []) as Array<{ folder: string; glb_url: string; meta: any }>
-        if (shapes.length === 0 || gen !== shapeLoadGenRef.current) return
-
-        const group = new THREE.Group()
-        group.name = 'shapes-group'
-        parentGroup.add(group)
-        shapesGroupRef.current = group
-
-        if (!gltfLoaderRef.current) gltfLoaderRef.current = makeGltfLoader()
-        const loader = gltfLoaderRef.current
-
-        let loaded = 0
-        for (const sh of shapes) {
-            try {
-                const gltf = await loader.loadAsync(sh.glb_url)
-                if (gen !== shapeLoadGenRef.current) {          // overtaken: this group is not the scene's
-                    disposeMeshGroup(group); group.removeFromParent()
-                    return
-                }
-                const meshGroup = new THREE.Group()
-                meshGroup.name = `shape-${sh.folder}`
-                meshGroup.userData = { meta: sh.meta, folder: sh.folder }
-                meshGroup.add(gltf.scene)
-                group.add(meshGroup)
-
-                const iid = sh.meta?.instance_id
-                if (typeof iid === 'number') {
-                    shapesByInstanceRef.current.set(iid, meshGroup)
-                    paintShape(meshGroup, instColorRef.current.get(iid))
-                }
-                loaded += 1
-            } catch (e) {
-                console.warn(`[Viewport] failed to load mesh ${sh.glb_url}`, e)
-            }
-        }
-        if (onStatusMessage && loaded > 0) {
-            onStatusMessage(tt('vp.loadedObjectMeshes', { n: loaded }))
-        }
-    }, [clearAllShapes, onStatusMessage, paintShape])
-
     // ── TSDF mesh auto-load helpers (mirrors ShapeR — separate group) ──
     const clearAllTsdf = useCallback(() => {
         const group = tsdfGroupRef.current
@@ -2194,7 +2099,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     }, [])
 
     const loadTsdfIntoGroup = useCallback(async (sessionId: string, parentGroup: THREE.Object3D) => {
-        const gen = ++tsdfLoadGenRef.current          // one load at a time wins (see loadShapesIntoGroup)
+        const gen = ++tsdfLoadGenRef.current          // one load at a time wins
         clearAllTsdf()
         let res: Response
         try {
@@ -2285,43 +2190,6 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
         return added
     }, [loadTsdfIntoGroup, loadTsdfMeshEntry, applyWireframe])
-
-    const addNewShapeEntries = useCallback(async (sessionId: string): Promise<number> => {
-        const parent = potreeLoaderRef.current?.getOctreeGroup() || sceneRef.current
-        if (!parent) return 0
-        if (!shapesGroupRef.current) { await loadShapesIntoGroup(sessionId, parent); return shapesByInstanceRef.current.size }
-        let res: Response
-        try { res = await fetch(`/api/segmentation/shape/list/${sessionId}`) } catch { return 0 }
-        if (!res.ok) return 0
-        const data = await res.json()
-        const shapes = (data?.shapes || []) as Array<{ folder: string; glb_url: string; meta: any }>
-        const group = shapesGroupRef.current
-        if (!group) return 0
-        if (!gltfLoaderRef.current) gltfLoaderRef.current = makeGltfLoader()
-        const loader = gltfLoaderRef.current
-        let added = 0
-        for (const sh of shapes) {
-            if (group.children.some(c => c.name === `shape-${sh.folder}`)) continue
-            try {
-                const gltf = await loader.loadAsync(sh.glb_url)
-                if (shapesGroupRef.current !== group) return added
-                const meshGroup = new THREE.Group()
-                meshGroup.name = `shape-${sh.folder}`
-                meshGroup.userData = { meta: sh.meta, folder: sh.folder }
-                meshGroup.add(gltf.scene)
-                group.add(meshGroup)
-                const iid = sh.meta?.instance_id
-                if (typeof iid === 'number') {
-                    shapesByInstanceRef.current.set(iid, meshGroup)
-                    paintShape(meshGroup, instColorRef.current.get(iid))
-                }
-                added += 1
-            } catch (e) {
-                console.warn(`[Viewport] failed to load mesh ${sh.glb_url}`, e)
-            }
-        }
-        return added
-    }, [loadShapesIntoGroup, paintShape])
 
     // ── Reconstruction-v2 scene loader (mirrors ShapeR / TSDF; own group) ──
     const clearAllReconScene = useCallback(() => {
@@ -2559,7 +2427,6 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             // ANY row of the list flies to its object (USER 2026-10-01): the object's own bounds
             let o: THREE.Object3D | undefined
             if (kind === 'placed') o = sceneObjByIdRef.current.get(Number(key))
-            else if (kind === 'shape') o = shapesByInstanceRef.current.get(Number(key))
             else if (kind === 'tsdf') o = tsdfGroupRef.current?.children.find(c => c.name === `tsdf-${key}`)
             if (!o) return false
             o.updateMatrixWorld(true)
@@ -2711,20 +2578,6 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 else if (loader.isLoaded) loader.updateVisibility()   // reload promptly
             }
         },
-        reloadShapes: async (sessionId: string) => {
-            // Reuse current octreeGroup as parent if a cloud is loaded; otherwise
-            // attach to the scene root. Either way, floor_transform applies via
-            // the parent chain.
-            const loader = potreeLoaderRef.current
-            const parent = loader?.getOctreeGroup() || sceneRef.current
-            if (!parent) return
-            await loadShapesIntoGroup(sessionId, parent)
-        },
-        setShapeVisibility: (instanceId: number, visible: boolean) => {
-            const meshGroup = shapesByInstanceRef.current.get(instanceId)
-            if (meshGroup) meshGroup.visible = visible
-        },
-        clearShapes: () => clearAllShapes(),
         reloadTsdf: async (sessionId: string) => {
             const loader = potreeLoaderRef.current
             const parent = loader?.getOctreeGroup() || sceneRef.current
@@ -2734,7 +2587,6 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         refreshMeshes: async (sessionId: string) => {
             // USER 2026-10-15: pick up every mesh folder written since the last load, in place
             await addNewTsdfEntries(sessionId)
-            await addNewShapeEntries(sessionId)
         },
         setTsdfVisibility: (folder: string, visible: boolean) => {
             const meshGroup = tsdfGroupRef.current?.children
@@ -2764,12 +2616,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 if (onStatusMessage) onStatusMessage(tt('vp.meshLoadFailed', { folder }))
             })
         },
-        setMeshWireframe: (kind: 'shape' | 'tsdf', key: number | string, on: boolean) => {
-            const id = kind === 'shape' ? `shape-${key}` : `tsdf-${key}`
+        setMeshWireframe: (_kind: 'tsdf', key: number | string, on: boolean) => {
+            const id = `tsdf-${key}`
             if (on) wireframeRef.current.add(id); else wireframeRef.current.delete(id)
-            const obj = kind === 'shape'
-                ? shapesByInstanceRef.current.get(Number(key))
-                : tsdfGroupRef.current?.children.find(c => c.name === `tsdf-${key}`)
+            const obj = tsdfGroupRef.current?.children.find(c => c.name === `tsdf-${key}`)
             if (obj) applyWireframe(obj, on)
         },
         clearTsdf: () => clearAllTsdf(),
@@ -3462,7 +3312,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         scene.fog = new THREE.FogExp2(tokenHex(VP.clear), 0.0003)
         sceneRef.current = scene
         const physics = new PhysicsSandbox(scene)
-        physics.setSolidRoots(() => [sceneObjectsGroupRef.current, shapesGroupRef.current, tsdfGroupRef.current,
+        physics.setSolidRoots(() => [sceneObjectsGroupRef.current, tsdfGroupRef.current,
                                      reconSceneGroupRef.current].filter((g): g is THREE.Group => !!g))
         physics.setPointRoots(() => [scene.getObjectByName('potree-octree'), pointCloudRef.current]
             .filter((o): o is THREE.Object3D => !!o))
@@ -3634,7 +3484,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
         // SHADOWS (USER 2026-10-01): meshes cast and receive, the points receive
         const shadows = new SceneShadows(scene, renderer, () => [pointShadowU], dirLight)
-        shadows.setRoots(() => [physics.group, sceneObjectsGroupRef.current, shapesGroupRef.current, tsdfGroupRef.current,
+        shadows.setRoots(() => [physics.group, sceneObjectsGroupRef.current, tsdfGroupRef.current,
                                 reconSceneGroupRef.current].filter((g): g is THREE.Group => !!g))
         shadowsRef.current = shadows
         // LIGHT SOURCES FROM THE SEGMENTS (USER 2026-10-16): rebuilt whenever the OBB list arrives
@@ -3854,8 +3704,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 }
             }
             if (tsdfGroupRef.current) targets.push(tsdfGroupRef.current)
-            if (shapesGroupRef.current) targets.push(shapesGroupRef.current)
-            const hits = raycaster.intersectObjects(targets)
+                const hits = raycaster.intersectObjects(targets)
             const hit = hits.find(h => h.object !== eraseCursor && hitIsVisible(h))
             return hit ? hit.point.clone() : null
         }
@@ -4225,7 +4074,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     if ((c.name || '').startsWith('potree-node-') && c.visible) targets.push(c)
                 })
             }
-            for (const g of [sceneObjectsGroupRef.current, shapesGroupRef.current, tsdfGroupRef.current, reconSceneGroupRef.current])
+            for (const g of [sceneObjectsGroupRef.current, tsdfGroupRef.current, reconSceneGroupRef.current])
                 if (g) targets.push(g)
             const hit = throwRay.intersectObjects(targets, true).find(h => hitIsVisibleRef.current(h))
             const r = placeRef.current ? placeRef.current.diameter / 2 : 0.1
@@ -4866,7 +4715,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const sid = msg.session_id as string
             const stage = String(msg.stage || '')
             if (sid && sid === activeSessionRef.current) {
-                const job = stage.includes('shape') ? addNewShapeEntries(sid) : addNewTsdfEntries(sid)
+                const job = addNewTsdfEntries(sid)
                 job.then(() => onTsdfReadyRef.current?.(sid, stage)).catch(() => onTsdfReadyRef.current?.(sid, stage))
                 if (onStatusMessage) onStatusMessage(tt('vp.meshesReady', { n: msg.count as number, stage }))
             }
@@ -4962,7 +4811,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             // memory leaked and meshes vanished on every erase commit/refresh
             // (user 2026-08-30: "se pone pesada con el uso").
             const survivingGroups: THREE.Object3D[] = []
-            for (const ref of [tsdfGroupRef, shapesGroupRef, reconSceneGroupRef]) {
+            for (const ref of [tsdfGroupRef, reconSceneGroupRef]) {
                 const g = ref.current
                 if (g) {
                     g.removeFromParent()
@@ -5061,7 +4910,6 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const sessionIdForShapes = msg.session_id as string | undefined
                 const octreeGroupForShapes = loader.getOctreeGroup()
                 if (sessionIdForShapes && octreeGroupForShapes) {
-                    loadShapesIntoGroup(sessionIdForShapes, octreeGroupForShapes)
                     loadTsdfIntoGroup(sessionIdForShapes, octreeGroupForShapes)
                     const preloadedScene = msg.scene as { elements?: Array<any> } | undefined
                     loadReconSceneIntoGroup(sessionIdForShapes, octreeGroupForShapes, preloadedScene)
@@ -5378,11 +5226,6 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const clsId = (inst.class_byte ?? instId) as number
             const label = (inst.label || 'object') as string
             const colorStr = (inst.color || tokenColor(VP.measure)) as string
-            if (instColorRef.current.get(instId) !== colorStr) {
-                instColorRef.current.set(instId, colorStr)
-                const sg = shapesByInstanceRef.current.get(instId)
-                if (sg) paintShape(sg, colorStr)
-            }
             const totalPoints = (inst.total_points || 0) as number
             const globalKey = (inst.global_id || `${label}_${instId}`) as string
 

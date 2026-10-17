@@ -5,7 +5,7 @@
  * footer buttons open Segmentation and Meshing.
  */
 import { memo, useState } from 'react'
-import { Box, CheckSquare, Crosshair, Grid3x3, Pencil, Puzzle, Spline, Square, Tag, Trash2, Wand2 } from 'lucide-react'
+import { Box, CheckSquare, Crosshair, Grid3x3, Pencil, Square, Tag, Trash2, Wand2 } from 'lucide-react'
 import type { SegmentInstance } from '../components/Viewport'
 import { Panel, Section, Stack } from '../components/ui/Panel'
 import { Tree, type TreeNodeData } from '../components/ui/Tree'
@@ -18,7 +18,7 @@ import { useFmt, useT } from '../i18n'
 export interface MeshListItem { instanceId: number; label: string; folder: string; visible: boolean; wireframe?: boolean }
 export interface PlacedObject { id: number; name: string; visible: boolean }
 export interface VolumeItem { volume_id: number; name: string }
-export interface ListedRows { segmentKeys: string[]; unsegmented: boolean; placedIds: number[]; shapeFolders: string[]; tsdfFolders: string[] }
+export interface ListedRows { segmentKeys: string[]; unsegmented: boolean; placedIds: number[]; tsdfFolders: string[] }
 export interface FloorLevelState { candidates: { instance_id: number; label: string; height_m: number | null }[]; selected: number | null }
 
 interface InstancesPanelProps {
@@ -44,7 +44,6 @@ interface InstancesPanelProps {
   volumeObb: Set<number>
   onToggleVolume: (id: number, visible: boolean) => void
   onToggleVolumeObb: (id: number, on: boolean) => void
-  shapeMeshes: MeshListItem[]
   tsdfMeshes: MeshListItem[]
   selectedSegmentId: number | null
   onSelectSegment: (id: number | null) => void
@@ -53,8 +52,6 @@ interface InstancesPanelProps {
   onSetAllVisible: (visible: boolean, listed: ListedRows) => void
   onToggleSegment: (seg: SegmentInstance, visible: boolean) => void
   onRenameSegment: (seg: SegmentInstance, label: string) => Promise<void>
-  /** the Manhattan mark (USER 2026-10-15), on by default */
-  onToggleManhattan: (seg: SegmentInstance, on: boolean) => Promise<void>
   onDeleteSegment: (seg: SegmentInstance) => void
   onToggleUnsegmented: (visible: boolean) => void
   onFloorLevel: (instanceId: number) => void
@@ -63,16 +60,11 @@ interface InstancesPanelProps {
   onRenamePlaced: (id: number, name: string) => Promise<void>
   /** a row that is not a segment was clicked: fly to it */
   onFocusItem: (kind: 'placed' | 'shape' | 'tsdf', key: string | number, instanceId?: number) => void
-  onToggleShape: (m: MeshListItem, visible: boolean) => void
-  onRenameShape: (m: MeshListItem, label: string) => Promise<void>
-  onDeleteShape: (m: MeshListItem) => void
   onToggleTsdf: (m: MeshListItem, visible: boolean) => void
   /** draw a GLB as wireframe (USER 2026-10-15) */
-  onToggleShapeWireframe: (m: MeshListItem, on: boolean) => void
   onToggleTsdfWireframe: (m: MeshListItem, on: boolean) => void
   onDeleteTsdf: (m: MeshListItem) => void
   onOpenSegmentation: () => void
-  onOpenMeshing: () => void
   /** the segmentation chain on demand, prompts editable (USER 2026-10-05) */
   onOpenAutosegment: () => void
 }
@@ -95,22 +87,16 @@ function InstancesPanelImpl(p: InstancesPanelProps) {
   const hit = (...txt: Array<string | number | undefined>) => !q || txt.some(x => x != null && String(x).toLowerCase().includes(q))
   const segs = p.segments.filter(s => hit(s.label, s.id))
   const placed = p.placedObjects.filter(o => hit(o.name, o.id))
-  const shapes = p.shapeMeshes.filter(m => hit(m.label, m.folder, m.instanceId))
   const tsdfs = p.tsdfMeshes.filter(m => hit(m.label, m.folder, m.instanceId))
   const vols = p.volumes.filter(v => hit(v.name, v.volume_id))
   const unsegListed = hit(t('instances.unsegmented'))
   const listed: ListedRows = { segmentKeys: segs.map(s => s.key), unsegmented: unsegListed, placedIds: placed.map(o => o.id),
-                               shapeFolders: shapes.map(m => m.folder), tsdfFolders: tsdfs.map(m => m.folder) }
-  const anyListed = segs.length + placed.length + shapes.length + tsdfs.length + vols.length > 0 || unsegListed
+                               tsdfFolders: tsdfs.map(m => m.folder) }
+  const anyListed = segs.length + placed.length + tsdfs.length + vols.length > 0 || unsegListed
   const commitPlaced = async (o: PlacedObject) => {
     const v = editValue.trim()
     setEditing(null)
     if (v && v !== o.name) await p.onRenamePlaced(o.id, v)
-  }
-  const commitShape = async (m: MeshListItem) => {
-    const v = editValue.trim()
-    setEditing(null)
-    if (v && v !== m.label) await p.onRenameShape(m, v)
   }
 
   // a generated mesh's OBB is its instance's
@@ -136,9 +122,6 @@ function InstancesPanelImpl(p: InstancesPanelProps) {
       muted: seg.excluded,
       actions: (
         <>
-          <IconButton size="sm" label={seg.manhattan !== false ? t('instances.manhattanOn') : t('instances.manhattanOff')}
-            icon={seg.manhattan !== false ? <Box aria-hidden /> : <Spline aria-hidden />}
-            onClick={() => p.onToggleManhattan(seg, seg.manhattan === false)} />
           <IconButton size="sm" label={t('instances.rename')} icon={<Pencil aria-hidden />} onClick={() => { setEditing(seg.key); setEditValue(seg.label) }} />
           <IconButton size="sm" variant="danger" label={t('instances.delete')} icon={<Trash2 aria-hidden />} onClick={() => p.onDeleteSegment(seg)} />
         </>
@@ -166,7 +149,6 @@ function InstancesPanelImpl(p: InstancesPanelProps) {
         <div className="stac-instances__footer">
           <Button size="sm" icon={<Crosshair aria-hidden />} onClick={p.onOpenSegmentation}>{t('instances.segmentation')}</Button>
           <Button size="sm" icon={<Wand2 aria-hidden />} onClick={p.onOpenAutosegment} title={t('instances.autosegmentHint')}>{t('instances.autosegment')}</Button>
-          <Button size="sm" icon={<Puzzle aria-hidden />} onClick={p.onOpenMeshing} title={t('instances.meshingHint')}>{t('instances.meshing')}</Button>
         </div>
       }>
       <Stack gap={1}>
@@ -215,28 +197,6 @@ function InstancesPanelImpl(p: InstancesPanelProps) {
               visible: !p.volumeHidden.has(v.volume_id), onVisible: on => p.onToggleVolume(v.volume_id, on),
               obb: p.volumeObb.has(v.volume_id), onObb: on => p.onToggleVolumeObb(v.volume_id, on),
               actions: <IconButton size="sm" variant="danger" label={t('instances.deleteVolume')} icon={<Trash2 aria-hidden />} onClick={() => p.onDeleteVolume(v.volume_id)} />,
-            }))} />
-          </Section>
-        )}
-        {shapes.length > 0 && (
-          <Section title={t('instances.objectMeshes', { n: shapes.length })} flush>
-            <Tree ariaLabel={t('instances.objectMeshes', { n: shapes.length })} dense
-              onSelect={n => { const m = shapes.find(x => `shape-${x.folder}` === n.id); if (m) p.onFocusItem('shape', m.instanceId, m.instanceId) }}
-              nodes={shapes.map(m => ({
-              id: `shape-${m.folder}`, visible: m.visible, onVisible: v => p.onToggleShape(m, v),
-              ...obbOf(m.instanceId),
-              label: editing === `shape-${m.folder}` ? (
-                <Input size="sm" autoFocus value={editValue} onChange={e => setEditValue(e.target.value)} onClick={e => e.stopPropagation()}
-                  onKeyDown={e => { if (e.key === 'Enter') commitShape(m); if (e.key === 'Escape') setEditing(null) }} onBlur={() => commitShape(m)} aria-label={t('instances.renameLabel')} />
-              ) : m.label,
-              actions: (
-                <>
-                  <IconButton size="sm" label={m.wireframe ? t('instances.wireframeOff') : t('instances.wireframeOn')} icon={<Grid3x3 aria-hidden />}
-                    onClick={() => p.onToggleShapeWireframe(m, !m.wireframe)} />
-                  <IconButton size="sm" label={t('instances.rename')} icon={<Pencil aria-hidden />} onClick={() => { setEditing(`shape-${m.folder}`); setEditValue(m.label) }} />
-                  <IconButton size="sm" variant="danger" label={t('instances.delete')} icon={<Trash2 aria-hidden />} onClick={() => p.onDeleteShape(m)} />
-                </>
-              ),
             }))} />
           </Section>
         )}

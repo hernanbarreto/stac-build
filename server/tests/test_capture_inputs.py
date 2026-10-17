@@ -46,7 +46,7 @@ def _stray(d: Path, k=K_CSV):
 def test_every_stray_reader_prefers_inputs_then_the_scans_own_places(tmp_path):
     from workers.map_worker import _find_stray_dir as mw
     from segmentation.session_io import _find_stray_dir as sio
-    from segmentation.shaper_export import _find_stray_dir as shp
+    from segmentation.session_io import _find_stray_dir as shp
     from precision import camera as C
     from precision import gauge as G
     from ingestors.stray_detector import detect_stray_data

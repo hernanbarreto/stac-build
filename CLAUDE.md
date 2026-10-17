@@ -1,5 +1,31 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ 2026-10-17 — THE MESHING STACK IS GONE; GENRECON IS THE LAST STAGE OF THE CHAIN (USER)
+- USER: "el botón meshing se va, porque este pipeline de mesh se hace al finalizar el autosegment … lo
+  cableamos ahí, y eliminamos el entorno de shaper, eliminamos el shaper del código, y los otros que teníamos
+  para mallado, el texrecon se queda por las dudas … el resto vuela todo". DONE the same night:
+  - `StageId.GENRECON` (`workers/genrecon_worker.py` → `server/tools/genrecon/run_cloud.sh`, mode `cloud`,
+    config `genrecon:` + `pipeline.auto_genrecon`) runs after CERTIFY in DEFAULT_STAGE_ORDER, is part of the
+    SEGMENTATION_CHAIN ("segment when done" meshes too), has its checkbox in the Autosegment window
+    (`stages.genrecon`), its artifact (`tsdf/genrecon_cloud`) and its place in the cascade. vLLM stays up
+    beside it (~12 GB peak). The viewer lists the mesh under Meshes as before.
+  - REMOVED: the Meshing button/modal (features/MeshingDialog.tsx), the per-instance Manhattan mark, ShapeR
+    everywhere (env `shaper`, vendor/ShapeR, the t5-v1_1-xl / CLIP / bert caches, `segmentation/shaper_export.py`,
+    the shape routes, the viewer's shape group/list/polling), `reconstruction/forms/`, the surface_fit meshing
+    modules (scene/facets/manhattan/regularize/contours/decompose/noise/escalate/fine_register/bspline/
+    profile_sweep/heatmap/residuals/runner/spatial_test), Poisson/TSDF/perfect-object/PGSR scripts and
+    routes, `workers/tsdf_worker.py`, `workers/pgsr_worker.py`, the PGSR and TSDF stages, env `pgsr` and
+    vendor/pgsr, vendor/NKSR, `segmentation/poisson_object.py`, `segmentation/manhattan.py`, the `forms:` and
+    `shaper:` config sections, and their tests. ~22 k lines.
+  - KEPT because other stages import them (library, no entry point): `reconstruction/surface_fit/{consolidate,
+    plane, quadric, fit_torch, hole_audit, support, models}` (the cloud stage's consolidation, the fusion's
+    primitives, the mask filter's z-buffer evidence), `segmentation/perfect_object.py` (the cloud detector of
+    the precision edge metric + `_read_ply_fields`), `segmentation/tsdf_export.py` (depth/camera readers used
+    by sam3_worker, erase, mv_consistency, native_depth), `reconstruction/texture_bake.py` (texrecon, USER:
+    "por las dudas") and `orient_outward.py`. The `surface_fit:`, `tsdf:`, `poisson:`, `pgsr:` config sections
+    still exist for those readers (dead keys inside them are declared, not read).
+  - The backend must be RESTARTED to pick the new stage and the removed routes (the user runs it).
+
 ## ⭐⭐⭐ 2026-10-16 (late night) — GenRecon: THE CLOUD DECIDES PRESENCE (USER: "lo ideal es que copie la nube")
 - The first pccr mesh ("es una maravilla") was MEASURED (`server/tools/genrecon/measure_mesh.py`, the one record
   for every variant): only 8 % of its area within 10 cm of the cloud, the floor 34 cm under the floor the

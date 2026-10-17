@@ -1,6 +1,6 @@
 /**
  * Dock panels: ConsolePanel (backend log stream), JobsPanel (pipeline
- * stages, meshing / resume / extraction progress),
+ * stages, object / resume / extraction progress),
  * PropertiesPanel (inspector: session, scan, cloud, epoch, selected
  * instance). Presentational.
  */
@@ -37,8 +37,6 @@ export function ConsolePanel({ logs }: { logs: LogEntry[] }) {
 export interface JobsState {
   pipeline: { session_id?: string; status: string; stages: ProgressStage[] } | null
   onCancelPipeline: () => void
-  meshing: { phase: string; total?: number; done?: number } | null
-  object: { phase: string; total?: number; done?: number } | null
   resume: { pct: number; detail: string } | null
   extracting: Record<string, number>
   tasks: Array<{ label: string; pct: number; detail: string }>
@@ -46,7 +44,7 @@ export interface JobsState {
 
 export function JobsPanel(j: JobsState) {
   const t = useT()
-  const any = j.pipeline || (j.meshing && j.meshing.phase !== 'idle') || (j.object && j.object.phase !== 'idle') || j.resume || Object.keys(j.extracting).length || j.tasks.length
+  const any = j.pipeline || j.resume || Object.keys(j.extracting).length || j.tasks.length
   return (
     <div className="stac-jobs">
       {!any && <EmptyState compact icon={<ListTodo aria-hidden />} title={t('jobs.empty')} description={t('jobs.emptyDesc')} />}
@@ -56,12 +54,6 @@ export function JobsPanel(j: JobsState) {
             : <Badge tone={j.pipeline.status === 'done' ? 'ok' : j.pipeline.status === 'failed' ? 'err' : 'neutral'}>{t(`jobStatus.${j.pipeline.status}`)}</Badge>}>
           <Progress stages={j.pipeline.stages} tone="brand" />
         </Section>
-      )}
-      {j.meshing && j.meshing.phase !== 'idle' && (
-        <Section title={t('jobs.meshing')} flush><Progress value={j.meshing.total ? ((j.meshing.done || 0) / j.meshing.total) * 100 : 0} label={t(`meshPhase.${j.meshing.phase}`, { done: j.meshing.done || 0, total: j.meshing.total || 0 })} /></Section>
-      )}
-      {j.object && j.object.phase !== 'idle' && (
-        <Section title={t('jobs.object')} flush><Progress value={j.object.total ? ((j.object.done || 0) / j.object.total) * 100 : 0} label={t(`shapePhase.${j.object.phase}`, { done: j.object.done || 0, total: j.object.total || 0 })} /></Section>
       )}
       {j.resume && <Section title={t('jobs.resume')} flush><Progress value={j.resume.pct} label={j.resume.detail} /></Section>}
       {Object.entries(j.extracting).map(([sid, pct]) => (

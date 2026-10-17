@@ -544,6 +544,8 @@
     "stageCertifyHint": "Cierres → profundidad por chunk → piso → filtro de máscaras → chequeo de chunks; publica la época final.",
     "stageCaptions": "Descripciones de objetos",
     "stageCaptionsHint": "Una llamada al VLM por objeto al final de la certificación (descripciones para ShapeR).",
+    "stageGenrecon": "Malla de la escena (GenRecon)",
+    "stageGenreconHint": "La nube decide la presencia: la malla se genera dentro de los voxels de la nube publicada, se hornea y aparece en Meshes; última etapa de la cadena.",
     "noCloud": "Este escaneo todavía no tiene nube: si su reconstrucción está en cola, la segmentación corre después.",
     "busy": "Hay un pipeline corriendo en esta sesión: esta orden va a esperar su turno en la cola.",
     "sam3NeedsPrompts": "SAM3 sin el VLM necesita al menos un prompt.",

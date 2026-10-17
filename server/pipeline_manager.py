@@ -201,13 +201,12 @@ def _environment(env: Dict[str, str]):
 class StageId(str, Enum):
     RECONSTRUCTION = "reconstruction"
     CLOUDCOMPY = "cloudcompy"
-    PGSR = "pgsr"
-    TSDF = "tsdf"
     VLM = "vlm"
     SAM3 = "sam3"
     PROJECTION = "projection"
     CERTIFY = "certify"
     INSTANCE_CLEANER = "instance_cleaner"
+    GENRECON = "genrecon"             # the scene mesh (GenRecon, the cloud decides presence) — last of the chain
 
 
 # "module" / "entry": the worker the stage process runs (``module.entry(conn, session_dir,
@@ -218,14 +217,13 @@ class StageId(str, Enum):
 STAGE_REGISTRY = {
     StageId.RECONSTRUCTION:   {"label": "Reconstruction (intake · VLM+SAM3 · Ω · F0-F6 bend)", "icon": "🔨", "module": "workers.map_worker"},
     StageId.CLOUDCOMPY:       {"label": "Cloud → viewer (octree + segmentation)", "icon": "🧹", "module": "workers.cloudcompy_worker"},
-    StageId.PGSR:             {"label": "Precision (PGSR)",  "icon": "💎", "module": "workers.pgsr_worker"},
-    StageId.TSDF:             {"label": "TSDF Mesh",         "icon": "🧊", "module": "workers.tsdf_worker"},
     StageId.VLM:              {"label": "Scene Analysis",    "icon": "🔍", "module": "workers.vlm_worker", "engine": True},
     StageId.SAM3:             {"label": "Segmentation",      "icon": "🏷️", "module": "workers.sam3_worker"},
     StageId.PROJECTION:       {"label": "Mask projection (masks → cloud + octree)", "icon": "🧷",
                                "module": "pipeline_manager", "entry": "run_projection_stage"},
     StageId.CERTIFY:          {"label": "Certification",     "icon": "📐", "module": "workers.certify_worker", "engine": True},
     StageId.INSTANCE_CLEANER: {"label": "Instance Cleaning", "icon": "✨", "module": "workers.instance_cleaner_worker"},
+    StageId.GENRECON:         {"label": "Mesh (GenRecon — the cloud decides presence)", "icon": "🧱", "module": "workers.genrecon_worker"},
 }
 
 # THE reconstruction pipeline — always runs end-to-end, no client selection.
@@ -263,11 +261,10 @@ DEFAULT_STAGE_ORDER: List[StageId] = [
                            # left masks without a result, a session opened with unprojected
                            # masks, the Segmentation Manager's close
     StageId.CERTIFY,
-    StageId.PGSR,          # precision mode only: no-ops unless backend is
+    StageId.GENRECON,      # USER 2026-10-17: the scene mesh at the end of the segmentation chain
                            # vggtomega_pgsr (seeds from cleaned_cloud, so it runs
                            # after CloudCompy; the TSDF then integrates its
                            # rendered depths via depth_source "pgsr_render")
-    StageId.TSDF,
 ]
 
 
@@ -849,8 +846,6 @@ class PipelineManager:
         StageId.CLOUDCOMPY: ["cleaned_cloud.ply", "cleaned_cloud_raw.ply",
                              "floor_transform.npz", "scene_consolidate_report.json",
                              "corrected_cloud.ply"],
-        StageId.PGSR: ["pgsr_scene", "pgsr_model", "pgsr_render"],
-        StageId.TSDF: ["tsdf/scene"],
         StageId.VLM: ["scene_analysis.json", "vlm_analysis.json", "vlm_analysis.timing.json",
                       "scene_understanding.json", "autoprompt_instances.json",
                       "autoprompt_review_queue.json", "autoprompt_concepts.json"],
@@ -888,6 +883,7 @@ class PipelineManager:
                           "keyframe_graph.json", "loop_candidates.json", "duplicates.json",
                           "loop_semantics.json", "object_captions.timing.json"],
         StageId.INSTANCE_CLEANER: ["instance_*.ply", "inst_cleaned_cloud.ply"],
+        StageId.GENRECON: ["tsdf/genrecon_cloud"],
     }
 
     # What a RESUME or an Autosegment cleans before a stage of the semantic chain runs
@@ -927,46 +923,42 @@ class PipelineManager:
     # seg_masks.npz right after SAM3 wrote them (test2, 2026-07-08).
     CASCADE_INVALIDATION: Dict[StageId, List[StageId]] = {
         StageId.RECONSTRUCTION: [
+            StageId.GENRECON,         # the scene mesh is of this geometry and segmentation
             StageId.CLOUDCOMPY,       # cleaned_cloud depends on chunks
             StageId.VLM,              # scene analysis ran on old keyframes
             StageId.SAM3,             # segmentation ran on old frames
             StageId.PROJECTION,
             StageId.CERTIFY,          # the acta certified the old geometry
-            StageId.PGSR,             # PGSR trained on old poses/cloud
-            StageId.TSDF,             # TSDF mesh integrated old depth/poses
             StageId.INSTANCE_CLEANER, # instance PLYs from old segmentation
         ],
         StageId.VLM: [
             StageId.SAM3,             # SAM3 uses VLM categories
+            StageId.GENRECON,         # the scene mesh is of this geometry and segmentation
             StageId.PROJECTION,       # the projection is of SAM3's masks
             StageId.CERTIFY,          # instance loops come from the segmentation
             StageId.INSTANCE_CLEANER,
         ],
         StageId.SAM3: [
             StageId.PROJECTION,       # the projection is of THESE masks
+            StageId.GENRECON,         # the scene mesh is of this geometry and segmentation
             StageId.CERTIFY,          # instance loops come from the segmentation
-            StageId.PGSR,             # dynamic masks come from SAM3 artifacts
             StageId.INSTANCE_CLEANER, # instances depend on segmentation
         ],
         StageId.PROJECTION: [
             StageId.CERTIFY,          # the certification reads the projected instances
+            StageId.GENRECON,         # the scene mesh is of this geometry and segmentation
             StageId.INSTANCE_CLEANER,
         ],
         StageId.CLOUDCOMPY: [
             StageId.VLM,              # the semantic stages read THIS cloud
+            StageId.GENRECON,         # the scene mesh is of this geometry and segmentation
             StageId.SAM3,             # masks are projected onto THIS cloud
             StageId.PROJECTION,
             StageId.CERTIFY,          # the loop certifies THIS cleaned cloud
-            StageId.PGSR,             # the Gaussian seed is the cleaned cloud
-            StageId.TSDF,             # TSDF masks to the old cleaned_cloud
             StageId.INSTANCE_CLEANER,
         ],
         StageId.CERTIFY: [
-            StageId.PGSR,             # a mesh is built on the certified geometry
-            StageId.TSDF,
-        ],
-        StageId.PGSR: [
-            StageId.TSDF,             # precision TSDF integrates pgsr_render depths
+            StageId.GENRECON,         # the mesh is of the certified epoch
         ],
     }
 
@@ -1877,7 +1869,6 @@ class PipelineManager:
                 return False, "masks on disk but no projection (segmentation_result.json)"
             return True, "segmentation_result.json on disk"
 
-        if stage_id == StageId.PGSR:
             # active only under backend vggtomega_pgsr — for every other backend the
             # worker no-ops, so "complete" here is simply "nothing pending" unless
             # the render products are expected and missing.
@@ -1891,7 +1882,6 @@ class PipelineManager:
                 return True, "pgsr_render depths + report on disk"
             return False, "no PGSR rendered depths"
 
-        if stage_id == StageId.TSDF:
             scene_dir = output_dir / "tsdf" / "scene"
             meshes = list(scene_dir.glob("scene.*")) if scene_dir.is_dir() else []
             if not meshes:
@@ -1950,16 +1940,11 @@ def build_pipeline_stages(backend: Optional[str] = None,
     # `pipeline.auto_segment: false` disables the automatic semantic chain
     # (VLM auto-prompt → SAM3) and restores the on-demand flow.
     auto_segment = bool((config.get("pipeline") or {}).get("auto_segment", True))
+    auto_genrecon = bool((config.get("pipeline") or {}).get("auto_genrecon", True))   # the scene mesh closing the chain
     _semantic_stages = {StageId.VLM, StageId.SAM3, StageId.PROJECTION}
     if not auto_segment:
         logger.info("[Pipeline] auto_segment off — VLM/SAM3 stages disabled")
 
-    # `pipeline.auto_tsdf: false` stops the pipeline at the cleaned cloud — the
-    # TSDF/texrecon takes hours and the user wants the cloud on screen first;
-    # the mesh is then triggered manually.
-    auto_tsdf = bool((config.get("pipeline") or {}).get("auto_tsdf", True))
-    if not auto_tsdf:
-        logger.info("[Pipeline] auto_tsdf off — pipeline ends at the cleaned cloud")
 
     # `certify.auto_after_segmentation` is the ONE switch of the automatic
     # certification, and it has to gate BOTH of its triggers: the CERTIFY stage
@@ -1989,23 +1974,18 @@ def build_pipeline_stages(backend: Optional[str] = None,
         if stage_id == StageId.CERTIFY and not (auto_certify and auto_segment):
             return False   # config.yaml documents auto_segment:false as "no
                            # segmentation, no instance loops, no certification" 
-        if not auto_tsdf and stage_id in (StageId.TSDF, StageId.PGSR):
-            return False   # no mesh requested → the 2h PGSR stage has no consumer
+        if stage_id == StageId.GENRECON and not (auto_genrecon and auto_segment):
+            return False   # the mesh needs the segmentation's levels; pipeline.auto_genrecon switches it
         return True
 
-    # The PGSR stage exists only for backend vggtomega_pgsr; for every other
-    # backend it is dropped from the list entirely (user 2026-08-18: the UI
-    # must not show a "Precision (PGSR)" step the pipeline will never run).
-    order = [s for s in DEFAULT_STAGE_ORDER
-             if s != StageId.PGSR or backend == "vggtomega_pgsr"]
     return [PipelineStage(id=stage_id, enabled=_enabled(stage_id))
-            for stage_id in order]
+            for stage_id in DEFAULT_STAGE_ORDER]
 
 
 # the stages that run AFTER the published cloud: the segmentation chain and what
 # feeds on it (USER 2026-10-05: a per-scan check in "Reconstruir" turns them off;
 # the Autosegment window runs any subset of them later)
-SEGMENTATION_CHAIN = (StageId.VLM, StageId.SAM3, StageId.CERTIFY)
+SEGMENTATION_CHAIN = (StageId.VLM, StageId.SAM3, StageId.CERTIFY, StageId.GENRECON)
 # ... plus the projection stage, which only exists after SAM3's masks
 SEGMENT_WHEN_DONE = SEGMENTATION_CHAIN + (StageId.PROJECTION,)
 
