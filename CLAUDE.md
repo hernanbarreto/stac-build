@@ -1448,4 +1448,5 @@ overlay, never a detection filter.
   (vLLM/Qwen3-VL on 127.0.0.1:8799); clients use `server/semantic/`.
 - Phase R geometry reuses R3D (`vendor/r3d`) ported into `server/phase_r/`.
 - All code / YAML / docstrings / comments in ENGLISH.
-- No paid external APIs; everything local. GPU: RTX A6000 48 GB (sm_86).
+- No paid external APIs; everything local. GPU: NVIDIA A100 80 GB since 2026-10 (developed on an RTX A6000 48 GB).
+- Envs: da3 (backend + core), mapanything (Ω pass), semantic (vLLM), CloudComPy310, genrecon, nodejs; colmap = evaluation only.

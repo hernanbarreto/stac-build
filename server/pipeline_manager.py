@@ -215,13 +215,13 @@ class StageId(str, Enum):
 # manager hands the job's permit over for that stage and takes it back when it ends
 # (point 154; the lease is per process, a worker never inherits the manager's).
 STAGE_REGISTRY = {
-    StageId.RECONSTRUCTION:   {"label": "Reconstruction (intake · VLM+SAM3 · Ω · F0-F6 bend)", "icon": "🔨", "module": "workers.map_worker"},
-    StageId.CLOUDCOMPY:       {"label": "Cloud → viewer (octree + segmentation)", "icon": "🧹", "module": "workers.cloudcompy_worker"},
-    StageId.VLM:              {"label": "Scene Analysis",    "icon": "🔍", "module": "workers.vlm_worker", "engine": True},
-    StageId.SAM3:             {"label": "Segmentation",      "icon": "🏷️", "module": "workers.sam3_worker"},
+    StageId.RECONSTRUCTION:   {"label": "Reconstruction (intake · Ω chunks · F0–F6 bend · cloud)", "icon": "🔨", "module": "workers.map_worker"},
+    StageId.CLOUDCOMPY:       {"label": "Cloud → viewer (cleaned cloud + octree)", "icon": "🧹", "module": "workers.cloudcompy_worker"},
+    StageId.VLM:              {"label": "Scene analysis (Qwen3-VL, every keyframe)", "icon": "🔍", "module": "workers.vlm_worker", "engine": True},
+    StageId.SAM3:             {"label": "Segmentation (SAM 3.1 masks → cloud)", "icon": "🏷️", "module": "workers.sam3_worker"},
     StageId.PROJECTION:       {"label": "Mask projection (masks → cloud + octree)", "icon": "🧷",
                                "module": "pipeline_manager", "entry": "run_projection_stage"},
-    StageId.CERTIFY:          {"label": "Certification",     "icon": "📐", "module": "workers.certify_worker", "engine": True},
+    StageId.CERTIFY:          {"label": "Certification (closures · depth · floor · mask filter · final epoch)", "icon": "📐", "module": "workers.certify_worker", "engine": True},
     StageId.INSTANCE_CLEANER: {"label": "Instance Cleaning", "icon": "✨", "module": "workers.instance_cleaner_worker"},
     StageId.GENRECON:         {"label": "Mesh (GenRecon — the cloud decides presence)", "icon": "🧱", "module": "workers.genrecon_worker"},
 }

@@ -1,4 +1,4 @@
-# Final reconstruction pipeline — STATE OF 2026-10-07 (read this first in a new session)
+# Final reconstruction pipeline — STATE OF 2026-10-17 (read this first in a new session)
 
 This file is the single source of truth for: what the reconstruction pipeline IS today, what each
 stage does, the user decisions behind it, and EVERY pending item (two lists at the end: A = the
@@ -358,12 +358,7 @@ over 128k tracks, F6 resampled every Omega map through it: floor undulation 14.6
 | 10 | Two epochs: ORIGINAL + FINAL | `certify.single_final_epoch: false` (USER 2026-10-05) | the reconstruction stage discards its pose-only epochs and Omega's chunks and builds no comparison cloud; the published cloud (stage 7) is the ORIGINAL and stays stored + selectable when the certification publishes the FINAL. The epoch NUMBER is a counter (F2, F5, F6 each take one: zaragoza published 3, certified 4) — the user wants to read them as 0 and 1; renumbering is pending list A |
 | 11 | Object descriptions | `segmentation/object_captioner.caption_session_objects` (end of certify) | ONE Qwen3-VL call per object over its largest SAM3-mask views → `shape_caption` source `object` (config `segmentation.object_captions`) |
 
-**On demand (Meshing dialog; search + select / deselect all, nothing preselected):** **Object** = ShapeR on every selected instance (keyed by `instance_id`; every face oriented OUTWARD by ray parity — `reconstruction/orient_outward.py` — before and after the texture bake; drawn in the viewer in its segment colour) (`/api/segmentation/
-shape/export` → `segmentation/shaper_export.py` → `run_shaper_batch.py`, env `shaper`, preset max):
-PKL views = every posed keyframe that SEES the object (occlusion test with the published depth +
-`loops.witness.occlusion_tol_rel`), max 32; caption = manual > VLM object > VLM concept > label;
-texture baked from the scan frames (`shaper.texture`); progress per object in the dialog.
-**Mesh** = RANSAC + Poisson today → to become point2cad (pending B2).
+| 12 | **Scene mesh — GenRecon** (USER 2026-10-17: "este pipeline de mesh se hace al finalizar el autosegment") | `workers/genrecon_worker.py` → `server/tools/genrecon/run_cloud.sh` (adapter → `reconstruct_scene.py --coords_from_points --coords_mode cloud` → bake → publish), vendor `vendor/GenRecon` + `genrecon_stac.patch`, config `genrecon:` + `pipeline.auto_genrecon` | the LAST stage of the chain (also in the Autosegment window): the active voxels of every 3.7 m chunk come from the PUBLISHED cloud (32³ = 11.6 cm; the model's sparse-structure stage is skipped — it painted the floor at the cube's base and rooms behind the walls, 34 cm off on pccr), the cubes sit on the segmentation's floor/ceiling levels (`levels.json`), the SLAT generates the surface inside and the texture; bake 150 k faces / chunk; `output/tsdf/genrecon_cloud/`, provenance `vlm_generated`. Measured (`measure_mesh.py`): pccr 95 % of the mesh area within 5 cm of the cloud, 87 % of the cloud within 5 cm of the mesh, floor 0 cm; observatorio 97 % within 10 cm; zaragoza 93 %; bufferStop 100 %. Modes `cloud+hull` (completion from the SAM3 masks), `cloud+objects`, `cloud+unseen` exist, never default (USER: "lo que alucina lo alucina mal"). NO Meshing button: ShapeR, forms, hull, plane segments, Poisson, TSDF, PGSR, point2cad are REMOVED (2026-10-16/17); texrecon stays for the projected texture (`scene_texture.py`, parked). |
 
 **Run checks (automatic since 2026-10-04):** chunk check; `precision/cloud_metrics.py` = the floor metric (layer thickness + tilt-removed undulation per 1 m cell, every number in `precision.cloud_metrics`) after f6_bend (`chunk_check.json` → `cloud_metrics`) and on the certified cloud in the acta, where the crease-profile edge metric (`precision/edge_metric.py`, largest `edge_max_objects` objects) runs too; `output/precision/cloud_metrics.json`. pccr epoch 7 reference: 18.5 M pts, floor 5.2 cm thickness / 7.6 cm undulation. Diagnostics by hand: `python -m precision.flyers --session <dir>` (flyer classes a-d, viewer layer View → Flyers), `python -m precision.mono_ab --session <dir> --out <dir>` (the PointDiT A/B, Phase 8).
 
@@ -400,17 +395,12 @@ gives them a neighbour's label); the fallback retry carries the category (DONE 2
 
 ## PENDING — B. General
 
-1. **Meshing → Object (ShapeR):** validate on the fresh reconstruction (the texture frame on the
-   ShapeR mesh, the view counts; pccr read-only check: backpack 15 views (was 12), monitor 271: 20).
-2. **Meshing → Mesh → point2cad — REMOVED 2026-10-16** (USER: "elimina p2c de todo el pipeline y borra el
-   entorno, así nos sacamos uno con licencia de encima" — CC-BY-NC). The Mesh button runs the FORMS stage
-   (above). The original item, for the record: pressing Mesh (instead of RANSAC +
-   Poisson) runs point2cad on the structure — floor, walls, pipes, columns, beams, ducts, chosen by
-   GEOMETRY, never by label. To DEFINE before building: the full pipe SAM3 instance → surface regions
-   (`segmentation/perfect_object.py`) → point2cad (`segmentation/p2c_object.py`, env `point2cad`;
-   needs `.xyzc` = points + surface id; fits plane/sphere/cylinder/cone/INR, intersects into edges and
-   corners, output normalized — inverted in p2c_object) → metric B-rep. License CC-BY-NC (internal
-   use approved; a commercial deliverable needs a licence). Validated later by the user.
+1. **Meshing → CLOSED 2026-10-17.** The Object (ShapeR) and Mesh (RANSAC / point2cad / forms / hull / plane
+   segments) buttons are gone with their code; the scene mesh is stage 12 above (GenRecon, presence from
+   the cloud). What stays open: the projected texture (`scene_texture.py`, 62 % of the faces from the
+   photos at a 3 cm + 2 % tolerance, "zonas con diferencias" — the snap to the cloud and colour matching
+   are the knobs), and the outdoor sessions' painted "ceiling" at the cube's top (declared).
+2. **(folded into 1.)**
 3. **BIM comparison** (§11): register to the BIM on the structure; per element deviation of position /
    dimensions / flatness / plumbness with its margin; objects present / missing / displaced; a deviation
    below the session's own repeatability (pccr ~5 cm) is reported as not measurable.

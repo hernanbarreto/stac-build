@@ -1,5 +1,7 @@
 # STAC Build — Development Roadmap
 
+> The state of the shipped pipeline, stage by stage, is `docs/pipeline_final.md` (2026-10-17); this file is the tier plan.
+
 > Dependency-ordered, no deadlines — just logical sequence.  
 > Check items off as they are completed.
 
@@ -15,7 +17,7 @@ end-to-end (see `docs/phase0_report.md` … `docs/phase7_report.md`).
 
 - [x] **Phase 0** — persistent vLLM/Qwen3-VL semantic service (`semantic` env, `127.0.0.1:8799`)
 - [x] **Phase 1** — understanding-driven, open-vocabulary auto-prompter → SAM3
-- [x] **Phase R** — instance store, gravity, vote/onion metrics, inter-window Sim(3) pose graph, depth regularization, A/B fail-safe, **writeback into the TSDF fusion**
+- [x] **Phase R** — instance store, gravity, vote/onion metrics, gravity-aligned OBBs, depth regularization (the inter-window Sim(3) graph and the TSDF writeback were removed with their stages)
 - [x] **Phase 5** — spatial Q&A tools + user-defined evaluation volumes + orchestrator (`/api/spatial_qa`, `/api/scene/*`)
 - [x] **Phase 2** — per-instance class / material / state, conflict flags, structural routing
 - [x] **Phase 3** — 3D-anchored visual findings (cracks/moisture/…), multi-view dedup, honest precision eval
@@ -50,7 +52,7 @@ Everything here is implemented and working.
 - [x] SAM3 instance segmentation (video mode + DBSCAN clustering)
 - [x] InternVL3 scene analysis (VLM object inventory)
 - [x] RANSAC face detection per segment + non-destructive point assignment
-- [x] Voxel mesh visualization with normal-snapped quads
+- [x] Scene mesh: GenRecon generated inside the certified cloud's voxels (2026-10-17; TSDF/Poisson/PGSR/ShapeR meshing removed)
 - [x] Segment visibility toggles (classification attribute in Potree)
 - [x] BIM comparison (IFC parsing, C2M deviation, sábana)
 - [x] Coverage analysis (mesh sampling + KDTree proximity)
