@@ -6,9 +6,11 @@
   product). The classical chain with COLMAP's own SfM drifts 12.3 cm rms against the certified trajectory on this 464×832 phone video
   and its mesh sits 6–30 cm off the objects (42 % of its area within 5 cm of the cloud, 76 m²); OpenMVS's dense MVS with OUR poses agrees
   with the certified cloud to p50 0.6 cm where it measures and covers 51 % of it; OpenMVS's Delaunay graph-cut + RefineMesh + photo
-  texture on OUR cloud is the best mesh by the numbers (1.5 cm p50, 92 % of the cloud within 5 cm, objects 1.2–2.4 cm) against
-  GenRecon's 2.0 cm / 87 % / 1.1–3.3 cm — but AGPL-3.0: his product decision; the pipeline's stage 12 stays GenRecon, `run_openmvs.sh
-  <sid>:<scan> cloud` is the hand-run alternative. Env recipe `server/tools/openmvs/setup_env.sh` (OpenMVS master needs six source
+  texture on OUR cloud scored closest to the cloud (1.5 cm p50, 92 % within 5 cm) against GenRecon's 2.0 cm / 87 % — and HIS EYE
+  (00:50, four screenshots) overruled the table: the OpenMVS mesh is crumpled paper (facets, spikes, torn edges, giant dark
+  triangles), GenRecon's is the surface. LESSON: distance-to-cloud saturates at the cloud's own noise and rewards a mesh that hugs
+  the noise; a surface metric (roughness against the segmented planes, facet angles, slivers/spikes) must join measure_mesh.py
+  before the next comparison. The pipeline's stage 12 stays GenRecon; `run_openmvs.sh <sid>:<scan> cloud` exists as evidence. Env recipe `server/tools/openmvs/setup_env.sh` (OpenMVS master needs six source
   libraries and the PoseLib FORK its own vcpkg port pins; README there lists every trap met). COLMAP 4.2 renamed the GPU options
   (`--FeatureExtraction.use_gpu`, `--FeatureMatching.*`). `vendor/openMVS/work/` (4.2 GB) holds the intermediates, deletable.
 

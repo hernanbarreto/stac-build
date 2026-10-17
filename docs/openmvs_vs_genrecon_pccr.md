@@ -65,7 +65,17 @@ with it by construction; the two MVS variants are the independent instruments.
    texture, a closed and complete surface (332 m², ceilings and hidden sides) and an MIT licence. OpenMVS's
    Delaunay leaves a few spurious large triangles (1 % of the area beyond 50 cm from the cloud; bounds reach
    y −2.96 under the floor) that a trim would remove.
-4. Decision for the user: OpenMVS is AGPL-3.0 (copyleft — a product decision, not a technical one). The
+4. **HIS EYE (2026-10-17 00:50, four screenshots: two of `openmvs_cloud`, two of `genrecon_cloud`)**: the OpenMVS
+   mesh is crumpled paper — faceted, spiky, torn edges, large dark triangles across the floor and the walls, the
+   cabinet's corners shredded — and GenRecon's is the surface itself: flat tiles, closed cabinets, the
+   extinguisher, the table, clean textures. The table above did not see it because EVERY row is a distance to
+   the cloud's points, and that distance saturates at the cloud's own noise (1–2 cm): a surface that hugs the
+   noise point by point scores "closest" while GenRecon sits 2 cm away precisely because it passes through the
+   middle of the noise, where the surface is. The instrument that would have said it: roughness against the
+   planar segments the segmentation already names (floor, walls, cabinet faces — RMS of the mesh from the plane
+   fitted to the segment's points), the facet-angle distribution between neighbouring faces, and the count of
+   slivers and spikes — to add to `measure_mesh.py` before the next comparison. VERDICT: GenRecon, clearly.
+5. Decision for the user (licence): OpenMVS is AGPL-3.0 (copyleft — a product decision, not a technical one). The
    meshing stage of the pipeline stays GenRecon (`StageId.GENRECON`); `openmvs_cloud` exists as a measured
    alternative, selectable by hand (`run_openmvs.sh <sid>:<scan> cloud`), never run by the pipeline.
 
