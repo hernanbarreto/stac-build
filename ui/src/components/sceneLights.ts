@@ -22,8 +22,8 @@ const LAMP_DROP_M = 0.15                 // the light hangs this far under a cei
 const CEILING_MIN_Y = 1.8                // a fixture above this height is a ceiling one
 const SPOT_ANGLE = Math.PI / 3
 const SPOT_PENUMBRA = 0.6
-const MAX_SHADOW_SPOTS = 4
-const MAX_LIGHTS = 48
+const MAX_SHADOW_SPOTS = 1       // each shadow-casting spot is one more pass over the whole scene mesh per frame (USER 2026-10-17: "tá lenta la malla")
+const MAX_LIGHTS = 12            // every light is evaluated per fragment of every mesh
 
 export interface LightRecord {
     instanceId: number
@@ -101,6 +101,7 @@ export class SceneLights {
             }
         }
         windows.sort((a, c) => c.area - a.area)
+        lamps.sort((a, c) => (c.half[0] * c.half[1] * c.half[2]) - (a.half[0] * a.half[1] * a.half[2]))   // the biggest fixtures first under the cap
 
         let shadowSpots = 0
         for (const w of windows) {
