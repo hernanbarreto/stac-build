@@ -132,6 +132,7 @@ def bake_texture(
     keep_work: bool = False,
     progress_cb: Optional[Callable[[str], None]] = None,
     skip_visibility_test: bool = False,
+    labeling: Optional[np.ndarray] = None,   # per-face view label: 0 = unseen, k = the k-th view of sorted(frame_indices)
 ) -> Optional[Path]:
     """Bake a UV-atlas texture onto ``mesh_path`` and write it to ``out_glb``.
 
@@ -248,6 +249,14 @@ def bake_texture(
             "--keep_unseen_faces",
             "--no_intermediate_results",
         ]
+        if labeling is not None:
+            # OUR view selection (the cloud's z-buffer decides visibility, not texrecon's ray test against the
+            # mesh itself): texrecon skips its MRF and only cuts patches and levels seams. Binary size_t per face,
+            # in the mesh's face order; the views are numbered 1.. in texrecon's (sorted-name) order.
+            lab = np.asarray(labeling, dtype=np.uint64)
+            lab_path = work / "labeling.vec"
+            lab.tofile(str(lab_path))
+            cmd += ["-L", str(lab_path)]
         if skip_visibility_test:
             # texrecon's ray test against the mesh ITSELF: on GenRecon's scene tiles it left 70 % of the faces
             # unseen (self-intersections of the generated surface), 16 % without it (2026-10-17); the photometric

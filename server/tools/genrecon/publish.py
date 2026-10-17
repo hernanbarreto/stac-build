@@ -16,10 +16,15 @@ if work is not None and (work / "M_raw_to_genrecon.npy").exists():
         frame_note = "display transform undone: the mesh is in the session's RAW frame (the viewer applies floor_transform.npz)"
 d = SES / "output" / "tsdf" / name; d.mkdir(parents=True, exist_ok=True)
 out = d / f"{name}.glb"
+# ATOMIC: the viewer's folder watcher lists the mesh the moment the folder appears and fetched a GLB still being
+# written ("Too much data for declared Content-Length", 2026-10-17) — write beside it, then rename
+tmp = d / f"{name}.glb.part"
 if frame_note.startswith("the baker"):
-    shutil.copy2(glb, out)
+    shutil.copy2(glb, tmp)
 else:
-    sc.export(str(out))
+    sc.export(str(tmp), file_type="glb")
+import os
+os.replace(tmp, out)
 meta = {"method": "genrecon", "kind": "scene", "instance_id": None, "label": name, "glb_file": out.name, "textured": True,
         "provenance": "vlm_generated: GenRecon (Trellis.2 fine-tuned, kasothaphie/GenRecon eaf1468) conditioned on the "
                       "session's keyframes, certified poses and published cloud — generative: presence and shape, not a measurement",

@@ -25,7 +25,29 @@
   (1517 m²: a second floor at the cube's base, rooms behind the walls, all "unseen") and CLOSED it: "lo que
   alucina lo alucina mal, prefiero la versión anterior, la genrecon cloud" (2026-10-17 00:10). The refined
   rule (≤ 2 voxels behind a surface or in a hole) stays in the patch, selectable, NEVER run by default: the
-  product is mode `cloud`. Rejected meshes deleted.
+  product is mode `cloud`. Rejected meshes deleted. THEN mode `cloud+objects` (01:00): the model's voxels only
+  inside segmented objects' boxes (floor-standing boxes reaching the floor, no free-space veto inside, cloud
+  voxels active from 2 points there) — 536 m², the cloud still respected, but USER: "en algunas partes queda
+  muy bien y en otras tiene duplicidad de malla … no completó patas, gabinetes, duplicó las figuras": the
+  model generates ITS OWN copy of the object at every voxel of the box and never knows the measured voxels are
+  the same object → two copies wherever they disagree by more than a voxel. VERDICT: the product stays
+  `genrecon_cloud`. Next idea (not built): presence for completion from the SAM3 MASKS (the visual hull at the
+  voxel level inside the box, excluding voxels within one voxel of measured surface), the model only shaping
+  the fine surface — no duplicates by construction. `genrecon_cloud_tex` (texrecon, 89 % of the faces from the
+  photos after skipping texrecon's self-occlusion test, which left 70 % unseen): "en general está bien pero
+  tiene zonas con diferencias" — faces textured from views that do not see them (no occlusion test), the 11 %
+  generated-colour patches in another tone, 2–5 cm of misregistration between views; fixes to weigh: our own
+  per-face visibility from the cloud's z-buffer (texrecon labeling), the snap to the cloud, colour matching.
+- 2026-10-17 01:40, USER'S DECISION: "la mejor es la versión cloud, sin tex, cloud sola; después probamos con
+  tex; vamos a generar las otras" → mode `cloud` with the GENERATED texture is the product; the three other
+  sessions run in that mode (chain_batch_cloud). Built the same hour, selectable, not the product:
+  `hull_points.py` + `--coords_extra_points` (mode `cloud+hull`: completion presence from the SAM3 masks — the
+  SHELL of each object's visual hull inside its box, never within 10 cm of the cloud, never the solid interior;
+  pccr 52 k voxels of 5 cm in 214 objects → `genrecon_hull`, 483 m², the cloud still 83 % within 5 cm, no model
+  presence so no duplicates by construction) and `scene_texture.py` with OUR per-face view selection (the
+  cloud's z-buffer decides which views see a face; texrecon takes the labeling with `-L`, `bake_texture(
+  labeling=)`): 62 % of the faces from the photos at a 3 cm + 2 % tolerance (the mesh sits 2–5 cm off the
+  cloud in places, so the tolerance or the snap is the knob), the rest the generated colour.
   TEXTURE by PROJECTING the keyframes with the certified poses (`scene_texture.py`, texrecon per tile, views
   chosen by what they see, 4 min CPU) → `genrecon_cloud_tex`; the generated texture stays only where no frame
   sees. `snap_mesh.py` (vertices onto the cloud's local surface) exists, not applied: 2 cm p50 = the cloud's noise.

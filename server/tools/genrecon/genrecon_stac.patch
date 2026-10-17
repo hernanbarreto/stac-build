@@ -237,10 +237,10 @@ index 75bbfcd..b619dfa 100644
          if manual_xy is not None:
              x_min, x_max, y_min, y_max = manual_xy
 diff --git a/reconstruct_scene.py b/reconstruct_scene.py
-index 58a831e..bb2834a 100644
+index 58a831e..5612bea 100644
 --- a/reconstruct_scene.py
 +++ b/reconstruct_scene.py
-@@ -290,9 +290,155 @@ def build_parser() -> argparse.ArgumentParser:
+@@ -290,9 +290,216 @@ def build_parser() -> argparse.ArgumentParser:
          "Pure performance knob, no numerical effect. Drop to 2048/1024 when "
          "running with very many views (e.g. all-frames iPhone captures).",
      )
@@ -255,12 +255,20 @@ index 58a831e..bb2834a 100644
 +        "--coords_mode",
 +        type=str,
 +        default="cloud",
-+        choices=["cloud", "cloud+unseen"],
++        choices=["cloud", "cloud+unseen", "cloud+objects"],
 +        help="STAC: 'cloud' = the active voxels are the cloud's only (the sparse-structure stage skipped); "
 +        "'cloud+unseen' = the model's sparse structure is generated too and its voxels are ADDED where no "
 +        "keyframe saw through them (a voxel in front of the cloud's z-buffer in any keyframe is seen free and "
-+        "vetoed; behind the measured surface or in a hole of the cloud it is unseen and kept).",
++        "vetoed; behind the measured surface or in a hole of the cloud it is unseen and kept); "
++        "'cloud+objects' = the model's voxels are added only INSIDE the boxes of segmented objects "
++        "(<path>/objects.json, never floor/walls/ceiling) and never where a camera saw empty; inside those boxes "
++        "a cloud voxel is active from --coords_min_points_objects points (sparse legs).",
 +    )
++    parser.add_argument("--coords_extra_points", type=str, default=None,
++                        help="STAC: a .npy [N, 3] float32 of extra presence points in the scene's world frame (the completion "
++                        "voxels from the masks, hull_points.py): every chunk voxel holding one becomes active, no model presence.")
++    parser.add_argument("--coords_min_points_objects", type=int, default=2,
++                        help="STAC: inside an object's box a voxel of the cloud is active from this many points.")
 +    parser.add_argument(
 +        "--coords_min_points",
 +        type=int,
@@ -292,7 +300,8 @@ index 58a831e..bb2834a 100644
 +    return np.asarray(R_list, np.float32), np.asarray(t_list, np.float32), np.asarray(K_list, np.float32), hw
 +
 +
-+def _make_unseen_hook(points_path, scene_path, colmap_subdir, m_c2o, chunk_indices, R: int, cloud_coords, record, out_path, device):
++def _make_unseen_hook(points_path, scene_path, colmap_subdir, m_c2o, chunk_indices, R: int, cloud_coords, record, out_path, device,
++                      objects=None, mode: str = "cloud+unseen"):
 +    """STAC: returns the hook that merges the MODEL's sparse structure with the cloud's voxels: a generated voxel
 +    not in the cloud's set is kept only when NO keyframe saw through it — in every keyframe that frames it, it
 +    lies at or behind the cloud's z-buffer (min-filtered, half resolution) within one voxel. The record carries
@@ -315,7 +324,8 @@ index 58a831e..bb2834a 100644
 +    zbuf = zbuf.view(len(Rw), Hh, Wh)
 +    del P
 +    behind_vox = 2.0            # voxels behind the measured surface a generated voxel may still sit (declared, not measured)
-+    record["unseen"] = {"keyframes": int(len(Rw)), "zbuffer_hw": [Hh, Wh], "tau_vox": 1.0, "behind_vox": behind_vox, "chunks": []}
++    record["unseen"] = {"mode": mode, "keyframes": int(len(Rw)), "zbuffer_hw": [Hh, Wh], "tau_vox": 1.0, "behind_vox": behind_vox,
++                        "objects": (len(objects[0]) if objects is not None else 0), "chunks": []}
 +
 +    def hook(generated):
 +        merged = []
@@ -347,6 +357,15 @@ index 58a831e..bb2834a 100644
 +                # or where a camera looked and the reconstruction measured nothing (a hole) — never a volume deep
 +                # behind every surface (a room the model imagines behind a wall) nor a place no camera framed
 +                keep = ~seen_free & (near_behind | in_hole)
++                if mode == "cloud+objects":
++                    # only INSIDE a segmented object's box (grown by one voxel), never where a camera saw empty
++                    if objects is None:
++                        keep = torch.zeros_like(keep)
++                    else:
++                        in_obj = torch.from_numpy(_inside_boxes(pw.detach().cpu().numpy().astype(np.float64), objects, tau)).to(device)
++                        # no free-space veto inside the box: a leg with no points lies "in front of" the floor
++                        # the z-buffer measured behind it — the box is the constraint, the images condition the model
++                        keep = in_obj
 +            add = cand[keep]
 +            allc = torch.unique(torch.cat([cl, add], 0), dim=0).int()
 +            merged.append(torch.cat([torch.zeros(len(allc), 1, dtype=torch.int32, device=device), allc], 1))
@@ -363,13 +382,37 @@ index 58a831e..bb2834a 100644
 +    return hook
 +
 +
-+def _coords_from_points(points_path, m_c2o, chunk_indices, R: int, min_points: int, out_path) -> list[torch.Tensor]:
++def _load_objects(scene_path: Path):
++    """STAC: the segmented objects' boxes (objects.json, GenRecon's frame): centres [B, 3], axes [B, 3, 3] (columns), half [B, 3]."""
++    f = Path(scene_path) / "objects.json"
++    if not f.exists():
++        return None
++    o = json.loads(f.read_text(encoding="utf-8"))["objects"]
++    if not o:
++        return None
++    return (np.asarray([x["center"] for x in o], np.float64), np.asarray([x["axes"] for x in o], np.float64),
++            np.asarray([x["half_extents"] for x in o], np.float64), [x["label"] for x in o])
++
++
++def _inside_boxes(P: np.ndarray, objects, dilate: float) -> np.ndarray:
++    """Which points (N, 3) lie inside at least one object box, each box grown by ``dilate`` on every side."""
++    C, A, H, _ = objects
++    inside = np.zeros(len(P), dtype=bool)
++    for b in range(len(C)):
++        local = (P - C[b]) @ A[b]                       # columns are the axes → local = Aᵀ (p − c)
++        inside |= np.all(np.abs(local) <= H[b] + dilate, axis=1)
++    return inside
++
++
++def _coords_from_points(points_path, m_c2o, chunk_indices, R: int, min_points: int, out_path, objects=None, min_points_objects: int = 2,
++                        extra_points_path=None) -> list[torch.Tensor]:
 +    """STAC: the active voxels of every kept chunk from the MEASURED cloud. Voxel (i, j, k) of a chunk covers
 +    [i/R - 0.5, (i+1)/R - 0.5) of its unit cube on each axis (the convention of ``_global_grid_points``);
 +    it is active when it holds ``min_points`` points of the cloud. The record (coords_from_points.json)
 +    carries the per-chunk occupancy distribution the bound sat in."""
 +    P = np.load(points_path).astype(np.float64)
-+    coords, record = [], {"points": int(len(P)), "resolution": int(R), "min_points": int(min_points), "chunks": []}
++    E = np.load(extra_points_path).astype(np.float64) if extra_points_path is not None else None
++    coords, record = [], {"points": int(len(P)), "extra_points": (int(len(E)) if E is not None else 0), "resolution": int(R), "min_points": int(min_points), "chunks": []}
 +    for c in chunk_indices:
 +        M = m_c2o[c].detach().cpu().numpy().astype(np.float64)       # chunk unit cube → world (scale = chunk size)
 +        size = float(M[0, 0]); centre = M[:3, 3]
@@ -378,14 +421,32 @@ index 58a831e..bb2834a 100644
 +        ijk = np.clip(np.floor((u[inside] + 0.5) * R).astype(np.int64), 0, R - 1)
 +        lin = (ijk[:, 0] * R + ijk[:, 1]) * R + ijk[:, 2]
 +        uniq, counts = np.unique(lin, return_counts=True)
-+        keep = counts >= min_points
-+        vox = np.stack([uniq[keep] // (R * R), (uniq[keep] // R) % R, uniq[keep] % R], 1)
++        vox_all = np.stack([uniq // (R * R), (uniq // R) % R, uniq % R], 1)
++        thr = np.full(len(uniq), min_points)
++        n_obj = 0
++        if objects is not None:
++            centres_w = centre + ((vox_all + 0.5) / R - 0.5) * size
++            in_obj = _inside_boxes(centres_w, objects, size / R)
++            thr[in_obj] = min_points_objects; n_obj = int((in_obj & (counts >= min_points_objects) & (counts < min_points)).sum())
++        keep = counts >= thr
++        vox = vox_all[keep]
++        n_extra = 0
++        if E is not None:
++            ue = (E - centre) / size; ie = np.all(np.abs(ue) < 0.5, axis=1)
++            if ie.any():
++                ijk_e = np.clip(np.floor((ue[ie] + 0.5) * R).astype(np.int64), 0, R - 1)
++                lin_e = np.unique((ijk_e[:, 0] * R + ijk_e[:, 1]) * R + ijk_e[:, 2])
++                lin_k = (vox[:, 0] * R + vox[:, 1]) * R + vox[:, 2]
++                lin_new = np.setdiff1d(lin_e, lin_k)
++                n_extra = int(len(lin_new))
++                if n_extra:
++                    vox = np.concatenate([vox, np.stack([lin_new // (R * R), (lin_new // R) % R, lin_new % R], 1)])
 +        if len(vox) == 0:
 +            raise RuntimeError(f"chunk {c}: no voxel of the cloud holds {min_points} points")
 +        xyz = torch.from_numpy(vox.astype(np.int32))
 +        coords.append(torch.cat([torch.zeros(len(xyz), 1, dtype=torch.int32), xyz], 1))
 +        record["chunks"].append({"chunk": int(c), "points_inside": int(inside.sum()), "voxels_occupied": int(len(uniq)),
-+                                 "voxels_active": int(len(vox)),
++                                 "voxels_active": int(len(vox)), "sparse_in_objects_added": n_obj, "extra_voxels_added": n_extra,
 +                                 "count_p10_p50_p90": [float(v) for v in np.percentile(counts, [10, 50, 90])]})
 +    with (Path(out_path) / "coords_from_points.json").open("w", encoding="utf-8") as f:
 +        json.dump(record, f, indent=2)
@@ -396,25 +457,31 @@ index 58a831e..bb2834a 100644
  def main() -> None:
      parser = build_parser()
      args = parser.parse_args()
-@@ -380,6 +526,17 @@ def main() -> None:
+@@ -380,6 +587,23 @@ def main() -> None:
          seed=args.seed,
      )
      rel_t_kept = [rel_t[i] for i in sel.chunk_indices]
 +    coords_override, coords_hook = None, None
 +    if args.coords_from_points is not None:
 +        R_slat = pipeline.models[f"shape_slat_flow_model_{args.pipeline}"].resolution
++        objects = _load_objects(scene_path) if args.coords_mode == "cloud+objects" else None
++        if args.coords_mode == "cloud+objects" and objects is None:
++            parser.error("--coords_mode cloud+objects needs <path>/objects.json (the adapter writes it)")
 +        cloud_coords, coords_record = _coords_from_points(
 +            Path(args.coords_from_points), m_c2o, sel.chunk_indices, R_slat, args.coords_min_points, out_path,
++            objects=objects, min_points_objects=args.coords_min_points_objects,
++            extra_points_path=(Path(args.coords_extra_points) if args.coords_extra_points else None),
 +        )
 +        if args.coords_mode == "cloud":
 +            coords_override = cloud_coords
 +        else:
 +            coords_hook = _make_unseen_hook(Path(args.coords_from_points), scene_path, args.colmap_subdir, m_c2o, sel.chunk_indices,
-+                                            R_slat, cloud_coords, coords_record, out_path, pipeline.device)
++                                            R_slat, cloud_coords, coords_record, out_path, pipeline.device,
++                                            objects=objects, mode=args.coords_mode)
  
      if args.save_imgs:
          scene_dir = out_path / "scene"
-@@ -407,6 +564,8 @@ def main() -> None:
+@@ -407,6 +631,8 @@ def main() -> None:
          shape_slat_sampler_params=slat_sampler_params,
          tex_slat_sampler_params=slat_sampler_params,
          occ_threshold=args.occ_threshold,
