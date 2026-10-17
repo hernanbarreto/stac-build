@@ -27,3 +27,9 @@ cd /workspace/stac-build/vendor/GenRecon && git submodule update --init --recurs
 rm -rf /tmp/claude-0/genrecon_ext/o-voxel && cp -r o-voxel /tmp/claude-0/genrecon_ext/o-voxel && pip install /tmp/claude-0/genrecon_ext/o-voxel --no-build-isolation
 python -c "import torch, flash_attn, nvdiffrast, cumesh, flex_gemm, o_voxel; print('OK torch', torch.__version__, torch.cuda.is_available())" 2>&1 | tail -3
 echo "SETUP DONE"
+
+# STAC patch (2026-10-16): the active voxels from the session's cloud (--coords_from_points, modes cloud /
+# cloud+unseen), the chunk cubes on the session's floor/ceiling levels (levels.json), the configs on the pod's
+# converted DINOv3. Idempotent: skipped when already applied.
+G=/workspace/stac-build/vendor/GenRecon; P=/workspace/stac-build/server/tools/genrecon/genrecon_stac.patch
+if git -C "$G" apply --check "$P" 2>/dev/null; then git -C "$G" apply "$P" && echo "STAC patch applied"; else echo "STAC patch already applied (or the tree differs: check git -C $G status)"; fi

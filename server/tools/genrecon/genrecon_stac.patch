@@ -1,0 +1,425 @@
+diff --git a/configs/gen/slat_flow_img2shape/genrecon_512.json b/configs/gen/slat_flow_img2shape/genrecon_512.json
+index faa45cc..9c0029d 100755
+--- a/configs/gen/slat_flow_img2shape/genrecon_512.json
++++ b/configs/gen/slat_flow_img2shape/genrecon_512.json
+@@ -115,7 +115,7 @@
+             "image_cond_model": {
+                 "name": "DinoV3FeatureExtractor",
+                 "args": {
+-                    "model_name": "facebook/dinov3-vitl16-pretrain-lvd1689m",
++                    "model_name": "/workspace/stac-build/vendor/GenRecon/weights/dinov3-vitl16-hf",
+                     "image_size": 512
+                 }
+             }
+diff --git a/configs/gen/slat_flow_imgshape2tex/genrecon_512.json b/configs/gen/slat_flow_imgshape2tex/genrecon_512.json
+index 976fb1d..9575212 100755
+--- a/configs/gen/slat_flow_imgshape2tex/genrecon_512.json
++++ b/configs/gen/slat_flow_imgshape2tex/genrecon_512.json
+@@ -137,7 +137,7 @@
+             "image_cond_model": {
+                 "name": "DinoV3FeatureExtractor",
+                 "args": {
+-                    "model_name": "facebook/dinov3-vitl16-pretrain-lvd1689m",
++                    "model_name": "/workspace/stac-build/vendor/GenRecon/weights/dinov3-vitl16-hf",
+                     "image_size": 512
+                 }
+             }
+diff --git a/configs/gen/ss_flow_img/genrecon.json b/configs/gen/ss_flow_img/genrecon.json
+index ddbf7bb..493c897 100755
+--- a/configs/gen/ss_flow_img/genrecon.json
++++ b/configs/gen/ss_flow_img/genrecon.json
+@@ -99,7 +99,7 @@
+             "image_cond_model": {
+                 "name": "DinoV3FeatureExtractor",
+                 "args": {
+-                    "model_name": "facebook/dinov3-vitl16-pretrain-lvd1689m",
++                    "model_name": "/workspace/stac-build/vendor/GenRecon/weights/dinov3-vitl16-hf",
+                     "image_size": 512
+                 }
+             }
+diff --git a/configs/pipelines/original.json b/configs/pipelines/original.json
+index f5ec14c..766aeb7 100644
+--- a/configs/pipelines/original.json
++++ b/configs/pipelines/original.json
+@@ -81,7 +81,7 @@
+         "image_cond_model": {
+             "name": "DinoV3FeatureExtractor",
+             "args": {
+-                "model_name": "facebook/dinov3-vitl16-pretrain-lvd1689m"
++                "model_name": "/workspace/stac-build/vendor/GenRecon/weights/dinov3-vitl16-hf"
+             }
+         },
+         "rembg_model": {
+diff --git a/configs/pipelines/texture.json b/configs/pipelines/texture.json
+index e57f74d..2dcc034 100644
+--- a/configs/pipelines/texture.json
++++ b/configs/pipelines/texture.json
+@@ -81,7 +81,7 @@
+         "image_cond_model": {
+             "name": "DinoV3FeatureExtractor",
+             "args": {
+-                "model_name": "facebook/dinov3-vitl16-pretrain-lvd1689m"
++                "model_name": "/workspace/stac-build/vendor/GenRecon/weights/dinov3-vitl16-hf"
+             }
+         },
+         "rembg_model": {
+diff --git a/genrecon/pipelines/full_scene_images_to_3d.py b/genrecon/pipelines/full_scene_images_to_3d.py
+index b26f309..cf0a244 100644
+--- a/genrecon/pipelines/full_scene_images_to_3d.py
++++ b/genrecon/pipelines/full_scene_images_to_3d.py
+@@ -1,7 +1,7 @@
+ from __future__ import annotations
+ 
+ from contextlib import contextmanager, nullcontext
+-from typing import Optional
++from typing import Callable, Optional
+ 
+ import torch
+ 
+@@ -408,6 +408,8 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+         pipeline_type: Optional[str] = None,
+         occ_threshold: float = 0.0,
+         zero_3d_cond: bool = False,
++        coords_override: Optional[list[torch.Tensor]] = None,  # STAC: the active voxels of every chunk from the MEASURED cloud
++        coords_hook: Optional[Callable[[list[torch.Tensor]], list[torch.Tensor]]] = None,  # STAC: merges the generated voxels with the cloud's
+     ) -> tuple[MeshWithVoxel, list[torch.Tensor]]:
+         pipeline_type = pipeline_type or self.default_pipeline_type
+         if pipeline_type not in ("512", "1024"):
+@@ -439,66 +441,76 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+             scene_feats_stage = scene_feats_512
+             cond2d_feats_stage = cond2d_feats_512
+ 
+-        # ── Stage 1: Sparse structure ─────────────────────────────────────────
+-        ss_model = self.models["sparse_structure_flow_model"]
+-        scene_ext_ss, scene_intr_ss = self._prep_extrinsics_intrinsics(
+-            sel.scene_extrinsics_c0,
+-            sel.scene_intrinsics,
+-            ss_model.dtype,
+-        )
+-        ss_conds = self._build_global_dense_cond(
+-            ss_model,
+-            scene_feats_512.to(ss_model.dtype),
+-            cond2d_feats_512.to(ss_model.dtype),
+-            scene_ext_ss,
+-            scene_intr_ss,
+-            relative_translations,
+-            ss_model.resolution,  # flow model samples at latent res; ss_res is the decoded occ res.
+-            zero_3d_cond=zero_3d_cond,
+-        )
+-        noise_ss = [
+-            torch.randn(
+-                1,
+-                ss_model.in_channels,
+-                ss_res,
+-                ss_res,
+-                ss_res,
+-                dtype=getattr(ss_model, "dtype", torch.float32),
+-                device=self.device,
++        shape_model = self.models[shape_model_key]
++        if coords_override is None:
++            # ── Stage 1: Sparse structure ─────────────────────────────────────────
++            ss_model = self.models["sparse_structure_flow_model"]
++            scene_ext_ss, scene_intr_ss = self._prep_extrinsics_intrinsics(
++                sel.scene_extrinsics_c0,
++                sel.scene_intrinsics,
++                ss_model.dtype,
+             )
+-            for _ in range(num_chunks)
+-        ]
+-        params_ss = {**self.sparse_structure_sampler_params, **sparse_structure_sampler_params}
+-
+-        if self.low_vram:
+-            ss_model.to(self.device)
+-        with _amp_ctx(ss_model):
+-            z_s_list = MultiDiffusionOrchestrator(self.sparse_structure_sampler).sample(
++            ss_conds = self._build_global_dense_cond(
+                 ss_model,
+-                noise_ss,
+-                [c["cond"] for c in ss_conds],
+-                [c["neg_cond"] for c in ss_conds],
++                scene_feats_512.to(ss_model.dtype),
++                cond2d_feats_512.to(ss_model.dtype),
++                scene_ext_ss,
++                scene_intr_ss,
+                 relative_translations,
+-                **params_ss,
+-                tqdm_desc="Sampling sparse structure",
++                ss_model.resolution,  # flow model samples at latent res; ss_res is the decoded occ res.
++                zero_3d_cond=zero_3d_cond,
+             )
+-        if self.low_vram:
+-            ss_model.cpu()
+-        del ss_conds, noise_ss
+-
+-        with _vram_peak(f"joint_decode_sparse_structure ({num_chunks} chunks, ss_res={ss_res})"):
+-            aggr_occ_logit_list = self.joint_decode_sparse_structure(z_s_list, relative_translations, ss_res)
+-        del z_s_list
+-
+-        # ── Stage 2: Shape SLat ───────────────────────────────────────────────
+-        shape_model = self.models[shape_model_key]
+-        coords_list = self.extract_coords_from_occ_logits(
+-            aggr_occ_logit_list,
+-            ss_res,
+-            shape_model.resolution,
+-            threshold=occ_threshold,
+-        )
+-        del aggr_occ_logit_list
++            noise_ss = [
++                torch.randn(
++                    1,
++                    ss_model.in_channels,
++                    ss_res,
++                    ss_res,
++                    ss_res,
++                    dtype=getattr(ss_model, "dtype", torch.float32),
++                    device=self.device,
++                )
++                for _ in range(num_chunks)
++            ]
++            params_ss = {**self.sparse_structure_sampler_params, **sparse_structure_sampler_params}
++
++            if self.low_vram:
++                ss_model.to(self.device)
++            with _amp_ctx(ss_model):
++                z_s_list = MultiDiffusionOrchestrator(self.sparse_structure_sampler).sample(
++                    ss_model,
++                    noise_ss,
++                    [c["cond"] for c in ss_conds],
++                    [c["neg_cond"] for c in ss_conds],
++                    relative_translations,
++                    **params_ss,
++                    tqdm_desc="Sampling sparse structure",
++                )
++            if self.low_vram:
++                ss_model.cpu()
++            del ss_conds, noise_ss
++
++            with _vram_peak(f"joint_decode_sparse_structure ({num_chunks} chunks, ss_res={ss_res})"):
++                aggr_occ_logit_list = self.joint_decode_sparse_structure(z_s_list, relative_translations, ss_res)
++            del z_s_list
++
++            # ── Stage 2: Shape SLat ───────────────────────────────────────────────
++            shape_model = self.models[shape_model_key]
++            coords_list = self.extract_coords_from_occ_logits(
++                aggr_occ_logit_list,
++                ss_res,
++                shape_model.resolution,
++                threshold=occ_threshold,
++            )
++            del aggr_occ_logit_list
++        else:
++            # STAC (2026-10-16): presence is the cloud's, never the model's — the active voxels come from
++            # reconstruct_scene --coords_from_points (the session's published cloud voxelised per chunk);
++            # the generated sparse structure is not sampled at all.
++            coords_list = [c.to(self.device, dtype=torch.int32) for c in coords_override]
++            print(f"[STAC] active voxels from the cloud: {[int(c.shape[0]) for c in coords_list]} per chunk (sparse-structure stage skipped)")
++        if coords_hook is not None:
++            coords_list = [c.to(self.device, dtype=torch.int32) for c in coords_hook(coords_list)]
+         std = torch.tensor(self.shape_slat_normalization["std"])[None].to(self.device)
+         mean = torch.tensor(self.shape_slat_normalization["mean"])[None].to(self.device)
+ 
+diff --git a/inference/get_chunks.py b/inference/get_chunks.py
+index 75bbfcd..b619dfa 100644
+--- a/inference/get_chunks.py
++++ b/inference/get_chunks.py
+@@ -481,6 +481,13 @@ class ScannetMixin:
+         }
+         clean_points = self._get_clean_points(path, out_path, **clean_kwargs)
+         x_min, x_max, y_min, y_max, z_floor, z_ceiling, delta_z = self._get_room_size(clean_points)
++        lv = Path(path) / "levels.json"      # STAC: the floor and the ceiling MEASURED by the session (not percentiles)
++        if lv.exists():
++            with lv.open("r", encoding="utf-8") as f:
++                L = json.load(f)
++            z_floor, z_ceiling = float(L["z_floor"]), float(L["z_ceiling"])
++            delta_z = z_ceiling - z_floor
++            print(f"[STAC] levels.json: z_floor {z_floor:.3f} z_ceiling {z_ceiling:.3f} ({L.get('source')})")
+         manual_xy = getattr(self, "manual_xy_bounds", None)
+         if manual_xy is not None:
+             x_min, x_max, y_min, y_max = manual_xy
+diff --git a/reconstruct_scene.py b/reconstruct_scene.py
+index 58a831e..bb2834a 100644
+--- a/reconstruct_scene.py
++++ b/reconstruct_scene.py
+@@ -290,9 +290,155 @@ def build_parser() -> argparse.ArgumentParser:
+         "Pure performance knob, no numerical effect. Drop to 2048/1024 when "
+         "running with very many views (e.g. all-frames iPhone captures).",
+     )
++    parser.add_argument(
++        "--coords_from_points",
++        type=str,
++        default=None,
++        help="STAC: a .npy [N, 3] float32 cloud in the scene's world frame; every kept chunk's active voxels "
++        "are the cloud's occupied voxels (resolution of the shape SLat), the sparse-structure stage is skipped.",
++    )
++    parser.add_argument(
++        "--coords_mode",
++        type=str,
++        default="cloud",
++        choices=["cloud", "cloud+unseen"],
++        help="STAC: 'cloud' = the active voxels are the cloud's only (the sparse-structure stage skipped); "
++        "'cloud+unseen' = the model's sparse structure is generated too and its voxels are ADDED where no "
++        "keyframe saw through them (a voxel in front of the cloud's z-buffer in any keyframe is seen free and "
++        "vetoed; behind the measured surface or in a hole of the cloud it is unseen and kept).",
++    )
++    parser.add_argument(
++        "--coords_min_points",
++        type=int,
++        default=10,
++        help="STAC: a voxel is active when it holds at least this many cloud points (a bound against flyers, "
++        "declared with the occupancy distribution in coords_from_points.json).",
++    )
+     return parser
+ 
+ 
++def _read_colmap_cameras(scene_path: Path, colmap_subdir: str):
++    """STAC: the keyframes' w2c and pinhole K from the COLMAP text model (the distortion, < 1 px here, ignored)."""
++    cams = {}
++    for line in (scene_path / colmap_subdir / "cameras.txt").read_text().splitlines():
++        if line.startswith("#") or not line.strip():
++            continue
++        v = line.split(); cams[int(v[0])] = (int(v[2]), int(v[3]), [float(x) for x in v[4:8]])
++    R_list, t_list, K_list, hw = [], [], [], None
++    from scipy.spatial.transform import Rotation
++    for line in (scene_path / colmap_subdir / "images.txt").read_text().splitlines():
++        if line.startswith("#") or not line.strip():
++            continue
++        v = line.split()
++        if len(v) < 10:
++            continue
++        qw, qx, qy, qz = (float(x) for x in v[1:5]); t = [float(x) for x in v[5:8]]
++        W, H, (fx, fy, cx, cy) = cams[int(v[8])]
++        R_list.append(Rotation.from_quat([qx, qy, qz, qw]).as_matrix()); t_list.append(t); K_list.append([fx, fy, cx, cy]); hw = (H, W)
++    return np.asarray(R_list, np.float32), np.asarray(t_list, np.float32), np.asarray(K_list, np.float32), hw
++
++
++def _make_unseen_hook(points_path, scene_path, colmap_subdir, m_c2o, chunk_indices, R: int, cloud_coords, record, out_path, device):
++    """STAC: returns the hook that merges the MODEL's sparse structure with the cloud's voxels: a generated voxel
++    not in the cloud's set is kept only when NO keyframe saw through it — in every keyframe that frames it, it
++    lies at or behind the cloud's z-buffer (min-filtered, half resolution) within one voxel. The record carries
++    the per-chunk counts (generated, candidates, vetoed as seen free, added as unseen)."""
++    Rw, tw, Kw, (H, W) = _read_colmap_cameras(scene_path, colmap_subdir)
++    P = torch.from_numpy(np.load(points_path).astype(np.float32)).to(device)
++    Rw_t = torch.from_numpy(Rw).to(device); tw_t = torch.from_numpy(tw).to(device); Kw_t = torch.from_numpy(Kw).to(device)
++    Hh, Wh = H // 2, W // 2
++    FAR = 1.0e6
++    zbuf = torch.full((len(Rw), Hh * Wh), FAR, device=device)
++    for f in range(len(Rw)):
++        pc = P @ Rw_t[f].T + tw_t[f]
++        z = pc[:, 2]; front = z > 0.2
++        fx, fy, cx, cy = Kw_t[f]
++        u = ((fx * pc[front, 0] / z[front] + cx) * 0.5).long(); v = ((fy * pc[front, 1] / z[front] + cy) * 0.5).long()
++        inb = (u >= 0) & (u < Wh) & (v >= 0) & (v < Hh)
++        zbuf[f].scatter_reduce_(0, (v[inb] * Wh + u[inb]), z[front][inb], reduce="amin")
++    zbuf = zbuf.view(len(Rw), 1, Hh, Wh)
++    zbuf = -torch.nn.functional.max_pool2d(-zbuf, kernel_size=5, stride=1, padding=2)      # the min filter of the hole audit
++    zbuf = zbuf.view(len(Rw), Hh, Wh)
++    del P
++    behind_vox = 2.0            # voxels behind the measured surface a generated voxel may still sit (declared, not measured)
++    record["unseen"] = {"keyframes": int(len(Rw)), "zbuffer_hw": [Hh, Wh], "tau_vox": 1.0, "behind_vox": behind_vox, "chunks": []}
++
++    def hook(generated):
++        merged = []
++        for n, c in enumerate(chunk_indices):
++            M = m_c2o[c].detach().cpu().numpy().astype(np.float64); size = float(M[0, 0]); centre = torch.tensor(M[:3, 3], dtype=torch.float32, device=device)
++            tau = size / R
++            gen = generated[n][:, 1:].long().to(device); cl = cloud_coords[n][:, 1:].long().to(device)
++            lin_g = (gen[:, 0] * R + gen[:, 1]) * R + gen[:, 2]; lin_c = (cl[:, 0] * R + cl[:, 1]) * R + cl[:, 2]
++            cand = gen[~torch.isin(lin_g, lin_c)]
++            keep = torch.zeros(len(cand), dtype=torch.bool, device=device)
++            if len(cand):
++                pw = centre + ((cand.float() + 0.5) / R - 0.5) * size                          # world centres [N, 3]
++                seen_free = torch.zeros(len(cand), dtype=torch.bool, device=device)
++                near_behind = torch.zeros(len(cand), dtype=torch.bool, device=device)   # just behind a measured surface
++                in_hole = torch.zeros(len(cand), dtype=torch.bool, device=device)       # a camera looked there, nothing measured
++                for f0 in range(0, len(Rw), 32):
++                    Rb, tb, Kb = Rw_t[f0:f0 + 32], tw_t[f0:f0 + 32], Kw_t[f0:f0 + 32]
++                    pc = torch.einsum("fij,nj->fni", Rb, pw) + tb[:, None, :]                  # [F, N, 3]
++                    z = pc[..., 2]; front = z > 0.2; zs = torch.where(front, z, torch.ones_like(z))
++                    u = ((Kb[:, 0, None] * pc[..., 0] / zs + Kb[:, 2, None]) * 0.5).long(); v = ((Kb[:, 1, None] * pc[..., 1] / zs + Kb[:, 3, None]) * 0.5).long()
++                    inb = front & (u >= 0) & (u < Wh) & (v >= 0) & (v < Hh)
++                    uc = u.clamp(0, Wh - 1); vc = v.clamp(0, Hh - 1)
++                    zb = zbuf[f0:f0 + 32][torch.arange(len(Rb), device=device)[:, None], vc, uc]
++                    measured = inb & (zb < FAR)
++                    seen_free |= (measured & (z < zb - tau)).any(0)
++                    near_behind |= (measured & (z <= zb + behind_vox * tau)).any(0)
++                    in_hole |= (inb & (zb >= FAR)).any(0)
++                # kept: never seen free, and either just behind a measured surface (its thickness, its underside)
++                # or where a camera looked and the reconstruction measured nothing (a hole) — never a volume deep
++                # behind every surface (a room the model imagines behind a wall) nor a place no camera framed
++                keep = ~seen_free & (near_behind | in_hole)
++            add = cand[keep]
++            allc = torch.unique(torch.cat([cl, add], 0), dim=0).int()
++            merged.append(torch.cat([torch.zeros(len(allc), 1, dtype=torch.int32, device=device), allc], 1))
++            record["unseen"]["chunks"].append({"chunk": int(c), "generated": int(len(gen)), "cloud": int(len(cl)), "candidates": int(len(cand)),
++                                               "vetoed_seen_free": int(seen_free.sum()) if len(cand) else 0,
++                                               "rejected_deep_or_unframed": int((~seen_free & ~(near_behind | in_hole)).sum()) if len(cand) else 0,
++                                               "added_unseen": int(len(add)), "active": int(len(allc))})
++        with (Path(out_path) / "coords_from_points.json").open("w", encoding="utf-8") as fh:
++            json.dump(record, fh, indent=2)
++        print(f"[STAC] cloud+unseen: added {[r['added_unseen'] for r in record['unseen']['chunks']]} unseen voxels per chunk "
++              f"(seen free {[r['vetoed_seen_free'] for r in record['unseen']['chunks']]}, deep/unframed {[r['rejected_deep_or_unframed'] for r in record['unseen']['chunks']]}); "
++              f"active {[r['active'] for r in record['unseen']['chunks']]}")
++        return merged
++    return hook
++
++
++def _coords_from_points(points_path, m_c2o, chunk_indices, R: int, min_points: int, out_path) -> list[torch.Tensor]:
++    """STAC: the active voxels of every kept chunk from the MEASURED cloud. Voxel (i, j, k) of a chunk covers
++    [i/R - 0.5, (i+1)/R - 0.5) of its unit cube on each axis (the convention of ``_global_grid_points``);
++    it is active when it holds ``min_points`` points of the cloud. The record (coords_from_points.json)
++    carries the per-chunk occupancy distribution the bound sat in."""
++    P = np.load(points_path).astype(np.float64)
++    coords, record = [], {"points": int(len(P)), "resolution": int(R), "min_points": int(min_points), "chunks": []}
++    for c in chunk_indices:
++        M = m_c2o[c].detach().cpu().numpy().astype(np.float64)       # chunk unit cube → world (scale = chunk size)
++        size = float(M[0, 0]); centre = M[:3, 3]
++        u = (P - centre) / size
++        inside = np.all(np.abs(u) < 0.5, axis=1)
++        ijk = np.clip(np.floor((u[inside] + 0.5) * R).astype(np.int64), 0, R - 1)
++        lin = (ijk[:, 0] * R + ijk[:, 1]) * R + ijk[:, 2]
++        uniq, counts = np.unique(lin, return_counts=True)
++        keep = counts >= min_points
++        vox = np.stack([uniq[keep] // (R * R), (uniq[keep] // R) % R, uniq[keep] % R], 1)
++        if len(vox) == 0:
++            raise RuntimeError(f"chunk {c}: no voxel of the cloud holds {min_points} points")
++        xyz = torch.from_numpy(vox.astype(np.int32))
++        coords.append(torch.cat([torch.zeros(len(xyz), 1, dtype=torch.int32), xyz], 1))
++        record["chunks"].append({"chunk": int(c), "points_inside": int(inside.sum()), "voxels_occupied": int(len(uniq)),
++                                 "voxels_active": int(len(vox)),
++                                 "count_p10_p50_p90": [float(v) for v in np.percentile(counts, [10, 50, 90])]})
++    with (Path(out_path) / "coords_from_points.json").open("w", encoding="utf-8") as f:
++        json.dump(record, f, indent=2)
++    print(f"[STAC] coords from the cloud ({len(P):,} points): {[r['voxels_active'] for r in record['chunks']]} active voxels per chunk at R={R}")
++    return coords, record
++
++
+ def main() -> None:
+     parser = build_parser()
+     args = parser.parse_args()
+@@ -380,6 +526,17 @@ def main() -> None:
+         seed=args.seed,
+     )
+     rel_t_kept = [rel_t[i] for i in sel.chunk_indices]
++    coords_override, coords_hook = None, None
++    if args.coords_from_points is not None:
++        R_slat = pipeline.models[f"shape_slat_flow_model_{args.pipeline}"].resolution
++        cloud_coords, coords_record = _coords_from_points(
++            Path(args.coords_from_points), m_c2o, sel.chunk_indices, R_slat, args.coords_min_points, out_path,
++        )
++        if args.coords_mode == "cloud":
++            coords_override = cloud_coords
++        else:
++            coords_hook = _make_unseen_hook(Path(args.coords_from_points), scene_path, args.colmap_subdir, m_c2o, sel.chunk_indices,
++                                            R_slat, cloud_coords, coords_record, out_path, pipeline.device)
+ 
+     if args.save_imgs:
+         scene_dir = out_path / "scene"
+@@ -407,6 +564,8 @@ def main() -> None:
+         shape_slat_sampler_params=slat_sampler_params,
+         tex_slat_sampler_params=slat_sampler_params,
+         occ_threshold=args.occ_threshold,
++        coords_override=coords_override,
++        coords_hook=coords_hook,
+     )
+ 
+     coords_resolution = pipeline.models[f"shape_slat_flow_model_{args.pipeline}"].resolution

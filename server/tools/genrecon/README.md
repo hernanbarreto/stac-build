@@ -28,3 +28,28 @@ presence and shape, never a measurement.
 pccr 2026-10-16 (epoch 4, 295 keyframes, 600 k points, 25 chunks of 3.72 m): generation 15 min on the
 A100 (VRAM peak 22 GB, the three stages sampled jointly for the whole scene: 12 steps each at 7.8 / 10.8 /
 5.4 s per step), raw mesh 40.9 M faces; light bake 13 min → 3.6 M faces, 304 MB.
+
+## The cloud decides presence (2026-10-16 night, USER: "lo ideal es que copie la nube")
+
+Measured on pccr epoch 4 with `measure_mesh.py`: the vendor's own run put only 8 % of its mesh area within 10 cm
+of the cloud — the chunker anchors each cube at the 0.2-percentile of z of a 600 k subsample (the entrance floor)
+and the model, trained with the floor at the cube's base, paints the whole floor there (34 cm under the walk) and
+everything standing on it. Now (vendor patch `genrecon_stac.patch`, applied by `setup_env.sh`):
+
+- `adapter.py` writes `cloud_genrecon.npy` (the WHOLE published cloud in GenRecon's frame) and `levels.json`
+  (lowest support level / highest ceiling level from the segmentation; the chunker reads it instead of percentiles).
+- `run_cloud.sh <sid>:<scan> [name] [min pts/voxel = 10] [cloud | cloud+unseen]` → `reconstruct_scene.py
+  --coords_from_points --coords_mode`: the active voxels of every chunk (32³, 11.6 cm; the decoder refines to
+  7 mm inside) are the cloud's occupied voxels. `cloud` skips the sparse-structure stage (VRAM 8 GB). `cloud+unseen`
+  generates it too and ADDS its voxels only where no keyframe saw through them (the cloud's z-buffer per keyframe,
+  min-filtered, half res, one voxel of tolerance; the record `coords_from_points.json` counts generated / vetoed /
+  added per chunk) — completion of what no camera saw, never where a camera saw empty space.
+- `measure_mesh.py <glb>`: the one record to compare variants (mesh area within bands of the cloud, the cloud
+  against the mesh surface, the cameras' height over the floor under them, the ceiling, named objects).
+- `scene_texture.py <glb_in> <glb_out> [max views = 80]`: the texture by PROJECTING the keyframes with the certified
+  poses (texrecon per tile, the views chosen by what they see), replacing the generated one; write the meta by hand.
+- `snap_mesh.py`: vertices within the run's voxel moved onto the cloud's local surface; not applied (2 cm p50 = the
+  cloud's own noise).
+
+pccr results: mode cloud 95 % of the mesh area within 5 cm of the cloud, 87 % of the cloud within 5 cm of the
+mesh, floor 0 cm, objects 1–3 cm (`output/tsdf/genrecon_cloud`, textured by projection `genrecon_cloud_tex`).

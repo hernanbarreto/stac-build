@@ -1,5 +1,42 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ 2026-10-16 (late night) — GenRecon: THE CLOUD DECIDES PRESENCE (USER: "lo ideal es que copie la nube")
+- The first pccr mesh ("es una maravilla") was MEASURED (`server/tools/genrecon/measure_mesh.py`, the one record
+  for every variant): only 8 % of its area within 10 cm of the cloud, the floor 34 cm under the floor the
+  cameras walked on (camera height 1.29 m in the cloud, 1.59 m in the mesh), the ceiling 1.3 m up, desk −46 cm,
+  door +19 cm sideways, 1279 m² of mesh for 332 m² of scene. CAUSE: GenRecon's chunker anchors each 3.7 m cube
+  at the 0.2-percentile of z of a 600 k subsample (pccr's entrance floor at −0.37) and the model, trained with
+  the floor at the cube's base and the ceiling at 92 % of its height, paints them there — everything standing
+  on the floor goes with it; what it reads from the images (ducts) lands within 4 cm. The user's "por ahí es
+  más métrico" was answered with that camera-height test. No frame/axis error (every mirror/rotation tested).
+- FIX (vendor patch `server/tools/genrecon/genrecon_stac.patch`, applied by setup_env.sh; the clone is
+  git-ignored): `reconstruct_scene.py --coords_from_points <npy> --coords_min_points 10 --coords_mode
+  cloud|cloud+unseen` — the active voxels of every chunk (32³ = 11.6 cm; the decoder refines to 7 mm inside)
+  are the FULL published cloud's occupied voxels (`adapter.py` writes `cloud_genrecon.npy`); `cloud` skips the
+  sparse-structure stage (VRAM 22 → 8 GB); `cloud+unseen` generates it and keeps its voxels only where no
+  keyframe saw through them (the cloud's z-buffer per keyframe, min-filtered, half res) AND they sit just behind
+  a measured surface (≤ 2 voxels) or in a hole a camera looked into — never a room imagined behind a wall
+  (the first rule without that clause added 3–7 k voxels per chunk, nearly all behind the walls). The chunker
+  reads `levels.json` (lowest support level / highest ceiling level from the segmentation) instead of
+  percentiles. `run_cloud.sh <sid>:<scan> [name] [min pts] [mode]`; vLLM is not touched by it (fits beside).
+- RESULT pccr, mode cloud (`output/tsdf/genrecon_cloud`): 95 % of the mesh area within 5 cm of the cloud,
+  87 % of the cloud within 5 cm of the mesh, floor 0 cm, objects 1–3 cm, 332 m². USER: "está perfecta" — and
+  asked for hallucinated completion of what is not seen → mode cloud+unseen (`genrecon_fill`, in evaluation).
+  TEXTURE by PROJECTING the keyframes with the certified poses (`scene_texture.py`, texrecon per tile, views
+  chosen by what they see, 4 min CPU) → `genrecon_cloud_tex`; the generated texture stays only where no frame
+  sees. `snap_mesh.py` (vertices onto the cloud's local surface) exists, not applied: 2 cm p50 = the cloud's noise.
+  The other sessions (observatorio, zaragoza, bufferStop) are NOT yet re-run with the cloud modes; their old
+  meshes were deleted (USER: "andá eliminando los glb que ya no se usan"). Outdoor sessions will get a painted
+  "ceiling" at the cube's top — declared.
+- UI the same night (commit f9fda15): `components/sceneLights.ts` — the segmentation's lamps become point
+  lights (under a ceiling fixture), windows/skylights daylight spots aimed into the room (the largest four cast
+  shadows), rebuilt with every OBB list; the Display light slider scales the ambient, the shadow sun and these;
+  point opacity slider (0 = the points discarded, under 1 they stop writing depth). Meshes already cast/receive
+  (shadows.ts since 2026-10-01). The point cloud is not lit directionally (no normals in its buffers).
+- LESSON: `semantic.service.ensure_service()` launches vLLM with die-with-parent — called from a short python
+  it dies with it (that is why vLLM never came back after the batch); from a shell use `setsid nohup bash
+  scripts/serve_semantic.sh`, and only with ≥ 40 GB free on the card (vLLM refuses otherwise).
+
 ## ⭐⭐ 2026-10-16 (night) — GenRecon TRIAL ON pccr (USER: "le damos dale, completo")
 - After the day's mesh verdicts the user pointed at WorldRecon (kszpxxzmc, arXiv 2610.18846, no code/weights)
   and its released predecessor **GenRecon** (TUM, MIT, arXiv 2605.23888): the scene in 3.7 m chunks, each

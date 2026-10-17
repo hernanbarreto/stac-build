@@ -188,3 +188,5 @@ vendor/LoGeR/
 
 # Evaluation battery runs (python -m server.evaluation run → runs/eval/<date_time>/, GBs of variant sessions)
 /runs/
+# GenRecon clone (kasothaphie/GenRecon @ eaf1468 + server/tools/genrecon/genrecon_stac.patch; checkpoints 13 GB, work/ outputs)
+vendor/GenRecon/
