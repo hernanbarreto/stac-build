@@ -51,12 +51,6 @@ TAU = 0.3                  # VGG-T3's published co-visibility threshold (H is ca
 TOL_QUANTILE = 0.95        # the depth-agreement tolerance is MEASURED: this quantile of the
                            # disagreement between two windows' depth of the same keyframe
 SAMPLES = 1500             # points per keyframe for the co-visibility test
-MAX_PLAN_PX = 600_000      # the planner's WORKING resolution: a window's depth maps above this many
-                           # pixels per frame are read at the integer stride that brings them under it
-                           # (K scaled with it). The calibration sessions (pccr, zaragoza, observatorio:
-                           # 464×832 = 0.39 Mpx native) are under it and stay bit-identical; station
-                           # (1092×1932 = 2.1 Mpx) reads at stride 2 (0.53 Mpx) — 2026-10-17, when the
-                           # planner spent over an hour reading 309 windows three times
 
 # H — co-visibility lengths per chunk. CALIBRATED on the user's visual verdicts; a constant of the
 # method, not a configuration and not a user option (USER 2026-10-06). Every D below was measured
@@ -156,28 +150,10 @@ def _placements(windows) -> List[np.ndarray]:
     return G
 
 
-def plan_stride(h: int, w: int) -> int:
-    """The integer stride that brings a window's frames under MAX_PLAN_PX (1 for the calibration sessions)."""
-    return max(1, int(np.ceil(np.sqrt(h * w / MAX_PLAN_PX))))
-
-
-def _window_maps(path: str, stride: int) -> dict:
-    """One window's depth, conf and K at the planner's working resolution (ONE read of the file)."""
-    with np.load(path) as z:
-        depth = z["depth"].astype(np.float32); conf = z["conf"].astype(np.float32)
-        K = z["intrinsics"].astype(np.float64)
-    if stride > 1:
-        depth = np.ascontiguousarray(depth[:, ::stride, ::stride]); conf = np.ascontiguousarray(conf[:, ::stride, ::stride])
-        K = K.copy(); K[:, :2, :] /= stride
-    return {"depth": depth, "conf": conf, "K": K}
-
-
-def measure_views(wdir: Path, log: Optional[Callable] = None) -> Tuple[List[int], Dict[int, dict], List[dict], float]:
+def keyframe_views(wdir: Path) -> Tuple[List[int], Dict[int, dict], List[dict]]:
     """Every keyframe's view from the window where it is most central: c2w (chained), depth, conf,
-    K — all from THAT window, so pose and depth agree — and the depth-agreement tolerance
-    (TOL_QUANTILE of |z_a − z_b| / mean over the keyframes two consecutive windows share), in ONE
-    sequential read of the windows: each file is decompressed once, the previous window's maps are
-    kept only for the tolerance pairs, and only the n kept frames' maps stay in memory."""
+    K — all from THAT window, so pose and depth agree. Each frame's maps are COPIED out of their
+    window, so only the n kept frames stay in memory, never every window whole."""
     windows = _load_windows(wdir)
     G = _placements(windows)
     best: Dict[int, Tuple[float, int, int]] = {}
@@ -187,44 +163,17 @@ def measure_views(wdir: Path, log: Optional[Callable] = None) -> Tuple[List[int]
             d = abs(i - (n - 1) / 2.0)
             if f not in best or d < best[f][0]:
                 best[f] = (d, k, i)
-    wanted: Dict[int, List[Tuple[int, int]]] = {}
-    for f, (_d, k, i) in best.items():
-        wanted.setdefault(k, []).append((f, i))
     views: Dict[int, dict] = {}
-    pool: List[np.ndarray] = []
-    prev: Optional[dict] = None
-    stride = None
-    t0 = time.time(); step = max(1, len(windows) // 10)
-    for k, w in enumerate(windows):
-        if stride is None:
-            with np.load(w["path"]) as z:
-                _n, h, ww = z["depth"].shape
-            stride = plan_stride(int(h), int(ww))
-            if log and stride > 1:
-                log(f"{LOG_TAG} windows of {h}×{ww} px read at stride {stride} ({h * ww / stride ** 2 / 1e6:.2f} Mpx per frame, bound {MAX_PLAN_PX / 1e6:.2f})")
-        maps = _window_maps(w["path"], stride)
-        for f, i in wanted.get(k, []):
-            views[f] = {"c2w": G[k] @ w["c2w"][i], "depth": np.array(maps["depth"][i]),
-                        "conf": np.array(maps["conf"][i]), "K": np.array(maps["K"][i]), "window": k}
-        if prev is not None:
-            a = windows[k - 1]
-            shared = [f for f in w["frames"] if f in a["frames"]]
-            for f in shared[:: max(1, len(shared) // 4)]:
-                da = prev["depth"][a["frames"].index(f)]; db = maps["depth"][w["frames"].index(f)]
-                ok = (da > 0) & (db > 0)
-                r = np.abs(da[ok] - db[ok]) / (0.5 * (da[ok] + db[ok]))
-                pool.append(r[:: max(1, r.size // 4000)])
-        prev = maps
-        if log and ((k + 1) % step == 0 or k + 1 == len(windows)):
-            log(f"{LOG_TAG} windows read {k + 1}/{len(windows)} ({time.time() - t0:.0f} s)")
-    tol = float(np.quantile(np.concatenate(pool), TOL_QUANTILE)) if pool else 0.05
-    return sorted(views), views, windows, tol
-
-
-def keyframe_views(wdir: Path) -> Tuple[List[int], Dict[int, dict], List[dict]]:
-    """``measure_views`` without the tolerance (kept for callers that measure it apart)."""
-    frames, views, windows, _tol = measure_views(wdir)
-    return frames, views, windows
+    cache: Dict[int, dict] = {}
+    for f, (_d, k, i) in sorted(best.items()):
+        if k not in cache:
+            with np.load(windows[k]["path"]) as z:
+                cache = {k: {"depth": z["depth"].astype(np.float32), "conf": z["conf"].astype(np.float32),
+                             "K": z["intrinsics"].astype(np.float64)}}
+        z = cache[k]
+        views[f] = {"c2w": G[k] @ windows[k]["c2w"][i], "depth": np.array(z["depth"][i]),
+                    "conf": np.array(z["conf"][i]), "K": np.array(z["K"][i]), "window": k}
+    return sorted(views), views, windows
 
 
 def measured_tol(windows) -> float:
@@ -274,7 +223,7 @@ def covis_dir(Pi: np.ndarray, vj: dict, tol: float) -> float:
 
 
 def covis_lengths_margins(frames: List[int], views: Dict[int, dict], tol: float,
-                          horizon: Optional[int] = None, log: Optional[Callable] = None) -> Tuple[np.ndarray, np.ndarray]:
+                          horizon: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
     """(ℓ, τ-margin): ℓ(i) by the majority rule (design §1.3, -1 = a censored scan) and, per
     keyframe, the smallest |c − τ| among the co-visibility tests that decided its ℓ — how close
     one flipped test is (docs/plan_determinismo.md point 15: recorded, never acted on)."""
@@ -283,10 +232,7 @@ def covis_lengths_margins(frames: List[int], views: Dict[int, dict], tol: float,
     P = {f: _samples(views[f]) for f in frames}
     ell = np.zeros(n, int)
     margin = np.full(n, np.inf)
-    t0 = time.time(); step = max(1, n // 10)
     for a in range(n):
-        if log and a and a % step == 0:
-            log(f"{LOG_TAG} co-visibility {a}/{n} ({time.time() - t0:.0f} s)")
         passes = fails = 0; last = a; censored = True
         for b in range(a + 1, min(n, a + reach)):
             c = min(covis_dir(P[frames[a]], views[frames[b]], tol), covis_dir(P[frames[b]], views[frames[a]], tol))
@@ -693,11 +639,12 @@ def measure_inputs(scan_dir: Path, log: Callable = print) -> Dict[str, Any]:
                          f"stamp {stamp[:12]} is persisted — regenerate the windows "
                          f"(intake.walk.run_da3_windows) first")
     t0 = time.time()
-    frames, views, windows, tol = measure_views(wdir, log=log)
+    frames, views, windows = keyframe_views(wdir)
     walk_n = int((load_walk(scan_dir) or {}).get("n_keyframes", -1))
     if walk_n != len(frames):
         raise CovisError(f"walk.json counts {walk_n} keyframes, the windows hold {len(frames)} — "
                          f"the walk was not measured on these windows")
+    tol = measured_tol(windows)
     # THE PLAN IS MEASURED ON THE PARALLAX KEYFRAMES ONLY (USER 2026-10-07). H was calibrated on
     # keyframes chosen by parallax alone; the keyframes the selector adds in a TURN
     # (intake/parallax.py, closed_by "rotation") give every view more co-visible neighbours
@@ -706,7 +653,7 @@ def measure_inputs(scan_dir: Path, log: Callable = print) -> Dict[str, Any]:
     # They fill the turns INSIDE the chunks; they never move a cut or stretch a budget.
     plan_idx = planning_indices(scan_dir, frames)
     pframes = [frames[i] for i in plan_idx]
-    ell, tau_margin = covis_lengths_margins(pframes, views, tol, log=log)
+    ell, tau_margin = covis_lengths_margins(pframes, views, tol)
     delta = budget(ell)
     zbar = [frame_depth_median(views[f]) for f in pframes]
     c2w = np.stack([views[f]["c2w"] for f in pframes])
@@ -1015,7 +962,8 @@ def main(argv=None) -> int:
         if a.out:
             Path(a.out).write_text(json.dumps(res, indent=1))
         return 0
-    frames, views, windows, tol = measure_views(sess / "output" / "da3_windows", log=print)
+    frames, views, windows = keyframe_views(sess / "output" / "da3_windows")
+    tol = measured_tol(windows)
     ell = covis_lengths(frames, views, tol)
     d = budget(ell)
     c = np.array([views[f]["c2w"][:3, 3] for f in frames])
