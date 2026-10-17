@@ -1,6 +1,9 @@
 # CLAUDE.md — working rules for this repo
 
 ## ⭐⭐⭐ 2026-10-17 (01:10) — THE REAL TEXTURE ON GENRECON'S MESH, ITS MATERIAL KEPT (USER: "la mejor que he visto hasta ahora, impresionante")
+- CLOSING VERDICT OF THE DAY (USER 02:00): "creo que tenemos a hoy el pipeline ganador … pasamos por encima al estándar colmap y mvs por
+  muchísimo" — intake → Ω chunks → F0–F6 → certified cloud → VLM/SAM3 → certification → GenRecon (presence from the cloud) → the
+  keyframes baked onto it (`genrecon_photo`). Measured against COLMAP + OpenMVS on pccr the same night (docs/openmvs_vs_genrecon_pccr.md).
 - USER: "tenemos que generar la textura real sobre la malla de genrecon, y mantengamos ese tono plástico o metálico que brilla que es
   divino, si logramos eso ya estamos al máximo nivel". `server/tools/genrecon/photo_albedo.py <session> <genrecon glb> <name>`: every
   texel of GenRecon's OWN UV atlas is re-coloured from the keyframes that see its surface point — occlusion by the mesh's own depth per
