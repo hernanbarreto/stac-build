@@ -1,5 +1,17 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ 2026-10-17 (01:10) — THE REAL TEXTURE ON GENRECON'S MESH, ITS MATERIAL KEPT (USER: "la mejor que he visto hasta ahora, impresionante")
+- USER: "tenemos que generar la textura real sobre la malla de genrecon, y mantengamos ese tono plástico o metálico que brilla que es
+  divino, si logramos eso ya estamos al máximo nivel". `server/tools/genrecon/photo_albedo.py <session> <genrecon glb> <name>`: every
+  texel of GenRecon's OWN UV atlas is re-coloured from the keyframes that see its surface point — occlusion by the mesh's own depth per
+  keyframe (nvdiffrast, 295 renders in 5 s), weight cos⁴/z², the best 3 views blended, 3 px padding; texels no keyframe sees keep the
+  generated colour tone-matched per part; the metallic-roughness TEXTURE (where the shine lives: GenRecon's material is metallic 1,
+  roughness 1 + a per-texel metallic-roughness map), the factors and the UVs stay exactly as generated. Two self-checks decide the
+  image-y and atlas-row conventions against the certified cloud's z-buffer (2.1 cm median on pccr) and the UVs themselves. pccr:
+  80.7 % of the covered texels photographed, 73 s, published as `genrecon_photo` — HIS VERDICT: the best mesh so far. NOT yet in the
+  pipeline (his OK pending for: GenRecon stage → bake → the product). `omvs_transfer.py` = the same with OpenMVS's TextureMesh
+  atlas (material mapped back by face correspondence), for comparison only.
+
 ## ⭐⭐ 2026-10-17 (morning) — COLMAP + OpenMVS MEASURED AGAINST THE PIPELINE ON pccr (USER: "todos hablan de que la mejor combinación es colmap+openmvs")
 - Four meshes of pccr, one instrument (`server/tools/genrecon/measure_mesh.py`), full table in `docs/openmvs_vs_genrecon_pccr.md`,
   all published under pccr's `output/tsdf/` (`openmvs_colmap`, `openmvs_full`, `openmvs_cloud`, `colmap_sparse`; `genrecon_cloud` is the
