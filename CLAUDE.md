@@ -20,8 +20,12 @@
   reads `levels.json` (lowest support level / highest ceiling level from the segmentation) instead of
   percentiles. `run_cloud.sh <sid>:<scan> [name] [min pts] [mode]`; vLLM is not touched by it (fits beside).
 - RESULT pccr, mode cloud (`output/tsdf/genrecon_cloud`): 95 % of the mesh area within 5 cm of the cloud,
-  87 % of the cloud within 5 cm of the mesh, floor 0 cm, objects 1–3 cm, 332 m². USER: "está perfecta" — and
-  asked for hallucinated completion of what is not seen → mode cloud+unseen (`genrecon_fill`, in evaluation).
+  87 % of the cloud within 5 cm of the mesh, floor 0 cm, objects 1–3 cm, 332 m². USER: "está perfecta" — he
+  then asked for hallucinated completion of what is not seen (mode cloud+unseen), saw the first result
+  (1517 m²: a second floor at the cube's base, rooms behind the walls, all "unseen") and CLOSED it: "lo que
+  alucina lo alucina mal, prefiero la versión anterior, la genrecon cloud" (2026-10-17 00:10). The refined
+  rule (≤ 2 voxels behind a surface or in a hole) stays in the patch, selectable, NEVER run by default: the
+  product is mode `cloud`. Rejected meshes deleted.
   TEXTURE by PROJECTING the keyframes with the certified poses (`scene_texture.py`, texrecon per tile, views
   chosen by what they see, 4 min CPU) → `genrecon_cloud_tex`; the generated texture stays only where no frame
   sees. `snap_mesh.py` (vertices onto the cloud's local surface) exists, not applied: 2 cm p50 = the cloud's noise.
