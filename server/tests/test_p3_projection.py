@@ -224,3 +224,67 @@ def test_a_configured_audit_that_cannot_run_fails_the_projection(tmp_path, fake_
     HA._EVIDENCE_CACHE.clear()
     with pytest.raises(RuntimeError, match="mask audit: no mask/camera evidence"):
         P._match_and_save_result(out)
+
+
+# ── phase 3e (2026-10-23): the masks of the observations a published point represents ────
+
+def _fuse_into_first_keyframe(out, data):
+    """The owner fusion's record, by hand: every plate point of keyframes 2..7 consumed into the
+    plate point of keyframe 1 at the same plate position; the cloud keeps the owners only. Origins
+    v2 name the bend's pixel (= the record pixel here: no lens)."""
+    import precision.provenance as PV
+    fx, fy, cx, cy = K_SESSION
+    plate = np.abs(data["z"] - Z_PLATE) < 1e-6
+    own_kf = data["frame_global"] == FRAMES[0]
+    keep = ~plate | own_kf
+    owners = data[keep]
+    # the winner of a consumed plate point: keyframe 1's NEAREST plate point (the surface element)
+    from scipy.spatial import cKDTree
+    o_plate = owners[np.abs(owners["z"] - Z_PLATE) < 1e-6]
+    consumed = data[plate & ~own_kf]
+    tree = cKDTree(np.stack([o_plate["x"], o_plate["y"]], 1))
+    d, j = tree.query(np.stack([consumed["x"], consumed["y"]], 1))
+    ok = d < 0.02
+    consumed = consumed[ok]; j = j[ok]
+    wr = o_plate["pixel_row"][j].astype(np.int64); wc = o_plate["pixel_col"][j].astype(np.int64)
+    n = len(consumed)
+    np.savez_compressed(out / "rejected_points.npz", version=np.int64(4), stage=np.array("owner_fusion"),
+                        frame_global=consumed["frame_global"].astype(np.int32),
+                        pixel_row=consumed["pixel_row"].astype(np.int16), pixel_col=consumed["pixel_col"].astype(np.int16),
+                        winner_frame=np.full(n, FRAMES[0], np.int32), winner_row=wr.astype(np.int16),
+                        winner_col=wc.astype(np.int16), reason=np.full(n, 10, np.uint8),
+                        n_agree=np.ones(n, np.int16), n_contradict=np.zeros(n, np.int16))
+    _write_ply(out / "cleaned_cloud.ply", owners)
+    m = len(owners)
+    PV.write_origins(out / "origins.npz", {
+        "frame_global": owners["frame_global"], "pixel_row": owners["pixel_row"], "pixel_col": owners["pixel_col"],
+        "pixel_u_und": owners["pixel_col"], "pixel_v_und": owners["pixel_row"],
+        "n_consistent": np.ones(m), "ncc": np.zeros(m), "source": np.ones(m), "residual_rel": np.zeros(m),
+        "content_flags": np.zeros(m), "geometry_epoch": np.full(m, 1), "camera_epoch": np.ones(m)}, {"test": True})
+    (out / "geometry_epoch.json").write_text(json.dumps({"epoch": 1}))
+    return owners, n
+
+
+def test_a_point_is_read_in_the_masks_of_every_observation_it_represents(tmp_path, fake_potree):
+    """The plate's mask is MISSING in keyframe 1 (SAM saw it only from the other six), and the
+    fusion made keyframe 1's observations the owners of every plate point: without the members'
+    pixels the plate has no label; with them every plate point is the monitor."""
+    out, data, n_plate = _session(tmp_path)
+    owners, n_consumed = _fuse_into_first_keyframe(out, data)
+    masks = dict(np.load(out / "seg_masks.npz"))
+    masks["f0_o0"] = np.zeros((H, W), np.uint8)                        # keyframe 1: no plate mask
+    masks["f0_o1"] = (_render(0)[1] == 1).astype(np.uint8)             # the wall as before
+    P.write_canonical_store(out / "seg_masks.npz", masks)
+    n_owner_plate = int((np.abs(owners["z"] - Z_PLATE) < 1e-6).sum())
+    res = P._match_and_save_result(out)
+    # keyframe 1's plate is 812 owners: under the 1000-point rule the instance is recorded as
+    # too small — with its POINT COUNT, which is every owner of the plate
+    fate = res["absorbed"]["1"]
+    assert fate["reason"] == "too_small" and fate["points"] == n_owner_plate, fate
+    mp = res["decisions"]["member_pixels"]
+    assert mp["taken"] and mp["resolved"] == n_consumed and mp["unresolved"] == 0 and not mp["carried_through_lens"]
+    # without the fusion record the owners' own pixel is all the projection has: the plate is lost
+    (out / "rejected_points.npz").unlink()
+    res0 = P._match_and_save_result(out)
+    assert res0["absorbed"]["1"]["reason"] in ("unmatched", "too_small") and res0["absorbed"]["1"].get("points", 0) == 0
+    assert not res0["decisions"]["member_pixels"]["taken"]

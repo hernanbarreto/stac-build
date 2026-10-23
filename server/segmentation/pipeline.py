@@ -4154,6 +4154,14 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
     frame_arr = frame_global.astype(np.int32)
     frame_groups = _frame_groups_of(frame_arr)
     print(f"[SegPipeline]   {len(frame_groups)} unique frames in cloud")
+    # THE LOOKUP PIXELS (phase 3e, 2026-10-23): a published point is read in the masks at its own
+    # birth pixel AND at the pixel of every observation the owner fusion consumed into it
+    # (segmentation.member_pixels) — the fusion moved the pixel a mask indexed; the labels must not move
+    from segmentation.member_pixels import lookup_pixels
+    lk_idx, lk_frame, lk_row, lk_col, lk_rep = lookup_pixels(
+        output_dir, frame_global, pixel_row, pixel_col, log=lambda m: print(f"[SegPipeline]   {m}"))
+    decisions["member_pixels"] = lk_rep["members"]
+    lookup_groups = _frame_groups_of(lk_frame.astype(np.int32))
 
     # the masks and the cloud index their frames differently — translate, EXACTLY
     # (point 121): a cloud frame that is not in camera_frames.txt FAILS the stage,
@@ -4163,7 +4171,7 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
     ms = mask_space.resolve(output_dir, masks=masks_data,
                             log=lambda m: print(f"[SegPipeline]   {m}"))
     mask_frame_of: Dict[int, int] = {}
-    for cloud_frame in sorted(frame_groups):
+    for cloud_frame in sorted(set(frame_groups) | set(lookup_groups)):
         mf = ms.to_mask(cloud_frame)
         if mf is None:
             if ms.keyframes:
@@ -4215,12 +4223,12 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
     mask_grid = mask_grid_for(cam.width, cam.height, (scaled_res[0], scaled_res[1]))
     proj = SessionProjection(cam, rec_grid, mask_grid,
                              source=f"{CAMERA_JSON_NAME} ({cam.source}, camera epoch {cam.camera_epoch})")
-    if n_pts and (int(pixel_row.max()) >= Ht or int(pixel_col.max()) >= Wt
-                  or int(pixel_row.min()) < 0 or int(pixel_col.min()) < 0):
-        raise RuntimeError(f"the cloud's birth pixels span rows {int(pixel_row.min())}..{int(pixel_row.max())}, "
-                           f"cols {int(pixel_col.min())}..{int(pixel_col.max())} outside the declared "
+    if n_pts and (int(lk_row.max()) >= Ht or int(lk_col.max()) >= Wt
+                  or int(lk_row.min()) < 0 or int(lk_col.min()) < 0):
+        raise RuntimeError(f"the cloud's birth pixels span rows {int(lk_row.min())}..{int(lk_row.max())}, "
+                           f"cols {int(lk_col.min())}..{int(lk_col.max())} outside the declared "
                            f"{Wt}x{Ht} record grid — the cloud and the camera do not describe one grid")
-    rows_m, cols_m = proj.record_to_mask(pixel_row, pixel_col)        # -1 where the mask grid ends
+    rows_m, cols_m = proj.record_to_mask(lk_row, lk_col)              # -1 where the mask grid ends
     mask_h_ref, mask_w_ref = scaled_res[0], scaled_res[1]
     print(f"[SegPipeline]   Record grid: {Wt}x{Ht} ({rec_grid.name}), mask grid: {mask_w_ref}x{mask_h_ref} "
           f"— exact grid maps of {proj.source}")
@@ -4258,8 +4266,8 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
         # Compute average mask area for this object (across all frames)
         frame_areas = []
 
-        for cloud_frame in sorted(frame_groups):
-            pt_indices = frame_groups[cloud_frame]
+        for cloud_frame in sorted(lookup_groups):
+            lk_rows = lookup_groups[cloud_frame]              # lookup pixels (own + members) of this frame
             # EXACT MATCH ONLY: if SAM3 didn't generate a mask for this exact frame, skip these points.
             # No fuzzy "nearest frame" matching, because that maps background points from unsegmented frames
             # to masks from completely different timestamps.
@@ -4292,14 +4300,15 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
             frame_areas.append(mask_area)
             areas_by_oid_frame.setdefault(int(obj_id), {})[int(cloud_frame)] = mask_area
 
-            # Look up each point's pixel in the (eroded) mask through the exact grid maps
-            r = rows_m[pt_indices]
-            c = cols_m[pt_indices]
+            # Look up each lookup pixel in the (eroded) mask through the exact grid maps; a point
+            # matched through any of its pixels (its own or a member's) is matched once
+            r = rows_m[lk_rows]
+            c = cols_m[lk_rows]
             ok = (r >= 0) & (c >= 0)
-            in_mask = np.zeros(len(pt_indices), bool)
+            in_mask = np.zeros(len(lk_rows), bool)
             in_mask[ok] = mask[r[ok], c[ok]]
 
-            matched = pt_indices[in_mask]
+            matched = np.unique(lk_idx[lk_rows[in_mask]])
 
             # ── Deconfliction: assign point to smallest-mask object ──
             # Vectorized: only update points where this mask_area is smaller;

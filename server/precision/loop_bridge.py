@@ -169,9 +169,13 @@ def roma_match_fn(weights_url: str, weights_sha256: str, device: str = "cuda", l
     import torch
     from precision.tracks import verified_checkpoint
     import importlib.util
+    import sys as _sys
+    root = _vendor("RoMa")
+    if root.is_dir() and str(root) not in _sys.path:
+        _sys.path.insert(0, str(root))
     if importlib.util.find_spec("romatch") is None:
         raise LoopBridgeError("tracks.loop_bridge: roma needs the `romatch` package (vendor/RoMa, "
-                              "pip install -e vendor/RoMa) — no fallback")
+                              "scripts/setup_vendors.sh RoMa) — no fallback")
     if str(device).startswith("cuda") and not torch.cuda.is_available():
         raise LoopBridgeError("torch sees no CUDA device — the matcher runs on the card, never the CPU")
     from romatch import roma_outdoor as _roma
@@ -190,43 +194,88 @@ def roma_match_fn(weights_url: str, weights_sha256: str, device: str = "cuda", l
     return fn
 
 
-def mast3r_match_fn(weights_url: str, weights_sha256: str, device: str = "cuda", log: Callable = print) -> MatchFn:
-    """MASt3R (naver; the checkpoint is CC BY-NC-SA 4.0 — a licence decision the config records).
-    Fast reciprocal NN matching on the two descriptor maps, confidence = the matching score."""
+def _vendor(*parts) -> Path:
+    return Path(__file__).resolve().parents[2] / "vendor" / Path(*parts)
+
+
+def mast3r_prepare(img: np.ndarray, size: int = 512):
+    """dust3r's ``load_images`` rule reproduced EXACTLY so a match maps back to the native pixel:
+    the long side resized to ``size`` (LANCZOS down, BICUBIC up — PIL, as the loader), then the
+    centre crop to multiples of 16 (halfw = (W // 16) * 8, halfh = (H // 16) * 8; a square frame
+    gets halfh = 3/4 halfw). Returns (tensor [1, 3, h, w] normalised to [-1, 1], true_shape,
+    (scale_x, scale_y) native per resized pixel, (crop_x0, crop_y0))."""
+    import PIL.Image
+    import torch
+    im = PIL.Image.fromarray(np.ascontiguousarray(img)).convert("RGB")
+    W1, H1 = im.size
+    S = max(im.size)
+    interp = PIL.Image.LANCZOS if S > size else PIL.Image.BICUBIC
+    new_size = tuple(int(round(x * size / S)) for x in im.size)
+    im = im.resize(new_size, interp)
+    W, H = im.size
+    cx, cy = W // 2, H // 2
+    halfw, halfh = ((2 * cx) // 16) * 8, ((2 * cy) // 16) * 8
+    if W == H:
+        halfh = 3 * halfw / 4
+    box = (cx - halfw, cy - halfh, cx + halfw, cy + halfh)
+    im = im.crop(box)
+    arr = (np.asarray(im, np.float32) / float(np.iinfo(np.uint8).max) - 0.5) / 0.5    # ImgNorm: [0, 1] → [-1, 1]
+    t = torch.from_numpy(arr).permute(2, 0, 1)[None]
+    return t, np.int32([im.size[::-1]]), (W1 / W, H1 / H), (float(box[0]), float(box[1]))
+
+
+def mast3r_match_fn(weights_url: str, weights_sha256: str, device: str = "cuda", log: Callable = print,
+                    size: int = 512, subsample: int = 8) -> MatchFn:
+    """MASt3R (naver — the checkpoint is CC BY-NC-SA 4.0; USER 2026-10-23: implemented regardless,
+    the licence decided later). The official matching recipe (README): inference on the pair,
+    fast reciprocal nearest neighbours on the two descriptor maps (dot, subsample 8), a 3-px border
+    ignored; here the images are prepared by ``mast3r_prepare`` so every match comes back to the
+    NATIVE pixel exactly (crop offset + scale), and the confidence is the descriptor confidence
+    of the first view at the match."""
+    import sys as _sys
     import torch
     from precision.tracks import verified_checkpoint
-    import importlib.util
-    if importlib.util.find_spec("mast3r") is None or importlib.util.find_spec("dust3r") is None:
-        raise LoopBridgeError("tracks.loop_bridge: mast3r needs vendor/mast3r (and its dust3r) on the path — "
-                              "no fallback")
+    for sub in ("mast3r", "mast3r/dust3r"):
+        root = _vendor(sub)
+        if not root.is_dir():
+            raise LoopBridgeError(f"tracks.loop_bridge: mast3r needs vendor/{sub} (scripts/setup_vendors.sh mast3r) — "
+                                  f"no fallback")
+        if str(root) not in _sys.path:
+            _sys.path.insert(0, str(root))
     if str(device).startswith("cuda") and not torch.cuda.is_available():
         raise LoopBridgeError("torch sees no CUDA device — the matcher runs on the card, never the CPU")
-    from mast3r.model import AsymmetricMASt3R as _M
+    from mast3r.model import AsymmetricMASt3R
     from mast3r.fast_nn import fast_reciprocal_NNs
     from dust3r.inference import inference
-    from dust3r.utils.image import load_images
     ckpt = verified_checkpoint(weights_url, weights_sha256, log=log)
-    model = _M.from_pretrained(str(ckpt)).to(device).eval()
+    model = AsymmetricMASt3R.from_pretrained(str(ckpt)).to(device).eval()
+    border = 3
 
     def fn(img_i: np.ndarray, img_j: np.ndarray, _fi: int = -1, _fj: int = -1):
-        import tempfile
-        from PIL import Image
-        with tempfile.TemporaryDirectory() as td:
-            pa, pb = str(Path(td) / "a.png"), str(Path(td) / "b.png")
-            Image.fromarray(np.ascontiguousarray(img_i)).save(pa); Image.fromarray(np.ascontiguousarray(img_j)).save(pb)
-            ims = load_images([pa, pb], size=512, verbose=False)
+        t1, sh1, sc1, off1 = mast3r_prepare(img_i, size)
+        t2, sh2, sc2, off2 = mast3r_prepare(img_j, size)
+        v1 = {"img": t1, "true_shape": sh1, "idx": 0, "instance": "0"}
+        v2 = {"img": t2, "true_shape": sh2, "idx": 1, "instance": "1"}
         with torch.no_grad():
-            out = inference([tuple(ims)], model, device, batch_size=1, verbose=False)
-        v1, v2 = out["view1"], out["view2"]
-        d1, d2 = out["pred1"]["desc"][0], out["pred2"]["desc1"][0]
-        m1, m2 = fast_reciprocal_NNs(d1, d2, subsample_or_initxy1=8, device=device, dist="dot", block_size=2 ** 13)
-        # back to native pixels: the loader's crop/resize is recorded per view
-        H0a, W0a = img_i.shape[:2]; H0b, W0b = img_j.shape[:2]
-        sa = np.array([W0a / v1["true_shape"][0][1].item(), H0a / v1["true_shape"][0][0].item()])
-        sb = np.array([W0b / v2["true_shape"][0][1].item(), H0b / v2["true_shape"][0][0].item()])
-        uv_i = (np.asarray(m1, np.float64) + 0.5) * sa - 0.5
-        uv_j = (np.asarray(m2, np.float64) + 0.5) * sb - 0.5
-        conf = np.ones(len(uv_i))
+            out = inference([(v1, v2)], model, device, batch_size=1, verbose=False)
+        d1 = out["pred1"]["desc"].squeeze(0).detach()
+        d2 = out["pred2"]["desc"].squeeze(0).detach()
+        m1, m2 = fast_reciprocal_NNs(d1, d2, subsample_or_initxy1=int(subsample), device=device, dist="dot",
+                                     block_size=2 ** 13)
+        m1 = np.asarray(m1, np.float64); m2 = np.asarray(m2, np.float64)
+        H0, W0 = int(sh1[0][0]), int(sh1[0][1]); H1_, W1_ = int(sh2[0][0]), int(sh2[0][1])
+        ok = ((m1[:, 0] >= border) & (m1[:, 0] < W0 - border) & (m1[:, 1] >= border) & (m1[:, 1] < H0 - border)
+              & (m2[:, 0] >= border) & (m2[:, 0] < W1_ - border) & (m2[:, 1] >= border) & (m2[:, 1] < H1_ - border))
+        m1, m2 = m1[ok], m2[ok]
+        conf1 = out["pred1"].get("desc_conf")
+        if conf1 is not None:
+            c = conf1.squeeze(0).detach().cpu().numpy()
+            conf = c[m1[:, 1].astype(int), m1[:, 0].astype(int)].astype(np.float64)
+        else:
+            conf = np.ones(len(m1))
+        # resized-cropped pixel centre → native pixel centre: (p + 0.5 + crop) * scale − 0.5
+        uv_i = np.stack([(m1[:, 0] + 0.5 + off1[0]) * sc1[0] - 0.5, (m1[:, 1] + 0.5 + off1[1]) * sc1[1] - 0.5], 1)
+        uv_j = np.stack([(m2[:, 0] + 0.5 + off2[0]) * sc2[0] - 0.5, (m2[:, 1] + 0.5 + off2[1]) * sc2[1] - 0.5], 1)
         return uv_i, uv_j, conf
     return fn
 

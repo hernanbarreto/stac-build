@@ -22,7 +22,9 @@ from precision import tracks as T                                # noqa: E402
 from precision.camera import grid_full_frame_resize, grid_to_native, native_to_grid   # noqa: E402
 from precision.config import load_precision_config              # noqa: E402
 
-TCFG = load_precision_config().tracks
+from dataclasses import replace as _replace                      # noqa: E402
+# the tracker's tests inject the tracker; the loop bridge (a matcher backend) only where a test injects one
+TCFG = _replace(load_precision_config().tracks, loop_bridge="none")
 NOISE_GRID_PX = 0.3
 KF = [0, 3, 6, 9, 11]
 

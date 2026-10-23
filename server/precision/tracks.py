@@ -544,7 +544,9 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
     bridge_rep: Dict[str, Any] = {"backend": str(tcfg.loop_bridge), "pairs": {}, "bridged_tracks": 0,
                                   "links": 0}
     by_pair: Dict[Tuple[int, int], Any] = {}
-    if match_fn is not None or str(tcfg.loop_bridge) != "none":
+    if not idx_pairs:
+        bridge_rep["skipped"] = "no loop pair (SALAD, instance or classical) — nothing to bridge"
+    if idx_pairs and (match_fn is not None or str(tcfg.loop_bridge) != "none"):
         from precision import loop_bridge as LB
         from precision.camera import load_camera_json
         if not cam_json.exists():

@@ -41,7 +41,22 @@ GIT_VENDORS=(
   "vggt-omega|https://github.com/facebookresearch/vggt-omega.git|39a0cb8af885"
   "ShapeR|https://github.com/facebookresearch/ShapeR.git|d4402f55dc69"
   "pgsr|https://github.com/zju3dv/PGSR.git|de24f1a38b35"
+  "mast3r|https://github.com/naver/mast3r.git|f5209afc300c"
+  "RoMa|https://github.com/Parskatt/RoMa.git|77f8d6880352"
 )
+
+# vendor/mast3r carries dust3r as a submodule (branch cvpr, pinned 1dce82d0905a by the clone's
+# gitlink): restored after the pinned clone — the loop bridge (precision/loop_bridge.py,
+# tracks.loop_bridge: mast3r) imports both. CC BY-NC-SA 4.0: a licence decision recorded in
+# config.yaml and vendor/VENDORS.lock.md (USER 2026-10-23: implemented regardless, decided later).
+init_mast3r_submodule() {
+  [ -d "${VENDOR}/mast3r/.git" ] || return 0
+  if [ -f "${VENDOR}/mast3r/dust3r/dust3r/__init__.py" ]; then ok "mast3r: dust3r submodule present"; return 0; fi
+  info "mast3r: initialising the dust3r submodule …"
+  git -C "${VENDOR}/mast3r" submodule update --init --recursive 2>&1 | tail -2 \
+    && ok "mast3r: dust3r submodule → $(git -C "${VENDOR}/mast3r/dust3r" rev-parse --short=12 HEAD 2>/dev/null || echo '?')" \
+    || err "mast3r: dust3r submodule init failed"
+}
 
 # vendor/pgsr carries ONE local patch (inline quaternion_to_matrix so the whole
 # pytorch3d dependency is not needed) — applied after the pinned clone.
@@ -121,6 +136,7 @@ for e in "${GIT_VENDORS[@]}"; do
   clone_pinned "${d}" "${u}" "${c}" || rc=1
 done
 apply_pgsr_patch
+init_mast3r_submodule
 
 # 3) non-git reminders
 if [ -z "${ONLY}" ]; then

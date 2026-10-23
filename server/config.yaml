@@ -2301,11 +2301,13 @@ reconstruction:
       # tracks seen from both visits, the constraint that closes a loop. The VGGSfM tracker alone loses
       # most points across a revisit. Backends: roma (MIT; DINOv2 Apache-2.0) · mast3r (naver — its
       # checkpoint is CC BY-NC-SA 4.0: a LICENCE DECISION before any commercial run). none = off.
-      # USER 2026-10-23 "si existen mejores … para los cierres de loop hay que implementarlo": the
-      # backend, its pinned checkpoint and sha256 are set when the vendor is restored (VENDORS.lock.md)
-      loop_bridge: none
-      loop_bridge_weights_url: ""
-      loop_bridge_weights_sha256: ""
+      # USER 2026-10-23 "si existen mejores … para los cierres de loop hay que implementarlo" and
+      # "implementemos sin importar de momento la licencia … debe implementarse lo mejor": MASt3R is the
+      # backend; vendor/mast3r (+ its dust3r) from scripts/setup_vendors.sh, the checkpoint fetched into
+      # torch hub's cache by precision.tracks.verified_checkpoint and refused unless its sha256 is this one
+      loop_bridge: mast3r
+      loop_bridge_weights_url: https://huggingface.co/naver/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric/resolve/main/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
+      loop_bridge_weights_sha256: e28f91b488554653e2b46ddae9c78c1143e0bcb2e27d3e26cdb0b717f1568eb2
       loop_bridge_max_matches: 4000     # BOUND (cost): the most confident matches verified per pair
       loop_bridge_min_inliers: 60       # a pair bridges with at least this many verified matches
       loop_bridge_ransac_px: 1.5        # the essential-matrix RANSAC threshold (native px)
