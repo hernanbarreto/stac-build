@@ -148,11 +148,13 @@ dependencies:
       - pure-eval==0.2.3
       - pyarrow==23.0.1
       - pycparser==3.0
+      - pyceres>=2.6                 # 2026-10-23: F5's odometry priors are pyceres residual blocks on pycolmap 4's Ceres problem
       - pycryptodome==3.23.0
       - pygments==2.19.2
       - pyparsing==3.3.2
       - pypose==0.7.5
       - pyquaternion==0.9.9
+      - roma                         # 2026-10-23: dust3r / MASt3R runtime (vendor/mast3r, the F4 loop bridge)
       - pytest==9.0.2
       - python-box==7.4.1
       - python-dateutil==2.9.0.post0

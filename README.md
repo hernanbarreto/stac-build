@@ -75,6 +75,12 @@ MESH ─────────── GenRecon: the scene mesh generated inside
   onto F5's landmarks** (`f6_bend`, 10-step IRLS, ±0 by held-out) with PointDiT detail at the depth
   edges only. The product is Ω's complete depth re-projected with the core's corrections — measured on
   pccr: floor-layer thickness 20.3 → 11.5 cm, the revisit duplicates of the desk and the floor closed.
+  **2026-10-23 audit (branch `audit/precision-geometry-2026-10-23`, synthetic validation only so far):**
+  a classical cross-check (COLMAP SIFT + vocab tree + GLOMAP, `f3_classical`), a wide-baseline loop
+  bridge (MASt3R / RoMa) feeding F4, odometry priors + loop gap + scale lock + rolling-shutter correction
+  in F5, COLMAP PatchMatch as fusion tier 0, the owner fusion (one point per surface element) with
+  free-space carving, member-pixel mask projection and completed z-buffers in the certification — see
+  `docs/pipeline_final.md` "2026-10-23" and `scripts/update_pod_precision_audit.sh`.
 - **Cloud publish**: confidence gate per chunk, voxel + SOR, witness filter, consolidation with trace
   normals → `cleaned_cloud.ply` + the Potree octree, as **epoch 0** (kept, selectable).
 
@@ -189,6 +195,7 @@ scans (reference scan, fusion of scans), resume-aware re-runs, one queue of jobs
 | **DA3** | [Depth Anything 3](https://github.com/ByteDance-Seed/Depth-Anything-3) `DA3NESTED-GIANT-LARGE-1.1` (STAC private fork) | The metric gauge: camera and walk at intake, anchors of the continuous gauge |
 | **PointDiT** | `vendor/pointdit` (env `da3`) | Monocular detail at the depth edges inside `f6_bend` |
 | **Precision core** | `server/precision/` (F0–F6), `server/correction/` | Session camera, gauge, tracks, refined poses, depth bent on landmarks, closures, floor, mask filter, chunk check |
+| **Loop bridge + classical cross-check** (2026-10-23) | [MASt3R](https://github.com/naver/mast3r) (`vendor/mast3r`, CC BY-NC-SA 4.0 — licence decision pending) / [RoMa](https://github.com/Parskatt/RoMa) (MIT); COLMAP 4 + GLOMAP (`evaluation.colmap.binary`) | Wide-baseline matches across every revisit for F4; an independent SIFT/GLOMAP photogrammetry whose loops feed F4 and whose trajectory is compared to F5's |
 | **Loop closure** | DINOv2 + SALAD (fork `LoopModel`) | Measured in the run, applied only when the held-out closures improve beyond their noise |
 | **Cloud post** | [CloudComPy](https://www.cloudcompare.org/) (env `CloudComPy310`) | Merge, scalar-field provenance, voxel + SOR, consolidation |
 | **Scene mesh** | [GenRecon](https://github.com/kasothaphie/GenRecon) @ eaf1468 + STAC patch (env `genrecon`) | Generated inside the cloud's voxels, baked at 150 k faces / chunk |

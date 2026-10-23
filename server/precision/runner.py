@@ -732,6 +732,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                                  description="The precision core F0 → F7 on a session.")
     ap.add_argument("--session", required=True)
     ap.add_argument("--from", dest="from_step", default=None, help="re-run from this step (f6_bend …)")
+    ap.add_argument("--refreeze", action="store_true",
+                    help="freeze the server's config.yaml NOW over the session's frozen copy (kept beside it as "
+                         "run_config.<sha>.before-refreeze.yaml) — the way a session made before a configuration "
+                         "change re-runs with the new one; the steps whose stamp changed re-run from --from")
     args = ap.parse_args(argv)
     # by hand the card is not shared either: vLLM (the chat) is stopped, verified,
     # before every GPU step — the same rule the pipeline's worker applies
@@ -744,13 +748,36 @@ def main(argv: Optional[List[str]] = None) -> int:
     # session's frozen configuration when there is one, else freezes the server's NOW — so the
     # step processes it launches read the same frozen copy, never config.yaml as it changes
     sd = Path(args.session)
-    from intake.run_config import freeze_run_config, has_run_config
-    if not has_run_config(sd):
-        from config import cfg as raw_cfg
-        freeze_run_config(sd, raw_cfg, log=print)
+    refreeze_or_freeze(sd, refreeze=bool(args.refreeze), log=print)
     run_chain(sd, load_precision_config(session_dir=sd), before_gpu=_before_gpu,
               from_step=args.from_step)
     return 0
+
+
+def refreeze_or_freeze(session_dir: Path, *, refreeze: bool = False, log=print) -> Dict[str, Any]:
+    """The CLI's configuration rule: a session without a frozen configuration gets the server's
+    NOW; one with it keeps it — unless ``refreeze``, which keeps the old copy beside it under its
+    sha (``run_config.<sha12>.before-refreeze.yaml``, never deleted) and freezes the server's NOW.
+    Returns {action: kept | frozen | refrozen, kept_as: session-relative path or None}."""
+    from intake.run_config import (freeze_run_config, has_run_config, load_run_config, run_config_path,
+                                   run_config_sha_path)
+    sd = Path(session_dir)
+    if has_run_config(sd) and not refreeze:
+        return {"action": "kept", "kept_as": None}
+    kept_as = None
+    if has_run_config(sd):
+        _doc, sha = load_run_config(sd)                       # refuses an edited frozen file, as every step does
+        old = run_config_path(sd)
+        kept = old.with_name(f"run_config.{sha[:12]}.before-refreeze.yaml")
+        if not kept.exists():
+            kept.write_bytes(old.read_bytes())
+        run_config_sha_path(sd).unlink(missing_ok=True)
+        old.unlink()
+        kept_as = str(kept.relative_to(sd))
+        log(f"[runner] the frozen configuration (sha256 {sha[:12]}) is kept as {kept_as}; freezing config.yaml NOW")
+    from config import cfg as raw_cfg
+    freeze_run_config(sd, raw_cfg, log=log)
+    return {"action": "refrozen" if kept_as else "frozen", "kept_as": kept_as}
 
 
 if __name__ == "__main__":

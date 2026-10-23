@@ -1,3 +1,107 @@
+ACTUALIZACIÓN 2026-10-23 · AUDITORÍA DE PRECISIÓN · QUÉ CAMBIÓ Y QUÉ HACER AL ARRANCAR EL POD
+(rama audit/precision-geometry-2026-10-23 — main NO se tocó; leer antes de cualquier otra cosa, junto con el bloque
+superior de CLAUDE.md y docs/pipeline_final.md "2026-10-23")
+
+Contexto
+Hernán auditó la cadena de precisión sobre pccr: la nube doblaba objetos, tenía filos incorrectos, voladores y
+duplicaciones (capas de un mismo elemento publicadas por varios keyframes). Exigencia (USER, 2026-10-23): STAC-BUILD es
+una herramienta de ingeniería y de nivel investigación científica; la nube debe ser absolutamente precisa y auditable,
+sin voladores ni puntos donde no van, lo más parecida a grado LiDAR, completa, densa y precisa; "sin absolutamente
+ninguna error de poses escala sin nada de drift … la mayor precisión que se pueda conseguir con las herramientas
+actuales, no se acepta nada menos". Se implementó TODO lo que la auditoría encontró, en fases con tests y un commit por
+fase, sobre geometría sintética (este espacio no tiene GPU ni pccr): NADA está validado sobre una sesión real todavía.
+Ese es tu trabajo al arrancar el pod. Licencia: MASt3R es CC BY-NC-SA 4.0 — USER: "Implementemos sin importar de
+momento la licencia. Eso lo vemos después"; `tracks.loop_bridge: roma` (MIT) es la alternativa permisiva ya cableada
+(para activarla: loop_bridge_weights_url/sha256 = el checkpoint roma_outdoor.pth de github.com/Parskatt/storage releases,
+sha256 calculado al bajarlo; DINOv2 ViT-L lo trae torch hub).
+
+Qué cambió (commits de la rama, en orden; cada uno explica el defecto, la corrección y sus tests)
+ e7da6d7  F6 bend: familia `inverse_depth` (1/z' = a/z + b0 + b1·u' + b2·v', planos → planos) juzgada contra la
+          afín-en-píxel por el held-out (`bend.model: judged`); las rampas de contorno de Omega no juzgan el voto;
+          regla de borde = segunda diferencia de 1/z; PointDiT juzgado por keyframe; F0 relee la cámara del visor.
+ a67aa1e  FUSIÓN POR PROPIETARIO (precision/owner_fusion.py, dentro de f6_bend): un punto por elemento de superficie;
+          profundidad fusionada = mediana sobre los keyframes covisibles; orden total de propiedad (evidencia, cámara
+          más cercana, keyframe); las observaciones consumidas quedan en rejected_points.npz con su ganador.
+ 8a5399a  f6_colmap_tier (nuevo paso, antes de f6_bend): COLMAP PatchMatch con la geometría de F5 como tier 0 de la
+          fusión — la referencia fotométrica calibra el bend y es dueña de lo que mide (output/depth_colmap_f5).
+ 0ff7526  F5: PRIORS DE ODOMETRÍA (relativos, entre keyframes consecutivos; `refine.prior_model: relative`) en lugar
+          de absolutos — los lazos cierran y el metro se conserva; σ lateral/rotacional medidos del propio ajuste
+          (R0 → R0s); el BA sin priors se RECHAZA (verificación de bloques residuales: COLMAP descartaba priors en
+          silencio al fallar el Sim3). precision/loop_gap.py: la brecha de lazo en METROS (antes/después, contra
+          control) y precision/scale_lock.py: el metro releído del gauge y reimpuesto solo por la regla del usuario.
+ 6eca8b2  CARVING DE ESPACIO LIBRE (`fusion.free_space`): un punto que otro keyframe covisible ve "a través" se
+          rechaza (razón contradicted); evidencia mínima por punto (`fusion.min_evidence: 2`, razón unverified);
+          el píxel de procedencia publicado atraviesa la lente (grilla de registro).
+ c95b561  PUENTE DE LAZOS (precision/loop_bridge.py): correspondencias de línea base ancha entre las dos visitas de
+          cada par de lazo, verificadas con la cámara de la sesión, entrando a F4 como consultas en ambos lados.
+          CRUCE CLÁSICO (precision/classical_check.py, nuevo paso f3_classical): COLMAP SIFT + árbol de vocabulario +
+          mapper global (GLOMAP) como fotogrametría independiente — sus geometrías verificadas lejos en el recorrido
+          son candidatos de lazo de F4 y su trayectoria alineada (Sim3) a F5 se informa keyframe por keyframe.
+ 0d9f293  MASt3R como backend por defecto del puente (preparación exacta de dust3r, correspondencias devueltas al
+          píxel nativo); vendors mast3r (+ submódulo dust3r) y RoMa; la proyección de máscaras lee TODOS los píxeles
+          miembros de cada punto publicado (segmentation/member_pixels.py) — un objeto enmascarado en el keyframe B
+          pero propiedad de un punto nacido en A ya no pierde su etiqueta.
+ 0263c6d  Certificación: los z-buffers de visit_drift se completan con las observaciones consumidas de cada keyframe
+          (correction/fused_observations.py); la auditoría proyecta a través de la lente y juzga TODOS los frames de
+          cada visita (`segmentation.mask_filter.max_frames_per_visit: 0`).
+ 600d74a  ROLLING SHUTTER de declarado a corregido (precision/rolling_shutter.py): τ (periodos de cuadro) buscado en
+          una rejilla juzgada (un BA convergido absorbe ~83 % de la firma, por eso no se regresa), observaciones
+          rectificadas, re-resolución juzgada por el held-out (`refine.rolling_shutter: judged`).
+ (final)  `python -m precision.runner --refreeze`; scripts/update_pod_precision_audit.sh; esta documentación.
+
+Variables por keyframe y quién certifica cada una (pregunta de Hernán: "8 variables por kf?")
+ - 6 de pose: F5 con priors de odometría + lazos (MASt3R / clásicos) + cruce COLMAP-GLOMAP; brecha de lazo en metros.
+ - la escala (1 por sesión, no por kf): gauge DA3 → scale_lock sobre las longitudes de paso; cotas gauge/test.
+ - la profundidad (una por píxel, no una variable): bend judged + tier 0 fotométrico + voto + fusión + carving.
+ - las que faltaban en la cuenta: la cámara (fx fy cx cy k1 k2 p1 p2, por sesión, R1/R2/R3 informados), el rolling
+   shutter (τ, por sesión), el bend por keyframe (4 coeficientes), y la ventana temporal de cada keyframe.
+
+Al arrancar el pod (en este orden, sin saltar nada; una sola tarea de GPU a la vez)
+ 1. bash scripts/update_pod_precision_audit.sh
+    Hace, idempotente: checkout + pull de la rama; vendors mast3r (+dust3r) y RoMa en sus commits fijados;
+    pip en env mapanything: pyceres>=2.6 (los priors de odometría son bloques residuales de pyceres sobre el problema
+    de pycolmap 4 — VERIFICA que convivan), einops, roma, huggingface_hub; descarga el checkpoint MASt3R (2.75 GB,
+    sha256 declarado en config.yaml precision.tracks.loop_bridge_weights_sha256, cache de torch hub) y el árbol de
+    vocabulario de COLMAP (evaluation.colmap.vocab_tree.sift); verifica el binario COLMAP 4 (evaluation.colmap.binary);
+    corre la batería de tests de la auditoría en los dos envs y deja los logs en analysis/2026-10-23_precision_audit/.
+    Si algo falla, el script lo nombra: arreglalo antes de seguir (torchvision debe ser la pareja exacta de torch en
+    cada env; pyceres y pycolmap deben venir de wheels compatibles — si pycolmap 4 no expone
+    cost_functions.RelativePosePriorCost, actualizalo en env mapanything).
+ 2. Re-correr pccr desde el cruce clásico con la configuración nueva:
+      conda activate da3 && cd server
+      python -m precision.runner --session /workspace/sessions/<pccr> --from f3_classical --refreeze
+    --refreeze conserva el run_config.yaml congelado de la sesión (run_config.<sha>.before-refreeze.yaml) y congela
+    config.yaml de AHORA: sin él, los pasos leerían la configuración vieja y nada de esto correría. Checkpoint de
+    rendimiento en los primeros minutos de cada paso de GPU (lección operativa); reportar progreso sin que lo pidan.
+ 3. Después "Reconstruir" completo desde el visor (VLM + SAM3 con píxeles miembro, certificación con z-buffers
+    completos) o la certificación a mano (python -m reconstruction.certify.run --help).
+ 4. Qué mirar y mostrarle a Hernán (números y capturas, NUNCA un veredicto):
+    - output/precision/refine.json: odometry, prior_sigma_ladder, loops (brecha antes/después vs control, en m),
+      scale_lock (factor y si se aplicó), rolling_shutter (tau_frames, taken, search), classical_cross_check
+      (position_m median/max, worst_keyframes), rungs (R0/R0s/R1/R2/RS, held-out en px).
+    - output/precision/tracks.json: classical_loops, loop_bridge (pares, inliers, ratio, tracks puenteados).
+    - output/precision/depth_on_f5.json: fusion → owners / consumed / free_space.rejected / unverified.rejected /
+      representation; bend.model elegido por ventana; tier0 (colmap) cobertura.
+    - output/precision/classical/: base de datos COLMAP, modelos, loop_candidates.json, reporte del cruce.
+    - output/rejected_points.npz (v5): cada observación no publicada con su razón (fused / contradicted / unverified)
+      y su ganador — contarlas por razón y por keyframe; `python -m precision.flyers --session <dir>` como antes.
+    - El visor: la nube final sobre pccr en los lugares que Hernán señaló (objetos doblados, filos, voladores,
+      duplicados) — capturas antes/después, sin veredicto.
+ 5. A/B disponibles (evaluation.variants): f5_absolute_priors (los priors absolutos de antes), no_fusion, epoch8_vote.
+    Costos esperados: f3_classical (COLMAP SIFT + vocab tree + GLOMAP) minutos; el puente MASt3R ~1 s por par en
+    A100; la búsqueda de rolling shutter = (rs_max_frames/rs_grid_frames + 2·rs_passes) BAs extra; la fusión con
+    carving recorre todos los keyframes covisibles (minutos en pccr).
+ 6. Límites que hay que decir en voz alta: validación solo sintética hasta que corra pccr; la deriva es inobservable
+    sin lazos ni referencias (los priors de odometría la dejan donde Omega la dejó entre lazos); la escala absoluta
+    viene de DA3 salvo known_dims; MASt3R no comercial; el sha256 de MASt3R es el del archivo en huggingface.co/naver
+    (verificalo contra download.europe.naverlabs.com si hay dudas).
+
+Reglas vigentes (las mismas de siempre): código + tests, nunca .md como entregable (esta nota y CLAUDE.md son la
+excepción pedida por Hernán); implementar y medir, nunca declarar un resultado válido; rigor adversario: decir qué
+juega en contra; ningún literal de decisión fuera de config.py/config.yaml; determinismo; "marcar, nunca borrar".
+
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
 PROMPT PARA CLAUDE CODE · STAC-BUILD · BATERÍA DE EVALUACIÓN MÉTRICA
 
 Contexto

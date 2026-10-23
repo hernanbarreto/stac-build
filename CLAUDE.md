@@ -1,5 +1,62 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ 2026-10-23 — THE PRECISION AUDIT: ONE POINT PER SURFACE ELEMENT, ODOMETRY PRIORS, LOOPS BRIDGED, CLASSICAL CROSS-CHECK, ROLLING SHUTTER (USER: "la mayor precisión que se pueda conseguir con las herramientas actuales, no se acepta nada menos")
+- BRANCH `audit/precision-geometry-2026-10-23` (main untouched; e7da6d7 → 600d74a + the closing commit). A NEW POD SESSION
+  STARTS HERE: read `claude_stac.txt` ("ACTUALIZACIÓN 2026-10-23" at its top — what changed, commit by commit, and the
+  pod procedure), then run `bash scripts/update_pod_precision_audit.sh` (checkout, vendors mast3r + RoMa, pyceres + MASt3R
+  deps in env mapanything, the 2.75 GB MASt3R checkpoint hash-checked, COLMAP vocab tree, the test battery in both envs),
+  then `python -m precision.runner --session <pccr> --from f3_classical --refreeze` (env da3; `--refreeze` keeps the
+  session's frozen run_config beside it and freezes config.yaml NOW — without it the new keys never reach the steps),
+  then "Reconstruir" for the full chain. EVERYTHING below was built and measured on SYNTHETIC geometry only (no GPU,
+  no pccr in the workspace that wrote it): nothing is validated on a real session — numbers and captures for the
+  user's eye, never a verdict.
+- USER'S PREMISE (pccr): "la nube tiende a doblar objetos, filos que no son del todo correctos … voladores,
+  deformaciones … no es admisible"; "No hay fusión entre keyframes … es el más importante y debe necesariamente
+  corregirse. Usa toda la potencia y el rigor matemático"; "sin absolutamente ninguna error de poses escala sin nada de
+  drift"; "si existen slam mejores … hay que implementarlo … usar lo mejor que existe … colmap pointdit omega da3 etc";
+  "Incorpora toda la batería … mast3r glomap etc."; "Implementemos sin importar de momento la licencia".
+- WHAT THE CHAIN IS NOW (runner steps): f0_camera → f2_gauge → **f3_classical** (COLMAP SIFT + vocab tree + GLOMAP global
+  mapper, env colmap binary; `precision.classical`; its verified two-view geometries far apart in the walk become F4's
+  loop candidates, stamped to the reconstruction + keyframe list; `classical_check.cross_check` Sim3-aligns its
+  trajectory to F5's and names the worst keyframes) → f4_tracks (VGGSfM + **the loop bridge** `tracks.loop_bridge:
+  mast3r` — wide-baseline matches across the two visits of every loop pair, essential-matrix RANSAC with the session
+  camera, min inliers AND min inlier ratio, entering F4 as queries on both sides; `roma` = the MIT alternative) →
+  f5_refine (**odometry priors** `refine.prior_model: relative`: RelativePosePriorCost blocks on pycolmap's Ceres
+  problem via pyceres, σ along the step from the gauge, σ lateral/rotation MEASURED from the solve (R0 → R0s), the
+  constant first pose set on the problem block; a solve whose priors are not in the problem is REFUSED — COLMAP's
+  absolute-prior adjuster silently dropped them when its Sim3 alignment failed; `loop_gap.measure_loops` = the loop
+  gap in METRES before/after vs a control; `scale_lock` = the metre re-read from the gauge's step lengths and re-imposed
+  only by the user's rule; **rolling shutter** `refine.rolling_shutter: judged` — τ in frame periods searched on a
+  judged grid + halving passes (a converged BA absorbs ~83 % of the signature, so it is never regressed), observations
+  rectified, re-solved, taken by the user's rule; R3 reported only) → **f6_colmap_tier** (COLMAP PatchMatch with F5's
+  geometry = fusion tier 0, `output/depth_colmap_f5`) → f6_bend (bend family `inverse_depth` judged vs `affine_pixel`
+  on the half-A held-out; Omega's contour ramps do not judge the vote; edge rule = second difference of 1/z; PointDiT
+  judged per keyframe; then the **OWNER FUSION** `precision/owner_fusion.py`: one point per surface element, fused depth
+  = median over the covisible keyframes, ownership by a total order (evidence, nearest camera, keyframe), **free-space
+  carving** `fusion.free_space` (a point another covisible keyframe sees through is rejected, reason contradicted),
+  `fusion.min_evidence: 2` (reason unverified); every consumed observation in `rejected_points.npz` v5 with its winner)
+  → publish (provenance pixel through the lens onto the record grid) → segmentation (`member_pixels.py`: the mask
+  projection reads the owner's pixel AND every consumed member's) → certification (visit_drift z-buffers completed
+  with the consumed observations, `max_frames_per_visit: 0` = every frame judged).
+- THE UNKNOWNS PER KEYFRAME (user's "8 variables por kf?"): 6 of pose (F5 + loops + classical cross-check), the
+  SESSION scale (gauge → scale lock; known_dims when present), the depth per pixel (bend + tier 0 + vote + fusion +
+  carving) — and the ones the count missed: the camera (8, per session, R1/R2/R3), the readout τ (per session), the
+  bend coefficients (4 per keyframe), the keyframe's time window.
+- RULES THAT STAYED: decide_change / worsens_by_rule (significant, ≥ min_judge_closures(0.95) = 5 judges, median ≥
+  factor × error) judges every change on held-out tracks; "mark, never delete" (rejected_points.npz reasons 10 fused,
+  9 contradicted, 1 unverified); decision float literals only in config.py (whitelist extended: 7.8147…, 1.5381…,
+  1.1774…); determinism (seeds, fixed thread counts, the frozen run_config).
+- ENVIRONMENT (also in Environment notes below): env mapanything += `pyceres>=2.6` (requirements.txt), einops, roma,
+  huggingface_hub; vendors `vendor/mast3r` (+ dust3r submodule) and `vendor/RoMa` pinned in scripts/setup_vendors.sh +
+  vendor/VENDORS.lock.md; MASt3R checkpoint by `precision.tracks.verified_checkpoint` (torch hub cache, sha256 in
+  config.yaml — the hash of naver's file on huggingface.co); COLMAP 4 binary (`evaluation.colmap.binary`) now serves
+  f3_classical and f6_colmap_tier in the chain, not only the evaluation; torchvision must be torch's exact pair in
+  every env (0.25 with torch 2.14 broke in the audit workspace: 0.29.1). LICENCE: MASt3R CC BY-NC-SA 4.0 — the
+  user's decision deferred, recorded in VENDORS.lock.md and config.yaml.
+- A/B VARIANTS (`evaluation.variants`): `f5_absolute_priors` (the absolute priors of before), `no_fusion`, `epoch8_vote`.
+  HONEST LIMITS: drift between loops is unobservable without loops or references (the odometry priors leave it where
+  Omega left it); absolute scale is DA3's unless known_dims; synthetic validation only until pccr runs.
+
 ## ⭐⭐⭐ 2026-10-17 (01:10) — THE REAL TEXTURE ON GENRECON'S MESH, ITS MATERIAL KEPT (USER: "la mejor que he visto hasta ahora, impresionante")
 - CLOSING VERDICT OF THE DAY (USER 02:00): "creo que tenemos a hoy el pipeline ganador … pasamos por encima al estándar colmap y mvs por
   muchísimo" — intake → Ω chunks → F0–F6 → certified cloud → VLM/SAM3 → certification → GenRecon (presence from the cloud) → the
@@ -1484,4 +1541,10 @@ overlay, never a detection filter.
 - Phase R geometry reuses R3D (`vendor/r3d`) ported into `server/phase_r/`.
 - All code / YAML / docstrings / comments in ENGLISH.
 - No paid external APIs; everything local. GPU: NVIDIA A100 80 GB since 2026-10 (developed on an RTX A6000 48 GB).
-- Envs: da3 (backend + core), mapanything (Ω pass), semantic (vLLM), CloudComPy310, genrecon, nodejs; colmap = evaluation only.
+- Envs: da3 (backend + core), mapanything (Ω pass, F4/F5 — pycolmap 4 + pyceres ≥ 2.6 + MASt3R deps since 2026-10-23),
+  semantic (vLLM), CloudComPy310, genrecon, nodejs; colmap = the COLMAP 4 binary: the evaluation AND, since 2026-10-23,
+  the chain's f3_classical (SIFT + vocab tree + GLOMAP cross-check) and f6_colmap_tier (PatchMatch tier 0).
+- 2026-10-23 audit on a fresh pod: `bash scripts/update_pod_precision_audit.sh` (vendors mast3r + RoMa, pyceres, the
+  MASt3R checkpoint, the vocab tree, the test battery in both envs) — then `python -m precision.runner --session <dir>
+  --from f3_classical --refreeze`. The torch hub cache (MASt3R 2.75 GB) and ~/.cache/colmap (vocab tree) live under
+  $HOME — on a pod whose /root is ephemeral, set TORCH_HOME / XDG_CACHE_HOME under /workspace before running it.

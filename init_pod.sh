@@ -89,6 +89,16 @@ tmux send-keys -t claude "$ENV" Enter
 tmux send-keys -t claude "export ANTHROPIC_MODEL=claude-fable-5" Enter
 tmux send-keys -t claude "$CONDA && conda activate nodejs && cd /workspace/stac-build" Enter
 
+# 4a. AUDITORÍA DE PRECISIÓN 2026-10-23 (rama audit/precision-geometry-2026-10-23): si el pod todavía no tiene
+#     lo que la cadena nueva necesita (vendor/mast3r, pyceres en env mapanything), avisar acá y en la sesión claude.
+#     El procedimiento completo: claude_stac.txt "ACTUALIZACIÓN 2026-10-23" + scripts/update_pod_precision_audit.sh
+if [ ! -f /workspace/stac-build/vendor/mast3r/dust3r/dust3r/__init__.py ] \
+   || ! /workspace/miniforge3/envs/mapanything/bin/python -c "import pyceres" 2>/dev/null; then
+    MSG="⚠ AUDITORÍA 2026-10-23: el pod no está al día (vendor/mast3r o pyceres faltan) → leer claude_stac.txt (bloque ACTUALIZACIÓN 2026-10-23) y correr: bash scripts/update_pod_precision_audit.sh"
+    echo "$MSG"
+    tmux send-keys -t claude "echo '$MSG'" Enter
+fi
+
 echo "Listo. Sesiones: backend, vite, electron, semantic, claude"
 echo "  tmux attach -t backend   (ver server)"
 echo "  tmux attach -t vite      (ver UI dev server)"

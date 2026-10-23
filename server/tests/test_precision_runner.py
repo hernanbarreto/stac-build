@@ -311,3 +311,28 @@ def test_the_core_runs_inside_the_reconstruction_stage():
     text = pathlib.Path(RN.__file__).read_text()
     assert text.index("repro.require_exclusive_gpu(") < text.index("subprocess.Popen(cmd")
     assert "time.strftime" not in text
+
+
+def test_the_cli_keeps_a_frozen_configuration_unless_told_to_refreeze(tmp_path, monkeypatch):
+    """A session made before a configuration change re-runs with the new one through --refreeze:
+    the old frozen copy is kept beside the new one under its sha, never deleted; without the flag
+    the frozen copy stands (audit 2026-10-23: the pod re-runs pccr from f3_classical this way)."""
+    from intake.run_config import freeze_run_config, load_run_config
+    s = tmp_path / "sess"; (s / "output").mkdir(parents=True)
+    freeze_run_config(s, {"precision": {"old": 1}}, log=lambda *a: None)
+    old_doc, old_sha = load_run_config(s)
+    assert RN.refreeze_or_freeze(s, refreeze=False, log=lambda *a: None) == {"action": "kept", "kept_as": None}
+    assert load_run_config(s)[1] == old_sha
+    monkeypatch.setattr("config.cfg", {"precision": {"new": 2}}, raising=False)
+    rep = RN.refreeze_or_freeze(s, refreeze=True, log=lambda *a: None)
+    assert rep["action"] == "refrozen" and rep["kept_as"] == f"output/run_config.{old_sha[:12]}.before-refreeze.yaml"
+    new_doc, new_sha = load_run_config(s)
+    assert new_doc == {"precision": {"new": 2}} and new_sha != old_sha
+    import yaml
+    assert yaml.safe_load((s / rep["kept_as"]).read_text()) == old_doc
+    # a session without a frozen configuration gets the server's NOW, flag or not
+    s2 = tmp_path / "sess2"; (s2 / "output").mkdir(parents=True)
+    assert RN.refreeze_or_freeze(s2, refreeze=False, log=lambda *a: None)["action"] == "frozen"
+    assert load_run_config(s2)[0] == {"precision": {"new": 2}}
+    # the flag is on the CLI
+    assert "--refreeze" in pathlib.Path(RN.__file__).read_text()
