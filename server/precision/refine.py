@@ -1305,6 +1305,16 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     rs = rolling_shutter_diag(core["held_groups"], best, solver, cfg)
     # prior-depth cross-check: triangulated depth vs Omega's depth at the query pixel
     cross = _prior_cross_check(out, kf, core["X"], core["fit_groups"], best, cam)
+    # the classical cross-check (phase 3d): COLMAP / GLOMAP's independent trajectory against F5's
+    from precision.classical_check import cross_check as classical_cross_check
+    from correction.epoch import reconstruction_id_or_none as _rid
+    classical = classical_cross_check(out, kf, best.w2c, _rid(out))
+    if classical.get("measured"):
+        log(f"{LOG_TAG} classical cross-check: {classical['n_registered']}/{classical['n_keyframes']} keyframes "
+            f"registered by COLMAP; position median {classical['position_m']['median'] * 100:.1f} cm, "
+            f"p90 {classical['position_m']['p90'] * 100:.1f} cm; rotation median {classical['rotation_deg']['median']:.3f} deg")
+    else:
+        log(f"{LOG_TAG} classical cross-check not measured: {classical.get('reason')}")
     pdir = out / "precision"
     pdir.mkdir(parents=True, exist_ok=True)
     loc = [f for f, r in wloc.items() if r["localized"]]
@@ -1343,7 +1353,8 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
                          "unlocalized": {str(f): r["reason"] for f, r in wloc.items()
                                          if not r["localized"]},
                          "rms_px": {str(f): r.get("rms_px") for f, r in wloc.items()}},
-           "rolling_shutter": rs, "prior_depth_cross_check": cross, "applied": False}
+           "rolling_shutter": rs, "prior_depth_cross_check": cross, "classical_cross_check": classical,
+           "applied": False}
     # the solver's wall clock, outside the compared artifact (point 36)
     (pdir / TIMING_NAME).write_text(json.dumps({"stage": "refine", "ceres_seconds": core["timing"]},
                                                indent=1, default=float))

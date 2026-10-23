@@ -352,3 +352,115 @@ def test_an_unreadable_instance_loops_file_fails_f4_never_a_default(tmp_path, se
     (out / T.INSTANCE_LOOPS_NAME).write_text("[1, 2]")
     with pytest.raises(T.TracksError, match="not an evidence document"):
         T.instance_loops(out)
+
+
+# ── phase 3d: the loop bridge ───────────────────────────────────────────────────
+
+def _one_sided_fn(s, max_gap=2, noise=NOISE_GRID_PX, seed=0):
+    """A tracker that loses every point across the revisit: visible only within ``max_gap``
+    keyframes of the query — the VGGSfM tracker's behaviour across a wide baseline."""
+    truth = _truth_fn(s, noise, seed)
+    kidx = {f: i for i, f in enumerate(KF)}
+
+    def fn(images, queries, frames):
+        uv, vis, sig = truth(images, queries, frames)
+        q = kidx.get(frames[0], None)
+        for k, f in enumerate(frames):
+            if q is not None and f in kidx and abs(kidx[f] - q) > max_gap:
+                vis[k] = 0.0
+        return uv, vis, sig
+    return fn
+
+
+def _gt_match_fn(s, n=400, noise_px=0.3, seed=1):
+    """The ground truth through the matcher's interface: pixels of keyframe i on a grid, their
+    surface points, projected into j where visible; the matcher's native-pixel noise added."""
+    rng = np.random.default_rng(seed)
+
+    def fn(img_i, img_j, fi, fj):
+        d0 = s.renders[fi].depth
+        H, W = d0.shape
+        u = rng.uniform(2, W - 3, n); v = rng.uniform(2, H - 3, n)
+        z0 = d0[np.rint(v).astype(int), np.rint(u).astype(int)].astype(np.float64)
+        ok0 = z0 > 0
+        X = S.unproject(s.cam, s.poses[fi], np.stack([u, v], 1), np.where(ok0, z0, 1.0))
+        p, z, front = S.project(s.cam, s.poses[fj], X)
+        inb = front & (p[:, 0] >= 0) & (p[:, 0] <= W - 1) & (p[:, 1] >= 0) & (p[:, 1] <= H - 1)
+        pu = np.clip(np.rint(p[:, 0]).astype(int), 0, W - 1); pv = np.clip(np.rint(p[:, 1]).astype(int), 0, H - 1)
+        dz = np.abs(s.renders[fj].depth[pv, pu] - z) / np.maximum(z, 1e-9)
+        keep = ok0 & inb & (dz < 0.02)
+        uv_i = np.stack([u, v], 1)[keep] + rng.normal(0, noise_px, (int(keep.sum()), 2))
+        uv_j = p[keep] + rng.normal(0, noise_px, (int(keep.sum()), 2))
+        return uv_i, uv_j, np.ones(int(keep.sum()))
+    return fn
+
+
+def _camera_json(s):
+    from precision.camera import CameraModel, grid_full_frame_resize, save_camera_json
+    w, h = s.cam.width, s.cam.height
+    K = s.cam.K(); d = np.asarray(s.cam.dist(), float).reshape(-1)[:4]
+    cam = CameraModel(w, h, (float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2]), *[float(x) for x in d]),
+                      "synthetic", 0, grid_full_frame_resize(w, h, w, h, "omega"))
+    return save_camera_json(s.session_dir / "output" / "camera.json", cam, geometry_epoch=0)
+
+
+def test_the_loop_bridge_joins_the_two_visits_of_a_loop(sess):
+    """Phase 3d: with a tracker that loses every point across the revisit, a loop window yields
+    no track seen from both visits (the loop is unobservable to F5). The bridge matches keyframe 0
+    to keyframe 4 directly, verifies the matches with the session camera's essential matrix, queries
+    both ends with them and merges the two tracks: tracks seen from BOTH sides, marked is_bridged."""
+    from dataclasses import replace
+    d = sess.session_dir / "output" / "maplong_run"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "loop_closures.txt").write_text(
+        "0, 4, 0.7\n" + "".join(f"# {i}: {f:06d}.jpg\n" for i, f in enumerate(KF)))
+    cam_path = _camera_json(sess)
+    tcfg = replace(TCFG, loop_half_window=1, loop_bridge_min_inliers=20, loop_bridge_max_matches=400)
+    side_a, side_b = {KF[0], KF[1]}, {KF[3], KF[4]}
+    try:
+        # without the bridge: every loop track lives on one side
+        T.run_tracks(sess.session_dir, tcfg, track_fn=_one_sided_fn(sess), log=lambda *a: None)
+        tr = T.load_tracks_v2(sess.session_dir)
+        loop = tr["is_loop_pair"]
+        assert loop.any() and "is_bridged" in tr and not tr["is_bridged"].any()
+        both = _tracks_on_both_sides(tr, loop, side_a, side_b)
+        assert both == 0, both
+        # with the bridge: the matches become queries on both ends, their tracks merge
+        rep = T.run_tracks(sess.session_dir, tcfg, track_fn=_one_sided_fn(sess), log=lambda *a: None,
+                           match_fn=_gt_match_fn(sess))
+        tr = T.load_tracks_v2(sess.session_dir)
+        br = rep["loop_bridge"]
+        pair = br["pairs"][f"{KF[0]}-{KF[4]}"]
+        assert br["match_fn"] == "injected" and pair["reason"] == "" and pair["verified"] >= 20
+        assert br["bridged_tracks"] >= 20 and pair["bridged_tracks"] == br["bridged_tracks"]
+        both = _tracks_on_both_sides(tr, tr["is_loop_pair"], side_a, side_b)
+        assert both >= 20 and both == br["bridged_tracks"]
+        # the bridged observations: marked, native pixels within the matcher's error of the truth
+        b = tr["is_bridged"]
+        assert b.any() and np.isin(tr["obs_track"][b], tr["track_query_id"]).all()
+        gt = _gt_native(sess, tr)
+        err = np.linalg.norm(tr["obs_uv_native"][b] - gt[b], axis=1)
+        assert np.median(err) < 1.5, np.median(err)
+        # every bridged track is one track: one query entry, a split like any other
+        ids, counts = np.unique(tr["obs_track"][b], return_counts=True)
+        assert (counts >= 2).all() and set(ids.tolist()) <= set(tr["track_query_id"].tolist())
+        # a pair the camera refuses (the matches scrambled) is reported, not bridged
+        def scrambled(img_i, img_j, fi, fj):
+            uv_i, uv_j, c = _gt_match_fn(sess)(img_i, img_j, fi, fj)
+            return uv_i, uv_j[np.random.default_rng(3).permutation(len(uv_j))], c
+        rep2 = T.run_tracks(sess.session_dir, tcfg, track_fn=_one_sided_fn(sess), log=lambda *a: None,
+                            match_fn=scrambled)
+        p2 = rep2["loop_bridge"]["pairs"][f"{KF[0]}-{KF[4]}"]
+        assert p2["reason"] and rep2["loop_bridge"]["bridged_tracks"] == 0
+    finally:
+        (d / "loop_closures.txt").unlink()
+        cam_path.unlink()
+
+
+def _tracks_on_both_sides(tr, loop_mask, side_a, side_b):
+    t = tr["obs_track"][loop_mask]; f = tr["obs_frame"][loop_mask]
+    n = 0
+    for tid in np.unique(t):
+        fs = set(f[t == tid].tolist())
+        n += bool(fs & side_a) and bool(fs & side_b)
+    return n

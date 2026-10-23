@@ -91,6 +91,15 @@ def _str(section, key, path) -> str:
     return v
 
 
+def _str_or_empty(section, key, path) -> str:
+    v = _require(section, key, path)
+    if v is None:
+        return ""
+    if not isinstance(v, str):
+        raise PrecisionConfigError(f"'{SECTION}.{path}.{key}' must be a string, got {v!r}")
+    return v
+
+
 def _enum(section, key, path, allowed: Sequence[str]) -> str:
     v = _str(section, key, path)
     if v not in allowed:
@@ -233,6 +242,7 @@ class OmegaConfig:
 # ── F4: native-pixel tracks ───────────────────────────────────────────────
 
 DENSE_MATCHERS = ("none", "roma")
+LOOP_BRIDGES = ("none", "roma", "mast3r")
 
 
 @dataclass(frozen=True)
@@ -255,6 +265,26 @@ class TracksConfig:
     dense_matcher: str          # none | roma (optional, off)
     tracker_weights_url: str    # the tracker checkpoint at a PINNED revision (never 'main')
     tracker_weights_sha256: str     # its content: a file that does not hash to this is refused
+    loop_bridge: str            # phase 3d: none | roma | mast3r — the wide-baseline matcher that bridges
+                                # the two visits of every loop pair (precision/loop_bridge.py)
+    loop_bridge_weights_url: str        # its checkpoint at a pinned revision (ignored when none)
+    loop_bridge_weights_sha256: str     # and its sha256
+    loop_bridge_max_matches: int        # BOUND (cost): the most confident matches verified per pair
+    loop_bridge_min_inliers: int        # a pair bridges with at least this many verified matches
+    loop_bridge_ransac_px: float        # the essential-matrix RANSAC threshold (native px)
+    loop_bridge_ransac_prob: float      # its confidence
+    loop_bridge_min_inlier_ratio: float # a pair bridges when at least this share of its verified matches are inliers
+
+
+# ── F3b: the classical cross-check (COLMAP / GLOMAP) ──────────────────────
+
+@dataclass(frozen=True)
+class ClassicalConfig:
+    enabled: bool               # phase 3d: COLMAP 4.x SIFT + vocab-tree loops + global mapper on the
+                                # keyframes before F4 (evaluation.colmap's own commands and binary):
+                                # loop candidates for F4, the pose cross-check in F5's report
+    loop_min_inliers: int       # a verified two-view geometry with at least this many inliers …
+    loop_min_gap_keyframes: int # … between keyframes at least this far apart is a loop candidate
 
 
 # ── F5: joint refinement + witness localisation ─────────────────────────
@@ -571,6 +601,7 @@ class PrecisionConfig:
     depth: DepthConfig
     fuse: FuseConfig
     cloud: CloudConfig
+    classical: ClassicalConfig
     bend: BendConfig
     fusion: FusionConfig
     flyers: FlyersConfig
@@ -761,6 +792,14 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         heldout_frac=_num(tk, "heldout_frac", "tracks", lo=0.0, hi=1.0),
         seed=_num(tk, "seed", "tracks", lo=0, integer=True),
         dense_matcher=_enum(tk, "dense_matcher", "tracks", DENSE_MATCHERS),
+        loop_bridge=_enum(tk, "loop_bridge", "tracks", LOOP_BRIDGES),
+        loop_bridge_weights_url=_str_or_empty(tk, "loop_bridge_weights_url", "tracks"),
+        loop_bridge_weights_sha256=_str_or_empty(tk, "loop_bridge_weights_sha256", "tracks").lower(),
+        loop_bridge_max_matches=_num(tk, "loop_bridge_max_matches", "tracks", lo=8, integer=True),
+        loop_bridge_min_inliers=_num(tk, "loop_bridge_min_inliers", "tracks", lo=8, integer=True),
+        loop_bridge_ransac_px=_num(tk, "loop_bridge_ransac_px", "tracks", lo=0.0, lo_excl=True),
+        loop_bridge_ransac_prob=_num(tk, "loop_bridge_ransac_prob", "tracks", lo=0.0, hi=1.0, lo_excl=True),
+        loop_bridge_min_inlier_ratio=_num(tk, "loop_bridge_min_inlier_ratio", "tracks", lo=0.0, hi=1.0),
         tracker_weights_url=_str(tk, "tracker_weights_url", "tracks"),
         tracker_weights_sha256=_str(tk, "tracker_weights_sha256", "tracks").lower(),
     )
@@ -777,7 +816,18 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
             f"'{SECTION}.tracks.dense_matcher' = {tracks.dense_matcher!r}: no dense matcher is "
             f"vendored (claude_stac.txt §4-F4: optional, off; its licence must be checked and "
             f"recorded in vendor/VENDORS.lock.md before it can be enabled)")
+    lb_sha = (tracks.loop_bridge_weights_sha256 or "").lower()
+    if tracks.loop_bridge != "none" and not tracks.loop_bridge_weights_url:
+        raise PrecisionConfigError(f"'{SECTION}.tracks.loop_bridge_weights_url' is empty with the loop bridge on")
+    if tracks.loop_bridge != "none" and (len(lb_sha) != 64 or any(c not in "0123456789abcdef" for c in lb_sha)):
+        raise PrecisionConfigError(
+            f"'{SECTION}.tracks.loop_bridge_weights_sha256' must be a sha256 (64 hex digits) when the loop "
+            f"bridge is on, got {tracks.loop_bridge_weights_sha256!r}")
 
+    cl = _sub(sec, "classical", "")
+    classical = ClassicalConfig(enabled=_bool(cl, "enabled", "classical"),
+                                loop_min_inliers=_num(cl, "loop_min_inliers", "classical", lo=8, integer=True),
+                                loop_min_gap_keyframes=_num(cl, "loop_min_gap_keyframes", "classical", lo=2, integer=True))
     rf = _sub(sec, "refine", "")
     refine = RefineConfig(
         enabled=_bool(rf, "enabled", "refine"),
@@ -1023,4 +1073,4 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                            tracks=tracks, refine=refine, depth=depth, fuse=fuse,
                            cloud=cloud, bend=bend, fusion=fusion, flyers=flyers, mono_detail=mono_detail,
                            cloud_metrics=cloud_metrics, chunk_check=chunk_check, runner=runner,
-                           raw=(raw if isinstance(raw, dict) else None))
+                           classical=classical, raw=(raw if isinstance(raw, dict) else None))

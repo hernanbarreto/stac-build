@@ -2295,12 +2295,42 @@ reconstruction:
       seed: 0                           # the held-out split's fixed seed (and the tracker run's
                                         # torch seed, deterministic algorithms on)
       dense_matcher: none               # none | roma — optional and OFF (no licence recorded)
+      # THE LOOP BRIDGE (audit 2026-10-23, phase 3d; precision/loop_bridge.py): a wide-baseline matcher
+      # matches keyframe i to keyframe j of every loop pair directly; the matches verified by the session
+      # camera's essential matrix become queries on BOTH visits and their VGGSfM tracks merge into one —
+      # tracks seen from both visits, the constraint that closes a loop. The VGGSfM tracker alone loses
+      # most points across a revisit. Backends: roma (MIT; DINOv2 Apache-2.0) · mast3r (naver — its
+      # checkpoint is CC BY-NC-SA 4.0: a LICENCE DECISION before any commercial run). none = off.
+      # USER 2026-10-23 "si existen mejores … para los cierres de loop hay que implementarlo": the
+      # backend, its pinned checkpoint and sha256 are set when the vendor is restored (VENDORS.lock.md)
+      loop_bridge: none
+      loop_bridge_weights_url: ""
+      loop_bridge_weights_sha256: ""
+      loop_bridge_max_matches: 4000     # BOUND (cost): the most confident matches verified per pair
+      loop_bridge_min_inliers: 60       # a pair bridges with at least this many verified matches
+      loop_bridge_ransac_px: 1.5        # the essential-matrix RANSAC threshold (native px)
+      loop_bridge_ransac_prob: 0.999    # its confidence
+      loop_bridge_min_inlier_ratio: 0.25  # and at least this share of the verified matches must be inliers:
+                                        #   scrambled or lookalike matches give a few percent, a rigid revisit
+                                        #   most of them
       # the VGGSfM tracker checkpoint at a PINNED revision of facebook/VGGSfM (commit
       # 643a1eb2…, 2025-05-14 — 'main' moves) and the sha256 of its content (the LFS oid at that
       # commit = the file already in this pod's torch hub cache); a file that hashes otherwise
       # is refused
       tracker_weights_url: https://huggingface.co/facebook/VGGSfM/resolve/643a1eb2069dad9b4cff071960323542477272e3/vggsfm_v2_tracker.pt
       tracker_weights_sha256: 451f1d218be1ef661c81d6254cbc633a5190e7d6069fe51621cc29ba5d90a404
+    # F3b — the classical cross-check (precision/classical_check.py, audit 2026-10-23 phase 3d): COLMAP 4.x
+    # SIFT + sequential matching with vocabulary-tree loop detection + the global mapper (GLOMAP) on the
+    # keyframes, with evaluation.colmap's binary and commands (the battery's h2) — an INDEPENDENT
+    # photogrammetry of the same pixels. Before F4 its verified two-view geometries between keyframes far
+    # apart become loop candidates (loop_candidates.json); after F5 its trajectory is Sim3-aligned to F5's and
+    # the discrepancy per keyframe is reported (refine.json classical_cross_check): two photogrammetries that
+    # agree certify the poses. Needs the COLMAP binary (CUDA) and the vocabulary tree (setup_weights.sh).
+    classical:
+      enabled: true
+      loop_min_inliers: 60              # a verified two-view geometry with at least this many inliers …
+      loop_min_gap_keyframes: 24        # … between keyframes at least this far apart (one tracking window)
+                                        #   is a loop candidate for F4
     # F5 — joint pose + session camera refinement, witness localisation (precision/refine.py)
     refine:
       enabled: true                     # false = no bundle adjustment (the evaluation battery's variant "sin F5",

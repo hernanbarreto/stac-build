@@ -131,8 +131,13 @@ STEPS: List[Step] = [
                 "output/camera_frames.txt", "output/camera_poses.txt", "output/maplong_run/metric_lock.json"),
          writes=("output/gauge.json",) + _POSE_FILES,
          config=("gauge", "raw:correction_graph.graph")),
+    Step("f3_classical", "F3b classical cross-check: COLMAP SIFT + vocab-tree loops + global mapper", "da3",
+         "precision.classical_check", gpu=True,
+         reads=("frames", "frames/selected_frames.json", "output/camera.json"),
+         writes=("output/precision/classical", "output/precision/loop_candidates.json"),
+         config=("classical", "raw:evaluation.colmap")),
     Step("f4_tracks", "F4 native-pixel tracks", "mapanything", "precision.tracks", gpu=True,
-         reads=("frames", "output/camera.json"),
+         reads=("frames", "output/camera.json", "output/precision/loop_candidates.json"),
          writes=("output/precision/tracks.npz", "output/precision/tracks.json"), config=("tracks",)),
     Step("f3_probe", "F3 Omega resolution probe (report)", "mapanything",
          "precision.omega_probe", gpu=True,
@@ -528,11 +533,15 @@ def chain_steps(pcfg, steps: Sequence[Step] = STEPS) -> List[Step]:
         from dataclasses import replace as _replace
         mono = bool(getattr(getattr(pcfg, "mono_detail", None), "enabled", False))
         colmap_tier = bool(getattr(getattr(pcfg, "fusion", None), "colmap_tier", False))
-        skip = {"f6_sweep", "f6_colmap", "f7_cloud", "f7_fuse"} | (set() if colmap_tier else {"f6_colmap_tier"})
+        classical = bool(getattr(getattr(pcfg, "classical", None), "enabled", False))
+        skip = {"f6_sweep", "f6_colmap", "f7_cloud", "f7_fuse"} | (set() if colmap_tier else {"f6_colmap_tier"}) \
+            | (set() if classical else {"f3_classical"})
         return [(_replace(s, gpu=True) if (mono and s.key == "f6_bend") else s)
                 for s in steps if s.key not in skip]
     drop.add("f6_bend")
     drop.add("f6_colmap_tier")
+    if not bool(getattr(getattr(pcfg, "classical", None), "enabled", False)):
+        drop.add("f3_classical")
     if fusion:
         drop.add("f7_cloud")
         if not pcfg.depth.colmap.enabled:

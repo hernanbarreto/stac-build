@@ -95,6 +95,7 @@ class Window:
     frames: List[int]
     kind: str                           # keyframes | loop | witness
     query_frames: List[int] = field(default_factory=list)
+    sides: Optional[Tuple[List[int], List[int]]] = None   # loop: the frames around each end
 
 
 def _num(name: str) -> int:
@@ -127,9 +128,10 @@ def loop_windows(kf: Sequence[int], pairs: Sequence[Tuple[int, int]], half: int)
     for i, j in pairs:
         if not (0 <= i < len(kf) and 0 <= j < len(kf)) or i == j:
             continue
-        idx = sorted(set(range(max(0, i - half), min(len(kf), i + half + 1)))
-                     | set(range(max(0, j - half), min(len(kf), j + half + 1))))
-        out.append(Window([kf[k] for k in idx], "loop", [kf[i], kf[j]]))
+        a = list(range(max(0, i - half), min(len(kf), i + half + 1)))
+        b = list(range(max(0, j - half), min(len(kf), j + half + 1)))
+        idx = sorted(set(a) | set(b))
+        out.append(Window([kf[k] for k in idx], "loop", [kf[i], kf[j]], ([kf[k] for k in a], [kf[k] for k in b])))
     return out
 
 
@@ -438,12 +440,13 @@ def _read_list(p: Path, key: str) -> List[int]:
 
 
 def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
-               log: Callable = print, ccfg=None) -> Dict[str, Any]:
+               log: Callable = print, ccfg=None, match_fn=None) -> Dict[str, Any]:
     """F4 on a session. ``ccfg``: the correction configuration the instance loops' evidence
     stamp is verified with (point 134) — the job's frozen one on the pipeline path (point 69);
-    None = the process's (the tests' path)."""
+    None = the process's (the tests' path). ``match_fn``: an injected loop-bridge matcher
+    (tests); None = the backend ``tcfg.loop_bridge`` names (precision.loop_bridge)."""
     import cv2
-    from precision.camera import grid_full_frame_resize, grid_to_native, grid_like
+    from precision.camera import grid_full_frame_resize, grid_to_native, grid_like, native_to_grid
     session_dir = Path(session_dir)
     frames_dir = session_dir / "frames"
     out_dir = session_dir / "output"
@@ -467,6 +470,17 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
     if il_rep["present"] and not il_rep["taken"]:
         log(f"{LOG_TAG} {INSTANCE_LOOPS_NAME} NOT taken: {il_rep['reason']}")
     idx_pairs += il_pairs
+    # the classical cross-check's loop candidates (phase 3d): COLMAP's verified two-view geometries
+    # between keyframes far apart, taken only for THIS reconstruction and THIS keyframe list
+    from precision.classical_check import classical_loops
+    from correction.epoch import reconstruction_id_or_none
+    cl_pairs, cl_rep = classical_loops(out_dir, kf, reconstruction_id_or_none(out_dir))
+    if cl_rep["present"] and not cl_rep["taken"]:
+        log(f"{LOG_TAG} loop_candidates.json NOT taken: {cl_rep['reason']}")
+    known = {(min(a, b), max(a, b)) for a, b in idx_pairs}
+    cl_new = [(a, b) for a, b in cl_pairs if (min(a, b), max(a, b)) not in known]
+    idx_pairs += cl_new
+    n_classical = len(cl_new)
     windows = (keyframe_windows(kf, tcfg.window_frames, tcfg.window_overlap_frac,
                                 tcfg.query_frames_per_window)
                + loop_windows(kf, idx_pairs, tcfg.loop_half_window)
@@ -474,7 +488,7 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
     log(f"{LOG_TAG} {len(kf)} keyframes, {len(wit)} witnesses → {len(windows)} window(s) "
         f"({sum(w.kind == 'keyframes' for w in windows)} keyframe, "
         f"{sum(w.kind == 'loop' for w in windows)} loop from {n_salad} SALAD + "
-        f"{len(idx_pairs) - n_salad} instance pair(s), "
+        f"{len(idx_pairs) - n_salad - n_classical} instance + {n_classical} classical pair(s), "
         f"{sum(w.kind == 'witness' for w in windows)} witness); tracker grid {tw}x{th} "
         f"for native {nw}x{nh}")
 
@@ -519,22 +533,68 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
                                    log=log)
         weights = {"url": tcfg.tracker_weights_url, "sha256": tcfg.tracker_weights_sha256}
     numerics = None
-    obs = {k: [] for k in ("track", "frame", "uv", "uv_native", "sigma", "vis", "window",
-                           "loop", "kind")}
+    OBS_KEYS = ("track", "frame", "uv", "uv_native", "sigma", "vis", "window", "loop", "kind", "bridged")
+    obs = {k: [] for k in OBS_KEYS}
     tq = {k: [] for k in ("id", "frame", "uv")}
     wit_set = set(wit) - set(kf)
     next_tid, t0 = 0, time.time()
     n_dropped_edge = 0
+    # THE LOOP BRIDGE (phase 3d): wide-baseline matches across every loop pair, verified by the
+    # session camera's geometry, become queries on both visits; their tracks merge into one
+    bridge_rep: Dict[str, Any] = {"backend": str(tcfg.loop_bridge), "pairs": {}, "bridged_tracks": 0,
+                                  "links": 0}
+    by_pair: Dict[Tuple[int, int], Any] = {}
+    if match_fn is not None or str(tcfg.loop_bridge) != "none":
+        from precision import loop_bridge as LB
+        from precision.camera import load_camera_json
+        if not cam_json.exists():
+            raise TracksError(f"{cam_json} is missing — the loop bridge verifies every pair with the session "
+                              f"camera (python -m precision.camera first)")
+        cam = load_camera_json(cam_json)
+        mfn = match_fn if match_fn is not None else LB.make_match_fn(str(tcfg.loop_bridge), tcfg, log=log)
+
+        def image_native(f):
+            im = cv2.imread(str(frames_dir / f"{f:06d}.jpg"), cv2.IMREAD_COLOR)
+            if im is None:
+                raise TracksError(f"frame {f:06d}.jpg is unreadable")
+            return cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+        matched = LB.match_pairs(idx_pairs, kf, image_native, mfn, cam.K(), cam.dist(),
+                                 ransac_px=float(tcfg.loop_bridge_ransac_px), min_inliers=int(tcfg.loop_bridge_min_inliers),
+                                 max_matches=int(tcfg.loop_bridge_max_matches), ransac_prob=float(tcfg.loop_bridge_ransac_prob),
+                                 seed=int(tcfg.seed), min_inlier_ratio=float(tcfg.loop_bridge_min_inlier_ratio), log=log)
+        for m in matched:
+            by_pair[(m.i, m.j)] = m
+            bridge_rep["pairs"][f"{kf[m.i]}-{kf[m.j]}"] = {"matches": m.n_raw, "verified": int(len(m.uv_i)),
+                                                           "inlier_ratio": m.inlier_ratio, "reason": m.reason}
+        bridge_rep["match_fn"] = "injected" if match_fn is not None else str(tcfg.loop_bridge)
     for wi, win in enumerate(windows):
         imgs = np.stack([image(f) for f in win.frames]).astype(np.float32) / GRAY_MAX
+        wobs = {k: [] for k in OBS_KEYS}
+        wtq = {k: [] for k in ("id", "frame", "uv")}
+        pm = None
+        if win.kind == "loop" and by_pair:
+            a, b = kidx[win.query_frames[0]], kidx[win.query_frames[1]]
+            pm = by_pair.get((min(a, b), max(a, b)))
+            if pm is not None and (pm.reason or len(pm.uv_i) == 0):
+                pm = None
+        bridge_tids: Dict[int, Dict[int, int]] = {}        # query frame → match index → tid
         for qf in win.query_frames:
             qi = win.frames.index(qf)
             gray = cv2.cvtColor((imgs[qi] * GRAY_MAX).astype(np.uint8), cv2.COLOR_RGB2GRAY)
             q = query_points(gray, tcfg.grid_side, tcfg.max_corners, tcfg.corner_quality,
                              tcfg.corner_min_distance_px)
+            n_base = len(q)
+            bq_idx = np.zeros(0, np.int64)
+            if pm is not None:
+                # the bridge queries of this end, in the tracker's grid
+                uv_b = pm.uv_i if kidx[qf] == pm.i else pm.uv_j
+                qb = native_to_grid(np.asarray(uv_b, np.float64), gmap).astype(q.dtype)
+                q = np.concatenate([q, qb]) if len(q) else qb
+                bq_idx = np.arange(len(uv_b))
             e, emap = edges(qf)
             keep = keep_mask(grid_to_native(q, gmap), None, e, emap)
-            n_dropped_edge += int((~keep).sum())
+            n_dropped_edge += int((~keep[:n_base]).sum())
+            kept_pos = np.cumsum(keep) - 1                 # position of each kept query
             q = q[keep]
             if len(q) == 0:
                 continue
@@ -551,20 +611,59 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
             seen = good.sum(0)
             for n in np.flatnonzero(seen >= 2):
                 tid = next_tid + int(n)
-                for s in np.flatnonzero(good[:, n]):
-                    f = win.frames[s]
-                    obs["track"].append(tid)
-                    obs["frame"].append(f)
-                    obs["uv"].append(uv[s, n])
-                    obs["sigma"].append(float(sig[s, n]) * s_mean)
-                    obs["vis"].append(float(vis[s, n]))
-                    obs["window"].append(wi)
-                    obs["loop"].append(win.kind == "loop")
-                    obs["kind"].append(KIND_WITNESS if f in wit_set else KIND_KEYFRAME)
-                tq["id"].append(tid)
-                tq["frame"].append(qf)
-                tq["uv"].append(q[n])
+                for s_ in np.flatnonzero(good[:, n]):
+                    f = win.frames[s_]
+                    wobs["track"].append(tid)
+                    wobs["frame"].append(f)
+                    wobs["uv"].append(uv[s_, n])
+                    wobs["sigma"].append(float(sig[s_, n]) * s_mean)
+                    wobs["vis"].append(float(vis[s_, n]))
+                    wobs["window"].append(wi)
+                    wobs["loop"].append(win.kind == "loop")
+                    wobs["kind"].append(KIND_WITNESS if f in wit_set else KIND_KEYFRAME)
+                    wobs["bridged"].append(False)
+                wtq["id"].append(tid)
+                wtq["frame"].append(qf)
+                wtq["uv"].append(q[n])
+            if pm is not None:
+                # the tid of every bridge query that survived the edge filter (a single-frame track
+                # — the query alone — still exists for the merge: it joins the other side's)
+                tids_of: Dict[int, int] = {}
+                for k in bq_idx:
+                    pos = n_base + int(k)
+                    if keep[pos]:
+                        n_ = int(kept_pos[pos])
+                        if seen[n_] >= 1:
+                            tids_of[int(k)] = next_tid + n_
+                            if seen[n_] < 2:
+                                # the query alone: one observation, so the merge has it
+                                wobs["track"].append(next_tid + n_); wobs["frame"].append(qf)
+                                wobs["uv"].append(uv[qi, n_]); wobs["sigma"].append(float(sig[qi, n_]) * s_mean)
+                                wobs["vis"].append(float(vis[qi, n_])); wobs["window"].append(wi)
+                                wobs["loop"].append(True); wobs["kind"].append(KIND_WITNESS if qf in wit_set else KIND_KEYFRAME)
+                                wobs["bridged"].append(False)
+                                wtq["id"].append(next_tid + n_); wtq["frame"].append(qf); wtq["uv"].append(q[n_])
+                bridge_tids[qf] = tids_of
             next_tid += len(q)
+        if pm is not None and len(bridge_tids) == 2:
+            fa, fb = win.query_frames[0], win.query_frames[1]
+            ta_of, tb_of = bridge_tids.get(fa, {}), bridge_tids.get(fb, {})
+            links = [(ta_of[k], tb_of[k]) for k in sorted(set(ta_of) & set(tb_of))]
+            if links:
+                from precision import loop_bridge as LB
+                side_a, side_b = (set(win.sides[0]), set(win.sides[1])) if win.sides else (set(), set())
+                mrep = LB.merge_bridged(wobs, wtq, links, side_a, side_b)
+                merged = {ta for ta, _tb in links}
+                tr_arr = np.asarray(wobs["track"], np.int64)
+                br = np.isin(tr_arr, list(merged))
+                wobs["bridged"] = br.tolist()
+                bridge_rep["bridged_tracks"] += int(mrep["bridged_tracks"])
+                bridge_rep["links"] += int(mrep["links"])
+                bridge_rep["pairs"][f"{fa}-{fb}"]["bridged_tracks"] = int(mrep["bridged_tracks"])
+        for k in OBS_KEYS:
+            obs[k].extend(wobs[k])
+        for k in ("id", "frame", "uv"):
+            tq[k].extend(wtq[k])
         if (wi + 1) % 25 == 0 or wi == len(windows) - 1:
             log(f"{LOG_TAG} window {wi + 1}/{len(windows)}: {len(obs['track']):,} obs "
                 f"({time.time() - t0:.0f} s)")
@@ -595,6 +694,7 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
         obs_uv_sigma=np.asarray(obs["sigma"], np.float32),
         track_split=split, window_id=np.asarray(obs["window"], np.int32),
         is_loop_pair=np.asarray(obs["loop"], bool), frame_kind=np.asarray(obs["kind"], np.int8),
+        is_bridged=np.asarray(obs["bridged"], bool),
         meta=np.asarray(json.dumps(meta)))
     tmp.replace(pdir / TRACKS_NAME)
     sig = np.asarray(obs["sigma"])
@@ -614,6 +714,8 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
            "sigma_native_px": {"median": float(np.median(sig)),
                                "p90": float(np.percentile(sig, 90))},
            "instance_loops": il_rep,
+           "classical_loops": dict(cl_rep, n_new_pairs=n_classical),
+           "loop_bridge": bridge_rep,
            "split": "sha256 of (seed, query frame, query pixel float32 bits) per track"}
     (pdir / REPORT_NAME).write_text(json.dumps(rep, indent=1))
     # the wall clock lives apart from the compared report (point 36)
