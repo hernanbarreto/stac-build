@@ -147,7 +147,7 @@ def measured_tau_rel(frames: Sequence[int], dms: Dict[int, np.ndarray], sources:
                 continue
             z_g = FT._t(dms[g])
             # a tolerance of 1 (every landing counts) returns the raw disagreement through `t`
-            agree, t, _, _ = carry(z_f, v_f, ray_w, C, np.linalg.inv(c2w[g]), z_g, z_g > 0, K, 1.0, False)
+            agree, t, _, _, _c = carry(z_f, v_f, ray_w, C, np.linalg.inv(c2w[g]), z_g, z_g > 0, K, 1.0, False)
             m = agree & torch.isfinite(t) & (t > 0)
             if bool(m.any()):
                 samp.append(torch.abs(t[m] - z_f[m]) / z_f[m])

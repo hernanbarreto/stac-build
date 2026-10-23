@@ -40,6 +40,17 @@ deterministic, no sequential state. Every chain of consumptions is strictly incr
 total order and therefore ends at an owner, so every element is represented; the report measures
 the one-hop share (consumed pixels whose winner is itself an owner).
 
+FREE-SPACE CARVING AND EVIDENCE (phase 3c, USER 2026-10-23 "no voladores ni puntos donde no van").
+Over the same covisible keyframes every observation counts the views that see FREE SPACE through
+its point — g measured a surface farther along g's ray than the point, beyond the pair's tolerance
+— judged by instruments at least as good as its own (a learned map never vetoes a photometric
+point). More such views than agreeing ones: rejected (reason ``contradicted``) — a floater is seen
+through by every camera that looks past it, and a surface element seen by many cameras is never
+contradicted by a single wrong map. An owner confirmed by fewer than ``min_evidence`` views (itself
+included) is rejected as ``unverified`` (``insufficient_witnesses``): what one camera alone saw is
+not a measurement two instruments agree on. Both leave with their counts in rejected_points.npz;
+the contradiction count of every published point goes to origins ``n_contradict``.
+
 WHAT IT DOES NOT DO. Two observations of one wall whose poses disagree by more than tau·z (drift
 between a visit and a revisit) do not agree and BOTH stay: the fusion never hides drift — the
 certification's visit_drift measures it. A real step smaller than tau·z (a 4 cm moulding at 3 m)
@@ -61,6 +72,8 @@ from precision import f6_torch as FT
 
 LOG_TAG = "[fusion]"
 REJECT_FUSED = 10                      # precision.provenance.REJECT_REASONS["fused"]
+REJECT_CONTRADICTED = 9                # ...["contradicted"]: a view sees free space through the point
+REJECT_UNVERIFIED = 1                  # ...["insufficient_witnesses"]: fewer than min_evidence views
 
 
 class OwnerFusionError(RuntimeError):
@@ -76,6 +89,9 @@ class FusionResult:
     candidates: Dict[int, List[int]]             # frame → the covisible keyframes it was fused with
     report: dict = field(default_factory=dict)
     fused_tier: Dict[int, np.ndarray] = field(default_factory=dict)   # frame → [H, W] int8: the instrument tier the fused depth came from
+    contra: Dict[int, np.ndarray] = field(default_factory=dict)       # frame → [H, W] int16: covisible observations that see free space through the point
+    free_space: Dict[int, np.ndarray] = field(default_factory=dict)   # frame → [H, W] bool: rejected, more views see through it than confirm it
+    unverified: Dict[int, np.ndarray] = field(default_factory=dict)   # frame → [H, W] bool: rejected, fewer than min_evidence views
 
 
 # ── covisibility: who sees what, measured on the depth maps ────────────────
@@ -145,7 +161,9 @@ def carry(z_f: torch.Tensor, valid_f: torch.Tensor, ray_w: torch.Tensor, C_f: to
           w2c_g: np.ndarray, z_g: torch.Tensor, valid_g: torch.Tensor, K: np.ndarray, tau,
           interpolate: bool, tau_g=None):
     """Keyframe g's surface at the landing points of f's pixels: returns (agree [H, W], t [H, W] the
-    agreeing depth carried onto f's ray (NaN elsewhere), q_row, q_col the nearest landing pixel).
+    agreeing depth carried onto f's ray (NaN elsewhere), q_row, q_col the nearest landing pixel,
+    contra [H, W]: g measured a surface FARTHER than f's point by more than the tolerance at the
+    landing pixel — g sees free space through the point).
     The landing depth of g is read bilinearly when the 2x2 patch is one surface (four valid depths
     within tau of their mean), at the nearest pixel otherwise. ``tau``: one tolerance, or f's
     per-pixel map (its instrument's); with ``tau_g`` (g's per-pixel map) a pair's tolerance is the
@@ -180,12 +198,13 @@ def carry(z_f: torch.Tensor, valid_f: torch.Tensor, ray_w: torch.Tensor, C_f: to
     one = torch.ones_like(zg)
     e = (zg - d_at) / torch.where(ok, d_at, one)
     agree = ok & (torch.abs(e) <= tau_t)
+    contra = ok & (e < -tau_t)
     # the point of f's ray whose depth in g equals g's depth at the landing point
     a = T[2, :3] @ C_f + T[2, 3]
     b = ray_w @ T[2, :3]
     bb = torch.where(torch.abs(b) > 0, b, one)
     t = torch.where(agree & (torch.abs(b) > 0), (d_at - a) / bb, torch.full_like(zg, float("nan")))
-    return agree, t, vr, ur
+    return agree, t, vr, ur, contra
 
 
 # ── the two passes ───────────────────────────────────────────────────────────
@@ -201,6 +220,7 @@ def fuse(frames: Sequence[int], depth: Dict[int, np.ndarray], valid: Dict[int, n
          max_candidates: int, evidence_cap: int, interpolate: bool, nearest_tie_rel: float,
          chain_max_hops: int = 8, chain_stride: int = 4,
          tier: Optional[Dict[int, np.ndarray]] = None, tau_by_tier: Optional[Sequence[float]] = None,
+         free_space: bool = True, min_evidence: int = 1,
          log: Callable = print, progress: Optional[Callable[[float, str], None]] = None) -> FusionResult:
     """The owner fusion over the voted maps (``depth[f]`` > 0 where ``valid[f]``), in two passes:
     1. members and the fused depth of every observation; 2. ownership by the total order.
@@ -212,7 +232,18 @@ def fuse(frames: Sequence[int], depth: Dict[int, np.ndarray], valid: Dict[int, n
     observation is the median over the BEST tier present among itself and its members (a tier-0
     member never averages with tier-1 ones: the better instrument decides, the worse one fills);
     and the tier is the first component of the owner's key — a photometric observation outranks
-    every learned one of the same element."""
+    every learned one of the same element.
+
+    FREE-SPACE CARVING (phase 3c, USER 2026-10-23 "no voladores ni puntos donde no van"): over the
+    same covisible keyframes, an observation counts the views that see FREE SPACE through its point
+    — g measured a surface farther along g's ray than the point, by more than the pair's tolerance
+    — judged only by instruments at least as good as its own (a learned map never vetoes a
+    photometric point). An observation with more such views than agreeing ones is rejected
+    (``free_space``, provenance reason ``contradicted``): a floater is seen through by every view
+    that looks past it. MINIMUM EVIDENCE: an owner confirmed by fewer than ``min_evidence`` views
+    (itself included) is rejected as ``unverified`` (reason ``insufficient_witnesses``) — a point one
+    camera alone saw is not a measurement two instruments agree on. Both go to rejected_points.npz
+    with their counts; nothing is deleted."""
     t0 = time.time()
     K = np.asarray(K, np.float64)
     frames = [int(f) for f in frames]
@@ -241,6 +272,7 @@ def fuse(frames: Sequence[int], depth: Dict[int, np.ndarray], valid: Dict[int, n
             tau_m[f] = torch.full(zt[f].shape, float(tau), dtype=torch.float64, device=zt[f].device)
     # pass 1: members and the fused depth
     members: Dict[int, torch.Tensor] = {}
+    contra_n: Dict[int, torch.Tensor] = {}
     fused: Dict[int, torch.Tensor] = {}
     best_tier: Dict[int, torch.Tensor] = {}
     for i, f in enumerate(frames):
@@ -249,14 +281,17 @@ def fuse(frames: Sequence[int], depth: Dict[int, np.ndarray], valid: Dict[int, n
         cols = [zt[f]]
         col_tier = [tt[f]]
         n_ag = torch.zeros((H, W), dtype=torch.int32, device=zt[f].device)
+        n_ct = torch.zeros((H, W), dtype=torch.int32, device=zt[f].device)
         for j in cands[i]:
             g = frames[j]
-            agree, t, qr, qc = carry(zt[f], vt[f], ray_w, C, w2c[g], zt[g], vt[g], K, tau_m[f], interpolate,
-                                     tau_g=tau_m[g])
+            agree, t, qr, qc, contra = carry(zt[f], vt[f], ray_w, C, w2c[g], zt[g], vt[g], K, tau_m[f],
+                                             interpolate, tau_g=tau_m[g])
             n_ag = n_ag + agree.to(torch.int32)
             cols.append(t)
             tq = tt[g].reshape(-1)[qr * W + qc]
             col_tier.append(torch.where(agree, tq, torch.full_like(tq, len(taus))))   # non-member: no tier
+            # a view sees through the point: counted when its instrument is at least as good
+            n_ct = n_ct + (contra & (tq <= tt[f])).to(torch.int32)
         C_all = torch.stack(cols)
         if len(cols) > 1:
             T_all = torch.stack(col_tier)
@@ -268,6 +303,7 @@ def fuse(frames: Sequence[int], depth: Dict[int, np.ndarray], valid: Dict[int, n
             med = zt[f].to(torch.float64)
         fused[f] = torch.where(vt[f], med, torch.zeros_like(med))
         members[f] = torch.where(vt[f], n_ag, torch.zeros_like(n_ag))
+        contra_n[f] = torch.where(vt[f], n_ct, torch.zeros_like(n_ct))
         best_tier[f] = torch.where(vt[f], bt, torch.full_like(bt, len(taus)))
         if progress is not None and (i % 10 == 0 or i == len(frames) - 1):
             progress(100.0 * 0.5 * (i + 1) / len(frames), f"fusion pass 1: {i + 1}/{len(frames)} keyframes")
@@ -295,7 +331,14 @@ def fuse(frames: Sequence[int], depth: Dict[int, np.ndarray], valid: Dict[int, n
         bucket[f] = torch.where(vt[f], b, torch.full_like(b, 0))
     owner: Dict[int, np.ndarray] = {}
     winner: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
-    tot_owner = tot_valid = tot_consumed = 0
+    free_m: Dict[int, np.ndarray] = {}
+    unver_m: Dict[int, np.ndarray] = {}
+    tot_owner = tot_valid = tot_consumed = tot_free = tot_unver = 0
+    min_ev = max(1, int(min_evidence))
+    # the observations that stay in the game: not seen through by more views than confirm them
+    alive: Dict[int, torch.Tensor] = {}
+    for f in frames:
+        alive[f] = vt[f] & ~(contra_n[f] > members[f]) if free_space else vt[f]
     def _prim(f: int) -> torch.Tensor:
         # the first component of the key: the instrument first (a tier-0 observation outranks every
         # tier-1 one), then the confirmed tier
@@ -315,21 +358,27 @@ def fuse(frames: Sequence[int], depth: Dict[int, np.ndarray], valid: Dict[int, n
         best_c = torch.zeros((H, W), dtype=torch.int64, device=z_f.device)
         for j in cands[i]:
             g = frames[j]
-            agree, _, qr, qc = carry(zt[f], vt[f], ray_w, C, w2c[g], zt[g], vt[g], K, tau_m[f], interpolate,
-                                     tau_g=tau_m[g])
+            agree, _, qr, qc, _c = carry(zt[f], vt[f], ray_w, C, w2c[g], zt[g], vt[g], K, tau_m[f], interpolate,
+                                         tau_g=tau_m[g])
             qi = qr * W + qc
             prim_g = _prim(g).reshape(-1)[qi]
             buck_g = bucket[g].reshape(-1)[qi]
-            better = agree & ((prim_g > prim_f) | ((prim_g == prim_f) & ((buck_g < buck_f) | ((buck_g == buck_f) & (j < i)))))
+            alive_g = alive[g].reshape(-1)[qi]
+            better = agree & alive_g & ((prim_g > prim_f) | ((prim_g == prim_f) & ((buck_g < buck_f) | ((buck_g == buck_f) & (j < i)))))
             lost = lost | better
             # the best-ranked winner so far, for the rejected record (the same total order)
             up = better & ((prim_g > best_prim) | ((prim_g == best_prim) & ((buck_g < best_buck) | ((buck_g == best_buck) & (j < best_j)))))
             best_prim = torch.where(up, prim_g, best_prim); best_buck = torch.where(up, buck_g, best_buck)
             best_j = torch.where(up, torch.full_like(best_j, j), best_j)
             best_r = torch.where(up, qr, best_r); best_c = torch.where(up, qc, best_c)
-        own = vt[f] & ~lost
+        free_f = vt[f] & ~alive[f]
+        unver_f = alive[f] & ~lost & (members[f] + 1 < min_ev)
+        own = alive[f] & ~lost & ~unver_f
         owner[f] = FT._np(own)
-        consumed = FT._np(vt[f] & lost)
+        free_m[f] = FT._np(free_f)
+        unver_m[f] = FT._np(unver_f)
+        tot_free += int(free_f.sum()); tot_unver += int(unver_f.sum())
+        consumed = FT._np(alive[f] & lost)
         bj = FT._np(best_j, np.int64)
         frames_arr = np.asarray(frames + [-1], np.int32)
         wf = np.where(consumed & (bj >= 0), frames_arr[np.where(bj >= 0, bj, len(frames))], -1).astype(np.int32)
@@ -353,13 +402,19 @@ def fuse(frames: Sequence[int], depth: Dict[int, np.ndarray], valid: Dict[int, n
            "covisibility": {"stride": int(covis_stride), "min_frac": float(min_covis_frac), "cap": int(max_candidates),
                             "candidates_per_keyframe": {"min": min(n_cand), "median": float(np.median(n_cand)), "max": max(n_cand)}},
            "observations": tot_valid, "owners": tot_owner, "consumed": tot_consumed,
+           "free_space": {"enabled": bool(free_space), "rejected": tot_free,
+                          "rule": "more covisible views (instrument >= the point's) see free space through the "
+                                  "point than agree with it"},
+           "unverified": {"min_evidence": min_ev, "rejected": tot_unver,
+                          "rule": "an owner confirmed by fewer than min_evidence views (itself included)"},
            "owners_share": (tot_owner / tot_valid) if tot_valid else None,
            "representation": chain,
            "members_of_owners": {"p05": q[0], "p25": q[1], "p50": q[2], "p75": q[3], "p95": q[4],
                                  "share_zero": float((mem_all == 0).mean()) if mem_all.size else None},
            "seconds": round(time.time() - t0, 1)}
     log(f"{LOG_TAG} {tot_owner:,} owners of {tot_valid:,} observations ({rep['owners_share'] * 100 if tot_valid else 0:.1f} %), "
-        f"{tot_consumed:,} consumed; represented by an owner within {chain_max_hops} hops: "
+        f"{tot_consumed:,} consumed, {tot_free:,} seen through (free space), {tot_unver:,} unverified "
+        f"(< {min_ev} views); represented by an owner within {chain_max_hops} hops: "
         f"{(chain['resolved_share'] * 100 if chain['sampled'] else 100):.1f} % of {chain['sampled']:,} sampled, "
         f"at p50 {chain['distance_footprints']['p50']} / p95 {chain['distance_footprints']['p95']} footprints; "
         f"members of the owners p50 "
@@ -377,7 +432,8 @@ def fuse(frames: Sequence[int], depth: Dict[int, np.ndarray], valid: Dict[int, n
                         members={f: FT._np(torch.clamp(members[f], max=32767), np.int16) for f in frames},
                         winner=winner, candidates={f: [frames[j] for j in cands[i]] for i, f in enumerate(frames)},
                         fused_tier={f: FT._np(torch.clamp(best_tier[f], max=127), np.int8) for f in frames},
-                        report=rep)
+                        contra={f: FT._np(torch.clamp(contra_n[f], max=32767), np.int16) for f in frames},
+                        free_space=free_m, unverified=unver_m, report=rep)
 
 
 def chain_check(frames: Sequence[int], zt: Dict[int, torch.Tensor], vt: Dict[int, torch.Tensor],
@@ -447,21 +503,37 @@ def chain_check(frames: Sequence[int], zt: Dict[int, torch.Tensor], vt: Dict[int
 
 
 def write_rejected(path, frames: Sequence[int], result: FusionResult, valid: Dict[int, np.ndarray]) -> int:
-    """The consumed pixels, with their winner, as ``rejected_points.npz`` (reason `fused`): every
-    observation that left the cloud is named with the one that represents it. Returns the count."""
-    fg, pr, pc, wf, wr, wc = [], [], [], [], [], []
+    """Every observation that left the cloud, as ``rejected_points.npz``: consumed (reason `fused`,
+    with the winner that represents it), seen through (`contradicted`) and unverified
+    (`insufficient_witnesses`), each with its agreeing and contradicting counts. Returns the count."""
+    fg, pr, pc, wf, wr, wc, rs, na, nc = [], [], [], [], [], [], [], [], []
     for f in frames:
-        m = np.asarray(valid[f], bool) & ~result.owner[f] & (result.winner[f][0] >= 0)
-        r, c = np.nonzero(m)
-        fg.append(np.full(len(r), int(f), np.int32)); pr.append(r.astype(np.int16)); pc.append(c.astype(np.int16))
-        wf.append(result.winner[f][0][m]); wr.append(result.winner[f][1][m]); wc.append(result.winner[f][2][m])
+        v = np.asarray(valid[f], bool)
+        free = result.free_space.get(f)
+        unv = result.unverified.get(f)
+        consumed = v & ~result.owner[f] & (result.winner[f][0] >= 0)
+        if free is not None:
+            consumed &= ~free
+        if unv is not None:
+            consumed &= ~unv
+        for m, reason in ((consumed, REJECT_FUSED),
+                          (v & free if free is not None else np.zeros_like(v), REJECT_CONTRADICTED),
+                          (v & unv if unv is not None else np.zeros_like(v), REJECT_UNVERIFIED)):
+            if not m.any():
+                continue
+            r, c = np.nonzero(m)
+            fg.append(np.full(len(r), int(f), np.int32)); pr.append(r.astype(np.int16)); pc.append(c.astype(np.int16))
+            if reason == REJECT_FUSED:
+                wf.append(result.winner[f][0][m]); wr.append(result.winner[f][1][m]); wc.append(result.winner[f][2][m])
+            else:
+                wf.append(np.full(len(r), -1, np.int32)); wr.append(np.zeros(len(r), np.int16)); wc.append(np.zeros(len(r), np.int16))
+            rs.append(np.full(len(r), reason, np.uint8))
+            na.append(result.members[f][m].astype(np.int16))
+            nc.append((result.contra[f][m] if f in result.contra else np.zeros(len(r), np.int16)).astype(np.int16))
     n = int(sum(len(x) for x in fg))
-    np.savez_compressed(path, version=np.int64(3), stage=np.array("owner_fusion"),
-                        frame_global=np.concatenate(fg) if n else np.zeros(0, np.int32),
-                        pixel_row=np.concatenate(pr) if n else np.zeros(0, np.int16),
-                        pixel_col=np.concatenate(pc) if n else np.zeros(0, np.int16),
-                        winner_frame=np.concatenate(wf) if n else np.zeros(0, np.int32),
-                        winner_row=np.concatenate(wr) if n else np.zeros(0, np.int16),
-                        winner_col=np.concatenate(wc) if n else np.zeros(0, np.int16),
-                        reason=np.full(n, REJECT_FUSED, np.uint8))
+    cat = lambda xs, dt: (np.concatenate(xs) if n else np.zeros(0, dt))  # noqa: E731
+    np.savez_compressed(path, version=np.int64(4), stage=np.array("owner_fusion"),
+                        frame_global=cat(fg, np.int32), pixel_row=cat(pr, np.int16), pixel_col=cat(pc, np.int16),
+                        winner_frame=cat(wf, np.int32), winner_row=cat(wr, np.int16), winner_col=cat(wc, np.int16),
+                        reason=cat(rs, np.uint8), n_agree=cat(na, np.int16), n_contradict=cat(nc, np.int16))
     return n

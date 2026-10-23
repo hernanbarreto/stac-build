@@ -122,7 +122,15 @@ def test_compute_bends_omega_to_the_landmarks_and_reports_the_model(tmp_path, mo
     # owner, and the fused points of the confirmed owners are the plane
     F = C.fusion
     assert F is not None and 0 < F.report["owners"] < F.report["observations"]
-    assert F.report["owners"] + F.report["consumed"] == F.report["observations"]
+    # every observation is an owner, consumed, seen through or unverified (phase 3c) — nothing vanishes
+    assert (F.report["owners"] + F.report["consumed"] + F.report["free_space"]["rejected"]
+            + F.report["unverified"]["rejected"] == F.report["observations"])
+    if expect == BM.INVERSE_DEPTH:
+        assert F.report["free_space"]["rejected"] == 0, "a plane seen from five keyframes: nobody sees through it"
+    else:
+        # the pixel-affine family bends the plane: where the bent surfaces of two keyframes part by more
+        # than tau, one sees free space through the other's point — the carving reads the bend's defect
+        assert F.report["free_space"]["rejected"] < 0.01 * F.report["observations"]
     rep_ = F.report["representation"]
     assert rep_["resolved_share"] > 0.99 and rep_["distance_footprints"]["p95"] < 3.0, rep_
     if expect == BM.INVERSE_DEPTH:
@@ -200,3 +208,36 @@ def test_the_photometric_reference_calibrates_the_bend_and_owns_the_textured_ban
     rp = CT.report_path(s / "output"); d = json.loads(rp.read_text()); d["geometry_epoch"] = 4; rp.write_text(json.dumps(d))
     with pytest.raises(CT.ColmapError, match="re-run the COLMAP tier"):
         CT.load_colmap_tier(s / "output", FRAMES, {"geometry_epoch": 5, "camera_epoch": 3}, rid, 3, (FW, FH))
+
+
+def test_the_published_pixel_is_the_record_pixel_through_the_lens():
+    """Phase 3c (measured 2026-10-23): the cleaner's rows carry the bend's UNDISTORTED pixel; the PLY's
+    pixel_row/col must be the pixel of Omega's record (the original, distorted frame) — what the masks
+    and every later stage index. With a lens the two differ by the distortion displacement."""
+    import cv2
+    from precision.camera import CameraModel, grid_full_frame_resize, undistort_maps
+    from precision.depth_on_f5 import provenance_pixels
+    g = grid_full_frame_resize(FW, FH, FW, FH, "omega")
+    cam = CameraModel(FW, FH, (*FK, -0.08, 0.01, 0.0, 0.0), "refine", 3, g)
+    maps = undistort_maps(cam)
+    data = np.zeros(4, dtype=[("frame_global", "i4"), ("pixel_row", "i2"), ("pixel_col", "i2")])
+    data["pixel_col"] = [2, 40, 77, 60]; data["pixel_row"] = [3, 30, 57, 10]
+    u_und, v_und, moved = provenance_pixels(data, cam, maps, (FH, FW), carry=True)
+    assert moved and u_und.tolist() == [2, 40, 77, 60] and v_und.tolist() == [3, 30, 57, 10]
+    # the distorted pixel of each undistorted one, by OpenCV itself (the lens maps are its)
+    K = cam.K()
+    pts = np.stack([u_und, v_und], 1).astype(np.float64)
+    xn = (pts - K[[0, 1], 2]) / K[[0, 1], [0, 1]]
+    X = np.c_[xn, np.ones(len(xn))]
+    dist, _ = cv2.projectPoints(X.reshape(-1, 1, 3), np.zeros(3), np.zeros(3), K, cam.dist())
+    dist = dist.reshape(-1, 2)
+    assert np.abs(np.asarray(data["pixel_col"]) - np.rint(dist[:, 0])).max() <= 1
+    assert np.abs(np.asarray(data["pixel_row"]) - np.rint(dist[:, 1])).max() <= 1
+    # the corners moved by the distortion, the centre not
+    assert sum(abs(int(data["pixel_col"][k]) - u_und[k]) + abs(int(data["pixel_row"][k]) - v_und[k]) for k in (0, 2)) >= 2
+    assert int(data["pixel_col"][1]) == 40 and int(data["pixel_row"][1]) == 30
+    # no lens, native grid: nothing moves
+    cam0 = CameraModel(FW, FH, (*FK, 0.0, 0.0, 0.0, 0.0), "refine", 3, g)
+    d0 = data.copy(); d0["pixel_col"] = [2, 40, 77, 60]; d0["pixel_row"] = [3, 30, 57, 10]
+    _u, _v, moved0 = provenance_pixels(d0, cam0, undistort_maps(cam0), (FH, FW), carry=False)
+    assert not moved0 and d0["pixel_col"].tolist() == [2, 40, 77, 60]

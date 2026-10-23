@@ -757,15 +757,42 @@ def apply_mono_detail(pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out
     return dep2, valid, passed, src, rep
 
 
-def map_column(data, maps: Dict[int, np.ndarray], dtype=np.uint8) -> np.ndarray:
-    """Per cleaned point the value of a per-keyframe map at its (frame, pixel) — the vote's
-    contradiction count for origins ``n_contradict`` (audit 2026-10-23); 0 where no map."""
+def provenance_pixels(data, cam, maps, rec_hw, carry: bool):
+    """THE PROVENANCE PIXEL (phase 3c, measured 2026-10-23). The cleaner's rows carry the BEND's pixel
+    (the undistorted native grid). ``pixel_row/col`` of the PLY are what every later stage indexes
+    the masks and Omega's record with — provenance.py's contract: the RECORD grid, through the lens
+    (``corrected_cloud.to_record_grid``). F7's path did that; this one published the bend's pixel,
+    and a lens camera mis-indexed every mask by the distortion displacement (5.5 px on observatorio).
+    Returns (u_und, v_und — the bend's pixel for origins.npz, moved) and rewrites ``data``'s
+    pixel_row/col in place when ``carry`` (a lens, or a record grid other than the native one)."""
+    from precision import corrected_cloud as CC
+    u_und = np.asarray(data["pixel_col"]).astype(np.int64, copy=True)
+    v_und = np.asarray(data["pixel_row"]).astype(np.int64, copy=True)
+    if not carry:
+        return u_und, v_und, False
+    row, col = CC.to_record_grid(u_und, v_und, cam, maps, rec_hw)
+    data["pixel_row"] = row.astype(data.dtype["pixel_row"])
+    data["pixel_col"] = col.astype(data.dtype["pixel_col"])
+    return u_und, v_und, True
+
+
+def _pixels_of(data, rc):
+    """The (row, col) of every point on the BEND's grid: ``rc`` when the caller carried pixel_row/col
+    elsewhere (the record grid, phase 3c), the PLY's columns otherwise."""
+    if rc is not None:
+        return np.asarray(rc[0], np.int64), np.asarray(rc[1], np.int64)
+    return np.asarray(data["pixel_row"], np.int64), np.asarray(data["pixel_col"], np.int64)
+
+
+def map_column(data, maps: Dict[int, np.ndarray], dtype=np.uint8, rc=None) -> np.ndarray:
+    """Per cleaned point the value of a per-keyframe map at its (frame, pixel on the bend's grid) —
+    the contradiction count for origins ``n_contradict`` (audit 2026-10-23); 0 where no map."""
     n = len(data)
     out = np.zeros(n, dtype)
     if not maps:
         return out
     fg = np.asarray(data["frame_global"], np.int64)
-    r = np.asarray(data["pixel_row"], np.int64); c = np.asarray(data["pixel_col"], np.int64)
+    r, c = _pixels_of(data, rc)
     for f in np.unique(fg):
         mp = maps.get(int(f))
         if mp is None:
@@ -775,15 +802,16 @@ def map_column(data, maps: Dict[int, np.ndarray], dtype=np.uint8) -> np.ndarray:
     return out
 
 
-def source_column(data, src_maps) -> np.ndarray:
+def source_column(data, src_maps, rc=None) -> np.ndarray:
     """Per cleaned point its provenance byte from the refined maps (1 = Omega bent when the stage did
-    not run); looked up by (frame, pixel) because the cleaner carries only the origin columns."""
+    not run); looked up by (frame, pixel on the bend's grid) because the cleaner carries only the
+    origin columns."""
     n = len(data)
     if src_maps is None:
         return np.ones(n, np.uint8)
     from precision.mono_detail import SRC_UNRESOLVED
     fg = np.asarray(data["frame_global"], np.int64)
-    r = np.asarray(data["pixel_row"], np.int64); c = np.asarray(data["pixel_col"], np.int64)
+    r, c = _pixels_of(data, rc)
     out = np.ones(n, np.uint8)
     for f in np.unique(fg):
         m = fg == f
@@ -1137,6 +1165,7 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
                          max_candidates=int(fu.max_candidates), evidence_cap=int(fu.evidence_cap),
                          interpolate=bool(fu.interpolate), nearest_tie_rel=float(fu.nearest_tie_rel),
                          tier=tier_maps, tau_by_tier=tau_by_tier,
+                         free_space=bool(fu.free_space), min_evidence=int(fu.min_evidence),
                          log=log, progress=lambda pct, m: _p(66 + pct * 4 / 100, m))
     return types.SimpleNamespace(session_dir=session_dir, out=out, inp=inp, frames=frames, N=N, W=W, H=H, K=K,
                                  c2w=c2w, params=params, chunk=chunk, voted=voted, tau=tau, vst=vst, cover=cover,
@@ -1188,9 +1217,12 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
                 contra_maps[f] = voted[f][2] if len(voted[f]) > 2 else np.zeros(zmap.shape, np.int16)
                 m = zmap > 0
                 if fusion is not None:
-                    # the owners only, at the fused depth, with every covisible member as the evidence
+                    # the owners only, at the fused depth, with every covisible member as the evidence;
+                    # the contradictions counted over every covisible keyframe (phase 3c), not ±3/6/12
                     m = m & fusion.owner[f] & (fusion.depth[f] > 0)
                     zmap = fusion.depth[f]; amap = fusion.members[f]
+                    if f in fusion.contra:
+                        contra_maps[f] = fusion.contra[f]
                 r, c = vv[m], uu[m]; zz = zmap[m].astype(np.float64)
                 X = np.stack([(c - K[0, 2]) / K[0, 0] * zz, (r - K[1, 2]) / K[1, 1] * zz, zz], 1) @ c2w[f][:3, :3].T + c2w[f][:3, 3]
                 img = CC._rgb_undistorted(inp.frames_dir, f, inp.maps)
@@ -1207,14 +1239,21 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
         cleaned = tmp / "cleaned_cloud.ply"
         CC.clean(raw_cfg, tmp / "chunks", cleaned, log)
         shutil.rmtree(tmp / "chunks", ignore_errors=True)
-        _, data = read_ply(cleaned)
-        cols = {"pixel_u_und": np.asarray(data["pixel_col"]), "pixel_v_und": np.asarray(data["pixel_row"]),
+        header, data = read_ply(cleaned)
+        u_und, v_und, moved = provenance_pixels(data, inp.cam, inp.maps, C.rec_hw, bool(C.carry))
+        if moved:
+            from correction.session import write_ply
+            write_ply(cleaned, header, data)
+            log(f"{LOG_TAG} provenance: pixel_row/col carried through the lens onto Omega's record grid "
+                f"{C.rec_hw[1]}x{C.rec_hw[0]}; the bend's undistorted pixel in origins.npz")
+        cols = {"pixel_u_und": u_und, "pixel_v_und": v_und,
                 "n_consistent": np.clip(np.asarray(data["confidence"]), 0, 255).astype(np.uint8),
-                "n_contradict": map_column(data, contra_maps),
-                "source": source_column(data, src_maps)}
+                "n_contradict": map_column(data, contra_maps, rc=(v_und, u_und)),
+                "source": source_column(data, src_maps, rc=(v_und, u_und))}
         if fusion is not None and fusion.fused_tier and getattr(C, "colmap_rep", None) is not None:
             # phase 3: a point whose fused depth is the photometric reference's says so
-            tier_col = map_column(data, {f: (fusion.fused_tier[f] + 1).astype(np.int16) for f in frames})
+            tier_col = map_column(data, {f: (fusion.fused_tier[f] + 1).astype(np.int16) for f in frames},
+                                  rc=(v_und, u_und))
             cols["source"] = np.where(tier_col == 1, SRC_COLMAP, cols["source"]).astype(np.uint8)
         report = {"version": 1, "stage": "depth_on_f5", "provenance": "tool_measured",
                   "source_of_depth": "Omega's depth bent to F5's landmarks + edge-keeping multi-view vote (pccr epoch 8)"

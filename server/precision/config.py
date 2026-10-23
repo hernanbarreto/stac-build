@@ -445,6 +445,11 @@ class FusionConfig:
     colmap_min_views: int       # a COLMAP depth is tier 0 with at least this many consistent COLMAP views (and
                                 # fewer contradictions than confirmations — the sweep's rule)
     colmap_max_sources: int     # BOUND (cost): source images per reference keyframe, the most covisible first
+    free_space: bool            # phase 3c: an observation more covisible views see FREE SPACE through than
+                                # agree with (instruments at least as good as its own) is rejected
+                                # (reason contradicted) — the floater's rule, over every covisible keyframe
+    min_evidence: int           # phase 3c: an owner confirmed by fewer views than this (itself included) is
+                                # rejected as unverified (reason insufficient_witnesses); 1 = publish all
     colmap_rows_stride: int     # BOUND (cost): every this-th tier-0 pixel is a row of the bend's fit when
                                 # bend.colmap_rows takes them
     colmap_tau_quantile: float  # the instrument's tolerance = this percentile of the disagreement between
@@ -942,6 +947,8 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                           interpolate=_bool(fu, "interpolate", "fusion"),
                           nearest_tie_rel=_num(fu, "nearest_tie_rel", "fusion", lo=0.0, hi=0.5),
                           rejected_file=_bool(fu, "rejected_file", "fusion"),
+                          free_space=_bool(fu, "free_space", "fusion"),
+                          min_evidence=_num(fu, "min_evidence", "fusion", lo=1, integer=True),
                           colmap_tier=_bool(fu, "colmap_tier", "fusion"),
                           colmap_min_views=_num(fu, "colmap_min_views", "fusion", lo=1, integer=True),
                           colmap_max_sources=_num(fu, "colmap_max_sources", "fusion", lo=1, integer=True),

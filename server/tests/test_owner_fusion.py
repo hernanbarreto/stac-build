@@ -153,9 +153,12 @@ def test_the_rejected_file_names_every_consumed_pixel_with_its_winner(tmp_path):
     res = OF.fuse(frames, depth, valid, K, c2w, 0.02, log=lambda *a: None, **CFG)
     n = OF.write_rejected(tmp_path / "rejected_points.npz", frames, res, valid)
     with np.load(tmp_path / "rejected_points.npz") as z:
-        assert int(z["version"]) == 3 and str(z["stage"]) == "owner_fusion"
-        assert len(z["frame_global"]) == n == res.report["consumed"]
-        assert (z["reason"] == OF.REJECT_FUSED).all() and (z["winner_frame"] >= 0).all()
+        assert int(z["version"]) == 4 and str(z["stage"]) == "owner_fusion"
+        assert len(z["frame_global"]) == n == res.report["consumed"] + res.report["free_space"]["rejected"] \
+            + res.report["unverified"]["rejected"]
+        fused = z["reason"] == OF.REJECT_FUSED
+        assert fused.all() and (z["winner_frame"] >= 0).all() and len(z["n_agree"]) == len(z["n_contradict"]) == n
+        assert res.report["free_space"]["rejected"] == 0 and (z["n_contradict"] == 0).all()
         # the winner of a consumed pixel is a valid observation of another keyframe
         for k in range(0, n, max(1, n // 50)):
             g, r, c = int(z["winner_frame"][k]), int(z["winner_row"][k]), int(z["winner_col"][k])
@@ -164,7 +167,7 @@ def test_the_rejected_file_names_every_consumed_pixel_with_its_winner(tmp_path):
     # across a step at the nearest pixel — never across the step
     z_g = np.full((H, W), 4.0, np.float32); z_g[:, W // 2:] = 2.0
     ray_w, C = OF._frame_geometry(0, H, W, K, c2w)
-    agree, t, qr, qc = OF.carry(FT._t(depth[0]), FT._t(valid[0], FT.torch.bool), ray_w, C, np.linalg.inv(c2w[1]),
+    agree, t, qr, qc, _c = OF.carry(FT._t(depth[0]), FT._t(valid[0], FT.torch.bool), ray_w, C, np.linalg.inv(c2w[1]),
                                 FT._t(z_g), FT._t(np.ones((H, W), bool), FT.torch.bool), K, 0.02, True)
     tt = FT._np(t)
     assert np.all(np.isnan(tt) | (np.abs(tt - 4.0) < 0.2) | (np.abs(tt - 2.0) < 0.2))
@@ -203,3 +206,83 @@ def test_the_photometric_tier_decides_where_it_measures_and_the_learned_depth_fi
     for g in np.unique(wf[consumed0]):
         sel = consumed0 & (wf == g)
         assert (tier[int(g)][wr[sel].astype(int), wc[sel].astype(int)] == 0).all()
+
+
+def test_free_space_carving_rejects_a_floater_every_other_view_sees_through():
+    """Phase 3c (USER 2026-10-23: "no voladores ni puntos donde no van"). Seven keyframes of a wall at
+    4 m; three of them also carry a blob 1.2 m in front of the wall (a floater three cameras agree
+    on). Every other keyframe measures the wall through the blob's place: more views see free space
+    through its points than confirm them — the blob leaves (reason contradicted), with its counts;
+    the wall stays whole."""
+    biases = [1.0] * 7
+    frames, c2w, depth, valid = _scene(biases, xs=[0.3 * (i - 3) for i in range(7)], zs=[0.0] * 7)
+    blob = np.zeros((H, W), bool); blob[18:30, 26:38] = True
+    for f in (2, 3, 4):
+        # the floater: a patch of ONE world plane 1.2 m in front of the wall (z = 2.8 + 0.15 x), seen
+        # at the blob's pixels of the three keyframes
+        depth[f] = np.where(blob, _wall(c2w[f], z0=2.8).astype(np.float32), depth[f])
+    res = OF.fuse(frames, depth, valid, K, c2w, 0.02, log=lambda *a: None, free_space=True, min_evidence=1, **CFG)
+    rep = res.report
+    assert rep["free_space"]["enabled"] and rep["free_space"]["rejected"] > 0
+    for f in (2, 3, 4):
+        assert res.free_space[f][blob].mean() > 0.9, f"keyframe {f}: {res.free_space[f][blob].mean():.2f} of the blob seen through"
+        assert not res.owner[f][blob].any()
+        assert res.contra[f][blob].min() >= 1
+        # the wall around the blob is untouched
+        ring = np.zeros((H, W), bool); ring[12:36, 20:44] = True; ring &= ~blob
+        assert not res.free_space[f][ring].any()
+    # the published cloud holds no point near the floater's place
+    P = _points(frames, c2w, res.depth, res.owner)
+    assert not np.any((P[:, 2] > 2.5) & (P[:, 2] < 3.1)), "floater points published"
+    assert _plane_rms(P) < 0.006
+    # without carving the blob is published (three agreeing views)
+    res0 = OF.fuse(frames, depth, valid, K, c2w, 0.02, log=lambda *a: None, free_space=False, min_evidence=1, **CFG)
+    P0 = _points(frames, c2w, res0.depth, res0.owner)
+    assert np.any((P0[:, 2] > 2.5) & (P0[:, 2] < 3.1))
+    assert res0.report["free_space"]["rejected"] == 0
+
+
+def test_a_learned_map_never_vetoes_a_photometric_point():
+    """The instrument rule of the carving: a tier-0 (COLMAP) point is seen through only by tier-0
+    maps. The same floater, but measured by tier 0 in its three keyframes and seen through by
+    tier-1 maps only — it stays (a learned depth cannot veto a photometric one)."""
+    frames, c2w, depth, valid = _scene([1.0] * 7, xs=[0.3 * (i - 3) for i in range(7)], zs=[0.0] * 7)
+    blob = np.zeros((H, W), bool); blob[18:30, 26:38] = True
+    tier = {f: np.ones((H, W), np.int8) for f in frames}
+    for f in (2, 3, 4):
+        depth[f] = np.where(blob, _wall(c2w[f], z0=2.8).astype(np.float32), depth[f])
+        tier[f] = np.where(blob, 0, 1).astype(np.int8)
+    res = OF.fuse(frames, depth, valid, K, c2w, 0.02, log=lambda *a: None, free_space=True, min_evidence=1,
+                  tier=tier, tau_by_tier=(0.005, 0.02), **CFG)
+    for f in (2, 3, 4):
+        assert not res.free_space[f][blob].any()
+        assert res.contra[f][blob].max() == 0
+
+
+def test_minimum_evidence_marks_what_one_camera_alone_saw():
+    """A patch of the wall seen by one keyframe only (the others have no depth there): with
+    min_evidence 2 its points are rejected as unverified (reason insufficient_witnesses), never
+    deleted — they are in rejected_points.npz with n_agree 0; with min_evidence 1 they publish."""
+    frames, c2w, depth, valid = _scene([1.0] * 5, xs=[0.3 * (i - 2) for i in range(5)], zs=[0.0] * 5)
+    patch = np.zeros((H, W), bool); patch[4:12, 4:12] = True
+    hole = np.zeros((H, W), bool); hole[0:20, 0:30] = True          # where keyframe 2's patch lands in the others
+    for f in frames:
+        if f != 2:
+            valid[f] = valid[f] & ~hole
+            depth[f] = np.where(hole, 0.0, depth[f]).astype(np.float32)
+    # keyframe 2's patch pixels land where the others have no depth: nobody agrees, nobody sees through
+    res2 = OF.fuse(frames, depth, valid, K, c2w, 0.02, log=lambda *a: None, free_space=True, min_evidence=2, **CFG)
+    single = res2.unverified[2] & patch
+    assert single.sum() > 0.5 * patch.sum() and not res2.owner[2][single].any()
+    assert (res2.members[2][single] == 0).all()
+    assert res2.report["unverified"]["rejected"] == int(sum(res2.unverified[f].sum() for f in frames))
+    res1 = OF.fuse(frames, depth, valid, K, c2w, 0.02, log=lambda *a: None, free_space=True, min_evidence=1, **CFG)
+    assert res1.owner[2][single].all() and res1.report["unverified"]["rejected"] == 0
+    import tempfile, pathlib
+    with tempfile.TemporaryDirectory() as td:
+        p = pathlib.Path(td) / "rejected_points.npz"
+        n = OF.write_rejected(p, frames, res2, valid)
+        with np.load(p) as z:
+            assert n == len(z["reason"]) and (z["reason"] == OF.REJECT_UNVERIFIED).sum() == res2.report["unverified"]["rejected"]
+            unv = z["reason"] == OF.REJECT_UNVERIFIED
+            assert (z["n_agree"][unv] == 0).all() and (z["winner_frame"][unv] == -1).all()

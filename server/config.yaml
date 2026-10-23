@@ -2581,6 +2581,18 @@ reconstruction:
       colmap_max_sources: 12            # BOUND (cost): source images per reference keyframe (the most covisible)
       colmap_rows_stride: 8             # BOUND (cost): every 8th tier-0 pixel is a row of the bend's fit
                                         #   (bend.colmap_rows) — ~6,000 rows per keyframe at 464x832
+      free_space: true                  # PHASE 3c (USER 2026-10-23 "no voladores ni puntos donde no van"): an
+                                        #   observation that MORE covisible keyframes see free space through
+                                        #   (they measured a surface farther along their ray, beyond the
+                                        #   pair's tolerance; only instruments at least as good as the
+                                        #   point's own count) than agree with it is rejected — reason
+                                        #   contradicted, with its counts, in rejected_points.npz. A floater
+                                        #   is seen through by every camera that looks past it.
+      min_evidence: 2                   # PHASE 3c: an owner confirmed by fewer views than this (itself
+                                        #   included) is rejected as UNVERIFIED (reason insufficient_witnesses,
+                                        #   recoverable from rejected_points.npz): a point one camera alone saw
+                                        #   is not a measurement two instruments agree on. 1 = publish them
+                                        #   (the pre-phase-3c cloud); the report counts what left
       colmap_tau_quantile: 75.0         # the instrument's tolerance = p75 of the disagreement between COLMAP maps,
                                         #   measured on every run (the construction of the vote's tau)
     flyers:                             # Phase 0 of the mono-detail work (claude_stac.txt 2026-10-04): flyer
