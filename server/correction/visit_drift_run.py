@@ -306,7 +306,9 @@ def measure_epoch(output_dir: Path, cfg, rep_m: float,
     # 2026-10-01: Omega's intrinsic.txt is another camera once F5 refined it)
     cam = vd.projection_camera(output_dir, xyz, ks, poses, data["pixel_row"],
                                data["pixel_col"], min_depth_m=float(vcfg.min_depth_m), log=log)
-    vis = vd.Visibility(output_dir, xyz, ks, poses, cam, tol, min_depth_m=float(vcfg.min_depth_m))
+    ex_xyz, ex_ks = consumed_world_points(output_dir, kfs, poses, log=log)
+    vis = vd.Visibility(output_dir, xyz, ks, poses, cam, tol, min_depth_m=float(vcfg.min_depth_m),
+                        extra_xyz=ex_xyz, extra_ks=ex_ks)
     det: List[Tuple] = []
     n_pairs = 0
     for c in cands:
@@ -640,9 +642,33 @@ def solve_depth(output_dir: Path, log: Callable[[str], None] = print,
     return k_kf, t_kf, srep
 
 
+def consumed_world_points(output_dir: Path, kfs, poses_c2w: np.ndarray, k_kf=None, b_kf=None,
+                          log: Callable[[str], None] = print):
+    """The keyframes' consumed observations as world points at the caller's epoch (phase 3e,
+    ``correction.fused_observations``): (xyz, keyframe index), or (None, None) without a fusion
+    record. ``k_kf`` / ``b_kf``: the epoch's per-keyframe depth warp when the caller stages one."""
+    from correction import fused_observations as FO
+    from precision.camera import CAMERA_JSON_NAME, load_camera_json
+    output_dir = Path(output_dir)
+    kf_of_frame = {int(f): k for k, f in enumerate(kfs or [])}
+    got = FO.consumed_observations(output_dir, kf_of_frame)
+    if got is None or len(got[0]) == 0:
+        return None, None
+    ks, r, c, d = got
+    cam_json = output_dir / CAMERA_JSON_NAME
+    if not cam_json.exists():
+        log("  consumed observations: no camera.json — the z-buffers hold the owners alone")
+        return None, None
+    K = load_camera_json(cam_json).K()
+    xyz = FO.world_points(ks, r, c, d, poses_c2w, K, k_kf=k_kf, b_kf=b_kf)
+    log(f"  consumed observations: {len(ks):,} of the keyframes' own measurements join their z-buffers "
+        f"(owners + consumed = the depth map each camera measured)")
+    return xyz, ks
+
+
 def filter_staged_cloud(tx: Path, session, data_new, xyz_new: np.ndarray,
                         poses_new: np.ndarray, raw_data_new, cfg,
-                        log: Callable[[str], None] = print
+                        log: Callable[[str], None] = print, depth_warp=None
                         ) -> Optional[Tuple[dict, np.ndarray]]:
     """STEP 12 — the mask filter, INSIDE the last transaction.
 
@@ -708,8 +734,14 @@ def filter_staged_cloud(tx: Path, session, data_new, xyz_new: np.ndarray,
                                aspect_tol=(float(_aspect) if _aspect is not None else None),
                                mask_pixels=cam.record_to_mask(data_new["pixel_row"],
                                                               data_new["pixel_col"]))
+    from segmentation import mask_space as _ms
+    _kfs = _ms.keyframe_numbers(output_dir) or []
+    ex_xyz, ex_ks = consumed_world_points(output_dir, _kfs, poses_new,
+                                          k_kf=(depth_warp[0] if depth_warp else None),
+                                          b_kf=(depth_warp[1] if depth_warp else None), log=log)
     vis = vd.Visibility(output_dir, xyz_new, session.ks, poses_new, cam, tol,
-                        min_depth_m=(float(_min_depth) if _min_depth is not None else None))
+                        min_depth_m=(float(_min_depth) if _min_depth is not None else None),
+                        extra_xyz=ex_xyz, extra_ks=ex_ks)
     o4 = _other_mask_params(cfg)
 
     # the "too small to be worth anything" test is about the OBJECT, not the

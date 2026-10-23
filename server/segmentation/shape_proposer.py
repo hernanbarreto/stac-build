@@ -171,8 +171,13 @@ def _project_frame(ev, fidx: int, pts: np.ndarray):
     front = z > 0.05
     u = np.full(len(pts), -1e9)
     v = np.full(len(pts), -1e9)
-    u[front] = K[0, 0] * p[front, 0] / z[front] + K[0, 2]
-    v[front] = K[1, 1] * p[front, 1] / z[front] + K[1, 2]
+    if front.any():
+        # the SAME projection as the hole audit's vote (CameraSource.pixels): the lens included —
+        # the bare K put every mask lookup off by the distortion displacement on a lens camera
+        # (audit 2026-10-23: 5.5 px on observatorio) while the z-buffer it was compared with had it
+        uu, vv = ev.cam.pixels(int(fidx), p[front])
+        u[front] = uu
+        v[front] = vv
     return u, v, z, front
 
 

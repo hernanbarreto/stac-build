@@ -248,3 +248,46 @@ def test_the_certify_step_wires_the_camera_and_the_declared_votes(tmp_path):
     assert np.array_equal(~keep, skirt), int((~keep & ~skirt).sum())
     _h, staged = read_ply(tx / "cleaned_cloud.ply")
     assert len(staged) == int(keep.sum())
+
+
+# ── phase 3e (2026-10-23): the consumed observations complete a keyframe's z-buffer ──────
+
+def test_a_keyframes_consumed_observations_complete_its_zbuffer(tmp_path):
+    """After the owner fusion keyframe 3 keeps only its OWNER points; the wall and plate pixels it
+    measured but other keyframes own are in rejected_points.npz with their fused depth. Its
+    z-buffer from the owners alone reads 'seen and empty' over them; with the consumed
+    observations back, a point 30 cm behind the wall reads OCCLUDED there, as the camera saw."""
+    from correction.visit_drift_run import consumed_world_points
+    out, xyz, fg, pr, pc, ks, *_rest, poses = _session(tmp_path)
+    kf = 3
+    own = ks == kf
+    # the fusion: a whole region of keyframe 3's observations (rows 40..119, cols 60..139 — the plate
+    # and the wall around it) consumed by other keyframes' owners
+    cons = own & (pr >= 40) & (pr < 120) & (pc >= 60) & (pc < 140)
+    keep = ~cons
+    cam_depth = (xyz[cons] - poses[kf][:3, 3])[:, 2]
+    n = int(cons.sum())
+    np.savez_compressed(out / "rejected_points.npz", version=np.int64(5), stage=np.array("owner_fusion"),
+                        frame_global=fg[cons].astype(np.int32), pixel_row=pr[cons].astype(np.int16),
+                        pixel_col=pc[cons].astype(np.int16), winner_frame=np.full(n, FRAMES[0], np.int32),
+                        winner_row=np.zeros(n, np.int16), winner_col=np.zeros(n, np.int16),
+                        reason=np.full(n, 10, np.uint8), n_agree=np.ones(n, np.int16),
+                        n_contradict=np.zeros(n, np.int16), depth=cam_depth.astype(np.float32))
+    cam = VD.projection_camera(out, xyz[keep], ks[keep], poses, pr[keep], pc[keep], min_depth_m=MIN_DEPTH,
+                               log=lambda m: None)
+    ex_xyz, ex_ks = consumed_world_points(out, FRAMES, poses, log=lambda m: None)
+    assert ex_xyz is not None and len(ex_xyz) == n and (ex_ks == kf).all()
+    # the consumed observations come back where the camera measured them
+    assert np.abs(ex_xyz - xyz[cons]).max() < 1e-6
+    vis0 = VD.Visibility(out, xyz[keep], ks[keep], poses, cam, DEPTH_TOL_M, min_depth_m=MIN_DEPTH)
+    vis1 = VD.Visibility(out, xyz[keep], ks[keep], poses, cam, DEPTH_TOL_M, min_depth_m=MIN_DEPTH,
+                         extra_xyz=ex_xyz, extra_ks=ex_ks)
+    zb0, zb1 = vis0.zbuf(kf), vis1.zbuf(kf)
+    assert np.isfinite(zb1).sum() > np.isfinite(zb0).sum()
+    # probes 30 cm behind the wall, at the consumed pixels: occluded only once the depth map is whole
+    inner = cons & (pr >= 50) & (pr < 110) & (pc >= 70) & (pc < 130)     # away from the hole's rim
+    probe = xyz[inner][::7].copy(); probe[:, 2] += 0.3
+    ok, r, c, z = vis1.project(probe, kf)
+    occluded0 = zb0[r, c] < z - DEPTH_TOL_M
+    occluded1 = zb1[r, c] < z - DEPTH_TOL_M
+    assert occluded1.mean() > 0.9 and occluded0.mean() < 0.1, (occluded0.mean(), occluded1.mean())

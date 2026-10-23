@@ -417,7 +417,7 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
             out = filter_staged_cloud(
                 tx, session, data_new, xyz_new, poses_new,
                 raw_data_new,
-                cfg, log=log)
+                cfg, log=log, depth_warp=(k_kf, b_kf))
             frep, kept_mask = out if out is not None else (None, None)
             if frep is not None:
                 votes = frep.pop("_votes", None)

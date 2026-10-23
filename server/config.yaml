@@ -365,7 +365,10 @@ segmentation:
     # and did nothing — no change, no error. The only filter by visit weight that
     # exists is correction.visit_drift.min_visit_share (a SHARE of the object, not
     # absolute points), today 0.0 by the user's order.
-    max_frames_per_visit: 8   # mask keyframes measured per visit, the ones showing MOST of the
+    max_frames_per_visit: 0   # 0 = EVERY mask keyframe of the visit judges (USER 2026-09-16 "deben
+                              # usarse todos"; the code kept the 8 largest until the audit of
+                              # 2026-10-23 — a cost cap, never a verdict; a positive value restores it).
+                              # Was: mask keyframes measured per visit, the ones showing MOST of the
                               # object first (a frame with three pixels of mask measures nothing).
                               # COST, not a decision: raising it costs time, never a verdict.
                               # RESTORED 2026-09-17: the working tree had dropped the line and

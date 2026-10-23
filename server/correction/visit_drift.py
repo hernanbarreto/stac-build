@@ -1338,7 +1338,11 @@ class Visibility:
 
     def __init__(self, output_dir, xyz: np.ndarray, ks_of_point: np.ndarray,
                  poses: np.ndarray, camera: "SessionProjection", depth_tol_m: float,
-                 min_depth_m: Optional[float] = None):
+                 min_depth_m: Optional[float] = None, extra_xyz: Optional[np.ndarray] = None,
+                 extra_ks: Optional[np.ndarray] = None):
+        """``extra_xyz`` / ``extra_ks`` (phase 3e): the keyframes' CONSUMED observations as world
+        points (``correction.fused_observations``) — they complete each keyframe's own depth map
+        in the z-buffer (never the mask lookup): what the camera measured, owners and consumed."""
         from segmentation import mask_space
         if not isinstance(camera, SessionProjection):
             raise TypeError(
@@ -1352,6 +1356,13 @@ class Visibility:
         self._order = order
         self._start = np.searchsorted(self.ks[order], np.arange(len(poses)), "left")
         self._end = np.searchsorted(self.ks[order], np.arange(len(poses)), "right")
+        self.extra_xyz = None if extra_xyz is None else np.asarray(extra_xyz, np.float64)
+        self.extra_ks = None if extra_ks is None else np.asarray(extra_ks, np.int64)
+        if self.extra_xyz is not None:
+            eo = np.argsort(self.extra_ks, kind="stable")
+            self._eorder = eo
+            self._estart = np.searchsorted(self.extra_ks[eo], np.arange(len(poses)), "left")
+            self._eend = np.searchsorted(self.extra_ks[eo], np.arange(len(poses)), "right")
         self.tol = float(depth_tol_m)
         self.min_depth = float(_vd_cfg().min_depth_m if min_depth_m is None
                                else min_depth_m)
@@ -1416,6 +1427,11 @@ class Visibility:
 
         A pixel the camera saw but did not measure stays ``inf`` — not occluded,
         and that is the point: seen and empty is information, not absence of it.
+
+        Since the owner fusion (phase 3e, 2026-10-23) the keyframe's own points are its OWNER
+        observations only; the observations it made of elements other keyframes own are the
+        ``extra`` points (its consumed observations, at their fused depth) — the depth map is
+        the two together, or a consumed pixel would read "seen and empty".
         """
         kf = int(kf)
         if kf in self._zb:
@@ -1425,6 +1441,11 @@ class Visibility:
         ok, r, c, z = self.project(self.xyz[own], kf)
         zb = np.full((self.Hm, self.Wm), np.inf)
         np.minimum.at(zb, (r, c), z)
+        if self.extra_xyz is not None:
+            ex = self._eorder[self._estart[kf]:self._eend[kf]]
+            if len(ex):
+                _ok, r2, c2, z2 = self.project(self.extra_xyz[ex], kf)
+                np.minimum.at(zb, (r2, c2), z2)
         zb = ndi.minimum_filter(zb, size=5, mode="nearest")
         self._zb[kf] = zb
         return zb
@@ -1841,7 +1862,7 @@ def _top_frames(vis, oid: int, visit: Tuple[int, int], n: int) -> List[Tuple[int
     a frame with three pixels of mask measures nothing)."""
     frames = list(vis.masks_of(oid, visit))
     frames.sort(key=lambda it: (-int(np.count_nonzero(it[1])), int(it[0])))
-    return frames[:int(n)]
+    return frames if int(n) <= 0 else frames[:int(n)]         # 0 = every frame of the visit (2026-10-23)
 
 
 def other_mask_votes(vis, P: np.ndarray, birth: np.ndarray,

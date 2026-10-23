@@ -153,7 +153,8 @@ def test_the_rejected_file_names_every_consumed_pixel_with_its_winner(tmp_path):
     res = OF.fuse(frames, depth, valid, K, c2w, 0.02, log=lambda *a: None, **CFG)
     n = OF.write_rejected(tmp_path / "rejected_points.npz", frames, res, valid)
     with np.load(tmp_path / "rejected_points.npz") as z:
-        assert int(z["version"]) == 4 and str(z["stage"]) == "owner_fusion"
+        assert int(z["version"]) == 5 and str(z["stage"]) == "owner_fusion"
+        assert len(z["depth"]) == n and (z["depth"] > 0).all()
         assert len(z["frame_global"]) == n == res.report["consumed"] + res.report["free_space"]["rejected"] \
             + res.report["unverified"]["rejected"]
         fused = z["reason"] == OF.REJECT_FUSED

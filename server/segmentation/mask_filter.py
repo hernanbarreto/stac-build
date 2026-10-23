@@ -215,7 +215,12 @@ class MaskAudit:
             # depends on the order the keys were read in)
             ranked.sort(key=lambda r: (-r[0], r[1]))
             zbuf: Dict[int, Optional[np.ndarray]] = {}
-            for _area, mf, m in ranked[:max_frames]:
+            # every mask frame of the visit judges when max_frames_per_visit is 0 (phase 3e,
+            # 2026-10-23: config.yaml said "every frame of the visit is measured now" while the code
+            # kept the 8 largest); a positive value is the cost cap it always was, declared
+            judged_frames = ranked if max_frames <= 0 else ranked[:max_frames]
+            vrec["frames_available"] = len(ranked)
+            for _area, mf, m in judged_frames:
                 from segmentation.shape_proposer import _visible_in_frame
                 pr = _visible_in_frame(
                     self.ev, self._cloud_frame(mf), mh, mw, pts,

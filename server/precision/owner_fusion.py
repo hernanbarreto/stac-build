@@ -506,7 +506,7 @@ def write_rejected(path, frames: Sequence[int], result: FusionResult, valid: Dic
     """Every observation that left the cloud, as ``rejected_points.npz``: consumed (reason `fused`,
     with the winner that represents it), seen through (`contradicted`) and unverified
     (`insufficient_witnesses`), each with its agreeing and contradicting counts. Returns the count."""
-    fg, pr, pc, wf, wr, wc, rs, na, nc = [], [], [], [], [], [], [], [], []
+    fg, pr, pc, wf, wr, wc, rs, na, nc, dp = [], [], [], [], [], [], [], [], [], []
     for f in frames:
         v = np.asarray(valid[f], bool)
         free = result.free_space.get(f)
@@ -530,10 +530,14 @@ def write_rejected(path, frames: Sequence[int], result: FusionResult, valid: Dic
             rs.append(np.full(len(r), reason, np.uint8))
             na.append(result.members[f][m].astype(np.int16))
             nc.append((result.contra[f][m] if f in result.contra else np.zeros(len(r), np.int16)).astype(np.int16))
+            # the observation's fused depth along its own ray (v5, phase 3e): what THIS camera measured
+            # of the element, so a keyframe's depth map can be rebuilt from its owners and its consumed
+            dp.append(np.asarray(result.depth[f], np.float32)[m])
     n = int(sum(len(x) for x in fg))
     cat = lambda xs, dt: (np.concatenate(xs) if n else np.zeros(0, dt))  # noqa: E731
-    np.savez_compressed(path, version=np.int64(4), stage=np.array("owner_fusion"),
+    np.savez_compressed(path, version=np.int64(5), stage=np.array("owner_fusion"),
                         frame_global=cat(fg, np.int32), pixel_row=cat(pr, np.int16), pixel_col=cat(pc, np.int16),
                         winner_frame=cat(wf, np.int32), winner_row=cat(wr, np.int16), winner_col=cat(wc, np.int16),
-                        reason=cat(rs, np.uint8), n_agree=cat(na, np.int16), n_contradict=cat(nc, np.int16))
+                        reason=cat(rs, np.uint8), n_agree=cat(na, np.int16), n_contradict=cat(nc, np.int16),
+                        depth=cat(dp, np.float32))
     return n
