@@ -2634,6 +2634,16 @@ reconstruction:
                                         #   point's own count) than agree with it is rejected — reason
                                         #   contradicted, with its counts, in rejected_points.npz. A floater
                                         #   is seen through by every camera that looks past it.
+      free_space_factor: 3.0            # the gap that counts as SEEING THROUGH: the other view's surface beyond
+                                        #   the point by more than 3 x the pair's tolerance. tau is the SAME-SURFACE
+                                        #   tolerance (p75 of the neighbour disagreement = 1.63 sigma of a pair under
+                                        #   Gaussian noise; a quarter of honest pairs exceed it): one tau is what noise
+                                        #   does, 3 tau (4.9 sigma) is not — a floater sits 20-60 % off. Measured on
+                                        #   the e2e synthetic run (analysis/2026-10-23_precision_audit): at factor 1
+                                        #   the rule carved 3.9 % of the true-surface observations (0.5 cm from their
+                                        #   surface) while the floater three views agreed on stayed where only two
+                                        #   views looked past it — the factor stops the first, the second is the
+                                        #   majority rule's own limit
       min_evidence: 2                   # PHASE 3c: an owner confirmed by fewer views than this (itself
                                         #   included) is rejected as UNVERIFIED (reason insufficient_witnesses,
                                         #   recoverable from rejected_points.npz): a point one camera alone saw

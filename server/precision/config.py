@@ -487,6 +487,9 @@ class FusionConfig:
                                 # (reason contradicted) — the floater's rule, over every covisible keyframe
     min_evidence: int           # phase 3c: an owner confirmed by fewer views than this (itself included) is
                                 # rejected as unverified (reason insufficient_witnesses); 1 = publish all
+    free_space_factor: float    # a view sees free space through a point only when its surface lies beyond the
+                                # point by more than this x the pair's tolerance (tau is the same-surface p75:
+                                # one tau is noise, a floater is many); >= 1
     colmap_rows_stride: int     # BOUND (cost): every this-th tier-0 pixel is a row of the bend's fit when
                                 # bend.colmap_rows takes them
     colmap_tau_quantile: float  # the instrument's tolerance = this percentile of the disagreement between
@@ -1010,6 +1013,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                           rejected_file=_bool(fu, "rejected_file", "fusion"),
                           free_space=_bool(fu, "free_space", "fusion"),
                           min_evidence=_num(fu, "min_evidence", "fusion", lo=1, integer=True),
+                          free_space_factor=_num(fu, "free_space_factor", "fusion", lo=1.0),
                           colmap_tier=_bool(fu, "colmap_tier", "fusion"),
                           colmap_min_views=_num(fu, "colmap_min_views", "fusion", lo=1, integer=True),
                           colmap_max_sources=_num(fu, "colmap_max_sources", "fusion", lo=1, integer=True),

@@ -47,7 +47,17 @@ Qué cambió (commits de la rama, en orden; cada uno explica el defecto, la corr
  600d74a  ROLLING SHUTTER de declarado a corregido (precision/rolling_shutter.py): τ (periodos de cuadro) buscado en
           una rejilla juzgada (un BA convergido absorbe ~83 % de la firma, por eso no se regresa), observaciones
           rectificadas, re-resolución juzgada por el held-out (`refine.rolling_shutter: judged`).
- (final)  `python -m precision.runner --refreeze`; scripts/update_pod_precision_audit.sh; esta documentación.
+ 506eda2  `python -m precision.runner --refreeze`; scripts/update_pod_precision_audit.sh; esta documentación.
+ (cierre) PRUEBA SINTÉTICA COMPLETA (analysis/2026-10-23_precision_audit/e2e_synthetic.py): sala renderizada, 14 kf ida y
+          vuelta, deriva + escala/desplazamiento por kf + volador inyectados, y el código real F5 → F6 → nube → máscaras →
+          proyección. Resultado (figuras en e2e_synthetic/figures, números en metrics.json): poses RMS 6.6 → 1.3 cm con el
+          puente (5.4 sin él); nube por capas (pared 1.5 cm RMS, 14.7 k puntos fuera de superficie) → producto 1.15 cm,
+          1.2 k fuera; el volador que 3 kf "ven" y sólo 2 ven a través SOBREVIVE (225 puntos, etiquetado cajón por la
+          máscara) — límite de la regla de mayoría, no un bug; cobertura de la superficie vista por ≥2 kf 99.4 % a 5 cm,
+          de la vista por 1 kf 51 % (lo que min_evidence 2 quita). HALLAZGO corregido en el mismo cierre:
+          `fusion.free_space_factor` (3.0): con la misma tolerancia τ para "misma superficie" y para "ve a través", el
+          carving quitaba 3.9 % de observaciones de superficies REALES (0.5 cm de su superficie); ahora ver a través exige
+          un hueco > 3 τ (0.33 %). Correlo en el pod (env mapanything) y mirá sus figuras antes que pccr.
 
 Variables por keyframe y quién certifica cada una (pregunta de Hernán: "8 variables por kf?")
  - 6 de pose: F5 con priors de odometría + lazos (MASt3R / clásicos) + cruce COLMAP-GLOMAP; brecha de lazo en metros.

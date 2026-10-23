@@ -1166,6 +1166,7 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
                          interpolate=bool(fu.interpolate), nearest_tie_rel=float(fu.nearest_tie_rel),
                          tier=tier_maps, tau_by_tier=tau_by_tier,
                          free_space=bool(fu.free_space), min_evidence=int(fu.min_evidence),
+                         free_space_factor=float(fu.free_space_factor),
                          log=log, progress=lambda pct, m: _p(66 + pct * 4 / 100, m))
     return types.SimpleNamespace(session_dir=session_dir, out=out, inp=inp, frames=frames, N=N, W=W, H=H, K=K,
                                  c2w=c2w, params=params, chunk=chunk, voted=voted, tau=tau, vst=vst, cover=cover,

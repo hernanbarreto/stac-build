@@ -287,3 +287,35 @@ def test_minimum_evidence_marks_what_one_camera_alone_saw():
             assert n == len(z["reason"]) and (z["reason"] == OF.REJECT_UNVERIFIED).sum() == res2.report["unverified"]["rejected"]
             unv = z["reason"] == OF.REJECT_UNVERIFIED
             assert (z["n_agree"][unv] == 0).all() and (z["winner_frame"][unv] == -1).all()
+
+
+def test_a_gap_of_one_tolerance_is_noise_not_free_space_a_gap_of_many_is():
+    """The carving's gap (fusion.free_space_factor, e2e_synthetic 2026-10-23). tau is the SAME-SURFACE
+    tolerance (a p75: a quarter of honest pairs exceed it). Keyframe 3 reads the whole wall 1.5 tau too
+    near — an honest observation at the noise's edge: every other view measures the wall beyond it by
+    1.5 tau. At factor 1 that is 'seen through' and the keyframe's observations leave; at factor 3 a
+    gap of one and a half tolerances is neither agreement nor free space — they stay, and the floater
+    1.2 m in front of the wall (a gap of 30 %) is carved exactly as before."""
+    tau = 0.02
+    frames, c2w, depth, valid = _scene([1.0] * 7, xs=[0.3 * (i - 3) for i in range(7)], zs=[0.0] * 7)
+    depth[3] = (depth[3] * (1.0 - 1.5 * tau)).astype(np.float32)
+    blob = np.zeros((H, W), bool); blob[18:30, 26:38] = True
+    for f in (1, 2):
+        depth[f] = np.where(blob, _wall(c2w[f], z0=2.8).astype(np.float32), depth[f])
+    r1 = OF.fuse(frames, depth, valid, K, c2w, tau, log=lambda *a: None, free_space=True, min_evidence=1,
+                 free_space_factor=1.0, **CFG)
+    r3 = OF.fuse(frames, depth, valid, K, c2w, tau, log=lambda *a: None, free_space=True, min_evidence=1,
+                 free_space_factor=3.0, **CFG)
+    assert r1.report["free_space"]["factor"] == 1.0 and r3.report["free_space"]["factor"] == 3.0
+    inner = np.zeros((H, W), bool); inner[8:40, 8:56] = True        # keyframe 3's wall, away from the borders
+    assert r1.free_space[3][inner].mean() > 0.9, "factor 1: the honest keyframe at the noise's edge is carved"
+    assert not r3.free_space[3][inner].any(), "factor 3: a gap of 1.5 tolerances is not free space"
+    assert r3.report["free_space"]["rejected"] < r1.report["free_space"]["rejected"]
+    # keyframe 3's observations are not members of the others either (a gap beyond tau): they stand
+    # alone, published at factor 3 (min_evidence 1) — the vote and min_evidence judge them, not the carving
+    assert r3.owner[3][inner].mean() > 0.5
+    # the floater two views agree on and five look past: carved at both factors
+    for f in (1, 2):
+        assert r1.free_space[f][blob].mean() > 0.9 and r3.free_space[f][blob].mean() > 0.9, f
+    P3 = _points(frames, c2w, r3.depth, r3.owner)
+    assert not np.any((P3[:, 2] > 2.5) & (P3[:, 2] < 3.1)), "floater points published at factor 3"

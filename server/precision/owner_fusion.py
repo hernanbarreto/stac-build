@@ -159,7 +159,7 @@ def candidates_of(cov: np.ndarray, min_frac: float, max_candidates: int) -> Dict
 
 def carry(z_f: torch.Tensor, valid_f: torch.Tensor, ray_w: torch.Tensor, C_f: torch.Tensor,
           w2c_g: np.ndarray, z_g: torch.Tensor, valid_g: torch.Tensor, K: np.ndarray, tau,
-          interpolate: bool, tau_g=None):
+          interpolate: bool, tau_g=None, free_space_factor: float = 1.0):
     """Keyframe g's surface at the landing points of f's pixels: returns (agree [H, W], t [H, W] the
     agreeing depth carried onto f's ray (NaN elsewhere), q_row, q_col the nearest landing pixel,
     contra [H, W]: g measured a surface FARTHER than f's point by more than the tolerance at the
@@ -167,7 +167,12 @@ def carry(z_f: torch.Tensor, valid_f: torch.Tensor, ray_w: torch.Tensor, C_f: to
     The landing depth of g is read bilinearly when the 2x2 patch is one surface (four valid depths
     within tau of their mean), at the nearest pixel otherwise. ``tau``: one tolerance, or f's
     per-pixel map (its instrument's); with ``tau_g`` (g's per-pixel map) a pair's tolerance is the
-    LARGER of the two observations' — the worse instrument of the pair decides what agreement is."""
+    LARGER of the two observations' — the worse instrument of the pair decides what agreement is.
+    ``free_space_factor``: a view sees free space through the point only when g's surface lies
+    beyond it by more than ``free_space_factor`` x the pair's tolerance — tau is the SAME-SURFACE
+    tolerance (a p75 of the neighbour disagreement: a quarter of the honest pairs exceed it), so a
+    gap of one tau is what noise does, not what a floater does (e2e_synthetic 2026-10-23: at
+    factor 1 the rule carved 3.9 % of true-surface observations, 0.5 cm from their surface)."""
     H, W = z_g.shape
     T = FT._t(w2c_g)
     Xw = C_f + z_f[..., None] * ray_w
@@ -198,7 +203,7 @@ def carry(z_f: torch.Tensor, valid_f: torch.Tensor, ray_w: torch.Tensor, C_f: to
     one = torch.ones_like(zg)
     e = (zg - d_at) / torch.where(ok, d_at, one)
     agree = ok & (torch.abs(e) <= tau_t)
-    contra = ok & (e < -tau_t)
+    contra = ok & (e < -tau_t * float(free_space_factor))
     # the point of f's ray whose depth in g equals g's depth at the landing point
     a = T[2, :3] @ C_f + T[2, 3]
     b = ray_w @ T[2, :3]
@@ -220,7 +225,7 @@ def fuse(frames: Sequence[int], depth: Dict[int, np.ndarray], valid: Dict[int, n
          max_candidates: int, evidence_cap: int, interpolate: bool, nearest_tie_rel: float,
          chain_max_hops: int = 8, chain_stride: int = 4,
          tier: Optional[Dict[int, np.ndarray]] = None, tau_by_tier: Optional[Sequence[float]] = None,
-         free_space: bool = True, min_evidence: int = 1,
+         free_space: bool = True, min_evidence: int = 1, free_space_factor: float = 1.0,
          log: Callable = print, progress: Optional[Callable[[float, str], None]] = None) -> FusionResult:
     """The owner fusion over the voted maps (``depth[f]`` > 0 where ``valid[f]``), in two passes:
     1. members and the fused depth of every observation; 2. ownership by the total order.
@@ -285,7 +290,7 @@ def fuse(frames: Sequence[int], depth: Dict[int, np.ndarray], valid: Dict[int, n
         for j in cands[i]:
             g = frames[j]
             agree, t, qr, qc, contra = carry(zt[f], vt[f], ray_w, C, w2c[g], zt[g], vt[g], K, tau_m[f],
-                                             interpolate, tau_g=tau_m[g])
+                                             interpolate, tau_g=tau_m[g], free_space_factor=float(free_space_factor))
             n_ag = n_ag + agree.to(torch.int32)
             cols.append(t)
             tq = tt[g].reshape(-1)[qr * W + qc]
@@ -402,7 +407,7 @@ def fuse(frames: Sequence[int], depth: Dict[int, np.ndarray], valid: Dict[int, n
            "covisibility": {"stride": int(covis_stride), "min_frac": float(min_covis_frac), "cap": int(max_candidates),
                             "candidates_per_keyframe": {"min": min(n_cand), "median": float(np.median(n_cand)), "max": max(n_cand)}},
            "observations": tot_valid, "owners": tot_owner, "consumed": tot_consumed,
-           "free_space": {"enabled": bool(free_space), "rejected": tot_free,
+           "free_space": {"enabled": bool(free_space), "rejected": tot_free, "factor": float(free_space_factor),
                           "rule": "more covisible views (instrument >= the point's) see free space through the "
                                   "point than agree with it"},
            "unverified": {"min_evidence": min_ev, "rejected": tot_unver,

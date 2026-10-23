@@ -33,8 +33,11 @@
   on the half-A held-out; Omega's contour ramps do not judge the vote; edge rule = second difference of 1/z; PointDiT
   judged per keyframe; then the **OWNER FUSION** `precision/owner_fusion.py`: one point per surface element, fused depth
   = median over the covisible keyframes, ownership by a total order (evidence, nearest camera, keyframe), **free-space
-  carving** `fusion.free_space` (a point another covisible keyframe sees through is rejected, reason contradicted),
-  `fusion.min_evidence: 2` (reason unverified); every consumed observation in `rejected_points.npz` v5 with its winner)
+  carving** `fusion.free_space` (a point another covisible keyframe sees through is rejected, reason contradicted;
+  `free_space_factor: 3` — seeing through needs a gap of 3 τ: τ is the same-surface p75, one τ is noise — the e2e
+  synthetic run showed factor 1 carving 3.9 % of true-surface observations), `fusion.min_evidence: 2` (reason
+  unverified: what one camera alone saw leaves — on the e2e scene 10 % of the surface was single-view and half of it
+  went); every consumed observation in `rejected_points.npz` v5 with its winner)
   → publish (provenance pixel through the lens onto the record grid) → segmentation (`member_pixels.py`: the mask
   projection reads the owner's pixel AND every consumed member's) → certification (visit_drift z-buffers completed
   with the consumed observations, `max_frames_per_visit: 0` = every frame judged).
@@ -53,6 +56,12 @@
   f3_classical and f6_colmap_tier in the chain, not only the evaluation; torchvision must be torch's exact pair in
   every env (0.25 with torch 2.14 broke in the audit workspace: 0.29.1). LICENCE: MASt3R CC BY-NC-SA 4.0 — the
   user's decision deferred, recorded in VENDORS.lock.md and config.yaml.
+- THE COMPLETE SYNTHETIC RUN `analysis/2026-10-23_precision_audit/e2e_synthetic.py` (a rendered room, a walk with a
+  revisit, Omega's drift + per-keyframe scale-and-shift + a floater injected, then the REAL F5 → F6 → cloud → masks →
+  projection; figures + metrics.json beside it): poses 6.6 → 1.3 cm RMS with the bridge (5.4 without); the layered cloud
+  (wall 1.5 cm RMS, 14.7 k off-surface points) → the product (1.15 cm, 1.2 k); a floater 3 keyframes agree on and only
+  2 look past SURVIVES (225 points, labelled by the crate's mask) — the majority rule's limit, said out loud; coverage of
+  the surface ≥ 2 keyframes saw 99.4 % at 5 cm, of the single-view surface 51 %. Run it on the pod (env mapanything).
 - A/B VARIANTS (`evaluation.variants`): `f5_absolute_priors` (the absolute priors of before), `no_fusion`, `epoch8_vote`.
   HONEST LIMITS: drift between loops is unobservable without loops or references (the odometry priors leave it where
   Omega left it); absolute scale is DA3's unless known_dims; synthetic validation only until pccr runs.
