@@ -326,6 +326,9 @@ def fuse(session_dir: Path, pcfg, log: Callable = print) -> Dict[str, Any]:
         dst["content_flags"].append(np.full(rows.size, flags, np.uint8))
         dst["geometry_epoch"].append(np.full(rows.size, ge, np.int16))
         dst["camera_epoch"].append(np.full(rows.size, ce, np.int16))
+        # the vote's contradiction count (origins v2 since 2026-10-23) belongs to the omega_bent
+        # product; F7's consistency rule records its contradictions in its own reasons — 0 here
+        dst["n_contradict"].append(np.zeros(rows.size, np.uint8))
 
     for i, f in enumerate(kf):
         p = ddir / f"frame_{f}.npz"

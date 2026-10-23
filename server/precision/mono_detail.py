@@ -246,7 +246,8 @@ def _refinement(fr: dict) -> FrameRefinement:
 
 def refine_frame(z_cal: np.ndarray, valid_cal: np.ndarray, z_al: np.ndarray, al_valid: np.ndarray,
                  tau: float, band_px: int, sigma_px: float, reach_px: int, align_err: float = 0.0,
-                 detail_scope: str = "edges", detail_zone_px: int = 12) -> FrameRefinement:
+                 detail_scope: str = "edges", detail_zone_px: int = 12,
+                 edge_rule: str = FT.EDGE_RULE_KINK) -> FrameRefinement:
     """One keyframe's refined depth from its calibrated (bent) map and PointDiT's aligned map.
     ``tau``: the session's agreement tolerance (relative); ``align_err``: the frame's own alignment
     error (relative MAD) — the band margin is the larger of the two.
@@ -261,7 +262,7 @@ def refine_frame(z_cal: np.ndarray, valid_cal: np.ndarray, z_al: np.ndarray, al_
       'surfaces'  the detail everywhere PointDiT covers (the first run's recipe, kept for the A/B)."""
     try:
         fr = FT.refine_frame(FT._t(z_cal), FT._t(valid_cal, FT.torch.bool), FT._t(z_al), FT._t(al_valid, FT.torch.bool),
-                             tau, band_px, sigma_px, reach_px, align_err, detail_scope, detail_zone_px)
+                             tau, band_px, sigma_px, reach_px, align_err, detail_scope, detail_zone_px, edge_rule)
     except FT.F6TorchError as e:
         raise MonoDetailError(str(e)) from e
     return _refinement(fr)
@@ -295,7 +296,7 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
               weight: Dict[int, np.ndarray], image_of: Callable[[int], np.ndarray], runner, mcfg,
               tau: float, native_px_per_omega_px: float, huber_k: float, log: Callable = print,
               progress: Optional[Callable[[float, str], None]] = None,
-              overlay_dir=None) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray], StageReport]:
+              overlay_dir=None, edge_rule: str = FT.EDGE_RULE_KINK) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray], StageReport]:
     """Refine every keyframe's bent depth IN PLACE semantics: returns (refined depth maps, source maps,
     report). ``image_of(f)`` gives the RGB frame on the camera grid; ``weight[f]`` the calibrated
     confidence weight in 0..1 (0 under the floor); ``tau`` the session's agreement tolerance.
@@ -313,6 +314,7 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
     sigma_px = lowpass_sigma_px(PATCH, native_px_per_omega_px, float(mcfg.lowpass_patch_fraction))
     tile_batch = int(getattr(mcfg, "tile_batch", 0))
     rep = StageReport(params={"detail_scope": str(mcfg.detail_scope), "detail_zone_px": int(mcfg.detail_zone_px),
+                              "edge_rule": str(edge_rule),
                               "tiles_per_frame": len(tiles), "tile": [tiles[0].h, tiles[0].w],
                               "run_size": [tiles[0].run_h, tiles[0].run_w], "band_px": band_px,
                               "lowpass_sigma_px": round(sigma_px, 2), "tau": tau, "fit_space": mcfg.fit_space,
@@ -359,7 +361,7 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
             try:
                 z_al, s, b, res = FT.align_tile(zc[sl], z_mono, sup, wc[sl], mcfg.fit_space, huber_k, int(mcfg.irls_iterations))
                 # second pass: the band of the aligned map is no support for the fit
-                _, band = FT.discontinuity_band(z_al, sup & (z_al > 0), tau, band_px)
+                _, band = FT.discontinuity_band(z_al, sup & (z_al > 0), tau, band_px, edge_rule)
                 sup2 = sup & ~band
                 if int(sup2.sum()) >= 3:
                     z_al, s, b, res = FT.align_tile(zc[sl], z_mono, sup2, wc[sl], mcfg.fit_space, huber_k, int(mcfg.irls_iterations))
@@ -429,7 +431,8 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
         align_err = float(np.median(acc)) if acc else 0.0
         try:
             frt = FT.refine_frame(zc, vc, z_al_f, al_valid, tau, band_px, sigma_px, int(mcfg.side_reach_px), align_err,
-                                  detail_scope=str(mcfg.detail_scope), detail_zone_px=int(mcfg.detail_zone_px))
+                                  detail_scope=str(mcfg.detail_scope), detail_zone_px=int(mcfg.detail_zone_px),
+                                  edge_rule=edge_rule)
         except FT.F6TorchError as e:
             raise MonoDetailError(str(e)) from e
         fr = _refinement(frt)

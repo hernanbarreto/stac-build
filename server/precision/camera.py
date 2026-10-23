@@ -722,20 +722,56 @@ def read_omega_preprocessing(output_dir: os.PathLike) -> Tuple[str, int]:
 
 
 def omega_intrinsics_path(output_dir: os.PathLike) -> Path:
-    """The intrinsic.txt :func:`read_omega_intrinsics` reads (output/ first, then maplong_run/)."""
+    """The intrinsic.txt :func:`read_omega_intrinsics` reads: Omega's OWN record first
+    (``maplong_run/intrinsic.txt``, written by the fork and never rewritten), then the copy the
+    reconstruction stage left in ``output/``.
+
+    AUDIT 2026-10-23: ``output/intrinsic.txt`` is ALSO the file a published cloud writes for the
+    viewer — the session camera in NATIVE pixels, one row per keyframe (depth_on_f5.camera_travels,
+    corrected_cloud.publish ``art("intrinsic.txt")``). Read first, as before, F0 took that native
+    camera for Omega's grid camera on every re-run after a publish (resume, ``--from f0_camera``,
+    a re-certification) and scaled it AGAIN through ``K_grid_to_native`` — identity only while the
+    grid is the native frame (pccr since 2026-09-28), fx × 1.26 and cx + 250 px on zaragoza
+    (1920x1080 on a 1520x848 grid): the whole chain then ran on a wrong camera. Omega's own
+    record wins; the copy is read only without it, and :func:`verify_omega_intrinsics_grid`
+    refuses it when its rows are not on the grid."""
     out = Path(output_dir)
-    for cand in (out / INTRINSIC_NAME, out / "maplong_run" / INTRINSIC_NAME):
+    for cand in (out / "maplong_run" / INTRINSIC_NAME, out / INTRINSIC_NAME):
         if cand.exists():
             return cand
     raise CameraError(f"no {INTRINSIC_NAME} under {out} — the omega run did not write intrinsics")
 
 
-def read_omega_intrinsics(output_dir: os.PathLike) -> np.ndarray:
-    """intrinsic.txt rows [fx fy cx cy] on the omega grid (one per keyframe)."""
+def verify_omega_intrinsics_grid(rows: np.ndarray, grid: GridMap, path: os.PathLike) -> None:
+    """``rows`` must be a camera ON OMEGA'S GRID: its principal point sits at the grid's centre
+    (Omega predicts cx, cy at the centre of the frame it sees), never at the NATIVE frame's. With a
+    grid equal to the native frame the two are one and nothing can be told (nor matters). FAILS
+    naming the file when the rows are nearer the native centre than the grid's — the viewer's
+    native camera of a published cloud left in ``output/intrinsic.txt`` (audit 2026-10-23)."""
+    g = grid
+    if (g.w, g.h) == (g.native_w, g.native_h) and g.crop_x == 0 and g.crop_y == 0:
+        return
+    r = np.asarray(rows, np.float64)
+    cx, cy = float(np.median(r[:, 2])), float(np.median(r[:, 3]))
+    d_grid = abs(cx - g.w / 2.0) + abs(cy - g.h / 2.0)
+    d_native = abs(cx - g.native_w / 2.0) + abs(cy - g.native_h / 2.0)
+    if d_native < d_grid:
+        raise CameraError(
+            f"{path}: its principal point ({cx:.1f}, {cy:.1f}) is the NATIVE frame's "
+            f"({g.native_w}x{g.native_h}), not Omega's grid's ({g.w}x{g.h}) — this is the session "
+            f"camera a published cloud wrote for the viewer, not Omega's record; F0 needs "
+            f"maplong_run/{INTRINSIC_NAME} (audit 2026-10-23)")
+
+
+def read_omega_intrinsics(output_dir: os.PathLike, grid: Optional[GridMap] = None) -> np.ndarray:
+    """intrinsic.txt rows [fx fy cx cy] on the omega grid (one per keyframe); with ``grid`` the
+    rows are verified to be on it (:func:`verify_omega_intrinsics_grid`)."""
     cand = omega_intrinsics_path(output_dir)
     rows = np.loadtxt(str(cand), dtype=np.float64, ndmin=2)
     if rows.shape[1] < 4:
         raise CameraError(f"{cand}: expected 'fx fy cx cy' rows, got shape {rows.shape}")
+    if grid is not None:
+        verify_omega_intrinsics_grid(rows[:, :4], grid, cand)
     return rows[:, :4]
 
 
@@ -824,7 +860,7 @@ def build_session_camera(session_dir: os.PathLike, cam_cfg, output_subdir: str =
     # run happened to be on disk (point 36). Every reader of real masks derives their grid from
     # the masks' own scaled_res (mask_grid_for / mask_grid_shape).
     mask_grid = mask_grid_for(nw, nh, (grid.h, grid.w))
-    rows = read_omega_intrinsics(out)
+    rows = read_omega_intrinsics(out, grid)      # Omega's record, verified on its grid (audit 2026-10-23)
     epoch = read_geometry_epoch(out)
     omega_cam = camera_from_omega(rows, grid, cam_cfg.fx_spread_warn_pct, mask_grid=mask_grid)
     stray_csv = find_stray_camera_matrix(root) if cam_cfg.init_from in ("auto", "stray") else None

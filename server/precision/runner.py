@@ -116,8 +116,11 @@ _GEOMETRY_IN = ("output/camera.json", "output/camera_poses.txt", "output/camera_
 
 STEPS: List[Step] = [
     Step("f0_camera", "F0 session camera", "da3", "precision.camera",
-         reads=("frames", "output/vggt_omega_config.yaml", "output/intrinsic.txt",
-                "output/maplong_run/intrinsic.txt", "output/camera_frames.txt",
+         # Omega's intrinsics enter as a DYNAMIC read (_dynamic_reads): the one file F0 reads —
+         # maplong_run/intrinsic.txt, Omega's own record. output/intrinsic.txt is rewritten by every
+         # published cloud (the viewer's native camera); stamped as an F0 input it re-ran F0 — on a
+         # wrong camera — after every publish (audit 2026-10-23, precision.camera.omega_intrinsics_path)
+         reads=("frames", "output/vggt_omega_config.yaml", "output/camera_frames.txt",
                 # the Stray K F0 may take, in every place precision.camera reads it (point 77:
                 # inputs/stray/ first, then the scan's legacy places)
                 "inputs/stray/camera_matrix.csv", "inputs/stray/odometry.csv",
@@ -292,6 +295,15 @@ def step_config(step: Step, pcfg, raw_cfg: Optional[Mapping[str, Any]] = None) -
 def _dynamic_reads(step: Step, session_dir: Path, pcfg, rid: Optional[str]) -> Dict[str, Path]:
     """Inputs only the step's own module can name (the evidence files it TAKES, the instruments
     configured): keyed like the static ones (session-relative)."""
+    if step.key == "f0_camera":
+        # the intrinsics file F0 actually reads (Omega's record first; audit 2026-10-23), keyed by
+        # its session-relative path; absent → stamped ABSENT like any missing input
+        from precision.camera import CameraError, omega_intrinsics_path
+        try:
+            p = omega_intrinsics_path(Path(session_dir) / "output")
+        except CameraError:
+            return {"output/maplong_run/intrinsic.txt": Path(session_dir) / "output" / "maplong_run" / "intrinsic.txt"}
+        return {p.relative_to(Path(session_dir)).as_posix(): p}
     if step.key == "f2_gauge":
         from precision.gauge import chain_inputs
         return dict(chain_inputs(session_dir, pcfg.gauge, rid))

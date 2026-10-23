@@ -322,6 +322,39 @@ def test_build_session_camera_from_omega(tmp_path):
     assert np.allclose(C.mask_px_to_native(C.native_to_mask_px(uv_native, cam), cam), uv_native)
 
 
+def test_f0_reads_omegas_own_record_not_the_native_camera_a_publish_left(tmp_path):
+    """AUDIT 2026-10-23: a published cloud rewrites output/intrinsic.txt with the session camera in
+    NATIVE pixels (the viewer's file). F0 read that file FIRST and took it for Omega's grid camera,
+    scaling it again through the grid map — fx × scale, cx shifted — on every re-run after a publish
+    (zaragoza: grid 1520x848 of a 1920x1080 frame). Omega's own record (maplong_run/intrinsic.txt)
+    wins; without it, the native file is refused by name."""
+    sess, g, rows = _fake_session(tmp_path)                  # 464x832 on a 384x688 grid: scale 1.21
+    out = sess / "output"
+    cam0 = C.build_session_camera(sess, _CamCfg("omega"), log=lambda *a: None)
+    # the publish: the NATIVE camera, one row per keyframe, over output/intrinsic.txt
+    native = np.tile(np.array([[cam0.fx, cam0.fy, cam0.cx, cam0.cy]]), (3, 1))
+    (out / "maplong_run").mkdir()
+    np.savetxt(out / "maplong_run" / "intrinsic.txt", rows)   # Omega's own record, untouched
+    np.savetxt(out / "intrinsic.txt", native)
+    cam1 = C.build_session_camera(sess, _CamCfg("omega"), log=lambda *a: None)
+    assert cam1.params == cam0.params, "F0 re-run after a publish must rebuild the SAME camera"
+    assert cam1.report["k_source"]["file"] == "output/maplong_run/intrinsic.txt"
+    # without Omega's record, the native file is not taken for a grid camera: refused, by name
+    (out / "maplong_run" / "intrinsic.txt").unlink()
+    with pytest.raises(C.CameraError, match="NATIVE frame's"):
+        C.build_session_camera(sess, _CamCfg("omega"), log=lambda *a: None)
+    # a grid equal to the native frame cannot tell the two apart (and the scaling is the identity)
+    gn = C.grid_full_frame_resize(464, 832, 464, 832, "omega")
+    C.verify_omega_intrinsics_grid(native, gn, out / "intrinsic.txt")
+    # the runner stamps the file F0 actually reads, never the viewer's copy
+    from precision.runner import STEPS, step_inputs
+    f0 = next(s for s in STEPS if s.key == "f0_camera")
+    assert "output/intrinsic.txt" not in f0.reads and "output/maplong_run/intrinsic.txt" not in f0.reads
+    np.savetxt(out / "maplong_run" / "intrinsic.txt", rows)
+    ins = step_inputs(f0, sess, None)
+    assert "output/maplong_run/intrinsic.txt" in ins and "output/intrinsic.txt" not in ins
+
+
 def test_build_session_camera_prefers_stray_and_cross_checks(tmp_path):
     sess, g, rows = _fake_session(tmp_path, stray=True)
     cam = C.build_session_camera(sess, _CamCfg("auto"), log=lambda *a: None)

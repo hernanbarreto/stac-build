@@ -45,6 +45,17 @@ for i, (frame, c2w) in enumerate(zip(s.frames, np.asarray(s.poses, np.float64)))
 f = _read_ply_fields(out / "cleaned_cloud.ply")
 xyz = np.column_stack([f["x"], f["y"], f["z"]]).astype(np.float64)
 rgbv = np.column_stack([f[k] for k in ("red", "green", "blue")]) if "red" in f else np.full((len(xyz), 3), 128)
+# AUDIT 2026-10-23: presence for the mesh from points WITH evidence — `confidence` is the vote's agree count
+# (depth_on_f5: n_consistent). genrecon.min_consistent_views 0 = every point, as before; the cloud is untouched
+import yaml as _yaml
+_gcfg = _yaml.safe_load(open("/workspace/stac-build/server/config.yaml"))["genrecon"]
+_min_views = int(_gcfg.get("min_consistent_views", 0))
+if _min_views > 0 and "confidence" in f:
+    _ev = np.asarray(f["confidence"], np.float64) >= _min_views
+    print(f"evidence: {int(_ev.sum()):,} of {len(xyz):,} points have >= {_min_views} agreeing views — presence from those")
+    xyz = xyz[_ev]; rgbv = np.asarray(rgbv)[_ev]
+elif _min_views > 0:
+    print("evidence: the cloud carries no `confidence` field — every point decides presence")
 sel = np.linspace(0, len(xyz) - 1, min(len(xyz), N_PTS)).astype(np.int64)        # a fixed stride, never a draw
 P = xyz[sel] @ M[:3, :3].T + M[:3, 3]; C = np.asarray(rgbv[sel]); C = (C * 255).astype(int) if C.max() <= 1.0 else C.astype(int)
 with (col / "points3D.txt").open("w") as fh:

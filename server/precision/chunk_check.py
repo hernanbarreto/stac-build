@@ -242,6 +242,11 @@ def load_inputs(session_dir: Path, log: Callable = print):
     s_k = {f: 1.0 for f in frames}
     bend = {f: (0.0, 0.0) for f in frames}
     offset = {f: 0.0 for f in frames}
+    # the bend's depth model per keyframe (precision/bend_model.py, audit 2026-10-23): None = the
+    # pixel-ratio model s_k + bend (every report before 2026-10-23, and affine_pixel since), else
+    # (model, coef) applied by bend_model.apply_map — with the transform epochs' factor kept apart
+    depth_model: Dict[int, Optional[tuple]] = {f: None for f in frames}
+    k_fac = {f: 1.0 for f in frames}
     cloud_epoch = None
     s_k_source = "absent (1.0 — neither the corrected cloud nor F6 measured the per-keyframe scale)"
     for rel in ("corrected_cloud.json", "depth_native/report.json"):
@@ -256,6 +261,13 @@ def load_inputs(session_dir: Path, log: Callable = print):
             # the check measures the cloud that was PUBLISHED, bend included
             bend = {f: tuple(float(x) for x in (pf[str(f)].get("bend") or (0.0, 0.0))) for f in frames}
             s_k_source = f"{rel} per_frame.s_k" + (" + bend" if any(b != (0.0, 0.0) for b in bend.values()) else "")
+            from precision import bend_model as BM
+            for f in frames:
+                m = pf[str(f)].get("model")
+                if m is not None and m != BM.AFFINE_PIXEL:
+                    depth_model[f] = (BM.check_model(str(m)), np.asarray(pf[str(f)]["coef"], np.float64))
+            if any(v is not None for v in depth_model.values()):
+                s_k_source += f" (model {sorted({v[0] for v in depth_model.values() if v})})"
             cloud_epoch = doc.get("epoch_to")
             break
     # the certification warps that cloud per keyframe (depth × k + b about the camera, then
@@ -263,7 +275,7 @@ def load_inputs(session_dir: Path, log: Callable = print):
     # above it — the rigid part is already in camera_poses.txt, the depth part is composed here
     epochs_composed: List[int] = []
     if cloud_epoch is not None:
-        s_k, bend, offset, epochs_composed = compose_transform_epochs(out, frames, int(cloud_epoch), s_k, bend)
+        s_k, bend, offset, epochs_composed, k_fac = compose_transform_epochs(out, frames, int(cloud_epoch), s_k, bend)
         if epochs_composed:
             s_k_source += (f" × depth factor of transform epoch(s) {epochs_composed} "
                            f"(corrections/epoch_<N>.npz k_kf" + (", b_kf" if any(offset.values()) else "")
@@ -283,14 +295,15 @@ def load_inputs(session_dir: Path, log: Callable = print):
     log(f"{LOG_TAG} {len(frames)} keyframes, {len(set(chunk.values()))} Omega chunk(s), "
         f"s_k from {s_k_source}, chainage {'measured' if chain is not None else 'NOT measured (no walk)'}")
     return (frames, c2w, K, s_k, s_k_source, chunk, chain, rec, out / "da3_run" / "results_output", bend,
-            {"offset": offset, "epochs_composed": epochs_composed})
+            {"offset": offset, "epochs_composed": epochs_composed, "depth_model": depth_model, "k_fac": k_fac})
 
 
 def compose_transform_epochs(out: Path, frames: Sequence[int], cloud_epoch: int,
                              s_k: Dict[int, float], bend: Dict[int, tuple]
-                             ) -> Tuple[Dict[int, float], Dict[int, tuple], Dict[int, float], List[int]]:
-    """``(s_k, bend, offset, epochs)``: the published cloud's per-keyframe depth model
-    composed with every TRANSFORM epoch between the cloud epoch and the live one.
+                             ) -> Tuple[Dict[int, float], Dict[int, tuple], Dict[int, float], List[int], Dict[int, float]]:
+    """``(s_k, bend, offset, epochs, k_fac)``: the published cloud's per-keyframe depth model
+    composed with every TRANSFORM epoch between the cloud epoch and the live one (``k_fac`` = the
+    epochs' multiplicative part alone, for a depth model that is not a pixel ratio).
 
     A transform epoch moves keyframe f's points along their rays, z' = k·z + b about
     the keyframe's own camera (correction.apply.warp_full_cloud; k_kf, b_kf of
@@ -326,7 +339,7 @@ def compose_transform_epochs(out: Path, frames: Sequence[int], cloud_epoch: int,
             B[f] = k * B[f] + b
     s_k2 = {f: float(s_k[f]) * K[f] for f in frames}
     bend2 = {f: (float(bend[f][0]) * K[f], float(bend[f][1]) * K[f]) for f in frames}
-    return s_k2, bend2, B, [int(e) for e in after]
+    return s_k2, bend2, B, [int(e) for e in after], K
 
 
 def scale_map(s_k: float, bend, H: int, W: int):
@@ -339,10 +352,31 @@ def scale_map(s_k: float, bend, H: int, W: int):
     return float(s_k) + c1 * (uu - W / 2) / W + c2 * (vv - H / 2) / H
 
 
+def published_depth(d0: np.ndarray, s_k: float, bend, offset_m: float,
+                    depth_model: Optional[tuple] = None, k_fac: float = 1.0) -> np.ndarray:
+    """Omega's record ``d0`` as the PUBLISHED cloud holds it: the pixel-ratio model (s_k + bend,
+    transform epochs folded in) or, since the audit of 2026-10-23, the bend's own family
+    (bend_model.apply_map) times the epochs' factor — plus the epochs' offset along the ray where
+    Omega measured a depth."""
+    H, W = d0.shape
+    if depth_model is None:
+        d = d0 * scale_map(s_k, bend, H, W)
+    else:
+        from precision import bend_model as BM
+        model, coef = depth_model
+        d = BM.apply_map(model, coef, d0, W, H) * float(k_fac)
+    off = float(offset_m)
+    if off != 0.0:
+        d = np.where(np.isfinite(d0) & (d0 > 0), d + off, d)
+    return d
+
+
 def measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir: Path, da3_dir: Path, cfg,
                  log: Callable = print, bend: Optional[Dict[int, tuple]] = None,
                  offset: Optional[Dict[int, float]] = None,
-                 floor_planes: Optional[Dict[int, Tuple[np.ndarray, np.ndarray]]] = None
+                 floor_planes: Optional[Dict[int, Tuple[np.ndarray, np.ndarray]]] = None,
+                 depth_model: Optional[Dict[int, Optional[tuple]]] = None,
+                 k_fac: Optional[Dict[int, float]] = None
                  ) -> Tuple[List[Row], dict]:
     """Two passes over the depth maps: the dominant floor plane, then every height.
     ``offset`` (metres along the ray, per keyframe) is the affine part a transform epoch
@@ -379,10 +413,10 @@ def measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir: Path, da3_dir: Pa
                         + f" carried onto the undistorted native grid {cm.width}x{cm.height} before unprojecting with K")
             if carry:
                 d0 = CC.record_on_native(d0.astype(np.float32), cm, maps).astype(np.float64)
-            d = d0 * scale_map(s_k[f], bend.get(f) if bend else None, d0.shape[0], d0.shape[1])
-            off = float(offset.get(f, 0.0)) if offset else 0.0
-            if off != 0.0:
-                d = np.where(np.isfinite(d0) & (d0 > 0), d + off, d)
+            d = published_depth(d0, s_k[f], bend.get(f) if bend else None,
+                                float(offset.get(f, 0.0)) if offset else 0.0,
+                                depth_model.get(f) if depth_model else None,
+                                float(k_fac.get(f, 1.0)) if k_fac else 1.0)
         X, uv = unproject_uv(d, K, c2w[i], cfg.pixel_stride)
         world_pts[f] = X
         if floor_planes is not None:
@@ -796,7 +830,8 @@ def run_check(session_dir: Path, pcfg, log: Callable = print, chainage: Optional
             f"({type(e).__name__}: {e}) — each keyframe's lowest band is its floor, DECLARED")
     try:
         rows, plane = measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir, da3_dir, cfg, log,
-                                   bend=bend, offset=composed["offset"], floor_planes=floor_planes)
+                                   bend=bend, offset=composed["offset"], floor_planes=floor_planes,
+                                   depth_model=composed.get("depth_model"), k_fac=composed.get("k_fac"))
         verdicts = judge(rows, cfg, pool_m, log, error_factor=fac)
     except NoFloorPlane as e:
         # DECLARED, not fatal (USER 2026-10-05): a report step that cannot measure says so and the

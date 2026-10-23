@@ -367,14 +367,31 @@ class CloudConfig:
 
 # ── depth on F5 (USER 2026-10-01: the epoch-7 recipe, precision/depth_on_f5.py) ──
 
+EDGE_RULES = ("inverse_second_difference", "window")
+
+
 @dataclass(frozen=True)
 class BendConfig:
     enabled: bool               # false = NO per-keyframe bend: Omega's depth stands (k = 1) on F5's
                                 # poses; the vote and the cleaner still run — the evaluation battery's
                                 # variant "sin refinamiento de profundidad F6" (rule 4: default = the
                                 # validated recipe bit for bit)
+    model: str                  # the depth model of the bend (precision/bend_model.py, audit 2026-10-23):
+                                # 'judged' (both families fitted, the held-out chooses, the plane-preserving
+                                # one wins a tie) | 'inverse_depth' (1/z' = a/z + b0 + b1·u' + b2·v', planes
+                                # stay planes) | 'affine_pixel' (epoch 7: z' = z·(c0 + c1·u' + c2·v'), bends
+                                # every oblique plane whenever c1 or c2 enters)
     windows: Tuple[int, ...]    # BOUND (search): smoothing windows (± keyframes) the held-out chooses among
     neighbors: Tuple[int, ...]  # keyframe offsets that vote on a pixel
+    judges_exclude_mixed: bool  # audit 2026-10-23: a neighbour's MIXED pixel (on neither surface of a step —
+                                # the vote's own definition) neither confirms nor contradicts anything; false =
+                                # epoch 8's vote, where Omega's contour ramps testified against the background
+                                # next to every object (halos repaired to the ramp's depth, holes)
+    edge_rule: str              # audit 2026-10-23: how a depth STEP is told from a smooth oblique surface —
+                                # 'inverse_second_difference' (a step is a kink of 1/z, which is affine on a
+                                # plane whatever its slant: a floor or a tunnel wall near the horizon is not an
+                                # edge) | 'window' (epoch 8: the 3x3 window's range, which flags every pixel
+                                # whose neighbours differ by more than tau — oblique surfaces far away included)
     tau_quantile: float         # agreement tolerance = this percentile of the session's OWN neighbour
                                 # disagreement (measured every run, never a fixed number)
     irls_iterations: int        # Huber IRLS steps (pccr epoch 7's fit, USER 2026-10-01)
@@ -432,6 +449,9 @@ class MonoDetailConfig:
                                       # session's pixels, or a step of the CALIBRATED depth — never PointDiT's
     tile_batch: int             # tiles of a keyframe per PointDiT forward pass (0 = all of them at once — USER
                                 # 2026-10-08: speed; part of the run's config, so the batch's bits repeat)
+    heldout_gate: bool          # audit 2026-10-23: the refinement is JUDGED per keyframe on the half-A held-out
+                                # rows it changed (depth_on_f5.mono_heldout_gate) and reverted where the user's
+                                # rule says it worsens them; false = applied unjudged (the 2026-10-04 recipe)
 
 
 # ── cloud metrics of every run (floor + edges; pending A "run checks", 2026-10-04) ──
@@ -839,7 +859,15 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         raise PrecisionConfigError(f"'{SECTION}.bend.windows' must be non-negative keyframe counts, got {windows}")
     if not neighbors or 0 in neighbors:
         raise PrecisionConfigError(f"'{SECTION}.bend.neighbors' must be non-zero keyframe offsets, got {neighbors}")
-    bend = BendConfig(enabled=_bool(bd, "enabled", "bend"), windows=windows, neighbors=neighbors,
+    from precision.bend_model import MODEL_CHOICES
+    bend_model = str(_require(bd, "model", "bend"))
+    if bend_model not in MODEL_CHOICES:
+        raise PrecisionConfigError(f"'{SECTION}.bend.model' must be one of {MODEL_CHOICES}, got {bend_model!r}")
+    edge_rule = str(_require(bd, "edge_rule", "bend"))
+    if edge_rule not in EDGE_RULES:
+        raise PrecisionConfigError(f"'{SECTION}.bend.edge_rule' must be one of {EDGE_RULES}, got {edge_rule!r}")
+    bend = BendConfig(enabled=_bool(bd, "enabled", "bend"), model=bend_model, windows=windows, neighbors=neighbors,
+                      judges_exclude_mixed=_bool(bd, "judges_exclude_mixed", "bend"), edge_rule=edge_rule,
                       tau_quantile=_num(bd, "tau_quantile", "bend", lo=0.0, hi=100.0, lo_excl=True),
                       irls_iterations=_num(bd, "irls_iterations", "bend", lo=1, integer=True),
                       min_rows=_num(bd, "min_rows", "bend", lo=3, integer=True),
@@ -891,7 +919,8 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                                    side_reach_px=_num(md, "side_reach_px", "mono_detail", lo=1, integer=True),
                                    overlays=_bool(md, "overlays", "mono_detail"),
                                    ab_edge_gradient_quantile=_num(md, "ab_edge_gradient_quantile", "mono_detail", lo=0.0, hi=100.0, lo_excl=True),
-                                   tile_batch=_num(md, "tile_batch", "mono_detail", lo=0, integer=True))
+                                   tile_batch=_num(md, "tile_batch", "mono_detail", lo=0, integer=True),
+                                   heldout_gate=_bool(md, "heldout_gate", "mono_detail"))
     cm = _sub(sec, "cloud_metrics", "")
     cloud_metrics = CloudMetricsConfig(
         ransac_iterations=_num(cm, "ransac_iterations", "cloud_metrics", lo=1, integer=True),

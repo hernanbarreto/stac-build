@@ -771,25 +771,30 @@ def window_extremes(depth: np.ndarray, valid: np.ndarray) -> tuple:
     return FT._np(mn), FT._np(mx)
 
 
-def mixed_pixels(depth: np.ndarray, valid: np.ndarray, tau: float) -> np.ndarray:
+def mixed_pixels(depth: np.ndarray, valid: np.ndarray, tau: float, rule: Optional[str] = None) -> np.ndarray:
     """Pixels on NEITHER surface of a depth step — more than tau (relative to that surface, as the
-    vote measures) from both extremes of their 3x3 window: Omega's ramp across an occluding contour."""
+    vote measures) from both extremes of their 3x3 window: Omega's ramp across an occluding contour.
+    ``rule`` (bend.edge_rule, audit 2026-10-23): under 'inverse_second_difference' only where the
+    window spans a real step (f6_torch.depth_steps) — the midpoint of a slant is on its surface."""
     from precision import f6_torch as FT
-    return FT._np(FT.mixed_pixels(FT._t(depth), FT._t(valid, FT.torch.bool), tau))
+    return FT._np(FT.mixed_pixels(FT._t(depth), FT._t(valid, FT.torch.bool), tau, rule or FT.EDGE_RULE_KINK))
 
 
-def depth_steps(depth: np.ndarray, valid: np.ndarray, tau: float) -> np.ndarray:
-    """Pixels whose 3x3 window spans a depth STEP: extremes far enough apart to hold a mixed pixel
-    (the mixed-pixel rule's own condition, so the two can never disagree). These are the EDGE pixels of
-    the epoch-8 recipe: on Omega's depth before snapping the set covers the ramp and one pixel of each
-    side. (A band MEASURED from the floor's pass rate per ring away from a step does not exist on pccr:
-    9.7 % at the step, 50.8 % at 5 rings, 80 % at 25, 100 % only at 193 — no ring separates the step's
-    erosion from the scene's, so the user's own 3x3 window decides.)"""
+def depth_steps(depth: np.ndarray, valid: np.ndarray, tau: float, rule: Optional[str] = None) -> np.ndarray:
+    """Pixels whose 3x3 window spans a depth STEP — the EDGE pixels of the epoch-8 recipe: on Omega's
+    depth before snapping the set covers the ramp and one pixel of each side. ``rule``
+    (bend.edge_rule, audit 2026-10-23): 'inverse_second_difference' = a kink of 1/z above tau on the
+    pixel or a 4-neighbour (a slanted plane is never a step); 'window' = the 3x3 range test of epoch
+    8, which flagged every oblique surface far away. (A band MEASURED from the floor's pass rate per
+    ring away from a step does not exist on pccr: 9.7 % at the step, 50.8 % at 5 rings, 80 % at 25,
+    100 % only at 193 — no ring separates the step's erosion from the scene's, so the user's own 3x3
+    window decides.)"""
     from precision import f6_torch as FT
-    return FT._np(FT.depth_steps(FT._t(depth), FT._t(valid, FT.torch.bool), tau))
+    return FT._np(FT.depth_steps(FT._t(depth), FT._t(valid, FT.torch.bool), tau, rule or FT.EDGE_RULE_KINK))
 
 
-def snap_mixed(depth: np.ndarray, valid: np.ndarray, labels: np.ndarray, tau: float) -> tuple:
+def snap_mixed(depth: np.ndarray, valid: np.ndarray, labels: np.ndarray, tau: float,
+               rule: Optional[str] = None) -> tuple:
     """USER 2026-10-01 — a mixed pixel is snapped to the side of the step its SAM3 mask says.
 
     `labels`: per pixel the masklet (0 = no mask, -1 = masks overlap there: the mask cannot say). A
@@ -799,7 +804,8 @@ def snap_mixed(depth: np.ndarray, valid: np.ndarray, labels: np.ndarray, tau: fl
     its label spans both sides (the mask does not follow this step), it is left as it is — the vote
     judges it. Returns (depth, mixed, snapped)."""
     from precision import f6_torch as FT
-    out, mixed, snapped = FT.snap_mixed(FT._t(depth), FT._t(valid, FT.torch.bool), FT._t(labels, FT.torch.int64), tau)
+    out, mixed, snapped = FT.snap_mixed(FT._t(depth), FT._t(valid, FT.torch.bool), FT._t(labels, FT.torch.int64), tau,
+                                        rule or FT.EDGE_RULE_KINK)
     return FT._np(out).astype(depth.dtype), FT._np(mixed), FT._np(snapped)
 
 

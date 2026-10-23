@@ -57,11 +57,17 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from precision import bend_model as BM
+
 LOG_TAG = "[depth-on-f5]"
 REPORT = "depth_on_f5.json"
 TX_TMP = "_tx_depth_on_f5"
 MAD_TO_SIGMA = 1.0 / 0.6744897501960817          # 1.4826: σ of a normal from its MAD
 IDENTITY = np.array([1.0, 0.0, 0.0])             # k = 1: Omega's depth as it is (epoch 7's fallback)
+# the bend's depth model (precision/bend_model.py, audit 2026-10-23): every function below takes
+# ``model`` and defaults to epoch 7's family so the callers and tests that know only that one read
+# as before; compute() runs the configured one (bend.model: judged | affine_pixel | inverse_depth)
+AFFINE_PIXEL, INVERSE_DEPTH = BM.AFFINE_PIXEL, BM.INVERSE_DEPTH
 
 
 class DepthOnF5Error(RuntimeError):
@@ -126,47 +132,55 @@ def irls_huber(A: np.ndarray, r: np.ndarray, k: float, iterations: int) -> np.nd
     return irls_huber_fit(A, r, k, iterations)[0]
 
 
+COEF_NAMES = {AFFINE_PIXEL: ("c0", "c1", "c2"), INVERSE_DEPTH: ("a", "b0", "b1", "b2")}
+
+
 def significant_bend(A: np.ndarray, r: np.ndarray, huber_k: float, iterations: int,
-                     error_factor: float) -> Tuple[np.ndarray, dict]:
-    """Point 48 on one fit: the full model k = c0 + c1·u + c2·v is fitted; c1 and c2 ENTER only when
-    |c| >= error_factor × their measured fit error, and the model is REFITTED on the kept columns
-    (c0 always; a dropped term is exactly 0). Returns (c (3,), info): the full fit's σ, which terms
-    were kept with their margins |c| − factor·σ, and the σ of the fit actually used (σ_c0 is what
-    the keyframe's c0 verification is held to)."""
+                     error_factor: float, model: str = AFFINE_PIXEL) -> Tuple[np.ndarray, dict]:
+    """Point 48 on one fit: the full model is fitted; its gated terms (c1, c2 of the pixel family —
+    b0, b1, b2 of the inverse-depth one) ENTER only when |c| >= error_factor × their measured fit
+    error, and the model is REFITTED on the kept columns (the scale always; a dropped term is exactly
+    0). Returns (c, info): the full fit's σ, which terms were kept with their margins |c| − factor·σ,
+    and the σ of the fit actually used (σ of the scale is what the keyframe's verification is held
+    to)."""
+    names = COEF_NAMES[BM.check_model(model)]
+    gated = BM.gated_columns(model)
+    p = len(names)
     c_full, s_full = irls_huber_fit(A, r, huber_k, iterations)
     fac = float(error_factor)
-    keep = [True] + [bool(abs(c_full[j]) >= fac * s_full[j]) for j in (1, 2)]
+    keep = [True] + [bool(abs(c_full[j]) >= fac * s_full[j]) for j in gated]
     if all(keep):
         c, sig = c_full, s_full
     else:
-        cols = [j for j in range(3) if keep[j]]
+        cols = [j for j in range(p) if keep[j]]
         cr, sr = irls_huber_fit(A[:, cols], r, huber_k, iterations)
-        c = np.zeros(3); sig = np.full(3, np.nan)
+        c = np.zeros(p); sig = np.full(p, np.nan)
         c[cols] = cr; sig[cols] = sr
     info = {"rows": int(len(r)), "sigma_full": [float(x) for x in s_full],
-            "kept": {"c1": keep[1], "c2": keep[2]},
-            "margins": {"c1": float(abs(c_full[1]) - fac * s_full[1]),
-                        "c2": float(abs(c_full[2]) - fac * s_full[2])},
-            "sigma": [float(x) for x in sig], "fallback": None}
+            "kept": {names[j]: keep[k + 1] for k, j in enumerate(gated)},
+            "margins": {names[j]: float(abs(c_full[j]) - fac * s_full[j]) for j in gated},
+            "sigma": [float(x) for x in sig], "fallback": None, "model": model}
     return c, info
 
 
-def disabled_bend(n: int):
+def disabled_bend(n: int, model: str = AFFINE_PIXEL):
     """``bend.enabled: false`` (the evaluation battery's variant "sin F6"): k = 1 for every keyframe,
     no window chosen, every keyframe's provenance 'disabled'. Returns (wb, window_rule, coefs,
     provenance) in the shapes `compute` carries on."""
     rule = {"window_best": None, "bar": float("nan"), "heldout_best_se": float("nan"), "disabled": True,
             "reason": "reconstruction.precision.bend.enabled: false — Omega's depth stands (k = 1) on F5's poses"}
-    coefs = {i: IDENTITY.copy() for i in range(n)}
+    coefs = {i: BM.identity(model) for i in range(n)}
     prov = {i: {"status": "disabled", "window": None, "fit": None, "reason": rule["reason"]} for i in range(n)}
     return None, rule, coefs, prov
 
 
 def bend_coefficients(rows: Dict[int, tuple], n: int, window: int, min_rows: int, huber_k: float,
-                      iterations: int, error_factor: float) -> Tuple[Dict[int, np.ndarray], Dict[int, dict]]:
-    """({i: (c0, c1, c2)}, {i: info}) — each keyframe fitted on the rows of i−w … i+w with the judged
+                      iterations: int, error_factor: float,
+                      model: str = AFFINE_PIXEL) -> Tuple[Dict[int, np.ndarray], Dict[int, dict]]:
+    """({i: coefficients}, {i: info}) — each keyframe fitted on the rows of i−w … i+w with the judged
     terms of `significant_bend` (point 48); one with fewer than `min_rows` rows there keeps Omega's
-    depth (k = 1), as epoch 7 did (info['fallback'] = 'identity')."""
+    depth (k = 1), as epoch 7 did (info['fallback'] = 'identity'). ``rows[j]`` = (A, r) of
+    ``bend_model.fit_rows`` for ``model``."""
     out: Dict[int, np.ndarray] = {}
     infos: Dict[int, dict] = {}
     for i in range(n):
@@ -176,11 +190,11 @@ def bend_coefficients(rows: Dict[int, tuple], n: int, window: int, min_rows: int
         n_rows = sum(len(x) for x in r)
         if A and n_rows >= min_rows:
             out[i], infos[i] = significant_bend(np.vstack(A), np.concatenate(r), huber_k, iterations,
-                                                error_factor)
+                                                error_factor, model)
         else:
-            out[i] = IDENTITY.copy()
+            out[i] = BM.identity(model)
             infos[i] = {"rows": int(n_rows), "sigma_full": None, "kept": None, "margins": None,
-                        "sigma": None, "fallback": "identity"}
+                        "sigma": None, "fallback": "identity", "model": model}
         infos[i]["window"] = int(window)
     return out, infos
 
@@ -199,22 +213,22 @@ def heldout_rows(obs_held: np.ndarray, zmap: np.ndarray, min_depth_m: float, hal
     return h[ok, 0], h[ok, 1], h[ok, 2], zz[ok]
 
 
-def rel_errors(u, v, z_lm, z_omega, coef: np.ndarray, W: int, H: int) -> np.ndarray:
-    """|z_omega·k(u, v) − z_landmark| / z_landmark per row (k = 1 with the identity coefficients)."""
+def rel_errors(u, v, z_lm, z_omega, coef: np.ndarray, W: int, H: int, model: str = AFFINE_PIXEL) -> np.ndarray:
+    """|bent(z_omega) − z_landmark| / z_landmark per row (k = 1 with the identity coefficients)."""
     if not len(u):
         return np.zeros(0)
-    return np.abs(z_omega * (design(u, v, W, H) @ coef) - z_lm) / z_lm
+    return np.abs(BM.apply(model, coef, z_omega, u, v, W, H) - z_lm) / z_lm
 
 
-def abs_errors_m(u, v, z_lm, z_omega, coef: np.ndarray, W: int, H: int) -> np.ndarray:
-    """|z_omega·k(u, v) − z_landmark| per row in METRES along the ray — the same rows as rel_errors."""
+def abs_errors_m(u, v, z_lm, z_omega, coef: np.ndarray, W: int, H: int, model: str = AFFINE_PIXEL) -> np.ndarray:
+    """|bent(z_omega) − z_landmark| per row in METRES along the ray — the same rows as rel_errors."""
     if not len(u):
         return np.zeros(0)
-    return np.abs(z_omega * (design(u, v, W, H) @ coef) - z_lm)
+    return np.abs(BM.apply(model, coef, z_omega, u, v, W, H) - z_lm)
 
 
 def heldout_metres(rows_B: Dict[int, tuple], final_coefs: Dict[int, np.ndarray], n: int, W: int,
-                   H: int) -> dict:
+                   H: int, model: str = AFFINE_PIXEL) -> dict:
     """The half-B held-out error in METRES: what the PUBLISHED depth can repeat along the ray.
 
     USER 2026-10-16: a single-pass session has no shared frame (uncertainty.json), no seam
@@ -228,7 +242,7 @@ def heldout_metres(rows_B: Dict[int, tuple], final_coefs: Dict[int, np.ndarray],
     errs, ranges = [], []
     for i in range(n):
         u, v, z_lm, z_om = rows_B[i]
-        e = abs_errors_m(u, v, z_lm, z_om, final_coefs[i], W, H)
+        e = abs_errors_m(u, v, z_lm, z_om, final_coefs[i], W, H, model)
         if len(e):
             errs.append(np.asarray(e, np.float64))
             ranges.append(np.asarray(z_lm, np.float64))
@@ -275,10 +289,36 @@ def choose_window(score: Dict[int, float], errs: Dict[int, Dict[int, np.ndarray]
                                           "within": bool(score[w] <= bar)} for w in sorted(score)}}
 
 
+def choose_model(score: Dict[str, Dict[int, float]], errs: Dict[str, Dict[int, Dict[int, np.ndarray]]],
+                 error_factor: float, n_boot: int, seed: int) -> Tuple[str, int, dict]:
+    """``bend.model: judged`` (audit 2026-10-23): the family AND the window, by the window rule's own
+    construction over every (family, window) candidate — the best pooled half-A median sets the bar
+    (best + error_factor × its keyframe-bootstrap standard error); among the candidates within the
+    bar the plane-preserving family (bend_model.PLANE_PRESERVING) wins, then the widest window.
+    ``score[model][w]`` / ``errs[model][w]`` as choose_window takes them. Returns (model, window,
+    rule)."""
+    cands = [(m, w) for m in score for w in score[m]]
+    best = min(cands, key=lambda mw: (score[mw[0]][mw[1]], mw[0] != BM.PLANE_PRESERVING, mw[1]))
+    se = cluster_bootstrap_se(list(errs[best[0]][best[1]].values()), n_boot, seed)
+    bar = float(score[best[0]][best[1]]) + float(error_factor) * se
+    within = [mw for mw in cands if score[mw[0]][mw[1]] <= bar]
+    pick = max(within, key=lambda mw: (mw[0] == BM.PLANE_PRESERVING, mw[1]))
+    rule = {"rule": "the plane-preserving family within error_factor x the standard error of the best "
+                    "(family, window)'s median (bootstrap by keyframe), then the widest window",
+            "plane_preserving": BM.PLANE_PRESERVING, "best_model": best[0], "window_best": int(best[1]),
+            "heldout_best": float(score[best[0]][best[1]]), "heldout_best_se": se,
+            "error_factor": float(error_factor), "bar": bar, "model": pick[0], "window": int(pick[1]),
+            "margin": float(bar - score[pick[0]][pick[1]]),
+            "curve": {m: {str(w): {"heldout_median": float(score[m][w]), "margin_to_bar": float(bar - score[m][w]),
+                                   "within": bool(score[m][w] <= bar)} for w in sorted(score[m])}
+                      for m in score}}
+    return pick[0], int(pick[1]), rule
+
+
 def verify_keyframes(windows: Sequence[int], wb: int, coefs: Dict[int, Dict[int, np.ndarray]],
                      infos: Dict[int, Dict[int, dict]], rows_A: Dict[int, tuple], N: int, W: int, H: int,
                      error_factor: float, confidence: float, n_boot: int, seed: int,
-                     min_rows: int) -> Tuple[Dict[int, np.ndarray], Dict[int, dict]]:
+                     min_rows: int, model: str = AFFINE_PIXEL) -> Tuple[Dict[int, np.ndarray], Dict[int, dict]]:
     """Point 48's c0 verification per keyframe. The candidates for keyframe i are the chosen window
     ``wb`` then every wider window of ``windows`` (the pooled fits of its neighbours). A candidate is
     VERIFIED when THE USER'S RULE (metric_lock.decide_change) says the bent depth improves the
@@ -294,9 +334,10 @@ def verify_keyframes(windows: Sequence[int], wb: int, coefs: Dict[int, Dict[int,
     order = [int(wb)] + sorted(int(w) for w in windows if int(w) > int(wb))
     out: Dict[int, np.ndarray] = {}
     prov: Dict[int, dict] = {}
+    ident = BM.identity(model)
     for i in range(N):
         u, v, z_lm, zo = rows_A[i]
-        before = rel_errors(u, v, z_lm, zo, IDENTITY, W, H)
+        before = rel_errors(u, v, z_lm, zo, ident, W, H, model)
         cands = [(w, coefs[w][i], infos[w][i]) for w in order if infos[w][i].get("fallback") != "identity"]
         trials = []
         chosen = None
@@ -311,7 +352,7 @@ def verify_keyframes(windows: Sequence[int], wb: int, coefs: Dict[int, Dict[int,
                 if not np.isfinite(sig0):
                     trials.append({"window": w, "verdict": None, "reason": "sigma_c0 not finite"})
                     continue
-                after = rel_errors(u, v, z_lm, zo, c, W, H)
+                after = rel_errors(u, v, z_lm, zo, c, W, H, model)
                 d = decide_change(before, after, error=sig0, error_factor=float(error_factor),
                                   confidence=float(confidence), n_boot=int(n_boot), seed=int(seed))
                 trials.append({"window": w, "verdict": {k: d[k] for k in ("improves", "significant", "enough_judges",
@@ -330,14 +371,14 @@ def verify_keyframes(windows: Sequence[int], wb: int, coefs: Dict[int, Dict[int,
                 reason = ("no candidate window verified c0 on this keyframe's held-out rows — the widest "
                           "pooled fit stands" if cands else f"no window holds {min_rows} landmark rows")
         if pick is None:
-            out[i] = IDENTITY.copy()
+            out[i] = ident.copy()
             prov[i] = {"status": "identity", "window": None, "reason": reason, "fit": None, "trials": trials,
-                       "heldout_rows_A": int(len(before))}
+                       "heldout_rows_A": int(len(before)), "model": model}
         else:
             w, c, info = pick
             out[i] = np.asarray(c, np.float64)
             prov[i] = {"status": status, "window": int(w), "reason": reason, "fit": info, "trials": trials,
-                       "heldout_rows_A": int(len(before))}
+                       "heldout_rows_A": int(len(before)), "model": model}
     return out, prov
 
 
@@ -436,13 +477,18 @@ def labels_on_undistorted(labels: Callable, maps) -> Callable:
 def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict[int, np.ndarray],
                       passed: Dict[int, np.ndarray], K: np.ndarray, c2w: Dict[int, np.ndarray], labels,
                       neighbors, tau_quantile: float, repair_min_views: int, log: Callable = print,
-                      bars_out: Optional[dict] = None):
+                      bars_out: Optional[dict] = None, judges_exclude_mixed: bool = True,
+                      edge_rule: Optional[str] = None):
     """pccr EPOCH 8 (USER 2026-10-01: "es la mejor, incorporar al pipeline"), on the bent depth
     `dep` (every `valid` pixel; `passed` = above the ONE confidence floor):
      1. tau = the `tau_quantile` percentile of the neighbour disagreement on INTERIOR pixels;
-     2. EDGE pixels = the 3x3 window spans a depth step (on the depth before snapping);
+     2. EDGE pixels = the 3x3 window spans a depth step (on the depth before snapping; `edge_rule`,
+        audit 2026-10-23: a kink of 1/z, or epoch 8's window range);
         MIXED pixels (on neither surface of the step) snapped to the side their SAM3 mask says;
-     3. the TWO-SIDED vote over `neighbors`, judged by floor-passing neighbour pixels only:
+     3. the TWO-SIDED vote over `neighbors`, judged by floor-passing neighbour pixels only — and,
+        with `judges_exclude_mixed` (audit 2026-10-23), never by a neighbour's MIXED pixel: a ramp
+        point in free space between object and wall confirms nothing and contradicts nothing (in
+        epoch 8 it contradicted the wall next to every silhouette: halos of repairs, holes);
         floor-passing pixels stay with contra ≤ agree (median of the agreeing views), a
         contradicted one is repaired to the median of the neighbours when ≥ `repair_min_views`
         agree, else it leaves; a below-floor EDGE pixel enters when agree ≥ 1 and contra ≤ agree.
@@ -452,17 +498,24 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
     import torch
     from precision import corrected_cloud as CC
     from precision import f6_torch as FT
+    rule = edge_rule or FT.EDGE_RULE_KINK
     H, W = next(iter(dep.values())).shape
     inner = {f: interior(passed[f]) for f in frames}
     tau = CC.measured_tau(dep, inner, K, c2w, frames, neighbors, tau_quantile)
     del inner
-    edge = {}
-    n_mixed = n_snap = 0
+    edge, judge = {}, {}
+    n_mixed = n_snap = n_unjudging = 0
     for i, f in enumerate(frames):
-        edge[f] = CC.depth_steps(dep[f], valid[f], tau)
+        edge[f] = CC.depth_steps(dep[f], valid[f], tau, rule)
+        mixed = CC.mixed_pixels(dep[f], valid[f], tau, rule)
         if labels is not None:
-            d, mixed, sn = CC.snap_mixed(dep[f], valid[f], labels(i), tau)
-            dep[f] = d.astype(np.float32); n_mixed += int(mixed.sum()); n_snap += int(sn.sum())
+            d, mixed, sn = CC.snap_mixed(dep[f], valid[f], labels(i), tau, rule)
+            dep[f] = d.astype(np.float32); n_snap += int(sn.sum())
+            mixed = mixed & ~sn                           # a snapped pixel is on a surface now
+        n_mixed += int(mixed.sum())
+        # who may testify: floor-passing pixels, minus the ones on neither surface of a step
+        judge[f] = (passed[f] & ~mixed) if judges_exclude_mixed else passed[f]
+        n_unjudging += int((passed[f] & mixed).sum()) if judges_exclude_mixed else 0
     w2c = {f: np.linalg.inv(c2w[f]) for f in frames}
     final, tot = {}, {}
     tau_margins: Dict[int, Optional[dict]] = {}
@@ -470,7 +523,7 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
     # decisions below are the same rules on the candidate pixels
     for i, f in enumerate(frames):
         cand = valid[f] & (passed[f] | edge[f])           # below-floor interior pixels stay out
-        v = FT.two_sided_vote(i, frames, dep, passed, cand, K, c2w, w2c, neighbors, tau)
+        v = FT.two_sided_vote(i, frames, dep, judge, cand, K, c2w, w2c, neighbors, tau)
         candt = FT._t(cand, torch.bool)
         agree, contra, z, s = v["agree"], v["contra"], v["z"], v["splats"]
         # point 53: every judged pixel's margin to τ — the nearest neighbour surface on its ray
@@ -498,14 +551,17 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
         zmap = torch.where(repair, zrep, zmap)
         amap = torch.where(m, agree, torch.zeros_like(agree))
         amap = torch.where(repair, nrep, amap)
-        zmap_np = FT._np(zmap, np.float32); amap_np = FT._np(amap, np.int16)
-        final[f] = (zmap_np, amap_np)
+        # the contradictions of every published pixel travel with it (origins n_contradict, audit
+        # 2026-10-23): a kept tie (1 / 1) and an unjudged pixel (0 / 0) read as what they are
+        cmap = torch.where(m | repair, contra, torch.zeros_like(contra))
+        zmap_np = FT._np(zmap, np.float32); amap_np = FT._np(amap, np.int16); cmap_np = FT._np(cmap, np.int16)
+        final[f] = (zmap_np, amap_np, cmap_np)
         for k, n in (("valid", int(valid[f].sum())), ("edge", int(edge[f].sum())), ("kept", int(keep.sum())),
                      ("contradicted", int(contradicted.sum())), ("repaired", int(repair.sum())),
                      ("admitted", int(admit.sum())), ("edge_below", int((~pas & edg).sum())),
                      ("out", int((zmap_np > 0).sum()))):
             tot[k] = tot.get(k, 0) + n
-    tot.update(mixed=n_mixed, snapped=n_snap, tau=tau)
+    tot.update(mixed=n_mixed, snapped=n_snap, tau=tau, mixed_not_judging=n_unjudging)
     # the bars of the vote and the margins to them (point 53): τ itself (the session's own
     # tau_quantile percentile) and, per keyframe, the distribution of the pixels' margins to it
     if bars_out is not None:
@@ -515,8 +571,10 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
                          "tau_margin_rel": {"per_frame": {str(f): m for f, m in tau_margins.items()},
                                             "median_of_frame_medians": float(np.median(med)) if med else None}})
     nv = max(tot["valid"], 1)
-    log(f"{LOG_TAG} tau {tau * 100:.2f} % (interior); edge pixels {tot['edge'] / nv * 100:.2f} % of the valid; "
-        f"mixed {n_mixed:,} ({n_mixed / nv * 100:.2f} %), {n_snap:,} snapped to their mask's side")
+    log(f"{LOG_TAG} tau {tau * 100:.2f} % (interior); edge rule {rule}; edge pixels {tot['edge'] / nv * 100:.2f} % of "
+        f"the valid; mixed {n_mixed:,} ({n_mixed / nv * 100:.2f} %), {n_snap:,} snapped to their mask's side"
+        + (f"; {n_unjudging:,} floor-passing mixed pixels do not judge" if judges_exclude_mixed else
+           "; mixed pixels judge (epoch 8)"))
     log(f"{LOG_TAG} vote: {tot['kept'] / nv * 100:.1f} % of the valid pixels kept, {tot['contradicted'] / nv * 100:.1f} % "
         f"contradicted, {tot['repaired'] / nv * 100:.1f} % repaired, {tot['admitted'] / nv * 100:.1f} % admitted below "
         f"the floor at edges; coverage {tot['out'] / float(len(frames) * H * W) * 100:.1f} % of all pixels")
@@ -555,11 +613,86 @@ def confidence_weight(conf: np.ndarray, floor: float, cmax: float, passed: np.nd
     return np.where(passed, w, 0.0)
 
 
-def apply_mono_detail(pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out: Path, log, _p):
+def mono_heldout_gate(frames, dep_before, dep_after, rows_A, error_factor: float, confidence: float,
+                      n_boot: int, seed: int, align_err: Dict[int, float], log: Callable = print) -> Tuple[Dict[int, bool], dict]:
+    """AUDIT 2026-10-23 — PointDiT judged like every other correction of the chain, by the held-out
+    landmarks it never saw: per keyframe the PAIRED disagreement |z − z_lm| / z_lm of the half-A rows
+    at the pixels the stage CHANGED (nearest pixel: a landmark at an edge must not be smeared across
+    it), before and after. THE USER'S RULE (metric_lock.decide_change) says whether the change
+    WORSENS them — the interval of the median delta entirely on the worsening side — with at least
+    min_judge_closures(confidence) rows; a keyframe it worsens goes back to the bent map (declared),
+    a keyframe with too few judges follows the session's pooled verdict, declared 'unjudged'. The
+    pccr A/B of 2026-10-04 read 2.48 → 2.55 % held-out, 2.54 → 2.70 % in the edge band, and the
+    stage went on by eye; this gate keeps the eye's choice wherever the rows do not say it is worse.
+    Returns ({frame: keep PointDiT}, the verdicts)."""
+    _vendor_path()
+    from loop_utils.loop_judge import min_judge_closures
+    from loop_utils.metric_lock import decide_change
+    need = int(min_judge_closures(float(confidence)))
+    per: Dict[int, dict] = {}
+    pooled_b, pooled_a = [], []
+    keep: Dict[int, bool] = {}
+    for i, f in enumerate(frames):
+        u, v, z_lm, _zo = rows_A[i]
+        if not len(u):
+            per[f] = {"rows": 0, "status": "unjudged", "verdict": None}
+            continue
+        H, W = dep_before[f].shape
+        c = np.clip(np.rint(u).astype(np.int64), 0, W - 1); r = np.clip(np.rint(v).astype(np.int64), 0, H - 1)
+        zb = dep_before[f][r, c].astype(np.float64); za = dep_after[f][r, c].astype(np.float64)
+        touched = (zb > 0) & (za > 0) & (za != zb) & np.isfinite(z_lm) & (z_lm > 0)
+        if not touched.any():
+            per[f] = {"rows": 0, "status": "untouched", "verdict": None}
+            keep[f] = True
+            continue
+        b = np.abs(zb[touched] - z_lm[touched]) / z_lm[touched]
+        a = np.abs(za[touched] - z_lm[touched]) / z_lm[touched]
+        pooled_b.append(b); pooled_a.append(a)
+        if len(b) < need:
+            per[f] = {"rows": int(len(b)), "status": "unjudged", "verdict": None,
+                      "median_before": float(np.median(b)), "median_after": float(np.median(a))}
+            continue
+        d = decide_change(b, a, error=float(align_err.get(f, 0.0)), error_factor=float(error_factor),
+                          confidence=float(confidence), n_boot=int(n_boot), seed=int(seed))
+        keep[f] = not bool(d["worsens"])
+        per[f] = {"rows": int(len(b)), "status": "reverted" if d["worsens"] else "kept",
+                  "verdict": {k: d[k] for k in ("improves", "worsens", "significant", "median_delta", "ci_low",
+                                                 "ci_high", "n_judges", "min_judges")}}
+    pooled = None
+    if pooled_b:
+        b = np.concatenate(pooled_b); a = np.concatenate(pooled_a)
+        if len(b) >= need:
+            d = decide_change(b, a, error=float(np.median([align_err.get(f, 0.0) for f in frames])),
+                              error_factor=float(error_factor), confidence=float(confidence),
+                              n_boot=int(n_boot), seed=int(seed))
+            pooled = {"rows": int(len(b)), "worsens": bool(d["worsens"]), "improves": bool(d["improves"]),
+                      "median_before": float(np.median(b)), "median_after": float(np.median(a)),
+                      "median_delta": d["median_delta"], "ci_low": d["ci_low"], "ci_high": d["ci_high"]}
+    session_keep = True if pooled is None else not pooled["worsens"]
+    for f in frames:
+        if f not in keep:
+            keep[f] = session_keep
+            if per[f]["status"] == "unjudged":
+                per[f]["follows"] = "session pooled verdict" if pooled is not None else "no pooled verdict: kept"
+    counts = {s: sum(1 for p_ in per.values() if p_["status"] == s) for s in ("kept", "reverted", "unjudged", "untouched")}
+    verdict = {"rule": "a keyframe whose touched half-A held-out rows WORSEN (decide_change.worsens) goes back to "
+                       "the bent map; too few judges → the session's pooled verdict", "min_judges": need,
+               "keyframes": counts, "pooled": pooled, "session_keep": session_keep, "per_frame": {str(f): p_ for f, p_ in per.items()}}
+    log(f"{LOG_TAG} mono detail held-out gate: {counts['kept']} keyframe(s) kept, {counts['reverted']} reverted "
+        f"(worse on their own rows), {counts['unjudged']} follow the pooled verdict ("
+        + (f"{pooled['rows']} rows, {pooled['median_before'] * 100:.2f} → {pooled['median_after'] * 100:.2f} %, "
+           f"{'WORSENS' if pooled['worsens'] else 'does not worsen'}" if pooled else "none") + ")")
+    return keep, verdict
+
+
+def apply_mono_detail(pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out: Path, log, _p,
+                      rows_A=None, error_factor: Optional[float] = None):
     """The hook between the bend and the vote. With ``mono_detail.enabled`` false it returns its
     inputs untouched (epoch 8 bit for bit); otherwise PointDiT's detail refines every bent map, the
     unresolved mixed pixels leave the measurement tier (depth 0, not passed, not valid) and the
-    per-pixel provenance comes back for the cloud's `source` column."""
+    per-pixel provenance comes back for the cloud's `source` column. With ``rows_A`` (the half-A
+    held-out rows) and ``mono_detail.heldout_gate`` the refinement is JUDGED per keyframe
+    (mono_heldout_gate, audit 2026-10-23) and reverted where it worsens the rows."""
     md = pcfg.mono_detail
     if not md.enabled:
         return dep, valid, passed, None, None
@@ -578,7 +711,18 @@ def apply_mono_detail(pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out
     overlay_dir = (out / "precision" / "mono_overlays") if bool(md.overlays) else None
     dep2, src, rep = run_stage(frames, dep, valid, weight, image_of, runner, md, tau0, scale,
                                pcfg.gauge.huber_k, log=log, progress=lambda pct, m: _p(42 + pct * 8 / 100, m),
-                               overlay_dir=overlay_dir)
+                               overlay_dir=overlay_dir, edge_rule=pcfg.bend.edge_rule)
+    if rows_A is not None and bool(getattr(md, "heldout_gate", False)):
+        from precision.mono_detail import SRC_OMEGA
+        align = {f: float(rep.per_frame.get(int(f), {}).get("align_err", 0.0)) for f in frames}
+        keep, verdict = mono_heldout_gate(frames, dep, dep2, rows_A, float(error_factor), pcfg.bend.heldout_confidence,
+                                          pcfg.bend.bootstrap, pcfg.bend.seed, align, log=log)
+        for f in frames:
+            if not keep[f]:
+                dep2[f] = dep[f]                              # the bent map, as it was
+                src[f] = np.full(src[f].shape, SRC_OMEGA, np.uint8)
+                rep.unresolved.pop(int(f), None)
+        rep.params["heldout_gate"] = verdict
     for f in frames:
         alive = dep2[f] > 0
         valid[f] = valid[f] & alive
@@ -587,6 +731,24 @@ def apply_mono_detail(pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out
     rep.params["footprint"] = runner.footprint()          # device, model, steps, seed, card, numerics (point 54)
     rep.params["timing"] = runner.timing()                # peak VRAM: the timing sidecar's, not the report's
     return dep2, valid, passed, src, rep
+
+
+def map_column(data, maps: Dict[int, np.ndarray], dtype=np.uint8) -> np.ndarray:
+    """Per cleaned point the value of a per-keyframe map at its (frame, pixel) — the vote's
+    contradiction count for origins ``n_contradict`` (audit 2026-10-23); 0 where no map."""
+    n = len(data)
+    out = np.zeros(n, dtype)
+    if not maps:
+        return out
+    fg = np.asarray(data["frame_global"], np.int64)
+    r = np.asarray(data["pixel_row"], np.int64); c = np.asarray(data["pixel_col"], np.int64)
+    for f in np.unique(fg):
+        mp = maps.get(int(f))
+        if mp is None:
+            continue
+        m = fg == f
+        out[m] = np.clip(mp[r[m], c[m]], 0, np.iinfo(dtype).max).astype(dtype)
+    return out
 
 
 def source_column(data, src_maps) -> np.ndarray:
@@ -775,24 +937,30 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     _p(25, "bending Omega's depth to F5's landmarks")
     from reconstruction.loops.config import improvement_error_factor
     fac = float(improvement_error_factor(raw_cfg))                   # the user's 2 (point 1), ONE place
-    rows = {}
+    # the families the configuration fits (precision/bend_model.py, audit 2026-10-23): one, or both
+    # under `judged` — the held-out chooses, the plane-preserving one wins a tie
+    models = list(BM.MODELS) if bc.model == BM.JUDGED else [BM.check_model(bc.model)]
+    fit_uvz = {}
     for i, f in enumerate(frames):
         o = obs[0][i]
         zz = bilinear(zo[f], o[:, 0], o[:, 1]) if len(o) else np.zeros(0)
         ok = zz > bc.min_depth_m
-        rows[i] = (design(o[ok, 0], o[ok, 1], W, H), o[ok, 2] / zz[ok])
+        fit_uvz[i] = (o[ok, 0], o[ok, 1], o[ok, 2], zz[ok])
     # the window is chosen on half A of the held-out (its even rows), half B reports — epoch 7
     rows_A = {i: heldout_rows(obs[1][i], zo[f], bc.min_depth_m, 0) for i, f in enumerate(frames)}
     rows_B = {i: heldout_rows(obs[1][i], zo[f], bc.min_depth_m, 1) for i, f in enumerate(frames)}
     score, coefs, infos, errs_A = {}, {}, {}, {}
-    for w in (bc.windows if bc.enabled else ()):
-        cw, inf = bend_coefficients(rows, N, int(w), bc.min_rows, gc.huber_k, bc.irls_iterations, fac)
-        per_kf = {i: rel_errors(*rows_A[i], cw[i], W, H) for i in range(N)}
-        per_kf = {i: e for i, e in per_kf.items() if len(e)}
-        if not per_kf:
-            raise DepthOnF5Error("no held-out landmark row on Omega's depth — the bend cannot be judged")
-        coefs[int(w)] = cw; infos[int(w)] = inf; errs_A[int(w)] = per_kf
-        score[int(w)] = float(np.median(np.concatenate(list(per_kf.values()))))
+    for m in (models if bc.enabled else ()):
+        rows = {i: BM.fit_rows(m, *fit_uvz[i], W, H) for i in range(N)}
+        score[m], coefs[m], infos[m], errs_A[m] = {}, {}, {}, {}
+        for w in bc.windows:
+            cw, inf = bend_coefficients(rows, N, int(w), bc.min_rows, gc.huber_k, bc.irls_iterations, fac, m)
+            per_kf = {i: rel_errors(*rows_A[i], cw[i], W, H, m) for i in range(N)}
+            per_kf = {i: e for i, e in per_kf.items() if len(e)}
+            if not per_kf:
+                raise DepthOnF5Error("no held-out landmark row on Omega's depth — the bend cannot be judged")
+            coefs[m][int(w)] = cw; infos[m][int(w)] = inf; errs_A[m][int(w)] = per_kf
+            score[m][int(w)] = float(np.median(np.concatenate(list(per_kf.values()))))
     raw_err = []
     for i, f in enumerate(frames):
         h = obs[1][i]
@@ -800,45 +968,56 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
             zz = bilinear(zo[f], h[:, 0], h[:, 1]); ok = zz > 0
             raw_err.append(np.abs(zz[ok] - h[ok, 2]) / h[ok, 2])
     if bc.enabled:
-        # point 49: the smoothest window within error_factor x the measured error of the best
-        wb, window_rule = choose_window(score, errs_A, fac, bc.bootstrap, bc.seed)
-        # point 48: every keyframe's c0 verified on its own held-out rows; the pooled fit otherwise
-        final_coefs, provenance = verify_keyframes(bc.windows, wb, coefs, infos, rows_A, N, W, H, fac,
-                                                   bc.heldout_confidence, bc.bootstrap, bc.seed, bc.min_rows)
+        if len(models) == 1:
+            model = models[0]
+            # point 49: the smoothest window within error_factor x the measured error of the best
+            wb, window_rule = choose_window(score[model], errs_A[model], fac, bc.bootstrap, bc.seed)
+            window_rule["model"] = model
+        else:
+            # audit 2026-10-23: family and window together, the plane-preserving family on a tie
+            model, wb, window_rule = choose_model(score, errs_A, fac, bc.bootstrap, bc.seed)
+        # point 48: every keyframe's scale verified on its own held-out rows; the pooled fit otherwise
+        final_coefs, provenance = verify_keyframes(bc.windows, wb, coefs[model], infos[model], rows_A, N, W, H,
+                                                   fac, bc.heldout_confidence, bc.bootstrap, bc.seed, bc.min_rows,
+                                                   model)
     else:
-        wb, window_rule, final_coefs, provenance = disabled_bend(N)
+        model = models[0]
+        wb, window_rule, final_coefs, provenance = disabled_bend(N, model)
         log(f"{LOG_TAG} bend.enabled: false — Omega's depth stands (k = 1) on F5's poses for every keyframe")
     status_counts: Dict[str, int] = {}
     for p_ in provenance.values():
         status_counts[p_["status"]] = status_counts.get(p_["status"], 0) + 1
-    kept_c1 = sum(1 for p_ in provenance.values() if p_["fit"] and p_["fit"]["kept"] and p_["fit"]["kept"]["c1"])
-    kept_c2 = sum(1 for p_ in provenance.values() if p_["fit"] and p_["fit"]["kept"] and p_["fit"]["kept"]["c2"])
+    kept_terms = {name: sum(1 for p_ in provenance.values() if p_["fit"] and p_["fit"]["kept"]
+                            and p_["fit"]["kept"].get(name)) for name in COEF_NAMES[model][1:]}
     # half B (the report): the final coefficients' held-out error, never used to choose anything
-    errs_B = [rel_errors(*rows_B[i], final_coefs[i], W, H) for i in range(N)]
+    errs_B = [rel_errors(*rows_B[i], final_coefs[i], W, H, model) for i in range(N)]
     errs_B = [e for e in errs_B if len(e)]
     score_B = float(np.median(np.concatenate(errs_B))) if errs_B else float("nan")
-    heldout_m = heldout_metres(rows_B, final_coefs, N, W, H)     # the same rows, in metres (σ floor)
-    c0 = np.array([final_coefs[i][0] for i in range(N)])
-    _p(40, f"held-out |dz|/z (half A): unbent {np.median(np.concatenate(raw_err)) * 100:.2f} %, "
-           + ", ".join(f"±{w} {score[w] * 100:.2f} %" for w in sorted(score))
-           + f" → ±{wb} (best ±{window_rule['window_best']}, bar {window_rule['bar'] * 100:.2f} % = best + "
-           f"{fac:g} x se {window_rule['heldout_best_se'] * 100:.3f} %); per keyframe: "
-           + ", ".join(f"{k} {v}" for k, v in sorted(status_counts.items()))
-           + f"; c1 kept on {kept_c1}, c2 on {kept_c2} of {N}; half B {score_B * 100:.2f} %"
+    heldout_m = heldout_metres(rows_B, final_coefs, N, W, H, model)     # the same rows, in metres (σ floor)
+    c0 = np.array([BM.scale_equivalent(model, final_coefs[i]) for i in range(N)])
+    score_m = score.get(model, {})
+    _p(40, f"bend model {model}" + (f" (judged among {models})" if len(models) > 1 else "")
+           + f"; held-out |dz|/z (half A): unbent {np.median(np.concatenate(raw_err)) * 100:.2f} %, "
+           + ", ".join(f"±{w} {score_m[w] * 100:.2f} %" for w in sorted(score_m))
+           + (f" → ±{wb} (best ±{window_rule['window_best']}, bar {window_rule['bar'] * 100:.2f} % = best + "
+              f"{fac:g} x se {window_rule['heldout_best_se'] * 100:.3f} %)" if bc.enabled else "")
+           + "; per keyframe: " + ", ".join(f"{k} {v}" for k, v in sorted(status_counts.items()))
+           + "; " + ", ".join(f"{k} kept on {v}" for k, v in kept_terms.items()) + f" of {N}; half B {score_B * 100:.2f} %"
            + (f" = {heldout_m['median_m'] * 100:.2f} cm along the ray at {heldout_m['range_m']:.2f} m "
               f"over {heldout_m['rows']} rows (the session's repeatability)"
               if heldout_m["median_m"] is not None else " (no half-B row: no repeatability measured)")
            + f"; scale {np.median(c0):.4f} [{c0.min():.4f}, {c0.max():.4f}], largest consecutive jump "
-           f"{np.abs(np.diff(c0)).max():.3f}")
+           f"{np.abs(np.diff(c0)).max() if N > 1 else 0.0:.3f}")
     uu, vv = np.meshgrid(np.arange(W), np.arange(H))
-    Dm = design(uu.ravel(), vv.ravel(), W, H)
     dep, valid, passed, weight = {}, {}, {}, {}
     md = pcfg.mono_detail
     for i, f in enumerate(frames):
         valid[f] = np.isfinite(zo[f]) & (zo[f] > 0) & np.isfinite(conf[f]) & (conf[f] > SKY_CONF)
         passed[f] = valid[f] & (conf[f] >= thr[chunk[f]])
-        # the bent map in float32 first, then the mask — epoch 8's arithmetic, bit for bit
-        bent = (zo[f] * (Dm @ final_coefs[i]).reshape(H, W)).astype(np.float32)
+        # the bent map in float32 first, then the mask — epoch 8's arithmetic, bit for bit under
+        # affine_pixel (bend_model.apply is design(u, v) @ c in that family)
+        bent = BM.apply_map(model, final_coefs[i], zo[f], W, H).astype(np.float32)
+        valid[f] = valid[f] & (bent > 0)                  # a pixel the inverse model cannot place has no depth
         dep[f] = np.where(valid[f], bent, 0).astype(np.float32)
         if md.enabled:
             # the session's calibrated confidence as a weight in 0..1 above its own floor (per chunk)
@@ -846,9 +1025,10 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     cmax = None
     del zo, conf
 
-    # 3b. mono detail (claude_stac.txt 2026-10-04): PointDiT refines the bent maps before the vote
+    # 3b. mono detail (claude_stac.txt 2026-10-04): PointDiT refines the bent maps before the vote —
+    # judged on the half-A held-out rows it changed (audit 2026-10-23, mono_detail.heldout_gate)
     dep, valid, passed, src_maps, md_rep = apply_mono_detail(
-        pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out, log, _p)
+        pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out, log, _p, rows_A=rows_A, error_factor=fac)
 
     # 4. the edge-keeping vote (pccr epoch 8)
     _p(50, "edge-keeping multi-view vote")
@@ -858,14 +1038,15 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     vote_bars: dict = {}
     voted, tau, vst = edge_keeping_vote(frames, dep, valid, passed, K, c2w, labels,
                                         bc.neighbors, bc.tau_quantile, int(pcfg.cloud.repair_min_views), log,
-                                        bars_out=vote_bars)
+                                        bars_out=vote_bars, judges_exclude_mixed=bool(bc.judges_exclude_mixed),
+                                        edge_rule=bc.edge_rule)
     cover = vst["out"] / float(N * H * W)
     _p(65, f"vote done: coverage {cover * 100:.1f} %")
     del dep, valid, passed
     return types.SimpleNamespace(session_dir=session_dir, out=out, inp=inp, frames=frames, N=N, W=W, H=H, K=K,
                                  c2w=c2w, params=params, chunk=chunk, voted=voted, tau=tau, vst=vst, cover=cover,
                                  wb=wb, score=score, score_B=score_B, heldout_m=heldout_m, window_rule=window_rule,
-                                 coefs=final_coefs,
+                                 coefs=final_coefs, model=model, models=models,
                                  vote_bars=vote_bars,
                                  provenance=provenance, status_counts=status_counts, c0=c0, obs=obs,
                                  dropped_tracks=dropped_tracks, error_factor=fac,
@@ -897,10 +1078,12 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
         by_chunk.setdefault(chunk[f], []).append(f)
     n_raw = 0
     try:
+        contra_maps: Dict[int, np.ndarray] = {}
         for k, fl in sorted(by_chunk.items()):
             L = {x: [] for x in ("xyz", "rgb", "fg", "pr", "pc", "cf")}
             for f in fl:
                 zmap, amap = voted[f][0], voted[f][1]
+                contra_maps[f] = voted[f][2] if len(voted[f]) > 2 else np.zeros(zmap.shape, np.int16)
                 m = zmap > 0
                 r, c = vv[m], uu[m]; zz = zmap[m].astype(np.float64)
                 X = np.stack([(c - K[0, 2]) / K[0, 0] * zz, (r - K[1, 2]) / K[1, 1] * zz, zz], 1) @ c2w[f][:3, :3].T + c2w[f][:3, 3]
@@ -920,6 +1103,7 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
         _, data = read_ply(cleaned)
         cols = {"pixel_u_und": np.asarray(data["pixel_col"]), "pixel_v_und": np.asarray(data["pixel_row"]),
                 "n_consistent": np.clip(np.asarray(data["confidence"]), 0, 255).astype(np.uint8),
+                "n_contradict": map_column(data, contra_maps),
                 "source": source_column(data, src_maps)}
         report = {"version": 1, "stage": "depth_on_f5", "provenance": "tool_measured",
                   "source_of_depth": "Omega's depth bent to F5's landmarks + edge-keeping multi-view vote (pccr epoch 8)",
@@ -928,7 +1112,13 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
                   # grid, the original frame) carried onto it through the lens + grid when they differ
                   "grid_of_the_bend": {"undistorted_native": [W, H], "record": [C.rec_hw[1], C.rec_hw[0]],
                                        "lens": bool(C.lens), "carried": bool(C.carry), "note": C.grid_note},
-                  "bend": {"window": (int(wb) if wb is not None else None), "held_out": {str(w): v for w, v in sorted(score.items())},
+                  "bend": {"window": (int(wb) if wb is not None else None),
+                           # the depth model of this cloud (precision/bend_model.py, audit 2026-10-23): the
+                           # family every per_frame coefficient vector belongs to, the families judged,
+                           # and the half-A held-out of every (family, window) candidate
+                           "model": C.model, "models_judged": list(C.models),
+                           "held_out": {str(w): v for w, v in sorted(score.get(C.model, {}).items())},
+                           "held_out_by_model": {m: {str(w): v for w, v in sorted(sc.items())} for m, sc in score.items()},
                            "held_out_half_B_final": C.score_B,
                            # the same half-B rows in METRES along the ray — the session's own
                            # repeatability, read by reconstruction.certify.repeatability (the fourth
@@ -946,14 +1136,18 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
                   "confidence_floor": {"conf_min_norm": C.floor_norm, "per_chunk": C.floor,
                                        "rule": "min + conf_min_norm x (max - min) of the chunk's valid "
                                                "confidences (THE ONE floor, shared with the viewer; point 52)"},
-                  # what each keyframe's depth was multiplied by — the chunk check (f6_check) measures
-                  # the PUBLISHED cloud with it: s_k = c0, bend = (c1, c2) of precision.depth_on_f5.design —
+                  # what each keyframe's depth went through — the chunk check (f6_check) measures the
+                  # PUBLISHED cloud with it: ``model`` + ``coef`` (bend_model.apply); s_k = the scale the
+                  # model amounts to, bend = its remaining terms (c1, c2 under affine_pixel, as before) —
                   # and WHY it got that fit (point 48: status, window, the terms kept, the margins)
-                  "per_frame": {str(f): {"s_k": float(coefs[i][0]),
-                                         "bend": [float(coefs[i][1]), float(coefs[i][2])],
+                  "per_frame": {str(f): {"s_k": BM.scale_equivalent(C.model, coefs[i]),
+                                         "bend": list(BM.tilt_terms(C.model, coefs[i])),
+                                         "coef": [float(x) for x in coefs[i]],
                                          **C.provenance[i]}
                                 for i, f in enumerate(frames)},
                   "vote": {"tau": tau, "coverage": cover, "bars": C.vote_bars,
+                           # audit 2026-10-23: the two rules this vote ran under
+                           "edge_rule": pcfg.bend.edge_rule, "judges_exclude_mixed": bool(pcfg.bend.judges_exclude_mixed),
                            **{k: (float(v) / max(vst["valid"], 1) if k not in ("tau", "valid") else v)
                               for k, v in vst.items() if k != "tau"}},
                   "raw_points": n_raw}

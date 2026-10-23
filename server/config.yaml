@@ -101,6 +101,13 @@ genrecon:
   mode: cloud                        # cloud (THE product, USER 2026-10-17) | cloud+hull (completion from the
                                      # masks) | cloud+objects | cloud+unseen — the last three are trials
   min_points_per_voxel: 10           # BOUND: a chunk voxel (32³ ≈ 11.6 cm) is active from this many cloud points
+  min_consistent_views: 0            # AUDIT 2026-10-23: the evidence a cloud point needs to decide PRESENCE for the
+                                     # mesh — its `confidence` field is the vote's agree count (n_consistent: the
+                                     # neighbouring keyframes that confirmed the depth within tau). The vote keeps a
+                                     # floor-passing pixel nobody judged (agree 0, contra 0) and a tie (1/1): with 0
+                                     # every published point votes for presence (the 2026-10-17 recipe, unchanged);
+                                     # 2 = "one neighbour is an opinion, two agreeing are evidence" (the chain's own
+                                     # repair rule) — the cloud itself is never filtered (mark, never delete)
   simplify_faces_per_chunk: 150000   # the bake's decimation target per chunk (pccr: 25 chunks → 3.2 M faces, 250 MB)
   texture_size: 2048                 # the bake's atlas per chunk
 
@@ -2461,9 +2468,33 @@ reconstruction:
     bend:                               # USER 2026-10-01 — the depth on F5 (precision/depth_on_f5.py)
       enabled: true                     # false = no per-keyframe bend, Omega's depth stands (k = 1) on F5's poses
                                         #   (the evaluation battery's variant "sin F6"). NEVER change in production
+      model: judged                     # AUDIT 2026-10-23 (precision/bend_model.py) — the family of the per-keyframe
+                                        #   correction. Epoch 7's `affine_pixel` (z' = z·(c0 + c1·u' + c2·v')) is not
+                                        #   a geometric transformation: it CURVES every plane seen obliquely as soon
+                                        #   as c1 or c2 enters (pccr camera, floor 1.5 m under it: c1 0.03 → 2.5 cm
+                                        #   off its plane, 0.10 → 8.8 cm; tests/test_bend_model.py). `inverse_depth`
+                                        #   (1/z' = a/z + b0 + b1·u' + b2·v' — scale, shift and tilt in inverse
+                                        #   depth) takes planes to planes exactly. `judged` fits both on every window
+                                        #   and the half-A held-out chooses by the window rule's own construction;
+                                        #   the plane-preserving family wins a tie. The report writes the choice
+                                        #   (bend.model, bend.held_out_by_model) and every keyframe's `coef`.
       windows: [0, 1, 2, 4, 8]          # BOUND (search): ± keyframes pooled per bend; the HELD-OUT tracks choose
                                         #   (pccr: ±0, held-out |dz|/z 7.25 % unbent → 2.80 %)
       neighbors: [-12, -6, -3, 3, 6, 12]  # keyframe offsets that vote on each pixel (same as the repair)
+      judges_exclude_mixed: true        # AUDIT 2026-10-23: a neighbour's MIXED pixel — on neither surface of a depth
+                                        #   step, the vote's own definition (mixed_pixels) — neither confirms nor
+                                        #   contradicts. Epoch 8 let every floor-passing pixel judge, Omega's contour
+                                        #   ramps included: their points, in free space between object and wall,
+                                        #   landed next to every silhouette in the neighbours and CONTRADICTED the
+                                        #   wall there (f6_torch.two_sided_vote `front`), so the background around
+                                        #   objects was repaired to the ramp's depth (a halo of flyers) or left
+                                        #   (holes). false = epoch 8's vote, bit for bit (the A/B).
+      edge_rule: inverse_second_difference  # AUDIT 2026-10-23: a depth STEP is a kink of 1/z — on a plane 1/z is
+                                        #   affine in the pixel whatever the slant, so a floor, ceiling or tunnel wall
+                                        #   near the horizon (per-pixel |dz|/z above tau beyond ~11 m on pccr's
+                                        #   camera) is NOT an edge; a real step is, on both sides, with its ramp.
+                                        #   window = epoch 8's 3x3 range test, which flags every oblique surface far
+                                        #   away as edge and then snaps / votes its pixels as if they were mixed.
       tau_quantile: 75.0                # agreement tolerance = p75 of the session's OWN neighbour disagreement
                                         #   (pccr 1.96 %), measured every run
       # USER 2026-10-01: "exactamente el mismo ajuste que la 7" — the fit of pccr epoch 7, the cloud
@@ -2545,6 +2576,15 @@ reconstruction:
       tile_batch: 0                     # tiles of a keyframe per PointDiT forward pass: 0 = all of them at once
                                         #   (USER 2026-10-08: speed; the batch is part of the run's config, so its
                                         #   bits repeat); a card that cannot hold it FAILS the stage, never halves it
+      heldout_gate: true                # AUDIT 2026-10-23: PointDiT judged like every other correction — per keyframe,
+                                        #   on the half-A held-out landmark rows whose pixel it CHANGED (paired,
+                                        #   nearest pixel), by THE USER'S RULE (metric_lock.decide_change): a keyframe
+                                        #   the detail WORSENS goes back to the bent map, declared; too few judges →
+                                        #   the session's pooled verdict (depth_on_f5.mono_heldout_gate; the verdicts
+                                        #   in depth_on_f5.json mono_detail.params.heldout_gate). The 2026-10-04 A/B
+                                        #   measured 2.48 → 2.55 % held-out and 2.54 → 2.70 % in the edge band and the
+                                        #   stage went on by eye; the eye keeps its choice wherever the rows do not
+                                        #   say it is worse. false = unjudged, as it ran until this audit.
       ab_edge_gradient_quantile: 90.0   # the Phase 8 A/B's edge band = image gradient energy above this percentile
                                         #   of the session's pixels, or a step of the calibrated depth (never PointDiT)
     cloud_metrics:                      # the floor + edge metrics of EVERY run (precision/cloud_metrics.py;
@@ -4258,6 +4298,27 @@ evaluation:
       description: (e) without F5's bundle adjustment — the gauge's poses and F0's camera pass through
       overrides:
         "reconstruction.precision.refine.enabled": false
+    epoch8_vote:
+      kind: chain
+      description: >-
+        (audit 2026-10-23, A/B) the depth on F5 exactly as it ran before the audit — the pixel-ratio bend
+        family, every floor-passing pixel judging (contour ramps included), the 3x3 window edge rule and
+        PointDiT unjudged
+      overrides:
+        "reconstruction.precision.bend.model": affine_pixel
+        "reconstruction.precision.bend.judges_exclude_mixed": false
+        "reconstruction.precision.bend.edge_rule": window
+        "reconstruction.precision.mono_detail.heldout_gate": false
+    bend_affine_pixel:
+      kind: chain
+      description: (audit 2026-10-23, A/B) only the bend family forced to epoch 7's pixel ratio; the vote as audited
+      overrides:
+        "reconstruction.precision.bend.model": affine_pixel
+    bend_inverse_depth:
+      kind: chain
+      description: (audit 2026-10-23, A/B) only the plane-preserving family, no judging between families
+      overrides:
+        "reconstruction.precision.bend.model": inverse_depth
     scale_mapanything:
       kind: not_executed
       description: (f) MapAnything as the scale source instead of DA3

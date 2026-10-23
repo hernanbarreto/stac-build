@@ -350,10 +350,44 @@ def relative_jump(z: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def discontinuity_band(z: torch.Tensor, valid: torch.Tensor, tau: float, band_px: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    """(discontinuity, band): the pixels where a 1-pixel jump of ``z`` exceeds ``tau`` (relative), and
-    that set dilated by ``band_px`` (≥ 1) restricted to the valid pixels."""
-    disc = valid & (relative_jump(z, valid) > float(tau))
+EDGE_RULE_WINDOW = "window"
+EDGE_RULE_KINK = "inverse_second_difference"
+EDGE_RULES = (EDGE_RULE_KINK, EDGE_RULE_WINDOW)
+
+
+def inverse_kink(z: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+    """AUDIT 2026-10-23 — per pixel the largest relative KINK of the inverse depth d = 1/z along the
+    two axes: |d[p] − (d[p−1] + d[p+1]) / 2| / d[p] where both neighbours are valid. On a plane d is
+    affine in the pixel whatever the slant, so a floor, a ceiling or a tunnel wall receding to the
+    horizon reads 0 here while its 1-pixel jumps |Δz| / z grow without bound; a depth step reads
+    half its jump in d on both sides and on its ramp. An axis with a missing neighbour (the image
+    border, a hole) is not judged — a 1-pixel difference there cannot tell a step from a slant — so
+    a pixel reads 0 where neither axis has both neighbours."""
+    H, W = z.shape
+    zz = z.to(torch.float64)
+    d = torch.where(valid & (zz > 0), 1.0 / torch.where(zz > 0, zz, torch.ones_like(zz)), torch.zeros_like(zz))
+    out = torch.zeros((H, W), dtype=torch.float64, device=z.device)
+    dd = torch.where(d > 0, d, torch.ones_like(d))
+    for dy, dx in ((0, 1), (1, 0)):
+        a = shift(d, -dy, -dx, 0.0); b = shift(d, dy, dx, 0.0)
+        both = (a > 0) & (b > 0) & (d > 0)
+        kink2 = torch.abs(d - (a + b) / 2) / dd
+        out = torch.maximum(out, torch.where(both, kink2, torch.zeros_like(d)))
+    return out
+
+
+def discontinuity_band(z: torch.Tensor, valid: torch.Tensor, tau: float, band_px: int,
+                       rule: str = EDGE_RULE_KINK) -> Tuple[torch.Tensor, torch.Tensor]:
+    """(discontinuity, band): the pixels at a depth step of ``z`` — a kink of the inverse depth above
+    ``tau`` (``rule`` 'inverse_second_difference', audit 2026-10-23) or a 1-pixel jump of ``z`` above
+    ``tau`` ('window', the first rule, which flagged every oblique surface far away) — and that set
+    dilated by ``band_px`` (≥ 1) restricted to the valid pixels."""
+    if rule == EDGE_RULE_KINK:
+        disc = valid & (inverse_kink(z, valid) > float(tau))
+    elif rule == EDGE_RULE_WINDOW:
+        disc = valid & (relative_jump(z, valid) > float(tau))
+    else:
+        raise F6TorchError(f"edge rule must be one of {EDGE_RULES}, got {rule!r}")
     band = dilate(disc, max(1, int(band_px))) & valid
     return disc, band
 
@@ -370,7 +404,7 @@ def side_depths(z_cal: torch.Tensor, usable: torch.Tensor, reach_px: int) -> Tup
 
 def refine_frame(z_cal: torch.Tensor, valid_cal: torch.Tensor, z_al: torch.Tensor, al_valid: torch.Tensor,
                  tau: float, band_px: int, sigma_px: float, reach_px: int, align_err: float = 0.0,
-                 detail_scope: str = "edges", detail_zone_px: int = 12) -> dict:
+                 detail_scope: str = "edges", detail_zone_px: int = 12, edge_rule: str = EDGE_RULE_KINK) -> dict:
     """One keyframe's refined depth from its calibrated (bent) map and PointDiT's aligned map — the
     arithmetic of mono_detail.refine_frame (see its docstring for the rules and the user's 'edges'
     scope) on tensors. Returns dict(depth float32, source uint8, band, detail float32, counts, margins)."""
@@ -379,7 +413,7 @@ def refine_frame(z_cal: torch.Tensor, valid_cal: torch.Tensor, z_al: torch.Tenso
     za = z_al.to(torch.float64)
     zero = torch.zeros((H, W), dtype=torch.float64, device=zc.device)
     both = valid_cal & al_valid & (za > 0) & (zc > 0)
-    disc, band = discontinuity_band(za, both, tau, band_px)
+    disc, band = discontinuity_band(za, both, tau, band_px, edge_rule)
     out = torch.where(valid_cal, zc, zero)
     src = torch.zeros((H, W), dtype=torch.int64, device=zc.device)
     detail = zero.clone()
@@ -515,25 +549,48 @@ def window_extremes(depth: torch.Tensor, valid: torch.Tensor) -> Tuple[torch.Ten
     return mn, mx
 
 
-def mixed_pixels(depth: torch.Tensor, valid: torch.Tensor, tau: float) -> torch.Tensor:
-    mn, mx = window_extremes(depth, valid)
-    z = depth.to(torch.float64)
-    return valid & (z > mn * (1.0 + tau)) & (z < mx * (1.0 - tau))
-
-
-def depth_steps(depth: torch.Tensor, valid: torch.Tensor, tau: float) -> torch.Tensor:
+def _step_window(depth: torch.Tensor, valid: torch.Tensor, tau: float) -> torch.Tensor:
+    """Epoch 8's step test: the 3x3 window's extremes are more than tau apart on both sides."""
     mn, mx = window_extremes(depth, valid)
     return valid & (mx * (1.0 - tau) > mn * (1.0 + tau))
+
+
+def depth_steps(depth: torch.Tensor, valid: torch.Tensor, tau: float, rule: str = EDGE_RULE_KINK) -> torch.Tensor:
+    """The EDGE pixels: a 3x3 window that spans a depth STEP. Under 'inverse_second_difference'
+    (audit 2026-10-23) a step is a kink of 1/z above tau on the pixel or a 4-neighbour — both sides
+    of the step and its ramp, never a smooth oblique surface; under 'window' it is epoch 8's range
+    test, which flags any window whose depths differ by more than tau on both sides."""
+    if rule == EDGE_RULE_KINK:
+        kink = valid & (inverse_kink(depth, valid) > float(tau))
+        return valid & dilate(kink, 1)
+    if rule == EDGE_RULE_WINDOW:
+        return _step_window(depth, valid, tau)
+    raise F6TorchError(f"edge rule must be one of {EDGE_RULES}, got {rule!r}")
+
+
+def mixed_pixels(depth: torch.Tensor, valid: torch.Tensor, tau: float, rule: str = EDGE_RULE_KINK) -> torch.Tensor:
+    """Pixels on NEITHER surface of a depth step: more than tau from both extremes of their 3x3
+    window — and, under 'inverse_second_difference', only where the window spans a step
+    (depth_steps): the midpoint of a smooth slant is on its surface."""
+    mn, mx = window_extremes(depth, valid)
+    z = depth.to(torch.float64)
+    mixed = valid & (z > mn * (1.0 + tau)) & (z < mx * (1.0 - tau))
+    if rule == EDGE_RULE_KINK:
+        return mixed & depth_steps(depth, valid, tau, rule)
+    if rule == EDGE_RULE_WINDOW:
+        return mixed
+    raise F6TorchError(f"edge rule must be one of {EDGE_RULES}, got {rule!r}")
 
 
 _NB8 = ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1))   # 4-neighbours first
 
 
-def snap_mixed(depth: torch.Tensor, valid: torch.Tensor, labels: torch.Tensor, tau: float):
+def snap_mixed(depth: torch.Tensor, valid: torch.Tensor, labels: torch.Tensor, tau: float,
+               rule: str = EDGE_RULE_KINK):
     """corrected_cloud.snap_mixed on tensors (see its docstring): returns (depth, mixed, snapped)."""
     H, W = depth.shape
     z = depth.to(torch.float64)
-    mixed = mixed_pixels(z, valid, tau)
+    mixed = mixed_pixels(z, valid, tau, rule)
     snapped = torch.zeros((H, W), dtype=torch.bool, device=z.device)
     if not bool(mixed.any()):
         return depth.clone(), mixed, snapped

@@ -10,8 +10,9 @@ as before — plus, row-aligned in ``output/origins.npz``:
 - ``pixel_u_und``, ``pixel_v_und``: the EXACT undistorted native pixel where the
   depth was measured (``pixel_row/col`` are that pixel carried back through the
   lens to the original frame and rounded, which is what the masks index);
-- ``n_consistent`` (views that confirm the depth), ``ncc`` (the ZNCC reached),
-  ``source`` (tier: 0 plane sweep, 1 prior fill), ``residual_rel``;
+- ``n_consistent`` (views that confirm the depth), ``n_contradict`` (views that see free
+  space through it — the vote's count, audit 2026-10-23; 0 in files written before it),
+  ``ncc`` (the ZNCC reached), ``source`` (tier: 0 plane sweep, 1 prior fill), ``residual_rel``;
 - ``content_flags`` (bit 1 reflective, bit 2 low_info — I2's vlm_proposed tags
   of the keyframe; they weigh, never exclude);
 - ``geometry_epoch``, ``camera_epoch`` of the measurement.
@@ -33,11 +34,16 @@ REJECTED_NAME = "rejected_points.npz"
 ORIGINS_VERSION = 2
 V1_FIELDS = ("frame_global", "pixel_row", "pixel_col")
 V2_FIELDS = V1_FIELDS + ("pixel_u_und", "pixel_v_und", "n_consistent", "ncc", "source",
-                         "residual_rel", "content_flags", "geometry_epoch", "camera_epoch")
+                         "residual_rel", "content_flags", "geometry_epoch", "camera_epoch",
+                         "n_contradict")
 V2_DTYPES = {"frame_global": np.int32, "pixel_row": np.int32, "pixel_col": np.int32,
              "pixel_u_und": np.int32, "pixel_v_und": np.int32, "n_consistent": np.uint8,
              "ncc": np.float32, "source": np.uint8, "residual_rel": np.float32,
-             "content_flags": np.uint8, "geometry_epoch": np.int16, "camera_epoch": np.int16}
+             "content_flags": np.uint8, "geometry_epoch": np.int16, "camera_epoch": np.int16,
+             "n_contradict": np.uint8}
+# fields added to v2 after files of it were written: a file without one reads it as zeros (the
+# value every writer before the field existed would have put there)
+V2_OPTIONAL = {"n_contradict": 0}
 # ``source`` of a fused point: depth_sweep's SOURCE_SWEEP (0, tier 0: photometric
 # measurement) and SOURCE_PRIOR_FILL (1, tier 1: Omega's prior confirmed by other
 # views), plus TIER 2 — COLMAP PatchMatch's geometric depth (USER 2026-09-29: a second
@@ -75,6 +81,11 @@ def content_flags_of(tags: Optional[Dict[str, Any]]) -> int:
 
 
 def write_origins(path: Path, cols: Dict[str, np.ndarray], meta: Dict[str, Any]) -> Path:
+    cols = dict(cols)
+    n_rows = {len(v) for k, v in cols.items() if k in V2_FIELDS}
+    for k, fill in V2_OPTIONAL.items():
+        if k not in cols and len(n_rows) == 1:
+            cols[k] = np.full(next(iter(n_rows)), fill, V2_DTYPES[k])
     missing = [k for k in V2_FIELDS if k not in cols]
     if missing:
         raise ProvenanceError(f"origins v2 needs {missing}")
@@ -108,5 +119,8 @@ def load_origins(output_dir: Path) -> Dict[str, Any]:
                 ep = int(z["geometry_epoch"][0]) if len(data) else read_geometry_epoch(output_dir)
                 if ep == read_geometry_epoch(output_dir) and \
                         np.array_equal(z["frame_global"], np.asarray(data["frame_global"], np.int32)):
-                    return {"version": ORIGINS_VERSION, **{k: z[k] for k in V2_FIELDS}}
+                    n = len(data)
+                    return {"version": ORIGINS_VERSION,
+                            **{k: (z[k] if k in z.files else np.full(n, V2_OPTIONAL[k], V2_DTYPES[k]))
+                               for k in V2_FIELDS}}
     return {"version": 1, **{k: np.asarray(data[k]) for k in V1_FIELDS}}

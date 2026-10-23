@@ -56,12 +56,14 @@ def test_the_edge_keeping_vote_removes_a_flyer_and_keeps_the_surface():
     ok = {f: np.ones((H, W), bool) for f in order}
     final, tau, tot = edge_keeping_vote(order, dep, ok, {f: ok[f].copy() for f in order}, K, cams, None,
                                         (-1, 1), 75.0, 2, log=lambda *a: None)
-    z1, a1 = final[1]
+    z1, a1, c1 = final[1]
     # the flyer is gone: its pixels see the wall behind it, so they are REPAIRED to the depth the two
     # neighbours agree on (epoch 8: a contradicted pixel still sees a surface) — never left at 1.5 m
     assert np.allclose(z1[12:18, 32:38], 3.0, atol=1e-3), "the flyer's pixels take the wall the neighbours see"
     assert np.allclose(z1[40:50, 30:40], 3.0, atol=1e-3) and (a1[40:50, 30:40] >= 1).all()
     assert tot["contradicted"] > 0 and tot["repaired"] > 0 and 0 <= tau
+    # the contradictions travel with the published pixel (origins n_contradict, audit 2026-10-23)
+    assert (c1[12:18, 32:38] >= 1).all() and (c1[40:50, 30:40] == 0).all()
 
 
 def test_the_camera_travels_with_the_cloud(tmp_path):
