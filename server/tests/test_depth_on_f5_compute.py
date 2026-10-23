@@ -76,11 +76,12 @@ def _session(tmp_path, a: float = 1.08, b0: float = -0.03):
     return s, cam, np.stack(c2w)
 
 
-def _pcfg(model: str):
+def _pcfg(model: str, colmap_tier: bool = False):
     from precision.config import load_precision_config
     pcfg = load_precision_config()
     return replace(pcfg, mono_detail=replace(pcfg.mono_detail, enabled=False),
-                   bend=replace(pcfg.bend, model=model, windows=(0, 1), neighbors=(-1, 1)))
+                   bend=replace(pcfg.bend, model=model, windows=(0, 1), neighbors=(-1, 1)),
+                   fusion=replace(pcfg.fusion, colmap_tier=colmap_tier, colmap_max_sources=4, colmap_rows_stride=2))
 
 
 def _plane_rms(dep: np.ndarray, K: np.ndarray) -> float:
@@ -135,3 +136,67 @@ def test_compute_bends_omega_to_the_landmarks_and_reports_the_model(tmp_path, mo
         P = np.concatenate(P)
         n = np.array([0.1, 0.0, -1.0]); n /= np.linalg.norm(n)              # the plane x·0.1 − z = −3
         assert np.sqrt(np.mean((P @ n + 3.0 * n[2] * -1) ** 2)) < 0.01 or np.sqrt(np.mean((P @ n - 3.0 / np.linalg.norm([0.1, 0, -1])) ** 2)) < 0.01
+
+
+def _fake_patch_match(stripe_rows):
+    """A stand-in for the COLMAP binary: writes, for every reference image of patch-match.cfg, the TRUE
+    depth of the plane on a horizontal stripe (the textured band PatchMatch measures) and 0 elsewhere."""
+    from precision.depth_colmap import write_colmap_array
+
+    def run(cmd, logf):
+        ws = Path(cmd[cmd.index("--workspace_path") + 1])
+        cfg = (ws / "stereo" / "patch-match.cfg").read_text().splitlines()
+        names = [cfg[k] for k in range(0, len(cfg), 2)]
+        # images.txt: image id → frame (from the name) and its pose; cameras.txt: K
+        poses = {}
+        lines = (ws / "sparse" / "images.txt").read_text().splitlines()
+        for k in range(0, len(lines), 2):
+            parts = lines[k].split()
+            poses[parts[-1]] = parts
+        from precision.depth_colmap import qvec_to_rotmat
+        for name in names:
+            parts = poses[name]
+            q = [float(x) for x in parts[1:5]]; t = np.array([float(x) for x in parts[5:8]])
+            R = qvec_to_rotmat(q)
+            w2c = np.eye(4); w2c[:3, :3] = R; w2c[:3, 3] = t
+            z = _plane_depth(np.linalg.inv(w2c))
+            dm = np.where(stripe_rows, z, 0.0).astype(np.float32)
+            write_colmap_array(ws / "stereo" / "depth_maps" / f"{name}.geometric.bin", dm)
+        Path(logf).write_text("fake patch_match_stereo\n")
+        return 0
+    return run
+
+
+def test_the_photometric_reference_calibrates_the_bend_and_owns_the_textured_band(tmp_path):
+    """Phase 3 end to end on the synthetic session: the COLMAP tier step (its binary replaced by a
+    stand-in that measures the plane exactly on a stripe) writes the tier-0 maps and the report;
+    compute() takes COLMAP's dense rows for the bend (judged on the landmarks), fuses the stripe at
+    tier 0 and marks those points `colmap` in the source column."""
+    from precision import colmap_tier as CT
+    from precision.depth_on_f5 import SRC_COLMAP, compute
+    s, cam, c2w = _session(tmp_path)
+    pcfg = _pcfg(BM.INVERSE_DEPTH, colmap_tier=True)
+    stripe = (np.arange(FH)[:, None] > FH * 0.35) & (np.arange(FH)[:, None] < FH * 0.65) & np.ones((1, FW), bool)
+    rep = CT.run_colmap_tier(s, pcfg, log=lambda *a: None, runner=_fake_patch_match(stripe))
+    assert rep["n_frames"] == len(FRAMES) and rep["tier0_pixels"] > 0 and 0 <= rep["tau_rel"] < 0.01
+    from correction.epoch import reconstruction_id
+    rid = reconstruction_id(s / "output")
+    maps, rep2 = CT.load_colmap_tier(s / "output", FRAMES, {"geometry_epoch": 5, "camera_epoch": 3}, rid, 3, (FW, FH))
+    assert set(maps) == set(FRAMES) and all(m[1][stripe].mean() > 0.5 for m in maps.values())
+    C = compute(s, pcfg, log=lambda *a: None)
+    assert C.colmap_rep is not None and C.bend_rows in ("landmarks", "landmarks+colmap")
+    assert any("|landmarks+colmap" in k for k in C.cand_keys)
+    F = C.fusion
+    assert F.report["tiers"]["owners_by_fused_tier"]["0"] > 0.5 * int(stripe.sum())
+    # the stripe's owners carry the photometric depth: the plane exactly, whatever Omega's bias
+    for i, f in enumerate(C.frames):
+        own0 = F.owner[f] & (F.fused_tier[f] == 0)
+        if own0.any():
+            zt = _plane_depth(c2w[i])
+            assert np.abs(F.depth[f][own0] / zt[own0] - 1).max() < 0.005
+    assert SRC_COLMAP == 5
+    # another geometry's report is refused by name
+    import json
+    rp = CT.report_path(s / "output"); d = json.loads(rp.read_text()); d["geometry_epoch"] = 4; rp.write_text(json.dumps(d))
+    with pytest.raises(CT.ColmapError, match="re-run the COLMAP tier"):
+        CT.load_colmap_tier(s / "output", FRAMES, {"geometry_epoch": 5, "camera_epoch": 3}, rid, 3, (FW, FH))

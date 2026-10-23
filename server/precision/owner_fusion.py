@@ -75,6 +75,7 @@ class FusionResult:
     winner: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]]   # frame → (winner frame i32, row i16, col i16) of consumed pixels
     candidates: Dict[int, List[int]]             # frame → the covisible keyframes it was fused with
     report: dict = field(default_factory=dict)
+    fused_tier: Dict[int, np.ndarray] = field(default_factory=dict)   # frame → [H, W] int8: the instrument tier the fused depth came from
 
 
 # ── covisibility: who sees what, measured on the depth maps ────────────────
@@ -141,12 +142,14 @@ def candidates_of(cov: np.ndarray, min_frac: float, max_candidates: int) -> Dict
 # ── one neighbour carried onto a keyframe's rays ─────────────────────────────
 
 def carry(z_f: torch.Tensor, valid_f: torch.Tensor, ray_w: torch.Tensor, C_f: torch.Tensor,
-          w2c_g: np.ndarray, z_g: torch.Tensor, valid_g: torch.Tensor, K: np.ndarray, tau: float,
-          interpolate: bool):
+          w2c_g: np.ndarray, z_g: torch.Tensor, valid_g: torch.Tensor, K: np.ndarray, tau,
+          interpolate: bool, tau_g=None):
     """Keyframe g's surface at the landing points of f's pixels: returns (agree [H, W], t [H, W] the
     agreeing depth carried onto f's ray (NaN elsewhere), q_row, q_col the nearest landing pixel).
     The landing depth of g is read bilinearly when the 2x2 patch is one surface (four valid depths
-    within tau of their mean), at the nearest pixel otherwise."""
+    within tau of their mean), at the nearest pixel otherwise. ``tau``: one tolerance, or f's
+    per-pixel map (its instrument's); with ``tau_g`` (g's per-pixel map) a pair's tolerance is the
+    LARGER of the two observations' — the worse instrument of the pair decides what agreement is."""
     H, W = z_g.shape
     T = FT._t(w2c_g)
     Xw = C_f + z_f[..., None] * ray_w
@@ -157,6 +160,9 @@ def carry(z_f: torch.Tensor, valid_f: torch.Tensor, ray_w: torch.Tensor, C_f: to
     flat_g = z_g.reshape(-1); flat_v = valid_g.reshape(-1)
     idx_n = vr * W + ur
     d_n = flat_g[idx_n]; v_n = flat_v[idx_n] & (d_n > 0)
+    tau_t = tau if isinstance(tau, torch.Tensor) else torch.full_like(zg, float(tau))
+    if tau_g is not None:
+        tau_t = torch.maximum(tau_t, tau_g.reshape(-1)[idx_n])
     d_at = d_n
     if interpolate:
         u0 = torch.floor(u).long().clamp(0, W - 2); v0 = torch.floor(v).long().clamp(0, H - 2)
@@ -166,14 +172,14 @@ def carry(z_f: torch.Tensor, valid_f: torch.Tensor, ray_w: torch.Tensor, C_f: to
         all_v = flat_v[i00] & flat_v[i01] & flat_v[i10] & flat_v[i11] & (d00 > 0) & (d01 > 0) & (d10 > 0) & (d11 > 0)
         stack = torch.stack([d00, d01, d10, d11])
         mean = stack.mean(0)
-        flat = all_v & ((stack.amax(0) - stack.amin(0)) <= float(tau) * mean)
+        flat = all_v & ((stack.amax(0) - stack.amin(0)) <= tau_t * mean)
         d_b = (d00 * (1 - du) * (1 - dv) + d01 * du * (1 - dv) + d10 * (1 - du) * dv + d11 * du * dv)
         d_at = torch.where(flat, d_b, d_n)
         v_n = v_n | flat
     ok = ok & v_n
     one = torch.ones_like(zg)
     e = (zg - d_at) / torch.where(ok, d_at, one)
-    agree = ok & (torch.abs(e) <= float(tau))
+    agree = ok & (torch.abs(e) <= tau_t)
     # the point of f's ray whose depth in g equals g's depth at the landing point
     a = T[2, :3] @ C_f + T[2, 3]
     b = ray_w @ T[2, :3]
@@ -194,9 +200,19 @@ def fuse(frames: Sequence[int], depth: Dict[int, np.ndarray], valid: Dict[int, n
          K: np.ndarray, c2w: Dict[int, np.ndarray], tau: float, *, covis_stride: int, min_covis_frac: float,
          max_candidates: int, evidence_cap: int, interpolate: bool, nearest_tie_rel: float,
          chain_max_hops: int = 8, chain_stride: int = 4,
+         tier: Optional[Dict[int, np.ndarray]] = None, tau_by_tier: Optional[Sequence[float]] = None,
          log: Callable = print, progress: Optional[Callable[[float, str], None]] = None) -> FusionResult:
     """The owner fusion over the voted maps (``depth[f]`` > 0 where ``valid[f]``), in two passes:
-    1. members and the fused depth of every observation; 2. ownership by the total order."""
+    1. members and the fused depth of every observation; 2. ownership by the total order.
+
+    INSTRUMENT TIERS (phase 3): ``tier[f]`` names per pixel the instrument that measured its depth —
+    0 the photometric reference (COLMAP PatchMatch, geometrically consistent), 1 the learned depth
+    (Omega bent and voted) — and ``tau_by_tier`` each instrument's own agreement tolerance (measured).
+    A pair of observations agrees within the LARGER of their two tolerances; the fused depth of an
+    observation is the median over the BEST tier present among itself and its members (a tier-0
+    member never averages with tier-1 ones: the better instrument decides, the worse one fills);
+    and the tier is the first component of the owner's key — a photometric observation outranks
+    every learned one of the same element."""
     t0 = time.time()
     K = np.asarray(K, np.float64)
     frames = [int(f) for f in frames]
@@ -204,27 +220,55 @@ def fuse(frames: Sequence[int], depth: Dict[int, np.ndarray], valid: Dict[int, n
     cov = covisibility(frames, depth, valid, K, c2w, covis_stride)
     cands = candidates_of(cov, min_covis_frac, max_candidates)
     n_cand = [len(cands[i]) for i in range(len(frames))]
+    tiers = tier is not None
+    taus = [float(x) for x in (tau_by_tier if tau_by_tier is not None else (tau,))]
+    if tiers and len(taus) < 2:
+        raise OwnerFusionError("tier maps need one tau per tier (tau_by_tier)")
     log(f"{LOG_TAG} covisibility over {len(frames)} keyframes (stride {covis_stride}): candidates per keyframe "
         f"min {min(n_cand)}, median {int(np.median(n_cand))}, max {max(n_cand)} (share >= {min_covis_frac:g}, "
-        f"cap {max_candidates}); tau {tau * 100:.2f} %")
+        f"cap {max_candidates}); tau " + (", ".join(f"tier {k} {x * 100:.2f} %" for k, x in enumerate(taus))
+                                         if tiers else f"{tau * 100:.2f} %"))
     zt = {f: FT._t(depth[f]) for f in frames}
     vt = {f: FT._t(valid[f], torch.bool) & (zt[f] > 0) for f in frames}
+    tt: Dict[int, torch.Tensor] = {}
+    tau_m: Dict[int, torch.Tensor] = {}
+    for f in frames:
+        if tiers:
+            tt[f] = FT._t(tier[f], torch.int64).clamp(0, len(taus) - 1)
+            tau_m[f] = torch.as_tensor(taus, dtype=torch.float64, device=zt[f].device)[tt[f]]
+        else:
+            tt[f] = torch.zeros(zt[f].shape, dtype=torch.int64, device=zt[f].device)
+            tau_m[f] = torch.full(zt[f].shape, float(tau), dtype=torch.float64, device=zt[f].device)
     # pass 1: members and the fused depth
     members: Dict[int, torch.Tensor] = {}
     fused: Dict[int, torch.Tensor] = {}
+    best_tier: Dict[int, torch.Tensor] = {}
     for i, f in enumerate(frames):
         H, W = zt[f].shape
         ray_w, C = _frame_geometry(f, H, W, K, c2w)
         cols = [zt[f]]
+        col_tier = [tt[f]]
         n_ag = torch.zeros((H, W), dtype=torch.int32, device=zt[f].device)
         for j in cands[i]:
             g = frames[j]
-            agree, t, _, _ = carry(zt[f], vt[f], ray_w, C, w2c[g], zt[g], vt[g], K, tau, interpolate)
+            agree, t, qr, qc = carry(zt[f], vt[f], ray_w, C, w2c[g], zt[g], vt[g], K, tau_m[f], interpolate,
+                                     tau_g=tau_m[g])
             n_ag = n_ag + agree.to(torch.int32)
             cols.append(t)
-        med = FT.nanmedian0(torch.stack(cols)) if len(cols) > 1 else zt[f].to(torch.float64)
+            tq = tt[g].reshape(-1)[qr * W + qc]
+            col_tier.append(torch.where(agree, tq, torch.full_like(tq, len(taus))))   # non-member: no tier
+        C_all = torch.stack(cols)
+        if len(cols) > 1:
+            T_all = torch.stack(col_tier)
+            bt = T_all.amin(0)                                      # the best tier present (own included)
+            nan = torch.full_like(C_all, float("nan"))
+            med = FT.nanmedian0(torch.where(T_all == bt[None], C_all, nan))
+        else:
+            bt = tt[f]
+            med = zt[f].to(torch.float64)
         fused[f] = torch.where(vt[f], med, torch.zeros_like(med))
         members[f] = torch.where(vt[f], n_ag, torch.zeros_like(n_ag))
+        best_tier[f] = torch.where(vt[f], bt, torch.full_like(bt, len(taus)))
         if progress is not None and (i % 10 == 0 or i == len(frames) - 1):
             progress(100.0 * 0.5 * (i + 1) / len(frames), f"fusion pass 1: {i + 1}/{len(frames)} keyframes")
     # pass 2: ownership by a TOTAL ORDER on observations. Every observation carries its own KEY,
@@ -252,10 +296,15 @@ def fuse(frames: Sequence[int], depth: Dict[int, np.ndarray], valid: Dict[int, n
     owner: Dict[int, np.ndarray] = {}
     winner: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
     tot_owner = tot_valid = tot_consumed = 0
+    def _prim(f: int) -> torch.Tensor:
+        # the first component of the key: the instrument first (a tier-0 observation outranks every
+        # tier-1 one), then the confirmed tier
+        return (len(taus) - 1 - tt[f]) * (cap + 1) + torch.clamp(members[f], max=cap)
+
     for i, f in enumerate(frames):
         H, W = zt[f].shape
         ray_w, C = _frame_geometry(f, H, W, K, c2w)
-        prim_f = torch.clamp(members[f], max=cap)
+        prim_f = _prim(f)
         buck_f = bucket[f]
         z_f = zt[f]
         lost = torch.zeros((H, W), dtype=torch.bool, device=z_f.device)
@@ -266,9 +315,10 @@ def fuse(frames: Sequence[int], depth: Dict[int, np.ndarray], valid: Dict[int, n
         best_c = torch.zeros((H, W), dtype=torch.int64, device=z_f.device)
         for j in cands[i]:
             g = frames[j]
-            agree, _, qr, qc = carry(zt[f], vt[f], ray_w, C, w2c[g], zt[g], vt[g], K, tau, interpolate)
+            agree, _, qr, qc = carry(zt[f], vt[f], ray_w, C, w2c[g], zt[g], vt[g], K, tau_m[f], interpolate,
+                                     tau_g=tau_m[g])
             qi = qr * W + qc
-            prim_g = torch.clamp(members[g], max=cap).reshape(-1)[qi]
+            prim_g = _prim(g).reshape(-1)[qi]
             buck_g = bucket[g].reshape(-1)[qi]
             better = agree & ((prim_g > prim_f) | ((prim_g == prim_f) & ((buck_g < buck_f) | ((buck_g == buck_f) & (j < i)))))
             lost = lost | better
@@ -315,9 +365,18 @@ def fuse(frames: Sequence[int], depth: Dict[int, np.ndarray], valid: Dict[int, n
         f"members of the owners p50 "
         f"{q[2]}, unconfirmed {rep['members_of_owners']['share_zero'] * 100 if mem_all.size else 0:.1f} %; "
         f"{rep['seconds']} s")
+    if tiers:
+        own_t = np.concatenate([FT._np(best_tier[f])[owner[f]] for f in frames]) if tot_owner else np.zeros(0)
+        rep["tiers"] = {"tau_by_tier": taus,
+                        "owners_by_fused_tier": {str(k): int((own_t == k).sum()) for k in range(len(taus))},
+                        "observations_by_tier": {str(k): int(sum(int(((tt[f] == k) & vt[f]).sum()) for f in frames))
+                                                 for k in range(len(taus))}}
+        log(f"{LOG_TAG} owners by the instrument of their fused depth: "
+            + ", ".join(f"tier {k}: {v:,}" for k, v in rep["tiers"]["owners_by_fused_tier"].items()))
     return FusionResult(owner=owner, depth={f: FT._np(fused[f], np.float32) for f in frames},
                         members={f: FT._np(torch.clamp(members[f], max=32767), np.int16) for f in frames},
                         winner=winner, candidates={f: [frames[j] for j in cands[i]] for i, f in enumerate(frames)},
+                        fused_tier={f: FT._np(torch.clamp(best_tier[f], max=127), np.int8) for f in frames},
                         report=rep)
 
 

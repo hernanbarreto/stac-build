@@ -131,8 +131,10 @@ def test_config_and_runner_step():
     cc = load_precision_config().chunk_check
     assert 0 < cc.low_pct < 50 < cc.high_pct <= 100 and 0.5 <= cc.confidence < 1
     keys = [s.key for s in RN.STEPS]
-    # after F5 comes the depth stage: f6_bend (the product since 2026-10-01) or f6_sweep (+ f7)
-    assert keys[-1] == "f6_check" and keys.index("f6_bend") == keys.index("f5_refine") + 1
+    # after F5 comes the depth stage: the COLMAP tier (phase 3, 2026-10-23) then f6_bend (the
+    # product since 2026-10-01), or f6_sweep (+ f7)
+    assert keys[-1] == "f6_check" and keys.index("f6_colmap_tier") == keys.index("f5_refine") + 1
+    assert keys.index("f6_bend") == keys.index("f6_colmap_tier") + 1
     assert keys.index("f6_sweep") == keys.index("f6_bend") + 1
     assert keys.index("f7_cloud") > keys.index("f6_sweep")
     assert not next(s for s in RN.STEPS if s.key == "f6_check").gpu
@@ -141,7 +143,11 @@ def test_config_and_runner_step():
     assert chain[-1] == "f6_check"
     if pcfg.cloud.source == "omega_bent":
         assert "f6_bend" in chain and not {"f6_sweep", "f7_cloud", "f7_fuse"} & set(chain)
+        assert ("f6_colmap_tier" in chain) == bool(pcfg.fusion.colmap_tier)
+        if "f6_colmap_tier" in chain:
+            assert chain.index("f6_bend") == chain.index("f6_colmap_tier") + 1
     else:
-        assert "f6_bend" not in chain and ("f7_cloud" in chain) != ("f7_fuse" in chain)
+        assert "f6_bend" not in chain and "f6_colmap_tier" not in chain
+        assert ("f7_cloud" in chain) != ("f7_fuse" in chain)
         if "f7_cloud" in chain:
             assert chain.index("f7_cloud") == chain.index("f6_sweep") + 1

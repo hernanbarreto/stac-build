@@ -144,11 +144,17 @@ STEPS: List[Step] = [
                  "output/precision/witness_frames.txt", "output/precision/refine_residuals.npz",
                  "output/camera.json") + _POSE_FILES,
          config=("refine", "camera")),
+    Step("f6_colmap_tier", "F6 photometric reference: COLMAP PatchMatch with F5's geometry (tier 0)", "da3",
+         "precision.colmap_tier", gpu=True,
+         reads=_GEOMETRY_IN + ("frames", "output/precision/tracks.npz", "output/precision/refine.json",
+                               "output/precision/witness_poses.txt", "output/precision/witness_frames.txt"),
+         writes=("output/depth_colmap_f5",), config=("fusion", "depth", "camera", "refine")),
     Step("f6_bend", "F6 depth on F5: Omega bent to F5's landmarks + multi-view vote (the product)", "da3",
          "precision.depth_on_f5",
          reads=_GEOMETRY_IN + ("frames", "output/precision/tracks.npz", "output/precision/refine.json",
                                "output/gauge.json", "output/depth_correction.json", "output/seg_masks.npz",
-                               "output/precision/witness_poses.txt", "output/precision/witness_frames.txt"),
+                               "output/precision/witness_poses.txt", "output/precision/witness_frames.txt",
+                               "output/depth_colmap_f5"),
          writes=("output/cleaned_cloud.ply", "output/intrinsic.txt", "output/precision/depth_on_f5.json",
                  "output/rejected_points.npz"),
          config=("bend", "fusion", "depth", "cloud", "mono_detail", "gauge", "refine", "camera",
@@ -518,11 +524,15 @@ def chain_steps(pcfg, steps: Sequence[Step] = STEPS) -> List[Step]:
     if pcfg.cloud.source == "omega_bent":
         # USER 2026-10-01 (pccr epoch 7): the depth on F5 IS the product — no plane sweep, no F7.
         # With mono_detail on, PointDiT runs inside it: the step takes the card (vLLM stands down).
+        # Phase 3 (2026-10-23): the COLMAP tier runs before it when fusion.colmap_tier is on.
         from dataclasses import replace as _replace
         mono = bool(getattr(getattr(pcfg, "mono_detail", None), "enabled", False))
+        colmap_tier = bool(getattr(getattr(pcfg, "fusion", None), "colmap_tier", False))
+        skip = {"f6_sweep", "f6_colmap", "f7_cloud", "f7_fuse"} | (set() if colmap_tier else {"f6_colmap_tier"})
         return [(_replace(s, gpu=True) if (mono and s.key == "f6_bend") else s)
-                for s in steps if s.key not in {"f6_sweep", "f6_colmap", "f7_cloud", "f7_fuse"}]
+                for s in steps if s.key not in skip]
     drop.add("f6_bend")
+    drop.add("f6_colmap_tier")
     if fusion:
         drop.add("f7_cloud")
         if not pcfg.depth.colmap.enabled:

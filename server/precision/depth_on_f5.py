@@ -290,25 +290,47 @@ def choose_window(score: Dict[int, float], errs: Dict[int, Dict[int, np.ndarray]
                                           "within": bool(score[w] <= bar)} for w in sorted(score)}}
 
 
+ROWS_LANDMARKS = "landmarks"
+ROWS_WITH_COLMAP = "landmarks+colmap"
+
+
+def cand_key(model: str, rows: str = ROWS_LANDMARKS) -> str:
+    """The key of a bend candidate: its family, and the row set it is fitted on (phase 3: the
+    landmarks alone, or the landmarks and COLMAP's dense tier-0 depth)."""
+    return model if rows == ROWS_LANDMARKS else f"{model}|{rows}"
+
+
+def model_of(key: str) -> str:
+    return key.split("|")[0]
+
+
+def rows_of(key: str) -> str:
+    return key.split("|")[1] if "|" in key else ROWS_LANDMARKS
+
+
 def choose_model(score: Dict[str, Dict[int, float]], errs: Dict[str, Dict[int, Dict[int, np.ndarray]]],
                  error_factor: float, n_boot: int, seed: int) -> Tuple[str, int, dict]:
     """``bend.model: judged`` (audit 2026-10-23): the family AND the window, by the window rule's own
-    construction over every (family, window) candidate — the best pooled half-A median sets the bar
+    construction over every (candidate, window) — the best pooled half-A median sets the bar
     (best + error_factor × its keyframe-bootstrap standard error); among the candidates within the
-    bar the plane-preserving family (bend_model.PLANE_PRESERVING) wins, then the widest window.
-    ``score[model][w]`` / ``errs[model][w]`` as choose_window takes them. Returns (model, window,
-    rule)."""
+    bar the plane-preserving family (bend_model.PLANE_PRESERVING) wins, then (phase 3) the row set
+    with COLMAP's dense support, then the widest window. ``score[key][w]`` / ``errs[key][w]`` as
+    choose_window takes them, ``key`` = cand_key(model, rows). Returns (key, window, rule)."""
     cands = [(m, w) for m in score for w in score[m]]
-    best = min(cands, key=lambda mw: (score[mw[0]][mw[1]], mw[0] != BM.PLANE_PRESERVING, mw[1]))
+    best = min(cands, key=lambda mw: (score[mw[0]][mw[1]], model_of(mw[0]) != BM.PLANE_PRESERVING,
+                                      rows_of(mw[0]) != ROWS_WITH_COLMAP, mw[1]))
     se = cluster_bootstrap_se(list(errs[best[0]][best[1]].values()), n_boot, seed)
     bar = float(score[best[0]][best[1]]) + float(error_factor) * se
     within = [mw for mw in cands if score[mw[0]][mw[1]] <= bar]
-    pick = max(within, key=lambda mw: (mw[0] == BM.PLANE_PRESERVING, mw[1]))
+    pick = max(within, key=lambda mw: (model_of(mw[0]) == BM.PLANE_PRESERVING, rows_of(mw[0]) == ROWS_WITH_COLMAP, mw[1]))
     rule = {"rule": "the plane-preserving family within error_factor x the standard error of the best "
-                    "(family, window)'s median (bootstrap by keyframe), then the widest window",
-            "plane_preserving": BM.PLANE_PRESERVING, "best_model": best[0], "window_best": int(best[1]),
+                    "(candidate, window)'s median (bootstrap by keyframe), then the row set with COLMAP's dense "
+                    "support, then the widest window",
+            "plane_preserving": BM.PLANE_PRESERVING, "best_model": model_of(best[0]), "best_rows": rows_of(best[0]),
+            "best_key": best[0], "window_best": int(best[1]),
             "heldout_best": float(score[best[0]][best[1]]), "heldout_best_se": se,
-            "error_factor": float(error_factor), "bar": bar, "model": pick[0], "window": int(pick[1]),
+            "error_factor": float(error_factor), "bar": bar, "model": model_of(pick[0]), "rows": rows_of(pick[0]),
+            "key": pick[0], "window": int(pick[1]),
             "margin": float(bar - score[pick[0]][pick[1]]),
             "curve": {m: {str(w): {"heldout_median": float(score[m][w]), "margin_to_bar": float(bar - score[m][w]),
                                    "within": bool(score[m][w] <= bar)} for w in sorted(score[m])}
@@ -602,7 +624,8 @@ def camera_travels(tmp: Path, params, n_kf: int, log: Callable = print) -> Path:
 
 # the cloud's `source` column: 1 = Omega bent (epoch 8's pixel), 2 = lowpass(Omega) + PointDiT detail,
 # 3 / 4 = a mixed pixel resolved to the front / back surface. mixed_unresolved never becomes a point.
-SRC_CLOUD_NAMES = {1: "omega_bent", 2: "mono_detail", 3: "band_front", 4: "band_back"}
+SRC_CLOUD_NAMES = {1: "omega_bent", 2: "mono_detail", 3: "band_front", 4: "band_back", 5: "colmap"}
+SRC_COLMAP = 5                                      # phase 3: the point's depth is the photometric reference's
 MONO_LAYERS = ("mono_detail", "mixed_unresolved")
 
 
@@ -947,21 +970,61 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
         zz = bilinear(zo[f], o[:, 0], o[:, 1]) if len(o) else np.zeros(0)
         ok = zz > bc.min_depth_m
         fit_uvz[i] = (o[ok, 0], o[ok, 1], o[ok, 2], zz[ok])
+    # PHASE 3: the photometric reference (COLMAP PatchMatch with F5's geometry, precision/colmap_tier.py)
+    # — its consistent pixels are dense rows of the bend's fit (judged below on the landmarks it never
+    # saw) and tier 0 of the owner fusion
+    colmap_maps, colmap_rep = None, None
+    if bool(pcfg.fusion.colmap_tier):
+        from precision import colmap_tier as CT
+        from correction.epoch import reconstruction_id_or_none
+        try:
+            colmap_maps, colmap_rep = CT.load_colmap_tier(out, frames, inp.epochs, reconstruction_id_or_none(out),
+                                                          int(pcfg.fusion.colmap_min_views), (W, H))
+        except CT.ColmapError as e:
+            raise DepthOnF5Error(f"fusion.colmap_tier is on and the photometric reference is not usable: {e}") from e
+        n_t0 = sum(int(t.sum()) for _, t in colmap_maps.values())
+        _p(27, f"COLMAP tier: {len(colmap_maps)} keyframe(s) with a depth map, {n_t0:,} tier-0 pixels "
+               f"(>= {pcfg.fusion.colmap_min_views} consistent views), tau_rel {colmap_rep['tau_rel'] * 100:.2f} %")
+    row_sets = [ROWS_LANDMARKS]
+    colmap_uvz: Dict[int, tuple] = {}
+    if colmap_maps and bc.colmap_rows != "never":
+        st = int(pcfg.fusion.colmap_rows_stride)
+        for i, f in enumerate(frames):
+            cm = colmap_maps.get(f)
+            if cm is None:
+                colmap_uvz[i] = (np.zeros(0), np.zeros(0), np.zeros(0), np.zeros(0)); continue
+            d, t0m = cm
+            sub = np.zeros((H, W), bool); sub[::st, ::st] = True
+            m = t0m & sub & np.isfinite(zo[f]) & (zo[f] > bc.min_depth_m)
+            r, c = np.nonzero(m)
+            colmap_uvz[i] = (c.astype(np.float64), r.astype(np.float64), d[r, c].astype(np.float64), zo[f][r, c].astype(np.float64))
+        n_rows_c = sum(len(v[0]) for v in colmap_uvz.values())
+        row_sets = ([ROWS_WITH_COLMAP] if bc.colmap_rows == "always" else [ROWS_LANDMARKS, ROWS_WITH_COLMAP])
+        _p(28, f"COLMAP rows for the bend: {n_rows_c:,} (every {st}th tier-0 pixel) — row sets judged: {row_sets}")
+
+    def _rows_for(i: int, rows: str):
+        if rows == ROWS_LANDMARKS:
+            return fit_uvz[i]
+        a, b = fit_uvz[i], colmap_uvz[i]
+        return tuple(np.concatenate([np.asarray(x, np.float64), np.asarray(y, np.float64)]) for x, y in zip(a, b))
+
     # the window is chosen on half A of the held-out (its even rows), half B reports — epoch 7
     rows_A = {i: heldout_rows(obs[1][i], zo[f], bc.min_depth_m, 0) for i, f in enumerate(frames)}
     rows_B = {i: heldout_rows(obs[1][i], zo[f], bc.min_depth_m, 1) for i, f in enumerate(frames)}
     score, coefs, infos, errs_A = {}, {}, {}, {}
-    for m in (models if bc.enabled else ()):
-        rows = {i: BM.fit_rows(m, *fit_uvz[i], W, H) for i in range(N)}
-        score[m], coefs[m], infos[m], errs_A[m] = {}, {}, {}, {}
+    cand_keys = [cand_key(m, rs) for rs in row_sets for m in models]
+    for key in (cand_keys if bc.enabled else ()):
+        m, rs = model_of(key), rows_of(key)
+        rows = {i: BM.fit_rows(m, *_rows_for(i, rs), W, H) for i in range(N)}
+        score[key], coefs[key], infos[key], errs_A[key] = {}, {}, {}, {}
         for w in bc.windows:
             cw, inf = bend_coefficients(rows, N, int(w), bc.min_rows, gc.huber_k, bc.irls_iterations, fac, m)
             per_kf = {i: rel_errors(*rows_A[i], cw[i], W, H, m) for i in range(N)}
             per_kf = {i: e for i, e in per_kf.items() if len(e)}
             if not per_kf:
                 raise DepthOnF5Error("no held-out landmark row on Omega's depth — the bend cannot be judged")
-            coefs[m][int(w)] = cw; infos[m][int(w)] = inf; errs_A[m][int(w)] = per_kf
-            score[m][int(w)] = float(np.median(np.concatenate(list(per_kf.values()))))
+            coefs[key][int(w)] = cw; infos[key][int(w)] = inf; errs_A[key][int(w)] = per_kf
+            score[key][int(w)] = float(np.median(np.concatenate(list(per_kf.values()))))
     raw_err = []
     for i, f in enumerate(frames):
         h = obs[1][i]
@@ -969,22 +1032,26 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
             zz = bilinear(zo[f], h[:, 0], h[:, 1]); ok = zz > 0
             raw_err.append(np.abs(zz[ok] - h[ok, 2]) / h[ok, 2])
     if bc.enabled:
-        if len(models) == 1:
-            model = models[0]
+        if len(cand_keys) == 1:
+            key = cand_keys[0]
+            model = model_of(key)
             # point 49: the smoothest window within error_factor x the measured error of the best
-            wb, window_rule = choose_window(score[model], errs_A[model], fac, bc.bootstrap, bc.seed)
-            window_rule["model"] = model
+            wb, window_rule = choose_window(score[key], errs_A[key], fac, bc.bootstrap, bc.seed)
+            window_rule.update({"model": model, "rows": rows_of(key), "key": key})
         else:
-            # audit 2026-10-23: family and window together, the plane-preserving family on a tie
-            model, wb, window_rule = choose_model(score, errs_A, fac, bc.bootstrap, bc.seed)
+            # audit 2026-10-23: family (and row set) and window together, the plane-preserving family on a tie
+            key, wb, window_rule = choose_model(score, errs_A, fac, bc.bootstrap, bc.seed)
+            model = model_of(key)
         # point 48: every keyframe's scale verified on its own held-out rows; the pooled fit otherwise
-        final_coefs, provenance = verify_keyframes(bc.windows, wb, coefs[model], infos[model], rows_A, N, W, H,
+        final_coefs, provenance = verify_keyframes(bc.windows, wb, coefs[key], infos[key], rows_A, N, W, H,
                                                    fac, bc.heldout_confidence, bc.bootstrap, bc.seed, bc.min_rows,
                                                    model)
     else:
+        key = cand_keys[0] if cand_keys else cand_key(models[0])
         model = models[0]
         wb, window_rule, final_coefs, provenance = disabled_bend(N, model)
         log(f"{LOG_TAG} bend.enabled: false — Omega's depth stands (k = 1) on F5's poses for every keyframe")
+    bend_rows = rows_of(key)
     status_counts: Dict[str, int] = {}
     for p_ in provenance.values():
         status_counts[p_["status"]] = status_counts.get(p_["status"], 0) + 1
@@ -996,8 +1063,8 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     score_B = float(np.median(np.concatenate(errs_B))) if errs_B else float("nan")
     heldout_m = heldout_metres(rows_B, final_coefs, N, W, H, model)     # the same rows, in metres (σ floor)
     c0 = np.array([BM.scale_equivalent(model, final_coefs[i]) for i in range(N)])
-    score_m = score.get(model, {})
-    _p(40, f"bend model {model}" + (f" (judged among {models})" if len(models) > 1 else "")
+    score_m = score.get(key, {})
+    _p(40, f"bend model {model}, rows {bend_rows}" + (f" (judged among {cand_keys})" if len(cand_keys) > 1 else "")
            + f"; held-out |dz|/z (half A): unbent {np.median(np.concatenate(raw_err)) * 100:.2f} %, "
            + ", ".join(f"±{w} {score_m[w] * 100:.2f} %" for w in sorted(score_m))
            + (f" → ±{wb} (best ±{window_rule['window_best']}, bar {window_rule['bar'] * 100:.2f} % = best + "
@@ -1045,22 +1112,38 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     _p(65, f"vote done: coverage {cover * 100:.1f} %")
     del dep, valid, passed
 
-    # 4b. owner fusion (audit 2026-10-23): one point per surface element over the voted maps
+    # 4b. owner fusion (audit 2026-10-23): one point per surface element over the voted maps — with the
+    # photometric reference as tier 0 where it measured (phase 3)
     fusion = None
     if bool(pcfg.fusion.enabled):
         from precision import owner_fusion as OF
         _p(66, "owner fusion: one point per surface element over every covisible keyframe")
         fu = pcfg.fusion
-        fusion = OF.fuse(frames, {f: voted[f][0] for f in frames}, {f: voted[f][0] > 0 for f in frames}, K, c2w, tau,
+        f_depth = {f: voted[f][0] for f in frames}
+        f_valid = {f: voted[f][0] > 0 for f in frames}
+        tier_maps, tau_by_tier = None, None
+        if colmap_maps:
+            tier_maps = {}
+            for f in frames:
+                cm = colmap_maps.get(f)
+                t0m = cm[1] if cm is not None else np.zeros((H, W), bool)
+                tier_maps[f] = np.where(t0m, 0, 1).astype(np.int8)
+                if cm is not None:
+                    f_depth[f] = np.where(t0m, cm[0], voted[f][0]).astype(np.float32)
+                    f_valid[f] = t0m | (voted[f][0] > 0)
+            tau_by_tier = (float(colmap_rep["tau_rel"]), float(tau))
+        fusion = OF.fuse(frames, f_depth, f_valid, K, c2w, tau,
                          covis_stride=int(fu.covis_stride), min_covis_frac=float(fu.min_covis_frac),
                          max_candidates=int(fu.max_candidates), evidence_cap=int(fu.evidence_cap),
                          interpolate=bool(fu.interpolate), nearest_tie_rel=float(fu.nearest_tie_rel),
+                         tier=tier_maps, tau_by_tier=tau_by_tier,
                          log=log, progress=lambda pct, m: _p(66 + pct * 4 / 100, m))
     return types.SimpleNamespace(session_dir=session_dir, out=out, inp=inp, frames=frames, N=N, W=W, H=H, K=K,
                                  c2w=c2w, params=params, chunk=chunk, voted=voted, tau=tau, vst=vst, cover=cover,
                                  fusion=fusion,
                                  wb=wb, score=score, score_B=score_B, heldout_m=heldout_m, window_rule=window_rule,
-                                 coefs=final_coefs, model=model, models=models,
+                                 coefs=final_coefs, model=model, models=models, bend_rows=bend_rows, cand_keys=cand_keys,
+                                 colmap_rep=colmap_rep, colmap_frames=(sorted(colmap_maps) if colmap_maps else None),
                                  vote_bars=vote_bars,
                                  provenance=provenance, status_counts=status_counts, c0=c0, obs=obs,
                                  dropped_tracks=dropped_tracks, error_factor=fac,
@@ -1129,6 +1212,10 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
                 "n_consistent": np.clip(np.asarray(data["confidence"]), 0, 255).astype(np.uint8),
                 "n_contradict": map_column(data, contra_maps),
                 "source": source_column(data, src_maps)}
+        if fusion is not None and fusion.fused_tier and getattr(C, "colmap_rep", None) is not None:
+            # phase 3: a point whose fused depth is the photometric reference's says so
+            tier_col = map_column(data, {f: (fusion.fused_tier[f] + 1).astype(np.int16) for f in frames})
+            cols["source"] = np.where(tier_col == 1, SRC_COLMAP, cols["source"]).astype(np.uint8)
         report = {"version": 1, "stage": "depth_on_f5", "provenance": "tool_measured",
                   "source_of_depth": "Omega's depth bent to F5's landmarks + edge-keeping multi-view vote (pccr epoch 8)"
                                      + (" + owner fusion: one point per surface element (audit 2026-10-23)"
@@ -1143,6 +1230,9 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
                            # family every per_frame coefficient vector belongs to, the families judged,
                            # and the half-A held-out of every (family, window) candidate
                            "model": C.model, "models_judged": list(C.models),
+                           # phase 3: the row set the fit took (the landmarks alone, or with COLMAP's dense
+                           # tier-0 depth) and every candidate judged
+                           "rows": C.bend_rows, "candidates_judged": list(C.cand_keys),
                            "held_out": {str(w): v for w, v in sorted(score.get(C.model, {}).items())},
                            "held_out_by_model": {m: {str(w): v for w, v in sorted(sc.items())} for m, sc in score.items()},
                            "held_out_half_B_final": C.score_B,
@@ -1179,7 +1269,11 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
                   "raw_points": n_raw,
                   # the owner fusion (audit 2026-10-23): one point per surface element — the counts, the
                   # covisibility, the one-hop check and the members of the owners; None = not run
-                  "fusion": (dict(fusion.report, rejected_written=n_rejected) if fusion is not None else None)}
+                  "fusion": (dict(fusion.report, rejected_written=n_rejected) if fusion is not None else None),
+                  # phase 3: the photometric reference this cloud fused (its report's identity and bars)
+                  "colmap_tier": ({k: C.colmap_rep.get(k) for k in ("tau_rel", "tau_px", "n_frames", "measured_share",
+                                                                    "tier0_share", "tier0_pixels", "depth_kind")}
+                                  if getattr(C, "colmap_rep", None) is not None else None)}
         if md_rep is not None:
             report["mono_detail"] = mono_report(md_rep, md)
             report["source_counts"] = {SRC_CLOUD_NAMES[int(v)]: int(c) for v, c in

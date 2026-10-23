@@ -169,3 +169,37 @@ def test_the_rejected_file_names_every_consumed_pixel_with_its_winner(tmp_path):
     tt = FT._np(t)
     assert np.all(np.isnan(tt) | (np.abs(tt - 4.0) < 0.2) | (np.abs(tt - 2.0) < 0.2))
     assert OF.candidates_of(np.zeros((2, 2)), 0.05, 12) == {0: [], 1: []}   # no overlap: no candidate
+
+
+def test_the_photometric_tier_decides_where_it_measures_and_the_learned_depth_fills_the_rest():
+    """Phase 3: Omega's depth of the wall carries a +1.5 % bias in every keyframe (the bend cannot
+    remove what every keyframe shares); COLMAP PatchMatch measured the textured middle stripe
+    exactly (tier 0) in three of the five keyframes. The fused cloud is at the photometric depth
+    on the stripe — a tier-0 member never averages with the biased tier-1 ones — and at Omega's
+    elsewhere; the owners of the stripe are tier-0 observations."""
+    biases = [1.015, 1.015, 1.015, 1.015, 1.015]
+    frames, c2w, depth, valid = _scene(biases)
+    tier = {f: np.ones((H, W), np.int8) for f in frames}
+    stripe = (VV > H * 0.35) & (VV < H * 0.65)
+    for f in (1, 2, 3):
+        depth[f] = np.where(stripe, _wall(c2w[f]), depth[f]).astype(np.float32)   # exact where COLMAP measured
+        tier[f][stripe] = 0
+    res = OF.fuse(frames, depth, valid, K, c2w, 0.02, log=lambda *a: None, tier=tier, tau_by_tier=(0.005, 0.02), **CFG)
+    P_stripe, P_rest = [], []
+    for f in frames:
+        own = res.owner[f]
+        t0 = own & (res.fused_tier[f] == 0); t1 = own & (res.fused_tier[f] == 1)
+        P_stripe.append(_points([f], c2w, res.depth, {f: t0})); P_rest.append(_points([f], c2w, res.depth, {f: t1}))
+    P_stripe = np.concatenate(P_stripe); P_rest = np.concatenate(P_rest)
+    assert len(P_stripe) > 0.5 * int(stripe.sum()), "the stripe is owned by photometric observations"
+    assert _plane_rms(P_stripe) < 0.003, f"stripe rms {_plane_rms(P_stripe) * 100:.2f} cm"
+    assert _plane_rms(P_rest) > 0.03, "outside the stripe only Omega measured: its bias stays, declared by the tier"
+    rep = res.report["tiers"]
+    assert rep["owners_by_fused_tier"]["0"] == len(P_stripe) and rep["tau_by_tier"] == [0.005, 0.02]
+    # a tier-0 pixel of keyframe 2 is owned by a tier-0 observation (its own or a nearer one), never
+    # consumed by a biased tier-1 one
+    wf, wr, wc = res.winner[2]
+    consumed0 = (tier[2] == 0) & ~res.owner[2] & (wf >= 0)
+    for g in np.unique(wf[consumed0]):
+        sel = consumed0 & (wf == g)
+        assert (tier[int(g)][wr[sel].astype(int), wc[sel].astype(int)] == 0).all()

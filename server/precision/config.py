@@ -368,6 +368,7 @@ class CloudConfig:
 # ── depth on F5 (USER 2026-10-01: the epoch-7 recipe, precision/depth_on_f5.py) ──
 
 EDGE_RULES = ("inverse_second_difference", "window")
+COLMAP_ROWS = ("judged", "always", "never")
 
 
 @dataclass(frozen=True)
@@ -387,6 +388,10 @@ class BendConfig:
                                 # the vote's own definition) neither confirms nor contradicts anything; false =
                                 # epoch 8's vote, where Omega's contour ramps testified against the background
                                 # next to every object (halos repaired to the ramp's depth, holes)
+    colmap_rows: str            # phase 3: whether the bend is fitted on COLMAP's dense tier-0 depth too — 'judged'
+                                # (landmarks alone and landmarks + COLMAP rows are both fitted; the half-A held-out
+                                # landmarks, which COLMAP never saw, choose; the denser support wins a tie) | 'always'
+                                # | 'never' (F5's landmarks alone, the recipe before phase 3)
     edge_rule: str              # audit 2026-10-23: how a depth STEP is told from a smooth oblique surface —
                                 # 'inverse_second_difference' (a step is a kink of 1/z, which is affine on a
                                 # plane whatever its slant: a floor or a tunnel wall near the horizon is not an
@@ -422,6 +427,16 @@ class FusionConfig:
                                 # are a tie (the earliest keyframe owns) — a sub-pixel landing offset never
                                 # decides who is nearer
     rejected_file: bool         # the consumed observations → rejected_points.npz (reason fused, with the winner)
+    colmap_tier: bool           # phase 3: COLMAP PatchMatch with F5's geometry (precision/colmap_tier.py, the chain's
+                                # f6_colmap_tier step) enters the fusion as TIER 0 — the photometric reference,
+                                # with its own measured tolerance; false = the learned depth alone
+    colmap_min_views: int       # a COLMAP depth is tier 0 with at least this many consistent COLMAP views (and
+                                # fewer contradictions than confirmations — the sweep's rule)
+    colmap_max_sources: int     # BOUND (cost): source images per reference keyframe, the most covisible first
+    colmap_rows_stride: int     # BOUND (cost): every this-th tier-0 pixel is a row of the bend's fit when
+                                # bend.colmap_rows takes them
+    colmap_tau_quantile: float  # the instrument's tolerance = this percentile of the disagreement between
+                                # COLMAP maps (measured on every run, never a declared number)
 
 
 # ── flyer diagnosis (claude_stac.txt 2026-10-04, Phase 0) ──────────────────
@@ -885,11 +900,15 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
     bend_model = str(_require(bd, "model", "bend"))
     if bend_model not in MODEL_CHOICES:
         raise PrecisionConfigError(f"'{SECTION}.bend.model' must be one of {MODEL_CHOICES}, got {bend_model!r}")
+    colmap_rows = str(_require(bd, "colmap_rows", "bend"))
+    if colmap_rows not in COLMAP_ROWS:
+        raise PrecisionConfigError(f"'{SECTION}.bend.colmap_rows' must be one of {COLMAP_ROWS}, got {colmap_rows!r}")
     edge_rule = str(_require(bd, "edge_rule", "bend"))
     if edge_rule not in EDGE_RULES:
         raise PrecisionConfigError(f"'{SECTION}.bend.edge_rule' must be one of {EDGE_RULES}, got {edge_rule!r}")
     bend = BendConfig(enabled=_bool(bd, "enabled", "bend"), model=bend_model, windows=windows, neighbors=neighbors,
                       judges_exclude_mixed=_bool(bd, "judges_exclude_mixed", "bend"), edge_rule=edge_rule,
+                      colmap_rows=colmap_rows,
                       tau_quantile=_num(bd, "tau_quantile", "bend", lo=0.0, hi=100.0, lo_excl=True),
                       irls_iterations=_num(bd, "irls_iterations", "bend", lo=1, integer=True),
                       min_rows=_num(bd, "min_rows", "bend", lo=3, integer=True),
@@ -907,7 +926,12 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                           evidence_cap=_num(fu, "evidence_cap", "fusion", lo=0, integer=True),
                           interpolate=_bool(fu, "interpolate", "fusion"),
                           nearest_tie_rel=_num(fu, "nearest_tie_rel", "fusion", lo=0.0, hi=0.5),
-                          rejected_file=_bool(fu, "rejected_file", "fusion"))
+                          rejected_file=_bool(fu, "rejected_file", "fusion"),
+                          colmap_tier=_bool(fu, "colmap_tier", "fusion"),
+                          colmap_min_views=_num(fu, "colmap_min_views", "fusion", lo=1, integer=True),
+                          colmap_max_sources=_num(fu, "colmap_max_sources", "fusion", lo=1, integer=True),
+                          colmap_rows_stride=_num(fu, "colmap_rows_stride", "fusion", lo=1, integer=True),
+                          colmap_tau_quantile=_num(fu, "colmap_tau_quantile", "fusion", lo=0.0, hi=100.0, lo_excl=True))
     fl = _sub(sec, "flyers", "")
     flyers = FlyersConfig(knn_k=_num(fl, "knn_k", "flyers", lo=1, integer=True),
                           isolated_quantile=_num(fl, "isolated_quantile", "flyers", lo=0.0, hi=100.0, lo_excl=True),

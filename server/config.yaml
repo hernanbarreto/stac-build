@@ -2489,6 +2489,13 @@ reconstruction:
                                         #   wall there (f6_torch.two_sided_vote `front`), so the background around
                                         #   objects was repaired to the ramp's depth (a halo of flyers) or left
                                         #   (holes). false = epoch 8's vote, bit for bit (the A/B).
+      colmap_rows: judged               # PHASE 3: the bend fitted on COLMAP's dense tier-0 depth as well as on F5's
+                                        #   landmarks — judged: both row sets are fitted and the half-A held-out
+                                        #   landmarks (never seen by COLMAP) choose, the denser support winning a tie;
+                                        #   always | never (the landmarks alone, the recipe before phase 3). Omega's
+                                        #   bias on textured surfaces is then measured densely by the photometric
+                                        #   instrument, and the plane-preserving family carries it to the textureless
+                                        #   ones in between
       edge_rule: inverse_second_difference  # AUDIT 2026-10-23: a depth STEP is a kink of 1/z — on a plane 1/z is
                                         #   affine in the pixel whatever the slant, so a floor, ceiling or tunnel wall
                                         #   near the horizon (per-pixel |dz|/z above tau beyond ~11 m on pccr's
@@ -2539,6 +2546,22 @@ reconstruction:
                                         #   offset decided at random along a wall walked at one distance and the cloud
                                         #   kept 1.56 views of owners for 1.14 views of wall (measured, tests)
       rejected_file: true               # the consumed observations, each with its winner → rejected_points.npz
+      colmap_tier: true                 # PHASE 3 (USER 2026-10-23: "que la fotogrametría clásica y la IA queden
+                                        #   perfectamente fusionadas"): COLMAP PatchMatch stereo with F5's camera and
+                                        #   poses (precision/colmap_tier.py, the chain's f6_colmap_tier step, ~1 h on
+                                        #   pccr's 295 keyframes) is TIER 0 of the fusion — the photometric reference,
+                                        #   accurate to a fraction of a pixel where there is texture (pccr 2026-10-17:
+                                        #   p50 0.6 cm against the certified cloud where it measured), with its OWN
+                                        #   measured tolerance; a photometric observation outranks every learned one
+                                        #   of the same element and never averages with it; Omega fills the rest.
+                                        #   false = the learned depth alone (the A/B, every run before phase 3)
+      colmap_min_views: 3               # tier 0 needs this many consistent COLMAP views and fewer contradictions
+                                        #   (the sweep's rule, §4-F9: min_consistent_views 3)
+      colmap_max_sources: 12            # BOUND (cost): source images per reference keyframe (the most covisible)
+      colmap_rows_stride: 8             # BOUND (cost): every 8th tier-0 pixel is a row of the bend's fit
+                                        #   (bend.colmap_rows) — ~6,000 rows per keyframe at 464x832
+      colmap_tau_quantile: 75.0         # the instrument's tolerance = p75 of the disagreement between COLMAP maps,
+                                        #   measured on every run (the construction of the vote's tau)
     flyers:                             # Phase 0 of the mono-detail work (claude_stac.txt 2026-10-04): flyer
                                         # diagnosis of the published cloud (precision/flyers.py). A flyer is an
                                         # ISOLATED point or one BETWEEN two surfaces of its own frame; classes
