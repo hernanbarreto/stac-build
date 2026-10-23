@@ -68,6 +68,7 @@ IDENTITY = np.array([1.0, 0.0, 0.0])             # k = 1: Omega's depth as it is
 # ``model`` and defaults to epoch 7's family so the callers and tests that know only that one read
 # as before; compute() runs the configured one (bend.model: judged | affine_pixel | inverse_depth)
 AFFINE_PIXEL, INVERSE_DEPTH = BM.AFFINE_PIXEL, BM.INVERSE_DEPTH
+PV_REJECTED_NAME = "rejected_points.npz"           # precision.provenance.REJECTED_NAME (the owner fusion's consumed set)
 
 
 class DepthOnF5Error(RuntimeError):
@@ -1043,8 +1044,21 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     cover = vst["out"] / float(N * H * W)
     _p(65, f"vote done: coverage {cover * 100:.1f} %")
     del dep, valid, passed
+
+    # 4b. owner fusion (audit 2026-10-23): one point per surface element over the voted maps
+    fusion = None
+    if bool(pcfg.fusion.enabled):
+        from precision import owner_fusion as OF
+        _p(66, "owner fusion: one point per surface element over every covisible keyframe")
+        fu = pcfg.fusion
+        fusion = OF.fuse(frames, {f: voted[f][0] for f in frames}, {f: voted[f][0] > 0 for f in frames}, K, c2w, tau,
+                         covis_stride=int(fu.covis_stride), min_covis_frac=float(fu.min_covis_frac),
+                         max_candidates=int(fu.max_candidates), evidence_cap=int(fu.evidence_cap),
+                         interpolate=bool(fu.interpolate), nearest_tie_rel=float(fu.nearest_tie_rel),
+                         log=log, progress=lambda pct, m: _p(66 + pct * 4 / 100, m))
     return types.SimpleNamespace(session_dir=session_dir, out=out, inp=inp, frames=frames, N=N, W=W, H=H, K=K,
                                  c2w=c2w, params=params, chunk=chunk, voted=voted, tau=tau, vst=vst, cover=cover,
+                                 fusion=fusion,
                                  wb=wb, score=score, score_B=score_B, heldout_m=heldout_m, window_rule=window_rule,
                                  coefs=final_coefs, model=model, models=models,
                                  vote_bars=vote_bars,
@@ -1077,14 +1091,23 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
     for f in frames:
         by_chunk.setdefault(chunk[f], []).append(f)
     n_raw = 0
+    fusion = getattr(C, "fusion", None)
     try:
         contra_maps: Dict[int, np.ndarray] = {}
+        n_rejected = None
+        if fusion is not None and bool(pcfg.fusion.rejected_file):
+            from precision import owner_fusion as OF
+            n_rejected = OF.write_rejected(tmp / PV_REJECTED_NAME, frames, fusion, {f: voted[f][0] > 0 for f in frames})
         for k, fl in sorted(by_chunk.items()):
             L = {x: [] for x in ("xyz", "rgb", "fg", "pr", "pc", "cf")}
             for f in fl:
                 zmap, amap = voted[f][0], voted[f][1]
                 contra_maps[f] = voted[f][2] if len(voted[f]) > 2 else np.zeros(zmap.shape, np.int16)
                 m = zmap > 0
+                if fusion is not None:
+                    # the owners only, at the fused depth, with every covisible member as the evidence
+                    m = m & fusion.owner[f] & (fusion.depth[f] > 0)
+                    zmap = fusion.depth[f]; amap = fusion.members[f]
                 r, c = vv[m], uu[m]; zz = zmap[m].astype(np.float64)
                 X = np.stack([(c - K[0, 2]) / K[0, 0] * zz, (r - K[1, 2]) / K[1, 1] * zz, zz], 1) @ c2w[f][:3, :3].T + c2w[f][:3, 3]
                 img = CC._rgb_undistorted(inp.frames_dir, f, inp.maps)
@@ -1096,7 +1119,8 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
             np.savez(tmp / "chunks" / f"chunk_{k:03d}_origins.npz", frame_global=np.concatenate(L["fg"]),
                      pixel_row=np.concatenate(L["pr"]), pixel_col=np.concatenate(L["pc"]),
                      confidence=np.concatenate(L["cf"]))
-        _p(72, f"{n_raw:,} raw points → the cloud stage's cleaner")
+        _p(72, f"{n_raw:,} raw points" + (f" (the owners; {n_rejected:,} consumed observations in {PV_REJECTED_NAME})"
+                                          if n_rejected is not None else "") + " → the cloud stage's cleaner")
         cleaned = tmp / "cleaned_cloud.ply"
         CC.clean(raw_cfg, tmp / "chunks", cleaned, log)
         shutil.rmtree(tmp / "chunks", ignore_errors=True)
@@ -1106,7 +1130,9 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
                 "n_contradict": map_column(data, contra_maps),
                 "source": source_column(data, src_maps)}
         report = {"version": 1, "stage": "depth_on_f5", "provenance": "tool_measured",
-                  "source_of_depth": "Omega's depth bent to F5's landmarks + edge-keeping multi-view vote (pccr epoch 8)",
+                  "source_of_depth": "Omega's depth bent to F5's landmarks + edge-keeping multi-view vote (pccr epoch 8)"
+                                     + (" + owner fusion: one point per surface element (audit 2026-10-23)"
+                                        if fusion is not None else ""),
                   "camera": params, "grid": [W, H],
                   # the grid the bend worked on: the undistorted native frame; Omega's record (its own
                   # grid, the original frame) carried onto it through the lens + grid when they differ
@@ -1150,7 +1176,10 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
                            "edge_rule": pcfg.bend.edge_rule, "judges_exclude_mixed": bool(pcfg.bend.judges_exclude_mixed),
                            **{k: (float(v) / max(vst["valid"], 1) if k not in ("tau", "valid") else v)
                               for k, v in vst.items() if k != "tau"}},
-                  "raw_points": n_raw}
+                  "raw_points": n_raw,
+                  # the owner fusion (audit 2026-10-23): one point per surface element — the counts, the
+                  # covisibility, the one-hop check and the members of the owners; None = not run
+                  "fusion": (dict(fusion.report, rejected_written=n_rejected) if fusion is not None else None)}
         if md_rep is not None:
             report["mono_detail"] = mono_report(md_rep, md)
             report["source_counts"] = {SRC_CLOUD_NAMES[int(v)]: int(c) for v, c in

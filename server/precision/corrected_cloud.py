@@ -560,6 +560,10 @@ def publish(session_dir: Path, tmp: Path, report: dict, log: Callable,
     # publish that wrote it after the swap left the next epoch without one and the certify crashed
     if (tmp / "intrinsic.txt").exists():
         shutil.copy2(tmp / "intrinsic.txt", tx / "intrinsic.txt"); art("intrinsic.txt")
+    # the owner fusion's consumed observations (audit 2026-10-23): an artifact of the epoch like the
+    # cloud they were fused into — a previous epoch's file never describes this cloud
+    if (tmp / PV.REJECTED_NAME).exists():
+        shutil.copy2(tmp / PV.REJECTED_NAME, tx / PV.REJECTED_NAME); art(PV.REJECTED_NAME)
     names = data.dtype.names
     columns = columns or {}
     for k, v in columns.items():

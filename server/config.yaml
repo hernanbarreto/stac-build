@@ -2512,6 +2512,33 @@ reconstruction:
       heldout_confidence: 0.95          # declared confidence (as everywhere else)
       bootstrap: 2000                   # BOUND (cost): resamples (as refine.permutations / metric_lock)
       seed: 0                           # their fixed seed
+    fusion:                             # AUDIT 2026-10-23 — owner fusion: ONE point per surface element
+                                        # (precision/owner_fusion.py; USER: "es el más importante y debe necesariamente
+                                        # corregirse"). Every run before this published every voted pixel of every
+                                        # keyframe: a wall seen by K keyframes was K layers up to tau·z apart (6 cm at
+                                        # 3 m on pccr) that the 5 mm voxel pick kept — the crumpled surfaces, the doubled
+                                        # walls. Now each element is published once, on the ray of its best observation
+                                        # (confirmed by evidence_cap views, then the NEAREST camera: the finest footprint
+                                        # and Omega's smallest absolute error), at the MEDIAN of the depths every
+                                        # covisible keyframe carries onto that ray — never a mean, never off a ray.
+                                        # The consumed observations go to rejected_points.npz (reason fused) naming
+                                        # the one that represents them. Drift between a visit and a revisit (> tau·z)
+                                        # is NOT merged: both stay, declared unconfirmed — the certification measures it.
+      enabled: true                     # false = the layered cloud, bit for bit (the A/B)
+      covis_stride: 8                   # BOUND (cost): every 8th row and column measures a keyframe's overlap with every other
+      min_covis_frac: 0.05              # candidates: at least this share of one's sampled points lands in the other
+      max_candidates: 48                # BOUND (cost, memory ~ candidates x H x W x 8 bytes per keyframe on the card)
+      evidence_cap: 2                   # "one neighbour is an opinion, two agreeing are evidence" (the chain's own rule):
+                                        #   an observation confirmed by 2 outranks one confirmed by 1; beyond 2 the
+                                        #   nearest camera decides
+      interpolate: true                 # the neighbour's depth at the exact landing point when its 2x2 patch is one
+                                        #   surface (within tau) — no half-pixel bias on oblique surfaces; nearest pixel
+                                        #   across a step
+      nearest_tie_rel: 0.02             # two cameras within 2 % of the same distance to the point are a tie (the earliest
+                                        #   keyframe owns): judged by the landing pixel's depth instead, a sub-pixel
+                                        #   offset decided at random along a wall walked at one distance and the cloud
+                                        #   kept 1.56 views of owners for 1.14 views of wall (measured, tests)
+      rejected_file: true               # the consumed observations, each with its winner → rejected_points.npz
     flyers:                             # Phase 0 of the mono-detail work (claude_stac.txt 2026-10-04): flyer
                                         # diagnosis of the published cloud (precision/flyers.py). A flyer is an
                                         # ISOLATED point or one BETWEEN two surfaces of its own frame; classes
@@ -4309,6 +4336,14 @@ evaluation:
         "reconstruction.precision.bend.judges_exclude_mixed": false
         "reconstruction.precision.bend.edge_rule": window
         "reconstruction.precision.mono_detail.heldout_gate": false
+        "reconstruction.precision.fusion.enabled": false
+    no_fusion:
+      kind: chain
+      description: >-
+        (audit 2026-10-23, A/B) the audited bend and vote, but every voted pixel of every keyframe published —
+        the layered cloud the owner fusion replaces
+      overrides:
+        "reconstruction.precision.fusion.enabled": false
     bend_affine_pixel:
       kind: chain
       description: (audit 2026-10-23, A/B) only the bend family forced to epoch 7's pixel ratio; the vote as audited

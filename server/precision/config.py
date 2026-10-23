@@ -403,6 +403,27 @@ class BendConfig:
     seed: int                   # their fixed seed
 
 
+# ── owner fusion: one point per surface element (audit 2026-10-23, precision/owner_fusion.py) ──
+
+@dataclass(frozen=True)
+class FusionConfig:
+    enabled: bool               # false = every voted pixel of every keyframe is published (the layered
+                                # cloud of every run before 2026-10-23; the A/B)
+    covis_stride: int           # BOUND (cost): every this-th row and column of a keyframe measures its
+                                # frustum overlap with the others (covisibility)
+    min_covis_frac: float       # two keyframes are candidates of each other when at least this share of
+                                # one's sampled points lands in the other
+    max_candidates: int         # BOUND (cost, memory): the most covisible keyframes a keyframe is fused with
+    evidence_cap: int           # the confirmed tier: members beyond this count no further in the owner's
+                                # rank; among equally confirmed observations the nearest camera owns
+    interpolate: bool           # the neighbour's depth read at the exact landing point when its 2x2 patch
+                                # is one surface (within tau); at the nearest pixel otherwise
+    nearest_tie_rel: float      # two cameras within this relative band of the same distance to the point
+                                # are a tie (the earliest keyframe owns) — a sub-pixel landing offset never
+                                # decides who is nearer
+    rejected_file: bool         # the consumed observations → rejected_points.npz (reason fused, with the winner)
+
+
 # ── flyer diagnosis (claude_stac.txt 2026-10-04, Phase 0) ──────────────────
 
 @dataclass(frozen=True)
@@ -519,6 +540,7 @@ class PrecisionConfig:
     fuse: FuseConfig
     cloud: CloudConfig
     bend: BendConfig
+    fusion: FusionConfig
     flyers: FlyersConfig
     mono_detail: MonoDetailConfig
     cloud_metrics: CloudMetricsConfig
@@ -877,6 +899,15 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                       seed=_num(bd, "seed", "bend", lo=0, integer=True))
     if bend.heldout_confidence >= 1.0:
         raise PrecisionConfigError(f"'{SECTION}.bend.heldout_confidence' must be below 1")
+    fu = _sub(sec, "fusion", "")
+    fusion = FusionConfig(enabled=_bool(fu, "enabled", "fusion"),
+                          covis_stride=_num(fu, "covis_stride", "fusion", lo=1, integer=True),
+                          min_covis_frac=_num(fu, "min_covis_frac", "fusion", lo=0.0, hi=1.0),
+                          max_candidates=_num(fu, "max_candidates", "fusion", lo=1, integer=True),
+                          evidence_cap=_num(fu, "evidence_cap", "fusion", lo=0, integer=True),
+                          interpolate=_bool(fu, "interpolate", "fusion"),
+                          nearest_tie_rel=_num(fu, "nearest_tie_rel", "fusion", lo=0.0, hi=0.5),
+                          rejected_file=_bool(fu, "rejected_file", "fusion"))
     fl = _sub(sec, "flyers", "")
     flyers = FlyersConfig(knn_k=_num(fl, "knn_k", "flyers", lo=1, integer=True),
                           isolated_quantile=_num(fl, "isolated_quantile", "flyers", lo=0.0, hi=100.0, lo_excl=True),
@@ -944,6 +975,6 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
           "(edge_max_objects x edge_max_points_per_object), never by a wall clock")
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,
                            tracks=tracks, refine=refine, depth=depth, fuse=fuse,
-                           cloud=cloud, bend=bend, flyers=flyers, mono_detail=mono_detail,
+                           cloud=cloud, bend=bend, fusion=fusion, flyers=flyers, mono_detail=mono_detail,
                            cloud_metrics=cloud_metrics, chunk_check=chunk_check, runner=runner,
                            raw=(raw if isinstance(raw, dict) else None))

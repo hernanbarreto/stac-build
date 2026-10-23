@@ -116,3 +116,22 @@ def test_compute_bends_omega_to_the_landmarks_and_reports_the_model(tmp_path, mo
     if expect == BM.INVERSE_DEPTH:
         assert rms < 0.002, f"the inverse family must give the plane back: rms {rms * 100:.2f} cm"
     assert C.vst["mixed_not_judging"] == 0 and 0 <= C.tau < 0.05
+    # the owner fusion ran over the voted maps (audit 2026-10-23): the five keyframes publish the plane
+    # ONCE between them — the owners are a fraction of the observations, every consumed pixel names an
+    # owner, and the fused points of the confirmed owners are the plane
+    F = C.fusion
+    assert F is not None and 0 < F.report["owners"] < F.report["observations"]
+    assert F.report["owners"] + F.report["consumed"] == F.report["observations"]
+    rep_ = F.report["representation"]
+    assert rep_["resolved_share"] > 0.99 and rep_["distance_footprints"]["p95"] < 3.0, rep_
+    if expect == BM.INVERSE_DEPTH:
+        P = []
+        for i, f in enumerate(C.frames):
+            m = F.owner[f] & (F.members[f] >= 2) & (F.depth[f] > 0)
+            zz = F.depth[f][m].astype(np.float64)
+            uu, vv = np.meshgrid(np.arange(FW), np.arange(FH))
+            X = np.stack([(uu[m] - FK[2]) / FK[0] * zz, (vv[m] - FK[3]) / FK[1] * zz, zz], 1)
+            P.append(X @ c2w[i][:3, :3].T + c2w[i][:3, 3])
+        P = np.concatenate(P)
+        n = np.array([0.1, 0.0, -1.0]); n /= np.linalg.norm(n)              # the plane x·0.1 − z = −3
+        assert np.sqrt(np.mean((P @ n + 3.0 * n[2] * -1) ** 2)) < 0.01 or np.sqrt(np.mean((P @ n - 3.0 / np.linalg.norm([0.1, 0, -1])) ** 2)) < 0.01
