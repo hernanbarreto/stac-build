@@ -30,6 +30,7 @@ omegaconf>=2.3
 plyfile>=1.1
 pillow_heif>=0.18
 pycolmap>=3.10
+pyceres>=2.6                 # F5's odometry priors are residual blocks on pycolmap's Ceres problem (precision/refine.py, 2026-10-23)
 moviepy==1.0.3
 faiss-cpu>=1.7.0
 numba>=0.59.0

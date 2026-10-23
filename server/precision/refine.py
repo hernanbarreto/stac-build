@@ -14,10 +14,31 @@ applied), F0's camera, landmarks triangulated from the FIT tracks (F4
 ``track_split`` 0) seen from at least ``min_tri_deg`` apart; the prior's depth
 (Omega) is the cross-check (reported).
 
-The gauge: no fixed prior. Each keyframe's centre is held by a soft prior whose σ
-grows with the walk the way consecutive-distance priors of relative σ_gauge
-(F2's measured scatter of its applied instrument) accumulate: σ_k =
-σ_gauge · sqrt(Σ d_i²) over the steps up to k.
+THE PRIOR MODEL (``refine.prior_model``, audit 2026-10-23 phase 3b — USER: "sin absolutamente
+ninguna error de poses, escala, sin nada de drift"):
+  relative (the default) — ODOMETRY priors: one 6-DoF relative-pose prior per consecutive keyframe
+    pair, the relative pose Omega × the gauge left, with σ along the step = σ_gauge × |d_k| (the
+    metre, F2's measured scatter), and the rotation / across-step σ MEASURED: R0 is solved with
+    those parts uninformative (the tracks decide), the scatter of Omega's relative poses against
+    that solution is their σ (Maxwell / Rayleigh medians), and R0s re-solves with it — taken unless
+    it worsens the held-out tracks or opens a loop by the user's rule. The first keyframe's pose is
+    held constant (the world frame); NO absolute position prior: Omega's drifted shape holds
+    nothing, a loop closes as far as the tracks say, the metre stays (the scale lock reads it).
+    Measured on the synthetic rectangle walk with a 10° heading drift (0.53 m at the return):
+    absolute priors 0.15 m RMS of shape error with the loop "closed", odometry priors 2 mm.
+    Residual blocks added to COLMAP's Ceres problem through pyceres; the count of blocks and of
+    variable poses is verified — nothing can be dropped in silence.
+  absolute — the pre-phase-3b model (the evaluation battery's A/B): each keyframe's centre held by
+    a soft prior whose σ grows with the walk the way consecutive-distance priors of relative
+    σ_gauge accumulate, σ_k = σ_gauge · sqrt(Σ d_i²); the σ relaxation
+    (``prior_sigma_from_loops``) measured on the loops left open. The pose-prior adjuster's
+    alignment to the priors can fail (degenerate camera centres) and COLMAP then DROPS every prior
+    in silence (measured 2026-10-23): the residual blocks are counted and such a solve is refused.
+
+THE LOOP GAP (``precision.loop_gap``): drift measured in metres where the walk revisits — the
+held-out loop tracks triangulated from each visit alone, judged against their own triangulation
+noise; before and after, in refine.json["loops"]. THE SCALE LOCK (``precision.scale_lock``): the
+metre read again from the gauge's step lengths after the solve, re-imposed only by the rule.
 
 The ladder, each rung judged ONLY on the held-out tracks (split 1: never
 optimised — triangulated with the rung's own poses and camera and reprojected):
@@ -89,6 +110,8 @@ LOG_TAG = "[refine]"
 # the ladder and only ever reported (point 62)
 LADDER = ("R0", "R1", "R2")
 RUNGS = LADDER + ("R3",)
+CHI2_95_3DOF = 7.814727903251179          # the 95 % quantile of chi-square with 3 dof (COLMAP's own
+                                          # constant for the prior alignment's inlier threshold)
 
 
 class RefineError(RuntimeError):
@@ -309,16 +332,101 @@ class RungResult:
     seconds: float = 0.0                    # the solve's wall clock — refine.timing.json only
 
 
+PRIOR_MODELS = ("relative", "absolute")
+MAXWELL_MEDIAN = 1.5381722544371092       # median of |v| for v ~ N(0, σ² I3), in units of σ
+RAYLEIGH_MEDIAN = 1.1774100225154747      # median of |v| for v ~ N(0, σ² I2), in units of σ
+
+
+@dataclass(frozen=True)
+class RelativePrior:
+    """The ODOMETRY prior of F5 (phase 3b, 2026-10-23): one 6-DoF relative-pose prior per
+    consecutive keyframe pair, the relative pose Omega (× the gauge) left, with a covariance in
+    keyframe i's frame — along the step σ_along = sigma_rel × |d_k| (the gauge's measured
+    relative scatter: the metre), across it σ_lat = sigma_lat × |d_k| and in rotation sigma_rot
+    radians (None = UNINFORMATIVE: |d_k| across, π in rotation — the tracks decide). The first
+    keyframe's pose is held constant: the world frame is the gauge's at keyframe 0, the scale
+    comes from the steps, nothing holds the SHAPE Omega left — a loop closes as far as the
+    tracks say, the metre stays."""
+    w2c: np.ndarray
+    sigma_rel: float
+    sigma_lat: Optional[float] = None
+    sigma_rot: Optional[float] = None
+
+    def covariances(self) -> List[np.ndarray]:
+        """The 6×6 prior covariances [rotation (3), translation (3)], translation in frame i."""
+        from precision.scale_lock import centres_of
+        W = np.asarray(self.w2c, np.float64)
+        C = centres_of(W)
+        out = []
+        for k in range(len(W) - 1):
+            step_w = C[k + 1] - C[k]
+            d = float(np.linalg.norm(step_w))
+            u = W[k, :3, :3] @ (step_w / d) if d > 0.0 else np.array([0.0, 0.0, 1.0])
+            s_along = float(self.sigma_rel) * max(d, np.finfo(float).tiny)
+            s_lat = (float(self.sigma_lat) if self.sigma_lat is not None else 1.0) * max(d, np.finfo(float).tiny)
+            s_rot = float(self.sigma_rot) if self.sigma_rot is not None else math.pi
+            P = np.outer(u, u)
+            cov_t = s_along ** 2 * P + s_lat ** 2 * (np.eye(3) - P)
+            cov = np.zeros((6, 6))
+            cov[:3, :3] = np.eye(3) * s_rot ** 2
+            cov[3:, 3:] = cov_t
+            out.append(cov)
+        return out
+
+
+def relative_prior_scatter(w2c_prior: np.ndarray, w2c_solved: np.ndarray) -> Dict[str, Any]:
+    """How far the prior's consecutive relative poses stand from a solution's, per step: the
+    rotation angle of R_sol,ij · R_prior,ijᵀ and the ACROSS-step angle between the prior's step
+    direction and the solved one (both in frame i). sigma_rot (rad/axis) and sigma_lat (per unit
+    step) are the medians of those norms over the Maxwell / Rayleigh median constants — the
+    scatter MEASURED, never declared."""
+    from precision.scale_lock import centres_of
+    P = np.asarray(w2c_prior, np.float64); S = np.asarray(w2c_solved, np.float64)
+    Cp, Cs = centres_of(P), centres_of(S)
+    rot, lat = [], []
+    for k in range(len(P) - 1):
+        Rp = P[k + 1, :3, :3] @ P[k, :3, :3].T
+        Rs = S[k + 1, :3, :3] @ S[k, :3, :3].T
+        Rd = Rs @ Rp.T
+        rot.append(float(np.arccos(np.clip((np.trace(Rd) - 1.0) / 2.0, -1.0, 1.0))))
+        up = P[k, :3, :3] @ (Cp[k + 1] - Cp[k]); us = S[k, :3, :3] @ (Cs[k + 1] - Cs[k])
+        dp, ds = np.linalg.norm(up), np.linalg.norm(us)
+        if dp > 0.0 and ds > 0.0:
+            lat.append(float(np.arccos(np.clip(np.dot(up / dp, us / ds), -1.0, 1.0))))
+    rot_a = np.asarray(rot); lat_a = np.asarray(lat)
+    return {"n_steps": int(rot_a.size),
+            "sigma_rot": float(np.median(rot_a) / MAXWELL_MEDIAN) if rot_a.size else None,
+            "sigma_lat": float(np.median(lat_a) / RAYLEIGH_MEDIAN) if lat_a.size else None,
+            "rot_median_deg": float(np.degrees(np.median(rot_a))) if rot_a.size else None,
+            "rot_p90_deg": float(np.degrees(np.percentile(rot_a, 90))) if rot_a.size else None,
+            "lat_median_deg": float(np.degrees(np.median(lat_a))) if lat_a.size else None}
+
+
+def _require_pyceres():
+    try:
+        import pyceres
+        return pyceres
+    except ImportError as e:
+        raise RefineError("refine.prior_model: relative needs pyceres (pip install pyceres) next to "
+                          "pycolmap 4 — the relative-pose priors are residual blocks added to COLMAP's "
+                          "Ceres problem; there is no fallback") from e
+
+
 def run_rung(name: str, w2c_start: np.ndarray, params_start: Sequence[float], wh: Tuple[int, int],
              fit_groups: Dict[int, List], X_start: Dict[int, np.ndarray], sigmas: np.ndarray,
              cfg, block_of: Optional[np.ndarray] = None,
              params_by_block0: Optional[List[List[float]]] = None,
-             prior_w2c: Optional[np.ndarray] = None) -> RungResult:
+             prior_w2c: Optional[np.ndarray] = None, flags_of: Optional[str] = None,
+             rel_prior: Optional[RelativePrior] = None) -> RungResult:
     """One pose-prior bundle adjustment. ``w2c_start`` / ``params_start`` / ``X_start``: where the
     solve STARTS (the gauge for R0; the rung it contains for R1, R2 and the continuation solves —
     point 61). ``prior_w2c``: the poses whose centres hold the gauge priors — the GAUGE poses for
     every rung (default: ``w2c_start``, the pre-2026-10-07 behaviour, kept for callers that start at
-    the gauge). The position prior σ per keyframe is ``sigmas``."""
+    the gauge). The position prior σ per keyframe is ``sigmas``. ``flags_of``: the rung whose camera
+    freedom this solve has (default ``name``; the σ ladder's rungs keep the best camera rung's).
+    ``rel_prior``: the ODOMETRY model instead — relative-pose priors between consecutive keyframes
+    (``RelativePrior``), the first keyframe fixed, no absolute prior and no alignment; ``sigmas``
+    and ``prior_w2c`` are then unused."""
     import pycolmap
     _vendor_path()
     from reconstruction.colmap_ba import _rigid, _tune_ceres, _solve_checked
@@ -350,6 +458,7 @@ def run_rung(name: str, w2c_start: np.ndarray, params_start: Sequence[float], wh
         for k, (t, _p) in enumerate(per_img[i]):
             p2d[(i, t)] = k
     n_pts = 0
+    n_rep = 0                               # reprojection residual blocks the problem must hold
     pid_of: Dict[int, int] = {}
     for t, X in X_start.items():
         tr = pycolmap.Track()
@@ -359,18 +468,15 @@ def run_rung(name: str, w2c_start: np.ndarray, params_start: Sequence[float], wh
         if tr.length() >= 2:
             pid_of[t] = int(rec.add_point3D(np.asarray(X, float), tr))
             n_pts += 1
-    priors = []
+            n_rep += int(tr.length())
+    bcfg = pycolmap.BundleAdjustmentConfig()
     for i in range(N):
-        pp = pycolmap.PosePrior()
-        pp.position = -prior_w2c[i, :3, :3].T @ prior_w2c[i, :3, 3]
-        pp.position_covariance = np.eye(3) * float(sigmas[i]) ** 2
-        pp.coordinate_system = pycolmap.PosePriorCoordinateSystem.CARTESIAN
-        pp.corr_data_id = rec.image(i + 1).data_id
-        priors.append(pp)
+        bcfg.add_image(i + 1)
     opts = pycolmap.BundleAdjustmentOptions()
-    opts.refine_focal_length = name in ("R1", "R2", "R3")
-    opts.refine_principal_point = name in ("R1", "R2")
-    opts.refine_extra_params = name == "R2"
+    fl = flags_of or name
+    opts.refine_focal_length = fl in ("R1", "R2", "R3")
+    opts.refine_principal_point = fl in ("R1", "R2")
+    opts.refine_extra_params = fl == "R2"
     opts.refine_points3D = True
     opts.refine_rig_from_world = True
     opts.ceres.loss_function_type = pycolmap.LossFunctionType.HUBER
@@ -380,9 +486,57 @@ def run_rung(name: str, w2c_start: np.ndarray, params_start: Sequence[float], wh
     # and Schur accumulation sum in a run-dependent order — measured 1.8e-11 in the
     # poses between two identical solves at 8 threads, bit for bit the same at 1
     opts.ceres.solver_options.num_threads = int(cfg.ceres_threads)
-    bcfg = pycolmap.BundleAdjustmentConfig()
+    pycolmap.set_random_seed(int(cfg.seed))
+    if rel_prior is not None:
+        # THE ODOMETRY MODEL: COLMAP's own reprojection problem (the same residual blocks, loss and
+        # camera freedom), the first keyframe's pose constant (the world frame), plus one relative
+        # pose prior per consecutive pair — residual blocks added to the Ceres problem through
+        # pyceres; no absolute prior, no alignment, nothing that can be dropped in silence
+        pyceres = _require_pyceres()
+        from pycolmap import cost_functions as CF
+        if len(rel_prior.w2c) != N:
+            raise RefineError(f"{name}: {len(rel_prior.w2c)} prior poses for {N} keyframes")
+        first = rec.frame(rec.image(1).frame_id)
+        bcfg.set_constant_rig_from_world_pose(first.frame_id)
+        adjuster = pycolmap.create_default_ceres_bundle_adjuster(opts, bcfg, rec)
+        problem = adjuster.problem
+        n_before = int(problem.num_residual_blocks())
+        W = np.asarray(rel_prior.w2c, np.float64)
+        for k, cov in enumerate(rel_prior.covariances()):
+            i_from_j = W[k] @ np.linalg.inv(W[k + 1])
+            cost = CF.RelativePosePriorCost(cov, _rigid(i_from_j, pycolmap))
+            fi = rec.frame(rec.image(k + 1).frame_id)
+            fj = rec.frame(rec.image(k + 2).frame_id)
+            problem.add_residual_block(cost, pyceres.TrivialLoss(),
+                                       [fi.rig_from_world.params, fj.rig_from_world.params])
+        # COLMAP bakes a constant pose into its reprojection costs and gives the problem no block
+        # for it; the first prior's reference to that pose created one — held constant here, or
+        # the world frame would be free (measured 2026-10-23: the whole solution rotated 2.3°)
+        p0 = first.rig_from_world.params
+        if not problem.has_parameter_block(p0):
+            raise RefineError(f"{name}: the first keyframe's pose is not a parameter block of the problem")
+        problem.set_parameter_block_constant(p0)
+        n_var = sum(1 for k in range(N)
+                    if not problem.is_parameter_block_constant(rec.frame(rec.image(k + 1).frame_id).rig_from_world.params))
+        if n_before != n_rep or int(problem.num_residual_blocks()) != n_rep + N - 1 or n_var != N - 1:
+            raise RefineError(f"{name}: the Ceres problem holds {n_before} reprojection blocks for {n_rep} "
+                              f"observations, {int(problem.num_residual_blocks())} after the {N - 1} relative "
+                              f"priors, {n_var} variable poses for {N - 1} — the odometry model is not set up")
+        summary = _solve_checked(adjuster, f"refine {name}")
+        cs = _ceres_summary(summary)
+        n_blocks = int(cs.get("num_residual_blocks", -1))
+        if n_blocks != n_rep + N - 1:
+            raise RefineError(f"{name}: Ceres solved {n_blocks} residual blocks for {n_rep} reprojections + "
+                              f"{N - 1} relative priors — the odometry priors were not held")
+        return _rung_result(name, rec, N, wh, blocks, block_of, pid_of, n_pts, summary, cs)
+    priors = []
     for i in range(N):
-        bcfg.add_image(i + 1)
+        pp = pycolmap.PosePrior()
+        pp.position = -prior_w2c[i, :3, :3].T @ prior_w2c[i, :3, 3]
+        pp.position_covariance = np.eye(3) * float(sigmas[i]) ** 2
+        pp.coordinate_system = pycolmap.PosePriorCoordinateSystem.CARTESIAN
+        pp.corr_data_id = rec.image(i + 1).data_id
+        priors.append(pp)
     popts = pycolmap.PosePriorBundleAdjustmentOptions()
     popts.prior_position_fallback_stddev = float(np.max(sigmas))
     # the adjuster first aligns the reconstruction to the priors by RANSAC; with COLMAP's
@@ -390,10 +544,28 @@ def run_rung(name: str, w2c_start: np.ndarray, params_start: Sequence[float], wh
     # (measured) — both are fixed, so a rung does not depend on what ran before it
     popts.alignment_ransac.random_seed = int(cfg.seed)
     popts.alignment_ransac.num_threads = 1
-    pycolmap.set_random_seed(int(cfg.seed))
+    # the alignment's inlier threshold: COLMAP derives sqrt(chi2_95(3) x the MEDIAN prior variance)
+    # when it is 0; the start IS the priors' frame (every rung starts at the gauge or at a solution
+    # judged against it), so the widest prior decides — the threshold is not a decision
+    popts.alignment_ransac.max_error = float(np.sqrt(CHI2_95_3DOF * float(np.max(sigmas)) ** 2))
     summary = _solve_checked(pycolmap.create_pose_prior_bundle_adjuster(
         opts, popts, bcfg, priors, rec), f"refine {name}")
     cs = _ceres_summary(summary)
+    # THE PRIORS MUST BE IN THE PROBLEM (2026-10-23, measured): when COLMAP's alignment of the
+    # reconstruction to the priors fails (exactly coplanar or collinear camera centres make its
+    # Sim3 RANSAC degenerate), the pose-prior adjuster logs a warning, DROPS EVERY PRIOR and fixes
+    # the gauge on two cameras — a solve with no metre and no shape prior, reported as converged.
+    # The residual blocks say whether the priors were held: reprojection blocks + one per keyframe.
+    n_blocks = int(cs.get("num_residual_blocks", -1))
+    if n_blocks != n_rep + N:
+        raise RefineError(f"{name}: the pose-prior adjuster solved {n_blocks} residual blocks for "
+                          f"{n_rep} reprojections + {N} position priors — the gauge priors were NOT in "
+                          f"the problem (COLMAP's alignment to the priors failed: degenerate camera "
+                          f"centres?); a solve without its metre is not taken")
+    return _rung_result(name, rec, N, wh, blocks, block_of, pid_of, n_pts, summary, cs)
+
+
+def _rung_result(name, rec, N, wh, blocks, block_of, pid_of, n_pts, summary, cs) -> RungResult:
     w2c = np.tile(np.eye(4), (N, 1, 1))
     for i in range(N):
         w2c[i, :3, :4] = np.asarray(rec.image(i + 1).cam_from_world().matrix())
@@ -578,11 +750,16 @@ def _rung_and_continuation(name: str, start: RungResult, wh, fit_g, held_g, sig,
 def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
                 track: np.ndarray, frame: np.ndarray, uv: np.ndarray, split: np.ndarray,
                 kf_frames: Sequence[int], sigma_rel: float, cfg, solver: dict, *,
-                error_factor: float, log: Callable = print, solve: bool = True) -> Dict[str, Any]:
+                error_factor: float, log: Callable = print, solve: bool = True,
+                window_id: Optional[np.ndarray] = None,
+                is_loop: Optional[np.ndarray] = None) -> Dict[str, Any]:
     """The ladder over the keyframes. ``split`` per OBSERVATION (its track's split).
     ``error_factor``: ``correction_graph.graph.improvement_error_factor`` (the user's 2).
     ``solve=False`` (``refine.enabled: false``, the evaluation battery): no rung is solved — the
-    initial state is the result (its held-out measured, its landmarks the witnesses' map)."""
+    initial state is the result (its held-out measured, its landmarks the witnesses' map).
+    ``window_id`` / ``is_loop`` per OBSERVATION (F4's): the loop-gap instrument
+    (``precision.loop_gap``) measures the drift at the loop windows before and after; None = no
+    loop instrument (reported as such)."""
     import pycolmap
     pycolmap.set_random_seed(int(cfg.seed))           # COLMAP's PRNG: identical runs, identical bits
     fac = float(error_factor)
@@ -602,6 +779,8 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
                       X=X0)
     held: Dict[str, Dict[int, float]] = {}
     held["init"], dropped_init = _heldout_of(base, held_g, solver, cfg)
+    loops_in = _loop_inputs(track, window_id, is_loop)
+    loops_before = _measure_loops(loops_in, held_g, base, solver, cfg, fac)
     if not solve:
         log(f"{LOG_TAG} refine.enabled: false — no rung solved; the initial poses and camera stand "
             f"(held-out median {np.median(list(held['init'].values())) if held['init'] else float('nan'):.3f} px "
@@ -610,7 +789,10 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
                 "held_groups": held_g, "prior_sigma_m": sig, "per_frame_heldout": {},
                 "solver_errors": {}, "clusters": clusters, "ladder": [],
                 "ladder_restricted_by": "refine.enabled: false", "error_factor": fac,
-                "dropped": {"fit_init": dropped_fit, "heldout_init": dropped_init}, "timing": {}}
+                "dropped": {"fit_init": dropped_fit, "heldout_init": dropped_init}, "timing": {},
+                "loops": _loop_report(loops_before, loops_before), "prior_sigma_ladder": {},
+                "scale_lock": {"measured": False, "reason": "refine.enabled: false"},
+                "odometry": {"model": str(cfg.prior_model)}}
     errors: Dict[str, dict] = {}
     rungs: Dict[str, Any] = {}
     best: Optional[RungResult] = None       # the rung the session takes (the held-out's verdict)
@@ -619,17 +801,71 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
     ladder = rung_ladder(log)
     timing: Dict[str, float] = {}
     cont_costs: Dict[str, float] = {}       # each rung's continuation final cost (the cost resolution)
+    # THE PRIOR MODEL (phase 3b, 2026-10-23). relative (the default): the odometry priors of
+    # ``RelativePrior`` — the gauge's metre on every step, the first keyframe the world frame, no
+    # absolute position prior: Omega's drifted SHAPE holds nothing, the loops close as far as the
+    # tracks say. Measured on the synthetic rectangle walk with a 10° heading drift (0.53 m at the
+    # return): absolute priors left 0.15 m RMS of shape error with the loop "closed"; the odometry
+    # priors 2 mm. R0 is solved twice: first with the rotation and across-step parts UNINFORMATIVE
+    # (the tracks decide), then (R0s) with those parts' σ MEASURED as the scatter of Omega's
+    # consecutive relative poses against that solution — taken unless it worsens the held-out
+    # tracks or opens a loop (reported either way). absolute: the pre-phase-3b model (the
+    # evaluation battery's A/B), the gauge priors on every keyframe's position.
+    model = str(cfg.prior_model)
+    rel_prior: Optional[RelativePrior] = (RelativePrior(np.asarray(w2c0, np.float64), float(sigma_rel))
+                                          if model == "relative" else None)
+    odometry: Dict[str, Any] = {"model": model}
     for name in ladder:
         # point 61 (USER 2026-10-07): ONLY R2 starts at R1's solution. R1 starts at the gauge, as in
         # the validated recipe — started at R0's fixed-focal optimum it never moved (pccr
         # 2026-10-07: cost 0.587605 → 0.587605, the focal stayed at F0's 362.56)
         start = base if name in ("R0", "R1") else parent
+        kw = {"rel_prior": rel_prior} if rel_prior is not None else {}
         r, held_r, dropped, cont, err = _rung_and_continuation(
-            name, start, wh, fit_g, held_g, sig, cfg, solver, w2c0, log)
+            name, start, wh, fit_g, held_g, sig, cfg, solver, w2c0, log, **kw)
         held[name] = held_r
         errors[name] = err
         timing[name] = r.seconds
         timing[name + "_continuation"] = cont.seconds
+        if name == "R0" and rel_prior is not None:
+            # R0s: the same model with the measured σ_rot / σ_lat (the scatter of Omega's relative
+            # poses against the uninformative solve), started from R0's solution
+            scat = relative_prior_scatter(w2c0, r.w2c)
+            odometry["scatter_vs_uninformative"] = scat
+            rel_meas = RelativePrior(rel_prior.w2c, rel_prior.sigma_rel, scat["sigma_lat"], scat["sigma_rot"])
+            r_s, held_s, dropped_s, cont_s, err_s = _rung_and_continuation(
+                "R0s", r, wh, fit_g, held_g, sig, cfg, solver, w2c0, log, flags_of="R0", rel_prior=rel_meas)
+            held["R0s"] = held_s
+            errors["R0s"] = err_s
+            timing["R0s"] = r_s.seconds
+            timing["R0s_continuation"] = cont_s.seconds
+            bar_s = max(float(err["error"]), float(err_s["error"]))
+            v_s = (judge_rungs(held_r, held_s, clusters, bar_s, fac, cfg) if np.isfinite(bar_s)
+                   else {"improves": False, "worsens": False, "n_tracks": 0,
+                         "reason": "no held-out track common to both states — nothing to judge"})
+            loops_r0 = _measure_loops(loops_in, held_g, r, solver, cfg, fac)
+            loops_s = _measure_loops(loops_in, held_g, r_s, solver, cfg, fac)
+            gap_s = (LG_judge(loops_r0, loops_s, fac, cfg) if loops_r0 is not None and loops_s is not None
+                     else {"improves": False, "worsens": False, "n_obs": 0, "reason": "no loop window"})
+            take_s = not worsens_by_rule(v_s) and not worsens_by_rule(gap_s)
+            rep_s = _rung_report(r_s, held_s, dropped_s, cont_s, err_s)
+            rep_s.update({"prior": {"sigma_rel": rel_meas.sigma_rel, "sigma_lat": rel_meas.sigma_lat,
+                                    "sigma_rot": rel_meas.sigma_rot},
+                          "verdict_vs_R0": v_s, "loop_gap_verdict_vs_R0": gap_s, "taken": take_s,
+                          "rule": "the measured sigma is the prior by construction; taken unless it worsens "
+                                  "the held-out tracks or opens a loop by the user's rule"})
+            rungs["R0s"] = rep_s
+            log(f"{LOG_TAG} R0s (odometry priors with the measured sigma_rot {np.degrees(rel_meas.sigma_rot):.3f} deg, "
+                f"sigma_lat {rel_meas.sigma_lat:.4f}/step): held-out median {rep_s['heldout_median_px']} px "
+                f"({'worsens' if worsens_by_rule(v_s) else 'does not worsen'}; loops "
+                f"{'open' if worsens_by_rule(gap_s) else 'do not open'}): {'TAKEN' if take_s else 'not taken'}")
+            if take_s:
+                r, held_r, dropped, cont, err = r_s, held_s, dropped_s, cont_s, err_s
+                rel_prior = rel_meas
+                held["R0"] = held_s
+                errors["R0"] = err_s
+            odometry["prior"] = {"sigma_rel": rel_prior.sigma_rel, "sigma_lat": rel_prior.sigma_lat,
+                                 "sigma_rot": rel_prior.sigma_rot, "measured_taken": take_s}
         rep = _rung_report(r, held_r, dropped, cont, err)
         # point 61: a nested rung starts AT its parent's solution, so its cost can only fall; one
         # that ends above it did not reach the optimum of a space that contains the parent's. The
@@ -681,6 +917,120 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
     if best is None:
         raise RefineError("no rung could be judged — the session camera cannot be refined; see the "
                           "rung reasons in the log")
+    # THE σ RELAXATION (phase 3b, 2026-10-23): the gauge priors hold the SHAPE Omega left, drift
+    # included, and a loop closes only as far as they yield. The factor is measured on the loops left
+    # open (never declared), relaxes every σ_k, keeps the best rung's camera freedom, starts at the
+    # best rung's solution and enters by the rule below. Point 61's cost check does not apply: the
+    # prior term changed, so Ceres costs are not comparable between factors.
+    # THE JUDGE of a relaxation is the LOOP GAP, never the held-out reprojection alone: relaxing the
+    # priors lowers every reprojection a little (fit and held-out share the poses), so the
+    # reprojection judge is biased toward relaxing (measured on the synthetic scenes 2026-10-23:
+    # paired improvements of 0.001-0.004 px against a solver-error bar of 1e-5, taken, with the
+    # true pose error moving either way). A factor enters only when the held-out loop gaps —
+    # the drift the two visits of a surface still show, in metres — close further by the user's
+    # rule, and the held-out reprojection does not worsen; without a judged loop window there is
+    # no evidence of drift to relax the priors against, and the gauge's priors stand.
+    ladder_p: Dict[str, Any] = {"enabled": bool(cfg.prior_sigma_from_loops), "rungs": {}, "applied_factor": 1.0,
+                                "rule": "the factor is MEASURED on the loops still open after the camera ladder "
+                                        "(loop_gap.prior_relaxation: gap over the prior's own random-walk "
+                                        "sigma across the loop); the rung is taken when the held-out loop gaps "
+                                        "close further (metric_lock.decide_change, clustered by loop window) "
+                                        "AND the held-out reprojection does not worsen; no open loop = the "
+                                        "gauge's priors stand"}
+    from precision import loop_gap as LG
+    loops_best = _measure_loops(loops_in, held_g, best, solver, cfg, fac)
+    judgeable = bool(loops_best is not None and loops_best["summary"]["n_judged"] > 0)
+    factors: List[float] = []
+    if cfg.prior_sigma_from_loops and rel_prior is not None:
+        ladder_p["skipped"] = "the odometry priors hold no shape — nothing to relax (relative model)"
+    elif cfg.prior_sigma_from_loops:
+        if not judgeable:
+            ladder_p["skipped"] = ("no judged loop window (held-out tracks seen from two visits) — no evidence "
+                                   "of drift to relax the gauge's priors against; they stand")
+        else:
+            relax = LG.prior_relaxation(loops_best, SL_centres(w2c0), sigma_rel)
+            ladder_p["measured"] = relax
+            if relax["n_open"] == 0:
+                ladder_p["skipped"] = "every judged loop is closed after the camera ladder — nothing to relax"
+            elif relax["factor"] <= 1.0:
+                ladder_p["skipped"] = (f"the open loops stand within the priors' own sigma (gap / sigma "
+                                       f"{relax['factor']:.2f}) — nothing to relax")
+            else:
+                factors = [float(relax["factor"])]
+    if "skipped" in ladder_p:
+        log(f"{LOG_TAG} sigma relaxation not tried: {ladder_p['skipped']}")
+    for f_sig in factors:
+        name = f"P{f_sig:.3g}"
+        r, held_r, dropped, cont, err = _rung_and_continuation(
+            name, best, wh, fit_g, held_g, sig * f_sig, cfg, solver, w2c0, log, flags_of=best.name)   # absolute only
+        held[name] = held_r
+        errors[name] = err
+        timing[name] = r.seconds
+        timing[name + "_continuation"] = cont.seconds
+        bar = max(float(errors[best.name]["error"]), float(err["error"]))
+        verdict = (judge_rungs(held[best.name], held_r, clusters, bar, fac, cfg) if np.isfinite(bar)
+                   else {"improves": False, "worsens": False, "n_tracks": 0,
+                         "reason": "no held-out track common to both states — nothing to judge"})
+        loops_r = _measure_loops(loops_in, held_g, r, solver, cfg, fac)
+        gap_v = LG.judge_gap_change(loops_best, loops_r, error_factor=fac,
+                                    confidence=float(cfg.heldout_confidence),
+                                    n_boot=int(cfg.permutations), seed=int(cfg.seed))
+        take = bool(gap_v["improves"]) and not worsens_by_rule(verdict)
+        rep = _rung_report(r, held_r, dropped, cont, err)
+        rep.update({"prior_sigma_factor": f_sig, "camera_freedom": best.name, "started_from": best.name,
+                    "verdict_vs_best": verdict, "loop_gap_verdict_vs_best": gap_v,
+                    "loops": LG.loop_report(loops_best, loops_r)["summary"], "taken": take,
+                    "nested_cost_check": {"applicable": False,
+                                          "reason": "the prior term changed with sigma — Ceres costs are "
+                                                    "not comparable (point 61 does not apply)"}})
+        rungs[name] = rep
+        ladder_p["rungs"][name] = rep
+        log(f"{LOG_TAG} {name} (gauge priors x{f_sig:g}, camera as {best.name}): loop gap median "
+            f"{loops_r['summary']['gap_median_m']} m vs {loops_best['summary']['gap_median_m']} m "
+            f"({gap_v.get('reason', '')}); held-out median {rep['heldout_median_px']} px "
+            f"({'worsens' if worsens_by_rule(verdict) else 'does not worsen'}): "
+            f"{'TAKEN' if take else 'not taken'}")
+        if not take:
+            break
+        best = r
+        loops_best = loops_r
+        ladder_p["applied_factor"] = f_sig
+    # THE SCALE LOCK (phase 3b): the metre read again from the gauge's step lengths, which drift
+    # leaves alone; re-imposed only by the user's rule (precision.scale_lock)
+    lock: Dict[str, Any] = {"measured": False, "reason": "refine.scale_lock: false"}
+    if bool(cfg.scale_lock):
+        from precision import scale_lock as SL
+        c_g = SL.centres_of(w2c0)
+        lock = SL.measure(c_g, SL.centres_of(best.w2c), error_factor=fac,
+                          confidence=float(cfg.heldout_confidence), n_boot=int(cfg.permutations),
+                          seed=int(cfg.seed))
+        lock["measured"] = True
+        lock["measured_after"] = best.name
+        if lock["apply"]:
+            centre = c_g.mean(axis=0)
+            w2c_l, X_l = SL.apply_similarity(best.w2c, best.X, lock["s"], centre)
+            locked = RungResult(best.name, w2c_l, best.params_by_block, best.block_of, best.fit_rms_px,
+                                best.n_points, best.termination, best.n_degenerate, X=X_l,
+                                initial_cost=best.initial_cost, final_cost=best.final_cost,
+                                iterations=best.iterations, seconds=best.seconds)
+            held_l, _ = _heldout_of(locked, held_g, solver, cfg)
+            lock["heldout_median_px_after_lock"] = (float(np.median(list(held_l.values())))
+                                                    if held_l else None)
+            lock["centre"] = [float(v) for v in centre]
+            best = locked
+            held[best.name + "_locked"] = held_l
+        log(f"{LOG_TAG} scale lock: s {lock['s']:.5f} (log s {lock['log_s']:+.5f} ± {lock['sigma']:.5f}, "
+            f"{lock['n_steps']} steps; trend {lock['trend_per_100m']['slope'] if lock.get('trend_per_100m') else None} "
+            f"per 100 m) — {lock['reason']}")
+    loops_after = _measure_loops(loops_in, held_g, best, solver, cfg, fac)
+    loops = _loop_report(loops_before, loops_after)
+    if loops.get("summary"):
+        sm = loops["summary"]
+        log(f"{LOG_TAG} loops: {sm['n_judged']}/{sm['n_loop_windows']} loop window(s) judged "
+            f"({sm['n_adjacent']} adjacent); open before {sm['open_before']}, after {sm['open_after']} "
+            f"({sm['open_coherent_after']} coherent = drift left in place, {sm['open_incoherent_after']} "
+            f"incoherent); gap median before {sm['gap_median_before_m']} m, after {sm['gap_median_after_m']} m "
+            f"(control {sm['control_median_after_m']} m)")
     # R3: focal per temporal block, only when the best rung leaves a temporal pattern; MEASURED
     # AND REPORTED, never applied (point 62: the chain uses one camera for every keyframe)
     blocks = np.arange(len(w2c0)) // int(cfg.focal_block_frames)
@@ -709,7 +1059,7 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
         pb = [list(best.params_by_block[0]) for _ in range(int(blocks.max()) + 1)]
         r, held_r, dropped, cont, err = _rung_and_continuation(
             "R3", start3, wh, fit_g, held_g, sig, cfg, solver, w2c0, log,
-            block_of=blocks, params_by_block0=pb)
+            block_of=blocks, params_by_block0=pb, **({"rel_prior": rel_prior} if rel_prior is not None else {}))
         held["R3"] = held_r
         errors["R3"] = err
         timing["R3"] = r.seconds
@@ -731,7 +1081,60 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
             "solver_errors": errors, "clusters": clusters, "ladder": list(ladder),
             "ladder_restricted_by": RUNGS_ENV if os.environ.get(RUNGS_ENV, "").strip() else None,
             "error_factor": fac, "dropped": {"fit_init": dropped_fit, "heldout_init": dropped_init},
-            "timing": timing}
+            "timing": timing, "loops": loops, "prior_sigma_ladder": ladder_p, "scale_lock": lock,
+            "odometry": odometry}
+
+
+def worsens_by_rule(v: dict) -> bool:
+    """The mirror of decide_change's ``improves``: significantly worse, with enough judges, by at least
+    the required delta. decide_change's bare ``worsens`` is the interval alone — one judge makes it a
+    point and any change reads 'entirely on one side'."""
+    return bool(v.get("worsens")) and bool(v.get("enough_judges", True)) and bool(
+        -float(v.get("median_delta", 0.0)) >= float(v.get("required_delta", 0.0)))
+
+
+def LG_judge(before: dict, after: dict, fac: float, cfg) -> dict:
+    from precision import loop_gap as LG
+    return LG.judge_gap_change(before, after, error_factor=float(fac), confidence=float(cfg.heldout_confidence),
+                               n_boot=int(cfg.permutations), seed=int(cfg.seed))
+
+
+def SL_centres(w2c: np.ndarray) -> np.ndarray:
+    from precision.scale_lock import centres_of
+    return centres_of(w2c)
+
+
+def _loop_inputs(track: np.ndarray, window_id: Optional[np.ndarray],
+                 is_loop: Optional[np.ndarray]) -> Optional[Tuple[Dict[int, int], List[int]]]:
+    """(track → window, the loop windows' ids) from the per-observation columns; None without them."""
+    if window_id is None or is_loop is None:
+        return None
+    wid = np.asarray(window_id).ravel(); lp = np.asarray(is_loop).ravel().astype(bool)
+    tr = np.asarray(track).ravel()
+    if not (wid.size == tr.size == lp.size):
+        raise RefineError(f"window_id ({wid.size}) / is_loop ({lp.size}) must be per observation ({tr.size})")
+    window_of = {int(t): int(w) for t, w in zip(tr, wid)}
+    loop_windows = sorted(set(int(w) for w in wid[lp]))
+    return window_of, loop_windows
+
+
+def _measure_loops(loops_in, held_g, state: RungResult, solver: dict, cfg, fac: float) -> Optional[dict]:
+    if loops_in is None or len(state.params_by_block) != 1:
+        return None
+    from precision import loop_gap as LG
+    window_of, loop_windows = loops_in
+    return LG.measure_loops(held_g, window_of, loop_windows, state.w2c, state.params_by_block[0], solver,
+                            float(cfg.min_tri_deg), error_factor=float(fac),
+                            confidence=float(cfg.heldout_confidence), n_boot=int(cfg.permutations),
+                            seed=int(cfg.seed))
+
+
+def _loop_report(before: Optional[dict], after: Optional[dict]) -> dict:
+    if before is None or after is None:
+        return {"measured": False, "reason": "no window_id / is_loop columns (F4's tracks.npz v2) — the "
+                                             "loop-gap instrument needs them"}
+    from precision import loop_gap as LG
+    return {"measured": True, **LG.loop_report(before, after)}
 
 
 def localize_witnesses(best: RungResult, fit_track_X: Dict[int, np.ndarray],
@@ -889,7 +1292,8 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     fac = float(improvement_error_factor(raw_of(pcfg)))   # the job's frozen configuration (point 69)
     core = refine_core(w2c0, cam.params, (cam.width, cam.height), tr["obs_track"], tr["obs_frame"],
                        tr["obs_uv_native"], split_obs, kf, sigma_rel, cfg, solver,
-                       error_factor=fac, log=log, solve=bool(cfg.enabled))
+                       error_factor=fac, log=log, solve=bool(cfg.enabled),
+                       window_id=tr.get("window_id"), is_loop=tr.get("is_loop_pair"))
     best = core["best"]
     bound = heldout_bound(heldout_leave_one_view_out(core["held_groups"], best, solver, cfg,
                                                      max_px=float(np.hypot(cam.width, cam.height))), cfg)
@@ -930,6 +1334,8 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
                      "prior_sigma_m": {"first": float(core["prior_sigma_m"][0]),
                                        "last": float(core["prior_sigma_m"][-1])}},
            "rungs": core["rungs"], "applied_rung": best.name,
+           "prior_model": core["odometry"], "prior_sigma_ladder": core["prior_sigma_ladder"],
+           "scale_lock": core["scale_lock"], "loops": core["loops"],
            "camera": {"before": list(cam.params), "after": best.params_by_block},
            "n_landmarks": len(core["X"]),
            "keyframe_heldout_bound_px": bound,
@@ -951,9 +1357,13 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
                                   report={"rung": best.name, "blocks": len(best.params_by_block)})
         save_camera_json(out / "camera.json", new_cam, epochs.get("geometry_epoch"))
         T = np.linalg.inv(best.w2c) @ w2c0              # c2w_new · w2c_old: world motion
+        # the scale lock scaled the whole solution by s: the records' depth follows (k = s)
+        s_lock = float(core["scale_lock"]["s"]) if core["scale_lock"].get("apply") else 1.0
         from precision.poses_epoch import apply_pose_epoch
-        res = apply_pose_epoch(out, T[:, :3, :3], T[:, :3, 3], np.ones(len(T)), "refine",
-                                    [{"stage": "refine", "rung": best.name}], log=log)
+        res = apply_pose_epoch(out, T[:, :3, :3], T[:, :3, 3], np.full(len(T), s_lock), "refine",
+                                    [{"stage": "refine", "rung": best.name,
+                                      "prior_sigma_factor": core["prior_sigma_ladder"].get("applied_factor", 1.0),
+                                      "scale_lock_s": s_lock}], log=log)
         doc["applied"] = bool(res)
         doc["epoch_to"] = (res or {}).get("epoch_to")
         doc["camera_epoch_to"] = new_cam.camera_epoch

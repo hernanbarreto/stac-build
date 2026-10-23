@@ -2320,6 +2320,27 @@ reconstruction:
       permutations: 2000                # BOUND: resamples of the permutation / bootstrap tests
       seed: 0                           # their fixed seed
       min_witness_corr: 12              # BOUND: 2D-3D correspondences a witness needs for PnP
+      prior_model: relative             # THE PRIOR MODEL (audit 2026-10-23, phase 3b). relative = ODOMETRY
+                                        #   priors: one relative-pose prior per consecutive keyframe pair
+                                        #   (Omega x the gauge), the gauge's σ along the step (the metre),
+                                        #   the rotation and across-step σ MEASURED against the tracks
+                                        #   (rung R0s), the first keyframe the world frame, NO absolute
+                                        #   prior — Omega's drifted shape holds nothing, the loops close
+                                        #   as far as the tracks say (synthetic rectangle walk, 10° drift:
+                                        #   absolute 0.15 m RMS shape error, relative 2 mm). Needs pyceres.
+                                        #   absolute = the pre-phase-3b model (evaluation A/B)
+      prior_sigma_from_loops: true      # THE σ RELAXATION (absolute model only): the gauge priors
+                                        #   hold the SHAPE Omega left, drift included. The loops the
+                                        #   held-out tracks still show OPEN after the camera ladder
+                                        #   measure the factor (gap over the prior's own random-walk σ
+                                        #   across the loop, precision/loop_gap.py); one rung relaxes every
+                                        #   σ_k by it, keeps the best camera rung's freedom and enters only
+                                        #   when the loop gaps close further by the user's rule and the
+                                        #   held-out reprojection does not worsen. false = never relaxed
+      scale_lock: true                  # after the rungs the metre is read again from the gauge's STEP
+                                        #   LENGTHS (which drift leaves alone) and re-imposed when the
+                                        #   solve's differs by the user's rule (precision/scale_lock.py);
+                                        #   the residual scale trend along the walk is reported
     # F6 — prior-guided plane sweep at native resolution (precision/depth_sweep.py)
     depth:
       n_views: 8                        # BOUND: photometric / consistency views per keyframe
@@ -4377,6 +4398,15 @@ evaluation:
       description: (audit 2026-10-23, A/B) only the plane-preserving family, no judging between families
       overrides:
         "reconstruction.precision.bend.model": inverse_depth
+    f5_absolute_priors:
+      kind: chain
+      description: >-
+        (audit 2026-10-23 phase 3b, A/B) F5 with the pre-phase-3b prior model — the gauge priors on every
+        keyframe's position (Omega's drifted shape held), no σ relaxation, no scale lock
+      overrides:
+        "reconstruction.precision.refine.prior_model": absolute
+        "reconstruction.precision.refine.prior_sigma_from_loops": false
+        "reconstruction.precision.refine.scale_lock": false
     scale_mapanything:
       kind: not_executed
       description: (f) MapAnything as the scale source instead of DA3

@@ -74,6 +74,7 @@ def _num(section, key, path, lo=None, hi=None, integer=False, lo_excl=False):
     return int(v) if integer else float(v)
 
 
+
 def _bool(section, key, path) -> bool:
     v = _require(section, key, path)
     if not isinstance(v, bool):
@@ -258,6 +259,9 @@ class TracksConfig:
 
 # ── F5: joint refinement + witness localisation ─────────────────────────
 
+PRIOR_MODELS = ("relative", "absolute")
+
+
 @dataclass(frozen=True)
 class RefineConfig:
     enabled: bool               # false = NO bundle adjustment: the gauge's poses and F0's camera pass
@@ -274,6 +278,14 @@ class RefineConfig:
     permutations: int           # BOUND: permutation / bootstrap resamples of the tests
     seed: int                   # their fixed seed
     min_witness_corr: int       # BOUND: 2D-3D correspondences a witness needs for PnP
+    prior_model: str            # phase 3b: "relative" (odometry priors between consecutive keyframes,
+                                # the first keyframe fixed — the default) or "absolute" (the gauge
+                                # priors on every keyframe's position, the pre-phase-3b model)
+    prior_sigma_from_loops: bool  # phase 3b, absolute model only: the gauge priors relaxed by the factor the OPEN loops
+                                # measure (loop_gap.prior_relaxation), judged by the loop gaps and the
+                                # held-out tracks; false = the priors as the gauge measured them
+    scale_lock: bool            # after the rungs: the metre re-read from the gauge's step lengths and
+                                # re-imposed by the user's rule (precision.scale_lock)
 
 
 # ── F6: native-resolution depth ─────────────────────────────────────────
@@ -774,6 +786,9 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         seed=_num(rf, "seed", "refine", lo=0, integer=True),
         # PnP needs four points (P3P + one to choose)
         min_witness_corr=_num(rf, "min_witness_corr", "refine", lo=4, integer=True),
+        prior_model=_enum(rf, "prior_model", "refine", PRIOR_MODELS),
+        prior_sigma_from_loops=_bool(rf, "prior_sigma_from_loops", "refine"),
+        scale_lock=_bool(rf, "scale_lock", "refine"),
     )
     if refine.heldout_confidence >= 1.0:
         raise PrecisionConfigError(f"'{SECTION}.refine.heldout_confidence' must be below 1")

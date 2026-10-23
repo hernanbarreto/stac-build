@@ -41,15 +41,17 @@ def test_rungs_are_warm_started_nested_and_carry_their_continuation():
                          error_factor=FAC, log=QUIET)
     rungs = core["rungs"]
     costs = [rungs[n]["ceres"]["final_cost"] for n in ("R0", "R1", "R2")]
-    # point 61: R1 starts at R0's solution and R2 at R1's — the cost never climbs along the ladder
-    assert costs[1] <= costs[0] and costs[2] <= costs[1], costs
+    # point 61 (USER 2026-10-07): R1 starts at the GAUGE (the validated recipe — started at R0's
+    # fixed-focal optimum it never moved on pccr), so no nested check holds it to R0; ONLY R2 starts at
+    # R1's solution and must not end above it
+    assert costs[2] <= costs[1], costs
     chk = rungs["R1"]["nested_cost_check"]
-    assert chk["parent"] == "R0" and chk["parent_final_cost"] == costs[0] and chk["final_cost"] == costs[1]
-    assert chk["passed"] is True and chk["margin"] >= 0 and chk["cost_tolerance"] >= 0
-    assert rungs["R2"]["nested_cost_check"]["parent"] == "R1"
-    # a warm start lands: R1 begins far below the gauge start's cost (the adjuster's prior alignment
-    # perturbs it a little before solving, so it is not exactly R0's final cost)
-    assert rungs["R1"]["ceres"]["initial_cost"] < 0.5 * rungs["R0"]["ceres"]["initial_cost"]
+    assert chk["parent"] == "init" and chk["passed"] is True and chk["margin"] is None
+    chk2 = rungs["R2"]["nested_cost_check"]
+    assert chk2["parent"] == "R1" and chk2["parent_final_cost"] == costs[1] and chk2["final_cost"] == costs[2]
+    assert chk2["passed"] is True and chk2["margin"] >= 0 and chk2["cost_tolerance"] >= 0
+    # the warm start lands: R2 begins at R1's optimum (the solver's own resolution apart)
+    assert rungs["R2"]["ceres"]["initial_cost"] <= 1.01 * rungs["R1"]["ceres"]["final_cost"]
     # point 59: a continuation solve from the end state, its held-out change = the solver error
     for n in ("R0", "R1", "R2"):
         c = rungs[n]["continuation"]
@@ -111,21 +113,21 @@ def test_a_rung_that_ends_above_its_parent_is_not_taken_and_the_next_starts_from
 
     def inflated(name, *a, **kw):
         r = real(name, *a, **kw)
-        if name == "R1" and not getattr(inflated, "done", False):
-            # the FIRST R1 solve (not its continuation) reports a cost above its parent's
+        if name == "R2" and not getattr(inflated, "done", False):
+            # the FIRST R2 solve (not its continuation) reports a cost above its parent's (R1)
             inflated.done = True
             r.final_cost = r.final_cost * 10.0
         return r
     monkeypatch.setattr(R, "run_rung", inflated)
     core = R.refine_core(w2c0, init, WH, track, frame, uv, split, kf, 0.01, CFG, SOLVER,
                          error_factor=FAC, log=QUIET)
-    r1 = core["rungs"]["R1"]
-    assert r1["taken"] is False and "above R0" in r1["rejected"] and r1["nested_cost_check"]["passed"] is False
-    assert core["rungs"]["R2"]["nested_cost_check"]["parent"] == "R0"
+    r2 = core["rungs"]["R2"]
+    assert r2["taken"] is False and "above R1" in r2["rejected"] and r2["nested_cost_check"]["passed"] is False
+    assert r2["nested_cost_check"]["parent"] == "R1"
     # the bar is the PARENT's cost resolution (its continuation change), never the rung's own
-    assert r1["nested_cost_check"]["cost_tolerance"] == abs(core["rungs"]["R0"]["continuation"]["final_cost"]
-                                                           - core["rungs"]["R0"]["ceres"]["final_cost"])
-    assert core["best"].name in ("R0", "R2")
+    assert r2["nested_cost_check"]["cost_tolerance"] == abs(core["rungs"]["R1"]["continuation"]["final_cost"]
+                                                           - core["rungs"]["R1"]["ceres"]["final_cost"])
+    assert core["best"].name in ("R0", "R0s", "R1")
 
 
 def test_heldout_tracks_that_do_not_round_trip_are_dropped_and_counted():

@@ -115,7 +115,7 @@ def test_a_perfect_camera_without_distortion_stays_at_R0():
     track, frame, uv = _observe(X, c2w, gt, 0.3, 4, kf)
     core = R.refine_core(np.linalg.inv(_perturb(c2w, 0.1, 0.01, 5)), gt, WH, track, frame, uv,
                          _split(track), kf, 0.01, CFG, SOLVER, error_factor=FAC, log=lambda *a: None)
-    assert core["best"].name == "R0", core["rungs"]
+    assert core["best"].name in ("R0", "R0s"), core["rungs"]       # R0s: R0 with the measured odometry σ
     assert not core["rungs"]["R1"]["taken"] and not core["rungs"]["R2"]["taken"]
 
 
@@ -179,6 +179,41 @@ def test_the_ladder_and_the_witnesses_are_bit_identical_run_to_run():
     assert runs[0][0] == runs[1][0]
     assert runs[0][1] == runs[1][1]
     assert all(np.isfinite(r[1]) for r in runs[0][1].values())
+
+
+def test_the_absolute_model_refuses_a_solve_whose_priors_colmap_dropped():
+    """Measured 2026-10-23: COLMAP's pose-prior adjuster aligns the reconstruction to the priors by a
+    Sim3 RANSAC; exactly coplanar camera centres (this scene: x and z both proportional to k) make
+    it degenerate, the adjuster logs a warning, drops every prior and solves on two fixed cameras.
+    The absolute model now counts the residual blocks and refuses that solve by name."""
+    from dataclasses import replace
+    X, c2w = _scene(seed=3)
+    gt = [500.0, 500.0, 319.5, 239.5, 0.0, 0.0, 0.0, 0.0]
+    kf = list(range(len(c2w)))
+    track, frame, uv = _observe(X, c2w, gt, 0.3, 4, kf)
+    with pytest.raises(R.RefineError, match="NOT in the problem"):
+        R.refine_core(np.linalg.inv(c2w), gt, WH, track, frame, uv, _split(track), kf, 0.01,
+                      replace(CFG, prior_model="absolute"), SOLVER, error_factor=FAC, log=lambda *a: None)
+
+
+def test_the_odometry_model_keeps_the_first_keyframe_and_the_metre():
+    """From the true poses the odometry solve stays there: the first keyframe is the world frame
+    (bit-exact), the metre of the steps is the gauge's, every keyframe within a millimetre."""
+    from precision.scale_lock import centres_of
+    X, c2w = _scene(seed=6)
+    gt = [500.0, 500.0, 319.5, 239.5, -0.05, 0.01, 0.0, 0.0]
+    kf = list(range(len(c2w)))
+    track, frame, uv = _observe(X, c2w, gt, 0.3, 7, kf)
+    core = R.refine_core(np.linalg.inv(c2w), gt, WH, track, frame, uv, _split(track), kf, 0.01, CFG,
+                         SOLVER, error_factor=FAC, log=lambda *a: None)
+    b = core["best"]
+    assert core["odometry"]["model"] == "relative" and "R0s" in core["rungs"]
+    # the quaternion round trip of the constant pose: 1e-16, never a solve
+    np.testing.assert_allclose(b.w2c[0], np.linalg.inv(c2w)[0], atol=1e-12)
+    err = np.linalg.norm(centres_of(b.w2c) - c2w[:, :3, 3], axis=1)
+    assert err.max() < 0.002, err
+    lock = core["scale_lock"]
+    assert lock["measured"] and abs(lock["log_s"]) < 1e-3 and not lock["apply"]
 
 
 def test_prior_sigmas_grow_with_the_walk():

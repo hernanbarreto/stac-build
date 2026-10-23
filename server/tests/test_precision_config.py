@@ -89,7 +89,10 @@ def test_out_of_range_and_enum_name_the_key():
 # conversion values. 0.6744897501960817 is Φ⁻¹(3/4) (MAD → σ), a property of
 # the normal distribution. Integers are indices, counts and shapes.
 _FLOAT_WHITELIST = {0.0, 1.0, -1.0, 2.0, 0.5, 1e-9, 1e-6, 1e-12, 100.0, 1000.0,
-                    0.6744897501960817,
+                    0.6744897501960817,  # the normal quartile (1.4826 MAD)
+                    7.814727903251179,   # chi-square 95 % at 3 dof (COLMAP's prior-alignment threshold)
+                    1.5381722544371093,  # the Maxwell median (|N(0, σ²I3)|) in units of σ
+                    1.1774100225154747,  # the Rayleigh median (|N(0, σ²I2)|) in units of σ
                     1024.0, 1e9}         # MiB ↔ GiB and bytes ↔ GB: units, not decisions
 
 
