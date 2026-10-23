@@ -2372,6 +2372,17 @@ reconstruction:
                                         #   σ_k by it, keeps the best camera rung's freedom and enters only
                                         #   when the loop gaps close further by the user's rule and the
                                         #   held-out reprojection does not worsen. false = never relaxed
+      rolling_shutter: judged           # PHASE 3f (audit 2026-10-23): the sensor reads its rows one after
+                                        #   another; a keyframe in motion has no single pose. The readout
+                                        #   (in frame periods, a device constant) is SEARCHED
+                                        #   (precision/rolling_shutter.py): every candidate rectifies the
+                                        #   observations to the global-shutter pose and re-solves, the
+                                        #   held-out median is the criterion; the winner enters only by the
+                                        #   user's rule. never = declared only (the Spearman diagnostic)
+      rs_max_frames: 2.0                # BOUND: readouts searched up to two frame periods (30 ms at 60 fps
+                                        #   is 1.8; a phone at 30 fps ~0.9)
+      rs_grid_frames: 0.5               # BOUND: the search grid's step …
+      rs_passes: 3                      # BOUND: … refined this many times around the minimum (0.0625 at the end)
       scale_lock: true                  # after the rungs the metre is read again from the gauge's STEP
                                         #   LENGTHS (which drift leaves alone) and re-imposed when the
                                         #   solve's differs by the user's rule (precision/scale_lock.py);

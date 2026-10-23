@@ -290,6 +290,7 @@ class ClassicalConfig:
 # ── F5: joint refinement + witness localisation ─────────────────────────
 
 PRIOR_MODELS = ("relative", "absolute")
+ROLLING_SHUTTER = ("judged", "never")
 
 
 @dataclass(frozen=True)
@@ -316,6 +317,12 @@ class RefineConfig:
                                 # held-out tracks; false = the priors as the gauge measured them
     scale_lock: bool            # after the rungs: the metre re-read from the gauge's step lengths and
                                 # re-imposed by the user's rule (precision.scale_lock)
+    rolling_shutter: str        # phase 3f: "judged" — the readout measured on the held-out residuals, the
+                                # observations rectified, the solve repeated and judged by the user's rule
+                                # (precision.rolling_shutter); "never" — declared only (the diagnostic)
+    rs_passes: int              # BOUND: refinement levels of the readout search (the grid step halves each)
+    rs_max_frames: float        # BOUND: the readout searched up to this many frame periods
+    rs_grid_frames: float       # BOUND: the search grid's step (frame periods)
 
 
 # ── F6: native-resolution depth ─────────────────────────────────────────
@@ -844,6 +851,10 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         prior_model=_enum(rf, "prior_model", "refine", PRIOR_MODELS),
         prior_sigma_from_loops=_bool(rf, "prior_sigma_from_loops", "refine"),
         scale_lock=_bool(rf, "scale_lock", "refine"),
+        rolling_shutter=_enum(rf, "rolling_shutter", "refine", ROLLING_SHUTTER),
+        rs_passes=_num(rf, "rs_passes", "refine", lo=0, integer=True),
+        rs_max_frames=_num(rf, "rs_max_frames", "refine", lo=0.0, lo_excl=True),
+        rs_grid_frames=_num(rf, "rs_grid_frames", "refine", lo=0.0, lo_excl=True),
     )
     if refine.heldout_confidence >= 1.0:
         raise PrecisionConfigError(f"'{SECTION}.refine.heldout_confidence' must be below 1")

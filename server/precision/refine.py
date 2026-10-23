@@ -792,7 +792,9 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
                 "dropped": {"fit_init": dropped_fit, "heldout_init": dropped_init}, "timing": {},
                 "loops": _loop_report(loops_before, loops_before), "prior_sigma_ladder": {},
                 "scale_lock": {"measured": False, "reason": "refine.enabled: false"},
-                "odometry": {"model": str(cfg.prior_model)}}
+                "odometry": {"model": str(cfg.prior_model)},
+                "rolling_shutter": {"policy": str(cfg.rolling_shutter), "taken": False, "corrected": False,
+                                    "reason": "refine.enabled: false"}}
     errors: Dict[str, dict] = {}
     rungs: Dict[str, Any] = {}
     best: Optional[RungResult] = None       # the rung the session takes (the held-out's verdict)
@@ -995,6 +997,47 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
         best = r
         loops_best = loops_r
         ladder_p["applied_factor"] = f_sig
+    # ROLLING SHUTTER (phase 3f): the readout measured on the held-out residuals of the best rung,
+    # the observations rectified to the global-shutter pose, the solve repeated and judged
+    # (precision.rolling_shutter); "never" keeps the declared diagnostic alone
+    rs_rep: Dict[str, Any] = {"policy": str(cfg.rolling_shutter), "taken": False, "corrected": False}
+    if str(cfg.rolling_shutter) == "judged":
+        from precision import rolling_shutter as RS
+        _rel = rel_prior
+        _flags = best.name if best.name in ("R0", "R1", "R2") else "R0"
+
+        def _rs_solve(start: RungResult, fit_rect: Dict[int, List], name: str) -> RungResult:
+            dropped_rs: dict = {"tracks": 0, "observations": 0}
+            Xs = triangulate_tracks(fit_rect, start.w2c, start.params_by_block[0], solver, cfg.min_tri_deg,
+                                    dropped=dropped_rs)
+            r_ = run_rung(name, start.w2c, start.params_by_block[0], wh, fit_rect, Xs, sig, cfg, prior_w2c=w2c0,
+                          flags_of=_flags, **({"rel_prior": _rel} if _rel is not None else {}))
+            timing[name] = r_.seconds
+            return r_
+
+        def _rs_held(r_: RungResult, groups: Dict[int, List]) -> Dict[int, float]:
+            return _heldout_of(r_, groups, solver, cfg)[0]
+
+        def _rs_judge(h_b: Dict[int, float], h_c: Dict[int, float], bar: float) -> dict:
+            return (judge_rungs(h_b, h_c, clusters, bar, fac, cfg) if np.isfinite(bar)
+                    else {"improves": False, "worsens": False, "n_tracks": 0, "reason": "no solver error to judge against"})
+        taken_rs, held_rs, rs_rep_stage = RS.judge_rolling_shutter(
+            best, fit_g, held_g, wh, cfg, solver, fac=fac, solve_fn=_rs_solve, heldout_fn=_rs_held, judge_fn=_rs_judge,
+            clusters=clusters, solver_error=float(errors[best.name]["error"]), frames=np.asarray(kf_frames, np.float64),
+            log=log)
+        rs_rep.update(rs_rep_stage)
+        if rs_rep_stage.get("taken"):
+            best = RungResult("RS", taken_rs.w2c, taken_rs.params_by_block, taken_rs.block_of, taken_rs.fit_rms_px,
+                              taken_rs.n_points, taken_rs.termination, taken_rs.n_degenerate, X=taken_rs.X,
+                              initial_cost=taken_rs.initial_cost, final_cost=taken_rs.final_cost,
+                              iterations=taken_rs.iterations, seconds=taken_rs.seconds)
+            held["RS"] = held_rs
+            errors["RS"] = errors[_flags if _flags in errors else "R0"]
+            rungs["RS"] = {"taken": True, "readout_frames": rs_rep_stage.get("tau_frames"), "camera_freedom": _flags,
+                           "passes": rs_rep_stage.get("passes"), "verdict_vs_best": rs_rep_stage.get("verdict_vs_best"),
+                           "heldout_median_px": (float(np.median(list(held_rs.values()))) if held_rs else None),
+                           "n_heldout_tracks": len(held_rs or {}), "fit_rms_px": best.fit_rms_px,
+                           "ceres": {"final_cost": best.final_cost, "iterations": best.iterations}}
     # THE SCALE LOCK (phase 3b): the metre read again from the gauge's step lengths, which drift
     # leaves alone; re-imposed only by the user's rule (precision.scale_lock)
     lock: Dict[str, Any] = {"measured": False, "reason": "refine.scale_lock: false"}
@@ -1082,7 +1125,7 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
             "ladder_restricted_by": RUNGS_ENV if os.environ.get(RUNGS_ENV, "").strip() else None,
             "error_factor": fac, "dropped": {"fit_init": dropped_fit, "heldout_init": dropped_init},
             "timing": timing, "loops": loops, "prior_sigma_ladder": ladder_p, "scale_lock": lock,
-            "odometry": odometry}
+            "odometry": odometry, "rolling_shutter": rs_rep}
 
 
 def worsens_by_rule(v: dict) -> bool:
@@ -1302,7 +1345,7 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     # with its camera) — not against X0, triangulated from the initial poses with F0's camera
     wloc = localize_witnesses(best, core["X"], tr["obs_track"], tr["obs_frame"],
                               tr["obs_uv_native"], wit, (cam.width, cam.height), bound, cfg)
-    rs = rolling_shutter_diag(core["held_groups"], best, solver, cfg)
+    rs = dict(rolling_shutter_diag(core["held_groups"], best, solver, cfg), **core["rolling_shutter"])
     # prior-depth cross-check: triangulated depth vs Omega's depth at the query pixel
     cross = _prior_cross_check(out, kf, core["X"], core["fit_groups"], best, cam)
     # the classical cross-check (phase 3d): COLMAP / GLOMAP's independent trajectory against F5's
