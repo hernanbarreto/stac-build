@@ -1,0 +1,93 @@
+PROMPT PARA CLAUDE CODE · STAC-BUILD · IDEAS DE VGGT-SLAM 2.0 EN LA ETAPA Ω (RAMAS PROPIAS, SEPARADAS DE LA AUDITORÍA COLMAP/GLOMAP)
+
+Contexto
+STAC-BUILD convierte un video de celular en una nube métrica certificada (intake → Ω en el fork VGGT-Long → núcleo de precisión F0–F6 → publicación). VGGT-SLAM 2.0 (MIT-SPARK, arXiv 2601.19887, RSS 2026) trae dos ideas que tocan problemas abiertos de la etapa Ω:
+1. Costura con calibración. La costura entre submapas exige que las dos inferencias del frame compartido coincidan en pose Y en calibración, y modela la diferencia de intrínsecos (K_i⁻¹·K_j) en lugar de suponerla nula. En STAC el mismo frame recibe focales que difieren hasta 21,8 px entre dos inferencias de Ω (pccr: +1,4 / +11,8 / −1,9 / +21,8 px; 8,8 px RMS por inferencia, metric_lock.inference_focal_error), cada chunk se desproyecta con su propia K (VGGTOmegaAdapter.infer_chunk) y la costura es rígida (exact_seam_align → robust_rigid, s = 1). Hoy ese error solo se usa para no confundirlo con un zoom; no corrige la geometría.
+2. Verificador de loops por atención, sin entrenamiento: lee la atención global del backbone sobre el par candidato. En STAC los candidatos salen de SALAD a similitud 0,65 (loops.salad), cada uno cuesta un bridge (inferencia Ω de dos ventanas + anclas DA3) y el grafo de keyframes no se aplica con menos de min_judge_closures (5 a 0,95). El 14/09 (ea5cd98) se borró un verificador "estilo 2.0" que comparaba por coseno los register tokens: no es el mecanismo del paper y nunca se midió.
+Tu tarea: implementar las dos ideas detrás de flags, con instrumentos que midan su efecto, en ramas propias, y dejarlas corriendo contra la referencia actual en pccr y zaragoza. Todo separado de la auditoría COLMAP/GLOMAP.
+
+Reglas
+1. El entregable es código y tests. No escribas archivos .md de ningún tipo: ni análisis, ni planes, ni documentación, ni reportes. Los resultados de cada corrida van como JSON, CSV y PNG dentro del directorio de la corrida.
+2. Implementá todo. Trabajá por fases, en el orden indicado, con tests y un commit por fase en cada repo que toque la fase. No pidas permiso para pasar de una fase a la siguiente.
+3. Implementás y medís, pero nunca declarás un resultado como válido, bueno o malo, ni lo interpretás. La validación es visual y la hace Hernán. Al cerrar cada fase informá solo qué se implementó, qué tests pasan y dónde quedaron los resultados.
+4. Ramas, sin mezclar:
+   - fork hernanbarreto/VGGT-Long: rama nueva `stac-slam2` desde `stac-metric-graph` (f576cbf, el pin actual de stac-build).
+   - stac-build: rama nueva `slam2-omega` desde `main` (d0bc0f6 más el commit que agrega este archivo y su aviso en CLAUDE.md; el código es el mismo). No partas de `audit/precision-geometry-2026-10-23`, no traigas ni cherry-pickees nada de ella y no la toques. En vendor/ lo único que cambia es el puntero del submódulo vendor/VGGT-Long a `stac-slam2`.
+5. Apagado = f576cbf bit a bit. Las secciones nuevas son opcionales en el config del fork: ausentes = apagado (explícito y testeado); presentes, cada subclave es obligatoria (cfg_req, sin defaults en el código). El map worker escribe las secciones solo cuando el config del servidor las enciende, así el vggt_omega_config.yaml de la referencia no cambia.
+6. No modifiques vendor/vggt-omega (pin 39a0cb8a). Todo acceso interno a Ω es por hooks que se retiran al terminar, con test de que la salida del modelo con y sin hook es idéntica bit a bit.
+7. Licencias: VGGT-SLAM es BSD-2, pero su fork de VGGT (MIT-SPARK/VGGT_SPARK), donde vive el verificador, es CC BY-NC 4.0. No copies código de ahí: implementá desde la definición matemática de este prompt.
+8. Determinismo: torch estricto como el resto del fork (repro), orden fijo, submuestreos por stable_pick. Todo puntaje y toda estadística nueva se calculan en CPU float64 a partir de tensores capturados. Cada producto nuevo lleva el sello del fork y es resume-safe como los existentes (json + sello; un sello distinto lo invalida).
+9. GPU: respetá server/card_table.json y nunca corras un paso de GPU en paralelo con otro proceso que use la GPU. Los tests no pueden requerir GPU: datos sintéticos, módulos diminutos con pesos aleatorios, etapas simuladas.
+10. Fuera de alcance, no lo implementes: SL(4) como estado, submapas cortos, escala por mediana de cocientes, backend de solo poses, tiempo real, CLIP/consulta abierta. No toques `camera_and_register_tokens` del adapter (cambiaría las npy de los chunks).
+
+Fase 0 · Ramas y andamiaje
+- Creá las dos ramas. Servidor: secciones opcionales `correction_graph.seams` y `loops.attention_gate` en server/config.yaml (comentadas, apagadas), con su cargador tipado en server/reconstruction/loops/config.py y su escritura al config del fork en server/workers/map_worker.py, junto a donde hoy se escriben exact_seam_align y Loop.SALAD. En el fork viajan como Model.seams y Model.loops.attention_gate.
+- Tests: con las secciones ausentes o apagadas, el vggt_omega_config.yaml que escribe el map worker es byte a byte el de hoy; corrida sintética del fork (al estilo de tests/test_stac_loop_stage.py) con las secciones ausentes = productos idénticos byte a byte a los de f576cbf, ignorando solo los campos de sello; una sección presente con una subclave faltante levanta error por nombre.
+
+Fase 1 · Instrumento de costura offline (fork, sin cambio de comportamiento)
+- `python -m loop_utils.seam_radial --run <maplong_run>`, sin GPU, sobre una corrida terminada. Lee `_tmp_results_unaligned/chunk_*.npy` (se conservan: delete_temp_files forzado a False), metric_lock.json, scale_graph.json y chunk_sim3.json. Con las marcas y sellos de cada npy determiná en qué estado quedó y reconstruí el estado exacto en que la costura lo leyó; si no se puede probar sin ambigüedad, la herramienta se niega por nombre y nunca supone.
+- Por costura k→k+1, sobre las mismas correspondencias exactas que usa exact_seam_align (_stac_seam_copies, máscara, _stac_seam_keys): partí por stable_pick en mitad de ajuste y mitad held-out, ajustá robust_rigid sobre la de ajuste y, sobre la held-out, reportá el residuo por tramos de radio normalizado al punto principal (r = ‖(u − cx, v − cy)‖ / f, tramos configurables) y por tramos de profundidad, separado en componente lateral (X, Y en la cámara del frame compartido) y axial (Z). Además, el desfase de fx, fy, cx, cy entre las dos inferencias en los frames compartidos (mediana y dispersión).
+- Contrafácticos sobre copias en memoria, nunca sobre las npy:
+  a. common_K (como la fase 2, con session_median y con intake_probe si existe): residuo held-out de cada costura antes/después y pares held-out de superficie dentro de cada chunk antes/después (metric_lock.surface_pair_correspondences, offsets de _stac_holdout_pairs).
+  b. affine_seam (el modelo literal de 2.0): por costura, A = K_k⁻¹·K_{k+1} con los intrínsecos medianos de los frames compartidos en cada inferencia, expresada en la cámara del frame compartido del medio y aplicada a toda la copia del chunk k+1 antes del ajuste rígido; mismo antes/después. Este modelo solo se mide, no entra en la cadena: una transformación afín de todo el chunk no se puede representar con cámaras euclidianas de una K por frame, que es lo que necesitan F0–F5.
+  Para cada uno, el veredicto de metric_lock.decide_change con los parámetros de correction_graph.graph (heldout_confidence, improvement_error_factor). Es un cálculo, no una recomendación.
+- Salidas: seam_radial.json, un CSV por costura y PNG del residuo contra radio (lateral y axial) por costura.
+- Tests con chunks sintéticos de cámara, profundidad y poses conocidas: (a) dos inferencias con la misma K → residuo plano en r y desfase 0; (b) focal 3 % distinta en el chunk k+1 → el residuo lateral crece con r, el axial no, el desfase se recupera y ambos contrafácticos bajan la held-out; (c) estado ambiguo de las npy → la herramienta se niega.
+
+Fase 2 · K común en la etapa Ω (fork + stac-build), flag `correction_graph.seams.focal_model: none | common_K`
+- common_K: toda inferencia de Ω se re-desproyecta con UNA K de sesión. La profundidad por píxel no cambia, cambian los rayos; c2w no cambia; world_points e intrinsic de la npy cambian juntos; la procedencia (frame, píxel) es invariante.
+- Fuente de la K: `common_K_source: session_median | intake_probe`. session_median = mediana de fx, fy, cx, cy de Ω sobre los frames por dueño (frame_owner). intake_probe = la K que produce intake.focal; si no llega al fork, pasala por el config que escribe el map worker; si no existe para la sesión, la variante se registra como no ejecutada con el motivo.
+- Cuándo: chunks, justo después de _stac_metric_lock (el detector de zoom sigue leyendo las focales propias de Ω) y antes de planear bridges y de las costuras; bridges, después de _stac_lock_bridges y antes de _stac_measure_loops. Así loops y costuras miden sobre la misma calibración. Un chunk que el metric lock declara con zoom conserva su propia K, declarado.
+- Juicio: la corrección se aplica solo si decide_change pasa en el residuo held-out de las costuras y los pares held-out dentro de los chunks no empeoran por la regla (el espejo de decide_change; si no existe en esta rama, implementalo con test). Si no pasa: identidad, declarada. Reporte focal_model.json: K usada, fuente, chunks excluidos por zoom, antes/después held-out, veredicto y motivo.
+- El registro de intrínsecos que lee F0 sale de las npy corregidas: test de que F0 lee la K común cuando la corrección se aplicó y la de Ω cuando no.
+- Tests: en la escena sintética de la fase 1, common_K recupera la focal inyectada y baja la held-out; con K iguales da identidad exacta; un caso donde empeora los pares internos queda en identidad; un chunk con zoom conserva su K; focal_model none = bytes de f576cbf.
+
+Fase 3 · Verificador de loops por atención (fork + stac-build), flag `loops.attention_gate`
+- Config: `mode: off | gate`, `layer`, `min_score`, `top_fraction`, `salad_similarity_threshold` (null = deja loops.salad.similarity_threshold como está; un número lo reemplaza solo con el gate encendido).
+- Dónde: en process_long_sequence, rama STAC, después de armar loop_results (dueños, ventanas compartidas, duplicados) y antes de _stac_metric_lock / _stac_plan_bridges, mientras self.model sigue cargado.
+- Captura: por candidato (i, j), una pasada de Ω sobre esos 2 keyframes con el mismo preprocesamiento y resolución de la corrida (omega_resolution). Hook de forward en `aggregator.inter_frame_blocks[L].attn.qkv` (LinearKMaskedBias). De su salida armá q y k como SelfAttention.compute_attention: reshape [B, N, 3, H, D], q_norm y k_norm del propio módulo; los bloques globales no llevan RoPE (rope None). Solo se aceptan bloques de tipo "global" según aggregator.inter_frame_attention_types; los de tipo "register" (hoy [2, 6, 9, 14, 20]) se rechazan por nombre. Layout por frame: 1 token de cámara + num_register_tokens registros y los parches desde aggregator.patch_token_start, frame por frame. Leé todo del modelo, nada hardcodeado.
+- Test de fidelidad: en un SelfAttentionBlock diminuto y un agregador falso con la misma interfaz, pesos aleatorios en CPU, la atención recomputada con q, k, v capturados (SDPA → proj) coincide con la salida del módulo.
+- Puntaje (definición propia a partir del paper): para el par ordenado (A, B), en la capa L, por cabeza h:
+  Q = queries de todos los tokens de A y B; K_A = keys de los parches de A.
+  P_h(k, t) = softmax sobre t ∈ Q de ⟨q_t, k_k⟩, sin escala, para cada k ∈ K_A.
+  P = media de P_h sobre las cabezas.
+  m_A(k) = máx sobre t ∈ tokens de A de P(k, t).
+  r(t) = máx sobre k ∈ K_A de P(k, t) / m_A(k), para t ∈ tokens de B.
+  score(A, B) = media del top_fraction superior de r (0,25 en el paper).
+  El candidato pasa si mín(score(A, B), score(B, A)) ≥ min_score.
+- gate: los que no pasan no llegan a los bridges. attention_gate.json registra todos los candidatos con sus dos puntajes, capa, umbral y veredicto.
+- Calibración offline: `python -m loop_utils.attention_calibrate --run <maplong_run> [--labels <json>]` (GPU: una pasada de 2 frames por par).
+  - Etiquetas de la corrida terminada: positivos = candidatos cuyo bridge verificó y sobrevivió la consistencia de ciclos (loop_edges.json, pose_graph.json); negativos = bridges rechazados por la verificación, más pares de keyframes fuera de la banda no local sin solape de frustum con las poses finales (selección estable, cantidad configurable). Etiquetas manuales opcionales con el mismo esquema. Si los archivos no permiten etiquetar sin ambigüedad, lo declara y usa solo las manuales.
+  - Por cada bloque global: AUC con IC bootstrap, curva precisión–recall, n de positivos y de negativos.
+  - Elección por regla declarada en config (`calibration.select: max_auc_lower_ci`, `calibration.target_precision`): la capa con mayor cota inferior del IC y el menor umbral que alcanza la precisión objetivo sobre las etiquetas. Escribe attention_calibration.json con capa, umbral, recall y el n detrás; con etiquetas insuficientes (configurable) no elige y lo declara.
+  - Para una grilla configurable de similitud SALAD: cuántos candidatos propone cada valor y cuántos pasan el gate con esa capa y umbral.
+- Tests: con un módulo diminuto, el puntaje separa un par repetido de uno de ruido; simetría del mínimo; capa register rechazada; gate con todos pasando = la rama sin gate byte a byte; dos corridas sintéticas con gate idénticas bit a bit; la calibración recupera capa y umbral sobre etiquetas sintéticas de separación conocida.
+
+Fase 4 · Variantes y comparación (stac-build)
+- En evaluation.variants:
+  - slam2_focal_common: focal_model common_K, session_median.
+  - slam2_attention_gate: gate con salad_similarity_threshold null.
+  - slam2_attention_gate_salad: gate con salad_similarity_threshold 0.60 (valor inicial propuesto: entre el p99 medido en pccr, 0,57, y el 0,65 actual).
+  - slam2_all: common_K + gate + 0.60.
+  Capa y umbral se leen del attention_calibration.json de la escena; si no existe o no eligió, las variantes con gate quedan no ejecutadas con el motivo.
+- Costo: cada variante es una reconstrucción completa desde Ω en su propia copia de la sesión (el sello del fork cambia con el código y el config: no hay reuso). Regla configurable `evaluation.slam2.skip_if_offline_identity: true`: si el contrafáctico de la fase 1 da que common_K no pasa la regla en la escena, slam2_focal_common se registra como no ejecutada con ese motivo, porque sería la referencia.
+- Comparador bit a bit: `reference` de esta rama contra una corrida existente de la misma escena hecha con main d0bc0f6 (o un commit posterior de main que solo cambie texto) + f576cbf y el mismo config, si la hay en el pod. Compara por procedencia (arrays de las npy de chunks y nube publicada), ignora solo los sellos, y reporta igualdad o la primera diferencia por nombre.
+- Tabla por escena y variante (CSV + JSON + PNG), con la diferencia contra la referencia y sin dictamen:
+  - residuo de costura por costura y por tramo de radio, y veredicto de focal_model;
+  - candidatos SALAD, pasados por el gate, bridges, cierres tras la consistencia de ciclos, jueces y veredicto del grafo de keyframes (APPLY/IDENTITY y motivo);
+  - pares held-out del fork y held-out de F5 (refine.json);
+  - fases 1 y 2 de la batería donde haya cotas de referencia, cobertura y costo por etapa (fase 4 de la batería).
+- La nube de cada variante queda abrible en el visor con el nombre de la variante. Usá lo que ya tenga la batería; si no lo tiene, agregá la carga como capa.
+- Tests del registro de variantes, de la regla de salto, del comparador (iguales / primera diferencia) y de la tabla con etapas simuladas.
+
+Fase 5 · Pod y ejecución
+- scripts/update_pod_slam2.sh, idempotente, en el pod: checkout de `slam2-omega`, submódulo en `stac-slam2`, tests de ambos repos con log en analysis/2026-10-29_slam2/, y los comandos siguientes impresos. No toca la rama de auditoría ni sus vendors.
+- En pccr y después en zaragoza, en este orden:
+  1. seam_radial y attention_calibrate sobre las corridas existentes;
+  2. `python -m server.evaluation run --scenes <escena> --variants reference slam2_focal_common slam2_attention_gate slam2_attention_gate_salad slam2_all`;
+  3. el comparador bit a bit de la referencia.
+  Una variante que falla queda registrada con su error y no frena las demás.
+- El manifiesto de cada corrida registra rama y commit de stac-build y del fork.
+
+Cierre
+Al terminar la fase 5 informá: commits de cada repo, tests que pasan, dónde quedaron los resultados de cada escena y variante, y qué variantes no se ejecutaron y por qué. No incluyas conclusiones sobre la calidad de los resultados.
