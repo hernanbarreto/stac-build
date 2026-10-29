@@ -1,5 +1,16 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ 2026-10-29 — NEXT TASKS, IN THIS ORDER (USER: "para que fable al volver a conectarse actualice el repo local y trabaje con todas las tareas")
+- One GPU task at a time; never mix the two branches.
+- 1. COLMAP/GLOMAP audit: checkout `audit/precision-geometry-2026-10-23` and follow the block "ACTUALIZACIÓN 2026-10-23"
+  at the top of its claude_stac.txt (scripts/update_pod_precision_audit.sh, then the pccr run). Run it on a COPY of the
+  pccr session, never the original: the original keeps the main baseline that task 2 compares against.
+- 2. Back on main: execute EVERY phase of `claude_stac_slam2.txt` (the VGGT-SLAM 2.0 ideas in the Ω stage), in order,
+  tests + one commit per phase, without asking between phases, on its own branches (`slam2-omega` here from main,
+  `stac-slam2` in the fork from `stac-metric-graph`). Code + tests only, no .md files, never declare a result valid:
+  Hernán validates visually.
+
+
 ## ⭐⭐⭐ 2026-10-17 (01:10) — THE REAL TEXTURE ON GENRECON'S MESH, ITS MATERIAL KEPT (USER: "la mejor que he visto hasta ahora, impresionante")
 - CLOSING VERDICT OF THE DAY (USER 02:00): "creo que tenemos a hoy el pipeline ganador … pasamos por encima al estándar colmap y mvs por
   muchísimo" — intake → Ω chunks → F0–F6 → certified cloud → VLM/SAM3 → certification → GenRecon (presence from the cloud) → the
