@@ -149,6 +149,10 @@ if [ "$DO_TESTS" = 1 ]; then
              tests/test_p3_projection.py tests/test_certify_mask_filter_camera.py tests/test_vote_evidence.py)
   cd "${ROOT}/server"
   export OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 MKL_NUM_THREADS=4
+  # on a pod WITH a card the first test that touches torch initialises CUDA: repro.ensure_cublas_workspace
+  # then refuses a process whose cuBLAS workspace was not pinned before (the same two variables start.sh
+  # exports for the backend) — without them test_precision_colmap_tier errors at setup (pod 2026-10-31)
+  export CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONHASHSEED=0
   LOGDIR="${ROOT}/analysis/2026-10-23_precision_audit"; mkdir -p "${LOGDIR}"
   if [ -x "${PY_MAP}" ]; then
     "${PY_MAP}" -m pytest -q -p no:cacheprovider "${TESTS_MAP[@]}" 2>&1 | tee "${LOGDIR}/pytest_mapanything.log" | tail -3
