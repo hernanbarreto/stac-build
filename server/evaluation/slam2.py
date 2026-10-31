@@ -613,10 +613,16 @@ class Slam2Hooks:
     ``after`` once it finished (instruments, viewer publication, bit-for-bit of the reference)."""
 
     def __init__(self, slam2: Dict[str, Any], base_config: Dict[str, Any], specs: Sequence[Any], *,
-                 projects_dir: Optional[Path], reference: str = "reference", gpu: bool = True, log: Callable = print):
+                 projects_dir: Optional[Path], reference: str = "reference", gpu: bool = True, log: Callable = print,
+                 calibration_specs: Optional[Sequence[Any]] = None):
         self.slam2 = slam2
         self.base_config = base_config
         self.specs = list(specs)
+        # the attention calibration's parameters come from the gate variants' declarations — of EVERY configured
+        # variant (``calibration_specs``), not only the ones of this run: one variant per invocation (the disk)
+        # left the pccr reference of 2026-10-31 without a calibration ("no gate variant declares calibration
+        # parameters") and the gate variants of the next invocations with nothing to resolve from
+        self.calibration_specs = list(calibration_specs) if calibration_specs is not None else self.specs
         self.projects_dir = projects_dir
         self.reference = reference
         self.gpu = gpu
@@ -634,7 +640,7 @@ class Slam2Hooks:
         try:
             info["seam_radial"] = run_seam_radial(sd, self.base_config, self.log)
             if spec.name == self.reference:
-                params = gate_params_from_overrides(self.specs)
+                params = gate_params_from_overrides(self.calibration_specs)
                 if not self.gpu:
                     info["attention_calibrate"] = {"ran": False, "reason": "no card for this run (--no-gpu-check): the "
                                                                            "calibration needs one Ω pass per labelled pair"}

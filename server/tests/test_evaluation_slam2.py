@@ -274,3 +274,23 @@ def test_the_manifest_records_branch_and_commit_of_both_repos():
     g = repo_git_state()
     for key in ("stac_build", "fork_vggt_long"):
         assert "commit" in g[key] and "branch" in g[key] and len(g[key]["commit"]) >= 7, g[key]
+
+
+def test_the_calibration_parameters_come_from_every_configured_variant_not_only_the_runs(tmp_path):
+    """One variant per invocation (the disk being what it is): a run of the reference alone must still find
+    the gate variants' calibration block — 2026-10-31 the pccr reference ran without a calibration and the
+    gate variants of the next invocations had nothing to resolve from."""
+    raw = _raw()
+    gate = V.VariantSpec("slam2_attention_gate", "chain",
+                         overrides={S2.GATE_KEY: {"mode": "gate", "layer": None, "min_score": None, "top_fraction": 0.25,
+                                                  "salad_similarity_threshold": None,
+                                                  "calibration": {"select": "max_auc_lower_ci", "target_precision": 0.95,
+                                                                  "min_labels": 5, "n_negatives": 50, "n_boot": 100,
+                                                                  "confidence": 0.95, "salad_grid": [0.6]}}})
+    ref = V.VariantSpec("reference", "chain", overrides={"certify.keep_unaligned_chunks": True})
+    only_ref = S2.Slam2Hooks(_slam2(), raw, [ref], projects_dir=tmp_path / "p", gpu=False, log=lambda *a: None)
+    assert S2.gate_params_from_overrides(only_ref.calibration_specs) is None             # the old behaviour, by itself
+    hooks = S2.Slam2Hooks(_slam2(), raw, [ref], projects_dir=tmp_path / "p", gpu=False, log=lambda *a: None,
+                          calibration_specs=[ref, gate])
+    params = S2.gate_params_from_overrides(hooks.calibration_specs)
+    assert params is not None and params["top_fraction"] == 0.25 and params["salad_grid"] == [0.6]

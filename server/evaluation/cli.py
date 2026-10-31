@@ -172,7 +172,8 @@ def cmd_run(args, cfg: EvaluationConfig, runner: Optional[V.ChainRunner], log: C
         else:
             from config import PROJECTS_DIR
             _projects = Path(PROJECTS_DIR)
-        hooks = S2.Slam2Hooks(slam2, base_config, specs, projects_dir=_projects, gpu=not args.no_gpu_check, log=_log)
+        hooks = S2.Slam2Hooks(slam2, base_config, specs, projects_dir=_projects, gpu=not args.no_gpu_check, log=_log,
+                              calibration_specs=list(all_specs.values()))    # every configured variant, not only this run's
         _log(f"[evaluation] slam2 hooks on (skip_if_offline_identity {slam2['skip_if_offline_identity']}, references "
              f"{'optional' if slam2['references_optional'] else 'required'})")
     card = None if args.no_gpu_check else card_key_or_none(_log)
