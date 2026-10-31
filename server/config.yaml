@@ -4472,6 +4472,17 @@ evaluation:
         the layered cloud the owner fusion replaces
       overrides:
         "reconstruction.precision.fusion.enabled": false
+    audit_layered_no_rs:
+      kind: chain
+      description: >-
+        (audit 2026-10-31, A/B after the user's eye on pccr_audit2: "muchos más voladores, el piso no está bien")
+        the audit's poses WITHOUT the rolling-shutter correction (readout -1.0 frame taken on pccr_audit2) and
+        the layered cloud of production (owner fusion and the COLMAP tier off); the reconstruction alone
+      stages_off: [vlm, sam3, projection, certify, genrecon]
+      overrides:
+        "reconstruction.precision.refine.rolling_shutter": never
+        "reconstruction.precision.fusion.enabled": false
+        "reconstruction.precision.fusion.colmap_tier": false
     bend_affine_pixel:
       kind: chain
       description: (audit 2026-10-23, A/B) only the bend family forced to epoch 7's pixel ratio; the vote as audited
