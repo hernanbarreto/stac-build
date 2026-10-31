@@ -82,6 +82,35 @@
   poco más pequeño"; zaragoza he saw too BIG — not run); at keyframe 59→60 F5 steps 14.6° where both COLMAP models step
   2.2° (F5 alone there). `tools/precision_audit_summary.py` reads a run (1e0ea73). The chain was re-run with the fixes on
   `pccr_audit2` (a frames + video copy) once the first run was through. USER: "quiero ver colmap glomap actuando".
+- 2026-10-31 (night) — THE A/B AND THE DIAGNOSIS. pccr_audit2 (the full audit chain, certified): USER "a pesar que tiene
+  muchos menos puntos que la original, no tiene mejor calidad, tiene muchos más voladores, en muchos lugares el piso no está
+  bien, en general es mucho peor, salvo el tema de la escala que parece estar algo mejor" → deleted. B = `audit_layered_no_rs`
+  on `pccr_audit3` (the audit's F3–F5 without the rolling shutter + production's layered F6, reconstruction only): NOT better
+  — the start of the walk (kf 0–60) sank 1.3 m under the floor (chunk check: `depth`, floor −132 cm / ceiling +85 cm), the
+  bend's s_k 1.43 [0.71–1.69] there against 1.0–1.1 elsewhere (production 1.07 vs 0.84–0.93), isolated points 0.054 %
+  against production's 0.008 % (8-NN > 5× the median spacing), the R1 camera fx/fy 400.6/352.7 against production's
+  388/385, the loop gap median 0.60 → 0.07 m but 17 of 33 loop windows still OPEN (the start↔end ones 0.16–0.60 m,
+  rigid-fit rotations 4–17°). The same s_k blow-up was in pccr_audit2's log (scale 1.07 [0.69–1.52], jump 0.49): not the
+  rolling shutter, not the fusion. THE REFEREE: GLOMAP's own trajectory (the focal prior) gives chunk 0 0.70 of chunk 1's
+  walk, production 0.79, the audit F5 0.96; and the E-matrix of the MASt3R-bridged tracks per loop pair agrees with
+  GLOMAP's relative rotation under 1° on the ten start↔end pairs while the audit F5's FINAL poses disagree with both by
+  5–6° (production's, without bridges, 2.5°): the bridges were right and the BA did not obey them — started at the
+  drifted walk it never closed the loop and bent the weakest structure (the near-static start) instead. Found on the
+  way: one false bridge (frames 260–2614, 71 verified matches, E rotation 73° off everyone) passed the verification —
+  an essential matrix only says "some rigid geometry", a repeated structure shifted one bay is one too; and the σ
+  relaxation ladder is SKIPPED for the relative model by construction ("the odometry priors hold no shape" — false
+  for a chain of relative priors with σ_rot 0.18°/step). USER: "no puede ser que con colmap glomap mast3r etc nos dé
+  peor que sin ellos, algo estamos implementando mal" — yes. THE FIX (8753b43): `refine.init_poses: classical` — F5
+  starts at GLOMAP's trajectory when ONE model registers EVERY keyframe (`classical_check.classical_init`: Sim3 to the
+  gauge's centres, the classical SHAPE, the gauge's metre and frame; the odometry priors from that chain; the scale lock
+  reads the GAUGE's steps whatever started the ladder — `refine_core(w2c_gauge=)`; the pose epoch = the motion of the
+  LIVE poses; a partial model = omega, declared); default `omega` (the chain as it was); f5_refine reads classical.json;
+  variant `audit_layered_no_rs_classical_init` = run E on `pccr_audit4` (isolations `_no_bridge` / `_absolute_priors`
+  declared in the config, not run). OPEN, not changed: the bridge verification against the EXPECTED relative pose
+  (GLOMAP's or the gauge's within the drift bound) and the σ ladder for the relative model. The main-branch fix of the
+  acta's edge metric (fitters.py, c9e9796) is cherry-picked here (743a21c). Tools of the day in the session scratchpad
+  (`render_views.py`: the same certified cameras on two clouds + elevation + top for the user's phone;
+  `analyze_audit_run.py`).
 
 ## ⭐⭐⭐ 2026-10-17 (01:10) — THE REAL TEXTURE ON GENRECON'S MESH, ITS MATERIAL KEPT (USER: "la mejor que he visto hasta ahora, impresionante")
 - CLOSING VERDICT OF THE DAY (USER 02:00): "creo que tenemos a hoy el pipeline ganador … pasamos por encima al estándar colmap y mvs por
