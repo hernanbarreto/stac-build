@@ -1470,16 +1470,27 @@ def _apply_stac_model_keys(cfg: dict, config: dict) -> dict:
     return cfg
 
 
-def _apply_slam2_sections(cfg_v: dict, mg) -> dict:
+def _apply_slam2_sections(cfg_v: dict, mg, session_dir=None, omega_grid=None, log=None) -> dict:
     """The VGGT-SLAM 2.0 sections (claude_stac_slam2.txt, phase 0): ``Model.seams`` and
     ``Model.loops.attention_gate`` reach the fork ONLY when the server config turns them on
     (correction_graph.seams.focal_model other than none / loops.attention_gate.mode other than
     off). Absent or off, this is a no-op on the dict — the fork config of the reference is byte
     for byte the one of f576cbf and the fork reads an absent section as off (rule 5). Lives in
     a helper for the same reason as :func:`_apply_stac_model_keys`: one writer, testable alone."""
-    from reconstruction.loops.config import fork_model_seams, fork_loops_attention_gate
+    from reconstruction.loops.config import (fork_model_seams, fork_loops_attention_gate,
+                                             intake_probe_K_for_omega)
     seams = fork_model_seams(mg)
     if seams is not None:
+        if seams["common_K_source"] == "intake_probe" and session_dir is not None and omega_grid is not None:
+            # the probe's K reaches the fork through the config it runs with (phase 2); without a
+            # probe the section goes without it and the fork declares the variant not run
+            probe = intake_probe_K_for_omega(session_dir, omega_grid)
+            if probe["K"] is not None:
+                seams["intake_probe_K"] = probe["K"]
+                seams["intake_probe"] = probe["record"]
+            elif log is not None:
+                log(f"[slam2] Model.seams.common_K_source intake_probe: no probe K for this session — "
+                    f"{probe['reason']}; the fork records the variant as not run")
         cfg_v["Model"]["seams"] = seams
     gate = fork_loops_attention_gate(mg)
     if gate is not None:
@@ -2131,7 +2142,11 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                       f"gap ≥ {_mg.loops.salad.min_gap_keyframes} kf, NMS {_mg.loops.salad.nms_threshold} kf")
         # VGGT-SLAM 2.0 sections (claude_stac_slam2.txt): written only when ON — off, the fork
         # config does not change by a byte
-        _apply_slam2_sections(cfg_v, _mg)
+        from precision.camera import omega_grid_for as _ogf
+        _apply_slam2_sections(cfg_v, _mg, session_dir=output_dir.parent,
+                              omega_grid=_ogf(int(_res["native_wh"][0]), int(_res["native_wh"][1]),
+                                              str(_res["mode"]), int(_res["resolution"])),
+                              log=pipe.send_log)
         if cfg_v["Model"].get("seams") is not None:
             pipe.send_log(f"[slam2] Model.seams: focal_model {cfg_v['Model']['seams']['focal_model']} "
                           f"({cfg_v['Model']['seams']['common_K_source']})")

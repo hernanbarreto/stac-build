@@ -181,6 +181,8 @@ class SeamsConfig:
     chunk's own K (today); common_K re-unprojects every inference with ONE session K."""
     focal_model: str                # none | common_K
     common_K_source: str            # session_median | intake_probe
+    judge_samples: int              # BOUND: held-out seam correspondences entering the rule per seam
+                                    # (a stable pick when the seam has more)
 
 
 @dataclass(frozen=True)
@@ -868,6 +870,7 @@ def _parse_seams(se) -> Optional[SeamsConfig]:
     return SeamsConfig(
         focal_model=_choice(se, "focal_model", P, ("none", "common_K")),
         common_K_source=_choice(se, "common_K_source", P, ("session_median", "intake_probe")),
+        judge_samples=_num(se, "judge_samples", P, lo=100, integer=True),
     )
 
 
@@ -1098,7 +1101,37 @@ def fork_model_seams(cfg: MetricGraphConfig) -> Optional[Dict[str, Any]]:
     se = cfg.seams
     if se is None or se.focal_model == "none":
         return None
-    return {"focal_model": str(se.focal_model), "common_K_source": str(se.common_K_source)}
+    return {"focal_model": str(se.focal_model), "common_K_source": str(se.common_K_source),
+            "judge_samples": int(se.judge_samples)}
+
+
+def intake_probe_K_for_omega(session_dir, grid) -> Dict[str, Any]:
+    """The intake focal probe's K (<session>/intake/focal_probe.json, native pixels) carried to the
+    Ω grid ``grid`` (precision.camera.GridMap) for ``Model.seams.intake_probe_K``: {'K': 3x3 list,
+    'record': {...}} or {'K': None, 'reason': ...} when the session has no probe. The fork then
+    declares the variant not run — never a default K."""
+    import json as _json
+    from pathlib import Path as _Path
+    import numpy as _np
+    from precision.camera import K_native_to_grid
+    path = _Path(session_dir) / "intake" / "focal_probe.json"
+    if not path.is_file():
+        return {"K": None, "reason": f"{path} does not exist (intake.focal did not run for this session)"}
+    try:
+        doc = _json.loads(path.read_text())
+    except ValueError as e:
+        return {"K": None, "reason": f"{path} is not readable JSON ({e})"}
+    if doc.get("K") is None or doc.get("native_wh") is None:
+        return {"K": None, "reason": f"{path} carries no K / native_wh"}
+    nat = [int(x) for x in doc["native_wh"]]
+    if nat != [int(grid.native_w), int(grid.native_h)]:
+        return {"K": None, "reason": f"the probe measured a {nat[0]}x{nat[1]} frame, the Ω grid is of a "
+                                     f"{grid.native_w}x{grid.native_h} one"}
+    Kg = K_native_to_grid(_np.asarray(doc["K"], _np.float64), grid)
+    return {"K": Kg.tolist(),
+            "record": {"source": "intake/focal_probe.json", "native_wh": nat, "grid_wh": [int(grid.w), int(grid.h)],
+                       "K_native": _np.asarray(doc["K"], _np.float64).tolist(),
+                       "spread_pct": doc.get("spread_pct"), "n_frames": len(doc.get("frames") or [])}}
 
 
 def fork_loops_attention_gate(cfg: MetricGraphConfig) -> Optional[Dict[str, Any]]:

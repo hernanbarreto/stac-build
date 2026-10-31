@@ -7,9 +7,11 @@ ONLY when the server config turns it on, so the reference's vggt_omega_config.ya
 change by a byte. CPU only."""
 import ast
 import copy
+import json
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 import yaml
 
@@ -23,7 +25,7 @@ from reconstruction.loops.config import (LoopsConfigError, fork_loop_salad,     
                                          gate_salad_similarity_threshold, load_loops_config)
 from synth_metric import raw_server_cfg                                                # noqa: E402
 
-SEAMS_ON = {"focal_model": "common_K", "common_K_source": "session_median"}
+SEAMS_ON = {"focal_model": "common_K", "common_K_source": "session_median", "judge_samples": 20000}
 CALIBRATION = {"select": "max_auc_lower_ci", "target_precision": 0.95, "min_labels": 5,
                "n_negatives": 50, "n_boot": 2000, "confidence": 0.95,
                "salad_grid": [0.55, 0.60, 0.65, 0.70]}
@@ -108,9 +110,10 @@ def test_on_sections_reach_the_fork_config():
 
 
 @pytest.mark.parametrize("seams, gate, named", [
-    ({"focal_model": "common_K"}, None, "correction_graph.seams.common_K_source"),
-    ({"common_K_source": "session_median"}, None, "correction_graph.seams.focal_model"),
-    ({"focal_model": "affine", "common_K_source": "session_median"}, None,
+    ({"focal_model": "common_K", "judge_samples": 20000}, None, "correction_graph.seams.common_K_source"),
+    ({"common_K_source": "session_median", "judge_samples": 20000}, None, "correction_graph.seams.focal_model"),
+    ({"focal_model": "common_K", "common_K_source": "session_median"}, None, "correction_graph.seams.judge_samples"),
+    ({"focal_model": "affine", "common_K_source": "session_median", "judge_samples": 20000}, None,
      "correction_graph.seams.focal_model"),
     (None, {k: v for k, v in GATE_ON.items() if k != "min_score"}, "loops.attention_gate.min_score"),
     (None, {k: v for k, v in GATE_ON.items() if k != "salad_similarity_threshold"},
@@ -155,7 +158,7 @@ def test_the_omega_builder_writes_the_sections_through_the_one_helper():
     assert len(calls) == 1, "one writer of the slam2 sections (the same discipline as _apply_stac_model_keys)"
     body = src[src.index("def _run_vggtomega("):]
     i_salad = body.index('["SALAD"] = fork_loop_salad(_mg)')
-    i_call = body.index("_apply_slam2_sections(cfg_v, _mg)")
+    i_call = body.index("_apply_slam2_sections(cfg_v, _mg,")
     assert i_salad < i_call, "the sections are written after the SALAD block, inside the chunked-metric path"
 
 
@@ -208,3 +211,54 @@ def test_the_cleanup_spares_the_unaligned_chunks_when_asked(tmp_path, keep):
     assert (save / "_tmp_results_unaligned").exists() is keep
     assert not (save / "pcd").exists() and (save / "_tmp_results_aligned").exists()
     assert any("_tmp_results_unaligned KEPT" in m for m in logs) is keep
+
+
+# ── phase 2: the intake probe's K reaches the fork on the Ω grid, only when the session has it ──
+
+def _probe_session(tmp_path, K_native, native_wh):
+    sess = tmp_path / "session"
+    (sess / "intake").mkdir(parents=True)
+    (sess / "intake" / "focal_probe.json").write_text(json.dumps(
+        {"version": 2, "K": K_native.tolist(), "fx": K_native[0, 0], "fy": K_native[1, 1],
+         "cx": K_native[0, 2], "cy": K_native[1, 2], "native_wh": list(native_wh),
+         "frames": ["000000.jpg", "000100.jpg"], "spread_pct": {"fx": 1.0, "fy": 1.0, "cx": 0.0, "cy": 0.0}}))
+    return sess
+
+
+def test_the_probe_K_is_carried_to_the_omega_grid_or_declared_absent(tmp_path):
+    import json as _json
+    from precision.camera import K_native_to_grid, omega_grid_for
+    from reconstruction.loops.config import intake_probe_K_for_omega
+    K = np.array([[1500.0, 0.0, 959.5], [0.0, 1500.0, 539.5], [0.0, 0.0, 1.0]])
+    grid = omega_grid_for(1920, 1080, "max_size", 832)
+    sess = _probe_session(tmp_path, K, (1920, 1080))
+    out = intake_probe_K_for_omega(sess, grid)
+    assert out["K"] is not None and np.allclose(out["K"], K_native_to_grid(K, grid))
+    assert out["record"]["source"] == "intake/focal_probe.json" and out["record"]["grid_wh"] == [grid.w, grid.h]
+    assert intake_probe_K_for_omega(tmp_path / "nowhere", grid)["K"] is None
+    other = intake_probe_K_for_omega(sess, omega_grid_for(464, 832, "max_size", 832))
+    assert other["K"] is None and "1920x1080" in other["reason"]
+
+
+def test_the_section_carries_the_probe_K_only_for_the_intake_source(tmp_path):
+    from precision.camera import omega_grid_for
+    K = np.array([[1500.0, 0.0, 959.5], [0.0, 1500.0, 539.5], [0.0, 0.0, 1.0]])
+    grid = omega_grid_for(1920, 1080, "max_size", 832)
+    sess = _probe_session(tmp_path, K, (1920, 1080))
+    seams_probe = dict(SEAMS_ON, common_K_source="intake_probe")
+    logs = []
+    cfg = _fork_cfg()
+    _helper()(cfg, load_loops_config(_raw(seams=seams_probe)), session_dir=sess, omega_grid=grid, log=logs.append)
+    se = cfg["Model"]["seams"]
+    assert se["common_K_source"] == "intake_probe" and se["judge_samples"] == 20000
+    assert np.asarray(se["intake_probe_K"]).shape == (3, 3) and se["intake_probe"]["native_wh"] == [1920, 1080]
+    # no probe for the session: the section goes without the K and the worker says so
+    cfg2 = _fork_cfg()
+    _helper()(cfg2, load_loops_config(_raw(seams=seams_probe)), session_dir=tmp_path / "none", omega_grid=grid,
+              log=logs.append)
+    assert "intake_probe_K" not in cfg2["Model"]["seams"]
+    assert any("no probe K for this session" in m for m in logs)
+    # the session median source never carries it
+    cfg3 = _fork_cfg()
+    _helper()(cfg3, load_loops_config(_raw(seams=SEAMS_ON)), session_dir=sess, omega_grid=grid, log=logs.append)
+    assert "intake_probe_K" not in cfg3["Model"]["seams"]

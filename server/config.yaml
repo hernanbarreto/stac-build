@@ -3538,8 +3538,12 @@ correction_graph:
   #                                 #   on the seams' held-out residual and the chunks' held-out pairs do not
   #                                 #   worsen, else identity (declared in maplong_run/focal_model.json)
   #   common_K_source: session_median   # session_median | intake_probe — the median fx, fy, cx, cy of Ω
-  #                                 #   over the frames by owner, or the K of intake.focal (absent for the
-  #                                 #   session → the variant is recorded as not run, with the reason)
+  #                                 #   over the frames by owner (zoom chunks excluded), or the K of
+  #                                 #   intake.focal carried to the Ω grid by the map worker (absent for
+  #                                 #   the session → the variant is recorded as not run, with the reason)
+  #   judge_samples: 20000          # BOUND: held-out seam correspondences entering the rule per seam (a
+  #                                 #   stable pick by pixel key when the seam has more); the judges are
+  #                                 #   the shared frames
   loop:                             # exact bridges + verification (§4.1/§4.2)
     anchors_per_bridge: 3           # DA3 anchor frames planned INSIDE each bridge window
                                     # (own metric lock; without them the bridge takes the
