@@ -19,3 +19,16 @@ def _hole_audit_evidence_on_cpu():
     hole_audit.use_device("cpu")
     fit_torch.use_device("cpu")
     yield
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _projects_dir_is_never_the_servers(tmp_path_factory):
+    """No test writes into the server's projects directory: ``config.PROJECTS_DIR`` is a temporary
+    directory for the whole session (2026-10-31: two eval projects, `scene__eval` and `noref__eval`,
+    were left in server/projects by the slam2 hooks of a test that published its variants there)."""
+    import config
+    tmp = tmp_path_factory.mktemp("projects")
+    mp = pytest.MonkeyPatch()
+    mp.setattr(config, "PROJECTS_DIR", str(tmp))
+    yield
+    mp.undo()
