@@ -13,6 +13,7 @@ PNG of phases 1–7 and a log per variant (``<scene>/<variant>/log.txt``) plus r
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 import time
@@ -107,6 +108,20 @@ def _write_manifest(run_dir: Path, man: Dict[str, Any]) -> None:
     (run_dir / "manifest.json").write_text(json.dumps(man, indent=1, sort_keys=True, default=str))
 
 
+def parse_stages_off(text: Optional[str]) -> set:
+    """``--stages-off``: stage ids of the pipeline (pipeline_manager.StageId values), comma-separated;
+    an unknown id is refused by name."""
+    if not text or not str(text).strip():
+        return set()
+    from pipeline_manager import StageId
+    known = {s.value for s in StageId}
+    ids = [x.strip() for x in str(text).split(",") if x.strip()]
+    bad = [x for x in ids if x not in known]
+    if bad:
+        raise CliError(f"--stages-off: not stages of the pipeline: {bad} (known: {sorted(known)})")
+    return set(ids)
+
+
 def cmd_run(args, cfg: EvaluationConfig, runner: Optional[V.ChainRunner], log: Callable) -> int:
     from evaluation import cost as COST
     from evaluation import determinism as DET
@@ -115,6 +130,13 @@ def cmd_run(args, cfg: EvaluationConfig, runner: Optional[V.ChainRunner], log: C
     base_config = read_config_once()
     all_specs = V.load_variants(cfg.raw)
     specs = select_variants(args.variants, all_specs)
+    off_cli = parse_stages_off(getattr(args, "stages_off", None))
+    if off_cli:
+        # the run's own stage switch (claude_stac_slam2.txt phase 5: the Ω-stage variants compared at
+        # the reconstruction's cloud — the segmentation chain adds nothing they measure): joined to every
+        # chain variant's stages_off, recorded in the manifest and in each variant's record
+        specs = [dataclasses.replace(s, stages_off=sorted(set(s.stages_off) | off_cli))
+                 if s.kind in ("chain", "chain_continuation") else s for s in specs]
     scenes = [resolve_scene(s, cfg) for s in [x.strip() for x in args.scenes.split(",") if x.strip()]]
     if not scenes:
         raise CliError("no scene given")
@@ -137,6 +159,7 @@ def cmd_run(args, cfg: EvaluationConfig, runner: Optional[V.ChainRunner], log: C
     man = DET.run_manifest(run_id, scenes, {s.name: s for s in specs}, cfg, base_config, eff, gpu=not args.no_gpu_check,
                            argv=list(sys.argv[1:]), status="running", repeat=args.repeat)
     man["git"] = repo_git_state()                 # branch + commit of stac-build and of the fork (phase 5)
+    man["stages_off_cli"] = sorted(off_cli)       # the run's stage switch (--stages-off), empty = the chain as configured
     _write_manifest(run_dir, man)
     runner = runner or V.PipelineChainRunner()
     # claude_stac_slam2.txt phase 4: the slam2 hooks when evaluation.slam2 exists
@@ -235,6 +258,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--run-id", default=None, help="run directory name (default: the date_time)")
     r.add_argument("--no-plots", action="store_true", help="skip the PNG charts")
     r.add_argument("--no-gpu-check", action="store_true", help="do not require a free card (tests / CPU-only variants)")
+    r.add_argument("--stages-off", default=None,
+                   help="comma-separated stage ids switched OFF in every chain variant of this run, on top of the "
+                        "variant's own (e.g. vlm,sam3,projection,certify,genrecon = the reconstruction alone); "
+                        "recorded in the manifest (stages_off_cli) and in each variant's record")
     i = sub.add_parser("import-colmap", help="evaluate an external COLMAP-format reconstruction as a variant")
     i.add_argument("--scene", required=True)
     i.add_argument("--name", required=True, help="variant name of the import")

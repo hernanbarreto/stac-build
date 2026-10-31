@@ -3,6 +3,15 @@
 # STAC-Builder — claude_stac_slam2.txt phase 5, the runs, sequenced ON THE POD
 # ---------------------------------------------------------------------------
 #   bash scripts/run_slam2_phase5.sh [--scenes pccr,zaragoza] [--variants a,b,c] [--skip-update] [--keep-backend]
+#                                    [--stages-off vlm,sam3,...] [--full-chain]
+#
+# THE STAGES: by default every variant runs the RECONSTRUCTION alone — the segmentation chain (VLM, SAM3,
+# the mask projection, the certification, GenRecon) is switched off through `evaluation run --stages-off`
+# (recorded in each run's manifest as stages_off_cli and in each variant's record): what the slam2 variants
+# measure and what the comparator reads (loop closures, the attention gate, the seams, F5's held-out, the
+# published cloud) exists at the reconstruction's cloud, and the five stages after it would add 2–3 h per
+# variant and ten vLLM launches. `--full-chain` runs the chain as configured (the metrics battery's own
+# setting); `--stages-off a,b` chooses.
 #
 # One GPU task at a time (prompt rule 9): the backend (and with it vLLM) is stopped first — the
 # fork refuses a card that is not free — then stac-build is brought to slam2-omega and the fork to
@@ -22,15 +31,20 @@ LOGDIR="${ROOT}/analysis/2026-10-29_slam2"
 SCENES="pccr,zaragoza"
 VARIANTS="reference,slam2_focal_common,slam2_attention_gate,slam2_attention_gate_salad,slam2_all"
 DO_UPDATE=1; KEEP_BACKEND=0
+STAGES_OFF="vlm,sam3,projection,certify,genrecon"
 while [ $# -gt 0 ]; do
   case "$1" in
     --scenes) SCENES="$2"; shift 2 ;;
     --variants) VARIANTS="$2"; shift 2 ;;
     --skip-update) DO_UPDATE=0; shift ;;
     --keep-backend) KEEP_BACKEND=1; shift ;;
-    *) echo "usage: $0 [--scenes a,b] [--variants a,b] [--skip-update] [--keep-backend]"; exit 2 ;;
+    --stages-off) STAGES_OFF="$2"; shift 2 ;;
+    --full-chain) STAGES_OFF=""; shift ;;
+    *) echo "usage: $0 [--scenes a,b] [--variants a,b] [--skip-update] [--keep-backend] [--stages-off a,b] [--full-chain]"; exit 2 ;;
   esac
 done
+STAGES_ARGS=()
+[ -n "${STAGES_OFF}" ] && STAGES_ARGS=(--stages-off "${STAGES_OFF}")
 mkdir -p "${LOGDIR}"
 MAIN_LOG="${LOGDIR}/phase5_$(date +%Y%m%d_%H%M%S).log"
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "${MAIN_LOG}"; }
@@ -69,6 +83,7 @@ fi
 cd "${ROOT}/server" || exit 5
 export HF_HOME="${HF_HOME:-/workspace/hf_cache}" PYTHONUNBUFFERED=1 PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8
 log "stac-build $(git -C "${ROOT}" rev-parse --abbrev-ref HEAD) @ $(git -C "${ROOT}" rev-parse --short=12 HEAD); fork $(git -C "${ROOT}/vendor/VGGT-Long" rev-parse --abbrev-ref HEAD) @ $(git -C "${ROOT}/vendor/VGGT-Long" rev-parse --short=12 HEAD)"
+log "stages off in every chain variant: ${STAGES_OFF:-none (the chain as configured)}"
 
 # ── 2. the runs: scene by scene, one variant per evaluation run ──
 IFS=',' read -r -a SC <<< "${SCENES}"
@@ -81,7 +96,7 @@ for scene in "${SC[@]}"; do
     rlog="${LOGDIR}/${rid}.log"
     log "── ${scene} / ${v} → run ${rid} (log ${rlog})"
     t0=$(date +%s)
-    "${PY_DA3}" -m evaluation run --scenes "${scene}" --variants "${v}" --run-id "${rid}" > "${rlog}" 2>&1
+    "${PY_DA3}" -m evaluation run --scenes "${scene}" --variants "${v}" --run-id "${rid}" "${STAGES_ARGS[@]}" > "${rlog}" 2>&1
     rc=$?
     dt=$(( $(date +%s) - t0 ))
     echo -e "${scene}\t${v}\t${rid}\t${rc}\t${dt}\t${rlog}" >> "${SUMMARY}"

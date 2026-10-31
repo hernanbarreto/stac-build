@@ -113,3 +113,32 @@ def test_module_entry_point_prints_help():
     r = subprocess.run([sys.executable, "-m", "evaluation", "list", "--out", "/nonexistent"], cwd=SERVER_DIR,
                        capture_output=True, text=True, timeout=120)
     assert r.returncode == 0
+
+
+def test_stages_off_of_the_run_joins_every_chain_variant_and_is_recorded(tmp_path):
+    """--stages-off (claude_stac_slam2.txt phase 5): the ids are switched off in every chain variant of
+    the run on top of the variant's own, reach the chain runner, and are recorded in the manifest and in
+    each variant's record; an unknown id is refused by name."""
+    scene, _doc = _scene_with_refs(tmp_path)
+    cfg = S.eval_config(**{"endpoints.depth_window_px": 1, "curves.min_bin_n": 1, "variants_keep": "cloud",
+                           "runs_dir": str(tmp_path / "runs"), "slam2.projects_dir": str(tmp_path / "projects")})
+    runner = FakeRunner()
+    rc = CLI.main(["run", "--scenes", str(scene.session_dir), "--variants", "reference,no_drift_correction,scale_mapanything",
+                   "--run-id", "t4", "--no-gpu-check", "--no-plots", "--stages-off", "genrecon,certify"],
+                  runner=runner, cfg=cfg, log=lambda *a: None)
+    assert rc == 0
+    run = tmp_path / "runs" / "t4"
+    man = json.loads((run / "manifest.json").read_text())
+    assert man["stages_off_cli"] == ["certify", "genrecon"]
+    by_name = {c[0]: c for c in runner.calls}
+    assert by_name["reference"][2] == ["certify", "genrecon"]
+    assert by_name["no_drift_correction"][2] == ["certify", "genrecon"]          # its own 'certify' joined, once
+    ref = json.loads((run / "scene" / "reference" / "variant.json").read_text())
+    assert ref["variant"]["stages_off"] == ["certify", "genrecon"]
+    ne = json.loads((run / "scene" / "scale_mapanything" / "variant.json").read_text())
+    assert ne["variant"]["stages_off"] == [] and ne["status"] == "not_executed"
+    rc = CLI.main(["run", "--scenes", str(scene.session_dir), "--variants", "reference", "--run-id", "t5",
+                   "--no-gpu-check", "--no-plots", "--stages-off", "certify,meshing"], runner=FakeRunner(), cfg=cfg,
+                  log=lambda *a: None)
+    assert rc == 2
+    assert not (tmp_path / "runs" / "t5").exists()
