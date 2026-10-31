@@ -85,17 +85,29 @@ def prepare_images(frames_dir: Path, keyframe_files: Sequence[str], ws: Path) ->
     return images
 
 
-def ensure_features_and_matches(ws: Path, features: str, matcher: str, ccfg: Dict[str, Any], log: Callable
-                                ) -> Dict[str, Any]:
+def ensure_features_and_matches(ws: Path, features: str, matcher: str, ccfg: Dict[str, Any], log: Callable,
+                                camera_params: Optional[Sequence[float]] = None) -> Dict[str, Any]:
     """Feature extraction + sequential matching with loop detection into ``ws/database.db``
-    (once per workspace: a marker records the commands; a later variant reuses them)."""
+    (once per workspace: a marker records the commands; a later variant reuses them).
+    ``camera_params``: the single camera's prior in native pixels, in the order of
+    ``ccfg["camera_model"]`` (OPENCV: fx fy cx cy k1 k2 p1 p2) — COLMAP's ``ImageReader.camera_params``;
+    None = COLMAP's own default (a focal of 1.2 × the long side, no prior). A workspace made with
+    another prior is rebuilt: the two-view geometries depend on the camera."""
     if features not in FEATURE_TYPES:
         raise ColmapError(f"features {features!r} not in {FEATURE_TYPES}")
     if matcher not in MATCHER_TYPES:
         raise ColmapError(f"matcher {matcher!r} not in {MATCHER_TYPES}")
+    want = [float(p) for p in camera_params] if camera_params is not None else None
     marker = ws / MARKER
     if marker.exists():
-        return json.loads(marker.read_text())
+        rec = json.loads(marker.read_text())
+        if rec.get("camera_params") == want:
+            return rec
+        log(f"[colmap] {ws}: the features and matches on disk were made with the camera prior "
+            f"{rec.get('camera_params')}, {want} is asked — rebuilt")
+        marker.unlink()
+        for d in ("sparse_incremental", "sparse_global"):
+            shutil.rmtree(ws / d, ignore_errors=True)
     binary = ccfg["binary"]
     db = ws / "database.db"
     if db.exists():
@@ -109,6 +121,8 @@ def ensure_features_and_matches(ws: Path, features: str, matcher: str, ccfg: Dic
         fx += ["--SiftExtraction.max_num_features", str(int(ccfg["sift"]["max_num_features"]))]
     else:
         fx += ["--AlikedExtraction.max_num_features", str(int(ccfg["aliked"]["max_num_features"]))]
+    if want is not None:
+        fx += ["--ImageReader.camera_params", ",".join(f"{p:.10g}" for p in want)]
     cmds.append(_run(fx, log_path, log, float(ccfg["timeout_s"])))
     sq = ccfg["sequential"]
     tree_key = "sift" if features == "SIFT" else ("aliked_n16rot" if features == "ALIKED_N16ROT" else "aliked_n32")
@@ -122,8 +136,8 @@ def ensure_features_and_matches(ws: Path, features: str, matcher: str, ccfg: Dic
     if sq["loop_detection"]:
         mx += ["--SequentialMatching.vocab_tree_path", str(ccfg["vocab_tree"][tree_key])]
     cmds.append(_run(mx, log_path, log, float(ccfg["timeout_s"])))
-    rec = {"features": features, "matcher": matcher, "camera_model": ccfg["camera_model"], "commands": cmds,
-           "colmap": colmap_version(binary), "n_images": len(list((ws / "images").iterdir()))}
+    rec = {"features": features, "matcher": matcher, "camera_model": ccfg["camera_model"], "camera_params": want,
+           "commands": cmds, "colmap": colmap_version(binary), "n_images": len(list((ws / "images").iterdir()))}
     marker.write_text(json.dumps(rec, indent=1))
     return rec
 

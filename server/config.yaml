@@ -2336,6 +2336,22 @@ reconstruction:
       loop_min_inliers: 60              # a verified two-view geometry with at least this many inliers …
       loop_min_gap_keyframes: 24        # … between keyframes at least this far apart (one tracking window)
                                         #   is a loop candidate for F4
+      mappers: [global, incremental]    # the sparse mappers on the ONE database, in this order: global = GLOMAP
+                                        #   (`colmap global_mapper`), incremental = COLMAP's mapper; every one is
+                                        #   cross-checked against F5 (refine.json classical_cross_check.models) and
+                                        #   the first named gives the top-level numbers. pccr_audit 2026-10-31, SIFT +
+                                        #   sequential/vocab-tree matches with the camera prior: GLOMAP 295/295
+                                        #   keyframes in one model (5.3° / 11 cm median against F5, no broken step,
+                                        #   19 min on the card), the incremental 184/295 in 2–3 models (4.0° / 9 cm
+                                        #   where registered, 1.6 min)
+      camera_prior: true                # the session's camera (camera.json at this step: F0's) handed to COLMAP as
+                                        #   the single camera's prior, in native pixels. pccr_audit 2026-10-31:
+                                        #   without it COLMAP started from its default focal (1.2 × 832 = 998 px
+                                        #   against 364 measured), GLOMAP's rotation averaging marked 156 pairs
+                                        #   invalid and the walk broke into segments turned 177° / 90° / 66° (75°
+                                        #   median against F5, 1.2 m); GLOMAP's own options (watermarks ignored, a 5°
+                                        #   rotation bar) did not mend it. false = COLMAP's default (the 2026-10-23
+                                        #   behaviour, for the record)
     # F5 — joint pose + session camera refinement, witness localisation (precision/refine.py)
     refine:
       enabled: true                     # false = no bundle adjustment (the evaluation battery's variant "sin F5",

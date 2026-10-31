@@ -15,8 +15,18 @@ Two things, two moments:
      share. Two photogrammetries that share nothing but the pixels agreeing within their errors
      CERTIFY the poses; where they part, the keyframes are named. An instrument, never a correction.
 
-Outputs ``output/precision/classical/`` (the COLMAP workspace: database, sparse_global) and
+Outputs ``output/precision/classical/`` (the COLMAP workspace: database, sparse_<mapper>) and
 ``classical.json``; a report of another reconstruction or keyframe list is refused by name.
+
+2026-10-31 (pccr_audit): COLMAP had been starting from its DEFAULT focal (1.2 × the long side: 998 px
+against 364 measured) because the keyframe JPEGs carry no EXIF — GLOMAP's rotation averaging marked 156
+pairs invalid and the walk came out in segments turned 177° / 90° / 66° (75° median against F5). The
+session's own camera (camera.json, F0's at this step) is now handed to COLMAP as the prior in native
+pixels (``camera_prior_params``), and BOTH mappers run on the one database (``classical.mappers``):
+GLOMAP with the prior registered 295/295 keyframes in one model (5.3° / 11 cm median against F5, no
+broken step), the incremental mapper 184/295 in 2–3 models. The cross-check reports every mapper and the
+consecutive-keyframe rotation STEPS of each against F5's — a step of 90–180° in one trajectory where
+the other steps a few degrees is a broken segment of that model, not drift.
 """
 from __future__ import annotations
 
@@ -33,7 +43,7 @@ DIRNAME = "classical"
 REPORT_NAME = "classical.json"
 LOOPS_NAME = "loop_candidates.json"
 LOG_TAG = "[classical]"
-VERSION = 1
+VERSION = 2                      # 2: mapping per mapper, camera_prior, cross-check per mapper + steps
 MAX_IMAGE_ID = 2147483647        # COLMAP's pair_id = image_id1 * MAX_IMAGE_ID + image_id2
 
 
@@ -75,9 +85,31 @@ def loop_pairs_from_database(db_path: Path, kf: Sequence[int], min_inliers: int,
     return out
 
 
+def camera_prior_params(out_dir: Path) -> Tuple[List[float], Dict[str, Any]]:
+    """The session's camera (``output/camera.json`` — F0's at the time of this step) as COLMAP's
+    single-camera prior in NATIVE pixels: fx, fy, cx, cy taken from the record grid through the
+    grid map (``K_grid_to_native``), the distortion as recorded (OPENCV's k1 k2 p1 p2 live in
+    normalised coordinates: grid-free). The classical images are the native keyframes."""
+    from precision.camera import K_grid_to_native, load_camera_json
+    cam = load_camera_json(Path(out_dir) / "camera.json")
+    if str(cam.model) != "OPENCV" or len(cam.params) != 8:
+        raise ClassicalError(f"camera.json: model {cam.model!r} with {len(cam.params)} parameter(s) — the classical "
+                             f"prior expects OPENCV (fx fy cx cy k1 k2 p1 p2)")
+    fx, fy, cx, cy, k1, k2, p1, p2 = [float(v) for v in cam.params]
+    K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], np.float64)
+    Kn = K_grid_to_native(K, cam.omega_grid)
+    params = [float(Kn[0, 0]), float(Kn[1, 1]), float(Kn[0, 2]), float(Kn[1, 2]), k1, k2, p1, p2]
+    rec = {"used": True, "source": str(cam.source), "camera_epoch": int(cam.camera_epoch), "model": "OPENCV",
+           "native_size": [int(cam.width), int(cam.height)], "grid": str(getattr(cam.omega_grid, "name", "")),
+           "params_native": params, "params_grid": [fx, fy, cx, cy, k1, k2, p1, p2]}
+    return params, rec
+
+
 def run_classical(session_dir: Path, pcfg, log: Callable = print, runner: Optional[Callable] = None) -> Dict[str, Any]:
-    """The step: features + matches + global mapper on the keyframes; the loop candidates and the
-    report, stamped. ``runner``: replaces ``evaluation.colmap_baseline``'s two stages (tests)."""
+    """The step: features + matches (with the session camera as COLMAP's prior, ``classical.camera_prior``)
+    + every configured mapper (``classical.mappers``) on the keyframes; the loop candidates and the
+    report, stamped. ``runner(ws, files, ccfg, log, camera_params=, mappers=)``: replaces
+    ``evaluation.colmap_baseline``'s stages (tests) and returns (features record, {mapper: mapping record})."""
     from correction.epoch import RECONSTRUCTION_ID_KEY, reconstruction_id_or_none
     from intake.quality import read_session_epochs
     from precision.config import raw_of
@@ -99,17 +131,33 @@ def run_classical(session_dir: Path, pcfg, log: Callable = print, runner: Option
         raise ClassicalError(f"{sel}: {len(kf)} keyframe file(s), need 3 with a frame number each")
     ws = out / "precision" / DIRNAME
     ws.mkdir(parents=True, exist_ok=True)
+    mappers = [str(m) for m in cc.mappers]
+    if not mappers:
+        raise ClassicalError("precision.classical.mappers is empty — name at least one mapper")
+    prior, prior_rec = (camera_prior_params(out) if bool(cc.camera_prior)
+                        else (None, {"used": False, "reason": "classical.camera_prior: false — COLMAP's default focal"}))
+    if prior is not None:
+        log(f"{LOG_TAG} camera prior for COLMAP (native px, {prior_rec['source']} @ camera epoch {prior_rec['camera_epoch']}): "
+            f"fx {prior[0]:.2f} fy {prior[1]:.2f} cx {prior[2]:.2f} cy {prior[3]:.2f}")
+    else:
+        log(f"{LOG_TAG} no camera prior for COLMAP (classical.camera_prior: false) — its default focal")
     t0 = time.time()
     if runner is None:
         from evaluation import colmap_baseline as CB
         CB.prepare_images(session_dir / "frames", files, ws)
-        feat = CB.ensure_features_and_matches(ws, "SIFT", "SIFT_BRUTEFORCE", ccfg, log)
-        mapped = CB.map_sparse(ws, "global", ccfg, log)
+        feat = CB.ensure_features_and_matches(ws, "SIFT", "SIFT_BRUTEFORCE", ccfg, log, camera_params=prior)
+        mapped = {m: CB.map_sparse(ws, m, ccfg, log) for m in mappers}
     else:
-        feat, mapped = runner(ws, files, ccfg, log)
-    models = sorted(mapped.get("models", []), key=lambda m: -int(m["n_images"]))
-    if not models:
-        raise ClassicalError("the global mapper registered no model")
+        feat, mapped = runner(ws, files, ccfg, log, camera_params=prior, mappers=mappers)
+    if not isinstance(mapped, dict) or set(mapped) != set(mappers):
+        raise ClassicalError(f"the mapping records do not match the configured mappers {mappers}: "
+                             f"{sorted(mapped) if isinstance(mapped, dict) else type(mapped).__name__}")
+    largest: Dict[str, Dict[str, Any]] = {}
+    for m in mappers:
+        models = sorted(mapped[m].get("models", []), key=lambda d: -int(d["n_images"]))
+        if not models:
+            raise ClassicalError(f"the {m} mapper registered no model")
+        largest[m] = models[0]
     pairs = loop_pairs_from_database(ws / "database.db", kf, int(cc.loop_min_inliers), int(cc.loop_min_gap_keyframes))
     epochs = read_session_epochs(session_dir)
     rid = reconstruction_id_or_none(out)
@@ -120,12 +168,14 @@ def run_classical(session_dir: Path, pcfg, log: Callable = print, runner: Option
              "pairs": [[int(kf[i]), int(kf[j]), int(n)] for i, j, n in pairs]}
     (out / "precision" / LOOPS_NAME).write_text(json.dumps(loops, indent=1))
     rep = {"version": VERSION, "stage": "classical", "provenance": "tool_measured", **stamp,
-           "features": feat, "mapping": mapped, "largest_model": models[0],
-           "registered_share": float(models[0]["n_images"]) / float(len(kf)),
+           "camera_prior": prior_rec, "features": feat, "mappers": mappers, "mapping": mapped,
+           "largest_model": largest,
+           "registered_share": {m: float(largest[m]["n_images"]) / float(len(kf)) for m in mappers},
            "loop_candidates": len(pairs), "seconds": round(time.time() - t0, 1)}
     (ws / REPORT_NAME).write_text(json.dumps(rep, indent=1, default=float))
-    log(f"{LOG_TAG} global mapper: {len(models)} model(s), the largest {models[0]['n_images']}/{len(kf)} keyframes; "
-        f"{len(pairs)} loop candidate(s) >= {cc.loop_min_gap_keyframes} keyframes apart → {out / 'precision' / LOOPS_NAME}")
+    log(f"{LOG_TAG} " + "; ".join(f"{m} mapper: {len(mapped[m].get('models', []))} model(s), the largest "
+                                  f"{largest[m]['n_images']}/{len(kf)} keyframes" for m in mappers)
+        + f"; {len(pairs)} loop candidate(s) >= {cc.loop_min_gap_keyframes} keyframes apart → {out / 'precision' / LOOPS_NAME}")
     return rep
 
 
@@ -165,26 +215,12 @@ def umeyama_sim3(src: np.ndarray, dst: np.ndarray, w: Optional[np.ndarray] = Non
     return s, R, t
 
 
-def cross_check(out_dir: Path, kf: Sequence[int], w2c_f5: np.ndarray, rid: Optional[str]) -> Dict[str, Any]:
-    """refine.json["classical_cross_check"]: the classical model's poses against F5's."""
-    from correction.epoch import same_reconstruction
-    from evaluation.colmap_io import frame_of_name, list_models, read_model
+def _check_model(model, kf: Sequence[int], w2c_f5: np.ndarray, n_models: int) -> Dict[str, Any]:
+    """One classical model against F5: Sim3 on the registered keyframe centres (one Huber reweighting
+    at the median), the per-keyframe rotation discrepancy after the chordal-mean frame rotation, the
+    worst keyframes — and the consecutive-keyframe rotation STEPS of both trajectories."""
+    from evaluation.colmap_io import frame_of_name
     from precision.scale_lock import centres_of
-    ws = Path(out_dir) / "precision" / DIRNAME
-    rp = ws / REPORT_NAME
-    if not rp.exists():
-        return {"measured": False, "reason": "no classical model (f3_classical did not run)"}
-    rep = json.loads(rp.read_text())
-    taken, why = same_reconstruction(rep, rid)
-    if not taken:
-        return {"measured": False, "reason": why}
-    if rep.get("keyframes_sha256") != keyframe_list_sha(kf):
-        return {"measured": False, "reason": "the classical model was built on another keyframe list"}
-    sparse = ws / "sparse_global"
-    dirs = list_models(sparse) if sparse.exists() else []
-    if not dirs:
-        return {"measured": False, "reason": f"{sparse}: no model"}
-    model = max((read_model(d) for d in dirs), key=lambda m: m.n_images)
     kidx = {int(f): i for i, f in enumerate(kf)}
     rows = []
     for im in model.images.values():
@@ -193,8 +229,9 @@ def cross_check(out_dir: Path, kf: Sequence[int], w2c_f5: np.ndarray, rid: Optio
             continue
         W = np.asarray(im.w2c(), np.float64)
         rows.append((kidx[f], W[:3, :3], W[:3, 3]))
+    rows.sort(key=lambda r: r[0])
     if len(rows) < 3:
-        return {"measured": False, "reason": f"{len(rows)} registered keyframe(s), need 3"}
+        return {"measured": False, "reason": f"{len(rows)} registered keyframe(s), need 3", "n_models": int(n_models)}
     idx = np.array([r[0] for r in rows])
     Rc = np.stack([r[1] for r in rows]); tc = np.stack([r[2] for r in rows])
     C_cl = -np.einsum("nji,nj->ni", Rc, tc)                     # classical centres (its own metre)
@@ -216,12 +253,11 @@ def cross_check(out_dir: Path, kf: Sequence[int], w2c_f5: np.ndarray, rid: Optio
         D = np.diag([1.0, 1.0, np.sign(np.linalg.det(U @ Vt))])
         return U @ D @ Vt
 
+    def angle(Rd) -> float:
+        return float(np.arccos(np.clip((np.trace(Rd) - 1.0) / 2.0, -1.0, 1.0)))
+
     def angles(A):
-        out = []
-        for k in range(len(rows)):
-            Rd = (Rc[k] @ A) @ W5[k, :3, :3].T
-            out.append(float(np.arccos(np.clip((np.trace(Rd) - 1.0) / 2.0, -1.0, 1.0))))
-        return np.asarray(out)
+        return np.asarray([angle((Rc[k] @ A) @ W5[k, :3, :3].T) for k in range(len(rows))])
     A = chordal_mean(np.ones(len(rows)))
     a0 = angles(A)
     ma = float(np.median(a0))
@@ -229,7 +265,28 @@ def cross_check(out_dir: Path, kf: Sequence[int], w2c_f5: np.ndarray, rid: Optio
         A = chordal_mean(np.minimum(1.0, ma / np.maximum(a0, np.finfo(float).tiny)))
     ang = np.degrees(angles(A))
     worst = np.argsort(-res)[:5]
-    return {"measured": True, "n_registered": int(len(rows)), "n_keyframes": int(len(kf)),
+    # the consecutive steps: registered keyframes that follow each other in the keyframe list
+    cons = np.flatnonzero(idx[1:] - idx[:-1] == 1)
+    step_cl = np.degrees([angle(Rc[k + 1] @ Rc[k].T) for k in cons]) if len(cons) else np.zeros(0)
+    step_f5 = np.degrees([angle(W5[k + 1, :3, :3] @ W5[k, :3, :3].T) for k in cons]) if len(cons) else np.zeros(0)
+    dstep = np.abs(step_cl - step_f5)
+    steps: Dict[str, Any] = {"n_steps": int(len(cons))}
+    if len(cons):
+        order = np.argsort(-dstep)[:5]
+        steps.update({"classical_median_deg": float(np.median(step_cl)), "f5_median_deg": float(np.median(step_f5)),
+                      "abs_diff_deg": {"median": float(np.median(dstep)), "p90": float(np.percentile(dstep, 90)),
+                                       "max": float(dstep.max())},
+                      "worst": [{"from_frame": int(kf[idx[cons[k]]]), "to_frame": int(kf[idx[cons[k] + 1]]),
+                                 "classical_step_deg": float(step_cl[k]), "f5_step_deg": float(step_f5[k])}
+                                for k in order],
+                      "reading": "a step of 90-180 deg in ONE trajectory where the other steps a few degrees is a "
+                                 "broken segment of that model, not drift"})
+    cams = list(model.cameras.values()) if getattr(model, "cameras", None) else []
+    cam_rec = None
+    if cams:
+        pr = [float(v) for v in np.asarray(cams[0].params, np.float64).ravel()]
+        cam_rec = {"model": str(getattr(cams[0], "model", "")), "params": pr}
+    return {"measured": True, "n_models": int(n_models), "n_registered": int(len(rows)), "n_keyframes": int(len(kf)),
             "registered_share": float(len(rows)) / float(len(kf)),
             "alignment": {"scale_f5_over_classical": float(s), "method": "Umeyama Sim3 on the registered keyframe "
                                                                        "centres, one Huber reweighting at the median"},
@@ -239,9 +296,45 @@ def cross_check(out_dir: Path, kf: Sequence[int], w2c_f5: np.ndarray, rid: Optio
                              "max": float(ang.max())},
             "worst_keyframes": [{"frame": int(kf[idx[k]]), "position_m": float(res[k]), "rotation_deg": float(ang[k])}
                                 for k in worst],
+            "steps": steps, "camera_refined": cam_rec,
             "reading": "two independent photogrammetries of the same pixels: where they agree within their errors "
                        "the poses are certified by both; the worst keyframes name where they part"}
 
+
+def cross_check(out_dir: Path, kf: Sequence[int], w2c_f5: np.ndarray, rid: Optional[str]) -> Dict[str, Any]:
+    """refine.json["classical_cross_check"]: every classical model (one per configured mapper,
+    ``models``) against F5's poses; the FIRST configured mapper's numbers at the top level
+    (``top_level_from``), the camera prior COLMAP was given (``camera_prior``)."""
+    from correction.epoch import same_reconstruction
+    from evaluation.colmap_io import list_models, read_model
+    ws = Path(out_dir) / "precision" / DIRNAME
+    rp = ws / REPORT_NAME
+    if not rp.exists():
+        return {"measured": False, "reason": "no classical model (f3_classical did not run)"}
+    rep = json.loads(rp.read_text())
+    taken, why = same_reconstruction(rep, rid)
+    if not taken:
+        return {"measured": False, "reason": why}
+    if rep.get("keyframes_sha256") != keyframe_list_sha(kf):
+        return {"measured": False, "reason": "the classical model was built on another keyframe list"}
+    mappers = [str(m) for m in (rep.get("mappers") or ["global"])]
+    found: Dict[str, Dict[str, Any]] = {}
+    for m in mappers:
+        sparse = ws / f"sparse_{m}"
+        dirs = list_models(sparse) if sparse.exists() else []
+        if not dirs:
+            found[m] = {"measured": False, "reason": f"{sparse}: no model"}
+            continue
+        model = max((read_model(d) for d in dirs), key=lambda mm: mm.n_images)
+        found[m] = _check_model(model, kf, w2c_f5, n_models=len(dirs))
+    first = found[mappers[0]]
+    out: Dict[str, Any] = {"measured": bool(first.get("measured")), "mappers": mappers, "models": found,
+                           "camera_prior": rep.get("camera_prior"), "top_level_from": mappers[0]}
+    if first.get("measured"):
+        out.update({k: v for k, v in first.items() if k != "measured"})
+    else:
+        out["reason"] = first.get("reason")
+    return out
 
 def main(argv: Optional[List[str]] = None) -> int:
     import argparse

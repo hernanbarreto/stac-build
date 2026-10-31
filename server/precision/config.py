@@ -278,6 +278,9 @@ class TracksConfig:
 
 # ── F3b: the classical cross-check (COLMAP / GLOMAP) ──────────────────────
 
+CLASSICAL_MAPPERS = ("global", "incremental")
+
+
 @dataclass(frozen=True)
 class ClassicalConfig:
     enabled: bool               # phase 3d: COLMAP 4.x SIFT + vocab-tree loops + global mapper on the
@@ -285,6 +288,14 @@ class ClassicalConfig:
                                 # loop candidates for F4, the pose cross-check in F5's report
     loop_min_inliers: int       # a verified two-view geometry with at least this many inliers …
     loop_min_gap_keyframes: int # … between keyframes at least this far apart is a loop candidate
+    mappers: tuple              # the sparse mappers run on the ONE database, in this order — "global" (GLOMAP,
+                                # `colmap global_mapper`) and/or "incremental" (COLMAP's mapper); every one is
+                                # cross-checked against F5 (refine.json classical_cross_check.models), the first
+                                # named gives the cross-check's top-level numbers
+    camera_prior: bool          # the session's camera (camera.json at this step: F0's) handed to COLMAP as the
+                                # single camera's prior in NATIVE pixels; false = COLMAP's default focal (1.2 × the
+                                # long side — on pccr 998 px against 364 measured: GLOMAP's rotation averaging broke
+                                # the walk into segments turned 177° / 90° / 66°, 2026-10-31)
 
 
 # ── F5: joint refinement + witness localisation ─────────────────────────
@@ -837,7 +848,9 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
     cl = _sub(sec, "classical", "")
     classical = ClassicalConfig(enabled=_bool(cl, "enabled", "classical"),
                                 loop_min_inliers=_num(cl, "loop_min_inliers", "classical", lo=8, integer=True),
-                                loop_min_gap_keyframes=_num(cl, "loop_min_gap_keyframes", "classical", lo=2, integer=True))
+                                loop_min_gap_keyframes=_num(cl, "loop_min_gap_keyframes", "classical", lo=2, integer=True),
+                                mappers=tuple(_str_list(cl, "mappers", "classical", allowed=CLASSICAL_MAPPERS, min_len=1)),
+                                camera_prior=_bool(cl, "camera_prior", "classical"))
     rf = _sub(sec, "refine", "")
     refine = RefineConfig(
         enabled=_bool(rf, "enabled", "refine"),

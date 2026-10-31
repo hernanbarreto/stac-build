@@ -71,12 +71,32 @@ def _session(tmp_path):
     return s, names
 
 
-def _runner(poses_c2w, pairs):
-    def run(ws, files, ccfg, log):
+def _runner(poses_c2w, pairs, broken=None):
+    """The stand-in for the COLMAP stages: the database, one model per mapper asked. ``broken``:
+    {mapper: (k0, angle_deg)} — that mapper's model turned about x by the angle from keyframe k0 on
+    (a broken segment, what GLOMAP produced without the camera prior)."""
+    def run(ws, files, ccfg, log, camera_params=None, mappers=("global",)):
+        run.calls.append({"camera_params": list(camera_params) if camera_params is not None else None,
+                          "mappers": list(mappers)})
+        import shutil
+        (ws / "database.db").unlink(missing_ok=True)                 # a second run on the same session
+        for d in ws.glob("sparse_*"):
+            shutil.rmtree(d, ignore_errors=True)
         _db(ws / "database.db", files, pairs)
-        _model(ws / "sparse_global" / "0", poses_c2w, files)
-        return ({"features": "SIFT", "n_images": len(files)},
-                {"mapper": "global", "models": [{"dir": "sparse_global/0", "n_images": len(files), "n_points3d": 0}]})
+        mapped = {}
+        for m in mappers:
+            poses = np.array(poses_c2w, np.float64).copy()
+            if broken and m in broken:
+                k0, deg = broken[m]
+                a = np.radians(deg)
+                Rx = np.array([[1, 0, 0], [0, np.cos(a), -np.sin(a)], [0, np.sin(a), np.cos(a)]])
+                T = np.eye(4); T[:3, :3] = Rx
+                poses[k0:] = np.einsum("ij,njk->nik", T, poses[k0:])
+            _model(ws / f"sparse_{m}" / "0", poses, files)
+            mapped[m] = {"mapper": m, "models": [{"dir": f"sparse_{m}/0", "n_images": min(len(files), len(poses)),
+                                                  "n_points3d": 0}]}
+        return ({"features": "SIFT", "n_images": len(files), "camera_params": camera_params}, mapped)
+    run.calls = []
     return run
 
 
@@ -90,9 +110,10 @@ def test_loop_pairs_come_from_the_verified_geometries_far_apart(tmp_path):
 def test_the_step_writes_stamped_loop_candidates_f4_takes_only_its_own(tmp_path):
     s, names = _session(tmp_path)
     c2w = _walk()
-    pcfg = replace(PC, classical=replace(PC.classical, loop_min_inliers=60, loop_min_gap_keyframes=4))
+    pcfg = replace(PC, classical=replace(PC.classical, loop_min_inliers=60, loop_min_gap_keyframes=4, mappers=("global",)))
     rep = CK.run_classical(s, pcfg, log=lambda *a: None, runner=_runner(c2w, [(1, 9, 120), (3, 8, 90), (1, 2, 400)]))
-    assert rep["loop_candidates"] == 2 and rep["registered_share"] == 1.0
+    assert rep["loop_candidates"] == 2 and rep["registered_share"] == {"global": 1.0}
+    assert rep["camera_prior"]["used"] and rep["camera_prior"]["params_native"][:4] == [500.0, 500.0, 320.0, 240.0]
     doc = json.loads((s / "output" / "precision" / CK.LOOPS_NAME).read_text())
     assert doc["pairs"] == [[0, 40, 120], [10, 35, 90]] and doc["keyframes_sha256"] == CK.keyframe_list_sha(KF)
     from correction.epoch import reconstruction_id_or_none
@@ -123,14 +144,93 @@ def test_the_cross_check_aligns_the_classical_trajectory_and_names_the_worst_key
         Tc = S @ Tk; Tc[:3, 3] = 0.37 * (S[:3, :3] @ Tk[:3, 3]) + S[:3, 3]
         cl.append(Tc)
     cl = cl[:-1]; names_reg = names[:-1]
-    pcfg = replace(PC, classical=replace(PC.classical, loop_min_inliers=60, loop_min_gap_keyframes=4))
+    pcfg = replace(PC, classical=replace(PC.classical, loop_min_inliers=60, loop_min_gap_keyframes=4, mappers=("global",)))
     CK.run_classical(s, pcfg, log=lambda *a: None, runner=_runner(cl, [(1, 9, 120)]))
     from correction.epoch import reconstruction_id_or_none
     rep = CK.cross_check(s / "output", KF, np.linalg.inv(c2w), reconstruction_id_or_none(s / "output"))
-    assert rep["measured"] and rep["n_registered"] == len(KF) - 1
+    assert rep["measured"] and rep["n_registered"] == len(KF) - 1 and rep["top_level_from"] == "global"
+    assert rep["models"]["global"]["n_registered"] == len(KF) - 1 and rep["camera_prior"]["used"]
     assert abs(rep["alignment"]["scale_f5_over_classical"] - 1 / 0.37) < 0.01
     assert rep["position_m"]["median"] < 0.005 and rep["rotation_deg"]["median"] < 0.05
     worst = {w["frame"] for w in rep["worst_keyframes"][:2]}
     assert worst == {KF[3], KF[7]} and rep["position_m"]["max"] > 0.02
     # no model: declared, never a number
     assert not CK.cross_check(tmp_path / "nowhere", KF, np.linalg.inv(c2w), None)["measured"]
+
+
+def test_the_camera_prior_is_the_session_camera_in_native_pixels(tmp_path):
+    """camera.json's parameters live on the record grid; COLMAP gets them in native pixels through
+    the grid map (fx, fy scaled; cx, cy through the pixel-centre convention), the distortion as is."""
+    s, _names = _session(tmp_path)
+    from precision.camera import CameraModel, grid_full_frame_resize, save_camera_json
+    g = grid_full_frame_resize(1280, 960, 640, 480, "omega")            # the grid is HALF the native frame
+    save_camera_json(s / "output" / "camera.json",
+                     CameraModel(1280, 960, (500.0, 500.0, 319.5, 239.5, 0.01, -0.002, 0.0003, 0.0), "synthetic", 0, g), 0)
+    params, rec = CK.camera_prior_params(s / "output")
+    assert params[0] == 1000.0 and params[1] == 1000.0
+    assert abs(params[2] - ((319.5 + 0.5) * 2.0 - 0.5)) < 1e-9 and abs(params[3] - ((239.5 + 0.5) * 2.0 - 0.5)) < 1e-9
+    assert params[4:] == [0.01, -0.002, 0.0003, 0.0]
+    assert rec["native_size"] == [1280, 960] and rec["camera_epoch"] == 0 and rec["used"]
+
+
+def test_every_mapper_runs_with_the_prior_and_the_cross_check_names_a_broken_segment(tmp_path):
+    """Both mappers on the one database, the camera prior handed to the runner; the cross-check
+    reports each model, the first configured at the top level, and the consecutive-keyframe STEPS
+    name a segment turned 170° in one model (pccr_audit 2026-10-31: GLOMAP without the prior) while
+    the other agrees with F5 step by step."""
+    s, _names = _session(tmp_path)
+    c2w = _walk()
+    pcfg = replace(PC, classical=replace(PC.classical, loop_min_inliers=60, loop_min_gap_keyframes=4,
+                                         mappers=("global", "incremental"), camera_prior=True))
+    runner = _runner(c2w, [(1, 9, 120)], broken={"incremental": (5, 170.0)})
+    rep = CK.run_classical(s, pcfg, log=lambda *a: None, runner=runner)
+    assert runner.calls[0]["mappers"] == ["global", "incremental"]
+    assert runner.calls[0]["camera_params"][:4] == [500.0, 500.0, 320.0, 240.0]
+    assert rep["mappers"] == ["global", "incremental"] and set(rep["mapping"]) == {"global", "incremental"}
+    assert rep["registered_share"] == {"global": 1.0, "incremental": 1.0}
+    from correction.epoch import reconstruction_id_or_none
+    cc = CK.cross_check(s / "output", KF, np.linalg.inv(c2w), reconstruction_id_or_none(s / "output"))
+    assert cc["measured"] and cc["top_level_from"] == "global" and set(cc["models"]) == {"global", "incremental"}
+    g, i = cc["models"]["global"], cc["models"]["incremental"]
+    assert g["rotation_deg"]["median"] < 0.01 and g["steps"]["abs_diff_deg"]["max"] < 0.01 and g["steps"]["n_steps"] == len(KF) - 1
+    assert i["steps"]["abs_diff_deg"]["max"] > 150.0 and i["steps"]["abs_diff_deg"]["median"] < 0.01
+    assert i["steps"]["worst"][0]["from_frame"] == KF[4] and i["steps"]["worst"][0]["to_frame"] == KF[5]
+    assert cc["n_registered"] == len(KF) and cc["camera_prior"]["used"]
+    # the prior off: COLMAP's own default, said
+    pcfg2 = replace(pcfg, classical=replace(pcfg.classical, camera_prior=False))
+    runner2 = _runner(c2w, [(1, 9, 120)])
+    rep2 = CK.run_classical(s, replace(pcfg2, classical=replace(pcfg2.classical, mappers=("global",))),
+                            log=lambda *a: None, runner=runner2)
+    assert runner2.calls[0]["camera_params"] is None and rep2["camera_prior"]["used"] is False
+
+
+def test_colmap_matching_takes_the_camera_prior_and_rebuilds_when_it_changes(tmp_path):
+    """evaluation.colmap_baseline.ensure_features_and_matches: the prior becomes COLMAP's
+    ImageReader.camera_params; a workspace made with another prior is rebuilt (the two-view
+    geometries depend on the camera), one made with the same is reused."""
+    from evaluation import colmap_baseline as CB
+    fake = tmp_path / "colmap"
+    fake.write_text(f"""#!/bin/bash
+echo "$@" >> {tmp_path}/argv.log
+[ "$1" = "-h" ] && echo "I COLMAP 4.2.0 (fake)"
+exit 0
+""")
+    fake.chmod(0o755)
+    ws = tmp_path / "ws"; (ws / "images").mkdir(parents=True); (ws / "images" / "000000.jpg").write_bytes(b"")
+    ccfg = {"binary": str(fake), "camera_model": "OPENCV", "use_gpu": False, "sift": {"max_num_features": 100},
+            "aliked": {"max_num_features": 100}, "timeout_s": 60, "vocab_tree": {},
+            "sequential": {"overlap": 2, "quadratic_overlap": False, "loop_detection": False,
+                           "loop_detection_period": 10, "loop_detection_num_images": 5}}
+    prior = [364.1, 364.6, 232.0, 416.0, 0.0, 0.0, 0.0, 0.0]
+    rec = CB.ensure_features_and_matches(ws, "SIFT", "SIFT_BRUTEFORCE", ccfg, lambda *a: None, camera_params=prior)
+
+    def extractions():
+        return [a for a in (tmp_path / "argv.log").read_text().splitlines() if a.startswith("feature_extractor")]
+    fx = extractions()
+    assert len(fx) == 1 and "--ImageReader.camera_params 364.1,364.6,232,416,0,0,0,0" in fx[0]
+    assert rec["camera_params"] == prior
+    CB.ensure_features_and_matches(ws, "SIFT", "SIFT_BRUTEFORCE", ccfg, lambda *a: None, camera_params=prior)
+    assert len(extractions()) == 1                               # reused
+    rec2 = CB.ensure_features_and_matches(ws, "SIFT", "SIFT_BRUTEFORCE", ccfg, lambda *a: None)
+    fx = extractions()
+    assert len(fx) == 2 and "camera_params" not in fx[1] and rec2["camera_params"] is None

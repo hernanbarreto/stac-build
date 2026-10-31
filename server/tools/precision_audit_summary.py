@@ -121,6 +121,17 @@ def summarise(session_dir: Path) -> Dict[str, Any]:
 
 
 def classical_series(session_dir: Path, out_dir: Path) -> Optional[Dict[str, Any]]:
+    """One series per classical mapper found (``sparse_<mapper>`` under output/precision/classical):
+    {mapper: record}; a declaration when none exists."""
+    cl = Path(session_dir) / "output" / "precision" / "classical"
+    dirs = sorted(d for d in cl.glob("sparse_*") if d.is_dir()) if cl.exists() else []
+    if not dirs:
+        return {"measured": False, "reason": f"{cl}: no sparse_<mapper> model directory"}
+    return {d.name[len("sparse_"):]: _classical_series_one(session_dir, out_dir, d, "_" + d.name[len("sparse_"):])
+            for d in dirs}
+
+
+def _classical_series_one(session_dir: Path, out_dir: Path, sparse: Path, tag: str) -> Optional[Dict[str, Any]]:
     """WHERE the classical (COLMAP / GLOMAP) trajectory and F5's part, keyframe by keyframe: the
     rotation residual after the best common world rotation and the position residual after the
     Sim3 alignment (the cross-check's own recipe), plus the consecutive-keyframe rotation STEPS of
@@ -130,7 +141,6 @@ def classical_series(session_dir: Path, out_dir: Path) -> Optional[Dict[str, Any
     from evaluation.colmap_io import frame_of_name, list_models, read_model
     from precision.classical_check import umeyama_sim3
     out = Path(session_dir) / "output"
-    sparse = out / "precision" / "classical" / "sparse_global"
     poses_p, frames_p = out / "camera_poses.txt", out / "camera_frames.txt"
     if not sparse.exists() or not poses_p.is_file() or not frames_p.is_file():
         return {"measured": False, "reason": f"missing {sparse if not sparse.exists() else poses_p}"}
@@ -164,7 +174,7 @@ def classical_series(session_dir: Path, out_dir: Path) -> Optional[Dict[str, Any
     step_c = np.array([_ang(Rc[k + 1] @ Rc[k].T) for k in range(len(idx) - 1)])
     step_5 = np.array([_ang(R5[k + 1] @ R5[k].T) for k in range(len(idx) - 1)])
     out_dir.mkdir(parents=True, exist_ok=True)
-    csv_p = out_dir / "classical_vs_f5_by_keyframe.csv"
+    csv_p = out_dir / f"classical_vs_f5_by_keyframe{tag}.csv"
     with open(csv_p, "w") as f:
         f.write("keyframe_index,frame,rotation_residual_deg,position_residual_m,step_classical_deg,step_f5_deg\n")
         for k in range(len(idx)):
@@ -187,12 +197,12 @@ def classical_series(session_dir: Path, out_dir: Path) -> Optional[Dict[str, Any
         fig, axes = plt.subplots(2, 1, figsize=(11, 6.5), sharex=True)
         axes[0].plot(idx, rot, ".", label="rotation residual classical vs F5 (deg)")
         axes[0].plot(idx, 100 * pos, ".", label="position residual (cm, after Sim3)")
-        axes[0].set_title("classical (COLMAP/GLOMAP) against F5, keyframe by keyframe"); axes[0].legend(fontsize=8); axes[0].grid(True, alpha=0.3)
+        axes[0].set_title(f"classical ({tag.strip(chr(95))} mapper) against F5, keyframe by keyframe"); axes[0].legend(fontsize=8); axes[0].grid(True, alpha=0.3)
         axes[1].plot(idx[:-1], step_c, ".", label="classical consecutive step (deg)")
         axes[1].plot(idx[:-1], step_5, ".", label="F5 consecutive step (deg)")
         axes[1].set_xlabel("keyframe index"); axes[1].legend(fontsize=8); axes[1].grid(True, alpha=0.3)
         fig.tight_layout()
-        png_p = out_dir / "classical_vs_f5_by_keyframe.png"
+        png_p = out_dir / f"classical_vs_f5_by_keyframe{tag}.png"
         fig.savefig(png_p, dpi=120)
         plt.close(fig)
         rec["png"] = str(png_p)

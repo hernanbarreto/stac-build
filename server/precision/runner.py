@@ -131,7 +131,7 @@ STEPS: List[Step] = [
                 "output/camera_frames.txt", "output/camera_poses.txt", "output/maplong_run/metric_lock.json"),
          writes=("output/gauge.json",) + _POSE_FILES,
          config=("gauge", "raw:correction_graph.graph")),
-    Step("f3_classical", "F3b classical cross-check: COLMAP SIFT + vocab-tree loops + global mapper", "da3",
+    Step("f3_classical", "F3b classical cross-check: COLMAP SIFT + vocab-tree loops, the session camera as prior, global + incremental mappers", "da3",
          "precision.classical_check", gpu=True,
          reads=("frames", "frames/selected_frames.json", "output/camera.json"),
          writes=("output/precision/classical", "output/precision/loop_candidates.json"),
