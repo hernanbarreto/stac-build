@@ -117,7 +117,7 @@ echo
 if [ "${#FAILS[@]}" -eq 0 ]; then ok "pod up to date with ${BRANCH} / ${FORK_BRANCH}"; else err "${#FAILS[@]} step(s) failed:"; for f in "${FAILS[@]}"; do echo "   - $f"; done; fi
 cat <<EOF
 
-Next (by hand, ONE GPU task at a time, the backend's vLLM down or left to the runner), pccr first, then zaragoza:
+Next (by hand, ONE GPU task at a time, the backend's vLLM down or left to the runner), pccr first, then observatorio (USER 2026-10-31: zaragoza out):
   1. the offline instruments over an EXISTING run (only if its maplong_run/_tmp_results_unaligned survived):
        cd ${ROOT}/vendor/VGGT-Long
        ${PY_MAP} -m loop_utils.seam_radial --run <session>/output/maplong_run
@@ -132,10 +132,10 @@ Next (by hand, ONE GPU task at a time, the backend's vLLM down or left to the ru
          ${PY_DA3} -m evaluation run --scenes pccr --variants \$v --run-id slam2_pccr_\$v
        done
        for v in reference slam2_focal_common slam2_attention_gate slam2_attention_gate_salad slam2_all; do
-         ${PY_DA3} -m evaluation run --scenes zaragoza --variants \$v --run-id slam2_zaragoza_\$v
+         ${PY_DA3} -m evaluation run --scenes observatorio --variants \$v --run-id slam2_observatorio_\$v
        done
   3. the bit-for-bit comparator of the reference against an existing main run of the scene: declare it in
-     config.yaml evaluation.slam2.existing_runs (pccr and zaragoza are declared) before step 2 — it runs
+     config.yaml evaluation.slam2.existing_runs (pccr and observatorio are declared) before step 2 — it runs
      with the reference and lands in <run>/<scene>/slam2_comparison.json (bitwise_comparator).
 Results: <runs_dir>/<run_id>/<scene>/{slam2_comparison.csv,json,png} and each variant's directory
 (variant.json, log.txt, session/output/maplong_run/{seam_radial,attention_gate.json,focal_model.json,attention_calibration}).

@@ -2,7 +2,7 @@
 # ===========================================================================
 # STAC-Builder — claude_stac_slam2.txt phase 5, the runs, sequenced ON THE POD
 # ---------------------------------------------------------------------------
-#   bash scripts/run_slam2_phase5.sh [--scenes pccr,zaragoza] [--variants a,b,c] [--skip-update] [--keep-backend]
+#   bash scripts/run_slam2_phase5.sh [--scenes pccr,observatorio] [--variants a,b,c] [--skip-update] [--keep-backend]
 #                                    [--stages-off vlm,sam3,...] [--full-chain]
 #
 # THE STAGES: by default every variant runs the RECONSTRUCTION alone — the segmentation chain (VLM, SAM3,
@@ -28,7 +28,7 @@ ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONDA_ROOT="${CONDA_ROOT:-/workspace/miniforge3}"
 PY_DA3="${CONDA_ROOT}/envs/da3/bin/python"
 LOGDIR="${ROOT}/analysis/2026-10-29_slam2"
-SCENES="pccr,zaragoza"
+SCENES="pccr,observatorio"      # USER 2026-10-31: "pccr y observatorio, zaragoza no"
 VARIANTS="reference,slam2_focal_common,slam2_attention_gate,slam2_attention_gate_salad,slam2_all"
 DO_UPDATE=1; KEEP_BACKEND=0
 STAGES_OFF="vlm,sam3,projection,certify,genrecon"
