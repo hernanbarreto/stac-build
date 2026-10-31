@@ -149,6 +149,43 @@ def test_the_bitwise_comparator_reports_equality_or_the_first_difference_by_name
     assert "chunk_0.npy[world_points]: arrays differ" in rep4["products"]["_tmp_results_unaligned"]["first_difference"]
 
 
+def test_the_comparator_takes_the_existing_sessions_cloud_at_the_epoch_the_reference_stops_at(tmp_path):
+    """pccr 2026-10-31: the reference's F5 was bit-identical to production's and the clouds compared
+    'not equal' by 3.28 m — the live CERTIFIED epoch (a transform) against the chain's cloud epoch.
+    The existing session's twin is the parent new-cloud epoch kept on disk."""
+    from correction import epoch as E
+    from evaluation.cloud_io import write_ply
+    from evaluation.product import read_ply_memmap
+    a = S.make_session(tmp_path / "a")
+    b = S.make_session(tmp_path / "b")
+    out_b = b.session_dir / "output"
+    original = np.array(read_ply_memmap(out_b / "cleaned_cloud.ply"))
+    # epoch 1 = the chain's cloud (stored), epoch 2 = the certification's transform (live): every point moved
+    stored = out_b / f"{E.EPOCH_DIR_PREFIX}1"
+    stored.mkdir()
+    write_ply(stored / "cleaned_cloud.ply", original)
+    (stored / E.EPOCH_FILE).write_text(json.dumps({"epoch": 1, "kind": E.EPOCH_KIND_NEW_CLOUD, "parent_epoch": 0,
+                                                   "correction_id": "f6"}))
+    moved = original.copy()
+    moved["y"] += 0.37
+    write_ply(out_b / "cleaned_cloud.ply", moved)
+    (out_b / E.EPOCH_FILE).write_text(json.dumps({"epoch": 2, "kind": E.EPOCH_KIND_TRANSFORM, "parent_epoch": 1,
+                                                  "correction_id": "floor"}))
+    name, rec = S2.cloud_epoch_twin(b.session_dir)
+    assert name == f"{E.EPOCH_DIR_PREFIX}1/cleaned_cloud.ply" and rec["live"] == 2 and rec["compared"] == 1
+    rep = S2.bitwise_compare(a.session_dir, b.session_dir, log=lambda *a_: None)
+    assert rep["products"]["published_cloud"]["equal"] and rep["products"]["published_cloud"]["epoch_b"]["compared"] == 1
+    # the stored epoch gone: the live cloud is compared, and the record says why
+    (stored / "cleaned_cloud.ply").unlink()
+    name2, rec2 = S2.cloud_epoch_twin(b.session_dir)
+    assert name2 == "cleaned_cloud.ply" and rec2["compared"] == 2 and "not stored on disk" in rec2["walk"][0]
+    rep2 = S2.bitwise_compare(a.session_dir, b.session_dir, log=lambda *a_: None)
+    assert rep2["products"]["published_cloud"]["equal"] is False
+    # a session without epochs: the live cloud, declared
+    name3, rec3 = S2.cloud_epoch_twin(a.session_dir)
+    assert name3 == "cleaned_cloud.ply" and rec3["compared"] == 0 and rec3["walk"] == []
+
+
 def test_the_table_carries_every_variant_with_its_difference_against_the_reference(tmp_path):
     def rec(status, metrics=None, seconds=100.0):
         return {"status": status, "reason": "" if status == "finished" else "x", "seconds": seconds,

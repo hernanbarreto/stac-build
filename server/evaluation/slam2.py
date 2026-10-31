@@ -39,7 +39,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -313,19 +313,58 @@ def _compare_npy_dir(da: Path, db: Path) -> Dict[str, Any]:
     return {"compared": True, "equal": True, "n_files": len(fa)}
 
 
+def cloud_epoch_twin(session_dir: Path, max_steps: int = 16) -> Tuple[str, Dict[str, Any]]:
+    """The cloud of ``session_dir`` the reference run's cloud is the twin of: the reference stops at
+    the chain's cloud epoch (the five stages after it are off), while an existing live session shows
+    the CERTIFICATION's epoch — a transform of that cloud (the floor levelled, the mask filter's
+    deletions). Walk back from the live epoch through the transform epochs whose parent is kept on
+    disk (``_epoch_<n>/cleaned_cloud.ply``) to the first new-cloud epoch, and name it. Returns
+    (cloud name relative to ``output/``, the record of the walk); the live cloud when nothing is
+    stored, declared in the record (pccr 2026-10-31: the reference's F5 bit-identical to production's,
+    the clouds compared 'not equal' by 3.28 m — the certified epoch against the cloud epoch)."""
+    from correction import epoch as E
+    out = Path(session_dir) / "output"
+    rec = E.read_epoch(out)
+    live = int(rec.get("epoch", 0))
+    cur, parent, kind = live, rec.get("parent_epoch"), rec.get("kind")
+    walked = []
+    for _ in range(max_steps):
+        if kind != E.EPOCH_KIND_TRANSFORM or parent is None or int(parent) == cur:
+            break
+        pdir = out / f"{E.EPOCH_DIR_PREFIX}{int(parent)}"
+        if not (pdir / "cleaned_cloud.ply").is_file():
+            walked.append(f"epoch {parent} is not stored on disk")
+            break
+        walked.append(f"epoch {cur} is a transform of epoch {parent}")
+        cur = int(parent)
+        try:
+            prec = json.loads((pdir / E.EPOCH_FILE).read_text())
+        except (OSError, ValueError):
+            prec = {}
+        parent, kind = prec.get("parent_epoch"), (prec.get("kind") or E.epoch_kind(out, cur))
+    name = "cleaned_cloud.ply" if cur == live else f"{E.EPOCH_DIR_PREFIX}{cur}/cleaned_cloud.ply"
+    return name, {"live": live, "compared": cur, "cloud": name, "walk": walked,
+                  "reason": ("the live cloud is the chain's cloud epoch" if cur == live else
+                             f"the live epoch {live} is the certification's transform; the reference run stops at the "
+                             f"cloud epoch, so its twin is epoch {cur}")}
+
+
 def bitwise_compare(session_a: Path, session_b: Path, log: Callable = print) -> Dict[str, Any]:
     """This branch's reference (A) against an existing run of the same scene (B): the published
-    cloud by provenance, the chunk npys both sides kept, the camera files as text, the fork's json
-    records without their stamps. Returns equality per product and the first difference by name."""
+    cloud by provenance — B's at the epoch the reference stops at (``cloud_epoch_twin``) —, the
+    chunk npys both sides kept, the camera files as text, the fork's json records without their
+    stamps. Returns equality per product and the first difference by name."""
     from evaluation.determinism import compare_products
     from evaluation.product import StacProduct
     A, B = Path(session_a), Path(session_b)
     out: Dict[str, Any] = {"session_a": str(A), "session_b": str(B), "products": {}}
     try:
+        cloud_b, epoch_b = cloud_epoch_twin(B)
         pa = StacProduct(A, "A", log=lambda *a: None)
-        pb = StacProduct(B, "B", log=lambda *a: None)
+        pb = StacProduct(B, "B", cloud_name=cloud_b, log=lambda *a: None)
         cp = compare_products(pa, pb)
         out["products"]["published_cloud"] = {"compared": True, "equal": bool(cp.get("bit_identical_cloud")),
+                                              "epoch_b": epoch_b,
                                               "detail": {k: v for k, v in cp.items() if k != "bit_identical_cloud"}}
         if not cp.get("bit_identical_cloud"):
             d = cp.get("position_diff_m") or {}
