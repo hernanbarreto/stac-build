@@ -4483,6 +4483,34 @@ evaluation:
         "reconstruction.precision.refine.rolling_shutter": never
         "reconstruction.precision.fusion.enabled": false
         "reconstruction.precision.fusion.colmap_tier": false
+    audit_layered_no_rs_no_bridge:
+      kind: chain
+      description: >-
+        (audit 2026-10-31, isolation after pccr_audit3: the start of the walk, kf 0-60, came out 1.3 m under
+        the floor — the bend's per-keyframe scale 1.43 there against 1.0-1.1 elsewhere, GLOMAP's own trajectory
+        0.70 of chunk 1's walk against the audit F5's 0.96, and the MASt3R-bridged tracks tie exactly kf 0-13 to
+        kf 282-294) audit_layered_no_rs with the loop bridge OFF: the classical loop windows, the odometry
+        priors and the scale lock stay
+      stages_off: [vlm, sam3, projection, certify, genrecon]
+      overrides:
+        "reconstruction.precision.tracks.loop_bridge": none
+        "reconstruction.precision.refine.rolling_shutter": never
+        "reconstruction.precision.fusion.enabled": false
+        "reconstruction.precision.fusion.colmap_tier": false
+    audit_layered_no_rs_absolute_priors:
+      kind: chain
+      description: >-
+        (audit 2026-10-31, isolation, the twin of audit_layered_no_rs_no_bridge) audit_layered_no_rs with the
+        pre-phase-3b prior model of f5_absolute_priors and the loop bridge ON — which of the two moved the
+        start of the walk
+      stages_off: [vlm, sam3, projection, certify, genrecon]
+      overrides:
+        "reconstruction.precision.refine.prior_model": absolute
+        "reconstruction.precision.refine.prior_sigma_from_loops": false
+        "reconstruction.precision.refine.scale_lock": false
+        "reconstruction.precision.refine.rolling_shutter": never
+        "reconstruction.precision.fusion.enabled": false
+        "reconstruction.precision.fusion.colmap_tier": false
     bend_affine_pixel:
       kind: chain
       description: (audit 2026-10-23, A/B) only the bend family forced to epoch 7's pixel ratio; the vote as audited
