@@ -4905,6 +4905,8 @@ app.include_router(certify_api.router, dependencies=[Depends(_certify_select_gua
 from evaluation import api as evaluation_api
 evaluation_api.configure(resolve_ctx=_ctx, audit_log=_audit_log)
 app.include_router(evaluation_api.router)
+from gaussians import api as gaussians_api  # noqa: E402 — the Gaussian-splat layer's routes (USER 2026-10-31)
+app.include_router(gaussians_api.router)
 
 
 @app.get("/api/autosegment/{session_id}")

@@ -91,6 +91,9 @@ pipeline:
   # GenRecon — mode cloud, the active voxels from the published cloud — as the LAST stage of the chain
   # (the Meshing button is gone). false = the chain ends at the certification.
   auto_genrecon: true
+  auto_gaussians: false              # the Gaussian-splat realism layer after the mesh (USER 2026-10-31; stage GAUSSIANS,
+                                     #   config `gaussians:`). false until the first pccr run is judged by eye; the
+                                     #   Autosegment window runs it on demand
 
 # ── GenRecon scene mesh (workers/genrecon_worker.py → server/tools/genrecon/run_cloud.sh) ──────────
 genrecon:
@@ -103,6 +106,54 @@ genrecon:
   min_points_per_voxel: 10           # BOUND: a chunk voxel (32³ ≈ 11.6 cm) is active from this many cloud points
   simplify_faces_per_chunk: 150000   # the bake's decimation target per chunk (pccr: 25 chunks → 3.2 M faces, 250 MB)
   texture_size: 2048                 # the bake's atlas per chunk
+
+gaussians:                           # THE REALISM LAYER (USER 2026-10-31: "el realismo de los GS con la capacidad de medir
+                                     #   sobre malla matemáticamente buena como la nuestra"): 3D Gaussian splats trained at
+                                     #   the END of the chain on what it certified — poses, camera and the published cloud
+                                     #   FIXED, never moved by the training — and drawn over the metric cloud / mesh in the
+                                     #   viewer: the splats are what is seen, the cloud and the mesh are what measures.
+                                     #   Every gaussian carries the projection's instance id (selectable per object, on/off
+                                     #   like the meshes). gsplat (Apache-2.0) in its own env `gs`; the Inria 3DGS code
+                                     #   (non-commercial) is never used. First milestone: pccr, judged by eye.
+  enabled: true
+  name: gaussians                    # output/gaussians/<name>/: gaussians.ply (the 3DGS record), gaussians.splat (the
+                                     #   viewer's compact form), instances.bin (uint32 per gaussian), meta.json, report.json
+  python: /workspace/miniforge3/envs/gs/bin/python
+  init:
+    max_points: 2000000              # BOUND: the seeds are a stable subsample of the published cloud (pccr 19.4 M → 2 M)
+    min_confidence: 0.0              # a cloud point under this confidence does not seed (0 = every point)
+    scale_knn: 3                     # the initial scale of a seed = its mean distance to the 3 nearest seeds
+    seed: 0                          # the subsample's permutation (recorded)
+  train:
+    iterations: 30000
+    sh_degree: 3
+    sh_degree_interval: 1000         # gsplat's warm-up: one spherical-harmonic degree more every 1000 iterations
+    strategy: default                # default (the 3DGS densification) | mcmc (gsplat's MCMC, capped at max_gaussians)
+    max_gaussians: 4000000           # BOUND
+    refine_start_frac: 0.0167        # the densification window as fractions of the iterations (gsplat: 500 …
+    refine_stop_frac: 0.5            #   … 15000 of 30000)
+    depth_loss_weight: 0.2           # L1 of the rendered depth against the depth the chain measured, where it measured
+                                     #   one (normalised by the frame's median depth): the splats sit on the measured
+                                     #   surface. 0 = photometric only
+    ssim_weight: 0.2                 # photometric loss = 0.8·L1 + 0.2·(1 − SSIM), the reference recipe
+    exposure: true                   # a learned 3×4 affine colour correction per keyframe (the phone's auto exposure)
+    exposure_reg: 0.001              # its pull toward identity
+    holdout_every: 8                 # every 8th keyframe is HELD OUT: the report's PSNR / SSIM are measured there
+                                     #   (pccr: 36 of 295 keyframes)
+    eval_every: 5000                 # held-out evaluation every this many iterations, and at the end
+    seed: 0
+    lr:                              # gsplat simple_trainer's own defaults (means × the scene extent)
+      means: 0.00016
+      scales: 0.005
+      quats: 0.001
+      opacities: 0.05
+      sh0: 0.0025
+      shN: 0.000125
+      exposure: 0.001
+  export:
+    formats: [ply, splat]            # the 3DGS PLY always first (the record); .splat for the viewer
+  label:
+    nearest_radius_m: 0.05           # a gaussian takes the instance of the nearest SEED within 5 cm, else 0 (unsegmented)
 
 # ── Paths ──────────────────────────────────────────────────────────
 paths:

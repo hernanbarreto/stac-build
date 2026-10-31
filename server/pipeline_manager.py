@@ -207,6 +207,7 @@ class StageId(str, Enum):
     CERTIFY = "certify"
     INSTANCE_CLEANER = "instance_cleaner"
     GENRECON = "genrecon"             # the scene mesh (GenRecon, the cloud decides presence) — last of the chain
+    GAUSSIANS = "gaussians"           # the Gaussian-splat realism layer over the certified geometry (USER 2026-10-31)
 
 
 # "module" / "entry": the worker the stage process runs (``module.entry(conn, session_dir,
@@ -224,6 +225,7 @@ STAGE_REGISTRY = {
     StageId.CERTIFY:          {"label": "Certification (closures · depth · floor · mask filter · final epoch)", "icon": "📐", "module": "workers.certify_worker", "engine": True},
     StageId.INSTANCE_CLEANER: {"label": "Instance Cleaning", "icon": "✨", "module": "workers.instance_cleaner_worker"},
     StageId.GENRECON:         {"label": "Mesh (GenRecon — the cloud decides presence)", "icon": "🧱", "module": "workers.genrecon_worker"},
+    StageId.GAUSSIANS:        {"label": "Gaussian splats (the realism layer over the certified geometry)", "icon": "🌌", "module": "workers.gaussians_worker"},
 }
 
 # THE reconstruction pipeline — always runs end-to-end, no client selection.
@@ -262,6 +264,7 @@ DEFAULT_STAGE_ORDER: List[StageId] = [
                            # masks, the Segmentation Manager's close
     StageId.CERTIFY,
     StageId.GENRECON,      # USER 2026-10-17: the scene mesh at the end of the segmentation chain
+    StageId.GAUSSIANS,     # USER 2026-10-31: the splats of the certified geometry, after the mesh
                            # vggtomega_pgsr (seeds from cleaned_cloud, so it runs
                            # after CloudCompy; the TSDF then integrates its
                            # rendered depths via depth_source "pgsr_render")
@@ -884,6 +887,7 @@ class PipelineManager:
                           "loop_semantics.json", "object_captions.timing.json"],
         StageId.INSTANCE_CLEANER: ["instance_*.ply", "inst_cleaned_cloud.ply"],
         StageId.GENRECON: ["tsdf/genrecon_photo"],
+        StageId.GAUSSIANS: ["gaussians"],
     }
 
     # What a RESUME or an Autosegment cleans before a stage of the semantic chain runs
@@ -924,6 +928,7 @@ class PipelineManager:
     CASCADE_INVALIDATION: Dict[StageId, List[StageId]] = {
         StageId.RECONSTRUCTION: [
             StageId.GENRECON,         # the scene mesh is of this geometry and segmentation
+            StageId.GAUSSIANS,        # the splats are seeded from this cloud and fixed on these poses
             StageId.CLOUDCOMPY,       # cleaned_cloud depends on chunks
             StageId.VLM,              # scene analysis ran on old keyframes
             StageId.SAM3,             # segmentation ran on old frames
@@ -934,6 +939,7 @@ class PipelineManager:
         StageId.VLM: [
             StageId.SAM3,             # SAM3 uses VLM categories
             StageId.GENRECON,         # the scene mesh is of this geometry and segmentation
+            StageId.GAUSSIANS,        # the splats are seeded from this cloud and fixed on these poses
             StageId.PROJECTION,       # the projection is of SAM3's masks
             StageId.CERTIFY,          # instance loops come from the segmentation
             StageId.INSTANCE_CLEANER,
@@ -941,17 +947,20 @@ class PipelineManager:
         StageId.SAM3: [
             StageId.PROJECTION,       # the projection is of THESE masks
             StageId.GENRECON,         # the scene mesh is of this geometry and segmentation
+            StageId.GAUSSIANS,        # the splats are seeded from this cloud and fixed on these poses
             StageId.CERTIFY,          # instance loops come from the segmentation
             StageId.INSTANCE_CLEANER, # instances depend on segmentation
         ],
         StageId.PROJECTION: [
             StageId.CERTIFY,          # the certification reads the projected instances
             StageId.GENRECON,         # the scene mesh is of this geometry and segmentation
+            StageId.GAUSSIANS,        # the splats are seeded from this cloud and fixed on these poses
             StageId.INSTANCE_CLEANER,
         ],
         StageId.CLOUDCOMPY: [
             StageId.VLM,              # the semantic stages read THIS cloud
             StageId.GENRECON,         # the scene mesh is of this geometry and segmentation
+            StageId.GAUSSIANS,        # the splats are seeded from this cloud and fixed on these poses
             StageId.SAM3,             # masks are projected onto THIS cloud
             StageId.PROJECTION,
             StageId.CERTIFY,          # the loop certifies THIS cleaned cloud
@@ -959,6 +968,7 @@ class PipelineManager:
         ],
         StageId.CERTIFY: [
             StageId.GENRECON,         # the mesh is of the certified epoch
+            StageId.GAUSSIANS,        # the splats are of the certified epoch
         ],
     }
 
@@ -1941,6 +1951,10 @@ def build_pipeline_stages(backend: Optional[str] = None,
     # (VLM auto-prompt → SAM3) and restores the on-demand flow.
     auto_segment = bool((config.get("pipeline") or {}).get("auto_segment", True))
     auto_genrecon = bool((config.get("pipeline") or {}).get("auto_genrecon", True))   # the scene mesh closing the chain
+    # the Gaussian-splat layer (USER 2026-10-31): BOTH pipeline.auto_gaussians and gaussians.enabled; off until the
+    # first pccr run is judged by eye — the Autosegment window runs it on demand
+    auto_gaussians = bool((config.get("pipeline") or {}).get("auto_gaussians", False)) and \
+        bool((config.get("gaussians") or {}).get("enabled", False))
     _semantic_stages = {StageId.VLM, StageId.SAM3, StageId.PROJECTION}
     if not auto_segment:
         logger.info("[Pipeline] auto_segment off — VLM/SAM3 stages disabled")
@@ -1976,6 +1990,8 @@ def build_pipeline_stages(backend: Optional[str] = None,
                            # segmentation, no instance loops, no certification" 
         if stage_id == StageId.GENRECON and not (auto_genrecon and auto_segment):
             return False   # the mesh needs the segmentation's levels; pipeline.auto_genrecon switches it
+        if stage_id == StageId.GAUSSIANS and not (auto_gaussians and auto_segment):
+            return False   # the splats take the instance ids of the projection; pipeline.auto_gaussians switches it
         return True
 
     return [PipelineStage(id=stage_id, enabled=_enabled(stage_id))
@@ -1985,7 +2001,7 @@ def build_pipeline_stages(backend: Optional[str] = None,
 # the stages that run AFTER the published cloud: the segmentation chain and what
 # feeds on it (USER 2026-10-05: a per-scan check in "Reconstruir" turns them off;
 # the Autosegment window runs any subset of them later)
-SEGMENTATION_CHAIN = (StageId.VLM, StageId.SAM3, StageId.CERTIFY, StageId.GENRECON)
+SEGMENTATION_CHAIN = (StageId.VLM, StageId.SAM3, StageId.CERTIFY, StageId.GENRECON, StageId.GAUSSIANS)
 # ... plus the projection stage, which only exists after SAM3's masks
 SEGMENT_WHEN_DONE = SEGMENTATION_CHAIN + (StageId.PROJECTION,)
 
