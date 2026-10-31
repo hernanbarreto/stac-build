@@ -406,6 +406,30 @@ def _camera_json(s):
     return save_camera_json(s.session_dir / "output" / "camera.json", cam, geometry_epoch=0)
 
 
+def test_a_loop_candidate_given_in_reverse_order_is_bridged_under_its_canonical_key(sess):
+    """pccr_audit 2026-10-31: a classical / SALAD candidate listed as (j, i) made a loop window whose
+    query frames kept that order, while match_pairs keyed the pair (i, j) — the bridged-track count
+    was written under '1269-1147' and F4 died on a KeyError. The record is keyed as the match is."""
+    from dataclasses import replace
+    d = sess.session_dir / "output" / "maplong_run"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "loop_closures.txt").write_text(
+        "4, 0, 0.7\n" + "".join(f"# {i}: {f:06d}.jpg\n" for i, f in enumerate(KF)))
+    cam_path = _camera_json(sess)
+    tcfg = replace(TCFG, loop_half_window=1, loop_bridge_min_inliers=20, loop_bridge_max_matches=400)
+    try:
+        rep = T.run_tracks(sess.session_dir, tcfg, track_fn=_one_sided_fn(sess), log=lambda *a: None,
+                           match_fn=_gt_match_fn(sess))
+        br = rep["loop_bridge"]
+        assert f"{KF[4]}-{KF[0]}" not in br["pairs"]
+        pair = br["pairs"][f"{KF[0]}-{KF[4]}"]
+        assert pair["reason"] == "" and br["bridged_tracks"] >= 20
+        assert pair["bridged_tracks"] == br["bridged_tracks"]
+    finally:
+        (d / "loop_closures.txt").unlink()
+        cam_path.unlink()
+
+
 def test_the_loop_bridge_joins_the_two_visits_of_a_loop(sess):
     """Phase 3d: with a tracker that loses every point across the revisit, a loop window yields
     no track seen from both visits (the loop is unobservable to F5). The bridge matches keyframe 0

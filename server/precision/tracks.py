@@ -661,7 +661,10 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
                 wobs["bridged"] = br.tolist()
                 bridge_rep["bridged_tracks"] += int(mrep["bridged_tracks"])
                 bridge_rep["links"] += int(mrep["links"])
-                bridge_rep["pairs"][f"{fa}-{fb}"]["bridged_tracks"] = int(mrep["bridged_tracks"])
+                # the pair's record is keyed as match_pairs wrote it — the UNORDERED pair, lower
+                # keyframe first — while a loop window keeps its candidate's order (a classical or
+                # SALAD pair given as (j, i)): pccr_audit 2026-10-31 died here on '1269-1147'
+                bridge_rep["pairs"][f"{kf[pm.i]}-{kf[pm.j]}"]["bridged_tracks"] = int(mrep["bridged_tracks"])
         for k in OBS_KEYS:
             obs[k].extend(wobs[k])
         for k in ("id", "frame", "uv"):
