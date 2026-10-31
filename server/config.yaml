@@ -2309,7 +2309,7 @@ reconstruction:
       # backend; vendor/mast3r (+ its dust3r) from scripts/setup_vendors.sh, the checkpoint fetched into
       # torch hub's cache by precision.tracks.verified_checkpoint and refused unless its sha256 is this one
       loop_bridge: mast3r
-      loop_bridge_weights_url: https://huggingface.co/naver/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric/resolve/main/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
+      loop_bridge_weights_url: https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
       loop_bridge_weights_sha256: e28f91b488554653e2b46ddae9c78c1143e0bcb2e27d3e26cdb0b717f1568eb2
       loop_bridge_max_matches: 4000     # BOUND (cost): the most confident matches verified per pair
       loop_bridge_min_inliers: 60       # a pair bridges with at least this many verified matches
