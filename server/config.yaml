@@ -4290,6 +4290,9 @@ evaluation:
                                       # project <scene><viewer_project_suffix> (a symlink to the kept products)
     viewer_project_suffix: "__eval"
     projects_dir: null                # where the eval projects are published: null = the server's projects directory
+    mirror_instruments_to_scene: true # the reference's seam_radial/ and attention_calibration/ records are copied
+                                      # under the SCENE's own maplong_run/, so a later invocation on the scene (one
+                                      # variant per run — a session copy is 10–40 GB) resolves its gate variants
     calibration_file: attention_calibration/attention_calibration.json   # under maplong_run/ of the reference run
     seam_radial_file: seam_radial/seam_radial.json                       # idem
     existing_runs: {}                 # scene → an existing session of the same scene made with main (a path, or

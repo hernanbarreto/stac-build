@@ -124,10 +124,16 @@ Next (by hand, ONE GPU task at a time, the backend's vLLM down or left to the ru
        ${PY_MAP} -m loop_utils.attention_calibrate --run <session>/output/maplong_run --params <json>   # GPU
      (a run that kept no unaligned chunks is declared by the tools; the reference variant below keeps them)
   2. the variants (every one a full reconstruction on its own copy; the reference runs seam_radial and
-     attention_calibrate itself and resolves the gate variants from them):
+     attention_calibrate itself, mirrors their records under the scene's maplong_run/ and the gate variants
+     resolve from them). ONE variant per invocation — a session copy with its chunk npys is 10–40 GB and the
+     /workspace quota is 400 GB; the keep policy trims a copy only when its run ends:
        cd ${ROOT}/server
-       ${PY_DA3} -m evaluation run --scenes pccr/2026-08-31/default --variants reference,slam2_focal_common,slam2_attention_gate,slam2_attention_gate_salad,slam2_all
-       ${PY_DA3} -m evaluation run --scenes zaragoza/2026-06-03/default --variants reference,slam2_focal_common,slam2_attention_gate,slam2_attention_gate_salad,slam2_all
+       for v in reference slam2_focal_common slam2_attention_gate slam2_attention_gate_salad slam2_all; do
+         ${PY_DA3} -m evaluation run --scenes pccr/2026-08-31/default --variants \$v --run-id slam2_pccr_\$v
+       done
+       for v in reference slam2_focal_common slam2_attention_gate slam2_attention_gate_salad slam2_all; do
+         ${PY_DA3} -m evaluation run --scenes zaragoza/2026-06-03/default --variants \$v --run-id slam2_zaragoza_\$v
+       done
   3. the bit-for-bit comparator of the reference against an existing main run of the scene: declare it in
      config.yaml evaluation.slam2.existing_runs ({pccr: pccr/2026-08-31/default}) before step 2 — it runs
      with the reference and lands in <run>/<scene>/slam2_comparison.json (bitwise_comparator).

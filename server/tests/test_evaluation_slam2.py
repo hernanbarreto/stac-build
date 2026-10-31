@@ -250,6 +250,7 @@ def test_a_scene_without_reference_distances_runs_with_the_hooks_and_declares_th
     assert s2["attention_calibrate"]["ran"] is False and "no card" in s2["attention_calibrate"]["reason"]
     assert s2["bitwise_vs_existing"]["compared"] is False and "existing_runs" in s2["bitwise_vs_existing"]["reason"]
     assert s2["viewer"]["project"] == "synth__eval" and (tmp_path / "projects" / "synth__eval" / "scans" / "reference" / "src_default").is_symlink()
+    assert s2["mirrored_to_scene"]["seam_radial"]["copied"] is False      # nothing to mirror from a fake chain
     assert isinstance(s2["metrics"], dict)
     # the focal variant ran (no offline verdict → declared, runs); the gate variant: no calibration → not run
     assert r["slam2_focal_common"]["status"] == "finished"

@@ -71,6 +71,9 @@ def slam2_config(raw_eval: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not isinstance(sec[key], typ) or (typ is bool and not isinstance(sec[key], bool)):
             raise Slam2Error(f"'evaluation.slam2.{key}' must be a {typ.__name__}")
         out[key] = sec[key]
+    if "mirror_instruments_to_scene" not in sec or not isinstance(sec["mirror_instruments_to_scene"], bool):
+        raise Slam2Error("'evaluation.slam2.mirror_instruments_to_scene' is missing or not true/false")
+    out["mirror_instruments_to_scene"] = sec["mirror_instruments_to_scene"]
     if "projects_dir" not in sec:
         raise Slam2Error("'evaluation.slam2.projects_dir' is missing (null = the server's projects directory)")
     pd = sec["projects_dir"]
@@ -571,6 +574,26 @@ def publish_variant_scan(projects_dir: Path, scene: str, variant: str, session_d
     return rec
 
 
+def mirror_instruments(variant_session: Path, scene_session: Path, log: Callable = print) -> Dict[str, Any]:
+    """Copy the reference's seam_radial/ and attention_calibration/ directories (records of the
+    instruments, json / csv / png) under the scene's own maplong_run/, replacing older copies."""
+    src = run_dir_of(variant_session)
+    dst = run_dir_of(scene_session)
+    out: Dict[str, Any] = {}
+    for name in ("seam_radial", "attention_calibration"):
+        s_, d_ = src / name, dst / name
+        if not s_.is_dir():
+            out[name] = {"copied": False, "reason": f"{s_} does not exist"}
+            continue
+        dst.mkdir(parents=True, exist_ok=True)
+        if d_.exists():
+            shutil.rmtree(d_)
+        shutil.copytree(s_, d_)
+        out[name] = {"copied": True, "to": str(d_)}
+        log(f"[slam2] {name}/ mirrored to the scene: {d_}")
+    return out
+
+
 # ── the hooks the executor calls ──────────────────────────────────────────────────────────
 
 class Slam2Hooks:
@@ -607,6 +630,11 @@ class Slam2Hooks:
                     info["attention_calibrate"] = {"ran": False, "reason": "no gate variant declares calibration parameters"}
                 else:
                     info["attention_calibrate"] = run_attention_calibrate(sd, self.base_config, params, self.log)
+            if spec.name == self.reference and self.slam2.get("mirror_instruments_to_scene"):
+                # the reference's instruments are copied under the SCENE's own run directory, so a later
+                # invocation on the same scene (one variant per run, the disk being what it is) resolves
+                # its gate variants from them — a record, never a product of the scene
+                info["mirrored_to_scene"] = mirror_instruments(sd, scene.session_dir, self.log)
             if spec.name == self.reference:
                 existing = (self.slam2.get("existing_runs") or {}).get(scene.name)
                 if existing:
