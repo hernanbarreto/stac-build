@@ -101,3 +101,30 @@ def test_without_rolling_shutter_nothing_is_measured_as_significant():
         assert rs.get("tau_frames", 0.0) == 0.0 or rs["verdict_vs_best"]["improves"] is False
     else:
         assert abs(m["tau_frames"]) < 0.3
+
+
+def test_a_negative_readout_is_searched_and_taken():
+    """Regression (pccr_audit 2026-10-31): the residuals read the readout with its sign, the search
+    walks the grid on that side — and every candidate there was short-circuited to the global
+    shutter (`key <= 0`), so a negative readout produced seven candidates with one identical held-out
+    median and 'not corrected'. The same scene as the positive test, the rows read the other way."""
+    X, c2w = T._scene(seed=4, n_kf=16)
+    gt = [500.0, 500.0, 319.5, 239.5, -0.05, 0.01, 0.0, 0.0]
+    kf = [STEP * k for k in range(len(c2w))]
+    track, frame, uv = _observe_rs(X, c2w, gt, 0.3, 9, kf, -TAU_F)
+    split = T._split(track)
+    cfg = replace(T.CFG, permutations=300, rolling_shutter="judged", rs_passes=2)
+    core = R.refine_core(np.linalg.inv(T._perturb(c2w, 0.1, 0.01, 3)), gt, T.WH, track, frame, uv, split, kf, 0.01,
+                         cfg, T.SOLVER, error_factor=T.FAC, log=lambda *a: None)
+    rs = core["rolling_shutter"]
+    m = rs["measured_on_global_shutter_residuals"]
+    assert m["significant"] and -TAU_F < m["tau_frames"] < 0.0, m
+    searched = [e for e in rs["search"] if e["tau_frames"] < 0.0]
+    assert len(searched) >= 4, rs["search"]
+    # the candidates were SOLVED: their held-out medians are not the global shutter's
+    gs = rs["heldout_median_px_global_shutter"]
+    assert any(e["heldout_median_px"] != gs for e in searched), rs["search"]
+    assert abs(rs["tau_frames"] + TAU_F) <= 0.125 + 1e-9, (rs["tau_frames"], rs["search"])
+    assert rs["taken"] and core["best"].name == "RS", rs
+    assert rs["heldout_median_px_rolling_shutter"] < gs
+    assert core["rungs"]["RS"]["readout_frames"] == rs["tau_frames"] < 0.0

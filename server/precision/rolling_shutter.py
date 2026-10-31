@@ -244,7 +244,12 @@ def judge_rolling_shutter(best, fit_g, held_g, wh, cfg, solver, *, fac: float, s
     def ev(tau: float, name: str):
         key = round(float(tau), 6)
         if key not in evaluated:
-            if key <= 0.0:
+            # only τ_f = 0 IS the global shutter: a NEGATIVE candidate is a readout of the other sign
+            # (the sensor's row order against the image's) and is rectified and solved like a positive
+            # one. Until 2026-10-31 every candidate ≤ 0 was short-circuited to the global-shutter best,
+            # so a session whose residuals read a negative readout (pccr_audit: −0.099 ± 0.010 frames)
+            # searched nothing — seven candidates, one identical held-out median, "not corrected".
+            if key == 0.0:
                 evaluated[key] = (best, h_best, med_gs)
             else:
                 evaluated[key] = _evaluate(key, best, fit_g, held_g, H, cfg, solver, solve_fn, heldout_fn, frames, name)
