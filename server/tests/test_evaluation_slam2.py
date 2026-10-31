@@ -190,15 +190,24 @@ def test_variant_metrics_read_the_records_or_leave_none(tmp_path):
     (run / "loop_edges.json").write_text(json.dumps({"edges": [{"stage": "verification", "status": "accepted"},
                                                                {"stage": "verification", "status": "rejected"},
                                                                {"stage": "spatial_gate", "status": "rejected"}]}))
+    # the records as the fork writes them (pccr 2026-10-31): leave_one_out_closures on every verdict,
+    # gates.holdout_surface_pairs only on an APPLY
     (run / "pose_graph.json").write_text(json.dumps({"verdict": "IDENTITY", "reason": "r", "cycle_consistency": {"n_kept": 1},
-                                                     "leave_one_out_closures": {"n_judges": 1},
-                                                     "gates": {"holdout_surface_pairs": {"n_pairs": 10, "before_m": 0.03, "after_m": 0.029}}}))
+                                                     "leave_one_out_closures": {"n_judges": 8, "median_before_m": 0.0312,
+                                                                                "median_after_m": 0.0316, "error_m": 0.3078}}))
     (run / "focal_model.json").write_text(json.dumps({"applied": True, "reason": "ok", "seams_rule": {"median_before_m": 0.02, "median_after_m": 0.01}}))
+    (out := sd / "output" / "precision").mkdir(parents=True)
+    (out / "refine.json").write_text(json.dumps({"applied_rung": "R2", "rungs": {
+        "R0": {"taken": True, "heldout_median_px": 1.2, "n_heldout_tracks": 1000, "fit_rms_px": 0.9},
+        "R2": {"taken": True, "heldout_median_px": 0.82, "n_heldout_tracks": 1234, "fit_rms_px": 0.61}}}))
     m = S2.variant_metrics(sd)
     assert m["salad_candidates"] == 2 and m["gate_passed"] == 1 and m["bridges"] == 2 and m["bridges_accepted"] == 1
-    assert m["closures_cycle_consistent"] == 1 and m["graph_verdict"] == "IDENTITY" and m["fork_heldout_after_m"] == 0.029
+    assert m["closures_cycle_consistent"] == 1 and m["graph_verdict"] == "IDENTITY"
+    assert m["fork_heldout_pairs"] == 8 and m["fork_heldout_after_m"] == 0.0316 and m["fork_heldout_error_m"] == 0.3078
+    assert "fork_surface_pairs" not in m
     assert m["focal_model_applied"] is True and m["focal_seams_after_m"] == 0.01
-    assert "seams" not in m and m.get("f5_heldout_px") is None
+    assert m["f5_rung"] == "R2" and m["f5_heldout_px"] == 0.82 and m["f5_heldout_tracks"] == 1234
+    assert "seams" not in m
     assert S2.variant_metrics(None) == {}
 
 

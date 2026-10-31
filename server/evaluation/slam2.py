@@ -417,11 +417,18 @@ def variant_metrics(session_dir: Optional[Path]) -> Dict[str, Any]:
         loo = pg.get("leave_one_out_closures") or {}
         m["graph_judges"] = loo.get("n_judges")
         m["graph_verdict"] = pg.get("verdict")
-        m["graph_reason"] = pg.get("reason") or (loo.get("reason") if pg.get("verdict") == "IDENTITY" else None)
+        m["graph_reason"] = pg.get("reason") or loo.get("reason")
+        # the fork's held-out: the leave-one-out closures (every record), the surface pairs when the
+        # graph was solved (an APPLY record's gates)
+        m["fork_heldout_pairs"] = loo.get("n_judges")
+        m["fork_heldout_before_m"] = loo.get("median_before_m")
+        m["fork_heldout_after_m"] = loo.get("median_after_m")
+        m["fork_heldout_error_m"] = loo.get("error_m")
         hp = (pg.get("gates") or {}).get("holdout_surface_pairs") or {}
-        m["fork_heldout_pairs"] = hp.get("n_pairs")
-        m["fork_heldout_before_m"] = hp.get("before_m", hp.get("median_before_m"))
-        m["fork_heldout_after_m"] = hp.get("after_m", hp.get("median_after_m"))
+        if hp:
+            m["fork_surface_pairs"] = hp.get("n_pairs")
+            m["fork_surface_pairs_before_m"] = hp.get("before_m", hp.get("median_before_m"))
+            m["fork_surface_pairs_after_m"] = hp.get("after_m", hp.get("median_after_m"))
     fm = _read_json(run / "focal_model.json") if (run / "focal_model.json").is_file() else None
     if fm is not None:
         m["focal_model_applied"] = fm.get("applied")
@@ -449,21 +456,26 @@ def variant_metrics(session_dir: Optional[Path]) -> Dict[str, Any]:
     rf = _read_json(out / "precision" / "refine.json") if (out / "precision" / "refine.json").is_file() else None
     if rf is not None:
         rungs = rf.get("rungs") or {}
-        last = None
-        for key in ("R2", "R1", "R0s", "R0"):
-            if isinstance(rungs.get(key), dict):
-                last = rungs[key]
-                break
-        m["f5_heldout_px"] = (last or {}).get("heldout_px", (last or {}).get("held_out_px"))
-        m["f5_rung"] = (rf.get("report") or {}).get("rung") or (rf.get("camera") or {}).get("rung")
+        rung = rf.get("applied_rung")
+        rec_r = rungs.get(rung) if isinstance(rung, str) else None
+        if not isinstance(rec_r, dict):
+            taken = [k for k, v in rungs.items() if isinstance(v, dict) and v.get("taken")]
+            rung = taken[-1] if taken else None
+            rec_r = rungs.get(rung) if rung else None
+        m["f5_rung"] = rung
+        m["f5_heldout_px"] = (rec_r or {}).get("heldout_median_px")
+        m["f5_heldout_tracks"] = (rec_r or {}).get("n_heldout_tracks")
+        m["f5_fit_rms_px"] = (rec_r or {}).get("fit_rms_px")
     return m
 
 
 TABLE_COLUMNS = ["scene", "variant", "status", "reason", "salad_candidates", "gate_candidates", "gate_passed", "gate_layer",
                  "gate_min_score", "bridges", "bridges_accepted", "closures_cycle_consistent", "graph_judges", "graph_verdict",
-                 "fork_heldout_pairs", "fork_heldout_before_m", "fork_heldout_after_m", "focal_model_applied",
+                 "fork_heldout_pairs", "fork_heldout_before_m", "fork_heldout_after_m", "fork_heldout_error_m",
+                 "fork_surface_pairs", "fork_surface_pairs_before_m", "fork_surface_pairs_after_m", "focal_model_applied",
                  "focal_seams_before_m", "focal_seams_after_m", "seam_held_median_m_mean", "offline_common_K_improves",
-                 "f5_heldout_px", "f5_rung", "abs_median_m", "abs_p95_m", "keyframes_registered_pct", "seconds", "gpu_hours",
+                 "f5_heldout_px", "f5_heldout_tracks", "f5_fit_rms_px", "f5_rung", "abs_median_m", "abs_p95_m",
+                 "keyframes_registered_pct", "seconds", "gpu_hours",
                  "cost_usd", "d_seam_held_median_m_mean_vs_reference", "d_fork_heldout_after_m_vs_reference",
                  "d_f5_heldout_px_vs_reference", "d_seconds_vs_reference"]
 
