@@ -3528,6 +3528,18 @@ scan_fusion:
 # VGGT-Long fork as Model.loops / Model.scale by workers/map_worker.py. Every
 # decision threshold of the loop machinery lives here — zero literals in code.
 correction_graph:
+  # seams:                          # OPTIONAL — VGGT-SLAM 2.0 idea 1 (claude_stac_slam2.txt, phase 2):
+  #                                 # ONE calibration for every Ω inference of the session. ABSENT (this
+  #                                 # default) = off = the fork's f576cbf products bit for bit; present,
+  #                                 # EVERY subkey is mandatory. Written into the fork config only when on.
+  #   focal_model: common_K         # none | common_K — common_K re-unprojects every chunk and bridge with
+  #                                 #   one session K (depth per pixel unchanged, rays change, c2w unchanged)
+  #                                 #   right after the metric lock; applied only when decide_change passes
+  #                                 #   on the seams' held-out residual and the chunks' held-out pairs do not
+  #                                 #   worsen, else identity (declared in maplong_run/focal_model.json)
+  #   common_K_source: session_median   # session_median | intake_probe — the median fx, fy, cx, cy of Ω
+  #                                 #   over the frames by owner, or the K of intake.focal (absent for the
+  #                                 #   session → the variant is recorded as not run, with the reason)
   loop:                             # exact bridges + verification (§4.1/§4.2)
     anchors_per_bridge: 3           # DA3 anchor frames planned INSIDE each bridge window
                                     # (own metric lock; without them the bridge takes the
@@ -4021,6 +4033,30 @@ witness:                            # §6 witnesses on the cloud (F3): evidence,
                                     # counts against the row, an occlusion mismatch does not
 
 loops:                              # candidate detector + spatial gate (§4.4/§4.5/§4.9)
+  # attention_gate:                 # OPTIONAL — VGGT-SLAM 2.0 idea 2 (claude_stac_slam2.txt, phase 3): the
+  #                                 # training-free loop verifier that reads the backbone's GLOBAL attention
+  #                                 # over the candidate pair (one Ω pass of 2 keyframes per candidate, before
+  #                                 # any bridge is spent). ABSENT (this default) = off = f576cbf bit for
+  #                                 # bit; present, EVERY subkey is mandatory. Written into the fork config
+  #                                 # only when on. Layer and threshold come from the scene's
+  #                                 # attention_calibration.json (python -m loop_utils.attention_calibrate).
+  #   mode: gate                    # off | gate — gate: a candidate under min_score gets no bridge
+  #   layer: 4                      # index of a GLOBAL inter-frame block (aggregator.inter_frame_attention_types);
+  #                                 #   a "register" block is refused by name
+  #   min_score: 0.5                # pass when min(score(A,B), score(B,A)) >= this
+  #   top_fraction: 0.25            # share of the highest r(t) averaged into the score (the paper's 0.25)
+  #   salad_similarity_threshold: null  # null keeps loops.salad.similarity_threshold; a number replaces it,
+  #                                 #   only with the gate on (0.60 proposed: between pccr's measured p99
+  #                                 #   0.57 and the 0.65 in use)
+  #   calibration:                  # the offline rule of attention_calibrate (never a tuning by hand)
+  #     select: max_auc_lower_ci    # the layer with the highest lower bound of its AUC interval, the lowest
+  #                                 #   threshold reaching target_precision on the labels
+  #     target_precision: 0.95
+  #     min_labels: 5               # positives AND negatives each at least this, else no choice (declared)
+  #     n_negatives: 50             # non-local, frustum-disjoint keyframe pairs drawn as negatives (stable)
+  #     n_boot: 2000                # bootstrap resamples of the AUC interval
+  #     confidence: 0.95            # of that interval
+  #     salad_grid: [0.55, 0.60, 0.65, 0.70]   # SALAD similarities whose candidate counts are reported
   salad:                            # §4.4 VISUAL candidates: DINOv2-SALAD retrieval over the
                                     # KEYFRAMES inside the fork (written into the Omega config's
                                     # Loop.SALAD — the fork has no thresholds of its own here).

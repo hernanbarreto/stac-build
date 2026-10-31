@@ -169,6 +169,49 @@ class ReprojectionConfig:
                                     # scatter of the shift VECTORS ranks the real cases backwards
 
 
+# ── VGGT-SLAM 2.0 ideas in the Ω stage (claude_stac_slam2.txt) — OPTIONAL sections ────────
+# Both sections are ABSENT by default: absent = off = the fork's f576cbf products bit for bit.
+# Present, every subkey is mandatory (no default in code). The map worker writes them into the
+# fork config ONLY when they are on, so the reference's vggt_omega_config.yaml never changes.
+
+@dataclass(frozen=True)
+class SeamsConfig:
+    """``correction_graph.seams`` — idea 1 (phase 2): one calibration for every Ω inference of the
+    session, so the seams and the loops measure on the same K. ``focal_model`` none keeps each
+    chunk's own K (today); common_K re-unprojects every inference with ONE session K."""
+    focal_model: str                # none | common_K
+    common_K_source: str            # session_median | intake_probe
+
+
+@dataclass(frozen=True)
+class AttentionGateCalibration:
+    """``loops.attention_gate.calibration`` — the OFFLINE rule that picks the layer and the
+    threshold from a finished run's labels (phase 3, loop_utils.attention_calibrate)."""
+    select: str                     # max_auc_lower_ci: the layer with the highest lower bound of
+                                    # the AUC interval, the lowest threshold reaching target_precision
+    target_precision: float         # precision the threshold must reach on the labels
+    min_labels: int                 # positives AND negatives each at least this, or no choice (declared)
+    n_negatives: int                # non-local, frustum-disjoint keyframe pairs drawn as negatives
+    n_boot: int                     # bootstrap resamples of the AUC interval
+    confidence: float               # of that interval
+    salad_grid: Tuple[float, ...]   # SALAD similarities whose candidate counts (proposed / passing
+                                    # the gate) the calibration reports
+
+
+@dataclass(frozen=True)
+class AttentionGateConfig:
+    """``loops.attention_gate`` — idea 2 (phase 3): the training-free loop verifier that reads the
+    backbone's global attention over the candidate pair."""
+    mode: str                       # off | gate — gate: a candidate that fails never gets a bridge
+    layer: int                      # index of a GLOBAL inter-frame block of the aggregator (a
+                                    # register block is refused by name in the fork)
+    min_score: float                # the pair passes when min(score(A,B), score(B,A)) >= this
+    top_fraction: float             # share of the highest r(t) averaged into the score (paper: 0.25)
+    salad_similarity_threshold: Optional[float]  # null: loops.salad.similarity_threshold stays;
+                                    # a number replaces it — only with the gate on
+    calibration: AttentionGateCalibration
+
+
 @dataclass(frozen=True)
 class LoopsConfig:
     reprojection: "ReprojectionConfig"
@@ -183,6 +226,7 @@ class LoopsConfig:
     spatial: SpatialGateConfig
     semantic: SemanticClassConfig
     salad: SaladConfig
+    attention_gate: Optional[AttentionGateConfig] = None   # absent = off (claude_stac_slam2.txt)
 
 
 # ── scale — the scale graph's extra sources (§5) ────────────────────────────
@@ -510,6 +554,7 @@ class MetricGraphConfig:
     structural: StructuralConfig
     certify: CertifyConfig
     witness: WitnessConfig
+    seams: Optional[SeamsConfig] = None     # absent = off (claude_stac_slam2.txt)
 
 
 def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig:
@@ -638,6 +683,7 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         min_cross_recall=_num(rp, "min_cross_recall", f"{L}.reprojection", lo=0),
         min_agreeing_frac=_num(rp, "min_agreeing_frac", f"{L}.reprojection", lo=0))
 
+    attention_gate = _parse_attention_gate(ls.get("attention_gate"))
     loops = LoopsConfig(
         min_gap_keyframes=_num(ls, "min_gap_keyframes", L, lo=1, integer=True),
         duplicate_min_sep_m=_num(ls, "duplicate_min_sep_m", L, lo=0, lo_excl=True),
@@ -648,6 +694,7 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         coverage_radius_m=_num(ls, "coverage_radius_m", L, lo=0, lo_excl=True),
         min_coverage=_num(ls, "min_coverage", L, lo=0, hi=1.0),
         spatial=spatial, semantic=semantic, salad=salad, reprojection=reprojection,
+        attention_gate=attention_gate,
     )
 
     sc = raw.get("scale")
@@ -800,9 +847,65 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
     if not isinstance(wi, dict):
         raise LoopsConfigError("config section witness is missing")
     witness = _parse_witness(wi)
+    seams = _parse_seams(cg.get("seams"))
     return MetricGraphConfig(loop=loop, loops=loops, scale=scale, graph=graph,
                              authority=authority, structural=structural, certify=certify,
-                             witness=witness)
+                             witness=witness, seams=seams)
+
+
+def _parse_seams(se) -> Optional[SeamsConfig]:
+    """``correction_graph.seams``: absent → None (off, f576cbf bit for bit); present → every
+    subkey mandatory, the enumerations checked by name."""
+    if se is None:
+        return None
+    P = "correction_graph.seams"
+    if not isinstance(se, dict):
+        raise LoopsConfigError(f"config section {P} must be a mapping (or absent = off)")
+    return SeamsConfig(
+        focal_model=_choice(se, "focal_model", P, ("none", "common_K")),
+        common_K_source=_choice(se, "common_K_source", P, ("session_median", "intake_probe")),
+    )
+
+
+def _parse_attention_gate(ag) -> Optional[AttentionGateConfig]:
+    """``loops.attention_gate``: absent → None (off, f576cbf bit for bit); present → every
+    subkey mandatory (the calibration block included), the enumerations checked by name."""
+    if ag is None:
+        return None
+    P = "loops.attention_gate"
+    if not isinstance(ag, dict):
+        raise LoopsConfigError(f"config section {P} must be a mapping (or absent = off)")
+    sst = _require(ag, "salad_similarity_threshold", P)
+    if sst is not None:
+        if isinstance(sst, bool) or not isinstance(sst, (int, float)):
+            raise LoopsConfigError(f"config key {P}.salad_similarity_threshold must be null or a "
+                                   f"number in [-1, 1], got {sst!r}")
+        sst = _num(ag, "salad_similarity_threshold", P, lo=-1.0, hi=1.0)
+    ca = _sub(ag, "calibration", P)
+    C = f"{P}.calibration"
+    grid = _require(ca, "salad_grid", C)
+    if (not isinstance(grid, (list, tuple)) or not grid
+            or not all(isinstance(x, (int, float)) and not isinstance(x, bool) and -1.0 <= x <= 1.0
+                       for x in grid)):
+        raise LoopsConfigError(f"config key {C}.salad_grid must be a non-empty list of similarities "
+                               f"in [-1, 1]")
+    calibration = AttentionGateCalibration(
+        select=_choice(ca, "select", C, ("max_auc_lower_ci",)),
+        target_precision=_num(ca, "target_precision", C, lo=0.0, hi=1.0),
+        min_labels=_num(ca, "min_labels", C, lo=1, integer=True),
+        n_negatives=_num(ca, "n_negatives", C, lo=0, integer=True),
+        n_boot=_num(ca, "n_boot", C, lo=1, integer=True),
+        confidence=_num(ca, "confidence", C, lo=0.5, hi=1.0, lo_excl=True),
+        salad_grid=tuple(float(x) for x in grid),
+    )
+    return AttentionGateConfig(
+        mode=_choice(ag, "mode", P, ("off", "gate")),
+        layer=_num(ag, "layer", P, lo=0, integer=True),
+        min_score=_num(ag, "min_score", P, lo=0.0, hi=1.0),
+        top_fraction=_num(ag, "top_fraction", P, lo=0.0, hi=1.0, lo_excl=True),
+        salad_similarity_threshold=sst,
+        calibration=calibration,
+    )
 
 
 def _sub(section, key, path) -> Dict[str, Any]:
@@ -983,14 +1086,46 @@ def fork_model_scale(cfg: MetricGraphConfig) -> Dict[str, Any]:
     return asdict(cfg.scale)
 
 
+def fork_model_seams(cfg: MetricGraphConfig) -> Optional[Dict[str, Any]]:
+    """``Model.seams`` for vendor/VGGT-Long — None unless the section is present AND on
+    (focal_model other than none): the fork reads an absent section as off, and the reference's
+    fork config must not change by a byte (claude_stac_slam2.txt, rule 5)."""
+    se = cfg.seams
+    if se is None or se.focal_model == "none":
+        return None
+    return {"focal_model": str(se.focal_model), "common_K_source": str(se.common_K_source)}
+
+
+def fork_loops_attention_gate(cfg: MetricGraphConfig) -> Optional[Dict[str, Any]]:
+    """``Model.loops.attention_gate`` for vendor/VGGT-Long — None unless the section is present
+    AND on (mode other than off); same rule as :func:`fork_model_seams`."""
+    ag = cfg.loops.attention_gate
+    if ag is None or ag.mode == "off":
+        return None
+    d = asdict(ag)
+    d["calibration"] = _plain(asdict(ag.calibration))
+    return _plain(d)
+
+
+def gate_salad_similarity_threshold(cfg: MetricGraphConfig) -> Optional[float]:
+    """The SALAD bar the attention gate asks for: a number only with the gate ON and
+    ``salad_similarity_threshold`` set; None keeps ``loops.salad.similarity_threshold``."""
+    ag = cfg.loops.attention_gate
+    if ag is None or ag.mode == "off" or ag.salad_similarity_threshold is None:
+        return None
+    return float(ag.salad_similarity_threshold)
+
+
 def fork_loop_salad(cfg: MetricGraphConfig) -> Dict[str, Any]:
     """``Loop.SALAD`` for vendor/VGGT-Long's LoopDetector (its own keys; the
     fork's base_config carries the vendor's driving-video values, this
-    overrides every one of them from config.yaml)."""
+    overrides every one of them from config.yaml). With the attention gate ON and
+    ``salad_similarity_threshold`` set, that number is the similarity bar (phase 3)."""
     s = cfg.loops.salad
+    _gate_bar = gate_salad_similarity_threshold(cfg)
     return {"image_size": [int(s.image_size[0]), int(s.image_size[1])],
             "batch_size": int(s.batch_size),
-            "similarity_threshold": float(s.similarity_threshold),
+            "similarity_threshold": float(s.similarity_threshold if _gate_bar is None else _gate_bar),
             "top_k": int(s.top_k),
             "use_nms": bool(s.nms_threshold > 0),
             "nms_threshold": int(s.nms_threshold),

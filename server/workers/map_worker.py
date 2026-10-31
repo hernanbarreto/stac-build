@@ -1470,6 +1470,23 @@ def _apply_stac_model_keys(cfg: dict, config: dict) -> dict:
     return cfg
 
 
+def _apply_slam2_sections(cfg_v: dict, mg) -> dict:
+    """The VGGT-SLAM 2.0 sections (claude_stac_slam2.txt, phase 0): ``Model.seams`` and
+    ``Model.loops.attention_gate`` reach the fork ONLY when the server config turns them on
+    (correction_graph.seams.focal_model other than none / loops.attention_gate.mode other than
+    off). Absent or off, this is a no-op on the dict — the fork config of the reference is byte
+    for byte the one of f576cbf and the fork reads an absent section as off (rule 5). Lives in
+    a helper for the same reason as :func:`_apply_stac_model_keys`: one writer, testable alone."""
+    from reconstruction.loops.config import fork_model_seams, fork_loops_attention_gate
+    seams = fork_model_seams(mg)
+    if seams is not None:
+        cfg_v["Model"]["seams"] = seams
+    gate = fork_loops_attention_gate(mg)
+    if gate is not None:
+        cfg_v["Model"]["loops"]["attention_gate"] = gate
+    return cfg_v
+
+
 def _native_frame_wh(frames_dir) -> tuple:
     """(w, h) of the session's frames (the first one; frames/ is at the video's native size)."""
     import cv2 as _cv2m
@@ -2107,8 +2124,19 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # loop, duplicates untouched.
         cfg_v.setdefault("Loop", {})["SALAD"] = fork_loop_salad(_mg)
         pipe.send_log(f"[loops] SALAD candidates over keyframes: similarity ≥ "
-                      f"{_mg.loops.salad.similarity_threshold:g}, top-{_mg.loops.salad.top_k}, "
+                      f"{cfg_v['Loop']['SALAD']['similarity_threshold']:g}, top-{_mg.loops.salad.top_k}, "
                       f"gap ≥ {_mg.loops.salad.min_gap_keyframes} kf, NMS {_mg.loops.salad.nms_threshold} kf")
+        # VGGT-SLAM 2.0 sections (claude_stac_slam2.txt): written only when ON — off, the fork
+        # config does not change by a byte
+        _apply_slam2_sections(cfg_v, _mg)
+        if cfg_v["Model"].get("seams") is not None:
+            pipe.send_log(f"[slam2] Model.seams: focal_model {cfg_v['Model']['seams']['focal_model']} "
+                          f"({cfg_v['Model']['seams']['common_K_source']})")
+        if cfg_v["Model"]["loops"].get("attention_gate") is not None:
+            _ag = cfg_v["Model"]["loops"]["attention_gate"]
+            pipe.send_log(f"[slam2] Model.loops.attention_gate: mode {_ag['mode']}, layer {_ag['layer']}, "
+                          f"min_score {_ag['min_score']:g}, top_fraction {_ag['top_fraction']:g}, "
+                          f"SALAD bar {'kept' if _ag['salad_similarity_threshold'] is None else _ag['salad_similarity_threshold']}")
         # F2: keyframe SE(3) graph replaces the vendor sim3loop; authority
         # budgets per stage; optional ensemble witness (§4.3/§4.7/§4.8)
         cfg_v["Model"]["graph"] = fork_model_graph(_mg)
