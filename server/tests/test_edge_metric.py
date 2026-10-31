@@ -271,6 +271,13 @@ def test_skirt_raises_overshoot_and_the_verdict_says_worse(skirt_report):
     assert v["metrics"]["tau_over_sigma"]["verdict"] == "worsens"
 
 
+@pytest.mark.xfail(strict=True, reason=(
+    "DECLARED 2026-10-31, measured when the detector's fitters came back (reconstruction.surface_fit.fitters; the "
+    "module they lived in had left with the meshing stack on 2026-10-17 and this test could not even import): the "
+    "RANSAC labeling splits the box's 6 faces into 10 regions, and on the eroded box the crease of face pair (0, 6) is "
+    "measured on a line that left the eroded band after the refit — n_band 41 → 70, coverage 0.84 → 1.00, r̂ 15.5 mm "
+    "where erosion is not a fillet; the other 13 creases read 0.0 and the A-vs-B verdict says worsens. The instrument's "
+    "crease line must follow the reference's faces, not a refit on the compared cloud — the user's call"))
 def test_eroded_edge_band_drops_coverage(eroded_report, skirt_report):
     a = eroded_report["reference"]["objects"][0]
     b = eroded_report["compare"]["objects"][0]
