@@ -762,7 +762,7 @@ def witness_cfg(**over) -> dict:
 
 def certify_cfg(**over) -> dict:
     """Mirror of config.yaml ``certify:``."""
-    d = {"ensemble_offset_frames": 0, "keep_aligned_chunks": True,
+    d = {"ensemble_offset_frames": 0, "keep_aligned_chunks": True, "keep_unaligned_chunks": False,
          "max_iters": 3, "eps": 0.05, "regression_eps": 0.01, "auto_after_segmentation": True,
          # the §9 loop is what these fixtures exercise, so they ask for the FULL
          # certification; production runs with deliverable_only: true (USER

@@ -3804,6 +3804,14 @@ certify:                            # §4.8 ensemble witness + §9 certification
                                     # omega_run/results_output carries the per-keyframe depth the core
                                     # reads), the bridges and the uncertainty maps at the end of the
                                     # reconstruction (uncertainty.json keeps the per-frame numbers).
+  keep_unaligned_chunks: false      # true = keep maplong_run/_tmp_results_unaligned (the chunk npys in
+                                    # the exact state the seams read: metric lock + scale close) for the
+                                    # offline seam instrument of claude_stac_slam2.txt phase 1
+                                    # (python -m loop_utils.seam_radial --run <maplong_run>). The fork
+                                    # then skips its incremental removal (the apply loop holds every
+                                    # unaligned AND aligned chunk at once: pccr 2408 ~41 GB each). false
+                                    # (the default, as before): removed during the apply loop and by the
+                                    # post-reconstruction cleanup.
                                     # pccr held 8.7 GB of them; zaragoza (1080p) 30 GB.
   geometric_cleanup: false          # SUPERSEDED 2026-09-19 by the mask filter inside
                                     # the epoch transaction (correction.apply.mask_filter):

@@ -512,6 +512,10 @@ class DeterminismConfig:
 class CertifyConfig:
     ensemble_offset_frames: int     # >0 → a second Omega pass with shifted chunk boundaries
     keep_aligned_chunks: bool
+    keep_unaligned_chunks: bool     # claude_stac_slam2.txt phase 1: keep maplong_run/
+                                    # _tmp_results_unaligned (the chunk npys in the state the exact
+                                    # seams read) for python -m loop_utils.seam_radial; the fork
+                                    # receives Model.keep_unaligned_chunks only when true
     geometric_cleanup: bool         # the retired second deleter — OFF, see config.yaml
                                     # after the scale (the post-hoc graph, the A/B harness and
                                     # the certification loop read them)
@@ -1052,6 +1056,7 @@ def _parse_certify(ce: Dict[str, Any]) -> CertifyConfig:
     return CertifyConfig(
         ensemble_offset_frames=_num(ce, "ensemble_offset_frames", P, lo=0, integer=True),
         keep_aligned_chunks=_bool(ce, "keep_aligned_chunks", P),
+        keep_unaligned_chunks=_bool(ce, "keep_unaligned_chunks", P),
         geometric_cleanup=_bool(ce, "geometric_cleanup", P),
         max_iters=_num(ce, "max_iters", P, lo=1, integer=True),
         eps=_num(ce, "eps", P, lo=0),

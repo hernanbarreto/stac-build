@@ -157,3 +157,54 @@ def test_the_omega_builder_writes_the_sections_through_the_one_helper():
     i_salad = body.index('["SALAD"] = fork_loop_salad(_mg)')
     i_call = body.index("_apply_slam2_sections(cfg_v, _mg)")
     assert i_salad < i_call, "the sections are written after the SALAD block, inside the chunked-metric path"
+
+
+# ── phase 1: the unaligned chunk npys survive for the offline seam instrument ──────────────
+
+def test_keep_unaligned_chunks_reaches_the_fork_only_when_on():
+    import copy as _copy
+    raw = _raw()
+    assert raw["certify"]["keep_unaligned_chunks"] is False
+    mg = load_loops_config(raw)
+    before = _bytes(_fork_cfg())
+    cfg = _fork_cfg()
+    _helper()(cfg, mg)
+    assert _bytes(cfg) == before and "keep_unaligned_chunks" not in cfg["Model"]
+    raw_on = _copy.deepcopy(raw)
+    raw_on["certify"]["keep_unaligned_chunks"] = True
+    cfg = _fork_cfg()
+    _helper()(cfg, load_loops_config(raw_on))
+    assert cfg["Model"]["keep_unaligned_chunks"] is True
+    with pytest.raises(LoopsConfigError, match="certify.keep_unaligned_chunks"):
+        load_loops_config(_raw(seams=None, gate=None) | {"certify": {k: v for k, v in raw["certify"].items()
+                                                                      if k != "keep_unaligned_chunks"}})
+
+
+def test_the_real_config_keeps_the_unaligned_chunks_off_by_default():
+    raw = yaml.safe_load((SERVER / "config.yaml").read_text())
+    assert raw["certify"]["keep_unaligned_chunks"] is False
+
+
+@pytest.mark.parametrize("keep", [True, False])
+def test_the_cleanup_spares_the_unaligned_chunks_when_asked(tmp_path, keep):
+    from workers import map_worker as MW
+    save, out = tmp_path / "maplong_run", tmp_path / "output"
+    for d in ("_tmp_results_unaligned", "_tmp_results_loop", "pcd", "uncert", "_tmp_results_aligned"):
+        (save / d).mkdir(parents=True)
+        (save / d / "x.bin").write_bytes(b"x" * 8)
+    out.mkdir()
+    raw = yaml.safe_load((SERVER / "config.yaml").read_text())
+    raw["certify"]["keep_unaligned_chunks"] = keep
+    logs = []
+
+    class _Pipe:
+        def send_log(self, m, level="info"):
+            logs.append(str(m))
+
+        def send_progress(self, *a, **k):
+            pass
+
+    MW._cleanup_recon_temps(save, out, "mapanything", _Pipe(), raw)
+    assert (save / "_tmp_results_unaligned").exists() is keep
+    assert not (save / "pcd").exists() and (save / "_tmp_results_aligned").exists()
+    assert any("_tmp_results_unaligned KEPT" in m for m in logs) is keep

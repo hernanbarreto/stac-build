@@ -1484,6 +1484,9 @@ def _apply_slam2_sections(cfg_v: dict, mg) -> dict:
     gate = fork_loops_attention_gate(mg)
     if gate is not None:
         cfg_v["Model"]["loops"]["attention_gate"] = gate
+    # phase 1: the unaligned chunk npys survive the apply loop for loop_utils.seam_radial
+    if mg.certify.keep_unaligned_chunks:
+        cfg_v["Model"]["keep_unaligned_chunks"] = True
     return cfg_v
 
 
@@ -2863,7 +2866,16 @@ def _cleanup_recon_temps(save_dir: Path, output_dir: Path, backend: str, pipe: W
                       level="warning")
     # uncert/ (per-frame uncertainty maps) is read by nothing after the run: uncertainty.json carries
     # the per-frame numbers the certification reads, and the fork's own resume reads that json too
-    for tmp_dir_name in ["_tmp_results_unaligned", "pcd"] + ([] if _keep_loop else ["_tmp_results_loop", "uncert"]):
+    _keep_unaligned = False
+    try:
+        _keep_unaligned = bool(_llc(job_config).certify.keep_unaligned_chunks)
+    except Exception:  # noqa: BLE001 — declared above with _keep_loop; the default removes
+        pass
+    if _keep_unaligned:
+        pipe.send_log("[cleanup] _tmp_results_unaligned KEPT (certify.keep_unaligned_chunks: the "
+                      "offline seam instrument reads the chunk npys in the state the seams read)")
+    for tmp_dir_name in ([] if _keep_unaligned else ["_tmp_results_unaligned"]) + ["pcd"] \
+            + ([] if _keep_loop else ["_tmp_results_loop", "uncert"]):
         tmp_dir = save_dir / tmp_dir_name
         if tmp_dir.exists():
             size_mb = sum(f.stat().st_size for f in tmp_dir.rglob("*") if f.is_file()) / (1024 * 1024)
