@@ -66,6 +66,23 @@
   HONEST LIMITS: drift between loops is unobservable without loops or references (the odometry priors leave it where
   Omega left it); absolute scale is DA3's unless known_dims; synthetic validation only until pccr runs.
 
+- 2026-10-31 — THE FIRST REAL RUN (pccr_audit = a copy of pccr 2026-08-31, replace ON, the full chain; the viewer shows
+  `pccr` beside `pccr_audit`; the user judges by eye). Found and fixed on the branch the same night, EVERY fix with a test:
+  F4's bridged-track count keyed canonically (cb25432); scale-align/orient redone only over a fresh Omega pass (8c21609: a
+  replace-OFF resume re-applied s = 0.9708 over F2's epoch); the ROLLING-SHUTTER search short-circuited every candidate ≤ 0
+  to the global shutter, so a negative readout (−0.099 ± 0.010 frames, significant) searched nothing — 7 candidates, one
+  identical held-out median (26db9c5); COLMAP had been starting from its DEFAULT focal (no EXIF in the keyframe JPEGs:
+  998 px against 364 measured) — GLOMAP's rotation averaging marked 156 pairs invalid and the walk came out in segments
+  turned 177°/90°/66° (75° median against F5), GLOMAP's own options did not mend it; with the session camera as COLMAP's
+  prior GLOMAP registered 295/295 in one model, 5.3°/11 cm median against F5, no broken step; the incremental mapper
+  184/295 with or without prior (d85eb67: `classical.camera_prior`, `classical.mappers [global, incremental]`, the
+  cross-check per mapper with the consecutive-step rotations). Measured on that run, F5: held-out 0.587 px (R1 applied)
+  against production pccr's 0.518 px (R2; another Omega pass); loop gap 60.4 → 6.8 cm over 29 windows with 30 MASt3R
+  bridges verified of 33 (16,851 bridged tracks); scale lock s = 1.0903 (+9 %, the direction the user saw: "pccr era un
+  poco más pequeño"; zaragoza he saw too BIG — not run); at keyframe 59→60 F5 steps 14.6° where both COLMAP models step
+  2.2° (F5 alone there). `tools/precision_audit_summary.py` reads a run (1e0ea73). The chain was re-run with the fixes on
+  `pccr_audit2` (a frames + video copy) once the first run was through. USER: "quiero ver colmap glomap actuando".
+
 ## ⭐⭐⭐ 2026-10-17 (01:10) — THE REAL TEXTURE ON GENRECON'S MESH, ITS MATERIAL KEPT (USER: "la mejor que he visto hasta ahora, impresionante")
 - CLOSING VERDICT OF THE DAY (USER 02:00): "creo que tenemos a hoy el pipeline ganador … pasamos por encima al estándar colmap y mvs por
   muchísimo" — intake → Ω chunks → F0–F6 → certified cloud → VLM/SAM3 → certification → GenRecon (presence from the cloud) → the
