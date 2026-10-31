@@ -234,3 +234,36 @@ exit 0
     rec2 = CB.ensure_features_and_matches(ws, "SIFT", "SIFT_BRUTEFORCE", ccfg, lambda *a: None)
     fx = extractions()
     assert len(fx) == 2 and "camera_params" not in fx[1] and rec2["camera_params"] is None
+
+
+def test_a_matcher_killed_by_a_signal_is_retried_once_and_recorded(tmp_path):
+    """FAISS's vocabulary-tree retrieval died by SIGSEGV on the pod (pccr_audit3 2026-10-31) and ran
+    through on the next attempt: ONE retry on a signal death, declared in the record; a second death
+    is the failure it is."""
+    from evaluation import colmap_baseline as CB
+    fake = tmp_path / "colmap"
+    fake.write_text(f"""#!/bin/bash
+echo "$@" >> {tmp_path}/argv.log
+[ "$1" = "-h" ] && echo "I COLMAP 4.2.0 (fake)"
+if [ "$1" = "sequential_matcher" ]; then
+  n=$(grep -c "^sequential_matcher" {tmp_path}/argv.log)
+  [ "$n" -le "$(cat {tmp_path}/deaths)" ] && kill -SEGV $$
+fi
+exit 0
+""")
+    fake.chmod(0o755)
+    ccfg = {"binary": str(fake), "camera_model": "OPENCV", "use_gpu": False, "sift": {"max_num_features": 100},
+            "aliked": {"max_num_features": 100}, "timeout_s": 60, "vocab_tree": {},
+            "sequential": {"overlap": 2, "quadratic_overlap": False, "loop_detection": False,
+                           "loop_detection_period": 10, "loop_detection_num_images": 5}}
+    ws = tmp_path / "ws"; (ws / "images").mkdir(parents=True); (ws / "images" / "000000.jpg").write_bytes(b"")
+    (tmp_path / "deaths").write_text("1")                      # the first matcher dies, the second lives
+    rec = CB.ensure_features_and_matches(ws, "SIFT", "SIFT_BRUTEFORCE", ccfg, lambda *a: None)
+    matcher = [c for c in rec["commands"] if c["argv"][1] == "sequential_matcher"]
+    assert len(matcher) == 1 and matcher[0]["attempt"] == 2 and "code -11" in matcher[0]["first_attempt"]
+    assert sum(1 for a in (tmp_path / "argv.log").read_text().splitlines() if a.startswith("sequential_matcher")) == 2
+    # two deaths: the failure it is
+    ws2 = tmp_path / "ws2"; (ws2 / "images").mkdir(parents=True); (ws2 / "images" / "000000.jpg").write_bytes(b"")
+    (tmp_path / "argv.log").write_text(""); (tmp_path / "deaths").write_text("2")
+    with pytest.raises(CB.ColmapError, match="code -11"):
+        CB.ensure_features_and_matches(ws2, "SIFT", "SIFT_BRUTEFORCE", ccfg, lambda *a: None)

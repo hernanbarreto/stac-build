@@ -135,7 +135,19 @@ def ensure_features_and_matches(ws: Path, features: str, matcher: str, ccfg: Dic
           "--SequentialMatching.loop_detection_num_images", str(int(sq["loop_detection_num_images"]))]
     if sq["loop_detection"]:
         mx += ["--SequentialMatching.vocab_tree_path", str(ccfg["vocab_tree"][tree_key])]
-    cmds.append(_run(mx, log_path, log, float(ccfg["timeout_s"])))
+    # the vocabulary-tree retrieval (FAISS, OpenMP) dies by SIGSEGV now and then on this pod (pccr_audit3
+    # 2026-10-31 and a CPU trial the same day; the next attempt ran through): ONE retry on a signal death,
+    # recorded — a second death is the failure it is
+    try:
+        cmds.append(_run(mx, log_path, log, float(ccfg["timeout_s"])))
+    except ColmapError as e:
+        if "code -" not in str(e):
+            raise
+        log(f"[colmap] sequential_matcher died by a signal ({e}) — retried once (FAISS vocab-tree retrieval)")
+        rec_retry = _run(mx, log_path, log, float(ccfg["timeout_s"]))
+        rec_retry["attempt"] = 2
+        rec_retry["first_attempt"] = str(e)
+        cmds.append(rec_retry)
     rec = {"features": features, "matcher": matcher, "camera_model": ccfg["camera_model"], "camera_params": want,
            "commands": cmds, "colmap": colmap_version(binary), "n_images": len(list((ws / "images").iterdir()))}
     marker.write_text(json.dumps(rec, indent=1))
