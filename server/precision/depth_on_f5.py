@@ -848,11 +848,14 @@ def write_mono_layers(pdir: Path, data, source: np.ndarray, rep, K, c2w, log) ->
     import trimesh
     pdir.mkdir(parents=True, exist_ok=True)
     xyz = np.stack([np.asarray(data["x"]), np.asarray(data["y"]), np.asarray(data["z"])], 1).astype(np.float32)
-    m = source >= 2
+    pal = {2: (150, 150, 150, 255), 3: (0, 200, 0, 255), 4: (0, 90, 255, 255)}
+    # ONLY the mono-detail sources: since the audit's tier 0 a point's source can also be SRC_COLMAP (5), which
+    # is not detail — `source >= 2` took it and the palette had no colour for it (pccr_audit2 2026-10-31,
+    # KeyError: 5 after the whole cloud was built)
+    m = np.isin(np.asarray(source), list(pal))
     idx = np.nonzero(m)[0]
     if len(idx) > LAYER_MAX_POINTS:
         idx = np.random.default_rng(0).choice(idx, LAYER_MAX_POINTS, replace=False)
-    pal = {2: (150, 150, 150, 255), 3: (0, 200, 0, 255), 4: (0, 90, 255, 255)}
     col = np.array([pal[int(v)] for v in source[idx]], np.uint8) if len(idx) else np.zeros((0, 4), np.uint8)
     pts = xyz[idx] if len(idx) else np.zeros((1, 3), np.float32)
     if not len(idx):

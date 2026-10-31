@@ -167,3 +167,25 @@ def test_edges_scope_applies_detail_only_near_discontinuities_and_within_tau():
     assert (fr.source[:, 62:90] == MD.SRC_OMEGA).all()                        # flat surfaces past the zone untouched
     fr2 = MD.refine_frame(z_cal, v, z_al, v, tau=0.02, band_px=1, sigma_px=3.0, reach_px=3, detail_scope="surfaces")
     assert (fr2.source[:, 62:90] == MD.SRC_DETAIL).any()                     # 'surfaces' = the first run's recipe: detail everywhere
+
+
+def test_the_viewer_layers_take_only_the_mono_detail_sources(tmp_path):
+    """Regression (pccr_audit2 2026-10-31): the published cloud's `source` now also holds SRC_COLMAP (5,
+    the photometric tier) — the layer writer selected every source >= 2 and died on the palette lookup
+    (KeyError: 5) after the whole cloud had been built. Only 2 / 3 / 4 are detail layers."""
+    import numpy as np
+    from types import SimpleNamespace
+    from precision import depth_on_f5 as D
+    n = 40
+    rng = np.random.default_rng(0)
+    data = {"x": rng.normal(size=n).astype(np.float32), "y": rng.normal(size=n).astype(np.float32),
+            "z": (rng.random(n) + 1).astype(np.float32)}
+    source = np.array([1, 2, 3, 4, 5] * 8, np.uint8)
+    rep = SimpleNamespace(unresolved={})
+    K = np.array([[300.0, 0, 160.0], [0, 300.0, 120.0], [0, 0, 1]])
+    c2w = np.tile(np.eye(4), (1, 1, 1))
+    pdir = tmp_path / "precision"
+    msgs = []
+    D.write_mono_layers(pdir, data, source, rep, K, c2w, msgs.append)
+    assert (pdir / "layer_mono_detail.glb").exists() and (pdir / "layer_mixed_unresolved.glb").exists()
+    assert any("24 mono-detail point(s)" in m for m in msgs), msgs       # 3 of 5 codes × 8 = 24, never the 8 colmap points
