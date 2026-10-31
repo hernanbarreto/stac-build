@@ -4583,6 +4583,17 @@ def _mesh_folders(output_dir: Path) -> Dict[str, set]:
                 except OSError:
                     continue
         out[kind] = names
+    # the Gaussian-splat models (USER 2026-10-31): output/gaussians/<name>/meta.json marks a published one
+    g = Path(output_dir) / "gaussians"
+    gs = set()
+    if g.is_dir():
+        for f in g.iterdir():
+            try:
+                if f.is_dir() and (f / "meta.json").exists():
+                    gs.add(f.name)
+            except OSError:
+                continue
+    out["gaussians"] = gs
     return out
 
 
@@ -4618,10 +4629,19 @@ async def _mesh_watch_loop(interval_s: float) -> None:
                         print(f"[Mesh] watch: {len(new)} new {kind} mesh folder(s) in {sid}: {new}")
                     except Exception as e:  # noqa: BLE001
                         print(f"[Mesh] watch notify failed (non-fatal): {e}")
+            new_gs = sorted(now.get("gaussians", set()) - set(rec.get("gaussians") or set()))
+            if new_gs:
+                try:
+                    await viewer_manager.broadcast_text(json.dumps(
+                        {"type": "gaussians_ready", "session_id": sid, "count": len(new_gs), "models": new_gs}))
+                    print(f"[Mesh] watch: {len(new_gs)} new splat model(s) in {sid}: {new_gs}")
+                except Exception as e:  # noqa: BLE001
+                    print(f"[Mesh] watch notify failed (non-fatal): {e}")
             with _mesh_watch_lock:
                 if sid in _mesh_watch:
                     _mesh_watch[sid]["tsdf"] = now["tsdf"]
                     _mesh_watch[sid]["shape"] = now["shape"]
+                    _mesh_watch[sid]["gaussians"] = now.get("gaussians", set())
 
 
 async def _notify_tsdf_ready(session_id: str, stage: str, count: int) -> None:

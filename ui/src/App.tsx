@@ -2206,6 +2206,7 @@ function App() {
             onSegments={list => { setSegments(list); refreshUnsegmentedCount(activeSession) }}
             onEraseLedger={() => reloadSegments(activeSession)}
             onTsdfReady={sid => { refreshTsdfMeshList(sid, false) }}
+            onGaussiansReady={sid => { refreshGaussianList(sid) }}
             onSceneObjectsChanged={setPlacedObjects}
             onSceneObjectSelected={id => { setSceneObjSel(id); setAlignTarget(''); setAlignTargets(id != null ? (viewportRef.current?.getSceneAlignTargets() || []) : []) }}
             onPipelineProgress={handlePipelineProgress}

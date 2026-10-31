@@ -80,6 +80,9 @@ interface ViewportProps {
     /** Freshly-published meshes (poisson/pgsr stage done) — App refreshes
         the mesh panel list. */
     onTsdfReady?: (sessionId: string, stage: string) => void
+    /** a splat model was published (the gaussians stage ended, or any writer) — the layer reloaded, App
+     *  refreshes the Gaussian splats list (USER 2026-10-31) */
+    onGaussiansReady?: (sessionId: string) => void
     /** Volume deleted from the viewer toolbar. */
     onVolumeDeleted?: (volumeId: number) => void
     /** The loaded octree carries witness fields (status / mv_votes). */
@@ -596,7 +599,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onViewScale, onSegmentPicked },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onGaussiansReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onViewScale, onSegmentPicked },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -1026,6 +1029,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     useEffect(() => { onEraseLedgerRef.current = onEraseLedger }, [onEraseLedger])
     const onTsdfReadyRef = useRef(onTsdfReady)
     useEffect(() => { onTsdfReadyRef.current = onTsdfReady }, [onTsdfReady])
+    const onGaussiansReadyRef = useRef(onGaussiansReady)
+    useEffect(() => { onGaussiansReadyRef.current = onGaussiansReady }, [onGaussiansReady])
     const onHasWitnessRef = useRef(onHasWitness)
     useEffect(() => { onHasWitnessRef.current = onHasWitness }, [onHasWitness])
     const onCursorRef = useRef(onCursor)
@@ -4766,6 +4771,15 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const job = addNewTsdfEntries(sid)
                 job.then(() => onTsdfReadyRef.current?.(sid, stage)).catch(() => onTsdfReadyRef.current?.(sid, stage))
                 if (onStatusMessage) onStatusMessage(tt('vp.meshesReady', { n: msg.count as number, stage }))
+            }
+            return
+        }
+        if (msg.type === 'gaussians_ready') {
+            // a published splat model (USER 2026-10-31): the layer reloads under the octree group, App's list follows
+            const sid = msg.session_id as string
+            if (sid && sid === activeSessionRef.current) {
+                const parent = potreeLoaderRef.current?.getOctreeGroup() || sceneRef.current
+                if (parent) loadGaussiansRef.current(sid, parent).then(() => onGaussiansReadyRef.current?.(sid)).catch(() => onGaussiansReadyRef.current?.(sid))
             }
             return
         }
