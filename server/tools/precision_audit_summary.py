@@ -82,18 +82,26 @@ def summarise(session_dir: Path) -> Dict[str, Any]:
     s["files"]["rejected_points.npz"] = rp.is_file()
     if rp.is_file():
         try:
-            with np.load(rp, allow_pickle=True) as z:
+            # v5 (owner fusion, 2026-10-23): 0-d `version` / `stage` beside 72 M-row columns — counted with
+            # numpy, never through Python lists (a Counter over 72 M entries took minutes and gigabytes)
+            reason_names = {10: "fused (consumed by its owner)", 9: "contradicted (seen through, free space)",
+                            1: "unverified (< 2 views)"}
+            with np.load(rp, allow_pickle=False) as z:
                 keys = list(z.keys())
-                rec: Dict[str, Any] = {"keys": keys, "n": int(len(z[keys[0]])) if keys else 0}
-                if "reason" in z:
-                    reasons = z["reason"]
-                    rec["by_reason"] = dict(Counter(str(r) for r in reasons.tolist()))
+                cols = [k for k in keys if z[k].ndim == 1]
+                rec: Dict[str, Any] = {"keys": keys, "n": int(z[cols[0]].shape[0]) if cols else 0,
+                                       "version": (int(z["version"]) if "version" in z and z["version"].ndim == 0 else None),
+                                       "stage": (str(z["stage"]) if "stage" in z and z["stage"].ndim == 0 else None)}
+                if "reason" in z and z["reason"].ndim == 1:
+                    vals, cnt = np.unique(z["reason"], return_counts=True)
+                    rec["by_reason"] = {f"{int(v)} {reason_names.get(int(v), '?')}": int(c) for v, c in zip(vals, cnt)}
                 for fk in ("frame_global", "frame", "keyframe"):
-                    if fk in z:
-                        fr = z[fk]
-                        c = Counter(int(f) for f in fr.tolist())
-                        rec["by_keyframe_top10"] = c.most_common(10)
-                        rec["keyframes_with_rejections"] = len(c)
+                    if fk in z and z[fk].ndim == 1:
+                        fr = np.asarray(z[fk])
+                        vals, cnt = np.unique(fr, return_counts=True)
+                        top = np.argsort(-cnt)[:10]
+                        rec["by_keyframe_top10"] = [(int(vals[i]), int(cnt[i])) for i in top]
+                        rec["keyframes_with_rejections"] = int(len(vals))
                         break
                 s["rejected_points"] = rec
         except Exception as e:  # noqa: BLE001
