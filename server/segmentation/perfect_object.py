@@ -325,7 +325,7 @@ def _detect_and_snap(tm, F: np.ndarray, Vd: np.ndarray, cfg: dict,
     Returns (regions, min_faces_eff); each region:
     {kind, model, f_idx, v_idx, notes}."""
     import scipy.sparse as sp
-    from reconstruction.surface_fit.escalate import FITTERS, FitContext
+    from reconstruction.surface_fit.fitters import FITTERS, FitContext
 
     crease0 = float(cfg.get("perfect_crease_deg", 30.0))
     min_region_faces = int(cfg.get("perfect_min_region_faces", 300))
@@ -620,7 +620,7 @@ def _detect_and_snap_cloud(Pd: np.ndarray, cfg: dict, safe: str,
     import open3d as o3d
     import scipy.sparse as sp
     from scipy.spatial import cKDTree
-    from reconstruction.surface_fit.escalate import FITTERS, FitContext
+    from reconstruction.surface_fit.fitters import FITTERS, FitContext
 
     min_region_pts = int(cfg.get("perfect_min_region_faces", 300))
     inlier_dist = float(cfg.get("p2c_inlier_dist_m", 0.02))
