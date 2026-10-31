@@ -521,7 +521,8 @@ def estimate_v2(output_dir: Path, log=None, near_frac: float = 0.25,
 
 def run(output_dir: Path, dry_run: bool = False, log=None,
         near_frac: float = 0.25, conf_top_frac: float = 0.0,
-        cfg: Optional[dict] = None, session_dir: Optional[Path] = None
+        cfg: Optional[dict] = None, session_dir: Optional[Path] = None,
+        fresh_products: Optional[bool] = None
         ) -> Optional[float]:
     """Estimate + apply the metric scale. Returns the scale s (float) on success OR when
     it was ALREADY applied (marker present → output is already metric). Returns None ONLY
@@ -548,8 +549,20 @@ def run(output_dir: Path, dry_run: bool = False, log=None,
                  f"re-scaling (Replace clears the marker to re-scale)")
             return s_prev          # non-None → caller knows it IS metric (not a failure)
         if status == "stale":
+            allowed, why = AM.redo_allowed(base=output_dir, fresh_products=fresh_products)
+            if not allowed:
+                # the files changed, but not by a raw Omega pass: the scale on disk IS applied
+                # (pccr_audit 2026-10-31 — F2's epoch rewrote the poses and a resume re-scaled them)
+                txt = info.get("text", "")
+                try:
+                    s_prev = float(txt.split("=")[-1])
+                except Exception:
+                    s_prev = float("nan")
+                _log(f"⚠ {AM.describe(status, info)} — NOT redone: {why}; the marker stays "
+                     f"(s={s_prev}) and the products keep their scale")
+                return s_prev
             _log(f"⚠ {AM.describe(status, info)} — the products on disk are NOT the ones this "
-                 f"marker scaled: the scale is redone from the poses on disk (point 10)")
+                 f"marker scaled ({why}): the scale is redone from the poses on disk (point 10)")
             AM.clear(marker)
     s, diag = estimate_v2(output_dir, log=log, near_frac=near_frac,
                           conf_top_frac=conf_top_frac, cfg=cfg, session_dir=session_dir)

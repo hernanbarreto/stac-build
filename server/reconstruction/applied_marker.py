@@ -100,6 +100,32 @@ def state(marker: Path, *, base: Path) -> Tuple[str, Dict[str, Any]]:
     return ("stale" if changed else "current"), info
 
 
+def redo_allowed(*, base: Path, fresh_products: Optional[bool]) -> Tuple[bool, str]:
+    """May a STALE marker's transform be redone from the files on disk? Only when those files are
+    a fresh Omega pass's raw products. ``fresh_products``: whether the fork ran this launch (the
+    map worker knows: omega_complete). False → never: the files were rewritten by a LATER stage of
+    this same reconstruction — an epoch of the precision core (F2's gauge, F5) or of the
+    certification — and redoing would apply the scale / orientation TWICE (pccr_audit 2026-10-31:
+    a replace-OFF resume after F2's epoch re-scaled the poses and the chunk clouds by 0.9708 again).
+    None (a caller that does not know): the session's geometry epoch decides — above 0 the files
+    were moved by an epoch, not by a raw pass. Returns (allowed, reason)."""
+    if fresh_products is True:
+        return True, "a fresh Omega pass rewrote the products this launch"
+    if fresh_products is False:
+        return False, ("Omega did not run this launch: the recorded files were rewritten by a later "
+                       "stage of this reconstruction (an epoch of the precision core or the "
+                       "certification), not by a raw pass — redoing would apply the transform twice")
+    try:
+        from correction.epoch import current_epoch
+        epoch = int(current_epoch(base))
+    except Exception as e:  # noqa: BLE001 — a corrupt epoch record is named, never guessed around
+        return False, f"the session's geometry epoch cannot be read ({e}) — nothing is redone"
+    if epoch > 0:
+        return False, (f"the session is in geometry epoch {epoch}: the recorded files were moved by "
+                       f"that epoch, not by a raw Omega pass — redoing would apply the transform twice")
+    return True, "geometry epoch 0 and no record of this launch's Omega pass: taken as a raw pass"
+
+
 def clear(marker: Path) -> None:
     """Remove the marker and its sidecar (a fresh pass starts clean)."""
     marker = Path(marker)

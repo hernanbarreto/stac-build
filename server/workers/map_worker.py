@@ -2496,6 +2496,9 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         from reconstruction.scale_align import run as _scale_run
         _s = _scale_run(output_dir, dry_run=False,
                         log=lambda m: pipe.send_log(f"[scale-align] {m}"),
+                        # a STALE marker is redone only when the fork ran this launch — never over
+                        # files a later epoch moved (reconstruction.applied_marker.redo_allowed)
+                        fresh_products=not _done,
                         near_frac=float(_va_cfg.get("scale_near_frac", 0.25)),
                         conf_top_frac=float(_va_cfg.get("scale_conf_top_frac", 0.10)),
                         cfg={"mode": str(_va_cfg.get("scale_mode", "global_median")),
@@ -2532,7 +2535,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             pipe.send_progress(92, "Baking upright orientation from camera poses...",
                                stage="reconstruction")
             from reconstruction.orient import run as _orient_run
-            _T = _orient_run(output_dir, log=lambda m: pipe.send_log(f"[orient] {m}"))
+            _T = _orient_run(output_dir, log=lambda m: pipe.send_log(f"[orient] {m}"),
+                             fresh_products=not _done)
             if _T is None:
                 pipe.send_log("[orient] orientation NOT applied (no poses or weak camera-down "
                               "consensus) — the floor leveler downstream is the fallback",
