@@ -129,13 +129,13 @@ Next (by hand, ONE GPU task at a time, the backend's vLLM down or left to the ru
      /workspace quota is 400 GB; the keep policy trims a copy only when its run ends:
        cd ${ROOT}/server
        for v in reference slam2_focal_common slam2_attention_gate slam2_attention_gate_salad slam2_all; do
-         ${PY_DA3} -m evaluation run --scenes pccr/2026-08-31/default --variants \$v --run-id slam2_pccr_\$v
+         ${PY_DA3} -m evaluation run --scenes pccr --variants \$v --run-id slam2_pccr_\$v
        done
        for v in reference slam2_focal_common slam2_attention_gate slam2_attention_gate_salad slam2_all; do
-         ${PY_DA3} -m evaluation run --scenes zaragoza/2026-06-03/default --variants \$v --run-id slam2_zaragoza_\$v
+         ${PY_DA3} -m evaluation run --scenes zaragoza --variants \$v --run-id slam2_zaragoza_\$v
        done
   3. the bit-for-bit comparator of the reference against an existing main run of the scene: declare it in
-     config.yaml evaluation.slam2.existing_runs ({pccr: pccr/2026-08-31/default}) before step 2 — it runs
+     config.yaml evaluation.slam2.existing_runs (pccr and zaragoza are declared) before step 2 — it runs
      with the reference and lands in <run>/<scene>/slam2_comparison.json (bitwise_comparator).
 Results: <runs_dir>/<run_id>/<scene>/{slam2_comparison.csv,json,png} and each variant's directory
 (variant.json, log.txt, session/output/maplong_run/{seam_radial,attention_gate.json,focal_model.json,attention_calibration}).

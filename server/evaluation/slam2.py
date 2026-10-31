@@ -648,7 +648,10 @@ class Slam2Hooks:
                 # its gate variants from them — a record, never a product of the scene
                 info["mirrored_to_scene"] = mirror_instruments(sd, scene.session_dir, self.log)
             if spec.name == self.reference:
-                existing = (self.slam2.get("existing_runs") or {}).get(scene.name)
+                # the scene by its name, else by its project (a scene given as project/date/source is
+                # named project_date_source)
+                ex_runs = self.slam2.get("existing_runs") or {}
+                existing = ex_runs.get(scene.name) or ex_runs.get(scene.name.split("_")[0])
                 if existing:
                     ex = Path(str(existing))
                     if not ex.is_absolute():
