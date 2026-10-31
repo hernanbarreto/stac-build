@@ -651,10 +651,16 @@ STAMP_VERSION = 1
 
 
 def _rel_to_repo(p: Path) -> Optional[str]:
-    try:
-        return p.resolve().relative_to(REPO_ROOT).as_posix()
-    except ValueError:
-        return None
+    """The repo-relative key of a code file. The LEXICAL path decides (symlinks kept): a vendored
+    tree reached through a symlink inside the repo — a worktree whose vendor/ entries point at the
+    main checkout's clones — is this repo's code, keyed and hashed like the real directory would be;
+    a path that leaves the repo only once resolved is still inside it."""
+    for cand in (Path(os.path.abspath(p)), p.resolve()):
+        try:
+            return cand.relative_to(REPO_ROOT).as_posix()
+        except ValueError:
+            continue
+    return None
 
 
 def _code_file(c: Any) -> Tuple[str, Path]:

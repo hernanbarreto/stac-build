@@ -553,3 +553,22 @@ def test_written_files_keep_the_umask_permissions(tmp_path):
     assert stat.S_IMODE(p.stat().st_mode) == 0o644
     with pytest.raises(ValueError):
         repro.write_rows_exact(tmp_path / "e.txt", np.zeros((0, 3)))
+
+
+def test_vendored_code_reached_through_a_symlink_inside_the_repo_is_stamped_as_repo_code(tmp_path):
+    """A worktree whose vendor/ entries are symlinks to the main checkout's clones (2026-10-31, the
+    audit A/B): the lexical path is inside the repo, so the file is this repo's code — keyed by the
+    lexical repo-relative path and hashed by content; a file that is outside lexically AND once
+    resolved is still refused."""
+    outside = tmp_path / "clone"; outside.mkdir()
+    (outside / "mod.py").write_text("x = 1\n")
+    link = repro.REPO_ROOT / "vendor" / f"_test_link_{tmp_path.name}"
+    link.symlink_to(outside, target_is_directory=True)
+    try:
+        st = repro.stamp(code=[link / "mod.py"])
+        key = f"vendor/{link.name}/mod.py"
+        assert key in st["code"] and st["code"][key] == repro.sha256_file(outside / "mod.py")
+    finally:
+        link.unlink()
+    with pytest.raises(repro.ReproError, match="outside"):
+        repro.stamp(code=[outside / "mod.py"])
