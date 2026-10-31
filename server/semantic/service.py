@@ -538,7 +538,72 @@ def _launch(launcher_args: List[str], log: Callable[[str], Any]):
                      cwd=str(Path(__file__).resolve().parent.parent),
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True)
+    _WATCHED_PGIDS.add(int(_proc.pid))     # its own session: pgid == the launcher's pid
     return _proc
+
+
+# the vLLM process groups this backend already watches (its own launch, an adopted chain):
+# one watchdog per group, never two
+_WATCHED_PGIDS: set = set()
+
+
+def _watch_vllm_group(pgid: int, log: Callable[[str], Any], why: str) -> bool:
+    """One ``semantic.watchdog`` on the BACKEND's pid over the vLLM session ``pgid`` —
+    once per group. False when this process is not the backend nor one of its children
+    (``STAC_BACKEND_PID`` unset: a CLI that merely found the chat alive must not make it
+    die with the CLI)."""
+    pgid = int(pgid)
+    if pgid in _WATCHED_PGIDS:
+        return True
+    backend = os.environ.get("STAC_BACKEND_PID")
+    if not backend:
+        log(f"Semantic service {why} (pgid {pgid}) — not watched: this process is not the "
+            f"backend (STAC_BACKEND_PID unset)")
+        return False
+    backend_pid = int(backend)
+    try:
+        own = {os.getpgid(0), os.getpgid(backend_pid)}
+    except OSError:
+        own = {os.getpgid(0)}
+    if pgid in own:
+        log(f"Semantic service {why} shares the backend's process group {pgid} — not watched "
+            f"(the watchdog would kill the backend itself)")
+        return False
+    subprocess.Popen([sys.executable, "-m", "semantic.watchdog", str(backend_pid), str(pgid)],
+                     cwd=str(Path(__file__).resolve().parent.parent),
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+    _WATCHED_PGIDS.add(pgid)
+    log(f"Semantic service {why} (pgid {pgid}) — watched: it dies with backend pid {backend_pid}")
+    return True
+
+
+def adopt_running_service(log: Optional[Callable[[str], Any]] = None) -> List[int]:
+    """A vLLM chain this backend did NOT launch — the pod's own tmux session, an earlier
+    backend — dies with this backend all the same (USER 2026-10-31: "el vlm adoptado o
+    levantado deben morir con el backend"; pod 2026-10-31: the boot started
+    serve_semantic.sh beside the backend, the backend adopted it without a watchdog and
+    38 GB of VRAM outlived the backend). Every process group among the live vLLM chain
+    processes (workers.base.vllm_pids) gets a watchdog on the backend's pid; the groups
+    this backend launched itself are already watched. Returns the groups watched."""
+    _log = log or (lambda m: None)
+    try:
+        from workers.base import vllm_pids
+        pids = vllm_pids()
+    except Exception as e:  # noqa: BLE001 — declared, never fatal
+        _log(f"Semantic service: cannot list the vLLM chain to adopt it ({e})")
+        return []
+    groups = set()
+    for pid in pids:
+        try:
+            groups.add(os.getpgid(int(pid)))
+        except OSError:
+            continue                       # gone between the listing and now
+    watched = []
+    for g in sorted(groups):
+        if g in _WATCHED_PGIDS or _watch_vllm_group(g, _log, "adopted (not launched by this backend)"):
+            watched.append(g)
+    return watched
 
 
 def _wait_alive(config: Optional[dict], timeout_s: float, log: Callable[[str], Any],
@@ -595,6 +660,8 @@ def ensure_service(config: Optional[dict] = None,
         _log(f"Semantic service busy — {why}")
         return False
     if is_alive(config):
+        # alive, launched by someone else (or by this backend earlier): it dies with us too
+        adopt_running_service(_log)
         return True
     if not _LAUNCHER.exists():
         _log(f"Semantic service down and launcher missing ({_LAUNCHER})")
@@ -607,6 +674,7 @@ def ensure_service(config: Optional[dict] = None,
         # IT — a second chain would fight the first for the card and the loser dies on memory
         _log("Semantic service is starting (a launcher is already running) — not starting "
              "a second instance")
+        adopt_running_service(_log)        # a chain we did not start dies with the backend too
         if timeout_s <= 0:
             return False
         if _wait_alive(config, timeout_s, _log, cancelled):

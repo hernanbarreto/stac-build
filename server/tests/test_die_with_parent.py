@@ -92,3 +92,75 @@ def test_the_launcher_starts_the_watchdog_and_the_shutdown_stops_vllm():
     src = (SERVER / "main.py").read_text()
     assert 'os.environ["STAC_BACKEND_PID"] = str(os.getpid())' in src
     assert '_stop_sem(None, stage="server shutdown")' in src
+
+
+def test_an_adopted_vllm_session_dies_with_the_backend(tmp_path, monkeypatch):
+    """USER 2026-10-31: 'el vlm adoptado o levantado deben morir con el backend'. A vLLM
+    chain the backend did NOT launch (the pod's tmux session started serve_semantic.sh
+    beside it) is adopted by ensure_service's alive branch with a watchdog on the backend's
+    pid — and dies with the backend like the one the backend launches itself."""
+    import subprocess as sp
+    sys.path.insert(0, str(SERVER))
+    from semantic import service as svc
+    backend = sp.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    fake_vllm = sp.Popen([sys.executable, "-c",
+                          "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)']); time.sleep(120)"],
+                         start_new_session=True)
+    time.sleep(0.5)
+    monkeypatch.setenv("STAC_BACKEND_PID", str(backend.pid))
+    import workers.base as wb
+    monkeypatch.setattr(wb, "vllm_pids", lambda: [fake_vllm.pid])
+    monkeypatch.setattr(svc, "_WATCHED_PGIDS", set())
+    log = []
+    watched = svc.adopt_running_service(log.append)
+    assert watched == [fake_vllm.pid], log
+    assert svc.adopt_running_service(log.append) == [fake_vllm.pid]      # idempotent: one dog per group
+    assert sum("watched: it dies with backend" in m for m in log) == 1
+    time.sleep(0.6)
+    assert fake_vllm.poll() is None
+    backend.kill(); backend.wait()
+    fake_vllm.wait(timeout=15)
+    t0 = time.time()
+    while time.time() - t0 < 15:
+        try:
+            os.killpg(fake_vllm.pid, 0)
+            time.sleep(0.2)
+        except OSError:
+            break
+    try:
+        os.killpg(fake_vllm.pid, 0)
+        group_left = True
+    except OSError:
+        group_left = False
+    assert not group_left, "a process of the ADOPTED vLLM session outlived the backend"
+
+
+def test_adoption_needs_the_backend_pid_and_never_watches_its_own_group(monkeypatch):
+    """A CLI that merely finds the chat alive (STAC_BACKEND_PID unset) must not make it die
+    with the CLI; a chain sharing the backend's own process group is never watched (the
+    watchdog's killpg would take the backend down)."""
+    sys.path.insert(0, str(SERVER))
+    from semantic import service as svc
+    import workers.base as wb
+    spawned = []
+    monkeypatch.setattr(svc.subprocess, "Popen", lambda *a, **k: spawned.append(a[0]))
+    monkeypatch.setattr(svc, "_WATCHED_PGIDS", set())
+    monkeypatch.setattr(wb, "vllm_pids", lambda: [os.getpid()])
+    log = []
+    monkeypatch.delenv("STAC_BACKEND_PID", raising=False)
+    assert svc.adopt_running_service(log.append) == []
+    assert spawned == [] and any("STAC_BACKEND_PID unset" in m for m in log)
+    monkeypatch.setenv("STAC_BACKEND_PID", str(os.getpid()))
+    log.clear()
+    assert svc.adopt_running_service(log.append) == []        # our own group: refused by name
+    assert spawned == [] and any("shares the backend's process group" in m for m in log)
+
+
+def test_ensure_service_adopts_on_both_branches():
+    full = (SERVER / "semantic" / "service.py").read_text()
+    svc = full[full.index("def ensure_service("):]           # the function's own body
+    i_alive = svc.index("    if is_alive(config):\n")
+    assert "adopt_running_service(_log)" in svc[i_alive:i_alive + 300]
+    i_start = svc.index("not starting \"\n             \"a second instance\")")
+    assert "adopt_running_service(_log)" in svc[i_start:i_start + 300]
+    assert "_WATCHED_PGIDS.add(int(_proc.pid))" in full       # the backend's own launch is registered
