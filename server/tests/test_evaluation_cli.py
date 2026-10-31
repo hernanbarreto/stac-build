@@ -19,7 +19,7 @@ SERVER_DIR = Path(__file__).resolve().parent.parent
 def test_run_command_builds_a_complete_run(tmp_path, capsys):
     scene, doc = _scene_with_refs(tmp_path)
     cfg = S.eval_config(**{"endpoints.depth_window_px": 1, "curves.min_bin_n": 1, "variants_keep": "cloud",
-                           "runs_dir": str(tmp_path / "runs")})
+                           "runs_dir": str(tmp_path / "runs"), "slam2.projects_dir": str(tmp_path / "projects")})
     rc = CLI.main(["run", "--scenes", str(scene.session_dir), "--variants", "reference,no_f6_bend,scale_mapanything",
                    "--run-id", "t1", "--no-gpu-check", "--no-plots"], runner=FakeRunner(), cfg=cfg, log=lambda *a: None)
     assert rc == 0
@@ -44,23 +44,38 @@ def test_run_command_builds_a_complete_run(tmp_path, capsys):
     assert "t1" in capsys.readouterr().out
 
 
-def test_run_refuses_unknown_scene_or_variant_and_records_a_scene_without_references(tmp_path, capsys):
-    cfg = S.eval_config(**{"runs_dir": str(tmp_path / "runs")})
+def test_run_refuses_unknown_scene_or_variant_and_handles_a_scene_without_references(tmp_path, capsys):
+    cfg = S.eval_config(**{"runs_dir": str(tmp_path / "runs"), "slam2.projects_dir": str(tmp_path / "projects")})
     assert CLI.main(["run", "--scenes", "nope", "--variants", "reference", "--no-gpu-check"], runner=FakeRunner(), cfg=cfg) == 2
     scene = S.make_session(tmp_path / "noref")
     assert CLI.main(["run", "--scenes", str(scene.session_dir), "--variants", "bogus", "--no-gpu-check"],
                     runner=FakeRunner(), cfg=cfg) == 2
+    # references optional (evaluation.slam2, USER 2026-10-31: no cota exists): the scene RUNS, its error
+    # phases declared not measured, the manifest carries both repos' branch and commit
     rc = CLI.main(["run", "--scenes", str(scene.session_dir), "--variants", "reference", "--run-id", "t2", "--no-gpu-check",
                    "--no-plots"], runner=FakeRunner(), cfg=cfg, log=lambda *a: None)
+    assert rc == 0
+    man = json.loads((tmp_path / "runs" / "t2" / "manifest.json").read_text())
+    assert man["status"] == "finished" and man["git"]["stac_build"]["commit"] and man["git"]["fork_vggt_long"]["branch"]
+    rec = json.loads((tmp_path / "runs" / "t2" / "noref" / "reference" / "variant.json").read_text())
+    assert rec["status"] == "finished" and "no reference distances" in rec["summary"]["status"]
+    assert (tmp_path / "runs" / "t2" / "noref" / "slam2_comparison.csv").exists()
+    assert (tmp_path / "projects" / "noref__eval" / "scans" / "reference" / "src_default").is_symlink()
+    # references required: the old refusal, recorded
+    cfg2 = S.eval_config(**{"runs_dir": str(tmp_path / "runs"), "slam2.references_optional": False,
+                            "slam2.projects_dir": str(tmp_path / "projects")})
+    rc = CLI.main(["run", "--scenes", str(scene.session_dir), "--variants", "reference", "--run-id", "t3", "--no-gpu-check",
+                   "--no-plots"], runner=FakeRunner(), cfg=cfg2, log=lambda *a: None)
     assert rc == 1
-    err = json.loads((tmp_path / "runs" / "t2" / "noref" / "scene_error.json").read_text())
+    err = json.loads((tmp_path / "runs" / "t3" / "noref" / "scene_error.json").read_text())
     assert "cannot be evaluated" in err["error"]
-    assert json.loads((tmp_path / "runs" / "t2" / "manifest.json").read_text())["status"] == "failed"
+    assert json.loads((tmp_path / "runs" / "t3" / "manifest.json").read_text())["status"] == "failed"
 
 
 def test_gpu_gate_turns_gpu_variants_into_not_executed_with_the_reason(tmp_path, monkeypatch):
     scene, doc = _scene_with_refs(tmp_path)
-    cfg = S.eval_config(**{"runs_dir": str(tmp_path / "runs"), "curves.min_bin_n": 1})
+    cfg = S.eval_config(**{"runs_dir": str(tmp_path / "runs"), "curves.min_bin_n": 1,
+                           "slam2.projects_dir": str(tmp_path / "projects")})
     monkeypatch.setattr(CLI, "gpu_gate", lambda specs, log: "the card is not free: vLLM holds 38 GB")
     monkeypatch.setattr(CLI, "card_key_or_none", lambda log: None)
     rc = CLI.main(["run", "--scenes", str(scene.session_dir), "--variants", "reference", "--run-id", "t3", "--no-plots"],
@@ -81,7 +96,8 @@ def test_import_command_adds_a_variant_to_a_run(tmp_path):
     data = np.zeros(len(prod.xyz), dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4")])
     data["x"], data["y"], data["z"] = prod.xyz[:, 0], prod.xyz[:, 1], prod.xyz[:, 2]
     write_ply(tmp_path / "ext" / "fused.ply", data)
-    cfg = S.eval_config(**{"runs_dir": str(tmp_path / "runs"), "curves.min_bin_n": 1})
+    cfg = S.eval_config(**{"runs_dir": str(tmp_path / "runs"), "curves.min_bin_n": 1,
+                           "slam2.projects_dir": str(tmp_path / "projects")})
     rc = CLI.main(["import-colmap", "--scene", str(scene.session_dir), "--name", "metashape", "--sparse", str(sparse),
                    "--dense", str(tmp_path / "ext" / "fused.ply"), "--run", "imp", "--no-plots"], cfg=cfg, log=lambda *a: None)
     assert rc == 0

@@ -84,6 +84,25 @@ def card_key_or_none(log: Callable) -> Optional[str]:
         return None
 
 
+def repo_git_state() -> Dict[str, Any]:
+    """Branch and commit of stac-build and of vendor/VGGT-Long (the fork), as repro.git_state reads
+    them — recorded in every run's manifest (claude_stac_slam2.txt phase 5)."""
+    import repro
+    root = Path(__file__).resolve().parents[2]
+    out: Dict[str, Any] = {}
+    import subprocess
+    for name, path in (("stac_build", root), ("fork_vggt_long", root / "vendor" / "VGGT-Long")):
+        try:
+            rec = dict(repro.git_state(path))
+            rec["branch"] = subprocess.run(["git", "-C", str(path), "rev-parse", "--abbrev-ref", "HEAD"],
+                                           capture_output=True, text=True, check=True).stdout.strip()
+            rec["path"] = str(path)
+            out[name] = rec
+        except Exception as e:  # noqa: BLE001 — declared
+            out[name] = {"error": f"{type(e).__name__}: {e}", "path": str(path)}
+    return out
+
+
 def _write_manifest(run_dir: Path, man: Dict[str, Any]) -> None:
     (run_dir / "manifest.json").write_text(json.dumps(man, indent=1, sort_keys=True, default=str))
 
@@ -117,8 +136,22 @@ def cmd_run(args, cfg: EvaluationConfig, runner: Optional[V.ChainRunner], log: C
            for s in specs}
     man = DET.run_manifest(run_id, scenes, {s.name: s for s in specs}, cfg, base_config, eff, gpu=not args.no_gpu_check,
                            argv=list(sys.argv[1:]), status="running", repeat=args.repeat)
+    man["git"] = repo_git_state()                 # branch + commit of stac-build and of the fork (phase 5)
     _write_manifest(run_dir, man)
     runner = runner or V.PipelineChainRunner()
+    # claude_stac_slam2.txt phase 4: the slam2 hooks when evaluation.slam2 exists
+    from evaluation import slam2 as S2
+    slam2 = S2.slam2_config(cfg.raw)
+    hooks = None
+    if slam2 is not None:
+        if slam2["projects_dir"]:
+            _projects = Path(slam2["projects_dir"])
+        else:
+            from config import PROJECTS_DIR
+            _projects = Path(PROJECTS_DIR)
+        hooks = S2.Slam2Hooks(slam2, base_config, specs, projects_dir=_projects, gpu=not args.no_gpu_check, log=_log)
+        _log(f"[evaluation] slam2 hooks on (skip_if_offline_identity {slam2['skip_if_offline_identity']}, references "
+             f"{'optional' if slam2['references_optional'] else 'required'})")
     card = None if args.no_gpu_check else card_key_or_none(_log)
     scene_results: Dict[str, Dict[str, Dict[str, Any]]] = {}
     status = "finished"
@@ -131,7 +164,8 @@ def cmd_run(args, cfg: EvaluationConfig, runner: Optional[V.ChainRunner], log: C
 
         try:
             res = V.run_scene(scene, specs, run_dir, cfg, runner, base_config, _log, monitor_factory=factory,
-                              plots=not args.no_plots, repeat=args.repeat)
+                              plots=not args.no_plots, repeat=args.repeat,
+                              references_optional=bool(slam2 and slam2["references_optional"]), hooks=hooks)
             scene_results[scene.name] = res["results"]
         except Exception as e:  # noqa: BLE001 — a scene that cannot even start (no references) is recorded
             status = "failed"

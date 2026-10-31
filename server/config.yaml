@@ -4280,12 +4280,66 @@ evaluation:
                                       # (pccr 7.5 GB, zaragoza 33 GB) and the /workspace quota is 400 GB
   coverage:
     cell_px: 8                        # BOUND: cell of the plane-surface coverage raster (keyframe pixels)
+  slam2:                              # claude_stac_slam2.txt phase 4 — the VGGT-SLAM 2.0 variants' hooks (evaluation.slam2)
+    skip_if_offline_identity: true    # slam2_focal_common is recorded as not run when the phase-1 instrument
+                                      # (seam_radial.json of the reference run) says the common K does not pass the
+                                      # rule on the scene — it would be the reference
+    references_optional: true         # a scene WITHOUT reference distances still runs (USER 2026-10-31: there is
+                                      # not one cota); phases 1, 2 and 5 are declared not measured
+    publish_to_viewer: true           # every finished variant's session becomes a scan <variant>/default of the
+                                      # project <scene><viewer_project_suffix> (a symlink to the kept products)
+    viewer_project_suffix: "__eval"
+    projects_dir: null                # where the eval projects are published: null = the server's projects directory
+    calibration_file: attention_calibration/attention_calibration.json   # under maplong_run/ of the reference run
+    seam_radial_file: seam_radial/seam_radial.json                       # idem
+    existing_runs: {}                 # scene → an existing session of the same scene made with main (a path, or
+                                      # project/date/source) for the bit-for-bit comparator of the reference
   variants:                           # phase 3 — the list is configurable; a failing variant is recorded, the rest run.
                                       # overrides = dotted config keys set on a COPY of the order's configuration
                                       # (server/config.yaml never changes); stages_off = pipeline stages disabled
     reference:
       kind: chain
       description: the full chain as configured (a)
+      overrides:                      # the unaligned chunk npys stay for the offline seam instrument (products unchanged)
+        "certify.keep_unaligned_chunks": true
+    slam2_focal_common:               # claude_stac_slam2.txt phase 4
+      kind: chain
+      description: VGGT-SLAM 2.0 idea 1 — one calibration for every Ω inference (common K, the session median), judged
+      overrides:
+        "certify.keep_unaligned_chunks": true
+        "correction_graph.seams": {focal_model: common_K, common_K_source: session_median, judge_samples: 20000}
+    slam2_attention_gate:
+      kind: chain
+      description: VGGT-SLAM 2.0 idea 2 — the attention gate (layer and threshold from the scene's calibration), the
+        SALAD bar as configured
+      overrides:
+        "certify.keep_unaligned_chunks": true
+        "loops.attention_gate": {mode: gate, layer: null, min_score: null, top_fraction: 0.25,
+                                 salad_similarity_threshold: null,
+                                 calibration: {select: max_auc_lower_ci, target_precision: 0.95, min_labels: 5,
+                                               n_negatives: 50, n_boot: 2000, confidence: 0.95,
+                                               salad_grid: [0.55, 0.60, 0.65, 0.70]}}
+    slam2_attention_gate_salad:
+      kind: chain
+      description: the attention gate with the SALAD bar at 0.60 (between pccr's measured p99 0.57 and the 0.65 in use)
+      overrides:
+        "certify.keep_unaligned_chunks": true
+        "loops.attention_gate": {mode: gate, layer: null, min_score: null, top_fraction: 0.25,
+                                 salad_similarity_threshold: 0.60,
+                                 calibration: {select: max_auc_lower_ci, target_precision: 0.95, min_labels: 5,
+                                               n_negatives: 50, n_boot: 2000, confidence: 0.95,
+                                               salad_grid: [0.55, 0.60, 0.65, 0.70]}}
+    slam2_all:
+      kind: chain
+      description: common K + the attention gate + the SALAD bar at 0.60
+      overrides:
+        "certify.keep_unaligned_chunks": true
+        "correction_graph.seams": {focal_model: common_K, common_K_source: session_median, judge_samples: 20000}
+        "loops.attention_gate": {mode: gate, layer: null, min_score: null, top_fraction: 0.25,
+                                 salad_similarity_threshold: 0.60,
+                                 calibration: {select: max_auc_lower_ci, target_precision: 0.95, min_labels: 5,
+                                               n_negatives: 50, n_boot: 2000, confidence: 0.95,
+                                               salad_grid: [0.55, 0.60, 0.65, 0.70]}}
     no_drift_correction:
       kind: chain
       description: (b) without the certification's corrections (visit drift, floor, mask filter) — the CERTIFY stage off

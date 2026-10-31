@@ -44,7 +44,9 @@ def test_overrides_set_leaves_and_refuse_unknown_sections():
 def test_variant_list_loads_and_is_validated():
     raw = _raw()
     specs = V.load_variants(raw["evaluation"])
-    assert specs["reference"].kind == "chain" and specs["reference"].overrides == {}
+    # the reference keeps the unaligned chunk npys for the offline seam instrument (claude_stac_slam2.txt
+    # phase 4): a retention flag, not a product change
+    assert specs["reference"].kind == "chain" and specs["reference"].overrides == {"certify.keep_unaligned_chunks": True}
     assert specs["no_drift_correction"].stages_off == ["certify"]
     assert specs["scale_mapanything"].kind == "not_executed" and specs["scale_mapanything"].reason
     assert specs["scale_gauge_only"].base == "reference"

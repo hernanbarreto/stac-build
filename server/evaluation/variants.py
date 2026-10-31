@@ -274,6 +274,18 @@ def evaluate_product(product: Product, doc: Dict[str, Any], out_dir: Path, cfg: 
                      keyframes: Sequence[int], *, n_models: int = 1, models: Optional[List[dict]] = None,
                      plots: bool = True) -> Dict[str, Any]:
     from evaluation import confidence as CF
+    if not doc.get("distances"):
+        # no reference distances for this scene (USER 2026-10-31: there is not one cota): the error phases
+        # cannot measure — DECLARED, never invented; the coverage of the keyframes still counts
+        cov = compute_coverage(product, keyframes, doc, [], int(cfg.raw["coverage"]["cell_px"]), n_models, models)
+        D.write_json(out_dir / "coverage.json", cov)
+        summary = {"n_test_evaluated": 0, "n_test_not_reconstructed": 0, "abs_error_m": {}, "rel_error": {},
+                   "scale": {}, "product": {"kind": product.kind, "name": product.name, "n_points": int(len(product.xyz))},
+                   "status": "no reference distances: phases 1, 2 and 5 not measured (declared)"}
+        D.write_json(out_dir / "phase1_summary.json", summary)
+        return {"rows": [], "summary": summary, "phase2": {"confidence_distance": None, "growth_models": None,
+                                                          "status": summary["status"]},
+                "coverage": cov, "recs": [], "confidence": {"status": summary["status"]}}
     rows, summary, recs = D.evaluate(doc, product, cfg)
     D.write_phase1(out_dir, rows, summary, recs)
     p2 = CURVES.run_phase2(doc, rows, summary, product, cfg, out_dir, plots=plots)
@@ -456,6 +468,13 @@ def keep_policy(results: Dict[str, Dict[str, Any]], policy: str, log: Callable) 
             for p in list(out.iterdir()):
                 if p.name in keep_names or (p.is_dir() and p.name in ("potree", "precision")):
                     continue
+                if p.is_dir() and p.name == "maplong_run":
+                    # the fork's records stay for the slam2 table and the comparator; the chunk npys
+                    # (tens of GB) go — the offline instruments already ran on them
+                    for q in list(p.iterdir()):
+                        if q.is_dir() and q.name.startswith("_tmp_results"):
+                            shutil.rmtree(q, ignore_errors=True)
+                    continue
                 shutil.rmtree(p, ignore_errors=True) if p.is_dir() else p.unlink(missing_ok=True)
         log(f"[variants] {name}: session copy trimmed to its products (evaluation.variants_keep: cloud)")
 
@@ -476,18 +495,32 @@ def repeated_specs(specs: Sequence[VariantSpec], repeat: int) -> List[VariantSpe
 
 def run_scene(scene: SceneSpec, specs: Sequence[VariantSpec], run_dir: Path, cfg: EvaluationConfig, runner: ChainRunner,
               base_config: Dict[str, Any], log: Callable, monitor_factory: Optional[Callable] = None,
-              reference: str = "reference", plots: bool = True, repeat: int = 1) -> Dict[str, Any]:
+              reference: str = "reference", plots: bool = True, repeat: int = 1,
+              references_optional: bool = False, hooks: Optional[Any] = None) -> Dict[str, Any]:
+    """``references_optional`` (evaluation.slam2.references_optional): a scene without reference
+    distances still runs — its error phases are declared not measured. ``hooks``: an object with
+    ``resolve(spec, scene, results)`` (the spec a variant runs with) and ``after(spec, scene, rec,
+    results)`` (instruments, publication) and ``finish_scene(scene, scene_dir, results, png)``
+    (claude_stac_slam2.txt phase 4, evaluation.slam2.Slam2Hooks)."""
     from evaluation.references import load_references
     scene_dir = run_dir / scene.name
     scene_dir.mkdir(parents=True, exist_ok=True)
-    doc = load_references(scene.session_dir / "output", cfg.references.file, require_roles=True)
+    doc = load_references(scene.session_dir / "output", cfg.references.file, require_roles=not references_optional)
+    if not doc.get("distances"):
+        log(f"[variants] {scene.name}: no reference distances — phases 1, 2 and 5 are not measured (declared)")
     kf_files = keyframes_of_scene(scene)
     results: Dict[str, Dict[str, Any]] = {}
     all_specs = repeated_specs(specs, repeat)
     order = sorted(all_specs, key=lambda s: 1 if s.kind == "chain_continuation" else 0)   # bases first
     for spec in order:
-        results[spec.name] = run_variant(scene, spec, scene_dir, cfg, runner, base_config, doc, kf_files, log,
+        run_spec = hooks.resolve(spec, scene, results) if hooks is not None else spec
+        if getattr(run_spec, "resolution", None):
+            log(f"[variants] {scene.name}/{spec.name}: resolved — {json.dumps(run_spec.resolution, default=str)[:400]}")
+        results[spec.name] = run_variant(scene, run_spec, scene_dir, cfg, runner, base_config, doc, kf_files, log,
                                          results, monitor_factory, plots=plots)
+        if hooks is not None:
+            hooks.after(run_spec, scene, results[spec.name], results)
+            _record(scene_dir / spec.name, results[spec.name])
     if repeat > 1:
         from evaluation.determinism import repeatability
         for s in specs:
@@ -499,6 +532,8 @@ def run_scene(scene: SceneSpec, specs: Sequence[VariantSpec], run_dir: Path, cfg
     D.write_csv(scene_dir / "comparison.csv", rows, COMPARISON_COLUMNS)
     D.write_json(scene_dir / "comparison.json", {"scene": scene.name, "reference": reference, "rows": rows,
                                                  "keyframes": len(kf_files)})
+    if hooks is not None:
+        hooks.finish_scene(scene, scene_dir, results, png=plots)
     keep_policy(results, str(cfg.raw["variants_keep"]), log)
     return {"scene": scene.name, "results": results, "comparison": rows}
 
