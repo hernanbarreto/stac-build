@@ -25,10 +25,12 @@ A click on a splat selects the instance the segmentation named; a measurement go
 | worker / stage | `workers/gaussians_worker.py`, `pipeline_manager.StageId.GAUSSIANS` | after GENRECON, in SEGMENTATION_CHAIN and every cascade that invalidates the mesh; ON only with `pipeline.auto_gaussians` AND `gaussians.enabled` AND `auto_segment`; products `output/gaussians/<name>/` with `meta.json` (reconstruction id, epochs, cloud sha + point count) |
 | tests | `tests/test_gaussians.py` | config strictness, PLY/.splat/seed-index records, the training set from a synthetic session (seeds are cloud points, deterministic, depth maps for training frames), live instances through the seed rows (merge, stale), the trainer's CPU parts (SSIM, PSNR, exposure, depth/grid pixel maps, SH), the worker's progress parsing, the stage wiring, the routes |
 
-Not yet: the viewer (Spark `@sparkjsdev/spark` 2.4.0, MIT, installed in the worktree's UI) — a `Gaussians`
-layer under the octree group (inherits the display transform), on/off like Meshes, per-instance
-show/hide and highlight from `/instances`, depth-composited with the meshes; the first pccr run (one GPU
-task at a time: after the audit and slam2 runs); external meshed objects sampled into gaussians.
+| viewer | `ui/src/components/GaussianLayer.ts`, Viewport handle (`reloadGaussians`, `setGaussiansVisible`, `setGaussianInstanceVisible`, `highlightGaussianInstance`, `refreshGaussianInstances`, `clearGaussians`), App, InstancesPanel ("Gaussian splats" section with on/off per model, stale badge, held-out PSNR, reload), AutosegmentDialog (the stage's checkbox, off by default), i18n en/es | Spark `@sparkjsdev/spark` 2.4.0 (MIT) inside the three.js scene: one `SparkRenderer`, one `SplatMesh` per model under the Potree octree group (the floor / display transform applies as to the cloud and the meshes), loaded when the cloud arrives and on demand. Per-splat control in an `RgbaArray` read by a dyno `objectModifier` in the splat shader: alpha = shown / hidden, red = highlighted — hiding an instance in the Instances list hides its splats, selecting one tints them; the instances come live from `/api/gaussians/instances`. Typecheck and `build:web` pass (the bundle grows by Spark) |
+
+Not yet: the first pccr run (one GPU task at a time: after the audit and slam2 runs) and, with it, the
+check by eye of the depth compositing of splats against meshes and of the display transform; a
+`gaussians_ready` push so the list refreshes when the stage ends without reopening the session (today:
+on session load and the section's reload button); external meshed objects sampled into gaussians.
 
 ## Decisions and their reasons
 

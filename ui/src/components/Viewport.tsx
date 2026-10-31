@@ -22,6 +22,7 @@ import type { ReadoutAnchor, ViewPreset } from './viewport/ViewportHud'
 import { PhysicsSandbox } from './physics'
 import { SceneShadows, pointShadowUniforms, POINT_SHADOW_VERT_DECL, POINT_SHADOW_VERT_MAIN, POINT_SHADOW_FRAG_DECL } from './shadows'
 import { SceneLights } from './sceneLights'
+import { GaussianLayer, type GaussianModelInfo } from './GaussianLayer'
 
 /** Translator for callbacks (the active language is read at call time). */
 const tt = (key: string, vars?: Record<string, string | number | null | undefined>) => getT()(key, vars)
@@ -195,6 +196,15 @@ export interface ViewportHandle {
      *  not loaded yet gets it when it loads */
     setMeshWireframe: (kind: 'tsdf', key: number | string, on: boolean) => void
     clearTsdf: () => void
+    /** the Gaussian-splat layer (USER 2026-10-31): the published models loaded under the octree group (the
+     *  display transform applies as to the cloud and the meshes), on/off per model; the instance of every
+     *  splat is resolved live by the server, so hiding / selecting an instance reaches its splats */
+    reloadGaussians: (sessionId: string) => Promise<void>
+    setGaussiansVisible: (name: string, visible: boolean) => void
+    clearGaussians: () => void
+    setGaussianInstanceVisible: (instanceId: number, visible: boolean) => void
+    highlightGaussianInstance: (instanceId: number | null) => void
+    refreshGaussianInstances: () => Promise<void>
     reloadReconScene: (sessionId: string) => Promise<void>
     setReconElementVisibility: (instanceId: number, visible: boolean) => void
     clearReconScene: () => void
@@ -591,6 +601,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
     const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
+    const gaussianLayerRef = useRef<GaussianLayer | null>(null)      // the Gaussian-splat layer (USER 2026-10-31)
     // THE FLYTHROUGH RENDER PROFILE (USER 2026-10-10: "debe ser absolutamente fluido"): while
     // the synced video plays, the camera walks at eye level through the cloud — cube sprites
     // up to 69 px, the full point budget, shadows and the full pixel ratio saturated the GPU
@@ -2161,6 +2172,32 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         })
     }, [])
 
+    // ── the Gaussian-splat layer (USER 2026-10-31): Spark inside this scene, the models under the octree
+    // group so the floor transform applies to the splats exactly as to the cloud and the meshes ──
+    const ensureGaussianLayer = useCallback((): GaussianLayer | null => {
+        if (!sceneRef.current || !rendererRef.current) return null
+        if (!gaussianLayerRef.current) gaussianLayerRef.current = new GaussianLayer(sceneRef.current, rendererRef.current)
+        return gaussianLayerRef.current
+    }, [])
+    const loadGaussiansIntoGroup = useCallback(async (sessionId: string, parent: THREE.Object3D) => {
+        const layer = ensureGaussianLayer()
+        if (!layer) return
+        let res: Response
+        try { res = await fetch(`/api/gaussians/list/${sessionId}`) } catch { return }
+        if (!res.ok) return
+        const data = await res.json()
+        const models = (data?.models || []) as GaussianModelInfo[]
+        layer.dispose()
+        if (models.length === 0) return
+        let splats = 0
+        for (const m of models) {
+            try { splats += await layer.load(m, parent) } catch (e) { console.warn(`[Viewport] gaussians ${m.name} failed to load`, e) }
+        }
+        if (onStatusMessage) onStatusMessage(tt('vp.gaussiansLoaded', { n: models.length, splats }))
+    }, [ensureGaussianLayer, onStatusMessage])
+    const loadGaussiansRef = useRef(loadGaussiansIntoGroup)
+    loadGaussiansRef.current = loadGaussiansIntoGroup
+
     const addNewTsdfEntries = useCallback(async (sessionId: string): Promise<number> => {
         const parent = potreeLoaderRef.current?.getOctreeGroup() || sceneRef.current
         if (!parent) return 0
@@ -2623,6 +2660,16 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             if (obj) applyWireframe(obj, on)
         },
         clearTsdf: () => clearAllTsdf(),
+        reloadGaussians: async (sessionId: string) => {
+            const parent = potreeLoaderRef.current?.getOctreeGroup() || sceneRef.current
+            if (!parent) return
+            await loadGaussiansIntoGroup(sessionId, parent)
+        },
+        setGaussiansVisible: (name: string, visible: boolean) => { gaussianLayerRef.current?.setModelVisible(name, visible) },
+        clearGaussians: () => { gaussianLayerRef.current?.dispose() },
+        setGaussianInstanceVisible: (instanceId: number, visible: boolean) => { gaussianLayerRef.current?.setInstanceVisible(instanceId, visible) },
+        highlightGaussianInstance: (instanceId: number | null) => { gaussianLayerRef.current?.highlight(instanceId) },
+        refreshGaussianInstances: async () => { await gaussianLayerRef.current?.refreshInstances() },
         reloadReconScene: async (sessionId: string) => {
             const loader = potreeLoaderRef.current
             const parent = loader?.getOctreeGroup() || sceneRef.current
@@ -4554,6 +4601,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
     // Clear geometry and OBBs
     const clearScene = useCallback(() => {
+        gaussianLayerRef.current?.dispose()
         // Reset stale view-state refs so a fresh load is never blocked:
         //  - cloudHiddenRef: if it stuck `true` (e.g. all segments hidden), the
         //    LOD loop would skip loading the cloud entirely on the next load.
@@ -4911,6 +4959,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const octreeGroupForShapes = loader.getOctreeGroup()
                 if (sessionIdForShapes && octreeGroupForShapes) {
                     loadTsdfIntoGroup(sessionIdForShapes, octreeGroupForShapes)
+                    loadGaussiansRef.current(sessionIdForShapes, octreeGroupForShapes)
                     const preloadedScene = msg.scene as { elements?: Array<any> } | undefined
                     loadReconSceneIntoGroup(sessionIdForShapes, octreeGroupForShapes, preloadedScene)
                 }

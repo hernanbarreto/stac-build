@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.14.0",
+    "@sparkjsdev/spark": "^2.4.0",
     "@types/three": "^0.182.0",
     "chart.js": "^4.5.1",
     "lucide-react": "^0.575.0",

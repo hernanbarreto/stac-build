@@ -26,7 +26,7 @@ export interface AutosegmentState {
   busy: boolean
 }
 
-export interface AutosegmentStages { vlm: boolean; sam3: boolean; certify: boolean; captions: boolean; genrecon: boolean }
+export interface AutosegmentStages { vlm: boolean; sam3: boolean; certify: boolean; captions: boolean; genrecon: boolean; gaussians: boolean }
 
 export interface AutosegmentScan { key: string; label: string }
 
@@ -48,19 +48,19 @@ export function AutosegmentDialog({ open, sessionId, scans, selectedScans, onTog
   const t = useT()
   const [vlmPrompt, setVlmPrompt] = useState('')
   const [sam3Text, setSam3Text] = useState('')
-  const [stages, setStages] = useState<AutosegmentStages>({ vlm: true, sam3: true, certify: true, captions: true, genrecon: true })
+  const [stages, setStages] = useState<AutosegmentStages>({ vlm: true, sam3: true, certify: true, captions: true, genrecon: true, gaussians: false })
   const [running, setRunning] = useState(false)
 
   useEffect(() => {
     if (!open || !state) return
     setVlmPrompt(state.vlm_prompt)
     setSam3Text(state.sam3_prompts.join('\n'))
-    setStages({ vlm: true, sam3: true, certify: true, captions: true, genrecon: true })
+    setStages({ vlm: true, sam3: true, certify: true, captions: true, genrecon: true, gaussians: false })
     setRunning(false)
   }, [open, state])
 
   const sam3Prompts = sam3Text.split('\n').map(s => s.trim()).filter(Boolean)
-  const nothing = !stages.vlm && !stages.sam3 && !stages.certify && !stages.genrecon
+  const nothing = !stages.vlm && !stages.sam3 && !stages.certify && !stages.genrecon && !stages.gaussians
   const sam3NeedsPrompts = stages.sam3 && !stages.vlm && sam3Prompts.length === 0
   // USER 2026-10-06: an order never waits for the window to be free — a running pipeline on this
   // session (or any other) only means the order QUEUES behind it
@@ -112,6 +112,7 @@ export function AutosegmentDialog({ open, sessionId, scans, selectedScans, onTog
           <Checkbox checked={stages.certify} onChange={v => setStages(s => ({ ...s, certify: v }))} label={t('autosegment.stageCertify')} description={t('autosegment.stageCertifyHint')} />
           <Checkbox checked={stages.captions} disabled={!stages.certify} onChange={v => setStages(s => ({ ...s, captions: v }))} label={t('autosegment.stageCaptions')} description={t('autosegment.stageCaptionsHint')} />
           <Checkbox checked={stages.genrecon} onChange={v => setStages(s => ({ ...s, genrecon: v }))} label={t('autosegment.stageGenrecon')} description={t('autosegment.stageGenreconHint')} />
+          <Checkbox checked={stages.gaussians} onChange={v => setStages(s => ({ ...s, gaussians: v }))} label={t('autosegment.stageGaussians')} description={t('autosegment.stageGaussiansHint')} />
         </Stack>
         {sam3NeedsPrompts && <Banner tone="warn" compact>{t('autosegment.sam3NeedsPrompts')}</Banner>}
         {nothing && <Banner tone="warn" compact>{t('autosegment.nothing')}</Banner>}

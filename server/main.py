@@ -6611,7 +6611,8 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
     if _auto is not None:
         _want = _auto.get("stages") if isinstance(_auto.get("stages"), dict) else {}
         _only = {sid_ for key_, sid_ in (("vlm", StageId.VLM), ("sam3", StageId.SAM3),
-                                         ("certify", StageId.CERTIFY), ("genrecon", StageId.GENRECON)) if _want.get(key_)}
+                                         ("certify", StageId.CERTIFY), ("genrecon", StageId.GENRECON),
+                                         ("gaussians", StageId.GAUSSIANS)) if _want.get(key_)}
         if not _only:
             await viewer_manager.send_text(websocket, json.dumps({
                 "type": "error",

@@ -58,7 +58,7 @@ import { SplashOverlay } from './components/viewport/SplashOverlay'
 import { WelcomeScreen } from './components/viewport/WelcomeScreen'
 import { tokenColor } from './components/viewport/palette'
 import { SessionsPanel } from './features/SessionsPanel'
-import { InstancesPanel, type ListedRows } from './features/InstancesPanel'
+import { InstancesPanel, type ListedRows, type GaussianListItem } from './features/InstancesPanel'
 import { ScansPanel } from './features/ScansPanel'
 import { PipelineDialog } from './features/PipelineDialog'
 import { ResumeDialog } from './features/ResumeDialog'
@@ -750,6 +750,21 @@ function App() {
     visible: boolean
   }
   const [tsdfMeshes, setTsdfMeshes] = useState<MeshListItem[]>([])
+  // the Gaussian-splat layer (USER 2026-10-31): one row per published model, on/off like the meshes; the
+  // Viewport loads the splats under the octree group when the cloud arrives (and reloads on demand)
+  const [gaussianModels, setGaussianModels] = useState<GaussianListItem[]>([])
+  const refreshGaussianList = useCallback(async (sessionId: string) => {
+    try {
+      const res = await fetch(`/api/gaussians/list/${sessionId}`)
+      if (!res.ok) { setGaussianModels([]); return }
+      const data = await res.json()
+      const models = (data?.models || []) as Array<{ name: string; n_gaussians: number | null; stale: boolean; reason: string;
+                                                     heldout: { psnr_mean?: number } | null }>
+      setGaussianModels(prev => models.map(m => ({
+        name: m.name, visible: prev.find(x => x.name === m.name)?.visible ?? true, nGaussians: m.n_gaussians,
+        stale: !!m.stale, reason: m.reason || '', psnr: m.heldout?.psnr_mean ?? null })))
+    } catch { setGaussianModels([]) }
+  }, [])
 
   // Same for TSDF mesh list.
   // `resetVisibility` (default true) follows a viewer reset (reloadTsdf / session load) that drops
@@ -797,10 +812,12 @@ function App() {
   useEffect(() => {
     if (!activeSession) {
       setTsdfMeshes([])
+      setGaussianModels([])
       return
     }
     refreshTsdfMeshList(activeSession)
-  }, [activeSession, refreshTsdfMeshList])
+    refreshGaussianList(activeSession)
+  }, [activeSession, refreshTsdfMeshList, refreshGaussianList])
 
   const connectToServer = useCallback(async () => {
     try {
@@ -2002,7 +2019,7 @@ function App() {
   const storedEpochs: number = Math.max((certifyState?.epochs?.length ?? 0) - 1, 0)
   const selectedSegment = segments.find(s => s.id === selectedSegmentId) ?? null
   // the selected segment lights its OBB and shows H / W / D in the viewport (USER 2026-10-04)
-  useEffect(() => { viewportRef.current?.setSelectedSegment(selectedSegment?.key ?? null) }, [selectedSegment?.key])
+  useEffect(() => { viewportRef.current?.setSelectedSegment(selectedSegment?.key ?? null); viewportRef.current?.highlightGaussianInstance(selectedSegment?.id ?? null) }, [selectedSegment?.key, selectedSegment?.id])
   const hasSabanaResult = !!sessions.find(s => s.id === activeSession)?.hasSabana
 
   // (a hook: before the early returns below — React counts hooks per render)
@@ -2020,23 +2037,25 @@ function App() {
                   // generated objects, meshes
                   const keys = new Set(listed.segmentKeys)
                   setSegments(prev => prev.map(s => (keys.has(s.key) ? { ...s, visible: v } : s)))
-                  segments.forEach(s => { if (keys.has(s.key)) { viewportRef.current?.toggleOBB(s.key, v && obbKeys.has(s.key)); viewportRef.current?.setSegmentVisibility(s.classId, v) } })
-                  if (listed.unsegmented) { setUnsegmentedVisible(v); viewportRef.current?.setSegmentVisibility(0, v) }
+                  segments.forEach(s => { if (keys.has(s.key)) { viewportRef.current?.setGaussianInstanceVisible(s.id, v); viewportRef.current?.toggleOBB(s.key, v && obbKeys.has(s.key)); viewportRef.current?.setSegmentVisibility(s.classId, v) } })
+                  if (listed.unsegmented) { setUnsegmentedVisible(v); viewportRef.current?.setSegmentVisibility(0, v); viewportRef.current?.setGaussianInstanceVisible(0, v) }
                   listed.placedIds.forEach(id => viewportRef.current?.setSceneObjectVisible(id, v))
                   const tf = new Set(listed.tsdfFolders)
                   setTsdfMeshes(prev => prev.map(x => (tf.has(x.folder) ? { ...x, visible: v } : x)))
                   tsdfMeshes.forEach(m => { if (tf.has(m.folder)) viewportRef.current?.setTsdfVisibility(m.folder, v) })
                 },
-    onToggleSegment: (seg, vis) => { setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, visible: vis } : s))); viewportRef.current?.toggleOBB(seg.key, vis && obbKeys.has(seg.key)); viewportRef.current?.setSegmentVisibility(seg.classId, vis) },
+    onToggleSegment: (seg, vis) => { setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, visible: vis } : s))); viewportRef.current?.toggleOBB(seg.key, vis && obbKeys.has(seg.key)); viewportRef.current?.setSegmentVisibility(seg.classId, vis); viewportRef.current?.setGaussianInstanceVisible(seg.id, vis) },
     onRenameSegment: renameSegment,
     onDeleteSegment: deleteSegment,
-    onToggleUnsegmented: v => { setUnsegmentedVisible(v); viewportRef.current?.setSegmentVisibility(0, v) },
+    onToggleUnsegmented: v => { setUnsegmentedVisible(v); viewportRef.current?.setSegmentVisibility(0, v); viewportRef.current?.setGaussianInstanceVisible(0, v) },
     onFloorLevel: (iid: number) => { if (activeSession) applyFloorLevel(activeSession, 'explicit', iid) },
     onTogglePlaced: (id, v) => viewportRef.current?.setSceneObjectVisible(id, v),
     onRemovePlaced: id => viewportRef.current?.removeSceneObject(id),
     onToggleTsdf: (m, v) => { setTsdfMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, visible: v } : x))); viewportRef.current?.setTsdfVisibility(m.folder, v) },
     onToggleTsdfWireframe: (m, on) => { setTsdfMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, wireframe: on } : x))); viewportRef.current?.setMeshWireframe('tsdf', m.folder, on) },
     onDeleteTsdf: deleteTsdfMesh,
+    onToggleGaussians: (m, v) => { setGaussianModels(prev => prev.map(x => (x.name === m.name ? { ...x, visible: v } : x))); viewportRef.current?.setGaussiansVisible(m.name, v) },
+    onRefreshGaussians: () => { if (activeSession) { refreshGaussianList(activeSession); viewportRef.current?.reloadGaussians(activeSession) } },
     onRenamePlaced: async (id, name) => {
                   if (!activeSession) return
                   try {
@@ -2105,7 +2124,7 @@ function App() {
             )}
             {layout.state.leftTab === 'instances' && activeSession && (
               <InstancesPanel {...instancesCb} volumes={userVolumes}   obbKeys={obbKeys}  placedObb={placedObb}  volumeHidden={volumeHidden} volumeObb={volumeObb}   segments={segments} unsegmentedVisible={unsegmentedVisible} unsegmentedCount={unsegmentedCount} absorbedCount={absorbedCount} floorLevel={floorLevel}
-                placedObjects={placedObjects} tsdfMeshes={tsdfMeshes} selectedSegmentId={selectedSegmentId}
+                placedObjects={placedObjects} tsdfMeshes={tsdfMeshes} gaussians={gaussianModels} selectedSegmentId={selectedSegmentId}
  />
             )}
             {layout.state.leftTab === 'scans' && (

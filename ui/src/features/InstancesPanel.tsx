@@ -5,7 +5,7 @@
  * footer buttons open Segmentation and Meshing.
  */
 import { memo, useState } from 'react'
-import { Box, CheckSquare, Crosshair, Grid3x3, Pencil, Square, Tag, Trash2, Wand2 } from 'lucide-react'
+import { Box, CheckSquare, Crosshair, Grid3x3, Pencil, RefreshCw, Sparkles, Square, Tag, Trash2, Wand2 } from 'lucide-react'
 import type { SegmentInstance } from '../components/Viewport'
 import { Panel, Section, Stack } from '../components/ui/Panel'
 import { Tree, type TreeNodeData } from '../components/ui/Tree'
@@ -17,6 +17,9 @@ import { useFmt, useT } from '../i18n'
 
 export interface MeshListItem { instanceId: number; label: string; folder: string; visible: boolean; wireframe?: boolean }
 export interface PlacedObject { id: number; name: string; visible: boolean }
+/** one published Gaussian-splat model (USER 2026-10-31): on/off like a mesh; `stale` = the cloud changed since
+ *  the splats were trained (their instances read 0 until retrained) */
+export interface GaussianListItem { name: string; visible: boolean; nGaussians: number | null; stale: boolean; reason: string; psnr: number | null }
 export interface VolumeItem { volume_id: number; name: string }
 export interface ListedRows { segmentKeys: string[]; unsegmented: boolean; placedIds: number[]; tsdfFolders: string[] }
 export interface FloorLevelState { candidates: { instance_id: number; label: string; height_m: number | null }[]; selected: number | null }
@@ -45,6 +48,7 @@ interface InstancesPanelProps {
   onToggleVolume: (id: number, visible: boolean) => void
   onToggleVolumeObb: (id: number, on: boolean) => void
   tsdfMeshes: MeshListItem[]
+  gaussians: GaussianListItem[]
   selectedSegmentId: number | null
   onSelectSegment: (id: number | null) => void
   /** show / hide EVERY row the list shows (the search applies): segments, Unsegmented, placed objects,
@@ -64,6 +68,8 @@ interface InstancesPanelProps {
   /** draw a GLB as wireframe (USER 2026-10-15) */
   onToggleTsdfWireframe: (m: MeshListItem, on: boolean) => void
   onDeleteTsdf: (m: MeshListItem) => void
+  onToggleGaussians: (m: GaussianListItem, visible: boolean) => void
+  onRefreshGaussians: () => void
   onOpenSegmentation: () => void
   /** the segmentation chain on demand, prompts editable (USER 2026-10-05) */
   onOpenAutosegment: () => void
@@ -89,10 +95,11 @@ function InstancesPanelImpl(p: InstancesPanelProps) {
   const placed = p.placedObjects.filter(o => hit(o.name, o.id))
   const tsdfs = p.tsdfMeshes.filter(m => hit(m.label, m.folder, m.instanceId))
   const vols = p.volumes.filter(v => hit(v.name, v.volume_id))
+  const gauss = p.gaussians.filter(g => hit(g.name))
   const unsegListed = hit(t('instances.unsegmented'))
   const listed: ListedRows = { segmentKeys: segs.map(s => s.key), unsegmented: unsegListed, placedIds: placed.map(o => o.id),
                                tsdfFolders: tsdfs.map(m => m.folder) }
-  const anyListed = segs.length + placed.length + tsdfs.length + vols.length > 0 || unsegListed
+  const anyListed = segs.length + placed.length + tsdfs.length + vols.length + gauss.length > 0 || unsegListed
   const commitPlaced = async (o: PlacedObject) => {
     const v = editValue.trim()
     setEditing(null)
@@ -214,6 +221,18 @@ function InstancesPanelImpl(p: InstancesPanelProps) {
                   <IconButton size="sm" variant="danger" label={t('instances.deleteMeshHint', { folder: m.folder })} icon={<Trash2 aria-hidden />} onClick={() => p.onDeleteTsdf(m)} />
                 </>
               ),
+            }))} />
+          </Section>
+        )}
+        {gauss.length > 0 && (
+          <Section title={t('instances.gaussians', { n: gauss.length })} flush
+            actions={<IconButton size="sm" label={t('instances.refreshGaussians')} icon={<RefreshCw aria-hidden />} onClick={p.onRefreshGaussians} />}>
+            <Tree ariaLabel={t('instances.gaussians', { n: gauss.length })} dense
+              nodes={gauss.map(g => ({
+              id: `gs-${g.name}`, icon: <Sparkles aria-hidden />, label: g.name, muted: g.stale,
+              meta: g.stale ? t('instances.gaussiansStale') : [g.nGaussians != null ? fmt.integer(g.nGaussians) : null,
+                                                              g.psnr != null ? t('instances.gaussiansPsnr', { psnr: g.psnr.toFixed(1) }) : null].filter(Boolean).join(' · '),
+              visible: g.visible, onVisible: v => p.onToggleGaussians(g, v),
             }))} />
           </Section>
         )}
