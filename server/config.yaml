@@ -2371,6 +2371,18 @@ reconstruction:
       permutations: 2000                # BOUND: resamples of the permutation / bootstrap tests
       seed: 0                           # their fixed seed
       min_witness_corr: 12              # BOUND: 2D-3D correspondences a witness needs for PnP
+      init_poses: omega                 # WHERE THE SOLVE STARTS (2026-10-31). omega = the gauge's poses (Omega x
+                                        #   the gauge: the walk as the fork drifted it — every run so far).
+                                        #   classical = F3's global mapper (GLOMAP) when ONE model registers
+                                        #   EVERY keyframe: its trajectory Sim3-aligned to the gauge's (the
+                                        #   metre, the world frame) starts the ladder and the odometry priors
+                                        #   are that chain's steps; a partial model = omega, declared.
+                                        #   MEASURED on pccr_audit3 (audit poses, MASt3R bridges, odometry
+                                        #   priors): the bridges' two-view geometry agrees with GLOMAP under
+                                        #   1 deg on the ten start-end pairs, F5's final poses disagree with
+                                        #   both by 5-6 deg — a BA started at the drifted walk keeps the loop
+                                        #   open and bends the weakest structure instead (kf 0-60 sank 1.3 m,
+                                        #   the bend's s_k 1.43 there, the R1 camera fx/fy 400/353).
       prior_model: relative             # THE PRIOR MODEL (audit 2026-10-23, phase 3b). relative = ODOMETRY
                                         #   priors: one relative-pose prior per consecutive keyframe pair
                                         #   (Omega x the gauge), the gauge's σ along the step (the metre),
@@ -4508,6 +4520,18 @@ evaluation:
         "reconstruction.precision.refine.prior_model": absolute
         "reconstruction.precision.refine.prior_sigma_from_loops": false
         "reconstruction.precision.refine.scale_lock": false
+        "reconstruction.precision.refine.rolling_shutter": never
+        "reconstruction.precision.fusion.enabled": false
+        "reconstruction.precision.fusion.colmap_tier": false
+    audit_layered_no_rs_classical_init:
+      kind: chain
+      description: >-
+        (audit 2026-10-31, after pccr_audit3's diagnosis) audit_layered_no_rs with F5 started at GLOMAP's
+        trajectory (refine.init_poses classical): the MASt3R bridges, the odometry priors (from GLOMAP's
+        chain) and the scale lock stay — does the start-end loop close and the start of the walk stand
+      stages_off: [vlm, sam3, projection, certify, genrecon]
+      overrides:
+        "reconstruction.precision.refine.init_poses": classical
         "reconstruction.precision.refine.rolling_shutter": never
         "reconstruction.precision.fusion.enabled": false
         "reconstruction.precision.fusion.colmap_tier": false

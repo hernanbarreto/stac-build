@@ -180,3 +180,14 @@ def test_ceres_threads_must_stay_one():
     raw["reconstruction"]["precision"]["refine"]["ceres_threads"] = 8
     with pytest.raises(PrecisionConfigError, match="ceres_threads.*bit-identical"):
         load_precision_config(raw)
+
+
+def test_refine_init_poses_is_an_enum_and_mandatory():
+    raw = _raw()
+    assert load_precision_config(raw).refine.init_poses in ("omega", "classical")
+    raw["reconstruction"]["precision"]["refine"]["init_poses"] = "glomap"
+    with pytest.raises(PrecisionConfigError, match="init_poses"):
+        load_precision_config(raw)
+    del raw["reconstruction"]["precision"]["refine"]["init_poses"]
+    with pytest.raises(PrecisionConfigError, match="init_poses"):
+        load_precision_config(raw)

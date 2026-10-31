@@ -301,6 +301,7 @@ class ClassicalConfig:
 # ── F5: joint refinement + witness localisation ─────────────────────────
 
 PRIOR_MODELS = ("relative", "absolute")
+INIT_POSES = ("omega", "classical")
 ROLLING_SHUTTER = ("judged", "never")
 
 
@@ -323,6 +324,15 @@ class RefineConfig:
     prior_model: str            # phase 3b: "relative" (odometry priors between consecutive keyframes,
                                 # the first keyframe fixed — the default) or "absolute" (the gauge
                                 # priors on every keyframe's position, the pre-phase-3b model)
+    init_poses: str             # 2026-10-31: where the solve STARTS. "omega" — the gauge's poses (Omega x
+                                # the gauge, the walk as the fork drifted it); "classical" — F3's global
+                                # mapper (GLOMAP) when ONE model registers EVERY keyframe, its trajectory
+                                # Sim3-aligned to the gauge's (the metre, the world frame); the odometry
+                                # priors are then that chain's steps. Measured on pccr_audit3: a BA started
+                                # at the drifted walk never closed the start-end loop (5-6 deg left between
+                                # F5 and GLOMAP; the bridges agree with GLOMAP under 1 deg) and bent the
+                                # weakest structure instead (kf 0-60 sank 1.3 m). A partial model = the
+                                # gauge's poses, declared
     prior_sigma_from_loops: bool  # phase 3b, absolute model only: the gauge priors relaxed by the factor the OPEN loops
                                 # measure (loop_gap.prior_relaxation), judged by the loop gaps and the
                                 # held-out tracks; false = the priors as the gauge measured them
@@ -865,6 +875,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         # PnP needs four points (P3P + one to choose)
         min_witness_corr=_num(rf, "min_witness_corr", "refine", lo=4, integer=True),
         prior_model=_enum(rf, "prior_model", "refine", PRIOR_MODELS),
+        init_poses=_enum(rf, "init_poses", "refine", INIT_POSES),
         prior_sigma_from_loops=_bool(rf, "prior_sigma_from_loops", "refine"),
         scale_lock=_bool(rf, "scale_lock", "refine"),
         rolling_shutter=_enum(rf, "rolling_shutter", "refine", ROLLING_SHUTTER),

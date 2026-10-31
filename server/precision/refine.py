@@ -752,8 +752,13 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
                 kf_frames: Sequence[int], sigma_rel: float, cfg, solver: dict, *,
                 error_factor: float, log: Callable = print, solve: bool = True,
                 window_id: Optional[np.ndarray] = None,
-                is_loop: Optional[np.ndarray] = None) -> Dict[str, Any]:
+                is_loop: Optional[np.ndarray] = None,
+                w2c_gauge: Optional[np.ndarray] = None) -> Dict[str, Any]:
     """The ladder over the keyframes. ``split`` per OBSERVATION (its track's split).
+    ``w2c0`` is where the ladder STARTS (the shape: the gauge's poses, or GLOMAP's trajectory aligned
+    to them — ``refine.init_poses``); ``w2c_gauge`` (default ``w2c0``) is the gauge's own trajectory,
+    whose step lengths are the metre the scale lock re-reads and whose centres span the loops the
+    prior relaxation measures against.
     ``error_factor``: ``correction_graph.graph.improvement_error_factor`` (the user's 2).
     ``solve=False`` (``refine.enabled: false``, the evaluation battery): no rung is solved — the
     initial state is the result (its held-out measured, its landmarks the witnesses' map).
@@ -766,6 +771,9 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
     if not (np.isfinite(fac) and fac > 0.0):
         raise RefineError(f"error_factor {error_factor!r} must be finite and > 0 "
                           f"(correction_graph.graph.improvement_error_factor)")
+    w2c_g = np.asarray(w2c0 if w2c_gauge is None else w2c_gauge, np.float64)
+    if w2c_g.shape != np.asarray(w2c0).shape:
+        raise RefineError(f"w2c_gauge {w2c_g.shape} and the initial poses {np.asarray(w2c0).shape} disagree")
     fit_g = group_tracks(track[split == 0], frame[split == 0], uv[split == 0], kf_frames)
     held_g = group_tracks(track[split == 1], frame[split == 1], uv[split == 1], kf_frames)
     dropped_fit: dict = {"tracks": 0, "observations": 0}
@@ -950,7 +958,7 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
             ladder_p["skipped"] = ("no judged loop window (held-out tracks seen from two visits) — no evidence "
                                    "of drift to relax the gauge's priors against; they stand")
         else:
-            relax = LG.prior_relaxation(loops_best, SL_centres(w2c0), sigma_rel)
+            relax = LG.prior_relaxation(loops_best, SL_centres(w2c_g), sigma_rel)
             ladder_p["measured"] = relax
             if relax["n_open"] == 0:
                 ladder_p["skipped"] = "every judged loop is closed after the camera ladder — nothing to relax"
@@ -1043,7 +1051,7 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
     lock: Dict[str, Any] = {"measured": False, "reason": "refine.scale_lock: false"}
     if bool(cfg.scale_lock):
         from precision import scale_lock as SL
-        c_g = SL.centres_of(w2c0)
+        c_g = SL.centres_of(w2c_g)                       # the GAUGE's steps: the metre, whatever started the ladder
         lock = SL.measure(c_g, SL.centres_of(best.w2c), error_factor=fac,
                           confidence=float(cfg.heldout_confidence), n_boot=int(cfg.permutations),
                           seed=int(cfg.seed))
@@ -1323,7 +1331,13 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     if len(kf) != len(poses):
         raise RefineError(f"camera_poses.txt ({len(poses)}) and camera_frames.txt ({len(kf)}) "
                           f"disagree")
-    w2c0 = np.linalg.inv(poses)
+    w2c_gauge = np.linalg.inv(poses)                 # the live poses (Omega x the gauge): the metre, the frame
+    from correction.epoch import reconstruction_id_or_none as _rid
+    init_rec: Dict[str, Any] = {"source": "omega", "taken": False, "reason": "refine.init_poses: omega"}
+    w2c0 = w2c_gauge
+    if str(cfg.init_poses) == "classical":
+        from precision.classical_check import classical_init
+        w2c0, init_rec = classical_init(out, kf, w2c_gauge, _rid(out), log=log)
     tr = load_tracks_v2(session_dir)
     tid = tr["track_query_id"]
     split_of_track = dict(zip(tid.tolist(), tr["track_split"].tolist()))
@@ -1336,7 +1350,7 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     core = refine_core(w2c0, cam.params, (cam.width, cam.height), tr["obs_track"], tr["obs_frame"],
                        tr["obs_uv_native"], split_obs, kf, sigma_rel, cfg, solver,
                        error_factor=fac, log=log, solve=bool(cfg.enabled),
-                       window_id=tr.get("window_id"), is_loop=tr.get("is_loop_pair"))
+                       window_id=tr.get("window_id"), is_loop=tr.get("is_loop_pair"), w2c_gauge=w2c_gauge)
     best = core["best"]
     bound = heldout_bound(heldout_leave_one_view_out(core["held_groups"], best, solver, cfg,
                                                      max_px=float(np.hypot(cam.width, cam.height))), cfg)
@@ -1350,7 +1364,6 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     cross = _prior_cross_check(out, kf, core["X"], core["fit_groups"], best, cam)
     # the classical cross-check (phase 3d): COLMAP / GLOMAP's independent trajectory against F5's
     from precision.classical_check import cross_check as classical_cross_check
-    from correction.epoch import reconstruction_id_or_none as _rid
     classical = classical_cross_check(out, kf, best.w2c, _rid(out))
     if classical.get("measured"):
         log(f"{LOG_TAG} classical cross-check: {classical['n_registered']}/{classical['n_keyframes']} keyframes "
@@ -1387,6 +1400,7 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
                      "prior_sigma_m": {"first": float(core["prior_sigma_m"][0]),
                                        "last": float(core["prior_sigma_m"][-1])}},
            "rungs": core["rungs"], "applied_rung": best.name,
+           "init_poses": dict(init_rec, policy=str(cfg.init_poses)),
            "prior_model": core["odometry"], "prior_sigma_ladder": core["prior_sigma_ladder"],
            "scale_lock": core["scale_lock"], "loops": core["loops"],
            "camera": {"before": list(cam.params), "after": best.params_by_block},
@@ -1410,7 +1424,7 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
         new_cam = cam.with_params(best.params_by_block[0], "refine", cam.camera_epoch + 1,
                                   report={"rung": best.name, "blocks": len(best.params_by_block)})
         save_camera_json(out / "camera.json", new_cam, epochs.get("geometry_epoch"))
-        T = np.linalg.inv(best.w2c) @ w2c0              # c2w_new · w2c_old: world motion
+        T = np.linalg.inv(best.w2c) @ w2c_gauge         # c2w_new · w2c_live: the motion of the LIVE poses
         # the scale lock scaled the whole solution by s: the records' depth follows (k = s)
         s_lock = float(core["scale_lock"]["s"]) if core["scale_lock"].get("apply") else 1.0
         from precision.poses_epoch import apply_pose_epoch

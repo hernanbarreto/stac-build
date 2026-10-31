@@ -301,23 +301,105 @@ def _check_model(model, kf: Sequence[int], w2c_f5: np.ndarray, n_models: int) ->
                        "the poses are certified by both; the worst keyframes name where they part"}
 
 
+def _load_classical(out_dir: Path, kf: Sequence[int], rid: Optional[str]):
+    """(report, mapper names, workspace) of a classical run that belongs to THIS reconstruction and
+    keyframe list, or (None, reason, workspace)."""
+    from correction.epoch import same_reconstruction
+    ws = Path(out_dir) / "precision" / DIRNAME
+    rp = ws / REPORT_NAME
+    if not rp.exists():
+        return None, "no classical model (f3_classical did not run)", ws
+    rep = json.loads(rp.read_text())
+    taken, why = same_reconstruction(rep, rid)
+    if not taken:
+        return None, why, ws
+    if rep.get("keyframes_sha256") != keyframe_list_sha(kf):
+        return None, "the classical model was built on another keyframe list", ws
+    return rep, [str(m) for m in (rep.get("mappers") or ["global"])], ws
+
+
+def classical_init(out_dir: Path, kf: Sequence[int], w2c_gauge: np.ndarray, rid: Optional[str],
+                   log: Callable = print) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """F5's STARTING poses from the classical trajectory (``refine.init_poses: classical``): the first
+    configured mapper's largest model, taken only when it registers EVERY keyframe, Sim3-aligned to the
+    gauge's trajectory (Umeyama on the camera centres, one Huber reweighting at the median — the
+    gauge's metre and world frame, the classical SHAPE). Returns (w2c per keyframe, the record); a
+    missing, foreign or partial model returns the gauge's poses with the reason (``taken: False``).
+
+    Why (pccr_audit3, 2026-10-31): a bundle adjustment started at the drifted walk never closed the
+    start-end loop although the MASt3R bridges held it (their two-view geometry agrees with GLOMAP
+    under 1 deg; F5's final poses disagree with both by 5-6 deg) — it bent the weakest structure
+    instead. GLOMAP's global solve has the loop consistent by construction."""
+    from evaluation.colmap_io import frame_of_name, list_models, read_model
+    from precision.scale_lock import centres_of
+    W_g = np.asarray(w2c_gauge, np.float64)
+    rep, mappers, ws = _load_classical(out_dir, kf, rid)
+    if rep is None:
+        log(f"{LOG_TAG} init_poses classical: {mappers} — the gauge's poses start the ladder")
+        return W_g, {"source": "omega", "taken": False, "reason": str(mappers)}
+    mapper = mappers[0]
+    sparse = ws / f"sparse_{mapper}"
+    dirs = list_models(sparse) if sparse.exists() else []
+    if not dirs:
+        why = f"{sparse}: no model"
+        log(f"{LOG_TAG} init_poses classical: {why} — the gauge's poses start the ladder")
+        return W_g, {"source": "omega", "taken": False, "mapper": mapper, "reason": why}
+    model = max((read_model(d) for d in dirs), key=lambda mm: mm.n_images)
+    kidx = {int(f): i for i, f in enumerate(kf)}
+    rows = []
+    for im in model.images.values():
+        f = frame_of_name(im.name)
+        if f is not None and f in kidx:
+            W = np.asarray(im.w2c(), np.float64)
+            rows.append((kidx[f], W[:3, :3], W[:3, 3]))
+    rows.sort(key=lambda r: r[0])
+    n_reg = len(rows)
+    base = {"source": "classical", "mapper": mapper, "n_models": int(len(dirs)), "n_registered": int(n_reg),
+            "n_keyframes": int(len(kf))}
+    if n_reg != len(kf) or len({r[0] for r in rows}) != len(kf):
+        why = (f"the {mapper} mapper's largest model registers {n_reg} of {len(kf)} keyframes "
+               f"({len(dirs)} model(s)) — a partial trajectory starts nothing; the gauge's poses start the ladder")
+        log(f"{LOG_TAG} init_poses classical: {why}")
+        return W_g, {**base, "source": "omega", "taken": False, "reason": why}
+    Rc = np.stack([r[1] for r in rows]); tc = np.stack([r[2] for r in rows])
+    C_cl = -np.einsum("nji,nj->ni", Rc, tc)
+    C_g = centres_of(W_g)
+    s, R, t = umeyama_sim3(C_cl, C_g)
+    res = np.linalg.norm((s * (C_cl @ R.T) + t) - C_g, axis=1)
+    med = float(np.median(res))
+    if med > 0.0:
+        w = np.minimum(1.0, med / np.maximum(res, np.finfo(float).tiny))
+        s, R, t = umeyama_sim3(C_cl, C_g, w)
+        res = np.linalg.norm((s * (C_cl @ R.T) + t) - C_g, axis=1)
+    # the Sim3 acting on the cameras: world' = s R world + t  →  R'_k = R_k Rᵀ, C'_k = s R C_k + t
+    C_new = s * (C_cl @ R.T) + t
+    R_new = np.einsum("nij,kj->nik", Rc, R)                      # R_k @ R.T
+    W_new = np.tile(np.eye(4), (len(kf), 1, 1))
+    W_new[:, :3, :3] = R_new
+    W_new[:, :3, 3] = -np.einsum("nij,nj->ni", R_new, C_new)
+    rot = np.degrees([float(np.arccos(np.clip((np.trace(R_new[k] @ W_g[k, :3, :3].T) - 1.0) / 2.0, -1.0, 1.0)))
+                      for k in range(len(kf))])
+    rec = {**base, "taken": True, "scale_gauge_over_classical": float(s),
+           "centres_vs_gauge_m": {"median": float(np.median(res)), "p90": float(np.percentile(res, 90)),
+                                  "max": float(res.max())},
+           "rotation_vs_gauge_deg": {"median": float(np.median(rot)), "p90": float(np.percentile(rot, 90)),
+                                     "max": float(rot.max())},
+           "reason": (f"the {mapper} mapper registers every keyframe in one model: its trajectory, Sim3-aligned "
+                      f"to the gauge's, starts the ladder (the gauge keeps the metre and the world frame)")}
+    log(f"{LOG_TAG} init_poses classical: {mapper} {n_reg}/{len(kf)} keyframes — the ladder starts at its "
+        f"trajectory (centres vs the gauge median {100 * np.median(res):.1f} cm, p90 {100 * np.percentile(res, 90):.1f} cm; "
+        f"rotation median {np.median(rot):.2f} deg)")
+    return W_new, rec
+
+
 def cross_check(out_dir: Path, kf: Sequence[int], w2c_f5: np.ndarray, rid: Optional[str]) -> Dict[str, Any]:
     """refine.json["classical_cross_check"]: every classical model (one per configured mapper,
     ``models``) against F5's poses; the FIRST configured mapper's numbers at the top level
     (``top_level_from``), the camera prior COLMAP was given (``camera_prior``)."""
-    from correction.epoch import same_reconstruction
     from evaluation.colmap_io import list_models, read_model
-    ws = Path(out_dir) / "precision" / DIRNAME
-    rp = ws / REPORT_NAME
-    if not rp.exists():
-        return {"measured": False, "reason": "no classical model (f3_classical did not run)"}
-    rep = json.loads(rp.read_text())
-    taken, why = same_reconstruction(rep, rid)
-    if not taken:
-        return {"measured": False, "reason": why}
-    if rep.get("keyframes_sha256") != keyframe_list_sha(kf):
-        return {"measured": False, "reason": "the classical model was built on another keyframe list"}
-    mappers = [str(m) for m in (rep.get("mappers") or ["global"])]
+    rep, mappers, ws = _load_classical(out_dir, kf, rid)
+    if rep is None:
+        return {"measured": False, "reason": str(mappers)}
     found: Dict[str, Dict[str, Any]] = {}
     for m in mappers:
         sparse = ws / f"sparse_{m}"

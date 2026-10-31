@@ -144,7 +144,10 @@ STEPS: List[Step] = [
          reads=("frames",), writes=("output/omega_probe.json",),
          config=("omega", "raw:reconstruction")),
     Step("f5_refine", "F5 joint refinement", "mapanything", "precision.refine",
-         reads=_GEOMETRY_IN + ("output/gauge.json", "output/precision/tracks.npz"),
+         # the classical report: F5 may START at GLOMAP's trajectory (refine.init_poses classical) and
+         # always cross-checks against it — a new classical model is a new F5 input
+         reads=_GEOMETRY_IN + ("output/gauge.json", "output/precision/tracks.npz",
+                               "output/precision/classical/classical.json"),
          writes=("output/precision/refine.json", "output/precision/witness_poses.txt",
                  "output/precision/witness_frames.txt", "output/precision/refine_residuals.npz",
                  "output/camera.json") + _POSE_FILES,

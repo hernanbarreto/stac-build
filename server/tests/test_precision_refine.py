@@ -285,3 +285,31 @@ def test_the_solve_is_bit_identical_under_the_runners_blas_threads(monkeypatch):
     assert a == b, (a, b)
     assert a["sha"] == one["sha"], (a, one)
     assert a["best"] == "R2"
+
+
+def test_a_classical_start_keeps_its_shape_and_takes_the_gauges_metre():
+    """refine.init_poses classical (2026-10-31): the ladder starts at a trajectory of another metre
+    (GLOMAP's aligned to the gauge — here the true shape at twice the metre); the odometry priors
+    come from that chain, so the solve keeps its shape, and the scale lock re-reads the metre from
+    the GAUGE's steps (``w2c_gauge``) and re-imposes it: step lengths back to the truth's."""
+    from precision.scale_lock import centres_of
+    X, c2w = _scene(seed=6)
+    gt = [500.0, 500.0, 319.5, 239.5, -0.05, 0.01, 0.0, 0.0]
+    kf = list(range(len(c2w)))
+    track, frame, uv = _observe(X, c2w, gt, 0.3, 7, kf)
+    start = c2w.copy()
+    start[:, :3, 3] *= 2.0                                          # the same shape at twice the metre
+    core = R.refine_core(np.linalg.inv(start), gt, WH, track, frame, uv, _split(track), kf, 0.01, CFG,
+                         SOLVER, error_factor=FAC, log=lambda *a: None, w2c_gauge=np.linalg.inv(c2w))
+    lock = core["scale_lock"]
+    assert lock["measured"] and lock["apply"] and abs(lock["log_s"] - np.log(0.5)) < 0.02, lock
+    b = core["best"]
+    step = np.linalg.norm(np.diff(centres_of(b.w2c), axis=0), axis=1)
+    step_t = np.linalg.norm(np.diff(c2w[:, :3, 3], axis=0), axis=1)
+    np.testing.assert_allclose(step, step_t, atol=0.003)
+    w2c_t = np.linalg.inv(c2w)
+    for k in range(len(kf)):
+        np.testing.assert_allclose(b.w2c[k, :3, :3], w2c_t[k, :3, :3], atol=2e-3)
+    with pytest.raises(R.RefineError, match="w2c_gauge"):
+        R.refine_core(np.linalg.inv(start), gt, WH, track, frame, uv, _split(track), kf, 0.01, CFG, SOLVER,
+                      error_factor=FAC, log=lambda *a: None, w2c_gauge=np.linalg.inv(c2w)[:-1])

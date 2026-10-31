@@ -267,3 +267,60 @@ exit 0
     (tmp_path / "argv.log").write_text(""); (tmp_path / "deaths").write_text("2")
     with pytest.raises(CB.ColmapError, match="code -11"):
         CB.ensure_features_and_matches(ws2, "SIFT", "SIFT_BRUTEFORCE", ccfg, lambda *a: None)
+
+
+def test_classical_init_starts_the_ladder_at_the_complete_models_shape_in_the_gauges_metre(tmp_path):
+    """refine.init_poses classical (2026-10-31): the global mapper's complete model, Sim3-aligned to the
+    gauge's trajectory, starts F5 — the classical SHAPE (relative rotations exact, step lengths one scale
+    of the model's), the gauge's metre and frame (the alignment); bit-identical call to call."""
+    s, names = _session(tmp_path)
+    truth = _walk()
+    pcfg = replace(PC, classical=replace(PC.classical, loop_min_inliers=60, loop_min_gap_keyframes=4, mappers=("global",)))
+    CK.run_classical(s, pcfg, log=lambda *a: None, runner=_runner(truth, [(1, 9, 120)]))
+    from correction.epoch import reconstruction_id_or_none
+    rid = reconstruction_id_or_none(s / "output")
+    # the gauge: the truth drifted — 1.3x the metre, a heading drift growing along the walk, 5 mm of noise
+    rng = np.random.default_rng(0)
+    gauge = truth.copy()
+    for k in range(len(gauge)):
+        a = np.radians(0.3 * k)
+        Ry = np.array([[np.cos(a), 0, np.sin(a)], [0, 1, 0], [-np.sin(a), 0, np.cos(a)]])
+        gauge[k, :3, :3] = Ry @ truth[k, :3, :3]
+        gauge[k, :3, 3] = 1.3 * (Ry @ truth[k, :3, 3]) + rng.normal(0, 0.005, 3)
+    w2c_g = np.linalg.inv(gauge)
+    w2c_i, rec = CK.classical_init(s / "output", KF, w2c_g, rid, log=lambda *a: None)
+    assert rec["taken"] and rec["source"] == "classical" and rec["mapper"] == "global"
+    assert rec["n_registered"] == len(KF) == rec["n_keyframes"] and rec["n_models"] == 1
+    c2w_i = np.linalg.inv(w2c_i)
+    for k in range(len(KF) - 1):                                   # the classical shape: relative rotations exact
+        np.testing.assert_allclose(c2w_i[k + 1, :3, :3].T @ c2w_i[k, :3, :3],
+                                   truth[k + 1, :3, :3].T @ truth[k, :3, :3], atol=1e-9)
+    step_i = np.linalg.norm(np.diff(c2w_i[:, :3, 3], axis=0), axis=1)
+    step_t = np.linalg.norm(np.diff(truth[:, :3, 3], axis=0), axis=1)
+    np.testing.assert_allclose(step_i / step_t, rec["scale_gauge_over_classical"], rtol=1e-9)
+    # the metre and the frame are the gauge's: the scale near its 1.3, the centres within its drift
+    assert abs(rec["scale_gauge_over_classical"] - 1.3) < 0.1
+    assert rec["centres_vs_gauge_m"]["median"] < 0.15 and rec["rotation_vs_gauge_deg"]["median"] < 5.0
+    w2c_i2, _ = CK.classical_init(s / "output", KF, w2c_g, rid, log=lambda *a: None)
+    assert np.array_equal(w2c_i, w2c_i2)
+
+
+def test_classical_init_declines_a_partial_or_foreign_model_and_the_gauge_starts(tmp_path):
+    s, names = _session(tmp_path)
+    truth = _walk()
+    pcfg = replace(PC, classical=replace(PC.classical, loop_min_inliers=60, loop_min_gap_keyframes=4, mappers=("global",)))
+    CK.run_classical(s, pcfg, log=lambda *a: None, runner=_runner(truth, [(1, 9, 120)]))
+    from correction.epoch import reconstruction_id_or_none
+    rid = reconstruction_id_or_none(s / "output")
+    import shutil
+    mdir = s / "output" / "precision" / CK.DIRNAME / "sparse_global" / "0"
+    shutil.rmtree(mdir)
+    _model(mdir, truth[:7], names[:7])                              # 7 of the 10 keyframes registered
+    w2c_g = np.linalg.inv(truth)
+    w2c_i, rec = CK.classical_init(s / "output", KF, w2c_g, rid, log=lambda *a: None)
+    assert not rec["taken"] and rec["source"] == "omega" and "7 of 10" in rec["reason"]
+    assert np.array_equal(w2c_i, w2c_g)
+    w2c_j, rec2 = CK.classical_init(s / "output", KF, w2c_g, "not-this-reconstruction", log=lambda *a: None)
+    assert not rec2["taken"] and np.array_equal(w2c_j, w2c_g)
+    w2c_k, rec3 = CK.classical_init(tmp_path / "nowhere", KF, w2c_g, rid, log=lambda *a: None)
+    assert not rec3["taken"] and "did not run" in rec3["reason"] and np.array_equal(w2c_k, w2c_g)
