@@ -130,6 +130,9 @@ class FrameQuality:
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
+QUALITY_THREADS = 8      # BOUND (cost): decode/measure worker threads; the features do not depend on it
+
+
 def _cv2():
     import cv2
     return cv2
@@ -339,19 +342,40 @@ def analyze_frames(frames_dir: os.PathLike, cfg: QualityConfig, log: Callable = 
     bytes_total = 0
     t0 = time.monotonic()
     last_beat = t0
-    for i, p in enumerate(paths):
-        check_cancelled(cancelled, f"intake I0 (quality) at frame {i}/{n}")
-        gray = read_gray(p)
-        if native_hw is None:
-            native_hw = gray.shape[:2]
-        elif gray.shape[:2] != native_hw:
-            raise QualityError(
-                f"frame {p.name} is {gray.shape[1]}x{gray.shape[0]} but the session's "
-                f"frames are {native_hw[1]}x{native_hw[0]} — frames/ mixes resolutions")
-        feats = frame_features(gray, prev_small, cfg)
-        prev_small = feats.pop("gray_small")
-        bytes_total += p.stat().st_size
-        rows.append({"frame": int(p.stem), "file": p.name, **feats})
+    # every frame decoded and measured in QUALITY_THREADS worker threads (2026-11-01: 52 frames/s on one core,
+    # 50 s of a fresh station run with the card idle; cv2's decode and resizes release the GIL); the frames are
+    # consumed IN ORDER and the inter-frame difference taken against the previous frame's diff-scale gray as
+    # before — the same features, frame by frame
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _measure(path):
+        g = read_gray(path)
+        return g.shape[:2], frame_features(g, None, cfg)
+    with ThreadPoolExecutor(max_workers=QUALITY_THREADS, thread_name_prefix="i0") as ex:
+        futs = [ex.submit(_measure, q) for q in paths[:QUALITY_THREADS * 2]]
+        for i, p in enumerate(paths):
+            check_cancelled(cancelled, f"intake I0 (quality) at frame {i}/{n}")
+            hw, feats = futs[i].result()
+            futs[i] = None
+            if i + QUALITY_THREADS * 2 < n:
+                futs.append(ex.submit(_measure, paths[i + QUALITY_THREADS * 2]))
+            if native_hw is None:
+                native_hw = hw
+            elif hw != native_hw:
+                raise QualityError(
+                    f"frame {p.name} is {hw[1]}x{hw[0]} but the session's "
+                    f"frames are {native_hw[1]}x{native_hw[0]} — frames/ mixes resolutions")
+            small = feats.pop("gray_small")
+            if prev_small is not None:
+                if prev_small.shape != small.shape:
+                    raise QualityError(
+                        f"previous frame's diff-scale gray {prev_small.shape} does not match "
+                        f"this frame's {small.shape} — frames of one session share one "
+                        f"native resolution")
+                feats["inter_frame_diff"] = float(_cv2().absdiff(prev_small, small).mean())
+            prev_small = small
+            bytes_total += p.stat().st_size
+            rows.append({"frame": int(p.stem), "file": p.name, **feats})
         now = time.monotonic()
         if now - last_beat >= heartbeat_s or i + 1 == n:
             elapsed = max(now - t0, 1e-9)
