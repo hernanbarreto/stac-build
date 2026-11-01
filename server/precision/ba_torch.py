@@ -34,6 +34,11 @@ EPS = float(np.finfo(np.float64).eps)
 TINY = float(np.finfo(np.float64).tiny)
 SMALL_ANGLE = 1e-6              # below it the series of sin / (1 − cos) are exact to double precision
 FD_STEP = 1e-6                  # the forward-difference step of the prior Jacobians (294 pairs, 6 × 12 each)
+# the stopping rules read at rest (λ ≤ λ_init): tried 2026-11-01 against the premature stop after a run of
+# rejections — on pccr's main tracks the LM then never came back to rest (500 iterations, λ 1e1..1e4, the
+# cost static to 1e-7) while Ceres' rule converged; OFF: the rules are Ceres' (study_r0.py keeps the switch)
+CONVERGENCE_AT_REST = False
+
 CAM_FREE = {"R0": (), "R0s": (), "R1": (0, 1, 2, 3), "R2": (0, 1, 2, 3, 4, 5, 6, 7), "R3": (0, 1)}
 
 
@@ -660,7 +665,7 @@ def solve(problem: _Problem, max_iterations: int, log=None) -> Dict[str, object]
             # next accepted step moved 1e-10 of the cost and the solve "converged" — its continuation
             # then lowered the cost 0.4 % and the ladder's judge, reading that as solver error, refused
             # a rung Ceres takes). Each accepted step divides λ by at least 3, so the loop cannot spin.
-            at_rest = lam <= float(tb.lambda_init)
+            at_rest = (lam <= float(tb.lambda_init)) if CONVERGENCE_AT_REST else True
             if at_rest and rel < tb.function_tolerance:
                 termination = "CONVERGENCE"; break
             if at_rest and step_norm <= tb.parameter_tolerance * (problem.norm_x() + tb.parameter_tolerance):
