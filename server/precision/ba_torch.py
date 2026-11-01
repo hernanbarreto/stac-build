@@ -104,12 +104,9 @@ def segment_sum(values, seg_id, n_seg, ends=None):
     torch = _torch()
     if values.shape[0] == 0:
         return torch.zeros((n_seg,) + tuple(values.shape[1:]), dtype=values.dtype, device=values.device)
-    cs = torch.cumsum(values, dim=0)
     if ends is None:
         ends = segment_ends(seg_id)
-    totals = cs[ends]
-    firsts = torch.cat([torch.zeros_like(totals[:1]), totals[:-1]])
-    per_present = totals - firsts
+    per_present = run_sums(values, ends)
     out = torch.zeros((n_seg,) + tuple(values.shape[1:]), dtype=values.dtype, device=values.device)
     out[seg_id[ends]] = per_present
     return out
@@ -117,11 +114,18 @@ def segment_sum(values, seg_id, n_seg, ends=None):
 
 def run_sums(values, ends):
     """The sums of ``values`` (n, …) over consecutive runs ending at ``ends`` (sorted positions, the last
-    one n − 1): cumulative sum and differences — one sequential float64 addition order, deterministic."""
+    one n − 1): cumulative sum and differences — one sequential float64 addition order per entry,
+    deterministic. The scan runs along the LAST dimension of a transposed copy: a cumsum along dim 0 of
+    an (n, k) tensor with small k is a serial loop over n on the card (measured 2026-11-01: the LM
+    iteration on pccr's 20 M observations spent its seconds there), along the last dimension it is a
+    parallel scan; the additions per entry are the same, in the same order."""
     torch = _torch()
-    cs = torch.cumsum(values, dim=0)
-    totals = cs[ends]
-    return totals - torch.cat([torch.zeros_like(totals[:1]), totals[:-1]])
+    n = values.shape[0]
+    flat = values.reshape(n, -1)
+    cs = torch.cumsum(flat.T.contiguous(), dim=1)                       # (k, n)
+    totals = cs[:, ends].T                                              # (runs, k)
+    sums = totals - torch.cat([torch.zeros_like(totals[:1]), totals[:-1]])
+    return sums.reshape((int(ends.shape[0]),) + tuple(values.shape[1:]))
 
 
 def sorted_scatter_add(target, keys, values):
