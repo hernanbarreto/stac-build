@@ -5,7 +5,7 @@ The same problem ``precision.refine.run_rung`` hands Ceres — the reprojection 
 under the OPENCV camera (fx fy cx cy k1 k2 p1 p2) with a Huber loss at ``huber_px``, the poses, the
 landmarks and the camera freedom of the rung (R0 none; R1 focal + principal point; R2 + distortion; R3
 focal per block), plus EITHER the absolute position priors of the gauge (σ per keyframe) OR the relative
-odometry priors between consecutive keyframes with the first pose constant — solved by Levenberg-Marquardt
+solved by Levenberg-Marquardt
 with the Schur complement over the landmarks:
 
 * residuals and analytic Jacobians batched over every observation (float64);
@@ -33,7 +33,6 @@ import numpy as np
 EPS = float(np.finfo(np.float64).eps)
 TINY = float(np.finfo(np.float64).tiny)
 SMALL_ANGLE = 1e-6              # below it the series of sin / (1 − cos) are exact to double precision
-FD_STEP = 1e-6                  # the forward-difference step of the prior Jacobians (294 pairs, 6 × 12 each)
 # the stopping rules read at rest (λ ≤ λ_init): tried 2026-11-01 against the premature stop after a run of
 # rejections — on pccr's main tracks the LM then never came back to rest (500 iterations, λ 1e1..1e4, the
 # cost static to 1e-7) while Ceres' rule converged; OFF: the rules are Ceres' (study_r0.py keeps the switch)
@@ -212,8 +211,7 @@ class _Problem:
     def __init__(self, w2c0: np.ndarray, params_by_block0: List[List[float]], block_of: np.ndarray,
                  cam_idx: np.ndarray, pt_idx: np.ndarray, uv: np.ndarray, X0: np.ndarray, huber_px: float,
                  cam_free: Sequence[int], *, device, sigmas: Optional[np.ndarray] = None,
-                 prior_centres: Optional[np.ndarray] = None, rel_w2c: Optional[np.ndarray] = None,
-                 rel_cov: Optional[np.ndarray] = None, first_constant: bool = False, torch_ba=None):
+                 prior_centres: Optional[np.ndarray] = None, torch_ba=None):
         torch = _torch()
         self.tb = torch_ba
         d = {"dtype": torch.float64, "device": device}
@@ -233,7 +231,6 @@ class _Problem:
         self.huber = float(huber_px)
         self.cam_free = tuple(int(i) for i in cam_free)
         self.nf = len(self.cam_free)
-        self.first_constant = bool(first_constant)
         # per point: segment lengths (sorted by point, every point has ≥ 1 observation by construction)
         counts = torch.bincount(self.pt_idx, minlength=self.P)
         if int((counts == 0).sum()):
@@ -242,20 +239,12 @@ class _Problem:
         # priors
         self.sigmas = torch.as_tensor(np.asarray(sigmas, np.float64), **d) if sigmas is not None else None
         self.prior_C = torch.as_tensor(np.asarray(prior_centres, np.float64), **d) if prior_centres is not None else None
-        self.rel_w2c = torch.as_tensor(np.asarray(rel_w2c, np.float64), **d) if rel_w2c is not None else None
-        if rel_cov is not None:
-            cov = torch.as_tensor(np.asarray(rel_cov, np.float64), **d)                     # (N-1,6,6)
-            self.rel_L = torch.linalg.cholesky(torch.linalg.inv(cov))                       # sqrt information
-        else:
-            self.rel_L = None
         # unknown layout: poses first (6 each), then the free camera params per block (nf each)
         self.n_pose = 6 * self.N
         self.n_c = self.n_pose + self.nf * self.B
         self.free = torch.ones(self.n_c, dtype=torch.bool, device=device)
-        if self.first_constant:
-            self.free[:6] = False
-        if self.sigmas is None and self.rel_w2c is None and self.nf == 0 and not self.first_constant:
-            raise BATorchError("a gauge is needed: priors, a constant first pose or free camera parameters")
+        if self.sigmas is None and self.nf == 0:
+            raise BATorchError("a gauge is needed: priors or free camera parameters")
         # THE INDEX PLANS — every permutation and segment boundary the step needs, computed ONCE: the
         # observation → landmark runs (already sorted by landmark), the observation → camera and → block
         # orders, the unknown columns of every observation, and (lazily, it is large) the landmark pair
@@ -371,47 +360,6 @@ class _Problem:
                     J[ar, a, 6 * ar + b] = dC_dw[:, a, b] / self.sigmas
                     J[ar, a, 6 * ar + 3 + b] = dC_dt[:, a, b] / self.sigmas
             rows.append(e.reshape(-1)); jacs.append(J.reshape(-1, self.n_c))
-        if self.rel_w2c is not None:
-            Wm = self.rel_w2c
-            Rm_i, tm_i = Wm[:-1, :3, :3], Wm[:-1, :3, 3]
-            Rm_j, tm_j = Wm[1:, :3, :3], Wm[1:, :3, 3]
-            Rij_m = Rm_i @ Rm_j.transpose(1, 2)
-            tij_m = tm_i - torch.einsum("kij,kj->ki", Rij_m, tm_j)
-            Ri, ti, Rj, tj = R[:-1], t[:-1], R[1:], t[1:]
-            Rij = Ri @ Rj.transpose(1, 2)
-            tij = ti - torch.einsum("kij,kj->ki", Rij, tj)
-            e_rot = so3_log(Rij_m @ Rij.transpose(1, 2))                                 # (K,3)
-            e_t = tij_m - tij
-            e = torch.cat([e_rot, e_t], -1)                                              # (K,6)
-            # Jacobians by finite differences in the tangent (K small — 294 pairs): d e / d (δω_i, δt_i, δω_j, δt_j)
-            K_ = e.shape[0]
-            J = torch.zeros(K_, 6, 12, dtype=R.dtype, device=self.device)
-            h = FD_STEP
-            for p in range(12):
-                dR_i, dt_i, dR_j, dt_j = Ri, ti, Rj, tj
-                dvec = torch.zeros(K_, 3, dtype=R.dtype, device=self.device)
-                if p < 3:
-                    dvec[:, p] = h; dR_i = so3_exp(dvec) @ Ri
-                elif p < 6:
-                    dvec[:, p - 3] = h; dt_i = ti + dvec
-                elif p < 9:
-                    dvec[:, p - 6] = h; dR_j = so3_exp(dvec) @ Rj
-                else:
-                    dvec[:, p - 9] = h; dt_j = tj + dvec
-                Rij2 = dR_i @ dR_j.transpose(1, 2)
-                tij2 = dt_i - torch.einsum("kij,kj->ki", Rij2, dt_j)
-                e2 = torch.cat([so3_log(Rij_m @ Rij2.transpose(1, 2)), tij_m - tij2], -1)
-                J[:, :, p] = (e2 - e) / h
-            # whiten
-            e_w = torch.einsum("kab,kb->ka", self.rel_L.transpose(1, 2), e)
-            J_w = torch.einsum("kab,kbc->kac", self.rel_L.transpose(1, 2), J)
-            Jd = torch.zeros(K_, 6, self.n_c, dtype=R.dtype, device=self.device)
-            ar = torch.arange(K_, device=self.device)
-            for a in range(6):
-                for b in range(6):
-                    Jd[ar, a, 6 * ar + b] = J_w[:, a, b]
-                    Jd[ar, a, 6 * (ar + 1) + b] = J_w[:, a, 6 + b]
-            rows.append(e_w.reshape(-1)); jacs.append(Jd.reshape(-1, self.n_c))
         if not rows:
             return (torch.zeros(0, dtype=R.dtype, device=self.device),
                     torch.zeros(0, self.n_c, dtype=R.dtype, device=self.device))
@@ -684,7 +632,7 @@ def solve(problem: _Problem, max_iterations: int, log=None) -> Dict[str, object]
 def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[float], wh: Tuple[int, int],
                    fit_groups: Dict[int, List], X_start: Dict[int, np.ndarray], sigmas: Optional[np.ndarray],
                    cfg, block_of: Optional[np.ndarray] = None, params_by_block0: Optional[List[List[float]]] = None,
-                   prior_w2c: Optional[np.ndarray] = None, flags_of: Optional[str] = None, rel_prior=None,
+                   prior_w2c: Optional[np.ndarray] = None, flags_of: Optional[str] = None,
                    device: Optional[str] = None, log=None):
     """The same inputs and the same RungResult as precision.refine.run_rung, solved on the device."""
     from precision.refine import RefineError, RungResult
@@ -761,21 +709,13 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
                 f"the camera) — out of the solve, {len(tracks):,} tracks stay")
     del probe
     n_rep = int(len(uv))
-    if rel_prior is not None:
-        if len(rel_prior.w2c) != N:
-            raise RefineError(f"{name}: {len(rel_prior.w2c)} prior poses for {N} keyframes")
-        prob = _Problem(w2c_start, pb0, block_of, cam_idx, pt_idx, uv, X0, float(cfg.huber_px), cam_free, device=dev,
-                        rel_w2c=np.asarray(rel_prior.w2c, np.float64), rel_cov=np.asarray(rel_prior.covariances(), np.float64),
-                        first_constant=True, torch_ba=cfg.torch_ba)
-        n_prior = N - 1
-    else:
-        prior_w2c = w2c_start if prior_w2c is None else np.asarray(prior_w2c, np.float64)
-        if prior_w2c.shape != np.asarray(w2c_start).shape:
-            raise RefineError(f"{name}: {len(prior_w2c)} prior poses for {N} keyframes")
-        C = -np.einsum("nji,nj->ni", prior_w2c[:, :3, :3], prior_w2c[:, :3, 3])
-        prob = _Problem(w2c_start, pb0, block_of, cam_idx, pt_idx, uv, X0, float(cfg.huber_px), cam_free, device=dev,
-                        sigmas=np.asarray(sigmas, np.float64), prior_centres=C, torch_ba=cfg.torch_ba)
-        n_prior = N
+    prior_w2c = w2c_start if prior_w2c is None else np.asarray(prior_w2c, np.float64)
+    if prior_w2c.shape != np.asarray(w2c_start).shape:
+        raise RefineError(f"{name}: {len(prior_w2c)} prior poses for {N} keyframes")
+    C = -np.einsum("nji,nj->ni", prior_w2c[:, :3, :3], prior_w2c[:, :3, 3])
+    prob = _Problem(w2c_start, pb0, block_of, cam_idx, pt_idx, uv, X0, float(cfg.huber_px), cam_free, device=dev,
+                    sigmas=np.asarray(sigmas, np.float64), prior_centres=C, torch_ba=cfg.torch_ba)
+    n_prior = N
     if log is None and os.environ.get("STAC_BA_TORCH_TRACE"):
         log = lambda m: print(f"[ba_torch {name}] {m}", flush=True)       # noqa: E731
     summary = solve(prob, int(cfg.max_iterations), log=log)

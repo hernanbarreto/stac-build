@@ -11,10 +11,6 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from precision import ba_torch as BA  # noqa: E402
-try:                                   # the odometry (relative) prior model exists on the audit branch only
-    from precision.refine import RelativePrior  # noqa: E402
-except ImportError:                    # main: absolute gauge priors — the relative case is skipped by name
-    RelativePrior = None
 
 TB = SimpleNamespace(function_tolerance=1e-6, parameter_tolerance=1e-8, gradient_tolerance=1e-8, min_relative_decrease=1e-3,
                      lambda_init=1e-4, lm_diag_min=1e-6, lm_diag_max=1e32)       # config.yaml refine.torch_ba (Ceres')
@@ -168,17 +164,11 @@ def test_the_segment_sum_and_the_pairs_are_exact_and_ordered():
     assert t.tolist() == [1.0, 0.0, 3.0, 4.0]
 
 
-@pytest.mark.parametrize("model", ["absolute", "relative"])
-def test_a_perturbed_scene_is_recovered_and_the_solve_is_bit_identical(model):
+def test_a_perturbed_scene_is_recovered_and_the_solve_is_bit_identical():
     w2c, pts, groups, X = _scene()
     rng = np.random.default_rng(7)
     w0, X0 = _perturb(w2c, X, rng)
-    if model == "absolute":
-        kw = dict(sigmas=np.full(len(w2c), 0.5), prior_w2c=w0)
-    else:
-        if RelativePrior is None:
-            pytest.skip("precision.refine has no RelativePrior on this branch (odometry priors are the audit's)")
-        kw = dict(sigmas=None, rel_prior=RelativePrior(w2c, sigma_rel=0.02, sigma_lat=0.05, sigma_rot=math.radians(0.5)))
+    kw = dict(sigmas=np.full(len(w2c), 0.5), prior_w2c=w0)
     r1 = BA.run_rung_torch("R0", w0, CAM, WH, groups, X0, cfg=CFG, device="cpu", **kw)
     r2 = BA.run_rung_torch("R0", w0, CAM, WH, groups, X0, cfg=CFG, device="cpu", **kw)
     assert r1.termination == "CONVERGENCE" and r1.final_cost < r1.initial_cost * 0.05
