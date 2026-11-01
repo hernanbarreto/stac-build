@@ -25,6 +25,11 @@
   identity, point 57; ~1-2 min per build, three builds per full run), sqlite, PLY / JSON / npz I/O, JPEG decoding.
   NEXT (authorised by the USER 18:00 CDMX "si hay tareas que se pueden paralelizar o adelantar … que no quede silicio
   sin usar"): the Potree builds off the critical path, stages overlapped where the VRAM allows.
+  PENDING, USER 20:30 CDMX ("anotá para luego migrar el intake de calidad y paralaje a GPU"): intake I0 (quality:
+  decode + FFT / Laplacian / luma / inter-frame diff per frame; 8 CPU threads since b6f7cfe, ~10 s on station) and
+  I1 (parallax: cv2 pyramidal LK + homography RANSAC + rotation fit, a SEQUENTIAL keyframe/witness chain; 80 s on
+  station's 2581 frames) to the card. Declared risk: a GPU LK / RANSAC is not cv2's arithmetic — the keyframes and
+  witnesses can change, so the port needs an A/B of the selection (same keyframes or the USER's OK on the new set).
 - Segment cleaning: enabled, DBSCAN OFF (USER 14:55 CDMX "este sí borra puntos, mantenelo apagado"), RANSAC on; the
   OBB is fitted to the POINTS (the 5 cm visualisation voxels sat on a world grid: the box changed with the frame).
 - F5 on pccr's copy now applies R2 (held-out 0.5163 → 0.5031 px, significant): before, R2 stopped short of converging
