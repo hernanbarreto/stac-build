@@ -1,0 +1,8 @@
+Sky-mask precompute measured on station (2026-11-01, 16:45-16:47 CDMX), while station's own Omega ran.
+Frames: the 377 keyframes whose masks Omega had already computed itself (1024x576 JPEG).
+Precompute: reconstruction/sky_precompute.py, 12 processes of one onnxruntime thread, Omega's interpreter
+(/workspace/miniforge3/envs/mapanything/bin/python, onnxruntime 1.24.3), the fork's own functions.
+Result: 377/377 masks byte-identical to Omega's (filecmp shallow=False); 73.9 s wall.
+Omega's own masking: one thread, ~2.4 s per keyframe, the card idle meanwhile (gpu_util.log 22:27-22:42 UTC:
+most samples at 0 % between chunks).
+8 frames on 4 processes: 10.6 s wall, of which ~6.7 s process start (imports + model hash), ~1.9 s per frame.

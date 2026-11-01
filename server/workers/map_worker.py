@@ -1494,6 +1494,25 @@ def omega_native_resolution(frames_dir) -> int:
     return int(-(-long_side // OMEGA_PATCH_SIZE) * OMEGA_PATCH_SIZE)
 
 
+def _start_sky_precompute(config: dict, frames_dir, output_dir, sel_files, pipe):
+    """Start the parallel sky masks of every keyframe Omega will read (reconstruction/
+    sky_precompute.py) into Omega's own cache (``<output>/maplong_run/sky_masks``, kept across
+    plans by ``_PLAN_INDEPENDENT_MAPLONG``); None when the fork will not mask the sky. The fork's
+    ``Model.mask_sky`` is read from the one builder that writes it (``_apply_stac_model_keys``),
+    its frame stride is 1 (``_build_vggtomega_config`` pins it), its interpreter is the launcher's
+    (``sky_precompute.omega_python``). CPU only (CUDA hidden): the card is I3's, then Omega's."""
+    if not _apply_stac_model_keys({"Model": {}}, config)["Model"]["mask_sky"]:
+        return None
+    import repro
+    from reconstruction import sky_precompute as _SKY
+    env = repro.deterministic_env()
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    fork = Path(__file__).resolve().parent.parent.parent / "vendor" / "VGGT-Long"
+    return _SKY.start(_SKY.keyframe_paths(frames_dir, sel_files, 1),
+                      Path(output_dir) / "maplong_run" / "sky_masks", fork, _SKY.omega_python(),
+                      env=env, log=pipe.send_log)
+
+
 def _build_vggtomega_config(config: dict, frames_dir=None) -> dict:
     """Load stac_vggtomega.yaml and override the user-configurable params (loop, resolution),
     keeping the Omega-specific keys. NO chunk_size / overlap: the layout of every Omega run is
@@ -1914,10 +1933,16 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # 1526.6 m for a walk its chunked run measured at 104.8 m.
     _walk_doc = None
     _walk_reused = False
+    _sky_pre = None
     if _scale_align_on and _sel_files:
         from precision.config import load_precision_config
         _pc = load_precision_config(config)
         if _pc.enabled:
+            # the sky masks Omega applies, computed NOW on the CPU while the card runs I3
+            # (reconstruction/sky_precompute.py: the fork's own code on Omega's interpreter, the
+            # bytes Omega writes; Omega finds them in its cache) — Omega computed them one thread at
+            # a time before every chunk with the card idle (station 2026-11-01: ~15 of its minutes)
+            _sky_pre = _start_sky_precompute(config, frames_dir, output_dir, _sel_files, pipe)
             from intake.walk import load_walk, measure_walk, run_da3_windows, walk_is_current
             # the job's configuration travels with the call (plan point 69): I3 never re-reads
             # config.yaml from disk at spawn; a frozen output/run_config.yaml must agree with it
@@ -2425,6 +2450,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # deletes the marker (it used to be the fork's own test on files the cleanup removes, so
     # every replace-OFF Reconstruir re-inferred Omega over a finished session).
     from reconstruction import omega_complete as _OC
+    if _sky_pre is not None:          # started before I3: joined before anything reads the masks
+        _sky_pre.wait(check_cancel=pipe.check_cancel)
     _launch = _OC.launch_stamp(output_dir.parent, frames_dir, _sel_files, vggt_config)
     _done, _why = _OC.check(output_dir, _launch)
     if _done:
@@ -2442,6 +2469,10 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # the card is Omega's alone (point 4): FAIL listing what holds it, never degrade; and an
         # Omega pass that runs out of memory FAILS — the resolution is the session's (point 14),
         # the plan is the co-visibility plan, neither is lowered to fit what else held the card
+        if _sky_pre is None:          # no I3 in this run to overlap with: in parallel, here
+            _sky_now = _start_sky_precompute(config, frames_dir, output_dir, _sel_files, pipe)
+            if _sky_now is not None:
+                _sky_now.wait(check_cancel=pipe.check_cancel)
         repro.require_exclusive_gpu(log=pipe.send_log)
         try:
             _ok = _omega_pass(vggt_config, _tag1)
