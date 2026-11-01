@@ -85,6 +85,9 @@ def update_instance_store(output_dir, R_kf: np.ndarray, t_kf: np.ndarray,
 
     store = InstanceStore(db)
     try:
+      # one sqlite transaction for the whole refresh (a commit per point blob was 20 of the update's
+      # 30 s on pccr, 2026-11-01); an exception rolls every write of this update back
+      with store.deferred_commits():
         n_inst = 0
         live_ids = []
         known = {int(r.get("instance_id")) for r in store.list_instances()}

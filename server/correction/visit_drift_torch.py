@@ -352,3 +352,98 @@ def other_mask_votes_torch(tv: TorchVisibility, P: np.ndarray, birth: np.ndarray
                            "d_own": d_own.astype(np.float32), "d_other": d_oth.astype(np.float32),
                            "own": own[v].cpu().numpy(), "other": other[v].cpu().numpy()})
     return n_votes.cpu().numpy(), n_own.cpu().numpy(), n_other.cpu().numpy()
+
+
+class CellIndex:
+    """Copy A of an object in cells of ``bound`` on the device, for the rival search of `visit_drift.ambiguity`
+    (10 s of k-d tree queries on pccr): the EXACT nearest distance of every query point to A when it is within
+    ``bound``, inf beyond — what `cKDTree(A).query(Q, k=1, distance_upper_bound=bound)` returns. Every A point
+    within ``bound`` of a query lies in the 27 cells around the query's (the cell is the bound), so the 27
+    cells' points are the candidates, compared distance for distance (the squared sum of three differences,
+    then the root — the tree's arithmetic); a query outside the grid's margin ring has no A point within
+    bound. Deterministic: sorts and gathers, first-minimum reductions."""
+
+    def __init__(self, A: np.ndarray, bound: float, device: str, block_entries: int = 20_000_000):
+        torch = _torch()
+        self.device = str(device)
+        self.bound = float(bound)
+        if not self.bound > 0.0:
+            raise ValueError(f"CellIndex: the bound must be positive, got {bound!r}")
+        A_t = torch.as_tensor(np.ascontiguousarray(np.asarray(A, np.float64)), device=self.device)
+        if A_t.ndim != 2 or A_t.shape[1] != 3 or A_t.shape[0] == 0:
+            raise ValueError(f"CellIndex: A must be (n, 3) with n ≥ 1, got {tuple(A_t.shape)}")
+        self.cell = self.bound
+        self.origin = A_t.min(0).values - 2.0 * self.cell                         # a margin ring of cells
+        c = torch.floor((A_t - self.origin) / self.cell).to(torch.int64)
+        self.dims = c.max(0).values + 3
+        self.s0 = int(self.dims[1]) * int(self.dims[2])
+        self.s1 = int(self.dims[2])
+        lin = c[:, 0] * self.s0 + c[:, 1] * self.s1 + c[:, 2]
+        order = torch.argsort(lin, stable=True)
+        self.A = A_t[order]
+        self.cells, self.counts = torch.unique_consecutive(lin[order], return_counts=True)
+        self.starts = torch.cumsum(self.counts, 0) - self.counts
+        self.block_entries = int(block_entries)
+        self.offsets = torch.tensor([(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)],
+                                    dtype=torch.int64, device=self.device)
+
+    def nearest_within(self, Q: np.ndarray, block: int = 65_536) -> np.ndarray:
+        """Per row of ``Q`` (q, 3): its distance to the nearest A point when ≤ bound, else inf (numpy float64)."""
+        torch = _torch()
+        dev = self.device
+        Q_t = torch.as_tensor(np.ascontiguousarray(np.asarray(Q, np.float64)), device=dev).reshape(-1, 3)
+        q = int(Q_t.shape[0])
+        out = torch.full((q,), float("inf"), dtype=torch.float64, device=dev)
+        if q == 0:
+            return out.cpu().numpy()
+        cq = torch.floor((Q_t - self.origin) / self.cell).to(torch.int64)
+        inside = (cq >= 0).all(1) & (cq < self.dims).all(1)
+        qi = torch.nonzero(inside).reshape(-1)
+        m = int(self.cells.shape[0])
+        for s in range(0, int(qi.shape[0]), int(block)):
+            sel = qi[s:s + block]
+            Qc = Q_t[sel]
+            cqs = cq[sel]
+            best = torch.full((int(sel.shape[0]),), float("inf"), dtype=torch.float64, device=dev)
+            for o in range(self.offsets.shape[0]):
+                nc = cqs + self.offsets[o]
+                valid = (nc >= 0).all(1) & (nc < self.dims).all(1)
+                nk = nc[:, 0] * self.s0 + nc[:, 1] * self.s1 + nc[:, 2]
+                pos = torch.searchsorted(self.cells, nk)
+                pos_c = pos.clamp(max=m - 1)
+                hit = valid & (pos < m) & (self.cells[pos_c] == nk)
+                cnt = torch.where(hit, self.counts[pos_c], torch.zeros_like(pos_c))
+                st = torch.where(hit, self.starts[pos_c], torch.zeros_like(pos_c))
+                maxc = int(cnt.max())
+                if maxc == 0:
+                    continue
+                # the queries bucketed by their cell's count (powers of two): a matrix padded to the
+                # densest cell of the whole block wasted most of its entries on pccr's floor (2× the tree)
+                order = torch.argsort(cnt, stable=True)
+                cnt_s = cnt[order]
+                bounds = [0]
+                c_b = 1
+                while c_b < maxc:
+                    bounds.append(c_b)
+                    c_b *= 2
+                bounds.append(maxc)
+                for lo_c, hi_c in zip(bounds[:-1], bounds[1:]):
+                    first = int(torch.searchsorted(cnt_s, torch.tensor(lo_c, device=dev), right=True))
+                    last = int(torch.searchsorted(cnt_s, torch.tensor(hi_c, device=dev), right=True))
+                    if last <= first:
+                        continue
+                    grp = order[first:last]
+                    step = max(1, self.block_entries // hi_c)
+                    j = torch.arange(hi_c, device=dev, dtype=torch.int64)
+                    for a in range(0, int(grp.shape[0]), step):
+                        g = grp[a:a + step]
+                        idx = st[g, None] + j[None, :]
+                        ok = j[None, :] < cnt[g, None]
+                        idx = torch.where(ok, idx, torch.zeros_like(idx))
+                        diff = self.A[idx] - Qc[g, None, :]
+                        d2 = (diff * diff).sum(-1)
+                        d2 = torch.where(ok, d2, torch.full_like(d2, float("inf")))
+                        best[g] = torch.minimum(best[g], d2.min(1).values)
+            d = torch.sqrt(best)
+            out[sel] = torch.where(d <= self.bound, d, torch.full_like(d, float("inf")))
+        return out.cpu().numpy()

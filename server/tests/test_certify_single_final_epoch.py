@@ -172,7 +172,7 @@ def test_the_map_worker_builds_no_comparison_cloud():
 def test_the_certification_discards_after_the_check_and_before_the_acta():
     src = (SERVER / "reconstruction" / "certify" / "run.py").read_text()
     assert 'getattr(ccert, "single_final_epoch", False)' in src
-    i_check = src.index("run_check(session_dir, _pcfg, log=log)")
+    i_check = src.index("run_check(session_dir, _pcfg, log=log")              # (+ floor_levels_out, 2026-11-01)
     i_keep = src.index("keep_only_live_epoch(output_dir, log=log)")
     i_acta = src.index("(output_dir / ACTA_JSON).write_text")
     assert i_check < i_keep < i_acta

@@ -3263,7 +3263,7 @@ correction:
                                   # the same levels: tests/test_correction_floor_torch.py). pccr epoch 4, 19.4 M
                                   # points: 131 s on numpy, 109 s of them in four IRLS fits over 3.8 M points
                                   # (analysis/2026-11-01_floor_gpu). A cuda with no card FAILS naming this key.
-    bootstrap_draws: device       # 2026-11-01: the floor bootstrap's uniforms from torch's seeded generator on
+    bootstrap_draws: device       # 2026-11-01 (USER OK 17:00 CDMX "todo debe quedar en GPU"): the floor bootstrap's uniforms from torch's seeded generator on
                                   # the floor device (numpy = the reference's stream, read on the CPU: 15 s per
                                   # 1 M-point chunk floor on pccr, 2000 × n doubles). The σ of the tilt and the
                                   # height then carry the bootstrap's own resampling noise (~1.6 % relative at
