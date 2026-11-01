@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import math
 import os
+from pathlib import Path
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -600,10 +601,35 @@ class _Problem:
 def solve(problem: _Problem, max_iterations: int, log=None) -> Dict[str, object]:
     """Levenberg-Marquardt with Ceres' stopping rules (refine.torch_ba). Returns the summary dict the rung report reads."""
     tb = problem.tb
+    torch = problem.torch
     t0 = time.time()
     lam, nu = float(tb.lambda_init), 2.0
     cost = problem.total_cost()
     initial = cost
+    if log:
+        # the start, decomposed (a cost far above Σ residual² means the problem is not the one meant)
+        r, front = problem.residuals(with_jac=False)
+        n = torch.linalg.norm(r, dim=-1)
+        e_p, _ = problem.prior_terms(problem.R, problem.t)
+        log(f"start: {int(r.shape[0]):,} observations, {int((~front).sum()):,} behind the camera, |r| median "
+            f"{float(n[front].median()) if bool(front.any()) else float('nan'):.3f} px, max {float(n[front].max()) if bool(front.any()) else float('nan'):.3e} px, "
+            f"{int((n[front] > 100.0).sum()):,} over 100 px; robust cost {problem.robust_cost((r * r).sum(-1), front):.4e}, "
+            f"prior cost {0.5 * float((e_p * e_p).sum()):.4e} over {int(e_p.shape[0])} prior row(s)")
+        # the worst observation, and what pycolmap's own camera makes of the same point and pose
+        k = int(torch.argmax(torch.where(front, n, torch.zeros_like(n))))
+        ci, pi = int(problem.cam_idx[k]), int(problem.pt_idx[k])
+        Xw = problem.X[pi]; Xc = problem.R[ci] @ Xw + problem.t[ci]
+        msg = (f"worst: obs {k} cam {ci} landmark {pi}: X_w {Xw.tolist()}, X_c {Xc.tolist()}, uv_obs {problem.uv[k].tolist()}, "
+               f"track length {int(problem.seg_len[pi])}")
+        try:
+            import pycolmap
+            cam = pycolmap.Camera.create_from_model_name(1, "OPENCV", float(problem.cam[0, 0]), 1, 1)
+            cam.params = [float(v) for v in problem.cam[0].tolist()]
+            uv_col = cam.img_from_cam(np.asarray(Xc.cpu().numpy(), np.float64)[None, :])
+            msg += f"; pycolmap img_from_cam → {np.asarray(uv_col).tolist()}"
+        except Exception as ex:  # noqa: BLE001
+            msg += f"; pycolmap check failed: {ex}"
+        log(msg)
     n_ok = n_bad = 0
     termination = "NO_CONVERGENCE"
     for it in range(int(max_iterations)):
@@ -628,9 +654,16 @@ def solve(problem: _Problem, max_iterations: int, log=None) -> Dict[str, object]
             if log:
                 log(f"    it {it + 1}: cost {cost_now:.6e} → {new_cost:.6e} (rel {rel:.2e}), step {step_norm:.2e}, λ {lam:.1e}")
             cost = new_cost
-            if rel < tb.function_tolerance:
+            # Ceres' stopping rules, read at REST: a step accepted while the damping sits above its
+            # initial value is a step the trust region shrank, not evidence of a stationary point
+            # (measured 2026-11-01 on pccr's main tracks: after a run of rejections λ reached 9e5, the
+            # next accepted step moved 1e-10 of the cost and the solve "converged" — its continuation
+            # then lowered the cost 0.4 % and the ladder's judge, reading that as solver error, refused
+            # a rung Ceres takes). Each accepted step divides λ by at least 3, so the loop cannot spin.
+            at_rest = lam <= float(tb.lambda_init)
+            if at_rest and rel < tb.function_tolerance:
                 termination = "CONVERGENCE"; break
-            if step_norm <= tb.parameter_tolerance * (problem.norm_x() + tb.parameter_tolerance):
+            if at_rest and step_norm <= tb.parameter_tolerance * (problem.norm_x() + tb.parameter_tolerance):
                 termination = "CONVERGENCE"; break
         else:
             lam *= nu; nu *= 2.0; n_bad += 1
@@ -652,6 +685,15 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
     from precision.refine import RefineError, RungResult
     torch = _torch()
     dev = device_for(device)
+    _dump = os.environ.get("STAC_BA_DUMP")
+    if _dump and not Path(_dump).exists():
+        # the rung's exact inputs, once (the first rung asked for), to study the solver offline
+        import pickle
+        with open(_dump, "wb") as fh:
+            pickle.dump({"name": name, "w2c_start": np.asarray(w2c_start), "params_start": list(params_start), "wh": tuple(wh),
+                         "fit_groups": fit_groups, "X_start": X_start, "sigmas": (None if sigmas is None else np.asarray(sigmas)),
+                         "block_of": block_of, "params_by_block0": params_by_block0,
+                         "prior_w2c": (None if prior_w2c is None else np.asarray(prior_w2c)), "flags_of": flags_of}, fh, protocol=4)
     N = len(w2c_start)
     block_of = np.zeros(N, int) if block_of is None else np.asarray(block_of, int)
     blocks = sorted(set(block_of.tolist()))
@@ -660,12 +702,59 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
     cam_free = CAM_FREE.get(fl)
     if cam_free is None:
         raise RefineError(f"{name}: unknown rung flags {fl!r}")
-    # the observations of the tracks with a start and ≥ 2 observations (run_rung's rule)
-    tracks = [t for t in X_start if t in fit_groups and len(fit_groups[t]) >= 2]
-    cam_idx = np.concatenate([np.fromiter((i for i, _ in fit_groups[t]), np.int64, len(fit_groups[t])) for t in tracks])
-    pt_idx = np.concatenate([np.full(len(fit_groups[t]), k, np.int64) for k, t in enumerate(tracks)])
-    uv = np.concatenate([np.asarray([p for _, p in fit_groups[t]], np.float64).reshape(-1, 2) for t in tracks])
+    # the observations of the tracks with a start and ≥ 2 observations — EXACTLY the residual blocks the
+    # Ceres path builds: COLMAP keys a track's elements by (image, track), so a track observed twice in
+    # the same keyframe keeps its LAST observation there and a track left with one image is skipped
+    # (measured 2026-11-01 on pccr's main tracks: without this rule two same-image observations
+    # triangulated at the camera put one residual of 7e11 px into the problem and the solve stalled)
+    tracks, obs_of = [], {}
+    for t in X_start:
+        if t not in fit_groups or len(fit_groups[t]) < 2:
+            continue
+        last = {}
+        for i, p_ in fit_groups[t]:
+            last[int(i)] = p_
+        if len(last) >= 2:
+            tracks.append(t)
+            obs_of[t] = [(i, last[i]) for i in last]
+    cam_idx = np.concatenate([np.fromiter((i for i, _ in obs_of[t]), np.int64, len(obs_of[t])) for t in tracks])
+    pt_idx = np.concatenate([np.full(len(obs_of[t]), k, np.int64) for k, t in enumerate(tracks)])
+    uv = np.concatenate([np.asarray([p for _, p in obs_of[t]], np.float64).reshape(-1, 2) for t in tracks])
     X0 = np.asarray([X_start[t] for t in tracks], np.float64).reshape(-1, 3)
+    # OFF THE RASTER AT THE START = not a measurement of that image (measured 2026-11-01 on pccr's main
+    # tracks: a 2-view landmark triangulated 0.06 mm in front of one camera projected 7e11 px away; one
+    # such residual is the whole cost, the Levenberg-Marquardt step for it is the linearisation of x/z at
+    # z → 0 and the solve froze). An observation whose initial reprojection error exceeds the image
+    # diagonal — the raster's own bound, the one the fit statistic already uses — leaves the solve, and a
+    # track left with one image with it; counted and declared. Ceres' path keeps them and solves through
+    # (the audit5 ladder had none); the held-out comparison on the real session is the bar.
+    diag = float(np.hypot(wh[0], wh[1]))
+    n_rep0 = int(len(uv))
+    n_off = 0
+    probe = _Problem(w2c_start, pb0, block_of, cam_idx, pt_idx, uv, X0, float(cfg.huber_px), cam_free, device=dev,
+                     sigmas=(np.ones(N) if sigmas is None else np.asarray(sigmas, np.float64)),
+                     prior_centres=np.zeros((N, 3)), torch_ba=cfg.torch_ba)
+    r0, front0 = probe.residuals(with_jac=False)
+    bad = (~front0) | (torch.linalg.norm(r0, dim=-1) > diag)
+    if bool(bad.any()):
+        # back to the observation order of (cam_idx, pt_idx, uv): the problem sorted them by landmark
+        order = np.lexsort((cam_idx, pt_idx))
+        bad_np = np.zeros(len(uv), bool); bad_np[order] = bad.cpu().numpy()
+        keep = ~bad_np
+        n_off = int(bad_np.sum())
+        # tracks left with < 2 images go too
+        kept_per_track = np.bincount(pt_idx[keep], minlength=len(tracks))
+        keep &= kept_per_track[pt_idx] >= 2
+        n_off = int((~keep).sum())
+        live = np.nonzero(kept_per_track >= 2)[0]
+        remap = -np.ones(len(tracks), np.int64); remap[live] = np.arange(len(live))
+        cam_idx, pt_idx, uv = cam_idx[keep], remap[pt_idx[keep]], uv[keep]
+        X0 = X0[live]
+        tracks = [tracks[k] for k in live]
+        if log:
+            log(f"{n_off:,} observation(s) of {n_rep0:,} project off the raster at the start (> {diag:.0f} px or behind "
+                f"the camera) — out of the solve, {len(tracks):,} tracks stay")
+    del probe
     n_rep = int(len(uv))
     if rel_prior is not None:
         if len(rel_prior.w2c) != N:
@@ -707,6 +796,7 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
     fit_med = float(np.median(per_pt[ok])) if ok.any() else float("nan")
     X_out = {t_: X[k].copy() for k, t_ in enumerate(tracks)}
     summary["num_residual_blocks"] = n_rep + n_prior
+    summary["num_observations_off_raster"] = n_off
     return RungResult(name, w2c, [list(map(float, cam[b])) for b in range(len(blocks))], block_of,
                       fit_med, int(len(tracks)), summary["termination_type"], int((~ok).sum()), X=X_out,
                       initial_cost=float(summary["initial_cost"]), final_cost=float(summary["final_cost"]),

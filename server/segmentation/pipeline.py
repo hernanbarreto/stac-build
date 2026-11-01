@@ -4400,7 +4400,6 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
     from segmentation.object_captioner import concept_caption_lookup
     _concept_caption = concept_caption_lookup(output_dir)
 
-    import time as _time
     _tm = {"select_s": 0.0, "audit_s": 0.0, "clean_s": 0.0, "obb_s": 0.0, "objects": 0}   # where the loop's time goes
     for iid in sorted(instance_groups):
         _t0 = _time.perf_counter()
