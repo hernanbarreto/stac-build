@@ -113,7 +113,12 @@ def update_instance_store(output_dir, R_kf: np.ndarray, t_kf: np.ndarray,
             if len(g) < 4:
                 n_inst += 1
                 continue
-            obb = _compute_obb(xyz_display[g])
+            # the OBB the republish just refit for these same points (apply._recompute_obbs, the same
+            # display transform, every instance of 10+ points) — computed once, not twice (484 OBBs
+            # were refit again here on pccr audit5, ~1.5 min); smaller instances are fit here as before
+            obb = inst.get("obb") if (indices_hold and len(g) >= 10) else None
+            if not isinstance(obb, dict) or "center" not in obb or "half_extents" not in obb:
+                obb = _compute_obb(xyz_display[g])
             # same OBB→store mapping as segmentation.pipeline._write_instance_store
             c = np.asarray(obb["center"], float)
             h = np.asarray(obb["half_extents"], float)

@@ -78,6 +78,11 @@ class GatesConfig:
 @dataclass(frozen=True)
 class FloorConfig:
     model_default: str
+    bootstrap_draws: str                  # numpy | device — the floor bootstrap's uniforms on the torch devices:
+                                          # numpy = the reference's seeded stream (σ equal to the numpy path, read on
+                                          # the CPU: 15 s per 1 M-point chunk floor on pccr), device = torch's seeded
+                                          # generator on the floor device (2026-11-01; σ within the bootstrap's own
+                                          # resampling noise of the reference's — tests/test_correction_floor_torch.py)
     device: str                           # numpy | cpu | cuda — where the session / chunk floor's IRLS planes,
                                           # bootstraps, level judges and footprints run (2026-11-01):
                                           # numpy is the path of record, the torch devices give the same
@@ -502,6 +507,7 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
     floor = FloorConfig(
         model_default=model_default,
         device=_choice(fl, "device", "floor", ("numpy", "cpu", "cuda")),
+        bootstrap_draws=_choice(fl, "bootstrap_draws", "floor", ("numpy", "device")),
         chunk_floor_labels=tuple(x.strip().lower() for x in _cfl),
         support_labels=tuple(x.strip().lower() for x in _sup),
         band_m=_num(fl, "band_m", "floor", lo=0.0, lo_excl=True),

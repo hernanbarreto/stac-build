@@ -117,7 +117,7 @@ def floor_metric(X: np.ndarray, c2w: np.ndarray, cfg, seed: int = 0) -> dict:
 
 
 def cloud_floor_levels(out: Path, fields: dict, frames, c2w: np.ndarray, raw_cfg: dict,
-                       max_points: int) -> dict:
+                       max_points: int, device: str = "numpy") -> dict:
     """The floor of every Omega chunk of the published cloud — ``correction.floor.
     chunk_floor_levels``, the certification's own choice (USER 2026-10-08: one floor concept for
     the certification, the chunk check and this metric) — on the deterministic subsample of at
@@ -135,7 +135,7 @@ def cloud_floor_levels(out: Path, fields: dict, frames, c2w: np.ndarray, raw_cfg
     fg = np.asarray(fields["frame_global"], np.int64)
     at = np.clip(np.searchsorted(fr[order], fg), 0, len(fr) - 1)
     ks_all = np.where(fr[order][at] == fg, order[at], -1)
-    rows = stable_point_sample(fields, np.flatnonzero(ks_all >= 0), int(max_points))
+    rows = stable_point_sample(fields, np.flatnonzero(ks_all >= 0), int(max_points), device=device)
     X = np.stack([np.asarray(fields[k], np.float64)[rows] for k in ("x", "y", "z")], 1)
     ks = ks_all[rows]
     ck = omega_chunk_of_frames(out, fr.tolist())
@@ -230,15 +230,23 @@ def stable_point_keys(fields: dict, rows: np.ndarray) -> np.ndarray:
     return ((bits[0] << np.uint64(32)) | bits[1] ^ (bits[2] << np.uint64(16))).astype(np.int64)
 
 
-def stable_point_sample(fields: dict, rows: np.ndarray, n_max: int) -> np.ndarray:
+def stable_point_sample(fields: dict, rows: np.ndarray, n_max: int, device: str = "numpy") -> np.ndarray:
     """At most ``n_max`` of ``rows``, the ones whose mixed stable key ranks lowest (ties — identical
     points — by row order, stable sort), returned in row order: the same points every run, on
-    every machine (point 138; the construction of point 11's stable pixel keys)."""
+    every machine (point 138; the construction of point 11's stable pixel keys). ``device`` numpy |
+    cpu | cuda: the stable sort of the 64-bit keys on the device (the uint64 order kept by flipping the
+    sign bit of the int64 view) — the same rows (tests/test_cloud_metrics_device.py); 3 s → under 0.1 s
+    on pccr's 19 M keys."""
     rows = np.asarray(rows, np.int64)
     if len(rows) <= int(n_max):
         return rows
     h = _splitmix64(stable_point_keys(fields, rows).view(np.uint64))
-    order = np.argsort(h, kind="stable")[:int(n_max)]
+    if device == "numpy":
+        order = np.argsort(h, kind="stable")[:int(n_max)]
+    else:
+        import torch
+        key = torch.as_tensor(np.ascontiguousarray(h.view(np.int64)), device=device) ^ (-(1 << 63))
+        order = torch.sort(key, stable=True).indices[:int(n_max)].cpu().numpy()
     return np.sort(rows[order])
 
 
@@ -290,7 +298,7 @@ def edge_work(out: Path, ply: Path, seg: Path, cfg, log: Callable) -> tuple:
     for n, iid, inst in chosen:
         gi = np.asarray(inst.get("globalIndices") or [], np.int64)
         gi = gi[(gi >= 0) & (gi < n_rows)]
-        kept = stable_point_sample(fields, gi, cap)
+        kept = stable_point_sample(fields, gi, cap, device=str(cfg.device))
         insts.append({"instance_id": iid, "label": inst.get("label", "segment"),
                       "globalIndices": [int(v) for v in kept], "total_points": int(len(gi))})
         record.append({"instance_id": iid, "label": inst.get("label", "segment"), "points": int(len(gi)),
@@ -346,7 +354,8 @@ def run_cloud_metrics(session_dir: Path, pcfg, stage: str, log: Callable = print
             try:
                 from precision.config import raw_of
                 fl = cloud_floor_levels(out, {k: data[k] for k in data.dtype.names}, frames, c2w,
-                                        raw_of(pcfg), int(cfg.max_points))   # the job's config (point 69)
+                                        raw_of(pcfg), int(cfg.max_points),   # the job's config (point 69)
+                                        device=str(cfg.device))
             except (RuntimeError, OSError) as e:
                 # the measurement's own errors (a session that cannot be measured: no keyframe
                 # provenance, no Omega record, no floor plane, a file missing) are declared and

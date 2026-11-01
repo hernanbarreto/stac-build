@@ -669,10 +669,11 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         # the chunk / keyframe floor check on the corrected geometry (USER 2026-09-29:
         # "verificación interna e intrachunk … que quede todo en el pipeline") — a
         # report; its failure is declared, never the stage's
+        _floor_levels: dict = {}          # the chunk floors the check measures, reused by the metrics below
         try:
             if _pcfg.enabled:
                 from precision.chunk_check import run_check
-                _chk = run_check(session_dir, _pcfg, log=log)
+                _chk = run_check(session_dir, _pcfg, log=log, floor_levels_out=_floor_levels)
                 acta["chunk_check"] = {"chunks": [{"chunk": c["chunk"], "verdict": c["verdict"],
                                                    "floor_h_m": c["floor_h_m"]} for c in _chk["chunks"]],
                                        "to_correct": _chk["to_correct"]}
@@ -683,7 +684,9 @@ def _certify_session(session_dir, cfg=None, operator: str = "auto", log: Callabl
         try:
             if _pcfg.enabled:
                 from precision.cloud_metrics import run_cloud_metrics
-                acta["cloud_metrics"] = run_cloud_metrics(session_dir, _pcfg, stage="certify", log=log, edges=True)
+                # the chunk floors measured once (the check's); None when the check did not run
+                acta["cloud_metrics"] = run_cloud_metrics(session_dir, _pcfg, stage="certify", log=log, edges=True,
+                                                          floor_levels=_floor_levels.get("levels"))
                 # the acta names files relative to output/ — an absolute path would make two copies
                 # of one session write different actas
                 _edges = (acta["cloud_metrics"] or {}).get("edges") or {}

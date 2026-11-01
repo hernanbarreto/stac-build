@@ -56,6 +56,27 @@ def use_device(dev: Optional[str]) -> Optional[str]:
     return _DEVICE_OVERRIDE
 
 
+_DRAWS_OVERRIDE: Optional[str] = None
+
+
+def use_draws(mode: Optional[str]) -> Optional[str]:
+    """The bootstrap draws of every floor solve after this call ('numpy' in the tests: the reference
+    stream, σ equal to the numpy path); None = the configuration's (``correction.floor.bootstrap_draws``)."""
+    global _DRAWS_OVERRIDE
+    _DRAWS_OVERRIDE = None if mode is None else str(mode)
+    return _DRAWS_OVERRIDE
+
+
+def draws_of(fl) -> str:
+    """Where the floor bootstrap's uniforms come from on the torch devices: ``numpy`` (the reference's
+    seeded stream, read in blocks) | ``device`` (torch's seeded generator on the floor device); the numpy
+    path always draws its own."""
+    mode = _DRAWS_OVERRIDE if _DRAWS_OVERRIDE is not None else str(fl.bootstrap_draws)
+    if mode not in ("numpy", "device"):
+        raise ValueError(f"correction.floor.bootstrap_draws must be 'numpy' or 'device', got {mode!r}")
+    return mode
+
+
 def device_of(fl) -> str:
     """Where the session / chunk floor's kernels run (the IRLS planes, the bootstraps, the level judge,
     the footprints): :func:`use_device`'s, else the floor configuration's ``device``. numpy = the path of
@@ -1008,7 +1029,8 @@ def chunk_floor_levels(xyz: np.ndarray, ks: np.ndarray, cams: np.ndarray, ck: np
         elif dev == "numpy":
             cands = _chunk_candidates(P[below], ks_c[below], fl, c, rep_m, fac, conf)
         else:
-            cands = FT.chunk_candidates(P[below], ks_c[below], fl, c, rep_m, fac, conf, device=dev)
+            cands = FT.chunk_candidates(P[below], ks_c[below], fl, c, rep_m, fac, conf, device=dev,
+                                        draws=draws_of(fl))
         for q in cands:
             q["camera_over_level_m"] = cam_y_med - _plane_y_at(q["normal"], q["centroid"], *cam_xz[c])
         cands_of[c] = cands
@@ -1493,7 +1515,8 @@ def session_floor_levels(xyz: np.ndarray, ks: np.ndarray, cams: np.ndarray, supp
         # the pool uploaded once and turned into the support's frame on the device (floor_torch)
         cands_f = FT.chunk_candidates(P, ksP, fl, SESSION_SEED_CHUNK, rep_m, fac, conf, device=dev,
                                       judge_scope="own", refine_over_all=True,
-                                      bootstrap_cap=int(fl.ransac_sample), frame=(Rf, c0))
+                                      bootstrap_cap=int(fl.ransac_sample), frame=(Rf, c0),
+                                      draws=draws_of(fl))
     if not cands_f:
         return out
     if dev == "numpy":

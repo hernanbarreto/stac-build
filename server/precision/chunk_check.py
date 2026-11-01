@@ -756,8 +756,11 @@ def judge(rows: List[Row], cfg, pool_m: float, log: Callable = print, *, error_f
 
 # ── the run ──────────────────────────────────────────────────────────────
 
-def run_check(session_dir: Path, pcfg, log: Callable = print, chainage: Optional[np.ndarray] = None) -> dict:
-    """Measure, judge, write ``output/precision/chunk_check.json``; return the report."""
+def run_check(session_dir: Path, pcfg, log: Callable = print, chainage: Optional[np.ndarray] = None,
+              floor_levels_out: Optional[dict] = None) -> dict:
+    """Measure, judge, write ``output/precision/chunk_check.json``; return the report. ``floor_levels_out``:
+    a dict the caller passes to receive the chunk floors measured here (key ``levels``) — the certification
+    hands them to its own cloud metrics instead of measuring them again (26 s on pccr, 2026-11-01)."""
     t0 = time.time()
     session_dir = Path(session_dir)
     cfg = pcfg.chunk_check
@@ -779,8 +782,11 @@ def run_check(session_dir: Path, pcfg, log: Callable = print, chainage: Optional
         from precision.cloud_metrics import cloud_floor_levels
         _, data = read_ply(session_dir / "output" / "cleaned_cloud.ply")
         floor_levels = cloud_floor_levels(session_dir / "output", {k: data[k] for k in data.dtype.names},
-                                          frames, c2w, raw_cfg, int(pcfg.cloud_metrics.max_points))
+                                          frames, c2w, raw_cfg, int(pcfg.cloud_metrics.max_points),
+                                          device=str(pcfg.cloud_metrics.device))
         del data
+        if floor_levels_out is not None:
+            floor_levels_out["levels"] = floor_levels
         floor_planes = {int(c): (q["normal"], q["centroid"])
                         for c, q in floor_levels["levels"]["chosen"].items()}
         log(f"{LOG_TAG} the floor under the camera measured on the published cloud for "

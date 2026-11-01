@@ -477,6 +477,8 @@ class CloudMetricsConfig:
     edge_max_points_per_object: int   # BOUND (work): points per object the edge metric sees — a stable
                                       # per-point key sample above it (docs/plan_determinismo.md point 138:
                                       # a limit by WORK, never by clock)
+    device: str                 # numpy | cpu | cuda — where the floor metric's stable point sample runs and
+                                # what the chunk floors are fed from (precision/cloud_metrics.py, 2026-11-01)
     edge_device: str            # numpy | cpu | cuda — where the edge metric's fillet-radius sweep and
                                 # normals' bootstrap run (precision/edge_torch.py, 2026-11-01); numpy is
                                 # the path of record, the torch devices give the same r̂ and normals
@@ -942,7 +944,8 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         seed=_num(cm, "seed", "cloud_metrics", lo=0, integer=True),
         edge_max_objects=_num(cm, "edge_max_objects", "cloud_metrics", lo=0, integer=True),
         edge_max_points_per_object=_num(cm, "edge_max_points_per_object", "cloud_metrics", lo=1, integer=True),
-        edge_device=_enum(cm, "edge_device", "cloud_metrics", ("numpy", "cpu", "cuda")))
+        edge_device=_enum(cm, "edge_device", "cloud_metrics", ("numpy", "cpu", "cuda")),
+        device=_enum(cm, "device", "cloud_metrics", ("numpy", "cpu", "cuda")))
     _gone(cm, "edge_timeout_s", "cloud_metrics",
           "docs/plan_determinismo.md point 138 (2026-10-07): the edge metric is bounded by WORK "
           "(edge_max_objects x edge_max_points_per_object), never by a wall clock")

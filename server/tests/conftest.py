@@ -23,5 +23,6 @@ def _hole_audit_evidence_on_cpu():
     fit_torch.use_device("cpu")
     visit_drift.use_device("cpu")        # the mask filter's torch path, on the CPU
     floor.use_device("cpu")              # the floor solve's torch path, on the CPU
+    floor.use_draws("numpy")             # the floor bootstrap on the reference's stream
     edge_metric.use_device("cpu")        # the edge metric's torch path, on the CPU
     yield

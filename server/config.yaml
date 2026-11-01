@@ -2597,6 +2597,9 @@ reconstruction:
                                         #   (two runs), under the 45 s per object. The rate is this box's; another
                                         #   box changes the time, never the sample (the rule is stable).
       # NO edge_timeout_s (point 138): a hung process is the cancel path's to kill, never a verdict on the metric.
+      device: cuda                      # 2026-11-01 (USER: "todo debe correr en GPU"): numpy (the path of record) |
+                                        #   cpu | cuda — the stable point sample (the sort of 19 M hashed keys, 3 s on
+                                        #   numpy for pccr) the chunk floors and the edge objects are drawn from
       edge_device: cuda                 # 2026-11-01 (USER: "todo debe correr en GPU"): numpy (the path of record) |
                                         #   cpu | cuda — where the fillet-radius sweep (profile distances of every
                                         #   radius at once) and the normals' bootstrap (the same seeded resamples)
@@ -3260,6 +3263,11 @@ correction:
                                   # the same levels: tests/test_correction_floor_torch.py). pccr epoch 4, 19.4 M
                                   # points: 131 s on numpy, 109 s of them in four IRLS fits over 3.8 M points
                                   # (analysis/2026-11-01_floor_gpu). A cuda with no card FAILS naming this key.
+    bootstrap_draws: device       # 2026-11-01: the floor bootstrap's uniforms from torch's seeded generator on
+                                  # the floor device (numpy = the reference's stream, read on the CPU: 15 s per
+                                  # 1 M-point chunk floor on pccr, 2000 × n doubles). The σ of the tilt and the
+                                  # height then carry the bootstrap's own resampling noise (~1.6 % relative at
+                                  # 2000 resamples) instead of the numpy stream's; the record names the mode.
     model_default: session        # USER 2026-10-16, after bufferStop came out "de costado" under `chunk`
                                   # (chunk 1 levelled on a 19 k-point patch under its cameras, 7.99° / +102 cm;
                                   # chunks 0 and 2, no support plane under theirs, took that motion blended):

@@ -137,19 +137,30 @@ def irls_plane_t(P, start_band_m: float, end_band_m: float, max_iter: int, tol: 
 
 # ── the Poisson bootstrap of a plane ──────────────────────────────────────────────────────────────────
 
-def bootstrap_plane_t(P, seed: int, n_boot: int, poisson_cdf: np.ndarray, tol: float, block: int = 200
-                      ) -> Tuple[float, float]:
+def bootstrap_plane_t(P, seed: int, n_boot: int, poisson_cdf: np.ndarray, tol: float, block: int = 200,
+                      draws: str = "numpy") -> Tuple[float, float]:
     """`correction.floor._bootstrap_plane` on the tensor ``P`` (n, 3): (σ of the tilt in degrees, σ of
-    the height in metres) over ``n_boot`` Poisson(1) resamples. The uniforms are the reference's —
-    `default_rng(seed).random`, one stream read ``block`` draws at a time (the same doubles in the same
-    order as its draw-by-draw calls) — inverted on the device; every resample's weighted PCA from the ten
-    per-point moments about the mean by one matmul; the planes by numpy's batched `eigh`."""
+    the height in metres) over ``n_boot`` Poisson(1) resamples. ``draws`` = ``numpy``: the uniforms are
+    the reference's — `default_rng(seed).random`, one stream read ``block`` draws at a time (the same
+    doubles in the same order as its draw-by-draw calls), the same σ to 1e-9; ``device``: torch's own
+    seeded generator on the device (`correction.floor.bootstrap_draws`, 2026-11-01 — the numpy stream
+    cost 15 s per chunk floor on pccr's 1 M-point inlier sets, 2000 × n doubles on the CPU; the σ then
+    differs from the reference's by the bootstrap's own resampling noise, ~1/√(2·n_boot) relative, and
+    the record says which draws it carries). Either way the uniforms are inverted on the device; every
+    resample's weighted PCA from the ten per-point moments about the mean by one matmul; the planes by
+    numpy's batched `eigh`."""
     torch = _torch()
     dev = P.device
     n = int(P.shape[0])
     if n < 4:
         return float("inf"), float("inf")
+    if draws not in ("numpy", "device"):
+        raise ValueError(f"bootstrap draws must be 'numpy' or 'device', got {draws!r}")
     rng = np.random.default_rng(int(seed))
+    gen = None
+    if draws == "device":
+        gen = torch.Generator(device=dev)
+        gen.manual_seed(int(seed))
     c0 = P.mean(0)
     Q = P - c0
     one = torch.ones(n, dtype=P.dtype, device=dev)
@@ -160,7 +171,10 @@ def bootstrap_plane_t(P, seed: int, n_boot: int, poisson_cdf: np.ndarray, tol: f
     S = torch.empty((int(n_boot), 10), dtype=P.dtype, device=dev)
     for a in range(0, int(n_boot), int(block)):
         b = min(int(block), int(n_boot) - a)
-        u = _t(rng.random((b, n)), dev)
+        if gen is None:
+            u = _t(rng.random((b, n)), dev)
+        else:
+            u = torch.rand((b, n), generator=gen, dtype=P.dtype, device=dev)
         w = torch.searchsorted(cdf, u, right=True).to(P.dtype)                        # Poisson(1) draws
         sw = w.sum(1)
         w = torch.where((sw <= 0)[:, None], one[None, :].expand(b, n), w)             # the reference's guard
@@ -276,7 +290,7 @@ def percentile_t(v, pct: float) -> float:
 def chunk_candidates(P: np.ndarray, ks: np.ndarray, fl, chunk: int, rep_m: float, fac: float, conf: float,
                      *, device: str, judge_scope: str = "any", refine_over_all: bool = False,
                      bootstrap_cap: Optional[int] = None, frame: Optional[Tuple[np.ndarray, np.ndarray]] = None,
-                     points_frame_back: bool = False) -> List[dict]:
+                     points_frame_back: bool = False, draws: str = "numpy") -> List[dict]:
     """`correction.floor._chunk_candidates` on ``device``: the pool ``P`` (numpy, the session's frame)
     uploaded once — ``frame`` = (R, c0) brings it into the support's frame on the device (P' = (P − c0)·Rᵀ)
     — and searched level by level with the kernels above; the records as the reference's (normal,
@@ -324,7 +338,7 @@ def chunk_candidates(P: np.ndarray, ks: np.ndarray, fl, chunk: int, rep_m: float
                                                                              replace=False)
             boot = boot[_t(np.sort(sel), dev, dtype=torch.int64)]
         s_tilt, s_h = bootstrap_plane_t(boot, FL._chunk_seed(chunk, rank), FL.N_BOOT_FLOOR, FL._POISSON1_CDF,
-                                        FL.IRLS_TOL)
+                                        FL.IRLS_TOL, draws=draws)
         planes.append((nrm, cen))
         pts_np = pts_in
         if frame is not None and points_frame_back:
