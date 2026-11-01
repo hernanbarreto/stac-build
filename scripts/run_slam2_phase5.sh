@@ -102,7 +102,7 @@ for scene in "${SC[@]}"; do
     echo -e "${scene}\t${v}\t${rid}\t${rc}\t${dt}\t${rlog}" >> "${SUMMARY}"
     log "   ${scene} / ${v}: exit ${rc} in ${dt} s"
     df_free=$(python3 -c "import os; s=os.statvfs('/workspace'); print(int(s.f_bavail*s.f_frsize/1e9))" 2>/dev/null || echo "?")
-    log "   /workspace used: $(du -sh /workspace 2>/dev/null | cut -f1) (quota 400 GB)"
+    log "   runs/eval + server/projects: $(du -sh /workspace/stac-build/runs/eval /workspace/stac-build/server/projects 2>/dev/null | cut -f1 | tr "\n" " ")(quota 450 GB; the whole /workspace is measured by hand — a full du idles the card for minutes)"
   done
 done
 log "phase 5 runs through — ${SUMMARY}"
