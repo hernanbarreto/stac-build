@@ -1548,6 +1548,9 @@ def _build_vggtomega_config(config: dict, frames_dir=None) -> dict:
     return _apply_stac_model_keys(cfg, config)
 
 
+OMEGA_RECORD_THREADS = 8
+
+
 def _emit_omega_depth(save_dir: Path, output_dir: Path, ranges,
                       selected_frames_path: str, pipe: WorkerPipe) -> None:
     """Write per-frame VGGT-Omega depth (globally scale-consistent) to
@@ -1635,6 +1638,7 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, ranges,
                                    f"says {_chunks[k] if k < len(_chunks) else 'no such chunk'}"
                                    f" — the aligned chunks on disk are of another plan")
             start = _chunks[k][0]
+            todo = []
             for j in range(S):
                 gi = start + j
                 if gi >= N:
@@ -1643,6 +1647,10 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, ranges,
                     continue
                 if stems[gi] not in pose_map:
                     raise RuntimeError(f"[omega-depth] frame {stems[gi]} has no aligned pose")
+                todo.append((j, gi))
+
+            def _record(jg, k=k, wp=wp, wconf=wconf, Kin=Kin):
+                j, gi = jg
                 c2w = pose_map[stems[gi]]                 # the ALIGNED pose of record
                 cam_c = c2w[:3, 3]
                 fwd = c2w[:3, 2]                           # camera +z in world
@@ -1655,7 +1663,12 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, ranges,
                 if Kin is not None:
                     rec["K_omega"] = Kin[j].astype(np.float64)
                 np.savez_compressed(out_dir / f"frame_{stems[gi]}.npz", **rec)
-                n_written += 1
+            # each record is its frame's alone, written on threads (zlib and the numpy arithmetic
+            # release the GIL; station 2026-11-01: 438 records, 2 min on one thread, the card idle)
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=OMEGA_RECORD_THREADS) as _ex:
+                list(_ex.map(_record, todo))
+            n_written += len(todo)
         except Exception as e:
             raise RuntimeError(f"[omega-depth] chunk {cp} could not be recorded: {e}") from e
     pipe.send_log(f"[omega-depth] wrote {n_written} per-frame omega records (depth, conf, "
@@ -2524,8 +2537,14 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             raise RuntimeError(f"[omega-depth] Omega ran the layout {_ran[0]} ({_ran[1]}), this "
                                f"run planned {cfg_v['Model']['chunk_ranges']}")
         _emit_omega_depth(vggt_save_dir, output_dir, _ran[0], selected_frames_path, pipe)
+        # the aligned chunks' last reader is the omega records just written: when the run does
+        # not keep them (certify.keep_aligned_chunks) they are deleted after the scale, so the
+        # scale and the orientation do not rewrite them first (station 2026-11-01: two passes of
+        # 11 GB, read and written, ~1.7 min with the card idle, for files deleted a second later)
+        from reconstruction.loops.config import load_loops_config as _llc0
+        _keep_aligned = bool(_llc0(config).certify.keep_aligned_chunks)
         from reconstruction.scale_align import run as _scale_run
-        _s = _scale_run(output_dir, dry_run=False,
+        _s = _scale_run(output_dir, dry_run=False, aligned_chunks=_keep_aligned,
                         log=lambda m: pipe.send_log(f"[scale-align] {m}"),
                         near_frac=float(_va_cfg.get("scale_near_frac", 0.25)),
                         conf_top_frac=float(_va_cfg.get("scale_conf_top_frac", 0.10)),
@@ -2563,7 +2582,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             pipe.send_progress(92, "Baking upright orientation from camera poses...",
                                stage="reconstruction")
             from reconstruction.orient import run as _orient_run
-            _T = _orient_run(output_dir, log=lambda m: pipe.send_log(f"[orient] {m}"))
+            _T = _orient_run(output_dir, log=lambda m: pipe.send_log(f"[orient] {m}"),
+                             aligned_chunks=_keep_aligned)
             if _T is None:
                 pipe.send_log("[orient] orientation NOT applied (no poses or weak camera-down "
                               "consensus) — the floor leveler downstream is the fallback",

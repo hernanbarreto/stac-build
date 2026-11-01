@@ -292,7 +292,24 @@ def _scale_aligned_depth(output_dir: Path, s: float, dry_run: bool = False) -> N
         logger.info(f"  scaled aligned depth {p.name} ×{s:.4f}")
 
 
-def apply_scale(output_dir: Path, s: float, dry_run: bool = False) -> None:
+# chunk PLYs transformed at once (each is read, transformed and written by its own thread: the
+# reads, numpy's large array arithmetic and the writes release the GIL; a 53 M-point PLY holds
+# ~5 GB in flight, so the count is bounded)
+PLY_THREADS = 4
+
+
+def _per_ply(fn, plys):
+    """``[fn(p) for p in plys]`` on PLY_THREADS threads, in order (the first error raised)."""
+    plys = list(plys)
+    if len(plys) <= 1:
+        return [fn(p) for p in plys]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(PLY_THREADS, len(plys))) as ex:
+        return list(ex.map(fn, plys))
+
+
+def apply_scale(output_dir: Path, s: float, dry_run: bool = False,
+                aligned_chunks: bool = True) -> None:
     """Apply s as a GLOBAL SIMILARITY to the whole reconstruction: every chunk_*.ply
     point XYZ ×s, the per-frame omega depth the TSDF reads (_tmp_results_aligned) ×s,
     AND every camera-centre translation ×s. Rotations and the metric DA3 depth are
@@ -307,17 +324,21 @@ def apply_scale(output_dir: Path, s: float, dry_run: bool = False) -> None:
     Clouds are scaled FIRST and a failure RAISES before any pose is touched, so a partial
     failure degrades safely to the consistent up-to-scale state (cameras never de-sync)."""
     # ── 1) the cloud (chunk PLYs CloudCompy will merge) ──
-    for ply in sorted(output_dir.glob("chunk_*.ply")):
-        if dry_run:
+    plys = sorted(output_dir.glob("chunk_*.ply"))
+    if dry_run:
+        for ply in plys:
             logger.info(f"[dry-run] would scale {ply.name} XYZ ×{s:.4f}")
-            continue
-        if not _scale_ply_xyz(ply, s):
-            raise RuntimeError(f"could not scale {ply.name} (unexpected PLY layout) — "
-                               f"aborting so cameras and cloud never de-sync")
-        logger.info(f"  scaled cloud {ply.name} XYZ ×{s:.4f}")
+    else:
+        for ply, ok in zip(plys, _per_ply(lambda q: _scale_ply_xyz(q, s), plys)):
+            if not ok:
+                raise RuntimeError(f"could not scale {ply.name} (unexpected PLY layout) — "
+                                   f"aborting so cameras and cloud never de-sync")
+            logger.info(f"  scaled cloud {ply.name} XYZ ×{s:.4f}")
 
-    # ── 2) the per-frame omega depth the TSDF integrates ──
-    _scale_aligned_depth(output_dir, s, dry_run=dry_run)
+    # ── 2) the per-frame omega depth the TSDF integrates ── (``aligned_chunks`` False: the
+    # caller deletes them right after — their last reader, the omega records, already ran)
+    if aligned_chunks:
+        _scale_aligned_depth(output_dir, s, dry_run=dry_run)
 
     # ── 3) the camera centres (every camera_poses.txt copy) ──
     # float64 round-trip EXACT text (docs/plan_determinismo.md point 45: the '{:.8g}' this wrote
@@ -347,12 +368,14 @@ def apply_scale(output_dir: Path, s: float, dry_run: bool = False) -> None:
         logger.info(f"  scaled {pp} (backup {bak.name} refreshed)")
 
 
-def transformed_files(output_dir: Path) -> list:
+def transformed_files(output_dir: Path, aligned_chunks: bool = True) -> list:
     """Every file apply_scale writes (the marker's sidecar records their sha256 after the pass):
-    the chunk PLYs, the aligned per-frame copies and every camera_poses.txt copy."""
+    the chunk PLYs, the aligned per-frame copies (when it scales them) and every
+    camera_poses.txt copy."""
     output_dir = Path(output_dir)
     files = sorted(output_dir.glob("chunk_*.ply"))
-    files += sorted((output_dir / "maplong_run" / "_tmp_results_aligned").glob("chunk_*.npy"))
+    if aligned_chunks:
+        files += sorted((output_dir / "maplong_run" / "_tmp_results_aligned").glob("chunk_*.npy"))
     files += [b / "camera_poses.txt" for b in (output_dir, output_dir / "maplong_run",
                                                 output_dir / "da3_run")]
     return [f for f in files if f.is_file()]
@@ -521,8 +544,8 @@ def estimate_v2(output_dir: Path, log=None, near_frac: float = 0.25,
 
 def run(output_dir: Path, dry_run: bool = False, log=None,
         near_frac: float = 0.25, conf_top_frac: float = 0.0,
-        cfg: Optional[dict] = None, session_dir: Optional[Path] = None
-        ) -> Optional[float]:
+        cfg: Optional[dict] = None, session_dir: Optional[Path] = None,
+        aligned_chunks: bool = True) -> Optional[float]:
     """Estimate + apply the metric scale. Returns the scale s (float) on success OR when
     it was ALREADY applied (marker present → output is already metric). Returns None ONLY
     when the scale could not be estimated (genuine failure) — the caller MUST treat None
@@ -561,12 +584,12 @@ def run(output_dir: Path, dry_run: bool = False, log=None,
         _log(f"WARNING: could not write {DIAGNOSTICS_NAME}: {e}")
     if s is None:
         return None            # genuine failure → caller makes it FATAL
-    apply_scale(output_dir, s, dry_run=dry_run)
+    apply_scale(output_dir, s, dry_run=dry_run, aligned_chunks=aligned_chunks)
     if not dry_run:
         import repro
         # the marker's first line stays `s=<value>` (its readers parse float(text.split('=')[-1]));
         # the value is the exact float64 text (point 45), the sidecar names what was transformed
-        AM.record(marker, f"s={repro.exact_float(s)}", transformed_files(output_dir),
+        AM.record(marker, f"s={repro.exact_float(s)}", transformed_files(output_dir, aligned_chunks),
                   base=output_dir, extra={"s": float(s), "scale_source": diag.get("scale_source")})
     _log(f"✅ metric scale {'(dry-run) ' if dry_run else ''}s={s:.4f} applied "
          f"(source={diag.get('scale_source', 'da3')})")

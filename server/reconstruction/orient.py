@@ -224,11 +224,12 @@ def _transform_poses_file(path: Path, R: np.ndarray, t: np.ndarray,
     logger.info(f"  oriented {path} (backup {bak.name} refreshed)")
 
 
-def transformed_files(output_dir: Path) -> list:
+def transformed_files(output_dir: Path, aligned_chunks: bool = True) -> list:
     """Every file run() writes (the marker's sidecar records their sha256 after the pass)."""
     output_dir = Path(output_dir)
     files = sorted(output_dir.glob("chunk_*.ply"))
-    files += sorted((output_dir / "maplong_run" / "_tmp_results_aligned").glob("chunk_*.npy"))
+    if aligned_chunks:
+        files += sorted((output_dir / "maplong_run" / "_tmp_results_aligned").glob("chunk_*.npy"))
     files += [b / "camera_poses.txt" for b in (output_dir, output_dir / "maplong_run",
                                                 output_dir / "da3_run")]
     return [f for f in files if f.is_file()]
@@ -259,7 +260,8 @@ def _transform_aligned_worldpoints(output_dir: Path, R: np.ndarray, t: np.ndarra
 
 # ── entry point ─────────────────────────────────────────────────────
 
-def run(output_dir: Path, floor_percentile: float = 1.0, log=None) -> Optional[np.ndarray]:
+def run(output_dir: Path, floor_percentile: float = 1.0, log=None,
+        aligned_chunks: bool = True) -> Optional[np.ndarray]:
     """Estimate gravity from the camera poses and bake the upright orientation
     (down → -Y, floor at y≈0) into chunk PLYs + poses + aligned world_points.
     Idempotent via the .orientation_applied marker. Returns the applied 4x4
@@ -295,11 +297,10 @@ def run(output_dir: Path, floor_percentile: float = 1.0, log=None) -> Optional[n
     R = _rotation_between(g_down, np.array([0.0, -1.0, 0.0]))
 
     # Floor offset: low-percentile Y after rotation → y=0
-    ys = []
-    for ply in sorted(output_dir.glob("chunk_*.ply")):
-        y = _ply_y_percentile(ply, R, floor_percentile)
-        if y is not None and len(y):
-            ys.append(y)
+    from reconstruction.scale_align import _per_ply
+    plys = sorted(output_dir.glob("chunk_*.ply"))
+    ys = [y for y in _per_ply(lambda q: _ply_y_percentile(q, R, floor_percentile), plys)
+          if y is not None and len(y)]
     t = np.zeros(3)
     if ys:
         floor_y = float(np.percentile(np.concatenate(ys), floor_percentile))
@@ -311,13 +312,14 @@ def run(output_dir: Path, floor_percentile: float = 1.0, log=None) -> Optional[n
     # Clouds first; a failure RAISES before poses are touched (same safety order as
     # scale_align: geometry and cameras never de-sync).
     n_ply = 0
-    for ply in sorted(output_dir.glob("chunk_*.ply")):
-        if not _transform_ply_xyz(ply, R, t):
+    for ply, ok in zip(plys, _per_ply(lambda q: _transform_ply_xyz(q, R, t), plys)):
+        if not ok:
             raise RuntimeError(f"could not orient {ply.name} (unexpected PLY layout) — "
                                f"aborting so cameras and cloud never de-sync")
         n_ply += 1
         _log(f"oriented cloud {ply.name}")
-    _transform_aligned_worldpoints(output_dir, R, t, log=_log)
+    if aligned_chunks:          # False: the caller deletes them right after (their last reader ran)
+        _transform_aligned_worldpoints(output_dir, R, t, log=_log)
     for base in (output_dir, output_dir / "maplong_run", output_dir / "da3_run"):
         _transform_poses_file(base / "camera_poses.txt", R, t)
 
@@ -326,7 +328,7 @@ def run(output_dir: Path, floor_percentile: float = 1.0, log=None) -> Optional[n
     T[:3, 3] = t
     ang = float(np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))))
     AM.record(marker, f"angle_deg={ang:.2f} ty={t[1]:.4f} align={align:.3f}",
-              transformed_files(output_dir), base=output_dir,
+              transformed_files(output_dir, aligned_chunks), base=output_dir,
               extra={"T": T.tolist(), "angle_deg": ang, "ty": float(t[1]), "align": float(align)})
     _log(f"✅ upright orientation baked: rotation {ang:.1f}°, floor offset {t[1]:+.3f} m, "
          f"{n_ply} chunk(s)")

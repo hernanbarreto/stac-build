@@ -53,11 +53,10 @@ def record(marker: Path, text: str, files: Iterable[Path], *, base: Path,
     ``extra`` (what was applied: s, the rotation …). Returns the sidecar path."""
     import repro
     marker = Path(marker)
-    shas: Dict[str, str] = {}
-    for f in files:
-        f = Path(f)
-        if f.is_file():
-            shas[_rel(f, base)] = repro.sha256_file(f)
+    present = [Path(f) for f in files if Path(f).is_file()]
+    # hashed on repro's stamp threads (the transformed clouds are GBs: station 2026-11-01)
+    shas: Dict[str, str] = dict(zip([_rel(f, base) for f in present],
+                                    repro._hash_all(repro.sha256_file, present)))
     doc = {"version": SIDECAR_VERSION, "marker": marker.name, "files": dict(sorted(shas.items())),
            "extra": dict(extra or {})}
     side = sidecar_path(marker)
@@ -89,12 +88,11 @@ def state(marker: Path, *, base: Path) -> Tuple[str, Dict[str, Any]]:
         return "stale", {"text": text, "changed": [f"{side.name}: not a version-{SIDECAR_VERSION} record"]}
     changed: List[str] = []
     gone: List[str] = []
-    for rel, sha in sorted(files.items()):
-        p = Path(base) / rel
-        if not p.is_file():
-            gone.append(rel)
-        elif repro.sha256_file(p) != sha:
-            changed.append(rel)
+    rows = sorted(files.items())
+    here = [(rel, sha) for rel, sha in rows if (Path(base) / rel).is_file()]
+    gone = [rel for rel, _sha in rows if not (Path(base) / rel).is_file()]
+    now = repro._hash_all(repro.sha256_file, [Path(base) / rel for rel, _sha in here])
+    changed = [rel for (rel, sha), got in zip(here, now) if got != sha]
     info = {"text": text, "extra": doc.get("extra") or {}, "n_recorded": len(files),
             "gone": gone, "changed": changed}
     return ("stale" if changed else "current"), info
