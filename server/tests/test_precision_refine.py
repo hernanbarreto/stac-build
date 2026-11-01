@@ -313,3 +313,26 @@ def test_a_classical_start_keeps_its_shape_and_takes_the_gauges_metre():
     with pytest.raises(R.RefineError, match="w2c_gauge"):
         R.refine_core(np.linalg.inv(start), gt, WH, track, frame, uv, _split(track), kf, 0.01, CFG, SOLVER,
                       error_factor=FAC, log=lambda *a: None, w2c_gauge=np.linalg.inv(c2w)[:-1])
+
+
+def test_the_walk_wobble_and_the_prior_verdict_follow_the_users_rule():
+    """USER 2026-11-01: priors are taken unless they open a loop; a held-out worsening is repaid only by a
+    smoothness gain beyond its noise. walk_wobble = the second difference of the centres per keyframe."""
+    import numpy as np
+    from precision.refine import prior_verdict, walk_wobble
+    n = 7
+    c = np.stack([np.linspace(0, 3, n), np.zeros(n), np.zeros(n)], 1)
+    w2c = np.tile(np.eye(4), (n, 1, 1)); w2c[:, :3, 3] = -c                       # R = I: t = -c
+    wob = walk_wobble(w2c)
+    assert set(wob) == set(range(1, n - 1)) and max(wob.values()) < 1e-12
+    c2 = c.copy(); c2[3, 1] += 0.02                                                   # one keyframe 2 cm off the line
+    w2 = np.tile(np.eye(4), (n, 1, 1)); w2[:, :3, 3] = -c2
+    wob2 = walk_wobble(w2)
+    assert abs(wob2[3] - 0.02) < 1e-9 and abs(wob2[2] - 0.01) < 1e-9 and abs(wob2[4] - 0.01) < 1e-9
+    ok = {"worsens": False, "improves": False}
+    worse = {"worsens": True, "enough_judges": True, "median_delta": -0.01, "required_delta": 0.0}
+    better = {"improves": True, "enough_judges": True}
+    assert prior_verdict(ok, ok, ok) == (True, "does not worsen the held-out tracks and does not open a loop")
+    assert prior_verdict(worse, ok, ok)[0] is False
+    assert prior_verdict(worse, ok, better)[0] is True
+    assert prior_verdict(ok, worse, better)[0] is False                               # a loop opening vetoes

@@ -3,9 +3,10 @@ epoch, c2w, OpenCV camera) as COLMAP w2c, the camera.json OPENCV intrinsics, and
 points3D.txt. The scene is handed over in the session's DISPLAY frame (floor_transform.npz applied, so
 up is up even when the raw frame lies on its side — bufferStop) and turned Y-up → Z-up (GenRecon's
 chunker reads the height along z). The transform back to the raw frame is saved for publish.py."""
-import sys, json, shutil, numpy as np
-sys.path.insert(0, "/workspace/stac-build/server")
+import os, sys, json, shutil, numpy as np
 from pathlib import Path
+SERVER = Path(__file__).resolve().parents[2]            # the server tree THIS adapter lives in (a worktree runs its own)
+sys.path.insert(0, str(SERVER))
 from scipy.spatial.transform import Rotation
 from correction.session import load_session
 from segmentation.perfect_object import _read_ply_fields
@@ -48,7 +49,7 @@ rgbv = np.column_stack([f[k] for k in ("red", "green", "blue")]) if "red" in f e
 # AUDIT 2026-10-23: presence for the mesh from points WITH evidence — `confidence` is the vote's agree count
 # (depth_on_f5: n_consistent). genrecon.min_consistent_views 0 = every point, as before; the cloud is untouched
 import yaml as _yaml
-_gcfg = _yaml.safe_load(open("/workspace/stac-build/server/config.yaml"))["genrecon"]
+_gcfg = _yaml.safe_load(open(SERVER / "config.yaml"))["genrecon"]
 _min_views = int(_gcfg.get("min_consistent_views", 0))
 if _min_views > 0 and "confidence" in f:
     _ev = np.asarray(f["confidence"], np.float64) >= _min_views
@@ -67,10 +68,47 @@ cams_g = (np.asarray(s.poses, np.float64)[:, :3, 3] @ M[:3, :3].T) + M[:3, 3]
 # reconstruct_scene --coords_from_points) and the session's floor and ceiling LEVELS for the chunk cubes
 # (levels.json: the cube's base is the lowest support level, its top the highest ceiling level — the model
 # paints floor and ceiling at the cube's faces, so a percentile of a subsample must not decide them).
-np.save(WORK / "cloud_genrecon.npy", (xyz @ M[:3, :3].T + M[:3, 3]).astype(np.float32))
+_presence_pts = xyz @ M[:3, :3].T + M[:3, 3]
+# USER 2026-11-01 ("la malla se comió partes … lo que se comió en audit está en el original y al revés"): presence
+# from the depth maps the chain MEASURED (dense, before the filters), confirmed by two keyframes — tools/genrecon/
+# presence.py; GENRECON_PRESENCE (the job's genrecon.presence_source) = cloud (as before) | cloud+depth2
+_presence = os.environ.get("GENRECON_PRESENCE") or str(_gcfg.get("presence_source", "cloud"))
+_presence_rec = {"source": _presence}
+if _presence == "cloud+depth2":
+    from segmentation.tsdf_export import _resolve_da3_depth, _with_depth_correction
+    from tools.genrecon.presence import depth_presence, unproject_depth
+    _res = _resolve_da3_depth(out)
+    if _res is None:
+        print("presence: cloud+depth2 asked but the session holds no per-keyframe depth maps — the cloud alone decides")
+        _presence_rec["reason"] = "no depth maps"
+    else:
+        _loader, _grid = _res
+        _loader = _with_depth_correction(_loader, out)
+        _npz_dir = next((d for d in (out / "da3_run" / "results_output", out / "results_output") if d.exists()), None)
+        _pts, _kf = [], []
+        for _k, (_frame, _c2w) in enumerate(zip(s.frames, np.asarray(s.poses, np.float64))):
+            _got = _loader(int(_frame))
+            _kp = (_npz_dir / f"frame_{int(_frame)}.npz") if _npz_dir is not None else None
+            if _got is None or _kp is None or not _kp.exists():
+                continue
+            _Kd = np.load(_kp)["intrinsics"]
+            _d, _ok = _got
+            _p = unproject_depth(_d, _ok, _Kd, _c2w, stride=3)
+            if len(_p):
+                _pts.append(_p); _kf.append(np.full(len(_p), _k, np.int64))
+        if _pts:
+            _P = np.concatenate(_pts) @ M[:3, :3].T + M[:3, 3]
+            _add, _rec = depth_presence(_P, np.concatenate(_kf), _presence_pts)
+            _presence_rec.update(_rec, keyframes_with_depth=len(_pts))
+            _presence_pts = np.concatenate([_presence_pts, _add])
+            print(f"presence: cloud {_rec['cloud_voxels']:,} voxels + depth maps of {len(_pts)} keyframes: {_rec['depth_voxels_confirmed']:,} "
+                  f"voxels confirmed by >= {_rec['min_views']} keyframes, {_rec['depth_voxels_new']:,} of them NEW; {_rec['points_appended']:,} points appended")
+        else:
+            _presence_rec["reason"] = "no keyframe yielded depth points"
+np.save(WORK / "cloud_genrecon.npy", _presence_pts.astype(np.float32))
 import yaml
 from correction.floor import head_noun
-_cfg = yaml.safe_load(open("/workspace/stac-build/server/config.yaml"))
+_cfg = yaml.safe_load(open(SERVER / "config.yaml"))
 support = set(_cfg["autoprompt"]["support_surfaces"])
 y_d = (xyz @ (s_f * R_f).T + t_f)[:, 1]                      # heights in the display frame = GenRecon's z
 seg = json.loads((out / "segmentation_result.json").read_text()) if (out / "segmentation_result.json").exists() else {"instances": []}
@@ -87,6 +125,7 @@ if ceil_idx:
     levels.update(z_ceiling=max(float(np.percentile(y_d[g], 95)) for g in ceil_idx), ceiling_source="segmentation ceiling instances p95")
 else:
     levels.update(z_ceiling=float(np.percentile(y_d, 99.97)), ceiling_source="percentile 99.97 of the cloud (no ceiling instance)")
+levels["presence"] = _presence_rec
 (WORK / "levels.json").write_text(json.dumps(levels, indent=2))
 # STAC 2026-10-17 (USER: "debería completar lo que no ve o no tenía puntos … las patas de una mesa … pero solo eso"):
 # the boxes of the segmented OBJECTS in GenRecon's frame — the model may complete only inside them; a support

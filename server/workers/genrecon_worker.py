@@ -60,7 +60,8 @@ def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
     env = {**os.environ, "PYTHONUNBUFFERED": "1",
            "GENRECON_SIMPLIFY": str(int(gcfg.get("simplify_faces_per_chunk", 150000))),
            "GENRECON_TEX": str(int(gcfg.get("texture_size", 2048))),
-           "GENRECON_TOPK": str(int(gcfg.get("bake_views", 3)))}
+           "GENRECON_TOPK": str(int(gcfg.get("bake_views", 3))),
+           "GENRECON_PRESENCE": str(gcfg.get("presence_source", "cloud"))}
     if not _SCRIPT.exists():
         raise FileNotFoundError(f"GenRecon runner missing: {_SCRIPT}")
     pipe.send_progress(1, f"GenRecon mesh ({mode}, ≥{min_pts} pts/voxel) for {sid}:{scan}", stage=STAGE)

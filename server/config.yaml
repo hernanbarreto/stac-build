@@ -101,6 +101,10 @@ genrecon:
   mode: cloud                        # cloud (THE product, USER 2026-10-17) | cloud+hull (completion from the
                                      # masks) | cloud+objects | cloud+unseen — the last three are trials
   min_points_per_voxel: 10           # BOUND: a chunk voxel (32³ ≈ 11.6 cm) is active from this many cloud points
+  presence_source: cloud             # cloud (the 2026-10-17 recipe: the published points decide the active voxels) |
+                                     #   cloud+depth2 (USER 2026-11-01: the mesh 'se comió' what a filter thinned — the
+                                     #   chain's per-keyframe depth maps, dense and unfiltered, add presence where TWO
+                                     #   keyframes measured it; tools/genrecon/presence.py; census in levels.json)
   min_consistent_views: 0            # AUDIT 2026-10-23: the evidence a cloud point needs to decide PRESENCE for the
                                      # mesh — its `confidence` field is the vote's agree count (n_consistent: the
                                      # neighbouring keyframes that confirmed the depth within tau). The vote keeps a
@@ -4535,6 +4539,19 @@ evaluation:
         "reconstruction.precision.refine.rolling_shutter": never
         "reconstruction.precision.fusion.enabled": false
         "reconstruction.precision.fusion.colmap_tier": false
+    audit5_classical_init_priors_depth:
+      kind: chain
+      description: >-
+        (audit5, USER 2026-11-01: 'lo mejor de ambos') E's recipe with the rolling shutter JUDGED again (production's)
+        (audit 2026-10-31, after pccr_audit3's diagnosis) audit_layered_no_rs with F5 started at GLOMAP's
+        trajectory (refine.init_poses classical): the MASt3R bridges, the odometry priors (from GLOMAP's
+        chain) and the scale lock stay — does the start-end loop close and the start of the walk stand
+      stages_off: [vlm, sam3, projection, certify, genrecon]
+      overrides:
+        genrecon.presence_source: cloud+depth2   # solution 3 (USER 2026-11-01)
+        "reconstruction.precision.refine.init_poses": classical
+        "reconstruction.precision.fusion.enabled": false
+        "reconstruction.precision.fusion.colmap_tier": false
     audit_layered_no_rs_classical_init_full:
       kind: chain
       description: >-
@@ -4578,6 +4595,22 @@ evaluation:
       overrides:
         "reconstruction.precision.refine.init_poses": classical
         "reconstruction.precision.refine.rolling_shutter": never
+        "reconstruction.precision.fusion.enabled": false
+        "reconstruction.precision.fusion.colmap_tier": false
+    audit5_classical_init_priors_depth_project:
+      kind: chain
+      description: >-
+        (audit5, USER 2026-11-01) the stages after the cloud of audit5, GenRecon presence from the depth maps —
+        (audit 2026-10-31, after pccr_audit3's diagnosis) audit_layered_no_rs with F5 started at GLOMAP's
+        trajectory (refine.init_poses classical): the MASt3R bridges, the odometry priors (from GLOMAP's
+        chain) and the scale lock stay — does the start-end loop close and the start of the walk stand
+      stages_off: [reconstruction, cloudcompy, vlm, sam3]   # projection, certification and GenRecon only, on E's
+                                      #   cloud with production's VLM analysis and SAM3 masks copied in (USER
+                                      #   2026-10-31: the frames are the same, the segmentation is theirs; only the
+                                      #   mask→cloud projection, the certification and the mesh depend on the cloud)
+      overrides:
+        genrecon.presence_source: cloud+depth2   # solution 3 (USER 2026-11-01)
+        "reconstruction.precision.refine.init_poses": classical
         "reconstruction.precision.fusion.enabled": false
         "reconstruction.precision.fusion.colmap_tier": false
     bend_affine_pixel:

@@ -652,6 +652,36 @@ def solver_error(h_end: Dict[int, float], h_cont: Dict[int, float]) -> dict:
             "n_tracks": int(len(common))}
 
 
+def walk_wobble(w2c: np.ndarray) -> Dict[int, float]:
+    """The walk's high-frequency jitter per interior keyframe, in metres: how far camera centre k sits from
+    the midpoint of its two neighbours (the second difference of the walk). A phone walk is smooth at the
+    keyframe spacing; a bundle adjustment without odometry knowledge leaves jitter here that the floor
+    then shows as undulation (pccr_audit4 2026-11-01: 12.5 cm against production's 6 cm). Per keyframe,
+    so the paired judge of the rungs applies to it unchanged."""
+    W = np.asarray(w2c, np.float64).reshape(-1, 4, 4)
+    c = -np.einsum("nji,nj->ni", W[:, :3, :3], W[:, :3, 3])
+    out: Dict[int, float] = {}
+    for k in range(1, len(c) - 1):
+        out[k] = float(np.linalg.norm(c[k] - 0.5 * (c[k - 1] + c[k + 1])))
+    return out
+
+
+def prior_verdict(v_heldout: dict, v_loops: dict, v_smooth: dict) -> Tuple[bool, str]:
+    """USER 2026-11-01 ("lo mejor de ambos"): the odometry priors are taken unless they OPEN a loop; a
+    held-out worsening is tolerated only when the walk's smoothness improves beyond its own noise (the
+    priors trade a measured sub-pixel loss for a measured gain in what they exist for), and never
+    otherwise. Returns (taken, reason)."""
+    if worsens_by_rule(v_loops):
+        return False, "opens a loop by the user's rule"
+    if not worsens_by_rule(v_heldout):
+        return True, "does not worsen the held-out tracks and does not open a loop"
+    smooth_ok = bool(v_smooth.get("improves")) and bool(v_smooth.get("enough_judges", True))
+    if smooth_ok:
+        return True, ("worsens the held-out tracks within what the walk's smoothness gain repays "
+                      "(both beyond their own noise)")
+    return False, "worsens the held-out tracks and does not smooth the walk"
+
+
 def judge_rungs(h_best: Dict[int, float], h_cand: Dict[int, float], clusters: Dict[int, int],
                 error: float, error_factor: float, cfg) -> dict:
     """THE USER'S RULE for 'does the more complex rung enter' (point 46 → metric_lock.decide_change):
@@ -857,18 +887,28 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
             loops_s = _measure_loops(loops_in, held_g, r_s, solver, cfg, fac)
             gap_s = (LG_judge(loops_r0, loops_s, fac, cfg) if loops_r0 is not None and loops_s is not None
                      else {"improves": False, "worsens": False, "n_obs": 0, "reason": "no loop window"})
-            take_s = not worsens_by_rule(v_s) and not worsens_by_rule(gap_s)
+            wob_r0, wob_s = walk_wobble(r.w2c), walk_wobble(r_s.w2c)
+            smooth_s = (judge_rungs(wob_r0, wob_s, {k: k for k in wob_r0}, 0.0, fac, cfg) if len(wob_r0) >= 3
+                        else {"improves": False, "worsens": False, "n_tracks": len(wob_r0), "reason": "too few keyframes"})
+            smooth_s["median_R0_m"] = float(np.median(list(wob_r0.values()))) if wob_r0 else None
+            smooth_s["median_R0s_m"] = float(np.median(list(wob_s.values()))) if wob_s else None
+            take_s, why_s = prior_verdict(v_s, gap_s, smooth_s)
             rep_s = _rung_report(r_s, held_s, dropped_s, cont_s, err_s)
             rep_s.update({"prior": {"sigma_rel": rel_meas.sigma_rel, "sigma_lat": rel_meas.sigma_lat,
                                     "sigma_rot": rel_meas.sigma_rot},
-                          "verdict_vs_R0": v_s, "loop_gap_verdict_vs_R0": gap_s, "taken": take_s,
-                          "rule": "the measured sigma is the prior by construction; taken unless it worsens "
-                                  "the held-out tracks or opens a loop by the user's rule"})
+                          "verdict_vs_R0": v_s, "loop_gap_verdict_vs_R0": gap_s,
+                          "walk_smoothness_vs_R0": smooth_s, "taken": take_s, "reason": why_s,
+                          "rule": "the measured sigma is the prior by construction; taken unless it opens a loop; a "
+                                  "held-out worsening is tolerated only when the walk's smoothness (second difference "
+                                  "of the centres per keyframe) improves beyond its own noise (USER 2026-11-01)"})
             rungs["R0s"] = rep_s
             log(f"{LOG_TAG} R0s (odometry priors with the measured sigma_rot {np.degrees(rel_meas.sigma_rot):.3f} deg, "
                 f"sigma_lat {rel_meas.sigma_lat:.4f}/step): held-out median {rep_s['heldout_median_px']} px "
                 f"({'worsens' if worsens_by_rule(v_s) else 'does not worsen'}; loops "
-                f"{'open' if worsens_by_rule(gap_s) else 'do not open'}): {'TAKEN' if take_s else 'not taken'}")
+                f"{'open' if worsens_by_rule(gap_s) else 'do not open'}; walk wobble "
+                f"{(smooth_s.get('median_R0_m') or 0) * 100:.2f} → {(smooth_s.get('median_R0s_m') or 0) * 100:.2f} cm, "
+                f"{'improves' if smooth_s.get('improves') else 'does not improve'}): "
+                f"{'TAKEN' if take_s else 'not taken'} — {why_s}")
             if take_s:
                 r, held_r, dropped, cont, err = r_s, held_s, dropped_s, cont_s, err_s
                 rel_prior = rel_meas
