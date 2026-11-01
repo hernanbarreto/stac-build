@@ -302,6 +302,7 @@ class ClassicalConfig:
 
 PRIOR_MODELS = ("relative", "absolute")
 INIT_POSES = ("omega", "classical")
+SOLVERS = ("ceres", "torch")
 ROLLING_SHUTTER = ("judged", "never")
 
 
@@ -324,6 +325,8 @@ class RefineConfig:
     prior_model: str            # phase 3b: "relative" (odometry priors between consecutive keyframes,
                                 # the first keyframe fixed — the default) or "absolute" (the gauge
                                 # priors on every keyframe's position, the pre-phase-3b model)
+    solver: str                 # 2026-11-01: ceres (pycolmap, one CPU thread) | torch (precision/ba_torch.py: the same
+                                #   problem on the GPU, deterministic by sorted reductions)
     init_poses: str             # 2026-10-31: where the solve STARTS. "omega" — the gauge's poses (Omega x
                                 # the gauge, the walk as the fork drifted it); "classical" — F3's global
                                 # mapper (GLOMAP) when ONE model registers EVERY keyframe, its trajectory
@@ -876,6 +879,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         min_witness_corr=_num(rf, "min_witness_corr", "refine", lo=4, integer=True),
         prior_model=_enum(rf, "prior_model", "refine", PRIOR_MODELS),
         init_poses=_enum(rf, "init_poses", "refine", INIT_POSES),
+        solver=_enum(rf, "solver", "refine", SOLVERS),
         prior_sigma_from_loops=_bool(rf, "prior_sigma_from_loops", "refine"),
         scale_lock=_bool(rf, "scale_lock", "refine"),
         rolling_shutter=_enum(rf, "rolling_shutter", "refine", ROLLING_SHUTTER),

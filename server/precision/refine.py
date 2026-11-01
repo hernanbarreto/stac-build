@@ -427,6 +427,10 @@ def run_rung(name: str, w2c_start: np.ndarray, params_start: Sequence[float], wh
     ``rel_prior``: the ODOMETRY model instead — relative-pose priors between consecutive keyframes
     (``RelativePrior``), the first keyframe fixed, no absolute prior and no alignment; ``sigmas``
     and ``prior_w2c`` are then unused."""
+    if str(getattr(cfg, "solver", "ceres")) == "torch":
+        from precision.ba_torch import run_rung_torch
+        return run_rung_torch(name, w2c_start, params_start, wh, fit_groups, X_start, sigmas, cfg, block_of=block_of,
+                              params_by_block0=params_by_block0, prior_w2c=prior_w2c, flags_of=flags_of, rel_prior=rel_prior)
     import pycolmap
     _vendor_path()
     from reconstruction.colmap_ba import _rigid, _tune_ceres, _solve_checked
