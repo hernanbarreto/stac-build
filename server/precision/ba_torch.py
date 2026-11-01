@@ -88,22 +88,40 @@ def so3_log(R):
     return v * f[..., None]
 
 
-def segment_sum(values, seg_id, n_seg):
+def segment_ends(seg_id):
+    """The last position of every run of a SORTED segment id vector (the positions where it changes)."""
+    torch = _torch()
+    last = torch.ones(seg_id.shape[0], dtype=torch.bool, device=seg_id.device)
+    if seg_id.shape[0] > 1:
+        last[:-1] = seg_id[1:] != seg_id[:-1]
+    return torch.nonzero(last, as_tuple=False).reshape(-1)
+
+
+def segment_sum(values, seg_id, n_seg, ends=None):
     """Sum ``values`` (M, …) by ``seg_id`` (M,) — ``seg_id`` must be SORTED ascending. Deterministic:
-    a cumulative sum and its differences at the segment ends, no atomics."""
+    a cumulative sum and its differences at the segment ends, no atomics. ``ends`` = segment_ends(seg_id)
+    when the caller has them (a problem's index sets never change between iterations)."""
     torch = _torch()
     if values.shape[0] == 0:
         return torch.zeros((n_seg,) + tuple(values.shape[1:]), dtype=values.dtype, device=values.device)
     cs = torch.cumsum(values, dim=0)
-    last = torch.ones(seg_id.shape[0], dtype=torch.bool, device=values.device)
-    last[:-1] = seg_id[1:] != seg_id[:-1]
-    ends = torch.nonzero(last, as_tuple=False)[:, 0]
+    if ends is None:
+        ends = segment_ends(seg_id)
     totals = cs[ends]
     firsts = torch.cat([torch.zeros_like(totals[:1]), totals[:-1]])
     per_present = totals - firsts
     out = torch.zeros((n_seg,) + tuple(values.shape[1:]), dtype=values.dtype, device=values.device)
     out[seg_id[ends]] = per_present
     return out
+
+
+def run_sums(values, ends):
+    """The sums of ``values`` (n, …) over consecutive runs ending at ``ends`` (sorted positions, the last
+    one n − 1): cumulative sum and differences — one sequential float64 addition order, deterministic."""
+    torch = _torch()
+    cs = torch.cumsum(values, dim=0)
+    totals = cs[ends]
+    return totals - torch.cat([torch.zeros_like(totals[:1]), totals[:-1]])
 
 
 def sorted_scatter_add(target, keys, values):
@@ -228,6 +246,67 @@ class _Problem:
             self.free[:6] = False
         if self.sigmas is None and self.rel_w2c is None and self.nf == 0 and not self.first_constant:
             raise BATorchError("a gauge is needed: priors, a constant first pose or free camera parameters")
+        # THE INDEX PLANS — every permutation and segment boundary the step needs, computed ONCE: the
+        # observation → landmark runs (already sorted by landmark), the observation → camera and → block
+        # orders, the unknown columns of every observation, and (lazily, it is large) the landmark pair
+        # list grouped by camera pair for the Schur complement. Measured 2026-11-01 on pccr's 2.69 M
+        # tracks: sorting these inside every LM iteration was ~60 % of its 9 s.
+        nco = 6 + self.nf
+        self.pt_ends = segment_ends(self.pt_idx)
+        self.cam_order = torch.argsort(self.cam_idx, stable=True)
+        self.ci_sorted = self.cam_idx[self.cam_order]
+        self.cam_ends = segment_ends(self.ci_sorted)
+        self.cam_uniq = self.ci_sorted[self.cam_ends]
+        if self.nf:
+            self.blk_order = torch.argsort(self.obs_block, stable=True)
+            self.bb_sorted = self.obs_block[self.blk_order]
+            self.blk_ends = segment_ends(self.bb_sorted)
+            self.blk_uniq = self.bb_sorted[self.blk_ends]
+        self.cols = self._cols_of_obs(nco)                                                  # (M,nco)
+        self.pose_idx = (6 * torch.arange(self.N, device=device))[:, None] + torch.arange(6, device=device)[None, :]
+        self.cam_cols = ((self.n_pose + self.nf * self.block_of)[:, None]
+                         + torch.arange(self.nf, device=device)[None, :]) if self.nf else None  # (N,nf)
+        self.blk_cols = ((self.n_pose + self.nf * torch.arange(self.B, device=device))[:, None]
+                         + torch.arange(self.nf, device=device)[None, :]) if self.nf else None  # (B,nf)
+        self._pairs = None
+
+    def _pair_plan(self, pair_chunk: int):
+        """All landmark-sharing observation pairs (a, b) sorted by camera pair (cam_a, cam_b), the group
+        ends, each group's unknown rows/cols, and chunk boundaries that never split a group — so the
+        Schur accumulation per iteration is gathers, batched products and run sums into UNIQUE cells."""
+        if self._pairs is not None:
+            return self._pairs
+        torch = self.torch
+        dev = self.device
+        a, b = pair_indices(self.seg_len)
+        key = self.cam_idx[a] * self.N + self.cam_idx[b]
+        order = torch.argsort(key, stable=True)
+        a = a[order].to(torch.int32); b = b[order].to(torch.int32); key = key[order]
+        del order
+        ends = segment_ends(key)
+        gkey = key[ends]
+        g_a = gkey // self.N; g_b = gkey % self.N
+        G = int(ends.shape[0])
+        # chunks: consecutive groups until pair_chunk pairs, a group never split (one run per cell)
+        starts = torch.cat([torch.zeros(1, dtype=ends.dtype, device=dev), ends[:-1] + 1])
+        sizes = (ends - starts + 1).cpu().numpy()
+        chunks = []           # (first group, last group + 1, first pair, last pair + 1)
+        g0, acc = 0, 0
+        for g in range(G):
+            acc += int(sizes[g])
+            if acc >= pair_chunk or g == G - 1:
+                chunks.append((g0, g + 1, int(starts[g0]), int(ends[g]) + 1))
+                g0, acc = g + 1, 0
+        # the cam-param columns are shared by every camera of a block: the pose-cam, cam-pose and cam-cam
+        # parts of the group blocks are summed again per camera / per block (groups sorted by cam_a; a
+        # second order by cam_b)
+        order_b = torch.argsort(g_b, stable=True)
+        gb_sorted = g_b[order_b]
+        plan = {"a": a, "b": b, "ends": ends, "starts": starts, "g_a": g_a, "g_b": g_b, "chunks": chunks,
+                "a_ends": segment_ends(g_a), "order_b": order_b, "b_ends": segment_ends(gb_sorted),
+                "a_uniq": g_a[segment_ends(g_a)], "b_uniq": gb_sorted[segment_ends(gb_sorted)]}
+        self._pairs = plan
+        return plan
 
     # ── evaluation at the current (or a candidate) state ──
     def residuals(self, R=None, t=None, cam=None, X=None, with_jac: bool = True):
@@ -348,8 +427,8 @@ class _Problem:
         J_c = torch.cat([J_pose, J_cam], -1)                                 # (M,2,6+nf)
         nco = 6 + self.nf
         # landmark blocks
-        Hpp = segment_sum(J_pt.transpose(1, 2) @ J_pt, self.pt_idx, self.P)                       # (P,3,3)
-        gp = segment_sum(torch.einsum("mai,ma->mi", J_pt, r_w), self.pt_idx, self.P)              # (P,3)
+        Hpp = segment_sum(J_pt.transpose(1, 2) @ J_pt, self.pt_idx, self.P, self.pt_ends)         # (P,3,3)
+        gp = segment_sum(torch.einsum("mai,ma->mi", J_pt, r_w), self.pt_idx, self.P, self.pt_ends)  # (P,3)
         Dp = torch.diagonal(Hpp, dim1=1, dim2=2).clamp(self.tb.lm_diag_min, self.tb.lm_diag_max)
         Hpp_l = Hpp + lam * torch.diag_embed(Dp)
         Hpp_inv = torch.linalg.inv(Hpp_l)
@@ -382,7 +461,7 @@ class _Problem:
         dc[free] = dc_f
         # back-substitution: Δp = Hpp⁻¹ (−g_p − Wᵀ Δc)
         dc_obs = self._gather_cam_delta(dc, nco)                           # (M,nco)
-        back = segment_sum(torch.einsum("mij,mi->mj", W, dc_obs), self.pt_idx, self.P)            # (P,3)
+        back = segment_sum(torch.einsum("mij,mi->mj", W, dc_obs), self.pt_idx, self.P, self.pt_ends)  # (P,3)
         dp = torch.einsum("pij,pj->pi", Hpp_inv, -gp - back)
         # the predicted decrease, Ceres' model_cost_change: ½|r̃|² − ½|r̃ + J̃Δ|² over the (loss-scaled)
         # residuals and Jacobians of the UNDAMPED problem — J̃Δ evaluated observation by observation and
@@ -401,27 +480,24 @@ class _Problem:
     def _accumulate_camera(self, H, g, J_c, r_w, nco):
         torch = self.torch
         N, nf, B = self.N, self.nf, self.B
-        # pose-pose (6×6 at (i,i)), sorted by camera
-        order = torch.argsort(self.cam_idx, stable=True)
-        Jc = J_c[order]; rw = r_w[order]; ci = self.cam_idx[order]; bi = self.obs_block[order]
+        # pose-pose (6×6 at (i,i)) and the gradient, observations in camera order (planned)
+        Jc = J_c[self.cam_order]; rw = r_w[self.cam_order]
         Jp = Jc[:, :, :6]
-        HPP = segment_sum(Jp.transpose(1, 2) @ Jp, ci, N)                  # (N,6,6)
-        gP = segment_sum(torch.einsum("mai,ma->mi", Jp, rw), ci, N)        # (N,6)
-        idx = (6 * torch.arange(N, device=self.device))[:, None] + torch.arange(6, device=self.device)[None, :]
+        HPP = segment_sum(Jp.transpose(1, 2) @ Jp, self.ci_sorted, N, self.cam_ends)          # (N,6,6)
+        gP = segment_sum(torch.einsum("mai,ma->mi", Jp, rw), self.ci_sorted, N, self.cam_ends)  # (N,6)
+        idx = self.pose_idx
         H[idx[:, :, None], idx[:, None, :]] += HPP
         g[idx] += gP
         if nf:
             Jk = Jc[:, :, 6:]
-            HPK = segment_sum(Jp.transpose(1, 2) @ Jk, ci, N)              # (N,6,nf) per camera, its block's params
-            cam_cols = (self.n_pose + nf * self.block_of)[:, None] + torch.arange(nf, device=self.device)[None, :]  # (N,nf)
+            HPK = segment_sum(Jp.transpose(1, 2) @ Jk, self.ci_sorted, N, self.cam_ends)      # (N,6,nf)
+            cam_cols = self.cam_cols
             H[idx[:, :, None], cam_cols[:, None, :]] += HPK
             H[cam_cols[:, :, None], idx[:, None, :]] += HPK.transpose(1, 2)
-            # cam-cam per block: sort by block
-            ob = torch.argsort(self.obs_block, stable=True)
-            Jk_b = J_c[ob][:, :, 6:]; rw_b = r_w[ob]; bb = self.obs_block[ob]
-            HKK = segment_sum(Jk_b.transpose(1, 2) @ Jk_b, bb, B)          # (B,nf,nf)
-            gK = segment_sum(torch.einsum("mai,ma->mi", Jk_b, rw_b), bb, B)
-            bidx = (self.n_pose + nf * torch.arange(B, device=self.device))[:, None] + torch.arange(nf, device=self.device)[None, :]
+            Jk_b = J_c[self.blk_order][:, :, 6:]; rw_b = r_w[self.blk_order]
+            HKK = segment_sum(Jk_b.transpose(1, 2) @ Jk_b, self.bb_sorted, B, self.blk_ends)  # (B,nf,nf)
+            gK = segment_sum(torch.einsum("mai,ma->mi", Jk_b, rw_b), self.bb_sorted, B, self.blk_ends)
+            bidx = self.blk_cols
             H[bidx[:, :, None], bidx[:, None, :]] += HKK
             g[bidx] += gK
 
@@ -435,39 +511,53 @@ class _Problem:
         return pose_cols
 
     def _reduce_vec(self, v_obs, nco):
-        """Σ over observations of a per-observation camera vector (M,nco) into the dense (n_c,)."""
+        """Σ over observations of a per-observation camera vector (M,nco) into the dense (n_c,): the pose
+        part per camera, the camera-parameter part per block — planned runs, no sort."""
         torch = self.torch
-        cols = self._cols_of_obs(nco).reshape(-1)
         out = torch.zeros(self.n_c, dtype=torch.float64, device=self.device)
-        return sorted_scatter_add(out, cols, v_obs.reshape(-1))
+        v = v_obs[self.cam_order]
+        out[self.pose_idx] += segment_sum(v[:, :6], self.ci_sorted, self.N, self.cam_ends)
+        if self.nf:
+            vb = v_obs[self.blk_order][:, 6:]
+            out[self.blk_cols] += segment_sum(vb, self.bb_sorted, self.B, self.blk_ends)
+        return out
 
     def _gather_cam_delta(self, dc, nco):
-        return dc[self._cols_of_obs(nco)]
+        return dc[self.cols]
 
     def _schur_pairs(self, Y, W, nco, pair_chunk):
-        """Σ_j Σ_{a,b ∈ obs(j)} Y_a W_bᵀ placed at the unknowns of a's and b's cameras — dense (n_c, n_c),
-        accumulated chunk by chunk over the landmarks with sorted segment sums (deterministic)."""
+        """Σ_j Σ_{a,b ∈ obs(j)} Y_a W_bᵀ placed at the unknowns of a's and b's cameras — dense (n_c, n_c).
+        The pairs are grouped by camera pair once (_pair_plan); per iteration: gathers, batched products,
+        run sums per group, and the group blocks added into UNIQUE cells (the pose-pose block of the
+        camera pair; the pose-cam / cam-pose / cam-cam parts summed again per camera / per block).
+        Deterministic: one fixed sequential addition order."""
         torch = self.torch
+        plan = self._pair_plan(int(pair_chunk))
+        G = int(plan["ends"].shape[0])
+        blocks = torch.empty(G, nco, nco, dtype=torch.float64, device=self.device)
+        for (g0, g1, p0, p1) in plan["chunks"]:
+            a = plan["a"][p0:p1].to(torch.int64); b = plan["b"][p0:p1].to(torch.int64)
+            contrib = (Y[a] @ W[b].transpose(1, 2)).reshape(p1 - p0, nco * nco)      # (n_pairs, nco²)
+            ends_local = plan["ends"][g0:g1] - p0
+            blocks[g0:g1] = run_sums(contrib, ends_local).reshape(g1 - g0, nco, nco)
         S = torch.zeros(self.n_c, self.n_c, dtype=torch.float64, device=self.device)
-        cols = self._cols_of_obs(nco)                                      # (M,nco)
-        starts = torch.cumsum(self.seg_len, 0) - self.seg_len
-        p0 = 0
-        P = self.P
-        lens = self.seg_len
-        while p0 < P:
-            # take landmarks until the pair budget is reached
-            cum = torch.cumsum(lens[p0:] * lens[p0:], 0)
-            n_take = int(torch.searchsorted(cum, torch.tensor(pair_chunk, device=cum.device)).item()) + 1
-            p1 = min(P, p0 + max(1, n_take))
-            o0 = int(starts[p0]); o1 = int(starts[p1 - 1] + lens[p1 - 1])
-            a, b = pair_indices(lens[p0:p1])
-            a = a + o0; b = b + o0
-            contrib = Y[a] @ W[b].transpose(1, 2)                          # (n_pairs, nco, nco)
-            rows = cols[a]; cc = cols[b]                                   # (n_pairs, nco)
-            key = (rows[:, :, None] * self.n_c + cc[:, None, :]).reshape(-1)
-            flat = S.reshape(-1)
-            sorted_scatter_add(flat, key, contrib.reshape(-1))
-            p0 = p1
+        ia = self.pose_idx[plan["g_a"]]; ib = self.pose_idx[plan["g_b"]]                 # (G,6)
+        S[ia[:, :, None], ib[:, None, :]] += blocks[:, :6, :6]
+        if self.nf:
+            # pose(a)-cam: summed over b per camera a (groups are sorted by a)
+            pc = segment_sum(blocks[:, :6, 6:], plan["g_a"], self.N, plan["a_ends"])           # (N,6,nf)
+            S[self.pose_idx[:, :, None], self.cam_cols[:, None, :]] += pc
+            # cam-pose(b): summed over a per camera b
+            cpb = blocks[plan["order_b"]][:, 6:, :6]
+            cp = segment_sum(cpb, plan["g_b"][plan["order_b"]], self.N, plan["b_ends"])         # (N,nf,6)
+            S[self.cam_cols[:, :, None], self.pose_idx[:, None, :]] += cp
+            # cam-cam: every group, per (block of a, block of b)
+            bk = self.block_of[plan["g_a"]] * self.B + self.block_of[plan["g_b"]]
+            o = torch.argsort(bk, stable=True)
+            cc = segment_sum(blocks[o][:, 6:, 6:], bk[o], self.B * self.B, segment_ends(bk[o]))   # (B²,nf,nf)
+            rows = self.blk_cols[torch.arange(self.B, device=self.device).repeat_interleave(self.B)]
+            colsb = self.blk_cols[torch.arange(self.B, device=self.device).repeat(self.B)]
+            S[rows[:, :, None], colsb[:, None, :]] += cc
         return S
 
     def apply(self, dc, dp):
