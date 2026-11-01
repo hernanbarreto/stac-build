@@ -4549,6 +4549,22 @@ evaluation:
         "reconstruction.precision.refine.rolling_shutter": never
         "reconstruction.precision.fusion.enabled": false
         "reconstruction.precision.fusion.colmap_tier": false
+    audit_layered_no_rs_classical_init_segment:
+      kind: chain
+      description: >-
+        (audit 2026-10-31, after pccr_audit3's diagnosis) audit_layered_no_rs with F5 started at GLOMAP's
+        trajectory (refine.init_poses classical): the MASt3R bridges, the odometry priors (from GLOMAP's
+        chain) and the scale lock stay — does the start-end loop close and the start of the walk stand
+      stages_off: [reconstruction, cloudcompy]   # the stages AFTER the cloud only (VLM, SAM3, projection,
+                                      #   certification, GenRecon) on the cloud on disk — the precision runner is not
+                                      #   re-entered: the pipeline's epoch discard rewrote depth_correction.json after
+                                      #   the chain ended and the runner's integrity check refuses that resume
+                                      #   (2026-11-01 04:41 UTC, pccr_audit4) — noted as a defect to fix
+      overrides:
+        "reconstruction.precision.refine.init_poses": classical
+        "reconstruction.precision.refine.rolling_shutter": never
+        "reconstruction.precision.fusion.enabled": false
+        "reconstruction.precision.fusion.colmap_tier": false
     bend_affine_pixel:
       kind: chain
       description: (audit 2026-10-23, A/B) only the bend family forced to epoch 7's pixel ratio; the vote as audited
