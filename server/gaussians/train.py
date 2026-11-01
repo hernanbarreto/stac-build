@@ -243,6 +243,18 @@ def clamp_scales_(scales_log_param, tol: float) -> int:
     return n
 
 
+def over_cap_mask(opacities_logit, cap: int):
+    """(N,) bool: the gaussians to remove so at most `cap` stay — the lowest opacities go (a deterministic
+    stable sort), the BOUND train.max_gaussians applied to the default strategy too (gsplat's has none)."""
+    import torch
+    n = int(opacities_logit.shape[0])
+    mask = torch.zeros(n, dtype=torch.bool, device=opacities_logit.device)
+    if n > int(cap):
+        order = torch.argsort(opacities_logit.detach(), stable=True)      # ascending: the faintest first
+        mask[order[: n - int(cap)]] = True
+    return mask
+
+
 def cloud_cell_keys(xyz, tol: float):
     """The sorted unique keys of the cells (size tol) the cloud occupies — one int64 per cell, exact (no hash)."""
     import torch
@@ -337,8 +349,15 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
         n_cl = clamp_scales_(params["scales"], tol)
         if n_rm:
             _remove_gaussians(params=params, optimizers=optimizers, state=(state if strategy_used == "default" else {}), mask=~keep)
-        if n_rm or n_cl:
-            confine_log.append({"step": int(at_step), "removed": n_rm, "clamped_axes": n_cl, "left": int(len(params["means"]))})
+        n_cap = 0
+        if strategy_used == "default":           # the cap: gsplat's default strategy has none
+            with torch.no_grad():
+                over = over_cap_mask(params["opacities"], int(tr["max_gaussians"]))
+            n_cap = int(over.sum())
+            if n_cap:
+                _remove_gaussians(params=params, optimizers=optimizers, state=state, mask=over)
+        if n_rm or n_cl or n_cap:
+            confine_log.append({"step": int(at_step), "removed": n_rm, "clamped_axes": n_cl, "over_cap": n_cap, "left": int(len(params["means"]))})
         return n_rm
     r0, r1 = int(round(float(tr["refine_start_frac"]) * iters)), int(round(float(tr["refine_stop_frac"]) * iters))
     # cameras

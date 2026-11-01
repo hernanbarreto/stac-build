@@ -339,3 +339,11 @@ def test_the_undistortion_is_opencvs_and_the_scale_bound_holds():
     scales = torch.nn.Parameter(torch.log(torch.tensor([[0.01, 0.2, 0.5], [0.02, 0.02, 0.02]])))
     n = GT.clamp_scales_(scales, 0.03)
     assert n == 2 and float(torch.exp(scales).max()) <= 0.03 + 1e-9 and abs(float(torch.exp(scales[1, 0])) - 0.02) < 1e-6
+
+
+def test_the_cap_removes_the_faintest_gaussians_first_and_only_beyond_it():
+    import torch
+    from gaussians.train import over_cap_mask
+    op = torch.tensor([0.0, -3.0, 2.0, -1.0, 1.0])        # logits; the faintest are -3 and -1
+    assert over_cap_mask(op, 3).tolist() == [False, True, False, True, False]
+    assert not over_cap_mask(op, 5).any() and not over_cap_mask(op, 9).any()
