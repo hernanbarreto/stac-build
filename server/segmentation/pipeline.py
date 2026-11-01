@@ -4483,12 +4483,13 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
                 "data": voxel_mesh_data,  # [[cx,cy,cz,nx,ny,nz], ...]
             }
 
-        # Compute OBB from snapped voxel centroids (corrected geometry)
+        # THE OBB FROM THE POINTS, the cleaning's face normals as yaw candidates (2026-11-01): with the
+        # cleaning's RANSAC on, the box used to be fitted to the 5 cm visualisation voxels' centroids,
+        # which sit on a WORLD-AXIS grid — a box that changed with the frame (the levelled frame's box was
+        # not the rotated box: tests/test_p3_wave2_closing.py) and shrank up to half a voxel per side. The
+        # points are the instance; the voxels stay the viewer's mesh data.
         _t0 = _time.perf_counter()
-        if voxel_mesh_data and len(voxel_mesh_data) >= 4:
-            voxel_centers = np.array([[v[0], v[1], v[2]] for v in voxel_mesh_data])
-            instance["obb"] = _compute_obb(voxel_centers, face_normals=face_normals_data, cfg=cfg)
-        elif len(all_matched) >= 4:
+        if len(all_matched) >= 4:
             instance["obb"] = _compute_obb(xyz_display[all_matched], face_normals=face_normals_data,
                                            cfg=cfg)
         _tm["obb_s"] += _time.perf_counter() - _t0
