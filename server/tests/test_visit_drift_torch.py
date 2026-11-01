@@ -121,9 +121,11 @@ def test_the_edge_distances_equal_cv2_at_the_query_pixels():
 
 def _run(out, xyz, fg, pr, pc, ks, poses, device, extra=None):
     cam = VD.projection_camera(out, xyz, ks, poses, pr, pc, min_depth_m=CAM.MIN_DEPTH, log=lambda m: None)
-    ex_xyz, ex_ks = (None, None) if extra is None else extra
-    vis = VD.Visibility(out, xyz, ks, poses, cam, CAM.DEPTH_TOL_M, min_depth_m=CAM.MIN_DEPTH,
-                        extra_xyz=ex_xyz, extra_ks=ex_ks, device=device)
+    import inspect
+    kw = {}
+    if extra is not None and "extra_xyz" in inspect.signature(VD.Visibility.__init__).parameters:
+        kw = {"extra_xyz": extra[0], "extra_ks": extra[1]}      # the consumed observations: the audit branch's z-buffers
+    vis = VD.Visibility(out, xyz, ks, poses, cam, CAM.DEPTH_TOL_M, min_depth_m=CAM.MIN_DEPTH, device=device, **kw)
     masklets = VD.masklet_visits(out, log=lambda m: None)
     pm = VD.points_of_masklets(out, fg, pr, pc, log=lambda m: None, mask_pixels=cam.record_to_mask(pr, pc))
     kill, rep = VD.cloud_filter_masklets(
