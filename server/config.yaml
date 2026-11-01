@@ -2313,7 +2313,7 @@ reconstruction:
       permutations: 2000                # BOUND: resamples of the permutation / bootstrap tests
       seed: 0                           # their fixed seed
       min_witness_corr: 12              # BOUND: 2D-3D correspondences a witness needs for PnP
-      solver: ceres                     # ceres (pycolmap, ONE CPU thread for bit-identity, ~60 min on pccr) | torch:
+      solver: torch                     # torch = the default since 2026-11-01 (USER: "hacelo todo a GPU ya mismo"); ceres (pycolmap, ONE CPU thread, hours on pccr) | torch:
                                         #   precision/ba_torch.py — the same residuals, loss, priors and camera freedom
                                         #   on the GPU in float64, Schur complement, sorted reductions (bit-identical
                                         #   between runs); USER 2026-11-01: 'todo debe correr en gpu, en modo determinista'.
