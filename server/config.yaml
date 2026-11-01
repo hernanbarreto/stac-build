@@ -123,6 +123,8 @@ gaussians:                           # THE REALISM LAYER (USER 2026-10-31: "el r
     max_points: 2000000              # BOUND: the seeds are a stable subsample of the published cloud (pccr 19.4 M → 2 M)
     min_confidence: 0.0              # a cloud point under this confidence does not seed (0 = every point)
     scale_knn: 3                     # the initial scale of a seed = its mean distance to the 3 nearest seeds
+    opacity: 0.1                     # gsplat simple_trainer `init_opa` (default preset); train.mcmc overrides it
+    scale: 1.0                       # gsplat simple_trainer `init_scale`, × the knn distance; train.mcmc overrides it
     seed: 0                          # the subsample's permutation (recorded)
   train:
     iterations: 30000
@@ -132,11 +134,14 @@ gaussians:                           # THE REALISM LAYER (USER 2026-10-31: "el r
     max_gaussians: 4000000           # BOUND
     refine_start_frac: 0.0167        # the densification window as fractions of the iterations (gsplat: 500 …
     refine_stop_frac: 0.5            #   … 15000 of 30000)
-    depth_loss_weight: 0.2           # L1 of the rendered depth against the depth the chain measured, where it measured
-                                     #   one (normalised by the frame's median depth): the splats sit on the measured
-                                     #   surface. 0 = photometric only
+    depth_lambda: 0.01               # gsplat simple_trainer `depth_lambda`: L1 of the DISPARITY (1/z) against the
+                                     #   depth the chain measured × the scene extent × this, where it measured one.
+                                     #   (The first pccr run used a 0.2 relative-L1 of my own: 20× the reference.)
+    means_lr_decay: 0.01             # gsplat simple_trainer: the means' lr decays exponentially to 1 % by the last
+                                     #   iteration (ExponentialLR, gamma = decay^(1/iterations))
     ssim_weight: 0.2                 # photometric loss = 0.8·L1 + 0.2·(1 − SSIM), the reference recipe
-    exposure: true                   # a learned 3×4 affine colour correction per keyframe (the phone's auto exposure)
+    exposure: false                  # a learned 3×4 affine colour correction per keyframe (the phone's auto exposure);
+                                     #   OFF: the reference recipe has none (pccr runs it as a declared experiment)
     exposure_reg: 0.001              # its pull toward identity
     holdout_every: 8                 # every 8th keyframe is HELD OUT: the report's PSNR / SSIM are measured there
                                      #   (pccr: 36 of 295 keyframes)
@@ -150,6 +155,29 @@ gaussians:                           # THE REALISM LAYER (USER 2026-10-31: "el r
       sh0: 0.0025
       shN: 0.000125
       exposure: 0.001
+    mcmc:                            # gsplat 1.5.3 simple_trainer `mcmc` preset + MCMCStrategy's defaults. Runs when
+                                     #   train.strategy is mcmc, or when the session camera has lens distortion (the
+                                     #   unscented-transform projection carries no means2d gradient for the default
+                                     #   densification — pccr 2026-10-31)
+      init_opacity: 0.5              # preset `init_opa`
+      init_scale: 0.1                # preset `init_scale` (× the knn distance)
+      opacity_reg: 0.01              # preset: + opacity_reg · mean(sigmoid(opacities)); without it (first pccr run)
+      scale_reg: 0.01                #   the gaussians stayed half-transparent and wandered: floating blobs, 21 dB
+      noise_lr: 500000               # MCMCStrategy defaults
+      refine_start_iter: 500
+      refine_stop_iter: 25000
+      refine_every: 100
+      min_opacity: 0.005
+    confine:                         # USER 2026-10-31: "debe quedar confinado a la nube y al mesh, no voladores por
+                                     #   cualquier lado". A HARD prune, not a regulariser: every `every` iterations
+                                     #   and at the end, a gaussian with NO published-cloud point within tolerance_m
+                                     #   per axis is removed (voxel hash of the cloud at tolerance_m: its own or an
+                                     #   adjacent cell), optimizer state included; a kept gaussian therefore has a
+                                     #   cloud point within 2·tolerance_m per axis. Every prune and the final census
+                                     #   go to report.json; every gaussian is labelled by its nearest cloud point.
+      tolerance_m: 0.03              # BOUND: ~5× the cloud's median spacing (pccr 5.7 mm) — a gaussian's centre sits
+                                     #   within its own extent of the surface it paints
+      every: 100                     # aligned with the strategies' refine_every
   export:
     formats: [ply, splat]            # the 3DGS PLY always first (the record); .splat for the viewer
   label:

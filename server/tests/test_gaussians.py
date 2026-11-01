@@ -31,8 +31,8 @@ def test_the_configuration_is_strict_and_loads_from_config_yaml():
     assert cfg.name and cfg.python and cfg.export.formats[0] == "ply"
     assert 0 <= cfg.train.sh_degree <= 3 and cfg.train.holdout_every >= 2
     broken = json.loads(json.dumps(raw))
-    del broken["gaussians"]["train"]["depth_loss_weight"]
-    with pytest.raises(GC.GaussiansConfigError, match="gaussians.train.depth_loss_weight"):
+    del broken["gaussians"]["train"]["depth_lambda"]
+    with pytest.raises(GC.GaussiansConfigError, match="gaussians.train.depth_lambda"):
         GC.load_gaussians_config(broken)
     broken = json.loads(json.dumps(raw))
     broken["gaussians"]["export"]["formats"] = ["splat"]
@@ -280,3 +280,33 @@ def test_a_lens_session_runs_the_mcmc_strategy_and_the_report_says_why():
     assert used == "mcmc" and "lens" in why and "gradient" in why
     assert strategy_choice("default", lens=False) == ("default", "as configured")
     assert strategy_choice("mcmc", lens=True)[0] == "mcmc" and strategy_choice("mcmc", lens=False)[0] == "mcmc"
+
+
+def test_the_recipe_is_gsplats_reference_and_the_confinement_removes_every_gaussian_off_the_cloud():
+    """The presets of gsplat's simple_trainer (default: init_opa 0.1 / init_scale 1; mcmc: 0.5 / 0.1), the means'
+    lr decaying to 1 % by the last iteration, the depth term as disparity L1, and the confinement: a gaussian
+    with no cloud point within the tolerance per axis is removed, one on the cloud stays — deterministic."""
+    import torch
+    import yaml
+    from gaussians import train as GT
+    from gaussians.config import load_gaussians_config
+    raw = yaml.safe_load(open(Path(__file__).resolve().parent.parent / "config.yaml"))
+    cfg = load_gaussians_config(raw).to_dict()
+    assert GT.init_for("default", cfg["init"], cfg["train"]["mcmc"]) == (0.1, 1.0)
+    assert GT.init_for("mcmc", cfg["init"], cfg["train"]["mcmc"]) == (0.5, 0.1)
+    assert cfg["train"]["mcmc"]["opacity_reg"] == 0.01 and cfg["train"]["mcmc"]["scale_reg"] == 0.01
+    g = GT.means_lr_gamma(cfg["train"]["means_lr_decay"], 30000)
+    assert abs(g ** 30000 - 0.01) < 1e-9
+    d_pred = torch.tensor([2.0, 4.0, 0.0]); d_meas = torch.tensor([2.0, 2.0, 3.0]); ok = torch.tensor([True, True, True])
+    # pixel 1: |1/4 - 1/2| = 0.25; pixel 0: 0; pixel 2 has no render → mean 0.125 × extent 10 × lambda 0.01
+    assert abs(float(GT.depth_disparity_loss(d_pred, d_meas, ok, 10.0, 0.01)) - 0.0125) < 1e-9
+    # the confinement: a 1 m square of cloud points on a 1 cm grid at z = 0
+    xs = torch.arange(0.0, 1.0, 0.01)
+    cloud = torch.stack(torch.meshgrid(xs, xs, indexing="ij"), -1).reshape(-1, 2)
+    cloud = torch.cat([cloud, torch.zeros(len(cloud), 1)], 1)
+    tol = 0.03
+    keys = GT.cloud_cell_keys(cloud, tol)
+    means = torch.tensor([[0.5, 0.5, 0.0], [0.5, 0.5, 0.02], [0.5, 0.5, 0.1], [2.0, 2.0, 0.0], [0.5, 0.5, -0.059]])
+    keep = GT.confinement_keep(means, keys, tol)
+    assert keep.tolist() == [True, True, False, False, False]     # 2 cm above stays; 10 cm above, 1 m away and 6 cm below go
+    assert torch.equal(keep, GT.confinement_keep(means, keys, tol))

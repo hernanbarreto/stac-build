@@ -65,8 +65,8 @@ def _gaussians_work(pipe: WorkerPipe, session_dir: str, config: dict):
     ts, loader = build_training_set(session_path, cfg, log=lambda m: pipe.send_log(str(m)))
     write_trainset(ts, trainset_dir, loader, log=lambda m: pipe.send_log(str(m)))
     tcfg_path = trainset_dir / "train_config.json"
-    tcfg_path.write_text(json.dumps({"train": cfg.to_dict()["train"], "export": cfg.to_dict()["export"],
-                                     "label": cfg.to_dict()["label"]}, indent=1))
+    d = cfg.to_dict()
+    tcfg_path.write_text(json.dumps({k: d[k] for k in ("init", "train", "export", "label")}, indent=1))
     pipe.send_progress(10, f"fitting the splats ({ts.n_seeds:,} seeds, {ts.n_frames} keyframes) in env gs", stage=STAGE)
     server_dir = Path(__file__).resolve().parent.parent
     env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONPATH": str(server_dir)}

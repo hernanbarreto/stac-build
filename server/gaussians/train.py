@@ -32,7 +32,7 @@ import numpy as np
 
 from gaussians import label as GL
 from gaussians.dataset import TrainingSet, read_depth_map, read_trainset
-from gaussians.plyio import SH_C0, write_gaussians_ply, write_instances, write_splat
+from gaussians.plyio import SH_C0, write_gaussians_ply, write_instances, write_splat, read_ply_vertices
 
 LOG = "[gs]"
 PLY_NAME = "gaussians.ply"
@@ -204,10 +204,61 @@ def strategy_choice(requested: str, lens: bool) -> Tuple[str, str]:
     return requested, "as configured"
 
 
+def init_for(strategy_used: str, init_cfg: Dict[str, Any], mcmc_cfg: Dict[str, Any]) -> Tuple[float, float]:
+    """(initial opacity, initial scale factor × the knn distance): gsplat simple_trainer's presets — the mcmc
+    preset's init_opa 0.5 / init_scale 0.1 for mcmc, the default preset's (config init.opacity / init.scale)."""
+    if strategy_used == "mcmc":
+        return float(mcmc_cfg["init_opacity"]), float(mcmc_cfg["init_scale"])
+    return float(init_cfg["opacity"]), float(init_cfg["scale"])
+
+
+def means_lr_gamma(decay: float, iterations: int) -> float:
+    """ExponentialLR's gamma so the means' lr reaches decay × its start by the last iteration (gsplat: 0.01)."""
+    return float(decay) ** (1.0 / max(1, int(iterations)))
+
+
+def depth_disparity_loss(d_pred, d_meas, ok, scene_extent: float, depth_lambda: float):
+    """gsplat simple_trainer's depth term: L1 of the disparity (1/z) against the measured depth, × the scene
+    extent × depth_lambda, over the pixels where the session measured a depth and the render has one."""
+    import torch
+    ok2 = ok & (d_meas > 0) & (d_pred > 0)
+    if not bool(ok2.any()):
+        return d_pred.sum() * 0.0
+    return torch.abs(1.0 / d_pred[ok2] - 1.0 / d_meas[ok2]).mean() * float(scene_extent) * float(depth_lambda)
+
+
+_CELL_OFF = 1 << 20   # cell indices live in [-2^20, 2^20): ±31 km at a 3 cm tolerance
+
+
+def cloud_cell_keys(xyz, tol: float):
+    """The sorted unique keys of the cells (size tol) the cloud occupies — one int64 per cell, exact (no hash)."""
+    import torch
+    c = torch.floor(xyz / float(tol)).to(torch.int64) + _CELL_OFF
+    keys = (c[:, 0] << 42) | (c[:, 1] << 21) | c[:, 2]
+    return torch.unique(keys)
+
+
+def confinement_keep(means, cloud_keys, tol: float):
+    """(N,) bool: the gaussian's cell or one of its 26 neighbours holds a cloud point. A gaussian with NO cloud
+    point within tol per axis is therefore False (removed); a True one has a cloud point within 2·tol per axis."""
+    import torch
+    c = torch.floor(means / float(tol)).to(torch.int64) + _CELL_OFF
+    keep = torch.zeros(len(means), dtype=torch.bool, device=means.device)
+    n = len(cloud_keys)
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                k = ((c[:, 0] + dx) << 42) | ((c[:, 1] + dy) << 21) | (c[:, 2] + dz)
+                idx = torch.searchsorted(cloud_keys, k).clamp_(max=n - 1)
+                keep |= cloud_keys[idx] == k
+    return keep
+
+
 def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) -> Dict[str, Any]:
     import torch
     from gsplat import rasterization
     from gsplat.strategy import DefaultStrategy, MCMCStrategy
+    from gsplat.strategy.ops import remove as _remove_gaussians
 
     t_start = time.time()
     trainset_dir, out_dir = Path(trainset_dir), Path(out_dir)
@@ -226,13 +277,22 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
     images = _load_images(ts, device)
     depths = _depth_targets(ts, trainset_dir, device, log) if float(tr["depth_loss_weight"]) > 0 else {}
     extent = scene_extent(ts.c2w)
+    # the lens decides the strategy (strategy_choice), the strategy its init preset (gsplat default / mcmc)
+    dist = np.asarray(ts.dist, np.float64)
+    lens = bool(np.any(np.abs(dist) > 0))
+    strategy_used, strategy_reason = strategy_choice(str(tr["strategy"]), lens)
+    if strategy_used != tr["strategy"]:
+        log(f"{LOG} strategy {tr['strategy']} → {strategy_used}: {strategy_reason}")
+    ini, mc, cf = tcfg["init"], tr["mcmc"], tr["confine"]
+    init_opacity, init_scale = init_for(strategy_used, ini, mc)
+    log(f"{LOG} init: opacity {init_opacity}, scale ×{init_scale} of the knn distance (gsplat {strategy_used} preset)")
 
     # the parameters
     K_sh = (int(tr["sh_degree"]) + 1) ** 2 - 1
     means = torch.from_numpy(np.asarray(ts.seeds_xyz, np.float32)).to(device)
-    scales = torch.from_numpy(np.asarray(ts.seeds_scale_log, np.float32)).to(device)
+    scales = torch.from_numpy(np.asarray(ts.seeds_scale_log, np.float32)).to(device) + float(np.log(init_scale))
     quats = torch.zeros(N0, 4, device=device); quats[:, 0] = 1.0
-    opacities = torch.full((N0,), logit(0.1), device=device)
+    opacities = torch.full((N0,), logit(init_opacity), device=device)
     sh0 = torch.from_numpy(rgb_to_sh0(np.asarray(ts.seeds_rgb, np.float32) / 255.0)).to(device)[:, None, :]
     shN = torch.zeros(N0, K_sh, 3, device=device)
     params = torch.nn.ParameterDict({
@@ -246,17 +306,33 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
     exp_opt = torch.optim.Adam([exposure.A], lr=float(lr["exposure"])) if exposure is not None else None
 
     iters = int(tr["iterations"])
+    sched = torch.optim.lr_scheduler.ExponentialLR(optimizers["means"], gamma=means_lr_gamma(float(tr["means_lr_decay"]), iters))
+
+    # confinement to the measured surface (USER 2026-10-31): the published cloud's occupied cells at the tolerance
+    cloud_p = Path(ts.meta["session_dir"]) / "output" / "cleaned_cloud.ply"
+    cv = read_ply_vertices(cloud_p)
+    cloud_xyz = np.stack([np.asarray(cv["x"]), np.asarray(cv["y"]), np.asarray(cv["z"])], 1).astype(np.float32)
+    tol = float(cf["tolerance_m"]); confine_every = int(cf["every"])
+    cloud_keys = cloud_cell_keys(torch.from_numpy(cloud_xyz).to(device), tol)
+    confine_log: List[Dict[str, Any]] = []
+    log(f"{LOG} confinement: {len(cloud_xyz):,} cloud points in {len(cloud_keys):,} cells of {tol} m; checked every {confine_every} iterations")
+
+    def confine(at_step: int) -> int:
+        with torch.no_grad():
+            keep = confinement_keep(params["means"].detach(), cloud_keys, tol)
+        n_rm = int((~keep).sum())
+        if n_rm:
+            _remove_gaussians(params=params, optimizers=optimizers, state=(state if strategy_used == "default" else {}), mask=~keep)
+            confine_log.append({"step": int(at_step), "removed": n_rm, "left": int(len(params["means"]))})
+        return n_rm
     r0, r1 = int(round(float(tr["refine_start_frac"]) * iters)), int(round(float(tr["refine_stop_frac"]) * iters))
     # cameras
     w2c = torch.from_numpy(np.linalg.inv(np.asarray(ts.c2w, np.float64)).astype(np.float32)).to(device)
     K_t = torch.from_numpy(np.asarray(ts.K, np.float32)).to(device)
-    dist = np.asarray(ts.dist, np.float64)
-    lens = bool(np.any(np.abs(dist) > 0))
-    strategy_used, strategy_reason = strategy_choice(str(tr["strategy"]), lens)
-    if strategy_used != tr["strategy"]:
-        log(f"{LOG} strategy {tr['strategy']} → {strategy_used}: {strategy_reason}")
     if strategy_used == "mcmc":
-        strategy = MCMCStrategy(cap_max=int(tr["max_gaussians"]), refine_start_iter=r0, refine_stop_iter=r1, verbose=False)
+        strategy = MCMCStrategy(cap_max=int(tr["max_gaussians"]), noise_lr=float(mc["noise_lr"]),
+                                refine_start_iter=int(mc["refine_start_iter"]), refine_stop_iter=int(mc["refine_stop_iter"]),
+                                refine_every=int(mc["refine_every"]), min_opacity=float(mc["min_opacity"]), verbose=False)
     else:
         strategy = DefaultStrategy(refine_start_iter=r0, refine_stop_iter=r1, verbose=False)
     strategy.check_sanity(params, optimizers)
@@ -272,7 +348,7 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
     def render(i: int, degree: int, need_depth: bool):
         kw: Dict[str, Any] = {}
         if lens:
-            kw.update(with_ut=True, radial_coeffs=radial, tangential_coeffs=tangential)
+            kw.update(with_ut=True, with_eval3d=True, radial_coeffs=radial, tangential_coeffs=tangential)
         colors = torch.cat([params["sh0"], params["shN"]], dim=1)
         renders, alphas, info = rasterization(
             means=params["means"], quats=params["quats"], scales=torch.exp(params["scales"]),
@@ -301,7 +377,8 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
     rng = np.random.default_rng(seed)
     order: List[int] = []
     evals: List[Dict[str, Any]] = []
-    w_ssim, w_depth, w_exp = float(tr["ssim_weight"]), float(tr["depth_loss_weight"]), float(tr["exposure_reg"])
+    w_ssim, w_depth, w_exp = float(tr["ssim_weight"]), float(tr["depth_lambda"]), float(tr["exposure_reg"])
+    n_confined_total = 0
     loss_hist: List[float] = []
     t_train = time.time()
     for step in range(iters):
@@ -321,22 +398,24 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
         loss = (1.0 - w_ssim) * l1 + w_ssim * (1.0 - ssim(pred.clamp(0, 1), gt)) if w_ssim > 0 else l1
         if need_depth:
             d_meas, ok = depths[i]
-            d_pred = renders[..., 3]
-            ok2 = ok & (alphas[..., 0] > 0.5)
-            if bool(ok2.any()):
-                med = torch.median(d_meas[ok2]).clamp_min(1e-3)
-                loss = loss + w_depth * (torch.abs(d_pred[ok2] - d_meas[ok2]) / med).mean()
+            loss = loss + depth_disparity_loss(renders[..., 3], d_meas, ok, extent, w_depth)
+        if strategy_used == "mcmc":          # the mcmc preset's regularisers (gsplat simple_trainer)
+            loss = loss + float(mc["opacity_reg"]) * torch.sigmoid(params["opacities"]).mean() \
+                        + float(mc["scale_reg"]) * torch.exp(params["scales"]).mean()
         if exposure is not None and w_exp > 0:
             loss = loss + w_exp * exposure.penalty()
         loss.backward()
-        if strategy_used == "mcmc":
-            strategy.step_post_backward(params, optimizers, state, step, info, lr=lrs["means"])
-        else:
-            strategy.step_post_backward(params, optimizers, state, step, info, packed=False)
-        for opt in optimizers.values():
+        for opt in optimizers.values():      # gsplat's order: optimizer step, scheduler, then the strategy
             opt.step(); opt.zero_grad(set_to_none=True)
         if exp_opt is not None:
             exp_opt.step(); exp_opt.zero_grad(set_to_none=True)
+        sched.step()
+        if strategy_used == "mcmc":
+            strategy.step_post_backward(params, optimizers, state, step, info, lr=sched.get_last_lr()[0])
+        else:
+            strategy.step_post_backward(params, optimizers, state, step, info, packed=False)
+        if (step + 1) % confine_every == 0:
+            n_confined_total += confine(step + 1)
         loss_hist.append(float(loss))
         if (step + 1) % 100 == 0 or step == 0:
             pct = 100.0 * (step + 1) / iters
@@ -344,6 +423,10 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
                 f"sh {degree}", flush=True)
         if (step + 1) % int(tr["eval_every"]) == 0 and step + 1 < iters:
             evals.append(evaluate(step + 1))
+    n_confined_final = confine(iters)
+    n_confined_total += n_confined_final
+    log(f"{LOG} confinement: {n_confined_total:,} gaussians removed off the surface over {len(confine_log)} prune(s), "
+        f"{n_confined_final:,} at the end; {len(params['means']):,} stay")
     evals.append(evaluate(iters))
     t_fit = time.time() - t_train
 
@@ -357,7 +440,7 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
         sh0_np = params["sh0"].detach().cpu().numpy()[:, 0, :].astype(np.float32)
         shN_np = params["shN"].detach().cpu().numpy().astype(np.float32)
     N = len(means_np)
-    seed_index = GL.seed_index_by_nearest(means_np, ts.seeds_xyz, ts.seeds_cloud_index, float(lb["nearest_radius_m"]))
+    seed_index = GL.seed_index_by_nearest(means_np, cloud_xyz, np.arange(len(cloud_xyz), dtype=np.uint32), float(lb["nearest_radius_m"]))
     n_no_seed = int((seed_index == GL.NO_SEED).sum())
     files: Dict[str, str] = {}
     comments = [f"stac gaussians: {N} gaussians from {N0} seeds of the published cloud; poses and camera fixed (certified)"]
@@ -375,6 +458,11 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
         "depth_supervision": {"weight": w_depth, "n_keyframes_with_depth": len(depths)},
         "exposure": {"learned": exposure is not None, "reg": w_exp},
         "strategy": {"requested": tr["strategy"], "used": strategy_used, "reason": strategy_reason},
+        "recipe": "gsplat 1.5.3 examples/simple_trainer.py: default / mcmc presets, depth = disparity L1 x scene extent, "
+                  "means lr ExponentialLR; plus the confinement prune to the published cloud",
+        "init": {"opacity": init_opacity, "scale_factor": init_scale},
+        "confine": {"tolerance_m": tol, "kept_within_m_per_axis": 2 * tol, "every": confine_every, "n_cloud_points": int(len(cloud_xyz)),
+                    "removed_total": int(n_confined_total), "removed_at_end": int(n_confined_final), "prunes": confine_log},
         "scene_extent_m": extent, "sh_degree": int(tr["sh_degree"]),
         "camera": {"lens": lens, "dist": dist.tolist(), "K_native": ts.K.tolist(), "size": [W, H]},
         "seconds": {"total": round(time.time() - t_start, 1), "fit": round(t_fit, 1)},
