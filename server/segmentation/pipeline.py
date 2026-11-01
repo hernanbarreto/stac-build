@@ -2769,6 +2769,24 @@ def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
               f"(DBSCAN -{dbscan_removed}, RANSAC disabled)")
         return indices, [], [], [], np.array([], dtype=np.int32)
     
+    # steps 2-6 on the evidence device (segmentation/clean_torch.py, 2026-11-01: the RANSAC's 500
+    # hypotheses and the 5 cm voxel pass took 174 s on pccr's floor in numpy); _faces_and_voxels_numpy
+    # below is the reference, held equal by tests/test_clean_torch.py
+    from reconstruction.surface_fit.hole_audit import evidence_device
+    from segmentation.clean_torch import faces_and_voxels_t
+    params = {"ransac_tolerance": get_param(f'{cfg_prefix}.ransac_tolerance', 0.01),
+              "min_face_points": get_param(f'{cfg_prefix}.min_face_points', 100),
+              "max_faces": get_param(f'{cfg_prefix}.max_faces', 8),
+              "planarity_threshold": planarity_thresh}
+    return faces_and_voxels_t(points, indices, obj_id, params, n_original, dbscan_removed, evidence_device())
+
+
+def _faces_and_voxels_numpy(xyz: np.ndarray, points: np.ndarray, indices: np.ndarray, obj_id: int,
+                            get_param, cfg_prefix: str, planarity_thresh: float, n_original: int,
+                            dbscan_removed: int) -> tuple:
+    """Steps 2-6 of :func:`_clean_segment_subcloud` as they ran until 2026-11-01 (the RANSAC faces,
+    the parallel-face merge, the nearest-face assignment, the 5 cm voxel pass with its flood fill) —
+    the path of record, kept as the reference of ``segmentation.clean_torch.faces_and_voxels_t``."""
     # ── Load RANSAC parameters ──
     ransac_tol = get_param(f'{cfg_prefix}.ransac_tolerance', 0.01)
     min_face_pts = get_param(f'{cfg_prefix}.min_face_points', 100)
