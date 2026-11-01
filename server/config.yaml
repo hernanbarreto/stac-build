@@ -953,9 +953,10 @@ models:
 
     # Per-segment cleaning (voxel grid + local PCA + depth peeling)
     segment_cleaning:
-      enabled: false                   # USER ORDER 2026-08-29: "nada de nada" — whatever the
-                                       # mask grabs stays untouched (no DBSCAN, no layer peel,
-                                       # no SOR). The mask is the assignment, raw.
+      enabled: true                    # USER 2026-11-01: "prende la limpieza por objeto en el config, que
+                                       # quede activada" (it had been off since 2026-08-29, "nada de nada").
+                                       # DBSCAN → voxel PCA → layer peel / SOR per instance, numpy/sklearn
+                                       # today (on the GPU list: it is per-object CPU in the projection).
       voxel_size: 0.005                # 5mm cell — fallback for curved surfaces
       min_points_per_voxel: 5
       planarity_threshold: 0.3         # λ₃/λ₁ — below this = planar → depth peel
