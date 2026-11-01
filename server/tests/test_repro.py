@@ -553,3 +553,19 @@ def test_written_files_keep_the_umask_permissions(tmp_path):
     assert stat.S_IMODE(p.stat().st_mode) == 0o644
     with pytest.raises(ValueError):
         repro.write_rows_exact(tmp_path / "e.txt", np.zeros((0, 3)))
+
+
+def test_the_card_probe_runs_once_per_process_and_visible_devices(monkeypatch):
+    calls = []
+    monkeypatch.setattr(repro, "_card_probe_subprocess", _a100_probe(TORCH_BYTES_BEFORE_RESTART, calls))
+    monkeypatch.setattr(repro, "_nvidia_smi", _smi(CARD_ROW.format(used=0)))
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    a = repro.card_identity()
+    b = repro.card_identity()
+    assert a == b and calls == [0]                     # the second identity: no new probe
+    b["name"] = "changed"                              # a caller's copy never reaches the memo
+    assert repro.card_identity()["name"] == a["name"] and calls == [0]
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")    # another visible card: probed again
+    repro.card_identity()
+    assert calls == [0, 0]

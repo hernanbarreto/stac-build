@@ -230,6 +230,19 @@ def _card_probe_subprocess(device: int) -> Dict[str, Any]:
         raise ReproError(f"card_identity: unreadable probe answer {r.stdout!r}") from e
 
 
+# the torch probe's answer per (probe, device, CUDA_VISIBLE_DEVICES), kept for the process's life: a
+# card's properties do not change while a process lives, and every probe is a fresh python + torch +
+# CUDA (~12 s on this pod; station 2026-11-01: two of them in the ~40 s before Omega, the card idle)
+_CARD_PROBE_MEMO: Dict[tuple, Dict[str, Any]] = {}
+
+
+def _card_probe_memo(device: int) -> Dict[str, Any]:
+    key = (_card_probe_subprocess, int(device), os.environ.get("CUDA_VISIBLE_DEVICES"))
+    if key not in _CARD_PROBE_MEMO:
+        _CARD_PROBE_MEMO[key] = _card_probe_subprocess(device)
+    return dict(_CARD_PROBE_MEMO[key])
+
+
 _CARD_KEY_SEP = " | "                    # card_key's field separator (parse_card_key splits on it)
 
 
@@ -291,7 +304,7 @@ def card_identity(device: int = 0) -> Dict[str, Any]:
     if torch is not None and torch.cuda.is_initialized():
         ident = _card_probe_inprocess(device)
     else:
-        ident = _card_probe_subprocess(device)
+        ident = _card_probe_memo(device)
     name = str(ident.get("name") or "").strip()
     total = int(ident.get("total_memory_bytes") or 0)
     uuid = str(ident.get("uuid") or "").strip()
