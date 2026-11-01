@@ -177,3 +177,18 @@ def test_ceres_threads_must_stay_one():
     raw["reconstruction"]["precision"]["refine"]["ceres_threads"] = 8
     with pytest.raises(PrecisionConfigError, match="ceres_threads.*bit-identical"):
         load_precision_config(raw)
+
+
+def test_refine_solver_is_an_enum_and_mandatory():
+    import copy
+    from precision.config import PrecisionConfigError, load_precision_config
+    raw = _raw()
+    assert load_precision_config(raw).refine.solver in ("ceres", "torch")
+    raw["reconstruction"]["precision"]["refine"]["solver"] = "torch"
+    assert load_precision_config(raw).refine.solver == "torch"
+    raw["reconstruction"]["precision"]["refine"]["solver"] = "cuda"
+    with pytest.raises(PrecisionConfigError):
+        load_precision_config(raw)
+    del raw["reconstruction"]["precision"]["refine"]["solver"]
+    with pytest.raises(PrecisionConfigError):
+        load_precision_config(raw)

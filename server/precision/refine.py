@@ -319,6 +319,10 @@ def run_rung(name: str, w2c_start: np.ndarray, params_start: Sequence[float], wh
     point 61). ``prior_w2c``: the poses whose centres hold the gauge priors — the GAUGE poses for
     every rung (default: ``w2c_start``, the pre-2026-10-07 behaviour, kept for callers that start at
     the gauge). The position prior σ per keyframe is ``sigmas``."""
+    if str(getattr(cfg, "solver", "ceres")) == "torch":
+        from precision.ba_torch import run_rung_torch
+        return run_rung_torch(name, w2c_start, params_start, wh, fit_groups, X_start, sigmas, cfg, block_of=block_of,
+                              params_by_block0=params_by_block0, prior_w2c=prior_w2c)
     import pycolmap
     _vendor_path()
     from reconstruction.colmap_ba import _rigid, _tune_ceres, _solve_checked
