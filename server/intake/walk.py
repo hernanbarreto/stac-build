@@ -128,17 +128,46 @@ def load_window(path: Path) -> Dict[str, Any]:
                 "path": str(path)}
 
 
+# threads for the passes over the I3 window files (station 2026-11-01, measure_walk 140 s with the
+# card idle: 100 s of zlib compressing the anchors, 18 s hashing the windows — reading a 139 MB stored
+# npz is the zip CRC): zlib.compress, zlib.crc32, the file reads and hashlib release the GIL, and
+# every task reads and writes its own files — the arrays, the anchors' arrays and every number
+# computed from them are the ones the loop over the windows computed
+WINDOW_THREADS = 8
+
+
+def _content_sha256_of(arrays: Dict[str, np.ndarray]) -> str:
+    """window_content_sha256 of a window's arrays already read: name, dtype, shape, bytes — sorted
+    by name (a large array's bytes go to the hash through its buffer, not a copy: the same bytes)."""
+    import hashlib
+    h = hashlib.sha256()
+    for k in sorted(arrays):
+        a = np.ascontiguousarray(arrays[k])
+        h.update(f"{k}\0{a.dtype.str}\0{list(a.shape)}\0".encode())
+        h.update(a.tobytes() if a.nbytes < (1 << 20) else memoryview(a.reshape(-1).view(np.uint8)))
+    return h.hexdigest()
+
+
+def _read_arrays(path) -> Dict[str, np.ndarray]:
+    with np.load(path) as z:
+        return {k: z[k] for k in z.files}
+
+
 def window_content_sha256(path: Path) -> str:
     """sha256 of a window file's ARRAYS (name, dtype, shape, bytes — sorted by name): the npz's
     own bytes carry zip timestamps, its arrays are what the walk and the gauge read."""
-    import hashlib
-    h = hashlib.sha256()
-    with np.load(path) as z:
-        for k in sorted(z.files):
-            a = np.ascontiguousarray(z[k])
-            h.update(f"{k}\0{a.dtype.str}\0{list(a.shape)}\0".encode())
-            h.update(a.tobytes())
-    return h.hexdigest()
+    return _content_sha256_of(_read_arrays(path))
+
+
+def _window_threads(fn, items):
+    """``fn`` over ``items`` on WINDOW_THREADS threads, the results in the items' order (the first
+    error raised, as the loop would)."""
+    from concurrent.futures import ThreadPoolExecutor
+    items = list(items)
+    if len(items) <= 1:
+        return [fn(x) for x in items]
+    with ThreadPoolExecutor(max_workers=min(WINDOW_THREADS, len(items))) as ex:
+        return list(ex.map(fn, items))
 
 
 def spec_sha256(spec: Dict[str, Any]) -> str:
@@ -211,10 +240,9 @@ def walk_of(frames: Sequence[int], poses: Dict[int, np.ndarray]) -> Tuple[float,
 
 # ── anchors ──────────────────────────────────────────────────────────────
 
-def write_anchors(windows_dir: Path, windows: Sequence[Dict[str, Any]],
-                  anchors_dir: Path) -> int:
-    """``frame_<num>.npz`` (depth, conf, intrinsics) for every keyframe, from the
-    window where it sits most centrally. Returns the number written."""
+def _anchor_assignment(windows: Sequence[Dict[str, Any]]) -> Tuple[int, Dict[int, List[Tuple[int, int]]]]:
+    """Every keyframe's anchor window — the one where it sits most centrally — as (number of
+    keyframes, {window: [(frame, index in the window)]})."""
     best: Dict[int, Tuple[float, int, int]] = {}
     for k, w in enumerate(windows):
         n = len(w["frames"])
@@ -222,19 +250,66 @@ def write_anchors(windows_dir: Path, windows: Sequence[Dict[str, Any]],
             d = abs(i - (n - 1) / 2.0)
             if f not in best or d < best[f][0]:
                 best[f] = (d, k, i)
-    anchors_dir.mkdir(parents=True, exist_ok=True)
     by_window: Dict[int, List[Tuple[int, int]]] = {}
     for f, (_d, k, i) in best.items():
         by_window.setdefault(k, []).append((f, i))
-    for k, items in by_window.items():
+    return len(best), by_window
+
+
+def _write_window_anchors(anchors_dir: Path, items, depth, conf, K) -> None:
+    for f, i in items:
+        np.savez_compressed(anchors_dir / f"frame_{f}.npz",
+                            depth=depth[i].astype(np.float32),
+                            conf=conf[i].astype(np.float32),
+                            intrinsics=K[i].astype(np.float64))
+
+
+def write_anchors(windows_dir: Path, windows: Sequence[Dict[str, Any]],
+                  anchors_dir: Path) -> int:
+    """``frame_<num>.npz`` (depth, conf, intrinsics) for every keyframe, from the
+    window where it sits most centrally. Returns the number written."""
+    n, by_window = _anchor_assignment(windows)
+    anchors_dir.mkdir(parents=True, exist_ok=True)
+
+    def one(k):
         with np.load(windows[k]["path"]) as z:
-            depth, conf, K = z["depth"], z["conf"], z["intrinsics"]
-            for f, i in items:
-                np.savez_compressed(anchors_dir / f"frame_{f}.npz",
-                                    depth=depth[i].astype(np.float32),
-                                    conf=conf[i].astype(np.float32),
-                                    intrinsics=K[i].astype(np.float64))
-    return len(best)
+            _write_window_anchors(anchors_dir, by_window[k], z["depth"], z["conf"], z["intrinsics"])
+    _window_threads(one, list(by_window))
+    return n
+
+
+def _window_records(windows: Sequence[Dict[str, Any]], anchors_dir: Path) -> Tuple[int, List[Dict[str, Any]]]:
+    """measure_walk's pass over the window files — EACH READ ONCE, on WINDOW_THREADS threads: the
+    anchors of the keyframes it holds most centrally (write_anchors) and its record (the
+    reference views, the stamp, the median valid depth and horizontal FOV the SALAD revisit
+    reference is computed from, the content sha256). Returns (anchors written, records in window
+    order) — what write_anchors and the loop over the windows produced."""
+    n, by_window = _anchor_assignment(windows)
+    anchors_dir.mkdir(parents=True, exist_ok=True)
+
+    def one(i):
+        w = windows[i]
+        arrays = _read_arrays(w["path"])
+        refs = [int(x) for x in arrays["ref_views"]] if "ref_views" in arrays else None
+        stamp_i = str(arrays["stamp"]) if "stamp" in arrays else None
+        # what the SALAD revisit reference is computed from (point 66, USER 2026-10-08): the
+        # window's median valid DA3 depth and its median horizontal FOV from its own K —
+        # recorded HERE, the one time the window files are certainly on disk (F2 deletes them
+        # after the chain, gauge.delete_windows_after_chain), so the reference never needs
+        # them: a resume recomputes it with no DA3 (USER 2026-10-06). A window with no valid
+        # depth records null and is left out of the distance bar, as it always was.
+        d, c, K = arrays["depth"], arrays["conf"], arrays["intrinsics"]
+        if i in by_window:
+            _write_window_anchors(anchors_dir, by_window[i], d, c, K)
+        valid = (c > 0) & np.isfinite(d) & (d > 0)
+        med_depth = float(np.median(d[valid])) if valid.any() else None
+        hfov = float(np.median(2.0 * np.arctan(d.shape[-1] / (2.0 * K[:, 0, 0]))))
+        return {"index": i, "frames": [w["frames"][0], w["frames"][-1]],
+                "n": len(w["frames"]), "scale_factor": w["scale_factor"],
+                "is_metric": w["is_metric"], "reference_views": refs, "stamp": stamp_i,
+                "median_depth_m": med_depth, "hfov_rad": hfov,
+                "content_sha256": _content_sha256_of(arrays)}
+    return n, _window_threads(one, range(len(windows)))
 
 
 # ── run ──────────────────────────────────────────────────────────────────
@@ -480,10 +555,12 @@ def run_da3_windows(session_dir: Path, gcfg, python: str, log: Callable = print,
         raise WalkError(f"DA3 window extraction exited with code {proc.returncode}")
     if not for_new_walk:
         rec = {int(w["index"]): w for w in walk.get("windows", []) if "index" in w}
+        gots = _window_threads(lambda i: window_content_sha256(wdir / f"window_{i:04d}.npz"),
+                               range(len(windows)))
         for i in range(len(windows)):
             p = wdir / f"window_{i:04d}.npz"
             want = (rec.get(i) or {}).get("content_sha256")
-            got = window_content_sha256(p)
+            got = gots[i]
             if want != got:
                 raise WalkError(f"the regenerated {p.name} is not the window walk.json was "
                                 f"measured on (content sha256 {str(want)[:12]} → {got[:12]}) — "
@@ -567,29 +644,9 @@ def measure_walk(session_dir: Path, gcfg, log: Callable = print, *,
     poses, seams = chain_windows(windows)
     frames = sorted(poses)
     walk_m, chainage = walk_of(frames, poses)
-    n_anchor = write_anchors(wdir, windows, session_dir / "output" / "da3_run" / "results_output")
+    n_anchor, win_rec = _window_records(windows, session_dir / "output" / "da3_run" / "results_output")
     dis = [s["centre_disagreement_median_m"] for s in seams]
     import repro
-    win_rec = []
-    for i, w in enumerate(windows):
-        with np.load(w["path"]) as z:
-            refs = [int(x) for x in z["ref_views"]] if "ref_views" in z.files else None
-            stamp_i = str(z["stamp"]) if "stamp" in z.files else None
-            # what the SALAD revisit reference is computed from (point 66, USER 2026-10-08): the
-            # window's median valid DA3 depth and its median horizontal FOV from its own K —
-            # recorded HERE, the one time the window files are certainly on disk (F2 deletes them
-            # after the chain, gauge.delete_windows_after_chain), so the reference never needs
-            # them: a resume recomputes it with no DA3 (USER 2026-10-06). A window with no valid
-            # depth records null and is left out of the distance bar, as it always was.
-            d, c, K = z["depth"], z["conf"], z["intrinsics"]
-            valid = (c > 0) & np.isfinite(d) & (d > 0)
-            med_depth = float(np.median(d[valid])) if valid.any() else None
-            hfov = float(np.median(2.0 * np.arctan(d.shape[-1] / (2.0 * K[:, 0, 0]))))
-        win_rec.append({"index": i, "frames": [w["frames"][0], w["frames"][-1]],
-                        "n": len(w["frames"]), "scale_factor": w["scale_factor"],
-                        "is_metric": w["is_metric"], "reference_views": refs, "stamp": stamp_i,
-                        "median_depth_m": med_depth, "hfov_rad": hfov,
-                        "content_sha256": window_content_sha256(Path(w["path"]))})
     doc = {
         "version": WALK_VERSION,
         "provenance": PROVENANCE,

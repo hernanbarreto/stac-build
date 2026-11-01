@@ -163,33 +163,63 @@ def keyframe_views(wdir: Path) -> Tuple[List[int], Dict[int, dict], List[dict]]:
             d = abs(i - (n - 1) / 2.0)
             if f not in best or d < best[f][0]:
                 best[f] = (d, k, i)
-    views: Dict[int, dict] = {}
-    cache: Dict[int, dict] = {}
+    # each window read ONCE, on intake.walk.WINDOW_THREADS threads (the zip CRC of a 139 MB stored
+    # npz and the read release the GIL; station 2026-11-01: the plan's 34 s were 23 s of reading),
+    # its kept frames' maps copied out of it — the views the loop over the frames built
+    from intake.walk import _window_threads
+    of_window: Dict[int, List[Tuple[int, int]]] = {}
     for f, (_d, k, i) in sorted(best.items()):
-        if k not in cache:
-            with np.load(windows[k]["path"]) as z:
-                cache = {k: {"depth": z["depth"].astype(np.float32), "conf": z["conf"].astype(np.float32),
-                             "K": z["intrinsics"].astype(np.float64)}}
-        z = cache[k]
-        views[f] = {"c2w": G[k] @ windows[k]["c2w"][i], "depth": np.array(z["depth"][i]),
-                    "conf": np.array(z["conf"][i]), "K": np.array(z["K"][i]), "window": k}
+        of_window.setdefault(k, []).append((f, i))
+
+    def one(k):
+        with np.load(windows[k]["path"]) as z:
+            depth = z["depth"].astype(np.float32)
+            conf = z["conf"].astype(np.float32)
+            K = z["intrinsics"].astype(np.float64)
+        return {f: {"c2w": G[k] @ windows[k]["c2w"][i], "depth": np.array(depth[i]),
+                    "conf": np.array(conf[i]), "K": np.array(K[i]), "window": k}
+                for f, i in of_window[k]}
+    ks = list(of_window)
+    got = dict(zip(ks, _window_threads(one, ks)))
+    views: Dict[int, dict] = {}
+    for f, (_d, k, i) in sorted(best.items()):
+        views[f] = got[k][f]
     return sorted(views), views, windows
 
 
 def measured_tol(windows) -> float:
     """TOL_QUANTILE of |z_a − z_b| / mean over keyframes seen by two consecutive windows."""
-    pool = []
+    # the depth maps the pairs compare, each window read ONCE on threads (the loop re-read a
+    # window's whole depth array for every sampled frame: ~10 reads of 46 MB per window); the
+    # pairs, the samples and their order are the loop's
+    from intake.walk import _window_threads
+    pairs = []
+    need: Dict[int, set] = {}
     for k in range(1, len(windows)):
         a, b = windows[k - 1], windows[k]
         shared = [f for f in b["frames"] if f in a["frames"]]
         if not shared:
             continue
-        with np.load(a["path"]) as za, np.load(b["path"]) as zb:
-            for f in shared[:: max(1, len(shared) // 4)]:
-                da = za["depth"][a["frames"].index(f)]; db = zb["depth"][b["frames"].index(f)]
-                ok = (da > 0) & (db > 0)
-                r = np.abs(da[ok] - db[ok]) / (0.5 * (da[ok] + db[ok]))
-                pool.append(r[:: max(1, r.size // 4000)])
+        sel = shared[:: max(1, len(shared) // 4)]
+        pairs.append((k, sel))
+        for f in sel:
+            need.setdefault(k - 1, set()).add(a["frames"].index(f))
+            need.setdefault(k, set()).add(b["frames"].index(f))
+
+    def one(k):
+        with np.load(windows[k]["path"]) as z:
+            depth = z["depth"]
+            return {i: np.array(depth[i]) for i in sorted(need[k])}
+    ks = sorted(need)
+    maps = dict(zip(ks, _window_threads(one, ks)))
+    pool = []
+    for k, sel in pairs:
+        a, b = windows[k - 1], windows[k]
+        for f in sel:
+            da = maps[k - 1][a["frames"].index(f)]; db = maps[k][b["frames"].index(f)]
+            ok = (da > 0) & (db > 0)
+            r = np.abs(da[ok] - db[ok]) / (0.5 * (da[ok] + db[ok]))
+            pool.append(r[:: max(1, r.size // 4000)])
     return float(np.quantile(np.concatenate(pool), TOL_QUANTILE)) if pool else 0.05
 
 
