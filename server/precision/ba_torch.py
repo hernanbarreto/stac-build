@@ -28,11 +28,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-FUNCTION_TOLERANCE = 1e-6       # reconstruction.colmap_ba._tune_ceres
-PARAMETER_TOLERANCE = 1e-8
-GRADIENT_TOLERANCE = 1e-8
-MIN_RELATIVE_DECREASE = 1e-3    # Ceres' default: a step with a smaller gain ratio is rejected
-LM_DIAG_MIN, LM_DIAG_MAX = 1e-6, 1e32
+EPS = float(np.finfo(np.float64).eps)
+TINY = float(np.finfo(np.float64).tiny)
+SMALL_ANGLE = 1e-6              # below it the series of sin / (1 − cos) are exact to double precision
+FD_STEP = 1e-6                  # the forward-difference step of the prior Jacobians (294 pairs, 6 × 12 each)
 CAM_FREE = {"R0": (), "R0s": (), "R1": (0, 1, 2, 3), "R2": (0, 1, 2, 3, 4, 5, 6, 7), "R3": (0, 1)}
 
 
@@ -66,10 +65,10 @@ def so3_exp(w):
     """Rodrigues, batched, exact for small angles (series below 1e-8)."""
     torch = _torch()
     th = torch.linalg.norm(w, dim=-1, keepdim=True)
-    small = th < 1e-8
+    small = th < SMALL_ANGLE
     th_safe = torch.where(small, torch.ones_like(th), th)
-    a = torch.where(small, 1.0 - th ** 2 / 6.0, torch.sin(th_safe) / th_safe)
-    b = torch.where(small, 0.5 - th ** 2 / 24.0, (1.0 - torch.cos(th_safe)) / th_safe ** 2)
+    a = torch.where(small, 1.0 - th ** 2 / 6, torch.sin(th_safe) / th_safe)
+    b = torch.where(small, 0.5 - th ** 2 / 24, (1.0 - torch.cos(th_safe)) / th_safe ** 2)
     K = skew(w)
     I = torch.eye(3, dtype=w.dtype, device=w.device).expand(K.shape)
     return I + a[..., None] * K + b[..., None] * (K @ K)
@@ -82,9 +81,9 @@ def so3_log(R):
     cos = ((tr - 1.0) * 0.5).clamp(-1.0, 1.0)
     th = torch.acos(cos)
     v = torch.stack([R[..., 2, 1] - R[..., 1, 2], R[..., 0, 2] - R[..., 2, 0], R[..., 1, 0] - R[..., 0, 1]], -1)
-    small = th < 1e-8
+    small = th < SMALL_ANGLE
     th_safe = torch.where(small, torch.ones_like(th), th)
-    f = torch.where(small, 0.5 + th ** 2 / 12.0, th_safe / (2.0 * torch.sin(th_safe)))
+    f = torch.where(small, 0.5 + th ** 2 / 12, th_safe / (2.0 * torch.sin(th_safe)))
     return v * f[..., None]
 
 
@@ -155,10 +154,10 @@ def project_jac(Xc, cam, cam_free: Sequence[int]):
     # d(xd, yd) / d(x, y)
     drad_dx = 2.0 * x * (k1 + 2.0 * k2 * r2)
     drad_dy = 2.0 * y * (k1 + 2.0 * k2 * r2)
-    dxd_dx = rad + x * drad_dx + 2.0 * p1 * y + 6.0 * p2 * x
+    dxd_dx = rad + x * drad_dx + 2.0 * p1 * y + 6 * p2 * x
     dxd_dy = x * drad_dy + 2.0 * p1 * x + 2.0 * p2 * y
     dyd_dx = y * drad_dx + 2.0 * p1 * x + 2.0 * p2 * y
-    dyd_dy = rad + y * drad_dy + 6.0 * p1 * y + 2.0 * p2 * x
+    dyd_dy = rad + y * drad_dy + 6 * p1 * y + 2.0 * p2 * x
     # d(x, y) / d Xc
     inv_z = 1.0 / zs
     dx_dX = torch.stack([inv_z, torch.zeros_like(z), -x * inv_z], -1)       # (M,3)
@@ -185,8 +184,9 @@ class _Problem:
                  cam_idx: np.ndarray, pt_idx: np.ndarray, uv: np.ndarray, X0: np.ndarray, huber_px: float,
                  cam_free: Sequence[int], *, device, sigmas: Optional[np.ndarray] = None,
                  prior_centres: Optional[np.ndarray] = None, rel_w2c: Optional[np.ndarray] = None,
-                 rel_cov: Optional[np.ndarray] = None, first_constant: bool = False):
+                 rel_cov: Optional[np.ndarray] = None, first_constant: bool = False, torch_ba=None):
         torch = _torch()
+        self.tb = torch_ba
         d = {"dtype": torch.float64, "device": device}
         self.torch, self.device = torch, device
         self.N = int(len(w2c0)); self.B = int(len(params_by_block0)); self.P = int(len(X0)); self.M = int(len(uv))
@@ -250,13 +250,13 @@ class _Problem:
         torch = self.torch
         s = (r * r).sum(-1)
         a2 = self.huber * self.huber
-        w = torch.where(s <= a2, torch.ones_like(s), self.huber / torch.sqrt(s.clamp_min(1e-300)))
+        w = torch.where(s <= a2, torch.ones_like(s), self.huber / torch.sqrt(s.clamp_min(TINY)))
         return torch.where(front, w, torch.zeros_like(w)), s
 
     def robust_cost(self, s, front):
         torch = self.torch
         a2 = self.huber * self.huber
-        rho = torch.where(s <= a2, s, 2.0 * self.huber * torch.sqrt(s.clamp_min(1e-300)) - a2)
+        rho = torch.where(s <= a2, s, 2.0 * self.huber * torch.sqrt(s.clamp_min(TINY)) - a2)
         return 0.5 * float(torch.where(front, rho, torch.zeros_like(rho)).sum())
 
     def prior_terms(self, R, t):
@@ -291,7 +291,7 @@ class _Problem:
             # Jacobians by finite differences in the tangent (K small — 294 pairs): d e / d (δω_i, δt_i, δω_j, δt_j)
             K_ = e.shape[0]
             J = torch.zeros(K_, 6, 12, dtype=R.dtype, device=self.device)
-            h = 1e-7
+            h = FD_STEP
             for p in range(12):
                 dR_i, dt_i, dR_j, dt_j = Ri, ti, Rj, tj
                 dvec = torch.zeros(K_, 3, dtype=R.dtype, device=self.device)
@@ -345,7 +345,7 @@ class _Problem:
         # landmark blocks
         Hpp = segment_sum(J_pt.transpose(1, 2) @ J_pt, self.pt_idx, self.P)                       # (P,3,3)
         gp = segment_sum(torch.einsum("mai,ma->mi", J_pt, r_w), self.pt_idx, self.P)              # (P,3)
-        Dp = torch.diagonal(Hpp, dim1=1, dim2=2).clamp(LM_DIAG_MIN, LM_DIAG_MAX)
+        Dp = torch.diagonal(Hpp, dim1=1, dim2=2).clamp(self.tb.lm_diag_min, self.tb.lm_diag_max)
         Hpp_l = Hpp + lam * torch.diag_embed(Dp)
         Hpp_inv = torch.linalg.inv(Hpp_l)
         # camera side: dense H_cc, g_c
@@ -364,7 +364,7 @@ class _Problem:
         g_red = g - self._reduce_vec(torch.einsum("mij,mj->mi", Y, gp[self.pt_idx]), nco)
         S = H - self._schur_pairs(Y, W, nco, pair_chunk)
         # damping and the constant blocks
-        Dc = torch.diagonal(S).clamp(LM_DIAG_MIN, LM_DIAG_MAX)
+        Dc = torch.diagonal(S).clamp(self.tb.lm_diag_min, self.tb.lm_diag_max)
         S_l = S + lam * torch.diag(Dc)
         free = self.free
         S_f = S_l[free][:, free]
@@ -473,13 +473,14 @@ class _Problem:
 
     def norm_x(self) -> float:
         torch = self.torch
-        return math.sqrt(float((self.t * self.t).sum()) + float((self.X * self.X).sum()) + float((self.cam * self.cam).sum()) + 3.0 * self.N)
+        return math.sqrt(float((self.t * self.t).sum()) + float((self.X * self.X).sum()) + float((self.cam * self.cam).sum()) + 3 * self.N)
 
 
 def solve(problem: _Problem, max_iterations: int, log=None) -> Dict[str, object]:
-    """Levenberg-Marquardt with Ceres' stopping rules. Returns the summary dict the rung report reads."""
+    """Levenberg-Marquardt with Ceres' stopping rules (refine.torch_ba). Returns the summary dict the rung report reads."""
+    tb = problem.tb
     t0 = time.time()
-    lam, nu = 1e-4, 2.0
+    lam, nu = float(tb.lambda_init), 2.0
     cost = problem.total_cost()
     initial = cost
     n_ok = n_bad = 0
@@ -488,7 +489,7 @@ def solve(problem: _Problem, max_iterations: int, log=None) -> Dict[str, object]
         step, cost_now, pred, why = problem.step(lam)
         if step is None or not math.isfinite(pred):
             lam *= nu; nu *= 2.0; n_bad += 1
-            if lam > 1e32:
+            if lam > tb.lm_diag_max:
                 termination = "FAILURE"; break
             continue
         dc, dp = step
@@ -497,21 +498,21 @@ def solve(problem: _Problem, max_iterations: int, log=None) -> Dict[str, object]
         actual = cost_now - new_cost
         rho = actual / pred if pred > 0 else -1.0
         step_norm = math.sqrt(float((dc * dc).sum()) + float((dp * dp).sum()))
-        if rho > MIN_RELATIVE_DECREASE and math.isfinite(new_cost):
+        if rho > tb.min_relative_decrease and math.isfinite(new_cost):
             problem.R, problem.t, problem.cam, problem.X = R, t, cam, X
             n_ok += 1
-            lam = lam * max(1.0 / 3.0, 1.0 - (2.0 * rho - 1.0) ** 3); nu = 2.0
-            rel = abs(actual) / max(cost_now, 1e-300)
+            lam = lam * max(1 / 3, 1.0 - (2.0 * rho - 1.0) ** 3); nu = 2.0
+            rel = abs(actual) / max(cost_now, TINY)
             if log:
                 log(f"    it {it + 1}: cost {cost_now:.6e} → {new_cost:.6e} (rel {rel:.2e}), step {step_norm:.2e}, λ {lam:.1e}")
             cost = new_cost
-            if rel < FUNCTION_TOLERANCE:
+            if rel < tb.function_tolerance:
                 termination = "CONVERGENCE"; break
-            if step_norm <= PARAMETER_TOLERANCE * (problem.norm_x() + PARAMETER_TOLERANCE):
+            if step_norm <= tb.parameter_tolerance * (problem.norm_x() + tb.parameter_tolerance):
                 termination = "CONVERGENCE"; break
         else:
             lam *= nu; nu *= 2.0; n_bad += 1
-            if lam > 1e32:
+            if lam > tb.lm_diag_max:
                 termination = "FAILURE"; break
     return {"initial_cost": float(initial), "final_cost": float(cost), "num_successful_steps": n_ok,
             "num_unsuccessful_steps": n_bad, "total_time_in_seconds": time.time() - t0,
@@ -549,7 +550,7 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
             raise RefineError(f"{name}: {len(rel_prior.w2c)} prior poses for {N} keyframes")
         prob = _Problem(w2c_start, pb0, block_of, cam_idx, pt_idx, uv, X0, float(cfg.huber_px), cam_free, device=dev,
                         rel_w2c=np.asarray(rel_prior.w2c, np.float64), rel_cov=np.asarray(rel_prior.covariances(), np.float64),
-                        first_constant=True)
+                        first_constant=True, torch_ba=cfg.torch_ba)
         n_prior = N - 1
     else:
         prior_w2c = w2c_start if prior_w2c is None else np.asarray(prior_w2c, np.float64)
@@ -557,7 +558,7 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
             raise RefineError(f"{name}: {len(prior_w2c)} prior poses for {N} keyframes")
         C = -np.einsum("nji,nj->ni", prior_w2c[:, :3, :3], prior_w2c[:, :3, 3])
         prob = _Problem(w2c_start, pb0, block_of, cam_idx, pt_idx, uv, X0, float(cfg.huber_px), cam_free, device=dev,
-                        sigmas=np.asarray(sigmas, np.float64), prior_centres=C)
+                        sigmas=np.asarray(sigmas, np.float64), prior_centres=C, torch_ba=cfg.torch_ba)
         n_prior = N
     summary = solve(prob, int(cfg.max_iterations), log=log)
     if summary["termination_type"] != "CONVERGENCE":

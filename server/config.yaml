@@ -2381,6 +2381,16 @@ reconstruction:
                                         #   between runs); USER 2026-11-01: 'todo debe correr en gpu, en modo determinista'.
                                         #   Validated against Ceres on a synthetic scene (tests/test_ba_torch.py); on a
                                         #   real session the bar is the held-out residual against Ceres' (his rule)
+      torch_ba:                         # the torch solver's stopping rules and damping = Ceres' (colmap_ba._tune_ceres
+                                        #   and Ceres' defaults), so the GPU solve stops where the CPU one did
+        function_tolerance: 1.0e-6
+        parameter_tolerance: 1.0e-8
+        gradient_tolerance: 1.0e-8
+        min_relative_decrease: 1.0e-3
+        lambda_init: 1.0e-4
+        lm_diag_min: 1.0e-6
+        lm_diag_max: 1.0e+32
+
 
       init_poses: omega                 # WHERE THE SOLVE STARTS (2026-10-31). omega = the gauge's poses (Omega x
                                         #   the gauge: the walk as the fork drifted it — every run so far).

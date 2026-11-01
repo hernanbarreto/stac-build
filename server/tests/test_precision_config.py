@@ -206,3 +206,12 @@ def test_refine_solver_is_an_enum_and_mandatory():
     del raw["reconstruction"]["precision"]["refine"]["solver"]
     with pytest.raises(PrecisionConfigError):
         load_precision_config(raw)
+
+
+def test_the_torch_solvers_rules_are_declared_and_mandatory():
+    raw = _raw()
+    tb = load_precision_config(raw).refine.torch_ba
+    assert tb.function_tolerance == 1e-6 and tb.parameter_tolerance == 1e-8 and tb.min_relative_decrease == 1e-3
+    del raw["reconstruction"]["precision"]["refine"]["torch_ba"]["lambda_init"]
+    with pytest.raises(PrecisionConfigError, match="torch_ba.lambda_init"):
+        load_precision_config(raw)

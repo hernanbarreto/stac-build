@@ -307,6 +307,20 @@ ROLLING_SHUTTER = ("judged", "never")
 
 
 @dataclass(frozen=True)
+class TorchBAConfig:
+    """The torch bundle adjustment's stopping rules and damping (precision/ba_torch.py) — Ceres' own values
+    (reconstruction.colmap_ba._tune_ceres and Ceres' defaults), declared here so the GPU solver stops where
+    the CPU one did."""
+    function_tolerance: float       # stop when the relative cost drop of an accepted step is under this
+    parameter_tolerance: float      # stop when the step is under this × (‖x‖ + this)
+    gradient_tolerance: float       # stop when the reduced gradient's max |g| is under this
+    min_relative_decrease: float    # Ceres: a step whose actual / predicted decrease is under this is rejected
+    lambda_init: float              # the first LM damping (Ceres' initial_trust_region_radius 1e4 ↔ λ 1e-4)
+    lm_diag_min: float              # Ceres' min_lm_diagonal / max_lm_diagonal: the damping's diagonal clamp
+    lm_diag_max: float
+
+
+@dataclass(frozen=True)
 class RefineConfig:
     enabled: bool               # false = NO bundle adjustment: the gauge's poses and F0's camera pass
                                 # through unchanged (an identity F5 epoch, the witnesses localised
@@ -327,6 +341,7 @@ class RefineConfig:
                                 # priors on every keyframe's position, the pre-phase-3b model)
     solver: str                 # 2026-11-01: ceres (pycolmap, one CPU thread) | torch (precision/ba_torch.py: the same
                                 #   problem on the GPU, deterministic by sorted reductions)
+    torch_ba: TorchBAConfig     # the torch solver's stopping rules and damping (used when solver is torch)
     init_poses: str             # 2026-10-31: where the solve STARTS. "omega" — the gauge's poses (Omega x
                                 # the gauge, the walk as the fork drifted it); "classical" — F3's global
                                 # mapper (GLOMAP) when ONE model registers EVERY keyframe, its trajectory
@@ -865,6 +880,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                                 mappers=tuple(_str_list(cl, "mappers", "classical", allowed=CLASSICAL_MAPPERS, min_len=1)),
                                 camera_prior=_bool(cl, "camera_prior", "classical"))
     rf = _sub(sec, "refine", "")
+    tb = _sub(rf, "torch_ba", "refine")
     refine = RefineConfig(
         enabled=_bool(rf, "enabled", "refine"),
         min_tri_deg=_num(rf, "min_tri_deg", "refine", lo=0.0, lo_excl=True),
@@ -880,6 +896,13 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         prior_model=_enum(rf, "prior_model", "refine", PRIOR_MODELS),
         init_poses=_enum(rf, "init_poses", "refine", INIT_POSES),
         solver=_enum(rf, "solver", "refine", SOLVERS),
+        torch_ba=TorchBAConfig(function_tolerance=_num(tb, "function_tolerance", "refine.torch_ba", lo=0.0, lo_excl=True),
+                               parameter_tolerance=_num(tb, "parameter_tolerance", "refine.torch_ba", lo=0.0, lo_excl=True),
+                               gradient_tolerance=_num(tb, "gradient_tolerance", "refine.torch_ba", lo=0.0, lo_excl=True),
+                               min_relative_decrease=_num(tb, "min_relative_decrease", "refine.torch_ba", lo=0.0, hi=1.0),
+                               lambda_init=_num(tb, "lambda_init", "refine.torch_ba", lo=0.0, lo_excl=True),
+                               lm_diag_min=_num(tb, "lm_diag_min", "refine.torch_ba", lo=0.0, lo_excl=True),
+                               lm_diag_max=_num(tb, "lm_diag_max", "refine.torch_ba", lo=0.0, lo_excl=True)),
         prior_sigma_from_loops=_bool(rf, "prior_sigma_from_loops", "refine"),
         scale_lock=_bool(rf, "scale_lock", "refine"),
         rolling_shutter=_enum(rf, "rolling_shutter", "refine", ROLLING_SHUTTER),
