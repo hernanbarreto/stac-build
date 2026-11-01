@@ -118,6 +118,25 @@ class SessionView:
 # ── clusters ────────────────────────────────────────────────────────────────
 
 def disjoint_clusters(pts: np.ndarray, cfg) -> List[np.ndarray]:
+    """Spatially separated groups of an instance's points (indices into pts), groups below
+    cluster_min_points dropped, largest first — the occupied-voxel components at dbscan_eps_m on the
+    evidence device (segmentation/voxel_components_torch; :func:`_disjoint_clusters_numpy` is the
+    reference, equal label for label: tests/test_voxel_components_torch.py)."""
+    if len(pts) < cfg.cluster_min_points:
+        return []
+    from reconstruction.surface_fit.hole_audit import evidence_device
+    from segmentation.voxel_components_torch import voxel_components
+    labels = voxel_components(np.asarray(pts, np.float64), float(cfg.dbscan_eps_m), evidence_device())
+    out = []
+    for c in np.unique(labels):
+        idx = np.flatnonzero(labels == c)
+        if len(idx) >= cfg.cluster_min_points:
+            out.append(idx)
+    out.sort(key=len, reverse=True)
+    return out
+
+
+def _disjoint_clusters_numpy(pts: np.ndarray, cfg) -> List[np.ndarray]:
     """Spatially separated groups of an instance's points (indices into pts),
     groups below cluster_min_points dropped, largest first.
 

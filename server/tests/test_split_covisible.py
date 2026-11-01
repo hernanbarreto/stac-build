@@ -80,15 +80,15 @@ def test_the_gap_grid_is_world_anchored_an_extra_point_changes_only_its_cell(mon
     x ∈ [0.15, 0.199] → cell 1): ONE component. One extra point at x = −0.002 moved the old grid
     by 2 mm and put the fragments in cells 0 and 2 — two components, a split candidate out of a
     flyer. World-anchored, the extra point lands in cell −1, adjacent to cell 0: still one."""
-    import segmentation.pipeline as _pl                # the split labels the occupied cells (sparse)
-    seen = []
-    real = _pl._label_occupied_cells
+    import segmentation.voxel_components_torch as _vc   # the split labels the occupied cells (sparse,
+    seen = []                                           # on the evidence device since 2026-11-01)
+    real = _vc.label_occupied_cells
 
-    def _label(ki):
-        comp, n = real(ki)
+    def _label(ki, device):
+        comp, n = real(ki, device)
         seen.append(int(n))
         return comp, n
-    monkeypatch.setattr(_pl, "_label_occupied_cells", _label)
+    monkeypatch.setattr(_vc, "label_occupied_cells", _label)
     rng = np.random.default_rng(5)
     a = np.column_stack([rng.uniform(0.0, 0.05, 3000), rng.uniform(0.0, 0.05, 3000), rng.uniform(0.0, 0.05, 3000)])
     b = np.column_stack([rng.uniform(0.15, 0.199, 3000), rng.uniform(0.0, 0.05, 3000), rng.uniform(0.0, 0.05, 3000)])

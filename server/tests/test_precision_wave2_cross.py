@@ -259,7 +259,11 @@ def test_the_footprint_takes_the_mask_pixel_from_the_exact_maps_not_a_scale():
         seen.append((np.asarray(u).copy(), np.asarray(v).copy()))
         # a crop of 7 / 3 px that a scale alone would miss
         return (np.rint(u / 2 + 7).astype(np.int64), np.rint(v / 2 + 3).astype(np.int64))
-    ev = SimpleNamespace(cam=SimpleNamespace(pose_map={0: np.eye(4)}, K_for=lambda f: K),
+    # the session camera's own projection (SessionCamera.pixels, lens-less here): since 2026-11-01
+    # _project_frame projects through it, as the evidence's z-buffers do
+    ev = SimpleNamespace(cam=SimpleNamespace(pose_map={0: np.eye(4)}, K_for=lambda f: K,
+                                             pixels=lambda f, p: (K[0, 0] * p[:, 0] / p[:, 2] + K[0, 2],
+                                                                  K[1, 1] * p[:, 1] / p[:, 2] + K[1, 2])),
                          kw=80, kh=60, mask_pixels=mask_pixels)
     # ten points on the optical axis at different depths: record pixel (40, 30) every time
     pts = np.stack([np.zeros(10), np.zeros(10), np.linspace(1.0, 3.0, 10)], 1)

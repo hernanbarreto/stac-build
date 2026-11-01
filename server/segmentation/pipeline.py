@@ -2252,7 +2252,11 @@ def _obb_core_points(points_xyz: np.ndarray, cfg: dict, factor: Optional[float] 
     if factor is None:
         from config import cfg as _server_cfg
         factor = _decision_params(_server_cfg)[0]
-    lab = _voxel_components(points_xyz, float(cfg.get("voxel_m", 0.05)))
+    # the components on the evidence device (segmentation/voxel_components_torch: the same labels as
+    # _voxel_components, kept as the reference — tests/test_voxel_components_torch.py)
+    from reconstruction.surface_fit.hole_audit import evidence_device
+    from segmentation.voxel_components_torch import voxel_components
+    lab = voxel_components(points_xyz, float(cfg.get("voxel_m", 0.05)), evidence_device())
     uniq, counts = np.unique(lab, return_counts=True)
     if len(uniq) == 1:
         rec["used"] = "all (one component)"
@@ -3307,7 +3311,11 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
         k = np.floor(P.astype(np.float64) / gap_m).astype(np.int64)
         k0 = k.min(0)
         ki = k - k0
-        comp, n = _label_occupied_cells(ki)                 # sparse: no dense grid over the bbox
+        # the components on the evidence device (voxel_components_torch; _label_occupied_cells is the
+        # reference): the one step every instance paid on the CPU, ~0.2 s each on pccr
+        from reconstruction.surface_fit.hole_audit import evidence_device
+        from segmentation.voxel_components_torch import label_occupied_cells
+        comp, n = label_occupied_cells(ki, evidence_device())
         if n < 2:
             continue
         size = np.bincount(comp, minlength=n)
