@@ -13,7 +13,9 @@ torch = pytest.importorskip("torch")
 from precision import ba_torch as BA  # noqa: E402
 from precision.refine import RelativePrior  # noqa: E402
 
-CFG = SimpleNamespace(huber_px=2.0, max_iterations=200, ceres_threads=1, seed=0)
+TB = SimpleNamespace(function_tolerance=1e-6, parameter_tolerance=1e-8, gradient_tolerance=1e-8, min_relative_decrease=1e-3,
+                     lambda_init=1e-4, lm_diag_min=1e-6, lm_diag_max=1e32)       # config.yaml refine.torch_ba (Ceres')
+CFG = SimpleNamespace(huber_px=2.0, max_iterations=200, ceres_threads=1, seed=0, torch_ba=TB)
 CAM = [400.0, 402.0, 231.5, 415.5, 0.02, -0.01, 0.0005, -0.0003]
 WH = (464, 832)
 
