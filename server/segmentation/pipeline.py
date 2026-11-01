@@ -2292,7 +2292,16 @@ def _fold_yaw(a: float) -> float:
     return float(np.mod(float(a), q))
 
 
-def _vertical_plane_yaws(points_xyz: np.ndarray, vcfg: dict) -> list:
+def _vertical_plane_yaws(points_xyz: np.ndarray, vcfg: dict, device: Optional[str] = None) -> list:
+    """:func:`_vertical_plane_yaws_numpy` on the evidence device (segmentation/obb_torch.py, 2026-11-01:
+    the same seeded hypotheses, scored on the card) — [(yaw, support)] of each vertical RANSAC plane."""
+    from reconstruction.surface_fit.hole_audit import evidence_device
+    from segmentation.obb_torch import vertical_plane_yaws_t
+    return vertical_plane_yaws_t(points_xyz, vcfg, evidence_device() if device is None else device,
+                                 _fold_yaw, _stable_sample)
+
+
+def _vertical_plane_yaws_numpy(points_xyz: np.ndarray, vcfg: dict) -> list:
     """[(yaw, support)] of each VERTICAL plane of an object, found by sequential
     RANSAC (seeded) on a STABLE sample of its points — the ``sample`` points with
     the smallest per-point key (:func:`_stable_sample`, point 109: one point more
@@ -2395,8 +2404,23 @@ def _extreme_indices(v: np.ndarray, keys: np.ndarray, T: int, largest: bool) -> 
 
 
 def _footprint_error(points_xz: np.ndarray, yaw: float, n_boot: Optional[int] = None,
-                     identity: Optional[Tuple[np.ndarray, str]] = None
+                     identity: Optional[Tuple[np.ndarray, str]] = None, device: Optional[str] = None
                      ) -> Tuple[float, int, int]:
+    """:func:`_footprint_error_numpy` on the evidence device (segmentation/obb_torch.py, 2026-11-01: the
+    same seeded uniforms, the extremes and the resample extents on the card)."""
+    from correction.floor import N_BOOT_FLOOR, _POISSON1_CDF
+    from reconstruction.surface_fit.hole_audit import evidence_device
+    from segmentation.obb_torch import footprint_error_t
+    P = np.asarray(points_xz, np.float64)
+    ident = identity if identity is not None else _footprint_identity(P)
+    return footprint_error_t(P, float(yaw), ident, _footprint_seed,
+                             int(N_BOOT_FLOOR if n_boot is None else n_boot), float(_POISSON1_CDF[0]),
+                             int(FOOTPRINT_EXTREMES), evidence_device() if device is None else device)
+
+
+def _footprint_error_numpy(points_xz: np.ndarray, yaw: float, n_boot: Optional[int] = None,
+                           identity: Optional[Tuple[np.ndarray, str]] = None
+                           ) -> Tuple[float, int, int]:
     """(σ of the footprint area at ``yaw`` in m², n_boot, seed): the MEASURED sampling error
     of the footprint, by a Poisson bootstrap over the instance's points (weights ~ Poisson(1),
     seeded — the construction of correction.floor._bootstrap_plane, point 109). The footprint
@@ -2521,11 +2545,6 @@ def _compute_obb(points_xyz: np.ndarray, face_normals=None, cfg: Optional[dict] 
         if np.linalg.norm(nxz) > 0.1:
             cands.append((_fold_yaw(np.arctan2(nxz[1], nxz[0])), int(fn[1]) if len(fn) > 1 else 0))
 
-    def _extents(a):
-        c, s_ = np.cos(-a), np.sin(-a)
-        r = pts_xz @ np.array([[c, -s_], [s_, c]]).T
-        return r.max(axis=0) - r.min(axis=0)
-
     yaw_rec = {"rule": "dominant plane among footprints within factor x error of the minimum "
                        "(points 109 / 143); error = sigma of the footprint area by a seeded "
                        "Poisson bootstrap over the points (correction.floor's construction)",
@@ -2533,9 +2552,12 @@ def _compute_obb(points_xyz: np.ndarray, face_normals=None, cfg: Optional[dict] 
     if cands:
         rows = []
         identity = _footprint_identity(pts_xz)          # once per box, not per candidate
-        for yaw, support in cands:
-            e = _extents(yaw)
-            err, n_boot, seed = _footprint_error(pts_xz, float(yaw), identity=identity)
+        from reconstruction.surface_fit.hole_audit import evidence_device
+        from segmentation.obb_torch import extents_t
+        _dev = evidence_device()
+        _ext = extents_t(pts_xz, [float(y) for y, _s in cands], _dev)       # every candidate, one pass
+        for (yaw, support), e in zip(cands, _ext):
+            err, n_boot, seed = _footprint_error(pts_xz, float(yaw), identity=identity, device=_dev)
             rows.append((float(yaw), int(support), float(e[0] * e[1]), float(err), int(n_boot),
                          int(seed)))
         a_min = min(r[2] for r in rows)
@@ -3628,9 +3650,11 @@ def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
             continue
         members.sort(key=lambda k: (-len(instances[k].get("globalIndices") or []), k))
         keep = members[0]
-        idx = set(instances[keep].get("globalIndices") or [])
+        # the union of the members' indices as ONE sorted unique array (np.union1d: what
+        # sorted(set | set) gave, without the Python sets over millions of ints — 2026-11-01)
+        idx = np.asarray(instances[keep].get("globalIndices") or [], dtype=np.int64)
         for k in members[1:]:
-            idx |= set(instances[k].get("globalIndices") or [])
+            idx = np.union1d(idx, np.asarray(instances[k].get("globalIndices") or [], dtype=np.int64))
             instances[k]["_absorbed_into"] = keep
             if record is not None:
                 record[int(instances[k].get("instance_id", instances[k].get("id")))] = {
@@ -3639,7 +3663,7 @@ def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
                     "reason": "fragment",
                 }
             absorbed += 1
-        merged = sorted(idx)
+        merged = idx.tolist()
         instances[keep]["globalIndices"] = merged
         instances[keep]["total_points"] = len(merged)
         print(f"[SegPipeline]   🧩 fragments: '{instances[keep].get('label')}' "
@@ -3648,6 +3672,157 @@ def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
     if absorbed:
         instances[:] = [i for i in instances if "_absorbed_into" not in i]
     return absorbed
+
+
+class VoxelSetsNumpy:
+    """The instances' 5 cm voxel sets as the space dedupe built them until 2026-11-01 — `np.unique` of the
+    packed keys per instance and per birth keyframe, `np.isin` for the intersections — the path of record,
+    kept as the reference of ``segmentation.dedupe_torch.VoxelSetsTorch`` (tests/test_dedupe_torch.py)."""
+
+    def __init__(self, instances, xyz_display: np.ndarray, frame_arr: np.ndarray, vox: float):
+        self.vox_all: List[np.ndarray] = []
+        self.vox_by_kf: List[Dict[int, np.ndarray]] = []
+        for inst in instances:
+            idxs = np.asarray(inst["globalIndices"], dtype=np.int64)
+            if len(idxs) == 0:
+                self.vox_all.append(np.zeros(0, np.int64))
+                self.vox_by_kf.append({})
+                continue
+            keys = _pack_voxels(np.floor(xyz_display[idxs] / vox).astype(np.int64))
+            self.vox_all.append(np.unique(keys))
+            fr = frame_arr[idxs]
+            per = {}
+            order = np.argsort(fr, kind="stable")
+            fs, starts = np.unique(fr[order], return_index=True)
+            ends = np.r_[starts[1:], len(order)]
+            for f_, s_, e_ in zip(fs.tolist(), starts, ends):
+                per[int(f_)] = np.unique(keys[order[s_:e_]])
+            self.vox_by_kf.append(per)
+
+    def n(self, k: int) -> int:
+        return len(self.vox_all[k])
+
+    def inter_counts(self, i: int, js) -> Dict[int, int]:
+        return {j: int(np.isin(self.vox_all[j], self.vox_all[i], assume_unique=True).sum()) for j in js}
+
+    def prepare(self, i: int, js) -> Dict[int, int]:
+        """The recipe answers pair by pair: nothing to batch — the intersections of this outer i."""
+        return self.inter_counts(i, js)
+
+    def common_keyframes(self, i: int, j: int) -> List[int]:
+        return sorted(set(self.vox_by_kf[i]) & set(self.vox_by_kf[j]))
+
+    def judges(self, i: int, j: int, common, mutual: bool) -> List[float]:
+        out = []
+        for f_ in common:
+            vi_f, vj_f = self.vox_by_kf[i][f_], self.vox_by_kf[j][f_]
+            sj = float(np.isin(vj_f, self.vox_all[i], assume_unique=True).sum()) / len(vj_f)
+            si = float(np.isin(vi_f, self.vox_all[j], assume_unique=True).sum()) / len(vi_f)
+            out.append(min(si, sj) if mutual else sj)
+        return out
+
+    def absorb(self, i: int, j: int) -> None:
+        self.vox_all[i] = np.union1d(self.vox_all[i], self.vox_all[j])
+        for f_, v_ in self.vox_by_kf[j].items():
+            self.vox_by_kf[i][f_] = (np.union1d(self.vox_by_kf[i][f_], v_)
+                                     if f_ in self.vox_by_kf[i] else v_)
+
+
+def _space_dedupe(instances: list, sets, xyz_display: np.ndarray, cfg: Optional[dict], dup_thr: float,
+                  mutual: bool, policy, decision, absorbed_into: dict, dedupe_decisions: list) -> list:
+    """The same-SPACE dedupe (docs/plan_determinismo.md point 104): every pair of instances, largest
+    first, merged when the keyframes that saw both judge their mutual voxel share above ``dup_thr`` by the
+    user's rule. ``sets``: the instances' voxel sets (:class:`VoxelSetsNumpy` or the device's
+    ``dedupe_torch.VoxelSetsTorch`` — the same integers either way). Returns the surviving instances
+    (``instances`` mutated: the survivor of a merge takes the union of the indices); the decisions and
+    the absorptions are recorded as before."""
+    error_factor, confidence, min_judges = decision
+    absorbed = set()
+    # USER 2026-10-15 ("solo debe fusionar lo que es de la parte de apoyo … el resto de
+    # elementos no"): two instances of DIFFERENT labels merge only when the survivor (the
+    # larger) is a SUPPORT surface; any other pair of labels stays distinct whatever their
+    # overlap — recorded with its shares, never silently
+    order = sorted(range(len(instances)), key=lambda k: (-sets.n(k), k))
+    for a_pos, i in enumerate(order):
+        if i in absorbed or not sets.n(i):
+            continue
+        js = [j for j in order[a_pos + 1:] if j not in absorbed and sets.n(j)]
+        counts = sets.prepare(i, js)                   # |vox_j ∩ vox_i| against the CURRENT i, one batch
+        for pos, j in enumerate(js):
+            inter = int(counts[j])
+            if not inter:
+                continue
+            share_i = inter / sets.n(i)
+            share_j = inter / sets.n(j)
+            if not _cross_label_merge_allowed(instances[i].get("label"), instances[j].get("label"), policy,
+                                              mutual=bool(mutual)):
+                dedupe_decisions.append({
+                    "kind": "space_dedupe", "instance_ids": [
+                        int(instances[i].get("instance_id", instances[i]["id"])),
+                        int(instances[j].get("instance_id", instances[j]["id"]))],
+                    "share": round(float(share_j), 3), "share_other": round(float(share_i), 3),
+                    "merged": False,
+                    "reason": (f"different labels ('{instances[j].get('label')}' vs "
+                               f"'{instances[i].get('label')}') and the survivor is not a support "
+                               f"surface — kept distinct (USER 2026-10-15)")})
+                continue
+            # IDENTITY, not containment (USER 2026-09-14: "que ambas instancias compartan mas del 80%
+            # de los puntos"); THE JUDGES (point 104, DECIDIDO): every keyframe that saw both — its share
+            # of j's voxels inside i's space (and of i's inside j's, the mutual test) — must exceed the
+            # user's bar significantly, with >= min_judges judges, by >= error_factor x the judges'
+            # measured spread; otherwise the two stay distinct and the margin is recorded
+            common_kf = sets.common_keyframes(i, j)
+            judges = sets.judges(i, j, common_kf, bool(mutual))
+            d = _decide_above_bar(judges, dup_thr, _robust_sigma(judges), factor=error_factor,
+                                  confidence=confidence, min_judges=min_judges)
+            dedupe_decisions.append({
+                "kind": "space_dedupe", "instance_ids": [
+                    int(instances[i].get("instance_id", instances[i]["id"])),
+                    int(instances[j].get("instance_id", instances[j]["id"]))],
+                "share": round(float(share_j), 3), "share_other": round(float(share_i), 3),
+                "n_judges": int(d["n_judges"]),
+                "median_judge_share": float(d["median_delta"] + dup_thr),
+                "ci_margin": d["ci_margin"], "judges_margin": d["judges_margin"],
+                "error_margin": d["error_margin"], "merged": bool(d["improves"]),
+                "reason": d["reason"]})
+            if d["improves"]:
+                # j is the same physical object as i → absorb (the union of the indices, sorted unique:
+                # np.union1d, what sorted(set | set) gave, without the Python sets over millions of ints)
+                merged_idx = np.union1d(np.asarray(instances[i]["globalIndices"], dtype=np.int64),
+                                        np.asarray(instances[j]["globalIndices"], dtype=np.int64)).tolist()
+                instances[i]["globalIndices"] = merged_idx
+                instances[i]["total_points"] = len(merged_idx)
+                sets.absorb(i, j)
+                absorbed.add(j)
+                absorbed_into[int(instances[j].get("instance_id", instances[j]["id"]))] = {
+                    "into": int(instances[i].get("instance_id", instances[i]["id"])),
+                    "into_label": instances[i].get("label"),
+                    "reason": "space_dedupe",
+                    "share": round(float(share_j), 3),
+                    "share_other": round(float(share_i), 3),
+                    "n_judges": int(d["n_judges"]),
+                    "error_margin": d["error_margin"],
+                }
+                print(f"[SegPipeline]   🔗 Space-dedupe: '{instances[j]['label']}' "
+                      f"#{instances[j]['id']} is the same object as "
+                      f"'{instances[i]['label']}' #{instances[i]['id']} "
+                      f"(they share {share_j:.0%} / {share_i:.0%} of their "
+                      f"space; {d['n_judges']} keyframes judge, {d['reason']}) — merged")
+                # the later pairs of this i see its enlarged set, as the recipe's loop did
+                counts.update(sets.prepare(i, js[pos + 1:]))
+            else:
+                print(f"[SegPipeline]   ↔ Space-dedupe: '{instances[j]['label']}' "
+                      f"#{instances[j]['id']} vs '{instances[i]['label']}' #{instances[i]['id']} "
+                      f"share {share_j:.0%} / {share_i:.0%} — kept distinct ({d['reason']})")
+    if absorbed:
+        pre = len(instances)
+        instances = [inst for k, inst in enumerate(instances) if k not in absorbed]
+        for inst in instances:
+            m = np.array(inst["globalIndices"], dtype=np.int64)
+            if len(m) >= 4:
+                inst["obb"] = _compute_obb(xyz_display[m], cfg=cfg)
+        print(f"[SegPipeline]   Space-dedupe: {pre} → {len(instances)} instances")
+    return instances
 
 
 def _merge_policy_of(cfg: Optional[dict]):
@@ -3682,7 +3857,49 @@ def _cross_label_merge_allowed(survivor_label: Optional[str], other_label: Optio
 
 def _attach_unsegmented(instances, xyz_display: np.ndarray,
                         attach_dist_m: float, rounds: int, votes: int,
-                        block: int = 4_000_000):
+                        block: int = 4_000_000, device: Optional[str] = None):
+    """:func:`_attach_unsegmented_numpy`'s rounds with the neighbour vote on the evidence device
+    (segmentation/attach_torch.py, 2026-11-01); the index rebuild as before. Returns (n_attached,
+    grown positions); mutates ``instances``."""
+    from reconstruction.surface_fit.hole_audit import evidence_device
+    from segmentation.attach_torch import attach_rounds_t
+    N = len(xyz_display)
+    owner = np.full(N, -1, dtype=np.int64)
+    for k, inst in enumerate(instances):
+        gi = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
+        owner[gi[(gi >= 0) & (gi < N)]] = k
+    n_before = int((owner >= 0).sum())
+    if not n_before:
+        return 0, []
+    owner = attach_rounds_t(xyz_display, owner, float(attach_dist_m), int(rounds), int(votes),
+                            evidence_device() if device is None else device)
+    return _rebuild_from_owner(instances, owner, n_before)
+
+
+def _rebuild_from_owner(instances, owner: np.ndarray, n_before: int):
+    """Every instance's index list from the owner array in ONE argsort (the recipe's rebuild)."""
+    n_attached = int((owner >= 0).sum()) - n_before
+    if n_attached <= 0:
+        return 0, []
+    order = np.argsort(owner, kind="stable")
+    sorted_owner = owner[order]
+    first = int(np.searchsorted(sorted_owner, 0))
+    counts = np.bincount(sorted_owner[first:], minlength=len(instances))
+    bounds = np.concatenate([[0], np.cumsum(counts)])
+    grown = []
+    for k in range(len(instances)):
+        gi = np.sort(order[first + bounds[k]: first + bounds[k + 1]])
+        was = int(instances[k].get("total_points") or 0)
+        instances[k]["globalIndices"] = gi.tolist()
+        instances[k]["total_points"] = int(len(gi))
+        if len(gi) > was:
+            grown.append(k)
+    return n_attached, grown
+
+
+def _attach_unsegmented_numpy(instances, xyz_display: np.ndarray,
+                              attach_dist_m: float, rounds: int, votes: int,
+                              block: int = 4_000_000):
     """Grow every instance into the unsegmented cloud around it.
 
     SAM3 runs on the KEYFRAMES, and the mask→cloud step only labels a point
@@ -4619,125 +4836,13 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
 
     dedupe_decisions: list = []
     if _merge_on and len(instances) > 1 and _vox > 0:
-        # per instance: its voxels (world-anchored, packed) and, per keyframe that
-        # saw it, the voxels of the points born in that keyframe — the JUDGES of
-        # point 104 are the keyframes that saw BOTH instances
-        vox_all: List[np.ndarray] = []
-        vox_by_kf: List[Dict[int, np.ndarray]] = []
-        for inst in instances:
-            idxs = np.asarray(inst["globalIndices"], dtype=np.int64)
-            if len(idxs) == 0:
-                vox_all.append(np.zeros(0, np.int64))
-                vox_by_kf.append({})
-                continue
-            keys = _pack_voxels(np.floor(xyz_display[idxs] / _vox).astype(np.int64))
-            vox_all.append(np.unique(keys))
-            fr = frame_arr[idxs]
-            per = {}
-            order = np.argsort(fr, kind="stable")
-            fs, starts = np.unique(fr[order], return_index=True)
-            ends = np.r_[starts[1:], len(order)]
-            for f_, s_, e_ in zip(fs.tolist(), starts, ends):
-                per[int(f_)] = np.unique(keys[order[s_:e_]])
-            vox_by_kf.append(per)
-        absorbed = set()
-        # USER 2026-10-15 ("solo debe fusionar lo que es de la parte de apoyo … el resto de
-        # elementos no"): two instances of DIFFERENT labels merge only when the survivor (the
-        # larger) is a SUPPORT surface; any other pair of labels stays distinct whatever their
-        # overlap — recorded with its shares, never silently
-        _policy = _merge_policy_of(cfg)
-        order = sorted(range(len(instances)), key=lambda k: (-len(vox_all[k]), k))
-        for a_pos, i in enumerate(order):
-            if i in absorbed or not len(vox_all[i]):
-                continue
-            for j in order[a_pos + 1:]:
-                if j in absorbed or not len(vox_all[j]):
-                    continue
-                inter = int(np.isin(vox_all[j], vox_all[i], assume_unique=True).sum())
-                if not inter:
-                    continue
-                share_i = inter / len(vox_all[i])
-                share_j = inter / len(vox_all[j])
-                if not _cross_label_merge_allowed(instances[i].get("label"), instances[j].get("label"), _policy,
-                                                  mutual=bool(_mutual)):
-                    dedupe_decisions.append({
-                        "kind": "space_dedupe", "instance_ids": [
-                            int(instances[i].get("instance_id", instances[i]["id"])),
-                            int(instances[j].get("instance_id", instances[j]["id"]))],
-                        "share": round(float(share_j), 3), "share_other": round(float(share_i), 3),
-                        "merged": False,
-                        "reason": (f"different labels ('{instances[j].get('label')}' vs "
-                                   f"'{instances[i].get('label')}') and the survivor is not a support "
-                                   f"surface — kept distinct (USER 2026-10-15)")})
-                    continue
-                # IDENTITY, not containment (USER 2026-09-14: "que ambas
-                # instancias compartan mas del 80% de los puntos"). Dividing
-                # only by the smaller asks "is B inside A", which every sign
-                # resting on a wall answers yes — that is what collapsed 147
-                # instances to 3. Asking BOTH to be mostly the intersection
-                # separates "the same object under two names" from "one object
-                # standing on another".
-                # THE JUDGES (point 104, DECIDIDO): every keyframe that saw both —
-                # its share of j's voxels inside i's space (and of i's inside j's,
-                # the mutual test) — must exceed the user's bar significantly, with
-                # >= min_judges judges, by >= error_factor x the judges' measured
-                # spread; otherwise the two stay distinct and the margin is recorded
-                common_kf = sorted(set(vox_by_kf[i]) & set(vox_by_kf[j]))
-                judges = []
-                for f_ in common_kf:
-                    vi_f, vj_f = vox_by_kf[i][f_], vox_by_kf[j][f_]
-                    sj = float(np.isin(vj_f, vox_all[i], assume_unique=True).sum()) / len(vj_f)
-                    si = float(np.isin(vi_f, vox_all[j], assume_unique=True).sum()) / len(vi_f)
-                    judges.append(min(si, sj) if _mutual else sj)
-                d = _decide_above_bar(judges, _dup_thr, _robust_sigma(judges), factor=error_factor,
-                                      confidence=confidence, min_judges=min_judges)
-                dedupe_decisions.append({
-                    "kind": "space_dedupe", "instance_ids": [
-                        int(instances[i].get("instance_id", instances[i]["id"])),
-                        int(instances[j].get("instance_id", instances[j]["id"]))],
-                    "share": round(float(share_j), 3), "share_other": round(float(share_i), 3),
-                    "n_judges": int(d["n_judges"]),
-                    "median_judge_share": float(d["median_delta"] + _dup_thr),
-                    "ci_margin": d["ci_margin"], "judges_margin": d["judges_margin"],
-                    "error_margin": d["error_margin"], "merged": bool(d["improves"]),
-                    "reason": d["reason"]})
-                if d["improves"]:
-                    # j is the same physical object as i → absorb
-                    merged_idx = sorted(set(instances[i]["globalIndices"])
-                                        | set(instances[j]["globalIndices"]))
-                    instances[i]["globalIndices"] = merged_idx
-                    instances[i]["total_points"] = len(merged_idx)
-                    vox_all[i] = np.union1d(vox_all[i], vox_all[j])
-                    for f_, v_ in vox_by_kf[j].items():
-                        vox_by_kf[i][f_] = (np.union1d(vox_by_kf[i][f_], v_)
-                                            if f_ in vox_by_kf[i] else v_)
-                    absorbed.add(j)
-                    absorbed_into[int(instances[j].get("instance_id", instances[j]["id"]))] = {
-                        "into": int(instances[i].get("instance_id", instances[i]["id"])),
-                        "into_label": instances[i].get("label"),
-                        "reason": "space_dedupe",
-                        "share": round(float(share_j), 3),
-                        "share_other": round(float(share_i), 3),
-                        "n_judges": int(d["n_judges"]),
-                        "error_margin": d["error_margin"],
-                    }
-                    print(f"[SegPipeline]   🔗 Space-dedupe: '{instances[j]['label']}' "
-                          f"#{instances[j]['id']} is the same object as "
-                          f"'{instances[i]['label']}' #{instances[i]['id']} "
-                          f"(they share {share_j:.0%} / {share_i:.0%} of their "
-                          f"space; {d['n_judges']} keyframes judge, {d['reason']}) — merged")
-                else:
-                    print(f"[SegPipeline]   ↔ Space-dedupe: '{instances[j]['label']}' "
-                          f"#{instances[j]['id']} vs '{instances[i]['label']}' #{instances[i]['id']} "
-                          f"share {share_j:.0%} / {share_i:.0%} — kept distinct ({d['reason']})")
-        if absorbed:
-            pre = len(instances)
-            instances = [inst for k, inst in enumerate(instances) if k not in absorbed]
-            for inst in instances:
-                m = np.array(inst["globalIndices"], dtype=np.int64)
-                if len(m) >= 4:
-                    inst["obb"] = _compute_obb(xyz_display[m], cfg=cfg)
-            print(f"[SegPipeline]   Space-dedupe: {pre} → {len(instances)} instances")
+        # the voxel sets on the evidence device (segmentation/dedupe_torch.py, 2026-11-01: the pair loop's
+        # np.isin over 1003 instances took 2 min 15 s on pccr audit5); VoxelSetsNumpy is the reference
+        from reconstruction.surface_fit.hole_audit import evidence_device
+        from segmentation.dedupe_torch import VoxelSetsTorch
+        _sets = VoxelSetsTorch(instances, xyz_display, frame_arr, _vox, evidence_device())
+        instances = _space_dedupe(instances, _sets, xyz_display, cfg, _dup_thr, _mutual, _merge_policy_of(cfg),
+                                  (error_factor, confidence, min_judges), absorbed_into, dedupe_decisions)
     decisions["space_dedupe"] = dedupe_decisions
 
     # ── Same-label fragment consolidation ──────────────────────────────
