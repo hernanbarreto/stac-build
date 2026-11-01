@@ -629,6 +629,66 @@ def solve(problem: _Problem, max_iterations: int, log=None) -> Dict[str, object]
 
 # ── the rung interface (precision.refine.run_rung's contract) ──────────────────────────────
 
+def problem_inputs(fit_groups, X_start, n_images: int):
+    """The residual blocks of the problem as arrays — EXACTLY the Ceres path's: of the tracks with a start
+    and ≥ 2 observations, one observation per (image, track) — the LAST where an image repeats — and only
+    the tracks left with ≥ 2 images; tracks in X_start's order, each track's images in the order of their
+    first observation. From the groups' cached arrays when they carry them (2026-11-01: the Python loop over
+    13 M observations cost ~10 s per rung on pccr); :func:`_problem_inputs_reference` is that loop."""
+    from precision.refine import TrackGroups
+    if not (isinstance(fit_groups, TrackGroups) and hasattr(fit_groups, "counts")):
+        return _problem_inputs_reference(fit_groups, X_start)
+    want = np.fromiter(X_start.keys(), np.int64, len(X_start))
+    g_tracks = fit_groups.tracks
+    pos = {int(t): q for q, t in enumerate(want.tolist())}
+    in_x = np.isin(g_tracks, want) & (fit_groups.counts >= 2)
+    if not in_x.any():
+        return [], np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros((0, 2)), np.zeros((0, 3))
+    m = np.repeat(in_x, fit_groups.counts)
+    ii = fit_groups.ii[m]; uv_all = fit_groups.uv[m]
+    tr_rank = np.repeat(np.fromiter((pos[int(t)] for t in g_tracks[in_x].tolist()), np.int64, int(in_x.sum())),
+                        fit_groups.counts[in_x])                       # X_start's order of each track
+    key = tr_rank * int(n_images) + ii                                  # (track in X order, image)
+    order = np.argsort(key, kind="stable")
+    ks = key[order]
+    bound = np.r_[0, np.flatnonzero(np.diff(ks)) + 1, len(ks)]
+    first = order[bound[:-1]]; last = order[bound[1:] - 1]              # first / last observation of each (track, image)
+    out_o = np.argsort(first, kind="stable")                            # tracks in X order, images by first observation
+    first, last = first[out_o], last[out_o]
+    t_of = tr_rank[first]
+    n_img = np.bincount(t_of, minlength=len(want))
+    ok = n_img[t_of] >= 2
+    first, last, t_of = first[ok], last[ok], t_of[ok]
+    kept_ranks = np.unique(t_of)                                        # ascending = X_start's order
+    renum = np.full(len(want), -1, np.int64); renum[kept_ranks] = np.arange(len(kept_ranks))
+    tracks = want[kept_ranks].tolist()
+    cam_idx = ii[first].astype(np.int64)
+    pt_idx = renum[t_of]
+    uv = np.asarray(uv_all[last], np.float64).reshape(-1, 2)
+    X0 = np.asarray([X_start[t] for t in tracks], np.float64).reshape(-1, 3)
+    return tracks, cam_idx, pt_idx, uv, X0
+
+
+def _problem_inputs_reference(fit_groups, X_start):
+    tracks, obs_of = [], {}
+    for t in X_start:
+        if t not in fit_groups or len(fit_groups[t]) < 2:
+            continue
+        last = {}
+        for i, p_ in fit_groups[t]:
+            last[int(i)] = p_
+        if len(last) >= 2:
+            tracks.append(t)
+            obs_of[t] = [(i, last[i]) for i in last]
+    if not tracks:
+        return [], np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros((0, 2)), np.zeros((0, 3))
+    cam_idx = np.concatenate([np.fromiter((i for i, _ in obs_of[t]), np.int64, len(obs_of[t])) for t in tracks])
+    pt_idx = np.concatenate([np.full(len(obs_of[t]), k, np.int64) for k, t in enumerate(tracks)])
+    uv = np.concatenate([np.asarray([p for _, p in obs_of[t]], np.float64).reshape(-1, 2) for t in tracks])
+    X0 = np.asarray([X_start[t] for t in tracks], np.float64).reshape(-1, 3)
+    return tracks, cam_idx, pt_idx, uv, X0
+
+
 def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[float], wh: Tuple[int, int],
                    fit_groups: Dict[int, List], X_start: Dict[int, np.ndarray], sigmas: Optional[np.ndarray],
                    cfg, block_of: Optional[np.ndarray] = None, params_by_block0: Optional[List[List[float]]] = None,
@@ -660,20 +720,7 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
     # the same keyframe keeps its LAST observation there and a track left with one image is skipped
     # (measured 2026-11-01 on pccr's main tracks: without this rule two same-image observations
     # triangulated at the camera put one residual of 7e11 px into the problem and the solve stalled)
-    tracks, obs_of = [], {}
-    for t in X_start:
-        if t not in fit_groups or len(fit_groups[t]) < 2:
-            continue
-        last = {}
-        for i, p_ in fit_groups[t]:
-            last[int(i)] = p_
-        if len(last) >= 2:
-            tracks.append(t)
-            obs_of[t] = [(i, last[i]) for i in last]
-    cam_idx = np.concatenate([np.fromiter((i for i, _ in obs_of[t]), np.int64, len(obs_of[t])) for t in tracks])
-    pt_idx = np.concatenate([np.full(len(obs_of[t]), k, np.int64) for k, t in enumerate(tracks)])
-    uv = np.concatenate([np.asarray([p for _, p in obs_of[t]], np.float64).reshape(-1, 2) for t in tracks])
-    X0 = np.asarray([X_start[t] for t in tracks], np.float64).reshape(-1, 3)
+    tracks, cam_idx, pt_idx, uv, X0 = problem_inputs(fit_groups, X_start, N)
     # OFF THE RASTER AT THE START = not a measurement of that image (measured 2026-11-01 on pccr's main
     # tracks: a 2-view landmark triangulated 0.06 mm in front of one camera projected 7e11 px away; one
     # such residual is the whole cost, the Levenberg-Marquardt step for it is the linearisation of x/z at

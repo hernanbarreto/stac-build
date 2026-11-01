@@ -63,3 +63,44 @@ def test_rolling_shutter_diag_pairs_equal_the_loop():
     rho, pval = spearmanr(xs, ys)
     assert rep["n"] == len(xs) > 100
     assert abs(rep["spearman"] - rho) < 1e-9 and abs(rep["p"] - pval) < 1e-9
+
+
+def test_track_groups_arrays_equal_the_loop_and_the_lists():
+    rng = np.random.default_rng(7)
+    frames = [100, 103, 106, 109, 112, 115, 118]
+    n = 20000
+    track = rng.integers(0, 3000, n); frame = rng.choice(frames + [999], n); uv = rng.uniform(0, 500, (n, 2)).astype(np.float32)
+    g = RF.group_tracks(track, frame, uv, frames)
+    ref = RF._group_tracks_reference(track, frame, uv, frames)
+    assert list(g.keys()) == list(ref.keys())
+    for t in ref:
+        assert [i for i, _ in g[t]] == [i for i, _ in ref[t]]
+        assert np.array_equal(np.array([p for _, p in g[t]]), np.array([p for _, p in ref[t]]))
+    # the cached arrays are the lists' content, and _track_arrays reads them (min_views 1, 2, 3)
+    for mv in (1, 2, 3):
+        a = RF._track_arrays(g, min_views=mv)
+        b = RF._track_arrays(dict(ref), min_views=mv)
+        assert a[0] == b[0] and np.array_equal(a[1], b[1]) and np.array_equal(a[2], b[2])
+        assert np.array_equal(a[3], b[3]) and np.array_equal(a[4], b[4])
+    assert RF.track_clusters(g) == RF.track_clusters(dict(ref))
+    # _obs_of_tracks on a filtered subsequence of the groups' order equals the lists' arrays
+    sub = [t for k, t in enumerate(g.tracks.tolist()) if k % 3 == 0]
+    ca, ia, ua = RF._obs_of_tracks(g, sub)
+    cb, ib, ub = RF._obs_of_tracks(dict(ref), sub)
+    assert np.array_equal(ca, cb) and np.array_equal(ia, ib) and np.array_equal(ua, ub)
+
+
+def test_torch_problem_inputs_equal_the_ceres_rule_loop():
+    from precision import ba_torch as BA
+    rng = np.random.default_rng(8)
+    frames = list(range(50))
+    n = 30000
+    track = rng.integers(0, 4000, n); frame = rng.choice(frames, n); uv = rng.uniform(0, 400, (n, 2)).astype(np.float32)
+    # some tracks observe the same image twice (the Ceres rule keeps the LAST observation there)
+    g = RF.group_tracks(track, frame, uv, frames)
+    X = {int(t): rng.normal(0, 1, 3) for k, t in enumerate(g.tracks.tolist()) if k % 4}
+    a = BA.problem_inputs(g, X, len(frames))
+    b = BA._problem_inputs_reference(g, X)
+    assert a[0] == b[0] and len(a[0]) > 1000
+    for x, y in zip(a[1:], b[1:]):
+        assert np.array_equal(x, y)

@@ -666,13 +666,11 @@ def landmark_rows_by_keyframe(g: Dict[int, list], X: Dict[int, np.ndarray], w2c:
     depth in that keyframe, rows with z ≤ 0 left out — as arrays (2026-11-01: the per-observation
     Python loop over 16 M observations of 2.6 M tracks on pccr), in the loop's order: tracks in the
     groups' order, observations in their order (:func:`_landmark_rows_by_keyframe_reference`)."""
-    tracks = list(g)                                          # every track, single observations included
+    from precision.refine import _track_arrays
+    tracks, counts, _starts, ii, uv = _track_arrays(g, min_views=1)       # every track, single observations included
     out = {i: np.zeros((0, 3), float) for i in range(int(n_frames))}
     if not tracks:
         return out
-    counts = np.fromiter((len(g[t]) for t in tracks), np.int64, len(tracks))
-    ii = np.fromiter((i for t in tracks for i, _ in g[t]), np.int64, int(counts.sum()))
-    uv = np.array([p for t in tracks for _, p in g[t]], np.float64).reshape(-1, 2)
     has = np.fromiter((t in X for t in tracks), bool, len(tracks))
     if not has.any():
         return out
