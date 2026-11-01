@@ -336,3 +336,34 @@ def test_the_cli_keeps_a_frozen_configuration_unless_told_to_refreeze(tmp_path, 
     assert load_run_config(s2)[0] == {"precision": {"new": 2}}
     # the flag is on the CLI
     assert "--refreeze" in pathlib.Path(RN.__file__).read_text()
+
+
+def test_resume_point_accepts_the_product_sidecar_rewritten_byte_for_byte_but_not_a_changed_one(monkeypatch, tmp_path):
+    """2026-11-01 (pccr_audit4): the resume refused because depth_correction.json's bytes differed from what
+    f6_bend left, while its CONTENT was exactly the product sidecar of the live epoch (the identity, empty
+    chain). Such a file is accepted and declared — the steps that read it run again; a sidecar that carries a
+    factor, or another epoch, still stops the chain."""
+    import json
+    from correction.chain import product_sidecar
+    steps = [RN.Step("f6_bend", "F6", "da3", "m", writes=("output/depth_correction.json",)),
+             RN.Step("f6_check", "chk", "da3", "m")]
+    st_in = RN._files_stamp({}, [], {"x": 1})
+    rec = {"key": "f6_bend", "epoch_after": 3, "stamp_in": st_in,
+           "stamp_out": RN._with_inputs(st_in, {"output/depth_correction.json": "aaa"})}
+    state = {"done": [rec]}
+    import correction.epoch as CE
+    monkeypatch.setattr(CE, "epoch_kind", lambda out, e: "transform")   # no published-cloud epoch excuses it
+    side = tmp_path / "depth_correction.json"
+    side.write_text(json.dumps(product_sidecar(tmp_path, 3), indent=1, sort_keys=True))
+    msgs = []
+    n = RN.resume_point(state, steps, 3, out=tmp_path, stamp_now=lambda s: st_in,
+                        product_sha=lambda k: "bbb", log=msgs.append)
+    assert n == 1 and any("product sidecar of epoch 3" in m for m in msgs)
+    changed = product_sidecar(tmp_path, 3); changed["k"] = {"5": 1.1}
+    side.write_text(json.dumps(changed, indent=1, sort_keys=True))
+    with pytest.raises(RN.ChainError, match="depth_correction.json"):
+        RN.resume_point(state, steps, 3, out=tmp_path, stamp_now=lambda s: st_in, product_sha=lambda k: "bbb")
+    other = product_sidecar(tmp_path, 4)
+    side.write_text(json.dumps(other, indent=1, sort_keys=True))
+    with pytest.raises(RN.ChainError, match="depth_correction.json"):
+        RN.resume_point(state, steps, 3, out=tmp_path, stamp_now=lambda s: st_in, product_sha=lambda k: "bbb")

@@ -434,6 +434,20 @@ def _only_new_cloud_epochs(out: Optional[Path], e_from: int, e_to: int) -> bool:
         return False
 
 
+def _is_product_sidecar(out, key: str, epoch: int) -> bool:
+    """A ``depth_correction.json`` that reads EXACTLY as ``correction.chain.product_sidecar(out, epoch)``:
+    the identity sidecar of the live PRODUCT epoch, stamped with its empty chain. Whoever rewrote its
+    bytes (2026-11-01, pccr_audit4: the file f6_bend left was re-serialised after the chain ended and
+    the resume refused), such a file carries no geometry the chain did not produce — compared as
+    content, never as bytes. Anything else (a factor, another epoch, a chain) is not a product sidecar."""
+    try:
+        from correction.chain import product_sidecar
+        p = Path(out) / Path(key).name
+        return json.loads(p.read_text()) == product_sidecar(out, int(epoch))
+    except Exception:
+        return False
+
+
 def resume_point(state: dict, steps: Sequence[Step], epoch_now: int, out: Optional[Path] = None, *,
                  stamp_now: Optional[Callable[[Step], Mapping[str, Any]]] = None,
                  product_sha: Optional[Callable[[str], str]] = None,
@@ -508,6 +522,16 @@ def resume_point(state: dict, steps: Sequence[Step], epoch_now: int, out: Option
             cut = min(cut, nxt)
         else:
             moved.append(f)
+    if moved and out is not None and int(done[n - 1].get("epoch_after", -1)) == int(epoch_now):
+        keep = []
+        for f in moved:
+            if Path(f).name == "depth_correction.json" and _is_product_sidecar(out, f, int(epoch_now)):
+                log(f"{LOG_TAG} {f} reads as the product sidecar of epoch {epoch_now} — its bytes changed since "
+                    f"'{done[n - 1]['key']}', its content is the identity the chain defines: accepted, declared; "
+                    f"the steps that read it run again")
+            else:
+                keep.append(f)
+        moved = keep
     if moved:
         last = done[n - 1]
         e_last = int(last.get("epoch_after", -1))
