@@ -948,25 +948,52 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
             "timing": timing}
 
 
+WITNESS_WORKERS = 8      # BOUND (cost): worker processes of the witnesses' PnP; the result does not depend on it
+
+
+def _pnp_witnesses(args) -> List[Tuple[int, dict]]:
+    """One worker of :func:`localize_witnesses`: COLMAP's PnP + refinement of each (frame, 2-D, 3-D) against the
+    fixed landmarks, the LO-RANSAC seeded per call (the same options as the sequential loop: each call is
+    independent of the others, so the split across workers changes no pose)."""
+    params, wh, seed, bound_px, items = args
+    import pycolmap
+    pycolmap.set_random_seed(int(seed))
+    cam = pycolmap.Camera.create_from_model_name(1, "OPENCV", float(params[0]), int(wh[0]), int(wh[1]))
+    cam.params = [float(v) for v in params]
+    est = pycolmap.AbsolutePoseEstimationOptions()
+    est.ransac.random_seed = int(seed)
+    est.ransac.num_threads = 1
+    ref = pycolmap.AbsolutePoseRefinementOptions()
+    out = []
+    for f, p2, p3 in items:
+        res = pycolmap.estimate_and_refine_absolute_pose(p2, p3, cam, est, ref)
+        if not res:
+            out.append((f, {"localized": False, "reason": "pnp_failed", "n": int(len(p2))}))
+            continue
+        T = np.eye(4)
+        T[:3, :4] = np.asarray(res["cam_from_world"].matrix())
+        inl = np.asarray(res["inlier_mask"], bool)
+        e = np.linalg.norm(project(p3[inl], T, params) - p2[inl], axis=1)
+        rms = float(np.sqrt(np.mean(e ** 2))) if inl.any() else float("inf")
+        ok = rms <= bound_px
+        out.append((f, {"localized": bool(ok), "reason": None if ok else "rms_above_keyframe_heldout",
+                        "rms_px": rms, "n": int(len(p2)), "n_inliers": int(inl.sum()),
+                        "c2w": np.linalg.inv(T).tolist()}))
+    return out
+
+
 def localize_witnesses(best: RungResult, fit_track_X: Dict[int, np.ndarray],
                        track: np.ndarray, frame: np.ndarray, uv: np.ndarray,
                        witness_frames: Sequence[int], wh: Tuple[int, int], bound_px: float,
-                       cfg) -> Dict[int, dict]:
+                       cfg, workers: Optional[int] = None) -> Dict[int, dict]:
     """PnP + refinement of every witness against the FIXED landmarks, the session
     camera fixed (the best rung's; R3 → the block of the nearest keyframe is not
-    known for a witness: its first block's camera)."""
-    import pycolmap
-    pycolmap.set_random_seed(int(cfg.seed))
-    params = best.params_by_block[0]
-    cam = pycolmap.Camera.create_from_model_name(1, "OPENCV", float(params[0]), int(wh[0]), int(wh[1]))
-    cam.params = [float(v) for v in params]
-    # explicit estimation options: COLMAP's defaults, but the LO-RANSAC seeded explicitly
-    # (its default seed is -1, the one that left the pose-prior alignment run-dependent)
-    # and single-threaded
-    est = pycolmap.AbsolutePoseEstimationOptions()
-    est.ransac.random_seed = int(cfg.seed)
-    est.ransac.num_threads = 1
-    ref = pycolmap.AbsolutePoseRefinementOptions()
+    known for a witness: its first block's camera). The LO-RANSAC is seeded explicitly per call
+    (its default seed is -1, the one that left the pose-prior alignment run-dependent) and
+    single-threaded; the witnesses are split over ``workers`` processes (2026-11-01: COLMAP's PnP has
+    no GPU path — 29 s on one core for pccr's 1,791 witnesses; each call is independent, so the poses
+    are the same whatever the split: tests/test_refine_cpu_phases.py)."""
+    params = [float(v) for v in best.params_by_block[0]]
     out = {}
     wset = set(int(w) for w in witness_frames)
     # the correspondences of every witness at once (2026-11-01: a Python loop over 16 M observations,
@@ -977,29 +1004,31 @@ def localize_witnesses(best: RungResult, fit_track_X: Dict[int, np.ndarray],
     sel = sel[np.argsort(frame[sel], kind="stable")]
     f_sorted = frame[sel]
     bounds = np.searchsorted(f_sorted, np.array(sorted(wset) + [np.iinfo(np.int64).max]))
+    items = []
     for q, f in enumerate(sorted(wset)):
         rows = sel[bounds[q]:bounds[q + 1]]
         if len(rows) < int(cfg.min_witness_corr):
             out[f] = {"localized": False, "reason": "too_few_correspondences", "n": int(len(rows))}
             continue
-        obs = rows
         p2 = np.asarray(uv[rows], np.float64)
         p3 = np.array([fit_track_X[int(t)] for t in track[rows]], np.float64)
-        res = pycolmap.estimate_and_refine_absolute_pose(p2, p3, cam, est, ref)
-        if not res:
-            out[f] = {"localized": False, "reason": "pnp_failed", "n": len(obs)}
-            continue
-        T = np.eye(4)
-        T[:3, :4] = np.asarray(res["cam_from_world"].matrix())
-        inl = np.asarray(res["inlier_mask"], bool)
-        e = np.linalg.norm(project(p3[inl], T, params) - p2[inl], axis=1)
-        rms = float(np.sqrt(np.mean(e ** 2))) if inl.any() else float("inf")
-        ok = rms <= bound_px
-        out[f] = {"localized": bool(ok), "reason": None if ok else "rms_above_keyframe_heldout",
-                  "rms_px": rms, "n": len(obs), "n_inliers": int(inl.sum()),
-                  "c2w": np.linalg.inv(T).tolist()}
+        out[f] = None                                        # the place of f in the sequential order
+        items.append((f, p2, p3))
+    n_w = max(1, min(int(WITNESS_WORKERS if workers is None else workers), len(items)))
+    if items:
+        chunks = [items[k::n_w] for k in range(n_w)]
+        jobs = [(params, tuple(wh), int(cfg.seed), float(bound_px), c) for c in chunks if c]
+        if n_w == 1:
+            parts = [_pnp_witnesses(j) for j in jobs]
+        else:
+            import multiprocessing
+            from concurrent.futures import ProcessPoolExecutor
+            with ProcessPoolExecutor(max_workers=n_w, mp_context=multiprocessing.get_context("spawn")) as ex:
+                parts = list(ex.map(_pnp_witnesses, jobs))
+        for part in parts:
+            for f, rec in part:
+                out[f] = rec
     return out
-
 
 def split_of_observations(track_ids: np.ndarray, track_split: np.ndarray, obs_track: np.ndarray) -> np.ndarray:
     """The split (0 fit / 1 held-out) of every observation from its track's — by searchsorted over the

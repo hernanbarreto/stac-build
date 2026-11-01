@@ -566,6 +566,29 @@ def confidence_weight(conf: np.ndarray, floor: float, cmax: float, passed: np.nd
     return np.where(passed, w, 0.0)
 
 
+_PRELOAD: Dict[str, object] = {}
+
+
+def preload_mono_detail(pcfg, log: Callable = print) -> None:
+    """Read PointDiT's weights in a background thread while the landmark rows and the bend run (2026-11-01:
+    11 GB of checkpoints, 62-72 s with the card idle on pccr). The loaded runner is the one apply_mono_detail
+    uses — the same weights, the same model; an error in the load is raised there."""
+    md = pcfg.mono_detail
+    if not md.enabled or "thread" in _PRELOAD:
+        return
+    import threading
+    from precision.pointdit_runner import PointDiTRunner
+
+    def _load():
+        try:
+            _PRELOAD["runner"] = PointDiTRunner(md, log=log).load()
+        except BaseException as e:  # noqa: BLE001 — re-raised where the runner is needed
+            _PRELOAD["error"] = e
+    th = threading.Thread(target=_load, name="pointdit-preload", daemon=True)
+    _PRELOAD["thread"] = th
+    th.start()
+
+
 def apply_mono_detail(pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out: Path, log, _p):
     """The hook between the bend and the vote. With ``mono_detail.enabled`` false it returns its
     inputs untouched (epoch 8 bit for bit); otherwise PointDiT's detail refines every bent map, the
@@ -578,7 +601,15 @@ def apply_mono_detail(pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out
     from precision.mono_detail import run_stage
     from precision.pointdit_runner import PointDiTRunner
     _p(42, f"mono detail: PointDiT-{md.model} refines the bent depth (tiles, affine per tile, detail, band)")
-    runner = PointDiTRunner(md, log=log)
+    runner = _PRELOAD.pop("runner", None)
+    th = _PRELOAD.pop("thread", None)
+    if th is not None:
+        th.join()                                   # the weights were read while the bend ran
+        err = _PRELOAD.pop("error", None)
+        if err is not None:
+            raise err
+    if runner is None:
+        runner = PointDiTRunner(md, log=log)
     inner = {f: interior(passed[f]) for f in frames}
     # the session's own agreement tolerance on the BENT maps (the vote measures its own again after)
     tau0 = CC.measured_tau(dep, inner, K, c2w, frames, pcfg.bend.neighbors, pcfg.bend.tau_quantile)
@@ -789,6 +820,7 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     else:
         grid_note = f"Omega's record on the camera grid {W}x{H}, no lens — read as it is"
     _p(3, f"{N} keyframes, camera fx {K[0, 0]:.1f} fy {K[1, 1]:.1f} ({W}x{H}); {grid_note}; F5's landmarks")
+    preload_mono_detail(pcfg, log)                   # PointDiT's weights load while the rows and the bend run
     obs, dropped_tracks = _landmark_rows(session_dir, pcfg, frames, w2c, params, log=log)
     if lens:
         # the tracks were observed where the lens put them (the original frame) → the undistorted frame

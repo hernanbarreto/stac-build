@@ -3,6 +3,7 @@ replaced: the leave-one-view-out held-out per keyframe (the batched SVD stacks v
 split map by searchsorted, the rolling-shutter diagnostic's pairs — on the synthetic OPENCV scene of the
 solver tests."""
 import numpy as np
+import pytest
 
 from precision import refine as RF
 from tests.test_ba_torch import CAM, WH, _scene
@@ -104,3 +105,33 @@ def test_torch_problem_inputs_equal_the_ceres_rule_loop():
     assert a[0] == b[0] and len(a[0]) > 1000
     for x, y in zip(a[1:], b[1:]):
         assert np.array_equal(x, y)
+
+
+def test_witness_pnp_is_the_same_whatever_the_split():
+    pycolmap = pytest.importorskip("pycolmap")
+    if not (hasattr(pycolmap, "estimate_and_refine_absolute_pose") and hasattr(pycolmap.Camera, "create_from_model_name")):
+        pytest.skip("this pycolmap predates the PnP API F5 runs with (env mapanything)")
+    rng = np.random.default_rng(9)
+    w2c, pts, groups, X = _scene(n_cam=6, n_pts=300, noise_px=0.3)
+    # witnesses: new frames 100..104 observing the landmarks through camera poses near the keyframes
+    track, frame, uv = [], [], []
+    ids = list(X)
+    for f in range(100, 105):
+        T = w2c[f % len(w2c)].copy(); T[:3, 3] += rng.normal(0, 0.05, 3)
+        P = np.array([X[t] for t in ids])
+        q = RF.project(P, T, CAM)
+        ok = (q[:, 0] > 0) & (q[:, 0] < WH[0]) & (q[:, 1] > 0) & (q[:, 1] < WH[1])
+        for t, p in zip(np.asarray(ids)[ok], q[ok] + rng.normal(0, 0.4, (int(ok.sum()), 2))):
+            track.append(int(t)); frame.append(f); uv.append(p)
+    track, frame, uv = np.asarray(track), np.asarray(frame), np.asarray(uv)
+    r = RF.RungResult("R0", w2c, [list(CAM)], np.zeros(len(w2c), int), 0.0, 0, "CONVERGENCE")
+
+    class Cfg:
+        seed = 0
+        min_witness_corr = 6
+    a = RF.localize_witnesses(r, X, track, frame, uv, list(range(100, 105)), WH, 5.0, Cfg, workers=1)
+    b = RF.localize_witnesses(r, X, track, frame, uv, list(range(100, 105)), WH, 5.0, Cfg, workers=3)
+    assert list(a.keys()) == list(b.keys()) and len(a) == 5
+    for f in a:
+        assert a[f] == b[f], f
+    assert sum(1 for v in a.values() if v["localized"]) >= 3
