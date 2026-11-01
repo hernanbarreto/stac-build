@@ -275,7 +275,7 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
     log(f"{LOG} {ts.n_frames} keyframes ({len(train_idx)} train, {len(held_idx)} held out), {N0:,} seeds, "
         f"{ts.width}x{ts.height}, sh degree {tr['sh_degree']}, {tr['iterations']} iterations, strategy {tr['strategy']}")
     images = _load_images(ts, device)
-    depths = _depth_targets(ts, trainset_dir, device, log) if float(tr["depth_loss_weight"]) > 0 else {}
+    depths = _depth_targets(ts, trainset_dir, device, log) if float(tr["depth_lambda"]) > 0 else {}
     extent = scene_extent(ts.c2w)
     # the lens decides the strategy (strategy_choice), the strategy its init preset (gsplat default / mcmc)
     dist = np.asarray(ts.dist, np.float64)
