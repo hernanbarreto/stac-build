@@ -76,6 +76,7 @@ TRACKS_VERSION = 2
 PROVENANCE = "tool_measured"
 LOG_TAG = "[tracks]"
 KIND_KEYFRAME, KIND_WITNESS = 0, 1
+FRAME_CACHE = 64        # BOUND (memory): decoded frames kept for the windows that share them (~1 MB each)
 GRAY_MAX = np.iinfo(np.uint8).max           # 8-bit frames: the tracker takes [0, 1]
 SPLIT_FIT, SPLIT_HELDOUT = 0, 1
 
@@ -568,17 +569,46 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
     wit_set = set(wit) - set(kf)
     next_tid, t0 = 0, time.time()
     n_dropped_edge = 0
-    for wi, win in enumerate(windows):
-        imgs = np.stack([image(f) for f in win.frames]).astype(np.float32) / GRAY_MAX
+    # THE CPU SIDE OF A WINDOW AHEAD OF THE CARD (2026-11-01: the tracker kept the card at 65 % on pccr — every
+    # window decoded and resized its 24 frames, found its corners and read its depth edges while the GPU
+    # waited): one worker thread prepares window wi + 1 while window wi is tracked, in the windows' order, with
+    # the same functions on the same inputs — the queries and the images are what the loop computed; the
+    # decoded frames are kept for the windows that share them (half of each keyframe window is the previous
+    # one's), a bounded cache.
+    from collections import OrderedDict
+    from concurrent.futures import ThreadPoolExecutor
+    frame_cache: "OrderedDict[int, np.ndarray]" = OrderedDict()
+
+    def image_cached(f):
+        if f in frame_cache:
+            frame_cache.move_to_end(f)
+            return frame_cache[f]
+        im = image(f)
+        frame_cache[f] = im
+        if len(frame_cache) > FRAME_CACHE:
+            frame_cache.popitem(last=False)
+        return im
+
+    def prep(win):
+        imgs_w = np.stack([image_cached(f) for f in win.frames]).astype(np.float32) / GRAY_MAX
+        qs = []
         for qf in win.query_frames:
             qi = win.frames.index(qf)
-            gray = cv2.cvtColor((imgs[qi] * GRAY_MAX).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+            gray = cv2.cvtColor((imgs_w[qi] * GRAY_MAX).astype(np.uint8), cv2.COLOR_RGB2GRAY)
             q = query_points(gray, tcfg.grid_side, tcfg.max_corners, tcfg.corner_quality,
                              tcfg.corner_min_distance_px)
             e, emap = edges(qf)
             keep = keep_mask(grid_to_native(q, gmap), None, e, emap)
-            n_dropped_edge += int((~keep).sum())
-            q = q[keep]
+            qs.append((qf, qi, q[keep], int((~keep).sum())))
+        return imgs_w, qs
+
+    prep_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="f4-prep")
+    pending = prep_pool.submit(prep, windows[0]) if windows else None
+    for wi, win in enumerate(windows):
+        imgs, prepared = pending.result()
+        pending = prep_pool.submit(prep, windows[wi + 1]) if wi + 1 < len(windows) else None
+        for qf, qi, q, n_drop in prepared:
+            n_dropped_edge += n_drop
             if len(q) == 0:
                 continue
             order = [qi] + [k for k in range(len(win.frames)) if k != qi]
@@ -604,6 +634,7 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
         if (wi + 1) % 25 == 0 or wi == len(windows) - 1:
             log(f"{LOG_TAG} window {wi + 1}/{len(windows)}: {sum(len(a) for a in obs['track']):,} obs "
                 f"({time.time() - t0:.0f} s)")
+    prep_pool.shutdown(wait=True)
     if not obs["track"] or not sum(len(a) for a in obs["track"]):
         raise TracksError("no track survived — nothing to write")
     obs = {k: np.concatenate(v) for k, v in obs.items()}
