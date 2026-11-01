@@ -222,6 +222,41 @@ def _vertices_to_las(data: np.ndarray, las_path: Path, class_dir: Path, label: s
     logger.info(f"[Potree] LAS quantum {scale:.3g} m (2^{math.frexp(scale)[1] - 1}) for "
                 f"a {extent:.2f} m extent")
 
+    # EVERY extra dimension declared on the header before the point record exists, in the order the
+    # fields are written below (2026-11-01: each add_extra_dim on a filled record re-allocated and copied the
+    # whole record — 8 copies of ~1 GB, most of the 30 s this step took on pccr's 19 M points; the bytes of
+    # the LAS are the same: tests/test_potree_las_bytes.py)
+    class_npy = Path(class_dir) / "classification.npy"
+    inst_npy = Path(class_dir) / "instance_ids.npy"
+    inst_arr = np.load(inst_npy) if inst_npy.exists() else None
+    if inst_arr is not None and len(inst_arr) != len(data):
+        logger.warning(f"[Potree] instance_ids.npy size mismatch: {len(inst_arr)} vs {len(data)} pts — not written")
+        inst_arr = None
+    if inst_arr is not None and inst_arr.size and int(inst_arr.max()) > int(np.iinfo(np.uint32).max):
+        raise ValueError(f"{inst_npy}: instance id {int(inst_arr.max())} does not fit uint32")
+
+    def _int_dim(arr):
+        hi = int(arr.max()) if arr.size else 0
+        lo = int(arr.min()) if arr.size else 0
+        if lo >= 0 and hi <= 65535:
+            return np.uint16
+        return np.int32
+    _types = ({name: _int_dim(data[name]) for name in ("frame_global", "pixel_row", "pixel_col")}
+              if has_origins else {})
+    _wit = [n for n in ("mv_votes", "mask_votes", "mask_conflicts", "status")
+            if data.dtype.names and n in data.dtype.names]
+    extra = []
+    if inst_arr is not None:
+        extra.append(laspy.ExtraBytesParams(name="instance", type=np.uint32))
+    if has_confidence:
+        extra.append(laspy.ExtraBytesParams(name="confidence", type=np.float32))
+    for name in (("frame_global", "pixel_row", "pixel_col") if has_origins else ()):
+        extra.append(laspy.ExtraBytesParams(name=name, type=_types[name]))
+    for name in _wit:
+        extra.append(laspy.ExtraBytesParams(name=name, type=np.uint8))
+    if extra:
+        header.add_extra_dims(extra)
+
     las = laspy.LasData(header)
     las.x = data['x'].astype(np.float64)
     las.y = data['y'].astype(np.float64)
@@ -232,7 +267,6 @@ def _vertices_to_las(data: np.ndarray, las_path: Path, class_dir: Path, label: s
     las.blue = data['b'].astype(np.uint16) * 256
 
     # Per-point segment classification (0=unsegmented, 1..N=segment ID)
-    class_npy = Path(class_dir) / "classification.npy"
     if class_npy.exists():
         class_arr = np.load(class_npy)
         if len(class_arr) == len(data):
@@ -252,18 +286,10 @@ def _vertices_to_las(data: np.ndarray, las_path: Path, class_dir: Path, label: s
     # Per-point INSTANCE id as a 32-bit extra dim (docs/plan_determinismo.md point 107: no
     # 255-object ceiling — segmentation.republish.write_classification writes instance_ids.npy
     # next to the uint8 classification.npy; the viewer keys on `instance` when the octree has it)
-    inst_npy = Path(class_dir) / "instance_ids.npy"
-    if inst_npy.exists():
-        inst_arr = np.load(inst_npy)
-        if len(inst_arr) == len(data):
-            if inst_arr.size and int(inst_arr.max()) > int(np.iinfo(np.uint32).max):
-                raise ValueError(f"{inst_npy}: instance id {int(inst_arr.max())} does not fit uint32")
-            las.add_extra_dim(laspy.ExtraBytesParams(name="instance", type=np.uint32))
-            las.instance = inst_arr.astype(np.uint32)
-            logger.info(f"[Potree] Instance ids written as LAS extra dim 'instance' (uint32, max "
-                        f"{int(inst_arr.max()) if inst_arr.size else 0})")
-        else:
-            logger.warning(f"[Potree] instance_ids.npy size mismatch: {len(inst_arr)} vs {len(data)} pts — not written")
+    if inst_arr is not None:
+        las.instance = inst_arr.astype(np.uint32)
+        logger.info(f"[Potree] Instance ids written as LAS extra dim 'instance' (uint32, max "
+                    f"{int(inst_arr.max()) if inst_arr.size else 0})")
 
     # Intensity is the FALLBACK channel, for a cloud that carries no `confidence`
     # extra dim. It must be NORMALIZED here: the old code asserted "already
@@ -298,23 +324,10 @@ def _vertices_to_las(data: np.ndarray, las_path: Path, class_dir: Path, label: s
     # only in cleaned_cloud.ply. (Confidence also kept as 'confidence' extra dim
     # in addition to intensity, so the value is exact, not quantized to uint16.)
     if has_confidence:
-        las.add_extra_dim(laspy.ExtraBytesParams(name="confidence", type=np.float32))
         las.confidence = data['confidence'].astype(np.float32)  # verified finite above
     if has_origins:
-        # Pick the smallest int type that fits each field's ACTUAL range, so the
-        # octree stays compact for typical scans (frame_global ~hundreds-to-low-
-        # thousands, pixels = DA3 res) WITHOUT ever overflowing on a large scan.
-        def _int_dim(arr):
-            hi = int(arr.max()) if arr.size else 0
-            lo = int(arr.min()) if arr.size else 0
-            if lo >= 0 and hi <= 65535:
-                return np.uint16
-            return np.int32
-        _types = {}
-        for name in ("frame_global", "pixel_row", "pixel_col"):
-            t = _int_dim(data[name])
-            _types[name] = t
-            las.add_extra_dim(laspy.ExtraBytesParams(name=name, type=t))
+        # the smallest int type that fits each field's ACTUAL range (declared above by _int_dim), so the
+        # octree stays compact for typical scans WITHOUT ever overflowing on a large scan
         las.frame_global = data['frame_global'].astype(_types['frame_global'])
         las.pixel_row = data['pixel_row'].astype(_types['pixel_row'])
         las.pixel_col = data['pixel_col'].astype(_types['pixel_col'])
@@ -325,10 +338,7 @@ def _vertices_to_las(data: np.ndarray, las_path: Path, class_dir: Path, label: s
     # claude_stac.txt §6 / §11: the witness fields (mv_votes, mask_votes,
     # mask_conflicts, status — uint8) ride along as extra dims so the viewer
     # colours by status / mv_votes straight from the octree attributes
-    _wit = [n for n in ("mv_votes", "mask_votes", "mask_conflicts", "status")
-            if data.dtype.names and n in data.dtype.names]
     for name in _wit:
-        las.add_extra_dim(laspy.ExtraBytesParams(name=name, type=np.uint8))
         setattr(las, name, np.asarray(data[name]).astype(np.uint8))
     if _wit:
         logger.info(f"[Potree] Witness fields written as LAS extra dims ({', '.join(_wit)}) "
