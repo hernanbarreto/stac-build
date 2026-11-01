@@ -196,6 +196,10 @@ class VisitDriftConfig:
     skip_when_gauge_applied: bool   # true: the depth (scale) stage stands down when the
                                     # precision gauge already applied its epoch (§4-F2);
                                     # false: it corrects the residual, closures only
+    device: str                     # numpy | cpu | cuda — where the mask filter's projections,
+                                    # z-buffers and ballots run (correction.visit_drift_torch);
+                                    # numpy is the path of record, the torch devices give the
+                                    # same votes
     # the whole configuration this block was loaded from (see CorrectionConfig.raw): the
     # measurement reads the judge's factor and the loops config through it
     raw: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
@@ -320,6 +324,14 @@ def _num(section, key, path, lo=None, hi=None, integer=False,
     return int(v) if integer else float(v)
 
 
+def _choice(section, key, path, allowed) -> str:
+    v = _require(section, key, path)
+    if not isinstance(v, str) or v not in allowed:
+        raise CorrectionConfigError(
+            f"'correction.{path}.{key}' must be one of {list(allowed)}, got {v!r}")
+    return v
+
+
 def _bool(section, key, path) -> bool:
     v = _require(section, key, path)
     if not isinstance(v, bool):
@@ -371,6 +383,7 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
         grid_aspect_tol=_num(vd_, "grid_aspect_tol", "visit_drift", lo=0.0, lo_excl=True),
         min_depth_m=_num(vd_, "min_depth_m", "visit_drift", lo=0.0, lo_excl=True),
         skip_when_gauge_applied=_bool(vd_, "skip_when_gauge_applied", "visit_drift"),
+        device=_choice(vd_, "device", "visit_drift", ("numpy", "cpu", "cuda")),
         raw=(raw if isinstance(raw, dict) else None),
     )
 

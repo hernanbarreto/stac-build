@@ -23,6 +23,7 @@ real session is the held-out track residual against Ceres' (beyond its own noise
 from __future__ import annotations
 
 import math
+import os
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -241,8 +242,12 @@ class _Problem:
         r = uv - self.uv
         if not with_jac:
             return r, front
-        # d Xc / d(δω, δt) with the left perturbation Xc' = exp(δω) Xc + δt; d Xc / d X = R
-        J_pose = torch.cat([-J_X @ skew(Xc), J_X], -1)                      # (M,2,6)
+        # d Xc / d(δω, δt) for the perturbation ``apply`` makes — R' = exp(δω) R, t' = t + δt, so
+        # Xc' = exp(δω) R X + t + δt and d Xc / dδω = −[R X]ₓ = −[Xc − t]ₓ (the same convention as the
+        # prior terms). Until 2026-11-01 this row read −[Xc]ₓ, the Jacobian of Xc' = exp(δω) Xc + δt,
+        # which apply does NOT make: every step delivered about half of its predicted decrease (ρ ≈ 0.5,
+        # λ never shrank) and on pccr's real tracks the solve stalled 37 % above Ceres' cost.
+        J_pose = torch.cat([-J_X @ skew(Xc - ti), J_X], -1)                 # (M,2,6)
         J_pt = J_X @ Ri                                                     # (M,2,3)
         return r, front, J_pose, J_pt, J_cam
 
@@ -379,12 +384,18 @@ class _Problem:
         dc_obs = self._gather_cam_delta(dc, nco)                           # (M,nco)
         back = segment_sum(torch.einsum("mij,mi->mj", W, dc_obs), self.pt_idx, self.P)            # (P,3)
         dp = torch.einsum("pij,pj->pi", Hpp_inv, -gp - back)
-        # predicted decrease (Ceres' model cost change): −gᵀΔ − ½ Δᵀ H Δ, computed on the full system
-        dot_g = float((g_red[free] * dc_f).sum()) + float(((-gp) * dp).sum() * -1.0)
-        pred = -(float((dc_f * (S_f @ dc_f)).sum()) * 0.5 + float((g_red[free] * dc_f).sum()))
-        # the landmark part of the model decrease
-        pred = pred - 0.5 * float(torch.einsum("pi,pij,pj->", dp, Hpp_l, dp)) - float((gp * dp).sum()) - float(
-            torch.einsum("mij,mi,mj->", W, dc_obs, dp[self.pt_idx]))
+        # the predicted decrease, Ceres' model_cost_change: ½|r̃|² − ½|r̃ + J̃Δ|² over the (loss-scaled)
+        # residuals and Jacobians of the UNDAMPED problem — J̃Δ evaluated observation by observation and
+        # prior row by prior row. (Until 2026-11-01 this mixed the Schur-reduced camera terms with the full
+        # landmark/coupling terms and so double-counted the coupling: the prediction came out too large,
+        # ρ too small, λ never shrank and the solve "converged" on pccr's real tracks at a cost 37 % above
+        # Ceres' from the same start — measured, f5_torch_pccr_audit5_bench3_predbug.log.)
+        JD = (torch.einsum("mai,mi->ma", J_c, dc_obs)
+              + torch.einsum("mai,mi->ma", J_pt, dp[self.pt_idx]))                 # (M,2) weighted J·Δ
+        pred = -float((JD * (r_w + 0.5 * JD)).sum())
+        if e_p.shape[0]:
+            Jp_d = J_p @ dc
+            pred = pred - float((Jp_d * (e_p + 0.5 * Jp_d)).sum())
         return (dc, dp), cost, pred, ""
 
     def _accumulate_camera(self, H, g, J_c, r_w, nco):
@@ -560,7 +571,13 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
         prob = _Problem(w2c_start, pb0, block_of, cam_idx, pt_idx, uv, X0, float(cfg.huber_px), cam_free, device=dev,
                         sigmas=np.asarray(sigmas, np.float64), prior_centres=C, torch_ba=cfg.torch_ba)
         n_prior = N
+    if log is None and os.environ.get("STAC_BA_TORCH_TRACE"):
+        log = lambda m: print(f"[ba_torch {name}] {m}", flush=True)       # noqa: E731
     summary = solve(prob, int(cfg.max_iterations), log=log)
+    if log:
+        log(f"{summary['termination_type']}: cost {summary['initial_cost']:.6e} → {summary['final_cost']:.6e}, "
+            f"{summary['num_successful_steps']} accepted / {summary['num_unsuccessful_steps']} rejected step(s), "
+            f"{summary['total_time_in_seconds']:.1f} s")
     if summary["termination_type"] != "CONVERGENCE":
         raise RuntimeError(f"refine {name}: the torch bundle adjustment did NOT converge "
                            f"(termination={summary['termination_type']}) — BA must converge, no fallback")

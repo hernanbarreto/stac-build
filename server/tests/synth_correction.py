@@ -103,7 +103,7 @@ def make_correction_raw_cfg(**overrides) -> dict:
                         "search_margin_m": 1.20,
                         "default_repeatability_m": 0.0477,
                         "grid_aspect_tol": 0.01, "min_depth_m": 0.05,
-                        "skip_when_gauge_applied": False},
+                        "skip_when_gauge_applied": False, "device": "cpu"},
     }}
     # the session floor model reads the segmentation's support list (autoprompt.support_surfaces)
     raw["autoprompt"] = {"support_surfaces": ["floor", "ground", "platform", "slab", "base", "deck",

@@ -306,7 +306,8 @@ def measure_epoch(output_dir: Path, cfg, rep_m: float,
     # 2026-10-01: Omega's intrinsic.txt is another camera once F5 refined it)
     cam = vd.projection_camera(output_dir, xyz, ks, poses, data["pixel_row"],
                                data["pixel_col"], min_depth_m=float(vcfg.min_depth_m), log=log)
-    vis = vd.Visibility(output_dir, xyz, ks, poses, cam, tol, min_depth_m=float(vcfg.min_depth_m))
+    vis = vd.Visibility(output_dir, xyz, ks, poses, cam, tol, min_depth_m=float(vcfg.min_depth_m),
+                        device=vcfg.device)
     det: List[Tuple] = []
     n_pairs = 0
     for c in cands:
@@ -709,7 +710,8 @@ def filter_staged_cloud(tx: Path, session, data_new, xyz_new: np.ndarray,
                                mask_pixels=cam.record_to_mask(data_new["pixel_row"],
                                                               data_new["pixel_col"]))
     vis = vd.Visibility(output_dir, xyz_new, session.ks, poses_new, cam, tol,
-                        min_depth_m=(float(_min_depth) if _min_depth is not None else None))
+                        min_depth_m=(float(_min_depth) if _min_depth is not None else None),
+                        device=getattr(vcfg, "device", None))
     o4 = _other_mask_params(cfg)
 
     # the "too small to be worth anything" test is about the OBJECT, not the
@@ -762,6 +764,7 @@ def filter_staged_cloud(tx: Path, session, data_new, xyz_new: np.ndarray,
                      "occlusion_tol_rel": float(o4.occlusion_tol_rel), "depth_tol_m": float(tol),
                      "max_frames_per_visit": int(_mask_filter_cost_cap(cfg))},
            "votes_file": "mask_filter_votes.npz",
+           "timing": getattr(frep, "timing", None),
            "provenance": "tool_measured",
            "_votes": getattr(frep, "votes", None)}
     log(f"  mask filter: {int(kill.sum()):,} of {len(keep):,} points leave, "

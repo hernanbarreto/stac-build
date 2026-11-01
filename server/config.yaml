@@ -3165,6 +3165,13 @@ correction:
                                 # of it: the projection divides by z and a point at or behind
                                 # the lens lands anywhere on the raster. Dropped from the
                                 # z-buffer, never projected.
+    device: cuda                # where the MASK FILTER's projections, z-buffers and ballots run
+                                # (USER 2026-11-01: "todo debe hacerse en GPU, en modo
+                                # determinista"). cuda | cpu = correction.visit_drift_torch —
+                                # a sorted z-buffer, no atomics, bit-identical twice, the SAME
+                                # votes as numpy (tests/test_visit_drift_torch.py); numpy = the
+                                # path of record until that day. cuda with no visible card
+                                # FAILS naming this key — nothing runs somewhere else.
     default_repeatability_m: 0.0477   # only when uncertainty.json is absent —
                                  # the session measures its own and that wins
     obb_core_pct: 98.0            # USER 2026-09-09: the box follows where the segment's

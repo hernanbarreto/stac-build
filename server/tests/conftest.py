@@ -15,7 +15,9 @@ def _hole_audit_evidence_on_cpu():
     """The synthetic tests run the hole-audit evidence on the CPU — the same code path as the
     card (reconstruction.surface_fit.hole_audit.use_device); a GPU test picks cuda itself and
     restores this."""
+    from correction import visit_drift
     from reconstruction.surface_fit import fit_torch, hole_audit
     hole_audit.use_device("cpu")
     fit_torch.use_device("cpu")
+    visit_drift.use_device("cpu")        # the mask filter's torch path, on the CPU
     yield

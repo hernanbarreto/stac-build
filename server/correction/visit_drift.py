@@ -52,6 +52,7 @@ Hernán Barreto - Ingerop IN3 Session IV - STAC
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -248,6 +249,29 @@ def _vd_cfg():
     dataclass so a missing key fails at load naming itself."""
     from correction.config import load_correction_config
     return load_correction_config().visit_drift
+
+
+_DEVICE_OVERRIDE: Optional[str] = None
+
+
+def use_device(dev: Optional[str]) -> Optional[str]:
+    """The device of every Visibility built after this call that names none ('cpu' in the synthetic
+    tests — the torch path on the CPU, the same code as the card); None = the configuration's."""
+    global _DEVICE_OVERRIDE
+    _DEVICE_OVERRIDE = None if dev is None else str(dev)
+    return _DEVICE_OVERRIDE
+
+
+def device_of(explicit: Optional[str] = None) -> str:
+    """Where the mask filter projects: the device named by the caller (the job's frozen
+    ``correction.visit_drift.device``), else :func:`use_device`'s, else the server configuration's.
+    numpy = the path of record; cpu | cuda = ``correction.visit_drift_torch`` (the same votes)."""
+    from correction.visit_drift_torch import resolve_device
+    if explicit is not None:
+        return resolve_device(explicit)
+    if _DEVICE_OVERRIDE is not None:
+        return resolve_device(_DEVICE_OVERRIDE)
+    return resolve_device(_vd_cfg().device)
 
 
 def points_of_masklets(output_dir, frame_global: np.ndarray,
@@ -1338,7 +1362,9 @@ class Visibility:
 
     def __init__(self, output_dir, xyz: np.ndarray, ks_of_point: np.ndarray,
                  poses: np.ndarray, camera: "SessionProjection", depth_tol_m: float,
-                 min_depth_m: Optional[float] = None):
+                 min_depth_m: Optional[float] = None, device: Optional[str] = None):
+        """``device``: numpy | cpu | cuda (:func:`device_of`) — where the projections, the z-buffers
+        and the ballots run; the torch devices give the same votes (tests/test_visit_drift_torch.py)."""
         from segmentation import mask_space
         if not isinstance(camera, SessionProjection):
             raise TypeError(
@@ -1374,6 +1400,7 @@ class Visibility:
                 f"the mask store is {self.Hm}x{self.Wm} and the camera was bound to a "
                 f"{camera.mask_hw[0]}x{camera.mask_hw[1]} mask grid")
         self._zb: Dict[int, np.ndarray] = {}
+        self._mask_bits: Dict[str, Tuple[np.ndarray, Tuple[int, int]]] = {}
         self._by_oid: Dict[int, List[Tuple[int, str]]] = {}
         self._by_kf: Dict[int, List[int]] = {}
         import re
@@ -1386,11 +1413,31 @@ class Visibility:
             if kf is not None:
                 self._by_oid.setdefault(int(m.group(2)), []).append((kf, key))
                 self._by_kf.setdefault(kf, []).append(int(m.group(2)))
+        # USER 2026-11-01 ("todo debe hacerse en GPU"): the projections, the z-buffers and the ballots
+        # on torch when the device says so — the numpy path stays the reference (same votes)
+        self.device = device_of(device)
+        self.torch = None
+        if self.device != "numpy":
+            from correction.visit_drift_torch import TorchVisibility
+            self.torch = TorchVisibility(self, self.device)
 
     def masks_of(self, oid: int, visit: Tuple[int, int]):
         a, b = int(visit[0]), int(visit[1])
-        return [(kf, self.masks[key]) for kf, key in self._by_oid.get(int(oid), [])
+        return [(kf, self.mask(key)) for kf, key in self._by_oid.get(int(oid), [])
                 if a <= kf <= b]
+
+    def mask(self, key: str) -> np.ndarray:
+        """One mask of the store as {0,1} uint8 — decompressed ONCE and kept packed (1 bit per
+        pixel): the filter reads every mask several times (the top frames, the object's union, the
+        rivals' cover, the record) and the npz decompresses on every access — measured 2026-11-01 on
+        pccr's 14,861 masks: most of rule 4's 83 s on the card was this, not the votes."""
+        cached = self._mask_bits.get(key)
+        if cached is None:
+            m = (np.asarray(self.masks[key]) > 0)
+            self._mask_bits[key] = (np.packbits(m, axis=None), m.shape)
+            return m.astype(np.uint8)
+        bits, shape = cached
+        return np.unpackbits(bits, count=int(shape[0]) * int(shape[1])).reshape(shape)
 
     def oids_at(self, kf: int) -> List[int]:
         """The masklets with a mask stored in keyframe ``kf`` (nothing is loaded)."""
@@ -1420,6 +1467,10 @@ class Visibility:
         kf = int(kf)
         if kf in self._zb:
             return self._zb[kf]
+        if self.torch is not None:
+            zb = self.torch.zbuf(kf).cpu().numpy()
+            self._zb[kf] = zb
+            return zb
         from scipy import ndimage as ndi
         own = self._order[self._start[kf]:self._end[kf]]
         ok, r, c, z = self.project(self.xyz[own], kf)
@@ -1743,12 +1794,14 @@ class FilterReport:
     detail: List[dict] = field(default_factory=list)
     margins: List[dict] = field(default_factory=list)      # every object's margin to min_points
     votes: Optional[Dict[str, np.ndarray]] = None          # the ballot of every deleted point
+    timing: Dict[str, float] = field(default_factory=dict)  # seconds per phase + the device
 
     def as_dict(self) -> dict:
         return {"dropped_points": self.dropped_points,
                 "dropped_objects": self.dropped_objects,
                 "dropped_visits": self.dropped_visits,
                 "detail": self.detail[:50], "margins": self.margins,
+                "timing": dict(self.timing),
                 "provenance": "tool_measured"}
 
 
@@ -1844,6 +1897,38 @@ def _top_frames(vis, oid: int, visit: Tuple[int, int], n: int) -> List[Tuple[int
     return frames[:int(n)]
 
 
+def rule1_votes(vis, P: np.ndarray, ks: np.ndarray,
+                views: Sequence[Tuple[int, int, int, np.ndarray]], dilate_px: int
+                ) -> Tuple[np.ndarray, np.ndarray]:
+    """RULE 1's cross-view tally for the points ``P`` of one object (birth keyframes ``ks``):
+    per point, how many frames of the OTHER visits (``views``: (visit a, b, keyframe, mask) —
+    a frame judges the points born outside its visit) saw it with nothing measured in front
+    (``vis.tol``, the absolute rule), and in how many of those it lay inside the DILATED mask.
+    On a torch Visibility the same tally runs on its device."""
+    tv = getattr(vis, "torch", None)
+    if tv is not None:
+        from correction.visit_drift_torch import rule1_votes_torch
+        return rule1_votes_torch(tv, P, ks, views, dilate_px)
+    n_saw = np.zeros(len(P), np.int32)
+    n_inside = np.zeros(len(P), np.int32)
+    for (a, b, kf, mm) in views:
+        other = ks < a
+        other |= ks > b                        # born outside this visit
+        if not other.any():
+            continue
+        w = np.flatnonzero(other)
+        ok, r, c, z = vis.project(P[w], kf)
+        if not ok.any():
+            continue
+        zpix = vis.zbuf(kf)[r, c]
+        visible = ~(zpix < (z - vis.tol))     # nothing in front
+        hit = _dilated(mm, int(dilate_px))[r, c] > 0
+        wo = w[ok]
+        n_saw[wo[visible]] += 1
+        n_inside[wo[visible & hit]] += 1
+    return n_saw, n_inside
+
+
 def other_mask_votes(vis, P: np.ndarray, birth: np.ndarray,
                      own_views: Dict[int, np.ndarray], rival_masks: Callable[[int], Optional[np.ndarray]],
                      dilate_px: int, occlusion_tol_rel: float, min_tri_deg: float,
@@ -1872,6 +1957,11 @@ def other_mask_votes(vis, P: np.ndarray, birth: np.ndarray,
     its surface — that was the halo the old rule cut at every contact crease (a desk
     under a monitor foot, a wall behind a switch).
     """
+    tv = getattr(vis, "torch", None)
+    if tv is not None:
+        from correction.visit_drift_torch import other_mask_votes_torch
+        return other_mask_votes_torch(tv, P, birth, own_views, rival_masks, dilate_px,
+                                      occlusion_tol_rel, min_tri_deg, record)
     n = len(P)
     n_votes = np.zeros(n, np.int32)
     n_own = np.zeros(n, np.int32)
@@ -2066,6 +2156,8 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
             _cover[kf] = cnt
         return _cover[kf]
 
+    _t_all = time.perf_counter()
+    _tm: Dict[str, float] = {"rule1_s": 0.0, "rule4_s": 0.0, "record_s": 0.0}
     for oid, idx in points_by_oid.items():
         idx = np.asarray(idx, np.int64)
         idx = idx[(idx >= 0) & (idx < n_points)]
@@ -2118,20 +2210,9 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
             for kf, mm in _top_frames(vis, oid, (a, b), max_frames_per_visit):
                 own_views[int(kf)] = mm
                 rule1_views.append((int(a), int(b), int(kf), mm))
-                other = sub_ks < a
-                other |= sub_ks > b               # born outside this visit
-                if not other.any():
-                    continue
-                w = np.flatnonzero(other)
-                ok, r, c, z = vis.project(xyz[sub[w]], kf)
-                if not ok.any():
-                    continue
-                zpix = vis.zbuf(kf)[r, c]
-                visible = ~(zpix < (z - vis.tol))     # nothing in front
-                hit = _dilated(mm, int(dilate_px))[r, c] > 0
-                wo = w[ok]
-                n_saw[wo[visible]] += 1
-                n_inside[wo[visible & hit]] += 1
+        _t = time.perf_counter()
+        n_saw, n_inside = rule1_votes(vis, xyz[sub], sub_ks, rule1_views, int(dilate_px))
+        _tm["rule1_s"] += time.perf_counter() - _t
         saw = n_saw > 0
         inside = n_inside > 0
 
@@ -2159,8 +2240,10 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
             for kf, mm in own_views.items():
                 mine = _union([o for o in vis.oids_at(kf) if _root_of(o) == my_root], kf)
                 object_views[kf] = (mm > 0) | (mine > 0) if mine is not None else (mm > 0)
+            _t = time.perf_counter()
             nv, no, nt = other_mask_votes(vis, xyz[sub], sub_ks, object_views, _rival_mask,
                                           dilate_px, occlusion_tol_rel, min_tri_deg)
+            _tm["rule4_s"] += time.perf_counter() - _t
             frac = float(min_inside_frac)
             judged = nv >= int(min_votes)
             # RULE 1 (USER 2026-10-16: "hay que contrastarlo contra la suya y las demás, regla 1
@@ -2184,8 +2267,10 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
         # the edge of the mask it was judged against
         d_idx = np.flatnonzero(drop)
         if len(d_idx):
+            _t = time.perf_counter()
             _ballot_record(vis, xyz, sub[d_idx], sub_ks[d_idx], rule1_views, own_views,
                            _rival_mask, dilate_px, occlusion_tol_rel, min_tri_deg, det)
+            _tm["record_s"] += time.perf_counter() - _t
             rec["point_index"].append(sub[d_idx].astype(np.int64))
             rec["oid"].append(np.full(len(d_idx), int(oid), np.int32))
             rec["rule"].append(np.where(drop_own[d_idx], 1, 4).astype(np.uint8))
@@ -2203,6 +2288,13 @@ def cloud_filter_masklets(points_by_oid: Dict[int, np.ndarray],
                                  "the majority of the views that saw it",
                        "points": int(off_other)})
     rep.votes = _assemble_votes(rec, det)
+    _tm["total_s"] = time.perf_counter() - _t_all
+    _tm["zbuffers"] = float(len(getattr(vis, "_zb", {}) or {}))
+    rep.timing = {k: (round(v, 3) if isinstance(v, float) else v) for k, v in _tm.items()}
+    rep.timing["device"] = str(getattr(vis, "device", "numpy"))
+    log(f"[visit-drift] step 12 timing ({rep.timing['device']}): rule 1 {_tm['rule1_s']:.1f} s, "
+        f"rule 4 {_tm['rule4_s']:.1f} s, record {_tm['record_s']:.1f} s, "
+        f"{int(_tm['zbuffers'])} z-buffer(s); total {_tm['total_s']:.1f} s")
     log(f"[visit-drift] step 12: {rep.dropped_points:,} of {n_points:,} points "
         f"leave (masklet decisions: {off_mask:,} inside their own silhouette in < {min_inside_frac:.0%} of "
         f"≥ {min_votes} views that saw them, "
@@ -2228,6 +2320,12 @@ def _ballot_record(vis, xyz: np.ndarray, pts: np.ndarray, ks: np.ndarray,
     Vectorised: the votes of every view are gathered as arrays and put in point order by ONE
     stable sort (the order inside a point is the order the views were judged in)."""
     n = len(pts)
+    tv = getattr(vis, "torch", None)
+    if tv is not None:
+        from correction.visit_drift_torch import ballot_record_torch
+        _detail_from_blocks(det, ballot_record_torch(tv, xyz, pts, ks, rule1_views, own_views, rival_masks,
+                                                     dilate_px, occlusion_tol_rel, min_tri_deg), n)
+        return
     P = xyz[pts]
     blocks: List[Tuple[np.ndarray, ...]] = []      # (pt, kf, rule, d_own, d_other, inside, other)
     # rule 1: the other visits' frames, as the verdict saw them
@@ -2260,6 +2358,12 @@ def _ballot_record(vis, xyz: np.ndarray, pts: np.ndarray, ks: np.ndarray,
                            np.full(m, 4, np.uint8), np.asarray(blk["d_own"], np.float32),
                            np.asarray(blk["d_other"], np.float32), np.asarray(blk["own"], bool),
                            np.asarray(blk["other"], bool)))
+    _detail_from_blocks(det, blocks, n)
+
+
+def _detail_from_blocks(det: Dict[str, list], blocks: List[Tuple[np.ndarray, ...]], n: int) -> None:
+    """The blocks (pt, kf, rule, d_own, d_other, inside, other) of ``n`` points into ``det``: CSR rows in
+    point order by ONE stable sort (inside a point, the order the views were judged in)."""
     keys = ("vote_kf", "vote_rule", "vote_dist_own_px", "vote_dist_other_px", "vote_inside_own",
             "vote_on_other")
     if blocks:
