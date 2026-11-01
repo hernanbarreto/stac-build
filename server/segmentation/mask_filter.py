@@ -214,28 +214,43 @@ class MaskAudit:
             # the tie-break is the keyframe, so which frames are judged never
             # depends on the order the keys were read in)
             ranked.sort(key=lambda r: (-r[0], r[1]))
-            zbuf: Dict[int, Optional[np.ndarray]] = {}
-            for _area, mf, m in ranked[:max_frames]:
-                from segmentation.shape_proposer import _visible_in_frame
-                pr = _visible_in_frame(
-                    self.ev, self._cloud_frame(mf), mh, mw, pts,
-                    inst_pts=pts, inst_zbuf_cache=zbuf,
-                    depth_tol=float(self.cfg["depth_tol_m"]),
-                    self_tol=float(self.cfg["self_tol_m"]))
+            # on the evidence's device (2026-11-01): the visit's points uploaded once, every frame's
+            # projection, the instance's own z-buffer and the mask lookups as tensors; the numpy twin
+            # (_visible_in_frame) is the reference — tests/test_mask_audit_torch.py
+            import torch
+            from segmentation.shape_proposer import _visible_in_frame_t
+            dev = self.ev.device
+            pts_t = torch.as_tensor(np.ascontiguousarray(pts, dtype=np.float64), device=dev)
+            seen_v = torch.zeros(len(sel), dtype=torch.int32, device=dev)
+            off_v = torch.zeros(len(sel), dtype=torch.int32, device=dev)
+            zbuf_t: Dict[int, Optional[object]] = {}
+            # 0 = EVERY mask keyframe of the visit judges (segmentation.mask_filter.max_frames_per_visit,
+            # USER 2026-09-16); the slice ranked[:0] judged NOTHING — the audit of every run on main since
+            # that day marked no point (found 2026-11-01 porting the loop; the audit branch had the fix)
+            judged_frames = ranked if max_frames <= 0 else ranked[:max_frames]
+            for _area, mf, m in judged_frames:
+                pr = _visible_in_frame_t(self.ev, self._cloud_frame(mf), mh, mw, pts_t, inst_zbuf_cache=zbuf_t,
+                                         depth_tol=float(self.cfg["depth_tol_m"]),
+                                         self_tol=float(self.cfg["self_tol_m"]))
                 if pr is None:
                     continue
                 mu, mv, vis = pr
-                if not vis.any():
+                n_vis = int(vis.sum())
+                if not n_vis:
                     continue
                 vrec["frames"] += 1
-                vrec["seen"] += int(vis.sum())
-                inside = np.zeros(len(pts), bool)
-                inside[vis] = m[mv[vis], mu[vis]]
+                vrec["seen"] += n_vis
+                m_t = torch.as_tensor(np.ascontiguousarray(m) > 0, device=dev)
+                mu_c = torch.where(vis, mu, torch.zeros_like(mu))
+                mv_c = torch.where(vis, mv, torch.zeros_like(mv))
+                inside = vis & m_t[mv_c, mu_c]
                 on = int(inside.sum())
                 vrec["on_mask"] += on
-                vrec["off_mask"] += int(vis.sum()) - on
-                seen_views[sel[vis]] += 1
-                off_views[sel[vis & ~inside]] += 1
+                vrec["off_mask"] += n_vis - on
+                seen_v += vis.to(torch.int32)
+                off_v += (vis & ~inside).to(torch.int32)
+            seen_views[sel] += seen_v.cpu().numpy()
+            off_views[sel] += off_v.cpu().numpy()
             rec["visits"].append(vrec)
             rec["on_mask"] += vrec["on_mask"]
             rec["off_mask"] += vrec["off_mask"]

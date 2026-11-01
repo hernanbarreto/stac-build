@@ -4401,11 +4401,23 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
     _concept_caption = concept_caption_lookup(output_dir)
 
     _tm = {"select_s": 0.0, "audit_s": 0.0, "clean_s": 0.0, "obb_s": 0.0, "objects": 0}   # where the loop's time goes
+    # the points of every obj_id, once: np.isin over the whole cloud PER INSTANCE was O(points × instances)
+    # (pccr 2026-11-01: 23 M points × 1003 instances ≈ the loop's 21 minutes); a stable sort by obj_id and
+    # a slice per id give the same ascending indices
+    _order = np.argsort(point_obj_id, kind="stable")
+    _sorted_ids = point_obj_id[_order]
+
+    def _points_of(obj_ids):
+        parts = [_order[np.searchsorted(_sorted_ids, o, "left"):np.searchsorted(_sorted_ids, o, "right")]
+                 for o in obj_ids]
+        idx = np.concatenate(parts) if parts else np.zeros(0, np.int64)
+        return np.sort(idx).astype(np.int64)
+
     for iid in sorted(instance_groups):
         _t0 = _time.perf_counter()
         group_obj_ids = instance_groups[iid]
         # Merge all points assigned to any obj_id in this instance group
-        all_matched = np.where(np.isin(point_obj_id, group_obj_ids))[0].astype(np.int64)
+        all_matched = _points_of(group_obj_ids)
         _tm["select_s"] += _time.perf_counter() - _t0
 
         if len(all_matched) == 0:

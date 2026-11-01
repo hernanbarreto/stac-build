@@ -171,8 +171,10 @@ def _project_frame(ev, fidx: int, pts: np.ndarray):
     front = z > 0.05
     u = np.full(len(pts), -1e9)
     v = np.full(len(pts), -1e9)
-    u[front] = K[0, 0] * p[front, 0] / z[front] + K[0, 2]
-    v[front] = K[1, 1] * p[front, 1] / z[front] + K[1, 2]
+    # the camera's own projection — through the lens when the session camera has one (what the
+    # evidence's z-buffers and its device twin _record_px_t do); until 2026-11-01 this used K alone,
+    # up to ~2 px off the z-buffer at the corners of pccr's lens
+    u[front], v[front] = ev.cam.pixels(int(fidx), p[front])
     return u, v, z, front
 
 
@@ -236,6 +238,46 @@ def _visible_in_frame(ev, fidx: int, mh: int, mw: int, pts: np.ndarray,
             zself = np.full(len(pts), np.inf)
             zself[inb] = zb_self[mv[inb], mu[inb]]
             vis &= ~(zself < (z - self_tol))
+    return mu, mv, vis
+
+
+def _visible_in_frame_t(ev, fidx: int, mh: int, mw: int, pts_t, inst_zbuf_cache: Optional[dict] = None,
+                        depth_tol: float = 0.15, self_tol: float = 0.10):
+    """:func:`_visible_in_frame` on the evidence's device: ``pts_t`` the instance's points as a float64
+    tensor there (the instance's own z-buffer is built from them — the audit passes the same points as
+    ``pts`` and ``inst_pts``), the full-cloud z-buffer from the evidence's device cache. Returns
+    (mask column, mask row, visible) as tensors; None when the frame has no pose. The same gathers
+    and the same tests as the numpy twin (USER 2026-11-01 "todo debe correr en GPU": the per-object
+    audit of the projection ran this per frame in numpy — 21 of pccr's 43 min)."""
+    import torch
+    from reconstruction.surface_fit.hole_audit import zbuffer_min
+    c2w = ev.cam.pose_map.get(int(fidx))
+    if c2w is None or ev.cam.K_for(int(fidx)) is None:
+        return None
+    mu, mv, z, inb = ev._project_t(int(fidx), c2w, pts_t)
+    vis = inb.clone()
+    if not bool(inb.any()):
+        return mu, mv, vis
+    zb_self = None
+    if inst_zbuf_cache is not None:
+        zb_self = inst_zbuf_cache.get(int(fidx))
+        if zb_self is None and int(fidx) not in inst_zbuf_cache:
+            zb_self = zbuffer_min((mv * mw + mu)[inb], z[inb], mh, mw)          # the instance alone, no filter
+            inst_zbuf_cache[int(fidx)] = zb_self
+    zb = ev._zbuf_t(int(fidx), mh, mw)
+    mu_c = torch.where(inb, mu, torch.zeros_like(mu))
+    mv_c = torch.where(inb, mv, torch.zeros_like(mv))
+    inf = torch.full_like(z, float("inf"))
+    if zb is not None:
+        zpix = torch.where(inb, zb[mv_c, mu_c], inf)
+        ext_occ = zpix < (z - depth_tol)
+        if zb_self is not None:
+            zself = torch.where(inb, zb_self[mv_c, mu_c], inf)
+            ext_occ &= ~(torch.abs(zpix - zself) < 0.05)                      # the occluder is itself
+        vis &= ~ext_occ
+    if zb_self is not None:
+        zself = torch.where(inb, zb_self[mv_c, mu_c], inf)
+        vis &= ~(zself < (z - self_tol))
     return mu, mv, vis
 
 
