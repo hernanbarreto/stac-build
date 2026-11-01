@@ -660,6 +660,51 @@ LAYER_MAX_POINTS = 2_000_000
 
 # ── the step ─────────────────────────────────────────────────────────────
 
+def landmark_rows_by_keyframe(g: Dict[int, list], X: Dict[int, np.ndarray], w2c: np.ndarray,
+                              n_frames: int) -> Dict[int, np.ndarray]:
+    """{keyframe index: (u, v, z) rows} of every observation of a triangulated track, z the landmark's
+    depth in that keyframe, rows with z ≤ 0 left out — as arrays (2026-11-01: the per-observation
+    Python loop over 16 M observations of 2.6 M tracks on pccr), in the loop's order: tracks in the
+    groups' order, observations in their order (:func:`_landmark_rows_by_keyframe_reference`)."""
+    tracks = list(g)                                          # every track, single observations included
+    out = {i: np.zeros((0, 3), float) for i in range(int(n_frames))}
+    if not tracks:
+        return out
+    counts = np.fromiter((len(g[t]) for t in tracks), np.int64, len(tracks))
+    ii = np.fromiter((i for t in tracks for i, _ in g[t]), np.int64, int(counts.sum()))
+    uv = np.array([p for t in tracks for _, p in g[t]], np.float64).reshape(-1, 2)
+    has = np.fromiter((t in X for t in tracks), bool, len(tracks))
+    if not has.any():
+        return out
+    tid = np.repeat(np.arange(len(tracks)), counts)
+    keep = has[tid]
+    Xo = np.stack([X[t] for t, h in zip(tracks, has) if h])[np.cumsum(has)[tid[keep]] - 1]
+    ii_k, uv_k = ii[keep], uv[keep]
+    R2 = w2c[ii_k, 2, :3]
+    z = R2[:, 0] * Xo[:, 0] + R2[:, 1] * Xo[:, 1] + R2[:, 2] * Xo[:, 2] + w2c[ii_k, 2, 3]
+    pos = z > 0
+    ii_k, uv_k, z = ii_k[pos], uv_k[pos], z[pos]
+    order = np.argsort(ii_k, kind="stable")                   # per keyframe, the loop's order kept
+    ii_s = ii_k[order]
+    rows = np.column_stack([uv_k[order].astype(np.float64), z[order]])
+    bounds = np.searchsorted(ii_s, np.arange(int(n_frames) + 1))
+    for i in range(int(n_frames)):
+        out[i] = rows[bounds[i]:bounds[i + 1]].reshape(-1, 3)
+    return out
+
+
+def _landmark_rows_by_keyframe_reference(g, X, w2c, n_frames):
+    """The per-observation loop :func:`landmark_rows_by_keyframe` replaced (kept for its test)."""
+    rows = {i: [] for i in range(int(n_frames))}
+    for t, lst in g.items():
+        if t in X:
+            for i, uv in lst:
+                z = w2c[i][2, :3] @ X[t] + w2c[i][2, 3]
+                if z > 0:
+                    rows[i].append((uv[0], uv[1], z))
+    return {i: np.array(v, float).reshape(-1, 3) for i, v in rows.items()}
+
+
 def _landmark_rows(session_dir: Path, pcfg, frames: List[int], w2c: np.ndarray, params,
                    log: Callable = print) -> Tuple[Dict[int, dict], dict]:
     """({split: {keyframe: (u, v, z) rows}}, {split: dropped}) — F5's tracks triangulated with
@@ -670,22 +715,14 @@ def _landmark_rows(session_dir: Path, pcfg, frames: List[int], w2c: np.ndarray, 
     from precision import refine as RF
     solver = undistort_solver(pcfg.camera)
     tr = load_tracks_v2(session_dir)
-    split_of = dict(zip(tr["track_query_id"].tolist(), tr["track_split"].tolist()))
-    split = np.array([split_of[int(t)] for t in tr["obs_track"]], np.int8)
+    split = RF.split_of_observations(tr["track_query_id"], tr["track_split"], tr["obs_track"])
     out, dropped = {}, {}
     for sp in (0, 1):
         m = split == sp
         g = RF.group_tracks(tr["obs_track"][m], tr["obs_frame"][m], tr["obs_uv_native"][m], frames)
         dropped[sp] = {"tracks": 0, "observations": 0}
         X = RF.triangulate_tracks(g, w2c, params, solver, pcfg.refine.min_tri_deg, dropped=dropped[sp])
-        rows = {i: [] for i in range(len(frames))}
-        for t, lst in g.items():
-            if t in X:
-                for i, uv in lst:
-                    z = w2c[i][2, :3] @ X[t] + w2c[i][2, 3]
-                    if z > 0:
-                        rows[i].append((uv[0], uv[1], z))
-        out[sp] = {i: np.array(v, float).reshape(-1, 3) for i, v in rows.items()}
+        out[sp] = landmark_rows_by_keyframe(g, X, w2c, len(frames))
     if any(d["tracks"] for d in dropped.values()):
         log(f"{LOG_TAG} landmark tracks dropped (no round trip through F5's lens — point 60): fit "
             f"{dropped[0]['tracks']}, held-out {dropped[1]['tracks']}")

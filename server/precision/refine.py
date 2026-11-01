@@ -878,17 +878,22 @@ def localize_witnesses(best: RungResult, fit_track_X: Dict[int, np.ndarray],
     ref = pycolmap.AbsolutePoseRefinementOptions()
     out = {}
     wset = set(int(w) for w in witness_frames)
-    by_frame: Dict[int, List[Tuple[int, np.ndarray]]] = {}
-    for t, f, p in zip(track, frame, uv):
-        if int(f) in wset and int(t) in fit_track_X:
-            by_frame.setdefault(int(f), []).append((int(t), p))
-    for f in sorted(wset):
-        obs = by_frame.get(f, [])
-        if len(obs) < int(cfg.min_witness_corr):
-            out[f] = {"localized": False, "reason": "too_few_correspondences", "n": len(obs)}
+    # the correspondences of every witness at once (2026-11-01: a Python loop over 16 M observations,
+    # 11 s on pccr): the observations of a witness frame whose track is a landmark, in their order
+    track = np.asarray(track, np.int64); frame = np.asarray(frame, np.int64); uv = np.asarray(uv)
+    lm_ids = np.fromiter(fit_track_X.keys(), np.int64, len(fit_track_X))
+    sel = np.flatnonzero(np.isin(frame, np.fromiter(wset, np.int64, len(wset))) & np.isin(track, lm_ids))
+    sel = sel[np.argsort(frame[sel], kind="stable")]
+    f_sorted = frame[sel]
+    bounds = np.searchsorted(f_sorted, np.array(sorted(wset) + [np.iinfo(np.int64).max]))
+    for q, f in enumerate(sorted(wset)):
+        rows = sel[bounds[q]:bounds[q + 1]]
+        if len(rows) < int(cfg.min_witness_corr):
+            out[f] = {"localized": False, "reason": "too_few_correspondences", "n": int(len(rows))}
             continue
-        p2 = np.array([p for _, p in obs], np.float64)
-        p3 = np.array([fit_track_X[t] for t, _ in obs], np.float64)
+        obs = rows
+        p2 = np.asarray(uv[rows], np.float64)
+        p3 = np.array([fit_track_X[int(t)] for t in track[rows]], np.float64)
         res = pycolmap.estimate_and_refine_absolute_pose(p2, p3, cam, est, ref)
         if not res:
             out[f] = {"localized": False, "reason": "pnp_failed", "n": len(obs)}
@@ -905,13 +910,103 @@ def localize_witnesses(best: RungResult, fit_track_X: Dict[int, np.ndarray],
     return out
 
 
+def split_of_observations(track_ids: np.ndarray, track_split: np.ndarray, obs_track: np.ndarray) -> np.ndarray:
+    """The split (0 fit / 1 held-out) of every observation from its track's — by searchsorted over the
+    track ids (2026-11-01: a Python dict map over 16 M observations, 2.5 s on pccr, twice per chain)."""
+    tid = np.asarray(track_ids, np.int64)
+    order = np.argsort(tid, kind="stable")
+    pos = np.searchsorted(tid[order], np.asarray(obs_track, np.int64))
+    if np.any(pos >= len(tid)) or np.any(tid[order][np.minimum(pos, len(tid) - 1)] != np.asarray(obs_track, np.int64)):
+        raise RefineError("an observation names a track that is not in the tracks' query list")
+    return np.asarray(track_split, np.int8)[order][pos]
+
+
+def _dlt_stack(x: np.ndarray, T: np.ndarray, min_tri_deg: float) -> Tuple[np.ndarray, np.ndarray]:
+    """The multi-view DLT of a STACK of tracks with the same view count: ``x`` (n, k, 2) normalised
+    coordinates, ``T`` (n, k, 4, 4) world-to-camera. Returns (X (n, 3), good (n,)) with the per-track
+    gates of :func:`triangulate` (a finite homogeneous point, in front of every camera, rays spanning
+    ≥ ``min_tri_deg``) — the same arithmetic as :func:`_dlt_tracks`, one LAPACK SVD per matrix."""
+    n, k = x.shape[0], x.shape[1]
+    P = T[:, :, :3, :4]
+    rx = x[:, :, 0:1] * P[:, :, 2, :] - P[:, :, 0, :]
+    ry = x[:, :, 1:2] * P[:, :, 2, :] - P[:, :, 1, :]
+    A = np.stack([rx, ry], axis=2).reshape(n, 2 * k, 4)
+    _u, _s, Vt = np.linalg.svd(A)
+    Xh = Vt[:, -1, :]
+    ok = ~(np.abs(Xh[:, 3]) < np.finfo(float).eps)
+    X = np.where(ok[:, None], Xh[:, :3] / np.where(ok, Xh[:, 3], 1.0)[:, None], np.nan)
+    R = T[:, :, :3, :3]
+    t = T[:, :, :3, 3]
+    z = (R[:, :, 2, 0] * X[:, None, 0] + R[:, :, 2, 1] * X[:, None, 1] + R[:, :, 2, 2] * X[:, None, 2] + t[:, :, 2])
+    C = -np.einsum("nkji,nkj->nki", R, t)
+    rays = X[:, None, :] - C
+    rays /= np.linalg.norm(rays, axis=2, keepdims=True)
+    cosm = np.clip(np.einsum("nki,nli->nkl", rays, rays), -1.0, 1.0)
+    ang = np.degrees(np.arccos(cosm.reshape(n, -1).min(axis=1)))
+    good = ok & (z > 0).all(axis=1) & (ang >= min_tri_deg) & np.isfinite(X).all(axis=1)
+    return X, good
+
+
 def heldout_leave_one_view_out(held_g: Dict[int, List], best: RungResult, solver: dict,
                                cfg, max_px: float = float("inf")) -> Dict[int, float]:
-    """Per keyframe: the RMS of its held-out observations reprojected from their track
-    triangulated WITHOUT that view — the situation of a witness frame, measured
-    against landmarks it never shaped. (A track triangulated with its own view
-    absorbs part of that view's noise and reads low: 0.38 vs 0.46 px on the
-    synthetic walk.)"""
+    """Per keyframe: the RMS of its held-out observations reprojected from their track triangulated
+    WITHOUT that view — the situation of a witness frame, measured against landmarks it never shaped.
+    BATCHED (2026-11-01): the per-track loop ran 705,519 Python triangulations on pccr (316 s of F5's
+    CPU); here every observation is undistorted once (the per-point solver gives the same normalised
+    coordinates whatever its companions), the tracks with k views are stacked and, for each left-out
+    position, triangulated from their other k − 1 views by one batched SVD (:func:`_dlt_stack`, the
+    same LAPACK routine per matrix as :func:`triangulate`), the left-out view's residual by
+    :func:`project_obs`; the residuals are gathered per keyframe in the loop's order (track by track,
+    view by view) and reduced as the loop did. :func:`heldout_leave_one_view_out_per_track` is the
+    loop. A track whose observations do not round-trip through the lens is left out (the loop would
+    have failed the stage on it)."""
+    from precision.camera import undistort_normalized_tracks
+    params = best.params_by_block[0]
+    tracks = [t for t, obs in held_g.items() if len(obs) >= 3]
+    if not tracks:
+        return {}
+    counts = np.fromiter((len(held_g[t]) for t in tracks), np.int64, len(tracks))
+    starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
+    ii = np.fromiter((i for t in tracks for i, _ in held_g[t]), np.int64, int(counts.sum()))
+    uv = np.array([p for t in tracks for _, p in held_g[t]], np.float64).reshape(-1, 2)
+    xn, ok_track = undistort_normalized_tracks(uv, K_of(params), np.asarray(params[4:8], np.float64),
+                                               starts, counts, **solver)
+    w2c = np.asarray(best.w2c, np.float64)
+    frame_out, res_out, key_out = [], [], []
+    for k in np.unique(counts):
+        sel_all = np.nonzero((counts == k) & ok_track)[0]
+        step = max(1, _TRI_BATCH_OBS // int(k))
+        for b0 in range(0, len(sel_all), step):
+            sel = sel_all[b0:b0 + step]
+            idx = starts[sel][:, None] + np.arange(int(k))[None, :]              # (n, k)
+            for j in range(int(k)):
+                rest = np.concatenate([np.arange(j), np.arange(j + 1, int(k))])
+                X, good = _dlt_stack(xn[idx[:, rest]], w2c[ii[idx[:, rest]]], float(cfg.min_tri_deg))
+                if not good.any():
+                    continue
+                i_left = ii[idx[good, j]]
+                pred = project_obs(X[good], w2c[i_left], np.asarray(params, np.float64))
+                e = np.linalg.norm(pred - uv[idx[good, j]], axis=1)
+                frame_out.append(i_left); res_out.append(e)
+                key_out.append(sel[good] * int(k) + j)                            # (track, position): the loop's order
+    if not frame_out:
+        return {}
+    fr = np.concatenate(frame_out); res = np.concatenate(res_out); key = np.concatenate(key_out)
+    order = np.lexsort((key, fr))                                                # per frame, in the loop's order
+    fr, res = fr[order], res[order]
+    bounds = np.r_[0, np.flatnonzero(np.diff(fr)) + 1, len(fr)]
+    out = {}
+    for a, b in zip(bounds[:-1], bounds[1:]):
+        v = res[a:b]
+        v = v[np.isfinite(v) & (v >= 0.0) & (v <= max_px)]
+        if v.size:
+            out[int(fr[a])] = float(np.sqrt(np.mean(np.square(v))))
+    return out
+
+
+def heldout_leave_one_view_out_per_track(held_g: Dict[int, List], best: RungResult, solver: dict,
+                                         cfg, max_px: float = float("inf")) -> Dict[int, float]:
+    """The per-track loop :func:`heldout_leave_one_view_out` replaced (kept for its test)."""
     params = best.params_by_block[0]
     per: Dict[int, List[float]] = {}
     for t, obs in held_g.items():
@@ -926,9 +1021,6 @@ def heldout_leave_one_view_out(held_g: Dict[int, List], best: RungResult, solver
                 continue
             per.setdefault(i, []).append(
                 float(np.linalg.norm(project(X[None], best.w2c[i], params)[0] - np.asarray(p))))
-    # a DEGENERATE residual (non-finite, or farther than the image diagonal) is a
-    # landmark the solve sent to infinity, not a frame's precision — pccr 2026-09-29:
-    # they made the per-frame RMS and the witness bound 106 px on a 464-px image
     out = {}
     for i, v in per.items():
         a = np.asarray(v, np.float64)
@@ -962,15 +1054,20 @@ def rolling_shutter_diag(held_g, best: RungResult, solver, cfg) -> dict:
         ang[i] = math.acos(float(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0))) / (b - a)
     params = best.params_by_block[0]
     X = triangulate_tracks(held_g, best.w2c, params, solver, cfg.min_tri_deg)
-    xs, ys = [], []
     cy = float(params[3])
-    for t, P in X.items():
-        for i, p in held_g[t]:
-            e = float(np.linalg.norm(project(P[None], best.w2c[i], params)[0] - p))
-            xs.append(abs(float(p[1]) - cy) * ang[i])
-            ys.append(e)
+    # every held-out observation of a triangulated track at once (2026-11-01: a Python loop over
+    # them, 24 s on pccr): the same pairs (row offset × angular speed, residual), in the loop's order
+    tr_ = [t for t in X]
+    if tr_:
+        ii = np.fromiter((i for t in tr_ for i, _ in held_g[t]), np.int64, sum(len(held_g[t]) for t in tr_))
+        uv = np.array([p for t in tr_ for _, p in held_g[t]], np.float64).reshape(-1, 2)
+        Xo = np.repeat(np.stack([X[t] for t in tr_]), [len(held_g[t]) for t in tr_], axis=0)
+        ys = np.linalg.norm(project_obs(Xo, best.w2c[ii], np.asarray(params, np.float64)) - uv, axis=1)
+        xs = np.abs(uv[:, 1] - cy) * ang[ii]
+    else:
+        xs = ys = np.zeros(0)
     if len(xs) < 3:
-        return {"n": len(xs), "spearman": None}
+        return {"n": int(len(xs)), "spearman": None}
     rho, pval = spearmanr(xs, ys)
     return {"n": len(xs), "spearman": float(rho), "p": float(pval), "corrected": False}
 
@@ -1005,8 +1102,7 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     tr = load_tracks_v2(session_dir)
     _phase = {"load_tracks_s": round(time.perf_counter() - _t_load, 1)}
     tid = tr["track_query_id"]
-    split_of_track = dict(zip(tid.tolist(), tr["track_split"].tolist()))
-    split_obs = np.array([split_of_track[int(t)] for t in tr["obs_track"]], np.int8)
+    split_obs = split_of_observations(tid, tr["track_split"], tr["obs_track"])
     sigma_rel, inst = _gauge_sigma(out)
     log(f"{LOG_TAG} {len(kf)} keyframes, {len(tid):,} tracks, gauge σ {sigma_rel:.4f} ({inst})")
     from precision.config import raw_of
