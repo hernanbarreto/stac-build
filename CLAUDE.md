@@ -111,6 +111,22 @@
   acta's edge metric (fitters.py, c9e9796) is cherry-picked here (743a21c). Tools of the day in the session scratchpad
   (`render_views.py`: the same certified cameras on two clouds + elevation + top for the user's phone;
   `analyze_audit_run.py`).
+- 2026-10-31 (20:18 CDMX) — RUN E MEASURED (`audit_layered_no_rs_classical_init` on `pccr_audit4`, code 743a21c, 182 min,
+  reconstruction only): the classical init was TAKEN (GLOMAP's global model 295/295 keyframes; its centres vs the gauge's
+  median 11.5 cm, rotation 2.79°); rung ladder R0 → R1 taken (held-out 0.536 → 0.532 px), R0s odometry priors NOT taken
+  (held-out worsens, loops do not open); scale lock +10.58 % (B +9.03 %); loop windows OPEN after F5: 6 of 33 (2 coherent,
+  4 incoherent; B 17; before F5 24), gap median 8.0 → 4.3 cm (control 2.9 cm); F5 vs GLOMAP after Sim3: position median
+  8.1 cm / p90 9.5 / max 11.5, rotation median 2.55° / p90 4.85° / max 6.7°, step-wise |Δ| median 0.027°; the R2 camera
+  fx/fy 382.6/384.0 (production 388.1/384.8, B 400.6/352.7); the bend's s_k by chunk 1.12 [1.04–1.31] / 1.12 / 1.06 /
+  1.03 / 1.00 (production 1.07 / 0.93 / 0.92 / 0.86 / 0.84); cloud 23.16 M points (production 19.39 M), median spacing
+  5.7 mm (5.6), isolated 0.017 % (production 0.008 %, B 0.054 %); chunk check: chunks 0–2 `intra` with excursions
+  ≤ 5.3 cm (production: chunk 1 only, ≤ 2.3 cm; B: chunk 0 `depth`, −132 cm), floor undulation 12.5 cm (production
+  6.0 cm), cameras 1.38 m above the floor; the trajectory vs production's: Sim3 scale 0.893 (E 12 % larger), centre
+  residual median 8.5 cm, max 25.3 cm. On the 6-view sheet (sent to the user) the start of the walk stands on the
+  floor. HIS VERDICT PENDING (he judges by eye); pccr_audit3 (B) deleted on his order. The false pair 260–2614 passed
+  the (untouched) verification again. SAME NIGHT, HIS RULE: every stage on the GPU, deterministic, no quality loss —
+  F5's Ceres (ONE thread by the bit-for-bit rule, ~60 min per run) is the first target; the shortcut of 8 threads was
+  declined; CDMX time in every message.
 
 ## ⭐⭐⭐ 2026-10-17 (01:10) — THE REAL TEXTURE ON GENRECON'S MESH, ITS MATERIAL KEPT (USER: "la mejor que he visto hasta ahora, impresionante")
 - CLOSING VERDICT OF THE DAY (USER 02:00): "creo que tenemos a hoy el pipeline ganador … pasamos por encima al estándar colmap y mvs por
