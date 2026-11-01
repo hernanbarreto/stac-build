@@ -962,9 +962,9 @@ models:
       planarity_threshold: 0.3         # λ₃/λ₁ — below this = planar → depth peel
       layer_tolerance: 0.005           # ±5mm of densest layer
       histogram_bins: 50
-      dbscan_enabled: true             # USER 2026-11-01 ("ya te había dicho que lo prendas"): the whole
-                                       # cleaning ON, DBSCAN included (it had been off since 2026-08-29,
-                                       # when it dropped ~98k mask-matched points on test3)
+      dbscan_enabled: false            # USER 2026-11-01 (14:55 CDMX): "este sí borra puntos, mantenelo
+                                       # apagado" — off since 2026-08-29 (it dropped ~98k mask-matched
+                                       # points on test3); the cleaning's other steps run
       dbscan_min_samples: 10
       sor_k: 20
       sor_std: 1.5
