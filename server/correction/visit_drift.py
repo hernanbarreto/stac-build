@@ -1217,17 +1217,29 @@ def mask_store_hw(output_dir) -> Tuple[int, int]:
     return int(a.shape[0]), int(a.shape[1])
 
 
-def _birth_grid_undistorted(output_dir) -> bool:
-    """True when the published cloud was built on the UNDISTORTED image: its report
-    (corrected_cloud.json) declares the bend carried Omega's record through the lens."""
+def _birth_grid_declared(output_dir) -> Optional[bool]:
+    """What corrected_cloud.json DECLARES about the published birth pixels: True = on the UNDISTORTED
+    image (the bend's grid: the report says the bend carried Omega's record through the lens and
+    nothing says the published pixel went back); False = on the ORIGINAL image (``grid_of_the_bend.
+    birth_pixels_through_lens`` — depth_on_f5 since the audit's phase 3c maps the published pixel back
+    through the lens onto Omega's record grid); None = no report."""
     p = Path(output_dir) / "corrected_cloud.json"
     if not p.exists():
-        return False
+        return None
     try:
         g = (json.loads(p.read_text()) or {}).get("grid_of_the_bend") or {}
     except (OSError, ValueError):
-        return False
-    return bool(isinstance(g, dict) and g.get("lens") and g.get("carried"))
+        return None
+    if not isinstance(g, dict):
+        return None
+    if "birth_pixels_through_lens" in g:
+        return not bool(g.get("birth_pixels_through_lens"))
+    return bool(g.get("lens") and g.get("carried"))
+
+
+def _birth_grid_undistorted(output_dir) -> bool:
+    """True when the published cloud's birth pixels are declared on the UNDISTORTED image."""
+    return bool(_birth_grid_declared(output_dir))
 
 
 def projection_camera(output_dir, xyz: np.ndarray, ks_of_point: np.ndarray,
@@ -1281,6 +1293,33 @@ def projection_camera(output_dir, xyz: np.ndarray, ks_of_point: np.ndarray,
         return front, x, y
 
     chk = birth_systematic(_session, xyz, ks, len(poses), pixel_row, pixel_col, (Wt, Ht))
+    # THE OTHER CONVENTION, MEASURED (pccr_audit4, 2026-11-01): a report written before the declaration
+    # ``birth_pixels_through_lens`` existed says "lens + carried" (the bend's grid) while its published
+    # pixels were already mapped back through the lens onto the original image (depth_on_f5's phase
+    # 3c); the check then read the lens itself as a camera error (1.35 px without it, 0.11 px with it).
+    # A real camera or pose error fails BOTH projections — so when the declared grid fails the bar and
+    # the report does not carry the declaration, the other grid is tried and, when IT reproduces the
+    # pixels, taken and said.
+    declared_explicitly = False
+    try:
+        _g = (json.loads((Path(output_dir) / "corrected_cloud.json").read_text()) or {}).get("grid_of_the_bend") or {}
+        declared_explicitly = isinstance(_g, dict) and "birth_pixels_through_lens" in _g
+    except (OSError, ValueError):
+        pass
+    if chk["n_in_front"] and not chk["systematic_px"] <= BIRTH_PIXEL_PRECISION_PX and not declared_explicitly:
+        other = not undistorted_birth
+
+        def _session_other(P, k):
+            front, x, y, _z = proj.continuous(P, poses[k], md, rec, lens=False if other else None)
+            return front, x, y
+
+        chk2 = birth_systematic(_session_other, xyz, ks, len(poses), pixel_row, pixel_col, (Wt, Ht))
+        if chk2["n_in_front"] and chk2["systematic_px"] <= BIRTH_PIXEL_PRECISION_PX:
+            log(f"[certify] the cloud's birth pixels live on the {'UNDISTORTED' if other else 'ORIGINAL'} image "
+                f"({chk2['systematic_px']:.2f} px there, {chk['systematic_px']:.2f} px on the "
+                f"{'undistorted' if undistorted_birth else 'original'} one the report implied) — corrected_cloud.json "
+                f"predates the declaration birth_pixels_through_lens; the measured grid is taken")
+            undistorted_birth, chk = other, chk2
     if not chk["n_in_front"]:
         raise CameraMismatchError(
             f"no point of the cloud lies in front of its own birth keyframe with "

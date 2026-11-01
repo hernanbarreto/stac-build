@@ -1267,7 +1267,12 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
                   # the grid the bend worked on: the undistorted native frame; Omega's record (its own
                   # grid, the original frame) carried onto it through the lens + grid when they differ
                   "grid_of_the_bend": {"undistorted_native": [W, H], "record": [C.rec_hw[1], C.rec_hw[0]],
-                                       "lens": bool(C.lens), "carried": bool(C.carry), "note": C.grid_note},
+                                       "lens": bool(C.lens), "carried": bool(C.carry), "note": C.grid_note,
+                                       # phase 3c: the PLY's pixel_row/col are Omega's record grid, through the
+                                       # lens when there is one (the bend's undistorted pixel is in origins.npz)
+                                       # — the certification's camera check projects accordingly
+                                       "birth_pixels_through_lens": bool(moved),
+                                       "birth_pixels_grid": "record"},
                   "bend": {"window": (int(wb) if wb is not None else None),
                            # the depth model of this cloud (precision/bend_model.py, audit 2026-10-23): the
                            # family every per_frame coefficient vector belongs to, the families judged,
