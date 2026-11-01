@@ -76,7 +76,7 @@ export class GaussianLayer {
   async load(info: GaussianModelInfo, parent: THREE.Object3D): Promise<number> {
     this.ensureRenderer()
     this.unload(info.name)
-    const url = info.files.splat ?? info.files.ply
+    const url = info.files.ply ?? info.files.splat   // the 3DGS PLY keeps the view-dependent colour (the .splat is 8-bit SH0 only)
     if (!url) throw new Error(`gaussians ${info.name}: no .splat or .ply file published`)
     const mesh = new SplatMesh({ url })
     mesh.name = `gaussians-${info.name}`
