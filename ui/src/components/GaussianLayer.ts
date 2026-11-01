@@ -76,7 +76,9 @@ export class GaussianLayer {
   async load(info: GaussianModelInfo, parent: THREE.Object3D): Promise<number> {
     this.ensureRenderer()
     this.unload(info.name)
-    const url = info.files.ply ?? info.files.splat   // the 3DGS PLY keeps the view-dependent colour (the .splat is 8-bit SH0 only)
+    // the 3DGS PLY keeps the view-dependent colour but weighs ~250 B per gaussian (6.5 M = 1.6 GB): over 2 M the
+    // compact .splat (32 B each, SH0 only) loads instead — the viewer stays usable; the PLY is the record
+    const url = (info.n_gaussians ?? 0) > 2_000_000 ? (info.files.splat ?? info.files.ply) : (info.files.ply ?? info.files.splat)
     if (!url) throw new Error(`gaussians ${info.name}: no .splat or .ply file published`)
     const mesh = new SplatMesh({ url })
     mesh.name = `gaussians-${info.name}`
