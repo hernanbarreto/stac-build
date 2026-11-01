@@ -1,5 +1,35 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ 2026-11-01 — EVERYTHING ON THE CARD (USER: "todo debe correr en GPU, en modo determinista … la GPU no debe
+## quedar parada nunca hasta terminar … en el menor tiempo posible, siempre determinista y reproducible")
+- THE RULE OF EVERY PORT: measure first on the real session (cProfile / a time-stamped log; pccr read-only or a copy
+  under /workspace/tmp), then the torch twin in float64 on ONE declared device with the numpy function KEPT as the path
+  of record, a test holding both equal (exact for integer decisions and the fork's verdict dicts, 1e-9 for geometry),
+  the device key typed in config.yaml (`numpy | cpu | cuda`; cuda with no card FAILS naming the key), tests on cpu via
+  tests/conftest.py `use_device("cpu")`, a commit per block on `gpu-main`, fast-forwarded into `main` after the suite.
+  Bit-identity across summation orders is not the bar; the record is (same inliers, verdicts, r̂, levels). Never run
+  a GPU bench under `ulimit -v` (CUDA maps device memory into the address space: a false OOM at 45 GB).
+- DEVICE KEYS (all cuda on main): refine.solver torch + refine.triangulation_device; correction.visit_drift.device;
+  correction.floor.device + floor.bootstrap_draws device (USER OK 17:00 CDMX: σ carry the bootstrap's own ~1.6 %
+  noise); cloud_metrics.edge_device + cloud_metrics.device; bend.device; the projection's kernels on the evidence
+  device (surface_fit.evidence_device).
+- MEASURED ON pccr (before → after): F5 63 min → 12 min (torch LM; leave-one-view-out 316 → 2.4 s; witnesses' PnP in
+  8 processes — COLMAP has no GPU PnP, each call seeded); F6 13.8 → ~10.5 min (bend 112 → 18 s by every keyframe of a
+  window at once; PointDiT's 11 GB of weights read while the bend runs); F4: the next window's frames/corners/edges
+  prepared while the card tracks (24 heavy windows 246 → 218 s, card 65 → 84 %); certification: mask filter 22 →
+  ~2.5 min, floor 131 → 15.6 s, edge metric 418 → 78 s (3 objects), closures 115 → 40 s, store one transaction;
+  projection: per-object loop 21 → ~1 min, the cleaning's RANSAC (floor 175 → 0.4 s), dedupe / attach / OBB / voxel
+  components on the card; every stage process: 14 s less (the packages' re-exports are lazy — open3d was imported by
+  `import reconstruction.loops.config`).
+- STAYS ON THE CPU, DECLARED: PotreeConverter (one thread: its node offsets follow the threads' completion order — byte
+  identity, point 57; ~1-2 min per build, three builds per full run), sqlite, PLY / JSON / npz I/O, JPEG decoding.
+  NEXT (authorised by the USER 18:00 CDMX "si hay tareas que se pueden paralelizar o adelantar … que no quede silicio
+  sin usar"): the Potree builds off the critical path, stages overlapped where the VRAM allows.
+- Segment cleaning: enabled, DBSCAN OFF (USER 14:55 CDMX "este sí borra puntos, mantenelo apagado"), RANSAC on; the
+  OBB is fitted to the POINTS (the 5 cm visualisation voxels sat on a world grid: the box changed with the frame).
+- F5 on pccr's copy now applies R2 (held-out 0.5163 → 0.5031 px, significant): before, R2 stopped short of converging
+  and its own solver error kept it out. The rule did it; the USER judges the cloud.
+
 ## ⭐⭐⭐ 2026-10-29 — NEXT TASKS, IN THIS ORDER (USER: "para que fable al volver a conectarse actualice el repo local y trabaje con todas las tareas")
 - One GPU task at a time; never mix the two branches.
 - 1. COLMAP/GLOMAP audit: checkout `audit/precision-geometry-2026-10-23` and follow the block "ACTUALIZACIÓN 2026-10-23"
