@@ -127,6 +127,12 @@
   the (untouched) verification again. SAME NIGHT, HIS RULE: every stage on the GPU, deterministic, no quality loss —
   F5's Ceres (ONE thread by the bit-for-bit rule, ~60 min per run) is the first target; the shortcut of 8 threads was
   declined; CDMX time in every message.
+  HIS VERDICT ON E'S CLOUD (20:40 CDMX, in the viewer): "la nube no está nada mal, el piso está muy bien y mucho a pesar
+  que no tiene la corrección de piso que viene luego de vlm sam3, y aun así tiene algo de ondulación pero el resultado es
+  muy bueno. tal vez incluso luego con el genrecon el detalle es muy bueno, y con mejor escala, me gusta eh!" → the chain
+  is COMPLETED on pccr_audit4 the same night (variant `audit_layered_no_rs_classical_init_full`, stages_off [], the
+  driver in resume mode: VLM, SAM3, projection, certification, GenRecon on E's cloud) for the final product; the merge
+  decision (init_poses classical + the layered F6 into main) waits for that product and his eye.
 
 ## ⭐⭐⭐ 2026-10-17 (01:10) — THE REAL TEXTURE ON GENRECON'S MESH, ITS MATERIAL KEPT (USER: "la mejor que he visto hasta ahora, impresionante")
 - CLOSING VERDICT OF THE DAY (USER 02:00): "creo que tenemos a hoy el pipeline ganador … pasamos por encima al estándar colmap y mvs por
