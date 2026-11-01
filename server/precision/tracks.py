@@ -437,6 +437,50 @@ def _read_list(p: Path, key: str) -> List[int]:
     return sorted(_num(f) for f in d.get(key, []))
 
 
+def collect_window_observations(good: np.ndarray, uv: np.ndarray, vis: np.ndarray, sig: np.ndarray,
+                                frames: np.ndarray, next_tid: int, window_index: int, is_loop: bool,
+                                wit_set, s_mean: float) -> Dict[str, np.ndarray]:
+    """The observations of one query set of one window, as arrays: ``good`` (F, Q) marks the frames
+    each query is tracked in; a query seen in ≥ 2 frames is a track (id next_tid + its column), with
+    one observation per good frame — in the order the reference loop produced them (query by query,
+    frame by frame): track id, frame, uv (the tracker's grid), sigma in native px (× ``s_mean``, in
+    float64 as the loop's `float(sig) * s_mean`), visibility, window, loop flag, frame kind; plus the
+    kept queries (``q_id``, ``q_col``). :func:`_collect_window_observations_reference` is the loop."""
+    frames = np.asarray(frames, np.int64)
+    seen = good.sum(0)
+    cols = np.flatnonzero(seen >= 2)
+    qn, rows = np.nonzero(good[:, cols].T)            # query-major, then frame: the loop's order
+    c = cols[qn]
+    f = frames[rows]
+    is_wit = np.isin(f, np.fromiter(wit_set, np.int64, len(wit_set))) if len(wit_set) else np.zeros(len(f), bool)
+    return {"track": (int(next_tid) + c).astype(np.int64), "frame": f,
+            "uv": np.asarray(uv)[rows, c], "sigma": np.asarray(sig, np.float64)[rows, c] * float(s_mean),
+            "vis": np.asarray(vis, np.float64)[rows, c],
+            "window": np.full(len(f), int(window_index), np.int64), "loop": np.full(len(f), bool(is_loop)),
+            "kind": np.where(is_wit, KIND_WITNESS, KIND_KEYFRAME).astype(np.int64),
+            "q_id": (int(next_tid) + cols).astype(np.int64), "q_col": cols}
+
+
+def _collect_window_observations_reference(good, uv, vis, sig, frames, next_tid, window_index, is_loop,
+                                           wit_set, s_mean):
+    """The per-observation loop :func:`collect_window_observations` replaced (kept for its test)."""
+    obs = {k: [] for k in ("track", "frame", "uv", "sigma", "vis", "window", "loop", "kind")}
+    q_id, q_col = [], []
+    seen = good.sum(0)
+    for n in np.flatnonzero(seen >= 2):
+        tid = int(next_tid) + int(n)
+        for s in np.flatnonzero(good[:, n]):
+            f = int(frames[s])
+            obs["track"].append(tid); obs["frame"].append(f); obs["uv"].append(uv[s, n])
+            obs["sigma"].append(float(sig[s, n]) * s_mean); obs["vis"].append(float(vis[s, n]))
+            obs["window"].append(window_index); obs["loop"].append(bool(is_loop))
+            obs["kind"].append(KIND_WITNESS if f in wit_set else KIND_KEYFRAME)
+        q_id.append(tid); q_col.append(int(n))
+    out = {k: np.asarray(v) for k, v in obs.items()}
+    out["q_id"] = np.asarray(q_id, np.int64); out["q_col"] = np.asarray(q_col, np.int64)
+    return out
+
+
 def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
                log: Callable = print, ccfg=None) -> Dict[str, Any]:
     """F4 on a session. ``ccfg``: the correction configuration the instance loops' evidence
@@ -519,8 +563,7 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
                                    log=log)
         weights = {"url": tcfg.tracker_weights_url, "sha256": tcfg.tracker_weights_sha256}
     numerics = None
-    obs = {k: [] for k in ("track", "frame", "uv", "uv_native", "sigma", "vis", "window",
-                           "loop", "kind")}
+    obs = {k: [] for k in ("track", "frame", "uv", "sigma", "vis", "window", "loop", "kind")}
     tq = {k: [] for k in ("id", "frame", "uv")}
     wit_set = set(wit) - set(kf)
     next_tid, t0 = 0, time.time()
@@ -548,28 +591,23 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
             uv, vis, sig = uv[inv], vis[inv], sig[inv]
             good = vis > tcfg.vis_thresh
             good[qi] = True                               # the query itself
-            seen = good.sum(0)
-            for n in np.flatnonzero(seen >= 2):
-                tid = next_tid + int(n)
-                for s in np.flatnonzero(good[:, n]):
-                    f = win.frames[s]
-                    obs["track"].append(tid)
-                    obs["frame"].append(f)
-                    obs["uv"].append(uv[s, n])
-                    obs["sigma"].append(float(sig[s, n]) * s_mean)
-                    obs["vis"].append(float(vis[s, n]))
-                    obs["window"].append(wi)
-                    obs["loop"].append(win.kind == "loop")
-                    obs["kind"].append(KIND_WITNESS if f in wit_set else KIND_KEYFRAME)
-                tq["id"].append(tid)
-                tq["frame"].append(qf)
-                tq["uv"].append(q[n])
+            # the window's observations as ARRAYS (2026-11-01): the per-observation Python loop
+            # appended 17.4 M tuples one by one on pccr (collect_window_observations keeps the
+            # loop's order and values exactly; tests/test_tracks_collect.py)
+            col = collect_window_observations(good, uv, vis, sig, np.asarray(win.frames, np.int64),
+                                              next_tid, wi, win.kind == "loop", wit_set, s_mean)
+            for k in obs:
+                obs[k].append(col[k])
+            tq["id"].append(col["q_id"]); tq["frame"].append(np.full(len(col["q_id"]), qf, np.int64))
+            tq["uv"].append(q[col["q_col"]])
             next_tid += len(q)
         if (wi + 1) % 25 == 0 or wi == len(windows) - 1:
-            log(f"{LOG_TAG} window {wi + 1}/{len(windows)}: {len(obs['track']):,} obs "
+            log(f"{LOG_TAG} window {wi + 1}/{len(windows)}: {sum(len(a) for a in obs['track']):,} obs "
                 f"({time.time() - t0:.0f} s)")
-    if not obs["track"]:
+    if not obs["track"] or not sum(len(a) for a in obs["track"]):
         raise TracksError("no track survived — nothing to write")
+    obs = {k: np.concatenate(v) for k, v in obs.items()}
+    tq = {k: np.concatenate(v) for k, v in tq.items()}
     uv = np.asarray(obs["uv"], np.float32)
     tids = np.asarray(tq["id"], np.int64)
     split = track_split_of(int(tcfg.seed), np.asarray(tq["frame"], np.int64),
