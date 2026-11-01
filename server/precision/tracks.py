@@ -663,12 +663,18 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
     return rep
 
 
-def load_tracks_v2(session_dir: Path) -> Dict[str, np.ndarray]:
+def load_tracks_v2(session_dir: Path, members: Optional[Sequence[str]] = None) -> Dict[str, np.ndarray]:
+    """The tracks' arrays; ``members``: only these (F6 reads five of the sixteen — the others are 8 of its 24 s of
+    zlib on pccr's 300 MB file, 2026-11-01); None = all."""
     p = Path(session_dir) / "output" / "precision" / TRACKS_NAME
     if not p.exists():
         raise TracksError(f"{p} is missing — run python -m precision.tracks first")
     with np.load(p) as z:
-        return {k: z[k] for k in z.files}
+        keys = z.files if members is None else [k for k in members]
+        missing = [k for k in keys if k not in z.files]
+        if missing:
+            raise TracksError(f"{p} lacks {missing}")
+        return {k: z[k] for k in keys}
 
 
 def main(argv: Optional[List[str]] = None) -> int:

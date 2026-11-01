@@ -2504,6 +2504,10 @@ reconstruction:
       heldout_confidence: 0.95          # declared confidence (as everywhere else)
       bootstrap: 2000                   # BOUND (cost): resamples (as refine.permutations / metric_lock)
       seed: 0                           # their fixed seed
+      device: cuda                      # 2026-11-01 (USER "todo debe correr en GPU"): numpy (the path of record) | cpu |
+                                        #   cuda — the bend's IRLS fits, every keyframe of a window at once
+                                        #   (precision/bend_torch.py), and its bootstraps' medians (precision/
+                                        #   judge_torch.py, the same draws). pccr: 95 s of F6 on numpy.
     flyers:                             # Phase 0 of the mono-detail work (claude_stac.txt 2026-10-04): flyer
                                         # diagnosis of the published cloud (precision/flyers.py). A flyer is an
                                         # ISOLATED point or one BETWEEN two surfaces of its own frame; classes

@@ -255,14 +255,18 @@ def cluster_bootstrap_se(groups: Sequence[np.ndarray], n_boot: int, seed: int) -
 
 
 def choose_window(score: Dict[int, float], errs: Dict[int, Dict[int, np.ndarray]], error_factor: float,
-                  n_boot: int, seed: int) -> Tuple[int, dict]:
+                  n_boot: int, seed: int, device: str = "numpy") -> Tuple[int, dict]:
     """Point 49 (USER 2026-10-07): the SMOOTHEST (widest) window whose half-A held-out error is
     within ``error_factor`` × the measured error of the best — the standard error of the best's
     pooled median under the keyframe bootstrap. ``score[w]`` = the pooled median per window,
     ``errs[w]`` = {keyframe: its rows' errors}. A strict argmin flipped on a 1 % near-tie (pccr
     ±0 2.85 % vs ±1 2.88 %). Returns (window, the rule with every margin)."""
     best = min(score, key=lambda w: (score[w], w))
-    se = cluster_bootstrap_se(list(errs[best].values()), n_boot, seed)
+    if device == "numpy":
+        se = cluster_bootstrap_se(list(errs[best].values()), n_boot, seed)
+    else:                                   # the same resamples, the pooled medians on the device
+        from precision.judge_torch import cluster_bootstrap_se_t
+        se = cluster_bootstrap_se_t(list(errs[best].values()), n_boot, seed, device)
     bar = float(score[best]) + float(error_factor) * se
     within = [w for w in score if score[w] <= bar]
     pick = max(within)
@@ -278,7 +282,7 @@ def choose_window(score: Dict[int, float], errs: Dict[int, Dict[int, np.ndarray]
 def verify_keyframes(windows: Sequence[int], wb: int, coefs: Dict[int, Dict[int, np.ndarray]],
                      infos: Dict[int, Dict[int, dict]], rows_A: Dict[int, tuple], N: int, W: int, H: int,
                      error_factor: float, confidence: float, n_boot: int, seed: int,
-                     min_rows: int) -> Tuple[Dict[int, np.ndarray], Dict[int, dict]]:
+                     min_rows: int, device: str = "numpy") -> Tuple[Dict[int, np.ndarray], Dict[int, dict]]:
     """Point 48's c0 verification per keyframe. The candidates for keyframe i are the chosen window
     ``wb`` then every wider window of ``windows`` (the pooled fits of its neighbours). A candidate is
     VERIFIED when THE USER'S RULE (metric_lock.decide_change) says the bent depth improves the
@@ -289,7 +293,14 @@ def verify_keyframes(windows: Sequence[int], wb: int, coefs: Dict[int, Dict[int,
     fit (declared 'unverifiable'), else ``wb``'s own. Returns ({i: c}, {i: provenance})."""
     _vendor_path()
     from loop_utils.loop_judge import min_judge_closures
-    from loop_utils.metric_lock import decide_change
+    from loop_utils.metric_lock import decide_change as _dc_numpy
+    if device == "numpy":
+        decide_change = _dc_numpy
+    else:                                   # the fork's rule, the bootstrap medians on the device
+        from precision.judge_torch import decide_change_t
+
+        def decide_change(*a, **k):
+            return decide_change_t(*a, device=device, **k)
     need = int(min_judge_closures(float(confidence)))
     order = [int(wb)] + sorted(int(w) for w in windows if int(w) > int(wb))
     out: Dict[int, np.ndarray] = {}
@@ -713,12 +724,13 @@ def _landmark_rows(session_dir: Path, pcfg, frames: List[int], w2c: np.ndarray, 
     from precision import refine as RF
     solver = undistort_solver(pcfg.camera)
     RF.use_device(pcfg.refine.triangulation_device)      # F6's landmark DLTs on the declared device
-    tr = load_tracks_v2(session_dir)
+    tr = load_tracks_v2(session_dir, members=("track_query_id", "track_split", "obs_track", "obs_frame",
+                                              "obs_uv_native"))
     split = RF.split_of_observations(tr["track_query_id"], tr["track_split"], tr["obs_track"])
     out, dropped = {}, {}
     for sp in (0, 1):
         m = split == sp
-        g = RF.group_tracks(tr["obs_track"][m], tr["obs_frame"][m], tr["obs_uv_native"][m], frames)
+        g = RF.group_tracks(tr["obs_track"][m], tr["obs_frame"][m], tr["obs_uv_native"][m], frames, lists=False)
         dropped[sp] = {"tracks": 0, "observations": 0}
         X = RF.triangulate_tracks(g, w2c, params, solver, pcfg.refine.min_tri_deg, dropped=dropped[sp])
         out[sp] = landmark_rows_by_keyframe(g, X, w2c, len(frames))
@@ -821,8 +833,14 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     rows_A = {i: heldout_rows(obs[1][i], zo[f], bc.min_depth_m, 0) for i, f in enumerate(frames)}
     rows_B = {i: heldout_rows(obs[1][i], zo[f], bc.min_depth_m, 1) for i, f in enumerate(frames)}
     score, coefs, infos, errs_A = {}, {}, {}, {}
+    bend_dev = str(getattr(bc, "device", "numpy"))
     for w in (bc.windows if bc.enabled else ()):
-        cw, inf = bend_coefficients(rows, N, int(w), bc.min_rows, gc.huber_k, bc.irls_iterations, fac)
+        if bend_dev == "numpy":
+            cw, inf = bend_coefficients(rows, N, int(w), bc.min_rows, gc.huber_k, bc.irls_iterations, fac)
+        else:
+            from precision.bend_torch import bend_coefficients_t
+            cw, inf = bend_coefficients_t(rows, N, int(w), bc.min_rows, gc.huber_k, bc.irls_iterations, fac,
+                                          bend_dev)
         per_kf = {i: rel_errors(*rows_A[i], cw[i], W, H) for i in range(N)}
         per_kf = {i: e for i, e in per_kf.items() if len(e)}
         if not per_kf:
@@ -837,10 +855,11 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
             raw_err.append(np.abs(zz[ok] - h[ok, 2]) / h[ok, 2])
     if bc.enabled:
         # point 49: the smoothest window within error_factor x the measured error of the best
-        wb, window_rule = choose_window(score, errs_A, fac, bc.bootstrap, bc.seed)
+        wb, window_rule = choose_window(score, errs_A, fac, bc.bootstrap, bc.seed, device=bend_dev)
         # point 48: every keyframe's c0 verified on its own held-out rows; the pooled fit otherwise
         final_coefs, provenance = verify_keyframes(bc.windows, wb, coefs, infos, rows_A, N, W, H, fac,
-                                                   bc.heldout_confidence, bc.bootstrap, bc.seed, bc.min_rows)
+                                                   bc.heldout_confidence, bc.bootstrap, bc.seed, bc.min_rows,
+                                                   device=bend_dev)
     else:
         wb, window_rule, final_coefs, provenance = disabled_bend(N)
         log(f"{LOG_TAG} bend.enabled: false — Omega's depth stands (k = 1) on F5's poses for every keyframe")

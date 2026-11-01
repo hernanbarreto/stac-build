@@ -407,6 +407,9 @@ class BendConfig:
                                 # window choice's error bar (docs/plan_determinismo.md points 48 / 49)
     bootstrap: int              # BOUND (cost): resamples of those bootstraps
     seed: int                   # their fixed seed
+    device: str                 # 2026-11-01: numpy (the path of record) | cpu | cuda — where the bend's IRLS fits
+                                #   (every keyframe of a window at once, precision/bend_torch.py) and its bootstrap
+                                #   medians (precision/judge_torch.py: the fork's rule, the same draws) run
 
 
 # ── flyer diagnosis (claude_stac.txt 2026-10-04, Phase 0) ──────────────────
@@ -884,7 +887,8 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                       min_depth_m=_num(bd, "min_depth_m", "bend", lo=0.0),
                       heldout_confidence=_num(bd, "heldout_confidence", "bend", lo=0.0, hi=1.0, lo_excl=True),
                       bootstrap=_num(bd, "bootstrap", "bend", lo=1, integer=True),
-                      seed=_num(bd, "seed", "bend", lo=0, integer=True))
+                      seed=_num(bd, "seed", "bend", lo=0, integer=True),
+                      device=_enum(bd, "device", "bend", ("numpy", "cpu", "cuda")))
     if bend.heldout_confidence >= 1.0:
         raise PrecisionConfigError(f"'{SECTION}.bend.heldout_confidence' must be below 1")
     fl = _sub(sec, "flyers", "")

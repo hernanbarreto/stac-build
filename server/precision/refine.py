@@ -163,7 +163,7 @@ class TrackGroups(dict):
 
 
 def group_tracks(track: np.ndarray, frame: np.ndarray, uv: np.ndarray,
-                 frames: Sequence[int]) -> Dict[int, List[Tuple[int, np.ndarray]]]:
+                 frames: Sequence[int], lists: bool = True) -> Dict[int, List[Tuple[int, np.ndarray]]]:
     """{track: [(index of the frame in ``frames``, uv)]} over the given frames — a :class:`TrackGroups`:
     tracks in the order of their first observation, observations in their order (what the per-observation
     loop produced; :func:`_group_tracks_reference` is that loop), with the arrays cached."""
@@ -192,6 +192,11 @@ def group_tracks(track: np.ndarray, frame: np.ndarray, uv: np.ndarray,
     ii = i_of[seg]; uvs = p[seg]
     out.tracks, out.counts, out.starts, out.ii = tracks, counts, new_starts, ii.astype(np.int64)
     out.uv = np.asarray(uvs, np.float64).reshape(-1, 2)
+    if not lists:
+        # ``lists=False``: the ARRAYS only, the dict left empty (F6's landmark rows read nothing else; building
+        # 2.6 M Python lists was 10 of its 24 s on pccr) — a reader of the dict gets nothing, so only the
+        # array-reading helpers (_track_arrays, _obs_of_tracks) may receive it
+        return out
     ii_l = ii.tolist()
     for q in range(len(tracks)):
         a, b = int(new_starts[q]), int(new_starts[q] + counts[q])
@@ -886,15 +891,22 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
     # R3: focal per temporal block, only when the best rung leaves a temporal pattern; MEASURED
     # AND REPORTED, never applied (point 62: the chain uses one camera for every keyframe)
     blocks = np.arange(len(w2c0)) // int(cfg.focal_block_frames)
-    per_frame: Dict[int, List[float]] = {}
     Xb = triangulate_tracks(held_g, best.w2c, best.params_by_block[0], solver, cfg.min_tri_deg)
-    for t, P in Xb.items():
-        for i, p in held_g[t]:
-            per_frame.setdefault(i, []).append(
-                float(np.linalg.norm(project(P[None], best.w2c[i], best.params_by_block[0])[0] - p)))
-    # per keyframe: the RMS of its held-out reprojections — the statistic a witness is
-    # compared with (its own reprojection RMS)
-    pf = {i: float(np.sqrt(np.mean(np.square(v)))) for i, v in per_frame.items()}
+    # per keyframe: the RMS of its held-out reprojections — the statistic a witness is compared with (its own
+    # reprojection RMS); every observation projected at once (2026-11-01: a Python loop of one projection per
+    # held-out observation), the keyframes in the loop's order of first appearance
+    pf: Dict[int, float] = {}
+    if Xb:
+        tr_b = list(Xb)
+        cnt_b, ii_b, uv_b = _obs_of_tracks(held_g, tr_b)
+        Xo = np.repeat(np.stack([Xb[t] for t in tr_b]), cnt_b, axis=0)
+        e = np.linalg.norm(project_obs(Xo, np.asarray(best.w2c, np.float64)[ii_b],
+                                       np.asarray(best.params_by_block[0], np.float64)) - uv_b, axis=1)
+        uniq, first = np.unique(ii_b, return_index=True)
+        order = uniq[np.argsort(first, kind="stable")]
+        s2 = np.bincount(ii_b, weights=e * e, minlength=int(ii_b.max()) + 1)
+        nn = np.bincount(ii_b, minlength=int(ii_b.max()) + 1)
+        pf = {int(i): float(np.sqrt(s2[i] / nn[i])) for i in order.tolist()}
     sysrep = _systematic_in_time(pf, blocks, cfg)
     rungs["R3"] = {"tried": False, "temporal_test": sysrep, "taken": False, "applied": False,
                    "policy": "measured and reported only — the chain uses one camera for every "
