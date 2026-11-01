@@ -69,6 +69,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import time
 import os
 import math
 import sys
@@ -1000,7 +1001,9 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
         raise RefineError(f"camera_poses.txt ({len(poses)}) and camera_frames.txt ({len(kf)}) "
                           f"disagree")
     w2c0 = np.linalg.inv(poses)
+    _t_load = time.perf_counter()
     tr = load_tracks_v2(session_dir)
+    _phase = {"load_tracks_s": round(time.perf_counter() - _t_load, 1)}
     tid = tr["track_query_id"]
     split_of_track = dict(zip(tid.tolist(), tr["track_split"].tolist()))
     split_obs = np.array([split_of_track[int(t)] for t in tr["obs_track"]], np.int8)
@@ -1013,14 +1016,22 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
                        tr["obs_uv_native"], split_obs, kf, sigma_rel, cfg, solver,
                        error_factor=fac, log=log, solve=bool(cfg.enabled))
     best = core["best"]
+    _t = time.perf_counter()
     bound = heldout_bound(heldout_leave_one_view_out(core["held_groups"], best, solver, cfg,
                                                      max_px=float(np.hypot(cam.width, cam.height))), cfg)
+    _phase["heldout_leave_one_view_out_s"] = round(time.perf_counter() - _t, 1)
     wit = sorted(set(tr["obs_frame"][tr["frame_kind"] == KIND_WITNESS].tolist()) - set(kf))
     # the witnesses localise against the landmarks AS THE BEST RUNG SOLVED THEM (in its world,
     # with its camera) — not against X0, triangulated from the initial poses with F0's camera
+    _t = time.perf_counter()
     wloc = localize_witnesses(best, core["X"], tr["obs_track"], tr["obs_frame"],
                               tr["obs_uv_native"], wit, (cam.width, cam.height), bound, cfg)
+    _phase["witnesses_s"] = round(time.perf_counter() - _t, 1)
+    _t = time.perf_counter()
     rs = rolling_shutter_diag(core["held_groups"], best, solver, cfg)
+    _phase["rolling_shutter_diag_s"] = round(time.perf_counter() - _t, 1)
+    core["timing"].update(_phase)                       # refine.timing.json: the CPU around the solves, measured
+    log(f"{LOG_TAG} phases: " + ", ".join(f"{k} {v}" for k, v in _phase.items()))
     # prior-depth cross-check: triangulated depth vs Omega's depth at the query pixel
     cross = _prior_cross_check(out, kf, core["X"], core["fit_groups"], best, cam)
     pdir = out / "precision"
