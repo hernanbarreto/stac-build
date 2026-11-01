@@ -273,6 +273,7 @@ class _Problem:
         self.blk_cols = ((self.n_pose + self.nf * torch.arange(self.B, device=device))[:, None]
                          + torch.arange(self.nf, device=device)[None, :]) if self.nf else None  # (B,nf)
         self._pairs = None
+        self._lin = None
 
     def _pair_plan(self, pair_chunk: int):
         """All landmark-sharing observation pairs (a, b) sorted by camera pair (cam_a, cam_b), the group
@@ -420,7 +421,11 @@ class _Problem:
         return c + 0.5 * float((e * e).sum())
 
     # ── one LM step ──
-    def step(self, lam: float, pair_chunk: int = 3_000_000):
+    def linearize(self):
+        """Everything of the LM step that does not depend on λ, at the current state: the loss-scaled
+        residuals and Jacobians, the landmark blocks, the dense camera Hessian and gradient (priors
+        included), the coupling W. Kept until the state moves — a REJECTED step only changes λ, and until
+        2026-11-01 it recomputed all of this (on pccr's tracks ~45 % of the steps were rejected)."""
         torch = self.torch
         r, front, J_pose, J_pt, J_cam = self.residuals()
         w, s = self.huber_weights(r, front)
@@ -430,24 +435,35 @@ class _Problem:
         J_pose = J_pose * sw[..., None]; J_pt = J_pt * sw[..., None]; J_cam = J_cam * sw[..., None]
         J_c = torch.cat([J_pose, J_cam], -1)                                 # (M,2,6+nf)
         nco = 6 + self.nf
-        # landmark blocks
         Hpp = segment_sum(J_pt.transpose(1, 2) @ J_pt, self.pt_idx, self.P, self.pt_ends)         # (P,3,3)
         gp = segment_sum(torch.einsum("mai,ma->mi", J_pt, r_w), self.pt_idx, self.P, self.pt_ends)  # (P,3)
-        Dp = torch.diagonal(Hpp, dim1=1, dim2=2).clamp(self.tb.lm_diag_min, self.tb.lm_diag_max)
-        Hpp_l = Hpp + lam * torch.diag_embed(Dp)
-        Hpp_inv = torch.linalg.inv(Hpp_l)
-        # camera side: dense H_cc, g_c
         H = torch.zeros(self.n_c, self.n_c, dtype=torch.float64, device=self.device)
         g = torch.zeros(self.n_c, dtype=torch.float64, device=self.device)
         self._accumulate_camera(H, g, J_c, r_w, nco)
-        # priors
         e_p, J_p = self.prior_terms(self.R, self.t)
         if e_p.shape[0]:
             H = H + J_p.T @ J_p
             g = g + J_p.T @ e_p
             cost = cost + 0.5 * float((e_p * e_p).sum())
-        # Schur: S = H − Σ W Hpp⁻¹ Wᵀ ;  ĝ = g − Σ W Hpp⁻¹ g_p
         W = J_c.transpose(1, 2) @ J_pt                                      # (M,nco,3)
+        self._lin = {"r_w": r_w, "J_c": J_c, "J_pt": J_pt, "Hpp": Hpp, "gp": gp, "H": H, "g": g,
+                     "e_p": e_p, "J_p": J_p, "W": W, "cost": cost}
+        return self._lin
+
+    def invalidate(self):
+        """The state moved (an accepted step): the linearization is stale."""
+        self._lin = None
+
+    def step(self, lam: float, pair_chunk: int = 3_000_000):
+        torch = self.torch
+        L = self._lin if getattr(self, "_lin", None) is not None else self.linearize()
+        r_w, J_c, J_pt, Hpp, gp, H, g, e_p, J_p, W, cost = (L[k] for k in (
+            "r_w", "J_c", "J_pt", "Hpp", "gp", "H", "g", "e_p", "J_p", "W", "cost"))
+        nco = 6 + self.nf
+        Dp = torch.diagonal(Hpp, dim1=1, dim2=2).clamp(self.tb.lm_diag_min, self.tb.lm_diag_max)
+        Hpp_l = Hpp + lam * torch.diag_embed(Dp)
+        Hpp_inv = torch.linalg.inv(Hpp_l)
+        # Schur: S = H − Σ W Hpp⁻¹ Wᵀ ;  ĝ = g − Σ W Hpp⁻¹ g_p
         Y = W @ Hpp_inv[self.pt_idx]                                        # (M,nco,3)
         g_red = g - self._reduce_vec(torch.einsum("mij,mj->mi", Y, gp[self.pt_idx]), nco)
         S = H - self._schur_pairs(Y, W, nco, pair_chunk)
@@ -605,6 +621,7 @@ def solve(problem: _Problem, max_iterations: int, log=None) -> Dict[str, object]
         step_norm = math.sqrt(float((dc * dc).sum()) + float((dp * dp).sum()))
         if rho > tb.min_relative_decrease and math.isfinite(new_cost):
             problem.R, problem.t, problem.cam, problem.X = R, t, cam, X
+            problem.invalidate()
             n_ok += 1
             lam = lam * max(1 / 3, 1.0 - (2.0 * rho - 1.0) ** 3); nu = 2.0
             rel = abs(actual) / max(cost_now, TINY)
