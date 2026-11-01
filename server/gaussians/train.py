@@ -191,6 +191,19 @@ def _depth_targets(ts: TrainingSet, trainset_dir: Path, device, log) -> Dict[int
     return out
 
 
+def strategy_choice(requested: str, lens: bool) -> Tuple[str, str]:
+    """The densification strategy actually run, with the reason. gsplat's DefaultStrategy densifies by the
+    gradient of the PROJECTED means (``info["means2d"].retain_grad()``); the unscented-transform projection
+    that renders a distorted lens (``with_ut=True``, the phone's OPENCV k1 k2 p1 p2) exposes no such gradient
+    (pccr 2026-10-31: "can't retain_grad on Tensor that has requires_grad=False"), so a lens session runs the
+    MCMC strategy — capped at train.max_gaussians, seeded — and the report says so. A pinhole session runs
+    what was configured."""
+    if requested == "default" and lens:
+        return "mcmc", ("the session camera has lens distortion, rendered through gsplat's unscented transform, "
+                        "whose projected means carry no gradient for the default densification")
+    return requested, "as configured"
+
+
 def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) -> Dict[str, Any]:
     import torch
     from gsplat import rasterization
@@ -234,18 +247,21 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
 
     iters = int(tr["iterations"])
     r0, r1 = int(round(float(tr["refine_start_frac"]) * iters)), int(round(float(tr["refine_stop_frac"]) * iters))
-    if tr["strategy"] == "mcmc":
+    # cameras
+    w2c = torch.from_numpy(np.linalg.inv(np.asarray(ts.c2w, np.float64)).astype(np.float32)).to(device)
+    K_t = torch.from_numpy(np.asarray(ts.K, np.float32)).to(device)
+    dist = np.asarray(ts.dist, np.float64)
+    lens = bool(np.any(np.abs(dist) > 0))
+    strategy_used, strategy_reason = strategy_choice(str(tr["strategy"]), lens)
+    if strategy_used != tr["strategy"]:
+        log(f"{LOG} strategy {tr['strategy']} → {strategy_used}: {strategy_reason}")
+    if strategy_used == "mcmc":
         strategy = MCMCStrategy(cap_max=int(tr["max_gaussians"]), refine_start_iter=r0, refine_stop_iter=r1, verbose=False)
     else:
         strategy = DefaultStrategy(refine_start_iter=r0, refine_stop_iter=r1, verbose=False)
     strategy.check_sanity(params, optimizers)
     state = strategy.initialize_state(scene_scale=extent)
 
-    # cameras
-    w2c = torch.from_numpy(np.linalg.inv(np.asarray(ts.c2w, np.float64)).astype(np.float32)).to(device)
-    K_t = torch.from_numpy(np.asarray(ts.K, np.float32)).to(device)
-    dist = np.asarray(ts.dist, np.float64)
-    lens = bool(np.any(np.abs(dist) > 0))
     radial = torch.tensor([[dist[0], dist[1], 0.0, 0.0, 0.0, 0.0]], dtype=torch.float32, device=device) if lens else None
     tangential = torch.tensor([[dist[2], dist[3]]], dtype=torch.float32, device=device) if lens else None
     W, H = ts.width, ts.height
@@ -355,7 +371,8 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
         "evaluations": evals, "heldout": evals[-1] if evals else None,
         "depth_supervision": {"weight": w_depth, "n_keyframes_with_depth": len(depths)},
         "exposure": {"learned": exposure is not None, "reg": w_exp},
-        "strategy": tr["strategy"], "scene_extent_m": extent, "sh_degree": int(tr["sh_degree"]),
+        "strategy": {"requested": tr["strategy"], "used": strategy_used, "reason": strategy_reason},
+        "scene_extent_m": extent, "sh_degree": int(tr["sh_degree"]),
         "camera": {"lens": lens, "dist": dist.tolist(), "K_native": ts.K.tolist(), "size": [W, H]},
         "seconds": {"total": round(time.time() - t_start, 1), "fit": round(t_fit, 1)},
         "versions": {"torch": torch.__version__, "gsplat": getattr(gsplat, "__version__", "?"),

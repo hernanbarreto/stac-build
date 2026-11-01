@@ -269,3 +269,14 @@ def test_the_routes_list_the_model_serve_its_files_and_resolve_the_instances_liv
     assert r.headers["X-Gaussians-Stale"] == "1" and "41 points now" in r.headers["X-Gaussians-Reason"]
     assert np.frombuffer(r.content, dtype="<u4").tolist() == [0] * 12
     assert c.get(f"/api/gaussians/list/{sid}").json()["models"][0]["stale"] is True
+
+
+def test_a_lens_session_runs_the_mcmc_strategy_and_the_report_says_why():
+    """gsplat's default densification needs the gradient of the projected means; the unscented-transform
+    projection of a distorted lens has none (pccr 2026-10-31: retain_grad on a tensor without grad) — so a lens
+    session runs MCMC and says so; a pinhole session runs what was configured; mcmc is never changed."""
+    from gaussians.train import strategy_choice
+    used, why = strategy_choice("default", lens=True)
+    assert used == "mcmc" and "lens" in why and "gradient" in why
+    assert strategy_choice("default", lens=False) == ("default", "as configured")
+    assert strategy_choice("mcmc", lens=True)[0] == "mcmc" and strategy_choice("mcmc", lens=False)[0] == "mcmc"
