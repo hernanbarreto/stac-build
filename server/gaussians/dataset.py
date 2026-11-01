@@ -235,17 +235,91 @@ def build_training_set(session_dir: Path, cfg: GaussiansConfig, *, log: Callable
     return ts, loader
 
 
-def write_trainset(ts: TrainingSet, out_dir: Path, depth_loader: Optional[Callable], *, log: Callable = print) -> Path:
+def undistort_maps(K: np.ndarray, dist: np.ndarray, width: int, height: int):
+    """OpenCV's undistortion of the session camera (what COLMAP's image_undistorter does): the pinhole K of the
+    largest valid crop (alpha 0), the crop (x, y, w, h) and the per-pixel source maps of the UNCROPPED
+    undistorted image. Returns (K_pinhole_cropped, roi, map_x, map_y)."""
+    import cv2
+    K64 = np.asarray(K, np.float64); d = np.asarray(dist, np.float64).reshape(-1)
+    newK, roi = cv2.getOptimalNewCameraMatrix(K64, d, (int(width), int(height)), 0.0, (int(width), int(height)))
+    mx, my = cv2.initUndistortRectifyMap(K64, d, None, newK, (int(width), int(height)), cv2.CV_32FC1)
+    x, y, w, h = [int(v) for v in roi]
+    Kc = newK.copy(); Kc[0, 2] -= x; Kc[1, 2] -= y
+    return Kc, (x, y, w, h), mx, my
+
+
+def undistort_image(img: np.ndarray, mx: np.ndarray, my: np.ndarray, roi, nearest: bool = False) -> np.ndarray:
+    import cv2
+    x, y, w, h = roi
+    out = cv2.remap(img, mx, my, cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    return out[y:y + h, x:x + w]
+
+
+def write_trainset(ts: TrainingSet, out_dir: Path, depth_loader: Optional[Callable], *, undistort: bool = False,
+                   log: Callable = print) -> Path:
     """``trainset.npz`` + ``trainset.json`` + ``depth/frame_<f>.npz`` (training frames only, float32
     depth and a validity mask on the record grid)."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    n_depth = 0
+    n_k = 0
+    lens = bool(np.any(np.abs(np.asarray(ts.dist)) > 0))
+    undistorted = False
+    if undistort and lens:
+        # the lens is removed ONCE, with OpenCV (as COLMAP's image_undistorter does): the splats then train on a
+        # pinhole camera with gsplat's standard path (gradient densification), not the unscented-transform one
+        import cv2
+        from dataclasses import replace
+        from gaussians.train import depth_pixel_map, grid_pixel_map, resample_depth
+        Kc, roi, mx, my = undistort_maps(ts.K, ts.dist, ts.width, ts.height)
+        x0, y0, w, h = roi
+        fdir = out_dir / "frames"; fdir.mkdir(exist_ok=True)
+        new_paths: List[str] = []
+        for i, (f, pth) in enumerate(zip(ts.frames.tolist(), ts.image_paths)):
+            img = cv2.imread(str(pth), cv2.IMREAD_COLOR)
+            if img is None or img.shape[:2] != (ts.height, ts.width):
+                raise DatasetError(f"{pth}: cannot read it at the native {ts.width}x{ts.height}")
+            dst = fdir / f"{int(f)}.png"
+            cv2.imwrite(str(dst), undistort_image(img, mx, my, roi))
+            new_paths.append(str(dst))
+        if depth_loader is not None and ts.depth_grid is not None:
+            ddir = out_dir / DEPTH_DIRNAME; ddir.mkdir(exist_ok=True)
+            npz_dir = _depth_npz_dir(Path(ts.meta.get("session_dir", out_dir)) / "output") if ts.meta.get("session_dir") else None
+            for i, f in enumerate(ts.frames.tolist()):
+                if ts.holdout[i]:
+                    continue
+                got = depth_loader(int(f))
+                if got is None:
+                    continue
+                depth, valid = got
+                Kd = depth_intrinsics(npz_dir, int(f))
+                if Kd is not None:
+                    ud, vd = depth_pixel_map(ts.K, Kd, ts.width, ts.height)
+                elif np.asarray(depth).shape == (ts.height, ts.width):
+                    ud, vd = np.arange(ts.width), np.arange(ts.height)
+                else:
+                    ud, vd = grid_pixel_map(ts.grid_map, ts.width, ts.height)
+                d_nat, ok_nat = resample_depth(np.asarray(depth, np.float32), np.asarray(valid, bool), ud, vd)
+                d_u = undistort_image(d_nat.astype(np.float32), mx, my, roi, nearest=True)
+                ok_u = undistort_image(ok_nat.astype(np.uint8), mx, my, roi, nearest=True).astype(bool) & (d_u > 0)
+                np.savez(ddir / f"frame_{int(f)}.npz", depth=d_u, valid=ok_u)
+                n_depth += 1
+        rec = {"applied": True, "method": "cv2.getOptimalNewCameraMatrix(alpha 0) + initUndistortRectifyMap",
+               "K_native_distorted": np.asarray(ts.K).tolist(), "dist": np.asarray(ts.dist).tolist(),
+               "K_pinhole": Kc.tolist(), "crop_xywh": [x0, y0, w, h], "size": [w, h]}
+        ts = replace(ts, image_paths=new_paths, width=int(w), height=int(h), K=Kc, dist=np.zeros(4, np.float64),
+                     depth_grid=((int(h), int(w)) if ts.depth_grid is not None else None),
+                     meta=dict(ts.meta, undistort=rec))
+        undistorted = True
+        log(f"[gaussians] lens removed once (OpenCV): pinhole fx {Kc[0, 0]:.1f} fy {Kc[1, 1]:.1f} on {w}x{h} "
+            f"(crop {x0},{y0} of {rec['K_native_distorted'][0][0]:.1f}-px native), {n_depth} depth map(s) remapped")
+    elif undistort:
+        from dataclasses import replace
+        ts = replace(ts, meta=dict(ts.meta, undistort={"applied": False, "reason": "the session camera has no distortion"}))
     np.savez(out_dir / TRAINSET_NAME, frames=ts.frames, holdout=ts.holdout, K=ts.K, dist=ts.dist, c2w=ts.c2w,
              seeds_xyz=ts.seeds_xyz, seeds_rgb=ts.seeds_rgb, seeds_cloud_index=ts.seeds_cloud_index,
              seeds_instance=ts.seeds_instance, seeds_scale_log=ts.seeds_scale_log, seeds_confidence=ts.seeds_confidence)
-    n_depth = 0
-    n_k = 0
-    if depth_loader is not None and ts.depth_grid is not None:
+    if not undistorted and depth_loader is not None and ts.depth_grid is not None:
         ddir = out_dir / DEPTH_DIRNAME
         ddir.mkdir(exist_ok=True)
         npz_dir = _depth_npz_dir(Path(ts.meta.get("session_dir", out_dir)) / "output") if ts.meta.get("session_dir") else None

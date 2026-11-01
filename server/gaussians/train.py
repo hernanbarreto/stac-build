@@ -230,6 +230,19 @@ def depth_disparity_loss(d_pred, d_meas, ok, scene_extent: float, depth_lambda: 
 _CELL_OFF = 1 << 20   # cell indices live in [-2^20, 2^20): ±31 km at a 3 cm tolerance
 
 
+def clamp_scales_(scales_log_param, tol: float) -> int:
+    """In place: no gaussian wider than tol (σ per axis) — the extent stays inside the confinement band like
+    its centre. Returns how many axes were clamped."""
+    import math
+    import torch
+    with torch.no_grad():
+        over = scales_log_param.data > math.log(float(tol))
+        n = int(over.sum())
+        if n:
+            scales_log_param.data.clamp_(max=math.log(float(tol)))
+    return n
+
+
 def cloud_cell_keys(xyz, tol: float):
     """The sorted unique keys of the cells (size tol) the cloud occupies — one int64 per cell, exact (no hash)."""
     import torch
@@ -321,9 +334,11 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
         with torch.no_grad():
             keep = confinement_keep(params["means"].detach(), cloud_keys, tol)
         n_rm = int((~keep).sum())
+        n_cl = clamp_scales_(params["scales"], tol)
         if n_rm:
             _remove_gaussians(params=params, optimizers=optimizers, state=(state if strategy_used == "default" else {}), mask=~keep)
-            confine_log.append({"step": int(at_step), "removed": n_rm, "left": int(len(params["means"]))})
+        if n_rm or n_cl:
+            confine_log.append({"step": int(at_step), "removed": n_rm, "clamped_axes": n_cl, "left": int(len(params["means"]))})
         return n_rm
     r0, r1 = int(round(float(tr["refine_start_frac"]) * iters)), int(round(float(tr["refine_stop_frac"]) * iters))
     # cameras
@@ -448,6 +463,17 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
     if "splat" in ex["formats"]:
         files["splat"] = write_splat(out_dir / SPLAT_NAME, means_np, scales_np, quats_np, opac_np, sh0_np).name
     files["seed_index"] = write_instances(out_dir / SEED_INDEX_NAME, seed_index).name
+    with torch.no_grad():
+        s_lin = torch.exp(params["scales"].detach()).cpu().numpy().astype(np.float64)
+        op_lin = torch.sigmoid(params["opacities"].detach()).cpu().numpy().astype(np.float64)
+    s_hi = s_lin.max(1); aniso = s_hi / np.maximum(s_lin.min(1), 1e-9)
+    shape = {"sigma_max_m": {k: float(v) for k, v in zip(("p50", "p90", "p99", "max"), [*np.percentile(s_hi, [50, 90, 99]), s_hi.max()])},
+             "anisotropy": {k: float(v) for k, v in zip(("p50", "p90", "p99"), np.percentile(aniso, [50, 90, 99]))},
+             "opacity": {k: float(v) for k, v in zip(("p10", "p50", "p90"), np.percentile(op_lin, [10, 50, 90]))},
+             "needles_share": float(((s_hi > 0.10) | (aniso > 20)).mean()),
+             "reading": "needles = sigma over 10 cm or anisotropy over 20 (the second pccr run: 93 %)"}
+    log(f"{LOG} shape: sigma max p50 {shape['sigma_max_m']['p50'] * 100:.2f} cm, anisotropy p50 {shape['anisotropy']['p50']:.1f}, "
+        f"opacity p50 {shape['opacity']['p50']:.2f}, needles {100 * shape['needles_share']:.1f} %")
     import gsplat
     report = {
         "version": 1, "stage": "gaussians", "provenance": "tool_measured",
@@ -461,8 +487,11 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
         "recipe": "gsplat 1.5.3 examples/simple_trainer.py: default / mcmc presets, depth = disparity L1 x scene extent, "
                   "means lr ExponentialLR; plus the confinement prune to the published cloud",
         "init": {"opacity": init_opacity, "scale_factor": init_scale},
-        "confine": {"tolerance_m": tol, "kept_within_m_per_axis": 2 * tol, "every": confine_every, "n_cloud_points": int(len(cloud_xyz)),
-                    "removed_total": int(n_confined_total), "removed_at_end": int(n_confined_final), "prunes": confine_log},
+        "confine": {"tolerance_m": tol, "kept_within_m_per_axis": 2 * tol, "sigma_max_m": tol, "every": confine_every,
+                    "n_cloud_points": int(len(cloud_xyz)), "removed_total": int(n_confined_total),
+                    "removed_at_end": int(n_confined_final), "prunes": confine_log},
+        "shape": shape,
+        "undistort": ts.meta.get("undistort", {"applied": False}),
         "scene_extent_m": extent, "sh_degree": int(tr["sh_degree"]),
         "camera": {"lens": lens, "dist": dist.tolist(), "K_native": ts.K.tolist(), "size": [W, H]},
         "seconds": {"total": round(time.time() - t_start, 1), "fit": round(t_fit, 1)},

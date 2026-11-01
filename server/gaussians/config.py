@@ -122,6 +122,7 @@ class TrainConfig:
     depth_lambda: float         # gsplat's depth loss: L1 of the disparity (1/z) against the measured depth × the
                                 #   scene extent × this, where the session measured a depth (0 = off)
     means_lr_decay: float       # the means' lr decays exponentially to this fraction by the last iteration
+    undistort: bool             # remove the lens once with OpenCV → pinhole camera, gsplat's standard path
     ssim_weight: float          # the photometric loss = (1 - w)·L1 + w·(1 - SSIM)
     exposure: bool              # a per-keyframe affine colour correction, learned
     exposure_reg: float         # its pull toward identity
@@ -189,6 +190,7 @@ def load_gaussians_config(raw: Mapping[str, Any]) -> GaussiansConfig:
                           refine_stop_frac=_num(tr, "refine_stop_frac", "train.", lo=0.0, hi=1.0),
                           depth_lambda=_num(tr, "depth_lambda", "train.", lo=0.0),
                           means_lr_decay=_num(tr, "means_lr_decay", "train.", lo=0.0, lo_excl=True, hi=1.0),
+                          undistort=_bool(tr, "undistort", "train."),
                           ssim_weight=_num(tr, "ssim_weight", "train.", lo=0.0, hi=1.0),
                           exposure=_bool(tr, "exposure", "train."),
                           exposure_reg=_num(tr, "exposure_reg", "train.", lo=0.0),

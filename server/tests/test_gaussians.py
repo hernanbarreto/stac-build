@@ -310,3 +310,32 @@ def test_the_recipe_is_gsplats_reference_and_the_confinement_removes_every_gauss
     keep = GT.confinement_keep(means, keys, tol)
     assert keep.tolist() == [True, True, False, False, False]     # 2 cm above stays; 10 cm above, 1 m away and 6 cm below go
     assert torch.equal(keep, GT.confinement_keep(means, keys, tol))
+
+
+def test_the_undistortion_is_opencvs_and_the_scale_bound_holds():
+    """The undistortion maps agree with OpenCV's own projection of the pinhole rays through the lens (the recipe
+    of COLMAP's image_undistorter), a constant depth stays constant where it lands, and no gaussian keeps a
+    σ above the confinement tolerance after the clamp."""
+    import cv2
+    import torch
+    from gaussians import dataset as DS
+    from gaussians import train as GT
+    K = np.array([[400.0, 0, 232.0], [0, 400.0, 416.0], [0, 0, 1]]); dist = np.array([-0.08, 0.01, 0.001, -0.0005])
+    W, H = 464, 832
+    Kc, roi, mx, my = DS.undistort_maps(K, dist, W, H)
+    x0, y0, w, h = roi
+    assert 0 < w <= W and 0 < h <= H and mx.shape == (H, W)
+    rng = np.random.default_rng(0)
+    uu = rng.uniform(0, w - 1, 200); vv = rng.uniform(0, h - 1, 200)
+    rays = np.stack([(uu - Kc[0, 2]) / Kc[0, 0], (vv - Kc[1, 2]) / Kc[1, 1], np.ones(200)], 1)
+    proj, _ = cv2.projectPoints(rays.reshape(-1, 1, 3), np.zeros(3), np.zeros(3), K, dist)
+    proj = proj.reshape(-1, 2)
+    src_u = cv2.remap(mx, (uu + x0).astype(np.float32), (vv + y0).astype(np.float32), cv2.INTER_LINEAR).reshape(-1)
+    src_v = cv2.remap(my, (uu + x0).astype(np.float32), (vv + y0).astype(np.float32), cv2.INTER_LINEAR).reshape(-1)
+    assert np.abs(src_u - proj[:, 0]).max() < 0.05 and np.abs(src_v - proj[:, 1]).max() < 0.05
+    depth = np.full((H, W), 2.5, np.float32)
+    d_u = DS.undistort_image(depth, mx, my, roi, nearest=True)
+    assert d_u.shape == (h, w) and np.all((d_u == 2.5) | (d_u == 0.0)) and (d_u == 2.5).mean() > 0.95
+    scales = torch.nn.Parameter(torch.log(torch.tensor([[0.01, 0.2, 0.5], [0.02, 0.02, 0.02]])))
+    n = GT.clamp_scales_(scales, 0.03)
+    assert n == 2 and float(torch.exp(scales).max()) <= 0.03 + 1e-9 and abs(float(torch.exp(scales[1, 0])) - 0.02) < 1e-6

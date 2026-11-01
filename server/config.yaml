@@ -139,6 +139,11 @@ gaussians:                           # THE REALISM LAYER (USER 2026-10-31: "el r
                                      #   (The first pccr run used a 0.2 relative-L1 of my own: 20× the reference.)
     means_lr_decay: 0.01             # gsplat simple_trainer: the means' lr decays exponentially to 1 % by the last
                                      #   iteration (ExponentialLR, gamma = decay^(1/iterations))
+    undistort: true                  # the phone lens (OPENCV k1 k2 p1 p2) is removed ONCE from the frames and the
+                                     #   depth maps with OpenCV (COLMAP's image_undistorter recipe, alpha 0 crop) →
+                                     #   a pinhole camera → gsplat's STANDARD path (gradient densification, opacity
+                                     #   resets, pruning). The unscented-transform lens path forced MCMC, which
+                                     #   fought the confinement prune (pccr 2026-10-31: 93 % needles, opacity 0.01)
     ssim_weight: 0.2                 # photometric loss = 0.8·L1 + 0.2·(1 − SSIM), the reference recipe
     exposure: false                  # a learned 3×4 affine colour correction per keyframe (the phone's auto exposure);
                                      #   OFF: the reference recipe has none (pccr runs it as a declared experiment)

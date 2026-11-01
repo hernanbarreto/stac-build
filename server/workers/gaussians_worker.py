@@ -63,7 +63,7 @@ def _gaussians_work(pipe: WorkerPipe, session_dir: str, config: dict):
     t0 = time.time()
     pipe.send_progress(1, "building the training set from the certified session", stage=STAGE)
     ts, loader = build_training_set(session_path, cfg, log=lambda m: pipe.send_log(str(m)))
-    write_trainset(ts, trainset_dir, loader, log=lambda m: pipe.send_log(str(m)))
+    write_trainset(ts, trainset_dir, loader, undistort=cfg.train.undistort, log=lambda m: pipe.send_log(str(m)))
     tcfg_path = trainset_dir / "train_config.json"
     d = cfg.to_dict()
     tcfg_path.write_text(json.dumps({k: d[k] for k in ("init", "train", "export", "label")}, indent=1))
