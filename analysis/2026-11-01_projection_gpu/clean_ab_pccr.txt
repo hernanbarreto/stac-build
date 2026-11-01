@@ -1,0 +1,9 @@
+[Config] Loaded configuration from /workspace/stac-build/.claude/worktrees/agent-a7ba1e660a9936451/server/config.yaml
+cable#424: 1,610 pts | numpy 0.02 s | cuda 0.36 s | faces 1/1 same True | ids same True | voxels 68/68 same True (differing rows 0)
+equipment#747: 11,690 pts | numpy 0.11 s | cuda 0.03 s | faces 2/2 same True | ids same True | voxels 97/97 same True (differing rows 0)
+plastic_sheeting#769: 101,676 pts | numpy 0.87 s | cuda 0.07 s | faces 1/1 same True | ids same True | voxels 1251/1251 same True (differing rows 0)
+wall#87: 392,944 pts | numpy 3.77 s | cuda 0.10 s | faces 2/2 same True | ids same True | voxels 3173/3173 same False (differing rows 0)
+opening#317: 465,021 pts | numpy 4.36 s | cuda 0.11 s | faces 1/1 same True | ids same True | voxels 3245/3245 same True (differing rows 0)
+drywall#982: 970,326 pts | numpy 14.22 s | cuda 0.18 s | faces 1/1 same True | ids same True | voxels 7058/7058 same True (differing rows 0)
+floor#10: 3,847,551 pts | numpy 174.93 s | cuda 0.42 s | faces 1/1 same True | ids same True | voxels 22645/22645 same True (differing rows 0)
+exit 0
