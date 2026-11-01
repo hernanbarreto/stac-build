@@ -714,6 +714,7 @@ def _landmark_rows(session_dir: Path, pcfg, frames: List[int], w2c: np.ndarray, 
     from precision.tracks import load_tracks_v2
     from precision import refine as RF
     solver = undistort_solver(pcfg.camera)
+    RF.use_device(pcfg.refine.triangulation_device)      # F6's landmark DLTs on the declared device
     tr = load_tracks_v2(session_dir)
     split = RF.split_of_observations(tr["track_query_id"], tr["track_split"], tr["obs_track"])
     out, dropped = {}, {}

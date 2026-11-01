@@ -2331,6 +2331,11 @@ reconstruction:
         lambda_init: 1.0e-4
         lm_diag_min: 1.0e-6
         lm_diag_max: 1.0e+32
+      triangulation_device: cuda        # 2026-11-01 (USER "todo debe correr en GPU"): numpy (the path of record) |
+                                        #   cpu | cuda — the batched multi-view DLTs of every triangulation of F5
+                                        #   (the rungs' landmarks, the held-outs, the leave-one-view-out) and of
+                                        #   F6's landmark rows (precision/refine._dlt_stack_t); pccr: 14.9 s per
+                                        #   triangulation of 2.6 M tracks on numpy. cuda with no card FAILS here.
     # F6 — prior-guided plane sweep at native resolution (precision/depth_sweep.py)
     depth:
       n_views: 8                        # BOUND: photometric / consistency views per keyframe

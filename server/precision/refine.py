@@ -198,6 +198,30 @@ def triangulate_tracks_per_track(groups: Dict[int, List], w2c: np.ndarray, param
 # track is (2k)^2 doubles), not a decision — the result does not depend on it
 _TRI_BATCH_OBS = 400_000
 
+# where the batched DLTs run (2026-11-01): numpy = the path of record (LAPACK, bit for bit the per-track
+# reference) | cpu | cuda = torch's batched SVD (_dlt_stack_t), the same landmarks to 1e-9
+TRIANGULATION_DEVICES = ("numpy", "cpu", "cuda")
+_DEVICE_OVERRIDE: Optional[str] = None
+
+
+def use_device(dev: Optional[str]) -> Optional[str]:
+    """The device of every triangulation after this call; None = numpy, the path of record (the step CLIs
+    set it from ``refine.triangulation_device``)."""
+    global _DEVICE_OVERRIDE
+    if dev is not None and str(dev) not in TRIANGULATION_DEVICES:
+        raise RefineError(f"refine.triangulation_device must be one of {list(TRIANGULATION_DEVICES)}, got {dev!r}")
+    if dev == "cuda":
+        import torch
+        if not torch.cuda.is_available():
+            raise RefineError("refine.triangulation_device is 'cuda' and torch sees no card — the triangulation "
+                              "does not fall back to the CPU by itself; declare cpu or numpy")
+    _DEVICE_OVERRIDE = None if dev is None else str(dev)
+    return _DEVICE_OVERRIDE
+
+
+def device_of() -> str:
+    return _DEVICE_OVERRIDE or "numpy"
+
 
 def triangulate_tracks(groups: Dict[int, List], w2c: np.ndarray, params: Sequence[float],
                        solver: dict, min_tri_deg: float,
@@ -280,35 +304,15 @@ def _dlt_tracks(tracks, counts, starts, ii, xn, ok_track, w2c, min_tri_deg, drop
     w2c = np.asarray(w2c, np.float64)
     keep = np.zeros(len(tracks), bool)
     Xall = np.full((len(tracks), 3), np.nan)
-    deg_eps = np.finfo(float).eps
     for k in np.unique(counts):
         sel_all = np.nonzero((counts == k) & ok_track)[0]
         step = max(1, _TRI_BATCH_OBS // int(k))
         for b0 in range(0, len(sel_all), step):
             sel = sel_all[b0:b0 + step]
             idx = starts[sel][:, None] + np.arange(int(k))[None, :]          # (n, k) observations
-            x = xn[idx]                                                    # (n, k, 2)
-            T = w2c[ii[idx]]                                               # (n, k, 4, 4)
-            P = T[:, :, :3, :4]
-            rx = x[:, :, 0:1] * P[:, :, 2, :] - P[:, :, 0, :]              # (n, k, 4)
-            ry = x[:, :, 1:2] * P[:, :, 2, :] - P[:, :, 1, :]
-            A = np.stack([rx, ry], axis=2).reshape(len(sel), 2 * int(k), 4)  # x-row, y-row per view
-            _u, _s, Vt = np.linalg.svd(A)
-            Xh = Vt[:, -1, :]
-            ok = ~(np.abs(Xh[:, 3]) < deg_eps)
-            X = np.where(ok[:, None], Xh[:, :3] / np.where(ok, Xh[:, 3], 1.0)[:, None], np.nan)
-            R = T[:, :, :3, :3]
-            t = T[:, :, :3, 3]
-            # the per-track tests, stacked: depth in every camera, the camera centres, the widest
-            # pair of rays (X itself is the SVD's, bit for bit; these only gate it)
-            z = (R[:, :, 2, 0] * X[:, None, 0] + R[:, :, 2, 1] * X[:, None, 1]
-                 + R[:, :, 2, 2] * X[:, None, 2] + t[:, :, 2])
-            C = -np.einsum("nkji,nkj->nki", R, t)
-            rays = X[:, None, :] - C
-            rays /= np.linalg.norm(rays, axis=2, keepdims=True)
-            cosm = np.clip(np.einsum("nki,nli->nkl", rays, rays), -1.0, 1.0)
-            ang = np.degrees(np.arccos(cosm.reshape(len(sel), -1).min(axis=1)))
-            good = ok & (z > 0).all(axis=1) & (ang >= min_tri_deg) & np.isfinite(X).all(axis=1)
+            # the stacked DLT with the per-track gates (depth in every camera, the widest pair of rays:
+            # X itself is the SVD's, bit for bit on numpy; these only gate it) — on the declared device
+            X, good = _dlt_stack(xn[idx], w2c[ii[idx]], float(min_tri_deg))
             keep[sel[good]] = True
             Xall[sel[good]] = X[good]
     return {tracks[q]: Xall[q] for q in np.nonzero(keep)[0]}
@@ -926,6 +930,9 @@ def _dlt_stack(x: np.ndarray, T: np.ndarray, min_tri_deg: float) -> Tuple[np.nda
     coordinates, ``T`` (n, k, 4, 4) world-to-camera. Returns (X (n, 3), good (n,)) with the per-track
     gates of :func:`triangulate` (a finite homogeneous point, in front of every camera, rays spanning
     ≥ ``min_tri_deg``) — the same arithmetic as :func:`_dlt_tracks`, one LAPACK SVD per matrix."""
+    dev = device_of()
+    if dev != "numpy":
+        return _dlt_stack_t(x, T, min_tri_deg, dev)
     n, k = x.shape[0], x.shape[1]
     P = T[:, :, :3, :4]
     rx = x[:, :, 0:1] * P[:, :, 2, :] - P[:, :, 0, :]
@@ -945,6 +952,39 @@ def _dlt_stack(x: np.ndarray, T: np.ndarray, min_tri_deg: float) -> Tuple[np.nda
     ang = np.degrees(np.arccos(cosm.reshape(n, -1).min(axis=1)))
     good = ok & (z > 0).all(axis=1) & (ang >= min_tri_deg) & np.isfinite(X).all(axis=1)
     return X, good
+
+
+def _dlt_stack_t(x: np.ndarray, T: np.ndarray, min_tri_deg: float, device: str) -> Tuple[np.ndarray, np.ndarray]:
+    """:func:`_dlt_stack` on torch (float64, ``device``): the same design rows, torch's batched SVD (the
+    reduced right factor holds the four right singular vectors; its last row is the DLT's solution), the
+    same gates — the landmarks agree with numpy's to 1e-9 (tests/test_triangulate_torch.py)."""
+    import torch
+    xt = torch.as_tensor(np.ascontiguousarray(x, dtype=np.float64), device=device)
+    Tt = torch.as_tensor(np.ascontiguousarray(T, dtype=np.float64), device=device)
+    n, k = int(xt.shape[0]), int(xt.shape[1])
+    P = Tt[:, :, :3, :4]
+    rx = xt[:, :, 0:1] * P[:, :, 2, :] - P[:, :, 0, :]
+    ry = xt[:, :, 1:2] * P[:, :, 2, :] - P[:, :, 1, :]
+    A = torch.stack([rx, ry], 2).reshape(n, 2 * k, 4)
+    # the right singular vectors of A are those of its QR factor R (A = Q·R, Q orthonormal): a batched QR
+    # (cuBLAS, every matrix at once) then the SVD of the (4 × 4) R — on CUDA torch's batched SVD is fast
+    # only up to 32 rows; a 24-view track has 48 and fell to one cusolver call per matrix
+    R4 = torch.linalg.qr(A, mode="r").R                                   # (n, 4, 4)
+    Vh = torch.linalg.svd(R4, full_matrices=False).Vh                     # (n, 4, 4)
+    Xh = Vh[:, -1, :]
+    ok = ~(Xh[:, 3].abs() < np.finfo(float).eps)
+    denom = torch.where(ok, Xh[:, 3], torch.ones_like(Xh[:, 3]))
+    X = torch.where(ok[:, None], Xh[:, :3] / denom[:, None], torch.full_like(Xh[:, :3], float("nan")))
+    R = Tt[:, :, :3, :3]
+    t = Tt[:, :, :3, 3]
+    z = (R[:, :, 2, 0] * X[:, None, 0] + R[:, :, 2, 1] * X[:, None, 1] + R[:, :, 2, 2] * X[:, None, 2] + t[:, :, 2])
+    C = -torch.einsum("nkji,nkj->nki", R, t)
+    rays = X[:, None, :] - C
+    rays = rays / torch.linalg.norm(rays, dim=2, keepdim=True)
+    cosm = torch.clamp(torch.einsum("nki,nli->nkl", rays, rays), -1.0, 1.0)
+    ang = torch.rad2deg(torch.arccos(cosm.reshape(n, -1).min(1).values))
+    good = ok & (z > 0).all(1) & (ang >= float(min_tri_deg)) & torch.isfinite(X).all(1)
+    return X.cpu().numpy(), good.cpu().numpy()
 
 
 def heldout_leave_one_view_out(held_g: Dict[int, List], best: RungResult, solver: dict,
@@ -1098,6 +1138,7 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
         raise RefineError(f"camera_poses.txt ({len(poses)}) and camera_frames.txt ({len(kf)}) "
                           f"disagree")
     w2c0 = np.linalg.inv(poses)
+    use_device(cfg.triangulation_device)                 # every DLT of this stage on the declared device
     _t_load = time.perf_counter()
     tr = load_tracks_v2(session_dir)
     _phase = {"load_tracks_s": round(time.perf_counter() - _t_load, 1)}

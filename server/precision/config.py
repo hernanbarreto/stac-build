@@ -294,6 +294,9 @@ class RefineConfig:
     solver: str                 # 2026-11-01: ceres (pycolmap, one CPU thread) | torch (precision/ba_torch.py: the same
                                 #   problem on the GPU, deterministic by sorted reductions)
     torch_ba: TorchBAConfig     # the torch solver's stopping rules and damping (used when solver is torch)
+    triangulation_device: str   # 2026-11-01: numpy (the path of record, LAPACK per track) | cpu | cuda — where the
+                                #   batched multi-view DLTs of F5 / F6 run (refine._dlt_stack_t); the same
+                                #   landmarks to 1e-9 (tests/test_triangulate_torch.py)
 
 
 # ── F6: native-resolution depth ─────────────────────────────────────────
@@ -742,6 +745,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         # PnP needs four points (P3P + one to choose)
         min_witness_corr=_num(rf, "min_witness_corr", "refine", lo=4, integer=True),
         solver=_enum(rf, "solver", "refine", SOLVERS),
+        triangulation_device=_enum(rf, "triangulation_device", "refine", ("numpy", "cpu", "cuda")),
         torch_ba=TorchBAConfig(function_tolerance=_num(tb, "function_tolerance", "refine.torch_ba", lo=0.0, lo_excl=True),
                                parameter_tolerance=_num(tb, "parameter_tolerance", "refine.torch_ba", lo=0.0, lo_excl=True),
                                gradient_tolerance=_num(tb, "gradient_tolerance", "refine.torch_ba", lo=0.0, lo_excl=True),
