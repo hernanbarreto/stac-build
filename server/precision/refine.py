@@ -222,6 +222,56 @@ def triangulate_tracks(groups: Dict[int, List], w2c: np.ndarray, params: Sequenc
     uv = np.array([p for t in tracks for _, p in groups[t]], np.float64).reshape(-1, 2)
     xn, ok_track = undistort_normalized_tracks(uv, K_of(params), np.asarray(params[4:8], np.float64),
                                                starts, counts, **solver)
+    return _dlt_tracks(tracks, counts, starts, ii, xn, ok_track, w2c, min_tri_deg, dropped)
+
+
+def _track_arrays(groups: Dict[int, List]):
+    """The observations of every track with ≥ 2 views, contiguous per track: (tracks, counts,
+    starts, keyframe index per observation, uv per observation)."""
+    tracks = [t for t, obs in groups.items() if len(obs) >= 2]
+    if not tracks:
+        return tracks, np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros((0, 2))
+    counts = np.fromiter((len(groups[t]) for t in tracks), np.int64, len(tracks))
+    starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
+    ii = np.fromiter((i for t in tracks for i, _ in groups[t]), np.int64, int(counts.sum()))
+    uv = np.array([p for t in tracks for _, p in groups[t]], np.float64).reshape(-1, 2)
+    return tracks, counts, starts, ii, uv
+
+
+def triangulate_tracks_blocks(groups: Dict[int, List], w2c: np.ndarray, params_by_block: Sequence[Sequence[float]],
+                              block_of: np.ndarray, solver: dict, min_tri_deg: float,
+                              dropped: Optional[dict] = None) -> Dict[int, np.ndarray]:
+    """:func:`triangulate_tracks` with ONE CAMERA PER BLOCK (R3): every observation is undistorted
+    under the camera of its keyframe's block — per block one solver call over that block's
+    observations, each track's part judged with the track rule of ``undistort_normalized_tracks``;
+    a track is dropped when any of its parts fails (what the per-track reference did) — then the
+    same batched DLT. (The per-track loop this replaces took 270 s for R3's held-out on pccr.)"""
+    from precision.camera import undistort_normalized_tracks
+    tracks, counts, starts, ii, uv = _track_arrays(groups)
+    if not tracks:
+        return {}
+    block_of = np.asarray(block_of, int)
+    tid = np.repeat(np.arange(len(tracks)), counts)                     # track index per observation
+    blk = block_of[ii]
+    xn = np.full((len(uv), 2), np.nan)
+    ok_track = np.ones(len(tracks), bool)
+    for b in np.unique(blk):
+        m = np.nonzero(blk == b)[0]                                      # track-ordered (observations are)
+        tb = tid[m]
+        first = np.r_[True, tb[1:] != tb[:-1]]
+        starts_b = np.nonzero(first)[0]
+        counts_b = np.diff(np.r_[starts_b, len(m)])
+        pb = params_by_block[int(b)]
+        xn_b, ok_b = undistort_normalized_tracks(uv[m], K_of(pb), np.asarray(pb[4:8], np.float64),
+                                                 starts_b, counts_b, **solver)
+        xn[m] = xn_b
+        ok_track[tb[starts_b][~ok_b]] = False
+    return _dlt_tracks(tracks, counts, starts, ii, xn, ok_track, np.asarray(w2c, np.float64), min_tri_deg, dropped)
+
+
+def _dlt_tracks(tracks, counts, starts, ii, xn, ok_track, w2c, min_tri_deg, dropped):
+    """The batched multi-view DLT of :func:`triangulate_tracks` over normalised coordinates ``xn``
+    (one row per observation), with its per-track gates (in front of every camera, ray span)."""
     if dropped is not None and not ok_track.all():
         bad = np.nonzero(~ok_track)[0]
         dropped["tracks"] = int(dropped.get("tracks", 0)) + len(bad)
@@ -263,17 +313,75 @@ def triangulate_tracks(groups: Dict[int, List], w2c: np.ndarray, params: Sequenc
     return {tracks[q]: Xall[q] for q in np.nonzero(keep)[0]}
 
 
+def project_obs(X: np.ndarray, w2c: np.ndarray, params: np.ndarray) -> np.ndarray:
+    """OPENCV projection of one point per row: ``X`` (M,3) world, ``w2c`` (M,4,4), ``params`` (M,8)
+    or (8,) — cv2.projectPoints' polynomial (k1 k2 p1 p2), vectorised; equal to :func:`project`
+    point by point (tests/test_heldout_batched.py)."""
+    X = np.asarray(X, np.float64).reshape(-1, 3)
+    w2c = np.asarray(w2c, np.float64).reshape(-1, 4, 4)
+    P = np.broadcast_to(np.asarray(params, np.float64).reshape(-1, 8), (len(X), 8))
+    Xc = np.einsum("mij,mj->mi", w2c[:, :3, :3], X) + w2c[:, :3, 3]
+    x = Xc[:, 0] / Xc[:, 2]
+    y = Xc[:, 1] / Xc[:, 2]
+    k1, k2, p1, p2 = P[:, 4], P[:, 5], P[:, 6], P[:, 7]
+    r2 = x * x + y * y
+    r4 = r2 * r2
+    cd = 1.0 + k1 * r2 + k2 * r4
+    a1 = 2.0 * x * y
+    xd = x * cd + p1 * a1 + p2 * (r2 + 2.0 * x * x)
+    yd = y * cd + p1 * (r2 + 2.0 * y * y) + p2 * a1
+    return np.stack([P[:, 0] * xd + P[:, 2], P[:, 1] * yd + P[:, 3]], 1)
+
+
+def _rms_per_track(groups: Dict[int, List], X: Dict[int, np.ndarray], w2c: np.ndarray,
+                   params_of_obs) -> Dict[int, float]:
+    """The RMS reprojection error per track of ``X`` over its own observations, every observation
+    projected in ONE vectorised call (``params_of_obs(ii)`` → (M,8) camera per observation)."""
+    tracks = list(X)
+    if not tracks:
+        return {}
+    counts = np.fromiter((len(groups[t]) for t in tracks), np.int64, len(tracks))
+    ii = np.fromiter((i for t in tracks for i, _ in groups[t]), np.int64, int(counts.sum()))
+    uv = np.array([p for t in tracks for _, p in groups[t]], np.float64).reshape(-1, 2)
+    tid = np.repeat(np.arange(len(tracks)), counts)
+    Xo = np.asarray([X[t] for t in tracks], np.float64)[tid]
+    e2 = np.sum((project_obs(Xo, np.asarray(w2c, np.float64)[ii], params_of_obs(ii)) - uv) ** 2, axis=1)
+    rms = np.sqrt(np.bincount(tid, weights=e2, minlength=len(tracks)) / counts)
+    return {t: float(rms[q]) for q, t in enumerate(tracks)}
+
+
 def heldout_rms(groups: Dict[int, List], w2c: np.ndarray, params: Sequence[float],
                 solver: dict, min_tri_deg: float, dropped: Optional[dict] = None) -> Dict[int, float]:
     """Per held-out track: triangulated with these poses and this camera, the RMS
     of its reprojection over its own observations (native px). Tracks that do not
-    round-trip through the lens are dropped and counted (``dropped``, point 60)."""
+    round-trip through the lens are dropped and counted (``dropped``, point 60).
+    BATCHED (2026-11-01): one projection call for every observation — the per-track loop
+    (:func:`heldout_rms_per_track`, kept as the reference) cost 20-40 s per evaluation on pccr."""
+    X = triangulate_tracks(groups, w2c, params, solver, min_tri_deg, dropped=dropped)
+    pr = np.asarray(params, np.float64)
+    return _rms_per_track(groups, X, w2c, lambda ii: pr)
+
+
+def heldout_rms_per_track(groups: Dict[int, List], w2c: np.ndarray, params: Sequence[float],
+                          solver: dict, min_tri_deg: float, dropped: Optional[dict] = None) -> Dict[int, float]:
+    """The one-track-at-a-time reference of :func:`heldout_rms` (kept for the equivalence test)."""
     X = triangulate_tracks(groups, w2c, params, solver, min_tri_deg, dropped=dropped)
     out = {}
     for t, P in X.items():
         e = [np.linalg.norm(project(P[None], w2c[i], params)[0] - np.asarray(p)) for i, p in groups[t]]
         out[t] = float(np.sqrt(np.mean(np.square(e))))
     return out
+
+
+def heldout_rms_blocks(groups: Dict[int, List], w2c: np.ndarray, params_by_block: Sequence[Sequence[float]],
+                       block_of: np.ndarray, solver: dict, min_tri_deg: float,
+                       dropped: Optional[dict] = None) -> Dict[int, float]:
+    """:func:`heldout_rms` with one camera per block (R3): each observation triangulated and
+    reprojected under its keyframe's block camera, batched."""
+    X = triangulate_tracks_blocks(groups, w2c, params_by_block, block_of, solver, min_tri_deg, dropped=dropped)
+    pb = np.asarray(params_by_block, np.float64)
+    bo = np.asarray(block_of, int)
+    return _rms_per_track(groups, X, w2c, lambda ii: pb[bo[ii]])
 
 
 def prior_sigmas(centres: np.ndarray, sigma_rel: float) -> np.ndarray:
@@ -442,7 +550,16 @@ def _heldout_of(r: RungResult, groups, solver, cfg) -> Tuple[Dict[int, float], d
         return heldout_rms(groups, r.w2c, r.params_by_block[0], solver, cfg.min_tri_deg,
                            dropped=dropped), dropped
     # per-block cameras: a track is judged with the camera of each observation's block —
-    # triangulated in normalised coordinates of its own block
+    # triangulated in normalised coordinates of its own block (batched; the per-track loop
+    # below it is the reference, tests/test_heldout_batched.py)
+    return heldout_rms_blocks(groups, r.w2c, r.params_by_block, r.block_of, solver, cfg.min_tri_deg,
+                              dropped=dropped), dropped
+
+
+def _heldout_of_blocks_per_track(r: RungResult, groups, solver, cfg) -> Tuple[Dict[int, float], dict]:
+    """The one-track-at-a-time reference of the per-block held-out."""
+    from precision.camera import CameraError
+    dropped: dict = {"tracks": 0, "observations": 0}
     out = {}
     for t, obs in groups.items():
         if len(obs) < 2:
