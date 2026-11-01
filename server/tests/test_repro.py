@@ -569,3 +569,24 @@ def test_the_card_probe_runs_once_per_process_and_visible_devices(monkeypatch):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")    # another visible card: probed again
     repro.card_identity()
     assert calls == [0, 0]
+
+
+def test_the_stamp_hashed_on_threads_is_the_loops(tmp_path, monkeypatch):
+    rng = np.random.default_rng(0)
+    files = {}
+    for k in range(23):
+        p = tmp_path / f"f{k:02d}.bin"
+        p.write_bytes(rng.bytes(int(rng.integers(0, 3_000_000))))
+        files[f"in/{k:02d}"] = p
+    (tmp_path / "d" / "e").mkdir(parents=True)
+    (tmp_path / "d" / "a.txt").write_text("a")
+    (tmp_path / "d" / "e" / "b.txt").write_text("b")
+    files["dir"] = tmp_path / "d"
+    want = {k: repro.sha256_path(p) for k, p in sorted(files.items())}
+    for threads in (1, 3, 8):
+        monkeypatch.setattr(repro, "STAMP_THREADS", threads)
+        st = repro.stamp(files, config={"x": 1})
+        assert st["inputs"] == want and list(st["inputs"]) == sorted(want)
+    missing = dict(files, gone=tmp_path / "nope.bin")
+    with pytest.raises(FileNotFoundError):
+        repro.stamp(missing)

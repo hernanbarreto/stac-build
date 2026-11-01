@@ -740,6 +740,23 @@ def _named_inputs(inputs: Union[Mapping[str, PathLike], Iterable[PathLike]],
     return out
 
 
+# threads hashing a stamp's inputs: the file reads and hashlib's update release the GIL, and each
+# digest is its file's alone — the stamp is the one the loop computed (the fork's run stamp hashed
+# 2581 frames, 438 anchors, the weights and the sky model in ONE thread: 26 s on station
+# 2026-11-01 before Omega started, the card idle)
+STAMP_THREADS = 8
+
+
+def _hash_all(fn, paths):
+    """``[fn(p) for p in paths]`` on STAMP_THREADS threads, in order (the first error raised)."""
+    paths = list(paths)
+    if len(paths) <= 1:
+        return [fn(p) for p in paths]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(STAMP_THREADS, len(paths))) as ex:
+        return list(ex.map(fn, paths))
+
+
 def stamp(inputs: Union[Mapping[str, PathLike], Iterable[PathLike]] = (),
           code: Iterable[Any] = (), config: Optional[Mapping[str, Any]] = None, *,
           root: Optional[PathLike] = None) -> Dict[str, Any]:
@@ -751,7 +768,8 @@ def stamp(inputs: Union[Mapping[str, PathLike], Iterable[PathLike]] = (),
     Returns {'stamp_version', 'inputs', 'code', 'config', 'sha256'}: JSON-able, deterministic.
     A missing input RAISES — a stamp of something absent says nothing."""
     ins = _named_inputs(inputs, root)
-    st_in = {k: sha256_path(p) for k, p in sorted(ins.items())}
+    items = sorted(ins.items())
+    st_in = dict(zip([k for k, _p in items], _hash_all(sha256_path, [p for _k, p in items])))
     st_code: Dict[str, str] = {}
     for c in code:
         k, p = _code_file(c)
