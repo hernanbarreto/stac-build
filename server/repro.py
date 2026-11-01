@@ -37,6 +37,7 @@ import platform
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
@@ -586,6 +587,36 @@ def sha256_file(path: PathLike) -> str:
         for blk in iter(lambda: fh.read(_HASH_BLOCK), b""):
             h.update(blk)
     return h.hexdigest()
+
+
+def sha256_file_memo(path: PathLike, log=None) -> str:
+    """The sha256 of an IMMUTABLE file read at every stage (model weights), computed once: the digest is kept
+    beside the resolved file (``<file>.stac_sha256.json``) with the file's identity — device, inode, size,
+    mtime_ns — and reused while that identity holds (the construction precision.pointdit_runner.verify_checkpoint
+    has used since 2026-10-04). 2026-11-01: DA3's 6.8 GB of weights were hashed again by every stage process that
+    loads DA3 (7 s of CPU each, the card idle). A file rewritten in place changes its mtime or inode and is hashed
+    again; an unwritable sidecar only means the next call hashes too."""
+    p = Path(path).resolve()
+    st = p.stat()
+    ident = [int(st.st_dev), int(st.st_ino), int(st.st_size), int(st.st_mtime_ns)]
+    side = p.with_name(p.name + ".stac_sha256.json")
+    try:
+        rec = json.loads(side.read_text())
+        if rec.get("identity") == ident and isinstance(rec.get("sha256"), str) and len(rec["sha256"]) == 64:
+            return rec["sha256"]
+    except (OSError, ValueError):
+        pass
+    t0 = time.time()
+    digest = sha256_file(p)
+    try:
+        tmp = side.with_name(side.name + f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"sha256": digest, "identity": ident}))
+        os.replace(tmp, side)
+    except OSError:
+        pass
+    if log is not None:
+        log(f"[repro] sha256 of {p.name} computed in {time.time() - t0:.1f} s (kept beside it for the next stage)")
+    return digest
 
 
 def sha256_path(path: PathLike) -> str:

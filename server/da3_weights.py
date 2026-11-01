@@ -75,7 +75,9 @@ def verified_snapshot(model_id: str, hf_home: Optional[os.PathLike] = None,
             raise DA3WeightsError(f"{d / name} is missing from the pinned DA3 snapshot")
     for name, sha in sorted(want.items()):
         f = d / name
-        got = repro.sha256_file(f)
+        # the digest kept beside the immutable blob with its identity (repro.sha256_file_memo): every DA3 load
+        # re-hashed 6.8 GB before (7 s of CPU per stage process)
+        got = repro.sha256_file_memo(f, log=log)
         if got != sha:
             raise DA3WeightsError(f"{f} hashes to sha256 {got}, the pinned {model_id} file is "
                                   f"{sha} — another file than the validated one")

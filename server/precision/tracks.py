@@ -273,7 +273,8 @@ def verified_checkpoint(url: str, sha256: str, log: Callable = print) -> Path:
         dst.parent.mkdir(parents=True, exist_ok=True)
         log(f"{LOG_TAG} downloading {url} → {dst}")
         torch.hub.download_url_to_file(url, str(dst), hash_prefix=sha256, progress=False)
-    got = file_sha256(dst)
+    from repro import sha256_file_memo
+    got = sha256_file_memo(dst, log=log)                 # kept beside the file with its identity
     if got != sha256:
         raise TracksError(f"{dst} hashes to sha256 {got}, the configured tracker weights are "
                           f"{sha256} (precision.tracks.tracker_weights_sha256) — another file "
