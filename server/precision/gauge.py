@@ -493,6 +493,25 @@ def _log_gain(inst: np.ndarray, omega: np.ndarray, conf: Optional[np.ndarray],
         xi = (np.arange(W) * a.shape[1] / W).astype(int).clip(0, a.shape[1] - 1)
         return a[yi][:, xi]
 
+    rw = _log_gain_inputs(inst, omega, conf)
+    if rw is None:
+        return None
+    return huber_location(rw[0], rw[1], float(gcfg.huber_k), float(gcfg.huber_tol),
+                          int(gcfg.huber_max_iter))
+
+
+def _log_gain_inputs(inst: np.ndarray, omega: np.ndarray, conf: Optional[np.ndarray]):
+    """(r, w0) of :func:`_log_gain` — log(inst/omega) over the pixels valid in both and their weights — or None
+    with fewer than four common pixels."""
+    H, W = omega.shape
+
+    def _fit(a):
+        if a is None or a.shape[:2] == (H, W):
+            return a
+        yi = (np.arange(H) * a.shape[0] / H).astype(int).clip(0, a.shape[0] - 1)
+        xi = (np.arange(W) * a.shape[1] / W).astype(int).clip(0, a.shape[1] - 1)
+        return a[yi][:, xi]
+
     inst, conf = _fit(inst), _fit(conf)
     m = np.isfinite(inst) & np.isfinite(omega) & (inst > 0) & (omega > 0)
     if conf is not None:
@@ -501,8 +520,7 @@ def _log_gain(inst: np.ndarray, omega: np.ndarray, conf: Optional[np.ndarray],
         return None
     r = np.log(inst[m].astype(np.float64)) - np.log(omega[m].astype(np.float64))
     w0 = conf[m].astype(np.float64) if conf is not None else np.ones(int(m.sum()))
-    return huber_location(r, w0, float(gcfg.huber_k), float(gcfg.huber_tol),
-                          int(gcfg.huber_max_iter))
+    return r, w0
 
 
 def _weighted_median(v: np.ndarray, w: np.ndarray) -> float:
@@ -560,6 +578,44 @@ def calibration_for_gauge(output_dir: Path, rid: Optional[str] = None
     return doc, {"present": True, "taken": True}
 
 
+_DEVICE_OVERRIDE: Optional[str] = None
+
+
+def use_device(dev: Optional[str]) -> Optional[str]:
+    """The device of every window's gains after this call ('cpu' in the tests); None = ``gauge.device``."""
+    global _DEVICE_OVERRIDE
+    _DEVICE_OVERRIDE = None if dev is None else str(dev)
+    return _DEVICE_OVERRIDE
+
+
+def _window_gains(frames, depth, conf, mono, omega, chainage, gcfg) -> Dict[tuple, Optional[Gain]]:
+    """{(i, 'inst' | 'mono'): Gain or None} of a window's frames: :func:`_log_gain` frame by frame on numpy (the path
+    of record), or every frame's estimate at once on ``gauge.device`` (precision/gauge_torch.py, 2026-11-01)."""
+    dev = _DEVICE_OVERRIDE or str(getattr(gcfg, "device", "numpy"))
+    keys, rs, ws = [], [], []
+    out: Dict[tuple, Optional[Gain]] = {}
+    for i, f in enumerate(frames):
+        if f not in omega or f not in chainage:
+            continue
+        for kind, inst, cf in (("inst", depth[i], conf[i]), ("mono", None if mono is None else mono[i], None)):
+            if inst is None:
+                continue
+            if dev == "numpy":
+                out[(i, kind)] = _log_gain(inst, omega[f], cf, gcfg)
+                continue
+            rw = _log_gain_inputs(inst, omega[f], cf)
+            if rw is None:
+                out[(i, kind)] = None
+                continue
+            keys.append((i, kind)); rs.append(rw[0]); ws.append(rw[1])
+    if keys:
+        from precision.gauge_torch import huber_location_batch
+        for key, g in zip(keys, huber_location_batch(rs, ws, float(gcfg.huber_k), float(gcfg.huber_tol),
+                                                     int(gcfg.huber_max_iter), dev)):
+            out[key] = g
+    return out
+
+
 def da3_rows(session_dir: Path, chainage: Dict[int, float], log_s0: float, gcfg,
              rid: Optional[str] = None) -> Tuple[List[Row], List[Row], List[dict]]:
     """(da3_windows rows, da3_mono rows, per-window report incl. the near-band variant).
@@ -590,14 +646,15 @@ def da3_rows(session_dir: Path, chainage: Dict[int, float], log_s0: float, gcfg,
         gains, weights, near, cs = [], [], [], []
         huber = {"not_converged": [], "mono_not_converged": [], "mad_zero": []}
         n = len(frames)
+        pre = _window_gains(frames, depth, conf, mono, omega, chainage, gcfg)
         for i, f in enumerate(frames):
             if f not in omega or f not in chainage:
                 continue
-            g = _log_gain(depth[i], omega[f], conf[i], gcfg)
+            g = pre[(i, "inst")]
             if g is None:
                 continue
             if mono is not None:
-                gm = _log_gain(mono[i], omega[f], None, gcfg)
+                gm = pre[(i, "mono")]
                 centrality = abs(i - (n - 1) / 2.0)
                 if gm is not None and not gm.converged:
                     huber["mono_not_converged"].append(f)

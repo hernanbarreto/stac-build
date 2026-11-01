@@ -18,6 +18,7 @@ def _hole_audit_evidence_on_cpu():
     from correction import visit_drift
     from correction import floor
     from precision import edge_metric
+    from precision import gauge
     from reconstruction.surface_fit import fit_torch, hole_audit
     hole_audit.use_device("cpu")
     fit_torch.use_device("cpu")
@@ -25,4 +26,5 @@ def _hole_audit_evidence_on_cpu():
     floor.use_device("cpu")              # the floor solve's torch path, on the CPU
     floor.use_draws("numpy")             # the floor bootstrap on the reference's stream
     edge_metric.use_device("cpu")        # the edge metric's torch path, on the CPU
+    gauge.use_device("cpu")              # F2's window gains, on the CPU
     yield

@@ -2251,6 +2251,9 @@ reconstruction:
       huber_max_iter: 10000             # BOUND (generous): a gain still moving here is NOT
                                         # converged — its row is excluded and reported
       instruments: [da3_windows, da3_mono, vio, stray, known_dims]
+      device: cuda                      # 2026-11-01 (USER "todo debe correr en GPU"): numpy (the path of record) |
+                                        #   cpu | cuda — the per-frame Huber gains of every I3 window at once
+                                        #   (precision/gauge_torch.py); F2 178 s on pccr on numpy
       delete_windows_after_chain: true  # USER 2026-10-05: output/da3_windows (the I3 multi-view depth,
                                         # 2.6 GB on pccr, 8.5 GB on zaragoza) is read by F0 only; once the
                                         # chain's last step is done it goes. walk.json, the anchors and

@@ -208,6 +208,9 @@ class GaugeConfig:
                                     # held-out error is lower beyond the sample's noise
     delete_windows_after_chain: bool    # the I3 windows (F0's only reader) go when the chain is done;
                                         # run_gauge regenerates them from windows.json on a re-run
+    device: str = "numpy"           # 2026-11-01: numpy (the path of record) | cpu | cuda — where the per-frame
+                                    #   Huber gains of the I3 windows run (precision/gauge_torch.py: a window's
+                                    #   frames at once; 178 s of F2 on pccr on numpy)
 
 
 # ── F3: Omega ─────────────────────────────────────────────────────────────
@@ -675,6 +678,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         huber_max_iter=_num(g, "huber_max_iter", "gauge", lo=1, integer=True),
         instruments=tuple(_str_list(g, "instruments", "gauge", allowed=GAUGE_INSTRUMENTS)),
         delete_windows_after_chain=_bool(g, "delete_windows_after_chain", "gauge"),
+        device=_enum(g, "device", "gauge", ("numpy", "cpu", "cuda")),
     )
     if gauge.window_overlap_frac >= 1.0 or gauge.heldout_confidence >= 1.0:
         raise PrecisionConfigError(
