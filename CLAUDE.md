@@ -10,7 +10,7 @@
   Bit-identity across summation orders is not the bar; the record is (same inliers, verdicts, r̂, levels). Never run
   a GPU bench under `ulimit -v` (CUDA maps device memory into the address space: a false OOM at 45 GB).
 - DEVICE KEYS (all cuda on main): refine.solver torch + refine.triangulation_device; correction.visit_drift.device;
-  correction.floor.device + floor.bootstrap_draws device (USER OK 17:00 CDMX: σ carry the bootstrap's own ~1.6 %
+  correction.floor.device + floor.bootstrap_draws device (USER OK 2026-11-01: σ carry the bootstrap's own ~1.6 %
   noise); cloud_metrics.edge_device + cloud_metrics.device; bend.device; the projection's kernels on the evidence
   device (surface_fit.evidence_device).
 - MEASURED ON pccr (before → after): F5 63 min → 12 min (torch LM; leave-one-view-out 316 → 2.4 s; witnesses' PnP in
@@ -20,12 +20,14 @@
   ~2.5 min, floor 131 → 15.6 s, edge metric 418 → 78 s (3 objects), closures 115 → 40 s, store one transaction;
   projection: per-object loop 21 → ~1 min, the cleaning's RANSAC (floor 175 → 0.4 s), dedupe / attach / OBB / voxel
   components on the card; every stage process: 14 s less (the packages' re-exports are lazy — open3d was imported by
-  `import reconstruction.loops.config`).
+  `import reconstruction.loops.config`). Omega's sky masks (skyseg.onnx, onnxruntime CPU, ONE thread — ~2.4 s per
+  keyframe with the card idle before every chunk): computed by the fork's own code on Omega's interpreter in 12
+  processes WHILE I3 runs (reconstruction/sky_precompute.py; station: 377/377 masks byte-identical, 74 s).
 - STAYS ON THE CPU, DECLARED: PotreeConverter (one thread: its node offsets follow the threads' completion order — byte
   identity, point 57; ~1-2 min per build, three builds per full run), sqlite, PLY / JSON / npz I/O, JPEG decoding.
-  NEXT (authorised by the USER 18:00 CDMX "si hay tareas que se pueden paralelizar o adelantar … que no quede silicio
+  NEXT (authorised by the USER 2026-11-01 "si hay tareas que se pueden paralelizar o adelantar … que no quede silicio
   sin usar"): the Potree builds off the critical path, stages overlapped where the VRAM allows.
-  PENDING, USER 20:30 CDMX ("anotá para luego migrar el intake de calidad y paralaje a GPU"): intake I0 (quality:
+  PENDING, USER 2026-11-01 ("anotá para luego migrar el intake de calidad y paralaje a GPU"): intake I0 (quality:
   decode + FFT / Laplacian / luma / inter-frame diff per frame; 8 CPU threads since b6f7cfe, ~10 s on station) and
   I1 (parallax: cv2 pyramidal LK + homography RANSAC + rotation fit, a SEQUENTIAL keyframe/witness chain; 80 s on
   station's 2581 frames) to the card. Declared risk: a GPU LK / RANSAC is not cv2's arithmetic — the keyframes and
