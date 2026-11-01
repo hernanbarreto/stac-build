@@ -260,7 +260,9 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
     else:
         strategy = DefaultStrategy(refine_start_iter=r0, refine_stop_iter=r1, verbose=False)
     strategy.check_sanity(params, optimizers)
-    state = strategy.initialize_state(scene_scale=extent)
+    # gsplat 1.5.3: DefaultStrategy.initialize_state(scene_scale) / MCMCStrategy.initialize_state(); only the
+    # default strategy has a step_pre_backward (it retains the projected means' gradient there)
+    state = strategy.initialize_state(scene_scale=extent) if strategy_used == "default" else strategy.initialize_state()
 
     radial = torch.tensor([[dist[0], dist[1], 0.0, 0.0, 0.0, 0.0]], dtype=torch.float32, device=device) if lens else None
     tangential = torch.tensor([[dist[2], dist[3]]], dtype=torch.float32, device=device) if lens else None
@@ -309,7 +311,8 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
         degree = sh_degree_at(step, int(tr["sh_degree"]), int(tr["sh_degree_interval"]))
         need_depth = w_depth > 0 and i in depths
         renders, alphas, info = render(i, degree, need_depth)
-        strategy.step_pre_backward(params, optimizers, state, step, info)
+        if strategy_used == "default":
+            strategy.step_pre_backward(params, optimizers, state, step, info)
         pred = renders[..., :3]
         if exposure is not None:
             pred = exposure.apply(pred, i)
@@ -326,7 +329,7 @@ def train(trainset_dir: Path, out_dir: Path, tcfg: Dict[str, Any], log=print) ->
         if exposure is not None and w_exp > 0:
             loss = loss + w_exp * exposure.penalty()
         loss.backward()
-        if tr["strategy"] == "mcmc":
+        if strategy_used == "mcmc":
             strategy.step_post_backward(params, optimizers, state, step, info, lr=lrs["means"])
         else:
             strategy.step_post_backward(params, optimizers, state, step, info, packed=False)
