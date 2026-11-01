@@ -4400,16 +4400,23 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
     from segmentation.object_captioner import concept_caption_lookup
     _concept_caption = concept_caption_lookup(output_dir)
 
+    import time as _time
+    _tm = {"select_s": 0.0, "audit_s": 0.0, "clean_s": 0.0, "obb_s": 0.0, "objects": 0}   # where the loop's time goes
     for iid in sorted(instance_groups):
+        _t0 = _time.perf_counter()
         group_obj_ids = instance_groups[iid]
         # Merge all points assigned to any obj_id in this instance group
         all_matched = np.where(np.isin(point_obj_id, group_obj_ids))[0].astype(np.int64)
+        _tm["select_s"] += _time.perf_counter() - _t0
 
         if len(all_matched) == 0:
             continue
+        _tm["objects"] += 1
 
         if mask_filter is not None:
+            _t0 = _time.perf_counter()
             _a = mask_filter.audit(int(iid), xyz[all_matched], frame_arr[all_matched])
+            _tm["audit_s"] += _time.perf_counter() - _t0
             _o = _a.get("out_of_place")
             if _o is not None and len(_o) == len(all_matched):
                 out_of_place[all_matched[_o]] = True
@@ -4423,9 +4430,11 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
         face_planes_data = []
         face_id_data = np.array([], dtype=np.int32)
         if pre_filter_count >= 20:
+            _t0 = _time.perf_counter()
             all_matched, voxel_mesh_data, face_normals_data, face_planes_data, face_id_data = _clean_segment_subcloud(
                 xyz_display, all_matched, iid, cfg=cfg
             )
+            _tm["clean_s"] += _time.perf_counter() - _t0
 
         total_segmented += len(all_matched)
 
@@ -4456,18 +4465,25 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
             }
 
         # Compute OBB from snapped voxel centroids (corrected geometry)
+        _t0 = _time.perf_counter()
         if voxel_mesh_data and len(voxel_mesh_data) >= 4:
             voxel_centers = np.array([[v[0], v[1], v[2]] for v in voxel_mesh_data])
             instance["obb"] = _compute_obb(voxel_centers, face_normals=face_normals_data, cfg=cfg)
         elif len(all_matched) >= 4:
             instance["obb"] = _compute_obb(xyz_display[all_matched], face_normals=face_normals_data,
                                            cfg=cfg)
+        _tm["obb_s"] += _time.perf_counter() - _t0
 
         instances.append(instance)
         removed = pre_filter_count - len(all_matched)
         filter_info = f" (filtered {removed} outliers)" if removed > 0 else ""
         print(f"[SegPipeline]   Object '{label}' #{iid}: "
               f"{len(all_matched):,} points{filter_info}")
+    # MEASURED (audit5 2026-11-01: this loop was 21 of the projection's 43 min): the loop's time per phase,
+    # so the next port is chosen by measurement (segmentation.pipeline per-object timing)
+    print(f"[SegPipeline]   per-object timing over {_tm['objects']} object(s): select {_tm['select_s']:.1f} s, "
+          f"mask audit {_tm['audit_s']:.1f} s, clean (DBSCAN/voxel PCA/peel/SOR) {_tm['clean_s']:.1f} s, "
+          f"OBB {_tm['obb_s']:.1f} s")
 
     # ── Instance post-processing config ────────────────────────────────
     _dd = (cfg.get("segmentation", {}) or {})
