@@ -1,0 +1,730 @@
+{
+ "metric": "crease_profile",
+ "version": 1,
+ "provenance": "tool_measured",
+ "params": {
+  "confidence": 0.95,
+  "z": 1.959963984540054,
+  "bootstrap": 2000,
+  "seed": 0,
+  "inlier_dist_m": 0.02,
+  "min_face_pts": 300,
+  "detect_max_pts": 150000,
+  "max_band_passes": 3,
+  "max_refits": 3
+ },
+ "reference": {
+  "ply": "/workspace/stac-build/server/projects/pccr/scans/2026-08-31/src_default/output/cleaned_cloud.ply",
+  "seg": "/workspace/stac-build/server/projects/pccr/scans/2026-08-31/src_default/output/segmentation_result.json",
+  "summary": {
+   "n_creases": 20,
+   "length_m": 18.720579258345403,
+   "r_hat_m": 0.0,
+   "r_res_m": 0.00026893877134069887,
+   "tau_m": 0.09528427822619547,
+   "tau_over_sigma": 10.13782334208112,
+   "coverage": 0.0,
+   "one_minus_coverage": 1.0,
+   "overshoot": 0.7269063856168629,
+   "sigma_a_m": 0.012021263179700425,
+   "sigma_b_m": 0.009433151937568263
+  },
+  "objects": [
+   {
+    "instance_id": 10,
+    "label": "floor",
+    "n_points": 3847551,
+    "n_faces": 10,
+    "band_passes": 3,
+    "skipped_pairs": [],
+    "delta_own_m": 0.003651804644363682,
+    "creases": [
+     {
+      "faces": [
+       1,
+       4
+      ],
+      "split": [
+       true,
+       false
+      ],
+      "theta_deg": 1.5103491473557982,
+      "theta_null_deg": 0.036810367965005725,
+      "measured": true,
+      "phi_deg": 1.5103491473560395,
+      "length_m": 0.9401919819469655,
+      "delta_m": 0.003651804644363682,
+      "sigma_a_m": 0.010243844159398219,
+      "sigma_b_m": 0.009433151937568263,
+      "r_res_m": 0.00013681607554556617,
+      "r_hat_m": 0.0,
+      "r_max_m": 0.02641110766831866,
+      "sharp_within_instrument": true,
+      "tau_m": 0.7931647919991763,
+      "tau_over_sigma": 77.42843210587961,
+      "coverage": 0.32170542635658916,
+      "overshoot": 0.9336922640974781,
+      "n_points": 146157,
+      "n_band": 14116,
+      "one_minus_coverage": 0.6782945736434108
+     },
+     {
+      "faces": [
+       1,
+       4
+      ],
+      "split": [
+       true,
+       false
+      ],
+      "theta_deg": 1.5103491473557982,
+      "theta_null_deg": 0.036810367965005725,
+      "measured": false
+     },
+     {
+      "faces": [
+       1,
+       8
+      ],
+      "split": [
+       true,
+       false
+      ],
+      "theta_deg": 3.3161292575908714,
+      "theta_null_deg": 0.10171149418258855,
+      "measured": true,
+      "phi_deg": 3.3161292575906516,
+      "length_m": 1.3473504699402532,
+      "delta_m": 0.003651804644363682,
+      "sigma_a_m": 0.010243844159398219,
+      "sigma_b_m": 0.009789242979607572,
+      "r_res_m": 0.00030523385970063313,
+      "r_hat_m": 0.0,
+      "r_max_m": 0.017328132930821517,
+      "sharp_within_instrument": true,
+      "tau_m": null,
+      "tau_over_sigma": null,
+      "coverage": 0.0,
+      "overshoot": null,
+      "n_points": 66310,
+      "n_band": 0,
+      "one_minus_coverage": 1.0
+     },
+     {
+      "faces": [
+       1,
+       8
+      ],
+      "split": [
+       true,
+       false
+      ],
+      "theta_deg": 3.3161292575908714,
+      "theta_null_deg": 0.10171149418258855,
+      "measured": true,
+      "phi_deg": 176.68387074240937,
+      "length_m": 1.3473504699402532,
+      "delta_m": 0.003651804644363682,
+      "sigma_a_m": 0.010243844159398219,
+      "sigma_b_m": 0.009789242979607572,
+      "r_res_m": 24.45590550470755,
+      "r_hat_m": 0.0,
+      "r_max_m": 21.01942446922948,
+      "sharp_within_instrument": true,
+      "tau_m": null,
+      "tau_over_sigma": null,
+      "coverage": 0.0,
+      "overshoot": null,
+      "n_points": 22291,
+      "n_band": 0,
+      "one_minus_coverage": 1.0
+     },
+     {
+      "faces": [
+       5,
+       6
+      ],
+      "split": [
+       false,
+       false
+      ],
+      "theta_deg": 1.359488062862061,
+      "theta_null_deg": 0.07733910937129865,
+      "measured": true,
+      "phi_deg": 1.3594880628612567,
+      "length_m": 0.46039118272281,
+      "delta_m": 0.003651804644363682,
+      "sigma_a_m": 0.011516100736360498,
+      "sigma_b_m": 0.012499685160283092,
+      "r_res_m": 0.00015007028669892182,
+      "r_hat_m": 0.0,
+      "r_max_m": 0.018983321715175163,
+      "sharp_within_instrument": true,
+      "tau_m": 0.019749036727620947,
+      "tau_over_sigma": 1.5799627330112427,
+      "coverage": 0.5196850393700787,
+      "overshoot": 0.33170731707317075,
+      "n_points": 49097,
+      "n_band": 410,
+      "one_minus_coverage": 0.4803149606299213
+     }
+    ],
+    "refits": 1,
+    "converged": true,
+    "summary": {
+     "n_creases": 4,
+     "length_m": 4.095284104550282,
+     "r_hat_m": 0.0,
+     "r_res_m": 0.00030523385970063313,
+     "tau_m": 0.7931647919991763,
+     "tau_over_sigma": 77.42843210587961,
+     "coverage": 0.0,
+     "one_minus_coverage": 1.0,
+     "overshoot": 0.9336922640974781,
+     "sigma_a_m": 0.010243844159398219,
+     "sigma_b_m": 0.009789242979607572
+    }
+   },
+   {
+    "instance_id": 317,
+    "label": "opening",
+    "n_points": 465021,
+    "n_faces": 7,
+    "band_passes": 3,
+    "skipped_pairs": [
+     {
+      "faces": [
+       1,
+       4
+      ],
+      "reason": "parallel within the normals' own bootstrap interval",
+      "theta_deg": 0.03629404146424457,
+      "theta_null_deg": 0.05366632637699494
+     }
+    ],
+    "delta_own_m": 0.004157497983020791,
+    "creases": [
+     {
+      "faces": [
+       0,
+       1
+      ],
+      "split": [
+       false,
+       false
+      ],
+      "theta_deg": 0.45142075445877183,
+      "theta_null_deg": 0.011894718390231512,
+      "measured": true,
+      "phi_deg": 0.45153794513421713,
+      "length_m": 2.1122985482894165,
+      "delta_m": 0.004157497983020791,
+      "sigma_a_m": 0.012021263179700425,
+      "sigma_b_m": 0.013203611908331732,
+      "r_res_m": 5.2233355519096156e-05,
+      "r_hat_m": 0.0,
+      "r_max_m": 0.022918839673491828,
+      "sharp_within_instrument": true,
+      "tau_m": null,
+      "tau_over_sigma": null,
+      "coverage": 0.0,
+      "overshoot": null,
+      "n_points": 392624,
+      "n_band": 0,
+      "one_minus_coverage": 1.0
+     },
+     {
+      "faces": [
+       0,
+       2
+      ],
+      "split": [
+       true,
+       false
+      ],
+      "theta_deg": 2.467697349344653,
+      "theta_null_deg": 0.028718470441184148,
+      "measured": true,
+      "phi_deg": 177.49226471419573,
+      "length_m": 1.4964646381608206,
+      "delta_m": 0.004157497983020791,
+      "sigma_a_m": 0.012021263179700425,
+      "sigma_b_m": 0.006503857043340717,
+      "r_res_m": 50.1920928283397,
+      "r_hat_m": 0.0,
+      "r_max_m": 40.65560584706203,
+      "sharp_within_instrument": true,
+      "tau_m": 0.008248827156873764,
+      "tau_over_sigma": 0.6861863877003421,
+      "coverage": 0.65,
+      "overshoot": 0.01762114537444934,
+      "n_points": 123233,
+      "n_band": 454,
+      "one_minus_coverage": 0.35
+     },
+     {
+      "faces": [
+       0,
+       2
+      ],
+      "split": [
+       true,
+       false
+      ],
+      "theta_deg": 2.467697349344653,
+      "theta_null_deg": 0.028718470441184148,
+      "measured": true,
+      "phi_deg": 2.507735285804257,
+      "length_m": 1.561911699810972,
+      "delta_m": 0.004157497983020791,
+      "sigma_a_m": 0.012021263179700425,
+      "sigma_b_m": 0.006503857043340717,
+      "r_res_m": 0.00026893877134069887,
+      "r_hat_m": 0.0,
+      "r_max_m": 0.01947678357091602,
+      "sharp_within_instrument": true,
+      "tau_m": 0.17280879238615357,
+      "tau_over_sigma": 14.375260719519497,
+      "coverage": 0.7367021276595744,
+      "overshoot": 0.897683119873363,
+      "n_points": 127497,
+      "n_band": 6949,
+      "one_minus_coverage": 0.26329787234042556
+     },
+     {
+      "faces": [
+       0,
+       5
+      ],
+      "split": [
+       false,
+       false
+      ],
+      "theta_deg": 0.8576897277816468,
+      "theta_null_deg": 0.20620791649390668,
+      "measured": true,
+      "phi_deg": 0.8568236958841025,
+      "length_m": 0.601905473157047,
+      "delta_m": 0.004157497983020791,
+      "sigma_a_m": 0.012021263179700425,
+      "sigma_b_m": 0.009007836125984117,
+      "r_res_m": 9.056166013805547e-05,
+      "r_hat_m": 0.0,
+      "r_max_m": 0.02030197429188512,
+      "sharp_within_instrument": true,
+      "tau_m": null,
+      "tau_over_sigma": null,
+      "coverage": 0.0,
+      "overshoot": null,
+      "n_points": 91767,
+      "n_band": 0,
+      "one_minus_coverage": 1.0
+     },
+     {
+      "faces": [
+       1,
+       3
+      ],
+      "split": [
+       false,
+       false
+      ],
+      "theta_deg": 1.0662749977609665,
+      "theta_null_deg": 0.07639291684321822,
+      "measured": true,
+      "phi_deg": 1.0662749977602828,
+      "length_m": 1.3505503328850572,
+      "delta_m": 0.004157497983020791,
+      "sigma_a_m": 0.013203611908331732,
+      "sigma_b_m": 0.008050543370881869,
+      "r_res_m": 0.0001240118120692578,
+      "r_hat_m": 0.0,
+      "r_max_m": 0.018881563506821415,
+      "sharp_within_instrument": true,
+      "tau_m": null,
+      "tau_over_sigma": null,
+      "coverage": 0.0,
+      "overshoot": null,
+      "n_points": 140887,
+      "n_band": 0,
+      "one_minus_coverage": 1.0
+     },
+     {
+      "faces": [
+       2,
+       6
+      ],
+      "split": [
+       true,
+       false
+      ],
+      "theta_deg": 2.207377287510234,
+      "theta_null_deg": 0.3006675857423803,
+      "measured": true,
+      "phi_deg": 2.2191248826992194,
+      "length_m": 0.263185431338947,
+      "delta_m": 0.004157497983020791,
+      "sigma_a_m": 0.006503857043340717,
+      "sigma_b_m": 0.006744529143534267,
+      "r_res_m": 0.0001331821154448113,
+      "r_hat_m": 0.0,
+      "r_max_m": 0.014111222708154854,
+      "sharp_within_instrument": true,
+      "tau_m": 0.06849238769153974,
+      "tau_over_sigma": 10.155251201961354,
+      "coverage": 0.34375,
+      "overshoot": 0.9033816425120773,
+      "n_points": 16140,
+      "n_band": 414,
+      "one_minus_coverage": 0.65625
+     },
+     {
+      "faces": [
+       2,
+       6
+      ],
+      "split": [
+       true,
+       false
+      ],
+      "theta_deg": 2.207377287510234,
+      "theta_null_deg": 0.3006675857423803,
+      "measured": true,
+      "phi_deg": 177.78087511730078,
+      "length_m": 0.13782021787327337,
+      "delta_m": 0.004157497983020791,
+      "sigma_a_m": 0.006503857043340717,
+      "sigma_b_m": 0.006744529143534267,
+      "r_res_m": 35.96296856583305,
+      "r_hat_m": 15.145765152144742,
+      "r_max_m": 15.14590658775307,
+      "sharp_within_instrument": true,
+      "tau_m": 0.012140619320779228,
+      "tau_over_sigma": 1.800069220905954,
+      "coverage": 1.0,
+      "overshoot": 0.00047281323877068556,
+      "n_points": 2115,
+      "n_band": 2115,
+      "one_minus_coverage": 0.0
+     }
+    ],
+    "refits": 3,
+    "converged": false,
+    "summary": {
+     "n_creases": 7,
+     "length_m": 7.5241363415155345,
+     "r_hat_m": 0.0,
+     "r_res_m": 0.0001240118120692578,
+     "tau_m": 0.06849238769153974,
+     "tau_over_sigma": 10.155251201961354,
+     "coverage": 0.0,
+     "one_minus_coverage": 1.0,
+     "overshoot": 0.897683119873363,
+     "sigma_a_m": 0.012021263179700425,
+     "sigma_b_m": 0.008050543370881869
+    }
+   },
+   {
+    "instance_id": 982,
+    "label": "drywall",
+    "n_points": 970326,
+    "n_faces": 7,
+    "band_passes": 3,
+    "skipped_pairs": [
+     {
+      "faces": [
+       2,
+       5
+      ],
+      "reason": "a majority of one face lies in the other's membership band",
+      "theta_deg": 4.25891597115725,
+      "share_in_other_band": [
+       0.4566222695791156,
+       0.5244773074961754
+      ]
+     }
+    ],
+    "delta_own_m": 0.003540315450724062,
+    "creases": [
+     {
+      "faces": [
+       0,
+       1
+      ],
+      "split": [
+       false,
+       false
+      ],
+      "theta_deg": 1.271985976568369,
+      "theta_null_deg": 0.007238142400899006,
+      "measured": true,
+      "phi_deg": 1.2697554194101572,
+      "length_m": 3.2404040574992705,
+      "delta_m": 0.003540315450724062,
+      "sigma_a_m": 0.01506269797296731,
+      "sigma_b_m": 0.007679064561123426,
+      "r_res_m": 0.00016877199270920823,
+      "r_hat_m": 0.0,
+      "r_max_m": 0.02990499460761529,
+      "sharp_within_instrument": true,
+      "tau_m": null,
+      "tau_over_sigma": null,
+      "coverage": 0.0,
+      "overshoot": null,
+      "n_points": 854808,
+      "n_band": 0,
+      "one_minus_coverage": 1.0
+     },
+     {
+      "faces": [
+       0,
+       4
+      ],
+      "split": [
+       true,
+       false
+      ],
+      "theta_deg": 7.810549433873211,
+      "theta_null_deg": 0.4085460052426281,
+      "measured": true,
+      "phi_deg": 172.18946615990342,
+      "length_m": 0.36500483213998647,
+      "delta_m": 0.003540315450724062,
+      "sigma_a_m": 0.01506269797296731,
+      "sigma_b_m": 0.015546458532041412,
+      "r_res_m": 6.679805777867314,
+      "r_hat_m": 0.0,
+      "r_max_m": 7.534362351076285,
+      "sharp_within_instrument": true,
+      "tau_m": 0.012736422006506721,
+      "tau_over_sigma": 0.8192490900906354,
+      "coverage": 0.8076923076923077,
+      "overshoot": 0.09580838323353294,
+      "n_points": 18764,
+      "n_band": 167,
+      "one_minus_coverage": 0.1923076923076923
+     },
+     {
+      "faces": [
+       0,
+       4
+      ],
+      "split": [
+       true,
+       false
+      ],
+      "theta_deg": 7.810549433873211,
+      "theta_null_deg": 0.4085460052426281,
+      "measured": true,
+      "phi_deg": 7.810533840096593,
+      "length_m": 0.4889045710792074,
+      "delta_m": 0.003540315450724062,
+      "sigma_a_m": 0.01506269797296731,
+      "sigma_b_m": 0.015546458532041412,
+      "r_res_m": 0.0011362062968985236,
+      "r_hat_m": 0.0,
+      "r_max_m": 0.026804648202027027,
+      "sharp_within_instrument": true,
+      "tau_m": 0.18427450648472185,
+      "tau_over_sigma": 11.853150098778457,
+      "coverage": 0.7266187050359713,
+      "overshoot": 0.17073170731707318,
+      "n_points": 19787,
+      "n_band": 656,
+      "one_minus_coverage": 0.27338129496402874
+     },
+     {
+      "faces": [
+       1,
+       3
+      ],
+      "split": [
+       true,
+       false
+      ],
+      "theta_deg": 8.807177238434237,
+      "theta_null_deg": 0.2528199936189049,
+      "measured": true,
+      "phi_deg": 171.19364796012653,
+      "length_m": 0.8502976581492274,
+      "delta_m": 0.003540315450724062,
+      "sigma_a_m": 0.007679064561123426,
+      "sigma_b_m": 0.013482886838105404,
+      "r_res_m": 4.554661354107516,
+      "r_hat_m": 0.0,
+      "r_max_m": 5.173928753202084,
+      "sharp_within_instrument": true,
+      "tau_m": 0.003860990114026268,
+      "tau_over_sigma": 0.28636227244111534,
+      "coverage": 0.6473029045643154,
+      "overshoot": 0.06329113924050633,
+      "n_points": 48442,
+      "n_band": 237,
+      "one_minus_coverage": 0.3526970954356846
+     },
+     {
+      "faces": [
+       1,
+       3
+      ],
+      "split": [
+       true,
+       false
+      ],
+      "theta_deg": 8.807177238434237,
+      "theta_null_deg": 0.2528199936189049,
+      "measured": true,
+      "phi_deg": 8.806352039873492,
+      "length_m": 0.8502976581492274,
+      "delta_m": 0.003540315450724062,
+      "sigma_a_m": 0.007679064561123426,
+      "sigma_b_m": 0.013482886838105404,
+      "r_res_m": 0.0011212200331243544,
+      "r_hat_m": 0.0,
+      "r_max_m": 0.02901339309345392,
+      "sharp_within_instrument": true,
+      "tau_m": 0.13668712490598328,
+      "tau_over_sigma": 10.13782334208112,
+      "coverage": 0.6141078838174274,
+      "overshoot": 0.8874332848131975,
+      "n_points": 35394,
+      "n_band": 2061,
+      "one_minus_coverage": 0.3858921161825726
+     },
+     {
+      "faces": [
+       2,
+       3
+      ],
+      "split": [
+       false,
+       false
+      ],
+      "theta_deg": 8.5203003847174,
+      "theta_null_deg": 0.25047525688015704,
+      "measured": true,
+      "phi_deg": 8.520300384717357,
+      "length_m": 0.5021741692258593,
+      "delta_m": 0.003540315450724062,
+      "sigma_a_m": 0.010637960701100107,
+      "sigma_b_m": 0.013482886838105404,
+      "r_res_m": 0.0010819512736729396,
+      "r_hat_m": 0.0,
+      "r_max_m": 0.05438376920079786,
+      "sharp_within_instrument": true,
+      "tau_m": 0.20891205155548465,
+      "tau_over_sigma": 15.494608392399789,
+      "coverage": 0.6267605633802817,
+      "overshoot": 0.7269063856168629,
+      "n_points": 43266,
+      "n_band": 3226,
+      "one_minus_coverage": 0.37323943661971826
+     },
+     {
+      "faces": [
+       2,
+       6
+      ],
+      "split": [
+       false,
+       false
+      ],
+      "theta_deg": 12.203773865263733,
+      "theta_null_deg": 0.30584004532684833,
+      "measured": true,
+      "phi_deg": 12.203773865263612,
+      "length_m": 0.22899473005087462,
+      "delta_m": 0.003540315450724062,
+      "sigma_a_m": 0.010637960701100107,
+      "sigma_b_m": 0.010844310747332102,
+      "r_res_m": 0.0012898194266460813,
+      "r_hat_m": 0.0,
+      "r_max_m": 0.03726965577778814,
+      "sharp_within_instrument": true,
+      "tau_m": 0.0504701502782758,
+      "tau_over_sigma": 4.6540671375257645,
+      "coverage": 0.7846153846153846,
+      "overshoot": 0.5033407572383074,
+      "n_points": 9082,
+      "n_band": 898,
+      "one_minus_coverage": 0.2153846153846154
+     },
+     {
+      "faces": [
+       3,
+       6
+      ],
+      "split": [
+       false,
+       false
+      ],
+      "theta_deg": 5.97601337664301,
+      "theta_null_deg": 0.37556713490041843,
+      "measured": true,
+      "phi_deg": 5.976013376642888,
+      "length_m": 0.34671794718036625,
+      "delta_m": 0.003540315450724062,
+      "sigma_a_m": 0.013482886838105404,
+      "sigma_b_m": 0.010844310747332102,
+      "r_res_m": 0.0007414720038931913,
+      "r_hat_m": 0.0,
+      "r_max_m": 0.025701314479709476,
+      "sharp_within_instrument": true,
+      "tau_m": 0.09528427822619547,
+      "tau_over_sigma": 7.067053174169092,
+      "coverage": 0.0,
+      "overshoot": 1.0,
+      "n_points": 15461,
+      "n_band": 3172,
+      "one_minus_coverage": 1.0
+     },
+     {
+      "faces": [
+       5,
+       6
+      ],
+      "split": [
+       false,
+       false
+      ],
+      "theta_deg": 10.734999346596691,
+      "theta_null_deg": 0.34177492338373633,
+      "measured": true,
+      "phi_deg": 10.734999346596554,
+      "length_m": 0.2283631888055667,
+      "delta_m": 0.003540315450724062,
+      "sigma_a_m": 0.005108840283900242,
+      "sigma_b_m": 0.010844310747332102,
+      "r_res_m": 0.0011191002707708272,
+      "r_hat_m": 0.0,
+      "r_max_m": 0.026779341007222717,
+      "sharp_within_instrument": true,
+      "tau_m": 0.022468434038809413,
+      "tau_over_sigma": 2.071909830169433,
+      "coverage": 0.03076923076923077,
+      "overshoot": 0.979381443298969,
+      "n_points": 5137,
+      "n_band": 97,
+      "one_minus_coverage": 0.9692307692307692
+     }
+    ],
+    "refits": 1,
+    "converged": true,
+    "summary": {
+     "n_creases": 9,
+     "length_m": 7.101158812279586,
+     "r_hat_m": 0.0,
+     "r_res_m": 0.0007414720038931913,
+     "tau_m": 0.09528427822619547,
+     "tau_over_sigma": 7.067053174169092,
+     "coverage": 0.0,
+     "one_minus_coverage": 1.0,
+     "overshoot": 0.5033407572383074,
+     "sigma_a_m": 0.01506269797296731,
+     "sigma_b_m": 0.010844310747332102
+    }
+   }
+  ]
+ },
+ "seconds": 75.2
+}

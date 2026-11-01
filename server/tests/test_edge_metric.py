@@ -29,7 +29,8 @@ def _raw_cfg():
     """The keys the metric reads, at the values config.yaml declares."""
     return {"surface_fit": {"p2c_inlier_dist_m": 0.02, "p2c_detect_max_pts": 150000,
                             "p2c_max_primitives": 24, "p2c_freeform_min_pts": 2000},
-            "correction_graph": {"graph": {"heldout_confidence": 0.95}}}
+            "correction_graph": {"graph": {"heldout_confidence": 0.95}},
+            "reconstruction": {"precision": {"cloud_metrics": {"edge_device": "cpu"}}}}
 
 
 @pytest.fixture(scope="module")

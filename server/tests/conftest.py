@@ -16,8 +16,12 @@ def _hole_audit_evidence_on_cpu():
     card (reconstruction.surface_fit.hole_audit.use_device); a GPU test picks cuda itself and
     restores this."""
     from correction import visit_drift
+    from correction import floor
+    from precision import edge_metric
     from reconstruction.surface_fit import fit_torch, hole_audit
     hole_audit.use_device("cpu")
     fit_torch.use_device("cpu")
     visit_drift.use_device("cpu")        # the mask filter's torch path, on the CPU
+    floor.use_device("cpu")              # the floor solve's torch path, on the CPU
+    edge_metric.use_device("cpu")        # the edge metric's torch path, on the CPU
     yield

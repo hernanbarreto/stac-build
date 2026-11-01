@@ -1,0 +1,146 @@
+{
+ "calls": [
+  {
+   "fn": "support_rows",
+   "s": 2.31,
+   "rows": 3849279
+  },
+  {
+   "fn": "session_floor_levels",
+   "s": 4.106,
+   "n_support": 3849279
+  }
+ ],
+ "load_session_s": 3.26,
+ "n_points": 19388095,
+ "n_kf": 295,
+ "solve_floor_session_s": 15.59,
+ "record": {
+  "model": "session",
+  "source": "segmentation",
+  "support_labels": [
+   "floor",
+   "ground",
+   "platform",
+   "slab",
+   "base",
+   "deck",
+   "walkway",
+   "pavement",
+   "anden",
+   "and\u00e9n"
+  ],
+  "support_instances": {
+   "floor": 3847551,
+   "platform": 1728
+  },
+  "n_support": 3849279,
+  "up0": [
+   0.0017414957897004776,
+   0.9999686097533883,
+   0.007729598973454377
+  ],
+  "repeatability_m": 0.08702876418828964,
+  "error_factor": 1.1,
+  "confidence": 0.95,
+  "n_boot": 2000,
+  "max_levels": 3,
+  "role": "anchor",
+  "chosen_rank": 0,
+  "under_cameras": true,
+  "inliers": 3290592,
+  "cameras_under": 295,
+  "camera_over_floor_m": 1.2241,
+  "tilt_deg": 0.017,
+  "sigma_tilt_deg": 0.0009,
+  "tilt_margin_deg": 0.0164,
+  "tilt_applied": true,
+  "floor_y_at_first_kf_m": 0.0005,
+  "offset_m": -0.00046,
+  "sigma_height_m": 3e-05,
+  "height_margin_m": 0.00042,
+  "height_applied": true,
+  "surfaces": {
+   "S1": 0.0
+  },
+  "keyframes": [
+   0,
+   294
+  ],
+  "rotation_deg": 0.0174,
+  "translation_m": 0.0004
+ },
+ "levels": [
+  {
+   "rank": 0,
+   "real": true,
+   "support": 3290592,
+   "tilt_deg": 0.017,
+   "sigma_tilt_deg": 0.0009,
+   "sigma_height_m": 3e-05,
+   "floor_y_m": 0.0005,
+   "camera_over_level_m": 1.2241,
+   "cameras_under": 295,
+   "footprint_support": 295,
+   "fit": {
+    "stages": 12,
+    "iterations": 213,
+    "converged": true,
+    "refined_over_all": true
+   },
+   "chosen": true,
+   "judge": null
+  },
+  {
+   "rank": 1,
+   "real": false,
+   "support": 265900,
+   "tilt_deg": 1.911,
+   "sigma_tilt_deg": 0.0006,
+   "sigma_height_m": 4e-05,
+   "floor_y_m": -0.1967,
+   "camera_over_level_m": 1.3813,
+   "cameras_under": 0,
+   "footprint_support": 208,
+   "fit": {
+    "stages": 12,
+    "iterations": 633,
+    "converged": false,
+    "refined_over_all": true
+   },
+   "chosen": false,
+   "judge": {
+    "improves": false,
+    "n_judges": 295,
+    "min_judges": 5,
+    "median_delta": 0.00039339570902414446,
+    "ci_low": 8.729920745437214e-05,
+    "ci_high": 0.0009833482877139865,
+    "required_delta": 0.09573164060711861,
+    "reason": "does NOT pass (error) \u2014 median improvement 0.000393396 vs 1.1 x error 0.0870288 = 0.0957316 (margin -0.0953382); 95 % CI [8.72992e-05, 0.000983348]; 295 judge(s) for 5 required"
+   }
+  }
+ ],
+ "R": [
+  [
+   0.9999999954385942,
+   9.551341039751243e-05,
+   -1.3802439962345112e-08
+  ],
+  [
+   -9.551341039751243e-05,
+   0.9999999536735433,
+   -0.0002890157431337101
+  ],
+  [
+   -1.3802439962345112e-08,
+   0.0002890157431337101,
+   0.9999999582349491
+  ]
+ ],
+ "t": [
+  -4.3331636945254104e-08,
+  -0.0004451200427176876,
+  -1.3111797836362626e-07
+ ]
+}

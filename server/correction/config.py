@@ -78,6 +78,10 @@ class GatesConfig:
 @dataclass(frozen=True)
 class FloorConfig:
     model_default: str
+    device: str                           # numpy | cpu | cuda — where the session / chunk floor's IRLS planes,
+                                          # bootstraps, level judges and footprints run (2026-11-01):
+                                          # numpy is the path of record, the torch devices give the same
+                                          # levels (correction.floor_torch, tests/test_correction_floor_torch.py)
     chunk_floor_labels: Tuple[str, ...]   # model chunk: the segmentation labels that ARE floor
     support_labels: Tuple[str, ...]       # model session: the SEGMENTATION's support surfaces, by head
                                           # noun — `autoprompt.support_surfaces`, the user's one list
@@ -497,6 +501,7 @@ def load_correction_config(raw: Optional[Dict[str, Any]] = None) -> CorrectionCo
         raise CorrectionConfigError("'autoprompt.support_surfaces' must be a non-empty list of label names")
     floor = FloorConfig(
         model_default=model_default,
+        device=_choice(fl, "device", "floor", ("numpy", "cpu", "cuda")),
         chunk_floor_labels=tuple(x.strip().lower() for x in _cfl),
         support_labels=tuple(x.strip().lower() for x in _sup),
         band_m=_num(fl, "band_m", "floor", lo=0.0, lo_excl=True),

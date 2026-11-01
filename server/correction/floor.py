@@ -45,6 +45,26 @@ from correction.session import CorrectionSession
 UP = np.array([0.0, 1.0, 0.0])
 FLOOR_MODELS = ("level", "plane", "profile", "chunk", "session")
 
+_DEVICE_OVERRIDE: Optional[str] = None
+
+
+def use_device(dev: Optional[str]) -> Optional[str]:
+    """The device of every floor solve after this call ('cpu' in the synthetic tests — the torch path on
+    the CPU, the same code as the card); None = the configuration's (``correction.floor.device``)."""
+    global _DEVICE_OVERRIDE
+    _DEVICE_OVERRIDE = None if dev is None else str(dev)
+    return _DEVICE_OVERRIDE
+
+
+def device_of(fl) -> str:
+    """Where the session / chunk floor's kernels run (the IRLS planes, the bootstraps, the level judge,
+    the footprints): :func:`use_device`'s, else the floor configuration's ``device``. numpy = the path of
+    record; cpu | cuda = ``correction.floor_torch`` (the same levels — tests/test_correction_floor_torch.py)."""
+    from correction.floor_torch import resolve_device
+    if _DEVICE_OVERRIDE is not None:
+        return resolve_device(_DEVICE_OVERRIDE)
+    return resolve_device(fl.device)
+
 
 def _vendor_path() -> None:
     """The fork on sys.path (``loop_utils.metric_lock.decide_change`` — the user's rule)."""
@@ -961,6 +981,9 @@ def chunk_floor_levels(xyz: np.ndarray, ks: np.ndarray, cams: np.ndarray, ck: np
     cams = np.asarray(cams, np.float64)
     ck = np.asarray(ck)
     chunks = sorted(set(int(c) for c in ck.tolist()))
+    dev = device_of(fl)
+    if dev != "numpy":
+        from correction import floor_torch as FT
     per_chunk: List[dict] = []
     cands_of: Dict[int, List[dict]] = {}
     cam_xz: Dict[int, Tuple[float, float]] = {}
@@ -980,8 +1003,12 @@ def chunk_floor_levels(xyz: np.ndarray, ks: np.ndarray, cams: np.ndarray, ck: np
                 "points": int(len(P)), "points_below_cameras": int(below.sum()),
                 "hint_points": int((hint_c & below).sum()),
                 "camera_y_median_m": cam_y_med, "repeatability_m": float(rep_m)}
-        cands = (_chunk_candidates(P[below], ks_c[below], fl, c, rep_m, fac, conf)
-                 if int(below.sum()) >= 3 else [])
+        if int(below.sum()) < 3:
+            cands = []
+        elif dev == "numpy":
+            cands = _chunk_candidates(P[below], ks_c[below], fl, c, rep_m, fac, conf)
+        else:
+            cands = FT.chunk_candidates(P[below], ks_c[below], fl, c, rep_m, fac, conf, device=dev)
         for q in cands:
             q["camera_over_level_m"] = cam_y_med - _plane_y_at(q["normal"], q["centroid"], *cam_xz[c])
         cands_of[c] = cands
@@ -1007,19 +1034,23 @@ def chunk_floor_levels(xyz: np.ndarray, ks: np.ndarray, cams: np.ndarray, ck: np
     # the camera but not under it); among those, the one whose camera-over-floor height is
     # continuous with the session's (the median over chunks of the nearest such level — a
     # person keeps one height over what they walk on)
-    from scipy.spatial import cKDTree
+    if dev == "numpy":
+        from scipy.spatial import cKDTree
     for c in chunks:
         kfs = np.flatnonzero(ck == c)
-        cam_tree = cKDTree(cams[kfs][:, [0, 2]])
+        cam_tree = cKDTree(cams[kfs][:, [0, 2]]) if dev == "numpy" else None
         for q in cands_of[c]:
-            pts = q["points"][:, [0, 2]]
+            pts = q["points"]
             h = max(float(q["camera_over_level_m"]), 0.0)
             if not len(pts) or h <= 0.0:
                 q["footprint_support"] = 0
                 continue
             # the horizontal distance of every support point to its NEAREST camera of the chunk
-            # (exact, a k-d tree over the chunk's cameras: no point x camera matrix)
-            d, _ = cam_tree.query(pts, k=1, workers=1)
+            # (exact: a k-d tree over the chunk's cameras on numpy, the blocked minimum on the device)
+            if dev == "numpy":
+                d, _ = cam_tree.query(pts[:, [0, 2]], k=1, workers=1)
+            else:
+                d = FT.nearest_xz(pts, cams[kfs], dev)
             q["footprint_support"] = int((d <= h).sum())
     nearest = {c: min(q["camera_over_level_m"] for q in cands_of[c] if q["real"] and q["footprint_support"])
                for c in chunks if any(q["real"] and q["footprint_support"] for q in cands_of[c])}
@@ -1443,18 +1474,30 @@ def session_floor_levels(xyz: np.ndarray, ks: np.ndarray, cams: np.ndarray, supp
     out = {"levels": [], "cands": [], "chosen": None, "up0": None, "n_support": int(len(P))}
     if len(P) < 3 or len(cams) == 0:
         return out
-    n0, c0 = _weighted_plane(P, np.ones(len(P)))
+    dev = device_of(fl)
+    if dev == "numpy":
+        n0, c0 = _weighted_plane(P, np.ones(len(P)))
+    else:
+        from correction import floor_torch as FT
+        n0, c0 = FT.support_plane(P, dev)
     if float(np.median((cams - c0) @ n0)) < 0.0:          # the walk is above its floor
         n0 = -n0
     out["up0"] = n0.tolist()
     Rf = _rot_between(n0, UP)                             # the support's frame: its normal is up
-    Pf = (P - c0) @ Rf.T
     camf = (cams - c0) @ Rf.T
-    cands_f = _chunk_candidates(Pf, ksP, fl, SESSION_SEED_CHUNK, rep_m, fac, conf, judge_scope="own",
-                                refine_over_all=True, bootstrap_cap=int(fl.ransac_sample))
+    if dev == "numpy":
+        Pf = (P - c0) @ Rf.T
+        cands_f = _chunk_candidates(Pf, ksP, fl, SESSION_SEED_CHUNK, rep_m, fac, conf, judge_scope="own",
+                                    refine_over_all=True, bootstrap_cap=int(fl.ransac_sample))
+    else:
+        # the pool uploaded once and turned into the support's frame on the device (floor_torch)
+        cands_f = FT.chunk_candidates(P, ksP, fl, SESSION_SEED_CHUNK, rep_m, fac, conf, device=dev,
+                                      judge_scope="own", refine_over_all=True,
+                                      bootstrap_cap=int(fl.ransac_sample), frame=(Rf, c0))
     if not cands_f:
         return out
-    from scipy.spatial import cKDTree
+    if dev == "numpy":
+        from scipy.spatial import cKDTree
     cands: List[dict] = []
     H = np.full((len(cands_f), len(camf)), np.nan)          # camera i's height over level j
     under = np.zeros((len(cands_f), len(camf)), bool)       # level j stands under camera i
@@ -1462,19 +1505,23 @@ def session_floor_levels(xyz: np.ndarray, ks: np.ndarray, cams: np.ndarray, supp
         nf, cf = q["normal"], q["centroid"]
         h = camf[:, 1] - np.array([_plane_y_at(nf, cf, float(x), float(z)) for x, z in camf[:, [0, 2]]])
         H[j] = h
-        pts = q["points"][:, [0, 2]]
+        pts = q["points"]
         if len(pts):
             # a level is UNDER a camera when it has support within the camera's own height over
             # it of the camera's (x, z) — the 45° footprint, derived, no radius chosen
-            d, _ = cKDTree(pts).query(camf[:, [0, 2]], k=1, workers=1)
+            if dev == "numpy":
+                d, _ = cKDTree(pts[:, [0, 2]]).query(camf[:, [0, 2]], k=1, workers=1)
+            else:
+                d = FT.nearest_xz(camf, pts, dev)
             under[j] = (h > 0.0) & (d <= h)
         nrm = Rf.T @ nf
         cen = Rf.T @ cf + c0
         if float(np.median((cams - cen) @ nrm)) < 0.0:
             nrm = -nrm
         tilt = float(np.degrees(np.arccos(np.clip(float(nrm @ UP), -1.0, 1.0))))
+        pts_session = (q["points"] @ Rf + c0) if dev == "numpy" else FT.rotate_back(q["points"], Rf, c0, dev)
         cands.append({"rank": int(q["rank"]), "normal": nrm, "centroid": cen,
-                      "points": q["points"] @ Rf + c0, "support": int(q["support"]),
+                      "points": pts_session, "support": int(q["support"]),
                       "real": bool(q["real"]), "judge": q["judge"], "fit": q["fit"],
                       "tilt_deg": tilt, "sigma_tilt_deg": float(q["sigma_tilt_deg"]),
                       "sigma_height_m": float(q["sigma_height_m"])})

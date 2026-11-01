@@ -104,6 +104,27 @@ SEED = 0
 _KEY_FIELDS = ("frame_global", "pixel_row", "pixel_col")
 VERDICT_METRICS = ("r_hat_m", "tau_over_sigma", "one_minus_coverage", "overshoot")
 
+# where the two hot loops run (2026-11-01): numpy = the path of record; cpu | cuda = precision/edge_torch.py
+# (the same r̂ and the same bootstrap normals — tests/test_edge_torch.py)
+DEVICES = ("numpy", "cpu", "cuda")
+_DEVICE_OVERRIDE: Optional[str] = None
+
+
+def use_device(dev: Optional[str]) -> Optional[str]:
+    """The device of every measurement after this call ('cpu' in the synthetic tests — the torch path on the
+    CPU, the same code as the card); None = the configuration's (reconstruction.precision.cloud_metrics.
+    edge_device)."""
+    global _DEVICE_OVERRIDE
+    _DEVICE_OVERRIDE = None if dev is None else str(dev)
+    return _DEVICE_OVERRIDE
+
+
+def device_of(cfg) -> str:
+    from precision.edge_torch import resolve_device
+    if _DEVICE_OVERRIDE is not None:
+        return resolve_device(_DEVICE_OVERRIDE)
+    return resolve_device(cfg.device)
+
 
 # ── configuration (strict: a missing key fails the load, naming it) ──────
 
@@ -125,6 +146,9 @@ class EdgeMetricConfig:
     confidence: float        # correction_graph.graph.heldout_confidence: the
                              # declared confidence of every held-out verdict; z
                              # (1.96 at 0.95) and the bootstrap quantiles follow
+    device: str              # reconstruction.precision.cloud_metrics.edge_device: numpy | cpu | cuda —
+                             # where the fillet-radius sweep and the normals' bootstrap run
+                             # (precision/edge_torch.py; numpy is the path of record)
 
 
 def _need(section: Any, key: str, path: str) -> Any:
@@ -157,12 +181,19 @@ def load_edge_config(raw: Dict[str, Any]) -> EdgeMetricConfig:
     if min_face < 3:
         raise EdgeMetricConfigError(f"'surface_fit.perfect_min_region_faces' = {min_face}: a "
                                     "plane needs at least 3 points")
+    cm = _need(_need(_need(raw, "reconstruction", "<root>"), "precision", "reconstruction"),
+               "cloud_metrics", "reconstruction.precision")
+    device = _need(cm, "edge_device", "reconstruction.precision.cloud_metrics")
+    if device not in DEVICES:
+        raise EdgeMetricConfigError(f"'reconstruction.precision.cloud_metrics.edge_device' must be one of "
+                                    f"{list(DEVICES)}, got {device!r}")
     return EdgeMetricConfig(
         detect=dict(sf),
         inlier_dist_m=_need_num(sf, "p2c_inlier_dist_m", "surface_fit", 0.0),
         min_face_pts=min_face,
         detect_max_pts=_need_num(sf, "p2c_detect_max_pts", "surface_fit", 0, integer=True),
         confidence=_need_num(graph, "heldout_confidence", "correction_graph.graph", 0.0, 1.0),
+        device=str(device),
     )
 
 
@@ -485,6 +516,7 @@ def define_creases(P: np.ndarray, labels: np.ndarray, pairs: Sequence[Tuple[int,
     """S4 on the reference: the adjacent pairs that make a crease, oriented as
     an L, T-junctions split. Returns (creases, skipped pairs with the reason)."""
     P = np.asarray(P, np.float64)
+    dev = device_of(cfg)
     planes, sig, boot = {}, {}, {}
     for f in sorted({f for pr in pairs for f in pr}):
         m = labels == f
@@ -504,7 +536,11 @@ def define_creases(P: np.ndarray, labels: np.ndarray, pairs: Sequence[Tuple[int,
         for f in (fa, fb):
             if f not in boot:
                 Pf = P[labels == f]
-                bn = _bootstrap_normals(Pf, n_boot, SEED + f)
+                if dev == "numpy":
+                    bn = _bootstrap_normals(Pf, n_boot, SEED + f)
+                else:
+                    from precision.edge_torch import bootstrap_normals_t
+                    bn = bootstrap_normals_t(Pf, n_boot, SEED + f, dev)
                 nf = planes[f][0]
                 bn *= np.where(bn @ nf < 0, -1.0, 1.0)[:, None]
                 boot[f] = bn - (bn @ nf)[:, None] * nf[None, :]     # tangent deviations
@@ -567,7 +603,7 @@ def define_creases(P: np.ndarray, labels: np.ndarray, pairs: Sequence[Tuple[int,
 
 def _measure_crease(P: np.ndarray, labels: np.ndarray, cr: Crease, planes: Dict[int, tuple],
                     sig: Dict[int, float], delta: float, z: float,
-                    min_pts: int) -> Optional[Dict[str, Any]]:
+                    min_pts: int, device: str = "numpy") -> Optional[Dict[str, Any]]:
     if cr.fa not in planes or cr.fb not in planes or not delta > 0:
         return None
     na, da, ca = planes[cr.fa]
@@ -618,7 +654,11 @@ def _measure_crease(P: np.ndarray, labels: np.ndarray, cr: Crease, planes: Dict[
     r_max = T_max * float(np.tan(0.5 * phi))
     sect = (a_pts | b_pts | (labels < 0)) & in_S & (np.hypot(qx, qy) <= T_max + delta)
     Q = np.column_stack([qx[sect], qy[sect]])
-    r_hat = fillet_radius(Q, phi, delta, r_max, z)
+    if device == "numpy":
+        r_hat = fillet_radius(Q, phi, delta, r_max, z)
+    else:
+        from precision.edge_torch import fillet_radius_t
+        r_hat = fillet_radius_t(Q, phi, delta, r_max, z, device)
     pr = profile(Q, r_hat, phi, delta)
     sa, sb = float(sig[cr.fa]), float(sig[cr.fb])
     sig_max = max(sa, sb)
@@ -657,6 +697,7 @@ def measure_object(P: np.ndarray, labels: np.ndarray, creases: Sequence[Crease],
     points (each face minus every crease's T(r̂)+Δ zone) until r̂ is a fixed
     point (≤ 3 refits). Returns per-crease records plus the object summary."""
     P = np.asarray(P, np.float64)
+    dev = device_of(cfg)
     faces = sorted({f for c in creases for f in (c.fa, c.fb)})
     cores = {f: labels == f for f in faces}
     prev, results, refits, converged = None, [], 0, False
@@ -668,7 +709,7 @@ def measure_object(P: np.ndarray, labels: np.ndarray, creases: Sequence[Crease],
                 n, d, c = tls_plane(P[m])
                 planes[f] = (n, d, c)
                 sig[f] = mad_sigma(P[m] @ n + d)
-        results = [_measure_crease(P, labels, c, planes, sig, delta, z, cfg.min_face_pts)
+        results = [_measure_crease(P, labels, c, planes, sig, delta, z, cfg.min_face_pts, device=dev)
                    for c in creases]
         key = tuple(None if r is None else r["r_hat_m"] for r in results)
         if key == prev:
