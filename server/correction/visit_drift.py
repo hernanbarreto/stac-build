@@ -126,7 +126,7 @@ class Masklet:
                 "n_visits": self.n_visits, "provenance": "tool_measured"}
 
 
-def masklet_visits(output_dir, log: Callable[[str], None] = print
+def masklet_visits(output_dir, log: Callable[[str], None] = print, masks=None
                    ) -> List[Masklet]:
     """Every SAM3 masklet of the session, with the visits its masks describe.
 
@@ -152,7 +152,10 @@ def masklet_visits(output_dir, log: Callable[[str], None] = print
     if not masks_path.exists():
         raise RuntimeError(f"{masks_path} does not exist — the masklets' "
                            f"visits cannot be read without the masks")
-    masks = fuse_parent.FusedMasks(output_dir)
+    # the store inflated ONCE for the process (correction/mask_store.py): this reader, points_of_masklets
+    # and Visibility used to inflate every mask each — 52 of the closures' 115 s on pccr (2026-11-01)
+    from correction import mask_store
+    masks = masks if masks is not None else mask_store.shared_store(output_dir)
     space = mask_space.resolve(output_dir, masks=masks, log=log)
     n_kf = len(mask_space.keyframe_numbers(output_dir) or [])
     if not n_kf:
@@ -176,8 +179,8 @@ def masklet_visits(output_dir, log: Callable[[str], None] = print
         kf = kf_of_mask_frame.get(int(m.group(1)))
         if kf is None:
             continue
-        a = masks[key]
-        if a.size == 0 or not a.any():
+        has = masks.any(key) if hasattr(masks, "any") else bool(np.asarray(masks[key]).any())
+        if not has:
             n_empty += 1
             continue
         seen.setdefault(int(m.group(2)), set()).add(kf)
@@ -278,8 +281,8 @@ def points_of_masklets(output_dir, frame_global: np.ndarray,
                        pixel_row: np.ndarray, pixel_col: np.ndarray,
                        log: Callable[[str], None] = print,
                        aspect_tol: Optional[float] = None,
-                       mask_pixels: Optional[Tuple[np.ndarray, np.ndarray]] = None
-                       ) -> Dict[int, np.ndarray]:
+                       mask_pixels: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+                       masks=None) -> Dict[int, np.ndarray]:
     """Which cloud points belong to each SAM3 masklet.
 
     The cloud's ``globalIndices`` are per FUSED instance, so a masklet has no
@@ -304,7 +307,9 @@ def points_of_masklets(output_dir, frame_global: np.ndarray,
     from segmentation import fuse_parent
 
     output_dir = Path(output_dir)
-    masks = fuse_parent.FusedMasks(output_dir)            # the fused objects' masks (point 100)
+    from correction import mask_store
+    # the fused objects' masks (point 100), inflated once for the process (correction/mask_store.py)
+    masks = masks if masks is not None else mask_store.shared_store(output_dir)
     space = mask_space.resolve(output_dir, masks=masks, log=lambda m: None)
     kfs = mask_space.keyframe_numbers(output_dir) or []
     n_kf = len(kfs)
@@ -360,11 +365,21 @@ def points_of_masklets(output_dir, frame_global: np.ndarray,
             by_kf.setdefault(kf, []).append((int(m.group(2)), key))
 
     out: Dict[int, List[np.ndarray]] = {}
+    dev = device_of()
     for kf, items in by_kf.items():
         idx = order[start[kf]:end[kf]]
         if not len(idx):
             continue
         r, c = rows[idx], cols[idx]
+        if hasattr(masks, "lookup"):
+            # the keyframe's masks against its points at once: the packed bits unpacked on the device,
+            # one gather (the same inside / outside as masks[key][r, c] > 0, mask by mask)
+            hit = masks.lookup([key for _, key in items], r, c, dev)
+            for m, (oid, key) in enumerate(items):
+                inside = hit[m]
+                if inside.any():
+                    out.setdefault(oid, []).append(idx[inside].astype(np.int64))
+            continue
         for oid, key in items:
             inside = masks[key][r, c] > 0
             if inside.any():
@@ -574,17 +589,29 @@ def ambiguity(copy_a: np.ndarray, oid: int, label: str,
     """
     from scipy.spatial import cKDTree
 
-    tree = cKDTree(np.asarray(copy_a, np.float64))
     mag = float(magnitude_m)
     bound = float(np.nextafter(mag, np.inf))            # the bar itself included
+    dev = device_of()
+    tree = None
+    index = None
+    if dev == "numpy":
+        tree = cKDTree(np.asarray(copy_a, np.float64))
+    else:
+        # the same exact search on the device (correction.visit_drift_torch.CellIndex): copy A in cells of
+        # the bar, every rival point against the 27 cells around it — 10 s of k-d tree queries on pccr
+        from correction.visit_drift_torch import CellIndex
+        index = CellIndex(np.asarray(copy_a, np.float64), bound, dev)
     hits: List[int] = []
     margins: Dict[int, float] = {}
     for other in sorted(points_by_oid):
         idx = points_by_oid[other]
         if other == oid or label_of.get(other) != label or not len(idx):
             continue
-        dd, _ = tree.query(np.asarray(xyz[idx], np.float64), k=1, workers=1,
-                           distance_upper_bound=bound)
+        if tree is not None:
+            dd, _ = tree.query(np.asarray(xyz[idx], np.float64), k=1, workers=1,
+                               distance_upper_bound=bound)
+        else:
+            dd = index.nearest_within(np.asarray(xyz[idx], np.float64))
         d_min = float(dd.min())
         if np.isfinite(d_min) and d_min <= mag:
             hits.append(int(other))
@@ -1228,17 +1255,14 @@ def birth_systematic(project: Callable[[np.ndarray, int], Tuple[np.ndarray, np.n
 
 def mask_store_hw(output_dir) -> Tuple[int, int]:
     """(H, W) of the session's SAM3 mask grid, read off the (fused) store itself."""
-    from segmentation import fuse_parent
+    from correction import mask_store
     output_dir = Path(output_dir)
-    masks = fuse_parent.FusedMasks(output_dir)
-    try:
-        key = next((k for k in masks.files if k.startswith("f") and "_o" in k), None)
-        if key is None:
-            raise RuntimeError(f"the mask store of {output_dir} holds no mask — the mask grid is unknown")
-        a = masks[key]
-    finally:
-        masks.close()
-    return int(a.shape[0]), int(a.shape[1])
+    masks = mask_store.shared_store(output_dir)
+    key = next((k for k in masks.files if k.startswith("f") and "_o" in k), None)
+    if key is None:
+        raise RuntimeError(f"the mask store of {output_dir} holds no mask — the mask grid is unknown")
+    _bits, shape = masks.bits(key)
+    return int(shape[0]), int(shape[1])
 
 
 def _birth_grid_undistorted(output_dir) -> bool:
@@ -1362,9 +1386,10 @@ class Visibility:
 
     def __init__(self, output_dir, xyz: np.ndarray, ks_of_point: np.ndarray,
                  poses: np.ndarray, camera: "SessionProjection", depth_tol_m: float,
-                 min_depth_m: Optional[float] = None, device: Optional[str] = None):
+                 min_depth_m: Optional[float] = None, device: Optional[str] = None, masks=None):
         """``device``: numpy | cpu | cuda (:func:`device_of`) — where the projections, the z-buffers
-        and the ballots run; the torch devices give the same votes (tests/test_visit_drift_torch.py)."""
+        and the ballots run; the torch devices give the same votes (tests/test_visit_drift_torch.py).
+        ``masks``: the session's inflated mask store (correction/mask_store.py); None = the process's shared one."""
         from segmentation import mask_space
         if not isinstance(camera, SessionProjection):
             raise TypeError(
@@ -1381,8 +1406,9 @@ class Visibility:
         self.tol = float(depth_tol_m)
         self.min_depth = float(_vd_cfg().min_depth_m if min_depth_m is None
                                else min_depth_m)
-        from segmentation import fuse_parent
-        self.masks = fuse_parent.FusedMasks(self.dir)      # the fused objects' masks (point 100)
+        from correction import mask_store
+        # the fused objects' masks (point 100), inflated once for the process
+        self.masks = masks if masks is not None else mask_store.shared_store(self.dir)
         self.space = mask_space.resolve(self.dir, masks=self.masks,
                                         log=lambda m: None)
         kfs = mask_space.keyframe_numbers(self.dir) or []
@@ -1392,9 +1418,12 @@ class Visibility:
             mf = self.space.from_keyframe(k)
             if mf is not None:
                 self.kf_of_frame[int(mf)] = k
-        probe = next(self.masks[k] for k in self.masks.files
-                     if k.startswith("f") and "_o" in k)
-        self.Hm, self.Wm = int(probe.shape[0]), int(probe.shape[1])
+        probe_key = next(k for k in self.masks.files if k.startswith("f") and "_o" in k)
+        if hasattr(self.masks, "bits"):
+            self.Hm, self.Wm = (int(v) for v in self.masks.bits(probe_key)[1])
+        else:
+            probe = self.masks[probe_key]
+            self.Hm, self.Wm = int(probe.shape[0]), int(probe.shape[1])
         if (self.Hm, self.Wm) != camera.mask_hw:
             raise CameraMismatchError(
                 f"the mask store is {self.Hm}x{self.Wm} and the camera was bound to a "
@@ -1433,9 +1462,13 @@ class Visibility:
         pccr's 14,861 masks: most of rule 4's 83 s on the card was this, not the votes."""
         cached = self._mask_bits.get(key)
         if cached is None:
-            m = (np.asarray(self.masks[key]) > 0)
-            self._mask_bits[key] = (np.packbits(m, axis=None), m.shape)
-            return m.astype(np.uint8)
+            if hasattr(self.masks, "bits"):                # the shared store already holds the bits
+                cached = self.masks.bits(key)
+                self._mask_bits[key] = cached
+            else:
+                m = (np.asarray(self.masks[key]) > 0)
+                self._mask_bits[key] = (np.packbits(m, axis=None), m.shape)
+                return m.astype(np.uint8)
         bits, shape = cached
         return np.unpackbits(bits, count=int(shape[0]) * int(shape[1])).reshape(shape)
 

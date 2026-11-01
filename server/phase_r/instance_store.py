@@ -159,6 +159,38 @@ class InstanceStore:
         self._migrate()
         self.conn.commit()
 
+    def deferred_commits(self):
+        """A context in which the per-call ``commit()`` of every writer is deferred to ONE commit at the
+        exit (a rollback on an exception): the certification's in-place update wrote 454 instances with
+        912 commits — 20 of its 30 s on pccr (2026-11-01) were sqlite committing, one point blob at a time."""
+        from contextlib import contextmanager
+
+        class _Deferred:
+            """The connection with ``commit`` a no-op; everything else is the connection's."""
+
+            def __init__(self, conn):
+                self._conn = conn
+
+            def commit(self):
+                return None
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        @contextmanager
+        def _ctx(store):
+            real = store.conn
+            store.conn = _Deferred(real)
+            try:
+                yield store
+                real.commit()
+            except BaseException:
+                real.rollback()
+                raise
+            finally:
+                store.conn = real
+        return _ctx(self)
+
     def _migrate(self) -> None:
         """Add columns introduced after a store was created (SQLite has no
         ADD COLUMN IF NOT EXISTS; existing scene .db files must keep working)."""

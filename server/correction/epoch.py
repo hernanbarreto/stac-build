@@ -120,7 +120,27 @@ def reconstruction_id(output_dir) -> str:
                                     f"is part of the reconstruction's identity")
     present = {rel: out / rel for rel in RECONSTRUCTION_ID_FILES if (out / rel).exists()}
     absent = sorted(set(RECONSTRUCTION_ID_FILES) - set(present))
-    return stamp(inputs=present, config={"absent": absent})["sha256"]
+    # memoised per process on the files' identity (path, size, mtime_ns): the certification asked for
+    # it in every report step — 1.5 s of sha256 over the Omega records each time on pccr (2026-11-01).
+    # A file rewritten in place changes its mtime; the same bytes under the same stats are the same id.
+    ident = tuple((rel, _file_ident(p)) for rel, p in sorted(present.items())) + (("absent", tuple(absent)),)
+    hit = _RID_MEMO.get(str(out))
+    if hit is not None and hit[0] == ident:
+        return hit[1]
+    rid = stamp(inputs=present, config={"absent": absent})["sha256"]
+    _RID_MEMO[str(out)] = (ident, rid)
+    return rid
+
+
+_RID_MEMO: Dict[str, Tuple[tuple, str]] = {}
+
+
+def _file_ident(p: Path) -> tuple:
+    """The identity of a file or of a directory's files for the memo: (size, mtime_ns) per file."""
+    if p.is_dir():
+        return tuple(sorted((q.name, q.stat().st_size, q.stat().st_mtime_ns) for q in p.iterdir() if q.is_file()))
+    st = p.stat()
+    return (st.st_size, st.st_mtime_ns)
 
 
 def reconstruction_id_or_none(output_dir) -> Optional[str]:

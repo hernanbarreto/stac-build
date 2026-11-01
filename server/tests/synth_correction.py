@@ -68,7 +68,7 @@ def make_correction_raw_cfg(**overrides) -> dict:
             "max_tilt_deg": 10.0, "min_inliers": 60,
             "min_inlier_ratio": 0.5, "ransac_tol_m": 0.02,
             "ransac_refit_band_m": 0.03, "ransac_iters": 200,
-            "device": "cpu", "ransac_sample": 20000, "smooth_window_kf": 5,
+            "device": "cpu", "bootstrap_draws": "numpy", "ransac_sample": 20000, "smooth_window_kf": 5,
             "local_mad_k": 3.0, "reference_span_kf": 8,
         },
         "revisit": {

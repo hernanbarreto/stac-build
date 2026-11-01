@@ -339,6 +339,35 @@ def scale_map(s_k: float, bend, H: int, W: int):
     return float(s_k) + c1 * (uu - W / 2) / W + c2 * (vv - H / 2) / H
 
 
+def _load_npz_members(args):
+    path, members, missing_ok = args
+    p = Path(path)
+    if not p.exists():
+        if missing_ok:
+            return None
+        raise FileNotFoundError(str(p))
+    with np.load(p) as z:
+        return {m: (np.asarray(z[m]) if m in z.files else None) for m in members}
+
+
+def load_depth_maps(paths: Sequence[Path], members: Sequence[str], missing_ok: bool = False,
+                    workers: int = 8) -> List[Optional[Dict[str, np.ndarray]]]:
+    """The npz ``members`` of every path, read in forked worker processes (numpy and zlib only — never the
+    card; threads where forking is not available); a missing file is None when ``missing_ok``. The arrays
+    are what np.load returns, member by member."""
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+    jobs = [(str(p), tuple(members), bool(missing_ok)) for p in paths]
+    if len(jobs) <= 2:
+        return [_load_npz_members(j) for j in jobs]
+    try:
+        ex = ProcessPoolExecutor(max_workers=int(workers), mp_context=multiprocessing.get_context("fork"))
+    except ValueError:
+        ex = ThreadPoolExecutor(max_workers=int(workers))
+    with ex:
+        return list(ex.map(_load_npz_members, jobs, chunksize=8))
+
+
 def measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir: Path, da3_dir: Path, cfg,
                  log: Callable = print, bend: Optional[Dict[int, tuple]] = None,
                  offset: Optional[Dict[int, float]] = None,
@@ -368,21 +397,25 @@ def measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir: Path, da3_dir: Pa
     cm = load_camera_json(Path(omega_dir).parents[1] / "camera.json")
     lens = bool(np.any(cm.dist()))
     carry, maps = None, None
+    # the depth maps of every keyframe read up front in worker processes (2026-11-01: the 1,181 npz
+    # loads of pccr's check were 12 of its 38 s — zip directories, zlib, numpy headers — on one core)
+    omega_maps = load_depth_maps([omega_dir / f"frame_{f}.npz" for f in frames], ("depth",))
+    da3_maps = load_depth_maps([da3_dir / f"frame_{f}.npz" for f in frames], ("depth", "intrinsics"),
+                               missing_ok=True)
     for i, f in enumerate(frames):
-        with np.load(omega_dir / f"frame_{f}.npz") as z:
-            d0 = np.asarray(z["depth"], np.float64)
-            if carry is None:
-                carry = lens or tuple(d0.shape) != (cm.height, cm.width)
-                if carry:
-                    maps = undistort_maps(cm)[:2]
-                    log(f"{LOG_TAG} Omega's record {d0.shape[1]}x{d0.shape[0]}" + (" + lens" if lens else "")
-                        + f" carried onto the undistorted native grid {cm.width}x{cm.height} before unprojecting with K")
+        d0 = np.asarray(omega_maps[i]["depth"], np.float64)
+        if carry is None:
+            carry = lens or tuple(d0.shape) != (cm.height, cm.width)
             if carry:
-                d0 = CC.record_on_native(d0.astype(np.float32), cm, maps).astype(np.float64)
-            d = d0 * scale_map(s_k[f], bend.get(f) if bend else None, d0.shape[0], d0.shape[1])
-            off = float(offset.get(f, 0.0)) if offset else 0.0
-            if off != 0.0:
-                d = np.where(np.isfinite(d0) & (d0 > 0), d + off, d)
+                maps = undistort_maps(cm)[:2]
+                log(f"{LOG_TAG} Omega's record {d0.shape[1]}x{d0.shape[0]}" + (" + lens" if lens else "")
+                    + f" carried onto the undistorted native grid {cm.width}x{cm.height} before unprojecting with K")
+        if carry:
+            d0 = CC.record_on_native(d0.astype(np.float32), cm, maps).astype(np.float64)
+        d = d0 * scale_map(s_k[f], bend.get(f) if bend else None, d0.shape[0], d0.shape[1])
+        off = float(offset.get(f, 0.0)) if offset else 0.0
+        if off != 0.0:
+            d = np.where(np.isfinite(d0) & (d0 > 0), d + off, d)
         X, uv = unproject_uv(d, K, c2w[i], cfg.pixel_stride)
         world_pts[f] = X
         if floor_planes is not None:
@@ -420,11 +453,10 @@ def measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir: Path, da3_dir: Pa
         ceil_h, n_ceil, ceil_res = band_height(h, cfg.high_pct, cfg.band_m, cfg.min_points)
         cam_h = float((c2w[i][:3, 3] - c) @ n)
         cf_da3 = float("nan")
-        p = da3_dir / f"frame_{f}.npz"
-        if p.exists() and (floor_planes is None or np.isfinite(floor_h)):
-            with np.load(p) as z:
-                dd = np.asarray(z["depth"], np.float64)
-                Kd = np.asarray(z["intrinsics"], np.float64) if "intrinsics" in z.files else K
+        dm = da3_maps[i]
+        if dm is not None and (floor_planes is None or np.isfinite(floor_h)):
+            dd = np.asarray(dm["depth"], np.float64)
+            Kd = np.asarray(dm["intrinsics"], np.float64) if dm.get("intrinsics") is not None else K
             if floor_planes is not None:
                 fd, _, _ = spread_height((depth_points_at(floor_uv[f], K, dd, Kd, c2w[i]) - c) @ n,
                                          cfg.min_points)
@@ -756,8 +788,11 @@ def judge(rows: List[Row], cfg, pool_m: float, log: Callable = print, *, error_f
 
 # ── the run ──────────────────────────────────────────────────────────────
 
-def run_check(session_dir: Path, pcfg, log: Callable = print, chainage: Optional[np.ndarray] = None) -> dict:
-    """Measure, judge, write ``output/precision/chunk_check.json``; return the report."""
+def run_check(session_dir: Path, pcfg, log: Callable = print, chainage: Optional[np.ndarray] = None,
+              floor_levels_out: Optional[dict] = None) -> dict:
+    """Measure, judge, write ``output/precision/chunk_check.json``; return the report. ``floor_levels_out``:
+    a dict the caller passes to receive the chunk floors measured here (key ``levels``) — the certification
+    hands them to its own cloud metrics instead of measuring them again (26 s on pccr, 2026-11-01)."""
     t0 = time.time()
     session_dir = Path(session_dir)
     cfg = pcfg.chunk_check
@@ -779,8 +814,11 @@ def run_check(session_dir: Path, pcfg, log: Callable = print, chainage: Optional
         from precision.cloud_metrics import cloud_floor_levels
         _, data = read_ply(session_dir / "output" / "cleaned_cloud.ply")
         floor_levels = cloud_floor_levels(session_dir / "output", {k: data[k] for k in data.dtype.names},
-                                          frames, c2w, raw_cfg, int(pcfg.cloud_metrics.max_points))
+                                          frames, c2w, raw_cfg, int(pcfg.cloud_metrics.max_points),
+                                          device=str(pcfg.cloud_metrics.device))
         del data
+        if floor_levels_out is not None:
+            floor_levels_out["levels"] = floor_levels
         floor_planes = {int(c): (q["normal"], q["centroid"])
                         for c, q in floor_levels["levels"]["chosen"].items()}
         log(f"{LOG_TAG} the floor under the camera measured on the published cloud for "
