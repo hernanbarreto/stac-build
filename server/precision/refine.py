@@ -67,6 +67,7 @@ CLI (the mapanything env: pycolmap 4): ``python -m precision.refine --session <d
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import math
@@ -919,7 +920,7 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     epochs = read_session_epochs(session_dir)
     doc = {"version": REFINE_VERSION, "provenance": PROVENANCE, **epochs,
            RECONSTRUCTION_ID_KEY: reconstruction_id_or_none(out),
-           "params": {k: getattr(cfg, k) for k in cfg.__dataclass_fields__},
+           "params": dataclasses.asdict(cfg),            # nested dataclasses (refine.torch_ba) as dicts
            "judge": {"rule": "metric_lock.decide_change (USER 2026-10-07): significant under a "
                              "keyframe-cluster bootstrap AND >= min_judge_closures(confidence) "
                              "keyframes AND median improvement >= improvement_error_factor x the "
