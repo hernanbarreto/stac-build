@@ -165,7 +165,8 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
             return
         pipe.send_log(f"[rounds] the rounds ended — the masks of every round ({n_all} "
                       f"instance(s)) are projected on the cloud once")
-        _project_and_crop(pipe, output_dir, n_all)
+        _project_and_crop(pipe, output_dir, n_all,
+                          build_octree=not config.get("_octree_by_certify"))
         return
 
     # EXCLUSIVE GPU (points 92 / 154): the VLM analysis is already on disk — vLLM is not
@@ -308,11 +309,13 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
         pipe.send_progress(100, f"Segmentation complete: {n_instances} objects (the projection "
                                 f"runs after the last round)", stage="sam3")
         return
-    _project_and_crop(pipe, output_dir, n_instances)
+    _project_and_crop(pipe, output_dir, n_instances,
+                      build_octree=not config.get("_octree_by_certify"))
 
 
 
-def _project_and_crop(pipe: WorkerPipe, output_dir: Path, n_instances: int):
+def _project_and_crop(pipe: WorkerPipe, output_dir: Path, n_instances: int,
+                      build_octree: bool = True):
     """The mask→cloud projection (and the per-object mesh crop) of the stage — after the
     only round, or once after the last of the segmentation rounds."""
     # Apply to cleaned cloud
@@ -326,7 +329,8 @@ def _project_and_crop(pipe: WorkerPipe, output_dir: Path, n_instances: int):
     # ONCE, on the reconstruction's PRODUCT epoch made live BEFORE SAM3 ran (point 150):
     # the in-run projection was deferred above, so this is the stage's only projection.
     from segmentation_pipeline import map_segmentation_to_cloud
-    seg_data = map_segmentation_to_cloud(output_dir)
+    # no octree when the certification runs next in this job (it publishes its own)
+    seg_data = map_segmentation_to_cloud(output_dir, build_octree=build_octree)
     if seg_data.get("error"):
         raise RuntimeError(f"mask→cloud projection failed: {seg_data['error']}")
     n_applied = len(seg_data.get("instances", []))

@@ -202,7 +202,8 @@ def test_the_sam3_worker_fails_the_stage_when_the_projection_fails(tmp_path, mon
 
     monkeypatch.setattr(segmentation_pipeline, "run_segmentation", ok)
     monkeypatch.setattr(segmentation_pipeline, "map_segmentation_to_cloud",
-                        lambda output_dir: {"error": "classification overflow", "instances": []})
+                        lambda output_dir, build_octree=True: {"error": "classification overflow",
+                                                               "instances": []})
     with pytest.raises(RuntimeError, match="mask→cloud projection failed: classification overflow"):
         sam3_worker._sam3_work(_Pipe(), str(tmp_path), cfg)
 
@@ -221,7 +222,8 @@ def test_the_sam3_worker_crops_meshes_only_from_a_scene_mesh_stamped_for_this_re
 
     monkeypatch.setattr(segmentation_pipeline, "run_segmentation", ok)
     monkeypatch.setattr(segmentation_pipeline, "map_segmentation_to_cloud",
-                        lambda output_dir: {"instances": [{"id": 0}], "coverage": 0.5})
+                        lambda output_dir, build_octree=True: {"instances": [{"id": 0}],
+                                                               "coverage": 0.5})
     cropped = []
     import segmentation.tsdf_export as te
     monkeypatch.setattr(te, "crop_scene_mesh_to_instances", lambda **kw: cropped.append(1) or [])

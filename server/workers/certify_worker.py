@@ -213,6 +213,12 @@ def _certify_work(pipe: WorkerPipe, session_dir: str, config: dict):
     if seg.exists():
         _caption_objects(pipe, session_path, config, captions_cfg)
 
+    # the live octree stands for the live cloud and its class arrays: the projection before this
+    # stage leaves it to the certification (USER 2026-11-02), whose epoch carries its own — built
+    # here only when the certification published none
+    from segmentation.pipeline import ensure_live_octree
+    ensure_live_octree(output_dir, log=pipe.send_log)
+
     pipe.send_progress(100, f"Certification: {acta.get('stop_reason')} "
                             f"(epoch {acta.get('epoch_final')})", stage=STAGE)
 

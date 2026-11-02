@@ -154,3 +154,20 @@ def test_a_broken_prompts_file_is_redone_with_the_shipped_prompt_and_said(tmp_pa
     assert "DECLARED" in capsys.readouterr().out
     assert save_vlm_prompt(tmp_path, "my own prompt") is True
     assert vlm_prompt_for(tmp_path) == ("my own prompt", True)
+
+
+def test_the_projection_leaves_the_octree_only_to_a_certification_that_follows():
+    """USER 2026-11-02: the projection builds no octree when an ENABLED certification comes after it
+    in the same job (the final epoch carries its own); without one after it, it builds as before."""
+    from types import SimpleNamespace as NS
+    from pipeline_manager import certify_follows
+
+    def job(*pairs):
+        return NS(stages=[NS(stage=NS(id=i, enabled=e)) for i, e in pairs])
+    chain = job((StageId.SAM3, True), (StageId.PROJECTION, True), (StageId.CERTIFY, True))
+    assert certify_follows(chain, 1) and certify_follows(chain, 0)
+    assert not certify_follows(chain, 2)                                  # nothing after the certification
+    off = job((StageId.SAM3, True), (StageId.PROJECTION, True), (StageId.CERTIFY, False))
+    assert not certify_follows(off, 1)                                    # switched off: the projection builds
+    alone = job((StageId.SAM3, True), (StageId.PROJECTION, True))
+    assert not certify_follows(alone, 1)

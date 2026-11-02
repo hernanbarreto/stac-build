@@ -1463,6 +1463,10 @@ class PipelineManager:
             rounds = (stage_state.stage.id == StageId.SAM3
                       and self._segmentation_rounds_on(job, config))
             stage_config = (dict(config, _defer_projection=True) if rounds else config)
+            if stage_state.stage.id == StageId.PROJECTION and certify_follows(job, idx):
+                # the certification publishes the final epoch with its own octree (USER
+                # 2026-11-02): the projection builds none
+                stage_config = dict(stage_config, _octree_by_certify=True)
             if stage_state.stage.id == StageId.CERTIFY and job.kind == "captions":
                 # the descriptions job a segment rename orders (USER 2026-10-09): the
                 # certification worker runs ONLY the per-object descriptions — the objects
@@ -1597,8 +1601,12 @@ class PipelineManager:
             k += 1
         sam3_state.status = JobStatus.RUNNING
         sam3_state.message = "Projecting every round's masks on the cloud"
+        idx = next(i for i, st in enumerate(job.stages) if st is sam3_state)
         return await self._run_stage(job, sam3_state, session_dir,
-                                     dict(config, _projection_only=True), on_progress, replace)
+                                     dict(config, _projection_only=True,
+                                          **({"_octree_by_certify": True}
+                                             if certify_follows(job, idx) else {})),
+                                     on_progress, replace)
 
     async def _fail_before_stages(self, job: PipelineJob, message: str,
                                   on_progress: Optional[ProgressCallback],
@@ -1985,6 +1993,12 @@ def build_pipeline_stages(backend: Optional[str] = None,
 # the stages that run AFTER the published cloud: the segmentation chain and what
 # feeds on it (USER 2026-10-05: a per-scan check in "Reconstruir" turns them off;
 # the Autosegment window runs any subset of them later)
+def certify_follows(job: "PipelineJob", idx: int) -> bool:
+    """An enabled CERTIFY stage comes after stage ``idx`` of ``job`` — it publishes the final
+    epoch with its own octree, so the projection before it builds none (USER 2026-11-02)."""
+    return any(st.stage.id == StageId.CERTIFY and st.stage.enabled for st in job.stages[idx + 1:])
+
+
 SEGMENTATION_CHAIN = (StageId.VLM, StageId.SAM3, StageId.CERTIFY, StageId.GENRECON)
 # ... plus the projection stage, which only exists after SAM3's masks
 SEGMENT_WHEN_DONE = SEGMENTATION_CHAIN + (StageId.PROJECTION,)
@@ -2172,7 +2186,9 @@ def _projection_work(pipe, session_dir: str, config: dict) -> None:
     from correction.chain import select_product_epoch
     select_product_epoch(output_dir, log=pipe.send_log)
     from segmentation_pipeline import map_segmentation_to_cloud
-    seg_data = map_segmentation_to_cloud(output_dir)
+    # no octree when the certification runs next in this job (it publishes its own)
+    seg_data = map_segmentation_to_cloud(output_dir,
+                                         build_octree=not config.get("_octree_by_certify"))
     if seg_data.get("error"):
         raise RuntimeError(f"mask→cloud projection failed: {seg_data['error']}")
     from atomic_io import atomic_write_json

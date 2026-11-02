@@ -4478,7 +4478,8 @@ def _display_transform(output_dir: Path, ply_path: Path, xyz: np.ndarray, log=pr
 
 
 def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
-                          cfg_source: Optional[str] = None, stage_dir=None) -> dict:
+                          cfg_source: Optional[str] = None, stage_dir=None,
+                          build_octree: bool = True) -> dict:
     """
     Core processing: match SAM3 masks against the PLY cloud — the mask→point
     assignment, the audit, the merges, the split, the attach, the OBBs, the
@@ -5293,6 +5294,18 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
     from potree_converter import (convert_ply_to_potree, octree_matches, potree_stamp_for,
                                   write_octree_record, write_potree_stamp)
     potree_dir = output_dir / "potree"
+    if not build_octree:
+        # the certification runs next in this job and publishes the final epoch with its own
+        # octree (USER 2026-11-02: "por qué arma el octree en esta etapa si con la
+        # certificación puede moverse y hay que generarla nuevamente" — one Potree build of
+        # ~5 min, one thread, the card idle): none here, and no record of one. The
+        # certification builds the octree of the live cloud itself when it publishes nothing
+        # (workers/certify_worker.py, ensure_live_octree). Until then the viewer shows the
+        # cloud without the segmentation's colours.
+        (output_dir / POTREE_STAMP_NAME).unlink(missing_ok=True)
+        print("[SegPipeline] 🌲 octree left to the certification that runs next (it publishes "
+              "the final epoch with its own) — not built here")
+        return result
     # the cloud's digest is already in the result's stamp: the octree checks take it (a
     # multi-gigabyte cloud is hashed once per projection, not three times)
     _cloud_sha = result["stamp"]["inputs"]["cloud"]
@@ -5323,7 +5336,34 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
     return result
 
 
-def map_segmentation_to_cloud(output_dir) -> dict:
+def ensure_live_octree(output_dir, log=print) -> bool:
+    """The live octree stands for the live cloud and its class arrays — rebuilt, with the
+    projection's record of it, only when it does not (``potree_converter.octree_matches``: the
+    stamp of the cloud's bytes, the class arrays, the converter). The certification calls it at
+    its end: a projection that left the octree to it (``build_octree=False``) gets one when the
+    certification published no epoch of its own. Returns True when it built one."""
+    from potree_converter import (convert_ply_to_potree, octree_matches, potree_stamp_for,
+                                  write_octree_record, write_potree_stamp)
+    output_dir = Path(output_dir)
+    ply_path = output_dir / "cleaned_cloud.ply"
+    if not ply_path.exists():
+        return False
+    potree_dir = output_dir / "potree"
+    ok, why = octree_matches(potree_dir, ply_path)
+    if ok:
+        log(f"[SegPipeline] Potree untouched — {why}")
+        return False
+    if not convert_ply_to_potree(output_dir.parent, force=True, ply_override=ply_path):
+        raise RuntimeError(f"the Potree octree could not be built from {ply_path.name}")
+    stamp = potree_stamp_for(ply_path)
+    write_potree_stamp(potree_dir, stamp)
+    if (output_dir / "segmentation_result.json").exists():
+        write_octree_record(output_dir, stamp)
+    log(f"[SegPipeline] 🌲 Potree octree built from {ply_path.name} — {why}")
+    return True
+
+
+def map_segmentation_to_cloud(output_dir, build_octree: bool = True) -> dict:
     """Deferred mask→cloud mapping (anchored pipeline order): run the FULL
     matching + per-instance cleaning ONCE against the (corrected, merged)
     cleaned cloud, then refresh the Phase R store's canonical OBBs so the
@@ -5349,7 +5389,7 @@ def map_segmentation_to_cloud(output_dir) -> dict:
             return _cached
     else:
         print(f"[SegPipeline] projecting: {_why}")
-    result = _match_and_save_result(output_dir)
+    result = _match_and_save_result(output_dir, build_octree=build_octree)
     # scene_r.db is (re)built inside the mask→cloud matching itself — points,
     # labels and OBBs all in the display frame, single source for phases 2-6.
     return result
@@ -5473,7 +5513,7 @@ def _merge_absorbed(prev, new, instances) -> dict:
 
 
 def _match_and_save_result(output_dir, ply_path=None, config: Optional[dict] = None,
-                           config_source: Optional[str] = None):
+                           config_source: Optional[str] = None, build_octree: bool = True):
     """
     Run mask→cloud matching and save to segmentation_result.json.
 
@@ -5487,7 +5527,8 @@ def _match_and_save_result(output_dir, ply_path=None, config: Optional[dict] = N
     """
     from segmentation.match_lock import matching_lock
     with matching_lock(output_dir, log=lambda m: print(f"[SegPipeline]{m}")):
-        return _match_and_save_result_locked(output_dir, ply_path, config, config_source)
+        return _match_and_save_result_locked(output_dir, ply_path, config, config_source,
+                                             build_octree=build_octree)
 
 
 # the order the staged products are swapped into output/ (point 122): the per-point
@@ -5522,7 +5563,8 @@ def _publish_staged_products(stage_dir: Path, output_dir: Path, log=print) -> Li
 
 
 def _match_and_save_result_locked(output_dir, ply_path=None, config: Optional[dict] = None,
-                                  config_source: Optional[str] = None):
+                                  config_source: Optional[str] = None,
+                                  build_octree: bool = True):
     """The projection, FULL and PURE (docs/plan_determinismo.md point 99): it
     starts from an empty result, never merges a previous `segmentation_result.json`
     (no carried instances, no carried captions — the per-object descriptions
@@ -5548,7 +5590,7 @@ def _match_and_save_result_locked(output_dir, ply_path=None, config: Optional[di
 
     try:
         result = _match_masks_to_cloud(output_dir, ply_path, cfg=config, cfg_source=config_source,
-                                       stage_dir=staging)
+                                       stage_dir=staging, build_octree=build_octree)
         if "error" in result or not result.get("instances"):
             raise RuntimeError(f"the projection produced no instance for {output_dir} — "
                                f"{result.get('error') or 'no mask landed on the cloud'}")

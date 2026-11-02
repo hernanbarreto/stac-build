@@ -224,3 +224,31 @@ def test_a_configured_audit_that_cannot_run_fails_the_projection(tmp_path, fake_
     HA._EVIDENCE_CACHE.clear()
     with pytest.raises(RuntimeError, match="mask audit: no mask/camera evidence"):
         P._match_and_save_result(out)
+
+
+def test_the_octree_is_left_to_the_certification_that_follows(tmp_path, fake_potree):
+    """USER 2026-11-02 ("por qué arma el octree en esta etapa si con la certificación puede moverse"):
+    with the certification next in the job the projection builds no octree and leaves no record of one —
+    the same result otherwise; the certification's ensure_live_octree builds it when the live one does
+    not stand for the live cloud and its class arrays, and leaves a matching one alone."""
+    import potree_converter as PC
+    out, _, _ = _session(tmp_path)
+    (out / P.POTREE_STAMP_NAME).write_text("{}")                     # a previous projection's record
+    res = P.map_segmentation_to_cloud(out, build_octree=False)
+    assert len(res["instances"]) == 2 and "reload_potree" not in res
+    assert fake_potree == [] and not (out / P.POTREE_STAMP_NAME).exists()
+    # the certification published nothing: it builds the octree of the live cloud + class arrays
+    assert P.ensure_live_octree(out) is True
+    assert fake_potree == [str(out / "cleaned_cloud.ply")]
+    assert (out / P.POTREE_STAMP_NAME).exists()
+    ok, _why = PC.octree_matches(out / "potree", out / "cleaned_cloud.ply")
+    assert ok
+    # a live octree that stands for the live cloud is left alone
+    assert P.ensure_live_octree(out) is False and len(fake_potree) == 1
+    # the full projection (no certification after it) builds as before: the same result bytes
+    out2, _, _ = _session(tmp_path / "b")
+    P.map_segmentation_to_cloud(out2)
+    assert len(fake_potree) == 2
+    a = json.loads((out / "segmentation_result.json").read_text())
+    b = json.loads((out2 / "segmentation_result.json").read_text())
+    assert [i["total_points"] for i in a["instances"]] == [i["total_points"] for i in b["instances"]]

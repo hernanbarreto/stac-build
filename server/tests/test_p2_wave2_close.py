@@ -270,7 +270,7 @@ def test_the_worker_selects_the_product_epoch_before_sam3_and_projects_once(tmp_
 
     monkeypatch.setattr(segmentation_pipeline, "run_segmentation", run)
     monkeypatch.setattr(segmentation_pipeline, "map_segmentation_to_cloud",
-                        lambda output_dir: (events.append("project"),
+                        lambda output_dir, build_octree=True: (events.append("project"),
                                             {"instances": [{"id": 0}], "coverage": 0.5})[1])
     pipe = _Pipe()
     sam3_worker._sam3_work(pipe, str(tmp_path), cfg)
