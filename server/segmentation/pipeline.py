@@ -4835,8 +4835,13 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
     _sorted_ids = point_obj_id[_order]
 
     def _points_of(obj_ids):
-        parts = [_order[np.searchsorted(_sorted_ids, o, "left"):np.searchsorted(_sorted_ids, o, "right")]
-                 for o in obj_ids]
+        # the needles in the haystack's dtype: a Python int against the int32 ids made numpy cast the
+        # WHOLE sorted array to int64 on every call (52 ms per search over station's 56.5 M points,
+        # two per obj_id: the loop's 169 s of 'select', 2026-11-02) — the same positions
+        o = np.asarray(obj_ids, dtype=_sorted_ids.dtype)
+        lo = np.searchsorted(_sorted_ids, o, "left")
+        hi = np.searchsorted(_sorted_ids, o, "right")
+        parts = [_order[a:b] for a, b in zip(lo, hi)]
         idx = np.concatenate(parts) if parts else np.zeros(0, np.int64)
         return np.sort(idx).astype(np.int64)
 
