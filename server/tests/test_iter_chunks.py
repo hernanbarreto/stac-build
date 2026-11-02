@@ -68,3 +68,11 @@ def test_the_seams_read_each_chunk_once_through_it():
     seg = seg[:seg.index("self.sim3_list.append((s, R, t))")]
     assert "self._stac_iter_chunks(" in seg and "self.result_unaligned_dir" in seg
     assert "np.load(" not in seg            # no chunk read twice per seam
+
+
+def test_the_alignment_is_applied_reading_one_ahead():
+    body = _method("process_long_sequence")
+    seg = body[body.index("print('Apply alignment')"):]
+    seg = seg[:seg.index("chunk_data['world_points'] = apply_sim3_direct(")]
+    assert "self._stac_iter_chunks(self.result_unaligned_dir" in seg
+    assert 'np.load(os.path.join(self.result_unaligned_dir, f"chunk_{chunk_idx + 1}.npy")' not in seg
