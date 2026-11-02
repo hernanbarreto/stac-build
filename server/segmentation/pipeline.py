@@ -2860,6 +2860,22 @@ def _find_nearest_keyframe(frame_idx: int, keyframes: list, max_dist: int = 5) -
     return None
 
 
+def _instances_share_points(instances: list, n_pts: int) -> bool:
+    """True when some cloud point is in the ``globalIndices`` of two of ``instances`` — one pass
+    over the points (an owner per point), the question the pairwise index-overlap merge asks of
+    every pair."""
+    owner = np.full(int(n_pts), -1, dtype=np.int64)
+    for k, inst in enumerate(instances):
+        idx = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
+        if not len(idx):
+            continue
+        idx = np.unique(idx)
+        if bool((owner[idx] >= 0).any()):
+            return True
+        owner[idx] = k
+    return False
+
+
 def _clean_segment_subcloud(xyz: np.ndarray, indices: np.ndarray,
                              obj_id: int, cfg: Optional[dict] = None) -> tuple:
     """
@@ -4938,7 +4954,15 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
     # (Phase 1 gives every point ONE obj id and instances are groups of obj ids, so
     # instance index sets are disjoint and this merge cannot fire — kept as the
     # recipe's step; the space dedupe below is the one that decides.)
-    if _merge_on and len(instances) > 1:
+    if _merge_on and len(instances) > 1 and not _instances_share_points(instances, n_pts):
+        # the instance index sets are disjoint (one obj id per point, above): no pair intersects,
+        # so the pairwise loop below cannot merge anything — station 2026-11-02 spent ~25 min in
+        # it over 1,183 instances (a Python set of every j's points built for every pair i < j)
+        # with the card idle. One pass over the points says so; the loop runs only when some
+        # point is in two instances, and then exactly as before
+        print(f"[SegPipeline]   Cross-category merge: {len(instances)} instances share no point "
+              f"— nothing to merge")
+    elif _merge_on and len(instances) > 1:
         merge_threshold = float(_dd.get("dedupe_overlap", 0.8))
         _mutual_idx = bool(_dd.get("dedupe_mutual", True))
         merged_away = set()  # indices of instances absorbed by others
