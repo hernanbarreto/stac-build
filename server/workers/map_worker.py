@@ -2486,6 +2486,18 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             _sky_now = _start_sky_precompute(config, frames_dir, output_dir, _sel_files, pipe)
             if _sky_now is not None:
                 _sky_now.wait(check_cancel=pipe.check_cancel)
+        # the fork's chunk files on the pod's LOCAL disk when they fit (reconstruction/
+        # fork_scratch.py: read and rewritten ~10 times inside Omega — station 2026-11-01, 360 MB/s
+        # over the network file system with the card idle); the aligned ones only when this run
+        # deletes them after the scale (certify.keep_aligned_chunks: kept ones stay on /workspace)
+        from reconstruction import fork_scratch as _FS
+        from reconstruction.loops.config import load_loops_config as _llc_fs
+        _FS.gc(log=pipe.send_log)
+        _fs_subs = ["_tmp_results_unaligned"]
+        if not _llc_fs(config).certify.keep_aligned_chunks:
+            _fs_subs.append("_tmp_results_aligned")
+        _FS.place(output_dir / "maplong_run", _fs_subs,
+                  _FS.estimate_bytes(chunk_lengths(_ranges), _res["grid_wh"]), log=pipe.send_log)
         repro.require_exclusive_gpu(log=pipe.send_log)
         try:
             _ok = _omega_pass(vggt_config, _tag1)
@@ -2605,10 +2617,9 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         if _llc(config).certify.keep_aligned_chunks:
             pipe.send_log("[cleanup] _tmp_results_aligned KEPT (certify.keep_aligned_chunks: "
                           "the post-hoc graph / A/B harness / certification read it)")
-        elif _aligned.exists():
-            _mb = sum(f.stat().st_size for f in _aligned.rglob("*")
-                      if f.is_file()) / 1048576
-            shutil.rmtree(_aligned, ignore_errors=True)
+        elif _aligned.exists() or _aligned.is_symlink():
+            from reconstruction import fork_scratch as _FS
+            _mb = _FS.remove(_aligned) / 1048576          # through its link when on the local disk
             pipe.send_log(f"[cleanup] _tmp_results_aligned deleted after scale "
                           f"({_mb:.0f} MB freed)")
         return _walk
@@ -2846,9 +2857,12 @@ def _wipe_plan_products(output_dir: Path, why: str, log=print) -> int:
     doomed = [p for p in out.iterdir() if p.name not in _PLAN_INDEPENDENT_OUTPUT] if out.is_dir() else []
     if ml.is_dir():
         doomed += [p for p in ml.iterdir() if p.name not in _PLAN_INDEPENDENT_MAPLONG]
+    from reconstruction import fork_scratch as _FS
     for p in doomed:
         try:
-            if p.is_dir() and not p.is_symlink():
+            if p.is_symlink():
+                freed += _FS.remove(p)          # a chunk directory on the local disk: target and link
+            elif p.is_dir():
                 freed += sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
                 shutil.rmtree(p)
             else:
@@ -2886,11 +2900,11 @@ def _cleanup_recon_temps(save_dir: Path, output_dir: Path, backend: str, pipe: W
                       level="warning")
     # uncert/ (per-frame uncertainty maps) is read by nothing after the run: uncertainty.json carries
     # the per-frame numbers the certification reads, and the fork's own resume reads that json too
+    from reconstruction import fork_scratch as _FS
     for tmp_dir_name in ["_tmp_results_unaligned", "pcd"] + ([] if _keep_loop else ["_tmp_results_loop", "uncert"]):
         tmp_dir = save_dir / tmp_dir_name
-        if tmp_dir.exists():
-            size_mb = sum(f.stat().st_size for f in tmp_dir.rglob("*") if f.is_file()) / (1024 * 1024)
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+        if tmp_dir.exists() or tmp_dir.is_symlink():
+            size_mb = _FS.remove(tmp_dir) / (1024 * 1024)   # through its link when on the local disk
             pipe.send_log(f"Cleaned up {tmp_dir_name}/ ({size_mb:.0f} MB freed)")
 
     # DA3-priors cleanup: in the mapanything backend, da3_run/ holds ONLY the consumed
