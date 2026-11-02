@@ -9,6 +9,9 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js'
+import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js'
+import { TilesRenderer } from '3d-tiles-renderer'
+import { GLTFExtensionsPlugin } from '3d-tiles-renderer/plugins'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { PotreeOctreeLoader } from './PotreeLoader'
 import { AssistantViz, arrowDimension, objectDims, thickBox, thickSegment, type SceneObject, type UserVolume, type TraceEntry } from './assistantViz'
@@ -35,6 +38,13 @@ function makeGltfLoader(): GLTFLoader {
     l.setMeshoptDecoder(MeshoptDecoder)
     return l
 }
+
+// A TILED mesh (tools/glb/tile_mesh.mjs; USER 2026-11-02: "hay que implementar el tema de los tiles … para que pueda
+// ser manejable una malla grande") streams like the Potree octree. Each tile's geometricError is the world size of
+// one of its texels (or its simplification error, when larger), so this is how many screen pixels one texel may
+// cover before the finer tile loads; 3d-tiles-renderer's default (16 px) is a geometry tolerance and shows the
+// coarse atlases at room distances.
+const MESH_TILES_ERROR_TARGET = 2
 
 type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align' | 'erase'
 
@@ -248,6 +258,7 @@ export interface ViewportHandle {
 interface TsdfListEntry {
     folder: string
     glb_url: string
+    tileset_url?: string    // the mesh is tiled: the viewer streams the tileset, the GLB stays on disk
     meta: { instance_id?: number; label?: string; method?: string } | null
 }
 
@@ -633,6 +644,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const reconSceneGroupRef = useRef<THREE.Group | null>(null)
     const reconByInstanceRef = useRef<Map<number, THREE.Group>>(new Map())
     const gltfLoaderRef = useRef<GLTFLoader | null>(null)
+    // the tiled meshes on screen, by folder, and the transcoder their KTX2 textures need
+    const tilesRenderersRef = useRef<Map<string, TilesRenderer>>(new Map())
+    const ktx2LoaderRef = useRef<KTX2Loader | null>(null)
     const obbMapRef = useRef<Map<string, THREE.Object3D>>(new Map())
     const bimGroupRef = useRef<THREE.Group | null>(null)
     const sabanaGroupRef = useRef<THREE.Group | null>(null)
@@ -2051,6 +2065,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
     // ── TSDF mesh auto-load helpers (mirrors ShapeR — separate group) ──
     const clearAllTsdf = useCallback(() => {
+        tilesRenderersRef.current.forEach(t => t.dispose())
+        tilesRenderersRef.current.clear()
         const group = tsdfGroupRef.current
         if (group) {
             disposeMeshGroup(group)   // geometry + materials + TEXTURES
@@ -2067,6 +2083,38 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const loadTsdfMeshEntry = useCallback(async (sh: TsdfListEntry): Promise<THREE.Group | null> => {
         const group = tsdfGroupRef.current
         if (!group) return null
+        // a tiled mesh: the tiles on screen at the detail the screen needs, instead of one GLB whose textures all
+        // decode on the card at once (station's GenRecon mesh restarted the viewer that way)
+        if (sh.tileset_url) {
+            const renderer = rendererRef.current, camera = cameraRef.current
+            if (!renderer || !camera) return null
+            if (!ktx2LoaderRef.current)
+                ktx2LoaderRef.current = new KTX2Loader().setTranscoderPath(`${import.meta.env.BASE_URL}basis/`).detectSupport(renderer)
+            const key = `tsdf-${sh.folder}`
+            const tiles = new TilesRenderer(sh.tileset_url)
+            tiles.registerPlugin(new GLTFExtensionsPlugin({ ktxLoader: ktx2LoaderRef.current, meshoptDecoder: MeshoptDecoder }))
+            tiles.errorTarget = MESH_TILES_ERROR_TARGET
+            tiles.setCamera(camera)
+            tiles.setResolutionFromRenderer(camera, renderer)
+            tiles.addEventListener('load-model', ({ scene: tileScene }) => {
+                tileScene.traverse((obj) => {
+                    if (!(obj instanceof THREE.Mesh)) return
+                    for (const m of (Array.isArray(obj.material) ? obj.material : [obj.material])) {
+                        if (!m) continue
+                        m.side = THREE.DoubleSide           // as the GLB meshes below
+                        const w = m as THREE.Material & { wireframe?: boolean }
+                        if (wireframeRef.current.has(key) && 'wireframe' in w) w.wireframe = true
+                    }
+                })
+            })
+            const meshGroup = new THREE.Group()
+            meshGroup.name = key
+            meshGroup.userData = { meta: sh.meta, folder: sh.folder, method: 'tsdf', tiled: true }
+            meshGroup.add(tiles.group)
+            group.add(meshGroup)
+            tilesRenderersRef.current.set(sh.folder, tiles)
+            return meshGroup
+        }
         if (!gltfLoaderRef.current) gltfLoaderRef.current = makeGltfLoader()
         const loader = gltfLoaderRef.current
 
@@ -3601,6 +3649,15 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     u.uViewportH.value = renderer.domElement.clientHeight || 1
                     const ep = epochLayerRef.current?.material.uniforms
                     if (ep && ep.uViewRotInv) { (ep.uViewRotInv.value as THREE.Matrix3).copy(u.uViewRotInv.value as THREE.Matrix3); ep.uViewportH.value = u.uViewportH.value }
+                }
+            }
+            // tiled meshes: which tiles the camera needs, at which detail (a hidden mesh loads nothing)
+            if (tilesRenderersRef.current.size && tsdfGroupRef.current?.visible) {
+                camera.updateMatrixWorld()
+                for (const t of tilesRenderersRef.current.values()) {
+                    if (!t.group.parent?.visible) continue
+                    t.setResolutionFromRenderer(camera, renderer)
+                    t.update()
                 }
             }
             renderer.render(scene, camera)

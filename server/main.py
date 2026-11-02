@@ -5117,11 +5117,17 @@ async def tsdf_list(session_id: str):
                     meta = json.load(f)
             except Exception as e:
                 print(f"[TSDFList] failed to read {meta_file}: {e}")
-        shapes.append({
+        entry = {
             "folder": obj_folder.name,
             "glb_url": f"/api/segmentation/tsdf/file/{session_id}/{obj_folder.name}/{glb_file.name}",
             "meta": meta,
-        })
+        }
+        # a mesh tiled for the viewer (tools/glb/tile_mesh.mjs → tiles/tileset.json, USER 2026-11-02: "hay que
+        # implementar el tema de los tiles … para que pueda ser manejable una malla grande"): the viewer streams
+        # the tileset instead of downloading the whole GLB
+        if (obj_folder / "tiles" / "tileset.json").is_file():
+            entry["tileset_url"] = f"/api/segmentation/tsdf/tiles/{session_id}/{obj_folder.name}/tileset.json"
+        shapes.append(entry)
     return {"ok": True, "shapes": shapes}
 
 
@@ -5148,6 +5154,21 @@ async def tsdf_file(session_id: str, folder: str, filename: str):
         media_type=media_type,
         headers={"Cache-Control": "no-cache"},
     )
+
+
+@app.get("/api/segmentation/tsdf/tiles/{session_id}/{folder}/{filename}")
+async def tsdf_tiles_file(session_id: str, folder: str, filename: str):
+    """Serve one file of a mesh's tileset (output/tsdf/<folder>/tiles/: tileset.json + tile_<id>.glb)."""
+    from fastapi.responses import FileResponse
+    if "/" in folder or ".." in folder or "/" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid path component")
+    ctx = _ctx(session_id)
+    full_path = ctx.output_dir / "tsdf" / folder / "tiles" / filename
+    if not full_path.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+    media_type = ("model/gltf-binary" if filename.endswith(".glb")
+                  else "application/json" if filename.endswith(".json") else "application/octet-stream")
+    return FileResponse(str(full_path), media_type=media_type, headers={"Cache-Control": "no-cache"})
 
 
 # ── Eraser tool (USER 2026-08-29): one gesture, one truth — points leave the

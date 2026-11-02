@@ -112,3 +112,12 @@ def test_the_cube_side_reaches_the_runner(tmp_path, monkeypatch):
     envs.clear()
     _run(tmp_path, monkeypatch, {**_CFG, "generative_mesh_name": ""})
     assert envs and envs[0]["GENRECON_CUBE_M"] == "3.7"
+
+
+def test_the_tiles_switch_reaches_the_runner(tmp_path, monkeypatch):
+    envs.clear()
+    _run(tmp_path / "on", monkeypatch, {**_CFG, "generative_mesh_name": "", "tiles": True})
+    assert envs and envs[0]["GENRECON_TILES"] == "1"
+    envs.clear()
+    _run(tmp_path / "off", monkeypatch, {**_CFG, "generative_mesh_name": "", "tiles": False})
+    assert envs and envs[0]["GENRECON_TILES"] == "0"

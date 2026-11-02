@@ -127,7 +127,8 @@ def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
            "GENRECON_SIMPLIFY": str(int(gcfg.get("simplify_faces_per_chunk", 150000))),
            "GENRECON_TEX": str(int(gcfg.get("texture_size", 2048))),
            "GENRECON_TOPK": str(int(gcfg.get("bake_views", 3))),
-           "GENRECON_CUBE_M": str(float(gcfg.get("cube_size_m", 0.0)))}
+           "GENRECON_CUBE_M": str(float(gcfg.get("cube_size_m", 0.0))),
+           "GENRECON_TILES": "1" if bool(gcfg.get("tiles", False)) else "0"}
     if not _SCRIPT.exists():
         raise FileNotFoundError(f"GenRecon runner missing: {_SCRIPT}")
     stop_semantic_service_verified(pipe, stage="GenRecon mesh")

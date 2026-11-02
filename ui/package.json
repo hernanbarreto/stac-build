@@ -21,6 +21,7 @@
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.14.0",
     "@types/three": "^0.182.0",
+    "3d-tiles-renderer": "0.5.3",
     "chart.js": "^4.5.1",
     "lucide-react": "^0.575.0",
     "react": "^18.2.0",

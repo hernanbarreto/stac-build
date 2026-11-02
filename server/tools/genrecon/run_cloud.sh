@@ -12,14 +12,24 @@
 # porque no va a ser exactamente igual").
 # CUBES (USER 2026-11-02): GENRECON_CUBE_M > 0 = cubes of that side stacked from the lowest level to the cloud's top
 # (genrecon_levels.stack_layers; the worker passes genrecon.cube_size_m), 0 = GenRecon's one layer floor to ceiling.
+# TILES (USER 2026-11-02: "hay que implementar el tema de los tiles … para que pueda ser manejable una malla grande"):
+# GENRECON_TILES=1 (the worker passes genrecon.tiles) cuts the published mesh into 3D Tiles beside it,
+# output/tsdf/<name>/tiles/ (tools/glb/tile_mesh.mjs): the viewer streams them instead of the whole GLB. The old
+# tileset leaves BEFORE the new mesh is published — a tileset never outlives the mesh it was cut from.
 set -x
 G=/workspace/stac-build/vendor/GenRecon; T=/workspace/stac-build/server/tools/genrecon
 DA3=/workspace/miniforge3/envs/da3/bin/python; GR=/workspace/miniforge3/envs/genrecon/bin/python
+NODE=/workspace/miniforge3/envs/nodejs/bin/node; GLB=/workspace/stac-build/tools/glb
 export CUDA_HOME=/workspace/miniforge3/envs/genrecon OMP_NUM_THREADS=8 HF_HOME=${HF_HOME:-/workspace/hf_cache} HF_TOKEN=${HF_TOKEN:-$(cat ${HF_HOME:-/workspace/hf_cache}/token 2>/dev/null)}
 spec=$1; name=${2:-genrecon_photo}; raw=${name}_raw; minpts=${3:-10}; mode=${4:-cloud}; sid=${spec%%:*}; scan=${spec##*:}
 tag=cloud; [ "$mode" = "cloud+unseen" ] && tag=fill; [ "$mode" = "cloud+objects" ] && tag=obj; [ "$mode" = "cloud+hull" ] && tag=hull; [ "$mode" = "generative" ] && tag=gen
 SES=/workspace/stac-build/server/projects/$sid/scans/$scan/src_default; W=$G/work/$sid; O=$G/work/${sid}_${tag}_out; OL=$G/work/${sid}_${tag}_out_light
 echo "=== SESSION $sid ($scan) $(date +%H:%M:%S)"
+tile_published() {
+  [ "${GENRECON_TILES:-0}" = "1" ] || return 0
+  local d=$SES/output/tsdf/$1
+  (cd $GLB && $NODE tile_mesh.mjs $d/$1.glb $d/tiles --jobs 4) || { echo "tiles failed $sid"; exit 1; }
+}
 (cd /workspace/stac-build/server && $DA3 $T/adapter.py $SES $W 600000 ${GENRECON_CUBE_M:-0}) || { echo "adapter failed $sid"; exit 1; }
 EXTRA=""
 if [ "$mode" = "cloud+hull" ]; then
@@ -40,9 +50,11 @@ rm -rf $O $OL
    --pipeline_config configs/pipelines/texture.json --proj_batch_voxels 2048 --colmap_subdir colmap_mast3r \
    $COORDS) || { echo "reconstruct failed $sid"; exit 1; }
 (cd $G && $GR chunked_to_glb.py --inputs $O/to_glb_inputs.pt --chunk_inputs $O/chunk_inputs.pt --output_dir $OL --simplify_threshold ${GENRECON_SIMPLIFY:-150000} --texture_size ${GENRECON_TEX:-2048}) || { echo "bake failed $sid"; exit 1; }
+rm -rf $SES/output/tsdf/$name/tiles $SES/output/tsdf/$name/tiles.part
 if [ "$mode" = "generative" ]; then
   (cd /workspace/stac-build/server && $DA3 $T/publish.py $OL/scene.glb $SES $name $W "$NOTE") || { echo "publish failed $sid"; exit 1; }
   [ -f $SES/output/tsdf/$name/$name.glb ] || { echo "publish failed $sid"; exit 1; }
+  tile_published $name
   echo "=== DONE $sid $(date +%H:%M:%S)"
   exit 0
 fi
@@ -51,4 +63,5 @@ rm -rf $SES/output/genrecon/$raw $SES/output/tsdf/$raw
 (cd /workspace/stac-build/server && $DA3 $T/publish.py $OL/scene.glb $SES $raw $W "$NOTE" genrecon) || { echo "publish failed $sid"; exit 1; }
 [ -f $SES/output/genrecon/$raw/$raw.glb ] || { echo "publish failed $sid"; exit 1; }
 (cd /workspace/stac-build/server && $DA3 $T/photo_albedo.py $SES $SES/output/genrecon/$raw/$raw.glb $name ${GENRECON_TOPK:-3}) || { echo "bake failed $sid"; exit 1; }
+tile_published $name
 echo "=== DONE $sid $(date +%H:%M:%S)"

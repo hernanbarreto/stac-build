@@ -115,6 +115,10 @@ genrecon:
   min_points_per_voxel: 10           # BOUND: a chunk voxel (32³ ≈ 11.6 cm) is active from this many cloud points
   simplify_faces_per_chunk: 150000   # the bake's decimation target per chunk (pccr: 25 chunks → 3.2 M faces, 250 MB)
   texture_size: 2048                 # the bake's atlas per chunk
+  tiles: true                        # USER 2026-11-02 ("hay que implementar el tema de los tiles … para que pueda ser
+                                     # manejable una malla grande"): the published mesh is also cut into 3D Tiles,
+                                     # output/tsdf/<mesh_name>/tiles/ (tools/glb/tile_mesh.mjs: LOD levels, KTX2
+                                     # textures) — the viewer streams the tiles on screen instead of the whole GLB
 
 # ── Paths ──────────────────────────────────────────────────────────
 paths:

@@ -131,6 +131,7 @@ vendor/oneTBB-src/
 
 # Vendor install trees (compiled libs, platform-specific)
 vendor/oneTBB/
+vendor/KTX-Software-4.4.2-Linux-x86_64/
 
 # Pod env staging / exports (conda env dumps, not source)
 scripts/.pod_envs_stage/
