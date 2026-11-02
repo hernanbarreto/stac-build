@@ -60,3 +60,11 @@ def test_the_per_chunk_passes_read_through_it():
                  "_stac_holdout_pairs"):
         body = _method(name)
         assert "self._stac_iter_chunks(self.result_aligned_dir" in body, name
+
+
+def test_the_seams_read_each_chunk_once_through_it():
+    body = _method("process_long_sequence")
+    seg = body[body.index('print("Aligning all the chunks...")'):]
+    seg = seg[:seg.index("self.sim3_list.append((s, R, t))")]
+    assert "self._stac_iter_chunks(" in seg and "self.result_unaligned_dir" in seg
+    assert "np.load(" not in seg            # no chunk read twice per seam
