@@ -48,10 +48,11 @@ class FakePredictor:
 
 def _wrapper(predictor):
     from segmentation.sam3_wrapper import SAM3Wrapper
-    w = SAM3Wrapper.__new__(SAM3Wrapper)      # no model load, no CUDA
+    # no model load, no CUDA (the constructor sets the batch-session bookkeeping the
+    # reuse path reads; ``__new__`` alone left it missing since the sessions became a dict)
+    w = SAM3Wrapper(device="cpu", config={"models": {"segmentation": {}}})
     w.predictor = predictor
     w.is_loaded = True
-    w._batch_session = None
     return w
 
 

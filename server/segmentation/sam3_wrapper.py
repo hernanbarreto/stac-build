@@ -1,6 +1,8 @@
+import contextlib
 import os
 import sys
 import gc
+import traceback
 import torch
 import numpy as np
 from pathlib import Path
@@ -43,6 +45,62 @@ SAM3_THRESHOLD_KEYS = ("score_threshold_detection", "new_det_thresh", "hotstart_
                        "hotstart_unmatch_thresh", "hotstart_dup_thresh",
                        "masklet_confirmation_consecutive_det_thresh")
 _SAM3_PROB_KEYS = ("score_threshold_detection", "new_det_thresh")
+
+
+# the chunks of vision-backbone output a group holds (segmentation/sam3_group.SharedVision): every
+# member processes the same frames in the same turn, a turn spans at most two 16-frame chunks
+GROUP_SHARED_CHUNKS = 2
+
+
+def concept_group_config(scfg: dict) -> Tuple[int, bool]:
+    """``models.segmentation.concept_group`` (concepts advanced together over one frame set, 1 =
+    one at a time) and ``keep_frame_outputs`` (the vendor's per-frame cache of every object's
+    mask and the session's state until the next concept — the batch flow never reads them).
+    A missing or invalid key fails naming it."""
+    try:
+        k = scfg["concept_group"]
+        keep = scfg["keep_frame_outputs"]
+    except KeyError as e:
+        raise SAM3ConfigError(f"models.segmentation.{e.args[0]} is missing from the "
+                              f"configuration (segmentation/sam3_group.py)") from None
+    if isinstance(k, bool) or not isinstance(k, int) or k < 1:
+        raise SAM3ConfigError(f"models.segmentation.concept_group must be an integer >= 1 "
+                              f"(got {k!r})")
+    if not isinstance(keep, bool):
+        raise SAM3ConfigError(f"models.segmentation.keep_frame_outputs must be true or false "
+                              f"(got {keep!r})")
+    return int(k), bool(keep)
+
+
+def _new_group_stats() -> Dict[str, int]:
+    return {"groups": 0, "chunks_computed": 0, "chunks_served": 0, "served_from_group": 0,
+            "fell_back": 0, "groups_out_of_memory": 0, "groups_failed": 0}
+
+
+def _pack_results(results: Dict[int, Any]) -> Dict[int, Any]:
+    """A concept's masks kept for its own call: every boolean mask array bit-packed (1/8 of
+    the memory); :func:`_unpack_results` gives back the same arrays."""
+    out = {}
+    for f, o in results.items():
+        o = dict(o)
+        m = o.get("out_binary_masks")
+        if isinstance(m, np.ndarray) and m.dtype == np.bool_:
+            o["out_binary_masks"] = ("packbits", tuple(m.shape), np.packbits(m, axis=None))
+        out[f] = o
+    return out
+
+
+def _unpack_results(packed: Dict[int, Any]) -> Dict[int, Any]:
+    out = {}
+    for f, o in packed.items():
+        o = dict(o)
+        m = o.get("out_binary_masks")
+        if isinstance(m, tuple) and len(m) == 3 and m[0] == "packbits":
+            shape = m[1]
+            n = int(np.prod(shape)) if shape else 0
+            o["out_binary_masks"] = np.unpackbits(m[2], count=n).astype(bool).reshape(shape)
+        out[f] = o
+    return out
 
 
 class SAM3ConfigError(RuntimeError):
@@ -317,6 +375,17 @@ class SAM3Wrapper:
         self._session_bytes: Dict[str, int] = {}
         # the largest growth one prompt's propagation took on the card, measured (bytes)
         self._prompt_peak_bytes: int = 0
+        # concepts advanced together over one frame set (segmentation/sam3_group.py): the
+        # concepts the caller runs next on the same frames (set_upcoming), the masks a group
+        # computed for concepts whose turn has not come yet (bit-packed, keyed by frame set and
+        # concept), and the (frame set, concept) pairs a group could not complete — they run
+        # one at a time, the path every concept took before groups
+        self._concept_group: int = 1
+        self._keep_frame_outputs: bool = True
+        self._upcoming: List[str] = []
+        self._prefetched: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._group_refused: set = set()
+        self.group_stats: Dict[str, int] = _new_group_stats()
         # what apply_sam3_thresholds wrote on the last model built (the census reads it)
         self.applied_thresholds: Optional[Dict[str, Any]] = None
         # the model built: version, checkpoint (path + sha256), device, dtype, the torch
@@ -497,6 +566,7 @@ class SAM3Wrapper:
                 # silent other result), cuDNN deterministic, seeds fixed. bf16 stays the
                 # validated dtype (recorded, not changed).
                 numerics = repro.enable_deterministic_torch(SAM3_DETERMINISTIC_SEED)
+                self._concept_group, self._keep_frame_outputs = concept_group_config(scfg)
                 torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
                 self.model_record = {
                     "version": version, "checkpoint": ckpt_rec, "device": "cuda",
@@ -504,6 +574,8 @@ class SAM3Wrapper:
                     "numerics": numerics,
                     "thresholds": dict(self.applied_thresholds or {}),
                     "config_source": self.config_source,
+                    "concept_group": self._concept_group,
+                    "keep_frame_outputs": self._keep_frame_outputs,
                 }
                 logger.info(f"SAM {version} loaded on GPU (bfloat16 autocast active; TF32 off, "
                             f"deterministic algorithms strict, seed {SAM3_DETERMINISTIC_SEED}; "
@@ -520,6 +592,7 @@ class SAM3Wrapper:
     def unload_model(self):
         """Unload model to free VRAM."""
         self.release_batch_session()   # its decoded frames belong to the predictor
+        self.drop_group_state()
         with self.lock:
             if self.predictor is not None:
                 # BACKPORT of upstream facebookresearch/sam3 8f0b7f4 (2026-08-14,
@@ -859,11 +932,226 @@ class SAM3Wrapper:
         
         return results
     
+    # ── Concepts advanced together (segmentation/sam3_group.py) ──────────
+    def set_upcoming(self, prompts: List[str]) -> None:
+        """The concepts the caller runs next over the SAME frame sets, in order (the batch
+        flow's category list when every concept runs on every frame, no box seeds). A plain
+        :meth:`process_batch` call advances the first ``concept_group - 1`` of them together
+        with its own concept; an empty list = one concept at a time."""
+        self._upcoming = [str(p) for p in prompts]
+
+    def drop_group_state(self) -> None:
+        """Forget the upcoming concepts, the masks computed ahead and the refusals (the start
+        and the end of a segmentation run; an unload)."""
+        self._upcoming = []
+        self._prefetched.clear()
+        self._group_refused.clear()
+
+    def _group_for(self, batch_dir: str, prompt_text: str) -> List[str]:
+        k = int(getattr(self, "_concept_group", 1))
+        out = [prompt_text]
+        if k <= 1 or (batch_dir, prompt_text) in self._group_refused:
+            return out
+        for p in self._upcoming:
+            if len(out) >= k:
+                break
+            if (p in out or (batch_dir, p) in self._prefetched
+                    or (batch_dir, p) in self._group_refused):
+                continue
+            out.append(p)
+        return out
+
     def process_batch(self, batch_dir: str, prompt_text: str,
                       index_mapping: Dict[int, int],
                       prompt_frames: List[int] = None,
                       boxes_by_local: Dict[int, list] = None,
                       per_frame_output: bool = False) -> Dict[int, Any]:
+        """The masks of one concept over one batch of frames (:meth:`_process_batch_one`).
+
+        A PLAIN call (no prompt frames, no box seeds, frames handed back in the vendor's
+        batches) with concepts announced by :meth:`set_upcoming` runs as a GROUP: this concept
+        and the next ``concept_group - 1`` advance together over the batch, the vision backbone
+        of every chunk computed once for all of them (segmentation/sam3_group.py); the others'
+        masks are kept for their own call. The masks of every concept are the ones it gets
+        alone. A concept the group could not complete — the vendor tracker's stop, an error,
+        the card out of memory (then the whole group) — runs alone on its call, exactly as
+        before groups."""
+        if not self.is_loaded:
+            self.load_model()
+        batch_dir = str(batch_dir)
+        prompt_text = str(prompt_text)
+        plain = not prompt_frames and not boxes_by_local and not per_frame_output
+        if plain:
+            ahead = self._prefetched.pop((batch_dir, prompt_text), None)
+            if ahead is not None and ahead["index_mapping"] == dict(index_mapping):
+                self.group_stats["served_from_group"] += 1
+                logger.info(f"[SAM3-Group] '{prompt_text}' on {batch_dir}: masks computed with "
+                            f"its group")
+                return _unpack_results(ahead["results"])
+            group = self._group_for(batch_dir, prompt_text)
+            if len(group) > 1:
+                done = self._process_group(batch_dir, group, index_mapping)
+                for p, res in done.items():
+                    if p != prompt_text:
+                        self._prefetched[(batch_dir, p)] = {
+                            "index_mapping": dict(index_mapping),
+                            "results": _pack_results(res)}
+                if prompt_text in done:
+                    return done[prompt_text]
+                self.group_stats["fell_back"] += 1
+        return self._process_batch_one(batch_dir, prompt_text, index_mapping,
+                                       prompt_frames=prompt_frames,
+                                       boxes_by_local=boxes_by_local,
+                                       per_frame_output=per_frame_output)
+
+    def _frame_outputs_ctx(self):
+        if bool(getattr(self, "_keep_frame_outputs", True)):
+            return contextlib.nullcontext()
+        from segmentation.sam3_group import frame_outputs_not_kept
+        return frame_outputs_not_kept(self.predictor.model)
+
+    def _reset_after_copy(self, session_id: str) -> None:
+        """The session's state goes as soon as its masks are copied out (the next
+        ``add_prompt`` resets it anyway — ``reset_state`` is idempotent); the frames stay."""
+        if bool(getattr(self, "_keep_frame_outputs", True)):
+            return
+        self.predictor.handle_request(request=dict(type="reset_session", session_id=session_id))
+
+    @staticmethod
+    def _collect(response: dict, index_mapping: Dict[int, int], results: Dict[int, Any],
+                 done_locals: List[int]) -> None:
+        local_idx = response["frame_index"]
+        outputs = response["outputs"]
+        # Map back to original frame index
+        orig_idx = index_mapping.get(local_idx, local_idx)
+        # Convert tensors to numpy
+        if "out_binary_masks" in outputs:
+            mask = outputs["out_binary_masks"]
+            if hasattr(mask, 'cpu'):
+                outputs["out_binary_masks"] = mask.cpu().numpy()
+        if "out_obj_ids" in outputs:
+            oids = outputs["out_obj_ids"]
+            if hasattr(oids, 'cpu'):
+                outputs["out_obj_ids"] = oids.cpu().numpy()
+        results[orig_idx] = outputs
+        done_locals.append(int(local_idx))
+
+    def _process_group(self, batch_dir: str, prompts: List[str],
+                       index_mapping: Dict[int, int]) -> Dict[str, Dict[int, Any]]:
+        """Advance ``prompts`` together over one batch: the first in the batch's own session,
+        the others in sessions over the SAME decoded frames (sam3_group.clone_session), one
+        ``add_prompt`` each at frame 0 (what the one-concept path does without box seeds), the
+        propagations stepped in turn frame by frame — every member processes the same frames
+        in the same turn (the vendor's hotstart and postprocessing batches count frames), so
+        each chunk's vision backbone is computed once and served to the rest
+        (sam3_group.SharedVision). Returns the masks of the members that completed; a member
+        that raised is left to its own call; out of memory anywhere → nothing (every member
+        runs alone on its call)."""
+        from segmentation.sam3_group import SharedVision, clone_session
+        stats = self.group_stats
+        stats["groups"] += 1
+        base_sid = self._session_for(batch_dir)
+        sids: Dict[str, str] = {prompts[0]: base_sid}
+        clones: List[str] = []
+        results: Dict[str, Dict[int, Any]] = {p: {} for p in prompts}
+        failed: Dict[str, str] = {}
+        gens: Dict[str, Any] = {}
+        stopped: Optional[str] = None
+        stopped_oom = False
+        prompt_base = None
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+            prompt_base = int(torch.cuda.memory_allocated())
+        shared = SharedVision(self.predictor.model.detector, GROUP_SHARED_CHUNKS)
+        logger.info(f"[SAM3-Group] {len(prompts)} concepts together on {batch_dir}: {prompts}")
+        try:
+            with shared, self._frame_outputs_ctx():
+                for p in prompts[1:]:
+                    sid = clone_session(self.predictor, base_sid)
+                    clones.append(sid)
+                    sids[p] = sid
+                for p in prompts:
+                    try:
+                        self.predictor.handle_request(request=dict(
+                            type="add_prompt", session_id=sids[p], frame_index=0, text=p))
+                    except Exception as e:  # noqa: BLE001 — that concept runs alone
+                        if is_cuda_oom(e):
+                            raise
+                        failed[p] = f"add_prompt: {type(e).__name__}: {e}"
+                live = [p for p in prompts if p not in failed]
+                for p in live:
+                    gens[p] = self._stream(dict(type="propagate_in_video", session_id=sids[p]))
+                done_locals: Dict[str, List[int]] = {p: [] for p in live}
+                while live:
+                    for p in list(live):
+                        try:
+                            response = next(gens[p])
+                        except StopIteration:
+                            live.remove(p)
+                            continue
+                        except Exception as e:  # noqa: BLE001 — that concept runs alone
+                            if is_cuda_oom(e):
+                                raise
+                            failed[p] = f"propagate_in_video: {type(e).__name__}: {e}"
+                            live.remove(p)
+                            gens.pop(p).close()
+                            continue
+                        self._collect(response, index_mapping, results[p], done_locals[p])
+        except Exception as e:  # noqa: BLE001 — out of memory, or the group's own machinery
+            stopped = f"{type(e).__name__}: {e}"
+            stopped_oom = is_cuda_oom(e)
+            # the stopped propagations' frames hold the card (the one-concept path does the same)
+            traceback.clear_frames(e.__traceback__)
+        finally:
+            for g in gens.values():
+                g.close()
+            gens.clear()
+            for sid in clones:
+                try:
+                    self.predictor.handle_request(request=dict(type="close_session",
+                                                               session_id=sid))
+                except Exception as e:  # noqa: BLE001
+                    logger.error(f"[SAM3-Group] closing a group session: {e}")
+            stats["chunks_computed"] += shared.computed
+            stats["chunks_served"] += shared.served
+        if stopped is not None:
+            stats["groups_out_of_memory" if stopped_oom else "groups_failed"] += 1
+            results.clear()
+            self.release_batch_session()
+            for p in prompts:
+                self._group_refused.add((batch_dir, p))
+            logger.warning(f"[SAM3-Group] the group of {len(prompts)} on {batch_dir} stopped "
+                           f"({stopped}) — every member runs alone on its own call")
+            return {}
+        if prompts[0] in failed:
+            # the batch's own session ran the member that raised: dropped, as the one-concept
+            # path drops it after an error (its own call opens it again)
+            self._close_session(batch_dir)
+        else:
+            try:
+                self._reset_after_copy(base_sid)
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"[SAM3-Group] resetting the batch session: {e}")
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if prompt_base is not None:
+            self._prompt_peak_bytes = max(self._prompt_peak_bytes,
+                                          int(torch.cuda.max_memory_allocated()) - prompt_base)
+        for p, why in failed.items():
+            self._group_refused.add((batch_dir, p))
+            logger.info(f"[SAM3-Group] '{p}' did not complete in its group ({why}) — it runs "
+                        f"alone on its own call")
+        logger.info(f"[SAM3-Group] {len(prompts) - len(failed)} of {len(prompts)} concepts "
+                    f"completed on {batch_dir}; vision backbone: {shared.computed} chunk(s) "
+                    f"computed, {shared.served} served from them")
+        return {p: results[p] for p in prompts if p not in failed}
+
+    def _process_batch_one(self, batch_dir: str, prompt_text: str,
+                           index_mapping: Dict[int, int],
+                           prompt_frames: List[int] = None,
+                           boxes_by_local: Dict[int, list] = None,
+                           per_frame_output: bool = False) -> Dict[int, Any]:
         """
         Process a batch of frames in a temporary directory.
 
@@ -910,7 +1198,9 @@ class SAM3Wrapper:
         pp_saved = getattr(pp_model, "postprocess_batch_size", None)
         if per_frame_output and pp_saved is not None:
             pp_model.postprocess_batch_size = 1
+        frame_outputs = contextlib.ExitStack()
         try:
+            frame_outputs.enter_context(self._frame_outputs_ctx())
             logger.info(f"[SAM3-Batch] Processing {batch_size} frames from {batch_dir}")
             if torch.cuda.is_available():
                 _vram_before = torch.cuda.memory_allocated() / (1024**3)
@@ -972,24 +1262,8 @@ class SAM3Wrapper:
                     session_id=session_id,
                 )
             ):
-                local_idx = response["frame_index"]
-                outputs = response["outputs"]
-                
-                # Map back to original frame index
-                orig_idx = index_mapping.get(local_idx, local_idx)
-                
-                # Convert tensors to numpy
-                if "out_binary_masks" in outputs:
-                    mask = outputs["out_binary_masks"]
-                    if hasattr(mask, 'cpu'):
-                        outputs["out_binary_masks"] = mask.cpu().numpy()
-                if "out_obj_ids" in outputs:
-                    oids = outputs["out_obj_ids"]
-                    if hasattr(oids, 'cpu'):
-                        outputs["out_obj_ids"] = oids.cpu().numpy()
-                
-                results[orig_idx] = outputs
-                done_locals.append(int(local_idx))
+                self._collect(response, index_mapping, results, done_locals)
+            self._reset_after_copy(session_id)
 
             _vram_after = 0
             if torch.cuda.is_available():
@@ -1048,6 +1322,7 @@ class SAM3Wrapper:
                 raise SAM3RunError(f"SAM3 {phase} failed for prompt '{prompt_text}' "
                                    f"({type(e).__name__}: {e})") from e
         finally:
+            frame_outputs.close()
             if per_frame_output and pp_saved is not None:
                 pp_model.postprocess_batch_size = pp_saved
             # NOTE: the session stays OPEN for the next concept — release_batch_session()

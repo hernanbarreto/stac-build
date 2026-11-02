@@ -913,6 +913,21 @@ models:
     compile: false                     # torch.compile (~2x speedup, warmup time)
     use_fa3: false                     # FlashAttention 3 (requires flash-attn-3)
     checkpoint_path: null              # null = auto-download from HuggingFace
+    # Concepts advanced together over one frame set (segmentation/sam3_group.py; USER 2026-11-02:
+    # "la etapa más lenta de todo el pipeline es sam3 … tenés que investigar cuál es la mejor
+    # estrategia", "ok"). SAM 3.1 propagates ONE text concept per session and its detector ran the
+    # vision backbone (the 32-block ViT at 1008 px and its three necks) of every 16-frame chunk
+    # again for every concept; a group computes it once per chunk for all its members. Each
+    # concept's masks are the ones it gets alone; a group the card cannot hold runs its members
+    # one at a time. station 2026-11-02: 75 concepts x 448 frames, ~90 s per concept alone.
+    concept_group: 4                   # concepts per group (1 = one at a time, as before)
+    keep_frame_outputs: false          # the vendor's per-frame cache of every object's mask at
+                                       # video resolution (its interactive demo's re-fetch) and the
+                                       # session's state kept until the next concept: the batch
+                                       # flow never reads them. On station 'light' (181 objects)
+                                       # ran out of memory at 69 GB with 74.5 GB free once the
+                                       # sessions were released — a forced seam with new ids.
+                                       # false frees them (USER 2026-11-02 "ok"); true = as before
 
     # Inference
     keyframe_interval: 2

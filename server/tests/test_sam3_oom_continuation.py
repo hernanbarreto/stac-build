@@ -89,6 +89,12 @@ class _SessionFakeSAM3:
     def release_batch_session(self):
         pass
 
+    def set_upcoming(self, prompts):
+        pass
+
+    def drop_group_state(self):
+        pass
+
     def unload_model(self):
         pass
 

@@ -102,7 +102,7 @@ def stubbed(monkeypatch, tmp_path):
         monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
         monkeypatch.setattr(w, "cfg", {"models": {"segmentation": {
             "version": version, "checkpoint_path": str(ckpt),
-            "sam3_thresholds": thresholds}}})
+            "sam3_thresholds": thresholds, "concept_group": 1, "keep_frame_outputs": True}}})
         wrapper = w.SAM3Wrapper()
         wrapper.load_model()
         return wrapper
@@ -176,6 +176,12 @@ class _ConfigBrokenSAM3:
                               "exceed hotstart_delay")
 
     def release_batch_session(self):
+        pass
+
+    def set_upcoming(self, prompts):
+        pass
+
+    def drop_group_state(self):
         pass
 
     def unload_model(self):

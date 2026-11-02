@@ -586,7 +586,7 @@ def sam3_store_seal(cfg: dict, categories: List[str], keyframes: List[int],
     seg = dict(cfg.get("segmentation") or {})
     return _stamp(inputs={"seg_masks.npz": Path(npz_path)},
                   code=["segmentation.pipeline", "segmentation.sam3_wrapper",
-                        "segmentation.mask_space"],
+                        "segmentation.sam3_group", "segmentation.mask_space"],
                   config={"prompts": list(categories),
                           "keyframes": [int(k) for k in keyframes],
                           "sam3": {"version": scfg.get("version"), "checkpoint_path": ckpt,
@@ -597,7 +597,9 @@ def sam3_store_seal(cfg: dict, categories: List[str], keyframes: List[int],
                                    "batch_overlap": scfg.get("batch_overlap"),
                                    "iou_match_threshold": scfg.get("iou_match_threshold"),
                                    "multiplex_count": scfg.get("multiplex_count"),
-                                   "max_num_objects": scfg.get("max_num_objects")},
+                                   "max_num_objects": scfg.get("max_num_objects"),
+                                   "concept_group": scfg.get("concept_group"),
+                                   "keep_frame_outputs": scfg.get("keep_frame_outputs")},
                           "mask_dedupe_iou": seg.get("mask_dedupe_iou"),
                           "scaled_res": [int(x) for x in scaled_res],
                           "reconstruction_id": reconstruction_id})
@@ -1027,6 +1029,7 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
     # Start clean: a previous run that crashed mid-way leaves its reused session
     # and symlink dirs behind (both are released on the normal path below).
     sam3.release_batch_session()
+    sam3.drop_group_state()
     _clear_batch_dirs()
 
     # Master state across all categories
@@ -1427,6 +1430,10 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         t_cat = _time.time()
         decisions: list = []                 # the identity decisions of this prompt (point 93)
         cat_status = {"status": "ran"}
+        # the concepts that run next over the SAME frames (every concept on every frame, no box
+        # seeds): SAM3 advances them together with this one, the vision backbone computed once
+        # for all (segmentation/sam3_group.py) — each concept's masks are the ones it gets alone
+        sam3.set_upcoming(categories[cat_idx + 1:] if not frame_map and not boxes_map else [])
         try:
             cat_masks = _process_category(
                 category, cat_batches, frames_dir, cat_frame_files, sam3,
@@ -1571,6 +1578,7 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         sam3.release_batch_session()
     except Exception as e:  # noqa: BLE001
         print(f"[SegPipeline]   ⚠️ Could not release SAM3 session: {e}")
+    sam3.drop_group_state()
     _clear_batch_dirs()
     
     return all_masks, obj_labels, seg_meta
