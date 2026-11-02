@@ -277,7 +277,13 @@ def _init_default(path, cls, key):
     return ast.literal_eval(defaults[key])
 
 
-def test_production_sam31_values_are_the_multiplex_builders_own():
+# 2026-10-15, on the USER's "detalle absoluto … hay muchos elementos que no están segmentados" (observatorio:
+# 13 of 51 prompts with zero masklets at the vendor's bars): the detection and new-masklet bars LOWERED from the
+# vendor's 0.4 / 0.65, declared in config.yaml. Every other sam3.1 value is the builder's own.
+DECLARED_SAM31 = {"score_threshold_detection": 0.3, "new_det_thresh": 0.5}
+
+
+def test_production_sam31_values_are_the_multiplex_builders_own_but_the_declared_two():
     raw = yaml.safe_load((SERVER / "config.yaml").read_text())
     conf = raw["models"]["segmentation"]["sam3_thresholds"]["sam3.1"]
     mb = _vendor_file("sam31", "sam3", "model_builder.py")
@@ -287,7 +293,10 @@ def test_production_sam31_values_are_the_multiplex_builders_own():
         mb.parent / "model" / "sam3_multiplex_base.py", "Sam3MultiplexBase",
         "masklet_confirmation_consecutive_det_thresh")
     assert set(vendor) == set(KEYS)
-    assert conf == vendor, "config.yaml's sam3.1 block moved off the vendor's values"
+    rest = lambda d: {k: v for k, v in d.items() if k not in DECLARED_SAM31}   # noqa: E731
+    assert rest(conf) == rest(vendor), "config.yaml's sam3.1 block moved off the vendor's values"
+    assert {k: conf[k] for k in DECLARED_SAM31} == DECLARED_SAM31, "the declared departures changed"
+    assert all(vendor[k] != v for k, v in DECLARED_SAM31.items()), "a declared departure is the vendor's value"
 
 
 def test_production_sam30_values_are_the_video_builders_own():
