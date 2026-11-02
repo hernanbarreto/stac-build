@@ -453,6 +453,12 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
         return seg_meta
 
     finally:
+        # a run that failed with saves still in line: they finish (or fail) before the staging
+        # store they write into is deleted
+        global _ACTIVE_STORE_WRITER
+        if _ACTIVE_STORE_WRITER is not None:
+            _ACTIVE_STORE_WRITER.drain()
+            _ACTIVE_STORE_WRITER = None
         # the memoized SAM3 symlink dirs (idempotent; _run_sam3_batched clears
         # them itself on the normal path, not when a category raises)
         _clear_batch_dirs()
@@ -932,6 +938,76 @@ def _plan_oom_continuation(b_start: int, b_end: int, frontier: Optional[int], n_
     return out
 
 
+class _StoreWriter:
+    """The per-category saves of the SAM3 staging store on ONE background thread, in the order
+    they were submitted (USER 2026-11-01: "la GPU no debe quedar parada nunca"): on station
+    2026-11-02 the 75 saves held the card idle 116 s in all (up to 11 s each — the npz read,
+    upserted and rewritten on the network file system) while the next concept could already
+    run. Each save gets snapshots of what it records (the labels so far, the categories so far)
+    and the category's own masks, which nothing touches afterwards: the store written is the one
+    the saves in line wrote, byte for byte. A failed save names its category: :meth:`check` (at
+    every submit) and :meth:`wait` (the end of the run) raise it, and the run fails as before."""
+
+    def __init__(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sam3-store")
+        self._pending: list = []          # [(category, future)], in submission order
+        self.last = None                  # the last save's result (segmentation.json written)
+
+    def submit(self, category: str, fn, *args, **kwargs) -> None:
+        self.check()
+        self._pending.append((category, self._pool.submit(fn, *args, **kwargs)))
+
+    def check(self) -> None:
+        """Raise the first save that failed; forget the ones done."""
+        while self._pending and self._pending[0][1].done():
+            category, fut = self._pending.pop(0)
+            exc = fut.exception()
+            if exc is not None:
+                raise _StoreSaveFailed(category, exc)
+            self.last = fut.result()
+
+    def wait(self):
+        """Every save done (in order); the last one's result. Raises the first failure."""
+        while self._pending:
+            category, fut = self._pending.pop(0)
+            try:
+                self.last = fut.result()
+            except Exception as exc:  # noqa: BLE001 — named and re-raised
+                raise _StoreSaveFailed(category, exc) from exc
+        return self.last
+
+    def drain(self) -> None:
+        """Every save finished, failures swallowed (a run already failing: the staging store is
+        deleted after this — never while a save is still writing into it)."""
+        for _c, fut in self._pending:
+            try:
+                fut.result()
+            except Exception:  # noqa: BLE001
+                pass
+        self._pending.clear()
+        self._pool.shutdown(wait=True)
+
+
+class _StoreSaveFailed(RuntimeError):
+    def __init__(self, category: str, exc: BaseException):
+        super().__init__(f"the masks of '{category}' could not be saved: {type(exc).__name__}: {exc}")
+        self.category, self.exc = category, exc
+
+
+# the writer of the run in progress (run_segmentation drains it before deleting the staging store)
+_ACTIVE_STORE_WRITER: Optional[_StoreWriter] = None
+
+
+def _save_category(output_dir, cat_global, categories_so_far, labels_so_far, cfg, session_output_dir,
+                   cat_idx, n_categories):
+    meta = _save_masks(output_dir, cat_global, categories_so_far, labels_so_far, cfg,
+                       frame_space=mask_space.SPACE_KEYFRAME, session_output_dir=session_output_dir,
+                       compact=False)
+    print(f"[SegPipeline] 💾 Saved category {cat_idx + 1}/{n_categories}")
+    return meta
+
+
 def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List[str],
                       batch_size: int, batch_overlap: int,
                       iou_threshold: float, mask_dedupe_iou: float,
@@ -991,6 +1067,9 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
     persist = output_dir is not None and cfg is not None
     status = prompt_status if prompt_status is not None else {}
     seg_meta = None
+    global _ACTIVE_STORE_WRITER
+    writer = _StoreWriter() if persist else None
+    _ACTIVE_STORE_WRITER = writer
     t_sam3 = _time.time()
     n_done = 0
     
@@ -1521,21 +1600,20 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         # order the cleaned cloud does not even exist yet at this point.
         if persist:
             if cat_global:
+                # appended into the STAGING store (compacted canonically once, at the end of
+                # the run — finalize_sam3_store); the keyframe list and the frames' resolution
+                # come from the session's output/. On the store writer's thread, in order,
+                # with snapshots of the labels and the categories so far: the next concept
+                # runs on the card meanwhile (_StoreWriter)
                 try:
-                    # appended into the STAGING store (compacted canonically once, at
-                    # the end of the run — finalize_sam3_store); the keyframe list and
-                    # the frames' resolution come from the session's output/
-                    seg_meta = _save_masks(output_dir, cat_global, categories[:cat_idx + 1],
-                                           obj_labels, cfg,
-                                           frame_space=mask_space.SPACE_KEYFRAME,
-                                           session_output_dir=session_output_dir,
-                                           compact=False)
-                except Exception as e:
-                    status[category] = {**cat_status, "status": "failed",
-                                        "reason": f"its masks could not be saved: "
-                                                  f"{type(e).__name__}: {e}"}
-                    raise
-                print(f"[SegPipeline] 💾 Saved category {cat_idx+1}/{len(categories)}")
+                    writer.submit(category, _save_category, output_dir, cat_global,
+                                  list(categories[:cat_idx + 1]), dict(obj_labels), cfg,
+                                  session_output_dir, cat_idx, len(categories))
+                except _StoreSaveFailed as e:
+                    status[e.category] = {**(status.get(e.category) or {}), "status": "failed",
+                                          "reason": f"its masks could not be saved: "
+                                                    f"{type(e.exc).__name__}: {e.exc}"}
+                    raise e.exc from e
         else:
             for global_frame_idx, frame_masks in cat_global.items():
                 all_masks.setdefault(global_frame_idx, {}).update(frame_masks)
@@ -1564,6 +1642,18 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                 pass
         _log_vram(f"cat {cat_idx+1} END (after cleanup)")
     
+    if writer is not None:
+        try:
+            seg_meta = writer.wait()
+        except _StoreSaveFailed as e:
+            status[e.category] = {**(status.get(e.category) or {}), "status": "failed",
+                                  "reason": f"its masks could not be saved: "
+                                            f"{type(e.exc).__name__}: {e.exc}"}
+            raise e.exc from e
+        finally:
+            writer.drain()
+            _ACTIVE_STORE_WRITER = None
+
     # Unload SAM3 to free VRAM
     sam3.unload_model()
     gc.collect()

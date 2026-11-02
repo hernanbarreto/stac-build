@@ -188,3 +188,67 @@ def test_the_canonical_writer_refuses_unknown_members(tmp_path):
     with pytest.raises(ValueError, match="cannot hold members"):
         P.write_canonical_store(tmp_path / "x.npz", {"f0_o0": np.ones((2, 2), np.uint8),
                                                      "stray": np.ones(2)})
+
+
+def test_the_saves_run_behind_in_order_and_write_the_inline_store(tmp_path, monkeypatch):
+    """The per-category saves on the store writer's thread (USER 2026-11-01: the card is never
+    idle — station's 75 saves held it 116 s): in submission order, off the main thread, and the
+    store they leave is byte for byte the one the saves made inline leave."""
+    import threading
+    calls = []
+    real = P._save_masks
+
+    def spy(output_dir, all_masks, categories, *a, **k):
+        calls.append((threading.current_thread().name, list(categories)))
+        return real(output_dir, all_masks, categories, *a, **k)
+
+    monkeypatch.setattr(P, "_save_masks", spy)
+    out, status, _ = _run(tmp_path, monkeypatch)
+    behind = _store_bytes(out)
+    assert [c for _t, c in calls] == [["chair"], ["chair", "box"]], "one save per category, in order"
+    assert all(t.startswith("sam3-store") for t, _c in calls), "the saves ran on the writer's thread"
+
+    class _Inline:
+        """the saves made inline, as before the writer"""
+        def __init__(self):
+            self.last = None
+
+        def submit(self, category, fn, *a, **k):
+            self.last = fn(*a, **k)
+
+        def check(self):
+            pass
+
+        def wait(self):
+            return self.last
+
+        def drain(self):
+            pass
+
+    monkeypatch.setattr(P, "_StoreWriter", _Inline)
+    calls.clear()
+    out, _, _ = _run(tmp_path, monkeypatch)
+    assert all(t == threading.main_thread().name for t, _c in calls)
+    assert _store_bytes(out) == behind
+
+
+def test_a_save_that_fails_behind_fails_the_run_naming_its_category(tmp_path, monkeypatch):
+    out, _, _ = _run(tmp_path, monkeypatch)
+    first = _store_bytes(out)
+    real = P._save_masks
+
+    def broken(output_dir, all_masks, categories, *a, **k):
+        if categories[-1] == "box":
+            raise OSError("No space left on device")
+        return real(output_dir, all_masks, categories, *a, **k)
+
+    monkeypatch.setattr(P, "_save_masks", broken)
+    status = {}
+    import segmentation.sam3_wrapper as w
+    monkeypatch.setattr(w, "get_sam3_wrapper", lambda: _FakeSAM3(SCRIPT))
+    with pytest.raises(OSError, match="No space left"):
+        P.run_segmentation(str(tmp_path / "frames"), str(out), "chair;box", prompt_status=status)
+    assert status["box"]["status"] == "failed"
+    assert "could not be saved" in status["box"]["reason"]
+    assert _store_bytes(out) == first and not (out / P.SAM3_STAGING_DIRNAME).exists()
+    assert P._ACTIVE_STORE_WRITER is None
