@@ -656,11 +656,12 @@ def test_the_server_has_no_internvl3_fallback_and_every_gpu_task_takes_the_permi
     r = src.index("def _resolve_segmentation_prompt(")
     rb = src[r:r + 4000]
     assert "job_engine(" in rb and "raise RuntimeError" in rb and "service=identity" in rb
-    # every GPU task of the server takes the permit (point 154)
-    for endpoint, needle in (('@app.post("/api/segmentation/shape/export")', "_take_gpu_permit(\"ShapeR meshing\""),
-                             ('@app.post("/api/segmentation/tsdf/export")', "_take_gpu_permit(\"per-object meshing\""),
-                             ('@app.post("/api/segmentation/tsdf/scene_export")', "_take_gpu_permit(\"scene TSDF meshing\""),
-                             ('@app.post("/api/segmentation/start_session/{session_id}")', "_take_gpu_permit(\"Segmentation Manager (SAM3)\""),
+    # every GPU task of the server takes the permit (point 154); the ShapeR and TSDF meshing
+    # routes are gone with the meshing stack (USER 2026-10-17)
+    for endpoint in ('@app.post("/api/segmentation/shape/export")', '@app.post("/api/segmentation/tsdf/export")',
+                     '@app.post("/api/segmentation/tsdf/scene_export")'):
+        assert endpoint not in src, endpoint
+    for endpoint, needle in (('@app.post("/api/segmentation/start_session/{session_id}")', "_take_gpu_permit(\"Segmentation Manager (SAM3)\""),
                              ('@app.post("/api/segmentation/auto/{session_id}")', "_take_gpu_permit(\"auto-segmentation (VLM + SAM3)\"")):
         i = src.index(endpoint)
         assert needle in src[i:i + 6000], endpoint
@@ -679,14 +680,12 @@ def test_the_server_has_no_internvl3_fallback_and_every_gpu_task_takes_the_permi
     sb = src[i:i + 4000]
     assert sb.index("except HTTPException as e:") < sb.index("async def _background_init():")
     assert '"status": "error"' in sb[:sb.index("async def _background_init():")]
-    # every background task whose finally releases the permit is KEPT (never a bare create_task)
-    for endpoint in ('@app.post("/api/segmentation/tsdf/export")', '@app.post("/api/segmentation/tsdf/scene_export")',
-                     '@app.post("/api/segmentation/shape/export")'):
-        i = src.index(endpoint)
-        j = src.index("\n@app.", i + 10)
-        assert "_keep_bg_task(" in src[i:j] and "asyncio.create_task(_bg" not in src[i:j], endpoint
+    # the background tasks whose finally released the permit were the meshing routes' (ShapeR,
+    # per-object and scene TSDF) — gone with the meshing stack (USER 2026-10-17), and their tokens
+    for kind in ("shape", "tsdf", "tsdf-scene"):
+        assert f'_permit_token("{kind}"' not in src, kind
     # the per-request tokens: one request, one token; the Manager's is the constant
-    for kind in ("shape", "tsdf", "tsdf-scene", "auto-segmentation", "retro-segmentation"):
+    for kind in ("auto-segmentation", "retro-segmentation"):
         assert f'_permit_token("{kind}"' in src, kind
     assert 'f"shape:{session_id}"' not in src and 'f"tsdf:{session_id}"' not in src
     # the socket's cancel is scheduled, never awaited in the command loop (point 111's bound)
