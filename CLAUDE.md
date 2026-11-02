@@ -23,6 +23,22 @@
   `import reconstruction.loops.config`). Omega's sky masks (skyseg.onnx, onnxruntime CPU, ONE thread — ~2.4 s per
   keyframe with the card idle before every chunk): computed by the fork's own code on Omega's interpreter in 12
   processes WHILE I3 runs (reconstruction/sky_precompute.py; station: 377/377 masks byte-identical, 74 s).
+- STATION 2026-11-01 (main a6d24bb, 438 kf, 2581 frames) WAS THE PROFILE of the rest: Omega 60.5 min, of which the
+  sky masks ~15 (one onnxruntime thread per frame, card idle), the pose graph's 20 leave-one-out judges 18.5 (~55 s
+  each, card ~24 %), the depth graph 4.5, the bridges' extra sky masks ~3; 4.5 min of CPU before Omega (anchors
+  zlib 114 s, plan 34 s, card probes, fork stamp) and 7 after it (omega records, the scale's and orientation's
+  rewrites of the aligned chunks deleted a second later). Fixed on gpu-main, every product equal to the loop it
+  replaces (tests hold each to its reference): reconstruction/sky_precompute.py (the fork's own code on Omega's
+  interpreter, 12 processes during I3: 377/377 masks byte-identical, 74 s); I3 windows read once on threads
+  (measure_walk 140 → 20 s, plan 34 → 10 s, same walk / plan / anchors); repro.card_identity memoised per
+  process; repro.stamp on threads; in the FORK (vendor/VGGT-Long branch gpu-main): sky masks on threads,
+  the pose graph's normal equations in ROUNDS + vmapped update (H, g, poses bit for bit on the CPU; THE CARD'S
+  EQUALITY AND TIMING ARE STILL TO MEASURE with the card free — scratchpad pg_cuda_check.py), stable_pick by
+  partition (exactly the stable sort's first k: the depth graph's pairs 31.4 → 2.5 s per 60 frames, same
+  measurements), the depth graph's source sample once per frame, no rewrite of an identity depth graph, the
+  bridges measured in a planned chunk order (58 → 34 loads of 2 GB), one-ahead chunk reads in the per-chunk
+  passes; after Omega the records on threads, scale / orientation not rewriting the aligned chunks the run
+  deletes (aligned_chunks = certify.keep_aligned_chunks), PLYs on threads, markers hashed on threads.
 - STAYS ON THE CPU, DECLARED: PotreeConverter (one thread: its node offsets follow the threads' completion order — byte
   identity, point 57; ~1-2 min per build, three builds per full run), sqlite, PLY / JSON / npz I/O, JPEG decoding.
   NEXT (authorised by the USER 2026-11-01 "si hay tareas que se pueden paralelizar o adelantar … que no quede silicio
