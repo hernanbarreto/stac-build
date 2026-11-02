@@ -37,6 +37,11 @@ SMALL_ANGLE = 1e-6              # below it the series of sin / (1 − cos) are e
 # rejections — on pccr's main tracks the LM then never came back to rest (500 iterations, λ 1e1..1e4, the
 # cost static to 1e-7) while Ceres' rule converged; OFF: the rules are Ceres' (study_r0.py keeps the switch)
 CONVERGENCE_AT_REST = False
+# the cameras' Levenberg-Marquardt damping: "schur" = λ·diag of the Schur complement — the port's since it
+# was written, the path every torch F5 so far ran (kept: changing it moves every rung's stopping point,
+# the USER's call); "hessian" = λ·diag(JᵀJ's camera block), Ceres' own (station's R3: 37 iterations in
+# 12 s vs 42 in 22 s, the camera centres within 3 mm of each other — analysis/2026-11-01_station_gpu_run)
+CAMERA_DAMPING = "schur"
 
 CAM_FREE = {"R0": (), "R0s": (), "R1": (0, 1, 2, 3), "R2": (0, 1, 2, 3, 4, 5, 6, 7), "R3": (0, 1)}
 
@@ -421,8 +426,11 @@ class _Problem:
         Y = W @ Hpp_inv[self.pt_idx]                                        # (M,nco,3)
         g_red = g - self._reduce_vec(torch.einsum("mij,mj->mi", Y, gp[self.pt_idx]), nco)
         S = H - self._schur_pairs(Y, W, nco, pair_chunk)
-        # damping and the constant blocks
-        Dc = torch.diagonal(S).clamp(self.tb.lm_diag_min, self.tb.lm_diag_max)
+        # the cameras' damping (CAMERA_DAMPING): λ·diag(S) — the port's — or λ·diag of their block of
+        # JᵀJ, priors included, Ceres' (whose Levenberg-Marquardt damps every parameter by the full JᵀJ
+        # diagonal: the Schur complement of that damped system is S + λ·diag(H_cc))
+        Dc = torch.diagonal(H if CAMERA_DAMPING == "hessian" else S).clamp(self.tb.lm_diag_min,
+                                                                            self.tb.lm_diag_max)
         S_l = S + lam * torch.diag(Dc)
         free = self.free
         S_f = S_l[free][:, free]
@@ -518,13 +526,24 @@ class _Problem:
         ia = self.pose_idx[plan["g_a"]]; ib = self.pose_idx[plan["g_b"]]                 # (G,6)
         S[ia[:, :, None], ib[:, None, :]] += blocks[:, :6, :6]
         if self.nf:
-            # pose(a)-cam: summed over b per camera a (groups are sorted by a)
-            pc = segment_sum(blocks[:, :6, 6:], plan["g_a"], self.N, plan["a_ends"])           # (N,6,nf)
-            S[self.pose_idx[:, :, None], self.cam_cols[:, None, :]] += pc
-            # cam-pose(b): summed over a per camera b
-            cpb = blocks[plan["order_b"]][:, 6:, :6]
-            cp = segment_sum(cpb, plan["g_b"][plan["order_b"]], self.N, plan["b_ends"])         # (N,nf,6)
-            S[self.cam_cols[:, :, None], self.pose_idx[:, None, :]] += cp
+            # pose(a)–cam: a group (a, b)'s pose rows are a's and its camera-parameter columns are those
+            # of b's BLOCK (W_b carries b's block) — summed per (camera a, block of b). Until 2026-11-01
+            # this summed per camera a and placed it at a's OWN block, right only with one block: with
+            # R3's focal per keyframe block every cross-block coupling landed in the wrong columns, the
+            # reduced system was not the Schur complement (not even positive definite on a small scene),
+            # the steps were bent — half rejected — and station's R3 ran out of its 500 iterations.
+            # One block (R0–R2): the same groups in the same order, the same sums as before.
+            ka = plan["g_a"] * self.B + self.block_of[plan["g_b"]]
+            oa = torch.argsort(ka, stable=True)
+            pc = segment_sum(blocks[oa][:, :6, 6:], ka[oa], self.N * self.B, segment_ends(ka[oa]))   # (N·B,6,nf)
+            S[self.pose_idx.repeat_interleave(self.B, 0)[:, :, None],
+              self.blk_cols.repeat(self.N, 1)[:, None, :]] += pc
+            # cam–pose(b): a's block's camera-parameter rows, b's pose columns — per (block of a, camera b)
+            kb = self.block_of[plan["g_a"]] * self.N + plan["g_b"]
+            ob = torch.argsort(kb, stable=True)
+            cp = segment_sum(blocks[ob][:, 6:, :6], kb[ob], self.B * self.N, segment_ends(kb[ob]))   # (B·N,nf,6)
+            S[self.blk_cols.repeat_interleave(self.N, 0)[:, :, None],
+              self.pose_idx.repeat(self.B, 1)[:, None, :]] += cp
             # cam-cam: every group, per (block of a, block of b)
             bk = self.block_of[plan["g_a"]] * self.B + self.block_of[plan["g_b"]]
             o = torch.argsort(bk, stable=True)
@@ -699,7 +718,8 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
     torch = _torch()
     dev = device_for(device)
     _dump = os.environ.get("STAC_BA_DUMP")
-    if _dump and not Path(_dump).exists():
+    _dump_rung = os.environ.get("STAC_BA_DUMP_RUNG")        # only that rung (default: the first asked for)
+    if _dump and not Path(_dump).exists() and (not _dump_rung or _dump_rung == name):
         # the rung's exact inputs, once (the first rung asked for), to study the solver offline
         import pickle
         with open(_dump, "wb") as fh:

@@ -233,3 +233,85 @@ def test_ceres_and_torch_agree_on_the_same_problem():
     d_abs = np.linalg.norm(rt.w2c[:, :3, 3] - rc.w2c[:, :3, 3], axis=1)
     assert np.max(d_rel) < 2e-3 and np.max(d_abs) < 5e-3, (d_rel, d_abs)
     assert abs(rt.fit_rms_px - rc.fit_rms_px) < 0.02, (rt.fit_rms_px, rc.fit_rms_px)
+
+
+@pytest.mark.parametrize("damping", ["hessian", "schur"])
+@pytest.mark.parametrize("cam_free,blocks", [((), 1), ((0, 1, 2, 3), 1), ((0, 1), 3)])
+def test_the_step_is_the_dense_damped_system(cam_free, blocks, damping, monkeypatch):
+    """_Problem.step(λ) against the DENSE solve of the same linearization — the whole Schur reduction
+    (the multi-block camera coupling included: until 2026-11-01 a pose's coupling to ANOTHER block's
+    focal landed in its own block's columns and station's F5 R3 ran out of iterations) and the
+    back-substitution, to 1e-9. "hessian": Ceres' system (JᵀJ + λ·D) δ = −Jᵀr, D = diag(JᵀJ) clamped
+    to [lm_diag_min, lm_diag_max] for every parameter. "schur" (the default): the landmarks damped the
+    same, the cameras by λ·diag of their damped Schur complement."""
+    monkeypatch.setattr(BA, "CAMERA_DAMPING", damping)
+    w2c, pts, groups, X = _scene(n_cam=6, n_pts=80, noise_px=0.3)
+    tracks = [t for t in X if t in groups and len(groups[t]) >= 2]
+    cam_idx = np.concatenate([np.array([i for i, _ in groups[t]]) for t in tracks])
+    pt_idx = np.concatenate([np.full(len(groups[t]), k) for k, t in enumerate(tracks)])
+    uv = np.concatenate([np.array([p for _, p in groups[t]]) for t in tracks])
+    X0 = np.array([X[t] for t in tracks]) + np.random.default_rng(1).normal(0, 0.02, (len(tracks), 3))
+    block_of = (np.arange(len(w2c)) * blocks // len(w2c)).astype(int)
+    prob = BA._Problem(w2c, [list(CAM)] * blocks, block_of, cam_idx, pt_idx, uv, X0, 1.0, cam_free,
+                       device="cpu", sigmas=np.full(len(w2c), 0.05),
+                       prior_centres=-np.einsum("nji,nj->ni", w2c[:, :3, :3], w2c[:, :3, 3]) + 0.01, torch_ba=TB)
+    L = prob.linearize()
+    M, P, nc = int(L["r_w"].shape[0]), int(prob.P), int(prob.n_c)
+    cols = torch.cat([prob.pose_idx, prob.cam_cols], 1) if prob.nf else prob.pose_idx      # (N, nco)
+    J = torch.zeros(2 * M + int(L["e_p"].shape[0]), nc + 3 * P, dtype=torch.float64)
+    r = torch.zeros(J.shape[0], dtype=torch.float64)
+    rows = torch.arange(2 * M).reshape(M, 2)
+    for m in range(M):
+        J[rows[m][:, None], cols[prob.cam_idx[m]][None, :]] = L["J_c"][m]
+        J[rows[m][:, None], (nc + 3 * prob.pt_idx[m] + torch.arange(3))[None, :]] = L["J_pt"][m]
+        r[rows[m]] = L["r_w"][m]
+    if L["e_p"].shape[0]:
+        J[2 * M:, :nc] = L["J_p"]
+        r[2 * M:] = L["e_p"]
+    keep = torch.cat([prob.free, torch.ones(3 * P, dtype=torch.bool)])
+    Jk = J[:, keep]
+    A = Jk.T @ Jk
+    D = torch.diagonal(A).clamp(TB.lm_diag_min, TB.lm_diag_max)
+    nf_ = int(prob.free.sum())
+    for lam in (1e-4, 1e-1, 3.0):
+        if damping == "hessian":
+            x = torch.linalg.solve(A + lam * torch.diag(D), -(Jk.T @ r))
+        else:
+            Ad = A + lam * torch.diag(torch.cat([torch.zeros(nf_, dtype=torch.float64), D[nf_:]]))
+            Acc, Acp, App = Ad[:nf_, :nf_], Ad[:nf_, nf_:], Ad[nf_:, nf_:]
+            g_all = Jk.T @ r
+            Sd = Acc - Acp @ torch.linalg.solve(App, Acp.T)
+            gr = g_all[:nf_] - Acp @ torch.linalg.solve(App, g_all[nf_:])
+            Sl = Sd + lam * torch.diag(torch.diagonal(Sd).clamp(TB.lm_diag_min, TB.lm_diag_max))
+            xc = torch.linalg.solve(Sl, -gr)
+            xp = torch.linalg.solve(App, -g_all[nf_:] - Acp.T @ xc)
+            x = torch.cat([xc, xp])
+        (dc, dp), _cost, _pred, why = prob.step(lam)
+        assert why == ""
+        got = torch.cat([dc[prob.free], dp.reshape(-1)])
+        assert torch.allclose(got, x, rtol=1e-9, atol=1e-12 * float(x.abs().max())), lam
+
+
+def test_r3_focal_blocks_agree_with_ceres():
+    """R3 (focal per block of keyframes) from a focal error that differs per block: the torch solve
+    converges and lands where Ceres does on the same problem, block by block — the multi-block
+    Schur complement (the pose of one camera against another block's focal) is what R0–R2 never
+    exercise (station 2026-11-01: R3 ran out of iterations with that coupling misplaced)."""
+    w2c, pts, groups, X = _scene(n_cam=12, n_pts=400, noise_px=0.1, curve=True)
+    block_of = (np.arange(len(w2c)) * 3 // len(w2c)).astype(int)
+    pb = []
+    for b, f in enumerate((1.01, 0.985, 1.02)):
+        c = list(CAM); c[0] *= f; c[1] *= f
+        pb.append(c)
+    sig = np.full(len(w2c), 0.05)
+    r = BA.run_rung_torch("R3", w2c, pb[0], WH, groups, X, sigmas=sig, cfg=CFG, prior_w2c=w2c, device="cpu",
+                          block_of=block_of, params_by_block0=pb)
+    assert r.termination == "CONVERGENCE", r.termination
+    _ceres_or_skip()
+    from precision.refine import run_rung
+    rc = run_rung("R3", w2c, pb[0], WH, groups, X, sig, CFG, block_of=block_of, params_by_block0=pb, prior_w2c=w2c)
+    for b in range(3):
+        fx, fy = r.params_by_block[b][:2]
+        fxc, fyc = rc.params_by_block[b][:2]
+        assert abs(fx - fxc) < 0.1 and abs(fy - fyc) < 0.1, (b, (fx, fy), (fxc, fyc))
+    assert abs(r.fit_rms_px - rc.fit_rms_px) < 0.01, (r.fit_rms_px, rc.fit_rms_px)
