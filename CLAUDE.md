@@ -1,5 +1,17 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐ 2026-11-02 — GenRecon: TWO VARIANTS, THE CUBES' BASE ON THE LOWEST LEVEL (USER: "paralo y corregí eso")
+- Station's tracks (1.15 m under the platform; labelled track / rail / gravel, no support noun) sat under EVERY chunk
+  cube: the base was the lowest SUPPORT level. `tools/genrecon/genrecon_levels.py`: the base = the lowest level of
+  the support surfaces OR of the whole cloud (the same 5 cm / 1 % rule over every point); station −0.10 → −1.15 m.
+- USER: "veamos cómo sale generativa y no generativa, que aparezcan las dos variantes … en la no generativa que se
+  cocinen las texturas reales, en la generativa no porque no va a ser exactamente igual": the GENRECON stage runs
+  `genrecon_photo` (mode cloud, photo bake) then `genrecon_generative` (`run_cloud.sh … generative`: the model's own
+  sparse structure, its generated texture; `genrecon.generative_mesh_name`, "" = off). DECLARED: one layer of cubes
+  on one base — on a two-level scene the generative model may paint ground at the lower level under the upper one.
+- LESSON (station 01:10): never edit a bash script in place while it runs (bash reads it by offset) — write a new
+  file and `mv` it over; the running copy keeps its inode.
+
 ## ⭐⭐⭐ 2026-11-01 — EVERYTHING ON THE CARD (USER: "todo debe correr en GPU, en modo determinista … la GPU no debe
 ## quedar parada nunca hasta terminar … en el menor tiempo posible, siempre determinista y reproducible")
 - THE RULE OF EVERY PORT: measure first on the real session (cProfile / a time-stamped log; pccr read-only or a copy

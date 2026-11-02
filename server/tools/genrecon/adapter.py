@@ -54,8 +54,9 @@ with (col / "points3D.txt").open("w") as fh:
 cams_g = (np.asarray(s.poses, np.float64)[:, :3, 3] @ M[:3, :3].T) + M[:3, 3]
 # STAC 2026-10-16: the WHOLE published cloud in GenRecon's frame (the active voxels of every chunk come from it,
 # reconstruct_scene --coords_from_points) and the session's floor and ceiling LEVELS for the chunk cubes
-# (levels.json: the cube's base is the lowest support level, its top the highest ceiling level — the model
-# paints floor and ceiling at the cube's faces, so a percentile of a subsample must not decide them).
+# (levels.json: the cube's base is the lowest level — of the support surfaces or of the whole cloud —, its top
+# the highest ceiling level; the model paints floor and ceiling at the cube's faces, so a percentile of a
+# subsample must not decide them).
 np.save(WORK / "cloud_genrecon.npy", (xyz @ M[:3, :3].T + M[:3, 3]).astype(np.float32))
 import yaml
 from correction.floor import head_noun
@@ -65,17 +66,10 @@ y_d = (xyz @ (s_f * R_f).T + t_f)[:, 1]                      # heights in the di
 seg = json.loads((out / "segmentation_result.json").read_text()) if (out / "segmentation_result.json").exists() else {"instances": []}
 sup_idx = np.concatenate([np.asarray(i["globalIndices"], np.int64) for i in seg["instances"] if head_noun(i["label"]) in support] or [np.zeros(0, np.int64)])
 ceil_idx = [np.asarray(i["globalIndices"], np.int64) for i in seg["instances"] if head_noun(i["label"]) == "ceiling"]
-levels = {"bin_m": 0.05, "level_min_share": 0.01}
-if len(sup_idx) > 1000:
-    ys = y_d[sup_idx]; h, e = np.histogram(ys, bins=np.arange(np.floor(ys.min() * 20) / 20, ys.max() + 0.05, 0.05))
-    lv = [float(e[i]) for i in range(len(h)) if h[i] / h.sum() >= levels["level_min_share"]]
-    levels.update(z_floor=min(lv), support_levels=lv, source="segmentation support surfaces")
-else:
-    levels.update(z_floor=float(np.percentile(y_d, 0.2)), source="percentile 0.2 of the cloud (no support instance)")
-if ceil_idx:
-    levels.update(z_ceiling=max(float(np.percentile(y_d[g], 95)) for g in ceil_idx), ceiling_source="segmentation ceiling instances p95")
-else:
-    levels.update(z_ceiling=float(np.percentile(y_d, 99.97)), ceiling_source="percentile 99.97 of the cloud (no ceiling instance)")
+# the cube's base on the LOWEST level, of the support surfaces or of the whole cloud (genrecon_levels.py:
+# station's tracks, 1.15 m under the platform and no support noun, sat under every cube — USER 2026-11-02)
+from genrecon_levels import chunk_levels
+levels = chunk_levels(y_d, y_d[sup_idx], [y_d[g] for g in ceil_idx], bin_m=0.05, min_share=0.01)
 (WORK / "levels.json").write_text(json.dumps(levels, indent=2))
 # STAC 2026-10-17 (USER: "debería completar lo que no ve o no tenía puntos … las patas de una mesa … pero solo eso"):
 # the boxes of the segmented OBJECTS in GenRecon's frame — the model may complete only inside them; a support

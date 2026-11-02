@@ -2,12 +2,17 @@
 # segmentation chain (USER 2026-10-17: "el botón meshing se va, porque este pipeline de mesh se hace al
 # finalizar el autosegment … lo cableamos ahí").
 #
-# What it runs: server/tools/genrecon/run_cloud.sh in mode `cloud` — the session's keyframes, certified
-# poses and PUBLISHED cloud handed to GenRecon (Trellis.2 scene generation, vendor/GenRecon + the STAC
-# patch) with the active voxels of every chunk taken FROM THE CLOUD (presence is the cloud's, never the
-# model's; the cube anchored on the segmentation's floor/ceiling levels), baked and published into
-# output/tsdf/<mesh_name>/ for the viewer. Measured on pccr 2026-10-16: 95 % of the mesh area within 5 cm
-# of the cloud, floor 0 cm — the user's "está perfecta".
+# What it runs: server/tools/genrecon/run_cloud.sh, TWICE (USER 2026-11-02: "veamos cómo sale generativa y
+# no generativa, que aparezcan las dos variantes"), the session's keyframes, certified poses and PUBLISHED
+# cloud handed to GenRecon (Trellis.2 scene generation, vendor/GenRecon + the STAC patch), the chunk cubes
+# on the scene's levels (tools/genrecon/genrecon_levels.py):
+#   1. genrecon.mesh_name, mode genrecon.mode (`cloud`) — the active voxels of every chunk taken FROM THE
+#      CLOUD (presence is the cloud's, never the model's), the keyframes baked into its atlas (the real
+#      textures). Measured on pccr 2026-10-16: 95 % of the mesh area within 5 cm of the cloud, floor 0 cm.
+#   2. genrecon.generative_mesh_name, mode `generative` — the model's own presence from the keyframes (the
+#      cloud only lays out the chunks) and the texture it generated: no photo bake ("en la generativa no,
+#      porque no va a ser exactamente igual"). An empty name runs only the first.
+# Both published into output/tsdf/<name>/ for the viewer.
 #
 # The adapter and the publish run on python_da3, the generation and the bake on the `genrecon` env (the
 # script owns the interpreters). vLLM is NOT stopped: the generation peaks at ~12 GB beside it.
@@ -32,7 +37,8 @@ _MARKS = [
     ("images, ", 12, "keyframes, poses and cloud written"),
     ("undistorted", 18, "keyframes undistorted"),
     ("coords from the cloud", 25, "active voxels from the cloud"),
-    ("Sampling shape", 35, "generating the surface inside the cloud's voxels"),
+    ("Sampling sparse structure", 25, "the model generating the scene's structure"),
+    ("Sampling shape", 35, "generating the surface"),
     ("Sampling texture", 55, "generating the texture"),
     ("joint_decode_shape", 62, "decoding the scene mesh"),
     ("joint_decode_tex", 68, "decoding the texture"),
@@ -43,28 +49,14 @@ _MARKS = [
 _FAILS = ("adapter failed", "reconstruct failed", "bake failed", "publish failed", "hull failed")
 
 
-def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
-    session_path = Path(session_dir).resolve()
-    output_dir = session_path / "output"
-    if not (output_dir / "cleaned_cloud.ply").exists():
-        raise FileNotFoundError("cleaned_cloud.ply not found — no published cloud; the GenRecon mesh needs it")
-    parts = session_path.parts
-    try:
-        sid, scan = parts[-4], parts[-2]            # projects/<sid>/scans/<scan>/src_default
-    except IndexError as e:  # noqa: BLE001
-        raise RuntimeError(f"session path {session_path} is not projects/<sid>/scans/<scan>/src_default") from e
-    gcfg = dict(config.get("genrecon") or {})
-    name = str(gcfg.get("mesh_name", "genrecon_photo"))
-    mode = str(gcfg.get("mode", "cloud"))
-    min_pts = int(gcfg.get("min_points_per_voxel", 10))
-    env = {**os.environ, "PYTHONUNBUFFERED": "1",
-           "GENRECON_SIMPLIFY": str(int(gcfg.get("simplify_faces_per_chunk", 150000))),
-           "GENRECON_TEX": str(int(gcfg.get("texture_size", 2048))),
-           "GENRECON_TOPK": str(int(gcfg.get("bake_views", 3)))}
-    if not _SCRIPT.exists():
-        raise FileNotFoundError(f"GenRecon runner missing: {_SCRIPT}")
-    pipe.send_progress(1, f"GenRecon mesh ({mode}, ≥{min_pts} pts/voxel) for {sid}:{scan}", stage=STAGE)
-    pipe.send_log(f"[genrecon] {_SCRIPT.name} {sid}:{scan} {name} {min_pts} {mode} "
+def _run_variant(pipe: WorkerPipe, output_dir: Path, sid: str, scan: str, name: str, min_pts: int, mode: str,
+                 env: dict, lo: int, hi: int, tag: str) -> dict:
+    """One run of the runner: its milestones mapped into [lo, hi] % of the stage, its published mesh's
+    meta returned (a failure raises, naming the variant)."""
+    def prog(p: int, msg: str):
+        pipe.send_progress(lo + (hi - lo) * p // 100, f"{tag}: {msg}", stage=STAGE)
+
+    pipe.send_log(f"[genrecon] {tag}: {_SCRIPT.name} {sid}:{scan} {name} {min_pts} {mode} "
                   f"(simplify {env['GENRECON_SIMPLIFY']} faces/chunk, texture {env['GENRECON_TEX']})")
     proc = subprocess.Popen(["bash", str(_SCRIPT), f"{sid}:{scan}", name, str(min_pts), mode],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -81,16 +73,16 @@ def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
         for mark, p, msg in _MARKS:
             if mark in line and p > pct:
                 pct = p
-                pipe.send_progress(pct, msg, stage=STAGE)
+                prog(pct, msg)
                 break
         if "[chunked_to_glb] baking chunk" in line:
             bake_n += 1
-            pipe.send_progress(min(94, 72 + bake_n), f"baking chunk {bake_n}", stage=STAGE)
+            prog(min(94, 72 + bake_n), f"baking chunk {bake_n}")
         if line.startswith("image convention") or line.startswith("mesh depth rendered"):
-            pct = max(pct, 95); pipe.send_progress(pct, "baking the keyframes into the generated atlas", stage=STAGE)
+            pct = max(pct, 95); prog(pct, "baking the keyframes into the generated atlas")
         if line.lstrip().startswith("part ") and "photographed" in line:
             pct = max(pct, min(98, 95 + bake_n // 8)); bake_n += 1
-            pipe.send_progress(pct, f"photo albedo: {line.strip()[:60]}", stage=STAGE)
+            prog(pct, f"photo albedo: {line.strip()[:60]}")
         if line.startswith("published "):
             published = line
         for f in _FAILS:
@@ -100,14 +92,51 @@ def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
             pipe.send_log(f"[genrecon] {line[:300]}")
     code = proc.wait()
     if code != 0 or failed is not None:
-        raise RuntimeError(f"GenRecon stage failed ({failed or f'exit {code}'}) — see the stage log")
+        raise RuntimeError(f"GenRecon stage failed — {tag} ({failed or f'exit {code}'}) — see the stage log")
     glb = output_dir / "tsdf" / name / f"{name}.glb"
     if not glb.exists():
-        raise RuntimeError(f"GenRecon ended without {glb}")
-    meta_p = output_dir / "tsdf" / name / f"{name}.meta.json"
-    meta = json.loads(meta_p.read_text()) if meta_p.exists() else {}
-    pipe.send_progress(100, f"GenRecon mesh published: {name} ({meta.get('n_faces', '?')} faces)", stage=STAGE)
-    pipe.send_log(f"[genrecon] {published or glb}")
+        raise RuntimeError(f"GenRecon ended without {glb} ({tag})")
+    meta_p = glb.parent / f"{name}.meta.json"
+    pipe.send_log(f"[genrecon] {tag}: {published or glb}")
+    return json.loads(meta_p.read_text()) if meta_p.exists() else {}
+
+
+def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
+    session_path = Path(session_dir).resolve()
+    output_dir = session_path / "output"
+    if not (output_dir / "cleaned_cloud.ply").exists():
+        raise FileNotFoundError("cleaned_cloud.ply not found — no published cloud; the GenRecon mesh needs it")
+    parts = session_path.parts
+    try:
+        sid, scan = parts[-4], parts[-2]            # projects/<sid>/scans/<scan>/src_default
+    except IndexError as e:  # noqa: BLE001
+        raise RuntimeError(f"session path {session_path} is not projects/<sid>/scans/<scan>/src_default") from e
+    gcfg = dict(config.get("genrecon") or {})
+    name = str(gcfg.get("mesh_name", "genrecon_photo"))
+    mode = str(gcfg.get("mode", "cloud"))
+    gen_name = str(gcfg.get("generative_mesh_name", "genrecon_generative") or "")
+    min_pts = int(gcfg.get("min_points_per_voxel", 10))
+    if gen_name and gen_name == name:
+        raise ValueError(f"genrecon.generative_mesh_name equals genrecon.mesh_name ({name}): one would overwrite the other")
+    env = {**os.environ, "PYTHONUNBUFFERED": "1",
+           "GENRECON_SIMPLIFY": str(int(gcfg.get("simplify_faces_per_chunk", 150000))),
+           "GENRECON_TEX": str(int(gcfg.get("texture_size", 2048))),
+           "GENRECON_TOPK": str(int(gcfg.get("bake_views", 3)))}
+    if not _SCRIPT.exists():
+        raise FileNotFoundError(f"GenRecon runner missing: {_SCRIPT}")
+    variants = [(name, mode, f"1/{2 if gen_name else 1} from the cloud, real textures")]
+    if gen_name:
+        variants.append((gen_name, "generative", "2/2 generative, its own texture"))
+    pipe.send_progress(1, f"GenRecon mesh ({len(variants)} variant(s)) for {sid}:{scan}", stage=STAGE)
+    done = []
+    for k, (vname, vmode, tag) in enumerate(variants):
+        if k and pipe.check_cancel():              # between the variants: the first one stays published
+            pipe.send_log(f"[genrecon] cancelled before {tag}")
+            return
+        lo, hi = 100 * k // len(variants), 100 * (k + 1) // len(variants)
+        meta = _run_variant(pipe, output_dir, sid, scan, vname, min_pts, vmode, env, lo, hi, tag)
+        done.append(f"{vname} ({meta.get('n_faces', '?')} faces)")
+    pipe.send_progress(100, f"GenRecon mesh published: {', '.join(done)}", stage=STAGE)
 
 
 def run(conn: Connection, session_dir: str, config: dict):
