@@ -346,6 +346,10 @@ def test_out_of_memory_in_a_group_runs_every_member_alone():
     pipe = w.process_batch("/b0", "pipe", MAP)                   # refused for groups: alone
     _same(pipe, _alone("pipe"))
     assert w.group_stats["groups"] == 1
+    # on the other frame set too: the concepts that filled the card together run alone
+    w.set_upcoming(["pipe", "light"])
+    w.process_batch("/b1", "door", MAP)
+    assert w.group_stats["groups"] == 1
 
 
 def test_masks_kept_for_a_later_call_are_bit_packed_and_restored_exactly():

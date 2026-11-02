@@ -950,13 +950,17 @@ class SAM3Wrapper:
     def _group_for(self, batch_dir: str, prompt_text: str) -> List[str]:
         k = int(getattr(self, "_concept_group", 1))
         out = [prompt_text]
-        if k <= 1 or (batch_dir, prompt_text) in self._group_refused:
+
+        def refused(p):
+            # (frame set, concept): the group could not complete it there (a stop, an error);
+            # (None, concept): a group it was in ran out of memory — alone on every frame set
+            return (batch_dir, p) in self._group_refused or (None, p) in self._group_refused
+        if k <= 1 or refused(prompt_text):
             return out
         for p in self._upcoming:
             if len(out) >= k:
                 break
-            if (p in out or (batch_dir, p) in self._prefetched
-                    or (batch_dir, p) in self._group_refused):
+            if p in out or (batch_dir, p) in self._prefetched or refused(p):
                 continue
             out.append(p)
         return out
@@ -1119,7 +1123,9 @@ class SAM3Wrapper:
             results.clear()
             self.release_batch_session()
             for p in prompts:
-                self._group_refused.add((batch_dir, p))
+                # out of memory: the concepts that filled the card together run alone on every
+                # frame set (the other batch holds the same objects); another stop, on this one
+                self._group_refused.add((None, p) if stopped_oom else (batch_dir, p))
             logger.warning(f"[SAM3-Group] the group of {len(prompts)} on {batch_dir} stopped "
                            f"({stopped}) — every member runs alone on its own call")
             return {}
