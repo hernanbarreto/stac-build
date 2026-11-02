@@ -155,8 +155,9 @@ def semantic_config_sha256(cfg: Mapping[str, Any]) -> str:
 
 def weights_identity(b: Mapping[str, Any], log=print) -> Dict[str, Any]:
     """The local weights of backend ``b`` VERIFIED against :data:`PINNED_WEIGHTS`: the
-    directory exists, every pinned file is there and hashes to its sha256 (the whole file is
-    read — the same check server/da3_weights.py runs on DA3's weights). RAISES otherwise:
+    directory exists, every pinned file is there and hashes to its sha256 (the whole file read
+    once per file identity — repro.sha256_file_memo, the check server/da3_weights.py runs on
+    DA3's weights). RAISES otherwise:
     no download, no other revision, no unpinned model (point 94). Returns the record a
     product made with these weights carries: model id, revision, repo-relative path and the
     per-file sha256."""
@@ -182,7 +183,10 @@ def weights_identity(b: Mapping[str, Any], log=print) -> Dict[str, Any]:
         if not f.is_file():
             raise ServeError(f"{f} is missing — the pinned weights of '{model_id}' "
                              f"(revision {pin['revision'][:12]}) are incomplete")
-        got = repro.sha256_file(f)
+        # once per file: kept beside it with the file's identity (device, inode, size,
+        # mtime_ns) — the 17 GB of Qwen3-VL were hashed again at every launch, 39 s with the
+        # card idle (station 2026-11-02); a file rewritten in place is hashed again
+        got = repro.sha256_file_memo(f)
         if got != want[name]:
             raise ServeError(f"{f} hashes to sha256 {got[:12]}…, the pinned file is "
                              f"{want[name][:12]}… — these are not the weights every validated "
