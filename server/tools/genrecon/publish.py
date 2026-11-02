@@ -6,6 +6,10 @@ import sys, json, shutil, time, numpy as np, trimesh
 from pathlib import Path
 glb = Path(sys.argv[1]); SES = Path(sys.argv[2]); name = sys.argv[3]; work = Path(sys.argv[4]) if len(sys.argv) > 4 else None
 note = sys.argv[5] if len(sys.argv) > 5 else None
+# where under output/: tsdf (the viewer lists and loads every folder that appears there) or genrecon (kept, unlisted:
+# the raw mesh before its photo bake — published into tsdf/ it was loaded by the viewer's watcher, then moved away
+# under it and left on screen with no box to hide it, station 2026-11-02)
+dest = sys.argv[6] if len(sys.argv) > 6 else "tsdf"
 sc = trimesh.load(str(glb), force="scene")
 b0 = sc.bounds.copy(); frame_note = "the baker's glTF Y-up = the session's raw frame (identity display transform)"
 if work is not None and (work / "M_raw_to_genrecon.npy").exists():
@@ -14,7 +18,7 @@ if work is not None and (work / "M_raw_to_genrecon.npy").exists():
     if not np.allclose(D, np.eye(4), atol=1e-6):
         sc.apply_transform(np.linalg.inv(D))                                          # display → raw
         frame_note = "display transform undone: the mesh is in the session's RAW frame (the viewer applies floor_transform.npz)"
-d = SES / "output" / "tsdf" / name; d.mkdir(parents=True, exist_ok=True)
+d = SES / "output" / dest / name; d.mkdir(parents=True, exist_ok=True)
 out = d / f"{name}.glb"
 # ATOMIC: the viewer's folder watcher lists the mesh the moment the folder appears and fetched a GLB still being
 # written ("Too much data for declared Content-Length", 2026-10-17) — write beside it, then rename

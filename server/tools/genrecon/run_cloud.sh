@@ -3,9 +3,9 @@
 # reconstruct_scene --coords_from_points (the sparse-structure stage skipped, the chunk cubes on the session's
 # floor/ceiling levels) → light bake → publish. vLLM is NOT touched here: the caller frees the card.
 #   bash run_cloud.sh <sid>:<scan> [mesh name, default genrecon_photo] [coords_min_points, default 10] [cloud | cloud+unseen | cloud+objects | cloud+hull | generative]
-# THE PRODUCT (USER 2026-10-17: "genrecon_photo debe ser la única publicada final"): the generated mesh is published as <name>_raw,
-# the keyframes are baked into its own atlas (photo_albedo.py, material kept) and published as <name>; the raw mesh moves to
-# output/genrecon/ (kept for re-bakes, outside the viewer's list).
+# THE PRODUCT (USER 2026-10-17: "genrecon_photo debe ser la única publicada final"): the generated mesh is published as <name>_raw
+# into output/genrecon/ (kept for re-bakes, outside the viewer's list), the keyframes are baked into its own atlas
+# (photo_albedo.py, material kept) and published as <name>.
 # GENERATIVE (USER 2026-11-02: "veamos cómo sale generativa y no generativa, que aparezcan las dos variantes"): mode
 # `generative` = GenRecon's own sparse structure — the model decides presence from the keyframes, the cloud only lays
 # out the chunks — published as <name> with the texture the model generated, no photo bake ("en la generativa no,
@@ -44,8 +44,9 @@ if [ "$mode" = "generative" ]; then
   echo "=== DONE $sid $(date +%H:%M:%S)"
   exit 0
 fi
-(cd /workspace/stac-build/server && $DA3 $T/publish.py $OL/scene.glb $SES $raw $W "$NOTE") || { echo "publish failed $sid"; exit 1; }
-[ -f $SES/output/tsdf/$raw/$raw.glb ] || { echo "publish failed $sid"; exit 1; }
-(cd /workspace/stac-build/server && $DA3 $T/photo_albedo.py $SES $SES/output/tsdf/$raw/$raw.glb $name ${GENRECON_TOPK:-3}) || { echo "bake failed $sid"; exit 1; }
-mkdir -p $SES/output/genrecon && rm -rf $SES/output/genrecon/$raw && mv $SES/output/tsdf/$raw $SES/output/genrecon/
+# the raw mesh never enters output/tsdf/ (the viewer loads every folder that appears there): output/genrecon/
+rm -rf $SES/output/genrecon/$raw $SES/output/tsdf/$raw
+(cd /workspace/stac-build/server && $DA3 $T/publish.py $OL/scene.glb $SES $raw $W "$NOTE" genrecon) || { echo "publish failed $sid"; exit 1; }
+[ -f $SES/output/genrecon/$raw/$raw.glb ] || { echo "publish failed $sid"; exit 1; }
+(cd /workspace/stac-build/server && $DA3 $T/photo_albedo.py $SES $SES/output/genrecon/$raw/$raw.glb $name ${GENRECON_TOPK:-3}) || { echo "bake failed $sid"; exit 1; }
 echo "=== DONE $sid $(date +%H:%M:%S)"

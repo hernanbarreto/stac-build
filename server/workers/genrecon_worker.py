@@ -15,7 +15,10 @@
 # Both published into output/tsdf/<name>/ for the viewer.
 #
 # The adapter and the publish run on python_da3, the generation and the bake on the `genrecon` env (the
-# script owns the interpreters). vLLM is NOT stopped: the generation peaks at ~12 GB beside it.
+# script owns the interpreters). vLLM is STOPPED (verified) before the generation: pccr's 3.7 m cubes peaked
+# at ~12 GB beside it, station's 7 m cubes ran out of memory with its 38 GB on the card (2026-11-02, a GenRecon
+# job ordered right after another, the backend having brought vLLM back between them); the chat comes back
+# when the job ends.
 # Generative: presence and shape are declared in the mesh's meta (provenance vlm_generated).
 #
 # Hernán Barreto - Ingerop IN3 Session IV - STAC
@@ -26,7 +29,7 @@ import sys
 from multiprocessing.connection import Connection
 from pathlib import Path
 
-from workers.base import WorkerPipe, run_worker_safe
+from workers.base import WorkerPipe, run_worker_safe, stop_semantic_service_verified
 
 STAGE = "genrecon"
 _SCRIPT = Path(__file__).resolve().parent.parent / "tools" / "genrecon" / "run_cloud.sh"
@@ -124,6 +127,7 @@ def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
            "GENRECON_TOPK": str(int(gcfg.get("bake_views", 3)))}
     if not _SCRIPT.exists():
         raise FileNotFoundError(f"GenRecon runner missing: {_SCRIPT}")
+    stop_semantic_service_verified(pipe, stage="GenRecon mesh")
     variants = [(name, mode, f"1/{2 if gen_name else 1} from the cloud, real textures")]
     if gen_name:
         variants.append((gen_name, "generative", "2/2 generative, its own texture"))

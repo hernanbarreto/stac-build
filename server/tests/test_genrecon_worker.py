@@ -51,9 +51,15 @@ def _fake_popen(calls, fail_mode=None):
     return _P
 
 
+def _no_vllm_stop(monkeypatch, calls):
+    """The stage frees the card before generating — recorded here, never the real service."""
+    monkeypatch.setattr(G, "stop_semantic_service_verified", lambda pipe, stage="": calls.append(["stop", stage]))
+
+
 def _run(tmp_path, monkeypatch, gcfg, fail_mode=None):
     ses = _session(tmp_path)
     calls = []
+    _no_vllm_stop(monkeypatch, calls)
     monkeypatch.setattr(G.subprocess, "Popen", _fake_popen(calls, fail_mode))
     monkeypatch.setenv("_TEST_OUTPUT", str(ses / "output"))
     pipe = _Pipe()
@@ -67,6 +73,8 @@ _CFG = {"mesh_name": "genrecon_photo", "mode": "cloud", "generative_mesh_name": 
 
 def test_both_variants_in_order(tmp_path, monkeypatch):
     calls, pipe = _run(tmp_path, monkeypatch, _CFG)
+    assert calls[0] == ["stop", "GenRecon mesh"]                  # the card freed first
+    calls = calls[1:]
     assert [c[3:] for c in calls] == [["genrecon_photo", "10", "cloud"], ["genrecon_generative", "10", "generative"]]
     assert all(c[2] == "station:2026-10-17" for c in calls)
     pcts = [p for p, _ in pipe.progress]
@@ -76,7 +84,7 @@ def test_both_variants_in_order(tmp_path, monkeypatch):
 
 def test_an_empty_generative_name_runs_only_the_cloud_mesh(tmp_path, monkeypatch):
     calls, _ = _run(tmp_path, monkeypatch, {**_CFG, "generative_mesh_name": ""})
-    assert [c[3] for c in calls] == ["genrecon_photo"]
+    assert [c[3] for c in calls[1:]] == ["genrecon_photo"]
 
 
 def test_the_same_name_twice_is_refused(tmp_path, monkeypatch):
@@ -87,8 +95,9 @@ def test_the_same_name_twice_is_refused(tmp_path, monkeypatch):
 def test_a_failed_first_variant_stops_and_names_itself(tmp_path, monkeypatch):
     ses = _session(tmp_path)
     calls = []
+    _no_vllm_stop(monkeypatch, calls)
     monkeypatch.setattr(G.subprocess, "Popen", _fake_popen(calls, fail_mode="cloud"))
     monkeypatch.setenv("_TEST_OUTPUT", str(ses / "output"))
     with pytest.raises(RuntimeError, match="1/2 from the cloud"):
         G._genrecon_work(_Pipe(), str(ses), {"genrecon": _CFG})
-    assert len(calls) == 1
+    assert len(calls) == 2 and calls[0][0] == "stop"
