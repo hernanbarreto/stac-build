@@ -1993,6 +1993,10 @@ function App() {
   const pipelineActiveHere = !!(pipelineRunning && pipelineRunning.status === 'running' && pipelineRunning.session_id === activeSession)
   // A cloud on screen is never covered: progress rides as a banner instead.
   const viewerHasCloud = pointCount > 0 || cloudEverShown
+  // nor is a session that already PUBLISHED one (USER 2026-11-02: "ese panel debe ocultarse si ya hay épocas
+  // publicadas, no puede quedar sobre la época"): a reload whose octree fetch was aborted mid-pipeline left
+  // station's epoch 4 under the "Building the point cloud" splash for the whole GenRecon stage
+  const sessionHasPublishedCloud = !!sessions.find(s => s.id === activeSession)?.hasCloud || certifyState?.epoch != null
   const loadingOverlay = sessionLoading && !pipelineActiveHere && !viewerHasCloud
   const pipelineStages: ProgressStage[] = (pipelineRunning?.stages || []).filter(s => s.enabled).map(s => ({ id: s.id, label: s.label, status: s.status, pct: s.pct, detail: s.message }))
   const currentStage = pipelineRunning?.stages[pipelineRunning.current_stage_idx]
@@ -2296,7 +2300,7 @@ function App() {
               statusFractions={certifyState?.report_metrics?.witnesses?.status_fraction ?? null}
               deviationRange={sabanaVisible && sabanaMetrics ? { maxMm: (sabanaMetrics.tolerance_mm || 15) * 3, toleranceMm: sabanaMetrics.tolerance_mm || 15 } : null}
               showEdges={showCertifyKit} readouts={readouts}
-              banner={pipelineActiveHere && viewerHasCloud && currentStage ? (
+              banner={pipelineActiveHere && (viewerHasCloud || sessionHasPublishedCloud) && currentStage ? (
                 <Banner glass compact tone="brand" title={t('pipeline.runningBanner', { stage: currentStage.label })} action={<Button size="sm" variant="ghost" onClick={handlePipelineCancel}>{t('common.cancel')}</Button>}>
                   {currentStage.message} {fmt.percent(currentStage.pct / 100)}
                 </Banner>
@@ -2306,7 +2310,7 @@ function App() {
           {flythroughOpen && <SyncPlayer sessionId={flythroughOpen} viewportRef={viewportRef} onClose={() => setFlythroughOpen(null)} />}
 
           {loadingOverlay && <SplashOverlay title={t('splash.loadingSession')} status={sessionLoading || undefined} />}
-          {pipelineActiveHere && !viewerHasCloud && (
+          {pipelineActiveHere && !viewerHasCloud && !sessionHasPublishedCloud && (
             <SplashOverlay title={t('splash.building')} status={currentStage ? `${currentStage.label}: ${currentStage.message}` : t('splash.initializing')} stages={pipelineStages} />
           )}
           {!hasSession && !sessionLoading && <WelcomeScreen connected={connected} sessionCount={sessions.length} onConnect={connectToServer} />}
