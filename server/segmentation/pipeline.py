@@ -209,6 +209,19 @@ def _sam3_wrapper(cfg: Optional[dict] = None):
     return get_sam3_wrapper()                   # a stand-in: it reads no configuration at all
 
 
+def voxel_mesh_entry(voxel_mesh_data, cfg: Optional[dict]) -> Optional[dict]:
+    """The instance's ``voxel_mesh`` (the cleaning's 5 cm surface quads the viewer draws over the segment) —
+    None unless ``models.segmentation.segment_cleaning.voxel_mesh`` is true. OFF (USER 2026-11-02, "es lo que
+    hay que apagar"): the viewer drew them apart from the boxes, so no box hid them, and they stayed where the
+    projection put them while the certification moved the cloud to its next epoch (station: 1.4 m above the
+    epoch-4 cloud). A frozen configuration without the key gets none."""
+    if not voxel_mesh_data or not _cfg_get(cfg, "models.segmentation.segment_cleaning.voxel_mesh", False):
+        return None
+    return {"voxel_size": 0.05,                 # 5 cm mesh voxels (independent of the cleaning's voxel_size)
+            "count": len(voxel_mesh_data),
+            "data": voxel_mesh_data}            # [[cx, cy, cz, nx, ny, nz], ...]
+
+
 def _cfg_get(cfg: Optional[dict], path: str, default):
     """``cfg[a][b][c]`` for a dotted ``path`` — the job's configuration when ``cfg`` is given
     (point 112), else the server's `config.get_param` (the CLI / manager path), with the same
@@ -4710,19 +4723,15 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
         if _cap is not None:
             instance["shape_caption"] = _cap       # source 'concept', vlm_proposed
 
-        # Add voxel mesh data if available
-        if voxel_mesh_data:
-            instance["voxel_mesh"] = {
-                "voxel_size": 0.05,  # 5cm mesh voxels (independent of cleaning voxel_size)
-                "count": len(voxel_mesh_data),
-                "data": voxel_mesh_data,  # [[cx,cy,cz,nx,ny,nz], ...]
-            }
+        _vm = voxel_mesh_entry(voxel_mesh_data, cfg)
+        if _vm is not None:
+            instance["voxel_mesh"] = _vm
 
         # THE OBB FROM THE POINTS, the cleaning's face normals as yaw candidates (2026-11-01): with the
         # cleaning's RANSAC on, the box used to be fitted to the 5 cm visualisation voxels' centroids,
         # which sit on a WORLD-AXIS grid — a box that changed with the frame (the levelled frame's box was
         # not the rotated box: tests/test_p3_wave2_closing.py) and shrank up to half a voxel per side. The
-        # points are the instance; the voxels stay the viewer's mesh data.
+        # points are the instance (the voxels are the viewer's mesh data, off by default: voxel_mesh_entry).
         _t0 = _time.perf_counter()
         if len(all_matched) >= 4:
             instance["obb"] = _compute_obb(xyz_display[all_matched], face_normals=face_normals_data,

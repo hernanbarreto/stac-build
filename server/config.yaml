@@ -969,6 +969,9 @@ models:
       dbscan_enabled: false            # USER 2026-11-01 (14:55 CDMX): "este sí borra puntos, mantenelo
                                        # apagado" — off since 2026-08-29 (it dropped ~98k mask-matched
                                        # points on test3); the cleaning's other steps run
+      voxel_mesh: false                # USER 2026-11-02 ("es lo que hay que apagar"): the 5 cm quads the viewer
+                                       # drew over every segment — no box hid them and they stayed at the
+                                       # projection's epoch (station: 1.4 m above the certified cloud)
       dbscan_min_samples: 10
       sor_k: 20
       sor_std: 1.5
