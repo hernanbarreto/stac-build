@@ -69,8 +69,12 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
     # lazily inside the first prompt, and a bad key must fail the stage here,
     # naming it — not end as every prompt at zero masklets. Of the JOB's configuration
     # (points 112 / 151): the block the model is built from below.
-    from segmentation.sam3_wrapper import check_sam3_thresholds
+    from segmentation.sam3_wrapper import (check_sam3_thresholds, concept_group_config,
+                                           segmentation_config)
     check_sam3_thresholds(config=config)
+    # the concept groups and the vendor's frame cache (segmentation/sam3_group.py): read
+    # here too, so a configuration without them fails before the model is built
+    concept_group_config(segmentation_config(config))
 
     # SEGMENTATION IN ROUNDS (segmentation.autoprompt.rounds, USER 2026-10-09): round k >= 2
     # segments the round's NEW prompts into the same store; the masks are projected on the
