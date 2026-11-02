@@ -56,6 +56,17 @@
   bridges measured in a planned chunk order (58 → 34 loads of 2 GB), one-ahead chunk reads in the per-chunk
   passes; after Omega the records on threads, scale / orientation not rewriting the aligned chunks the run
   deletes (aligned_chunks = certify.keep_aligned_chunks), PLYs on threads, markers hashed on threads.
+- STATION 2026-11-02 (main 87d7c00, 438 kf): the reconstruction ~86 min, then SAM3 88 min (75 concepts x 448 frames,
+  ~70 s each — USER: "la etapa más lenta de todo el pipeline es sam3 … tarda más que todo el pipeline completo") and the
+  segmentation ROUNDS (his rule 2026-10-09; round 2 named 14 new prompts), every round relaunching vLLM (~185 s) after
+  SAM3's exclusive card. On gpu-main, each held to the path it replaces by its tests: SAM3 concepts in GROUPS sharing the
+  vision backbone of every 16-frame chunk (segmentation/sam3_group.py, `models.segmentation.concept_group`; SAM 3.1
+  propagates ONE text concept per session and recomputed the 32-block ViT per concept) and the vendor's per-frame mask
+  cache not kept + sessions reset after the copy (`keep_frame_outputs: false`, USER "ok" — 'light' ran out of memory
+  at 69 GB with 74.5 GB free after the release: a forced seam) — THE CARD'S A/B (masks equal, time) STILL TO RUN
+  (scratchpad sam3_validate_after_station.sh); the per-category store saves on a background thread (116 s); the
+  store's canonical rewrite deflated on 8 threads (115 → 26 s, same bytes — the cost was zlib, not the disk); the
+  rounds' mask union on 8 threads (39 → 17 s); vLLM's weights verified once per file (−39 s per launch).
 - STAYS ON THE CPU, DECLARED: PotreeConverter (one thread: its node offsets follow the threads' completion order — byte
   identity, point 57; ~1-2 min per build, three builds per full run), sqlite, PLY / JSON / npz I/O, JPEG decoding.
   NEXT (authorised by the USER 2026-11-01 "si hay tareas que se pueden paralelizar o adelantar … que no quede silicio
