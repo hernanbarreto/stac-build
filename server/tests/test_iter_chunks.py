@@ -56,6 +56,7 @@ def test_the_chunks_in_order_and_at_most_two_alive(tmp_path):
 
 
 def test_the_per_chunk_passes_read_through_it():
-    for name in ("_stac_uncertainty", "_stac_depth_graph", "_stac_write_deferred_outputs"):
+    for name in ("_stac_uncertainty", "_stac_depth_graph", "_stac_write_deferred_outputs",
+                 "_stac_holdout_pairs"):
         body = _method(name)
         assert "self._stac_iter_chunks(self.result_aligned_dir" in body, name
