@@ -1137,6 +1137,10 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
     status = prompt_status if prompt_status is not None else {}
     seg_meta = None
     global _ACTIVE_STORE_WRITER
+    if _ACTIVE_STORE_WRITER is not None:
+        # a previous run of this process that raised without run_segmentation's drain (a direct
+        # call): its saves finish before this run's start
+        _ACTIVE_STORE_WRITER.drain()
     writer = _StoreWriter() if persist else None
     _ACTIVE_STORE_WRITER = writer
     t_sam3 = _time.time()
