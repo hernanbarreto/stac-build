@@ -360,10 +360,15 @@ def load_depth_maps(paths: Sequence[Path], members: Sequence[str], missing_ok: b
     jobs = [(str(p), tuple(members), bool(missing_ok)) for p in paths]
     if len(jobs) <= 2:
         return [_load_npz_members(j) for j in jobs]
-    try:
-        ex = ProcessPoolExecutor(max_workers=int(workers), mp_context=multiprocessing.get_context("fork"))
-    except ValueError:
+    if multiprocessing.current_process().daemon:
+        # a pipeline stage's daemonic process (the certification runs the chunk check) may not start
+        # children — threads there, the same members read by the same function
         ex = ThreadPoolExecutor(max_workers=int(workers))
+    else:
+        try:
+            ex = ProcessPoolExecutor(max_workers=int(workers), mp_context=multiprocessing.get_context("fork"))
+        except ValueError:
+            ex = ThreadPoolExecutor(max_workers=int(workers))
     with ex:
         return list(ex.map(_load_npz_members, jobs, chunksize=8))
 

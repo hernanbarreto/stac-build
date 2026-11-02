@@ -32,7 +32,12 @@ DEFAULT_THREADS = max(2, min(16, (__import__("os").cpu_count() or 8) >> 1))   # 
 
 def _pool(workers: int):
     """Forked worker processes (the children read the npz with numpy and zlib only — never the card);
-    threads when forking is not available on the platform."""
+    threads when forking is not available on the platform, or when THIS process is a daemon: every
+    pipeline stage runs in the manager's daemonic multiprocessing child, and a daemon may not start
+    children (station 2026-11-02: the certification died on its first mask read, "daemonic processes
+    are not allowed to have children"). The same members, inflated by the same function."""
+    if multiprocessing.current_process().daemon:
+        return ThreadPoolExecutor(max_workers=workers)
     try:
         ctx = multiprocessing.get_context("fork")
     except ValueError:
