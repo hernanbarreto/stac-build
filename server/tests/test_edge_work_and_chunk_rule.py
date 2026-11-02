@@ -80,7 +80,9 @@ def test_the_subprocess_gets_bounded_work_a_fresh_report_and_no_clock(tmp_path, 
     from precision.config import load_precision_config
     out = _edge_session(tmp_path)
     p = load_precision_config()
-    pcfg = replace(p, cloud_metrics=replace(p.cloud_metrics, edge_max_objects=2, edge_max_points_per_object=150))
+    # the sample's device on the CPU (config.yaml's cloud_metrics.device is the card; tests hide it)
+    pcfg = replace(p, cloud_metrics=replace(p.cloud_metrics, edge_max_objects=2, edge_max_points_per_object=150,
+                                            device="cpu"))
     stale = out / "precision" / CM.EDGE_REPORT
     stale.write_text(json.dumps({"stale": True}))
     seen = {}
