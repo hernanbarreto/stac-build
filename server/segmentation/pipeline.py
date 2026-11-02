@@ -504,27 +504,47 @@ def write_canonical_store(path: Path, members: Dict[str, np.ndarray],
     if stray:
         raise ValueError(f"the mask store cannot hold members {stray[:5]} — not masks "
                          f"(f<frame>_o<oid>) nor known metadata")
+    import io as _io
+    # the zip is built in memory and written in ONE write: member by member on the network file
+    # system the store of station 2026-11-02 (1,405 objects, ~20,000 members, 31 MB) took over two
+    # minutes to rewrite with the card idle. A seekable buffer is written exactly as a file is (the
+    # local headers rewritten in place, no data descriptors): the same bytes
+    out = _io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+        for k in mask_keys + meta_keys:
+            arr = members[k]
+            if arr is None:
+                arr = source[k]
+            buf = _io.BytesIO()
+            np.lib.format.write_array(buf, np.asanyarray(arr), allow_pickle=False)
+            info = zipfile.ZipInfo(k + ".npy", date_time=STORE_ZIP_TIME)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o600 << 16
+            zf.writestr(info, buf.getvalue())
+    _write_bytes_atomic(path, out.getbuffer())
+    if path.name == "seg_masks.npz":
+        mask_space.invalidate(path.parent)
+
+
+def _write_bytes_atomic(path: Path, data) -> None:
+    """``data`` into ``path`` through a temporary file beside it and a rename (a crash never
+    leaves a truncated file); the tmp name ends in .npz like every store writer's."""
+    path = Path(path)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp.npz")
-    os.close(fd)
     try:
-        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
-            for k in mask_keys + meta_keys:
-                arr = members[k]
-                if arr is None:
-                    arr = source[k]
-                import io as _io
-                buf = _io.BytesIO()
-                np.lib.format.write_array(buf, np.asanyarray(arr), allow_pickle=False)
-                info = zipfile.ZipInfo(k + ".npy", date_time=STORE_ZIP_TIME)
-                info.compress_type = zipfile.ZIP_DEFLATED
-                info.external_attr = 0o600 << 16
-                zf.writestr(info, buf.getvalue())
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
         os.replace(tmp, path)
-        if path.name == "seg_masks.npz":
-            mask_space.invalidate(path.parent)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+
+def _load_store_in_ram(path: Path):
+    """An npz opened from its bytes read in ONE sequential read: its members then come out of
+    memory, not one network round trip (or several) each — the same arrays."""
+    import io as _io
+    return np.load(_io.BytesIO(Path(path).read_bytes()))
 
 
 def write_npz_canonical(path: Path, arrays: Dict[str, np.ndarray]) -> None:
@@ -538,7 +558,8 @@ def write_npz_canonical(path: Path, arrays: Dict[str, np.ndarray]) -> None:
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp.npz")
     os.close(fd)
     try:
-        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+        out = _io.BytesIO()                 # built in memory, written once (write_canonical_store)
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
             for k in sorted(arrays):
                 buf = _io.BytesIO()
                 np.lib.format.write_array(buf, np.asanyarray(arrays[k]), allow_pickle=False)
@@ -546,6 +567,8 @@ def write_npz_canonical(path: Path, arrays: Dict[str, np.ndarray]) -> None:
                 info.compress_type = zipfile.ZIP_DEFLATED
                 info.external_attr = 0o600 << 16
                 zf.writestr(info, buf.getvalue())
+        with open(tmp, "wb") as fh:
+            fh.write(out.getbuffer())
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
@@ -556,7 +579,7 @@ def compact_mask_store(path: Path) -> int:
     """Rewrite an existing store canonically (:func:`write_canonical_store`) from
     its own members, one at a time. Returns the number of masks."""
     path = Path(path)
-    z = np.load(path)
+    z = _load_store_in_ram(path)
     try:
         members: Dict[str, Optional[np.ndarray]] = {}
         for k in z.files:
@@ -625,7 +648,7 @@ def finalize_sam3_store(staging: Path, output_dir: Path, keyframes: List[int],
     if not (src_npz.exists() and src_json.exists()):
         raise RuntimeError(f"the SAM3 run saved no store in {staging}")
     rid = reconstruction_id_or_none(output_dir)
-    z = np.load(src_npz)
+    z = _load_store_in_ram(src_npz)
     try:
         members: Dict[str, Optional[np.ndarray]] = {k: None for k in z.files
                                                     if _mask_key_parts(k) is not None}

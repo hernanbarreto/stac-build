@@ -252,3 +252,72 @@ def test_a_save_that_fails_behind_fails_the_run_naming_its_category(tmp_path, mo
     assert "could not be saved" in status["box"]["reason"]
     assert _store_bytes(out) == first and not (out / P.SAM3_STAGING_DIRNAME).exists()
     assert P._ACTIVE_STORE_WRITER is None
+
+
+def _write_canonical_reference(path, members, source=None):
+    """write_canonical_store as it was before the in-memory build (member by member into the
+    temporary file) — the byte sequence the new writer must reproduce."""
+    import io as _io
+    import os
+    import tempfile
+    path = Path(path)
+    mask_keys = sorted((k for k in members if P._mask_key_parts(k) is not None), key=P._mask_key_parts)
+    meta_keys = [k for k in P.STORE_META_KEYS if k in members]
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp.npz")
+    os.close(fd)
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+        for k in mask_keys + meta_keys:
+            arr = members[k] if members[k] is not None else source[k]
+            buf = _io.BytesIO()
+            np.lib.format.write_array(buf, np.asanyarray(arr), allow_pickle=False)
+            info = zipfile.ZipInfo(k + ".npy", date_time=P.STORE_ZIP_TIME)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o600 << 16
+            zf.writestr(info, buf.getvalue())
+    os.replace(tmp, path)
+
+
+def test_the_store_built_in_memory_is_the_same_bytes(tmp_path):
+    """write_canonical_store builds the zip in memory and writes it once (station 2026-11-02: the
+    member-by-member rewrite of a 31 MB store took over two minutes on the network file system),
+    and the stores it rewrites are read in one read: the bytes are the ones the member-by-member
+    writer wrote, members read from the file or from memory alike."""
+    rng = np.random.default_rng(7)
+    members = {f"f{f}_o{o}": (rng.random((24, 40)) > 0.6) for o in range(1, 40) for f in range(0, 30, 3)}
+    members["scaled_res"] = np.array([24, 40])
+    members[mask_space.KEYFRAMES_KEY] = np.arange(30, dtype=np.int32)
+    members["reconstruction_id"] = np.array("abc")
+    a, b = tmp_path / "a" / "seg_masks.npz", tmp_path / "b" / "seg_masks.npz"
+    a.parent.mkdir(); b.parent.mkdir()
+    _write_canonical_reference(a, dict(members))
+    P.write_canonical_store(b, dict(members))
+    assert a.read_bytes() == b.read_bytes()
+    # rewritten from its own members (compact_mask_store reads it in memory now)
+    P.compact_mask_store(b)
+    assert a.read_bytes() == b.read_bytes()
+    # the members read lazily from the file vs from the in-memory copy
+    with np.load(a) as z:
+        lazy = {k: None for k in z.files if P._mask_key_parts(k) is not None}
+        lazy.update({k: np.asarray(z[k]) for k in z.files if P._mask_key_parts(k) is None})
+        c = tmp_path / "c" / "seg_masks.npz"
+        c.parent.mkdir()
+        _write_canonical_reference(c, lazy, source=z)
+    z2 = P._load_store_in_ram(a)
+    d = tmp_path / "d" / "seg_masks.npz"
+    d.parent.mkdir()
+    P.write_canonical_store(d, {k: (None if v is None else v) for k, v in lazy.items()}, source=z2)
+    assert c.read_bytes() == d.read_bytes() == a.read_bytes()
+    # write_npz_canonical: the same bytes as the zip written member by member
+    arrays = {"s": np.arange(5.0), "R": np.eye(3)}
+    e, f = tmp_path / "e.npz", tmp_path / "f.npz"
+    P.write_npz_canonical(e, arrays)
+    import io as _io
+    with zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+        for k in sorted(arrays):
+            buf = _io.BytesIO()
+            np.lib.format.write_array(buf, np.asanyarray(arrays[k]), allow_pickle=False)
+            info = zipfile.ZipInfo(k + ".npy", date_time=P.STORE_ZIP_TIME)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o600 << 16
+            zf.writestr(info, buf.getvalue())
+    assert e.read_bytes() == f.read_bytes()
