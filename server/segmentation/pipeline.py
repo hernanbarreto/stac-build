@@ -25,6 +25,7 @@ import time as _time
 import cv2
 import gc
 import tempfile
+import zlib
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import logging
@@ -505,25 +506,70 @@ def write_canonical_store(path: Path, members: Dict[str, np.ndarray],
         raise ValueError(f"the mask store cannot hold members {stray[:5]} — not masks "
                          f"(f<frame>_o<oid>) nor known metadata")
     import io as _io
-    # the zip is built in memory and written in ONE write: member by member on the network file
-    # system the store of station 2026-11-02 (1,405 objects, ~20,000 members, 31 MB) took over two
-    # minutes to rewrite with the card idle. A seekable buffer is written exactly as a file is (the
-    # local headers rewritten in place, no data descriptors): the same bytes
+    # MEASURED on station 2026-11-02 (1,405 objects, 19,786 members, 31 MB): 115 s with the card
+    # idle — not the disk (the same 115 s built in memory) but zlib: every 576x1024 boolean mask
+    # (590 kB as .npy) inflated from the source and deflated again, one after the other. The
+    # members are now serialised and deflated on STORE_DEFLATE_THREADS threads (zlib and the zip
+    # reads release the GIL) with the very compressor zipfile uses for ZIP_DEFLATED (level
+    # Z_DEFAULT_COMPRESSION, raw stream), and written in the canonical order by
+    # _write_deflated_entry exactly as ZipFile.writestr writes them into a seekable file — the
+    # same bytes (tests/test_p3_sam3_store.py holds them to the member-by-member writer)
+    from concurrent.futures import ThreadPoolExecutor
+    order = mask_keys + meta_keys
+
+    def deflated(k):
+        arr = members[k]
+        if arr is None:
+            arr = source[k]
+        buf = _io.BytesIO()
+        np.lib.format.write_array(buf, np.asanyarray(arr), allow_pickle=False)
+        raw = buf.getbuffer()
+        comp = zlib.compressobj(zlib.Z_DEFAULT_COMPRESSION, zlib.DEFLATED, -15)
+        data = comp.compress(raw) + comp.flush()
+        return k, len(raw), zlib.crc32(raw), data
+
     out = _io.BytesIO()
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
-        for k in mask_keys + meta_keys:
-            arr = members[k]
-            if arr is None:
-                arr = source[k]
-            buf = _io.BytesIO()
-            np.lib.format.write_array(buf, np.asanyarray(arr), allow_pickle=False)
-            info = zipfile.ZipInfo(k + ".npy", date_time=STORE_ZIP_TIME)
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = 0o600 << 16
-            zf.writestr(info, buf.getvalue())
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf, \
+            ThreadPoolExecutor(max_workers=STORE_DEFLATE_THREADS,
+                               thread_name_prefix="store-deflate") as pool:
+        for k, size, crc, data in pool.map(deflated, order):
+            _write_deflated_entry(zf, k + ".npy", size, crc, data)
     _write_bytes_atomic(path, out.getbuffer())
     if path.name == "seg_masks.npz":
         mask_space.invalidate(path.parent)
+
+
+# threads that serialise and deflate a store's members (write_canonical_store)
+STORE_DEFLATE_THREADS = 8
+
+
+def _write_deflated_entry(zf, name: str, size: int, crc: int, data: bytes) -> None:
+    """One member already deflated (``data``: the raw stream of zipfile's own ZIP_DEFLATED
+    compressor over ``size`` bytes of CRC ``crc``) written into ``zf`` — a ZipFile open for
+    writing on a SEEKABLE stream — exactly as ``ZipFile.writestr(ZipInfo(name,
+    STORE_ZIP_TIME), ...)`` writes it: the same local header (flag bits 0, no zip64 under the
+    limit, ?rw------- attributes, the fixed time), the data, the member in the central
+    directory."""
+    import zipfile
+    info = zipfile.ZipInfo(name, date_time=STORE_ZIP_TIME)
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.external_attr = 0o600 << 16
+    info.flag_bits = 0x00
+    info.file_size = size
+    info.compress_size = len(data)
+    info.CRC = crc
+    zip64 = zf._allowZip64 and size * 1.05 > zipfile.ZIP64_LIMIT
+    if not zip64 and (size > zipfile.ZIP64_LIMIT or len(data) > zipfile.ZIP64_LIMIT):
+        raise RuntimeError(f"{name}: a member over the zip64 limit written without zip64")
+    zf.fp.seek(zf.start_dir)
+    info.header_offset = zf.fp.tell()
+    zf._writecheck(info)
+    zf._didModify = True
+    zf.fp.write(info.FileHeader(zip64))
+    zf.fp.write(data)
+    zf.start_dir = zf.fp.tell()
+    zf.filelist.append(info)
+    zf.NameToInfo[info.filename] = info
 
 
 def _write_bytes_atomic(path: Path, data) -> None:
