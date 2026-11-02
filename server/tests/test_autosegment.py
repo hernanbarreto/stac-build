@@ -23,7 +23,8 @@ def _full():
 
 
 def test_the_chain_is_vlm_sam3_certify_and_the_check_off_ends_at_the_cloud():
-    assert SEGMENTATION_CHAIN == (StageId.VLM, StageId.SAM3, StageId.CERTIFY)
+    # GenRecon closes the chain since 2026-10-17 (USER: the mesh at the end of the autosegment)
+    assert SEGMENTATION_CHAIN == (StageId.VLM, StageId.SAM3, StageId.CERTIFY, StageId.GENRECON)
     off = select_stages(_full(), segment=False)
     assert [s.id for s in off if s.enabled] == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY]
     on = select_stages(_full(), segment=True)
