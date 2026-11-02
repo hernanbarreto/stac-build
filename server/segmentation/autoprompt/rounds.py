@@ -138,14 +138,27 @@ def decided_names(output_dir, before_round: int) -> List[str]:
     return names
 
 
+# threads that inflate the store's masks for segmented_masks (zlib releases the GIL)
+UNION_THREADS = 8
+
+
 def segmented_masks(output_dir) -> Dict[int, np.ndarray]:
-    """{video frame: bool map of the pixels some masklet of the store covers}, at the store's grid."""
+    """{video frame: bool map of the pixels some masklet of the store covers}, at the store's grid.
+
+    The store is read in one read and its masks inflated on :data:`UNION_THREADS` threads, each
+    taking whole frames (every mask of a frame in one thread, OR-ed there): station 2026-11-02, a
+    round's VLM waited 73 s for the 19,780 masks inflated one after the other, vLLM up and idle.
+    A union of booleans does not depend on its order: the same maps."""
+    import io
+    import zipfile
+    from concurrent.futures import ThreadPoolExecutor
     from segmentation import mask_space
     out = Path(output_dir)
-    union: Dict[int, np.ndarray] = {}
-    with np.load(out / "seg_masks.npz") as npz:
+    raw = (out / "seg_masks.npz").read_bytes()
+    with np.load(io.BytesIO(raw)) as npz:
         space = mask_space.declared_space(npz) or mask_space.SPACE_KEYFRAME
         kfs = mask_space.declared_keyframes(npz) or mask_space.keyframe_numbers(out) or []
+        by_frame: Dict[int, List[str]] = {}
         for key in npz.files:
             m = _MASK_KEY.match(key)
             if not m:
@@ -155,11 +168,31 @@ def segmented_masks(output_dir) -> Dict[int, np.ndarray]:
                 if f >= len(kfs):
                     continue
                 f = int(kfs[f])
-            a = np.asarray(npz[key]) > 0
-            if f in union:
-                union[f] |= a
-            else:
-                union[f] = a.copy()
+            by_frame.setdefault(f, []).append(key)
+
+    def frames_union(items):
+        # one reader per task (no shared file position), whole frames each
+        res = []
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            for f, keys in items:
+                acc = None
+                for key in keys:
+                    with zf.open(key + ".npy") as fh:
+                        a = np.lib.format.read_array(fh, allow_pickle=False) > 0
+                    if acc is None:
+                        acc = a.copy()
+                    else:
+                        acc |= a
+                res.append((f, acc))
+        return res
+
+    items = sorted(by_frame.items())
+    n = max(1, min(len(items), UNION_THREADS * 4))
+    tasks = [items[i::n] for i in range(n)]
+    union: Dict[int, np.ndarray] = {}
+    with ThreadPoolExecutor(max_workers=UNION_THREADS, thread_name_prefix="round-union") as pool:
+        for part in pool.map(frames_union, tasks):
+            union.update(part)
     return union
 
 
