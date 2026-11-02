@@ -100,10 +100,10 @@ genrecon:
   bake_views: 3                      # the best views (by cos⁴/z²) blended per texel
   mode: cloud                        # cloud (THE product, USER 2026-10-17) | cloud+hull (completion from the
                                      # masks) | cloud+objects | cloud+unseen — the last three are trials
-  generative_mesh_name: genrecon_generative   # USER 2026-11-02 "veamos cómo sale generativa y no generativa, que
-                                     # aparezcan las dos variantes": after mesh_name, a second mesh whose presence the
-                                     # MODEL decides from the keyframes (the cloud only lays out the chunks), with the
-                                     # texture it generated — no photo bake ("no va a ser exactamente igual"); "" = off
+  generative_mesh_name: ""           # OFF. USER 2026-11-02 01:58, after seeing station's: "el generativo inventó
+                                     # cualquier cosa, nos quedamos con el genrecon photo". "genrecon_generative" runs,
+                                     # after mesh_name, a second mesh whose presence the MODEL decides from the keyframes
+                                     # (the cloud only lays out the chunks) with the texture it generated, no photo bake
   min_points_per_voxel: 10           # BOUND: a chunk voxel (32³ ≈ 11.6 cm) is active from this many cloud points
   simplify_faces_per_chunk: 150000   # the bake's decimation target per chunk (pccr: 25 chunks → 3.2 M faces, 250 MB)
   texture_size: 2048                 # the bake's atlas per chunk

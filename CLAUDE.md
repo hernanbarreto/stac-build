@@ -9,6 +9,11 @@
   `genrecon_photo` (mode cloud, photo bake) then `genrecon_generative` (`run_cloud.sh … generative`: the model's own
   sparse structure, its generated texture; `genrecon.generative_mesh_name`, "" = off). DECLARED: one layer of cubes
   on one base — on a two-level scene the generative model may paint ground at the lower level under the upper one.
+  VERDICT 01:58: "el generativo inventó cualquier cosa, nos quedamos con el genrecon photo, el otro se puede borrar"
+  → `generative_mesh_name: ""` (off), station's generative mesh deleted; the product stays `genrecon_photo`.
+- Viewer, same night: the projection's 5 cm cleaning quads (`voxel_mesh`) are OFF (`segment_cleaning.voxel_mesh`) —
+  drawn apart from the boxes and left at the projection's epoch ("qué mierda son esas mallas de colores"); the
+  "Building the point cloud" splash never covers a session that already published a cloud.
 - LESSON (station 01:10): never edit a bash script in place while it runs (bash reads it by offset) — write a new
   file and `mv` it over; the running copy keeps its inode.
 
