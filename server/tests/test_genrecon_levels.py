@@ -61,3 +61,35 @@ def test_the_runner_parses():
     text = (_TOOLS / "run_cloud.sh").read_text()
     assert '[ "$mode" = "generative" ] && tag=gen' in text      # its own output folders
     assert 'COORDS=""' in text                                  # no voxel from the cloud
+
+
+def test_stacked_cubes_stand_on_the_lowest_level_and_reach_the_top():
+    cube = 3.7
+    zs = L.stacked_centers(-1.15, 5.661, cube)              # station: the tracks' level to the cloud's top
+    assert zs[0] - cube / 2 == -1.15                        # the first layer stands on the lowest level
+    assert zs[-1] + cube / 2 >= 5.661                       # the last one reaches the top
+    strides = np.diff(zs)
+    assert len(zs) == 3 and np.allclose(strides, strides[0])
+    assert strides[0] <= cube * (1 - L.MIN_OVERLAP) + 1e-9  # at least a quarter of overlap between layers
+    k = strides[0] / (cube * L.ATOMIC)
+    assert abs(k - round(k)) < 1e-9                         # on GenRecon's 1/16 lattice
+    # the fewest layers: one less would not reach the top with that overlap
+    n = len(zs) - 1
+    assert -1.15 + cube + (n - 1) * cube * (1 - L.MIN_OVERLAP) < 5.661
+
+
+def test_a_span_shorter_than_a_cube_is_one_layer_and_zero_keeps_genrecons_own():
+    assert L.stacked_centers(0.0, 3.0, 3.7) == [1.85]
+    lv = {"z_floor": -0.1, "z_top": 5.7}
+    assert "chunk_z_centers" not in L.stack_layers(dict(lv), 0.0)
+    out = L.stack_layers(dict(lv), 3.7)
+    assert out["chunk_size_m"] == 3.7 and out["chunk_z_centers"] == L.stacked_centers(-0.1, 5.7, 3.7)
+
+
+def test_the_top_is_the_clouds_highest_surface_above_the_ceiling():
+    rng = np.random.default_rng(3)
+    y, sup, ceil = _scene(rng)
+    y = np.concatenate([y, rng.normal(6.0, 0.02, 2_000)])  # ducts above the ceiling instance
+    lv = L.chunk_levels(y, sup, [ceil])
+    assert lv["z_top"] == max(lv["z_ceiling"], float(np.percentile(y, 99.97)))
+    assert lv["z_top"] > lv["z_ceiling"]

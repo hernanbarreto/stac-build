@@ -29,10 +29,14 @@ def _session(tmp_path):
     return ses
 
 
+envs: list = []
+
+
 def _fake_popen(calls, fail_mode=None):
     class _P:
         def __init__(self, argv, **kw):
             calls.append(argv)
+            envs.append(kw["env"])
             _, _, spec, name, minpts, mode = argv
             self._code = 1 if mode == fail_mode else 0
             out = []
@@ -68,7 +72,8 @@ def _run(tmp_path, monkeypatch, gcfg, fail_mode=None):
 
 
 _CFG = {"mesh_name": "genrecon_photo", "mode": "cloud", "generative_mesh_name": "genrecon_generative",
-        "min_points_per_voxel": 10, "simplify_faces_per_chunk": 150000, "texture_size": 2048, "bake_views": 3}
+        "min_points_per_voxel": 10, "simplify_faces_per_chunk": 150000, "texture_size": 2048, "bake_views": 3,
+        "cube_size_m": 3.7}
 
 
 def test_both_variants_in_order(tmp_path, monkeypatch):
@@ -101,3 +106,9 @@ def test_a_failed_first_variant_stops_and_names_itself(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="1/2 from the cloud"):
         G._genrecon_work(_Pipe(), str(ses), {"genrecon": _CFG})
     assert len(calls) == 2 and calls[0][0] == "stop"
+
+
+def test_the_cube_side_reaches_the_runner(tmp_path, monkeypatch):
+    envs.clear()
+    _run(tmp_path, monkeypatch, {**_CFG, "generative_mesh_name": ""})
+    assert envs and envs[0]["GENRECON_CUBE_M"] == "3.7"

@@ -11,6 +11,7 @@ z_floor = the LOWEST of both. Station 2026-11-02: the tracks lie 1.15 m under th
 'track' / 'rail' / 'gravel', none a support noun — the base on the platform left them under every cube
 (USER: "corregí eso"). With no level at all, the percentile 0.2 of the cloud (the vendor's own anchor).
 """
+import math
 from typing import Dict, List, Sequence
 
 import numpy as np
@@ -50,9 +51,47 @@ def chunk_levels(y_cloud, y_support, y_ceilings: Sequence, bin_m: float = 0.05,
         levels.update(z_floor=float(np.percentile(y_cloud, 0.2)),
                       source="percentile 0.2 of the cloud (no level)")
     ceil = [float(np.percentile(np.asarray(g, np.float64), 95)) for g in y_ceilings if len(g)]
+    top = float(np.percentile(y_cloud, 99.97))
     if ceil:
         levels.update(z_ceiling=max(ceil), ceiling_source="segmentation ceiling instances p95")
     else:
-        levels.update(z_ceiling=float(np.percentile(y_cloud, 99.97)),
-                      ceiling_source="percentile 99.97 of the cloud (no ceiling instance)")
+        levels.update(z_ceiling=top, ceiling_source="percentile 99.97 of the cloud (no ceiling instance)")
+    levels["z_top"] = max(levels["z_ceiling"], top)      # the cloud's highest surface (stacked cubes cover it)
+    return levels
+
+
+# GenRecon's own lattice (inference/get_chunks.py BaseChunker): strides are multiples of 1/16 of the cube, adjacent
+# cubes overlap by at least 4/16 of it (ScannetChunker's min_overlap_factor 4) — the joint generation places every
+# chunk on that lattice, so the layers follow the same rule as the floor plan does
+ATOMIC = 1.0 / 16.0
+MIN_OVERLAP = 4.0 / 16.0
+
+
+def stacked_centers(lo: float, hi: float, cube: float) -> List[float]:
+    """The centres of the fewest cubes of side ``cube`` that cover [lo, hi] along the vertical: the first one STANDS
+    on ``lo`` (the lowest level — the floor at a cube's base, as the model was trained), the stride the smallest
+    multiple of cube/16 that reaches ``hi`` with at least a quarter of overlap between layers (USER 2026-11-02:
+    "los tamaños de cubo con los que se entrenó, y deberían ser tantos como sean necesarios para cubrir la altura
+    desde la parte más baja a la más alta de la nube")."""
+    if cube <= 0:
+        raise ValueError(f"cube side must be positive, got {cube}")
+    dim = hi - lo
+    if dim <= cube:
+        return [lo + 0.5 * cube]
+    atomic, max_stride = ATOMIC * cube, cube * (1.0 - MIN_OVERLAP)
+    for n in range(2, 10_000):
+        k = max(1, math.ceil((dim - cube) / (n - 1) / atomic - 1e-9))
+        stride = k * atomic
+        if stride > max_stride + 1e-9:
+            continue
+        return [lo + 0.5 * cube + i * stride for i in range(n)]
+    raise ValueError(f"cannot stack cubes of {cube} m over {dim} m")
+
+
+def stack_layers(levels: Dict, cube: float) -> Dict:
+    """levels.json with the stacked layout the patched chunker reads: ``chunk_size_m`` and ``chunk_z_centers``
+    (from the lowest level to the cloud's top). ``cube`` 0 = GenRecon's single layer, floor to ceiling."""
+    if cube and cube > 0:
+        levels["chunk_size_m"] = float(cube)
+        levels["chunk_z_centers"] = stacked_centers(levels["z_floor"], levels["z_top"], float(cube))
     return levels

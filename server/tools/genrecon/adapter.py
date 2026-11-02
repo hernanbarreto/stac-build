@@ -11,6 +11,7 @@ from correction.session import load_session
 from segmentation.perfect_object import _read_ply_fields
 
 SES = Path(sys.argv[1]); WORK = Path(sys.argv[2]); N_PTS = int(sys.argv[3]) if len(sys.argv) > 3 else 600_000
+CUBE_M = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0     # genrecon.cube_size_m: stacked cubes of this side (0 = one layer)
 out = SES / "output"
 R_UP = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])     # (x, y, z) → (x, -z, y): y-up → z-up
 s = load_session(out)
@@ -68,8 +69,8 @@ sup_idx = np.concatenate([np.asarray(i["globalIndices"], np.int64) for i in seg[
 ceil_idx = [np.asarray(i["globalIndices"], np.int64) for i in seg["instances"] if head_noun(i["label"]) == "ceiling"]
 # the cube's base on the LOWEST level, of the support surfaces or of the whole cloud (genrecon_levels.py:
 # station's tracks, 1.15 m under the platform and no support noun, sat under every cube — USER 2026-11-02)
-from genrecon_levels import chunk_levels
-levels = chunk_levels(y_d, y_d[sup_idx], [y_d[g] for g in ceil_idx], bin_m=0.05, min_share=0.01)
+from genrecon_levels import chunk_levels, stack_layers
+levels = stack_layers(chunk_levels(y_d, y_d[sup_idx], [y_d[g] for g in ceil_idx], bin_m=0.05, min_share=0.01), CUBE_M)
 (WORK / "levels.json").write_text(json.dumps(levels, indent=2))
 # STAC 2026-10-17 (USER: "debería completar lo que no ve o no tenía puntos … las patas de una mesa … pero solo eso"):
 # the boxes of the segmented OBJECTS in GenRecon's frame — the model may complete only inside them; a support
@@ -104,7 +105,10 @@ for inst in seg["instances"]:
                              "half_extents": hd[[0, 2, 1]].tolist(), "axes": np.eye(3).tolist()})   # y-up → z-up: extents reorder
 (WORK / "objects.json").write_text(json.dumps({"frame": "genrecon (M_raw_to_genrecon applied)", "axes": "columns", "objects": objs}, indent=1))
 print(f"objects.json: {len(objs)} object boxes of {len(seg['instances'])} instances (structural and support excluded)")
-print(f"levels: z_floor {levels['z_floor']:+.3f} ({levels['source']}), z_ceiling {levels['z_ceiling']:+.3f} ({levels['ceiling_source']}); cloud_genrecon.npy {len(xyz):,} pts")
+print(f"levels: z_floor {levels['z_floor']:+.3f} ({levels['source']}), z_ceiling {levels['z_ceiling']:+.3f} ({levels['ceiling_source']}), "
+      f"top {levels['z_top']:+.3f}; " + (f"{len(levels['chunk_z_centers'])} layer(s) of {CUBE_M} m cubes centred at "
+      f"{[round(z, 3) for z in levels['chunk_z_centers']]}; " if 'chunk_z_centers' in levels else "one layer, floor to ceiling; ")
+      + f"cloud_genrecon.npy {len(xyz):,} pts")
 np.save(WORK / "M_raw_to_genrecon.npy", M); np.save(WORK / "R_up.npy", R_UP)
 print(f"{n} images, {len(P):,} points; display transform {'identity' if np.allclose(R_f, np.eye(3)) and np.allclose(t_f, 0) else 'applied'}; "
       f"z range points p2/p98 {np.percentile(P[:, 2], 2):.2f}/{np.percentile(P[:, 2], 98):.2f}, cameras z med {np.median(cams_g[:, 2]):.2f}; "

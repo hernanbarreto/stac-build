@@ -60,7 +60,8 @@ def _run_variant(pipe: WorkerPipe, output_dir: Path, sid: str, scan: str, name: 
         pipe.send_progress(lo + (hi - lo) * p // 100, f"{tag}: {msg}", stage=STAGE)
 
     pipe.send_log(f"[genrecon] {tag}: {_SCRIPT.name} {sid}:{scan} {name} {min_pts} {mode} "
-                  f"(simplify {env['GENRECON_SIMPLIFY']} faces/chunk, texture {env['GENRECON_TEX']})")
+                  f"(simplify {env['GENRECON_SIMPLIFY']} faces/chunk, texture {env['GENRECON_TEX']}, "
+                  f"cubes {env['GENRECON_CUBE_M']} m)")
     proc = subprocess.Popen(["bash", str(_SCRIPT), f"{sid}:{scan}", name, str(min_pts), mode],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                             cwd=str(_SCRIPT.parent.parent.parent), env=env)
@@ -91,7 +92,8 @@ def _run_variant(pipe: WorkerPipe, output_dir: Path, sid: str, scan: str, name: 
         for f in _FAILS:
             if line.startswith(f):
                 failed = line
-        if "Traceback" in line or "Error" in line or "[STAC]" in line or "[VRAM]" in line or line.startswith("published"):
+        if ("Traceback" in line or "Error" in line or "[STAC]" in line or "[VRAM]" in line or line.startswith("published")
+                or line.startswith("levels:")):
             pipe.send_log(f"[genrecon] {line[:300]}")
     code = proc.wait()
     if code != 0 or failed is not None:
@@ -124,7 +126,8 @@ def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
     env = {**os.environ, "PYTHONUNBUFFERED": "1",
            "GENRECON_SIMPLIFY": str(int(gcfg.get("simplify_faces_per_chunk", 150000))),
            "GENRECON_TEX": str(int(gcfg.get("texture_size", 2048))),
-           "GENRECON_TOPK": str(int(gcfg.get("bake_views", 3)))}
+           "GENRECON_TOPK": str(int(gcfg.get("bake_views", 3))),
+           "GENRECON_CUBE_M": str(float(gcfg.get("cube_size_m", 0.0)))}
     if not _SCRIPT.exists():
         raise FileNotFoundError(f"GenRecon runner missing: {_SCRIPT}")
     stop_semantic_service_verified(pipe, stage="GenRecon mesh")

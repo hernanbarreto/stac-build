@@ -10,6 +10,8 @@
 # `generative` = GenRecon's own sparse structure — the model decides presence from the keyframes, the cloud only lays
 # out the chunks — published as <name> with the texture the model generated, no photo bake ("en la generativa no,
 # porque no va a ser exactamente igual").
+# CUBES (USER 2026-11-02): GENRECON_CUBE_M > 0 = cubes of that side stacked from the lowest level to the cloud's top
+# (genrecon_levels.stack_layers; the worker passes genrecon.cube_size_m), 0 = GenRecon's one layer floor to ceiling.
 set -x
 G=/workspace/stac-build/vendor/GenRecon; T=/workspace/stac-build/server/tools/genrecon
 DA3=/workspace/miniforge3/envs/da3/bin/python; GR=/workspace/miniforge3/envs/genrecon/bin/python
@@ -18,7 +20,7 @@ spec=$1; name=${2:-genrecon_photo}; raw=${name}_raw; minpts=${3:-10}; mode=${4:-
 tag=cloud; [ "$mode" = "cloud+unseen" ] && tag=fill; [ "$mode" = "cloud+objects" ] && tag=obj; [ "$mode" = "cloud+hull" ] && tag=hull; [ "$mode" = "generative" ] && tag=gen
 SES=/workspace/stac-build/server/projects/$sid/scans/$scan/src_default; W=$G/work/$sid; O=$G/work/${sid}_${tag}_out; OL=$G/work/${sid}_${tag}_out_light
 echo "=== SESSION $sid ($scan) $(date +%H:%M:%S)"
-(cd /workspace/stac-build/server && $DA3 $T/adapter.py $SES $W 600000) || { echo "adapter failed $sid"; exit 1; }
+(cd /workspace/stac-build/server && $DA3 $T/adapter.py $SES $W 600000 ${GENRECON_CUBE_M:-0}) || { echo "adapter failed $sid"; exit 1; }
 EXTRA=""
 if [ "$mode" = "cloud+hull" ]; then
   # completion presence from the SAM3 masks (hull_points.py); the generator runs in mode cloud with these extra points

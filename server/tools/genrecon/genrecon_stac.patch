@@ -219,10 +219,32 @@ index b26f309..cf0a244 100644
          mean = torch.tensor(self.shape_slat_normalization["mean"])[None].to(self.device)
  
 diff --git a/inference/get_chunks.py b/inference/get_chunks.py
-index 75bbfcd..b619dfa 100644
+index 75bbfcd..e9a52ad 100644
 --- a/inference/get_chunks.py
 +++ b/inference/get_chunks.py
-@@ -481,6 +481,13 @@ class ScannetMixin:
+@@ -53,6 +53,7 @@ class BaseChunker:
+         z_floor: float,
+         chunk_size: float,
+         out_path: Optional[str | Path] = None,
++        z_centers: Optional[list[float]] = None,
+     ) -> list[list[float]]:
+         """Compute 3-D chunk centres covering the floor plan and save a top-down visualisation.
+ 
+@@ -72,10 +73,12 @@ class BaseChunker:
+         width = x_max_padded - x_min_padded
+         length = y_max_padded - y_min_padded
+         z_center = z_floor + 0.5 * chunk_size
++        # STAC 2026-11-02: stacked layers (levels.json chunk_z_centers, server/tools/genrecon/genrecon_levels.py)
++        zs = [float(z) for z in z_centers] if z_centers else [z_center]
+ 
+         xs = [x + x_min_padded for x in self._axis_centers(width, chunk_size)]
+         ys = [y + y_min_padded for y in self._axis_centers(length, chunk_size)]
+-        centers = [[x, y, z_center] for y in ys for x in xs]
++        centers = [[x, y, z] for z in zs for y in ys for x in xs]
+ 
+         if out_path is not None:
+             self._visualize_chunks(centers, chunk_size, x_min, x_max, y_min, y_max, out_path)
+@@ -481,11 +484,26 @@ class ScannetMixin:
          }
          clean_points = self._get_clean_points(path, out_path, **clean_kwargs)
          x_min, x_max, y_min, y_max, z_floor, z_ceiling, delta_z = self._get_room_size(clean_points)
@@ -236,6 +258,20 @@ index 75bbfcd..b619dfa 100644
          manual_xy = getattr(self, "manual_xy_bounds", None)
          if manual_xy is not None:
              x_min, x_max, y_min, y_max = manual_xy
+         chunk_size = delta_z * self.chunk_size_factor
+-        chunk_centers = self._define_centers(x_min, x_max, y_min, y_max, z_floor, chunk_size)
++        z_centers = None
++        if lv.exists() and L.get("chunk_z_centers"):
++            # STAC 2026-11-02 (USER: "los tamaños de cubo con los que se entrenó … tantos como sean necesarios para
++            # cubrir la altura"): cubes of a fixed side, stacked from the lowest level to the cloud's top
++            chunk_size = float(L["chunk_size_m"])
++            z_centers = [float(z) for z in L["chunk_z_centers"]]
++            print(f"[STAC] stacked cubes: {len(z_centers)} layer(s) of {chunk_size:.3f} m centred at "
++                  f"{[round(z, 3) for z in z_centers]}")
++        chunk_centers = self._define_centers(x_min, x_max, y_min, y_max, z_floor, chunk_size, z_centers=z_centers)
+         red_chunk_centers = self._remove_empty_chunks(
+             chunk_centers,
+             chunk_size,
 diff --git a/reconstruct_scene.py b/reconstruct_scene.py
 index 58a831e..5612bea 100644
 --- a/reconstruct_scene.py
