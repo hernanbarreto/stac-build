@@ -292,23 +292,6 @@ def test_a_sim3_closure_carries_no_scale_term_in_its_sigma():
 
 # ── 2026-11-04: closures by geometry and the chain-consistency test ──
 
-def test_a_closure_metres_off_the_chain_is_left_out_and_a_drifted_true_one_kept():
-    rng = np.random.default_rng(11)
-    n = 9
-    C = _truth(n, rng)
-    seams = [_edge(k + 1, k, C, sigma=0.08, lever=2.5,
-                   bias=(1.03, np.eye(3), np.zeros(3))) for k in range(n - 1)]
-    priors = {k: {"log_s": 0.0, "sigma": 0.08 / np.sqrt(3)} for k in range(n)}
-    true_ = _edge(8, 0, C, sigma=0.08, lever=4.0, bridge=0)            # the drift the seams chain
-    false_ = _edge(7, 2, C, sigma=0.17, lever=4.0, bridge=1,
-                   bias=(1.0, G._rodrigues(np.array([0, 0.6, 0])), np.array([3.0, 0.0, 1.5])))
-    kept, rejected = G.consistent_with_chain(n, seams, [true_, false_], priors, 0.95)
-    assert [e["bridge"] for e in kept] == [0] and [e["bridge"] for e in rejected] == [1]
-    assert rejected[0]["chain_mahalanobis2"] > rejected[0]["chi2_bar"]
-    assert kept[0]["chain_error_m"] > 0.1                   # drifted, still within the chain's error
-    assert G.consistent_with_chain(n, seams, [], priors, 0.95) == ([], [])
-
-
 def _corridor_out_and_back(n_half=40, step=0.25):
     """A corridor walked along +x, then walked back along −x a metre to the side: keyframes
     0..n_half−1 look +x, n_half..2n_half−1 look −x."""
@@ -362,7 +345,18 @@ def test_the_bridge_planner_adds_the_geometric_revisits_in_sim3_mode():
     geo = _method("_stac_geometric_revisits")
     assert "gate_mod.gate_frame_pair(int(i), int(j), view, sp)" in geo
     assert '"source": "geometry"' in geo
+    assert "covered(ki, ra, kj, rb, existing)" in geo
     stage = _method("_stac_chunk_graph")
-    assert "CG.consistent_with_chain(n, seams, loops_all, priors, conf)" in stage
-    i_c, i_j = stage.index("consistent_with_chain("), stage.index("judge_leave_one_out(")
-    assert i_c < i_j                                        # the gross ones never testify
+    # no pre-filter of the closures (USER 2026-09-16: no separation bar rejects anything) — the
+    # judge decides on every verified closure, the robust loss weighs the far ones down
+    assert "CG.judge_leave_one_out(n, seams, loops, priors" in stage
+
+
+def test_a_closure_covers_a_candidate_only_between_the_same_two_chunks():
+    from loop_utils.revisits import covered
+    existing = [(5, (120, 140), 4, (100, 120))]             # a SALAD pair inside one pass
+    assert not covered(3, (81, 101), 5, (115, 135), existing)          # pccr's 3↔5 revisit
+    assert covered(4, (105, 118), 5, (125, 139), existing)             # the same chunks, swapped
+    assert covered(5, (125, 139), 4, (105, 118), existing)
+    assert not covered(5, (141, 150), 4, (105, 118), existing)         # window a apart
+    assert not covered(3, (81, 101), 5, (115, 135), [])
