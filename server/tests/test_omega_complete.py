@@ -140,7 +140,7 @@ def test_the_worker_reads_the_card_through_torch_and_the_table_and_persists_the_
         assert gone not in blk, gone
     assert "_env_rec = repro.environment_record(gpu=True)" in blk
     assert "omega_plan_environment.json" in blk
-    assert "chunk_plan_doc(_ranges, _n_kf, _walk, _covis, _res, environment=_env_rec)" in blk
+    assert "chunk_plan_doc(_ranges, _n_kf, _walk, _covis, _res, environment=_env_rec," in blk
     assert 'if k != "persisted"' in blk, "the log-only field stays out of the stamped config"
     assert "_legacy_fp.unlink()" in blk and "weights" in blk.split("_legacy_fp = ")[1].split("\n")[0]
 

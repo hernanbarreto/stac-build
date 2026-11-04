@@ -1565,6 +1565,25 @@ reconstruction:
                                         # run native on both).
     mode: "balanced"                    # "balanced" (≈res² tokens) | "max_size" (less VRAM);
                                         # ignored when resolution is native
+    turn_frames:                        # USER 2026-11-04 ("programá las imágenes"): Omega's
+                                        # CONTEXT views through a turn (intake/turn_frames.py).
+                                        # The turn between two consecutive keyframes is cut into
+                                        # steps no longer than θ_t·(1 + band), θ_t = θ_q / this
+                                        # divisor (θ_q the rotation quantum derived from K: pccr
+                                        # 10.82° → θ_t 3.61°, steps ≤ 4.51°); each step's
+                                        # sharpest frame is inferred WITH the chunk's keyframes
+                                        # and dropped before the chunk is saved (the fork's
+                                        # loop_utils/context_views.py) — F0-F6 and every reader
+                                        # after Omega see the keyframes only, as before. The
+                                        # card holds them with the chunk: the resolution is sized
+                                        # on keyframes + context views (zaragoza: 183 kf at its
+                                        # 1520 capacity → a lower resolution with its 16).
+                                        # Counted 2026-11-04: pccr 53 for 295 kf, station 193 /
+                                        # 438, zaragoza 16 / 183, observatorio 16 / 73,
+                                        # bufferStop 10 / 316.
+      enabled: true
+      per_rotation_quantum: 3           # the divisor d (3 = the ~3.5° step proposed and taken
+                                        # 2026-11-04; VGGT-SLAM's views were ~1° apart)
     scale_align: true                   # metric: DA3 anchor + scale_align (global similarity:
                                         # scales cloud + poses by s = median DA3/Omega depth).
                                         # false → up-to-scale (raw Omega isolation test).

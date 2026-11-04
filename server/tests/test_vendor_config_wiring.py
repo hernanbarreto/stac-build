@@ -153,7 +153,7 @@ def test_the_planned_ranges_are_the_ones_the_fork_and_the_plan_file_get(tree):
     assert '_ranges = [(int(a), int(b)) for a, b in _cplan["ranges"]]' in run
     # chunked: the same list reaches the fork and chunk_plan.json
     assert "_apply_chunked_metric(vggt_config, _ranges)" in run
-    assert "_persist_chunk_plan(_ranges, _n_selected, _walk0, _covis_rep, _res)" in run
+    assert "_persist_chunk_plan(_ranges, _n_selected, _walk0, _covis_rep, _res, _ctx)" in run
     applied = run[run.index("def _apply_chunked_metric"):run.index("def _ensure_anchors")]
     assert 'cfg_v["Model"]["chunk_ranges"] = [[int(a), int(b)] for a, b in _ranges]' in applied
     assert 'cfg_v["Model"].pop("chunk_size", None)' in applied

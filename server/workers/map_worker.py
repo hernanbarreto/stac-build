@@ -2048,7 +2048,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 _ps["conf_threshold_coef"] = float(_coef)
                 pipe.send_log(f"SIMPLE: point confidence filter conf >= mean*{float(_coef):g}")
 
-    def _persist_chunk_plan(_ranges, _n_kf, _walk, _covis, _res):
+    def _persist_chunk_plan(_ranges, _n_kf, _walk, _covis, _res, _context=None):
         """Persist the REAL chunk plan (USER 2026-09-08: the correction module
         may group evidence only by the reconstruction's actual chunks, never by
         a fixed divisor) — the co-visibility plan's explicit ranges, every chunk's
@@ -2056,7 +2056,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         the Omega resolution chosen for the largest chunk (USER 2026-10-06). Written
         for a chunked run; a single-pass session has no plan (the corrector then
         works purely per keyframe)."""
-        plan = chunk_plan_doc(_ranges, _n_kf, _walk, _covis, _res, environment=_env_rec)
+        plan = chunk_plan_doc(_ranges, _n_kf, _walk, _covis, _res, environment=_env_rec,
+                              context=_context)
         _invalidate_on_new_chunk_plan(output_dir, plan, pipe.send_log)
         (output_dir / "chunk_plan.json").write_text(json.dumps(plan, indent=1))
         pipe.send_log(f"[chunk-plan] persisted output/chunk_plan.json: "
@@ -2302,6 +2303,22 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                            f"selected {_n_selected} — the I3 walk is not of this keyframe set")
     _walk0 = float(_walk_doc["walk_length_m"])
 
+    # ── TURN FRAMES (USER 2026-11-04): Omega's CONTEXT views through a turn ──
+    # The keyframes stay the only frames every stage after Omega knows (frame_list, the poses,
+    # the records, F0-F6, the cloud). The turn frames between two consecutive keyframes
+    # (intake/turn_frames.py, from I1's own rotation readings — nothing is measured again) enter
+    # the inference of every chunk that holds both, and the fork keeps only the keyframes' slots
+    # (vendor/VGGT-Long/loop_utils/context_views.py). They are on the card with the chunk: the
+    # resolution below is sized on the keyframes AND the context views of the largest chunk.
+    from intake.turn_frames import chunk_context, load_turn_frames_config, session_turn_frames
+    _turn = session_turn_frames(output_dir.parent, load_turn_frames_config(config),
+                                log=pipe.send_log)
+    _ctx = chunk_context(_ranges, _sel_files, _turn["files"])
+    vggt_config["Model"]["chunk_context"] = _ctx
+    if any(_ctx):
+        pipe.send_log(f"[turn-frames] context views per chunk {[len(c) for c in _ctx]} over the "
+                      f"chunks' keyframes {chunk_lengths(_ranges)}")
+
     # ── Omega's resolution: the LARGEST planned chunk must fit the card ──
     # The card's TOTAL memory (a property of the card — deterministic) and the per-frame
     # footprint ∝ the grid's pixels: native when the largest chunk fits, otherwise the largest
@@ -2324,7 +2341,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     _ct.require_one_visible_card()          # point 78: the identity is THE device's, one card
     _ident = repro.card_identity(0)
     _card = omega_card(_ident["key"])
-    _n_max = max(chunk_lengths(_ranges))
+    _n_max = max(n + len(c) for n, c in zip(chunk_lengths(_ranges), _ctx))
     # the same margin the I3 DA3 windows leave on the card (USER 2026-10-06)
     from intake.config import load_intake_config as _lic
     _omega_margin = float(_lic(config).parallax.vram_margin_frac)
@@ -2333,7 +2350,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     _res = session_omega_resolution(output_dir.parent, _ranges, _native_frame_wh(frames_dir),
                                     str(vggt_config["Model"]["omega_mode"]),
                                     int(vggt_config["Model"]["omega_resolution"]),
-                                    _omega_margin, _card, log=pipe.send_log)
+                                    _omega_margin, _card, log=pipe.send_log,
+                                    context_counts=[len(c) for c in _ctx])
     vggt_config["Model"]["omega_resolution"] = int(_res["resolution"])
     # the report travels in the run config minus its log-only field (the config is stamped)
     vggt_config["Model"]["omega_resolution_report"] = {k: v for k, v in _res.items()
@@ -2372,7 +2390,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # runs — the single pass used to leave them for the fork to trip over
         _invalidate_on_new_chunk_plan(output_dir, {"chunk_ranges": [[0, int(_n_selected)]],
                                                    "n_keyframes": int(_n_selected),
-                                                   "omega_resolution": _res}, pipe.send_log)
+                                                   "omega_resolution": _res,
+                                                   "chunk_context": _ctx}, pipe.send_log)
         # single pass = no chunks: a stale plan from a previous chunked run
         # would lie to the correction module
         (output_dir / "chunk_plan.json").unlink(missing_ok=True)
@@ -2448,7 +2467,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 pipe.send_log(f"[loops] no SALAD in this launch — the previous reconstruction's "
                               f"{REVISIT_REFERENCE_NAME} deleted (never reused, point 66, USER "
                               f"2026-10-08)")
-        _persist_chunk_plan(_ranges, _n_selected, _walk0, _covis_rep, _res)
+        _persist_chunk_plan(_ranges, _n_selected, _walk0, _covis_rep, _res, _ctx)
         pipe.send_log(f"CHUNKED-METRIC (I4): walk {_walk0:.1f} m, D_total "
                       f"{_covis_rep['D_total']:.2f} > H {_covis_rep['H']:g} → "
                       f"{_plan_layout_text({'chunk_ranges': _ranges})}; ONE Omega pass")
@@ -2666,14 +2685,17 @@ _PLAN_INDEPENDENT_MAPLONG = {"loop_closures.txt", "salad_calibration.json", "sky
 
 
 def chunk_plan_doc(ranges, n_kf: int, walk_m, covis: dict, omega_res: dict,
-                   environment: "Optional[dict]" = None) -> dict:
+                   environment: "Optional[dict]" = None,
+                   context: "Optional[list]" = None) -> dict:
     """output/chunk_plan.json of a chunked run (version 2, USER 2026-10-06): the co-visibility
     plan's EXPLICIT ranges — what every reader of the chunks reads — every chunk's length and
     every seam's own overlap (variable: nothing here is a uniform size/overlap to rebuild
     chunks from), the planner's report (D per chunk, H, τ, tol_rel, blocks, cuts, flags, the
     input stamp), the Omega resolution chosen for the largest chunk, with why, and — plan point
     12 — the ``environment`` the run reconstructs in (repro.environment_record(gpu=True) + the
-    card's identity and table entry)."""
+    card's identity and table entry). ``context``: the chunks' context views (USER 2026-11-04:
+    the turn frames each chunk is inferred with, one list per chunk), recorded when there is
+    one."""
     from reconstruction.chunk_plan import as_ranges, chunk_lengths, seam_overlaps
     r = as_ranges(ranges)
     doc = {
@@ -2688,6 +2710,9 @@ def chunk_plan_doc(ranges, n_kf: int, walk_m, covis: dict, omega_res: dict,
         "covis": covis,
         "omega_resolution": {k: v for k, v in (omega_res or {}).items() if k != "persisted"},
     }
+    if context is not None and any(context):
+        doc["chunk_context"] = [list(c) for c in context]
+        doc["chunk_context_counts"] = [len(c) for c in context]
     if environment is not None:
         doc["environment"] = json.loads(json.dumps(environment, default=str))
     return doc
@@ -2710,6 +2735,15 @@ def _plan_layout_text(plan: dict) -> str:
     if sm:
         txt += f", seams {min(sm)}-{max(sm)} kf"
     return txt + at
+
+
+def _context_key(plan: Optional[dict]):
+    """The chunks' context views of a plan record (USER 2026-11-04, the turn frames each chunk is
+    inferred with); None when it has none — a record from before them included."""
+    c = (plan or {}).get("chunk_context")
+    if not c or not any(c):
+        return None
+    return [[str(f) for f in (x or [])] for x in c]
 
 
 def _res_key(plan: Optional[dict]):
@@ -2797,7 +2831,8 @@ def _layout_on_disk(out: Path) -> Optional[dict]:
         return {"chunk_ranges": r, "n_keyframes": n, "chunk_size": size, "overlap": ov,
                 "legacy_uniform": True, "omega_resolution": res}
     r = [[int(a), int(b)] for a, b in model["chunk_ranges"]]
-    return {"chunk_ranges": r, "n_keyframes": r[-1][1] if r else -1, "omega_resolution": res}
+    return {"chunk_ranges": r, "n_keyframes": r[-1][1] if r else -1, "omega_resolution": res,
+            "chunk_context": model.get("chunk_context")}
 
 
 def _invalidate_on_new_chunk_plan(output_dir: Path, plan: dict, log=print) -> bool:
@@ -2825,7 +2860,8 @@ def _invalidate_on_new_chunk_plan(output_dir: Path, plan: dict, log=print) -> bo
     same = (old is not None
             and old.get("chunk_ranges") == [[int(a), int(b)] for a, b in plan["chunk_ranges"]]
             and int(old.get("n_keyframes", -1)) == int(plan["n_keyframes"])
-            and _res_key(old) == _res_key(plan))
+            and _res_key(old) == _res_key(plan)
+            and _context_key(old) == _context_key(plan))
     if same:
         return False
     if old is None and not has_chunks:

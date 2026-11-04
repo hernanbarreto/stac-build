@@ -254,15 +254,25 @@ OMEGA_RESOLUTION_VERSION = 1
 
 def session_omega_resolution(session_dir: Path, ranges: Sequence[Sequence[int]], native_wh,
                              mode: str, ceiling: int, margin_frac: float, card: Dict[str, Any],
-                             log=print) -> Dict[str, Any]:
+                             log=print, context_counts: Optional[Sequence[int]] = None
+                             ) -> Dict[str, Any]:
     """The Omega resolution report of this session's plan: reused from
     ``<session>/intake/omega_resolution.json`` when it was decided for this exact plan, otherwise
     decided now (omega_resolution_for over ``card`` — omega_card's dict — and persisted). The
-    report carries ``"persisted": "reused" | "decided"`` and the card it was decided on."""
+    report carries ``"persisted": "reused" | "decided"`` and the card it was decided on.
+    ``context_counts``: the context views each chunk is inferred with (USER 2026-11-04, the turn
+    frames — on the card with the chunk's keyframes); the largest chunk is the one with the most
+    views, and a plan with context views is another plan (its key carries them)."""
     r = as_ranges(ranges)
+    ctx = [0] * len(r) if context_counts is None else [int(c) for c in context_counts]
+    if len(ctx) != len(r) or any(c < 0 for c in ctx):
+        raise ChunkLayoutError(f"context_counts {list(context_counts or [])} is not one count ≥ 0 "
+                               f"per chunk ({len(r)})")
     key = {"chunk_ranges": [[a, b] for a, b in r], "n_keyframes": int(r[-1][1]) if r else 0,
            "native_wh": [int(native_wh[0]), int(native_wh[1])], "mode": str(mode),
            "ceiling": int(ceiling), "margin_frac": float(margin_frac)}
+    if any(ctx):
+        key["context_counts"] = ctx
     p = Path(session_dir) / "intake" / OMEGA_RESOLUTION_NAME
     if p.exists():
         try:
@@ -285,9 +295,13 @@ def session_omega_resolution(session_dir: Path, ranges: Sequence[Sequence[int]],
                     f"delete {p.name} to decide again)")
             return rep
         log(f"[omega-res] {p.name} was decided for another plan — deciding again")
-    rep = omega_resolution_for(max(chunk_lengths(r)), card["total_gb"], (int(native_wh[0]),
+    views = [n + c for n, c in zip(chunk_lengths(r), ctx)]
+    rep = omega_resolution_for(max(views), card["total_gb"], (int(native_wh[0]),
                                int(native_wh[1])), mode, ceiling, margin_frac=margin_frac,
                                footprint_factor=card["footprint_factor"])
+    if any(ctx):
+        rep["context_counts"] = ctx
+        rep["chunk_views"] = views
     rep["card"] = card.get("card")
     doc = {"version": OMEGA_RESOLUTION_VERSION, "key": key,
            "card": {k: card.get(k) for k in ("card", "total_gb", "footprint_factor")},
