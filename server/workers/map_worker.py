@@ -1495,7 +1495,8 @@ def omega_native_resolution(frames_dir) -> int:
 
 
 def _start_sky_precompute(config: dict, frames_dir, output_dir, sel_files, pipe):
-    """Start the parallel sky masks of every keyframe Omega will read (reconstruction/
+    """Start the parallel sky masks of every frame Omega will read — the keyframes and the
+    context views, which the fork masks the same way (USER 2026-11-04) — (reconstruction/
     sky_precompute.py) into Omega's own cache (``<output>/maplong_run/sky_masks``, kept across
     plans by ``_PLAN_INDEPENDENT_MAPLONG``); None when the fork will not mask the sky. The fork's
     ``Model.mask_sky`` is read from the one builder that writes it (``_apply_stac_model_keys``),
@@ -1959,15 +1960,22 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     _walk_doc = None
     _walk_reused = False
     _sky_pre = None
+    _turn = None
     if _scale_align_on and _sel_files:
         from precision.config import load_precision_config
         _pc = load_precision_config(config)
         if _pc.enabled:
+            # the context views (intake/turn_frames.py, from I0/I1's own records — known before
+            # I3) are views of Omega's passes like the keyframes: the fork masks their sky too
+            from intake.turn_frames import load_turn_frames_config, session_turn_frames
+            _turn = session_turn_frames(output_dir.parent, load_turn_frames_config(config),
+                                        log=pipe.send_log)
             # the sky masks Omega applies, computed NOW on the CPU while the card runs I3
             # (reconstruction/sky_precompute.py: the fork's own code on Omega's interpreter, the
             # bytes Omega writes; Omega finds them in its cache) — Omega computed them one thread at
             # a time before every chunk with the card idle (station 2026-11-01: ~15 of its minutes)
-            _sky_pre = _start_sky_precompute(config, frames_dir, output_dir, _sel_files, pipe)
+            _sky_pre = _start_sky_precompute(config, frames_dir, output_dir,
+                                             list(_sel_files) + list(_turn["files"]), pipe)
             from intake.walk import load_walk, measure_walk, run_da3_windows, walk_is_current
             # the job's configuration travels with the call (plan point 69): I3 never re-reads
             # config.yaml from disk at spawn; a frozen output/run_config.yaml must agree with it
@@ -2307,8 +2315,9 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # (vendor/VGGT-Long/loop_utils/context_views.py). They are views of the pass: the plan counts
     # them against MAX_CHUNK_VIEWS and the card holds them with the chunk.
     from intake.turn_frames import chunk_context, load_turn_frames_config, session_turn_frames
-    _turn = session_turn_frames(output_dir.parent, load_turn_frames_config(config),
-                                log=pipe.send_log)
+    if _turn is None:                 # not computed with the sky masks above (no I3 in this run)
+        _turn = session_turn_frames(output_dir.parent, load_turn_frames_config(config),
+                                    log=pipe.send_log)
     pipe.send_progress(8, "Chunk plan: co-visibility over the I3 windows...", stage="reconstruction")
     try:
         _cplan = plan_session(output_dir.parent, log=pipe.send_log, turn_files=_turn["files"])
@@ -2535,7 +2544,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # Omega pass that runs out of memory FAILS — the resolution is the session's (point 14),
         # the plan is the co-visibility plan, neither is lowered to fit what else held the card
         if _sky_pre is None:          # no I3 in this run to overlap with: in parallel, here
-            _sky_now = _start_sky_precompute(config, frames_dir, output_dir, _sel_files, pipe)
+            _sky_now = _start_sky_precompute(config, frames_dir, output_dir,
+                                             list(_sel_files) + list(_turn["files"]), pipe)
             if _sky_now is not None:
                 _sky_now.wait(check_cancel=pipe.check_cancel)
         # the fork's chunk files on the pod's LOCAL disk when they fit (reconstruction/

@@ -128,8 +128,13 @@ def _runner(tmp_path, img, chunks, context):
     s.all_camera_poses, s.all_camera_intrinsics = [], []
     s.model = _Model()
     s._stac_check_fork_stamp = lambda pred, path: None
-    s._stac_mask_sky = lambda pred, paths: s.__dict__.setdefault("sky", []).append(
-        [os.path.basename(p) for p in paths])
+    def _sky(pred, paths):
+        # the stand-in segmenter: frame 15's corner pixel is sky
+        s.__dict__.setdefault("sky", []).append([os.path.basename(p) for p in paths])
+        for i, p in enumerate(paths):
+            if os.path.basename(p) == _fn(15):
+                pred["world_points_conf"][i, 0, 0] = 0.0
+    s._stac_mask_sky = _sky
     s._stac_layout_stamp = lambda: [list(c) for c in chunks]
     s._stac_stamp_digest = lambda: None
     s.output_dir = str(tmp_path / "ml")
@@ -151,7 +156,8 @@ def test_a_chunk_is_inferred_with_its_context_and_saved_with_its_keyframes(tmp_p
     assert [float(x) for x in pred["extrinsic"][:, 0, 3]] == [0.0, 10.0, 20.0]
     assert pred["camera_and_register_tokens"].shape[0] == 3 and pred["images"].shape[0] == 3
     assert pred["_stac_context"] == [_fn(5), _fn(15)] and pred["_stac_range"] == [0, 3]
-    assert s.sky == [[_fn(0), _fn(10), _fn(20)]]            # the sky mask sees the keyframes
+    # the sky mask sees the WHOLE pass, once, before the context views are kept (USER 2026-11-04)
+    assert s.sky == [[_fn(0), _fn(5), _fn(10), _fn(15), _fn(20)]]
     # the context views stay as F6 witnesses (USER 2026-11-04): anchored on the keyframe before
     # (the stand-in's depth is the frame number: keyframe 0 has no valid depth to anchor frame 5)
     saved = sorted((tmp_path / "ml" / "context_views").glob("*.npz"))
@@ -159,6 +165,7 @@ def test_a_chunk_is_inferred_with_its_context_and_saved_with_its_keyframes(tmp_p
     with np.load(saved[0]) as z:
         assert int(z["anchor_frame"]) == 10 and int(z["anchor_index"]) == 1 and int(z["chunk"]) == 0
         assert float(z["depth"][0, 0]) == 15.0 and str(z["frame_file"]) == _fn(15)
+        assert float(z["conf"][0, 0]) == 0.0 and float(z["conf"][1, 2]) == 1.0   # its sky masked
     assert [float(x) for x in s.all_camera_poses[0][1][:, 0, 3]] == [0.0, 10.0, 20.0]
     # resumed by the same context: no inference
     s2, run2 = _runner(tmp_path, img, chunks, ctx)
@@ -180,6 +187,7 @@ def test_without_context_the_chunk_is_the_one_it_always_was(tmp_path):
     s, run = _runner(tmp_path, img, chunks, check_chunk_context(None, chunks, img, str(d)))
     run(s, chunks[1], chunk_idx=1)
     assert s.model.calls == [[_fn(10), _fn(20), _fn(30), _fn(40)]]
+    assert s.sky == [[_fn(10), _fn(20), _fn(30), _fn(40)]]
     pred = np.load(tmp_path / "unaligned" / "chunk_1.npy", allow_pickle=True).item()
     assert "_stac_context" not in pred and pred["depth"].shape == (4, 2, 3)
 

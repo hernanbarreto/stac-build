@@ -144,7 +144,7 @@ def start(image_paths: Sequence[str], cache_root, fork_dir, python: str, env: Op
                                       stderr=subprocess.STDOUT))
         fh.close()
         logs.append(lp)
-    log(f"[sky-precompute] {len(paths)} keyframes' sky masks started on {n} processes "
+    log(f"[sky-precompute] {len(paths)} frames' sky masks (keyframes + context views) started on {n} processes "
         f"({python}) while the card runs — Omega reuses them from {root}")
     return SkyPrecompute(procs, logs, len(paths), time.time(), log)
 
