@@ -250,11 +250,48 @@ def test_without_enough_closures_the_seams_and_the_priors_decide(tmp_path):
     _bind(s, "_stac_chunk_graph")
     s._stac_chunk_graph()
     doc = json.loads((tmp_path / "chunk_graph.json").read_text())
-    assert doc["applied"].startswith("seams + DA3 priors")
+    assert doc["applied"] == "seams + DA3 priors (no closure)"
     assert doc["seams"][1]["sigma_source"].startswith("starved seam")
     assert doc["seams"][1]["sigma_m"] == 0.08
     for k, p in enumerate(doc["poses"]):
         assert abs(p["s"] - C[k][0]) < 1e-6 and np.allclose(p["t"], C[k][2], atol=1e-6)
+
+
+def test_every_verified_closure_enters_even_when_the_judge_cannot_tell(tmp_path):
+    """USER 2026-11-04 ("sí"): closures enter like a SLAM's — 3 true closures with local offsets
+    (fewer than the judge's 5) and one metres off: the true ones close, the far one barely moves
+    the graph (the Cauchy loss)."""
+    rng = np.random.default_rng(9)
+    n = 8
+    C = _truth(n, rng)
+    s = _Self()
+    s.chunk_indices = [(k * 10, k * 10 + 20) for k in range(n)]
+    s._stac_seam_edges = {k: dict(_edge(k + 1, k, C, sigma=0.03, lever=2.0,
+                                        bias=(1.02, np.eye(3), np.zeros(3))), exact=True)
+                          for k in range(n - 1)}
+    loops = [(7, 0, 0.08, None), (5, 2, 0.08, None), (6, 1, 0.08, None),
+             (7, 3, 0.17, (1.0, G._rodrigues(np.array([0, 0.5, 0])), np.array([1.5, 0, 0.5])))]
+    s._stac_loop_edges = []
+    for i, (a, b, sg, bias) in enumerate(loops):
+        e = _edge(a, b, C, sigma=sg, lever=4.0, bridge=i, bias=bias)
+        s._stac_loop_edges.append({"a": a, "b": b, "R_ab": e["R"], "t_ab": e["t"], "s_ab": e["s"],
+                                   "centroid_b": e["centroid"], "range_m": 4.0, "sigma_m": sg,
+                                   "status": "accepted", "bridge": i})
+    s._stac_scale_inputs = {"s_da3": {k: 1.0 for k in range(n)}, "n_anchors": {k: 3 for k in range(n)},
+                            "sigma_anchor": 0.08}
+    s._stac_scales_applied = {k: 1.0 for k in range(n)}
+    s._stac_graph_cfg = lambda: {"heldout_confidence": 0.95, "improvement_error_factor": 1.1}
+    s._stac_stamp_digest = lambda: None
+    s.output_dir = str(tmp_path)
+    _bind(s, "_stac_chunk_graph")
+    s._stac_chunk_graph()
+    doc = json.loads((tmp_path / "chunk_graph.json").read_text())
+    assert doc["applied"] == "seams + closures + DA3 priors"
+    assert doc["judge"]["improves"] is False                # measured, recorded, not deciding
+    errs = {c["bridge"]: c for c in doc["closure_errors"]}
+    for i in (0, 1, 2):
+        assert errs[i]["final_m"] < 0.6 * errs[i]["chain_m"]
+    assert errs[3]["final_m"] > 0.8 * errs[3]["chain_m"]    # the false one is weighed down
 
 
 def test_the_mode_is_read_strictly():
