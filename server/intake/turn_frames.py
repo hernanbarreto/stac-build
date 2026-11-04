@@ -259,28 +259,3 @@ def chunk_context(ranges: Sequence[Sequence[int]], keyframe_files: Sequence[str]
         out.append([f for f in turns if lo < _frame_no(f) < hi])
     return out
 
-
-def cap_context(context: Sequence[Sequence[str]], ranges: Sequence[Sequence[int]],
-                max_views: int) -> Tuple[List[List[str]], Dict[int, int]]:
-    """Each chunk's context views within ``max_views`` together with its keyframes (USER
-    2026-11-04: 64 views per Omega pass): a chunk over it keeps max(0, max_views − keyframes) of
-    its turn frames, evenly spread over its list (the first and the last kept when two or more
-    fit). Returns (the capped lists, {chunk: frames left out}). Deterministic."""
-    out: List[List[str]] = []
-    cut: Dict[int, int] = {}
-    for k, (c, (s, e)) in enumerate(zip(context, ranges)):
-        c = list(c)
-        room = max(0, int(max_views) - (int(e) - int(s)))
-        if len(c) <= room:
-            out.append(c)
-            continue
-        if room == 0:
-            keep = []
-        elif room == 1:
-            keep = [c[len(c) // 2]]
-        else:
-            idx = sorted({int(round(i * (len(c) - 1) / (room - 1))) for i in range(room)})
-            keep = [c[i] for i in idx]
-        out.append(keep)
-        cut[k] = len(c) - len(keep)
-    return out, cut

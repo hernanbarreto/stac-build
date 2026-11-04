@@ -2,7 +2,7 @@
 solape con corte por covisibilidad"): at most MAX_CHUNK_VIEWS (64) views per Omega pass — keyframes
 and the turn frames inferred with them — every block at most half, the 50 % overlap, the cuts still
 the co-visibility DP's; a minimum block already over it is admitted and flagged; the turn frames of
-such a chunk are thinned to the limit. And the map worker: the turn frames before the plan, the
+such a chunk are all kept (USER 2026-11-04: Omega sees the turn whole). And the map worker: the turn frames before the plan, the
 chunk graph mode on a chunked run. CPU only."""
 import sys
 from pathlib import Path
@@ -12,7 +12,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from intake.turn_frames import cap_context  # noqa: E402
 from reconstruction.chunk_covis import (MAX_CHUNK_VIEWS, PlanError, inputs_sha256,  # noqa: E402
                                         plan_detail, planning_views)
 
@@ -75,23 +74,14 @@ def test_the_views_of_each_planning_keyframe():
     assert inputs_sha256(d, z, t, 24, 13.67) != inputs_sha256(d, z, t, 24, 13.67, 64, v)
 
 
-def test_the_turn_frames_of_a_chunk_over_the_limit_are_thinned_evenly():
-    ctx = [[f"{i:06d}.jpg" for i in range(10)], ["a.jpg"], [f"{i:06d}.jpg" for i in range(5)]]
-    ranges = [(0, 58), (40, 60), (50, 114)]
-    out, cut = cap_context(ctx, ranges, 64)
-    # 58 keyframes leave room for 6 of the 10: indices round(i·9/5) = 0, 2, 4, 5, 7, 9
-    assert out[0] == ["000000.jpg", "000002.jpg", "000004.jpg", "000005.jpg", "000007.jpg",
-                      "000009.jpg"]
-    assert out[1] == ["a.jpg"] and out[2] == []
-    assert cut == {0: 4, 2: 5}
-
-
 def test_the_map_worker_plans_with_the_turn_frames_and_joins_the_chunks_by_sim3():
     src = (Path(__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
     i_turn = src.index("_turn = session_turn_frames(")
     i_plan = src.index('_cplan = plan_session(output_dir.parent, log=pipe.send_log, turn_files=_turn["files"])')
-    i_cap = src.index("_ctx, _ctx_cut = cap_context(chunk_context(_ranges, _sel_files, _turn[\"files\"])")
-    assert i_turn < i_plan < i_cap
+    i_ctx = src.index('_ctx = chunk_context(_ranges, _sel_files, _turn["files"])')
+    assert i_turn < i_plan < i_ctx
+    # a chunk over the limit keeps EVERY turn frame (USER 2026-11-04: option 2)
+    assert "cap_context" not in src and "kept whole" in src
     assert src.count('turn_files=_turn["files"]') == 2        # the regenerated-windows retry too
     assert 'cfg_v["Model"]["chunk_graph"] = {"mode": "sim3"}' in src
     import yaml

@@ -2335,18 +2335,18 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                            f"selected {_n_selected} — the I3 walk is not of this keyframe set")
     _walk0 = float(_walk_doc["walk_length_m"])
 
-    # the chunks' context views: the turn frames inside each chunk; a chunk the plan could not
-    # keep within MAX_CHUNK_VIEWS (a minimum block dense with rotation keyframes — flagged by the
-    # plan) keeps only as many turn frames as fit, evenly spread, declared — the user's limit
-    # (USER 2026-11-04) before the context views
-    from intake.turn_frames import cap_context
-    _ctx, _ctx_cut = cap_context(chunk_context(_ranges, _sel_files, _turn["files"]), _ranges,
-                                 MAX_CHUNK_VIEWS)
-    for _k, _dropped in _ctx_cut.items():
-        pipe.send_log(f"[turn-frames] chunk {_k}: {_dropped} turn frame(s) left out — its "
-                      f"{_ranges[_k][1] - _ranges[_k][0]} keyframes and the rest stay within "
-                      f"{MAX_CHUNK_VIEWS} views (or are already over it with no turn frame)",
-                      level="warning")
+    # the chunks' context views: EVERY turn frame inside each chunk. A chunk the plan cannot keep
+    # within MAX_CHUNK_VIEWS — its minimum block is a turn dense with rotation keyframes (the
+    # plan flags it) — keeps its whole turn (USER 2026-11-04, "2. … para que cuando lleguen esos
+    # casos esté preparado"): Omega sees the turn complete in one pass; the card holds it (the
+    # resolution below is sized on the views of the largest chunk)
+    _ctx = chunk_context(_ranges, _sel_files, _turn["files"])
+    _over = {k: (b - a) + len(c) for k, ((a, b), c) in enumerate(zip(_ranges, _ctx))
+             if (b - a) + len(c) > MAX_CHUNK_VIEWS}
+    if _over:
+        pipe.send_log(f"[turn-frames] chunk(s) over {MAX_CHUNK_VIEWS} views kept whole "
+                      f"{_over} — a turn dense with rotation keyframes the plan cannot cut "
+                      f"shorter; Omega sees every turn frame of it")
     vggt_config["Model"]["chunk_context"] = _ctx
     if any(_ctx):
         pipe.send_log(f"[turn-frames] context views per chunk {[len(c) for c in _ctx]} over the "
