@@ -69,8 +69,8 @@ def test_an_extra_witness_votes_like_a_neighbour_and_none_changes_nothing():
     assert more["splats"].shape[0] == base["splats"].shape[0] + 1
 
 
-def _write_view(d, chunk, frame, anchor, stamp, depth, rel, am, conf=None):
-    np.savez(d / f"c{chunk:03d}_{frame:06d}.npz", chunk=chunk, fork_stamp=stamp, frame=frame,
+def _write_view(d, chunk, frame, anchor, stamp, depth, rel, am, conf=None, prefix="c"):
+    np.savez(d / f"{prefix}{chunk:03d}_{frame:06d}.npz", chunk=chunk, fork_stamp=stamp, frame=frame,
              frame_file=f"{frame:06d}.jpg", anchor_frame=anchor, anchor_index=0, depth=depth,
              conf=conf if conf is not None else np.full(depth.shape, 9.0, np.float32), K=np.eye(3),
              rel_pose=rel, anchor_depth_median=am)
@@ -118,3 +118,31 @@ def test_the_witnesses_enter_the_vote_after_the_mono_detail_and_never_its_keyfra
     assert i_md < i_w < i_v
     assert "extra=t_extra" in body and "turn_witnesses=t_rep" in body
     assert "frames=frames" in body                       # the cloud is built over the keyframes
+
+
+def test_the_interval_witnesses_of_their_own_pass_are_read_like_the_turn_frames(tmp_path):
+    """USER 2026-11-04 ("que solo entren para afirmar o no en el F6"): the interval frames come
+    from a pass of their own after the chunk (w<chunk>_<frame>.npz) — F6 reads them with the same
+    carry as the turn frames (c<chunk>_<frame>.npz) and they vote on the keyframes near their
+    anchor."""
+    from precision.depth_on_f5 import design, load_turn_witnesses
+    out = tmp_path / "output"
+    d = out / "maplong_run" / CONTEXT_DIR
+    d.mkdir(parents=True)
+    (out / "maplong_run" / "fork_stamp.json").write_text(json.dumps({"sha256": "S"}))
+    H, W = 4, 5
+    frames = [10, 20, 30, 40]
+    rel = _pose(0.05, 0.1)
+    _write_view(d, 1, 15, 10, "S", np.full((H, W), 2.0, np.float32), rel, 2.0)              # turn
+    _write_view(d, 1, 25, 20, "S", np.full((H, W), 2.0, np.float32), rel, 2.0, prefix="w")  # interval
+    chunk = {10: 1, 20: 1, 30: 2, 40: 2}
+    uu, vv = np.meshgrid(np.arange(W), np.arange(H))
+    Dm = design(uu.ravel(), vv.ravel(), W, H)
+    coefs = {i: np.array([1.1, 0.0, 0.0]) for i in range(4)}
+    c2w = {f: _pose(float(f)) for f in frames}
+    dep, valid, passed, cw, extra, rep = load_turn_witnesses(
+        out, frames, chunk, {1: 5.0, 2: 5.0}, {10: 3.0, 20: 3.0, 30: 3.0, 40: 3.0}, coefs, c2w,
+        None, False, (H, W), Dm, H, W, [-1, 1], log=lambda m: None)
+    assert sorted(dep) == [15, 25] and rep["used"] == 2
+    assert np.allclose(dep[25], 2.0 * 1.5 * 1.1)
+    assert extra == {10: [15, 25], 20: [15, 25], 30: [25]}

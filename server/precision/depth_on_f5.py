@@ -560,9 +560,11 @@ def load_turn_witnesses(out: Path, frames: List[int], chunk: Dict[int, int], thr
                         zmed: Dict[int, float], coefs: Dict[int, np.ndarray], c2w: Dict[int, np.ndarray],
                         inp, carry: bool, rec_hw, Dm: np.ndarray, H: int, W: int, neighbors,
                         log: Callable = print):
-    """The TURN FRAMES as witnesses of the vote (USER 2026-11-04, "hacé 1 y 2"): the fork kept every
-    context view's Omega depth, confidence and pose relative to the keyframe before it (its anchor,
-    output/maplong_run/context_views, vendor loop_utils/context_views.context_records). Each one
+    """The TURN FRAMES and the INTERVAL WITNESSES as witnesses of the vote (USER 2026-11-04, "hacé 1
+    y 2" … "que solo entren para afirmar o no en el F6"): the fork kept every context view's (c*)
+    and every witness view's (w*, a pass of their own after the chunk) Omega depth, confidence and
+    pose relative to the keyframe before it (its anchor, output/maplong_run/context_views, vendor
+    loop_utils/context_views.context_records). Each one
     takes its anchor's chain: the depth into the record's units by the ratio of the two medians in
     that pass (Omega's chunk units → the record's), the anchor's BEND (its coefficients at the
     view's pixels), the anchor's confidence floor (its chunk's), and the anchor's F5 pose composed
@@ -588,7 +590,10 @@ def load_turn_witnesses(out: Path, frames: List[int], chunk: Dict[int, int], thr
     def _ign(why):
         rep["ignored"][why] = rep["ignored"].get(why, 0) + 1
     chosen: Dict[int, Tuple[Path, int]] = {}
-    for p in sorted(d.glob("c*_*.npz")):
+    # c<chunk>_<frame>: the turn frames, inferred WITH their chunk; w<chunk>_<frame>: the interval
+    # frames, inferred in a pass of their own after it (USER 2026-11-04: they only affirm or deny
+    # here, the chunks never see them) — the same record, the same carry
+    for p in sorted(list(d.glob("c*_*.npz")) + list(d.glob("w*_*.npz"))):
         with np.load(p) as z:
             ft, a, ck, st = int(z["frame"]), int(z["anchor_frame"]), int(z["chunk"]), str(z["fork_stamp"])
         if stamp is None or st != stamp:

@@ -67,6 +67,10 @@ def _run(tmp_path, monkeypatch, seq):
     stub.loop_predict_list = [((a, (0, 1), b, (0, 1)), li, {"layout": {}}) for li, (a, b) in enumerate(seq)]
     stub._stac_loops_cfg = lambda: {}
     stub._stac_drop_chunk_cache = lambda: None
+    # a bridge held in memory is read as it is (the fork's reader, 2026-11-04: a bridge on disk
+    # is read back from its file instead)
+    exec(_method("_stac_bridge_pred"), ns)
+    stub._stac_bridge_pred = lambda pred, meta: ns["_stac_bridge_pred"](stub, pred, meta)
     out = ns["_stac_measure_loops"](stub, True)
     return out, loads, peak[0]
 

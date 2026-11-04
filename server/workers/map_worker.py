@@ -1975,7 +1975,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             # bytes Omega writes; Omega finds them in its cache) — Omega computed them one thread at
             # a time before every chunk with the card idle (station 2026-11-01: ~15 of its minutes)
             _sky_pre = _start_sky_precompute(config, frames_dir, output_dir,
-                                             list(_sel_files) + list(_turn["files"]), pipe)
+                                             list(_sel_files) + list(_turn["files"])
+                                             + list(_turn["witness_files"]), pipe)
             from intake.walk import load_walk, measure_walk, run_da3_windows, walk_is_current
             # the job's configuration travels with the call (plan point 69): I3 never re-reads
             # config.yaml from disk at spawn; a frozen output/run_config.yaml must agree with it
@@ -2360,6 +2361,15 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     if any(_ctx):
         pipe.send_log(f"[turn-frames] context views per chunk {[len(c) for c in _ctx]} over the "
                       f"chunks' keyframes {chunk_lengths(_ranges)}")
+    # the chunks' WITNESS views (USER 2026-11-04: "que los chunks no se modifiquen por los frames
+    # extra en los tramos rectos, que solo entren para afirmar o no en el F6"): every interval
+    # frame inside each chunk, inferred by the fork in a pass of its own AFTER the chunk
+    # (_stac_witness_pass) — never counted by the plan, never in the chunk's inference
+    _wit = chunk_context(_ranges, _sel_files, _turn["witness_files"])
+    vggt_config["Model"]["chunk_witnesses"] = _wit
+    if any(_wit):
+        pipe.send_log(f"[turn-frames] witness views per chunk {[len(w) for w in _wit]} (F6 only, "
+                      f"a pass of their own after each chunk; the chunks are the turn rule's)")
 
     # ── Omega's resolution: the LARGEST planned chunk must fit the card ──
     # The card's TOTAL memory (a property of the card — deterministic) and the per-frame
@@ -2383,7 +2393,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     _ct.require_one_visible_card()          # point 78: the identity is THE device's, one card
     _ident = repro.card_identity(0)
     _card = omega_card(_ident["key"])
-    _n_max = max(n + len(c) for n, c in zip(chunk_lengths(_ranges), _ctx))
+    # the card holds the larger of a chunk's two passes: keyframes + context, keyframes + witnesses
+    _n_max = max(n + max(len(c), len(w)) for n, c, w in zip(chunk_lengths(_ranges), _ctx, _wit))
     # the same margin the I3 DA3 windows leave on the card (USER 2026-10-06)
     from intake.config import load_intake_config as _lic
     _omega_margin = float(_lic(config).parallax.vram_margin_frac)
@@ -2393,7 +2404,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                     str(vggt_config["Model"]["omega_mode"]),
                                     int(vggt_config["Model"]["omega_resolution"]),
                                     _omega_margin, _card, log=pipe.send_log,
-                                    context_counts=[len(c) for c in _ctx])
+                                    context_counts=[max(len(c), len(w)) for c, w in zip(_ctx, _wit)])
     vggt_config["Model"]["omega_resolution"] = int(_res["resolution"])
     # the report travels in the run config minus its log-only field (the config is stamped)
     vggt_config["Model"]["omega_resolution_report"] = {k: v for k, v in _res.items()
@@ -2545,7 +2556,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # the plan is the co-visibility plan, neither is lowered to fit what else held the card
         if _sky_pre is None:          # no I3 in this run to overlap with: in parallel, here
             _sky_now = _start_sky_precompute(config, frames_dir, output_dir,
-                                             list(_sel_files) + list(_turn["files"]), pipe)
+                                             list(_sel_files) + list(_turn["files"])
+                                             + list(_turn["witness_files"]), pipe)
             if _sky_now is not None:
                 _sky_now.wait(check_cancel=pipe.check_cancel)
         # the fork's chunk files on the pod's LOCAL disk when they fit (reconstruction/

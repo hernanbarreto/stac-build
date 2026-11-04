@@ -1590,13 +1590,16 @@ reconstruction:
       per_rotation_quantum: 3           # the divisor d (3 = the ~3.5° step proposed and taken
                                         # 2026-11-04; VGGT-SLAM's views were ~1° apart)
       min_per_interval: 1               # USER 2026-11-04 (night, "¿qué pasa si la usamos en todo
-                                        # el recorrido?" … "con ambas mejoras"): the fewest
-                                        # context frames between ANY two consecutive keyframes —
-                                        # a stretch of walk the turn rule leaves alone is cut into
-                                        # this + 1 steps of its parallax reading (one frame at
-                                        # half the window's parallax); a turn keeps its rotation
-                                        # steps. They are F6's vote witnesses too. 0 = turns only.
-                                        # pccr: ~300 more views, the 64-view chunks ~11 → ~20.
+                                        # el recorrido?" … "con ambas mejoras"): the fewest frames
+                                        # between ANY two consecutive keyframes — a stretch of walk
+                                        # the turn rule leaves alone is cut into this + 1 steps of
+                                        # its parallax reading (one frame at half the window's
+                                        # parallax). These are F6 WITNESSES ONLY ("que los chunks
+                                        # no se modifiquen por los frames extra en los tramos
+                                        # rectos, que solo entren para afirmar o no en el F6"):
+                                        # inferred in a pass of their own after each chunk, never
+                                        # with it — the chunks are the turn rule's (pccr 11, as
+                                        # validated). 0 = turns only.
     chunk_graph: sim3                   # USER 2026-11-04 ("ok, Sim3 … lo tenés que implementar
                                         # correctamente"): how the chunks of a chunked run are
                                         # joined. sim3 = every chunk one piece of ONE Sim(3)

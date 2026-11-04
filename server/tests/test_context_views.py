@@ -139,6 +139,9 @@ def _runner(tmp_path, img, chunks, context):
     s._stac_stamp_digest = lambda: None
     s.output_dir = str(tmp_path / "ml")
     s._stac_save_context_views = lambda *a: ns["_stac_save_context_views"](s, *a)
+    exec(_method("_stac_witness_pass"), ns)
+    s.chunk_witnesses = None
+    s._stac_witness_pass = lambda *a: ns["_stac_witness_pass"](s, *a)
     return s, ns["process_single_chunk"]
 
 
@@ -221,3 +224,64 @@ def test_the_layout_resolves_the_context_and_the_stamp_reads_its_bytes(tmp_path)
         FS.repro = real
     assert seen["frames/000005.jpg"] == str(d / _fn(5))
     assert seen["frames/000025.jpg"] == str(d / _fn(25))
+    # the witness views' bytes are inputs too (USER 2026-11-04: a pass of their own)
+    seen.clear()
+    cfg["Model"]["chunk_witnesses"] = [[_fn(15)], [_fn(35)]]
+    FS.repro = lambda: _R
+    try:
+        FS.run_stamp(img_list=[str(d / _fn(0)), str(d / _fn(10))], img_dir=str(d), config=cfg,
+                     code_files=[])
+    finally:
+        FS.repro = real
+    assert seen["frames/000015.jpg"] == str(d / _fn(15)) and seen["frames/000035.jpg"] == str(d / _fn(35))
+
+
+def test_witnesses_are_inferred_in_a_pass_of_their_own_and_the_chunk_is_untouched(tmp_path):
+    """USER 2026-11-04 ("que los chunks no se modifiquen por los frames extra en los tramos rectos,
+    que solo entren para afirmar o no en el F6"): the chunk file is the one inferred without the
+    witnesses; the witnesses get a pass of their own (the chunk's keyframes + them, the sky mask on
+    the whole pass), only their records are kept (w<chunk>_<frame>.npz), and a second call with
+    this run's records on disk infers nothing."""
+    d = _frames(tmp_path, range(0, 41))
+    img = [str(d / _fn(f)) for f in (0, 10, 20, 30, 40)]
+    chunks = [(0, 3), (1, 5)]
+    ctx = check_chunk_context([[_fn(5)], [_fn(25)]], chunks, img, str(d))
+    wit = check_chunk_context([[_fn(15)], [_fn(35)]], chunks, img, str(d))
+    a, run_a = _runner(tmp_path / "a", img, chunks, ctx)
+    run_a(a, chunks[0], chunk_idx=0)
+    b, run_b = _runner(tmp_path / "b", img, chunks, ctx)
+    b.chunk_witnesses = wit
+    run_b(b, chunks[0], chunk_idx=0)
+    b._stac_witness_pass(0)
+    pa = np.load(tmp_path / "a" / "unaligned" / "chunk_0.npy", allow_pickle=True).item()
+    pb = np.load(tmp_path / "b" / "unaligned" / "chunk_0.npy", allow_pickle=True).item()
+    assert set(pa) == set(pb)
+    for k in pa:
+        if isinstance(pa[k], np.ndarray):
+            assert np.array_equal(pa[k], pb[k]), k
+        else:
+            assert pa[k] == pb[k], k
+    assert b.model.calls == [[_fn(0), _fn(5), _fn(10), _fn(20)],            # the chunk: + context
+                             [_fn(0), _fn(10), _fn(15), _fn(20)]]           # its witness pass
+    assert b.sky[-1] == [_fn(0), _fn(10), _fn(15), _fn(20)]
+    saved = sorted(x.name for x in (tmp_path / "b" / "ml" / "context_views").glob("*.npz"))
+    assert saved == ["c000_000005.npz", "w000_000015.npz"] or saved == ["w000_000015.npz"]
+    with np.load(tmp_path / "b" / "ml" / "context_views" / "w000_000015.npz") as z:
+        assert int(z["anchor_frame"]) == 10 and int(z["anchor_index"]) == 1 and int(z["chunk"]) == 0
+        assert float(z["depth"][0, 0]) == 15.0
+    b._stac_witness_pass(0)                                                 # this run's: skipped
+    assert len(b.model.calls) == 2
+    b._stac_witness_pass(1)                                                 # chunk 1: its own pass
+    assert b.model.calls[-1] == [_fn(10), _fn(20), _fn(30), _fn(35), _fn(40)]
+    c, _ = _runner(tmp_path / "c", img, chunks, ctx)
+    c._stac_witness_pass(0)                                                 # no witnesses: nothing
+    assert c.model.calls == []
+
+
+def test_the_layout_refuses_a_frame_that_is_both_context_and_witness():
+    body = _method("_stac_build_layout")
+    assert "check_chunk_context(self.chunk_witnesses_cfg, self.chunk_indices," in body
+    assert "are both context views and witnesses" in body
+    loop = _method("process_long_sequence")
+    i_chunk = loop.index("self.process_single_chunk(self.chunk_indices[chunk_idx], chunk_idx=chunk_idx)")
+    assert i_chunk < loop.index("self._stac_witness_pass(chunk_idx)")

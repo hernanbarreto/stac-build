@@ -31,11 +31,18 @@ keyframe gets none, and says so.
 
 EVERY INTERVAL (USER 2026-11-04, the same night: *"¿qué pasa si la usamos en todo el recorrido
 para dar completitud en todo el recorrido sin romper geometría?"* … *"con ambas mejoras"*): a
-window the turn rule cuts into fewer than ``min_per_interval`` + 1 steps — a stretch of walk, not
-a turn — is cut into ``min_per_interval`` + 1 equal steps of its PARALLAX reading (I1's parallax
-from the anchor, the reading its keyframe rule closes a walking window on), each step's frame by
-the same band rule; a keyframe without a parallax reading is cut on its rotation reading. A turn
-keeps its rotation steps exactly (at least ``min_per_interval`` + 1 of them). 0 = turns only.
+window the turn rule leaves without a frame — a stretch of walk, not a turn — is cut into
+``min_per_interval`` + 1 equal steps of its PARALLAX reading (I1's parallax from the anchor, the
+reading its keyframe rule closes a walking window on), each step's frame by the same band rule; a
+keyframe without a parallax reading is cut on its rotation reading. 0 = turns only.
+
+TWO ROLES (USER 2026-11-04, after the first run of every interval in Omega doubled its views and
+halved its chunks: *"lo que quiero que cambie es que los chunks no se modifiquen por los frames
+extra en los tramos rectos, que solo entren para afirmar o no en el F6"*): the TURN frames are
+``context`` views — Omega infers them with the chunk, as validated on pccr (``files``: what the
+chunk plan counts and the chunks are inferred with); the INTERVAL frames are ``witness`` views
+only (``witness_files``): inferred in a pass of their own after each chunk (the fork's
+_stac_witness_pass), never with it, and read by F6's vote alone — the chunks are the turn rule's.
 
 Nothing is measured again: the readings are I1's own records (``intake/coverage_warnings.json``
 'frames'), the sharpness I0's (``frames/quality_features.json``), the keyframes and windows
@@ -55,7 +62,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from intake.quality import _write_json_atomic
 
 TURN_FRAMES_NAME = "turn_frames.json"
-TURN_FRAMES_VERSION = 2          # 2: every interval (min_per_interval, its parallax steps)
+TURN_FRAMES_VERSION = 3          # 3: two roles — turn frames = Omega context, interval frames =
+                                 #    F6 witnesses only (2: every interval as Omega context)
 PROVENANCE = "tool_measured"
 METHOD = "turn_rotation_steps+interval_parallax_steps"
 CONFIG_PATH = "reconstruction.vggtomega.turn_frames"
@@ -142,12 +150,12 @@ def select_turn_frames(selection: Dict[str, Any], frame_records: Sequence[Dict[s
         if skip is None:
             r_k, p_k = kf_rot.get(int(k)), kf_par.get(int(k))
             n_rot = max(1, int(math.ceil(r_k / step_max))) if r_k is not None else 0
-            if n_rot >= 2:                                   # a turn: its rotation steps
-                kind, total, n = "rotation", r_k, max(n_rot, n_min)
-            elif n_min >= 2 and p_k is not None and p_k > 0.0:   # a walk: its parallax steps
-                kind, total, n = "parallax", p_k, n_min
+            if n_rot >= 2:                  # a turn: its rotation steps, Omega's context views
+                kind, total, n, role = "rotation", r_k, n_rot, "context"
+            elif n_min >= 2 and p_k is not None and p_k > 0.0:   # a walk: F6's witnesses only
+                kind, total, n, role = "parallax", p_k, n_min, "witness"
             elif n_min >= 2 and r_k is not None and r_k > 0.0:
-                kind, total, n = "rotation", r_k, n_min
+                kind, total, n, role = "rotation", r_k, n_min, "witness"
             elif r_k is None or n_min >= 2:
                 skip = "no_rotation_reading" if n_min < 2 else "no_reading"
             else:
@@ -182,17 +190,19 @@ def select_turn_frames(selection: Dict[str, Any], frame_records: Sequence[Dict[s
                 f, x = min(pool, key=lambda c: (abs(c[1] - target), c[0]))
                 how = "nearest"
             chosen.append({"frame": f, "file": q[f]["file"], "anchor": a, "keyframe": k,
-                           "reading": kind, "unit": unit, "step": j, "steps": n,
+                           "role": role, "reading": kind, "unit": unit, "step": j, "steps": n,
                            "target": target, "value": x, "chosen_by": how})
             prev = f
         frames.extend(chosen)
-        windows.append({"anchor": a, "keyframe": k, "reading": kind, "unit": unit,
+        windows.append({"anchor": a, "keyframe": k, "role": role, "reading": kind, "unit": unit,
                         "total": float(total), "steps": n, "n_candidates": len(cands),
                         "n_turn_frames": len(chosen), "skipped": None})
-    files = [t["file"] for t in sorted(frames, key=lambda t: t["frame"])]
+    ordered = sorted(frames, key=lambda t: t["frame"])
+    files = [t["file"] for t in ordered if t["role"] == "context"]
+    witness_files = [t["file"] for t in ordered if t["role"] == "witness"]
     return {"theta_q_deg": theta_q, "per_rotation_quantum": d, "theta_t_deg": theta_t,
             "band_frac": b, "step_max_deg": step_max, "min_per_interval": int(min_per_interval),
-            "frames": frames, "files": files, "windows": windows}
+            "frames": frames, "files": files, "witness_files": witness_files, "windows": windows}
 
 
 def _sha_file(p: Path) -> str:
@@ -232,7 +242,8 @@ def session_turn_frames(scan_dir: Path, cfg: TurnFramesConfig, log=print) -> Dic
                           "the sharpest frame within +-b of a step around j * (r_k or p_k) / n "
                           "(I1's readings from the anchor)"}
     if not cfg.enabled:
-        doc = {**head, "frames": [], "files": [], "windows": [], "n_turn_frames": 0}
+        doc = {**head, "frames": [], "files": [], "witness_files": [], "windows": [],
+               "n_turn_frames": 0, "n_witness_frames": 0}
         _write_json_atomic(scan_dir / "intake" / TURN_FRAMES_NAME, doc)
         log(f"[turn-frames] OFF ({CONFIG_PATH}.enabled false) — Omega sees the keyframes only")
         return doc
@@ -249,19 +260,20 @@ def session_turn_frames(scan_dir: Path, cfg: TurnFramesConfig, log=print) -> Dic
     for w in res["windows"]:
         if w.get("skipped"):
             skipped[w["skipped"]] = skipped.get(w["skipped"], 0) + 1
-    doc = {**head, **res, "n_turn_frames": len(res["frames"]),
+    doc = {**head, **res, "n_turn_frames": len(res["files"]),
+           "n_witness_frames": len(res["witness_files"]),
            "n_windows_with_turn_frames": sum(1 for w in res["windows"]
                                              if w.get("n_turn_frames")),
            "chosen_by": by, "by_reading": by_reading, "skipped": skipped}
     _write_json_atomic(scan_dir / "intake" / TURN_FRAMES_NAME, doc)
-    log(f"[turn-frames] {doc['n_turn_frames']} context frame(s) in "
-        f"{doc['n_windows_with_turn_frames']} window(s) for {len(sel['keyframes'])} keyframes: "
-        f"turns {by_reading.get('rotation', 0)} by rotation (θ_t = θ_q {res['theta_q_deg']:.2f}° / "
-        f"{res['per_rotation_quantum']} = {res['theta_t_deg']:.2f}°, no step over "
-        f"{res['step_max_deg']:.2f}°), every other interval {by_reading.get('parallax', 0)} by "
-        f"parallax (≥ {res['min_per_interval']} per interval; band ±{res['band_frac']:g}); chosen "
-        f"in the band {by.get('band', 0)}, nearest reading {by.get('nearest', 0)}"
-        + (f"; windows skipped {skipped}" if skipped else "") + f" → {TURN_FRAMES_NAME}")
+    log(f"[turn-frames] {doc['n_turn_frames']} turn frame(s) — Omega's context views (θ_t = θ_q "
+        f"{res['theta_q_deg']:.2f}° / {res['per_rotation_quantum']} = {res['theta_t_deg']:.2f}°, no "
+        f"step over {res['step_max_deg']:.2f}°) — and {doc['n_witness_frames']} witness frame(s) "
+        f"for F6 only (≥ {res['min_per_interval']} in every other interval, by its parallax), "
+        f"{doc['n_windows_with_turn_frames']} window(s) of {len(sel['keyframes'])} keyframes; band "
+        f"±{res['band_frac']:g}, chosen in the band {by.get('band', 0)}, nearest reading "
+        f"{by.get('nearest', 0)}" + (f"; windows skipped {skipped}" if skipped else "")
+        + f" → {TURN_FRAMES_NAME}")
     return doc
 
 

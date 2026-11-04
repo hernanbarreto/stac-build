@@ -134,14 +134,16 @@ def test_every_interval_gets_a_frame_at_half_its_parallax():
     sel, recs, q = _session_docs(rot_per_frame=0.1, sharp={5: 0.9, 21: 0.8})
     assert select_turn_frames(sel, recs, q, 3, 0)["frames"] == []
     r = select_turn_frames(sel, recs, q, 3, 1)
-    got = [(t["frame"], t["reading"], t["step"], t["steps"], t["chosen_by"]) for t in r["frames"]]
-    assert got == [(5, "parallax", 1, 2, "band"), (21, "parallax", 1, 2, "band")]
+    got = [(t["frame"], t["role"], t["reading"], t["step"], t["steps"], t["chosen_by"])
+           for t in r["frames"]]
+    assert got == [(5, "witness", "parallax", 1, 2, "band"), (21, "witness", "parallax", 1, 2, "band")]
     assert [(w["reading"], w["unit"], w["total"], w["steps"]) for w in r["windows"]] == [
         ("parallax", "px", 12.0, 2), ("parallax", "px", 24.0, 2)]
-    assert r["min_per_interval"] == 1 and r["files"] == [_fn(5), _fn(21)]
+    # USER 2026-11-04: they only affirm or deny in F6 — never Omega's context views
+    assert r["min_per_interval"] == 1 and r["files"] == [] and r["witness_files"] == [_fn(5), _fn(21)]
     # all sharp 0.5 → the earliest frame of the band
     sel, recs, q = _session_docs(rot_per_frame=0.1)
-    assert [t["frame"] for t in select_turn_frames(sel, recs, q, 3, 1)["frames"]] == [4, 18]
+    assert select_turn_frames(sel, recs, q, 3, 1)["witness_files"] == [_fn(4), _fn(18)]
     # two per interval: thirds of the parallax, 4 ± 1 px → frames 3, 4 (3.6, 4.8), 8 ± 1 px →
     # frames 6, 7 (7.2, 8.4); all sharp 0.5 → the earliest of each band
     r2 = select_turn_frames(sel, recs, q, 3, 2)
@@ -149,21 +151,24 @@ def test_every_interval_gets_a_frame_at_half_its_parallax():
         (3, 1, 3), (6, 2, 3)]
 
 
-def test_a_turn_keeps_its_rotation_steps_whatever_the_interval_rule():
+def test_a_turn_keeps_exactly_its_rotation_steps_whatever_the_interval_rule():
+    # the chunks are the turn rule's (USER 2026-11-04): Omega's context views never change with
+    # min_per_interval, and a turn gets no witness of the interval rule
     sel, recs, q = _session_docs(sharp={17: 0.9, 16: 0.8, 23: 0.95, 24: 0.99})
-    turns = select_turn_frames(sel, recs, q, 3, 0)["frames"]
-    assert select_turn_frames(sel, recs, q, 3, 1)["frames"] == turns           # turns only, as before
-    assert all(t["reading"] == "rotation" for t in turns)
-    # a two-step turn (window 0 → 10, 5.4°) asked for two frames: three ROTATION steps of 1.8°
-    r = select_turn_frames(sel, recs, q, 3, 2)
-    w0 = [(t["reading"], t["steps"]) for t in r["frames"] if t["anchor"] == 0]
-    assert w0 == [("rotation", 3), ("rotation", 3)]
+    turns = select_turn_frames(sel, recs, q, 3, 0)
+    for m in (1, 2):
+        r = select_turn_frames(sel, recs, q, 3, m)
+        assert r["frames"] == turns["frames"] and r["files"] == turns["files"]
+        assert r["witness_files"] == []
+    assert all(t["reading"] == "rotation" and t["role"] == "context" for t in turns["frames"])
+    assert turns["files"] == [_fn(4), _fn(17), _fn(24)]
 
 
 def test_an_interval_without_a_parallax_reading_is_cut_on_its_rotation_or_skipped():
     sel, recs, q = _session_docs(rot_per_frame=0.1, kf=(0, 10), kf_par={10: None})
     r = select_turn_frames(sel, recs, q, 3, 1)
-    assert [(t["reading"], t["frame"]) for t in r["frames"]] == [("rotation", 4)]   # 0.5° ± 0.125
+    assert [(t["role"], t["reading"], t["frame"]) for t in r["frames"]] == [("witness", "rotation", 4)]
+    assert r["files"] == [] and r["witness_files"] == [_fn(4)]                     # 0.5° ± 0.125
     sel, recs, q = _session_docs(rot_per_frame=0.1, kf=(0, 10), kf_par={10: None},
                                  kf_rot={10: float("nan")})
     r = select_turn_frames(sel, recs, q, 3, 1)
@@ -244,8 +249,9 @@ def test_the_session_document_is_stamped_and_reproducible(tmp_path):
     assert d1["files"] == [_fn(4), _fn(17), _fn(24)] and d1["n_turn_frames"] == 3
     assert set(d1["inputs"]) == {"selected_frames_sha256", "coverage_warnings_sha256",
                                  "quality_features_sha256"} and d1["code_sha256"]
-    assert any("[turn-frames] 3 context frame(s) in 2 window(s)" in m for m in logs), logs
+    assert any("[turn-frames] 3 turn frame(s) — Omega's context views" in m for m in logs), logs
     assert d1["min_per_interval"] == 0 and d1["by_reading"] == {"rotation": 3}
+    assert d1["n_turn_frames"] == 3 and d1["n_witness_frames"] == 0 and d1["witness_files"] == []
     off = session_turn_frames(scan, TurnFramesConfig(False, 3, 1), log=logs.append)
     assert off["files"] == [] and off["enabled"] is False
     (scan / "intake" / "coverage_warnings.json").unlink()
@@ -257,9 +263,10 @@ def test_the_session_document_records_every_interval(tmp_path):
     scan = _write_session(tmp_path, rot_per_frame=0.1, sharp={5: 0.9, 21: 0.8})
     logs = []
     d = session_turn_frames(scan, TurnFramesConfig(True, 3, 1), log=logs.append)
-    assert d["files"] == [_fn(5), _fn(21)] and d["by_reading"] == {"parallax": 2}
-    assert d["version"] == 2 and d["min_per_interval"] == 1
-    assert any("every other interval 2 by parallax (≥ 1 per interval" in m for m in logs), logs
+    assert d["files"] == [] and d["witness_files"] == [_fn(5), _fn(21)]
+    assert d["by_reading"] == {"parallax": 2} and d["n_witness_frames"] == 2
+    assert d["version"] == 3 and d["min_per_interval"] == 1
+    assert any("and 2 witness frame(s) for F6 only (≥ 1 in every other interval" in m for m in logs), logs
 
 
 def test_the_card_holds_the_keyframes_and_the_context_views(tmp_path):
@@ -292,8 +299,11 @@ def test_the_map_worker_sizes_the_card_on_the_context_views_and_records_them():
     i_ctx = src.index('vggt_config["Model"]["chunk_context"] = _ctx')
     i_res = src.index("_res = session_omega_resolution(")
     assert i_turn < i_ctx < i_res
-    assert "context_counts=[len(c) for c in _ctx])" in src[i_res:i_res + 600]
-    assert "_n_max = max(n + len(c) for n, c in zip(chunk_lengths(_ranges), _ctx))" in src
+    assert "context_counts=[max(len(c), len(w)) for c, w in zip(_ctx, _wit)])" in src[i_res:i_res + 600]
+    assert "_n_max = max(n + max(len(c), len(w)) for n, c, w in zip(chunk_lengths(_ranges), _ctx, _wit))" in src
+    # the witnesses never reach the plan: it counts the turn frames only (USER 2026-11-04)
+    assert src.count('turn_files=_turn["files"]') == 2 and 'turn_files=_turn["witness_files"]' not in src
+    assert 'vggt_config["Model"]["chunk_witnesses"] = _wit' in src
     assert "_persist_chunk_plan(_ranges, _n_selected, _walk0, _covis_rep, _res, _ctx)" in src
     assert '"chunk_context": _ctx}, pipe.send_log)' in src          # the single pass's check
 
