@@ -267,3 +267,24 @@ def test_the_mode_is_read_strictly():
     assert f(_M({})) is None and f(_M({"chunk_graph": {"mode": "sim3"}})) == "sim3"
     with pytest.raises(ValueError, match="sim3"):
         f(_M({"chunk_graph": {"mode": "sl4"}}))
+
+
+def test_a_sim3_closure_carries_no_scale_term_in_its_sigma():
+    """pccr 2026-11-04: verify_loop given no scale disagreement reads log s_ab of the measurement
+    and adds it to σ (the start↔end closure: held-out 7.9 cm → σ 28 cm); in the chunk Sim(3)
+    graph the scale is the graph's variable — the stage passes 0."""
+    body = _method("_stac_verify_loops")
+    assert "_sres = (0.0 if sim3 else" in body
+    from loop_utils.loop_bridges import verify_loop
+    meas = {"ok": True, "s_ab": 1.10, "R_ab": np.eye(3).tolist(), "t_ab": [0, 0, 0],
+            "range_m": 2.7, "residual_m": 0.02, "holdout_residual_m": 0.079,
+            "holdout_ratio": 1.0, "n_corr": 50000}
+    import yaml
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from reconstruction.loops.config import fork_model_loops, load_loops_config
+    live = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
+    cfg = fork_model_loops(load_loops_config(live), str(Path(__file__).resolve().parents[1]))
+    with_term = verify_loop(meas, cfg)
+    without = verify_loop(meas, cfg, scale_disagreement_log=0.0)
+    assert without["checks"]["scale"]["sigma_scale_m"] == 0.0
+    assert with_term["checks"]["scale"]["sigma_scale_m"] > 0.2

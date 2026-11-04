@@ -2712,7 +2712,13 @@ _PLAN_INDEPENDENT_OUTPUT = {"chunk_plan.json", "da3_run", "da3_windows", "intake
                             "salad_revisit_reference.json", "vggt_omega_config.yaml", "maplong_run",
                             # written by THIS run before Omega (plan point 12): describes the run
                             # that is about to reconstruct, not the products being wiped
-                            "omega_plan_environment.json"}
+                            "omega_plan_environment.json",
+                            # THIS job's frozen configuration and environment (the pipeline
+                            # manager writes them at the job's start; every stage after this one
+                            # reads them). pccr 2026-11-04: the first run of a new plan (5 → 11
+                            # chunks) wiped them and the precision core stopped at F0
+                            # ("run_config.yaml does not exist")
+                            "run_config.yaml", "run_config.sha256", "run_environment.json"}
 _PLAN_INDEPENDENT_MAPLONG = {"loop_closures.txt", "salad_calibration.json", "sky_masks",
                              "frame_list.json", "vggt_omega_config.yaml"}
 

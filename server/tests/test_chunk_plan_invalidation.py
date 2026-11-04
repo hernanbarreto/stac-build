@@ -243,3 +243,16 @@ def test_the_fork_stops_on_a_chunk_of_another_plan_instead_of_reinferring_it_alo
     assert "class _StacPlanMismatch(RuntimeError)" in src
     assert "except _StacPlanMismatch:\n                raise" in src
     assert "predictions['_stac_range']" in src, "an explicit-layout chunk is stamped by its range"
+
+
+def test_a_new_plan_keeps_this_jobs_frozen_configuration(tmp_path):
+    """pccr 2026-11-04: the first run of a new plan (5 → 11 chunks) wiped output/run_config.yaml
+    — written by the pipeline manager at THIS job's start — and the precision core stopped at F0
+    ("run_config.yaml does not exist"). The job's own records are not products of the old plan."""
+    out = _session(tmp_path, _plan(PCCR))
+    for f in ("run_config.yaml", "run_config.sha256", "run_environment.json"):
+        (out / f).write_text("x")
+    assert _invalidate_on_new_chunk_plan(out, _plan(PCCR_OTHER), log=lambda m: None) is True
+    assert _wiped(out)
+    for f in ("run_config.yaml", "run_config.sha256", "run_environment.json"):
+        assert (out / f).exists(), f
