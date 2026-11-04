@@ -41,7 +41,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -105,6 +105,16 @@ H_CALIBRATION_LAYOUT: Dict[str, Any] = {
 # (loop_chunk_size 20) and ≥ the intra-chunk floor (8), and its half — one block, i.e. one seam —
 # is 12 frames, above the fork's 8-frame seam-alignment floor (sim3utils.py:958).
 MIN_CHUNK_FRAMES = 24
+
+# USER 2026-11-04 ("¿los chunks no eran de 32?" … "bueno, pero ese es el límite, con 50 % de solape
+# con corte por covisibilidad"): VGGT-SLAM's submaps — 32 new views + 32 shared with the previous
+# one, 64 views per Omega pass — are the limit of a chunk: every BLOCK holds at most half of it, so
+# a chunk (two consecutive blocks, the 50 % overlap) holds at most MAX_CHUNK_VIEWS views. A view is
+# a keyframe — parallax or rotation — or a turn frame Omega is inferred with (intake/turn_frames.py,
+# the context views): what one Omega pass sees. Where the cuts go is still the co-visibility plan's
+# choice. A stretch whose minimum block already holds more (a pan dense with rotation keyframes)
+# is admitted only at the minimum length, like an over-budget one, and flagged.
+MAX_CHUNK_VIEWS = 64
 
 COVIS_NAME = "covis.json"
 COVIS_VERSION = 4          # 4: measured on the PARALLAX keyframes only (plan_index; USER
@@ -368,13 +378,18 @@ class _Blocks:
     lower-median z̄ ≤ Z), ``tok`` (tok[b]: a cut at b, between b−1 and b, turns ≤ T), ``dthr`` (a
     block within budget holds ≤ dthr lengths). R[a] = the minimum cost from a to the end."""
 
-    def __init__(self, P: np.ndarray, min_chunk_frames: int, H: float):
+    def __init__(self, P: np.ndarray, min_chunk_frames: int, H: float,
+                 Wv: Optional[np.ndarray] = None, max_block_views: Optional[int] = None):
         self.P = P
         self.n = len(P) - 1
         self.half = H / 2.0
         self.L_min = min_chunk_frames // 2
         self.L_max = self.n
         self.L_ex = 2 * self.L_min - 1
+        # the view cap (MAX_CHUNK_VIEWS // 2 per block): Wv = prefix sums of each planning
+        # keyframe's views; None = no cap (every plan before 2026-11-04)
+        self.Wv = Wv
+        self.cap = max_block_views
         self.W1 = self.n + 1
         self.W2 = (self.n + 1) ** 2
         self._slack = 1e-9 * (1.0 + float(P[-1]))     # the search bound only; D decides exactly
@@ -384,6 +399,8 @@ class _Blocks:
         lo = a + self.L_min
         hi = min(a + self.L_max, n - 1 if a == 0 else n)
         bb = int(np.searchsorted(self.P, self.P[a] + self.half + self._slack, side="right")) - 1
+        if self.cap is not None:
+            bb = min(bb, int(np.searchsorted(self.Wv, self.Wv[a] + self.cap, side="right")) - 1)
         hi = min(hi, max(a + self.L_ex, bb))
         if lo > hi:
             return None
@@ -391,6 +408,8 @@ class _Blocks:
         D = self.P[bs] - self.P[a]
         L = bs - a
         over = D > self.half
+        if self.cap is not None:
+            over = over | ((self.Wv[bs] - self.Wv[a]) > self.cap)
         ok = ~over | (L <= self.L_ex)
         if dthr is not None:
             ok &= over | (D <= dthr)
@@ -449,9 +468,12 @@ def _single(n: int, D_total: float, why: str, flags: List[str], H: float) -> Dic
 
 
 def plan_detail(delta, zbar, theta, min_chunk_frames: int = MIN_CHUNK_FRAMES,
-                H: float = H_LENGTHS_PER_CHUNK) -> Dict[str, Any]:
+                H: float = H_LENGTHS_PER_CHUNK, max_chunk_views: Optional[int] = None,
+                views=None) -> Dict[str, Any]:
     """The plan with its evidence: ``ranges`` ([start, end) keyframe indices), the blocks, chunks,
-    cuts, flags and the optimum reached on each criterion. See ``plan``."""
+    cuts, flags and the optimum reached on each criterion. See ``plan``. ``max_chunk_views``: the
+    most views a chunk may hold (MAX_CHUNK_VIEWS; None = no cap); ``views``: each keyframe's views
+    (itself, the rotation keyframes it stands for, the turn frames after it; None = 1 each)."""
     d = np.asarray(delta, dtype=np.float64).ravel()
     z = np.asarray(zbar, dtype=np.float64).ravel()
     t = np.asarray(theta, dtype=np.float64).ravel()
@@ -469,18 +491,29 @@ def plan_detail(delta, zbar, theta, min_chunk_frames: int = MIN_CHUNK_FRAMES,
         raise PlanError("a cut angle is not a finite angle ≥ 0")
     if mcf < 2 or not (np.isfinite(H) and H > 0):
         raise PlanError(f"min_chunk_frames {mcf} / H {H} cannot plan")
+    v = np.ones(n, dtype=np.int64) if views is None else np.asarray(views, dtype=np.int64).ravel()
+    if len(v) != n or (v < 1).any():
+        raise PlanError(f"{n} keyframes need {n} view counts ≥ 1 (got {len(v)})")
+    cap = None if max_chunk_views is None else int(max_chunk_views)
+    if cap is not None and cap < 2:
+        raise PlanError(f"max_chunk_views {cap} cannot plan")
+    Wv = np.concatenate(([0], np.cumsum(v)))
     P = np.concatenate(([0.0], np.cumsum(d)))
     D_total = float(P[n])
     L_min = mcf // 2
-    head = {"n": n, "H": H, "min_chunk_frames": mcf, "block_min": L_min, "D_total": D_total}
-    if D_total <= H:
-        return {**head, **_single(n, D_total, f"D_total {D_total:.2f} ≤ H {H:g}", [], H)}
+    head = {"n": n, "H": H, "min_chunk_frames": mcf, "block_min": L_min, "D_total": D_total,
+            "max_chunk_views": cap, "views_total": int(Wv[n])}
+    if D_total <= H and (cap is None or int(Wv[n]) <= cap):
+        why = f"D_total {D_total:.2f} ≤ H {H:g}" + (f", {int(Wv[n])} views ≤ {cap}"
+                                                     if cap is not None else "")
+        return {**head, **_single(n, D_total, why, [], H)}
     if n < 2 * L_min:
         return {**head, **_single(n, D_total, f"{n} keyframes are fewer than the shortest "
                                               f"chunk ({2 * L_min}): one pass, over budget "
                                               f"(D_total {D_total:.2f} > H {H:g})",
                                   ["too_short_to_chunk"], H)}
-    bl = _Blocks(P, mcf, H)
+    bl = _Blocks(P, mcf, H, Wv=Wv if cap is not None else None,
+                 max_block_views=(cap // 2 if cap is not None else None))
     # (a) fewest blocks (after the over-budget terms, which are 0 on any walk within budget)
     C = int(bl.solve()[0])
     if C >= _INF:
@@ -532,13 +565,16 @@ def plan_detail(delta, zbar, theta, min_chunk_frames: int = MIN_CHUNK_FRAMES,
         flag = None
         if Db > bl.half:
             flag = "over_budget_at_minimum" if b - a == L_min else "over_budget_partition"
-        blocks.append({"range": [a, b], "frames": b - a, "D": Db, "z_med_m": _lower_median(z[a:b]),
-                       "flag": flag})
+        elif cap is not None and int(Wv[b] - Wv[a]) > cap // 2:
+            flag = "over_view_cap_at_minimum" if b - a == L_min else "over_view_cap_partition"
+        blocks.append({"range": [a, b], "frames": b - a, "views": int(Wv[b] - Wv[a]), "D": Db,
+                       "z_med_m": _lower_median(z[a:b]), "flag": flag})
     ranges = [(bnd[k], bnd[k + 2]) for k in range(m - 1)]
     chunks = []
     for k, (s, e) in enumerate(ranges):
         seam = blocks[k + 1] if k + 1 < m - 1 else None
-        chunks.append({"range": [s, e], "frames": e - s, "D": float(P[e] - P[s]),
+        chunks.append({"range": [s, e], "frames": e - s, "views": int(Wv[e] - Wv[s]),
+                       "D": float(P[e] - P[s]),
                        "seam_after": ({"range": seam["range"], "frames": seam["frames"],
                                        "z_med_m": seam["z_med_m"]} if seam else None),
                        "flags": [x["flag"] for x in (blocks[k], blocks[k + 1]) if x["flag"]]})
@@ -553,7 +589,8 @@ def plan_detail(delta, zbar, theta, min_chunk_frames: int = MIN_CHUNK_FRAMES,
                "block_budget_margin": (bl.half - obj["block_budget"]
                                        if obj["block_budget"] is not None else None)}
     return {**head, "single_pass": len(ranges) == 1,
-            "why": f"D_total {D_total:.2f} > H {H:g}",
+            "why": (f"D_total {D_total:.2f} > H {H:g}" if D_total > H else
+                    f"{int(Wv[n])} views > {cap} per chunk"),
             "ranges": ranges, "blocks": blocks, "chunks": chunks, "cuts": cuts, "flags": flags,
             "objective": obj, "margins": margins}
 
@@ -574,12 +611,16 @@ def plan(delta, zbar, theta, min_chunk_frames: int = MIN_CHUNK_FRAMES,
     return [(int(a), int(b)) for a, b in plan_detail(delta, zbar, theta, min_chunk_frames, H)["ranges"]]
 
 
-def inputs_sha256(delta, zbar, theta, min_chunk_frames: int, H: float) -> str:
+def inputs_sha256(delta, zbar, theta, min_chunk_frames: int, H: float,
+                  max_chunk_views: Optional[int] = None, views=None) -> str:
     """sha256 of exactly what the planner reads — two equal hashes plan bit-identically."""
     h = hashlib.sha256()
     for x in (delta, zbar, theta):
         h.update(np.ascontiguousarray(np.asarray(x, dtype=np.float64), dtype="<f8").tobytes())
     h.update(json.dumps([len(delta), int(min_chunk_frames), float(H)]).encode())
+    if max_chunk_views is not None or views is not None:
+        h.update(json.dumps([max_chunk_views, None if views is None
+                             else [int(x) for x in np.asarray(views).ravel()]]).encode())
     return h.hexdigest()
 
 
@@ -742,11 +783,41 @@ FROZEN_NAME = "chunk_plan_frozen.json"
 FROZEN_VERSION = 1
 
 
-def _planner_constants() -> Dict[str, Any]:
-    """What a plan is a function of beyond the measurement: the method's constants."""
+def _turn_files_sha256(turn_files: Optional[Sequence[str]]) -> Optional[str]:
+    if not turn_files:
+        return None
+    return hashlib.sha256(json.dumps(sorted(str(f) for f in turn_files)).encode()).hexdigest()
+
+
+def _planner_constants(turn_files: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+    """What a plan is a function of beyond the measurement: the method's constants and the turn
+    frames whose views it counts (USER 2026-11-04)."""
     return {"H": H_LENGTHS_PER_CHUNK, "min_chunk_frames": MIN_CHUNK_FRAMES, "tau": TAU,
             "tol_quantile": TOL_QUANTILE, "samples_per_frame": SAMPLES,
-            "scan_horizon": SCAN_HORIZON}
+            "scan_horizon": SCAN_HORIZON, "max_chunk_views": MAX_CHUNK_VIEWS,
+            "turn_frames_sha256": _turn_files_sha256(turn_files)}
+
+
+def planning_views(frames: Sequence[int], plan_index: Sequence[int],
+                   turn_files: Optional[Sequence[str]] = None) -> np.ndarray:
+    """Each PLANNING keyframe's views (the view cap's unit, MAX_CHUNK_VIEWS): itself, the
+    rotation keyframes up to the next planning keyframe (they fall inside the chunk that holds
+    it), and every turn frame after each of those keyframes up to the next keyframe (the context
+    views Omega infers with them). A chunk then holds at most the views its blocks count — the
+    turn frames after its very last keyframe are counted though Omega leaves them out."""
+    fr = [int(f) for f in frames]
+    nxt = fr[1:] + [None]
+    turns = sorted(int(Path(str(t)).stem) for t in (turn_files or []))
+    per_full = np.ones(len(fr), dtype=np.int64)
+    if turns:
+        tt = np.asarray(turns)
+        for i, (f, g) in enumerate(zip(fr, nxt)):
+            if g is not None:
+                per_full[i] += int(((tt > f) & (tt < g)).sum())
+    pi = [int(i) for i in plan_index]
+    full_of = pi + [len(fr)]
+    return np.asarray([int(per_full[full_of[p]:full_of[p + 1]].sum()) for p in range(len(pi))],
+                      dtype=np.int64)
 
 
 def _walk_keyframes(scan_dir: Path) -> Optional[List[int]]:
@@ -803,14 +874,16 @@ def planning_indices(scan_dir: Path, frames: List[int]) -> List[int]:
     return [i for i, f in enumerate(frames) if kinds.get(int(f), "quantum") != "rotation"]
 
 
-def _report_of(scan_dir: Path, doc: Dict[str, Any], source: str) -> Dict[str, Any]:
+def _report_of(scan_dir: Path, doc: Dict[str, Any], source: str,
+               turn_files: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     delta = np.asarray(doc["delta"], dtype=np.float64)
     zbar = np.asarray(doc["zbar_m"], dtype=np.float64)
     theta = np.asarray(doc["theta_deg"], dtype=np.float64)
-    det = plan_detail(delta, zbar, theta)
-    chain = doc["chainage_m"]
     frames = doc["frames"]
     n_full = len(frames)
+    views = planning_views(frames, doc.get("plan_index", list(range(n_full))), turn_files)
+    det = plan_detail(delta, zbar, theta, max_chunk_views=MAX_CHUNK_VIEWS, views=views)
+    chain = doc["chainage_m"]
     # the plan is measured on the planning subsequence (the parallax keyframes); every range it
     # reports is mapped to FULL keyframe indices — a boundary at planning keyframe p becomes the
     # full index of p, the end of the walk stays n — so the rotation keyframes between two
@@ -849,7 +922,8 @@ def _report_of(scan_dir: Path, doc: Dict[str, Any], source: str) -> Dict[str, An
             "tol_rel": doc["tol_rel"], "walk_m": float(chain[-1]), **det, "ranges": ranges,
             "input_stamp": doc["stamp"], "measurement": source,
             "inputs_sha256": inputs_sha256(delta, zbar, theta, MIN_CHUNK_FRAMES,
-                                           H_LENGTHS_PER_CHUNK),
+                                           H_LENGTHS_PER_CHUNK, MAX_CHUNK_VIEWS, views),
+            "turn_frames_sha256": _turn_files_sha256(turn_files),
             # how close every ℓ sat to flipping (point 15; None on a measurement older than it)
             "tau_margin_min": doc.get("tau_margin_min"),
             # the windows this measurement was read from (a measurement persisted before the
@@ -861,7 +935,8 @@ def _report_of(scan_dir: Path, doc: Dict[str, Any], source: str) -> Dict[str, An
 
 
 def plan_session(scan_dir: Path, *, cache_path: Optional[Path] = None,
-                 log: Callable = print) -> Dict[str, Any]:
+                 log: Callable = print,
+                 turn_files: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     """The session's chunk plan: {"ranges": [(start, end), ...], "report": {...}}. The report
     carries n, D_total, H, tol_rel, every chunk's D / frames / metres / seam depth, the cuts, the
     flags, every bar's margin, the input stamp and the sha256 of exactly what the planner read.
@@ -874,7 +949,7 @@ def plan_session(scan_dir: Path, *, cache_path: Optional[Path] = None,
     plan it would have given). Another keyframe set plans again and freezes that plan. With the
     keyframes known from walk.json, the frozen plan needs no measurement at all."""
     scan_dir = Path(scan_dir)
-    planner = _planner_constants()
+    planner = _planner_constants(turn_files)
     frozen = _load_frozen(scan_dir)
     fpath = scan_dir / "intake" / FROZEN_NAME
 
@@ -886,7 +961,7 @@ def plan_session(scan_dir: Path, *, cache_path: Optional[Path] = None,
         ranges = [(int(a), int(b)) for a, b in frozen["ranges"]]
         rep = dict(frozen["report"], ranges=ranges, measurement=source, plan_frozen=str(fpath))
         if doc_now is not None:
-            now = _report_of(scan_dir, doc_now, "reused")
+            now = _report_of(scan_dir, doc_now, "reused", turn_files)
             # the informational fields follow the CURRENT measurement (the window layout it was
             # read from, the τ margins) — recorded, never acted on; the ranges are the frozen ones
             for k in ("window_layout", "tau_margin_min"):
@@ -908,7 +983,7 @@ def plan_session(scan_dir: Path, *, cache_path: Optional[Path] = None,
     doc, source = covis_inputs(scan_dir, cache_path=cache_path, log=log)
     if _frozen_for(doc["frames"]):
         return _from_frozen(doc, "frozen")
-    report = _report_of(scan_dir, doc, source)
+    report = _report_of(scan_dir, doc, source, turn_files)
     ranges = [(int(a), int(b)) for a, b in report["ranges"]]
     if frozen is not None:
         log(f"{LOG_TAG} {fpath.name} froze another keyframe set or planner — this one is planned "

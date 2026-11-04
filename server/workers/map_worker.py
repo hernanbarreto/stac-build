@@ -2085,6 +2085,15 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         cfg_v["Model"].pop("overlap", None)
         cfg_v["Model"]["loop_enable"] = True
         cfg_v["Model"]["using_sim3"] = False       # SE(3): scale locked by the anchors
+        # USER 2026-11-04 ("ok, Sim3"): the chunks are pieces of ONE Sim(3) graph — seams with
+        # their scale, the SALAD closures, DA3 as a weak scale prior (the fork's
+        # loop_utils/chunk_graph.py) — instead of the scale ladder + SE(3) seams + keyframe graph
+        _cg = str(_va_cfg.get("chunk_graph", "se3"))
+        if _cg not in ("sim3", "se3"):
+            raise RuntimeError(f"reconstruction.vggtomega.chunk_graph must be 'sim3' or 'se3', "
+                               f"got {_cg!r}")
+        if _cg == "sim3":
+            cfg_v["Model"]["chunk_graph"] = {"mode": "sim3"}
         # USER ORDER 2026-09-04 ("deja omegalong como corresponde, sin
         # agregados adicionales de ajustes; la escala de DA3 queda; si se
         # detecta zoom se corrige la escala"): every adjustment stage is now
@@ -2288,10 +2297,21 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             "and it is measured on the I3 DA3 windows, which this run did not produce — I3 runs "
             "with reconstruction.precision.enabled and reconstruction.vggtomega.scale_align; "
             "there is no other chunk layout to fall back on")
-    from reconstruction.chunk_covis import CovisError, format_plan, plan_session
+    from reconstruction.chunk_covis import (MAX_CHUNK_VIEWS, CovisError, format_plan,
+                                            plan_session)
+    # ── TURN FRAMES (USER 2026-11-04): Omega's CONTEXT views through a turn ──
+    # The keyframes stay the only frames every stage after Omega knows (frame_list, the poses,
+    # the records, F0-F6, the cloud). The turn frames between two consecutive keyframes
+    # (intake/turn_frames.py, from I1's own rotation readings — nothing is measured again) enter
+    # the inference of every chunk that holds both, and the fork keeps only the keyframes' slots
+    # (vendor/VGGT-Long/loop_utils/context_views.py). They are views of the pass: the plan counts
+    # them against MAX_CHUNK_VIEWS and the card holds them with the chunk.
+    from intake.turn_frames import chunk_context, load_turn_frames_config, session_turn_frames
+    _turn = session_turn_frames(output_dir.parent, load_turn_frames_config(config),
+                                log=pipe.send_log)
     pipe.send_progress(8, "Chunk plan: co-visibility over the I3 windows...", stage="reconstruction")
     try:
-        _cplan = plan_session(output_dir.parent, log=pipe.send_log)
+        _cplan = plan_session(output_dir.parent, log=pipe.send_log, turn_files=_turn["files"])
     except CovisError as _ce:
         if not _walk_reused:
             raise
@@ -2305,7 +2325,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         run_da3_windows(output_dir.parent, _pc.gauge, sys.executable, log=pipe.send_log,
                         check_cancel=pipe.check_cancel, frames_dir=frames_dir, files=_sel_files,
                         run_cfg=config)
-        _cplan = plan_session(output_dir.parent, log=pipe.send_log)
+        _cplan = plan_session(output_dir.parent, log=pipe.send_log, turn_files=_turn["files"])
     _ranges = [(int(a), int(b)) for a, b in _cplan["ranges"]]
     _covis_rep = _cplan["report"]
     for _line in format_plan(_covis_rep):
@@ -2315,17 +2335,18 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                            f"selected {_n_selected} — the I3 walk is not of this keyframe set")
     _walk0 = float(_walk_doc["walk_length_m"])
 
-    # ── TURN FRAMES (USER 2026-11-04): Omega's CONTEXT views through a turn ──
-    # The keyframes stay the only frames every stage after Omega knows (frame_list, the poses,
-    # the records, F0-F6, the cloud). The turn frames between two consecutive keyframes
-    # (intake/turn_frames.py, from I1's own rotation readings — nothing is measured again) enter
-    # the inference of every chunk that holds both, and the fork keeps only the keyframes' slots
-    # (vendor/VGGT-Long/loop_utils/context_views.py). They are on the card with the chunk: the
-    # resolution below is sized on the keyframes AND the context views of the largest chunk.
-    from intake.turn_frames import chunk_context, load_turn_frames_config, session_turn_frames
-    _turn = session_turn_frames(output_dir.parent, load_turn_frames_config(config),
-                                log=pipe.send_log)
-    _ctx = chunk_context(_ranges, _sel_files, _turn["files"])
+    # the chunks' context views: the turn frames inside each chunk; a chunk the plan could not
+    # keep within MAX_CHUNK_VIEWS (a minimum block dense with rotation keyframes — flagged by the
+    # plan) keeps only as many turn frames as fit, evenly spread, declared — the user's limit
+    # (USER 2026-11-04) before the context views
+    from intake.turn_frames import cap_context
+    _ctx, _ctx_cut = cap_context(chunk_context(_ranges, _sel_files, _turn["files"]), _ranges,
+                                 MAX_CHUNK_VIEWS)
+    for _k, _dropped in _ctx_cut.items():
+        pipe.send_log(f"[turn-frames] chunk {_k}: {_dropped} turn frame(s) left out — its "
+                      f"{_ranges[_k][1] - _ranges[_k][0]} keyframes and the rest stay within "
+                      f"{MAX_CHUNK_VIEWS} views (or are already over it with no turn frame)",
+                      level="warning")
     vggt_config["Model"]["chunk_context"] = _ctx
     if any(_ctx):
         pipe.send_log(f"[turn-frames] context views per chunk {[len(c) for c in _ctx]} over the "

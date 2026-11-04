@@ -1589,6 +1589,19 @@ reconstruction:
       enabled: true
       per_rotation_quantum: 3           # the divisor d (3 = the ~3.5° step proposed and taken
                                         # 2026-11-04; VGGT-SLAM's views were ~1° apart)
+    chunk_graph: sim3                   # USER 2026-11-04 ("ok, Sim3 … lo tenés que implementar
+                                        # correctamente"): how the chunks of a chunked run are
+                                        # joined. sim3 = every chunk one piece of ONE Sim(3)
+                                        # graph (the fork's loop_utils/chunk_graph.py): the seams'
+                                        # exact Sim(3) fit (scale included, σ = their median
+                                        # residual), the verified SALAD closures (σ = their
+                                        # held-out residual, applied when the leave-one-out judge
+                                        # says they improve), DA3 per chunk as a WEAK scale prior.
+                                        # se3 = the scale ladder + SE(3) seams + the keyframe
+                                        # SE(3) graph (every run before 2026-11-04). The chunks
+                                        # themselves: at most 64 views per Omega pass, 50 % overlap,
+                                        # cut by co-visibility (reconstruction/chunk_covis.py
+                                        # MAX_CHUNK_VIEWS — VGGT-SLAM's 32 new + 32 shared).
     scale_align: true                   # metric: DA3 anchor + scale_align (global similarity:
                                         # scales cloud + poses by s = median DA3/Omega depth).
                                         # false → up-to-scale (raw Omega isolation test).
