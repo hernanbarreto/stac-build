@@ -53,7 +53,7 @@ import sys
 import time
 import types
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -447,7 +447,8 @@ def labels_on_undistorted(labels: Callable, maps) -> Callable:
 def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict[int, np.ndarray],
                       passed: Dict[int, np.ndarray], K: np.ndarray, c2w: Dict[int, np.ndarray], labels,
                       neighbors, tau_quantile: float, repair_min_views: int, log: Callable = print,
-                      bars_out: Optional[dict] = None):
+                      bars_out: Optional[dict] = None,
+                      extra: Optional[Dict[int, List[int]]] = None):
     """pccr EPOCH 8 (USER 2026-10-01: "es la mejor, incorporar al pipeline"), on the bent depth
     `dep` (every `valid` pixel; `passed` = above the ONE confidence floor):
      1. tau = the `tau_quantile` percentile of the neighbour disagreement on INTERIOR pixels;
@@ -459,7 +460,9 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
         agree, else it leaves; a below-floor EDGE pixel enters when agree ≥ 1 and contra ≤ agree.
     Returns ({frame: (depth map, agree count map)}, tau, totals). ``bars_out`` (a dict) receives the
     vote's bar τ and every keyframe's pixel margins to it (point 53) — kept out of ``totals``, which
-    stays numeric for its readers."""
+    stays numeric for its readers. ``extra``: {keyframe: [witness frames]} — the turn frames that
+    vote on that keyframe after its neighbours (USER 2026-11-04; their maps and poses are in
+    ``dep`` / ``passed`` / ``c2w``); τ is measured on the keyframes alone, as before."""
     import torch
     from precision import corrected_cloud as CC
     from precision import f6_torch as FT
@@ -474,14 +477,16 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
         if labels is not None:
             d, mixed, sn = CC.snap_mixed(dep[f], valid[f], labels(i), tau)
             dep[f] = d.astype(np.float32); n_mixed += int(mixed.sum()); n_snap += int(sn.sum())
-    w2c = {f: np.linalg.inv(c2w[f]) for f in frames}
+    w2c = {f: np.linalg.inv(c2w[f]) for f in c2w}
+    extra = extra or {}
     final, tot = {}, {}
     tau_margins: Dict[int, Optional[dict]] = {}
     # USER 2026-10-08: the vote on the card — dense [H, W] tensors per keyframe (f6_torch), the
     # decisions below are the same rules on the candidate pixels
     for i, f in enumerate(frames):
         cand = valid[f] & (passed[f] | edge[f])           # below-floor interior pixels stay out
-        v = FT.two_sided_vote(i, frames, dep, passed, cand, K, c2w, w2c, neighbors, tau)
+        v = FT.two_sided_vote(i, frames, dep, passed, cand, K, c2w, w2c, neighbors, tau,
+                              extra=extra.get(f, ()))
         candt = FT._t(cand, torch.bool)
         agree, contra, z, s = v["agree"], v["contra"], v["z"], v["splats"]
         # point 53: every judged pixel's margin to τ — the nearest neighbour surface on its ray
@@ -532,6 +537,86 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
         f"contradicted, {tot['repaired'] / nv * 100:.1f} % repaired, {tot['admitted'] / nv * 100:.1f} % admitted below "
         f"the floor at edges; coverage {tot['out'] / float(len(frames) * H * W) * 100:.1f} % of all pixels")
     return final, tau, tot
+
+
+def load_turn_witnesses(out: Path, frames: List[int], chunk: Dict[int, int], thr: Dict[int, float],
+                        zmed: Dict[int, float], coefs: Dict[int, np.ndarray], c2w: Dict[int, np.ndarray],
+                        inp, carry: bool, rec_hw, Dm: np.ndarray, H: int, W: int, neighbors,
+                        log: Callable = print):
+    """The TURN FRAMES as witnesses of the vote (USER 2026-11-04, "hacé 1 y 2"): the fork kept every
+    context view's Omega depth, confidence and pose relative to the keyframe before it (its anchor,
+    output/maplong_run/context_views, vendor loop_utils/context_views.context_records). Each one
+    takes its anchor's chain: the depth into the record's units by the ratio of the two medians in
+    that pass (Omega's chunk units → the record's), the anchor's BEND (its coefficients at the
+    view's pixels), the anchor's confidence floor (its chunk's), and the anchor's F5 pose composed
+    with the relative pose (its translation in the record's units times the bend's scale c0). It
+    votes on the keyframes whose neighbour window holds its anchor — more views agreeing on a turn
+    keep and repair more of its pixels; the points stay the keyframes' (their birth pixels, what
+    the masks and the corrections read). A view of another fork run, an anchor that is not a
+    keyframe of this run, another record grid: ignored, counted. Returns (dep, valid, passed, c2w,
+    {keyframe: [witnesses]}, report)."""
+    import json as _json
+    from precision import corrected_cloud as CC
+    from precision.epoch0_cloud import SKY_CONF
+    d = Path(out) / "maplong_run" / "context_views"
+    rep: Dict[str, Any] = {"dir": "maplong_run/context_views", "used": 0, "ignored": {}}
+    empty = ({}, {}, {}, {}, {}, rep)
+    if not d.is_dir():
+        rep["why_none"] = "no context views (turn frames off, or a run before them)"
+        return empty
+    fsp = Path(out) / "maplong_run" / "fork_stamp.json"
+    stamp = _json.loads(fsp.read_text()).get("sha256") if fsp.exists() else None
+    idx = {f: i for i, f in enumerate(frames)}
+
+    def _ign(why):
+        rep["ignored"][why] = rep["ignored"].get(why, 0) + 1
+    chosen: Dict[int, Tuple[Path, int]] = {}
+    for p in sorted(d.glob("c*_*.npz")):
+        with np.load(p) as z:
+            ft, a, ck, st = int(z["frame"]), int(z["anchor_frame"]), int(z["chunk"]), str(z["fork_stamp"])
+        if stamp is None or st != stamp:
+            _ign("another fork run's"); continue
+        if a not in idx:
+            _ign("anchor not a keyframe of this run"); continue
+        if ft in idx:
+            _ign("a keyframe"); continue
+        prev = chosen.get(ft)
+        if prev is None or (ck == chunk.get(a) and prev[1] != chunk.get(a)):
+            chosen[ft] = (p, ck)                         # the anchor's own chunk first
+    dep, valid, passed, cw, extra = {}, {}, {}, {}, {}
+    lo, hi = min(int(x) for x in neighbors), max(int(x) for x in neighbors)
+    for ft, (p, ck) in sorted(chosen.items()):
+        with np.load(p) as z:
+            raw = np.asarray(z["depth"], np.float32); cf = np.asarray(z["conf"], np.float32)
+            rel = np.asarray(z["rel_pose"], np.float64); a = int(z["anchor_frame"])
+            am = float(z["anchor_depth_median"])
+        if tuple(raw.shape) != tuple(rec_hw):
+            _ign("another record grid"); continue
+        if ck not in thr:
+            _ign("a chunk without a confidence floor"); continue
+        if not (am > 0 and zmed.get(a, 0) > 0):
+            _ign("no anchor depth to carry the scale"); continue
+        ia = idx[a]
+        factor = float(zmed[a]) / am
+        dt = raw * factor
+        if carry:
+            dt = CC.record_on_native(dt, inp.cam, inp.maps)
+            cf = CC.record_on_native(cf, inp.cam, inp.maps)
+        v = np.isfinite(dt) & (dt > 0) & np.isfinite(cf) & (cf > SKY_CONF)
+        bent = (dt * (Dm @ coefs[ia]).reshape(H, W)).astype(np.float32)
+        dep[ft] = np.where(v, bent, 0).astype(np.float32)
+        valid[ft] = v
+        passed[ft] = v & (cf >= thr[ck])
+        T = rel.copy()
+        T[:3, 3] *= factor * float(coefs[ia][0])
+        cw[ft] = np.asarray(c2w[a], np.float64) @ T
+        for i in range(max(0, ia + lo), min(len(frames), ia + hi + 1)):
+            extra.setdefault(frames[i], []).append(ft)
+        rep["used"] += 1
+    rep["keyframes_with_witnesses"] = len(extra)
+    log(f"{LOG_TAG} turn witnesses: {rep['used']} turn frame(s) vote on {len(extra)} keyframe(s)"
+        + (f"; ignored {rep['ignored']}" if rep["ignored"] else ""))
+    return dep, valid, passed, cw, extra, rep
 
 
 def camera_travels(tmp: Path, params, n_kf: int, log: Callable = print) -> Path:
@@ -920,9 +1005,12 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     uu, vv = np.meshgrid(np.arange(W), np.arange(H))
     Dm = design(uu.ravel(), vv.ravel(), W, H)
     dep, valid, passed, weight = {}, {}, {}, {}
+    zmed: Dict[int, float] = {}
     md = pcfg.mono_detail
     for i, f in enumerate(frames):
         valid[f] = np.isfinite(zo[f]) & (zo[f] > 0) & np.isfinite(conf[f]) & (conf[f] > SKY_CONF)
+        if valid[f].any():
+            zmed[f] = float(np.median(zo[f][valid[f]]))   # the turn witnesses' scale (record units)
         passed[f] = valid[f] & (conf[f] >= thr[chunk[f]])
         # the bent map in float32 first, then the mask — epoch 8's arithmetic, bit for bit
         bent = (zo[f] * (Dm @ final_coefs[i]).reshape(H, W)).astype(np.float32)
@@ -937,15 +1025,19 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     dep, valid, passed, src_maps, md_rep = apply_mono_detail(
         pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out, log, _p)
 
-    # 4. the edge-keeping vote (pccr epoch 8)
+    # 4. the edge-keeping vote (pccr epoch 8), with the turn frames as witnesses (USER 2026-11-04)
+    t_dep, t_valid, t_passed, t_c2w, t_extra, t_rep = load_turn_witnesses(
+        out, frames, chunk, thr, zmed, final_coefs, c2w, inp, carry, rec_hw, Dm, H, W, bc.neighbors, log)
+    dep.update(t_dep); valid.update(t_valid); passed.update(t_passed)
+    c2w_vote = dict(c2w); c2w_vote.update(t_c2w)
     _p(50, "edge-keeping multi-view vote")
     labels = mask_labels(out, H, W, log)
     if labels is not None and lens:
         labels = labels_on_undistorted(labels, inp.maps)       # the masks live on the original frame
     vote_bars: dict = {}
-    voted, tau, vst = edge_keeping_vote(frames, dep, valid, passed, K, c2w, labels,
+    voted, tau, vst = edge_keeping_vote(frames, dep, valid, passed, K, c2w_vote, labels,
                                         bc.neighbors, bc.tau_quantile, int(pcfg.cloud.repair_min_views), log,
-                                        bars_out=vote_bars)
+                                        bars_out=vote_bars, extra=t_extra)
     cover = vst["out"] / float(N * H * W)
     _p(65, f"vote done: coverage {cover * 100:.1f} %")
     del dep, valid, passed
@@ -953,7 +1045,7 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
                                  c2w=c2w, params=params, chunk=chunk, voted=voted, tau=tau, vst=vst, cover=cover,
                                  wb=wb, score=score, score_B=score_B, heldout_m=heldout_m, window_rule=window_rule,
                                  coefs=final_coefs,
-                                 vote_bars=vote_bars,
+                                 vote_bars=vote_bars, turn_witnesses=t_rep,
                                  provenance=provenance, status_counts=status_counts, c0=c0, obs=obs,
                                  dropped_tracks=dropped_tracks, error_factor=fac,
                                  floor={str(k): {"threshold": thr[k]} for k in sorted(thr)}, floor_norm=floor_norm,
@@ -1040,6 +1132,7 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
                                          "bend": [float(coefs[i][1]), float(coefs[i][2])],
                                          **C.provenance[i]}
                                 for i, f in enumerate(frames)},
+                  "turn_witnesses": getattr(C, "turn_witnesses", None),
                   "vote": {"tau": tau, "coverage": cover, "bars": C.vote_bars,
                            **{k: (float(v) / max(vst["valid"], 1) if k not in ("tau", "valid") else v)
                               for k, v in vst.items() if k != "tau"}},

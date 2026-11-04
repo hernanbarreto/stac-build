@@ -218,7 +218,8 @@ def test_the_forks_production_call_passes_the_bar_and_loop_edges_json_records_it
     init = src[src.index("    def __init__(self"):src.index("    def get_loop_pairs(self):")]
     assert ("self._stac_salad_bar = salad_applied_threshold(None, use_dbow=self.useDBoW,\n"
             "                                                       loop_enable=self.loop_enable)") in init
-    plan = src[src.index("    def _stac_plan_bridges(self"):src.index("    def _stac_extra_frames(self")]
+    # (2026-11-04: _stac_geometric_revisits follows it — its own gate call carries no SALAD bar)
+    plan = src[src.index("    def _stac_plan_bridges(self"):src.index("    def _stac_geometric_revisits(self")]
     assert plan.count("gate_mod.gate_frame_pair(") == 1 and "salad=salad_in" in plan
     assert "salad_in, salad_why = salad_gate_input(cand, salad_bar)" in plan
     assert "salad_bar = self._stac_salad_bar_record()" in plan

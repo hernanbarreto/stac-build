@@ -566,10 +566,12 @@ def snap_mixed(depth: torch.Tensor, valid: torch.Tensor, labels: torch.Tensor, t
 
 def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge: Dict[int, np.ndarray],
                    cand, K: np.ndarray, c2w: Dict[int, np.ndarray], w2c: Dict[int, np.ndarray],
-                   neighbors, tau: float) -> dict:
+                   neighbors, tau: float, extra=()) -> dict:
     """corrected_cloud.two_sided_vote (see its docstring) on DENSE maps: every entry is an [H, W]
     tensor over the candidate pixels (``cand``), ``splats`` [V, H, W] (NaN where nothing landed;
-    [0, H, W] without a neighbour). The compact (rr, cc) view is corrected_cloud's wrapper."""
+    [0, H, W] without a neighbour). The compact (rr, cc) view is corrected_cloud's wrapper.
+    ``extra``: more witness frames (keys of ``depth`` / ``judge`` / ``c2w`` / ``w2c``) voting after
+    the neighbours — the turn frames near this keyframe (USER 2026-11-04); none = as before."""
     f = order[i]
     H, W = depth[f].shape
     K = np.asarray(K, np.float64)
@@ -584,11 +586,9 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
     contra = torch.zeros_like(agree); contra_fwd = torch.zeros_like(agree)
     cands, splats = [z], []
     Xw = C + z[..., None] * ray
-    for d in neighbors:
-        j = i + int(d)
-        if not 0 <= j < len(order):
-            continue
-        g = order[j]
+    witnesses = [order[i + int(d)] for d in neighbors if 0 <= i + int(d) < len(order)]
+    witnesses += [int(g) for g in extra]
+    for g in witnesses:
         T = _t(w2c[g])
         a = T[2, :3] @ C + T[2, 3]
         b = ray @ T[2, :3]

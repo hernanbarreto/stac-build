@@ -288,3 +288,81 @@ def test_a_sim3_closure_carries_no_scale_term_in_its_sigma():
     without = verify_loop(meas, cfg, scale_disagreement_log=0.0)
     assert without["checks"]["scale"]["sigma_scale_m"] == 0.0
     assert with_term["checks"]["scale"]["sigma_scale_m"] > 0.2
+
+
+# ── 2026-11-04: closures by geometry and the chain-consistency test ──
+
+def test_a_closure_metres_off_the_chain_is_left_out_and_a_drifted_true_one_kept():
+    rng = np.random.default_rng(11)
+    n = 9
+    C = _truth(n, rng)
+    seams = [_edge(k + 1, k, C, sigma=0.08, lever=2.5,
+                   bias=(1.03, np.eye(3), np.zeros(3))) for k in range(n - 1)]
+    priors = {k: {"log_s": 0.0, "sigma": 0.08 / np.sqrt(3)} for k in range(n)}
+    true_ = _edge(8, 0, C, sigma=0.08, lever=4.0, bridge=0)            # the drift the seams chain
+    false_ = _edge(7, 2, C, sigma=0.17, lever=4.0, bridge=1,
+                   bias=(1.0, G._rodrigues(np.array([0, 0.6, 0])), np.array([3.0, 0.0, 1.5])))
+    kept, rejected = G.consistent_with_chain(n, seams, [true_, false_], priors, 0.95)
+    assert [e["bridge"] for e in kept] == [0] and [e["bridge"] for e in rejected] == [1]
+    assert rejected[0]["chain_mahalanobis2"] > rejected[0]["chi2_bar"]
+    assert kept[0]["chain_error_m"] > 0.1                   # drifted, still within the chain's error
+    assert G.consistent_with_chain(n, seams, [], priors, 0.95) == ([], [])
+
+
+def _corridor_out_and_back(n_half=40, step=0.25):
+    """A corridor walked along +x, then walked back along −x a metre to the side: keyframes
+    0..n_half−1 look +x, n_half..2n_half−1 look −x."""
+    from loop_utils.revisits import propose, quick_visibility  # noqa: F401
+    poses, pts = [], []
+    rng = np.random.default_rng(0)
+    for k in range(2 * n_half):
+        back = k >= n_half
+        x = (k if not back else 2 * n_half - 1 - k) * step
+        y = 1.0 if back else 0.0
+        fwd = np.array([-1.0, 0, 0]) if back else np.array([1.0, 0, 0])
+        down = np.array([0, 0, -1.0])
+        right = np.cross(down, fwd)
+        M = np.eye(4)
+        M[:3, :3] = np.stack([right, down, fwd], 1)
+        M[:3, 3] = [x, y, 1.5]
+        poses.append(M)
+        # the corridor's walls 2 m to either side, ahead of the camera
+        d = rng.uniform(1.0, 6.0, 200)
+        lat = rng.choice([-1.5, 2.5], 200)
+        P = np.stack([x + fwd[0] * d, np.full(200, 0.0) + lat, rng.uniform(0.2, 2.8, 200)], 1)
+        pts.append(P)
+    K = np.array([[300.0, 0, 232], [0, 300.0, 416], [0, 0, 1]])
+    return np.stack(poses), np.stack([K] * len(poses)), pts
+
+
+def test_the_geometry_proposes_the_revisit_between_chunks_that_share_no_frame():
+    from loop_utils.revisits import propose, quick_visibility
+    poses, Ks, pts = _corridor_out_and_back()
+    n = len(poses)
+    owner = np.minimum(np.arange(n) // 16, 4)               # chunks of 16 keyframes
+    cent = poses[:, :3, 3]
+    walk = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(cent, axis=0), axis=1))])
+    cfg = {"min_depth_m": 0.1, "max_depth_m": 15.0, "frustum_margin_px": 0.0}
+    F = quick_visibility(pts, poses, Ks, (832, 464), cfg, walk, lambda L: (0.05, 1.0))
+    assert F.shape == (n, n) and F[0, 1] > 0.5
+    props = propose(F, owner, walk, min_walk_m=1.0, min_visible_frac=0.3)
+    assert props, "the walk back sees the walk out"
+    for (a, b), lst in props.items():
+        assert abs(a - b) >= 2 and 1 <= len(lst) <= 3
+        for s, i, j in lst:
+            assert s >= 0.3 and abs(walk[j] - walk[i]) >= 1.0 and owner[i] != owner[j]
+        assert [x[0] for x in lst] == sorted([x[0] for x in lst], reverse=True)
+    assert propose(F, owner, walk, min_walk_m=1e9, min_visible_frac=0.3) == {}
+
+
+def test_the_bridge_planner_adds_the_geometric_revisits_in_sim3_mode():
+    body = _method("_stac_plan_bridges")
+    assert "self._stac_geometric_revisits(view, gate_mod, lcfg," in body
+    assert 'if self._stac_chunk_graph_mode() == "sim3":' in body
+    geo = _method("_stac_geometric_revisits")
+    assert "gate_mod.gate_frame_pair(int(i), int(j), view, sp)" in geo
+    assert '"source": "geometry"' in geo
+    stage = _method("_stac_chunk_graph")
+    assert "CG.consistent_with_chain(n, seams, loops_all, priors, conf)" in stage
+    i_c, i_j = stage.index("consistent_with_chain("), stage.index("judge_leave_one_out(")
+    assert i_c < i_j                                        # the gross ones never testify

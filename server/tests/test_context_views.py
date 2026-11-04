@@ -114,6 +114,7 @@ def _runner(tmp_path, img, chunks, context):
     ns = {"np": np, "os": os, "torch": torch, "_StacPlanMismatch": _Mismatch,
           "_stac_images_to_u8": lambda p: None}
     exec(_method("process_single_chunk"), ns)
+    exec(_method("_stac_save_context_views"), ns)
 
     class _Self:
         pass
@@ -131,6 +132,8 @@ def _runner(tmp_path, img, chunks, context):
         [os.path.basename(p) for p in paths])
     s._stac_layout_stamp = lambda: [list(c) for c in chunks]
     s._stac_stamp_digest = lambda: None
+    s.output_dir = str(tmp_path / "ml")
+    s._stac_save_context_views = lambda *a: ns["_stac_save_context_views"](s, *a)
     return s, ns["process_single_chunk"]
 
 
@@ -149,6 +152,13 @@ def test_a_chunk_is_inferred_with_its_context_and_saved_with_its_keyframes(tmp_p
     assert pred["camera_and_register_tokens"].shape[0] == 3 and pred["images"].shape[0] == 3
     assert pred["_stac_context"] == [_fn(5), _fn(15)] and pred["_stac_range"] == [0, 3]
     assert s.sky == [[_fn(0), _fn(10), _fn(20)]]            # the sky mask sees the keyframes
+    # the context views stay as F6 witnesses (USER 2026-11-04): anchored on the keyframe before
+    # (the stand-in's depth is the frame number: keyframe 0 has no valid depth to anchor frame 5)
+    saved = sorted((tmp_path / "ml" / "context_views").glob("*.npz"))
+    assert [x.name for x in saved] == ["c000_000015.npz"]
+    with np.load(saved[0]) as z:
+        assert int(z["anchor_frame"]) == 10 and int(z["anchor_index"]) == 1 and int(z["chunk"]) == 0
+        assert float(z["depth"][0, 0]) == 15.0 and str(z["frame_file"]) == _fn(15)
     assert [float(x) for x in s.all_camera_poses[0][1][:, 0, 3]] == [0.0, 10.0, 20.0]
     # resumed by the same context: no inference
     s2, run2 = _runner(tmp_path, img, chunks, ctx)
