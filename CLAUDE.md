@@ -1,6 +1,7 @@
 # CLAUDE.md — working rules for this repo
 
 ## ⭐⭐⭐ 2026-11-04 — pccr: "LA NUBE ESTÁ ESPECTACULAR" (USER, 02:05 CDMX) — branch `turn-frames`, NOT yet in main
+- USER: "no tiene duplicados, no tiene artefactos, tiene completitud, tiene todo lo que buscábamos".
 - After the SLAM trials (VGGT-SLAM 2.0, VidMap, AMB3R — none beat the original pipeline) the original pipeline took the
   SLAM's STRUCTURE. Validated by eye on pccr epoch 3 (to the cloud, no segmentation), repo turn-frames 8c70619, fork
   2bd919b. What makes it:
