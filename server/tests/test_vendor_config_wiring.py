@@ -196,3 +196,33 @@ def test_the_resolution_reaches_the_config_f0_reads(tree):
     cam = (SERVER / "precision" / "camera.py").read_text()
     assert 'return str(model["omega_mode"]), int(model["omega_resolution"])' in cam, \
         "F0 must keep reading Omega's grid from the run's own config"
+
+
+# ── THE RESOLUTION CAP (USER 2026-11-04: "la resolución de Zaragoza siempre 1024, no más") ──
+
+def _frames_of(tmp_path, w, h):
+    import cv2
+    import numpy as np
+    d = tmp_path / f"frames_{w}x{h}"
+    d.mkdir()
+    cv2.imwrite(str(d / "000000.jpg"), np.zeros((h, w, 3), np.uint8))
+    return d
+
+
+def test_the_native_ceiling_never_passes_max_resolution(tmp_path):
+    from workers import map_worker as MW
+
+    def build(frames, **om):
+        cfg = {"reconstruction": {"vggtomega": {"resolution": "native", **om}}}
+        m = MW._build_vggtomega_config(cfg, frames)["Model"]
+        return m["omega_resolution"], m["omega_mode"]
+    zaragoza, pccr = _frames_of(tmp_path, 1920, 1080), _frames_of(tmp_path, 464, 832)
+    assert build(zaragoza, max_resolution=1024) == (1024, "max_size")
+    assert build(zaragoza) == (1920, "max_size")                      # no cap: native, as before
+    assert build(pccr, max_resolution=1024) == (832, "max_size")       # under the cap: native
+    for bad in (1000, 0, True, "1024"):
+        with pytest.raises(RuntimeError, match="max_resolution"):
+            build(zaragoza, max_resolution=bad)
+    import yaml
+    live = yaml.safe_load((SERVER / "config.yaml").read_text())
+    assert live["reconstruction"]["vggtomega"]["max_resolution"] == 1024

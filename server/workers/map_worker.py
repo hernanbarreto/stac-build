@@ -1543,6 +1543,18 @@ def _build_vggtomega_config(config: dict, frames_dir=None) -> dict:
             raise RuntimeError("reconstruction.vggtomega.resolution is 'native': the Omega "
                                "config needs the session's frames to read it")
         _res, _mode = omega_native_resolution(frames_dir), "max_size"
+    # USER 2026-11-04 ("la resolución de Zaragoza siempre 1024, no más"): Omega's resolution never
+    # passes reconstruction.vggtomega.max_resolution — zaragoza's 1920x1080 frames run at 1024
+    # (grid 1024x576, the whole frame) like the 1024x576 sessions; pccr's native 832 stays. It
+    # caps the CEILING: the largest chunk can still lower it to fit the card.
+    _cap = om.get("max_resolution")
+    if _cap is not None:
+        from precision.camera import OMEGA_PATCH_SIZE
+        if isinstance(_cap, bool) or not isinstance(_cap, int) or _cap < OMEGA_PATCH_SIZE \
+                or _cap % OMEGA_PATCH_SIZE:
+            raise RuntimeError(f"reconstruction.vggtomega.max_resolution must be a positive "
+                               f"multiple of Omega's patch ({OMEGA_PATCH_SIZE}), got {_cap!r}")
+        _res = min(int(_res), int(_cap))
     cfg["Model"]["omega_resolution"] = int(_res)
     cfg["Model"]["omega_mode"] = _mode
     return _apply_stac_model_keys(cfg, config)

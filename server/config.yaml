@@ -1563,6 +1563,11 @@ reconstruction:
                                         # 1808 (grid 1808x1024) on an 80 GB one; pccr's
                                         # largest chunk, 139 kf, and observatorio's 71 kf
                                         # run native on both).
+    max_resolution: 1024                # USER 2026-11-04 ("la resolución de Zaragoza siempre
+                                        # 1024, no más"): the ceiling never passes it — zaragoza
+                                        # 1920x1080 → 1024 (grid 1024x576, the whole frame; it
+                                        # ran 1520 on the A100); pccr's native 832 and the
+                                        # 1024x576 sessions are unchanged. null = no cap.
     mode: "balanced"                    # "balanced" (≈res² tokens) | "max_size" (less VRAM);
                                         # ignored when resolution is native
     turn_frames:                        # USER 2026-11-04 ("programá las imágenes"): Omega's
