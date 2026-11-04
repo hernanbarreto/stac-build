@@ -133,3 +133,27 @@ def test_two_floor_surfaces_are_each_measured_on_their_own_plane(tmp_path, pcfg)
         assert m["cells"] > 0, (s, m)
         assert abs(m["cameras_above_floor_m"]["median"] - CAM_OVER_FLOOR) < 0.05, (s, m)
     assert rep["floor"]["cells"] == max(m["cells"] for m in fs["per_surface"].values())
+
+
+def test_no_floor_under_any_camera_is_declared_not_fatal(tmp_path, pcfg):
+    """zaragoza 2026-11-04: a landscape camera held level sees the floor only metres ahead, beyond
+    the 45° footprint of its chunk's own cameras — the published cloud has a floor, but under no
+    camera. The report says so (UNDECIDED) and the chain goes on (USER 2026-10-05: a report step
+    that cannot measure declares it); the cloud is untouched."""
+    from scipy.spatial import cKDTree
+    chain = build_session(tmp_path)
+    out = tmp_path / "output"
+    raw = (out / "cleaned_cloud.ply").read_bytes()
+    i = raw.index(b"end_header\n") + len(b"end_header\n")
+    rec = np.frombuffer(raw[i:], dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("frame_global", "<i4")])
+    xyz = np.stack([rec["x"], rec["y"], rec["z"]], 1).astype(np.float64)
+    cams = np.loadtxt(out / "camera_poses.txt").reshape(-1, 4, 4)[:, :3, 3]
+    d, _ = cKDTree(cams[:, [0, 2]]).query(xyz[:, [0, 2]])
+    keep = d > 3.0                                       # nothing within 3 m of a camera's (x, z)
+    _write_cloud(out / "cleaned_cloud.ply", xyz[keep], np.asarray(rec["frame_global"])[keep])
+    logs = []
+    rep = CC.run_check(tmp_path, pcfg, log=logs.append, chainage=chain)
+    assert rep["session"]["verdict"] == "undecided", rep["session"]
+    assert "under its camera" in rep["session"]["reason"]
+    assert rep["to_correct"] == [] and (out / "precision" / CC.CHECK_NAME).exists()
+    assert any("UNDECIDED" in m for m in logs), logs

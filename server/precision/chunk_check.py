@@ -439,8 +439,13 @@ def measure_rows(frames, c2w, K, s_k, chunk, chain, omega_dir: Path, da3_dir: Pa
             q = np.percentile(y, cfg.low_pct)
             floor_pool.append(X[np.abs(y - q) <= cfg.band_m])
     if not floor_pool:
-        raise ChunkCheckError("no Omega depth to measure" if floor_planes is None else
-                              "no keyframe sees the floor under its camera")
+        if floor_planes is None:
+            raise ChunkCheckError("no Omega depth to measure")
+        # the floor measured on the published cloud stands under NO camera (zaragoza 2026-11-04: a
+        # landscape camera held level sees the floor only metres ahead, beyond the 45° footprint of
+        # its chunk's own cameras) — a report that cannot measure declares it (USER 2026-10-05)
+        raise NoFloorPlane("no keyframe sees the floor under its camera (no chunk has a floor level "
+                           "under its cameras on the published cloud)", 0.0, 0)
     n, c, pinfo = dominant_plane(np.concatenate(floor_pool), cfg.band_m, cfg.seed, cfg.confidence,
                                  cfg.bootstrap)
     tilt = float(np.degrees(np.arccos(np.clip(n @ UP, -1, 1))))
