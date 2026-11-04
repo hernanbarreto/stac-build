@@ -446,8 +446,8 @@ def labels_on_undistorted(labels: Callable, maps) -> Callable:
 
 def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict[int, np.ndarray],
                       passed: Dict[int, np.ndarray], K: np.ndarray, c2w: Dict[int, np.ndarray], labels,
-                      neighbors, tau_quantile: float, repair_min_views: int, log: Callable = print,
-                      bars_out: Optional[dict] = None,
+                      neighbors, tau_quantile: float, repair_min_views: int, rescue_below_floor: bool,
+                      log: Callable = print, bars_out: Optional[dict] = None,
                       extra: Optional[Dict[int, List[int]]] = None):
     """pccr EPOCH 8 (USER 2026-10-01: "es la mejor, incorporar al pipeline"), on the bent depth
     `dep` (every `valid` pixel; `passed` = above the ONE confidence floor):
@@ -457,7 +457,11 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
      3. the TWO-SIDED vote over `neighbors`, judged by floor-passing neighbour pixels only:
         floor-passing pixels stay with contra ≤ agree (median of the agreeing views), a
         contradicted one is repaired to the median of the neighbours when ≥ `repair_min_views`
-        agree, else it leaves; a below-floor EDGE pixel enters when agree ≥ 1 and contra ≤ agree.
+        agree, else it leaves; a below-floor EDGE pixel enters when agree ≥ 1 and contra ≤ agree;
+     4. ``rescue_below_floor`` (USER 2026-11-04, night): any other below-floor pixel enters with the
+        depth ≥ `repair_min_views` floor-passing views agree on along its ray (the repair's rule,
+        their median — never its own depth), unless its own depth lies in front of that surface
+        beyond tau (something nearer no view measured: the surface behind would wear its colour).
     Returns ({frame: (depth map, agree count map)}, tau, totals). ``bars_out`` (a dict) receives the
     vote's bar τ and every keyframe's pixel margins to it (point 53) — kept out of ``totals``, which
     stays numeric for its readers. ``extra``: {keyframe: [witness frames]} — the turn frames that
@@ -506,19 +510,28 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
         pas = FT._t(passed[f], torch.bool) & candt
         edg = FT._t(edge[f], torch.bool) & candt
         contradicted = pas & (contra > agree)
+        agreed = rep_ok                      # ≥ repair_min_views floor-passing views on one surface
         rep_ok = rep_ok & contradicted
         keep, repair, admit = CC.edge_vote_decision(pas, edg, agree, contra, rep_ok)
+        below = FT._t(valid[f], torch.bool) & ~FT._t(passed[f], torch.bool)
+        offer = below & agreed & ~admit      # a below-floor pixel the floor-passing views agree on
+        nearer = offer & (z < zrep * (1.0 - tau))       # its own depth in front of their surface
+        if not rescue_below_floor:
+            offer = nearer = torch.zeros_like(offer)
+        rescue = offer & ~nearer
         m = keep | admit
         zero = torch.zeros_like(z)
         zmap = torch.where(m, v["zmed"], zero)
-        zmap = torch.where(repair, zrep, zmap)
+        zmap = torch.where(repair | rescue, zrep, zmap)
         amap = torch.where(m, agree, torch.zeros_like(agree))
-        amap = torch.where(repair, nrep, amap)
+        amap = torch.where(repair | rescue, nrep, amap)
         zmap_np = FT._np(zmap, np.float32); amap_np = FT._np(amap, np.int16)
         final[f] = (zmap_np, amap_np)
         for k, n in (("valid", int(valid[f].sum())), ("edge", int(edge[f].sum())), ("kept", int(keep.sum())),
                      ("contradicted", int(contradicted.sum())), ("repaired", int(repair.sum())),
                      ("admitted", int(admit.sum())), ("edge_below", int((~pas & edg).sum())),
+                     ("below_floor", int(below.sum())), ("rescued", int(rescue.sum())),
+                     ("rescue_refused_nearer", int(nearer.sum())),
                      ("out", int((zmap_np > 0).sum()))):
             tot[k] = tot.get(k, 0) + n
     tot.update(mixed=n_mixed, snapped=n_snap, tau=tau)
@@ -535,7 +548,11 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
         f"mixed {n_mixed:,} ({n_mixed / nv * 100:.2f} %), {n_snap:,} snapped to their mask's side")
     log(f"{LOG_TAG} vote: {tot['kept'] / nv * 100:.1f} % of the valid pixels kept, {tot['contradicted'] / nv * 100:.1f} % "
         f"contradicted, {tot['repaired'] / nv * 100:.1f} % repaired, {tot['admitted'] / nv * 100:.1f} % admitted below "
-        f"the floor at edges; coverage {tot['out'] / float(len(frames) * H * W) * 100:.1f} % of all pixels")
+        f"the floor at edges, "
+        + (f"{tot['rescued'] / nv * 100:.1f} % rescued below the floor ({tot['rescued'] / max(tot['below_floor'], 1) * 100:.1f} % "
+           f"of the {tot['below_floor'] / nv * 100:.1f} % under it; {tot['rescue_refused_nearer'] / nv * 100:.1f} % refused, "
+           f"their own depth in front)" if rescue_below_floor else "no rescue below the floor (rescue_below_floor false)")
+        + f"; coverage {tot['out'] / float(len(frames) * H * W) * 100:.1f} % of all pixels")
     return final, tau, tot
 
 
@@ -1036,7 +1053,8 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
         labels = labels_on_undistorted(labels, inp.maps)       # the masks live on the original frame
     vote_bars: dict = {}
     voted, tau, vst = edge_keeping_vote(frames, dep, valid, passed, K, c2w_vote, labels,
-                                        bc.neighbors, bc.tau_quantile, int(pcfg.cloud.repair_min_views), log,
+                                        bc.neighbors, bc.tau_quantile, int(pcfg.cloud.repair_min_views),
+                                        bool(pcfg.cloud.rescue_below_floor), log,
                                         bars_out=vote_bars, extra=t_extra)
     cover = vst["out"] / float(N * H * W)
     _p(65, f"vote done: coverage {cover * 100:.1f} %")

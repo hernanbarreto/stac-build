@@ -243,7 +243,7 @@ def test_the_vote_reports_tau_and_every_frames_margins_to_it():
     ok = {f: np.ones((H, W), bool) for f in order}
     bars = {}
     _, tau, tot = D.edge_keeping_vote(order, dep, ok, {f: ok[f].copy() for f in order}, K, cams, None,
-                                      (-1, 1), 75.0, 2, log=QUIET, bars_out=bars)
+                                      (-1, 1), 75.0, 2, False, log=QUIET, bars_out=bars)
     assert all(isinstance(v, (int, float, np.integer, np.floating)) for v in tot.values())   # numeric for its readers
     assert bars["tau"] == tau and bars["tau_quantile"] == 75.0
     pf = bars["tau_margin_rel"]["per_frame"]

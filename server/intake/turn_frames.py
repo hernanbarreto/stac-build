@@ -29,6 +29,14 @@ between two frames) → the frame whose reading is nearest (ties → the earlies
 a keyframe, anchored on a non-keyframe (after a coverage break) or without a reading of its
 keyframe gets none, and says so.
 
+EVERY INTERVAL (USER 2026-11-04, the same night: *"¿qué pasa si la usamos en todo el recorrido
+para dar completitud en todo el recorrido sin romper geometría?"* … *"con ambas mejoras"*): a
+window the turn rule cuts into fewer than ``min_per_interval`` + 1 steps — a stretch of walk, not
+a turn — is cut into ``min_per_interval`` + 1 equal steps of its PARALLAX reading (I1's parallax
+from the anchor, the reading its keyframe rule closes a walking window on), each step's frame by
+the same band rule; a keyframe without a parallax reading is cut on its rotation reading. A turn
+keeps its rotation steps exactly (at least ``min_per_interval`` + 1 of them). 0 = turns only.
+
 Nothing is measured again: the readings are I1's own records (``intake/coverage_warnings.json``
 'frames'), the sharpness I0's (``frames/quality_features.json``), the keyframes and windows
 ``frames/selected_frames.json``. The result, ``intake/turn_frames.json``, is stamped with the
@@ -47,11 +55,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from intake.quality import _write_json_atomic
 
 TURN_FRAMES_NAME = "turn_frames.json"
-TURN_FRAMES_VERSION = 1
+TURN_FRAMES_VERSION = 2          # 2: every interval (min_per_interval, its parallax steps)
 PROVENANCE = "tool_measured"
-METHOD = "turn_rotation_steps"
+METHOD = "turn_rotation_steps+interval_parallax_steps"
 CONFIG_PATH = "reconstruction.vggtomega.turn_frames"
-SKIP_REASONS = ("no_keyframe", "anchor_not_keyframe", "no_rotation_reading")
+SKIP_REASONS = ("no_keyframe", "anchor_not_keyframe", "no_rotation_reading", "no_reading")
+# the reading a window is cut on: I1's per-frame record key and its unit
+READINGS = {"rotation": ("rot_deg", "deg"), "parallax": ("parallax_px", "px")}
 
 
 class TurnFramesError(RuntimeError):
@@ -62,6 +72,7 @@ class TurnFramesError(RuntimeError):
 class TurnFramesConfig:
     enabled: bool
     per_rotation_quantum: int        # d: θ_t = θ_q / d
+    min_per_interval: int            # the fewest context frames between two consecutive keyframes
 
 
 def load_turn_frames_config(config: Dict[str, Any]) -> TurnFramesConfig:
@@ -69,13 +80,17 @@ def load_turn_frames_config(config: Dict[str, Any]) -> TurnFramesConfig:
     sec = (((config or {}).get("reconstruction") or {}).get("vggtomega") or {}).get("turn_frames")
     if not isinstance(sec, dict):
         raise TurnFramesError(f"{CONFIG_PATH} is missing from the config")
-    for k in ("enabled", "per_rotation_quantum"):
+    for k in ("enabled", "per_rotation_quantum", "min_per_interval"):
         if k not in sec:
             raise TurnFramesError(f"{CONFIG_PATH}.{k} is missing from the config")
     d = sec["per_rotation_quantum"]
     if isinstance(d, bool) or not isinstance(d, int) or d < 1:
         raise TurnFramesError(f"{CONFIG_PATH}.per_rotation_quantum must be an integer ≥ 1, got {d!r}")
-    return TurnFramesConfig(enabled=bool(sec["enabled"]), per_rotation_quantum=int(d))
+    m = sec["min_per_interval"]
+    if isinstance(m, bool) or not isinstance(m, int) or m < 0:
+        raise TurnFramesError(f"{CONFIG_PATH}.min_per_interval must be an integer ≥ 0, got {m!r}")
+    return TurnFramesConfig(enabled=bool(sec["enabled"]), per_rotation_quantum=int(d),
+                            min_per_interval=int(m))
 
 
 def _finite(x: Any) -> Optional[float]:
@@ -89,16 +104,20 @@ def _finite(x: Any) -> Optional[float]:
 
 
 def select_turn_frames(selection: Dict[str, Any], frame_records: Sequence[Dict[str, Any]],
-                       quality_rows: Sequence[Dict[str, Any]], per_rotation_quantum: int
-                       ) -> Dict[str, Any]:
-    """The turn frames of one session (see the module docstring). ``selection``: I1's
+                       quality_rows: Sequence[Dict[str, Any]], per_rotation_quantum: int,
+                       min_per_interval: int) -> Dict[str, Any]:
+    """The context frames of one session (see the module docstring). ``selection``: I1's
     selected_frames.json; ``frame_records``: I1's per-frame records (coverage_warnings.json
-    'frames': frame, anchor, lost, rot_deg); ``quality_rows``: I0's frames (frame, file,
-    sharp_rank, usable). Pure and deterministic. Returns {theta_q_deg, theta_t_deg, band_frac,
-    step_max_deg, frames: [...], files: [...], windows: [...]}."""
+    'frames': frame, anchor, lost, rot_deg, parallax_px); ``quality_rows``: I0's frames (frame,
+    file, sharp_rank, usable); ``min_per_interval``: the fewest frames between two consecutive
+    keyframes (0 = turns only). Pure and deterministic. Returns {theta_q_deg, theta_t_deg,
+    band_frac, step_max_deg, frames: [...], files: [...], windows: [...]}."""
     d = int(per_rotation_quantum)
     if d < 1:
         raise TurnFramesError(f"per_rotation_quantum must be ≥ 1, got {per_rotation_quantum}")
+    if isinstance(min_per_interval, bool) or not isinstance(min_per_interval, int) or min_per_interval < 0:
+        raise TurnFramesError(f"min_per_interval must be an integer ≥ 0, got {min_per_interval!r}")
+    n_min = 1 + int(min_per_interval)
     theta_q = _finite(selection.get("rotation_quantum_deg"))
     b = _finite(selection.get("keyframe_band_frac"))
     if theta_q is None or theta_q <= 0.0 or b is None or not 0.0 <= b < 1.0:
@@ -112,58 +131,68 @@ def select_turn_frames(selection: Dict[str, Any], frame_records: Sequence[Dict[s
     rec = {int(r["frame"]): r for r in frame_records}
     kfs = sorted(int(k["frame"]) for k in selection["keyframes"])
     kf_rot = {int(k["frame"]): _finite(k.get("rotation_deg")) for k in selection["keyframes"]}
+    kf_par = {int(k["frame"]): _finite(k.get("parallax_px")) for k in selection["keyframes"]}
     kf_set = set(kfs)
     frames: List[Dict[str, Any]] = []
     windows: List[Dict[str, Any]] = []
     for w in selection["windows"]:
         a, k = w.get("anchor"), w.get("keyframe")
         skip = ("no_keyframe" if k is None else
-                "anchor_not_keyframe" if not w.get("anchor_is_keyframe") else
-                "no_rotation_reading" if kf_rot.get(int(k)) is None else None)
+                "anchor_not_keyframe" if not w.get("anchor_is_keyframe") else None)
+        if skip is None:
+            r_k, p_k = kf_rot.get(int(k)), kf_par.get(int(k))
+            n_rot = max(1, int(math.ceil(r_k / step_max))) if r_k is not None else 0
+            if n_rot >= 2:                                   # a turn: its rotation steps
+                kind, total, n = "rotation", r_k, max(n_rot, n_min)
+            elif n_min >= 2 and p_k is not None and p_k > 0.0:   # a walk: its parallax steps
+                kind, total, n = "parallax", p_k, n_min
+            elif n_min >= 2 and r_k is not None and r_k > 0.0:
+                kind, total, n = "rotation", r_k, n_min
+            elif r_k is None or n_min >= 2:
+                skip = "no_rotation_reading" if n_min < 2 else "no_reading"
+            else:
+                continue                                     # a short turn, turns only: none
         if skip is not None:
             windows.append({"anchor": a, "keyframe": k, "skipped": skip})
             continue
         a, k = int(a), int(k)
-        r_k = float(kf_rot[k])
-        n = max(1, int(math.ceil(r_k / step_max)))
+        key, unit = READINGS[kind]
         cands = []
         for f in range(a + 1, k):
             r = rec.get(f)
             if (r is None or f in kf_set or int(r.get("anchor", -1)) != a or r.get("lost")
                     or not (q.get(f) or {}).get("usable")):
                 continue
-            rot = _finite(r.get("rot_deg"))
-            if rot is not None:
-                cands.append((f, rot))
+            x = _finite(r.get(key))
+            if x is not None:
+                cands.append((f, x))
         chosen: List[Dict[str, Any]] = []
-        if n > 1:
-            step = r_k / n
-            prev = a
-            for j in range(1, n):
-                target = j * step
-                pool = [(f, rot) for f, rot in cands if f > prev]
-                if not pool:
-                    break
-                band = [(f, rot) for f, rot in pool if abs(rot - target) <= b * step]
-                if band:
-                    f, rot = max(band, key=lambda c: (float(q[c[0]]["sharp_rank"]), -c[0]))
-                    how = "band"
-                else:
-                    f, rot = min(pool, key=lambda c: (abs(c[1] - target), c[0]))
-                    how = "nearest"
-                chosen.append({"frame": f, "file": q[f]["file"], "anchor": a, "keyframe": k,
-                               "step": j, "steps": n, "target_deg": target, "reading_deg": rot,
-                               "chosen_by": how})
-                prev = f
+        step = float(total) / n
+        prev = a
+        for j in range(1, n):
+            target = j * step
+            pool = [(f, x) for f, x in cands if f > prev]
+            if not pool:
+                break
+            band = [(f, x) for f, x in pool if abs(x - target) <= b * step]
+            if band:
+                f, x = max(band, key=lambda c: (float(q[c[0]]["sharp_rank"]), -c[0]))
+                how = "band"
+            else:
+                f, x = min(pool, key=lambda c: (abs(c[1] - target), c[0]))
+                how = "nearest"
+            chosen.append({"frame": f, "file": q[f]["file"], "anchor": a, "keyframe": k,
+                           "reading": kind, "unit": unit, "step": j, "steps": n,
+                           "target": target, "value": x, "chosen_by": how})
+            prev = f
         frames.extend(chosen)
-        if n > 1:
-            windows.append({"anchor": a, "keyframe": k, "rotation_deg": r_k, "steps": n,
-                            "n_candidates": len(cands), "n_turn_frames": len(chosen),
-                            "skipped": None})
+        windows.append({"anchor": a, "keyframe": k, "reading": kind, "unit": unit,
+                        "total": float(total), "steps": n, "n_candidates": len(cands),
+                        "n_turn_frames": len(chosen), "skipped": None})
     files = [t["file"] for t in sorted(frames, key=lambda t: t["frame"])]
     return {"theta_q_deg": theta_q, "per_rotation_quantum": d, "theta_t_deg": theta_t,
-            "band_frac": b, "step_max_deg": step_max, "frames": frames, "files": files,
-            "windows": windows}
+            "band_frac": b, "step_max_deg": step_max, "min_per_interval": int(min_per_interval),
+            "frames": frames, "files": files, "windows": windows}
 
 
 def _sha_file(p: Path) -> str:
@@ -194,11 +223,14 @@ def session_turn_frames(scan_dir: Path, cfg: TurnFramesConfig, log=print) -> Dic
     import repro
     head = {"version": TURN_FRAMES_VERSION, "provenance": PROVENANCE, "method": METHOD,
             "enabled": bool(cfg.enabled), "per_rotation_quantum": int(cfg.per_rotation_quantum),
+            "min_per_interval": int(cfg.min_per_interval),
             "inputs": {f"{k}_sha256": _sha_file(p) for k, p in paths.items()},
             "code_sha256": repro.stamp(code=[__file__])["code"],
-            "derivation": "n = ceil(r_k / (theta_t * (1 + b))) steps between consecutive keyframes, "
-                          "theta_t = theta_q / per_rotation_quantum; step j = the sharpest frame "
-                          "within +-b of a step around j * r_k / n (I1's readings from the anchor)"}
+            "derivation": "a turn: n = ceil(r_k / (theta_t * (1 + b))) rotation steps between "
+                          "consecutive keyframes, theta_t = theta_q / per_rotation_quantum; any other "
+                          "interval: min_per_interval + 1 steps of its parallax reading p_k; step j = "
+                          "the sharpest frame within +-b of a step around j * (r_k or p_k) / n "
+                          "(I1's readings from the anchor)"}
     if not cfg.enabled:
         doc = {**head, "frames": [], "files": [], "windows": [], "n_turn_frames": 0}
         _write_json_atomic(scan_dir / "intake" / TURN_FRAMES_NAME, doc)
@@ -208,10 +240,11 @@ def session_turn_frames(scan_dir: Path, cfg: TurnFramesConfig, log=print) -> Dic
     cov = json.loads(paths["coverage_warnings"].read_text())
     qual = json.loads(paths["quality_features"].read_text())
     res = select_turn_frames(sel, cov.get("frames") or [], qual.get("frames") or [],
-                             cfg.per_rotation_quantum)
-    by = {}
+                             cfg.per_rotation_quantum, cfg.min_per_interval)
+    by, by_reading = {}, {}
     for t in res["frames"]:
         by[t["chosen_by"]] = by.get(t["chosen_by"], 0) + 1
+        by_reading[t["reading"]] = by_reading.get(t["reading"], 0) + 1
     skipped = {}
     for w in res["windows"]:
         if w.get("skipped"):
@@ -219,15 +252,16 @@ def session_turn_frames(scan_dir: Path, cfg: TurnFramesConfig, log=print) -> Dic
     doc = {**head, **res, "n_turn_frames": len(res["frames"]),
            "n_windows_with_turn_frames": sum(1 for w in res["windows"]
                                              if w.get("n_turn_frames")),
-           "chosen_by": by, "skipped": skipped}
+           "chosen_by": by, "by_reading": by_reading, "skipped": skipped}
     _write_json_atomic(scan_dir / "intake" / TURN_FRAMES_NAME, doc)
-    log(f"[turn-frames] {doc['n_turn_frames']} turn frame(s) in "
+    log(f"[turn-frames] {doc['n_turn_frames']} context frame(s) in "
         f"{doc['n_windows_with_turn_frames']} window(s) for {len(sel['keyframes'])} keyframes: "
-        f"θ_t = θ_q {res['theta_q_deg']:.2f}° / {res['per_rotation_quantum']} = "
-        f"{res['theta_t_deg']:.2f}°, no step over {res['step_max_deg']:.2f}° (band ±"
-        f"{res['band_frac']:g}); chosen in the band {by.get('band', 0)}, nearest reading "
-        f"{by.get('nearest', 0)}" + (f"; windows skipped {skipped}" if skipped else "")
-        + f" → {TURN_FRAMES_NAME}")
+        f"turns {by_reading.get('rotation', 0)} by rotation (θ_t = θ_q {res['theta_q_deg']:.2f}° / "
+        f"{res['per_rotation_quantum']} = {res['theta_t_deg']:.2f}°, no step over "
+        f"{res['step_max_deg']:.2f}°), every other interval {by_reading.get('parallax', 0)} by "
+        f"parallax (≥ {res['min_per_interval']} per interval; band ±{res['band_frac']:g}); chosen "
+        f"in the band {by.get('band', 0)}, nearest reading {by.get('nearest', 0)}"
+        + (f"; windows skipped {skipped}" if skipped else "") + f" → {TURN_FRAMES_NAME}")
     return doc
 
 

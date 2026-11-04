@@ -25,9 +25,10 @@ def _fn(f):
 
 
 def _session_docs(rot_per_frame=0.54, sharp=None, lost=(), unusable=(), kf=(0, 10, 30),
-                  kf_rot=None, anchors=None, windows=None):
-    """Keyframes ``kf``; the window kf[i] → kf[i+1] reads (f − kf[i]) · rot_per_frame from its
-    anchor; frame 30's reading is the keyframe's own."""
+                  kf_rot=None, anchors=None, windows=None, par_per_frame=1.2, kf_par=None):
+    """Keyframes ``kf``; the window kf[i] → kf[i+1] reads (f − kf[i]) · rot_per_frame degrees and
+    (f − kf[i]) · par_per_frame pixels of parallax from its anchor; frame 30's readings are the
+    keyframe's own."""
     sharp = dict(sharp or {})
     n = kf[-1] + 5
     quality = [{"frame": f, "file": _fn(f), "sharp_rank": sharp.get(f, 0.5),
@@ -37,13 +38,15 @@ def _session_docs(rot_per_frame=0.54, sharp=None, lost=(), unusable=(), kf=(0, 1
         a, k = kf[i], kf[i + 1]
         for f in range(a + 1, k + 1):
             recs.append({"frame": f, "anchor": (anchors or {}).get(f, a), "lost": f in lost,
-                         "rot_deg": None if f in lost else (f - a) * rot_per_frame})
-    kf_rot = kf_rot or {}
+                         "rot_deg": None if f in lost else (f - a) * rot_per_frame,
+                         "parallax_px": None if f in lost else (f - a) * par_per_frame})
+    kf_rot, kf_par = kf_rot or {}, kf_par or {}
     keyframes = [{"frame": kf[0], "file": _fn(kf[0]), "anchor": None, "rotation_deg": 0.0,
-                  "closed_by": "first_usable_frame"}]
+                  "parallax_px": 0.0, "closed_by": "first_usable_frame"}]
     for i in range(1, len(kf)):
         keyframes.append({"frame": kf[i], "file": _fn(kf[i]), "anchor": kf[i - 1],
                           "rotation_deg": kf_rot.get(kf[i], (kf[i] - kf[i - 1]) * rot_per_frame),
+                          "parallax_px": kf_par.get(kf[i], (kf[i] - kf[i - 1]) * par_per_frame),
                           "closed_by": "rotation"})
     if windows is None:
         windows = [{"anchor": kf[i - 1], "keyframe": kf[i], "anchor_is_keyframe": True}
@@ -57,7 +60,7 @@ def test_a_turn_is_cut_into_equal_steps_and_each_step_takes_its_sharpest_frame()
     # window 10 → 30 turns 20 · 0.54 = 10.8°: n = ceil(10.8 / 4.5) = 3 steps of 3.6°; the band
     # of step 1 is 3.6 ± 0.9 (frames 15-18), of step 2 7.2 ± 0.9 (frames 22-25, 25 on the edge)
     sel, recs, q = _session_docs(sharp={17: 0.9, 16: 0.8, 23: 0.95, 24: 0.99})
-    r = select_turn_frames(sel, recs, q, 3)
+    r = select_turn_frames(sel, recs, q, 3, 0)
     assert math.isclose(r["theta_t_deg"], 3.6) and math.isclose(r["step_max_deg"], 4.5)
     w1 = [(t["frame"], t["step"], t["steps"], t["chosen_by"]) for t in r["frames"]
           if t["anchor"] == 10]
@@ -72,29 +75,29 @@ def test_a_turn_is_cut_into_equal_steps_and_each_step_takes_its_sharpest_frame()
 
 def test_two_steps_and_the_tie_rule():
     sel, recs, q = _session_docs(rot_per_frame=0.6, kf=(0, 10))     # 6.0° → n = 2, step 3.0
-    r = select_turn_frames(sel, recs, q, 3)
+    r = select_turn_frames(sel, recs, q, 3, 0)
     # band 3.0 ± 0.75: readings 2.4, 3.0, 3.6 → frames 4, 5, 6, all sharp 0.5 → the earliest
     assert [(t["frame"], t["step"], t["steps"]) for t in r["frames"]] == [(4, 1, 2)]
     sel, recs, q = _session_docs(rot_per_frame=0.6, kf=(0, 10), sharp={6: 0.7})
-    assert [t["frame"] for t in select_turn_frames(sel, recs, q, 3)["frames"]] == [6]
+    assert [t["frame"] for t in select_turn_frames(sel, recs, q, 3, 0)["frames"]] == [6]
 
 
 def test_a_short_turn_gets_no_turn_frame():
     sel, recs, q = _session_docs(rot_per_frame=0.4, kf=(0, 10))     # 4.0° ≤ 4.5°: one step
-    r = select_turn_frames(sel, recs, q, 3)
+    r = select_turn_frames(sel, recs, q, 3, 0)
     assert r["frames"] == [] and r["windows"] == []
     # a finer divisor cuts the same turn: d = 6 → θ_t 1.8°, steps ≤ 2.25° → n = 2
-    assert [t["steps"] for t in select_turn_frames(sel, recs, q, 6)["frames"]] == [2]
+    assert [t["steps"] for t in select_turn_frames(sel, recs, q, 6, 0)["frames"]] == [2]
 
 
 def test_a_turn_that_jumps_over_a_band_takes_the_nearest_reading():
     # 10.8° in 4 frames: readings 2.7, 5.4, 8.1 between the keyframes; steps 3.6 / 7.2 with bands
     # ± 0.9 → 2.7 is in band 1 (edge), 7.2 ± 0.9 = [6.3, 8.1] → 8.1 (edge) — make it jump: 3 frames
     sel, recs, q = _session_docs(rot_per_frame=10.8 / 3, kf=(0, 3))     # readings 3.6, 7.2 …
-    r = select_turn_frames(sel, recs, q, 3)
+    r = select_turn_frames(sel, recs, q, 3, 0)
     assert [(t["frame"], t["chosen_by"]) for t in r["frames"]] == [(1, "band"), (2, "band")]
     sel, recs, q = _session_docs(rot_per_frame=10.8 / 2, kf=(0, 2))     # one frame at 5.4
-    r = select_turn_frames(sel, recs, q, 3)
+    r = select_turn_frames(sel, recs, q, 3, 0)
     # step 1 (3.6 ± 0.9) has no reading → the nearest, frame 1 (5.4); step 2: no frame left
     assert [(t["frame"], t["step"], t["chosen_by"]) for t in r["frames"]] == [(1, 1, "nearest")]
     assert r["windows"][0]["n_turn_frames"] == 1 and r["windows"][0]["steps"] == 3
@@ -103,7 +106,7 @@ def test_a_turn_that_jumps_over_a_band_takes_the_nearest_reading():
 def test_lost_unusable_and_other_anchor_frames_are_never_chosen():
     sel, recs, q = _session_docs(rot_per_frame=0.6, kf=(0, 10), lost={4}, unusable={5},
                                  anchors={6: 99}, sharp={4: 1.0, 5: 1.0, 6: 1.0})
-    r = select_turn_frames(sel, recs, q, 3)
+    r = select_turn_frames(sel, recs, q, 3, 0)
     # band 3.0 ± 0.75 holds frames 4, 5, 6 — all excluded → the nearest reading left: frames 3
     # (1.8) and 7 (4.2) are 1.2° away, the tie → the earlier
     assert [(t["frame"], t["chosen_by"]) for t in r["frames"]] == [(3, "nearest")]
@@ -114,22 +117,72 @@ def test_windows_without_a_measured_turn_get_none_and_say_why():
         {"anchor": 0, "keyframe": 10, "anchor_is_keyframe": True},
         {"anchor": 10, "keyframe": 30, "anchor_is_keyframe": False},
         {"anchor": 30, "keyframe": None, "anchor_is_keyframe": True}])
-    r = select_turn_frames(sel, recs, q, 3)
+    r = select_turn_frames(sel, recs, q, 3, 0)
     skipped = [w["skipped"] for w in r["windows"] if w.get("skipped")]
     assert skipped == ["anchor_not_keyframe", "no_keyframe"]
     assert all(t["anchor"] == 0 for t in r["frames"])
     sel, recs, q = _session_docs(kf=(0, 10, 30), kf_rot={30: float("nan")})
-    r = select_turn_frames(sel, recs, q, 3)
+    r = select_turn_frames(sel, recs, q, 3, 0)
     assert [w["skipped"] for w in r["windows"] if w.get("skipped")] == ["no_rotation_reading"]
+
+
+def test_every_interval_gets_a_frame_at_half_its_parallax():
+    # USER 2026-11-04 (night): 1° and 2° of turn — one rotation step each, the turn rule leaves
+    # them alone; at min_per_interval 1 each window takes the sharpest frame at half its parallax:
+    # window 0 → 10 (12 px) 6 ± 1.5 px = frames 4, 5, 6; window 10 → 30 (24 px) 12 ± 3 px =
+    # frames 18-22
+    sel, recs, q = _session_docs(rot_per_frame=0.1, sharp={5: 0.9, 21: 0.8})
+    assert select_turn_frames(sel, recs, q, 3, 0)["frames"] == []
+    r = select_turn_frames(sel, recs, q, 3, 1)
+    got = [(t["frame"], t["reading"], t["step"], t["steps"], t["chosen_by"]) for t in r["frames"]]
+    assert got == [(5, "parallax", 1, 2, "band"), (21, "parallax", 1, 2, "band")]
+    assert [(w["reading"], w["unit"], w["total"], w["steps"]) for w in r["windows"]] == [
+        ("parallax", "px", 12.0, 2), ("parallax", "px", 24.0, 2)]
+    assert r["min_per_interval"] == 1 and r["files"] == [_fn(5), _fn(21)]
+    # all sharp 0.5 → the earliest frame of the band
+    sel, recs, q = _session_docs(rot_per_frame=0.1)
+    assert [t["frame"] for t in select_turn_frames(sel, recs, q, 3, 1)["frames"]] == [4, 18]
+    # two per interval: thirds of the parallax, 4 ± 1 px → frames 3, 4 (3.6, 4.8), 8 ± 1 px →
+    # frames 6, 7 (7.2, 8.4); all sharp 0.5 → the earliest of each band
+    r2 = select_turn_frames(sel, recs, q, 3, 2)
+    assert [(t["frame"], t["step"], t["steps"]) for t in r2["frames"] if t["anchor"] == 0] == [
+        (3, 1, 3), (6, 2, 3)]
+
+
+def test_a_turn_keeps_its_rotation_steps_whatever_the_interval_rule():
+    sel, recs, q = _session_docs(sharp={17: 0.9, 16: 0.8, 23: 0.95, 24: 0.99})
+    turns = select_turn_frames(sel, recs, q, 3, 0)["frames"]
+    assert select_turn_frames(sel, recs, q, 3, 1)["frames"] == turns           # turns only, as before
+    assert all(t["reading"] == "rotation" for t in turns)
+    # a two-step turn (window 0 → 10, 5.4°) asked for two frames: three ROTATION steps of 1.8°
+    r = select_turn_frames(sel, recs, q, 3, 2)
+    w0 = [(t["reading"], t["steps"]) for t in r["frames"] if t["anchor"] == 0]
+    assert w0 == [("rotation", 3), ("rotation", 3)]
+
+
+def test_an_interval_without_a_parallax_reading_is_cut_on_its_rotation_or_skipped():
+    sel, recs, q = _session_docs(rot_per_frame=0.1, kf=(0, 10), kf_par={10: None})
+    r = select_turn_frames(sel, recs, q, 3, 1)
+    assert [(t["reading"], t["frame"]) for t in r["frames"]] == [("rotation", 4)]   # 0.5° ± 0.125
+    sel, recs, q = _session_docs(rot_per_frame=0.1, kf=(0, 10), kf_par={10: None},
+                                 kf_rot={10: float("nan")})
+    r = select_turn_frames(sel, recs, q, 3, 1)
+    assert r["frames"] == [] and [w["skipped"] for w in r["windows"]] == ["no_reading"]
+    # turns only: the old reason
+    assert [w["skipped"] for w in select_turn_frames(sel, recs, q, 3, 0)["windows"]] == [
+        "no_rotation_reading"]
+    for bad in (-1, 1.0, True):
+        with pytest.raises(TurnFramesError, match="min_per_interval"):
+            select_turn_frames(sel, recs, q, 3, bad)
 
 
 def test_the_selection_refuses_a_session_without_a_rotation_quantum():
     sel, recs, q = _session_docs()
     sel["rotation_quantum_deg"] = None
     with pytest.raises(TurnFramesError, match="rotation quantum"):
-        select_turn_frames(sel, recs, q, 3)
+        select_turn_frames(sel, recs, q, 3, 0)
     with pytest.raises(TurnFramesError):
-        select_turn_frames(_session_docs()[0], recs, q, 0)
+        select_turn_frames(_session_docs()[0], recs, q, 0, 0)
 
 
 def test_chunk_context_follows_the_keyframes_each_chunk_holds():
@@ -148,8 +201,9 @@ def test_chunk_context_follows_the_keyframes_each_chunk_holds():
 
 def test_the_config_is_read_strictly():
     ok = {"reconstruction": {"vggtomega": {"turn_frames": {"enabled": True,
-                                                           "per_rotation_quantum": 3}}}}
-    assert load_turn_frames_config(ok) == TurnFramesConfig(True, 3)
+                                                           "per_rotation_quantum": 3,
+                                                           "min_per_interval": 1}}}}
+    assert load_turn_frames_config(ok) == TurnFramesConfig(True, 3, 1)
     with pytest.raises(TurnFramesError, match="turn_frames is missing"):
         load_turn_frames_config({"reconstruction": {"vggtomega": {}}})
     with pytest.raises(TurnFramesError, match="per_rotation_quantum is missing"):
@@ -157,10 +211,17 @@ def test_the_config_is_read_strictly():
     for bad in (0, 2.5, True, "3"):
         with pytest.raises(TurnFramesError, match="integer"):
             load_turn_frames_config({"reconstruction": {"vggtomega": {"turn_frames": {
-                "enabled": True, "per_rotation_quantum": bad}}}})
+                "enabled": True, "per_rotation_quantum": bad, "min_per_interval": 1}}}})
+    with pytest.raises(TurnFramesError, match="min_per_interval is missing"):
+        load_turn_frames_config({"reconstruction": {"vggtomega": {"turn_frames": {
+            "enabled": True, "per_rotation_quantum": 3}}}})
+    for bad in (-1, 1.5, False, "1"):
+        with pytest.raises(TurnFramesError, match="min_per_interval must be an integer"):
+            load_turn_frames_config({"reconstruction": {"vggtomega": {"turn_frames": {
+                "enabled": True, "per_rotation_quantum": 3, "min_per_interval": bad}}}})
     import yaml
     live = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
-    assert load_turn_frames_config(live) == TurnFramesConfig(True, 3)
+    assert load_turn_frames_config(live) == TurnFramesConfig(True, 3, 1)
 
 
 def _write_session(tmp_path, **kw):
@@ -176,19 +237,29 @@ def _write_session(tmp_path, **kw):
 def test_the_session_document_is_stamped_and_reproducible(tmp_path):
     scan = _write_session(tmp_path, sharp={17: 0.9, 24: 0.99})
     logs = []
-    d1 = session_turn_frames(scan, TurnFramesConfig(True, 3), log=logs.append)
+    d1 = session_turn_frames(scan, TurnFramesConfig(True, 3, 0), log=logs.append)
     first = (scan / "intake" / TURN_FRAMES_NAME).read_text()
-    d2 = session_turn_frames(scan, TurnFramesConfig(True, 3), log=logs.append)
+    d2 = session_turn_frames(scan, TurnFramesConfig(True, 3, 0), log=logs.append)
     assert (scan / "intake" / TURN_FRAMES_NAME).read_text() == first and d1 == d2
     assert d1["files"] == [_fn(4), _fn(17), _fn(24)] and d1["n_turn_frames"] == 3
     assert set(d1["inputs"]) == {"selected_frames_sha256", "coverage_warnings_sha256",
                                  "quality_features_sha256"} and d1["code_sha256"]
-    assert any("[turn-frames] 3 turn frame(s) in 2 window(s)" in m for m in logs), logs
-    off = session_turn_frames(scan, TurnFramesConfig(False, 3), log=logs.append)
+    assert any("[turn-frames] 3 context frame(s) in 2 window(s)" in m for m in logs), logs
+    assert d1["min_per_interval"] == 0 and d1["by_reading"] == {"rotation": 3}
+    off = session_turn_frames(scan, TurnFramesConfig(False, 3, 1), log=logs.append)
     assert off["files"] == [] and off["enabled"] is False
     (scan / "intake" / "coverage_warnings.json").unlink()
     with pytest.raises(TurnFramesError, match="coverage_warnings"):
-        session_turn_frames(scan, TurnFramesConfig(True, 3))
+        session_turn_frames(scan, TurnFramesConfig(True, 3, 1))
+
+
+def test_the_session_document_records_every_interval(tmp_path):
+    scan = _write_session(tmp_path, rot_per_frame=0.1, sharp={5: 0.9, 21: 0.8})
+    logs = []
+    d = session_turn_frames(scan, TurnFramesConfig(True, 3, 1), log=logs.append)
+    assert d["files"] == [_fn(5), _fn(21)] and d["by_reading"] == {"parallax": 2}
+    assert d["version"] == 2 and d["min_per_interval"] == 1
+    assert any("every other interval 2 by parallax (≥ 1 per interval" in m for m in logs), logs
 
 
 def test_the_card_holds_the_keyframes_and_the_context_views(tmp_path):

@@ -55,13 +55,41 @@ def test_the_edge_keeping_vote_removes_a_flyer_and_keeps_the_surface():
     dep[1][10:20, 30:40] = 1.5                       # a flyer in front of the wall the others see
     ok = {f: np.ones((H, W), bool) for f in order}
     final, tau, tot = edge_keeping_vote(order, dep, ok, {f: ok[f].copy() for f in order}, K, cams, None,
-                                        (-1, 1), 75.0, 2, log=lambda *a: None)
+                                        (-1, 1), 75.0, 2, False, log=lambda *a: None)
     z1, a1 = final[1]
     # the flyer is gone: its pixels see the wall behind it, so they are REPAIRED to the depth the two
     # neighbours agree on (epoch 8: a contradicted pixel still sees a surface) — never left at 1.5 m
     assert np.allclose(z1[12:18, 32:38], 3.0, atol=1e-3), "the flyer's pixels take the wall the neighbours see"
     assert np.allclose(z1[40:50, 30:40], 3.0, atol=1e-3) and (a1[40:50, 30:40] >= 1).all()
     assert tot["contradicted"] > 0 and tot["repaired"] > 0 and 0 <= tau
+
+
+def test_a_pixel_under_the_floor_is_rescued_with_the_surface_two_views_agree_on():
+    """USER 2026-11-04 (night): a below-floor pixel takes the depth its floor-passing neighbours agree
+    on along its ray, never its own; one whose own depth lies in front of that surface (a thin
+    occluder no view measured) stays out; off = the floor alone decides, as before."""
+    cams = _cams(); order = [0, 1, 2]
+    dep = {f: np.full((H, W), 3.0, np.float32) for f in order}
+    dep[1][10:20, 30:40] = 3.3                       # under the floor, its own depth noisy behind the wall
+    dep[1][40:50, 30:40] = 1.5                       # under the floor, its own depth IN FRONT of the wall
+    ok = {f: np.ones((H, W), bool) for f in order}
+    passed = {f: ok[f].copy() for f in order}
+    passed[1][10:20, 30:40] = False
+    passed[1][40:50, 30:40] = False
+    args = (order, {f: d.copy() for f, d in dep.items()}, ok, passed, K, cams, None, (-1, 1), 75.0, 2)
+    off, _, tot_off = edge_keeping_vote(*args, False, log=lambda *a: None)
+    assert (off[1][0][10:20, 30:40] == 0).all() and (off[1][0][40:50, 30:40] == 0).all()
+    assert tot_off["rescued"] == 0 and tot_off["below_floor"] == 200
+    args = (order, {f: d.copy() for f, d in dep.items()}, ok, passed, K, cams, None, (-1, 1), 75.0, 2)
+    on, _, tot = edge_keeping_vote(*args, True, log=lambda *a: None)
+    z1, a1 = on[1]
+    assert np.allclose(z1[10:20, 30:40], 3.0, atol=1e-3), "the wall the two neighbours agree on, never 3.3"
+    assert (a1[10:20, 30:40] == 2).all()
+    assert (z1[40:50, 30:40] == 0).all(), "its own depth in front: it may see something no view measured"
+    assert tot["rescued"] == 100 and tot["rescue_refused_nearer"] == 100
+    # every pixel the floor passed is decided exactly as without the rescue
+    keep = passed[1]
+    assert np.array_equal(z1[keep], off[1][0][keep]) and np.array_equal(a1[keep], off[1][1][keep])
 
 
 def test_the_camera_travels_with_the_cloud(tmp_path):
