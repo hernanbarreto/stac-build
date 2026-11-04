@@ -63,7 +63,7 @@ def _wiped(out):
                  "metric_lock.json", "chunk_health.json", "chunk_sim3.json"):
         assert not (ml / gone).exists(), gone
     for gone in ("omega_run", "precision", "potree", "cleaned_cloud.ply", "camera.json",
-                 "geometry_epoch.json", "segmentation.json"):
+                 "geometry_epoch.json"):
         assert not (out / gone).exists(), gone
     for kept in ("da3_run", "da3_windows", "intake", "salad_revisit_reference.json"):
         assert (out / kept).exists(), kept
@@ -256,3 +256,23 @@ def test_a_new_plan_keeps_this_jobs_frozen_configuration(tmp_path):
     assert _wiped(out)
     for f in ("run_config.yaml", "run_config.sha256", "run_environment.json"):
         assert (out / f).exists(), f
+
+
+
+def test_a_new_plan_keeps_the_2d_semantic_products_and_drops_the_projection(tmp_path):
+    """USER 2026-11-03: every session is re-run keeping its VLM and SAM3; pccr 2026-11-04 lost them
+    to the first plan of 64-view chunks. The VLM records and the RAW SAM3 store (immutable since
+    point 100) are of the keyframes' images; the projection, the fusion map and the instance store
+    are of the old cloud."""
+    out = _session(tmp_path, _plan(PCCR))
+    keep = ("vlm_analysis.json", "autoprompt_concepts.json", "scene_analysis.json",
+            "segmentation.json", "seg_masks.npz", "seg_rounds.json", "segmentation_census.json")
+    gone = ("segmentation_result.json", "fusion_map.json", "scene_r.db", "mask_audit.json",
+            "classification.npy")
+    for f in keep + gone:
+        (out / f).write_text("x")
+    assert _invalidate_on_new_chunk_plan(out, _plan(PCCR_OTHER), log=lambda m: None) is True
+    for f in keep:
+        assert (out / f).exists(), f
+    for f in gone:
+        assert not (out / f).exists(), f

@@ -2718,7 +2718,20 @@ _PLAN_INDEPENDENT_OUTPUT = {"chunk_plan.json", "da3_run", "da3_windows", "intake
                             # reads them). pccr 2026-11-04: the first run of a new plan (5 → 11
                             # chunks) wiped them and the precision core stopped at F0
                             # ("run_config.yaml does not exist")
-                            "run_config.yaml", "run_config.sha256", "run_environment.json"}
+                            "run_config.yaml", "run_config.sha256", "run_environment.json",
+                            # the 2-D SEMANTIC products — of the keyframes' images, never of the
+                            # chunk plan or the cloud (USER 2026-11-03: re-run every session "manteniendo
+                            # el VLM y SAM3"; pccr 2026-11-04 lost them to the first new plan of
+                            # 64-view chunks): the VLM stage's records and the RAW SAM3 store
+                            # (segmentation.json + seg_masks.npz, immutable since point 100 —
+                            # the interactive manager's edits live in it) with its rounds and
+                            # census. The projection, the fusion map and the instance store are of
+                            # the cloud and still go.
+                            "scene_analysis.json", "vlm_analysis.json", "vlm_analysis.timing.json",
+                            "scene_understanding.json", "autoprompt_instances.json",
+                            "autoprompt_review_queue.json", "autoprompt_concepts.json",
+                            "segmentation.json", "seg_masks.npz", "seg_rounds.json",
+                            "segmentation_census.json", "segmentation_timing.json", "_sam3_raw"}
 _PLAN_INDEPENDENT_MAPLONG = {"loop_closures.txt", "salad_calibration.json", "sky_masks",
                              "frame_list.json", "vggt_omega_config.yaml"}
 
