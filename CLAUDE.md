@@ -1,5 +1,38 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ 2026-11-04 — pccr: "LA NUBE ESTÁ ESPECTACULAR" (USER, 02:05 CDMX) — branch `turn-frames`, NOT yet in main
+- After the SLAM trials (VGGT-SLAM 2.0, VidMap, AMB3R — none beat the original pipeline) the original pipeline took the
+  SLAM's STRUCTURE. Validated by eye on pccr epoch 3 (to the cloud, no segmentation), repo turn-frames 8c70619, fork
+  2bd919b. What makes it:
+  - TURN FRAMES (`intake/turn_frames.py`, `reconstruction.vggtomega.turn_frames: {enabled, per_rotation_quantum: 3}`):
+    between consecutive keyframes the turn is cut into steps ≤ θ_q/3·1.25 (pccr 3.6°), the sharpest frame per step,
+    from I1's own readings. They are Omega CONTEXT views (inferred with the chunk, their slots dropped — the fork's
+    `loop_utils/context_views.py`) AND F6 WITNESSES (`precision/depth_on_f5.load_turn_witnesses`: the anchor keyframe's
+    scale, bend, floor and F5 pose carried onto them; they vote on the keyframes near their anchor — pccr: repaired
+    8.5 → 12.6 %, coverage 68.6 → 73.3 %). The POINTS stay the keyframes' (births = what the masks/corrections read).
+  - CHUNKS of at most 64 views per Omega pass, 50 % overlap, cut by co-visibility (USER: "¿los chunks no eran de 32?" →
+    VGGT-SLAM's 32 new + 32 shared; "ese es el límite"): `chunk_covis.MAX_CHUNK_VIEWS = 64`, a block ≤ 32 views
+    (keyframes + rotation keyframes + turn frames); a turn whose minimum block is over the cap keeps every turn frame
+    (USER: option 2). pccr 5 → 11 chunks, seams agree 1.7–3.1 cm (were ~10 cm).
+  - ONE CHUNK-LEVEL Sim(3) GRAPH (`reconstruction.vggtomega.chunk_graph: sim3`, the fork's `loop_utils/chunk_graph.py`,
+    USER "ok, Sim3" — not SL(4): it shears each piece, no metric model): seams fitted in Sim(3) on the exact shared
+    pixels (σ = their median residual), SALAD closures + REVISIT closures by GEOMETRY (`loop_utils/revisits.py`: pairs of
+    chunks that share no frame and see each other in the provisional chain — pccr 0↔2, 2↔4, 3↔5, the duplicated second
+    pass SALAD never retrieved), DA3 per chunk as a weak scale prior; chunk 0 the gauge. EVERY verified closure enters
+    as in a SLAM (USER "sí" / "aplicalo"), Cauchy loss; the leave-one-out judge is MEASURED, never deciding (local revisit
+    errors cannot predict one another: it refused 10 closures, 3 of them true). The closures' σ carry NO scale term (the
+    scale is the graph's). No distance bar on closures (USER: the "3× drift budget" rule is OBSOLETE). pccr: start↔end
+    closure 101 cm (old 5-chunk chain) → 45.5 (Sim3 seams) → 17.5 (+ DA3 priors) → 2.4 cm (closures applied); F2's
+    per-keyframe rescale 0.92–1.27 → 0.94–1.03.
+  - `reconstruction.vggtomega.max_resolution: 1024` (USER: "la resolución de Zaragoza siempre 1024, no más").
+  - Fixes found on the way: a new chunk plan wiped THIS job's run_config.yaml (F0 died) and the VLM/SAM3 2-D products —
+    both now kept (`_PLAN_INDEPENDENT_OUTPUT`); pccr's VLM/SAM3 were lost before the fix (re-run them before GenRecon).
+- USER on my readouts: "tus métricas son incorrectas" — the chunk check's floor-per-chunk of this run (+8–29 cm on
+  chunks 3–5, 9, with a 0.1–0.8° progressive tilt from the closures) does NOT match what he sees; nothing is changed on
+  it. His eye is the verdict; the floor is the certification's job.
+- NEXT (his plan of 11-03/04): zaragoza (1024, 6 chunks) and station (17 chunks) with this recipe, then every session to
+  GenRecon keeping VLM/SAM3; merge turn-frames → main on his word.
+
 ## ⭐⭐ 2026-11-02 — GenRecon: TWO VARIANTS, THE CUBES' BASE ON THE LOWEST LEVEL (USER: "paralo y corregí eso")
 - Station's tracks (1.15 m under the platform; labelled track / rail / gravel, no support noun) sat under EVERY chunk
   cube: the base was the lowest SUPPORT level. `tools/genrecon/genrecon_levels.py`: the base = the lowest level of
