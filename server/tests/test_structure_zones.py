@@ -190,3 +190,11 @@ def test_a_zone_is_only_what_the_chain_of_chunks_does_not_join_already(tmp_path)
     assert len(apart["zones"]) == 1 and apart["zone_revisits"]
     together = WS.analyse(npz, ranges=[(0, 60)], device="cpu", log=lambda m: None)   # one pass holds the revisit
     assert together["zones"] == [] and together["revisits"]["geometric"]
+
+
+def test_the_probe_analysis_never_touches_the_card_in_the_map_worker():
+    """pccr 2026-11-05: the co-visibility on cuda inside the map worker's process made Omega's exclusive-card check
+    (repro.require_exclusive_gpu) fail the run — the analysis runs on the CPU there."""
+    import inspect
+    src = inspect.getsource(ZN.structure_probe)
+    assert 'WS.analyse(npz, ranges=ranges, device="cpu"' in src

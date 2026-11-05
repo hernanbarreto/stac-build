@@ -114,7 +114,10 @@ def structure_probe(scan_dir: Path, frames_dir: Path, sel_files: Sequence[str], 
         tmp = stamp_p.with_name(stamp_p.name + ".tmp")
         tmp.write_text(json.dumps(stamp, indent=1))
         os.replace(tmp, stamp_p)
-    res = WS.analyse(npz, ranges=ranges, log=log)
+    # on the CPU: the map worker's own process must not touch the card before Omega's exclusive check
+    # (repro.require_exclusive_gpu, docs/plan_determinismo.md point 4 — pccr 2026-11-05: the matrix on cuda here
+    # failed the run at the fork); a few seconds for hundreds of keyframes, deterministic
+    res = WS.analyse(npz, ranges=ranges, device="cpu", log=log)
     z = np.load(npz)
     WS.figure(res, z["c2w"], png, Path(scan_dir).parent.parent.name)
     res["pass_stamp"] = stamp
