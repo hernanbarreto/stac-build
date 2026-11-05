@@ -1899,6 +1899,30 @@ def math_deg(rad: float) -> float:
     return math.degrees(float(rad))
 
 
+
+def _single_pass_capacity(config: dict, vggt_config: dict, frames_dir, n_keyframes: int, n_witness: int,
+                          log) -> int:
+    """The views one Omega pass holds on THIS card at the configured resolution (the committed card
+    table, Omega's grid for the native frame, the I3 margin) — 0 when even the keyframes with their
+    interval witnesses (the witness pass of a single chunk) would not fit it."""
+    import repro
+    import card_table as _ct
+    from precision.camera import omega_grid_for
+    from intake.config import load_intake_config as _lic
+    from reconstruction.chunk_plan import omega_capacity, omega_card
+    _ct.require_one_visible_card()
+    card = omega_card(repro.card_identity(0)["key"])
+    nw, nh = _native_frame_wh(frames_dir)
+    res = int(vggt_config["Model"]["omega_resolution"])
+    g = omega_grid_for(int(nw), int(nh), str(vggt_config["Model"]["omega_mode"]), res)
+    cap = omega_capacity(card["total_gb"], g.w, g.h, float(_lic(config).parallax.vram_margin_frac),
+                         card["footprint_factor"])
+    fits = int(n_keyframes) + int(n_witness) <= cap
+    log(f"[covis] one Omega pass on {card['card']} at {res} (grid {g.w}x{g.h}) holds {cap} views; "
+        f"the keyframes with their witnesses: {int(n_keyframes) + int(n_witness)}"
+        + ("" if fits else " — they do not fit: no single pass"))
+    return int(cap) if fits else 0
+
 def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                    selected_frames_path: str, recon_cfg: dict, config: dict):
     """VGGT-Omega backbone: DA3 per-frame metric depth (anchor) + VGGT-Long[Omega] poses
@@ -2320,8 +2344,15 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         _turn = session_turn_frames(output_dir.parent, load_turn_frames_config(config),
                                     log=pipe.send_log)
     pipe.send_progress(8, "Chunk plan: co-visibility over the I3 windows...", stage="reconstruction")
+    # USER 2026-11-05 ("si es un tramo recto y entra en una sola tarjeta es un único chunk"): what ONE
+    # Omega pass holds on this card at the configured resolution — the walk within H that fits it
+    # (its keyframes with their turn frames, and its keyframes with their interval witnesses) is
+    # one pass; the 64-view cap only sizes the pieces of a walk that must be cut
+    _sp_views = _single_pass_capacity(config, vggt_config, frames_dir, _n_selected,
+                                      len(_turn["witness_files"]), pipe.send_log)
     try:
-        _cplan = plan_session(output_dir.parent, log=pipe.send_log, turn_files=_turn["files"])
+        _cplan = plan_session(output_dir.parent, log=pipe.send_log, turn_files=_turn["files"],
+                              single_pass_views=_sp_views)
     except CovisError as _ce:
         if not _walk_reused:
             raise
@@ -2335,7 +2366,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         run_da3_windows(output_dir.parent, _pc.gauge, sys.executable, log=pipe.send_log,
                         check_cancel=pipe.check_cancel, frames_dir=frames_dir, files=_sel_files,
                         run_cfg=config)
-        _cplan = plan_session(output_dir.parent, log=pipe.send_log, turn_files=_turn["files"])
+        _cplan = plan_session(output_dir.parent, log=pipe.send_log, turn_files=_turn["files"],
+                              single_pass_views=_sp_views)
     _ranges = [(int(a), int(b)) for a, b in _cplan["ranges"]]
     _covis_rep = _cplan["report"]
     for _line in format_plan(_covis_rep):

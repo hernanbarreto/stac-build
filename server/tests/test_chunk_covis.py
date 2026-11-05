@@ -295,3 +295,19 @@ def test_the_frozen_plan_declines_a_replan_on_noise_and_plans_anew_for_other_key
     assert new["ranges"][-1][1] == 48 and new["report"]["measurement"] == "measured"
     assert json.loads((other / "intake" / CC.FROZEN_NAME).read_text())["keyframes"][-1] == 470
     assert any("froze another keyframe set" in m for m in logs)
+
+
+def test_a_walk_within_H_that_fits_the_card_is_one_pass():
+    """USER 2026-11-05: "si es un tramo recto y entra en una sola tarjeta es un único chunk" — the
+    64-view cap sizes the pieces of a walk that must be cut, never a walk the card holds."""
+    from reconstruction.chunk_covis import plan_detail, MAX_CHUNK_VIEWS
+    n = 70
+    d = np.full(n, 2.99 / n); z = np.full(n, 8.0); t = np.full(n - 1, 1.0); v = np.ones(n, int); v[:20] = 2
+    assert len(plan_detail(d, z, t, max_chunk_views=MAX_CHUNK_VIEWS, views=v)["ranges"]) == 2
+    one = plan_detail(d, z, t, max_chunk_views=MAX_CHUNK_VIEWS, views=v, single_pass_views=401)
+    assert one["ranges"] == [(0, n)] and one["single_pass"]
+    assert len(plan_detail(d, z, t, max_chunk_views=MAX_CHUNK_VIEWS, views=v, single_pass_views=0)["ranges"]) == 2
+    d2 = np.full(300, 35.9 / 300)
+    many = plan_detail(d2, np.full(300, 5.0), np.full(299, 1.0), max_chunk_views=MAX_CHUNK_VIEWS,
+                       views=np.ones(300, int), single_pass_views=613)
+    assert len(many["ranges"]) > 1                       # beyond H: cut as before, whatever the card holds

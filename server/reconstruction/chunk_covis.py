@@ -469,11 +469,15 @@ def _single(n: int, D_total: float, why: str, flags: List[str], H: float) -> Dic
 
 def plan_detail(delta, zbar, theta, min_chunk_frames: int = MIN_CHUNK_FRAMES,
                 H: float = H_LENGTHS_PER_CHUNK, max_chunk_views: Optional[int] = None,
-                views=None) -> Dict[str, Any]:
+                views=None, single_pass_views: Optional[int] = None) -> Dict[str, Any]:
     """The plan with its evidence: ``ranges`` ([start, end) keyframe indices), the blocks, chunks,
     cuts, flags and the optimum reached on each criterion. See ``plan``. ``max_chunk_views``: the
     most views a chunk may hold (MAX_CHUNK_VIEWS; None = no cap); ``views``: each keyframe's views
-    (itself, the rotation keyframes it stands for, the turn frames after it; None = 1 each)."""
+    (itself, the rotation keyframes it stands for, the turn frames after it; None = 1 each).
+    ``single_pass_views``: the views ONE Omega pass holds on this card at the configured resolution —
+    USER 2026-11-05 ("si es un tramo recto y entra en una sola tarjeta es un único chunk"): a walk
+    within H that fits the card is ONE pass whatever max_chunk_views says (the 64-view cap is the
+    size of the pieces when the walk must be cut); None = the old rule (max_chunk_views)."""
     d = np.asarray(delta, dtype=np.float64).ravel()
     z = np.asarray(zbar, dtype=np.float64).ravel()
     t = np.asarray(theta, dtype=np.float64).ravel()
@@ -503,9 +507,11 @@ def plan_detail(delta, zbar, theta, min_chunk_frames: int = MIN_CHUNK_FRAMES,
     L_min = mcf // 2
     head = {"n": n, "H": H, "min_chunk_frames": mcf, "block_min": L_min, "D_total": D_total,
             "max_chunk_views": cap, "views_total": int(Wv[n])}
-    if D_total <= H and (cap is None or int(Wv[n]) <= cap):
-        why = f"D_total {D_total:.2f} ≤ H {H:g}" + (f", {int(Wv[n])} views ≤ {cap}"
-                                                     if cap is not None else "")
+    one = cap if single_pass_views is None else int(single_pass_views)
+    head["single_pass_views"] = one
+    if D_total <= H and (one is None or int(Wv[n]) <= one):
+        why = f"D_total {D_total:.2f} ≤ H {H:g}" + (f", {int(Wv[n])} views ≤ {one} (one pass on the card)"
+                                                     if one is not None else "")
         return {**head, **_single(n, D_total, why, [], H)}
     if n < 2 * L_min:
         return {**head, **_single(n, D_total, f"{n} keyframes are fewer than the shortest "
@@ -789,12 +795,15 @@ def _turn_files_sha256(turn_files: Optional[Sequence[str]]) -> Optional[str]:
     return hashlib.sha256(json.dumps(sorted(str(f) for f in turn_files)).encode()).hexdigest()
 
 
-def _planner_constants(turn_files: Optional[Sequence[str]] = None) -> Dict[str, Any]:
-    """What a plan is a function of beyond the measurement: the method's constants and the turn
-    frames whose views it counts (USER 2026-11-04)."""
+def _planner_constants(turn_files: Optional[Sequence[str]] = None,
+                       single_pass_views: Optional[int] = None) -> Dict[str, Any]:
+    """What a plan is a function of beyond the measurement: the method's constants, the turn
+    frames whose views it counts (USER 2026-11-04) and the views one pass holds on the card
+    (USER 2026-11-05: a walk that fits is one pass)."""
     return {"H": H_LENGTHS_PER_CHUNK, "min_chunk_frames": MIN_CHUNK_FRAMES, "tau": TAU,
             "tol_quantile": TOL_QUANTILE, "samples_per_frame": SAMPLES,
             "scan_horizon": SCAN_HORIZON, "max_chunk_views": MAX_CHUNK_VIEWS,
+            "single_pass_views": single_pass_views,
             "turn_frames_sha256": _turn_files_sha256(turn_files)}
 
 
@@ -875,14 +884,16 @@ def planning_indices(scan_dir: Path, frames: List[int]) -> List[int]:
 
 
 def _report_of(scan_dir: Path, doc: Dict[str, Any], source: str,
-               turn_files: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+               turn_files: Optional[Sequence[str]] = None,
+               single_pass_views: Optional[int] = None) -> Dict[str, Any]:
     delta = np.asarray(doc["delta"], dtype=np.float64)
     zbar = np.asarray(doc["zbar_m"], dtype=np.float64)
     theta = np.asarray(doc["theta_deg"], dtype=np.float64)
     frames = doc["frames"]
     n_full = len(frames)
     views = planning_views(frames, doc.get("plan_index", list(range(n_full))), turn_files)
-    det = plan_detail(delta, zbar, theta, max_chunk_views=MAX_CHUNK_VIEWS, views=views)
+    det = plan_detail(delta, zbar, theta, max_chunk_views=MAX_CHUNK_VIEWS, views=views,
+                      single_pass_views=single_pass_views)
     chain = doc["chainage_m"]
     # the plan is measured on the planning subsequence (the parallax keyframes); every range it
     # reports is mapped to FULL keyframe indices — a boundary at planning keyframe p becomes the
@@ -936,7 +947,8 @@ def _report_of(scan_dir: Path, doc: Dict[str, Any], source: str,
 
 def plan_session(scan_dir: Path, *, cache_path: Optional[Path] = None,
                  log: Callable = print,
-                 turn_files: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+                 turn_files: Optional[Sequence[str]] = None,
+                 single_pass_views: Optional[int] = None) -> Dict[str, Any]:
     """The session's chunk plan: {"ranges": [(start, end), ...], "report": {...}}. The report
     carries n, D_total, H, tol_rel, every chunk's D / frames / metres / seam depth, the cuts, the
     flags, every bar's margin, the input stamp and the sha256 of exactly what the planner read.
@@ -949,7 +961,7 @@ def plan_session(scan_dir: Path, *, cache_path: Optional[Path] = None,
     plan it would have given). Another keyframe set plans again and freezes that plan. With the
     keyframes known from walk.json, the frozen plan needs no measurement at all."""
     scan_dir = Path(scan_dir)
-    planner = _planner_constants(turn_files)
+    planner = _planner_constants(turn_files, single_pass_views)
     frozen = _load_frozen(scan_dir)
     fpath = scan_dir / "intake" / FROZEN_NAME
 
@@ -961,7 +973,7 @@ def plan_session(scan_dir: Path, *, cache_path: Optional[Path] = None,
         ranges = [(int(a), int(b)) for a, b in frozen["ranges"]]
         rep = dict(frozen["report"], ranges=ranges, measurement=source, plan_frozen=str(fpath))
         if doc_now is not None:
-            now = _report_of(scan_dir, doc_now, "reused", turn_files)
+            now = _report_of(scan_dir, doc_now, "reused", turn_files, single_pass_views)
             # the informational fields follow the CURRENT measurement (the window layout it was
             # read from, the τ margins) — recorded, never acted on; the ranges are the frozen ones
             for k in ("window_layout", "tau_margin_min"):
@@ -983,7 +995,7 @@ def plan_session(scan_dir: Path, *, cache_path: Optional[Path] = None,
     doc, source = covis_inputs(scan_dir, cache_path=cache_path, log=log)
     if _frozen_for(doc["frames"]):
         return _from_frozen(doc, "frozen")
-    report = _report_of(scan_dir, doc, source, turn_files)
+    report = _report_of(scan_dir, doc, source, turn_files, single_pass_views)
     ranges = [(int(a), int(b)) for a, b in report["ranges"]]
     if frozen is not None:
         log(f"{LOG_TAG} {fpath.name} froze another keyframe set or planner — this one is planned "
