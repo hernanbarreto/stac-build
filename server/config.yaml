@@ -90,7 +90,8 @@ pipeline:
   # USER 2026-10-17 ("este pipeline de mesh se hace al finalizar el autosegment"): the scene mesh by
   # GenRecon — mode cloud, the active voxels from the published cloud — as the LAST stage of the chain
   # (the Meshing button is gone). false = the chain ends at the certification.
-  auto_genrecon: true
+  auto_genrecon: false               # USER 2026-11-05: "que se genere a mano, desde el panel de segmentación" — the
+                                     # Autosegment window runs it with the confidence chosen there; the chain ends at SAM3
 
 # ── GenRecon scene mesh (workers/genrecon_worker.py → server/tools/genrecon/run_cloud.sh) ──────────
 genrecon:
@@ -104,7 +105,8 @@ genrecon:
                                      # cualquier cosa, nos quedamos con el genrecon photo". "genrecon_generative" runs,
                                      # after mesh_name, a second mesh whose presence the MODEL decides from the keyframes
                                      # (the cloud only lays out the chunks) with the texture it generated, no photo bake
-  cube_size_m: 3.7                   # USER 2026-11-02 ("vamos con los tamaños de cubo con los que se entrenó, y deberían
+  cube_size_m: 2.85                  # USER 2026-11-05: the cube GenRecon was trained on (SAGE 2.85 m) — 8.9 cm voxels.
+                                     # Was 3.7 (USER 2026-11-02 ("vamos con los tamaños de cubo con los que se entrenó, y deberían
                                      # ser tantos como sean necesarios para cubrir la altura desde la parte más baja a la
                                      # más alta de la nube"): cubes of this side STACKED from the lowest level to the
                                      # cloud's top (tools/genrecon/genrecon_levels.stacked_centers, GenRecon's own 1/16
@@ -112,9 +114,22 @@ genrecon:
                                      # inside GenRecon's training range (ScanNet++ rooms ×1.2, SAGE 2.85 m): 11.6 cm
                                      # voxels, ~7 mm surface. 0 = one layer floor to ceiling (station: 5.85 m → 18 cm,
                                      # 6.98 m with the tracks → 22 cm)
-  min_points_per_voxel: 10           # BOUND: a chunk voxel (32³ ≈ 11.6 cm) is active from this many cloud points
-  simplify_faces_per_chunk: 150000   # the bake's decimation target per chunk (pccr: 25 chunks → 3.2 M faces, 250 MB)
-  texture_size: 2048                 # the bake's atlas per chunk
+  min_points_per_voxel: 10           # only for the modes without layout.json (cloud+hull/objects/unseen): a voxel is
+                                     # active from this many points. Mode cloud: the keyframes' vote decides (below)
+  # USER 2026-11-05 ("que decidan las fotos, no la cuenta de puntos … el límite es la nube"): every point is put to the
+  # keyframes that frame it (tools/genrecon/presence.py: each keyframe's depth rebuilt from the points born in it); a
+  # point stays when at least presence_min_views keyframes measure it and fewer see through it; a voxel is active when a
+  # point that stayed lies in it; the cubes are laid over the whole of what stays
+  presence_min_views: 2              # the keyframe it was born in + at least one more
+  presence_device: cuda
+  confidence: 0.0                    # the viewer's confidence slider (0..1) applied first; chosen PER ORDER in the
+                                     # Autosegment window (USER: "eso depende de cómo se capturó, no puede generalizarse")
+  simplify_faces_per_chunk: 0        # 0 = no decimation (USER 2026-11-05: "no simplificar cada cubo"; the 3D tiles carry
+                                     # the levels of detail). Was 150000 (pccr: 25 chunks → 3.2 M faces, 250 MB)
+  bake_workers: 6                    # chunk bakes in parallel processes (bake_chunks_parallel.py; one CPU thread each)
+  texture_size: 2048                 # GenRecon's own atlas per chunk (the UV layout the photo bake starts from)
+  photo_atlas_min: 512               # the photo bake re-sizes each part's atlas to the finest photo pixel on it,
+  photo_atlas_max: 4096              # a power of two within these bounds (USER 2026-11-05: "no un 2048 fijo")
   tiles: true                        # USER 2026-11-02 ("hay que implementar el tema de los tiles … para que pueda ser
                                      # manejable una malla grande"): the published mesh is also cut into 3D Tiles,
                                      # output/tsdf/<mesh_name>/tiles/ (tools/glb/tile_mesh.mjs: LOD levels, KTX2
@@ -4011,7 +4026,10 @@ certify:                            # §4.8 ensemble witness + §9 certification
                                     # corrections/epoch_<N>.npz (replay + provenance).
                                     # false = every epoch stays on disk and is selectable in
                                     # the kit (the 2026-09-16 behaviour, kept for evaluation).
-  auto_after_segmentation: true     # USER 2026-09-29 evening: "todo integrado, nada a mano" — after the
+  auto_after_segmentation: false    # USER 2026-11-05: "hay que detener la certificación de mierda esa,
+                                    # eliminarla del pipeline … nube genrecon vlm+sam3 fin, así tiene que
+                                    # ser" — OFF: the pipeline is cloud → GenRecon → VLM + SAM3 → end.
+                                    # (USER 2026-09-29 evening: "todo integrado, nada a mano" — after the
                                     # cloud stage projects the masks on the corrected cloud, the
                                     # correction runs (closures → depth per chunk → floor level →
                                     # re-level → chunk check), deliverable_only. (2026-09-28 it was

@@ -35,23 +35,29 @@ def test_production_pipeline_runs_the_whole_chain():
     # closes: closures → depth per chunk → floor → mask filter → chunk check,
     # deliverable_only. With the precision core on or off, the same five stages.
     assert raw["reconstruction"]["precision"]["enabled"] is True
-    assert raw["certify"]["auto_after_segmentation"] is True, \
-        "the correction after the cloud stage is part of 'Reconstruir'"
+    # USER 2026-11-05: "hay que detener la certificación de mierda esa, eliminarla del pipeline …
+    # nube genrecon vlm+sam3 fin, así tiene que ser"
+    assert raw["certify"]["auto_after_segmentation"] is False, \
+        "the certification is out of the pipeline (USER 2026-11-05)"
     # USER 2026-10-08: I2 (content tags + exclusion masks) is REMOVED, not off — the section is
     # gone from config.yaml (a leftover fails the intake loader); the VLM runs once, after the cloud
     assert "content" not in raw["intake"], \
         "I2 was removed on 2026-10-08 — intake.content must not come back"
     stages = build_pipeline_stages(backend=str(raw["reconstruction"]["backend"]))
     enabled = [s.id for s in stages if s.enabled]
-    want = [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.VLM, StageId.SAM3,
-            StageId.CERTIFY]
-    assert enabled[:len(want)] == want, enabled
+    want = [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.GENRECON, StageId.VLM,
+            StageId.SAM3]
+    assert enabled == want, enabled                   # cloud → GenRecon → VLM + SAM3 → end
     # the reconstruction stage hosts no semantics any more
     import inspect
     import workers.map_worker as M
     assert not hasattr(M, "_run_semantics_2d") and not hasattr(M, "_run_vlm_understand")
     assert "vlm_worker" not in inspect.getsource(M) and "sam3_worker" not in inspect.getsource(M)
-    assert StageId.GENRECON in enabled        # the scene mesh closes the chain (USER 2026-10-17)
+    # the mesh is the cloud's: it runs without the semantic stages too (their switch is theirs)
+    from pipeline_manager import SEGMENTATION_CHAIN, select_stages
+    assert StageId.GENRECON not in SEGMENTATION_CHAIN
+    no_seg = [s.id for s in select_stages(stages, segment=False) if s.enabled]
+    assert no_seg == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.GENRECON], no_seg
 
 
 def test_production_config_loads_through_every_typed_loader():
@@ -67,7 +73,7 @@ def test_production_config_loads_through_every_typed_loader():
     assert cfg.certify.gates.mode == "advisory"
     assert cfg.graph.gate_mode == "advisory"
     assert cfg.loops.semantic.nonstructural_sigma_factor >= 1.0
-    assert cfg.certify.auto_after_segmentation is True
+    assert cfg.certify.auto_after_segmentation is False      # USER 2026-11-05: out of the pipeline
     ccfg = load_correction_config(raw)
     assert ccfg.gates.mode == "advisory"
     assert ccfg.apply.potree_rebuild is True, "the certified epoch must carry its own octree"

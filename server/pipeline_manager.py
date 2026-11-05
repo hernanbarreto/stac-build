@@ -252,6 +252,9 @@ DEFAULT_STAGE_ORDER: List[StageId] = [
                            # and degraded to instances with no points. It also
                            # means a SAM3 failure no longer costs the user the
                            # cloud: it is on screen before segmentation starts.
+    StageId.GENRECON,      # USER 2026-11-05: "nube genrecon vlm+sam3 fin, así tiene que ser" — the
+                           # scene mesh right after the cloud (its levels from the segmentation when
+                           # one exists, else from the whole cloud: tools/genrecon/genrecon_levels.py)
     StageId.VLM,
     StageId.SAM3,
     StageId.PROJECTION,    # the masks → cloud projection as a stage of its own (points 158 /
@@ -260,11 +263,8 @@ DEFAULT_STAGE_ORDER: List[StageId] = [
                            # the one launcher of a projection ordered alone: a resume whose SAM3
                            # left masks without a result, a session opened with unprojected
                            # masks, the Segmentation Manager's close
-    StageId.CERTIFY,
-    StageId.GENRECON,      # USER 2026-10-17: the scene mesh at the end of the segmentation chain
-                           # vggtomega_pgsr (seeds from cleaned_cloud, so it runs
-                           # after CloudCompy; the TSDF then integrates its
-                           # rendered depths via depth_source "pgsr_render")
+    StageId.CERTIFY,       # USER 2026-11-05: "hay que detener la certificación de mierda esa,
+                           # eliminarla del pipeline" — off (certify.auto_after_segmentation false)
 ]
 
 
@@ -923,7 +923,7 @@ class PipelineManager:
     # seg_masks.npz right after SAM3 wrote them (test2, 2026-07-08).
     CASCADE_INVALIDATION: Dict[StageId, List[StageId]] = {
         StageId.RECONSTRUCTION: [
-            StageId.GENRECON,         # the scene mesh is of this geometry and segmentation
+            StageId.GENRECON,         # the scene mesh is of this geometry
             StageId.CLOUDCOMPY,       # cleaned_cloud depends on chunks
             StageId.VLM,              # scene analysis ran on old keyframes
             StageId.SAM3,             # segmentation ran on old frames
@@ -933,32 +933,30 @@ class PipelineManager:
         ],
         StageId.VLM: [
             StageId.SAM3,             # SAM3 uses VLM categories
-            StageId.GENRECON,         # the scene mesh is of this geometry and segmentation
             StageId.PROJECTION,       # the projection is of SAM3's masks
             StageId.CERTIFY,          # instance loops come from the segmentation
             StageId.INSTANCE_CLEANER,
         ],
         StageId.SAM3: [
             StageId.PROJECTION,       # the projection is of THESE masks
-            StageId.GENRECON,         # the scene mesh is of this geometry and segmentation
             StageId.CERTIFY,          # instance loops come from the segmentation
             StageId.INSTANCE_CLEANER, # instances depend on segmentation
         ],
         StageId.PROJECTION: [
             StageId.CERTIFY,          # the certification reads the projected instances
-            StageId.GENRECON,         # the scene mesh is of this geometry and segmentation
             StageId.INSTANCE_CLEANER,
         ],
         StageId.CLOUDCOMPY: [
             StageId.VLM,              # the semantic stages read THIS cloud
-            StageId.GENRECON,         # the scene mesh is of this geometry and segmentation
+            StageId.GENRECON,         # the scene mesh is of this cloud
             StageId.SAM3,             # masks are projected onto THIS cloud
             StageId.PROJECTION,
             StageId.CERTIFY,          # the loop certifies THIS cleaned cloud
             StageId.INSTANCE_CLEANER,
         ],
         StageId.CERTIFY: [
-            StageId.GENRECON,         # the mesh is of the certified epoch
+            StageId.GENRECON,         # a certified epoch is another geometry (the stage is off since
+                                      # 2026-11-05; kept for a certification ordered by hand)
         ],
     }
 
@@ -1962,8 +1960,11 @@ def build_pipeline_stages(backend: Optional[str] = None,
     if not auto_certify:
         logger.info("[Pipeline] auto_after_segmentation off — CERTIFY stage disabled")
 
+    # USER 2026-11-05: "nube genrecon vlm+sam3 fin" — DEFAULT_STAGE_ORDER: reconstruction →
+    # cloudcompy → genrecon → vlm → sam3 → (projection) — and the certification is OFF
+    # (certify.auto_after_segmentation false).
     # USER 2026-10-05: the VLM and SAM3 are stages AFTER the cloud stage again
-    # (DEFAULT_STAGE_ORDER: reconstruction → cloudcompy → vlm → sam3 → certify) —
+    # (DEFAULT_STAGE_ORDER then: reconstruction → cloudcompy → vlm → sam3 → certify) —
     # the reconstruction stage (intake, Omega, the precision core F0 → F6 bend)
     # publishes its cloud with its octree, the cloud stage hands it to the viewer
     # at once, the segmentation runs after it and the SAM3 stage projects its masks
@@ -1982,8 +1983,9 @@ def build_pipeline_stages(backend: Optional[str] = None,
         if stage_id == StageId.CERTIFY and not (auto_certify and auto_segment):
             return False   # config.yaml documents auto_segment:false as "no
                            # segmentation, no instance loops, no certification" 
-        if stage_id == StageId.GENRECON and not (auto_genrecon and auto_segment):
-            return False   # the mesh needs the segmentation's levels; pipeline.auto_genrecon switches it
+        if stage_id == StageId.GENRECON and not auto_genrecon:
+            return False   # pipeline.auto_genrecon switches the mesh (USER 2026-11-05: right after the
+                           # cloud; its levels from the segmentation when one exists, else the cloud's)
         return True
 
     return [PipelineStage(id=stage_id, enabled=_enabled(stage_id))
@@ -1999,7 +2001,8 @@ def certify_follows(job: "PipelineJob", idx: int) -> bool:
     return any(st.stage.id == StageId.CERTIFY and st.stage.enabled for st in job.stages[idx + 1:])
 
 
-SEGMENTATION_CHAIN = (StageId.VLM, StageId.SAM3, StageId.CERTIFY, StageId.GENRECON)
+SEGMENTATION_CHAIN = (StageId.VLM, StageId.SAM3, StageId.CERTIFY)   # USER 2026-11-05: the mesh is
+                                                                     # the cloud's, before them
 # ... plus the projection stage, which only exists after SAM3's masks
 SEGMENT_WHEN_DONE = SEGMENTATION_CHAIN + (StageId.PROJECTION,)
 

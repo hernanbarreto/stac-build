@@ -445,7 +445,8 @@ def test_the_projection_stage_is_registered_off_in_reconstruir_and_on_demand():
     assert not PM.STAGE_REGISTRY[StageId.SAM3].get("engine") and not reg.get("engine")
     stages = build_pipeline_stages(backend="vggtomega", config=_base_config())
     assert not next(s for s in stages if s.id == StageId.PROJECTION).enabled
-    assert [s.id for s in select_stages(stages, segment=False) if s.enabled] == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY]
+    assert [s.id for s in select_stages(stages, segment=False) if s.enabled] == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY,
+                                                                                 StageId.GENRECON]   # USER 2026-11-05
     svc = service_stages({StageId.CERTIFY, StageId.PROJECTION})
     assert [s.id for s in svc] == [StageId.PROJECTION, StageId.CERTIFY] and all(s.enabled for s in svc)
     with pytest.raises(ValueError):
@@ -457,11 +458,16 @@ def test_the_projection_stage_is_registered_off_in_reconstruir_and_on_demand():
 
 
 def test_build_pipeline_stages_reads_the_orders_configuration_not_the_servers():
+    # USER 2026-11-05: "nube genrecon vlm+sam3 fin" — the mesh is the cloud's (its own switch), the
+    # certification out of the pipeline (certify.auto_after_segmentation false)
     off = build_pipeline_stages(backend="vggtomega", config=_base_config(pipeline={"auto_segment": False, "auto_tsdf": False}))
-    assert [s.id for s in off if s.enabled] == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY]
-    on = build_pipeline_stages(backend="vggtomega", config=_base_config())
-    assert [s.id for s in on if s.enabled] == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.VLM,
-                                                StageId.SAM3, StageId.CERTIFY, StageId.GENRECON]   # the scene mesh closes the chain (USER 2026-10-17)
+    assert [s.id for s in off if s.enabled] == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.GENRECON]
+    on = build_pipeline_stages(backend="vggtomega", config=_base_config(certify={"auto_after_segmentation": False}))
+    assert [s.id for s in on if s.enabled] == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.GENRECON,
+                                                StageId.VLM, StageId.SAM3]
+    # the switch still works: on, the certification follows the segmentation
+    cert = build_pipeline_stages(backend="vggtomega", config=_base_config())
+    assert [s.id for s in cert if s.enabled][-1] == StageId.CERTIFY
 
 
 def test_projection_probe_and_the_job_config_reach_the_reconstruction_probe(tmp_path):

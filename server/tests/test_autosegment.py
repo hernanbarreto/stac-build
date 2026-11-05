@@ -23,8 +23,8 @@ def _full():
 
 
 def test_the_chain_is_vlm_sam3_certify_and_the_check_off_ends_at_the_cloud():
-    # GenRecon closes the chain since 2026-10-17 (USER: the mesh at the end of the autosegment)
-    assert SEGMENTATION_CHAIN == (StageId.VLM, StageId.SAM3, StageId.CERTIFY, StageId.GENRECON)
+    # USER 2026-11-05 ("nube genrecon vlm+sam3 fin"): the mesh is the cloud's, before the chain
+    assert SEGMENTATION_CHAIN == (StageId.VLM, StageId.SAM3, StageId.CERTIFY)
     off = select_stages(_full(), segment=False)
     assert [s.id for s in off if s.enabled] == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY]
     on = select_stages(_full(), segment=True)
@@ -51,9 +51,9 @@ def test_production_stage_list_accepts_the_selection():
     raw = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
     stages = build_pipeline_stages(backend=str(raw["reconstruction"]["backend"]))
     off = [s.id for s in select_stages(stages, segment=False) if s.enabled]
-    assert off == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY]
+    assert off == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.GENRECON]   # the mesh is the cloud's
     auto = [s.id for s in select_stages(stages, only={StageId.SAM3, StageId.CERTIFY}) if s.enabled]
-    assert auto == [StageId.SAM3, StageId.CERTIFY]
+    assert auto == [StageId.SAM3]          # the certification is off in config.yaml (USER 2026-11-05)
 
 
 # ── the prompts ─────────────────────────────────────────────────────────
