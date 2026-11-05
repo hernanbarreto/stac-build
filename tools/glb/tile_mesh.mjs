@@ -24,7 +24,7 @@
  *   The ktx tool: $KTX_BIN (default <repo>/vendor/KTX-Software-4.4.2-Linux-x86_64/bin/ktx, its lib/ beside it).
  */
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -190,6 +190,24 @@ function run(cmd, args, env) {
   });
 }
 
+
+function readLarge(p) {
+  const fd = openSync(p, 'r');
+  try {
+    const size = fstatSync(fd).size;
+    const buf = Buffer.allocUnsafe(size);
+    let off = 0;
+    while (off < size) {
+      const n = readSync(fd, buf, off, Math.min(1 << 30, size - off), off);
+      if (n <= 0) throw new Error(`short read at ${off} of ${size} bytes`);
+      off += n;
+    }
+    return new Uint8Array(buf.buffer, buf.byteOffset, size);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 async function pool(tasks, n) {
   let next = 0;
   const worker = async () => { while (next < tasks.length) { const t = tasks[next++]; await t(); } };
@@ -207,7 +225,9 @@ async function main() {
   const io = new NodeIO().registerExtensions(ALL_EXTENSIONS)
     .registerDependencies({ 'meshopt.encoder': MeshoptEncoder, 'meshopt.decoder': MeshoptDecoder });
   const t0 = Date.now();
-  const src = await io.read(inPath);
+  // STAC 2026-11-05 (zaragoza: a 2.3 GB GLB — fs.readFile stops at 2 GiB, ERR_FS_FILE_TOO_LARGE): the GLB is read in
+  // 1 GiB pieces into one buffer (Node allows up to 4 GiB; a GLB counts its length in 32 bits anyway) and parsed from it
+  const src = inPath.toLowerCase().endsWith('.glb') ? await io.readBinary(readLarge(inPath)) : await io.read(inPath);
   const items = [];
   for (const scene of src.getRoot().listScenes()) {
     scene.traverse(node => {

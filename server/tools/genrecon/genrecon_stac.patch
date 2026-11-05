@@ -1,3 +1,26 @@
+diff --git a/chunked_to_glb.py b/chunked_to_glb.py
+index a46c4e5..cfc69a5 100644
+--- a/chunked_to_glb.py
++++ b/chunked_to_glb.py
+@@ -15,6 +15,7 @@ from __future__ import annotations
+ 
+ import argparse
+ import time
++import sys
+ import traceback
+ from pathlib import Path
+ 
+@@ -157,7 +158,9 @@ def main() -> None:
+     except Exception:
+         print("[chunked_to_glb] FAILED:")
+         traceback.print_exc()
+-        return
++        # STAC 2026-11-05 (zaragoza: an out-of-memory in the global remesh returned 0 — the dump "succeeded" with no
++        # chunk, the bake workers baked nothing and the run went on to a missing scene.glb): a failure FAILS the step
++        sys.exit(1)
+ 
+     elapsed = time.perf_counter() - t0
+     if args.dump_geometry_plys:
 diff --git a/configs/gen/slat_flow_img2shape/genrecon_512.json b/configs/gen/slat_flow_img2shape/genrecon_512.json
 index faa45cc..9c0029d 100755
 --- a/configs/gen/slat_flow_img2shape/genrecon_512.json
@@ -249,7 +272,7 @@ index f4c79e8..f5e1834 100644
  from ..models.sc_vaes.sparse_unet_vae import SparseUnetVaeDecoder
  from ..modules.sparse import SparseTensor
 diff --git a/inference/chunked_glb.py b/inference/chunked_glb.py
-index f9a9459..c5c64f6 100644
+index f9a9459..b883af3 100644
 --- a/inference/chunked_glb.py
 +++ b/inference/chunked_glb.py
 @@ -3,6 +3,7 @@
@@ -291,24 +314,67 @@ index f9a9459..c5c64f6 100644
  def _feature_locked_mask(vertices: torch.Tensor, faces: torch.Tensor, feature_angle_deg: float) -> torch.Tensor:
      """Return a (V,) bool mask of vertices that should be held fixed during smoothing.
  
-@@ -252,17 +277,32 @@ def chunked_to_glb(
+@@ -226,6 +251,8 @@ def chunked_to_glb(
+         pre_mesh = cumesh.CuMesh()
+         pre_mesh.init(vertices_world, faces)
+         pre_mesh.fill_holes(max_hole_perimeter=hole_perim)
++        print(f"[STAC] global fill_holes (perimeter {hole_perim} m): {pre_mesh.num_faces:,} faces, VRAM peak "
++              f"{torch.cuda.max_memory_allocated() / 2**30:.1f} GB", flush=True)
+         if verbose:
+             print(
+                 f"[chunked_to_glb] after global fill_holes: "
+@@ -240,6 +267,7 @@ def chunked_to_glb(
+     if do_remesh:
+         bvh = cumesh.cuBVH(pre_v, pre_f)
+ 
++        remesh_arg_was_none = remesh_res is None
+         if remesh_res is None:
+             extent = float((aabb_t[1] - aabb_t[0]).max().item())
+             vs_scalar = _voxel_size_scalar(voxel_size_world)
+@@ -252,17 +280,56 @@ def chunked_to_glb(
          center = aabb_t.mean(dim=0)
          scale = float((aabb_t[1] - aabb_t[0]).max().item())
  
-+        scale_dc = (remesh_res + 3 * remesh_band) / remesh_res * scale
-         new_v, new_f = cumesh.remeshing.remesh_narrow_band_dc(
-             pre_v,
-             pre_f,
-             center=center,
+-        new_v, new_f = cumesh.remeshing.remesh_narrow_band_dc(
+-            pre_v,
+-            pre_f,
+-            center=center,
 -            scale=(remesh_res + 3 * remesh_band) / remesh_res * scale,
-+            scale=scale_dc,
-             resolution=remesh_res,
-             band=remesh_band,
+-            resolution=remesh_res,
+-            band=remesh_band,
 -            project_back=remesh_project,
-+            project_back=0.0,
-             verbose=verbose,
-             bvh=bvh,
-         )
+-            verbose=verbose,
+-            bvh=bvh,
+-        )
++        # STAC 2026-11-05 (zaragoza, 431 cubes of 2.85 m over the whole cloud: the narrow band at the decoder's 5.6 mm
++        # ran the 80 GB card out of memory): when the resolution was derived (not given), an out-of-memory retries the
++        # dual-contouring grid 15 % coarser, DECLARED — deterministic for the same mesh and card; the chunks' face
++        # budget is applied after it, so the published mesh keeps its faces as long as the remesh yields more
++        auto_res = remesh_arg_was_none
++        while True:
++            scale_dc = (remesh_res + 3 * remesh_band) / remesh_res * scale
++            try:
++                new_v, new_f = cumesh.remeshing.remesh_narrow_band_dc(
++                    pre_v,
++                    pre_f,
++                    center=center,
++                    scale=scale_dc,
++                    resolution=remesh_res,
++                    band=remesh_band,
++                    project_back=0.0,
++                    verbose=verbose,
++                    bvh=bvh,
++                )
++                break
++            except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
++                if not auto_res or "out of memory" not in str(e).lower():
++                    raise
++                torch.cuda.empty_cache()
++                coarser = int(remesh_res * 0.85)
++                print(f"[STAC] remesh at resolution {remesh_res} ({scale_dc / remesh_res * 1000:.2f} mm cells) ran out of GPU "
++                      f"memory — retried at {coarser} ({scale / coarser * 1000:.2f} mm), declared", flush=True)
++                remesh_res = coarser
++        print(f"[STAC] global remesh at resolution {remesh_res} ({scale_dc / remesh_res * 1000:.2f} mm cells)", flush=True)
 +        if remesh_project > 0:
 +            # STAC 2026-11-02 (station): cumesh's own project-back reads the closest point from the BVH's
 +            # barycentrics, which come out unbounded on degenerate input triangles — 1.65 % of station's vertices
@@ -323,10 +389,17 @@ index f9a9459..c5c64f6 100644
 +            if verbose:
 +                print(f"[chunked_to_glb] project-back: {int((~ok).sum()):,} of {new_v.shape[0]:,} vertices kept "
 +                      f"at their dual-contouring position (the BVH's barycentrics did not give its closest point)")
++        # STAC 2026-11-05 (zaragoza: the remeshed 165 M faces ran out of memory in CuMesh.init with the fill-holes mesh,
++        # its BVH and the project-back buffers still on the card): none of them is read after this point — freed first
++        del bvh, pre_v, pre_f
++        pre_mesh = None
++        if remesh_project > 0:
++            del dist, fid, uvw, proj, ok
++        torch.cuda.empty_cache()
          mesh = cumesh.CuMesh()
          mesh.init(new_v, new_f)
          if verbose:
-@@ -309,8 +349,12 @@ def chunked_to_glb(
+@@ -309,8 +376,12 @@ def chunked_to_glb(
  
      # ── Step 2: Spatial partition by face centroid (nearest chunk center) ─
      centroids = gv[gf.long()].mean(dim=1)  # (F, 3)
@@ -341,7 +414,7 @@ index f9a9459..c5c64f6 100644
      if verbose:
          for k, idx in enumerate(chunk_indices):
              print(f"[chunked_to_glb] chunk {idx:03d}: {(assignment == k).sum().item():,} faces")
-@@ -383,11 +427,26 @@ def chunked_to_glb(
+@@ -383,11 +454,26 @@ def chunked_to_glb(
              )
  
          t1 = time.perf_counter()
