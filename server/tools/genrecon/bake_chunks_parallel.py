@@ -34,6 +34,39 @@ coords = d["coords"].to(dev)
 aabb_t = torch.as_tensor(np.asarray(d["aabb"], np.float32), device=dev)
 vs = float(d["voxel_size"])
 geoms = sorted(dump.glob("chunk_*_geom.ply"), reverse=True)            # from the END
+
+
+def _ply_faces(path):
+    """The face count from a PLY header (no body read)."""
+    with open(path, "rb") as fh:
+        for raw in fh:
+            line = raw.decode("ascii", "replace").strip()
+            if line.startswith("element face"):
+                return int(line.split()[-1])
+            if line == "end_header":
+                return 0
+    return 0
+
+
+# THE SINGLE GLB'S LIMIT (zaragoza 2026-11-05: 431 cubes of 2.85 m undecimated would write ~6.5 GB of geometry): a GLB
+# counts its length in 32 bits and the tiler reads it into one Node buffer (4 GiB), so "no decimation" (simplify ≥ 1e9)
+# becomes a TOTAL face budget shared in proportion — every chunk keeps the same fraction of its own detail — and the
+# chunk atlases (base colour + metallic-roughness each) a total byte budget. Bytes per face and per texel MEASURED on
+# zaragoza's raw GLB of 2026-11-05 (17.8 M faces, 268 textures of 2048²: 1364 MB → ~34.5 B/face, ~0.67 B/texel).
+FACE_BUDGET = int(os.environ.get("STAC_FACE_BUDGET", "64000000"))
+ATLAS_BYTES_BUDGET = float(os.environ.get("STAC_ATLAS_BYTES_BUDGET", "6e8"))
+counts = {g: _ply_faces(g) for g in geoms}
+total_faces = sum(counts.values())
+share = 1.0
+if simplify >= 1_000_000_000 and total_faces > FACE_BUDGET:
+    share = FACE_BUDGET / total_faces
+side = 2 ** int(np.floor(np.log2(max(64.0, np.sqrt(ATLAS_BYTES_BUDGET / (2 * max(1, len(geoms)) * 0.67))))))
+if side < texsize:
+    texsize = int(side)
+if k == 0:
+    print(f"[bake-worker] {len(geoms)} chunks, {total_faces:,} faces before decimation; each keeps "
+          f"{share * 100:.1f} % of its own (total budget {FACE_BUDGET:,}); atlases {texsize}² "
+          f"({len(geoms)} x 2 within {ATLAS_BYTES_BUDGET / 1e9:.1f} GB)", flush=True)
 mine = [g for i, g in enumerate(geoms) if i % n == k]
 cache.mkdir(parents=True, exist_ok=True)
 for g in mine:
@@ -59,7 +92,7 @@ for g in mine:
         t1 = time.perf_counter()
         glb = op.to_glb(vertices=chunk_v, faces=chunk_f, attr_volume=attr_volume[keep], coords=coords[keep],
                         attr_layout=d["attr_layout"], aabb=aabb_t, voxel_size=vs,
-                        decimation_target=min(simplify, int(chunk_f.shape[0])), texture_size=texsize,
+                        decimation_target=max(1000, min(simplify, int(np.ceil(int(chunk_f.shape[0]) * share)))), texture_size=texsize,
                         remesh=False, verbose=False)
         part = cache / f"chunk_{idx:03d}.part.glb"
         (glb if isinstance(glb, trimesh.Scene) else trimesh.Scene([glb])).export(str(part))

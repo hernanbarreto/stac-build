@@ -151,21 +151,29 @@ print(f"mesh depth rendered for {len(fids)} keyframes ({time.time()-t0:.0f} s)")
 # ── per part: rasterize the UV atlas, colour every covered texel from the views that see it ──────────────────────
 w2c_t = torch.from_numpy(w2c.astype(np.float32)).to(dev); K_t = torch.from_numpy(K.astype(np.float32)).to(dev); cam_t = torch.from_numpy(cam_pos.astype(np.float32)).to(dev)
 stats = []; new_textures = {}; UV_FLIP = None
+# USER 2026-11-05 ("el tamaño del atlas sale de la superficie real y de la resolución de las fotos, no un 2048 fijo"):
+# each part wants a texel the size of the finest photo pixel that falls on it — the nearest camera, the focal — over its
+# surface and the share of the atlas its charts fill. The atlases TOGETHER hold no more texels than the photos have
+# pixels (n keyframes × W × H: no detail exists beyond them) — and the published GLB stays under its 4 GB limit —:
+# every part's side is scaled by one common factor to that budget, a power of two in [TEX_MIN, TEX_MAX].
+TEXEL_BUDGET = float(os.environ.get("GENRECON_TEXEL_BUDGET", "0") or 0) or float(len(fids) * W * H)
+_fx = float(np.median(K[:, 0, 0])); _need, _texel = [], []
+for _, g, Vw in parts:
+    fw3 = Vw[g.faces]; area3 = 0.5 * np.linalg.norm(np.cross(fw3[:, 1] - fw3[:, 0], fw3[:, 2] - fw3[:, 0]), axis=1).sum()
+    uvn = np.asarray(g.visual.uv, np.float64)[g.faces]; area_uv = 0.5 * np.abs(np.cross(uvn[:, 1] - uvn[:, 0], uvn[:, 2] - uvn[:, 0])).sum()
+    lo_p, hi_p = Vw.min(0), Vw.max(0); ctr = 0.5 * (lo_p + hi_p); rad = 0.5 * np.linalg.norm(hi_p - lo_p)
+    d_near = max(0.3, float(np.min(np.linalg.norm(cam_pos - ctr, axis=1)) - rad))
+    _texel.append(d_near / _fx); _need.append(np.sqrt(max(area3, 1e-6) / max(area_uv, 1e-6)) / (d_near / _fx))
+_need = np.asarray(_need); _scale = min(1.0, float(np.sqrt(TEXEL_BUDGET / max(float((_need ** 2).sum()), 1.0))))
+ATLAS = [(int(min(TEX_MAX, max(TEX_MIN, 2 ** int(np.floor(np.log2(max(n * _scale, 1.0))))))), t) for n, t in zip(_need, _texel)]
+print(f"atlases: {len(parts)} parts want {float((_need ** 2).sum()) / 1e6:.0f} M texels, the photos hold {TEXEL_BUDGET / 1e6:.0f} M "
+      f"(scale {_scale:.3f}); sides {min(a for a, _ in ATLAS)}..{max(a for a, _ in ATLAS)}, {sum(a * a for a, _ in ATLAS) / 1e6:.0f} M texels")
 for pi, (pname, g, Vw) in enumerate(parts):
     tex = g.visual.material.baseColorTexture; T0 = tex.size[0]; assert tex.size == (T0, T0) and T0 % 8 == 0, tex.size
     base0 = torch.from_numpy(np.asarray(tex.convert("RGB")).astype(np.float32)).to(dev)            # (T0, T0, 3) image rows
     uv = torch.from_numpy(np.asarray(g.visual.uv, np.float32)).to(dev); Vp = torch.from_numpy(Vw.astype(np.float32)).to(dev)
     Fp = torch.from_numpy(g.faces.astype(np.int32)).to(dev)
-    # USER 2026-11-05 ("el tamaño del atlas sale de la superficie real y de la resolución de las fotos, no un 2048 fijo"):
-    # a texel the size of the finest photo pixel that falls on this part — the nearest camera framing it, its focal —
-    # over the part's surface and the share of the atlas its charts fill; a power of two in [TEX_MIN, TEX_MAX]
-    fw3 = Vw[g.faces]; area3 = 0.5 * np.linalg.norm(np.cross(fw3[:, 1] - fw3[:, 0], fw3[:, 2] - fw3[:, 0]), axis=1).sum()
-    uvn = np.asarray(g.visual.uv, np.float64)[g.faces]; area_uv = 0.5 * np.abs(np.cross(uvn[:, 1] - uvn[:, 0], uvn[:, 2] - uvn[:, 0])).sum()
-    lo_p, hi_p = Vw.min(0), Vw.max(0); ctr = 0.5 * (lo_p + hi_p); rad = 0.5 * np.linalg.norm(hi_p - lo_p)
-    d_near = max(0.3, float(np.min(np.linalg.norm(cam_pos - ctr, axis=1)) - rad))
-    texel_m = d_near / float(np.median(K[:, 0, 0]))
-    need = np.sqrt(max(area3, 1e-6) / max(area_uv, 1e-6)) / texel_m
-    T = int(min(TEX_MAX, max(TEX_MIN, 2 ** int(np.ceil(np.log2(max(need, 1.0)))))))
+    T, texel_m = ATLAS[pi]
     pos = torch.cat([uv * 2 - 1, torch.zeros_like(uv[:, :1]), torch.ones_like(uv[:, :1])], 1)[None].contiguous()
     rast, _ = dr.rasterize(glctx, pos, Fp, resolution=[T, T])
     if UV_FLIP is None:    # self-check: interpolate the UVs themselves; texel (r, c) must read (c/T, 1 − r/T) in image row order or its flip
