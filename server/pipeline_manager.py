@@ -206,7 +206,7 @@ class StageId(str, Enum):
     PROJECTION = "projection"
     CERTIFY = "certify"
     INSTANCE_CLEANER = "instance_cleaner"
-    GENRECON = "genrecon"             # the scene meshes (GenRecon: presence from the cloud + generative) — last of the chain
+    GENRECON = "genrecon"             # the scene mesh (GenRecon from the cloud; the GenRecon button of the segmentation panel)
 
 
 # "module" / "entry": the worker the stage process runs (``module.entry(conn, session_dir,
@@ -223,7 +223,7 @@ STAGE_REGISTRY = {
                                "module": "pipeline_manager", "entry": "run_projection_stage"},
     StageId.CERTIFY:          {"label": "Certification (closures · depth · floor · mask filter · final epoch)", "icon": "📐", "module": "workers.certify_worker", "engine": True},
     StageId.INSTANCE_CLEANER: {"label": "Instance Cleaning", "icon": "✨", "module": "workers.instance_cleaner_worker"},
-    StageId.GENRECON:         {"label": "Mesh (GenRecon — from the cloud + generative)", "icon": "🧱", "module": "workers.genrecon_worker"},
+    StageId.GENRECON:         {"label": "Mesh (GenRecon — from the cloud)", "icon": "🧱", "module": "workers.genrecon_worker"},
 }
 
 # THE reconstruction pipeline — always runs end-to-end, no client selection.

@@ -93,7 +93,7 @@ def _run_variant(pipe: WorkerPipe, output_dir: Path, sid: str, scan: str, name: 
             if line.startswith(f):
                 failed = line
         if ("Traceback" in line or "Error" in line or "[STAC]" in line or "[VRAM]" in line or line.startswith("published")
-                or line.startswith("levels:")):
+                or line.startswith("levels:") or "[presence]" in line or line.startswith("confidence filter")):
             pipe.send_log(f"[genrecon] {line[:300]}")
     code = proc.wait()
     if code != 0 or failed is not None:
