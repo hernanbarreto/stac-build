@@ -1362,8 +1362,13 @@ function App() {
         setPointSize(typeof prefs.pointSize === 'number' ? prefs.pointSize : 5.0)
         setConfidenceThreshold(typeof prefs.confidenceThreshold === 'number' ? prefs.confidenceThreshold : 0.0)
         setPointBudget(typeof prefs.pointBudget === 'number' ? prefs.pointBudget : 10_000_000)
-        setLightIntensity(typeof prefs.lightIntensity === 'number' ? prefs.lightIntensity : 1.0)
-        setPointOpacity(typeof prefs.pointOpacity === 'number' ? prefs.pointOpacity : 1.0)
+        // USER 2026-11-05 ("la muestra instantáneamente y después la apaga"): a session OPENS with its cloud on screen.
+        // Light 0 paints every point black (colour × light) and opacity 0 discards them — the state left behind
+        // when the cloud was turned off to look at a mesh (pccr, zaragoza, station had both saved at 0). Those two
+        // are restored only when they still show the cloud; 0 opens at 1.
+        const visible = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v > 0
+        setLightIntensity(visible(prefs.lightIntensity) ? prefs.lightIntensity : 1.0)
+        setPointOpacity(visible(prefs.pointOpacity) ? prefs.pointOpacity : 1.0)
         setTimeout(() => { prefsLoadedRef.current = true }, 300)
       })
       .catch(() => {
@@ -1371,6 +1376,7 @@ function App() {
         setConfidenceThreshold(0.0)
         setPointBudget(10_000_000)
         setLightIntensity(1.0)
+        setPointOpacity(1.0)
         prefsLoadedRef.current = true
       })
   }, [pointCount])  
