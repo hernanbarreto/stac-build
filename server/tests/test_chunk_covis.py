@@ -311,3 +311,26 @@ def test_a_walk_within_H_that_fits_the_card_is_one_pass():
     many = plan_detail(d2, np.full(300, 5.0), np.full(299, 1.0), max_chunk_views=MAX_CHUNK_VIEWS,
                        views=np.ones(300, int), single_pass_views=613)
     assert len(many["ranges"]) > 1                       # beyond H: cut as before, whatever the card holds
+
+
+def test_the_cut_pieces_take_the_runs_view_cap_and_another_cap_plans_anew(tmp_path):
+    """USER 2026-11-05 (the plan he approved: "El planificador (reemplaza al actual, el del tope de 64)"): the view
+    cap of a cut piece is the RUN's (structure.chunk_view_cap) — with the card's capacity H alone decides the
+    length; a plan frozen under another cap is planned anew."""
+    from reconstruction import chunk_covis as CC
+    n = 300
+    d = np.full(n, 0.1)
+    z, t = _flat(n)
+    v = np.full(n, 2, int)
+    capped = plan_detail(d, z, t, max_chunk_views=64, views=v)
+    card = plan_detail(d, z, t, max_chunk_views=613, views=v)
+    assert len(card["ranges"]) < len(capped["ranges"])
+    assert card["ranges"] == plan_detail(d, z, t)["ranges"]            # the card does not bind: H decides
+    _synthetic_session(tmp_path)
+    plan_session(tmp_path, log=lambda m: None, max_chunk_views=64)
+    logs = []
+    again = plan_session(tmp_path, log=logs.append, max_chunk_views=613)
+    assert again["report"]["measurement"] != "frozen"
+    assert any("froze another keyframe set or planner" in m for m in logs)
+    fz = json.loads((tmp_path / "intake" / CC.FROZEN_NAME).read_text())
+    assert fz["planner"]["max_chunk_views"] == 613

@@ -1900,11 +1900,26 @@ def math_deg(rad: float) -> float:
 
 
 
+def _structure_config(va_cfg: dict) -> dict:
+    """reconstruction.vggtomega.structure (USER 2026-11-05, the plan he approved): {enabled,
+    chunk_view_cap: 'card' | an integer ≥ 2}. A missing or malformed key FAILS naming it."""
+    st = va_cfg.get("structure")
+    if not isinstance(st, dict) or "enabled" not in st or "chunk_view_cap" not in st:
+        raise RuntimeError("reconstruction.vggtomega.structure {enabled, chunk_view_cap} is missing from "
+                           "the configuration (USER 2026-11-05: the structure probe, the zones and the "
+                           "view cap of a cut piece)")
+    cap = st["chunk_view_cap"]
+    if not (cap == "card" or (isinstance(cap, int) and not isinstance(cap, bool) and cap >= 2)):
+        raise RuntimeError(f"reconstruction.vggtomega.structure.chunk_view_cap {cap!r}: 'card' or an "
+                           f"integer ≥ 2")
+    return {"enabled": bool(st["enabled"]), "chunk_view_cap": cap}
+
+
 def _single_pass_capacity(config: dict, vggt_config: dict, frames_dir, n_keyframes: int, n_witness: int,
-                          log) -> int:
-    """The views one Omega pass holds on THIS card at the configured resolution (the committed card
-    table, Omega's grid for the native frame, the I3 margin) — 0 when even the keyframes with their
-    interval witnesses (the witness pass of a single chunk) would not fit it."""
+                          log):
+    """(views, fits): the views one Omega pass holds on THIS card at the configured resolution (the
+    committed card table, Omega's grid for the native frame, the I3 margin), and whether the
+    keyframes with their interval witnesses (the witness pass of a single chunk) fit it."""
     import repro
     import card_table as _ct
     from precision.camera import omega_grid_for
@@ -1921,7 +1936,7 @@ def _single_pass_capacity(config: dict, vggt_config: dict, frames_dir, n_keyfram
     log(f"[covis] one Omega pass on {card['card']} at {res} (grid {g.w}x{g.h}) holds {cap} views; "
         f"the keyframes with their witnesses: {int(n_keyframes) + int(n_witness)}"
         + ("" if fits else " — they do not fit: no single pass"))
-    return int(cap) if fits else 0
+    return int(cap), bool(fits)
 
 def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                    selected_frames_path: str, recon_cfg: dict, config: dict):
@@ -2330,7 +2345,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             "and it is measured on the I3 DA3 windows, which this run did not produce — I3 runs "
             "with reconstruction.precision.enabled and reconstruction.vggtomega.scale_align; "
             "there is no other chunk layout to fall back on")
-    from reconstruction.chunk_covis import (MAX_CHUNK_VIEWS, CovisError, format_plan,
+    from reconstruction.chunk_covis import (CovisError, format_plan,
                                             plan_session)
     # ── TURN FRAMES (USER 2026-11-04): Omega's CONTEXT views through a turn ──
     # The keyframes stay the only frames every stage after Omega knows (frame_list, the poses,
@@ -2338,7 +2353,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # (intake/turn_frames.py, from I1's own rotation readings — nothing is measured again) enter
     # the inference of every chunk that holds both, and the fork keeps only the keyframes' slots
     # (vendor/VGGT-Long/loop_utils/context_views.py). They are views of the pass: the plan counts
-    # them against MAX_CHUNK_VIEWS and the card holds them with the chunk.
+    # them against the view cap and the card holds them with the chunk.
     from intake.turn_frames import chunk_context, load_turn_frames_config, session_turn_frames
     if _turn is None:                 # not computed with the sky masks above (no I3 in this run)
         _turn = session_turn_frames(output_dir.parent, load_turn_frames_config(config),
@@ -2348,11 +2363,20 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     # Omega pass holds on this card at the configured resolution — the walk within H that fits it
     # (its keyframes with their turn frames, and its keyframes with their interval witnesses) is
     # one pass; the 64-view cap only sizes the pieces of a walk that must be cut
-    _sp_views = _single_pass_capacity(config, vggt_config, frames_dir, _n_selected,
-                                      len(_turn["witness_files"]), pipe.send_log)
+    _card_views, _sp_fits = _single_pass_capacity(config, vggt_config, frames_dir, _n_selected,
+                                                  len(_turn["witness_files"]), pipe.send_log)
+    _sp_views = _card_views if _sp_fits else 0
+    # the cap of a cut piece (USER 2026-11-05, the plan he approved: "El planificador (reemplaza al
+    # actual, el del tope de 64)"): `card` = what one pass holds on the card at this resolution, so
+    # H decides the length; an integer = that cap (64 = the 2026-11-04 rule, selectable)
+    _st_cfg = _structure_config(_va_cfg)
+    _view_cap = (_card_views if _st_cfg["chunk_view_cap"] == "card"
+                 else int(_st_cfg["chunk_view_cap"]))
+    pipe.send_log(f"[covis] a cut piece holds at most {_view_cap} views "
+                  f"(structure.chunk_view_cap: {_st_cfg['chunk_view_cap']})")
     try:
         _cplan = plan_session(output_dir.parent, log=pipe.send_log, turn_files=_turn["files"],
-                              single_pass_views=_sp_views)
+                              single_pass_views=_sp_views, max_chunk_views=_view_cap)
     except CovisError as _ce:
         if not _walk_reused:
             raise
@@ -2367,7 +2391,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                         check_cancel=pipe.check_cancel, frames_dir=frames_dir, files=_sel_files,
                         run_cfg=config)
         _cplan = plan_session(output_dir.parent, log=pipe.send_log, turn_files=_turn["files"],
-                              single_pass_views=_sp_views)
+                              single_pass_views=_sp_views, max_chunk_views=_view_cap)
     _ranges = [(int(a), int(b)) for a, b in _cplan["ranges"]]
     _covis_rep = _cplan["report"]
     for _line in format_plan(_covis_rep):
@@ -2378,15 +2402,15 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     _walk0 = float(_walk_doc["walk_length_m"])
 
     # the chunks' context views: EVERY turn frame inside each chunk. A chunk the plan cannot keep
-    # within MAX_CHUNK_VIEWS — its minimum block is a turn dense with rotation keyframes (the
+    # within the view cap — its minimum block is a turn dense with rotation keyframes (the
     # plan flags it) — keeps its whole turn (USER 2026-11-04, "2. … para que cuando lleguen esos
     # casos esté preparado"): Omega sees the turn complete in one pass; the card holds it (the
     # resolution below is sized on the views of the largest chunk)
     _ctx = chunk_context(_ranges, _sel_files, _turn["files"])
     _over = {k: (b - a) + len(c) for k, ((a, b), c) in enumerate(zip(_ranges, _ctx))
-             if (b - a) + len(c) > MAX_CHUNK_VIEWS}
+             if (b - a) + len(c) > _view_cap}
     if _over:
-        pipe.send_log(f"[turn-frames] chunk(s) over {MAX_CHUNK_VIEWS} views kept whole "
+        pipe.send_log(f"[turn-frames] chunk(s) over {_view_cap} views kept whole "
                       f"{_over} — a turn dense with rotation keyframes the plan cannot cut "
                       f"shorter; Omega sees every turn frame of it")
     vggt_config["Model"]["chunk_context"] = _ctx
@@ -2569,6 +2593,33 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     from reconstruction import omega_complete as _OC
     if _sky_pre is not None:          # started before I3: joined before anything reads the masks
         _sky_pre.wait(check_cancel=pipe.check_cancel)
+    # ── THE STRUCTURE PROBE (USER 2026-11-05, the plan he approved: "1. Pasada de estructura" … "3. El
+    # fork: chunks no contiguos") ── a walk the plan cuts: ONE Omega pass over every keyframe at the
+    # resolution where they all fit the card says who sees whom (reconstruction/walk_structure.py);
+    # every place the walk left and came back to is a ZONE, inferred with all its pieces together
+    # after the chunks and made the owner of its keyframes (reconstruction/zones.py, applied in
+    # _metricize_and_orient). Its own stamped record (intake/structure.json), not the fork's launch.
+    _zones = []
+    if _chunked_already and _st_cfg["enabled"]:
+        from reconstruction import zones as _ZN
+        from reconstruction.chunk_plan import omega_resolution_for as _orf
+        _pres = _orf(_n_selected, _card["total_gb"], _native_frame_wh(frames_dir),
+                     str(vggt_config["Model"]["omega_mode"]),
+                     int(vggt_config["Model"]["omega_resolution"]), _omega_margin,
+                     _card["footprint_factor"])
+        pipe.send_progress(9, f"Structure probe: ONE Omega pass over all {_n_selected} keyframes...",
+                           stage="reconstruction")
+        repro.require_exclusive_gpu(log=pipe.send_log)
+        _sdoc = _ZN.structure_probe(output_dir.parent, frames_dir, _sel_files, vggt_config,
+                                    resolution=int(_pres["resolution"]), ranges=_ranges,
+                                    sky_cache=output_dir / "maplong_run" / "sky_masks",
+                                    log=pipe.send_log)
+        _zones = list(_sdoc.get("zones") or [])
+        pipe.send_log(f"[structure] probe at {_pres['resolution']} (grid {_pres['grid_wh'][0]}x"
+                      f"{_pres['grid_wh'][1]}, {_n_selected} keyframes): D {_sdoc['D_probe']:.2f}; "
+                      f"{len(_zones)} revisited zone(s)"
+                      + "".join(f"; zone {i + 1}: runs {z['runs']} ({len(z['keyframes'])} kf)"
+                                for i, z in enumerate(_zones)))
     _launch = _OC.launch_stamp(output_dir.parent, frames_dir, _sel_files, vggt_config)
     _done, _why = _OC.check(output_dir, _launch)
     if _done:
@@ -2655,6 +2706,21 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             raise RuntimeError(f"[omega-depth] Omega ran the layout {_ran[0]} ({_ran[1]}), this "
                                f"run planned {cfg_v['Model']['chunk_ranges']}")
         _emit_omega_depth(vggt_save_dir, output_dir, _ran[0], selected_frames_path, pipe)
+        # the revisited ZONES (the structure probe above): each inferred with all its pieces and
+        # their turn frames in ONE pass at the run's resolution, fitted Sim(3) to the aligned walk on
+        # exact pixels and made the owner of its keyframes' records and poses — before the scale
+        if _zones:
+            import repro as _rp
+            from reconstruction import zones as _ZN
+            pipe.send_progress(87, f"Zones: {len(_zones)} revisited zone(s), each inferred whole...",
+                               stage="reconstruction")
+            _rp.require_exclusive_gpu(log=pipe.send_log)
+            _ZN.apply_zones(output_dir.parent, frames_dir, _sel_files, _turn["files"], _zones, cfg_v,
+                            resolution=int(cfg_v["Model"]["omega_resolution"]),
+                            capacity=int(_res["capacity_frames"]), n_chunks=len(_ran[0]),
+                            sky_cache=vggt_save_dir / "sky_masks", log=pipe.send_log)
+        else:
+            (output_dir / "zones.json").unlink(missing_ok=True)
         # the aligned chunks' last reader is the omega records just written: when the run does
         # not keep them (certify.keep_aligned_chunks) they are deleted after the scale, so the
         # scale and the orientation do not rewrite them first (station 2026-11-01: two passes of

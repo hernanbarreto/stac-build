@@ -77,7 +77,7 @@ def test_the_views_of_each_planning_keyframe():
 def test_the_map_worker_plans_with_the_turn_frames_and_joins_the_chunks_by_sim3():
     src = (Path(__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
     i_turn = src.index("_turn = session_turn_frames(")
-    i_plan = src.index('_cplan = plan_session(output_dir.parent, log=pipe.send_log, turn_files=_turn["files"])')
+    i_plan = src.index('_cplan = plan_session(output_dir.parent, log=pipe.send_log, turn_files=_turn["files"],')
     i_ctx = src.index('_ctx = chunk_context(_ranges, _sel_files, _turn["files"])')
     assert i_turn < i_plan < i_ctx
     # a chunk over the limit keeps EVERY turn frame (USER 2026-11-04: option 2)

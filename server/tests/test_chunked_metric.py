@@ -1124,7 +1124,7 @@ def test_the_order_is_i3_then_the_plan_then_the_resolution_then_one_pass():
     i_walk = src.index("_walk_doc = measure_walk(output_dir.parent")
     i_da3 = src.index("DA3 metric anchor on ALL")
     # (2026-11-04: the plan counts the turn frames as views — USER "ese es el límite")
-    i_plan = src.index('_cplan = plan_session(output_dir.parent, log=pipe.send_log, turn_files=_turn["files"])')
+    i_plan = src.index('_cplan = plan_session(output_dir.parent, log=pipe.send_log, turn_files=_turn["files"],')
     i_card = src.index("_ident = repro.card_identity(0)")
     i_res = src.index("_res = session_omega_resolution(")
     i_pass = src.index("_ok = _omega_pass(vggt_config, _tag1)")
@@ -1133,6 +1133,28 @@ def test_the_order_is_i3_then_the_plan_then_the_resolution_then_one_pass():
     assert "re-run CHUNKED" not in src and "_phase2" not in src and "_probe_sel" not in src
     assert "_gpu_free_gb" not in src and "_gpu_total_gb" not in src, \
         "the card's TOTAL memory from the committed table, never nvidia-smi of the moment"
+
+
+def test_the_structure_probe_runs_before_the_pass_and_the_zones_before_the_scale():
+    """USER 2026-11-05 (the plan he approved): a walk the plan cuts is probed by ONE Omega pass over every keyframe
+    (after the sky masks, before the chunks' pass); its revisited zones are inferred whole after the chunks' records
+    and before the scale; the view cap of a cut piece is the run's (structure.chunk_view_cap)."""
+    src = _SRC.read_text()
+    i_res = src.index("_res = session_omega_resolution(")
+    i_sky = src.index("_sky_pre.wait(check_cancel=pipe.check_cancel)")
+    i_probe = src.index("_sdoc = _ZN.structure_probe(")
+    i_launch = src.index("_launch = _OC.launch_stamp(")
+    i_pass = src.index("_ok = _omega_pass(vggt_config, _tag1)")
+    assert i_res < i_sky < i_probe < i_launch < i_pass
+    assert 'if _chunked_already and _st_cfg["enabled"]:' in src[i_sky:i_probe]
+    i_emit = src.index("_emit_omega_depth(vggt_save_dir, output_dir, _ran[0], selected_frames_path, pipe)")
+    i_zones = src.index("_ZN.apply_zones(")
+    i_scale = src.index("_s = _scale_run(output_dir, dry_run=False")
+    assert i_emit < i_zones < i_scale
+    assert "max_chunk_views=_view_cap" in src and src.count("max_chunk_views=_view_cap") == 2
+    import yaml
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
+    assert cfg["reconstruction"]["vggtomega"]["structure"] == {"enabled": True, "chunk_view_cap": "card"}
 
 
 def test_a_resume_without_windows_replans_from_the_persisted_measurement():

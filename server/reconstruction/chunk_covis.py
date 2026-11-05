@@ -115,6 +115,10 @@ MIN_CHUNK_FRAMES = 24
 # choice. A stretch whose minimum block already holds more (a pan dense with rotation keyframes)
 # is admitted only at the minimum length, like an over-budget one, and flagged.
 MAX_CHUNK_VIEWS = 64
+# USER 2026-11-05 (the plan he approved: "El planificador (reemplaza al actual, el del tope de 64)"): the
+# cap of a cut piece is the RUN's choice, reconstruction.vggtomega.structure.chunk_view_cap — `card` =
+# what one Omega pass holds on the card at the run's resolution (H then decides the length), an integer
+# = that cap (64 = the rule above). MAX_CHUNK_VIEWS stays the default of a caller that passes none.
 
 COVIS_NAME = "covis.json"
 COVIS_VERSION = 4          # 4: measured on the PARALLAX keyframes only (plan_index; USER
@@ -796,13 +800,14 @@ def _turn_files_sha256(turn_files: Optional[Sequence[str]]) -> Optional[str]:
 
 
 def _planner_constants(turn_files: Optional[Sequence[str]] = None,
-                       single_pass_views: Optional[int] = None) -> Dict[str, Any]:
+                       single_pass_views: Optional[int] = None,
+                       max_chunk_views: Optional[int] = MAX_CHUNK_VIEWS) -> Dict[str, Any]:
     """What a plan is a function of beyond the measurement: the method's constants, the turn
     frames whose views it counts (USER 2026-11-04) and the views one pass holds on the card
     (USER 2026-11-05: a walk that fits is one pass)."""
     return {"H": H_LENGTHS_PER_CHUNK, "min_chunk_frames": MIN_CHUNK_FRAMES, "tau": TAU,
             "tol_quantile": TOL_QUANTILE, "samples_per_frame": SAMPLES,
-            "scan_horizon": SCAN_HORIZON, "max_chunk_views": MAX_CHUNK_VIEWS,
+            "scan_horizon": SCAN_HORIZON, "max_chunk_views": max_chunk_views,
             "single_pass_views": single_pass_views,
             "turn_frames_sha256": _turn_files_sha256(turn_files)}
 
@@ -885,14 +890,15 @@ def planning_indices(scan_dir: Path, frames: List[int]) -> List[int]:
 
 def _report_of(scan_dir: Path, doc: Dict[str, Any], source: str,
                turn_files: Optional[Sequence[str]] = None,
-               single_pass_views: Optional[int] = None) -> Dict[str, Any]:
+               single_pass_views: Optional[int] = None,
+               max_chunk_views: Optional[int] = MAX_CHUNK_VIEWS) -> Dict[str, Any]:
     delta = np.asarray(doc["delta"], dtype=np.float64)
     zbar = np.asarray(doc["zbar_m"], dtype=np.float64)
     theta = np.asarray(doc["theta_deg"], dtype=np.float64)
     frames = doc["frames"]
     n_full = len(frames)
     views = planning_views(frames, doc.get("plan_index", list(range(n_full))), turn_files)
-    det = plan_detail(delta, zbar, theta, max_chunk_views=MAX_CHUNK_VIEWS, views=views,
+    det = plan_detail(delta, zbar, theta, max_chunk_views=max_chunk_views, views=views,
                       single_pass_views=single_pass_views)
     chain = doc["chainage_m"]
     # the plan is measured on the planning subsequence (the parallax keyframes); every range it
@@ -933,7 +939,7 @@ def _report_of(scan_dir: Path, doc: Dict[str, Any], source: str,
             "tol_rel": doc["tol_rel"], "walk_m": float(chain[-1]), **det, "ranges": ranges,
             "input_stamp": doc["stamp"], "measurement": source,
             "inputs_sha256": inputs_sha256(delta, zbar, theta, MIN_CHUNK_FRAMES,
-                                           H_LENGTHS_PER_CHUNK, MAX_CHUNK_VIEWS, views),
+                                           H_LENGTHS_PER_CHUNK, max_chunk_views, views),
             "turn_frames_sha256": _turn_files_sha256(turn_files),
             # how close every ℓ sat to flipping (point 15; None on a measurement older than it)
             "tau_margin_min": doc.get("tau_margin_min"),
@@ -948,7 +954,8 @@ def _report_of(scan_dir: Path, doc: Dict[str, Any], source: str,
 def plan_session(scan_dir: Path, *, cache_path: Optional[Path] = None,
                  log: Callable = print,
                  turn_files: Optional[Sequence[str]] = None,
-                 single_pass_views: Optional[int] = None) -> Dict[str, Any]:
+                 single_pass_views: Optional[int] = None,
+                 max_chunk_views: Optional[int] = MAX_CHUNK_VIEWS) -> Dict[str, Any]:
     """The session's chunk plan: {"ranges": [(start, end), ...], "report": {...}}. The report
     carries n, D_total, H, tol_rel, every chunk's D / frames / metres / seam depth, the cuts, the
     flags, every bar's margin, the input stamp and the sha256 of exactly what the planner read.
@@ -961,7 +968,7 @@ def plan_session(scan_dir: Path, *, cache_path: Optional[Path] = None,
     plan it would have given). Another keyframe set plans again and freezes that plan. With the
     keyframes known from walk.json, the frozen plan needs no measurement at all."""
     scan_dir = Path(scan_dir)
-    planner = _planner_constants(turn_files, single_pass_views)
+    planner = _planner_constants(turn_files, single_pass_views, max_chunk_views)
     frozen = _load_frozen(scan_dir)
     fpath = scan_dir / "intake" / FROZEN_NAME
 
@@ -973,7 +980,8 @@ def plan_session(scan_dir: Path, *, cache_path: Optional[Path] = None,
         ranges = [(int(a), int(b)) for a, b in frozen["ranges"]]
         rep = dict(frozen["report"], ranges=ranges, measurement=source, plan_frozen=str(fpath))
         if doc_now is not None:
-            now = _report_of(scan_dir, doc_now, "reused", turn_files, single_pass_views)
+            now = _report_of(scan_dir, doc_now, "reused", turn_files, single_pass_views,
+                             max_chunk_views)
             # the informational fields follow the CURRENT measurement (the window layout it was
             # read from, the τ margins) — recorded, never acted on; the ranges are the frozen ones
             for k in ("window_layout", "tau_margin_min"):
@@ -995,7 +1003,7 @@ def plan_session(scan_dir: Path, *, cache_path: Optional[Path] = None,
     doc, source = covis_inputs(scan_dir, cache_path=cache_path, log=log)
     if _frozen_for(doc["frames"]):
         return _from_frozen(doc, "frozen")
-    report = _report_of(scan_dir, doc, source, turn_files, single_pass_views)
+    report = _report_of(scan_dir, doc, source, turn_files, single_pass_views, max_chunk_views)
     ranges = [(int(a), int(b)) for a, b in report["ranges"]]
     if frozen is not None:
         log(f"{LOG_TAG} {fpath.name} froze another keyframe set or planner — this one is planned "

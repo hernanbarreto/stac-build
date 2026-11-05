@@ -51,7 +51,8 @@ def test_production_stage_list_accepts_the_selection():
     raw = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
     stages = build_pipeline_stages(backend=str(raw["reconstruction"]["backend"]))
     off = [s.id for s in select_stages(stages, segment=False) if s.enabled]
-    assert off == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.GENRECON]   # the mesh is the cloud's
+    # GenRecon is its own button since 2026-11-05 (USER: "GENRECON ES UN BOTON MAS"; pipeline.auto_genrecon: false)
+    assert off == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY]
     auto = [s.id for s in select_stages(stages, only={StageId.SAM3, StageId.CERTIFY}) if s.enabled]
     assert auto == [StageId.SAM3]          # the certification is off in config.yaml (USER 2026-11-05)
 
