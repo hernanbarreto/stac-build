@@ -261,7 +261,7 @@ def _transform_aligned_worldpoints(output_dir: Path, R: np.ndarray, t: np.ndarra
 # ── entry point ─────────────────────────────────────────────────────
 
 def run(output_dir: Path, floor_percentile: float = 1.0, log=None,
-        aligned_chunks: bool = True) -> Optional[np.ndarray]:
+        aligned_chunks: bool = True, fresh_products: Optional[bool] = None) -> Optional[np.ndarray]:
     """Estimate gravity from the camera poses and bake the upright orientation
     (down → -Y, floor at y≈0) into chunk PLYs + poses + aligned world_points.
     Idempotent via the .orientation_applied marker. Returns the applied 4x4
@@ -279,8 +279,14 @@ def run(output_dir: Path, floor_percentile: float = 1.0, log=None,
              f"marker to re-orient)")
         return np.eye(4)
     if status == "stale":
+        allowed, why = AM.redo_allowed(base=output_dir, fresh_products=fresh_products)
+        if not allowed:
+            # the files changed, but not by a raw Omega pass: the orientation on disk IS applied
+            _log(f"⚠ {AM.describe(status, info)} — NOT redone: {why}; the marker stays and the products keep "
+                 f"their orientation")
+            return np.eye(4)
         _log(f"⚠ {AM.describe(status, info)} — the products on disk are NOT the ones this marker "
-             f"oriented: the orientation is redone from the poses on disk (point 10)")
+             f"oriented ({why}): the orientation is redone from the poses on disk (point 10)")
         AM.clear(marker)
 
     est = estimate_gravity(output_dir, log=_log)

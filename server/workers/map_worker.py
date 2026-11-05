@@ -2709,7 +2709,11 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # the revisited ZONES (the structure probe above): each inferred with all its pieces and
         # their turn frames in ONE pass at the run's resolution, fitted Sim(3) to the aligned walk on
         # exact pixels and made the owner of its keyframes' records and poses — before the scale
-        if _zones:
+        if _zones and _done:
+            # the zones were applied by the launch that ran Omega; a resume (Omega complete, not run now) never
+            # applies them again over records and poses a later epoch moved (USER 2026-11-05: determinism)
+            pipe.send_log("[zones] Omega did not run this launch — the zones it applied stay as they are")
+        elif _zones:
             import repro as _rp
             from reconstruction import zones as _ZN
             pipe.send_progress(87, f"Zones: {len(_zones)} revisited zone(s), each inferred whole...",
@@ -2728,7 +2732,10 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         from reconstruction.loops.config import load_loops_config as _llc0
         _keep_aligned = bool(_llc0(config).certify.keep_aligned_chunks)
         from reconstruction.scale_align import run as _scale_run
-        _s = _scale_run(output_dir, dry_run=False, aligned_chunks=_keep_aligned,
+        # a STALE marker is redone only when the fork ran this launch — never over files a later epoch
+        # (F2, F5, a correction) moved: reconstruction.applied_marker.redo_allowed (USER 2026-11-05:
+        # "debe ser determinista en todo el pipeline")
+        _s = _scale_run(output_dir, dry_run=False, aligned_chunks=_keep_aligned, fresh_products=not _done,
                         log=lambda m: pipe.send_log(f"[scale-align] {m}"),
                         near_frac=float(_va_cfg.get("scale_near_frac", 0.25)),
                         conf_top_frac=float(_va_cfg.get("scale_conf_top_frac", 0.10)),
@@ -2767,7 +2774,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                stage="reconstruction")
             from reconstruction.orient import run as _orient_run
             _T = _orient_run(output_dir, log=lambda m: pipe.send_log(f"[orient] {m}"),
-                             aligned_chunks=_keep_aligned)
+                             aligned_chunks=_keep_aligned, fresh_products=not _done)
             if _T is None:
                 pipe.send_log("[orient] orientation NOT applied (no poses or weak camera-down "
                               "consensus) — the floor leveler downstream is the fallback",
