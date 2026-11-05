@@ -64,6 +64,7 @@ import { PipelineDialog } from './features/PipelineDialog'
 import { ResumeDialog } from './features/ResumeDialog'
 import { ObjectLibraryDialog } from './features/ObjectLibraryDialog'
 import { AutosegmentDialog, type AutosegmentState, type AutosegmentStages } from './features/AutosegmentDialog'
+import { GenreconDialog } from './features/GenreconDialog'
 import { ReferenceDialog, type ReferenceMode } from './features/ReferenceDialog'
 import { EvaluationPanel } from './features/EvaluationPanel'
 import { PhysicsPanel } from './features/PhysicsPanel'
@@ -1205,6 +1206,22 @@ function App() {
   }, [pipelineDialogSession, pipelineReplace, selectedScans, pipelineSegment])
 
   // Autosegment (USER 2026-10-05): the segmentation chain on demand, prompts editable
+  // USER 2026-11-05: "GenRecon es un botón más, como el de autosegmentar": the mesh of the OPEN scan, with the
+  // confidence chosen in its window — an order of the GenRecon stage alone (pipeline.auto_genrecon is off)
+  const [genreconOpen, setGenreconOpen] = useState(false)
+  const runGenrecon = useCallback(async (confidence: number) => {
+    if (!activeSession) return
+    const rr = await fetch('/api/pipeline/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: activeSession, replace: false, scans: activeScanTab ? [activeScanTab] : [],
+                             autosegment: { stages: { genrecon: true }, genrecon_confidence: confidence } }),
+    })
+    const dd = await rr.json().catch(() => ({}))
+    if (!rr.ok || !dd.ok) { setStatusMessage(dd.detail || dd.error || 'GenRecon: command rejected'); return }
+    setGenreconOpen(false)
+    setStatusMessage(tt('genrecon.started', { session: activeSession, pct: Math.round(confidence * 100) }))
+  }, [activeSession, activeScanTab])
+
   const openAutosegment = useCallback(async () => {
     if (!activeSession) return
     setAutosegState(null)
@@ -2057,6 +2074,7 @@ function App() {
                 },
     onOpenSegmentation: () => { if (activeSession) openSegmentationManager(activeSession) },
     onOpenAutosegment: openAutosegment,
+    onOpenGenrecon: () => { if (activeSession) setGenreconOpen(true) },
   })
 
   if (authLoading) {
@@ -2441,6 +2459,9 @@ function App() {
         selectedScans={autosegScans}
         onToggleScan={(key, on) => setAutosegScans(prev => (on ? [...prev.filter(k => k !== key), key] : prev.filter(k => k !== key)))}
         onClose={() => setAutosegOpen(false)} onRun={runAutosegment} />
+
+      <GenreconDialog open={genreconOpen} sessionId={activeSession} scanLabel={activeScanTab} defaultConfidence={confidenceThreshold}
+        onClose={() => setGenreconOpen(false)} onRun={runGenrecon} />
 
       {activeSession && (
         <ReferenceDialog open={referenceDialog !== null} sessionId={activeSession} scanKey={activeScanTab} initialMode={referenceDialog ?? 'distance'}

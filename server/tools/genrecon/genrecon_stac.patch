@@ -218,11 +218,195 @@ index b26f309..cf0a244 100644
          std = torch.tensor(self.shape_slat_normalization["std"])[None].to(self.device)
          mean = torch.tensor(self.shape_slat_normalization["mean"])[None].to(self.device)
  
+diff --git a/genrecon/pipelines/joint_decode.py b/genrecon/pipelines/joint_decode.py
+index f4c79e8..f5e1834 100644
+--- a/genrecon/pipelines/joint_decode.py
++++ b/genrecon/pipelines/joint_decode.py
+@@ -33,6 +33,25 @@ from typing import Dict, List, Optional, Tuple
+ import torch
+ import torch.nn.functional as F
+ from o_voxel.convert import flexible_dual_grid_to_mesh
++import o_voxel.convert.flexible_dual_grid as _stac_fdg
++
++
++def _stac_init_hashmap(grid_size, capacity, device):
++    """STAC 2026-11-02 (station): o_voxel's _init_hashmap multiplies the int32 grid_size tensor, and 3584 x 1920 x
++    960 = 6.6e9 overflowed to a value under 2**32 — uint32 keys were chosen, every cell collided with the one 2**32
++    cells away, and the joint decode's faces joined vertices 17 m apart (28,141 long faces, every one displaced by
++    exactly 2**32 linear cells). The same function with the volume in Python ints."""
++    vol = int(grid_size[0]) * int(grid_size[1]) * int(grid_size[2])
++    if vol < 2 ** 32:
++        keys = torch.full((capacity,), torch.iinfo(torch.uint32).max, dtype=torch.uint32, device=device)
++    elif vol < 2 ** 64:
++        keys = torch.full((capacity,), torch.iinfo(torch.uint64).max, dtype=torch.uint64, device=device)
++    else:
++        raise ValueError(f"The spatial size is too large to fit in a hashmap. Get volumn {vol} > 2^64.")
++    return keys, torch.empty((capacity,), dtype=torch.uint32, device=device)
++
++
++_stac_fdg._init_hashmap = _stac_init_hashmap
+ 
+ from ..models.sc_vaes.sparse_unet_vae import SparseUnetVaeDecoder
+ from ..modules.sparse import SparseTensor
+diff --git a/inference/chunked_glb.py b/inference/chunked_glb.py
+index f9a9459..c5c64f6 100644
+--- a/inference/chunked_glb.py
++++ b/inference/chunked_glb.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ import math
++import os
+ import time
+ from pathlib import Path
+ from typing import Any, Sequence
+@@ -14,6 +15,30 @@ import torch
+ import trimesh
+ 
+ 
++def _stac_clamp_dual_contour() -> None:
++    """STAC 2026-11-02 (station, stacked 3.7 m cubes): cumesh's simple_dual_contour returned 1.3-1.7 % of its
++    vertices outside their own voxel — tens of metres to kilometres away, at any resolution — and the global remesh
++    threw them out of the scene. A dual-contouring vertex belongs inside its cell (the standard DC clamp): each one
++    is clamped to its voxel [c, c + 1] in grid units, a non-finite one put at the voxel's centre. The voxel of
++    vertex k is coords[k] (the call's coords argument), the same grid units remesh_narrow_band_dc maps to metres."""
++    import cumesh.remeshing as _rm
++    if getattr(_rm._C, "_stac_clamped", False):
++        return
++    orig = _rm._C.simple_dual_contour
++
++    def clamped(*args):
++        dv, inter = orig(*args)
++        c = args[-5].to(dv.dtype)
++        dv = torch.where(torch.isfinite(dv).all(dim=1, keepdim=True), dv, c + 0.5)
++        return torch.minimum(torch.maximum(dv, c), c + 1.0), inter
++
++    _rm._C.simple_dual_contour = clamped
++    _rm._C._stac_clamped = True
++
++
++_stac_clamp_dual_contour()
++
++
+ def _feature_locked_mask(vertices: torch.Tensor, faces: torch.Tensor, feature_angle_deg: float) -> torch.Tensor:
+     """Return a (V,) bool mask of vertices that should be held fixed during smoothing.
+ 
+@@ -252,17 +277,32 @@ def chunked_to_glb(
+         center = aabb_t.mean(dim=0)
+         scale = float((aabb_t[1] - aabb_t[0]).max().item())
+ 
++        scale_dc = (remesh_res + 3 * remesh_band) / remesh_res * scale
+         new_v, new_f = cumesh.remeshing.remesh_narrow_band_dc(
+             pre_v,
+             pre_f,
+             center=center,
+-            scale=(remesh_res + 3 * remesh_band) / remesh_res * scale,
++            scale=scale_dc,
+             resolution=remesh_res,
+             band=remesh_band,
+-            project_back=remesh_project,
++            project_back=0.0,
+             verbose=verbose,
+             bvh=bvh,
+         )
++        if remesh_project > 0:
++            # STAC 2026-11-02 (station): cumesh's own project-back reads the closest point from the BVH's
++            # barycentrics, which come out unbounded on degenerate input triangles — 1.65 % of station's vertices
++            # went tens of metres to kilometres away. The same projection, accepted only where the point it lands
++            # on is the BVH's closest point (its distance within one cell of the BVH's own distance); elsewhere the
++            # dual-contouring vertex (inside its cell) stays.
++            dist, fid, uvw = bvh.unsigned_distance(new_v, return_uvw=True)
++            proj = (pre_v[pre_f[fid.long()].long()] * uvw.unsqueeze(-1)).sum(dim=1)
++            cell = scale_dc / remesh_res
++            ok = torch.isfinite(proj).all(dim=1) & ((proj - new_v).norm(dim=1) <= dist + cell)
++            new_v = torch.where(ok.unsqueeze(1), new_v - remesh_project * (new_v - proj), new_v)
++            if verbose:
++                print(f"[chunked_to_glb] project-back: {int((~ok).sum()):,} of {new_v.shape[0]:,} vertices kept "
++                      f"at their dual-contouring position (the BVH's barycentrics did not give its closest point)")
+         mesh = cumesh.CuMesh()
+         mesh.init(new_v, new_f)
+         if verbose:
+@@ -309,8 +349,12 @@ def chunked_to_glb(
+ 
+     # ── Step 2: Spatial partition by face centroid (nearest chunk center) ─
+     centroids = gv[gf.long()].mean(dim=1)  # (F, 3)
+-    dists = torch.cdist(centroids.unsqueeze(0), chunk_centers_world.unsqueeze(0)).squeeze(0)
+-    assignment = dists.argmin(dim=1)  # (F,) → index into chunk_indices
++    # STAC 2026-11-05 (zaragoza: 113.7 M faces x 130 chunk centers asked cdist for a 59 GB matrix at once): the
++    # nearest chunk center of every face in batches of rows — the same cdist per row, the same argmin
++    _rows = 1 << 21
++    assignment = torch.cat([
++        torch.cdist(centroids[i:i + _rows].unsqueeze(0), chunk_centers_world.unsqueeze(0)).squeeze(0).argmin(dim=1)
++        for i in range(0, centroids.shape[0], _rows)])  # (F,) → index into chunk_indices
+     if verbose:
+         for k, idx in enumerate(chunk_indices):
+             print(f"[chunked_to_glb] chunk {idx:03d}: {(assignment == k).sum().item():,} faces")
+@@ -383,11 +427,26 @@ def chunked_to_glb(
+             )
+ 
+         t1 = time.perf_counter()
++        # STAC 2026-11-02: the attribute volume CROPPED to this chunk's mesh (its voxel bbox ± a margin). The bake
++        # samples it only at this chunk's surface (trilinear: the 8 voxels around each sample), but handed the
++        # WHOLE scene's volume it built its hash map over every voxel of every chunk for every chunk — station's
++        # 100 stacked cubes took ~4 min each (30 s on 15 cubes). Same voxels around every sample → same texture.
++        crop_margin = int(os.environ.get("STAC_BAKE_CROP_MARGIN", "2"))
++        if crop_margin >= 0:
++            vs = torch.as_tensor(voxel_size_world, dtype=torch.float32, device=coords.device).reshape(-1)
++            lo = torch.floor((chunk_v.min(dim=0).values.float() - aabb_t[0].to(chunk_v.device)) / vs).to(coords.device) - crop_margin
++            hi = torch.ceil((chunk_v.max(dim=0).values.float() - aabb_t[0].to(chunk_v.device)) / vs).to(coords.device) + crop_margin
++            keep = ((coords[:, -3:].float() >= lo) & (coords[:, -3:].float() <= hi)).all(dim=1)
++            if not bool(keep.any()):          # no voxel near this chunk: the whole volume, as before
++                keep = torch.ones_like(keep)
++            attr_c, coords_c = attr_volume[keep], coords[keep]
++        else:
++            attr_c, coords_c = attr_volume, coords
+         chunk_glb = op.to_glb(
+             vertices=chunk_v,
+             faces=chunk_f,
+-            attr_volume=attr_volume,
+-            coords=coords,
++            attr_volume=attr_c,
++            coords=coords_c,
+             attr_layout=attr_layout,
+             aabb=aabb_t,
+             voxel_size=voxel_size_world,
 diff --git a/inference/get_chunks.py b/inference/get_chunks.py
-index 75bbfcd..e9a52ad 100644
+index 75bbfcd..4564f57 100644
 --- a/inference/get_chunks.py
 +++ b/inference/get_chunks.py
-@@ -53,6 +53,7 @@ class BaseChunker:
+@@ -12,6 +12,31 @@ import torch
+ import trimesh
+ 
+ 
++
++def _stac_active_cells(points_path, chunk_centers, chunk_size: float, R: int, min_points: int) -> np.ndarray:
++    """STAC 2026-11-05: the centres of the ACTIVE voxels of the whole cloud on the lattice every cube's grid lies on.
++    A cube's voxel (i, j, k) covers [corner + i·v, corner + (i+1)·v) with v = chunk_size / R (the convention of
++    reconstruct_scene._coords_from_points); the strides between cubes are multiples of chunk_size/16 = 2 voxels, so
++    the grids of all the cubes are ONE lattice whose origin is the lowest cube's corner, and a voxel's count is the
++    same whichever cube holds it. A voxel is active with ``min_points`` points; its centre lies strictly inside every
++    cube whose grid contains it."""
++    P = np.load(points_path)
++    C = np.asarray(chunk_centers, np.float64)
++    v = float(chunk_size) / int(R)
++    o = C.min(0) - 0.5 * float(chunk_size)
++    off = (C - 0.5 * float(chunk_size) - o) / v
++    if np.abs(off - np.round(off)).max() > 1e-3:
++        raise RuntimeError(f"the cubes' grids are not one lattice (corner offsets {np.abs(off - np.round(off)).max():.4f} voxel)")
++    ijk = np.floor((P.astype(np.float64) - o) / v).astype(np.int64)
++    del P
++    lo = ijk.min(0); ijk -= lo; dims = ijk.max(0) + 1
++    key = (ijk[:, 0] * dims[1] + ijk[:, 1]) * dims[2] + ijk[:, 2]
++    del ijk
++    uniq, cnt = np.unique(key, return_counts=True)
++    act = uniq[cnt >= int(min_points)]
++    vox = np.stack([act // (dims[1] * dims[2]), (act // dims[2]) % dims[1], act % dims[2]], 1) + lo
++    return (o + (vox + 0.5) * v).astype(np.float64)
++
+ class BaseChunker:
+     def __init__(self, min_overlap_factor: int = 4) -> None:
+         self.atomic_distance = 1 / 16
+@@ -53,6 +78,7 @@ class BaseChunker:
          z_floor: float,
          chunk_size: float,
          out_path: Optional[str | Path] = None,
@@ -230,7 +414,7 @@ index 75bbfcd..e9a52ad 100644
      ) -> list[list[float]]:
          """Compute 3-D chunk centres covering the floor plan and save a top-down visualisation.
  
-@@ -72,10 +73,12 @@ class BaseChunker:
+@@ -72,10 +98,12 @@ class BaseChunker:
          width = x_max_padded - x_min_padded
          length = y_max_padded - y_min_padded
          z_center = z_floor + 0.5 * chunk_size
@@ -244,7 +428,30 @@ index 75bbfcd..e9a52ad 100644
  
          if out_path is not None:
              self._visualize_chunks(centers, chunk_size, x_min, x_max, y_min, y_max, out_path)
-@@ -481,11 +484,26 @@ class ScannetMixin:
+@@ -474,6 +502,22 @@ class ScannetMixin:
+         path: str | Path,
+         out_path: str | Path,
+     ) -> tuple[list[list[float]], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
++        lay = Path(path) / "layout.json"
++        if lay.exists():
++            # STAC 2026-11-05 (USER: "que decidan las fotos, no la cuenta de puntos … debe abarcar la totalidad de la
++            # nube"): the cubes were laid by the adapter (server/tools/genrecon/presence.py) over the WHOLE of what the
++            # keyframes' vote kept — GenRecon's own axis rule on its exact extent, every cube holding an active voxel;
++            # no percentile, no subsample, no cleaning decides them
++            with lay.open("r", encoding="utf-8") as f:
++                Ly = json.load(f)
++            chunk_size = float(Ly["chunk_size"])
++            centers = [[float(c) for c in ctr] for ctr in Ly["centers"]]
++            print(f"[STAC] layout.json: {len(centers)} cubes of {chunk_size:.3f} m over the whole cloud "
++                  f"({len(Ly['x_centers'])}x{len(Ly['y_centers'])}x{len(Ly['z_centers'])} on the lattice)")
++            m_original_to_chunks, m_chunk_to_originals, relative_translations = self._get_transforms(
++                centers, chunk_size, out_path
++            )
++            return centers, m_original_to_chunks, m_chunk_to_originals, relative_translations
+         clean_kwargs = {
+             k: getattr(self, k)
+             for k in ("stat_std_ratio", "radius_nb_points", "radius_m")
+@@ -481,18 +525,49 @@ class ScannetMixin:
          }
          clean_points = self._get_clean_points(path, out_path, **clean_kwargs)
          x_min, x_max, y_min, y_max, z_floor, z_ceiling, delta_z = self._get_room_size(clean_points)
@@ -255,11 +462,24 @@ index 75bbfcd..e9a52ad 100644
 +            z_floor, z_ceiling = float(L["z_floor"]), float(L["z_ceiling"])
 +            delta_z = z_ceiling - z_floor
 +            print(f"[STAC] levels.json: z_floor {z_floor:.3f} z_ceiling {z_ceiling:.3f} ({L.get('source')})")
++        if lv.exists() and L.get("xy_extent"):
++            # STAC 2026-11-05 (USER: "debe abarcar la totalidad de la nube … no me importa dónde está ubicada ni cuánto
++            # mide"): the floor plan is the WHOLE cloud's exact extent (the adapter's min/max over every point kept),
++            # never the 0.5–99.5 percentiles of a cleaned subsample — those cut the outermost walls and the scene's ends
++            x_min, x_max, y_min, y_max = [float(v) for v in L["xy_extent"]]
++            print(f"[STAC] xy_extent of the whole cloud: x {x_min:.3f}..{x_max:.3f}  y {y_min:.3f}..{y_max:.3f}")
          manual_xy = getattr(self, "manual_xy_bounds", None)
          if manual_xy is not None:
              x_min, x_max, y_min, y_max = manual_xy
          chunk_size = delta_z * self.chunk_size_factor
 -        chunk_centers = self._define_centers(x_min, x_max, y_min, y_max, z_floor, chunk_size)
+-        red_chunk_centers = self._remove_empty_chunks(
+-            chunk_centers,
+-            chunk_size,
+-            clean_points,
+-            out_path,
+-            n=getattr(self, "min_points_per_chunk", 500),
+-        )
 +        z_centers = None
 +        if lv.exists() and L.get("chunk_z_centers"):
 +            # STAC 2026-11-02 (USER: "los tamaños de cubo con los que se entrenó … tantos como sean necesarios para
@@ -269,14 +489,31 @@ index 75bbfcd..e9a52ad 100644
 +            print(f"[STAC] stacked cubes: {len(z_centers)} layer(s) of {chunk_size:.3f} m centred at "
 +                  f"{[round(z, 3) for z in z_centers]}")
 +        chunk_centers = self._define_centers(x_min, x_max, y_min, y_max, z_floor, chunk_size, z_centers=z_centers)
-         red_chunk_centers = self._remove_empty_chunks(
-             chunk_centers,
-             chunk_size,
++        if lv.exists() and L.get("coords_min_points") and (Path(path) / "cloud_genrecon.npy").exists():
++            # STAC 2026-11-05: a cube is kept when it holds ONE active voxel of the whole cloud — the exact rule of
++            # reconstruct_scene._coords_from_points (a voxel of the cube's own grid with coords_min_points points) —,
++            # never by 500 points of a 600 k subsample (that dropped the sparse ends of the walk)
++            cells = _stac_active_cells(Path(path) / "cloud_genrecon.npy", chunk_centers, chunk_size,
++                                       int(L.get("coords_resolution", 32)), int(L["coords_min_points"]))
++            red_chunk_centers = self._remove_empty_chunks(chunk_centers, chunk_size, cells, out_path, n=1)
++            print(f"[STAC] {len(red_chunk_centers)} of {len(chunk_centers)} cubes hold an active voxel "
++                  f"({len(cells):,} active voxels of {int(L['coords_min_points'])}+ points in the whole cloud)")
++        else:
++            red_chunk_centers = self._remove_empty_chunks(
++                chunk_centers,
++                chunk_size,
++                clean_points,
++                out_path,
++                n=getattr(self, "min_points_per_chunk", 500),
++            )
+         m_original_to_chunks, m_chunk_to_originals, relative_translations = self._get_transforms(
+             red_chunk_centers, chunk_size, out_path
+         )
 diff --git a/reconstruct_scene.py b/reconstruct_scene.py
-index 58a831e..5612bea 100644
+index 58a831e..2c17f6a 100644
 --- a/reconstruct_scene.py
 +++ b/reconstruct_scene.py
-@@ -290,9 +290,216 @@ def build_parser() -> argparse.ArgumentParser:
+@@ -290,9 +290,250 @@ def build_parser() -> argparse.ArgumentParser:
          "Pure performance knob, no numerical effect. Drop to 2048/1024 when "
          "running with very many views (e.g. all-frames iPhone captures).",
      )
@@ -440,12 +677,46 @@ index 58a831e..5612bea 100644
 +    return inside
 +
 +
++def _coords_from_layout(lay_path, cells_path, m_c2o, chunk_indices, R: int, out_path):
++    """STAC 2026-11-05 (USER: "que decidan las fotos, no la cuenta de puntos"): the active voxels of every chunk are
++    the lattice cells the adapter found occupied by the points the keyframes' vote kept (server/tools/genrecon/
++    presence.py) — one lattice for every cube, so a cell is the same voxel whichever cube holds it."""
++    with Path(lay_path).open("r", encoding="utf-8") as f:
++        L = json.load(f)
++    if int(L["R"]) != int(R):
++        raise RuntimeError(f"layout.json was planned for {L['R']}³ voxels per cube, the model's grid is {R}³")
++    A = np.load(cells_path).astype(np.int64)
++    o, v = np.asarray(L["origin"], np.float64), float(L["voxel"])
++    coords, record = [], {"active_cells": int(len(A)), "resolution": int(R), "voxel_m": v, "source": "layout.json", "chunks": []}
++    for c in chunk_indices:
++        M = m_c2o[c].detach().cpu().numpy().astype(np.float64)
++        size = float(M[0, 0]); centre = M[:3, 3]
++        f = (centre - 0.5 * size - o) / v
++        corner = np.round(f).astype(np.int64)
++        if np.abs(f - corner).max() > 1e-3 or abs(size / v - R) > 1e-3:
++            raise RuntimeError(f"chunk {c} is off the layout's lattice (corner offset {np.abs(f - corner).max():.4f} voxel)")
++        sel = np.all((A >= corner) & (A < corner + R), axis=1)
++        vox = A[sel] - corner
++        if len(vox) == 0:
++            raise RuntimeError(f"chunk {c}: no active cell of the layout inside it")
++        xyz = torch.from_numpy(vox.astype(np.int32))
++        coords.append(torch.cat([torch.zeros(len(xyz), 1, dtype=torch.int32), xyz], 1))
++        record["chunks"].append({"chunk": int(c), "voxels_active": int(len(vox))})
++    with (Path(out_path) / "coords_from_points.json").open("w", encoding="utf-8") as f:
++        json.dump(record, f, indent=2)
++    print(f"[STAC] coords from the layout's active cells ({len(A):,}): {[r['voxels_active'] for r in record['chunks']]} per chunk")
++    return coords, record
++
++
 +def _coords_from_points(points_path, m_c2o, chunk_indices, R: int, min_points: int, out_path, objects=None, min_points_objects: int = 2,
 +                        extra_points_path=None) -> list[torch.Tensor]:
 +    """STAC: the active voxels of every kept chunk from the MEASURED cloud. Voxel (i, j, k) of a chunk covers
 +    [i/R - 0.5, (i+1)/R - 0.5) of its unit cube on each axis (the convention of ``_global_grid_points``);
 +    it is active when it holds ``min_points`` points of the cloud. The record (coords_from_points.json)
 +    carries the per-chunk occupancy distribution the bound sat in."""
++    lay, cells_p = Path(points_path).parent / "layout.json", Path(points_path).parent / "active_cells.npy"
++    if objects is None and extra_points_path is None and lay.exists() and cells_p.exists():
++        return _coords_from_layout(lay, cells_p, m_c2o, chunk_indices, R, out_path)
 +    P = np.load(points_path).astype(np.float64)
 +    E = np.load(extra_points_path).astype(np.float64) if extra_points_path is not None else None
 +    coords, record = [], {"points": int(len(P)), "extra_points": (int(len(E)) if E is not None else 0), "resolution": int(R), "min_points": int(min_points), "chunks": []}
@@ -493,7 +764,7 @@ index 58a831e..5612bea 100644
  def main() -> None:
      parser = build_parser()
      args = parser.parse_args()
-@@ -380,6 +587,23 @@ def main() -> None:
+@@ -380,6 +621,23 @@ def main() -> None:
          seed=args.seed,
      )
      rel_t_kept = [rel_t[i] for i in sel.chunk_indices]
@@ -517,7 +788,7 @@ index 58a831e..5612bea 100644
  
      if args.save_imgs:
          scene_dir = out_path / "scene"
-@@ -407,6 +631,8 @@ def main() -> None:
+@@ -407,6 +665,8 @@ def main() -> None:
          shape_slat_sampler_params=slat_sampler_params,
          tex_slat_sampler_params=slat_sampler_params,
          occ_threshold=args.occ_threshold,

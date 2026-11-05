@@ -6636,6 +6636,20 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
                 "type": "error",
                 "message": "Autosegment: no stage selected — nothing to run"}))
             return {"ok": False, "error": "no stage selected"}
+        if StageId.GENRECON in _only:
+            # USER 2026-11-05: "para cada GenRecon, que se genere a mano, desde el panel de segmentación, y el usuario
+            # va a tener que seleccionar ahí el valor del porcentaje que va a filtrar" — the mesh runs only on this
+            # order (pipeline.auto_genrecon is off) with the confidence the window sends (the viewer's slider, 0..1)
+            _gc = _auto.get("genrecon_confidence", 0.0)
+            if isinstance(_gc, bool) or not isinstance(_gc, (int, float)) or not (0.0 <= float(_gc) < 1.0):
+                await viewer_manager.send_text(websocket, json.dumps({
+                    "type": "error", "message": f"Autosegment rejected: genrecon_confidence must be in [0, 1), got {_gc!r}"}))
+                return {"ok": False, "error": "genrecon_confidence must be in [0, 1)"}
+            _gen = {**dict(_run_cfg.get("genrecon") or {}), "confidence": float(_gc)}
+            for _st in stages:
+                if _st.id == StageId.GENRECON:
+                    _st.enabled = True
+                    _st.config["genrecon"] = _gen
         # THE PROMPTS TRAVEL WITH THE ORDER (docs/plan_determinismo.md point 162): the window
         # sends the VLM prompt and the SAM3 list in the command itself (it also saves them in
         # each scan for the session's record); the manager makes them the job's inputs —

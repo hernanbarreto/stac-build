@@ -3,7 +3,7 @@ epoch, c2w, OpenCV camera) as COLMAP w2c, the camera.json OPENCV intrinsics, and
 points3D.txt. The scene is handed over in the session's DISPLAY frame (floor_transform.npz applied, so
 up is up even when the raw frame lies on its side — bufferStop) and turned Y-up → Z-up (GenRecon's
 chunker reads the height along z). The transform back to the raw frame is saved for publish.py."""
-import sys, json, shutil, numpy as np
+import sys, json, shutil, yaml, numpy as np
 sys.path.insert(0, "/workspace/stac-build/server")
 from pathlib import Path
 from scipy.spatial.transform import Rotation
@@ -12,6 +12,8 @@ from segmentation.perfect_object import _read_ply_fields
 
 SES = Path(sys.argv[1]); WORK = Path(sys.argv[2]); N_PTS = int(sys.argv[3]) if len(sys.argv) > 3 else 600_000
 CUBE_M = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0     # genrecon.cube_size_m: stacked cubes of this side (0 = one layer)
+CONF = float(sys.argv[5]) if len(sys.argv) > 5 else 0.0       # the viewer's confidence slider, 0..1 (0 = every point)
+MIN_PTS = int(sys.argv[6]) if len(sys.argv) > 6 else 10       # --coords_min_points: a voxel is active from this many points
 out = SES / "output"
 R_UP = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])     # (x, y, z) → (x, -z, y): y-up → z-up
 s = load_session(out)
@@ -46,6 +48,51 @@ for i, (frame, c2w) in enumerate(zip(s.frames, np.asarray(s.poses, np.float64)))
 f = _read_ply_fields(out / "cleaned_cloud.ply")
 xyz = np.column_stack([f["x"], f["y"], f["z"]]).astype(np.float64)
 rgbv = np.column_stack([f[k] for k in ("red", "green", "blue")]) if "red" in f else np.full((len(xyz), 3), 128)
+# USER 2026-11-05: "usé el filtro de confianza del panel … al 25 % sale bien … que ajuste el usuario al valor que deja la
+# geometría limpia, eso depende de cómo se capturó, no puede generalizarse": the points GenRecon receives are the ones the
+# viewer SHOWS at the user's slider — the same arithmetic (PotreeLoader.ts: the raw `confidence` normalised by the octree
+# metadata's min/max; Viewport.tsx hides a point whose normalised confidence is under the slider). 0 = every point.
+n_all = len(xyz)
+keep_all = np.ones(n_all, bool)
+if CONF > 0:
+    conf = np.asarray(f["confidence"], np.float64)
+    meta = out / "potree" / "metadata.json"
+    a = next((a for a in json.loads(meta.read_text())["attributes"] if a["name"] == "confidence"), None) if meta.exists() else None
+    cmin, cmax = (float(a["min"][0]), float(a["max"][0])) if a else (float(conf.min()), float(conf.max()))
+    keep_all = (conf - cmin) / max(cmax - cmin, 1e-6) >= CONF
+    print(f"confidence filter {CONF:.2f} (the viewer's: raw confidence normalised by [{cmin:g}, {cmax:g}] "
+          f"{'from the octree metadata' if a else 'of the cloud itself (no octree metadata)'}): "
+          f"{int(keep_all.sum()):,} of {n_all:,} points kept ({100.0 * keep_all.sum() / max(n_all, 1):.1f} %)")
+# USER 2026-11-05 ("que decidan las fotos, no la cuenta de puntos … el límite es la nube"): the keyframes vote on every
+# point that passed the slider — the depth each keyframe measured is rebuilt from the cloud (each point's birth
+# keyframe and pixel); a point stays when enough keyframes measure it and fewer see through it (presence.py). The
+# votes only remove points; the cubes and their active voxels are laid over the WHOLE of what stays.
+LAYOUT = None
+if CUBE_M > 0:
+    from presence import vote_points, plan_layout
+    _g = (yaml.safe_load(open("/workspace/stac-build/server/config.yaml")).get("genrecon") or {})
+    votes = vote_points(xyz[keep_all], np.asarray(f["frame_global"])[keep_all], np.asarray(f["pixel_row"])[keep_all],
+                        np.asarray(f["pixel_col"])[keep_all], [int(fr) for fr in s.frames], np.asarray(s.poses, np.float64),
+                        [fx, fy, cx, cy, k1, k2, p1, p2], W, H, CUBE_M / 32.0,
+                        min_views=int(_g.get("presence_min_views", 2)), device=str(_g.get("presence_device", "cuda")))
+    sub = np.flatnonzero(keep_all)
+    keep_all[sub[~votes["keep"]]] = False
+    (WORK / "presence.json").write_text(json.dumps({k: v for k, v in votes.items() if k not in ("keep", "support", "through")}
+                                                   | {"points_published": int(n_all), "points_kept": int(keep_all.sum()),
+                                                      "confidence_threshold": CONF}, indent=2))
+old2new = None
+if not keep_all.all():
+    old2new = np.full(n_all, -1, np.int64); old2new[keep_all] = np.arange(int(keep_all.sum()))
+    xyz, rgbv = xyz[keep_all], rgbv[keep_all]
+
+
+def _remap(idx):
+    """Indices of the published cloud (the segmentation's globalIndices) → indices of the points kept."""
+    idx = np.asarray(idx, np.int64)
+    if old2new is None:
+        return idx
+    r = old2new[idx]
+    return r[r >= 0]
 sel = np.linspace(0, len(xyz) - 1, min(len(xyz), N_PTS)).astype(np.int64)        # a fixed stride, never a draw
 P = xyz[sel] @ M[:3, :3].T + M[:3, 3]; C = np.asarray(rgbv[sel]); C = (C * 255).astype(int) if C.max() <= 1.0 else C.astype(int)
 with (col / "points3D.txt").open("w") as fh:
@@ -58,19 +105,36 @@ cams_g = (np.asarray(s.poses, np.float64)[:, :3, 3] @ M[:3, :3].T) + M[:3, 3]
 # (levels.json: the cube's base is the lowest level — of the support surfaces or of the whole cloud —, its top
 # the highest ceiling level; the model paints floor and ceiling at the cube's faces, so a percentile of a
 # subsample must not decide them).
-np.save(WORK / "cloud_genrecon.npy", (xyz @ M[:3, :3].T + M[:3, 3]).astype(np.float32))
+P_g = xyz @ M[:3, :3].T + M[:3, 3]                         # the points kept, in GenRecon's frame
+np.save(WORK / "cloud_genrecon.npy", P_g.astype(np.float32))
+if CUBE_M > 0:
+    LAYOUT = plan_layout(P_g, CUBE_M)
+    np.save(WORK / "active_cells.npy", LAYOUT.pop("cells"))
+    (WORK / "layout.json").write_text(json.dumps(LAYOUT, indent=1))
 import yaml
 from correction.floor import head_noun
 _cfg = yaml.safe_load(open("/workspace/stac-build/server/config.yaml"))
 support = set(_cfg["autoprompt"]["support_surfaces"])
 y_d = (xyz @ (s_f * R_f).T + t_f)[:, 1]                      # heights in the display frame = GenRecon's z
 seg = json.loads((out / "segmentation_result.json").read_text()) if (out / "segmentation_result.json").exists() else {"instances": []}
-sup_idx = np.concatenate([np.asarray(i["globalIndices"], np.int64) for i in seg["instances"] if head_noun(i["label"]) in support] or [np.zeros(0, np.int64)])
-ceil_idx = [np.asarray(i["globalIndices"], np.int64) for i in seg["instances"] if head_noun(i["label"]) == "ceiling"]
+sup_idx = np.concatenate([_remap(i["globalIndices"]) for i in seg["instances"] if head_noun(i["label"]) in support] or [np.zeros(0, np.int64)])
+ceil_idx = [_remap(i["globalIndices"]) for i in seg["instances"] if head_noun(i["label"]) == "ceiling"]
 # the cube's base on the LOWEST level, of the support surfaces or of the whole cloud (genrecon_levels.py:
 # station's tracks, 1.15 m under the platform and no support noun, sat under every cube — USER 2026-11-02)
 from genrecon_levels import chunk_levels, stack_layers
-levels = stack_layers(chunk_levels(y_d, y_d[sup_idx], [y_d[g] for g in ceil_idx], bin_m=0.05, min_share=0.01), CUBE_M)
+levels = chunk_levels(y_d, y_d[sup_idx], [y_d[g] for g in ceil_idx], bin_m=0.05, min_share=0.01)
+# USER 2026-11-05: "debe abarcar la totalidad de la nube independientemente de dónde esté la parte más baja y más alta …
+# no me importa dónde está ubicada ni cuánto mide": the cubes are stacked from the cloud's LOWEST point to its HIGHEST
+# and laid over its whole floor plan (xy_extent, the exact min/max — never a percentile of a subsample); a cube is kept
+# when it holds one active voxel (coords_min_points points in one voxel of its own grid; the patched chunker applies the
+# rule of reconstruct_scene._coords_from_points on the whole cloud). The levels found stay in the record.
+levels["floor_level"], levels["floor_level_source"] = levels["z_floor"], levels["source"]
+levels.update(z_floor=float(P_g[:, 2].min()), source="the whole cloud's lowest point (USER 2026-11-05)",
+              z_top=float(P_g[:, 2].max()),
+              xy_extent=[float(P_g[:, 0].min()), float(P_g[:, 0].max()), float(P_g[:, 1].min()), float(P_g[:, 1].max())],
+              coords_min_points=MIN_PTS, coords_resolution=32,     # GenRecon's shape SLat grid (11.6 cm at 3.7 m)
+              confidence_threshold=CONF, points_kept=int(len(xyz)), points_published=int(n_all))
+levels = stack_layers(levels, CUBE_M)
 (WORK / "levels.json").write_text(json.dumps(levels, indent=2))
 # STAC 2026-10-17 (USER: "debería completar lo que no ve o no tenía puntos … las patas de una mesa … pero solo eso"):
 # the boxes of the segmented OBJECTS in GenRecon's frame — the model may complete only inside them; a support
@@ -92,7 +156,7 @@ for inst in seg["instances"]:
     # que sí tenga"): an object whose lowest points sit within STAND_MAX_M of the support level under it gets a
     # second, axis-aligned box from that level up to its lowest points over its footprint, where the model may
     # put the legs; a duct, a lamp, a cable hanging higher keeps its own box only
-    gi = np.asarray(inst["globalIndices"], np.int64)
+    gi = _remap(inst["globalIndices"])
     if len(gi) >= 50:
         pd = xyz[gi] @ (s_f * R_f).T + t_f                              # display frame: y up
         y_lo = float(np.percentile(pd[:, 1], 1)); below = [l for l in levels.get("support_levels", [levels["z_floor"]]) if l <= y_lo + 0.05]

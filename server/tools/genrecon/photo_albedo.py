@@ -17,6 +17,7 @@ from segmentation.session_io import _load_camera_source
 SES = Path(sys.argv[1]); GLB = Path(sys.argv[2]); NAME = sys.argv[3]
 TOPK = int(sys.argv[4]) if len(sys.argv) > 4 else 3
 TOL_M, TOL_REL, COS_MIN, PAD_PX = 0.03, 0.01, 0.2, 3
+TEX_MIN, TEX_MAX = int(os.environ.get("GENRECON_TEX_MIN", "512")), int(os.environ.get("GENRECON_TEX_MAX", "4096"))   # the atlas side, bounded
 t0 = time.time(); dev = torch.device("cuda"); glctx = dr.RasterizeCudaContext()
 NEAR, FARP = 0.05, 100.0
 
@@ -59,16 +60,28 @@ def clip_coords(V, Kk, w2ck, flip_y):
     zc = (Z * (FARP + NEAR) - 2 * FARP * NEAR) / (FARP - NEAR)
     return torch.stack([xn, yn, zc, Z], 1)[None].contiguous(), Z.contiguous()
 
+# nvdiffrast keeps a triangle's id in a float32 channel — exact only up to 2^24 (zaragoza 2026-11-05: 17.8 M faces gave
+# a CUDA illegal access): the depth is rendered in batches of triangles and the nearest surface kept (the z-buffer of
+# all of them is the minimum of the batches' — one batch, the same render, under 2^23 faces)
+_TRI_BATCH = 1 << 23
+
 def render_depth(k, flip_y):
     pos, Z = clip_coords(Vt, K[k], w2c[k], flip_y)
-    rast, _ = dr.rasterize(glctx, pos, Ft, resolution=[H8, W8])
-    z, _ = dr.interpolate(Z[None, :, None].contiguous(), rast, Ft)
-    z = z[0, :, :, 0]; z = torch.where(rast[0, :, :, 3] > 0, z, torch.full_like(z, 1e6))
-    return z            # (H8, W8) rows in nvdiffrast's order (y = −1 first); the self-check below fixes the convention
+    out = None
+    for a in range(0, Ft.shape[0], _TRI_BATCH):
+        Fb = Ft[a:a + _TRI_BATCH].contiguous()
+        rast, _ = dr.rasterize(glctx, pos, Fb, resolution=[H8, W8])
+        z, _ = dr.interpolate(Z[None, :, None].contiguous(), rast, Fb)
+        z = z[0, :, :, 0]; z = torch.where(rast[0, :, :, 3] > 0, z, torch.full_like(z, 1e6))
+        out = z if out is None else torch.minimum(out, z)
+    return out          # (H8, W8) rows in nvdiffrast's order (y = −1 first); the self-check below fixes the convention
 
 # self-check of the image-y convention against the certified cloud's own z-buffer on one keyframe
 from segmentation.perfect_object import _read_ply_fields
-_f = _read_ply_fields(SES / "output" / "cleaned_cloud.ply"); cloud = torch.from_numpy(np.column_stack([_f["x"], _f["y"], _f["z"]]).astype(np.float32)).to(dev); del _f
+_f = _read_ply_fields(SES / "output" / "cleaned_cloud.ply"); cloud = torch.from_numpy(np.column_stack([_f["x"], _f["y"], _f["z"]]).astype(np.float32)).to(dev)
+cloud_rgb = np.column_stack([_f[k] for k in ("red", "green", "blue")]).astype(np.float32) if "red" in _f else None
+if cloud_rgb is not None and cloud_rgb.max() <= 1.0: cloud_rgb *= 255.0
+del _f
 def cloud_zbuf(k):
     Pc = cloud @ torch.from_numpy(w2c[k][:3, :3].T.astype(np.float32)).to(dev) + torch.from_numpy(w2c[k][:3, 3].astype(np.float32)).to(dev)
     z = Pc[:, 2]; fr = z > 0.2; u = (K[k][0, 0] * Pc[fr, 0] / z[fr] + K[k][0, 2]).long(); v = (K[k][1, 1] * Pc[fr, 1] / z[fr] + K[k][1, 2]).long()
@@ -84,7 +97,49 @@ ERR0, FLIP_Y, FLIP_ROWS = best
 print(f"image convention: flip_y={FLIP_Y} flip_rows={FLIP_ROWS} (mesh depth vs cloud z-buffer median |Δ| {ERR0*100:.1f} cm on keyframe {fids[k0]})")
 if ERR0 > 0.25:        # a wrong frame disagrees by metres (bufferStop before the world-frame fix: 332 cm); a right one by centimetres
     raise SystemExit(f"bake failed: the mesh and the keyframes' poses are not in the same frame (median |Δ| {ERR0*100:.0f} cm)")
-del cloud
+
+# USER 2026-11-05 ("donde ninguna foto ve, el color real de la nube … las máscaras de SAM3 evitan que el color de un objeto
+# se corra al de al lado"): the cloud's own colour and SAM3's instance labels (instance_ids.npy: the label every point got
+# from the masks) in a hash of 2 cm cells — a texel no keyframe photographs takes the colour of the cloud where it lies,
+# and a keyframe whose pixel shows ANOTHER labelled object than the texel's does not colour it
+CELL = 0.02
+inst_p = SES / "output" / "instance_ids.npy"
+labels = torch.from_numpy(np.load(inst_p).astype(np.int64)).to(dev) if inst_p.exists() else None
+if labels is not None and len(labels) != len(cloud):
+    print(f"instance_ids.npy holds {len(labels):,} labels for {len(cloud):,} points — labels not used"); labels = None
+cmin = cloud.min(0).values
+def cell_key(Q):
+    ijk = torch.floor((Q - cmin) / CELL).long()
+    return (ijk[:, 0] * 1_000_003 + ijk[:, 1]) * 1_000_033 + ijk[:, 2]
+ck = cell_key(cloud); order = torch.argsort(ck, stable=True); ck_s = ck[order]
+uk, cnt = torch.unique_consecutive(ck_s, return_counts=True)
+starts = torch.cumsum(cnt, 0) - cnt
+cell_rgb = None
+if cloud_rgb is not None:
+    rgb_t = torch.from_numpy(cloud_rgb).to(dev)[order]
+    seg = torch.repeat_interleave(torch.arange(len(uk), device=dev), cnt)
+    cell_rgb = torch.zeros((len(uk), 3), device=dev).index_add_(0, seg, rgb_t) / cnt[:, None].float()
+    del rgb_t, seg
+cell_lab = labels[order][starts] if labels is not None else None          # the label of the cell's first point (stable order)
+def cell_lookup(Q):
+    """Index of the 2 cm cell holding Q (−1 when no point lies in it)."""
+    k = cell_key(Q); i = torch.searchsorted(uk, k).clamp(max=len(uk) - 1)
+    return torch.where(uk[i] == k, i, torch.full_like(i, -1))
+# per keyframe, the label of the NEAREST cloud point at every pixel (packed depth-mm and label, min-reduced: deterministic)
+lab_img = None
+if labels is not None:
+    lab_img = torch.zeros((len(fids), H, W), dtype=torch.int32, device=dev)
+    for k in range(len(fids)):
+        Pc = cloud @ torch.from_numpy(w2c[k][:3, :3].T.astype(np.float32)).to(dev) + torch.from_numpy(w2c[k][:3, 3].astype(np.float32)).to(dev)
+        z = Pc[:, 2]; fr = z > 0.2
+        u = (K[k][0, 0] * Pc[fr, 0] / z[fr] + K[k][0, 2]).long(); v = (K[k][1, 1] * Pc[fr, 1] / z[fr] + K[k][1, 2]).long()
+        inb = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+        key = (z[fr][inb] * 1000).long().clamp(max=(1 << 40) - 1) * (1 << 20) + labels[fr][inb].clamp(max=(1 << 20) - 1)
+        zb = torch.full((H * W,), (1 << 62), dtype=torch.long, device=dev)
+        zb.scatter_reduce_(0, v[inb] * W + u[inb], key, reduce="amin")
+        lab_img[k] = torch.where(zb < (1 << 62), zb % (1 << 20), torch.zeros_like(zb)).view(H, W).int()
+    print(f"labels: {int((labels > 0).sum()):,} of {len(labels):,} points segmented; per-keyframe label images ({time.time()-t0:.0f} s)")
+del cloud, ck, ck_s, order
 
 # the mesh's own depth per keyframe (min-filtered 3×3: no leak at silhouettes), in IMAGE row order
 depth = torch.empty((len(fids), H, W), device=dev)
@@ -97,10 +152,20 @@ print(f"mesh depth rendered for {len(fids)} keyframes ({time.time()-t0:.0f} s)")
 w2c_t = torch.from_numpy(w2c.astype(np.float32)).to(dev); K_t = torch.from_numpy(K.astype(np.float32)).to(dev); cam_t = torch.from_numpy(cam_pos.astype(np.float32)).to(dev)
 stats = []; new_textures = {}; UV_FLIP = None
 for pi, (pname, g, Vw) in enumerate(parts):
-    tex = g.visual.material.baseColorTexture; T = tex.size[0]; assert tex.size == (T, T) and T % 8 == 0, tex.size
-    base = torch.from_numpy(np.asarray(tex.convert("RGB")).astype(np.float32)).to(dev)             # (T, T, 3) image rows
+    tex = g.visual.material.baseColorTexture; T0 = tex.size[0]; assert tex.size == (T0, T0) and T0 % 8 == 0, tex.size
+    base0 = torch.from_numpy(np.asarray(tex.convert("RGB")).astype(np.float32)).to(dev)            # (T0, T0, 3) image rows
     uv = torch.from_numpy(np.asarray(g.visual.uv, np.float32)).to(dev); Vp = torch.from_numpy(Vw.astype(np.float32)).to(dev)
     Fp = torch.from_numpy(g.faces.astype(np.int32)).to(dev)
+    # USER 2026-11-05 ("el tamaño del atlas sale de la superficie real y de la resolución de las fotos, no un 2048 fijo"):
+    # a texel the size of the finest photo pixel that falls on this part — the nearest camera framing it, its focal —
+    # over the part's surface and the share of the atlas its charts fill; a power of two in [TEX_MIN, TEX_MAX]
+    fw3 = Vw[g.faces]; area3 = 0.5 * np.linalg.norm(np.cross(fw3[:, 1] - fw3[:, 0], fw3[:, 2] - fw3[:, 0]), axis=1).sum()
+    uvn = np.asarray(g.visual.uv, np.float64)[g.faces]; area_uv = 0.5 * np.abs(np.cross(uvn[:, 1] - uvn[:, 0], uvn[:, 2] - uvn[:, 0])).sum()
+    lo_p, hi_p = Vw.min(0), Vw.max(0); ctr = 0.5 * (lo_p + hi_p); rad = 0.5 * np.linalg.norm(hi_p - lo_p)
+    d_near = max(0.3, float(np.min(np.linalg.norm(cam_pos - ctr, axis=1)) - rad))
+    texel_m = d_near / float(np.median(K[:, 0, 0]))
+    need = np.sqrt(max(area3, 1e-6) / max(area_uv, 1e-6)) / texel_m
+    T = int(min(TEX_MAX, max(TEX_MIN, 2 ** int(np.ceil(np.log2(max(need, 1.0)))))))
     pos = torch.cat([uv * 2 - 1, torch.zeros_like(uv[:, :1]), torch.ones_like(uv[:, :1])], 1)[None].contiguous()
     rast, _ = dr.rasterize(glctx, pos, Fp, resolution=[T, T])
     if UV_FLIP is None:    # self-check: interpolate the UVs themselves; texel (r, c) must read (c/T, 1 − r/T) in image row order or its flip
@@ -114,6 +179,14 @@ for pi, (pname, g, Vw) in enumerate(parts):
     fw = Vw[g.faces]; fn_np = np.cross(fw[:, 1] - fw[:, 0], fw[:, 2] - fw[:, 0]); fn_np /= np.linalg.norm(fn_np, axis=1, keepdims=True).clip(1e-12)
     fn = torch.from_numpy(fn_np.astype(np.float32)).to(dev)                                           # world-frame face normals
     P = Pw[cov]; N = fn[tri[cov]]; n_tex = int(cov.sum())
+    cidx = cell_lookup(P)                                                       # the cloud cell each texel lies in
+    lab_t = cell_lab[cidx.clamp(min=0)] * (cidx >= 0) if cell_lab is not None else None
+    # the generated colour at the new resolution: the old atlas sampled at each texel's UV (image rows)
+    uvi_c, _ = dr.interpolate(uv[None].contiguous(), rast, Fp); uvi_c = uvi_c[0]
+    if UV_FLIP: uvi_c = torch.flip(uvi_c, [0])
+    uvc = uvi_c[cov]
+    gsmp = torch.stack([uvc[:, 0] * 2 - 1, (1 - uvc[:, 1]) * 2 - 1], 1)[None, None]
+    gen0 = Fn.grid_sample(base0.permute(2, 0, 1)[None], gsmp, mode="bilinear", align_corners=False)[0, :, 0].T   # (n, 3)
     # candidate views: every keyframe whose frustum holds a point of the part's box (its 3×3×3 lattice) or whose
     # camera stands inside it — no distance bound: a hall's far wall is photographed from 20 m away
     lo, hi = Vp.min(0).values, Vp.max(0).values
@@ -135,6 +208,9 @@ for pi, (pname, g, Vw) in enumerate(parts):
         vis = inb & (Z <= zb + TOL_M + TOL_REL * Z)
         dirs = cam_t[vb][:, None] - P[None]; dirs = dirs / dirs.norm(dim=2, keepdim=True).clamp(min=1e-6)
         cosang = (dirs * N[None]).sum(2).abs(); ok = vis & (cosang > COS_MIN)
+        if lab_t is not None:      # the pixel shows another labelled object than the texel's: that view does not colour it
+            lv = torch.stack([lab_img[k][vi[b], ui[b]] for b, k in enumerate(vb)]).long()
+            ok &= ~((lab_t[None] > 0) & (lv > 0) & (lv != lab_t[None]))
         w = torch.where(ok, cosang ** 4 / (Z.clamp(min=0.3) ** 2), torch.zeros_like(Z))
         grid = torch.stack([u / (W - 1) * 2 - 1, vv / (H - 1) * 2 - 1], 2)[:, None]             # (B, 1, n, 2)
         col = Fn.grid_sample(imgs_t[vb].permute(0, 3, 1, 2).float(), grid, mode="bilinear", align_corners=True)[:, :, 0].permute(0, 2, 1)  # (B, n, 3)
@@ -142,15 +218,20 @@ for pi, (pname, g, Vw) in enumerate(parts):
         wtop, idx = wall.topk(TOPK, dim=0); ctop = torch.gather(call, 0, idx[..., None].expand(-1, -1, 3))
     wsum = wtop.sum(0); seen = wsum > 0
     photo = (ctop * wtop[..., None]).sum(0) / wsum.clamp(min=1e-9)[:, None]
-    # unseen texels keep the generated colour, tone-matched per channel to the photographed ones (affine on mean/std)
-    gen = base[cov]
+    # a texel no keyframe photographs takes the cloud's own colour where it lies; only where the cloud has no point
+    # either, the generated colour, tone-matched per channel to the photographed ones (affine on mean/std)
+    gen = gen0
     if seen.sum() > 1000:
         mp, sp = photo[seen].mean(0), photo[seen].std(0); mg, sg = gen[seen].mean(0), gen[seen].std(0)
         gen_m = ((gen - mg) / sg.clamp(min=1) * sp + mp).clamp(0, 255)
     else:
         gen_m = gen
-    out = torch.where(seen[:, None], photo, gen_m)
-    newtex = base.clone(); newtex[cov] = out
+    from_cloud = (~seen) & (cidx >= 0) if cell_rgb is not None else torch.zeros_like(seen)
+    unseen_col = torch.where(from_cloud[:, None], cell_rgb[cidx.clamp(min=0)] if cell_rgb is not None else gen_m, gen_m)
+    out = torch.where(seen[:, None], photo, unseen_col)
+    # the texels no triangle covers keep the generated atlas, resampled to the new side (mip-mapping reads them)
+    newtex = Fn.interpolate(base0.permute(2, 0, 1)[None], size=(T, T), mode="bilinear", align_corners=False)[0].permute(1, 2, 0).contiguous()
+    newtex[cov] = out
     # a few texels of padding past the triangle edges so mip-mapping does not bleed the old colour at seams
     m = cov.float()[None, None]; img = newtex.permute(2, 0, 1)[None]
     for _ in range(PAD_PX):
@@ -158,8 +239,10 @@ for pi, (pname, g, Vw) in enumerate(parts):
         fill = summed / cnt.clamp(min=1); img = torch.where((grown > 0) & (m == 0), fill, img); m = grown
     newtex = img[0].permute(1, 2, 0)
     new_textures[pname] = Image.fromarray(newtex.clamp(0, 255).byte().cpu().numpy())
-    stats.append({"part": pname, "faces": int(len(g.faces)), "texels": n_tex, "seen_frac": float(seen.float().mean()), "views": len(views)})
-    print(f"  part {pi:2d}: {len(g.faces):>8,} faces, {n_tex:>9,} texels, {len(views):3d} candidate views, photographed {seen.float().mean()*100:5.1f} %  ({time.time()-t0:.0f} s)")
+    stats.append({"part": pname, "faces": int(len(g.faces)), "texels": n_tex, "atlas_px": T, "texel_mm": texel_m * 1000,
+                  "seen_frac": float(seen.float().mean()), "cloud_colour_frac": float(from_cloud.float().mean()), "views": len(views)})
+    print(f"  part {pi:2d}: {len(g.faces):>8,} faces, atlas {T}, {n_tex:>9,} texels, {len(views):3d} candidate views, photographed "
+          f"{seen.float().mean()*100:5.1f} %, cloud colour {from_cloud.float().mean()*100:4.1f} %  ({time.time()-t0:.0f} s)")
 
 # ── publish: the same mesh, the same UVs, the same metallic-roughness, only the base colour replaced ─────────────
 for pname, g, _ in parts:
@@ -170,7 +253,8 @@ src_meta = json.loads((GLB.parent / (GLB.stem + ".meta.json")).read_text()) if (
 seen_all = sum(s["seen_frac"] * s["texels"] for s in stats) / max(1, sum(s["texels"] for s in stats))
 meta = dict(src_meta); meta.update({"label": NAME, "glb_file": out.name, "textured": True, "method": src_meta.get("method", "genrecon"), "kind": "scene",
     "texture": "photo_albedo: base colour re-projected from the keyframes with the certified poses into GenRecon's own UV atlas "
-               f"(mesh depth occlusion, cos⁴/z² weights, best {TOPK} blended, {PAD_PX} px padding); unseen texels keep the generated colour tone-matched; "
+               f"(mesh depth occlusion, cos⁴/z² weights, best {TOPK} blended, {PAD_PX} px padding, a view showing another SAM3-labelled object skipped, "
+               f"the atlas sized by the surface and the finest photo pixel in [{TEX_MIN}, {TEX_MAX}]); unseen texels take the cloud's colour, else the generated colour tone-matched; "
                "metallic-roughness texture, factors and UVs as generated",
     "provenance": "geometry + material: vlm_generated (GenRecon, presence from the certified cloud); base colour: tool_measured (keyframe projection)",
     "source_glb": str(GLB), "photographed_texel_frac": seen_all, "parts": stats, "image_convention": {"flip_y": FLIP_Y, "flip_rows": FLIP_ROWS, "atlas_flip": bool(UV_FLIP), "check_cm": ERR0 * 100},

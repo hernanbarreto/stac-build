@@ -384,7 +384,9 @@
     "absorbed": "{n} máscara(s) fusionadas en estos",
     "deleteShapeTitle": "Borrar objeto generado",
     "deleteShapeMessage": "¿Borrar \"{label}\" y su carpeta entera ({folder}: PKL, malla, metadatos)? No se puede deshacer.",
-    "renameFailed": "No se pudo renombrar: {detail}"
+    "renameFailed": "No se pudo renombrar: {detail}",
+    "genrecon": "GenRecon",
+    "genreconHint": "Genera la malla GenRecon de esta sesión con el filtro de confianza que elijas"
   },
   "toolbar": {
     "label": "Herramientas del visor",
@@ -545,7 +547,7 @@
     "stageCaptions": "Descripciones de objetos",
     "stageCaptionsHint": "Una llamada al VLM por objeto al final de la certificación (descripciones para ShapeR).",
     "stageGenrecon": "Malla de la escena (GenRecon)",
-    "stageGenreconHint": "La nube decide la presencia: la malla se genera dentro de los voxels de la nube publicada, se hornea y aparece en Meshes; última etapa de la cadena.",
+    "stageGenreconHint": "Malla GenRecon de la nube: las fotos deciden dónde hay superficie dentro de la nube publicada, se hornea con las fotos y aparece en Meshes. Solo corre cuando la marcás acá.",
     "noCloud": "Este escaneo todavía no tiene nube: si su reconstrucción está en cola, la segmentación corre después.",
     "busy": "Hay un pipeline corriendo en esta sesión: esta orden va a esperar su turno en la cola.",
     "sam3NeedsPrompts": "SAM3 sin el VLM necesita al menos un prompt.",
@@ -1281,5 +1283,13 @@
     "place": "Colocar con el mouse",
     "placing": "Colocando — clic para soltar",
     "dropHint": "Suelta una esfera 1,5 m sobre el centro de la vista"
+  },
+  "genrecon": {
+    "title": "Malla GenRecon",
+    "run": "Generar",
+    "description": "Genera la malla de la nube publicada: las fotos deciden dónde hay superficie, los cubos cubren toda la nube y la textura sale de las fotos.",
+    "confidence": "Confianza de la nube: {{pct}} %",
+    "confidenceHint": "GenRecon usa los puntos que el visor muestra con este filtro (arranca en el valor del visor de esta sesión). Depende de cómo se capturó: 0 % usa todos los puntos.",
+    "started": "GenRecon en cola para {{session}} (confianza {{pct}} %)"
   }
 }

@@ -67,6 +67,7 @@ interface InstancesPanelProps {
   onOpenSegmentation: () => void
   /** the segmentation chain on demand, prompts editable (USER 2026-10-05) */
   onOpenAutosegment: () => void
+  onOpenGenrecon: () => void
 }
 
 function InstancesPanelImpl(p: InstancesPanelProps) {
@@ -149,6 +150,7 @@ function InstancesPanelImpl(p: InstancesPanelProps) {
         <div className="stac-instances__footer">
           <Button size="sm" icon={<Crosshair aria-hidden />} onClick={p.onOpenSegmentation}>{t('instances.segmentation')}</Button>
           <Button size="sm" icon={<Wand2 aria-hidden />} onClick={p.onOpenAutosegment} title={t('instances.autosegmentHint')}>{t('instances.autosegment')}</Button>
+          <Button size="sm" icon={<Box aria-hidden />} onClick={p.onOpenGenrecon} title={t('instances.genreconHint')}>{t('instances.genrecon')}</Button>
         </div>
       }>
       <Stack gap={1}>

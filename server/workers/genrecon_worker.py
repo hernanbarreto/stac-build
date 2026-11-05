@@ -121,6 +121,9 @@ def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
     mode = str(gcfg.get("mode", "cloud"))
     gen_name = str(gcfg.get("generative_mesh_name", "genrecon_generative") or "")
     min_pts = int(gcfg.get("min_points_per_voxel", 10))
+    conf = float(gcfg.get("confidence", 0.0))
+    if not 0.0 <= conf < 1.0:
+        raise ValueError(f"genrecon.confidence must be in [0, 1) — the viewer's slider as a fraction, got {conf}")
     if gen_name and gen_name == name:
         raise ValueError(f"genrecon.generative_mesh_name equals genrecon.mesh_name ({name}): one would overwrite the other")
     env = {**os.environ, "PYTHONUNBUFFERED": "1",
@@ -128,7 +131,13 @@ def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
            "GENRECON_TEX": str(int(gcfg.get("texture_size", 2048))),
            "GENRECON_TOPK": str(int(gcfg.get("bake_views", 3))),
            "GENRECON_CUBE_M": str(float(gcfg.get("cube_size_m", 0.0))),
-           "GENRECON_TILES": "1" if bool(gcfg.get("tiles", False)) else "0"}
+           "GENRECON_TILES": "1" if bool(gcfg.get("tiles", False)) else "0",
+           # USER 2026-11-05: the viewer's confidence slider chosen for THIS order (the Autosegment window), the
+           # chunk bakes in parallel processes, the photo atlas bounds
+           "GENRECON_CONF": str(conf),
+           "GENRECON_BAKE_WORKERS": str(int(gcfg.get("bake_workers", 1))),
+           "GENRECON_TEX_MIN": str(int(gcfg.get("photo_atlas_min", 512))),
+           "GENRECON_TEX_MAX": str(int(gcfg.get("photo_atlas_max", 4096)))}
     if not _SCRIPT.exists():
         raise FileNotFoundError(f"GenRecon runner missing: {_SCRIPT}")
     stop_semantic_service_verified(pipe, stage="GenRecon mesh")
