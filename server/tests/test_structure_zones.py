@@ -192,9 +192,11 @@ def test_a_zone_is_only_what_the_chain_of_chunks_does_not_join_already(tmp_path)
     assert together["zones"] == [] and together["revisits"]["geometric"]
 
 
-def test_the_probe_analysis_never_touches_the_card_in_the_map_worker():
+def test_the_probe_analysis_runs_on_the_card_in_a_process_of_its_own():
     """pccr 2026-11-05: the co-visibility on cuda inside the map worker's process made Omega's exclusive-card check
-    (repro.require_exclusive_gpu) fail the run — the analysis runs on the CPU there."""
+    (repro.require_exclusive_gpu) fail the run; USER: "ningún cálculo va en CPU" — the analysis runs on the card in
+    a subprocess (python -m reconstruction.walk_structure), never in the map worker's process."""
     import inspect
     src = inspect.getsource(ZN.structure_probe)
-    assert 'WS.analyse(npz, ranges=ranges, device="cpu"' in src
+    assert '"-m", "reconstruction.walk_structure"' in src and '"--device", "cuda"' in src
+    assert "WS.analyse(" not in src

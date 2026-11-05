@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence
 
@@ -114,15 +115,26 @@ def structure_probe(scan_dir: Path, frames_dir: Path, sel_files: Sequence[str], 
         tmp = stamp_p.with_name(stamp_p.name + ".tmp")
         tmp.write_text(json.dumps(stamp, indent=1))
         os.replace(tmp, stamp_p)
-    # on the CPU: the map worker's own process must not touch the card before Omega's exclusive check
-    # (repro.require_exclusive_gpu, docs/plan_determinismo.md point 4 — pccr 2026-11-05: the matrix on cuda here
-    # failed the run at the fork); a few seconds for hundreds of keyframes, deterministic
-    res = WS.analyse(npz, ranges=ranges, device="cpu", log=log)
-    z = np.load(npz)
-    WS.figure(res, z["c2w"], png, Path(scan_dir).parent.parent.name)
-    res["pass_stamp"] = stamp
-    WS.save(res, doc_p)
-    return {k: v for k, v in res.items() if k != "covisibility"}
+    # ON THE CARD, in a process of its own (USER 2026-11-05: "ningún cálculo va en CPU"): the map worker's own
+    # process never touches the card before Omega's exclusive check (repro.require_exclusive_gpu, point 4 — pccr
+    # 2026-11-05: the matrix on cuda inside it failed the run at the fork)
+    import repro
+    cmd = [sys.executable, "-m", "reconstruction.walk_structure", "--probe", str(npz),
+           "--ranges", json.dumps([[int(a), int(b)] for a, b in ranges]), "--out", str(doc_p), "--png", str(png),
+           "--title", Path(scan_dir).parent.parent.name, "--device", "cuda"]
+    r = subprocess.run(cmd, cwd=str(Path(__file__).resolve().parents[1]), env=repro.deterministic_env(),
+                       capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        if line.strip():
+            log(line)
+    if r.returncode != 0 or not doc_p.exists():
+        raise RuntimeError(f"the structure probe's analysis failed (exit {r.returncode}):\n{r.stderr[-1500:]}")
+    doc = json.loads(doc_p.read_text())
+    doc["pass_stamp"] = stamp
+    tmp = doc_p.with_name(doc_p.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=1))
+    os.replace(tmp, doc_p)
+    return doc
 
 
 def zone_pass_frames(zone: Dict, sel_files: Sequence[str], turn_files: Sequence[str]) -> List[str]:

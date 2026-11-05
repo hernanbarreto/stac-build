@@ -289,3 +289,28 @@ def save(res: Dict, path: Path) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(doc, indent=1))
     tmp.replace(path)
+
+
+def main(argv=None) -> int:
+    """The probe's analysis in a process of its own, on the card (USER 2026-11-05: "ningún cálculo va en CPU"): the
+    map worker never touches the card before Omega's exclusive check (repro.require_exclusive_gpu), so it runs this
+    as a subprocess and reads the record back."""
+    import argparse
+    ap = argparse.ArgumentParser(prog="python -m reconstruction.walk_structure")
+    ap.add_argument("--probe", required=True)
+    ap.add_argument("--ranges", required=True, help="the plan's chunks, a JSON list of [start, end)")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--png", required=True)
+    ap.add_argument("--title", default="")
+    ap.add_argument("--device", default="cuda")
+    a = ap.parse_args(argv)
+    ranges = [tuple(int(x) for x in r) for r in json.loads(a.ranges)]
+    res = analyse(Path(a.probe), ranges=ranges, device=a.device)
+    z = np.load(a.probe)
+    figure(res, z["c2w"], Path(a.png), a.title)
+    save(res, Path(a.out))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
