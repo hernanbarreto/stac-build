@@ -916,15 +916,13 @@ function App() {
     viewportRef.current?.setOBBsVisible(true)
   }, [sessions])  
 
-  // Dismiss loading overlay when points arrive (session load only, not refresh)
+  // Dismiss loading overlay when points arrive (session load only, not refresh). USER 2026-11-05 (zaragoza, an IFC
+  // that never finished loading: the toolbar never appeared): the cloud on screen ends the load — a session's BIM
+  // and its deviation map keep loading behind it with their own status (the sábana check below still runs)
   const prevPointCount = useRef(0)
   useEffect(() => {
     if (prevPointCount.current === 0 && pointCount > 0 && sessionLoading) {
-      // If session has BIM, don't dismiss yet — wait for BIM load + sábana check
-      const sess = sessions.find(s => s.id === activeSession)
-      if (!sess?.hasBim) {
-        setSessionLoading(null)
-      }
+      setSessionLoading(null)
     }
     prevPointCount.current = pointCount
   }, [pointCount, sessionLoading, sessions, activeSession])
