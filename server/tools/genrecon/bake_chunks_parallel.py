@@ -60,9 +60,12 @@ total_faces = sum(counts.values())
 share = 1.0
 if simplify >= 1_000_000_000 and total_faces > FACE_BUDGET:
     share = FACE_BUDGET / total_faces
-side = 2 ** int(np.floor(np.log2(max(64.0, np.sqrt(ATLAS_BYTES_BUDGET / (2 * max(1, len(geoms)) * 0.67))))))
-if side < texsize:
-    texsize = int(side)
+GLB_LIMIT = 3.5e9                     # bytes: the 4 GiB GLB / Node buffer, with a margin
+est = share * total_faces * 34.5 + len(geoms) * 2 * texsize * texsize * 0.67
+if est > GLB_LIMIT:                   # only then are the chunk atlases reduced (as always otherwise: texsize)
+    side = 2 ** int(np.floor(np.log2(max(64.0, np.sqrt(ATLAS_BYTES_BUDGET / (2 * max(1, len(geoms)) * 0.67))))))
+    if side < texsize:
+        texsize = int(side)
 if k == 0:
     print(f"[bake-worker] {len(geoms)} chunks, {total_faces:,} faces before decimation; each keeps "
           f"{share * 100:.1f} % of its own (total budget {FACE_BUDGET:,}); atlases {texsize}² "

@@ -68,9 +68,10 @@ if CONF > 0:
 # keyframe and pixel); a point stays when enough keyframes measure it and fewer see through it (presence.py). The
 # votes only remove points; the cubes and their active voxels are laid over the WHOLE of what stays.
 LAYOUT = None
-if CUBE_M > 0:
-    from presence import vote_points, plan_layout
-    _g = (yaml.safe_load(open("/workspace/stac-build/server/config.yaml")).get("genrecon") or {})
+_g = (yaml.safe_load(open("/workspace/stac-build/server/config.yaml")).get("genrecon") or {})
+VOTE = bool(_g.get("presence_vote", False))      # USER 2026-11-05: "hay que volver a como estaba antes" — off
+if CUBE_M > 0 and VOTE:
+    from presence import vote_points
     votes = vote_points(xyz[keep_all], np.asarray(f["frame_global"])[keep_all], np.asarray(f["pixel_row"])[keep_all],
                         np.asarray(f["pixel_col"])[keep_all], [int(fr) for fr in s.frames], np.asarray(s.poses, np.float64),
                         [fx, fy, cx, cy, k1, k2, p1, p2], W, H, CUBE_M / 32.0,
@@ -108,7 +109,10 @@ cams_g = (np.asarray(s.poses, np.float64)[:, :3, 3] @ M[:3, :3].T) + M[:3, 3]
 P_g = xyz @ M[:3, :3].T + M[:3, 3]                         # the points kept, in GenRecon's frame
 np.save(WORK / "cloud_genrecon.npy", P_g.astype(np.float32))
 if CUBE_M > 0:
-    LAYOUT = plan_layout(P_g, CUBE_M)
+    from presence import plan_layout
+    # the cubes stacked over the WHOLE cloud (USER 2026-11-05); a voxel active from MIN_PTS points — GenRecon's own
+    # presence rule, as always — unless the keyframes' vote already kept only confirmed points (then from one)
+    LAYOUT = plan_layout(P_g, CUBE_M, min_points=(1 if VOTE else MIN_PTS))
     np.save(WORK / "active_cells.npy", LAYOUT.pop("cells"))
     (WORK / "layout.json").write_text(json.dumps(LAYOUT, indent=1))
 import yaml

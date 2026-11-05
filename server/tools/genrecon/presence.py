@@ -158,7 +158,7 @@ def axis_centers(lo: float, hi: float, cube: float) -> list:
     raise ValueError(f"cannot place cubes of {cube} m over {dim} m")
 
 
-def plan_layout(P: np.ndarray, cube: float, R: int = 32, log: Callable[[str], None] = print) -> Dict:
+def plan_layout(P: np.ndarray, cube: float, R: int = 32, log: Callable[[str], None] = print, min_points: int = 1) -> Dict:
     """The cubes over the WHOLE of ``P`` (GenRecon's frame, z up) and its active voxels (module docstring)."""
     P = np.asarray(P, np.float64)
     lo, hi = P.min(0), P.max(0)
@@ -175,7 +175,8 @@ def plan_layout(P: np.ndarray, cube: float, R: int = 32, log: Callable[[str], No
     ijk = np.floor((P - origin) / v).astype(np.int64)
     dims = ijk.max(0) + 1
     key = (ijk[:, 0] * dims[1] + ijk[:, 1]) * dims[2] + ijk[:, 2]
-    act = np.unique(key)
+    act, cnt = np.unique(key, return_counts=True)
+    act = act[cnt >= int(min_points)]            # a voxel is active from min_points points (GenRecon's own rule: 10)
     cells = np.stack([act // (dims[1] * dims[2]), (act // dims[2]) % dims[1], act % dims[2]], 1)
     # a cube is kept when its R³ cells hold an active one: the count by a summed-area table over the lattice
     G = np.zeros(tuple(int(d) + R + 1 for d in dims), np.int32)
