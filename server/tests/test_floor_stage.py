@@ -21,20 +21,21 @@ def _cfg(auto_floor=True, auto_segment=True):
 def test_the_floor_runs_after_the_projection_and_before_the_certification():
     order = PM.DEFAULT_STAGE_ORDER
     assert order.index(StageId.PROJECTION) < order.index(StageId.FLOOR) < order.index(StageId.CERTIFY)
-    assert StageId.FLOOR in PM.SEGMENTATION_CHAIN and StageId.FLOOR in PM.SEGMENT_WHEN_DONE
+    # the final step of every reconstruction (USER 2026-11-05: "el piso corre automático como paso final")
+    assert StageId.FLOOR not in PM.SEGMENTATION_CHAIN and StageId.FLOOR not in PM.SEGMENT_WHEN_DONE
     assert PM.STAGE_REGISTRY[StageId.FLOOR]["module"] == "workers.floor_worker"
     on = {s.id: s.enabled for s in PM.build_pipeline_stages(config=_cfg())}
     assert on[StageId.FLOOR] and not on[StageId.CERTIFY]
     assert not {s.id: s.enabled for s in PM.build_pipeline_stages(config=_cfg(auto_floor=False))}[StageId.FLOOR]
-    assert not {s.id: s.enabled for s in PM.build_pipeline_stages(config=_cfg(auto_segment=False))}[StageId.FLOOR]
-    # "Reconstruir" without segmentation ends at the cloud: no floor (nothing to find it on)
+    # "Reconstruir" without the segmentation chain still ends with the floor (on the masks the session has)
     off = {s.id: s.enabled for s in PM.select_stages(PM.build_pipeline_stages(config=_cfg()), segment=False)}
-    assert not off[StageId.FLOOR]
+    assert off[StageId.FLOOR] and not off[StageId.VLM] and not off[StageId.SAM3]
     # the projection before it builds no octree: the floor publishes the final one
     job = SimpleNamespace(stages=[SimpleNamespace(stage=s) for s in PM.build_pipeline_stages(config=_cfg())])
     i_proj = next(i for i, st in enumerate(job.stages) if st.stage.id == StageId.PROJECTION)
     assert PM.certify_follows(job, i_proj)
     assert PM.floor_after_segmentation(_cfg()) and not PM.floor_after_segmentation(_cfg(auto_floor=False))
+    assert PM.floor_after_segmentation(_cfg(auto_segment=False))
     live = __import__("yaml").safe_load((Path(PM.__file__).parent / "config.yaml").read_text())
     assert live["pipeline"]["auto_floor"] is True
 
@@ -149,3 +150,20 @@ def test_without_a_segmentation_nothing_moves_declared(session):
     assert calls["run_floor"] is None and calls["octree"] == 1
     assert json.loads((out / FW.RECORD).read_text())["status"] == "no segmentation"
     assert any("nothing is moved" in m for m in pipe.logs)
+
+
+def test_a_reconstruction_without_replace_keeps_the_masks_and_projects_them():
+    """USER 2026-11-05 ("vlm sam3 (si es que no lo tiene), matching con la nube y ajuste de suelo"; "debe ser lo mismo
+    que si yo mando a reconstruir desde el UI"): the VLM analysis and the SAM3 masks are of the keyframes — a
+    reconstruction without replace keeps them when complete and switches the projection on; an Autosegment (force)
+    segments again."""
+    import inspect
+    src = inspect.getsource(PM.PipelineManager._run_pipeline)
+    assert "keep_semantics = recon_requested and not replace and not force" in src
+    i_keep = src.index("if keep_semantics and stage_state.stage.id in (StageId.VLM, StageId.SAM3):")
+    i_proj = src.index("later.stage.enabled = True", i_keep)
+    i_probe = src.index("if not upstream_ran:", i_keep)
+    assert i_keep < i_proj < i_probe
+    # the masks the session has are projected for the floor even with the chain off
+    i_masks = src.index("_masks_ok, _masks_why = self._stage_is_complete(")
+    assert i_masks < i_keep and "st.stage.enabled = True" in src[i_masks:i_keep]

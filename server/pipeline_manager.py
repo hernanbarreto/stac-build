@@ -1412,6 +1412,22 @@ class PipelineManager:
         # stage actually runs, everything downstream is considered stale (its
         # inputs just changed) and runs too.
         upstream_ran = replace or recon_requested or force
+        # USER 2026-11-05 ("nubes, vlm sam3 (si es que no lo tiene), matching con la nube y ajuste de suelo";
+        # "debe ser lo mismo que si yo mando a reconstruir desde el UI"): a reconstruction WITHOUT replace keeps the
+        # VLM analysis and the SAM3 masks the session already has — they are of the keyframes' images, not of the
+        # cloud (a new chunk plan keeps them too: map_worker._PLAN_INDEPENDENT_OUTPUT) — and the PROJECTION stage
+        # puts the kept masks on the new cloud; the floor follows. An Autosegment (force) segments again, as ordered.
+        keep_semantics = recon_requested and not replace and not force
+        if keep_semantics and any(st.stage.id == StageId.FLOOR and st.stage.enabled for st in job.stages):
+            # the floor needs the segmented support on THIS cloud: masks the session already has are projected
+            # even when the segmentation chain is off in this order (VLM / SAM3 not run)
+            _masks_ok, _masks_why = self._stage_is_complete(output_dir, Path(session_dir), StageId.SAM3, config)
+            if _masks_ok:
+                for st in job.stages:
+                    if st.stage.id == StageId.PROJECTION:
+                        st.stage.enabled = True
+                logger.info(f"[Pipeline] the session's masks ({_masks_why}) are projected on the new cloud for "
+                            f"the floor")
 
         for idx, stage_state in enumerate(job.stages):
             if not stage_state.stage.enabled:
@@ -1421,6 +1437,21 @@ class PipelineManager:
 
             if job.status == JobStatus.CANCELLED:
                 break
+
+            if keep_semantics and stage_state.stage.id in (StageId.VLM, StageId.SAM3):
+                done, why = self._stage_is_complete(
+                    output_dir, Path(session_dir), stage_state.stage.id, config)
+                if done:
+                    stage_state.status = JobStatus.DONE
+                    stage_state.pct = 100
+                    stage_state.message = f"Kept ({why}) — of the keyframes, not of the cloud"
+                    logger.info(f"[Pipeline] {stage_state.stage.id.value}: kept ({why}) — the masks are "
+                                f"of the keyframes; the projection puts them on the new cloud")
+                    if stage_state.stage.id == StageId.SAM3:
+                        for later in job.stages[idx + 1:]:
+                            if later.stage.id == StageId.PROJECTION:
+                                later.stage.enabled = True
+                    continue
 
             if not upstream_ran:
                 done, why = self._stage_is_complete(
@@ -2020,10 +2051,10 @@ def build_pipeline_stages(backend: Optional[str] = None,
 # feeds on it (USER 2026-10-05: a per-scan check in "Reconstruir" turns them off;
 # the Autosegment window runs any subset of them later)
 def floor_after_segmentation(config: Optional[dict]) -> bool:
-    """The floor stage follows every projection (``pipeline.auto_floor``, USER 2026-11-05) — when
-    the automatic segmentation it levels on is on (``pipeline.auto_segment``)."""
+    """The floor stage is the final step of every reconstruction and follows every projection
+    (``pipeline.auto_floor``, USER 2026-11-05: "el piso corre automático como paso final")."""
     pl = (config or {}).get("pipeline") or {}
-    return bool(pl.get("auto_floor", False)) and bool(pl.get("auto_segment", True))
+    return bool(pl.get("auto_floor", False))
 
 
 def certify_follows(job: "PipelineJob", idx: int) -> bool:
@@ -2034,8 +2065,9 @@ def certify_follows(job: "PipelineJob", idx: int) -> bool:
                for st in job.stages[idx + 1:])
 
 
-SEGMENTATION_CHAIN = (StageId.VLM, StageId.SAM3, StageId.FLOOR, StageId.CERTIFY)   # USER 2026-11-05:
-                                                                     # the mesh is the cloud's, before them
+SEGMENTATION_CHAIN = (StageId.VLM, StageId.SAM3, StageId.CERTIFY)   # USER 2026-11-05: the mesh is the cloud's
+# (and the FLOOR is not of the chain: USER 2026-11-05 "el piso corre automático como paso final, el único manual es
+# genrecon" — it runs at the end of every reconstruction, with or without the segmentation chain)
 # ... plus the projection stage, which only exists after SAM3's masks
 SEGMENT_WHEN_DONE = SEGMENTATION_CHAIN + (StageId.PROJECTION,)
 

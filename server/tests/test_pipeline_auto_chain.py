@@ -58,7 +58,7 @@ def test_production_pipeline_runs_the_whole_chain():
     from pipeline_manager import SEGMENTATION_CHAIN, select_stages
     assert StageId.GENRECON not in SEGMENTATION_CHAIN
     no_seg = [s.id for s in select_stages(stages, segment=False) if s.enabled]
-    assert no_seg == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY], no_seg
+    assert no_seg == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.FLOOR], no_seg   # the floor: always last
 
 
 def test_production_config_loads_through_every_typed_loader():
