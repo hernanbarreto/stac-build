@@ -15,8 +15,8 @@ whichever is larger: κ·z with κ = 3σ, σ the robust spread of the relative d
 measured the same surface (measured here, on this cloud). Votes only REMOVE points: the cloud is the limit.
 
 The cubes (``plan_layout``) are GenRecon's own lattice laid over the WHOLE of what stays — its exact extent, no
-percentile —: x and y by GenRecon's axis rule (inference/get_chunks.BaseChunker._axis_centers), z stacked from the
-lowest point (genrecon_levels.stacked_centers), every cube's 32³ grid one lattice; a voxel is ACTIVE when it holds
+percentile —: x and y by GenRecon's own rule (inference/get_chunks.BaseChunker._define_centers: the floor plan padded
+by 3.5/16 of the cube, then _axis_centers), z stacked from the lowest point (genrecon_levels.stacked_centers), every cube's 32³ grid one lattice; a voxel is ACTIVE when it holds
 a point that stayed, and a cube is kept when it holds an active voxel. Deterministic: element-wise ops, gathers and
 min/max scatters on one declared device."""
 from __future__ import annotations
@@ -31,6 +31,8 @@ from genrecon_levels import stacked_centers
 
 ATOMIC = 1.0 / 16.0            # GenRecon's lattice: strides are multiples of 1/16 of the cube
 MIN_OVERLAP = 4.0 / 16.0       # adjacent cubes overlap by at least 4/16 of the cube (BaseChunker min_overlap_factor 4)
+MIN_PADDING = 3.5 / 16.0       # the floor plan is padded by 3.5/16 of the cube on each side (BaseChunker.min_padding):
+                               # the outermost walls sit inside a cube, never on its face (as the model was trained)
 
 
 def _project(X: torch.Tensor, w2c: torch.Tensor, intr: Sequence[float]):
@@ -160,7 +162,8 @@ def plan_layout(P: np.ndarray, cube: float, R: int = 32, log: Callable[[str], No
     """The cubes over the WHOLE of ``P`` (GenRecon's frame, z up) and its active voxels (module docstring)."""
     P = np.asarray(P, np.float64)
     lo, hi = P.min(0), P.max(0)
-    xs, ys = axis_centers(lo[0], hi[0], cube), axis_centers(lo[1], hi[1], cube)
+    pad = MIN_PADDING * cube         # GenRecon's own padding of the floor plan (inference/get_chunks._define_centers)
+    xs, ys = axis_centers(lo[0] - pad, hi[0] + pad, cube), axis_centers(lo[1] - pad, hi[1] + pad, cube)
     zs = stacked_centers(lo[2], hi[2], cube)
     v = cube / R
     axes = [np.asarray(xs), np.asarray(ys), np.asarray(zs)]
