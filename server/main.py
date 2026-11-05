@@ -5705,7 +5705,9 @@ async def refresh_segmentation(body: dict):
         raise HTTPException(500, f"the configuration cannot be read: {e}")
     _auto_certify = (bool((_cfg_once.get("certify") or {}).get("auto_after_segmentation", True))
                      and bool((_cfg_once.get("pipeline") or {}).get("auto_segment", True)))
-    _ids = {_SI.PROJECTION} | ({_SI.CERTIFY} if _auto_certify else set())
+    from pipeline_manager import floor_after_segmentation as _fas
+    _ids = ({_SI.PROJECTION} | ({_SI.FLOOR} if _fas(_cfg_once) else set())
+            | ({_SI.CERTIFY} if _auto_certify else set()))
     job = await _enqueue_service_job(session_id, _scan_key_of(ctx), _ids, kind="refresh",
                                      why="the Segmentation Manager closed with changes")
     if job is None:
@@ -6636,6 +6638,10 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
                 "type": "error",
                 "message": "Autosegment: no stage selected — nothing to run"}))
             return {"ok": False, "error": "no stage selected"}
+        from pipeline_manager import floor_after_segmentation as _fas
+        if StageId.SAM3 in _only and _fas(_run_cfg):
+            # USER 2026-11-05: the floor correction after the projection of every segmentation
+            _only.add(StageId.FLOOR)
         if StageId.GENRECON in _only:
             # USER 2026-11-05: "para cada GenRecon, que se genere a mano, desde el panel de segmentación, y el usuario
             # va a tener que seleccionar ahí el valor del porcentaje que va a filtrar" — the mesh runs only on this
@@ -7177,9 +7183,16 @@ async def viewer_websocket(websocket: WebSocket):
                             if ((output_dir / "segmentation.json").exists()
                                     and (output_dir / "seg_masks.npz").exists()
                                     and not pipeline_manager.is_active(session_id)):
-                                from pipeline_manager import StageId as _SI
+                                from pipeline_manager import (StageId as _SI, floor_after_segmentation as _fas,
+                                                              read_config_once as _rco1)
+                                try:
+                                    _floor_on = _fas(_rco1())
+                                except Exception:  # noqa: BLE001 — the job reads it once more and fails named
+                                    _floor_on = False
                                 _job = await _enqueue_service_job(
-                                    session_id, _load_scan_key, {_SI.PROJECTION}, kind="projection",
+                                    session_id, _load_scan_key,
+                                    {_SI.PROJECTION} | ({_SI.FLOOR} if _floor_on else set()),
+                                    kind="projection",
                                     why="opened with SAM3 masks but no projection")
                                 await viewer_manager.send_text(websocket, json.dumps({
                                     "type": "status",

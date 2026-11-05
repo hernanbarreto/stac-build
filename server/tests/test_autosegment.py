@@ -24,7 +24,8 @@ def _full():
 
 def test_the_chain_is_vlm_sam3_certify_and_the_check_off_ends_at_the_cloud():
     # USER 2026-11-05 ("nube genrecon vlm+sam3 fin"): the mesh is the cloud's, before the chain
-    assert SEGMENTATION_CHAIN == (StageId.VLM, StageId.SAM3, StageId.CERTIFY)
+    # (+ the floor after the projection, USER 2026-11-05: "lo del piso sí, porque está inclinada la nube")
+    assert SEGMENTATION_CHAIN == (StageId.VLM, StageId.SAM3, StageId.FLOOR, StageId.CERTIFY)
     off = select_stages(_full(), segment=False)
     assert [s.id for s in off if s.enabled] == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY]
     on = select_stages(_full(), segment=True)

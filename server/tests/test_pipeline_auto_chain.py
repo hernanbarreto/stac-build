@@ -45,9 +45,10 @@ def test_production_pipeline_runs_the_whole_chain():
         "I2 was removed on 2026-10-08 — intake.content must not come back"
     stages = build_pipeline_stages(backend=str(raw["reconstruction"]["backend"]))
     enabled = [s.id for s in stages if s.enabled]
-    want = [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.GENRECON, StageId.VLM,
-            StageId.SAM3]
-    assert enabled == want, enabled                   # cloud → GenRecon → VLM + SAM3 → end
+    # GenRecon is its own button since 2026-11-05 (pipeline.auto_genrecon false); the floor follows the
+    # segmentation (USER 2026-11-05: "lo del piso sí, porque está inclinada la nube")
+    want = [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.VLM, StageId.SAM3, StageId.FLOOR]
+    assert enabled == want, enabled                   # cloud → VLM + SAM3 → floor → end
     # the reconstruction stage hosts no semantics any more
     import inspect
     import workers.map_worker as M
@@ -57,7 +58,7 @@ def test_production_pipeline_runs_the_whole_chain():
     from pipeline_manager import SEGMENTATION_CHAIN, select_stages
     assert StageId.GENRECON not in SEGMENTATION_CHAIN
     no_seg = [s.id for s in select_stages(stages, segment=False) if s.enabled]
-    assert no_seg == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY, StageId.GENRECON], no_seg
+    assert no_seg == [StageId.RECONSTRUCTION, StageId.CLOUDCOMPY], no_seg
 
 
 def test_production_config_loads_through_every_typed_loader():

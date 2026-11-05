@@ -205,6 +205,7 @@ class StageId(str, Enum):
     SAM3 = "sam3"
     PROJECTION = "projection"
     CERTIFY = "certify"
+    FLOOR = "floor"                   # the certification's floor correction alone (USER 2026-11-05)
     INSTANCE_CLEANER = "instance_cleaner"
     GENRECON = "genrecon"             # the scene mesh (GenRecon from the cloud; the GenRecon button of the segmentation panel)
 
@@ -221,6 +222,7 @@ STAGE_REGISTRY = {
     StageId.SAM3:             {"label": "Segmentation (SAM 3.1 masks → cloud)", "icon": "🏷️", "module": "workers.sam3_worker"},
     StageId.PROJECTION:       {"label": "Mask projection (masks → cloud + octree)", "icon": "🧷",
                                "module": "pipeline_manager", "entry": "run_projection_stage"},
+    StageId.FLOOR:            {"label": "Floor (one rigid motion on the segmented floor)", "icon": "📏", "module": "workers.floor_worker"},
     StageId.CERTIFY:          {"label": "Certification (closures · depth · floor · mask filter · final epoch)", "icon": "📐", "module": "workers.certify_worker", "engine": True},
     StageId.INSTANCE_CLEANER: {"label": "Instance Cleaning", "icon": "✨", "module": "workers.instance_cleaner_worker"},
     StageId.GENRECON:         {"label": "Mesh (GenRecon — from the cloud)", "icon": "🧱", "module": "workers.genrecon_worker"},
@@ -263,6 +265,11 @@ DEFAULT_STAGE_ORDER: List[StageId] = [
                            # the one launcher of a projection ordered alone: a resume whose SAM3
                            # left masks without a result, a session opened with unprojected
                            # masks, the Segmentation Manager's close
+    StageId.FLOOR,         # USER 2026-11-05 ("el piso lo acomodaba la certificación? hay que agregar al
+                           # pipeline eso … lo del piso sí, porque está inclinada la nube"): the
+                           # certification's floor correction ALONE, on the projected segmentation —
+                           # ONE rigid motion for the session (workers/floor_worker.py); it publishes
+                           # the final epoch with its octree, so the projection before it builds none
     StageId.CERTIFY,       # USER 2026-11-05: "hay que detener la certificación de mierda esa,
                            # eliminarla del pipeline" — off (certify.auto_after_segmentation false)
 ]
@@ -884,6 +891,8 @@ class PipelineManager:
                           "loop_semantics.json", "object_captions.timing.json"],
         StageId.INSTANCE_CLEANER: ["instance_*.ply", "inst_cleaned_cloud.ply"],
         StageId.GENRECON: ["tsdf/genrecon_photo", "tsdf/genrecon_generative"],
+        # the floor stage's record (its epoch is the session's live geometry, kept)
+        StageId.FLOOR: ["floor_session.json"],
     }
 
     # What a RESUME or an Autosegment cleans before a stage of the semantic chain runs
@@ -928,21 +937,25 @@ class PipelineManager:
             StageId.VLM,              # scene analysis ran on old keyframes
             StageId.SAM3,             # segmentation ran on old frames
             StageId.PROJECTION,
+            StageId.FLOOR,            # the floor was levelled on the old cloud
             StageId.CERTIFY,          # the acta certified the old geometry
             StageId.INSTANCE_CLEANER, # instance PLYs from old segmentation
         ],
         StageId.VLM: [
             StageId.SAM3,             # SAM3 uses VLM categories
             StageId.PROJECTION,       # the projection is of SAM3's masks
+            StageId.FLOOR,            # the floor is found by the segmentation
             StageId.CERTIFY,          # instance loops come from the segmentation
             StageId.INSTANCE_CLEANER,
         ],
         StageId.SAM3: [
             StageId.PROJECTION,       # the projection is of THESE masks
+            StageId.FLOOR,            # the floor is found by the segmentation
             StageId.CERTIFY,          # instance loops come from the segmentation
             StageId.INSTANCE_CLEANER, # instances depend on segmentation
         ],
         StageId.PROJECTION: [
+            StageId.FLOOR,            # the floor is found on the projected instances
             StageId.CERTIFY,          # the certification reads the projected instances
             StageId.INSTANCE_CLEANER,
         ],
@@ -951,6 +964,7 @@ class PipelineManager:
             StageId.GENRECON,         # the scene mesh is of this cloud
             StageId.SAM3,             # masks are projected onto THIS cloud
             StageId.PROJECTION,
+            StageId.FLOOR,            # the floor levels THIS cloud
             StageId.CERTIFY,          # the loop certifies THIS cleaned cloud
             StageId.INSTANCE_CLEANER,
         ],
@@ -1910,6 +1924,13 @@ class PipelineManager:
                 return False, "acta older than cleaned_cloud.ply"
             return True, "certification acta on disk"
 
+        if stage_id == StageId.FLOOR:
+            # the floor stage's record names the live geometry it left (workers/floor_worker.py):
+            # complete only while that geometry is still the live one and the segmentation it was
+            # found on has not been projected again
+            from workers.floor_worker import floor_is_current
+            return floor_is_current(output_dir)
+
         return False, "no probe for stage"
 
 
@@ -1947,6 +1968,7 @@ def build_pipeline_stages(backend: Optional[str] = None,
     # (VLM auto-prompt → SAM3) and restores the on-demand flow.
     auto_segment = bool((config.get("pipeline") or {}).get("auto_segment", True))
     auto_genrecon = bool((config.get("pipeline") or {}).get("auto_genrecon", True))   # the scene mesh closing the chain
+    auto_floor = floor_after_segmentation(config)
     _semantic_stages = {StageId.VLM, StageId.SAM3, StageId.PROJECTION}
     if not auto_segment:
         logger.info("[Pipeline] auto_segment off — VLM/SAM3 stages disabled")
@@ -1983,6 +2005,8 @@ def build_pipeline_stages(backend: Optional[str] = None,
         if stage_id == StageId.CERTIFY and not (auto_certify and auto_segment):
             return False   # config.yaml documents auto_segment:false as "no
                            # segmentation, no instance loops, no certification" 
+        if stage_id == StageId.FLOOR and not auto_floor:
+            return False   # pipeline.auto_floor (and the segmentation it levels on)
         if stage_id == StageId.GENRECON and not auto_genrecon:
             return False   # pipeline.auto_genrecon switches the mesh (USER 2026-11-05: right after the
                            # cloud; its levels from the segmentation when one exists, else the cloud's)
@@ -1995,14 +2019,23 @@ def build_pipeline_stages(backend: Optional[str] = None,
 # the stages that run AFTER the published cloud: the segmentation chain and what
 # feeds on it (USER 2026-10-05: a per-scan check in "Reconstruir" turns them off;
 # the Autosegment window runs any subset of them later)
+def floor_after_segmentation(config: Optional[dict]) -> bool:
+    """The floor stage follows every projection (``pipeline.auto_floor``, USER 2026-11-05) — when
+    the automatic segmentation it levels on is on (``pipeline.auto_segment``)."""
+    pl = (config or {}).get("pipeline") or {}
+    return bool(pl.get("auto_floor", False)) and bool(pl.get("auto_segment", True))
+
+
 def certify_follows(job: "PipelineJob", idx: int) -> bool:
-    """An enabled CERTIFY stage comes after stage ``idx`` of ``job`` — it publishes the final
-    epoch with its own octree, so the projection before it builds none (USER 2026-11-02)."""
-    return any(st.stage.id == StageId.CERTIFY and st.stage.enabled for st in job.stages[idx + 1:])
+    """An enabled stage that publishes the final epoch with its own octree — the CERTIFY stage
+    (USER 2026-11-02) or the FLOOR stage (USER 2026-11-05) — comes after stage ``idx`` of ``job``:
+    the projection before it builds none."""
+    return any(st.stage.id in (StageId.CERTIFY, StageId.FLOOR) and st.stage.enabled
+               for st in job.stages[idx + 1:])
 
 
-SEGMENTATION_CHAIN = (StageId.VLM, StageId.SAM3, StageId.CERTIFY)   # USER 2026-11-05: the mesh is
-                                                                     # the cloud's, before them
+SEGMENTATION_CHAIN = (StageId.VLM, StageId.SAM3, StageId.FLOOR, StageId.CERTIFY)   # USER 2026-11-05:
+                                                                     # the mesh is the cloud's, before them
 # ... plus the projection stage, which only exists after SAM3's masks
 SEGMENT_WHEN_DONE = SEGMENTATION_CHAIN + (StageId.PROJECTION,)
 
