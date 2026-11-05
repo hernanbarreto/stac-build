@@ -414,6 +414,8 @@ function App() {
   // count > 0). Used by the pipeline-done handler to tell "the cloud arrived on this
   // live socket" from "WS reconnected mid-pipeline  potree_ready went to a dead socket".
   const lastCloudLoadAtRef = useRef(0)
+  const activeSessionRef = useRef<string | null>(null)
+  useEffect(() => { activeSessionRef.current = activeSession }, [activeSession])
   const [flythroughOpen, setFlythroughOpen] = useState<string | null>(null)
   const [adminOpen, setAdminOpen] = useState(false)
 
@@ -499,6 +501,11 @@ function App() {
             }
           }
           setPipelineJobs(grouped)
+          // USER 2026-11-05 ("cuando terminó no le avisó al visor … tuve que refrescar la página"): a job the server
+          // no longer lists has ENDED even when its final event never reached this tab — the state restored or
+          // caught here is cleared at once (it used to wait for a reload or a window focus)
+          setPipelineRunning(prev => (prev && !Object.values(live).some(j => String(j.session_id ?? '') === prev.session_id))
+            ? null : prev)
         }
       } catch { /* offline: keep the last picture rather than blank the list */ }
       if (!stop) window.setTimeout(poll, 4000)
@@ -1323,7 +1330,8 @@ function App() {
       setCertifyRefresh(v => v + 1)
       setTimeout(() => {
         if (lastCloudLoadAtRef.current >= doneAt) return  // cloud arrived on this socket  keep it
-        viewportRef.current?.sendCommand({ type: 'load_session', session_id: sid })
+        if (activeSessionRef.current !== sid) return       // another session's job: the one on screen stays
+        viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: sid })
       }, 8000)
     }
   }, [])
@@ -2012,6 +2020,11 @@ function App() {
 
   const activeScanRow = projectScans.find((s: any) => s.key === activeScanTab)
   const pipelineActiveHere = !!(pipelineRunning && pipelineRunning.status === 'running' && pipelineRunning.session_id === activeSession)
+  // USER 2026-11-05 (observatorio: "no muestra nada ni barra de herramientas ni nube" while the mask projection ran):
+  // the cloud on disk is shown during any job that does not rebuild it — only a pending reconstruction / cloud stage
+  // keeps the viewer from loading it
+  const cloudRebuildingHere = pipelineActiveHere && (pipelineRunning?.stages || []).some(
+    s => s.enabled && (s.id === 'reconstruction' || s.id === 'cloudcompy') && s.status !== 'done')
   // A cloud on screen is never covered: progress rides as a banner instead.
   const viewerHasCloud = pointCount > 0 || cloudEverShown
   // nor is a session that already PUBLISHED one (USER 2026-11-02: "ese panel debe ocultarse si ya hay épocas
@@ -2206,7 +2219,7 @@ function App() {
             onEraseBoxSelected={setEraseBoxSel}
             showAxes={showAxes}
             showGrid={showGrid}
-            pipelineRunning={pipelineActiveHere}
+            pipelineRunning={cloudRebuildingHere}
             onPointCount={n => { setPointCount(n); if (n > 0) { lastCloudLoadAtRef.current = Date.now(); setCloudEverShown(true) } }}
             onFps={setFps}
             onStatusMessage={setStatusMessage}

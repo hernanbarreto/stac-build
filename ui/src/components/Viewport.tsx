@@ -4597,6 +4597,26 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }))
     }, [activeSession])  
 
+    // USER 2026-11-05 ("cuando terminó no le avisó al visor para que muestre … tuve que refrescar la página"): the two
+    // automatic loads above stand down while the session's cloud is being rebuilt; when that ends — the job finished,
+    // or a 'running' restored from the last visit turned out to be stale — the cloud on disk is loaded, unless the
+    // job's own broadcast (potree_ready) put one on screen in the meantime
+    const prevRebuildingRef = useRef(pipelineRunning)
+    useEffect(() => {
+        const was = prevRebuildingRef.current
+        prevRebuildingRef.current = pipelineRunning
+        if (!was || pipelineRunning) return
+        const t = window.setTimeout(() => {
+            const sid = activeSessionRef.current
+            const ws = wsRef.current
+            if (!sid || !ws || ws.readyState !== WebSocket.OPEN || pipelineRunningRef.current) return
+            if (potreeLoaderRef.current) return
+            sentLoadForSessionRef.current = sid
+            ws.send(JSON.stringify({ type: 'load_session', session_id: sid, scan_key: openScanKeyRef.current || undefined }))
+        }, 2000)
+        return () => window.clearTimeout(t)
+    }, [pipelineRunning])
+
     /** Remove the light cloud (the octree covers the scene, or the session changed). */
     const disposePreview = useCallback(() => {
         const p = previewRef.current
