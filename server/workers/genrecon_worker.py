@@ -132,12 +132,10 @@ def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
            "GENRECON_TOPK": str(int(gcfg.get("bake_views", 3))),
            "GENRECON_CUBE_M": str(float(gcfg.get("cube_size_m", 0.0))),
            "GENRECON_TILES": "1" if bool(gcfg.get("tiles", False)) else "0",
-           # USER 2026-11-05: the viewer's confidence slider chosen for THIS order (the Autosegment window), the
-           # chunk bakes in parallel processes, the photo atlas bounds
+           # USER 2026-11-05: the viewer's confidence slider chosen for THIS order (the GenRecon button), the chunk
+           # bakes in parallel processes
            "GENRECON_CONF": str(conf),
-           "GENRECON_BAKE_WORKERS": str(int(gcfg.get("bake_workers", 1))),
-           "GENRECON_TEX_MIN": str(int(gcfg.get("photo_atlas_min", 512))),
-           "GENRECON_TEX_MAX": str(int(gcfg.get("photo_atlas_max", 4096)))}
+           "GENRECON_BAKE_WORKERS": str(int(gcfg.get("bake_workers", 1)))}
     if not _SCRIPT.exists():
         raise FileNotFoundError(f"GenRecon runner missing: {_SCRIPT}")
     stop_semantic_service_verified(pipe, stage="GenRecon mesh")

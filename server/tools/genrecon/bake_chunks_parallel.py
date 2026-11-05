@@ -61,15 +61,27 @@ share = 1.0
 if simplify >= 1_000_000_000 and total_faces > FACE_BUDGET:
     share = FACE_BUDGET / total_faces
 GLB_LIMIT = 3.5e9                     # bytes: the 4 GiB GLB / Node buffer, with a margin
-est = share * total_faces * 34.5 + len(geoms) * 2 * texsize * texsize * 0.67
+
+
+def _target(f):
+    """The decimation target of a chunk of f faces — the same expression the bake below passes to to_glb."""
+    return max(1000, min(simplify, int(np.ceil(int(f) * share))))
+
+
+# the faces the chunks will HAVE once decimated (2026-11-05: the raw count, before the 150 k decimation, made a
+# 100-cube session look like 5 GB and shrank atlases the GLB had room for)
+kept_faces = sum(min(int(f), _target(f)) for f in counts.values())
+est = kept_faces * 34.5 + len(geoms) * 2 * texsize * texsize * 0.67
 if est > GLB_LIMIT:                   # only then are the chunk atlases reduced (as always otherwise: texsize)
     side = 2 ** int(np.floor(np.log2(max(64.0, np.sqrt(ATLAS_BYTES_BUDGET / (2 * max(1, len(geoms)) * 0.67))))))
     if side < texsize:
         texsize = int(side)
 if k == 0:
-    print(f"[bake-worker] {len(geoms)} chunks, {total_faces:,} faces before decimation; each keeps "
-          f"{share * 100:.1f} % of its own (total budget {FACE_BUDGET:,}); atlases {texsize}² "
-          f"({len(geoms)} x 2 within {ATLAS_BYTES_BUDGET / 1e9:.1f} GB)", flush=True)
+    print(f"[bake-worker] {len(geoms)} chunks, {total_faces:,} faces before decimation, {kept_faces:,} after; each "
+          f"keeps {share * 100:.1f} % of its own (total budget {FACE_BUDGET:,}); atlases {texsize}² — the GLB "
+          f"~{est / 1e9:.2f} GB of its {GLB_LIMIT / 1e9:.1f} GB limit"
+          + (f" (reduced: {len(geoms)} x 2 within {ATLAS_BYTES_BUDGET / 1e9:.1f} GB)" if texsize < int(sys.argv[7] if len(sys.argv) > 7 else 2048) else ""),
+          flush=True)
 mine = [g for i, g in enumerate(geoms) if i % n == k]
 cache.mkdir(parents=True, exist_ok=True)
 for g in mine:
@@ -95,7 +107,7 @@ for g in mine:
         t1 = time.perf_counter()
         glb = op.to_glb(vertices=chunk_v, faces=chunk_f, attr_volume=attr_volume[keep], coords=coords[keep],
                         attr_layout=d["attr_layout"], aabb=aabb_t, voxel_size=vs,
-                        decimation_target=max(1000, min(simplify, int(np.ceil(int(chunk_f.shape[0]) * share)))), texture_size=texsize,
+                        decimation_target=_target(chunk_f.shape[0]), texture_size=texsize,
                         remesh=False, verbose=False)
         part = cache / f"chunk_{idx:03d}.part.glb"
         (glb if isinstance(glb, trimesh.Scene) else trimesh.Scene([glb])).export(str(part))

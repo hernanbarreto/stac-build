@@ -130,8 +130,6 @@ genrecon:
                                      # was tried that night: pccr 35 M faces "espantoso")
   bake_workers: 6                    # chunk bakes in parallel processes (bake_chunks_parallel.py; one CPU thread each)
   texture_size: 2048                 # GenRecon's own atlas per chunk (the UV layout the photo bake starts from)
-  photo_atlas_min: 512               # the photo bake re-sizes each part's atlas to the finest photo pixel on it,
-  photo_atlas_max: 4096              # a power of two within these bounds (USER 2026-11-05: "no un 2048 fijo")
   tiles: true                        # USER 2026-11-02 ("hay que implementar el tema de los tiles … para que pueda ser
                                      # manejable una malla grande"): the published mesh is also cut into 3D Tiles,
                                      # output/tsdf/<mesh_name>/tiles/ (tools/glb/tile_mesh.mjs: LOD levels, KTX2
