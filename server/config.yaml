@@ -992,8 +992,11 @@ models:
 
     # Per-segment cleaning (voxel grid + local PCA + depth peeling)
     segment_cleaning:
-      enabled: true                    # USER 2026-11-01: "prende la limpieza por objeto en el config, que
-                                       # quede activada" (it had been off since 2026-08-29, "nada de nada").
+      enabled: false                   # USER 2026-11-05 (00:35 CDMX), seeing it per object in zaragoza's
+                                       # projection ("Clean obj 223 … DBSCAN -0, 3 faces"): "ese paso no nos
+                                       # interesa, debe quitarse". (USER 2026-11-01 had turned it on: "prende
+                                       # la limpieza por objeto en el config, que quede activada"; it had been
+                                       # off since 2026-08-29, "nada de nada".)
                                        # DBSCAN → voxel PCA → layer peel / SOR per instance, numpy/sklearn
                                        # today (on the GPU list: it is per-object CPU in the projection).
       voxel_size: 0.005                # 5mm cell — fallback for curved surfaces
