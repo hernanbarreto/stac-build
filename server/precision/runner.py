@@ -116,7 +116,9 @@ _GEOMETRY_IN = ("output/camera.json", "output/camera_poses.txt", "output/camera_
 
 STEPS: List[Step] = [
     Step("f0_camera", "F0 session camera", "da3", "precision.camera",
-         reads=("frames", "output/vggt_omega_config.yaml", "output/intrinsic.txt",
+         # Omega's intrinsics as its run recorded them (output/intrinsic.txt is F6's epoch artifact — the camera of
+         # the published cloud — and is not what F0 reads; precision.camera.omega_intrinsics_path)
+         reads=("frames", "output/vggt_omega_config.yaml",
                 "output/maplong_run/intrinsic.txt", "output/camera_frames.txt",
                 # the Stray K F0 may take, in every place precision.camera reads it (point 77:
                 # inputs/stray/ first, then the scan's legacy places)

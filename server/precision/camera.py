@@ -722,9 +722,12 @@ def read_omega_preprocessing(output_dir: os.PathLike) -> Tuple[str, int]:
 
 
 def omega_intrinsics_path(output_dir: os.PathLike) -> Path:
-    """The intrinsic.txt :func:`read_omega_intrinsics` reads (output/ first, then maplong_run/)."""
+    """The intrinsic.txt :func:`read_omega_intrinsics` reads: Omega's own record (maplong_run/) first, output/ only for a
+    session whose run wrote none there. output/intrinsic.txt is rewritten by F6 with the camera of the cloud it
+    publishes (an epoch artifact the viewer reads): read first, a resumed chain took F6's camera for Omega's and
+    restarted at F0, where F2 then refused the session's epoch (pccr 2026-11-07)."""
     out = Path(output_dir)
-    for cand in (out / INTRINSIC_NAME, out / "maplong_run" / INTRINSIC_NAME):
+    for cand in (out / "maplong_run" / INTRINSIC_NAME, out / INTRINSIC_NAME):
         if cand.exists():
             return cand
     raise CameraError(f"no {INTRINSIC_NAME} under {out} — the omega run did not write intrinsics")
