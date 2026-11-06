@@ -29,7 +29,8 @@ views or the 5 m: "si hay muy pocas vistas eso sí es un problema" — the views
    co-visible first, while it stays within the cap — about half its views when its own are half the cap. The OWNER of a
    unit's keyframes is its own group's cube.
 
-A cube's box (for the viewer) holds the cameras of its own views. A cube's Omega views are its keyframes and the turn
+A cube's box (for the viewer) holds the cameras of all its views, its own and the shared ones: cubes that share views
+overlap. A cube's Omega views are its keyframes and the turn
 frames between two of its keyframes consecutive in the walk; its F6 witnesses (the interval frames) follow the same rule.
 Deterministic: fixed strides, every order with a tie-break by index; what the views see is tested on the card."""
 from __future__ import annotations
@@ -174,6 +175,16 @@ def unit_covisibility(cmap, unit_recs: Sequence[Sequence[int]], centres: np.ndar
             rows = t.as_tensor([row[int(r)] for r in unit_recs[v]], dtype=t.int64, device=cmap.dev)
             directed[(u, v)] = float(seen[rows].any(0).double().mean())
     return {(u, v): min(c, directed.get((v, u), 0.0)) for (u, v), c in directed.items() if u < v}
+
+
+def cube_box(cams: np.ndarray, size: float):
+    """(lo of the cameras, hi of the cameras, the box's centre, its half extents): the box drawn for a cube — around its
+    views' cameras, at least a quarter of a cube on each horizontal half side and half a cube up and down."""
+    lo, hi = cams.min(0), cams.max(0)
+    mid = 0.5 * (lo + hi)
+    hx = np.maximum(0.5 * (hi - lo), 0.25 * size)
+    hx[2] = 0.5 * size
+    return lo, hi, mid, hx
 
 
 def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], cov: Dict[Tuple[int, int], float], *, metres_per_unit: float,
@@ -335,11 +346,11 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], cov: Dict[Tuple[int, int],
         raise CubePlanError("the cubes do not form one graph through the views they share")
     cubes: List[Dict] = []
     for i in range(len(groups)):
-        cams = np.concatenate([ucam[u] for u in core[i]])
-        lo, hi = cams.min(0), cams.max(0)
-        mid = 0.5 * (lo + hi)
-        hx = np.maximum(0.5 * (hi - lo), 0.25 * size)
-        hx[2] = 0.5 * size
+        # the box drawn holds the cameras of ALL its views, its own and the shared ones (USER 2026-11-07: "no veo
+        # solapamiento … los cubos deberían estar uno dentro del otro"): two cubes that share views overlap
+        lo, hi, mid, hx = cube_box(np.concatenate([ucam[u] for u in sorted(cube_units[i])]), size)
+        o_cams = np.concatenate([ucam[u] for u in core[i]])
+        olo, ohi = o_cams.min(0), o_cams.max(0)
         aff = {}
         for y in sorted(cube_units[i]):
             aff[str(y)] = 1.0 if y in core[i] else max(nbr[y].get(x, 0.0) for x in core[i])
@@ -349,6 +360,7 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], cov: Dict[Tuple[int, int],
                       "own_views": int(w[core[i]].sum()), "views": int(w[units_i].sum()),
                       "over_cap": bool(int(w[units_i].sum()) > int(max_views)),
                       "camera_span_m": ((hi - lo) * float(metres_per_unit)).tolist(),
+                      "own_camera_span_m": ((ohi - olo) * float(metres_per_unit)).tolist(),
                       "size_m": (2.0 * hx * float(metres_per_unit)).tolist()})
     n_kf_all = int(sum(len(u["keyframes"]) for u in units))
     owner = np.full(n_kf_all, -1, np.int64)

@@ -479,7 +479,7 @@ most co-visible first, up to the cap. Each unit's keyframes take their geometry 
 in the walk. Its F6 witnesses, the interval frames, follow the same rule.
 
 **Products.** `intake/cubes.json` and `intake/cubes.png`, stamped by the probe, the inputs and the code. The viewer draws
-each cube (**Instances** tab, `reconstruction/cube_boxes.py`) as a box around the cameras of its own views, carried into
+each cube (**Instances** tab, `reconstruction/cube_boxes.py`) as a box around the cameras of all its views, its own and the shared ones (cubes that share views overlap), carried into
 the live frame by the similarity between the probe's and the published keyframe cameras.
 
 On the dry run of 2026-11-07: zaragoza (185 keyframes, an open hall) 6 cubes of 32–37 own views and 63–64 with the
