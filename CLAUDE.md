@@ -11,6 +11,11 @@
   (10, his "piso de 10 vistas"); the cloud's `confidence` column is that support. Measured before: per point a median
   of 19 (zaragoza) / 28 (observatorio) witnesses could test its depth; 90 / 97 % of points had ≥ 10 of them.
 - Re-run with Replace in HIS order: zaragoza, observatorio, pccr 08-31, then the rest (bufferStop, station, pccr 2408).
+- VERDICT on zaragoza (coverage 69.4 → 38.8 %, ~56 % of the cloud kept): "tiene poca cobertura pero lo que se ve es
+  perfecto, yo sostengo esto, prefiero poco y bueno que mucho y mierda". Do not loosen the floor for coverage.
+- PENDING, to MEASURE when he says (USER: "me lo van a preguntar"): the recommended CAPTURE DISTANCE to the target,
+  minimum and maximum (he expects the maximum ≤ 10 m) — per session, F6's half-B held-out error in metres binned by
+  range, the support floor's pass rate by range, the published points by distance to their birth camera.
 
 ## ⭐⭐⭐ 2026-11-07 (later) — DUPLICATES ON CUBES: THE REVISITS TIED BY AMB3R'S MAP (USER: "la corrida anterior duplicaba
 ## muchísimo … mirá la pared de madera y las señales"; "me gusta tu enfoque de corrección … aplícalo a conciencia")
