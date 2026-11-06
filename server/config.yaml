@@ -1650,7 +1650,8 @@ reconstruction:
                                         # walk on exact pixels, the owner of its keyframes
                                         # (reconstruction/zones.py → output/zones.json).
       enabled: true
-      chunk_view_cap: card              # the most views a cut piece holds: card = what one Omega
+      chunk_view_cap: 64                # USER 2026-11-05 ("probemos así como el 04/11 con las zonas de revisitas"): 64 —
+                                        # the 2026-11-04 cut. The most views a cut piece holds: card = what one Omega
                                         # pass holds on this card at the run's resolution (H then
                                         # decides the length); an integer = that cap (64 = the
                                         # 2026-11-04 rule, VGGT-SLAM's 32 new + 32 shared: pccr 11

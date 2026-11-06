@@ -1154,7 +1154,7 @@ def test_the_structure_probe_runs_before_the_pass_and_the_zones_before_the_scale
     assert "max_chunk_views=_view_cap" in src and src.count("max_chunk_views=_view_cap") == 2
     import yaml
     cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
-    assert cfg["reconstruction"]["vggtomega"]["structure"] == {"enabled": True, "chunk_view_cap": "card"}
+    assert cfg["reconstruction"]["vggtomega"]["structure"] == {"enabled": True, "chunk_view_cap": 64}
 
 
 def test_a_resume_without_windows_replans_from_the_persisted_measurement():
