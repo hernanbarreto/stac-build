@@ -451,7 +451,8 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
                       passed: Dict[int, np.ndarray], K: np.ndarray, c2w: Dict[int, np.ndarray], labels,
                       neighbors, tau_quantile: float, repair_min_views: int, rescue_below_floor: bool,
                       log: Callable = print, bars_out: Optional[dict] = None,
-                      extra: Optional[Dict[int, List[int]]] = None):
+                      extra: Optional[Dict[int, List[int]]] = None, min_parallax_deg: Optional[float] = None,
+                      min_support: int = 0):
     """pccr EPOCH 8 (USER 2026-10-01: "es la mejor, incorporar al pipeline"), on the bent depth
     `dep` (every `valid` pixel; `passed` = above the ONE confidence floor):
      1. tau = the `tau_quantile` percentile of the neighbour disagreement on INTERIOR pixels;
@@ -470,7 +471,16 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
     stays numeric for its readers. ``extra``: {keyframe: [witness frames]} — the turn frames and the
     keyframes of other moments that see the same surface, voting on that keyframe after its neighbours
     (USER 2026-11-04, 2026-11-07; their maps and poses are in ``dep`` / ``passed`` / ``c2w``); τ is
-    measured on the walk neighbours alone, as before."""
+    measured on the walk neighbours alone, as before.
+     5. THE SUPPORT (USER 2026-11-07: "si pedimos piso de 10 vistas … quiero puntos válidos sin ruido"; a vote
+        counts when it TESTS the depth): with ``min_parallax_deg``, a pixel's support is the number of views that
+        agree with the depth it is published at AND see that point from at least ``min_parallax_deg`` away from
+        this keyframe's camera (F5's bound for a landmark, refine.min_tri_deg — a view from almost the same place
+        agrees with any depth along the ray, and a turn or interval frame next to its keyframe repeats it): the
+        agreeing witnesses for a kept or admitted pixel, the agreeing surface's views for a repaired or rescued
+        one. A pixel the vote keeps, repairs, admits or rescues enters only with a support of at least
+        ``min_support``; the support is the agree map returned (the cloud's ``confidence`` column).
+        ``min_parallax_deg`` None = every agreeing view counts and no floor (before 2026-11-07)."""
     import torch
     from precision import corrected_cloud as CC
     from precision import f6_torch as FT
@@ -494,7 +504,7 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
     for i, f in enumerate(frames):
         cand = valid[f] & (passed[f] | edge[f])           # below-floor interior pixels stay out
         v = FT.two_sided_vote(i, frames, dep, passed, cand, K, c2w, w2c, neighbors, tau,
-                              extra=extra.get(f, ()))
+                              extra=extra.get(f, ()), min_parallax_deg=min_parallax_deg)
         candt = FT._t(cand, torch.bool)
         agree, contra, z, s = v["agree"], v["contra"], v["z"], v["splats"]
         # point 53: every judged pixel's margin to τ — the nearest neighbour surface on its ray
@@ -527,15 +537,26 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
         zero = torch.zeros_like(z)
         zmap = torch.where(m, v["zmed"], zero)
         zmap = torch.where(repair | rescue, zrep, zmap)
-        amap = torch.where(m, agree, torch.zeros_like(agree))
-        amap = torch.where(repair | rescue, nrep, amap)
+        if min_parallax_deg is None:
+            amap = torch.where(m, agree, torch.zeros_like(agree))
+            amap = torch.where(repair | rescue, nrep, amap)
+            low = torch.zeros_like(m)
+        else:
+            # 5. the support: only the views that test the depth the pixel is published at
+            nrep_q = (FT.agreeing_count(s, tau, v["par_splat"]) if s.shape[0]
+                      else torch.zeros_like(agree))
+            amap = torch.where(m, v["agree_q"], torch.zeros_like(agree))
+            amap = torch.where(repair | rescue, nrep_q, amap)
+            low = (m | repair | rescue) & (amap < int(min_support))
+            zmap = torch.where(low, zero, zmap)
+            amap = torch.where(low, torch.zeros_like(amap), amap)
         zmap_np = FT._np(zmap, np.float32); amap_np = FT._np(amap, np.int16)
         final[f] = (zmap_np, amap_np)
         for k, n in (("valid", int(valid[f].sum())), ("edge", int(edge[f].sum())), ("kept", int(keep.sum())),
                      ("contradicted", int(contradicted.sum())), ("repaired", int(repair.sum())),
                      ("admitted", int(admit.sum())), ("edge_below", int((~pas & edg).sum())),
                      ("below_floor", int(below.sum())), ("rescued", int(rescue.sum())),
-                     ("rescue_refused_nearer", int(nearer.sum())),
+                     ("rescue_refused_nearer", int(nearer.sum())), ("below_support", int(low.sum())),
                      ("out", int((zmap_np > 0).sum()))):
             tot[k] = tot.get(k, 0) + n
     tot.update(mixed=n_mixed, snapped=n_snap, tau=tau)
@@ -556,7 +577,12 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
         + (f"{tot['rescued'] / nv * 100:.1f} % rescued below the floor ({tot['rescued'] / max(tot['below_floor'], 1) * 100:.1f} % "
            f"of the {tot['below_floor'] / nv * 100:.1f} % under it; {tot['rescue_refused_nearer'] / nv * 100:.1f} % refused, "
            f"their own depth in front)" if rescue_below_floor else "no rescue below the floor (rescue_below_floor false)")
+        + (f"; {tot['below_support'] / nv * 100:.1f} % left under the support of {int(min_support)} views that test "
+           f"the depth (≥ {float(min_parallax_deg):g}° from this keyframe's camera at the point)"
+           if min_parallax_deg is not None else "")
         + f"; coverage {tot['out'] / float(len(frames) * H * W) * 100:.1f} % of all pixels")
+    if min_parallax_deg is not None:
+        tot.update(min_support=int(min_support), min_parallax_deg=float(min_parallax_deg))
     return final, tau, tot
 
 
@@ -1129,7 +1155,9 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     voted, tau, vst = edge_keeping_vote(frames, dep, valid, passed, K, c2w_vote, labels,
                                         bc.neighbors, bc.tau_quantile, int(pcfg.cloud.repair_min_views),
                                         bool(pcfg.cloud.rescue_below_floor), log,
-                                        bars_out=vote_bars, extra=t_extra)
+                                        bars_out=vote_bars, extra=t_extra,
+                                        min_parallax_deg=float(pcfg.refine.min_tri_deg),
+                                        min_support=int(pcfg.cloud.min_support_views))
     cover = vst["out"] / float(N * H * W)
     _p(65, f"vote done: coverage {cover * 100:.1f} %")
     del dep, valid, passed
@@ -1227,7 +1255,8 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
                   "turn_witnesses": getattr(C, "turn_witnesses", None),
                   "covisible_witnesses": getattr(C, "covisible_witnesses", None),
                   "vote": {"tau": tau, "coverage": cover, "bars": C.vote_bars,
-                           **{k: (float(v) / max(vst["valid"], 1) if k not in ("tau", "valid") else v)
+                           **{k: (float(v) / max(vst["valid"], 1)
+                                  if k not in ("tau", "valid", "min_support", "min_parallax_deg") else v)
                               for k, v in vst.items() if k != "tau"}},
                   "raw_points": n_raw}
         if md_rep is not None:

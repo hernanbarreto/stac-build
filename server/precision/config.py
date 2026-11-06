@@ -392,6 +392,8 @@ class CloudConfig:
     rescue_below_floor: bool    # USER 2026-11-04 (night): a pixel under the confidence floor enters
                                 # with the depth repair_min_views floor-passing views agree on along
                                 # its ray (never its own), unless its own depth lies in front of it
+    min_support_views: int      # USER 2026-11-07: views that agree with a pixel's depth AND test it (≥
+                                # refine.min_tri_deg from its camera at the point) it needs to enter F6's cloud
 
 
 # ── depth on F5 (USER 2026-10-01: the epoch-7 recipe, precision/depth_on_f5.py) ──
@@ -866,7 +868,8 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                         repair_tau_quantile=_num(cl, "repair_tau_quantile", "cloud", lo=0.0, hi=100.0,
                                                  lo_excl=True),
                         repair_min_views=_num(cl, "repair_min_views", "cloud", lo=1, integer=True),
-                        rescue_below_floor=_bool(cl, "rescue_below_floor", "cloud"))
+                        rescue_below_floor=_bool(cl, "rescue_below_floor", "cloud"),
+                        min_support_views=_num(cl, "min_support_views", "cloud", lo=0, integer=True))
     cc = _sub(sec, "chunk_check", "")
     _gone(cc, "plane_min_inlier_frac", "chunk_check",
           "USER 2026-10-07 (docs/plan_determinismo.md point 140): no acceptance bar on the floor plane — "

@@ -566,12 +566,17 @@ def snap_mixed(depth: torch.Tensor, valid: torch.Tensor, labels: torch.Tensor, t
 
 def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge: Dict[int, np.ndarray],
                    cand, K: np.ndarray, c2w: Dict[int, np.ndarray], w2c: Dict[int, np.ndarray],
-                   neighbors, tau: float, extra=()) -> dict:
+                   neighbors, tau: float, extra=(), min_parallax_deg: Optional[float] = None) -> dict:
     """corrected_cloud.two_sided_vote (see its docstring) on DENSE maps: every entry is an [H, W]
     tensor over the candidate pixels (``cand``), ``splats`` [V, H, W] (NaN where nothing landed;
     [0, H, W] without a neighbour). The compact (rr, cc) view is corrected_cloud's wrapper.
     ``extra``: more witness frames (keys of ``depth`` / ``judge`` / ``c2w`` / ``w2c``) voting after
-    the neighbours — the turn frames near this keyframe (USER 2026-11-04); none = as before."""
+    the neighbours — the turn frames near this keyframe (USER 2026-11-04); none = as before.
+    ``min_parallax_deg`` (USER 2026-11-07: "quiero puntos válidos sin ruido" — a vote counts when it
+    TESTS the depth): also ``agree_q``, the agreeing witnesses whose camera sees the point from at least
+    that angle away from this keyframe's (the angle at the point between the two cameras; a view from
+    almost the same place agrees with any depth along the ray), and ``par_splat`` [V, H, W], the same
+    test at each witness's own surface on this keyframe's ray (the repair's support)."""
     f = order[i]
     H, W = depth[f].shape
     K = np.asarray(K, np.float64)
@@ -588,6 +593,17 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
     Xw = C + z[..., None] * ray
     witnesses = [order[i + int(d)] for d in neighbors if 0 <= i + int(d) < len(order)]
     witnesses += [int(g) for g in extra]
+    qualify = min_parallax_deg is not None
+    if qualify:
+        cos_max = float(np.cos(np.radians(float(min_parallax_deg))))
+        agree_q = torch.zeros_like(agree)
+        par_s = []
+
+        def _parallax_ok(X, Cg):
+            a = C - X
+            b = Cg - X
+            c = (a * b).sum(-1) / (torch.linalg.norm(a, dim=-1) * torch.linalg.norm(b, dim=-1)).clamp_min(1e-300)
+            return c <= cos_max
     for g in witnesses:
         T = _t(w2c[g])
         a = T[2, :3] @ C + T[2, 3]
@@ -611,9 +627,32 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
         contra = contra + (fwd | front).to(torch.int32)
         cands.append(torch.where(ag, (dg - a) / torch.where(torch.abs(b) > 0, b, one), nan))
         splats.append(torch.where(landed, s, nan))
+        if qualify:
+            Cg = _t(np.asarray(c2w[g], np.float64)[:3, 3])
+            agree_q = agree_q + (ag & _parallax_ok(Xw, Cg)).to(torch.int32)
+            par_s.append(landed & _parallax_ok(C + s0[..., None] * ray, Cg))
     zmed = nanmedian0(torch.stack(cands))
     sp = torch.stack(splats) if splats else torch.zeros((0, H, W), dtype=torch.float64, device=z.device)
-    return {"z": z, "agree": agree, "contra": contra, "contra_fwd": contra_fwd, "zmed": zmed, "splats": sp}
+    out = {"z": z, "agree": agree, "contra": contra, "contra_fwd": contra_fwd, "zmed": zmed, "splats": sp}
+    if qualify:
+        out["agree_q"] = agree_q
+        out["par_splat"] = (torch.stack(par_s) if par_s
+                            else torch.zeros((0, H, W), dtype=torch.bool, device=z.device))
+    return out
+
+
+def agreeing_count(C: torch.Tensor, tau: float, Q: torch.Tensor) -> torch.Tensor:
+    """Per column of C [V, ...]: how many views agree within tau of the column's median (agreeing_median's
+    agreeing set) AND are marked in Q [V, ...] — the repair's support counted only where it tests the depth."""
+    if C.ndim < 2 or C.shape[0] == 0:
+        shape = C.shape[1:] if C.ndim >= 2 else (0,)
+        return torch.zeros(shape, dtype=torch.int32, device=C.device)
+    C = C.to(torch.float64)
+    nan = torch.full_like(C, float("nan"))
+    C = torch.where(torch.isfinite(C), C, nan)
+    med = nanmedian0(C)
+    agree = torch.abs(C - med[None]) <= tau * med[None]
+    return (agree & Q.to(torch.bool)).sum(0).to(torch.int32)
 
 
 def agreeing_median(C: torch.Tensor, tau: float, min_views: int):

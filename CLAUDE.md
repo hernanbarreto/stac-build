@@ -1,5 +1,17 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ 2026-11-07 (evening) — F6 PUBLISHES ONLY SUPPORTED POINTS: ≥ 10 VIEWS THAT TEST THE DEPTH (USER: "quiero
+## puntos válidos sin ruido"; "prefiero tener menos puntos pero valiosos, que muchos puntos malos")
+- He found by eye on pccr, observatorio and zaragoza that the viewer's confidence slider at 25 % (≥ 8–10 agreeing votes
+  of F6, every vote counted) removes the duplicates and flyers. Asked whether more frames between keyframes would
+  reinforce: no — a vote from almost the same place agrees with any depth along the ray. So a vote now counts only
+  when it TESTS the depth: the witness sees the point from ≥ `refine.min_tri_deg` (2°) away from the keyframe's camera
+  (`f6_torch.two_sided_vote(min_parallax_deg)` → `agree_q`, `par_splat`; `agreeing_count` for repairs), and a pixel
+  the vote keeps / repairs / admits / rescues enters only with that support ≥ `precision.cloud.min_support_views`
+  (10, his "piso de 10 vistas"); the cloud's `confidence` column is that support. Measured before: per point a median
+  of 19 (zaragoza) / 28 (observatorio) witnesses could test its depth; 90 / 97 % of points had ≥ 10 of them.
+- Re-run with Replace in HIS order: zaragoza, observatorio, pccr 08-31, then the rest (bufferStop, station, pccr 2408).
+
 ## ⭐⭐⭐ 2026-11-07 (later) — DUPLICATES ON CUBES: THE REVISITS TIED BY AMB3R'S MAP (USER: "la corrida anterior duplicaba
 ## muchísimo … mirá la pared de madera y las señales"; "me gusta tu enfoque de corrección … aplícalo a conciencia")
 - CAUSE, measured: on cubes nothing tied two moments of the walk that see the same surface from different cubes — no

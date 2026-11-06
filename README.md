@@ -890,6 +890,18 @@ where $s_g$ is $g$'s floor-passing surface splatted into $f$, which $f$ should h
 | **rescue** | valid ∧ ¬P ∧ $\lvert A\rvert\ge2$ ∧ ¬admit, refused when $z<z_{\text{rep}}(1-\tau)$ | $z_{\text{rep}}$ |
 | leave | otherwise | — |
 
+**The support** (USER 2026-11-07: "si pedimos piso de 10 vistas … quiero puntos válidos sin ruido"). A vote counts
+only when it **tests the depth**: the witness sees the point from at least $\theta_{\min}=$ `refine.min_tri_deg` (2°,
+F5's bound for a landmark) away from $f$'s camera, the angle at the point
+$\angle\big(C_f-X,\ C_g-X\big)\ge\theta_{\min}$. A view from almost the same place agrees with any depth along the
+ray, and a turn or interval frame next to its keyframe repeats it. The support of a published pixel is the number of
+such views that agree with the depth it is published at: the agreeing witnesses for keep and admit, the agreeing
+surface $A$ for repair and rescue. **A pixel enters the cloud only with a support of at least**
+`cloud.min_support_views` (**10**); below it, it leaves. Measured before the rule on the published clouds: per point a
+median of 19 (zaragoza) and 28 (observatorio) of its witnesses could test its depth, and 90 % / 97 % of the points had
+at least 10 of them; the viewer's confidence slider at 25 % (≥ 8–10 agreeing votes, every vote counted) was what
+removed the duplicates and flyers by eye on pccr, observatorio and zaragoza.
+
 **Rescue.** The rescue recovers low-confidence pixels that the surrounding views agree on, which would otherwise be holes.
 It is refused when the pixel's own depth is nearer than the agreed surface: the pixel saw something in front, and the
 neighbours' surface may lie behind it.
@@ -906,7 +918,7 @@ They vote on the keyframes within ±12 of their anchor and never become points.
 
 ## 15. The published cloud
 
-**Points.** Every keyframe pixel that the vote kept becomes a point:
+**Points.** Every keyframe pixel that the vote kept with its support (§14.6) becomes a point:
 
 ```math
 \mathbf X=c2w^{F5}_f\big(\hat z(u,v)\,K_{F5}^{-1}[u,v,1]^\top\big),
@@ -916,7 +928,7 @@ coloured from the undistorted frame. Each point records:
 
 - its birth keyframe (`frame_global`);
 - its pixel (`pixel_row`, `pixel_col`);
-- its vote count (`confidence`);
+- its support (`confidence`): the views that test its depth and agree, at least 10 (§14.6);
 - its source: VGGT-Ω bent, PointDiT detail, band front or band back.
 
 **Cleaner** (`reconstruction/gpu_cloud_clean.py`), on the GPU:
