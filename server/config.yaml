@@ -4372,8 +4372,6 @@ scale:                              # scale graph sources beyond DA3 + seams (§
                                     # synthetic set (bridge Sim3 fits recover s_ab to ~0.3 %)
   sigma_vio: 0.03                   # σ (log) of a per-chunk VIO row
   sigma_regulated: 0.01             # σ (log) of a regulated-dimension row (§4.6)
-  verify_max_dev: 0.10              # chunked-metric: scale_align must land within ±10 % of 1
-                                    # — beyond it the session FAILS (§5.4), no warning
   vio_segment_s: 5.0                # VIO↔chunk ratio segment length (s)
   vio_min_segments_chunk: 3         # a chunk needs this many voting segments for its VIO row
   vio_min_seg_disp_m: 0.5           # a segment votes when VIO walked at least this

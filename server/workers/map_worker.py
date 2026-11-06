@@ -2709,21 +2709,13 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 "metric scale alignment FAILED — scale_align could not estimate s. Refusing to "
                 "produce a NON-METRIC reconstruction (it can't be compared against BIM). See the "
                 "[scale-align] lines above for the exact reason (frame match / ratios / inputs).")
-        # claude_stac.txt §5.4: in chunked-metric mode the chunks are already
-        # locked, so scale_align is the VERIFIER — s ≈ 1 expected. A deviation
-        # beyond scale.verify_max_dev is a session failure, not a warning.
+        # in chunked-metric mode the chunks are already locked, so scale_align MEASURES how far the
+        # locked, joined chunks sit from the DA3/VIO metre — recorded, never a verdict (USER 2026-11-06:
+        # "sacá esa regla, es un número inventado, no hay límite en la regla" — the ±10 % of
+        # scale.verify_max_dev that failed the session is gone)
         if tag == "chunked-metric":
-            from reconstruction.loops.config import load_loops_config
-            _vmax = load_loops_config(config).scale.verify_max_dev
-            _dev = abs(float(_s) - 1.0)
             pipe.send_log(f"[scale-verify] chunked-metric residual s={float(_s):.4f} "
-                          f"(|s-1|={_dev:.4f}, limit {_vmax:g})")
-            if _dev > _vmax:
-                raise RuntimeError(
-                    f"scale VERIFICATION FAILED: the locked chunks disagree with the DA3/VIO "
-                    f"verifier by {_dev*100:.1f}% (> {_vmax*100:.0f}% = scale.verify_max_dev). "
-                    f"The scale graph (scale_graph.json / metric_lock.json) does not close — "
-                    f"session failure, not a warning.")
+                          f"(|s-1|={abs(float(_s) - 1.0):.4f}; measured, no limit)")
 
         # ── SIMPLE: bake the upright orientation (gravity from the camera poses) ──
         if _simple_on and bool(_simple_cfg.get("orient_from_poses", True)):

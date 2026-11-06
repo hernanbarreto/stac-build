@@ -307,7 +307,8 @@ def test_production_yaml_loads_and_flattens():
         assert k in d
     # USER 2026-10-07 (plan point 17): no scale-break threshold, no σ factor reaches the fork
     assert "scale_tol_log" not in d and "scale_break_sigma_factor" not in d
-    assert fork_model_scale(cfg)["verify_max_dev"] == cfg.scale.verify_max_dev
+    assert fork_model_scale(cfg)["sigma_loop"] == cfg.scale.sigma_loop
+    assert "verify_max_dev" not in fork_model_scale(cfg)        # USER 2026-11-06: no limit on the residual
 
 
 # Mathematics and machine limits, not decisions: 1.4826 = 1/Φ⁻¹(0.75), the

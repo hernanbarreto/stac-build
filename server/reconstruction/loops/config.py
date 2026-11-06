@@ -192,7 +192,6 @@ class ScaleConfig:
     sigma_loop: float               # σ of a loop row (log units)
     sigma_vio: float                # σ of a VIO absolute row (log units)
     sigma_regulated: float          # σ of a regulated-dimension row (log units)
-    verify_max_dev: float           # |s_align − 1| beyond this = session FAILURE (§5.4)
     vio_segment_s: float            # VIO↔chunk ratio segment length (s)
     vio_min_segments_chunk: int     # per-chunk minimum voting segments for a VIO row
     vio_min_seg_disp_m: float       # a segment votes when VIO walked at least this
@@ -658,7 +657,6 @@ def load_loops_config(raw: Optional[Dict[str, Any]] = None) -> MetricGraphConfig
         sigma_loop=_num(sc, "sigma_loop", C, lo=0, lo_excl=True),
         sigma_vio=_num(sc, "sigma_vio", C, lo=0, lo_excl=True),
         sigma_regulated=_num(sc, "sigma_regulated", C, lo=0, lo_excl=True),
-        verify_max_dev=_num(sc, "verify_max_dev", C, lo=0, lo_excl=True),
         vio_segment_s=_num(sc, "vio_segment_s", C, lo=0, lo_excl=True),
         vio_min_segments_chunk=_num(sc, "vio_min_segments_chunk", C, lo=1, integer=True),
         vio_min_seg_disp_m=_num(sc, "vio_min_seg_disp_m", C, lo=0),

@@ -497,7 +497,7 @@ def fork_loops_cfg(stac_server_dir: Optional[str] = None, **over) -> dict:
 
 def fork_scale_cfg(**over) -> dict:
     d = {"sigma_loop": 0.005, "sigma_vio": 0.03, "sigma_regulated": 0.01,
-         "verify_max_dev": 0.10, "vio_segment_s": 5.0, "vio_min_segments_chunk": 3,
+         "vio_segment_s": 5.0, "vio_min_segments_chunk": 3,
          "vio_min_seg_disp_m": 0.5, "break_localisation_gap": 2.0}
     d.update(over)
     return d
