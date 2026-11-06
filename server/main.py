@@ -3844,6 +3844,20 @@ async def propagate_interactive_segmentation(request: Request):
 
 # --- User Viewer Preferences ---
 
+@app.get("/api/sessions/{session_id}/cubes")
+async def get_session_cubes(session_id: str, scan_key: Optional[str] = None):
+    """The cubes of the session's cut as boxes in the viewer's display frame (USER 2026-11-06: "me gustaría ver los
+    chunks como cubos en la escena, y que se puedan apagar y prender") — reconstruction/cube_boxes.py; an empty list
+    when the session has no cube plan."""
+    from reconstruction.cube_boxes import cube_boxes
+    ctx = _ctx(session_id, scan_key=scan_key)
+    try:
+        doc = await asyncio.get_running_loop().run_in_executor(None, lambda: cube_boxes(ctx.session_dir))
+    except Exception as e:  # noqa: BLE001 — a view, never a failure of the session
+        return {"cubes": [], "error": f"{type(e).__name__}: {e}"}
+    return doc or {"cubes": []}
+
+
 @app.get("/api/sessions/{session_id}/prefs")
 async def get_viewer_prefs(
     session_id: str,

@@ -386,7 +386,12 @@
     "deleteShapeMessage": "Delete \"{label}\" and its whole folder ({folder}: PKL, mesh, metadata)? This cannot be undone.",
     "renameFailed": "Rename failed: {detail}",
     "genrecon": "GenRecon",
-    "genreconHint": "Generate this session's GenRecon mesh with the confidence filter you choose"
+    "genreconHint": "Generate this session's GenRecon mesh with the confidence filter you choose",
+    "cubes": "Cubes of the cut ({n})",
+    "cubesShowAll": "Show every cube",
+    "cubesHideAll": "Hide every cube",
+    "cubeLabel": "Cube {id}",
+    "cubeMeta": "{kf} kf · {views} views"
   },
   "toolbar": {
     "label": "Viewport tools",
@@ -1234,7 +1239,8 @@
     "layer_flyers": "Flyer layer loaded (red edge · orange views · blue texture · grey other)",
     "layer_mono_detail": "PointDiT layer loaded (grey detail · green front · blue back)",
     "layer_mixed_unresolved": "Mixed unresolved pixels loaded (red): excluded from the cloud",
-    "layerMissing": "Layer '{{name}}' is not on this session yet"
+    "layerMissing": "Layer '{{name}}' is not on this session yet",
+    "cube": "Cube {id}"
   },
   "xr": {
     "title": "STAC XR",

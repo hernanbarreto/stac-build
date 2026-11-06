@@ -14,7 +14,7 @@ import { TilesRenderer } from '3d-tiles-renderer'
 import { GLTFExtensionsPlugin } from '3d-tiles-renderer/plugins'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { PotreeOctreeLoader } from './PotreeLoader'
-import { AssistantViz, arrowDimension, objectDims, thickBox, thickSegment, type SceneObject, type UserVolume, type TraceEntry } from './assistantViz'
+import { AssistantViz, arrowDimension, labelSprite, objectDims, thickBox, thickSegment, type SceneObject, type UserVolume, type TraceEntry } from './assistantViz'
 import { Eye, EyeOff, Focus, RotateCw, Move, Save, Trash2, X, Box as BoxIcon, Scaling, RefreshCw, MonitorX } from 'lucide-react'
 import { getT, getFmt } from '../i18n'
 import { tokenColor, tokenHex, edgeColorHex, VP } from './viewport/palette'
@@ -70,6 +70,9 @@ interface ViewportProps {
     onHasConfidence?: (has: boolean) => void
     showCameraPoses?: boolean
     onHasCameraPoses?: (has: boolean) => void
+    /** the cubes of the session's cut, listed in the Instances panel (USER 2026-11-06: "me gustaría ver los chunks
+     *  como cubos en la escena, y que se puedan apagar y prender … en la pestaña de segmentación") */
+    onCubes?: (cubes: CubeInfo[]) => void
     /** Gizmo edit finished on an evaluation volume — persist + re-evaluate. */
     onVolumeChanged?: (params: { volume_id: number; center: number[]; size: number[]; yaw_deg: number }) => void
     eraseRadius?: number
@@ -101,6 +104,14 @@ interface ViewportProps {
     onViewScale?: (metersPerPixel: number) => void
     /** a click on a point of the cloud (navigate tool) names its segment by CLASS BYTE (USER 2026-10-04) */
     onSegmentPicked?: (classId: number) => void
+}
+
+/** a cube of the session's cut (reconstruction/cubes.py), as the Instances list shows it */
+export interface CubeInfo {
+    id: number
+    keyframes: number
+    views: number
+    color: string
 }
 
 export interface SegmentInstance {
@@ -155,6 +166,9 @@ export interface ViewportHandle {
     sendCommand: (cmd: Record<string, unknown>) => void
     sendCommandPreserveCamera: (cmd: Record<string, unknown>) => void
     toggleOBB: (key: string, visible: boolean) => void
+    /** a cube of the cut shown / hidden; the camera flown to it */
+    setCubeVisible: (id: number, visible: boolean) => void
+    focusCube: (id: number) => void
     toggleBIMVisibility: (meshNames: string[], visible: boolean) => void
     highlightBIMElement: (meshNames: string[]) => void
     addBIMGroup: (group: THREE.Group) => void
@@ -597,7 +611,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onViewScale, onSegmentPicked },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onCubes, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onViewScale, onSegmentPicked },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -651,6 +665,15 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const bimGroupRef = useRef<THREE.Group | null>(null)
     const sabanaGroupRef = useRef<THREE.Group | null>(null)
     const cameraGroupRef = useRef<THREE.Group | null>(null)
+    // the cubes of the cut (GET /api/sessions/<id>/cubes, in the display frame like the camera markers): one box per
+    // cube, hidden until the Instances list's Cubes section turns it on; the choice survives a reload
+    const cubeGroupRef = useRef<THREE.Group | null>(null)
+    const cubeMapRef = useRef<Map<number, THREE.Object3D>>(new Map())
+    const cubeVisRef = useRef<Set<number>>(new Set())
+    const onCubesRef = useRef(onCubes)
+    onCubesRef.current = onCubes
+    const loadCubesRef = useRef<(sessionId: string) => void>(() => {})
+    const cubeSessionRef = useRef<string | null>(null)
     const [camTooltip, setCamTooltip] = useState<{ x: number; y: number; frameName: string; sessionId: string } | null>(null)
     const [bimTooltip, setBimTooltip] = useState<{ x: number; y: number; type: string; name: string } | null>(null)
     const bimHoverThrottleRef = useRef(0)
@@ -2348,6 +2371,24 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 wsRef.current.send(JSON.stringify(cmd))
             }
         },
+        setCubeVisible: (id: number, visible: boolean) => {
+            if (visible) cubeVisRef.current.add(id)
+            else cubeVisRef.current.delete(id)
+            const c = cubeMapRef.current.get(id)
+            if (c) c.visible = visible
+        },
+        focusCube: (id: number) => {
+            const o = cubeMapRef.current.get(id)
+            const camera = cameraRef.current, controls = controlsRef.current
+            if (!o || !camera || !controls) return
+            o.updateMatrixWorld(true)
+            const box = new THREE.Box3().setFromObject(o)
+            if (box.isEmpty()) return
+            const c = box.getCenter(new THREE.Vector3()), r = box.getSize(new THREE.Vector3()).length() / 2
+            const dir = camera.position.clone().sub(controls.target).normalize()
+            const dist = Math.max(r, 0.5) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.4
+            animateCameraTo(c, c.clone().addScaledVector(dir, dist))
+        },
         toggleOBB: (key: string, visible: boolean) => {
             const mesh = obbMapRef.current.get(key)
             if (!mesh) return
@@ -3411,6 +3452,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         cameraGroup.name = 'cameraGroup'
         scene.add(cameraGroup)
         cameraGroupRef.current = cameraGroup
+
+        // The cubes of the cut (USER 2026-11-06)
+        const cubeGroup = new THREE.Group()
+        cubeGroup.name = 'cubeGroup'
+        scene.add(cubeGroup)
+        cubeGroupRef.current = cubeGroup
 
         // Measurement overlay group
         const measureGroup = new THREE.Group()
@@ -5031,6 +5078,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     console.log(`[Viewport] Rendered ${cameraPoses.length} camera poses`)
                     if (onHasCameraPoses) onHasCameraPoses(true)
                 }
+                // the cubes of the cut follow the epoch like the camera markers
+                if (msg.session_id) loadCubesRef.current(msg.session_id as string)
             }).catch((err) => {
                 console.error('[Viewport] Potree load failed:', err)
                 if (onStatusMessage) onStatusMessage(tt('vp.octreeError', { detail: err.message }))
@@ -5244,6 +5293,53 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
         })
     }, [])
+
+    // the cubes of the cut (USER 2026-11-06): one box per cube from GET /api/sessions/<id>/cubes (the display frame),
+    // thick edges and its number on top; each hidden until the Instances list turns it on
+    loadCubesRef.current = (sessionId: string) => {
+        const group = cubeGroupRef.current
+        if (!group) return
+        if (cubeSessionRef.current !== sessionId) {          // another session: every cube starts hidden
+            cubeSessionRef.current = sessionId
+            cubeVisRef.current.clear()
+        }
+        fetch(`/api/sessions/${encodeURIComponent(sessionId)}/cubes`)
+            .then(r => (r.ok ? r.json() : { cubes: [] }))
+            .then((doc: { cubes?: Array<Record<string, unknown>> }) => {
+                while (group.children.length > 0) {
+                    const child = group.children[0]
+                    group.remove(child)
+                    disposeDeep(child)
+                }
+                cubeMapRef.current.clear()
+                const list: CubeInfo[] = []
+                for (const cb of doc.cubes || []) {
+                    const id = Number(cb.id)
+                    const half = (cb.half_extents as number[]).map(Number)
+                    const ctr = (cb.center as number[]).map(Number)
+                    const R = cb.rotation as number[][]
+                    const color = String(cb.color || '#ffaa00')
+                    const cont = new THREE.Group()
+                    cont.position.set(ctr[0], ctr[1], ctr[2])
+                    cont.setRotationFromMatrix(new THREE.Matrix4().set(
+                        R[0][0], R[0][1], R[0][2], 0,
+                        R[1][0], R[1][1], R[1][2], 0,
+                        R[2][0], R[2][1], R[2][2], 0,
+                        0, 0, 0, 1))
+                    cont.add(thickBox(half, new THREE.MeshBasicMaterial({ color: new THREE.Color(color) })))
+                    const label = labelSprite(tt('vp.cube', { id }), color, undefined, 0.035)
+                    label.position.set(0, 0, half[2])             // the box's local z is the scene's up
+                    cont.add(label)
+                    cont.userData.cubeId = id
+                    cont.visible = cubeVisRef.current.has(id)
+                    group.add(cont)
+                    cubeMapRef.current.set(id, cont)
+                    list.push({ id, keyframes: Number(cb.keyframes || 0), views: Number(cb.views || 0), color })
+                }
+                onCubesRef.current?.(list)
+            })
+            .catch(() => onCubesRef.current?.([]))
+    }
 
     const renderOBBs = useCallback((instances: Array<Record<string, unknown>>) => {
         const group = obbGroupRef.current

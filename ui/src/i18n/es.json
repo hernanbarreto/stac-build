@@ -386,7 +386,12 @@
     "deleteShapeMessage": "¿Borrar \"{label}\" y su carpeta entera ({folder}: PKL, malla, metadatos)? No se puede deshacer.",
     "renameFailed": "No se pudo renombrar: {detail}",
     "genrecon": "GenRecon",
-    "genreconHint": "Genera la malla GenRecon de esta sesión con el filtro de confianza que elijas"
+    "genreconHint": "Genera la malla GenRecon de esta sesión con el filtro de confianza que elijas",
+    "cubes": "Cubos del corte ({n})",
+    "cubesShowAll": "Mostrar todos los cubos",
+    "cubesHideAll": "Ocultar todos los cubos",
+    "cubeLabel": "Cubo {id}",
+    "cubeMeta": "{kf} kf · {views} vistas"
   },
   "toolbar": {
     "label": "Herramientas del visor",
@@ -1234,7 +1239,8 @@
     "layer_flyers": "Capa de voladores cargada (rojo borde · naranja vistas · azul textura · gris otro)",
     "layer_mono_detail": "Capa PointDiT cargada (gris detalle · verde frente · azul fondo)",
     "layer_mixed_unresolved": "Píxeles mezclados sin resolver cargados (rojo): excluidos de la nube",
-    "layerMissing": "La capa '{{name}}' no está en esta sesión todavía"
+    "layerMissing": "La capa '{{name}}' no está en esta sesión todavía",
+    "cube": "Cubo {id}"
   },
   "xr": {
     "title": "STAC XR",

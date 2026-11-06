@@ -6,7 +6,7 @@
  */
 import { memo, useState } from 'react'
 import { Box, CheckSquare, Crosshair, Grid3x3, Pencil, Square, Tag, Trash2, Wand2 } from 'lucide-react'
-import type { SegmentInstance } from '../components/Viewport'
+import type { CubeInfo, SegmentInstance } from '../components/Viewport'
 import { Panel, Section, Stack } from '../components/ui/Panel'
 import { Tree, type TreeNodeData } from '../components/ui/Tree'
 import { IconButton } from '../components/ui/IconButton'
@@ -68,6 +68,13 @@ interface InstancesPanelProps {
   /** the segmentation chain on demand, prompts editable (USER 2026-10-05) */
   onOpenAutosegment: () => void
   onOpenGenrecon: () => void
+  /** the cubes of the session's cut (USER 2026-11-06: "en la pestaña de segmentación, ahí poder prender y apagar los
+   *  cubos") */
+  cubes: CubeInfo[]
+  cubeVisible: Set<number>
+  onToggleCube: (id: number, visible: boolean) => void
+  onSetAllCubes: (visible: boolean) => void
+  onFocusCube: (id: number) => void
 }
 
 function InstancesPanelImpl(p: InstancesPanelProps) {
@@ -199,6 +206,24 @@ function InstancesPanelImpl(p: InstancesPanelProps) {
               visible: !p.volumeHidden.has(v.volume_id), onVisible: on => p.onToggleVolume(v.volume_id, on),
               obb: p.volumeObb.has(v.volume_id), onObb: on => p.onToggleVolumeObb(v.volume_id, on),
               actions: <IconButton size="sm" variant="danger" label={t('instances.deleteVolume')} icon={<Trash2 aria-hidden />} onClick={() => p.onDeleteVolume(v.volume_id)} />,
+            }))} />
+          </Section>
+        )}
+        {p.cubes.length > 0 && (
+          <Section title={t('instances.cubes', { n: p.cubes.length })} flush
+            actions={(
+              <>
+                <IconButton size="sm" label={t('instances.cubesShowAll')} icon={<CheckSquare aria-hidden />} onClick={() => p.onSetAllCubes(true)} />
+                <IconButton size="sm" label={t('instances.cubesHideAll')} icon={<Square aria-hidden />} onClick={() => p.onSetAllCubes(false)} />
+              </>
+            )}>
+            <Tree ariaLabel={t('instances.cubes', { n: p.cubes.length })} dense
+              onSelect={n => { const c = p.cubes.find(x => `cube-${x.id}` === n.id); if (c) p.onFocusCube(c.id) }}
+              nodes={p.cubes.map(c => ({
+              id: `cube-${c.id}`, icon: <Box aria-hidden style={{ color: c.color }} />,
+              label: t('instances.cubeLabel', { id: c.id }),
+              meta: t('instances.cubeMeta', { kf: c.keyframes, views: c.views }),
+              visible: p.cubeVisible.has(c.id), onVisible: on => p.onToggleCube(c.id, on),
             }))} />
           </Section>
         )}

@@ -47,7 +47,7 @@ const GUIDE = () => tokenHex(VP.ptSingle)
 
 interface Animator { update: (now: number) => boolean } // returns true when done
 
-function labelSprite(text: string, color = tokenColor(VP.text1), bg = tokenColor(VP.labelBg),
+export function labelSprite(text: string, color = tokenColor(VP.text1), bg = tokenColor(VP.labelBg),
                      screenHeight = 0): THREE.Sprite {
     const pad = 12, font = screenHeight > 0 ? 64 : 44
     const canvas = document.createElement('canvas')

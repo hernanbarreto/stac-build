@@ -9,7 +9,7 @@
  * Status messages go through i18n (`tt` = translator for callbacks).
  */
 import { useState, useCallback, useEffect, useRef } from 'react'
-import Viewport, { ViewportHandle, SegmentInstance } from './components/Viewport'
+import Viewport, { ViewportHandle, SegmentInstance, type CubeInfo } from './components/Viewport'
 import type { UserVolume } from './components/assistantViz'
 import { SyncPlayer } from './components/SyncPlayer'
 import { BIMAnalysisPanel } from './components/BIMAnalysisPanel'
@@ -1587,6 +1587,11 @@ function App() {
   const [obbKeys, setObbKeys] = useState<Set<string>>(new Set())
   const [placedObb, setPlacedObb] = useState<Set<number>>(new Set())
   const [volumeHidden, setVolumeHidden] = useState<Set<number>>(new Set())
+  // the cubes of the session's cut (USER 2026-11-06): listed in the Instances tab, each shown / hidden there;
+  // another session starts with every cube hidden (the viewer forgets its choices with it)
+  const [cubes, setCubes] = useState<CubeInfo[]>([])
+  const [cubeVisible, setCubeVisible] = useState<Set<number>>(new Set())
+  useEffect(() => { setCubes([]); setCubeVisible(new Set()) }, [activeSession])
   const [volumeObb, setVolumeObb] = useState<Set<number>>(new Set())
   const flip = <K,>(set: Set<K>, k: K, on: boolean) => { const n = new Set(set); if (on) n.add(k); else n.delete(k); return n }
   const toggleObb = useCallback((key: string, on: boolean) => {
@@ -2047,6 +2052,15 @@ function App() {
   // the Instances list's callbacks, stable (the list is memoized — see InstancesPanel)
   const instancesCb = useStableCallbacks({
     onFocusVolume: focusVolume,
+    onToggleCube: (id: number, on: boolean) => {
+                  setCubeVisible(prev => { const n = new Set(prev); if (on) n.add(id); else n.delete(id); return n })
+                  viewportRef.current?.setCubeVisible(id, on)
+                },
+    onSetAllCubes: (on: boolean) => {
+                  setCubeVisible(on ? new Set(cubes.map(c => c.id)) : new Set())
+                  cubes.forEach(c => viewportRef.current?.setCubeVisible(c.id, on))
+                },
+    onFocusCube: (id: number) => viewportRef.current?.focusCube(id),
     onDeleteVolume: deleteVolume,
     onToggleObb: toggleObb,
     onTogglePlacedObb: togglePlacedObb,
@@ -2143,7 +2157,7 @@ function App() {
                 onFuse={openFuse} onOpenScan={openScanFromTree} onSetReference={setReference} />
             )}
             {layout.state.leftTab === 'instances' && activeSession && (
-              <InstancesPanel {...instancesCb} volumes={userVolumes}   obbKeys={obbKeys}  placedObb={placedObb}  volumeHidden={volumeHidden} volumeObb={volumeObb}   segments={segments} unsegmentedVisible={unsegmentedVisible} unsegmentedCount={unsegmentedCount} absorbedCount={absorbedCount} floorLevel={floorLevel}
+              <InstancesPanel {...instancesCb} cubes={cubes} cubeVisible={cubeVisible} volumes={userVolumes}   obbKeys={obbKeys}  placedObb={placedObb}  volumeHidden={volumeHidden} volumeObb={volumeObb}   segments={segments} unsegmentedVisible={unsegmentedVisible} unsegmentedCount={unsegmentedCount} absorbedCount={absorbedCount} floorLevel={floorLevel}
                 placedObjects={placedObjects} tsdfMeshes={tsdfMeshes} selectedSegmentId={selectedSegmentId}
  />
             )}
@@ -2248,6 +2262,7 @@ function App() {
             onBimLoaded={models => { setBimModels(models); if (models.length > 0) { setShowAxes(false); setShowGrid(false) } }}
             onSabanaLoaded={nPts => { setSabanaLoading(false); setSessionLoading(null); setStatusMessage(t('deviation.loadedPoints', { n: fmt.integer(nPts ?? 0) })) }}
             showCameraPoses={showCameraPoses && !sabanaVisible}
+            onCubes={setCubes}
             onHasCameraPoses={setHasCameraPoses}
             onCursor={setCursor}
             onReadouts={setReadouts}
