@@ -5,8 +5,9 @@ The cut (reconstruction/cubes.py, intake/cubes.json) is made in the structure pr
 gravity frame (a plan of 2026-11-06 morning: k-d cells, every cube two neighbour blocks — drawn as its cells' union). A
 cube is carried into the session's live frame by the similarity that best maps the probe's keyframe cameras onto the
 live ones (output/camera_poses.txt: Umeyama over the keyframes' centres, its residual reported), then through the
-sealed floor transform like the camera markers. Vertically each box spans the cloud (the octree's bounds along the up
-axis). Nothing here is a measurement."""
+sealed floor transform like the camera markers. A cube of space is drawn as the box it is, its own height included (a
+plan of k-d cells spans the cloud vertically: the octree's bounds along the up axis — far points made those columns
+18 m tall on pccr and they seemed to hold each other). Nothing here is a measurement."""
 from __future__ import annotations
 
 import json
@@ -88,7 +89,7 @@ def cube_boxes(scan_dir: Path) -> Optional[Dict]:
         c_g = 0.5 * (lo + hi)
         half = 0.5 * (hi - lo) * S_all
         center = S_all * (R_all @ (G.T @ c_g)) + t_all
-        if lo_up is not None:
+        if lo_up is not None and "lo" not in cb:          # a floor-plan cell spans the cloud; a cube of space is its own box
             up = axes[:, 2] / np.linalg.norm(axes[:, 2])
             h0 = float(center @ up)
             center = center + up * (0.5 * (lo_up + hi_up) - h0)
