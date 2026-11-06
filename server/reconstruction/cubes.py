@@ -21,10 +21,10 @@ x m, con no más de y kf, y ya sabés quiénes vas a incluir en cada cubo porque
    the overlap, and the seam the chunk graph joins the cubes on.
 5. THE CAP: a cube seen by more than ``max_views`` views is halved on its longest side, and again, while halving still
    lowers the views of a half; what no halving can separate keeps the views that see the most of it (declared).
-6. OWNER: a unit's keyframes take their geometry from the cube where it sees the most. A unit no cube holds joins the
-   cube where it sees the most among those with room (the most, over the cap, when none has room); seeing only space no
-   cube holds, the cell of the grid where it sees the most becomes a cube; seeing nothing, it joins its walk
-   neighbour's. Two units consecutive along the walk always share a cube (the turn frames between them are Omega views
+6. OWNER: a unit's keyframes take their geometry from the cube where it sees the most. A unit no cube holds τ of goes
+   to the box where it sees the most (USER 2026-11-07): a cube with room takes it, a cell that is no cube yet becomes
+   one; the next box when that one is a full cube; over the cap only when every box it sees is a full cube (declared);
+   seeing nothing, it joins its walk neighbour's. Two units consecutive along the walk always share a cube (the turn frames between them are Omega views
    of a cube that holds both, and the cubes form one graph). A cube needs two keyframes.
 7. HOLES (reported): the share of what the views see that falls in a cube they belong to, per unit and overall. The
    keyframes themselves were completed before (reconstruction/coverage_fill.py: where no keyframe sees what the video
@@ -262,27 +262,40 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], unit_pts, *, metres_per_un
         cubes[ci]["units"] = sorted(cubes[ci]["units"] + [u])
         cubes[ci]["share"][str(u)] = float(shares[u, ci])
 
-    # a unit no cube holds: the cube where it sees the most among those with room (the most, over the cap, when none
-    # has room); seeing only cells no cube holds, the one where it sees the most becomes a cube
-    leaf_sh = None
+    # a unit no cube holds goes to the box where it sees the most (USER 2026-11-07: "cada grupo va a la celda donde más
+    # ve, y si esa celda no es cubo todavía, se vuelve cubo"): every final box of the grid — a cube, or a cell no unit
+    # held τ of — ranked by the unit's share in it (ties → a cube first, then the lower index); the first that is a cube
+    # with room takes it, an empty cell becomes a cube with it; when every box it sees is a full cube, the one where it
+    # sees the most takes it over the cap (declared)
+    leaf_sh = (np.stack([seen.share(lo, hi) for lo, hi in empty_leaves], 1) if empty_leaves
+               else np.zeros((U, 0)))
+    leaf_cube = [-1] * len(empty_leaves)                # the cube an empty cell became
+    new_cubes = 0
     for u in range(U):
         if any(u in cb["units"] for cb in cubes) or u in seen.empty:
             continue
-        cand = [ci for ci in range(len(cubes)) if shares[u, ci] > 0]
-        if not cand:
-            if leaf_sh is None:
-                leaf_sh = np.stack([seen.share(lo, hi) for lo, hi in empty_leaves], 1) if empty_leaves \
-                    else np.zeros((U, 0))
-            if leaf_sh.shape[1] == 0 or float(leaf_sh[u].max()) <= 0:
-                continue                                    # nothing it sees is in any cell: its walk neighbour's
-            li = int(np.argmax(leaf_sh[u]))
-            lo, hi = empty_leaves[li]
-            cubes.append({"lo": lo.tolist(), "hi": hi.tolist(), "units": [], "share": {}})
-            shares = np.concatenate([shares, leaf_sh[:, li][:, None]], axis=1)
-            leaf_sh[:, li] = 0.0                            # one cube per cell
-            cand = [len(cubes) - 1]
-        room = [ci for ci in cand if views_in(ci) + int(w[u]) <= int(max_views)]
-        place(u, max(room or cand, key=lambda c: (shares[u, c], -c)))
+        opts = [(float(shares[u, ci]), 0, ci) for ci in range(len(cubes)) if shares[u, ci] > 0]
+        opts += [(float(leaf_sh[u, li]), 1, li) for li in range(len(empty_leaves))
+                 if leaf_cube[li] < 0 and leaf_sh[u, li] > 0]
+        if not opts:
+            continue                                    # nothing it sees is in any box: its walk neighbour's
+        opts.sort(key=lambda o: (-o[0], o[1], o[2]))
+        target = None
+        for _sh, kind, idx in opts:
+            if kind == 1:
+                lo, hi = empty_leaves[idx]
+                cubes.append({"lo": lo.tolist(), "hi": hi.tolist(), "units": [], "share": {}})
+                shares = np.concatenate([shares, leaf_sh[:, idx][:, None]], axis=1)
+                leaf_cube[idx] = len(cubes) - 1
+                target = len(cubes) - 1
+                new_cubes += 1
+                break
+            if views_in(idx) + int(w[u]) <= int(max_views):
+                target = idx
+                break
+        if target is None:                              # every box it sees is a full cube
+            target = max((o for o in opts if o[1] == 0), key=lambda o: (o[0], -o[2]))[2]
+        place(u, target)
         forced += 1
     # a unit that sees nothing a cube holds joins its walk neighbour's cube (the previous unit's, else the next's)
     blind = [u for u in range(U) if not any(u in cb["units"] for cb in cubes)]
@@ -367,7 +380,8 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], unit_pts, *, metres_per_un
     return {"gravity_frame": R.tolist(), "max_views": int(max_views), "tau": float(tau), "cube_m": float(cube_m),
             "metres_per_unit": float(metres_per_unit), "cubes": cubes, "owner_unit": owner_unit,
             "owner": owner.tolist(),
-            "stats": {"splits": splits, "trimmed": trimmed, "forced": forced, "dropped_small": len(dropped),
+            "stats": {"splits": splits, "trimmed": trimmed, "forced": forced, "cells_made_cubes": new_cubes,
+                      "dropped_small": len(dropped),
                       "walk_joins": joined, "units_seeing_nothing": len(seen.empty),
                       "covered_overall": float((covered * n_pts).sum() / max(n_pts.sum(), 1.0)),
                       "units_mostly_uncovered": int((covered < 0.5).sum()),
@@ -477,7 +491,8 @@ def analyse(probe_npz: Path, inputs: Dict, *, device: str = "cuda", log: Callabl
     log(f"[cubes] {len(units)} units ({len(kf)} keyframes, {len(turns)} turn frames) by what they see → "
         f"{len(plan['cubes'])} cube(s) of {plan['cube_m']:g} m or less, {min(sizes)}–{max(sizes)} Omega views (cap "
         f"{plan['max_views']}); a unit in {st['memberships_per_unit']:.2f} cube(s) on average; {st['splits']} "
-        f"halving(s), {st['walk_joins']} walk join(s), {st['forced']} unit(s) placed where they see the most; what "
+        f"halving(s), {st['walk_joins']} walk join(s), {st['forced']} unit(s) placed where they see the most "
+        f"({st['cells_made_cubes']} cell(s) made cubes for them); what "
         f"the views see inside their cubes: {st['covered_overall'] * 100:.1f} % ({st['units_mostly_uncovered']} "
         f"unit(s) under half)"
         + (f"; over the cap: {[i for i, cb in enumerate(plan['cubes']) if cb['over_cap']]}"

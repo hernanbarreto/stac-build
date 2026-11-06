@@ -481,9 +481,10 @@ are declared trimmed.
 
 **Placement.**
 
-- A unit that no cube holds joins the cube where it sees the most, among those with room; when none has room, the one
-  where it sees the most.
-- A unit that sees only cells no cube holds makes the cell where it sees the most a cube.
+- A unit that no cube holds τ of goes to the box where it sees the most: a cube with room takes it, and a cell that is
+  not a cube yet becomes one. When that box is a full cube, the next box in its order; over the cap only when every box
+  it sees is a full cube (declared). In an open scene, where views see far and few 5 m cells hold τ of anything, this is
+  how most of the cubes are made.
 - A unit that sees nothing joins its walk neighbour's cube.
 - A cube needs two keyframes. A smaller one's units join where they see the most.
 - Two units consecutive along the walk always share a cube, so the turn frames between them are views of a cube that
