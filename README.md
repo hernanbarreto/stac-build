@@ -22,8 +22,8 @@ STAC Build turns a handheld video into a **metric 3-D reconstruction of a constr
 2. The intake's parallax keyframes are a first proposal. **The map completes them**: where the video saw something that no
    keyframe sees, or that only one sees, the frame that sees it becomes a keyframe, until no frame brings more than the
    measurement's own noise.
-3. The scene is **cut into cubes of space by what each view sees**: 5 m cubes, at most 64 views each, a view in every cube
-   that holds a sizeable share of what it sees.
+3. The views are **grouped into cubes by what they see**: about 64 views each, half of them shared with the neighbours,
+   the cameras of a cube's own views moving at most 5 m where the walk has views enough.
 4. A feed-forward multi-view network (VGGT-Ω) reconstructs each cube. A multi-view monocular-metric depth model (Depth
    Anything 3) makes each cube metric, and **one Sim(3) graph** joins the cubes on the frames they share.
 
@@ -57,7 +57,7 @@ on the GPU in deterministic mode. Every product is stamped with the inputs, conf
 7. [The coverage map and the keyframe fill](#7-the-coverage-map-and-the-keyframe-fill)
 8. [I3: multi-view metric depth windows and the walk](#8-i3-multi-view-metric-depth-windows-and-the-walk)
 9. [Turn frames and interval witnesses](#9-turn-frames-and-interval-witnesses)
-10. [Cubes: the scene cut by what the views see, and the Ω resolution](#10-cubes-the-scene-cut-by-what-the-views-see-and-the-ω-resolution)
+10. [Cubes: the views grouped by what they see, and the Ω resolution](#10-cubes-the-views-grouped-by-what-they-see-and-the-ω-resolution)
 11. [The VGGT-Ω pass, cube by cube](#11-the-vggt-ω-pass-cube-by-cube)
 12. [Metric lock and the cube Sim(3) graph](#12-metric-lock-and-the-cube-sim3-graph)
 13. [Global metric scale and the upright frame](#13-global-metric-scale-and-the-upright-frame)
@@ -436,73 +436,54 @@ window, and never on a keyframe.
 
 ---
 
-## 10. Cubes: the scene cut by what the views see, and the Ω resolution
+## 10. Cubes: the views grouped by what they see, and the Ω resolution
 
 ### 10.1 The cut (`server/reconstruction/cubes.py`)
 
-The scene is cut into **cubes of space**, as GenRecon cuts it. A view belongs to a cube by **what it sees there**, never
-by where its camera stands. Two cameras on the same ray that see the two faces of an object belong to different cubes;
-two views that see the same place belong together, whatever moment of the walk they come from.
+A cube is a **group of views that VGGT-Ω reconstructs together**: about 64 views, half of them its own and half shared
+with its neighbours. Views go together by **what they see**, and the cube's own cameras move at most **5 m**
+(`cube_m`, a displacement, not the depth of what they see) wherever the walk has views enough. Two passes over the same
+place that see the same go together, whatever moment of the walk they come from. Two cameras side by side that see
+different things do not.
 
 **Units.** A unit is a parallax keyframe with the rotation keyframes up to the next parallax keyframe, and the turn frames
-after them. A turn is never cut. What a unit sees, $P_u$, is the union of the records of its views (§6).
+after them. A turn is never cut.
 
-**Gravity frame.**
-
-- up is $u=-\operatorname{normalize}\big(\sum_kR_ke_2\big)$, the opposite of the keyframes' summed image-down axes;
-- $e_1$ is the principal axis of the camera centres projected on the plane ⊥ $u$, pointing from the walk's start to its
-  end;
-- $e_2=u\times e_1$.
-
-**Metres.** The probe is converted to metres by the session's own walk:
-$m=L_{\text{I3}}\big/\sum_k\|C_{k+1}-C_k\|$ over the probe's keyframe cameras.
-
-**The grid.** The bounds of everything the units see are covered by cells of side $a=\texttt{cube\_m}/m$, with
-`cube_m` = 5 m. There is one layer when the scene is no taller than a cube; otherwise the cells are stacked, so several
-floors are cut the same way.
-
-**Membership.** A unit belongs to a box $B$ when at least $\tau$ of what it sees falls inside:
+**What two units see of each other.** With the records of §6 and the depth test of §7,
 
 ```math
-\operatorname{share}_u(B)=\frac{|P_u\cap B|}{|P_u|}\ \ge\ \tau=0.3 .
+c(u\!\to\!v)=\frac{1}{|S_u|}\,\#\big\{X\in S_u:\ \text{some record of }v\text{ sees }X\big\},\qquad
+c_{uv}=\min\big(c(u\!\to\!v),\,c(v\!\to\!u)\big),
 ```
 
-A unit that sees two regions belongs to two cubes. That is the overlap, and it is where the cube graph is joined.
+where $S_u$ is a fixed stride of up to 2000 points of what $u$ saw. It is measured for every two units whose cameras lie
+within two cubes of each other, and every two units consecutive along the walk.
 
-**The cap.** A cube whose units hold more than 64 views (keyframes and turn frames) is halved on its longest side, and
-halved again, while halving still lowers the views of a half:
+**Groups.**
 
-```math
-\max\big(\mathrm{views}(B_A),\mathrm{views}(B_B)\big)<\mathrm{views}(B).
-```
+1. **Growth by sight.** From the first unit of the walk that no group holds, a group takes, one at a time, the unit that
+   sees the most of what it sees ($c\ge\tau=0.3$ with one of its units), until its own views reach half the cap (32).
+   Candidates whose cameras keep the group within a 5 m box come first; beyond it only when nothing within is left.
+2. **The views first.** A group left under 32 own views joins another small group first, else the smallest of the
+   others: among the groups it sees the same as before those it sees anything of, else its walk neighbour's. The two
+   must stay within the cap of 64, beyond 5 m if they must. A cube of a handful of views gives Omega no base and the
+   graph a weak seam, so few views weigh more than the 5 m.
 
-When no halving separates what the views see, the units that see the most of the cube stay, up to the cap, and the rest
-are declared trimmed.
+**The walk.** Two units consecutive along the walk always share a cube, so the turn frames between them are views of a
+cube that holds both and the cubes form one graph.
 
-**Placement.**
-
-- A unit that no cube holds τ of goes to the box where it sees the most: a cube with room takes it, and a cell that is
-  not a cube yet becomes one. When that box is a full cube, the next box in its order; over the cap only when every box
-  it sees is a full cube (declared). In an open scene, where views see far and few 5 m cells hold τ of anything, this is
-  how most of the cubes are made.
-- A unit that sees nothing joins its walk neighbour's cube.
-- A cube needs two keyframes. A smaller one's units join where they see the most.
-- Two units consecutive along the walk always share a cube, so the turn frames between them are views of a cube that
-  holds both, and the cubes form one graph. This is checked.
-
-**Owner.** A unit's keyframes take their geometry from the cube where it sees the most. The report also gives the share
-of what each unit sees that falls inside its cubes.
+**The overlap.** Each cube takes the units of other cubes that see what its own see ($c\ge\tau$ with one of them), the
+most co-visible first, up to the cap. Each unit's keyframes take their geometry from its own group's cube.
 
 **A cube's views.** Its Ω views are its keyframes plus the turn frames that lie between two of its keyframes consecutive
 in the walk. Its F6 witnesses, the interval frames, follow the same rule.
 
-**Products.** `intake/cubes.json` and `intake/cubes.png`, stamped by the probe, the inputs and the code. Everything is
-counted on the card with integers, and every order has an index tie-break. The viewer draws the cubes from the
-**Instances** tab (`reconstruction/cube_boxes.py`), carried into the live frame by the similarity between the probe's and
-the published keyframe cameras.
+**Products.** `intake/cubes.json` and `intake/cubes.png`, stamped by the probe, the inputs and the code. The viewer draws
+each cube (**Instances** tab, `reconstruction/cube_boxes.py`) as a box around the cameras of its own views, carried into
+the live frame by the similarity between the probe's and the published keyframe cameras.
 
-On pccr: 313 keyframes and 53 turn frames in 300 units gave 12 cubes of at most 5 m, with 17 to 64 Ω views each and a unit
-in 1.31 cubes on average. The start and the end of the walk fell in one cube.
+On the dry run of 2026-11-07: zaragoza (185 keyframes, an open hall) 6 cubes of 32–37 own views and 63–64 with the
+shared ones; observatorio (76 keyframes) 2 cubes; pccr 11 cubes of 32–40 own views.
 
 ### 10.2 Ω resolution
 
