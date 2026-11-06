@@ -1,5 +1,28 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ 2026-11-07 — pccr: "LA NUBE MÁS COHERENTE Y CON MENOS ERRORES DE TODAS" (USER, 01:55 CDMX) — main 2b373e3
+- The first pass is AMB3R-SLAM over the WHOLE VIDEO at frame stride 1 (USER: "a amber le tenés que dar el video completo
+  … a paso 1"; "amber solo decide las poses, los cubos como se arman lo decidimos nosotros"), right after I1
+  (`reconstruction/amb3r_probe.py` → intake/amb3r_video.npz; AMB3R fork c47bccb `--stac_light_map`: per reconstructed
+  frame its depth on the 4-px grid, K and c2w through its submap's final Sim(3)). Its backend reconstructs ~1 frame in 4
+  (its own design); the others get Sim(3)-interpolated poses. On pccr it closed NO loop even on the whole video (its
+  DBoW proposed no candidate) — the cut still put start↔end in one cube.
+- THE COVERAGE MAP decides (USER: "cada punto de la nube amber tiene los frames de procedencia … no necesitás proyectar
+  ningún rayo"; "el intake es una propuesta primera de cobertura pero el mapa debe ser nuestra definitiva"):
+  `reconstruction/coverage_fill.py` adds keyframes (`closed_by: coverage`) while a reconstructed frame brings weak points
+  (no keyframe sees them, or no second view ≥ refine.min_tri_deg) beyond the depth test's own miss rate (pccr 4.2 %);
+  what no frame covers is declared. pccr: 295 + 18 kf, unseen 0.7 → 0.4 %, single-view 6.4 → 5.8 %.
+- THE CUBES (`reconstruction/cubes.py`, USER: "cubos de x m, con no más de y kf, y ya sabés quiénes vas a incluir en
+  cada cubo porque el propio mapa de distribución te lo dice"): 5 m cubes of space (`structure.cube_m`), a view in every
+  cube holding τ = 0.3 of what its own frame saw, cap 64 by halving; owner = where it sees most; walk neighbours share a
+  cube. Fork `loop_utils/cube_run.py`: DA3 lock per cube, exact Sim(3) seams on shared frames, ONE Sim(3) graph.
+  pccr: 12 cubes, seams 0.1 cm after the graph, F5 R2 0.503 px, F6 contradicted 14.5 % (16.3 % before), coverage 79.1 %.
+- VLM / SAM3 kept through Replace unless the keyframes changed (USER 2026-11-06; `pipeline_manager.
+  _semantics_keyframes_change`: the VLM stamp's frames, SAM3's keyframes_sha256); `workers.base.SEMANTIC_OUTPUT` is the
+  one list. Viewer: Instances → Cubes (show/hide each cube, drawn as its own box).
+- NEXT (USER 02:00): pccr segmentation, then observatorio, zaragoza, bufferStop, station with Replace, pccr 2408 last
+  (scratchpad ui_final.py — the UI's command).
+
 ## ⭐⭐⭐ 2026-11-04 — pccr: "LA NUBE ESTÁ ESPECTACULAR" (USER, 02:05 CDMX) — branch `turn-frames`, NOT yet in main
 - USER: "no tiene duplicados, no tiene artefactos, tiene completitud, tiene todo lo que buscábamos".
 - After the SLAM trials (VGGT-SLAM 2.0, VidMap, AMB3R — none beat the original pipeline) the original pipeline took the
