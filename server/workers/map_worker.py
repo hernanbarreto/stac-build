@@ -1911,18 +1911,25 @@ def math_deg(rad: float) -> float:
 
 
 def _structure_config(va_cfg: dict) -> dict:
-    """reconstruction.vggtomega.structure (USER 2026-11-05, the plan he approved): {enabled,
-    chunk_view_cap: 'card' | an integer ≥ 2}. A missing or malformed key FAILS naming it."""
+    """reconstruction.vggtomega.structure (USER 2026-11-05/06): {enabled, chunk_view_cap: 'card' | an integer ≥ 2,
+    probe: 'amb3r' | 'omega', amb3r_model: 'omega' | 'da3'}. A missing or malformed key FAILS naming it."""
     st = va_cfg.get("structure")
-    if not isinstance(st, dict) or "enabled" not in st or "chunk_view_cap" not in st:
-        raise RuntimeError("reconstruction.vggtomega.structure {enabled, chunk_view_cap} is missing from "
-                           "the configuration (USER 2026-11-05: the structure probe, the zones and the "
-                           "view cap of a cut piece)")
+    need = ("enabled", "chunk_view_cap", "probe", "amb3r_model")
+    if not isinstance(st, dict) or any(k not in st for k in need):
+        raise RuntimeError(f"reconstruction.vggtomega.structure {{{', '.join(need)}}} is missing from the "
+                           f"configuration (USER 2026-11-05/06: the structure probe — AMB3R-SLAM or one Omega "
+                           f"pass — and the view cap of a cube)")
     cap = st["chunk_view_cap"]
     if not (cap == "card" or (isinstance(cap, int) and not isinstance(cap, bool) and cap >= 2)):
         raise RuntimeError(f"reconstruction.vggtomega.structure.chunk_view_cap {cap!r}: 'card' or an "
                            f"integer ≥ 2")
-    return {"enabled": bool(st["enabled"]), "chunk_view_cap": cap}
+    if st["probe"] not in ("amb3r", "omega"):
+        raise RuntimeError(f"reconstruction.vggtomega.structure.probe {st['probe']!r}: 'amb3r' or 'omega'")
+    if st["amb3r_model"] not in ("omega", "da3"):
+        raise RuntimeError(f"reconstruction.vggtomega.structure.amb3r_model {st['amb3r_model']!r}: 'omega' or "
+                           f"'da3'")
+    return {"enabled": bool(st["enabled"]), "chunk_view_cap": cap, "probe": str(st["probe"]),
+            "amb3r_model": str(st["amb3r_model"])}
 
 
 def _single_pass_capacity(config: dict, vggt_config: dict, frames_dir, n_keyframes: int, n_witness: int,
@@ -2442,17 +2449,31 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         _sky_joined = True
     from reconstruction.chunk_plan import cube_anchor_indices, omega_resolution_for
     _probe_files = sorted(set(_sel_files) | set(_turn["files"]), key=lambda f: int(Path(f).stem))
-    _pres = omega_resolution_for(len(_probe_files), _card["total_gb"], _native_frame_wh(frames_dir),
-                                 str(vggt_config["Model"]["omega_mode"]),
-                                 int(vggt_config["Model"]["omega_resolution"]),
-                                 margin_frac=_omega_margin, footprint_factor=_card["footprint_factor"])
-    pipe.send_progress(8, f"Structure probe: ONE Omega pass over {len(_probe_files)} views (keyframes + turn "
+    if _st_cfg["probe"] == "amb3r":
+        # AMB3R-SLAM (USER 2026-11-06: "incorporemos amb3r-slam, con todo su slam, para la primer pasada, luego de
+        # eso se hace el corte"): its submaps hold a few dozen views, the card is no constraint — it runs at the
+        # session's Omega grid (the configured resolution on the native frame)
+        from precision.camera import omega_grid_for as _ogf
+        _nw, _nh = _native_frame_wh(frames_dir)
+        _g = _ogf(int(_nw), int(_nh), str(vggt_config["Model"]["omega_mode"]),
+                  int(vggt_config["Model"]["omega_resolution"]))
+        _pres = {"resolution": max(int(_g.w), int(_g.h)), "grid_wh": [int(_g.w), int(_g.h)]}
+        _probe_txt = f"AMB3R-SLAM ({_st_cfg['amb3r_model']}, {_g.w}x{_g.h}, its loops closed)"
+    else:
+        _pres = omega_resolution_for(len(_probe_files), _card["total_gb"], _native_frame_wh(frames_dir),
+                                     str(vggt_config["Model"]["omega_mode"]),
+                                     int(vggt_config["Model"]["omega_resolution"]),
+                                     margin_frac=_omega_margin, footprint_factor=_card["footprint_factor"])
+        _probe_txt = f"ONE Omega pass at {_pres['resolution']}"
+    pipe.send_progress(8, f"Structure probe: {_probe_txt} over {len(_probe_files)} views (keyframes + turn "
                           f"frames), then the cubes...", stage="reconstruction")
     repro.require_exclusive_gpu(log=pipe.send_log)
     from reconstruction import cubes as _CB
     _cplan = _CB.session_cubes(output_dir.parent, frames_dir, _sel_files, _turn["files"], _turn["witness_files"],
                                vggt_config, resolution=int(_pres["resolution"]), max_views=_view_cap,
-                               sky_cache=output_dir / "maplong_run" / "sky_masks", log=pipe.send_log)
+                               sky_cache=output_dir / "maplong_run" / "sky_masks", log=pipe.send_log,
+                               probe=_st_cfg["probe"], amb3r_model=_st_cfg["amb3r_model"],
+                               grid_wh=tuple(_pres["grid_wh"]))
     _cubes = _cplan["cubes"]
     _sets = [[int(k) for k in cb["keyframes"]] for cb in _cubes]
     _owner = [int(x) for x in _cplan["owner"]]

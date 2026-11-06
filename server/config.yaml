@@ -1653,6 +1653,14 @@ reconstruction:
       enabled: true
       chunk_view_cap: 64                # the most views a cube holds (keyframes + turn frames);
                                         # each cell half of it — two cubes sharing a cell share 50 %.
+      probe: amb3r                      # USER 2026-11-06 ("para recorridos de cientos de metros y loops …
+                                        # incorporemos amb3r-slam, con todo su slam, para la primer pasada,
+                                        # luego de eso se hace el corte"): the first pass is AMB3R-SLAM over
+                                        # the same views (reconstruction/amb3r_probe.py) — one closed
+                                        # trajectory, its loops verified; omega = one Omega pass (no loop
+                                        # closure, the card bounds its length)
+      amb3r_model: omega                # AMB3R's heavy model (the trials of 2026-11-03: Ω at the session's
+                                        # grid gave its best raw result; da3 = DA3 Giant)
     scale_align: true                   # metric: DA3 anchor + scale_align (global similarity:
                                         # scales cloud + poses by s = median DA3/Omega depth).
                                         # false → up-to-scale (raw Omega isolation test).

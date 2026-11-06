@@ -366,12 +366,15 @@ def code_sha() -> str:
 
 def session_cubes(scan_dir: Path, frames_dir: Path, sel_files: Sequence[str], turn_files: Sequence[str],
                   witness_files: Sequence[str], cfg_v: dict, *, resolution: int, max_views: int,
-                  sky_cache: Optional[Path], log: Callable[[str], None]) -> Dict:
-    """The session's cube plan: the STRUCTURE PROBE (one Omega pass over every keyframe and every turn frame at
-    ``resolution``, vendor/VGGT-Long/stac_frames_pass.py; reused when the views, the resolution, the pass's code and the
-    weights are the same — its stamp beside it) and the PLAN (a process of its own on the card, ``python -m
-    reconstruction.cubes``; reused when the probe, the inputs and this code are the same). intake/structure_probe.npz,
-    intake/cubes.json and intake/cubes.png."""
+                  sky_cache: Optional[Path], log: Callable[[str], None], probe: str = "omega",
+                  amb3r_model: Optional[str] = None, grid_wh: Optional[Tuple[int, int]] = None) -> Dict:
+    """The session's cube plan: the STRUCTURE PROBE over every keyframe and every turn frame — ``probe`` "amb3r":
+    AMB3R-SLAM with its loop closures (reconstruction/amb3r_probe.py, USER 2026-11-06: "incorporemos amb3r-slam, con
+    todo su slam, para la primer pasada"), at the Omega grid ``grid_wh`` with ``amb3r_model``; "omega": one Omega pass
+    at ``resolution`` (vendor/VGGT-Long/stac_frames_pass.py) — reused when its stamp (the views, what ran them, how)
+    is the same, and the PLAN (a process of its own on the card, ``python -m reconstruction.cubes``; reused when the
+    probe, the inputs and this code are the same). intake/structure_probe.npz, intake/cubes.json and
+    intake/cubes.png."""
     import subprocess
     import sys
     import repro
@@ -381,9 +384,19 @@ def session_cubes(scan_dir: Path, frames_dir: Path, sel_files: Sequence[str], tu
     intake.mkdir(parents=True, exist_ok=True)
     views = sorted(set(sel_files) | set(turn_files), key=_frame_no)
     npz, stamp_p = intake / "structure_probe.npz", intake / "structure_probe.stamp.json"
-    stamp = {"views": hashlib.sha256("\n".join(views).encode()).hexdigest(), "resolution": int(resolution),
-             "pass_code": _sha_file(PASS_SCRIPT), "weights": str((cfg_v.get("Weights") or {}).get("VGGTOmega")),
-             "mask_sky": bool((cfg_v.get("Model") or {}).get("mask_sky", True))}
+    if probe == "amb3r":
+        from reconstruction import amb3r_probe as A3
+        if not amb3r_model or grid_wh is None:
+            raise CubePlanError("the AMB3R probe needs its model and the Omega grid")
+        stamp = {"views": hashlib.sha256("\n".join(views).encode()).hexdigest(),
+                 **A3.identity(amb3r_model, grid_wh), "probe_code": _sha_file(Path(A3.__file__))}
+    elif probe == "omega":
+        stamp = {"views": hashlib.sha256("\n".join(views).encode()).hexdigest(), "resolution": int(resolution),
+                 "omega_mode": str((cfg_v.get("Model") or {}).get("omega_mode")),
+                 "pass_code": _sha_file(PASS_SCRIPT), "weights": str((cfg_v.get("Weights") or {}).get("VGGTOmega")),
+                 "mask_sky": bool((cfg_v.get("Model") or {}).get("mask_sky", True))}
+    else:
+        raise CubePlanError(f"structure probe {probe!r}: 'amb3r' or 'omega'")
     reuse = False
     if npz.exists() and stamp_p.exists():
         try:
@@ -395,10 +408,16 @@ def session_cubes(scan_dir: Path, frames_dir: Path, sel_files: Sequence[str], tu
             f"weights)")
     else:
         stamp_p.unlink(missing_ok=True)
-        log(f"[cubes] the structure probe: ONE Omega pass over {len(sel_files)} keyframes + {len(turn_files)} turn "
-            f"frames at {resolution} — not one of precision, the cut is decided on it")
-        run_frames_pass([str(Path(frames_dir) / f) for f in views], int(resolution), npz, cfg_v, sky_cache=sky_cache,
-                        salad=False, log=log)
+        if probe == "amb3r":
+            log(f"[cubes] the structure probe: AMB3R-SLAM over {len(sel_files)} keyframes + {len(turn_files)} turn "
+                f"frames — its loops closed, not one of precision: the cut is decided on it")
+            A3.run_amb3r_probe([str(Path(frames_dir) / f) for f in views], npz, model=amb3r_model,
+                               grid_wh=grid_wh, log=log)
+        else:
+            log(f"[cubes] the structure probe: ONE Omega pass over {len(sel_files)} keyframes + {len(turn_files)} "
+                f"turn frames at {resolution} — not one of precision, the cut is decided on it")
+            run_frames_pass([str(Path(frames_dir) / f) for f in views], int(resolution), npz, cfg_v,
+                            sky_cache=sky_cache, salad=False, log=log)
         tmp = stamp_p.with_name(stamp_p.name + ".tmp")
         tmp.write_text(json.dumps(stamp, indent=1))
         os.replace(tmp, stamp_p)
