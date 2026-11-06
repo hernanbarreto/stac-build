@@ -1,27 +1,31 @@
 """THE COVERAGE FILL (USER 2026-11-06: "con esa información sacás un mapa de cobertura de lo escaneado, y qué frames
-fueron cubriendo qué cosa … si hace falta completar con kf se completa, es eso nomás"; "donde no cubren o cubren poco").
+fueron cubriendo qué cosa … si hace falta completar con kf se completa, es eso nomás"; "donde no cubren o cubren poco";
+"el intake es una propuesta primera de cobertura pero el mapa debe ser nuestra definitiva para tener cobertura
+completa" — "sí, me parece bien" to the rule below).
 
 THE MAP: every frame AMB3R-SLAM reconstructed over the whole video (reconstruction/amb3r_probe.py) with what it SAW —
 its depth on the pixel-stride grid, its camera — so every point of the scanned scene with the frame it came from. A
 keyframe SEES a point when the point falls inside its image (its whole horizontal and vertical field) at a depth
 consistent with what the keyframe itself saw there, |z − d| ≤ tol·d (tol the session's own: 3σ of the relative
 disagreement between consecutive keyframes on one surface — reconstruction/walk_structure.covisibility's rule, across
-AMB3R's submaps as the walk crosses them); occluded or in front of what it saw, it does not. A point is COVERED when a second keyframe sees it from a ray at
-least ``refine.min_tri_deg`` away from the first's (F5's bound for a landmark): one view, or two from the same place,
-measure nothing.
+AMB3R's submaps as the walk crosses them); occluded or in front of what it saw, it does not. A point is COVERED when a
+second keyframe sees it from a ray at least ``refine.min_tri_deg`` away from the first's (F5's bound for a landmark):
+one view, or two from the same place, measure nothing. A point no keyframe sees, or one alone, is WEAK.
 
-THE FILL: a frame AMB3R reconstructed (usable by I0, not a keyframe's own record) whose own view — what it saw — is
-for more than (1 − τ)/4 neither seen by a keyframe nor covered with its help (it would be the second view, from far
-enough) becomes a keyframe. (1 − τ)/4 is the share of a view I1's rotation quantum lets change between consecutive
-keyframes (θ_q = (1 − τ)·FOV_h/4, intake/parallax.rotation_quantum): a frame bringing more than that is a keyframe I1's
-chain did not take. Greedy: the frame bringing the largest share first (ties → the sharper by I0, then the earlier);
-what it sees is added to the map and the others' shares are measured again, until no frame passes the bar (a share only
-falls as keyframes are added: the search is lazy and exact). Every keyframe I1 chose stays. The added frames enter
-frames/selected_frames.json (keyframes[].closed_by "coverage") and frames/witness_frames.json (every keyframe is a
-witness); the selection keeps I1's own list (``coverage_fill.i1_selected_files``), so the fill always starts from I1's
-keyframes and an unchanged input is not filled twice. intake/coverage_fill.json: the record — the map's coverage
-before and after, every frame added and what it brought. On the card, deterministic: fixed grids, integer counts,
-sorted reductions, every tie by index (a process of its own: the map worker never touches the card before Omega)."""
+THE FILL — the map is the definitive coverage, the intake's keyframes its first proposal: a frame AMB3R reconstructed
+(usable by I0, not a keyframe's own record) whose own view — what it saw — holds more weak points it would see first, or
+cover as the second view from far enough, than the measurement's own noise becomes a keyframe. The noise is the share
+of consecutive keyframes' samples on one surface that the depth test itself calls inconsistent (the same samples tol is
+measured on): below it a frame's gain cannot be told from the test failing. Greedy: the frame bringing the largest
+share first (ties → the sharper by I0, then the earlier); what it sees enters the map and the others' shares are
+measured again, until no frame brings more than the noise (a share only falls as keyframes are added: the search is
+lazy and exact). What stays weak is DECLARED: no frame of the video sees it from a second place (a turn on the spot, a
+corner glimpsed once). Every keyframe I1 chose stays. The added frames enter frames/selected_frames.json
+(keyframes[].closed_by "coverage") and frames/witness_frames.json (every keyframe is a witness); the selection keeps I1's
+own list (``coverage_fill.i1_selected_files``), so the fill always starts from I1's keyframes and an unchanged input is
+not filled twice. intake/coverage_fill.json: the record — the map's coverage before and after, every frame added and
+what it brought. On the card, deterministic: fixed grids, integer counts, sorted reductions, every tie by index (a
+process of its own: the map worker never touches the card before Omega)."""
 from __future__ import annotations
 
 import argparse
@@ -31,12 +35,12 @@ import json
 import math
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Sequence
+from typing import Callable, Dict, List, Sequence, Tuple
 
 import numpy as np
 
 FILL_NAME = "coverage_fill.json"
-FILL_VERSION = 1
+FILL_VERSION = 2                # 2: the bar is the measurement's own noise (1: (1 − τ)/4 of a frame's view)
 CLOSED_BY = "coverage"
 PROVENANCE = "tool_measured"
 CHUNK = 1 << 24                # points projected at once
@@ -108,10 +112,11 @@ class CoverageMap:
         dg = self.D[g][v.clamp(0, self.Hs - 1), u.clamp(0, self.Ws - 1)]
         return ok & (dg > 0) & ((z - dg).abs() <= tol * dg)
 
-    def tolerance(self, pairs: Sequence[Sequence[int]], log: Callable[[str], None]) -> float:
-        """The session's tolerance (walk_structure.covisibility's rule) on the record pairs ``pairs`` — consecutive
-        KEYFRAMES' records: the spacing at which a keyframe is asked whether it sees a point, across AMB3R's submaps
-        as the walk crosses them."""
+    def tolerance(self, pairs: Sequence[Sequence[int]], log: Callable[[str], None]) -> Tuple[float, float]:
+        """(tol, noise): the session's tolerance (walk_structure.covisibility's rule) on the record pairs ``pairs`` —
+        consecutive KEYFRAMES' records: the spacing at which a keyframe is asked whether it sees a point, across
+        AMB3R's submaps as the walk crosses them — and the share of those samples the test itself calls
+        inconsistent (its own miss rate on surfaces both keyframes see)."""
         t = self.t
         rel = []
         for r, j in pairs:
@@ -135,9 +140,11 @@ class CoverageMap:
                                     f"session's tolerance cannot be measured")
         med = rel.median()
         tol = float(3.0 * 1.4826 * (rel - med).abs().median())
+        noise = float(((rel - med).abs() > tol).double().mean())
         log(f"[coverage] the session's tolerance {tol * 100:.2f} % of the depth (3σ of {len(rel):,} samples of "
-            f"consecutive keyframes on one surface)")
-        return tol
+            f"consecutive keyframes on one surface); the test misses {noise * 100:.2f} % of them — the noise a "
+            f"frame's gain must exceed")
+        return tol, noise
 
     def add(self, g: int, tol: float, cos_min: float) -> None:
         """Keyframe record ``g`` sees what it sees: first sight, or the second view that covers a point."""
@@ -176,7 +183,7 @@ class CoverageMap:
         return {"points": self.N, "unseen": (self.N - seen) / n, "seen_once": (seen - cov) / n, "covered": cov / n}
 
 
-def fill(video: Dict[str, np.ndarray], keyframe_frames: Sequence[int], quality_rows: Sequence[Dict], *, tau: float,
+def fill(video: Dict[str, np.ndarray], keyframe_frames: Sequence[int], quality_rows: Sequence[Dict], *,
          min_tri_deg: float, device: str = "cuda", log: Callable[[str], None] = print) -> Dict:
     """The fill on the whole-video pass ``video`` (reconstruction/amb3r_probe.load_video) for I1's keyframes
     ``keyframe_frames`` (frame numbers); ``quality_rows``: I0's frames (frame, file, sharp_rank, usable)."""
@@ -184,9 +191,8 @@ def fill(video: Dict[str, np.ndarray], keyframe_frames: Sequence[int], quality_r
     t0 = time.monotonic()
     cmap = CoverageMap(video, device)
     kf_src = sorted(set(int(r) for r in source_records(video, keyframe_frames)))
-    tol = cmap.tolerance(list(zip(kf_src[:-1], kf_src[1:])), log)
+    tol, bar = cmap.tolerance(list(zip(kf_src[:-1], kf_src[1:])), log)
     cos_min = math.cos(math.radians(float(min_tri_deg)))
-    bar = (1.0 - float(tau)) / 4.0
     rec_frame = np.asarray(video["frame_no"], np.int64)[np.asarray(video["rec_index"], np.int64)]
     for g in kf_src:
         cmap.add(g, tol, cos_min)
@@ -196,19 +202,21 @@ def fill(video: Dict[str, np.ndarray], keyframe_frames: Sequence[int], quality_r
     in_s = set(kf_src)
     n_per = cmap.n_per.cpu().numpy()
     heap = []
+    cands = []
     for c in range(cmap.F):
         f = int(rec_frame[c])
         row = q.get(f)
         if c in in_s or f in kf_set or row is None or not row.get("usable") or n_per[c] == 0:
             continue
+        cands.append(c)
         share = cmap.brings(c, cos_min) / float(n_per[c])
-        if share >= bar:
+        if share > bar:
             heapq.heappush(heap, (-share, -float(row["sharp_rank"]), f, c))
     added: List[Dict] = []
     while heap:
         neg, nsharp, f, c = heapq.heappop(heap)
         share = cmap.brings(c, cos_min) / float(n_per[c])
-        if share < bar:
+        if share <= bar:
             continue                                    # it only falls from here
         if heap and (share, -nsharp, -f) < (-heap[0][0], -heap[0][1], -heap[0][2]):
             heapq.heappush(heap, (-share, nsharp, f, c))
@@ -218,14 +226,17 @@ def fill(video: Dict[str, np.ndarray], keyframe_frames: Sequence[int], quality_r
         added.append({"frame": f, "file": q[f]["file"], "share": share, "points": int(n_per[c]),
                       "order": len(added)})
     after = cmap.summary()
+    rest = max((cmap.brings(c, cos_min) / float(n_per[c]) for c in cands if c not in in_s), default=0.0)
     log(f"[coverage] the map: {cmap.N:,} points of {cmap.F} reconstructed frames; I1's {len(kf_set)} keyframes leave "
         f"{before['unseen'] * 100:.1f} % unseen and {before['seen_once'] * 100:.1f} % seen without a second view "
-        f"(≥ {min_tri_deg:g}° apart); {len(added)} frame(s) bringing more than {bar * 100:.1f} % of their view → "
-        f"{after['unseen'] * 100:.1f} % unseen, {after['seen_once'] * 100:.1f} % seen once"
-        + (f"; added {[a['frame'] for a in added][:40]}" if added else ""))
-    return {"tol_rel": tol, "bar_share": bar, "tau": float(tau), "min_tri_deg": float(min_tri_deg),
+        f"(≥ {min_tri_deg:g}° apart); {len(added)} frame(s) bringing more than the noise ({bar * 100:.2f} % of their "
+        f"view) → {after['unseen'] * 100:.1f} % unseen, {after['seen_once'] * 100:.1f} % seen once — DECLARED: no "
+        f"frame of the video covers it beyond the noise (the most any frame left still brings: {rest * 100:.2f} %)"
+        + (f"; added {[a['frame'] for a in added][:60]}" if added else ""))
+    return {"tol_rel": tol, "noise_share": bar, "min_tri_deg": float(min_tri_deg),
             "reconstructed_frames": cmap.F, "points": cmap.N, "before": before, "after": after,
-            "added": sorted(added, key=lambda a: a["frame"]), "elapsed_s": round(time.monotonic() - t0, 3)}
+            "most_left_share": rest, "added": sorted(added, key=lambda a: a["frame"]),
+            "elapsed_s": round(time.monotonic() - t0, 3)}
 
 
 # ── the selection on disk ─────────────────────────────────────────────────────────────────────
@@ -261,7 +272,7 @@ def _base_witness(wit: Dict) -> Dict:
     return base
 
 
-def session_fill(scan_dir: Path, video_npz: Path, video_stamp: Dict, *, tau: float, min_tri_deg: float,
+def session_fill(scan_dir: Path, video_npz: Path, video_stamp: Dict, *, min_tri_deg: float,
                  device: str = "cuda", log: Callable[[str], None] = print) -> Dict:
     """Fill the session's keyframes (module docstring); reused when its stamp — the whole-video pass, I1's selection,
     I0's report, this code and the bars — is the one on disk."""
@@ -274,7 +285,7 @@ def session_fill(scan_dir: Path, video_npz: Path, video_stamp: Dict, *, tau: flo
     sel_doc, wit_doc = json.loads(p_sel.read_text()), json.loads(p_wit.read_text())
     base, wbase = _base_selection(sel_doc), _base_witness(wit_doc)
     stamp_src = {"version": FILL_VERSION, "video": video_stamp, "i1_selected_files": base["selected_files"],
-                 "quality_features_sha256": _sha_file(p_q), "code": _sha_file(Path(__file__)), "tau": float(tau),
+                 "quality_features_sha256": _sha_file(p_q), "code": _sha_file(Path(__file__)),
                  "min_tri_deg": float(min_tri_deg)}
     stamp = hashlib.sha256(json.dumps(stamp_src, sort_keys=True).encode()).hexdigest()
     rec_p = scan_dir / "intake" / FILL_NAME
@@ -285,7 +296,7 @@ def session_fill(scan_dir: Path, video_npz: Path, video_stamp: Dict, *, tau: flo
         return json.loads(rec_p.read_text())
     quality = json.loads(p_q.read_text())
     kf = [_frame_no(f) for f in base["selected_files"]]
-    res = fill(load_video(video_npz), kf, quality.get("frames") or [], tau=tau, min_tri_deg=min_tri_deg,
+    res = fill(load_video(video_npz), kf, quality.get("frames") or [], min_tri_deg=min_tri_deg,
                device=device, log=log)
     added = res["added"]
     new_files = sorted(set(base["selected_files"]) | {a["file"] for a in added}, key=_frame_no)
@@ -329,15 +340,14 @@ def session_fill(scan_dir: Path, video_npz: Path, video_stamp: Dict, *, tau: flo
 def main(argv=None) -> int:
     """The fill in a process of its own, on the card (USER 2026-11-05: "ningún cálculo va en CPU"; the map worker
     never touches the card before Omega's exclusive check)."""
-    ap = argparse.ArgumentParser(prog="python -m intake.coverage_fill")
+    ap = argparse.ArgumentParser(prog="python -m reconstruction.coverage_fill")
     ap.add_argument("--scan", required=True)
     ap.add_argument("--video", required=True)
     ap.add_argument("--video-stamp", required=True, help="the whole-video pass's stamp (a JSON file)")
-    ap.add_argument("--tau", type=float, required=True)
     ap.add_argument("--min-tri-deg", type=float, required=True)
     ap.add_argument("--device", default="cuda")
     a = ap.parse_args(argv)
-    session_fill(Path(a.scan), Path(a.video), json.loads(Path(a.video_stamp).read_text()), tau=a.tau,
+    session_fill(Path(a.scan), Path(a.video), json.loads(Path(a.video_stamp).read_text()),
                  min_tri_deg=a.min_tri_deg, device=a.device, log=lambda m: print(m, flush=True))
     return 0
 

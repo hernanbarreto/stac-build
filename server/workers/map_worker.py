@@ -1698,7 +1698,7 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, ranges,
                   f"K_omega, pose_c2w)")
 
 
-from workers.base import stop_semantic_service, stop_semantic_service_verified
+from workers.base import SEMANTIC_OUTPUT, stop_semantic_service, stop_semantic_service_verified
 
 
 def _motion_keyframes(frames_dir: Path, quantum: float):
@@ -1826,17 +1826,18 @@ def _run_intake_selection(pipe: WorkerPipe, session_path: Path, frames_dir: Path
 def _amb3r_coverage_fill(pipe: WorkerPipe, session_path: Path, frames_dir: Path, config: dict) -> None:
     """With the AMB3R structure probe (reconstruction.vggtomega.structure.probe 'amb3r'), right after I1's keyframes and
     before anything reads them: AMB3R-SLAM over the WHOLE VIDEO (reconstruction/amb3r_probe.py — reused while the
-    video and what runs it are the same) and THE COVERAGE FILL on it (intake/coverage_fill.py, USER 2026-11-06: "con
-    esa información sacás un mapa de cobertura de lo escaneado … si hace falta completar con kf se completa"; "donde
-    no cubren o cubren poco"): where the keyframes do not see what the video saw, or one sees it alone, the frame that
-    sees it becomes a keyframe — so the turn frames, I3's windows, the DA3 anchors, the cut and Omega all read the
-    completed keyframes. On the card, each in a process of its own (the worker itself never holds the card)."""
+    video and what runs it are the same) and THE COVERAGE FILL on it (reconstruction/coverage_fill.py, USER
+    2026-11-06: "con esa información sacás un mapa de cobertura de lo escaneado … si hace falta completar con kf se
+    completa"; "donde no cubren o cubren poco"; "el mapa debe ser nuestra definitiva para tener cobertura completa"):
+    where the keyframes do not see what the video saw, or one sees it alone, the frames that see it become keyframes
+    until none brings more than the measurement's own noise — so the turn frames, I3's windows, the DA3 anchors, the
+    cut and Omega all read the completed keyframes. On the card, each in a process of its own (the worker itself never
+    holds the card)."""
     va = ((config.get("reconstruction") or {}).get("vggtomega") or {})
     st = _structure_config(va)
     if not st["enabled"] or st["probe"] != "amb3r":
         return
     import repro
-    from intake.parallax import covis_tau
     from precision.camera import omega_grid_for
     from precision.config import load_precision_config
     from reconstruction import amb3r_probe as A3
@@ -1850,8 +1851,8 @@ def _amb3r_coverage_fill(pipe: WorkerPipe, session_path: Path, frames_dir: Path,
     npz, _stamp = A3.session_amb3r(session_path, frames_dir, model=st["amb3r_model"], grid_wh=(int(g.w), int(g.h)),
                                    log=pipe.send_log, check_cancel=pipe.check_cancel)
     stamp_p = session_path / "intake" / "amb3r_video.stamp.json"
-    cmd = [sys.executable, "-m", "intake.coverage_fill", "--scan", str(session_path), "--video", str(npz),
-           "--video-stamp", str(stamp_p), "--tau", repr(float(covis_tau())),
+    cmd = [sys.executable, "-m", "reconstruction.coverage_fill", "--scan", str(session_path), "--video", str(npz),
+           "--video-stamp", str(stamp_p),
            "--min-tri-deg", repr(float(load_precision_config(config).refine.min_tri_deg)), "--device", "cuda"]
     proc = subprocess.Popen(cmd, cwd=str(Path(__file__).resolve().parent.parent), env=repro.deterministic_env(),
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -2864,20 +2865,13 @@ _PLAN_INDEPENDENT_OUTPUT = {"chunk_plan.json", "da3_run", "da3_windows", "intake
                             # reads them). pccr 2026-11-04: the first run of a new plan (5 → 11
                             # chunks) wiped them and the precision core stopped at F0
                             # ("run_config.yaml does not exist")
-                            "run_config.yaml", "run_config.sha256", "run_environment.json",
+                            "run_config.yaml", "run_config.sha256", "run_environment.json"} | set(
                             # the 2-D SEMANTIC products — of the keyframes' images, never of the
                             # chunk plan or the cloud (USER 2026-11-03: re-run every session "manteniendo
                             # el VLM y SAM3"; pccr 2026-11-04 lost them to the first new plan of
-                            # 64-view chunks): the VLM stage's records and the RAW SAM3 store
-                            # (segmentation.json + seg_masks.npz, immutable since point 100 —
-                            # the interactive manager's edits live in it) with its rounds and
-                            # census. The projection, the fusion map and the instance store are of
-                            # the cloud and still go.
-                            "scene_analysis.json", "vlm_analysis.json", "vlm_analysis.timing.json",
-                            "scene_understanding.json", "autoprompt_instances.json",
-                            "autoprompt_review_queue.json", "autoprompt_concepts.json",
-                            "segmentation.json", "seg_masks.npz", "seg_rounds.json",
-                            "segmentation_census.json", "segmentation_timing.json", "_sam3_raw"}
+                            # 64-view chunks): workers.base.SEMANTIC_OUTPUT. The projection, the fusion
+                            # map and the instance store are of the cloud and still go.
+                            SEMANTIC_OUTPUT)
 _PLAN_INDEPENDENT_MAPLONG = {"loop_closures.txt", "salad_calibration.json", "sky_masks",
                              "frame_list.json", "vggt_omega_config.yaml"}
 

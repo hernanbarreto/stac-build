@@ -1646,7 +1646,7 @@ reconstruction:
                                         # completa"): the STRUCTURE PROBE (not one of precision) says
                                         # what every frame saw; the keyframes are completed where the
                                         # video saw what no keyframe sees, or one alone
-                                        # (intake/coverage_fill.py); the scene is cut into CUBES of
+                                        # (reconstruction/coverage_fill.py); the scene is cut into CUBES of
                                         # space (reconstruction/cubes.py → intake/cubes.json +
                                         # cubes.png): a view in every cube where τ of what it sees
                                         # falls; Omega per cube (the fork's loop_utils/cube_run.py),

@@ -27,8 +27,8 @@ x m, con no más de y kf, y ya sabés quiénes vas a incluir en cada cubo porque
    neighbour's. Two units consecutive along the walk always share a cube (the turn frames between them are Omega views
    of a cube that holds both, and the cubes form one graph). A cube needs two keyframes.
 7. HOLES (reported): the share of what the views see that falls in a cube they belong to, per unit and overall. The
-   keyframes themselves were completed before (intake/coverage_fill.py: where no keyframe sees what the video saw, or
-   one sees it alone).
+   keyframes themselves were completed before (reconstruction/coverage_fill.py: where no keyframe sees what the video
+   saw, or one sees it alone).
 
 A cube's Omega views are its keyframes and the turn frames between two of its keyframes that are consecutive in the
 walk; its F6 witnesses (the interval frames) follow the same rule. Deterministic: fixed grids, integer counts, sorted
@@ -422,7 +422,7 @@ def analyse(probe_npz: Path, inputs: Dict, *, device: str = "cuda", log: Callabl
         source = str(z["source"]) if "source" in z.files else "omega"
     extra: Dict = {}
     if source == "amb3r-video":
-        from intake.coverage_fill import CoverageMap
+        from reconstruction.coverage_fill import CoverageMap
         from reconstruction import amb3r_probe as A3
         video = A3.load_video(probe_npz)
         c2w = np.asarray(video["pred"], np.float64)[A3.video_index(video, nums)]
@@ -531,7 +531,7 @@ def save(plan: Dict, path: Path) -> None:
 def code_sha() -> str:
     h = hashlib.sha256()
     for p in (Path(__file__), Path(__file__).with_name("walk_structure.py"),
-              Path(__file__).resolve().parents[1] / "intake" / "coverage_fill.py",
+              Path(__file__).with_name("coverage_fill.py"),
               Path(__file__).with_name("amb3r_probe.py")):
         h.update(p.read_bytes())
     return h.hexdigest()
@@ -543,7 +543,8 @@ def session_cubes(scan_dir: Path, frames_dir: Path, sel_files: Sequence[str], tu
                   cube_m: float = CUBE_M, walk_m: float = 0.0) -> Dict:
     """The session's cube plan on the STRUCTURE PROBE — ``probe`` "amb3r": AMB3R-SLAM's whole-video pass
     (intake/amb3r_video.npz, run right after the intake's keyframes — workers/map_worker._run_intake_selection —
-    and the keyframes completed on it, intake/coverage_fill.py); "omega": one Omega pass over every keyframe and turn
+    and the keyframes completed on it, reconstruction/coverage_fill.py); "omega": one Omega pass over every keyframe
+    and turn
     frame at ``resolution`` (vendor/VGGT-Long/stac_frames_pass.py, intake/structure_probe.npz, reused when its stamp is
     the same) — and the PLAN (a process of its own on the card, ``python -m reconstruction.cubes``; reused when the
     probe, the inputs and this code are the same). intake/cubes.json and intake/cubes.png."""

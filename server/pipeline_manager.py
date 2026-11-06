@@ -1040,6 +1040,19 @@ class PipelineManager:
                         "(output/autosegment.json)")
         # the capture data still in the scan's legacy places goes to inputs/ — never deleted
         _moved = _CI.move_legacy_capture(session_dir, log=lambda m: logger.info(f"[Pipeline] {m}"))
+        # USER 2026-11-06 ("cuando esté quiero lanzar todo desde el UI, con reemplazo, pero aun con reemplazo el vlm y
+        # sam3 si ya están no deben rehacerse, salvo que hayan cambiado los KF"): the 2-D semantic products step aside
+        # (beside the session, renamed — one syscall each) and come back into the new output/; the VLM / SAM3 stages
+        # then keep them only while they are of the keyframes this run selects (_semantics_keyframes_change)
+        from workers.base import SEMANTIC_OUTPUT
+        _keep_dir = session_dir.parent / f".{session_dir.name}.semantics-{_os.getpid()}"
+        _kept = []
+        for _name in SEMANTIC_OUTPUT:
+            _src = output_dir / _name
+            if _src.exists() or _src.is_symlink():
+                _keep_dir.mkdir(parents=True, exist_ok=True)
+                _src.rename(_keep_dir / _name)
+                _kept.append(_name)
         frames_dir = session_dir / "frames"
         for entry in sorted(session_dir.iterdir()) if session_dir.is_dir() else []:
             if entry.is_file() and entry.name.startswith("source_video"):
@@ -1065,6 +1078,12 @@ class PipelineManager:
                 entry.unlink(missing_ok=True)
                 deleted.append(entry.name)
         output_dir.mkdir(parents=True, exist_ok=True)
+        for _name in _kept:
+            (_keep_dir / _name).rename(output_dir / _name)
+        if _kept:
+            _keep_dir.rmdir()
+            logger.info(f"[Pipeline] Replace keeps the VLM / SAM3 products ({', '.join(_kept)}) — redone only if "
+                        f"this run's keyframes are not the ones they were made on")
 
         # project-level derivatives of output/ (merged cloud, its octree, floor)
         try:
@@ -1417,7 +1436,9 @@ class PipelineManager:
         # VLM analysis and the SAM3 masks the session already has — they are of the keyframes' images, not of the
         # cloud (a new chunk plan keeps them too: map_worker._PLAN_INDEPENDENT_OUTPUT) — and the PROJECTION stage
         # puts the kept masks on the new cloud; the floor follows. An Autosegment (force) segments again, as ordered.
-        keep_semantics = recon_requested and not replace and not force
+        # USER 2026-11-06: with Replace too ("aun con reemplazo el vlm y sam3 si ya están no deben rehacerse, salvo
+        # que hayan cambiado los KF") — _stage_is_complete says whether they are of this run's keyframes
+        keep_semantics = recon_requested and not force
         if keep_semantics and any(st.stage.id == StageId.FLOOR and st.stage.enabled for st in job.stages):
             # the floor needs the segmented support on THIS cloud: masks the session already has are projected
             # even when the segmentation chain is off in this order (VLM / SAM3 not run)
@@ -1823,6 +1844,45 @@ class PipelineManager:
 
     # ── resume-mode probes ────────────────────────────────────
     @staticmethod
+    def _semantics_keyframes_change(output_dir: Path, session_dir: Path, stage_id: "StageId") -> Optional[str]:
+        """Why the VLM / SAM3 products on disk are not of the session's CURRENT keyframes (USER 2026-11-06: "aun con
+        reemplazo el vlm y sam3 si ya están no deben rehacerse, salvo que hayan cambiado los KF"; the coverage fill can
+        add keyframes) — None when they are of them, when the products carry no record of their keyframes (made before
+        the record existed: kept, as before) or when the session has no selection yet. The VLM's record is the frames
+        its stamp read; SAM3's, the keyframes_sha256 its store was sealed with."""
+        sel_p = Path(session_dir) / "frames" / "selected_frames.json"
+        try:
+            sel = json.loads(sel_p.read_text())
+        except (OSError, ValueError):
+            return None
+        files = sel.get("selected_files", []) if isinstance(sel, dict) else sel
+        nums = sorted(int(Path(str(f)).stem) for f in files)
+        if stage_id == StageId.VLM:
+            try:
+                doc = json.loads((Path(output_dir) / "vlm_analysis.json").read_text())
+            except (OSError, ValueError):
+                return None
+            ins = (doc.get("stamp") or {}).get("inputs") or {}
+            made = sorted(int(Path(k).stem) for k in ins
+                          if str(k).startswith("frames/") and Path(k).suffix.lower() in (".jpg", ".jpeg", ".png"))
+            if made and made != nums:
+                return (f"the VLM analysed {len(made)} keyframes, the session has {len(nums)} now "
+                        f"({len(set(nums) - set(made))} new, {len(set(made) - set(nums))} gone)")
+            return None
+        if stage_id == StageId.SAM3:
+            try:
+                doc = json.loads((Path(output_dir) / "segmentation.json").read_text())
+            except (OSError, ValueError):
+                return None
+            sha = doc.get("keyframes_sha256")
+            if sha:
+                from repro import sha256_json
+                if sha != sha256_json(nums):
+                    return (f"SAM3 segmented another set of {doc.get('n_keyframes')} keyframes, the session has "
+                            f"{len(nums)} now")
+        return None
+
+    @staticmethod
     def _stage_is_complete(output_dir: Path, session_dir: Path,
                            stage_id: StageId, config: Optional[dict] = None) -> tuple:
         """(complete, reason) — does this session already have the stage's
@@ -1877,7 +1937,10 @@ class PipelineManager:
 
         if stage_id == StageId.VLM:
             if (output_dir / "vlm_analysis.json").exists():
-                return True, "vlm_analysis.json on disk"
+                changed = PipelineManager._semantics_keyframes_change(output_dir, session_dir, stage_id)
+                if changed:
+                    return False, changed
+                return True, "vlm_analysis.json on disk, of the session's keyframes"
             # a session segmented MANUALLY (Segmentation Manager) already
             # fulfilled this stage's purpose — never overwrite human work
             # with an auto-prompted re-segmentation
@@ -1890,6 +1953,9 @@ class PipelineManager:
             masks = output_dir / "seg_masks.npz"
             if not (seg.exists() and masks.exists()):
                 return False, "no segmentation"
+            changed = PipelineManager._semantics_keyframes_change(output_dir, session_dir, stage_id)
+            if changed:
+                return False, changed
             vlm = output_dir / "vlm_analysis.json"
             if vlm.exists() and mt(seg) < mt(vlm):
                 return False, "segmentation older than VLM analysis"
@@ -1907,7 +1973,7 @@ class PipelineManager:
                                        f"({len(have & want)}/{len(want)} categories)")
                 except Exception:
                     pass
-            return True, "segmentation.json + masks on disk"
+            return True, "segmentation.json + masks on disk, of the session's keyframes"
 
         if stage_id == StageId.PROJECTION:
             # the projection's own product; whether it is the projection OF THIS cloud and

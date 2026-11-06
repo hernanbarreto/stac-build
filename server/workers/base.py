@@ -10,6 +10,16 @@ import traceback
 from multiprocessing.connection import Connection
 from typing import Optional
 
+# The 2-D SEMANTIC products of a session — of the keyframes' images, never of the chunk plan or the cloud: the VLM
+# stage's records and the RAW SAM3 store with its rounds and census. Kept by a new chunk plan
+# (map_worker._PLAN_INDEPENDENT_OUTPUT, USER 2026-11-03: "manteniendo el VLM y SAM3") and by Replace (USER 2026-11-06:
+# "aun con reemplazo el vlm y sam3 si ya están no deben rehacerse, salvo que hayan cambiado los KF"); redone only when
+# the keyframes they were made on are not the session's any more (pipeline_manager._semantics_keyframes_change).
+SEMANTIC_OUTPUT = ("scene_analysis.json", "vlm_analysis.json", "vlm_analysis.timing.json", "scene_understanding.json",
+                   "autoprompt_instances.json", "autoprompt_review_queue.json", "autoprompt_concepts.json",
+                   "segmentation.json", "seg_masks.npz", "seg_rounds.json", "segmentation_census.json",
+                   "segmentation_timing.json", "_sam3_raw")
+
 
 class WorkerPipe:
     """Helper wrapper around a multiprocessing.Pipe connection.
