@@ -1820,6 +1820,55 @@ def _run_intake_selection(pipe: WorkerPipe, session_path: Path, frames_dir: Path
                   f"quantum {icfg.parallax.parallax_quantum_px:g} px), {s['n_witness']} witness "
                   f"frames, {s['n_warnings']} coverage warning(s) → selected_frames.json / "
                   f"witness_frames.json")
+    _amb3r_coverage_fill(pipe, session_path, frames_dir, config)
+
+
+def _amb3r_coverage_fill(pipe: WorkerPipe, session_path: Path, frames_dir: Path, config: dict) -> None:
+    """With the AMB3R structure probe (reconstruction.vggtomega.structure.probe 'amb3r'), right after I1's keyframes and
+    before anything reads them: AMB3R-SLAM over the WHOLE VIDEO (reconstruction/amb3r_probe.py — reused while the
+    video and what runs it are the same) and THE COVERAGE FILL on it (intake/coverage_fill.py, USER 2026-11-06: "con
+    esa información sacás un mapa de cobertura de lo escaneado … si hace falta completar con kf se completa"; "donde
+    no cubren o cubren poco"): where the keyframes do not see what the video saw, or one sees it alone, the frame that
+    sees it becomes a keyframe — so the turn frames, I3's windows, the DA3 anchors, the cut and Omega all read the
+    completed keyframes. On the card, each in a process of its own (the worker itself never holds the card)."""
+    va = ((config.get("reconstruction") or {}).get("vggtomega") or {})
+    st = _structure_config(va)
+    if not st["enabled"] or st["probe"] != "amb3r":
+        return
+    import repro
+    from intake.parallax import covis_tau
+    from precision.camera import omega_grid_for
+    from precision.config import load_precision_config
+    from reconstruction import amb3r_probe as A3
+    vcfg = _build_vggtomega_config(config, frames_dir)
+    nw, nh = _native_frame_wh(frames_dir)
+    g = omega_grid_for(int(nw), int(nh), str(vcfg["Model"]["omega_mode"]), int(vcfg["Model"]["omega_resolution"]))
+    pipe.send_progress(4, f"AMB3R-SLAM over the whole video ({st['amb3r_model']}, {g.w}x{g.h}), then the coverage "
+                          f"fill of the keyframes...", stage="reconstruction")
+    stop_semantic_service_verified(pipe, stage="AMB3R-SLAM whole-video pass")
+    repro.require_exclusive_gpu(log=pipe.send_log)
+    npz, _stamp = A3.session_amb3r(session_path, frames_dir, model=st["amb3r_model"], grid_wh=(int(g.w), int(g.h)),
+                                   log=pipe.send_log, check_cancel=pipe.check_cancel)
+    stamp_p = session_path / "intake" / "amb3r_video.stamp.json"
+    cmd = [sys.executable, "-m", "intake.coverage_fill", "--scan", str(session_path), "--video", str(npz),
+           "--video-stamp", str(stamp_p), "--tau", repr(float(covis_tau())),
+           "--min-tri-deg", repr(float(load_precision_config(config).refine.min_tri_deg)), "--device", "cuda"]
+    proc = subprocess.Popen(cmd, cwd=str(Path(__file__).resolve().parent.parent), env=repro.deterministic_env(),
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    tail = []
+    for line in proc.stdout:
+        line = line.rstrip()
+        if not line:
+            continue
+        tail = (tail + [line])[-30:]
+        if pipe.check_cancel():
+            proc.terminate()
+            proc.wait()
+            from intake.quality import IntakeCancelled
+            raise IntakeCancelled("cancelled during the coverage fill")
+        pipe.send_log(line)
+    if proc.wait() != 0:
+        raise RuntimeError("the coverage fill failed:\n" + "\n".join(tail[-20:]))
 
 
 def _intake_da3_frames(frames_dir: Path) -> dict:
@@ -1914,7 +1963,7 @@ def _structure_config(va_cfg: dict) -> dict:
     """reconstruction.vggtomega.structure (USER 2026-11-05/06): {enabled, chunk_view_cap: 'card' | an integer ≥ 2,
     probe: 'amb3r' | 'omega', amb3r_model: 'omega' | 'da3'}. A missing or malformed key FAILS naming it."""
     st = va_cfg.get("structure")
-    need = ("enabled", "chunk_view_cap", "probe", "amb3r_model")
+    need = ("enabled", "chunk_view_cap", "probe", "amb3r_model", "cube_m")
     if not isinstance(st, dict) or any(k not in st for k in need):
         raise RuntimeError(f"reconstruction.vggtomega.structure {{{', '.join(need)}}} is missing from the "
                            f"configuration (USER 2026-11-05/06: the structure probe — AMB3R-SLAM or one Omega "
@@ -1928,8 +1977,11 @@ def _structure_config(va_cfg: dict) -> dict:
     if st["amb3r_model"] not in ("omega", "da3"):
         raise RuntimeError(f"reconstruction.vggtomega.structure.amb3r_model {st['amb3r_model']!r}: 'omega' or "
                            f"'da3'")
+    cm = st["cube_m"]
+    if isinstance(cm, bool) or not isinstance(cm, (int, float)) or not cm > 0:
+        raise RuntimeError(f"reconstruction.vggtomega.structure.cube_m {cm!r}: a cube's side in metres, > 0")
     return {"enabled": bool(st["enabled"]), "chunk_view_cap": cap, "probe": str(st["probe"]),
-            "amb3r_model": str(st["amb3r_model"])}
+            "amb3r_model": str(st["amb3r_model"]), "cube_m": float(cm)}
 
 
 def _single_pass_capacity(config: dict, vggt_config: dict, frames_dir, n_keyframes: int, n_witness: int,
@@ -2151,11 +2203,12 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                 "chunk_owner": [int(x) for x in _owner], "chunk_lengths": [len(F) for F in _sets],
                 "walk_m": round(float(_walk), 2),
                 "omega_resolution": {k: v for k, v in (_res or {}).items() if k != "persisted"},
-                "cube_plan": {"stamp": _cplan.get("stamp"), "max_views": _cplan.get("max_views"),
-                              "units": len(_cplan.get("units") or []), "cells": len(_cplan.get("cells") or []),
-                              "blocks": len(_cplan.get("blocks") or []),
-                              "cubes": [{"blocks": cb.get("blocks"), "omega_views": cb.get("omega_views"),
-                                         "why": cb.get("why"), "over_cap": cb.get("over_cap")}
+                "cube_plan": {"stamp": _cplan.get("stamp"), "version": _cplan.get("version"),
+                              "probe_source": _cplan.get("probe_source"), "max_views": _cplan.get("max_views"),
+                              "cube_m": _cplan.get("cube_m"), "units": len(_cplan.get("units") or []),
+                              "stats": _cplan.get("stats"),
+                              "cubes": [{"units": len(cb.get("units") or []), "size_m": cb.get("size_m"),
+                                         "omega_views": cb.get("omega_views"), "over_cap": cb.get("over_cap")}
                                         for cb in _cplan["cubes"]]},
                 "environment": json.loads(json.dumps(_env_rec, default=str))}
         if _context is not None and any(_context):
@@ -2450,15 +2503,12 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     from reconstruction.chunk_plan import cube_anchor_indices, omega_resolution_for
     _probe_files = sorted(set(_sel_files) | set(_turn["files"]), key=lambda f: int(Path(f).stem))
     if _st_cfg["probe"] == "amb3r":
-        # AMB3R-SLAM (USER 2026-11-06: "incorporemos amb3r-slam, con todo su slam, para la primer pasada, luego de
-        # eso se hace el corte"): its submaps hold a few dozen views, the card is no constraint — it runs at the
-        # session's Omega grid (the configured resolution on the native frame)
-        from precision.camera import omega_grid_for as _ogf
-        _nw, _nh = _native_frame_wh(frames_dir)
-        _g = _ogf(int(_nw), int(_nh), str(vggt_config["Model"]["omega_mode"]),
-                  int(vggt_config["Model"]["omega_resolution"]))
-        _pres = {"resolution": max(int(_g.w), int(_g.h)), "grid_wh": [int(_g.w), int(_g.h)]}
-        _probe_txt = f"AMB3R-SLAM ({_st_cfg['amb3r_model']}, {_g.w}x{_g.h}, its loops closed)"
+        # AMB3R-SLAM over the whole video (USER 2026-11-06: "incorporemos amb3r-slam, con todo su slam, para la
+        # primer pasada, luego de eso se hace el corte"; "a amber le tenés que dar el video completo"): it ran right
+        # after I1's keyframes, which were completed on it (_amb3r_coverage_fill) — the cut reads what each of our
+        # views saw there
+        _pres = {"resolution": 0}
+        _probe_txt = f"AMB3R-SLAM's whole-video pass ({_st_cfg['amb3r_model']})"
     else:
         _pres = omega_resolution_for(len(_probe_files), _card["total_gb"], _native_frame_wh(frames_dir),
                                      str(vggt_config["Model"]["omega_mode"]),
@@ -2472,8 +2522,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     _cplan = _CB.session_cubes(output_dir.parent, frames_dir, _sel_files, _turn["files"], _turn["witness_files"],
                                vggt_config, resolution=int(_pres["resolution"]), max_views=_view_cap,
                                sky_cache=output_dir / "maplong_run" / "sky_masks", log=pipe.send_log,
-                               probe=_st_cfg["probe"], amb3r_model=_st_cfg["amb3r_model"],
-                               grid_wh=tuple(_pres["grid_wh"]))
+                               probe=_st_cfg["probe"], cube_m=_st_cfg["cube_m"], walk_m=_walk0)
     _cubes = _cplan["cubes"]
     _sets = [[int(k) for k in cb["keyframes"]] for cb in _cubes]
     _owner = [int(x) for x in _cplan["owner"]]

@@ -1,12 +1,12 @@
 """The cubes of the cut, as boxes in the scene the viewer shows (USER 2026-11-06: "me gustaría ver los chunks como
 cubos en la escena, y que se puedan apagar y prender, para entender cómo se separó la escena").
 
-The cut (reconstruction/cubes.py, intake/cubes.json) is made on the structure probe's cameras, in the probe's own
-frame: k-d cells of the floor plan, every cube two neighbour blocks. A cube is drawn as the box of its cells — their
-union's bounds in the probe's gravity frame — carried into the session's live frame by the similarity that best maps
-the probe's keyframe cameras onto the live ones (output/camera_poses.txt: Umeyama over the keyframes' centres, its
-residual reported), then through the sealed floor transform like the camera markers. Vertically each box spans the
-cloud (the octree's bounds along the up axis): a cut is a cut of the floor plan. Nothing here is a measurement."""
+The cut (reconstruction/cubes.py, intake/cubes.json) is made in the structure probe's own frame: boxes of space in its
+gravity frame (a plan of 2026-11-06 morning: k-d cells, every cube two neighbour blocks — drawn as its cells' union). A
+cube is carried into the session's live frame by the similarity that best maps the probe's keyframe cameras onto the
+live ones (output/camera_poses.txt: Umeyama over the keyframes' centres, its residual reported), then through the
+sealed floor transform like the camera markers. Vertically each box spans the cloud (the octree's bounds along the up
+axis). Nothing here is a measurement."""
 from __future__ import annotations
 
 import json
@@ -34,17 +34,21 @@ def cube_boxes(scan_dir: Path) -> Optional[Dict]:
     out = scan_dir / "output"
     cp, npz = scan_dir / "intake" / "cubes.json", scan_dir / "intake" / "structure_probe.npz"
     poses_p, frames_p = out / "camera_poses.txt", out / "camera_frames.txt"
-    if not (cp.exists() and npz.exists() and poses_p.exists() and frames_p.exists()):
+    if not (cp.exists() and poses_p.exists() and frames_p.exists()):
         return None
     plan = json.loads(cp.read_text())
+    if "kf_centres" not in plan and not npz.exists():
+        return None
     sel = json.loads((scan_dir / "frames" / "selected_frames.json").read_text())
     files = sel if isinstance(sel, list) else sel.get("selected_files", [])
     kf_no = [int(Path(f).stem) for f in sorted(files)]
     if len(kf_no) != int(plan.get("n_keyframes", -1)):
         return None                                   # the plan is of another keyframe set
-    with np.load(npz) as z:
-        c2w_probe = np.asarray(z["c2w"], np.float64)
-    C_probe = c2w_probe[np.asarray(plan["kf_slot"])][:, :3, 3]
+    if "kf_centres" in plan:                           # the keyframes' centres in the probe frame, with the plan
+        C_probe = np.asarray(plan["kf_centres"], np.float64)
+    else:
+        with np.load(npz) as z:
+            C_probe = np.asarray(z["c2w"], np.float64)[np.asarray(plan["kf_slot"])][:, :3, 3]
     poses = np.loadtxt(poses_p).reshape(-1, 4, 4)
     nums = [int(float(x)) for x in frames_p.read_text().split()]
     live = {n: p for n, p in zip(nums, poses)}
@@ -72,12 +76,15 @@ def cube_boxes(scan_dir: Path) -> Optional[Dict]:
             up = axes[:, 2] / np.linalg.norm(axes[:, 2])
             h = disp @ up
             lo_up, hi_up = float(h.min()), float(h.max())
-    cells, blocks = plan["cells"], plan["blocks"]
+    cells, blocks = plan.get("cells"), plan.get("blocks")
     cubes: List[Dict] = []
     n = max(1, len(plan["cubes"]))
     for ci, cb in enumerate(plan["cubes"]):
-        lo = np.min([cells[blocks[b]["cell"]]["lo"] for b in cb["blocks"]], axis=0)
-        hi = np.max([cells[blocks[b]["cell"]]["hi"] for b in cb["blocks"]], axis=0)
+        if "lo" in cb:                                   # a cube of space (cut by what the views see)
+            lo, hi = np.asarray(cb["lo"], np.float64), np.asarray(cb["hi"], np.float64)
+        else:                                            # a pair of k-d cells (the cut of 2026-11-06 morning)
+            lo = np.min([cells[blocks[b]["cell"]]["lo"] for b in cb["blocks"]], axis=0)
+            hi = np.max([cells[blocks[b]["cell"]]["hi"] for b in cb["blocks"]], axis=0)
         c_g = 0.5 * (lo + hi)
         half = 0.5 * (hi - lo) * S_all
         center = S_all * (R_all @ (G.T @ c_g)) + t_all
@@ -91,6 +98,6 @@ def cube_boxes(scan_dir: Path) -> Optional[Dict]:
                       "rotation": (axes / np.linalg.norm(axes, axis=0)).tolist(),
                       "color": "#%02x%02x%02x" % tuple(int(v) for v in rgb),
                       "keyframes": len(cb["keyframes"]), "views": int(cb.get("omega_views", cb.get("views", 0))),
-                      "blocks": [int(b) for b in cb["blocks"]]})
+                      "units": len(cb.get("units", [])), "size_m": cb.get("size_m")})
     return {"cubes": cubes, "fit": {"keyframes": len(have), "scale": s, "residual_median_m": float(np.median(res)),
                                     "residual_max_m": float(res.max())}}

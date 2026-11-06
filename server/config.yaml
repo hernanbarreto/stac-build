@@ -1640,27 +1640,36 @@ reconstruction:
                                         # principio … en esa pasada se determinaban las revisitas …
                                         # hay que recortar la escena como hace genrecon, que toma
                                         # cubos … de 64 imágenes solapadas al 50% con los vecinos …
-                                        # siempre con tope de 64"): ONE Omega pass over EVERY
-                                        # keyframe and turn frame (the STRUCTURE PROBE, not one of
-                                        # precision; vendor/VGGT-Long/stac_frames_pass.py) at the
-                                        # resolution where they all fit the card; on it the scene is
-                                        # cut into CUBES (reconstruction/cubes.py → intake/cubes.json
-                                        # + cubes.png): k-d cells of at most half the cap, the units
-                                        # of a cell that see each other a block, every two neighbour
-                                        # blocks one cube; Omega per cube (the fork's loop_utils/
-                                        # cube_run.py), ONE Sim(3) graph on the shared frames. One
-                                        # cube = one pass.
+                                        # siempre con tope de 64"; "con esa información sacás un
+                                        # mapa de cobertura de lo escaneado … vas a armar cubos de x m,
+                                        # con no más de y kf … si hace falta completar con kf se
+                                        # completa"): the STRUCTURE PROBE (not one of precision) says
+                                        # what every frame saw; the keyframes are completed where the
+                                        # video saw what no keyframe sees, or one alone
+                                        # (intake/coverage_fill.py); the scene is cut into CUBES of
+                                        # space (reconstruction/cubes.py → intake/cubes.json +
+                                        # cubes.png): a view in every cube where τ of what it sees
+                                        # falls; Omega per cube (the fork's loop_utils/cube_run.py),
+                                        # ONE Sim(3) graph on the shared frames. One cube = one pass.
       enabled: true
-      chunk_view_cap: 64                # the most views a cube holds (keyframes + turn frames);
-                                        # each cell half of it — two cubes sharing a cell share 50 %.
+      chunk_view_cap: 64                # the most views a cube holds (keyframes + turn frames); a cube
+                                        # over it is halved while halving separates what its views see
       probe: amb3r                      # USER 2026-11-06 ("para recorridos de cientos de metros y loops …
                                         # incorporemos amb3r-slam, con todo su slam, para la primer pasada,
                                         # luego de eso se hace el corte"): the first pass is AMB3R-SLAM over
-                                        # the same views (reconstruction/amb3r_probe.py) — one closed
-                                        # trajectory, its loops verified; omega = one Omega pass (no loop
-                                        # closure, the card bounds its length)
+                                        # the WHOLE video, right after I1's keyframes
+                                        # (reconstruction/amb3r_probe.py → intake/amb3r_video.npz) — one
+                                        # closed trajectory, every reconstructed frame with what it saw;
+                                        # omega = one Omega pass over our views (no loop closure, no fill,
+                                        # the card bounds its length)
       amb3r_model: omega                # AMB3R's heavy model (the trials of 2026-11-03: Ω at the session's
-                                        # grid gave its best raw result; da3 = DA3 Giant)
+                                        # grid gave its best raw result; da3 = DA3 Giant). It reads the WHOLE
+                                        # video at frame stride 1 (USER 2026-11-06: "a amber le tenés que dar
+                                        # el video completo … a paso 1, no importa el tiempo, importa la
+                                        # precisión y la completitud"); our views are placed on its trajectory
+      cube_m: 5.0                       # USER 2026-11-06 ("el tamaño del cubo, no más de por ejemplo como
+                                        # genrecon 5 m o 6 m"): a cube's side; a view belongs to every cube
+                                        # where τ of what its rays hit falls (reconstruction/cubes.py)
     scale_align: true                   # metric: DA3 anchor + scale_align (global similarity:
                                         # scales cloud + poses by s = median DA3/Omega depth).
                                         # false → up-to-scale (raw Omega isolation test).
