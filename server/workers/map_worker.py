@@ -1565,7 +1565,7 @@ OMEGA_RECORD_THREADS = 8
 
 
 def _emit_omega_depth(save_dir: Path, output_dir: Path, ranges,
-                      selected_frames_path: str, pipe: WorkerPipe) -> None:
+                      selected_frames_path: str, pipe: WorkerPipe, cubes=None) -> None:
     """Write per-frame VGGT-Omega depth (globally scale-consistent) to
     omega_run/results_output/frame_<num>.npz so scale_align can compare it to DA3.
     The omega 'depth' is recovered from the ALIGNED world_points projected onto each
@@ -1574,16 +1574,24 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, ranges,
     ``ranges``: the chunk layout the fork RAN ([start, end) keyframe positions — the
     co-visibility plan's explicit ranges, variable lengths and seams; one range for a
     single pass). Chunk k's local frame j is keyframe ranges[k][0] + j; nothing is
-    rebuilt from a size or an overlap (USER 2026-10-06)."""
+    rebuilt from a size or an overlap (USER 2026-10-06). ``cubes``: (keyframe sets, owner of every keyframe) — a CUBE
+    run (USER 2026-11-06): cube k's local frame j is keyframe sets[k][j] and each keyframe's record is its owner
+    cube's, the owner the plan named (the fork wrote its points and pose from the same copy)."""
     import numpy as np, json, glob
     sel = json.load(open(selected_frames_path))
     files = sorted(sel.get("selected_files", sel if isinstance(sel, list) else []))
     stems = [int(Path(f).stem) for f in files]
     N = len(stems)
-    _chunks = [(int(a), int(b)) for a, b in ranges]
-    if not _chunks or _chunks[0][0] != 0 or _chunks[-1][1] != N:
-        raise RuntimeError(f"[omega-depth] the chunk layout {_chunks} does not cover the "
-                           f"{N} selected keyframes [0, {N})")
+    if cubes is not None:
+        _frames_of = [[int(g) for g in F] for F in cubes[0]]
+        if sorted({g for F in _frames_of for g in F}) != list(range(N)) or len(cubes[1]) != N:
+            raise RuntimeError(f"[omega-depth] the cube layout does not cover the {N} selected keyframes")
+    else:
+        _chunks = [(int(a), int(b)) for a, b in ranges]
+        if not _chunks or _chunks[0][0] != 0 or _chunks[-1][1] != N:
+            raise RuntimeError(f"[omega-depth] the chunk layout {_chunks} does not cover the "
+                               f"{N} selected keyframes [0, {N})")
+        _frames_of = [list(range(a, b)) for a, b in _chunks]
     out_dir = output_dir / "omega_run" / "results_output"
     out_dir.mkdir(parents=True, exist_ok=True)
     aligned = save_dir / "_tmp_results_aligned"
@@ -1613,13 +1621,16 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, ranges,
     # ranges (the shared block of two chunks split at its midpoint, USER 2026-10-07): the record
     # of a shared frame carries the depth, conf, K and pose of the chunk that writes its points
     # (traceability), never of whichever chunk came last
-    _owner_of = np.full(N, -1, np.int32)
-    for kk, (a, b) in enumerate(_chunks):
-        _owner_of[a:b] = kk
-    for kk in range(len(_chunks) - 1):
-        a, b = _chunks[kk + 1][0], _chunks[kk][1]
-        if b > a:
-            _owner_of[a:a + (b - a) // 2 + 1] = kk      # the midpoint frame → the earlier chunk
+    if cubes is not None:
+        _owner_of = np.asarray([int(x) for x in cubes[1]], np.int32)
+    else:
+        _owner_of = np.full(N, -1, np.int32)
+        for kk, (a, b) in enumerate(_chunks):
+            _owner_of[a:b] = kk
+        for kk in range(len(_chunks) - 1):
+            a, b = _chunks[kk + 1][0], _chunks[kk][1]
+            if b > a:
+                _owner_of[a:a + (b - a) // 2 + 1] = kk      # the midpoint frame → the earlier chunk
 
     def _owner(g):
         return int(_owner_of[g])
@@ -1646,14 +1657,13 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, ranges,
             if Kin is not None and Kin.ndim == 4:
                 Kin = Kin[0]
             S = wp.shape[0]
-            if k >= len(_chunks) or S != _chunks[k][1] - _chunks[k][0]:
+            if k >= len(_frames_of) or S != len(_frames_of[k]):
                 raise RuntimeError(f"chunk {k} holds {S} frames, the layout the fork ran "
-                                   f"says {_chunks[k] if k < len(_chunks) else 'no such chunk'}"
+                                   f"says {len(_frames_of[k]) if k < len(_frames_of) else 'no such chunk'}"
                                    f" — the aligned chunks on disk are of another plan")
-            start = _chunks[k][0]
             todo = []
             for j in range(S):
-                gi = start + j
+                gi = _frames_of[k][j]
                 if gi >= N:
                     break
                 if _owner(gi) != k:
@@ -2124,14 +2134,46 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                       f"{_plan_layout_text(plan)}, Omega at {_res['resolution']} "
                       f"({_res['mode']}, grid {_res['grid_wh'][0]}x{_res['grid_wh'][1]})")
 
-    def _apply_chunked_metric(cfg_v, _ranges):
+    def _persist_cube_plan(_cplan, _sets, _owner, _n_kf, _walk, _res, _context):
+        """output/chunk_plan.json of a CUBE run (USER 2026-11-06): the cubes (keyframe sets), each keyframe's
+        owner cube, the turn frames each cube is inferred with, the Omega resolution of the largest cube, the cube
+        plan's stamp and summary (intake/cubes.json holds it whole) and the environment — compared with what is on
+        disk first: another plan's products go before Omega runs."""
+        plan = {"version": 3, "layout": "cubes", "phase": "cubes", "method": "structure-probe cubes",
+                "n_keyframes": int(_n_kf), "chunk_sets": [[int(g) for g in F] for F in _sets],
+                "chunk_owner": [int(x) for x in _owner], "chunk_lengths": [len(F) for F in _sets],
+                "walk_m": round(float(_walk), 2),
+                "omega_resolution": {k: v for k, v in (_res or {}).items() if k != "persisted"},
+                "cube_plan": {"stamp": _cplan.get("stamp"), "max_views": _cplan.get("max_views"),
+                              "units": len(_cplan.get("units") or []), "cells": len(_cplan.get("cells") or []),
+                              "blocks": len(_cplan.get("blocks") or []),
+                              "cubes": [{"blocks": cb.get("blocks"), "omega_views": cb.get("omega_views"),
+                                         "why": cb.get("why"), "over_cap": cb.get("over_cap")}
+                                        for cb in _cplan["cubes"]]},
+                "environment": json.loads(json.dumps(_env_rec, default=str))}
+        if _context is not None and any(_context):
+            plan["chunk_context"] = [list(c) for c in _context]
+            plan["chunk_context_counts"] = [len(c) for c in _context]
+        _invalidate_on_new_chunk_plan(output_dir, plan, pipe.send_log)
+        (output_dir / "chunk_plan.json").write_text(json.dumps(plan, indent=1))
+        pipe.send_log(f"[chunk-plan] persisted output/chunk_plan.json: {_plan_layout_text(plan)} "
+                      f"({_res['mode']}, grid {_res['grid_wh'][0]}x{_res['grid_wh'][1]})")
+
+    def _apply_chunked_metric(cfg_v, _ranges, cubes=None):
         # the layout IS the explicit list: the fork builds chunk_indices from it and slices
         # every seam by its own overlap (vggt_long._stac_build_layout / _stac_seam_copies);
         # with Model.chunk_ranges it reads no chunk_size / overlap at all
-        cfg_v["Model"]["chunk_ranges"] = [[int(a), int(b)] for a, b in _ranges]
+        if cubes is not None:
+            # the CUBES (USER 2026-11-06): keyframe sets and each keyframe's owner — the fork's
+            # loop_utils/cube_run.py; no loop bridges (a revisit is inside its cube)
+            cfg_v["Model"]["chunk_sets"] = [[int(g) for g in F] for F in cubes[0]]
+            cfg_v["Model"]["chunk_owner"] = [int(x) for x in cubes[1]]
+            cfg_v["Model"].pop("chunk_ranges", None)
+        else:
+            cfg_v["Model"]["chunk_ranges"] = [[int(a), int(b)] for a, b in _ranges]
         cfg_v["Model"].pop("chunk_size", None)
         cfg_v["Model"].pop("overlap", None)
-        cfg_v["Model"]["loop_enable"] = True
+        cfg_v["Model"]["loop_enable"] = cubes is None
         cfg_v["Model"]["using_sim3"] = False       # SE(3): scale locked by the anchors
         # USER 2026-11-04 ("ok, Sim3"): the chunks are pieces of ONE Sim(3) graph — seams with
         # their scale, the SALAD closures, DA3 as a weak scale prior (the fork's
@@ -2231,7 +2273,11 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # this exact plan and measured on Omega's geometry (docs/plan_determinismo.md point 22)
         from reconstruction.loops.structural import absolute_rows_for_plan
         _abs_path = output_dir / "scale_absolute_rows.json"
-        _abs_rows, _abs_why = absolute_rows_for_plan(_abs_path, _ranges, _n_selected)
+        if cubes is not None:
+            _abs_rows, _abs_why = [], ("its rows are stamped with a range plan — a cube run reads none "
+                                       "(declared)") if _abs_path.exists() else None
+        else:
+            _abs_rows, _abs_why = absolute_rows_for_plan(_abs_path, _ranges, _n_selected)
         if _abs_rows:
             pipe.send_log(f"[scale-graph] {len(_abs_rows)} absolute scale row(s) from "
                           f"{_abs_path.name} (stamped with this plan, epoch 0) enter the chunk "
@@ -2239,7 +2285,12 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         elif _abs_why:
             pipe.send_log(f"[scale-graph] {_abs_path.name} IGNORED: {_abs_why}", level="warning")
         cfg_v["Model"]["metric_lock"]["absolute_rows"] = _abs_rows
-        if bool(_va_cfg.get("scale_vio", True)):
+        if bool(_va_cfg.get("scale_vio", True)) and cubes is not None:
+            from ingestors.vio_detector import detect_vio_data
+            if detect_vio_data(frames_dir.parent)["has_vio"]:
+                pipe.send_log("[scale-graph] VIO present — its rows are per chunk of the walk; a cube run reads "
+                              "none (declared)", level="warning")
+        elif bool(_va_cfg.get("scale_vio", True)):
             from ingestors.vio_detector import detect_vio_data
             _det = detect_vio_data(frames_dir.parent)
             if _det["has_vio"]:
@@ -2257,7 +2308,9 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                             "ownership_backfill", "elastic_seam", "intra_chunk",
                             "depth_graph", "blend_copies")
                 if cfg_v["Model"].get(k)]
-        pipe.send_log(f"CHUNKED-METRIC: {_plan_layout_text({'chunk_ranges': _ranges})}, DA3 metric "
+        pipe.send_log(f"CHUNKED-METRIC: "
+                      f"{_plan_layout_text({'chunk_sets': cubes[0]} if cubes is not None else {'chunk_ranges': _ranges})}"
+                      f", DA3 metric "
                       f"scale (anchors + seam graph; zoom chunks: anchors excluded, "
                       f"scale from seams), chunk health flags diagnostic-only; "
                       f"adjustment stages ON: {_adj if _adj else 'NONE (clean omegalong)'}")
@@ -2336,108 +2389,37 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         return True
 
     _chunked_already = False
-    # ── I4: THE CHUNK PLAN — co-visibility only, measured on the I3 windows, BEFORE Omega ──
+    # ── I4: THE CUBES (USER 2026-11-06: "habíamos dicho que omega corría al principio también para darnos una idea del
+    # recorrido, en esa pasada se determinaban las revisitas … hay que recortar la escena como hace por ejemplo genrecon,
+    # que toma cubos … la primer pasada de omega que no es de precisión es para saber cómo cortar, en esa pasada armás
+    # los cubos, de 64 imágenes solapadas al 50% con los vecinos, la primer pasada ya se hace con selección de kf y en
+    # caso de giros la inyección de más frames, se arman los cubos siempre con tope de 64") ──
+    # ONE Omega pass over every keyframe and every turn frame — the STRUCTURE PROBE, not one of precision — at the
+    # resolution where they all fit the card; on it the scene is cut into cubes of space (reconstruction/cubes.py):
+    # cells of at most half the cap, the units of a cell that see each other a block, every two neighbour blocks one
+    # cube — a revisit falls in the cube of the first visit, a floor above in its own cells. Omega then reconstructs
+    # each cube with its turn frames (the fork's loop_utils/cube_run.py) and ONE Sim(3) graph joins the cubes on the
+    # frames they share. A session that is one cube is one pass. The I3 walk stays what the anchors and the scale read.
     if not _n_selected:
         raise RuntimeError("selected_frames.json lists no keyframe — nothing to plan or reconstruct")
     if _walk_doc is None:
         raise RuntimeError(
-            "the chunk plan is the co-visibility plan (USER 2026-10-06: always, no alternative) "
-            "and it is measured on the I3 DA3 windows, which this run did not produce — I3 runs "
-            "with reconstruction.precision.enabled and reconstruction.vggtomega.scale_align; "
-            "there is no other chunk layout to fall back on")
-    from reconstruction.chunk_covis import (CovisError, format_plan,
-                                            plan_session)
-    # ── TURN FRAMES (USER 2026-11-04): Omega's CONTEXT views through a turn ──
-    # The keyframes stay the only frames every stage after Omega knows (frame_list, the poses,
-    # the records, F0-F6, the cloud). The turn frames between two consecutive keyframes
-    # (intake/turn_frames.py, from I1's own rotation readings — nothing is measured again) enter
-    # the inference of every chunk that holds both, and the fork keeps only the keyframes' slots
-    # (vendor/VGGT-Long/loop_utils/context_views.py). They are views of the pass: the plan counts
-    # them against the view cap and the card holds them with the chunk.
+            "the reconstruction reads the I3 DA3 walk (the metric anchors, the scale) and this run did not produce it "
+            "— I3 runs with reconstruction.precision.enabled and reconstruction.vggtomega.scale_align")
     from intake.turn_frames import chunk_context, load_turn_frames_config, session_turn_frames
     if _turn is None:                 # not computed with the sky masks above (no I3 in this run)
         _turn = session_turn_frames(output_dir.parent, load_turn_frames_config(config),
                                     log=pipe.send_log)
-    pipe.send_progress(8, "Chunk plan: co-visibility over the I3 windows...", stage="reconstruction")
-    # USER 2026-11-05 ("si es un tramo recto y entra en una sola tarjeta es un único chunk"): what ONE
-    # Omega pass holds on this card at the configured resolution — the walk within H that fits it
-    # (its keyframes with their turn frames, and its keyframes with their interval witnesses) is
-    # one pass; the 64-view cap only sizes the pieces of a walk that must be cut
-    _card_views, _sp_fits = _single_pass_capacity(config, vggt_config, frames_dir, _n_selected,
-                                                  len(_turn["witness_files"]), pipe.send_log)
-    _sp_views = _card_views if _sp_fits else 0
-    # the cap of a cut piece (USER 2026-11-05, the plan he approved: "El planificador (reemplaza al
-    # actual, el del tope de 64)"): `card` = what one pass holds on the card at this resolution, so
-    # H decides the length; an integer = that cap (64 = the 2026-11-04 rule, selectable)
-    _st_cfg = _structure_config(_va_cfg)
-    _view_cap = (_card_views if _st_cfg["chunk_view_cap"] == "card"
-                 else int(_st_cfg["chunk_view_cap"]))
-    pipe.send_log(f"[covis] a cut piece holds at most {_view_cap} views "
-                  f"(structure.chunk_view_cap: {_st_cfg['chunk_view_cap']})")
-    try:
-        _cplan = plan_session(output_dir.parent, log=pipe.send_log, turn_files=_turn["files"],
-                              single_pass_views=_sp_views, max_chunk_views=_view_cap)
-    except CovisError as _ce:
-        if not _walk_reused:
-            raise
-        # A resume reused walk.json, but its window files are gone (F2 deletes them after the
-        # chain) and no co-visibility measurement of THIS walk is persisted yet: regenerate the
-        # SAME windows (walk.json and the anchors stay — they are the plan's stamp) and measure
-        # once; intake/covis.json then serves every later resume without the windows.
-        pipe.send_log(f"[covis] {_ce} — regenerating this walk's I3 windows to measure the "
-                      f"co-visibility plan once", level="warning")
-        from intake.walk import run_da3_windows
-        run_da3_windows(output_dir.parent, _pc.gauge, sys.executable, log=pipe.send_log,
-                        check_cancel=pipe.check_cancel, frames_dir=frames_dir, files=_sel_files,
-                        run_cfg=config)
-        _cplan = plan_session(output_dir.parent, log=pipe.send_log, turn_files=_turn["files"],
-                              single_pass_views=_sp_views, max_chunk_views=_view_cap)
-    _ranges = [(int(a), int(b)) for a, b in _cplan["ranges"]]
-    _covis_rep = _cplan["report"]
-    for _line in format_plan(_covis_rep):
-        pipe.send_log(_line)
-    if int(_covis_rep["n"]) != _n_selected or _ranges[-1][1] != _n_selected:
-        raise RuntimeError(f"the co-visibility plan covers {_covis_rep['n']} keyframes, this run "
-                           f"selected {_n_selected} — the I3 walk is not of this keyframe set")
     _walk0 = float(_walk_doc["walk_length_m"])
-
-    # the chunks' context views: EVERY turn frame inside each chunk. A chunk the plan cannot keep
-    # within the view cap — its minimum block is a turn dense with rotation keyframes (the
-    # plan flags it) — keeps its whole turn (USER 2026-11-04, "2. … para que cuando lleguen esos
-    # casos esté preparado"): Omega sees the turn complete in one pass; the card holds it (the
-    # resolution below is sized on the views of the largest chunk)
-    _ctx = chunk_context(_ranges, _sel_files, _turn["files"])
-    _over = {k: (b - a) + len(c) for k, ((a, b), c) in enumerate(zip(_ranges, _ctx))
-             if (b - a) + len(c) > _view_cap}
-    if _over:
-        pipe.send_log(f"[turn-frames] chunk(s) over {_view_cap} views kept whole "
-                      f"{_over} — a turn dense with rotation keyframes the plan cannot cut "
-                      f"shorter; Omega sees every turn frame of it")
-    vggt_config["Model"]["chunk_context"] = _ctx
-    if any(_ctx):
-        pipe.send_log(f"[turn-frames] context views per chunk {[len(c) for c in _ctx]} over the "
-                      f"chunks' keyframes {chunk_lengths(_ranges)}")
-    # the chunks' WITNESS views (USER 2026-11-04: "que los chunks no se modifiquen por los frames
-    # extra en los tramos rectos, que solo entren para afirmar o no en el F6"): every interval
-    # frame inside each chunk, inferred by the fork in a pass of its own AFTER the chunk
-    # (_stac_witness_pass) — never counted by the plan, never in the chunk's inference
-    _wit = chunk_context(_ranges, _sel_files, _turn["witness_files"])
-    vggt_config["Model"]["chunk_witnesses"] = _wit
-    if any(_wit):
-        pipe.send_log(f"[turn-frames] witness views per chunk {[len(w) for w in _wit]} (F6 only, "
-                      f"a pass of their own after each chunk; the chunks are the turn rule's)")
-
-    # ── Omega's resolution: the LARGEST planned chunk must fit the card ──
-    # The card's TOTAL memory (a property of the card — deterministic) and the per-frame
-    # footprint ∝ the grid's pixels: native when the largest chunk fits, otherwise the largest
-    # patch-aligned resolution that holds it (reconstruction.chunk_plan.omega_resolution_for).
-    # Every chunk runs at that one resolution; F0 reads it from the config this run writes
-    # (precision.camera.read_omega_preprocessing) and maps Omega's grid to the native frame.
-    # THE CARD is read through torch (repro.card_identity — never an 'unknown' sentinel, plan
-    # point 13) and everything sized on it comes from the COMMITTED card table (point 3: its
-    # total memory and Omega's measured footprint factor — no run writes it; a card with no entry
-    # FAILS naming the calibration CLI). The learned per-card file every OOM used to rewrite is
-    # gone: a leftover is deleted, said (point 24).
+    _st_cfg = _structure_config(_va_cfg)
+    if not _st_cfg["enabled"]:
+        raise RuntimeError("reconstruction.vggtomega.structure.enabled is false — the cubes are cut on the "
+                           "structure probe (USER 2026-11-06); there is no other layout")
+    if _st_cfg["chunk_view_cap"] == "card":
+        raise RuntimeError("reconstruction.vggtomega.structure.chunk_view_cap 'card': a cube has a fixed cap (USER "
+                           "2026-11-06, \"siempre con tope de 64\") — set an integer")
+    _view_cap = int(_st_cfg["chunk_view_cap"])
+    # THE CARD, before the probe: its resolution, like Omega's, is decided on the committed card table.
     import repro
     _legacy_fp = Path(__file__).resolve().parent.parent.parent / "weights" / "omega_footprint.json"
     if _legacy_fp.exists():
@@ -2449,18 +2431,68 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     _ct.require_one_visible_card()          # point 78: the identity is THE device's, one card
     _ident = repro.card_identity(0)
     _card = omega_card(_ident["key"])
-    # the card holds the larger of a chunk's two passes: keyframes + context, keyframes + witnesses
-    _n_max = max(n + max(len(c), len(w)) for n, c, w in zip(chunk_lengths(_ranges), _ctx, _wit))
     # the same margin the I3 DA3 windows leave on the card (USER 2026-10-06)
     from intake.config import load_intake_config as _lic
     _omega_margin = float(_lic(config).parallax.vram_margin_frac)
-    # FIXED PER SESSION (point 14): decided once for this exact plan from the card table and
-    # reused by every later run of the same plan; another plan decides again (declared)
+    # the sky masks first: the probe's pass reads them (the precompute started while I3 ran)
+    _sky_joined = False
+    if _sky_pre is not None:
+        _sky_pre.wait(check_cancel=pipe.check_cancel)
+        _sky_pre = None
+        _sky_joined = True
+    from reconstruction.chunk_plan import cube_anchor_indices, omega_resolution_for
+    _probe_files = sorted(set(_sel_files) | set(_turn["files"]), key=lambda f: int(Path(f).stem))
+    _pres = omega_resolution_for(len(_probe_files), _card["total_gb"], _native_frame_wh(frames_dir),
+                                 str(vggt_config["Model"]["omega_mode"]),
+                                 int(vggt_config["Model"]["omega_resolution"]),
+                                 margin_frac=_omega_margin, footprint_factor=_card["footprint_factor"])
+    pipe.send_progress(8, f"Structure probe: ONE Omega pass over {len(_probe_files)} views (keyframes + turn "
+                          f"frames), then the cubes...", stage="reconstruction")
+    repro.require_exclusive_gpu(log=pipe.send_log)
+    from reconstruction import cubes as _CB
+    _cplan = _CB.session_cubes(output_dir.parent, frames_dir, _sel_files, _turn["files"], _turn["witness_files"],
+                               vggt_config, resolution=int(_pres["resolution"]), max_views=_view_cap,
+                               sky_cache=output_dir / "maplong_run" / "sky_masks", log=pipe.send_log)
+    _cubes = _cplan["cubes"]
+    _sets = [[int(k) for k in cb["keyframes"]] for cb in _cubes]
+    _owner = [int(x) for x in _cplan["owner"]]
+    if sorted({k for F in _sets for k in F}) != list(range(_n_selected)) or len(_owner) != _n_selected:
+        raise RuntimeError(f"the cube plan covers {len({k for F in _sets for k in F})} keyframes with "
+                           f"{len(_owner)} owners, this run selected {_n_selected} — the probe was not of this "
+                           f"keyframe set")
+    _name_of = {int(Path(f).stem): f for f in list(_turn["files"]) + list(_turn["witness_files"])}
+    _single = len(_sets) == 1
+    if _single:
+        _ranges = [(0, int(_n_selected))]
+        _ctx = chunk_context(_ranges, _sel_files, _turn["files"])
+        _wit = chunk_context(_ranges, _sel_files, _turn["witness_files"])
+        _chunk_frame_counts = [int(_n_selected)]
+    else:
+        _ranges = None
+        _ctx = [[_name_of[int(x)] for x in cb["context"]] for cb in _cubes]
+        _wit = [[_name_of[int(x)] for x in cb["witnesses"]] for cb in _cubes]
+        _chunk_frame_counts = [len(F) for F in _sets]
+    _over = {k: n + len(c) for k, (n, c) in enumerate(zip(_chunk_frame_counts, _ctx)) if n + len(c) > _view_cap}
+    if _over:
+        pipe.send_log(f"[cubes] cube(s) over {_view_cap} views kept whole {_over} — a turn dense with views the "
+                      f"cut cannot split; Omega sees all of it")
+    vggt_config["Model"]["chunk_context"] = _ctx
+    vggt_config["Model"]["chunk_witnesses"] = _wit
+    pipe.send_log(f"[cubes] {len(_sets)} cube(s): keyframes {_chunk_frame_counts}, turn frames (Omega context) "
+                  f"{[len(c) for c in _ctx]}, interval witnesses (F6 only) {[len(w) for w in _wit]}")
+    # ── Omega's resolution: the LARGEST cube must fit the card ──
+    # The card's TOTAL memory and the per-frame footprint ∝ the grid's pixels (reconstruction.chunk_plan.
+    # omega_resolution_for): native when the largest cube fits, otherwise the largest patch-aligned resolution that
+    # holds it; every cube at that one resolution, which F0 reads from the config this run writes. The card holds the
+    # larger of a cube's two passes: keyframes + context, keyframes + witnesses. FIXED PER SESSION (point 14): decided
+    # once for this exact plan and reused by every later run of it.
+    _n_max = max(n + max(len(c), len(w)) for n, c, w in zip(_chunk_frame_counts, _ctx, _wit))
     _res = session_omega_resolution(output_dir.parent, _ranges, _native_frame_wh(frames_dir),
                                     str(vggt_config["Model"]["omega_mode"]),
                                     int(vggt_config["Model"]["omega_resolution"]),
                                     _omega_margin, _card, log=pipe.send_log,
-                                    context_counts=[max(len(c), len(w)) for c, w in zip(_ctx, _wit)])
+                                    context_counts=[max(len(c), len(w)) for c, w in zip(_ctx, _wit)],
+                                    cube_sets=None if _single else _sets)
     vggt_config["Model"]["omega_resolution"] = int(_res["resolution"])
     # the report travels in the run config minus its log-only field (the config is stamped)
     vggt_config["Model"]["omega_resolution_report"] = {k: v for k, v in _res.items()
@@ -2488,9 +2520,9 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                   f"+cu{_env_rec['torch']['cuda']}, cuDNN {_env_rec['torch']['cudnn']}, repo "
                   f"{_env_rec['git']['repo']['commit'][:12]}{'+dirty' if _env_rec['git']['repo']['dirty'] else ''})")
 
-    if len(_ranges) == 1:
-        # ONE pass: the whole walk within H co-visibility lengths. The fork runs the one range
-        # [0, n) — the same explicit layout every reader of the chunks reads.
+    if _single:
+        # ONE cube holds the whole walk: ONE pass over the one range [0, n) — the same explicit
+        # layout every reader of the chunks reads.
         vggt_config["Model"]["chunk_ranges"] = [[0, int(_n_selected)]]
         vggt_config["Model"].pop("chunk_size", None)
         vggt_config["Model"].pop("overlap", None)
@@ -2516,70 +2548,27 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # config.yaml says `intra_chunk: true  # (KEEP ON)` with its A4
         # verdict; the flag is what decides, not the layout.
         vggt_config["Model"]["intra_chunk"] = bool(_va_cfg.get("intra_chunk", False))
-        pipe.send_log(f"SINGLE PASS: {_n_selected} keyframes, D_total "
-                      f"{_covis_rep['D_total']:.2f} — {_covis_rep['why']} → ONE chunk, no seams. "
-                      f"Adjustment stage ON: "
+        pipe.send_log(f"SINGLE PASS: {_n_selected} keyframes — the cube plan is ONE cube "
+                      f"({len(_cplan.get('units') or [])} units, {_chunk_frame_counts[0]} keyframes + "
+                      f"{len(_ctx[0])} turn frames ≤ {_view_cap} views) → ONE chunk, no seams. Adjustment stage ON: "
                       f"{'intra_chunk' if vggt_config['Model']['intra_chunk'] else 'NONE'} "
                       f"(the seam stages need 2+ chunks and stand down by themselves).")
     else:
         _chunked_already = True
-        _anchor_idx = plan_anchor_indices(_ranges, _anch_per_chunk)
+        _anchor_idx = cube_anchor_indices(_sets, _anch_per_chunk)
         _ensure_anchors([_sel_files[i] for i in _anchor_idx])
-        _apply_chunked_metric(vggt_config, _ranges)
-        # SALAD's non-local band in METRES OF WALK: the system's one definition of two visits
-        # (correction.visit_drift.min_walk_m) through the I3 walk's mean m/kf
-        _visit_m = float(((config.get("correction") or {}).get("visit_drift") or {})
-                         .get("min_walk_m", 0) or 0)
-        _sal = (vggt_config.get("Loop") or {}).get("SALAD")
-        if _sal is not None and _visit_m > 0 and _walk0 > 0:
-            import math as _math
-            # DECIDIDO (docs/plan_determinismo.md point 71): the band stays min_walk_m of WALK
-            # (the user's one definition of a visit) converted to keyframes with the FROZEN
-            # walk of the session (walk.json, measured by I3 — never an Omega pass), and its
-            # margin is RECORDED: how far the band's walk clears min_walk_m (a margin near 0
-            # is a ceil() one keyframe from flipping — visible, never silent)
-            _m_per_kf = _walk0 / _n_selected
-            _band_visit = int(_math.ceil(_visit_m / _m_per_kf))
-            _band = max(int(_sal["min_gap"]), _band_visit)
-            _band_margin_m = _band_visit * _m_per_kf - _visit_m
-            pipe.send_log(f"[loops] SALAD non-local band: {_band} kf = "
-                          f"{_band_visit * _m_per_kf:.3f} m of the frozen walk ({_visit_m:g} m "
-                          f"required; margin {_band_margin_m:.3f} m = "
-                          f"{_band_margin_m / _m_per_kf:.2f} kf; floor {_sal['min_gap']} kf)")
-            _sal["min_gap"] = int(_band)
-            _sal["min_gap_frac"] = 0.0
-            _sal["band_walk_m_per_kf"] = float(_m_per_kf)       # recorded in the Omega config
-            _sal["band_margin_m"] = float(_band_margin_m)
-        if _sal is not None:
-            # SALAD's appearance bar calibrated on the session's GEOMETRIC revisits
-            # (the DA3-window walk) — LoopModels.LoopModel.calibrate_threshold. NEVER
-            # reused (docs/plan_determinismo.md point 66, USER 2026-10-08): deleted and
-            # recomputed whole on every reconstruction, the walk reused or not, from
-            # walk.json's RECORD of the windows (every keyframe's chained pose, each
-            # window's median depth and FOV) — no window file is read, so a resume whose
-            # window files F2 deleted needs no DA3 for it (USER 2026-10-06)
-            from intake.walk import revisit_reference, REVISIT_REFERENCE_NAME
-            _ref = revisit_reference(output_dir.parent, log=pipe.send_log)
-            _sal["revisit_reference"] = str(output_dir / REVISIT_REFERENCE_NAME)
-            pipe.send_log(f"[loops] SALAD revisit reference: {len(_ref['frames'])} "
-                          f"keyframes, revisit = cameras < {_ref['dist_bar_m']:.2f} m "
-                          f"(scene median depth) and < "
-                          f"{math_deg(_ref['hfov_rad']) / 2.0:.1f}° apart (half the FOV)")
-        else:
-            # point 66 holds without SALAD too: the file on disk is this reconstruction's or
-            # absent — a previous reconstruction's reference (kept across a plan wipe by
-            # _PLAN_INDEPENDENT_OUTPUT, hashed into the launch stamp) is deleted, said
-            from intake.walk import REVISIT_REFERENCE_NAME
-            _stale_ref = output_dir / REVISIT_REFERENCE_NAME
-            if _stale_ref.exists():
-                _stale_ref.unlink()
-                pipe.send_log(f"[loops] no SALAD in this launch — the previous reconstruction's "
-                              f"{REVISIT_REFERENCE_NAME} deleted (never reused, point 66, USER "
-                              f"2026-10-08)")
-        _persist_chunk_plan(_ranges, _n_selected, _walk0, _covis_rep, _res, _ctx)
-        pipe.send_log(f"CHUNKED-METRIC (I4): walk {_walk0:.1f} m, D_total "
-                      f"{_covis_rep['D_total']:.2f} > H {_covis_rep['H']:g} → "
-                      f"{_plan_layout_text({'chunk_ranges': _ranges})}; ONE Omega pass")
+        _apply_chunked_metric(vggt_config, None, cubes=(_sets, _owner))
+        # no SALAD on cubes (a revisit is inside its cube): a previous reconstruction's revisit reference is deleted —
+        # never reused (point 66, USER 2026-10-08)
+        from intake.walk import REVISIT_REFERENCE_NAME
+        _stale_ref = output_dir / REVISIT_REFERENCE_NAME
+        if _stale_ref.exists():
+            _stale_ref.unlink()
+            pipe.send_log(f"[loops] no SALAD on cubes — the previous reconstruction's {REVISIT_REFERENCE_NAME} "
+                          f"deleted (never reused, point 66)")
+        _persist_cube_plan(_cplan, _sets, _owner, _n_selected, _walk0, _res, _ctx)
+        pipe.send_log(f"CUBES (I4): walk {_walk0:.1f} m → {_plan_layout_text({'chunk_sets': _sets})}, every two "
+                      f"neighbour blocks one cube; ONE Omega pass per cube, ONE Sim(3) graph")
     if _simple_on:
         _apply_conf_filter(vggt_config)
     _tag1 = "chunked-metric" if _chunked_already else "single-pass"
@@ -2593,33 +2582,6 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     from reconstruction import omega_complete as _OC
     if _sky_pre is not None:          # started before I3: joined before anything reads the masks
         _sky_pre.wait(check_cancel=pipe.check_cancel)
-    # ── THE STRUCTURE PROBE (USER 2026-11-05, the plan he approved: "1. Pasada de estructura" … "3. El
-    # fork: chunks no contiguos") ── a walk the plan cuts: ONE Omega pass over every keyframe at the
-    # resolution where they all fit the card says who sees whom (reconstruction/walk_structure.py);
-    # every place the walk left and came back to is a ZONE, inferred with all its pieces together
-    # after the chunks and made the owner of its keyframes (reconstruction/zones.py, applied in
-    # _metricize_and_orient). Its own stamped record (intake/structure.json), not the fork's launch.
-    _zones = []
-    if _chunked_already and _st_cfg["enabled"]:
-        from reconstruction import zones as _ZN
-        from reconstruction.chunk_plan import omega_resolution_for as _orf
-        _pres = _orf(_n_selected, _card["total_gb"], _native_frame_wh(frames_dir),
-                     str(vggt_config["Model"]["omega_mode"]),
-                     int(vggt_config["Model"]["omega_resolution"]), _omega_margin,
-                     _card["footprint_factor"])
-        pipe.send_progress(9, f"Structure probe: ONE Omega pass over all {_n_selected} keyframes...",
-                           stage="reconstruction")
-        repro.require_exclusive_gpu(log=pipe.send_log)
-        _sdoc = _ZN.structure_probe(output_dir.parent, frames_dir, _sel_files, vggt_config,
-                                    resolution=int(_pres["resolution"]), ranges=_ranges,
-                                    sky_cache=output_dir / "maplong_run" / "sky_masks",
-                                    log=pipe.send_log)
-        _zones = list(_sdoc.get("zones") or [])
-        pipe.send_log(f"[structure] probe at {_pres['resolution']} (grid {_pres['grid_wh'][0]}x"
-                      f"{_pres['grid_wh'][1]}, {_n_selected} keyframes): D {_sdoc['D_probe']:.2f}; "
-                      f"{len(_zones)} revisited zone(s)"
-                      + "".join(f"; zone {i + 1}: runs {z['runs']} ({len(z['keyframes'])} kf)"
-                                for i, z in enumerate(_zones)))
     _launch = _OC.launch_stamp(output_dir.parent, frames_dir, _sel_files, vggt_config)
     _done, _why = _OC.check(output_dir, _launch)
     if _done:
@@ -2637,7 +2599,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # the card is Omega's alone (point 4): FAIL listing what holds it, never degrade; and an
         # Omega pass that runs out of memory FAILS — the resolution is the session's (point 14),
         # the plan is the co-visibility plan, neither is lowered to fit what else held the card
-        if _sky_pre is None:          # no I3 in this run to overlap with: in parallel, here
+        if _sky_pre is None and not _sky_joined:      # no I3 in this run to overlap with: here
             _sky_now = _start_sky_precompute(config, frames_dir, output_dir,
                                              list(_sel_files) + list(_turn["files"])
                                              + list(_turn["witness_files"]), pipe)
@@ -2654,7 +2616,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         if not _llc_fs(config).certify.keep_aligned_chunks:
             _fs_subs.append("_tmp_results_aligned")
         _FS.place(output_dir / "maplong_run", _fs_subs,
-                  _FS.estimate_bytes(chunk_lengths(_ranges), _res["grid_wh"]), log=pipe.send_log)
+                  _FS.estimate_bytes(_chunk_frame_counts, _res["grid_wh"]), log=pipe.send_log)
         repro.require_exclusive_gpu(log=pipe.send_log)
         try:
             _ok = _omega_pass(vggt_config, _tag1)
@@ -2697,34 +2659,29 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # the layout the fork RAN (maplong_run/chunk_sim3.json), checked against the one this
         # run configured — the records' `chunk` field every precision / floor stage trusts
         # comes from it
-        from reconstruction.chunk_plan import omega_chunk_ranges
-        _ran = omega_chunk_ranges(output_dir)
-        if _ran is None:
-            raise RuntimeError("[omega-depth] no record of the chunk layout Omega ran "
-                               "(maplong_run/chunk_sim3.json, vggt_omega_config.yaml)")
-        if _ran[0] != [tuple(r) for r in cfg_v["Model"]["chunk_ranges"]]:
-            raise RuntimeError(f"[omega-depth] Omega ran the layout {_ran[0]} ({_ran[1]}), this "
-                               f"run planned {cfg_v['Model']['chunk_ranges']}")
-        _emit_omega_depth(vggt_save_dir, output_dir, _ran[0], selected_frames_path, pipe)
-        # the revisited ZONES (the structure probe above): each inferred with all its pieces and
-        # their turn frames in ONE pass at the run's resolution, fitted Sim(3) to the aligned walk on
-        # exact pixels and made the owner of its keyframes' records and poses — before the scale
-        if _zones and _done:
-            # the zones were applied by the launch that ran Omega; a resume (Omega complete, not run now) never
-            # applies them again over records and poses a later epoch moved (USER 2026-11-05: determinism)
-            pipe.send_log("[zones] Omega did not run this launch — the zones it applied stay as they are")
-        elif _zones:
-            import repro as _rp
-            from reconstruction import zones as _ZN
-            pipe.send_progress(87, f"Zones: {len(_zones)} revisited zone(s), each inferred whole...",
-                               stage="reconstruction")
-            _rp.require_exclusive_gpu(log=pipe.send_log)
-            _ZN.apply_zones(output_dir.parent, frames_dir, _sel_files, _turn["files"], _zones, cfg_v,
-                            resolution=int(cfg_v["Model"]["omega_resolution"]),
-                            capacity=int(_res["capacity_frames"]), n_chunks=len(_ran[0]),
-                            sky_cache=vggt_save_dir / "sky_masks", log=pipe.send_log)
+        from reconstruction.chunk_plan import omega_chunk_ranges, omega_cube_layout
+        if cfg_v["Model"].get("chunk_sets") is not None:
+            _cub = omega_cube_layout(output_dir)
+            if _cub is None:
+                raise RuntimeError("[omega-depth] no record of the cube layout Omega ran "
+                                   "(maplong_run/chunk_sim3.json, vggt_omega_config.yaml)")
+            if (_cub["chunk_sets"] != [[int(g) for g in F] for F in cfg_v["Model"]["chunk_sets"]]
+                    or _cub["owner"] != [int(x) for x in cfg_v["Model"]["chunk_owner"]]):
+                raise RuntimeError(f"[omega-depth] Omega ran another cube layout ({_cub['source']}) than this "
+                                   f"run planned")
+            _emit_omega_depth(vggt_save_dir, output_dir, None, selected_frames_path, pipe,
+                              cubes=(_cub["chunk_sets"], _cub["owner"]))
         else:
-            (output_dir / "zones.json").unlink(missing_ok=True)
+            _ran = omega_chunk_ranges(output_dir)
+            if _ran is None:
+                raise RuntimeError("[omega-depth] no record of the chunk layout Omega ran "
+                                   "(maplong_run/chunk_sim3.json, vggt_omega_config.yaml)")
+            if _ran[0] != [tuple(r) for r in cfg_v["Model"]["chunk_ranges"]]:
+                raise RuntimeError(f"[omega-depth] Omega ran the layout {_ran[0]} ({_ran[1]}), this "
+                                   f"run planned {cfg_v['Model']['chunk_ranges']}")
+            _emit_omega_depth(vggt_save_dir, output_dir, _ran[0], selected_frames_path, pipe)
+        # the zones of 2026-11-05 are gone: a revisit is inside its cube (USER 2026-11-06)
+        (output_dir / "zones.json").unlink(missing_ok=True)
         # the aligned chunks' last reader is the omega records just written: when the run does
         # not keep them (certify.keep_aligned_chunks) they are deleted after the scale, so the
         # scale and the orientation do not rewrite them first (station 2026-11-01: two passes of
@@ -2903,6 +2860,9 @@ def _plan_layout_text(plan: dict) -> str:
     from reconstruction.chunk_plan import as_ranges, chunk_lengths, seam_overlaps
     res = (plan.get("omega_resolution") or {}).get("resolution")
     at = f", Omega at {res}" if res is not None else ""
+    if plan.get("chunk_sets") is not None:
+        ls = [len(F) for F in plan["chunk_sets"]] or [0]
+        return f"{len(plan['chunk_sets'])} cube(s), {min(ls)}-{max(ls)} kf each{at}"
     if plan.get("chunk_size") is not None and plan.get("overlap") is not None \
             and "chunk_lengths" not in plan:
         return f"{plan.get('chunk_size')}/{plan.get('overlap')}{at}"
@@ -2995,6 +2955,11 @@ def _layout_on_disk(out: Path) -> Optional[dict]:
     if model.get("__unreadable__"):
         return {"unreadable": True}
     res = _model_resolution(model)
+    if model.get("chunk_sets") is not None:
+        sets = [[int(g) for g in F] for F in model["chunk_sets"]]
+        return {"chunk_sets": sets, "chunk_owner": [int(x) for x in model.get("chunk_owner") or []],
+                "n_keyframes": (1 + max(max(F) for F in sets)) if sets else -1, "omega_resolution": res,
+                "chunk_context": model.get("chunk_context")}
     if model.get("chunk_ranges") is None:
         try:
             size, ov = int(model["chunk_size"]), int(model["overlap"])
@@ -3036,8 +3001,13 @@ def _invalidate_on_new_chunk_plan(output_dir: Path, plan: dict, log=print) -> bo
     ml = out / "maplong_run"
     old = _layout_on_disk(out)
     has_chunks = any((ml / "_tmp_results_unaligned").glob("chunk_*.npy")) if ml.is_dir() else False
+    def _rng(d):
+        r = (d or {}).get("chunk_ranges")
+        return None if r is None else [[int(a), int(b)] for a, b in r]
     same = (old is not None
-            and old.get("chunk_ranges") == [[int(a), int(b)] for a, b in plan["chunk_ranges"]]
+            and _rng(old) == _rng(plan)
+            and (old.get("chunk_sets") or None) == (plan.get("chunk_sets") or None)
+            and (old.get("chunk_owner") or None) == (plan.get("chunk_owner") or None)
             and int(old.get("n_keyframes", -1)) == int(plan["n_keyframes"])
             and _res_key(old) == _res_key(plan)
             and _context_key(old) == _context_key(plan))
@@ -3473,7 +3443,12 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
     # backend whose vendor builds the uniform chunk_size/overlap layout itself (DA3 streaming,
     # MapAnything) and records no list falls back to that uniform layout — it IS what it ran.
     _model = vggt_config.get("Model") or {}
-    if _model.get("chunk_ranges") is not None:
+    _cube_sets = ([[int(g) for g in F] for F in _model["chunk_sets"]]
+                  if _model.get("chunk_sets") is not None else None)
+    if _cube_sets is not None:
+        _layout = None
+        _layout_src = "Model.chunk_sets (cubes)"
+    elif _model.get("chunk_ranges") is not None:
         _layout = [(int(a), int(b)) for a, b in _model["chunk_ranges"]]
         _layout_src = "Model.chunk_ranges"
     elif (vggt_save_dir / "chunk_sim3.json").exists():
@@ -3483,10 +3458,13 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
     else:
         _layout = None
         _layout_src = "the legacy backend's uniform chunk_size/overlap"
-    _uniform_step = (None if _layout is not None
+    _uniform_step = (None if (_layout is not None or _cube_sets is not None)
                      else int(_model["chunk_size"]) - int(_model["overlap"]))
 
     def _chunk_start(K: int) -> int:
+        if _cube_sets is not None:
+            raise RuntimeError(f"cube {K} has no inline origins from the fork — a cube's frames are not a range; "
+                               f"its origins are written by the fork only (loop_utils/cube_run.py)")
         if _layout is None:
             return K * _uniform_step
         if K >= len(_layout):
@@ -3497,6 +3475,9 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
     def _layout_meta(K: int, S: int) -> dict:
         """chunk_NNN_meta.json's layout fields: the chunk's real first/last processed-list
         positions; `chunk_step` only for a legacy uniform layout (its readers' key)."""
+        if _cube_sets is not None:
+            F = _cube_sets[K]
+            return {"frame_global_start": int(min(F)), "frame_global_end": int(max(F)), "cube_frames": len(F)}
         a = _chunk_start(K)
         meta = {"frame_global_start": int(a), "frame_global_end": int(a + S - 1)}
         if _layout is None:
@@ -3568,8 +3549,9 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
                             f"for the PLY and for the origins must be identical.")
                     np.savez_compressed(output_dir / f"chunk_{i:03d}_origins.npz",
                                         **{k: z[k] for k in z.files})
-                    _S_inline = (_layout[K][1] - _layout[K][0]) if (
-                        _layout is not None and K < len(_layout)) else None
+                    _S_inline = (len(_cube_sets[K]) if (_cube_sets is not None and K < len(_cube_sets))
+                                 else (_layout[K][1] - _layout[K][0]) if (
+                                     _layout is not None and K < len(_layout)) else None)
                     with open(output_dir / f"chunk_{i:03d}_meta.json", "w") as f:
                         json.dump({"chunk_id": i, "source_chunk": int(K), "n_points": n,
                                    **(_layout_meta(K, _S_inline) if _S_inline is not None

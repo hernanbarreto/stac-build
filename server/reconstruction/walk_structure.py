@@ -42,8 +42,10 @@ def _floor_mask(conf: np.ndarray, depth: np.ndarray) -> np.ndarray:
 
 
 def covisibility(c2w: np.ndarray, K: np.ndarray, depth: np.ndarray, conf: np.ndarray, *, device: str = "cuda",
-                 log: Callable[[str], None] = print) -> Dict:
-    """The directed co-visibility of every keyframe pair and the session's tolerance (module docstring)."""
+                 log: Callable[[str], None] = print, tol_pairs: Optional[Sequence] = None) -> Dict:
+    """The directed co-visibility of every pair of views and the session's tolerance (module docstring). ``tol_pairs``:
+    the (i, j) view pairs the tolerance is measured on — consecutive KEYFRAMES when the pass also holds turn frames
+    (reconstruction/cubes.py); None = every consecutive pair of views."""
     dev = torch.device(device if (device != "cuda" or torch.cuda.is_available()) else "cpu")
     S, H, W = depth.shape
     valid = np.stack([_floor_mask(conf[i], depth[i]) for i in range(S)])
@@ -76,10 +78,10 @@ def covisibility(c2w: np.ndarray, K: np.ndarray, depth: np.ndarray, conf: np.nda
 
     # the session's tolerance: consecutive keyframes on one surface
     rel = []
-    for i in range(S - 1):
+    for i, j in ([(i, i + 1) for i in range(S - 1)] if tol_pairs is None else [(int(a), int(b)) for a, b in tol_pairs]):
         if len(pts[i]) == 0:
             continue
-        z, dj, ok = project(pts[i], i + 1)
+        z, dj, ok = project(pts[i], j)
         r = (dj[ok] / z[ok] - 1.0)
         rel.append(r[r.abs() < 0.25])
     rel = torch.cat(rel) if rel else torch.zeros(0, device=dev)

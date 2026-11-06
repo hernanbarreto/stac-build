@@ -31,6 +31,13 @@ def load_chunk_plan(output_dir) -> Optional[dict]:
         return None
     try:
         plan = json.loads(p.read_text())
+        if plan.get("layout") == "cubes":
+            # a CUBE plan (USER 2026-11-06, reconstruction/cubes.py): keyframe sets, each keyframe's owner cube
+            sets = plan["chunk_sets"]
+            if not isinstance(sets, list) or not sets or not all(isinstance(F, list) and F for F in sets):
+                raise ValueError("chunk_sets must be a non-empty list of keyframe lists")
+            int(plan["n_keyframes"])
+            return plan
         ranges = plan["chunk_ranges"]
         if not isinstance(ranges, list) or not ranges or not all(
                 isinstance(r, list) and len(r) == 2 and int(r[0]) < int(r[1]) for r in ranges):
@@ -52,6 +59,8 @@ def chunks_of_keyframe(plan: Optional[dict], kf: int) -> List[int]:
     chunks share keyframes by design). Empty when there is no plan."""
     if plan is None:
         return []
+    if plan.get("layout") == "cubes":
+        return [i for i, F in enumerate(plan["chunk_sets"]) if int(kf) in set(int(g) for g in F)]
     return [i for i, (a, b) in enumerate(plan["chunk_ranges"]) if a <= kf < b]
 
 

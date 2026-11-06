@@ -1636,26 +1636,23 @@ reconstruction:
                                         # SE(3) graph (every run before 2026-11-04). The chunks
                                         # themselves: 50 % overlap, cut by co-visibility, at most
                                         # structure.chunk_view_cap views per Omega pass (below).
-    structure:                          # USER 2026-11-05 (the plan he approved: "1. Pasada de
-                                        # estructura … 2. El planificador (reemplaza al actual, el
-                                        # del tope de 64) … 3. … chunks no contiguos"). A walk
-                                        # within H whose views fit the card is ONE pass. A walk the
-                                        # plan must cut: ONE Omega pass over EVERY keyframe at the
-                                        # resolution where they all fit the card (vendor/VGGT-Long/
-                                        # stac_frames_pass.py, SALAD with it) says who sees whom
-                                        # (reconstruction/walk_structure.py → intake/structure.json
-                                        # + structure.png); every place the walk left and came back
-                                        # to is a ZONE — all its pieces inferred TOGETHER with their
-                                        # turn frames after the chunks, fitted Sim(3) to the aligned
-                                        # walk on exact pixels, the owner of its keyframes
-                                        # (reconstruction/zones.py → output/zones.json).
+    structure:                          # USER 2026-11-06 ("habíamos dicho que omega corría al
+                                        # principio … en esa pasada se determinaban las revisitas …
+                                        # hay que recortar la escena como hace genrecon, que toma
+                                        # cubos … de 64 imágenes solapadas al 50% con los vecinos …
+                                        # siempre con tope de 64"): ONE Omega pass over EVERY
+                                        # keyframe and turn frame (the STRUCTURE PROBE, not one of
+                                        # precision; vendor/VGGT-Long/stac_frames_pass.py) at the
+                                        # resolution where they all fit the card; on it the scene is
+                                        # cut into CUBES (reconstruction/cubes.py → intake/cubes.json
+                                        # + cubes.png): k-d cells of at most half the cap, the units
+                                        # of a cell that see each other a block, every two neighbour
+                                        # blocks one cube; Omega per cube (the fork's loop_utils/
+                                        # cube_run.py), ONE Sim(3) graph on the shared frames. One
+                                        # cube = one pass.
       enabled: true
-      chunk_view_cap: 64                # USER 2026-11-05 ("probemos así como el 04/11 con las zonas de revisitas"): 64 —
-                                        # the 2026-11-04 cut. The most views a cut piece holds: card = what one Omega
-                                        # pass holds on this card at the run's resolution (H then
-                                        # decides the length); an integer = that cap (64 = the
-                                        # 2026-11-04 rule, VGGT-SLAM's 32 new + 32 shared: pccr 11
-                                        # chunks, seams 1.7–3.1 cm).
+      chunk_view_cap: 64                # the most views a cube holds (keyframes + turn frames);
+                                        # each cell half of it — two cubes sharing a cell share 50 %.
     scale_align: true                   # metric: DA3 anchor + scale_align (global similarity:
                                         # scales cloud + poses by s = median DA3/Omega depth).
                                         # false → up-to-scale (raw Omega isolation test).

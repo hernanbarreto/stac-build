@@ -252,9 +252,10 @@ OMEGA_RESOLUTION_NAME = "omega_resolution.json"
 OMEGA_RESOLUTION_VERSION = 1
 
 
-def session_omega_resolution(session_dir: Path, ranges: Sequence[Sequence[int]], native_wh,
+def session_omega_resolution(session_dir: Path, ranges: Optional[Sequence[Sequence[int]]], native_wh,
                              mode: str, ceiling: int, margin_frac: float, card: Dict[str, Any],
-                             log=print, context_counts: Optional[Sequence[int]] = None
+                             log=print, context_counts: Optional[Sequence[int]] = None,
+                             cube_sets: Optional[Sequence[Sequence[int]]] = None
                              ) -> Dict[str, Any]:
     """The Omega resolution report of this session's plan: reused from
     ``<session>/intake/omega_resolution.json`` when it was decided for this exact plan, otherwise
@@ -263,14 +264,29 @@ def session_omega_resolution(session_dir: Path, ranges: Sequence[Sequence[int]],
     ``context_counts``: the context views each chunk is inferred with (USER 2026-11-04, the turn
     frames — on the card with the chunk's keyframes); the largest chunk is the one with the most
     views, and a plan with context views is another plan (its key carries them)."""
-    r = as_ranges(ranges)
-    ctx = [0] * len(r) if context_counts is None else [int(c) for c in context_counts]
-    if len(ctx) != len(r) or any(c < 0 for c in ctx):
-        raise ChunkLayoutError(f"context_counts {list(context_counts or [])} is not one count ≥ 0 "
-                               f"per chunk ({len(r)})")
-    key = {"chunk_ranges": [[a, b] for a, b in r], "n_keyframes": int(r[-1][1]) if r else 0,
-           "native_wh": [int(native_wh[0]), int(native_wh[1])], "mode": str(mode),
-           "ceiling": int(ceiling), "margin_frac": float(margin_frac)}
+    if cube_sets is not None:
+        # a CUBE plan (USER 2026-11-06): the same decision, keyed by its sets, sized on its largest cube
+        sets = [[int(g) for g in F] for F in cube_sets]
+        lens = [len(F) for F in sets]
+        ctx = [0] * len(sets) if context_counts is None else [int(c) for c in context_counts]
+        if len(ctx) != len(sets) or any(c < 0 for c in ctx):
+            raise ChunkLayoutError(f"context_counts {list(context_counts or [])} is not one count ≥ 0 per cube "
+                                   f"({len(sets)})")
+        import hashlib
+        key = {"chunk_sets_sha256": hashlib.sha256(json.dumps(sets).encode()).hexdigest(),
+               "n_keyframes": 1 + max(max(F) for F in sets), "n_cubes": len(sets),
+               "native_wh": [int(native_wh[0]), int(native_wh[1])], "mode": str(mode),
+               "ceiling": int(ceiling), "margin_frac": float(margin_frac)}
+    else:
+        r = as_ranges(ranges)
+        lens = chunk_lengths(r)
+        ctx = [0] * len(r) if context_counts is None else [int(c) for c in context_counts]
+        if len(ctx) != len(r) or any(c < 0 for c in ctx):
+            raise ChunkLayoutError(f"context_counts {list(context_counts or [])} is not one count ≥ 0 "
+                                   f"per chunk ({len(r)})")
+        key = {"chunk_ranges": [[a, b] for a, b in r], "n_keyframes": int(r[-1][1]) if r else 0,
+               "native_wh": [int(native_wh[0]), int(native_wh[1])], "mode": str(mode),
+               "ceiling": int(ceiling), "margin_frac": float(margin_frac)}
     if any(ctx):
         key["context_counts"] = ctx
     p = Path(session_dir) / "intake" / OMEGA_RESOLUTION_NAME
@@ -295,7 +311,7 @@ def session_omega_resolution(session_dir: Path, ranges: Sequence[Sequence[int]],
                     f"delete {p.name} to decide again)")
             return rep
         log(f"[omega-res] {p.name} was decided for another plan — deciding again")
-    views = [n + c for n, c in zip(chunk_lengths(r), ctx)]
+    views = [n + c for n, c in zip(lens, ctx)]
     rep = omega_resolution_for(max(views), card["total_gb"], (int(native_wh[0]),
                                int(native_wh[1])), mode, ceiling, margin_frac=margin_frac,
                                footprint_factor=card["footprint_factor"])
@@ -336,6 +352,8 @@ def omega_chunk_ranges(output_dir: Path) -> Optional[Tuple[List[Tuple[int, int]]
     record and the config both exist they must agree — the products on disk would otherwise
     belong to another plan (ChunkLayoutError). None when no record exists."""
     out = Path(output_dir)
+    if omega_cube_layout(out) is not None:
+        return None               # a CUBE layout (USER 2026-11-06): no ranges — omega_cube_layout
     sim3_ranges = cfg_ranges = None
     p = out / "maplong_run" / CHUNK_SIM3_NAME
     if p.exists():
@@ -367,6 +385,55 @@ def omega_chunk_ranges(output_dir: Path) -> Optional[Tuple[List[Tuple[int, int]]
         if r is not None:
             return r, str(pp)
     return None
+
+
+def omega_cube_layout(output_dir: Path) -> Optional[Dict[str, Any]]:
+    """The CUBE layout Omega ran (USER 2026-11-06, reconstruction/cubes.py; the fork's loop_utils/cube_run.py):
+    {"chunk_sets": [[keyframe positions]], "owner": [cube of every keyframe], "source"} from maplong_run/chunk_sim3.json
+    (what the fork ran), else the run config's Model.chunk_sets / chunk_owner (what it was told to run). When both exist
+    they must agree. None for a range layout or no record."""
+    out = Path(output_dir)
+    ran = cfg = None
+    p = out / "maplong_run" / CHUNK_SIM3_NAME
+    if p.exists():
+        try:
+            doc = json.loads(p.read_text())
+        except (OSError, ValueError) as e:
+            raise ChunkLayoutError(f"{p} is unreadable ({e})") from e
+        if isinstance(doc, dict) and doc.get("layout") == "cubes":
+            ran = {"chunk_sets": [[int(g) for g in F] for F in doc["chunk_sets"]],
+                   "owner": [int(x) for x in doc["owner"]], "source": str(p)}
+    c = out / OMEGA_CONFIG_NAME
+    if c.exists():
+        import yaml
+        try:
+            model = (yaml.full_load(c.read_text()) or {}).get("Model") or {}
+        except (OSError, yaml.YAMLError) as e:
+            raise ChunkLayoutError(f"{c} is unreadable ({e})") from e
+        if model.get("chunk_sets") is not None:
+            cfg = {"chunk_sets": [[int(g) for g in F] for F in model["chunk_sets"]],
+                   "owner": [int(x) for x in model.get("chunk_owner") or []],
+                   "source": f"{c} Model.chunk_sets"}
+    if ran is not None and cfg is not None and (ran["chunk_sets"] != cfg["chunk_sets"]
+                                                or ran["owner"] != cfg["owner"]):
+        raise ChunkLayoutError(f"{p} records another cube layout than {c} configured — the products on disk are of "
+                               f"another plan")
+    return ran if ran is not None else cfg
+
+
+def cube_anchor_indices(sets: Sequence[Sequence[int]], per_chunk: int = 3) -> List[int]:
+    """Keyframe positions (sorted, deduped) for the DA3 metric anchors: ``per_chunk`` spread over EVERY cube's
+    keyframes (by rank in the cube, plan_anchor_indices' fractions), so no cube is left without a metric lock."""
+    per_chunk = max(1, int(per_chunk))
+    picks = set()
+    for F in sets:
+        F = sorted(int(g) for g in F)
+        if not F:
+            continue
+        fracs = [0.5] if per_chunk == 1 else [0.15 + 0.7 * i / (per_chunk - 1) for i in range(per_chunk)]
+        for fr in fracs:
+            picks.add(F[min(len(F) - 1, int(round(fr * (len(F) - 1))))])
+    return sorted(picks)
 
 
 # ── the calibration CLI: the ONLY writer of a card's Omega footprint ──────────────────────────

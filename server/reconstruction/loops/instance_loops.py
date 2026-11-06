@@ -664,7 +664,7 @@ def detect_instance_loops(output_dir, session_dir, cfg: Optional[MetricGraphConf
         from reconstruction.loops import structural as st
         from correction.units import load_chunk_plan
         plan = load_chunk_plan(output_dir)
-        ranges = plan["chunk_ranges"] if plan else None
+        ranges = plan.get("chunk_ranges") if plan else None      # a cube plan has none (USER 2026-11-06)
         downs = session.poses[:, :3, 1]
         g_down = downs.mean(0); g_down = g_down / (np.linalg.norm(g_down) + 1e-12)
         cls_map = {int(k): v.get("class", cfg.loops.semantic.default_class) for k, v in classes.items()}

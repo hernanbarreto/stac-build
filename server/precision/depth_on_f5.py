@@ -603,8 +603,11 @@ def load_turn_witnesses(out: Path, frames: List[int], chunk: Dict[int, int], thr
         if ft in idx:
             _ign("a keyframe"); continue
         prev = chosen.get(ft)
-        if prev is None or (ck == chunk.get(a) and prev[1] != chunk.get(a)):
-            chosen[ft] = (p, ck)                         # the anchor's own chunk first
+        # the anchor's own chunk first; else a chunk with a confidence floor (on CUBES a view lives in every cube
+        # holding its two keyframes, and a cube may own no record — USER 2026-11-06), the earliest file among them
+        if (prev is None or (ck == chunk.get(a) and prev[1] != chunk.get(a))
+                or (prev[1] != chunk.get(a) and prev[1] not in thr and ck in thr)):
+            chosen[ft] = (p, ck)
     dep, valid, passed, cw, extra = {}, {}, {}, {}, {}
     lo, hi = min(int(x) for x in neighbors), max(int(x) for x in neighbors)
     for ft, (p, ck) in sorted(chosen.items()):
