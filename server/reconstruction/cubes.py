@@ -16,17 +16,19 @@ views or the 5 m: "si hay muy pocas vistas eso sí es un problema" — the views
    c(v→u)), for every two units whose cameras lie within two cubes of each other and every two consecutive along the walk.
 4. THE GROUPS. A. From the first unit of the walk no group holds, a group grows by the unit that sees the most of what
    it sees (c ≥ τ with one of its units — total or partially, any moment of the walk) until its own views reach half
-   the cap, within a cube of ``cube_m`` first (the DISPLACEMENT: where views abound, a cube is no longer than that) and
-   beyond it only when nothing within it is left. B. THE VIEWS FIRST: a group with fewer
+   the cap, its own cameras always within half a cube and its pass within the cube of ``cube_m`` around them (C): the
+   DISPLACEMENT of a pass, never exceeded, half for its own views and half for the shared ones — beyond about 5 m
+   Omega bends what it infers, and a cube longer than the others bends differently (USER 2026-11-07: "a más de 5 m omega
+   deforma y puede generar dobleces para un cubo más largo que otros … deben ser coherentes"). B. A group left with fewer
    own views than half the cap joins another small group first, else the smallest of the others — among the groups it
    sees the same as (c ≥ τ) before those it sees anything of, else its walk neighbour's — while the two stay within the
-   cap, beyond a cube's displacement if it must: the cubes stay near half the cap of their own views and half for the
-   shared ones. Two cameras side
-   by side that see different things never meet in A; in B only a group too small to stand alone is joined.
+   cap and their cameras within half a cube; one that cannot stays as it is, its pass filled with the shared views
+   around it.
 5. THE WALK: two units consecutive along the walk share a cube (the turn frames between them are Omega views of a cube
    that holds both, and the cubes form one graph).
-6. THE OVERLAP: each cube takes the units of other cubes that see what its own see (c ≥ τ with one of them), the most
-   co-visible first, while it stays within the cap — about half its views when its own are half the cap. The OWNER of a
+6. THE OVERLAP: each cube takes the units of other cubes that see what its own see (c ≥ τ with one of them) and whose
+   cameras fall within its cube (its own cameras' box widened to ``cube_m``), the most co-visible first, while it stays
+   within the cap: neighbouring cubes share the strip between them, and a pass with few own views gets its views there. The OWNER of a
    unit's keyframes is its own group's cube.
 
 A cube's box (for the viewer) holds the cameras of all its views, its own and the shared ones: cubes that share views
@@ -207,15 +209,18 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], cov: Dict[Tuple[int, int],
         nbr[v][u] = c
     # A. GROUPS THAT GROW BY WHAT THEY SEE: from the first unit of the walk no group holds, a group takes the unit that
     #    sees the most of what it sees (c ≥ τ with one of its units — total or partially, any moment of the walk) until its
-    #    own views reach half the cap; within a cube's displacement first, beyond it only when nothing within it is left
-    #    (the views first)
+    #    own views reach half the cap, its cameras always within a cube (USER 2026-11-07: "a más de 5 m omega deforma y
+    #    puede generar dobleces para un cubo más largo que otros … deben ser coherentes")
     assigned = [-1] * U
     members: Dict[int, List[int]] = {}
     own: Dict[int, int] = {}
-    beyond = 0
+
+    # a group's OWN cameras take half a cube; its pass, the cube widened around them, the other half (the shared views)
+    # — "64 imágenes solapadas al 50 % con los vecinos" in space as in views
+    own_size = 0.5 * size
 
     def fits_box(lo, hi, pts):
-        return bool(np.all(np.maximum(hi, pts.max(0)) - np.minimum(lo, pts.min(0)) <= size * (1.0 + 1e-9)))
+        return bool(np.all(np.maximum(hi, pts.max(0)) - np.minimum(lo, pts.min(0)) <= own_size * (1.0 + 1e-9)))
     for seed in range(U):
         if assigned[seed] >= 0:
             continue
@@ -230,8 +235,8 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], cov: Dict[Tuple[int, int],
                 break
             within = [y for y in cands if fits_box(lo, hi, ucam[y])]
             if not within:
-                beyond += 1
-            y = max(within or cands, key=lambda y: (best[y], -y))
+                break
+            y = max(within, key=lambda y: (best[y], -y))
             assigned[y] = g
             mem.append(y)
             n_own += int(w[y])
@@ -260,11 +265,18 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], cov: Dict[Tuple[int, int],
         members[a] = sorted(members[a] + members.pop(b))
         own[a] += own.pop(b)
         return a
-    # B. THE VIEWS FIRST (USER 2026-11-07: "si hay muy pocas vistas eso sí es un problema … ¿a qué le damos prioridad?" —
-    #    "me parece bien"): a group left with fewer own views than half the cap joins another small group first, else
-    #    the smallest of the others — among the groups it sees the same as (≥ τ) before those it sees anything of, else
-    #    its walk neighbour's — while the two stay within the cap, beyond a cube's displacement if it must
+    # B. FEW OWN VIEWS (USER 2026-11-07: "si hay muy pocas vistas eso sí es un problema"): a group left with fewer own
+    #    views than half the cap joins another small group first, else the smallest of the others — among the groups it
+    #    sees the same as (≥ τ) before those it sees anything of, else its walk neighbour's — while the two stay within
+    #    the cap and their cameras within a cube (the coherence of every pass comes first: a group that cannot join stays
+    #    as it is, and its cube is filled with the shared views around it, C)
     merges_b, stuck = 0, set()
+    gbox = {g: (np.min([ucam[x].min(0) for x in members[g]], axis=0), np.max([ucam[x].max(0) for x in members[g]], axis=0))
+            for g in members}
+
+    def fits_groups(a, b):
+        return bool(np.all(np.maximum(gbox[a][1], gbox[b][1]) - np.minimum(gbox[a][0], gbox[b][0])
+                           <= own_size * (1.0 + 1e-9)))
 
     def affinity(a):
         out: Dict[int, float] = {}
@@ -280,7 +292,7 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], cov: Dict[Tuple[int, int],
             break
         a = min(small, key=lambda g: (own[g], g))
         aff = affinity(a)
-        cands = [g for g, c in aff.items() if c > 0 and own[a] + own[g] <= int(max_views)]
+        cands = [g for g, c in aff.items() if c > 0 and own[a] + own[g] <= int(max_views) and fits_groups(a, g)]
         if cands:
             pools = ([g for g in cands if own[g] < half and aff[g] >= tau], [g for g in cands if own[g] < half],
                      [g for g in cands if aff[g] >= tau], cands)
@@ -288,12 +300,18 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], cov: Dict[Tuple[int, int],
             b = min(pool, key=lambda g: (own[g], -aff[g], g))
         else:
             wn = sorted({find(x) for y in members[a] for x in (y - 1, y + 1) if 0 <= x < U} - {a})
-            wn = [g for g in wn if own[a] + own[g] <= int(max_views)]
+            wn = [g for g in wn if own[a] + own[g] <= int(max_views) and fits_groups(a, g)]
             if not wn:
                 stuck.add(a)
                 continue
             b = min(wn, key=lambda g: (own[g], g))
-        stuck.discard(merge(a, b))
+        lo_ab = np.minimum(gbox[a][0], gbox[b][0])
+        hi_ab = np.maximum(gbox[a][1], gbox[b][1])
+        m = merge(a, b)
+        gbox.pop(a, None)
+        gbox.pop(b, None)
+        gbox[m] = (lo_ab, hi_ab)
+        stuck.discard(m)
         merges_b += 1
     groups = sorted(members, key=lambda g: (members[g][0], g))
     gi = {g: i for i, g in enumerate(groups)}
@@ -317,14 +335,20 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], cov: Dict[Tuple[int, int],
             cube_units[a].add(u + 1)
             over += 1
         joined += 1
-    # C. THE OVERLAP: each cube takes the units of other cubes that see what its own see (≥ τ with one of them), the most
-    #    co-visible first, while it stays within the cap — about half its views when its own are half the cap
+    # C. THE OVERLAP: each cube takes the units of other cubes that see what its own see (≥ τ with one of them) and whose
+    #    cameras fall within its cube — its own cameras' box widened to ``cube_m`` (USER 2026-11-07: a shared view enters
+    #    "si su cámara cae dentro de sus 5 m") —, the most co-visible first, while it stays within the cap
     shared = 0
     for i in range(len(groups)):
+        oc = np.concatenate([ucam[u] for u in core[i]])
+        olo, ohi = oc.min(0), oc.max(0)
+        pad = np.maximum(size - (ohi - olo), 0.0) / 2.0
+        blo, bhi = olo - pad, ohi + pad
         best: Dict[int, float] = {}
         for x in core[i]:
             for y, c in nbr[x].items():
-                if c >= tau and y not in cube_units[i] and c > best.get(y, -1.0):
+                if (c >= tau and y not in cube_units[i] and c > best.get(y, -1.0)
+                        and bool(np.all(ucam[y] >= blo - 1e-9 * size)) and bool(np.all(ucam[y] <= bhi + 1e-9 * size))):
                     best[y] = c
         for y in sorted(best, key=lambda y: (-best[y], y)):
             if views_of(i) + int(w[y]) <= int(max_views):
@@ -372,7 +396,7 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], cov: Dict[Tuple[int, int],
     return {"gravity_frame": R.tolist(), "max_views": int(max_views), "tau": float(tau), "cube_m": float(cube_m),
             "metres_per_unit": float(metres_per_unit), "cubes": cubes, "owner_unit": owner_unit,
             "owner": owner.tolist(),
-            "stats": {"covisible_pairs": len(cov), "groups_grown": len(set(assigned)), "grown_beyond_displacement": beyond,
+            "stats": {"covisible_pairs": len(cov), "groups_grown": len(set(assigned)),
                       "merges_for_views": merges_b,
                       "small_left": int(sum(1 for v in own_v if v < half)), "walk_joins": joined,
                       "over_cap_joins": over, "shared_memberships": shared,
@@ -486,8 +510,8 @@ def analyse(probe_npz: Path, inputs: Dict, *, device: str = "cuda", log: Callabl
         f"own views {st['own_views_min']}–{st['own_views_max']} (the views first: at least {half} when the walk has "
         f"them), {min(sizes)}–{max(sizes)} Omega views with the shared ones (cap {plan['max_views']}); "
         f"{st['groups_grown']} group(s) grown by what the units see within {cube_m:g} m of displacement "
-        f"({st['grown_beyond_displacement']} step(s) beyond it for the views), {st['merges_for_views']} merge(s) for the "
-        f"views; a unit in {st['memberships_per_unit']:.2f} cube(s); "
+        f", {st['merges_for_views']} merge(s) of small groups within it; a unit in {st['memberships_per_unit']:.2f} "
+        f"cube(s); "
         f"{st['walk_joins']} walk join(s)"
         + (f"; {st['small_left']} cube(s) under {half} own views (nothing left to join)" if st["small_left"] else "")
         + (f"; over the cap by a walk join: {st['over_cap_joins']}" if st["over_cap_joins"] else ""))
