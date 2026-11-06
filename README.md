@@ -15,11 +15,19 @@
 
 ## Abstract
 
-STAC Build turns a handheld video into a **metric 3-D reconstruction of a construction site** and the objects in it. A
-feed-forward multi-view network (VGGT-Ω) reconstructs the walk in overlapping chunks planned by co-visibility. The chunks
-are made metric by a multi-view monocular-metric depth model (Depth Anything 3) and joined into **one chunk-level Sim(3)
-graph**. That graph carries every seam, every retrieved and every geometrically detected loop closure, and a scale prior
-per chunk. A **precision core** then measures and corrects, in order:
+STAC Build turns a handheld video into a **metric 3-D reconstruction of a construction site** and the objects in it.
+
+1. **A first pass by AMB3R-SLAM over the whole video** gives every frame a pose and records what every frame it
+   reconstructed saw. That is a **coverage map** of the scanned scene, in which every point carries the frame it came from.
+2. The intake's parallax keyframes are a first proposal. **The map completes them**: where the video saw something that no
+   keyframe sees, or that only one sees, the frame that sees it becomes a keyframe, until no frame brings more than the
+   measurement's own noise.
+3. The scene is **cut into cubes of space by what each view sees**: 5 m cubes, at most 64 views each, a view in every cube
+   that holds a sizeable share of what it sees.
+4. A feed-forward multi-view network (VGGT-Ω) reconstructs each cube. A multi-view monocular-metric depth model (Depth
+   Anything 3) makes each cube metric, and **one Sim(3) graph** joins the cubes on the frames they share.
+
+A **precision core** then measures and corrects, in order:
 
 - the camera;
 - a continuous metric gauge along the walk;
@@ -45,13 +53,13 @@ on the GPU in deterministic mode. Every product is stamped with the inputs, conf
 3. [Models](#3-models)
 4. [Notation and the decision rule](#4-notation-and-the-decision-rule)
 5. [Intake: quality, camera, parallax keyframes](#5-intake-quality-camera-parallax-keyframes)
-6. [I3: multi-view metric depth windows and the walk](#6-i3-multi-view-metric-depth-windows-and-the-walk)
-7. [Turn frames and interval witnesses](#7-turn-frames-and-interval-witnesses)
-8. [Chunks planned by co-visibility, and the Ω resolution](#8-chunks-planned-by-co-visibility-and-the-ω-resolution)
-9. [The VGGT-Ω pass](#9-the-vggt-ω-pass)
-10. [Metric lock of each chunk](#10-metric-lock-of-each-chunk)
-11. [Loop closures: retrieval, revisits, bridges](#11-loop-closures-retrieval-revisits-bridges)
-12. [One chunk-level Sim(3) graph](#12-one-chunk-level-sim3-graph)
+6. [The first pass: AMB3R-SLAM over the whole video](#6-the-first-pass-amb3r-slam-over-the-whole-video)
+7. [The coverage map and the keyframe fill](#7-the-coverage-map-and-the-keyframe-fill)
+8. [I3: multi-view metric depth windows and the walk](#8-i3-multi-view-metric-depth-windows-and-the-walk)
+9. [Turn frames and interval witnesses](#9-turn-frames-and-interval-witnesses)
+10. [Cubes: the scene cut by what the views see, and the Ω resolution](#10-cubes-the-scene-cut-by-what-the-views-see-and-the-ω-resolution)
+11. [The VGGT-Ω pass, cube by cube](#11-the-vggt-ω-pass-cube-by-cube)
+12. [Metric lock and the cube Sim(3) graph](#12-metric-lock-and-the-cube-sim3-graph)
 13. [Global metric scale and the upright frame](#13-global-metric-scale-and-the-upright-frame)
 14. [The precision core, F0 → F6](#14-the-precision-core-f0--f6)
 15. [The published cloud](#15-the-published-cloud)
@@ -72,10 +80,11 @@ stage is resumable against stamped products. The default chain is:
 
 | # | Stage | Worker | What it produces |
 |---|---|---|---|
-| 1 | **Reconstruction** | `workers/map_worker.py` | intake → I3 → chunk plan → VGGT-Ω pass with loop closures and the chunk Sim(3) graph → metric scale and upright frame → precision core F0–F6 → the published cloud (`output/cleaned_cloud.ply`) and its octree |
+| 1 | **Reconstruction** | `workers/map_worker.py` | intake (I0, I1) → AMB3R-SLAM over the whole video → the coverage fill of the keyframes → turn frames → I3 → the cubes → VGGT-Ω per cube and the cube Sim(3) graph → metric scale and upright frame → precision core F0–F6 → the published cloud (`output/cleaned_cloud.ply`) and its octree |
 | 2 | **Cloud → viewer** | `workers/cloudcompy_worker.py` | the cleaned cloud handed to the viewer (Potree octree) |
 | 3 | **Scene analysis** | `workers/vlm_worker.py` | Qwen3-VL reads every keyframe; the SAM 3 vocabulary (`output/vlm_analysis.json`) |
 | 4 | **Segmentation** | `workers/sam3_worker.py` | SAM 3.1 masks on every keyframe, projected onto the cloud as instances with oriented boxes (`output/segmentation_result.json`, `instance_ids.npy`, `scene_r.db`) |
+| 5 | **Floor** | `workers/floor_worker.py` | the floor levelled on the segmented support surfaces, one rigid motion per session (`pipeline.auto_floor`) |
 
 Two more stages exist but are switched off in the chain:
 
@@ -83,7 +92,14 @@ Two more stages exist but are switched off in the chain:
   chooses the cloud's confidence threshold for that session (`pipeline.auto_genrecon: false`).
 - **Certification** stays in the code, switched off (`certify.auto_after_segmentation: false`).
 
-The **Autosegment** button re-runs the VLM and SAM 3 stages on the cloud already on disk, with editable prompts.
+The **Autosegment** button re-runs the VLM and SAM 3 stages on the cloud already on disk, with editable prompts; the
+projection and the floor follow.
+
+**Replace and the semantic products.** **Reconstruir** with *Replace* wipes the scan down to its frames, its video and its
+capture inputs, except the VLM analysis and the SAM 3 store. Those are kept and are redone only when the keyframes they
+were made on are no longer the session's: the frames the VLM's stamp read, and the `keyframes_sha256` SAM 3's store was
+sealed with (`pipeline_manager._semantics_keyframes_change`). The coverage fill can add keyframes, and then they are
+redone.
 
 ---
 
@@ -107,6 +123,7 @@ properties:
 |---|---|
 | `da3` | backend, DA3, SAM 3.1, precision core, scale/orientation, photo bake |
 | `mapanything` | the VGGT-Ω fork and the sky segmenter |
+| `amb3r` | AMB3R-SLAM, the whole-video first pass |
 | `semantic` | vLLM serving Qwen3-VL |
 | `genrecon` | GenRecon |
 | `nodejs` | 3D Tiles builder |
@@ -120,12 +137,13 @@ of the artifacts it changed. The previous epoch is kept selectable, and a ledger
   GenRecon adapter (§18.1);
 - mesh layers stream as 3D Tiles;
 - panels show instances, oriented boxes and measurement tools, and a chat assistant answers spatial questions with
-  deterministic tools (the VLM proposes; tools measure).
+  deterministic tools (the VLM proposes; tools measure);
+- the **Instances** tab shows the cubes of the cut, each one switched on and off on its own.
 
 **Storage.** Each scan lives in `server/projects/<session>/scans/<scan>/src_default/`:
 
 - `frames/`: the video frames;
-- `intake/`: quality, parallax, walk, plan and their stamps;
+- `intake/`: quality, parallax, AMB3R's whole-video pass, the coverage fill, the walk, the cubes, and their stamps;
 - `output/`: model passes, epochs, cloud, octree, segmentation, meshes.
 
 ---
@@ -135,8 +153,9 @@ of the artifacts it changed. The previous epoch is kept selectable, and a ledger
 | Role | Model | Where |
 |---|---|---|
 | Multi-view feed-forward reconstruction (poses, intrinsics, depth, confidence) | **VGGT-Ω** 1B, `vggt_omega_1b_512.pt`, bf16 | `vendor/VGGT-Long` (fork, branch `gpu-main`) |
+| First pass over the whole video: every frame's pose, loops, what each frame saw | **AMB3R-SLAM**: DA3-Small front-end, VGGT-Ω submaps, DBoW loops, offline pose graph | `vendor/AMB3R-SLAM` (fork, branch `stac`) |
 | Metric multi-view depth: focal probe, I3 windows, scale anchors | **Depth Anything 3**, `DA3NESTED-GIANT-LARGE-1.1` | `vendor/depth-anything-3` |
-| Place recognition for loop candidates | **DINOv2 ViT-B/14 + SALAD** (8448-D descriptor) | fork `LoopModels/` |
+| Place recognition for loop candidates (F4's loop windows) | **DINOv2 ViT-B/14 + SALAD** (8448-D descriptor) | fork `LoopModels/` |
 | Sky segmentation | `skyseg.onnx` (sha256-pinned), onnxruntime CPU | fork `loop_utils/sky_mask.py` |
 | Native-pixel point tracks | **VGGSfM v2** tracker (sha256-pinned) | fork `dependency/vggsfm_tracker` |
 | Monocular detail at depth discontinuities | **PointDiT-H/16** with DINOv3 ViT-H+/16 | `vendor/pointdit` |
@@ -248,7 +267,109 @@ The keyframe becomes the next anchor.
 
 ---
 
-## 6. I3: multi-view metric depth windows and the walk
+## 6. The first pass: AMB3R-SLAM over the whole video
+
+`server/reconstruction/amb3r_probe.py` runs **AMB3R-SLAM** (`vendor/AMB3R-SLAM`, branch `stac`) right after I1, over
+**every frame of the video** (frame stride 1), at the session's Ω grid rounded to the model's patch. Its role is to say
+where every frame is and what every frame saw. It never decides the keyframes or the cubes.
+
+**What it runs.**
+
+- A DA3-Small front-end tracks every frame. It promotes a keyframe when the overlap with the last one falls below 0.35,
+  or after one backend step.
+- The heavy model (VGGT-Ω) builds submaps of 24 views spanning 96 frames, every 32 frames. A submap takes one frame per
+  group of $k$, the front-end's most confident, with $k=\operatorname{round}(4\min(\mathrm{fps},10)/10)$, so $k=4$ for any
+  video at 10 Hz or more.
+- Submaps are joined by Sim(3) edges, and DBoW retrieval proposes loops every 5 frames at least 100 frames apart. The
+  verified loops enter an offline pose graph.
+- Every frame gets a pose. A frame inside submaps takes the weighted average of their poses, down-weighted at a submap's
+  edge. A frame no submap reconstructed takes the Sim(3) interpolation between its two reconstructed neighbours.
+
+**What each reconstructed frame saw.** The light map (`--stac_light_map`) keeps, for every reconstructed frame, one record
+placed by its submap's final Sim(3) $(s,R,t)$. With the frame's pose $T=[R_T\,|\,t_T]$ and its points $p$ in the submap:
+
+```math
+z=s\,\big(R_T^\top(p-t_T)\big)_z,\qquad c2w=\big[R\,R_T\ \big|\ s\,R\,t_T+t\big].
+```
+
+- $z$ is kept on a 4-px grid, and is 0 where the map drops the pixel: the frame's lowest 20 % of confidence, depth edges
+  (more than 3 % within 3×3) and sky.
+- The pinhole $K$ the points follow is fitted by least squares of $u=f_xx/z+c_x$ and $v=f_yy/z+c_y$ over the valid pixels,
+  with the median pixel residual recorded (pccr: 0.29 px).
+
+Every point of this cloud therefore carries the frame it came from. A view of ours, a keyframe or a turn frame, **sees
+what its own frame saw** when AMB3R reconstructed it, and otherwise what the nearest reconstructed frame saw, at most half
+a backend step away (ties go to the earlier frame). No ray is cast.
+
+**Product.** `intake/amb3r_video.npz` holds every frame's pose, AMB3R's own keyframes (recorded) and the records. It is
+stamped by the video (the frames manifest's sha256 inventory), AMB3R's commit, the launcher, the model, the grid and the
+strides, and reused while they are the same. AMB3R runs under the pipeline's strict deterministic torch
+(`reconstruction/amb3r_launch.py`), on 8 threads over 16 cores, offline.
+
+On pccr the pass took 11 min over 3044 frames and reconstructed 761 of them.
+
+---
+
+## 7. The coverage map and the keyframe fill
+
+The intake's keyframes are a first proposal of coverage. **The map decides**: `server/reconstruction/coverage_fill.py`
+completes them where the video saw something that no keyframe sees, or that only one keyframe sees.
+
+**The map.** Every valid pixel of every record is a point, $X=c2w_r\big(z\,K_s^{-1}[u,v,1]^\top\big)$. Here $K_s$ is the
+record's $K$ with its first two rows divided by the stride, because grid pixel $(j,i)$ is model pixel $(4j,4i)$.
+
+**Seeing.** A keyframe $g$, through its own record, sees $X$ when the point falls inside $g$'s image, in front of it, at a
+depth consistent with what $g$ saw there:
+
+```math
+z_g(X)>10^{-3},\qquad (u,v)=\operatorname{round}\pi_g(X)\in\Omega_g,\qquad D_g(u,v)>0,\qquad
+|z_g(X)-D_g(u,v)|\le\mathrm{tol}\cdot D_g(u,v).
+```
+
+Occluded, or in front of what $g$ saw, it does not.
+
+**The session's tolerance and noise.** Take the relative disagreement $\rho=D_j/z-1$ of each keyframe's points in the
+next keyframe, with $|\rho|<0.25$. Then:
+
+```math
+\mathrm{tol}=3\cdot1.4826\operatorname{med}|\rho-\operatorname{med}\rho|,\qquad
+\eta=\frac{\#\{|\rho-\operatorname{med}\rho|>\mathrm{tol}\}}{\#\rho}.
+```
+
+$\eta$ is the share of samples on one surface that the test itself calls inconsistent: its own miss rate (pccr: tol
+2.70 %, $\eta$ = 4.22 %).
+
+**Covered.** A point is **seen** when some keyframe sees it. It is **covered** when a second keyframe sees it from a ray at
+least `refine.min_tri_deg` (2°) away from the first one's, $\angle(C_g-X,\,\mathbf d_1)\ge2°$, which is F5's bound for a
+landmark. A point not seen, or seen without a second view, is **weak**: one view, or two from the same place, measure
+nothing.
+
+**The fill.** A candidate is any frame AMB3R reconstructed that I0 found usable and that is not a keyframe's own record.
+Its gain is the share of what it saw that it would see first, or cover as the second view from far enough:
+
+```math
+g(c)=\frac{1}{|P_c|}\,\#\big\{X\in P_c:\ \neg\mathrm{seen}(X)\ \vee\ \big(\mathrm{seen}(X)\wedge\neg\mathrm{covered}(X)\wedge
+\angle(C_c-X,\mathbf d_1(X))\ge2°\big)\big\}.
+```
+
+- While some candidate has $g(c)>\eta$, the one with the largest gain becomes a keyframe. Ties go to the sharper (I0's
+  sharpness rank), then to the earlier.
+- What it sees enters the map, and the other gains are measured again. A gain can only fall as keyframes are added, so
+  the lazy search is exact.
+- Every keyframe I1 chose stays. What no frame of the video can cover beyond the noise stays weak and is declared, for
+  example a turn on the spot or a corner glimpsed once.
+
+**Products.** The added frames enter `frames/selected_frames.json` with `closed_by: coverage`, and
+`frames/witness_frames.json`. The selection keeps I1's own list, so a re-run always starts from I1's keyframes and an
+unchanged input is not filled twice. `intake/coverage_fill.json` records the coverage before and after and every frame
+added. The fill runs on the card, in a process of its own.
+
+On pccr: I1's 295 keyframes left 0.7 % of the map unseen and 6.4 % seen once. 18 frames were added; 0.4 % unseen and 5.8 %
+seen once remain, and no frame covers more of them than the noise.
+
+---
+
+## 8. I3: multi-view metric depth windows and the walk
 
 **Window size.** The keyframes are covered by overlapping windows of $N_w$ frames, sized from the card's measured footprint:
 
@@ -286,7 +407,7 @@ are taken from the window where it is most central. These are the metric anchors
 
 ---
 
-## 7. Turn frames and interval witnesses
+## 9. Turn frames and interval witnesses
 
 `server/intake/turn_frames.py` adds frames **between** consecutive keyframes from the I1 readings. It plays two roles.
 
@@ -305,76 +426,105 @@ the interval's parallax.
 
 How each role is used:
 
-- **Context frames** are inferred *with* their chunk by VGGT-Ω. They give the network the turn it would otherwise see as a
+- **Context frames** are inferred *with* their cube by VGGT-Ω. They give the network the turn it would otherwise see as a
   jump, and their slots are dropped before saving. They also vote in F6.
-- **Witness frames** are inferred in a **separate pass after each chunk**. They never change the chunks or the poses; they
+- **Witness frames** are inferred in a **separate pass after each cube**. They never change the cubes or the poses; they
   only testify in F6's vote.
+
+A keyframe added by the coverage fill lies inside one of I1's windows. The turn frames are cut from I1's readings of that
+window, and never on a keyframe.
 
 ---
 
-## 8. Chunks planned by co-visibility, and the Ω resolution
+## 10. Cubes: the scene cut by what the views see, and the Ω resolution
 
-### 8.1 Co-visibility (`server/reconstruction/chunk_covis.py`)
+### 10.1 The cut (`server/reconstruction/cubes.py`)
 
-**Tolerance.** On the I3 depth maps,
-$\mathrm{tol}=Q_{0.95}\{|z_a-z_b|/\tfrac12(z_a+z_b)\}$ over about 4000 pixels per frame of the frames shared by
-consecutive windows.
+The scene is cut into **cubes of space**, as GenRecon cuts it. A view belongs to a cube by **what it sees there**, never
+by where its camera stands. Two cameras on the same ray that see the two faces of an object belong to different cubes;
+two views that see the same place belong together, whatever moment of the walk they come from.
 
-**Directed co-visibility.** The share of $i$'s sampled points $P_i$ that $j$ sees at a consistent depth is
+**Units.** A unit is a parallax keyframe with the rotation keyframes up to the next parallax keyframe, and the turn frames
+after them. A turn is never cut. What a unit sees, $P_u$, is the union of the records of its views (§6).
+
+**Gravity frame.**
+
+- up is $u=-\operatorname{normalize}\big(\sum_kR_ke_2\big)$, the opposite of the keyframes' summed image-down axes;
+- $e_1$ is the principal axis of the camera centres projected on the plane ⊥ $u$, pointing from the walk's start to its
+  end;
+- $e_2=u\times e_1$.
+
+**Metres.** The probe is converted to metres by the session's own walk:
+$m=L_{\text{I3}}\big/\sum_k\|C_{k+1}-C_k\|$ over the probe's keyframe cameras.
+
+**The grid.** The bounds of everything the units see are covered by cells of side $a=\texttt{cube\_m}/m$, with
+`cube_m` = 5 m. There is one layer when the scene is no taller than a cube; otherwise the cells are stacked, so several
+floors are cut the same way.
+
+**Membership.** A unit belongs to a box $B$ when at least $\tau$ of what it sees falls inside:
 
 ```math
-c(i\!\to\!j)=\frac{1}{|P_i|}\,\#\big\{X\in P_i:\ \pi_j(X)\in\Omega_j,\ Z_j>0,\ |z_j-Z_j[\pi_j(X)]|\le \mathrm{tol}\,Z_j\big\},
-\qquad c_{ij}=\min\big(c(i\!\to\!j),c(j\!\to\!i)\big).
+\operatorname{share}_u(B)=\frac{|P_u\cap B|}{|P_u|}\ \ge\ \tau=0.3 .
 ```
 
-**Co-visibility length.** $\ell(a)$ is found by a majority scan from $a$: count the passes ($c_{ab}\ge0.3$) and the
-fails, and stop when fails outnumber passes. Then:
+A unit that sees two regions belongs to two cubes. That is the overlap, and it is where the cube graph is joined.
 
-- each keyframe costs $\delta=1/\max(\ell,1)$;
-- the distance is $D(a,b)=\sum_{[a,b)}\delta$, measured in "co-visibility lengths".
+**The cap.** A cube whose units hold more than 64 views (keyframes and turn frames) is halved on its longest side, and
+halved again, while halving still lowers the views of a half:
 
-### 8.2 The plan
+```math
+\max\big(\mathrm{views}(B_A),\mathrm{views}(B_B)\big)<\mathrm{views}(B).
+```
 
-**One pass** when $D_{\text{tot}}\le H=13.67$ and the views (keyframes, rotation keyframes and their turn frames) number at
-most 64.
+When no halving separates what the views see, the units that see the most of the cube stay, up to the cap, and the rest
+are declared trimmed.
 
-**Otherwise blocks** $B_0,\dots,B_{m-1}$, with chunk $k=B_k\cup B_{k+1}$ (50 % overlap). The constraints:
+**Placement.**
 
-- each block holds at least 12 keyframes;
-- a block is within budget when $D\le H/2$ and it has at most 32 views. This is `MAX_CHUNK_VIEWS` = 64: half new, half
-  shared, as in VGGT-SLAM.
+- A unit that no cube holds joins the cube where it sees the most, among those with room; when none has room, the one
+  where it sees the most.
+- A unit that sees only cells no cube holds makes the cell where it sees the most a cube.
+- A unit that sees nothing joins its walk neighbour's cube.
+- A cube needs two keyframes. A smaller one's units join where they see the most.
+- Two units consecutive along the walk always share a cube, so the turn frames between them are views of a cube that
+  holds both, and the cubes form one graph. This is checked.
 
-The blocks minimise the cost $1+W_1[\text{over}]+W_2[\text{over}\wedge L>12]$, with $W_1=n+1$ and $W_2=(n+1)^2$, by an
-exact dynamic program. Ties are broken lexicographically:
+**Owner.** A unit's keyframes take their geometry from the cube where it sees the most. The report also gives the share
+of what each unit sees that falls inside its cubes.
 
-1. minimise the worst seam depth;
-2. minimise the worst rotation across a cut, $\theta_i=2\arcsin(\|R_{i+1}-R_i\|_F/2\sqrt2)$, so that cuts avoid turns;
-3. minimise the per-block budget;
-4. take the leftmost boundary.
+**A cube's views.** Its Ω views are its keyframes plus the turn frames that lie between two of its keyframes consecutive
+in the walk. Its F6 witnesses, the interval frames, follow the same rule.
 
-$H$ was calibrated on measured sessions. The plan is frozen per session.
+**Products.** `intake/cubes.json` and `intake/cubes.png`, stamped by the probe, the inputs and the code. Everything is
+counted on the card with integers, and every order has an index tie-break. The viewer draws the cubes from the
+**Instances** tab (`reconstruction/cube_boxes.py`), carried into the live frame by the similarity between the probe's and
+the published keyframe cameras.
 
-### 8.3 Ω resolution
+On pccr: 313 keyframes and 53 turn frames in 300 units gave 12 cubes of at most 5 m, with 17 to 64 Ω views each and a unit
+in 1.31 cubes on average. The start and the end of the walk fell in one cube.
+
+### 10.2 Ω resolution
 
 The resolution is the largest multiple of 16 not above $\min(16\lceil\max(W,H)/16\rceil,\ 1024)$ at which the largest
-chunk fits the card:
+cube fits the card:
 
 ```math
 \mathrm{cap}(R)=\Big\lfloor\frac{T(1-m)-4.0}{\kappa\cdot0.086\cdot g_wg_h/(832\cdot464)}\Big\rfloor,\qquad
 R^*=\max\{R:\ N^*\le\mathrm{cap}(R)\}
 ```
 
-- $N^*$ is the largest chunk's view count, context or witness views included.
+- $N^*$ is the largest cube's view count, context or witness views included.
 - $\kappa$ is the committed footprint factor of the card table.
 
 An out-of-memory fails the run. It is never silently retried lower.
 
 ---
 
-## 9. The VGGT-Ω pass
+## 11. The VGGT-Ω pass, cube by cube
 
-For a chunk $[s,e)$ with context frames $\mathcal C$, the network sees the views $[s,e)\cup\mathcal C$, sorted, the first
-being a keyframe. It returns per view:
+The fork (`vendor/VGGT-Long`, `loop_utils/cube_run.py`) infers each cube whole. For a cube with keyframes $\mathcal F$ and
+context frames $\mathcal C$, the network sees the views $\mathcal F\cup\mathcal C$, sorted, the first being a keyframe. It
+returns per view:
 
 - a pose encoding, which gives world-to-camera and $K$;
 - a depth $d$;
@@ -387,10 +537,10 @@ and the mask is $m=\mathbf 1[\hat o<32]$ (non-sky). The confidence becomes $c\le
 keyframe, context and witness frame are precomputed in 12 processes while I3 runs on the card.
 
 **Context records.** Each context view's depth, confidence, $K$ and relative pose to its preceding keyframe are saved,
-then every per-view array is cut to the keyframe slots. The **witness pass** infers keyframes ∪ interval frames separately
-and saves only the witness slots.
+then every per-view array is cut to the keyframe slots. The **witness pass** infers keyframes ∪ interval frames
+separately and saves only the witness slots.
 
-**Confidence floor.** Per chunk,
+**Confidence floor.** Per cube,
 
 ```math
 \theta=\max\big(P_{20}(c_{\text{valid}}),\ c_{\min}+0.10\,(c_{\max}-c_{\min})\big),
@@ -401,113 +551,63 @@ It also gates the samplers of every pose fit.
 
 ---
 
-## 10. Metric lock of each chunk
+## 12. Metric lock and the cube Sim(3) graph
 
-**Anchor ratio.** For each frame, $r_f=\operatorname{med}(d^{\text{DA3}}/d^{\Omega})$ over pixels valid in both, in the
-near band $d^\Omega\le Q_{0.25}$. The chunk's ratio is $s^{\text{DA3}}_k=\operatorname{med}_f r_f$.
+**Metric lock.** For each frame, $r_f=\operatorname{med}(d^{\text{DA3}}/d^{\Omega})$ over pixels valid in both, in the
+near band $d^\Omega\le Q_{0.25}$. A cube is brought to the DA3 metre by its ratio $s^{\text{DA3}}_k=\operatorname{med}_f r_f$.
+A cube without anchors takes the anchored cubes' median, and says so.
 
-**Seam ratio.** $r_k=1/\operatorname{med}\big(d^{(k+1)}/d^{(k)}\big)$ over each frame shared by chunks $k$ and $k+1$, then
-the median over the shared frames.
-
-**Scale graph.** With $x_k=\ln s_k$,
-
-```math
-\min_x\ \sum_k\frac{(x_{k+1}-x_k-\ln r_k)^2}{\sigma_s^2}+\sum_k\frac{(x_k-\ln s^{\text{DA3}}_k)^2}{(\sigma_a/\sqrt{n_k})^2}
-```
-
-with $\sigma_s=0.003$, $\sigma_a=0.08$ and $n_k$ anchors per chunk, solved by linear least squares. A zoom chunk, whose
-focal differs significantly, loses its anchors.
-
-**Scale drift.** A linear drift of scale inside a chunk, $\ln s(u)=(1-u)x_{k0}+ux_{k1}$, is applied only if the decision
-rule approves it on held-out seam frames.
-
----
-
-## 11. Loop closures: retrieval, revisits, bridges
-
-**Retrieval.** DINOv2 + SALAD descriptors $\hat D$ give the similarity $S=\hat D\hat D^\top$. The candidates are, per row,
-the top 5 non-local neighbours (gap at least the larger of 11 keyframes, 1 m of walk, and 20 keyframes) with
-$S>\tau_S$, followed by NMS over ±3 keyframes.
-
-The threshold $\tau_S$ is calibrated by Youden's $J=\mathrm{TPR}-\mathrm{FPR}$ against the revisit reference of §6:
-
-- positives are pairs closer than the distance bar and facing within the angle bar;
-- pairs within 1.1× either bar's error are undecided;
-- the fallback is 0.65.
-
-**Spatial gate.** Only one rule rejects: two frames less than 1 m of walk apart (`visit_drift.min_walk_m`) are one visit.
-A narrow corridor (lateral extent under 3 m) with fewer than 4 reciprocal frames is marked ambiguous, and its σ is tripled.
-
-**Geometric revisits** find what retrieval misses. Using the provisional chain, $F_{ij}$ is the share of $i$'s sampled
-points inside $j$'s frustum, widened by the drift a walk of length $L$ allows:
-
-- distance $\delta(L)=\max(0.30,0.013L)$ m;
-- angle $\theta(L)=\max(2°,0.10L)$.
-
-Pairs from chunks at least 2 apart, at least 1 m of walk apart, with $\min(F_{ij},F_{ji})\ge0.30$, are proposed, keeping
-the best 3 per chunk pair.
-
-**Bridges.** Each candidate is measured by one extra VGGT-Ω pass over its two windows: 20 keyframes each plus 4 sharp
-in-between frames. The pass is locked to its own anchors, and the exact correspondences are the same keyframe at the same
-pixel on both sides.
-
-**Robust Sim(3) fit.** The fit is a weighted Umeyama alignment with Cauchy IRLS weights:
+**Seams.** Every two cubes that share keyframes are tied by a **seam**: the Sim(3) between their two copies of the shared
+frames. The correspondences are exact, the same pixel of the same shared frame in both cubes, up to 200 000 of them. The
+fit is a weighted Umeyama alignment with Cauchy IRLS weights:
 
 ```math
 w_i=\frac{1}{1+(r_i/c)^2},\qquad c=\max\big(3\cdot1.4826\,\mathrm{MAD}(r),\,10^{-4}\big),\qquad 8\ \text{iterations}.
 ```
 
-The bridge composes as $s_{ab}=s_b/s_a$, $R_{ab}=R_bR_a^\top$, $t_{ab}=t_b-s_{ab}R_{ab}t_a$. Its $\sigma$ is the median
-split-half held-out residual of the worse side. It carries no scale term: the scale belongs to the graph.
-
----
-
-## 12. One chunk-level Sim(3) graph
-
-All chunks are pieces of **one** Sim(3) graph (fork `loop_utils/chunk_graph.py`).
-
-**Unknowns.** For $k\ge1$, $C_k=(e^{\lambda_k},\exp[\omega_k]_\times,t_k)$. The gauge is $C_0=I$.
-
-**Seam edges.** A Sim(3) is fitted between chunks $k+1$ and $k$ on all valid shared pixels. A scale outside $[0.6,1.6]$
-falls back to a rigid fit. Each edge carries:
+Each seam carries:
 
 - $\sigma_e$, the fit's median residual;
 - a centroid $c_e$, the median of the overlap points;
 - a lever $L_e$, the median camera-to-point distance.
 
-**Closure edges.** These are the bridges of §11, retrieved and geometric. Every verified closure enters the graph.
+**The graph** (fork `loop_utils/chunk_graph.py`). Every cube is a piece of **one** Sim(3) graph.
 
-**Residual** of an edge $(a,b,M)$, with $E=(C_b^{-1}\circ C_a)\circ M^{-1}$:
+- **Unknowns.** For $k\ge1$, $C_k=(e^{\lambda_k},\exp[\omega_k]_\times,t_k)$. The gauge is $C_0=I$: cube 0 whole, at its
+  metric lock.
+- **Residual** of an edge $(a,b,M)$, with $E=(C_b^{-1}\circ C_a)\circ M^{-1}$:
 
-```math
-\mathbf r_e=\frac{1}{\sigma_e}\Big[\,E(c_e)-c_e\ ;\ \operatorname{Log}(R_E)\,L_e\ ;\ (\ln s_E)\,L_e\,\Big]\in\mathbb R^7 .
-```
+  ```math
+  \mathbf r_e=\frac{1}{\sigma_e}\Big[\,E(c_e)-c_e\ ;\ \operatorname{Log}(R_E)\,L_e\ ;\ (\ln s_E)\,L_e\,\Big]\in\mathbb R^7 .
+  ```
 
-**Scale prior.** Each chunk $k\ge1$ has a DA3 scale prior:
+- **Scale prior.** Each cube $k\ge1$ has a weak DA3 scale prior:
 
-```math
-r^{\text{DA3}}_k=\frac{\lambda_k-\ln\big(s^{\text{DA3}}_k/s^{\text{lock}}_k\big)}{0.08/\sqrt{n_k}} .
-```
+  ```math
+  r^{\text{DA3}}_k=\frac{\lambda_k-\ln\big(s^{\text{DA3}}_k/s^{\text{lock}}_k\big)}{0.08/\sqrt{n_k}} .
+  ```
 
-**Cost.** Cauchy on every scalar component,
+- **Cost.** Cauchy on every scalar component,
 
-```math
-\min_{\{\omega_k,t_k,\lambda_k\}}\ \tfrac12\sum_j\ln\big(1+r_j^2\big),
-```
+  ```math
+  \min_{\{\omega_k,t_k,\lambda_k\}}\ \tfrac12\sum_j\ln\big(1+r_j^2\big),
+  ```
 
-solved by trust-region reflective least squares (tolerances $10^{-12}$). The start is the seams-only chain
-$C_{k+1}=C_k\circ M_{k+1\to k}$.
+  solved by trust-region reflective least squares (tolerances $10^{-12}$), started from the spanning tree of the best seams.
 
-**Judge (measured, never deciding).** Each closure $q$ is left out in turn. Its error before is at the seams + priors
-solve, and its error after is at the solve without it. The decision rule is evaluated and recorded in
-`output/chunk_graph.json`; the closures are applied regardless, as in a SLAM back end.
+On pccr the seams disagreed by 1.8 to 5.4 cm before the solve, and by 0.1 cm in the median (0.6 cm at most) after it.
+
+**Not run on cubes, declared.** The chain's SALAD loop bridges and geometric revisit closures are not run: a revisit is
+inside a cube by the cut. Neither are the per-chunk scale ladder and its linear drift, since a cube has no walk order to
+drift along.
 
 **Application.**
 
 - Points: $X\leftarrow s_kR_kX+t_k$.
 - Depths: $d\leftarrow s_kd$.
 - Poses: $[R_kR_c\,|\,s_kR_kc+t_k]$.
-- A shared block of frames is split at its midpoint between its two chunks.
+- **Ownership.** Each keyframe's points, pose and $K$ come from the cube that owns it. The pixels the owner drops are
+  written by one other copy (backfill).
 
 **Depth graph.** Pairwise affine relations $z_g\approx\alpha z_f+\beta$ are fitted at keyframe offsets {1, 2, 3, 5, 8, 12},
 with offsets {4, 10} held out. They are solved for per-frame $(a_f,b_f)$ with a mean-zero gauge. The result is applied, as
@@ -524,8 +624,8 @@ band ($z^\Omega\le P_{25}$) intersected with DA3's top-10 % confidence, with fal
 s=\operatorname{med}\{s_f:\ s_f\in[P_{10},P_{90}]\}.
 ```
 
-It multiplies point coordinates, depths and camera centres. On a chunked session the residual $|s-1|$ must stay below
-0.10, or the run fails.
+It multiplies point coordinates, depths and camera centres. On a cube run, $s$ is also how far the locked and joined cubes
+sit from DA3's metre. It is applied and recorded, with no bound (pccr: 0.891).
 
 **Orientation.** Gravity is the normalised mean of the cameras' "down" axes, $\hat g=\operatorname{normalize}\big(\tfrac1N\sum_i\operatorname{normalize}(R_ie_2)\big)$.
 It is refused when the mean alignment $\tfrac1N\sum|d_i\cdot\hat g|$ is below 0.7. The frame is rotated by Rodrigues'
@@ -557,8 +657,9 @@ mapped to the native frame exactly, through the vendor's crop, resize and pad:
 x_n=(x_g-p_x+\tfrac12)\,s_x-\tfrac12+o_x,\qquad f^n_x=s_xf^g_x,\qquad c^n_x=(c^g_x-p_x+\tfrac12)s_x-\tfrac12+o_x .
 ```
 
-**Session K.** The session $K$ is the component-wise median of the per-frame VGGT-Ω intrinsics. The focal spread
-$100\cdot1.4826\operatorname{med}|f_i-\hat f|/|\hat f|$ is reported, with a warning above 2 %.
+**Session K.** The session $K$ is the component-wise median of the per-frame VGGT-Ω intrinsics, read from Ω's own record
+(`output/maplong_run/intrinsic.txt`; `output/intrinsic.txt` is F6's epoch artifact, the camera of the published cloud).
+The focal spread $100\cdot1.4826\operatorname{med}|f_i-\hat f|/|\hat f|$ is reported, with a warning above 2 %.
 
 **Undistortion.** Points are undistorted iteratively (200 iterations, $\epsilon=10^{-12}$). Each one is re-distorted and must
 land within $\epsilon+16$ ulp of its observation.
@@ -726,7 +827,7 @@ $w^*=\max\{w:\ S(w)\le S_{\min}+1.1\,\mathrm{se}\}$, with se from a keyframe-clu
 metres too, and that is the σ floor downstream.
 
 **Validity.** A pixel is valid when $z>0$ and its confidence exceeds $10^{-5}$ (the sky sentinel). It *passes the floor*
-when its confidence is at least $\min+0.10(\max-\min)$ of its VGGT-Ω chunk.
+when its confidence is at least $\min+0.10(\max-\min)$ of its VGGT-Ω cube.
 
 **PointDiT at the edges only** (`precision/mono_detail.py`). PointDiT-H/16 (16 Euler steps from zeros, 512-px tiles with
 ¼ overlap) gives an affine-invariant depth. Each tile is aligned to the bent depth:
@@ -776,7 +877,7 @@ where $s_g$ is $g$'s floor-passing surface splatted into $f$, which $f$ should h
 It is refused when the pixel's own depth is nearer than the agreed surface: the pixel saw something in front, and the
 neighbours' surface may lie behind it.
 
-**Turn and interval witnesses.** These are the context and witness records of §9. Each is carried into the anchor
+**Turn and interval witnesses.** These are the context and witness records of §11. Each is carried into the anchor
 keyframe's metric frame:
 
 - its depth is scaled by $\phi=\operatorname{med}z_{\Omega,a}/\operatorname{med}z_a$ and bent by the anchor's $k_a$;
@@ -814,16 +915,16 @@ Potree octree. The LAS quantum is the smallest power of two $s$ with extent$/s<2
 
 ## 16. Chunk check (report)
 
-`precision/chunk_check.py` checks, per VGGT-Ω chunk and per keyframe, the floor band, the ceiling band and the camera's
+`precision/chunk_check.py` checks, per cube and per keyframe, the floor band, the ceiling band and the camera's
 height over the floor. DA3's own camera-to-floor distance serves as an independent confirmation.
 
 **Floor plane.** A seeded RANSAC (400 iterations, 2 cm) gives the floor plane, its normal oriented upward.
 
-**Bands.** Heights are $h=(X-c)\cdot n$. A band is the median of the points within 8 cm of the chunk's floor (or of the
+**Bands.** Heights are $h=(X-c)\cdot n$. A band is the median of the points within 8 cm of the cube's floor (or of the
 5th percentile), and likewise for the ceiling (97th percentile). Each band needs at least 200 points, and its resolution
 is $\hat\sigma$.
 
-**Departures.** Departures between chunks are judged by the decision rule, with a two-sample bootstrap and
+**Departures.** Departures between cubes are judged by the decision rule, with a two-sample bootstrap and
 $\varepsilon$ = the band's resolution.
 
 **Verdicts.**
@@ -834,7 +935,7 @@ $\varepsilon$ = the band's resolution.
 | level | the floor departs and the ceiling does not: a real level change |
 | depth | the floor and the ceiling depart in opposite directions |
 | pose | the floor and the ceiling depart together |
-| intra | the floor trend departs within the chunk |
+| intra | the floor trend departs within the cube |
 | undecided | anything the evidence cannot decide |
 
 The report lists what it would correct. Nothing is applied.
@@ -1113,10 +1214,11 @@ The viewer refines to 2 px of screen error.
 ## 19. Determinism, devices and reproducibility
 
 - **One GPU job at a time.** Every GPU stage checks that it has the whole card, and stops the VLM service first.
-- **Deterministic torch everywhere.** That means:
+- **Deterministic torch everywhere**, AMB3R-SLAM included (`reconstruction/amb3r_launch.py`). That means:
   - `use_deterministic_algorithms(True)` and cuDNN deterministic, with no benchmarking and TF32 off;
   - seeded RNGs and `CUBLAS_WORKSPACE_CONFIG=:4096:8`;
   - z-buffers and medians computed by stable sorts and min/max scatters, with no floating-point atomics;
+  - the coverage map and the cut counted with integers (cumulative sums over runs), never with float atomics;
   - the bundle adjustment's normal equations accumulated by sorted segment sums.
 - **Torch twins.** Each GPU port keeps the numpy function as the path of record. Tests hold the torch twin equal to it:
   exactly for decisions, and to $10^{-9}$ for geometry.
@@ -1145,7 +1247,8 @@ cd ui && npm run dev:web                      # the UI (Vite) → http://localho
 
 **Workflow.**
 
-1. Create a session, upload a video, and press **Reconstruir**: the reconstruction, the cloud, then VLM + SAM 3.
+1. Create a session, upload a video, and press **Reconstruir**: the reconstruction, the cloud, then VLM + SAM 3 and the
+   floor. **Instances → Cubes** shows how the scene was cut.
 2. Inspect the cloud. Set the **confidence** slider to the value that leaves the geometry clean.
 3. Press **GenRecon** in the segmentation panel. The slider's value is pre-filled.
 
@@ -1160,10 +1263,11 @@ stac-build/
 ├─ server/
 │   ├─ main.py                 # FastAPI app: REST, WebSockets, the run orders (Reconstruir, Autosegment, GenRecon)
 │   ├─ pipeline_manager.py     # stages, frozen config per job, resume probes, the queue, the GPU hand-over
-│   ├─ workers/                # map (reconstruction), cloudcompy, vlm, sam3, genrecon, certify (off)
+│   ├─ workers/                # map (reconstruction), cloudcompy, vlm, sam3, floor, genrecon, certify (off)
 │   ├─ intake/                 # I0 quality, focal probe, I1 parallax, I3 walk, turn frames, VRAM sizing
-│   ├─ reconstruction/         # chunk_covis (plan), chunk_plan (Ω resolution), scale_align, orient, sky precompute,
-│   │                          #   loops (spatial gate), gpu_cloud_clean, potree_converter, repro
+│   ├─ reconstruction/         # amb3r_probe (the whole-video pass), coverage_fill (the keyframes completed on the
+│   │                          #   map), cubes (the cut), cube_boxes (the viewer's cubes), chunk_plan (Ω resolution),
+│   │                          #   scale_align, orient, sky precompute, gpu_cloud_clean, potree_converter
 │   ├─ precision/              # F0 camera, F2 gauge, F4 tracks, F3 probe, F5 refine + ba_torch, F6 depth_on_f5 +
 │   │                          #   mono_detail + f6_torch, corrected cloud, chunk check, epochs
 │   ├─ segmentation/           # autoprompt (VLM), SAM 3 wrapper, mask → cloud, instances, OBBs, store
@@ -1172,8 +1276,9 @@ stac-build/
 │   │                          #   photo_albedo, publish, measure_mesh, genrecon_stac.patch
 │   └─ config.yaml
 ├─ vendor/
-│   ├─ VGGT-Long/              # the fork (branch gpu-main): VGGT-Ω chunks, context/witness views, SALAD, revisits,
-│   │                          #   bridges, metric lock, the chunk Sim(3) graph, the decision rule
+│   ├─ VGGT-Long/              # the fork (branch gpu-main): cube_run (Ω per cube, seams, ownership), context/witness
+│   │                          #   views, metric lock, the Sim(3) graph, SALAD, the decision rule
+│   ├─ AMB3R-SLAM/             # the fork (branch stac): the whole-video pass and its light map
 │   ├─ depth-anything-3/  pointdit/  sam31/  GenRecon/  …
 ├─ ui/                         # React + TypeScript + Vite; the viewer, panels, GenRecon and Autosegment windows
 ├─ tools/glb/                  # tile_mesh.mjs (3D Tiles)
