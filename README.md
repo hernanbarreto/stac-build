@@ -587,21 +587,28 @@ Each seam carries:
   \mathbf r_e=\frac{1}{\sigma_e}\Big[\,E(c_e)-c_e\ ;\ \operatorname{Log}(R_E)\,L_e\ ;\ (\ln s_E)\,L_e\,\Big]\in\mathbb R^7 .
   ```
 
-- **Scale prior.** Each cube $k\ge1$ has a weak DA3 scale prior:
+- **Scale prior.** Each cube $k\ge1$ has a DA3 scale prior whose width is **measured on the session's own seams**
+  (USER 2026-11-07). A seam's scale $s_e$ is how far two neighbouring cubes' DA3 locks disagree, so each lock's error is
 
   ```math
-  r^{\text{DA3}}_k=\frac{\lambda_k-\ln\big(s^{\text{DA3}}_k/s^{\text{lock}}_k\big)}{0.08/\sqrt{n_k}} .
+  \sigma_{\text{lock}}=\frac{1.4826\,\operatorname{med}_e\lvert\ln s_e\rvert}{\sqrt2},\qquad
+  r^{\text{DA3}}_k=\frac{\lambda_k-\ln\big(s^{\text{DA3}}_k/s^{\text{lock}}_k\big)}{\max\big(\sigma_{\text{lock}},\,0.08/\sqrt{n_k}\big)} .
   ```
 
-- **Cost.** Cauchy on every scalar component,
+  The width $0.08/\sqrt{n_k}$ alone took a cube's anchors as independent and claimed 1.1–1.5 %, where pccr's seams
+  measured neighbouring locks 0.876–1.167 apart ($\sigma_{\text{lock}}=8.8\,\%$; zaragoza 4.7 %, observatorio 5.4 %).
+- **Cost.** The seams and the priors **squared**; a loop closure, when there is one, under Cauchy,
 
   ```math
-  \min_{\{\omega_k,t_k,\lambda_k\}}\ \tfrac12\sum_j\ln\big(1+r_j^2\big),
+  \min_{\{\omega_k,t_k,\lambda_k\}}\ \tfrac12\Big[\sum_{\text{seams, priors}}r_j^2+\sum_{\text{loops}}\ln\big(1+r_j^2\big)\Big],
   ```
 
   solved by trust-region reflective least squares (tolerances $10^{-12}$), started from the spanning tree of the best seams.
-
-On pccr the seams disagreed by 1.8 to 5.4 cm before the solve, and by 0.1 cm in the median (0.6 cm at most) after it.
+  A seam is an exact fit of the same pixels in two passes, never an outlier to drop. With every residual under one
+  Cauchy and the narrow prior, pccr's chain of 11 cubes **broke two seams by 16 %**: 18 and 24 cm between the two
+  copies of the same surfaces, while the log read "0.0 cm" because it measured the seam's centroid only. Now no seam
+  breaks: pccr's worst seam is 10.2 cm at its surfaces. The log reports the disagreement at the surfaces, the scale
+  and the rotation read at the lever arm (`edge_surface_error_m`).
 
 **Not run on cubes, declared.** The chain's SALAD loop bridges and geometric revisit closures are not run. A revisit
 inside a cube is one Ω pass; a revisit across cubes is tied after the graph, by F4's revisit windows and F6's vote, both

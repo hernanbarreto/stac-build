@@ -13,6 +13,14 @@
 - Re-run with Replace in HIS order: zaragoza, observatorio, pccr 08-31, then the rest (bufferStop, station, pccr 2408).
 - VERDICT on zaragoza (coverage 69.4 → 38.8 %, ~56 % of the cloud kept): "tiene poca cobertura pero lo que se ve es
   perfecto, yo sostengo esto, prefiero poco y bueno que mucho y mierda". Do not loosen the floor for coverage.
+- pccr's cube graph (chain of 11, no loop) BROKE TWO SEAMS BY 16 % (0↔1, 2↔3: 18 / 24 cm between the copies of the
+  same surfaces) to follow DA3's per-cube priors (σ 0.08/√anchors = 1.1–1.5 % — anchors taken as independent) under
+  one Cauchy loss; the log said "seams 0.0 cm" (centroid only). USER "detenelo, aplicá la corrección y volvé a correr
+  pccr": fork `chunk_graph.solve(robust_seams=False)` — seams + priors SQUARED, loops alone Cauchy — and the prior's σ
+  MEASURED on the session's seams (1.4826·med|ln s_e|/√2, pccr 8.8 %), never tighter than the anchors'; the log reads
+  the seams at their surfaces (`edge_surface_error_m`). Offline on this run's seams: pccr worst 23.6 → 10.2 cm, none
+  broken; zaragoza / observatorio medians 2.5 → 4.3 / 2.6 → 4.0 cm (within the seams' own 1–4 cm noise; not re-run).
+  The measured σ alone, still under Cauchy, broke seam 0↔1 by 33 cm.
 - PENDING, to MEASURE when he says (USER: "me lo van a preguntar"): the recommended CAPTURE DISTANCE to the target,
   minimum and maximum (he expects the maximum ≤ 10 m) — per session, F6's half-B held-out error in metres binned by
   range, the support floor's pass rate by range, the published points by distance to their birth camera.
