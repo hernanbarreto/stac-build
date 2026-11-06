@@ -1,5 +1,22 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ 2026-11-07 (later) — DUPLICATES ON CUBES: THE REVISITS TIED BY AMB3R'S MAP (USER: "la corrida anterior duplicaba
+## muchísimo … mirá la pared de madera y las señales"; "me gusta tu enfoque de corrección … aplícalo a conciencia")
+- CAUSE, measured: on cubes nothing tied two moments of the walk that see the same surface from different cubes — no
+  SALAD on cubes, F4's windows follow the walk, F6 voted among walk neighbours only. pccr's coherent run of 11-06 was
+  the exception BY ACCIDENT: F4 read a loop_closures.txt left by a chunk run of 11-04 (24 SALAD loop windows); zaragoza
+  and observatorio had 0 loop windows (F6 contradicted 15.2 / ~28 % vs pccr 14.5 %).
+- FIX (USER: "¿por qué usamos salad si tenemos la información de qué kf ve qué cosa y cuáles comparten zonas con la nube
+  de amber?" — the source is AMB3R's map only): `reconstruction/cubes.py` 7 keeps `kf_covisibility` in cubes.json
+  (version 5): c(a→b) for EVERY two keyframes on one surface (|z − d| ≤ coverage_fill.ONE_SURFACE 0.25·d — at the
+  session's tolerance AMB3R's pccr map never saw end meet start, it closed no loop), pairs with max ≥ τ 0.3.
+  F4 `tracks.revisit_pairs`: one loop window (±4 kf, queried at both ends) per revisit the walk does not tie (no
+  keyframe window within 12 of both ends), thinned within 12 — pccr 6 windows incl. (1, 309), zaragoza 54. F6
+  `depth_on_f5.covisible_witnesses`: up to 6 keyframes of other moments (> 12 away, c(a→b) ≥ τ) vote after the
+  neighbours and turn frames, same rules, τ still the walk neighbours'. Stale `loop_closures.txt` / revisit reference
+  deleted on every cube run (map_worker, point 66). The cut is unchanged (passes ≤ 5 m).
+- Verdict pending his eye on the re-run queue (observatorio, zaragoza, pccr 08-31, bufferStop, station, pccr 2408).
+
 ## ⭐⭐⭐ 2026-11-07 — pccr: "LA NUBE MÁS COHERENTE Y CON MENOS ERRORES DE TODAS" (USER, 01:55 CDMX) — main 2b373e3
 - The first pass is AMB3R-SLAM over the WHOLE VIDEO at frame stride 1 (USER: "a amber le tenés que dar el video completo
   … a paso 1"; "amber solo decide las poses, los cubos como se arman lo decidimos nosotros"), right after I1

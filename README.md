@@ -155,7 +155,7 @@ of the artifacts it changed. The previous epoch is kept selectable, and a ledger
 | Multi-view feed-forward reconstruction (poses, intrinsics, depth, confidence) | **VGGT-Ω** 1B, `vggt_omega_1b_512.pt`, bf16 | `vendor/VGGT-Long` (fork, branch `gpu-main`) |
 | First pass over the whole video: every frame's pose, loops, what each frame saw | **AMB3R-SLAM**: DA3-Small front-end, VGGT-Ω submaps, DBoW loops, offline pose graph | `vendor/AMB3R-SLAM` (fork, branch `stac`) |
 | Metric multi-view depth: focal probe, I3 windows, scale anchors | **Depth Anything 3**, `DA3NESTED-GIANT-LARGE-1.1` | `vendor/depth-anything-3` |
-| Place recognition for loop candidates (F4's loop windows) | **DINOv2 ViT-B/14 + SALAD** (8448-D descriptor) | fork `LoopModels/` |
+| Place recognition for the chunk layouts' loop candidates (not run on cubes: the revisits are AMB3R's map's, §10.1) | **DINOv2 ViT-B/14 + SALAD** (8448-D descriptor) | fork `LoopModels/` |
 | Sky segmentation | `skyseg.onnx` (sha256-pinned), onnxruntime CPU | fork `loop_utils/sky_mask.py` |
 | Native-pixel point tracks | **VGGSfM v2** tracker (sha256-pinned) | fork `dependency/vggsfm_tracker` |
 | Monocular detail at depth discontinuities | **PointDiT-H/16** with DINOv3 ViT-H+/16 | `vendor/pointdit` |
@@ -482,6 +482,21 @@ keyframes take their geometry from its own group's cube.
 **A cube's views.** Its Ω views are its keyframes plus the turn frames that lie between two of its keyframes consecutive
 in the walk. Its F6 witnesses, the interval frames, follow the same rule.
 
+**What each keyframe sees of every other.** The same measurement with one keyframe on each side, for every two keyframes:
+
+```math
+c(a\!\to\!b)=\frac{1}{|S_a|}\,\#\big\{X\in S_a:\ b\text{'s record sees }X\text{ with }|z-d|\le 0.25\,d\big\},
+```
+
+with the band of **one surface** (0.25, the band the session's tolerance of §7 is measured in) instead of the tolerance:
+two moments of the walk whose geometry disagrees still see the surface each other saw, and those are the ones to tie.
+The pairs with $\max\big(c(a\!\to\!b),c(b\!\to\!a)\big)\ge\tau$ are kept in the plan (`kf_covisibility`). After the cut
+nothing tied two moments of the walk that see the same surface from different cubes: F4 tracked along the walk only and
+F6 voted among walk neighbours only, so two cubes that disagree left the surface twice (observatorio's wooden wall and
+signs, 2026-11-07). These pairs are F4's revisit windows (§14.3) and the co-visible witnesses of F6's vote (§14.6). At
+the session's tolerance, pccr's map never saw the walk's end meet its start (AMB3R closed no loop there); on one surface
+it does.
+
 **Products.** `intake/cubes.json` and `intake/cubes.png`, stamped by the probe, the inputs and the code. The viewer draws
 each cube (**Instances** tab, `reconstruction/cube_boxes.py`) as a box around the cameras of all its views, its own and the shared ones (cubes that share views overlap), carried into
 the live frame by the similarity between the probe's and the published keyframe cameras.
@@ -588,9 +603,11 @@ Each seam carries:
 
 On pccr the seams disagreed by 1.8 to 5.4 cm before the solve, and by 0.1 cm in the median (0.6 cm at most) after it.
 
-**Not run on cubes, declared.** The chain's SALAD loop bridges and geometric revisit closures are not run: a revisit is
-inside a cube by the cut. Neither are the per-chunk scale ladder and its linear drift, since a cube has no walk order to
-drift along.
+**Not run on cubes, declared.** The chain's SALAD loop bridges and geometric revisit closures are not run. A revisit
+inside a cube is one Ω pass; a revisit across cubes is tied after the graph, by F4's revisit windows and F6's vote, both
+from AMB3R's map (§10.1). A `loop_closures.txt` or revisit reference left by an earlier run is deleted before Ω runs:
+pccr's run of 2026-11-06 read 24 SALAD pairs from a chunk run of 11-04, and it was the only session whose F5 saw a
+revisit. Neither are the per-chunk scale ladder and its linear drift run, since a cube has no walk order to drift along.
 
 **Application.**
 
@@ -714,7 +731,13 @@ score) runs on CUDA under deterministic torch.
 **Windows.**
 
 - Windows of 24 keyframes with step 12, and 2 query frames each.
-- Loop windows around every SALAD pair.
+- **Revisit windows** (`revisit_pairs`): the keyframes within 4 of both ends of a pair that sees the same surface in
+  AMB3R's map (§10.1), queried at both ends, so the tracks cross from one moment of the walk to the other and F5 aligns
+  the two moments' poses on landmarks both see. A pair the walk already ties (a keyframe window holds keyframes within
+  12, half a window, of both ends) gets none. The pairs that see the most of each other go first; a pair whose two ends
+  lie within 12 of an accepted pair's two ends is tied through it and the walk's windows. On the data of 2026-11-07:
+  pccr 6 windows, among them its end and its start (1, 309); zaragoza, where every view sees every other, 54.
+- Loop windows around SALAD pairs (chunk layouts only) and the re-identified objects' visits.
 - Witness windows spanning the witness frames between two keyframes.
 
 **Queries.** A 48-column grid plus up to 512 Shi–Tomasi corners. A query is dropped where VGGT-Ω's depth jumps by more
@@ -838,7 +861,10 @@ $|z'-z_b|/z_b\le\tau_0$. Surfaces stay VGGT-Ω's. Mixed pixels at a discontinuit
 when $z_{\text{al}}$ agrees with it, and are otherwise left out of the measurement tier.
 
 **The edge-keeping vote.** Every candidate pixel of keyframe $f$ is lifted to $X=C_f+z\,\mathbf r(u,v)$ and put to its six
-neighbours plus the turn and interval witnesses.
+neighbours, the turn and interval witnesses, and the **co-visible witnesses** (`covisible_witnesses`): the keyframes of
+other moments of the walk, more than 12 keyframes away, that see at least $\tau$ of what $f$ saw in AMB3R's map (§10.1),
+the most co-visible first, as many as the six neighbours. Two moments that disagree contradict each other instead of
+both standing.
 
 The tolerance $\tau$ is the 75th percentile of the relative disagreement between interior pixels of neighbours at offsets
 $\pm3,\pm6,\pm12$, measured on this session (≈ 2 %). For a witness $g$ with depth map $d_g$ and the point's depth $z_g$ in

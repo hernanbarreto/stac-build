@@ -39,7 +39,10 @@ Per keyframe i (cameras and poses = the session's, i.e. F5's after f5_refine):
     chunk) and not sky (epoch0_cloud.SKY_CONF);
  4. vote over the keyframe offsets `bend.neighbors`: a pixel LEAVES when more neighbours see free space
     through it than agree; otherwise its depth is the MEDIAN of its own and the agreeing views carried
-    onto its ray. τ = the `bend.tau_quantile` percentile of the session's own neighbour disagreement;
+    onto its ray. τ = the `bend.tau_quantile` percentile of the session's own neighbour disagreement.
+    The turn frames vote after the neighbours, and the keyframes of OTHER moments of the walk that see the
+    same surface (USER 2026-11-07, :func:`covisible_witnesses`: two moments that disagree contradict each
+    other instead of both standing);
  5. chunks (Omega's) → the cloud stage's cleaner (voxel + SOR) → the new-cloud epoch through
     corrected_cloud.publish (the same transaction as F7). The `confidence` column carries the vote's
     agree count. The camera that built the cloud is written next to it (intrinsic.txt, one row per
@@ -464,9 +467,10 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
         beyond tau (something nearer no view measured: the surface behind would wear its colour).
     Returns ({frame: (depth map, agree count map)}, tau, totals). ``bars_out`` (a dict) receives the
     vote's bar τ and every keyframe's pixel margins to it (point 53) — kept out of ``totals``, which
-    stays numeric for its readers. ``extra``: {keyframe: [witness frames]} — the turn frames that
-    vote on that keyframe after its neighbours (USER 2026-11-04; their maps and poses are in
-    ``dep`` / ``passed`` / ``c2w``); τ is measured on the keyframes alone, as before."""
+    stays numeric for its readers. ``extra``: {keyframe: [witness frames]} — the turn frames and the
+    keyframes of other moments that see the same surface, voting on that keyframe after its neighbours
+    (USER 2026-11-04, 2026-11-07; their maps and poses are in ``dep`` / ``passed`` / ``c2w``); τ is
+    measured on the walk neighbours alone, as before."""
     import torch
     from precision import corrected_cloud as CC
     from precision import f6_torch as FT
@@ -642,6 +646,64 @@ def load_turn_witnesses(out: Path, frames: List[int], chunk: Dict[int, int], thr
     log(f"{LOG_TAG} turn witnesses: {rep['used']} turn frame(s) vote on {len(extra)} keyframe(s)"
         + (f"; ignored {rep['ignored']}" if rep["ignored"] else ""))
     return dep, valid, passed, cw, extra, rep
+
+
+def covisible_witnesses(session_dir: Path, frames: List[int], neighbors,
+                        log: Callable = print) -> Tuple[Dict[int, List[int]], Dict[str, Any]]:
+    """The keyframes of OTHER MOMENTS of the walk that see what a keyframe sees, as witnesses of its vote (USER
+    2026-11-07, on observatorio's duplicated wooden wall and signs: "me gusta tu enfoque de corrección … aplícalo a
+    conciencia y que se corrija en serio"). The vote heard the walk around a keyframe only (``neighbors``, its turn
+    frames): two moments that saw one wall from two cubes that disagree each kept their copy, and nothing contradicted
+    either. What each keyframe sees of every other in AMB3R's map (the cube plan's ``kf_covisibility``,
+    reconstruction/cubes.py 7 — which keyframe sees what, which share a zone): for keyframe a, the keyframes b beyond
+    the reach of its offsets (more than max |offset| keyframes away along the walk) that see at least τ of what a saw,
+    the most co-visible first (ties by walk order), as many as the walk's own offsets — the other moments get as many
+    voices as the walk around it. They vote after the neighbours and the turn frames by the same rules (agree within τ,
+    free space either way); the vote's τ stays the walk neighbours' own disagreement. Returns ({keyframe: [keyframes]},
+    report)."""
+    rep: Dict[str, Any] = {"sources": {}, "used": 0}
+    p = Path(session_dir) / "intake" / "cubes.json"
+    plan_cv = json.loads(p.read_text()).get("kf_covisibility") if p.exists() else None
+    reach = max(abs(int(x)) for x in neighbors)
+    cap = len(list(neighbors))
+    idx = {int(f): i for i, f in enumerate(frames)}
+    best: Dict[Tuple[int, int], float] = {}            # (a, b) → c(a→b)
+    for name, cv in (("structure probe (intake/cubes.json)", plan_cv),):
+        if not cv:
+            rep["sources"][name] = {"pairs": 0, "why_none": "no cube plan" if not p.exists() else
+                                    "the cube plan holds no keyframe co-visibility (a plan before version 5)"}
+            continue
+        tau = float(cv["tau"])
+        n_in, unknown = 0, 0
+        for a, b, cab, cba in cv["pairs"]:
+            a, b = int(a), int(b)
+            if a not in idx or b not in idx:
+                unknown += 1
+                continue
+            if abs(idx[a] - idx[b]) <= reach:
+                continue
+            for x, y, c in ((a, b, float(cab)), (b, a, float(cba))):
+                if c >= tau and c > best.get((x, y), -1.0):
+                    best[(x, y)] = c
+                    n_in += 1
+        rep["sources"][name] = {"pairs": n_in, "tau": tau, "band_rel": cv.get("band_rel"),
+                                "not_keyframes_of_this_run": unknown}
+    cand: Dict[int, List[Tuple[float, int]]] = {}
+    for (a, b), c in best.items():
+        cand.setdefault(a, []).append((-c, idx[b]))
+    extra: Dict[int, List[int]] = {}
+    for f in frames:
+        if f in cand:
+            extra[f] = [frames[j] for _c, j in sorted(cand[f])[:cap]]
+    n = [len(v) for v in extra.values()]
+    rep.update({"beyond_keyframes": reach, "per_keyframe_cap": cap, "used": int(sum(n)),
+                "keyframes_with_witnesses": len(extra), "candidates": len(best)})
+    log(f"{LOG_TAG} co-visible witnesses: {len(extra)} of {len(frames)} keyframes hear {sum(n)} keyframe(s) of other "
+        f"moments of the walk that see what they see (more than {reach} keyframes away, at most {cap} each, from "
+        f"{len(best)} candidate(s); "
+        + "; ".join(f"{k}: {v['pairs']}" + (f" ({v['why_none']})" if v.get("why_none") else "")
+                    for k, v in rep["sources"].items()) + ")")
+    return extra, rep
 
 
 def camera_travels(tmp: Path, params, n_kf: int, log: Callable = print) -> Path:
@@ -1055,6 +1117,10 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
         out, frames, chunk, thr, zmed, final_coefs, c2w, inp, carry, rec_hw, Dm, H, W, bc.neighbors, log)
     dep.update(t_dep); valid.update(t_valid); passed.update(t_passed)
     c2w_vote = dict(c2w); c2w_vote.update(t_c2w)
+    # the keyframes of other moments of the walk that see the same surface (USER 2026-11-07)
+    cv_extra, cv_rep = covisible_witnesses(session_dir, frames, bc.neighbors, log)
+    for f, ws in cv_extra.items():
+        t_extra.setdefault(f, []).extend(ws)
     _p(50, "edge-keeping multi-view vote")
     labels = mask_labels(out, H, W, log)
     if labels is not None and lens:
@@ -1071,7 +1137,7 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
                                  c2w=c2w, params=params, chunk=chunk, voted=voted, tau=tau, vst=vst, cover=cover,
                                  wb=wb, score=score, score_B=score_B, heldout_m=heldout_m, window_rule=window_rule,
                                  coefs=final_coefs,
-                                 vote_bars=vote_bars, turn_witnesses=t_rep,
+                                 vote_bars=vote_bars, turn_witnesses=t_rep, covisible_witnesses=cv_rep,
                                  provenance=provenance, status_counts=status_counts, c0=c0, obs=obs,
                                  dropped_tracks=dropped_tracks, error_factor=fac,
                                  floor={str(k): {"threshold": thr[k]} for k in sorted(thr)}, floor_norm=floor_norm,
@@ -1159,6 +1225,7 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
                                          **C.provenance[i]}
                                 for i, f in enumerate(frames)},
                   "turn_witnesses": getattr(C, "turn_witnesses", None),
+                  "covisible_witnesses": getattr(C, "covisible_witnesses", None),
                   "vote": {"tau": tau, "coverage": cover, "bars": C.vote_bars,
                            **{k: (float(v) / max(vst["valid"], 1) if k not in ("tau", "valid") else v)
                               for k, v in vst.items() if k != "tau"}},

@@ -44,6 +44,8 @@ FILL_VERSION = 2                # 2: the bar is the measurement's own noise (1: 
 CLOSED_BY = "coverage"
 PROVENANCE = "tool_measured"
 CHUNK = 1 << 24                # points projected at once
+ONE_SURFACE = 0.25             # |d/z − 1| under this: one surface — the samples the session's tolerance is measured on
+                               # (and the band two moments that disagree are still on, reconstruction/cubes.py 7)
 
 
 class CoverageFillError(RuntimeError):
@@ -133,7 +135,7 @@ class CoverageMap:
             dj = self.D[j][v.clamp(0, self.Hs - 1), u.clamp(0, self.Ws - 1)]
             ok &= dj > 0
             q = dj[ok] / z[ok] - 1.0
-            rel.append(q[q.abs() < 0.25])
+            rel.append(q[q.abs() < ONE_SURFACE])
         rel = t.cat(rel) if rel else t.zeros(0, device=self.dev)
         if len(rel) < 100:
             raise CoverageFillError(f"only {len(rel)} samples of consecutive keyframes on one surface — the "

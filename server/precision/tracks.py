@@ -18,8 +18,13 @@ Windows:
   keyframes  overlapping runs of ``window_frames`` keyframes (``window_overlap_frac``)
   loop       the keyframes around both ends of every SALAD pair
              (``maplong_run/loop_closures.txt`` — INDICES into its own image list,
-             resolved through that list) and every re-identified object's visits
-             (``instance_loops.json``, F3)
+             resolved through that list), every re-identified object's visits
+             (``instance_loops.json``, F3) and every REVISIT (:func:`revisit_pairs`, USER
+             2026-11-07): two keyframes the walk's windows do not tie that see the same
+             surface in the structure probe's map (AMB3R's: ``intake/cubes.json``
+             ``kf_covisibility``, reconstruction/cubes.py 7) — the tracks F5 aligns two moments
+             of the walk with. No SALAD on cubes: a ``loop_closures.txt`` there is another run's
+             and the map worker deletes it (point 66)
   witness    each run of witness frames with the two keyframes around it — the
              correspondences F5 localises the witnesses with
 
@@ -152,6 +157,71 @@ def witness_windows(kf: Sequence[int], witnesses: Sequence[int], window_frames: 
         for s in range(0, len(run), per):
             out.append(Window([a] + run[s:s + per] + [b], "witness", [a, b]))
     return out
+
+
+def revisit_pairs(sources: Sequence[Tuple[str, Optional[dict]]], kf: Sequence[int], windows: Sequence[Window],
+                  reach: int) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
+    """The REVISITS (USER 2026-11-07: "aplícalo a conciencia y que se corrija en serio"): pairs of keyframe INDICES
+    (i, j) that see the same surface — one sees at least τ of what the other saw, on one surface, in the structure
+    probe's map (``sources``: (name, kf_covisibility), reconstruction/cubes.py 7 — AMB3R's: which keyframe sees what,
+    which share a zone) — and that the walk does not tie already: no keyframe window holds keyframes within ``reach``
+    (half a keyframe window) of both ends. On cubes nothing else tied two moments of the walk: SALAD does not
+    run there, and the keyframe windows follow the walk. ONE loop window per revisit: the pairs that see the most of
+    each other first (ties by index); a pair whose two ends lie within ``reach`` of an accepted pair's two ends is tied
+    through it and the walk's windows (zaragoza, where every view sees every other: 409 such pairs, one window each,
+    would have been an hour of tracking). Returns (pairs, report)."""
+    rep: Dict[str, Any] = {"sources": {}, "reach_keyframes": int(reach)}
+    r = int(reach)
+    kidx = {int(f): i for i, f in enumerate(kf)}
+    best: Dict[Tuple[int, int], float] = {}
+    tau = None
+    for name, cv in sources:
+        if not cv:
+            rep["sources"][name] = {"pairs": 0, "why_none": "not measured"}
+            continue
+        t_ = float(cv["tau"])
+        tau = t_ if tau is None else min(tau, t_)
+        n_in, unknown = 0, 0
+        for a, b, cab, cba in cv["pairs"]:
+            if int(a) not in kidx or int(b) not in kidx:
+                unknown += 1
+                continue
+            c = max(float(cab), float(cba))
+            if c < t_:
+                continue
+            i, j = sorted((kidx[int(a)], kidx[int(b)]))
+            if i != j and c > best.get((i, j), -1.0):
+                best[(i, j)] = c
+            n_in += 1
+        rep["sources"][name] = {"pairs": n_in, "tau": t_, "band_rel": cv.get("band_rel"),
+                                "not_keyframes_of_this_run": unknown}
+    spans = [(min(ids), max(ids)) for ids in ([kidx[f] for f in w.frames if f in kidx]
+                                              for w in windows if w.kind == "keyframes") if ids]
+    ws = np.asarray([a for a, _b in spans], np.int64)
+    we = np.asarray([b for _a, b in spans], np.int64)
+    cand, tied = [], 0
+    for (i, j), c in best.items():
+        if len(ws) and bool(np.any((ws <= i + r) & (we >= j - r))):
+            tied += 1
+            continue
+        cand.append((-c, i, j))
+    cand.sort()
+    out: List[Tuple[int, int]] = []
+    P = np.zeros(0, np.int64)
+    Q = np.zeros(0, np.int64)
+    for _c, i, j in cand:
+        if len(out) and bool(np.any((np.abs(P - i) <= r) & (np.abs(Q - j) <= r))):
+            continue
+        out.append((i, j))
+        P = np.append(P, i)
+        Q = np.append(Q, j)
+    out.sort()
+    rep.update({"tau": tau, "covisible_pairs": len(best), "tied_by_the_walk": tied, "candidates": len(cand),
+                "pairs": len(out), "gap_keyframes": None})
+    if out:
+        gaps = np.asarray([j - i for i, j in out], np.int64)
+        rep["gap_keyframes"] = {"min": int(gaps.min()), "median": float(np.median(gaps)), "max": int(gaps.max())}
+    return out, rep
 
 
 def salad_pairs(loop_file: Path) -> List[Tuple[int, int]]:
@@ -406,8 +476,8 @@ def instance_loops(out_dir: Path, rid: Optional[str] = None,
 
 def chain_inputs(session_dir: Path, rid: Optional[str] = None) -> Dict[str, Path]:
     """The files F4 reads that no step of the chain writes (the runner stamps them, point 31):
-    the keyframe and witness lists, SALAD's pairs and the instance loops of THIS reconstruction
-    (point 34). The frames, Omega's records (depth edges) and the config are stamped by the
+    the keyframe and witness lists, SALAD's pairs, the cube plan's revisits and the instance loops of
+    THIS reconstruction (point 34). The frames, Omega's records (depth edges) and the config are stamped by the
     runner.
 
     Whether instance_loops.json is an INPUT of F4 is decided by its OWNERSHIP alone (this
@@ -421,7 +491,8 @@ def chain_inputs(session_dir: Path, rid: Optional[str] = None) -> Dict[str, Path
     out = sd / "output"
     cand = {"frames/selected_frames.json": sd / "frames" / "selected_frames.json",
             "frames/witness_frames.json": sd / "frames" / "witness_frames.json",
-            "output/maplong_run/loop_closures.txt": out / "maplong_run" / "loop_closures.txt"}
+            "output/maplong_run/loop_closures.txt": out / "maplong_run" / "loop_closures.txt",
+            "intake/cubes.json": sd / "intake" / "cubes.json"}
     found = {k: p for k, p in cand.items() if p.exists()}
     if instance_loops_owned(out, rid)[1]["taken"]:
         found[f"output/{INSTANCE_LOOPS_NAME}"] = out / INSTANCE_LOOPS_NAME
@@ -513,16 +584,33 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
     if il_rep["present"] and not il_rep["taken"]:
         log(f"{LOG_TAG} {INSTANCE_LOOPS_NAME} NOT taken: {il_rep['reason']}")
     idx_pairs += il_pairs
-    windows = (keyframe_windows(kf, tcfg.window_frames, tcfg.window_overlap_frac,
-                                tcfg.query_frames_per_window)
+    kf_windows = keyframe_windows(kf, tcfg.window_frames, tcfg.window_overlap_frac, tcfg.query_frames_per_window)
+    # the REVISITS: what each keyframe sees of every other in AMB3R's map (the cube plan, USER 2026-11-07: "tenemos la
+    # información de qué kf ve qué cosa y cuáles comparten zonas con la nube de amber")
+    cp = session_dir / "intake" / "cubes.json"
+    plan_cv = json.loads(cp.read_text()).get("kf_covisibility") if cp.exists() else None
+    rv_pairs, rv_rep = revisit_pairs([("structure probe (intake/cubes.json)", plan_cv)], kf, kf_windows,
+                                     int(tcfg.window_frames) // 2)
+    idx_pairs += rv_pairs
+    windows = (kf_windows
                + loop_windows(kf, idx_pairs, tcfg.loop_half_window)
                + witness_windows(kf, wit, tcfg.window_frames))
     log(f"{LOG_TAG} {len(kf)} keyframes, {len(wit)} witnesses → {len(windows)} window(s) "
         f"({sum(w.kind == 'keyframes' for w in windows)} keyframe, "
         f"{sum(w.kind == 'loop' for w in windows)} loop from {n_salad} SALAD + "
-        f"{len(idx_pairs) - n_salad} instance pair(s), "
+        f"{len(il_pairs)} instance pair(s) + {len(rv_pairs)} revisit(s), "
         f"{sum(w.kind == 'witness' for w in windows)} witness); tracker grid {tw}x{th} "
         f"for native {nw}x{nh}")
+    src = "; ".join(f"{k}: {v['pairs']} pair(s)" + (f" ({v['why_none']})" if v.get("why_none") else "")
+                    for k, v in rv_rep["sources"].items())
+    if rv_pairs:
+        g = rv_rep["gap_keyframes"]
+        log(f"{LOG_TAG} revisits: {len(rv_pairs)} loop window(s) — {rv_rep['covisible_pairs']} pair(s) of keyframes "
+            f"see the same surface (c ≥ {rv_rep['tau']:g} either way, on one surface), {rv_rep['tied_by_the_walk']} "
+            f"of them tied by the walk's windows, the rest one window per revisit within {rv_rep['reach_keyframes']} "
+            f"keyframes; {g['min']}–{g['max']} keyframes apart (median {g['median']:.0f}) [{src}]")
+    else:
+        log(f"{LOG_TAG} revisits: none — no two keyframes the walk does not tie see the same surface [{src}]")
 
     # the prior's depth edges need Omega's exact grid (F0's camera.json); without it
     # the filter is skipped and SAID, never approximated
@@ -683,7 +771,7 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
            "witnesses_covered": len(set(obs["frame"]) & wit_set), "n_witnesses": len(wit_set),
            "sigma_native_px": {"median": float(np.median(sig)),
                                "p90": float(np.percentile(sig, 90))},
-           "instance_loops": il_rep,
+           "instance_loops": il_rep, "revisits": rv_rep,
            "split": "sha256 of (seed, query frame, query pixel float32 bits) per track"}
     (pdir / REPORT_NAME).write_text(json.dumps(rep, indent=1))
     # the wall clock lives apart from the compared report (point 36)

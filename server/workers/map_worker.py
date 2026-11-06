@@ -2525,6 +2525,16 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                sky_cache=output_dir / "maplong_run" / "sky_masks", log=pipe.send_log,
                                probe=_st_cfg["probe"], cube_m=_st_cfg["cube_m"], walk_m=_walk0)
     _cubes = _cplan["cubes"]
+    # no SALAD on cubes, one cube or many (the revisits are AMB3R's map's: which keyframe sees what —
+    # reconstruction/cubes.py 7): a previous reconstruction's revisit reference and SALAD pairs are deleted — never
+    # reused (point 66, USER 2026-10-08). pccr's run of 2026-11-06 read a loop_closures.txt left by a chunk run of 11-04
+    # (F4's 24 loop windows); USER 2026-11-07: "¿por qué usamos salad si tenemos la información de qué kf ve qué cosa?"
+    from intake.walk import REVISIT_REFERENCE_NAME
+    for _stale in (output_dir / REVISIT_REFERENCE_NAME, output_dir / "maplong_run" / "loop_closures.txt"):
+        if _stale.exists():
+            _stale.unlink()
+            pipe.send_log(f"[loops] no SALAD on cubes — the previous reconstruction's "
+                          f"{_stale.relative_to(output_dir)} deleted (never reused, point 66)")
     _sets = [[int(k) for k in cb["keyframes"]] for cb in _cubes]
     _owner = [int(x) for x in _cplan["owner"]]
     if sorted({k for F in _sets for k in F}) != list(range(_n_selected)) or len(_owner) != _n_selected:
@@ -2629,14 +2639,6 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         _anchor_idx = cube_anchor_indices(_sets, _anch_per_chunk)
         _ensure_anchors([_sel_files[i] for i in _anchor_idx])
         _apply_chunked_metric(vggt_config, None, cubes=(_sets, _owner))
-        # no SALAD on cubes (a revisit is inside its cube): a previous reconstruction's revisit reference is deleted —
-        # never reused (point 66, USER 2026-10-08)
-        from intake.walk import REVISIT_REFERENCE_NAME
-        _stale_ref = output_dir / REVISIT_REFERENCE_NAME
-        if _stale_ref.exists():
-            _stale_ref.unlink()
-            pipe.send_log(f"[loops] no SALAD on cubes — the previous reconstruction's {REVISIT_REFERENCE_NAME} "
-                          f"deleted (never reused, point 66)")
         _persist_cube_plan(_cplan, _sets, _owner, _n_selected, _walk0, _res, _ctx)
         pipe.send_log(f"CUBES (I4): walk {_walk0:.1f} m → {_plan_layout_text({'chunk_sets': _sets})}, every two "
                       f"neighbour blocks one cube; ONE Omega pass per cube, ONE Sim(3) graph")

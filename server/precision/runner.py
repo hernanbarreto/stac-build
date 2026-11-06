@@ -145,9 +145,12 @@ STEPS: List[Step] = [
          config=("refine", "camera")),
     Step("f6_bend", "F6 depth on F5: Omega bent to F5's landmarks + multi-view vote (the product)", "da3",
          "precision.depth_on_f5",
+         # intake/cubes.json: what each keyframe sees of every other — the co-visible keyframes of other moments
+         # vote too (depth_on_f5.covisible_witnesses, USER 2026-11-07)
          reads=_GEOMETRY_IN + ("frames", "output/precision/tracks.npz", "output/precision/refine.json",
                                "output/gauge.json", "output/depth_correction.json", "output/seg_masks.npz",
-                               "output/precision/witness_poses.txt", "output/precision/witness_frames.txt"),
+                               "output/precision/witness_poses.txt", "output/precision/witness_frames.txt",
+                               "intake/cubes.json"),
          writes=("output/cleaned_cloud.ply", "output/intrinsic.txt", "output/precision/depth_on_f5.json"),
          config=("bend", "depth", "cloud", "mono_detail", "gauge", "refine", "camera",
                  "raw:reconstruction.simple", "raw:postprocessing")),
