@@ -428,7 +428,7 @@ def _plot(report, pairs, before, after, n_kf, plan, path: Path) -> str:
     ax2.plot([r["kf"] for r in rows], [r["step_rot_deg"] for r in rows], "-",
              color="#cc4422", label="δθ per step (°)")
     if plan:
-        for i, (a, b) in enumerate(plan["chunk_ranges"]):
+        for i, (a, b) in enumerate(plan.get("chunk_ranges") or []):     # a cube plan has none
             ax.axvspan(a, b, color="#888888", alpha=(6 if i % 2 else 12) / 100)
     ax.set_xlabel("keyframe"); ax.set_ylabel("cm", color="#2266cc")
     ax2.set_ylabel("deg", color="#cc4422")

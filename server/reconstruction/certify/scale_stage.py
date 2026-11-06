@@ -60,6 +60,10 @@ def chunk_of_keyframes(output_dir, n_kf: int) -> Tuple[List[Tuple[int, int]], np
     plan = load_chunk_plan(output_dir)
     if plan is None:
         ranges = [(0, int(n_kf))]
+    elif plan.get("layout") == "cubes":
+        # a CUBE session (USER 2026-11-06) has no chain of seams k→k+1, which this stage solves on — said, not faked
+        raise RuntimeError("the certification's scale stage is chain-shaped (seams k→k+1); a cube session "
+                           "(chunk_plan.json layout 'cubes') has no such seams — not supported")
     else:
         ranges = [(int(a), int(b)) for a, b in plan["chunk_ranges"]]
     owner = frame_owner(ranges, int(n_kf))

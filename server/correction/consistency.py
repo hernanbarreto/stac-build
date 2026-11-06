@@ -243,7 +243,7 @@ def _plot(report: dict, M: np.ndarray, plan: Optional[dict], path: Path) -> str:
     ax.plot(kf2, [r["dev_far_cm"] for r in rows if r["dev_far_cm"] is not None],
             ".", color="#cc4422", label=f"vs distant writers (>{report['near_kf']} kf)")
     if plan:
-        for i, (a, b) in enumerate(plan["chunk_ranges"]):
+        for i, (a, b) in enumerate(plan.get("chunk_ranges") or []):     # a cube plan has none
             ax.axvspan(a, b, color="#888888", alpha=(6 if i % 2 else 12) / 100)
     ax.set_xlabel("keyframe"); ax.set_ylabel("cm")
     ax.set_title("pairwise deviation of a keyframe's points vs other writers")
