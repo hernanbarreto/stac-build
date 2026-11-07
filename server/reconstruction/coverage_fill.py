@@ -9,7 +9,9 @@ keyframe SEES a point when the point falls inside its image (its whole horizonta
 consistent with what the keyframe itself saw there, |z − d| ≤ tol·d (tol the session's own: 3σ of the relative
 disagreement between consecutive keyframes on one surface — reconstruction/walk_structure.covisibility's rule, across
 AMB3R's submaps as the walk crosses them); occluded or in front of what it saw, it does not. A point is COVERED when a
-second keyframe sees it from a ray at least ``refine.min_tri_deg`` away from the first's (F5's bound for a landmark):
+second keyframe sees it from a ray at least ``refine.min_tri_deg`` away from the first's (F5's bound for a landmark) — since
+2026-11-07 (version 3, USER "ahora necesitamos cobertura") as many such views as F6 publishes a point with
+(``precision.cloud.min_support_views``), the second view being the case of one:
 one view, or two from the same place, measure nothing. A point no keyframe sees, or one alone, is WEAK.
 
 THE FILL — the map is the definitive coverage, the intake's keyframes its first proposal: a frame AMB3R reconstructed
@@ -40,7 +42,9 @@ from typing import Callable, Dict, List, Sequence, Tuple
 import numpy as np
 
 FILL_NAME = "coverage_fill.json"
-FILL_VERSION = 2                # 2: the bar is the measurement's own noise (1: (1 − τ)/4 of a frame's view)
+FILL_VERSION = 3                # 3: covered = the PUBLICATION's support (USER 2026-11-07: "ahora necesitamos cobertura"):
+                               #    min_support views ≥ min_tri_deg from the first (2: one second view; the bar is the
+                               #    measurement's own noise — 1: (1 − τ)/4 of a frame's view)
 CLOSED_BY = "coverage"
 PROVENANCE = "tool_measured"
 CHUNK = 1 << 24                # points projected at once
@@ -98,6 +102,7 @@ class CoverageMap:
         if state:
             self.seen = torch.zeros(N, dtype=torch.bool, device=dev)
             self.covered = torch.zeros(N, dtype=torch.bool, device=dev)
+            self.n_far = torch.zeros(N, dtype=torch.int32, device=dev)   # views ≥ the angle away from the first
             self.d1 = torch.zeros((N, 3), dtype=torch.float32, device=dev)
 
     def own(self, r: int):
@@ -163,12 +168,16 @@ class CoverageMap:
             was = self.seen[idx]
             first = idx[~was]
             self.d1[first] = dirg[~was]
-            cov = was & ~self.covered[idx] & ((self.d1[idx] * dirg).sum(1) <= cos_min)
-            self.covered[idx[cov]] = True
+            far = was & ~self.covered[idx] & ((self.d1[idx] * dirg).sum(1) <= cos_min)
+            self.n_far[idx[far]] += 1
+            self.covered[idx[far]] = self.n_far[idx[far]] >= int(self.support)
             self.seen[first] = True
 
+    support = 1                  # views ≥ the angle away from a point's first view that cover it (fill() sets it)
+
     def brings(self, c: int, cos_min: float) -> int:
-        """How many of what candidate record ``c`` saw no keyframe sees, or it would cover as the second view."""
+        """How many of what candidate record ``c`` saw no keyframe sees, or it would add a view to that is ≥ the angle
+        away from its first while it has fewer than ``support`` of them."""
         sl = self.own(c)
         X = self.X[sl]
         if len(X) == 0:
@@ -186,12 +195,17 @@ class CoverageMap:
 
 
 def fill(video: Dict[str, np.ndarray], keyframe_frames: Sequence[int], quality_rows: Sequence[Dict], *,
-         min_tri_deg: float, device: str = "cuda", log: Callable[[str], None] = print) -> Dict:
+         min_tri_deg: float, min_support: int = 1, device: str = "cuda", log: Callable[[str], None] = print) -> Dict:
     """The fill on the whole-video pass ``video`` (reconstruction/amb3r_probe.load_video) for I1's keyframes
-    ``keyframe_frames`` (frame numbers); ``quality_rows``: I0's frames (frame, file, sharp_rank, usable)."""
+    ``keyframe_frames`` (frame numbers); ``quality_rows``: I0's frames (frame, file, sharp_rank, usable). A point is
+    COVERED when ``min_support`` keyframes see it from at least ``min_tri_deg`` away from the first that did — F6's
+    publication rule (precision.cloud.min_support_views views that test its depth, USER 2026-11-07: pccr's racks were
+    seen from ≥ 2° by a median of 14 reconstructed frames of the video and 4 keyframes, and the 10-view floor emptied
+    them); 1 = the second view of version 2."""
     from reconstruction.amb3r_probe import source_records
     t0 = time.monotonic()
     cmap = CoverageMap(video, device)
+    cmap.support = max(1, int(min_support))
     kf_src = sorted(set(int(r) for r in source_records(video, keyframe_frames)))
     tol, bar = cmap.tolerance(list(zip(kf_src[:-1], kf_src[1:])), log)
     cos_min = math.cos(math.radians(float(min_tri_deg)))
@@ -230,12 +244,13 @@ def fill(video: Dict[str, np.ndarray], keyframe_frames: Sequence[int], quality_r
     after = cmap.summary()
     rest = max((cmap.brings(c, cos_min) / float(n_per[c]) for c in cands if c not in in_s), default=0.0)
     log(f"[coverage] the map: {cmap.N:,} points of {cmap.F} reconstructed frames; I1's {len(kf_set)} keyframes leave "
-        f"{before['unseen'] * 100:.1f} % unseen and {before['seen_once'] * 100:.1f} % seen without a second view "
-        f"(≥ {min_tri_deg:g}° apart); {len(added)} frame(s) bringing more than the noise ({bar * 100:.2f} % of their "
-        f"view) → {after['unseen'] * 100:.1f} % unseen, {after['seen_once'] * 100:.1f} % seen once — DECLARED: no "
-        f"frame of the video covers it beyond the noise (the most any frame left still brings: {rest * 100:.2f} %)"
+        f"{before['unseen'] * 100:.1f} % unseen and {before['seen_once'] * 100:.1f} % seen by fewer than "
+        f"{cmap.support} view(s) ≥ {min_tri_deg:g}° from the first; {len(added)} frame(s) bringing more than the "
+        f"noise ({bar * 100:.2f} % of their view) → {after['unseen'] * 100:.1f} % unseen, "
+        f"{after['seen_once'] * 100:.1f} % under the support — DECLARED: no frame of the video brings it beyond the "
+        f"noise (the most any frame left still brings: {rest * 100:.2f} %)"
         + (f"; added {[a['frame'] for a in added][:60]}" if added else ""))
-    return {"tol_rel": tol, "noise_share": bar, "min_tri_deg": float(min_tri_deg),
+    return {"tol_rel": tol, "noise_share": bar, "min_tri_deg": float(min_tri_deg), "min_support": cmap.support,
             "reconstructed_frames": cmap.F, "points": cmap.N, "before": before, "after": after,
             "most_left_share": rest, "added": sorted(added, key=lambda a: a["frame"]),
             "elapsed_s": round(time.monotonic() - t0, 3)}
@@ -274,7 +289,7 @@ def _base_witness(wit: Dict) -> Dict:
     return base
 
 
-def session_fill(scan_dir: Path, video_npz: Path, video_stamp: Dict, *, min_tri_deg: float,
+def session_fill(scan_dir: Path, video_npz: Path, video_stamp: Dict, *, min_tri_deg: float, min_support: int = 1,
                  device: str = "cuda", log: Callable[[str], None] = print) -> Dict:
     """Fill the session's keyframes (module docstring); reused when its stamp — the whole-video pass, I1's selection,
     I0's report, this code and the bars — is the one on disk."""
@@ -288,7 +303,7 @@ def session_fill(scan_dir: Path, video_npz: Path, video_stamp: Dict, *, min_tri_
     base, wbase = _base_selection(sel_doc), _base_witness(wit_doc)
     stamp_src = {"version": FILL_VERSION, "video": video_stamp, "i1_selected_files": base["selected_files"],
                  "quality_features_sha256": _sha_file(p_q), "code": _sha_file(Path(__file__)),
-                 "min_tri_deg": float(min_tri_deg)}
+                 "min_tri_deg": float(min_tri_deg), "min_support": int(min_support)}
     stamp = hashlib.sha256(json.dumps(stamp_src, sort_keys=True).encode()).hexdigest()
     rec_p = scan_dir / "intake" / FILL_NAME
     if (sel_doc.get("coverage_fill") or {}).get("stamp") == stamp and rec_p.exists() \
@@ -299,7 +314,7 @@ def session_fill(scan_dir: Path, video_npz: Path, video_stamp: Dict, *, min_tri_
     quality = json.loads(p_q.read_text())
     kf = [_frame_no(f) for f in base["selected_files"]]
     res = fill(load_video(video_npz), kf, quality.get("frames") or [], min_tri_deg=min_tri_deg,
-               device=device, log=log)
+               min_support=min_support, device=device, log=log)
     added = res["added"]
     new_files = sorted(set(base["selected_files"]) | {a["file"] for a in added}, key=_frame_no)
     kfs = sorted(list(base.get("keyframes", [])) + [
@@ -347,10 +362,13 @@ def main(argv=None) -> int:
     ap.add_argument("--video", required=True)
     ap.add_argument("--video-stamp", required=True, help="the whole-video pass's stamp (a JSON file)")
     ap.add_argument("--min-tri-deg", type=float, required=True)
+    ap.add_argument("--min-support", type=int, default=1,
+                    help="views ≥ min-tri-deg from a point's first view that cover it (F6's support floor)")
     ap.add_argument("--device", default="cuda")
     a = ap.parse_args(argv)
     session_fill(Path(a.scan), Path(a.video), json.loads(Path(a.video_stamp).read_text()),
-                 min_tri_deg=a.min_tri_deg, device=a.device, log=lambda m: print(m, flush=True))
+                 min_tri_deg=a.min_tri_deg, min_support=a.min_support, device=a.device,
+                 log=lambda m: print(m, flush=True))
     return 0
 
 

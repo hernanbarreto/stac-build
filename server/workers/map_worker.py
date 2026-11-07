@@ -1853,7 +1853,9 @@ def _amb3r_coverage_fill(pipe: WorkerPipe, session_path: Path, frames_dir: Path,
     stamp_p = session_path / "intake" / "amb3r_video.stamp.json"
     cmd = [sys.executable, "-m", "reconstruction.coverage_fill", "--scan", str(session_path), "--video", str(npz),
            "--video-stamp", str(stamp_p),
-           "--min-tri-deg", repr(float(load_precision_config(config).refine.min_tri_deg)), "--device", "cuda"]
+           "--min-tri-deg", repr(float(load_precision_config(config).refine.min_tri_deg)),
+           # covered = F6's publication support (USER 2026-11-07: "ahora necesitamos cobertura")
+           "--min-support", str(int(load_precision_config(config).cloud.min_support_views)), "--device", "cuda"]
     proc = subprocess.Popen(cmd, cwd=str(Path(__file__).resolve().parent.parent), env=repro.deterministic_env(),
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     tail = []

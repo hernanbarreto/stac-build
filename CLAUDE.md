@@ -32,6 +32,18 @@
   zaragoza / observatorio change ≤ 1 % in scale, ≤ 9 cm (not re-run). Also: SAM3's "partial" guard
   (pipeline_manager._stage_is_complete) counts the prompts the census says SAM3 RAN — pccr re-segmented 76 × 313 (~1 h)
   because 'person' (tried, zero masklets) was not among segmentation.json's prompts.
+- RESULT: seams 0.0 cm but the holes STAYED (F6 coverage 46.6 → 46.4 %) — the graph was NOT the cause (I said it was;
+  wrong). Measured per pixel from the hole keyframes' own view: the published cloud covers 41–48 % (racks) / 5–14 % of
+  what they see vs 81–94 % elsewhere; their keyframe witnesses that see a pixel from ≥ 2° and agree: median 0–1 (good
+  keyframes 4–9) — the fixed offsets ±3/6/12 look elsewhere when walking sideways/turning, and only 14–19 keyframes see
+  those areas at all, while AMB3R's video has a median of 13–19 frames seeing them from ≥ 2° (4–6 of them keyframes).
+  (Also: a keyframe's count of PUBLISHED points says nothing — the 5 mm voxel keeps one point per cell from any
+  keyframe; measure holes by projecting the cloud into a view.) USER: "no importa, usemos la combinación de kf de amber
+  y los nuestros, ahora necesitamos cobertura, dale": (1) coverage_fill version 3 — covered = `cloud.min_support_views`
+  views ≥ `refine.min_tri_deg` from the first (was one second view; map_worker passes `--min-support`); pccr dry:
+  295 + 391 = 686 keyframes, covered 52.8 → 83.1 %; (2) F6's co-visible witnesses at ANY distance but the offsets, up
+  to 18 (dry on pccr: pixels with ≥ 10 confirmations #100 25 → 44 %, #150 41 → 75 %). VLM / SAM3 re-run (keyframes
+  change).
 - PENDING, to MEASURE when he says (USER: "me lo van a preguntar"): the recommended CAPTURE DISTANCE to the target,
   minimum and maximum (he expects the maximum ≤ 10 m) — per session, F6's half-B held-out error in metres binned by
   range, the support floor's pass rate by range, the published points by distance to their birth camera.

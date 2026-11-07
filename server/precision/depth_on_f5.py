@@ -681,17 +681,19 @@ def covisible_witnesses(session_dir: Path, frames: List[int], neighbors,
     conciencia y que se corrija en serio"). The vote heard the walk around a keyframe only (``neighbors``, its turn
     frames): two moments that saw one wall from two cubes that disagree each kept their copy, and nothing contradicted
     either. What each keyframe sees of every other in AMB3R's map (the cube plan's ``kf_covisibility``,
-    reconstruction/cubes.py 7 — which keyframe sees what, which share a zone): for keyframe a, the keyframes b beyond
-    the reach of its offsets (more than max |offset| keyframes away along the walk) that see at least τ of what a saw,
-    the most co-visible first (ties by walk order), as many as the walk's own offsets — the other moments get as many
-    voices as the walk around it. They vote after the neighbours and the turn frames by the same rules (agree within τ,
-    free space either way); the vote's τ stays the walk neighbours' own disagreement. Returns ({keyframe: [keyframes]},
-    report)."""
+    reconstruction/cubes.py 7 — which keyframe sees what, which share a zone): for keyframe a, the keyframes b that see
+    at least τ of what a saw, AT ANY DISTANCE ALONG THE WALK but its own offsets (which vote already), the most
+    co-visible first (ties by walk order), up to three times as many as the offsets. USER 2026-11-07 (pccr's racks):
+    walking sideways or turning in front of a target, the keyframes at ±3/6/12 look elsewhere while ±1, ±2, ±4 … see it
+    — the fixed offsets plus six keyframes beyond ±12 gave the racks' pixels a median of one confirming view; chosen by
+    what they see, a well-seen keyframe's pixels with ≥ 10 confirmations went 25 → 44 % (#100) and 41 → 75 % (#150).
+    They vote after the neighbours and the turn frames by the same rules (agree within τ, free space either way); the
+    vote's τ stays the walk neighbours' own disagreement. Returns ({keyframe: [keyframes]}, report)."""
     rep: Dict[str, Any] = {"sources": {}, "used": 0}
     p = Path(session_dir) / "intake" / "cubes.json"
     plan_cv = json.loads(p.read_text()).get("kf_covisibility") if p.exists() else None
-    reach = max(abs(int(x)) for x in neighbors)
-    cap = len(list(neighbors))
+    offsets = {int(x) for x in neighbors}
+    cap = 3 * len(offsets)
     idx = {int(f): i for i, f in enumerate(frames)}
     best: Dict[Tuple[int, int], float] = {}            # (a, b) → c(a→b)
     for name, cv in (("structure probe (intake/cubes.json)", plan_cv),):
@@ -706,7 +708,7 @@ def covisible_witnesses(session_dir: Path, frames: List[int], neighbors,
             if a not in idx or b not in idx:
                 unknown += 1
                 continue
-            if abs(idx[a] - idx[b]) <= reach:
+            if a == b or (idx[b] - idx[a]) in offsets:      # itself, or one of its offsets (they vote already)
                 continue
             for x, y, c in ((a, b, float(cab)), (b, a, float(cba))):
                 if c >= tau and c > best.get((x, y), -1.0):
@@ -722,10 +724,10 @@ def covisible_witnesses(session_dir: Path, frames: List[int], neighbors,
         if f in cand:
             extra[f] = [frames[j] for _c, j in sorted(cand[f])[:cap]]
     n = [len(v) for v in extra.values()]
-    rep.update({"beyond_keyframes": reach, "per_keyframe_cap": cap, "used": int(sum(n)),
+    rep.update({"any_distance_but_the_offsets": sorted(offsets), "per_keyframe_cap": cap, "used": int(sum(n)),
                 "keyframes_with_witnesses": len(extra), "candidates": len(best)})
-    log(f"{LOG_TAG} co-visible witnesses: {len(extra)} of {len(frames)} keyframes hear {sum(n)} keyframe(s) of other "
-        f"moments of the walk that see what they see (more than {reach} keyframes away, at most {cap} each, from "
+    log(f"{LOG_TAG} co-visible witnesses: {len(extra)} of {len(frames)} keyframes hear {sum(n)} keyframe(s) that see "
+        f"what they see (any distance along the walk but their offsets, at most {cap} each, from "
         f"{len(best)} candidate(s); "
         + "; ".join(f"{k}: {v['pairs']}" + (f" ({v['why_none']})" if v.get("why_none") else "")
                     for k, v in rep["sources"].items()) + ")")

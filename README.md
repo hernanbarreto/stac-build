@@ -339,13 +339,15 @@ next keyframe, with $|\rho|<0.25$. Then:
 $\eta$ is the share of samples on one surface that the test itself calls inconsistent: its own miss rate (pccr: tol
 2.70 %, $\eta$ = 4.22 %).
 
-**Covered.** A point is **seen** when some keyframe sees it. It is **covered** when a second keyframe sees it from a ray at
-least `refine.min_tri_deg` (2°) away from the first one's, $\angle(C_g-X,\,\mathbf d_1)\ge2°$, which is F5's bound for a
-landmark. A point not seen, or seen without a second view, is **weak**: one view, or two from the same place, measure
-nothing.
+**Covered.** A point is **seen** when some keyframe sees it. It is **covered** when as many keyframes as F6 publishes a
+point with (`precision.cloud.min_support_views`, 10, §14.6) see it from rays at least `refine.min_tri_deg` (2°) away
+from the first one's, $\angle(C_g-X,\,\mathbf d_1)\ge2°$, which is F5's bound for a landmark (USER 2026-11-07: "ahora
+necesitamos cobertura"). Until then the bar was ONE second view, and the 10-view floor emptied what that left: pccr's
+racks were seen from ≥ 2° by a median of 14 frames of the video and 4 keyframes. A point not seen, or seen by fewer such
+views, is **weak**.
 
 **The fill.** A candidate is any frame AMB3R reconstructed that I0 found usable and that is not a keyframe's own record.
-Its gain is the share of what it saw that it would see first, or cover as the second view from far enough:
+Its gain is the share of what it saw that it would see first, or add a view to from far enough while it is not covered:
 
 ```math
 g(c)=\frac{1}{|P_c|}\,\#\big\{X\in P_c:\ \neg\mathrm{seen}(X)\ \vee\ \big(\mathrm{seen}(X)\wedge\neg\mathrm{covered}(X)\wedge
@@ -364,8 +366,10 @@ g(c)=\frac{1}{|P_c|}\,\#\big\{X\in P_c:\ \neg\mathrm{seen}(X)\ \vee\ \big(\mathr
 unchanged input is not filled twice. `intake/coverage_fill.json` records the coverage before and after and every frame
 added. The fill runs on the card, in a process of its own.
 
-On pccr: I1's 295 keyframes left 0.7 % of the map unseen and 6.4 % seen once. 18 frames were added; 0.4 % unseen and 5.8 %
-seen once remain, and no frame covers more of them than the noise.
+On pccr, with one second view as the bar: I1's 295 keyframes left 0.7 % of the map unseen and 6.4 % seen once; 18 frames
+were added. With the publication's support (10 views ≥ 2°), the same keyframes leave 46.5 % of the map under it; 391
+frames of AMB3R's are added (686 keyframes), and 0.03 % unseen and 16.8 % under the support remain — no frame of the
+video brings more of them than the noise.
 
 ---
 
@@ -866,10 +870,11 @@ $|z'-z_b|/z_b\le\tau_0$. Surfaces stay VGGT-Ω's. Mixed pixels at a discontinuit
 when $z_{\text{al}}$ agrees with it, and are otherwise left out of the measurement tier.
 
 **The edge-keeping vote.** Every candidate pixel of keyframe $f$ is lifted to $X=C_f+z\,\mathbf r(u,v)$ and put to its six
-neighbours, the turn and interval witnesses, and the **co-visible witnesses** (`covisible_witnesses`): the keyframes of
-other moments of the walk, more than 12 keyframes away, that see at least $\tau$ of what $f$ saw in AMB3R's map (§10.1),
-the most co-visible first, as many as the six neighbours. Two moments that disagree contradict each other instead of
-both standing.
+neighbours, the turn and interval witnesses, and the **co-visible witnesses** (`covisible_witnesses`): the keyframes that
+see at least $\tau$ of what $f$ saw in AMB3R's map (§10.1), **at any distance along the walk** but $f$'s own offsets,
+the most co-visible first, up to 18. Walking sideways or turning in front of a target, the keyframes at ±3/6/12 look
+elsewhere while ±1, ±2, ±4… see it (pccr's racks: a median of one confirming view per pixel with the offsets alone).
+Two moments that disagree contradict each other instead of both standing.
 
 The tolerance $\tau$ is the 75th percentile of the relative disagreement between interior pixels of neighbours at offsets
 $\pm3,\pm6,\pm12$, measured on this session (≈ 2 %). For a witness $g$ with depth map $d_g$ and the point's depth $z_g$ in
