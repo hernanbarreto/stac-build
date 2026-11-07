@@ -1968,6 +1968,14 @@ class PipelineManager:
                     want = {c.strip() for c in _json.load(open(vlm))
                             .get("prompt", "").split(";") if c.strip()}
                     have = set(_json.load(open(seg)).get("prompts", []))
+                    # a prompt SAM3 RAN and found nothing in is done too (the census records its fate, its status
+                    # 'ran'): pccr 2026-11-07 re-segmented 76 concepts × 313 keyframes (~1 h) because 'person',
+                    # tried with a fallback and zero masklets, was not among segmentation.json's prompts
+                    cen_p = output_dir / "segmentation_census.json"
+                    if cen_p.exists():
+                        for c in _json.load(open(cen_p)).get("prompts", []) or []:
+                            if ((c.get("sam3_status") or {}).get("status") == "ran") and c.get("prompt"):
+                                have.add(str(c["prompt"]).strip())
                     if want and not want <= have:
                         return False, (f"segmentation partial "
                                        f"({len(have & want)}/{len(want)} categories)")

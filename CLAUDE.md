@@ -21,6 +21,17 @@
   the seams at their surfaces (`edge_surface_error_m`). Offline on this run's seams: pccr worst 23.6 → 10.2 cm, none
   broken; zaragoza / observatorio medians 2.5 → 4.3 / 2.6 → 4.0 cm (within the seams' own 1–4 cm noise; not re-run).
   The measured σ alone, still under Cauchy, broke seam 0↔1 by 33 cm.
+- THEN (same night, his screenshots of pccr's racks: "tenemos cobertura, tenemos cercanía al objetivo, pero tenemos
+  huecos"): the holes were whole keyframes at the transitions the graph had BENT (0→1, 1→2, 6→7: 0–2 k points each vs a
+  median of 27 k) — the same views (~36 depth-testing witnesses) and distance as the full ones, but the two cubes do not
+  coincide there and the 10-view floor drops the keyframe. NOT glass (USER: "ahí no hay nada de vidrio … si te digo eso
+  es porque sé lo que hay" — never claim a material without looking). USER "corregí, detené pccr y volvé a correr":
+  NO DA3 PRIOR in the cube graph (fork cube_run: `CG.solve(K, edges, [], {}, robust_seams=False)`, the per-cube scales
+  recorded, `priors_used: false`, `locks_spread_log`) — the seams place the cubes exactly; the metre is scale_align's
+  and the scale along the walk F2's continuous gauge (no step at a transition). Offline: pccr seams 10.2 → 0.0 cm;
+  zaragoza / observatorio change ≤ 1 % in scale, ≤ 9 cm (not re-run). Also: SAM3's "partial" guard
+  (pipeline_manager._stage_is_complete) counts the prompts the census says SAM3 RAN — pccr re-segmented 76 × 313 (~1 h)
+  because 'person' (tried, zero masklets) was not among segmentation.json's prompts.
 - PENDING, to MEASURE when he says (USER: "me lo van a preguntar"): the recommended CAPTURE DISTANCE to the target,
   minimum and maximum (he expects the maximum ≤ 10 m) — per session, F6's half-B held-out error in metres binned by
   range, the support floor's pass rate by range, the published points by distance to their birth camera.

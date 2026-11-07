@@ -587,28 +587,26 @@ Each seam carries:
   \mathbf r_e=\frac{1}{\sigma_e}\Big[\,E(c_e)-c_e\ ;\ \operatorname{Log}(R_E)\,L_e\ ;\ (\ln s_E)\,L_e\,\Big]\in\mathbb R^7 .
   ```
 
-- **Scale prior.** Each cube $k\ge1$ has a DA3 scale prior whose width is **measured on the session's own seams**
-  (USER 2026-11-07). A seam's scale $s_e$ is how far two neighbouring cubes' DA3 locks disagree, so each lock's error is
+- **No scale prior** (USER 2026-11-07). The seams alone place the cubes: each is an exact fit of the same pixels in two
+  passes, and the cubes must coincide there. The DA3 per-cube scales are recorded, not used. A DA3 prior per cube fought
+  the seams wherever the locks disagree (pccr: neighbouring locks 0.876–1.167 apart). At $0.08/\sqrt{n_k}$ (1.1–1.5 %,
+  each cube's anchors taken as independent) the solve broke two seams by 16 %, 18 and 24 cm between the copies of the
+  same surfaces, while the log read "0.0 cm" because it measured the seam's centroid only. At the locks' measured
+  spread ($\sigma_{\text{lock}}=1.4826\,\operatorname{med}_e\lvert\ln s_e\rvert/\sqrt2$ = 8.8 %) it still bent three
+  seams by 6–10 cm. F6's 10-view support floor then emptied the keyframes at those transitions: #19–25, #55–65 and
+  #187–199 published 0–2 k points each, against a median of 27 k. The metre is `scale_align`'s (every anchor of the
+  session); the scale along the walk is F2's continuous gauge (§14.2), a smooth curve of the walked distance that
+  cannot put a step at a transition. The locks' spread is still measured and recorded (`locks_spread_log`).
+- **Cost.** The seams squared; a loop closure, when there is one, under Cauchy,
 
   ```math
-  \sigma_{\text{lock}}=\frac{1.4826\,\operatorname{med}_e\lvert\ln s_e\rvert}{\sqrt2},\qquad
-  r^{\text{DA3}}_k=\frac{\lambda_k-\ln\big(s^{\text{DA3}}_k/s^{\text{lock}}_k\big)}{\max\big(\sigma_{\text{lock}},\,0.08/\sqrt{n_k}\big)} .
-  ```
-
-  The width $0.08/\sqrt{n_k}$ alone took a cube's anchors as independent and claimed 1.1–1.5 %, where pccr's seams
-  measured neighbouring locks 0.876–1.167 apart ($\sigma_{\text{lock}}=8.8\,\%$; zaragoza 4.7 %, observatorio 5.4 %).
-- **Cost.** The seams and the priors **squared**; a loop closure, when there is one, under Cauchy,
-
-  ```math
-  \min_{\{\omega_k,t_k,\lambda_k\}}\ \tfrac12\Big[\sum_{\text{seams, priors}}r_j^2+\sum_{\text{loops}}\ln\big(1+r_j^2\big)\Big],
+  \min_{\{\omega_k,t_k,\lambda_k\}}\ \tfrac12\Big[\sum_{\text{seams}}r_j^2+\sum_{\text{loops}}\ln\big(1+r_j^2\big)\Big],
   ```
 
   solved by trust-region reflective least squares (tolerances $10^{-12}$), started from the spanning tree of the best seams.
-  A seam is an exact fit of the same pixels in two passes, never an outlier to drop. With every residual under one
-  Cauchy and the narrow prior, pccr's chain of 11 cubes **broke two seams by 16 %**: 18 and 24 cm between the two
-  copies of the same surfaces, while the log read "0.0 cm" because it measured the seam's centroid only. Now no seam
-  breaks: pccr's worst seam is 10.2 cm at its surfaces. The log reports the disagreement at the surfaces, the scale
-  and the rotation read at the lever arm (`edge_surface_error_m`).
+  A chain of seams is then placed exactly (pccr: every seam 0.0 cm at its surfaces). Cubes joined on more than one side
+  share the loop's disagreement (zaragoza: worst seam 10.4 cm, median 3.1; observatorio 2.8 / 1.4). The log reports
+  every seam at its surfaces, the scale and the rotation read at the lever arm (`edge_surface_error_m`).
 
 **Not run on cubes, declared.** The chain's SALAD loop bridges and geometric revisit closures are not run. A revisit
 inside a cube is one Ω pass; a revisit across cubes is tied after the graph, by F4's revisit windows and F6's vote, both
