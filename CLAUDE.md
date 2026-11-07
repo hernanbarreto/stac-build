@@ -24,7 +24,9 @@
   answered in 0.1 s. THE FIX THAT WORKED: kill the stuck worker, RESTART
   THE BACKEND (its job record stays "running" and refuses every order until then), relaunch with replace OFF: intake
   validated in 30 s, AMB3R / coverage / cubes / Omega / F0–F4 reused by their stamps, resumed at F5 with R0–R2 bit-
-  identical to the killed run. A STALL = the STAGE process (e.g. `-m precision.refine`, not the `inline_child` parent)
+  identical to the killed run. A backend restart DROPS THE QUEUE (it lives in the backend's memory): re-send the
+  stalled session with replace OFF and the sessions not yet started as they were (Replace + segmentation), in order.
+  A STALL = the STAGE process (e.g. `-m precision.refine`, not the `inline_child` parent)
   AND the card both idle for minutes; between F5 rungs the log is silent for 4–6 min while both run at 100 %. After a
   pod restart PointDiT's DINOv3 (3.1 GB) is copied once from vendor/ into the local torch cache (5 s).
 - HIS COST RULE (same incident, in anger): every minute of pod idle is money — when a run stalls, check the stage
