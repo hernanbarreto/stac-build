@@ -17,6 +17,11 @@
   18): pccr's door with 295 kf 7 → 82 of 93 keyframes able to gather 10 views, the table 64/64 either way.
   Kept: revisits tied by AMB3R's map (F4 windows), graph by seams alone, the 10-view floor ≥ 2°.
 - Queue relaunched with Replace: pccr 08-31, observatorio, zaragoza, bufferStop, station, pccr 2408.
+- VERDICT pccr (07:46 CDMX, the cloud before segmentation): "sí, está mucho mejor y más completa, sin piso duplicado, claro
+  que hay partes que le falta algo de voto pero en general está muy bien". Measured: 313 kf, 11 cubes of 42–64 views,
+  seams 0.0 / 3.2 cm, F5 R2 0.430 px (bound 1.98 px), co-visible witnesses at a median 0.61 m baseline, F6 coverage
+  57.0 % (46.4 % with the nearest witnesses), below the 10-view support 25.0 % (34 %), 10.7 M points; the corridor's
+  door box 53 → 78 % covered; the table edge's bend 3.0 → 2.4 cm (keyframe copies still 3.7 cm apart, p5–p95).
 
 ## ⭐⭐⭐ 2026-11-07 (evening) — F6 PUBLISHES ONLY SUPPORTED POINTS: ≥ 10 VIEWS THAT TEST THE DEPTH (USER: "quiero
 ## puntos válidos sin ruido"; "prefiero tener menos puntos pero valiosos, que muchos puntos malos")
