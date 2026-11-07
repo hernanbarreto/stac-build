@@ -1,5 +1,13 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ 2026-11-08 (08:10 CDMX) — EVERY KEYFRAME THAT SEES ANY PART VOTES (USER: "que voten todos como decís,
+## siempre … cortá y veamos cómo sale"; "ver lo mismo al 30 % no necesariamente es un número con sustento, ven lo mismo
+## es ver total o parcialmente el sector")
+- cubes.py 9: `kf_covisibility` keeps every pair where one keyframe sees any part of the other's view (c > 0 either way,
+  τ 0 in the plan); F6's co-visible witnesses = ALL of them (no cap of 18), any distance but the offsets, the widest
+  baseline first; F4's revisits read the same definition. pccr re-run with Replace.
+- His question on a WEIGHTED vote: answered (my view), not built — pending his word.
+
 ## ⭐⭐⭐ 2026-11-08 (06:20 CDMX) — ≤ 64 VIEWS PER CUBE, THE INTAKE'S KEYFRAMES, F6'S WITNESSES BY BASELINE (USER: "ok, dale,
 ## detené todo y corremos todo así como vos proponés")
 - VERDICT on pccr with 5 m cubes and no view cap + the fill to F6's support (686 kf, 6 cubes of 94–358 kf / up to 385

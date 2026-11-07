@@ -25,8 +25,9 @@ frames between two of its keyframes consecutive in the walk; its F6 witnesses (t
 7. WHAT EACH KEYFRAME SEES OF EVERY OTHER (USER 2026-11-07, on the duplicated wooden wall and signs of observatorio: "me
    gusta tu enfoque de corrección … aplícalo a conciencia y que se corrija en serio"): c(a→b), the test of 3 with one
    keyframe on each side and the band of one surface (coverage_fill.ONE_SURFACE: two moments that disagree are still on
-   the surface each other saw), for every two keyframes; the pairs that reach τ either way are kept in the plan
-   (``kf_covisibility``, frame numbers). Two moments of the walk that see the same surface were tied by nothing after
+   the surface each other saw), for every two keyframes; the pairs where one sees any part of what the other saw are
+   kept in the plan (``kf_covisibility``, frame numbers; USER 2026-11-08: "ven lo mismo es ver total o parcialmente el
+   sector" — the 30 % bar of before had no ground). Two moments of the walk that see the same surface were tied by nothing after
    the cut — F4 tracked only along the walk, F6 voted only among walk neighbours — so two cubes that disagree left the
    surface twice. F4 tracks across these pairs (precision/tracks.revisit_pairs: F5 aligns the two moments' poses on
    landmarks both see) and F6's vote hears them (precision/depth_on_f5.covisible_witnesses). The band, not the session's
@@ -49,7 +50,8 @@ TAU = 0.3                    # the co-visibility bar (walk_structure.TAU, chunk_
 CUBE_M = 5.0                 # USER 2026-11-06 ("el tamaño del cubo, no más de por ejemplo como genrecon 5 m o 6 m")
 SAMPLES = 2000               # the points of a unit tested in another (a fixed stride over what its records saw)
 CUBES_NAME = "cubes.json"
-CUBES_VERSION = 8            # 8: along the walk, ≤ cube_m AND ≤ max_views views, neighbours sharing half their
+CUBES_VERSION = 9            # 9: kf_covisibility keeps every pair where one sees any part of the other's view (USER
+                             #    2026-11-08); 8: along the walk, ≤ cube_m AND ≤ max_views views, neighbours sharing half their
                              #    keyframes (USER 2026-11-08); 7: 5 m along the walk, no view cap (2026-11-07, night);
                              #    6: no view cap; 5: + kf_covisibility; 4: groups by what the units see; 3: boxes of
                              #    seen space; 2: rays cast against AMB3R's cloud; 1: k-d camera cells
@@ -149,12 +151,14 @@ def _sees_many(cmap, recs, X, tol: float):
 
 
 def keyframe_covisibility(cmap, kf_frames: Sequence[int], kf_recs: Sequence[int], *, band: Optional[float] = None,
-                          tau: float = TAU, samples: int = SAMPLES) -> Dict:
+                          tau: float = 0.0, samples: int = SAMPLES) -> Dict:
     """What each keyframe sees of every other (7), for EVERY two keyframes: c(a→b) = the share of what keyframe a saw (a
     fixed stride of its record's points) that keyframe b's record sees on one surface, |z − d| ≤ ``band``·d — the band
     the session's tolerance is measured in (coverage_fill.ONE_SURFACE): two moments of the walk that disagree by less
     than that still see the surface each other saw, and those are the ones to tie. Each keyframe sees with its record
-    (AMB3R: its own frame's, else the nearest reconstructed one's). Kept: the pairs that reach ``tau`` either way, as
+    (AMB3R: its own frame's, else the nearest reconstructed one's). Kept: the pairs where one sees ANY PART of what the
+    other saw (``tau`` 0: c > 0 either way; USER 2026-11-08: "ver lo mismo al 30 % no necesariamente es un número con
+    sustento, ven lo mismo es ver total o parcialmente el sector"; a positive ``tau`` keeps the pairs that reach it), as
     [frame a, frame b, c(a→b), c(b→a)], a before b along the walk. On the card."""
     from reconstruction.coverage_fill import ONE_SURFACE
     band = ONE_SURFACE if band is None else float(band)
@@ -174,7 +178,8 @@ def keyframe_covisibility(cmap, kf_frames: Sequence[int], kf_recs: Sequence[int]
     M.fill_diagonal_(0.0)
     Mc = M.cpu().numpy()
     fr = [int(f) for f in kf_frames]
-    ii, jj = np.nonzero(np.triu(np.maximum(Mc, Mc.T) >= float(tau), 1))
+    both = np.maximum(Mc, Mc.T)
+    ii, jj = np.nonzero(np.triu((both > 0) & (both >= float(tau)), 1))
     pairs = [[fr[i], fr[j], float(Mc[i, j]), float(Mc[j, i])] for i, j in zip(ii.tolist(), jj.tolist())]
     return {"tau": float(tau), "band_rel": band, "samples": int(samples), "n_keyframes": n, "pairs": pairs}
 
@@ -381,8 +386,8 @@ def analyse(probe_npz: Path, inputs: Dict, *, device: str = "cuda", log: Callabl
         f"a unit in {st['memberships_per_unit']:.2f} cube(s)")
     at = {f: i for i, f in enumerate(kf)}
     gap = np.asarray([at[b] - at[a] for a, b, _c, _d in kf_cov["pairs"]], np.int64)
-    log(f"[cubes] what each keyframe sees of every other: {len(kf_cov['pairs'])} pair(s) of keyframes at c ≥ {TAU:g} "
-        f"either way on one surface (within {kf_cov['band_rel'] * 100:g} % of the depth)"
+    log(f"[cubes] what each keyframe sees of every other: {len(kf_cov['pairs'])} pair(s) of keyframes where one sees "
+        f"any part of what the other saw, on one surface (within {kf_cov['band_rel'] * 100:g} % of the depth)"
         + (f", the farthest {int(gap.max())} keyframes apart along the walk" if len(gap) else "")
         + " — what F4 tracks across and F6's vote hears")
     return plan

@@ -479,7 +479,9 @@ c(a\!\to\!b)=\frac{1}{|S_a|}\,\#\big\{X\in S_a:\ b\text{'s record sees }X\text{ 
 
 with the band of **one surface** (0.25, the band the session's tolerance of §7 is measured in) instead of the tolerance:
 two moments of the walk whose geometry disagrees still see the surface each other saw, and those are the ones to tie.
-The pairs with $\max\big(c(a\!\to\!b),c(b\!\to\!a)\big)\ge\tau$ are kept in the plan (`kf_covisibility`). After the cut
+The pairs where one sees **any part** of what the other saw, $\max\big(c(a\!\to\!b),c(b\!\to\!a)\big)>0$, are kept
+in the plan (`kf_covisibility`; USER 2026-11-08: "ver lo mismo al 30 % no necesariamente es un número con sustento, ven
+lo mismo es ver total o parcialmente el sector" — until then $\tau$ = 0.3). After the cut
 nothing tied two moments of the walk that see the same surface from different cubes: F4 tracked along the walk only and
 F6 voted among walk neighbours only, so two cubes that disagree left the surface twice (observatorio's wooden wall and
 signs, 2026-11-07). These pairs are F4's revisit windows (§14.3) and the co-visible witnesses of F6's vote (§14.6). At
@@ -849,8 +851,9 @@ when $z_{\text{al}}$ agrees with it, and are otherwise left out of the measureme
 
 **The edge-keeping vote.** Every candidate pixel of keyframe $f$ is lifted to $X=C_f+z\,\mathbf r(u,v)$ and put to its six
 neighbours, the turn and interval witnesses, and the **co-visible witnesses** (`covisible_witnesses`): the keyframes that
-see at least $\tau$ of what $f$ saw in AMB3R's map (§10.1), **at any distance along the walk** but $f$'s own offsets,
-**the widest baseline first** (the farthest camera from $f$'s, F5's poses), up to 18. Walking sideways or turning in
+see **any part** of what $f$ saw in AMB3R's map (§10.1), **at any distance along the walk** but $f$'s own offsets —
+**every one of them** (USER 2026-11-08: "que voten todos … siempre"), listed the widest baseline first (the farthest
+camera from $f$'s, F5's poses); each votes on the pixels it sees. Until 2026-11-08 they were the 18 most co-visible. Walking sideways or turning in
 front of a target, the keyframes at ±3/6/12 look elsewhere while ±1, ±2, ±4… see it (pccr's racks: a median of one
 confirming view per pixel with the offsets alone). The most co-visible are the nearest keyframes of the walk (20–37 cm
 from $f$'s camera on pccr), and far away they test no depth: of the 93 keyframes that see pccr's door at the end of a

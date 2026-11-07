@@ -682,9 +682,10 @@ def covisible_witnesses(session_dir: Path, frames: List[int], neighbors, c2w: Di
     frames): two moments that saw one wall from two cubes that disagree each kept their copy, and nothing contradicted
     either. What each keyframe sees of every other in AMB3R's map (the cube plan's ``kf_covisibility``,
     reconstruction/cubes.py 7 — which keyframe sees what, which share a zone): for keyframe a, the keyframes b that see
-    at least τ of what a saw, AT ANY DISTANCE ALONG THE WALK but its own offsets (which vote already), the WIDEST
-    BASELINE first — the farthest camera from a's (``c2w``, F5's poses; ties by walk order) — up to three times as many
-    as the offsets. USER 2026-11-07 (pccr's racks): walking sideways or turning in front of a target, the keyframes at
+    ANY PART of what a saw (c(a→b) > 0, and ≥ the plan's τ when it keeps one), AT ANY DISTANCE ALONG THE WALK but its own
+    offsets (which vote already) — EVERY ONE of them (USER 2026-11-08: "que voten todos … siempre"; "ven lo mismo es
+    ver total o parcialmente el sector"), listed the widest baseline first (the farthest camera from a's, ``c2w``,
+    F5's poses; ties by walk order). Each votes on the pixels it sees, by the vote's own rules. USER 2026-11-07 (pccr's racks): walking sideways or turning in front of a target, the keyframes at
     ±3/6/12 look elsewhere while ±1, ±2, ±4 … see it — the fixed offsets plus six keyframes beyond ±12 gave the racks'
     pixels a median of one confirming view; chosen by what they see, a well-seen keyframe's pixels with ≥ 10
     confirmations went 25 → 44 % (#100) and 41 → 75 % (#150). USER 2026-11-08 (pccr's door at the end of a corridor,
@@ -698,7 +699,6 @@ def covisible_witnesses(session_dir: Path, frames: List[int], neighbors, c2w: Di
     p = Path(session_dir) / "intake" / "cubes.json"
     plan_cv = json.loads(p.read_text()).get("kf_covisibility") if p.exists() else None
     offsets = {int(x) for x in neighbors}
-    cap = 3 * len(offsets)
     idx = {int(f): i for i, f in enumerate(frames)}
     best: Dict[Tuple[int, int], float] = {}            # (a, b) → c(a→b)
     for name, cv in (("structure probe (intake/cubes.json)", plan_cv),):
@@ -716,7 +716,7 @@ def covisible_witnesses(session_dir: Path, frames: List[int], neighbors, c2w: Di
             if a == b or (idx[b] - idx[a]) in offsets:      # itself, or one of its offsets (they vote already)
                 continue
             for x, y, c in ((a, b, float(cab)), (b, a, float(cba))):
-                if c >= tau and c > best.get((x, y), -1.0):
+                if c > 0 and c >= tau and c > best.get((x, y), -1.0):
                     best[(x, y)] = c
                     n_in += 1
         rep["sources"][name] = {"pairs": n_in, "tau": tau, "band_rel": cv.get("band_rel"),
@@ -728,17 +728,19 @@ def covisible_witnesses(session_dir: Path, frames: List[int], neighbors, c2w: Di
     extra: Dict[int, List[int]] = {}
     for f in frames:
         if f in cand:
-            extra[f] = [frames[j] for _c, j in sorted(cand[f])[:cap]]
+            extra[f] = [frames[j] for _c, j in sorted(cand[f])]
     n = [len(v) for v in extra.values()]
     base = [float(np.linalg.norm(centre[b] - centre[a])) for a, ws in extra.items() for b in ws]
-    rep.update({"any_distance_but_the_offsets": sorted(offsets), "per_keyframe_cap": cap, "used": int(sum(n)),
+    rep.update({"any_distance_but_the_offsets": sorted(offsets), "per_keyframe_cap": None, "used": int(sum(n)),
+                "per_keyframe": ({"median": float(np.median(n)), "max": int(max(n))} if n else None),
                 "keyframes_with_witnesses": len(extra), "candidates": len(best), "order": "widest baseline first",
                 "baseline_m": ({"median": float(np.median(base)), "min": float(np.min(base)), "max": float(np.max(base))}
                                if base else None)})
     log(f"{LOG_TAG} co-visible witnesses: {len(extra)} of {len(frames)} keyframes hear {sum(n)} keyframe(s) that see "
-        f"what they see, the widest baseline first"
-        + (f" (median {np.median(base):.2f} m from the keyframe's camera;" if base else " (")
-        + f" any distance along the walk but their offsets, at most {cap} each, from "
+        f"any part of what they see — every one"
+        + (f", a median of {np.median(n):.0f} per keyframe (max {max(n)})" if n else "")
+        + (f", at a median of {np.median(base):.2f} m from the keyframe's camera" if base else "")
+        + f" (any distance along the walk but their offsets, from "
         f"{len(best)} candidate(s); "
         + "; ".join(f"{k}: {v['pairs']}" + (f" ({v['why_none']})" if v.get("why_none") else "")
                     for k, v in rep["sources"].items()) + ")")

@@ -162,7 +162,8 @@ def witness_windows(kf: Sequence[int], witnesses: Sequence[int], window_frames: 
 def revisit_pairs(sources: Sequence[Tuple[str, Optional[dict]]], kf: Sequence[int], windows: Sequence[Window],
                   reach: int) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
     """The REVISITS (USER 2026-11-07: "aplícalo a conciencia y que se corrija en serio"): pairs of keyframe INDICES
-    (i, j) that see the same surface — one sees at least τ of what the other saw, on one surface, in the structure
+    (i, j) that see the same surface — one sees any part of what the other saw (at least the plan's τ when it keeps
+    one; USER 2026-11-08: "ven lo mismo es ver total o parcialmente el sector"), on one surface, in the structure
     probe's map (``sources``: (name, kf_covisibility), reconstruction/cubes.py 7 — AMB3R's: which keyframe sees what,
     which share a zone) — and that the walk does not tie already: no keyframe window holds keyframes within ``reach``
     (half a keyframe window) of both ends. On cubes nothing else tied two moments of the walk: SALAD does not
