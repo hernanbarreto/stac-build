@@ -674,7 +674,7 @@ def load_turn_witnesses(out: Path, frames: List[int], chunk: Dict[int, int], thr
     return dep, valid, passed, cw, extra, rep
 
 
-def covisible_witnesses(session_dir: Path, frames: List[int], neighbors,
+def covisible_witnesses(session_dir: Path, frames: List[int], neighbors, c2w: Dict[int, np.ndarray],
                         log: Callable = print) -> Tuple[Dict[int, List[int]], Dict[str, Any]]:
     """The keyframes of OTHER MOMENTS of the walk that see what a keyframe sees, as witnesses of its vote (USER
     2026-11-07, on observatorio's duplicated wooden wall and signs: "me gusta tu enfoque de corrección … aplícalo a
@@ -682,11 +682,16 @@ def covisible_witnesses(session_dir: Path, frames: List[int], neighbors,
     frames): two moments that saw one wall from two cubes that disagree each kept their copy, and nothing contradicted
     either. What each keyframe sees of every other in AMB3R's map (the cube plan's ``kf_covisibility``,
     reconstruction/cubes.py 7 — which keyframe sees what, which share a zone): for keyframe a, the keyframes b that see
-    at least τ of what a saw, AT ANY DISTANCE ALONG THE WALK but its own offsets (which vote already), the most
-    co-visible first (ties by walk order), up to three times as many as the offsets. USER 2026-11-07 (pccr's racks):
-    walking sideways or turning in front of a target, the keyframes at ±3/6/12 look elsewhere while ±1, ±2, ±4 … see it
-    — the fixed offsets plus six keyframes beyond ±12 gave the racks' pixels a median of one confirming view; chosen by
-    what they see, a well-seen keyframe's pixels with ≥ 10 confirmations went 25 → 44 % (#100) and 41 → 75 % (#150).
+    at least τ of what a saw, AT ANY DISTANCE ALONG THE WALK but its own offsets (which vote already), the WIDEST
+    BASELINE first — the farthest camera from a's (``c2w``, F5's poses; ties by walk order) — up to three times as many
+    as the offsets. USER 2026-11-07 (pccr's racks): walking sideways or turning in front of a target, the keyframes at
+    ±3/6/12 look elsewhere while ±1, ±2, ±4 … see it — the fixed offsets plus six keyframes beyond ±12 gave the racks'
+    pixels a median of one confirming view; chosen by what they see, a well-seen keyframe's pixels with ≥ 10
+    confirmations went 25 → 44 % (#100) and 41 → 75 % (#150). USER 2026-11-08 (pccr's door at the end of a corridor,
+    gone): the most co-visible are the NEAREST keyframes of the walk — 20 cm from a's camera at 686 keyframes, 37 cm at
+    295 — and 7 m away they test no depth (under ``refine.min_tri_deg``): 7 of the 93 keyframes that see that door could
+    gather the support floor's 10 views; the widest among the same co-visible keyframes give 82 of 93 (a table at 2 m:
+    64 of 64 either way).
     They vote after the neighbours and the turn frames by the same rules (agree within τ, free space either way); the
     vote's τ stays the walk neighbours' own disagreement. Returns ({keyframe: [keyframes]}, report)."""
     rep: Dict[str, Any] = {"sources": {}, "used": 0}
@@ -716,18 +721,24 @@ def covisible_witnesses(session_dir: Path, frames: List[int], neighbors,
                     n_in += 1
         rep["sources"][name] = {"pairs": n_in, "tau": tau, "band_rel": cv.get("band_rel"),
                                 "not_keyframes_of_this_run": unknown}
+    centre = {int(f): np.asarray(c2w[f], np.float64)[:3, 3] for f in frames}
     cand: Dict[int, List[Tuple[float, int]]] = {}
     for (a, b), c in best.items():
-        cand.setdefault(a, []).append((-c, idx[b]))
+        cand.setdefault(a, []).append((-float(np.linalg.norm(centre[b] - centre[a])), idx[b]))
     extra: Dict[int, List[int]] = {}
     for f in frames:
         if f in cand:
             extra[f] = [frames[j] for _c, j in sorted(cand[f])[:cap]]
     n = [len(v) for v in extra.values()]
+    base = [float(np.linalg.norm(centre[b] - centre[a])) for a, ws in extra.items() for b in ws]
     rep.update({"any_distance_but_the_offsets": sorted(offsets), "per_keyframe_cap": cap, "used": int(sum(n)),
-                "keyframes_with_witnesses": len(extra), "candidates": len(best)})
+                "keyframes_with_witnesses": len(extra), "candidates": len(best), "order": "widest baseline first",
+                "baseline_m": ({"median": float(np.median(base)), "min": float(np.min(base)), "max": float(np.max(base))}
+                               if base else None)})
     log(f"{LOG_TAG} co-visible witnesses: {len(extra)} of {len(frames)} keyframes hear {sum(n)} keyframe(s) that see "
-        f"what they see (any distance along the walk but their offsets, at most {cap} each, from "
+        f"what they see, the widest baseline first"
+        + (f" (median {np.median(base):.2f} m from the keyframe's camera;" if base else " (")
+        + f" any distance along the walk but their offsets, at most {cap} each, from "
         f"{len(best)} candidate(s); "
         + "; ".join(f"{k}: {v['pairs']}" + (f" ({v['why_none']})" if v.get("why_none") else "")
                     for k, v in rep["sources"].items()) + ")")
@@ -1146,7 +1157,7 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     dep.update(t_dep); valid.update(t_valid); passed.update(t_passed)
     c2w_vote = dict(c2w); c2w_vote.update(t_c2w)
     # the keyframes of other moments of the walk that see the same surface (USER 2026-11-07)
-    cv_extra, cv_rep = covisible_witnesses(session_dir, frames, bc.neighbors, log)
+    cv_extra, cv_rep = covisible_witnesses(session_dir, frames, bc.neighbors, c2w, log)
     for f, ws in cv_extra.items():
         t_extra.setdefault(f, []).extend(ws)
     _p(50, "edge-keeping multi-view vote")

@@ -1854,8 +1854,10 @@ def _amb3r_coverage_fill(pipe: WorkerPipe, session_path: Path, frames_dir: Path,
     cmd = [sys.executable, "-m", "reconstruction.coverage_fill", "--scan", str(session_path), "--video", str(npz),
            "--video-stamp", str(stamp_p),
            "--min-tri-deg", repr(float(load_precision_config(config).refine.min_tri_deg)),
-           # covered = F6's publication support (USER 2026-11-07: "ahora necesitamos cobertura")
-           "--min-support", str(int(load_precision_config(config).cloud.min_support_views)), "--device", "cuda"]
+           # covered = a second view at ≥ min_tri_deg (USER 2026-11-08: the fill to F6's support of 10 views doubled
+           # pccr's keyframes, 313 → 686 — the cubes, the time and the witnesses' baseline with them; the coverage of
+           # what is far comes from F6's witnesses chosen by their baseline, precision/depth_on_f5.covisible_witnesses)
+           "--device", "cuda"]
     proc = subprocess.Popen(cmd, cwd=str(Path(__file__).resolve().parent.parent), env=repro.deterministic_env(),
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     tail = []

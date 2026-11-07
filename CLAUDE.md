@@ -1,5 +1,23 @@
 # CLAUDE.md — working rules for this repo
 
+## ⭐⭐⭐ 2026-11-08 (06:20 CDMX) — ≤ 64 VIEWS PER CUBE, THE INTAKE'S KEYFRAMES, F6'S WITNESSES BY BASELINE (USER: "ok, dale,
+## detené todo y corremos todo así como vos proponés")
+- VERDICT on pccr with 5 m cubes and no view cap + the fill to F6's support (686 kf, 6 cubes of 94–358 kf / up to 385
+  Ω views): "volvimos al mismo problema de antes, ves cómo se dobla el borde de ese mueble blanco"; "le falta toda la
+  parte de la puerta … heredamos los problemas de antes con menos completitud y mucho más tiempo de procesamiento";
+  "el piso … duplicado". MEASURED (scratchpad bend/): seams after the graph 5.9 cm median / 15.8 max (cubes of ≤ 64
+  views: 0.0–0.6), F5's keyframe bound 4.98 px (1.8–1.9 before); floor twice 6 cm apart (≤ 23 cm) between cubes 1 and 2;
+  the table's 1.8 m edge bent 4–5 cm — each keyframe saw it straight, their copies at heights drifting along the walk
+  (+2.8 → −1.5 → +2.6 cm); the corridor's door 7 m away lost: F6's co-visible witnesses were the NEAREST keyframes (20 cm
+  from the camera at 686 kf, 37 cm at 295) → median 1 view ≥ 2°, 9 of 172 keyframes could reach 10; 6 h 28 min (SAM3 3 h).
+- FIX (his OK): (1) cubes.py 8: along the walk, ≤ cube_m (5 m) AND ≤ `structure.chunk_view_cap` (64) views, at least two
+  units, neighbours sharing half their keyframes (dry on the 686-kf units: 23 cubes of 49–64 views; on ~313 kf ≈ 11–12);
+  (2) the coverage fill asks ONE second view again (map_worker no longer passes `--min-support`): pccr 295 + 18 = 313;
+  (3) F6's co-visible witnesses: the widest baseline first among those with c ≥ τ (`covisible_witnesses(..., c2w)`, cap
+  18): pccr's door with 295 kf 7 → 82 of 93 keyframes able to gather 10 views, the table 64/64 either way.
+  Kept: revisits tied by AMB3R's map (F4 windows), graph by seams alone, the 10-view floor ≥ 2°.
+- Queue relaunched with Replace: pccr 08-31, observatorio, zaragoza, bufferStop, station, pccr 2408.
+
 ## ⭐⭐⭐ 2026-11-07 (evening) — F6 PUBLISHES ONLY SUPPORTED POINTS: ≥ 10 VIEWS THAT TEST THE DEPTH (USER: "quiero
 ## puntos válidos sin ruido"; "prefiero tener menos puntos pero valiosos, que muchos puntos malos")
 - He found by eye on pccr, observatorio and zaragoza that the viewer's confidence slider at 25 % (≥ 8–10 agreeing votes

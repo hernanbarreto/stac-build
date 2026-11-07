@@ -339,12 +339,13 @@ next keyframe, with $|\rho|<0.25$. Then:
 $\eta$ is the share of samples on one surface that the test itself calls inconsistent: its own miss rate (pccr: tol
 2.70 %, $\eta$ = 4.22 %).
 
-**Covered.** A point is **seen** when some keyframe sees it. It is **covered** when as many keyframes as F6 publishes a
-point with (`precision.cloud.min_support_views`, 10, §14.6) see it from rays at least `refine.min_tri_deg` (2°) away
-from the first one's, $\angle(C_g-X,\,\mathbf d_1)\ge2°$, which is F5's bound for a landmark (USER 2026-11-07: "ahora
-necesitamos cobertura"). Until then the bar was ONE second view, and the 10-view floor emptied what that left: pccr's
-racks were seen from ≥ 2° by a median of 14 frames of the video and 4 keyframes. A point not seen, or seen by fewer such
-views, is **weak**.
+**Covered.** A point is **seen** when some keyframe sees it. It is **covered** when a second keyframe sees it from a ray
+at least `refine.min_tri_deg` (2°) away from the first one's, $\angle(C_g-X,\,\mathbf d_1)\ge2°$, which is F5's bound
+for a landmark. A point not seen, or seen by one view alone, is **weak**. (`coverage_fill.py --min-support n` asks $n$
+such views; the session asks one. From 2026-11-07 to 11-08 it asked F6's ten — "ahora necesitamos cobertura" — and
+doubled pccr's keyframes, 313 → 686: the cubes, the time and the witnesses' baseline doubled or halved with them, a far
+door vanished, a floor duplicated; USER 2026-11-08 "corremos todo así como vos proponés": back to one, and what is far
+is covered by F6's witnesses chosen by their baseline, §14.6.)
 
 **The fill.** A candidate is any frame AMB3R reconstructed that I0 found usable and that is not a keyframe's own record.
 Its gain is the share of what it saw that it would see first, or add a view to from far enough while it is not covered:
@@ -367,9 +368,9 @@ unchanged input is not filled twice. `intake/coverage_fill.json` records the cov
 added. The fill runs on the card, in a process of its own.
 
 On pccr, with one second view as the bar: I1's 295 keyframes left 0.7 % of the map unseen and 6.4 % seen once; 18 frames
-were added. With the publication's support (10 views ≥ 2°), the same keyframes leave 46.5 % of the map under it; 391
-frames of AMB3R's are added (686 keyframes), and 0.03 % unseen and 16.8 % under the support remain — no frame of the
-video brings more of them than the noise.
+were added (313 keyframes). With the publication's support (10 views ≥ 2°) as the bar, 391 frames were added (686
+keyframes) — the run of 2026-11-07/08, judged worse: "heredamos los problemas de antes con menos completitud y mucho más
+tiempo de procesamiento" (6 h 28 min, SAM3 alone 3 h).
 
 ---
 
@@ -444,23 +445,28 @@ window, and never on a keyframe.
 
 ### 10.1 The cut (`server/reconstruction/cubes.py`)
 
-**The rule** (USER 2026-11-07, night): "los cubos son de 5 m, no los decide nadie … ni los kf de intake ni nadie … y el
-solape con los cubos vecinos es el 50 % de los kf que hay en los cubos, punto, es todo"; "la cantidad de cubos la
-determina la trayectoria, 5 m, no la cantidad de kf — más cubos son más costuras y más errores".
+**The rule** (USER 2026-11-07, night): "los cubos son de 5 m, no los decide nadie … y el solape con los cubos vecinos es
+el 50 % de los kf que hay en los cubos"; and one Ω pass holds 64 views at most (USER 2026-11-04: "ese es el límite";
+2026-11-08: "corremos todo así como vos proponés", after the cubes with no view cap did not hold together — below).
 
 - **Units.** A unit is a parallax keyframe with the rotation keyframes up to the next parallax keyframe, and the turn
   frames after them. A turn is never cut.
 - **A cube.** Along the walk, the units in order while their mean cameras fit a box of `cube_m` (5 m) on every axis of
-  the gravity frame: the displacement of one Ω pass (beyond about 5 m Omega bends what it infers). No view count enters:
-  every keyframe the walk has inside those 5 m is a view of the cube, I1's and the coverage fill's alike.
+  the gravity frame — the displacement of one Ω pass (beyond about 5 m Omega bends what it infers) — **and** its views
+  (keyframes + turn frames) stay within `structure.chunk_view_cap` (64) — the views of one Ω pass. A cube takes at
+  least two units, so that neighbours always share one; a unit alone over the cap is never cut (Ω sees all of it,
+  declared `over_cap`).
 - **The overlap.** The next cube starts at the unit where half of this cube's keyframes lie behind it, so neighbouring
   cubes share half their keyframes: the seams of the Sim(3) graph (§12).
 - **The owner** of a unit's keyframes is the cube where the unit lies deepest (farthest from both of its ends).
 
 The cuts before it (k-d camera cells, rays against AMB3R's cloud, boxes of seen space, groups by what the units see
-capped at 64 views) are gone: the cap multiplied pccr's cubes when the coverage fill doubled its keyframes (11 → 23).
-On pccr's 686 keyframes and a 17.9 m walk the rule gives 6 cubes of 94–358 keyframes (96–385 Ω views), every pass
-within 5.0 m. Revisits across cubes are tied downstream, by F4's revisit windows and F6's vote.
+capped at 64 views by halving, and version 7: 5 m along the walk with no view cap) are gone. Version 7 on pccr's 686
+keyframes gave 6 cubes of 94–358 keyframes (96–385 Ω views), and they did not hold together: after the graph the seams
+read 5.9 cm median and 15.8 cm max (cubes of ≤ 64 views closed to 0.0–0.6 cm), the floor came out twice 6 cm apart
+(23 cm at most) between two neighbouring cubes, and a table's 1.8 m edge bent 4–5 cm — every keyframe saw it straight,
+their copies sat at heights drifting along the walk (+2.8 → −1.5 → +2.6 cm). Revisits across cubes are tied
+downstream, by F4's revisit windows and F6's vote.
 
 **A cube's views.** Its Ω views are its keyframes plus the turn frames that lie between two of its keyframes consecutive
 in the walk. Its F6 witnesses, the interval frames, follow the same rule.
@@ -844,9 +850,12 @@ when $z_{\text{al}}$ agrees with it, and are otherwise left out of the measureme
 **The edge-keeping vote.** Every candidate pixel of keyframe $f$ is lifted to $X=C_f+z\,\mathbf r(u,v)$ and put to its six
 neighbours, the turn and interval witnesses, and the **co-visible witnesses** (`covisible_witnesses`): the keyframes that
 see at least $\tau$ of what $f$ saw in AMB3R's map (§10.1), **at any distance along the walk** but $f$'s own offsets,
-the most co-visible first, up to 18. Walking sideways or turning in front of a target, the keyframes at ±3/6/12 look
-elsewhere while ±1, ±2, ±4… see it (pccr's racks: a median of one confirming view per pixel with the offsets alone).
-Two moments that disagree contradict each other instead of both standing.
+**the widest baseline first** (the farthest camera from $f$'s, F5's poses), up to 18. Walking sideways or turning in
+front of a target, the keyframes at ±3/6/12 look elsewhere while ±1, ±2, ±4… see it (pccr's racks: a median of one
+confirming view per pixel with the offsets alone). The most co-visible are the nearest keyframes of the walk (20–37 cm
+from $f$'s camera on pccr), and far away they test no depth: of the 93 keyframes that see pccr's door at the end of a
+corridor, 7 m away, 7 could gather the support floor's 10 views with the most co-visible and 82 with the widest (a
+table at 2 m: 64 of 64 either way). Two moments that disagree contradict each other instead of both standing.
 
 The tolerance $\tau$ is the 75th percentile of the relative disagreement between interior pixels of neighbours at offsets
 $\pm3,\pm6,\pm12$, measured on this session (≈ 2 %). For a witness $g$ with depth map $d_g$ and the point's depth $z_g$ in

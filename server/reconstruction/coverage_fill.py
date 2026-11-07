@@ -12,7 +12,10 @@ AMB3R's submaps as the walk crosses them); occluded or in front of what it saw, 
 second keyframe sees it from a ray at least ``refine.min_tri_deg`` away from the first's (F5's bound for a landmark) — since
 2026-11-07 (version 3, USER "ahora necesitamos cobertura") as many such views as F6 publishes a point with
 (``precision.cloud.min_support_views``), the second view being the case of one:
-one view, or two from the same place, measure nothing. A point no keyframe sees, or one alone, is WEAK.
+one view, or two from the same place, measure nothing. A point no keyframe sees, or one alone, is WEAK. The session's
+fill asks ONE second view since 2026-11-08 (workers/map_worker; USER "corremos todo así como vos proponés"): the fill to
+F6's ten doubled pccr's keyframes, 313 → 686, and with them its cubes, its time and its witnesses' baseline; what is far
+is covered by F6's witnesses chosen by their baseline (precision/depth_on_f5.covisible_witnesses).
 
 THE FILL — the map is the definitive coverage, the intake's keyframes its first proposal: a frame AMB3R reconstructed
 (usable by I0, not a keyframe's own record) whose own view — what it saw — holds more weak points it would see first, or

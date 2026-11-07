@@ -1,21 +1,24 @@
-"""THE CUBES (USER 2026-11-07, night): "los cubos son de 5 m, no los decide nadie … ni los kf de intake ni nadie … y el
-solape con los cubos vecinos es el 50 % de los kf que hay en los cubos, punto, es todo"; "la cantidad de cubos la
-determina la trayectoria, 5 m, no la cantidad de kf — más cubos son más costuras y más errores".
+"""THE CUBES (USER 2026-11-07, night): "los cubos son de 5 m, no los decide nadie … y el solape con los cubos vecinos
+es el 50 % de los kf que hay en los cubos"; and ONE Omega pass holds 64 views at most (USER 2026-11-04: "ese es el
+límite"; 2026-11-08: "corremos todo así como vos proponés" — pccr's cubes of 5 m with no view cap, 94–358 keyframes and
+up to 385 Omega views each, did not hold together: seams 5.9 cm median / 15.8 max after the graph where cubes of ≤ 64
+views closed to 0.0–0.6 cm, the floor duplicated 6 cm between two neighbouring cubes, a table's edge bent 4–5 cm by
+copies of its keyframes drifting along the walk).
 
 1. UNITS: a parallax keyframe with the rotation keyframes it stands for and the turn frames after them — a turn is never
    cut (units_of).
 2. A CUBE: along the walk, the units in order while their cameras (each unit's mean camera) fit a box of ``cube_m`` on
-   every axis of the gravity frame — the displacement of ONE Omega pass (USER 2026-11-07: "a más de 5 m omega deforma").
-   No view count enters: every keyframe the walk has inside those 5 m is a view of the cube, I1's and the coverage
-   fill's alike.
+   every axis of the gravity frame — the displacement of ONE Omega pass (USER 2026-11-07: "a más de 5 m omega deforma")
+   — AND its views (keyframes + turn frames) stay within ``max_views`` — the views of ONE Omega pass. A cube takes at
+   least two units (a unit alone over the cap is never cut — Omega sees all of it, declared ``over_cap``), so that two
+   neighbours always share a unit.
 3. THE OVERLAP: the next cube starts at the unit where half of this cube's keyframes lie behind it — two neighbouring
    cubes share half their keyframes, the seams that join them in ONE Sim(3) graph.
 4. THE OWNER of a unit's keyframes is the cube where the unit lies deepest (farthest from both of its ends; ties → the
    earlier cube).
 Earlier cuts (versions 1–6: k-d camera cells, rays against AMB3R's cloud, boxes of seen space, groups by what the units
-see with a cap of 64 views) are gone: the cap multiplied pccr's cubes when the coverage fill doubled its keyframes
-(11 → 23 cubes, every one a seam more). Revisits across cubes are tied downstream — F4's revisit windows and F6's vote
-(7).
+see with a cap of 64 views by halving; 7: 5 m along the walk with no view cap) are gone. Revisits across cubes are tied
+downstream — F4's revisit windows and F6's vote (7).
 
 A cube's box (for the viewer) holds the cameras of all its views. A cube's Omega views are its keyframes and the turn
 frames between two of its keyframes consecutive in the walk; its F6 witnesses (the interval frames) follow the same rule.
@@ -46,9 +49,10 @@ TAU = 0.3                    # the co-visibility bar (walk_structure.TAU, chunk_
 CUBE_M = 5.0                 # USER 2026-11-06 ("el tamaño del cubo, no más de por ejemplo como genrecon 5 m o 6 m")
 SAMPLES = 2000               # the points of a unit tested in another (a fixed stride over what its records saw)
 CUBES_NAME = "cubes.json"
-CUBES_VERSION = 7            # 7: cubes of 5 m along the walk sharing half their keyframes — nothing else decides (USER
-                             #    2026-11-07, night); 6: no view cap; 5: + kf_covisibility; 4: groups by what the units
-                             #    see; 3: boxes of seen space; 2: rays cast against AMB3R's cloud; 1: k-d camera cells
+CUBES_VERSION = 8            # 8: along the walk, ≤ cube_m AND ≤ max_views views, neighbours sharing half their
+                             #    keyframes (USER 2026-11-08); 7: 5 m along the walk, no view cap (2026-11-07, night);
+                             #    6: no view cap; 5: + kf_covisibility; 4: groups by what the units see; 3: boxes of
+                             #    seen space; 2: rays cast against AMB3R's cloud; 1: k-d camera cells
 
 
 class CubePlanError(RuntimeError):
@@ -188,12 +192,14 @@ def cube_box(cams: np.ndarray, size: float):
 def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], *, metres_per_unit: float, cube_m: float = CUBE_M,
                max_views: int = MAX_CUBE_VIEWS, device: str = "cuda") -> Dict:
     """The cubes of ``units`` (units_of) along the walk (module doc 2–4): a cube takes the units in order while their
-    mean cameras fit a box of ``cube_m`` (the probe's metre: ``metres_per_unit``) on every axis of the gravity frame;
-    the next cube starts at the unit where half of this cube's keyframes lie behind it; a unit's owner is the cube where
-    it lies deepest. ``max_views`` is recorded, never a bound."""
+    mean cameras fit a box of ``cube_m`` (the probe's metre: ``metres_per_unit``) on every axis of the gravity frame
+    and its views stay within ``max_views`` — at least two units, so that neighbours share one; the next cube starts at
+    the unit where half of this cube's keyframes lie behind it; a unit's owner is the cube where it lies deepest."""
     U = len(units)
     if U == 0:
         raise CubePlanError("no unit to plan")
+    if int(max_views) < 2:
+        raise CubePlanError(f"max_views {max_views}: a cube holds at least two views")
     R = gravity_frame(c2w_kf, device)
     Cg = np.asarray(c2w_kf, np.float64)[:, :3, 3] @ np.asarray(R, np.float64).T
     ucam = [Cg[units[u]["keyframes"]] for u in range(U)]
@@ -205,12 +211,15 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], *, metres_per_unit: float,
     s0 = 0
     while True:
         lo = hi = centre[s0]
-        e = s0
+        e, nv = s0, int(w[s0])
         while e + 1 < U:
             nlo, nhi = np.minimum(lo, centre[e + 1]), np.maximum(hi, centre[e + 1])
-            if bool(np.any(nhi - nlo > size * (1.0 + 1e-9))):
+            fits = not bool(np.any(nhi - nlo > size * (1.0 + 1e-9))) and nv + int(w[e + 1]) <= int(max_views)
+            if not fits and e > s0:                       # at least two units: neighbours always share one
                 break
-            lo, hi, e = nlo, nhi, e + 1
+            lo, hi, e, nv = nlo, nhi, e + 1, nv + int(w[e + 1])
+            if not fits:
+                break
         spans.append((s0, e))
         if e == U - 1:
             break
@@ -363,9 +372,12 @@ def analyse(probe_npz: Path, inputs: Dict, *, device: str = "cuda", log: Callabl
     st = plan["stats"]
     sizes = [cb["omega_views"] for cb in plan["cubes"]]
     log(f"[cubes] {len(units)} units ({len(kf)} keyframes, {len(turns)} turn frames) → {len(plan['cubes'])} cube(s) of "
-        f"{cube_m:g} m along the walk, neighbours sharing half their keyframes ({st['shared_keyframes_frac_min'] * 100:.0f}"
+        f"≤ {cube_m:g} m and ≤ {plan['max_views']} views along the walk, neighbours sharing half their keyframes ({st['shared_keyframes_frac_min'] * 100:.0f}"
         f"–{st['shared_keyframes_frac_max'] * 100:.0f} %): {st['keyframes_min']}–{st['keyframes_max']} keyframes, "
-        f"{min(sizes)}–{max(sizes)} Omega views per cube (no view cap); cameras spanning ≤ {st['max_camera_span_m']:.1f} m; "
+        f"{min(sizes)}–{max(sizes)} Omega views per cube (cap {plan['max_views']}"
+        + (f", {sum(cb['over_cap'] for cb in plan['cubes'])} over it: a unit the cut never splits" if any(
+            cb["over_cap"] for cb in plan["cubes"]) else "")
+        + f"); cameras spanning ≤ {st['max_camera_span_m']:.1f} m; "
         f"a unit in {st['memberships_per_unit']:.2f} cube(s)")
     at = {f: i for i, f in enumerate(kf)}
     gap = np.asarray([at[b] - at[a] for a, b, _c, _d in kf_cov["pairs"]], np.int64)
@@ -401,8 +413,9 @@ def figure(plan: Dict, centres: np.ndarray, out_png: Path, title: str) -> None:
     ax[0].scatter(C[0, 0], C[0, 1], marker="*", s=220, c="g", zorder=6, label="start")
     ax[0].set_aspect("equal")
     ax[0].legend(fontsize=8)
-    ax[0].set_title(f"{title}: {len(plan['cubes'])} cubes of {plan['cube_m']:g} m along the walk, neighbours sharing "
-                    f"half their keyframes; cameras coloured by the cube that owns them — from above")
+    ax[0].set_title(f"{title}: {len(plan['cubes'])} cubes of ≤ {plan['cube_m']:g} m and ≤ {plan['max_views']} views "
+                    f"along the walk, neighbours sharing half their keyframes; cameras coloured by the cube that owns "
+                    f"them — from above")
     ax[1].scatter(C[:, 0], C[:, 2], s=6, c="0.4")
     ax[1].set_title("side view (floors)")
     ax[1].set_aspect("equal")

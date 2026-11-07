@@ -1652,8 +1652,11 @@ reconstruction:
                                         # falls; Omega per cube (the fork's loop_utils/cube_run.py),
                                         # ONE Sim(3) graph on the shared frames. One cube = one pass.
       enabled: true
-      chunk_view_cap: 64                # the most views a cube holds (keyframes + turn frames); a cube
-                                        # over it is halved while halving separates what its views see
+      chunk_view_cap: 64                # the most views a cube holds (keyframes + turn frames): along the
+                                        # walk a cube closes before the unit that would take it over this
+                                        # or its cameras past cube_m (USER 2026-11-04 "ese es el límite";
+                                        # 2026-11-08: pccr's cubes with no cap, up to 385 views, did not
+                                        # hold together — reconstruction/cubes.py 8)
       probe: amb3r                      # USER 2026-11-06 ("para recorridos de cientos de metros y loops …
                                         # incorporemos amb3r-slam, con todo su slam, para la primer pasada,
                                         # luego de eso se hace el corte"): the first pass is AMB3R-SLAM over
@@ -1668,8 +1671,8 @@ reconstruction:
                                         # el video completo … a paso 1, no importa el tiempo, importa la
                                         # precisión y la completitud"); our views are placed on its trajectory
       cube_m: 5.0                       # USER 2026-11-06 ("el tamaño del cubo, no más de por ejemplo como
-                                        # genrecon 5 m o 6 m"): a cube's side; a view belongs to every cube
-                                        # where τ of what its rays hit falls (reconstruction/cubes.py)
+                                        # genrecon 5 m o 6 m"): the most a cube's cameras span along the
+                                        # walk, on every axis (reconstruction/cubes.py)
     scale_align: true                   # metric: DA3 anchor + scale_align (global similarity:
                                         # scales cloud + poses by s = median DA3/Omega depth).
                                         # false → up-to-scale (raw Omega isolation test).
