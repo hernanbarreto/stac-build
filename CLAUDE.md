@@ -44,6 +44,12 @@
   295 + 391 = 686 keyframes, covered 52.8 → 83.1 %; (2) F6's co-visible witnesses at ANY distance but the offsets, up
   to 18 (dry on pccr: pixels with ≥ 10 confirmations #100 25 → 44 %, #150 41 → 75 %). VLM / SAM3 re-run (keyframes
   change).
+- THE CUBES ARE 5 m (USER, same night, the fill having doubled pccr's cubes 11 → 23 through the 64-view cap): "los cubos
+  son de 5 m, no los decide nadie … ni los kf de intake ni nadie … el solape con los cubos vecinos es el 50 % de los kf
+  que hay en los cubos, punto, es todo"; "más cubos son más costuras y más errores". cubes.py version 7: along the walk,
+  units in order while their mean cameras fit a 5 m box (gravity frame); the next cube starts where half of this cube's
+  keyframes lie behind; owner = the cube where the unit lies deepest; NO view cap (pccr dry: 6 cubes of 94–358 keyframes,
+  96–385 Ω views). The co-visibility grouping, the cap and unit_covisibility are gone; kf_covisibility stays (F4 / F6).
 - PENDING, to MEASURE when he says (USER: "me lo van a preguntar"): the recommended CAPTURE DISTANCE to the target,
   minimum and maximum (he expects the maximum ≤ 10 m) — per session, F6's half-B held-out error in metres binned by
   range, the support floor's pass rate by range, the published points by distance to their birth camera.

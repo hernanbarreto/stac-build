@@ -1,38 +1,23 @@
-"""THE CUBES (USER 2026-11-06/07): the views are cut into groups Omega reconstructs together — "cubos de 64 imágenes
-solapadas al 50 % con los vecinos"; "el tema es lo que ven, ¿ven lo mismo?"; "van juntas porque ven lo mismo, total o
-parcialmente … no importa si son del principio o del final del recorrido"; "en bufferstop los rayos podrían ser
-concéntricos pero ven cosas diferentes"; "los 5 m es una estimación no de profundidad de lo que ven, sino de
-desplazamiento"; "los cubos deben contener las vistas que lo conforman"; and, asked what comes first, the number of
-views or the 5 m: "si hay muy pocas vistas eso sí es un problema" — the views first ("me parece bien").
+"""THE CUBES (USER 2026-11-07, night): "los cubos son de 5 m, no los decide nadie … ni los kf de intake ni nadie … y el
+solape con los cubos vecinos es el 50 % de los kf que hay en los cubos, punto, es todo"; "la cantidad de cubos la
+determina la trayectoria, 5 m, no la cantidad de kf — más cubos son más costuras y más errores".
 
-1. WHAT A VIEW SEES. The structure probe is AMB3R-SLAM over the whole video (reconstruction/amb3r_probe.py): every frame
-   it reconstructed with what it saw — its depth over its whole image, its camera; a view of ours sees what its own frame
-   saw, or the nearest reconstructed frame when AMB3R did not reconstruct it. (The older probe, one Omega pass over our
-   views, gives each view its own depth.)
-2. UNITS: a parallax keyframe with the rotation keyframes it stands for and the turn frames after them — a turn is never
-   cut.
-3. WHAT TWO UNITS SEE OF EACH OTHER: c(u→v) = the share of what u saw that some record of v sees at a consistent depth
-   (|z − d| ≤ tol·d, tol the session's own — reconstruction/coverage_fill.CoverageMap's test); c_uv = min(c(u→v),
-   c(v→u)), for every two units whose cameras lie within two cubes of each other and every two consecutive along the walk.
-4. THE GROUPS. A. From the first unit of the walk no group holds, a group grows by the unit that sees the most of what
-   it sees (c ≥ τ with one of its units — total or partially, any moment of the walk) until its own views reach half
-   the cap, its own cameras always within half a cube and its pass within the cube of ``cube_m`` around them (C): the
-   DISPLACEMENT of a pass, never exceeded, half for its own views and half for the shared ones — beyond about 5 m
-   Omega bends what it infers, and a cube longer than the others bends differently (USER 2026-11-07: "a más de 5 m omega
-   deforma y puede generar dobleces para un cubo más largo que otros … deben ser coherentes"). B. A group left with fewer
-   own views than half the cap joins another small group first, else the smallest of the others — among the groups it
-   sees the same as (c ≥ τ) before those it sees anything of, else its walk neighbour's — while the two stay within the
-   cap and their cameras within half a cube; one that cannot stays as it is, its pass filled with the shared views
-   around it.
-5. THE WALK: two units consecutive along the walk share a cube (the turn frames between them are Omega views of a cube
-   that holds both, and the cubes form one graph).
-6. THE OVERLAP: each cube takes the units of other cubes that see what its own see (c ≥ τ with one of them) and whose
-   cameras fall within its cube (its own cameras' box widened to ``cube_m``), the most co-visible first, while it stays
-   within the cap: neighbouring cubes share the strip between them, and a pass with few own views gets its views there. The OWNER of a
-   unit's keyframes is its own group's cube.
+1. UNITS: a parallax keyframe with the rotation keyframes it stands for and the turn frames after them — a turn is never
+   cut (units_of).
+2. A CUBE: along the walk, the units in order while their cameras (each unit's mean camera) fit a box of ``cube_m`` on
+   every axis of the gravity frame — the displacement of ONE Omega pass (USER 2026-11-07: "a más de 5 m omega deforma").
+   No view count enters: every keyframe the walk has inside those 5 m is a view of the cube, I1's and the coverage
+   fill's alike.
+3. THE OVERLAP: the next cube starts at the unit where half of this cube's keyframes lie behind it — two neighbouring
+   cubes share half their keyframes, the seams that join them in ONE Sim(3) graph.
+4. THE OWNER of a unit's keyframes is the cube where the unit lies deepest (farthest from both of its ends; ties → the
+   earlier cube).
+Earlier cuts (versions 1–6: k-d camera cells, rays against AMB3R's cloud, boxes of seen space, groups by what the units
+see with a cap of 64 views) are gone: the cap multiplied pccr's cubes when the coverage fill doubled its keyframes
+(11 → 23 cubes, every one a seam more). Revisits across cubes are tied downstream — F4's revisit windows and F6's vote
+(7).
 
-A cube's box (for the viewer) holds the cameras of all its views, its own and the shared ones: cubes that share views
-overlap. A cube's Omega views are its keyframes and the turn
+A cube's box (for the viewer) holds the cameras of all its views. A cube's Omega views are its keyframes and the turn
 frames between two of its keyframes consecutive in the walk; its F6 witnesses (the interval frames) follow the same rule.
 7. WHAT EACH KEYFRAME SEES OF EVERY OTHER (USER 2026-11-07, on the duplicated wooden wall and signs of observatorio: "me
    gusta tu enfoque de corrección … aplícalo a conciencia y que se corrija en serio"): c(a→b), the test of 3 with one
@@ -43,7 +28,8 @@ frames between two of its keyframes consecutive in the walk; its F6 witnesses (t
    surface twice. F4 tracks across these pairs (precision/tracks.revisit_pairs: F5 aligns the two moments' poses on
    landmarks both see) and F6's vote hears them (precision/depth_on_f5.covisible_witnesses). The band, not the session's
    tolerance: AMB3R closed no loop on pccr, and at that tolerance its map never saw the walk's end meet its start — on
-   one surface it does.
+   one surface it does. The test of what a view sees: a point of its record inside the other's image at a consistent
+   depth (reconstruction/coverage_fill.CoverageMap's test).
 Deterministic: fixed strides, every order with a tie-break by index; what the views see is tested on the card."""
 from __future__ import annotations
 
@@ -60,9 +46,9 @@ TAU = 0.3                    # the co-visibility bar (walk_structure.TAU, chunk_
 CUBE_M = 5.0                 # USER 2026-11-06 ("el tamaño del cubo, no más de por ejemplo como genrecon 5 m o 6 m")
 SAMPLES = 2000               # the points of a unit tested in another (a fixed stride over what its records saw)
 CUBES_NAME = "cubes.json"
-CUBES_VERSION = 5            # 5: + what each keyframe sees of every other (kf_covisibility: F4's revisit tracks, F6's vote)
-                             #    (4: groups by what the units see of each other, the views first, the displacement a
-                             #    ceiling; 3: boxes of seen space; 2: rays cast against AMB3R's cloud; 1: k-d camera cells)
+CUBES_VERSION = 7            # 7: cubes of 5 m along the walk sharing half their keyframes — nothing else decides (USER
+                             #    2026-11-07, night); 6: no view cap; 5: + kf_covisibility; 4: groups by what the units
+                             #    see; 3: boxes of seen space; 2: rays cast against AMB3R's cloud; 1: k-d camera cells
 
 
 class CubePlanError(RuntimeError):
@@ -158,45 +144,6 @@ def _sees_many(cmap, recs, X, tol: float):
     return ok & (d > 0) & ((z - d).abs() <= tol * d)
 
 
-def directed_covisibility(cmap, unit_recs: Sequence[Sequence[int]], centres: np.ndarray, reach: float, tol: float, *,
-                          samples: int = SAMPLES) -> Dict[Tuple[int, int], float]:
-    """c(u→v) for every two units whose cameras lie within ``reach`` of each other, and every two consecutive along the
-    walk, both ways: the share of what u saw (a fixed stride of its records' points) that some record of v sees at a
-    consistent depth. On the card."""
-    t = cmap.t
-    U = len(unit_recs)
-    Ct = t.as_tensor(np.asarray(centres, np.float64), device=cmap.dev)
-    close = (t.cdist(Ct, Ct) <= float(reach)).cpu().numpy()
-    near = []
-    for u in range(U):
-        s = set(int(v) for v in np.nonzero(close[u])[0]) | {x for x in (u - 1, u + 1) if 0 <= x < U}
-        s.discard(u)
-        near.append(sorted(s))
-    directed: Dict[Tuple[int, int], float] = {}
-    for u in range(U):
-        if not near[u]:
-            continue
-        P = t.cat([cmap.X[cmap.own(r)] for r in unit_recs[u]])
-        if len(P) == 0:
-            continue
-        idx = t.linspace(0, len(P) - 1, min(len(P), int(samples)), dtype=t.float64, device=cmap.dev).floor().long()
-        X = P[idx]
-        recs = sorted({int(r) for v in near[u] for r in unit_recs[v]})
-        row = {r: i for i, r in enumerate(recs)}
-        seen = t.cat([_sees_many(cmap, recs[a:a + 512], X, tol) for a in range(0, len(recs), 512)])
-        for v in near[u]:
-            rows = t.as_tensor([row[int(r)] for r in unit_recs[v]], dtype=t.int64, device=cmap.dev)
-            directed[(u, v)] = float(seen[rows].any(0).double().mean())
-    return directed
-
-
-def unit_covisibility(cmap, unit_recs: Sequence[Sequence[int]], centres: np.ndarray, reach: float, tol: float, *,
-                      samples: int = SAMPLES) -> Dict[Tuple[int, int], float]:
-    """c_uv = min(c(u→v), c(v→u)) (directed_covisibility) for u < v."""
-    directed = directed_covisibility(cmap, unit_recs, centres, reach, tol, samples=samples)
-    return {(u, v): min(c, directed.get((v, u), 0.0)) for (u, v), c in directed.items() if u < v}
-
-
 def keyframe_covisibility(cmap, kf_frames: Sequence[int], kf_recs: Sequence[int], *, band: Optional[float] = None,
                           tau: float = TAU, samples: int = SAMPLES) -> Dict:
     """What each keyframe sees of every other (7), for EVERY two keyframes: c(a→b) = the share of what keyframe a saw (a
@@ -238,202 +185,62 @@ def cube_box(cams: np.ndarray, size: float):
     return lo, hi, mid, hx
 
 
-def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], cov: Dict[Tuple[int, int], float], *, metres_per_unit: float,
-               cube_m: float = CUBE_M, max_views: int = MAX_CUBE_VIEWS, tau: float = TAU,
-               device: str = "cuda") -> Dict:
-    """The cubes of ``units`` (units_of) from what they see of each other (``cov``, unit_covisibility) and the probe's
-    keyframe cameras ``c2w_kf`` (the gravity frame, the displacement); ``metres_per_unit``: the probe's scale."""
+def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], *, metres_per_unit: float, cube_m: float = CUBE_M,
+               max_views: int = MAX_CUBE_VIEWS, device: str = "cuda") -> Dict:
+    """The cubes of ``units`` (units_of) along the walk (module doc 2–4): a cube takes the units in order while their
+    mean cameras fit a box of ``cube_m`` (the probe's metre: ``metres_per_unit``) on every axis of the gravity frame;
+    the next cube starts at the unit where half of this cube's keyframes lie behind it; a unit's owner is the cube where
+    it lies deepest. ``max_views`` is recorded, never a bound."""
     U = len(units)
     if U == 0:
         raise CubePlanError("no unit to plan")
     R = gravity_frame(c2w_kf, device)
     Cg = np.asarray(c2w_kf, np.float64)[:, :3, 3] @ np.asarray(R, np.float64).T
     ucam = [Cg[units[u]["keyframes"]] for u in range(U)]
+    centre = np.stack([c.mean(0) for c in ucam])
     size = float(cube_m) / float(metres_per_unit)
+    nk = np.asarray([len(u["keyframes"]) for u in units], np.int64)
     w = np.asarray([int(u["views"]) for u in units], np.int64)
-    half = int(max_views) // 2
-    nbr: Dict[int, Dict[int, float]] = {u: {} for u in range(U)}
-    for (u, v), c in cov.items():
-        nbr[u][v] = c
-        nbr[v][u] = c
-    # A. GROUPS THAT GROW BY WHAT THEY SEE: from the first unit of the walk no group holds, a group takes the unit that
-    #    sees the most of what it sees (c ≥ τ with one of its units — total or partially, any moment of the walk) until its
-    #    own views reach half the cap, its cameras always within a cube (USER 2026-11-07: "a más de 5 m omega deforma y
-    #    puede generar dobleces para un cubo más largo que otros … deben ser coherentes")
-    assigned = [-1] * U
-    members: Dict[int, List[int]] = {}
-    own: Dict[int, int] = {}
-
-    # a group's OWN cameras take half a cube; its pass, the cube widened around them, the other half (the shared views)
-    # — "64 imágenes solapadas al 50 % con los vecinos" in space as in views
-    own_size = 0.5 * size
-
-    def fits_box(lo, hi, pts):
-        return bool(np.all(np.maximum(hi, pts.max(0)) - np.minimum(lo, pts.min(0)) <= own_size * (1.0 + 1e-9)))
-    for seed in range(U):
-        if assigned[seed] >= 0:
-            continue
-        g = seed
-        assigned[seed] = g
-        mem, n_own = [seed], int(w[seed])
-        lo, hi = ucam[seed].min(0), ucam[seed].max(0)
-        best = {y: c for y, c in nbr[seed].items() if assigned[y] < 0}
-        while n_own < half:
-            cands = [y for y, c in best.items() if c >= tau and assigned[y] < 0]
-            if not cands:
-                break
-            within = [y for y in cands if fits_box(lo, hi, ucam[y])]
-            if not within:
-                break
-            y = max(within, key=lambda y: (best[y], -y))
-            assigned[y] = g
-            mem.append(y)
-            n_own += int(w[y])
-            lo, hi = np.minimum(lo, ucam[y].min(0)), np.maximum(hi, ucam[y].max(0))
-            best.pop(y)
-            for z, c in nbr[y].items():
-                if assigned[z] < 0 and c > best.get(z, -1.0):
-                    best[z] = c
-        members[g] = sorted(mem)
-        own[g] = n_own
-    par = list(range(U))
-
-    def find(x):
-        while par[x] != x:
-            par[x] = par[par[x]]
-            x = par[x]
-        return x
-    for u in range(U):
-        par[u] = assigned[u]
-
-    def merge(a, b):
-        a, b = sorted((a, b))
-        for x in members[b]:
-            par[x] = a
-        par[b] = a
-        members[a] = sorted(members[a] + members.pop(b))
-        own[a] += own.pop(b)
-        return a
-    # B. FEW OWN VIEWS (USER 2026-11-07: "si hay muy pocas vistas eso sí es un problema"): a group left with fewer own
-    #    views than half the cap joins another small group first, else the smallest of the others — among the groups it
-    #    sees the same as (≥ τ) before those it sees anything of, else its walk neighbour's — while the two stay within
-    #    the cap and their cameras within a cube (the coherence of every pass comes first: a group that cannot join stays
-    #    as it is, and its cube is filled with the shared views around it, C)
-    merges_b, stuck = 0, set()
-    gbox = {g: (np.min([ucam[x].min(0) for x in members[g]], axis=0), np.max([ucam[x].max(0) for x in members[g]], axis=0))
-            for g in members}
-
-    def fits_groups(a, b):
-        return bool(np.all(np.maximum(gbox[a][1], gbox[b][1]) - np.minimum(gbox[a][0], gbox[b][0])
-                           <= own_size * (1.0 + 1e-9)))
-
-    def affinity(a):
-        out: Dict[int, float] = {}
-        for x in members[a]:
-            for y, c in nbr[x].items():
-                gy = find(y)
-                if gy != a and c > out.get(gy, -1.0):
-                    out[gy] = c
-        return out
+    spans: List[Tuple[int, int]] = []
+    s0 = 0
     while True:
-        small = [g for g in members if own[g] < half and g not in stuck]
-        if not small or len(members) == 1:
+        lo = hi = centre[s0]
+        e = s0
+        while e + 1 < U:
+            nlo, nhi = np.minimum(lo, centre[e + 1]), np.maximum(hi, centre[e + 1])
+            if bool(np.any(nhi - nlo > size * (1.0 + 1e-9))):
+                break
+            lo, hi, e = nlo, nhi, e + 1
+        spans.append((s0, e))
+        if e == U - 1:
             break
-        a = min(small, key=lambda g: (own[g], g))
-        aff = affinity(a)
-        cands = [g for g, c in aff.items() if c > 0 and own[a] + own[g] <= int(max_views) and fits_groups(a, g)]
-        if cands:
-            pools = ([g for g in cands if own[g] < half and aff[g] >= tau], [g for g in cands if own[g] < half],
-                     [g for g in cands if aff[g] >= tau], cands)
-            pool = next(pl for pl in pools if pl)
-            b = min(pool, key=lambda g: (own[g], -aff[g], g))
-        else:
-            wn = sorted({find(x) for y in members[a] for x in (y - 1, y + 1) if 0 <= x < U} - {a})
-            wn = [g for g in wn if own[a] + own[g] <= int(max_views) and fits_groups(a, g)]
-            if not wn:
-                stuck.add(a)
-                continue
-            b = min(wn, key=lambda g: (own[g], g))
-        lo_ab = np.minimum(gbox[a][0], gbox[b][0])
-        hi_ab = np.maximum(gbox[a][1], gbox[b][1])
-        m = merge(a, b)
-        gbox.pop(a, None)
-        gbox.pop(b, None)
-        gbox[m] = (lo_ab, hi_ab)
-        stuck.discard(m)
-        merges_b += 1
-    groups = sorted(members, key=lambda g: (members[g][0], g))
-    gi = {g: i for i, g in enumerate(groups)}
-    core = [list(members[g]) for g in groups]
-    owner_unit = [gi[find(u)] for u in range(U)]
-    cube_units = [set(c) for c in core]
-
-    def views_of(i):
-        return int(w[sorted(cube_units[i])].sum())
-    # D. two units consecutive along the walk share a cube (the turn frames between them, one graph)
-    joined, over = 0, 0
-    for u in range(U - 1):
-        if any(u in s and (u + 1) in s for s in cube_units):
-            continue
-        a, b = owner_unit[u], owner_unit[u + 1]
-        if views_of(a) + int(w[u + 1]) <= int(max_views):
-            cube_units[a].add(u + 1)
-        elif views_of(b) + int(w[u]) <= int(max_views):
-            cube_units[b].add(u)
-        else:
-            cube_units[a].add(u + 1)
-            over += 1
-        joined += 1
-    # C. THE OVERLAP: each cube takes the units of other cubes that see what its own see (≥ τ with one of them) and whose
-    #    cameras fall within its cube — its own cameras' box widened to ``cube_m`` (USER 2026-11-07: a shared view enters
-    #    "si su cámara cae dentro de sus 5 m") —, the most co-visible first, while it stays within the cap
-    shared = 0
-    for i in range(len(groups)):
-        oc = np.concatenate([ucam[u] for u in core[i]])
-        olo, ohi = oc.min(0), oc.max(0)
-        pad = np.maximum(size - (ohi - olo), 0.0) / 2.0
-        blo, bhi = olo - pad, ohi + pad
-        best: Dict[int, float] = {}
-        for x in core[i]:
-            for y, c in nbr[x].items():
-                if (c >= tau and y not in cube_units[i] and c > best.get(y, -1.0)
-                        and bool(np.all(ucam[y] >= blo - 1e-9 * size)) and bool(np.all(ucam[y] <= bhi + 1e-9 * size))):
-                    best[y] = c
-        for y in sorted(best, key=lambda y: (-best[y], y)):
-            if views_of(i) + int(w[y]) <= int(max_views):
-                cube_units[i].add(y)
-                shared += 1
-    # one graph: cubes joined by the units they share
-    gpar = list(range(len(groups)))
-
-    def gfind(x):
-        while gpar[x] != x:
-            gpar[x] = gpar[gpar[x]]
-            x = gpar[x]
-        return x
+        # half of this cube's keyframes behind the next start (at least one unit shared, always a step forward)
+        behind, nxt = 0, e
+        for u in range(s0, e + 1):
+            if behind * 2 >= int(nk[s0:e + 1].sum()):
+                nxt = u
+                break
+            behind += int(nk[u])
+        s0 = min(max(nxt, s0 + 1), e)
+    owner_unit = []
     for u in range(U):
-        mine = [i for i, s in enumerate(cube_units) if u in s]
-        for i in mine[1:]:
-            gpar[gfind(i)] = gfind(mine[0])
-    if len({gfind(i) for i in range(len(groups))}) != 1:
-        raise CubePlanError("the cubes do not form one graph through the views they share")
+        cand = [(min(u - a, b - u), -i) for i, (a, b) in enumerate(spans) if a <= u <= b]
+        owner_unit.append(-max(cand)[1])
     cubes: List[Dict] = []
-    for i in range(len(groups)):
-        # the box drawn holds the cameras of ALL its views, its own and the shared ones (USER 2026-11-07: "no veo
-        # solapamiento … los cubos deberían estar uno dentro del otro"): two cubes that share views overlap
-        lo, hi, mid, hx = cube_box(np.concatenate([ucam[u] for u in sorted(cube_units[i])]), size)
-        o_cams = np.concatenate([ucam[u] for u in core[i]])
-        olo, ohi = o_cams.min(0), o_cams.max(0)
-        aff = {}
-        for y in sorted(cube_units[i]):
-            aff[str(y)] = 1.0 if y in core[i] else max(nbr[y].get(x, 0.0) for x in core[i])
-        units_i = sorted(cube_units[i])
-        cubes.append({"lo": (mid - hx).tolist(), "hi": (mid + hx).tolist(), "units": units_i, "core": sorted(core[i]),
-                      "share": aff, "keyframes": sorted(k for u in units_i for k in units[u]["keyframes"]),
-                      "own_views": int(w[core[i]].sum()), "views": int(w[units_i].sum()),
+    for i, (a, b) in enumerate(spans):
+        units_i = list(range(a, b + 1))
+        core = [u for u in units_i if owner_unit[u] == i]
+        lo_b, hi_b, mid, hx = cube_box(np.concatenate([ucam[u] for u in units_i]), size)
+        o_cams = np.concatenate([ucam[u] for u in core]) if core else np.concatenate([ucam[u] for u in units_i])
+        shared = [u for u in units_i if u not in core]
+        cubes.append({"lo": (mid - hx).tolist(), "hi": (mid + hx).tolist(), "units": units_i, "core": core,
+                      "share": {str(u): (1.0 if u in core else 0.5) for u in units_i},
+                      "keyframes": sorted(k for u in units_i for k in units[u]["keyframes"]),
+                      "own_views": int(w[core].sum()) if core else 0, "views": int(w[units_i].sum()),
+                      "shared_keyframes": int(nk[shared].sum()) if shared else 0,
                       "over_cap": bool(int(w[units_i].sum()) > int(max_views)),
-                      "camera_span_m": ((hi - lo) * float(metres_per_unit)).tolist(),
-                      "own_camera_span_m": ((ohi - olo) * float(metres_per_unit)).tolist(),
+                      "camera_span_m": ((hi_b - lo_b) * float(metres_per_unit)).tolist(),
+                      "own_camera_span_m": ((o_cams.max(0) - o_cams.min(0)) * float(metres_per_unit)).tolist(),
                       "size_m": (2.0 * hx * float(metres_per_unit)).tolist()})
     n_kf_all = int(sum(len(u["keyframes"]) for u in units))
     owner = np.full(n_kf_all, -1, np.int64)
@@ -441,16 +248,17 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], cov: Dict[Tuple[int, int],
         owner[units[u]["keyframes"]] = i
     if (owner < 0).any():
         raise CubePlanError("a keyframe has no owner cube")
-    own_v = [cb["own_views"] for cb in cubes]
-    return {"gravity_frame": R.tolist(), "max_views": int(max_views), "tau": float(tau), "cube_m": float(cube_m),
+    nkc = [len(cb["keyframes"]) for cb in cubes]
+    ov = [cubes[i]["shared_keyframes"] / max(len(cubes[i]["keyframes"]), 1) for i in range(len(cubes))]
+    return {"gravity_frame": R.tolist(), "max_views": int(max_views), "cube_m": float(cube_m),
             "metres_per_unit": float(metres_per_unit), "cubes": cubes, "owner_unit": owner_unit,
             "owner": owner.tolist(),
-            "stats": {"covisible_pairs": len(cov), "groups_grown": len(set(assigned)),
-                      "merges_for_views": merges_b,
-                      "small_left": int(sum(1 for v in own_v if v < half)), "walk_joins": joined,
-                      "over_cap_joins": over, "shared_memberships": shared,
-                      "memberships_per_unit": float(np.mean([sum(u in s for s in cube_units) for u in range(U)])),
-                      "own_views_min": int(min(own_v)), "own_views_max": int(max(own_v))}}
+            "stats": {"cubes": len(cubes), "keyframes_min": int(min(nkc)), "keyframes_max": int(max(nkc)),
+                      "views_min": int(min(cb["views"] for cb in cubes)),
+                      "views_max": int(max(cb["views"] for cb in cubes)),
+                      "shared_keyframes_frac_min": float(min(ov)), "shared_keyframes_frac_max": float(max(ov)),
+                      "memberships_per_unit": float(np.mean([sum(a <= u <= b for a, b in spans) for u in range(U)])),
+                      "max_camera_span_m": float(max(max(cb["camera_span_m"][:2]) for cb in cubes))}}
 
 
 def cube_extras(cubes: List[Dict], kf_frames: Sequence[int], extra_frames: Sequence[int]) -> List[List[int]]:
@@ -538,11 +346,9 @@ def analyse(probe_npz: Path, inputs: Dict, *, device: str = "cuda", log: Callabl
                             f"metre to size the cubes with")
     mpu = walk_m / path
     cube_m = float(inputs.get("cube_m", CUBE_M))
-    centres = np.stack([kf_c2w[u["keyframes"], :3, 3].mean(0) for u in units])
-    cov = unit_covisibility(cmap, unit_recs, centres, 2.0 * cube_m / mpu, tol)
     kf_cov = keyframe_covisibility(cmap, kf, kf_recs)
     del cmap
-    plan = plan_cubes(kf_c2w, units, cov, metres_per_unit=mpu, cube_m=cube_m, max_views=int(inputs["max_views"]),
+    plan = plan_cubes(kf_c2w, units, metres_per_unit=mpu, cube_m=cube_m, max_views=int(inputs["max_views"]),
                       device=device)
     ctx = cube_extras(plan["cubes"], kf, turns)
     wit = cube_extras(plan["cubes"], kf, inputs.get("witness") or [])
@@ -556,16 +362,11 @@ def analyse(probe_npz: Path, inputs: Dict, *, device: str = "cuda", log: Callabl
                  "kf_covisibility": kf_cov, **extra})
     st = plan["stats"]
     sizes = [cb["omega_views"] for cb in plan["cubes"]]
-    half = int(inputs["max_views"]) // 2
-    log(f"[cubes] {len(units)} units ({len(kf)} keyframes, {len(turns)} turn frames) → {len(plan['cubes'])} cube(s): "
-        f"own views {st['own_views_min']}–{st['own_views_max']} (the views first: at least {half} when the walk has "
-        f"them), {min(sizes)}–{max(sizes)} Omega views with the shared ones (cap {plan['max_views']}); "
-        f"{st['groups_grown']} group(s) grown by what the units see within {cube_m:g} m of displacement "
-        f", {st['merges_for_views']} merge(s) of small groups within it; a unit in {st['memberships_per_unit']:.2f} "
-        f"cube(s); "
-        f"{st['walk_joins']} walk join(s)"
-        + (f"; {st['small_left']} cube(s) under {half} own views (nothing left to join)" if st["small_left"] else "")
-        + (f"; over the cap by a walk join: {st['over_cap_joins']}" if st["over_cap_joins"] else ""))
+    log(f"[cubes] {len(units)} units ({len(kf)} keyframes, {len(turns)} turn frames) → {len(plan['cubes'])} cube(s) of "
+        f"{cube_m:g} m along the walk, neighbours sharing half their keyframes ({st['shared_keyframes_frac_min'] * 100:.0f}"
+        f"–{st['shared_keyframes_frac_max'] * 100:.0f} %): {st['keyframes_min']}–{st['keyframes_max']} keyframes, "
+        f"{min(sizes)}–{max(sizes)} Omega views per cube (no view cap); cameras spanning ≤ {st['max_camera_span_m']:.1f} m; "
+        f"a unit in {st['memberships_per_unit']:.2f} cube(s)")
     at = {f: i for i, f in enumerate(kf)}
     gap = np.asarray([at[b] - at[a] for a, b, _c, _d in kf_cov["pairs"]], np.int64)
     log(f"[cubes] what each keyframe sees of every other: {len(kf_cov['pairs'])} pair(s) of keyframes at c ≥ {TAU:g} "
@@ -600,8 +401,8 @@ def figure(plan: Dict, centres: np.ndarray, out_png: Path, title: str) -> None:
     ax[0].scatter(C[0, 0], C[0, 1], marker="*", s=220, c="g", zorder=6, label="start")
     ax[0].set_aspect("equal")
     ax[0].legend(fontsize=8)
-    ax[0].set_title(f"{title}: {len(plan['cubes'])} cubes of {plan['cube_m']:g} m or less by what the views see "
-                    f"(≤ {plan['max_views']} views); cameras coloured by the cube that owns them — from above")
+    ax[0].set_title(f"{title}: {len(plan['cubes'])} cubes of {plan['cube_m']:g} m along the walk, neighbours sharing "
+                    f"half their keyframes; cameras coloured by the cube that owns them — from above")
     ax[1].scatter(C[:, 0], C[:, 2], s=6, c="0.4")
     ax[1].set_title("side view (floors)")
     ax[1].set_aspect("equal")

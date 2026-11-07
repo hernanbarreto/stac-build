@@ -444,44 +444,23 @@ window, and never on a keyframe.
 
 ### 10.1 The cut (`server/reconstruction/cubes.py`)
 
-A cube is a **group of views that VGGT-Ω reconstructs together**: its own views and the views it shares with its
-neighbours. Views go together by **what they see**. A cube's pass never spans more than **5 m** of camera displacement
-(`cube_m`): beyond about 5 m one inference of Omega accumulates drift and bends what it infers, and a cube longer than the
-others would bend differently from them, so every pass keeps the same reach. Half of it is for the cube's own views and
-half for the shared ones: "64 images overlapped 50 % with the neighbours", in space as in views. Two passes over the same
-place that see the same go together, whatever moment of the walk they come from. Two cameras side by side that see
-different things do not.
+**The rule** (USER 2026-11-07, night): "los cubos son de 5 m, no los decide nadie … ni los kf de intake ni nadie … y el
+solape con los cubos vecinos es el 50 % de los kf que hay en los cubos, punto, es todo"; "la cantidad de cubos la
+determina la trayectoria, 5 m, no la cantidad de kf — más cubos son más costuras y más errores".
 
-**Units.** A unit is a parallax keyframe with the rotation keyframes up to the next parallax keyframe, and the turn frames
-after them. A turn is never cut.
+- **Units.** A unit is a parallax keyframe with the rotation keyframes up to the next parallax keyframe, and the turn
+  frames after them. A turn is never cut.
+- **A cube.** Along the walk, the units in order while their mean cameras fit a box of `cube_m` (5 m) on every axis of
+  the gravity frame: the displacement of one Ω pass (beyond about 5 m Omega bends what it infers). No view count enters:
+  every keyframe the walk has inside those 5 m is a view of the cube, I1's and the coverage fill's alike.
+- **The overlap.** The next cube starts at the unit where half of this cube's keyframes lie behind it, so neighbouring
+  cubes share half their keyframes: the seams of the Sim(3) graph (§12).
+- **The owner** of a unit's keyframes is the cube where the unit lies deepest (farthest from both of its ends).
 
-**What two units see of each other.** With the records of §6 and the depth test of §7,
-
-```math
-c(u\!\to\!v)=\frac{1}{|S_u|}\,\#\big\{X\in S_u:\ \text{some record of }v\text{ sees }X\big\},\qquad
-c_{uv}=\min\big(c(u\!\to\!v),\,c(v\!\to\!u)\big),
-```
-
-where $S_u$ is a fixed stride of up to 2000 points of what $u$ saw. It is measured for every two units whose cameras lie
-within two cubes of each other, and every two units consecutive along the walk.
-
-**Groups.**
-
-1. **Growth by sight.** From the first unit of the walk that no group holds, a group takes, one at a time, the unit that
-   sees the most of what it sees ($c\ge\tau=0.3$ with one of its units), until its own views reach half the cap (32).
-   Its own cameras always stay within half a cube (2.5 m).
-2. **Small groups.** A group left under 32 own views joins another small group first, else the smallest of the others:
-   among the groups it sees the same as before those it sees anything of, else its walk neighbour's. The two must stay
-   within the cap of 64 and their cameras within half a cube. A group that cannot join stays as it is, and its pass is
-   filled with the shared views around it.
-
-**The walk.** Two units consecutive along the walk always share a cube, so the turn frames between them are views of a
-cube that holds both and the cubes form one graph.
-
-**The overlap.** Each cube takes the units of other cubes that see what its own see ($c\ge\tau$ with one of them) and
-whose cameras fall within its cube, which is its own cameras' box widened to 5 m. The most co-visible go first, up to the
-cap. Neighbouring cubes share the strip between them, and a pass with few own views gets its views there. Each unit's
-keyframes take their geometry from its own group's cube.
+The cuts before it (k-d camera cells, rays against AMB3R's cloud, boxes of seen space, groups by what the units see
+capped at 64 views) are gone: the cap multiplied pccr's cubes when the coverage fill doubled its keyframes (11 → 23).
+On pccr's 686 keyframes and a 17.9 m walk the rule gives 6 cubes of 94–358 keyframes (96–385 Ω views), every pass
+within 5.0 m. Revisits across cubes are tied downstream, by F4's revisit windows and F6's vote.
 
 **A cube's views.** Its Ω views are its keyframes plus the turn frames that lie between two of its keyframes consecutive
 in the walk. Its F6 witnesses, the interval frames, follow the same rule.
@@ -502,16 +481,9 @@ the session's tolerance, pccr's map never saw the walk's end meet its start (AMB
 it does.
 
 **Products.** `intake/cubes.json` and `intake/cubes.png`, stamped by the probe, the inputs and the code. The viewer draws
-each cube (**Instances** tab, `reconstruction/cube_boxes.py`) as a box around the cameras of all its views, its own and the shared ones (cubes that share views overlap), carried into
+each cube (**Instances** tab, `reconstruction/cube_boxes.py`) as a box around the cameras of all its views (cubes that
+share keyframes overlap), carried into
 the live frame by the similarity between the probe's and the published keyframe cameras.
-
-On the dry run of 2026-11-07, every pass within 5 m:
-
-| Session | Cubes | Views per pass | A unit in, on average |
-|---|---|---|---|
-| zaragoza (185 keyframes, an open hall) | 6 | 63–64 | 1.98 cubes |
-| observatorio (76 keyframes, a sparse walk) | 4 | 29–46 | 1.74 cubes |
-| pccr (313 keyframes) | 11 | 39–55 | 1.49 cubes |
 
 ### 10.2 Ω resolution
 
