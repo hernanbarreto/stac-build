@@ -1,538 +1,158 @@
-# Final reconstruction pipeline — STATE OF 2026-10-17 (read this first in a new session)
+# Final reconstruction pipeline — STATE OF 2026-11-08 (read this first in a new session)
 
-This file is the single source of truth for: what the reconstruction pipeline IS today, what each
-stage does, the user decisions behind it, and EVERY pending item (two lists at the end: A = the
-reconstruction pipeline, B = general). Validated by the user on 2026-10-01 ("así está bien, todo lo
-que describiste es correcto").
+THE PIPELINE IS FINAL. Validated by the user on pccr 2026-08-31 (main `8cef74f`): *"la cobertura es muy buena, sin
+errores, sin duplicados, muy muy buen resultado, excelente, que quede este como pipeline final"*. Nothing in it
+changes without his word. This file says what each stage does and what is still open; how it got here is in the git
+history of this file and of CLAUDE.md (the 2026-10-17 version of this file: `git show 2f13136:docs/pipeline_final.md`).
 
-## Decisions (USER, 2026-09-30 / 2026-10-01 / 2026-10-04 / 2026-10-05)
+## 1 · The pipeline ("Reconstruir"), stage by stage
 
-**2026-10-05 (night) — SEGMENTATION ON DEMAND (USER: "un check para correr o no el vlm sam etc luego de la
-reconstrucción … en la lista de segmentación un botón para autosegment … una ventana donde se puede ver el prompt
-para vlm y segmentación, luego checkbox para el resto de etapas").** "Reconstruir" carries a per-scan check
-*Segment when done* (OFF by default, USER): off, the run ends with the cloud in the viewer (`run_pipeline`
-`segment`: the scan keys whose chain runs; `pipeline_manager.select_stages`). The Instances panel's **Autosegment**
-button (also in the command palette) opens a window with the VLM prompt (scene understanding — the SAM3
-vocabulary) and the session's SAM3 prompts, both editable, and a checkbox per stage: VLM, SAM3 + mask projection,
-certification, object descriptions. The VLM prompt is SAVED IN THE SESSION (`output/autosegment.json`, USER) and
-every later VLM pass of that session uses it (`AutoPrompter.understand_prompt` → `understand_frame(prompt=)`);
-edited SAM3 prompts go into `vlm_analysis.json` `prompt` (what the SAM3 stage reads; a VLM run replaces them —
-declared in the window). Run = `run_pipeline` with `autosegment` over the viewer socket: the chosen stages FORCED to
-run (`start_pipeline(force=True)`: the resume probes are not consulted), nothing wiped, captions off through the
-run's config. REST: `GET/POST /api/autosegment/{session}` (state / save prompts). Module
-`segmentation/autoprompt/autosegment.py`, UI `features/AutosegmentDialog.tsx`; tests `tests/test_autosegment.py`.
+`pipeline_manager.DEFAULT_STAGE_ORDER`: RECONSTRUCTION → CLOUDCOMPY → GENRECON → VLM → SAM3 → PROJECTION → FLOOR →
+CERTIFY. GenRecon runs only when ordered from the Autosegment window; the certification is OFF (§1.9).
 
-**2026-10-05 (evening) — THE ORDER: "intake, da3 para medir, omega, f0 a f6, octree, época publicada, vlm, sam3,
-máscaras, correcciones, época 1"; "chunks de 15 m siempre"; "olvidate de la exclusión de personas y objetos en
-movimiento"; "como mucho la original y la final, ninguna intermedia".** Zaragoza (17.8 m) at 5 m chunks came out
-in 6 chunks (metric lock spread ×1.39, pose graph held-out 12.5 cm and rejected, floor tilted 2.5–5.8° per chunk,
-the certification then applied 2.64 m of translation) — "muchísimo peor que Omega en un solo chunk". Wired:
-`chunk_walk_m: 15`; I2 REMOVED (USER 2026-10-08 night: "ya no corre VLM ahí" — the `intake.content` section is gone, a leftover fails the intake loader); the VLM and SAM3 are pipeline STAGES after
-the cloud stage again (`pipeline_manager.DEFAULT_STAGE_ORDER`: reconstruction → cloudcompy → vlm → sam3 → certify;
-the reconstruction stage hosts no semantics; the cloud stage hands the published cloud to the viewer at once and its
-resume probe no longer keys on the segmentation; the SAM3 stage projects its masks on the cloud on disk; the
-certification follows); `certify.single_final_epoch: false` = the published cloud's epoch stays stored and selectable
-next to the certification's (the reconstruction stage always discards its pose-only epochs, builds no Omega
-comparison cloud). F6's mixed-pixel snap reads `seg_masks.npz` when present; without it (the new order) the mixed
-pixels go to the vote as they are (declared in its log). ALSO SEEN on zaragoza: `segmentation_result.json` is 1 GB
-at 111 M points and the viewer socket dropped while it was sent (the viewer showed no segmentation) — pending list B.
+### 1.1 Intake (`intake/`, inside the reconstruction stage, `workers/map_worker.py`)
+- **I0 quality** — per-frame sharpness / luma / inter-frame difference (8 CPU threads).
+- **I1 parallax keyframes** — pyramidal LK + homography RANSAC + rotation fit; a keyframe every 12 px of parallax
+  (quantum) and one by ROTATION every (1 − τ)·FOV_h / 4 (pccr 10.8°); witness frames in between.
+- **I3 DA3 to measure** — the focal probe (16 frames → the session K) and DA3 windows (metric depth for the gauge
+  and the anchors; deleted after the chain, regenerated on demand). I2 (content tags / exclusion masks) is REMOVED.
+- Frames are SEALED by `frames/manifest.json` (sha256 of every frame); every step is stamped and reused only on an
+  identical stamp (frames' bytes, code, parameters, environment).
 
-**2026-10-05 — STORAGE: a session keeps what the next reader needs, nothing else ("que no almacene al pedo … debe ir
-limpiando"), after zaragoza (1080p) died at the second loop bridge with the /workspace quota full.** Measured: pccr held
-18 GB, 12 GB of it dead (Omega's aligned chunks 6.5 GB + bridges 1.9 GB + uncertainty maps 0.3 GB kept by
-`certify.keep_aligned_chunks: true`, the I3 gauge windows 2.6 GB read by F0 only); zaragoza 42 GB (24 GB of chunk
-predictions, 8.5 GB of windows, 6.5 GB of two bridges). Wired: `certify.keep_aligned_chunks: false` (aligned chunks
-deleted right after the omega-depth/scale step, bridges + `uncert/` at the end of the reconstruction — existing
-cleanup code, now on); a bridge is saved and held WITHOUT its images (never read; a third of its 3.6 GB at 1080p);
-`gauge.delete_windows_after_chain: true` (the chain's last step deletes `output/da3_windows/window_*.npz`; the plan,
-walk.json and the anchors stay; `run_gauge` regenerates the files for a re-run from F0); the focal probe and the VRAM
-probe delete their window depth once K / the footprint is written. Epochs are NOT the bloat: one live potree (0.8 GB),
-`corrections/epoch_N.npz` ≤ 1.4 MB each. Kept on purpose: `omega_run` + `da3_run` records (the core's inputs),
-`origins.npz`, `cleaned_cloud_raw.ply` (epoch transactions), `precision/tracks.npz`, `scene_r.db`, `seg_broadcast.json`.
-**The bend's grid (zaragoza's second failure, 2026-10-05):** F5's ladder chose R2 (lens k1 −0.0035, held-out 0.784 →
-0.777 px) and `f6_bend` refused a camera with distortion; Omega's records were also 1920×1088 for 1920×1080 frames. Fixed
-at the root, not hidden: the bend works on the UNDISTORTED NATIVE frame (the chain's convention: corrected_cloud,
-silhouette_filter, `pixel_u_und/v_und`); Omega's record, F5's landmark pixels and the SAM3 label maps are carried onto it
-through the lens + record grid (`record_on_native`, nearest; `undistort_points`) when they differ; `f6_check` does the same
-before unprojecting with K (its old guard checked x only). pccr (no lens, record on the camera grid) takes the old path bit
-for bit. Report: `depth_on_f5.json` `grid_of_the_bend`. Measured on zaragoza: lens shift ≤ 3 px at the corners, 0 % uncovered.
+### 1.2 Structure (inside the reconstruction stage)
+- **AMB3R-SLAM over the WHOLE video at stride 1** (`reconstruction/amb3r_probe.py` → `intake/amb3r_video.npz`; env
+  `amb3r`, fork `--stac_light_map`): AMB3R decides poses only — its backend reconstructs ~1 frame in 4 with what each
+  saw (depth every 4 px, K, c2w through its submap's Sim(3)); the rest are interpolated. It is the coverage map.
+- **Coverage fill** (`reconstruction/coverage_fill.py`): AMB3R frames are added as keyframes (`closed_by:
+  coverage`) while a frame brings points no keyframe sees, or sees from one view only (a second view ≥
+  `refine.min_tri_deg`, 2°), beyond the depth test's own miss rate. pccr: 295 + 18 = 313 keyframes.
+- **Turn frames** (`intake/turn_frames.py`): between consecutive keyframes the turn is cut into steps ≤ θ_q/3·1.25,
+  the sharpest frame per step — Omega CONTEXT views (slots dropped) and F6 witnesses.
+- **Cubes** (`reconstruction/cubes.py`, version 9): along the walk, units while their cameras fit
+  `structure.cube_m` (5 m) AND ≤ `structure.chunk_view_cap` (64) Omega views, at least two units per cube,
+  neighbours sharing HALF their keyframes. `kf_covisibility` (in `intake/cubes.json`): every pair of keyframes where
+  one sees ANY part of the other's view on one surface (c > 0, τ 0) — read by F4's revisits and F6's witnesses.
+- **Omega per cube** (fork `vendor/VGGT-Long`, `loop_utils/cube_run.py`): one VGGT-Omega pass per cube at the
+  largest patch-aligned resolution at which the largest cube fits the card (`max_resolution` 1024); the DA3 metric
+  lock per cube; exact Sim(3) seams on the shared frames; ONE Sim(3) graph over the cubes on the SEAMS ALONE
+  (`robust_seams=False`, no DA3 prior: the priors broke seams by 16–33 cm). Then `scale_align` + orientation.
 
-**"Reconstruir" with the replace box OFF now RESUMES** (no wipe: the intake's step markers, DA3 depth on disk, the
-fork's `[STAC resume]` chunk predictions / `loop_closures.txt` / `metric_lock.json` stamps, the core's step records
-decide what is reused; everything derived is recomputed) — since 2026-07-11 a requested reconstruction wiped output/
-unconditionally. The dialog defaults the box OFF when a scan shows cached Omega chunks (`maplong_run/
-_tmp_results_unaligned`, now detected). With the box ON a reconstruction still leaves only the frames and the video.
-
-**2026-10-04 — VALIDATED: epoch 8's recipe + PointDiT at the edges ("la reconstrucción está perfecta").** pccr epoch 5 of the
-2026-10-04 run: f6_bend with `mono_detail.enabled: true`, `detail_scope: edges` (PointDiT's detail only within 12 px of a
-discontinuity and within τ; surfaces stay Omega; mixed edge pixels resolved to front / back), floor levelled per chunk
-(undulation 13.1 → 7.9 cm), 158 segments. The first variant (detail on every surface) was REJECTED by eye the same day:
-bent walls, points shed off a rack. The second VLM pass over the unsegmented points is OFF (it added prompts and
-segments). Next sessions run this recipe unchanged; the user is reconstructing a second scene with it.
-
-0. **pccr EPOCH 8 is the best cloud and IS the pipeline** (*"valido el resultado de la época 8, es la
-   mejor, incorporar al pipeline"*). Epoch 8 = epoch 7's depth adjustment EXACTLY (the bend) + the
-   edge-keeping vote. History: epoch 7 (*"piso perfecto, voladores perfectos, la corrección de
-   profundidad de una sutileza excepcional"*) → a first epoch 8 with a different bend window (±16, by
-   consecutive-keyframe agreement) had a WORSE floor and was discarded (*"tenías que dejarlo como la 7"*)
-   → epoch 8 rebuilt with epoch 7's exact bend + the edge vote = the validated one.
-1. **Priority: object DEFINITION** — *"los objetos deben tener mucha definición, corte en los filos,
-   las aristas"*. Old rules may be replaced where something measures better (*"olvidate de las reglas
-   que pusimos en su momento"*).
-2. **The cloud is Omega's depth BENT to F5 per keyframe + the edge-keeping vote — no plane sweep, no
-   DA3** (DA3 layered objects: *"capas duplicadas y puntos voladores"*). F5 rung R1 (fx 392); the
-   camera TRAVELS with the cloud (intrinsic.txt is an epoch artifact).
-3. **The certification** de-duplicates objects and collapses the floor (*"no debe haber cebolla en el
-   piso"*), respecting real steps and slopes. SINCE 2026-10-16 (evening, USER, bufferStop "de costado"):
-   the floor is ONE rigid motion for the whole session, measured on the SEGMENTATION's support surfaces over
-   the whole walk (`correction.floor.model_default: session`) — no chunk turns against another; `chunk`
-   (one motion per Omega chunk, blended across overlaps) stays selectable.
-4. **ONE epoch: the final one** (*"debe quedar una sola época que es la final"*).
-5. **Work one task at a time**, never several agents at once on the user's session; never change what
-   works on a hypothesis — measure first, and reproduce validated numbers exactly when porting.
-
-## ⭐ DETERMINISM — USER 2026-10-07 ("STAC Build es una herramienta de ingeniería, debe dar siempre lo mismo")
-The whole pipeline must be BIT-FOR-BIT deterministic: the same input gives the same bytes, whatever ran before,
-whatever else is on the machine. Trigger: two pccr 2026-08-31 runs with identical input diverged at the in-run pose
-graph (a code change between them), F5 then took rung R2 (a false lens, p2 −0.007) on a 0.0005 px "improvement"
-over 128k tracks, F6 resampled every Omega map through it: floor undulation 14.6 → 45.1 cm.
-- THE PLAN: `docs/plan_determinismo.md` — 166 points (1-63 Omega→F6, 64-166 intake / VLM+SAM3 / cloud+segmentation /
-  corrections+certification / orchestration), each with its fix or the user's decision (DECIDIDO). Wave 1 = the whole
-  RECONSTRUCTION (1-79 + 102, 138, 140, 146) implemented 2026-10-07; wave 2 (after the cloud) follows while the user
-  tests reconstructions.
-- THE USER'S RULE (point 1, delegated to all judges): a change is APPLIED only if (a) significant — 95 % CI of the
-  paired change entirely on the improving side (cluster bootstrap when judges share a keyframe), (b) ≥ 5 judges
-  (`loop_judge.min_judge_closures(0.95)`), (c) the median improvement ≥ `correction_graph.graph.improvement_error_factor`
-  (1.1 since 2026-10-07, USER "1.1 en todos los casos"; was 2.0) × the MEASURED error. One function: `loop_utils/metric_lock.decide_change`. Users: the in-run pose graph
-  (leave-one-out judges, every closure judges once; < 5 closures → declared before solving, not applied), the depth
-  graph, the F2 instrument switch, the F5 rung ladder (error = the solver's own continuation error; R2 warm-started
-  from R1; R3 report-only), the F6 per-keyframe bend (c1/c2 enter only ≥ 2× their fit error; c0 verified on the
-  keyframe's own held-out rows, else the pooled neighbours' fit), the chunk check verdicts, the zoom exclusion and the
-  scale-drift gate. argmins (gauge λ, bend window) take the SMOOTHEST option within 2× the measured error of the best.
-- SHARED MECHANISMS: `server/repro.py` — `deterministic_torch` / `enable_deterministic_torch` (STRICT deterministic
-  algorithms, TF32 off, cudnn benchmark off, seeds, cuBLAS workspace), `require_exclusive_gpu` (any co-tenant on the
-  card FAILS the GPU step: no resolution step-down, no window halving — ever), `card_identity` (torch, no 'unknown'),
-  `environment_record` (card, driver, torch/cuDNN, CPU, BLAS core, libs, git of repo+forks), `stamp`/`check_stamp`
-  (inputs + code + config sha256 on every reused file), `stable_id` (no uuid in artifacts), exact float64 writers
-  for every pose/intrinsics text file. Per-card constants COMMITTED in `server/card_table.json` (DA3 window sizing,
-  focal-probe layout, Omega footprint factor) — nothing learned from OOMs at run time (`weights/omega_footprint.json`
-  gone). DA3 weights pinned by revision + sha256 (`server/da3_weights.py`), ONE HF cache (`/workspace/hf_cache`).
-  OPENBLAS_CORETYPE=HASWELL pinned in the chain's step env. PotreeConverter pinned to 1 thread + total-order sorts
-  (rebuilt; measured byte-identical). Timings/clock → `*.timing.json`, never in compared artifacts.
-- RESUME: every chain step stamps what it consumed (`chain_state.json` STATE_VERSION 2: old files are ignored → re-run
-  from F0); Omega has a stamped completion marker (`maplong_run/omega_complete.json`, `fork_stamp.json`); every reused
-  file (windows, walk, covis, loop closures, scale rows, calibration, masks, gauge.json) is taken only on a matching
-  stamp, otherwise recomputed or refused with the reason.
-- INTAKE (points 64-66, 69-71, 74, 75, 78, 79, 84 — package E, 2026-10-07): the I0/I1/I2 marker (`intake/intake_state.json`
-  v2) keys every step on a `repro.stamp` — every frame's bytes under `frames/<name>`, the intake + DA3-extractor code
-  (`intake.stamps.INTAKE_CODE_FILES`), the step's parameters, K + the focal probe's stamp, the CPU environment
-  (`intake.stamps.cpu_environment_record`: numpy/scipy/OpenCV/Pillow versions, CPU, BLAS core, OpenCV dispatch + IPP,
-  BOTH JPEG decoders with their libjpeg-turbo builds, numpy's FFT dtype) — never a version bumped by hand; the log
-  names what differs. No time, epoch or absolute path in any intake product (epochs = 0 by construction: the intake
-  feeds the reconstruction's epoch 0; the session's epochs at run time, times and absolute paths go to
-  `intake/intake_state.timing.json`). I0's FFT in explicit float64 (bit-identical to the numpy-1.26 float32 path);
-  numpy / scipy / opencv-python / pillow PINNED in requirements.txt + environment.yml to env da3's versions. The job's
-  configuration is FROZEN once by the pipeline manager after the replace wipe (`output/run_config.yaml` +
-  `run_config.sha256`, `intake.run_config`); the intake refuses an intake configuration that is not the frozen one and
-  records the sha (not a key: a change elsewhere in config.yaml re-runs nothing); the CLIs freeze their own. Every I1
-  window records its decision margins in `selected_frames.json` (`windows[].margins`: closing p − hi, band-edge
-  distance, top-2 sharp_rank gap, worst fb margin, tracks margin, TRF nfev vs the bound). I2 (off): the disabled branch
-  deletes leftover `intake/exclusion_masks/*.png` and `content_tags.json` carries the stamp of exactly the valid masks
-  (root `stamp` + `exclusion_masks.stamp`; readers: `precision.tracks.exclusion_mask_paths` / `intake.content.
-  valid_exclusion_masks`); a VLM answer that does not parse FAILS the stage (`VLMParseError`), never 'nothing'. The
-  focal probe is reused on its stamp only (frames' bytes, committed layout, card, weights, dtype, versions —
-  `intake.focal_probe`); the SALAD revisit bars carry their bootstrap error and pairs within 2× it are in neither
-  class; the non-local band is min_walk_m of the FROZEN walk with its margin recorded.
-- FRAMES SEALED + CAPTURE IN inputs/ (points 67, 73, 76, 77 — 2026-10-07): every frame writer (video upload,
-  Stray `rgb.mp4` — `ingestors/stray_scanner.py`, `convert_stray_to_da3.py` —, the WebXR `/ws/scan` socket) fills
-  `<scan>/frames.extracting/` through `intake.frames_manifest.FrameSealer` (duplicate frame numbers refused) and
-  renames it to `frames/` only when complete, `frames/manifest.json` written LAST: video name/size/sha256, decoder
-  (OpenCV version, FFMPEG requested explicitly, the Video I/O build lines, `CAP_PROP_ORIENTATION_AUTO` SET to 0 —
-  measured to be OpenCV 4.11.0's default: bufferStop's / fosa_pan's −90° videos have unrotated frames on disk —
-  and the container's orientation), encoder (`cv2.imencode` with every JPEG option explicit, the same bytes as the
-  old `imwrite` q95 — tested), reported vs decoded count, every frame's sha256; deterministic bytes, no clock. An
-  upload into a scan WITH frames → 409 naming the count (the UI has no replace-video action). While a writer works
-  (in-process claim) or the temp dir exists (a restart mid-extraction) the pipeline fails the job with the reason,
-  the wipe and the intake refuse; the next upload removes the temp dir. The legacy `/ws/camera` stream (no client)
-  is refused. The intake checks the frames against the manifest (names + count, then the sha256 of its OWN I0 stamp)
-  and fails naming the first difference; a manifest-less `frames/` (all five sessions today) is ADOPTED once
-  (origin `adopted`, decoder/encoder null, DECLARED in the log). `quality.list_frames` refuses two files with one
-  frame number. CAPTURE: `inputs/stray/`, `inputs/vio_trajectory.*` / `inputs/vio/`, `inputs/webxr/`
-  (`ingestors/capture_inputs.py`); every Stray / VIO reader reads `inputs/` first, then the scan's own legacy
-  places (never a sibling); the replace wipe keeps `frames/manifest.json` + `inputs/` and MOVES legacy capture data
-  into `inputs/` (two different copies of one file refuse the wipe before anything is touched). `camera.json`
-  `report.k_source` = source + file + sha256; `scale_diagnostics.json` `scale_source_file` / `vio_sha256`;
-  `gauge.json` (+ its v2 block) `scale_source` / `scale_inputs`. No session has VIO/Stray: a no-op for them but
-  the adoption (and F0+ re-runs once: `frames/` now holds the manifest the chain's `frames` stamp hashes).
-- DECLARED for the first run after this: F5 solves each rung twice (continuation = solver error); PointDiT and DA3
-  run STRICT — an op without a deterministic CUDA kernel RAISES (fail, never degrade); Potree on one thread ≈ 0.55 M
-  pts/s; F2's algebra on Haswell kernels (last-bit changes vs earlier runs); F6 numbers change by design (points 48/49).
-- VERIFICATION: run the same session twice (replace ON) and compare the sha256 of every product; any difference is a
-  bug of this plan, not noise.
-- 2026-10-07 (evening, USER — after the first deterministic pccr run showed the turn at frames 558–723 torn by 39 cm and
-  the table doubled): (1) I1 also makes a keyframe by ROTATION — the quantum is a QUARTER of the co-visibility bound,
-  (1 − τ)·FOV_h/4 (pccr 10.8°: co-visible with the next three keyframes, ℓ ≥ 4); measured on pccr, half the bound
-  (21.6°) still left 19–27° jumps ("huecos") and the session's own 7° stacked 30 keyframes 2–3 cm apart ("solapados");
-  pccr 289 → 295 keyframes, the turn 16 → 21, largest frame gap 70 → 51. (2) THE CHUNK PLAN IS MEASURED ON THE
-  PARALLAX KEYFRAMES ONLY (covis.json plan_index; COVIS_VERSION 4): counted, the rotation keyframes made turns cheap
-  (D_total 34.7 → 31.9, 5 chunks → 4 longer ones spanning the turn, Omega drifted −54 cm inside them — floor undulation
-  13.5 → 32.7 cm). They fill the turns inside the chunks; every range maps to full keyframe indices. (3) Ownership of a
-  shared block = split at its midpoint (the frame at the midpoint to the earlier chunk — bit-identical to the old
-  nearest-centre rule on uniform layouts); the centre rule gave the whole block to the smaller chunk (pccr: 63/63 vs
-  50/139). (4) TRIED AND REMOVED the same evening: a top-view (silhouette correlation) witness corroborating loop closures
-  — on real bridge windows it read false shifts (67 cm on a local closure, 1.7–5.1 m start↔end) and the graph applied
-  metres; ownership by co-visibility company (untested on its own); F6 landmark-precision weights (measured: do not move
-  s_k at the turn) and nearest-side edge pixels (a recipe change). The start↔end closure (~1 m, bridge 284↔8) stays
-  measured, not applied: the certification is the validated corrector of that loop.
-- 2026-10-07 (night): the ZOOM rule's error was each chunk's own per-frame focal scatter (2–5 px); Omega gives the
-  SAME frames focals that differ by up to 21.8 px between two chunks' inferences (pccr seams: +1.4, +11.8, −1.9,
-  +21.8 px), so its per-inference noise read as a zoom on 4 of 5 chunks, their DA3 anchors were dropped and the scale
-  verification failed by 18.6 %. The error is now max(own scatter, Omega's focal error between inferences measured on
-  the shared frames = RMS of the seams' median offsets / √2, pccr 8.8 px) — metric_lock.inference_focal_error.
-- 2026-10-08 — WAVE 1 VALIDATED and COMMITTED (main 1c466f4, fork 67f30e9) on pccr 2026-08-31 (floor undulation
-  10.0 cm, thickness 4.8 cm, worst in-chunk drift 8 cm; USER: "pccr se ve bien, con menos errores que hoy a la mañana")
-  and zaragoza 2026-06-03 (ONE pass, D_total 5.01; floor 27.8 cm, as before). Hashes of the run and a full copy of the
-  session under /workspace/stac-keep/ (docs/determinism_work/verification_runs.md). The bit-for-bit two-run comparison
-  of the reconstruction was NOT run (USER: wave 2 first).
-- 2026-10-08 — F6 ON THE CARD, STRICT (USER: "todos los pasos que son CPU y pueden ser GPU estricto deben ser gpu
-  estricto … la premisa es que cada paso sea lo más veloz posible, manteniendo la calidad y el determinismo"; bit
-  identity with the numpy recipe NOT required, run-to-run identity IS). `precision/f6_torch.py`: every map operation of
-  mono_detail (per-tile affine fit in closed form, blend, Gaussian lowpass as matrix products with explicit 'nearest'
-  boundaries, band, sides) and of the edge-keeping vote (splat by stable sort — no scatter, no atomics —, dense
-  projections, sort-based medians, snap, repair) on torch tensors on ONE device: the stage entries (`depth_on_f5.main`,
-  `corrected_cloud.main`, `mono_ab.main`) call `f6_torch.require_cuda(seed)` (no card → fail; strict deterministic mode
-  for the whole process; a CUDA run with the mode off FAILS), the synthetic tests run the same code on the CPU
-  (`use_device`). PointDiT runs a keyframe's tiles as ONE batch (`PointDiTRunner.depth_batch`, `mono_detail.tile_batch`
-  0 = all; a card that cannot hold it fails, never halves). `depth_on_f5.json` carries `maps_numerics` (device, card,
-  torch flags). VERIFIED 2026-10-08 on two fresh copies of pccr (precision.mono_ab, variant 'on'): cleaned cloud
-  byte-identical (sha f548f2f985b9a566), reports identical but the timings; F6 compute 16–18 min vs 32 in the
-  pipeline (PointDiT 411–479 s vs 819 at batch 2; the map phases 26 s vs 186). Still CPU inside F6: the bend
-  (landmark IRLS + bootstrap, ~9 min on pccr) — the next port. Expected on zaragoza (15 tiles/keyframe): PointDiT 56
-  min → to be measured.
-- 2026-10-08 — SEGMENTATION IN ROUNDS (USER DECISION, to implement after wave 2's P2: "si si, es la manera correcta,
-  porque sino el tiempo que se ahorra ahora lo pierde después el humano fusionando o diciendo que 5 cosas son lo
-  mismo"): round k — the VLM sees every keyframe with everything already segmented GREYED OUT and names only what is
-  still visible, with the most specific common name of ONE object (desk, chair — never 'furniture'); the synonym merge
-  over the new names; SAM3 runs the new prompts over all keyframes into the same (staged) store; the unsegmented
-  remainder per keyframe is recomputed; stop when a round names nothing new (plus a declared bound of rounds). Then the
-  VLM describes every segment (ShapeR + chat). Duplicates are prevented by construction, completeness is measured; the
-  after-the-fact dedupes stay as safety nets. Cost ~2–3 h on pccr vs ~2 h, plus one vLLM start per round (never
-  vLLM and SAM3 together on the card).
-- 2026-10-08 — THE FLOOR IS GEOMETRIC, AND THERE MAY BE SEVERAL (USER): "piso" = the horizontal SUPPORT surface the
-  camera walks over — the dominant horizontal plane under the cameras, nearest to y=0 or parallel to it — whatever it
-  is called (floor, platform, andén, walkway, slab, deck); labels are only a hint (plan point 128). A session can hold
-  several floors at different heights, each a segmented object; the floor of a keyframe/chunk is the surface under the
-  camera at that moment and a real change of level (stepping down from the platform) is PRESERVED as a step, never
-  corrected as drift; a second level with significant support by the user's rule is a real floor, not noise. Applies
-  to the certification's floor alignment, the re-level after each epoch, the chunk check and the cloud metrics.
-- 2026-10-16 (evening) — THE FLOOR CORRECTION IS ONE RIGID MOTION PER SESSION ON THE SEGMENTED SUPPORT (USER:
-  "la época 4 debe tomar bien el suelo siempre en todos los casos, al menos un suelo … claro que debe tomar la de
-  segmentación … la correcta es la B"): bufferStop's chunk 1 had been levelled on a 19 k-point patch (7.99°, +102 cm)
-  and its neighbours, with no support plane under their cameras, took that motion blended — the scene came out on
-  its side. `correction/floor.py solve_floor_session` (`model_default: session`): the support = every instance whose
-  label's head noun is in `autoprompt.support_surfaces` (one list, `FloorConfig.support_labels`), over the whole
-  walk; levels searched along the support's own normal (no 'up' assumed), Tukey IRLS refitted over all the points
-  within the band, a further level real by the user's rule judged by the keyframes standing on it; THE floor = the
-  level under the most cameras; ONE motion for every keyframe (tilt / height each only when it clears the factor ×
-  its bootstrap σ); other levels keep their step; without a support instance the points below their own camera,
-  declared. The chunk check and the floor metric still read the per-chunk levels (`chunk_floor_levels`) as reports.
-- 2026-10-08 — WAVE 2 (after the cloud), packages P2–P5 of docs/determinism_work/impl_spec2.md, running/landed the same
-  day (reports in the session log; summary here when all four are in):
-  P2 VLM + SAM3 (landed): each VLM stage launches its OWN vLLM from the frozen config (no prefix cache, one sequence,
-  batch invariance, eager, seed, FLASH_ATTN pinned) and stops it at the end (`semantic.service.job_engine`; identity
-  verified and written to vlm_analysis.json); weights pinned by sha256 (`semantic.serve.PINNED_WEIGHTS`); engine LEASE
-  (`logs/semantic_engine_lease.json`): chat/intel wait while a job holds it; `vlm_analysis.json` stamped over every
-  input and reused WHOLE only on an identical stamp; per-call records (image sha1, finish_reason, salvage); captions
-  stamped, never carried by id, all-or-nothing; SAM3 strict deterministic (TF32 off, repro flags after the build), NO
-  object cap (vendor/sam31 patched: no 320 GB pin), any error/OOM fails the stage; InternVL3 fallback gone; the cloud
-  stage never projects masks (a rebuilt cloud deletes the previous projection products).
-  P3 cloud + segmentation geometry (landed): the raw SAM3 store is IMMUTABLE and sealed (staged, swapped atomically,
-  `reconstruction_id` + stamp), the fusion lives in `fusion_map.json` tied to the raw store's sha (readers:
-  `fuse_parent.fused_parent` / `FusedMasks`), `seg_masks.npz` canonical (object, frame) order; mask identity, space
-  dedupe, label-fragment contiguity, co-visibility splits and OBB core/yaw all by the user's rule with margins
-  recorded (`decisions` in the result); the projection is PURE (no previous result; error or empty → fails and deletes
-  the old one), stamped over every input, reused only on an identical stamp; octree built only from the cloud the masks
-  were projected on, `potree_stamp.json`; PotreeConverter canonical octree layout (byte-identical conversions, no
-  log.txt; POTREE_NUM_THREADS=1 still required); leveling seeded and cache-keyed by the cloud's sha; 16-bit instance ids
-  (`instance_ids.npy`, LAS extra dim `instance`; the viewer still keys on the uint8 class — pending); caches keyed by
-  content; no clock in any compared artifact (`segmentation_timing.json`). Mask audit projects through the cloud
-  camera's LENS (`session_io.CameraSource.pixels`) — a lens-refined session (pccr R2) is no longer refused.
-  DECLARED: octrees change bytes and rebuild once; sessions projected before 2026-10-08 re-project once; legacy
-  sessions without camera.json cannot be projected; `segmentation.obb_orientation.min_plane_frac` removed.
-- 2026-10-08 (evening, USER OK) — SAM3 CROSS-BATCH CHIMERAS FIXED (`segmentation/pipeline._match_ids_iou` + the
-  batch loop of `_run_sam3_batched`): an object of batch ≥ 1 that the overlap frames never show kept its raw
-  per-session SAM3 id (`id_remap.get(local_id, local_id)`), which collides with the ids 1..N the first batch was
-  given — it fused with whatever same-category object held that number, no IoU test, no record (bug since
-  2026-03-15; every category of a session with more keyframes than one batch, 250: pccr 295 → 2 batches, plus the
-  vendor-stop continuations; zaragoza 183 = one batch, unaffected). Measured on pccr 2026-10-08: 'door' batch 1
-  had 9 objects, 2 linked or new, 7 fused into batch-0 doors. Now every unlinked object of the batch gets a fresh
-  id (the docstring's "INVIOLABLE RULE") and the remap is strict. Test: `tests/test_sam3_batch_link.py`.
-  The cross-batch link bar `models.segmentation.iou_match_threshold` 0.3 → 0.90, the same as within a batch
-  (point 93, USER 2026-10-08).
-- 2026-10-08 (evening, USER) — a CONTINUATION WITH ANOTHER CONFIGURATION RUNS
-  (`pipeline_manager._continuation_config_change`, point 151): a resume / Autosegment / projection / certification
-  ordered with a config.yaml that differs from the session's frozen `output/run_config.yaml` is no longer refused —
-  the differing sections are DECLARED in the log and the job freezes its own. An edited frozen file still refuses.
-- 2026-10-08 (evening, USER) — ONE PLACE FOR THE RULE'S FACTOR: every user of "≥ factor × the error" reads
-  `correction_graph.graph.improvement_error_factor` (1.1). The only one that did not — the object descriptions'
-  view ties (`object_captioner.select_views`, a fixed 2.0, point 98) — now reads it (the job's frozen config in
-  the pipeline). object_captioner.py is in the VLM analysis stamp: the next run of each session re-runs the VLM.
-- 2026-10-08 (evening, USER: "no tiene por qué tener el límite de 255") — NO 255-OBJECT CEILING IN THE VIEWER:
-  per-point instance ids in 32 bits (`segmentation.republish.INSTANCE_IDS_DTYPE`, the octree's `instance` LAS extra
-  dim, `potree_converter`); the viewer reads `instance` when the octree has it (`PotreeLoader`), else the class byte
-  of older octrees; the visibility texture is 2048 × 2048 = 4,194,304 segments (`Viewport.makeSegVisTexture`, the
-  side every WebGL2 device supports); the payloads' `class_byte` is the instance id when the octree carries
-  `instance` (`republish.viewer_key_of`). Tests: `test_segmentation_payload_class_byte`, `test_p3_potree_canonical`
-  (the real converter keeps ids 70,000 and 4,000,000 in a uint32 `instance`).
-- 2026-10-08 (evening, USER) — ONE FLOOR CONCEPT IN THE REPORTS TOO (point 128): steps 1–4 of the certification's
-  chunk floor are `correction.floor.chunk_floor_levels` (the certification calls it — same result), measured ONCE
-  on the published cloud (`precision.cloud_metrics.cloud_floor_levels`, stable subsample of `max_points`) by the
-  chunk check. The chunk check's floor of a keyframe is its points within `band_m` of its chunk's floor UNDER THE
-  CAMERA — never the lowest surface it sees (zaragoza measured the camera 2.25 m over the "floor": the track bed
-  from the platform) — and DA3 is read at those same pixels; without the cloud it falls back to the lowest band,
-  declared. The floor metric names each chunk's floor's surface (`correction.floor.chosen_surfaces`, the seam
-  identity rule without the correction's tilt) and, with several surfaces, measures each on its own plane (one
-  surface: exactly the old metric). Test: `tests/test_chunk_check_floor_under_camera.py` (platform + track bed).
-- 2026-10-08 (night) — WAVE 2 CLOSED (the remaining points, four packages in parallel, two skeptics each, fixes, the
-  whole suite: 1702 passed; the 12 failures left were tests written BEFORE the user's 2026-10-07 decisions — updated
-  in the close-out below). P2: the client's Pillow/libjpeg record in the VLM stamp + per-call records + caption stamp
-  (94); loop classes keyed by the job's frozen config and the engine's expected identity, no 'default' (95); the census
-  carries the prompt sha, the analysis stamp sha, the engine sha and the SAM3 list sha, and no run-varying field
-  (`used_mib`, temp paths, seconds) — byte-identical between identical runs (159); the SAM3 stage runs on the JOB's
-  frozen config (`get_sam3_wrapper(config=)`, `run_segmentation(config=)`); the product epoch is selected BEFORE SAM3
-  and the masks are projected ONCE (150); a reused VLM analysis verifies the engine identity WITHOUT launching vLLM
-  (`semantic.serve --identity-only`). P3: a rebuilt cloud always deletes the previous projection products (96); one
-  Potree thread pinned in code and recorded in the octree stamp (103 closed by 57's rule); the mask audit / shape
-  proposer use the declared grids' exact maps (108); the OBB footprint error is a seeded Poisson bootstrap of the
-  points (109); every `from config import cfg` of the projection reads the frozen config (112/151); a failed projection
-  deletes every product (122); octrees reused only on their content stamp, never mtime (123); `floor_transform.npz`
-  read only under its seal (`floor_level.json`: reconstruction id + cloud sha + npz sha) (158); the SAM3 store seal
-  is fatal for every reader (`store_seal_verdict`). P4: gauge rows taken on their evidence stamp (134); the product
-  publish writes the identity `depth_correction.json` and a product `scale_diagnostics.json`, and prunes the epochs
-  outside the live lineage (135/136 — the epoch NUMBER still counts history: renumbering = list A); clocks out of the
-  quality report (`quality/timing/`), correction ids derived from the transform (137); the certification refuses a
-  non-intact store. P5: the engine lease carries the holder's start time + boot id and an owner (a reused pid is
-  stale; backend threads cannot bypass it) (81); cooperative cancel with a derived bound (40.5 s) before the kill,
-  `/api/certify/select` refused while a job is active (111); `config.py` raises on a broken or missing config.yaml
-  (112/151); ONE GPU permit for meshing, the Segmentation Manager's SAM3, the legacy auto-segmentation and the
-  retro-segmentation (154); the InternVL3 fallback is gone from main.py (156); the Autosegment order CARRIES its
-  prompts (162). Earlier the same evening (USER): cross-batch SAM3 chimeras fixed and the link bar 0.90 (93); a
-  continuation with another configuration runs and declares (151); one place for the 1.1 factor (98); no 255-object
-  ceiling (107); the floor under the camera in the chunk check and the metric (128); 105/129 kept as the code does;
-  the stale acta removed by a segmentation run without the certification, broken prompt files redone (149).
-- 2026-10-08 (night) — WAVE 1 AUDITED AND CLOSED OUT (USER's decisions per point in docs/plan_determinismo.md):
-  73 of 83 points closed as written, 3 no-action, 63 = the user's renumbering (list A); the six gaps decided: 11 NOT
-  touched (it would move the validated chunk plan); 16 the SALAD margin per candidate recorded in loop_edges.json,
-  the bar read from loop_closures.txt's stamp on a fresh or resumed pass (`loop_bridges.salad_applied_threshold`,
-  the detector cross-checks it); 66 `salad_revisit_reference.json` is NEVER reused — recomputed every reconstruction
-  (`REVISIT_REFERENCE_VERSION` and `revisit_reference_is_of` gone); 69 the precision chain reads the FROZEN
-  `output/run_config.yaml` (`precision.config.raw_config_of(session_dir)` / `load_precision_config(session_dir=)`,
-  the runner's raw sections and every former `from config import cfg`; a CLI on an unfrozen session: the server's
-  config, declared; the code-version half stays open, declared); 70 `windows.json` session-relative (`frames/<name>`,
-  the extractor resolves against `--image_dir`; the next RECONSTRUCTION re-runs I3's DA3 windows once); 75 I2 REMOVED
-  (the stage, `intake/content.py`, the config section, the exclusion masks and every reader; `intake.quality.
-  frame_file` is the one frame-number → file rule). Wave-2 cross items closed the same night: InternVL3
-  (`scene_analyzer.py`) unreferenced; the session intel polls `cancelled`; `precision/tracks.instance_loops` on the
-  evidence stamp (134); `poses_epoch` derives the depth sidecar from the chain (135); the f6_bend publish records
-  `history` (136); witness / fuse / fuse_scans ids and clocks (137); the re-level's `floor_transform.npz` SEALED in the
-  certification's transaction and by the gizmo / level_floor writers, the viewer applies it under the same seal (158);
-  the erase / delete paths re-seal the SAM3 store; the interactive SAM3 runs on the session's frozen config; the
-  reprojection tools use the exact maps (108). The 12 pre-2026-10-07 tests updated to the user's decisions (factor 1.1
-  and the median closure σ, selected_frames required by the plan, rotation keyframes, midpoint ownership, the
-  exclusive-GPU rule). Still open, declared: the fork's own two stage fixtures (`vendor/VGGT-Long/tests`, the frustum
-  rule of 2026-10-05) and the two-run byte comparison of a reconstruction (needs a reconstruction run).
-
-## The pipeline ("Reconstruir"), stage by stage
-
-| # | Stage | Code | What it does |
-|---|---|---|---|
-| 1 | Intake I0, I1, I3 | `intake/`, `workers/map_worker.py` | frames, parallax keyframes, DA3 to measure (K, walk). I2 (content tags + exclusion masks) was OFF since 2026-10-05 and is REMOVED since 2026-10-08 (USER): no `intake/content.py`, no `content_tags.json`, no exclusion masks, no readers |
-| 2 | VLM + SAM3 — **AFTER the cloud stage** (USER 2026-10-05) | `workers/vlm_worker.py`, `workers/sam3_worker.py` (pipeline stages `vlm`, `sam3`), `segmentation/autoprompt/` | ONCE, on EVERY keyframe (one call each; the 2×2 crops were removed 2026-09-29, c07575a); the same VLM call names the SAM3 prompts AND describes each kind for ShapeR (`vlm_analysis.json` `shape_descriptions`); the SAM3 stage projects its masks on the published cloud (stage 8) |
-| 3 | Omega | `workers/map_worker.py` `_run_vggtomega`, planner `reconstruction/chunk_covis.py`, resolution `reconstruction/chunk_plan.omega_resolution_for` | chunks = the **co-visibility plan** (USER 2026-10-06, always, no switch): ONE pass when the whole walk is ≤ H = 13.67 co-visibility lengths, else variable-size chunks at 50 % overlap (each seam its own block), handed to the fork as `Model.chunk_ranges`, persisted in `output/chunk_plan.json` (+ covis report); Omega's resolution = the largest patch-aligned one at which the LARGEST chunk fits the card (native when it fits); poses, metric scale, per-keyframe depth + conf (`omega_run/results_output/frame_<f>.npz`) |
-| 4 | F0, F2, F4 (F3 report) | `precision/` runner steps | session camera, continuous gauge, native-pixel tracks |
-| 5 | F5 | `precision/refine.py` | corrected poses + camera (rung chosen by held-out; pccr R1, fx 364→392) |
-| 6 | **Depth on F5 (`f6_bend`)** | `precision/depth_on_f5.py`, `precision.cloud.source: omega_bent`, config `precision.bend`; **mono detail** `precision/mono_detail.py` + `precision/pointdit_runner.py`, config `precision.mono_detail` (flag `enabled`) | (a) F5 FIT tracks triangulated with F5 poses + camera; (b) per keyframe Omega depth × k(u,v)=c0+c1·u+c2·v, fitted EXACTLY as epoch 7: 10-step Huber IRLS (`bend.irls_iterations`), landmark rows on depth > `bend.min_depth_m` (0.05), < `bend.min_rows` (20) rows → k = 1, window by half A of the HELD-OUT tracks (pccr ±0, 7.25 % → 2.80 %); (c) validity = the ONE confidence floor (`conf_min_norm`, min-max per Omega chunk) + not sky; (d) epoch 8's EDGE-KEEPING VOTE: τ = p75 of the neighbour disagreement on INTERIOR pixels (pccr 1.93 %), mixed pixels at contours snapped to their SAM3 mask's side, two-sided vote over ±3/±6/±12, contradicted pixels repaired to the neighbours' median when ≥ 2 agree, below-floor edge pixels admitted when confirmed; confidence column = agree count. pccr: 63.1 % kept, 15.1 % contradicted, 8.5 % repaired, 0.4 % admitted, coverage 71.0 %. **(c2) MONO DETAIL (USER 2026-10-04, `mono_detail.enabled`)** between the bend and the vote: PointDiT-H (DINOv3 ViT-H+/16, 16 Euler steps from zeros, deterministic) on native 512-px tiles with feathered overlaps → per tile z_cal ≈ s·z_mono + b (Huber IRLS weighted by the calibrated confidence, outside the band; tiles rejected by support or by the session's p95 residual) → z = lowpass(z_bent) + (z_al − lowpass(z_al)) with σ from Omega's patch; the discontinuity band (1-px jump > τ, dilated by context_scale) resolves Omega's MIXED pixels to the front or back surface by PointDiT's side, or marks them mixed_unresolved (out of the cloud). Metric and gauge are never touched (DA3's). Per-pixel provenance → cloud column `source` (1 omega_bent, 2 mono_detail, 3 band_front, 4 band_back); report `depth_on_f5.json` `mono_detail`; viewer layers View → PointDiT detail / Mixed unresolved. Flag off = epoch 8 bit for bit (tested) |
-| 7 | Cloud publish | `precision/corrected_cloud.publish` | voxel + SOR, octree, transactional epoch; `corrected_cloud.json` carries per-frame s_k + bend; intrinsic.txt inside the transaction |
-| 8 | Mask projection + OBBs | `segmentation/pipeline.py` (cloud stage) | class byte = `_encode_classification` + `class_map.json` (`class_byte` on every viewer payload); co-visible split (camera-return rule + free-space test); split children listed (`mask_fates.created_by_projection`); OBB yaw by RANSAC; every instance inherits its concept's `shape_caption` |
-| 9 | Certification | `workers/certify_worker.py`, `reconstruction/certify/run.py`, `correction/` | depth per chunk; floor = ONE rigid motion per session on the segmented support (`floor.model_default: session`, 2026-10-16; `chunk` = per chunk blended across overlaps, selectable); mask filter with the cloud's own camera (`camera.json`), rule 4 by majority of views; NO MLS (`precision.cloud.consolidate: false`); chunk check on the CERTIFIED depth (composes the transform epochs) |
-| 10 | Two epochs: ORIGINAL + FINAL | `certify.single_final_epoch: false` (USER 2026-10-05) | the reconstruction stage discards its pose-only epochs and Omega's chunks and builds no comparison cloud; the published cloud (stage 7) is the ORIGINAL and stays stored + selectable when the certification publishes the FINAL. The epoch NUMBER is a counter (F2, F5, F6 each take one: zaragoza published 3, certified 4) — the user wants to read them as 0 and 1; renumbering is pending list A |
-| 11 | Object descriptions | `segmentation/object_captioner.caption_session_objects` (end of certify) | ONE Qwen3-VL call per object over its largest SAM3-mask views → `shape_caption` source `object` (config `segmentation.object_captions`) |
-
-| 12 | **Scene mesh — GenRecon** (USER 2026-10-17: "este pipeline de mesh se hace al finalizar el autosegment") | `workers/genrecon_worker.py` → `server/tools/genrecon/run_cloud.sh` (adapter → `reconstruct_scene.py --coords_from_points --coords_mode cloud` → bake → publish), vendor `vendor/GenRecon` + `genrecon_stac.patch`, config `genrecon:` + `pipeline.auto_genrecon` | the LAST stage of the chain (also in the Autosegment window): the active voxels of every 3.7 m chunk come from the PUBLISHED cloud (32³ = 11.6 cm; the model's sparse-structure stage is skipped — it painted the floor at the cube's base and rooms behind the walls, 34 cm off on pccr), the cubes sit on the segmentation's floor/ceiling levels (`levels.json`), the SLAT generates the surface inside and the texture; bake 150 k faces / chunk; `output/tsdf/genrecon_cloud/`, provenance `vlm_generated`. Measured (`measure_mesh.py`): pccr 95 % of the mesh area within 5 cm of the cloud, 87 % of the cloud within 5 cm of the mesh, floor 0 cm; observatorio 97 % within 10 cm; zaragoza 93 %; bufferStop 100 %. Modes `cloud+hull` (completion from the SAM3 masks), `cloud+objects`, `cloud+unseen` exist, never default (USER: "lo que alucina lo alucina mal"). NO Meshing button: ShapeR, forms, hull, plane segments, Poisson, TSDF, PGSR, point2cad are REMOVED (2026-10-16/17); texrecon stays for the projected texture (`scene_texture.py`, parked). MEASURED AGAINST THE CLASSICAL CHAIN 2026-10-17 (`docs/openmvs_vs_genrecon_pccr.md`, scripts `server/tools/openmvs/`): COLMAP + OpenMVS on pccr's 464×832 video drifts 12 cm rms and covers a quarter of the scene; OpenMVS's dense MVS with OUR poses agrees with the certified cloud to 0.6 cm where it measures (51 % coverage); OpenMVS's Delaunay mesh on OUR cloud (1.5 cm p50, 92 % within 5 cm, photo texture, AGPL-3.0) is the measured alternative to GenRecon (2.0 cm, 87 %, MIT) — his product decision, the stage stays GenRecon. **01:10 — THE PRODUCT IS `genrecon_photo`** (USER: "la mejor que he visto hasta ahora … debe ser la única publicada final"): the stage's last step bakes the keyframes into the generated mesh's own UV atlas (`tools/genrecon/photo_albedo.py`: occlusion by the mesh's depth per keyframe, cos⁴/z² weights, best 3 views blended, unseen texels keep the generated colour tone-matched, metallic-roughness map and UVs untouched); the raw generated mesh is kept in `output/genrecon/<name>_raw/`, out of the viewer's list. |
-
-**Run checks (automatic since 2026-10-04):** chunk check; `precision/cloud_metrics.py` = the floor metric (layer thickness + tilt-removed undulation per 1 m cell, every number in `precision.cloud_metrics`) after f6_bend (`chunk_check.json` → `cloud_metrics`) and on the certified cloud in the acta, where the crease-profile edge metric (`precision/edge_metric.py`, largest `edge_max_objects` objects) runs too; `output/precision/cloud_metrics.json`. pccr epoch 7 reference: 18.5 M pts, floor 5.2 cm thickness / 7.6 cm undulation. Diagnostics by hand: `python -m precision.flyers --session <dir>` (flyer classes a-d, viewer layer View → Flyers), `python -m precision.mono_ab --session <dir> --out <dir>` (the PointDiT A/B, Phase 8).
-
-**Viewer fixes of 2026-10-01** (in main): the session load and every epoch's potree_ready send the
-LIVE poses + intrinsic.txt (`main.py` `_camera_poses_payload`; maplong_run/ holds Omega's original
-poses); segment visibility keyed by `class_byte`, reset when the class map changes between epochs;
-the objects the projection creates are listed (their points could never be hidden).
-
-## PENDING — A. Reconstruction pipeline (clean list)
-
-| # | Stage | Status |
+### 1.3 The precision chain (`precision/runner.py`, inside the reconstruction stage)
+| Step | Module | What it does |
 |---|---|---|
-| 1 | Intake | done |
-| 2 | VLM + SAM3 | done — fallback with category (2026-10-04). The second pass over the UNSEGMENTED points (`segmentation/second_pass.py`) is **OFF** (USER 2026-10-04: it ADDED 16 prompts and segments on pccr and the floor ended inside an `electrical_panel` segment). **PENDING — smarter segmentation (USER 2026-10-04): the same physical object comes out as 3-4 segments under different names (not the same pixels, the same object: 10 'door', 10 'panel', 11 'metal_frame' on pccr). The consolidation must happen BEFORE SAM3 (one concept = one prompt, `merge_synonyms` is not enough) and/or AFTER the projection (merge the segments that are one physical object, the VLM deciding on the views). One VLM pass per image stays the rule (SAM3 prompt + ShapeR description in the same call).** |
-| 3 | Omega (co-visibility chunks, 50 %) | wired 2026-10-06 (USER: "el plan de chunk no cambia … para que encaje adaptamos la resolución") — pccr 2026-08-31 plans 5 chunks (lengths 42–139), zaragoza and observatorio ONE pass; zaragoza's 183 kf run at 1376 on a 48 GB card / 1808 on 80 GB. **Pending:** the user's eye on the first run (the walk-sized 15 m chunks are deleted) |
-| 4 | F0, F2, F4 (F3) | done |
-| 5 | F5 (R1) | done |
-| 6 | Depth on F5 (`f6_bend` = epoch 8) | done — **reproduced 2026-10-04**: the product code on pccr's F5 files gives epoch 8's numbers exactly (held-out 2.80 % at ±0, τ 1.93 %, kept 63.1 / contradicted 15.1 / repaired 8.5 / admitted 0.4 %, coverage 71.0 %) — **pending:** it aborts when F5's camera carries lens distortion or Omega's grid is not the native one (pccr has neither); no fallback |
-| 7 | Cloud publish | done |
-| 8 | Mask projection + OBB + class byte + co-visible split | done — **pending:** desk #174's 3.14 m piece may still hold 2 desks |
-| 9 | Certification | done — **pending:** the chunk check flags a floor drift INSIDE chunk 0 (+16 cm, kf 0–62) and chunk 1 undecided (+5 cm); no intra-chunk correction exists |
-| 10 | One final epoch | done |
-| 11 | Per-object VLM description for ShapeR | done |
-| — | Run checks | done 2026-10-04 (`precision/cloud_metrics.py`, floor after f6_bend + floor and edges in the acta) |
-| — | PointDiT (claude_stac.txt 2026-10-04) | Phases 0-8 built (flyers, runner, tiles, affine, detail/band, mixed pixels, provenance + layers, A/B). **`mono_detail.enabled: true` since 2026-10-04 by the USER's verdict on the maps** ("la nitidez de los bordes de pointdit es abrumadoramente superior a omega"). A/B pccr off → on: held-out 2.48 → 2.55 % (edge band 2.54 → 2.70 %, p90 29 → 39 %), contradicted 15.1 → 15.7 %, coverage 71.0 → 70.3 %, 18.42 → 19.29 M pts, mixed-edge flyers −30 %, +17 min (analysis/2026-10-04_pointdit/ab). First end-to-end run (2026-10-04): the detail over every surface bent walls and shed points off a rack while ducts and cables came out → **`mono_detail.detail_scope: edges` (in the pipeline since dc1f509)**: PointDiT's detail only within `detail_zone_px` (12) of a discontinuity and within τ; surfaces stay Omega. pccr: detail on 17.9 % of the pixels (was 85.5 %). **Pending:** the user's eye on this cloud |
-| — | End-to-end validation | **pending:** the user relaunches pccr from scratch (restart the backend first) |
+| F0 | `precision.camera` | the session camera (K + lens) |
+| F2 | `precision.gauge` | the continuous metric gauge: scale s along the walk from the best instrument by held-out (DA3 windows vs mono) — no step at a cube transition |
+| F4 | `precision.tracks` | native-pixel tracks over keyframe windows, REVISIT windows (pairs of `kf_covisibility` the walk does not tie) and the witnesses; held-out split |
+| F3 | `precision.omega_probe` | Omega resolution probe — report only |
+| F5 | `precision.refine` | joint refinement (torch LM on the card): poses, camera, landmarks; rungs R0 → R3, each TAKEN only when the held-out improves beyond 1.1 × its own error with ≥ 5 judges (`metric_lock.decide_change`) |
+| F6 | `precision.depth_on_f5` (`f6_bend`) | THE PRODUCT — see 1.4 |
+| check | `precision.chunk_check` | floor / ceiling / camera per keyframe and per cube — report only |
 
-**VLM refinement (stage 2):** prompts per CONCEPT, never per object (the understanding prompt asks one entry per
-kind; pccr's 43 prompts are all concepts); 100 % of the points segmented (a second VLM pass looks at what stayed
-unsegmented and proposes the concepts it sees there — MEASURED 2026-10-04 on pccr's live epoch: 14.6 % of the points
-have NO mask at their source pixel; today's 99.4 % coverage is the geometric growth of `_attach_unsegmented`, which
-gives them a neighbour's label); the fallback retry carries the category (DONE 2026-10-04:
-`session_builder.with_category`, "white tiled floor", never "white tiled").
+### 1.4 F6 — the cloud (`precision/depth_on_f5.py`, `precision/f6_torch.py`, `cloud.source: omega_bent`)
+1. **Bend**: each keyframe's Omega depth × k(u,v) = c0 + c1·u + c2·v fitted to F5's landmarks (10-step Huber IRLS;
+   c1/c2 only ≥ 2× their fit error; c0 verified on the keyframe's own held-out rows).
+2. **PointDiT detail at the EDGES only** (`precision.mono_detail`, `detail_scope: edges`): within 12 px of a
+   discontinuity and within τ; mixed edge pixels resolved to the front or back surface; surfaces stay Omega.
+3. **The vote**: witnesses = the walk neighbours (±3/6/12), the turn frames, and EVERY keyframe that sees any part
+   of the keyframe's view (no cap, any distance but the offsets, the widest baseline first). A vote counts only when
+   it TESTS the depth — the witness sees the point from ≥ 2° away from the keyframe's camera (`two_sided_vote
+   (min_parallax_deg)`). Contradicted pixels leave or are repaired to the witnesses' median.
+4. **The publication floor**: a pixel enters only with ≥ `precision.cloud.min_support_views` (10) depth-testing
+   views (USER 2026-11-07: *"prefiero poco y bueno que mucho y mierda"* — never loosened for coverage). The cloud's
+   `confidence` column is that support. Plus the ONE confidence floor (`conf_min_norm`, min-max per cube) and sky.
+5. The cloud stage's cleaner (voxel 5 mm + SOR), published as an epoch with its octree (transactional).
 
-## PENDING — B. General
+### 1.5 CLOUDCOMPY
+The published cloud goes to the viewer (`cleaned_cloud.ply`, Potree; PotreeConverter on ONE thread for byte
+identity). A run without *Segment when done* ends here (plus the floor, §1.8).
 
-1. **Meshing → CLOSED 2026-10-17.** The Object (ShapeR) and Mesh (RANSAC / point2cad / forms / hull / plane
-   segments) buttons are gone with their code; the scene mesh is stage 12 above (GenRecon, presence from
-   the cloud). What stays open: the projected texture (`scene_texture.py`, 62 % of the faces from the
-   photos at a 3 cm + 2 % tolerance, "zonas con diferencias" — the snap to the cloud and colour matching
-   are the knobs), and the outdoor sessions' painted "ceiling" at the cube's top (declared).
-2. **(folded into 1.)**
-3. **BIM comparison** (§11): register to the BIM on the structure; per element deviation of position /
-   dimensions / flatness / plumbness with its margin; objects present / missing / displaced; a deviation
-   below the session's own repeatability (pccr ~5 cm) is reported as not measurable.
-   **FORMS (USER 2026-10-16, the Mesh button's stage, `surface_fit.mesh_button_stages: [forms]`):** "vlm dice
-   cómo es y cómo debe ser; la nube orienta sobre dónde está y qué tamaño tiene … si vlm dice una forma es esa
-   forma". `reconstruction/forms/`: `catalog` (panel, box, cylinder, sphere, cone, profile, revolution, composite,
-   freeform; the typed `forms:` config), `query` (one structured Qwen3-VL answer per object from its isolated
-   mask views → `output/forms/<safe>.form.json`, stamped), `templates` (a 2-D section extruded along an axis, or
-   a revolution, or a sphere — torch, differentiable; "vertical"/"horizontal"/"axis_aligned" fix the pose to the
-   scene frame EXACTLY), `fit` (Huber at the session's σ; solid faces fitted by the distance, a plate's outline
-   measured, extents bounded to the last measured point), `silhouette` (THE CORRECTOR: the form projected into
-   every keyframe that masks it, occlusion-verified by the cloud's z-buffer; precision + recall in metres at the
-   depth, Huber at the image's own pixel footprint; blocks until the per-view consensus stops improving beyond
-   its own noise; the bar = the cloud's own agreement with the masks; alternatives ranked by the same paired
-   bootstrap), `composite` (parts extracted by the RANSAC of their own form, accepted by support density,
-   "equal" parts share a section, missing parts declared), `review` (the fitted form drawn over the worst views
-   → a structured verdict, applied only when the form changes), `run` (per session: records
-   `output/forms/<safe>/form_fit.json`, GLB published in `output/tsdf/<safe>/` as `method: form`, freeform or no
-   form → the live-cloud TSDF as `form_tsdf`; texture from the frames). Worker `run_forms.py`; main.py
-   `_forms_for_export`. The provenance rule restated: the VLM decides the form and never measures. All the
-   invented bars of the Manhattan route (4 cm, 16 cm, aspect 4, 15°, 5 %, 75 %) are gone from this path.
-   **The mesh since the evening of 2026-10-16 is the HULL** (`forms.mesh: hull`, `reconstruction/forms/hull.py`): the
-   user judged the fitted forms "horribles … no respeta la nube, sobresale por todas partes … no todo es cubo
-   cilindro o esfera". The visual hull of the object's masks (a voxel at tsdf.object's voxel is in when it projects
-   inside the mask in ≥ the cloud's own inside share of the views that see it; outside only when nothing closer
-   hides the pixel, by the scene z-buffer) carved by the TSDF of the scene's dense per-keyframe z-buffer (free
-   beyond trunc in front of the measured surface, own where the pixel is in the mask within ±trunc), marching
-   cubes, `method: hull`; `forms.mesh: template` publishes the fitted form instead. HIS VERDICT on the 9 pccr hulls
-   (the same evening): "un desastre … tiene todo el ruido y prácticamente ningún dato" — measured: 81–96 % of every
-   hull mesh lay on no point at all (the mask cones extruded to the grid's walls, 40 k–2 M fragments). **The Mesh
-   button since then: `mesh_button_stages: [surface_fit]`, PLANES ONLY** ("olvídate de los cilindros … puede estar
-   facetado … sino va a forzar cilindros en donde no aplica"): the Manhattan planes with the object's OWN measured
-   noise as the tolerance (`surface_fit.tolerance: measured`, `noise.py` local thickness × `tolerance_k`), what no
-   plane holds DECLARED and left as points (`manhattan_residue: declare`; `bars_tsdf` = the 2026-10-15 route,
-   selectable). forms and hull stay selectable stages. **The same night: PLANE SEGMENTS** (USER: "segmentos de
-   plano, no único plano que describe todo … depende qué objeto sea y el tamaño de voxelización"):
-   `surface_fit/facets.py grow_plane_segments` — region growing over cells of the object's own resolution
-   (`facet_cell_m` 0.10 = the user's cell; an object's cell = its smallest extent / `facets_across`, never under
-   four sampling gaps), tolerance = half the cell, a cell seeds/joins only when it holds a SURFACE (thickness or
-   spread ≤ tol/3), the plane refitted and re-validated every ring. A flat wall one segment, a curved wall a chain
-   of facets, a step two parallel segments with their exact offset, a ramp its own tilted segment, a volume
-   residue. Snap: the majority segment (`manhattan_dominant_min_frac`) and the parts whose far edge would move
-   less than the tolerance; facets of curves and ramps keep their measured normals. pccr: door one plane (90 %),
-   cabinet two faces, floor one plane + its 5° ramp segment, pipe six facets, extinguisher body + dome facets.
-   **Repeatability (σ floor) since 2026-10-16:** `reconstruction/certify/repeatability.py` reads, in order,
-   `uncertainty.json` (two copies of a shared frame) → `elastic_seams.json` → `intra_chunk.json` (OFF since
-   2026-09-28, never written) → **`precision/depth_on_f5.json` `bend.held_out_half_B_final_m`** (F6's held-out
-   against F5's landmarks in METRES along the ray, on the published geometry; measured in every session) →
-   `correction.visit_drift.default_repeatability_m` (pccr's 4.77 cm), declared in the acta. A single-pass session
-   (zaragoza, observatorio) had no fork evidence and borrowed pccr's constant; an F6 record bent before the
-   metres field exists carries only the relative score and stays on the fallback (declared: "re-run the chain").
-4. **Lock the brush during an epoch publish:** a brush reassignment while a publish ran left the
-   viewer with no segmentation (pccr 2026-10-01). `correction.apply.publish_in_flight` exists; the
-   erase endpoint must refuse while it returns a transaction.
-5. **Pre-existing broken test:** `segmentation/autoprompt/tests/test_associate.py::
-   test_adaptive_sampling_scales_with_camera_path` — its fixture lacks `autoprompt.merge_synonyms`.
-6. **Shadows, step 2 (optional):** the point cloud CASTS shadows too (a second pass over millions of points
-   from the light — measure the fps cost first). Step 1 is done: meshes cast + receive, points receive
-   (`ui/src/components/shadows.ts`, View → Shadows).
-7. **Viewer additions of 2026-10-01 to validate by eye on pccr:** the gravity sandbox (place with the mouse,
-   grab and throw, the cloud is solid, spheres with the STAC Build logo), the reference human in Add
-   object, ShapeR objects drawn in their segment colour, rename / delete of generated and placed objects,
-   one search + show / hide all over every list, fly-to on every row, fixed-size dialogs.
-8. **Meshing → Mesh on the card (USER 2026-10-15: "toda esa etapa debe correr en gpu, no puede demorar
-   tanto y correrlo en cpu")** — MEASURED on pccr 2408 (floor #8, 19.35 M pts, 295 kf) before the port:
-   WLOP 171 s, B-spline fit 3 s, **hole audit 22.5 min** (the per-keyframe z-buffer of the FULL cloud in
-   numpy/cv2 with the lens: 3.3 s each × 295, plus the calibration votes of 724 mask candidates — and it
-   ended "no matching mask, audit skipped": the floor's own mask covers < 50 % of its on-surface points
-   unoccluded, so floors get no image-supported fills, OPEN), texture bake 10 s; per-object TSDF 78 s;
-   point2cad 6–7 min per object (the vendor's INR, already on the card). DONE the same day: the evidence
-   (`reconstruction/surface_fit/hole_audit._Evidence` — z-buffers, mask votes, see-through; it also serves
-   mask_filter, the Poisson fills, the shape proposer, the loop reprojection) runs on torch on ONE declared
-   device (`surface_fit.evidence_device: cuda`, no fallback; tests on cpu via tests/conftest.py), F6's
-   recipe (stable sort z-buffer, gathers, max-pool min filter): 295 z-buffers in 10 s (34 ms each), bit
-   for bit numpy's (0 px differ on 3 frames), 3.2 GiB VRAM; the three meshing workers (run_surface_fit /
-   run_poisson_objects / run_perfect_objects) run under torch STRICT deterministic (repro.
-   enable_deterministic_torch). STILL CPU, declared: WLOP (CGAL subprocess; the torch MLS exists as
-   `consolidate_method: mls`, a recipe change → the user's call), Open3D Poisson (no GPU Poisson in any
-   env; ~1 min/object pinned), texrecon. Open3D's CUDA tensor TSDF (`VoxelBlockGrid`) is available in env
-   da3 for the per-object TSDF if it joins the stage.
-9. **Manhattan world (USER 2026-10-15: "BIM perfecto"; "debe indicarlo el usuario, por defecto marcado
-   como manhattan"; "deja solo el manhattan al mandar mesh por ahora"; "probar con cilindros etc, y si
-   no, tsdf sin poisson")** — DONE the same day, in `reconstruction/surface_fit/manhattan.py` + `scene.py`,
-   `segmentation/manhattan.py`, the Instances panel toggle (Box = on, Spline = off; only the exceptions in
-   `output/manhattan.json`). The Mesh button runs `surface_fit.mesh_button_stages` = `[surface_fit]` (the
-   full chain `[surface_fit, poisson, pgsr, p2c]`). A marked object: its planes extracted (largest
-   first, down to 5 % of its points), each a connected THIN panel ≥ 4 support distances wide, snapped
-   EXACTLY to the scene frame (up = the session's own up from `floor_transform.npz`, X = the heaviest
-   wall's direction, Z = up × X; within `manhattan_snap_deg` 15°, else kept as measured and declared),
-   coplanar pieces one plane, exact edges between parts and neighbours; the rest: BARS (length ≥ 4× the
-   section, round) → straight cylinders on the frame, the remainder → the live-cloud TSDF
-   (`tsdf_export.tsdf_mesh_of_points`), NEVER Poisson; a surface's leftovers (a floor's clutter) are
-   declared only. Every object gets `surface_fit/<name>/manhattan.json` (axes, degrees moved, offsets,
-   parts, cylinders, tsdf, residue) and the scene report the frame. The plane fit skips WLOP and runs
-   its RANSAC + support mesh on the card (`surface_fit.fit_device`, `fit_torch.py`; pccr's floor 3.3 s →
-   1.5 s per object). The per-object TSDF integrates the PUBLISHED cloud of the live epoch
-   (`tsdf.object`, `run_tsdf_objects.py`, texrecon after it) — the original depth maps are epoch 0's
-   geometry (pccr's floor came out duplicated). Pending: the user's eye on pccr's floor / door 18 /
-   wall 59 / desk 351 with the final rules; boxes for rectangular bars; the Manhattan frame for
-   point2cad's regions.
-10. Keep this file updated with every change of the above.
+### 1.6 GENRECON — manual only (`workers/genrecon_worker.py`, `server/tools/genrecon/`)
+Ordered from the Autosegment window with the viewer's confidence value (`pipeline.auto_genrecon: false`, USER
+2026-11-05). Mode `cloud`: every 3.7 m chunk's active voxels are the published cloud's; the cubes sit on the
+segmentation's floor / ceiling levels; the keyframes are BAKED into the generated mesh's own UV atlas
+(`photo_albedo.py`) → the product `genrecon_photo` (USER 2026-10-17: *"la mejor que he visto hasta ahora"*). The
+generative variant is OFF (*"inventó cualquier cosa"*); modes `cloud+hull` / `cloud+objects` / `cloud+unseen` exist,
+never default.
 
-## §11 · Deliverables for the BIM comparison (USER 2026-09-30)
+### 1.7 VLM → SAM3 → rounds → PROJECTION
+- **VLM** (`workers/vlm_worker.py`, `segmentation/autoprompt/`): Qwen3-VL in the job's OWN vLLM (frozen config,
+  deterministic), ONE call per keyframe, prompts per CONCEPT; true synonyms merged; every phrase's fate in
+  `output/segmentation_census.json`; at most `autoprompt.max_sam3_prompts` (150).
+- **SAM3** (`workers/sam3_worker.py`, `segmentation/sam3_group.py`): concepts in groups sharing each chunk's vision
+  backbone; strict deterministic; an out-of-memory or the vendor tracker's own stop ("No points are provided") is a
+  STOP continued in a fresh session, never a failure.
+- **Rounds** (`segmentation/autoprompt/rounds.py`, USER 2026-10-08/09 *"las pasadas son recursivas"*): the VLM sees
+  every keyframe with what is segmented painted grey and names what is left; SAM3 appends those prompts; until a
+  round names nothing new. pccr 2026-11-08: 76 concepts + 3 + … over four rounds.
+- **Projection** (`segmentation/pipeline.py`): the masks onto the published cloud ONCE, after the last round; OBBs;
+  32-bit instance ids. pccr 2026-11-08: 491 segments.
+- VLM and SAM3 are KEPT through Replace unless the keyframes changed (`pipeline_manager.
+  _semantics_keyframes_change`).
 
-*"usar point2cad en lugar de ransac … y ShapeR para objetos, y comparamos lo que podemos"*. Raw points
-are not a reliable basis (flyers, layers); the comparison uses reconstructed elements with their own
-error. Structure → point2cad B-rep (B2); objects → ShapeR + texture baked from the scan frames
-(unseen parts stay untextured). ShapeR generates what no camera saw: trusted for presence, position,
-orientation and overall extent, not for detailed dimensions of unseen sides; every mesh carries
-measured vs generated (`caption_source`, view counts in its `.meta.json`).
+### 1.8 FLOOR — automatic, the last step of every reconstruction (USER 2026-11-05)
+`correction/floor.py solve_floor_session` (`correction.floor.model_default: session`): ONE rigid motion for the whole
+session, measured on the SEGMENTED support surfaces (labels whose head noun is in `autoprompt.support_surfaces`):
+levels searched along the support's own normal, THE floor = the level under the most cameras, other real levels keep
+their step. Without segmentation: the points below each keyframe's camera, declared. pccr 2026-11-08: tilt 3.27°,
+height −26.0 cm → epoch 4.
 
-## Environment notes
+### 1.9 CERTIFY — OFF
+`certify.auto_after_segmentation: false` (USER 2026-11-05: *"nube genrecon vlm+sam3 fin, así tiene que ser"*). The
+code (closures, depth per chunk, mask filter, chunk check on the certified depth) stays, unused.
 
-- Pod: cgroup 117 GB RAM / ~30 CPUs — cap every job (`ulimit -v`, `OMP_NUM_THREADS`, `taskset`,
-  `nice`); never fan out agents on the user's session. `memory.usage_in_bytes` counts the page cache
-  (83 GB of it on 2026-10-05 with 4 GB of RSS) — read `memory.stat` `total_rss` for the real pressure.
-- /workspace is a MooseFS volume with a RunPod quota (400 GB since 2026-10-05, was 300): `df` reports the
-  cluster, not the quota, and no `mfs*` tool is installed — a full quota fails every write with
-  `Errno 122 Disk quota exceeded` and the worker dies without a traceback (its log write fails too).
-  Big tenants: miniforge3 180 GB, hf_cache 44 GB (`t5-v1_1-xl` 22 GB is ShapeR's text encoder — keep),
-  vendor 29 GB, the sessions (see the 2026-10-05 storage decision).
-- ShapeR on the A100 (sm_80): `torchsparse` in env `shaper` rebuilt from `nihalsid/torchsparse@20ccc92`
-  with `TORCH_CUDA_ARCH_LIST="8.0;8.6"`, `SPHASH_INCLUDE`, `CUDA_INCLUDE`, `CUDA_LIB`.
-- One Hugging Face cache: `HF_HOME=/workspace/hf_cache`.
-- texrecon (`vendor/mvs-texturing`, the texture bake of every object mesh) was built against libtiff 5;
-  the pod now has libtiff 6 only ("libtiff.so.5: cannot open shared object file", 2026-10-01). Relinked
-  with its own `apps/texrecon/CMakeFiles/texrecon.dir/link.txt`, `libtbb.so.12.19` → `libtbb.so.12`
-  (the vendored oneTBB holds 12.15; a full `cmake ..` fails on that mismatch).
-- PointDiT: submodule `vendor/pointdit` (@ 11f53a3) with `third_party/dinov3` cloned inside and the weights under
-  `pretrained/` (H and L 512 checkpoints, DINOv3 ViT-H+/16 and ViT-L/16; sha256 verified), runs in env `da3`
-  (`torchmetrics` + `lightning-utilities` added `--no-deps`). Viewer: points drawn as cubes (View → Points as cubes).
-- The pccr session on disk (2026-10-01): live epoch 8 (certified, 18.2 M pts, 110 objects), stored
-  epochs 0 / 6 / 7 — hand-built, not what the code produces; a "Reconstruir" wipes it.
-- Analysis scripts of the depth-source study: `analysis/2026-09-30_depth_sources/` (epoch 7 / 8
-  recipes, floor metric, diagnostics).
+## 2 · Measured on pccr 2026-08-31 (the validated run, 2026-11-08)
+313 keyframes (295 I1 + 18 coverage), 2,111 witnesses, 53 turn frames; 11 cubes of 40–64 keyframes, Omega at 832
+(grid 464 × 832); walk 17.5 m (I3 17.7 m). F2: s 0.915–1.226 along the walk. F4: 16.5 M observations, 2.69 M
+tracks, σ 1.27 px (23.7 min). F5: R2 applied, held-out 0.462 px, witnesses 1,399 / 1,790 within 2.14 px (19.3 min).
+F6: 19,540 co-visible witnesses, a median of 53 per keyframe (max 109); vote kept 62.4 % / contradicted 16.0 % /
+repaired 15.7 % / rescued 6.0 %; COVERAGE 63.6 %; 76.9 M raw points → 11,462,333 (12.5 min). Floor thickness median
+2.9 cm (p90 8.9), cameras 1.35 m above it. Segmentation 491 objects; floor epoch 4. From F5 to the end: 2 h 38 min.
+
+## 3 · Rules the pipeline lives by
+- **Determinism** (USER 2026-10-07: *"STAC Build es una herramienta de ingeniería, debe dar siempre lo mismo"*):
+  bit-for-bit; the plan is `docs/plan_determinismo.md` (166 points, cited by the code). Mechanisms: `server/repro.py`
+  (strict deterministic torch, `require_exclusive_gpu` — a co-tenant FAILS the GPU step, `stamp`/`check_stamp`,
+  `environment_record`), per-card constants committed in `server/card_table.json`, DA3 weights pinned by revision +
+  sha256, one HF cache, PotreeConverter on one thread, clocks only in `*.timing.json`.
+- **The user's decision rule** (one function, `metric_lock.decide_change`): a change is applied only when (a) the
+  95 % CI of the paired change lies entirely on the improving side, (b) ≥ 5 judges, (c) the median improvement ≥
+  `correction_graph.graph.improvement_error_factor` (1.1) × the measured error.
+- **Resume**: Replace OFF resumes — every step reuses its products only on its stamp; Replace ON wipes to the frames
+  and the video. The job's configuration is frozen in `output/run_config.yaml`.
+- **Storage**: a session keeps what the next reader needs (aligned chunks, bridges, I3 windows deleted once read).
+- **The floor is geometric** (USER 2026-10-08): the support the camera walks over, whatever its name; a session may
+  hold several levels, a real change of level is kept as a step.
+
+## §10 · Epochs
+The epoch NUMBER is a counter (F2, F5, F6 and the floor each take one: pccr 2026-11-08 published epoch 3 and the
+floor epoch 4). `certify.single_final_epoch: false`: the published cloud's epoch stays stored and selectable next to
+the floor's. Renumbering to 0 / 1 is pending (list A).
+
+## 4 · PENDING
+### A · Reconstruction pipeline
+1. **Capture distance** (USER 2026-11-07, *"me lo van a preguntar"*): the recommended minimum and maximum distance to
+   the target (he expects the maximum ≤ 10 m) — per session F6's held-out error in metres by range, the support
+   floor's pass rate by range, the published points by distance to their birth camera. Measure when he says.
+2. **Weighted vote** (his question 2026-11-08): answered, not built — his word.
+3. **Smarter segmentation** (USER 2026-10-04): one physical object still comes out as several segments under
+   different names; the consolidation before SAM3 and/or after the projection is open.
+4. **Epoch renumbering** to 0 / 1 (§10).
+5. **GPU** (USER 2026-11-01): the intake I0 / I1 on the card (a GPU LK / RANSAC is not cv2's arithmetic — the
+   keyframes can change: needs an A/B of the selection or his OK); the SAM3 group A/B (masks equal, time) and the
+   pose graph's card equality still to measure; the Potree builds off the critical path.
+
+### B · General
+1. `docs/MEJORAS_OBLIGATORIAS.md` (USER 2026-09-06, *"obligatorio todo"*): item 1 — the per-point membership out of
+   `segmentation_result.json` (`membership.py` never built; `globalIndices` still in 73 files; zaragoza's file was
+   1 GB and dropped the viewer socket) — and item 2 (I/O and Potree speed) are NOT done.
+2. Lock the brush during an epoch publish (`correction.apply.publish_in_flight` exists; the erase endpoint must
+   refuse while it returns a transaction).
+3. BIM comparison: register to the BIM on the structure; per element deviation of position / dimensions / flatness /
+   plumbness with its margin; objects present / missing / displaced; a deviation below the session's own
+   repeatability reported as not measurable.
+4. GenRecon: the projected texture (`scene_texture.py`) is parked; outdoor sessions get a painted "ceiling" at the
+   cube's top (declared).
+5. Viewer: the 2026-10-01 additions to validate by eye (gravity sandbox, reference human, rename / delete of placed
+   objects, search, fly-to); shadows step 2 (the cloud casting shadows — measure the fps cost first).
+6. Pre-existing broken test `segmentation/autoprompt/tests/test_associate.py::
+   test_adaptive_sampling_scales_with_camera_path` (its fixture lacks `autoprompt.merge_synonyms`).
