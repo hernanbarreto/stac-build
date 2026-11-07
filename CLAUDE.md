@@ -1,6 +1,37 @@
 # CLAUDE.md — working rules for this repo
 
-## ⭐⭐⭐ 2026-11-08 (08:10 CDMX) — EVERY KEYFRAME THAT SEES ANY PART VOTES (USER: "que voten todos como decís,
+## ⭐⭐⭐⭐ 2026-11-08 (11:20 CDMX) — THIS IS THE FINAL PIPELINE (USER on pccr, main 8cef74f: "la cobertura es muy buena,
+## sin errores, sin duplicados, muy muy buen resultado, excelente, que quede este como pipeline final, dejamos terminar
+## todas las sesiones, todas")
+- THE RECIPE = main 8cef74f, nothing else changed: AMB3R whole-video pass → coverage fill (one second view ≥ 2°) →
+  cubes.py 9 (≤ 5 m and ≤ 64 views along the walk, neighbours sharing half; `kf_covisibility` c > 0, τ 0) → Omega per
+  cube + one Sim(3) graph on seams alone → F0 F2 F4 F3 F5 → F6 with EVERY co-visible keyframe voting (no cap, widest
+  baseline first, ≥ 10 views ≥ 2° to publish) → cloud → VLM / SAM3 → certification. Do not touch it without his word.
+- MEASURED on pccr (313 kf, 11 cubes of 40–64 kf): F5 R2 applied, held-out 0.462 px, witnesses 1399/1790 (bound
+  2.14 px); F6 witnesses 313/313 keyframes hear 19,540 keyframes, a median of 53 each (max 109; the cap of 18 before);
+  vote kept 62.4 % / contradicted 16.0 % / repaired 15.7 % / rescued 6.0 %; COVERAGE 63.6 % (57.0 % with the cap of 18,
+  46.4 % with the nearest); 76.9 M raw → 11,462,333 points (10.7 M before); floor thickness median 2.9 cm (p90 8.9),
+  tilt 3.1°, cameras 1.35 m above; chunk 9 INTRA −2.5…+0.8 cm (report). F5 19.3 min, F6 12.5 min.
+- QUEUE (his order, Replace + segmentation after the cloud, queued 11:25 CDMX behind pccr's segmentation):
+  observatorio 2026-08-11, zaragoza 2026-06-03, bufferStop 2026-08-11, station 2026-10-17, pccr 2026-08-24 (2408).
+- INCIDENT, same morning (cost him an hour of pod): at 09:12 CDMX everything stopped during F5 R2 — no traceback, no
+  OOM, the backend log and the session silent until the POD restarted at 10:14 (new PID 1; the host itself up 58 days).
+  Cause NOT determined (no dmesg in the container): a provider-side stop, or the network volume freezing — /workspace
+  is RunPod's FUSE volume (`mfs#ca-mtl-3.runpod.net`) and the backend's log goes through `tee` onto it, so one request
+  the volume never answers can freeze the log, then the backend, then every worker writing to its pipe. That freeze WAS
+  SEEN 11 min after the restart: the first resume hung in `intake.run`, the worker's main thread in the kernel's
+  `request_wait_answer` (a FUSE request never answered) at 0 % CPU, nothing written, while other reads of the volume
+  answered in 0.1 s. THE FIX THAT WORKED: kill the stuck worker, RESTART
+  THE BACKEND (its job record stays "running" and refuses every order until then), relaunch with replace OFF: intake
+  validated in 30 s, AMB3R / coverage / cubes / Omega / F0–F4 reused by their stamps, resumed at F5 with R0–R2 bit-
+  identical to the killed run. A STALL = the STAGE process (e.g. `-m precision.refine`, not the `inline_child` parent)
+  AND the card both idle for minutes; between F5 rungs the log is silent for 4–6 min while both run at 100 %. After a
+  pod restart PointDiT's DINOv3 (3.1 GB) is copied once from vendor/ into the local torch cache (5 s).
+- HIS COST RULE (same incident, in anger): every minute of pod idle is money — when a run stalls, check the stage
+  process and the card ONCE, then act (kill + backend restart + resume); never a long investigation while the card
+  idles, never "it is fine" before the log shows the next stage.
+
+## ⭐⭐⭐ 2026-11-08 (07:50 CDMX) — EVERY KEYFRAME THAT SEES ANY PART VOTES (USER: "que voten todos como decís,
 ## siempre … cortá y veamos cómo sale"; "ver lo mismo al 30 % no necesariamente es un número con sustento, ven lo mismo
 ## es ver total o parcialmente el sector")
 - cubes.py 9: `kf_covisibility` keeps every pair where one keyframe sees any part of the other's view (c > 0 either way,
