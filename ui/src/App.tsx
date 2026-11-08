@@ -2035,7 +2035,9 @@ function App() {
   // nor is a session that already PUBLISHED one (USER 2026-11-02: "ese panel debe ocultarse si ya hay épocas
   // publicadas, no puede quedar sobre la época"): a reload whose octree fetch was aborted mid-pipeline left
   // station's epoch 4 under the "Building the point cloud" splash for the whole GenRecon stage
-  const sessionHasPublishedCloud = !!sessions.find(s => s.id === activeSession)?.hasCloud || certifyState?.epoch != null
+  // epoch 0 is no proof of a cloud: after a Replace the session reports epoch 0 with output/ empty, and the
+  // "!= null" test hid the progress panel for the whole reconstruction (USER 2026-11-08: "tiene que aparecer ahí")
+  const sessionHasPublishedCloud = !!sessions.find(s => s.id === activeSession)?.hasCloud || (certifyState?.epoch ?? 0) > 0
   const loadingOverlay = sessionLoading && !pipelineActiveHere && !viewerHasCloud
   const pipelineStages: ProgressStage[] = (pipelineRunning?.stages || []).filter(s => s.enabled).map(s => ({ id: s.id, label: s.label, status: s.status, pct: s.pct, detail: s.message }))
   const currentStage = pipelineRunning?.stages[pipelineRunning.current_stage_idx]
