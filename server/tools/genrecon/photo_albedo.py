@@ -96,7 +96,7 @@ if ERR0 > 0.25:        # a wrong frame disagrees by metres (bufferStop before th
 # THE CERTIFIED CLOUD'S z-buffer per keyframe (min-filtered 5×5 as the hole audit): the judge of the faces below
 # (USER 2026-11-08, pccr: the mesh had a second floor 10 cm under the real one — the UNDERSIDE of the floor's voxel
 # slab, seen through holes of its top face; the cloud says the floor is 8 cm in front of it)
-CULL_UNSEEN = os.environ.get("STAC_CULL_UNSEEN", "0") == "1"     # OFF (USER 2026-11-08: objects stand on the lower floor — removing it leaves them in the air; fix the generation)
+CULL_UNSEEN = os.environ.get("STAC_CULL_UNSEEN", "1") == "1"
 CULL_TOL_M = float(os.environ.get("STAC_CULL_TOL_M", "0.058"))     # half of GenRecon's 11.6 cm voxel: the surface cannot be placed finer
 czb = torch.empty((len(fids), H, W), device=dev)
 for k in range(len(fids)):
