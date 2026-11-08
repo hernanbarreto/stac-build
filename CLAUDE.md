@@ -167,7 +167,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
 ## 7 · PENDING
 - The pipeline's and the general lists: `docs/pipeline_final.md` §4 — capture distance (when he says), the weighted
   vote (his word), smarter segmentation, epoch renumbering, the GPU ports of the intake, MEJORAS_OBLIGATORIAS
-  (never built), the brush lock, the BIM comparison, viewer checks.
+  (never built), the brush lock, the BIM comparison, viewer checks; station's heavy residual tail (USER 2026-11-08
+  *"si termina en mayor cobertura de la buena claro que interesa"* — measure by keyframe type / cube / region when
+  the queue finishes, §4 A6).
 - An evaluation against laser ground truth (ScanNet++ / ETH3D) for the IN3 and a later paper: proposed 2026-11-08,
   not ordered.
 - `docs/`: ARCHITECTURE.md and ROADMAP.md are out of date — update or delete on his word. His own documents

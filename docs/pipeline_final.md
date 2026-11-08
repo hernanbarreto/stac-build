@@ -144,6 +144,13 @@ the floor's. Renumbering to 0 / 1 is pending (list A).
 5. **GPU** (USER 2026-11-01): the intake I0 / I1 on the card (a GPU LK / RANSAC is not cv2's arithmetic — the
    keyframes can change: needs an A/B of the selection or his OK); the SAM3 group A/B (masks equal, time) and the
    pose graph's card equality still to measure; the Potree builds off the critical path.
+6. **Station's heavy residual tail** (USER 2026-11-08, *"si termina en mayor cobertura de la buena claro que
+   interesa"*): the witness bound came out 37.04 px (the session's own held-out quantile) where the 01/02-11
+   station gave 2.96 px and pccr 2.14 px — the big errors cost witnesses (1170/1872 localized, 62 %) and coverage
+   (41.0 %), never point quality (the 2 px pixel rule is fixed). TO MEASURE when the queue finishes: the held-out
+   residuals split by keyframe type (64 rotation-only?), by cube (chunk-check flagged intra-cube floor drift), by
+   scene region (rails, glass, far geometry) — find which slice carries the tail, then propose the recovery of the
+   good coverage with numbers; no recipe change without his OK.
 
 ### B · General
 1. `docs/MEJORAS_OBLIGATORIAS.md` (USER 2026-09-06, *"obligatorio todo"*): item 1 — the per-point membership out of
