@@ -691,13 +691,6 @@ def select_keyframes(chain: List[int], frames: _Frames, by_frame: Dict[int, Dict
                 chosen = _sharpest(band, by_frame)
                 closed_by, restart = "rotation", pos[chosen.frame] + 1
                 break
-            if int(cfg.max_window_frames) > 0 and f - anchor >= int(cfg.max_window_frames):
-                # AMB3R's completeness (USER 2026-11-08): no stretch longer than max_window_frames without a
-                # keyframe — the sharpest usable frame of the window, whatever its parallax
-                band = list(seen)
-                chosen = _sharpest(band, by_frame)
-                closed_by, restart = "stride", pos[chosen.frame] + 1
-                break
             j += 1
         closing_m = None
         if closed_by == "end":
@@ -737,6 +730,61 @@ def select_keyframes(chain: List[int], frames: _Frames, by_frame: Dict[int, Dict
             break
         i = restart
     return keyframes, windows, records
+
+
+def stride_fill(chain: List[int], keyframes: List[Dict[str, Any]], by_frame: Dict[int, Dict[str, Any]],
+                gap: int) -> List[Dict[str, Any]]:
+    """AMB3R-SLAM's completeness rule, read in its code (backend._group_keyframes + _densify), on the usable frames
+    (USER 2026-11-08: "la misma lógica que amb3r-slam, con su criterio de selección y de completitud"; "no deben
+    haber huecos de más de 8 frames sin un kf"): (1) every FIXED block of ``gap`` video frames (frame // gap) that
+    holds no keyframe gets its sharpest usable frame (I0 sharp_rank; AMB3R uses its tracker's confidence); (2) any
+    two consecutive keyframes more than ``gap`` frames apart get frames inserted at even positions (the usable frame
+    nearest each) until none is. The chain's own keyframes stay; added ones are ``closed_by: "stride"``.
+    Deterministic: blocks in order, ties to the earlier frame."""
+    if gap <= 0 or not chain:
+        return keyframes
+    usable = sorted(int(f) for f in chain)
+    have = {int(k["frame"]) for k in keyframes}
+    added: List[int] = []
+    for b in range(usable[0] // gap, usable[-1] // gap + 1):
+        lo, hi = b * gap, (b + 1) * gap
+        if any(lo <= f < hi for f in have):
+            continue
+        cands = [f for f in usable if lo <= f < hi]
+        if cands:
+            best = max(cands, key=lambda f: (float(by_frame[f].get("sharp_rank") or 0.0), -f))
+            have.add(best)
+            added.append(best)
+    import bisect
+    while True:
+        cur = sorted(have)
+        more = []
+        for a, b in zip(cur, cur[1:]):
+            if b - a > gap:
+                k = -(-(b - a) // gap) - 1
+                for i in range(1, k + 1):
+                    target = a + int(round(i * (b - a) / (k + 1)))
+                    j = bisect.bisect_left(usable, target)
+                    near = [usable[x] for x in (j - 1, j) if 0 <= x < len(usable)]
+                    near = [f for f in near if a < f < b and f not in have]
+                    if near:
+                        more.append(min(near, key=lambda f: (abs(f - target), f)))
+        more = sorted(set(more))
+        if not more:
+            break
+        have.update(more)
+        added.extend(more)
+    out = list(keyframes)
+    for f in sorted(set(added)):
+        out.append({"frame": f, "file": by_frame[f]["file"], "anchor": None, "parallax_px": None,
+                    "rotation_deg": None, "closed_by": "stride"})
+    out.sort(key=lambda k: int(k["frame"]))
+    prev = None
+    for k in out:                                     # an added keyframe's anchor: the keyframe before it
+        if k["closed_by"] == "stride":
+            k["anchor"] = prev
+        prev = int(k["frame"])
+    return out
 
 
 def select_witnesses(chain: List[int], kf_frames: Sequence[int], frames: _Frames,
@@ -898,12 +946,14 @@ def run_parallax(frames_dir: os.PathLike, quality: Dict[str, Any], cfg: Parallax
     prog = _Progress(log, "keyframes", len(chain), heartbeat_s, cancelled)
     keyframes, windows, records = select_keyframes(chain, frames, by_frame, cfg, T, Kn, prog,
                                                    rot)
+    keyframes = stride_fill(chain, keyframes, by_frame, int(cfg.max_window_frames))
     dt = time.monotonic() - t0
-    closers = {c: sum(1 for k in keyframes if k["closed_by"] == c) for c in WINDOW_CLOSERS}
+    closers = {c: sum(1 for k in keyframes if k["closed_by"] == c) for c in WINDOW_CLOSERS + ("stride",)}
     log(f"{LOG_TAG} keyframes: {len(keyframes)} in {dt:.1f} s "
         f"({prog.n} measurements, {prog.n / max(dt, 1e-9):.1f}/s; by parallax "
         f"{closers['quantum']}, by rotation {closers['rotation']}, by track loss "
-        f"{closers['track_loss']})")
+        f"{closers['track_loss']}, added by the stride rule {closers['stride']} — no gap over "
+        f"{int(cfg.max_window_frames)} frames)")
     t1 = time.monotonic()
     prog_w = _Progress(log, "witnesses", len(chain), heartbeat_s, cancelled)
     witnesses = select_witnesses(chain, [k["frame"] for k in keyframes], frames, by_frame,

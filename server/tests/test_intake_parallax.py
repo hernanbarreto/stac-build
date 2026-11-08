@@ -363,20 +363,30 @@ def test_lost_tracks_invent_no_keyframe(tmp_path, scene, cam):
 
 
 def test_the_stride_rule_leaves_no_stretch_without_a_keyframe(tmp_path, scene, cam):
-    """USER 2026-11-08 ("la misma lógica que amb3r-slam, con su criterio de selección y de completitud"): with
-    max_window_frames 8 even a camera standing still (light change only — no parallax, no rotation) gets a
-    keyframe at most 8 frames after the previous one, the SHARPEST usable frame of the window."""
+    """USER 2026-11-08 ("la misma lógica que amb3r-slam" / "no deben haber huecos de más de 8 frames sin un kf"):
+    AMB3R's rule as a post-pass — a still camera (no parallax, no rotation) still gets keyframes, never more than
+    8 frames apart, and NOT clustered: about one per block of 8 (AMB3R's density), not one every frame or two."""
     from dataclasses import replace
     poses = S.walk_poses("still", 30, start=S.room_start_pose())
     _sess, quality, res = _run(tmp_path, scene, cam, poses, cfg=replace(PCFG, max_window_frames=8),
                                light=list(np.linspace(0.6, 1.4, 30)))
     frames = [int(k["frame"]) for k in res["keyframes"]]
-    assert len(frames) >= 3, "a still camera still gets keyframes under the stride rule"
     assert all(b - a <= 8 for a, b in zip(frames, frames[1:])), f"a gap over 8 frames: {frames}"
     assert any(k["closed_by"] == "stride" for k in res["keyframes"])
-    ranks = {int(r["frame"]): r["sharp_rank"] for r in quality["frames"]}
-    by_frame = {r["frame"]: r for r in res["frames"]}
-    for w in res["windows"]:
-        if w["closed_by"] == "stride":
-            seen = [f for f, r in by_frame.items() if r["anchor"] == w["anchor"] and not r["lost"]]
-            assert ranks[w["keyframe"]] >= max(ranks[f] for f in seen) - 1e-12, "the sharpest of the window"
+    assert len(frames) <= 30 // 8 + 3, f"clustered keyframes (AMB3R gives ~1 per 8): {frames}"
+
+
+def test_stride_fill_unit():
+    """Fixed blocks of 8 + densify, on a synthetic chain: no gap over 8, existing keyframes kept, deterministic,
+    and roughly one keyframe per block (no clustering)."""
+    chain = list(range(0, 100))
+    by_frame = {f: {"file": f"{f:06d}.jpg", "sharp_rank": ((f * 37) % 11) / 10.0} for f in chain}
+    kfs = [{"frame": 0, "file": "000000.jpg", "closed_by": "first_usable_frame"},
+           {"frame": 50, "file": "000050.jpg", "closed_by": "quantum"}]
+    out = P.stride_fill(chain, kfs, by_frame, 8)
+    fr = [int(k["frame"]) for k in out]
+    assert fr == sorted(fr) and 0 in fr and 50 in fr
+    assert all(b - a <= 8 for a, b in zip(fr, fr[1:])), fr
+    assert len(fr) <= 100 // 8 + 6, f"clustered: {len(fr)} keyframes for 100 frames"
+    assert P.stride_fill(chain, kfs, by_frame, 8) == out
+    assert P.stride_fill(chain, kfs, by_frame, 0) == kfs
