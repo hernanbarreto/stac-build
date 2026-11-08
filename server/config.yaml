@@ -2653,6 +2653,19 @@ reconstruction:
                                         #   nearer no view measured: a thin leg, a foreground edge —
                                         #   the surface behind would wear its colour). false = the
                                         #   floor alone decides, as before.
+      fusion_rule: colmap               # USER 2026-11-08 ("cómo se resuelve en fotogrametría dura de precisión"):
+                                        # COLMAP StereoFusion's rule — a witness confirms a pixel when the surface it
+                                        # measured at the landed pixel, carried back into the keyframe, lands within
+                                        # fusion_max_reproj_px of the pixel AND the depths differ ≤ fusion_max_depth_rel;
+                                        # witnesses by triangulation angle in [fusion_tri_min_deg, fusion_tri_max_deg];
+                                        # a pixel enters with ≥ min_support_views confirming witnesses; NO repair (the
+                                        # repair to the witnesses' median exploded station's floor: repaired 7.5 → 20 %
+                                        # with every witness at any distance voting). "tau" = the 2026-11-07 vote.
+      fusion_max_reproj_px: 2.0         # COLMAP StereoFusion.max_reproj_error default
+      fusion_max_depth_rel: 0.01        # COLMAP StereoFusion.max_depth_error default
+      fusion_tri_min_deg: 3.0           # COLMAP PatchMatch filter_min_triangulation_angle default ("stable")
+      fusion_tri_max_deg: 30.0          # the wide end of the usual 10–30° source-view band (visibility-aware MVS)
+      no_birth_without_parallax: true   # USER 2026-11-08: a keyframe I1 made by rotation votes, gives birth to nothing
       min_support_views: 10             # USER 2026-11-07 ("si pedimos piso de 10 vistas … quiero puntos válidos sin
                                         #   ruido"; "prefiero tener menos puntos pero valiosos"): a pixel F6's vote
                                         #   keeps, repairs, admits or rescues enters the cloud only when at least this

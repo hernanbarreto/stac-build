@@ -452,7 +452,7 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
                       neighbors, tau_quantile: float, repair_min_views: int, rescue_below_floor: bool,
                       log: Callable = print, bars_out: Optional[dict] = None,
                       extra: Optional[Dict[int, List[int]]] = None, min_parallax_deg: Optional[float] = None,
-                      min_support: int = 0):
+                      min_support: int = 0, fusion: Optional[dict] = None, no_birth=()):
     """pccr EPOCH 8 (USER 2026-10-01: "es la mejor, incorporar al pipeline"), on the bent depth
     `dep` (every `valid` pixel; `passed` = above the ONE confidence floor):
      1. tau = the `tau_quantile` percentile of the neighbour disagreement on INTERIOR pixels;
@@ -504,8 +504,32 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
     for i, f in enumerate(frames):
         cand = valid[f] & (passed[f] | edge[f])           # below-floor interior pixels stay out
         v = FT.two_sided_vote(i, frames, dep, passed, cand, K, c2w, w2c, neighbors, tau,
-                              extra=extra.get(f, ()), min_parallax_deg=min_parallax_deg)
+                              extra=extra.get(f, ()), min_parallax_deg=min_parallax_deg, fusion=fusion)
         candt = FT._t(cand, torch.bool)
+        if fusion is not None:
+            # COLMAP's fusion rule (USER 2026-11-08): a pixel enters with ≥ min_support witnesses that CONFIRM it
+            # (forward-backward reprojection ≤ max_reproj_px, depths within max_depth_rel, triangulation angle in
+            # the band); nothing is repaired, rescued or admitted — a pixel is kept or dropped. A keyframe without
+            # parallax (``no_birth``) votes as a witness and gives birth to nothing.
+            n_conf = v["agree_q"]
+            keep = candt & (n_conf >= int(min_support))
+            if f in no_birth:
+                keep = torch.zeros_like(keep)
+            zero = torch.zeros_like(v["z"])
+            zmap = torch.where(keep, v["zmed"], zero)
+            amap = torch.where(keep, n_conf, torch.zeros_like(n_conf))
+            pas = FT._t(passed[f], torch.bool) & candt
+            zmap_np = FT._np(zmap, np.float32); amap_np = FT._np(amap, np.int16)
+            final[f] = (zmap_np, amap_np)
+            tau_margins[f] = None
+            for k, n in (("valid", int(valid[f].sum())), ("edge", int(edge[f].sum())), ("kept", int(keep.sum())),
+                         ("contradicted", int((pas & ~keep).sum())), ("repaired", 0), ("admitted", 0),
+                         ("edge_below", 0), ("below_floor", int((valid[f] & ~passed[f]).sum())), ("rescued", 0),
+                         ("rescue_refused_nearer", 0), ("below_support", int((candt & ~keep).sum())),
+                         ("no_birth", int(candt.sum()) if f in no_birth else 0),
+                         ("out", int((zmap_np > 0).sum()))):
+                tot[k] = tot.get(k, 0) + n
+            continue
         agree, contra, z, s = v["agree"], v["contra"], v["z"], v["splats"]
         # point 53: every judged pixel's margin to τ — the nearest neighbour surface on its ray
         # against its own depth, (τ − |Δz|/z) / τ (positive = agrees with its nearest witness)
@@ -583,7 +607,53 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
         + f"; coverage {tot['out'] / float(len(frames) * H * W) * 100:.1f} % of all pixels")
     if min_parallax_deg is not None:
         tot.update(min_support=int(min_support), min_parallax_deg=float(min_parallax_deg))
+    if fusion is not None:
+        tot.update(min_support=int(min_support), fusion=dict(fusion), no_birth_keyframes=int(len(no_birth)))
+        log(f"{LOG_TAG} fusion rule: COLMAP — ≥ {int(min_support)} witnesses at [{fusion['tri_min_deg']:g}°, "
+            f"{fusion['tri_max_deg']:g}°] confirming within {fusion['max_reproj_px']:g} px and "
+            f"{fusion['max_depth_rel'] * 100:g} % of depth; no repair; {len(no_birth)} keyframe(s) without parallax "
+            f"give birth to nothing ({tot.get('no_birth', 0) / nv * 100:.1f} % of the valid pixels)")
     return final, tau, tot
+
+
+def rotation_keyframes(session_dir: Path, frames: List[int], log: Callable = print) -> set:
+    """The keyframes I1 made by ROTATION (frames/selected_frames.json ``windows[].rotation``), as frame
+    numbers among ``frames`` — they vote as witnesses and give birth to no point (USER 2026-11-08: COLMAP
+    registers an image without parallax by PnP and triangulates nothing from it)."""
+    p = Path(session_dir) / "frames" / "selected_frames.json"
+    if not p.exists():
+        log(f"{LOG_TAG} no frames/selected_frames.json — no keyframe marked without parallax")
+        return set()
+    doc = json.loads(p.read_text())
+    files = [str(x) for x in (doc.get("selected_files") or [])]
+    stems = {}
+    for i, name in enumerate(files):
+        try:
+            stems[i] = int(Path(name).stem)
+        except ValueError:
+            pass
+    have = set(int(f) for f in frames)
+    rot = set()
+    for w in doc.get("windows") or []:
+        if not w.get("rotation"):
+            continue
+        k = w.get("keyframe")
+        cands = []
+        if isinstance(k, str):
+            try:
+                cands.append(int(Path(k).stem))
+            except ValueError:
+                pass
+        elif isinstance(k, (int, float)):
+            cands.append(int(k))
+            if int(k) in stems:
+                cands.append(stems[int(k)])
+        for c in cands:
+            if c in have:
+                rot.add(c)
+                break
+    log(f"{LOG_TAG} {len(rot)} of {len(frames)} keyframes were made by rotation (no parallax): witnesses only")
+    return rot
 
 
 def load_turn_witnesses(out: Path, frames: List[int], chunk: Dict[int, int], thr: Dict[int, float],
@@ -1167,12 +1237,20 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     if labels is not None and lens:
         labels = labels_on_undistorted(labels, inp.maps)       # the masks live on the original frame
     vote_bars: dict = {}
+    fusion = None
+    if str(pcfg.cloud.fusion_rule) == "colmap":
+        fusion = {"max_reproj_px": float(pcfg.cloud.fusion_max_reproj_px),
+                  "max_depth_rel": float(pcfg.cloud.fusion_max_depth_rel),
+                  "tri_min_deg": float(pcfg.cloud.fusion_tri_min_deg),
+                  "tri_max_deg": float(pcfg.cloud.fusion_tri_max_deg)}
+    no_birth = rotation_keyframes(session_dir, frames, log) if bool(pcfg.cloud.no_birth_without_parallax) else set()
     voted, tau, vst = edge_keeping_vote(frames, dep, valid, passed, K, c2w_vote, labels,
                                         bc.neighbors, bc.tau_quantile, int(pcfg.cloud.repair_min_views),
                                         bool(pcfg.cloud.rescue_below_floor), log,
                                         bars_out=vote_bars, extra=t_extra,
                                         min_parallax_deg=float(pcfg.refine.min_tri_deg),
-                                        min_support=int(pcfg.cloud.min_support_views))
+                                        min_support=int(pcfg.cloud.min_support_views),
+                                        fusion=fusion, no_birth=no_birth)
     cover = vst["out"] / float(N * H * W)
     _p(65, f"vote done: coverage {cover * 100:.1f} %")
     del dep, valid, passed

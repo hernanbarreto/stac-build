@@ -566,7 +566,8 @@ def snap_mixed(depth: torch.Tensor, valid: torch.Tensor, labels: torch.Tensor, t
 
 def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge: Dict[int, np.ndarray],
                    cand, K: np.ndarray, c2w: Dict[int, np.ndarray], w2c: Dict[int, np.ndarray],
-                   neighbors, tau: float, extra=(), min_parallax_deg: Optional[float] = None) -> dict:
+                   neighbors, tau: float, extra=(), min_parallax_deg: Optional[float] = None,
+                   fusion: Optional[dict] = None) -> dict:
     """corrected_cloud.two_sided_vote (see its docstring) on DENSE maps: every entry is an [H, W]
     tensor over the candidate pixels (``cand``), ``splats`` [V, H, W] (NaN where nothing landed;
     [0, H, W] without a neighbour). The compact (rr, cc) view is corrected_cloud's wrapper.
@@ -593,7 +594,21 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
     Xw = C + z[..., None] * ray
     witnesses = [order[i + int(d)] for d in neighbors if 0 <= i + int(d) < len(order)]
     witnesses += [int(g) for g in extra]
-    qualify = min_parallax_deg is not None
+    qualify = min_parallax_deg is not None and fusion is None
+    if fusion is not None:
+        # COLMAP's fusion rule (USER 2026-11-08): a witness CONFIRMS a pixel when the surface it measured at
+        # the landed pixel, carried back into this keyframe, falls within ``max_reproj_px`` of the pixel
+        # (forward-backward reprojection, in pixels — a far view cannot tolerate 40 cm) AND the two depths
+        # differ by at most ``max_depth_rel``; only witnesses whose camera sees the point at a triangulation
+        # angle within [tri_min_deg, tri_max_deg] of this keyframe's camera vote. ``agree_q`` = the count.
+        fx, fy, cx, cy = float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])
+        U0 = torch.arange(W, dtype=torch.float64, device=z.device)[None, :].expand(H, W)
+        V0 = torch.arange(H, dtype=torch.float64, device=z.device)[:, None].expand(H, W)
+        Tf = _t(w2c[f])
+        cos_wide = float(np.cos(np.radians(float(fusion["tri_max_deg"]))))
+        cos_narrow = float(np.cos(np.radians(float(fusion["tri_min_deg"]))))
+        max_px = float(fusion["max_reproj_px"]); max_rel = float(fusion["max_depth_rel"])
+        agree_q = torch.zeros_like(agree)
     if qualify:
         cos_max = float(np.cos(np.radians(float(min_parallax_deg))))
         agree_q = torch.zeros_like(agree)
@@ -617,6 +632,23 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
         ok = ok & jg & (dg > 0)
         e = torch.where(ok, (zg - dg) / torch.where(ok, dg, one), zero)
         ag = ok & (torch.abs(e) <= tau) & (torch.abs(b) > 0)
+        if fusion is not None:
+            Cg = _t(np.asarray(c2w[g], np.float64)[:3, 3])
+            rg = rays.reshape(-1, 3)[idx].reshape(H, W, 3)            # the witness's rays at the landed pixels
+            Rg = _t(c2w[g][:3, :3]); tg = _t(c2w[g][:3, 3])
+            Xb = (rg * dg[..., None]) @ Rg.T + tg                      # its surface there, in the world
+            Xb = Xb @ Tf[:3, :3].T + Tf[:3, 3]                         # back into this keyframe
+            zb = Xb[..., 2]
+            okb = ok & (zb > 0)
+            zs = torch.where(okb, zb, one)
+            du = fx * Xb[..., 0] / zs + cx - U0
+            dv = fy * Xb[..., 1] / zs + cy - V0
+            err_px = torch.sqrt(du * du + dv * dv)
+            a_ = C - Xw; b_ = Cg - Xw
+            cs = (a_ * b_).sum(-1) / (torch.linalg.norm(a_, dim=-1) * torch.linalg.norm(b_, dim=-1)).clamp_min(1e-300)
+            band = (cs <= cos_narrow) & (cs >= cos_wide)
+            ag = okb & band & (err_px <= max_px) & (torch.abs(e) <= max_rel) & (torch.abs(b) > 0)
+            agree_q = agree_q + ag.to(torch.int32)
         fwd = ok & (e < -tau)
         s = splat(depth[g], judge[g], K, c2w[g], w2c[f], (H, W))
         landed = torch.isfinite(s)
@@ -638,6 +670,9 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
         out["agree_q"] = agree_q
         out["par_splat"] = (torch.stack(par_s) if par_s
                             else torch.zeros((0, H, W), dtype=torch.bool, device=z.device))
+    elif fusion is not None:
+        out["agree_q"] = agree_q
+        out["par_splat"] = torch.zeros((0, H, W), dtype=torch.bool, device=z.device)
     return out
 
 

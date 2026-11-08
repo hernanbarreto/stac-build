@@ -394,6 +394,19 @@ class CloudConfig:
                                 # its ray (never its own), unless its own depth lies in front of it
     min_support_views: int      # USER 2026-11-07: views that agree with a pixel's depth AND test it (≥
                                 # refine.min_tri_deg from its camera at the point) it needs to enter F6's cloud
+    fusion_rule: str            # USER 2026-11-08 ("cómo se resuelve en fotogrametría dura de precisión"): "colmap" =
+                                # COLMAP StereoFusion's rule — a witness confirms a pixel when its own surface at the
+                                # landed pixel reprojects back within fusion_max_reproj_px AND the depths differ ≤
+                                # fusion_max_depth_rel, witnesses chosen by triangulation angle in
+                                # [fusion_tri_min_deg, fusion_tri_max_deg]; a pixel enters with ≥ min_support_views
+                                # confirming witnesses; nothing is repaired. "tau" = the vote of 2026-11-07.
+    fusion_max_reproj_px: float
+    fusion_max_depth_rel: float
+    fusion_tri_min_deg: float
+    fusion_tri_max_deg: float
+    no_birth_without_parallax: bool   # USER 2026-11-08: a keyframe I1 made by ROTATION (no parallax) votes as a
+                                      # witness but gives birth to no point — COLMAP registers such an image by
+                                      # PnP and triangulates nothing from it
 
 
 # ── depth on F5 (USER 2026-10-01: the epoch-7 recipe, precision/depth_on_f5.py) ──
@@ -869,7 +882,17 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                                                  lo_excl=True),
                         repair_min_views=_num(cl, "repair_min_views", "cloud", lo=1, integer=True),
                         rescue_below_floor=_bool(cl, "rescue_below_floor", "cloud"),
-                        min_support_views=_num(cl, "min_support_views", "cloud", lo=0, integer=True))
+                        min_support_views=_num(cl, "min_support_views", "cloud", lo=0, integer=True),
+                        # 2026-11-08: COLMAP's defaults when a configuration predates the keys (the tests'
+                        # fixtures); config.yaml declares them
+                        fusion_rule=str(cl.get("fusion_rule", "colmap")),
+                        fusion_max_reproj_px=float(cl.get("fusion_max_reproj_px", 2.0)),
+                        fusion_max_depth_rel=float(cl.get("fusion_max_depth_rel", 0.01)),
+                        fusion_tri_min_deg=float(cl.get("fusion_tri_min_deg", 3.0)),
+                        fusion_tri_max_deg=float(cl.get("fusion_tri_max_deg", 30.0)),
+                        no_birth_without_parallax=bool(cl.get("no_birth_without_parallax", True)))
+    if cloud.fusion_rule not in ("colmap", "tau"):
+        raise ValueError(f"precision.cloud.fusion_rule {cloud.fusion_rule!r}: 'colmap' | 'tau'")
     cc = _sub(sec, "chunk_check", "")
     _gone(cc, "plane_min_inlier_frac", "chunk_check",
           "USER 2026-10-07 (docs/plan_determinismo.md point 140): no acceptance bar on the floor plane — "
