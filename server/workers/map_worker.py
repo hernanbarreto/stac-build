@@ -1986,7 +1986,10 @@ def _structure_config(va_cfg: dict) -> dict:
     if isinstance(cm, bool) or not isinstance(cm, (int, float)) or not cm > 0:
         raise RuntimeError(f"reconstruction.vggtomega.structure.cube_m {cm!r}: a cube's side in metres, > 0")
     return {"enabled": bool(st["enabled"]), "chunk_view_cap": cap, "probe": str(st["probe"]),
-            "amb3r_model": str(st["amb3r_model"]), "cube_m": float(cm)}
+            "amb3r_model": str(st["amb3r_model"]), "cube_m": float(cm),
+            # USER 2026-11-08 ("hay que recortar con criterio"): covis = the cut by co-visibility budget (the
+            # 2026-10-06 planner's rule on AMB3R's map), metres = the 5 m box of 2026-11-07
+            "cut": str(st.get("cut", "covis"))}
 
 
 def _single_pass_capacity(config: dict, vggt_config: dict, frames_dir, n_keyframes: int, n_witness: int,
@@ -2527,7 +2530,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
     _cplan = _CB.session_cubes(output_dir.parent, frames_dir, _sel_files, _turn["files"], _turn["witness_files"],
                                vggt_config, resolution=int(_pres["resolution"]), max_views=_view_cap,
                                sky_cache=output_dir / "maplong_run" / "sky_masks", log=pipe.send_log,
-                               probe=_st_cfg["probe"], cube_m=_st_cfg["cube_m"], walk_m=_walk0)
+                               probe=_st_cfg["probe"], cube_m=_st_cfg["cube_m"], walk_m=_walk0,
+                               cut=_st_cfg["cut"])
     _cubes = _cplan["cubes"]
     # no SALAD on cubes, one cube or many (the revisits are AMB3R's map's: which keyframe sees what —
     # reconstruction/cubes.py 7): a previous reconstruction's revisit reference and SALAD pairs are deleted — never

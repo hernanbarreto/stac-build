@@ -1678,6 +1678,12 @@ reconstruction:
                                         # video at frame stride 1 (USER 2026-11-06: "a amber le tenés que dar
                                         # el video completo … a paso 1, no importa el tiempo, importa la
                                         # precisión y la completitud"); our views are placed on its trajectory
+      cut: covis                        # USER 2026-11-08 ("hay que recortar con criterio"; station cut into 22 cubes
+                                        # of 5 m, eight of them a turn in place — Omega deforms without parallax,
+                                        # seams 50–76 cm): a cube takes keyframes while its CO-VISIBILITY budget
+                                        # Σ 1/ℓ ≤ 13.67 lengths (reconstruction/chunk_covis.H_LENGTHS_PER_CHUNK,
+                                        # calibrated on pccr 2026-10-06; ℓ from AMB3R's map, τ 0.3) and ≤ 64 views —
+                                        # a turn in place never closes a cube. metres = the 5 m box of 2026-11-07.
       cube_m: 5.0                       # USER 2026-11-06 ("el tamaño del cubo, no más de por ejemplo como
                                         # genrecon 5 m o 6 m"): the most a cube's cameras span along the
                                         # walk, on every axis (reconstruction/cubes.py)

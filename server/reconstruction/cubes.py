@@ -50,7 +50,8 @@ TAU = 0.3                    # the co-visibility bar (walk_structure.TAU, chunk_
 CUBE_M = 5.0                 # USER 2026-11-06 ("el tamaño del cubo, no más de por ejemplo como genrecon 5 m o 6 m")
 SAMPLES = 2000               # the points of a unit tested in another (a fixed stride over what its records saw)
 CUBES_NAME = "cubes.json"
-CUBES_VERSION = 9            # 9: kf_covisibility keeps every pair where one sees any part of the other's view (USER
+CUBES_VERSION = 10           # 10: the cut by CO-VISIBILITY budget (plan_cubes cut='covis', USER 2026-11-08 "hay que
+                             #    recortar con criterio"); 9: kf_covisibility keeps every pair where one sees any part of the other's view (USER
                              #    2026-11-08); 8: along the walk, ≤ cube_m AND ≤ max_views views, neighbours sharing half their
                              #    keyframes (USER 2026-11-08); 7: 5 m along the walk, no view cap (2026-11-07, night);
                              #    6: no view cap; 5: + kf_covisibility; 4: groups by what the units see; 3: boxes of
@@ -194,8 +195,35 @@ def cube_box(cams: np.ndarray, size: float):
     return lo, hi, mid, hx
 
 
+COVIS_TAU = 0.3                 # a keyframe still "sees" the next while they share ≥ this of its view (chunk_covis.TAU)
+
+
+def covis_lengths(covis: Dict, kf_frames: Sequence[int], tau: float = COVIS_TAU) -> np.ndarray:
+    """Per keyframe (walk order) its CO-VISIBILITY LENGTH: how many of the following keyframes, without a gap, still
+    share ≥ ``tau`` of its view (keyframe_covisibility's pairs [frame_a, frame_b, c_ab, c_ba]; the larger of the
+    two directions) — at least 1. A turn in place keeps sharing (long lengths); a corridor stops sharing soon."""
+    idx = {int(f): i for i, f in enumerate(kf_frames)}
+    n = len(idx)
+    c = np.zeros((n, n), np.float64)
+    for p in covis.get("pairs") or []:
+        a, b = idx.get(int(p[0])), idx.get(int(p[1]))
+        if a is None or b is None:
+            continue
+        v = max(float(x) for x in p[2:]) if len(p) > 2 else 1.0
+        c[a, b] = c[b, a] = max(c[a, b], v)
+    ell = np.ones(n, np.int64)
+    for k in range(n):
+        j = k + 1
+        while j < n and c[k, j] >= float(tau):
+            j += 1
+        ell[k] = max(1, j - k - 1)
+    return ell
+
+
 def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], *, metres_per_unit: float, cube_m: float = CUBE_M,
-               max_views: int = MAX_CUBE_VIEWS, device: str = "cuda") -> Dict:
+               max_views: int = MAX_CUBE_VIEWS, device: str = "cuda", cut: str = "covis",
+               covis: Optional[Dict] = None, kf_frames: Optional[Sequence[int]] = None,
+               covis_tau: float = COVIS_TAU, budget: Optional[float] = None) -> Dict:
     """The cubes of ``units`` (units_of) along the walk (module doc 2–4): a cube takes the units in order while their
     mean cameras fit a box of ``cube_m`` (the probe's metre: ``metres_per_unit``) on every axis of the gravity frame
     and its views stay within ``max_views`` — at least two units, so that neighbours share one; the next cube starts at
@@ -212,17 +240,39 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], *, metres_per_unit: float,
     size = float(cube_m) / float(metres_per_unit)
     nk = np.asarray([len(u["keyframes"]) for u in units], np.int64)
     w = np.asarray([int(u["views"]) for u in units], np.int64)
+    # USER 2026-11-08 ("hay que recortar con criterio"; station cut into 22 cubes of 5 m, eight of them a turn in
+    # place with the camera moving < 1 m — Omega deforms without parallax, seams of 50–76 cm): the cut by
+    # CO-VISIBILITY of 2026-10-06 (reconstruction/chunk_covis.py, H calibrated on pccr): a cube takes units while the
+    # motion budget Σ 1/ℓ over its keyframes stays ≤ ``budget`` lengths — a turn in place (long ℓ) costs almost
+    # nothing and never closes a cube, a corridor (short ℓ) does — and its views stay ≤ max_views. "metres" = the
+    # 5 m box of 2026-11-07.
+    if cut not in ("covis", "metres"):
+        raise CubePlanError(f"cut {cut!r}: 'covis' | 'metres'")
+    if cut == "covis":
+        if covis is None:
+            raise CubePlanError("cut 'covis' needs the keyframes' co-visibility (keyframe_covisibility)")
+        from reconstruction.chunk_covis import H_LENGTHS_PER_CHUNK
+        H = float(budget) if budget is not None else float(H_LENGTHS_PER_CHUNK)
+        if kf_frames is None:
+            raise CubePlanError("cut 'covis' needs the keyframes' frame numbers (kf_frames)")
+        ell = covis_lengths(covis, kf_frames, covis_tau)
+        du = np.asarray([float(np.sum(1.0 / ell[u["keyframes"]])) for u in units], np.float64)
+    else:
+        H, du = float("inf"), np.zeros(U, np.float64)
     spans: List[Tuple[int, int]] = []
     s0 = 0
     while True:
         lo = hi = centre[s0]
-        e, nv = s0, int(w[s0])
+        e, nv, D = s0, int(w[s0]), float(du[s0])
         while e + 1 < U:
             nlo, nhi = np.minimum(lo, centre[e + 1]), np.maximum(hi, centre[e + 1])
-            fits = not bool(np.any(nhi - nlo > size * (1.0 + 1e-9))) and nv + int(w[e + 1]) <= int(max_views)
+            if cut == "covis":
+                fits = (D + float(du[e + 1]) <= H * (1.0 + 1e-9)) and nv + int(w[e + 1]) <= int(max_views)
+            else:
+                fits = not bool(np.any(nhi - nlo > size * (1.0 + 1e-9))) and nv + int(w[e + 1]) <= int(max_views)
             if not fits and e > s0:                       # at least two units: neighbours always share one
                 break
-            lo, hi, e, nv = nlo, nhi, e + 1, nv + int(w[e + 1])
+            lo, hi, e, nv, D = nlo, nhi, e + 1, nv + int(w[e + 1]), D + float(du[e + 1])
             if not fits:
                 break
         spans.append((s0, e))
@@ -265,6 +315,8 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], *, metres_per_unit: float,
     nkc = [len(cb["keyframes"]) for cb in cubes]
     ov = [cubes[i]["shared_keyframes"] / max(len(cubes[i]["keyframes"]), 1) for i in range(len(cubes))]
     return {"gravity_frame": R.tolist(), "max_views": int(max_views), "cube_m": float(cube_m),
+            "cut": cut, "covis_budget_lengths": (H if cut == "covis" else None), "covis_tau": float(covis_tau),
+            "unit_budget": du.tolist(),
             "metres_per_unit": float(metres_per_unit), "cubes": cubes, "owner_unit": owner_unit,
             "owner": owner.tolist(),
             "stats": {"cubes": len(cubes), "keyframes_min": int(min(nkc)), "keyframes_max": int(max(nkc)),
@@ -363,7 +415,7 @@ def analyse(probe_npz: Path, inputs: Dict, *, device: str = "cuda", log: Callabl
     kf_cov = keyframe_covisibility(cmap, kf, kf_recs)
     del cmap
     plan = plan_cubes(kf_c2w, units, metres_per_unit=mpu, cube_m=cube_m, max_views=int(inputs["max_views"]),
-                      device=device)
+                      device=device, cut=str(inputs.get("cut", "covis")), covis=kf_cov, kf_frames=kf)
     ctx = cube_extras(plan["cubes"], kf, turns)
     wit = cube_extras(plan["cubes"], kf, inputs.get("witness") or [])
     for cb, cx, wx in zip(plan["cubes"], ctx, wit):
@@ -448,7 +500,7 @@ def code_sha() -> str:
 def session_cubes(scan_dir: Path, frames_dir: Path, sel_files: Sequence[str], turn_files: Sequence[str],
                   witness_files: Sequence[str], cfg_v: dict, *, resolution: int, max_views: int,
                   sky_cache: Optional[Path], log: Callable[[str], None], probe: str = "omega",
-                  cube_m: float = CUBE_M, walk_m: float = 0.0) -> Dict:
+                  cube_m: float = CUBE_M, walk_m: float = 0.0, cut: str = "covis") -> Dict:
     """The session's cube plan on the STRUCTURE PROBE — ``probe`` "amb3r": AMB3R-SLAM's whole-video pass
     (intake/amb3r_video.npz, run right after the intake's keyframes — workers/map_worker._run_intake_selection —
     and the keyframes completed on it, reconstruction/coverage_fill.py); "omega": one Omega pass over every keyframe
@@ -504,6 +556,7 @@ def session_cubes(scan_dir: Path, frames_dir: Path, sel_files: Sequence[str], tu
     inputs = {"keyframes": kf, "turn": sorted(_frame_no(f) for f in turn_files),
               "witness": sorted(_frame_no(f) for f in witness_files),
               "plan_index": [int(i) for i in planning_indices(Path(scan_dir), kf)], "max_views": int(max_views),
+              "cut": str(cut),
               "cube_m": float(cube_m), "walk_m": float(walk_m)}
     h = hashlib.sha256(json.dumps(stamp, sort_keys=True).encode())
     h.update(code_sha().encode())
