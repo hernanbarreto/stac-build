@@ -1674,12 +1674,13 @@ reconstruction:
                                         # card. An integer ≥ 2 caps the views as before (USER 2026-11-04 "ese es el
                                         # límite" — superseded for the cut by his 2026-11-08 order; pccr's METRES
                                         # cubes with no cap, up to 385 views, did not hold — cubes.py 8).
-      probe: omega                      # USER 2026-11-08 ("creo que ni siquiera había amb3r en el pipeline" — the
-                                        # good 01/02-11 front had none; "pasá todo a ese código"): one Omega pass
-                                        # over our views (keyframes + turn frames) says what every view saw — no
-                                        # AMB3R, no coverage fill (both gated off by this key). amb3r = AMB3R-SLAM
-                                        # over the WHOLE video (2026-11-06, reconstruction/amb3r_probe.py), kept
-                                        # selectable.
+      probe: amb3r                      # USER 2026-11-08 06:4x ("amber es lo mismo y es escalable, ¿por qué hacemos
+                                        # eso?" — the one-pass Omega probe hit 93 % of the card on station's 654
+                                        # views and cannot scale to the long walks AMB3R was brought in for,
+                                        # 2026-11-06 "para recorridos de cientos de metros y loops"): AMB3R-SLAM
+                                        # over the WHOLE video stays THE probe — it only says what each view saw;
+                                        # the cut is the covis budget with no view cap (the fix of today). omega =
+                                        # one Omega pass over our views, kept selectable for short sessions.
       amb3r_model: omega                # AMB3R's heavy model (the trials of 2026-11-03: Ω at the session's
                                         # grid gave its best raw result; da3 = DA3 Giant). It reads the WHOLE
                                         # video at frame stride 1 (USER 2026-11-06: "a amber le tenés que dar
