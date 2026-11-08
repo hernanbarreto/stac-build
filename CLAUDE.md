@@ -4,6 +4,20 @@ Compacted 2026-11-08 at the user's request ("hay mucha basura y cosas obsoletas"
 every decision with its date, his words and the measurements behind it, 2026-08 … 2026-11-08 — is in git:
 `git show 2f13136:CLAUDE.md`. The pipeline stage by stage, its numbers and its pending lists: `docs/pipeline_final.md`.
 
+## 0 · ⭐⭐⭐⭐⭐ THE NEW CANDIDATE PIPELINE — USER 2026-11-08 (evening CDMX), pccr 3108, main 14a731a
+*"en pccr que acabo de ver está perfecto, sin duplicados, sin voladores, con excelente cobertura, sin agujeros, es decir
+todo OK, felicitaciones, anotalo, y si soporta el resto de las sesiones es el pipeline"*. Pending: zaragoza, pccr 2408,
+station (queued, cloud only, replace). What it is, over §1's pipeline:
+- intake: AMB3R's completeness — `parallax.max_window_frames: 8`, fixed blocks of 8 video frames + densify, never a gap
+  over 8 frames without a keyframe (`intake.parallax.stride_fill`, 31e0c52); every keyframe gives birth.
+- cubes: covis budget, cap 64, min 32 kf, 50 % overlap (5b6308e); the REVISITS as SLAM closures of the cube Sim(3)
+  graph — F4's own pairs, one joint Omega bridge each, Cauchy loop edges (a3c435a); scale bound = the session's own
+  (1.1 × the 95 % interval of its seam scales, no fixed 0.6/1.6), bridge window = F4's (ec02dc7, 14a731a).
+- F6: COLMAP vote + repair to the witnesses' median (≤ 10 m) + Merrell occlusion veto, ON (b74b5e6, 6ecbe88, a51f3c7).
+- cleaner: voxel 1 mm, SOR σ 6 (4287313). Replace empties output/ entirely; floor stage off (a3c435a).
+- pccr 3108 numbers: 547 kf, 17 cubes, seams 1.0–3.7 cm, 43/49 closures (graph moved cubes ≤ 61 cm), F5 held-out
+  0.534 px, witnesses bound 2.26 px, vote coverage 74.1 %, 132.5 M points published.
+
 ## 1 · ⭐⭐⭐⭐ THE FINAL PIPELINE — USER 2026-11-08 (11:20 CDMX), pccr, main 8cef74f
 *"la cobertura es muy buena, sin errores, sin duplicados, muy muy buen resultado, excelente, que quede este como
 pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WITHOUT HIS WORD.
