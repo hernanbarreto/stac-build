@@ -1665,19 +1665,21 @@ reconstruction:
                                         # falls; Omega per cube (the fork's loop_utils/cube_run.py),
                                         # ONE Sim(3) graph on the shared frames. One cube = one pass.
       enabled: true
-      chunk_view_cap: 64                # the most views a cube holds (keyframes + turn frames): along the
-                                        # walk a cube closes before the unit that would take it over this
-                                        # or its cameras past cube_m (USER 2026-11-04 "ese es el límite";
-                                        # 2026-11-08: pccr's cubes with no cap, up to 385 views, did not
-                                        # hold together — reconstruction/cubes.py 8)
-      probe: amb3r                      # USER 2026-11-06 ("para recorridos de cientos de metros y loops …
-                                        # incorporemos amb3r-slam, con todo su slam, para la primer pasada,
-                                        # luego de eso se hace el corte"): the first pass is AMB3R-SLAM over
-                                        # the WHOLE video, right after I1's keyframes
-                                        # (reconstruction/amb3r_probe.py → intake/amb3r_video.npz) — one
-                                        # closed trajectory, every reconstructed frame with what it saw;
-                                        # omega = one Omega pass over our views (no loop closure, no fill,
-                                        # the card bounds its length)
+      chunk_view_cap: 0                 # 0 = UNCAPPED (USER 2026-11-08 05:5x, after station's 15 capped cubes gave
+                                        # non-rigid seams of up to 60 cm where the 01/02-11 co-visibility chunks of
+                                        # 67–127 kf held at 2.96 px: "pasá todo a ese código … que andaba de
+                                        # maravilla, podemos probar ese código con el voto de f6 colmap"): the
+                                        # covis BUDGET alone bounds a chunk (the 2026-10-06 planner's own rule) and
+                                        # Omega's resolution adapts to the largest chunk, never the chunks to the
+                                        # card. An integer ≥ 2 caps the views as before (USER 2026-11-04 "ese es el
+                                        # límite" — superseded for the cut by his 2026-11-08 order; pccr's METRES
+                                        # cubes with no cap, up to 385 views, did not hold — cubes.py 8).
+      probe: omega                      # USER 2026-11-08 ("creo que ni siquiera había amb3r en el pipeline" — the
+                                        # good 01/02-11 front had none; "pasá todo a ese código"): one Omega pass
+                                        # over our views (keyframes + turn frames) says what every view saw — no
+                                        # AMB3R, no coverage fill (both gated off by this key). amb3r = AMB3R-SLAM
+                                        # over the WHOLE video (2026-11-06, reconstruction/amb3r_probe.py), kept
+                                        # selectable.
       amb3r_model: omega                # AMB3R's heavy model (the trials of 2026-11-03: Ω at the session's
                                         # grid gave its best raw result; da3 = DA3 Giant). It reads the WHOLE
                                         # video at frame stride 1 (USER 2026-11-06: "a amber le tenés que dar
@@ -1687,8 +1689,9 @@ reconstruction:
                                         # of 5 m, eight of them a turn in place — Omega deforms without parallax,
                                         # seams 50–76 cm): a cube takes keyframes while its CO-VISIBILITY budget
                                         # Σ 1/ℓ ≤ 13.67 lengths (reconstruction/chunk_covis.H_LENGTHS_PER_CHUNK,
-                                        # calibrated on pccr 2026-10-06; ℓ from AMB3R's map, τ 0.3) and ≤ 64 views —
-                                        # a turn in place never closes a cube. metres = the 5 m box of 2026-11-07.
+                                        # calibrated on pccr 2026-10-06; ℓ from the probe's map, τ 0.3) and, with a
+                                        # chunk_view_cap ≥ 2, within that cap (0 = the budget alone, USER
+                                        # 2026-11-08). metres = the 5 m box of 2026-11-07.
       cube_m: 5.0                       # USER 2026-11-06 ("el tamaño del cubo, no más de por ejemplo como
                                         # genrecon 5 m o 6 m"): the most a cube's cameras span along the
                                         # walk, on every axis (reconstruction/cubes.py)

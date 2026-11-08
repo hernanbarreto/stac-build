@@ -35,6 +35,19 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
 - He presents the pipeline at Ingerop's IN3 contest about a month after 2026-11-08 and believes Ingerop may own it
   (*"antes tal vez no me dejen porque es de ellos"*). Nothing goes public (arXiv, open code, outside talks) without
   his explicit order.
+- ⭐ FRONT SWAPPED BACK (USER 2026-11-08 ~06:00 CDMX): station under the 11-08 front (AMB3R + 15 cubes ≤ 64 views)
+  gave NON-RIGID seams of 60/32/20 cm (the same pixels reconstructed apart in neighbour cubes — no graph closes
+  that), a −7 % Omega scale ramp along the walk, a split circular column and a doubled wall (*"esta corrida salió
+  con poca cobertura y con duplicados, es una bosta"*); the behind-copy survives F6's vote because it is HIDDEN,
+  not seen through (his 2026-09-19 finding). The good station was 01/02-11 (main 87d7c00): co-visibility chunks of
+  67–127 kf, NO AMB3R (*"creo que ni siquiera había amb3r en el pipeline"* — right: AMB3R entered 06-11). His order:
+  *"pasá todo a ese código y dejémonos de romper las pelotas … corremos todos con ese código que andaba de
+  maravilla, podemos probar ese código con el voto de f6 colmap"* → `structure.probe: omega` (no AMB3R, no coverage
+  fill), `cut: covis`, `chunk_view_cap: 0` = UNCAPPED (the 13.67-length budget alone closes a chunk; Omega's
+  resolution adapts to the largest chunk, ≤ 1024). Everything downstream intact (COLMAP vote, SAM3 groups, GenRecon
+  anchored + 1 pt, floor). Test order: station CLOUD ONLY, then pccr 3108 CLOUD ONLY — his eye decides before the
+  rest. pccr seams were 1.5–5.4 cm under the 11-08 front (healthy): the swap is judged on station without losing
+  that reference.
 
 ## 2 · HOW TO WORK WITH HIM (hard-earned — each line cost him time or money)
 - NO DECISION WITHOUT HIS OK (2026-10-04): not a config default, not a UI default, not a repair on his session — one

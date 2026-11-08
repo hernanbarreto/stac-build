@@ -1157,6 +1157,30 @@ def test_the_structure_probe_runs_before_the_pass_and_the_zones_before_the_scale
     assert cfg["reconstruction"]["vggtomega"]["structure"] == {"enabled": True, "chunk_view_cap": 64}
 
 
+def test_chunk_view_cap_zero_is_uncapped_and_one_refuses():
+    """USER 2026-11-08 ("pasá todo a ese código … que andaba de maravilla"): chunk_view_cap 0 = the covis budget
+    alone bounds a chunk (the 2026-10-06 planner's rule — the 01/02-11 chunks of 67–127 kf); 1 is no cap at all
+    and refuses; the worker resolves 0 to every view the session holds."""
+    from workers.map_worker import _structure_config
+    base = {"enabled": True, "probe": "omega", "amb3r_model": "omega", "cube_m": 5.0, "cut": "covis"}
+    st = _structure_config({"structure": dict(base, chunk_view_cap=0)})
+    assert st["chunk_view_cap"] == 0 and st["probe"] == "omega"
+    for bad in (1, -2, True, "sixty"):
+        try:
+            _structure_config({"structure": dict(base, chunk_view_cap=bad)})
+        except RuntimeError as e:
+            assert "chunk_view_cap" in str(e)
+        else:
+            raise AssertionError(f"chunk_view_cap {bad!r} must refuse")
+    src = _SRC.read_text()
+    i0 = src.index("if _view_cap == 0:")
+    assert "_view_cap = len(_sel_files) + len(_turn[\"files\"]) + 1" in src[i0:i0 + 700]
+    import yaml
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
+    stc = cfg["reconstruction"]["vggtomega"]["structure"]
+    assert stc["chunk_view_cap"] == 0 and stc["probe"] == "omega" and stc["cut"] == "covis"
+
+
 def test_a_resume_without_windows_replans_from_the_persisted_measurement():
     """walk reused + window files deleted: covis.json serves the plan; without it the SAME
     windows are regenerated once (walk.json and the anchors stay)."""

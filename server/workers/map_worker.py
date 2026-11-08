@@ -1974,9 +1974,10 @@ def _structure_config(va_cfg: dict) -> dict:
                            f"configuration (USER 2026-11-05/06: the structure probe — AMB3R-SLAM or one Omega "
                            f"pass — and the view cap of a cube)")
     cap = st["chunk_view_cap"]
-    if not (cap == "card" or (isinstance(cap, int) and not isinstance(cap, bool) and cap >= 2)):
-        raise RuntimeError(f"reconstruction.vggtomega.structure.chunk_view_cap {cap!r}: 'card' or an "
-                           f"integer ≥ 2")
+    if not (cap == "card" or (isinstance(cap, int) and not isinstance(cap, bool) and (cap == 0 or cap >= 2))):
+        raise RuntimeError(f"reconstruction.vggtomega.structure.chunk_view_cap {cap!r}: 'card', 0 (UNCAPPED — "
+                           f"the covis budget alone bounds a chunk and Omega's resolution adapts to the largest, "
+                           f"USER 2026-11-08 'pasá todo a ese código') or an integer ≥ 2")
     if st["probe"] not in ("amb3r", "omega"):
         raise RuntimeError(f"reconstruction.vggtomega.structure.probe {st['probe']!r}: 'amb3r' or 'omega'")
     if st["amb3r_model"] not in ("omega", "da3"):
@@ -2485,8 +2486,15 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                            "structure probe (USER 2026-11-06); there is no other layout")
     if _st_cfg["chunk_view_cap"] == "card":
         raise RuntimeError("reconstruction.vggtomega.structure.chunk_view_cap 'card': a cube has a fixed cap (USER "
-                           "2026-11-06, \"siempre con tope de 64\") — set an integer")
+                           "2026-11-06, \"siempre con tope de 64\") — set an integer (0 = uncapped)")
     _view_cap = int(_st_cfg["chunk_view_cap"])
+    if _view_cap == 0:
+        # USER 2026-11-08 ("pasá todo a ese código … que andaba de maravilla"): the covis BUDGET alone bounds a
+        # chunk — the 2026-10-06 planner's own rule (the 01/02-11 chunks of 67–127 kf that held station at 2.96 px);
+        # Omega's resolution adapts to the largest chunk (session_omega_resolution), never the chunks to the card.
+        _view_cap = len(_sel_files) + len(_turn["files"]) + 1
+        pipe.send_log(f"[cubes] chunk_view_cap 0 → UNCAPPED ({_view_cap - 1} views are every view this session "
+                      f"holds): the co-visibility budget alone closes a chunk (USER 2026-11-08)")
     # THE CARD, before the probe: its resolution, like Omega's, is decided on the committed card table.
     import repro
     _legacy_fp = Path(__file__).resolve().parent.parent.parent / "weights" / "omega_footprint.json"
