@@ -223,7 +223,7 @@ def covis_lengths(covis: Dict, kf_frames: Sequence[int], tau: float = COVIS_TAU)
 def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], *, metres_per_unit: float, cube_m: float = CUBE_M,
                max_views: int = MAX_CUBE_VIEWS, device: str = "cuda", cut: str = "covis",
                covis: Optional[Dict] = None, kf_frames: Optional[Sequence[int]] = None,
-               covis_tau: float = COVIS_TAU, budget: Optional[float] = None) -> Dict:
+               covis_tau: float = COVIS_TAU, budget: Optional[float] = None, min_kf: int = 0) -> Dict:
     """The cubes of ``units`` (units_of) along the walk (module doc 2–4): a cube takes the units in order while their
     mean cameras fit a box of ``cube_m`` (the probe's metre: ``metres_per_unit``) on every axis of the gravity frame
     and its views stay within ``max_views`` — at least two units, so that neighbours share one; the next cube starts at
@@ -289,6 +289,53 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], *, metres_per_unit: float,
                 break
             behind += int(nk[u])
         s0 = min(max(nxt, s0 + 1), e)
+    # SMALL CUBES FUSE (USER 2026-11-08: "los chunks pequeños deben fusionarse, no debemos tener menos de 32 kf
+    # por ejemplo" — the 99.8 cm seam stood on 5 shared frames): a span with fewer than ``min_kf`` keyframes
+    # merges into the adjacent span with fewer keyframes (ties: the earlier), until every span holds at least
+    # ``min_kf`` or one span remains. Deterministic: always the smallest offender first (ties: the earlier).
+    if int(min_kf) > 0:
+        def _span_kf(sp):
+            a, b = sp
+            return int(nk[a:b + 1].sum())
+        merged = 0
+        while len(spans) > 1:
+            sizes = [_span_kf(sp) for sp in spans]
+            small = [i for i, s_ in enumerate(sizes) if s_ < int(min_kf)]
+            if not small:
+                break
+            i = min(small, key=lambda j: (sizes[j], j))
+            if i == 0:
+                j = 1
+            elif i == len(spans) - 1:
+                j = i - 1
+            else:
+                j = i - 1 if sizes[i - 1] <= sizes[i + 1] else i + 1
+            a, b = min(spans[i][0], spans[j][0]), max(spans[i][1], spans[j][1])
+            lo_i, hi_i = sorted((i, j))
+            spans[lo_i:hi_i + 1] = [(a, b)]
+            merged += 1
+        if merged:
+            print(f"[cubes] {merged} cube(s) under {int(min_kf)} keyframes fused into their neighbours "
+                  f"(USER 2026-11-08: 'los chunks pequeños deben fusionarse') — {len(spans)} cube(s) remain")
+    # 50 % OVERLAP, ALWAYS (USER 2026-11-08: "siempre deben tener el 50 % de solape" — the 99.8 cm seam stood
+    # on 5 shared frames): consecutive cubes share at least HALF of the smaller one's keyframes; a short seam
+    # extends the next cube's start backwards, one unit at a time, left to right (deterministic).
+    if len(spans) > 1:
+        widened = 0
+        for i in range(len(spans) - 1):
+            a1, b1 = spans[i + 1]
+            while True:
+                a0, b0 = spans[i]
+                sh = int(nk[max(a1, a0):min(b0, b1) + 1].sum()) if a1 <= b0 else 0
+                k0, k1 = int(nk[a0:b0 + 1].sum()), int(nk[a1:b1 + 1].sum())
+                if sh * 2 >= min(k0, k1) or a1 <= a0:
+                    break
+                a1 -= 1
+                widened += 1
+            spans[i + 1] = (a1, b1)
+        if widened:
+            print(f"[cubes] overlap widened by {widened} unit step(s): every pair of neighbours shares at least "
+                  f"half of the smaller cube's keyframes (USER 2026-11-08: '50 % de solape, siempre')")
     owner_unit = []
     for u in range(U):
         cand = [(min(u - a, b - u), -i) for i, (a, b) in enumerate(spans) if a <= u <= b]
@@ -418,7 +465,8 @@ def analyse(probe_npz: Path, inputs: Dict, *, device: str = "cuda", log: Callabl
     kf_cov = keyframe_covisibility(cmap, kf, kf_recs)
     del cmap
     plan = plan_cubes(kf_c2w, units, metres_per_unit=mpu, cube_m=cube_m, max_views=int(inputs["max_views"]),
-                      device=device, cut=str(inputs.get("cut", "covis")), covis=kf_cov, kf_frames=kf)
+                      device=device, cut=str(inputs.get("cut", "covis")), covis=kf_cov, kf_frames=kf,
+                      min_kf=int(inputs.get("min_chunk_keyframes", 0)))
     ctx = cube_extras(plan["cubes"], kf, turns)
     wit = cube_extras(plan["cubes"], kf, inputs.get("witness") or [])
     for cb, cx, wx in zip(plan["cubes"], ctx, wit):
@@ -503,7 +551,7 @@ def code_sha() -> str:
 def session_cubes(scan_dir: Path, frames_dir: Path, sel_files: Sequence[str], turn_files: Sequence[str],
                   witness_files: Sequence[str], cfg_v: dict, *, resolution: int, max_views: int,
                   sky_cache: Optional[Path], log: Callable[[str], None], probe: str = "omega",
-                  cube_m: float = CUBE_M, walk_m: float = 0.0, cut: str = "covis") -> Dict:
+                  cube_m: float = CUBE_M, walk_m: float = 0.0, cut: str = "covis", min_kf: int = 0) -> Dict:
     """The session's cube plan on the STRUCTURE PROBE — ``probe`` "amb3r": AMB3R-SLAM's whole-video pass
     (intake/amb3r_video.npz, run right after the intake's keyframes — workers/map_worker._run_intake_selection —
     and the keyframes completed on it, reconstruction/coverage_fill.py); "omega": one Omega pass over every keyframe
@@ -559,7 +607,7 @@ def session_cubes(scan_dir: Path, frames_dir: Path, sel_files: Sequence[str], tu
     inputs = {"keyframes": kf, "turn": sorted(_frame_no(f) for f in turn_files),
               "witness": sorted(_frame_no(f) for f in witness_files),
               "plan_index": [int(i) for i in planning_indices(Path(scan_dir), kf)], "max_views": int(max_views),
-              "cut": str(cut),
+              "cut": str(cut), "min_chunk_keyframes": int(min_kf),
               "cube_m": float(cube_m), "walk_m": float(walk_m)}
     h = hashlib.sha256(json.dumps(stamp, sort_keys=True).encode())
     h.update(code_sha().encode())

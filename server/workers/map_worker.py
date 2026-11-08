@@ -1990,7 +1990,10 @@ def _structure_config(va_cfg: dict) -> dict:
             "amb3r_model": str(st["amb3r_model"]), "cube_m": float(cm),
             # USER 2026-11-08 ("hay que recortar con criterio"): covis = the cut by co-visibility budget (the
             # 2026-10-06 planner's rule on AMB3R's map), metres = the 5 m box of 2026-11-07
-            "cut": str(st.get("cut", "covis"))}
+            "cut": str(st.get("cut", "covis")),
+            # USER 2026-11-08 ("los chunks pequeños deben fusionarse, no debemos tener menos de 32 kf"):
+            # a cube under this many keyframes merges into its neighbour at the cut
+            "min_chunk_keyframes": int(st.get("min_chunk_keyframes", 32))}
 
 
 def _single_pass_capacity(config: dict, vggt_config: dict, frames_dir, n_keyframes: int, n_witness: int,
@@ -2539,7 +2542,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                vggt_config, resolution=int(_pres["resolution"]), max_views=_view_cap,
                                sky_cache=output_dir / "maplong_run" / "sky_masks", log=pipe.send_log,
                                probe=_st_cfg["probe"], cube_m=_st_cfg["cube_m"], walk_m=_walk0,
-                               cut=_st_cfg["cut"])
+                               cut=_st_cfg["cut"], min_kf=int(_st_cfg["min_chunk_keyframes"]))
     _cubes = _cplan["cubes"]
     # no SALAD on cubes, one cube or many (the revisits are AMB3R's map's: which keyframe sees what —
     # reconstruction/cubes.py 7): a previous reconstruction's revisit reference and SALAD pairs are deleted — never

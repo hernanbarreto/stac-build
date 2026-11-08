@@ -1696,6 +1696,10 @@ reconstruction:
       cube_m: 5.0                       # USER 2026-11-06 ("el tamaño del cubo, no más de por ejemplo como
                                         # genrecon 5 m o 6 m"): the most a cube's cameras span along the
                                         # walk, on every axis (reconstruction/cubes.py)
+      min_chunk_keyframes: 32           # USER 2026-11-08 ("los chunks pequeños deben fusionarse, no debemos
+                                        # tener menos de 32 kf por ejemplo"): a cube under this many keyframes
+                                        # merges into its neighbour at the cut (the 99.8 cm seam stood on a
+                                        # 5-shared-frame joint)
     scale_align: true                   # metric: DA3 anchor + scale_align (global similarity:
                                         # scales cloud + poses by s = median DA3/Omega depth).
                                         # false → up-to-scale (raw Omega isolation test).
