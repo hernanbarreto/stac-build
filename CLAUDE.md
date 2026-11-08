@@ -16,7 +16,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   mierda"*) → cloud → [VLM → SAM3 → rounds → projection] → floor (automatic). GenRecon manual; certification OFF.
 - pccr: coverage 63.6 %, 11.46 M points, F5 held-out 0.462 px, 491 segments (`docs/pipeline_final.md` §2).
 - The queue of 2026-11-08 (his order, Replace + segmentation): pccr ✓, observatorio, zaragoza, bufferStop, station,
-  pccr 2026-08-24 ("2408").
+  pccr 2026-08-24 ("2408"); then GenRecon of all six (*"para tener todas las nubes y todos los genrecon"*) at
+  confidence 0 % and ONE point per active voxel (`genrecon.min_points_per_voxel: 1`, USER 2026-11-08 "1. Ok": the
+  cloud is already confirmed by ≥ 10 views). Closing the gaps no keyframe saw through: later, on his word.
 - He presents the pipeline at Ingerop's IN3 contest about a month after 2026-11-08 and believes Ingerop may own it
   (*"antes tal vez no me dejen porque es de ellos"*). Nothing goes public (arXiv, open code, outside talks) without
   his explicit order.
