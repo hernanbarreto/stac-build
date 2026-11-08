@@ -608,7 +608,9 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
     if min_parallax_deg is not None:
         tot.update(min_support=int(min_support), min_parallax_deg=float(min_parallax_deg))
     if fusion is not None:
-        tot.update(min_support=int(min_support), fusion=dict(fusion), no_birth_keyframes=int(len(no_birth)))
+        tot.update(min_support=int(min_support), no_birth_keyframes=int(len(no_birth)))   # numeric only (the report)
+        if bars_out is not None:
+            bars_out["fusion"] = dict(fusion)
         log(f"{LOG_TAG} fusion rule: COLMAP — ≥ {int(min_support)} witnesses at [{fusion['tri_min_deg']:g}°, "
             f"{fusion['tri_max_deg']:g}°] confirming within {fusion['max_reproj_px']:g} px and "
             f"{fusion['max_depth_rel'] * 100:g} % of depth; no repair; {len(no_birth)} keyframe(s) without parallax "
