@@ -2240,6 +2240,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             # loop_utils/cube_run.py; no loop bridges (a revisit is inside its cube)
             cfg_v["Model"]["chunk_sets"] = [[int(g) for g in F] for F in cubes[0]]
             cfg_v["Model"]["chunk_owner"] = [int(x) for x in cubes[1]]
+            cfg_v["Model"]["cube_revisits"] = [[int(i), int(j)] for i, j in (cubes[2] if len(cubes) > 2 else [])]
             cfg_v["Model"].pop("chunk_ranges", None)
         else:
             cfg_v["Model"]["chunk_ranges"] = [[int(a), int(b)] for a, b in _ranges]
@@ -2657,7 +2658,22 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         _chunked_already = True
         _anchor_idx = cube_anchor_indices(_sets, _anch_per_chunk)
         _ensure_anchors([_sel_files[i] for i in _anchor_idx])
-        _apply_chunked_metric(vggt_config, None, cubes=(_sets, _owner))
+        # THE REVISITS AS SLAM CLOSURES (USER 2026-11-08: "implementalo para las cajas y luego se vuelven a aplicar en
+        # f5 … las haríamos como un slam"): the pairs F4 tracks across — precision.tracks.revisit_pairs over the
+        # structure probe's kf_covisibility, the SAME rule, no new criterion — go to the fork, which bridges each pair
+        # with a joint Omega pass and puts it in the cube Sim(3) graph as a loop edge (Cauchy-robust)
+        _revisits = []
+        if _cplan.get("kf_covisibility"):
+            from precision.config import load_precision_config as _lpc
+            from precision.tracks import keyframe_windows as _kw, revisit_pairs as _rvp
+            _tc = _lpc(session_dir=output_dir.parent).tracks
+            _kfn = [int(Path(f).stem) for f in _sel_files]
+            _revisits, _rv_rep = _rvp([("structure probe (intake/cubes.json)", _cplan["kf_covisibility"])], _kfn,
+                                      _kw(_kfn, _tc.window_frames, _tc.window_overlap_frac,
+                                          _tc.query_frames_per_window), int(_tc.window_frames) // 2)
+            pipe.send_log(f"[cubes] {len(_revisits)} revisit(s) handed to the cube graph as SLAM closures "
+                          f"(F4's own rule over the structure probe's co-visibility)")
+        _apply_chunked_metric(vggt_config, None, cubes=(_sets, _owner, _revisits))
         _persist_cube_plan(_cplan, _sets, _owner, _n_selected, _walk0, _res, _ctx)
         pipe.send_log(f"CUBES (I4): walk {_walk0:.1f} m → {_plan_layout_text({'chunk_sets': _sets})}, every two "
                       f"neighbour blocks one cube; ONE Omega pass per cube, ONE Sim(3) graph")

@@ -412,6 +412,23 @@ def _only_new_cloud_epochs(out: Optional[Path], e_from: int, e_to: int) -> bool:
         return False
 
 
+def _same_epoch_sidecar(out: Optional[Path], f: str, e_last: int, epoch_now: int) -> bool:
+    """True when ``f`` is the depth sidecar ``depth_correction.json`` and its CURRENT content is a
+    stamped sidecar of the SAME epoch the chain stopped in (= the session's epoch now): the floor
+    stage and ``corrected_cloud.publish`` re-stamp that file INSIDE their transactions without
+    publishing an epoch (``correction.chain.product_sidecar``) — bookkeeping over the same
+    geometry, never a change of it. Verified by the file's own declared epoch, not assumed
+    (USER 2026-11-08: station's resume refused after the floor stage's re-stamp of epoch 3 —
+    "se soluciona y se continúa en el mismo punto")."""
+    if out is None or e_last < 0 or e_last != int(epoch_now) or Path(f).name != "depth_correction.json":
+        return False
+    try:
+        d = json.loads((out / "depth_correction.json").read_text())
+        return int(d.get("epoch", -1)) == e_last
+    except Exception:  # noqa: BLE001 — an unreadable sidecar is not the same epoch's
+        return False
+
+
 def resume_point(state: dict, steps: Sequence[Step], epoch_now: int, out: Optional[Path] = None, *,
                  stamp_now: Optional[Callable[[Step], Mapping[str, Any]]] = None,
                  product_sha: Optional[Callable[[str], str]] = None,
@@ -473,6 +490,8 @@ def resume_point(state: dict, steps: Sequence[Step], epoch_now: int, out: Option
     if n == 0:
         return 0
     cut, moved = n, []
+    last = done[n - 1]
+    e_last = int(last.get("epoch_after", -1))
     for f, sha_last in sorted(written.items()):
         now = product_sha(f)
         if now == sha_last:
@@ -484,11 +503,13 @@ def resume_point(state: dict, steps: Sequence[Step], epoch_now: int, out: Option
             log(f"{LOG_TAG} {f} is what '{steps[j].key}' left (a later epoch was undone): "
                 f"'{steps[nxt].key}' and the steps after it run again")
             cut = min(cut, nxt)
+        elif _same_epoch_sidecar(out, f, e_last, int(epoch_now)):
+            log(f"{LOG_TAG} {f} was re-stamped inside epoch {e_last}'s own transaction (the floor "
+                f"stage / the publish re-write the sidecar of the SAME epoch — no new geometry): "
+                f"the finished prefix still counts")
         else:
             moved.append(f)
     if moved:
-        last = done[n - 1]
-        e_last = int(last.get("epoch_after", -1))
         if not _only_new_cloud_epochs(out, e_last, int(epoch_now)):
             raise ChainError(f"the chain's product(s) {moved} are not what the steps left them "
                              f"(the chain stopped after '{last['key']}' in epoch {e_last}; the session "

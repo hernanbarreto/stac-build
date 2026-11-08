@@ -1040,19 +1040,9 @@ class PipelineManager:
                         "(output/autosegment.json)")
         # the capture data still in the scan's legacy places goes to inputs/ — never deleted
         _moved = _CI.move_legacy_capture(session_dir, log=lambda m: logger.info(f"[Pipeline] {m}"))
-        # USER 2026-11-06 ("cuando esté quiero lanzar todo desde el UI, con reemplazo, pero aun con reemplazo el vlm y
-        # sam3 si ya están no deben rehacerse, salvo que hayan cambiado los KF"): the 2-D semantic products step aside
-        # (beside the session, renamed — one syscall each) and come back into the new output/; the VLM / SAM3 stages
-        # then keep them only while they are of the keyframes this run selects (_semantics_keyframes_change)
-        from workers.base import SEMANTIC_OUTPUT
-        _keep_dir = session_dir.parent / f".{session_dir.name}.semantics-{_os.getpid()}"
-        _kept = []
-        for _name in SEMANTIC_OUTPUT:
-            _src = output_dir / _name
-            if _src.exists() or _src.is_symlink():
-                _keep_dir.mkdir(parents=True, exist_ok=True)
-                _src.rename(_keep_dir / _name)
-                _kept.append(_name)
+        # USER 2026-11-08 ("cuando se lanza con replace debe eliminarse todo lo que hay, todo, debe vaciarse la
+        # carpeta output"): Replace empties output/ entirely — the VLM / SAM3 products go too (the 2026-11-06 rule
+        # that set them aside and brought them back is superseded: masks made on other keyframes are invalid).
         frames_dir = session_dir / "frames"
         for entry in sorted(session_dir.iterdir()) if session_dir.is_dir() else []:
             if entry.is_file() and entry.name.startswith("source_video"):
@@ -1078,12 +1068,6 @@ class PipelineManager:
                 entry.unlink(missing_ok=True)
                 deleted.append(entry.name)
         output_dir.mkdir(parents=True, exist_ok=True)
-        for _name in _kept:
-            (_keep_dir / _name).rename(output_dir / _name)
-        if _kept:
-            _keep_dir.rmdir()
-            logger.info(f"[Pipeline] Replace keeps the VLM / SAM3 products ({', '.join(_kept)}) — redone only if "
-                        f"this run's keyframes are not the ones they were made on")
 
         # project-level derivatives of output/ (merged cloud, its octree, floor)
         try:

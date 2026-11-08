@@ -269,6 +269,41 @@ def test_resume_point_with_stamps_tolerates_published_clouds_only(monkeypatch, t
                            stamp_now=lambda s: st_in, product_sha=lambda k: "aaa") == 0
 
 
+def test_resume_point_accepts_the_depth_sidecar_restamped_in_the_same_epoch(monkeypatch, tmp_path):
+    """The floor stage / the publish re-stamp depth_correction.json INSIDE their transactions
+    without publishing an epoch: a sidecar whose content declares the SAME epoch the chain stopped
+    in keeps the prefix (USER 2026-11-08: station's resume refused after the floor's re-stamp);
+    any other epoch in it, or any other file, still fails."""
+    import json as _json
+    steps = [RN.Step("f6_bend", "F6", "da3", "m", writes=("output/depth_correction.json",)),
+             RN.Step("f6_check", "chk", "da3", "m")]
+    st_in = RN._files_stamp({}, [], {"x": 1})
+    rec = {"key": "f6_bend", "epoch_after": 3, "stamp_in": st_in,
+           "stamp_out": RN._with_inputs(st_in, {"output/depth_correction.json": "aaa"})}
+    state = {"done": [rec]}
+    import correction.epoch as CE
+    monkeypatch.setattr(CE, "epoch_kind", lambda out, e: "transform")
+    (tmp_path / "depth_correction.json").write_text(_json.dumps(
+        {"version": 2, "epoch": 3, "base_epoch": 3, "chain": [3], "k": {}, "b": {}}))
+    assert RN.resume_point(state, steps, 3, out=tmp_path, stamp_now=lambda s: st_in,
+                           product_sha=lambda k: "bbb") == 1
+    # the sidecar of ANOTHER epoch does not count
+    (tmp_path / "depth_correction.json").write_text(_json.dumps({"version": 2, "epoch": 2, "k": {}, "b": {}}))
+    with pytest.raises(RN.ChainError, match="depth_correction.json"):
+        RN.resume_point(state, steps, 3, out=tmp_path, stamp_now=lambda s: st_in, product_sha=lambda k: "bbb")
+    # the session in a LATER epoch does not count either (the geometry under the chain changed)
+    (tmp_path / "depth_correction.json").write_text(_json.dumps({"version": 2, "epoch": 3, "k": {}, "b": {}}))
+    with pytest.raises(RN.ChainError):
+        RN.resume_point(state, steps, 4, out=tmp_path, stamp_now=lambda s: st_in, product_sha=lambda k: "bbb")
+    # another product re-written the same way still fails naming it
+    steps2 = [RN.Step("f6_bend", "F6", "da3", "m", writes=("output/cleaned_cloud.ply",)),
+              RN.Step("f6_check", "chk", "da3", "m")]
+    rec2 = dict(rec, stamp_out=RN._with_inputs(st_in, {"output/cleaned_cloud.ply": "aaa"}))
+    with pytest.raises(RN.ChainError, match="cleaned_cloud.ply"):
+        RN.resume_point({"done": [rec2]}, steps2, 3, out=tmp_path, stamp_now=lambda s: st_in,
+                        product_sha=lambda k: "bbb")
+
+
 def test_the_code_closure_stops_at_the_precision_core(pcfg):
     """F2's stamp holds the gauge and what it computes with, none of F4–F6's modules — an F6 edit
     never re-runs F2; F6's holds every module up to it. Every real step stamps real sections."""
