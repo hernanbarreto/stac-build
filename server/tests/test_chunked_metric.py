@@ -1178,7 +1178,7 @@ def test_chunk_view_cap_zero_is_uncapped_and_one_refuses():
     import yaml
     cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
     stc = cfg["reconstruction"]["vggtomega"]["structure"]
-    assert stc["chunk_view_cap"] == 0 and stc["probe"] == "amb3r" and stc["cut"] == "covis"
+    assert stc["chunk_view_cap"] == 64 and stc["probe"] == "amb3r" and stc["cut"] == "covis"
 
 
 def test_a_resume_without_windows_replans_from_the_persisted_measurement():

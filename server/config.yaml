@@ -1665,15 +1665,13 @@ reconstruction:
                                         # falls; Omega per cube (the fork's loop_utils/cube_run.py),
                                         # ONE Sim(3) graph on the shared frames. One cube = one pass.
       enabled: true
-      chunk_view_cap: 0                 # 0 = UNCAPPED (USER 2026-11-08 05:5x, after station's 15 capped cubes gave
-                                        # non-rigid seams of up to 60 cm where the 01/02-11 co-visibility chunks of
-                                        # 67–127 kf held at 2.96 px: "pasá todo a ese código … que andaba de
-                                        # maravilla, podemos probar ese código con el voto de f6 colmap"): the
-                                        # covis BUDGET alone bounds a chunk (the 2026-10-06 planner's own rule) and
-                                        # Omega's resolution adapts to the largest chunk, never the chunks to the
-                                        # card. An integer ≥ 2 caps the views as before (USER 2026-11-04 "ese es el
-                                        # límite" — superseded for the cut by his 2026-11-08 order; pccr's METRES
-                                        # cubes with no cap, up to 385 views, did not hold — cubes.py 8).
+      chunk_view_cap: 64                # USER 2026-11-04 "ese es el límite" — RESTORED 2026-11-08 ~16:30 after the
+                                        # uncapped trial (his "pasá todo a ese código") BROKE pccr: 3 cubes of
+                                        # 108–210 kf, seams 1.5–5.4 → 33.4 cm ("pccr se ve peor que antes con piso
+                                        # duplicado … no, mal"). Measured both ways on pccr: capped 64 ✔ (0.0–0.6 cm
+                                        # after the graph), uncapped ✘. Station is sick at ANY cap (its content —
+                                        # repetitive ceiling sweeps, blur, close-ups — warps Omega). 0 = UNCAPPED
+                                        # (the covis budget alone; kept selectable for experiments).
       probe: amb3r                      # USER 2026-11-08 06:4x ("amber es lo mismo y es escalable, ¿por qué hacemos
                                         # eso?" — the one-pass Omega probe hit 93 % of the card on station's 654
                                         # views and cannot scale to the long walks AMB3R was brought in for,
@@ -2672,16 +2670,16 @@ reconstruction:
                                         #   nearer no view measured: a thin leg, a foreground edge —
                                         #   the surface behind would wear its colour). false = the
                                         #   floor alone decides, as before.
-      fusion_rule: adjust               # USER 2026-11-08 ("no es un filtro, es un AJUSTE — buscar la posición
-                                        # correcta de los puntos"): every qualified witness within
-                                        # fusion_witness_max_m puts the depth ITS surface measures on the ray —
-                                        # never tested against the pixel's own depth — and the STRONGEST cluster
-                                        # (± the session's τ) of ≥ min_support_views decides the position: a pixel
-                                        # whose own camp loses is MOVED onto the winner (the displaced wall copy
-                                        # collapses onto the wall: station 2026-11-08, seams 60/32/20 cm), only a
-                                        # pixel with no reachable consensus dies. The distance cap is what the old
-                                        # repair lacked (it exploded station's floor with every witness at any
-                                        # distance voting). "colmap" = keep-or-drop (no repair), the rule below:
+      fusion_rule: colmap               # THE VALIDATED RECIPE'S VOTE (USER 2026-11-08 morning: "excelente, que quede
+                                        # este como pipeline final"; restored ~16:30 with the 64 cap after the day's
+                                        # trials). "adjust" (USER 2026-11-08: "no es un filtro, es un AJUSTE") stays
+                                        # selectable: every qualified witness within fusion_witness_max_m puts the
+                                        # depth ITS surface measures on the ray and the STRONGEST cluster of ≥
+                                        # min_support_views decides the position — a losing camp is MOVED onto the
+                                        # winner; measured on station's sick 10-cube geometry it moved 4.0 M px and
+                                        # raised coverage 41 → 45 % but could NOT collapse the misregistered wall
+                                        # (each camp's walk neighbours out-vote the other camp per pixel). "colmap"
+                                        # = keep-or-drop (no repair), the rule below:
                                         # COLMAP StereoFusion's rule — a witness confirms a pixel when the surface it
                                         # measured at the landed pixel, carried back into the keyframe, lands within
                                         # fusion_max_reproj_px of the pixel AND the depths differ ≤ fusion_max_depth_rel;
