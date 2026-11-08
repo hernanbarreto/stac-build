@@ -19,7 +19,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   pccr 2026-08-24 ("2408"); then GenRecon of all six (*"para tener todas las nubes y todos los genrecon"*) at
   confidence 0 % and ONE point per active voxel (`genrecon.min_points_per_voxel: 1`, USER 2026-11-08, commit 475ac0c
   *"ok, dale, ajustalo así, que quede"* — at 5 thin pipes and sparse wall were eaten; the queue's jobs carry it).
-  Closing the gaps no keyframe saw through: later, on his word.
+  Closing the gaps no keyframe saw through: later, on his word. Station's cloud ✓ 2026-11-08 ~05:00 CDMX
+  (*"se ve bien, no mucha cobertura pero de buena calidad"*): coverage 41.0 %, 28.95 M pts, held-out 0.598 px
+  (R2), witness bound 37.04 px — the session's own held-out tail, vs 2.96 px of the 01/02-11 station.
 - GenRecon grid (USER 2026-11-08 ~04:00 CDMX, *"grilla anclada en y = 0 … el suelo es sólido … nada más cambia"* /
   *"dale, si, no te detengas hasta que quede implementado"*): one cube base EXACTLY on the lowest measured support
   level (`anchored_centers`; layers down only where the cloud reaches lower — full coverage of 2026-11-05 kept) and
