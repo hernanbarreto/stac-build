@@ -373,10 +373,31 @@ def write_chunks(inp, f6: dict, raw_cfg: dict, tmp: Path, log: Callable, ccfg=No
     return chunks
 
 
+def _release_card(log: Callable) -> None:
+    """Hand this process's CACHED card memory back to the driver before a subprocess needs the card. The
+    tensors F6 freed (PointDiT, the vote) stay RESERVED by torch's caching allocator, and another process sees
+    the card full: bufferStop 2026-11-08 — the F6 process held 78.6 GB while the cleaner of 130.7 M points
+    asked for 0.5 GB and died. Nothing alive is touched; the numbers are logged, never decided on."""
+    if "torch" not in sys.modules:
+        return
+    import gc
+    import torch
+    if not torch.cuda.is_available() or not torch.cuda.is_initialized():
+        return
+    gib = 1024 ** 3
+    before = torch.cuda.memory_reserved() / gib
+    gc.collect()
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    log(f"{LOG_TAG} card handed to the cleaner: this process held {before:.1f} GiB reserved → "
+        f"{torch.cuda.memory_reserved() / gib:.1f} GiB ({torch.cuda.memory_allocated() / gib:.1f} GiB alive)")
+
+
 def clean(raw_cfg: dict, tmp: Path, cleaned: Path, log: Callable) -> None:
     """The cloud stage's own cleaner (voxel + SOR, postprocessing keys), as a subprocess."""
     from precision.epoch0_cloud import clean_cmd
     cmd = clean_cmd(raw_cfg, tmp, cleaned)
+    _release_card(log)
     r = subprocess.run(cmd, cwd=str(Path(__file__).resolve().parents[1]), capture_output=True, text=True)
     for ln in r.stdout.splitlines():
         if "✅" in ln or "❌" in ln:
