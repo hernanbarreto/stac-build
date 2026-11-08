@@ -2675,7 +2675,9 @@ reconstruction:
       fusion_tri_min_deg: 3.0           # COLMAP PatchMatch filter_min_triangulation_angle default ("stable")
       fusion_tri_max_deg: 30.0          # the wide end of the usual 10–30° source-view band (visibility-aware MVS)
       no_birth_without_parallax: true   # USER 2026-11-08: a keyframe I1 made by rotation votes, gives birth to nothing
-      min_support_views: 10             # USER 2026-11-07 ("si pedimos piso de 10 vistas … quiero puntos válidos sin
+      min_support_views: 5              # USER 2026-11-08 ("si colmap usa 5 por qué usamos 10"): COLMAP StereoFusion's
+                                        # min_num_pixels — under the fusion rule every confirmation is strict (angle
+                                        # 3–30°, 2 px, τ). (Was 10 — USER 2026-11-07 ("si pedimos piso de 10 vistas … quiero puntos válidos sin
                                         #   ruido"; "prefiero tener menos puntos pero valiosos"): a pixel F6's vote
                                         #   keeps, repairs, admits or rescues enters the cloud only when at least this
                                         #   many views agree with its depth AND test it — each sees the point from at
