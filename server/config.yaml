@@ -896,6 +896,12 @@ intake:
     keyframe_band_frac: 0.25           # BOUND: once the quantum is reached the window is followed
                                        # while the reading stays within quantum × (1 ± this); the
                                        # keyframe is the SHARPEST frame (I0 sharp_rank) in that band
+    max_window_frames: 8               # USER 2026-11-08 ("trabajemos con la misma lógica que amb3r-slam, con su
+                                       # criterio de selección y de completitud"): a window closes at the latest
+                                       # 8 video frames after its anchor, on its SHARPEST usable frame — AMB3R's
+                                       # rule read in its code (stride 2, the best of each group of 4, densified
+                                       # to ≤ 8 video frames apart); blurred/noisy frames are out by I0 already.
+                                       # The parallax and rotation bars still close a window earlier. 0 = off.
     reference_max_eval: 200            # BOUND: residual evaluations of the rotation fit per frame
                                        # (warm-started from the previous frame); reaching it means
                                        # NOT converged and the frame is not measured (lost)
@@ -2697,17 +2703,17 @@ reconstruction:
       fusion_witness_max_m: 10.0        # USER 2026-11-08 ("tu voto no tiene peso porque estás a más de 10 o 15 m,
                                         # ponele 10 m, no más que eso"): a witness farther than this from the
                                         # surface it measured has no vote in the ADJUST rule
-      fusion_repair: false              # USER 2026-11-08 evening ("lo que se le puede agregar a F6 es el ajuste …
+      fusion_repair: true               # ON (USER 2026-11-08 "prendé ambas correcciones de f6"). USER 2026-11-08 evening ("lo que se le puede agregar a F6 es el ajuste …
                                         # vamos a volver a [la receta validada] + las dos mejoras"): a COLMAP-mode
                                         # pixel SHORT of min_support_views whose witnesses' surfaces agree among
                                         # themselves (≥ min_support_views within τ of their median, on its ray) is
                                         # published AT THAT MEDIAN instead of dropped — coverage of the GOOD kind
                                         # (pending A6). OFF = the validated recipe bit for bit.
-      fusion_occlusion_veto: false      # the Merrell duel (ICCV07 visibility-based fusion, researched 2026-11-08):
+      fusion_occlusion_veto: true       # ON (USER 2026-11-08 "prendé ambas"). The Merrell duel (ICCV07 visibility-based fusion, researched 2026-11-08):
                                         # a pixel whose OCCLUDING witnesses (surfaces measured in FRONT of it on its
                                         # ray) outnumber its confirming ones is behind a better-supported surface —
                                         # the hidden duplicate — and leaves. OFF = the validated recipe bit for bit.
-      no_birth_without_parallax: true   # USER 2026-11-08: a keyframe I1 made by rotation votes, gives birth to nothing
+      no_birth_without_parallax: false  # USER 2026-11-08 evening ("A": every keyframe gives birth — AMB3R's completeness; the vote tests each depth). Was: a rotation keyframe votes, births nothing
       min_support_views: 5              # USER 2026-11-08 ("si colmap usa 5 por qué usamos 10"): COLMAP StereoFusion's
                                         # min_num_pixels — under the fusion rule every confirmation is strict (angle
                                         # 3–30°, 2 px, τ). (Was 10 — USER 2026-11-07 ("si pedimos piso de 10 vistas … quiero puntos válidos sin

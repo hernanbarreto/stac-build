@@ -691,6 +691,13 @@ def select_keyframes(chain: List[int], frames: _Frames, by_frame: Dict[int, Dict
                 chosen = _sharpest(band, by_frame)
                 closed_by, restart = "rotation", pos[chosen.frame] + 1
                 break
+            if int(cfg.max_window_frames) > 0 and f - anchor >= int(cfg.max_window_frames):
+                # AMB3R's completeness (USER 2026-11-08): no stretch longer than max_window_frames without a
+                # keyframe — the sharpest usable frame of the window, whatever its parallax
+                band = list(seen)
+                chosen = _sharpest(band, by_frame)
+                closed_by, restart = "stride", pos[chosen.frame] + 1
+                break
             j += 1
         closing_m = None
         if closed_by == "end":

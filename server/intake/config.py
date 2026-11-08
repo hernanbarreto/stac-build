@@ -181,6 +181,12 @@ class ParallaxConfig:
                                         # w.r.t. the rotation reference
     keyframe_band_frac: float           # BOUND: the keyframe's reading lies in
                                         # [(1 − band), (1 + band)] × quantum
+    max_window_frames: int              # USER 2026-11-08 ("trabajemos con la misma lógica que amb3r-slam,
+                                        # con su criterio de selección y de completitud"): a window never
+                                        # spans more than this many video frames — it closes on the SHARPEST
+                                        # usable frame it saw (closed_by "stride"), so no stretch of the walk
+                                        # is left without a keyframe (AMB3R: stride 2 × the best of each group
+                                        # of 4, densified to ≤ 4 inputs apart = 8 video frames). 0 = off.
     reference_max_eval: int             # BOUND: residual evaluations of the rotation fit per frame;
                                         # reaching it = NOT converged = the frame is not measured
     reference_tol: float                # declared convergence tolerance of the rotation fit (step,
@@ -279,6 +285,7 @@ def _load_parallax(sec: Dict[str, Any]) -> ParallaxConfig:
                                lo_excl=True),
         # a band of 1 would admit the anchor's own neighbour; 0 = the closing frame only
         keyframe_band_frac=_num(p, "keyframe_band_frac", "parallax", lo=0.0, hi=1.0),
+        max_window_frames=_num(p, "max_window_frames", "parallax", lo=0, integer=True),
         reference_max_eval=_num(p, "reference_max_eval", "parallax", lo=1, integer=True),
         # MINPACK needs a positive tolerance; 1 would stop on the first step
         reference_tol=_num(p, "reference_tol", "parallax", lo=0.0, hi=1.0, lo_excl=True),

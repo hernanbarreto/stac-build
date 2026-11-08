@@ -37,14 +37,15 @@ QCFG = QualityConfig(luma_lo=40.0, luma_hi=220.0, clip_frac_max=0.25, clip_lo=5,
                      fft_max_side=640, diff_max_side=320)
 # The production values except the tracking scale, the grid and the LK window,
 # sized for 320x240 test frames — test_test_config_mirrors_production pins that.
-SIZED_FOR_TEST = {"grid_side", "process_scale", "lk_win"}
+SIZED_FOR_TEST = {"grid_side", "process_scale", "lk_win", "max_window_frames"}  # the stride rule has its own test
 PCFG = ParallaxConfig(grid_side=24, process_scale=0.5, ransac_px=1.0, parallax_quantum_px=12.0,
                       witness_min_parallax_px=1.5, min_tracks=40, lk_win=15, lk_levels=3,
                       fb_max_px=1.0, warn_static_disp_px=0.5, warn_rotation_min_disp_px=4.0,
                       warn_min_run_frames=5, parallax_quantile=0.9, keyframe_band_frac=0.25,
                       reference_max_eval=200, reference_tol=1.0e-12,
                       focal_probe_frames=16, focal_probe_res="native",
-                      focal_probe_model="depth-anything/DA3NESTED-GIANT-LARGE-1.1", vram_calibration_frames=2, vram_margin_frac=0.15)
+                      focal_probe_model="depth-anything/DA3NESTED-GIANT-LARGE-1.1", vram_calibration_frames=2, vram_margin_frac=0.15,
+                      max_window_frames=0)
 NOISE_SIGMA = 2.0
 QUIET = (lambda *a, **k: None)
 WALK = dict(start=S.room_start_pose(x_m=1.2), direction="right")
@@ -359,3 +360,23 @@ def test_lost_tracks_invent_no_keyframe(tmp_path, scene, cam):
     _s, _q, res = _run(tmp_path, scene, cam, poses, cfg=cfg)
     assert res["n_keyframes"] == 1                  # nothing measurable: no keyframe invented
     assert "tracking_lost" in _kinds(res)
+
+
+def test_the_stride_rule_leaves_no_stretch_without_a_keyframe(tmp_path, scene, cam):
+    """USER 2026-11-08 ("la misma lógica que amb3r-slam, con su criterio de selección y de completitud"): with
+    max_window_frames 8 even a camera standing still (light change only — no parallax, no rotation) gets a
+    keyframe at most 8 frames after the previous one, the SHARPEST usable frame of the window."""
+    from dataclasses import replace
+    poses = S.walk_poses("still", 30, start=S.room_start_pose())
+    _sess, quality, res = _run(tmp_path, scene, cam, poses, cfg=replace(PCFG, max_window_frames=8),
+                               light=list(np.linspace(0.6, 1.4, 30)))
+    frames = [int(k["frame"]) for k in res["keyframes"]]
+    assert len(frames) >= 3, "a still camera still gets keyframes under the stride rule"
+    assert all(b - a <= 8 for a, b in zip(frames, frames[1:])), f"a gap over 8 frames: {frames}"
+    assert any(k["closed_by"] == "stride" for k in res["keyframes"])
+    ranks = {int(r["frame"]): r["sharp_rank"] for r in quality["frames"]}
+    by_frame = {r["frame"]: r for r in res["frames"]}
+    for w in res["windows"]:
+        if w["closed_by"] == "stride":
+            seen = [f for f, r in by_frame.items() if r["anchor"] == w["anchor"] and not r["lost"]]
+            assert ranks[w["keyframe"]] >= max(ranks[f] for f in seen) - 1e-12, "the sharpest of the window"

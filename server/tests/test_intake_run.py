@@ -326,6 +326,8 @@ def test_a_marker_listing_the_removed_i2_is_read_as_i0_i1_and_its_leftovers_go(s
 # ── what re-runs, and what does not ──────────────────────────────────────
 
 def test_parameter_change_reruns_only_downstream(session, icfg):
+    # the quantum's own effect: the stride rule (max_window_frames, USER 2026-11-08) off, else it dominates
+    icfg = replace(icfg, parallax=replace(icfg.parallax, max_window_frames=0))
     res, _ = _run(session, icfg)
     mt = _mtimes(session)
     time.sleep(0.02)
