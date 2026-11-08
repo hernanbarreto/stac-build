@@ -2697,6 +2697,16 @@ reconstruction:
       fusion_witness_max_m: 10.0        # USER 2026-11-08 ("tu voto no tiene peso porque estás a más de 10 o 15 m,
                                         # ponele 10 m, no más que eso"): a witness farther than this from the
                                         # surface it measured has no vote in the ADJUST rule
+      fusion_repair: false              # USER 2026-11-08 evening ("lo que se le puede agregar a F6 es el ajuste …
+                                        # vamos a volver a [la receta validada] + las dos mejoras"): a COLMAP-mode
+                                        # pixel SHORT of min_support_views whose witnesses' surfaces agree among
+                                        # themselves (≥ min_support_views within τ of their median, on its ray) is
+                                        # published AT THAT MEDIAN instead of dropped — coverage of the GOOD kind
+                                        # (pending A6). OFF = the validated recipe bit for bit.
+      fusion_occlusion_veto: false      # the Merrell duel (ICCV07 visibility-based fusion, researched 2026-11-08):
+                                        # a pixel whose OCCLUDING witnesses (surfaces measured in FRONT of it on its
+                                        # ray) outnumber its confirming ones is behind a better-supported surface —
+                                        # the hidden duplicate — and leaves. OFF = the validated recipe bit for bit.
       no_birth_without_parallax: true   # USER 2026-11-08: a keyframe I1 made by rotation votes, gives birth to nothing
       min_support_views: 5              # USER 2026-11-08 ("si colmap usa 5 por qué usamos 10"): COLMAP StereoFusion's
                                         # min_num_pixels — under the fusion rule every confirmation is strict (angle

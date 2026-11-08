@@ -543,19 +543,38 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
             # parallax (``no_birth``) votes as a witness and gives birth to nothing.
             n_conf = v["agree_q"]
             keep = candt & (n_conf >= int(min_support))
+            n_veto = 0
+            if bool(fusion.get("occlusion_veto")):
+                # the Merrell duel (ICCV07, researched 2026-11-08): more witnesses measured surfaces IN FRONT of
+                # this pixel than confirm it — it sits behind a better-supported surface (the hidden duplicate)
+                occluders = (v["contra"] - v["contra_fwd"]).clamp(min=0)
+                veto = keep & (occluders > n_conf)
+                n_veto = int(veto.sum())
+                keep = keep & ~veto
+            rep = torch.zeros_like(keep)
+            if bool(fusion.get("repair")) and v["splats"].shape[0]:
+                # USER 2026-11-08 evening: a pixel SHORT of support whose witnesses' surfaces agree among
+                # themselves on its ray is published AT THEIR MEDIAN — coverage of the GOOD kind (A6)
+                rep_ok, zrep, nrep = FT.agreeing_median(v["splats"], tau, int(min_support))
+                rep = candt & ~keep & rep_ok
             if f in no_birth:
                 keep = torch.zeros_like(keep)
+                rep = torch.zeros_like(rep)
             zero = torch.zeros_like(v["z"])
             zmap = torch.where(keep, v["zmed"], zero)
             amap = torch.where(keep, n_conf, torch.zeros_like(n_conf))
+            if bool(rep.any()):
+                zmap = torch.where(rep, zrep.to(zmap.dtype), zmap)
+                amap = torch.where(rep, nrep.to(amap.dtype), amap)
             pas = FT._t(passed[f], torch.bool) & candt
             zmap_np = FT._np(zmap, np.float32); amap_np = FT._np(amap, np.int16)
             final[f] = (zmap_np, amap_np)
             tau_margins[f] = None
             for k, n in (("valid", int(valid[f].sum())), ("edge", int(edge[f].sum())), ("kept", int(keep.sum())),
-                         ("contradicted", int((pas & ~keep).sum())), ("repaired", 0), ("admitted", 0),
+                         ("contradicted", int((pas & ~keep & ~rep).sum())), ("repaired", int(rep.sum())),
+                         ("admitted", 0), ("occlusion_veto", n_veto),
                          ("edge_below", 0), ("below_floor", int((valid[f] & ~passed[f]).sum())), ("rescued", 0),
-                         ("rescue_refused_nearer", 0), ("below_support", int((candt & ~keep).sum())),
+                         ("rescue_refused_nearer", 0), ("below_support", int((candt & ~keep & ~rep).sum())),
                          ("no_birth", int(candt.sum()) if f in no_birth else 0),
                          ("out", int((zmap_np > 0).sum()))):
                 tot[k] = tot.get(k, 0) + n
@@ -652,7 +671,12 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
         else:
             log(f"{LOG_TAG} fusion rule: COLMAP — ≥ {int(min_support)} witnesses at [{fusion['tri_min_deg']:g}°, "
                 f"{fusion['tri_max_deg']:g}°] confirming within {fusion['max_reproj_px']:g} px and "
-                f"{fusion['max_depth_rel'] * 100:g} % of depth; no repair; {len(no_birth)} keyframe(s) without "
+                f"{fusion['max_depth_rel'] * 100:g} % of depth; "
+                + (f"repair ON: {tot.get('repaired', 0):,} short-of-support pixel(s) published at their witnesses' "
+                   f"median; " if bool(fusion.get("repair")) else "no repair; ")
+                + (f"occlusion veto ON: {tot.get('occlusion_veto', 0):,} pixel(s) behind a better-supported "
+                   f"surface left; " if bool(fusion.get("occlusion_veto")) else "")
+                + f"{len(no_birth)} keyframe(s) without "
                 f"parallax give birth to nothing ({tot.get('no_birth', 0) / nv * 100:.1f} % of the valid pixels)")
     return final, tau, tot
 
@@ -1292,7 +1316,10 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
                   "tri_max_deg": float(pcfg.cloud.fusion_tri_max_deg),
                   # ADJUST (USER 2026-11-08): the vote finds the position; witnesses beyond this range have none
                   "mode": "adjust" if str(pcfg.cloud.fusion_rule) == "adjust" else "keep",
-                  "witness_max_m": float(pcfg.cloud.fusion_witness_max_m)}
+                  "witness_max_m": float(pcfg.cloud.fusion_witness_max_m),
+                  # the two selectable F6 additions (USER 2026-11-08 evening, OFF = the validated recipe)
+                  "repair": bool(pcfg.cloud.fusion_repair),
+                  "occlusion_veto": bool(pcfg.cloud.fusion_occlusion_veto)}
     no_birth = rotation_keyframes(session_dir, frames, log) if bool(pcfg.cloud.no_birth_without_parallax) else set()
     voted, tau, vst = edge_keeping_vote(frames, dep, valid, passed, K, c2w_vote, labels,
                                         bc.neighbors, bc.tau_quantile, int(pcfg.cloud.repair_min_views),

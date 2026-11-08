@@ -150,6 +150,65 @@ def test_the_adjust_vote_collapses_a_displaced_camp_and_the_distance_cap_silence
     assert (final2[4][0] == 0).all(), "witnesses beyond witness_max_m have no vote (USER: 10 m, no más)"
 
 
+def test_fusion_repair_publishes_the_short_pixel_at_its_witnesses_median():
+    """USER 2026-11-08 evening: a COLMAP-mode pixel short of min_support whose witnesses' surfaces agree
+    among themselves on its ray is published at THEIR median; with the flag off it is dropped (the
+    validated recipe bit for bit)."""
+    rng = np.random.default_rng(5)
+    order = [0, 1, 2, 3]
+    cams = {}
+    for f in order:
+        c = np.eye(4); c[0, 3] = 0.3 * f
+        cams[f] = c
+    jit = {f: (1.0 + 0.003 * rng.standard_normal((H, W))).astype(np.float32) for f in order}
+    dep = {f: 3.0 * jit[f] for f in order}
+    dep[1][10:20, 30:40] = 1.2            # a patch whose own depth agrees with nobody (short of support)
+    ok = {f: np.ones((H, W), bool) for f in order}
+    base = {"max_reproj_px": 6.0, "max_depth_rel": 0.0, "tri_min_deg": 3.0, "tri_max_deg": 30.0, "mode": "keep"}
+    args = lambda: (order, {f: d.copy() for f, d in dep.items()}, ok, {f: ok[f].copy() for f in order},
+                    K, cams, None, (-2, -1, 1, 2), 75.0, 2)
+    off, _, t_off = edge_keeping_vote(*args(), False, log=lambda *a: None,
+                                      min_parallax_deg=3.0, min_support=3, fusion=dict(base, repair=False))
+    assert (off[1][0][12:18, 32:38] == 0).all(), "short of support and no repair: dropped"
+    on, _, t_on = edge_keeping_vote(*args(), False, log=lambda *a: None,
+                                    min_parallax_deg=3.0, min_support=3, fusion=dict(base, repair=True))
+    z = on[1][0][12:18, 32:38]
+    # with only 3 witnesses and synthetic jitter ~τ some rays miss the agreeing set — the semantics under
+    # test is WHERE the repaired pixel lands (the witnesses' wall), not the synthetic survival rate
+    assert (z > 0).mean() > 0.5 and abs(np.median(z[z > 0]) - 3.0) < 0.1, \
+        "repair ON: published at the witnesses' agreed median (the wall at 3.0), never its own 1.2"
+    assert t_on["repaired"] > 0 and t_off["repaired"] == 0
+
+
+def test_fusion_occlusion_veto_removes_the_copy_behind_a_stronger_surface():
+    """The Merrell duel (ICCV07, researched 2026-11-08): a pixel confirmed only by its own camp but
+    OCCLUDED by more witnesses than confirm it (their surfaces in front on its ray) leaves when the
+    veto is on; with it off (the validated recipe) it stays."""
+    rng = np.random.default_rng(9)
+    order = [0, 1, 2, 3, 4, 5, 6]
+    cams = {}
+    for f in order:
+        c = np.eye(4); c[0, 3] = 0.3 * f
+        cams[f] = c
+    jit = {f: (1.0 + 0.003 * rng.standard_normal((H, W))).astype(np.float32) for f in order}
+    dep = {f: (3.0 if f < 4 else 3.5) * jit[f] for f in order}   # camp A (0-3) in front, camp B (4-6) behind
+    ok = {f: np.ones((H, W), bool) for f in order}
+    base = {"max_reproj_px": 6.0, "max_depth_rel": 0.0, "tri_min_deg": 3.0, "tri_max_deg": 30.0, "mode": "keep"}
+    args = lambda: (order, {f: d.copy() for f, d in dep.items()}, ok, {f: ok[f].copy() for f in order},
+                    K, cams, None, (-4, -3, -2, -1, 1, 2, 3, 4), 75.0, 2)
+    off, _, t_off = edge_keeping_vote(*args(), False, log=lambda *a: None, min_parallax_deg=3.0,
+                                      min_support=2, fusion=dict(base, occlusion_veto=False))
+    z5_off = off[5][0]
+    mid = (slice(H // 3, 2 * H // 3), slice(W // 3, 2 * W // 3))
+    assert (z5_off[mid] > 0).mean() > 0.5, "veto off: the behind camp self-confirms and stays"
+    on, _, t_on = edge_keeping_vote(*args(), False, log=lambda *a: None, min_parallax_deg=3.0,
+                                    min_support=2, fusion=dict(base, occlusion_veto=True))
+    z5_on, z1_on = on[5][0], on[1][0]
+    assert (z5_on[mid] > 0).mean() < 0.3, "veto on: the copy behind the stronger surface leaves"
+    assert (z1_on[mid] > 0).mean() > 0.5, "the FRONT surface is never occluded and stays"
+    assert t_on["occlusion_veto"] > 0 and t_off.get("occlusion_veto", 0) == 0
+
+
 def test_the_camera_travels_with_the_cloud(tmp_path):
     """Written into the transaction (one row per keyframe); publish registers it as an epoch artifact."""
     import inspect

@@ -411,6 +411,13 @@ class CloudConfig:
                                 # cluster of qualified witness depths along the ray decides, a pixel whose own
                                 # camp loses is MOVED onto the winner, only a pixel with no cluster of
                                 # min_support_views dies.
+    fusion_repair: bool         # USER 2026-11-08 evening: a COLMAP-mode pixel short of min_support_views whose
+                                # witnesses' surfaces agree among themselves on its ray is published at THEIR
+                                # median instead of dropped (coverage of the GOOD kind, pending A6). OFF = the
+                                # validated recipe bit for bit.
+    fusion_occlusion_veto: bool # the Merrell duel (ICCV07, researched 2026-11-08): a pixel whose occluding
+                                # witnesses outnumber its confirming ones is behind a better-supported surface
+                                # (the hidden duplicate) and leaves. OFF = the validated recipe bit for bit.
     no_birth_without_parallax: bool   # USER 2026-11-08: a keyframe I1 made by ROTATION (no parallax) votes as a
                                       # witness but gives birth to no point — COLMAP registers such an image by
                                       # PnP and triangulates nothing from it
@@ -898,6 +905,8 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                         fusion_tri_min_deg=float(cl.get("fusion_tri_min_deg", 3.0)),
                         fusion_tri_max_deg=float(cl.get("fusion_tri_max_deg", 30.0)),
                         fusion_witness_max_m=float(cl.get("fusion_witness_max_m", 10.0)),
+                        fusion_repair=bool(cl.get("fusion_repair", False)),
+                        fusion_occlusion_veto=bool(cl.get("fusion_occlusion_veto", False)),
                         no_birth_without_parallax=bool(cl.get("no_birth_without_parallax", True)))
     if cloud.fusion_rule not in ("colmap", "tau", "adjust"):
         raise ValueError(f"precision.cloud.fusion_rule {cloud.fusion_rule!r}: 'colmap' | 'tau' | 'adjust'")
