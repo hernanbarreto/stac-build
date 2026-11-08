@@ -488,6 +488,8 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
     inner = {f: interior(passed[f]) for f in frames}
     tau = CC.measured_tau(dep, inner, K, c2w, frames, neighbors, tau_quantile)
     del inner
+    if fusion is not None and float(fusion.get("max_depth_rel", 0.0)) <= 0.0:
+        fusion = dict(fusion, max_depth_rel=float(tau))        # the session's measured τ, never a fixed number
     edge = {}
     n_mixed = n_snap = 0
     for i, f in enumerate(frames):
@@ -1244,6 +1246,9 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     vote_bars: dict = {}
     fusion = None
     if str(pcfg.cloud.fusion_rule) == "colmap":
+        # the depth tolerance: the session's OWN neighbour disagreement τ (measured in the vote) when the key is
+        # 0 — COLMAP's 1 % is for its PatchMatch maps, already geometrically consistent; Omega's neighbours
+        # disagree by τ (pccr 1.7 %), so 1 % refused honest pairs (39.5 % contradicted, coverage 37.9 %)
         fusion = {"max_reproj_px": float(pcfg.cloud.fusion_max_reproj_px),
                   "max_depth_rel": float(pcfg.cloud.fusion_max_depth_rel),
                   "tri_min_deg": float(pcfg.cloud.fusion_tri_min_deg),
