@@ -69,10 +69,10 @@ identity). A run without *Segment when done* ends here (plus the floor, §1.8).
 ### 1.6 GENRECON — manual only (`workers/genrecon_worker.py`, `server/tools/genrecon/`)
 Ordered from the Autosegment window with the viewer's confidence value (`pipeline.auto_genrecon: false`, USER
 2026-11-05; with the final pipeline's cloud he orders it at 0 %: *"ya todo viene muy filtrado"*). Mode `cloud`: every
-3.7 m chunk's active voxels (11.6 cm) are the published cloud's — a voxel is active from ONE point
-(`genrecon.min_points_per_voxel: 1`, USER 2026-11-08: every point is already confirmed by ≥ 10 views; the old 10
-points cut +8 / +19 / +12 % of the voxels of pccr / observatorio / zaragoza, 97–99 % of them next to the surface); the
-cubes sit on the
+3.7 m chunk's active voxels (11.6 cm) are the published cloud's — a voxel is active from FIVE points
+(`genrecon.min_points_per_voxel: 5`, USER 2026-11-08 *"vayamos con 5 puntos"*: against one point, 5 drops 4.5 / 9.9 /
+6.7 % of the voxels of pccr / observatorio / zaragoza and the old 10 dropped 7.2 / 16.1 / 10.9 %, 97–99 % of them at
+a surface's edge); the cubes sit on the
 segmentation's floor / ceiling levels; the keyframes are BAKED into the generated mesh's own UV atlas
 (`photo_albedo.py`) → the product `genrecon_photo` (USER 2026-10-17: *"la mejor que he visto hasta ahora"*). The
 generative variant is OFF (*"inventó cualquier cosa"*); modes `cloud+hull` / `cloud+objects` / `cloud+unseen` exist,

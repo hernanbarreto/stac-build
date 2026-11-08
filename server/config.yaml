@@ -121,15 +121,16 @@ genrecon:
                                      # inside GenRecon's training range (ScanNet++ rooms ×1.2, SAGE 2.85 m): 11.6 cm
                                      # voxels, ~7 mm surface. 0 = one layer floor to ceiling (station: 5.85 m → 18 cm,
                                      # 6.98 m with the tracks → 22 cm)
-  min_points_per_voxel: 1            # a voxel is active from this many points of the published cloud (mode cloud with
-                                     # presence_vote off: adapter.py plan_layout + --coords_min_points). USER 2026-11-08
-                                     # ("1. Ok"): 10 → 1 — every point of the final pipeline's cloud is already confirmed
-                                     # by ≥ 10 views ≥ 2° (F6), so one point proves the surface; the 10 was a guard against
-                                     # the flyers of the older clouds (the adapter already took 1 for vote-confirmed points).
-                                     # Measured on the published clouds: +7.8 % (pccr) / +19.3 % (observatorio) / +12.2 %
-                                     # (zaragoza) active voxels, 97–99 % of them next to a voxel of ≥ 10 points (they close
-                                     # edges and partial holes). Next, to test on his word: closing the gaps of 1–2 voxels
-                                     # no keyframe saw through; never the model's own presence (cloud+unseen: NO).
+  min_points_per_voxel: 5            # a voxel is active from this many points of the published cloud (mode cloud with
+                                     # presence_vote off: adapter.py plan_layout + --coords_min_points). USER 2026-11-08:
+                                     # "vayamos con 5 puntos … yo creo que va a andar bien" (10 → 1 → 5 the same night).
+                                     # Measured on the final pipeline's clouds against 1 point: 5 drops 4.5 % (pccr) /
+                                     # 9.9 % (observatorio) / 6.7 % (zaragoza) of the voxels, 10 drops 7.2 / 16.1 / 10.9 %
+                                     # — 97–99 % of those voxels border a surface (its edges, the sparse parts); 1 adds a
+                                     # few isolated voxels (22 / 152 / 188). On 2026-11-05 the vote's presence (1 point)
+                                     # with 2.85 m cubes made "espantosos" meshes — which of the two did it is unknown.
+                                     # Next, on his word: closing the gaps of 1–2 voxels no keyframe saw through; never
+                                     # the model's own presence (cloud+unseen: NO).
   # USER 2026-11-05 ("que decidan las fotos, no la cuenta de puntos … el límite es la nube"): every point is put to the
   # keyframes that frame it (tools/genrecon/presence.py: each keyframe's depth rebuilt from the points born in it); a
   # point stays when at least presence_min_views keyframes measure it and fewer see through it; a voxel is active when a
