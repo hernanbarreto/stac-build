@@ -86,6 +86,33 @@ def test_a_span_shorter_than_a_cube_is_one_layer_and_zero_keeps_genrecons_own():
     assert out["chunk_size_m"] == 3.7 and out["chunk_z_centers"] == L.stacked_centers(-0.1, 5.7, 3.7)
 
 
+def test_anchored_centers_one_base_on_the_support_level_and_layers_down_to_the_cloud():
+    cube = 3.7
+    zs = L.anchored_centers(0.0, -1.15, 5.661, cube)        # station: platform at 0, tracks 1.15 m below
+    bases = [z - cube / 2 for z in zs]
+    assert any(abs(b) < 1e-9 for b in bases)                # one base EXACTLY on the support level
+    assert min(bases) <= -1.15 + 1e-9                       # the cloud below is covered
+    assert max(zs) + cube / 2 >= 5.661 - 1e-9               # and the top is reached
+    for a, b in zip(zs, zs[1:]):
+        gap = b - a
+        assert gap <= cube * (1 - L.MIN_OVERLAP) + 1e-9     # at least a quarter of overlap
+        k = gap / (cube * L.ATOMIC)
+        assert abs(k - round(k)) < 1e-9                     # every stride on GenRecon's 1/16 lattice
+
+
+def test_anchored_centers_without_cloud_below_equal_the_stacked_layers():
+    assert L.anchored_centers(0.0, 0.02, 5.661, 3.7) == L.stacked_centers(0.0, 5.661, 3.7)
+    assert L.anchored_centers(-0.3, -0.3, 2.0, 3.7) == [-0.3 + 1.85]
+
+
+def test_stack_layers_takes_the_anchored_centers_verbatim():
+    lv = {"z_floor": -1.1, "z_top": 5.7}
+    zs = L.anchored_centers(0.0, -1.1, 5.7, 3.7)
+    out = L.stack_layers(dict(lv), 3.7, zs)
+    assert out["chunk_z_centers"] == zs and out["chunk_size_m"] == 3.7
+    assert L.stack_layers(dict(lv), 3.7)["chunk_z_centers"] == L.stacked_centers(-1.1, 5.7, 3.7)
+
+
 def test_the_top_is_the_clouds_highest_surface_above_the_ceiling():
     rng = np.random.default_rng(3)
     y, sup, ceil = _scene(rng)

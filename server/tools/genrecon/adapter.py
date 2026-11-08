@@ -108,13 +108,6 @@ cams_g = (np.asarray(s.poses, np.float64)[:, :3, 3] @ M[:3, :3].T) + M[:3, 3]
 # subsample must not decide them).
 P_g = xyz @ M[:3, :3].T + M[:3, 3]                         # the points kept, in GenRecon's frame
 np.save(WORK / "cloud_genrecon.npy", P_g.astype(np.float32))
-if CUBE_M > 0:
-    from presence import plan_layout
-    # the cubes stacked over the WHOLE cloud (USER 2026-11-05); a voxel active from MIN_PTS points — GenRecon's own
-    # presence rule, as always — unless the keyframes' vote already kept only confirmed points (then from one)
-    LAYOUT = plan_layout(P_g, CUBE_M, min_points=(1 if VOTE else MIN_PTS))
-    np.save(WORK / "active_cells.npy", LAYOUT.pop("cells"))
-    (WORK / "layout.json").write_text(json.dumps(LAYOUT, indent=1))
 import yaml
 from correction.floor import head_noun
 _cfg = yaml.safe_load(open("/workspace/stac-build/server/config.yaml"))
@@ -125,20 +118,39 @@ sup_idx = np.concatenate([_remap(i["globalIndices"]) for i in seg["instances"] i
 ceil_idx = [_remap(i["globalIndices"]) for i in seg["instances"] if head_noun(i["label"]) == "ceiling"]
 # the cube's base on the LOWEST level, of the support surfaces or of the whole cloud (genrecon_levels.py:
 # station's tracks, 1.15 m under the platform and no support noun, sat under every cube — USER 2026-11-02)
-from genrecon_levels import chunk_levels, stack_layers
+from genrecon_levels import anchored_centers, chunk_levels, stack_layers
 levels = chunk_levels(y_d, y_d[sup_idx], [y_d[g] for g in ceil_idx], bin_m=0.05, min_share=0.01)
-# USER 2026-11-05: "debe abarcar la totalidad de la nube independientemente de dónde esté la parte más baja y más alta …
-# no me importa dónde está ubicada ni cuánto mide": the cubes are stacked from the cloud's LOWEST point to its HIGHEST
-# and laid over its whole floor plan (xy_extent, the exact min/max — never a percentile of a subsample); a cube is kept
-# when it holds one active voxel (coords_min_points points in one voxel of its own grid; the patched chunker applies the
-# rule of reconstruct_scene._coords_from_points on the whole cloud). The levels found stay in the record.
 levels["floor_level"], levels["floor_level_source"] = levels["z_floor"], levels["source"]
-levels.update(z_floor=float(P_g[:, 2].min()), source="the whole cloud's lowest point (USER 2026-11-05)",
-              z_top=float(P_g[:, 2].max()),
+z_lo, z_hi = float(P_g[:, 2].min()), float(P_g[:, 2].max())
+levels.update(z_top=z_hi, coverage_z=[z_lo, z_hi],
               xy_extent=[float(P_g[:, 0].min()), float(P_g[:, 0].max()), float(P_g[:, 1].min()), float(P_g[:, 1].max())],
               coords_min_points=MIN_PTS, coords_resolution=32,     # GenRecon's shape SLat grid (11.6 cm at 3.7 m)
               confidence_threshold=CONF, points_kept=int(len(xyz)), points_published=int(n_all))
-levels = stack_layers(levels, CUBE_M)
+centers = None
+if CUBE_M > 0:
+    # USER 2026-11-08 ("grilla anclada en y = 0 … suelo sólido … nada más cambia"): one cube base sits EXACTLY on
+    # the lowest measured support level (z_floor as chunk_levels measured it — the model paints the floor at a
+    # cube's base, as it was trained), the layers rise as before and continue DOWN only where the cloud reaches
+    # lower, so the WHOLE cloud stays covered (USER 2026-11-05: "debe abarcar la totalidad de la nube … no me
+    # importa dónde está ubicada ni cuánto mide") over its whole floor plan (xy_extent, the exact min/max — never
+    # a percentile of a subsample). The support levels' columns are filled SOLID down to the lattice base
+    # (presence.plan_layout: "el suelo es sólido"), so no floor keeps air below it in any cube or layer.
+    anchor = float(levels["z_floor"])
+    support_z = [float(l) for l in (levels.get("support_levels") or [anchor])]
+    centers = anchored_centers(anchor, z_lo, z_hi, CUBE_M)
+    levels.update(z_anchor=anchor, anchor_source=levels["source"])
+    from presence import plan_layout
+    # a voxel active from MIN_PTS points — GenRecon's own presence rule, as always — unless the keyframes' vote
+    # already kept only confirmed points (then from one)
+    LAYOUT = plan_layout(P_g, CUBE_M, min_points=(1 if VOTE else MIN_PTS),
+                         z_centers=centers, support_levels=support_z, level_bin=0.05)
+    levels["ground_filled_voxels"] = LAYOUT["ground_filled"]
+    np.save(WORK / "active_cells.npy", LAYOUT.pop("cells"))
+    (WORK / "layout.json").write_text(json.dumps(LAYOUT, indent=1))
+else:
+    # GenRecon's own single floor-to-ceiling layer: full coverage keeps the 2026-11-05 rule unchanged
+    levels.update(z_floor=z_lo, source="the whole cloud's lowest point (USER 2026-11-05)")
+levels = stack_layers(levels, CUBE_M, centers)
 (WORK / "levels.json").write_text(json.dumps(levels, indent=2))
 # STAC 2026-10-17 (USER: "debería completar lo que no ve o no tenía puntos … las patas de una mesa … pero solo eso"):
 # the boxes of the segmented OBJECTS in GenRecon's frame — the model may complete only inside them; a support
@@ -176,6 +188,8 @@ print(f"objects.json: {len(objs)} object boxes of {len(seg['instances'])} instan
 print(f"levels: z_floor {levels['z_floor']:+.3f} ({levels['source']}), z_ceiling {levels['z_ceiling']:+.3f} ({levels['ceiling_source']}), "
       f"top {levels['z_top']:+.3f}; " + (f"{len(levels['chunk_z_centers'])} layer(s) of {CUBE_M} m cubes centred at "
       f"{[round(z, 3) for z in levels['chunk_z_centers']]}; " if 'chunk_z_centers' in levels else "one layer, floor to ceiling; ")
+      + (f"one base anchored at {levels['z_anchor']:+.3f}, {levels.get('ground_filled_voxels', 0):,} solid-ground "
+         f"voxels filled; " if 'z_anchor' in levels else "")
       + f"cloud_genrecon.npy {len(xyz):,} pts")
 np.save(WORK / "M_raw_to_genrecon.npy", M); np.save(WORK / "R_up.npy", R_UP)
 print(f"{n} images, {len(P):,} points; display transform {'identity' if np.allclose(R_f, np.eye(3)) and np.allclose(t_f, 0) else 'applied'}; "

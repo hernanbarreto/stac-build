@@ -12,7 +12,7 @@ z_floor = the LOWEST of both. Station 2026-11-02: the tracks lie 1.15 m under th
 (USER: "corregí eso"). With no level at all, the percentile 0.2 of the cloud (the vendor's own anchor).
 """
 import math
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -88,10 +88,33 @@ def stacked_centers(lo: float, hi: float, cube: float) -> List[float]:
     raise ValueError(f"cannot stack cubes of {cube} m over {dim} m")
 
 
-def stack_layers(levels: Dict, cube: float) -> Dict:
+def anchored_centers(floor: float, lo: float, hi: float, cube: float) -> List[float]:
+    """The centres of the cubes that cover [lo, hi] along the vertical with one base EXACTLY on ``floor``,
+    the lowest measured support level (USER 2026-11-08: the model was trained with the floor at the cube's
+    base and nothing below it — anchored there it paints the floor's top face only, never the slab's
+    underside). Layers rise from ``floor`` by stacked_centers' own rule, and where the cloud reaches lower
+    (lo < floor: station's tracks 1.15 m under the platform) layers continue DOWN — the fewest of them,
+    their stride a multiple of cube/16 leaving at least a quarter of overlap — so every cube's grid stays
+    on the one lattice ``plan_layout`` verifies. Full coverage of the cloud is kept (USER 2026-11-05)."""
+    if cube <= 0:
+        raise ValueError(f"cube side must be positive, got {cube}")
+    up = stacked_centers(floor, max(hi, floor), cube)
+    if lo >= floor:
+        return up
+    atomic, max_stride = ATOMIC * cube, cube * (1.0 - MIN_OVERLAP)
+    span = floor - lo
+    n = max(1, math.ceil(span / max_stride - 1e-9))        # the fewest layers below the anchor
+    k = max(1, math.ceil(span / n / atomic - 1e-9))        # their stride, on the 1/16 lattice
+    stride = k * atomic
+    return [floor + 0.5 * cube - j * stride for j in range(n, 0, -1)] + up
+
+
+def stack_layers(levels: Dict, cube: float, centers: Optional[Sequence[float]] = None) -> Dict:
     """levels.json with the stacked layout the patched chunker reads: ``chunk_size_m`` and ``chunk_z_centers``
-    (from the lowest level to the cloud's top). ``cube`` 0 = GenRecon's single layer, floor to ceiling."""
+    (``centers`` when given — the anchored layout, ONE source with layout.json — else stacked from the lowest
+    level to the cloud's top). ``cube`` 0 = GenRecon's single layer, floor to ceiling."""
     if cube and cube > 0:
         levels["chunk_size_m"] = float(cube)
-        levels["chunk_z_centers"] = stacked_centers(levels["z_floor"], levels["z_top"], float(cube))
+        levels["chunk_z_centers"] = ([float(c) for c in centers] if centers is not None
+                                     else stacked_centers(levels["z_floor"], levels["z_top"], float(cube)))
     return levels

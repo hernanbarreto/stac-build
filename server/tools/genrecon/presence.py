@@ -158,13 +158,29 @@ def axis_centers(lo: float, hi: float, cube: float) -> list:
     raise ValueError(f"cannot place cubes of {cube} m over {dim} m")
 
 
-def plan_layout(P: np.ndarray, cube: float, R: int = 32, log: Callable[[str], None] = print, min_points: int = 1) -> Dict:
-    """The cubes over the WHOLE of ``P`` (GenRecon's frame, z up) and its active voxels (module docstring)."""
+def plan_layout(P: np.ndarray, cube: float, R: int = 32, log: Callable[[str], None] = print, min_points: int = 1,
+                z_centers: Sequence[float] = None, support_levels: Sequence[float] = None,
+                level_bin: float = 0.05) -> Dict:
+    """The cubes over the WHOLE of ``P`` (GenRecon's frame, z up) and its active voxels (module docstring).
+
+    ``z_centers``: the vertical layout (genrecon_levels.anchored_centers — one base exactly on the lowest
+    support level), ONE source with levels.json; absent, the layers stand on the cloud's lowest point.
+    ``support_levels``: SOLID GROUND (USER 2026-11-08: "el suelo es sólido … rellena su columna hacia abajo
+    hasta la base del cubo"): every column holding an active voxel in the ``level_bin`` slice of a support
+    level (the floor, a ramp's landing, the platform — the levels the floor step measures) is filled active
+    from under that slice down to the base of the lattice, so no floor has air below it in ANY cube and the
+    model can only paint its top face — the condition it was trained on (below a floor there is earth)."""
     P = np.asarray(P, np.float64)
     lo, hi = P.min(0), P.max(0)
     pad = MIN_PADDING * cube         # GenRecon's own padding of the floor plan (inference/get_chunks._define_centers)
     xs, ys = axis_centers(lo[0] - pad, hi[0] + pad, cube), axis_centers(lo[1] - pad, hi[1] + pad, cube)
-    zs = stacked_centers(lo[2], hi[2], cube)
+    if z_centers is not None:
+        zs = [float(z) for z in z_centers]
+        if min(zs) - 0.5 * cube > lo[2] + 1e-9 or max(zs) + 0.5 * cube < hi[2] - 1e-9:
+            raise RuntimeError(f"z_centers {min(zs):.3f}..{max(zs):.3f} (cube {cube}) do not cover the "
+                               f"cloud's z {lo[2]:.3f}..{hi[2]:.3f} — the cubes must cover the WHOLE cloud")
+    else:
+        zs = stacked_centers(lo[2], hi[2], cube)
     v = cube / R
     axes = [np.asarray(xs), np.asarray(ys), np.asarray(zs)]
     origin = np.array([a.min() - 0.5 * cube for a in axes])
@@ -172,12 +188,34 @@ def plan_layout(P: np.ndarray, cube: float, R: int = 32, log: Callable[[str], No
     for a, o, c in zip(axes, origin, corners):
         if np.abs((a - 0.5 * cube - o) / v - c).max() > 1e-6:
             raise RuntimeError("the cubes' grids are not one lattice")
-    ijk = np.floor((P - origin) / v).astype(np.int64)
+    ijk = np.clip(np.floor((P - origin) / v).astype(np.int64), 0, None)   # the guard above bounds the clip to float noise
     dims = ijk.max(0) + 1
     key = (ijk[:, 0] * dims[1] + ijk[:, 1]) * dims[2] + ijk[:, 2]
     act, cnt = np.unique(key, return_counts=True)
     act = act[cnt >= int(min_points)]            # a voxel is active from min_points points (GenRecon's own rule: 10)
     cells = np.stack([act // (dims[1] * dims[2]), (act // dims[2]) % dims[1], act % dims[2]], 1)
+    # SOLID GROUND (docstring): columns of the support levels' active voxels filled down to the lattice base
+    n_ground = 0
+    if support_levels:
+        oz, fills = float(origin[2]), []
+        for L in sorted({float(l) for l in support_levels}):
+            k0 = int(math.floor((L - oz) / v + 1e-9))                 # the slice's first voxel layer
+            k1 = min(int(math.floor((L + level_bin - oz) / v + 1e-9)), int(dims[2]) - 1)
+            if k0 <= 0 or k0 >= int(dims[2]):                         # at the lattice base: nothing below it
+                continue
+            layer = cells[(cells[:, 2] >= k0) & (cells[:, 2] <= k1)]
+            if not len(layer):
+                continue
+            cols = np.unique(layer[:, :2], axis=0)
+            depth = np.arange(0, k0, dtype=np.int64)
+            fills.append(np.column_stack([np.repeat(cols, len(depth), axis=0), np.tile(depth, len(cols))]))
+        if fills:
+            before = len(cells)
+            cells = np.unique(np.concatenate([cells] + fills), axis=0)
+            n_ground = int(len(cells) - before)
+            log(f"[presence] solid ground (USER 2026-11-08): {n_ground:,} voxels filled under "
+                f"{len(set(float(l) for l in support_levels))} support level(s), down to the lattice base — "
+                f"no floor keeps air below it")
     # a cube is kept when its R³ cells hold an active one: the count by a summed-area table over the lattice
     G = np.zeros(tuple(int(d) + R + 1 for d in dims), np.int32)
     G[cells[:, 0] + 1, cells[:, 1] + 1, cells[:, 2] + 1] = 1
@@ -202,4 +240,5 @@ def plan_layout(P: np.ndarray, cube: float, R: int = 32, log: Callable[[str], No
     return {"chunk_size": float(cube), "R": int(R), "voxel": float(v), "origin": origin.tolist(),
             "centers": centers, "x_centers": [float(a) for a in xs], "y_centers": [float(a) for a in ys],
             "z_centers": [float(a) for a in zs], "extent": [lo.tolist(), hi.tolist()],
+            "ground_filled": int(n_ground), "support_levels": [float(l) for l in (support_levels or [])],
             "cells": cells.astype(np.int32)}

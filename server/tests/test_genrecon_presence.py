@@ -62,3 +62,50 @@ def test_the_cubes_cover_every_point_on_one_lattice():
     corners = (C - s / 2 - np.asarray(L["origin"])) / L["voxel"]
     assert np.allclose(corners, np.round(corners), atol=1e-6)
     assert (L["cells"] >= 0).all()
+    assert L["ground_filled"] == 0                           # no support levels given: nothing filled
+
+
+def _scene_with_a_platform(rng):
+    """A floor slab at z=0 (the anchor), a platform at z=1.2 with AIR under it, a duct at z=2.5 over
+    the floor (nothing supports it — its column must keep its air)."""
+    floor = np.column_stack([rng.uniform(0, 3, 20000), rng.uniform(0, 3, 20000), rng.uniform(0.0, 0.03, 20000)])
+    plat = np.column_stack([rng.uniform(4, 6, 8000), rng.uniform(0, 3, 8000), rng.uniform(1.2, 1.23, 8000)])
+    duct = np.column_stack([rng.uniform(1.4, 1.6, 600), rng.uniform(1.4, 1.6, 600), rng.uniform(2.5, 2.55, 600)])
+    return np.concatenate([floor, plat, duct]), floor, plat, duct
+
+
+def test_solid_ground_fills_under_every_support_level_and_only_there():
+    import sys
+    from pathlib import Path as _P
+    sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "tools" / "genrecon"))
+    from genrecon_levels import anchored_centers
+    rng = np.random.default_rng(7)
+    P, floor, plat, duct = _scene_with_a_platform(rng)
+    cube = 3.7
+    zs = anchored_centers(0.0, float(P[:, 2].min()), float(P[:, 2].max()), cube)
+    L = plan_layout(P, cube, z_centers=zs, support_levels=[0.0, 1.2], log=lambda m: None)
+    v, oz = L["voxel"], L["origin"][2]
+    cells = {tuple(c) for c in L["cells"]}
+    assert abs(oz - 0.0) < 1e-9                              # the lattice base IS the anchored floor
+    k_p = int(np.floor((1.2 - oz) / v + 1e-9))
+    plat_cols = {(i, j) for i, j, k in cells if k == k_p}
+    ijk = np.floor((plat - [L["origin"]][0]) / v).astype(np.int64)
+    assert {(int(a), int(b)) for a, b, _ in ijk} <= plat_cols            # every platform column is in the slice
+    missing = [(i, j, k) for i, j in plat_cols for k in range(k_p) if (i, j, k) not in cells]
+    assert missing == []                                     # SOLID GROUND: no air under the platform
+    assert L["ground_filled"] == len(plat_cols) * k_p        # exactly the fill, nothing else
+    dk = np.floor((duct - [L["origin"]][0]) / v).astype(np.int64)
+    k_d = int(dk[:, 2].min())
+    for i, j in {(int(a), int(b)) for a, b, _ in dk}:
+        air = [(i, j, k) for k in range(1, k_d) if (i, j, k) in cells]
+        assert air == []                                     # the duct's air stays (only the floor voxel below)
+
+
+def test_z_centers_that_do_not_cover_the_cloud_refuse():
+    P = np.random.default_rng(1).uniform([0, 0, 0], [2.0, 2.0, 5.0], size=(5000, 3))
+    try:
+        plan_layout(P, 3.7, z_centers=[1.85], log=lambda m: None)
+    except RuntimeError as e:
+        assert "do not cover" in str(e)
+    else:
+        raise AssertionError("a layout that leaves cloud outside every cube must refuse")
