@@ -6,8 +6,10 @@ every decision with its date, his words and the measurements behind it, 2026-08 
 
 ## 0 · ⭐⭐⭐⭐⭐ THE NEW CANDIDATE PIPELINE — USER 2026-11-08 (evening CDMX), pccr 3108, main 14a731a
 *"en pccr que acabo de ver está perfecto, sin duplicados, sin voladores, con excelente cobertura, sin agujeros, es decir
-todo OK, felicitaciones, anotalo, y si soporta el resto de las sesiones es el pipeline"*. Pending: zaragoza, pccr 2408,
-station (queued, cloud only, replace). What it is, over §1's pipeline:
+todo OK, felicitaciones, anotalo, y si soporta el resto de las sesiones es el pipeline"* — and: *"ninguna nube de las
+que he visto reúne todos los requisitos de perfección y completitud sin voladores que esta reúne"*: THE BEST CLOUD OF
+THE PROJECT TO DATE, the reference every later run is judged against. Pending: zaragoza, pccr 2408, station (queued,
+cloud only, replace). What it is, over §1's pipeline:
 - intake: AMB3R's completeness — `parallax.max_window_frames: 8`, fixed blocks of 8 video frames + densify, never a gap
   over 8 frames without a keyframe (`intake.parallax.stride_fill`, 31e0c52); every keyframe gives birth.
 - cubes: covis budget, cap 64, min 32 kf, 50 % overlap (5b6308e); the REVISITS as SLAM closures of the cube Sim(3)
