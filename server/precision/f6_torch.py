@@ -676,7 +676,14 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
         contra_fwd = contra_fwd + fwd.to(torch.int32)
         contra = contra + (fwd | front).to(torch.int32)
         cands.append(torch.where(ag, (dg - a) / torch.where(torch.abs(b) > 0, b, one), nan))
-        splats.append(torch.where(landed, s, nan))
+        sp_g = torch.where(landed, s, nan)
+        if fusion is not None and bool(fusion.get("repair")) and max_dist > 0:
+            # the repair hears no witness farther than witness_max_m from the surface it splats — the recorded
+            # failure of the uncapped repair (station's floor exploded with every witness at any distance voting)
+            Cg_ = _t(np.asarray(c2w[g], np.float64)[:3, 3])
+            far = torch.linalg.norm(C + s0[..., None] * ray - Cg_, dim=-1) > max_dist
+            sp_g = torch.where(far, nan, sp_g)
+        splats.append(sp_g)
         if qualify:
             Cg = _t(np.asarray(c2w[g], np.float64)[:3, 3])
             agree_q = agree_q + (ag & _parallax_ok(Xw, Cg)).to(torch.int32)
