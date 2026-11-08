@@ -635,7 +635,10 @@ def rotation_keyframes(session_dir: Path, frames: List[int], log: Callable = pri
     have = set(int(f) for f in frames)
     rot = set()
     for w in doc.get("windows") or []:
-        if not w.get("rotation"):
+        # the mark is ``closed_by == "rotation"`` (the window closed on the rotation quantum, not on parallax);
+        # ``rotation`` itself is a dict of margins present on EVERY window (pccr 2026-11-08: reading it as the
+        # mark made 294 of 313 keyframes birthless — coverage 1.2 %)
+        if str(w.get("closed_by", "")) != "rotation":
             continue
         k = w.get("keyframe")
         cands = []
