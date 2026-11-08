@@ -3476,6 +3476,51 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         scene.add(gridHelper)
         gridRef.current = gridHelper
 
+        // SKY + GROUND (USER 2026-11-08: "al plano y=0 agregale un verdecito oscuro como hacen algunos visores
+        // profesionales, y a lo que está por encima de y=0 una especie de cielo degradado"): a sky dome drawn first
+        // at the far plane (rotation-only view: it never moves with the camera), a gradient from the horizon to the
+        // zenith above y=0 and the dark ground colour below it; and a dark-green ground plane at y=0, translucent so
+        // the points under the floor (station's tracks) still show through, tinted.
+        const skyMat = new THREE.ShaderMaterial({
+            side: THREE.BackSide, depthWrite: false, depthTest: false, toneMapped: false,
+            uniforms: {
+                uZenith: { value: new THREE.Color('#1c3f6e') },
+                uHorizon: { value: new THREE.Color('#9dbcdc') },
+                uGround: { value: new THREE.Color('#14261a') },
+            },
+            vertexShader: `
+                varying vec3 vDir;
+                void main() {
+                    vDir = position;
+                    vec4 p = projectionMatrix * mat4(mat3(viewMatrix)) * vec4(position, 1.0);
+                    gl_Position = p.xyww;
+                }`,
+            fragmentShader: `
+                uniform vec3 uZenith; uniform vec3 uHorizon; uniform vec3 uGround;
+                varying vec3 vDir;
+                void main() {
+                    float h = normalize(vDir).y;
+                    vec3 c = h >= 0.0 ? mix(uHorizon, uZenith, pow(clamp(h, 0.0, 1.0), 0.55))
+                                      : mix(uHorizon * 0.35 + uGround * 0.65, uGround, clamp(-h * 8.0, 0.0, 1.0));
+                    gl_FragColor = vec4(c, 1.0);
+                }`,
+        })
+        const skyDome = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 24), skyMat)
+        skyDome.frustumCulled = false
+        skyDome.renderOrder = -1000
+        skyDome.userData.isEnvironment = true
+        scene.add(skyDome)
+        const groundMat = new THREE.MeshBasicMaterial({
+            color: new THREE.Color('#1e3a26'), transparent: true, opacity: 0.55, depthWrite: false,
+            side: THREE.DoubleSide, toneMapped: false,
+        })
+        const groundPlane = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), groundMat)
+        groundPlane.rotation.x = -Math.PI / 2
+        groundPlane.position.y = -0.002          // just under the grid: no z-fighting with its lines
+        groundPlane.renderOrder = -10
+        groundPlane.userData.isEnvironment = true
+        scene.add(groundPlane)
+
         // Axes helper with XYZ labels
         const axesGroup = new THREE.Group()
         const axesHelper = new THREE.AxesHelper(2)
@@ -4308,6 +4353,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             renderer.domElement.removeEventListener('webglcontextrestored', handleContextRestored)
             window.removeEventListener('keydown', onKeyDown)
             controls.dispose()
+            scene.remove(skyDome); skyDome.geometry.dispose(); skyMat.dispose()
+            scene.remove(groundPlane); groundPlane.geometry.dispose(); groundMat.dispose()
             renderer.dispose()
             geometry.dispose()
             material.dispose()
