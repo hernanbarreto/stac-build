@@ -22,7 +22,7 @@ DA3=/workspace/miniforge3/envs/da3/bin/python; GR=/workspace/miniforge3/envs/gen
 NODE=/workspace/miniforge3/envs/nodejs/bin/node; GLB=/workspace/stac-build/tools/glb
 export CUDA_HOME=/workspace/miniforge3/envs/genrecon OMP_NUM_THREADS=8 HF_HOME=${HF_HOME:-/workspace/hf_cache} HF_TOKEN=${HF_TOKEN:-$(cat ${HF_HOME:-/workspace/hf_cache}/token 2>/dev/null)}
 spec=$1; name=${2:-genrecon_photo}; raw=${name}_raw; minpts=${3:-10}; mode=${4:-cloud}; sid=${spec%%:*}; scan=${spec##*:}
-tag=cloud; [ "$mode" = "cloud+unseen" ] && tag=fill; [ "$mode" = "cloud+objects" ] && tag=obj; [ "$mode" = "cloud+hull" ] && tag=hull; [ "$mode" = "generative" ] && tag=gen
+tag=cloud; [ "$mode" = "cloud+hull+unseen" ] && tag=full; [ "$mode" = "cloud+unseen" ] && tag=fill; [ "$mode" = "cloud+objects" ] && tag=obj; [ "$mode" = "cloud+hull" ] && tag=hull; [ "$mode" = "generative" ] && tag=gen
 SES=/workspace/stac-build/server/projects/$sid/scans/$scan/src_default; W=$G/work/$sid; O=$G/work/${sid}_${tag}_out; OL=$G/work/${sid}_${tag}_out_light
 echo "=== SESSION $sid ($scan) $(date +%H:%M:%S)"
 tile_published() {
@@ -35,10 +35,13 @@ tile_published() {
 CONF=${GENRECON_CONF:-0}
 (cd /workspace/stac-build/server && $DA3 $T/adapter.py $SES $W 600000 ${GENRECON_CUBE_M:-0} $CONF $minpts) || { echo "adapter failed $sid"; exit 1; }
 EXTRA=""
-if [ "$mode" = "cloud+hull" ]; then
-  # completion presence from the SAM3 masks (hull_points.py); the generator runs in mode cloud with these extra points
+if [ "$mode" = "cloud+hull" ] || [ "$mode" = "cloud+hull+unseen" ]; then
+  # completion presence from the SAM3 masks (hull_points.py); the generator runs with these extra points — in mode
+  # cloud (cloud+hull), or with the unseen hook on top (cloud+hull+unseen, USER 2026-11-08 "¿podremos combinarlos?":
+  # the hull's voxels join the cloud's before the hook, which then fills the holes the cameras looked into)
   (cd /workspace/stac-build/server && $DA3 $T/hull_points.py $SES $W) || { echo "hull failed $sid"; exit 1; }
-  EXTRA="--coords_extra_points $W/hull_points.npy"; mode=cloud
+  EXTRA="--coords_extra_points $W/hull_points.npy"
+  [ "$mode" = "cloud+hull" ] && mode=cloud || mode=cloud+unseen
 fi
 COORDS="--coords_from_points $W/cloud_genrecon.npy --coords_min_points $minpts --coords_mode $mode $EXTRA"
 NOTE="sparse structure FROM THE CLOUD (coords_from_points, min $minpts pts/voxel, mode $mode, the points at confidence >= $CONF of the viewer's slider), cubes over the whole cloud"
