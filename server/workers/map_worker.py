@@ -2674,6 +2674,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
             pipe.send_log(f"[cubes] {len(_revisits)} revisit(s) handed to the cube graph as SLAM closures "
                           f"(F4's own rule over the structure probe's co-visibility)")
         _apply_chunked_metric(vggt_config, None, cubes=(_sets, _owner, _revisits))
+        # each side of a revisit bridge: F4's own loop window (no number of the fork's own)
+        vggt_config["Model"]["cube_bridge_half"] = (int(_tc.loop_half_window) if _revisits else 0)
         _persist_cube_plan(_cplan, _sets, _owner, _n_selected, _walk0, _res, _ctx)
         pipe.send_log(f"CUBES (I4): walk {_walk0:.1f} m → {_plan_layout_text({'chunk_sets': _sets})}, every two "
                       f"neighbour blocks one cube; ONE Omega pass per cube, ONE Sim(3) graph")
