@@ -328,10 +328,13 @@ def keyframe_files(frames_dir: Path) -> List[str]:
 DA3_PATCH = 14
 
 
-def da3_process_res(value, frames_dir: Path) -> int:
+def da3_process_res(value, frames_dir: Path, max_long_side: int = 0) -> int:
     """DA3's process_res: an int as configured, or ``native`` — the frames' long side
     rounded up to DA3's patch (USER 2026-09-28: maximum resolution; DA3 upper-bound-
-    resizes the long side, so this is the native frame and never an upsampling)."""
+    resizes the long side, so this is the native frame and never an upsampling). With
+    ``max_long_side`` the long side is first capped there (USER 2026-11-08: "hay que hacerlo a
+    resolución de 1024 y nunca ventanas tan chicas" — zaragoza's 1920 frames ran I3 at 1932 in
+    windows of 6 keyframes); a 1024 frame is processed exactly as a native 1024 one (1036)."""
     if value != "native":
         return int(value)
     import cv2
@@ -342,7 +345,10 @@ def da3_process_res(value, frames_dir: Path) -> int:
     img = cv2.imread(str(paths[0]), cv2.IMREAD_UNCHANGED)
     if img is None:
         raise WalkError(f"cannot read {paths[0]}")
-    return int(-(-max(img.shape[:2]) // DA3_PATCH) * DA3_PATCH)
+    long_side = max(img.shape[:2])
+    if int(max_long_side) > 0:
+        long_side = min(long_side, int(max_long_side))
+    return int(-(-long_side // DA3_PATCH) * DA3_PATCH)
 
 
 def da3_identity(python: str, model_id: str, log: Callable = print) -> Dict[str, Any]:
@@ -402,7 +408,7 @@ def planned_spec(session_dir: Path, gcfg, python: str, log: Callable = print, *,
     files = (sorted(files, key=lambda f: int("".join(ch for ch in Path(f).stem
                                                      if ch.isdigit())))
              if files else keyframe_files(frames_dir))
-    res = da3_process_res(gcfg.process_res, frames_dir)
+    res = da3_process_res(gcfg.process_res, frames_dir, int(gcfg.max_long_side))
     icfg, _rc_sha = intake_config_for(session_dir, run_cfg, log)
     import cv2
     _img = cv2.imread(str(frames_dir / files[0]), cv2.IMREAD_UNCHANGED)

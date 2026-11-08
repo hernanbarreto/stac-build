@@ -2417,6 +2417,10 @@ reconstruction:
                                         # frames that chain the windows' poses into ONE walk
       process_res: native               # USER 2026-09-28 maximum resolution: the frames' long side
                                         # rounded up to DA3's patch 14 (was 504, the model default)
+      max_long_side: 1024               # USER 2026-11-08 ("hay que hacerlo a resolución de 1024 y nunca ventanas tan
+                                        # chicas, van a salir rotas"): the long side capped at 1024 before "native" —
+                                        # zaragoza's 1920 frames ran I3 at 1932 in windows of 6 keyframes (102
+                                        # windows); a 1024 frame runs exactly as the 1024 sessions do (1036)
       model_id: depth-anything/DA3NESTED-GIANT-LARGE-1.1
       knot_walk_m: 2.0                  # BOUND: knot spacing of the continuous scale model
       heldout_confidence: 0.95          # declared confidence of the held-out comparisons (the
