@@ -263,16 +263,19 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], *, metres_per_unit: float,
     s0 = 0
     while True:
         lo = hi = centre[s0]
-        e, nv, D = s0, int(w[s0]), float(du[s0])
+        e, nv, D = s0, (int(nk[s0]) if cut == "covis" else int(w[s0])), float(du[s0])
         while e + 1 < U:
             nlo, nhi = np.minimum(lo, centre[e + 1]), np.maximum(hi, centre[e + 1])
             if cut == "covis":
-                fits = (D + float(du[e + 1]) <= H * (1.0 + 1e-9)) and nv + int(w[e + 1]) <= int(max_views)
+                # the cap counts KEYFRAMES: the turn frames ride along as Omega context (a turn brought 20–35
+                # of them and left room for 11–25 keyframes — the tiny cubes of station's turns, 2026-11-08)
+                fits = (D + float(du[e + 1]) <= H * (1.0 + 1e-9)) and nv + int(nk[e + 1]) <= int(max_views)
             else:
                 fits = not bool(np.any(nhi - nlo > size * (1.0 + 1e-9))) and nv + int(w[e + 1]) <= int(max_views)
             if not fits and e > s0:                       # at least two units: neighbours always share one
                 break
-            lo, hi, e, nv, D = nlo, nhi, e + 1, nv + int(w[e + 1]), D + float(du[e + 1])
+            lo, hi, e, D = nlo, nhi, e + 1, D + float(du[e + 1])
+            nv += int(nk[e]) if cut == "covis" else int(w[e])
             if not fits:
                 break
         spans.append((s0, e))
