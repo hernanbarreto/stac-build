@@ -107,7 +107,10 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   /sessions/<id>/scans`. A session lives in `server/projects/<id>/scans/<date>/src_<source>/`.
 - Storage (2026-10-05, *"que no almacene al pedo"*): a session keeps what the next reader needs
   (`certify.keep_aligned_chunks: false`, bridges without images, I3 windows deleted after the chain). Replace ON wipes
-  to frames + video; OFF resumes on stamps.
+  to frames + video; OFF resumes on stamps. Quota 450 GB (2026-11-08: ~358 used before pccr 2408; a ~2000-keyframe
+  session peaks at ~70–95 GB). Safe to free: the pip cache, `conda clean --tarballs --packages` (no env softlinks
+  into pkgs), `vendor/GenRecon/work` (every GenRecon run rmtree's and recreates its own dirs) — USER 2026-11-08
+  "ok, sin romper nada" / "los genrecon que se usaron a modo de pruebas eliminalos" (37 GB freed).
 - Envs (`/workspace/miniforge3/envs`): da3 (backend + core + PointDiT), mapanything (Omega, F4, F5), semantic (vLLM),
   amb3r (AMB3R-SLAM), genrecon, CloudComPy310, gs, nodejs, colmap (evaluation only). One HF cache: `HF_HOME=
   /workspace/hf_cache`. No paid external APIs; everything local.
