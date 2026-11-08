@@ -609,6 +609,14 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
         cos_narrow = float(np.cos(np.radians(float(fusion["tri_min_deg"]))))
         max_px = float(fusion["max_reproj_px"]); max_rel = float(fusion["max_depth_rel"])
         agree_q = torch.zeros_like(agree)
+        # ADJUST (USER 2026-11-08: "no es un filtro, es un ajuste … buscar la posición correcta"): every
+        # qualified witness contributes the depth ITS OWN surface puts on this ray — not tested against this
+        # pixel's depth — and the strongest consensus along the ray decides the position (strongest_consensus).
+        # A witness farther than ``witness_max_m`` from the surface it measured has no vote (USER: "tu voto no
+        # tiene peso porque estás a más de 10 m").
+        adjust = str(fusion.get("mode", "keep")) == "adjust"
+        max_dist = float(fusion.get("witness_max_m", 0.0))
+        cons = [torch.where(candt, z.to(torch.float64), nan.to(torch.float64))] if adjust else None
     if qualify:
         cos_max = float(np.cos(np.radians(float(min_parallax_deg))))
         agree_q = torch.zeros_like(agree)
@@ -649,6 +657,16 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
             band = (cs <= cos_narrow) & (cs >= cos_wide)
             ag = okb & band & (err_px <= max_px) & (torch.abs(e) <= max_rel) & (torch.abs(b) > 0)
             agree_q = agree_q + ag.to(torch.int32)
+            if adjust:
+                # the witness's surface as a depth on THIS ray (dg - a) / b — qualified by its own
+                # self-consistency (err_px), the triangulation band and the 10 m range, never by this
+                # pixel's depth: two displaced camps meet in ONE candidate list and the strongest wins
+                q = okb & band & (err_px <= max_px) & (torch.abs(b) > 0)
+                if max_dist > 0:
+                    q = q & (dg <= max_dist)
+                t_g = (dg - a) / torch.where(torch.abs(b) > 0, b, one)
+                cons.append(torch.where(q & (t_g > 0), t_g.to(torch.float64),
+                                        nan.to(torch.float64)))
         fwd = ok & (e < -tau)
         s = splat(depth[g], judge[g], K, c2w[g], w2c[f], (H, W))
         landed = torch.isfinite(s)
@@ -666,6 +684,8 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
     zmed = nanmedian0(torch.stack(cands))
     sp = torch.stack(splats) if splats else torch.zeros((0, H, W), dtype=torch.float64, device=z.device)
     out = {"z": z, "agree": agree, "contra": contra, "contra_fwd": contra_fwd, "zmed": zmed, "splats": sp}
+    if fusion is not None and str(fusion.get("mode", "keep")) == "adjust":
+        out["cons"] = torch.stack(cons)
     if qualify:
         out["agree_q"] = agree_q
         out["par_splat"] = (torch.stack(par_s) if par_s
@@ -674,6 +694,44 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
         out["agree_q"] = agree_q
         out["par_splat"] = torch.zeros((0, H, W), dtype=torch.bool, device=z.device)
     return out
+
+
+def strongest_consensus(C: torch.Tensor, tau: float, min_views: int):
+    """Per column of C [V, H, W] (the witnesses' depths on one ray, NaN = no vote; C[0] = the pixel's own
+    depth): the depth with the MOST votes within ± tau (relative) of it — the strongest cluster along the
+    ray — and that cluster's median and size. USER 2026-11-08: "un punto debe ser votado … si la falta de
+    consenso es entre vistas en el rango útil, elegir la posición más fuerte" — the vote finds the CORRECT
+    position ("no es un filtro, es un ajuste"): a pixel whose own camp loses is MOVED to the winner, and
+    only a pixel with no cluster of ``min_views`` dies. Deterministic: candidates sorted ascending, the
+    first maximal count wins (the nearest depth on ties).
+
+    Returns (z_cons [H, W] float64 — NaN where no cluster reaches ``min_views``, n [H, W] int32,
+    own_in [H, W] bool — the own depth lies inside the winning cluster)."""
+    V, H, W = C.shape
+    if V == 0:
+        z0 = torch.full((H, W), float("nan"), dtype=torch.float64, device=C.device)
+        return z0, torch.zeros((H, W), dtype=torch.int32, device=C.device), torch.zeros((H, W), dtype=torch.bool, device=C.device)
+    Cs = C.to(torch.float64).permute(1, 2, 0).reshape(-1, V)               # [P, V] rays as rows
+    inf = torch.full_like(Cs, float("inf"))
+    Cs = torch.where(torch.isfinite(Cs) & (Cs > 0), Cs, inf)
+    S, _ = torch.sort(Cs, dim=1)                                           # NaN/invalid → +inf, last
+    lo = torch.searchsorted(S, S * (1.0 - float(tau)))                     # first candidate ≥ c·(1−τ)
+    hi = torch.searchsorted(S, S * (1.0 + float(tau)), right=True)         # first candidate > c·(1+τ)
+    n = (hi - lo).where(torch.isfinite(S), torch.zeros_like(lo))           # votes within ±τ of each candidate
+    best = n.argmax(dim=1, keepdim=True)                                   # first maximal = nearest depth
+    n_best = n.gather(1, best).squeeze(1)
+    lo_b, hi_b = lo.gather(1, best).squeeze(1), hi.gather(1, best).squeeze(1)
+    mid = (lo_b + hi_b - 1) // 2                                           # median index of the winner's span
+    mid2 = (lo_b + hi_b) // 2
+    z1 = S.gather(1, mid.clamp(0, V - 1).unsqueeze(1)).squeeze(1)
+    z2 = S.gather(1, mid2.clamp(0, V - 1).unsqueeze(1)).squeeze(1)
+    z_cons = torch.where((hi_b - lo_b) % 2 == 1, z1, 0.5 * (z1 + z2))      # even span: mean of the two middles
+    ok = (n_best >= int(min_views)) & torch.isfinite(z_cons)
+    z_cons = torch.where(ok, z_cons, torch.full_like(z_cons, float("nan")))
+    own = C[0].reshape(-1).to(torch.float64)
+    own_in = ok & torch.isfinite(own) & (torch.abs(own - z_cons) <= float(tau) * z_cons)
+    return (z_cons.reshape(H, W), n_best.to(torch.int32).reshape(H, W).where(
+        ok.reshape(H, W), torch.zeros((H, W), dtype=torch.int32, device=C.device)), own_in.reshape(H, W))
 
 
 def agreeing_count(C: torch.Tensor, tau: float, Q: torch.Tensor) -> torch.Tensor:

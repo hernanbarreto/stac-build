@@ -404,6 +404,13 @@ class CloudConfig:
     fusion_max_depth_rel: float
     fusion_tri_min_deg: float
     fusion_tri_max_deg: float
+    fusion_witness_max_m: float # USER 2026-11-08 ("tu voto no tiene peso porque estás a más de 10 m, ponele
+                                # 10 m, no más que eso"): a witness farther than this from the surface it
+                                # measured has no vote in the ADJUST rule; "adjust" (fusion_rule) = the vote
+                                # finds the CORRECT position ("no es un filtro, es un ajuste"): the strongest
+                                # cluster of qualified witness depths along the ray decides, a pixel whose own
+                                # camp loses is MOVED onto the winner, only a pixel with no cluster of
+                                # min_support_views dies.
     no_birth_without_parallax: bool   # USER 2026-11-08: a keyframe I1 made by ROTATION (no parallax) votes as a
                                       # witness but gives birth to no point — COLMAP registers such an image by
                                       # PnP and triangulates nothing from it
@@ -890,9 +897,13 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                         fusion_max_depth_rel=float(cl.get("fusion_max_depth_rel", 0.01)),
                         fusion_tri_min_deg=float(cl.get("fusion_tri_min_deg", 3.0)),
                         fusion_tri_max_deg=float(cl.get("fusion_tri_max_deg", 30.0)),
+                        fusion_witness_max_m=float(cl.get("fusion_witness_max_m", 10.0)),
                         no_birth_without_parallax=bool(cl.get("no_birth_without_parallax", True)))
-    if cloud.fusion_rule not in ("colmap", "tau"):
-        raise ValueError(f"precision.cloud.fusion_rule {cloud.fusion_rule!r}: 'colmap' | 'tau'")
+    if cloud.fusion_rule not in ("colmap", "tau", "adjust"):
+        raise ValueError(f"precision.cloud.fusion_rule {cloud.fusion_rule!r}: 'colmap' | 'tau' | 'adjust'")
+    if not cloud.fusion_witness_max_m > 0:
+        raise ValueError(f"precision.cloud.fusion_witness_max_m {cloud.fusion_witness_max_m!r}: metres > 0 "
+                         f"(USER 2026-11-08: 'ponele 10 m, no más que eso')")
     cc = _sub(sec, "chunk_check", "")
     _gone(cc, "plane_min_inlier_frac", "chunk_check",
           "USER 2026-10-07 (docs/plan_determinismo.md point 140): no acceptance bar on the floor plane — "

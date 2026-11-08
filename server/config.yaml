@@ -2668,7 +2668,16 @@ reconstruction:
                                         #   nearer no view measured: a thin leg, a foreground edge —
                                         #   the surface behind would wear its colour). false = the
                                         #   floor alone decides, as before.
-      fusion_rule: colmap               # USER 2026-11-08 ("cómo se resuelve en fotogrametría dura de precisión"):
+      fusion_rule: adjust               # USER 2026-11-08 ("no es un filtro, es un AJUSTE — buscar la posición
+                                        # correcta de los puntos"): every qualified witness within
+                                        # fusion_witness_max_m puts the depth ITS surface measures on the ray —
+                                        # never tested against the pixel's own depth — and the STRONGEST cluster
+                                        # (± the session's τ) of ≥ min_support_views decides the position: a pixel
+                                        # whose own camp loses is MOVED onto the winner (the displaced wall copy
+                                        # collapses onto the wall: station 2026-11-08, seams 60/32/20 cm), only a
+                                        # pixel with no reachable consensus dies. The distance cap is what the old
+                                        # repair lacked (it exploded station's floor with every witness at any
+                                        # distance voting). "colmap" = keep-or-drop (no repair), the rule below:
                                         # COLMAP StereoFusion's rule — a witness confirms a pixel when the surface it
                                         # measured at the landed pixel, carried back into the keyframe, lands within
                                         # fusion_max_reproj_px of the pixel AND the depths differ ≤ fusion_max_depth_rel;
@@ -2683,6 +2692,9 @@ reconstruction:
                                         # 39.5 % contradicted, coverage 37.9 %). A positive value is used as is.
       fusion_tri_min_deg: 3.0           # COLMAP PatchMatch filter_min_triangulation_angle default ("stable")
       fusion_tri_max_deg: 30.0          # the wide end of the usual 10–30° source-view band (visibility-aware MVS)
+      fusion_witness_max_m: 10.0        # USER 2026-11-08 ("tu voto no tiene peso porque estás a más de 10 o 15 m,
+                                        # ponele 10 m, no más que eso"): a witness farther than this from the
+                                        # surface it measured has no vote in the ADJUST rule
       no_birth_without_parallax: true   # USER 2026-11-08: a keyframe I1 made by rotation votes, gives birth to nothing
       min_support_views: 5              # USER 2026-11-08 ("si colmap usa 5 por qué usamos 10"): COLMAP StereoFusion's
                                         # min_num_pixels — under the fusion rule every confirmation is strict (angle

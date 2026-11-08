@@ -92,6 +92,64 @@ def test_a_pixel_under_the_floor_is_rescued_with_the_surface_two_views_agree_on(
     assert np.array_equal(z1[keep], off[1][0][keep]) and np.array_equal(a1[keep], off[1][1][keep])
 
 
+def test_strongest_consensus_moves_the_loser_and_drops_the_orphan():
+    """USER 2026-11-08 ("no es un filtro, es un ajuste … elegir la posición más fuerte"): the strongest
+    cluster along the ray decides the position; the own camp losing is MOVED (own_in False); a ray with
+    no cluster of min_views dies; ties take the nearest depth (deterministic)."""
+    import torch
+    from precision.f6_torch import strongest_consensus
+    nan = float("nan")
+    # columns: [own, w1, w2, w3, w4] on a 1x5 image
+    C = torch.tensor([
+        [3.40, 3.00, 1.50, 3.00, nan],      # own
+        [3.00, 3.01, 3.00, 3.40, nan],      # w1
+        [3.01, 2.99, 3.01, 3.40, nan],      # w2
+        [2.99, 3.00, 2.99, nan,  nan],      # w3
+        [3.41, nan,  nan,  nan,  nan],      # w4
+    ], dtype=torch.float64).reshape(5, 1, 5)
+    z, n, own_in = strongest_consensus(C, tau=0.02, min_views=3)
+    z, n, own_in = z[0], n[0], own_in.reshape(-1)
+    assert abs(z[0] - 3.00) < 0.02 and n[0] == 3 and not own_in[0]      # own camp (3.4 x2) loses, MOVED
+    assert abs(z[1] - 3.00) < 0.02 and n[1] == 4 and own_in[1]          # own inside the winner
+    assert abs(z[2] - 3.00) < 0.02 and not own_in[2]                    # the flyer at 1.5 moved onto the wall
+    assert n[3] == 0 and torch.isnan(z[3])                              # 3.0 x1 + 3.4 x2: no cluster of 3
+    assert n[4] == 0 and torch.isnan(z[4])                              # nothing on the ray
+
+
+def test_the_adjust_vote_collapses_a_displaced_camp_and_the_distance_cap_silences_far_witnesses():
+    """USER 2026-11-08: two camps of keyframes put the same wall at 3.0 m (4 frames) and 3.4 m (2 frames) —
+    the displaced camp's pixels are MOVED onto the strong wall (one surface, no duplicate); with
+    witness_max_m below the wall's range no witness votes and the pixels die instead."""
+    rng = np.random.default_rng(3)
+    order = [0, 1, 2, 3, 4, 5]
+    cams = {}
+    for f in order:
+        c = np.eye(4); c[0, 3] = 0.3 * f                 # 0.3 m baseline: ~5.7° at 3 m, inside [3°, 30°]
+        cams[f] = c
+    jit = {f: (1.0 + 0.004 * rng.standard_normal((H, W))).astype(np.float32) for f in order}
+    dep = {f: (3.0 if f < 4 else 3.4) * jit[f] for f in order}
+    ok = {f: np.ones((H, W), bool) for f in order}
+    fusion = {"max_reproj_px": 6.0, "max_depth_rel": 0.0, "tri_min_deg": 3.0, "tri_max_deg": 30.0,
+              "mode": "adjust", "witness_max_m": 10.0}
+    args = lambda fu: (order, {f: d.copy() for f, d in dep.items()}, ok, {f: ok[f].copy() for f in order},
+                       K, cams, None, (-3, -2, -1, 1, 2, 3), 75.0, 2)
+    final, tau, tot = edge_keeping_vote(*args(fusion), False, log=lambda *a: None,
+                                        min_parallax_deg=3.0, min_support=3, fusion=dict(fusion))
+    z4 = final[4][0]
+    mid = z4[H // 3: 2 * H // 3, W // 3: 2 * W // 3]
+    # with only 3 same-camp witnesses and synthetic jitter ~τ, some rays miss a 3-cluster — the real maps
+    # carry dozens of witnesses; the semantics under test is the MOVE, not the synthetic survival rate
+    assert (mid > 0).mean() > 0.6, "the displaced keyframe keeps most pixels (adjust, not filter)"
+    assert abs(np.median(mid[mid > 0]) - 3.0) < 0.1, "…MOVED onto the strong wall at 3.0, not 3.4"
+    assert tot["repaired"] > 0, "moved pixels are counted"
+    z1 = final[1][0]
+    assert abs(np.median(z1[z1 > 0]) - 3.0) < 0.05, "the strong camp stays on its wall"
+    near = dict(fusion, witness_max_m=2.0)               # the wall is ~3 m away: nobody may vote
+    final2, _, tot2 = edge_keeping_vote(*args(near), False, log=lambda *a: None,
+                                        min_parallax_deg=3.0, min_support=3, fusion=near)
+    assert (final2[4][0] == 0).all(), "witnesses beyond witness_max_m have no vote (USER: 10 m, no más)"
+
+
 def test_the_camera_travels_with_the_cloud(tmp_path):
     """Written into the transaction (one row per keyframe); publish registers it as an epoch artifact."""
     import inspect

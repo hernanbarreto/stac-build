@@ -508,6 +508,34 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
         v = FT.two_sided_vote(i, frames, dep, passed, cand, K, c2w, w2c, neighbors, tau,
                               extra=extra.get(f, ()), min_parallax_deg=min_parallax_deg, fusion=fusion)
         candt = FT._t(cand, torch.bool)
+        if fusion is not None and str(fusion.get("mode", "keep")) == "adjust":
+            # ADJUST (USER 2026-11-08: "no es un filtro, es un ajuste … buscar la posición correcta de los
+            # puntos"): every qualified witness ≤ witness_max_m puts ITS surface's depth on this ray
+            # (two_sided_vote's ``cons``), the strongest cluster decides the position (strongest_consensus) —
+            # a pixel whose own camp loses is MOVED onto the winner (the displaced wall copy collapses onto
+            # the wall), and only a pixel with no cluster of ``min_support`` dies. The published depth is the
+            # winner's median; the support is the winner's size.
+            z_cons, n_cons, own_in = FT.strongest_consensus(v["cons"], float(tau), int(min_support))
+            keep = candt & (n_cons > 0)
+            if f in no_birth:
+                keep = torch.zeros_like(keep)
+            zero = torch.zeros_like(v["z"])
+            zmap = torch.where(keep, z_cons.to(v["z"].dtype), zero)
+            amap = torch.where(keep, n_cons, torch.zeros_like(n_cons))
+            moved = keep & ~own_in
+            pas = FT._t(passed[f], torch.bool) & candt
+            zmap_np = FT._np(zmap, np.float32); amap_np = FT._np(amap, np.int16)
+            final[f] = (zmap_np, amap_np)
+            tau_margins[f] = None
+            for k, n in (("valid", int(valid[f].sum())), ("edge", int(edge[f].sum())), ("kept", int(keep.sum())),
+                         ("contradicted", int((pas & ~keep).sum())), ("repaired", int(moved.sum())),
+                         ("admitted", 0), ("edge_below", 0),
+                         ("below_floor", int((valid[f] & ~passed[f]).sum())), ("rescued", 0),
+                         ("rescue_refused_nearer", 0), ("below_support", int((candt & ~keep).sum())),
+                         ("no_birth", int(candt.sum()) if f in no_birth else 0),
+                         ("out", int((zmap_np > 0).sum()))):
+                tot[k] = tot.get(k, 0) + n
+            continue
         if fusion is not None:
             # COLMAP's fusion rule (USER 2026-11-08): a pixel enters with ≥ min_support witnesses that CONFIRM it
             # (forward-backward reprojection ≤ max_reproj_px, depths within max_depth_rel, triangulation angle in
@@ -613,10 +641,19 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
         tot.update(min_support=int(min_support), no_birth_keyframes=int(len(no_birth)))   # numeric only (the report)
         if bars_out is not None:
             bars_out["fusion"] = dict(fusion)
-        log(f"{LOG_TAG} fusion rule: COLMAP — ≥ {int(min_support)} witnesses at [{fusion['tri_min_deg']:g}°, "
-            f"{fusion['tri_max_deg']:g}°] confirming within {fusion['max_reproj_px']:g} px and "
-            f"{fusion['max_depth_rel'] * 100:g} % of depth; no repair; {len(no_birth)} keyframe(s) without parallax "
-            f"give birth to nothing ({tot.get('no_birth', 0) / nv * 100:.1f} % of the valid pixels)")
+        if str(fusion.get("mode", "keep")) == "adjust":
+            log(f"{LOG_TAG} fusion rule: ADJUST (USER 2026-11-08 'no es un filtro, es un ajuste') — every "
+                f"qualified witness at [{fusion['tri_min_deg']:g}°, {fusion['tri_max_deg']:g}°] within "
+                f"{fusion.get('witness_max_m', 0):g} m puts its surface on the ray; the strongest cluster "
+                f"(± τ {float(tau) * 100:.2f} %) of ≥ {int(min_support)} views decides the position: "
+                f"{tot.get('repaired', 0):,} pixel(s) MOVED onto the winner ({tot.get('repaired', 0) / nv * 100:.1f} % "
+                f"of the valid), {tot.get('below_support', 0) / nv * 100:.1f} % with no consensus died; "
+                f"{len(no_birth)} keyframe(s) without parallax give birth to nothing")
+        else:
+            log(f"{LOG_TAG} fusion rule: COLMAP — ≥ {int(min_support)} witnesses at [{fusion['tri_min_deg']:g}°, "
+                f"{fusion['tri_max_deg']:g}°] confirming within {fusion['max_reproj_px']:g} px and "
+                f"{fusion['max_depth_rel'] * 100:g} % of depth; no repair; {len(no_birth)} keyframe(s) without "
+                f"parallax give birth to nothing ({tot.get('no_birth', 0) / nv * 100:.1f} % of the valid pixels)")
     return final, tau, tot
 
 
@@ -1245,14 +1282,17 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
         labels = labels_on_undistorted(labels, inp.maps)       # the masks live on the original frame
     vote_bars: dict = {}
     fusion = None
-    if str(pcfg.cloud.fusion_rule) == "colmap":
+    if str(pcfg.cloud.fusion_rule) in ("colmap", "adjust"):
         # the depth tolerance: the session's OWN neighbour disagreement τ (measured in the vote) when the key is
         # 0 — COLMAP's 1 % is for its PatchMatch maps, already geometrically consistent; Omega's neighbours
         # disagree by τ (pccr 1.7 %), so 1 % refused honest pairs (39.5 % contradicted, coverage 37.9 %)
         fusion = {"max_reproj_px": float(pcfg.cloud.fusion_max_reproj_px),
                   "max_depth_rel": float(pcfg.cloud.fusion_max_depth_rel),
                   "tri_min_deg": float(pcfg.cloud.fusion_tri_min_deg),
-                  "tri_max_deg": float(pcfg.cloud.fusion_tri_max_deg)}
+                  "tri_max_deg": float(pcfg.cloud.fusion_tri_max_deg),
+                  # ADJUST (USER 2026-11-08): the vote finds the position; witnesses beyond this range have none
+                  "mode": "adjust" if str(pcfg.cloud.fusion_rule) == "adjust" else "keep",
+                  "witness_max_m": float(pcfg.cloud.fusion_witness_max_m)}
     no_birth = rotation_keyframes(session_dir, frames, log) if bool(pcfg.cloud.no_birth_without_parallax) else set()
     voted, tau, vst = edge_keeping_vote(frames, dep, valid, passed, K, c2w_vote, labels,
                                         bc.neighbors, bc.tau_quantile, int(pcfg.cloud.repair_min_views),
