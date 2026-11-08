@@ -93,6 +93,14 @@ ERR0, FLIP_Y, FLIP_ROWS = best
 print(f"image convention: flip_y={FLIP_Y} flip_rows={FLIP_ROWS} (mesh depth vs cloud z-buffer median |Δ| {ERR0*100:.1f} cm on keyframe {fids[k0]})")
 if ERR0 > 0.25:        # a wrong frame disagrees by metres (bufferStop before the world-frame fix: 332 cm); a right one by centimetres
     raise SystemExit(f"bake failed: the mesh and the keyframes' poses are not in the same frame (median |Δ| {ERR0*100:.0f} cm)")
+# THE CERTIFIED CLOUD'S z-buffer per keyframe (min-filtered 5×5 as the hole audit): the judge of the faces below
+# (USER 2026-11-08, pccr: the mesh had a second floor 10 cm under the real one — the UNDERSIDE of the floor's voxel
+# slab, seen through holes of its top face; the cloud says the floor is 8 cm in front of it)
+CULL_UNSEEN = os.environ.get("STAC_CULL_UNSEEN", "1") == "1"
+CULL_TOL_M = float(os.environ.get("STAC_CULL_TOL_M", "0.058"))     # half of GenRecon's 11.6 cm voxel: the surface cannot be placed finer
+czb = torch.empty((len(fids), H, W), device=dev)
+for k in range(len(fids)):
+    czb[k] = -Fn.max_pool2d(-cloud_zbuf(k)[None, None], kernel_size=5, stride=1, padding=2)[0, 0]
 del cloud
 
 # the mesh's own depth per keyframe (min-filtered 3×3: no leak at silhouettes), in IMAGE row order
@@ -105,7 +113,34 @@ print(f"mesh depth rendered for {len(fids)} keyframes ({time.time()-t0:.0f} s)")
 # ── per part: rasterize the UV atlas, colour every covered texel from the views that see it ──────────────────────
 w2c_t = torch.from_numpy(w2c.astype(np.float32)).to(dev); K_t = torch.from_numpy(K.astype(np.float32)).to(dev); cam_t = torch.from_numpy(cam_pos.astype(np.float32)).to(dev)
 stats = []; new_textures = {}; UV_FLIP = None
+cull_tot = {"faces": 0, "kept": 0, "behind_cloud": 0, "unframed": 0}
 for pi, (pname, g, Vw) in enumerate(parts):
+    if CULL_UNSEEN and len(g.faces):
+        # A face stays when SOME keyframe frames its centroid where the certified cloud measured no surface in
+        # front of it (within CULL_TOL_M, or nothing measured there — the model's fill of a hole the camera looked
+        # into). A face every framing keyframe sees BEHIND the measured surface (a floor's underside, a wall's
+        # back) and a face no keyframe frames at all are generated volume no photo supports: removed.
+        Cf = torch.from_numpy(Vw[g.faces].mean(1).astype(np.float32)).to(dev)
+        framed_any = torch.zeros(len(Cf), dtype=torch.bool, device=dev); ok_any = torch.zeros_like(framed_any)
+        for v0 in range(0, len(fids), 16):
+            vb = list(range(v0, min(v0 + 16, len(fids))))
+            Rw = w2c_t[vb, :3, :3]; tw = w2c_t[vb, :3, 3]
+            Pc = torch.einsum("bij,nj->bni", Rw, Cf) + tw[:, None]; Z = Pc[..., 2]; zs = torch.where(Z > 0.1, Z, torch.ones_like(Z))
+            u = K_t[vb, 0, 0][:, None] * Pc[..., 0] / zs + K_t[vb, 0, 2][:, None]; vv = K_t[vb, 1, 1][:, None] * Pc[..., 1] / zs + K_t[vb, 1, 2][:, None]
+            inb = (Z > 0.1) & (u >= 0) & (u < W - 1) & (vv >= 0) & (vv < H - 1)
+            ui, vi = u.clamp(0, W - 1).long(), vv.clamp(0, H - 1).long()
+            zc = torch.stack([czb[k][vi[b], ui[b]] for b, k in enumerate(vb)])
+            ok = inb & ((zc > 1e5) | (Z <= zc + CULL_TOL_M))
+            framed_any |= inb.any(0); ok_any |= ok.any(0)
+        keep = ok_any
+        if not bool(keep.any()):
+            keep[0] = True                                # never an empty part in the GLB (one face stays, declared)
+        n_f = int(len(g.faces)); n_keep = int(keep.sum()); n_unframed = int((~framed_any & ~keep).sum())
+        cull_tot["faces"] += n_f; cull_tot["kept"] += n_keep; cull_tot["unframed"] += n_unframed
+        cull_tot["behind_cloud"] += n_f - n_keep - n_unframed
+        if n_keep < n_f:
+            g.update_faces(keep.cpu().numpy())            # the vertex arrays (and Vw) stay aligned: nothing removed
+            print(f"  part {pi:2d}: cull {n_f:,} → {n_keep:,} faces ({n_f - n_keep - n_unframed:,} behind the cloud, {n_unframed:,} unframed)")
     tex = g.visual.material.baseColorTexture; T = tex.size[0]; assert tex.size == (T, T) and T % 8 == 0, tex.size
     base = torch.from_numpy(np.asarray(tex.convert("RGB")).astype(np.float32)).to(dev)             # (T, T, 3) image rows
     uv = torch.from_numpy(np.asarray(g.visual.uv, np.float32)).to(dev); Vp = torch.from_numpy(Vw.astype(np.float32)).to(dev)
@@ -177,7 +212,11 @@ d = SES / "output" / "tsdf" / NAME; d.mkdir(parents=True, exist_ok=True)
 out = d / f"{NAME}.glb"; tmp = d / f"{NAME}.glb.part"; sc.export(str(tmp), file_type="glb"); os.replace(tmp, out)
 src_meta = json.loads((GLB.parent / (GLB.stem + ".meta.json")).read_text()) if (GLB.parent / (GLB.stem + ".meta.json")).exists() else {}
 seen_all = sum(s["seen_frac"] * s["texels"] for s in stats) / max(1, sum(s["texels"] for s in stats))
+if CULL_UNSEEN:
+    print(f"cull: {cull_tot['faces']:,} generated faces → {cull_tot['kept']:,} kept; {cull_tot['behind_cloud']:,} behind the certified "
+          f"cloud's surface in every framing keyframe (> {CULL_TOL_M*100:.1f} cm), {cull_tot['unframed']:,} framed by no keyframe — removed")
 meta = dict(src_meta); meta.update({"label": NAME, "glb_file": out.name, "textured": True, "method": src_meta.get("method", "genrecon"), "kind": "scene",
+    "cull_unseen": ({"tol_m": CULL_TOL_M, **cull_tot} if CULL_UNSEEN else None),
     "texture": "photo_albedo: base colour re-projected from the keyframes with the certified poses into GenRecon's own UV atlas "
                f"(mesh depth occlusion, cos⁴/z² weights, best {TOPK} blended, {PAD_PX} px padding); unseen texels keep the generated colour tone-matched; "
                "metallic-roughness texture, factors and UVs as generated",
