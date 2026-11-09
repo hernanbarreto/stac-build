@@ -51,6 +51,9 @@ _PLY_TYPES = {"float": "<f4", "float32": "<f4", "double": "<f8",
               "ushort": "<u2", "int": "<i4", "uint": "<u4"}
 
 
+LOAD_THREADS = 8                # BOUND (I/O): chunks loaded at once; the merge keeps the file order
+
+
 def _read_ply(path: str):
     with open(path, "rb") as f:
         if f.readline().strip() != b"ply":
@@ -144,11 +147,21 @@ def _voxel_keep(xyz_np: np.ndarray, voxel: float, *, tile_points: int,
         print(f"  [tiles] {n:,} pts → {n_tiles} slabs of whole {voxel * 1000:g} mm "
               f"cells (bound {int(tile_points):,} pts/slab)")
     out = []
+    # the slabs' members by ONE stable sort of the slab-axis cell (was a full scan of the cloud per slab: O(N × slabs));
+    # each slab's indices re-sorted ascending — exactly the set and order np.flatnonzero gave, so the same survivors
+    if n_tiles > 1:
+        order = np.argsort(ca, kind="stable")
+        ca_sorted = ca[order]
+        starts = np.searchsorted(ca_sorted, bounds[:-1], side="left")
+        ends = np.searchsorted(ca_sorted, bounds[1:], side="left")
+        del ca_sorted
+    t_v = time.time()
     for t in range(len(bounds) - 1):
-        sl = (np.arange(n, dtype=np.int64) if n_tiles == 1
-              else np.flatnonzero((ca >= bounds[t]) & (ca < bounds[t + 1])))
+        sl = (np.arange(n, dtype=np.int64) if n_tiles == 1 else np.sort(order[starts[t]:ends[t]]))
         if len(sl) == 0:
             continue
+        if n_tiles > 1:
+            print(f"  [voxel] slab {t + 1}/{len(bounds) - 1}: {len(sl):,} pts ({time.time() - t_v:.0f} s)", flush=True)
         cells = np.empty((len(sl), 3), np.int64)
         for a in range(3):
             cells[:, a] = (ca[sl] if a == ax else np.floor(
@@ -304,14 +317,24 @@ def main() -> int:
     t0 = time.time()
     print(f"[Step 1/6] Loading and merging {len(chunk_files)} chunks...")
     xyz_l, rgb_l = [], []
-    for i, p in enumerate(chunk_files):
+    # the chunks read on threads (file I/O and the copies release the GIL), merged in their FILE ORDER — the same
+    # arrays as one after the other (USER 2026-11-09: zaragoza's cleaning spent most of its time loading on one core)
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _load_chunk(p):
         v = _read_ply(p)
-        xyz_l.append(np.stack([v["x"], v["y"], v["z"]], 1))
         names = v.dtype.names
-        if all(c in names for c in ("red", "green", "blue")):
-            rgb_l.append(np.stack([v["red"], v["green"], v["blue"]], 1))
-        print(f"  [{i + 1}/{len(chunk_files)}] {os.path.basename(p)}: "
-              f"{len(v):,} pts")
+        xyz_c = np.stack([v["x"], v["y"], v["z"]], 1)
+        rgb_c = (np.stack([v["red"], v["green"], v["blue"]], 1)
+                 if all(c in names for c in ("red", "green", "blue")) else None)
+        return xyz_c, rgb_c
+    with ThreadPoolExecutor(max_workers=max(1, min(LOAD_THREADS, len(chunk_files)))) as ex:
+        for i, (p, (xyz_c, rgb_c)) in enumerate(zip(chunk_files, ex.map(_load_chunk, chunk_files))):
+            xyz_l.append(xyz_c)
+            if rgb_c is not None:
+                rgb_l.append(rgb_c)
+            print(f"  [{i + 1}/{len(chunk_files)}] {os.path.basename(p)}: "
+                  f"{len(xyz_c):,} pts ({time.time() - t0:.0f} s)", flush=True)
     xyz = np.concatenate(xyz_l).astype(np.float32)
     del xyz_l
     rgb = (np.concatenate(rgb_l).astype(np.uint8)
@@ -327,11 +350,15 @@ def main() -> int:
         t1 = time.time()
         cols = {k: [] for k in ("frame_global", "pixel_row", "pixel_col",
                                 "confidence")}
-        for of in origin_files:
+        def _load_origin(of):
             d = np.load(of)
-            for k in cols:
-                if k in d:
-                    cols[k].append(d[k])
+            return {k: d[k] for k in cols if k in d}       # the members decompress here (zlib releases the GIL)
+        with ThreadPoolExecutor(max_workers=max(1, min(LOAD_THREADS, len(origin_files)))) as ex:
+            for i, (of, rec) in enumerate(zip(origin_files, ex.map(_load_origin, origin_files))):
+                for k, v in rec.items():
+                    cols[k].append(v)
+                print(f"  [origins {i + 1}/{len(origin_files)}] {os.path.basename(of)} "
+                      f"({time.time() - t1:.0f} s)", flush=True)
         fg = np.concatenate(cols["frame_global"]).astype(np.int32)
         pr = np.concatenate(cols["pixel_row"]).astype(np.int16)
         pc = np.concatenate(cols["pixel_col"]).astype(np.int16)

@@ -9,21 +9,23 @@ def test_clean_releases_the_card_before_the_cleaner_runs(monkeypatch, tmp_path: 
     order = []
     cleaned = tmp_path / "cleaned_cloud.ply"
 
-    def fake_run(cmd, **kw):
-        order.append("cleaner")
-        cleaned.write_bytes(b"ply\n")
+    class FakePopen:
+        """The cleaner as a live stream (2026-11-09: its every line reaches the log as it is printed)."""
+        def __init__(self, cmd, **kw):
+            order.append("cleaner")
+            cleaned.write_bytes(b"ply\n")
+            self.stdout = iter(["[Step 3/6] Voxel spatial subsampling (1.0mm)...\n", "✅ done\n"])
 
-        class R:
-            returncode = 0
-            stdout = "✅ done\n"
-            stderr = ""
-        return R()
+        def wait(self):
+            return 0
 
+    logs = []
     monkeypatch.setattr(CC, "_release_card", lambda log: order.append("release"))
-    monkeypatch.setattr(CC.subprocess, "run", fake_run)
+    monkeypatch.setattr(CC.subprocess, "Popen", FakePopen)
     monkeypatch.setattr("precision.epoch0_cloud.clean_cmd", lambda cfg, tmp, out: ["true"])
-    CC.clean({}, tmp_path, cleaned, log=lambda m: None)
+    CC.clean({}, tmp_path, cleaned, log=logs.append)
     assert order == ["release", "cleaner"]
+    assert any("[Step 3/6]" in m for m in logs), "every cleaner line reaches the log, not only the ✅ ones"
 
 
 def test_release_is_a_no_op_without_an_initialised_card():

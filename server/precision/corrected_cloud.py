@@ -398,12 +398,23 @@ def clean(raw_cfg: dict, tmp: Path, cleaned: Path, log: Callable) -> None:
     from precision.epoch0_cloud import clean_cmd
     cmd = clean_cmd(raw_cfg, tmp, cleaned)
     _release_card(log)
-    r = subprocess.run(cmd, cwd=str(Path(__file__).resolve().parents[1]), capture_output=True, text=True)
-    for ln in r.stdout.splitlines():
-        if "✅" in ln or "❌" in ln:
-            log(f"{LOG_TAG} {ln.strip()}")
-    if r.returncode != 0 or not cleaned.exists():
-        raise CorrectedCloudError(f"the cleaner failed (rc {r.returncode}): {r.stderr[-1500:]}")
+    # every line of the cleaner reaches the log AS IT IS PRINTED (USER 2026-11-09: "no podemos pasar tantos pasos sin
+    # saber qué está pasando" — zaragoza's 45-min cleaning showed nothing: its output was held until the end)
+    import os as _os
+    from collections import deque
+    env = dict(_os.environ, PYTHONUNBUFFERED="1")
+    tail = deque(maxlen=60)
+    p = subprocess.Popen(cmd, cwd=str(Path(__file__).resolve().parents[1]), stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, text=True, env=env)
+    assert p.stdout is not None
+    for ln in p.stdout:
+        ln = ln.rstrip("\n")
+        tail.append(ln)
+        if ln.strip():
+            log(f"{LOG_TAG} [clean] {ln.strip()}")
+    rc = p.wait()
+    if rc != 0 or not cleaned.exists():
+        raise CorrectedCloudError(f"the cleaner failed (rc {rc}): " + "\n".join(tail)[-1500:])
 
 
 def witness(tmp: Path, cleaned: Path, frames: Dict[int, dict], raw_cfg: dict, log: Callable) -> dict:
