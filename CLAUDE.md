@@ -208,6 +208,13 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
      to show it.
   3. TICKETS — a simple tool to mark tickets anywhere in the project, as a review item or a non-conformity: "es para
      mostrar el concepto nomás".
+  4. LATER (USER 2026-11-09: "luego, ahora no, pero luego lo pasemos a map, no solo porque parece ser mejor sino más que
+     nada por la licencia, y nosotros ya tenemos map"): replace DA3 by MapAnything (its version with a commercially
+     usable licence — DA3's licence is unresolved) as the pipeline's METRIC source — the focal probe (K and AMB3R's
+     metre), I3's windows, Omega's scale_align, the cubes' anchors, F2's gauge. Evidence so far: KITScenes (LiDAR,
+     outdoor, 0–100 m) AbsRel MapAnything 14.9 % / δ1 83 % vs DA3 27.8 % / 49 %; GeoReader (DA3NESTED-GIANT-LARGE-1.1,
+     no scale alignment) 5.9–8.8 % on ScanNet / ScanNet++ / ARKitScenes; his eye: zaragoza always too BIG, pccr 3108
+     too SMALL (a per-scene DA3 metre bias). Decide the source by measuring our sessions against known real dimensions.
   He expects GenRecon may need a few knobs for the right mesh ("es más rápido y es la última etapa"); after that the work
   moves to fronts other than the cloud.
 - The pipeline's and the general lists: `docs/pipeline_final.md` §4 — capture distance (when he says), the weighted
