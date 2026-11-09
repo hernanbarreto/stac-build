@@ -1549,13 +1549,15 @@ poisson:
 #   "gaus_slam_hybrid"  → GauS-SLAM with LiDAR-calibrated DA3 + ARKit
 #   "nerfstudio"        → neus-facto SDF mesh via nerfstudio
 reconstruction:
-  view_range_m: 10.0                     # THE RANGE of every view (USER 2026-11-09: "ningún KF debe aportar puntos
+  view_range_m: 15.0                     # THE RANGE of every view (USER 2026-11-09: "ningún KF debe aportar puntos
                                          # más allá de los 10 m respecto de su posición … esos puntos tampoco deben
                                          # ser considerados en etapas anteriores, de cierres ni de paridades, ni de
                                          # nada … los 10 m es una variable, la misma para todas"): a point farther
                                          # than this from the camera that measured it is born by no keyframe (F6) and
                                          # weighs in no fit, pairing, scale, closure, co-visibility or statistic of any
-                                         # stage (server/view_range.py — every stage reads it there)
+                                         # stage (server/view_range.py — every stage reads it there). 15 m (USER 2026-11-09: "lo
+                                         # dejamos en 15 m y vemos cómo se comporta"; zaragoza's map beyond
+                                         # 10 / 12 / 15 / 20 m: 29.3 / 17.0 / 6.7 / 2.7 %)
   backend: "vggtomega_pgsr"             # RESTORED 2026-08-19 (user: "volvamos al 11/08"): the
                                         # known-good era. DA3-streaming cloud was tried 08-19 and
                                         # judged worse than VGGT ("ni cerca"). (prev da3 A/B: single
