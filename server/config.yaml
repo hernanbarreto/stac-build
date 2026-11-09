@@ -3033,9 +3033,10 @@ postprocessing:
 
   # Statistical Outlier Removal
   sor_knn: 8                           # neighbors (lower = keeps isolated objects)
-  sor_sigma: 6.0                       # std multiplier (higher = keeps more points). USER 2026-11-08: "el sor lo
-                                       # mismo, bajale a la exigencia" — doubled from 3.0 (the hole suspect eating
-                                       # thin detail: cables, pipe edges); his eye judges the next cloud
+  sor_sigma: 3.0                       # std multiplier (higher = keeps more points). Back to 3.0 (USER 2026-11-09:
+                                       # "el filtro a 1 mm y el SOR aflojado no dejan más geometría, sino más puntos
+                                       # que no aportan geometría … volver al esquema anterior de filtrado 5 mm y el
+                                       # SOR un poco más fuerte"); 6.0 since 2026-11-08 had added no detail
   # BOUND — the SOR's isolation reach, max(sor_reach_voxels × voxel_size,
   # sor_reach_min_m): the rule the cleaning always had (the 27-cell box of
   # 3 voxels, ≥ 1 cm), declared here since 2026-09-28. A point with NO
@@ -3051,8 +3052,8 @@ postprocessing:
   noise_sigma: 2.0
 
   # Voxel subsampling
-  voxel_size: 0.001                    # 1 mm cell (USER 2026-11-08: "bajale al filtro de voxel de 5mm a 1mm" —
-                                       # the 5 mm pick swept 80 % of the vote's points, pccr 72.8 M → 14.1 M)
+  voxel_size: 0.005                    # 5 mm cell — back from 1 mm (USER 2026-11-09, zaragoza / pccr 3108: the 1 mm
+                                       # cell kept more points, not more geometry: a heavier cloud, no added detail)
   max_points: 0                        # 0 = unlimited
 
 
