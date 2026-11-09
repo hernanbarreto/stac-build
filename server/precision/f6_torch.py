@@ -617,6 +617,14 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
         adjust = str(fusion.get("mode", "keep")) == "adjust"
         max_dist = float(fusion.get("witness_max_m", 0.0))
         cons = [torch.where(candt, z.to(torch.float64), nan.to(torch.float64))] if adjust else None
+        # THE RANGE (USER 2026-11-09: "nadie debe aportar puntos a más de 10m de distancia" / "si están a más de
+        # 10m ya no votan aunque lo vean"): a pixel farther than witness_max_m from its own camera is born by
+        # nobody (``in_range``), and a witness farther than that from the point neither confirms it, nor sees
+        # through it, nor occludes it. ``thru_q``: the witnesses in range and in the triangulation band whose
+        # surface lies BEHIND the point beyond max_depth_rel — they see through it (the majority's other side).
+        in_range = ((torch.linalg.norm(Xw - C, dim=-1) <= max_dist) if max_dist > 0
+                    else torch.ones_like(candt))
+        thru_q = torch.zeros_like(agree)
     if qualify:
         cos_max = float(np.cos(np.radians(float(min_parallax_deg))))
         agree_q = torch.zeros_like(agree)
@@ -655,8 +663,11 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
             a_ = C - Xw; b_ = Cg - Xw
             cs = (a_ * b_).sum(-1) / (torch.linalg.norm(a_, dim=-1) * torch.linalg.norm(b_, dim=-1)).clamp_min(1e-300)
             band = (cs <= cos_narrow) & (cs >= cos_wide)
-            ag = okb & band & (err_px <= max_px) & (torch.abs(e) <= max_rel) & (torch.abs(b) > 0)
+            near = ((torch.linalg.norm(Xw - Cg, dim=-1) <= max_dist) if max_dist > 0
+                    else torch.ones_like(okb))
+            ag = okb & band & near & (err_px <= max_px) & (torch.abs(e) <= max_rel) & (torch.abs(b) > 0)
             agree_q = agree_q + ag.to(torch.int32)
+            thru_q = thru_q + (ok & band & near & (e < -max_rel)).to(torch.int32)
             if adjust:
                 # the witness's surface as a depth on THIS ray (dg - a) / b — qualified by its own
                 # self-consistency (err_px), the triangulation band and the 10 m range, never by this
@@ -672,6 +683,11 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
         landed = torch.isfinite(s)
         s0 = torch.where(landed, s, zero)
         front = landed & (z - s0 > tau * s0)
+        if fusion is not None and max_dist > 0:
+            # out of range, no voice in the veto either: the point beyond the witness's reach, or the surface
+            # the witness measured in front of it
+            fwd = fwd & near
+            front = front & (torch.linalg.norm(C + s0[..., None] * ray - Cg, dim=-1) <= max_dist)
         agree = agree + ag.to(torch.int32)
         contra_fwd = contra_fwd + fwd.to(torch.int32)
         contra = contra + (fwd | front).to(torch.int32)
@@ -700,6 +716,9 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
     elif fusion is not None:
         out["agree_q"] = agree_q
         out["par_splat"] = torch.zeros((0, H, W), dtype=torch.bool, device=z.device)
+    if fusion is not None:
+        out["thru_q"] = thru_q
+        out["in_range"] = in_range
     return out
 
 

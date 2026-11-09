@@ -2709,8 +2709,19 @@ reconstruction:
       fusion_tri_min_deg: 3.0           # COLMAP PatchMatch filter_min_triangulation_angle default ("stable")
       fusion_tri_max_deg: 30.0          # the wide end of the usual 10–30° source-view band (visibility-aware MVS)
       fusion_witness_max_m: 10.0        # USER 2026-11-08 ("tu voto no tiene peso porque estás a más de 10 o 15 m,
-                                        # ponele 10 m, no más que eso"): a witness farther than this from the
-                                        # surface it measured has no vote in the ADJUST rule
+                                        # ponele 10 m, no más que eso") and 2026-11-09 ("nadie debe aportar puntos a
+                                        # más de 10m de distancia"): THE RANGE of every view — no keyframe gives birth
+                                        # to a point farther than this from its camera, no witness farther than this
+                                        # from the point confirms, sees through or occludes it (zaragoza 2026-11-09:
+                                        # 11.7 % of its kept pixels stood on confirmations from beyond 10 m — the
+                                        # start of the walk's copies at 10.5 m; pccr 3108: 0 %)
+      fusion_majority: true             # ON (USER 2026-11-09: "si tenemos muchas vistas del mismo punto 5 puede
+                                        # significar poco, pero si tiene pocas vistas puede significar mucho … sí,
+                                        # ok a todo"): a pixel enters only when the witnesses in range that CONFIRM
+                                        # it outnumber those in range and in the band that see THROUGH it (their
+                                        # surface behind it beyond the depth tolerance). Census 2026-11-09: pccr
+                                        # 3108's kept pixels — a median 90 % of the views that can test them
+                                        # confirm, 94.1 % pass; zaragoza — 63 %, 74.6 % pass (its doubles/floaters)
       fusion_repair: false              # OFF (USER 2026-11-09: "quitemos la reparación, y esos píxeles hay que quitarlos, no repararlos" — zaragoza: 160 M repaired pixels kept their BIRTH colour at the moved depth: the hanging yellow object painted on the wheels, shadows as black stains, floaters). Was ON 2026-11-08. USER 2026-11-08 evening ("lo que se le puede agregar a F6 es el ajuste …
                                         # vamos a volver a [la receta validada] + las dos mejoras"): a COLMAP-mode
                                         # pixel SHORT of min_support_views whose witnesses' surfaces agree among

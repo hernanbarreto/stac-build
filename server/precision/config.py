@@ -407,8 +407,11 @@ class CloudConfig:
     fusion_tri_min_deg: float
     fusion_tri_max_deg: float
     fusion_witness_max_m: float # USER 2026-11-08 ("tu voto no tiene peso porque estás a más de 10 m, ponele
-                                # 10 m, no más que eso"): a witness farther than this from the surface it
-                                # measured has no vote in the ADJUST rule; "adjust" (fusion_rule) = the vote
+                                # 10 m, no más que eso") and 2026-11-09 ("nadie debe aportar puntos a más de 10m
+                                # de distancia"): THE RANGE of every view under the fusion rules — no keyframe
+                                # gives birth to a point farther than this from its camera, and no witness
+                                # farther than this from the point confirms, sees through or occludes it;
+                                # "adjust" (fusion_rule) = the vote
                                 # finds the CORRECT position ("no es un filtro, es un ajuste"): the strongest
                                 # cluster of qualified witness depths along the ray decides, a pixel whose own
                                 # camp loses is MOVED onto the winner, only a pixel with no cluster of
@@ -420,6 +423,9 @@ class CloudConfig:
     fusion_occlusion_veto: bool # the Merrell duel (ICCV07, researched 2026-11-08): a pixel whose occluding
                                 # witnesses outnumber its confirming ones is behind a better-supported surface
                                 # (the hidden duplicate) and leaves. OFF = the validated recipe bit for bit.
+    fusion_majority: bool       # USER 2026-11-09 ("5 puede significar poco … cuál es la verdadera relación"): a
+                                # COLMAP-mode pixel enters only when its confirming witnesses (in range) outnumber
+                                # the witnesses in range and in the band that see THROUGH it
     no_birth_without_parallax: bool   # USER 2026-11-08: a keyframe I1 made by ROTATION (no parallax) votes as a
                                       # witness but gives birth to no point — COLMAP registers such an image by
                                       # PnP and triangulates nothing from it
@@ -910,6 +916,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                         fusion_witness_max_m=float(cl.get("fusion_witness_max_m", 10.0)),
                         fusion_repair=bool(cl.get("fusion_repair", False)),
                         fusion_occlusion_veto=bool(cl.get("fusion_occlusion_veto", False)),
+                        fusion_majority=bool(cl.get("fusion_majority", False)),
                         no_birth_without_parallax=bool(cl.get("no_birth_without_parallax", True)))
     if cloud.fusion_rule not in ("colmap", "tau", "adjust"):
         raise ValueError(f"precision.cloud.fusion_rule {cloud.fusion_rule!r}: 'colmap' | 'tau' | 'adjust'")

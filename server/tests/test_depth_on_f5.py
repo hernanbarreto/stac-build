@@ -209,6 +209,72 @@ def test_fusion_occlusion_veto_removes_the_copy_behind_a_stronger_surface():
     assert t_on["occlusion_veto"] > 0 and t_off.get("occlusion_veto", 0) == 0
 
 
+def test_the_range_births_nothing_beyond_it_and_silences_far_witnesses():
+    """USER 2026-11-09 ("nadie debe aportar puntos a más de 10m de distancia" / "si están a más de 10m ya no votan
+    aunque lo vean"): a wall 3 m away is kept with a range of 10 m; with a range of 2 m no keyframe gives birth
+    to it (counted as beyond_range) and no witness confirms it."""
+    rng = np.random.default_rng(4)
+    order = [0, 1, 2, 3, 4, 5]
+    cams = {}
+    for f in order:
+        c = np.eye(4); c[0, 3] = 0.3 * f
+        cams[f] = c
+    jit = {f: (1.0 + 0.003 * rng.standard_normal((H, W))).astype(np.float32) for f in order}
+    dep = {f: 3.0 * jit[f] for f in order}
+    ok = {f: np.ones((H, W), bool) for f in order}
+    base = {"max_reproj_px": 6.0, "max_depth_rel": 0.0, "tri_min_deg": 3.0, "tri_max_deg": 30.0, "mode": "keep"}
+    args = lambda: (order, {f: d.copy() for f, d in dep.items()}, ok, {f: ok[f].copy() for f in order},
+                    K, cams, None, (-3, -2, -1, 1, 2, 3), 75.0, 2)
+    mid = (slice(H // 3, 2 * H // 3), slice(W // 3, 2 * W // 3))
+    far, _, t_far = edge_keeping_vote(*args(), False, log=lambda *a: None, min_parallax_deg=3.0, min_support=2,
+                                      fusion=dict(base, witness_max_m=10.0))
+    assert (far[2][0][mid] > 0).mean() > 0.5 and t_far["beyond_range"] == 0, "3 m inside a 10 m range: kept"
+    short, _, t_short = edge_keeping_vote(*args(), False, log=lambda *a: None, min_parallax_deg=3.0,
+                                          min_support=2, fusion=dict(base, witness_max_m=2.0))
+    assert all((short[f][0] == 0).all() for f in order), "beyond the range nobody gives birth"
+    assert t_short["beyond_range"] > 0 and t_short["kept"] == 0
+    import torch
+    from precision import f6_torch as FT
+    d = {f: dd.copy() for f, dd in dep.items()}
+    w2c = {f: np.linalg.inv(cams[f]) for f in order}
+    v = FT.two_sided_vote(2, order, d, ok, np.ones((H, W), bool), K, cams, w2c, (-2, -1, 1, 2), 0.01,
+                          fusion=dict(base, max_depth_rel=0.01, witness_max_m=2.0))
+    assert int(v["agree_q"].sum()) == 0 and int(v["thru_q"].sum()) == 0, "no witness beyond the range votes"
+    assert not bool(v["in_range"].any())
+
+
+def test_the_majority_drops_the_point_more_witnesses_see_through():
+    """USER 2026-11-09 ("si tenemos muchas vistas del mismo punto 5 puede significar poco, pero si tiene pocas vistas
+    puede significar mucho"): a floater 2 m away confirmed by its own two neighbours but seen THROUGH by the four
+    witnesses that measure the wall behind it at 3 m — with the majority ON it leaves; OFF (the recipe before) it
+    stays on its two confirmations; the wall itself is never touched."""
+    rng = np.random.default_rng(6)
+    order = [0, 1, 2, 3, 4, 5, 6]
+    cams = {}
+    for f in order:
+        c = np.eye(4); c[0, 3] = 0.3 * f
+        cams[f] = c
+    jit = {f: (1.0 + 0.003 * rng.standard_normal((H, W))).astype(np.float32) for f in order}
+    dep = {f: 3.0 * jit[f] for f in order}
+    for f in (2, 3, 4):                                   # the floater's camp: three keyframes put a patch at 2 m
+        dep[f][20:40, 20:60] = 2.0 * jit[f][20:40, 20:60]
+    ok = {f: np.ones((H, W), bool) for f in order}
+    base = {"max_reproj_px": 6.0, "max_depth_rel": 0.01, "tri_min_deg": 3.0, "tri_max_deg": 30.0, "mode": "keep",
+            "witness_max_m": 10.0}
+    args = lambda: (order, {f: d.copy() for f, d in dep.items()}, ok, {f: ok[f].copy() for f in order},
+                    K, cams, None, (-3, -2, -1, 1, 2, 3), 75.0, 2)
+    patch = (slice(25, 35), slice(35, 45))                # ±1 land inside their own patch, ±2/±3 on the wall
+    wall = (slice(5, 12), slice(10, 70))
+    off, _, t_off = edge_keeping_vote(*args(), False, log=lambda *a: None, min_parallax_deg=3.0, min_support=2,
+                                      fusion=dict(base, majority=False))
+    assert (off[3][0][patch] > 0).mean() > 0.5, "majority OFF: the floater self-confirms with its two neighbours"
+    on, _, t_on = edge_keeping_vote(*args(), False, log=lambda *a: None, min_parallax_deg=3.0, min_support=2,
+                                    fusion=dict(base, majority=True))
+    assert (on[3][0][patch] > 0).mean() < 0.2, "majority ON: seen through by more than confirm it — it leaves"
+    assert t_on["minority"] > 0 and t_off["minority"] == 0
+    assert (on[3][0][wall] > 0).mean() > 0.5, "the wall around it stays"
+
+
 def test_the_camera_travels_with_the_cloud(tmp_path):
     """Written into the transaction (one row per keyframe); publish registers it as an epoch artifact."""
     import inspect

@@ -516,7 +516,7 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
             # the wall), and only a pixel with no cluster of ``min_support`` dies. The published depth is the
             # winner's median; the support is the winner's size.
             z_cons, n_cons, own_in = FT.strongest_consensus(v["cons"], float(tau), int(min_support))
-            keep = candt & (n_cons > 0)
+            keep = candt & (n_cons > 0) & v["in_range"]
             if f in no_birth:
                 keep = torch.zeros_like(keep)
             zero = torch.zeros_like(v["z"])
@@ -543,6 +543,19 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
             # parallax (``no_birth``) votes as a witness and gives birth to nothing.
             n_conf = v["agree_q"]
             keep = candt & (n_conf >= int(min_support))
+            # THE RANGE (USER 2026-11-09: "nadie debe aportar puntos a más de 10m de distancia"): no keyframe
+            # gives birth to a point farther than witness_max_m from its camera
+            beyond = candt & ~v["in_range"]
+            keep = keep & ~beyond
+            n_minor = 0
+            if bool(fusion.get("majority")):
+                # THE MAJORITY (USER 2026-11-09: "si tenemos muchas vistas del mismo punto 5 puede significar poco,
+                # pero si tiene pocas vistas puede significar mucho"): the witnesses in range that CONFIRM the point
+                # must outnumber those in range and in the band that see THROUGH it (pccr 3108, the reference cloud:
+                # 94.1 % of its kept pixels pass; zaragoza 74.6 % — census of 2026-11-09)
+                minority = keep & ~(n_conf > v["thru_q"])
+                n_minor = int(minority.sum())
+                keep = keep & ~minority
             n_veto = 0
             if bool(fusion.get("occlusion_veto")):
                 # the Merrell duel (ICCV07, researched 2026-11-08): more witnesses measured surfaces IN FRONT of
@@ -556,7 +569,7 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
                 # USER 2026-11-08 evening: a pixel SHORT of support whose witnesses' surfaces agree among
                 # themselves on its ray is published AT THEIR MEDIAN — coverage of the GOOD kind (A6)
                 rep_ok, zrep, nrep = FT.agreeing_median(v["splats"], tau, int(min_support))
-                rep = candt & ~keep & rep_ok
+                rep = candt & ~keep & rep_ok & v["in_range"]
             if f in no_birth:
                 keep = torch.zeros_like(keep)
                 rep = torch.zeros_like(rep)
@@ -573,6 +586,7 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
             for k, n in (("valid", int(valid[f].sum())), ("edge", int(edge[f].sum())), ("kept", int(keep.sum())),
                          ("contradicted", int((pas & ~keep & ~rep).sum())), ("repaired", int(rep.sum())),
                          ("admitted", 0), ("occlusion_veto", n_veto),
+                         ("beyond_range", int(beyond.sum())), ("minority", n_minor),
                          ("edge_below", 0), ("below_floor", int((valid[f] & ~passed[f]).sum())), ("rescued", 0),
                          ("rescue_refused_nearer", 0), ("below_support", int((candt & ~keep & ~rep).sum())),
                          ("no_birth", int(candt.sum()) if f in no_birth else 0),
@@ -674,6 +688,11 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
                 f"{fusion['max_depth_rel'] * 100:g} % of depth; "
                 + (f"repair ON: {tot.get('repaired', 0):,} short-of-support pixel(s) published at their witnesses' "
                    f"median; " if bool(fusion.get("repair")) else "no repair; ")
+                + (f"range {float(fusion.get('witness_max_m', 0)):g} m: {tot.get('beyond_range', 0):,} pixel(s) "
+                   f"farther from their camera born by nobody, no witness beyond it votes; "
+                   if float(fusion.get("witness_max_m", 0)) > 0 else "")
+                + (f"majority ON: {tot.get('minority', 0):,} pixel(s) seen through by more witnesses than "
+                   f"confirm them left; " if bool(fusion.get("majority")) else "")
                 + (f"occlusion veto ON: {tot.get('occlusion_veto', 0):,} pixel(s) behind a better-supported "
                    f"surface left; " if bool(fusion.get("occlusion_veto")) else "")
                 + f"{len(no_birth)} keyframe(s) without "
@@ -1319,7 +1338,8 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
                   "witness_max_m": float(pcfg.cloud.fusion_witness_max_m),
                   # the two selectable F6 additions (USER 2026-11-08 evening, OFF = the validated recipe)
                   "repair": bool(pcfg.cloud.fusion_repair),
-                  "occlusion_veto": bool(pcfg.cloud.fusion_occlusion_veto)}
+                  "occlusion_veto": bool(pcfg.cloud.fusion_occlusion_veto),
+                  "majority": bool(pcfg.cloud.fusion_majority)}
     no_birth = rotation_keyframes(session_dir, frames, log) if bool(pcfg.cloud.no_birth_without_parallax) else set()
     voted, tau, vst = edge_keeping_vote(frames, dep, valid, passed, K, c2w_vote, labels,
                                         bc.neighbors, bc.tau_quantile, int(pcfg.cloud.repair_min_views),
