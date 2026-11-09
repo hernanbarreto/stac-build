@@ -263,6 +263,16 @@ def test_verify_native_frames(tmp_path):
             Image.new("RGB", (160, 120)).save(p)
         with pytest.raises(C.NativeResolutionError, match="rescaled"):
             C.verify_native_frames(sess)
+        # USER 2026-11-09 ("a 1024 todo"): frames extracted under a declared long-side cap are the video's decode
+        # reduced by the extractor's own computation — accepted; any other size still refused
+        import json
+        (sess / "frames" / "manifest.json").write_text(json.dumps({"decoder": {"max_long_side": 160}}))
+        rep = C.verify_native_frames(sess)
+        assert (rep["expected_w"], rep["expected_h"], rep["extraction_max_long_side"]) == (160, 120, 160)
+        (sess / "frames" / "manifest.json").write_text(json.dumps({"decoder": {"max_long_side": 200}}))
+        with pytest.raises(C.NativeResolutionError, match="declared cap of 200"):
+            C.verify_native_frames(sess)
+        (sess / "frames" / "manifest.json").unlink()
     with pytest.raises(C.CameraError, match="does not match"):
         C.verify_omega_grid(C.omega_grid_for(464, 832, "balanced", 512), (384, 688))
     C.verify_omega_grid(C.omega_grid_for(464, 832, "balanced", 512), (688, 384))

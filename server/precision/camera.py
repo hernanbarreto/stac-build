@@ -679,11 +679,21 @@ def verify_native_frames(session_dir: os.PathLike, frames_subdir: str = "frames"
     report.update({"native_w": fw, "native_h": fh})
     if video is not None:
         vw, vh = video_size(video)
-        report.update({"video_w": vw, "video_h": vh})
-        if (fw, fh) != (vw, vh):
+        # the extraction's declared long-side cap (USER 2026-11-09, "a 1024 todo"; the frames manifest's decoder
+        # record): the frames are the video's decode reduced to it by the one computation, never anything else
+        from intake import frames_manifest as FM
+        cap = 0
+        mp = FM.manifest_path(root)
+        if mp.exists():
+            cap = int(((json.loads(mp.read_text()).get("decoder") or {}).get("max_long_side")) or 0)
+        ew, eh = FM.reduced_size(vw, vh, cap)
+        report.update({"video_w": vw, "video_h": vh, "extraction_max_long_side": cap,
+                       "expected_w": ew, "expected_h": eh})
+        if (fw, fh) != (ew, eh):
             raise NativeResolutionError(
-                f"frames are {fw}x{fh} but {video.name} decodes to {vw}x{vh}: something "
-                f"rescaled the frames — re-extract at native resolution")
+                f"frames are {fw}x{fh} but {video.name} decodes to {vw}x{vh}"
+                + (f", {ew}x{eh} under the extraction's declared cap of {cap} px" if cap else "")
+                + ": something rescaled the frames — re-extract them")
     return report
 
 

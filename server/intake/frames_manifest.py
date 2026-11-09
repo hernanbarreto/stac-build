@@ -408,6 +408,17 @@ class FrameSealer:
         return doc
 
 
+def reduced_size(w: int, h: int, max_long_side: int) -> Tuple[int, int]:
+    """(w, h) of a frame of ``w`` x ``h`` extracted with the long-side cap ``max_long_side`` (USER 2026-11-09, "a 1024
+    todo"): unchanged when the cap is 0 or not exceeded, else scaled to the cap (the ONE computation — the extractor
+    resizes with it and F0 checks the frames against it)."""
+    w, h, cap = int(w), int(h), int(max_long_side)
+    if cap <= 0 or max(w, h) <= cap:
+        return w, h
+    sc = cap / float(max(w, h))
+    return max(1, int(round(w * sc))), max(1, int(round(h * sc)))
+
+
 def extract_video(video_path: os.PathLike, scan_dir: os.PathLike, *, origin: str = ORIGIN_VIDEO,
                   stride: int = 1, max_frames: int = 0, max_long_side: int = 0,
                   progress: Optional[Callable[[int, int], Any]] = None,
@@ -463,9 +474,7 @@ def extract_video(video_path: os.PathLike, scan_dir: os.PathLike, *, origin: str
                 continue
             if int(max_long_side) > 0 and max(frame.shape[:2]) > int(max_long_side):
                 h0, w0 = frame.shape[:2]
-                sc = int(max_long_side) / float(max(h0, w0))
-                frame = cv2.resize(frame, (max(1, int(round(w0 * sc))), max(1, int(round(h0 * sc)))),
-                                   interpolation=cv2.INTER_AREA)
+                frame = cv2.resize(frame, reduced_size(w0, h0, max_long_side), interpolation=cv2.INTER_AREA)
             ok_enc, buf = cv2.imencode(".jpg", frame, params)
             if not ok_enc:
                 raise FramesManifestError(f"the JPEG encoder failed on frame {i} of {video_path}")
