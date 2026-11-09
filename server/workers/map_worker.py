@@ -2676,6 +2676,11 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         _apply_chunked_metric(vggt_config, None, cubes=(_sets, _owner, _revisits))
         # each side of a revisit bridge: F4's own loop window (no number of the fork's own)
         vggt_config["Model"]["cube_bridge_half"] = (int(_tc.loop_half_window) if _revisits else 0)
+        # THE RANGE (USER 2026-11-09: "puntos a más de 10 m no deben aportar, a menos de 10 m de la cámara sí"): the
+        # cube graph's seams and closures fit only points within F6's range of their camera
+        from precision.config import load_precision_config as _lpc_range
+        vggt_config["Model"]["cube_range_m"] = float(
+            _lpc_range(session_dir=output_dir.parent).cloud.fusion_witness_max_m)
         _persist_cube_plan(_cplan, _sets, _owner, _n_selected, _walk0, _res, _ctx)
         pipe.send_log(f"CUBES (I4): walk {_walk0:.1f} m → {_plan_layout_text({'chunk_sets': _sets})}, every two "
                       f"neighbour blocks one cube; ONE Omega pass per cube, ONE Sim(3) graph")
