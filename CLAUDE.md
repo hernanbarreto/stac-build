@@ -29,6 +29,12 @@ cloud only, replace). What it is, over §1's pipeline:
   pero con buena solidez en los objetos, lo que falta o está ahuecado es lo que está más allá de los 15 m, que no es
   parte del fondo del escaneo"*. Numbers: seams 1.0–3.7 cm, 43 closures, F5 held-out 0.534 px, witnesses bound 2.26 px,
   vote coverage 49.3 % (no repair), 88.8 M points; AMB3R metre 2.6381 m/unit (MAD 6.3 %).
+- ✓ PCCR 3108 VALIDATED AGAIN (USER 2026-11-09 evening: "bien, pccr validado visualmente, ok") with the
+  cleaner back to voxel 5 mm / SOR σ 3 (4b346ae), the vote's minimum angle 1.5° (b893e5f) and F6 IN PLACE
+  (bb7a871: a pixel whose witnesses agree with its own depth is published where it is, never moved): vote
+  coverage 59.9 % (kept 55.3 %, in place 6.7 %), 126.5 M raw → 18.8 M points published, core 94.4 min. The
+  near surfaces the no-repair run lost came back in part (hollow 1 m zones 28 → 57 % filled); what still
+  stays out is held by the occlusion veto, missing votes and the majority, in that order (census).
 
 ## 1 · ⭐⭐⭐⭐ THE FINAL PIPELINE — USER 2026-11-08 (11:20 CDMX), pccr, main 8cef74f
 *"la cobertura es muy buena, sin errores, sin duplicados, muy muy buen resultado, excelente, que quede este como
