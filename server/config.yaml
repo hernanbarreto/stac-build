@@ -2711,7 +2711,7 @@ reconstruction:
       fusion_witness_max_m: 10.0        # USER 2026-11-08 ("tu voto no tiene peso porque estás a más de 10 o 15 m,
                                         # ponele 10 m, no más que eso"): a witness farther than this from the
                                         # surface it measured has no vote in the ADJUST rule
-      fusion_repair: true               # ON (USER 2026-11-08 "prendé ambas correcciones de f6"). USER 2026-11-08 evening ("lo que se le puede agregar a F6 es el ajuste …
+      fusion_repair: false              # OFF (USER 2026-11-09: "quitemos la reparación, y esos píxeles hay que quitarlos, no repararlos" — zaragoza: 160 M repaired pixels kept their BIRTH colour at the moved depth: the hanging yellow object painted on the wheels, shadows as black stains, floaters). Was ON 2026-11-08. USER 2026-11-08 evening ("lo que se le puede agregar a F6 es el ajuste …
                                         # vamos a volver a [la receta validada] + las dos mejoras"): a COLMAP-mode
                                         # pixel SHORT of min_support_views whose witnesses' surfaces agree among
                                         # themselves (≥ min_support_views within τ of their median, on its ray) is
