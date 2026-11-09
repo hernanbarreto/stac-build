@@ -272,6 +272,9 @@ def main() -> int:
                     help="claude_stac.txt §6: mv_votes + provisional status on the merged "
                          "cloud BEFORE the net; voxel/SOR then run only on witness."
                          "clean_statuses (server config.yaml witness:)")
+    ap.add_argument("--in-memory", action="store_true",
+                    help="the PATH OF RECORD: every chunk merged in host RAM (the by-pieces cleaner, "
+                         "reconstruction.stream_clean, is held equal to it byte for byte by its test)")
     args = ap.parse_args()
 
     os.environ.setdefault("OMP_NUM_THREADS", "8")
@@ -300,6 +303,14 @@ def main() -> int:
     tile_pts = bounds["tile_points"]
     knn_kw = {"query_block": bounds["knn_query_block"],
               "candidate_budget": bounds["knn_candidate_budget"]}
+    if not args.witness and not args.in_memory:
+        # USER 2026-11-09: by pieces on the card, the memory independent of the cloud's size (stream_clean)
+        from reconstruction import stream_clean
+        from reconstruction.grid_knn import config_section
+        sc = config_section(("postprocessing",), ("clean_scratch_dir",))
+        halo = config_section(("postprocessing", "clean_bounds"), ("sor_halo_m",))
+        return stream_clean.run(args, bounds=bounds, sor_reach=sor_reach, halo_m=float(halo["sor_halo_m"]),
+                                scratch_root=str(sc["clean_scratch_dir"]))
     t_pipe = time.time()
 
     chunk_files = sorted(glob.glob(os.path.join(args.input_dir,

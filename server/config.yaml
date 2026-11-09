@@ -2937,6 +2937,12 @@ postprocessing:
     tile_points: 50000000          # BOUND: points per voxel-pick slab (~100 B/pt on the card)
     knn_query_block: 262144        # BOUND: SOR queries per kNN block
     knn_candidate_budget: 33554432 # BOUND: kNN candidate pairs evaluated at once
+    sor_halo_m: 0.04               # BOUND (USER 2026-11-09, the cleaner by pieces): the first halo around each slab
+                                   # for its SOR; a point whose k-th neighbour may lie beyond it is re-run with a 4x
+                                   # wider one — the answer is the whole cloud's exact kNN for any value
+  clean_scratch_dir: /tmp/stac_clean   # the cleaner by pieces' scratch (byte masks, slab lists, the statistic's
+                                       # arrays — up to 40 B per input point, checked before it starts); the
+                                       # container's local disk, not the MooseFS volume (random access)
 
   # ── Scene-level consolidation (surface_fit stage 1 at scene scale) ──
   # After CloudComPy writes cleaned_cloud.ply, a normal-aware robust MLS
