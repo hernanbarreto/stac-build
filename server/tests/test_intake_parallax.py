@@ -38,15 +38,17 @@ QCFG = QualityConfig(luma_lo=40.0, luma_hi=220.0, clip_frac_max=0.25, clip_lo=5,
 # The production values except the tracking scale, the grid and the LK window,
 # sized for 320x240 test frames — test_test_config_mirrors_production pins that.
 SIZED_FOR_TEST = {"grid_side", "process_scale", "lk_win", "max_window_frames"}  # the stride rule has its own test
-PCFG = ParallaxConfig(grid_side=24, process_scale=0.5, ransac_px=1.0, parallax_quantum_px=12.0,
-                      witness_min_parallax_px=1.5, min_tracks=40, lk_win=15, lk_levels=3,
-                      fb_max_px=1.0, warn_static_disp_px=0.5, warn_rotation_min_disp_px=4.0,
+PCFG = ParallaxConfig(grid_side=24, process_scale=0.5, ransac_px=1.0,
+                      parallax_quantum_deg=1.7737540482250769, witness_min_parallax_deg=0.2217890064575329,
+                      min_tracks=40, lk_win=15, lk_levels=3, fb_max_px=1.0,
+                      warn_static_disp_deg=0.07392999705193322, warn_rotation_min_disp_deg=0.5914192988879183,
                       warn_min_run_frames=5, parallax_quantile=0.9, keyframe_band_frac=0.25,
                       reference_max_eval=200, reference_tol=1.0e-12,
                       focal_probe_frames=16, focal_probe_res="native",
                       focal_probe_model="depth-anything/DA3NESTED-GIANT-LARGE-1.1", vram_calibration_frames=2, vram_margin_frac=0.15,
                       max_window_frames=0)
 NOISE_SIGMA = 2.0
+PV = P.session_view(PCFG, S.default_camera().K())   # the angles in the test camera's px
 QUIET = (lambda *a, **k: None)
 WALK = dict(start=S.room_start_pose(x_m=1.2), direction="right")
 
@@ -222,7 +224,7 @@ def test_pure_rotation_earns_keyframes_by_the_rotation_quantum_and_is_warned(rot
     for k in kfs[1:]:
         assert k["closed_by"] == "rotation", k
         assert lo_r <= k["rotation_deg"] <= hi_r, k
-        assert k["parallax_px"] < PCFG.witness_min_parallax_px, k      # no baseline
+        assert k["parallax_px"] < PV.witness_min_parallax_px, k      # no baseline
     frames = [k["frame"] for k in kfs]
     assert frames == sorted(frames) and len(set(frames)) == len(frames)
     # the count follows the pan: one keyframe per quantum band at least
@@ -240,7 +242,7 @@ def test_translation_keyframes_at_parallax_intervals(translation):
     _sess, quality, res = translation
     kfs = res["keyframes"]
     assert len(kfs) >= 3
-    q, band = PCFG.parallax_quantum_px, PCFG.keyframe_band_frac
+    q, band = PV.parallax_quantum_px, PCFG.keyframe_band_frac
     ranks = {int(r["frame"]): r["sharp_rank"] for r in quality["frames"]}
     for k in kfs[1:]:
         if k["closed_by"] == "quantum":
@@ -274,7 +276,7 @@ def test_witnesses_dedup_and_include_every_keyframe(translation):
     assert {k["frame"] for k in res["keyframes"]} <= set(frames)
     for w in wit[1:]:
         if w["reason"] == "parallax":
-            assert w["parallax_px"] >= PCFG.witness_min_parallax_px
+            assert w["parallax_px"] >= PV.witness_min_parallax_px
     # dedup: fewer witnesses than frames on a 5 cm/frame walk, more than keyframes
     assert res["n_keyframes"] < len(wit) <= res["n_usable_frames"]
 
@@ -309,7 +311,7 @@ def test_every_window_records_its_margins(translation):
     the gap between the two best sharp_ranks, the worst forward-backward margin, the tracks
     margin and the rotation fit's evaluations against its bound."""
     _sess, _q, res = translation
-    q, band = PCFG.parallax_quantum_px, PCFG.keyframe_band_frac
+    q, band = PV.parallax_quantum_px, PCFG.keyframe_band_frac
     lo, hi = q * (1 - band), q * (1 + band)
     keys = {"closing_margin_px", "band_edge_min_px", "outside_band_nearest_px", "sharp_rank_gap",
             "sharp_rank_frame_gap", "fb_margin_min_px", "tracks_margin", "nfev_max",
@@ -390,3 +392,15 @@ def test_stride_fill_unit():
     assert len(fr) <= 100 // 8 + 6, f"clustered: {len(fr)} keyframes for 100 frames"
     assert P.stride_fill(chain, kfs, by_frame, 8) == out
     assert P.stride_fill(chain, kfs, by_frame, 0) == kfs
+
+
+def test_the_thresholds_are_angles_and_follow_the_focal():
+    """USER 2026-11-09 ("es un paralaje, debería ser por ángulo que es independiente de la resolución"): the same
+    angle reads fx · tan θ px — twice the focal (twice the resolution), twice the pixels; pccr's camera gives back
+    the validated 12 px / 1.5 px."""
+    K = lambda f: np.array([[f, 0, 100.0], [0, f, 80.0], [0, 0, 1.0]])
+    a, b = P.session_view(PCFG, K(387.5)), P.session_view(PCFG, K(775.0))
+    assert abs(a.parallax_quantum_px - 12.0) < 1e-9 and abs(a.witness_min_parallax_px - 1.5) < 1e-9
+    assert abs(a.warn_static_disp_px - 0.5) < 1e-9 and abs(a.warn_rotation_min_disp_px - 4.0) < 1e-9
+    assert abs(b.parallax_quantum_px - 2 * a.parallax_quantum_px) < 1e-9
+    assert b.parallax_quantum_deg == a.parallax_quantum_deg == PCFG.parallax_quantum_deg

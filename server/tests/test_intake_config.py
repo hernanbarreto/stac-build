@@ -45,9 +45,9 @@ def test_real_config_loads_with_documented_shape():
     p = cfg.parallax
     assert isinstance(p.grid_side, int) and p.grid_side >= 2
     assert 0 < p.process_scale <= 1
-    assert p.parallax_quantum_px > 0 and p.witness_min_parallax_px > 0
+    assert p.parallax_quantum_deg > 0 and p.witness_min_parallax_deg > 0
     assert isinstance(p.min_tracks, int) and isinstance(p.lk_win, int) and isinstance(p.lk_levels, int)
-    assert p.warn_static_disp_px < p.warn_rotation_min_disp_px
+    assert p.warn_static_disp_deg < p.warn_rotation_min_disp_deg
     assert isinstance(p.warn_min_run_frames, int)
     assert 0 <= p.keyframe_band_frac < 1 and 0 < p.parallax_quantile <= 1
     assert isinstance(p.reference_max_eval, int) and p.reference_max_eval >= 1
@@ -147,10 +147,10 @@ def test_missing_section_fails():
     ("quality", "clip_lo"), ("quality", "clip_hi"), ("quality", "fft_max_side"),
     ("quality", "diff_max_side"),
     ("parallax", "grid_side"), ("parallax", "process_scale"), ("parallax", "ransac_px"),
-    ("parallax", "parallax_quantum_px"), ("parallax", "witness_min_parallax_px"),
+    ("parallax", "parallax_quantum_deg"), ("parallax", "witness_min_parallax_deg"),
     ("parallax", "min_tracks"), ("parallax", "lk_win"), ("parallax", "lk_levels"),
-    ("parallax", "fb_max_px"), ("parallax", "warn_static_disp_px"),
-    ("parallax", "warn_rotation_min_disp_px"), ("parallax", "warn_min_run_frames"),
+    ("parallax", "fb_max_px"), ("parallax", "warn_static_disp_deg"),
+    ("parallax", "warn_rotation_min_disp_deg"), ("parallax", "warn_min_run_frames"),
     ("parallax", "parallax_quantile"), ("parallax", "keyframe_band_frac"),
     ("parallax", "reference_max_eval"),
     ("parallax", "reference_tol"),
@@ -199,7 +199,7 @@ def test_range_errors_name_the_key():
     _expect(_set(raw, "parallax", "process_scale", 1.5), "parallax.process_scale")
     _expect(_set(raw, "parallax", "grid_side", 1), "parallax.grid_side")
     _expect(_set(raw, "parallax", "ransac_px", 0), "parallax.ransac_px")
-    _expect(_set(raw, "parallax", "parallax_quantum_px", 0.0), "parallax.parallax_quantum_px")
+    _expect(_set(raw, "parallax", "parallax_quantum_deg", 0.0), "parallax.parallax_quantum_deg")
     _expect(_set(raw, "parallax", "min_tracks", 3), "parallax.min_tracks")
     _expect(_set(raw, "parallax", "lk_levels", -1), "parallax.lk_levels")
     _expect(_set(raw, "parallax", "warn_min_run_frames", 0), "parallax.warn_min_run_frames")
@@ -221,9 +221,9 @@ def test_cross_key_consistency():
     bad = _set(raw, "quality", "clip_lo", raw["intake"]["quality"]["clip_hi"])
     _expect(bad, "quality.clip_lo")
     # still vs pure-rotation displacement bars cannot overlap
-    bad = _set(raw, "parallax", "warn_static_disp_px",
-               raw["intake"]["parallax"]["warn_rotation_min_disp_px"])
-    _expect(bad, "warn_static_disp_px")
+    bad = _set(raw, "parallax", "warn_static_disp_deg",
+               raw["intake"]["parallax"]["warn_rotation_min_disp_deg"])
+    _expect(bad, "warn_static_disp_deg")
 
 
 def test_numbers_come_back_typed():

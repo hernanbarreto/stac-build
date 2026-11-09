@@ -332,7 +332,7 @@ def test_parameter_change_reruns_only_downstream(session, icfg):
     mt = _mtimes(session)
     time.sleep(0.02)
     # parallax change: I0 stands, I1 re-runs with the reason and the differences named
-    par = replace(icfg, parallax=replace(icfg.parallax, parallax_quantum_px=6.0))
+    par = replace(icfg, parallax=replace(icfg.parallax, parallax_quantum_deg=icfg.parallax.parallax_quantum_deg / 2))
     res2, _ = _run(session, par)
     assert res2["steps"]["quality"]["ran"] is False
     assert _s(res2["steps"]["parallax"]) == {"ran": True, "reason": R.REASON_PARAMS_CHANGED}

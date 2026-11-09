@@ -167,17 +167,17 @@ class ParallaxConfig:
     process_scale: float                # tracking scale (LK runs on the downscaled gray)
     ransac_px: float                    # BOUND: RANSAC bound of the homography that starts the
                                         # rotation fit, native px
-    parallax_quantum_px: float          # BOUND: parallax (native px) from the anchor that makes a
-                                        # keyframe
-    witness_min_parallax_px: float      # BOUND: parallax from the last chosen witness that makes a
+    parallax_quantum_deg: float         # BOUND: parallax (an ANGLE, USER 2026-11-09) from the anchor that makes
+                                        # a keyframe — native px = fx · tan(θ) with the session's measured focal
+    witness_min_parallax_deg: float     # BOUND: parallax (angle) from the last chosen witness that makes a
                                         # witness; also the least parallax that counts as a baseline
                                         # (track-loss keyframe, pure_rotation warning)
     min_tracks: int                     # BOUND: fewer matched tracks = frame not measured (lost)
     lk_win: int                         # LK window side at process scale
     lk_levels: int                      # LK pyramid levels
     fb_max_px: float                    # BOUND: forward-backward LK disagreement tolerated (native px)
-    warn_static_disp_px: float          # BOUND: median displacement from the anchor under this = still
-    warn_rotation_min_disp_px: float    # BOUND: displacement from which the view moved (pure_rotation)
+    warn_static_disp_deg: float         # BOUND: median displacement (angle) from the anchor under this = still
+    warn_rotation_min_disp_deg: float   # BOUND: displacement (angle) from which the view moved (pure_rotation)
     warn_min_run_frames: int            # BOUND: consecutive flagged frames that make a coverage warning
     parallax_quantile: float            # BOUND: parallax = this quantile of the tracks' residuals
                                         # w.r.t. the rotation reference
@@ -271,17 +271,17 @@ def _load_parallax(sec: Dict[str, Any]) -> ParallaxConfig:
         grid_side=_num(p, "grid_side", "parallax", lo=2, integer=True),
         process_scale=_num(p, "process_scale", "parallax", lo=0.0, hi=1.0, lo_excl=True),
         ransac_px=_num(p, "ransac_px", "parallax", lo=0.0, lo_excl=True),
-        parallax_quantum_px=_num(p, "parallax_quantum_px", "parallax", lo=0.0, lo_excl=True),
-        witness_min_parallax_px=_num(p, "witness_min_parallax_px", "parallax", lo=0.0,
-                                     lo_excl=True),
+        parallax_quantum_deg=_num(p, "parallax_quantum_deg", "parallax", lo=0.0, lo_excl=True, hi=90.0),
+        witness_min_parallax_deg=_num(p, "witness_min_parallax_deg", "parallax", lo=0.0,
+                                      lo_excl=True, hi=90.0),
         # a homography needs four correspondences: the mathematical minimum, not a decision
         min_tracks=_num(p, "min_tracks", "parallax", lo=4, integer=True),
         lk_win=_num(p, "lk_win", "parallax", lo=3, integer=True),
         lk_levels=_num(p, "lk_levels", "parallax", lo=0, integer=True),
         fb_max_px=_num(p, "fb_max_px", "parallax", lo=0.0, lo_excl=True),
-        warn_static_disp_px=_num(p, "warn_static_disp_px", "parallax", lo=0.0),
-        warn_rotation_min_disp_px=_num(p, "warn_rotation_min_disp_px", "parallax", lo=0.0,
-                                       lo_excl=True),
+        warn_static_disp_deg=_num(p, "warn_static_disp_deg", "parallax", lo=0.0, hi=90.0),
+        warn_rotation_min_disp_deg=_num(p, "warn_rotation_min_disp_deg", "parallax", lo=0.0,
+                                        lo_excl=True, hi=90.0),
         warn_min_run_frames=_num(p, "warn_min_run_frames", "parallax", lo=1, integer=True),
         # a quantile lives in (0, 1]; 1.0 is the maximum residual
         parallax_quantile=_num(p, "parallax_quantile", "parallax", lo=0.0, hi=1.0,
@@ -304,11 +304,11 @@ def _load_parallax(sec: Dict[str, Any]) -> ParallaxConfig:
         raise IntakeConfigError(
             f"'{SECTION}.parallax.keyframe_band_frac' = {out.keyframe_band_frac} must be "
             f"below 1 — the keyframe would be allowed to keep no baseline at all")
-    if not out.warn_static_disp_px < out.warn_rotation_min_disp_px:
+    if not out.warn_static_disp_deg < out.warn_rotation_min_disp_deg:
         raise IntakeConfigError(
-            f"'{SECTION}.parallax.warn_static_disp_px' ({out.warn_static_disp_px}) must "
-            f"be below '{SECTION}.parallax.warn_rotation_min_disp_px' "
-            f"({out.warn_rotation_min_disp_px}) — a step cannot be both still and a "
+            f"'{SECTION}.parallax.warn_static_disp_deg' ({out.warn_static_disp_deg}) must "
+            f"be below '{SECTION}.parallax.warn_rotation_min_disp_deg' "
+            f"({out.warn_rotation_min_disp_deg}) — a step cannot be both still and a "
             f"pure rotation")
     return out
 

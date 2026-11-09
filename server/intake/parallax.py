@@ -101,7 +101,7 @@ WITNESS_FRAMES_NAME = "witness_frames.json"
 COVERAGE_WARNINGS_NAME = "coverage_warnings.json"
 INTAKE_SUBDIR = "intake"
 SELECTED_CONTRACT_VERSION = "2.0"       # the v2 contract of frames/selected_frames.json
-PARALLAX_VERSION = 7                    # 3: anchor-based parallax (2026-09-27)
+PARALLAX_VERSION = 8                    # 3: anchor-based parallax (2026-09-27)
                                         # 4: rotation reference (2026-09-28)
                                         # 5: cut back to the §4-F1 spec (2026-09-28): quantile of
                                         #    the residual w.r.t. the rotation, no rigidity /
@@ -112,6 +112,8 @@ PARALLAX_VERSION = 7                    # 3: anchor-based parallax (2026-09-27)
                                         #    74 — 2026-10-07; the measurement is unchanged)
                                         # 7: keyframes also by ROTATION from the anchor (the
                                         #    rotation quantum θ_q derived from K; 2026-10-07)
+                                        # 8: the motion thresholds are ANGLES, in px by the
+                                        #    session's focal (USER 2026-11-09)
 PROVENANCE = "tool_measured"
 METHOD = "parallax_lk"
 WARNING_KINDS = ("static", "pure_rotation", "tracking_lost", "exposure")
@@ -295,6 +297,34 @@ def rotation_angle_deg(w: np.ndarray) -> float:
     is 2π − a about the opposite axis)."""
     a = float(np.linalg.norm(np.asarray(w, dtype=np.float64).ravel()))
     return math.degrees(abs(math.remainder(a, 2.0 * math.pi)))
+
+
+@dataclass(frozen=True)
+class SessionParallax(ParallaxConfig):
+    """The parallax configuration on ONE session's camera (USER 2026-11-09: "es un paralaje, debería ser por
+    ángulo que es independiente de la resolución"): the motion thresholds are configured as ANGLES and read
+    here in the session's native px, ``px = fx · tan θ`` with its measured focal — the same walk gives the
+    same keyframes at any resolution of its frames."""
+    fx_px: float
+    parallax_quantum_px: float
+    witness_min_parallax_px: float
+    warn_static_disp_px: float
+    warn_rotation_min_disp_px: float
+
+
+def session_view(cfg: ParallaxConfig, K: np.ndarray) -> SessionParallax:
+    """``cfg`` with its angle thresholds in the native px of the camera ``K`` (fx · tan θ)."""
+    fx = float(np.asarray(K, dtype=np.float64)[0, 0])
+    if not fx > 0.0:
+        raise ParallaxError(f"the session focal must be positive, got fx {fx}")
+    base = {f: getattr(cfg, f) for f in ParallaxConfig.__dataclass_fields__}
+
+    def px(deg: float) -> float:
+        return fx * math.tan(math.radians(float(deg)))
+    return SessionParallax(**base, fx_px=fx, parallax_quantum_px=px(cfg.parallax_quantum_deg),
+                           witness_min_parallax_px=px(cfg.witness_min_parallax_deg),
+                           warn_static_disp_px=px(cfg.warn_static_disp_deg),
+                           warn_rotation_min_disp_px=px(cfg.warn_rotation_min_disp_deg))
 
 
 def rotation_quantum(K: np.ndarray, native_w: int) -> Dict[str, float]:
@@ -927,13 +957,15 @@ def run_parallax(frames_dir: os.PathLike, quality: Dict[str, Any], cfg: Parallax
     if K.shape != (3, 3) or not np.all(np.isfinite(K)) or K[0, 0] <= 0 or K[1, 1] <= 0:
         raise ParallaxError(f"the session K must be a finite 3x3 with positive focals, got {K}")
     Kn = T @ K
+    cfg = session_view(cfg, K)                   # the angle thresholds in this camera's native px
     rot = rotation_quantum(K, native_wh[0])
     log(f"{LOG_TAG} {len(chain)}/{len(rows)} usable frame(s); LK grid {cfg.grid_side}x"
         f"{cfg.grid_side} at scale {cfg.process_scale:g} matched to the anchor; parallax = "
         f"{cfg.parallax_quantile:g}-quantile of the residuals w.r.t. the rotation of the "
         f"session camera (fx {K[0, 0]:.1f} px, measured); quantum "
-        f"{cfg.parallax_quantum_px:g} px (band ±{cfg.keyframe_band_frac:g}), witness "
-        f"{cfg.witness_min_parallax_px:g} px (native px); rotation quantum "
+        f"{cfg.parallax_quantum_deg:.4g}° = {cfg.parallax_quantum_px:.3g} px (band ±{cfg.keyframe_band_frac:g}), "
+        f"witness {cfg.witness_min_parallax_deg:.4g}° = {cfg.witness_min_parallax_px:.3g} px (native px at fx "
+        f"{cfg.fx_px:.1f}); rotation quantum "
         f"{rot['theta_q_deg']:.2f}° = (1 − τ {rot['tau']:g}) · FOV_h {rot['fov_h_deg']:.2f}° / 4 "
         f"(W {native_wh[0]} px, same band)")
     frames = _Frames({int(p.stem): p for p in paths}, native_wh, cfg)
@@ -995,6 +1027,10 @@ def run_parallax(frames_dir: os.PathLike, quality: Dict[str, Any], cfg: Parallax
         "native_h": native_wh[1],
         "params": asdict(cfg),
         "rotation_quantum": rot,                     # derived from K and native_w (not a param)
+        "thresholds_px": {"fx_px": cfg.fx_px, "parallax_quantum_px": cfg.parallax_quantum_px,
+                          "witness_min_parallax_px": cfg.witness_min_parallax_px,
+                          "warn_static_disp_px": cfg.warn_static_disp_px,
+                          "warn_rotation_min_disp_px": cfg.warn_rotation_min_disp_px},
         "K": K.tolist(),
         "environment": env,
         "inputs": {
@@ -1029,14 +1065,15 @@ def selected_frames_document(result: Dict[str, Any], cfg: ParallaxConfig) -> Dic
     total = int(result["n_frames"])
     return _finite_or_none({
         "version": SELECTED_CONTRACT_VERSION,
-        "method": f"{METHOD}_{cfg.parallax_quantum_px:g}",
+        "method": f"{METHOD}_{cfg.parallax_quantum_deg:.4g}deg",
         "total_frames": total,
         "selected_count": len(files),
         "selected_files": files,
         "reduction": (1.0 - len(files) / float(total)) if total else 0.0,
         **_stamps(result),
         "intake_version": PARALLAX_VERSION,
-        "parallax_quantum_px": float(cfg.parallax_quantum_px),
+        "parallax_quantum_deg": float(cfg.parallax_quantum_deg),
+        "parallax_quantum_px": float(result["thresholds_px"]["parallax_quantum_px"]),
         "rotation_quantum_deg": float(result["rotation_quantum"]["theta_q_deg"]),
         "fov_h_deg": float(result["rotation_quantum"]["fov_h_deg"]),
         "keyframe_band_frac": float(cfg.keyframe_band_frac),
@@ -1054,7 +1091,8 @@ def witness_frames_document(result: Dict[str, Any], cfg: ParallaxConfig) -> Dict
         "version": PARALLAX_VERSION,
         **_stamps(result),
         "method": METHOD,
-        "witness_min_parallax_px": float(cfg.witness_min_parallax_px),
+        "witness_min_parallax_deg": float(cfg.witness_min_parallax_deg),
+        "witness_min_parallax_px": float(result["thresholds_px"]["witness_min_parallax_px"]),
         "frames": result["witnesses"],
         "total_frames": int(result["n_frames"]),
         "selected_count": len(files),

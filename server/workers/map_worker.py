@@ -1813,11 +1813,11 @@ def _run_intake_selection(pipe: WorkerPipe, session_path: Path, frames_dir: Path
         # two views is the structural minimum of a multi-view reconstruction (the fps
         # and motion branches stop at the same count)
         raise RuntimeError(f"parallax_lk selection produced {s['n_keyframes']} keyframe(s) "
-                           f"(quantum {icfg.parallax.parallax_quantum_px:g} px of measured "
+                           f"(quantum {icfg.parallax.parallax_quantum_deg:.4g}° of measured "
                            f"parallax) — not enough to reconstruct; see "
                            f"{res['artifacts']['coverage_warnings']}")
     pipe.send_log(f"Frame set: {s['n_keyframes']}/{s['n_frames']} keyframes (parallax_lk, "
-                  f"quantum {icfg.parallax.parallax_quantum_px:g} px), {s['n_witness']} witness "
+                  f"quantum {icfg.parallax.parallax_quantum_deg:.4g}°), {s['n_witness']} witness "
                   f"frames, {s['n_warnings']} coverage warning(s) → selected_frames.json / "
                   f"witness_frames.json")
     _amb3r_coverage_fill(pipe, session_path, frames_dir, config)
