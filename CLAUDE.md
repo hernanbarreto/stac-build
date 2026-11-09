@@ -25,6 +25,10 @@ cloud only, replace). What it is, over §1's pipeline:
   y a los costados no está escaneado … está perfecto para mí"*. A low coverage there is the far background (beyond the
   range or seen by too few views), NOT a defect — zaragoza is walked like observatorio (a train in a shed). Numbers:
   seams 2.5–16.5 cm, graph median 3.5 / max 11.2 cm, F5 held-out 0.398 px, vote coverage 30.1 %, 42.6 M points.
+- ✓ PCCR 3108 VALIDATED under the same rules (USER 2026-11-09): *"también está muy bien, con algo menos de cobertura
+  pero con buena solidez en los objetos, lo que falta o está ahuecado es lo que está más allá de los 15 m, que no es
+  parte del fondo del escaneo"*. Numbers: seams 1.0–3.7 cm, 43 closures, F5 held-out 0.534 px, witnesses bound 2.26 px,
+  vote coverage 49.3 % (no repair), 88.8 M points; AMB3R metre 2.6381 m/unit (MAD 6.3 %).
 
 ## 1 · ⭐⭐⭐⭐ THE FINAL PIPELINE — USER 2026-11-08 (11:20 CDMX), pccr, main 8cef74f
 *"la cobertura es muy buena, sin errores, sin duplicados, muy muy buen resultado, excelente, que quede este como
