@@ -251,7 +251,8 @@ class TracksConfig:
     grid_side: int              # BOUND: query grid columns (rows follow the aspect)
     max_corners: int            # BOUND: Shi-Tomasi corners per query frame
     corner_quality: float       # BOUND: Shi-Tomasi quality level (share of the best corner)
-    corner_min_distance_px: float   # BOUND: minimum corner spacing (tracker px)
+    corner_min_distance_deg: float  # BOUND: minimum corner spacing — an ANGLE (USER 2026-11-09), the tracker's
+                                    # px = its focal · tan θ
     depth_edge_tol_rel: float   # BOUND: 2×2 depth spread / nearest depth above this = an edge
     vis_thresh: float           # BOUND: tracker visibility below this = not observed
     heldout_frac: float         # BOUND: share of the TRACKS held out of every fit
@@ -398,11 +399,11 @@ class CloudConfig:
                                 # refine.min_tri_deg from its camera at the point) it needs to enter F6's cloud
     fusion_rule: str            # USER 2026-11-08 ("cómo se resuelve en fotogrametría dura de precisión"): "colmap" =
                                 # COLMAP StereoFusion's rule — a witness confirms a pixel when its own surface at the
-                                # landed pixel reprojects back within fusion_max_reproj_px AND the depths differ ≤
+                                # landed pixel reprojects back within fusion_max_reproj_deg (as px) AND the depths differ ≤
                                 # fusion_max_depth_rel, witnesses chosen by triangulation angle in
                                 # [fusion_tri_min_deg, fusion_tri_max_deg]; a pixel enters with ≥ min_support_views
                                 # confirming witnesses; nothing is repaired. "tau" = the vote of 2026-11-07.
-    fusion_max_reproj_px: float
+    fusion_max_reproj_deg: float  # USER 2026-11-09: an ANGLE, px = F5's fx · tan θ on F6's grid
     fusion_max_depth_rel: float
     fusion_tri_min_deg: float
     fusion_tri_max_deg: float
@@ -494,8 +495,9 @@ class MonoDetailConfig:
     tile_residual_quantile: float  # a tile whose residual is above this percentile of the session's tiles is rejected
     lowpass_patch_fraction: float  # lowpass sigma = Omega's patch on the camera grid × this
     detail_scope: str           # 'edges' (detail only near discontinuities, within tau) | 'surfaces' (everywhere)
-    detail_zone_px: int         # BOUND (resolution): how far from a discontinuity the detail reaches ('edges')
-    side_reach_px: int          # BOUND (resolution): how far past the band the front/back surfaces are read
+    detail_zone_deg: float      # BOUND: how far from a discontinuity the detail reaches ('edges') — an ANGLE
+                                # (USER 2026-11-09), px = round(fx · tan θ) on F6's grid
+    side_reach_deg: float       # BOUND: how far past the band the front/back surfaces are read — an ANGLE
     overlays: bool              # per-keyframe PNG overlays (bent | aligned | detail | band + status) for the eye
     ab_edge_gradient_quantile: float  # the A/B's edge band: image gradient energy above this percentile of the
                                       # session's pixels, or a step of the CALIBRATED depth — never PointDiT's
@@ -757,7 +759,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         grid_side=_num(tk, "grid_side", "tracks", lo=2, integer=True),
         max_corners=_num(tk, "max_corners", "tracks", lo=0, integer=True),
         corner_quality=_num(tk, "corner_quality", "tracks", lo=0.0, hi=1.0, lo_excl=True),
-        corner_min_distance_px=_num(tk, "corner_min_distance_px", "tracks", lo=0.0),
+        corner_min_distance_deg=_num(tk, "corner_min_distance_deg", "tracks", lo=0.0, hi=90.0),
         depth_edge_tol_rel=_num(tk, "depth_edge_tol_rel", "tracks", lo=0.0, lo_excl=True),
         vis_thresh=_num(tk, "vis_thresh", "tracks", lo=0.0, hi=1.0),
         heldout_frac=_num(tk, "heldout_frac", "tracks", lo=0.0, hi=1.0),
@@ -909,7 +911,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                         # 2026-11-08: COLMAP's defaults when a configuration predates the keys (the tests'
                         # fixtures); config.yaml declares them
                         fusion_rule=str(cl.get("fusion_rule", "colmap")),
-                        fusion_max_reproj_px=float(cl.get("fusion_max_reproj_px", 2.0)),
+                        fusion_max_reproj_deg=float(cl.get("fusion_max_reproj_deg", 0.30128383328297)),
                         fusion_max_depth_rel=float(cl.get("fusion_max_depth_rel", 0.01)),
                         fusion_tri_min_deg=float(cl.get("fusion_tri_min_deg", 3.0)),
                         fusion_tri_max_deg=float(cl.get("fusion_tri_max_deg", 30.0)),
@@ -993,8 +995,10 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                                    tile_residual_quantile=_num(md, "tile_residual_quantile", "mono_detail", lo=0.0, hi=100.0, lo_excl=True),
                                    lowpass_patch_fraction=_num(md, "lowpass_patch_fraction", "mono_detail", lo=0.0, lo_excl=True),
                                    detail_scope=detail_scope,
-                                   detail_zone_px=_num(md, "detail_zone_px", "mono_detail", lo=1, integer=True),
-                                   side_reach_px=_num(md, "side_reach_px", "mono_detail", lo=1, integer=True),
+                                   detail_zone_deg=_num(md, "detail_zone_deg", "mono_detail", lo=0.0, hi=90.0,
+                                                        lo_excl=True),
+                                   side_reach_deg=_num(md, "side_reach_deg", "mono_detail", lo=0.0, hi=90.0,
+                                                       lo_excl=True),
                                    overlays=_bool(md, "overlays", "mono_detail"),
                                    ab_edge_gradient_quantile=_num(md, "ab_edge_gradient_quantile", "mono_detail", lo=0.0, hi=100.0, lo_excl=True),
                                    tile_batch=_num(md, "tile_batch", "mono_detail", lo=0, integer=True))

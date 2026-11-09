@@ -2481,7 +2481,9 @@ reconstruction:
       grid_side: 48                     # BOUND: query grid columns (vggt_tracks' validated grid)
       max_corners: 512                  # BOUND: Shi-Tomasi corners added per query frame
       corner_quality: 0.01              # BOUND: Shi-Tomasi quality level (OpenCV's own scale)
-      corner_min_distance_px: 8         # BOUND: minimum corner spacing (tracker px)
+      corner_min_distance_deg: 1.2627439890700325  # BOUND: minimum corner spacing, an ANGLE (USER 2026-11-09: "los
+                                        # de f6 y f4 hay que pasarlos a ángulo"): the tracker's px = its focal ·
+                                        # tan θ — pccr 3108's 8 px at F0's fx 362.93 on its 464x832 tracker grid
       depth_edge_tol_rel: 0.05          # BOUND: the loops.witness.tracks convention (2×2 spread)
       vis_thresh: 0.2                   # BOUND: vggt_tracks' validated visibility gate
       heldout_frac: 0.2                 # BOUND: share of the tracks held out of every fit (F5)
@@ -2701,12 +2703,15 @@ reconstruction:
                                         # = keep-or-drop (no repair), the rule below:
                                         # COLMAP StereoFusion's rule — a witness confirms a pixel when the surface it
                                         # measured at the landed pixel, carried back into the keyframe, lands within
-                                        # fusion_max_reproj_px of the pixel AND the depths differ ≤ fusion_max_depth_rel;
+                                        # fusion_max_reproj_deg of the pixel AND the depths differ ≤ fusion_max_depth_rel;
                                         # witnesses by triangulation angle in [fusion_tri_min_deg, fusion_tri_max_deg];
                                         # a pixel enters with ≥ min_support_views confirming witnesses; NO repair (the
                                         # repair to the witnesses' median exploded station's floor: repaired 7.5 → 20 %
                                         # with every witness at any distance voting). "tau" = the 2026-11-07 vote.
-      fusion_max_reproj_px: 2.0         # COLMAP StereoFusion.max_reproj_error default
+      fusion_max_reproj_deg: 0.30128383328297  # COLMAP StereoFusion.max_reproj_error's 2 px as an ANGLE (USER
+                                        # 2026-11-09: "los de f6 y f4 hay que pasarlos a ángulo"), read on F6's grid
+                                        # with F5's focal — pccr 3108's 2 px at fx 380.34 (in px a 1024-wide session
+                                        # confirmed with a tighter angle than a 464-wide one)
       fusion_max_depth_rel: 0.0         # 0 = the session's OWN neighbour disagreement τ, measured in the vote (pccr
                                         # 1.7 %). COLMAP's 0.01 is for its PatchMatch maps, already geometrically
                                         # consistent; on Omega's maps it refused honest pairs (pccr 2026-11-08:
@@ -2829,11 +2834,14 @@ reconstruction:
                                         #   calibrated depth resolves; finer than that comes from PointDiT
       detail_scope: edges               # USER 2026-10-04 (first end-to-end run): the detail over EVERY surface bent
                                         #   walls and shed points off a rack; what the user wanted was the filos.
-                                        #   edges = PointDiT's detail only within detail_zone_px of a discontinuity
+                                        #   edges = PointDiT's detail only within detail_zone_deg of a discontinuity
                                         #   (edges, ducts, cables, thin structures) and only within τ of Omega; every
                                         #   other pixel keeps Omega. surfaces = the first run's recipe (A/B only)
-      detail_zone_px: 12                # BOUND (resolution): reach of the detail around a discontinuity ('edges')
-      side_reach_px: 3                  # BOUND (resolution): pixels past the band where front / back are read
+      detail_zone_deg: 1.8071201913258195  # BOUND: reach of the detail around a discontinuity ('edges'), an ANGLE
+                                        # (USER 2026-11-09) — px = round(fx · tan θ) on F6's grid; pccr 3108's 12 px
+                                        # at F5's fx 380.34
+      side_reach_deg: 0.4519205433650306   # BOUND: how far past the band front / back are read, an ANGLE — pccr
+                                        # 3108's 3 px at fx 380.34
       overlays: false                   # per-keyframe PNGs under output/precision/mono_overlays/ for the eye
       tile_batch: 0                     # tiles of a keyframe per PointDiT forward pass: 0 = all of them at once
                                         #   (USER 2026-10-08: speed; the batch is part of the run's config, so its

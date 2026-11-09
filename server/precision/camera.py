@@ -109,6 +109,15 @@ class GridMap:
         return cls(**{k: (d[k] if k == "name" else int(d[k])) for k in keys})
 
 
+def angle_px(fx: float, deg: float) -> float:
+    """An angle as the image distance it spans at the principal point of a camera of focal ``fx`` (px):
+    fx · tan θ (USER 2026-11-09: the stages' pixel thresholds are angles, independent of the resolution)."""
+    import math
+    if not (fx > 0.0):
+        raise ValueError(f"angle_px needs a positive focal, got {fx}")
+    return float(fx) * math.tan(math.radians(float(deg)))
+
+
 def _crop_to_supported_aspect(native_w: int, native_h: int) -> Tuple[int, int, int, int]:
     """(crop_x, crop_y, crop_w, crop_h) — vendor ``_crop_to_supported_aspect_ratio``."""
     width, height = int(native_w), int(native_h)

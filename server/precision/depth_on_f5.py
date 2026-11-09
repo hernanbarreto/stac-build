@@ -990,7 +990,7 @@ def apply_mono_detail(pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out
     overlay_dir = (out / "precision" / "mono_overlays") if bool(md.overlays) else None
     dep2, src, rep = run_stage(frames, dep, valid, weight, image_of, runner, md, tau0, scale,
                                pcfg.gauge.huber_k, log=log, progress=lambda pct, m: _p(42 + pct * 8 / 100, m),
-                               overlay_dir=overlay_dir)
+                               overlay_dir=overlay_dir, fx_px=float(K[0, 0]))
     for f in frames:
         alive = dep2[f] > 0
         valid[f] = valid[f] & alive
@@ -1329,7 +1329,10 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
         # the depth tolerance: the session's OWN neighbour disagreement τ (measured in the vote) when the key is
         # 0 — COLMAP's 1 % is for its PatchMatch maps, already geometrically consistent; Omega's neighbours
         # disagree by τ (pccr 1.7 %), so 1 % refused honest pairs (39.5 % contradicted, coverage 37.9 %)
-        fusion = {"max_reproj_px": float(pcfg.cloud.fusion_max_reproj_px),
+        from precision.camera import angle_px
+        # USER 2026-11-09: the reprojection bound is an ANGLE, in px on this grid by F5's focal
+        fusion = {"max_reproj_px": angle_px(float(K[0, 0]), float(pcfg.cloud.fusion_max_reproj_deg)),
+                  "max_reproj_deg": float(pcfg.cloud.fusion_max_reproj_deg),
                   "max_depth_rel": float(pcfg.cloud.fusion_max_depth_rel),
                   "tri_min_deg": float(pcfg.cloud.fusion_tri_min_deg),
                   "tri_max_deg": float(pcfg.cloud.fusion_tri_max_deg),

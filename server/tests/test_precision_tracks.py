@@ -24,6 +24,11 @@ from precision.config import load_precision_config              # noqa: E402
 
 TCFG = load_precision_config().tracks
 NOISE_GRID_PX = 0.3
+
+
+def _run_tracks(*a, **k):
+    # the synthetic sessions carry no camera.json: the corner spacing's angle reads the synthetic camera's focal
+    return T.run_tracks(*a, fx_px=S.default_camera().fx, **k)
 KF = [0, 3, 6, 9, 11]
 
 
@@ -93,7 +98,7 @@ def _gt_native(s, tr):
 
 
 def test_observations_land_in_native_pixels_with_the_trackers_error(sess):
-    rep = T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+    rep = _run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
     tr = T.load_tracks_v2(sess.session_dir)
     err = np.linalg.norm(tr["obs_uv_native"] - _gt_native(sess, tr), axis=1)
     moved = tr["obs_frame"] != tr["track_query_frame"][np.searchsorted(tr["track_query_id"], tr["obs_track"])]
@@ -111,9 +116,9 @@ def test_observations_land_in_native_pixels_with_the_trackers_error(sess):
 
 
 def test_identical_runs_write_identical_bits_and_say_which_tracker(sess):
-    T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+    _run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
     a = T.load_tracks_v2(sess.session_dir)
-    rep = T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+    rep = _run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
     b = T.load_tracks_v2(sess.session_dir)
     assert a.keys() == b.keys()
     for k in a:
@@ -153,9 +158,9 @@ def test_deterministic_torch_is_scoped():
 
 
 def test_the_split_is_deterministic_and_per_track(sess):
-    T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+    _run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
     a = T.load_tracks_v2(sess.session_dir)["track_split"].copy()
-    T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+    _run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
     b = T.load_tracks_v2(sess.session_dir)["track_split"]
     assert np.array_equal(a, b)
     assert abs(a.mean() - TCFG.heldout_frac) < 0.05
@@ -179,7 +184,7 @@ def test_nothing_under_intake_excludes_a_query_i2_is_gone(sess):
         {"version": 1, "enabled": True,
          "exclusion_masks": {"dir": str(mdir), "frames": {str(f): 100 for f in KF}}}))
     try:
-        rep = T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+        rep = _run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
         tr = T.load_tracks_v2(sess.session_dir)
         qn = grid_to_native(tr["track_query_uv"].astype(np.float64), _gmap(sess))
         kf_q = np.isin(tr["track_query_frame"], KF)
@@ -195,7 +200,7 @@ def test_nothing_under_intake_excludes_a_query_i2_is_gone(sess):
 
 
 def test_witnesses_are_tracked_between_their_keyframes(sess):
-    T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+    _run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
     tr = T.load_tracks_v2(sess.session_dir)
     wit = sorted(set(range(12)) - set(KF))
     seen = set(tr["obs_frame"][tr["frame_kind"] == T.KIND_WITNESS].tolist())
@@ -220,7 +225,7 @@ def test_loop_windows_mark_their_observations(sess):
     (d / "loop_closures.txt").write_text(
         "0, 4, 0.7\n" + "".join(f"# {i}: {f:06d}.jpg\n" for i, f in enumerate(KF)))
     try:
-        rep = T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+        rep = _run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
         tr = T.load_tracks_v2(sess.session_dir)
         assert rep["n_windows_by_kind"]["loop"] == 1 and tr["is_loop_pair"].any()
     finally:
@@ -268,9 +273,9 @@ def test_the_report_holds_no_clock_and_the_timing_file_does(sess):
     """Plan points 36 / 37: tracks.json is the same bytes twice (environment and numerics
     recorded, no elapsed time); the elapsed time lives in tracks.timing.json."""
     pdir = sess.session_dir / "output" / "precision"
-    T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+    _run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
     first = (pdir / T.REPORT_NAME).read_bytes()
-    T.run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+    _run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
     assert (pdir / T.REPORT_NAME).read_bytes() == first
     rep = json.loads(first)
     assert "elapsed_s" not in rep and "elapsed_s" in json.loads((pdir / T.TIMING_NAME).read_text())
@@ -320,7 +325,7 @@ def test_instance_loops_enter_only_with_this_reconstructions_id_and_a_fresh_evid
     pairs, rep = T.instance_loops(out)
     assert pairs == [(0, 4)] and rep["taken"]
     assert f"output/{T.INSTANCE_LOOPS_NAME}" in T.chain_inputs(sd)
-    T.run_tracks(sd, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+    _run_tracks(sd, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
     doc = json.loads((out / "precision" / T.REPORT_NAME).read_text())
     assert doc["instance_loops"]["taken"] and doc["n_windows_by_kind"]["loop"] >= 1
     # the session moves on (a segmentation appears — the same reconstruction, other masks):
@@ -348,7 +353,7 @@ def test_an_unreadable_instance_loops_file_fails_f4_never_a_default(tmp_path, se
     with pytest.raises(T.TracksError, match="is unreadable"):
         T.chain_inputs(sd)
     with pytest.raises(T.TracksError, match="is unreadable"):
-        T.run_tracks(sd, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+        _run_tracks(sd, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
     (out / T.INSTANCE_LOOPS_NAME).write_text("[1, 2]")
     with pytest.raises(T.TracksError, match="not an evidence document"):
         T.instance_loops(out)

@@ -555,7 +555,7 @@ def _collect_window_observations_reference(good, uv, vis, sig, frames, next_tid,
     return out
 
 
-def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
+def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None, fx_px: Optional[float] = None,
                log: Callable = print, ccfg=None) -> Dict[str, Any]:
     """F4 on a session. ``ccfg``: the correction configuration the instance loops' evidence
     stamp is verified with (point 134) — the job's frozen one on the pipeline path (point 69);
@@ -575,6 +575,17 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
     nh, nw = probe.shape[:2]
     tw, th = tracker_grid(nw, nh, tcfg.tracker_long_side, tcfg.tracker_stride)
     gmap = grid_full_frame_resize(nw, nh, tw, th, "tracker")
+    # USER 2026-11-09 ("los de f6 y f4 hay que pasarlos a ángulo"): the corner spacing is an ANGLE, in the
+    # tracker's px by the session's focal (F0's camera.json) carried to the tracker grid
+    if fx_px is None:
+        cam_path = out_dir / "camera.json"
+        if not cam_path.exists():
+            raise TracksError(f"{cam_path} is missing — the corner spacing (tracks.corner_min_distance_deg) is an "
+                              f"angle read with the session's focal: run precision.camera (F0) first")
+        from precision.camera import load_camera_json
+        fx_px = float(load_camera_json(cam_path).params[0])
+    from precision.camera import angle_px
+    corner_px = angle_px(float(fx_px) * tw / nw, float(tcfg.corner_min_distance_deg))
     s_mean = 0.5 * (nw / tw + nh / th)             # grid px → native px (σ)
 
     pairs_f = salad_pairs(out_dir / "maplong_run" / "loop_closures.txt")
@@ -685,8 +696,7 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None,
         for qf in win.query_frames:
             qi = win.frames.index(qf)
             gray = cv2.cvtColor((imgs_w[qi] * GRAY_MAX).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-            q = query_points(gray, tcfg.grid_side, tcfg.max_corners, tcfg.corner_quality,
-                             tcfg.corner_min_distance_px)
+            q = query_points(gray, tcfg.grid_side, tcfg.max_corners, tcfg.corner_quality, corner_px)
             e, emap = edges(qf)
             keep = keep_mask(grid_to_native(q, gmap), None, e, emap)
             qs.append((qf, qi, q[keep], int((~keep).sum())))

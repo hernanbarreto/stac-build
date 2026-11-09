@@ -1,3 +1,4 @@
+import math
 """Phases 2-4 and 6 of the mono-detail work (claude_stac.txt 2026-10-04): tiles, per-tile affine, detail and
 discontinuity band, mixed-pixel resolution. Synthetic, no GPU, PointDiT mocked."""
 import sys
@@ -88,10 +89,10 @@ def test_tile_without_support_is_rejected_and_seams_show_no_step():
     weight = {0: np.ones((H, W))}
     weight[0][:, :48] = 0.0                                   # the left part carries no confidence at all
     mcfg = _mcfg(tile_px=64, tile_overlap_frac=0.5, context_scale=1.0, min_support_frac=0.5,
-                 tile_residual_quantile=100.0, lowpass_patch_fraction=0.5, side_reach_px=3,
+                 tile_residual_quantile=100.0, lowpass_patch_fraction=0.5, side_reach_deg=math.degrees(math.atan(3 / 100.0)),
                  detail_scope="surfaces")          # the blend is tested over the whole ramp
     dep, src, rep = MD.run_stage([0], {0: z_cal.copy()}, valid, weight, img_of, R(), mcfg, tau=0.02,
-                                 native_px_per_omega_px=1.0, huber_k=1.345, log=lambda m: None)
+                                 native_px_per_omega_px=1.0, huber_k=1.345, log=lambda m: None, fx_px=100.0)
     assert rep.rejected_support >= 1 and rep.accepted >= 2
     d = dep[0]
     # where tiles were accepted the refined ramp equals the ramp (no seam step)

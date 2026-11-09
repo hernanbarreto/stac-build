@@ -295,7 +295,7 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
               weight: Dict[int, np.ndarray], image_of: Callable[[int], np.ndarray], runner, mcfg,
               tau: float, native_px_per_omega_px: float, huber_k: float, log: Callable = print,
               progress: Optional[Callable[[float, str], None]] = None,
-              overlay_dir=None) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray], StageReport]:
+              overlay_dir=None, *, fx_px: float) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray], StageReport]:
     """Refine every keyframe's bent depth IN PLACE semantics: returns (refined depth maps, source maps,
     report). ``image_of(f)`` gives the RGB frame on the camera grid; ``weight[f]`` the calibrated
     confidence weight in 0..1 (0 under the floor); ``tau`` the session's agreement tolerance.
@@ -310,9 +310,15 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
     weights = feather_weights(H, W, tiles)
     weights_t = [FT._t(w) for w in weights]
     band_px = band_half_width_px(float(mcfg.context_scale))
+    # USER 2026-11-09: the detail zone and the side reach are ANGLES, in px on this grid by its focal
+    from precision.camera import angle_px
+    zone_px = max(1, int(round(angle_px(fx_px, float(mcfg.detail_zone_deg)))))
+    reach_px = max(1, int(round(angle_px(fx_px, float(mcfg.side_reach_deg)))))
     sigma_px = lowpass_sigma_px(PATCH, native_px_per_omega_px, float(mcfg.lowpass_patch_fraction))
     tile_batch = int(getattr(mcfg, "tile_batch", 0))
-    rep = StageReport(params={"detail_scope": str(mcfg.detail_scope), "detail_zone_px": int(mcfg.detail_zone_px),
+    rep = StageReport(params={"detail_scope": str(mcfg.detail_scope), "detail_zone_px": zone_px,
+                              "detail_zone_deg": float(mcfg.detail_zone_deg), "side_reach_px": reach_px,
+                              "side_reach_deg": float(mcfg.side_reach_deg), "fx_px": float(fx_px),
                               "tiles_per_frame": len(tiles), "tile": [tiles[0].h, tiles[0].w],
                               "run_size": [tiles[0].run_h, tiles[0].run_w], "band_px": band_px,
                               "lowpass_sigma_px": round(sigma_px, 2), "tau": tau, "fit_space": mcfg.fit_space,
@@ -428,8 +434,8 @@ def run_stage(frames: Sequence[int], dep: Dict[int, np.ndarray], valid: Dict[int
         acc = [tf.residual for tf in fits[f] if tf.accepted]
         align_err = float(np.median(acc)) if acc else 0.0
         try:
-            frt = FT.refine_frame(zc, vc, z_al_f, al_valid, tau, band_px, sigma_px, int(mcfg.side_reach_px), align_err,
-                                  detail_scope=str(mcfg.detail_scope), detail_zone_px=int(mcfg.detail_zone_px))
+            frt = FT.refine_frame(zc, vc, z_al_f, al_valid, tau, band_px, sigma_px, reach_px, align_err,
+                                  detail_scope=str(mcfg.detail_scope), detail_zone_px=zone_px)
         except FT.F6TorchError as e:
             raise MonoDetailError(str(e)) from e
         fr = _refinement(frt)
