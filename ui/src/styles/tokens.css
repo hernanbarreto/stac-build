@@ -117,9 +117,13 @@
   --dev-4: #f85149;
 
   /* ── Viewport scene colours (Three.js reads these at runtime) ──────── */
-  --vp-clear: #0a0d14;
-  --vp-grid-major: #252d3a;
-  --vp-grid-minor: #1c2333;
+  /* USER 2026-11-09: the viewer's background like ReCap Pro's — a diffused charcoal grey, darker at the top,
+     and a white grid */
+  --vp-clear: #2f3136;
+  --vp-bg-top: #1f2125;
+  --vp-bg-bottom: #3a3d43;
+  --vp-grid-major: #ffffff;
+  --vp-grid-minor: #d9dce1;
   --vp-light: #ffffff;
   --vp-axis-x: #f85149;
   --vp-axis-y: #3fb950;

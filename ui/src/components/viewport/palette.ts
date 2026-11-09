@@ -42,6 +42,8 @@ export function refreshPalette(): void {
 /** Semantic names used by the viewport code — one place to see them all. */
 export const VP = {
   clear: '--vp-clear',
+  bgTop: '--vp-bg-top',
+  bgBottom: '--vp-bg-bottom',
   gridMajor: '--vp-grid-major',
   gridMinor: '--vp-grid-minor',
   light: '--vp-light',

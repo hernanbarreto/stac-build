@@ -573,6 +573,32 @@ function frameCloud(bbox: THREE.Box3, cam: THREE.PerspectiveCamera, ctrl: { targ
     ctrl.update()
 }
 
+// ── the viewer's grid: white lines, half transparent over the grey background (USER 2026-11-09, ReCap Pro) ──
+function makeGrid(size: number, divisions: number): THREE.GridHelper {
+    const grid = new THREE.GridHelper(size, divisions, tokenHex(VP.gridMajor), tokenHex(VP.gridMinor))
+    const mat = grid.material as THREE.LineBasicMaterial
+    mat.transparent = true
+    mat.opacity = 0.45
+    mat.depthWrite = false
+    mat.toneMapped = false
+    return grid
+}
+
+// ── the viewer's background: a screen-space vertical gradient, darker at the top (USER 2026-11-09, ReCap Pro) ──
+function makeBackground(): THREE.CanvasTexture {
+    const canvas = document.createElement('canvas')
+    canvas.width = 4; canvas.height = 512
+    const ctx = canvas.getContext('2d')!
+    const g = ctx.createLinearGradient(0, 0, 0, canvas.height)
+    g.addColorStop(0, tokenColor(VP.bgTop))
+    g.addColorStop(1, tokenColor(VP.bgBottom))
+    ctx.fillStyle = g
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    const tex = new THREE.CanvasTexture(canvas)
+    tex.colorSpace = THREE.SRGBColorSpace
+    return tex
+}
+
 // ── adaptGrid: resize grid to match cloud extents ──
 function adaptGrid(
     bbox: THREE.Box3,
@@ -589,10 +615,10 @@ function adaptGrid(
     const size = new THREE.Vector3()
     bbox.getCenter(center)
     bbox.getSize(size)
-    // Grid covers the XZ footprint of the cloud with slight margin
-    const gridSize = Math.max(size.x, size.z) * 1.1
-    const divisions = Math.max(10, Math.min(80, Math.round(gridSize / 0.5)))
-    const grid = new THREE.GridHelper(gridSize, divisions, tokenHex(VP.gridMajor), tokenHex(VP.gridMinor))
+    // USER 2026-11-09 (ReCap Pro's look): "un poco más grande que el modelo pero no mucho más", 1 m cells
+    const gridSize = Math.max(size.x, size.z) * 1.3
+    const divisions = Math.max(10, Math.min(200, Math.round(gridSize)))
+    const grid = makeGrid(gridSize, divisions)
     // Grid at Y=0 (floor level) — floor transform aligns floor to Y=0
     grid.position.set(center.x, 0, center.z)
     grid.visible = visible
@@ -3471,55 +3497,16 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         assistantVizRef.current = assistantViz
 
         // Grid helper (will be replaced when cloud loads)
-        const gridHelper = new THREE.GridHelper(20, 40, tokenHex(VP.gridMajor), tokenHex(VP.gridMinor))
+        const gridHelper = makeGrid(20, 20)
         gridHelper.visible = showGrid
         scene.add(gridHelper)
         gridRef.current = gridHelper
 
-        // SKY + GROUND (USER 2026-11-08: "al plano y=0 agregale un verdecito oscuro como hacen algunos visores
-        // profesionales, y a lo que está por encima de y=0 una especie de cielo degradado"): a sky dome drawn first
-        // at the far plane (rotation-only view: it never moves with the camera), a gradient from the horizon to the
-        // zenith above y=0 and the dark ground colour below it; and a dark-green ground plane at y=0, translucent so
-        // the points under the floor (station's tracks) still show through, tinted.
-        const skyMat = new THREE.ShaderMaterial({
-            side: THREE.BackSide, depthWrite: false, depthTest: false, toneMapped: false,
-            uniforms: {
-                uZenith: { value: new THREE.Color('#1c3f6e') },
-                uHorizon: { value: new THREE.Color('#9dbcdc') },
-                uGround: { value: new THREE.Color('#14261a') },
-            },
-            vertexShader: `
-                varying vec3 vDir;
-                void main() {
-                    vDir = position;
-                    vec4 p = projectionMatrix * mat4(mat3(viewMatrix)) * vec4(position, 1.0);
-                    gl_Position = p.xyww;
-                }`,
-            fragmentShader: `
-                uniform vec3 uZenith; uniform vec3 uHorizon; uniform vec3 uGround;
-                varying vec3 vDir;
-                void main() {
-                    float h = normalize(vDir).y;
-                    vec3 c = h >= 0.0 ? mix(uHorizon, uZenith, pow(clamp(h, 0.0, 1.0), 0.55))
-                                      : mix(uHorizon * 0.35 + uGround * 0.65, uGround, clamp(-h * 8.0, 0.0, 1.0));
-                    gl_FragColor = vec4(c, 1.0);
-                }`,
-        })
-        const skyDome = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 24), skyMat)
-        skyDome.frustumCulled = false
-        skyDome.renderOrder = -1000
-        skyDome.userData.isEnvironment = true
-        scene.add(skyDome)
-        const groundMat = new THREE.MeshBasicMaterial({
-            color: new THREE.Color('#1e3a26'), transparent: true, opacity: 0.55, depthWrite: false,
-            side: THREE.DoubleSide, toneMapped: false,
-        })
-        const groundPlane = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), groundMat)
-        groundPlane.rotation.x = -Math.PI / 2
-        groundPlane.position.y = -0.002          // just under the grid: no z-fighting with its lines
-        groundPlane.renderOrder = -10
-        groundPlane.userData.isEnvironment = true
-        scene.add(groundPlane)
+        // BACKGROUND (USER 2026-11-09: "el fondo … hacelo así con ese gris difuminado como ReCap Pro 2027 y la grilla
+        // también"): a charcoal gradient fixed to the screen — it replaces the sky dome and the green ground of
+        // 2026-11-08
+        const background = makeBackground()
+        scene.background = background
 
         // Axes helper with XYZ labels
         const axesGroup = new THREE.Group()
@@ -4353,8 +4340,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             renderer.domElement.removeEventListener('webglcontextrestored', handleContextRestored)
             window.removeEventListener('keydown', onKeyDown)
             controls.dispose()
-            scene.remove(skyDome); skyDome.geometry.dispose(); skyMat.dispose()
-            scene.remove(groundPlane); groundPlane.geometry.dispose(); groundMat.dispose()
+            scene.background = null; background.dispose()
             renderer.dispose()
             geometry.dispose()
             material.dispose()
