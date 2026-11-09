@@ -569,18 +569,33 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
                 veto = keep & (occluders > n_conf)
                 n_veto = int(veto.sum())
                 keep = keep & ~veto
+            inpl = torch.zeros_like(keep)
+            if bool(fusion.get("in_place")) and v["splats"].shape[0]:
+                # IN PLACE (USER 2026-11-09: "los recuperados que están cerca de la cámara, ése es el problema" / "aplicá
+                # esta nueva regla"): a pixel the vote did not keep whose witnesses' surfaces on its ray (in range)
+                # agree — ≥ min_support within τ of their median — AT ITS OWN DEPTH (that median within τ of it) is
+                # published WHERE IT IS: never moved, so it keeps its own colour at its own depth (the repair's moved
+                # pixels painted their birth colour elsewhere — zaragoza 2026-11-09). pccr 3108 census: 79 % of the
+                # near surfaces the validated run had and the COLMAP vote lost come back, all inside that cloud
+                ok_s, z_s, n_s = FT.agreeing_median(v["splats"], tau, int(min_support))
+                own = torch.abs(z_s - v["z"].to(z_s.dtype)) <= tau * v["z"].to(z_s.dtype)   # NaN → False
+                inpl = candt & ~keep & ok_s & own & v["in_range"]
             rep = torch.zeros_like(keep)
             if bool(fusion.get("repair")) and v["splats"].shape[0]:
                 # USER 2026-11-08 evening: a pixel SHORT of support whose witnesses' surfaces agree among
                 # themselves on its ray is published AT THEIR MEDIAN — coverage of the GOOD kind (A6)
                 rep_ok, zrep, nrep = FT.agreeing_median(v["splats"], tau, int(min_support))
-                rep = candt & ~keep & rep_ok & v["in_range"]
+                rep = candt & ~keep & ~inpl & rep_ok & v["in_range"]
             if f in no_birth:
                 keep = torch.zeros_like(keep)
                 rep = torch.zeros_like(rep)
+                inpl = torch.zeros_like(inpl)
             zero = torch.zeros_like(v["z"])
             zmap = torch.where(keep, v["zmed"], zero)
             amap = torch.where(keep, n_conf, torch.zeros_like(n_conf))
+            if bool(inpl.any()):
+                zmap = torch.where(inpl, v["z"].to(zmap.dtype), zmap)
+                amap = torch.where(inpl, n_s.to(amap.dtype), amap)
             if bool(rep.any()):
                 zmap = torch.where(rep, zrep.to(zmap.dtype), zmap)
                 amap = torch.where(rep, nrep.to(amap.dtype), amap)
@@ -589,11 +604,13 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
             final[f] = (zmap_np, amap_np)
             tau_margins[f] = None
             for k, n in (("valid", int(valid[f].sum())), ("edge", int(edge[f].sum())), ("kept", int(keep.sum())),
-                         ("contradicted", int((pas & ~keep & ~rep).sum())), ("repaired", int(rep.sum())),
+                         ("contradicted", int((pas & ~keep & ~rep & ~inpl).sum())), ("repaired", int(rep.sum())),
+                         ("in_place", int(inpl.sum())),
                          ("admitted", 0), ("occlusion_veto", n_veto),
                          ("beyond_range", int(beyond.sum())), ("minority", n_minor),
                          ("edge_below", 0), ("below_floor", int((valid[f] & ~passed[f]).sum())), ("rescued", 0),
-                         ("rescue_refused_nearer", 0), ("below_support", int((candt & ~keep & ~rep).sum())),
+                         ("rescue_refused_nearer", 0),
+                         ("below_support", int((candt & ~keep & ~rep & ~inpl).sum())),
                          ("no_birth", int(candt.sum()) if f in no_birth else 0),
                          ("out", int((zmap_np > 0).sum()))):
                 tot[k] = tot.get(k, 0) + n
@@ -664,7 +681,8 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
     log(f"{LOG_TAG} tau {tau * 100:.2f} % (interior); edge pixels {tot['edge'] / nv * 100:.2f} % of the valid; "
         f"mixed {n_mixed:,} ({n_mixed / nv * 100:.2f} %), {n_snap:,} snapped to their mask's side")
     log(f"{LOG_TAG} vote: {tot['kept'] / nv * 100:.1f} % of the valid pixels kept, {tot['contradicted'] / nv * 100:.1f} % "
-        f"contradicted, {tot['repaired'] / nv * 100:.1f} % repaired, {tot['admitted'] / nv * 100:.1f} % admitted below "
+        f"contradicted, {tot['repaired'] / nv * 100:.1f} % repaired, {tot.get('in_place', 0) / nv * 100:.1f} % in place, "
+        f"{tot['admitted'] / nv * 100:.1f} % admitted below "
         f"the floor at edges, "
         + (f"{tot['rescued'] / nv * 100:.1f} % rescued below the floor ({tot['rescued'] / max(tot['below_floor'], 1) * 100:.1f} % "
            f"of the {tot['below_floor'] / nv * 100:.1f} % under it; {tot['rescue_refused_nearer'] / nv * 100:.1f} % refused, "
@@ -693,6 +711,8 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
                 f"{fusion['max_depth_rel'] * 100:g} % of depth; "
                 + (f"repair ON: {tot.get('repaired', 0):,} short-of-support pixel(s) published at their witnesses' "
                    f"median; " if bool(fusion.get("repair")) else "no repair; ")
+                + (f"in place ON: {tot.get('in_place', 0):,} pixel(s) whose witnesses agree with their own depth "
+                   f"published where they are; " if bool(fusion.get("in_place")) else "")
                 + (f"range {float(fusion.get('witness_max_m', 0)):g} m: {tot.get('beyond_range', 0):,} pixel(s) "
                    f"farther from their camera born by nobody, no witness beyond it votes; "
                    if float(fusion.get("witness_max_m", 0)) > 0 else "")
@@ -1361,7 +1381,8 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
                   # the two selectable F6 additions (USER 2026-11-08 evening, OFF = the validated recipe)
                   "repair": bool(pcfg.cloud.fusion_repair),
                   "occlusion_veto": bool(pcfg.cloud.fusion_occlusion_veto),
-                  "majority": bool(pcfg.cloud.fusion_majority)}
+                  "majority": bool(pcfg.cloud.fusion_majority),
+                  "in_place": bool(pcfg.cloud.fusion_in_place)}
     no_birth = rotation_keyframes(session_dir, frames, log) if bool(pcfg.cloud.no_birth_without_parallax) else set()
     voted, tau, vst = edge_keeping_vote(frames, dep, valid, passed, K, c2w_vote, labels,
                                         bc.neighbors, bc.tau_quantile, int(pcfg.cloud.repair_min_views),

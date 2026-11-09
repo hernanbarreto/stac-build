@@ -2738,6 +2738,14 @@ reconstruction:
                                         # surface behind it beyond the depth tolerance). Census 2026-11-09: pccr
                                         # 3108's kept pixels — a median 90 % of the views that can test them
                                         # confirm, 94.1 % pass; zaragoza — 63 %, 74.6 % pass (its doubles/floaters)
+      fusion_in_place: true             # ON (USER 2026-11-09: "los recuperados que están cerca de la cámara, ése es el
+                                        # problema" / "aplicá esta nueva regla"): a pixel the vote did not keep whose
+                                        # witnesses' surfaces on its ray (in range, ≥ min_support_views within τ of
+                                        # their median) agree with ITS OWN depth (that median within τ of it) is
+                                        # published WHERE IT IS — never moved (its own colour at its own depth).
+                                        # pccr 3108 census: published 59.7 → 82.5 % (validated 90.9 %), 79 % of the
+                                        # lost near surfaces back, all inside the validated cloud; 35 % of them have
+                                        # more see-through than confirming views (thin objects or ghosts: his eye)
       fusion_repair: false              # OFF (USER 2026-11-09: "quitemos la reparación, y esos píxeles hay que quitarlos, no repararlos" — zaragoza: 160 M repaired pixels kept their BIRTH colour at the moved depth: the hanging yellow object painted on the wheels, shadows as black stains, floaters). Was ON 2026-11-08. USER 2026-11-08 evening ("lo que se le puede agregar a F6 es el ajuste …
                                         # vamos a volver a [la receta validada] + las dos mejoras"): a COLMAP-mode
                                         # pixel SHORT of min_support_views whose witnesses' surfaces agree among

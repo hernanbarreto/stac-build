@@ -277,6 +277,40 @@ def test_the_majority_drops_the_point_more_witnesses_see_through():
     assert (on[3][0][wall] > 0).mean() > 0.5, "the wall around it stays"
 
 
+def test_in_place_publishes_a_surface_its_witnesses_agree_on_without_moving_it():
+    """USER 2026-11-09 ("los recuperados que están cerca de la cámara, ése es el problema" / "aplicá esta nueva
+    regla"): a wall every keyframe sees from almost the same place (1 cm apart — no witness in the triangulation
+    band) gets no COLMAP confirmation; IN PLACE publishes it AT ITS OWN DEPTH because its witnesses' surfaces agree
+    with it. A patch one keyframe puts 10 % nearer is NOT moved onto the wall: it stays out."""
+    rng = np.random.default_rng(11)
+    order = [0, 1, 2, 3, 4, 5, 6]
+    cams = {}
+    for f in order:
+        c = np.eye(4); c[0, 3] = 0.01 * f
+        cams[f] = c
+    jit = {f: (1.0 + 0.002 * rng.standard_normal((H, W))).astype(np.float32) for f in order}
+    dep = {f: 3.0 * jit[f] for f in order}
+    dep[3][20:40, 20:60] = 2.7 * jit[3][20:40, 20:60]          # one keyframe's patch 10 % nearer
+    ok = {f: np.ones((H, W), bool) for f in order}
+    base = {"max_reproj_px": 6.0, "max_depth_rel": 0.01, "tri_min_deg": 3.0, "tri_max_deg": 30.0, "mode": "keep",
+            "witness_max_m": 10.0, "majority": True, "occlusion_veto": True}
+    args = lambda: (order, {f: d.copy() for f, d in dep.items()}, ok, {f: ok[f].copy() for f in order},
+                    K, cams, None, (-3, -2, -1, 1, 2, 3), 75.0, 2)
+    wall = (slice(5, 15), slice(10, 70))
+    patch = (slice(25, 35), slice(30, 50))
+    off, _, t_off = edge_keeping_vote(*args(), False, log=lambda *a: None, min_parallax_deg=3.0, min_support=2,
+                                      fusion=dict(base, in_place=False))
+    assert (off[3][0][wall] > 0).mean() < 0.05, "no witness in the band: COLMAP confirms nothing"
+    on, _, t_on = edge_keeping_vote(*args(), False, log=lambda *a: None, min_parallax_deg=3.0, min_support=2,
+                                    fusion=dict(base, in_place=True))
+    z3 = on[3][0]
+    pub = z3[wall] > 0
+    assert pub.mean() > 0.5, "in place: the wall its witnesses agree on is published"
+    assert np.allclose(z3[wall][pub], dep[3][wall][pub]), "published AT ITS OWN DEPTH, never moved"
+    assert (z3[patch] > 0).mean() < 0.05, "the 10 % nearer patch is not moved onto the wall: it stays out"
+    assert t_on["in_place"] > 0 and t_off["in_place"] == 0
+
+
 def test_the_camera_travels_with_the_cloud(tmp_path):
     """Written into the transaction (one row per keyframe); publish registers it as an epoch artifact."""
     import inspect

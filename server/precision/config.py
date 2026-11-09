@@ -425,6 +425,10 @@ class CloudConfig:
     fusion_majority: bool       # USER 2026-11-09 ("5 puede significar poco … cuál es la verdadera relación"): a
                                 # COLMAP-mode pixel enters only when its confirming witnesses (in range) outnumber
                                 # the witnesses in range and in the band that see THROUGH it
+    fusion_in_place: bool       # USER 2026-11-09 ("los recuperados que están cerca de la cámara, ése es el problema"
+                                # / "aplicá esta nueva regla"): a pixel short of confirmations whose witnesses'
+                                # surfaces (≥ min_support_views in range, within τ of their median) agree with ITS
+                                # OWN depth (their median within τ of it) is published where it is — never moved
     no_birth_without_parallax: bool   # USER 2026-11-08: a keyframe I1 made by ROTATION (no parallax) votes as a
                                       # witness but gives birth to no point — COLMAP registers such an image by
                                       # PnP and triangulates nothing from it
@@ -919,6 +923,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                         fusion_repair=bool(cl.get("fusion_repair", False)),
                         fusion_occlusion_veto=bool(cl.get("fusion_occlusion_veto", False)),
                         fusion_majority=bool(cl.get("fusion_majority", False)),
+                        fusion_in_place=bool(cl.get("fusion_in_place", False)),
                         no_birth_without_parallax=bool(cl.get("no_birth_without_parallax", True)))
     if cloud.fusion_rule not in ("colmap", "tau", "adjust"):
         raise ValueError(f"precision.cloud.fusion_rule {cloud.fusion_rule!r}: 'colmap' | 'tau' | 'adjust'")
