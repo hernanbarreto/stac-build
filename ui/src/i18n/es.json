@@ -194,7 +194,8 @@
     "flyers": "Voladores (diagnóstico)",
     "monoDetail": "Capa de detalle PointDiT",
     "mixedUnresolved": "Píxeles mezclados sin resolver",
-    "cubes": "Puntos como cubos"
+    "cubes": "Puntos como cubos",
+    "sceneLook": "Fondo y cuadrícula…"
   },
   "palette": {
     "title": "Paleta de comandos",
@@ -491,7 +492,8 @@
     "bottom": "Inferior",
     "dimH": "Al",
     "dimW": "An",
-    "dimD": "Pr"
+    "dimD": "Pr",
+    "gridCell": "Cuadrícula {cell}, línea gruesa cada {major}"
   },
   "gizmo": {
     "move": "Mover",
@@ -1297,5 +1299,23 @@
     "confidence": "Confianza de la nube: {{pct}} %",
     "confidenceHint": "GenRecon usa los puntos que el visor muestra con este filtro (arranca en el valor del visor de esta sesión). Depende de cómo se capturó: 0 % usa todos los puntos.",
     "started": "GenRecon en cola para {{session}} (confianza {{pct}} %)"
+  },
+  "sceneLook": {
+    "title": "Fondo y cuadrícula",
+    "background": "Fondo",
+    "bgDefault": "Predeterminado",
+    "bgHorizon": "Horizonte",
+    "bgPlain": "Color liso",
+    "bgHint": "Predeterminado: gris difuminado. Horizonte: piso verde en y = 0 y cielo degradado. Color liso: el color que elijas.",
+    "bgColor": "Color de fondo",
+    "grid": "Cuadrícula",
+    "cell": "Tamaño de celda",
+    "major": "Línea gruesa cada",
+    "majorHint": "Las líneas gruesas permiten contar distancias grandes de un vistazo.",
+    "majorCells": "{n} celdas ({length})",
+    "gridColor": "Color de la cuadrícula",
+    "gridColorHint": "Se aplica con cualquier fondo.",
+    "reset": "Restablecer",
+    "saved": "Se guarda para esta {@session}, en tus preferencias."
   }
 }

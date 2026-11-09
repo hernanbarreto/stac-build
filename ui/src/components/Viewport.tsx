@@ -18,6 +18,7 @@ import { AssistantViz, arrowDimension, labelSprite, objectDims, thickBox, thickS
 import { Eye, EyeOff, Focus, RotateCw, Move, Save, Trash2, X, Box as BoxIcon, Scaling, RefreshCw, MonitorX } from 'lucide-react'
 import { getT, getFmt } from '../i18n'
 import { tokenColor, tokenHex, edgeColorHex, VP } from './viewport/palette'
+import { applyBackground, DEFAULT_LOOK, disposeGroup, makeHorizon, makeLookGrid, type SceneLook } from './viewport/sceneLook'
 import { Button } from './ui/Button'
 import { IconButton } from './ui/IconButton'
 import { Slider } from './ui/Field'
@@ -59,6 +60,8 @@ interface ViewportProps {
     activeTool: Tool
     showAxes?: boolean
     showGrid?: boolean
+    /** The session's background and grid (View, Background and Grid, USER 2026-11-09). */
+    sceneLook?: SceneLook
     pipelineRunning?: boolean
     onPointCount: (count: number) => void
     onFps: (fps: number) => void
@@ -573,17 +576,6 @@ function frameCloud(bbox: THREE.Box3, cam: THREE.PerspectiveCamera, ctrl: { targ
     ctrl.update()
 }
 
-// ── the viewer's grid: white lines, half transparent over the grey background (USER 2026-11-09, ReCap Pro) ──
-function makeGrid(size: number, divisions: number): THREE.GridHelper {
-    const grid = new THREE.GridHelper(size, divisions, tokenHex(VP.gridMajor), tokenHex(VP.gridMinor))
-    const mat = grid.material as THREE.LineBasicMaterial
-    mat.transparent = true
-    mat.opacity = 0.45
-    mat.depthWrite = false
-    mat.toneMapped = false
-    return grid
-}
-
 // ── the viewer's background: a screen-space vertical gradient, darker at the top (USER 2026-11-09, ReCap Pro) ──
 function makeBackground(): THREE.CanvasTexture {
     const canvas = document.createElement('canvas')
@@ -599,28 +591,30 @@ function makeBackground(): THREE.CanvasTexture {
     return tex
 }
 
-// ── adaptGrid: resize grid to match cloud extents ──
+// ── adaptGrid: the grid over the cloud's footprint (or a 20 m square before a cloud), in the session's look ──
 function adaptGrid(
-    bbox: THREE.Box3,
+    bbox: THREE.Box3 | null,
     scene: THREE.Scene,
-    gridRef: React.MutableRefObject<THREE.GridHelper | null>,
-    visible: boolean
+    gridRef: React.MutableRefObject<THREE.Object3D | null>,
+    visible: boolean,
+    look: SceneLook,
 ) {
     if (gridRef.current) {
         scene.remove(gridRef.current)
-        gridRef.current.geometry.dispose()
-            ; (gridRef.current.material as THREE.Material).dispose()
+        disposeGroup(gridRef.current)
     }
     const center = new THREE.Vector3()
-    const size = new THREE.Vector3()
-    bbox.getCenter(center)
-    bbox.getSize(size)
-    // USER 2026-11-09 (ReCap Pro's look): "un poco más grande que el modelo pero no mucho más", 1 m cells
-    const gridSize = Math.max(size.x, size.z) * 1.3
-    const divisions = Math.max(10, Math.min(200, Math.round(gridSize)))
-    const grid = makeGrid(gridSize, divisions)
-    // Grid at Y=0 (floor level) — floor transform aligns floor to Y=0
-    grid.position.set(center.x, 0, center.z)
+    let half = 10
+    if (bbox && !bbox.isEmpty()) {
+        const size = new THREE.Vector3()
+        bbox.getCenter(center)
+        bbox.getSize(size)
+        // USER 2026-11-09 (ReCap Pro's look): "un poco más grande que el modelo pero no mucho más"
+        half = Math.max(size.x, size.z) * 1.3 / 2
+    }
+    // Grid at Y=0 (floor level) — floor transform aligns floor to Y=0; lines at whole cells of the world
+    const grid = makeLookGrid(new THREE.Vector2(center.x - half, center.z - half),
+                              new THREE.Vector2(center.x + half, center.z + half), look)
     grid.visible = visible
     scene.add(grid)
     gridRef.current = grid
@@ -637,7 +631,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onCubes, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onViewScale, onSegmentPicked },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, sceneLook = DEFAULT_LOOK, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onCubes, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onViewScale, onSegmentPicked },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -1142,8 +1136,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const previewRef = useRef<{ group: THREE.Group; n: number; session: string; shownAt: number } | null>(null)
     const preserveCameraRef = useRef<{ pos: THREE.Vector3; target: THREE.Vector3 } | null>(null)
     const floorTransformRef = useRef<THREE.Matrix4 | null>(null)
-    const gridRef = useRef<THREE.GridHelper | null>(null)
+    const gridRef = useRef<THREE.Object3D | null>(null)
     const cloudBBoxRef = useRef<THREE.Box3 | null>(null)
+    // the session's background and grid (USER 2026-11-09, View, Background and Grid)
+    const lookRef = useRef<SceneLook>(sceneLook)
+    const backgroundTexRef = useRef<THREE.Texture | null>(null)
+    const horizonRef = useRef<THREE.Object3D | null>(null)
     const axesRef = useRef<THREE.Group | null>(null)
     const showGridRef = useRef(showGrid)
     const showCameraPosesRef = useRef(showCameraPoses)
@@ -1165,6 +1163,16 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
     // Toggle grid and axes visibility
     useEffect(() => { if (gridRef.current) gridRef.current.visible = showGrid; showGridRef.current = showGrid }, [showGrid])
+    // the session's look changed (its prefs loaded, or the Background and Grid dialog): grid and background again
+    useEffect(() => {
+        lookRef.current = sceneLook
+        const scene = sceneRef.current
+        if (!scene) return
+        adaptGrid(cloudBBoxRef.current, scene, gridRef, showGridRef.current, sceneLook)
+        if (backgroundTexRef.current && horizonRef.current) {
+            applyBackground(scene, sceneLook, backgroundTexRef.current, horizonRef.current)
+        }
+    }, [sceneLook])
     useEffect(() => { pipelineRunningRef.current = pipelineRunning }, [pipelineRunning])
     useEffect(() => { if (axesRef.current) axesRef.current.visible = showAxes }, [showAxes])
 
@@ -3496,17 +3504,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         scene.add(assistantViz.group)
         assistantVizRef.current = assistantViz
 
-        // Grid helper (will be replaced when cloud loads)
-        const gridHelper = makeGrid(20, 20)
-        gridHelper.visible = showGrid
-        scene.add(gridHelper)
-        gridRef.current = gridHelper
+        // Grid (will be replaced when cloud loads) in the session's look
+        adaptGrid(null, scene, gridRef, showGrid, lookRef.current)
 
-        // BACKGROUND (USER 2026-11-09: "el fondo … hacelo así con ese gris difuminado como ReCap Pro 2027 y la grilla
-        // también"): a charcoal gradient fixed to the screen — it replaces the sky dome and the green ground of
-        // 2026-11-08
+        // BACKGROUND (USER 2026-11-09): the session's choice among the charcoal gradient ("default", ReCap Pro),
+        // the horizon (green ground at y = 0, graduated sky — the look of 2026-11-08) and a plain colour
         const background = makeBackground()
-        scene.background = background
+        backgroundTexRef.current = background
+        const horizon = makeHorizon()
+        scene.add(horizon)
+        horizonRef.current = horizon
+        applyBackground(scene, lookRef.current, background, horizon)
 
         // Axes helper with XYZ labels
         const axesGroup = new THREE.Group()
@@ -4341,6 +4349,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             window.removeEventListener('keydown', onKeyDown)
             controls.dispose()
             scene.background = null; background.dispose()
+            scene.remove(horizon); disposeGroup(horizon); horizonRef.current = null; backgroundTexRef.current = null
+            if (gridRef.current) { scene.remove(gridRef.current); disposeGroup(gridRef.current); gridRef.current = null }
             renderer.dispose()
             geometry.dispose()
             material.dispose()
@@ -4938,7 +4948,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                             frameCloud(box, cameraRef.current, controlsRef.current)
                             sessionFramedRef.current = sid
                         }
-                        adaptGrid(box, scene, gridRef, showGridRef.current)
+                        adaptGrid(box, scene, gridRef, showGridRef.current, lookRef.current)
                     }
                     onPointCount(n)
                 })
@@ -5059,7 +5069,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                         preserveCameraRef.current = null
                     }
                     // Adapt grid to combined extents
-                    if (sceneRef.current) adaptGrid(cloudBBoxRef.current, sceneRef.current, gridRef, showGridRef.current)
+                    if (sceneRef.current) adaptGrid(cloudBBoxRef.current, sceneRef.current, gridRef, showGridRef.current, lookRef.current)
                 }
 
                 // Auto-load reconstructed object meshes (ShapeR .glb) into the
@@ -5267,7 +5277,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                                 preserveCameraRef.current = null
                             }
                             if (sceneRef.current) {
-                                adaptGrid(cloudBBoxRef.current, sceneRef.current, gridRef, showGridRef.current)
+                                adaptGrid(cloudBBoxRef.current, sceneRef.current, gridRef, showGridRef.current, lookRef.current)
                             }
                         }
                         console.log(`[Viewport]  BIM loaded: ${model.name} (${result.group.children.length} elements, ${result.hierarchy.length} hierarchy roots)`)

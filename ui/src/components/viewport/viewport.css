@@ -239,6 +239,12 @@
   border-top: none;
 }
 
+/* what the grid's cells and major lines measure (USER 2026-11-09) */
+.stac-hud__grid {
+  color: var(--text-2);
+  font-size: var(--fs-0);
+}
+
 .stac-hud__legend {
   position: absolute;
   right: var(--hud-inset);

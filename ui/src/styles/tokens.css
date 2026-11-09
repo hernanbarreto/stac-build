@@ -124,6 +124,10 @@
   --vp-bg-bottom: #3a3d43;
   --vp-grid-major: #ffffff;
   --vp-grid-minor: #d9dce1;
+  --vp-sky-zenith: #1c3f6e;
+  --vp-sky-horizon: #9dbcdc;
+  --vp-sky-ground: #14261a;
+  --vp-ground-plane: #1e3a26;
   --vp-light: #ffffff;
   --vp-axis-x: #f85149;
   --vp-axis-y: #3fb950;

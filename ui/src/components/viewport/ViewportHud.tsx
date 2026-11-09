@@ -44,6 +44,8 @@ interface ViewportHudProps {
   onOrbit: (dAz: number, dEl: number) => void
   onHome: () => void
   metersPerPixel: number | null
+  /** What the grid's cells and major lines measure (USER 2026-11-09); null when the grid is hidden. */
+  gridLabel?: string | null
   colorMode: ColorMode
   mvThreshold: number
   statusFractions?: Record<string, number> | null
@@ -55,7 +57,7 @@ interface ViewportHudProps {
 
 const SCALE_STEPS_M = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100]
 
-export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, metersPerPixel, colorMode, mvThreshold, statusFractions, deviationRange, readouts, banner }: ViewportHudProps) {
+export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, metersPerPixel, gridLabel, colorMode, mvThreshold, statusFractions, deviationRange, readouts, banner }: ViewportHudProps) {
   const t = useT()
   const fmt = useFmt()
 
@@ -89,6 +91,7 @@ export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, 
             <span className="stac-hud__scale-label stac-mono">{scale.label}</span>
           </div>
         )}
+        {gridLabel && <span className="stac-hud__grid stac-mono">{gridLabel}</span>}
       </div>
 
       {colorMode !== 'rgb' && (

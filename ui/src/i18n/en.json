@@ -194,7 +194,8 @@
     "flyers": "Flyers (diagnosis)",
     "monoDetail": "PointDiT detail layer",
     "mixedUnresolved": "Mixed unresolved pixels",
-    "cubes": "Points as cubes"
+    "cubes": "Points as cubes",
+    "sceneLook": "Background and grid…"
   },
   "palette": {
     "title": "Command palette",
@@ -491,7 +492,8 @@
     "bottom": "Bottom",
     "dimH": "H",
     "dimW": "W",
-    "dimD": "D"
+    "dimD": "D",
+    "gridCell": "Grid {cell}, major line every {major}"
   },
   "gizmo": {
     "move": "Move",
@@ -1297,5 +1299,23 @@
     "confidence": "Cloud confidence: {{pct}} %",
     "confidenceHint": "GenRecon uses the points the viewer shows at this filter (it starts at this session's viewer value). It depends on how the scene was captured: 0 % uses every point.",
     "started": "GenRecon queued for {{session}} (confidence {{pct}} %)"
+  },
+  "sceneLook": {
+    "title": "Background and grid",
+    "background": "Background",
+    "bgDefault": "Default",
+    "bgHorizon": "Horizon",
+    "bgPlain": "Plain",
+    "bgHint": "Default: diffused grey. Horizon: green ground at y = 0 and a graduated sky. Plain: the colour you choose.",
+    "bgColor": "Background colour",
+    "grid": "Grid",
+    "cell": "Cell size",
+    "major": "Major line every",
+    "majorHint": "Major lines let large distances be counted at a glance.",
+    "majorCells": "{n} cells ({length})",
+    "gridColor": "Grid colour",
+    "gridColorHint": "Applies with any background.",
+    "reset": "Reset",
+    "saved": "Saved for this {@session}, in your preferences."
   }
 }

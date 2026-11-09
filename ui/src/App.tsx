@@ -31,7 +31,7 @@ import {
   Move, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D, Building2, Package, ArrowUpFromLine, Trash2, Unlock,
   Clock, Scale, BarChart3, Home, Camera, SlidersHorizontal, Sparkles, Undo2, Brush, Layers, Star, Terminal,
   ListTodo, FileCheck2, PanelLeftClose, PanelLeftOpen, Wand2,
-  Circle, Sun, FlaskConical, Pin, Pentagon,
+  Circle, Sun, FlaskConical, Pin, Pentagon, Palette,
 } from 'lucide-react'
 import { useI18n, getT } from './i18n'
 import { useLayout } from './layout/LayoutContext'
@@ -43,6 +43,8 @@ import { BottomDock } from './layout/BottomDock'
 import { StatusBar } from './layout/StatusBar'
 import { CommandPalette, type Command } from './layout/CommandPalette'
 import { SettingsDialog } from './layout/SettingsDialog'
+import { SceneLookDialog } from './layout/SceneLookDialog'
+import { DEFAULT_LOOK, parseLook, type SceneLook } from './components/viewport/sceneLook'
 import { Tabs } from './components/ui/Tabs'
 import { Button } from './components/ui/Button'
 import { Banner } from './components/ui/Banner'
@@ -396,6 +398,9 @@ function App() {
 
   const [showAxes, setShowAxes] = useState(false)
   const [showGrid, setShowGrid] = useState(true)
+  // the session's background and grid (USER 2026-11-09: View, Background and grid), saved in its prefs
+  const [sceneLook, setSceneLook] = useState<SceneLook>(DEFAULT_LOOK)
+  const [sceneLookOpen, setSceneLookOpen] = useState(false)
   const [pointCount, setPointCount] = useState(0)
   // STICKY: the viewer HAS an octree for this session. `pointCount` is the
   // VISIBLE count, reported every frame — it dips to 0 whenever Potree swaps
@@ -1377,6 +1382,7 @@ function App() {
         const visible = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v > 0
         setLightIntensity(visible(prefs.lightIntensity) ? prefs.lightIntensity : 1.0)
         setPointOpacity(visible(prefs.pointOpacity) ? prefs.pointOpacity : 1.0)
+        setSceneLook(parseLook(prefs.sceneLook))
         setTimeout(() => { prefsLoadedRef.current = true }, 300)
       })
       .catch(() => {
@@ -1385,6 +1391,7 @@ function App() {
         setPointBudget(10_000_000)
         setLightIntensity(1.0)
         setPointOpacity(1.0)
+        setSceneLook(DEFAULT_LOOK)
         prefsLoadedRef.current = true
       })
   }, [pointCount])  
@@ -1401,11 +1408,11 @@ function App() {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ pointSize, confidenceThreshold, pointBudget, lightIntensity, pointOpacity })
+        body: JSON.stringify({ pointSize, confidenceThreshold, pointBudget, lightIntensity, pointOpacity, sceneLook })
       }).catch(() => {})
     }, 500)
     return () => { if (prefsSaveTimer.current) clearTimeout(prefsSaveTimer.current) }
-  }, [pointSize, confidenceThreshold, pointBudget, lightIntensity, pointOpacity])
+  }, [pointSize, confidenceThreshold, pointBudget, lightIntensity, pointOpacity, sceneLook])
 
   // ── Sábana: Generate comparison (auto_match  compare  show via Potree) ──
   // Open the comparison dialog (shows toggle inside)
@@ -1948,6 +1955,7 @@ function App() {
       { type: 'separator', id: 's3' },
       { id: 'axes', label: t('menu.axes'), icon: <Axis3D aria-hidden />, checked: showAxes, onSelect: () => setShowAxes(v => !v) },
       { id: 'grid', label: t('menu.grid'), icon: <Grid3X3 aria-hidden />, checked: showGrid, onSelect: () => setShowGrid(v => !v) },
+      { id: 'sceneLook', label: t('menu.sceneLook'), icon: <Palette aria-hidden />, disabled: !hasSession, onSelect: () => setSceneLookOpen(true) },
       { id: 'density', label: t('settings.density'), icon: <SlidersHorizontal aria-hidden />, hint: t(`settings.${layout.state.density}`), onSelect: () => setSettingsOpen(true) },
     ] },
     { id: 'tools', label: t('menu.tools'), disabled: !hasSession, entries: [
@@ -2235,6 +2243,7 @@ function App() {
             onEraseBoxSelected={setEraseBoxSel}
             showAxes={showAxes}
             showGrid={showGrid}
+            sceneLook={sceneLook}
             pipelineRunning={cloudRebuildingHere}
             onPointCount={n => { setPointCount(n); if (n > 0) { lastCloudLoadAtRef.current = Date.now(); setCloudEverShown(true) } }}
             onFps={setFps}
@@ -2344,6 +2353,7 @@ function App() {
 
           {hasSession && !sessionLoading && (
             <ViewportHud onView={preset => viewportRef.current?.setStandardView(preset)} metersPerPixel={metersPerPixel}
+              gridLabel={showGrid ? t('view.gridCell', { cell: fmt.lengthText(sceneLook.grid.cellM), major: fmt.lengthText(sceneLook.grid.cellM * sceneLook.grid.majorEvery) }) : null}
               getQuaternion={() => viewportRef.current?.getCameraQuaternion() ?? null}
               onOrient={dir => viewportRef.current?.orientView(dir)}
               onOrbit={(a, e) => viewportRef.current?.orbitBy(a, e)}
@@ -2504,6 +2514,7 @@ function App() {
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SceneLookDialog open={sceneLookOpen} onClose={() => setSceneLookOpen(false)} look={sceneLook} onChange={setSceneLook} />
       {appDialog}
     </div>
   )

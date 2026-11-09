@@ -1,0 +1,15 @@
+/* SceneLookDialog — View, Background and grid (USER 2026-11-09) */
+.stac-scene-look__color {
+  inline-size: calc(var(--ctl-h) * 2);
+  block-size: var(--ctl-h);
+  padding: 0;
+  border: var(--bw) solid var(--border-ctl);
+  border-radius: var(--r-1);
+  background: none;
+  cursor: pointer;
+}
+
+.stac-scene-look__note {
+  font-size: var(--fs-0);
+  color: var(--text-3);
+}
