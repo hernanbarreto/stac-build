@@ -196,10 +196,16 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
 ## 7 · PENDING
 - ⭐ NEXT, AS SOON AS THE RECONSTRUCTION STAGE CLOSES (USER 2026-11-09, ~01:30 CDMX: "anotá para lo que sigue porque
   presentamos el proyecto en poco más de un mes … ni bien terminemos es lo que sigue"), in this order:
-  1. FUSION — comparing two dates of the same project (the two pccr scans, 2026-08-24 and 2026-08-31): "ahí vamos a
-     tener que trabajar con escalado" (registering the two clouds with scale).
-  2. BIM COMPARISON — "ya está hecha, hay que retomarla y comparar"; maybe build a base BIM model ("por ahí armás un BIM
-     de base, ya veremos") to show the comparison.
+  1. FUSION — TWO functions (USER 2026-11-09), both needing the scans coherent in POSITION and above all in SCALE:
+     a. MERGE: "la misma persona va el lunes y escanea una planta, el martes otro cuarto que no pudo escanear el lunes …
+        eso no es para comparar sino que deben fusionarse en una única gran nube y mesh" — they may stay two underneath,
+        but for viewing and loading they are ONE.
+     b. COMPARE: pccr 2026-08-24 scanned the whole technical room, pccr 2026-08-31 only a part of it — "ahí hay que
+        acoplarlas y comparar, no es en sí mismo una fusión" — aligned on the points / zones they share ("deben
+        coincidir algunos puntos en común o zonas, ya veremos cómo se implementa"), then compared.
+  2. BIM COMPARISON — "ya está hecha, hay que retomarla y comparar": the same as 1b with an IFC in place of the second
+     scan ("es lo mismo, o bastante parecido"); maybe build a base BIM model ("por ahí armás un BIM de base, ya veremos")
+     to show it.
   3. TICKETS — a simple tool to mark tickets anywhere in the project, as a review item or a non-conformity: "es para
      mostrar el concepto nomás".
   He expects GenRecon may need a few knobs for the right mesh ("es más rápido y es la última etapa"); after that the work
