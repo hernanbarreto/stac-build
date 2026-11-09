@@ -486,6 +486,11 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
     from precision import f6_torch as FT
     H, W = next(iter(dep.values())).shape
     inner = {f: interior(passed[f]) for f in frames}
+    rng_m = float((fusion or {}).get("witness_max_m", 0.0))
+    if rng_m > 0:
+        # THE RANGE (reconstruction.view_range_m, USER 2026-11-09): τ is measured only where a pixel can enter
+        from precision.camera import depth_map_distance
+        inner = {f: inner[f] & (depth_map_distance(dep[f], K) <= rng_m) for f in frames}
     tau = CC.measured_tau(dep, inner, K, c2w, frames, neighbors, tau_quantile)
     del inner
     if fusion is not None and float(fusion.get("max_depth_rel", 0.0)) <= 0.0:
@@ -980,7 +985,9 @@ def apply_mono_detail(pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out
             raise err
     if runner is None:
         runner = PointDiTRunner(md, log=log)
-    inner = {f: interior(passed[f]) for f in frames}
+    from precision.camera import depth_map_distance
+    # THE RANGE (reconstruction.view_range_m): τ only where a pixel can enter the cloud
+    inner = {f: interior(passed[f]) & (depth_map_distance(dep[f], K) <= float(pcfg.view_range_m)) for f in frames}
     # the session's own agreement tolerance on the BENT maps (the vote measures its own again after)
     tau0 = CC.measured_tau(dep, inner, K, c2w, frames, pcfg.bend.neighbors, pcfg.bend.tau_quantile)
     del inner
@@ -1200,6 +1207,18 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
             for i, o in obs[sp].items():
                 if len(o):
                     o[:, :2] = undistort_points(o[:, :2], inp.cam, **solver)
+    # THE RANGE (reconstruction.view_range_m, USER 2026-11-09: "esos puntos tampoco deben ser considerados en etapas
+    # anteriores … ni de nada"): a landmark farther than it from the keyframe neither bends that keyframe's depth nor
+    # judges the bend
+    from precision.camera import pixel_distance
+    n_far = 0
+    for sp in obs:
+        for i, o in list(obs[sp].items()):
+            if len(o):
+                near = pixel_distance(o[:, 0], o[:, 1], o[:, 2], K) <= float(pcfg.view_range_m)
+                n_far += int((~near).sum())
+                obs[sp][i] = o[near]
+    log(f"{LOG_TAG} landmark rows: {n_far:,} beyond the {float(pcfg.view_range_m):g} m range left out of the bend")
 
     zo, conf, chunk = {}, {}, {}
     for f in frames:
@@ -1338,7 +1357,7 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
                   "tri_max_deg": float(pcfg.cloud.fusion_tri_max_deg),
                   # ADJUST (USER 2026-11-08): the vote finds the position; witnesses beyond this range have none
                   "mode": "adjust" if str(pcfg.cloud.fusion_rule) == "adjust" else "keep",
-                  "witness_max_m": float(pcfg.cloud.fusion_witness_max_m),
+                  "witness_max_m": float(pcfg.view_range_m),
                   # the two selectable F6 additions (USER 2026-11-08 evening, OFF = the validated recipe)
                   "repair": bool(pcfg.cloud.fusion_repair),
                   "occlusion_veto": bool(pcfg.cloud.fusion_occlusion_veto),

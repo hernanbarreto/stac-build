@@ -109,6 +109,21 @@ class GridMap:
         return cls(**{k: (d[k] if k == "name" else int(d[k])) for k in keys})
 
 
+def pixel_distance(u, v, z, K) -> np.ndarray:
+    """Distance from the camera (metres) of the points at pixels (u, v) with axial depth z on the pinhole K — what THE
+    RANGE (reconstruction.view_range_m, USER 2026-11-09) is measured on: z · ‖((u − cx)/fx, (v − cy)/fy, 1)‖."""
+    K = np.asarray(K, np.float64)
+    x = (np.asarray(u, np.float64) - K[0, 2]) / K[0, 0]
+    y = (np.asarray(v, np.float64) - K[1, 2]) / K[1, 1]
+    return np.asarray(z, np.float64) * np.sqrt(x * x + y * y + 1.0)
+
+
+def depth_map_distance(depth: np.ndarray, K) -> np.ndarray:
+    """:func:`pixel_distance` of every pixel of an (H, W) axial depth map."""
+    H, W = np.asarray(depth).shape
+    return pixel_distance(np.arange(W)[None, :], np.arange(H)[:, None], depth, K)
+
+
 def angle_px(fx: float, deg: float) -> float:
     """An angle as the image distance it spans at the principal point of a camera of focal ``fx`` (px):
     fx · tan θ (USER 2026-11-09: the stages' pixel thresholds are angles, independent of the resolution)."""

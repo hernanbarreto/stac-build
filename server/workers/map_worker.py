@@ -1823,6 +1823,12 @@ def _run_intake_selection(pipe: WorkerPipe, session_path: Path, frames_dir: Path
     _amb3r_coverage_fill(pipe, session_path, frames_dir, config)
 
 
+def _view_range_m(config: dict) -> float:
+    """THE RANGE of every view (reconstruction.view_range_m of the job's configuration, server/view_range.py)."""
+    from view_range import view_range_m
+    return view_range_m(config)
+
+
 def _amb3r_coverage_fill(pipe: WorkerPipe, session_path: Path, frames_dir: Path, config: dict) -> None:
     """With the AMB3R structure probe (reconstruction.vggtomega.structure.probe 'amb3r'), right after I1's keyframes and
     before anything reads them: AMB3R-SLAM over the WHOLE VIDEO (reconstruction/amb3r_probe.py — reused while the
@@ -1857,7 +1863,7 @@ def _amb3r_coverage_fill(pipe: WorkerPipe, session_path: Path, frames_dir: Path,
            # covered = a second view at ≥ min_tri_deg (USER 2026-11-08: the fill to F6's support of 10 views doubled
            # pccr's keyframes, 313 → 686 — the cubes, the time and the witnesses' baseline with them; the coverage of
            # what is far comes from F6's witnesses chosen by their baseline, precision/depth_on_f5.covisible_witnesses)
-           "--device", "cuda"]
+           "--device", "cuda", "--view-range-m", repr(_view_range_m(config))]
     proc = subprocess.Popen(cmd, cwd=str(Path(__file__).resolve().parent.parent), env=repro.deterministic_env(),
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     tail = []
@@ -2543,7 +2549,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                vggt_config, resolution=int(_pres["resolution"]), max_views=_view_cap,
                                sky_cache=output_dir / "maplong_run" / "sky_masks", log=pipe.send_log,
                                probe=_st_cfg["probe"], cube_m=_st_cfg["cube_m"], walk_m=_walk0,
-                               cut=_st_cfg["cut"], min_kf=int(_st_cfg["min_chunk_keyframes"]))
+                               cut=_st_cfg["cut"], min_kf=int(_st_cfg["min_chunk_keyframes"]),
+                               view_range_m=_view_range_m(config))
     _cubes = _cplan["cubes"]
     # no SALAD on cubes, one cube or many (the revisits are AMB3R's map's: which keyframe sees what —
     # reconstruction/cubes.py 7): a previous reconstruction's revisit reference and SALAD pairs are deleted — never
@@ -2679,8 +2686,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # THE RANGE (USER 2026-11-09: "puntos a más de 10 m no deben aportar, a menos de 10 m de la cámara sí"): the
         # cube graph's seams and closures fit only points within F6's range of their camera
         from precision.config import load_precision_config as _lpc_range
-        vggt_config["Model"]["cube_range_m"] = float(
-            _lpc_range(session_dir=output_dir.parent).cloud.fusion_witness_max_m)
+        vggt_config["Model"]["cube_range_m"] = float(_lpc_range(session_dir=output_dir.parent).view_range_m)
         _persist_cube_plan(_cplan, _sets, _owner, _n_selected, _walk0, _res, _ctx)
         pipe.send_log(f"CUBES (I4): walk {_walk0:.1f} m → {_plan_layout_text({'chunk_sets': _sets})}, every two "
                       f"neighbour blocks one cube; ONE Omega pass per cube, ONE Sim(3) graph")
@@ -2808,6 +2814,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # (F2, F5, a correction) moved: reconstruction.applied_marker.redo_allowed (USER 2026-11-05:
         # "debe ser determinista en todo el pipeline")
         _s = _scale_run(output_dir, dry_run=False, aligned_chunks=_keep_aligned, fresh_products=not _done,
+                        range_m=_view_range_m(config),
                         log=lambda m: pipe.send_log(f"[scale-align] {m}"),
                         near_frac=float(_va_cfg.get("scale_near_frac", 0.25)),
                         conf_top_frac=float(_va_cfg.get("scale_conf_top_frac", 0.10)),
@@ -2838,7 +2845,8 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                stage="reconstruction")
             from reconstruction.orient import run as _orient_run
             _T = _orient_run(output_dir, log=lambda m: pipe.send_log(f"[orient] {m}"),
-                             aligned_chunks=_keep_aligned, fresh_products=not _done)
+                             aligned_chunks=_keep_aligned, fresh_products=not _done,
+                             range_m=_view_range_m(config))
             if _T is None:
                 pipe.send_log("[orient] orientation NOT applied (no poses or weak camera-down "
                               "consensus) — the floor leveler downstream is the fallback",

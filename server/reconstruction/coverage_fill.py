@@ -66,7 +66,7 @@ def _frame_no(name) -> int:
 class CoverageMap:
     """What every reconstructed frame saw, on the card, and which keyframes see and cover each of its points."""
 
-    def __init__(self, video: Dict[str, np.ndarray], device: str, state: bool = True):
+    def __init__(self, video: Dict[str, np.ndarray], device: str, state: bool = True, range_m: float = 0.0):
         """``state``: also the map's per-point state (which keyframes see and cover each point) — the fill's; the cut
         (reconstruction/cubes.py) reads only the points."""
         import torch
@@ -85,6 +85,18 @@ class CoverageMap:
         self.C = C.float()
         self.K = K.float()
         self.D = D
+        if range_m and range_m > 0:
+            # THE RANGE (reconstruction.view_range_m, USER 2026-11-09: "esos puntos tampoco deben ser considerados en
+            # etapas anteriores … ni de nada"): a pixel whose point lies farther than it from its own camera is not in
+            # the map — it neither counts as seen nor sees, in the fill, the cut, the co-visibility or the revisits
+            ys, xs = torch.meshgrid(torch.arange(D.shape[1], device=dev, dtype=torch.float64),
+                                    torch.arange(D.shape[2], device=dev, dtype=torch.float64), indexing="ij")
+            rx = (xs[None] - K[:, 0, 2, None, None]) / K[:, 0, 0, None, None]
+            ry = (ys[None] - K[:, 1, 2, None, None]) / K[:, 1, 1, None, None]
+            dist = D.double() * torch.sqrt(rx * rx + ry * ry + 1.0)
+            D = torch.where(dist <= float(range_m), D, torch.zeros_like(D))
+            self.D = D
+            del rx, ry, dist
         valid = D > 0
         self.n_per = valid.sum((1, 2)).to(torch.int64)
         self.off = torch.cat([torch.zeros(1, dtype=torch.int64, device=dev), torch.cumsum(self.n_per, 0)])
@@ -198,7 +210,8 @@ class CoverageMap:
 
 
 def fill(video: Dict[str, np.ndarray], keyframe_frames: Sequence[int], quality_rows: Sequence[Dict], *,
-         min_tri_deg: float, min_support: int = 1, device: str = "cuda", log: Callable[[str], None] = print) -> Dict:
+         min_tri_deg: float, min_support: int = 1, device: str = "cuda", log: Callable[[str], None] = print,
+         range_m: float = 0.0) -> Dict:
     """The fill on the whole-video pass ``video`` (reconstruction/amb3r_probe.load_video) for I1's keyframes
     ``keyframe_frames`` (frame numbers); ``quality_rows``: I0's frames (frame, file, sharp_rank, usable). A point is
     COVERED when ``min_support`` keyframes see it from at least ``min_tri_deg`` away from the first that did — F6's
@@ -207,7 +220,7 @@ def fill(video: Dict[str, np.ndarray], keyframe_frames: Sequence[int], quality_r
     them); 1 = the second view of version 2."""
     from reconstruction.amb3r_probe import source_records
     t0 = time.monotonic()
-    cmap = CoverageMap(video, device)
+    cmap = CoverageMap(video, device, range_m=range_m)
     cmap.support = max(1, int(min_support))
     kf_src = sorted(set(int(r) for r in source_records(video, keyframe_frames)))
     tol, bar = cmap.tolerance(list(zip(kf_src[:-1], kf_src[1:])), log)
@@ -293,7 +306,7 @@ def _base_witness(wit: Dict) -> Dict:
 
 
 def session_fill(scan_dir: Path, video_npz: Path, video_stamp: Dict, *, min_tri_deg: float, min_support: int = 1,
-                 device: str = "cuda", log: Callable[[str], None] = print) -> Dict:
+                 device: str = "cuda", log: Callable[[str], None] = print, range_m: float = 0.0) -> Dict:
     """Fill the session's keyframes (module docstring); reused when its stamp — the whole-video pass, I1's selection,
     I0's report, this code and the bars — is the one on disk."""
     from intake.quality import _write_json_atomic
@@ -306,7 +319,7 @@ def session_fill(scan_dir: Path, video_npz: Path, video_stamp: Dict, *, min_tri_
     base, wbase = _base_selection(sel_doc), _base_witness(wit_doc)
     stamp_src = {"version": FILL_VERSION, "video": video_stamp, "i1_selected_files": base["selected_files"],
                  "quality_features_sha256": _sha_file(p_q), "code": _sha_file(Path(__file__)),
-                 "min_tri_deg": float(min_tri_deg), "min_support": int(min_support)}
+                 "min_tri_deg": float(min_tri_deg), "min_support": int(min_support), "view_range_m": float(range_m)}
     stamp = hashlib.sha256(json.dumps(stamp_src, sort_keys=True).encode()).hexdigest()
     rec_p = scan_dir / "intake" / FILL_NAME
     if (sel_doc.get("coverage_fill") or {}).get("stamp") == stamp and rec_p.exists() \
@@ -317,7 +330,7 @@ def session_fill(scan_dir: Path, video_npz: Path, video_stamp: Dict, *, min_tri_
     quality = json.loads(p_q.read_text())
     kf = [_frame_no(f) for f in base["selected_files"]]
     res = fill(load_video(video_npz), kf, quality.get("frames") or [], min_tri_deg=min_tri_deg,
-               min_support=min_support, device=device, log=log)
+               min_support=min_support, device=device, log=log, range_m=range_m)
     added = res["added"]
     new_files = sorted(set(base["selected_files"]) | {a["file"] for a in added}, key=_frame_no)
     kfs = sorted(list(base.get("keyframes", [])) + [
@@ -368,10 +381,11 @@ def main(argv=None) -> int:
     ap.add_argument("--min-support", type=int, default=1,
                     help="views ≥ min-tri-deg from a point's first view that cover it (F6's support floor)")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--view-range-m", type=float, required=True, help="reconstruction.view_range_m (THE RANGE)")
     a = ap.parse_args(argv)
     session_fill(Path(a.scan), Path(a.video), json.loads(Path(a.video_stamp).read_text()),
                  min_tri_deg=a.min_tri_deg, min_support=a.min_support, device=a.device,
-                 log=lambda m: print(m, flush=True))
+                 log=lambda m: print(m, flush=True), range_m=a.view_range_m)
     return 0
 
 

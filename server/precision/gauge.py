@@ -617,7 +617,7 @@ def _window_gains(frames, depth, conf, mono, omega, chainage, gcfg) -> Dict[tupl
 
 
 def da3_rows(session_dir: Path, chainage: Dict[int, float], log_s0: float, gcfg,
-             rid: Optional[str] = None) -> Tuple[List[Row], List[Row], List[dict]]:
+             rid: Optional[str] = None, range_m: float = 0.0) -> Tuple[List[Row], List[Row], List[dict]]:
     """(da3_windows rows, da3_mono rows, per-window report incl. the near-band variant).
     A frame whose Huber gain did not converge gives no gain: the window's report lists
     it (``huber.not_converged`` / ``huber.mono_not_converged``; ``huber.mad_zero`` the
@@ -640,6 +640,17 @@ def da3_rows(session_dir: Path, chainage: Dict[int, float], log_s0: float, gcfg,
             frames = [int(f) for f in z["frames"]]
             depth, conf = z["depth"], z["conf"]
             mono = z["depth_mono"] if "depth_mono" in z.files else None
+            intr = z["intrinsics"] if "intrinsics" in z.files else None
+        if range_m and range_m > 0:
+            # THE RANGE (reconstruction.view_range_m, USER 2026-11-09): a pixel farther than it from the camera
+            # weighs nothing in the gauge — DA3's metric depth on its own window intrinsics
+            if intr is None:
+                raise GaugeError(f"{p.name} carries no intrinsics — the range (reconstruction.view_range_m) cannot be "
+                                 f"measured on its pixels; re-run the I3 windows")
+            from precision.camera import depth_map_distance
+            far = np.stack([depth_map_distance(np.where(depth[i] > 0, depth[i], 0.0), intr[i]) > float(range_m)
+                            for i in range(len(frames))])
+            conf = np.where(far, 0.0, conf)
         if cal_da3 is not None:
             q = CAL.lookup(cal_da3, np.nan_to_num(conf, nan=0.0), np.where(depth > 0, depth, 1.0))
             conf = np.where((conf > 0) & (q > 0), 1.0 / np.maximum(q, 1e-12) ** 2, 0.0)
@@ -1015,7 +1026,8 @@ def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = pr
     wins, mono, win_report = [], [], []
     inst = set(gcfg.instruments)
     if {"da3_windows", "da3_mono"} & inst:
-        wins, mono, win_report = da3_rows(session_dir, chainage, log_s0, gcfg, rid)
+        from view_range import view_range_m
+        wins, mono, win_report = da3_rows(session_dir, chainage, log_s0, gcfg, rid, range_m=view_range_m(raw))
         evidence["confidence_calibration.json"] = calibration_for_gauge(out, rid)[1]
     if "da3_windows" in inst:
         rows += wins

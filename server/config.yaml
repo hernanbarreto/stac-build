@@ -1549,6 +1549,13 @@ poisson:
 #   "gaus_slam_hybrid"  → GauS-SLAM with LiDAR-calibrated DA3 + ARKit
 #   "nerfstudio"        → neus-facto SDF mesh via nerfstudio
 reconstruction:
+  view_range_m: 10.0                     # THE RANGE of every view (USER 2026-11-09: "ningún KF debe aportar puntos
+                                         # más allá de los 10 m respecto de su posición … esos puntos tampoco deben
+                                         # ser considerados en etapas anteriores, de cierres ni de paridades, ni de
+                                         # nada … los 10 m es una variable, la misma para todas"): a point farther
+                                         # than this from the camera that measured it is born by no keyframe (F6) and
+                                         # weighs in no fit, pairing, scale, closure, co-visibility or statistic of any
+                                         # stage (server/view_range.py — every stage reads it there)
   backend: "vggtomega_pgsr"             # RESTORED 2026-08-19 (user: "volvamos al 11/08"): the
                                         # known-good era. DA3-streaming cloud was tried 08-19 and
                                         # judged worse than VGGT ("ni cerca"). (prev da3 A/B: single
@@ -2695,7 +2702,7 @@ reconstruction:
       fusion_rule: colmap               # THE VALIDATED RECIPE'S VOTE (USER 2026-11-08 morning: "excelente, que quede
                                         # este como pipeline final"; restored ~16:30 with the 64 cap after the day's
                                         # trials). "adjust" (USER 2026-11-08: "no es un filtro, es un AJUSTE") stays
-                                        # selectable: every qualified witness within fusion_witness_max_m puts the
+                                        # selectable: every qualified witness within reconstruction.view_range_m puts the
                                         # depth ITS surface measures on the ray and the STRONGEST cluster of ≥
                                         # min_support_views decides the position — a losing camp is MOVED onto the
                                         # winner; measured on station's sick 10-cube geometry it moved 4.0 M px and
@@ -2719,13 +2726,6 @@ reconstruction:
                                         # 39.5 % contradicted, coverage 37.9 %). A positive value is used as is.
       fusion_tri_min_deg: 3.0           # COLMAP PatchMatch filter_min_triangulation_angle default ("stable")
       fusion_tri_max_deg: 30.0          # the wide end of the usual 10–30° source-view band (visibility-aware MVS)
-      fusion_witness_max_m: 10.0        # USER 2026-11-08 ("tu voto no tiene peso porque estás a más de 10 o 15 m,
-                                        # ponele 10 m, no más que eso") and 2026-11-09 ("nadie debe aportar puntos a
-                                        # más de 10m de distancia"): THE RANGE of every view — no keyframe gives birth
-                                        # to a point farther than this from its camera, no witness farther than this
-                                        # from the point confirms, sees through or occludes it (zaragoza 2026-11-09:
-                                        # 11.7 % of its kept pixels stood on confirmations from beyond 10 m — the
-                                        # start of the walk's copies at 10.5 m; pccr 3108: 0 %)
       fusion_majority: true             # ON (USER 2026-11-09: "si tenemos muchas vistas del mismo punto 5 puede
                                         # significar poco, pero si tiene pocas vistas puede significar mucho … sí,
                                         # ok a todo"): a pixel enters only when the witnesses in range that CONFIRM

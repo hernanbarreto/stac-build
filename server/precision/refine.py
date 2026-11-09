@@ -782,10 +782,38 @@ def _rung_and_continuation(name: str, start: RungResult, wh, fit_g, held_g, sig,
     return r, held_r, dropped, cont, err
 
 
+def within_range(track: np.ndarray, frame: np.ndarray, uv: np.ndarray, kf_frames: Sequence[int], w2c: np.ndarray,
+                 params: Sequence[float], solver: dict, min_tri_deg: float, range_m: float) -> np.ndarray:
+    """THE RANGE (reconstruction.view_range_m, USER 2026-11-09: "ningún KF debe aportar puntos más allá de los 10 m
+    … esos puntos tampoco deben ser considerados en etapas anteriores … ni de nada"): per observation, False when it
+    is on a keyframe and its track, triangulated from every keyframe view with the poses ``w2c``, lies farther than
+    ``range_m`` from that keyframe's camera. Observations off the keyframes and tracks that do not triangulate are
+    kept (nothing to measure them with — the fit's own triangulation drops the latter)."""
+    track = np.asarray(track, np.int64); frame = np.asarray(frame, np.int64)
+    keep = np.ones(len(track), bool)
+    X = triangulate_tracks(group_tracks(track, frame, uv, kf_frames), w2c, params, solver, min_tri_deg)
+    if not X:
+        return keep
+    tx = np.array(sorted(X), np.int64)
+    Xs = np.stack([X[int(t)] for t in tx])
+    fr = np.asarray([int(f) for f in kf_frames], np.int64)
+    fo = np.argsort(fr, kind="stable")
+    pos = np.searchsorted(fr[fo], frame)
+    on_kf = (pos < len(fr)) & (fr[fo][np.minimum(pos, len(fr) - 1)] == frame)
+    ti = np.searchsorted(tx, track)
+    has = (ti < len(tx)) & (tx[np.minimum(ti, len(tx) - 1)] == track)
+    m = on_kf & has
+    C = np.linalg.inv(np.asarray(w2c, np.float64))[:, :3, 3]
+    d = np.linalg.norm(Xs[ti[m]] - C[fo[pos[m]]], axis=1)
+    keep[np.flatnonzero(m)[d > float(range_m)]] = False
+    return keep
+
+
 def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
                 track: np.ndarray, frame: np.ndarray, uv: np.ndarray, split: np.ndarray,
                 kf_frames: Sequence[int], sigma_rel: float, cfg, solver: dict, *,
-                error_factor: float, log: Callable = print, solve: bool = True) -> Dict[str, Any]:
+                error_factor: float, log: Callable = print, solve: bool = True,
+                range_m: float = 0.0) -> Dict[str, Any]:
     """The ladder over the keyframes. ``split`` per OBSERVATION (its track's split).
     ``error_factor``: ``correction_graph.graph.improvement_error_factor`` (the user's 2).
     ``solve=False`` (``refine.enabled: false``, the evaluation battery): no rung is solved — the
@@ -796,6 +824,11 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
     if not (np.isfinite(fac) and fac > 0.0):
         raise RefineError(f"error_factor {error_factor!r} must be finite and > 0 "
                           f"(correction_graph.graph.improvement_error_factor)")
+    if range_m and range_m > 0:
+        keep = within_range(track, frame, uv, kf_frames, w2c0, params0, solver, cfg.min_tri_deg, range_m)
+        log(f"{LOG_TAG} range {range_m:g} m (reconstruction.view_range_m): {int((~keep).sum()):,} of {len(keep):,} "
+            f"observation(s) of a landmark farther than it from their keyframe left out of the fit and the held-out")
+        track, frame, uv, split = track[keep], frame[keep], uv[keep], split[keep]
     fit_g = group_tracks(track[split == 0], frame[split == 0], uv[split == 0], kf_frames)
     held_g = group_tracks(track[split == 1], frame[split == 1], uv[split == 1], kf_frames)
     dropped_fit: dict = {"tracks": 0, "observations": 0}
@@ -1262,7 +1295,7 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     fac = float(improvement_error_factor(raw_of(pcfg)))   # the job's frozen configuration (point 69)
     core = refine_core(w2c0, cam.params, (cam.width, cam.height), tr["obs_track"], tr["obs_frame"],
                        tr["obs_uv_native"], split_obs, kf, sigma_rel, cfg, solver,
-                       error_factor=fac, log=log, solve=bool(cfg.enabled))
+                       error_factor=fac, log=log, solve=bool(cfg.enabled), range_m=float(pcfg.view_range_m))
     best = core["best"]
     _t = time.perf_counter()
     bound = heldout_bound(heldout_leave_one_view_out(core["held_groups"], best, solver, cfg,

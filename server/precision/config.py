@@ -150,6 +150,14 @@ def _sub(section: Any, key: str, path: str) -> Dict[str, Any]:
     return v
 
 
+def _view_range(raw) -> float:
+    from view_range import view_range_m
+    try:
+        return view_range_m(raw)
+    except (KeyError, ValueError) as e:
+        raise PrecisionConfigError(str(e)) from e
+
+
 def _gone(section: Any, key: str, path: str, why: str) -> None:
     """A key that was REMOVED by a decision: a leftover in config.yaml fails the load naming it
     and the decision — it would otherwise sit there looking like it still decided something."""
@@ -407,16 +415,6 @@ class CloudConfig:
     fusion_max_depth_rel: float
     fusion_tri_min_deg: float
     fusion_tri_max_deg: float
-    fusion_witness_max_m: float # USER 2026-11-08 ("tu voto no tiene peso porque estás a más de 10 m, ponele
-                                # 10 m, no más que eso") and 2026-11-09 ("nadie debe aportar puntos a más de 10m
-                                # de distancia"): THE RANGE of every view under the fusion rules — no keyframe
-                                # gives birth to a point farther than this from its camera, and no witness
-                                # farther than this from the point confirms, sees through or occludes it;
-                                # "adjust" (fusion_rule) = the vote
-                                # finds the CORRECT position ("no es un filtro, es un ajuste"): the strongest
-                                # cluster of qualified witness depths along the ray decides, a pixel whose own
-                                # camp loses is MOVED onto the winner, only a pixel with no cluster of
-                                # min_support_views dies.
     fusion_repair: bool         # USER 2026-11-08 evening: a COLMAP-mode pixel short of min_support_views whose
                                 # witnesses' surfaces agree among themselves on its ray is published at THEIR
                                 # median instead of dropped (coverage of the GOOD kind, pending A6). OFF = the
@@ -580,6 +578,9 @@ class PrecisionConfig:
     cloud_metrics: CloudMetricsConfig
     chunk_check: ChunkCheckConfig
     runner: RunnerConfig
+    # THE RANGE of every view (USER 2026-11-09): reconstruction.view_range_m, read by server/view_range.py — no
+    # keyframe gives birth to, and no stage weighs, a point farther than this from the camera that measured it
+    view_range_m: float
     # the WHOLE configuration dict this one was loaded from (point 69, 2026-10-08): the
     # ``raw:`` sections a step reads outside its own block — reconstruction.simple's
     # confidence floor, postprocessing's cloud recipe, correction_graph's factor, the loops
@@ -915,16 +916,13 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                         fusion_max_depth_rel=float(cl.get("fusion_max_depth_rel", 0.01)),
                         fusion_tri_min_deg=float(cl.get("fusion_tri_min_deg", 3.0)),
                         fusion_tri_max_deg=float(cl.get("fusion_tri_max_deg", 30.0)),
-                        fusion_witness_max_m=float(cl.get("fusion_witness_max_m", 10.0)),
                         fusion_repair=bool(cl.get("fusion_repair", False)),
                         fusion_occlusion_veto=bool(cl.get("fusion_occlusion_veto", False)),
                         fusion_majority=bool(cl.get("fusion_majority", False)),
                         no_birth_without_parallax=bool(cl.get("no_birth_without_parallax", True)))
     if cloud.fusion_rule not in ("colmap", "tau", "adjust"):
         raise ValueError(f"precision.cloud.fusion_rule {cloud.fusion_rule!r}: 'colmap' | 'tau' | 'adjust'")
-    if not cloud.fusion_witness_max_m > 0:
-        raise ValueError(f"precision.cloud.fusion_witness_max_m {cloud.fusion_witness_max_m!r}: metres > 0 "
-                         f"(USER 2026-11-08: 'ponele 10 m, no más que eso')")
+    _gone(cl, "fusion_witness_max_m", "cloud", "USER 2026-11-09: ONE range for every stage — reconstruction.view_range_m")
     cc = _sub(sec, "chunk_check", "")
     _gone(cc, "plane_min_inlier_frac", "chunk_check",
           "USER 2026-10-07 (docs/plan_determinismo.md point 140): no acceptance bar on the floor plane — "
@@ -1029,4 +1027,5 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                            tracks=tracks, refine=refine, depth=depth, fuse=fuse,
                            cloud=cloud, bend=bend, flyers=flyers, mono_detail=mono_detail,
                            cloud_metrics=cloud_metrics, chunk_check=chunk_check, runner=runner,
+                           view_range_m=_view_range(raw),
                            raw=(raw if isinstance(raw, dict) else None))

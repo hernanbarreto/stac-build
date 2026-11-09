@@ -148,7 +148,7 @@ def _ratio(da3: np.ndarray, omega: np.ndarray, conf: Optional[np.ndarray] = None
 
 
 def estimate_scale(output_dir: Path, log=None,
-                   near_frac: float = 0.25, conf_top_frac: float = 0.0) -> Optional[float]:
+                   near_frac: float = 0.25, conf_top_frac: float = 0.0, range_m: float = 0.0) -> Optional[float]:
     # `log` (if given) mirrors every message to the caller's sink (e.g. the worker pipe →
     # server log file AND the UI) so WHAT HAPPENED is always visible, not just in this
     # module's logger (which the worker does not forward).
@@ -176,9 +176,19 @@ def estimate_scale(output_dir: Path, log=None,
             npz = np.load(p)
             dd = npz["depth"].astype(np.float32)
             cc = npz["conf"].astype(np.float32) if "conf" in npz.files else None
+            Kd = npz["intrinsics"] if "intrinsics" in npz.files else None
         except Exception:
             continue
-        r = _ratio(dd, od, conf=cc, near_frac=near_frac, conf_top_frac=conf_top_frac)
+        restrict = None
+        if range_m and range_m > 0:
+            # THE RANGE (reconstruction.view_range_m, USER 2026-11-09): DA3's pixels farther than it from the camera
+            # never vote the metre — measured on DA3's own metric depth and intrinsics
+            if Kd is None:
+                raise RuntimeError(f"{p.name} carries no intrinsics — the range (reconstruction.view_range_m) "
+                                   f"cannot be measured on DA3's pixels")
+            from precision.camera import depth_map_distance
+            restrict = depth_map_distance(np.where(dd > 0, dd, 0.0), Kd) <= float(range_m)
+        r = _ratio(dd, od, conf=cc, near_frac=near_frac, conf_top_frac=conf_top_frac, restrict=restrict)
         if r is not None and np.isfinite(r) and r > 0:
             ratios.append(r)
         else:
@@ -401,7 +411,7 @@ def _kf_centres_and_times(output_dir: Path, session_dir: Path):
 
 def estimate_v2(output_dir: Path, log=None, near_frac: float = 0.25,
                 conf_top_frac: float = 0.0, cfg: Optional[dict] = None,
-                session_dir: Optional[Path] = None) -> Tuple[Optional[float], dict]:
+                session_dir: Optional[Path] = None, range_m: float = 0.0) -> Tuple[Optional[float], dict]:
     """Phase-A estimator + diagnostics. Returns (s_applied, diagnostics dict).
 
     Scale source priority: VIO (when detected and enabled) SETS s; the DA3 model
@@ -420,7 +430,8 @@ def estimate_v2(output_dir: Path, log=None, near_frac: float = 0.25,
 
     # ── DA3 model (baseline s always computed via the untouched production path) ──
     s_baseline = estimate_scale(output_dir, log=log, near_frac=near_frac,
-                                conf_top_frac=conf_top_frac)
+                                conf_top_frac=conf_top_frac, range_m=range_m)
+    diag["view_range_m"] = float(range_m)
     frames = sm.collect_frame_samples(output_dir, near_frac=near_frac,
                                       conf_top_frac=conf_top_frac)
     s_da3: Optional[float] = s_baseline
@@ -545,7 +556,8 @@ def estimate_v2(output_dir: Path, log=None, near_frac: float = 0.25,
 def run(output_dir: Path, dry_run: bool = False, log=None,
         near_frac: float = 0.25, conf_top_frac: float = 0.0,
         cfg: Optional[dict] = None, session_dir: Optional[Path] = None,
-        aligned_chunks: bool = True, fresh_products: Optional[bool] = None) -> Optional[float]:
+        aligned_chunks: bool = True, fresh_products: Optional[bool] = None,
+        range_m: float = 0.0) -> Optional[float]:
     """Estimate + apply the metric scale. Returns the scale s (float) on success OR when
     it was ALREADY applied (marker present → output is already metric). Returns None ONLY
     when the scale could not be estimated (genuine failure) — the caller MUST treat None
@@ -586,7 +598,7 @@ def run(output_dir: Path, dry_run: bool = False, log=None,
                  f"marker scaled ({why}): the scale is redone from the poses on disk (point 10)")
             AM.clear(marker)
     s, diag = estimate_v2(output_dir, log=log, near_frac=near_frac,
-                          conf_top_frac=conf_top_frac, cfg=cfg, session_dir=session_dir)
+                          conf_top_frac=conf_top_frac, cfg=cfg, session_dir=session_dir, range_m=range_m)
     diag["dry_run"] = bool(dry_run)
     try:
         (output_dir / DIAGNOSTICS_NAME).write_text(json.dumps(diag, indent=2))

@@ -433,7 +433,7 @@ def analyse(probe_npz: Path, inputs: Dict, *, device: str = "cuda", log: Callabl
         own_frames = sum(1 for f, r in zip(nums, rec_of) if int(rec_frame[r]) == f)
         log(f"[cubes] what {len(nums)} views see: the records of {len(set(rec_of))} frames AMB3R reconstructed — "
             f"{own_frames} view(s) their own frame's, the others the nearest reconstructed frame's")
-        cmap = CoverageMap(video, device, state=False)
+        cmap = CoverageMap(video, device, state=False, range_m=float(inputs.get("view_range_m", 0.0)))
         probe_resolution = int(max(int(v) for v in video["grid_wh"]))
         extra = {"views": nums, "view_source_frames": [int(rec_frame[r]) for r in rec_of]}
         del video
@@ -551,7 +551,8 @@ def code_sha() -> str:
 def session_cubes(scan_dir: Path, frames_dir: Path, sel_files: Sequence[str], turn_files: Sequence[str],
                   witness_files: Sequence[str], cfg_v: dict, *, resolution: int, max_views: int,
                   sky_cache: Optional[Path], log: Callable[[str], None], probe: str = "omega",
-                  cube_m: float = CUBE_M, walk_m: float = 0.0, cut: str = "covis", min_kf: int = 0) -> Dict:
+                  cube_m: float = CUBE_M, walk_m: float = 0.0, cut: str = "covis", min_kf: int = 0,
+                  view_range_m: float = 0.0) -> Dict:
     """The session's cube plan on the STRUCTURE PROBE — ``probe`` "amb3r": AMB3R-SLAM's whole-video pass
     (intake/amb3r_video.npz, run right after the intake's keyframes — workers/map_worker._run_intake_selection —
     and the keyframes completed on it, reconstruction/coverage_fill.py); "omega": one Omega pass over every keyframe
@@ -608,7 +609,9 @@ def session_cubes(scan_dir: Path, frames_dir: Path, sel_files: Sequence[str], tu
               "witness": sorted(_frame_no(f) for f in witness_files),
               "plan_index": [int(i) for i in planning_indices(Path(scan_dir), kf)], "max_views": int(max_views),
               "cut": str(cut), "min_chunk_keyframes": int(min_kf),
-              "cube_m": float(cube_m), "walk_m": float(walk_m)}
+              "cube_m": float(cube_m), "walk_m": float(walk_m),
+              # THE RANGE (reconstruction.view_range_m): the AMB3R map the cut reads holds only points within it
+              "view_range_m": float(view_range_m)}
     h = hashlib.sha256(json.dumps(stamp, sort_keys=True).encode())
     h.update(code_sha().encode())
     h.update(json.dumps(inputs, sort_keys=True).encode())

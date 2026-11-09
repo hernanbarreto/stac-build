@@ -144,10 +144,11 @@ def test_the_adjust_vote_collapses_a_displaced_camp_and_the_distance_cap_silence
     assert tot["repaired"] > 0, "moved pixels are counted"
     z1 = final[1][0]
     assert abs(np.median(z1[z1 > 0]) - 3.0) < 0.05, "the strong camp stays on its wall"
-    near = dict(fusion, witness_max_m=2.0)               # the wall is ~3 m away: nobody may vote
-    final2, _, tot2 = edge_keeping_vote(*args(near), False, log=lambda *a: None,
-                                        min_parallax_deg=3.0, min_support=3, fusion=near)
-    assert (final2[4][0] == 0).all(), "witnesses beyond witness_max_m have no vote (USER: 10 m, no más)"
+    near = dict(fusion, witness_max_m=2.0)               # the wall is ~3 m away: nothing lies within the range
+    from precision.corrected_cloud import CorrectedCloudError
+    with pytest.raises(CorrectedCloudError, match="share a surface"):
+        # USER 2026-11-09: nothing beyond the range is considered anywhere — not even to measure τ
+        edge_keeping_vote(*args(near), False, log=lambda *a: None, min_parallax_deg=3.0, min_support=3, fusion=near)
 
 
 def test_fusion_repair_publishes_the_short_pixel_at_its_witnesses_median():
@@ -229,10 +230,11 @@ def test_the_range_births_nothing_beyond_it_and_silences_far_witnesses():
     far, _, t_far = edge_keeping_vote(*args(), False, log=lambda *a: None, min_parallax_deg=3.0, min_support=2,
                                       fusion=dict(base, witness_max_m=10.0))
     assert (far[2][0][mid] > 0).mean() > 0.5 and t_far["beyond_range"] == 0, "3 m inside a 10 m range: kept"
-    short, _, t_short = edge_keeping_vote(*args(), False, log=lambda *a: None, min_parallax_deg=3.0,
-                                          min_support=2, fusion=dict(base, witness_max_m=2.0))
-    assert all((short[f][0] == 0).all() for f in order), "beyond the range nobody gives birth"
-    assert t_short["beyond_range"] > 0 and t_short["kept"] == 0
+    from precision.corrected_cloud import CorrectedCloudError
+    with pytest.raises(CorrectedCloudError, match="share a surface"):
+        # nothing within the range: not even τ can be measured (USER 2026-11-09: "ni de nada")
+        edge_keeping_vote(*args(), False, log=lambda *a: None, min_parallax_deg=3.0, min_support=2,
+                          fusion=dict(base, witness_max_m=2.0))
     import torch
     from precision import f6_torch as FT
     d = {f: dd.copy() for f, dd in dep.items()}

@@ -161,7 +161,7 @@ def _transform_ply_xyz(path: Path, R: np.ndarray, t: np.ndarray) -> bool:
     return True
 
 
-def _ply_y_percentile(path: Path, R: np.ndarray, pct: float) -> Optional[np.ndarray]:
+def _ply_y_percentile(path: Path, R: np.ndarray, pct: float, centres=None, range_m: float = 0.0) -> Optional[np.ndarray]:
     """Y values of a PLY's vertices AFTER rotation R (no translation), subsampled.
     Returns the array (may be empty) or None on unexpected layout."""
     raw = path.read_bytes()
@@ -197,6 +197,21 @@ def _ply_y_percentile(path: Path, R: np.ndarray, pct: float) -> Optional[np.ndar
     xyz = np.stack([arr["x"][::step].astype(np.float64),
                     arr["y"][::step].astype(np.float64),
                     arr["z"][::step].astype(np.float64)], axis=1)
+    if range_m and range_m > 0:
+        # THE RANGE (reconstruction.view_range_m, USER 2026-11-09): the floor is found only on the points within it of
+        # the camera that measured them (the chunk's origins name it)
+        op = path.with_name(path.stem + "_origins.npz")
+        if not op.exists() or centres is None:
+            raise RuntimeError(f"{op.name} / the camera poses are missing — the range (reconstruction.view_range_m) "
+                               f"cannot be measured on {path.name}'s points")
+        with np.load(op) as z:
+            fg = np.asarray(z["frame_global"])[::step][:len(xyz)].astype(np.int64)
+        fr, cc = centres
+        pos = np.searchsorted(fr, fg)
+        hit = (pos < len(fr)) & (fr[np.minimum(pos, len(fr) - 1)] == fg)
+        d = np.full(len(xyz), np.inf)
+        d[hit] = np.linalg.norm(xyz[hit] - cc[pos[hit]], axis=1)
+        xyz = xyz[d <= float(range_m)]
     return (xyz @ R.T)[:, 1]
 
 
@@ -261,7 +276,8 @@ def _transform_aligned_worldpoints(output_dir: Path, R: np.ndarray, t: np.ndarra
 # ── entry point ─────────────────────────────────────────────────────
 
 def run(output_dir: Path, floor_percentile: float = 1.0, log=None,
-        aligned_chunks: bool = True, fresh_products: Optional[bool] = None) -> Optional[np.ndarray]:
+        aligned_chunks: bool = True, fresh_products: Optional[bool] = None,
+        range_m: float = 0.0) -> Optional[np.ndarray]:
     """Estimate gravity from the camera poses and bake the upright orientation
     (down → -Y, floor at y≈0) into chunk PLYs + poses + aligned world_points.
     Idempotent via the .orientation_applied marker. Returns the applied 4x4
@@ -305,7 +321,17 @@ def run(output_dir: Path, floor_percentile: float = 1.0, log=None,
     # Floor offset: low-percentile Y after rotation → y=0
     from reconstruction.scale_align import _per_ply
     plys = sorted(output_dir.glob("chunk_*.ply"))
-    ys = [y for y in _per_ply(lambda q: _ply_y_percentile(q, R, floor_percentile), plys)
+    centres = None
+    if range_m and range_m > 0:
+        poses = _read_poses(output_dir / "camera_poses.txt")
+        fnums = [int(float(x)) for x in (output_dir / "camera_frames.txt").read_text().split()] \
+            if (output_dir / "camera_frames.txt").exists() else []
+        if not poses or len(poses) != len(fnums):
+            raise RuntimeError("camera_poses.txt / camera_frames.txt disagree or are missing — the range "
+                               "(reconstruction.view_range_m) cannot be measured for the floor")
+        o = np.argsort(np.asarray(fnums, np.int64), kind="stable")
+        centres = (np.asarray(fnums, np.int64)[o], np.stack([p[:3, 3] for p in poses])[o])
+    ys = [y for y in _per_ply(lambda q: _ply_y_percentile(q, R, floor_percentile, centres, range_m), plys)
           if y is not None and len(y)]
     t = np.zeros(3)
     if ys:
