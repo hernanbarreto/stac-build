@@ -122,7 +122,10 @@ genrecon:
                                      # inside GenRecon's training range (ScanNet++ rooms ×1.2, SAGE 2.85 m): 11.6 cm
                                      # voxels, ~7 mm surface. 0 = one layer floor to ceiling (station: 5.85 m → 18 cm,
                                      # 6.98 m with the tracks → 22 cm)
-  min_points_per_voxel: 1            # USER 2026-11-08 (after genrecon_photo on the COLMAP-rule cloud, "bien bonita
+  min_points_per_voxel: 10           # USER 2026-11-09 (zaragoza's genrecon_photo with 1: sheets of noise — "con un
+                                     # solo punto cualquier ruido genera malla … hay que subirlo a 10 como estaba
+                                     # originalmente" / "sí, ok, dale"): back to the original 10. Was 1 since:
+                                     # USER 2026-11-08 (after genrecon_photo on the COLMAP-rule cloud, "bien bonita
                                      # pero se come algo … caños finos o parte de pared"): ONE point activates a voxel —
                                      # every point of this cloud is confirmed by ≥ 5 views at 2 px; on pccr the 982
                                      # voxels this recovers are 97.8 % next to a surface already meshed (edges, pipes,
