@@ -194,6 +194,16 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   segmented, replaced it).
 
 ## 7 · PENDING
+- ⭐ NEXT, AS SOON AS THE RECONSTRUCTION STAGE CLOSES (USER 2026-11-09, ~01:30 CDMX: "anotá para lo que sigue porque
+  presentamos el proyecto en poco más de un mes … ni bien terminemos es lo que sigue"), in this order:
+  1. FUSION — comparing two dates of the same project (the two pccr scans, 2026-08-24 and 2026-08-31): "ahí vamos a
+     tener que trabajar con escalado" (registering the two clouds with scale).
+  2. BIM COMPARISON — "ya está hecha, hay que retomarla y comparar"; maybe build a base BIM model ("por ahí armás un BIM
+     de base, ya veremos") to show the comparison.
+  3. TICKETS — a simple tool to mark tickets anywhere in the project, as a review item or a non-conformity: "es para
+     mostrar el concepto nomás".
+  He expects GenRecon may need a few knobs for the right mesh ("es más rápido y es la última etapa"); after that the work
+  moves to fronts other than the cloud.
 - The pipeline's and the general lists: `docs/pipeline_final.md` §4 — capture distance (when he says), the weighted
   vote (his word), smarter segmentation, epoch renumbering, the GPU ports of the intake, MEJORAS_OBLIGATORIAS
   (never built), the brush lock, the BIM comparison, viewer checks; station's heavy residual tail (USER 2026-11-08
