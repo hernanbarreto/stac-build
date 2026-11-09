@@ -1876,7 +1876,9 @@ def _extract_video_frames_sync(video_path: str, scan_dir: Path, session_id: str)
         pct = round(100.0 * saved / total, 1) if total else 0.0
         _video_extract_set(session_id, pct=pct, saved=saved, total=total)
 
+    from intake.config import load_intake_config as _lic
     doc = FM.extract_video(video_path, scan_dir, origin=FM.ORIGIN_VIDEO, progress=_prog,
+                           max_long_side=int(_lic().runtime.frames_max_long_side),
                            log=lambda m: print(m, flush=True))
     _video_extract_set(session_id, phase="done", pct=100.0, saved=doc["n_frames"],
                        total=doc["frame_count_reported"] or doc["n_frames"], error=None,

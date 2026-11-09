@@ -409,7 +409,7 @@ class FrameSealer:
 
 
 def extract_video(video_path: os.PathLike, scan_dir: os.PathLike, *, origin: str = ORIGIN_VIDEO,
-                  stride: int = 1, max_frames: int = 0,
+                  stride: int = 1, max_frames: int = 0, max_long_side: int = 0,
                   progress: Optional[Callable[[int, int], Any]] = None,
                   log: Callable[[str], Any] = print) -> Dict[str, Any]:
     """Decode ``video_path`` into the scan's frames, sealed (module doc): frame ``i`` of the
@@ -447,7 +447,9 @@ def extract_video(video_path: os.PathLike, scan_dir: os.PathLike, *, origin: str
                    "video_io": video_io_build_record(),
                    "orientation_auto": float(cap.get(cv2.CAP_PROP_ORIENTATION_AUTO)),
                    "orientation_meta": float(cap.get(cv2.CAP_PROP_ORIENTATION_META)),
-                   "stride": stride, "max_frames": max_frames}
+                   "stride": stride, "max_frames": max_frames,
+                   # USER 2026-11-09 ("a 1024 todo"): frames longer than this are reduced (INTER_AREA)
+                   "max_long_side": int(max_long_side), "resize": "INTER_AREA" if int(max_long_side) > 0 else None}
         params = jpeg_params(cv2)
         sealer = FrameSealer(scan_dir)
         decoded = kept = 0
@@ -459,6 +461,11 @@ def extract_video(video_path: os.PathLike, scan_dir: os.PathLike, *, origin: str
             decoded += 1
             if i % stride:
                 continue
+            if int(max_long_side) > 0 and max(frame.shape[:2]) > int(max_long_side):
+                h0, w0 = frame.shape[:2]
+                sc = int(max_long_side) / float(max(h0, w0))
+                frame = cv2.resize(frame, (max(1, int(round(w0 * sc))), max(1, int(round(h0 * sc)))),
+                                   interpolation=cv2.INTER_AREA)
             ok_enc, buf = cv2.imencode(".jpg", frame, params)
             if not ok_enc:
                 raise FramesManifestError(f"the JPEG encoder failed on frame {i} of {video_path}")

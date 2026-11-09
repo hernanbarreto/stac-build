@@ -143,6 +143,8 @@ REMOVED_SECTIONS: Dict[str, str] = {
 @dataclass(frozen=True)
 class RuntimeConfig:
     heartbeat_s: float          # BOUND: seconds between progress lines of a long loop
+    frames_max_long_side: int   # USER 2026-11-09 ("hay que trabajar a 1024 todo, no más que eso"): a video's frames
+                                # are extracted with their long side at most this (INTER_AREA); 0 = as decoded
 
 
 @dataclass(frozen=True)
@@ -214,6 +216,7 @@ def _load_runtime(sec: Dict[str, Any]) -> RuntimeConfig:
     _refuse_unknown(rn, "runtime", _fields(RuntimeConfig))
     return RuntimeConfig(
         heartbeat_s=_num(rn, "heartbeat_s", "runtime", lo=0.0, lo_excl=True),
+        frames_max_long_side=_num(rn, "frames_max_long_side", "runtime", lo=0, integer=True),
     )
 
 

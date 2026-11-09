@@ -346,3 +346,21 @@ def test_no_other_server_code_writes_frame_images_into_a_scan_unsealed():
         src = (SERVER / rel).read_text()
         assert "FrameSealer" in src or "FM.extract_video(" in src, rel
         assert "cv2.imwrite(str(fname)" not in src and "cv2.imwrite(str(frames_dst)" not in src, rel
+
+
+def test_extraction_caps_the_long_side(tmp_path):
+    """USER 2026-11-09 ("hay que trabajar a 1024 todo, no más que eso"): frames longer than max_long_side are reduced
+    on extraction (INTER_AREA, aspect kept), recorded in the manifest's decoder; shorter ones are untouched; the same
+    video extracts to the same bytes twice (deterministic)."""
+    s = _scan(tmp_path)
+    v = _video(s / "source_video.avi")
+    doc = FM.extract_video(v, s, max_long_side=32, log=lambda *a: None)
+    img = cv2.imread(str(s / "frames" / "000000.jpg"))
+    assert img.shape[:2] == (24, 32), "64x48 capped at 32: the long side 32, the aspect kept"
+    assert doc["decoder"]["max_long_side"] == 32 and doc["decoder"]["resize"] == "INTER_AREA"
+    s2 = _scan(tmp_path, "src_again")
+    FM.extract_video(_video(s2 / "source_video.avi"), s2, max_long_side=32, log=lambda *a: None)
+    assert (s / "frames" / "000003.jpg").read_bytes() == (s2 / "frames" / "000003.jpg").read_bytes()
+    s3 = _scan(tmp_path, "src_big_cap")
+    FM.extract_video(_video(s3 / "source_video.avi"), s3, max_long_side=1024, log=lambda *a: None)
+    assert cv2.imread(str(s3 / "frames" / "000000.jpg")).shape[:2] == (H, W), "under the cap: untouched"

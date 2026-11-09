@@ -846,6 +846,10 @@ frame_selection:
 intake:
   runtime:
     heartbeat_s: 20.0                  # BOUND: seconds between progress lines of a long loop
+    frames_max_long_side: 1024         # USER 2026-11-09 ("no veo que valga la pena trabajar con tanta resolución …
+                                       # hay que trabajar a 1024 todo, no más que eso"): a video's frames are extracted
+                                       # with their long side at most 1024 (cv2.INTER_AREA, deterministic) — every stage
+                                       # then works at ≤ 1024 with the points' provenance intact. 0 = as decoded.
   quality:                             # I0 — features, never a percentile gate
     luma_lo: 40.0                      # BOUND: mean luma below this = unusable exposure ("dark")
     luma_hi: 220.0                     # BOUND: mean luma above this = unusable exposure ("bright")
