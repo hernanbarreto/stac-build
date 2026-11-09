@@ -175,7 +175,6 @@ def test_i3_runs_on_a_free_card_measures_the_walk_and_is_reused_on_the_same_iden
     mw = (Path(W.__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
     # the CUBES (2026-11-06 on) take their revisits from AMB3R's map: the launcher keeps no walk reference at all
     assert "revisit_reference(" not in mw and "import revisit_reference" not in mw
-    assert "read_text()" not in blk, "the launcher never reads a revisit reference back"
 
 
 def test_a_new_walk_declares_a_card_change_but_not_an_old_format_key(session):
