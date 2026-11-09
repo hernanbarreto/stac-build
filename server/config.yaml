@@ -90,7 +90,8 @@ pipeline:
   # USER 2026-10-17 ("este pipeline de mesh se hace al finalizar el autosegment"): the scene mesh by
   # GenRecon — mode cloud, the active voxels from the published cloud — as the LAST stage of the chain
   # (the Meshing button is gone). false = the chain ends at the certification.
-  auto_floor: false                  # USER 2026-11-05 ("el piso lo acomodaba la certificación? hay que agregar al
+  auto_floor: true                   # ON (USER 2026-11-09: "corrés vlm sam3 corrección de suelo (que está apagado en el
+                                     # config activalo), y genrecon de todos"). USER 2026-11-05 ("el piso lo acomodaba la certificación? hay que agregar al
                                      # pipeline eso … lo del piso sí, porque está inclinada la nube"): after every
                                      # projection of the segmentation, the FLOOR stage (workers/floor_worker.py):
                                      # the certification's floor correction alone — ONE rigid motion for the
