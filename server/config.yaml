@@ -2726,7 +2726,10 @@ reconstruction:
                                         # 1.7 %). COLMAP's 0.01 is for its PatchMatch maps, already geometrically
                                         # consistent; on Omega's maps it refused honest pairs (pccr 2026-11-08:
                                         # 39.5 % contradicted, coverage 37.9 %). A positive value is used as is.
-      fusion_tri_min_deg: 3.0           # COLMAP PatchMatch filter_min_triangulation_angle default ("stable")
+      fusion_tri_min_deg: 1.5           # USER 2026-11-09 ("los 3 grados bajalo … es un número arbitrario" / "hay
+                                        # que bajar a 1.5 grados"): COLMAP's 3° default dropped near surfaces seen
+                                        # only from close-by views; census on pccr 3108: +5.2 pts published, 15 % of
+                                        # the lost recovered, all inside the validated cloud, see-through median 2
       fusion_tri_max_deg: 30.0          # the wide end of the usual 10–30° source-view band (visibility-aware MVS)
       fusion_majority: true             # ON (USER 2026-11-09: "si tenemos muchas vistas del mismo punto 5 puede
                                         # significar poco, pero si tiene pocas vistas puede significar mucho … sí,
