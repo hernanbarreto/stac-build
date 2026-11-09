@@ -633,7 +633,7 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
         def _parallax_ok(X, Cg):
             a = C - X
             b = Cg - X
-            c = (a * b).sum(-1) / (torch.linalg.norm(a, dim=-1) * torch.linalg.norm(b, dim=-1)).clamp_min(1e-300)
+            c = (a * b).sum(-1) / (torch.linalg.norm(a, dim=-1) * torch.linalg.norm(b, dim=-1)).clamp_min(torch.finfo(torch.float64).tiny)
             return c <= cos_max
     for g in witnesses:
         T = _t(w2c[g])
@@ -661,7 +661,7 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
             dv = fy * Xb[..., 1] / zs + cy - V0
             err_px = torch.sqrt(du * du + dv * dv)
             a_ = C - Xw; b_ = Cg - Xw
-            cs = (a_ * b_).sum(-1) / (torch.linalg.norm(a_, dim=-1) * torch.linalg.norm(b_, dim=-1)).clamp_min(1e-300)
+            cs = (a_ * b_).sum(-1) / (torch.linalg.norm(a_, dim=-1) * torch.linalg.norm(b_, dim=-1)).clamp_min(torch.finfo(torch.float64).tiny)
             band = (cs <= cos_narrow) & (cs >= cos_wide)
             near = ((torch.linalg.norm(Xw - Cg, dim=-1) <= max_dist) if max_dist > 0
                     else torch.ones_like(okb))
