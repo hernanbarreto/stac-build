@@ -19,6 +19,12 @@ cloud only, replace). What it is, over §1's pipeline:
 - cleaner: voxel 1 mm, SOR σ 6 (4287313). Replace empties output/ entirely; floor stage off (a3c435a).
 - pccr 3108 numbers: 547 kf, 17 cubes, seams 1.0–3.7 cm, 43/49 closures (graph moved cubes ≤ 61 cm), F5 held-out
   0.534 px, witnesses bound 2.26 px, vote coverage 74.1 %, 132.5 M points published.
+- ✓ ZARAGOZA VALIDATED (USER 2026-11-09) under the 2026-11-09 rules (no repair, majority vote, THE RANGE 15 m, AMB3R
+  scaled to metres with DA3, frames ≤ 1024): *"si bien tiene poca cobertura la que tiene es excelente y lo que falta es
+  todo lo que se tomaba de lejos … el tren que es el objetivo del escaneo está perfecto, el resto que es mucho de fondo
+  y a los costados no está escaneado … está perfecto para mí"*. A low coverage there is the far background (beyond the
+  range or seen by too few views), NOT a defect — zaragoza is walked like observatorio (a train in a shed). Numbers:
+  seams 2.5–16.5 cm, graph median 3.5 / max 11.2 cm, F5 held-out 0.398 px, vote coverage 30.1 %, 42.6 M points.
 
 ## 1 · ⭐⭐⭐⭐ THE FINAL PIPELINE — USER 2026-11-08 (11:20 CDMX), pccr, main 8cef74f
 *"la cobertura es muy buena, sin errores, sin duplicados, muy muy buen resultado, excelente, que quede este como
