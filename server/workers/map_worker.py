@@ -511,12 +511,15 @@ def _discard_previous_epochs(output_dir: Path) -> int:
     (USER 2026-10-05); nothing older is worth a byte. Returns the bytes freed. The
     ledger (corrections.jsonl) and geometry_epoch.json stay: the live epoch is the
     published one and the record says so."""
-    freed = 0
-    for pattern in ("_epoch_*", "_tx_epoch_*"):
-        for d in output_dir.glob(pattern):
-            if d.is_dir() and not d.is_symlink():
-                freed += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
-                shutil.rmtree(d, ignore_errors=True)
+    # THE WAY BACK TO EPOCH 0 (zaragoza 2026-11-09: a chain that started again from F0 found no epoch 0
+    # and F2 failed): the stores on the live epoch's lineage move to output/_restart_epochs/ — out of the
+    # epochs the viewer lists — and every other stored epoch is deleted (correction/restart.py)
+    from correction.restart import stash_lineage
+    kept, freed = stash_lineage(output_dir)
+    for d in output_dir.glob("_tx_epoch_*"):
+        if d.is_dir() and not d.is_symlink():
+            freed += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+            shutil.rmtree(d, ignore_errors=True)
     for pattern in ("chunk_*.ply", "chunk_*_origins.npz", "chunk_*_meta.json"):
         for f in output_dir.glob(pattern):
             if f.is_file():

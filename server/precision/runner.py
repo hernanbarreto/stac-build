@@ -633,6 +633,18 @@ def run_chain(session_dir: Path, pcfg, *, log: Callable = print,
     epoch_now = _epoch(session_dir)
     first = resume_point(state, steps, epoch_now, out=out, stamp_now=_stamp_in,
                          product_sha=_product_sha, log=log)
+    if first == 0 and int(epoch_now) != 0:
+        # THE CHAIN STARTS AGAIN (zaragoza 2026-11-09: its code changed, Omega's pass did not — F2 then failed
+        # on the published epoch 3): back to Omega's epoch 0 first, from the stores the publish kept
+        # (correction/restart.py); a session with no epoch 0 kept fails here, naming it
+        from correction.restart import restore_epoch0
+        log(f"{LOG_TAG} the chain starts again from '{steps[0].key}' with the session in epoch {epoch_now} — "
+            f"back to Omega's epoch 0 first")
+        try:
+            restore_epoch0(out, log=log)
+        except RuntimeError as exc:
+            raise ChainError(str(exc)) from exc
+        epoch_now = _epoch(session_dir)
     done = list(state.get("done") or [])
     state["done"] = done[:first]
     if first:

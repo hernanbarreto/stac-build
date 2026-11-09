@@ -155,6 +155,8 @@ def test_discard_previous_epochs_drops_every_stored_epoch_and_the_chunks(tmp_pat
     (out / EPOCH_FILE).write_text(json.dumps({"epoch": 3}))
     _discard_previous_epochs(out)
     assert not [d for d in out.glob("_epoch_*")] and not (out / "_tx_epoch_3").exists()
+    # the way back to epoch 0 (zaragoza 2026-11-09): the lineage's stores, out of the listed epochs
+    assert sorted(d.name for d in (out / "_restart_epochs").iterdir()) == ["_epoch_0", "_epoch_1", "_epoch_2"]
     assert not (out / "chunk_000.ply").exists()
     assert (out / LEDGER_FILE).exists() and (out / EPOCH_NPZ_DIR / "epoch_1.npz").exists()
     assert (out / EPOCH_FILE).exists()
