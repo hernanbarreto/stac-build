@@ -29,6 +29,10 @@ cloud only, replace). What it is, over §1's pipeline:
   pero con buena solidez en los objetos, lo que falta o está ahuecado es lo que está más allá de los 15 m, que no es
   parte del fondo del escaneo"*. Numbers: seams 1.0–3.7 cm, 43 closures, F5 held-out 0.534 px, witnesses bound 2.26 px,
   vote coverage 49.3 % (no repair), 88.8 M points; AMB3R metre 2.6381 m/unit (MAD 6.3 %).
+- ✓ ZARAGOZA VALIDATED AGAIN (USER 2026-11-09 evening: "salió bien, lo único la columna partida") under the same
+  three changes (5 mm / σ 3, 1.5°, F6 in place): vote coverage 42.2 % (was 30.1 %; kept 36.4 %, in place 11.1 %),
+  69.5 M raw → 23.3 M points (was 10.1 M), F5 held-out 0.398 px bit-identical, core 51.6 min. Known, not
+  investigated: the split column at the start of the shed (he waved it off earlier: "no importa la columna esa").
 - ✓ PCCR 3108 VALIDATED AGAIN (USER 2026-11-09 evening: "bien, pccr validado visualmente, ok") with the
   cleaner back to voxel 5 mm / SOR σ 3 (4b346ae), the vote's minimum angle 1.5° (b893e5f) and F6 IN PLACE
   (bb7a871: a pixel whose witnesses agree with its own depth is published where it is, never moved): vote
