@@ -433,6 +433,8 @@ def analyse(probe_npz: Path, inputs: Dict, *, device: str = "cuda", log: Callabl
         own_frames = sum(1 for f, r in zip(nums, rec_of) if int(rec_frame[r]) == f)
         log(f"[cubes] what {len(nums)} views see: the records of {len(set(rec_of))} frames AMB3R reconstructed — "
             f"{own_frames} view(s) their own frame's, the others the nearest reconstructed frame's")
+        if float(inputs.get("view_range_m", 0.0)) > 0 and "metric_scale" not in video:
+            raise CubePlanError("the whole-video map is not in metres (no metric_scale) — the range cannot be applied")
         cmap = CoverageMap(video, device, state=False, range_m=float(inputs.get("view_range_m", 0.0)))
         probe_resolution = int(max(int(v) for v in video["grid_wh"]))
         extra = {"views": nums, "view_source_frames": [int(rec_frame[r]) for r in rec_of]}
@@ -461,6 +463,8 @@ def analyse(probe_npz: Path, inputs: Dict, *, device: str = "cuda", log: Callabl
         raise CubePlanError(f"the probe's keyframe path {path} or the session's walk {walk_m} m is not positive — no "
                             f"metre to size the cubes with")
     mpu = walk_m / path
+    log(f"[cubes] the probe's metre: I3's walk {walk_m:.2f} m over the probe's {path:.2f} units → {mpu:.4f} m per unit "
+        f"(≈ 1 when AMB3R's map is in metres)")
     cube_m = float(inputs.get("cube_m", CUBE_M))
     kf_cov = keyframe_covisibility(cmap, kf, kf_recs)
     del cmap

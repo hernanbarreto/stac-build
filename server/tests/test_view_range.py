@@ -98,3 +98,17 @@ def test_the_floor_is_found_on_points_within_the_range(tmp_path):
     y_all = _ply_y_percentile(tmp_path / "chunk_000.ply", np.eye(3), 1.0)
     y_near = _ply_y_percentile(tmp_path / "chunk_000.ply", np.eye(3), 1.0, centres, 10.0)
     assert y_all.min() == pytest.approx(-4.0) and y_near.min() == pytest.approx(-1.5) and len(y_near) == 500
+
+
+def test_amb3r_map_gets_da3_metre():
+    """USER 2026-11-09 ("amber con omega escalado con da3"): AMB3R's units against DA3's metric depth on the focal
+    probe's frames — a map at 1/10 of the metre comes out ×10."""
+    from reconstruction.amb3r_probe import metric_scale
+    n, H, W = 10, 12, 16
+    K = np.array([[16.0, 0, 8.0], [0, 16.0, 6.0], [0, 0, 1.0]])
+    pred = np.tile(np.eye(4), (n, 1, 1)); pred[:, 0, 3] = np.arange(n) * 0.01         # a 0.09-unit walk
+    video = {"frame_no": np.arange(n), "rec_index": np.arange(n), "pred": pred, "rec_c2w": pred.copy(),
+             "rec_K": np.tile(K, (n, 1, 1)), "rec_depth": np.full((n, H, W), 0.5, np.float32), "stride": 1}
+    focal = {"frames": np.array([0, 3, 6, 9]), "depth": np.full((4, 2 * H, 2 * W), 5.0),
+             "K": np.tile(np.array([[32.0, 0, 16.0], [0, 32.0, 12.0], [0, 0, 1.0]]), (4, 1, 1))}
+    assert metric_scale(video, focal, min_px=10)["scale"] == pytest.approx(10.0)

@@ -76,13 +76,14 @@ def test_the_views_of_each_planning_keyframe():
 
 def test_the_map_worker_plans_with_the_turn_frames_and_joins_the_chunks_by_sim3():
     src = (Path(__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
-    i_turn = src.index("_turn = session_turn_frames(")
-    i_plan = src.index('_cplan = plan_session(output_dir.parent, log=pipe.send_log, turn_files=_turn["files"],')
-    i_ctx = src.index('_ctx = chunk_context(_ranges, _sel_files, _turn["files"])')
+    # the CUBES (2026-11-06 on): the turn frames enter the cube plan, each cube carries its own context views
+    i_plan = src.index('_cplan = _CB.session_cubes(output_dir.parent, frames_dir, _sel_files, _turn["files"], '
+                       '_turn["witness_files"],')
+    i_turn = src.rindex("_turn = session_turn_frames(", 0, i_plan)
+    i_ctx = src.index('_ctx = [[_name_of[int(x)] for x in cb["context"]] for cb in _cubes]', i_plan)
     assert i_turn < i_plan < i_ctx
-    # a chunk over the limit keeps EVERY turn frame (USER 2026-11-04: option 2)
+    # a cube over the limit keeps EVERY turn frame (USER 2026-11-04: option 2)
     assert "cap_context" not in src and "kept whole" in src
-    assert src.count('turn_files=_turn["files"]') == 2        # the regenerated-windows retry too
     assert 'cfg_v["Model"]["chunk_graph"] = {"mode": "sim3"}' in src
     import yaml
     live = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())

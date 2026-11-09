@@ -37,6 +37,10 @@ import numpy as np
 from intake import focal_probe as FP
 
 FOCAL_NAME = "focal_probe.json"
+# the probe frames' DA3 METRIC depth, kept reduced (USER 2026-11-09: "amber con omega escalado con da3") — the one
+# metric reference AMB3R's whole-video map is scaled with (reconstruction/amb3r_probe.metric_scale)
+FOCAL_DEPTH_NAME = "focal_depth.npz"
+FOCAL_DEPTH_MAX_SIDE = 512              # BOUND (storage): the kept depth's long side, an integer stride of DA3's grid
 DIRNAME = "da3_focal"
 FOCAL_VERSION = FP.FOCAL_VERSION       # 2: session-relative spec + stamp as the reuse key
 PROVENANCE = "tool_measured"
@@ -149,6 +153,8 @@ def run_focal_probe(session_dir: Path, quality: Dict[str, Any], pcfg, *, python:
         except ValueError:
             doc = None
         why = FP.probe_reusable(doc, stamp)
+        if not why and not (session_dir / "intake" / FOCAL_DEPTH_NAME).exists():
+            why = [f"{FOCAL_DEPTH_NAME} is missing (the probe's DA3 depth, AMB3R's metric reference)"]
         if not why:
             log(f"{LOG_TAG} reusing {out} (stamp {stamp['sha256'][:12]}: same frames' bytes, "
                 f"layout, resolution, model, DA3 identity, code and environment): fx "
@@ -184,9 +190,24 @@ def run_focal_probe(session_dir: Path, quality: Dict[str, Any], pcfg, *, python:
     if proc.returncode != 0:
         raise FocalError(f"DA3 focal probe exited with code {proc.returncode}")
     Ks, depth = [], None
+    keep_f, keep_d, keep_k = [], [], []
     for i in range(len(windows)):
         with np.load(wdir / f"window_{i:04d}.npz") as z:
             Ks.append(np.asarray(z["intrinsics"], np.float64)); depth = z["depth"]
+            if "is_metric" in z.files and not bool(z["is_metric"]):
+                raise FocalError(f"window {i} of the focal probe is not metric — AMB3R's map needs DA3's metre")
+            st = max(1, -(-max(depth.shape[-2:]) // FOCAL_DEPTH_MAX_SIDE))
+            for j, f in enumerate(np.asarray(z["frames"]).tolist()):
+                keep_f.append(int(f))
+                keep_d.append(np.asarray(depth[j][::st, ::st], np.float32))
+                k = np.asarray(z["intrinsics"][j], np.float64).copy()
+                k[:2, :] /= st                      # pixel i' of the strided grid is pixel i'·st of DA3's
+                keep_k.append(k)
+    dpath = session_dir / "intake" / FOCAL_DEPTH_NAME
+    tmpd = dpath.with_name(dpath.name + ".part.npz")
+    np.savez(tmpd, frames=np.asarray(keep_f, np.int64), depth=np.stack(keep_d), K=np.stack(keep_k),
+             stamp=np.array(str(stamp["sha256"])), model=np.array(model_id))
+    os.replace(tmpd, dpath)
     K_grid = np.concatenate(Ks, 0)
     K_nat = native_intrinsics(K_grid, (depth.shape[-1], depth.shape[-2]), native_wh)
     from intake.quality import intake_epochs

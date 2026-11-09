@@ -159,7 +159,8 @@ def test_a_reconstruction_without_replace_keeps_the_masks_and_projects_them():
     segments again."""
     import inspect
     src = inspect.getsource(PM.PipelineManager._run_pipeline)
-    assert "keep_semantics = recon_requested and not replace and not force" in src
+    # Replace empties output/ entirely (a3c435a): nothing to keep there — the rule needs no "not replace"
+    assert "keep_semantics = recon_requested and not force" in src
     i_keep = src.index("if keep_semantics and stage_state.stage.id in (StageId.VLM, StageId.SAM3):")
     i_proj = src.index("later.stage.enabled = True", i_keep)
     i_probe = src.index("if not upstream_ran:", i_keep)

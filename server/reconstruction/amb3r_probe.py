@@ -194,6 +194,95 @@ def run_amb3r_video(frames_dir: Path, out_npz: Path, *, model: str, grid_wh: Tup
     return out_npz
 
 
+def metric_scale(video: Dict[str, np.ndarray], focal: Dict[str, np.ndarray], *, near_frac: float = 0.25,
+                 min_px: int = 50) -> Dict:
+    """AMB3R's metre (USER 2026-11-09: "amber con omega escalado con da3 … suponiendo una escala de amb3r en todo el
+    video, es una primera aproximación"): for every frame of the focal probe, the record nearest to it is projected
+    into its camera (AMB3R's pose of that frame, DA3's K on DA3's grid) and the depth DA3 measured there is divided by
+    AMB3R's — the median over the NEAR band (the closest ``near_frac`` by AMB3R's depth: scale_align._ratio's rule for
+    Omega); the scale is the median of the frames' ratios inside their 10–90 % band (scale_align.estimate_scale's).
+    Metres per AMB3R unit."""
+    fr = np.asarray(focal["frames"], np.int64)
+    s = float(video["stride"])
+    pos = {int(n): i for i, n in enumerate(video["frame_no"])}
+    present = [k for k, f in enumerate(fr.tolist()) if int(f) in pos]
+    recs = source_records(video, [int(fr[k]) for k in present]) if present else []
+    pred = np.asarray(video["pred"], np.float64)
+    ratios, per = [], {}
+    for k, r in zip(present, recs):
+        d = np.asarray(video["rec_depth"][r], np.float64)
+        Kr = np.asarray(video["rec_K"][r], np.float64).copy(); Kr[:2, :] /= s
+        m = d > 0
+        if m.sum() < min_px:
+            continue
+        vv, uu = np.nonzero(m)
+        cam = np.stack([(uu - Kr[0, 2]) / Kr[0, 0] * d[m], (vv - Kr[1, 2]) / Kr[1, 1] * d[m], d[m]], 1)
+        Rr = np.asarray(video["rec_c2w"][r], np.float64)
+        X = cam @ Rr[:3, :3].T + Rr[:3, 3]
+        w2c = np.linalg.inv(pred[pos[int(fr[k])]])
+        Xc = X @ w2c[:3, :3].T + w2c[:3, 3]
+        z = Xc[:, 2]
+        Kd = np.asarray(focal["K"][k], np.float64)
+        D = np.asarray(focal["depth"][k], np.float64)
+        ok = z > 1e-9
+        u = np.round(Kd[0, 0] * Xc[ok, 0] / z[ok] + Kd[0, 2]).astype(np.int64)
+        v = np.round(Kd[1, 1] * Xc[ok, 1] / z[ok] + Kd[1, 2]).astype(np.int64)
+        za = z[ok]
+        inb = (u >= 0) & (u < D.shape[1]) & (v >= 0) & (v < D.shape[0])
+        u, v, za = u[inb], v[inb], za[inb]
+        dd = D[v, u]
+        g = np.isfinite(dd) & (dd > 0)
+        if g.sum() < min_px:
+            continue
+        rr, za = dd[g] / za[g], za[g]
+        near = za <= np.percentile(za, float(near_frac) * 100.0)
+        r_f = float(np.median(rr[near] if near.sum() >= min_px else rr))
+        ratios.append(r_f)
+        per[str(int(fr[k]))] = r_f
+    if len(ratios) < 3:
+        raise Amb3rProbeError(f"only {len(ratios)} focal-probe frame(s) measure AMB3R against DA3 — its map cannot be "
+                              f"put in metres")
+    a = np.asarray(ratios)
+    lo, hi = np.percentile(a, [10, 90])
+    sc = float(np.median(a[(a >= lo) & (a <= hi)]))
+    return {"scale": sc, "frames": len(ratios), "spread": [float(a.min()), float(a.max())],
+            "mad_rel": float(np.median(np.abs(a - sc)) / sc), "per_frame": per, "near_frac": float(near_frac)}
+
+
+def make_metric(npz: Path, focal_npz: Path, log: Callable[[str], None]) -> Dict:
+    """The whole-video map in METRES, once: its positions and depths times :func:`metric_scale`, written into the npz
+    with the scale and the focal depth it was measured on (a later measurement on another probe replaces it, never
+    compounds it). Returns the record {scale, focal_depth_stamp, …}."""
+    with np.load(focal_npz) as z:
+        focal = {k: z[k] for k in z.files}
+    fstamp = str(focal["stamp"])
+    video = load_video(npz)
+    old = float(video["metric_scale"]) if "metric_scale" in video else None
+    if old is not None and str(video.get("metric_focal_stamp")) == fstamp:
+        return json.loads(str(video["metric_report"]))
+    base = dict(video)
+    if old is not None:                                   # back to AMB3R's units first
+        for key in ("pred", "rec_c2w"):
+            m = np.asarray(base[key], np.float64).copy(); m[:, :3, 3] /= old; base[key] = m
+        base["rec_depth"] = (np.asarray(base["rec_depth"], np.float64) / old).astype(np.float32)
+    rep = metric_scale(base, focal)
+    sc = rep["scale"]
+    for key in ("pred", "rec_c2w"):
+        m = np.asarray(base[key], np.float64).copy(); m[:, :3, 3] *= sc; base[key] = m
+    base["rec_depth"] = (np.asarray(base["rec_depth"], np.float64) * sc).astype(np.float32)
+    rep = dict(rep, focal_depth_stamp=fstamp)
+    base.update(metric_scale=np.float64(sc), metric_focal_stamp=np.array(fstamp),
+                metric_report=np.array(json.dumps(rep)))
+    tmp = npz.with_name(npz.name + ".part.npz")
+    np.savez(tmp, **base)
+    os.replace(tmp, npz)
+    C = np.asarray(base["rec_c2w"], np.float64)[:, :3, 3]
+    log(f"[amb3r] map in METRES: × {sc:.4f} m per AMB3R unit (DA3 over {rep['frames']} focal-probe frames, ratios "
+        f"{rep['spread'][0]:.3f}–{rep['spread'][1]:.3f}, MAD {rep['mad_rel'] * 100:.1f} %); the reconstructed frames' "
+        f"walk is now {np.linalg.norm(np.diff(C, axis=0), axis=1).sum():.2f} m")
+    return rep
+
+
 def session_amb3r(scan_dir: Path, frames_dir: Path, *, model: str, grid_wh: Tuple[int, int],
                   log: Callable[[str], None], check_cancel: Optional[Callable[[], bool]] = None
                   ) -> Tuple[Path, Dict]:
@@ -204,15 +293,27 @@ def session_amb3r(scan_dir: Path, frames_dir: Path, *, model: str, grid_wh: Tupl
     npz, stamp_p = intake / VIDEO_NAME, intake / "amb3r_video.stamp.json"
     stamp = {"video": video_identity(frames_dir), **identity(model, grid_wh),
              "code": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+    focal_npz = intake / "focal_depth.npz"
+    if not focal_npz.exists():
+        raise Amb3rProbeError(f"{focal_npz} is missing — AMB3R's map is put in metres with the focal probe's DA3 depth "
+                              f"(intake I0, intake/focal.py)")
+    reused = False
     if npz.exists() and stamp_p.exists():
         try:
-            if json.loads(stamp_p.read_text()) == stamp:
+            prev = json.loads(stamp_p.read_text())
+            prev.pop("metric", None)
+            if prev == stamp:
                 log(f"[amb3r] the whole-video pass reused ({npz.name}: the same video, AMB3R, model and grid)")
-                return npz, stamp
+                reused = True
         except ValueError:
             pass
-    stamp_p.unlink(missing_ok=True)
-    run_amb3r_video(Path(frames_dir), npz, model=model, grid_wh=grid_wh, log=log, check_cancel=check_cancel)
+    if not reused:
+        stamp_p.unlink(missing_ok=True)
+        run_amb3r_video(Path(frames_dir), npz, model=model, grid_wh=grid_wh, log=log, check_cancel=check_cancel)
+    # THE METRE (USER 2026-11-09): AMB3R on Omega gives a map in its own units (zaragoza: 1.21 units for a 12.2 m
+    # walk) — every stage that reads it (the fill, the cut, the co-visibility, the range) reads it in metres
+    rep = make_metric(npz, focal_npz, log)
+    stamp = dict(stamp, metric={"scale": rep["scale"], "focal_depth_stamp": rep["focal_depth_stamp"]})
     tmp = stamp_p.with_name(stamp_p.name + ".tmp")
     tmp.write_text(json.dumps(stamp, indent=1))
     os.replace(tmp, stamp_p)

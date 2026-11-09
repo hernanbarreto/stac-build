@@ -295,16 +295,15 @@ def test_the_card_holds_the_keyframes_and_the_context_views(tmp_path):
 
 def test_the_map_worker_sizes_the_card_on_the_context_views_and_records_them():
     src = (Path(__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
-    i_turn = src.index("_turn = session_turn_frames(")
+    # the CUBES (2026-11-06 on): each cube's context and witness views size the card and are recorded
     i_ctx = src.index('vggt_config["Model"]["chunk_context"] = _ctx')
-    i_res = src.index("_res = session_omega_resolution(")
+    i_turn = src.rindex("_turn = session_turn_frames(", 0, i_ctx)
+    i_res = src.index("_res = session_omega_resolution(", i_ctx)
     assert i_turn < i_ctx < i_res
-    assert "context_counts=[max(len(c), len(w)) for c, w in zip(_ctx, _wit)])" in src[i_res:i_res + 600]
-    assert "_n_max = max(n + max(len(c), len(w)) for n, c, w in zip(chunk_lengths(_ranges), _ctx, _wit))" in src
-    # the witnesses never reach the plan: it counts the turn frames only (USER 2026-11-04)
-    assert src.count('turn_files=_turn["files"]') == 2 and 'turn_files=_turn["witness_files"]' not in src
+    assert "context_counts=[max(len(c), len(w)) for c, w in zip(_ctx, _wit)]," in src[i_res:i_res + 600]
+    assert "_n_max = max(n + max(len(c), len(w)) for n, c, w in zip(_chunk_frame_counts, _ctx, _wit))" in src
     assert 'vggt_config["Model"]["chunk_witnesses"] = _wit' in src
-    assert "_persist_chunk_plan(_ranges, _n_selected, _walk0, _covis_rep, _res, _ctx)" in src
+    assert "_persist_cube_plan(_cplan, _sets, _owner, _n_selected, _walk0, _res, _ctx)" in src
     assert '"chunk_context": _ctx}, pipe.send_log)' in src          # the single pass's check
 
 

@@ -220,6 +220,8 @@ def fill(video: Dict[str, np.ndarray], keyframe_frames: Sequence[int], quality_r
     them); 1 = the second view of version 2."""
     from reconstruction.amb3r_probe import source_records
     t0 = time.monotonic()
+    if range_m and range_m > 0 and "metric_scale" not in video:
+        raise CoverageFillError("the whole-video map is not in metres (no metric_scale) — the range cannot be applied")
     cmap = CoverageMap(video, device, range_m=range_m)
     cmap.support = max(1, int(min_support))
     kf_src = sorted(set(int(r) for r in source_records(video, keyframe_frames)))

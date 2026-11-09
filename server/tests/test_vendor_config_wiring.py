@@ -147,20 +147,19 @@ def test_the_builder_writes_no_uniform_layout(tree):
 
 
 def test_the_planned_ranges_are_the_ones_the_fork_and_the_plan_file_get(tree):
+    """The CUBES (2026-11-06 on): the ONE source of the layout is the cube plan (reconstruction.cubes.session_cubes);
+    the same keyframe sets and owners reach the fork (Model.chunk_sets / chunk_owner) and cubes.json; a single cube
+    is the one range [0, n); nothing re-derives a uniform layout anywhere in the Omega path."""
     run = _run_src(tree)
-    # the ONE source of the layout: the co-visibility plan
-    assert "_cplan = plan_session(output_dir.parent" in run
-    assert '_ranges = [(int(a), int(b)) for a, b in _cplan["ranges"]]' in run
-    # chunked: the same list reaches the fork and chunk_plan.json
-    assert "_apply_chunked_metric(vggt_config, _ranges)" in run
-    assert "_persist_chunk_plan(_ranges, _n_selected, _walk0, _covis_rep, _res, _ctx)" in run
+    assert "_cplan = _CB.session_cubes(output_dir.parent" in run
+    assert "_apply_chunked_metric(vggt_config, None, cubes=(_sets, _owner, _revisits))" in run
+    assert "_persist_cube_plan(_cplan, _sets, _owner, _n_selected, _walk0, _res, _ctx)" in run
     applied = run[run.index("def _apply_chunked_metric"):run.index("def _ensure_anchors")]
-    assert 'cfg_v["Model"]["chunk_ranges"] = [[int(a), int(b)] for a, b in _ranges]' in applied
+    assert 'cfg_v["Model"]["chunk_sets"] = [[int(g) for g in F] for F in cubes[0]]' in applied
+    assert 'cfg_v["Model"]["chunk_owner"] = [int(x) for x in cubes[1]]' in applied
     assert 'cfg_v["Model"].pop("chunk_size", None)' in applied
     assert 'cfg_v["Model"].pop("overlap", None)' in applied
-    # single pass: the one range [0, n)
     assert 'vggt_config["Model"]["chunk_ranges"] = [[0, int(_n_selected)]]' in run
-    # nothing re-derives a uniform layout anywhere in the Omega path
     for gone in ('["Model"]["chunk_size"] =', '["Model"]["overlap"] =', "chunk_ranges(_n_selected"):
         assert gone not in run, gone
 

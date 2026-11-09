@@ -30,6 +30,7 @@ class G:
     window_frames = 32
     window_overlap_frac = 0.5
     process_res = 840
+    max_long_side = 1024        # I3 at 1024 at most (USER 2026-11-08/09: "a 1024 todo") — the production value
     model_id = MODEL
 
 
@@ -172,9 +173,8 @@ def test_i3_runs_on_a_free_card_measures_the_walk_and_is_reused_on_the_same_iden
     # no reuse path of the reference is left in the launcher either
     W.da3_identity = lambda python, model_id, log=print: dict(IDENT)
     mw = (Path(W.__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
-    i0 = mw.index("from intake.walk import revisit_reference")
-    blk = mw[i0:mw.index("_persist_chunk_plan(_ranges", i0)]
-    assert "revisit_reference(output_dir.parent" in blk and "_ref_p.exists()" not in blk
+    # the CUBES (2026-11-06 on) take their revisits from AMB3R's map: the launcher keeps no walk reference at all
+    assert "revisit_reference(" not in mw and "import revisit_reference" not in mw
     assert "read_text()" not in blk, "the launcher never reads a revisit reference back"
 
 
@@ -302,9 +302,8 @@ def test_the_revisit_reference_needs_no_window_file(session):
         W.revisit_reference(sess, log=lambda m: None)
     # the launcher: without SALAD the previous reconstruction's reference is deleted too
     mw = (Path(W.__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
-    i0 = mw.index("from intake.walk import revisit_reference")
-    blk = mw[i0:mw.index("_persist_chunk_plan(_ranges", i0)]
-    assert "no SALAD in this launch" in blk and "_stale_ref.unlink()" in blk
+    # the CUBES take their revisits from AMB3R's map, no SALAD: the launcher reads no walk reference
+    assert "revisit_reference(" not in mw and "import revisit_reference" not in mw
 
 
 def test_i3_reads_the_jobs_configuration_never_config_yaml_at_spawn(session):
@@ -339,5 +338,5 @@ def test_i3_reads_the_jobs_configuration_never_config_yaml_at_spawn(session):
     assert "from config import cfg" not in src, "I3 never re-reads config.yaml at spawn"
     # the worker hands its configuration on every I3 call
     mw = (Path(W.__file__).resolve().parents[1] / "workers" / "map_worker.py").read_text()
-    blk = mw[mw.index("if walk_is_current("):mw.index("_ranges = [(int(a), int(b)) for a, b in _cplan")]
-    assert blk.count("run_cfg=config") == 3
+    blk = mw[mw.index("if walk_is_current("):mw.index("_cplan = _CB.session_cubes")]
+    assert blk.count("run_cfg=config") == 2           # the reuse check and the windows (the cubes need no retry)
