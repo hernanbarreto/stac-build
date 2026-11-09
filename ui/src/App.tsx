@@ -44,7 +44,7 @@ import { StatusBar } from './layout/StatusBar'
 import { CommandPalette, type Command } from './layout/CommandPalette'
 import { SettingsDialog } from './layout/SettingsDialog'
 import { SceneLookDialog } from './layout/SceneLookDialog'
-import { DEFAULT_LOOK, parseLook, type SceneLook } from './components/viewport/sceneLook'
+import { DEFAULT_LOOK, gridLength, parseLook, type SceneLook } from './components/viewport/sceneLook'
 import { Tabs } from './components/ui/Tabs'
 import { Button } from './components/ui/Button'
 import { Banner } from './components/ui/Banner'
@@ -2353,7 +2353,7 @@ function App() {
 
           {hasSession && !sessionLoading && (
             <ViewportHud onView={preset => viewportRef.current?.setStandardView(preset)} metersPerPixel={metersPerPixel}
-              gridLabel={showGrid ? t('view.gridCell', { cell: fmt.lengthText(sceneLook.grid.cellM), major: fmt.lengthText(sceneLook.grid.cellM * sceneLook.grid.majorEvery) }) : null}
+              gridLabel={showGrid ? t('view.gridCell', { cell: gridLength(sceneLook.grid.cellM, fmt.number), major: gridLength(sceneLook.grid.cellM * sceneLook.grid.majorEvery, fmt.number) }) : null}
               getQuaternion={() => viewportRef.current?.getCameraQuaternion() ?? null}
               onOrient={dir => viewportRef.current?.orientView(dir)}
               onOrbit={(a, e) => viewportRef.current?.orbitBy(a, e)}

@@ -9,7 +9,7 @@ import { Field, SegmentedControl, Select } from '../components/ui/Field'
 import { Stack } from '../components/ui/Panel'
 import { useFmt, useI18n } from '../i18n'
 import { tokenColor, VP } from '../components/viewport/palette'
-import { DEFAULT_LOOK, GRID_CELLS_M, GRID_MAJOR_EVERY, type BackgroundKind, type SceneLook } from '../components/viewport/sceneLook'
+import { DEFAULT_LOOK, GRID_CELLS_M, GRID_MAJOR_EVERY, gridLength, type BackgroundKind, type SceneLook } from '../components/viewport/sceneLook'
 import './SceneLookDialog.css'
 
 export function SceneLookDialog({ open, onClose, look, onChange }: {
@@ -46,13 +46,13 @@ export function SceneLookDialog({ open, onClose, look, onChange }: {
         <Field label={t('sceneLook.cell')}>
           <Select<string> aria-label={t('sceneLook.cell')} value={String(grid.cellM)}
             onChange={v => setGrid({ cellM: Number(v) })}
-            options={GRID_CELLS_M.map(c => ({ value: String(c), label: fmt.lengthText(c) }))} />
+            options={GRID_CELLS_M.map(c => ({ value: String(c), label: gridLength(c, fmt.number) }))} />
         </Field>
         <Field label={t('sceneLook.major')} hint={t('sceneLook.majorHint')}>
           <Select<string> aria-label={t('sceneLook.major')} value={String(grid.majorEvery)}
             onChange={v => setGrid({ majorEvery: Number(v) })}
             options={GRID_MAJOR_EVERY.map(n => ({
-              value: String(n), label: t('sceneLook.majorCells', { n: String(n), length: fmt.lengthText(n * grid.cellM) }),
+              value: String(n), label: t('sceneLook.majorCells', { n: String(n), length: gridLength(n * grid.cellM, fmt.number) }),
             }))} />
         </Field>
         <Field label={t('sceneLook.gridColor')} hint={t('sceneLook.gridColorHint')}>

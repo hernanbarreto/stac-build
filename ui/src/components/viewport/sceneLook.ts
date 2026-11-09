@@ -51,11 +51,17 @@ export function parseLook(raw: unknown): SceneLook {
 
 // ── the grid ────────────────────────────────────────────────────────────
 
+/** A grid length as people write it: "1 m", "0.5 m", "0.25 m" — never "1.000 m". */
+export function gridLength(m: number, number: (v: number, digits: number) => string): string {
+  const digits = Number.isInteger(m) ? 0 : Number.isInteger(m * 10) ? 1 : 2
+  return `${number(m, digits)} m`
+}
+
 /** Line positions at multiples of `cell` covering [lo, hi], anchored to the world origin (a line at every
  * whole cell, so the cell size reads as real coordinates), with the major ones flagged. */
 export function gridLines(lo: number, hi: number, cell: number, majorEvery: number): { at: number; major: boolean }[] {
   const out: { at: number; major: boolean }[] = []
-  const i0 = Math.floor(lo / cell), i1 = Math.ceil(hi / cell)
+  const i0 = Math.round(lo / cell), i1 = Math.round(hi / cell)
   for (let i = i0; i <= i1; i++) out.push({ at: i * cell, major: i % majorEvery === 0 })
   return out
 }
@@ -63,18 +69,20 @@ export function gridLines(lo: number, hi: number, cell: number, majorEvery: numb
 /** The most lines one axis draws: a grid finer than this over a large cloud is drawn coarser, never frozen. */
 const MAX_LINES_PER_AXIS = 2000
 
-/** The grid over a cloud's footprint (x, z in [min, max]) at y = 0: minor and major line sets. */
+/** The grid over a cloud's footprint (x, z in [min, max]) at y = 0: minor and major line sets. The footprint
+ * is widened to whole cells so every line spans the same closed rectangle, and its border is drawn as a major
+ * line (USER 2026-11-09: "la grilla tiene errores, fijate que no cierra bien" — the lines of one direction ended
+ * at the cloud's footprint, the other direction's at whole cells beyond it). */
 export function makeLookGrid(min: THREE.Vector2, max: THREE.Vector2, look: SceneLook): THREE.Group {
   let cell = look.grid.cellM
   while (Math.max(max.x - min.x, max.y - min.y) / cell > MAX_LINES_PER_AXIS) cell *= 2
+  const x0 = Math.floor(min.x / cell) * cell, x1 = Math.ceil(max.x / cell) * cell
+  const z0 = Math.floor(min.y / cell) * cell, z1 = Math.ceil(max.y / cell) * cell
   const colour = look.grid.color ? new THREE.Color(look.grid.color) : tokenThree(VP.gridMajor)
   const minor: number[] = [], major: number[] = []
-  for (const l of gridLines(min.x, max.x, cell, look.grid.majorEvery)) {
-    (l.major ? major : minor).push(l.at, 0, min.y, l.at, 0, max.y)
-  }
-  for (const l of gridLines(min.y, max.y, cell, look.grid.majorEvery)) {
-    (l.major ? major : minor).push(min.x, 0, l.at, max.x, 0, l.at)
-  }
+  const xs = gridLines(x0, x1, cell, look.grid.majorEvery), zs = gridLines(z0, z1, cell, look.grid.majorEvery)
+  xs.forEach((l, i) => ((l.major || i === 0 || i === xs.length - 1) ? major : minor).push(l.at, 0, z0, l.at, 0, z1))
+  zs.forEach((l, i) => ((l.major || i === 0 || i === zs.length - 1) ? major : minor).push(x0, 0, l.at, x1, 0, l.at))
   const group = new THREE.Group()
   group.name = 'grid'
   for (const [pts, opacity] of [[minor, 0.28], [major, 0.7]] as [number[], number][]) {
