@@ -51,6 +51,17 @@ def test_a_chain_that_starts_again_is_back_in_omegas_epoch_0(published):
     assert restore_epoch0(published, log=lambda *a: None) is False, "already in epoch 0: nothing to do"
 
 
+def test_the_chain_goes_back_to_epoch_0_until_a_step_has_moved_the_geometry():
+    """zaragoza 2026-11-09: F0 recorded IN the published epoch 3 — the chain resumed after it onto F2's refusal."""
+    from precision.runner import needs_epoch0
+    f0_in_3 = [{"key": "f0_camera", "epoch_before": 3, "epoch_after": 3}]
+    assert needs_epoch0([], 3) and needs_epoch0(f0_in_3, 3), "nothing has moved the geometry: back to 0"
+    gauge = f0_in_3[:0] + [{"key": "f0_camera", "epoch_before": 0, "epoch_after": 0},
+                           {"key": "f2_gauge", "epoch_before": 0, "epoch_after": 1}]
+    assert not needs_epoch0(gauge, 1), "F2 moved it: a normal resume"
+    assert not needs_epoch0([], 0) and not needs_epoch0(f0_in_3[:0], 0), "already in epoch 0"
+
+
 def test_a_session_without_epoch_0_kept_fails_naming_it(published):
     import shutil
     shutil.rmtree(published / f"{PREV_PREFIX}0")

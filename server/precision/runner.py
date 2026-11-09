@@ -576,6 +576,16 @@ def _run_config_sha(session_dir: Path, log: Callable) -> Optional[str]:
         raise ChainError(str(e)) from e
 
 
+def needs_epoch0(prefix: Sequence[Mapping[str, Any]], epoch_now: int) -> bool:
+    """True when the chain must stand on Omega's epoch 0 before it goes on: the session is in another
+    epoch and none of the finished steps it resumes after has moved the geometry (each left the epoch it
+    found — F0 reads the camera, F2 is the first that publishes an epoch). zaragoza 2026-11-09: F0 had
+    run in the published epoch 3 and the chain resumed after it, onto F2's refusal."""
+    if int(epoch_now) == 0:
+        return False
+    return all(int(r.get("epoch_after", -1)) == int(r.get("epoch_before", -2)) for r in prefix)
+
+
 def run_chain(session_dir: Path, pcfg, *, log: Callable = print,
               progress: Optional[Callable[[float, str], None]] = None,
               cancelled: Optional[Callable[[], bool]] = None,
@@ -633,17 +643,20 @@ def run_chain(session_dir: Path, pcfg, *, log: Callable = print,
     epoch_now = _epoch(session_dir)
     first = resume_point(state, steps, epoch_now, out=out, stamp_now=_stamp_in,
                          product_sha=_product_sha, log=log)
-    if first == 0 and int(epoch_now) != 0:
+    if needs_epoch0((state.get("done") or [])[:first], int(epoch_now)):
         # THE CHAIN STARTS AGAIN (zaragoza 2026-11-09: its code changed, Omega's pass did not — F2 then failed
-        # on the published epoch 3): back to Omega's epoch 0 first, from the stores the publish kept
-        # (correction/restart.py); a session with no epoch 0 kept fails here, naming it
+        # on the published epoch 3; and again with F0 already recorded IN epoch 3, the chain resumed after
+        # it): no finished step has moved the geometry yet and the session is not in Omega's epoch 0 — back
+        # to epoch 0 first, from the stores the publish kept (correction/restart.py), and the chain runs
+        # from its first step; a session with no epoch 0 kept fails here, naming it
         from correction.restart import restore_epoch0
-        log(f"{LOG_TAG} the chain starts again from '{steps[0].key}' with the session in epoch {epoch_now} — "
-            f"back to Omega's epoch 0 first")
+        log(f"{LOG_TAG} no finished step has moved the geometry and the session is in epoch {epoch_now} — "
+            f"back to Omega's epoch 0, the chain runs from '{steps[0].key}'")
         try:
             restore_epoch0(out, log=log)
         except RuntimeError as exc:
             raise ChainError(str(exc)) from exc
+        first = 0
         epoch_now = _epoch(session_dir)
     done = list(state.get("done") or [])
     state["done"] = done[:first]
