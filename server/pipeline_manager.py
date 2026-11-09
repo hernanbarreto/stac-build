@@ -254,9 +254,6 @@ DEFAULT_STAGE_ORDER: List[StageId] = [
                            # and degraded to instances with no points. It also
                            # means a SAM3 failure no longer costs the user the
                            # cloud: it is on screen before segmentation starts.
-    StageId.GENRECON,      # USER 2026-11-05: "nube genrecon vlm+sam3 fin, así tiene que ser" — the
-                           # scene mesh right after the cloud (its levels from the segmentation when
-                           # one exists, else from the whole cloud: tools/genrecon/genrecon_levels.py)
     StageId.VLM,
     StageId.SAM3,
     StageId.PROJECTION,    # the masks → cloud projection as a stage of its own (points 158 /
@@ -272,6 +269,11 @@ DEFAULT_STAGE_ORDER: List[StageId] = [
                            # the final epoch with its octree, so the projection before it builds none
     StageId.CERTIFY,       # USER 2026-11-05: "hay que detener la certificación de mierda esa,
                            # eliminarla del pipeline" — off (certify.auto_after_segmentation false)
+    StageId.GENRECON,      # USER 2026-11-09: "el orden primero vlm -> sam3 -> piso -> genrecon" — the scene
+                           # mesh LAST, on the levelled cloud and with the segmentation's levels
+                           # (tools/genrecon/genrecon_levels.py); it was right after the cloud (USER
+                           # 2026-11-05 "nube genrecon vlm+sam3 fin"), before the floor stage moved the
+                           # cloud — the mesh stayed in the unlevelled frame, its grid on a tilted floor
 ]
 
 
@@ -925,7 +927,7 @@ class PipelineManager:
 
     # Cascade: when a stage re-runs, these DOWNSTREAM stages' outputs are ALSO
     # invalidated. MUST mirror DEFAULT_STAGE_ORDER:
-    #   RECONSTRUCTION → CLOUDCOMPY → VLM → SAM3 → CERTIFY → TSDF
+    #   RECONSTRUCTION → CLOUDCOMPY → VLM → SAM3 → PROJECTION → FLOOR → CERTIFY → GENRECON
     # A cascade edge pointing UPSTREAM deletes freshly produced artifacts
     # mid-pipeline — that exact bug (CLOUDCOMPY → SAM3, a relic of the old
     # cloudcompy-before-sam3 order) silently erased segmentation.json +
@@ -967,6 +969,9 @@ class PipelineManager:
             StageId.FLOOR,            # the floor levels THIS cloud
             StageId.CERTIFY,          # the loop certifies THIS cleaned cloud
             StageId.INSTANCE_CLEANER,
+        ],
+        StageId.FLOOR: [
+            StageId.GENRECON,         # the floor's rigid motion is another geometry: the mesh follows it
         ],
         StageId.CERTIFY: [
             StageId.GENRECON,         # a certified epoch is another geometry (the stage is off since

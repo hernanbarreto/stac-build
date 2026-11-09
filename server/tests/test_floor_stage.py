@@ -167,3 +167,14 @@ def test_a_reconstruction_without_replace_keeps_the_masks_and_projects_them():
     # the masks the session has are projected for the floor even with the chain off
     i_masks = src.index("_masks_ok, _masks_why = self._stage_is_complete(")
     assert i_masks < i_keep and "st.stage.enabled = True" in src[i_masks:i_keep]
+
+
+def test_the_mesh_runs_last_on_the_levelled_cloud():
+    """USER 2026-11-09: "el orden primero vlm -> sam3 -> piso -> genrecon" — and a new floor invalidates the mesh."""
+    import pipeline_manager as PM
+    from pipeline_manager import StageId
+    o = PM.DEFAULT_STAGE_ORDER
+    assert (o.index(StageId.CLOUDCOMPY) < o.index(StageId.VLM) < o.index(StageId.SAM3) < o.index(StageId.PROJECTION)
+            < o.index(StageId.FLOOR) < o.index(StageId.GENRECON))
+    assert o[-1] == StageId.GENRECON
+    assert StageId.GENRECON in PM.PipelineManager.CASCADE_INVALIDATION[StageId.FLOOR]
