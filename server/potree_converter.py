@@ -359,7 +359,18 @@ def _vertices_to_las(data: np.ndarray, las_path: Path, class_dir: Path, label: s
 # ONE thread, three conversions were byte-identical (4.0 s vs 2.2 s on 16 cores). The octree is a
 # product of the epoch (what the viewer shows), so it is built on one thread, always.
 POTREE_THREADS_ENV = "POTREE_NUM_THREADS"
-POTREE_THREADS = "1"
+# USER 2026-11-09 ("octree: armado paralelo y determinista, con avance en el log"): the vendored indexer now puts
+# every chunk's points in ONE order (sorted by their bytes) before building — measured on 2.2 M points with exact
+# ties: octree.bin / hierarchy.bin / metadata.json byte-identical at 1, 8, 16 and 30 threads (5.0 s → 2.1 s). The
+# thread count is a BOUND (postprocessing.potree_threads), still pinned on every launch and recorded in the stamp.
+
+
+def _threads() -> str:
+    from reconstruction.grid_knn import config_section
+    return str(int(config_section(("postprocessing",), ("potree_threads",))["potree_threads"]))
+
+
+POTREE_THREADS = _threads()
 #: the converter's encoding flag — part of the octree's identity (the stamp below)
 POTREE_ENCODING = "UNCOMPRESSED"
 # Point 103 (the converter's offsets follow the threads' completion order; the chunker's and
@@ -530,17 +541,19 @@ def _run_potree_converter(las_path: Path, output_dir: Path) -> bool:
     # NO wall-clock timeout (2026-09-28): 600 s on a slow disk discarded a whole
     # correction epoch as if its geometry were wrong. Duration is not a verdict;
     # a hung converter is the heartbeat/cancel path's to detect and kill.
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        env=potree_env(),
-    )
+    # every line the converter prints reaches the log as it is printed (USER 2026-11-09: "con avance en el log")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=potree_env())
+    tail: list = []
+    for line in proc.stdout:
+        line = line.rstrip()
+        if line:
+            logger.info(f"[Potree] {line}")
+            tail = (tail + [line])[-40:]
+    rc = proc.wait()
 
-    if result.returncode != 0:
-        logger.error(f"[Potree] ❌ PotreeConverter failed (exit {result.returncode}, "
-                     f"signal {-result.returncode if result.returncode < 0 else 'n/a'})\n"
-                     f"STDERR:\n{result.stderr}\nSTDOUT:\n{result.stdout}")
+    if rc != 0:
+        logger.error(f"[Potree] ❌ PotreeConverter failed (exit {rc}, "
+                     f"signal {-rc if rc < 0 else 'n/a'})\nlast output:\n" + "\n".join(tail))
         return False
 
     # Verify output

@@ -2940,6 +2940,9 @@ postprocessing:
     sor_halo_m: 0.04               # BOUND (USER 2026-11-09, the cleaner by pieces): the first halo around each slab
                                    # for its SOR; a point whose k-th neighbour may lie beyond it is re-run with a 4x
                                    # wider one — the answer is the whole cloud's exact kNN for any value
+  potree_threads: 16                   # BOUND (USER 2026-11-09, "octree paralelo y determinista"): PotreeConverter's
+                                       # thread count — the octree's bytes are the same for any value (the vendored
+                                       # indexer orders every chunk's points canonically; measured at 1/8/16/30)
   clean_scratch_dir: /tmp/stac_clean   # the cleaner by pieces' scratch (byte masks, slab lists, the statistic's
                                        # arrays — up to 40 B per input point, checked before it starts); the
                                        # container's local disk, not the MooseFS volume (random access)

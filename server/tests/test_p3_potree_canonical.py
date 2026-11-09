@@ -83,6 +83,7 @@ def test_the_vendored_source_carries_the_canonical_patches():
     indexer = (VENDOR / "src" / "indexer.cpp").read_bytes().decode()
     assert "stac_canonical::canonicalizeOctree(targetDir, hierarchyDir);" in indexer
     assert "void canonicalizeOctree(string targetDir, string hierarchyDir)" in indexer
+    assert "std::memcmp(base + a * bpp, base + b * bpp, bpp) < 0" in indexer      # 2026-11-09: chunk order
     main = (VENDOR / "src" / "main.cpp").read_bytes().decode()
     assert 'logger::addOutputFile(targetDir + "/log.txt")' not in main
     writer = (VENDOR / "include" / "ConcurrentWriter.h").read_bytes().decode()
@@ -113,3 +114,22 @@ def test_the_octree_carries_the_full_32_bit_instance_id(tmp_path):
     attrs = {a["name"]: a for a in json.loads((od / "metadata.json").read_text())["attributes"]}
     assert attrs["instance"]["size"] == 4 and attrs["instance"]["type"] == "uint32"
     assert attrs["instance"]["min"] == [70_000] and attrs["instance"]["max"] == [4_000_000]
+
+
+@pytest.mark.skipif(not PC.POTREE_BIN.exists(), reason="PotreeConverter is not built on this machine")
+def test_the_octree_is_the_same_for_any_thread_count(tmp_path, monkeypatch):
+    """USER 2026-11-09 ("octree: armado paralelo y determinista"): every chunk's points in one order before the
+    hierarchy — one thread and sixteen give the same bytes over every file."""
+    pytest.importorskip("laspy")
+    ply = tmp_path / "cloud.ply"
+    _ply_with_ties(ply, 400_000)
+    las = tmp_path / "cloud.las"
+    PC._ply_to_las(ply, las)
+    runs = {}
+    for th in ("1", "16"):
+        monkeypatch.setattr(PC, "POTREE_THREADS", th)
+        od = tmp_path / f"octree_{th}"
+        assert PC._run_potree_converter(las, od)
+        runs[th] = _digests(od)
+    assert runs["1"] == runs["16"], {k: (runs["1"][k], runs["16"].get(k)) for k in runs["1"]
+                                     if runs["1"][k] != runs["16"].get(k)}

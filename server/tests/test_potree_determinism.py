@@ -20,23 +20,32 @@ import potree_converter as PC                                       # noqa: E402
 VENDOR = Path(__file__).resolve().parents[2] / "vendor" / "PotreeConverter" / "Converter"
 
 
-def test_the_converter_is_always_launched_on_one_thread(tmp_path, monkeypatch):
+def test_the_converter_is_launched_with_the_configured_threads_and_streams_its_output(tmp_path, monkeypatch):
+    """USER 2026-11-09: the thread count is the config's BOUND (postprocessing.potree_threads), pinned on every launch
+    (a stray value in the shell never wins), and every line the converter prints reaches the log."""
     fake_bin = tmp_path / "PotreeConverter"
     fake_bin.write_text("")
     monkeypatch.setattr(PC, "POTREE_BIN", fake_bin)
-    monkeypatch.setenv(PC.POTREE_THREADS_ENV, "7")                 # a stray value in the shell never wins
+    monkeypatch.setenv(PC.POTREE_THREADS_ENV, "7")
     seen = {}
 
-    def run(cmd, **kw):
-        seen.update(kw)
-        od = Path(cmd[cmd.index("-o") + 1])
-        od.mkdir(parents=True)
-        (od / "metadata.json").write_text("{}")
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-    monkeypatch.setattr(PC.subprocess, "run", run)
+    class FakePopen:
+        def __init__(self, cmd, **kw):
+            seen.update(kw)
+            od = Path(cmd[cmd.index("-o") + 1])
+            od.mkdir(parents=True)
+            (od / "metadata.json").write_text("{}")
+            self.stdout = iter(["[10%, 1s], [INDEXING: 10%]\n", "done\n"])
+
+        def wait(self):
+            return 0
+    logs = []
+    monkeypatch.setattr(PC.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(PC.logger, "info", lambda m, *a, **k: logs.append(m))
     assert PC._run_potree_converter(tmp_path / "x.las", tmp_path / "octree")
-    assert seen["env"][PC.POTREE_THREADS_ENV] == "1" and PC.POTREE_THREADS == "1"
+    assert seen["env"][PC.POTREE_THREADS_ENV] == PC._threads() == PC.POTREE_THREADS
     assert "timeout" not in seen
+    assert any("[INDEXING: 10%]" in m for m in logs), "the converter's progress reaches the log"
 
 
 def _ply_with_ties(path: Path, n: int) -> None:

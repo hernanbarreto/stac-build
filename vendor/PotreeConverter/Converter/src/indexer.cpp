@@ -1828,6 +1828,25 @@ void doIndexing(string targetDir, State& state, Options& options, Sampler& sampl
 
 		int64_t numPoints = pointBuffer->size / bpp;
 
+		// STAC 2026-11-09 (USER: "octree: armado paralelo y determinista"): the chunker's threads append a chunk's
+		// points in the order they finish — the chunk's point SET is fixed, its ORDER followed the thread count, and
+		// so did octree.bin (measured: hierarchy.bin identical, octree.bin not, at 16 threads). Every chunk's records
+		// are put in ONE order before the hierarchy is built: sorted by their bytes, a total order up to identical
+		// records (whose order cannot show) — the octree no longer depends on how many threads built it.
+		{
+			vector<int64_t> order(numPoints);
+			for (int64_t i = 0; i < numPoints; i++) order[i] = i;
+			uint8_t* base = pointBuffer->data_u8;
+			std::sort(order.begin(), order.end(), [base, bpp](int64_t a, int64_t b) {
+				return std::memcmp(base + a * bpp, base + b * bpp, bpp) < 0;
+			});
+			auto canonical = make_shared<Buffer>(pointBuffer->size);
+			for (int64_t i = 0; i < numPoints; i++) {
+				std::memcpy(canonical->data_u8 + i * bpp, base + order[i] * bpp, bpp);
+			}
+			pointBuffer = canonical;
+		}
+
 		buildHierarchy(&indexer, chunkRoot.get(), pointBuffer, numPoints);
 
 		sampler.sample(chunkRoot.get(), attributes, indexer.spacing, onNodeCompleted, onNodeDiscarded);
