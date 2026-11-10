@@ -1,404 +1,172 @@
-# STAC-Builder — Architecture Reference
+# STAC Build — Architecture
 
-> **Living document** — Must be updated as new modules, integrations, or architectural changes are introduced per the [ROADMAP.md](./ROADMAP.md).
->
-> Last updated: 2026-04-15
-
----
-
-## System Overview
-
-STAC-Builder is an AI-powered construction and asset lifecycle platform that transforms phone-based video into accurate 3D reconstructions, performs segmentation, BIM comparison, and coverage analysis. It comprises a **Python/FastAPI backend**, a **React/Three.js frontend**, and **vendored AI models** (MapAnything, SAM3, PE Spatial, PLM-8B, DepthLM).
+State of 2026-11-09. The mathematics of every reconstruction stage is in `README.md`; the stage-by-stage settings and
+the reference numbers are in `docs/pipeline_final.md`. This file says how the system is built: its processes, how a job
+runs, how products are stamped, resumed and published, how a session is laid out on disk, and how the UI is made.
 
 ---
 
-## Architecture Diagram
+## 1. Processes
 
-```mermaid
-graph TB
-    subgraph UI["React Frontend"]
-        App["App.tsx — Main App"]
-        VP["Viewport.tsx — 3D Renderer"]
-        PL["PotreeLoader.ts — LOD Octree"]
-        IS["InteractiveSegmentation.tsx"]
-        BN["BIMNavigator.tsx"]
-        DO["DeviationOverlay.tsx"]
-        BA["BIMAnalysisPanel.tsx"]
-        TP["TeamPanel.tsx + WebRTC"]
-        AP["AdminPage.tsx"]
-    end
+| Process | Where | What it does |
+|---|---|---|
+| **Backend** | `server/main.py`, FastAPI + uvicorn on port 8765 (TLS), env `da3`, started by `scripts/start.sh` (tmux `backend`, log `logs/latest.log`) | REST API, the viewer / log / team / scan WebSockets, the session store, the pipeline manager. It never loads a GPU model. |
+| **Stage workers** | `server/workers/*.py`, one process per stage | the work of each stage, in the stage's own conda environment (below) |
+| **Precision steps** | `server/precision/*.py`, run by `precision/runner.py` | F0 → F6 inside the reconstruction stage, each step a subprocess of its own |
+| **Semantic service** | vLLM serving Qwen3-VL on `127.0.0.1:8799` (`scripts/serve_semantic.sh`, env `semantic`) | the chat's model. Every VLM stage launches its own vLLM from the job's frozen configuration and stops it; the chat's service is stopped before any GPU stage and reloaded when the pipeline is idle. |
+| **UI dev server** | `ui/`, Vite on port 5173 (`npm run dev:web`) | the React application |
 
-    subgraph Server["FastAPI Backend"]
-        Main["main.py — API + WebSocket Hub"]
-        PM["pipeline_manager.py — 5-Stage Orchestrator"]
+**Environments** (`/workspace/miniforge3/envs`):
 
-        subgraph Workers["Subprocess Workers"]
-            W1["map_worker.py — Reconstruction Dispatcher"]
-            W2["cloudcompy_worker.py — Cloud Cleaning + LiDAR Merge"]
-            W3["vlm_worker.py — Scene Analysis"]
-            W4["sam3_worker.py — Segmentation"]
-            W5["instance_cleaner_worker.py — DBSCAN"]
-        end
-
-        subgraph CoreModules["Core Processing"]
-            ReconstructionW["reconstruction_native_wrapper.py — RealtimeReconstruction"]
-            AM["alignment_manager.py"]
-            SP["segmentation_pipeline.py"]
-            BC["bim_comparison.py"]
-            BR["bim_registration.py"]
-            ZD["zoom_detector.py"]
-            ICP["icp_aligner.py"]
-            CS["coverage_store.py"]
-            OR["occlusion_raycaster.py"]
-            FQ["frame_quality.py + frame_selector.py"]
-        end
-
-        subgraph Support["Supporting"]
-            CFG["config.py + config.yaml"]
-            PP["project_paths.py"]
-            VP2["vendor_paths.py"]
-            FS["frame_storage.py"]
-            DB["db.py / db_project.py / db_team.py"]
-            Auth["auth.py / routes_auth.py / routes_team.py"]
-        end
-    end
-
-    subgraph Vendor["Vendored AI Models"]
-        DA3["depth-anything-3 — DA3_Streaming"]
-        Reconstruction["mapanything — Reconstruction_Streaming"]
-        StrayDA3["stray_da3_streaming — StrayDA3Streaming / StrayLiDAROnly"]
-        SAM3["sam3 — SAM3 Video Predictor"]
-        PESpatial["perception_models — PE-Spatial-G14-448"]
-        PLM["perception_models — PLM-8B VLM"]
-        DepthLM["DepthLM — Pixtral 12B Metric Depth"]
-        CC["cloudcompy — CloudCompPy"]
-        PC["PotreeConverter 2.1"]
-    end
-
-    UI --> Server
-    PM --> Workers
-    W1 -->|backend=da3| DA3
-    W1 -->|backend=hybrid/lidar| StrayDA3
-    W1 -->|backend=mapanything| Reconstruction
-    W4 --> SP --> SAM3
-    W3 --> SA["scene_analyzer.py — InternVL3 (migrating to PLM-8B)"]
-    W2 --> CC
-```
-
----
-
-## Server Layer
-
-### Configuration & Infrastructure
-
-| File | Purpose |
-|------|---------|
-| `config.py` | YAML config loader, `DictConfig` wrapper, `get_param()` helper |
-| `config.yaml` | All server/Reconstruction/SAM3/VLM/segmentation/cleaning parameters |
-| `vendor_paths.py` | Resolves Reconstruction/SAM3/CloudCompPy paths, adds to `sys.path` |
-| `project_paths.py` | `ProjectPaths` + `SourceContext` — hierarchical path resolution: `projects/` → scan days → sources → frames/output |
-| `db.py` | SQLite setup + user/auth tables |
-| `auth.py` | JWT token generation + verification |
-
-### Main Server — `main.py`
-
-The monolithic FastAPI server. Key sections:
-
-- **PLY utilities**: `cloud_to_binary()`, `load_ply_to_numpy()`, `numpy_to_ply_bytes()`
-- **Cloud processing**: `_run_cloudcompy_postprocess()`, `_align_cloud_to_floor()` (RANSAC), `_send_cleaned_cloud()`, `_send_sabana_cloud()`
-- **Connection managers**: `CameraManager`, `ViewerManager` (WebSocket connection pools)
-- **Online processing**: `chunk_processing_worker()` (real-time Reconstruction chunk loop), `_resolve_segmentation_prompt()` (VLM auto-prompt)
-- **REST endpoints**: Session CRUD, BIM upload/compare, segmentation management, pipeline control, alignment save, mode switching
-- **WebSockets**: Viewer (pipeline trigger, cloud loading, progress callbacks, multi-scan), Camera (MapAnything/Reconstruction flows), SLAM (real-time frame processing), Team (presence, chat, WebRTC signaling), Logs (real-time server log forwarding)
-
-### Pipeline Manager — `pipeline_manager.py`
-
-Orchestrates the 5-stage reconstruction pipeline sequentially as subprocesses with Pipe IPC:
-
-1. **Reconstruction** → 3D Reconstruction
-2. **CloudCompPy** → Cloud Cleaning (SOR, voxel, normals)
-3. **VLM** → Scene Analysis (InternVL3)
-4. **SAM3** → Video Segmentation
-5. **Instance Cleaner** → DBSCAN per instance
-
-Key classes: `StageId`, `PipelineStage`, `JobStatus`, `StageState`, `PipelineJob`, `PipelineManager`
-
-### Workers — `server/workers/`
-
-All workers share a pattern: `run(conn, session_dir, config)` → `run_worker_safe(_work_fn, conn, ...)` → `WorkerPipe` IPC.
-
-| Worker | What It Does |
-|--------|-------------|
-| `base.py` | `WorkerPipe` (IPC: progress/log/done/error/cancel), `run_worker_safe()` |
-| `map_worker.py` | **Reconstruction dispatcher**: routes to `_run_da3()`, `_run_hybrid_or_lidar()`, or `_run_mapanything()` based on `config.reconstruction.backend`. For hybrid/lidar: runs `stray_detector.py` validation, then spawns `run_da3_hybrid.sh` subprocess. Generates `lidar_complement.ply` in hybrid mode |
-| `cloudcompy_worker.py` | Runs `run_cloudcompy.sh`. Merges chunks + `lidar_complement.ply` (if present) → `cleaned_cloud.ply`, links to `merged/`, computes `floor_transform.npz` |
-| `vlm_worker.py` | InternVL3 scene analysis → `vlm_analysis.json` (prompt + frame_map). Being migrated to PLM-8B |
-| `sam3_worker.py` | SAM3 segmentation using VLM prompt → `segmentation.json` + `seg_masks.npz` |
-| `instance_cleaner_worker.py` | DBSCAN cluster isolation per segmented instance |
-
-### Core Processing Modules
-
-| Module | Purpose |
-|--------|---------|
-| `reconstruction_native_wrapper.py` | `RealtimeReconstruction` wraps `Reconstruction_Streaming`. Per-chunk async processing with callbacks, zoom intrinsics correction, gravity transform management, metadata saving. **Fast path**: skips `super().__init__()` when `preloaded_model` is available |
-| `reconstruction_config_builder.py` | Builds Reconstruction config dict from `config.yaml` (model checkpoint, weights, chunk_size, overlap, conf_threshold, etc.) |
-| `stray_da3_streaming.py` | **Hybrid/LiDAR reconstruction subclasses**: `StrayDA3Streaming` injects ARKit poses + fused LiDAR/DA3 depth into DA3_Streaming. `StrayLiDAROnly` skips neural inference entirely, using raw LiDAR depth with DA3's SLAM backbone for alignment |
-| `run_da3_hybrid_main.py` | Entry point for hybrid/LiDAR subprocess: parses CLI args, loads Stray Scanner data via `prepare_stray_data()`, instantiates the appropriate subclass, runs chunk-based reconstruction |
-| `ingestors/stray_detector.py` | `detect_stray_data()`: validates Stray Scanner session (checks for `depth/`, `odometry.csv`, `camera_matrix.csv`). Used by `map_worker.py` and `GET /api/sessions/{id}/available_backends` |
-| `ingestors/stray_scanner.py` | `prepare_stray_data()`: extracts frames from `rgb.mp4`, loads ARKit poses (C2W matrices from quaternions), LiDAR depth maps (uint16 mm → float32 m), confidence masks, intrinsic matrix rescaling |
-| `alignment_manager.py` | `AlignmentManager`: RANSAC floor detection, SIM3 gravity correction, chunk-to-chunk alignment, point cloud generation with depth/conf thresholds, segmentation ID continuity mapping |
-| `icp_aligner.py` | Scaled ICP registration: auto voxel sizing, FPFH features, RANSAC global registration, point-to-plane refinement, scale estimation from correspondences |
-| `segmentation_pipeline.py` | Batched SAM3 processing per category, IoU ID matching across batches, NPZ mask storage with upsert logic, display-time point-to-mask matching via PLY origin fields, OBB computation |
-| `sam3_wrapper.py` | `SAM3Wrapper`: model load/unload, batch/interactive/text-prompt modes, VRAM OOM recovery, mask caching, interactive session with propagation streaming |
-| `scene_analyzer.py` | InternVL3 scene analysis: auto model size selection (2B/8B), dynamic resolution preprocessing, multi-frame analysis with keyframe loading, category merging with synonym detection, frame_map building. **Being migrated to PLM-8B** |
-| `bim_comparison.py` | IFC mesh extraction (Revit UniqueId suffix matching), C2M distance computation (KDTree + exact triangle projection), deviation reports, sábana generation |
-| `bim_registration.py` | Hierarchical BIM–scan registration: floor plane RANSAC alignment (height+tilt 3DOF) → object XZ+yaw sweep (3DOF) → full 6DOF transform |
-| `coverage_store.py` | Per-element cumulative coverage: mesh surface sampling, SampleStatus (COVERED/OCCLUDED/NOT_BUILT/NOT_VISIBLE), persistent NPZ storage, timeline tracking |
-| `occlusion_raycaster.py` | Ray-based BIM surface classification: camera pose loading (from Reconstruction extrinsics), cylindrical ray queries, best-camera selection, per-sample status classification |
-| `zoom_detector.py` | 3 zoom detection methods (ffprobe focal length, ORB feature density, DCT frequency), segment identification with merging |
-| `frame_quality.py` | Laplacian blur detection with adaptive threshold, inter-frame diff |
-| `frame_selector.py` | ORB-SLAM H/F ratio keyframe selection: symmetric transfer error, Sampson distance, chi-squared scoring |
-| `frame_storage.py` | `FrameStorage`: session management, frame-to-disk, chunk organization with overlap, PLY save/load with origin traceability (frame_global, pixel_row, pixel_col) |
-
----
-
-## Frontend Layer
-
-### `App.tsx` — Main Application
-
-- **Session sidebar**: project listing with stats (frame count, cloud size, BIM presence, sábana)
-- **Toolbar**: measurement tools, alignment, section box, pipeline controls
-- **Pipeline dialog**: stage ordering, per-stage enable/disable, progress tracking
-- **Panel system**: BIM Navigator, Deviation Overlay, BIM Analysis, Team, Segmentation
-- **Console panel**: real-time server log streaming via WebSocket
-
-### `Viewport.tsx` — 3D Renderer
-
-Three.js-based point cloud renderer:
-- Custom GLSL shaders (vertex: depth-based point sizing, fragment: circular points with EDL-like shading + section box clipping)
-- Potree LOD octree loading via `PotreeLoader`
-- OBB visualization from segmentation results
-- Measurement tools (distance, angle)
-- Floor alignment gizmo (TransformControls)
-- BIM model display (IFC loader integration)
-- Sábana (deviation) cloud rendering with transparency
-- Section box for clipping
-
-### `PotreeLoader.ts` — LOD Octree Loader
-
-Custom Potree 2.0 octree loader:
-- Parses `metadata.json`, `hierarchy.bin`, `octree.bin`
-- Priority-queue visibility traversal (projected pixel size threshold)
-- Point budget management (loaded/unloaded nodes)
-- Chunked hierarchy for deep octrees (proxy nodes → sub-chunk HTTP Range requests)
-- Floor transform matrix application
-
-### Other Components
-
-| Component | Purpose |
-|-----------|---------|
-| `InteractiveSegmentation.tsx` | SAM3 interactive segmentation: click/text prompts, mask painting, SSE propagation streaming, instance management |
-| `BIMNavigator.tsx` | IFC tree explorer: Project→Site→Building→Storey→Elements with search, visibility, opacity |
-| `DeviationOverlay.tsx` | BIM comparison UI: match selection, tolerance config, results histogram |
-| `BIMAnalysisPanel.tsx` | Post-comparison report: per-element quality/advance/coverage, global progress |
-| `IFCLoader.ts` | IFC→Three.js mesh loading with tree hierarchy parsing |
-| `TeamPanel.tsx` | Team chat, online presence, task assignment |
-| `WebRTCCall.tsx` | Video/audio calling between team members |
-| `AdminPage.tsx` | User/team CRUD, session-to-team assignment |
-| `LoginPage.tsx` | JWT login form |
-
----
-
-## Vendor Layer
-
-| Vendor | Purpose |
-|--------|---------|
-| **depth-anything-3** | `DA3_Streaming`: chunk-based monocular depth estimation + SLAM with loop closure (SALAD features). Primary reconstruction backend |
-| **mapanything** | `Reconstruction_Streaming`: chunk-based feed-forward reconstruction. Legacy/fallback backend |
-| **perception_models** | PE-Spatial-G14-448: dense spatial features (segmentation, detection, depth). PLM-8B: VLM for scene analysis, material ID. Apache 2.0 |
-| **DepthLM_Official** | DepthLM (Pixtral 12B): per-pixel metric depth estimation from single images |
-| **sam3** | SAM3 Video Predictor: text/point-prompt segmentation with video propagation |
-| **cloudcompy** | CloudCompPy: SOR filtering, voxel downsampling, duplicate removal, normal estimation |
-| **PotreeConverter** | Converts PLY point clouds to Potree 2.0 octree format |
-
----
-
-## 2D Analysis Pipeline (Tier 2)
-
-> **Full specification:** [ADR-002: 2D Comparison Pipeline](./002-2d-comparison-pipeline.md)
-
-Compares As-Built (real photos) against As-Planned (BIM) in 2D image space for each camera keyframe.
-
-```mermaid
-sequenceDiagram
-    participant MA as MapAnything
-    participant Gizmo as Gizmo Alignment
-    participant Render as BIM Rasterizer
-    participant PES as PE Spatial G14
-    participant DLM as DepthLM 12B
-    participant PLM as PLM-8B
-    participant Agg as Aggregator
-    participant Viz as Visualization
-
-    Note over MA,Gizmo: Phase 1 — Alignment (existing)
-    MA->>Gizmo: camera poses + point cloud
-    Gizmo->>Render: T_scan→BIM + poses in BIM space
-
-    Note over Render: Phase 2 — BIM Render
-    Render->>Render: Per keyframe: RGB + depth + element ID + edges
-
-    Note over PES,PLM: Phase 3 — Per-Frame Analysis (parallel)
-    Render->>PES: BIM render + real photo
-    PES->>Agg: deviation feature map
-    Render->>DLM: BIM z-buffer vs real photo
-    DLM->>Agg: Δdepth (meters)
-    Render->>PLM: element crops from real photo
-    PLM->>Agg: material + state classification
-
-    Note over Agg: Phase 4 — Multi-Frame Aggregation
-    Agg->>Viz: per-element report
-
-    Note over Viz: Phase 5 — Visualization
-    Viz->>Viz: Sábana 2.0 + frame overlay + gallery
-```
-
----
-
-## 3D Pipeline Sequence
-
-```mermaid
-sequenceDiagram
-    participant UI as React UI
-    participant API as FastAPI
-    participant PM as PipelineManager
-    participant ReconstructionW as Reconstruction Worker
-    participant CCW as CloudCompPy Worker
-    participant VLMW as VLM Worker
-    participant SAMW as SAM3 Worker
-    participant ICW as Instance Cleaner
-
-    UI->>API: Start Pipeline (viewer WebSocket)
-    API->>PM: start_pipeline(session_id, stages)
-
-    PM->>ReconstructionW: Stage 1 — 3D Reconstruction
-    Note over ReconstructionW: Backend selection: DA3 | hybrid | lidar | mapanything<br/>DA3: neural depth + SLAM<br/>Hybrid: LiDAR + DA3 fused depth + ARKit poses<br/>LiDAR: raw LiDAR depth + DA3 SLAM alignment
-    ReconstructionW-->>PM: done (chunk PLYs + lidar_complement.ply)
-
-    PM->>CCW: Stage 2 — Cloud Cleaning
-    Note over CCW: CloudCompPy: SOR + voxel + normals<br/>→ cleaned_cloud.ply + floor_transform.npz
-    CCW-->>PM: done
-
-    PM->>VLMW: Stage 3 — Scene Analysis
-    Note over VLMW: InternVL3 multi-frame analysis<br/>(migrating to PLM-8B)<br/>→ vlm_analysis.json
-    VLMW-->>PM: done
-
-    PM->>SAMW: Stage 4 — Segmentation
-    Note over SAMW: SAM3 batched per-category<br/>→ segmentation.json + seg_masks.npz
-    SAMW-->>PM: done
-
-    PM->>ICW: Stage 5 — Instance Cleaning
-    Note over ICW: DBSCAN per instance<br/>→ segmentation_result.json with OBBs
-    ICW-->>PM: done
-
-    PM-->>API: Pipeline complete
-    API-->>UI: WebSocket: pipeline_done + load results
-```
-
----
-
-## Data Layout — Project Structure
-
-```
-projects/<project-slug>/
-├── project.json                    # Project metadata
-├── ifcs/                          # Uploaded IFC files
-├── scans/<date>/<source>/
-│   ├── frames/                    # Extracted video frames
-│   │   ├── 00000.jpg ... NNNNN.jpg
-│   │   ├── frame_quality.json     # Blur analysis
-│   │   ├── selected_frames.json   # Novelty-filtered keyframes
-│   │   └── zoom_analysis.json     # Per-frame zoom levels
-│   └── output/
-│       ├── chunk_*.ply            # Reconstruction raw chunks
-│       ├── chunk_*_meta.json      # Per-chunk metadata (cameras, intrinsics)
-│       ├── chunk_*_origins.npz    # Per-point origin traceability
-│       ├── lidar_complement.ply   # LiDAR backprojection (hybrid mode only)
-│       ├── cleaned_cloud.ply      # CloudCompPy cleaned cloud (chunks + complement merged)
-│       ├── floor_transform.npz    # RANSAC floor alignment (s, R, t)
-│       ├── vlm_analysis.json      # InternVL3 scene inventory (migrating to PLM-8B)
-│       ├── segmentation.json      # SAM3 raw seg results
-│       ├── segmentation_result.json # DBSCAN-cleaned with OBBs
-│       ├── seg_masks.npz          # Compressed per-frame masks
-│       └── potree/                # PotreeConverter output (LOD octree)
-├── merged/
-│   ├── merged_cloud.ply           # → symlink to cleaned_cloud.ply
-│   └── floor_transform.npz       # → symlink
-├── segmentation/                  # Project-level segmentation
-├── coverage/                      # Cumulative coverage tracking
-│   ├── timeline.json
-│   └── element_*.npz
-└── bim_comparison/
-    ├── sabana.ply                 # Deviation-colored point cloud
-    └── sabana_meta.json           # Per-element quality report
-```
-
----
-
-## Correction module — `server/correction/` (USER 2026-09-08)
-
-User-directed loop closure for revisit duplicates (pose drift + scale ambiguity
-+ depth error). Replaces `segmentation/correction_analysis.py` and the chunk
-gizmo. One responsibility per module:
-
-| Module | Responsibility |
+| Environment | Used by |
 |---|---|
-| `config.py` | typed/validated load of `config.yaml correction:` (missing key → load error naming it) |
-| `epoch.py` | geometry epoch: read/bump/stamp/check (`geometry_epoch.json`); dependency-free |
-| `session.py` | immutable session snapshot (cloud+raw, provenance, keyframes, poses, pose copies) |
-| `units.py` | keyframe = atomic unit; visits = keyframe runs; chunks ONLY from `output/chunk_plan.json` |
-| `observability.py` | PCA shape classes + baselines → observable DOF per visit |
-| `diagnose.py` | internal fingerprint → pose \| depth+pose; analytic DA3 anchor cross-check |
-| `solve.py` | trimmed yaw-planar ICP (translation-only under constraints), per-ray depth expansion, DOF projection |
-| `distribute.py` | per-keyframe R,t (slerp+lerp between anchors), k step over the visit span |
-| `gates.py` | collapse, plausibility, continuity, integrity, scene exam — all veto |
-| `floor.py` | floor alignment vs an explicit model (level/plane/profile), step-demotion |
-| `apply.py` | transactional apply: stage `_tx_epoch_<N>/` (incl. Potree) → verify → journaled atomic swap; undo/approve |
-| `invalidate.py` | in-place instance-store refresh, finding re-anchoring, derived-artifact staleness |
-| `ledger.py` | append-only `corrections.jsonl` + `corrections/epoch_<N>.npz` + store mirror |
-| `replay.py` | `python -m correction.replay` — bit-faithful epoch reproduction (keyed by frame_global) |
-| `report.py` | per-run persistent reports (the manual `/api/correction/*` router was removed 2026-09-24 with the UI "Corrections" button; epochs are shown through `/api/certify/select`) |
+| `da3` | backend, DA3 (focal probe, I3, anchors), SAM 3.1, F0, F2, F6 and the chunk check, scale and orientation, the cleaner, the photo bake |
+| `mapanything` | the VGGT-Ω fork (`vendor/VGGT-Long`), F4 (tracks), F3 (resolution probe), F5 (refinement), the sky segmenter |
+| `amb3r` | AMB3R-SLAM, the whole-video first pass |
+| `semantic` | vLLM |
+| `genrecon` | GenRecon |
+| `nodejs` | the 3D Tiles builder (`tools/glb/tile_mesh.mjs`) |
 
+---
+
+## 2. A job
+
+**Orders.** `POST /api/pipeline/run {session_id, scans: [key], replace, segment | autosegment}` is the order the UI's
+**Reconstruir** and **Autosegment** buttons send; `GET /api/pipelines/active` lists the running and queued jobs and their
+stages. A scan key is `<date>/<source>`.
+
+**The pipeline manager** (`server/pipeline_manager.py`) keeps one queue: one job per scan and order, one GPU job at a
+time, stages in `DEFAULT_STAGE_ORDER`:
+
+```text
+RECONSTRUCTION → CLOUDCOMPY → VLM → SAM3 → PROJECTION → FLOOR → CERTIFY (off) → GENRECON (ordered only)
 ```
-mark instances (UI) → evidence → observability → diagnose → solve
-  → gates (object + scene exam + scale) → distribute → apply (tx)
-  → invalidate/regenerate → report → "pending" → approve | undo
+
+- **One configuration per job.** `config.yaml` is read once when the order is given (`read_config_once`; an error fails
+  the order). The job freezes it into `output/run_config.yaml` with its per-order stage overrides, and every worker
+  verifies the copy it reads. A change to `config.yaml` reaches only the orders given after it. Every parameter is
+  typed; a missing key fails the load naming it.
+- **Workers.** Each stage runs as a separate process with the deterministic environment (`repro.deterministic_env`:
+  `PYTHONHASHSEED=0`, the cuBLAS workspace, fixed CPU threads) and the configured interpreter. It talks to the manager
+  through a `WorkerPipe` (`workers/base.py`): `send_progress`, `send_log`, `send_done`, `send_error`, and
+  `check_cancel` polled between steps. `run_stage_inline` runs a sub-stage (the precision core inside the
+  reconstruction) as a child with the same protocol.
+- **The card.** Every GPU step checks it has the whole card (`repro.require_exclusive_gpu`): a co-tenant fails the step,
+  naming it; nothing is lowered to fit a shared card. The semantic service is stopped first.
+- **Cancel** is cooperative with a bound (`CANCEL_ACK_BOUND_S`, about 40 s): the stage is told and may stop at a safe
+  point (never inside a transaction); otherwise its whole process tree is killed. A queued job is simply dropped.
+- **A backend restart drops the queue**; the orders are sent again (a stalled session with *Replace* off resumes).
+
+---
+
+## 3. Stamps, resume and Replace
+
+- **Stamps** (`server/repro.py`: `stamp` / `check_stamp`, `environment_record`). Every product carries the sha256 of
+  its inputs, the configuration sections it reads, its code (the files it imports, followed by
+  `precision/code_closure.py`) and the environment (card, torch, CUDA). A product is reused only on an identical stamp.
+- **Intake markers** (`intake/intake_state.json`): each intake step (quality, parallax, the focal probe) is skipped when
+  its marker matches the frames' bytes, the parameters, the code and the environment.
+- **VGGT-Ω's completion marker** (`output/maplong_run/omega_complete.json`): the fork is skipped only when the marker
+  carries the stamp of exactly this launch; a marker of another launch wipes the plan's products and the fork runs.
+  Inside the fork, `fork_stamp.json` resumes cube by cube; a cube or bridge of another stamp is never silently reused.
+- **The precision chain** (`output/precision/chain_state.json`): the finished prefix counts while every step's input
+  stamp is unchanged; the chain restarts at the first step whose stamp differs.
+- **Replace OFF** resumes on all of the above. **Replace ON** empties the scan to its frames, their manifest, its
+  video and its capture inputs (`intake/`, `output/` and `user_prefs/` go).
+
+---
+
+## 4. Geometry epochs
+
+`server/correction/` (`apply.py`, `epoch.py`, `ledger.py`, `replay.py`, `restart.py`).
+
+- Every correction that moves geometry publishes an **epoch**: a journaled transaction (`_tx_epoch_<N>/`) whose swap
+  files the previous versions of the artifacts it replaces under `_epoch_<N-1>/` and records the transform
+  (`output/corrections/epoch_<N>.npz`), the ledger (`corrections.jsonl`) and `geometry_epoch.json` (epoch, parent,
+  kind). An interrupted swap rolls back. Epoch numbers are never recycled (`next_epoch`).
+- F2 and F5 publish pose-only epochs; F6 publishes the cloud (kind `new_cloud`); the floor step a rigid motion.
+- **After the cloud is published** only it is shown: the stores on the live epoch's lineage move to
+  `output/_restart_epochs/` (out of the viewer's epoch list) and every other store is deleted
+  (`restart.stash_lineage`, called by `map_worker._discard_previous_epochs` and the floor worker).
+- **The way back.** When the precision chain must start again from its first step and no finished step has moved the
+  geometry, the runner returns the stored lineage and selects epoch 0 (`restart.restore_epoch0`,
+  `runner.needs_epoch0`) — the journaled `select_epoch`, nothing destroyed. A session with no epoch 0 kept fails there,
+  naming it.
+
+---
+
+## 5. A session on disk
+
+```text
+server/projects/<session>/
+├─ scans/<date>/src_<source>/
+│   ├─ source_video.mp4           # the original video
+│   ├─ inputs/                    # the rest of the capture (VIO, LiDAR, …), never deleted
+│   ├─ frames/                    # the extracted frames (long side ≤ 1024) + manifest.json (sha256 of each)
+│   │                             #   + selected_frames.json / witness_frames.json (the keyframes)
+│   ├─ intake/                    # quality, parallax, focal probe (focal_probe.json, focal_depth.npz), AMB3R's
+│   │                             #   whole-video pass (amb3r_video.npz, in metres), coverage_fill.json, walk.json,
+│   │                             #   turn_frames.json, cubes.json (+ png), omega_resolution.json, their stamps
+│   ├─ output/
+│   │   ├─ run_config.yaml        # the job's frozen configuration (+ .sha256), run_environment.json
+│   │   ├─ maplong_run/           # the fork: cube results, context views, bridge fits, chunk_graph.json,
+│   │   │                         #   fork_stamp.json, omega_complete.json
+│   │   ├─ omega_run/             # VGGT-Ω's per-keyframe records (epoch-0 depth)
+│   │   ├─ precision/             # chain_state.json, tracks, refine, depth_on_f5.json (the vote's report), layers
+│   │   ├─ cleaned_cloud.ply      # THE published cloud: x y z rgb confidence frame_global pixel_row pixel_col
+│   │   ├─ potree/                # its octree
+│   │   ├─ camera_poses.txt, camera.json, intrinsic.txt, geometry_epoch.json, corrections/, corrections.jsonl
+│   │   ├─ _restart_epochs/       # the lineage's stores, the way back to epoch 0
+│   │   ├─ vlm_analysis.json, segmentation_result.json, instance_ids.npy, scene_r.db, floor_session.json
+│   │   ├─ genrecon/              # the raw GenRecon mesh
+│   │   └─ tsdf/genrecon_photo/   # the published, photo-textured mesh and its 3D Tiles
+│   └─ user_prefs/<user>.json     # each user's viewer preferences for this session
+└─ merged/                        # project-level derivatives (merged cloud, its octree)
 ```
 
-### Consumer → action matrix on apply
+Deleting a session (`DELETE /sessions/{id}`, admin) removes the whole project folder, preferences included, and is
+logged to the project audit. A point's origin (`frame_global`, `pixel_row`, `pixel_col`) is never broken by any stage.
 
-| Artifact / consumer | Action |
-|---|---|
-| `cleaned_cloud.ply`, `cleaned_cloud_raw.ply` | transform per keyframe (k along own ray, then R,t) — same transform, order preserved |
-| `camera_poses.txt` + copies (`maplong_run/`, `omega_run/`, `da3_run/`) | transform per keyframe (row-count-matched copies; mismatches declared) |
-| per-keyframe depth (omega/maplong/da3 npy/pgsr/hires) | `depth_correction.json` sidecar; served ONLY via `session_io.correct_depth` (DA3-anchor/Stray witness depth never corrected) |
-| `segmentation_result.json` | OBBs recomputed in the tx; `globalIndices` untouched (order preserved, asserted by test) |
-| SAM3 masks | unchanged (2-D) |
-| instance store `scene_r.db` | geometry updated in place; findings re-anchored per `frame_id`; user volumes NEVER move; epoch in `scene_meta` |
-| Potree | rebuilt inside the tx, atomically swapped |
-| `output/tsdf/*`, `surface_fit/*`, poisson, perfect, meshes, `pgsr_render/` | invalidated (epoch badge + Regenerate; never auto) |
-| BIM registration/comparison, coverage | invalidated; entries stamped with their epoch |
-| `phase3_findings` | 3-D anchors re-transformed via their origin keyframe |
-| `scale_diagnostics.json` | regenerated per epoch (analytic `s_f → s_f/k` history) |
-| phase-5 tools / phase-6 report | every measurement carries `geometry_epoch` + `human_directed_corrections` (+ overrides) |
+Storage follows one rule: a session keeps what the next reader needs. The aligned chunks, the bridges' predictions
+(only their fits stay) and the I3 windows are deleted once read.
 
-## Key Design Decisions
+---
 
-1. **Model caching**: Reconstruction model is loaded once and reused across zoom segments via `preloaded_model` in `RealtimeReconstruction.__init__` (fast path skips `super().__init__()`)
-2. **Multi-backend reconstruction**: `map_worker.py` dispatches to DA3, hybrid/LiDAR (via `run_da3_hybrid.sh`), or MapAnything based on `config.reconstruction.backend`. Stray Scanner data is auto-detected at runtime
-3. **Hybrid depth fusion**: `StrayDA3Streaming` fuses LiDAR depth (trust range 0.1-5m) with DA3 neural depth for pixels beyond LiDAR range. `StrayLiDAROnly` bypasses neural inference entirely
-4. **Origin traceability**: Every point in the PLY carries `(frame_global, pixel_row, pixel_col)` — this is how segmentation masks (2D) map to 3D points at display-time
-5. **Gravity alignment**: Computed once from first chunk, shared across all segments. Floor transform persisted to NPZ for consistent loading
-6. **Pipeline is subprocess-based**: Each stage runs in its own `multiprocessing.Process` with `Pipe` IPC — the server process never loads GPU models
-7. **Potree LOD**: PotreeConverter generates octree; frontend `PotreeLoader` does priority-queue visibility traversal with configurable point budget
-8. **All parameters in `config.yaml`**: No hardcoded values — all thresholds, model paths, and tuning parameters are configurable
-9. **LiDAR complement**: In hybrid mode, raw LiDAR depth is backprojected using post-loop-closure refined camera poses to generate `lidar_complement.ply`, which CloudCompPy merges with the neural reconstruction
+## 6. The UI
+
+`ui/` — React 18, TypeScript, Vite, Three.js.
+
+- **Shell** (`ui/src/layout/`): `AppHeader` (File / View / Tools / Help menus, the session and scan pickers),
+  `ActivityBar`, `SidePanel` (sessions, instances, layers), `Inspector`, `BottomDock` (console, jobs), `StatusBar`,
+  `CommandPalette`, `SettingsDialog` (density, language), `SceneLookDialog`.
+- **Viewer** (`ui/src/components/Viewport.tsx`, `ui/src/components/viewport/`): the cloud streamed from the Potree
+  octree by `PotreeLoader.ts` with a point budget and a confidence slider (the raw support normalised by the octree's
+  min and max — the arithmetic GenRecon's adapter uses); meshes streamed as 3D Tiles; measurement tools; the
+  navigation cube and HUD (`ViewportHud.tsx`: gravity, scale bar, the grid's cell and major spacing, legends,
+  readouts); the cubes of the cut; the segmentation instances and their oriented boxes.
+- **Background and grid** (`viewport/sceneLook.ts`, View menu): per session, the background (Default — the charcoal
+  gradient; Horizon — a sky dome over a translucent green ground at $y=0$; Plain — a chosen colour) and the grid (cell
+  0.1–5 m, a major line every 2/4/5/10 cells, its colour). The grid's lines sit at whole cells of the world and its
+  border closes on a major line.
+- **Preferences** are saved per session and per user (`GET/POST /api/sessions/{id}/prefs` → `user_prefs/<user>.json`):
+  point size, confidence, budget, light, opacity, background and grid.
+- **Design system**: every colour is a token (`ui/src/styles/tokens.css`, read in 3-D code through
+  `viewport/palette.ts`); no inline style but CSS variables; every visible string in `ui/src/i18n/` (es-MX, en) with a
+  glossary of terms. `npm run verify:design` runs `scripts/check-tokens.mjs`, `check-contrast.mjs`, `check-inline.mjs`,
+  `check-strings.mjs`, the linter, the type check and a build.
+- **Other panels**: the spatial assistant (chat; the VLM proposes, deterministic tools measure), BIM / IFC registration
+  and deviation, team workspaces, the WebXR view.
+
+---
+
+## 7. Vendored code
+
+| Directory | What | Branch / pin |
+|---|---|---|
+| `vendor/VGGT-Long` | the VGGT-Ω cube run, seams, revisit bridges, the Sim(3) graph, the decision rule | fork, branch `gpu-main` |
+| `vendor/AMB3R-SLAM` | the whole-video first pass and its light map | fork, branch `stac` (third party: never pushed upstream) |
+| `vendor/depth-anything-3` | DA3 | pinned |
+| `vendor/pointdit` | PointDiT-H/16 (edge detail) | pinned, sha256-verified weights |
+| `vendor/GenRecon` | the scene mesh | pinned commit + `server/tools/genrecon/genrecon_stac.patch` |
+| `vendor/PotreeConverter` | the octree, with the canonical chunk order | patched |
+| `vendor/mvs-texturing` | texrecon, kept | — |
