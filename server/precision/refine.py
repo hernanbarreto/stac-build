@@ -159,7 +159,10 @@ class TrackGroups(dict):
     ``uv`` (float64, one row per observation), observations in each track's order. The arrays are the
     lists' content, built from the same input by one stable sort; :func:`_track_arrays` reads them when
     the groups carry them and builds them from the lists otherwise (a plain dict — the tests' shape)."""
-    __slots__ = ("tracks", "counts", "starts", "ii", "uv")
+    # ``listed``: whether the dict holds the lists too. F5 builds its groups WITHOUT them (2026-11-10, pccr
+    # 2026-08-24: 180 M keyframe observations at 367 bytes each as Python lists = 66 GB per grouping — F5 was
+    # killed by the pod's 117 GB limit); a reader that needs the per-track lists calls :func:`listed`
+    __slots__ = ("tracks", "counts", "starts", "ii", "uv", "listed")
 
 
 def group_tracks(track: np.ndarray, frame: np.ndarray, uv: np.ndarray,
@@ -176,6 +179,7 @@ def group_tracks(track: np.ndarray, frame: np.ndarray, uv: np.ndarray,
     hit = (pos < len(fr)) & (fr[fo][pos_c] == frame) if len(fr) else np.zeros(len(frame), bool)
     t = track[hit]; i_of = fo[pos_c[hit]]; p = uv[hit]
     out = TrackGroups()
+    out.listed = bool(lists)
     if not len(t):
         out.tracks = np.zeros(0, np.int64); out.counts = np.zeros(0, np.int64); out.starts = np.zeros(0, np.int64)
         out.ii = np.zeros(0, np.int64); out.uv = np.zeros((0, 2), np.float64)
@@ -201,6 +205,22 @@ def group_tracks(track: np.ndarray, frame: np.ndarray, uv: np.ndarray,
     for q in range(len(tracks)):
         a, b = int(new_starts[q]), int(new_starts[q] + counts[q])
         out[int(tracks[q])] = list(zip(ii_l[a:b], uvs[a:b]))
+    return out
+
+
+def listed(groups: Dict[int, List]) -> Dict[int, List]:
+    """The groups as {track: [(keyframe index, uv)]} lists — ``groups`` itself when it holds them (a plain dict, or
+    a :class:`TrackGroups` built with lists), else built from the arrays: the same tracks in the same order, the
+    same observations in each track's order, uv as float64 rows (the values of the lists' rows). Only the per-track
+    readers call it (the Ceres rung, the one-track-at-a-time references): on a large session it costs what the
+    arrays-only groups save."""
+    if not isinstance(groups, TrackGroups) or getattr(groups, "listed", True):
+        return groups
+    out: Dict[int, List] = {}
+    ii_l = groups.ii.tolist()
+    for q, t in enumerate(groups.tracks.tolist()):
+        a = int(groups.starts[q]); b = a + int(groups.counts[q])
+        out[int(t)] = list(zip(ii_l[a:b], groups.uv[a:b]))
     return out
 
 
@@ -230,6 +250,7 @@ def triangulate_tracks_per_track(groups: Dict[int, List], w2c: np.ndarray, param
     """The one-track-at-a-time reference of :func:`triangulate_tracks` (kept for the equivalence
     test: the batched form must give the same tracks and the same bits)."""
     from precision.camera import CameraError
+    groups = listed(groups)
     out = {}
     for t, obs in groups.items():
         if len(obs) < 2:
@@ -275,6 +296,34 @@ def device_of() -> str:
     return _DEVICE_OVERRIDE or "numpy"
 
 
+# observations per call of the lens' batched undistortion: a BOUND on memory, not a decision — the call is per
+# point and each track's tolerance its own, so whole tracks in chunks give the same bits (2026-11-10: Python's
+# cv2.projectPoints inside it also returns its (2n × 14) Jacobian, 32 GB for pccr 2026-08-24's 144 M fit
+# observations — with the rest F5 went over the pod's 117 GB)
+_UNDISTORT_CHUNK_OBS = 2_000_000
+
+
+def _undistort_tracks(uv: np.ndarray, K: np.ndarray, dist: np.ndarray, starts: np.ndarray, counts: np.ndarray,
+                      solver: dict) -> Tuple[np.ndarray, np.ndarray]:
+    """:func:`precision.camera.undistort_normalized_tracks` over contiguous tracks (track q = rows
+    starts[q] : starts[q] + counts[q], in order, no gap), whole tracks at a time, ≤ ``_UNDISTORT_CHUNK_OBS``
+    observations per call (one track larger than that is one call)."""
+    from precision.camera import undistort_normalized_tracks
+    starts = np.asarray(starts, np.int64); counts = np.asarray(counts, np.int64)
+    if len(uv) <= _UNDISTORT_CHUNK_OBS:
+        return undistort_normalized_tracks(uv, K, dist, starts, counts, **solver)
+    xn = np.empty((len(uv), 2), np.float64)
+    ok = np.empty(len(starts), bool)
+    ends = starts + counts
+    q0 = 0
+    while q0 < len(starts):
+        q1 = max(q0 + 1, int(np.searchsorted(ends, starts[q0] + _UNDISTORT_CHUNK_OBS, side="right")))
+        a, b = int(starts[q0]), int(ends[q1 - 1])
+        xn[a:b], ok[q0:q1] = undistort_normalized_tracks(uv[a:b], K, dist, starts[q0:q1] - a, counts[q0:q1], **solver)
+        q0 = q1
+    return xn, ok
+
+
 def triangulate_tracks(groups: Dict[int, List], w2c: np.ndarray, params: Sequence[float],
                        solver: dict, min_tri_deg: float,
                        dropped: Optional[dict] = None) -> Dict[int, np.ndarray]:
@@ -289,12 +338,10 @@ def triangulate_tracks(groups: Dict[int, List], w2c: np.ndarray, params: Sequenc
     tracks with k views solved as one stack (numpy's batched SVD = the same LAPACK routine per
     matrix), the same front / angle tests — the result equals :func:`triangulate_tracks_per_track`
     (tests/test_triangulate_batched.py)."""
-    from precision.camera import undistort_normalized_tracks
     tracks, counts, starts, ii, uv = _track_arrays(groups)
     if not tracks:
         return {}
-    xn, ok_track = undistort_normalized_tracks(uv, K_of(params), np.asarray(params[4:8], np.float64),
-                                               starts, counts, **solver)
+    xn, ok_track = _undistort_tracks(uv, K_of(params), np.asarray(params[4:8], np.float64), starts, counts, solver)
     return _dlt_tracks(tracks, counts, starts, ii, xn, ok_track, w2c, min_tri_deg, dropped)
 
 
@@ -331,6 +378,17 @@ def _obs_of_tracks(groups: Dict[int, List], tracks: Sequence[int]):
         if int(keep.sum()) == len(want) and np.array_equal(groups.tracks[keep], want):
             m = np.repeat(keep, groups.counts)
             return groups.counts[keep], groups.ii[m], groups.uv[m]
+        if not getattr(groups, "listed", True):
+            # any order, from the arrays (no lists to read): each track's run of observations, in its order
+            o = np.argsort(groups.tracks, kind="stable")
+            pos = np.searchsorted(groups.tracks[o], want)
+            q = o[np.minimum(pos, len(o) - 1)]
+            if np.any(pos >= len(o)) or not np.array_equal(groups.tracks[q], want):
+                raise RefineError("a track asked for is not in the groups")
+            counts = groups.counts[q]
+            idx = np.repeat(groups.starts[q], counts) + (np.arange(int(counts.sum()))
+                                                          - np.repeat(np.cumsum(counts) - counts, counts))
+            return counts, groups.ii[idx], groups.uv[idx]
     counts = np.fromiter((len(groups[t]) for t in tracks), np.int64, len(tracks))
     ii = np.fromiter((i for t in tracks for i, _ in groups[t]), np.int64, int(counts.sum()))
     uv = np.array([p for t in tracks for _, p in groups[t]], np.float64).reshape(-1, 2)
@@ -345,7 +403,6 @@ def triangulate_tracks_blocks(groups: Dict[int, List], w2c: np.ndarray, params_b
     observations, each track's part judged with the track rule of ``undistort_normalized_tracks``;
     a track is dropped when any of its parts fails (what the per-track reference did) — then the
     same batched DLT. (The per-track loop this replaces took 270 s for R3's held-out on pccr.)"""
-    from precision.camera import undistort_normalized_tracks
     tracks, counts, starts, ii, uv = _track_arrays(groups)
     if not tracks:
         return {}
@@ -361,8 +418,7 @@ def triangulate_tracks_blocks(groups: Dict[int, List], w2c: np.ndarray, params_b
         starts_b = np.nonzero(first)[0]
         counts_b = np.diff(np.r_[starts_b, len(m)])
         pb = params_by_block[int(b)]
-        xn_b, ok_b = undistort_normalized_tracks(uv[m], K_of(pb), np.asarray(pb[4:8], np.float64),
-                                                 starts_b, counts_b, **solver)
+        xn_b, ok_b = _undistort_tracks(uv[m], K_of(pb), np.asarray(pb[4:8], np.float64), starts_b, counts_b, solver)
         xn[m] = xn_b
         ok_track[tb[starts_b][~ok_b]] = False
     return _dlt_tracks(tracks, counts, starts, ii, xn, ok_track, np.asarray(w2c, np.float64), min_tri_deg, dropped)
@@ -443,6 +499,7 @@ def heldout_rms_per_track(groups: Dict[int, List], w2c: np.ndarray, params: Sequ
                           solver: dict, min_tri_deg: float, dropped: Optional[dict] = None) -> Dict[int, float]:
     """The one-track-at-a-time reference of :func:`heldout_rms` (kept for the equivalence test)."""
     X = triangulate_tracks(groups, w2c, params, solver, min_tri_deg, dropped=dropped)
+    groups = listed(groups)
     out = {}
     for t, P in X.items():
         e = [np.linalg.norm(project(P[None], w2c[i], params)[0] - np.asarray(p)) for i, p in groups[t]]
@@ -526,6 +583,7 @@ def run_rung(name: str, w2c_start: np.ndarray, params_start: Sequence[float], wh
         cam.params = [float(v) for v in pb0[b]]
         cam.camera_id = b + 1
         rec.add_camera_with_trivial_rig(cam)
+    fit_groups = listed(fit_groups)                       # this path reads the per-track lists
     per_img: Dict[int, List[Tuple[int, np.ndarray]]] = {i: [] for i in range(N)}
     for t, obs in fit_groups.items():
         if t in X_start:
@@ -637,6 +695,7 @@ def _heldout_of_blocks_per_track(r: RungResult, groups, solver, cfg) -> Tuple[Di
     """The one-track-at-a-time reference of the per-block held-out."""
     from precision.camera import CameraError
     dropped: dict = {"tracks": 0, "observations": 0}
+    groups = listed(groups)
     out = {}
     for t, obs in groups.items():
         if len(obs) < 2:
@@ -669,7 +728,7 @@ def track_clusters(groups: Dict[int, List]) -> Dict[int, int]:
         counts = groups.counts[keep]
         first = np.minimum.reduceat(groups.ii[m], np.concatenate([[0], np.cumsum(counts)[:-1]]))
         return {int(t): int(i) for t, i in zip(groups.tracks[keep].tolist(), first.tolist())}
-    return {t: int(min(i for i, _ in obs)) for t, obs in groups.items() if len(obs) >= 2}
+    return {t: int(min(i for i, _ in obs)) for t, obs in listed(groups).items() if len(obs) >= 2}
 
 
 def solver_error(h_end: Dict[int, float], h_cont: Dict[int, float]) -> dict:
@@ -791,7 +850,7 @@ def within_range(track: np.ndarray, frame: np.ndarray, uv: np.ndarray, kf_frames
     kept (nothing to measure them with — the fit's own triangulation drops the latter)."""
     track = np.asarray(track, np.int64); frame = np.asarray(frame, np.int64)
     keep = np.ones(len(track), bool)
-    X = triangulate_tracks(group_tracks(track, frame, uv, kf_frames), w2c, params, solver, min_tri_deg)
+    X = triangulate_tracks(group_tracks(track, frame, uv, kf_frames, lists=False), w2c, params, solver, min_tri_deg)
     if not X:
         return keep
     tx = np.array(sorted(X), np.int64)
@@ -829,8 +888,9 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
         log(f"{LOG_TAG} range {range_m:g} m (reconstruction.view_range_m): {int((~keep).sum()):,} of {len(keep):,} "
             f"observation(s) of a landmark farther than it from their keyframe left out of the fit and the held-out")
         track, frame, uv, split = track[keep], frame[keep], uv[keep], split[keep]
-    fit_g = group_tracks(track[split == 0], frame[split == 0], uv[split == 0], kf_frames)
-    held_g = group_tracks(track[split == 1], frame[split == 1], uv[split == 1], kf_frames)
+    # the arrays only (TrackGroups.listed): every F5 reader takes them; the lists were 66 GB on pccr 2026-08-24
+    fit_g = group_tracks(track[split == 0], frame[split == 0], uv[split == 0], kf_frames, lists=False)
+    held_g = group_tracks(track[split == 1], frame[split == 1], uv[split == 1], kf_frames, lists=False)
     dropped_fit: dict = {"tracks": 0, "observations": 0}
     X0 = triangulate_tracks(fit_g, w2c0, params0, solver, cfg.min_tri_deg, dropped=dropped_fit)
     if len(X0) < 3:
@@ -1149,13 +1209,11 @@ def heldout_leave_one_view_out(held_g: Dict[int, List], best: RungResult, solver
     view by view) and reduced as the loop did. :func:`heldout_leave_one_view_out_per_track` is the
     loop. A track whose observations do not round-trip through the lens is left out (the loop would
     have failed the stage on it)."""
-    from precision.camera import undistort_normalized_tracks
     params = best.params_by_block[0]
     tracks, counts, starts, ii, uv = _track_arrays(held_g, min_views=3)
     if not tracks:
         return {}
-    xn, ok_track = undistort_normalized_tracks(uv, K_of(params), np.asarray(params[4:8], np.float64),
-                                               starts, counts, **solver)
+    xn, ok_track = _undistort_tracks(uv, K_of(params), np.asarray(params[4:8], np.float64), starts, counts, solver)
     w2c = np.asarray(best.w2c, np.float64)
     frame_out, res_out, key_out = [], [], []
     for k in np.unique(counts):
@@ -1194,7 +1252,7 @@ def heldout_leave_one_view_out_per_track(held_g: Dict[int, List], best: RungResu
     """The per-track loop :func:`heldout_leave_one_view_out` replaced (kept for its test)."""
     params = best.params_by_block[0]
     per: Dict[int, List[float]] = {}
-    for t, obs in held_g.items():
+    for t, obs in listed(held_g).items():
         if len(obs) < 3:
             continue
         for k, (i, p) in enumerate(obs):
@@ -1384,9 +1442,15 @@ def _prior_cross_check(out: Path, kf, X, fit_g, best: RungResult, cam) -> dict:
     compared as a ratio: its median is the scale between them, and the spread of the
     ratios around it is the prior's relative depth error."""
     from precision.camera import native_to_grid, grid_like
+    import itertools
     ratio = []
-    for t, P in list(X.items())[:5000]:
-        i, p = fit_g[t][0]
+    head = list(itertools.islice(X.items(), 5000))      # never a list of every landmark (37 M on pccr 2026-08-24)
+    if not head:
+        return {"n": 0, "scale": None, "median_rel": None}
+    cnt, ii_h, uv_h = _obs_of_tracks(fit_g, [t for t, _ in head])
+    first = np.cumsum(cnt) - cnt                         # each track's first observation
+    for q, (t, P) in enumerate(head):
+        i, p = int(ii_h[first[q]]), uv_h[first[q]]
         npz = out / "omega_run" / "results_output" / f"frame_{kf[i]}.npz"
         if not npz.exists():
             continue

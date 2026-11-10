@@ -91,6 +91,49 @@ def test_track_groups_arrays_equal_the_loop_and_the_lists():
     assert np.array_equal(ca, cb) and np.array_equal(ia, ib) and np.array_equal(ua, ub)
 
 
+def test_arrays_only_groups_read_the_same_as_the_lists():
+    """F5's groups carry no Python lists (2026-11-10: 66 GB on pccr 2026-08-24, the pod's limit killed F5): every
+    reader gives what it gave with the lists — listed() rebuilds them exactly, _obs_of_tracks serves any order,
+    the triangulation, the held-out and the torch problem's inputs are unchanged."""
+    from precision import ba_torch as BA
+    rng = np.random.default_rng(11)
+    frames = [100, 103, 106, 109, 112, 115, 118]
+    n = 20000
+    track = rng.integers(0, 3000, n); frame = rng.choice(frames + [999], n); uv = rng.uniform(0, 500, (n, 2)).astype(np.float32)
+    g = RF.group_tracks(track, frame, uv, frames)
+    a = RF.group_tracks(track, frame, uv, frames, lists=False)
+    assert g.listed and not a.listed and len(a) == 0 and len(g) > 1000
+    la = RF.listed(a)
+    assert list(la.keys()) == list(g.keys())
+    for t in g:
+        assert [i for i, _ in la[t]] == [i for i, _ in g[t]]
+        assert np.array_equal(np.array([p for _, p in la[t]]), np.array([p for _, p in g[t]], np.float64))
+    assert RF.listed(g) is g
+    # any order (reversed, a shuffled subset): the same runs as the lists give
+    for sub in (g.tracks.tolist()[::-1], rng.permutation(g.tracks)[:500].tolist()):
+        ca, ia, ua = RF._obs_of_tracks(a, sub)
+        cb, ib, ub = RF._obs_of_tracks(dict(g), sub)
+        assert np.array_equal(ca, cb) and np.array_equal(ia, ib) and np.array_equal(ua, ub)
+    with pytest.raises(RF.RefineError):
+        RF._obs_of_tracks(a, [10 ** 9])
+    # the scene's readers: triangulation, held-out, per-track reference, the torch problem
+    w2c, pts, groups, X = _scene(n_cam=12, n_pts=400, noise_px=0.4)
+    tr_, fr_, uv_ = [], [], []
+    for t, obs in groups.items():
+        for i, p in obs:
+            tr_.append(t); fr_.append(i); uv_.append(p)
+    full = RF.group_tracks(np.asarray(tr_), np.asarray(fr_), np.asarray(uv_), list(range(len(w2c))))
+    arr = RF.group_tracks(np.asarray(tr_), np.asarray(fr_), np.asarray(uv_), list(range(len(w2c))), lists=False)
+    Xf = RF.triangulate_tracks(full, w2c, CAM, SOLVER, _Cfg.min_tri_deg)
+    Xa = RF.triangulate_tracks(arr, w2c, CAM, SOLVER, _Cfg.min_tri_deg)
+    assert list(Xf) == list(Xa) and all(np.array_equal(Xf[t], Xa[t]) for t in Xf)
+    assert RF.heldout_rms(full, w2c, CAM, SOLVER, _Cfg.min_tri_deg) == RF.heldout_rms(arr, w2c, CAM, SOLVER, _Cfg.min_tri_deg)
+    assert (RF.heldout_rms_per_track(arr, w2c, CAM, SOLVER, _Cfg.min_tri_deg)
+            == RF.heldout_rms_per_track(full, w2c, CAM, SOLVER, _Cfg.min_tri_deg))
+    pa, pf = BA.problem_inputs(arr, Xf, len(w2c)), BA.problem_inputs(full, Xf, len(w2c))
+    assert pa[0] == pf[0] and all(np.array_equal(x, y) for x, y in zip(pa[1:], pf[1:]))
+
+
 def test_torch_problem_inputs_equal_the_ceres_rule_loop():
     from precision import ba_torch as BA
     rng = np.random.default_rng(8)
@@ -135,3 +178,21 @@ def test_witness_pnp_is_the_same_whatever_the_split():
     for f in a:
         assert a[f] == b[f], f
     assert sum(1 for v in a.values() if v["localized"]) >= 3
+
+
+def test_undistortion_in_track_chunks_gives_the_same_bits(monkeypatch):
+    """The lens' batched undistortion in chunks of whole tracks (2026-11-10: cv2.projectPoints' Jacobian alone was
+    32 GB for pccr 2026-08-24's fit observations) equals the one call, bit for bit, verdicts included."""
+    from precision.camera import undistort_normalized_tracks
+    rng = np.random.default_rng(12)
+    counts = rng.integers(2, 9, 3000)
+    starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
+    uv = rng.uniform(-40, 520, (int(counts.sum()), 2))
+    K = RF.K_of(CAM)
+    dist = np.asarray(CAM[4:8], np.float64) * 200.0          # a strong lens: 1800 of the 3000 tracks fail the round trip
+    xa, oa = undistort_normalized_tracks(uv, K, dist, starts, counts, **SOLVER)
+    for chunk in (7, 101, 5000):
+        monkeypatch.setattr(RF, "_UNDISTORT_CHUNK_OBS", chunk)
+        xb, ob = RF._undistort_tracks(uv, K, dist, starts, counts, SOLVER)
+        assert np.array_equal(xa, xb, equal_nan=True) and np.array_equal(oa, ob)
+    assert 0 < int((~oa).sum()) < len(oa)
