@@ -196,3 +196,39 @@ def test_undistortion_in_track_chunks_gives_the_same_bits(monkeypatch):
         xb, ob = RF._undistort_tracks(uv, K, dist, starts, counts, SOLVER)
         assert np.array_equal(xa, xb, equal_nan=True) and np.array_equal(oa, ob)
     assert 0 < int((~oa).sum()) < len(oa)
+
+
+def test_the_torch_problem_reads_groups_made_by_refine_run_as_main(monkeypatch):
+    """The chain runs F5 as `python -m precision.refine`: its groups are __main__'s TrackGroups, a second class next to
+    the precision.refine the solver imports (2026-11-10, pccr 2026-08-24: an isinstance test sent them to the
+    per-observation reader, which found no lists — R0 solved an EMPTY problem and "converged"). The solver reads them by
+    their arrays; groups without lists never reach the per-observation reader; an empty problem is refused."""
+    import importlib.util
+    from pathlib import Path
+    from precision import ba_torch as BA
+    spec = importlib.util.spec_from_file_location("refine_as_main", Path(RF.__file__))
+    main_mod = importlib.util.module_from_spec(spec)
+    import sys
+    monkeypatch.setitem(sys.modules, "refine_as_main", main_mod)      # what runpy does for __main__
+    spec.loader.exec_module(main_mod)
+    assert main_mod.TrackGroups is not RF.TrackGroups
+    rng = np.random.default_rng(8)
+    frames = list(range(50))
+    n = 30000
+    track = rng.integers(0, 4000, n); frame = rng.choice(frames, n); uv = rng.uniform(0, 400, (n, 2)).astype(np.float32)
+    g_main = main_mod.group_tracks(track, frame, uv, frames, lists=False)
+    g_ref = RF.group_tracks(track, frame, uv, frames)
+    assert not isinstance(g_main, RF.TrackGroups)
+    X = {int(t): rng.normal(0, 1, 3) for k, t in enumerate(g_ref.tracks.tolist()) if k % 4}
+    a = BA.problem_inputs(g_main, X, len(frames))
+    b = BA._problem_inputs_reference(g_ref, X)
+    assert a[0] == b[0] and len(a[0]) > 1000
+    assert all(np.array_equal(x, y) for x, y in zip(a[1:], b[1:]))
+    with pytest.raises(BA.BATorchError):
+        BA._problem_inputs_reference(g_main, X)
+    # a rung whose landmarks reach no observation is refused, never solved on the priors alone
+    from tests.test_ba_torch import CFG
+    w2c = np.tile(np.eye(4), (len(frames), 1, 1))
+    with pytest.raises(RF.RefineError):
+        BA.run_rung_torch("R0", w2c, CAM, WH, g_main, {10 ** 9: np.zeros(3)}, np.full(len(frames), 0.5), CFG,
+                          device="cpu")

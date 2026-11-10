@@ -872,9 +872,16 @@ def problem_inputs(fit_groups, X_start, n_images: int):
     the tracks left with ≥ 2 images; tracks in X_start's order, each track's images in the order of their
     first observation. From the groups' cached arrays when they carry them (2026-11-01: the Python loop over
     13 M observations cost ~10 s per rung on pccr); :func:`_problem_inputs_reference` is that loop."""
-    from precision.refine import TrackGroups
-    if not (isinstance(fit_groups, TrackGroups) and hasattr(fit_groups, "counts")):
-        return _problem_inputs_reference(fit_groups, X_start)
+    # the ARRAYS by their attributes, never by isinstance (2026-11-10): the chain runs F5 as `python -m
+    # precision.refine`, so the groups are __main__.TrackGroups while this module imports precision.refine — a second
+    # class. The isinstance test sent every production F5 to the per-observation loop below and, once the groups
+    # carried no lists (d744c4f), handed pccr 2026-08-24's R0 an EMPTY problem that "converged" on the priors alone
+    if all(hasattr(fit_groups, a) for a in ("tracks", "counts", "ii", "uv")):
+        return _problem_inputs_arrays(fit_groups, X_start, n_images)
+    return _problem_inputs_reference(fit_groups, X_start)
+
+
+def _problem_inputs_arrays(fit_groups, X_start, n_images: int):
     want = np.fromiter(X_start.keys(), np.int64, len(X_start))
     g_tracks = fit_groups.tracks
     pos = {int(t): q for q, t in enumerate(want.tolist())}
@@ -907,6 +914,9 @@ def problem_inputs(fit_groups, X_start, n_images: int):
 
 
 def _problem_inputs_reference(fit_groups, X_start):
+    if getattr(fit_groups, "listed", True) is False:
+        raise BATorchError("track groups built without their lists reached the per-observation reader — it would see "
+                           "no observation at all")
     tracks, obs_of = [], {}
     for t in X_start:
         if t not in fit_groups or len(fit_groups[t]) < 2:
@@ -959,6 +969,9 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
     # (measured 2026-11-01 on pccr's main tracks: without this rule two same-image observations
     # triangulated at the camera put one residual of 7e11 px into the problem and the solve stalled)
     tracks, cam_idx, pt_idx, uv, X0 = problem_inputs(fit_groups, X_start, N)
+    if not len(tracks):
+        raise RefineError(f"refine {name}: no landmark with two observations reached the problem ({len(X_start):,} "
+                          f"landmark(s) to start from) — a bundle adjustment of the priors alone is no solve")
     # OFF THE RASTER AT THE START = not a measurement of that image (measured 2026-11-01 on pccr's main
     # tracks: a 2-view landmark triangulated 0.06 mm in front of one camera projected 7e11 px away; one
     # such residual is the whole cost, the Levenberg-Marquardt step for it is the linearisation of x/z at
@@ -992,6 +1005,9 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
         if log:
             log(f"{n_off:,} observation(s) of {n_rep0:,} project off the raster at the start (> {diag:.0f} px or behind "
                 f"the camera) — out of the solve, {len(tracks):,} tracks stay")
+        if not len(tracks):
+            raise RefineError(f"refine {name}: every one of the {n_rep0:,} observation(s) projects off the raster or "
+                              f"behind its camera at the start — nothing to solve")
     del probe
     n_rep = int(len(uv))
     prior_w2c = w2c_start if prior_w2c is None else np.asarray(prior_w2c, np.float64)
