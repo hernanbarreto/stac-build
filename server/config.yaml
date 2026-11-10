@@ -2469,18 +2469,6 @@ reconstruction:
                                         # ORDER MATTERS: the first one with a held-out error is
                                         # the default; another replaces it only when heldout_change
                                         # says it is better beyond the sample's noise
-    # F3 — Omega (precision/omega_probe.py): the resolution probe REPORTS, the user sets
-    # reconstruction.vggtomega.resolution / .mode
-    omega:
-      resolution_probe:
-        enabled: true
-        resolutions: [512, 768, 1024]   # compared on the same central window of keyframes
-                                        # (the only checkpoint is vggt_omega_1b_512.pt: trained
-                                        # at 512 — whether more pixels help is MEASURED here)
-        mode: balanced                  # balanced (≈ res² pixels, today's production) | max_size
-        window_frames: 32               # BOUND: keyframes of the probe window
-        pair_samples: 8000              # BOUND: surface samples per frame pair
-                                        # (metric_lock.depth_pair_samples' own default)
     # F4 — native-pixel sub-pixel tracks (precision/tracks.py; the fork's VGGSfM tracker)
     tracks:
       tracker_long_side: 1024           # BOUND: tracker input long side (native when smaller,
@@ -2523,7 +2511,6 @@ reconstruction:
                                         # (multi-threaded evaluation / Schur accumulation order);
                                         # at 1 thread, with the alignment RANSAC seeded, it is bit
                                         # for bit the same, allocation history included
-      focal_block_frames: 60            # BOUND: keyframes per temporal focal block (rung R3)
       heldout_confidence: 0.95          # declared confidence (as everywhere else)
       permutations: 2000                # BOUND: resamples of the permutation / bootstrap tests
       seed: 0                           # their fixed seed

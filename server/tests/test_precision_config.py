@@ -134,15 +134,6 @@ def test_gauge_windows_must_chain():
         load_precision_config(raw)
 
 
-@pytest.mark.parametrize("key", ["enabled", "resolutions", "mode", "window_frames",
-                                 "pair_samples"])
-def test_resolution_probe_keys_are_mandatory(key):
-    raw = _raw()
-    del raw["reconstruction"]["precision"]["omega"]["resolution_probe"][key]
-    with pytest.raises(PrecisionConfigError, match=rf"resolution_probe\.{key}"):
-        load_precision_config(raw)
-
-
 def test_tracks_keys_are_mandatory_and_the_dense_matcher_stays_off():
     raw = _raw()
     del raw["reconstruction"]["precision"]["tracks"]["heldout_frac"]

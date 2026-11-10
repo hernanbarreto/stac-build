@@ -3,8 +3,7 @@ comprometer la calidad" — Ceres ran ONE thread for bit-identity, ~60 min per p
 
 The same problem ``precision.refine.run_rung`` hands Ceres — the reprojection residuals of the fit tracks
 under the OPENCV camera (fx fy cx cy k1 k2 p1 p2) with a Huber loss at ``huber_px``, the poses, the
-landmarks and the camera freedom of the rung (R0 none; R1 focal + principal point; R2 + distortion; R3
-focal per block), plus EITHER the absolute position priors of the gauge (σ per keyframe) OR the relative
+landmarks and the camera freedom of the rung (R0 none; R1 focal + principal point; R2 + distortion), plus EITHER the absolute position priors of the gauge (σ per keyframe) OR the relative
 solved by Levenberg-Marquardt
 with the Schur complement over the landmarks:
 
@@ -43,7 +42,7 @@ CONVERGENCE_AT_REST = False
 # 12 s vs 42 in 22 s, the camera centres within 3 mm of each other — analysis/2026-11-01_station_gpu_run)
 CAMERA_DAMPING = "schur"
 
-CAM_FREE = {"R0": (), "R0s": (), "R1": (0, 1, 2, 3), "R2": (0, 1, 2, 3, 4, 5, 6, 7), "R3": (0, 1)}
+CAM_FREE = {"R0": (), "R0s": (), "R1": (0, 1, 2, 3), "R2": (0, 1, 2, 3, 4, 5, 6, 7)}
 
 
 class BATorchError(RuntimeError):

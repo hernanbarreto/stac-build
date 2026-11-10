@@ -2,7 +2,6 @@
 
     camera.py      F0  session camera model + exact grid-to-native-pixel mappings
     gauge.py       F2  continuous metric gauge along the walk
-    omega_probe.py F3  strict omega load report + resolution probe
     tracks.py      F4  native-pixel subpixel tracks with a held-out split
     refine.py      F5  joint pose + session camera refinement, witness localisation
     depth_sweep.py F6  prior-guided native-resolution plane sweep (tiers)

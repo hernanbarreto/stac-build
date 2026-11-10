@@ -240,7 +240,7 @@ def test_ceres_and_torch_agree_on_the_same_problem():
 def test_the_step_is_the_dense_damped_system(cam_free, blocks, damping, monkeypatch):
     """_Problem.step(λ) against the DENSE solve of the same linearization — the whole Schur reduction
     (the multi-block camera coupling included: until 2026-11-01 a pose's coupling to ANOTHER block's
-    focal landed in its own block's columns and station's F5 R3 ran out of iterations) and the
+    focal landed in its own block's columns and station's F5 R3 — removed 2026-11-10 — ran out of iterations) and the
     back-substitution, to 1e-9. "hessian": Ceres' system (JᵀJ + λ·D) δ = −Jᵀr, D = diag(JᵀJ) clamped
     to [lm_diag_min, lm_diag_max] for every parameter. "schur" (the default): the landmarks damped the
     same, the cameras by λ·diag of their damped Schur complement."""
@@ -290,31 +290,6 @@ def test_the_step_is_the_dense_damped_system(cam_free, blocks, damping, monkeypa
         assert why == ""
         got = torch.cat([dc[prob.free], dp.reshape(-1)])
         assert torch.allclose(got, x, rtol=1e-9, atol=1e-12 * float(x.abs().max())), lam
-
-
-def test_r3_focal_blocks_agree_with_ceres():
-    """R3 (focal per block of keyframes) from a focal error that differs per block: the torch solve
-    converges and lands where Ceres does on the same problem, block by block — the multi-block
-    Schur complement (the pose of one camera against another block's focal) is what R0–R2 never
-    exercise (station 2026-11-01: R3 ran out of iterations with that coupling misplaced)."""
-    w2c, pts, groups, X = _scene(n_cam=12, n_pts=400, noise_px=0.1, curve=True)
-    block_of = (np.arange(len(w2c)) * 3 // len(w2c)).astype(int)
-    pb = []
-    for b, f in enumerate((1.01, 0.985, 1.02)):
-        c = list(CAM); c[0] *= f; c[1] *= f
-        pb.append(c)
-    sig = np.full(len(w2c), 0.05)
-    r = BA.run_rung_torch("R3", w2c, pb[0], WH, groups, X, sigmas=sig, cfg=CFG, prior_w2c=w2c, device="cpu",
-                          block_of=block_of, params_by_block0=pb)
-    assert r.termination == "CONVERGENCE", r.termination
-    _ceres_or_skip()
-    from precision.refine import run_rung
-    rc = run_rung("R3", w2c, pb[0], WH, groups, X, sig, CFG, block_of=block_of, params_by_block0=pb, prior_w2c=w2c)
-    for b in range(3):
-        fx, fy = r.params_by_block[b][:2]
-        fxc, fyc = rc.params_by_block[b][:2]
-        assert abs(fx - fxc) < 0.1 and abs(fy - fyc) < 0.1, (b, (fx, fy), (fxc, fyc))
-    assert abs(r.fit_rms_px - rc.fit_rms_px) < 0.01, (r.fit_rms_px, rc.fit_rms_px)
 
 
 def _flat_problem(n_cam=8, n_pts=300, seed=0):

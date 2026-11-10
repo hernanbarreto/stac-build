@@ -1,7 +1,7 @@
 """F5's judge (docs/plan_determinismo.md points 46, 55, 59, 60, 61, 62 — USER 2026-10-07): the
 rungs are warm-started and nested-cost-checked, every rung carries its continuation solve and its
 solver error, a more complex rung enters only by THE USER'S RULE with keyframe clusters, held-out
-tracks that do not round-trip are dropped and counted, R3 is measured and never applied.
+tracks that do not round-trip are dropped and counted.
 Needs pycolmap 4 (the mapanything env); the synthetic scene is test_precision_refine's."""
 
 import os
@@ -143,37 +143,6 @@ def test_heldout_tracks_that_do_not_round_trip_are_dropped_and_counted():
         assert core["rungs"][n]["heldout_dropped"]["tracks"] == 1
         assert bad not in core["held"][n]
     assert core["best"].name in ("R1", "R2")
-
-
-def test_r3_is_measured_from_retriangulated_landmarks_and_never_applied(monkeypatch):
-    w2c0, init, track, frame, uv, split, kf = _problem(seed=6)
-    cfg = replace(CFG, focal_block_frames=7)                         # two temporal blocks
-    monkeypatch.setattr(R, "_systematic_in_time", lambda pf, b, c: {"systematic": True, "p": 0.0, "stat": 1.0})
-    seen = {}
-    real = R.run_rung
-
-    def spy(name, w2c_start, params_start, wh, fit_groups, X_start, sigmas, cfg_, **kw):
-        if name == "R3" and "R3" not in seen:
-            seen["R3"] = {"X_start": {t: np.array(x) for t, x in X_start.items()},
-                          "prior": np.array(kw["prior_w2c"]), "start": np.array(w2c_start)}
-        return real(name, w2c_start, params_start, wh, fit_groups, X_start, sigmas, cfg_, **kw)
-    monkeypatch.setattr(R, "run_rung", spy)
-    core = R.refine_core(w2c0, init, WH, track, frame, uv, split, kf, 0.01, cfg, SOLVER,
-                         error_factor=FAC, log=QUIET)
-    r3 = core["rungs"]["R3"]
-    assert r3["tried"] and r3["taken"] is False and r3["applied"] is False and "point 62" in r3["policy"]
-    assert core["best"].name != "R3" and len(r3["params_by_block"]) == 2
-    assert r3["start_landmarks_retriangulated"] > 0 and "would_improve" in r3
-    assert np.isfinite(r3["continuation"]["error"])
-    best = core["best"]
-    # point 55: R3 started from the best rung's poses with landmarks triangulated under ITS camera,
-    # and its priors are the gauge poses R0–R2 were held to
-    assert np.array_equal(seen["R3"]["start"], best.w2c)
-    assert np.array_equal(seen["R3"]["prior"], w2c0)
-    X3 = seen["R3"]["X_start"]
-    X0 = core["X0"]
-    common = sorted(set(X3) & set(X0))
-    assert common and any(np.linalg.norm(X3[t] - X0[t]) > 1e-9 for t in common)
 
 
 def test_the_ladder_can_be_restricted_only_by_the_declared_diagnostic_variable(monkeypatch):

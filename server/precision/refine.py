@@ -11,8 +11,7 @@ seeded (``seed``) — identical inputs give bit-identical outputs.
 
 Initialisation: the current keyframe poses (Omega × F2's gauge when it was
 applied), F0's camera, landmarks triangulated from the FIT tracks (F4
-``track_split`` 0) seen from at least ``min_tri_deg`` apart; the prior's depth
-(Omega) is the cross-check (reported).
+``track_split`` 0) seen from at least ``min_tri_deg`` apart.
 
 The gauge: no fixed prior. Each keyframe's centre is held by a soft prior whose σ
 grows with the walk the way consecutive-distance priors of relative σ_gauge
@@ -21,11 +20,11 @@ grows with the walk the way consecutive-distance priors of relative σ_gauge
 
 The ladder, each rung judged ONLY on the held-out tracks (split 1: never
 optimised — triangulated with the rung's own poses and camera and reprojected):
-  R0 camera fixed → R1 + fx, fy, cx, cy → R2 + k1, k2, p1, p2 → R3 focal per
-  temporal block (``focal_block_frames``; tried only when the best rung's held-out
-  residual varies systematically between blocks — a permutation test — the phone's
-  EIS; MEASURED AND REPORTED, never applied: the chain uses one camera for every
-  keyframe — docs/plan_determinismo.md point 62).
+  R0 camera fixed → R1 + fx, fy, cx, cy → R2 + k1, k2, p1, p2; ONE camera for every keyframe
+  (docs/plan_determinismo.md point 62). R3 (a focal per temporal block, measured and reported,
+  never applied) was REMOVED 2026-11-10 with its temporal test, the rolling-shutter diagnostic
+  and the prior-depth cross-check (USER: "lo que no se usa para corregir geometría no se pierde
+  un solo segundo de máquina" — R3 alone took 18 min on pccr 2026-08-24).
 
 THE JUDGE (docs/plan_determinismo.md points 46, 59, 60, 61 — USER 2026-10-07, after pccr
 2026-08-31 took R2 on a 0.0005 px paired change over 128k tracks, R2 having ENDED AT A
@@ -53,8 +52,7 @@ Witness frames (the second pass of ``refine_poses_ba_twopass``): PnP + refinemen
 of every witness against the FIXED landmarks with its witness→keyframe tracks,
 the session camera fixed; a witness whose reprojection RMS exceeds the bootstrap
 upper bound of the keyframes' held-out quantile stays ``unlocalized`` with the
-reason. Rolling shutter: DECLARED, not corrected — the held-out residual vs image
-row × angular speed, its correlation reported.
+reason.
 
 Outputs (``output/precision``): ``refine.json``, ``refine.timing.json``, ``refine_residuals.npz``,
 ``witness_poses.txt`` (+ ``witness_frames.txt``, float64 round-trip exact — point 45);
@@ -71,7 +69,6 @@ import dataclasses
 import json
 import time
 import os
-import math
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,13 +81,12 @@ TIMING_NAME = "refine.timing.json"
 RESIDUALS_NAME = "refine_residuals.npz"
 WITNESS_POSES_NAME = "witness_poses.txt"
 WITNESS_FRAMES_NAME = "witness_frames.txt"
-REFINE_VERSION = 2            # 2 (2026-10-07): the judge of points 46 / 59 / 60 / 61, R3 report-only
+REFINE_VERSION = 3            # 2 (2026-10-07): the judge of points 46 / 59 / 60 / 61, R3 report-only;
+                              # 3 (2026-11-10): R3, the rolling-shutter and prior-depth reports removed
 PROVENANCE = "tool_measured"
 LOG_TAG = "[refine]"
-# the ladder of nested camera models, simplest first; R3 (focal per temporal block) is tried after
-# the ladder and only ever reported (point 62)
+# the ladder of nested camera models, simplest first (point 62: one camera for every keyframe)
 LADDER = ("R0", "R1", "R2")
-RUNGS = LADDER + ("R3",)
 
 
 class RefineError(RuntimeError):
@@ -398,11 +394,12 @@ def _obs_of_tracks(groups: Dict[int, List], tracks: Sequence[int]):
 def triangulate_tracks_blocks(groups: Dict[int, List], w2c: np.ndarray, params_by_block: Sequence[Sequence[float]],
                               block_of: np.ndarray, solver: dict, min_tri_deg: float,
                               dropped: Optional[dict] = None) -> Dict[int, np.ndarray]:
-    """:func:`triangulate_tracks` with ONE CAMERA PER BLOCK (R3): every observation is undistorted
+    """:func:`triangulate_tracks` with ONE CAMERA PER BLOCK (the rung's camera layout; F5 solves one
+    block): every observation is undistorted
     under the camera of its keyframe's block — per block one solver call over that block's
     observations, each track's part judged with the track rule of ``undistort_normalized_tracks``;
     a track is dropped when any of its parts fails (what the per-track reference did) — then the
-    same batched DLT. (The per-track loop this replaces took 270 s for R3's held-out on pccr.)"""
+    same batched DLT. (The per-track loop this replaces took 270 s for a held-out on pccr.)"""
     tracks, counts, starts, ii, uv = _track_arrays(groups)
     if not tracks:
         return {}
@@ -510,7 +507,7 @@ def heldout_rms_per_track(groups: Dict[int, List], w2c: np.ndarray, params: Sequ
 def heldout_rms_blocks(groups: Dict[int, List], w2c: np.ndarray, params_by_block: Sequence[Sequence[float]],
                        block_of: np.ndarray, solver: dict, min_tri_deg: float,
                        dropped: Optional[dict] = None) -> Dict[int, float]:
-    """:func:`heldout_rms` with one camera per block (R3): each observation triangulated and
+    """:func:`heldout_rms` with one camera per block (the rung's layout): each observation triangulated and
     reprojected under its keyframe's block camera, batched."""
     X = triangulate_tracks_blocks(groups, w2c, params_by_block, block_of, solver, min_tri_deg, dropped=dropped)
     pb = np.asarray(params_by_block, np.float64)
@@ -532,7 +529,7 @@ def prior_sigmas(centres: np.ndarray, sigma_rel: float) -> np.ndarray:
 class RungResult:
     name: str
     w2c: np.ndarray
-    params_by_block: List[List[float]]      # one camera, or one per focal block (R3)
+    params_by_block: List[List[float]]      # the camera(s) by block — F5 solves one block
     block_of: np.ndarray                    # keyframe → camera block
     fit_rms_px: float                       # MEDIAN per-landmark reprojection error (px) of the
                                             # fit tracks — pccr 2026-09-29 R0: pycolmap's MEAN read
@@ -543,8 +540,8 @@ class RungResult:
     n_degenerate: int = 0                   # landmarks with a non-finite error or one beyond the
                                             # image diagonal — counted, never in the statistic
     X: Dict[int, np.ndarray] = field(default_factory=dict)   # the landmarks AS SOLVED (track → xyz):
-                                            # the next rung's warm start, the witnesses' map, R3's
-                                            # start (points 55 / 61)
+                                            # the next rung's warm start and the witnesses' map
+                                            # (points 55 / 61)
     initial_cost: float = float("nan")      # Ceres' total cost at the start / end of this solve
     final_cost: float = float("nan")        # (reprojection under Huber + position priors, the SAME
                                             # residual blocks for every rung of the ladder)
@@ -616,7 +613,7 @@ def run_rung(name: str, w2c_start: np.ndarray, params_start: Sequence[float], wh
         pp.corr_data_id = rec.image(i + 1).data_id
         priors.append(pp)
     opts = pycolmap.BundleAdjustmentOptions()
-    opts.refine_focal_length = name in ("R1", "R2", "R3")
+    opts.refine_focal_length = name in ("R1", "R2")
     opts.refine_principal_point = name in ("R1", "R2")
     opts.refine_extra_params = name == "R2"
     opts.refine_points3D = True
@@ -769,25 +766,6 @@ def judge_rungs(h_best: Dict[int, float], h_cand: Dict[int, float], clusters: Di
     return verdict
 
 
-def _systematic_in_time(per_frame: Dict[int, float], block_of: np.ndarray, cfg) -> dict:
-    """Does the held-out residual differ between temporal blocks beyond chance?
-    Permutation test (fixed seed) on the variance of the block medians."""
-    fr = sorted(per_frame)
-    if len(set(block_of[fr].tolist())) < 2:
-        return {"systematic": False, "p": None, "reason": "one block"}
-    v = np.array([per_frame[i] for i in fr])
-    b = block_of[fr]
-
-    def stat(labels):
-        return float(np.var([np.median(v[labels == k]) for k in np.unique(labels)]))
-    obs = stat(b)
-    rng = np.random.default_rng(int(cfg.seed))
-    perm = np.array([stat(rng.permutation(b)) for _ in range(int(cfg.permutations))])
-    p = float((1 + np.sum(perm >= obs)) / (1 + len(perm)))
-    return {"systematic": bool(p < 1.0 - float(cfg.heldout_confidence)), "p": p,
-            "stat": obs}
-
-
 RUNGS_ENV = "STAC_REFINE_RUNGS"
 
 
@@ -907,7 +885,7 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
             f"(held-out median {np.median(list(held['init'].values())) if held['init'] else float('nan'):.3f} px "
             f"over {len(held['init'])} tracks)")
         return {"best": base, "rungs": {}, "held": held, "X": X0, "X0": X0, "fit_groups": fit_g,
-                "held_groups": held_g, "prior_sigma_m": sig, "per_frame_heldout": {},
+                "held_groups": held_g, "prior_sigma_m": sig,
                 "solver_errors": {}, "clusters": clusters, "ladder": [],
                 "ladder_restricted_by": "refine.enabled: false", "error_factor": fac,
                 "dropped": {"fit_init": dropped_fit, "heldout_init": dropped_init}, "timing": {}}
@@ -981,60 +959,8 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
     if best is None:
         raise RefineError("no rung could be judged — the session camera cannot be refined; see the "
                           "rung reasons in the log")
-    # R3: focal per temporal block, only when the best rung leaves a temporal pattern; MEASURED
-    # AND REPORTED, never applied (point 62: the chain uses one camera for every keyframe)
-    blocks = np.arange(len(w2c0)) // int(cfg.focal_block_frames)
-    Xb = triangulate_tracks(held_g, best.w2c, best.params_by_block[0], solver, cfg.min_tri_deg)
-    # per keyframe: the RMS of its held-out reprojections — the statistic a witness is compared with (its own
-    # reprojection RMS); every observation projected at once (2026-11-01: a Python loop of one projection per
-    # held-out observation), the keyframes in the loop's order of first appearance
-    pf: Dict[int, float] = {}
-    if Xb:
-        tr_b = list(Xb)
-        cnt_b, ii_b, uv_b = _obs_of_tracks(held_g, tr_b)
-        Xo = np.repeat(np.stack([Xb[t] for t in tr_b]), cnt_b, axis=0)
-        e = np.linalg.norm(project_obs(Xo, np.asarray(best.w2c, np.float64)[ii_b],
-                                       np.asarray(best.params_by_block[0], np.float64)) - uv_b, axis=1)
-        uniq, first = np.unique(ii_b, return_index=True)
-        order = uniq[np.argsort(first, kind="stable")]
-        s2 = np.bincount(ii_b, weights=e * e, minlength=int(ii_b.max()) + 1)
-        nn = np.bincount(ii_b, minlength=int(ii_b.max()) + 1)
-        pf = {int(i): float(np.sqrt(s2[i] / nn[i])) for i in order.tolist()}
-    sysrep = _systematic_in_time(pf, blocks, cfg)
-    rungs["R3"] = {"tried": False, "temporal_test": sysrep, "taken": False, "applied": False,
-                   "policy": "measured and reported only — the chain uses one camera for every "
-                             "keyframe (docs/plan_determinismo.md point 62)"}
-    if sysrep["systematic"]:
-        # point 55: R3 starts from the best rung's poses AND its landmarks RE-TRIANGULATED with
-        # that rung's camera (never X0, triangulated with F0's camera and the initial poses), under
-        # the same gauge priors as R0–R2
-        dropped_r3: dict = {"tracks": 0, "observations": 0}
-        X3 = triangulate_tracks(fit_g, best.w2c, best.params_by_block[0], solver, cfg.min_tri_deg,
-                                dropped=dropped_r3)
-        start3 = RungResult("R3_start", best.w2c, [list(best.params_by_block[0])], blocks,
-                            float("nan"), 0, "", X=X3)
-        pb = [list(best.params_by_block[0]) for _ in range(int(blocks.max()) + 1)]
-        r, held_r, dropped, cont, err = _rung_and_continuation(
-            "R3", start3, wh, fit_g, held_g, sig, cfg, solver, w2c0, log,
-            block_of=blocks, params_by_block0=pb)
-        held["R3"] = held_r
-        errors["R3"] = err
-        timing["R3"] = r.seconds
-        timing["R3_continuation"] = cont.seconds
-        bar = max(float(errors[best.name]["error"]), float(err["error"]))
-        verdict = (judge_rungs(held[best.name], held_r, clusters, bar, fac, cfg) if np.isfinite(bar)
-                   else {"improves": False, "worsens": False, "n_tracks": 0,
-                         "reason": "no held-out track common to both states — nothing to judge"})
-        rungs["R3"].update(_rung_report(r, held_r, dropped, cont, err))
-        rungs["R3"].update({"tried": True, "verdict_vs_best": verdict, "taken": False,
-                            "applied": False, "start_landmarks_retriangulated": len(X3),
-                            "start_landmarks_dropped": dropped_r3,
-                            "would_improve": bool(verdict["improves"])})
-        log(f"{LOG_TAG} R3 (focal per {int(cfg.focal_block_frames)}-keyframe block): held-out median "
-            f"{rungs['R3']['heldout_median_px']} px — would {'improve' if verdict['improves'] else 'not improve'} "
-            f"({verdict.get('reason', '')}); REPORTED ONLY, never applied (point 62)")
     return {"best": best, "rungs": rungs, "held": held, "X": best.X, "X0": X0, "fit_groups": fit_g,
-            "held_groups": held_g, "prior_sigma_m": sig, "per_frame_heldout": pf,
+            "held_groups": held_g, "prior_sigma_m": sig,
             "solver_errors": errors, "clusters": clusters, "ladder": list(ladder),
             "ladder_restricted_by": RUNGS_ENV if os.environ.get(RUNGS_ENV, "").strip() else None,
             "error_factor": fac, "dropped": {"fit_init": dropped_fit, "heldout_init": dropped_init},
@@ -1080,8 +1006,7 @@ def localize_witnesses(best: RungResult, fit_track_X: Dict[int, np.ndarray],
                        witness_frames: Sequence[int], wh: Tuple[int, int], bound_px: float,
                        cfg, workers: Optional[int] = None) -> Dict[int, dict]:
     """PnP + refinement of every witness against the FIXED landmarks, the session
-    camera fixed (the best rung's; R3 → the block of the nearest keyframe is not
-    known for a witness: its first block's camera). The LO-RANSAC is seeded explicitly per call
+    camera fixed (the best rung's). The LO-RANSAC is seeded explicitly per call
     (its default seed is -1, the one that left the pose-prior alignment run-dependent) and
     single-threaded; the witnesses are split over ``workers`` processes (2026-11-01: COLMAP's PnP has
     no GPU path — 29 s on one core for pccr's 1,791 witnesses; each call is independent, so the poses
@@ -1283,37 +1208,6 @@ def heldout_bound(per_frame: Dict[int, float], cfg) -> float:
     return float(np.percentile(boots, q))
 
 
-def rolling_shutter_diag(held_g, best: RungResult, solver, cfg) -> dict:
-    """DECLARED, not corrected: the held-out reprojection error vs (image row ×
-    angular speed of the keyframe) — Spearman correlation."""
-    from scipy.stats import spearmanr
-    N = len(best.w2c)
-    ang = np.zeros(N)
-    for i in range(N):
-        a, b = max(0, i - 1), min(N - 1, i + 1)
-        if a == b:
-            continue
-        R = best.w2c[b, :3, :3] @ best.w2c[a, :3, :3].T
-        ang[i] = math.acos(float(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0))) / (b - a)
-    params = best.params_by_block[0]
-    X = triangulate_tracks(held_g, best.w2c, params, solver, cfg.min_tri_deg)
-    cy = float(params[3])
-    # every held-out observation of a triangulated track at once (2026-11-01: a Python loop over
-    # them, 24 s on pccr): the same pairs (row offset × angular speed, residual), in the loop's order
-    tr_ = [t for t in X]
-    if tr_:
-        counts, ii, uv = _obs_of_tracks(held_g, tr_)
-        Xo = np.repeat(np.stack([X[t] for t in tr_]), counts, axis=0)
-        ys = np.linalg.norm(project_obs(Xo, best.w2c[ii], np.asarray(params, np.float64)) - uv, axis=1)
-        xs = np.abs(uv[:, 1] - cy) * ang[ii]
-    else:
-        xs = ys = np.zeros(0)
-    if len(xs) < 3:
-        return {"n": int(len(xs)), "spearman": None}
-    rho, pval = spearmanr(xs, ys)
-    return {"n": len(xs), "spearman": float(rho), "p": float(pval), "corrected": False}
-
-
 # ── session I/O ──────────────────────────────────────────────────────────
 
 def _gauge_sigma(output_dir: Path) -> Tuple[float, str]:
@@ -1366,13 +1260,8 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     wloc = localize_witnesses(best, core["X"], tr["obs_track"], tr["obs_frame"],
                               tr["obs_uv_native"], wit, (cam.width, cam.height), bound, cfg)
     _phase["witnesses_s"] = round(time.perf_counter() - _t, 1)
-    _t = time.perf_counter()
-    rs = rolling_shutter_diag(core["held_groups"], best, solver, cfg)
-    _phase["rolling_shutter_diag_s"] = round(time.perf_counter() - _t, 1)
     core["timing"].update(_phase)                       # refine.timing.json: the CPU around the solves, measured
     log(f"{LOG_TAG} phases: " + ", ".join(f"{k} {v}" for k, v in _phase.items()))
-    # prior-depth cross-check: triangulated depth vs Omega's depth at the query pixel
-    cross = _prior_cross_check(out, kf, core["X"], core["fit_groups"], best, cam)
     pdir = out / "precision"
     pdir.mkdir(parents=True, exist_ok=True)
     loc = [f for f, r in wloc.items() if r["localized"]]
@@ -1409,7 +1298,7 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
                          "unlocalized": {str(f): r["reason"] for f, r in wloc.items()
                                          if not r["localized"]},
                          "rms_px": {str(f): r.get("rms_px") for f, r in wloc.items()}},
-           "rolling_shutter": rs, "prior_depth_cross_check": cross, "applied": False}
+           "applied": False}
     # the solver's wall clock, outside the compared artifact (point 36)
     (pdir / TIMING_NAME).write_text(json.dumps({"stage": "refine", "ceres_seconds": core["timing"]},
                                                indent=1, default=float))
@@ -1433,42 +1322,6 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     log(f"{LOG_TAG} applied rung {best.name}; witnesses {len(loc)}/{len(wit)} localized "
         f"(bound {bound:.2f} px) → {pdir / REFINE_NAME}")
     return doc
-
-
-def _prior_cross_check(out: Path, kf, X, fit_g, best: RungResult, cam) -> dict:
-    """Triangulated landmark depth vs Omega's depth at the observing keyframe's pixel
-    (Omega grid via F0) — reported, the landmarks are not moved by it. Omega's record
-    carries the units of the reconstruction BEFORE the metric lock, so the two are
-    compared as a ratio: its median is the scale between them, and the spread of the
-    ratios around it is the prior's relative depth error."""
-    from precision.camera import native_to_grid, grid_like
-    import itertools
-    ratio = []
-    head = list(itertools.islice(X.items(), 5000))      # never a list of every landmark (37 M on pccr 2026-08-24)
-    if not head:
-        return {"n": 0, "scale": None, "median_rel": None}
-    cnt, ii_h, uv_h = _obs_of_tracks(fit_g, [t for t, _ in head])
-    first = np.cumsum(cnt) - cnt                         # each track's first observation
-    for q, (t, P) in enumerate(head):
-        i, p = int(ii_h[first[q]]), uv_h[first[q]]
-        npz = out / "omega_run" / "results_output" / f"frame_{kf[i]}.npz"
-        if not npz.exists():
-            continue
-        with np.load(npz) as z:
-            d = z["depth"]
-        g = cam.omega_grid if (cam.omega_grid.w, cam.omega_grid.h) == (d.shape[1], d.shape[0]) \
-            else grid_like(cam.omega_grid, d.shape[1], d.shape[0], "omega_npz")
-        q = native_to_grid(np.asarray(p, np.float64)[None], g)[0]
-        u, v = int(round(q[0])), int(round(q[1]))
-        if not (0 <= v < d.shape[0] and 0 <= u < d.shape[1]) or d[v, u] <= 0:
-            continue
-        z_tri = float((best.w2c[i, :3, :3] @ P + best.w2c[i, :3, 3])[2])
-        ratio.append(z_tri / float(d[v, u]))
-    if not ratio:
-        return {"n": 0, "scale": None, "median_rel": None}
-    r = np.asarray(ratio)
-    s = float(np.median(r))
-    return {"n": int(r.size), "scale": s, "median_rel": float(np.median(np.abs(r / s - 1)))}
 
 
 def main(argv: Optional[List[str]] = None) -> int:

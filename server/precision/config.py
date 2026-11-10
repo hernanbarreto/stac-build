@@ -223,25 +223,6 @@ class GaugeConfig:
                                     #   frames at once; 178 s of F2 on pccr on numpy)
 
 
-# ── F3: Omega ─────────────────────────────────────────────────────────────
-
-OMEGA_MODES = ("balanced", "max_size")
-
-
-@dataclass(frozen=True)
-class ResolutionProbeConfig:
-    enabled: bool
-    resolutions: Tuple[int, ...]    # the resolutions compared on the same window
-    mode: str                       # balanced (≈ res² pixels) | max_size (longest side = res)
-    window_frames: int              # BOUND: keyframes of the probe window
-    pair_samples: int               # BOUND: surface samples per frame pair
-
-
-@dataclass(frozen=True)
-class OmegaConfig:
-    resolution_probe: ResolutionProbeConfig
-
-
 # ── F4: native-pixel tracks ───────────────────────────────────────────────
 
 DENSE_MATCHERS = ("none", "roma")
@@ -300,7 +281,6 @@ class RefineConfig:
     huber_px: float             # BOUND: Huber scale of the reprojection loss (native px)
     max_iterations: int         # BOUND: Ceres iterations per rung (reconstruction.colmap_ba)
     ceres_threads: int          # must stay 1 for bit-identical results (validated at load)
-    focal_block_frames: int     # BOUND: keyframes per temporal focal block (rung R3)
     heldout_confidence: float   # declared confidence of the held-out comparisons
     permutations: int           # BOUND: permutation / bootstrap resamples of the tests
     seed: int                   # their fixed seed
@@ -570,7 +550,6 @@ class PrecisionConfig:
     enabled: bool
     camera: CameraConfig
     gauge: GaugeConfig
-    omega: OmegaConfig
     tracks: TracksConfig
     refine: RefineConfig
     depth: DepthConfig
@@ -736,22 +715,9 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
             f"'{SECTION}.gauge.window_frames' x '.window_overlap_frac' shares fewer than 2 "
             f"frames between windows — two windows cannot be chained")
 
-    om = _sub(sec, "omega", "")
-    rp = _sub(om, "resolution_probe", "omega")
-    omega = OmegaConfig(resolution_probe=ResolutionProbeConfig(
-        enabled=_bool(rp, "enabled", "omega.resolution_probe"),
-        # Omega's patch is 16 px: a resolution below one patch has no token
-        resolutions=tuple(int(v) for v in _num_list(rp, "resolutions", "omega.resolution_probe",
-                                                     lo=16, integer=True)),
-        mode=_enum(rp, "mode", "omega.resolution_probe", OMEGA_MODES),
-        window_frames=_num(rp, "window_frames", "omega.resolution_probe", lo=2, integer=True),
-        # depth_pair_samples starves a pair under 500 samples
-        pair_samples=_num(rp, "pair_samples", "omega.resolution_probe", lo=500, integer=True),
-    ))
-    if "coherence_probe" in om:
-        raise PrecisionConfigError(
-            f"'{SECTION}.omega.coherence_probe' was DELETED 2026-09-30 (USER: Omega drifts; the "
-            f"chunks are planned before Omega — since 2026-10-06 by co-visibility) — remove the key")
+    _gone(sec.get("omega"), "coherence_probe", "omega",
+          "DELETED 2026-09-30 (USER: Omega drifts; the chunks are planned before Omega — since "
+          "2026-10-06 by co-visibility)")
 
     tk = _sub(sec, "tracks", "")
     tracks = TracksConfig(
@@ -795,7 +761,6 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         huber_px=_num(rf, "huber_px", "refine", lo=0.0, lo_excl=True),
         max_iterations=_num(rf, "max_iterations", "refine", lo=1, integer=True),
         ceres_threads=_num(rf, "ceres_threads", "refine", lo=1, integer=True),
-        focal_block_frames=_num(rf, "focal_block_frames", "refine", lo=2, integer=True),
         heldout_confidence=_num(rf, "heldout_confidence", "refine", lo=0.0, hi=1.0, lo_excl=True),
         permutations=_num(rf, "permutations", "refine", lo=1, integer=True),
         seed=_num(rf, "seed", "refine", lo=0, integer=True),
@@ -1028,7 +993,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
     _gone(cm, "edge_timeout_s", "cloud_metrics",
           "docs/plan_determinismo.md point 138 (2026-10-07): the edge metric is bounded by WORK "
           "(edge_max_objects x edge_max_points_per_object), never by a wall clock")
-    return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge, omega=omega,
+    return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge,
                            tracks=tracks, refine=refine, depth=depth, fuse=fuse,
                            cloud=cloud, bend=bend, flyers=flyers, mono_detail=mono_detail,
                            cloud_metrics=cloud_metrics, chunk_check=chunk_check, runner=runner,

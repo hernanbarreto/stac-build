@@ -37,7 +37,7 @@ def test_the_product_selects_the_chain():
     fusion = [s.key for s in RN.chain_steps(replace(p, cloud=replace(p.cloud, source="fusion")))]
     # the corrected cloud is built on F6's depth: the sweep runs first, never the COLMAP
     # reference nor the witness fusion (USER 2026-09-29)
-    assert corrected == ["f0_camera", "f2_gauge", "f4_tracks", "f3_probe", "f5_refine", "f6_sweep",
+    assert corrected == ["f0_camera", "f2_gauge", "f4_tracks", "f5_refine", "f6_sweep",
                          "f7_cloud", "f6_check"], corrected
     assert "f7_cloud" not in fusion and {"f6_sweep", "f7_fuse"} <= set(fusion)
     assert fusion.index("f6_sweep") < fusion.index("f7_fuse") < fusion.index("f6_check")

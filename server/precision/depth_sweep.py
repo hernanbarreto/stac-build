@@ -1190,7 +1190,6 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
     cal_path = CAL.write_calibration(out, "tier0", tables, inp.epochs, cal_params)
 
     total = sum(counts_tot.values())
-    probe = out / "omega_probe.json"
     doc = {"version": REPORT_VERSION, "provenance": PROVENANCE, **inp.epochs,
            "params": asdict(dcfg),
            # no clock / run device in the compared report (docs/plan_determinismo.md points 36 / 56):
@@ -1201,7 +1200,6 @@ def _run_sweep(session_dir: Path, pcfg, log: Callable = print, device=None) -> D
            "n_witness_views_available": len(inp.wit),
            "beta_source": beta_source, "zncc_floor": floor,
            "tau_rel": tau_rel, "tau_rel_pairs": len(mm),
-           "tau_rel_f3_probe": (json.loads(probe.read_text()).get("results") if probe.exists() else None),
            "tau_px": inp.tau_px, "heldout_rms_px": inp.heldout_rms_px,
            "s_k": {"min": float(np.nanmin(s_k)), "max": float(np.nanmax(s_k)),
                    "median": float(np.nanmedian(s_k))},

@@ -223,8 +223,7 @@ def torch_peaks_reported(session_dir: Path) -> Dict[str, Any]:
     """The torch peak memories the chain's own timing files report (declared, in GB)."""
     out: Dict[str, Any] = {}
     o = Path(session_dir) / "output"
-    for rel, keys in (("precision/depth_on_f5.timing.json", ("mono_detail", "vram_peak_gb")),
-                      ("omega_probe.timing.json", ("resolutions",))):
+    for rel, keys in (("precision/depth_on_f5.timing.json", ("mono_detail", "vram_peak_gb")),):
         p = o / rel
         if not p.exists():
             continue

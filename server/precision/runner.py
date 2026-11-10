@@ -1,7 +1,8 @@
 """The precision core of "Reconstruir" (claude_stac.txt §3): EVIDENCE + CORE, in order.
 
-    CORE      F0 session camera → F2 continuous gauge → F4 native tracks → F3 Omega
-              resolution probe (report) → F5 joint refinement → F6 native depth →
+    CORE      F0 session camera → F2 continuous gauge → F4 native tracks → F5 joint
+              refinement → F6 native depth (F3, the Omega resolution probe — a report —
+              removed 2026-11-10: nothing that does not correct geometry costs machine time) →
               the product: F7-C corrected cloud on F6's depth (cloud.source
               omega_corrected) | F6 COLMAP reference + F7 witness fusion (fusion)
               → the chunk / keyframe floor check (report)
@@ -133,10 +134,6 @@ STEPS: List[Step] = [
     Step("f4_tracks", "F4 native-pixel tracks", "mapanything", "precision.tracks", gpu=True,
          reads=("frames", "output/camera.json"),
          writes=("output/precision/tracks.npz", "output/precision/tracks.json"), config=("tracks",)),
-    Step("f3_probe", "F3 Omega resolution probe (report)", "mapanything",
-         "precision.omega_probe", gpu=True,
-         reads=("frames",), writes=("output/omega_probe.json",),
-         config=("omega", "raw:reconstruction")),
     Step("f5_refine", "F5 joint refinement", "mapanything", "precision.refine",
          reads=_GEOMETRY_IN + ("output/gauge.json", "output/precision/tracks.npz"),
          writes=("output/precision/refine.json", "output/precision/witness_poses.txt",
