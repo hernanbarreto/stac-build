@@ -216,7 +216,11 @@ class _Problem:
     def __init__(self, w2c0: np.ndarray, params_by_block0: List[List[float]], block_of: np.ndarray,
                  cam_idx: np.ndarray, pt_idx: np.ndarray, uv: np.ndarray, X0: np.ndarray, huber_px: float,
                  cam_free: Sequence[int], *, device, sigmas: Optional[np.ndarray] = None,
-                 prior_centres: Optional[np.ndarray] = None, torch_ba=None):
+                 prior_centres: Optional[np.ndarray] = None, torch_ba=None, gauge: bool = True,
+                 lazy_cols: bool = False):
+        """``gauge=False``: a CHUNK of a :class:`_ChunkedProblem` (its priors live in the whole problem, not here);
+        ``lazy_cols``: the (M, 6 + nf) unknown columns of the observations are made when a step needs them, not
+        kept (the chunks' memory)."""
         torch = _torch()
         self.tb = torch_ba
         d = {"dtype": torch.float64, "device": device}
@@ -248,7 +252,7 @@ class _Problem:
         self.n_pose = 6 * self.N
         self.n_c = self.n_pose + self.nf * self.B
         self.free = torch.ones(self.n_c, dtype=torch.bool, device=device)
-        if self.sigmas is None and self.nf == 0:
+        if gauge and self.sigmas is None and self.nf == 0:
             raise BATorchError("a gauge is needed: priors or free camera parameters")
         # THE INDEX PLANS — every permutation and segment boundary the step needs, computed ONCE: the
         # observation → landmark runs (already sorted by landmark), the observation → camera and → block
@@ -266,7 +270,7 @@ class _Problem:
             self.bb_sorted = self.obs_block[self.blk_order]
             self.blk_ends = segment_ends(self.bb_sorted)
             self.blk_uniq = self.bb_sorted[self.blk_ends]
-        self.cols = self._cols_of_obs(nco)                                                  # (M,nco)
+        self.cols = None if lazy_cols else self._cols_of_obs(nco)                           # (M,nco)
         self.pose_idx = (6 * torch.arange(self.N, device=device))[:, None] + torch.arange(6, device=device)[None, :]
         self.cam_cols = ((self.n_pose + self.nf * self.block_of)[:, None]
                          + torch.arange(self.nf, device=device)[None, :]) if self.nf else None  # (N,nf)
@@ -386,13 +390,7 @@ class _Problem:
         included), the coupling W. Kept until the state moves — a REJECTED step only changes λ, and until
         2026-11-01 it recomputed all of this (on pccr's tracks ~45 % of the steps were rejected)."""
         torch = self.torch
-        r, front, J_pose, J_pt, J_cam = self.residuals()
-        w, s = self.huber_weights(r, front)
-        sw = torch.sqrt(w)[:, None]
-        cost = self.robust_cost(s, front)
-        r_w = r * sw
-        J_pose = J_pose * sw[..., None]; J_pt = J_pt * sw[..., None]; J_cam = J_cam * sw[..., None]
-        J_c = torch.cat([J_pose, J_cam], -1)                                 # (M,2,6+nf)
+        r_w, J_c, J_pt, cost = self._weighted()
         nco = 6 + self.nf
         Hpp = segment_sum(J_pt.transpose(1, 2) @ J_pt, self.pt_idx, self.P, self.pt_ends)         # (P,3,3)
         gp = segment_sum(torch.einsum("mai,ma->mi", J_pt, r_w), self.pt_idx, self.P, self.pt_ends)  # (P,3)
@@ -408,6 +406,19 @@ class _Problem:
         self._lin = {"r_w": r_w, "J_c": J_c, "J_pt": J_pt, "Hpp": Hpp, "gp": gp, "H": H, "g": g,
                      "e_p": e_p, "J_p": J_p, "W": W, "cost": cost}
         return self._lin
+
+    def _weighted(self):
+        """The loss-scaled residuals and Jacobians at the current state: (r_w (M,2), J_c (M,2,6+nf), J_pt (M,2,3),
+        robust cost of these observations)."""
+        torch = self.torch
+        r, front, J_pose, J_pt, J_cam = self.residuals()
+        w, s = self.huber_weights(r, front)
+        sw = torch.sqrt(w)[:, None]
+        cost = self.robust_cost(s, front)
+        r_w = r * sw
+        J_pose = J_pose * sw[..., None]; J_pt = J_pt * sw[..., None]; J_cam = J_cam * sw[..., None]
+        J_c = torch.cat([J_pose, J_cam], -1)                                 # (M,2,6+nf)
+        return r_w, J_c, J_pt, cost
 
     def invalidate(self):
         """The state moved (an accepted step): the linearization is stale."""
@@ -426,21 +437,9 @@ class _Problem:
         Y = W @ Hpp_inv[self.pt_idx]                                        # (M,nco,3)
         g_red = g - self._reduce_vec(torch.einsum("mij,mj->mi", Y, gp[self.pt_idx]), nco)
         S = H - self._schur_pairs(Y, W, nco, pair_chunk)
-        # the cameras' damping (CAMERA_DAMPING): λ·diag(S) — the port's — or λ·diag of their block of
-        # JᵀJ, priors included, Ceres' (whose Levenberg-Marquardt damps every parameter by the full JᵀJ
-        # diagonal: the Schur complement of that damped system is S + λ·diag(H_cc))
-        Dc = torch.diagonal(H if CAMERA_DAMPING == "hessian" else S).clamp(self.tb.lm_diag_min,
-                                                                            self.tb.lm_diag_max)
-        S_l = S + lam * torch.diag(Dc)
-        free = self.free
-        S_f = S_l[free][:, free]
-        try:
-            Lc = torch.linalg.cholesky(S_f)
-            dc_f = -torch.cholesky_solve(g_red[free][:, None], Lc)[:, 0]
-        except Exception as ex:  # noqa: BLE001 — an indefinite reduced system: the caller raises λ
-            return None, cost, float("inf"), f"cholesky: {ex}"
-        dc = torch.zeros(self.n_c, dtype=torch.float64, device=self.device)
-        dc[free] = dc_f
+        dc, why = self._camera_solve(H, S, g_red, lam)
+        if dc is None:
+            return None, cost, float("inf"), why
         # back-substitution: Δp = Hpp⁻¹ (−g_p − Wᵀ Δc)
         dc_obs = self._gather_cam_delta(dc, nco)                           # (M,nco)
         back = segment_sum(torch.einsum("mij,mi->mj", W, dc_obs), self.pt_idx, self.P, self.pt_ends)  # (P,3)
@@ -458,6 +457,27 @@ class _Problem:
             Jp_d = J_p @ dc
             pred = pred - float((Jp_d * (e_p + 0.5 * Jp_d)).sum())
         return (dc, dp), cost, pred, ""
+
+    def _camera_solve(self, H, S, g_red, lam):
+        """The damped reduced camera system solved: (Δc (n_c,), "") or (None, why) when it is not positive
+        definite (the caller raises λ)."""
+        torch = self.torch
+        # the cameras' damping (CAMERA_DAMPING): λ·diag(S) — the port's — or λ·diag of their block of
+        # JᵀJ, priors included, Ceres' (whose Levenberg-Marquardt damps every parameter by the full JᵀJ
+        # diagonal: the Schur complement of that damped system is S + λ·diag(H_cc))
+        Dc = torch.diagonal(H if CAMERA_DAMPING == "hessian" else S).clamp(self.tb.lm_diag_min,
+                                                                            self.tb.lm_diag_max)
+        S_l = S + lam * torch.diag(Dc)
+        free = self.free
+        S_f = S_l[free][:, free]
+        try:
+            Lc = torch.linalg.cholesky(S_f)
+            dc_f = -torch.cholesky_solve(g_red[free][:, None], Lc)[:, 0]
+        except Exception as ex:  # noqa: BLE001 — an indefinite reduced system: the caller raises λ
+            return None, f"cholesky: {ex}"
+        dc = torch.zeros(self.n_c, dtype=torch.float64, device=self.device)
+        dc[free] = dc_f
+        return dc, ""
 
     def _accumulate_camera(self, H, g, J_c, r_w, nco):
         torch = self.torch
@@ -505,7 +525,7 @@ class _Problem:
         return out
 
     def _gather_cam_delta(self, dc, nco):
-        return dc[self.cols]
+        return dc[self.cols if self.cols is not None else self._cols_of_obs(nco)]
 
     def _schur_pairs(self, Y, W, nco, pair_chunk):
         """Σ_j Σ_{a,b ∈ obs(j)} Y_a W_bᵀ placed at the unknowns of a's and b's cameras — dense (n_c, n_c).
@@ -568,6 +588,204 @@ class _Problem:
     def norm_x(self) -> float:
         torch = self.torch
         return math.sqrt(float((self.t * self.t).sum()) + float((self.X * self.X).sum()) + float((self.cam * self.cam).sum()) + 3 * self.N)
+
+
+# THE CARD'S MEMORY (2026-11-10, USER "priorizá la solución … es la prueba justamente de que el sistema puede manejar
+# datos masivos"): pccr 2026-08-24's F5 hands the solver 101.6 M residual blocks over 13.0 M landmarks — the one-piece
+# problem took 30.6 GB of the card to build and its first linearisation went over the 80 GB (the Jacobians, the
+# coupling W and the step's Y are ~1.3 KB per observation, kept for every observation at once). Above
+# CHUNKED_ABOVE_OBS the problem is solved in CHUNKS of consecutive landmarks (a landmark never split, so every
+# landmark block, every Schur pair and every back-substitution stays inside one chunk): the camera system is summed
+# chunk by chunk in a fixed order and the per-observation quantities are made again per chunk instead of kept —
+# the same equations, deterministic, a few times the arithmetic. Both are BOUNDS (memory), not decisions; below the
+# threshold the solve is the one-piece path, bit for bit what every session so far ran (pccr 2026-08-31: 25.9 M
+# observations in all, ~12 M of them fit residuals); above it the bits differ from a one-piece solve only by the
+# order of the additions.
+CHUNKED_ABOVE_OBS = 24_000_000
+CHUNK_OBS = 8_000_000
+
+
+def landmark_chunks(seg_len: np.ndarray, max_obs: int) -> List[Tuple[int, int, int, int]]:
+    """(first landmark, last + 1, first observation, last + 1) of consecutive landmarks with ≤ ``max_obs``
+    observations each (observations sorted by landmark; one landmark larger than that is a chunk alone)."""
+    ends = np.cumsum(np.asarray(seg_len, np.int64))
+    out, p0, o0, P = [], 0, 0, len(ends)
+    while p0 < P:
+        p1 = max(p0 + 1, int(np.searchsorted(ends, o0 + int(max_obs), side="right")))
+        o1 = int(ends[p1 - 1])
+        out.append((p0, p1, o0, o1))
+        p0, o0 = p1, o1
+    return out
+
+
+class _ChunkedProblem:
+    """:class:`_Problem`'s contract (what :func:`solve` and :func:`run_rung_torch` read) over chunks of consecutive
+    landmarks, each chunk a gauge-free :class:`_Problem` of its observations that reads the WHOLE problem's state.
+    The linearisation keeps only what is per landmark or per camera (H_pp, g_p, the dense camera system); a step makes
+    each chunk's loss-scaled Jacobians twice (the Schur sums, then the back-substitution and the predicted decrease)."""
+
+    huber_weights = _Problem.huber_weights
+    robust_cost = _Problem.robust_cost
+    prior_terms = _Problem.prior_terms
+    apply = _Problem.apply
+    norm_x = _Problem.norm_x
+    invalidate = _Problem.invalidate
+    _camera_solve = _Problem._camera_solve
+
+    def __init__(self, w2c0: np.ndarray, params_by_block0: List[List[float]], block_of: np.ndarray,
+                 cam_idx: np.ndarray, pt_idx: np.ndarray, uv: np.ndarray, X0: np.ndarray, huber_px: float,
+                 cam_free: Sequence[int], *, device, sigmas: Optional[np.ndarray] = None,
+                 prior_centres: Optional[np.ndarray] = None, torch_ba=None, chunk_obs: Optional[int] = None):
+        torch = _torch()
+        self.tb = torch_ba
+        d = {"dtype": torch.float64, "device": device}
+        self.torch, self.device = torch, device
+        self.N = int(len(w2c0)); self.B = int(len(params_by_block0)); self.P = int(len(X0)); self.M = int(len(uv))
+        self.R = torch.as_tensor(np.asarray(w2c0)[:, :3, :3], **d).clone()
+        self.t = torch.as_tensor(np.asarray(w2c0)[:, :3, 3], **d).clone()
+        self.cam = torch.as_tensor(np.asarray(params_by_block0, np.float64), **d).clone()
+        self.block_of = torch.as_tensor(np.asarray(block_of, np.int64), device=device)
+        self.X = torch.as_tensor(np.asarray(X0, np.float64), **d).clone()
+        # the one-piece problem's order: observations sorted by landmark, the camera order kept
+        order = np.lexsort((cam_idx, pt_idx))
+        ci = np.asarray(cam_idx)[order].astype(np.int64)
+        pi = np.asarray(pt_idx)[order].astype(np.int64)
+        uvs = np.asarray(uv, np.float64)[order]
+        del order
+        counts = np.bincount(pi, minlength=self.P)
+        if int((counts == 0).sum()):
+            raise BATorchError("a landmark without observations entered the problem")
+        self.cam_idx = torch.as_tensor(ci, device=device)
+        self.pt_idx = torch.as_tensor(pi, device=device)
+        self.uv = torch.as_tensor(uvs, **d)
+        self.seg_len = torch.as_tensor(counts, device=device)
+        self.huber = float(huber_px)
+        self.cam_free = tuple(int(i) for i in cam_free)
+        self.nf = len(self.cam_free)
+        self.sigmas = torch.as_tensor(np.asarray(sigmas, np.float64), **d) if sigmas is not None else None
+        self.prior_C = torch.as_tensor(np.asarray(prior_centres, np.float64), **d) if prior_centres is not None else None
+        self.n_pose = 6 * self.N
+        self.n_c = self.n_pose + self.nf * self.B
+        self.free = torch.ones(self.n_c, dtype=torch.bool, device=device)
+        if self.sigmas is None and self.nf == 0:
+            raise BATorchError("a gauge is needed: priors or free camera parameters")
+        X0 = np.asarray(X0, np.float64)
+        self.chunks = []
+        for p0, p1, o0, o1 in landmark_chunks(counts, int(CHUNK_OBS if chunk_obs is None else chunk_obs)):
+            sub = _Problem(w2c0, params_by_block0, block_of, ci[o0:o1], pi[o0:o1] - p0, uvs[o0:o1], X0[p0:p1],
+                           huber_px, cam_free, device=device, torch_ba=torch_ba, gauge=False, lazy_cols=True)
+            self.chunks.append((p0, p1, sub))
+        self._lin = None
+
+    def _bind(self, sub, p0, p1):
+        """The chunk reads the whole problem's CURRENT state (its own copies are never used)."""
+        sub.R, sub.t, sub.cam, sub.X = self.R, self.t, self.cam, self.X[p0:p1]
+        sub._lin = None
+
+    def residuals(self, R=None, t=None, cam=None, X=None, with_jac: bool = False):
+        """(r (M,2), in front (M,)) in the one-piece problem's observation order; no Jacobian (never all at once)."""
+        if with_jac:
+            raise BATorchError("a chunked problem never forms every observation's Jacobian at once")
+        torch = self.torch
+        R = self.R if R is None else R; t = self.t if t is None else t
+        cam = self.cam if cam is None else cam; X = self.X if X is None else X
+        rs, fs = [], []
+        for p0, p1, sub in self.chunks:
+            r, f = sub.residuals(R, t, cam, X[p0:p1], with_jac=False)
+            rs.append(r); fs.append(f)
+        return torch.cat(rs), torch.cat(fs)
+
+    def total_cost(self, R=None, t=None, cam=None, X=None) -> float:
+        R = self.R if R is None else R; t = self.t if t is None else t
+        cam = self.cam if cam is None else cam; X = self.X if X is None else X
+        c = 0.0
+        for p0, p1, sub in self.chunks:
+            r, front = sub.residuals(R, t, cam, X[p0:p1], with_jac=False)
+            c += self.robust_cost((r * r).sum(-1), front)
+            del r, front
+        e, _ = self.prior_terms(R, t)
+        return c + 0.5 * float((e * e).sum())
+
+    def linearize(self):
+        torch = self.torch
+        nco = 6 + self.nf
+        d = {"dtype": torch.float64, "device": self.device}
+        Hpp = torch.empty(self.P, 3, 3, **d)
+        gp = torch.empty(self.P, 3, **d)
+        H = torch.zeros(self.n_c, self.n_c, **d)
+        g = torch.zeros(self.n_c, **d)
+        cost = 0.0
+        for p0, p1, sub in self.chunks:
+            self._bind(sub, p0, p1)
+            r_w, J_c, J_pt, c = sub._weighted()
+            Hpp[p0:p1] = segment_sum(J_pt.transpose(1, 2) @ J_pt, sub.pt_idx, sub.P, sub.pt_ends)
+            gp[p0:p1] = segment_sum(torch.einsum("mai,ma->mi", J_pt, r_w), sub.pt_idx, sub.P, sub.pt_ends)
+            sub._accumulate_camera(H, g, J_c, r_w, nco)
+            cost += c
+            del r_w, J_c, J_pt
+        e_p, J_p = self.prior_terms(self.R, self.t)
+        if e_p.shape[0]:
+            H = H + J_p.T @ J_p
+            g = g + J_p.T @ e_p
+            cost = cost + 0.5 * float((e_p * e_p).sum())
+        self._lin = {"Hpp": Hpp, "gp": gp, "H": H, "g": g, "e_p": e_p, "J_p": J_p, "cost": cost}
+        return self._lin
+
+    def step(self, lam: float, pair_chunk: int = 3_000_000):
+        torch = self.torch
+        L = self._lin if getattr(self, "_lin", None) is not None else self.linearize()
+        Hpp, gp, H, g, e_p, J_p, cost = (L[k] for k in ("Hpp", "gp", "H", "g", "e_p", "J_p", "cost"))
+        nco = 6 + self.nf
+        Dp = torch.diagonal(Hpp, dim1=1, dim2=2).clamp(self.tb.lm_diag_min, self.tb.lm_diag_max)
+        Hpp_inv = torch.linalg.inv(Hpp + lam * torch.diag_embed(Dp))
+        # Schur: S = H − Σ W Hpp⁻¹ Wᵀ ;  ĝ = g − Σ W Hpp⁻¹ g_p — chunk by chunk, in order
+        red = torch.zeros(self.n_c, dtype=torch.float64, device=self.device)
+        S_sum = torch.zeros(self.n_c, self.n_c, dtype=torch.float64, device=self.device)
+        for p0, p1, sub in self.chunks:
+            self._bind(sub, p0, p1)
+            _r_w, J_c, J_pt, _c = sub._weighted()
+            del _r_w
+            W = J_c.transpose(1, 2) @ J_pt                                  # (m,nco,3)
+            del J_c, J_pt
+            Y = W @ Hpp_inv[p0:p1][sub.pt_idx]
+            red += sub._reduce_vec(torch.einsum("mij,mj->mi", Y, gp[p0:p1][sub.pt_idx]), nco)
+            S_sum += sub._schur_pairs(Y, W, nco, pair_chunk)
+            sub._pairs = None                                              # the plan is per chunk, not kept
+            del W, Y
+        g_red = g - red
+        S = H - S_sum
+        del S_sum, red
+        dc, why = self._camera_solve(H, S, g_red, lam)
+        del S
+        if dc is None:
+            return None, cost, float("inf"), why
+        # back-substitution Δp = Hpp⁻¹ (−g_p − Wᵀ Δc) and the predicted decrease, chunk by chunk
+        dp = torch.empty(self.P, 3, dtype=torch.float64, device=self.device)
+        pred = 0.0
+        for p0, p1, sub in self.chunks:
+            self._bind(sub, p0, p1)
+            r_w, J_c, J_pt, _c = sub._weighted()
+            W = J_c.transpose(1, 2) @ J_pt
+            dc_obs = sub._gather_cam_delta(dc, nco)
+            back = segment_sum(torch.einsum("mij,mi->mj", W, dc_obs), sub.pt_idx, sub.P, sub.pt_ends)
+            del W
+            dpc = torch.einsum("pij,pj->pi", Hpp_inv[p0:p1], -gp[p0:p1] - back)
+            dp[p0:p1] = dpc
+            JD = (torch.einsum("mai,mi->ma", J_c, dc_obs)
+                  + torch.einsum("mai,mi->ma", J_pt, dpc[sub.pt_idx]))
+            pred += -float((JD * (r_w + 0.5 * JD)).sum())
+            del r_w, J_c, J_pt, dc_obs, back, JD
+        if e_p.shape[0]:
+            Jp_d = J_p @ dc
+            pred = pred - float((Jp_d * (e_p + 0.5 * Jp_d)).sum())
+        return (dc, dp), cost, pred, ""
+
+
+def make_problem(w2c0, params_by_block0, block_of, cam_idx, pt_idx, uv, X0, huber_px, cam_free, **kw):
+    """The one-piece :class:`_Problem` up to CHUNKED_ABOVE_OBS residual blocks, the :class:`_ChunkedProblem` above."""
+    if int(len(uv)) > CHUNKED_ABOVE_OBS:
+        return _ChunkedProblem(w2c0, params_by_block0, block_of, cam_idx, pt_idx, uv, X0, huber_px, cam_free, **kw)
+    return _Problem(w2c0, params_by_block0, block_of, cam_idx, pt_idx, uv, X0, huber_px, cam_free, **kw)
 
 
 def solve(problem: _Problem, max_iterations: int, log=None) -> Dict[str, object]:
@@ -751,7 +969,7 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
     diag = float(np.hypot(wh[0], wh[1]))
     n_rep0 = int(len(uv))
     n_off = 0
-    probe = _Problem(w2c_start, pb0, block_of, cam_idx, pt_idx, uv, X0, float(cfg.huber_px), cam_free, device=dev,
+    probe = make_problem(w2c_start, pb0, block_of, cam_idx, pt_idx, uv, X0, float(cfg.huber_px), cam_free, device=dev,
                      sigmas=(np.ones(N) if sigmas is None else np.asarray(sigmas, np.float64)),
                      prior_centres=np.zeros((N, 3)), torch_ba=cfg.torch_ba)
     r0, front0 = probe.residuals(with_jac=False)
@@ -780,7 +998,7 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
     if prior_w2c.shape != np.asarray(w2c_start).shape:
         raise RefineError(f"{name}: {len(prior_w2c)} prior poses for {N} keyframes")
     C = -np.einsum("nji,nj->ni", prior_w2c[:, :3, :3], prior_w2c[:, :3, 3])
-    prob = _Problem(w2c_start, pb0, block_of, cam_idx, pt_idx, uv, X0, float(cfg.huber_px), cam_free, device=dev,
+    prob = make_problem(w2c_start, pb0, block_of, cam_idx, pt_idx, uv, X0, float(cfg.huber_px), cam_free, device=dev,
                     sigmas=np.asarray(sigmas, np.float64), prior_centres=C, torch_ba=cfg.torch_ba)
     n_prior = N
     if log is None and os.environ.get("STAC_BA_TORCH_TRACE"):

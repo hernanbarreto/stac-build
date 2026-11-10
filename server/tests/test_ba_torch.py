@@ -315,3 +315,66 @@ def test_r3_focal_blocks_agree_with_ceres():
         fxc, fyc = rc.params_by_block[b][:2]
         assert abs(fx - fxc) < 0.1 and abs(fy - fyc) < 0.1, (b, (fx, fy), (fxc, fyc))
     assert abs(r.fit_rms_px - rc.fit_rms_px) < 0.01, (r.fit_rms_px, rc.fit_rms_px)
+
+
+def _flat_problem(n_cam=8, n_pts=300, seed=0):
+    w2c, pts, groups, X = _scene(n_cam=n_cam, n_pts=n_pts, noise_px=0.3, seed=seed)
+    tracks = [t for t in X if t in groups and len(groups[t]) >= 2]
+    cam_idx = np.concatenate([np.array([i for i, _ in groups[t]]) for t in tracks])
+    pt_idx = np.concatenate([np.full(len(groups[t]), k) for k, t in enumerate(tracks)])
+    uv = np.concatenate([np.array([p for _, p in groups[t]]) for t in tracks])
+    X0 = np.array([X[t] for t in tracks]) + np.random.default_rng(seed + 1).normal(0, 0.02, (len(tracks), 3))
+    return w2c, cam_idx, pt_idx, uv, X0
+
+
+@pytest.mark.parametrize("cam_free,blocks", [((), 1), ((0, 1, 2, 3, 4, 5, 6, 7), 1), ((0, 1), 3)])
+def test_the_chunked_problem_is_the_one_piece_problem(cam_free, blocks):
+    """THE CARD'S MEMORY (2026-11-10, pccr 2026-08-24: 101.6 M residual blocks did not fit the 80 GB card in one
+    piece): the problem in chunks of landmarks gives the one-piece cost, linearisation and LM step to the rounding
+    of the summation order — and with ONE chunk, the same bits."""
+    w2c, cam_idx, pt_idx, uv, X0 = _flat_problem()
+    block_of = (np.arange(len(w2c)) * blocks // len(w2c)).astype(int)
+    kw = dict(device="cpu", sigmas=np.full(len(w2c), 0.05),
+              prior_centres=-np.einsum("nji,nj->ni", w2c[:, :3, :3], w2c[:, :3, 3]) + 0.01, torch_ba=TB)
+    args = (w2c, [list(CAM)] * blocks, block_of, cam_idx, pt_idx, uv, X0, 1.0, cam_free)
+    one = BA._Problem(*args, **kw)
+    many = BA._ChunkedProblem(*args, chunk_obs=97, **kw)
+    single = BA._ChunkedProblem(*args, chunk_obs=10 ** 9, **kw)
+    assert len(many.chunks) > 5 and len(single.chunks) == 1
+    r1, f1 = one.residuals(with_jac=False)
+    r2, f2 = many.residuals(with_jac=False)
+    assert torch.equal(r1, r2) and torch.equal(f1, f2)
+    assert abs(one.total_cost() - many.total_cost()) <= 1e-12 * one.total_cost()
+    L1, L2 = one.linearize(), many.linearize()
+    for k in ("Hpp", "gp", "H", "g"):
+        assert torch.allclose(L1[k], L2[k], rtol=1e-10, atol=1e-10 * float(L1[k].abs().max())), k
+    for lam in (1e-4, 1e-1, 3.0):
+        (dc1, dp1), c1, p1, w1 = one.step(lam)
+        (dc2, dp2), c2, p2, w2 = many.step(lam)
+        (dc3, dp3), c3, p3, w3 = single.step(lam)
+        assert w1 == w2 == w3 == ""
+        # the summation order's rounding (H agrees to 4e-15), amplified by the damped system's conditioning:
+        # measured ≤ 2e-10 of the step's norm at λ 1e-4, ≤ 2e-13 at 0.1
+        assert float((dc1 - dc2).norm()) <= 1e-8 * float(dc1.norm()), lam
+        assert float((dp1 - dp2).norm()) <= 1e-8 * float(dp1.norm()), lam
+        assert abs(p1 - p2) <= 1e-9 * abs(p1) and abs(c1 - c2) <= 1e-12 * c1
+        assert torch.equal(dc1, dc3) and torch.equal(dp1, dp3) and p1 == p3 and c1 == c3, lam
+
+
+def test_a_rung_solved_in_chunks_lands_where_the_one_piece_solve_does(monkeypatch):
+    """run_rung_torch above CHUNKED_ABOVE_OBS: the same rung, the same optimum (the LM path may differ by the
+    summation order's rounding); deterministic run to run."""
+    w2c, pts, groups, X = _scene()
+    rng = np.random.default_rng(7)
+    w0, X0 = _perturb(w2c, X, rng)
+    kw = dict(sigmas=np.full(len(w2c), 0.5), prior_w2c=w0)
+    r1 = BA.run_rung_torch("R1", w0, CAM, WH, groups, X0, cfg=CFG, device="cpu", **kw)
+    monkeypatch.setattr(BA, "CHUNKED_ABOVE_OBS", 0)
+    monkeypatch.setattr(BA, "CHUNK_OBS", 211)
+    r2 = BA.run_rung_torch("R1", w0, CAM, WH, groups, X0, cfg=CFG, device="cpu", **kw)
+    r3 = BA.run_rung_torch("R1", w0, CAM, WH, groups, X0, cfg=CFG, device="cpu", **kw)
+    assert r1.termination == r2.termination == "CONVERGENCE"
+    assert np.array_equal(r2.w2c, r3.w2c) and all(np.array_equal(r2.X[t], r3.X[t]) for t in r2.X)
+    assert abs(r1.final_cost - r2.final_cost) <= 1e-6 * r1.final_cost, (r1.final_cost, r2.final_cost)
+    assert np.max(np.abs(r1.w2c - r2.w2c)) < 1e-6 and np.max(np.abs(np.subtract(r1.params_by_block, r2.params_by_block))) < 1e-4
+    assert abs(r1.fit_rms_px - r2.fit_rms_px) < 1e-6
