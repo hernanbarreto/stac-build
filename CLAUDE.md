@@ -237,6 +237,15 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
      too SMALL (a per-scene DA3 metre bias). Decide the source by measuring our sessions against known real dimensions.
   He expects GenRecon may need a few knobs for the right mesh ("es más rápido y es la última etapa"); after that the work
   moves to fronts other than the cloud.
+- GENRECON INVENTS FLOOR-LEVEL SURFACE (USER 2026-11-09: "tiene eso que no sé qué es ahí abajo … en la nube ahí no hay
+  nada" / "dejalo anotado, lo vemos después"). Measured on zaragoza's genrecon_photo (10 points per voxel, 5 mm cloud):
+  36.5 % of the mesh area (423 of 1160 m²) has no cloud point within one GenRecon voxel (11.56 cm) — 79 m² at
+  12–25 cm, 131 at 25–50, 188 at 50–100, 25 beyond 1 m; 409 m² of it between y −0.5 and +0.5 m, none above 1 m; 84 %
+  of those faces have no point within 23 cm; the few points near them have a normal confidence (median 31 vs 29) —
+  not noise, so neither min_points_per_voxel nor a confidence filter removes it. Main suspect: the SOLID fill of every
+  support level's active columns down to the lattice base (plan_layout, USER 2026-11-08 "el suelo es sólido", against
+  the double floor). Proposed test: one zaragoza GenRecon without that fill, measured the same way
+  (scratchpad mesh_support.py: faces vs nearest cloud point).
 - The pipeline's and the general lists: `docs/pipeline_final.md` §4 — capture distance (when he says), the weighted
   vote (his word), smarter segmentation, epoch renumbering, the GPU ports of the intake, MEJORAS_OBLIGATORIAS
   (never built), the brush lock, the BIM comparison, viewer checks; station's heavy residual tail (USER 2026-11-08
