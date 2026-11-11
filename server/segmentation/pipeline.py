@@ -3569,6 +3569,7 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
         run = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(C, axis=0), axis=1))]
         chain = dict(zip(order, run.tolist()))
     tree_box = [None]                                         # the cloud's KD-tree, built on first need
+    reach_box = [None]                                        # the cloud's extent, computed on first need
     if id_base is None:
         id_base = max([int(i.get("id", 0)) for i in instances] + [0])
     splits = []                                               # (parent iid, inst, groups, P, comp, owner, gi)
@@ -3603,7 +3604,11 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
             # over observatorio's 99 M points queried per ray sample ran for hours)
             from segmentation.gap_rays_torch import FreeSpaceIndex
             tree_box[0] = FreeSpaceIndex(xyz_display, gap_m / 2.0)
-        reach = float(np.linalg.norm(xyz_display.max(0) - xyz_display.min(0)))
+        if reach_box[0] is None:
+            # the cloud's extent, ONCE (pccr 3108, 2026-11-11: recomputed per instance over the whole
+            # cloud — 94 s of the split's 104 on the CPU); the same value every instance read
+            reach_box[0] = float(np.linalg.norm(xyz_display.max(0) - xyz_display.min(0)))
+        reach = reach_box[0]
         parent = {c: c for c in cand}
 
         def _root(x):
@@ -4532,6 +4537,113 @@ def _display_transform(output_dir: Path, ply_path: Path, xyz: np.ndarray, log=pr
     return s, R, t, "computed (seeded leveling of the cloud)"
 
 
+def _match_points_numpy(masks_data, mask_keys, obj_ids, frame_groups: Dict[int, np.ndarray],
+                        mask_frame_of: Dict[int, int], rows_m: np.ndarray, cols_m: np.ndarray, n_pts: int,
+                        mask_h_ref: int, mask_w_ref: int, erosion_iterations: int, erosion_kernel):
+    """Phase 1 of the projection, the PATH OF RECORD (kept as the reference of
+    ``segmentation.mask_match_torch.match_points_t``, tests/test_mask_match_torch.py): every
+    masklet's masks over the points born in their keyframes; each point to the SMALLEST mask
+    area covering it (a tie: the lower id), its runner-up tracked. Returns (point_obj_id,
+    point_mask_area, second_obj_id, second_area, obj_mask_areas, areas_by_oid_frame)."""
+    # ── Phase 1: Match all objects, track per-point best assignment ──
+    # For deconfliction: each point goes to the object with the smallest mask area
+    # (the user's rule, kept — point 117, DECIDIDO: the smaller area wins, a tie the
+    # lower id; the runner-up is tracked so the NEAR-TIES can be counted and declared)
+    point_obj_id = np.full(n_pts, -1, dtype=np.int32)     # winning obj_id per point
+    point_mask_area = np.full(n_pts, np.inf, dtype=np.float64)  # smaller wins
+    second_obj_id = np.full(n_pts, -1, dtype=np.int32)    # the runner-up and its area
+    second_area = np.full(n_pts, np.inf, dtype=np.float64)
+
+    obj_mask_areas = {}  # obj_id → average mask area (for priority)
+    areas_by_oid_frame: Dict[int, Dict[int, float]] = {}
+
+    # A LONG STAGE MUST SAY WHERE IT IS (USER 2026-09-22: *"etapas largas mudas
+    # se puede y se debe solucionar ahora porque voy a lanzar desde ui y sino no
+    # voy a recibir nada por mucho tiempo"*). This loop projects every masklet
+    # over the whole cloud and printed nothing until it finished — 10 minutes of
+    # silence on pccr, indistinguishable from a hang.
+    _t_match = _time.time()
+    _n_obj = len(obj_ids)
+    _step = max(1, _n_obj // 20)          # ~20 lines, whatever the session size
+    _done = 0
+    for obj_id in obj_ids:
+        _done += 1
+        if _done == 1 or _done % _step == 0 or _done == _n_obj:
+            _el = _time.time() - _t_match
+            _eta = (_el / _done) * (_n_obj - _done)
+            print(f"[SegPipeline]   matching {_done}/{_n_obj} masklets "
+                  f"({100.0 * _done / max(_n_obj, 1):.0f}%, {_el:.0f}s elapsed"
+                  + (f", ~{_eta:.0f}s left)" if _done < _n_obj else ")"),
+                  flush=True)
+        # Compute average mask area for this object (across all frames)
+        frame_areas = []
+
+        for cloud_frame in sorted(frame_groups):
+            pt_indices = frame_groups[cloud_frame]
+            # EXACT MATCH ONLY: if SAM3 didn't generate a mask for this exact frame, skip these points.
+            # No fuzzy "nearest frame" matching, because that maps background points from unsegmented frames
+            # to masks from completely different timestamps.
+            mask_key = f"f{mask_frame_of[cloud_frame]}_o{obj_id}"
+            if mask_key not in mask_keys:
+                continue
+
+            mask = masks_data[mask_key].astype(np.uint8)
+            if mask.shape[0] != mask_h_ref or mask.shape[1] != mask_w_ref:
+                raise RuntimeError(f"mask {mask_key} is {mask.shape[0]}x{mask.shape[1]} and the store "
+                                   f"declares {mask_h_ref}x{mask_w_ref} — one store, one grid")
+
+            # ── Erosion: shrink mask edges for tighter boundaries ──
+            # Adaptive: skip/reduce erosion for small masks to avoid eliminating them
+            raw_area = float(np.sum(mask > 0))
+            if erosion_iterations <= 0 or raw_area < 2000:
+                # erosion disabled (user 2026-08-29) or small object
+                pass
+            elif raw_area < 10000:
+                # Medium object — mild erosion (1 iteration)
+                mask = cv2.erode(mask, erosion_kernel, iterations=1)
+            else:
+                # Large object — full erosion
+                mask = cv2.erode(mask, erosion_kernel, iterations=erosion_iterations)
+            mask = mask.astype(bool)
+
+            mask_area = float(np.sum(mask))
+            if mask_area == 0:
+                continue
+            frame_areas.append(mask_area)
+            areas_by_oid_frame.setdefault(int(obj_id), {})[int(cloud_frame)] = mask_area
+
+            # Look up each point's pixel in the (eroded) mask through the exact grid maps
+            r = rows_m[pt_indices]
+            c = cols_m[pt_indices]
+            ok = (r >= 0) & (c >= 0)
+            in_mask = np.zeros(len(pt_indices), bool)
+            in_mask[ok] = mask[r[ok], c[ok]]
+
+            matched = pt_indices[in_mask]
+
+            # ── Deconfliction: assign point to smallest-mask object ──
+            # Vectorized: only update points where this mask_area is smaller;
+            # the previous winner becomes the runner-up, a loser that beats the
+            # runner-up replaces it (the near-tie count reads both)
+            cur = point_mask_area[matched]
+            wins = mask_area < cur
+            winning_pts = matched[wins]
+            second_obj_id[winning_pts] = point_obj_id[winning_pts]
+            second_area[winning_pts] = cur[wins]
+            point_obj_id[winning_pts] = obj_id
+            point_mask_area[winning_pts] = mask_area
+            losing = matched[~wins]
+            better_second = mask_area < second_area[losing]
+            second_obj_id[losing[better_second]] = obj_id
+            second_area[losing[better_second]] = mask_area
+
+        avg_area = np.mean(frame_areas) if frame_areas else 0
+        obj_mask_areas[obj_id] = avg_area
+
+    return (point_obj_id, point_mask_area, second_obj_id, second_area, obj_mask_areas,
+            areas_by_oid_frame)
+
+
 def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
                           cfg_source: Optional[str] = None, stage_dir=None,
                           build_octree: bool = True) -> dict:
@@ -4608,7 +4720,6 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
         raise RuntimeError(f"{masks_path} does not exist — the masks to project are missing")
 
     masks_data = np.load(masks_path)
-    mask_keys = set(masks_data.files)
     obj_ids = sorted(int(o) for o in masks_data["obj_ids"].tolist())
     keyframes = masks_data["frames"].tolist()
     scaled_res = [int(x) for x in masks_data["scaled_res"].tolist()]
@@ -4724,100 +4835,17 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
     print(f"[SegPipeline]   Record grid: {Wt}x{Ht} ({rec_grid.name}), mask grid: {mask_w_ref}x{mask_h_ref} "
           f"— exact grid maps of {proj.source}")
 
-    # ── Phase 1: Match all objects, track per-point best assignment ──
-    # For deconfliction: each point goes to the object with the smallest mask area
-    # (the user's rule, kept — point 117, DECIDIDO: the smaller area wins, a tie the
-    # lower id; the runner-up is tracked so the NEAR-TIES can be counted and declared)
-    point_obj_id = np.full(n_pts, -1, dtype=np.int32)     # winning obj_id per point
-    point_mask_area = np.full(n_pts, np.inf, dtype=np.float64)  # smaller wins
-    second_obj_id = np.full(n_pts, -1, dtype=np.int32)    # the runner-up and its area
-    second_area = np.full(n_pts, np.inf, dtype=np.float64)
-
-    obj_mask_areas = {}  # obj_id → average mask area (for priority)
-    areas_by_oid_frame: Dict[int, Dict[int, float]] = {}
-
-    # A LONG STAGE MUST SAY WHERE IT IS (USER 2026-09-22: *"etapas largas mudas
-    # se puede y se debe solucionar ahora porque voy a lanzar desde ui y sino no
-    # voy a recibir nada por mucho tiempo"*). This loop projects every masklet
-    # over the whole cloud and printed nothing until it finished — 10 minutes of
-    # silence on pccr, indistinguishable from a hang.
-    _t_match = _time.time()
-    _n_obj = len(obj_ids)
-    _step = max(1, _n_obj // 20)          # ~20 lines, whatever the session size
-    _done = 0
-    for obj_id in obj_ids:
-        _done += 1
-        if _done == 1 or _done % _step == 0 or _done == _n_obj:
-            _el = _time.time() - _t_match
-            _eta = (_el / _done) * (_n_obj - _done)
-            print(f"[SegPipeline]   matching {_done}/{_n_obj} masklets "
-                  f"({100.0 * _done / max(_n_obj, 1):.0f}%, {_el:.0f}s elapsed"
-                  + (f", ~{_eta:.0f}s left)" if _done < _n_obj else ")"),
-                  flush=True)
-        # Compute average mask area for this object (across all frames)
-        frame_areas = []
-
-        for cloud_frame in sorted(frame_groups):
-            pt_indices = frame_groups[cloud_frame]
-            # EXACT MATCH ONLY: if SAM3 didn't generate a mask for this exact frame, skip these points.
-            # No fuzzy "nearest frame" matching, because that maps background points from unsegmented frames
-            # to masks from completely different timestamps.
-            mask_key = f"f{mask_frame_of[cloud_frame]}_o{obj_id}"
-            if mask_key not in mask_keys:
-                continue
-
-            mask = masks_data[mask_key].astype(np.uint8)
-            if mask.shape[0] != mask_h_ref or mask.shape[1] != mask_w_ref:
-                raise RuntimeError(f"mask {mask_key} is {mask.shape[0]}x{mask.shape[1]} and the store "
-                                   f"declares {mask_h_ref}x{mask_w_ref} — one store, one grid")
-
-            # ── Erosion: shrink mask edges for tighter boundaries ──
-            # Adaptive: skip/reduce erosion for small masks to avoid eliminating them
-            raw_area = float(np.sum(mask > 0))
-            if erosion_iterations <= 0 or raw_area < 2000:
-                # erosion disabled (user 2026-08-29) or small object
-                pass
-            elif raw_area < 10000:
-                # Medium object — mild erosion (1 iteration)
-                mask = cv2.erode(mask, erosion_kernel, iterations=1)
-            else:
-                # Large object — full erosion
-                mask = cv2.erode(mask, erosion_kernel, iterations=erosion_iterations)
-            mask = mask.astype(bool)
-
-            mask_area = float(np.sum(mask))
-            if mask_area == 0:
-                continue
-            frame_areas.append(mask_area)
-            areas_by_oid_frame.setdefault(int(obj_id), {})[int(cloud_frame)] = mask_area
-
-            # Look up each point's pixel in the (eroded) mask through the exact grid maps
-            r = rows_m[pt_indices]
-            c = cols_m[pt_indices]
-            ok = (r >= 0) & (c >= 0)
-            in_mask = np.zeros(len(pt_indices), bool)
-            in_mask[ok] = mask[r[ok], c[ok]]
-
-            matched = pt_indices[in_mask]
-
-            # ── Deconfliction: assign point to smallest-mask object ──
-            # Vectorized: only update points where this mask_area is smaller;
-            # the previous winner becomes the runner-up, a loser that beats the
-            # runner-up replaces it (the near-tie count reads both)
-            cur = point_mask_area[matched]
-            wins = mask_area < cur
-            winning_pts = matched[wins]
-            second_obj_id[winning_pts] = point_obj_id[winning_pts]
-            second_area[winning_pts] = cur[wins]
-            point_obj_id[winning_pts] = obj_id
-            point_mask_area[winning_pts] = mask_area
-            losing = matched[~wins]
-            better_second = mask_area < second_area[losing]
-            second_obj_id[losing[better_second]] = obj_id
-            second_area[losing[better_second]] = mask_area
-
-        avg_area = np.mean(frame_areas) if frame_areas else 0
-        obj_mask_areas[obj_id] = avg_area
+    # ── Phase 1: every masklet over the points born in its keyframes (point 117: the smaller
+    # area wins, a tie the lower id; the runner-up tracked for the near-ties) — on the evidence
+    # device (segmentation/mask_match_torch.py, USER 2026-11-11: "todo debe ser GPU nada en cpu";
+    # pccr 2026-08-24: 290,418 masks read one after the other) — _match_points_numpy is the
+    # reference, held equal by tests/test_mask_match_torch.py
+    from reconstruction.surface_fit.hole_audit import evidence_device
+    from segmentation.mask_match_torch import match_points_t
+    (point_obj_id, point_mask_area, second_obj_id, second_area, obj_mask_areas,
+     areas_by_oid_frame) = match_points_t(
+        masks_path, obj_ids, frame_groups, mask_frame_of, rows_m, cols_m, n_pts,
+        mask_h_ref, mask_w_ref, erosion_iterations, erosion_kernel, evidence_device())
 
     # the NEAR-TIES of the smaller-area rule (point 117): contested points whose two
     # smallest areas differ by less than error_factor x the measured frame-to-frame

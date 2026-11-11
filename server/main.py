@@ -6647,7 +6647,11 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
     _inputs = None
     if _auto is not None:
         _want = _auto.get("stages") if isinstance(_auto.get("stages"), dict) else {}
+        # `projection`: the session's masks on its cloud, nothing segmented again (USER 2026-11-11: pccr
+        # 2026-08-24 had SAM3's 150 prompts done — "que al reiniciar la segmentación retome desde el punto
+        # de la reproyección … y pasar a la reproyección directamente")
         _only = {sid_ for key_, sid_ in (("vlm", StageId.VLM), ("sam3", StageId.SAM3),
+                                         ("projection", StageId.PROJECTION),
                                          ("certify", StageId.CERTIFY), ("genrecon", StageId.GENRECON)) if _want.get(key_)}
         if not _only:
             await viewer_manager.send_text(websocket, json.dumps({
@@ -6655,7 +6659,13 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
                 "message": "Autosegment: no stage selected — nothing to run"}))
             return {"ok": False, "error": "no stage selected"}
         from pipeline_manager import floor_after_segmentation as _fas
-        if StageId.SAM3 in _only and _fas(_run_cfg):
+        if StageId.PROJECTION in _only:
+            # the stage is off in the default list (the SAM3 stage projects what it segments): this
+            # order asks for it alone
+            for _st in stages:
+                if _st.id == StageId.PROJECTION:
+                    _st.enabled = True
+        if (StageId.SAM3 in _only or StageId.PROJECTION in _only) and _fas(_run_cfg):
             # USER 2026-11-05: the floor correction after the projection of every segmentation
             _only.add(StageId.FLOOR)
         if StageId.GENRECON in _only:

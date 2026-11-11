@@ -62,3 +62,20 @@ def test_the_audit_on_the_device_equals_the_numpy_twin(tmp_path):
     assert rec["on_mask"] == on_total and rec["off_mask"] == off_total
     assert np.array_equal(rec["judged_views"], seen) and np.array_equal(rec["off_views"], off)
     assert np.array_equal(rec["out_of_place"], (seen > 0) & (off > 0))
+
+
+@pytest.mark.parametrize("px", [0, 1, 2, 3])
+def test_the_device_dilation_is_scipys(px):
+    """USER 2026-11-11 ("todo debe ser GPU nada en cpu"): the audit's mask dilation on the device —
+    scipy's binary_dilation (default cross, outside 0, px passes), pixel for pixel, masks touching the
+    border included."""
+    from scipy import ndimage as ndi
+    from segmentation.mask_filter import dilate_cross_t
+    rng = np.random.default_rng(px)
+    for _ in range(6):
+        m = rng.random((37, 53)) > 0.93
+        m[0, rng.integers(0, 53)] = True                    # on the border
+        m[rng.integers(0, 37), -1] = True
+        ref = ndi.binary_dilation(m, iterations=px) if px else m
+        got = dilate_cross_t(torch.as_tensor(m), px).numpy()
+        assert got.dtype == bool and np.array_equal(ref, got)

@@ -42,6 +42,23 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 
+def dilate_cross_t(m, iterations: int):
+    """``scipy.ndimage.binary_dilation(m, iterations=iterations)`` on ``m``'s device: the default
+    structuring element (the 3x3 cross), the outside of the image 0, applied ``iterations`` times —
+    each pass a 3x3 cross convolution of the booleans, any hit sets the pixel. Integer arithmetic:
+    the same pixels as scipy's."""
+    import torch
+    import torch.nn.functional as F
+    out = m.to(torch.bool)
+    if iterations <= 0:
+        return out
+    k = torch.tensor([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=torch.float32, device=m.device)[None, None]
+    x = out.to(torch.float32)[None, None]
+    for _ in range(int(iterations)):
+        x = (F.conv2d(x, k, padding=1) > 0).to(torch.float32)
+    return x[0, 0] > 0
+
+
 class MaskAudit:
     """Built once per session; audits one instance at a time.
 
@@ -122,13 +139,35 @@ class MaskAudit:
 
     # ── the vote ─────────────────────────────────────────────────────────
 
-    def _mask_of(self, mask_idx: int, oid: int) -> Optional[np.ndarray]:
+    def _read_mask(self, mask_idx: int, oid: int) -> Optional[np.ndarray]:
+        """The stored mask as booleans, None when the store has none. The member names are a SET
+        (pccr 2026-08-24: a list of 290,418 names scanned once per mask read)."""
         key = f"f{int(mask_idx)}_o{int(oid)}"
         try:
-            if key not in self.ev.masks.files:
+            keys = getattr(self, "_mask_keys", None)
+            if keys is None:
+                keys = self._mask_keys = set(self.ev.masks.files)
+            if key not in keys:
                 return None
-            m = np.asarray(self.ev.masks[key]) > 0
+            return np.asarray(self.ev.masks[key]) > 0
         except Exception:  # noqa: BLE001
+            return None
+
+    def _mask_of_t(self, mask_idx: int, oid: int, dev):
+        """:meth:`_mask_of` on ``dev`` (USER 2026-11-11: "todo debe ser GPU nada en cpu"; pccr 3108: the
+        CPU dilation was 186 s of the audit's 368): the stored mask uploaded, dilated there by
+        :func:`dilate_cross_t` — scipy's binary_dilation with its default cross, ``dilate_px`` times,
+        the outside 0 — the same pixels (tests/test_mask_audit_torch.py)."""
+        import torch
+        m = self._read_mask(mask_idx, oid)
+        if m is None:
+            return None
+        return dilate_cross_t(torch.as_tensor(np.ascontiguousarray(m), device=dev), int(self.cfg["dilate_px"]))
+
+    def _mask_of(self, mask_idx: int, oid: int) -> Optional[np.ndarray]:
+        """The mask the audit judges with, dilated on the CPU — the reference of :meth:`_mask_of_t`."""
+        m = self._read_mask(mask_idx, oid)
+        if m is None:
             return None
         px = int(self.cfg["dilate_px"])
         if px > 0:
@@ -204,11 +243,15 @@ class MaskAudit:
             if len(sel) == 0:
                 rec["visits"].append(vrec)
                 continue
+            import torch
+            dev = self.ev.device
             ranked = []
             for mf in vframes:
-                m = self._mask_of(mf, oid)
-                if m is not None and m.any():
-                    ranked.append((int(m.sum()), int(mf), m))
+                m = self._mask_of_t(mf, oid, dev)            # on the evidence's device, dilated there
+                if m is not None:
+                    area = int(m.sum())
+                    if area:
+                        ranked.append((area, int(mf), m))
             # the frames showing MOST of the object first; two of EQUAL area are
             # ordered by keyframe (docs/plan_determinismo.md point 119, DECIDIDO:
             # the tie-break is the keyframe, so which frames are judged never
@@ -217,9 +260,7 @@ class MaskAudit:
             # on the evidence's device (2026-11-01): the visit's points uploaded once, every frame's
             # projection, the instance's own z-buffer and the mask lookups as tensors; the numpy twin
             # (_visible_in_frame) is the reference — tests/test_mask_audit_torch.py
-            import torch
             from segmentation.shape_proposer import _visible_in_frame_t
-            dev = self.ev.device
             pts_t = torch.as_tensor(np.ascontiguousarray(pts, dtype=np.float64), device=dev)
             seen_v = torch.zeros(len(sel), dtype=torch.int32, device=dev)
             off_v = torch.zeros(len(sel), dtype=torch.int32, device=dev)
@@ -240,7 +281,7 @@ class MaskAudit:
                     continue
                 vrec["frames"] += 1
                 vrec["seen"] += n_vis
-                m_t = torch.as_tensor(np.ascontiguousarray(m) > 0, device=dev)
+                m_t = m
                 mu_c = torch.where(vis, mu, torch.zeros_like(mu))
                 mv_c = torch.where(vis, mv, torch.zeros_like(mv))
                 inside = vis & m_t[mv_c, mu_c]

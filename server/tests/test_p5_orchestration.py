@@ -546,3 +546,37 @@ def test_a_segmentation_run_without_the_certification_removes_the_stale_acta_not
     assert not any((out / n).exists() for n in records) and not (out / "quality").exists()
     assert set(records) | {"quality", "segmentation.json"} <= set(removed)
     assert all((out / n).exists() for n in epochs) and (out / "corrections" / "epoch_1.npz").exists()
+
+
+# ── USER 2026-11-11: an autosegment order that resumes at the projection ─────────────────
+
+def test_a_projection_order_projects_the_masks_on_disk_and_segments_nothing(tmp_path, lease, monkeypatch):
+    """pccr 2026-08-24: SAM3's 150 prompts done, the job stopped before the projection — "que al
+    reiniciar la segmentación retome desde el punto de la reproyección … y pasar a la reproyección
+    directamente". The order's stages are the projection and the floor: the masks on disk are what
+    the projection reads, nothing cleans them, no VLM or SAM3 stage runs."""
+    s = _session(tmp_path)
+    out = s / "output"
+    (out / "segmentation.json").write_text("masks of the 150 prompts")
+    (out / "seg_masks.npz").write_text("x")
+    pm = PipelineManager()
+    ran = []
+
+    async def _stage(job, st, session_dir, config, on_progress, replace):
+        ran.append(st.stage.id)
+        assert (out / "segmentation.json").read_text() == "masks of the 150 prompts"
+        return True
+
+    monkeypatch.setattr(pm, "_run_stage", _stage)
+    job = _job(s, [StageId.PROJECTION, StageId.FLOOR], kind="autosegment")
+    assert _run(pm, job, _base_config(), force=True) is True
+    assert ran == [StageId.PROJECTION, StageId.FLOOR]
+
+
+def test_the_autosegment_order_takes_the_projection_with_its_floor():
+    src = (Path(__file__).resolve().parents[1] / "main.py").read_text()
+    assert '("projection", StageId.PROJECTION)' in src
+    a = src.index('("projection", StageId.PROJECTION)')
+    block = src[a:a + 1500]
+    assert "if StageId.PROJECTION in _only:" in block and "_st.enabled = True" in block
+    assert "(StageId.SAM3 in _only or StageId.PROJECTION in _only) and _fas(_run_cfg)" in block
