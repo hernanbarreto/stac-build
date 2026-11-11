@@ -246,6 +246,15 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
      too SMALL (a per-scene DA3 metre bias). Decide the source by measuring our sessions against known real dimensions.
   He expects GenRecon may need a few knobs for the right mesh ("es más rápido y es la última etapa"); after that the work
   moves to fronts other than the cloud.
+- AFTER DECEMBER, IF THE PROJECT PASSES (USER 2026-11-11: "luego de diciembre, si pasa el proyecto nos centramos en
+  mejorar la comprensión de la escena mucho mejor" — the VLM "está muy básico … hemos puesto todos nuestros
+  esfuerzos en la geometría … ninguno era atacable si la geometría no estaba correcta"): SCENE UNDERSTANDING. SAM 3.1
+  stays the recogniser (he agreed 2026-11-11: no 3D-native model replaces it — they learned from a few thousand
+  rooms and every one with public weights is CC-BY-NC: SpaCeFormer, Locate 3D / 3D-JEPA, SpatialLM). The work: a 3D
+  relations layer over the segmented cloud, the VLM proposing and the geometry measuring (support = contact +
+  vertical order + centre of mass inside the support polygon; attached to wall / ceiling / floor; containment;
+  clearances; material `vlm_proposed`), feeding the spatial chat; and a much better VLM stage. Optional witness:
+  SpaCeFormer vs SAM3 on pccr 3108 (non-commercial licence).
 - GENRECON INVENTS FLOOR-LEVEL SURFACE (USER 2026-11-09: "tiene eso que no sé qué es ahí abajo … en la nube ahí no hay
   nada" / "dejalo anotado, lo vemos después"). Measured on zaragoza's genrecon_photo (10 points per voxel, 5 mm cloud):
   36.5 % of the mesh area (423 of 1160 m²) has no cloud point within one GenRecon voxel (11.56 cm) — 79 m² at
