@@ -261,7 +261,11 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   *"si termina en mayor cobertura de la buena claro que interesa"* — measure by keyframe type / cube / region when
   the queue finishes, §4 A6).
 - An evaluation against laser ground truth (ScanNet++ / ETH3D) for the IN3 and a later paper: proposed 2026-11-08,
-  not ordered.
+  not ordered. USER 2026-11-11: *"más adelante lo contrastaremos contra los estándares incluso contra líderes
+  profesionales"* — later, on his word. His verdict on the whole: classical photogrammetry and frontier
+  feed-forward models living together, photogrammetric quality from sub-megapixel frames; the viewer *"una pc común
+  en un navegador común puede navegar en una nube masiva de 114 millones de puntos con total fluidez y la carga
+  inicial es instantánea"*.
 - `docs/`: ARCHITECTURE.md and ROADMAP.md are out of date — update or delete on his word. His own documents
   (SCANNING_GUIDE, FUTURE_VISION, COVERAGE_STRATEGY, BIM_INTEGRATION_PLAN, the ADRs 001 / 002, FIREFOX_CONFIG, the
   phase reports signed "Ingerop IN3 Session IV") are his to keep or drop.
