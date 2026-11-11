@@ -3929,13 +3929,17 @@ class VoxelSetsNumpy:
 
 
 def _space_dedupe(instances: list, sets, xyz_display: np.ndarray, cfg: Optional[dict], dup_thr: float,
-                  mutual: bool, policy, decision, absorbed_into: dict, dedupe_decisions: list) -> list:
+                  mutual: bool, policy, decision, absorbed_into: dict, dedupe_decisions: list, *,
+                  support_only: bool) -> list:
     """The same-SPACE dedupe (docs/plan_determinismo.md point 104): every pair of instances, largest
     first, merged when the keyframes that saw both judge their mutual voxel share above ``dup_thr`` by the
     user's rule. ``sets``: the instances' voxel sets (:class:`VoxelSetsNumpy` or the device's
     ``dedupe_torch.VoxelSetsTorch`` — the same integers either way). Returns the surviving instances
     (``instances`` mutated: the survivor of a merge takes the union of the indices); the decisions and
-    the absorptions are recorded as before."""
+    the absorptions are recorded as before. ``support_only`` (segmentation.merge_support_only, USER
+    2026-11-11: "no quiero hacer una pasada para fusionar objetos, solo el piso … porque a veces une dos
+    objetos que están muy alejados"): a pair merges only when the survivor (the larger) is a SUPPORT
+    surface (autoprompt.support_surfaces) — every other object stays as SAM3 gave it, declared."""
     error_factor, confidence, min_judges = decision
     absorbed = set()
     # USER 2026-10-15 ("solo debe fusionar lo que es de la parte de apoyo … el resto de
@@ -3954,6 +3958,16 @@ def _space_dedupe(instances: list, sets, xyz_display: np.ndarray, cfg: Optional[
                 continue
             share_i = inter / sets.n(i)
             share_j = inter / sets.n(j)
+            if support_only and not _is_support_label(instances[i].get("label"), policy):
+                dedupe_decisions.append({
+                    "kind": "space_dedupe", "instance_ids": [
+                        int(instances[i].get("instance_id", instances[i]["id"])),
+                        int(instances[j].get("instance_id", instances[j]["id"]))],
+                    "share": round(float(share_j), 3), "share_other": round(float(share_i), 3),
+                    "merged": False,
+                    "reason": (f"'{instances[i].get('label')}' is not a support surface — only the floor "
+                               f"merges (segmentation.merge_support_only, USER 2026-11-11)")})
+                continue
             if not _cross_label_merge_allowed(instances[i].get("label"), instances[j].get("label"), policy,
                                               mutual=bool(mutual)):
                 dedupe_decisions.append({
@@ -4037,6 +4051,13 @@ def _label_head(label: Optional[str]) -> str:
     from segmentation.autoprompt.scene_understanding import _head_noun
     text = str(label or "").replace("_", " ").strip().lower()
     return _fold_word(_head_noun(text)) if text else ""
+
+
+def _is_support_label(label: Optional[str], policy) -> bool:
+    """The label's head noun is one of the SUPPORT surfaces (autoprompt.support_surfaces: floor, ground,
+    platform …). The legacy policy (no autoprompt section) names no support surface: nothing is one."""
+    support = getattr(policy, "support", None)
+    return support is not None and _label_head(label) in support
 
 
 def _cross_label_merge_allowed(survivor_label: Optional[str], other_label: Optional[str], policy,
@@ -4945,6 +4966,11 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
     # ── Instance post-processing config ────────────────────────────────
     _dd = (cfg.get("segmentation", {}) or {})
     _merge_on = bool(_dd.get("merge_duplicates", False))
+    if "merge_support_only" not in _dd:
+        raise KeyError("config.yaml is missing 'segmentation.merge_support_only' (USER 2026-11-11: only the "
+                       "floor merges)")
+    _support_only = bool(_dd["merge_support_only"])
+    _policy = _merge_policy_of(cfg)
 
     # ── Phase 3: Cross-category Re-ID — merge instances with high 3D overlap ──
     # If VLM produced synonyms (e.g., "chair" + "wooden chair"), SAM3 may have
@@ -4985,6 +5011,9 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
                 overlap_ratio = intersection / min(len(set_i), len(set_j))
                 if _mutual_idx:
                     overlap_ratio = intersection / max(len(set_i), len(set_j))
+                _surv = instances[i] if len(set_i) >= len(set_j) else instances[j]
+                if _support_only and not _is_support_label(_surv.get("label"), _policy):
+                    continue                    # only the floor merges (USER 2026-11-11)
 
                 if overlap_ratio >= merge_threshold:
                     # Merge: smaller into larger
@@ -5052,8 +5081,9 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
         from reconstruction.surface_fit.hole_audit import evidence_device
         from segmentation.dedupe_torch import VoxelSetsTorch
         _sets = VoxelSetsTorch(instances, xyz_display, frame_arr, _vox, evidence_device())
-        instances = _space_dedupe(instances, _sets, xyz_display, cfg, _dup_thr, _mutual, _merge_policy_of(cfg),
-                                  (error_factor, confidence, min_judges), absorbed_into, dedupe_decisions)
+        instances = _space_dedupe(instances, _sets, xyz_display, cfg, _dup_thr, _mutual, _policy,
+                                  (error_factor, confidence, min_judges), absorbed_into, dedupe_decisions,
+                                  support_only=_support_only)
     decisions["space_dedupe"] = dedupe_decisions
 
     # ── Same-label fragment consolidation ──────────────────────────────

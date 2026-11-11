@@ -42,12 +42,13 @@ def _scene(seed=0):
     return instances, xyz, frame
 
 
-def _run(backend_sets, instances, xyz, frame):
+def _run(backend_sets, instances, xyz, frame, support_only=False):
     inst = copy.deepcopy(instances)
     sets = backend_sets(inst)
     absorbed_into, decisions = {}, []
     policy = SimpleNamespace(support={"floor", "ground"})
-    out = SP._space_dedupe(inst, sets, xyz, {"segmentation": {}}, 0.5, True, policy, DECISION, absorbed_into, decisions)
+    out = SP._space_dedupe(inst, sets, xyz, {"segmentation": {}}, 0.5, True, policy, DECISION, absorbed_into, decisions,
+                           support_only=support_only)
     return out, absorbed_into, decisions
 
 
@@ -65,6 +66,30 @@ def test_space_dedupe_on_the_device_takes_the_numpy_decisions(monkeypatch):
         for da, db in zip(a[2], b[2]):
             assert da == db, (da, db)
         assert any(d["merged"] for d in a[2])             # the floor's duplicate and the desk's copy merge
+
+
+def test_only_the_floor_merges_when_merges_are_support_only(monkeypatch):
+    """USER 2026-11-11 ("no quiero hacer una pasada para fusionar objetos, solo el piso … a veces une dos
+    objetos que están muy alejados" / "lo que dije que se evitara es después de sam3 fusionar lo
+    segmentado"): with segmentation.merge_support_only the floor and its duplicate under another name
+    still merge; the desk and its drift copy stay two, the pair declared with the reason."""
+    monkeypatch.setattr(SP, "_compute_obb", lambda pts, cfg=None, **k: {"stub": int(len(pts))})
+    instances, xyz, frame = _scene(0)
+    # the 'ground' instance made the floor seen again: the floor's own points, 1 mm apart
+    fl = np.asarray(instances[0]["globalIndices"])
+    gr = np.asarray(instances[1]["globalIndices"])
+    rng = np.random.default_rng(5)
+    xyz = xyz.copy()
+    xyz[gr] = xyz[fl[:len(gr)]] + rng.normal(0, 0.001, (len(gr), 3))
+    sets = lambda inst: SP.VoxelSetsNumpy(inst, xyz, frame, 0.05)  # noqa: E731
+    out, absorbed_into, decisions = _run(sets, instances, xyz, frame, support_only=True)
+    assert sorted(i["label"] for i in out) == ["desk", "desk", "floor", "sign", "wall"]
+    assert [v["into_label"] for v in absorbed_into.values()] == ["floor"]
+    desk = [d for d in decisions if set(d["instance_ids"]) == {3, 4}]
+    assert desk and not desk[0]["merged"] and "only the floor merges" in desk[0]["reason"]
+    # without the rule the desk's copy merges too (the general path, unchanged)
+    out_all, _, _ = _run(sets, instances, xyz, frame, support_only=False)
+    assert sorted(i["label"] for i in out_all) == ["desk", "floor", "sign", "wall"]
 
 
 def test_voxel_sets_intersections_and_judges_equal():

@@ -298,6 +298,13 @@ segmentation:
                               # wall answers yes — the absorber's envelope then keeps growing
                               # (largest-first cascade) and 147 instances collapsed to 3-4.
                               # dedupe_mutual below asks the question that means IDENTITY.
+  merge_support_only: true    # USER 2026-11-11 ("no quiero hacer una pasada para fusionar objetos, solo el
+                              # piso eso sí, pero nada más, porque a veces une dos objetos que están muy
+                              # alejados"): the duplicate merges (the index overlap and the space dedupe)
+                              # take place only when the survivor is a SUPPORT surface
+                              # (autoprompt.support_surfaces: the floor and its kin); every other object
+                              # stays as SAM3 gave it — the same object named twice by the VLM stays twice.
+                              # The fragment consolidation was already support-only (USER 2026-10-15).
   dedupe_mutual: true         # the intersection must be dedupe_overlap of BOTH instances, not
                               # just of the smaller one. Measured on pccr 2026-09-14 over all
                               # 2,926 instance pairs: at 0.5 the mutual test collapses 5 pairs
