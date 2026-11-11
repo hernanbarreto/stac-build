@@ -205,7 +205,16 @@ def _vlm_round(pipe: WorkerPipe, session_path: Path, config: dict, k: int):
     output/seg_rounds.json for the SAM3 stage that follows."""
     from intake.run_config import load_run_config, run_config_path
     from semantic.service import job_engine
-    from segmentation.autoprompt.rounds import run_round
+    from segmentation.autoprompt.rounds import bound_full_round, run_round
+    # the SAM3 prompt bound already full: the round's answer is known (no room for a new name) —
+    # no engine, no VLM pass (USER 2026-11-11: "si ya se alcanzó el total en la primera ronda ya
+    # no entre en la ronda 2 y nos ahorramos ese paso")
+    full = bound_full_round(session_path / "output", config, k)
+    if full is not None:
+        pipe.send_log(f"[rounds] round {k} not run: {full['skipped']}")
+        pipe.send_progress(100, f"Round {k}: not run — the SAM3 prompt bound is already full",
+                           stage="vlm")
+        return
     frozen, sha = load_run_config(session_path)
     if (frozen.get("semantic") or {}) != (config.get("semantic") or {}):
         raise RuntimeError(

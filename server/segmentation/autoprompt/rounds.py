@@ -15,6 +15,11 @@ Round 1 is the VLM stage and the SAM3 stage as always. Round k >= 2 (pipeline_ma
 The loop ends when a round names nothing new, or when autoprompt.max_sam3_prompts is reached (every
 round that goes on adds at least one prompt, so that bound also ends it). The masks are then
 projected on the cloud once.
+
+A round whose bound is ALREADY full when it starts (:func:`bound_full_round`) does not run the VLM at
+all (USER 2026-11-11: "si ya se alcanzó el total en la primera ronda ya no entre en la ronda 2 y nos
+ahorramos ese paso"): with no room left every name it found would be recorded "not prompted" — pccr
+2026-08-24 reached 150 prompts in round 1 and its round 2 still showed the VLM 2765 keyframes.
 """
 from __future__ import annotations
 
@@ -235,6 +240,26 @@ def select_fresh(counts: Counter, have: set, policy) -> tuple:
         fkeys.add(key)
         fresh.append(name)
     return fresh, single_witness, generic
+
+
+def bound_full_round(output_dir, config: dict, k: int) -> Optional[dict]:
+    """Round ``k``'s record when ``autoprompt.max_sam3_prompts`` is already full — every prompt SAM3
+    has been given (:func:`tried_prompts`, the count :func:`run_round` takes its room from) reaches
+    the bound — written to output/seg_rounds.json with no new prompt; None when there is room and the
+    round must run. No engine is started for a full bound: the round's answer is known."""
+    from segmentation.autoprompt.vlm_sampling import load_max_sam3_prompts
+    out = Path(output_dir)
+    existing = tried_prompts(out, k)
+    bound = int(load_max_sam3_prompts(config))
+    if len(existing) < bound:
+        return None
+    rec = {"round": int(k), "new_prompts": [], "fates": {}, "n_prompts_before": len(existing),
+           "skipped": (f"autoprompt.max_sam3_prompts ({bound}) already reached by the "
+                       f"{len(existing)} prompt(s) SAM3 has been given — no room for a new name, "
+                       f"the VLM is not run (USER 2026-11-11)"),
+           "seconds": 0.0}
+    _save_round(out, rec)
+    return rec
 
 
 def run_round(session_dir, config: dict, k: int, *, log: Callable[[str], None] = print,
