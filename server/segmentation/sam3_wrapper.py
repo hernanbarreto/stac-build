@@ -567,6 +567,12 @@ class SAM3Wrapper:
                 # validated dtype (recorded, not changed).
                 numerics = repro.enable_deterministic_torch(SAM3_DETERMINISTIC_SEED)
                 self._concept_group, self._keep_frame_outputs = concept_group_config(scfg)
+                # the planning metadata's copy (segmentation/sam3_fast.py, USER 2026-11-11)
+                if "planning_copy" not in scfg:
+                    raise SAM3ConfigError("models.segmentation.planning_copy is missing from the "
+                                          "configuration (segmentation/sam3_fast.py)")
+                from segmentation.sam3_fast import install_planning_copy
+                self._planning_copy = install_planning_copy(str(scfg["planning_copy"]))
                 torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
                 self.model_record = {
                     "version": version, "checkpoint": ckpt_rec, "device": "cuda",
@@ -576,6 +582,7 @@ class SAM3Wrapper:
                     "config_source": self.config_source,
                     "concept_group": self._concept_group,
                     "keep_frame_outputs": self._keep_frame_outputs,
+                    "planning_copy": self._planning_copy,
                 }
                 logger.info(f"SAM {version} loaded on GPU (bfloat16 autocast active; TF32 off, "
                             f"deterministic algorithms strict, seed {SAM3_DETERMINISTIC_SEED}; "

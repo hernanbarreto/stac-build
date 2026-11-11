@@ -61,7 +61,8 @@ def stubbed_sam3(monkeypatch, tmp_path):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     ckpt = tmp_path / "sam3.1_multiplex.pt"
     ckpt.write_bytes(b"weights")
-    scfg = dict(CONFIG["models"]["segmentation"], checkpoint_path=str(ckpt))
+    # the stubbed vendor has no planning metadata to copy (segmentation/sam3_fast.py: tests/test_sam3_fast.py)
+    scfg = dict(CONFIG["models"]["segmentation"], checkpoint_path=str(ckpt), planning_copy="deep")
     monkeypatch.setattr(w, "cfg", {"models": {"segmentation": scfg}})
     return w, built, ckpt
 

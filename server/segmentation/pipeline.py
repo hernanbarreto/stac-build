@@ -1077,6 +1077,338 @@ def _save_category(output_dir, cat_global, categories_so_far, labels_so_far, cfg
     return meta
 
 
+def _sam3_category_masks(category, batches, frames_dir, frame_files, sam3,
+                         batch_size, batch_overlap, iou_threshold,
+                         mask_dedupe_iou, boxes_by_pos=None, *, cfg, decisions,
+                         on_batch=None, log_vram=None):
+    """Process all batches for a single category. A CUDA out-of-memory is continued,
+    never a failure (USER 2026-10-09) — only a session that cannot complete even one
+    frame on the card raises (SAM3OutOfMemory); any other SAM3 error raises.
+    boxes_by_pos: {category-local frame position: [xywh boxes]} from the
+    Phase 1 auto-prompter — seeded into SAM3 alongside the text prompt.
+    Module-level (USER 2026-11-11: SAM3 in two processes): ``decisions`` receives this
+    prompt's identity decisions, ``on_batch(batch_idx, n_batches, prompt)`` the progress,
+    ``log_vram(label)`` the card's memory; the rest is the closure it was."""
+    from segmentation.sam3_wrapper import (SAM3OutOfMemory, SAM3PropagationStopped,
+                                           STOP_OUT_OF_MEMORY)
+    batch_step = batch_size - batch_overlap
+    cat_masks = {}
+    next_global_id = 1
+    prev_batch_masks = None
+    prev_overlap_start = None
+    prev_end = None
+    # where the frames already KEPT end (a batch with no masks included) — the
+    # out-of-memory continuation measures its progress against it
+    frontier = None
+    prompt_retried = set()           # batches re-run once after an OOM before any frame
+    # the work list grows by a CONTINUATION batch when the propagation stops midway
+    # (SAM3PropagationStopped): the frames it completed are kept and the rest of the
+    # batch is propagated again from (stop − overlap), linked by the same overlap rule
+    # as any two batches. Two causes: the vendor tracker's own stop (deterministic,
+    # measured on pccr 'pipe', USER 2026-10-08 point 92) and CUDA running out of memory
+    # (USER 2026-10-09: "no debe nunca fallar por colapso del GPU" — pccr's 'tile', one
+    # session grew 8 → 77.7 GB with every floor tile an object). The out-of-memory stop
+    # depends on the card's memory: the same card with the GPU exclusive stops at the
+    # same frame, and every continuation is declared in the census (oom_continuation)
+    work = list(batches)
+    wi = 0
+    vendor_stopped = False     # after the vendor's stop: frames handed back one by one
+    while wi < len(work):
+        batch_idx = wi
+        b_start, b_end = work[wi]
+        wi += 1
+        batch_frame_files = frame_files[b_start:b_end]
+        batch_len = len(batch_frame_files)
+
+        print(f"\n[SegPipeline] ── Batch {batch_idx}/{len(batches)-1}: "
+              f"frames {b_start}–{b_end-1} ({batch_len} frames) ──")
+        if on_batch:
+            on_batch(batch_idx, len(batches), category)
+        if log_vram:
+            log_vram(f"  batch {batch_idx} BEFORE")
+
+        batch_dir, index_mapping = _prepare_batch_dir(frames_dir, batch_frame_files, b_start)
+
+        # per-instance box seeds for this batch (local index space)
+        batch_boxes = None
+        if boxes_by_pos:
+            batch_boxes = {pos - b_start: bx for pos, bx in boxes_by_pos.items()
+                           if b_start <= pos < b_end and bx}
+            if batch_boxes:
+                print(f"[SegPipeline]   box seeds on {len(batch_boxes)} frame(s)")
+
+        try:
+            try:
+                raw_results = sam3.process_batch(
+                    str(batch_dir), category, index_mapping,
+                    boxes_by_local=batch_boxes or None,
+                    **({"per_frame_output": True} if vendor_stopped else {}),
+                )
+            except SAM3PropagationStopped as stop:
+                n_done = int(stop.frames_done)
+                if getattr(stop, "cause", None) == STOP_OUT_OF_MEMORY:
+                    # CUDA OUT OF MEMORY — continued, never a failure (USER
+                    # 2026-10-09); the plan and its progress guarantee are
+                    # _plan_oom_continuation's
+                    plan = _plan_oom_continuation(
+                        b_start, b_end, frontier, n_done, batch_overlap,
+                        getattr(stop, "phase", "propagate_in_video"),
+                        (b_start, b_end) in prompt_retried)
+                    mem = getattr(stop, "memory", None) or {}
+                    at = mem.get("at_stop") or {}
+                    after = mem.get("after_release") or {}
+                    card = {"total_mib": at.get("total_mib", after.get("total_mib")),
+                            "free_mib_at_stop": at.get("free_mib"),
+                            "free_mib_after_release": after.get("free_mib")}
+                    if plan["action"] == "fail":
+                        if stop.phase in _SAM3_PROMPT_PHASES:
+                            pos = b_start + int(getattr(stop, "prompt_frame", None) or 0)
+                            what = (f"its {stop.phase} ran out of CUDA memory twice, each "
+                                    f"time in a fresh session with the memory freed")
+                        else:
+                            pos = b_start
+                            what = ("a fresh session ran out of CUDA memory before "
+                                    "completing its first frame, with no overlap left "
+                                    "to shorten")
+                            if int(getattr(stop, "frames_propagated", 0) or 0):
+                                what += (f" (it propagated {stop.frames_propagated} "
+                                         f"frame(s) from its prompt frame "
+                                         f"{stop.prompt_frame} — box seeds — but none "
+                                         f"from its first: not a leading run a "
+                                         f"continuation can start after)")
+                        fname = frame_files[pos] if 0 <= pos < len(frame_files) else "?"
+                        raise SAM3OutOfMemory(
+                            f"SAM3 cannot complete even ONE frame of prompt "
+                            f"'{category}' on this card at category frame {pos} "
+                            f"({fname}): {what}; card total {card['total_mib']} MiB, "
+                            f"free {card['free_mib_at_stop']} MiB at the stop and "
+                            f"{card['free_mib_after_release']} MiB after the release "
+                            f"— physically impossible on this card, the one "
+                            f"out-of-memory that fails the stage (USER 2026-10-09). "
+                            f"[{stop}]") from stop
+                    cont = plan["continuation"]
+                    rec = {"kind": "oom_continuation", "category": category,
+                           "phase": stop.phase,
+                           "batch": [int(b_start), int(b_end)],
+                           "frames_done": n_done,
+                           "leading_overlap": int(plan["leading_overlap"]),
+                           "progress": bool(plan["progress"]),
+                           "kept": list(plan["kept"]) if plan["kept"] else None,
+                           "continuation": [int(cont[0]), int(cont[1])] if cont else None,
+                           "overlap": plan["overlap"],
+                           "action": plan["action"],
+                           "card_memory": card}
+                    if cont and plan["overlap"] == 0 and plan["action"] != "retry_prompt":
+                        rec["seam"] = ("linked by nothing: the continuation starts at "
+                                       "the stop itself, the objects of this seam get "
+                                       "fresh ids")
+                    decisions.append(rec)
+                    mem_txt = (f"card: free {card['free_mib_at_stop']} of "
+                               f"{card['total_mib']} MiB at the stop, "
+                               f"{card['free_mib_after_release']} MiB after the release")
+                    if plan["action"] in ("retry_prompt", "reduce"):
+                        if plan["action"] == "retry_prompt":
+                            prompt_retried.add((b_start, b_end))
+                            print(f"[SegPipeline]   ⤷ CUDA out of memory in {stop.phase} "
+                                  f"(no frame propagated, {mem_txt}); the batch "
+                                  f"{b_start}–{b_end - 1} runs once more in a fresh "
+                                  f"session — declared in the census (oom_continuation)")
+                        else:
+                            print(f"[SegPipeline]   ⤷ CUDA out of memory after {n_done} "
+                                  f"frame(s), no progress past the {plan['leading_overlap']}"
+                                  f"-frame overlap ({mem_txt}); propagated again from "
+                                  f"{cont[0]} with the overlap reduced to "
+                                  f"{plan['overlap']}"
+                                  + (" — linked by nothing, fresh ids at this seam"
+                                     if plan["overlap"] == 0 else "")
+                                  + " — declared in the census (oom_continuation)")
+                        work[wi - 1] = (int(cont[0]), int(cont[1]))
+                        wi -= 1
+                        continue
+                    raw_results = stop.partial
+                    b_end = int(plan["kept"][1])
+                    if plan["action"] == "continue":
+                        work.insert(wi, (int(cont[0]), int(cont[1])))
+                        work[wi - 1] = (b_start, b_end)
+                        print(f"[SegPipeline]   ⤷ CUDA out of memory after {n_done} "
+                              f"frame(s) ({b_start}–{b_end - 1} kept, {mem_txt}); the "
+                              f"rest is propagated again from {cont[0]} (overlap "
+                              f"{plan['overlap']}) in a fresh session — the stop "
+                              f"depends on the card's memory (same card, exclusive "
+                              f"GPU = same stop); declared in the census "
+                              f"(oom_continuation)")
+                    else:
+                        print(f"[SegPipeline]   ⤷ CUDA out of memory after the batch's "
+                              f"last frame ({b_start}–{b_end - 1} all kept, {mem_txt}) "
+                              f"— declared in the census (oom_continuation)")
+                else:
+                    # THE VENDOR TRACKER'S STOP never fails the prompt (USER 2026-10-09:
+                    # "no quiero más fallas"): every continuation makes progress.
+                    #   progress past the frames already kept → the rest again from
+                    #     (stop − overlap), linked by the overlap as any two batches;
+                    #   no progress (it stopped where the previous one did) → the rest
+                    #     from the STOP frame itself in a fresh session, overlap 0 (the
+                    #     objects of that seam get fresh ids);
+                    #   not even the first frame → that ONE frame has no mask of this
+                    #     prompt, the rest from the next frame.
+                    # Each case is declared in the census (identity_decisions).
+                    vendor_stopped = True
+                    orig_end = work[wi - 1][1]
+                    stop_at = b_start + n_done
+                    if n_done == 0:
+                        raw_results = {}
+                        b_end = b_start + 1
+                        cont, ov, kind = (b_end, orig_end), 0, "vendor_stop_frame_skipped"
+                    elif frontier is not None and stop_at <= frontier:
+                        raw_results = stop.partial
+                        b_end = stop_at
+                        cont, ov, kind = (stop_at, orig_end), 0, "vendor_stop_fresh_session"
+                    else:
+                        raw_results = stop.partial
+                        b_end = stop_at
+                        ov = min(batch_overlap, n_done)
+                        cont, kind = (stop_at - ov, orig_end), "vendor_stop_continuation"
+                    work[wi - 1] = (b_start, b_end)
+                    if cont[0] < cont[1]:
+                        work.insert(wi, (int(cont[0]), int(cont[1])))
+                    decisions.append({"kind": kind, "category": category,
+                                      "batch": [int(b_start), int(orig_end)],
+                                      "frames_done": n_done, "overlap": int(ov),
+                                      "continuation": ([int(cont[0]), int(cont[1])]
+                                                       if cont[0] < cont[1] else None)})
+                    print(f"[SegPipeline]   ⤷ the vendor tracker stopped after {n_done} "
+                          f"frame(s) at frame {stop_at}"
+                          + (f" — frame {b_start} gets no mask of this prompt"
+                             if n_done == 0 else f" ({b_start}–{b_end - 1} kept)")
+                          + (f"; the rest from {cont[0]} (overlap {ov}"
+                             + (", a fresh session: new ids at this seam" if ov == 0 else "")
+                             + ")" if cont[0] < cont[1] else "")
+                          + f" — declared in the census ({kind})")
+
+            # these frames are KEPT (masks or none): the frontier moves to their end
+            frontier = b_end if frontier is None else max(frontier, b_end)
+
+            if not raw_results:
+                print(f"[SegPipeline] Batch {batch_idx}: no masks produced")
+                continue
+            
+            batch_masks = _parse_raw_masks(raw_results)
+
+            if not batch_masks:
+                print(f"[SegPipeline] Batch {batch_idx}: no valid masks after parsing")
+                continue
+
+            batch_masks, n_dup_ids = _dedupe_masks_per_frame(
+                batch_masks, mask_dedupe_iou, cfg=cfg, record=decisions)
+            if n_dup_ids:
+                print(f"[SegPipeline] Batch {batch_idx}: {n_dup_ids} object id(s) were "
+                      f"the same observation (IoU ≥ {mask_dedupe_iou:g} in the majority "
+                      f"of their shared frames, point 93) — collapsed")
+
+            if batch_idx == 0:
+                id_remap = {}
+                batch_obj_ids = set()
+                for frame_masks in batch_masks.values():
+                    batch_obj_ids.update(frame_masks.keys())
+                for local_id in sorted(batch_obj_ids):
+                    id_remap[local_id] = next_global_id
+                    next_global_id += 1
+            else:
+                overlap_start_frame = b_start
+                # the overlap ends where the PREVIOUS batch's frames end (a full batch:
+                # prev start + batch_size − 1; a batch the vendor stopped: its last frame)
+                overlap_end_frame = (prev_end - 1 if prev_end is not None
+                                     else prev_overlap_start + batch_step + batch_overlap - 1
+                                     if prev_overlap_start is not None
+                                     else b_start + batch_overlap - 1)
+
+                id_remap, next_global_id = _match_ids_iou(
+                    prev_batch_masks, batch_masks,
+                    overlap_start=overlap_start_frame,
+                    overlap_end=min(overlap_end_frame, b_end - 1),
+                    iou_threshold=iou_threshold,
+                    next_global_id=next_global_id,
+                    cfg=cfg, record=decisions,
+                )
+            
+            remapped_batch = {}
+            for orig_idx, frame_masks in batch_masks.items():
+                remapped = {}
+                for local_id, mask in frame_masks.items():
+                    global_id = id_remap[local_id]
+                    remapped[global_id] = mask
+                cat_masks[orig_idx] = {**cat_masks.get(orig_idx, {}), **remapped}
+                remapped_batch[orig_idx] = remapped
+            
+            prev_batch_masks = remapped_batch
+            prev_overlap_start = b_start
+            prev_end = b_end
+            
+            unique_objects = set()
+            for fm in batch_masks.values():
+                unique_objects.update(fm.keys())
+            print(f"[SegPipeline] Batch {batch_idx}: {len(batch_masks)} frames, "
+                  f"{len(unique_objects)} objects → remapped to {len(set(id_remap.values()))} global IDs")
+            if log_vram:
+                log_vram(f"  batch {batch_idx} AFTER")
+            
+        finally:
+            # batch_dir is memoized and reused by the next concept — see
+            # _prepare_batch_dir. Freed by _clear_batch_dirs() at the end.
+            pass
+    
+    return cat_masks
+
+
+class _CategoryFailed(RuntimeError):
+    """A prompt's SAM3 failed: ``reason`` is what its status records; the original error is the cause."""
+
+    def __init__(self, reason: str, origin: bool = False):
+        super().__init__(reason)
+        self.reason = reason
+        self.origin = origin
+
+
+def _sam3_category_result(category, fallbacks, batches, frames_dir, frame_files, sam3,
+                          batch_size, batch_overlap, iou_threshold, mask_dedupe_iou, boxes_by_pos,
+                          *, cfg, on_batch=None, log_vram=None):
+    """One prompt's masks, its identity decisions and its status extras — THE FALLBACK included
+    (USER 2026-09-30): the bare category confirmed NOTHING → its origins (the VLM's descriptions, the
+    merged names) in order, the first that finds something kept under THIS category's label. The
+    same function in the SAM3 stage's process and in a helper (segmentation/sam3_parallel.py). A
+    failure raises :class:`_CategoryFailed` with the reason the status records (point 92)."""
+    decisions: list = []
+    extras: dict = {}
+    try:
+        cat_masks = _sam3_category_masks(
+            category, batches, frames_dir, frame_files, sam3,
+            batch_size, batch_overlap, iou_threshold, mask_dedupe_iou,
+            boxes_by_pos=boxes_by_pos, cfg=cfg, decisions=decisions,
+            on_batch=on_batch, log_vram=log_vram)
+    except Exception as e:
+        raise _CategoryFailed(f"{type(e).__name__}: {e}") from e
+    if not any(len(fm) for fm in cat_masks.values()):
+        _tried = []
+        for _alt in fallbacks or []:
+            _tried.append(_alt)
+            print(f"[SegPipeline] '{category}' confirmed nothing — retrying with its origin '{_alt}'")
+            try:
+                _alt_masks = _sam3_category_masks(
+                    _alt, batches, frames_dir, frame_files, sam3,
+                    batch_size, batch_overlap, iou_threshold, mask_dedupe_iou,
+                    boxes_by_pos=boxes_by_pos, cfg=cfg, decisions=decisions,
+                    on_batch=on_batch, log_vram=log_vram)
+            except Exception as _e:
+                raise _CategoryFailed(f"origin '{_alt}': {type(_e).__name__}: {_e}", origin=True) from _e
+            if any(len(fm) for fm in _alt_masks.values()):
+                cat_masks = _alt_masks
+                extras["fallback_prompt"] = _alt
+                break
+        if _tried:
+            extras["fallbacks_tried"] = _tried
+    return cat_masks, decisions, extras
+
+
 def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List[str],
                       batch_size: int, batch_overlap: int,
                       iou_threshold: float, mask_dedupe_iou: float,
@@ -1288,283 +1620,12 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
                 break
             s += batch_step
         
-        def _process_category(category, batches, frames_dir, frame_files, sam3,
-                              batch_size, batch_overlap, iou_threshold,
-                              mask_dedupe_iou, boxes_by_pos=None):
-            """Process all batches for a single category. A CUDA out-of-memory is continued,
-            never a failure (USER 2026-10-09) — only a session that cannot complete even one
-            frame on the card raises (SAM3OutOfMemory); any other SAM3 error raises.
-            boxes_by_pos: {category-local frame position: [xywh boxes]} from the
-            Phase 1 auto-prompter — seeded into SAM3 alongside the text prompt."""
-            from segmentation.sam3_wrapper import (SAM3OutOfMemory, SAM3PropagationStopped,
-                                                   STOP_OUT_OF_MEMORY)
-            batch_step = batch_size - batch_overlap
-            cat_masks = {}
-            next_global_id = 1
-            prev_batch_masks = None
-            prev_overlap_start = None
-            prev_end = None
-            # where the frames already KEPT end (a batch with no masks included) — the
-            # out-of-memory continuation measures its progress against it
-            frontier = None
-            prompt_retried = set()           # batches re-run once after an OOM before any frame
-            # the work list grows by a CONTINUATION batch when the propagation stops midway
-            # (SAM3PropagationStopped): the frames it completed are kept and the rest of the
-            # batch is propagated again from (stop − overlap), linked by the same overlap rule
-            # as any two batches. Two causes: the vendor tracker's own stop (deterministic,
-            # measured on pccr 'pipe', USER 2026-10-08 point 92) and CUDA running out of memory
-            # (USER 2026-10-09: "no debe nunca fallar por colapso del GPU" — pccr's 'tile', one
-            # session grew 8 → 77.7 GB with every floor tile an object). The out-of-memory stop
-            # depends on the card's memory: the same card with the GPU exclusive stops at the
-            # same frame, and every continuation is declared in the census (oom_continuation)
-            work = list(batches)
-            wi = 0
-            vendor_stopped = False     # after the vendor's stop: frames handed back one by one
-            while wi < len(work):
-                batch_idx = wi
-                b_start, b_end = work[wi]
-                wi += 1
-                batch_frame_files = frame_files[b_start:b_end]
-                batch_len = len(batch_frame_files)
-
-                print(f"\n[SegPipeline] ── Batch {batch_idx}/{len(batches)-1}: "
-                      f"frames {b_start}–{b_end-1} ({batch_len} frames) ──")
-                if on_progress:
-                    batch_pct = ((cat_idx * len(batches) + batch_idx + 1) / max(len(categories) * len(batches), 1)) * 100
-                    on_progress(batch_pct, f"Batch {batch_idx+1}/{len(batches)} for '{category}'")
-                _log_vram(f"  batch {batch_idx} BEFORE")
-
-                batch_dir, index_mapping = _prepare_batch_dir(frames_dir, batch_frame_files, b_start)
-
-                # per-instance box seeds for this batch (local index space)
-                batch_boxes = None
-                if boxes_by_pos:
-                    batch_boxes = {pos - b_start: bx for pos, bx in boxes_by_pos.items()
-                                   if b_start <= pos < b_end and bx}
-                    if batch_boxes:
-                        print(f"[SegPipeline]   box seeds on {len(batch_boxes)} frame(s)")
-
-                try:
-                    try:
-                        raw_results = sam3.process_batch(
-                            str(batch_dir), category, index_mapping,
-                            boxes_by_local=batch_boxes or None,
-                            **({"per_frame_output": True} if vendor_stopped else {}),
-                        )
-                    except SAM3PropagationStopped as stop:
-                        n_done = int(stop.frames_done)
-                        if getattr(stop, "cause", None) == STOP_OUT_OF_MEMORY:
-                            # CUDA OUT OF MEMORY — continued, never a failure (USER
-                            # 2026-10-09); the plan and its progress guarantee are
-                            # _plan_oom_continuation's
-                            plan = _plan_oom_continuation(
-                                b_start, b_end, frontier, n_done, batch_overlap,
-                                getattr(stop, "phase", "propagate_in_video"),
-                                (b_start, b_end) in prompt_retried)
-                            mem = getattr(stop, "memory", None) or {}
-                            at = mem.get("at_stop") or {}
-                            after = mem.get("after_release") or {}
-                            card = {"total_mib": at.get("total_mib", after.get("total_mib")),
-                                    "free_mib_at_stop": at.get("free_mib"),
-                                    "free_mib_after_release": after.get("free_mib")}
-                            if plan["action"] == "fail":
-                                if stop.phase in _SAM3_PROMPT_PHASES:
-                                    pos = b_start + int(getattr(stop, "prompt_frame", None) or 0)
-                                    what = (f"its {stop.phase} ran out of CUDA memory twice, each "
-                                            f"time in a fresh session with the memory freed")
-                                else:
-                                    pos = b_start
-                                    what = ("a fresh session ran out of CUDA memory before "
-                                            "completing its first frame, with no overlap left "
-                                            "to shorten")
-                                    if int(getattr(stop, "frames_propagated", 0) or 0):
-                                        what += (f" (it propagated {stop.frames_propagated} "
-                                                 f"frame(s) from its prompt frame "
-                                                 f"{stop.prompt_frame} — box seeds — but none "
-                                                 f"from its first: not a leading run a "
-                                                 f"continuation can start after)")
-                                fname = frame_files[pos] if 0 <= pos < len(frame_files) else "?"
-                                raise SAM3OutOfMemory(
-                                    f"SAM3 cannot complete even ONE frame of prompt "
-                                    f"'{category}' on this card at category frame {pos} "
-                                    f"({fname}): {what}; card total {card['total_mib']} MiB, "
-                                    f"free {card['free_mib_at_stop']} MiB at the stop and "
-                                    f"{card['free_mib_after_release']} MiB after the release "
-                                    f"— physically impossible on this card, the one "
-                                    f"out-of-memory that fails the stage (USER 2026-10-09). "
-                                    f"[{stop}]") from stop
-                            cont = plan["continuation"]
-                            rec = {"kind": "oom_continuation", "category": category,
-                                   "phase": stop.phase,
-                                   "batch": [int(b_start), int(b_end)],
-                                   "frames_done": n_done,
-                                   "leading_overlap": int(plan["leading_overlap"]),
-                                   "progress": bool(plan["progress"]),
-                                   "kept": list(plan["kept"]) if plan["kept"] else None,
-                                   "continuation": [int(cont[0]), int(cont[1])] if cont else None,
-                                   "overlap": plan["overlap"],
-                                   "action": plan["action"],
-                                   "card_memory": card}
-                            if cont and plan["overlap"] == 0 and plan["action"] != "retry_prompt":
-                                rec["seam"] = ("linked by nothing: the continuation starts at "
-                                               "the stop itself, the objects of this seam get "
-                                               "fresh ids")
-                            decisions.append(rec)
-                            mem_txt = (f"card: free {card['free_mib_at_stop']} of "
-                                       f"{card['total_mib']} MiB at the stop, "
-                                       f"{card['free_mib_after_release']} MiB after the release")
-                            if plan["action"] in ("retry_prompt", "reduce"):
-                                if plan["action"] == "retry_prompt":
-                                    prompt_retried.add((b_start, b_end))
-                                    print(f"[SegPipeline]   ⤷ CUDA out of memory in {stop.phase} "
-                                          f"(no frame propagated, {mem_txt}); the batch "
-                                          f"{b_start}–{b_end - 1} runs once more in a fresh "
-                                          f"session — declared in the census (oom_continuation)")
-                                else:
-                                    print(f"[SegPipeline]   ⤷ CUDA out of memory after {n_done} "
-                                          f"frame(s), no progress past the {plan['leading_overlap']}"
-                                          f"-frame overlap ({mem_txt}); propagated again from "
-                                          f"{cont[0]} with the overlap reduced to "
-                                          f"{plan['overlap']}"
-                                          + (" — linked by nothing, fresh ids at this seam"
-                                             if plan["overlap"] == 0 else "")
-                                          + " — declared in the census (oom_continuation)")
-                                work[wi - 1] = (int(cont[0]), int(cont[1]))
-                                wi -= 1
-                                continue
-                            raw_results = stop.partial
-                            b_end = int(plan["kept"][1])
-                            if plan["action"] == "continue":
-                                work.insert(wi, (int(cont[0]), int(cont[1])))
-                                work[wi - 1] = (b_start, b_end)
-                                print(f"[SegPipeline]   ⤷ CUDA out of memory after {n_done} "
-                                      f"frame(s) ({b_start}–{b_end - 1} kept, {mem_txt}); the "
-                                      f"rest is propagated again from {cont[0]} (overlap "
-                                      f"{plan['overlap']}) in a fresh session — the stop "
-                                      f"depends on the card's memory (same card, exclusive "
-                                      f"GPU = same stop); declared in the census "
-                                      f"(oom_continuation)")
-                            else:
-                                print(f"[SegPipeline]   ⤷ CUDA out of memory after the batch's "
-                                      f"last frame ({b_start}–{b_end - 1} all kept, {mem_txt}) "
-                                      f"— declared in the census (oom_continuation)")
-                        else:
-                            # THE VENDOR TRACKER'S STOP never fails the prompt (USER 2026-10-09:
-                            # "no quiero más fallas"): every continuation makes progress.
-                            #   progress past the frames already kept → the rest again from
-                            #     (stop − overlap), linked by the overlap as any two batches;
-                            #   no progress (it stopped where the previous one did) → the rest
-                            #     from the STOP frame itself in a fresh session, overlap 0 (the
-                            #     objects of that seam get fresh ids);
-                            #   not even the first frame → that ONE frame has no mask of this
-                            #     prompt, the rest from the next frame.
-                            # Each case is declared in the census (identity_decisions).
-                            vendor_stopped = True
-                            orig_end = work[wi - 1][1]
-                            stop_at = b_start + n_done
-                            if n_done == 0:
-                                raw_results = {}
-                                b_end = b_start + 1
-                                cont, ov, kind = (b_end, orig_end), 0, "vendor_stop_frame_skipped"
-                            elif frontier is not None and stop_at <= frontier:
-                                raw_results = stop.partial
-                                b_end = stop_at
-                                cont, ov, kind = (stop_at, orig_end), 0, "vendor_stop_fresh_session"
-                            else:
-                                raw_results = stop.partial
-                                b_end = stop_at
-                                ov = min(batch_overlap, n_done)
-                                cont, kind = (stop_at - ov, orig_end), "vendor_stop_continuation"
-                            work[wi - 1] = (b_start, b_end)
-                            if cont[0] < cont[1]:
-                                work.insert(wi, (int(cont[0]), int(cont[1])))
-                            decisions.append({"kind": kind, "category": category,
-                                              "batch": [int(b_start), int(orig_end)],
-                                              "frames_done": n_done, "overlap": int(ov),
-                                              "continuation": ([int(cont[0]), int(cont[1])]
-                                                               if cont[0] < cont[1] else None)})
-                            print(f"[SegPipeline]   ⤷ the vendor tracker stopped after {n_done} "
-                                  f"frame(s) at frame {stop_at}"
-                                  + (f" — frame {b_start} gets no mask of this prompt"
-                                     if n_done == 0 else f" ({b_start}–{b_end - 1} kept)")
-                                  + (f"; the rest from {cont[0]} (overlap {ov}"
-                                     + (", a fresh session: new ids at this seam" if ov == 0 else "")
-                                     + ")" if cont[0] < cont[1] else "")
-                                  + f" — declared in the census ({kind})")
-
-                    # these frames are KEPT (masks or none): the frontier moves to their end
-                    frontier = b_end if frontier is None else max(frontier, b_end)
-
-                    if not raw_results:
-                        print(f"[SegPipeline] Batch {batch_idx}: no masks produced")
-                        continue
-                    
-                    batch_masks = _parse_raw_masks(raw_results)
-
-                    if not batch_masks:
-                        print(f"[SegPipeline] Batch {batch_idx}: no valid masks after parsing")
-                        continue
-
-                    batch_masks, n_dup_ids = _dedupe_masks_per_frame(
-                        batch_masks, mask_dedupe_iou, cfg=cfg, record=decisions)
-                    if n_dup_ids:
-                        print(f"[SegPipeline] Batch {batch_idx}: {n_dup_ids} object id(s) were "
-                              f"the same observation (IoU ≥ {mask_dedupe_iou:g} in the majority "
-                              f"of their shared frames, point 93) — collapsed")
-
-                    if batch_idx == 0:
-                        id_remap = {}
-                        batch_obj_ids = set()
-                        for frame_masks in batch_masks.values():
-                            batch_obj_ids.update(frame_masks.keys())
-                        for local_id in sorted(batch_obj_ids):
-                            id_remap[local_id] = next_global_id
-                            next_global_id += 1
-                    else:
-                        overlap_start_frame = b_start
-                        # the overlap ends where the PREVIOUS batch's frames end (a full batch:
-                        # prev start + batch_size − 1; a batch the vendor stopped: its last frame)
-                        overlap_end_frame = (prev_end - 1 if prev_end is not None
-                                             else prev_overlap_start + batch_step + batch_overlap - 1
-                                             if prev_overlap_start is not None
-                                             else b_start + batch_overlap - 1)
-
-                        id_remap, next_global_id = _match_ids_iou(
-                            prev_batch_masks, batch_masks,
-                            overlap_start=overlap_start_frame,
-                            overlap_end=min(overlap_end_frame, b_end - 1),
-                            iou_threshold=iou_threshold,
-                            next_global_id=next_global_id,
-                            cfg=cfg, record=decisions,
-                        )
-                    
-                    remapped_batch = {}
-                    for orig_idx, frame_masks in batch_masks.items():
-                        remapped = {}
-                        for local_id, mask in frame_masks.items():
-                            global_id = id_remap[local_id]
-                            remapped[global_id] = mask
-                        cat_masks[orig_idx] = {**cat_masks.get(orig_idx, {}), **remapped}
-                        remapped_batch[orig_idx] = remapped
-                    
-                    prev_batch_masks = remapped_batch
-                    prev_overlap_start = b_start
-                    prev_end = b_end
-                    
-                    unique_objects = set()
-                    for fm in batch_masks.values():
-                        unique_objects.update(fm.keys())
-                    print(f"[SegPipeline] Batch {batch_idx}: {len(batch_masks)} frames, "
-                          f"{len(unique_objects)} objects → remapped to {len(set(id_remap.values()))} global IDs")
-                    _log_vram(f"  batch {batch_idx} AFTER")
-                    
-                finally:
-                    # batch_dir is memoized and reused by the next concept — see
-                    # _prepare_batch_dir. Freed by _clear_batch_dirs() at the end.
-                    pass
-            
-            return cat_masks
         
+        def _on_batch(batch_idx, n_batches, prompt, _ci=cat_idx):
+            if on_progress:
+                batch_pct = ((_ci * n_batches + batch_idx + 1) / max(len(categories) * n_batches, 1)) * 100
+                on_progress(batch_pct, f"Batch {batch_idx+1}/{n_batches} for '{prompt}'")
+
         # ── Run the category. ANY SAM3 error FAILS THE RUN (docs/plan_determinismo.md
         # point 92, 2026-10-08): `sam3_wrapper.process_batch` raises SAM3RunError and it
         # propagates — no "failed twice, skipping", no prompt recorded as failed while the
@@ -1572,7 +1633,7 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         # discarded by the caller, the previous store stays as it was). A SAM3ConfigError
         # (models.segmentation.sam3_thresholds, a vendor rename) is the same: the prompt's
         # status names it before the error leaves. TWO STOPS ARE NOT ERRORS and are
-        # continued inside _process_category, every frame kept, every object linked by the
+        # continued inside _sam3_category_masks, every frame kept, every object linked by the
         # overlap rule, nothing skipped or dropped: the vendor tracker's midway stop (USER
         # 2026-10-08) and CUDA running out of memory (USER 2026-10-09: "no debe nunca fallar
         # por colapso del GPU" — it replaces point 92's "an OOM fails, no retry"). The only
@@ -1580,51 +1641,24 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
         # even one frame on the card.
         cat_masks = {}
         t_cat = _time.time()
-        decisions: list = []                 # the identity decisions of this prompt (point 93)
         cat_status = {"status": "ran"}
-        # the concepts that run next over the SAME frames (every concept on every frame, no box
-        # seeds): SAM3 advances them together with this one, the vision backbone computed once
-        # for all (segmentation/sam3_group.py) — each concept's masks are the ones it gets alone
-        sam3.set_upcoming(categories[cat_idx + 1:] if not frame_map and not boxes_map else [])
         try:
-            cat_masks = _process_category(
-                category, cat_batches, frames_dir, cat_frame_files, sam3,
-                batch_size, batch_overlap, iou_threshold, mask_dedupe_iou,
-                boxes_by_pos=cat_boxes
-            )
-        except SAM3ConfigError as e:
-            status[category] = {"status": "failed", "reason": f"SAM3ConfigError: {e}"}
-            raise
-        except Exception as e:
-            status[category] = {"status": "failed", "reason": f"{type(e).__name__}: {e}"}
-            print(f"[SegPipeline] ⛔ Category '{category}' failed ({type(e).__name__}: {e}) — "
-                  f"the run fails: no partial segmentation (point 92)")
-            raise
-        
-        # THE FALLBACK (USER 2026-09-30): the bare category confirmed NOTHING → SAM3
-        # lacks detail; try its origins (the VLM's descriptions, the merged names) in
-        # order, keep the first that finds something — under THIS category's label.
-        # An origin that errors fails the run like the category itself (point 92).
-        if not any(len(fm) for fm in cat_masks.values()):
-            _tried = []
-            for _alt in (fallback_prompts or {}).get(category, []) or []:
-                _tried.append(_alt)
-                print(f"[SegPipeline] '{category}' confirmed nothing — retrying with its origin '{_alt}'")
-                try:
-                    _alt_masks = _process_category(
-                        _alt, cat_batches, frames_dir, cat_frame_files, sam3,
-                        batch_size, batch_overlap, iou_threshold, mask_dedupe_iou,
-                        boxes_by_pos=cat_boxes)
-                except Exception as _e:
-                    status[category] = {"status": "failed",
-                                        "reason": f"origin '{_alt}': {type(_e).__name__}: {_e}"}
-                    raise
-                if any(len(fm) for fm in _alt_masks.values()):
-                    cat_masks = _alt_masks
-                    cat_status["fallback_prompt"] = _alt
-                    break
-            if _tried:
-                cat_status["fallbacks_tried"] = _tried
+            # the concepts that run next over the SAME frames (every concept on every frame, no
+            # box seeds): SAM3 advances them together with this one, the vision backbone computed
+            # once for all (segmentation/sam3_group.py) — each concept's masks are the ones it
+            # gets alone
+            sam3.set_upcoming(categories[cat_idx + 1:] if not frame_map and not boxes_map else [])
+            cat_masks, decisions, _extras = _sam3_category_result(
+                category, (fallback_prompts or {}).get(category, []) or [], cat_batches, frames_dir,
+                cat_frame_files, sam3, batch_size, batch_overlap, iou_threshold, mask_dedupe_iou,
+                cat_boxes, cfg=cfg, on_batch=_on_batch, log_vram=_log_vram)
+        except _CategoryFailed as e:
+            status[category] = {"status": "failed", "reason": e.reason}
+            if not e.origin and not isinstance(e.__cause__, SAM3ConfigError):
+                print(f"[SegPipeline] ⛔ Category '{category}' failed ({e.reason}) — "
+                      f"the run fails: no partial segmentation (point 92)")
+            raise e.__cause__ if e.__cause__ is not None else e
+        cat_status.update(_extras)
 
         # Collect unique obj_ids for this category
         cat_obj_ids = set()
@@ -1714,7 +1748,7 @@ def _run_sam3_batched(frames_dir: Path, frame_files: List[str], categories: List
             except Exception:
                 pass
         _log_vram(f"cat {cat_idx+1} END (after cleanup)")
-    
+
     if writer is not None:
         try:
             seg_meta = writer.wait()

@@ -992,14 +992,27 @@ models:
     # equal masks were never verified. USER 03:00: "dejamos como está e incorporamos lo demás, así
     # liberamos la GPU para otras cosas, porque ni siquiera sabemos si va a dar igual" — OFF: one
     # concept at a time and the vendor's cache kept, the SAM3 stage exactly as before.
-    concept_group: 1                   # concepts per group (1 = one at a time, as before; 4 measured)
-    keep_frame_outputs: true           # the vendor's per-frame cache of every object's mask at
+    # ON (USER 2026-11-11: "me cierran las opciones 2 …" — the shared vision backbone). MEASURED on pccr
+    # 2026-08-31 (250 keyframes, 8 concepts, the card exclusive, the production loop): one at a time 333.8 s,
+    # groups of 4 with the cache off 236.6 s (×1.41), the masks and labels of all 8 concepts IDENTICAL bit
+    # for bit (4,448 arrays). Two SAM3 processes on the card were measured too and REMOVED: 397.1 s alone,
+    # 262.4 s with the groups — slower, the processes contend for the card; torch.compile (the vendor's
+    # max-autotune) recompiled on every new object count: 14 min for the first concept's 120 frames.
+    concept_group: 4                   # concepts per group (1 = one at a time, as before)
+    keep_frame_outputs: false          # the vendor's per-frame cache of every object's mask at
                                        # video resolution (its interactive demo's re-fetch) and the
                                        # session's state kept until the next concept: the batch
                                        # flow never reads them. On station 'light' (181 objects)
                                        # ran out of memory at 69 GB with 74.5 GB free once the
                                        # sessions were released — a forced seam with new ids.
-                                       # true = as before (USER 03:00); false frees them
+                                       # true = as before (USER 2026-11-02 03:00); false frees
+                                       # them (with the groups, USER 2026-11-11)
+    planning_copy: shallow             # USER 2026-11-11 ("un pccr3108 debe dar 30' como mucho"): the vendor
+                                       # deep-copies every object's score on every frame propagated so far,
+                                       # again on every frame (22 % of a concept on 120 frames, growing with
+                                       # the frames); shallow = each frame's dict copied, its score tensors
+                                       # shared — no writer touches a past frame (segmentation/sam3_fast.py);
+                                       # deep = the vendor's copy
 
     # Inference
     keyframe_interval: 2

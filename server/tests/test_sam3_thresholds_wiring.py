@@ -102,7 +102,8 @@ def stubbed(monkeypatch, tmp_path):
         monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
         monkeypatch.setattr(w, "cfg", {"models": {"segmentation": {
             "version": version, "checkpoint_path": str(ckpt),
-            "sam3_thresholds": thresholds, "concept_group": 1, "keep_frame_outputs": True}}})
+            "sam3_thresholds": thresholds, "concept_group": 1, "keep_frame_outputs": True,
+            "planning_copy": "deep"}}})                 # the stubbed vendor has no planning metadata
         wrapper = w.SAM3Wrapper()
         wrapper.load_model()
         return wrapper
