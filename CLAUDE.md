@@ -255,6 +255,10 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   vertical order + centre of mass inside the support polygon; attached to wall / ceiling / floor; containment;
   clearances; material `vlm_proposed`), feeding the spatial chat; and a much better VLM stage. Optional witness:
   SpaCeFormer vs SAM3 on pccr 3108 (non-commercial licence).
+- AFTER DECEMBER, ALSO: SPEED (USER 2026-11-11: "que pipeline robusto viejo, lento pero robusto. Insisto que luego de
+  diciembre uno de los puntos a mejorar es justamente la velocidad"). Reference: pccr 2408 (2765 kf, 150 concepts)
+  VLM 48.5 min + SAM3 ~10.5 h at ~4.1 min / concept even with the shared backbone (3ccb7c6); pccr 3108 (547 kf,
+  87 concepts) SAM3 1 h 43 min. Robustness stays the bar: speed is never bought with a lost mask or a looser geometry.
 - GENRECON INVENTS FLOOR-LEVEL SURFACE (USER 2026-11-09: "tiene eso que no sé qué es ahí abajo … en la nube ahí no hay
   nada" / "dejalo anotado, lo vemos después"). Measured on zaragoza's genrecon_photo (10 points per voxel, 5 mm cloud):
   36.5 % of the mesh area (423 of 1160 m²) has no cloud point within one GenRecon voxel (11.56 cm) — 79 m² at
