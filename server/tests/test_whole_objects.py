@@ -278,8 +278,7 @@ def test_the_autoprompter_folds_the_tile_into_the_floor_and_the_census_closes(
     assert rec["prompts"] == ["floor", "cable"]
 
     # the accounting closes: every proposed concept is a prompt, merged, or not prompted
-    census = build_census(tmp_path / "output", prompt=res.prompt, vlm_doc=doc, gap_kf=1,
-                          frames_dir=tmp_path / "frames", log=_quiet)
+    census = build_census(tmp_path / "output", prompt=res.prompt, vlm_doc=doc, log=_quiet)
     acc = census["accounting"]
     assert acc["closed"] is True
     assert acc["by_fate"] == {"prompt": 2, "merged": 2, "not_prompted": 0, "unaccounted": 0}

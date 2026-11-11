@@ -167,8 +167,7 @@ def test_an_oom_midway_is_continued_and_the_objects_across_the_stop_stay_one(tmp
     # the census carries the decision (its prompt row copies the prompt's SAM3 record)
     from segmentation.census import CENSUS_NAME, build_census
     lines = []
-    build_census(out, prompt="tile", vlm_doc=None, gap_kf=1, frames_dir=tmp_path / "frames",
-                 prompt_status=status, log=lines.append)
+    build_census(out, prompt="tile", vlm_doc=None, prompt_status=status, log=lines.append)
     doc = json.loads((out / CENSUS_NAME).read_text())
     (row,) = doc["prompts"]
     assert [x["kind"] for x in row["sam3_status"]["identity_decisions"]

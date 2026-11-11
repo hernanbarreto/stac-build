@@ -274,8 +274,7 @@ def test_the_autoprompter_folds_the_tile_keeps_the_drawer_and_prompts_the_struct
     rec = json.loads((tmp_path / "output" / "autoprompt_concepts.json").read_text())
     assert rec["parts_folded"] == {"tile": "floor"} and rec["parts_kept_detail"] == ["drawer"]
     assert rec["merge_policy"]["fold_only_into_support"] is True and rec["structural_first"] == ["floor", "wall"]
-    census = build_census(tmp_path / "output", prompt=res.prompt, vlm_doc=doc, gap_kf=1,
-                          frames_dir=tmp_path / "frames", log=_quiet)
+    census = build_census(tmp_path / "output", prompt=res.prompt, vlm_doc=doc, log=_quiet)
     assert census["accounting"]["closed"] is True
     assert census["vlm"]["n_keyframes_without_structure"] == 1
     assert len(census["vlm"]["keyframes_without_structure"]) == 1

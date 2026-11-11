@@ -321,8 +321,7 @@ def test_past_the_prompt_bound_every_name_is_recorded_not_prompted(tmp_path, mon
     rec = json.loads((tmp_path / "output" / "autoprompt_concepts.json").read_text())
     assert set(rec["not_prompted_bound"]) == set(bound["not_prompted"])
     assert rec["stamp"] == vlm["stamp"]["sha256"] and "max_sam3_prompts" in vlm["stamp"]["config"]
-    doc = build_census(tmp_path / "output", prompt=res.prompt, vlm_doc=vlm, gap_kf=1,
-                       frames_dir=tmp_path / "frames", log=lambda m: None)
+    doc = build_census(tmp_path / "output", prompt=res.prompt, vlm_doc=vlm, log=lambda m: None)
     assert doc["accounting"]["closed"] is True
     assert doc["accounting"]["by_fate"]["not_prompted"] == 3
 

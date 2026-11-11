@@ -7,8 +7,8 @@ pipes' reached SAM3 and got 0 masklets, 'cardboard box' never reached it, and
 nothing on disk said which was which. The census is built by the SAM3 worker
 from what the workers already wrote; these tests build its inputs synthetically
 (no vLLM, no SAM3 weights) and pin: the accounting closes (every raw concept has
-exactly one fate), zero-masklet prompts are flagged down to their concepts, and
-masklet spans / visits are read off the masks with the mask filter's own gap.
+exactly one fate), zero-masklet prompts are flagged down to their concepts, and the
+masks are never read back (USER 2026-11-11: keep of the census only what the pipeline uses).
 """
 
 import json
@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from segmentation import mask_space  # noqa: E402
 from segmentation.census import (  # noqa: E402
-    CENSUS_NAME, build_census, concept_label, visit_gap_kf, visits_of)
+    CENSUS_NAME, build_census, concept_label)
 
 KF_FILES = [f"{v:06d}.jpg" for v in (0, 51, 61, 75, 91, 120, 150, 180, 200, 230, 260, 300)]
 
@@ -91,8 +91,7 @@ def test_accounting_closes_and_zero_masklet_prompts_are_flagged(tmp_path):
                                  "tile": "r1c1", "parsed": False, "n_objects": 0}],
                       "concepts": fates, "vocabulary_reused": False}}
     lines = []
-    doc = build_census(out, prompt=vlm["prompt"], vlm_doc=vlm, gap_kf=1,
-                       frames_dir=tmp_path / "frames", log=lines.append)
+    doc = build_census(out, prompt=vlm["prompt"], vlm_doc=vlm, log=lines.append)
     assert (out / CENSUS_NAME).exists()
     acc = doc["accounting"]
     assert acc["closed"] is True
@@ -108,12 +107,8 @@ def test_accounting_closes_and_zero_masklet_prompts_are_flagged(tmp_path):
         {"red fire alarm box", "doorbell panel", "conduit"}
     ch = rows["black office chair"]
     assert ch["raw_concepts"] == ["black office chair", "black office chairs"]
-    (m,) = ch["masklets"]
-    assert m["visits"] == [[0, 2], [5, 6]] and m["n_visits"] == 2
-    assert (m["first_kf"], m["last_kf"], m["span_kf"]) == (0, 6, 7)
-    assert (m["first_frame"], m["last_frame"]) == (0, 150)
-    bx = rows["cardboard box"]["masklets"][0]
-    assert bx["n_keyframes"] == 2, "an EMPTY stored mask does not count as seeing it"
+    assert ch["masklets"] == [{"oid": 0, "instance_id": 1}]
+    assert rows["cardboard box"]["masklets"] == [{"oid": 1, "instance_id": 2}]
     assert doc["vlm"]["n_calls"] == 4 and doc["vlm"]["n_parsed"] == 3
     assert [e["frame"] for e in doc["vlm"]["looked_at"]] == [0, 51]
     assert any("ZERO masklets" in ln for ln in lines)
@@ -124,8 +119,7 @@ def test_a_concept_whose_prompt_sam3_never_received_is_unaccounted(tmp_path):
     und, fates = _fates()
     out = _session(tmp_path, ["black office chair"], [], {})
     vlm = {"census": {"concepts": fates, "calls": [], "sampling": None}}
-    doc = build_census(out, prompt="black office chair", vlm_doc=vlm, gap_kf=1,
-                       frames_dir=tmp_path / "frames", log=lambda m: None)
+    doc = build_census(out, prompt="black office chair", vlm_doc=vlm, log=lambda m: None)
     acc = doc["accounting"]
     assert acc["closed"] is False
     assert set(acc["concepts_not_reaching_sam3_prompt"]) == {
@@ -135,8 +129,7 @@ def test_a_concept_whose_prompt_sam3_never_received_is_unaccounted(tmp_path):
 
 def test_no_concept_record_is_declared_not_assumed(tmp_path):
     out = _session(tmp_path, ["floor"], [], {})
-    doc = build_census(out, prompt="floor;wall", vlm_doc={"prompt": "floor;wall"}, gap_kf=1,
-                       frames_dir=tmp_path / "frames", log=lambda m: None)
+    doc = build_census(out, prompt="floor;wall", vlm_doc={"prompt": "floor;wall"}, log=lambda m: None)
     assert doc["accounting"]["closed"] is False
     assert doc["accounting"]["concept_record"].startswith("MISSING")
     assert doc["zero_masklet_prompts"] == ["floor", "wall"]
@@ -147,33 +140,22 @@ def test_a_failed_segmentation_still_writes_the_census(tmp_path):
     out = _session(tmp_path, und.objects, [{"id": 0, "label": "stale", "instance_id": 1}],
                    {"f0_o0": _m()})
     doc = build_census(out, prompt=";".join(und.objects),
-                       vlm_doc={"census": {"concepts": fates, "calls": []}}, gap_kf=1,
-                       frames_dir=tmp_path / "frames", seg_error="No masks generated",
+                       vlm_doc={"census": {"concepts": fates, "calls": []}}, seg_error="No masks generated",
                        log=lambda m: None)
     assert doc["sam3"]["error"] == "No masks generated"
     assert len(doc["zero_masklet_prompts"]) == len(und.objects)
 
 
-def test_a_video_frame_store_is_translated_to_keyframe_positions(tmp_path):
-    out = _session(tmp_path, ["conduit"], [{"id": 3, "label": "conduit", "instance_id": 1}],
-                   {"f61_o3": _m(), "f75_o3": _m(), "f200_o3": _m()},
-                   space=mask_space.SPACE_VIDEO)
-    doc = build_census(out, prompt="conduit", vlm_doc=None, gap_kf=1,
-                       frames_dir=tmp_path / "frames", log=lambda m: None)
-    (m,) = doc["prompts"][0]["masklets"]
-    assert m["visits"] == [[2, 3], [8, 8]]
-
-
-def test_visits_use_the_mask_filter_gap():
-    assert visits_of([3, 4, 5, 9, 10], 1) == [[3, 5], [9, 10]]
-    assert visits_of([3, 4, 5, 9, 10], 4) == [[3, 10]]
-    assert visits_of([], 1) == []
-
-
-def test_the_gap_is_read_strictly():
-    with pytest.raises(KeyError, match="segmentation.mask_filter.visit_gap_kf"):
-        visit_gap_kf({"segmentation": {}})
-    assert visit_gap_kf({"segmentation": {"mask_filter": {"visit_gap_kf": 1}}}) == 1
+def test_the_census_never_reads_the_masks_back(tmp_path):
+    """pccr 2026-08-24: the census decompressed all 290,418 masks of seg_masks.npz one by one
+    for keyframe spans nothing read — over an hour with the card idle. USER 2026-11-11 ("sí,
+    ok"): the census keeps only what the pipeline uses, so the store is never opened — an
+    unreadable store changes nothing."""
+    out = _session(tmp_path, ["conduit"], [{"id": 3, "label": "conduit", "instance_id": 1}], {})
+    (out / "seg_masks.npz").write_bytes(b"not a zip")
+    doc = build_census(out, prompt="conduit", vlm_doc=None, log=lambda m: None)
+    assert doc["prompts"][0]["masklets"] == [{"oid": 3, "instance_id": 1}]
+    assert doc["prompts"][0]["n_masklets"] == 1 and doc["zero_masklet_prompts"] == []
 
 
 def test_the_label_rule_is_the_one_the_masks_are_saved_under():
@@ -240,7 +222,7 @@ def test_the_sam3_worker_writes_the_census_after_segmentation(tmp_path, monkeypa
     doc = json.loads((out / CENSUS_NAME).read_text())
     assert doc["accounting"]["closed"] is True
     rows = {r["prompt"]: r for r in doc["prompts"]}
-    assert rows["black office chair"]["masklets"][0]["visits"] == [[0, 1]]
+    assert rows["black office chair"]["masklets"] == [{"oid": 0, "instance_id": 1}]
     assert "conduit" in doc["zero_masklet_prompts"]
     assert any(ln.startswith("[census]") for ln in pipe.logs)
 
@@ -260,8 +242,7 @@ def test_a_prompt_sam3_did_not_complete_is_not_a_zero(tmp_path):
                          "reason": "the SAM3 run stopped before this prompt"}
     lines = []
     doc = build_census(out, prompt=";".join(prompts),
-                       vlm_doc={"census": {"concepts": fates, "calls": []}}, gap_kf=1,
-                       frames_dir=tmp_path / "frames", prompt_status=status,
+                       vlm_doc={"census": {"concepts": fates, "calls": []}}, prompt_status=status,
                        log=lines.append)
     assert set(doc["zero_masklet_prompts"]) == {"cardboard box", "red fire alarm box"}
     nc = {e["prompt"]: e for e in doc["prompts_not_completed_by_sam3"]}

@@ -225,6 +225,7 @@ def test_load_model_builds_from_the_jobs_thresholds_not_the_servers(monkeypatch,
     scfg["version"] = "sam3.1"
     scfg["checkpoint_path"] = str(ckpt)
     scfg["sam3_thresholds"]["sam3.1"]["score_threshold_detection"] = 0.31      # not the server's
+    scfg["planning_copy"] = "deep"            # the stub package has no sam3.model to patch
     # the server's config (w.cfg) is left as it is: it must not be what the model gets
     wrapper = w.SAM3Wrapper(config=job)
     wrapper.load_model()
@@ -280,7 +281,7 @@ def test_the_worker_selects_the_product_epoch_before_sam3_and_projects_once(tmp_
     assert any("product epoch 0" in m and "made live again" in m for m in pipe.logs)
     # the census carries the identity of its inputs (point 159)
     doc = json.loads((out / "segmentation_census.json").read_text())
-    assert doc["version"] == 2
+    assert doc["version"] == 3
     assert doc["inputs"] == {"vlm_prompt_sha256": "p" * 64, "vlm_prompt_source": "shipped",
                              "vlm_analysis_stamp_sha256": "s" * 64, "service_sha256": "e" * 64,
                              "sam3_prompts_sha256": hashlib.sha256(b"desk").hexdigest(),
@@ -329,8 +330,7 @@ def test_the_census_bytes_do_not_follow_the_moment(tmp_path):
                "exclusive_gpu": {"cards": [{"uuid": "GPU-1", "name": "A100", "used_mib": used_mib,
                                             "total_mib": 81920, "driver_version": "595.91.07"}],
                                  "compute_processes": 0}}
-        census.build_census(out, prompt="desk;door", vlm_doc={"prompt": "desk;door"}, gap_kf=1,
-                            frames_dir=root / "frames",
+        census.build_census(out, prompt="desk;door", vlm_doc={"prompt": "desk;door"},
                             seg_error=f"the run stopped in /tmp/sam3_batch_{tmp_suffix}",
                             prompt_status=status, sam3_thresholds=rec, log=lambda m: None)
         return (out / census.CENSUS_NAME).read_bytes()

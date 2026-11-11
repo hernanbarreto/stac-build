@@ -60,11 +60,7 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
     import repro
     repro.ensure_cublas_workspace()
 
-    # The census (below) splits masklets into visits by the mask filter's own key:
-    # read it BEFORE SAM3 runs, so a config without it fails in seconds, not after.
-    from segmentation.census import visit_gap_kf
-    gap_kf = visit_gap_kf(config)
-    # Same for the SAM3 detection / confirmation thresholds of the model that will
+    # The SAM3 detection / confirmation thresholds of the model that will
     # be built (models.segmentation.sam3_thresholds): the wrapper loads the model
     # lazily inside the first prompt, and a bad key must fail the stage here,
     # naming it — not end as every prompt at zero masklets. Of the JOB's configuration
@@ -232,8 +228,7 @@ def _sam3_work(pipe: WorkerPipe, session_dir: str, config: dict):
             return
         try:
             from segmentation.census import build_census
-            build_census(output_dir, prompt=prompt, vlm_doc=vlm_data, gap_kf=gap_kf,
-                         frames_dir=frames_dir, seg_error=seg_error,
+            build_census(output_dir, prompt=prompt, vlm_doc=vlm_data, seg_error=seg_error,
                          prompt_status=prompt_status,
                          sam3_thresholds=_sam3_record(),
                          log=pipe.send_log)

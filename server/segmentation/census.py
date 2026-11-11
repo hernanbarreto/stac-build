@@ -13,10 +13,14 @@
 #     the VLM was shown, every call (parsed or not), every phrase it proposed
 #     and its ONE fate — prompt / merged into the same name / not prompted, each
 #     non-prompt with its reason — plus the consolidation's grouping as evidence;
-#   · segmentation.json + seg_masks.npz: per prompt the SAM3 masklets, their
-#     keyframe spans and their VISITS (runs of keyframes; a gap of more than
-#     ``segmentation.mask_filter.visit_gap_kf`` opens a new one — the user's one
-#     definition of a visit, read from the same key the mask filter reads).
+#   · segmentation.json: per prompt the SAM3 masklets (object id, instance id).
+#     The masks themselves are NOT read back (USER 2026-11-11: "sí, ok" to keeping of the
+#     census only what the pipeline uses — "lo que no se usa para corregir geometría no se
+#     pierde un solo segundo de máquina"): the per-masklet keyframe spans and visits it once
+#     derived by decompressing every mask of seg_masks.npz were read by nothing, and on
+#     pccr 2026-08-24 (290,418 masks) that read held the card idle for over an hour. What
+#     the pipeline does read here: each prompt's SAM3 status (pipeline_manager: a prompt
+#     that RAN is done) and each concept's fate (autoprompt.rounds).
 # Prompts with ZERO masklets are flagged, and so is every concept they carry —
 # but only when SAM3 RAN them (``run_segmentation``'s per-prompt status): a
 # prompt SAM3 never completed (skipped, failed, OOM twice, never reached) is
@@ -24,8 +28,8 @@
 # The accounting closes when every proposed phrase has exactly one fate and
 # every fate that names a prompt names one SAM3 actually received.
 #
-# PROVENANCE: the phrases are vlm_proposed; spans, visits and counts are
-# tool_measured over SAM3's masks. Nothing here decides anything.
+# PROVENANCE: the phrases are vlm_proposed; the masklet counts are tool_measured
+# (SAM3's own output). Nothing here decides anything.
 #
 # DETERMINISM (docs/plan_determinismo.md point 159 — 2026-10-08): the census is a COMPARED
 # artifact — two identical runs give byte-identical segmentation_census.json. So it carries
@@ -46,17 +50,16 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
-import numpy as np
 
 CENSUS_NAME = "segmentation_census.json"
-CENSUS_VERSION = 2                      # 2 (2026-10-08): ``inputs`` block, run-varying fields out
+CENSUS_VERSION = 3                      # 2 (2026-10-08): ``inputs`` block, run-varying fields out;
+                                        # 3 (2026-11-11): no masklet keyframe spans / visits
 FATES = ("prompt", "merged", "not_prompted", "unaccounted")
 # the run_segmentation statuses of a prompt SAM3 did NOT run to the end (its
 # zero is not a zero); "ran" is the one whose zero is real
 _SAM3_NOT_COMPLETED = ("skipped", "failed", "not_reached")
-_MASK_KEY = re.compile(r"^f(\d+)_o(\d+)$")
 # the per-prompt frame directory SAM3 reads (segmentation.pipeline: tempfile.mkdtemp with
 # prefix 'sam3_batch_'; the wrapper's interactive session: 'sam3_kf_'): its random suffix is
 # the one path that differs between runs — reduced to '<sam3_batch_dir>' / '<sam3_kf_dir>'
@@ -147,85 +150,8 @@ def split_prompt(prompt: str) -> List[str]:
     return [c.strip() for c in str(prompt or "").split(";") if c.strip()]
 
 
-def visit_gap_kf(config: dict) -> int:
-    """``segmentation.mask_filter.visit_gap_kf`` — strict (a missing key fails
-    naming it)."""
-    try:
-        v = config["segmentation"]["mask_filter"]["visit_gap_kf"]
-    except (KeyError, TypeError):
-        raise KeyError("config.yaml is missing 'segmentation.mask_filter.visit_gap_kf' — "
-                       "the census splits masklets into visits by the same key the mask "
-                       "filter reads") from None
-    if isinstance(v, bool) or int(v) != v or int(v) < 1:
-        raise ValueError(f"'segmentation.mask_filter.visit_gap_kf' must be an integer "
-                         f">= 1, got {v!r}")
-    return int(v)
-
-
-def segmentation_keyframes(frames_dir) -> Optional[List[str]]:
-    """The keyframe files in the order SAM3 numbered them — mirrors
-    ``pipeline._prepare_valid_frames``: ``frames/selected_frames.json``, with the
-    files missing on disk dropped BEFORE numbering. None without the file."""
-    p = Path(frames_dir) / "selected_frames.json"
-    if not p.is_file():
-        return None
-    try:
-        files = json.loads(p.read_text()).get("selected_files") or []
-    except Exception:  # noqa: BLE001 — an unreadable selection is no selection
-        return None
-    return [f for f in files if (Path(frames_dir) / f).exists()] or None
-
-
-def visits_of(positions: Sequence[int], gap: int) -> List[List[int]]:
-    """``[[first, last], …]`` runs of keyframe positions; a step larger than
-    ``gap`` keyframes ends a visit (``mask_filter._visits``' rule)."""
-    out: List[List[int]] = []
-    for k in sorted(set(int(p) for p in positions)):
-        if out and k - out[-1][1] <= gap:
-            out[-1][1] = k
-        else:
-            out.append([k, k])
-    return out
-
-
-def _masklet_positions(output_dir: Path, seg_doc: dict,
-                       keyframe_files: Optional[List[str]]) -> Tuple[Dict[int, List[int]], str]:
-    """{oid: sorted keyframe positions with a NON-EMPTY mask} for the instances
-    of ``segmentation.json``, and a note on the frame space the store is in."""
-    from segmentation import mask_space
-    masks_path = output_dir / str(seg_doc.get("mask_file") or "seg_masks.npz")
-    if not masks_path.exists():
-        return {}, f"{masks_path.name} not on disk"
-    oids = {int(i["id"]) for i in seg_doc.get("instances") or [] if "id" in i}
-    npz = np.load(masks_path)
-    space = mask_space.declared_space(npz)
-    to_pos = None
-    note = space or "undeclared (read as keyframe_position, what run_segmentation writes)"
-    if space == mask_space.SPACE_VIDEO:
-        if not keyframe_files:
-            return {}, "video_frame store and no frames/selected_frames.json to translate it"
-        idx = {int(os.path.splitext(f)[0]): i for i, f in enumerate(keyframe_files)}
-        to_pos = idx.get
-    out: Dict[int, set] = {}
-    for key in npz.files:
-        m = _MASK_KEY.match(key)
-        if not m:
-            continue
-        oid = int(m.group(2))
-        if oid not in oids:
-            continue
-        pos = int(m.group(1)) if to_pos is None else to_pos(int(m.group(1)))
-        if pos is None:
-            continue
-        a = npz[key]
-        if a.size == 0 or not a.any():
-            continue                      # a stored but EMPTY mask did not see the object
-        out.setdefault(oid, set()).add(pos)
-    return {k: sorted(v) for k, v in out.items()}, note
-
-
-def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: int,
-                 frames_dir=None, seg_error: Optional[str] = None,
+def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict],
+                 seg_error: Optional[str] = None,
                  prompt_status: Optional[Dict[str, dict]] = None,
                  sam3_thresholds: Optional[dict] = None,
                  log: Callable[[str], None] = print) -> dict:
@@ -239,16 +165,12 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
     (``ran`` / ``skipped`` / ``failed`` / ``not_reached`` + reason); without it
     every prompt's status is ``unknown``."""
     output_dir = Path(output_dir)
-    frames_dir = Path(frames_dir) if frames_dir else output_dir.parent / "frames"
     prompts = split_prompt(prompt)
-    kf_files = segmentation_keyframes(frames_dir)
     rec = (vlm_doc or {}).get("census") if isinstance(vlm_doc, dict) else None
 
     # ── SAM3: masklets per prompt ────────────────────────────────────────
     seg_path = output_dir / "segmentation.json"
     seg_doc = json.loads(seg_path.read_text()) if (seg_path.exists() and not seg_error) else {}
-    positions, space_note = (_masklet_positions(output_dir, seg_doc, kf_files)
-                             if seg_doc else ({}, "no segmentation.json from this run"))
     by_label: Dict[str, List[dict]] = {}
     for inst in seg_doc.get("instances") or []:
         by_label.setdefault(str(inst.get("label")), []).append(inst)
@@ -256,11 +178,6 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
     sharing: Dict[str, List[str]] = {}
     for p, lb in labels.items():
         sharing.setdefault(lb, []).append(p)
-
-    def _video(pos: int) -> Optional[int]:
-        if kf_files and 0 <= pos < len(kf_files):
-            return int(os.path.splitext(kf_files[pos])[0])
-        return None
 
     concepts = list((rec or {}).get("concepts") or [])
     carried: Dict[str, List[str]] = {}
@@ -273,18 +190,8 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
 
     prompt_rows = []
     for p in prompts:
-        ms = []
-        for inst in by_label.get(labels[p], []):
-            ks = positions.get(int(inst["id"]), [])
-            vis = visits_of(ks, gap_kf)
-            ms.append({"oid": int(inst["id"]), "instance_id": inst.get("instance_id"),
-                       "n_keyframes": len(ks),
-                       "first_kf": ks[0] if ks else None, "last_kf": ks[-1] if ks else None,
-                       "span_kf": (ks[-1] - ks[0] + 1) if ks else 0,
-                       "first_frame": _video(ks[0]) if ks else None,
-                       "last_frame": _video(ks[-1]) if ks else None,
-                       "visits": vis, "n_visits": len(vis)})
-        seen = sorted({k for m in ms for k in positions.get(m["oid"], [])})
+        ms = [{"oid": int(inst["id"]), "instance_id": inst.get("instance_id")}
+              for inst in by_label.get(labels[p], [])]
         # no clock in a compared artifact (point 125): the per-prompt seconds live in the
         # SAM3 stage's timing sidecar (segmentation_timing.json), never here — and no
         # temporary path (point 159)
@@ -294,9 +201,7 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
                "raw_concepts": carried.get(p, []),
                "sam3_status": st,
                "n_masklets": len(ms), "zero_masklets": not ms,
-               "n_keyframes_seen": len(seen),
-               "masklets": sorted(ms, key=lambda m: (m["first_kf"] is None, m["first_kf"] or 0,
-                                                     m["oid"]))}
+               "masklets": sorted(ms, key=lambda m: m["oid"])}
         if len(sharing[labels[p]]) > 1:
             row["label_shared_with"] = [q for q in sharing[labels[p]] if q != p]
         if p in role_of:
@@ -400,9 +305,7 @@ def build_census(output_dir, *, prompt: str, vlm_doc: Optional[dict], gap_kf: in
         "prompts": prompt_rows,
         "zero_masklet_prompts": zero,
         "prompts_not_completed_by_sam3": not_completed,
-        "sam3": {"error": without_temp_paths(seg_error), "frame_space": space_note,
-                 "visit_gap_kf": gap_kf,
-                 "n_keyframes": len(kf_files) if kf_files else None,
+        "sam3": {"error": without_temp_paths(seg_error),
                  "thresholds": stable_sam3_record(sam3_thresholds)},
         "accounting": accounting,
     }

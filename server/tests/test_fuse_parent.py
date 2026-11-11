@@ -253,7 +253,14 @@ def test_the_ledger_records_the_round_and_its_reasons(tmp_path):
 def _visits_of_fused(tmp_path, gap=1):
     """Visits per fused object read through the fused view — the construction
     `correction.visit_drift.masklet_visits` makes over the parent and the masks."""
-    from segmentation.census import visits_of
+    def visits_of(positions, gap):        # runs of keyframes; a step over `gap` opens a visit
+        out = []
+        for k in sorted(set(int(p) for p in positions)):
+            if out and k - out[-1][1] <= gap:
+                out[-1][1] = k
+            else:
+                out.append([k, k])
+        return out
     doc = fused_parent(tmp_path)
     fm = FusedMasks(tmp_path)
     out = {}
