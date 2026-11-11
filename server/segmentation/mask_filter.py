@@ -42,21 +42,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 
-def dilate_cross_t(m, iterations: int):
-    """``scipy.ndimage.binary_dilation(m, iterations=iterations)`` on ``m``'s device: the default
-    structuring element (the 3x3 cross), the outside of the image 0, applied ``iterations`` times —
-    each pass a 3x3 cross convolution of the booleans, any hit sets the pixel. Integer arithmetic:
-    the same pixels as scipy's."""
-    import torch
-    import torch.nn.functional as F
-    out = m.to(torch.bool)
-    if iterations <= 0:
-        return out
-    k = torch.tensor([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=torch.float32, device=m.device)[None, None]
-    x = out.to(torch.float32)[None, None]
-    for _ in range(int(iterations)):
-        x = (F.conv2d(x, k, padding=1) > 0).to(torch.float32)
-    return x[0, 0] > 0
+from segmentation.mask_store_gpu import dilate_cross_t  # noqa: E402,F401 — the audit's dilation
 
 
 class MaskAudit:
@@ -153,19 +139,26 @@ class MaskAudit:
         except Exception:  # noqa: BLE001
             return None
 
-    def _mask_of_t(self, mask_idx: int, oid: int, dev):
-        """:meth:`_mask_of` on ``dev`` (USER 2026-11-11: "todo debe ser GPU nada en cpu"; pccr 3108: the
-        CPU dilation was 186 s of the audit's 368): the stored mask uploaded, dilated there by
-        :func:`dilate_cross_t` — scipy's binary_dilation with its default cross, ``dilate_px`` times,
-        the outside 0 — the same pixels (tests/test_mask_audit_torch.py)."""
-        import torch
-        m = self._read_mask(mask_idx, oid)
-        if m is None:
-            return None
-        return dilate_cross_t(torch.as_tensor(np.ascontiguousarray(m), device=dev), int(self.cfg["dilate_px"]))
+    def _masks_of_t(self, mask_idxs, oid: int, dev) -> Dict[int, object]:
+        """:meth:`_mask_of` of every frame of ``mask_idxs`` ON THE DEVICE (USER 2026-11-11: "todo debe
+        ser GPU nada en cpu"; pccr 3108: the CPU dilation was 186 s of the audit's 368, the zlib reads
+        ~96 s): the frames' masks inflated in one batch by the device store (nvCOMP), dilated there by
+        :func:`dilate_cross_t` — scipy's binary_dilation, the default cross, ``dilate_px`` times, the
+        outside 0. {frame: boolean mask} for the frames the store holds (tests/test_mask_audit_torch.py)."""
+        store = getattr(self, "_dstore", None)
+        if store is None or str(store.device) != str(dev):
+            from segmentation.mask_store_gpu import DeviceMaskStore
+            store = self._dstore = DeviceMaskStore(self.output_dir / "seg_masks.npz", dev)
+        have = [int(f) for f in mask_idxs if f"f{int(f)}_o{int(oid)}" in store]
+        out: Dict[int, object] = {}
+        for b in range(0, len(have), 256):                          # bounded device memory per block
+            part = have[b:b + 256]
+            st = dilate_cross_t(store.stack([f"f{f}_o{int(oid)}" for f in part]), int(self.cfg["dilate_px"]))
+            out.update({f: st[k] for k, f in enumerate(part)})
+        return out
 
     def _mask_of(self, mask_idx: int, oid: int) -> Optional[np.ndarray]:
-        """The mask the audit judges with, dilated on the CPU — the reference of :meth:`_mask_of_t`."""
+        """The mask the audit judges with, dilated on the CPU — the reference of :meth:`_masks_of_t`."""
         m = self._read_mask(mask_idx, oid)
         if m is None:
             return None
@@ -246,12 +239,12 @@ class MaskAudit:
             import torch
             dev = self.ev.device
             ranked = []
-            for mf in vframes:
-                m = self._mask_of_t(mf, oid, dev)            # on the evidence's device, dilated there
-                if m is not None:
-                    area = int(m.sum())
+            got = self._masks_of_t(vframes, oid, dev)        # one batch, on the evidence's device
+            if got:
+                areas = torch.stack([got[int(mf)].sum() for mf in vframes if int(mf) in got]).tolist()
+                for area, mf in zip(areas, [int(mf) for mf in vframes if int(mf) in got]):
                     if area:
-                        ranked.append((area, int(mf), m))
+                        ranked.append((int(area), int(mf), got[mf]))
             # the frames showing MOST of the object first; two of EQUAL area are
             # ordered by keyframe (docs/plan_determinismo.md point 119, DECIDIDO:
             # the tie-break is the keyframe, so which frames are judged never
