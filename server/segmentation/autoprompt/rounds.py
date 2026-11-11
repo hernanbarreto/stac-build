@@ -148,7 +148,48 @@ UNION_THREADS = 8
 
 
 def segmented_masks(output_dir) -> Dict[int, np.ndarray]:
-    """{video frame: bool map of the pixels some masklet of the store covers}, at the store's grid.
+    """{video frame: bool map of the pixels some masklet of the store covers}, at the store's grid — the
+    union ON THE DEVICE (USER 2026-11-11: "Nada debe hacerse en cpu"): each frame's masks inflated by the
+    device store (segmentation/mask_store_gpu.py: nvCOMP on the card) and OR-ed there, in blocks; the
+    reader on threads below (:func:`_segmented_masks_threads`) is the reference."""
+    from reconstruction.surface_fit.hole_audit import evidence_device
+    from segmentation.mask_store_gpu import DeviceMaskStore
+    by_frame = _store_frames(output_dir)
+    store = DeviceMaskStore(Path(output_dir) / "seg_masks.npz", evidence_device())
+    union: Dict[int, np.ndarray] = {}
+    for f, keys in sorted(by_frame.items()):
+        acc = None
+        for b in range(0, len(keys), 256):
+            u = store.stack(keys[b:b + 256]).any(0)
+            acc = u if acc is None else (acc | u)
+        union[f] = acc.cpu().numpy()
+    return union
+
+
+def _store_frames(output_dir) -> Dict[int, List[str]]:
+    """{video frame: the store's mask members of that frame}, the keyframe positions translated."""
+    from segmentation import mask_space
+    out = Path(output_dir)
+    with np.load(out / "seg_masks.npz") as npz:
+        space = mask_space.declared_space(npz) or mask_space.SPACE_KEYFRAME
+        kfs = mask_space.declared_keyframes(npz) or mask_space.keyframe_numbers(out) or []
+        by_frame: Dict[int, List[str]] = {}
+        for key in npz.files:
+            m = _MASK_KEY.match(key)
+            if not m:
+                continue
+            f = int(m.group(1))
+            if space == mask_space.SPACE_KEYFRAME:
+                if f >= len(kfs):
+                    continue
+                f = int(kfs[f])
+            by_frame.setdefault(f, []).append(key)
+    return by_frame
+
+
+def _segmented_masks_threads(output_dir) -> Dict[int, np.ndarray]:
+    """{video frame: bool map of the pixels some masklet of the store covers}, at the store's grid —
+    the CPU reader, the reference of :func:`segmented_masks`.
 
     The store is read in one read and its masks inflated on :data:`UNION_THREADS` threads, each
     taking whole frames (every mask of a frame in one thread, OR-ed there): station 2026-11-02, a

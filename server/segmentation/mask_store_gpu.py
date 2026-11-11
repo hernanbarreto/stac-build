@@ -133,9 +133,10 @@ class DeviceMaskStore:
                 if head is None:
                     head = self._head[k] = _npy_header(bytes(t[:256].cpu().numpy().tobytes()))
                 off, dt, shape, fortran = head
-                if dt.itemsize != 1 or fortran or len(shape) != 2:
+                if dt.itemsize != 1 or dt.kind not in ("b", "u") or fortran or len(shape) != 2:
                     raise RuntimeError(f"mask {k}: {dt} {shape} fortran={fortran} — the device reader takes "
-                                       f"C-ordered one-byte 2-D masks (the SAM3 store's)")
+                                       f"C-ordered one-byte unsigned / boolean 2-D masks (the SAM3 store's: "
+                                       f"there, nonzero and > 0 are one test)")
                 parts.append((t[off:off + shape[0] * shape[1]].view(shape[0], shape[1]) != 0))
         shapes = {tuple(p.shape) for p in parts}
         if len(shapes) != 1:

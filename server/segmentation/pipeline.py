@@ -3776,6 +3776,67 @@ def _split_covisible_components(instances: list, xyz_display: np.ndarray, frame_
     return added
 
 
+def _fragment_pairs_numpy(instances, members, xyz_display: np.ndarray, gap_m: float):
+    """For the instances ``members`` of one label: (instance-index pairs, their count of distinct adjacent
+    occupied-voxel pairs at ``gap_m``) — None when fewer than two hold points or the extent does not pack —
+    the PATH OF RECORD of ``segmentation.fragments_torch.fragment_pairs_t``."""
+    offsets = np.array([[dx, dy, dz]
+                        for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)],
+                       dtype=np.int64)
+    keys, owners = [], []
+    for k in members:
+        gi = np.asarray(instances[k].get("globalIndices") or [], dtype=np.int64)
+        gi = gi[(gi >= 0) & (gi < len(xyz_display))]
+        if not len(gi):
+            continue
+        v = np.unique(np.floor(xyz_display[gi] / gap_m).astype(np.int64), axis=0)
+        keys.append(v)
+        owners.append(np.full(len(v), k, dtype=np.int64))
+    if len(keys) < 2:
+        return None
+    allv = np.concatenate(keys)
+    allo = np.concatenate(owners)
+    # pack (i,j,k) into one int64 so the neighbour lookup is a searchsorted
+    base = allv.min(axis=0)
+    span = (allv.max(axis=0) - base + 3).astype(np.int64)
+    if np.prod(span.astype(float)) > 9.0e18:       # degenerate extent — skip this label
+        return None
+
+    def pack(v):
+        d = v - base + 1
+        return (d[:, 0] * span[1] + d[:, 1]) * span[2] + d[:, 2]
+
+    packed = pack(allv)
+    order = np.argsort(packed, kind="stable")
+    packed_sorted, owner_sorted = packed[order], allo[order]
+    pairs = []
+    for off in offsets:
+        if not off.any():
+            continue
+        nb = pack(allv + off)
+        pos = np.searchsorted(packed_sorted, nb)
+        ok = pos < len(packed_sorted)
+        pos = np.where(ok, pos, 0)
+        hit = ok & (packed_sorted[pos] == nb)
+        if not hit.any():
+            continue
+        a, b = allo[hit], owner_sorted[pos[hit]]
+        diff = a != b
+        if diff.any():
+            # the adjacent VOXEL pair (both cells) with its instance pair: distinct
+            # pairs are what the contiguity is counted on
+            va, vb = packed[hit][diff], nb[hit][diff]
+            pairs.append(np.stack([np.minimum(a[diff], b[diff]), np.maximum(a[diff], b[diff]),
+                                   np.minimum(va, vb), np.maximum(va, vb)], axis=1))
+    if pairs:
+        # millions of voxel adjacencies collapse to a handful of instance
+        # pairs — unique them (by voxel pair) and COUNT them per instance pair
+        allp = np.unique(np.concatenate(pairs), axis=0)
+        inst_pairs, counts = np.unique(allp[:, :2], axis=0, return_counts=True)
+        return inst_pairs, counts
+    return None
+
+
 def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
                            record=None, min_adjacent_pairs: Optional[int] = None,
                            decisions: Optional[list] = None, policy=None):
@@ -3828,9 +3889,11 @@ def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
             a = parent[a]
         return a
 
-    offsets = np.array([[dx, dy, dz]
-                        for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)],
-                       dtype=np.int64)
+    # the labels' contiguity and the merged index lists on the evidence device
+    # (segmentation/fragments_torch.py, USER 2026-11-11: "Nada debe hacerse en cpu")
+    from reconstruction.surface_fit.hole_audit import evidence_device
+    from segmentation.fragments_torch import fragment_pairs_t, union_indices_t
+    _dev = evidence_device()
 
     for label, members in by_label.items():
         if len(members) < 2:
@@ -3847,56 +3910,9 @@ def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
                                   "merged": False,
                                   "reason": "not a support surface — its pieces stay separate (USER 2026-10-15)"})
             continue
-        keys, owners = [], []
-        for k in members:
-            gi = np.asarray(instances[k].get("globalIndices") or [], dtype=np.int64)
-            gi = gi[(gi >= 0) & (gi < len(xyz_display))]
-            if not len(gi):
-                continue
-            v = np.unique(np.floor(xyz_display[gi] / gap_m).astype(np.int64), axis=0)
-            keys.append(v)
-            owners.append(np.full(len(v), k, dtype=np.int64))
-        if len(keys) < 2:
-            continue
-        allv = np.concatenate(keys)
-        allo = np.concatenate(owners)
-        # pack (i,j,k) into one int64 so the neighbour lookup is a searchsorted
-        base = allv.min(axis=0)
-        span = (allv.max(axis=0) - base + 3).astype(np.int64)
-        if np.prod(span.astype(float)) > 9.0e18:       # degenerate extent — skip this label
-            continue
-
-        def pack(v):
-            d = v - base + 1
-            return (d[:, 0] * span[1] + d[:, 1]) * span[2] + d[:, 2]
-
-        packed = pack(allv)
-        order = np.argsort(packed, kind="stable")
-        packed_sorted, owner_sorted = packed[order], allo[order]
-        pairs = []
-        for off in offsets:
-            if not off.any():
-                continue
-            nb = pack(allv + off)
-            pos = np.searchsorted(packed_sorted, nb)
-            ok = pos < len(packed_sorted)
-            pos = np.where(ok, pos, 0)
-            hit = ok & (packed_sorted[pos] == nb)
-            if not hit.any():
-                continue
-            a, b = allo[hit], owner_sorted[pos[hit]]
-            diff = a != b
-            if diff.any():
-                # the adjacent VOXEL pair (both cells) with its instance pair: distinct
-                # pairs are what the contiguity is counted on
-                va, vb = packed[hit][diff], nb[hit][diff]
-                pairs.append(np.stack([np.minimum(a[diff], b[diff]), np.maximum(a[diff], b[diff]),
-                                       np.minimum(va, vb), np.maximum(va, vb)], axis=1))
-        if pairs:
-            # millions of voxel adjacencies collapse to a handful of instance
-            # pairs — unique them (by voxel pair) and COUNT them per instance pair
-            allp = np.unique(np.concatenate(pairs), axis=0)
-            inst_pairs, counts = np.unique(allp[:, :2], axis=0, return_counts=True)
+        found = fragment_pairs_t(instances, members, xyz_display, gap_m, _dev)   # _fragment_pairs_numpy: the record
+        if found is not None:
+            inst_pairs, counts = found
             for (a, b), cnt in zip(inst_pairs, counts):
                 contiguous = int(cnt) >= int(min_adjacent_pairs)
                 if decisions is not None:
@@ -3924,9 +3940,8 @@ def _merge_label_fragments(instances, xyz_display: np.ndarray, gap_m: float,
         keep = members[0]
         # the union of the members' indices as ONE sorted unique array (np.union1d: what
         # sorted(set | set) gave, without the Python sets over millions of ints — 2026-11-01)
-        idx = np.asarray(instances[keep].get("globalIndices") or [], dtype=np.int64)
+        idx = union_indices_t([instances[k].get("globalIndices") or [] for k in members], _dev)
         for k in members[1:]:
-            idx = np.union1d(idx, np.asarray(instances[k].get("globalIndices") or [], dtype=np.int64))
             instances[k]["_absorbed_into"] = keep
             if record is not None:
                 record[int(instances[k].get("instance_id", instances[k].get("id")))] = {

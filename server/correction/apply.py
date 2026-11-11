@@ -109,7 +109,16 @@ def keep_only_live_epoch(output_dir, log=print) -> List[int]:
 
 # ── warp ─────────────────────────────────────────────────────────────────
 
-def warp_full_cloud(session: CorrectionSession, R_kf: np.ndarray,
+def warp_full_cloud(session: CorrectionSession, R_kf: np.ndarray, t_kf: np.ndarray, k_kf: np.ndarray,
+                    log=print, b_kf: Optional[np.ndarray] = None) -> Tuple[np.ndarray, int]:
+    """:func:`warp_full_cloud_numpy` on the evidence device (correction/warp_torch.py, USER 2026-11-11:
+    "Nada debe hacerse en cpu"): every point moved at once, the record's arithmetic elementwise."""
+    from correction.warp_torch import warp_full_cloud_t
+    from reconstruction.surface_fit.hole_audit import evidence_device
+    return warp_full_cloud_t(session, R_kf, t_kf, k_kf, evidence_device(), b_kf=b_kf)
+
+
+def warp_full_cloud_numpy(session: CorrectionSession, R_kf: np.ndarray,
                     t_kf: np.ndarray, k_kf: np.ndarray,
                     log=print, b_kf: Optional[np.ndarray] = None
                     ) -> Tuple[np.ndarray, int]:
