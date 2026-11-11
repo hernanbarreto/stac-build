@@ -39,6 +39,15 @@ cloud only, replace). What it is, over §1's pipeline:
   coverage 59.9 % (kept 55.3 %, in place 6.7 %), 126.5 M raw → 18.8 M points published, core 94.4 min. The
   near surfaces the no-repair run lost came back in part (hollow 1 m zones 28 → 57 % filled); what still
   stays out is held by the occlusion veto, missing votes and the majority, in that order (census).
+- ✓ PCCR 2026-08-24 ("2408") VALIDATED (USER 2026-11-11), 2765 keyframes, the longest walk of the project: *"la
+  nube de pcr2408 salió espectacular confirmada además por la persona que grabó el video, la geometría es correcta
+  increíble! Algunos pequeños duplicados pero nada grave y en un recorrido que hasta los modelos de frontera temen,
+  el nuestro logró coherencia absoluta"*. The geometry confirmed by the person who filmed it.
+- ✓ BUFFERSTOP VALIDATED (USER 2026-11-11): *"no estaba acostado estaba bien parado y salió excelente también"* —
+  under this pipeline it comes out STANDING (the 11-08 run's "on its side" below no longer holds).
+- STATION (USER 2026-11-11): *"había salido bien, bastante bien con como se grabó … lo que estaba reconstruido
+  estaba muy muy bien, gran coherencia"* — DELETED by him: many parts missing from a poor recording, not a
+  session to show in December. Observatorio: not yet seen by him.
 
 ## 1 · ⭐⭐⭐⭐ THE FINAL PIPELINE — USER 2026-11-08 (11:20 CDMX), pccr, main 8cef74f
 *"la cobertura es muy buena, sin errores, sin duplicados, muy muy buen resultado, excelente, que quede este como
