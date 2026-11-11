@@ -137,7 +137,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
 - DETERMINISM (2026-10-07, *"STAC Build es una herramienta de ingeniería, debe dar siempre lo mismo"*): bit-for-bit,
   `docs/plan_determinismo.md`; strict deterministic torch, exclusive GPU, every reused product on its stamp, no clock
   in a compared artifact.
-- GPU PORTS (2026-11-01, *"todo debe correr en GPU, en modo determinista … la GPU no debe quedar parada nunca"*):
+- GPU PORTS (2026-11-01, *"todo debe correr en GPU, en modo determinista … la GPU no debe quedar parada nunca"*;
+  again 2026-11-11, *"todo debe ser GPU nada en cpu"*, after pccr 2408's census held the card idle over an hour):
   measure first on the real session (cProfile / a timed log; pccr read-only or a copy under /workspace/tmp); the
   torch twin in float64 on ONE declared device with the numpy function KEPT as the path of record; a test holding
   both equal (exact for integer decisions and verdicts, 1e-9 for geometry); the device key typed (`numpy | cpu |
