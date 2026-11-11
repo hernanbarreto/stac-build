@@ -1908,6 +1908,39 @@ def _identity_judge(ious, bar: float, cfg: Optional[dict]) -> dict:
     return out
 
 
+def _overlap_pair_ious_numpy(prev_masks, curr_masks, overlap_frames, prev_obj_ids, curr_obj_ids,
+                             iou_threshold: float) -> Dict[Tuple[int, int], List[float]]:
+    """The IoU of every (prev, curr) pair in every overlap frame where BOTH appear, frames in order,
+    for the pairs some frame takes to the bar (the only ones the judge looks at) — the PATH OF RECORD
+    of ``segmentation.sam3_pairs_torch.overlap_pair_ious_t``."""
+    ious: Dict[Tuple[int, int], List[float]] = {}
+    for fidx in overlap_frames:
+        prev_fm = prev_masks.get(fidx, {})
+        curr_fm = curr_masks.get(fidx, {})
+
+        for pid in prev_obj_ids:
+            if pid not in prev_fm:
+                continue
+            pmask = prev_fm[pid].astype(bool)
+
+            for cid in curr_obj_ids:
+                if cid not in curr_fm:
+                    continue
+                cmask = curr_fm[cid].astype(bool)
+
+                # Handle resolution mismatch
+                if pmask.shape != cmask.shape:
+                    cmask = cv2.resize(cmask.astype(np.uint8),
+                                      (pmask.shape[1], pmask.shape[0]),
+                                      interpolation=cv2.INTER_NEAREST).astype(bool)
+
+                intersection = np.logical_and(pmask, cmask).sum()
+                union = np.logical_or(pmask, cmask).sum()
+                if union > 0:
+                    ious.setdefault((pid, cid), []).append(float(intersection / union))
+    return {k: v for k, v in ious.items() if max(v) >= iou_threshold}
+
+
 def _match_ids_iou(prev_masks: Dict[int, Dict[int, np.ndarray]],
                    curr_masks: Dict[int, Dict[int, np.ndarray]],
                    overlap_start: int, overlap_end: int,
@@ -1962,32 +1995,13 @@ def _match_ids_iou(prev_masks: Dict[int, Dict[int, np.ndarray]],
     prev_obj_ids = sorted(prev_obj_ids)
     curr_obj_ids = sorted(curr_obj_ids)
 
-    # the IoU of every (prev, curr) pair in every overlap frame where BOTH appear
-    ious: Dict[Tuple[int, int], List[float]] = {}
-    for fidx in overlap_frames:
-        prev_fm = prev_masks.get(fidx, {})
-        curr_fm = curr_masks.get(fidx, {})
-
-        for pid in prev_obj_ids:
-            if pid not in prev_fm:
-                continue
-            pmask = prev_fm[pid].astype(bool)
-
-            for cid in curr_obj_ids:
-                if cid not in curr_fm:
-                    continue
-                cmask = curr_fm[cid].astype(bool)
-
-                # Handle resolution mismatch
-                if pmask.shape != cmask.shape:
-                    cmask = cv2.resize(cmask.astype(np.uint8),
-                                      (pmask.shape[1], pmask.shape[0]),
-                                      interpolation=cv2.INTER_NEAREST).astype(bool)
-
-                intersection = np.logical_and(pmask, cmask).sum()
-                union = np.logical_or(pmask, cmask).sum()
-                if union > 0:
-                    ious.setdefault((pid, cid), []).append(float(intersection / union))
+    # the IoU of every (prev, curr) pair in every overlap frame where BOTH appear — on the
+    # evidence device (segmentation/sam3_pairs_torch.py, USER 2026-11-11: "todo debe ser GPU nada
+    # en cpu"); _overlap_pair_ious_numpy is the reference (tests/test_sam3_pairs_torch.py)
+    from reconstruction.surface_fit.hole_audit import evidence_device
+    from segmentation.sam3_pairs_torch import overlap_pair_ious_t
+    ious = overlap_pair_ious_t(prev_masks, curr_masks, overlap_frames, prev_obj_ids, curr_obj_ids,
+                               iou_threshold, evidence_device())
 
     # the judge, pair by pair (point 93); only the pairs that pass may link
     pairs = []
@@ -3270,6 +3284,52 @@ def _faces_and_voxels_numpy(xyz: np.ndarray, points: np.ndarray, indices: np.nda
     return result_indices, voxel_data, face_normals_summary, face_planes, local_face_id
 
 
+def _frame_pair_ious_numpy(batch_masks, iou_threshold: float):
+    """Every pair of ids seen together in a batch frame and its IoU there, frames in order (0 when the
+    areas are too far apart to reach the bar — the pixels need not be touched to know that; the frames
+    judged that way appended as zeros), returned for the pairs some frame takes to the bar, with every
+    mask's area {(frame, id): pixels} — the PATH OF RECORD of
+    ``segmentation.sam3_pairs_torch.frame_pair_ious_t``."""
+    areas: Dict[Tuple[int, int], int] = {}
+    # every frame where both ids appear is a judge: its IoU (0 when the areas are too far
+    # apart to reach the bar — the pixels need not be touched to know that)
+    ious: Dict[Tuple[int, int], List[float]] = {}
+    for frame_idx in sorted(batch_masks):
+        frame_masks = batch_masks[frame_idx]
+        items = []
+        for oid, m in frame_masks.items():
+            mb = m.astype(bool, copy=False)
+            items.append((int(mb.sum()), int(oid), mb))
+            areas[(int(frame_idx), int(oid))] = items[-1][0]
+        items.sort(key=lambda t: (t[0], t[1]))         # by area: IoU >= t needs areas within t
+        oids = sorted(int(o) for o in frame_masks)
+        for a in range(len(items)):
+            area_a, oid_a, mask_a = items[a]
+            if area_a == 0:
+                continue
+            for b in range(a + 1, len(items)):
+                area_b, oid_b, mask_b = items[b]
+                pair = (min(oid_a, oid_b), max(oid_a, oid_b))
+                if area_a < iou_threshold * area_b:    # areas too far apart — and sorted, so
+                    break                              # every later b is farther still
+                if mask_a.shape != mask_b.shape:
+                    continue
+                inter = int(np.logical_and(mask_a, mask_b).sum())
+                iou = inter / float(area_a + area_b - inter) if inter else 0.0
+                ious.setdefault(pair, []).append(iou)
+        # frames where both appear but one is far smaller / disjoint: IoU 0 — a judge too
+        for i, oa in enumerate(oids):
+            for ob in oids[i + 1:]:
+                ious.setdefault((oa, ob), [])
+    for pair in list(ious):
+        n_both = sum(1 for fm in batch_masks.values() if pair[0] in fm and pair[1] in fm)
+        vals = ious[pair]
+        if n_both > len(vals):                          # frames judged without touching pixels
+            vals = vals + [0.0] * (n_both - len(vals))
+        ious[pair] = vals
+    return ({k: v for k, v in ious.items() if v and max(v) >= iou_threshold}, areas)
+
+
 def _dedupe_masks_per_frame(batch_masks, iou_threshold: float, cfg: Optional[dict] = None,
                             record: Optional[list] = None):
     """Collapse object ids that SAM3 handed out for the SAME observation.
@@ -3308,41 +3368,12 @@ def _dedupe_masks_per_frame(batch_masks, iou_threshold: float, cfg: Optional[dic
         if ra != rb:
             parent[max(ra, rb)] = min(ra, rb)
 
-    # every frame where both ids appear is a judge: its IoU (0 when the areas are too far
-    # apart to reach the bar — the pixels need not be touched to know that)
-    ious: Dict[Tuple[int, int], List[float]] = {}
-    for frame_idx in sorted(batch_masks):
-        frame_masks = batch_masks[frame_idx]
-        items = []
-        for oid, m in frame_masks.items():
-            mb = m.astype(bool, copy=False)
-            items.append((int(mb.sum()), int(oid), mb))
-        items.sort(key=lambda t: (t[0], t[1]))         # by area: IoU >= t needs areas within t
-        oids = sorted(int(o) for o in frame_masks)
-        for a in range(len(items)):
-            area_a, oid_a, mask_a = items[a]
-            if area_a == 0:
-                continue
-            for b in range(a + 1, len(items)):
-                area_b, oid_b, mask_b = items[b]
-                pair = (min(oid_a, oid_b), max(oid_a, oid_b))
-                if area_a < iou_threshold * area_b:    # areas too far apart — and sorted, so
-                    break                              # every later b is farther still
-                if mask_a.shape != mask_b.shape:
-                    continue
-                inter = int(np.logical_and(mask_a, mask_b).sum())
-                iou = inter / float(area_a + area_b - inter) if inter else 0.0
-                ious.setdefault(pair, []).append(iou)
-        # frames where both appear but one is far smaller / disjoint: IoU 0 — a judge too
-        for i, oa in enumerate(oids):
-            for ob in oids[i + 1:]:
-                ious.setdefault((oa, ob), [])
-    for pair in list(ious):
-        n_both = sum(1 for fm in batch_masks.values() if pair[0] in fm and pair[1] in fm)
-        vals = ious[pair]
-        if n_both > len(vals):                          # frames judged without touching pixels
-            vals = vals + [0.0] * (n_both - len(vals))
-        ious[pair] = vals
+    # every frame where both ids appear is a judge (IoU 0 when the areas are too far apart to reach
+    # the bar) — the IoUs and the mask areas on the evidence device (segmentation/sam3_pairs_torch.py,
+    # USER 2026-11-11: "todo debe ser GPU nada en cpu"); _frame_pair_ious_numpy is the reference
+    from reconstruction.surface_fit.hole_audit import evidence_device
+    from segmentation.sam3_pairs_torch import frame_pair_ious_t
+    ious, areas = frame_pair_ious_t(batch_masks, iou_threshold, evidence_device())
     for (oid_a, oid_b), vals in sorted(ious.items()):
         if not vals or max(vals) < iou_threshold:
             continue                                   # no frame reaches the bar: nothing to judge
@@ -3361,13 +3392,15 @@ def _dedupe_masks_per_frame(batch_masks, iou_threshold: float, cfg: Optional[dic
     collapsed = {}
     for frame_idx, frame_masks in batch_masks.items():
         out = {}
+        out_area: Dict[int, int] = {}
         for oid, m in frame_masks.items():
             root = find(oid)
             prev = out.get(root)
             # the survivor keeps the LARGER mask: the copies agree by IoU, so
             # this only picks up the few pixels one of them saw and the other missed
-            if prev is None or m.astype(bool).sum() > prev.astype(bool).sum():
+            if prev is None or areas[(int(frame_idx), int(oid))] > out_area[root]:
                 out[root] = m
+                out_area[root] = areas[(int(frame_idx), int(oid))]
         collapsed[frame_idx] = out
     n_collapsed = sum(1 for oid in parent if find(oid) != oid)
     return collapsed, n_collapsed
@@ -4644,6 +4677,21 @@ def _match_points_numpy(masks_data, mask_keys, obj_ids, frame_groups: Dict[int, 
             areas_by_oid_frame)
 
 
+def _near_ties_numpy(point_obj_id, point_mask_area, second_obj_id, second_area, area_var: Dict[int, float],
+                     error_factor: float) -> Tuple[int, int, int]:
+    """(contested points, near-ties, exact ties) of the smaller-area rule (point 117): a contested point's
+    two smallest areas closer than error_factor x the larger measured frame-to-frame area variation of the
+    two masks — the PATH OF RECORD of ``segmentation.mask_match_torch.near_ties_t``."""
+    contested = np.flatnonzero(np.isfinite(second_area))
+    if not len(contested):
+        return 0, 0, 0
+    var_best = np.asarray([area_var.get(int(o), 0.0) for o in point_obj_id[contested]])
+    var_second = np.asarray([area_var.get(int(o), 0.0) for o in second_obj_id[contested]])
+    gap = second_area[contested] - point_mask_area[contested]
+    near = gap < error_factor * np.maximum(var_best, var_second)
+    return int(len(contested)), int(near.sum()), int((gap == 0).sum())
+
+
 def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
                           cfg_source: Optional[str] = None, stage_dir=None,
                           build_octree: bool = True) -> dict:
@@ -4851,24 +4899,20 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
     # smallest areas differ by less than error_factor x the measured frame-to-frame
     # variation of those masks' areas — counted and declared, the rule unchanged
     area_var = _area_variation_by_oid(areas_by_oid_frame)
-    contested = np.flatnonzero(np.isfinite(second_area))
-    if len(contested):
-        var_best = np.asarray([area_var.get(int(o), 0.0) for o in point_obj_id[contested]])
-        var_second = np.asarray([area_var.get(int(o), 0.0) for o in second_obj_id[contested]])
-        gap = second_area[contested] - point_mask_area[contested]
-        near = gap < error_factor * np.maximum(var_best, var_second)
-        n_near = int(near.sum())
-        exact = int((gap == 0).sum())
-    else:
-        n_near, exact = 0, 0
+    # on the evidence device (segmentation/mask_match_torch.near_ties_t, USER 2026-11-11: "todo debe ser
+    # GPU nada en cpu" — pccr 2026-08-24: 92.6 M contested points through two Python list
+    # comprehensions); _near_ties_numpy is the reference
+    from segmentation.mask_match_torch import near_ties_t
+    n_contested, n_near, exact = near_ties_t(point_obj_id, point_mask_area, second_obj_id, second_area,
+                                             area_var, error_factor, evidence_device())
     decisions["mask_area_near_ties"] = {
         "rule": "a point inside two masks goes to the smaller area (tie: the lower id) — kept; "
                 "near-ties = gap < error_factor x the masks' measured frame-to-frame area variation",
-        "n_points_contested": int(len(contested)), "n_points_near_tie": n_near,
+        "n_points_contested": int(n_contested), "n_points_near_tie": n_near,
         "n_points_exact_tie": exact,
         "area_variation_median_px": float(np.median(list(area_var.values()))) if area_var else 0.0}
     if n_near:
-        print(f"[SegPipeline]   ⚖ {n_near:,} of {len(contested):,} contested point(s) sit within the "
+        print(f"[SegPipeline]   ⚖ {n_near:,} of {n_contested:,} contested point(s) sit within the "
               f"masks' own area variation of the smaller-area rule — declared, rule unchanged")
     del second_area, second_obj_id
 

@@ -260,6 +260,19 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   diciembre uno de los puntos a mejorar es justamente la velocidad"). Reference: pccr 2408 (2765 kf, 150 concepts)
   VLM 48.5 min + SAM3 ~10.5 h at ~4.1 min / concept even with the shared backbone (3ccb7c6); pccr 3108 (547 kf,
   87 concepts) SAM3 1 h 43 min. Robustness stays the bar: speed is never bought with a lost mask or a looser geometry.
+- GPU, WHAT IS LEFT ON THE CPU (USER 2026-11-11: "todas las etapas deben ser en GPU"; inventory measured on pccr 3108,
+  cProfile of the projection and the floor). ON HIS WORD, because moving them changes the result: (1) the OBB's
+  seeded numpy draws — the vertical-plane RANSAC triplets and the footprint bootstrap's uniforms (~110 s of pccr
+  3108's projection; most of pccr 2408's per-object loop) — another generator draws other hypotheses, other boxes;
+  (2) GenRecon's UV parameterisation of each chunk (a CPU library; 8 of pccr 3108's 28 min). Declared CPU: npz /
+  zlib decompression (the audit's mask reads: ~96 s on pccr 3108), sqlite (the instance store), PotreeConverter,
+  JPEG, GenRecon's own image undistortion (vendor). Ported 2026-11-11, identical results: the mask→point match, the
+  audit's dilation, the split's cloud extent, SAM3's batch IoUs and per-frame dedupe, the near-tie counts.
+- THE PROJECTION'S AUDIT READS THE PREVIOUS PROJECTION'S FUSION MAP (found 2026-11-11, not fixed — on his word):
+  `MaskAudit.obj_of` = `segmentation.erase._mask_obj_by_iid` = the FUSED view (fusion_map.json of the last
+  projection), so a RE-projection audits the parts that map folded as "instance has no mask object id" (pccr 3108
+  copy: 13 floor parts, 8,593 marks different). A SAM3 run deletes the map first, so SAM3 → projection is not
+  affected; a projection-only re-run is (the docstring promises "a pure function of its inputs").
 - GENRECON INVENTS FLOOR-LEVEL SURFACE (USER 2026-11-09: "tiene eso que no sé qué es ahí abajo … en la nube ahí no hay
   nada" / "dejalo anotado, lo vemos después"). Measured on zaragoza's genrecon_photo (10 points per voxel, 5 mm cloud):
   36.5 % of the mesh area (423 of 1160 m²) has no cloud point within one GenRecon voxel (11.56 cm) — 79 m² at

@@ -163,3 +163,33 @@ def match_points_t(masks_path, obj_ids: Sequence[int], frame_groups: Dict[int, n
         obj_mask_areas[oid] = np.mean([a for _, a in fa]) if fa else 0
     return (point_obj_id, point_mask_area, second_obj_id, second_area, obj_mask_areas,
             areas_by_oid_frame)
+
+
+def near_ties_t(point_obj_id: np.ndarray, point_mask_area: np.ndarray, second_obj_id: np.ndarray,
+                second_area: np.ndarray, area_var: Dict[int, float], error_factor: float, device: str,
+                block: int = 50_000_000) -> Tuple[int, int, int]:
+    """``segmentation.pipeline._near_ties_numpy`` on ``device``: the per-object area variations as a table
+    indexed by id (0.0 for an id without one — the record's ``dict.get`` default), the same float64
+    elementwise arithmetic, counted in blocks of points."""
+    dev = torch.device(device)
+    top = max([int(point_obj_id.max(initial=-1)), int(second_obj_id.max(initial=-1))]
+              + [int(k) for k in area_var]) + 1
+    table_np = np.zeros(max(top, 1), np.float64)
+    for k, v in area_var.items():
+        table_np[int(k)] = float(v)
+    table = torch.as_tensor(table_np, device=dev)
+    n_cont = n_near = n_exact = 0
+    for a in range(0, len(second_area), block):
+        sa = torch.as_tensor(second_area[a:a + block], device=dev)
+        cont = torch.isfinite(sa)
+        if not bool(cont.any()):
+            continue
+        pa = torch.as_tensor(point_mask_area[a:a + block], device=dev)[cont]
+        ob = torch.as_tensor(point_obj_id[a:a + block], device=dev)[cont].to(torch.int64)
+        os_ = torch.as_tensor(second_obj_id[a:a + block], device=dev)[cont].to(torch.int64)
+        gap = sa[cont] - pa
+        bar = float(error_factor) * torch.maximum(table[ob], table[os_])
+        n_cont += int(cont.sum())
+        n_near += int((gap < bar).sum())
+        n_exact += int((gap == 0).sum())
+    return n_cont, n_near, n_exact

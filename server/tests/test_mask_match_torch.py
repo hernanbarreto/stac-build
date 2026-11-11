@@ -95,3 +95,24 @@ def test_a_mask_on_another_grid_fails_naming_it(tmp_path):
     with pytest.raises(RuntimeError, match="f0_o1 is"):
         match_points_t(path, [1], fg, {0: 0}, np.zeros(5, np.int64), np.zeros(5, np.int64), 5, H, W, 0,
                        None, "cpu", log=lambda m: None)
+
+
+@pytest.mark.parametrize("seed", [0, 1])
+def test_the_near_ties_on_the_device_are_the_records(seed):
+    """The near-ties of the smaller-area rule (point 117) counted on the device: the same three counts as
+    the record's per-point dictionary lookups — ids without a measured variation (0.0), exact ties,
+    uncontested points (inf), blocks smaller than the cloud."""
+    from segmentation.mask_match_torch import near_ties_t
+    rng = np.random.default_rng(seed)
+    n = 20_000
+    best = rng.integers(0, 60, n).astype(np.int32)
+    second = rng.integers(0, 60, n).astype(np.int32)
+    pa = rng.integers(10, 500, n).astype(np.float64)
+    sa = pa + rng.integers(0, 40, n)
+    sa[rng.random(n) < 0.3] = np.inf                                 # uncontested
+    tie = rng.random(n) < 0.05
+    sa[tie] = pa[tie]                                                # exact ties
+    var = {int(k): float(rng.random() * 30) for k in rng.choice(60, 40, replace=False)}
+    ref = P._near_ties_numpy(best, pa, second, sa, var, 1.1)
+    new = near_ties_t(best, pa, second, sa, var, 1.1, "cpu", block=3_000)
+    assert ref == new and ref[1] > 0 and ref[2] > 0
