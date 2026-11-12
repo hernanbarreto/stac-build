@@ -23,7 +23,9 @@ ahorramos ese paso"): with no room left every name it found would be recorded "n
 """
 from __future__ import annotations
 
+import functools
 import json
+import math
 import re
 import time
 from collections import Counter
@@ -256,6 +258,51 @@ def greyed(image, mask: Optional[np.ndarray]):
     return Image.fromarray(img)
 
 
+@functools.lru_cache(maxsize=64)
+def nearest_index(src: int, dst: int) -> tuple:
+    """The source sample of every destination sample of ``cv2.resize(..., INTER_NEAREST)`` along one axis
+    (OpenCV resize.cpp, resizeNN: ``floor(x * (1 / (dst / src)))`` in doubles, held inside the source)."""
+    inv = 1.0 / (float(dst) / float(src))
+    return tuple(min(int(math.floor(x * inv)), src - 1) for x in range(dst))
+
+
+def resize_nearest(mask, height: int, width: int):
+    """A (h, w) map on a device at another grid — ``cv2.resize(mask, (width, height), INTER_NEAREST)``, the same
+    samples, taken on the map's device."""
+    import torch
+    iy = torch.tensor(nearest_index(int(mask.shape[0]), int(height)), dtype=torch.int64, device=mask.device)
+    ix = torch.tensor(nearest_index(int(mask.shape[1]), int(width)), dtype=torch.int64, device=mask.device)
+    return mask.index_select(0, iy).index_select(1, ix)
+
+
+def greyed_frame(path, mask: Optional[np.ndarray], device: Optional[str]):
+    """:func:`greyed` of a frame FILE with its decode and its painting on ``device`` (USER 2026-11-11: "Nada debe
+    hacerse en cpu"). "cuda": the frame is decoded on the card (jpeg_gpu: PIL's pixels, bit for bit), the mask is
+    brought to the frame's grid by cv2's own nearest samples and painted there, and the image comes back for
+    its encoding; None / "cpu": THE RECORD, ``greyed(Image.open(path), mask)``. The same image either way.
+
+    MEASURED 2026-11-12 (A100) on every keyframe a round shows the VLM, painted with the session's real store,
+    read-only — pccr 2026-08-31: 547 frames (94.8 % of their pixels grey), pccr 2026-08-24: 2,765 frames (93.3 %):
+    0 images differ, 0 JPEG payloads differ; 13.8 / 14.7 ms a frame by the record → 4.75 / 5.35 ms on the card (the
+    file's read included). The mask's grid was the frame's on every one of them (the other-grid case: the tests).
+    Stays on the CPU, declared: the store's union comes back as numpy maps (the mask travels numpy → card) and the
+    greyed image's JPEG encode for the VLM (1.1–1.2 ms a frame)."""
+    from PIL import Image
+    if device in (None, "cpu"):
+        return greyed(Image.open(path), mask)
+    import torch
+    import jpeg_gpu
+    rgb = jpeg_gpu.read_rgb([path], device)[0]
+    if mask is not None and mask.any():
+        if mask.dtype != np.bool_:
+            raise TypeError(f"the grey painting takes a bool mask (got {mask.dtype}) — {path}")
+        m = torch.from_numpy(np.ascontiguousarray(mask)).to(rgb.device)
+        if tuple(m.shape) != tuple(rgb.shape[:2]):
+            m = resize_nearest(m, int(rgb.shape[0]), int(rgb.shape[1]))
+        rgb = torch.where(m[..., None], torch.tensor(GREY, dtype=torch.uint8, device=rgb.device), rgb)
+    return Image.fromarray(rgb.cpu().numpy())
+
+
 def select_fresh(counts: Counter, have: set, policy) -> tuple:
     """The names a round proposes for the first time: (fresh, single_witness_dropped,
     generic_dropped), most proposed first. A name already prompted or decided (``have``, by
@@ -308,7 +355,7 @@ def run_round(session_dir, config: dict, k: int, *, log: Callable[[str], None] =
               cancelled: Optional[Callable[[], bool]] = None) -> dict:
     """Round ``k`` (>= 2) of the VLM: returns (and records in output/seg_rounds.json) the round,
     its ``new_prompts`` first."""
-    from PIL import Image
+    from reconstruction.surface_fit.hole_audit import evidence_device
     from semantic.client import get_semantic_client
     from semantic.parallel import (Job, concurrency_plan, cost_of, engine_kv_cache, plan_line,
                                    run_ordered, self_check_judges)
@@ -348,6 +395,7 @@ def run_round(session_dir, config: dict, k: int, *, log: Callable[[str], None] =
     _p(2, f"round {k}: painting what {len(existing)} prompt(s) already segmented grey on "
           f"{len(frames)} keyframe(s)")
     masks = segmented_masks(out)
+    device = evidence_device()                        # the frames decoded and painted there
 
     client = get_semantic_client(backend=backend, consumer=f"phase1.understand.round{k}")
     kv = engine_kv_cache(client, log=lambda m: log(f"{LOG_TAG} {m}"))
@@ -365,7 +413,7 @@ def run_round(session_dir, config: dict, k: int, *, log: Callable[[str], None] =
 
     def _jobs():
         for f, fn in frames:
-            img = greyed(Image.open(frames_dir / fn), masks.get(f))
+            img = greyed_frame(frames_dir / fn, masks.get(f), device)
             yield Job(fn=(lambda img=img, f=f: understand_frame(
                 client, img, f, max_tokens=max_tokens, extra=_EXTRA, prompt=base_prompt)),
                 cost=cost_of(conc, foot))
