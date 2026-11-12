@@ -315,6 +315,21 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   ocurre detienes todo corregís el error y lanzas desde el punto donde falló"): zaragoza, bufferStop, observatorio —
   VLM → SAM3 → GenRecon (confidence 0) on the cloud on disk, replace OFF, launched 2026-11-12 00:33 CDMX on main
   bcbfe3e. Volume before it: ~382 GB of the 450 GB quota (miniforge3 176, stac-build 181, hf_cache 17).
+  DONE 05:14 CDMX in 4 h 41 min: the three ended ✅ with no failure and no relaunch — the first production runs of
+  the five GPU ports. His eye on the three is PENDING.
+  · zaragoza (1 h 59 min): 408 segments; floor tilt 2.75°, height −74.3 cm; mesh 8,804,677 faces / 73 primitives
+    in 145 tiles, depth 7, 928 MB.
+  · bufferStop (59 min): 347 segments (96.87 % of 3,837,478 points); mesh 1,293,670 faces / 12 primitives in 23
+    tiles, depth 4, 133 MB. The floor step turned it 92.68° on the segmented floor (904,060 pts under 174 of 174
+    cameras, 0.95 m below; 92.74° on 11-08), the advisory plausibility gate failed and declared. Measured after
+    it: the cameras' path is horizontal (thin axis 0.6° from y, the cameras 0.84–0.98 m over the floor) — so the
+    cloud ON DISK was on its side before the floor step, against §0's "comes out STANDING" (his eye, 2026-11-11):
+    not investigated, his eye says which holds in the viewer. SAM3 ran out of card memory twice on the prompt
+    'rock' (after 96 of 174 frames, then 48 of 88); the pipeline's own window path closed it (781 objects).
+  · observatorio (1 h 43 min): 529 segments (99.80 % of 23,374,569 points); floor tilt 3.25°, height −36.7 cm;
+    mesh 9,991,750 faces / 82 primitives in 163 tiles, depth 7, 997 MB.
+  Every session now holds cloud + segmentation + GenRecon mesh in tiles: pccr 2408, pccr 3108, zaragoza,
+  bufferStop, observatorio.
 - THE PROJECTION'S AUDIT READS THE PREVIOUS PROJECTION'S FUSION MAP (found 2026-11-11, not fixed — on his word):
   `MaskAudit.obj_of` = `segmentation.erase._mask_obj_by_iid` = the FUSED view (fusion_map.json of the last
   projection), so a RE-projection audits the parts that map folded as "instance has no mask object id" (pccr 3108
