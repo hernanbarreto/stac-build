@@ -266,15 +266,55 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   per-frame dedupe, the near-tie counts, and the mask store inflated ON THE CARD by nvCOMP
   (segmentation/mask_store_gpu.py; nvidia-nvcomp-cu12 6.0.0.12 installed in da3 — NVIDIA's licence, not open
   source). pccr 3108's projection: 967 s → 535 s (under the queue's contention). THE BOXES: the OBB end to end on
-  the device with torch's generator for its draws is written (branch obb-device-draws, NOT merged): on pccr 3108
-  every object, point, class, fusion and audit mark identical, but 421 of 1363 boxes turned > 5° (median 1.5°,
-  max 45°; centre p95 8 cm, extent up to 1.6 m) — the box's yaw depends on the RANSAC draw itself for about a
-  third of the objects (numpy with another seed would turn them too). Waiting for his eye on pccr 3108's boxes;
-  the way to make the yaw independent of the draw is enough RANSAC iterations for the same planes every time —
-  to measure on his word. Still on the CPU: SAM3's vendor tracker logic (Python control, the GPU ~50 % busy
-  during SAM3), GenRecon's UV parameterisation (xatlas inside cumesh; a GPU replacement is a project) and its
-  vendor image undistortion (cv2.undistort), the floor's warp (seconds; a GPU warp differs in the last bit), the
-  fragment consolidation (< 20 s), the rounds' grey painting, JPEG decode / encode; disk, sqlite, PotreeConverter.
+  the device with torch's generator for its draws, ON MAIN since 2026-11-12 (eb57ad9, his "dije ok a todo"): on
+  pccr 3108 every object, point, class, fusion and audit mark identical, but 421 of 1363 boxes turned > 5° (median
+  1.5°, max 45°; centre p95 8 cm, extent up to 1.6 m) — the box's yaw depends on the RANSAC draw itself for about
+  a third of the objects (numpy with another seed would turn them too). His eye on the boxes is still pending; the
+  way to make the yaw independent of the draw is enough RANSAC iterations for the same planes every time — to
+  measure on his word.
+  DONE 2026-11-12, main bcbfe3e (the night's order: "Termina de una puta vez con la implementación de los 6 puntos
+  a GPU"), each measured on real sessions with the CPU function kept as the record:
+  · the SAM3 mask store DEFLATED on the card (dc25e01; nvCOMP's Deflate, the CRC-32 on the device, every stream
+    verified after the encode): pccr 3108 55,079 masks 81.1 → 19.6 s, pccr 2408 290,418 masks 1280.1 → 93.3 s. The
+    card's store is 2.2× LARGER (65.5 → 143.8 MB, 349.2 → 771.7 MB); the server's interactive edits stay on zlib.
+  · JPEG DECODE on the card (f19e34e, jpeg_gpu.py: nvJPEG's planes, libjpeg-turbo's integer upsampling and colour
+    conversion on the device = PIL bit for bit): 20,279 frames of five sessions, 0 differ; 0.215 ms a frame
+    against 2.485 ms; SAM3's frame loader 30–36 → 4.1–4.5 ms a frame.
+  · the rounds' grey painting (de3f756): 547 + 2,765 frames, 0 images differ; 13.8 / 14.7 → 4.75 / 5.35 ms a frame.
+  · GenRecon's input preparation (a7af592, `genrecon.adapter_device`): every output file byte-identical on pccr
+    3108 and pccr 2408; 28.0 → 21.6 s and 121.2 → 63.5 s.
+  · GenRecon's frame undistortion (bcbfe3e, `genrecon.undistort_device`): the same 916 files on bufferStop,
+    observatorio and pccr 3108 — and NO TIME GAINED (≈ 3 s either way; the JPEG encode that stays weighs the most).
+  NOT DONE — GenRecon's UV unwrap. Measured 2026-11-12 on three baked chunks of pccr (147–149 k faces each): 7.6 /
+  16.4 / 19.1 s a chunk, 97–98.5 % of it xatlas on the CPU (add_mesh, compute_charts, pack_charts) against
+  0.22–0.34 s of cumesh's clustering on the card. A GPU atlas gives OTHER UVs, so other textures: it cannot be
+  held identical and needs his eye — a project, on his word.
+  Still on the CPU, declared: SAM3's vendor tracker logic (Python control, the GPU ~50 % busy during SAM3), the UV
+  unwrap above, every JPEG ENCODE (the VLM's views, the greyed frames, GenRecon's undistorted frames: another
+  encoder writes other bytes), vLLM's own image decode, the floor's warp (seconds; a GPU warp differs in the last
+  bit), the fragment consolidation (< 20 s); disk, sqlite, PotreeConverter.
+  THE POD'S THREADS (found 2026-11-12): `nproc` shows the host's 252 cores and the cgroup grants 26.35 CPUs — a
+  torch / BLAS job left to its own thread count is throttled to a crawl (18 frames in ~170 s). Every CPU job runs
+  with OMP_NUM_THREADS set (run_cloud.sh: 8; the tests: 4).
+  THE SUITE (2026-11-12): with the card hidden 2,191 pass, 47 skip, 13 FAIL; the 16 files with card tests pass on
+  the card (202). The 13 fail THE SAME on 89688c0 and on bcbfe3e, run alone with the card visible — not from these
+  ports, not investigated (on his word): test_chunked_metric × 3, test_intake_focal × 2, test_intake_run × 3,
+  test_omega_complete × 1, test_p5_orchestration × 1, test_potree_preview × 1, test_precision_runner × 2. Tests
+  that need the vendor trees cannot run in a bare worktree: the suite runs in the main tree on gpu-main's commit
+  (`git checkout --detach gpu-main`), then main is fast-forwarded.
+- GENRECON AT SCALE (USER 2026-11-12: "arreglá genrecon y hacelo escalable que pueda manejar nubes masivas" / "la
+  regla es que se continúa desde el punto de falla" / "Ok córrelo y publícalo con los tiles" / "Y aplica la
+  corrección para que no vuelva a ocurrir"): pccr 2408's mesh published as tiles — 126 primitives, 16,641,666
+  triangles, 251 tiles, depth 7, 1.80 GB, tiled in 618 s. 494c2e4 (the scene images DINO-encoded in batches, the
+  projection's voxel batch cut to the images), eecca95 (the remesh retry at a resolution cumesh accepts; a failed
+  mesh step resumes AT the mesh step), 89688c0 (the tiler never writes an empty primitive). node / WebAssembly
+  never under `ulimit -v`. Known, on his word: no resume AT THE TILES step; the global remesh is computed twice;
+  the stage script's `set -x` prints the HF token into the logs (never quote a log unfiltered).
+- THE NIGHT'S QUEUE (USER 2026-11-12: "Cuando termines de implementar todas y queden en main listas, lanzas el
+  resto de las sesiones que quedan desde el vlm al genrecon … no puede quedar el Pod sin trabajar, si alguna falla
+  ocurre detienes todo corregís el error y lanzas desde el punto donde falló"): zaragoza, bufferStop, observatorio —
+  VLM → SAM3 → GenRecon (confidence 0) on the cloud on disk, replace OFF, launched 2026-11-12 00:33 CDMX on main
+  bcbfe3e. Volume before it: ~382 GB of the 450 GB quota (miniforge3 176, stac-build 181, hf_cache 17).
 - THE PROJECTION'S AUDIT READS THE PREVIOUS PROJECTION'S FUSION MAP (found 2026-11-11, not fixed — on his word):
   `MaskAudit.obj_of` = `segmentation.erase._mask_obj_by_iid` = the FUSED view (fusion_map.json of the last
   projection), so a RE-projection audits the parts that map folded as "instance has no mask object id" (pccr 3108
