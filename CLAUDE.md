@@ -351,6 +351,18 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   verdadero desastre, inventa partes donde no existe genera enormes huecos donde si hay nube"*. TWO defects: the
   surface invented at and under the floor (every session) and LARGE HOLES WHERE THE CLOUD IS (bufferStop, pccr 2408,
   pccr 3108) — the holes not measured yet.
+  ROOT CAUSES MEASURED 2026-11-12 (USER: "avanza con las mediciones y encontra la causa raiz de todos los errores, la
+  malla debe ser correcta"; scratchpad mesh_vs_cloud.py, tiles_vs_cloud.py, render_views.py — open3d CUDA search):
+  (1) INVENTED = THE SOLID-GROUND FILL. 25–72 % of each published mesh lies beyond one voxel (11.56 cm) of the cloud
+  (zaragoza 2233 of 3090 m², pccr 2408 1376 of 3554, pccr 3108 259 of 625, observatorio 416 of 1253, bufferStop 23 of
+  90) and 92–99.8 % of that area sits in FILL voxels. plan_layout fills every column holding ANY active voxel at the
+  height of any of the 3–8 support levels (not only the floor's points) down to the LATTICE base — zaragoza 1.16 m
+  under the floor (a layer added because the cloud reaches −1.19 m), bufferStop / observatorio 23 cm; the fill is
+  37–69 % of the active voxels. (2) HOLES = THE GENERATED SUB-VOXEL GEOMETRY. The cloud decides only which voxels are
+  active; 99.5–99.8 % of the cloud has mesh within one voxel but only 54–73 % within 3 cm. From bufferStop's
+  keyframes, 3–12 % of the cloud's pixels meet NO mesh (vegetation, fence: fragments) and 10–20 % meet it > 10 cm
+  behind (the gravel as lumps). The decoder's own mesh.ply gives the same; fill_holes, the remesh, the per-chunk
+  simplification and every level of the tiles add nothing (3D holes 0.13–0.32 % at every tile depth).
 - The pipeline's and the general lists: `docs/pipeline_final.md` §4 — capture distance (when he says), the weighted
   vote (his word), smarter segmentation, epoch renumbering, the GPU ports of the intake, MEJORAS_OBLIGATORIAS
   (never built), the brush lock, the BIM comparison, viewer checks; station's heavy residual tail (USER 2026-11-08
