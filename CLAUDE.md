@@ -316,7 +316,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   VLM → SAM3 → GenRecon (confidence 0) on the cloud on disk, replace OFF, launched 2026-11-12 00:33 CDMX on main
   bcbfe3e. Volume before it: ~382 GB of the 450 GB quota (miniforge3 176, stac-build 181, hf_cache 17).
   DONE 05:14 CDMX in 4 h 41 min: the three ended ✅ with no failure and no relaunch — the first production runs of
-  the five GPU ports. His eye on the three is PENDING.
+  the five GPU ports. His eye on the GenRecon meshes, 2026-11-12: a disaster (GENRECON INVENTS FLOOR-LEVEL
+  SURFACE below); the clouds and the segmentations not judged yet.
   · zaragoza (1 h 59 min): 408 segments; floor tilt 2.75°, height −74.3 cm; mesh 8,804,677 faces / 73 primitives
     in 145 tiles, depth 7, 928 MB.
   · bufferStop (59 min): 347 segments (96.87 % of 3,837,478 points); mesh 1,293,670 faces / 12 primitives in 23
@@ -344,6 +345,12 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   support level's active columns down to the lattice base (plan_layout, USER 2026-11-08 "el suelo es sólido", against
   the double floor). Proposed test: one zaragoza GenRecon without that fill, measured the same way
   (scratchpad mesh_support.py: faces vs nearest cloud point).
+  USER 2026-11-12 (~07:57 CDMX, looking at the meshes of zaragoza, bufferStop, pccr 2408 and pccr 3108): *"fijate
+  zaragoza, tiene mucha malladebajo que no hay nube ahi, pero ademas por ejemplo bufferstop donde si hay nube hay
+  enormes huecos, lo mismo sucede en pccr2408 y en el 3108 lo mismo un genrecon desastroso las capas de piso, es un
+  verdadero desastre, inventa partes donde no existe genera enormes huecos donde si hay nube"*. TWO defects: the
+  surface invented at and under the floor (every session) and LARGE HOLES WHERE THE CLOUD IS (bufferStop, pccr 2408,
+  pccr 3108) — the holes not measured yet.
 - The pipeline's and the general lists: `docs/pipeline_final.md` §4 — capture distance (when he says), the weighted
   vote (his word), smarter segmentation, epoch renumbering, the GPU ports of the intake, MEJORAS_OBLIGATORIAS
   (never built), the brush lock, the BIM comparison, viewer checks; station's heavy residual tail (USER 2026-11-08
