@@ -17,6 +17,12 @@
  * surface over its UV area), never under its children's. Textures: KTX2 (Basis UASTC + zstd, mipmaps generated) —
  * they stay compressed on the card. Geometry: quantized + EXT_meshopt_compression, as compress_glb.mjs.
  *
+ * NEVER AN EMPTY PRIMITIVE (pccr 2026-08-24, 2026-11-12: a speck of 8 triangles in 1.4 cm, its budget one triangle
+ * at height 3, came back from the simplifier with NO triangle; written as an empty primitive it stopped the meshopt
+ * encoder — "Assertion failed" — after 223 of 251 tiles). A primitive the simplifier leaves with no triangle keeps
+ * the geometry, and the error, of the tile below: a tile never loses a primitive. A primitive of the SOURCE with no
+ * triangle has nothing to tile and is left out, declared in the log and the report.
+ *
  * Usage: node tile_mesh.mjs <in.glb> <out dir> [--jobs N] [--uastc-quality Q]
  *   <out dir>/tileset.json + tile_<id>.glb + tiles_report.json, built in <out dir>.part and renamed at the end (a
  *   viewer never reads half a tileset). asset.gltfUpAxis "Z": 3d-tiles-renderer applies no axis turn then — the
@@ -229,17 +235,22 @@ async function main() {
   // 1 GiB pieces into one buffer (Node allows up to 4 GiB; a GLB counts its length in 32 bits anyway) and parsed from it
   const src = inPath.toLowerCase().endsWith('.glb') ? await io.readBinary(readLarge(inPath)) : await io.read(inPath);
   const items = [];
+  let empty = 0;                                    // primitives of the source with no triangle: nothing to tile
   for (const scene of src.getRoot().listScenes()) {
     scene.traverse(node => {
       const mesh = node.getMesh();
       if (!mesh) return;
       const M = node.getWorldMatrix();
-      for (const prim of mesh.listPrimitives()) items.push(extract(prim, M, items.length));
+      for (const prim of mesh.listPrimitives()) {
+        const it = extract(prim, M, items.length);
+        if (it.idx.length >= 3) items.push(it); else empty += 1;
+      }
     });
   }
-  if (items.length === 0) throw new Error(`${inPath}: no mesh primitive`);
+  if (items.length === 0) throw new Error(`${inPath}: no mesh primitive${empty ? ` with a triangle (${empty} without)` : ''}`);
   const nTri = items.reduce((s, it) => s + it.idx.length / 3, 0);
   log(`${inPath}: ${items.length} primitives, ${nTri.toLocaleString('en')} triangles (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
+  if (empty) log(`${empty} primitive(s) of the source have no triangle — left out of the tiles`);
 
   const tree = build(items);
   let nextId = 0;
@@ -292,6 +303,16 @@ async function main() {
   await mkdir(part, { recursive: true });
   const wio = new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies({ 'meshopt.encoder': MeshoptEncoder });
   const simplified = new Map();                     // `${index}:${h}` → { idx, err }
+  // what the tile below holds of a primitive: its entry at the nearest lower height (a primitive is in one tile per
+  // height of its path, its own leaf at 0, and the tiles are written children first)
+  const below = (it, h) => {
+    for (let k = h - 1; k >= 0; k--) {
+      const e = simplified.get(`${it.index}:${k}`);
+      if (e) return e;
+    }
+    throw new Error(`primitive ${it.index}: no tile under height ${h} holds it`);
+  };
+  const keptBelow = new Set();                      // the primitives the simplifier left with no triangle somewhere
   const report = [];
   const t2 = Date.now();
   // children before parents: a parent's geometricError is never under its children's
@@ -301,7 +322,7 @@ async function main() {
     doc.createExtension(KHRTextureBasisu).setRequired(true);
     const mesh = doc.createMesh();
     doc.createScene().addChild(doc.createNode().setMesh(mesh));
-    let ge = 0, tris = 0, simplErr = 0, texel = 0;
+    let ge = 0, tris = 0, simplErr = 0, texel = 0, nKept = 0;
     for (const it of node.items) {
       const key = `${it.index}:${node.h}`;
       if (!simplified.has(key)) {
@@ -309,10 +330,13 @@ async function main() {
         else {
           const target = Math.max(3, Math.floor(it.idx.length / 3 / 2 ** node.h) * 3);
           const [idx, err] = MeshoptSimplifier.simplify(it.idx, it.pos, 3, target, NO_ERROR_BOUND, ['LockBorder', 'ErrorAbsolute']);
-          simplified.set(key, { idx, err });
+          // the simplifier can leave a small closed piece with NO triangle (the header): the tile then holds the
+          // piece as the tile below does, with that geometry's error — never an empty primitive
+          simplified.set(key, idx.length >= 3 ? { idx, err } : { ...below(it, node.h), kept: true });
         }
       }
-      const { idx, err } = simplified.get(key);
+      const { idx, err, kept } = simplified.get(key);
+      if (kept) { nKept += 1; keptBelow.add(it.index); }
       const c = compact(it, idx);
       tris += idx.length / 3;
       simplErr = Math.max(simplErr, err);
@@ -348,10 +372,12 @@ async function main() {
     const file = path.join(part, `tile_${node.id}.glb`);
     await wio.write(file, doc);
     const bytes = (await stat(file)).size;
-    report.push({ id: node.id, h: node.h, primitives: node.items.length, triangles: tris, bytes,
+    report.push({ id: node.id, h: node.h, primitives: node.items.length, triangles: tris, kept_from_below: nKept, bytes,
                   simplification_error_m: simplErr, texel_m: texel, geometric_error_m: ge });
   }
   log(`${nodes.length} tiles written (${((Date.now() - t2) / 1000).toFixed(0)} s)`);
+  const keptList = [...keptBelow].sort((p, q) => p - q);
+  if (keptList.length) log(`${keptList.length} primitive(s) kept the geometry of the tile below where the simplifier left them no triangle: ${keptList.join(', ')}`);
 
   const box = (node) => {
     const lo = [0, 1, 2].map(k => Math.min(...node.items.map(it => it.min[k])));
@@ -371,9 +397,11 @@ async function main() {
   await writeFile(path.join(part, 'tiles_report.json'), JSON.stringify({
     source: path.resolve(inPath), source_bytes: (await stat(inPath)).size, primitives: items.length, triangles: nTri,
     tiles: nodes.length, depth: tree.h, bytes: total, textures_encoded: encodes.size,
+    source_primitives_without_triangles: empty, primitives_kept_from_below: keptList,
     ktx: { tool: KTX_BIN, encode: 'uastc', uastc_quality: args.uastcQuality, zstd: 18, mipmaps: true },
     rule: 'leaves = the source primitives at full detail; a tile of height h = its primitives simplified to 1/2^h of '
         + 'their triangles (meshoptimizer, LockBorder, its own absolute error), textures at the source side >> ceil(h/2); '
+        + 'a primitive the simplifier leaves with no triangle keeps the geometry and the error of the tile below; '
         + 'geometricError = max(simplifier error, texel size, children)', seconds: (Date.now() - t0) / 1000,
     per_tile: report.sort((p, q) => p.id - q.id) }, null, 1));
   await rm(outDir, { recursive: true, force: true });
