@@ -82,6 +82,22 @@ def test_the_load_passes_no_cap_runs_deterministic_and_records_the_model(stubbed
     assert rec["numerics"]["seed"] == w.SAM3_DETERMINISTIC_SEED
     assert torch.are_deterministic_algorithms_enabled() and not torch.backends.cuda.matmul.allow_tf32
     assert rec["thresholds"]["version"] == "sam3.1"
+    assert wrapper._frames_prepared == "record", "the tests' device is cpu: the vendor's own loader"
+    assert "frames" not in rec, "the card's frames are the vendor's bit for bit: no part of the model's record"
+
+
+def test_the_load_prepares_the_frames_on_the_stages_device(stubbed_sam3, monkeypatch):
+    """The model's load installs the frame loader on the segmentation ports' device
+    (segmentation/sam3_frames_gpu.py) and keeps what runs."""
+    from reconstruction.surface_fit import hole_audit
+    from segmentation import sam3_frames_gpu
+    w, built, ckpt = stubbed_sam3
+    asked = []
+    monkeypatch.setattr(hole_audit, "evidence_device", lambda: "cuda")
+    monkeypatch.setattr(sam3_frames_gpu, "install", lambda device: asked.append(device) or "cuda")
+    wrapper = w.SAM3Wrapper()
+    wrapper.load_model()
+    assert asked == ["cuda"] and wrapper._frames_prepared == "cuda"
 
 
 def test_an_unknown_version_fails_naming_it(stubbed_sam3):

@@ -573,6 +573,12 @@ class SAM3Wrapper:
                                           "configuration (segmentation/sam3_fast.py)")
                 from segmentation.sam3_fast import install_planning_copy
                 self._planning_copy = install_planning_copy(str(scfg["planning_copy"]))
+                # the frames decoded, resized and normalised ON THE CARD (segmentation/sam3_frames_gpu.py, USER
+                # 2026-11-11 "nada debe hacerse en cpu"): the vendor loader's own tensors, bit for bit — so it
+                # is no part of the model's record; the device is the segmentation ports' one key
+                from reconstruction.surface_fit.hole_audit import evidence_device
+                from segmentation.sam3_frames_gpu import install as install_frames
+                self._frames_prepared = install_frames(evidence_device())
                 torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
                 self.model_record = {
                     "version": version, "checkpoint": ckpt_rec, "device": "cuda",
@@ -586,7 +592,8 @@ class SAM3Wrapper:
                 }
                 logger.info(f"SAM {version} loaded on GPU (bfloat16 autocast active; TF32 off, "
                             f"deterministic algorithms strict, seed {SAM3_DETERMINISTIC_SEED}; "
-                            f"checkpoint sha256 {str(ckpt_rec.get('sha256'))[:12]}).")
+                            f"checkpoint sha256 {str(ckpt_rec.get('sha256'))[:12]}; frames prepared: "
+                            f"{self._frames_prepared}).")
 
                 self.is_loaded = True
 

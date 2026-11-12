@@ -58,7 +58,6 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
-from PIL import Image
 
 from .associate import Instance, associate_detections
 from .detector import Detection, GroundedDetector
@@ -68,6 +67,15 @@ from .vocabulary import Vocabulary, load_vocabulary
 def _is_structural(name: str) -> bool:
     from .consolidate_prompts import is_structural
     return is_structural(name)
+
+
+def _open_frame(path):
+    """A frame as the RGB image the stage reads (``Image.open(path).convert("RGB")``), decoded on the device of
+    the segmentation ports (jpeg_gpu.open_rgb, USER 2026-11-11 "nada debe hacerse en cpu"): PIL's pixels and
+    PIL's info, on the card or by the record — the views sent to the VLM are the same bytes either way."""
+    import jpeg_gpu
+    from reconstruction.surface_fit.hole_audit import evidence_device
+    return jpeg_gpu.open_rgb(path, evidence_device())
 
 VLM_ANALYSIS_NAME = "vlm_analysis.json"
 VLM_TIMING_NAME = "vlm_analysis.timing.json"      # the run's clock, outside the compared file
@@ -774,7 +782,7 @@ class AutoPrompter:
 
         def _alone(i: int):
             fr, tid, box, sent_sha1 = where[i]
-            img = Image.open(self.frames_dir / fr["file"]).convert("RGB")
+            img = _open_frame(self.frames_dir / fr["file"])
             view = img if box is None else crop_for_vlm(img, box)
             rec: dict = {}
             cap = AnswerCapture(client, consumer_suffix=SELF_CHECK_SUFFIX)
@@ -934,7 +942,7 @@ class AutoPrompter:
                 """Every call of the plan, in the sequential loop's order: (frame record, tile,
                 box, the view shown, the frame's number of views, last view of its frame)."""
                 for fr in plan.frames:
-                    img = Image.open(self.frames_dir / fr["file"]).convert("RGB")
+                    img = _open_frame(self.frames_dir / fr["file"])
                     views = [(None, None)] + tile_boxes(img.width, img.height, vcfg.tile_rows,
                                                         vcfg.tile_cols, vcfg.tile_overlap_frac)
                     for k, (tid, box) in enumerate(views):
@@ -1355,7 +1363,7 @@ class AutoPrompter:
         fid_to_file: dict[int, str] = {}
         n_det = 0
         for i, fn in enumerate(kf_vlm):
-            img = Image.open(self.frames_dir / fn).convert("RGB")
+            img = _open_frame(self.frames_dir / fn)
             fid = _frame_num(fn)
             fid_to_file[fid] = fn
             img_wh[fid] = img.size

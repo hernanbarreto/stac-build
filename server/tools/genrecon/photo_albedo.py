@@ -13,6 +13,7 @@ from PIL import Image
 import nvdiffrast.torch as dr
 import torch.nn.functional as Fn
 from segmentation.session_io import _load_camera_source
+import jpeg_gpu
 
 SES = Path(sys.argv[1]); GLB = Path(sys.argv[2]); NAME = sys.argv[3]
 TOPK = int(sys.argv[4]) if len(sys.argv) > 4 else 3
@@ -27,8 +28,8 @@ K = np.array([np.asarray(cam.K_for(fi), np.float64) for fi in fids]); c2w = np.a
 w2c = np.linalg.inv(c2w); cam_pos = c2w[:, :3, 3]
 img0 = Image.open(SES / "frames" / f"{int(fids[0]):06d}.jpg"); W, H = img0.size
 W8, H8 = (W + 7) // 8 * 8, (H + 7) // 8 * 8          # the rasterizer renders a multiple of 8; the padding rows/cols are cropped
-imgs = np.stack([np.asarray(Image.open(SES / "frames" / f"{int(fi):06d}.jpg").convert("RGB")) for fi in fids])   # (n, H, W, 3) uint8
-imgs_t = torch.from_numpy(imgs).to(dev)
+# the keyframes decoded ON THE CARD, PIL's pixels bit for bit (jpeg_gpu, USER 2026-11-11 "nada debe hacerse en cpu")
+imgs_t = jpeg_gpu.read_rgb_stack([SES / "frames" / f"{int(fi):06d}.jpg" for fi in fids], dev.type)   # (n, H, W, 3) uint8
 print(f"{len(fids)} keyframes {W}x{H}, K[0] fx {K[0,0,0]:.1f} fy {K[0,1,1]:.1f} cx {K[0,0,2]:.1f} cy {K[0,1,2]:.1f}")
 
 # ── the mesh: GenRecon's parts, each with its UV atlas, base colour and metallic-roughness textures ───────────────
