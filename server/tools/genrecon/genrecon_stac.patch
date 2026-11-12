@@ -87,19 +87,21 @@ index e57f74d..2dcc034 100644
          },
          "rembg_model": {
 diff --git a/genrecon/pipelines/full_scene_images_to_3d.py b/genrecon/pipelines/full_scene_images_to_3d.py
-index b26f309..aadba25 100644
+index b26f309..2e75227 100644
 --- a/genrecon/pipelines/full_scene_images_to_3d.py
 +++ b/genrecon/pipelines/full_scene_images_to_3d.py
-@@ -1,7 +1,7 @@
+@@ -1,8 +1,9 @@
  from __future__ import annotations
  
  from contextlib import contextmanager, nullcontext
 -from typing import Optional
 +from typing import Callable, Optional
  
++import os
  import torch
  
-@@ -38,6 +38,16 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+ from ..modules.cond_3D.projection import project_features_on_points
+@@ -38,6 +39,16 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
      # of this size. Aggregation is pure per-voxel so this changes nothing
      # numerically. Shrink if you still OOM at higher `num_imgs_per_scene`.
      proj_batch_voxels = 8192
@@ -116,7 +118,7 @@ index b26f309..aadba25 100644
  
      # ─────────────────────────────────────────────────────────────────────
      # Global-grid geometry helpers
-@@ -122,7 +132,7 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+@@ -122,7 +133,7 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
          if self.low_vram:
              flow_model.to(self.device)
          V_total = pts.shape[0]
@@ -125,7 +127,7 @@ index b26f309..aadba25 100644
          agg_chunks: list[torch.Tensor] = []
          for start in range(0, V_total, batch):
              end = min(start + batch, V_total)
-@@ -192,7 +202,7 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+@@ -192,7 +203,7 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
              flow_model.to(self.device)
          S_global = pts.shape[0]
          global_xyz_dev = global_xyz_unique.to(self.device)
@@ -134,7 +136,7 @@ index b26f309..aadba25 100644
          agg_chunks: list[torch.Tensor] = []
          for start in range(0, S_global, batch):
              end = min(start + batch, S_global)
-@@ -385,8 +395,11 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+@@ -385,8 +396,11 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
      # ─────────────────────────────────────────────────────────────────────
  
      def _encode_scene(self, images: torch.Tensor, resolution: int) -> torch.Tensor:
@@ -148,16 +150,18 @@ index b26f309..aadba25 100644
  
      def _prep_extrinsics_intrinsics(
          self, ext: torch.Tensor, intr: torch.Tensor, dtype: torch.dtype
-@@ -408,6 +421,8 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+@@ -408,6 +422,10 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
          pipeline_type: Optional[str] = None,
          occ_threshold: float = 0.0,
          zero_3d_cond: bool = False,
 +        coords_override: Optional[list[torch.Tensor]] = None,  # STAC: the active voxels of every chunk from the MEASURED cloud
 +        coords_hook: Optional[Callable[[list[torch.Tensor]], list[torch.Tensor]]] = None,  # STAC: merges the generated voxels with the cloud's
++        shape_latents_override: Optional[list] = None,  # STAC: the cloud's shape (cloud_shape.encode_chunks)
++        shape_refine_t: float = 0.0,  # STAC: 0 = the cloud's shape as is; > 0 = the flow refines it from that t
      ) -> tuple[MeshWithVoxel, list[torch.Tensor]]:
          pipeline_type = pipeline_type or self.default_pipeline_type
          if pipeline_type not in ("512", "1024"):
-@@ -439,66 +454,76 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+@@ -439,112 +457,140 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
              scene_feats_stage = scene_feats_512
              cond2d_feats_stage = cond2d_feats_512
  
@@ -290,6 +294,108 @@ index b26f309..aadba25 100644
          std = torch.tensor(self.shape_slat_normalization["std"])[None].to(self.device)
          mean = torch.tensor(self.shape_slat_normalization["mean"])[None].to(self.device)
  
+-        scene_ext_shape, scene_intr_shape = self._prep_extrinsics_intrinsics(
+-            sel.scene_extrinsics_c0,
+-            sel.scene_intrinsics,
+-            shape_model.dtype,
+-        )
+-        shape_conds = self._build_global_sparse_cond(
+-            shape_model,
+-            scene_feats_stage.to(shape_model.dtype),
+-            cond2d_feats_stage.to(shape_model.dtype),
+-            scene_ext_shape,
+-            scene_intr_shape,
+-            coords_list,
+-            relative_translations,
+-            shape_model.resolution,
+-            zero_3d_cond=zero_3d_cond,
+-        )
+-        noise_shape = [
+-            SparseTensor(
+-                feats=torch.randn(coords_list[i].shape[0], shape_model.in_channels, device=self.device),
+-                coords=coords_list[i],
++        # STAC 2026-11-12 (USER: "la geometría debe ser correcta, exactamente igual a la nube lisa y correcta con
++        # detalle"): shape_latents_override = the shape latents ENCODED FROM THE CLOUD by GenRecon's own shape encoder
++        # (tools/genrecon/cloud_shape.py), one per chunk in this run's order. shape_refine_t 0: they ARE the shape;
++        # > 0: the shape flow continues from them noised to that t, guided by the photos (sharper than the cloud)
++        if shape_latents_override is not None and len(shape_latents_override) != num_chunks:
++            raise RuntimeError(f"{len(shape_latents_override)} shape latents for {num_chunks} chunks")
++        if shape_latents_override is not None and shape_refine_t <= 0:
++            shape_slat_list = [SparseTensor(feats=z.feats.to(self.device, torch.float32), coords=z.coords.to(self.device, torch.int32))
++                               for z in shape_latents_override]
++            print(f"[STAC] shape latents from the cloud: {[int(x.feats.shape[0]) for x in shape_slat_list]} per chunk")
++        else:
++            scene_ext_shape, scene_intr_shape = self._prep_extrinsics_intrinsics(
++                sel.scene_extrinsics_c0,
++                sel.scene_intrinsics,
++                shape_model.dtype,
+             )
+-            for i in range(num_chunks)
+-        ]
+-        params_shape = {**self.shape_slat_sampler_params, **shape_slat_sampler_params}
+-
+-        if self.low_vram:
+-            shape_model.to(self.device)
+-        with _amp_ctx(shape_model):
+-            shape_slat_raw = MultiDiffusionOrchestrator(self.shape_slat_sampler).sample(
++            shape_conds = self._build_global_sparse_cond(
+                 shape_model,
+-                noise_shape,
+-                [c["cond"] for c in shape_conds],
+-                [c["neg_cond"] for c in shape_conds],
++                scene_feats_stage.to(shape_model.dtype),
++                cond2d_feats_stage.to(shape_model.dtype),
++                scene_ext_shape,
++                scene_intr_shape,
++                coords_list,
+                 relative_translations,
+-                **params_shape,
+-                tqdm_desc="Sampling shape SLat",
++                shape_model.resolution,
++                zero_3d_cond=zero_3d_cond,
+             )
+-        if self.low_vram:
+-            shape_model.cpu()
+-        del shape_conds, noise_shape
++            noise_shape = [
++                SparseTensor(
++                    feats=torch.randn(coords_list[i].shape[0], shape_model.in_channels, device=self.device),
++                    coords=coords_list[i],
++                )
++                for i in range(num_chunks)
++            ]
++            params_shape = {**self.shape_slat_sampler_params, **shape_slat_sampler_params}
++
++            if self.low_vram:
++                shape_model.to(self.device)
++            with _amp_ctx(shape_model):
++                _init = None
++                if shape_latents_override is not None:
++                    _init = [(z.feats.to(self.device, torch.float32) - mean) / std for z in shape_latents_override]
++                    _init = [SparseTensor(feats=f, coords=z.coords.to(self.device, torch.int32))
++                             for f, z in zip(_init, shape_latents_override)]
++                    print(f"[STAC] shape flow continued from the cloud's latents at t {shape_refine_t}")
++                shape_slat_raw = MultiDiffusionOrchestrator(self.shape_slat_sampler).sample(
++                    shape_model,
++                    noise_shape,
++                    [c["cond"] for c in shape_conds],
++                    [c["neg_cond"] for c in shape_conds],
++                    relative_translations,
++                    **params_shape,
++                    tqdm_desc="Sampling shape SLat",
++                    **({"init": _init, "t_start": float(shape_refine_t)} if _init is not None else {}),
++                )
++            if self.low_vram:
++                shape_model.cpu()
++            del shape_conds, noise_shape
+ 
+-        shape_slat_list = [s * std + mean for s in shape_slat_raw]
+-        del shape_slat_raw
++            shape_slat_list = [s * std + mean for s in shape_slat_raw]
++            del shape_slat_raw
+ 
+         # ── Stage 3: Tex SLat ─────────────────────────────────────────────────
+         tex_model = self.models[tex_model_key]
 diff --git a/genrecon/pipelines/joint_decode.py b/genrecon/pipelines/joint_decode.py
 index f4c79e8..f5e1834 100644
 --- a/genrecon/pipelines/joint_decode.py
@@ -320,6 +426,35 @@ index f4c79e8..f5e1834 100644
  
  from ..models.sc_vaes.sparse_unet_vae import SparseUnetVaeDecoder
  from ..modules.sparse import SparseTensor
+diff --git a/genrecon/pipelines/samplers/multi_diff_orchestrator.py b/genrecon/pipelines/samplers/multi_diff_orchestrator.py
+index 34adb89..90bf47a 100644
+--- a/genrecon/pipelines/samplers/multi_diff_orchestrator.py
++++ b/genrecon/pipelines/samplers/multi_diff_orchestrator.py
+@@ -357,6 +357,8 @@ class MultiDiffusionOrchestrator:
+         chunk_kwargs: Optional[list[dict]] = None,
+         boundary_sensitive: bool = False,
+         boundary_width: int = 2,
++        init: Optional[list[Any]] = None,
++        t_start: float = 1.0,
+     ):
+         num_chunks = len(noise)
+         chunks = self._initialize_noise(noise, relative_transl, model.resolution)
+@@ -365,6 +367,15 @@ class MultiDiffusionOrchestrator:
+         t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
+         t_seq = t_seq.tolist()
+         t_pairs = list((t_seq[i], t_seq[i + 1]) for i in range(steps))
++        if init is not None:
++            # STAC 2026-11-12 (USER: "geometría correcta … mejor incluso que la nube"): the flow continues FROM a given
++            # latent (the cloud's shape) noised to the first step at or below t_start, x_t = (1 - t) x_0 + t eps — the
++            # model refines it guided by the photos instead of inventing it from pure noise
++            t_pairs = [(t, tp) for t, tp in t_pairs if t <= t_start + 1e-9]
++            if not t_pairs:
++                raise ValueError(f"t_start {t_start} leaves no sampling step")
++            t0 = t_pairs[0][0]
++            chunks = [c.replace((1 - t0) * x.feats.to(c.feats.dtype) + t0 * c.feats) for c, x in zip(chunks, init)]
+ 
+         if boundary_sensitive:
+ 
 diff --git a/inference/chunked_glb.py b/inference/chunked_glb.py
 index f9a9459..513b1ba 100644
 --- a/inference/chunked_glb.py
@@ -704,10 +839,10 @@ index aeb44be..608296c 100644
                      if not cv2.imwrite(str(dst), undist):
                          raise RuntimeError(f"Failed to write undistorted frame: {dst}")
 diff --git a/reconstruct_scene.py b/reconstruct_scene.py
-index 58a831e..2c17f6a 100644
+index 58a831e..d02918c 100644
 --- a/reconstruct_scene.py
 +++ b/reconstruct_scene.py
-@@ -290,9 +290,250 @@ def build_parser() -> argparse.ArgumentParser:
+@@ -290,9 +290,257 @@ def build_parser() -> argparse.ArgumentParser:
          "Pure performance knob, no numerical effect. Drop to 2048/1024 when "
          "running with very many views (e.g. all-frames iPhone captures).",
      )
@@ -734,6 +869,13 @@ index 58a831e..2c17f6a 100644
 +    parser.add_argument("--coords_extra_points", type=str, default=None,
 +                        help="STAC: a .npy [N, 3] float32 of extra presence points in the scene's world frame (the completion "
 +                        "voxels from the masks, hull_points.py): every chunk voxel holding one becomes active, no model presence.")
++    parser.add_argument("--shape_from_cloud", action="store_true",
++                        help="STAC 2026-11-12: the SHAPE is the cloud's (tools/genrecon/cloud_shape.py): the points of "
++                        "--coords_from_points written in GenRecon's cell representation, one sheet per surface, and "
++                        "encoded by GenRecon's shape encoder; the shape flow is not sampled from noise.")
++    parser.add_argument("--shape_refine_t", type=float, default=0.0,
++                        help="STAC: with --shape_from_cloud, 0 = the cloud's shape as encoded; > 0 = the shape flow "
++                        "continues from it noised to that t (0..1), guided by the photos.")
 +    parser.add_argument("--coords_min_points_objects", type=int, default=2,
 +                        help="STAC: inside an object's box a voxel of the cloud is active from this many points.")
 +    parser.add_argument(
@@ -958,11 +1100,11 @@ index 58a831e..2c17f6a 100644
  def main() -> None:
      parser = build_parser()
      args = parser.parse_args()
-@@ -380,6 +621,23 @@ def main() -> None:
+@@ -380,6 +628,35 @@ def main() -> None:
          seed=args.seed,
      )
      rel_t_kept = [rel_t[i] for i in sel.chunk_indices]
-+    coords_override, coords_hook = None, None
++    coords_override, coords_hook, shape_latents = None, None, None
 +    if args.coords_from_points is not None:
 +        R_slat = pipeline.models[f"shape_slat_flow_model_{args.pipeline}"].resolution
 +        objects = _load_objects(scene_path) if args.coords_mode == "cloud+objects" else None
@@ -973,7 +1115,19 @@ index 58a831e..2c17f6a 100644
 +            objects=objects, min_points_objects=args.coords_min_points_objects,
 +            extra_points_path=(Path(args.coords_extra_points) if args.coords_extra_points else None),
 +        )
-+        if args.coords_mode == "cloud":
++        if args.shape_from_cloud:
++            if args.coords_mode != "cloud":
++                parser.error("--shape_from_cloud goes with --coords_mode cloud")
++            import cloud_shape  # tools/genrecon (run_cloud.sh puts that folder alone on the path)
++            _enc = cloud_shape.load_encoder(pipeline.device)
++            _P = torch.as_tensor(np.load(args.coords_from_points), device=pipeline.device, dtype=torch.float64)
++            _m = [torch.linalg.inv(m_c2o[c].to(torch.float64)) for c in sel.chunk_indices]
++            shape_latents = cloud_shape.encode_chunks(_P, _m, _enc, R=512, log=print)
++            del _enc, _P
++            torch.cuda.empty_cache()
++            coords_override = [z.coords.to(torch.int32) for z in shape_latents]
++            print(f"[STAC] shape from the cloud: {[int(z.feats.shape[0]) for z in shape_latents]} latent voxels per chunk")
++        elif args.coords_mode == "cloud":
 +            coords_override = cloud_coords
 +        else:
 +            coords_hook = _make_unseen_hook(Path(args.coords_from_points), scene_path, args.colmap_subdir, m_c2o, sel.chunk_indices,
@@ -982,12 +1136,14 @@ index 58a831e..2c17f6a 100644
  
      if args.save_imgs:
          scene_dir = out_path / "scene"
-@@ -407,6 +665,8 @@ def main() -> None:
+@@ -407,6 +684,10 @@ def main() -> None:
          shape_slat_sampler_params=slat_sampler_params,
          tex_slat_sampler_params=slat_sampler_params,
          occ_threshold=args.occ_threshold,
 +        coords_override=coords_override,
 +        coords_hook=coords_hook,
++        shape_latents_override=shape_latents,
++        shape_refine_t=args.shape_refine_t,
      )
  
      coords_resolution = pipeline.models[f"shape_slat_flow_model_{args.pipeline}"].resolution

@@ -15,6 +15,11 @@ SES = Path(sys.argv[1]); WORK = Path(sys.argv[2]); N_PTS = int(sys.argv[3]) if l
 CUBE_M = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0     # genrecon.cube_size_m: stacked cubes of this side (0 = one layer)
 CONF = float(sys.argv[5]) if len(sys.argv) > 5 else 0.0       # the viewer's confidence slider, 0..1 (0 = every point)
 MIN_PTS = int(sys.argv[6]) if len(sys.argv) > 6 else 10       # --coords_min_points: a voxel is active from this many points
+# genrecon.solid_ground (1 | 0): the support levels' columns filled solid down to the lattice base. USER 2026-11-12: OFF
+# ("no debe rellenarse por debajo sino que debe respetar toda la excursión de la nube con geometría correcta")
+if len(sys.argv) <= 7 or sys.argv[7] not in ("0", "1"):
+    raise SystemExit("adapter.py: the 7th argument is genrecon.solid_ground, 1 or 0 (config.yaml) — missing or invalid")
+SOLID_GROUND = sys.argv[7] == "1"
 out = SES / "output"
 R_UP = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])     # (x, y, z) → (x, -z, y): y-up → z-up
 s = load_session(out)
@@ -175,7 +180,8 @@ if CUBE_M > 0:
     # a voxel active from MIN_PTS points — GenRecon's own presence rule, as always — unless the keyframes' vote
     # already kept only confirmed points (then from one)
     LAYOUT = plan_layout(P_g, CUBE_M, min_points=(1 if VOTE else MIN_PTS),
-                         z_centers=centers, support_levels=support_z, level_bin=0.05, device=DEV)
+                         z_centers=centers, support_levels=(support_z if SOLID_GROUND else None), level_bin=0.05,
+                         device=DEV)
     levels["ground_filled_voxels"] = LAYOUT["ground_filled"]
     np.save(WORK / "active_cells.npy", LAYOUT.pop("cells"))
     (WORK / "layout.json").write_text(json.dumps(LAYOUT, indent=1))

@@ -147,6 +147,28 @@ genrecon:
   presence_vote: false               # OFF (USER 2026-11-05: back to how it always was): presence by min_points_per_voxel
   presence_min_views: 2              # the keyframe it was born in + at least one more (only with presence_vote)
   presence_device: cuda
+  shape_from_cloud: true             # USER 2026-11-12 ("la única que acepto es genrecon pero correcta" / "la geometría debe
+                                     # ser correcta, exactamente igual a la nube lisa y correcta con detalle" / "el piso es
+                                     # una lámina así debe ser igual que las paredes"): the SHAPE is the cloud's, written in
+                                     # GenRecon's cells (one sheet per surface, edges by dual contouring) and encoded by its
+                                     # own shape encoder (tools/genrecon/cloud_shape.py); then the loose floating pieces go
+                                     # (tools/genrecon/drop_loose.py) and the bake keeps the single sheets (no global
+                                     # remesh). Measured on bufferStop 2026-11-12, before the bake: the floor ONE lamina in
+                                     # 85 % of its 1 cm columns (78 % after GenRecon's VAE; the closed shell published
+                                     # before: 6 %); holes seen from the keyframes 3.1 % after the VAE and the hole filling,
+                                     # lines along the silhouettes (the generated shape: 10.6 %). false = GenRecon's
+                                     # generated shape
+  shape_refine_t: 0.0                # with shape_from_cloud: 0 = the cloud's shape as encoded; > 0 (< 1) = GenRecon's shape
+                                     # flow continues from it noised to that t, guided by the photos (sharper edges than
+                                     # the cloud — USER 2026-11-12 "debe ser mejor incluso que la nube"; his eye decides)
+  smooth_iters: 30                   # with shape_from_cloud: GenRecon's own feature-preserving Taubin smoothing in the
+                                     # bake (inference/chunked_glb.py, its 25 degrees feature lock), iterations
+  solid_ground: false                # USER 2026-11-12 ("la nube a veces está por debajo de y =0, no debe rellenarse por
+                                     # debajo sino que debe respetar toda la excursión de la nube con geometría
+                                     # correcta"): OFF. true = presence.plan_layout fills every column holding an active
+                                     # voxel at a support level's height down to the lattice base (USER 2026-11-08 "el
+                                     # suelo es sólido"). Measured 2026-11-12: 92–99.8 % of the meshes' invented surface
+                                     # (25–72 % of each mesh) lay in those voxels; bufferStop without it 22.6 → 0.04 m²
   # USER 2026-11-11 ("todo lo que me marcaste que puede pasarse a GPU hay que hacerlo en GPU … Nada debe hacerse en
   # cpu"): where adapter.py's arithmetic over the cloud's points runs (the points in GenRecon's frame, the levels of
   # their heights, the lattice's active voxels, the objects' stands). numpy = THE RECORD (adapter.py's own numpy

@@ -53,7 +53,7 @@ _MARKS = [
 # every "<step> failed <sid>" line of run_cloud.sh: a failure names its step (2026-11-12: pccr 2026-08-24 died in the
 # dump of the mesh step and the stage said only "exit 1") — tests/test_genrecon_worker.py holds the two lists equal
 _FAILS = ("adapter failed", "reconstruct failed", "bake failed", "publish failed", "hull failed", "dump failed",
-          "bake worker failed", "tiles failed", "resume check failed", "resume stamp failed")
+          "bake worker failed", "tiles failed", "resume check failed", "resume stamp failed", "drop loose failed")
 
 
 def _run_variant(pipe: WorkerPipe, output_dir: Path, sid: str, scan: str, name: str, min_pts: int, mode: str,
@@ -135,6 +135,25 @@ def _undistort_device(gcfg: dict) -> str:
     return dev
 
 
+def _flag(gcfg: dict, key: str) -> str:
+    """A typed boolean key of genrecon: a missing key or a non-boolean fails naming it; "1" / "0" for the runner."""
+    if key not in gcfg:
+        raise RuntimeError(f"config.yaml: genrecon.{key} is missing (true | false)")
+    if not isinstance(gcfg[key], bool):
+        raise RuntimeError(f"config.yaml: genrecon.{key} must be true or false (got {gcfg[key]!r})")
+    return "1" if gcfg[key] else "0"
+
+
+def _number(gcfg: dict, key: str, kind, lo, hi) -> str:
+    """A typed number of genrecon in [lo, hi): a missing key, another type or a value outside fails naming it."""
+    if key not in gcfg:
+        raise RuntimeError(f"config.yaml: genrecon.{key} is missing")
+    v = gcfg[key]
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or (kind is int and not isinstance(v, int)) or not lo <= v < hi:
+        raise RuntimeError(f"config.yaml: genrecon.{key} must be a {kind.__name__} in [{lo}, {hi}) (got {v!r})")
+    return str(kind(v))
+
+
 def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
     session_path = Path(session_dir).resolve()
     output_dir = session_path / "output"
@@ -166,7 +185,14 @@ def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
            "GENRECON_CONF": str(conf),
            "GENRECON_BAKE_WORKERS": str(int(gcfg.get("bake_workers", 1))),
            # where GenRecon's own process undistorts its frames (tools/genrecon/remap_gpu.py reads it there)
-           UNDISTORT_ENV: _undistort_device(gcfg)}
+           UNDISTORT_ENV: _undistort_device(gcfg),
+           # USER 2026-11-12: no solid ground under the floor (adapter.py's 7th argument)
+           "GENRECON_SOLID_GROUND": _flag(gcfg, "solid_ground"),
+           # USER 2026-11-12: the shape from the cloud (tools/genrecon/cloud_shape.py), the flow's refinement from it,
+           # the smoothing of the bake that keeps the single sheets
+           "GENRECON_SHAPE_FROM_CLOUD": _flag(gcfg, "shape_from_cloud"),
+           "GENRECON_SHAPE_REFINE_T": _number(gcfg, "shape_refine_t", float, 0.0, 1.0),
+           "GENRECON_SMOOTH_ITERS": _number(gcfg, "smooth_iters", int, 0, 1000)}
     if not _SCRIPT.exists():
         raise FileNotFoundError(f"GenRecon runner missing: {_SCRIPT}")
     stop_semantic_service_verified(pipe, stage="GenRecon mesh")
