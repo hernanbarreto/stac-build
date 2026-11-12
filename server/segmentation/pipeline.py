@@ -2709,6 +2709,15 @@ def _footprint_error_numpy(points_xz: np.ndarray, yaw: float, n_boot: Optional[i
 
 
 def _compute_obb(points_xyz: np.ndarray, face_normals=None, cfg: Optional[dict] = None) -> dict:
+    """The oriented bounding box ON THE DEVICE, end to end (segmentation/obb_gpu.py, USER 2026-11-11:
+    "todo lo que me marcaste que puede pasarse a GPU hay que hacerlo en GPU ... Nada debe hacerse en
+    cpu"; USER 2026-11-12: "dije ok a todo"): :func:`_compute_obb_record`'s rules and record, its draws
+    on the card."""
+    from segmentation.obb_gpu import compute_obb_t
+    return compute_obb_t(points_xyz, face_normals=face_normals, cfg=cfg)
+
+
+def _compute_obb_record(points_xyz: np.ndarray, face_normals=None, cfg: Optional[dict] = None) -> dict:
     """Compute minimum Oriented Bounding Box for floor-aligned coordinates.
 
     If face_normals is provided (list of (normal, n_points) tuples from RANSAC),
