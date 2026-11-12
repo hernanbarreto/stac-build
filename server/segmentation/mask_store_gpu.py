@@ -48,10 +48,12 @@ class DeviceMaskStore:
     """``np.load(seg_masks.npz)`` for masks, on ``device``: ``files``, ``in``, and ``stack(keys)`` → the
     masks as one boolean tensor (k, H, W) on the device (nonzero = True, as every reader thresholds)."""
 
-    def __init__(self, path, device):
+    def __init__(self, path, device, raw: bytes = None):
+        """``raw``: the store's bytes when the caller already holds them (an npz opened from memory) —
+        the file at ``path`` is then not read."""
         self.path = Path(path)
         self.device = torch.device(device)
-        self.raw = self.path.read_bytes()
+        self.raw = self.path.read_bytes() if raw is None else raw
         zf = zipfile.ZipFile(io.BytesIO(self.raw))
         self._info: Dict[str, zipfile.ZipInfo] = {}
         for i in zf.infolist():

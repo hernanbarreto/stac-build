@@ -48,7 +48,21 @@ def raw_to_display(output_dir: Path, pts: np.ndarray) -> np.ndarray:
     return s * (np.asarray(pts, np.float64) @ R.T) + t
 
 
-def _atomic_savez(path: Path, arrays: Dict[str, np.ndarray]) -> None:
+def store_on_card(device: Optional[str]) -> bool:
+    """Does a store writer deflate on the card? ``device``: None — no device was passed: the record, zlib on the
+    CPU (the server's interactive edits: the server process holds no CUDA context) —, ``cpu`` (the record) or
+    ``cuda`` (segmentation/store_deflate_gpu.py: the SAM3 stage, which passes its declared device). Anything
+    else fails, named."""
+    if device is None or str(device) == "cpu":
+        return False
+    if str(device) == "cuda":
+        return True
+    raise ValueError(f"a mask store writer's device is {device!r} — None (the record), 'cpu' or 'cuda'")
+
+
+def _atomic_savez(path: Path, arrays: Dict[str, np.ndarray], *, device: Optional[str] = None) -> None:
+    """``arrays`` as the npz at ``path``, atomically. ``device``: see :func:`store_on_card` — on the card the same
+    members, deflated by nvCOMP (other streams than zlib's)."""
     # the tmp name MUST end in ".npz": np.savez appends ".npz" to any other
     # name, so the replace() moved the EMPTY mkstemp file over seg_masks.npz
     # and truncated it to 0 bytes (bug 2026-08-29, recovered from the stray
@@ -56,7 +70,15 @@ def _atomic_savez(path: Path, arrays: Dict[str, np.ndarray]) -> None:
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp.npz")
     os.close(fd)
     try:
-        np.savez_compressed(tmp, **arrays)
+        if store_on_card(device):
+            # deflated on the card (USER 2026-11-12: "Nada debe hacerse en cpu"), np.savez's layout
+            import zipfile
+            from segmentation.store_deflate_gpu import write_members
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+                ks = list(arrays)
+                write_members(zf, [f"{k}.npy" for k in ks], [np.asanyarray(arrays[k]) for k in ks], device)
+        else:
+            np.savez_compressed(tmp, **arrays)
         os.replace(tmp, path)
         if Path(path).name == "seg_masks.npz":
             # the frame-space cache is keyed by the store's mtime, but an
@@ -193,14 +215,16 @@ def reseal_floor(output_dir: Path, *, by: str, held_before: Tuple[bool, str], lo
     return {"resealed": True, "reason": "sealed to the cloud bytes on disk", "cloud_sha256": have}
 
 
-def _atomic_append_npz(path: Path, arrays: Dict[str, np.ndarray], *, keep) -> None:
+def _atomic_append_npz(path: Path, arrays: Dict[str, np.ndarray], *, keep,
+                       device: Optional[str] = None) -> None:
     """Write ``arrays`` into the npz at ``path`` WITHOUT touching the entries it
     keeps: the entries named in ``keep`` (and not in ``arrays``) are carried
     over AS STORED — never decompressed, never recompressed —, ``arrays``
     replace or add theirs, every other entry is dropped. The same logical
     content ``_atomic_savez({**kept, **arrays})`` would write, at the cost of the
     new entries only. Atomic like ``_atomic_savez`` (a copy is edited, then
-    replaced).
+    replaced). ``device``: see :func:`store_on_card` — on the card the new entries
+    are deflated by nvCOMP.
 
     A dropped / replaced entry leaves the central directory, which is what a
     zip reader goes by; its old bytes stay in the file as unreferenced space
@@ -216,10 +240,16 @@ def _atomic_append_npz(path: Path, arrays: Dict[str, np.ndarray], *, keep) -> No
                              allowZip64=True) as zf:
             zf.filelist = [i for i in zf.filelist if i.filename in carry]
             zf.NameToInfo = {i.filename: i for i in zf.filelist}
-            for key, val in arrays.items():
-                # how np.savez_compressed writes an entry (no pickled arrays)
-                with zf.open(f"{key}.npy", "w", force_zip64=True) as f:
-                    np.lib.format.write_array(f, np.asanyarray(val), allow_pickle=False)
+            if store_on_card(device):
+                # deflated on the card (USER 2026-11-12: "Nada debe hacerse en cpu")
+                from segmentation.store_deflate_gpu import write_members
+                ks = list(arrays)
+                write_members(zf, [f"{k}.npy" for k in ks], [np.asanyarray(arrays[k]) for k in ks], device)
+            else:
+                for key, val in arrays.items():
+                    # how np.savez_compressed writes an entry (no pickled arrays)
+                    with zf.open(f"{key}.npy", "w", force_zip64=True) as f:
+                        np.lib.format.write_array(f, np.asanyarray(val), allow_pickle=False)
         os.replace(tmp, path)
         if Path(path).name == "seg_masks.npz":
             from segmentation import mask_space

@@ -429,8 +429,10 @@ def run_segmentation(frames_dir: str, output_dir: str, prompt: str,
 
         # the finished store: canonical member order, compact, sealed with the keyframe
         # list it was segmented on and the reconstruction it belongs to — then swapped in
+        from reconstruction.surface_fit.hole_audit import evidence_device
         seg_meta = finalize_sam3_store(staging, output_dir, keyframe_numbers, seal_categories, cfg,
-                                       log=lambda m: print(f"[SegPipeline] {m}"))
+                                       log=lambda m: print(f"[SegPipeline] {m}"),
+                                       device=evidence_device())
         timing["seconds"] = round(_time.time() - t_run, 1)
         atomic_write_json(output_dir / SEGMENTATION_TIMING_NAME, timing, indent=1)
 
@@ -489,14 +491,20 @@ def _mask_key_parts(key: str) -> Optional[Tuple[int, int]]:
 
 
 def write_canonical_store(path: Path, members: Dict[str, np.ndarray],
-                          source=None) -> None:
+                          source=None, device: Optional[str] = None) -> None:
     """Write a mask store with its members in CANONICAL order — every mask by
     (object, frame), then the metadata members in :data:`STORE_META_KEYS` order —
     compact (no dead bytes of a replaced entry) and with a fixed zip entry time,
     so one logical store is one byte sequence (point 101). ``members`` holds the
     arrays to write; ``source`` (an open NpzFile) supplies any mask named in
     ``members`` with the value None — read one at a time, never all in RAM.
-    Atomic: a temporary file, then rename."""
+    Atomic: a temporary file, then rename.
+
+    ``device`` (segmentation.erase.store_on_card): None or ``cpu`` = zlib, the record;
+    ``cuda`` = every member inflated, CRC-32'd and deflated on the card
+    (segmentation/store_deflate_gpu.py) — the same members in the same order under the
+    same entry headers, nvCOMP's streams in place of zlib's: one byte sequence per
+    logical store there too, another one than the record's."""
     import zipfile
     path = Path(path)
     mask_keys = sorted((k for k in members if _mask_key_parts(k) is not None), key=_mask_key_parts)
@@ -515,7 +523,20 @@ def write_canonical_store(path: Path, members: Dict[str, np.ndarray],
     # _write_deflated_entry exactly as ZipFile.writestr writes them into a seekable file — the
     # same bytes (tests/test_p3_sam3_store.py holds them to the member-by-member writer)
     from concurrent.futures import ThreadPoolExecutor
+    from segmentation.erase import store_on_card
     order = mask_keys + meta_keys
+    if store_on_card(device):
+        # ON THE CARD (USER 2026-11-12: "Nada debe hacerse en cpu"): a member taken from the source inflated
+        # by nvCOMP and held to the source's own CRC-32, every member deflated by nvCOMP; the CPU path below
+        # is the record
+        from segmentation.store_deflate_gpu import write_canonical_members
+        out = _io.BytesIO()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+            write_canonical_members(zf, order, members, source, device)
+        _write_bytes_atomic(path, out.getbuffer())
+        if path.name == "seg_masks.npz":
+            mask_space.invalidate(path.parent)
+        return
 
     def deflated(k):
         arr = members[k]
@@ -621,9 +642,9 @@ def write_npz_canonical(path: Path, arrays: Dict[str, np.ndarray]) -> None:
             os.unlink(tmp)
 
 
-def compact_mask_store(path: Path) -> int:
-    """Rewrite an existing store canonically (:func:`write_canonical_store`) from
-    its own members, one at a time. Returns the number of masks."""
+def compact_mask_store(path: Path, device: Optional[str] = None) -> int:
+    """Rewrite an existing store canonically (:func:`write_canonical_store`, on its
+    ``device``) from its own members, one at a time. Returns the number of masks."""
     path = Path(path)
     z = _load_store_in_ram(path)
     try:
@@ -635,7 +656,7 @@ def compact_mask_store(path: Path) -> int:
                 members[k] = np.asarray(z[k])
             else:
                 raise ValueError(f"{path} holds the member {k!r}, neither a mask nor known metadata")
-        write_canonical_store(path, members, source=z)
+        write_canonical_store(path, members, source=z, device=device)
         return sum(1 for k in members if _mask_key_parts(k) is not None)
     finally:
         z.close()
@@ -681,8 +702,10 @@ def sam3_store_seal(cfg: dict, categories: List[str], keyframes: List[int],
 
 
 def finalize_sam3_store(staging: Path, output_dir: Path, keyframes: List[int],
-                        categories: List[str], cfg: dict, log=print) -> dict:
-    """The staging store → the session's store: the npz rewritten canonically with
+                        categories: List[str], cfg: dict, log=print,
+                        device: Optional[str] = None) -> dict:
+    """The staging store → the session's store: the npz rewritten canonically (on
+    ``device``: segmentation.erase.store_on_card — the SAM3 stage passes its own) with
     the keyframe list and the reconstruction id as members (points 101 / 114 / 51),
     `segmentation.json` sealed (`stamp`, `reconstruction_id`, `keyframes_sha256`),
     both moved into ``output_dir`` replacing what was there, and the products of
@@ -704,7 +727,7 @@ def finalize_sam3_store(staging: Path, output_dir: Path, keyframes: List[int],
         members[mask_space.KEYFRAMES_KEY] = np.asarray([int(k) for k in keyframes], np.int32)
         members["reconstruction_id"] = np.array(str(rid) if rid else "")
         scaled_res = [int(x) for x in np.asarray(members["scaled_res"]).ravel()]
-        write_canonical_store(src_npz, members, source=z)
+        write_canonical_store(src_npz, members, source=z, device=device)
         n_masks = sum(1 for k in members if _mask_key_parts(k) is not None)
     finally:
         z.close()
@@ -1070,9 +1093,12 @@ _ACTIVE_STORE_WRITER: Optional[_StoreWriter] = None
 
 def _save_category(output_dir, cat_global, categories_so_far, labels_so_far, cfg, session_output_dir,
                    cat_idx, n_categories):
+    # the SAM3 stage's own saves: the members deflated on its declared device (USER 2026-11-12: "Nada debe
+    # hacerse en cpu" — zlib was ~750 s of pccr 2026-08-24's stage)
+    from reconstruction.surface_fit.hole_audit import evidence_device
     meta = _save_masks(output_dir, cat_global, categories_so_far, labels_so_far, cfg,
                        frame_space=mask_space.SPACE_KEYFRAME, session_output_dir=session_output_dir,
-                       compact=False)
+                       compact=False, device=evidence_device())
     print(f"[SegPipeline] 💾 Saved category {cat_idx + 1}/{n_categories}")
     return meta
 
@@ -2053,9 +2079,12 @@ def _match_ids_iou(prev_masks: Dict[int, Dict[int, np.ndarray]],
 def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
                 categories: List[str], obj_labels: Dict[int, str], cfg: dict,
                 *, frame_space: str, session_output_dir: Optional[Path] = None,
-                compact: bool = True):
+                compact: bool = True, device: Optional[str] = None):
     """
-    Save SAM3 masks as compressed NPZ + metadata JSON.
+    Save SAM3 masks as compressed NPZ + metadata JSON. ``device``
+    (segmentation.erase.store_on_card): where the members are deflated — None, the
+    record (the interactive manager, in the server process); the SAM3 stage passes
+    its declared device.
     Upsert logic: if an obj_id already exists in the NPZ (same object from a
     previous incremental save), keep its ID and overwrite its masks.
     If it's genuinely new, assign a new ID.
@@ -2248,11 +2277,11 @@ def _save_masks(output_dir: Path, all_masks: Dict[int, Dict[int, np.ndarray]],
             for k in STORE_META_KEYS:
                 if k in old_data.files and k not in npz_data:
                     npz_data[k] = np.asarray(old_data[k])
-        _atomic_append_npz(masks_path, npz_data, keep=existing_mask_keys)
+        _atomic_append_npz(masks_path, npz_data, keep=existing_mask_keys, device=device)
     else:
-        _atomic_savez(masks_path, npz_data)
+        _atomic_savez(masks_path, npz_data, device=device)
     if compact:
-        compact_mask_store(masks_path)
+        compact_mask_store(masks_path, device=device)
     _mspace.invalidate(output_dir)
     masks_mb = masks_path.stat().st_size / (1024 * 1024)
     new_count = mask_count
