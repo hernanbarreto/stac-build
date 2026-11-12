@@ -160,7 +160,7 @@ def axis_centers(lo: float, hi: float, cube: float) -> list:
 
 def plan_layout(P: np.ndarray, cube: float, R: int = 32, log: Callable[[str], None] = print, min_points: int = 1,
                 z_centers: Sequence[float] = None, support_levels: Sequence[float] = None,
-                level_bin: float = 0.05) -> Dict:
+                level_bin: float = 0.05, device: str = None) -> Dict:
     """The cubes over the WHOLE of ``P`` (GenRecon's frame, z up) and its active voxels (module docstring).
 
     ``z_centers``: the vertical layout (genrecon_levels.anchored_centers — one base exactly on the lowest
@@ -169,9 +169,19 @@ def plan_layout(P: np.ndarray, cube: float, R: int = 32, log: Callable[[str], No
     hasta la base del cubo"): every column holding an active voxel in the ``level_bin`` slice of a support
     level (the floor, a ramp's landing, the platform — the levels the floor step measures) is filled active
     from under that slice down to the base of the lattice, so no floor has air below it in ANY cube and the
-    model can only paint its top face — the condition it was trained on (below a floor there is earth)."""
-    P = np.asarray(P, np.float64)
-    lo, hi = P.min(0), P.max(0)
+    model can only paint its top face — the condition it was trained on (below a floor there is earth).
+
+    ``device``: where the lines that read EVERY point run (the cloud's extent, each point's voxel, the count of
+    every voxel) — absent or "numpy", THE RECORD below; "cpu" / "cuda", layout_gpu.py's twins (``P`` may then be
+    a tensor already on that device). Everything after them is the same numpy over the voxels."""
+    on_device = device not in (None, "numpy")
+    if on_device:
+        import layout_gpu
+        P = layout_gpu.as_points(P, device)
+        lo, hi = layout_gpu.extent(P)
+    else:
+        P = np.asarray(P, np.float64)
+        lo, hi = P.min(0), P.max(0)
     pad = MIN_PADDING * cube         # GenRecon's own padding of the floor plan (inference/get_chunks._define_centers)
     xs, ys = axis_centers(lo[0] - pad, hi[0] + pad, cube), axis_centers(lo[1] - pad, hi[1] + pad, cube)
     if z_centers is not None:
@@ -188,11 +198,14 @@ def plan_layout(P: np.ndarray, cube: float, R: int = 32, log: Callable[[str], No
     for a, o, c in zip(axes, origin, corners):
         if np.abs((a - 0.5 * cube - o) / v - c).max() > 1e-6:
             raise RuntimeError("the cubes' grids are not one lattice")
-    ijk = np.clip(np.floor((P - origin) / v).astype(np.int64), 0, None)   # the guard above bounds the clip to float noise
-    dims = ijk.max(0) + 1
-    key = (ijk[:, 0] * dims[1] + ijk[:, 1]) * dims[2] + ijk[:, 2]
-    act, cnt = np.unique(key, return_counts=True)
-    act = act[cnt >= int(min_points)]            # a voxel is active from min_points points (GenRecon's own rule: 10)
+    if on_device:
+        act, dims = layout_gpu.active_keys(P, origin, v, min_points)
+    else:
+        ijk = np.clip(np.floor((P - origin) / v).astype(np.int64), 0, None)   # the guard above bounds the clip to float noise
+        dims = ijk.max(0) + 1
+        key = (ijk[:, 0] * dims[1] + ijk[:, 1]) * dims[2] + ijk[:, 2]
+        act, cnt = np.unique(key, return_counts=True)
+        act = act[cnt >= int(min_points)]        # a voxel is active from min_points points (GenRecon's own rule: 10)
     cells = np.stack([act // (dims[1] * dims[2]), (act // dims[2]) % dims[1], act % dims[2]], 1)
     # SOLID GROUND (docstring): columns of the support levels' active voxels filled down to the lattice base
     n_ground = 0

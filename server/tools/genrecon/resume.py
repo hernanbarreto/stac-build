@@ -91,9 +91,12 @@ def adapter_config() -> Dict[str, Any]:
     import yaml
     cfg = yaml.safe_load((SERVER / "config.yaml").read_text())
     g = cfg.get("genrecon") or {}
+    if "adapter_device" not in g:
+        raise RuntimeError("config.yaml: genrecon.adapter_device is missing (numpy | cpu | cuda)")
     return {"presence_vote": bool(g.get("presence_vote", False)),
             "presence_min_views": int(g.get("presence_min_views", 2)),
             "presence_device": str(g.get("presence_device", "cuda")),
+            "adapter_device": str(g["adapter_device"]),
             "support_surfaces": sorted(str(x) for x in cfg["autoprompt"]["support_surfaces"])}
 
 
@@ -112,7 +115,7 @@ def vendor_sources(vendor: Optional[Path] = None) -> List[Path]:
 
 
 def code_files() -> List[Path]:
-    return [HERE / "adapter.py", HERE / "presence.py", HERE / "genrecon_levels.py",
+    return [HERE / "adapter.py", HERE / "presence.py", HERE / "genrecon_levels.py", HERE / "layout_gpu.py",
             SERVER / "correction" / "session.py", SERVER / "correction" / "floor.py",
             SERVER / "segmentation" / "perfect_object.py", SERVER / "segmentation" / "session_io.py",
             *vendor_sources()]

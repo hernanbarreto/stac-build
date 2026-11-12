@@ -4,8 +4,9 @@ points3D.txt. The scene is handed over in the session's DISPLAY frame (floor_tra
 up is up even when the raw frame lies on its side — bufferStop) and turned Y-up → Z-up (GenRecon's
 chunker reads the height along z). The transform back to the raw frame is saved for publish.py."""
 import sys, json, shutil, yaml, numpy as np
-sys.path.insert(0, "/workspace/stac-build/server")
 from pathlib import Path
+SERVER = Path(__file__).resolve().parents[2]      # the server tree this adapter belongs to (its modules, config.yaml)
+sys.path.insert(0, str(SERVER))
 from scipy.spatial.transform import Rotation
 from correction.session import load_session
 from segmentation.perfect_object import _read_ply_fields
@@ -68,8 +69,13 @@ if CONF > 0:
 # keyframe and pixel); a point stays when enough keyframes measure it and fewer see through it (presence.py). The
 # votes only remove points; the cubes and their active voxels are laid over the WHOLE of what stays.
 LAYOUT = None
-_g = (yaml.safe_load(open("/workspace/stac-build/server/config.yaml")).get("genrecon") or {})
+_g = (yaml.safe_load(open(SERVER / "config.yaml")).get("genrecon") or {})
 VOTE = bool(_g.get("presence_vote", False))      # USER 2026-11-05: "hay que volver a como estaba antes" — off
+# USER 2026-11-11 ("todo lo que me marcaste que puede pasarse a GPU hay que hacerlo en GPU … Nada debe hacerse en
+# cpu"): the arithmetic over the cloud's points runs on genrecon.adapter_device — numpy is THE RECORD (the lines
+# below as they always were), cpu / cuda are layout_gpu.py's twins of them
+import layout_gpu as LG
+DEV = LG.adapter_device(_g)
 if CUBE_M > 0 and VOTE:
     from presence import vote_points
     votes = vote_points(xyz[keep_all], np.asarray(f["frame_global"])[keep_all], np.asarray(f["pixel_row"])[keep_all],
@@ -95,7 +101,15 @@ def _remap(idx):
     r = old2new[idx]
     return r[r >= 0]
 sel = np.linspace(0, len(xyz) - 1, min(len(xyz), N_PTS)).astype(np.int64)        # a fixed stride, never a draw
-P = xyz[sel] @ M[:3, :3].T + M[:3, 3]; C = np.asarray(rgbv[sel]); C = (C * 255).astype(int) if C.max() <= 1.0 else C.astype(int)
+if DEV == "numpy":
+    P = xyz[sel] @ M[:3, :3].T + M[:3, 3]
+else:
+    import torch
+    torch.use_deterministic_algorithms(True)
+    xyz_t = LG.as_points(xyz, DEV)                         # the points kept, on the device once
+    P_t = LG.to_frame(xyz_t, M[:3, :3], M[:3, 3])          # … in GenRecon's frame
+    P = P_t[torch.from_numpy(sel).to(DEV)].cpu().numpy()
+C = np.asarray(rgbv[sel]); C = (C * 255).astype(int) if C.max() <= 1.0 else C.astype(int)
 with (col / "points3D.txt").open("w") as fh:
     fh.write("# 3D point list with one line of data per point:\n#   POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)\n")
     for j in range(len(P)):
@@ -106,24 +120,42 @@ cams_g = (np.asarray(s.poses, np.float64)[:, :3, 3] @ M[:3, :3].T) + M[:3, 3]
 # (levels.json: the cube's base is the lowest level — of the support surfaces or of the whole cloud —, its top
 # the highest ceiling level; the model paints floor and ceiling at the cube's faces, so a percentile of a
 # subsample must not decide them).
-P_g = xyz @ M[:3, :3].T + M[:3, 3]                         # the points kept, in GenRecon's frame
-np.save(WORK / "cloud_genrecon.npy", P_g.astype(np.float32))
+if DEV == "numpy":
+    P_g = xyz @ M[:3, :3].T + M[:3, 3]                     # the points kept, in GenRecon's frame
+    np.save(WORK / "cloud_genrecon.npy", P_g.astype(np.float32))
+else:
+    P_g = P_t
+    np.save(WORK / "cloud_genrecon.npy", P_t.to(torch.float32).cpu().numpy())
 import yaml
 from correction.floor import head_noun
-_cfg = yaml.safe_load(open("/workspace/stac-build/server/config.yaml"))
+_cfg = yaml.safe_load(open(SERVER / "config.yaml"))
 support = set(_cfg["autoprompt"]["support_surfaces"])
-y_d = (xyz @ (s_f * R_f).T + t_f)[:, 1]                      # heights in the display frame = GenRecon's z
-seg = json.loads((out / "segmentation_result.json").read_text()) if (out / "segmentation_result.json").exists() else {"instances": []}
+if DEV == "numpy":
+    y_d = (xyz @ (s_f * R_f).T + t_f)[:, 1]                  # heights in the display frame = GenRecon's z
+else:
+    D_t = LG.to_frame(xyz_t, s_f * R_f, t_f)               # the display frame (y up), on the device
+seg =json.loads((out / "segmentation_result.json").read_text()) if (out / "segmentation_result.json").exists() else {"instances": []}
 sup_idx = np.concatenate([_remap(i["globalIndices"]) for i in seg["instances"] if head_noun(i["label"]) in support] or [np.zeros(0, np.int64)])
 ceil_idx = [_remap(i["globalIndices"]) for i in seg["instances"] if head_noun(i["label"]) == "ceiling"]
 # the cube's base on the LOWEST level, of the support surfaces or of the whole cloud (genrecon_levels.py:
 # station's tracks, 1.15 m under the platform and no support noun, sat under every cube — USER 2026-11-02)
 from genrecon_levels import anchored_centers, chunk_levels, stack_layers
-levels = chunk_levels(y_d, y_d[sup_idx], [y_d[g] for g in ceil_idx], bin_m=0.05, min_share=0.01)
+if DEV == "numpy":
+    levels = chunk_levels(y_d, y_d[sup_idx], [y_d[g] for g in ceil_idx], bin_m=0.05, min_share=0.01)
+    z_lo, z_hi = float(P_g[:, 2].min()), float(P_g[:, 2].max())
+    xy_extent = [float(P_g[:, 0].min()), float(P_g[:, 0].max()), float(P_g[:, 1].min()), float(P_g[:, 1].max())]
+else:
+    def _heights(idx):
+        """The display heights of these points of the cloud, sorted on the device."""
+        return LG.sorted_heights(D_t[torch.from_numpy(np.asarray(idx, np.int64)).to(DEV), 1])
+    levels = chunk_levels(LG.sorted_heights(D_t[:, 1]), _heights(sup_idx), [_heights(g) for g in ceil_idx],
+                          bin_m=0.05, min_share=0.01, levels_of=LG.levels_of_sorted,
+                          percentile_of=LG.percentile_of_sorted)
+    g_lo, g_hi = LG.extent(P_t)
+    z_lo, z_hi = float(g_lo[2]), float(g_hi[2])
+    xy_extent = [float(g_lo[0]), float(g_hi[0]), float(g_lo[1]), float(g_hi[1])]
 levels["floor_level"], levels["floor_level_source"] = levels["z_floor"], levels["source"]
-z_lo, z_hi = float(P_g[:, 2].min()), float(P_g[:, 2].max())
-levels.update(z_top=z_hi, coverage_z=[z_lo, z_hi],
-              xy_extent=[float(P_g[:, 0].min()), float(P_g[:, 0].max()), float(P_g[:, 1].min()), float(P_g[:, 1].max())],
+levels.update(z_top=z_hi, coverage_z=[z_lo, z_hi], xy_extent=xy_extent,
               coords_min_points=MIN_PTS, coords_resolution=32,     # GenRecon's shape SLat grid (11.6 cm at 3.7 m)
               confidence_threshold=CONF, points_kept=int(len(xyz)), points_published=int(n_all))
 centers = None
@@ -143,7 +175,7 @@ if CUBE_M > 0:
     # a voxel active from MIN_PTS points — GenRecon's own presence rule, as always — unless the keyframes' vote
     # already kept only confirmed points (then from one)
     LAYOUT = plan_layout(P_g, CUBE_M, min_points=(1 if VOTE else MIN_PTS),
-                         z_centers=centers, support_levels=support_z, level_bin=0.05)
+                         z_centers=centers, support_levels=support_z, level_bin=0.05, device=DEV)
     levels["ground_filled_voxels"] = LAYOUT["ground_filled"]
     np.save(WORK / "active_cells.npy", LAYOUT.pop("cells"))
     (WORK / "layout.json").write_text(json.dumps(LAYOUT, indent=1))
@@ -157,13 +189,35 @@ levels = stack_layers(levels, CUBE_M, centers)
 # surface, a wall, a ceiling, a pane is never an object here (that is where the phantom floors and rooms came from)
 import re
 STAND_MAX_M = 1.2      # an object's lowest points this close to the support under it stand on it (declared)
+STAND_MIN_PTS = 50     # an object's lowest points are read from this many points (as always)
 _STRUCTURAL = re.compile(r"\b(wall|walls|drywall|ceiling|ceilings|floor|floors|roof|slab|slabs|partition|partitions|panel|panels|sheeting|glass|window|windows|opening|openings|facade|façade)\b", re.I)
-objs = []
-for inst in seg["instances"]:
+
+
+def _no_object(inst):
+    """An instance with no box, a support surface, a wall, a ceiling, a pane: never an object here."""
     obb = inst.get("obb") or {}
-    if not obb.get("center") or head_noun(inst["label"]) in support or _STRUCTURAL.search(inst["label"].replace("_", " ")):
-        continue                                   # labels carry underscores: "drywall_panel" must read as words
-    c = np.asarray(obb["center"], np.float64); he = np.asarray(obb["half_extents"], np.float64); Rb = np.asarray(obb["rotation"], np.float64)
+    return bool(not obb.get("center") or head_noun(inst["label"]) in support
+                or _STRUCTURAL.search(inst["label"].replace("_", " ")))   # labels carry underscores: "drywall_panel" must read as words
+
+
+# on the device: the lowest points and the footprint of EVERY object ranked together, in one pass per axis over
+# their points (the record reads them object by object, inside the loop)
+STANDS = {}
+if DEV != "numpy":
+    held = [(k, _remap(inst["globalIndices"])) for k, inst in enumerate(seg["instances"]) if not _no_object(inst)]
+    held = [(k, gi) for k, gi in held if len(gi) >= STAND_MIN_PTS]
+    if held:
+        pd_t = D_t[torch.from_numpy(np.concatenate([gi for _, gi in held])).to(DEV)]      # display frame: y up
+        sizes = [len(gi) for _, gi in held]
+        lows = LG.group_percentiles(pd_t[:, 1], sizes, [1])
+        span_x, span_z = LG.group_percentiles(pd_t[:, 0], sizes, [1, 99]), LG.group_percentiles(pd_t[:, 2], sizes, [1, 99])
+        STANDS = {k: (lows[j, 0], span_x[j, 0], span_x[j, 1], span_z[j, 0], span_z[j, 1]) for j, (k, _) in enumerate(held)}
+objs = []
+for k, inst in enumerate(seg["instances"]):
+    obb = inst.get("obb") or {}
+    if _no_object(inst):
+        continue
+    c =np.asarray(obb["center"], np.float64); he = np.asarray(obb["half_extents"], np.float64); Rb = np.asarray(obb["rotation"], np.float64)
     iid = int(inst.get("instance_id", inst.get("id", 0)))
     objs.append({"id": iid, "label": inst["label"],
                  "center": (M[:3, :3] @ c + M[:3, 3]).tolist(), "half_extents": (he * s_f).tolist(),
@@ -172,15 +226,26 @@ for inst in seg["instances"]:
     # que sí tenga"): an object whose lowest points sit within STAND_MAX_M of the support level under it gets a
     # second, axis-aligned box from that level up to its lowest points over its footprint, where the model may
     # put the legs; a duct, a lamp, a cable hanging higher keeps its own box only
-    gi = _remap(inst["globalIndices"])
-    if len(gi) >= 50:
-        pd = xyz[gi] @ (s_f * R_f).T + t_f                              # display frame: y up
-        y_lo = float(np.percentile(pd[:, 1], 1)); below = [l for l in levels.get("support_levels", [levels["z_floor"]]) if l <= y_lo + 0.05]
+    if DEV == "numpy":
+        gi = _remap(inst["globalIndices"])
+        reads = len(gi) >= STAND_MIN_PTS
+    else:
+        reads = k in STANDS
+    if reads:
+        if DEV == "numpy":
+            pd = xyz[gi] @ (s_f * R_f).T + t_f                          # display frame: y up
+            y_lo = float(np.percentile(pd[:, 1], 1))
+        else:
+            y_lo = float(STANDS[k][0])
+        below = [l for l in levels.get("support_levels", [levels["z_floor"]]) if l <= y_lo + 0.05]
         if below:
             floor_y = max(below)
             if 0.03 < (y_lo - floor_y) <= STAND_MAX_M:
-                x0, x1 = np.percentile(pd[:, 0], [1, 99]); z0, z1 = np.percentile(pd[:, 2], [1, 99])
-                cd = np.array([(x0 + x1) / 2, (floor_y + y_lo) / 2, (z0 + z1) / 2]); hd = np.array([(x1 - x0) / 2, (y_lo - floor_y) / 2, (z1 - z0) / 2])
+                if DEV == "numpy":
+                    x0, x1 = np.percentile(pd[:, 0], [1, 99]); z0, z1 = np.percentile(pd[:, 2], [1, 99])
+                else:
+                    x0, x1, z0, z1 = STANDS[k][1:]
+                cd =np.array([(x0 + x1) / 2, (floor_y + y_lo) / 2, (z0 + z1) / 2]); hd = np.array([(x1 - x0) / 2, (y_lo - floor_y) / 2, (z1 - z0) / 2])
                 objs.append({"id": iid, "label": inst["label"] + " (stand)", "center": (R_UP @ cd).tolist(),
                              "half_extents": hd[[0, 2, 1]].tolist(), "axes": np.eye(3).tolist()})   # y-up → z-up: extents reorder
 (WORK / "objects.json").write_text(json.dumps({"frame": "genrecon (M_raw_to_genrecon applied)", "axes": "columns", "objects": objs}, indent=1))

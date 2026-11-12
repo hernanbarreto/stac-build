@@ -12,7 +12,7 @@ z_floor = the LOWEST of both. Station 2026-11-02: the tracks lie 1.15 m under th
 (USER: "corregí eso"). With no level at all, the percentile 0.2 of the cloud (the vendor's own anchor).
 """
 import math
-from typing import Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -30,17 +30,26 @@ def height_levels(y, bin_m: float, min_share: float) -> List[float]:
 
 
 def chunk_levels(y_cloud, y_support, y_ceilings: Sequence, bin_m: float = 0.05,
-                 min_share: float = 0.01) -> Dict:
+                 min_share: float = 0.01, levels_of: Optional[Callable] = None,
+                 percentile_of: Optional[Callable] = None) -> Dict:
     """levels.json: z_floor (the lowest support or cloud level), z_ceiling (the highest ceiling
-    instance's p95, else the cloud's p99.97) and where each came from."""
-    y_cloud = np.asarray(y_cloud, np.float64)
+    instance's p95, else the cloud's p99.97) and where each came from.
+
+    ``levels_of(y, bin_m, min_share)`` and ``percentile_of(y, q)`` read the levels and a percentile of a set of
+    heights: absent, THE RECORD (height_levels and np.percentile over numpy heights); layout_gpu.py passes its
+    twins, which read heights sorted on a device."""
+    if levels_of is None:
+        levels_of = height_levels
+    if percentile_of is None:
+        def percentile_of(y, q):
+            return np.percentile(np.asarray(y, np.float64), q)
     levels: Dict = {"bin_m": bin_m, "level_min_share": min_share}
     floors = []
     if len(y_support) > SUPPORT_MIN_POINTS:
-        sup = height_levels(y_support, bin_m, min_share)
+        sup = levels_of(y_support, bin_m, min_share)
         levels["support_levels"] = sup
         floors.append((min(sup), "segmentation support surfaces"))
-    cloud = height_levels(y_cloud, bin_m, min_share)
+    cloud = levels_of(y_cloud, bin_m, min_share)
     levels["cloud_levels"] = cloud
     if cloud:
         floors.append((min(cloud), "the whole cloud's lowest level (below every support surface)"))
@@ -48,10 +57,10 @@ def chunk_levels(y_cloud, y_support, y_ceilings: Sequence, bin_m: float = 0.05,
         z, src = min(floors, key=lambda f: f[0])
         levels.update(z_floor=float(z), source=src)
     else:
-        levels.update(z_floor=float(np.percentile(y_cloud, 0.2)),
+        levels.update(z_floor=float(percentile_of(y_cloud, 0.2)),
                       source="percentile 0.2 of the cloud (no level)")
-    ceil = [float(np.percentile(np.asarray(g, np.float64), 95)) for g in y_ceilings if len(g)]
-    top = float(np.percentile(y_cloud, 99.97))
+    ceil = [float(percentile_of(g, 95)) for g in y_ceilings if len(g)]
+    top = float(percentile_of(y_cloud, 99.97))
     if ceil:
         levels.update(z_ceiling=max(ceil), ceiling_source="segmentation ceiling instances p95")
     else:

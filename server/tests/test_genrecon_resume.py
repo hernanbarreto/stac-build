@@ -166,12 +166,14 @@ def test_the_real_lists():
     assert all(p.is_file() for p in files)
     rel = {p.relative_to(_SERVER.parent).as_posix() for p in files}
     assert {"server/tools/genrecon/adapter.py", "server/tools/genrecon/presence.py",
-            "server/tools/genrecon/genrecon_levels.py"} <= rel
+            "server/tools/genrecon/genrecon_levels.py", "server/tools/genrecon/layout_gpu.py"} <= rel
     if S.VENDOR.is_dir():
         assert "vendor/GenRecon/reconstruct_scene.py" in rel
         assert all((S.VENDOR / m).is_file() and f"vendor/GenRecon/{m}" not in rel for m in S.MESH_STEP_FILES)
         assert not any("/work/" in r for r in rel)
-    assert set(S.adapter_config()) == {"presence_vote", "presence_min_views", "presence_device", "support_surfaces"}
+    assert set(S.adapter_config()) == {"presence_vote", "presence_min_views", "presence_device", "adapter_device",
+                                       "support_surfaces"}
+    assert S.adapter_config()["adapter_device"] in ("numpy", "cpu", "cuda")
 
 
 def test_the_runner_checks_before_the_adapter_and_seals_after_the_reconstruction():
