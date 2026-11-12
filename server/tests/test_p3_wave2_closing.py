@@ -96,7 +96,10 @@ def test_the_octree_is_reused_only_on_an_identical_stamp_never_by_date(tmp_path,
     assert PC.potree_stamp_path(out / "potree") == stamp_path and stamp_path.is_file()
     assert not (out / PC.POTREE_STAMP_NAME).exists(), "a build writes no record beside the octree"
     stamp = json.loads(stamp_path.read_text())
-    assert stamp["threads"] == PC.POTREE_THREADS == "1" and stamp["encoding"] == "UNCOMPRESSED"
+    # the thread count is the config's BOUND since 2026-11-09 (the indexer orders every chunk: any count, one octree)
+    from reconstruction.grid_knn import config_section
+    bound = str(int(config_section(("postprocessing",), ("potree_threads",))["potree_threads"]))
+    assert stamp["threads"] == PC.POTREE_THREADS == bound and stamp["encoding"] == "UNCOMPRESSED"
     assert stamp["classification_sha256"] is None and stamp["instance_ids_sha256"] is None
     assert stamp["cloud_sha256"] == PC.potree_stamp_for(ply)["cloud_sha256"]
     # the same inputs: reused, whatever the file dates say
