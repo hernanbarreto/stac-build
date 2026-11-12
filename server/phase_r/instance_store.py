@@ -146,6 +146,54 @@ CREATE TABLE IF NOT EXISTS user_volumes (
 """
 
 
+from contextlib import contextmanager
+
+
+@contextmanager
+def store_on_local_disk(final_path, keep_existing: bool):
+    """Work on ``scene_r.db`` on the pod's LOCAL disk and put it back in one sequential copy (USER 2026-11-12:
+    "bien con el arreglo").
+
+    /workspace is a network volume (MooseFS over FUSE): sqlite writes its pages there one by one, and its
+    journal is checkpointed into the database page by page. pccr 2026-08-24's floor stage refreshed the
+    geometry of 8,777 instances in one transaction — a 1.4 GB store, a 1.8 GB journal — and spent over half an
+    hour writing it back. Here the store is a file in a fresh directory of the local disk
+    (``tempfile.gettempdir()``): with ``keep_existing`` the current store is first checkpointed (its journal
+    folded into it) and copied there; the caller works on that path and CLOSES its store; on a normal exit
+    the file is copied next to the target, flushed, the target's stale ``-wal`` / ``-shm`` removed and the
+    copy renamed over the target (atomic). On an exception nothing is copied back: the target is untouched.
+    The content is the same — the same sqlite statements run on another disk."""
+    import os
+    import shutil
+    import tempfile
+    final_path = Path(final_path)
+    tmpdir = Path(tempfile.mkdtemp(prefix="scene_r_"))
+    local = tmpdir / final_path.name
+    try:
+        if keep_existing and final_path.exists():
+            con = sqlite3.connect(str(final_path))
+            try:
+                con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                con.close()
+            shutil.copyfile(final_path, local)
+        yield local
+        for suf in ("-wal", "-shm"):
+            if Path(str(local) + suf).exists():
+                raise RuntimeError(f"{local.name}{suf} is still on the local disk — the store was not closed "
+                                   f"before its copy back")
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        part = final_path.with_name(final_path.name + ".part")
+        shutil.copyfile(local, part)
+        with open(part, "rb+") as fh:
+            os.fsync(fh.fileno())
+        for suf in ("-wal", "-shm"):
+            Path(str(final_path) + suf).unlink(missing_ok=True)
+        os.replace(part, final_path)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 class InstanceStore:
     """SQLite-backed canonical instance store (one file per scene)."""
 

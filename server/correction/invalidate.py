@@ -83,113 +83,118 @@ def update_instance_store(output_dir, R_kf: np.ndarray, t_kf: np.ndarray,
             f"cloud has {len(xyz):,} — its points and OBBs are NOT refit from another "
             f"cloud's indices; re-project the masks on this cloud to update them")
 
-    store = InstanceStore(db)
-    try:
-      # one sqlite transaction for the whole refresh (a commit per point blob was 20 of the update's
-      # 30 s on pccr, 2026-11-01); an exception rolls every write of this update back
-      with store.deferred_commits():
-        n_inst = 0
-        live_ids = []
-        known = {int(r.get("instance_id")) for r in store.list_instances()}
-        for inst in result.get("instances", []):
-            iid = int(inst.get("instance_id", inst.get("id", -1)))
-            if iid < 0:
-                continue
-            live_ids.append(iid)
-            # an instance the store never heard of (a brush segment, a split)
-            # used to be silently skipped: the geometry refreshed around a hole
-            if iid not in known:
-                store.upsert_instance(iid, str(inst.get("label") or "segment"),
-                                      source="sam3_concepts", status="proposed",
-                                      label_origin=str(inst.get("label_origin") or "vlm_proposed"))
-                known.add(iid)
-            if not indices_hold:
-                continue
-            g = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
-            g = g[(g >= 0) & (g < len(xyz_display))]
-            if not len(g):
-                continue
-            pts = xyz_display[g].astype(np.float32)
-            fids = data["frame_global"][g].astype(np.int32)
-            store.set_points(iid, pts, frame_ids=fids)
-            # the OBB needs a volume to fit; the points stand on their own
-            if len(g) < 4:
+    # the refresh runs on the pod's LOCAL disk and the store comes back in one copy
+    # (phase_r.instance_store.store_on_local_disk, USER 2026-11-12: pccr 2026-08-24's in-place refresh
+    # wrote a 1.8 GB journal to the network volume page by page for over half an hour)
+    from phase_r.instance_store import store_on_local_disk
+    with store_on_local_disk(db, keep_existing=True) as local_db:
+        store = InstanceStore(local_db)
+        try:
+          # one sqlite transaction for the whole refresh (a commit per point blob was 20 of the update's
+          # 30 s on pccr, 2026-11-01); an exception rolls every write of this update back
+          with store.deferred_commits():
+            n_inst = 0
+            live_ids = []
+            known = {int(r.get("instance_id")) for r in store.list_instances()}
+            for inst in result.get("instances", []):
+                iid = int(inst.get("instance_id", inst.get("id", -1)))
+                if iid < 0:
+                    continue
+                live_ids.append(iid)
+                # an instance the store never heard of (a brush segment, a split)
+                # used to be silently skipped: the geometry refreshed around a hole
+                if iid not in known:
+                    store.upsert_instance(iid, str(inst.get("label") or "segment"),
+                                          source="sam3_concepts", status="proposed",
+                                          label_origin=str(inst.get("label_origin") or "vlm_proposed"))
+                    known.add(iid)
+                if not indices_hold:
+                    continue
+                g = np.asarray(inst.get("globalIndices") or [], dtype=np.int64)
+                g = g[(g >= 0) & (g < len(xyz_display))]
+                if not len(g):
+                    continue
+                pts = xyz_display[g].astype(np.float32)
+                fids = data["frame_global"][g].astype(np.int32)
+                store.set_points(iid, pts, frame_ids=fids)
+                # the OBB needs a volume to fit; the points stand on their own
+                if len(g) < 4:
+                    n_inst += 1
+                    continue
+                # the OBB the republish just refit for these same points (apply._recompute_obbs, the same
+                # display transform, every instance of 10+ points) — computed once, not twice (484 OBBs
+                # were refit again here on pccr audit5, ~1.5 min); smaller instances are fit here as before
+                obb = inst.get("obb") if (indices_hold and len(g) >= 10) else None
+                if not isinstance(obb, dict) or "center" not in obb or "half_extents" not in obb:
+                    obb = _compute_obb(xyz_display[g])
+                # same OBB→store mapping as segmentation.pipeline._write_instance_store
+                c = np.asarray(obb["center"], float)
+                h = np.asarray(obb["half_extents"], float)
+                Rd = np.asarray(obb.get("rotation", np.eye(3)), float)
+                T = np.eye(4)
+                T[:3, :3] = Rd
+                T[:3, 3] = c
+                aabb = np.array([-h[0], h[0], -h[1], h[1], -h[2], h[2]])
+                store.set_obb(iid, T, aabb, c, n_points=len(pts),
+                              obb_origin="tool_measured")
                 n_inst += 1
-                continue
-            # the OBB the republish just refit for these same points (apply._recompute_obbs, the same
-            # display transform, every instance of 10+ points) — computed once, not twice (484 OBBs
-            # were refit again here on pccr audit5, ~1.5 min); smaller instances are fit here as before
-            obb = inst.get("obb") if (indices_hold and len(g) >= 10) else None
-            if not isinstance(obb, dict) or "center" not in obb or "half_extents" not in obb:
-                obb = _compute_obb(xyz_display[g])
-            # same OBB→store mapping as segmentation.pipeline._write_instance_store
-            c = np.asarray(obb["center"], float)
-            h = np.asarray(obb["half_extents"], float)
-            Rd = np.asarray(obb.get("rotation", np.eye(3)), float)
-            T = np.eye(4)
-            T[:3, :3] = Rd
-            T[:3, 3] = c
-            aabb = np.array([-h[0], h[0], -h[1], h[1], -h[2], h[2]])
-            store.set_obb(iid, T, aabb, c, n_points=len(pts),
-                          obb_origin="tool_measured")
-            n_inst += 1
 
-        # 3-D findings: re-anchor per origin keyframe (they carry frame_id;
-        # the anchor lives in the same world frame as the cloud). Full warp:
-        # depth k along the ray from the PRE-correction camera centre, then
-        # the keyframe's rigid transform. The pre-correction centre is
-        # recovered from the corrected pose: c0 = R^T (c_corr - t).
-        poses_corr = read_poses(output_dir / "camera_poses.txt")
-        n_findings = 0
-        n_findings_lost = 0
-        for f in store.list_findings():
-            p3 = f.get("point3d")
-            fid = f.get("frame_id")
-            if p3 is None:
-                continue
-            kf = kf_of_frame.get(int(fid)) if fid is not None else None
-            if kf is None:
-                n_findings_lost += 1
-                continue
-            p = np.asarray(p3, dtype=np.float64).reshape(3)
-            kv = float(k_kf[kf])
-            bv = float(b_kf[kf]) if b_kf is not None else 0.0
-            if kv != 1.0 or bv != 0.0:
-                cam_corr = poses_corr[kf][:3, 3]
-                cam0 = R_kf[kf].T @ (cam_corr - t_kf[kf])
-                if bv != 0.0:
-                    axis0 = R_kf[kf].T @ poses_corr[kf][:3, 2]
-                    z = float((p - cam0) @ axis0)
-                    zc = z if abs(z) > 1e-9 else 1e-9
-                    p = cam0 + (p - cam0) * ((kv * z + bv) / zc)
-                else:
-                    p = cam0 + (p - cam0) * kv
-            p = R_kf[kf] @ p + t_kf[kf]
-            store.conn.execute(
-                "UPDATE findings SET point3d = ? WHERE finding_id = ?",
-                (np.ascontiguousarray(p, dtype=np.float32).tobytes(),
-                 int(f["finding_id"])))
-            n_findings += 1
-        store.conn.commit()
-        # what the segmentation no longer has stops existing here too — the
-        # store is the canonical object list and a ghost in it is a lie the
-        # chat, the findings and the reports all repeat
-        recon = store.reconcile(live_ids)
-        store.set_meta("geometry_epoch", str(current_epoch(output_dir)))
-        store.set_meta("segmentation_indexes_live_cloud", "true" if indices_hold else "false")
-        summary = {"store": "updated" if indices_hold else "stale_segmentation",
-                   "instances": n_inst,
-                   "removed": recon["removed"],
-                   "findings_orphaned": recon["findings_orphaned"],
-                   "findings_transformed": n_findings,
-                   "findings_unresolvable": n_findings_lost}
-        if recon["removed"]:
-            log(f"  instance store: {recon['removed']} instance(s) dropped — "
-                f"{recon.get('removed_ids')}")
-        log(f"  instance store updated in place: {summary}")
-        return summary
-    finally:
-        store.close()
+            # 3-D findings: re-anchor per origin keyframe (they carry frame_id;
+            # the anchor lives in the same world frame as the cloud). Full warp:
+            # depth k along the ray from the PRE-correction camera centre, then
+            # the keyframe's rigid transform. The pre-correction centre is
+            # recovered from the corrected pose: c0 = R^T (c_corr - t).
+            poses_corr = read_poses(output_dir / "camera_poses.txt")
+            n_findings = 0
+            n_findings_lost = 0
+            for f in store.list_findings():
+                p3 = f.get("point3d")
+                fid = f.get("frame_id")
+                if p3 is None:
+                    continue
+                kf = kf_of_frame.get(int(fid)) if fid is not None else None
+                if kf is None:
+                    n_findings_lost += 1
+                    continue
+                p = np.asarray(p3, dtype=np.float64).reshape(3)
+                kv = float(k_kf[kf])
+                bv = float(b_kf[kf]) if b_kf is not None else 0.0
+                if kv != 1.0 or bv != 0.0:
+                    cam_corr = poses_corr[kf][:3, 3]
+                    cam0 = R_kf[kf].T @ (cam_corr - t_kf[kf])
+                    if bv != 0.0:
+                        axis0 = R_kf[kf].T @ poses_corr[kf][:3, 2]
+                        z = float((p - cam0) @ axis0)
+                        zc = z if abs(z) > 1e-9 else 1e-9
+                        p = cam0 + (p - cam0) * ((kv * z + bv) / zc)
+                    else:
+                        p = cam0 + (p - cam0) * kv
+                p = R_kf[kf] @ p + t_kf[kf]
+                store.conn.execute(
+                    "UPDATE findings SET point3d = ? WHERE finding_id = ?",
+                    (np.ascontiguousarray(p, dtype=np.float32).tobytes(),
+                     int(f["finding_id"])))
+                n_findings += 1
+            store.conn.commit()
+            # what the segmentation no longer has stops existing here too — the
+            # store is the canonical object list and a ghost in it is a lie the
+            # chat, the findings and the reports all repeat
+            recon = store.reconcile(live_ids)
+            store.set_meta("geometry_epoch", str(current_epoch(output_dir)))
+            store.set_meta("segmentation_indexes_live_cloud", "true" if indices_hold else "false")
+            summary = {"store": "updated" if indices_hold else "stale_segmentation",
+                       "instances": n_inst,
+                       "removed": recon["removed"],
+                       "findings_orphaned": recon["findings_orphaned"],
+                       "findings_transformed": n_findings,
+                       "findings_unresolvable": n_findings_lost}
+            if recon["removed"]:
+                log(f"  instance store: {recon['removed']} instance(s) dropped — "
+                    f"{recon.get('removed_ids')}")
+            log(f"  instance store updated in place: {summary}")
+            return summary
+        finally:
+            store.close()
 
 
 # scene_meta rows the store's WRITERS own — regenerated with the store, never carried over

@@ -5553,13 +5553,17 @@ def _write_instance_store(output_dir: Path, instances: list,
     ``rebuild_instance_store`` (instances reloaded from disk). ``dest_dir``
     (default ``output_dir``) is where the file is written — the projection's
     staging directory (point 122)."""
-    from phase_r.instance_store import InstanceStore
+    from phase_r.instance_store import InstanceStore, store_on_local_disk
     _sp = (Path(dest_dir) if dest_dir is not None else Path(output_dir)) / "scene_r.db"
-    for _suffix in ("", "-wal", "-shm"):
-        _f = Path(str(_sp) + _suffix)
-        if _f.exists():
-            _f.unlink()
-    _st = InstanceStore(_sp)
+    # built on the pod's local disk, copied over the target once (store_on_local_disk, USER 2026-11-12)
+    with store_on_local_disk(_sp, keep_existing=False) as _local:
+        _write_instance_rows(InstanceStore(_local), instances, xyz_display)
+    print(f"[SegPipeline] scene_r.db built: {len(instances)} instances "
+          f"(display frame — Q&A/classify/findings read from here)")
+
+
+def _write_instance_rows(_st, instances: list, xyz_display: np.ndarray) -> None:
+    """Every instance's row, points and box into the open store ``_st``, which is then closed."""
     for inst in instances:
         _iid = int(inst["instance_id"])
         _m = np.asarray(inst["globalIndices"], dtype=np.int64)
@@ -5581,8 +5585,6 @@ def _write_instance_store(output_dir: Path, instances: list,
                         obb_origin="tool_measured")
     _st.set_meta("built_from", "sam3_concepts_display_frame")
     _st.close()
-    print(f"[SegPipeline] scene_r.db built: {len(instances)} instances "
-          f"(display frame — Q&A/classify/findings read from here)")
 
 
 def rebuild_instance_store(output_dir) -> bool:
