@@ -121,3 +121,12 @@ def test_the_tiles_switch_reaches_the_runner(tmp_path, monkeypatch):
     envs.clear()
     _run(tmp_path / "off", monkeypatch, {**_CFG, "generative_mesh_name": "", "tiles": False})
     assert envs and envs[0]["GENRECON_TILES"] == "0"
+
+
+def test_every_failure_line_of_the_runner_is_named():
+    """run_cloud.sh ends a failed step with `echo "<step> failed <sid>"`: the worker knows every one of them (pccr
+    2026-08-24, 2026-11-12: the mesh step's "dump failed" was not in the list and the stage said only "exit 1")."""
+    import re
+    script = (Path(G.__file__).resolve().parent.parent / "tools" / "genrecon" / "run_cloud.sh").read_text()
+    said = set(re.findall(r'echo "([a-z ]+ failed) \$sid"', script))
+    assert said and said == set(G._FAILS)

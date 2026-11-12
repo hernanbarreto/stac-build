@@ -39,6 +39,7 @@ _MARKS = [
     ("levels:", 8, "floor and ceiling levels from the segmentation"),
     ("images, ", 12, "keyframes, poses and cloud written"),
     ("undistorted", 18, "keyframes undistorted"),
+    ("=== RESUME", 70, "the reconstruction reused — continuing at the mesh step"),
     ("coords from the cloud", 25, "active voxels from the cloud"),
     ("Sampling sparse structure", 25, "the model generating the scene's structure"),
     ("Sampling shape", 35, "generating the surface"),
@@ -49,7 +50,10 @@ _MARKS = [
     ("writing", 95, "writing scene.glb"),
     ("published", 99, "published"),
 ]
-_FAILS = ("adapter failed", "reconstruct failed", "bake failed", "publish failed", "hull failed")
+# every "<step> failed <sid>" line of run_cloud.sh: a failure names its step (2026-11-12: pccr 2026-08-24 died in the
+# dump of the mesh step and the stage said only "exit 1") — tests/test_genrecon_worker.py holds the two lists equal
+_FAILS = ("adapter failed", "reconstruct failed", "bake failed", "publish failed", "hull failed", "dump failed",
+          "bake worker failed", "tiles failed", "resume check failed", "resume stamp failed")
 
 
 def _run_variant(pipe: WorkerPipe, output_dir: Path, sid: str, scan: str, name: str, min_pts: int, mode: str,
@@ -96,7 +100,8 @@ def _run_variant(pipe: WorkerPipe, output_dir: Path, sid: str, scan: str, name: 
             if line.startswith(f):
                 failed = line
         if ("Traceback" in line or "Error" in line or "[STAC]" in line or "[VRAM]" in line or line.startswith("published")
-                or line.startswith("levels:") or "[presence]" in line or line.startswith("confidence filter")):
+                or line.startswith("levels:") or "[presence]" in line or line.startswith("confidence filter")
+                or "[resume]" in line or line.startswith("=== RESUME")):
             pipe.send_log(f"[genrecon] {line[:300]}")
     code = proc.wait()
     if code != 0 or failed is not None:
