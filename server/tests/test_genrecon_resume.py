@@ -174,7 +174,7 @@ def test_the_real_lists():
     rel = {p.relative_to(_SERVER.parent).as_posix() for p in files}
     assert {"server/tools/genrecon/adapter.py", "server/tools/genrecon/presence.py",
             "server/tools/genrecon/genrecon_levels.py", "server/tools/genrecon/layout_gpu.py",
-            "server/tools/genrecon/remap_gpu.py", "server/jpeg_gpu.py"} <= rel
+            "server/tools/genrecon/remap_gpu.py", "server/jpeg_gpu.py", "server/tools/genrecon/cloud_shape.py"} <= rel
     if S.VENDOR.is_dir():
         assert "vendor/GenRecon/reconstruct_scene.py" in rel
         assert all((S.VENDOR / m).is_file() and f"vendor/GenRecon/{m}" not in rel for m in S.MESH_STEP_FILES)

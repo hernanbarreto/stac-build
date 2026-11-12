@@ -124,6 +124,7 @@ def vendor_sources(vendor: Optional[Path] = None) -> List[Path]:
 def code_files() -> List[Path]:
     return [HERE / "adapter.py", HERE / "presence.py", HERE / "genrecon_levels.py", HERE / "layout_gpu.py",
             HERE / "remap_gpu.py", SERVER / "jpeg_gpu.py",
+            HERE / "cloud_shape.py",     # the shape from the cloud: reconstruct_scene.py imports it (USER 2026-11-12)
             SERVER / "correction" / "session.py", SERVER / "correction" / "floor.py",
             SERVER / "segmentation" / "perfect_object.py", SERVER / "segmentation" / "session_io.py",
             *vendor_sources()]
