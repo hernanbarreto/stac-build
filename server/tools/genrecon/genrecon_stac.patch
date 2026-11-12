@@ -87,7 +87,7 @@ index e57f74d..2dcc034 100644
          },
          "rembg_model": {
 diff --git a/genrecon/pipelines/full_scene_images_to_3d.py b/genrecon/pipelines/full_scene_images_to_3d.py
-index b26f309..cf0a244 100644
+index b26f309..aadba25 100644
 --- a/genrecon/pipelines/full_scene_images_to_3d.py
 +++ b/genrecon/pipelines/full_scene_images_to_3d.py
 @@ -1,7 +1,7 @@
@@ -99,7 +99,56 @@ index b26f309..cf0a244 100644
  
  import torch
  
-@@ -408,6 +408,8 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+@@ -38,6 +38,16 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+     # of this size. Aggregation is pure per-voxel so this changes nothing
+     # numerically. Shrink if you still OOM at higher `num_imgs_per_scene`.
+     proj_batch_voxels = 8192
++    # STAC (USER 2026-11-12: "arreglá genrecon y hacelo escalable, que pueda manejar nubes masivas"): the
++    # projection tensor is [1, N, voxels, D], N = EVERY scene image — pccr 2026-08-24's 2765 keyframes ran
++    # the card out of memory where pccr 3108's 547 fit with 2048 voxels a batch. The voxel batch is cut so
++    # that voxels x images stays at that working size (aggregation is per voxel: the same numbers), and the
++    # scene images are DINO-encoded in batches of ENCODE_BATCH (per image: the same tokens).
++    proj_pairs_budget = 2048 * 547
++    encode_batch_images = 64
++
++    def _proj_batch(self, n_images: int) -> int:
++        return max(1, min(int(self.proj_batch_voxels), int(self.proj_pairs_budget) // max(int(n_images), 1)))
+ 
+     # ─────────────────────────────────────────────────────────────────────
+     # Global-grid geometry helpers
+@@ -122,7 +132,7 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+         if self.low_vram:
+             flow_model.to(self.device)
+         V_total = pts.shape[0]
+-        batch = self.proj_batch_voxels
++        batch = self._proj_batch(scene_feats.shape[1])   # STAC: voxels x images bounded
+         agg_chunks: list[torch.Tensor] = []
+         for start in range(0, V_total, batch):
+             end = min(start + batch, V_total)
+@@ -192,7 +202,7 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+             flow_model.to(self.device)
+         S_global = pts.shape[0]
+         global_xyz_dev = global_xyz_unique.to(self.device)
+-        batch = self.proj_batch_voxels
++        batch = self._proj_batch(scene_feats.shape[1])   # STAC: voxels x images bounded
+         agg_chunks: list[torch.Tensor] = []
+         for start in range(0, S_global, batch):
+             end = min(start + batch, S_global)
+@@ -385,8 +395,11 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+     # ─────────────────────────────────────────────────────────────────────
+ 
+     def _encode_scene(self, images: torch.Tensor, resolution: int) -> torch.Tensor:
+-        """DINO-encode a stack of images [M, C, H, W] → [1, M, T, D]."""
+-        return self._encode_conditioning_tokens(images.unsqueeze(0), resolution=resolution)
++        """DINO-encode a stack of images [M, C, H, W] → [1, M, T, D], ``encode_batch_images`` at a time (STAC)."""
++        parts = [self._encode_conditioning_tokens(images[a:a + self.encode_batch_images].unsqueeze(0),
++                                                  resolution=resolution)
++                 for a in range(0, int(images.shape[0]), int(self.encode_batch_images))]
++        return parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
+ 
+     def _prep_extrinsics_intrinsics(
+         self, ext: torch.Tensor, intr: torch.Tensor, dtype: torch.dtype
+@@ -408,6 +421,8 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
          pipeline_type: Optional[str] = None,
          occ_threshold: float = 0.0,
          zero_3d_cond: bool = False,
@@ -108,7 +157,7 @@ index b26f309..cf0a244 100644
      ) -> tuple[MeshWithVoxel, list[torch.Tensor]]:
          pipeline_type = pipeline_type or self.default_pipeline_type
          if pipeline_type not in ("512", "1024"):
-@@ -439,66 +441,76 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+@@ -439,66 +454,76 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
              scene_feats_stage = scene_feats_512
              cond2d_feats_stage = cond2d_feats_512
  

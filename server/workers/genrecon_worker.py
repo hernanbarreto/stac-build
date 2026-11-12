@@ -70,8 +70,11 @@ def _run_variant(pipe: WorkerPipe, output_dir: Path, sid: str, scan: str, name: 
     failed = None
     published = None
     bake_n = 0
+    from collections import deque
+    tail = deque(maxlen=120)                    # the last lines, all of them: a failure shows its whole traceback
     for line in proc.stdout:
         line = line.rstrip("\n")
+        tail.append(line)
         if not line.strip() or line.startswith("+ "):          # the script's own `set -x` echo
             continue
         for mark, p, msg in _MARKS:
@@ -97,6 +100,9 @@ def _run_variant(pipe: WorkerPipe, output_dir: Path, sid: str, scan: str, name: 
             pipe.send_log(f"[genrecon] {line[:300]}")
     code = proc.wait()
     if code != 0 or failed is not None:
+        # the filter above forwards a traceback's first and last lines only (2026-11-12: pccr 2026-08-24's
+        # out-of-memory had no 'File …' line in the log) — the whole tail goes out on a failure
+        pipe.send_log("[genrecon] the run's last lines:\n" + "\n".join(tail))
         raise RuntimeError(f"GenRecon stage failed — {tag} ({failed or f'exit {code}'}) — see the stage log")
     glb = output_dir / "tsdf" / name / f"{name}.glb"
     if not glb.exists():
