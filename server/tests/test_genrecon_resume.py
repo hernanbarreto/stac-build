@@ -159,6 +159,13 @@ def test_vendor_sources_leave_the_mesh_step_out(tmp_path):
     assert got == ["configs/a.json", "genrecon/work/kept.py", "inference/get_chunks.py", "reconstruct_scene.py"]
 
 
+def test_the_stamp_holds_the_device_genrecons_process_undistorts_on(monkeypatch):
+    monkeypatch.delenv(S.UNDISTORT_ENV, raising=False)
+    assert S.adapter_config()["undistort_device"] == "numpy"          # the runner by hand: the vendor's own lines
+    monkeypatch.setenv(S.UNDISTORT_ENV, "cuda")
+    assert S.adapter_config()["undistort_device"] == "cuda"
+
+
 def test_the_real_lists():
     """What the stamp covers in this repo: the adapter's files, and — when the vendor clone is here — its
     reconstruction sources without the mesh step's two files."""
@@ -166,13 +173,14 @@ def test_the_real_lists():
     assert all(p.is_file() for p in files)
     rel = {p.relative_to(_SERVER.parent).as_posix() for p in files}
     assert {"server/tools/genrecon/adapter.py", "server/tools/genrecon/presence.py",
-            "server/tools/genrecon/genrecon_levels.py", "server/tools/genrecon/layout_gpu.py"} <= rel
+            "server/tools/genrecon/genrecon_levels.py", "server/tools/genrecon/layout_gpu.py",
+            "server/tools/genrecon/remap_gpu.py", "server/jpeg_gpu.py"} <= rel
     if S.VENDOR.is_dir():
         assert "vendor/GenRecon/reconstruct_scene.py" in rel
         assert all((S.VENDOR / m).is_file() and f"vendor/GenRecon/{m}" not in rel for m in S.MESH_STEP_FILES)
         assert not any("/work/" in r for r in rel)
     assert set(S.adapter_config()) == {"presence_vote", "presence_min_views", "presence_device", "adapter_device",
-                                       "support_surfaces"}
+                                       "undistort_device", "support_surfaces"}
     assert S.adapter_config()["adapter_device"] in ("numpy", "cpu", "cuda")
 
 

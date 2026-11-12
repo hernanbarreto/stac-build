@@ -48,6 +48,9 @@ NOT_REUSABLE = 3
 PRODUCTS = ("to_glb_inputs.pt", "chunk_inputs.pt")
 #: vendor files of the MESH step (after the reconstruction): a change there keeps the reconstruction's products
 MESH_STEP_FILES = ("chunked_to_glb.py", "inference/chunked_glb.py")
+#: genrecon.undistort_device as the worker hands it to GenRecon's own process (workers/genrecon_worker.py
+#: UNDISTORT_ENV, tools/genrecon/remap_gpu.py ENV — one name, held equal by tests/test_remap_gpu.py)
+UNDISTORT_ENV = "STAC_UNDISTORT_DEVICE"
 #: top-level vendor folders that hold no source of the reconstruction
 _VENDOR_SKIP = ("work", ".git", "checkpoints", "weights", "assets")
 _VENDOR_SOURCE = (".py", ".json", ".yaml", ".yml")
@@ -87,7 +90,8 @@ def keyframes(ses: Path) -> Dict[str, Optional[int]]:
 
 def adapter_config() -> Dict[str, Any]:
     """The config.yaml values adapter.py reads, as it reads them (the order's own values — cube, confidence,
-    points per voxel, mode — are in the command lines)."""
+    points per voxel, mode — are in the command lines), and the device GenRecon's own process undistorts its
+    frames on."""
     import yaml
     cfg = yaml.safe_load((SERVER / "config.yaml").read_text())
     g = cfg.get("genrecon") or {}
@@ -97,6 +101,9 @@ def adapter_config() -> Dict[str, Any]:
             "presence_min_views": int(g.get("presence_min_views", 2)),
             "presence_device": str(g.get("presence_device", "cuda")),
             "adapter_device": str(g["adapter_device"]),
+            # what GenRecon's own process is launched with (the worker writes genrecon.undistort_device of the
+            # order's config into its environment; absent = numpy, the vendor's own lines — remap_gpu.device_from_env)
+            "undistort_device": str(os.environ.get(UNDISTORT_ENV, "numpy")),
             "support_surfaces": sorted(str(x) for x in cfg["autoprompt"]["support_surfaces"])}
 
 
@@ -116,6 +123,7 @@ def vendor_sources(vendor: Optional[Path] = None) -> List[Path]:
 
 def code_files() -> List[Path]:
     return [HERE / "adapter.py", HERE / "presence.py", HERE / "genrecon_levels.py", HERE / "layout_gpu.py",
+            HERE / "remap_gpu.py", SERVER / "jpeg_gpu.py",
             SERVER / "correction" / "session.py", SERVER / "correction" / "floor.py",
             SERVER / "segmentation" / "perfect_object.py", SERVER / "segmentation" / "session_io.py",
             *vendor_sources()]

@@ -73,7 +73,7 @@ def _run(tmp_path, monkeypatch, gcfg, fail_mode=None):
 
 _CFG = {"mesh_name": "genrecon_photo", "mode": "cloud", "generative_mesh_name": "genrecon_generative",
         "min_points_per_voxel": 10, "simplify_faces_per_chunk": 150000, "texture_size": 2048, "bake_views": 3,
-        "cube_size_m": 3.7}
+        "cube_size_m": 3.7, "undistort_device": "cuda"}
 
 
 def test_both_variants_in_order(tmp_path, monkeypatch):
@@ -112,6 +112,21 @@ def test_the_cube_side_reaches_the_runner(tmp_path, monkeypatch):
     envs.clear()
     _run(tmp_path, monkeypatch, {**_CFG, "generative_mesh_name": ""})
     assert envs and envs[0]["GENRECON_CUBE_M"] == "3.7"
+
+
+def test_the_undistortion_device_reaches_the_runner_and_is_typed(tmp_path, monkeypatch):
+    for n, dev in enumerate(("numpy", "cpu", "cuda")):
+        envs.clear()
+        _run(tmp_path / str(n), monkeypatch, {**_CFG, "generative_mesh_name": "", "undistort_device": dev})
+        assert envs and envs[0][G.UNDISTORT_ENV] == dev
+    envs.clear()
+    missing = {k: v for k, v in _CFG.items() if k != "undistort_device"}
+    with pytest.raises(RuntimeError, match="genrecon.undistort_device is missing"):
+        _run(tmp_path / "missing", monkeypatch, missing)
+    for n, bad in enumerate(("gpu", "cuda:0", "", None, True)):
+        with pytest.raises(RuntimeError, match="genrecon.undistort_device must be one of"):
+            _run(tmp_path / f"bad{n}", monkeypatch, {**_CFG, "undistort_device": bad})
+    assert not envs                                               # nothing was launched
 
 
 def test_the_tiles_switch_reaches_the_runner(tmp_path, monkeypatch):

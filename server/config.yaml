@@ -152,6 +152,13 @@ genrecon:
   # their heights, the lattice's active voxels, the objects' stands). numpy = THE RECORD (adapter.py's own numpy
   # lines); cpu | cuda = tools/genrecon/layout_gpu.py's float64 twins. cuda with no card FAILS naming this key
   adapter_device: cuda               # numpy | cpu | cuda
+  # USER 2026-11-11 (the same order): where GenRecon's own process undistorts the frames of a camera with distortion
+  # (inference/get_images.py: decode, remap, crop — one frame after the other). numpy = THE RECORD (the vendor's own
+  # cv2 lines on the CPU); cpu | cuda = tools/genrecon/remap_gpu.py's twin — the same pixels handed to the vendor's
+  # cv2.imwrite, so the same files (the JPEG encode stays cv2's, on the CPU). Measured 2026-11-12: no time gained
+  # (bufferStop 2.9–3.1 s on the record, 2.9–3.3 s on the card); cpu is the tests' device, slower than the record
+  # (8.6 s). cuda with no card FAILS naming this key
+  undistort_device: cuda             # numpy | cpu | cuda
   confidence: 0.0                   # the viewer's confidence slider (0..1) applied first; chosen PER ORDER in the
                                      # Autosegment window (USER: "eso depende de cómo se capturó, no puede generalizarse")
   simplify_faces_per_chunk: 150000   # the bake's decimation target per chunk, as always (USER 2026-11-05: back; 0 = none

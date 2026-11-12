@@ -78,7 +78,9 @@ else
     (cd /workspace/stac-build/server && $DA3 $T/hull_points.py $SES $W) || { echo "hull failed $sid"; exit 1; }
   fi
   rm -rf $O $OL
-  (cd $G && $GR $RECON) || { echo "reconstruct failed $sid"; exit 1; }
+  # $T alone on GenRecon's path (never the server tree over the vendor's modules): inference/get_images.py imports
+  # remap_gpu from it when the worker set STAC_UNDISTORT_DEVICE (genrecon.undistort_device)
+  (cd $G && PYTHONPATH=$T${PYTHONPATH:+:$PYTHONPATH} $GR $RECON) || { echo "reconstruct failed $sid"; exit 1; }
   if [ $HULL -eq 0 ]; then
     (cd /workspace/stac-build/server && $DA3 $T/resume.py seal $SES $W $O) || { echo "resume stamp failed $sid"; exit 1; }
   fi

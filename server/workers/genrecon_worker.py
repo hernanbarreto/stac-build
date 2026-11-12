@@ -117,6 +117,24 @@ def _run_variant(pipe: WorkerPipe, output_dir: Path, sid: str, scan: str, name: 
     return json.loads(meta_p.read_text()) if meta_p.exists() else {}
 
 
+#: genrecon.undistort_device as GenRecon's own process reads it (tools/genrecon/remap_gpu.py ENV / DEVICES — not
+#: imported here: this process loads no torch)
+UNDISTORT_ENV = "STAC_UNDISTORT_DEVICE"
+_UNDISTORT_DEVICES = ("numpy", "cpu", "cuda")
+
+
+def _undistort_device(gcfg: dict) -> str:
+    """``genrecon.undistort_device``, typed: a missing key or another value fails naming it (cuda with no card is
+    refused where the card is looked for — GenRecon's own process, remap_gpu.device_from_env)."""
+    if "undistort_device" not in gcfg:
+        raise RuntimeError(f"config.yaml: genrecon.undistort_device is missing ({' | '.join(_UNDISTORT_DEVICES)})")
+    dev = gcfg["undistort_device"]
+    if dev not in _UNDISTORT_DEVICES:
+        raise RuntimeError(f"config.yaml: genrecon.undistort_device must be one of {' | '.join(_UNDISTORT_DEVICES)} "
+                           f"(got {dev!r})")
+    return dev
+
+
 def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
     session_path = Path(session_dir).resolve()
     output_dir = session_path / "output"
@@ -146,7 +164,9 @@ def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
            # USER 2026-11-05: the viewer's confidence slider chosen for THIS order (the GenRecon button), the chunk
            # bakes in parallel processes
            "GENRECON_CONF": str(conf),
-           "GENRECON_BAKE_WORKERS": str(int(gcfg.get("bake_workers", 1)))}
+           "GENRECON_BAKE_WORKERS": str(int(gcfg.get("bake_workers", 1))),
+           # where GenRecon's own process undistorts its frames (tools/genrecon/remap_gpu.py reads it there)
+           UNDISTORT_ENV: _undistort_device(gcfg)}
     if not _SCRIPT.exists():
         raise FileNotFoundError(f"GenRecon runner missing: {_SCRIPT}")
     stop_semantic_service_verified(pipe, stage="GenRecon mesh")

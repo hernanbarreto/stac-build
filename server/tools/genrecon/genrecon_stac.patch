@@ -652,6 +652,57 @@ index 75bbfcd..4564f57 100644
          m_original_to_chunks, m_chunk_to_originals, relative_translations = self._get_transforms(
              red_chunk_centers, chunk_size, out_path
          )
+diff --git a/inference/get_images.py b/inference/get_images.py
+index aeb44be..608296c 100644
+--- a/inference/get_images.py
++++ b/inference/get_images.py
+@@ -574,6 +574,20 @@ class ScannetIphoneMixin:
+         if any(c["needs_undistort"] for c in cam_table.values()):
+             image_root_undist.mkdir(exist_ok=True)
+ 
++        # STAC (USER 2026-11-11: "todo lo que me marcaste que puede pasarse a GPU hay que hacerlo en GPU"): the frames'
++        # decode and remap on genrecon.undistort_device — server/tools/genrecon/remap_gpu.py hands cv2.imwrite the
++        # pixels of the cv2 lines below bit for bit. "numpy" (or no STAC_UNDISTORT_DEVICE: this tree run by hand) =
++        # those lines themselves.
++        stac_device = "numpy"
++        if any(c["needs_undistort"] for c in cam_table.values()):
++            import os
++
++            if "STAC_UNDISTORT_DEVICE" in os.environ:
++                import remap_gpu  # server/tools/genrecon, on this process's path (run_cloud.sh)
++
++                stac_device = remap_gpu.device_from_env()
++                print(f"[get_images] STAC: the frames undistorted on {stac_device} (genrecon.undistort_device)")
++
+         # ── Parse images.txt: 2 lines per image (header + POINTS2D); we only need the header ─
+         cameras: list[dict] = []
+         with images_txt.open("r", encoding="utf-8") as f:
+@@ -602,12 +616,19 @@ class ScannetIphoneMixin:
+                 dst = image_root_undist / name
+                 if not dst.is_file():
+                     src = image_root / name
+-                    img = cv2.imread(str(src), cv2.IMREAD_COLOR)
+-                    if img is None:
+-                        raise FileNotFoundError(f"iPhone RGB frame not readable: {src}")
+-                    undist = cv2.remap(img, cam["mapx"], cam["mapy"], cv2.INTER_LINEAR)
+-                    x, y, w, h = cam["roi"]
+-                    undist = undist[y : y + h, x : x + w]
++                    if stac_device == "numpy":
++                        img = cv2.imread(str(src), cv2.IMREAD_COLOR)
++                        if img is None:
++                            raise FileNotFoundError(f"iPhone RGB frame not readable: {src}")
++                        undist = cv2.remap(img, cam["mapx"], cam["mapy"], cv2.INTER_LINEAR)
++                        x, y, w, h = cam["roi"]
++                        undist = undist[y : y + h, x : x + w]
++                    else:
++                        if "stac_undistorter" not in cam:
++                            cam["stac_undistorter"] = remap_gpu.Undistorter(
++                                cam["mapx"], cam["mapy"], cam["roi"], stac_device
++                            )
++                        undist = cam["stac_undistorter"](src)
+                     dst.parent.mkdir(parents=True, exist_ok=True)
+                     if not cv2.imwrite(str(dst), undist):
+                         raise RuntimeError(f"Failed to write undistorted frame: {dst}")
 diff --git a/reconstruct_scene.py b/reconstruct_scene.py
 index 58a831e..2c17f6a 100644
 --- a/reconstruct_scene.py
