@@ -1,0 +1,351 @@
+diff --git a/amb3r_slam/backend.py b/amb3r_slam/backend.py
+index 62a34fd..200164a 100644
+--- a/amb3r_slam/backend.py
++++ b/amb3r_slam/backend.py
+@@ -322,12 +322,17 @@ class HierarchicalBackend:
+             return float(self.cfg.backend.long_context.weight)
+         return float(self.cfg.backend.align.extra_weight)
+ 
+-    def _loop_constraint(self, images, submaps, ka, kb, fi, fj):
++    def _loop_constraint(self, images, submaps, ka, kb, fi, fj, forced=False):
+         """Loop edge ``Z_ab`` from a joint forward over windows at ``fi`` (old) and ``fj``.
+ 
+         Accepted if both ends overlap in the joint reconstruction and each fits its own
+         submap; otherwise the windows are shifted (anchor search). Returns
+         ``(ka, kb, Z_ab or None, info)``, or None.
++
++        ``forced`` (STAC, USER 2026-11-08 "no es cuestión de que su verificador las acepte, es
++        inyectárselas"): an externally supplied pair skips the overlap and residual GATES — the
++        pair is already verified by STAC's own depth-tested co-visibility — and is rejected only
++        when no Sim(3) can be fitted at all; the pose graph's Cauchy kernel still moderates it.
+         """
+         half = int(self.cfg.backend.loop_half_window)
+         if ka == kb:
+@@ -351,7 +356,7 @@ class HierarchicalBackend:
+                               pt[n_a:].float(), cf[n_a:].float(),
+                               voxel_rel=float(self.cfg.backend.loop.voxel_rel),
+                               conf_rel=float(self.cfg.backend.loop.conf_rel))
+-            if o < min_ov:
++            if o < min_ov and not forced:
+                 del p, pt, cf
+                 return {'ok': False, 'ov': o,
+                         'reason': f'windows do not overlap ({o:.2f})'}
+@@ -362,11 +367,12 @@ class HierarchicalBackend:
+             del p, pt, cf
+             if ga is None or gb is None:
+                 return {'ok': False, 'ov': o, 'reason': 'align failed', 'hard': True}
+-            if ja.get('residual_rel', 1e9) > thr_res or jb.get('residual_rel', 1e9) > thr_res:
++            if (ja.get('residual_rel', 1e9) > thr_res or jb.get('residual_rel', 1e9) > thr_res) and not forced:
+                 return {'ok': False, 'ov': o, 'a': ja, 'b': jb,
+                         'reason': 'residual too large'}
+             Z = sim3_mul(ga, sim3_inv(gb))
+             ja['overlap'] = o
++            ja['forced'] = bool(forced)
+             return {'ok': True, 'ov': o, 'a': ja, 'b': jb, 'Z': Z, 'shift': (0, 0)}
+ 
+         res = _eval(wa, wb)
+@@ -618,7 +624,14 @@ class HierarchicalBackend:
+ 
+     def _loop_begin(self):
+         """The retrieval index for this sequence, or None when loop closure is off."""
+-        self._st.loop = {'probe': 0, 'pending': [], 'seen': set()}
++        ext = sorted(((int(b), int(a)) for a, b in getattr(self, 'external_loop_pairs', []) if int(b) > int(a)),
++                     key=lambda p: p[0])          # (fj newer, fi older), in fj order — the resolve gate pops in order
++        self._st.loop = {'probe': 0, 'pending': [], 'seen': set(), 'external': list(ext)}
++        if ext:
++            # STAC (USER 2026-11-08: "la idea es decirle dónde tiene que ajustar … los que detecta más los
++            # nuestros"): externally supplied candidates, verified by _verify_loop exactly like the detector's;
++            # the submap-pair dedup ('seen') unions the two sources.
++            self.stats['injected_loops'] = {'given': len(ext), 'accepted': 0}
+         return build_detector(self.cfg.retrieval, ROOT, self.device)
+ 
+     def _loop_query(self, det, imgs, f):
+@@ -645,19 +658,31 @@ class HierarchicalBackend:
+         while pending:
+             fj, fi, k, hit = pending[0]
+             if not final and not (st.submaps and st.submaps[-1].start > fj):
+-                return
++                break
+             pending.pop(0)
+             edge = self._verify_loop(imgs, fj, fi)
+             st.det.resolve(k, hit, edge is not None)
+             if edge is not None:
+                 st.loops.append(edge)
+                 yield edge
++        ext = st.loop.get('external') or []
++        while ext:
++            fj, fi = ext[0]
++            if not final and not (st.submaps and st.submaps[-1].start > fj):
++                break
++            ext.pop(0)
++            edge = self._verify_loop(imgs, fj, fi, forced=True)   # STAC (USER 2026-11-08 "es inyectárselas"):
++            #   the acceptance gates are OFF for our pairs — only an unfittable Sim(3) stays out
++            if edge is not None:
++                self.stats['injected_loops']['accepted'] += 1
++                st.loops.append(edge)
++                yield edge
+ 
+     def _reject(self, reason):
+         reasons = self.stats.setdefault('loop_reject_reasons', {})
+         reasons[reason] = reasons.get(reason, 0) + 1
+ 
+-    def _verify_loop(self, imgs, fj, fi):
++    def _verify_loop(self, imgs, fj, fi, forced=False):
+         """One retrieval candidate: `_loop_constraint`, then the drift gates.
+ 
+         A verified closure is still rejected if its correction exceeds the chain's own
+@@ -679,7 +704,7 @@ class HierarchicalBackend:
+         if (ka, kb) in seen:
+             return self._reject('duplicate submap pair')
+         seen.add((ka, kb))
+-        out = self._loop_constraint(imgs, submaps, ka, kb, fi, fj)
++        out = self._loop_constraint(imgs, submaps, ka, kb, fi, fj, forced=forced)
+         if out is None:
+             return self._reject('no usable windows')
+         ka, kb, Z, info = out
+@@ -695,10 +720,10 @@ class HierarchicalBackend:
+         n = b - a
+         log_s = np.log(np.clip([float(S[i][7]) for i in range(a, b + 1)], 1e-9, None))
+         sig_s = float(np.median(np.abs(np.diff(log_s)))) if n >= 1 else 0.0
+-        if max_chi > 0 and path > 0 and sig_s > 0 and n >= 2 and \
++        if not forced and max_chi > 0 and path > 0 and sig_s > 0 and n >= 2 and \
+                 (corr / path) / (sig_s * math.sqrt(n)) > max_chi:
+             return self._reject('drift')
+-        if max_rot > 0 and n >= 2 and drot > max_rot * math.sqrt(n):
++        if not forced and max_rot > 0 and n >= 2 and drot > max_rot * math.sqrt(n):
+             return self._reject('rotation drift')
+         self.stats['n_loops'] += 1
+         return ka, kb, Z
+diff --git a/amb3r_slam/tools/export.py b/amb3r_slam/tools/export.py
+index aa9e5eb..ec94154 100644
+--- a/amb3r_slam/tools/export.py
++++ b/amb3r_slam/tools/export.py
+@@ -30,12 +30,47 @@ def depth_edge(depth, rtol=0.03, k=3):
+     return (hi - lo) / depth.abs().clamp_min(1e-6) > rtol
+ 
+ 
++def _line_fit(x, y):
++    """(a, b) of the least-squares line y = a x + b: the normal equations in float64 (fixed-order reductions)."""
++    n = float(x.numel())
++    sx, sy, sxx, sxy = x.sum(), y.sum(), (x * x).sum(), (x * y).sum()
++    det = n * sxx - sx * sx
++    return float((n * sxy - sx * sy) / det), float((sxx * sy - sx * sxy) / det)
++
++
++def _light_record(p, T, keep, stride):
++    """STAC (2026-11-06): one saved frame of the light map — its depth along its own camera axis on the pixel-stride
++    grid (0 where the map drops the pixel), its pose in its submap, the pinhole K its full pass follows (StacDump's
++    least squares of u = fx x/z + cx, v = fy y/z + cy over the valid pixels, pixel centres at integers — here on the
++    card) and that fit's median pixel residual."""
++    Td = T.double()
++    pc = (p.double() - Td[:3, 3]) @ Td[:3, :3]
++    z = pc[..., 2]
++    H, W = z.shape
++    ok = torch.isfinite(pc).all(-1) & (z > 1e-6)
++    d = torch.where(keep & ok, z, torch.zeros_like(z))[::stride, ::stride].float().cpu()
++    if int(ok.sum()) < 3:
++        return d, Td.cpu(), (float('nan'),) * 4, float('nan')
++    v, u = torch.meshgrid(torch.arange(H, dtype=torch.float64, device=z.device),
++                          torch.arange(W, dtype=torch.float64, device=z.device), indexing='ij')
++    zs = torch.where(ok, z, torch.ones_like(z))
++    xs, ys, uo, vo = (pc[..., 0] / zs)[ok], (pc[..., 1] / zs)[ok], u[ok], v[ok]
++    fx, cx = _line_fit(xs, uo)
++    fy, cy = _line_fit(ys, vo)
++    r = torch.cat([(fx * xs + cx - uo).abs(), (fy * ys + cy - vo).abs()])
++    return d, Td.cpu(), (fx, fy, cx, cy), float(r.sort().values[r.numel() // 2])
++
++
+ class MapRecorder:
+     def __init__(self, frame_stride, save_every=2, pixel_stride=4, conf_drop=0.2,
+-                 edge_rtol=0.03, max_points=0):
++                 edge_rtol=0.03, max_points=0, light_only=False):
+         self.every = max(1, int(save_every) * int(frame_stride))
+         self.stride = max(1, int(pixel_stride))
+         self.conf_drop, self.edge_rtol, self.max_points = conf_drop, edge_rtol, int(max_points)
++        # STAC (2026-11-06): instead of the clouds, one record per saved frame — what it SAW: its depth on the
++        # pixel-stride grid, its camera and the pinhole K its points follow, placed by its submap's final Sim(3)
++        # (map_<seq>_light.npz) — a whole video at frame stride 1 without its hundreds of millions of points
++        self.light_only = bool(light_only)
+         self.best = {}
+ 
+     def add(self, sm, images):
+@@ -52,6 +87,9 @@ class MapRecorder:
+             keep &= ~depth_edge(depth, self.edge_rtol)
+             if sky is not None:
+                 keep &= ~sky[i].to(keep.device)
++            if self.light_only:
++                self.best[slot] = (dist, sm, f) + _light_record(p, T, keep, self.stride)
++                continue
+             col = ((images[f].permute(1, 2, 0).to(keep.device) + 1.0) * 127.5).clamp(0, 255)
+             grid = torch.zeros_like(keep)
+             grid[::self.stride, ::self.stride] = True
+@@ -75,6 +113,8 @@ class MapRecorder:
+         if not result.submaps or result.submap_poses is None or not self.best:
+             return None
+         index = {id(sm): k for k, sm in enumerate(result.submaps)}
++        if self.light_only:
++            return self._save_light(path[:-len('.ply')] + '_light.npz', result, index)
+         xyz, rgb, on = [], [], []
+         for f in sorted(self.best):
+             _, sm, p, col, g_on = self.best[f]
+@@ -93,3 +133,97 @@ class MapRecorder:
+             write_ply(out, x, r)
+             counts.append(len(x))
+         return tuple(counts)
++
++    def _save_light(self, out, result, index):
++        """STAC: ``out`` (map_<seq>_light.npz) — per saved frame, in frame order: its input index, its camera-to-world
++        and its depth through its submap's final Sim(3) (the depth times the submap's scale), its K on the model grid,
++        the submap, its scale, the K fit's median residual; and the pixel stride. Returns (0, frames written)."""
++        rows = []
++        for slot in sorted(self.best):
++            _, sm, f, d, T, k4, k_res = self.best[slot]
++            k = index.get(id(sm))
++            if k is None:
++                continue
++            g = result.submap_poses[k].double().cpu()
++            R, t, s = quat_to_rmat(g[3:7]), g[:3], float(g[7])
++            M = torch.eye(4, dtype=torch.float64)
++            M[:3, :3] = R @ T[:3, :3]
++            M[:3, 3] = s * (R @ T[:3, 3]) + t
++            fx, fy, cx, cy = k4
++            rows.append((int(f), M.numpy(), (d.double() * s).float().numpy(),
++                         np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]]), k, s, k_res))
++        if not rows:
++            return None
++        np.savez(out, frame=np.array([r[0] for r in rows], np.int64), c2w=np.stack([r[1] for r in rows]),
++                 depth=np.stack([r[2] for r in rows]), K=np.stack([r[3] for r in rows]),
++                 submap=np.array([r[4] for r in rows], np.int64), scale=np.array([r[5] for r in rows]),
++                 k_residual_px=np.array([r[6] for r in rows]), stride=np.int64(self.stride))
++        return (0, len(rows))
++
++
++class StacDump(MapRecorder):
++    """STAC (2026-11-03): the map recorder that also keeps, for every frame it saves, that frame's FULL pass — its
++    points in its submap's frame, confidence, sky and camera — so ``save_frames`` writes one record per frame: the
++    depth along the WORLD camera's axis (the submap's final Sim(3) applied: depth times its scale), the pinhole K the
++    pass's points follow (least squares of u = fx x/z + cx, v = fy y/z + cy over the valid pixels, pixel centres at
++    integers), the world camera-to-world, the confidence and the sky. The map itself is unchanged."""
++
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        self.full = {}
++
++    def add(self, sm, images):
++        super().add(sm, images)
++        pts, conf, sky = sm.dense
++        mid = 0.5 * (sm.start + sm.end - 1)
++        for i, f in enumerate(sm.frames):
++            slot, dist = f // self.every, abs(f - mid)
++            got = self.best.get(slot)
++            if got is not None and got[1] is sm and got[0] == dist:
++                self.full[slot] = (f, sm, pts[i].half().cpu(), conf[i].float().cpu(),
++                                   None if sky is None else sky[i].bool().cpu(), sm.poses[i].double().cpu())
++
++    def drop(self, sm):
++        super().drop(sm)
++        self.full = {s: v for s, v in self.full.items() if v[1] is not sm}
++
++    def save_frames(self, out_dir, result):
++        """One ``frame_<input index>.npz`` per saved frame under ``out_dir``; returns how many."""
++        import os
++        if not result.submaps or result.submap_poses is None:
++            return 0
++        os.makedirs(out_dir, exist_ok=True)
++        index = {id(sm): k for k, sm in enumerate(result.submaps)}
++        n = 0
++        for slot in sorted(self.full):
++            f, sm, p, c, sky, T = self.full[slot]
++            k = index.get(id(sm))
++            if k is None:
++                continue
++            g = result.submap_poses[k].double().cpu()
++            R, t, s = quat_to_rmat(g[3:7]), g[:3], float(g[7])
++            pc = (p.double() - T[:3, 3]) @ T[:3, :3]
++            z = pc[..., 2]
++            H, W = z.shape
++            ok = torch.isfinite(pc).all(-1) & (z > 1e-6)
++            v, u = torch.meshgrid(torch.arange(H, dtype=torch.float64), torch.arange(W, dtype=torch.float64),
++                                  indexing='ij')
++            xs, ys = (pc[..., 0] / z)[ok], (pc[..., 1] / z)[ok]
++            A = torch.stack([xs, torch.ones_like(xs)], -1)
++            fx, cx = torch.linalg.lstsq(A, u[ok][:, None]).solution[:, 0].tolist()
++            A = torch.stack([ys, torch.ones_like(ys)], -1)
++            fy, cy = torch.linalg.lstsq(A, v[ok][:, None]).solution[:, 0].tolist()
++            ru = (fx * xs + cx - u[ok]).abs()
++            rv = (fy * ys + cy - v[ok]).abs()
++            c2w = torch.eye(4, dtype=torch.float64)
++            c2w[:3, :3] = R @ T[:3, :3]
++            c2w[:3, 3] = s * (R @ T[:3, 3]) + t
++            depth = torch.where(ok, z * s, torch.zeros_like(z))
++            if sky is not None:
++                depth = torch.where(sky, torch.zeros_like(depth), depth)
++            np.savez(os.path.join(out_dir, f'frame_{f:06d}.npz'), frame=f, c2w=c2w.numpy(),
++                     K=np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1.0]]), depth=depth.float().numpy(),
++                     conf=c.numpy(), sky=(np.zeros((H, W), bool) if sky is None else sky.numpy()),
++                     submap=k, scale=s, k_residual_px=float(torch.cat([ru, rv]).median()))
++            n += 1
++        return n
+diff --git a/run.py b/run.py
+index 007e7f4..b3bf571 100644
+--- a/run.py
++++ b/run.py
+@@ -86,6 +86,17 @@ def arguments():
+     ap.add_argument('--map_max_points', type=int, default=0,
+                     help='with --save_map, thin the cloud to at most this many points (0: all)')
+     ap.add_argument('--verbose', action='store_true', help='per-stage progress')
++    ap.add_argument('--stac_light_map', action='store_true',
++                    help="STAC: with --save_map, write instead of the clouds one record per saved frame — its depth "
++                         "on the pixel-stride grid, camera-to-world and K through its submap's final Sim(3) "
++                         "(map_<seq>_light.npz)")
++    ap.add_argument('--stac_dump', default=None,
++                    help="STAC: with --save_map, also write one record per saved frame (depth along the world "
++                         "camera's axis, K, camera-to-world, confidence, sky) into this directory")
++    ap.add_argument('--stac_loops', default=None,
++                    help="STAC (USER 2026-11-08): json {\"pairs\": [[i_old, i_new], ...]} of PROCESSED-SEQUENCE "
++                         "indices injected as loop candidates — verified by the backend's OWN gates "
++                         "(_verify_loop) and unioned with whatever its detector finds")
+     datasets.add_options(ap)
+     return ap.parse_args()
+ 
+@@ -141,10 +152,16 @@ def main():
+                                     if args.calib and seq.K is not None else None))
+             ds.attach(seq, pipeline.backend, pipeline.cfg, modality, resolution)
+             if args.save_map:
+-                from amb3r_slam.tools.export import MapRecorder
+-                pipeline.backend.recorder = MapRecorder(
++                from amb3r_slam.tools.export import MapRecorder, StacDump
++                pipeline.backend.recorder = (StacDump if args.stac_dump else MapRecorder)(
+                     pipeline.cfg.backend.frame_stride, args.save_every, args.pixel_stride,
+-                    max_points=args.map_max_points)
++                    max_points=args.map_max_points, light_only=args.stac_light_map)
++            if args.stac_loops:
++                with open(args.stac_loops) as _f:
++                    _lp = json.load(_f)['pairs']
++                pipeline.backend.external_loop_pairs = [(int(a), int(b)) for a, b in _lp]
++                print(f"  stac loops: {len(_lp)} external candidate pair(s) queued for the backend's "
++                      f"own verification", flush=True)
+             t0 = time.time()
+             mem = pipeline.run(seq.images, verbose=args.verbose)
+             dt = time.time() - t0
+@@ -162,10 +179,17 @@ def main():
+             if args.save_map:
+                 ply = os.path.join(out_dir, f"map_{seq.name.replace('/', '_')}.ply")
+                 npts = pipeline.backend.recorder.save(ply, mem)
++                if args.stac_dump:
++                    nd = pipeline.backend.recorder.save_frames(args.stac_dump, mem)
++                    print(f'  stac dump: {nd} frame record(s) -> {args.stac_dump}', flush=True)
+                 pipeline.backend.recorder = None
+-                print(f'  map: {npts[0]} points -> {ply}, {npts[1]} at pixel stride '
+-                      f'{args.pixel_stride} -> {ply[:-4]}_stride.ply' if npts else
+-                      '  map: this backend keeps no submap points', flush=True)
++                if args.stac_light_map:
++                    print(f'  light map: {npts[1] if npts else 0} frame record(s) at pixel stride '
++                          f'{args.pixel_stride} -> {ply[:-4]}_light.npz', flush=True)
++                else:
++                    print(f'  map: {npts[0]} points -> {ply}, {npts[1]} at pixel stride '
++                          f'{args.pixel_stride} -> {ply[:-4]}_stride.ply' if npts else
++                          '  map: this backend keeps no submap points', flush=True)
+             rec = {'scene': seq.scene, 'frames': int(n), 'keyframes': len(mem.keyframes),
+                    'time_s': dt, 'fps': n / max(dt, 1e-9),
+                    'loops': int(st.get('n_loops', 0)),

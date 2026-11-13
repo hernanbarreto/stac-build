@@ -330,7 +330,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   · observatorio (1 h 43 min): 529 segments (99.80 % of 23,374,569 points); floor tilt 3.25°, height −36.7 cm;
     mesh 9,991,750 faces / 82 primitives in 163 tiles, depth 7, 997 MB.
   Every session now holds cloud + segmentation + GenRecon mesh in tiles: pccr 2408, pccr 3108, zaragoza,
-  bufferStop, observatorio.
+  bufferStop, observatorio. (The GenRecon meshes were deleted later that day on his word — THE SEARCH below.)
 - THE PROJECTION'S AUDIT READS THE PREVIOUS PROJECTION'S FUSION MAP (found 2026-11-11, not fixed — on his word):
   `MaskAudit.obj_of` = `segmentation.erase._mask_obj_by_iid` = the FUSED view (fusion_map.json of the last
   projection), so a RE-projection audits the parts that map folded as "instance has no mask object id" (pccr 3108
@@ -363,6 +363,42 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   keyframes, 3–12 % of the cloud's pixels meet NO mesh (vegetation, fence: fragments) and 10–20 % meet it > 10 cm
   behind (the gravel as lumps). The decoder's own mesh.ply gives the same; fill_holes, the remesh, the per-chunk
   simplification and every level of the tiles add nothing (3D holes 0.13–0.32 % at every tile depth).
+- GENRECON, THE SEARCH FOR A CORRECT MESH ON BUFFERSTOP (USER 2026-11-12, day and night CDMX). main c00e2f3 +
+  UNCOMMITTED work (config.yaml, run_cloud.sh, the worker, the adapter, cloud_shape / drop_loose / denoise.py,
+  main.py) — a commit on his word. Each value with its hour and his words: config.yaml, `genrecon:`.
+  · DELETED on his word: every session's GenRecon mesh of the night's queue ("elimina los genrecon que tenemos en
+    todas las esiones") and the queue of the other sessions ("corta las corridas y elimina la cola"). ONLY bufferStop
+    holds a mesh; pccr 3108, pccr 2408, zaragoza and observatorio are NOT relaunched without his word.
+  · THE SHAPE FROM THE CLOUD (1d3e806 and the uncommitted work on it: the bilateral normal filter denoise.py, the
+    generative refinement T 0.5–0.7): REJECTED by his eye — "Pero no se ve nada liso" / "No tiene la calidad de
+    genrecon lo que veo" / "Ninguno está bien"; "Es que la única que acepto es genrecon pero correcta no asi".
+    `shape_from_cloud: false`, `solid_ground: false`; the code stays, selectable.
+  · THE GENERATED SHAPE with SMALLER CUBES (only the 512 models exist: voxel = cube / 32, surface cell = cube / 512):
+    "Vamos a ir avanzando por aproximaciones sucesivas, hasta dar con el mejor tamaño". His eye on 3.7 / 1.85 /
+    0.925 m: "El que más se parece es el de 1.85 con algunos errores igual, entre 3.7 y 1.85"; with 2.775 and 2.31 m
+    beside them: "Vamos con 2.775" → published at 2.775 m · 6 pts: "visto de frente ambas columnas que tiene están
+    huecas" → 3 m · 3 pts: "Hasta ahora gana 3m 3 puntos" → 2.5 m · 3 pts: "Parece que 2.5m 3 puntos es la mejor"
+    and, on 14 textured views of it alone, "Se ven espectaculares las imágenes!!!". IN FORCE, his numbers:
+    `cube_size_m: 2.5` (7.81 cm voxels, 4.88 mm cells), `min_points_per_voxel: 3`; bufferStop's mesh published with
+    them (1,983,731 faces, 162 MB, the stage 800.6 s). The published meshes, 2.775 m · 6 | 3 m · 3 | 2.5 m · 3: mesh
+    beyond 3 cm of the cloud 23.4 | 24.8 | 21.4 %, cloud beyond 3 cm of the mesh 31.1 | 32.7 | 17.3 %, holes from the
+    keyframes 7.8 | 6.6 | 5.65 %.
+  · FOUND, not corrected (on his word): production's mesh step changes the generated mesh — the global remesh closes
+    every sheet into a shell (the floor seen as two sheets on 85–99.8 % of the rays) and the simplification to
+    150,000 faces a chunk leaves the faceting. The generation is not identical run to run (seen, not investigated).
+    The loose pieces stay in this family.
+  · THE EDGE FILTER ON THE GENERATED MESH — TESTED, NO VISIBLE GAIN (USER 2026-11-12 night: "es posible aplicar el
+    filtro que teníamos para las aristas?" / "Lo que quiero es que corras sobre la de 2.5m 3 puntos el afilado de
+    aristas y Mostrame imágenes comparativas lado a lado con y sin filtro de aristas"): denoise.py (20 / 10 / 0.35)
+    on the SAME decoded mesh after the global remesh, before the chunks' simplification — a scratch driver, NOT
+    wired, the published mesh untouched. 7,211,584 faces in 2 s (12.9 GB): normals turned 1.66° median (p99 64°),
+    vertices moved 0.083 mm median (p99 2.3 mm, max 8 mm); the result 1,965,867 faces. Without | with: keyframe
+    12's window with no mesh 7.36 | 7.37 %, keyframe 108's 1.85 | 1.84 %; the three steel plates' normal median
+    1.3 | 1.3°, p90 3.3 | 4.1°, relief 2.4 | 2.3 mm. HIS EYE on four side-by-side views (textured and shaded):
+    "No noto la diferencia". The filter stays out of the generated family.
+  · CHAT ON DEMAND (USER 2026-11-12: "Baja al chat, no se usa" / "El chat debe cargar a demanda en esta instancia,
+    si no lo usamos debe estar abajo"): `semantic.chat_on_demand: true` — vLLM is not reloaded after a stage or at
+    the server's start; it loads when the chat is opened or asked. An idle auto-stop: on his value.
 - The pipeline's and the general lists: `docs/pipeline_final.md` §4 — capture distance (when he says), the weighted
   vote (his word), smarter segmentation, epoch renumbering, the GPU ports of the intake, MEJORAS_OBLIGATORIAS
   (never built), the brush lock, the BIM comparison, viewer checks; station's heavy residual tail (USER 2026-11-08

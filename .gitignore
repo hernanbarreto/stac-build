@@ -202,3 +202,5 @@ vendor/halfmesh/
 vendor/tinyply/
 vendor/thread-pool/
 vendor/PoseLib/
+# AMB3R-SLAM clone (HengyiWang/amb3r-slam @ 5418465 + server/tools/amb3r/amb3r_stac.patch; checkpoints and thirdparty builds)
+vendor/AMB3R-SLAM/
