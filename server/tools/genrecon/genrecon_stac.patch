@@ -112,7 +112,7 @@ index e57f74d..2dcc034 100644
          },
          "rembg_model": {
 diff --git a/genrecon/pipelines/full_scene_images_to_3d.py b/genrecon/pipelines/full_scene_images_to_3d.py
-index b26f309..2e75227 100644
+index b26f309..1429bee 100644
 --- a/genrecon/pipelines/full_scene_images_to_3d.py
 +++ b/genrecon/pipelines/full_scene_images_to_3d.py
 @@ -1,8 +1,9 @@
@@ -126,7 +126,7 @@ index b26f309..2e75227 100644
  import torch
  
  from ..modules.cond_3D.projection import project_features_on_points
-@@ -38,6 +39,16 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+@@ -38,6 +39,21 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
      # of this size. Aggregation is pure per-voxel so this changes nothing
      # numerically. Shrink if you still OOM at higher `num_imgs_per_scene`.
      proj_batch_voxels = 8192
@@ -137,13 +137,18 @@ index b26f309..2e75227 100644
 +    # scene images are DINO-encoded in batches of ENCODE_BATCH (per image: the same tokens).
 +    proj_pairs_budget = 2048 * 547
 +    encode_batch_images = 64
++    # STAC (USER 2026-11-13: "Debemos hacer entrar pccr2408 hay que ver la forma la técnica para que sea escalable
++    # a nubes masivas"): genrecon.joint_decode_max_voxels, written by the builder (reconstruct_scene.py). A scene
++    # with MORE latent voxels than this is decoded by regions (joint_decode.py + tools/genrecon/decode_regions.py),
++    # the card's memory then follows the region; 0 = always the vendor's single pass.
++    joint_decode_max_voxels = 0
 +
 +    def _proj_batch(self, n_images: int) -> int:
 +        return max(1, min(int(self.proj_batch_voxels), int(self.proj_pairs_budget) // max(int(n_images), 1)))
  
      # ─────────────────────────────────────────────────────────────────────
      # Global-grid geometry helpers
-@@ -122,7 +133,7 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+@@ -122,7 +138,7 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
          if self.low_vram:
              flow_model.to(self.device)
          V_total = pts.shape[0]
@@ -152,7 +157,7 @@ index b26f309..2e75227 100644
          agg_chunks: list[torch.Tensor] = []
          for start in range(0, V_total, batch):
              end = min(start + batch, V_total)
-@@ -192,7 +203,7 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+@@ -192,7 +208,7 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
              flow_model.to(self.device)
          S_global = pts.shape[0]
          global_xyz_dev = global_xyz_unique.to(self.device)
@@ -161,7 +166,16 @@ index b26f309..2e75227 100644
          agg_chunks: list[torch.Tensor] = []
          for start in range(0, S_global, batch):
              end = min(start + batch, S_global)
-@@ -385,8 +396,11 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+@@ -356,6 +372,8 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+             max_chunks_per_group=max_chunks_per_group,
+             max_inflated_voxels=max_inflated_voxels,
+             overlap_r_in=overlap_r_in,
++            stac_max_voxels=int(self.joint_decode_max_voxels),
++            stac_tex_blocks=list(self.models["tex_slat_decoder"].num_blocks),
+         )
+         if self.low_vram:
+             dec.cpu()
+@@ -385,8 +403,11 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
      # ─────────────────────────────────────────────────────────────────────
  
      def _encode_scene(self, images: torch.Tensor, resolution: int) -> torch.Tensor:
@@ -175,7 +189,7 @@ index b26f309..2e75227 100644
  
      def _prep_extrinsics_intrinsics(
          self, ext: torch.Tensor, intr: torch.Tensor, dtype: torch.dtype
-@@ -408,6 +422,10 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+@@ -408,6 +429,11 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
          pipeline_type: Optional[str] = None,
          occ_threshold: float = 0.0,
          zero_3d_cond: bool = False,
@@ -183,10 +197,11 @@ index b26f309..2e75227 100644
 +        coords_hook: Optional[Callable[[list[torch.Tensor]], list[torch.Tensor]]] = None,  # STAC: merges the generated voxels with the cloud's
 +        shape_latents_override: Optional[list] = None,  # STAC: the cloud's shape (cloud_shape.encode_chunks)
 +        shape_refine_t: float = 0.0,  # STAC: 0 = the cloud's shape as is; > 0 = the flow refines it from that t
++        latents_hook: Optional[Callable] = None,  # STAC: handed the sampled latents before the decode (the resume point)
      ) -> tuple[MeshWithVoxel, list[torch.Tensor]]:
          pipeline_type = pipeline_type or self.default_pipeline_type
          if pipeline_type not in ("512", "1024"):
-@@ -439,112 +457,140 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+@@ -439,112 +465,140 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
              scene_feats_stage = scene_feats_512
              cond2d_feats_stage = cond2d_feats_512
  
@@ -421,8 +436,44 @@ index b26f309..2e75227 100644
  
          # ── Stage 3: Tex SLat ─────────────────────────────────────────────────
          tex_model = self.models[tex_model_key]
+@@ -602,6 +656,29 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+         tex_slat_list = [s * tex_std + tex_mean for s in tex_slat_raw]
+         del tex_slat_raw
+ 
++        # STAC 2026-11-13 (USER: "escalable a nubes masivas" / 2026-11-12: "la regla es que se continúa desde el
++        # punto de falla"): the generation ends here. Its image features (about 4 MB an image, held twice) leave
++        # the card before the decode, and the sampled latents go to the caller, so that the decode can be repeated
++        # from them without sampling again (reconstruct_scene.py --save_latents / --resume_latents).
++        del scene_feats_512, cond2d_feats_512, scene_feats_stage, cond2d_feats_stage
++        torch.cuda.empty_cache()
++        if latents_hook is not None:
++            latents_hook(shape_slat_list, tex_slat_list, coords_list)
++        scene = self.decode_latents(shape_slat_list, tex_slat_list, relative_translations, pipeline_type)
++        return scene, coords_list
++
++    @torch.no_grad()
++    def decode_latents(
++        self,
++        shape_slat_list: list[SparseTensor],
++        tex_slat_list: list[SparseTensor],
++        relative_translations: list[torch.Tensor],
++        pipeline_type: str,
++    ) -> MeshWithVoxel:
++        """STAC: run()'s decode, from the sampled latents alone — run() ends in it and a resume starts at it."""
++        res = int(pipeline_type)
++        num_chunks = len(shape_slat_list)
++
+         # ── Decode ────────────────────────────────────────────────────────────
+         # Chunked joint decode is enabled for the 1024 pipeline only; 512 keeps
+         # the original single-pass behavior verbatim.
+@@ -646,4 +723,4 @@ class FullSceneImagesTo3DPipeline(ImagesTo3DPipeline):
+             voxel_shape=voxel_shape,
+             layout=self.pbr_attr_layout,
+         )
+-        return scene, coords_list
++        return scene
 diff --git a/genrecon/pipelines/joint_decode.py b/genrecon/pipelines/joint_decode.py
-index f4c79e8..f5e1834 100644
+index f4c79e8..797b8eb 100644
 --- a/genrecon/pipelines/joint_decode.py
 +++ b/genrecon/pipelines/joint_decode.py
 @@ -33,6 +33,25 @@ from typing import Dict, List, Optional, Tuple
@@ -451,6 +502,190 @@ index f4c79e8..f5e1834 100644
  
  from ..models.sc_vaes.sparse_unet_vae import SparseUnetVaeDecoder
  from ..modules.sparse import SparseTensor
+@@ -53,6 +72,9 @@ class JointDecodeContext:
+     subs_inflated: List[List[SparseTensor]]  # per group, per stage (raw, no owned filter)
+     R_in: int
+     upscale: int
++    # STAC 2026-11-13: set by the decode by regions (tools/genrecon/decode_regions.py) — the cut the texture decode
++    # repeats; subs_inflated then holds one CPU-stashed list per REGION.
++    stac: Optional[dict] = None
+ 
+ 
+ def _merge_chunk_slats(
+@@ -240,6 +262,141 @@ def _sparse_to_device_clean(st: SparseTensor, device: torch.device) -> SparseTen
+     )
+ 
+ 
++_STAC_CAP_KEY = "genrecon.joint_decode_max_voxels"
++
++
++def _stac_regions_module():
++    """STAC: tools/genrecon/decode_regions.py, loaded by path (the vendor tree is not a package of ours)."""
++    import importlib.util
++    import sys
++    from pathlib import Path
++
++    name = "stac_decode_regions"
++    if name in sys.modules:
++        return sys.modules[name]
++    path = Path(__file__).resolve().parents[4] / "server" / "tools" / "genrecon" / "decode_regions.py"
++    spec = importlib.util.spec_from_file_location(name, path)
++    if spec is None or spec.loader is None or not path.is_file():
++        raise ImportError(f"STAC decode-by-regions module not found: {path}")
++    mod = importlib.util.module_from_spec(spec)
++    sys.modules[name] = mod
++    try:
++        spec.loader.exec_module(mod)
++    except BaseException:
++        del sys.modules[name]
++        raise
++    return mod
++
++
++def _stac_local_blocks(decoder, name: str) -> List[int]:
++    """STAC: the decode by regions is exact for the structure its margin was derived for — stacks of 3x3x3
++    submanifold ConvNeXt blocks, one C2S up block between levels, per-voxel norms. Anything else fails by name."""
++    blocks = [int(b) for b in decoder.num_blocks]
++    for lev, stack in enumerate(decoder.blocks):
++        want = ["SparseConvNeXtBlock3d"] * blocks[lev] + (["SparseResBlockC2S3d"] if lev < len(blocks) - 1 else [])
++        kinds = [type(b).__name__ for b in stack]
++        if kinds != want:
++            raise RuntimeError(
++                f"{name}: level {lev} holds {kinds}, not {want} — the margin of the decode by regions is not "
++                f"derived for it ({_STAC_CAP_KEY}: 0 decodes the scene in one pass)")
++    for module in decoder.blocks.modules():
++        if type(module).__name__ == "SparseConv3d" and (
++                tuple(module.kernel_size) != (3, 3, 3) or tuple(module.dilation) != (1, 1, 1)):
++            raise RuntimeError(
++                f"{name}: a convolution of kernel {tuple(module.kernel_size)}, dilation {tuple(module.dilation)} — "
++                f"the margin of the decode by regions is derived for 3x3x3, dilation 1 ({_STAC_CAP_KEY}: 0 decodes "
++                "the scene in one pass)")
++        if isinstance(module, (torch.nn.GroupNorm, torch.nn.modules.batchnorm._BatchNorm,
++                               torch.nn.MultiheadAttention)):
++            raise RuntimeError(
++                f"{name}: a {type(module).__name__} reads the whole scene — it cannot be decoded by regions "
++                f"({_STAC_CAP_KEY}: 0 decodes the scene in one pass)")
++    return blocks
++
++
++def _stac_region_slat(joint_slat: SparseTensor, rows: torch.Tensor) -> SparseTensor:
++    return SparseTensor(feats=joint_slat.feats[rows].contiguous(), coords=joint_slat.coords[rows].contiguous())
++
++
++def _stac_decode_shape_by_regions(decoder, joint_slat, meta, aabb, grid_size_fine, R_in, upscale, cap, tex_blocks):
++    """STAC 2026-11-13 (USER: "Debemos hacer entrar pccr2408 … escalable a nubes masivas"): the single pass's mesh
++    from disjoint regions of the latent lattice, each decoded with the margin the decoders' reach asks for — the
++    card's memory follows the region, not the scene. tools/genrecon/decode_regions.py holds the cut and the merge."""
++    dr = _stac_regions_module()
++    shape_blocks = _stac_local_blocks(decoder, "shape_slat_decoder")
++    levels = len(shape_blocks) - 1
++    if upscale != 2 ** levels:
++        raise RuntimeError(f"shape_slat_decoder: upscale {upscale} with {levels} up levels — not a x2 per level")
++    if tex_blocks is None:
++        raise RuntimeError("the decode by regions needs the texture decoder's num_blocks to size its margin")
++    tex_blocks = [int(b) for b in tex_blocks]
++    margin = dr.margin(shape_blocks, tex_blocks)
++    xyz = joint_slat.coords[:, 1:].long()
++    lattice = [int(v) for v in (meta["maxs"] - meta["mins"]).tolist()]
++    regions = dr.partition(xyz, margin, cap)
++    log = lambda line: print(line, flush=True)  # noqa: E731
++    log(dr.describe(regions, int(xyz.shape[0]), margin, cap))
++    vm = decoder.voxel_margin
++    subs_cpu: List[Optional[List[SparseTensor]]] = [None] * len(regions)
++
++    def run_region(n, rows):
++        h, subs = SparseUnetVaeDecoder.forward(decoder, _stac_region_slat(joint_slat, rows), return_subs=True)
++        subs_cpu[n] = [_sparse_cpu_clean(s) for s in subs]
++        del subs
++        fine = h.coords[:, 1:]
++        verts, faces = flexible_dual_grid_to_mesh(
++            fine,
++            (1 + 2 * vm) * F.sigmoid(h.feats[..., 0:3]) - vm,
++            h.feats[..., 3:6] > 0,
++            F.softplus(h.feats[..., 6:7]),
++            aabb=aabb,
++            grid_size=grid_size_fine,
++            train=False,
++        )
++        return fine, verts, faces
++
++    vertices, faces, dropped = dr.decode_shape(xyz, regions, margin, levels, lattice, run_region, log=log)
++    log(f"[STAC] joint decode by regions: {vertices.shape[0]:,} vertices, {faces.shape[0]:,} faces; {dropped:,} faces "
++        "dropped for a corner its own region did not decode (two regions disagreeing on a subdivision bit)")
++    ctx = JointDecodeContext(
++        inflated_aabbs=None,
++        owned_aabbs=None,
++        subs_inflated=subs_cpu,
++        R_in=R_in,
++        upscale=upscale,
++        stac={"regions": regions, "margin": margin, "levels": levels, "lattice": lattice, "tex_blocks": tex_blocks},
++    )
++    return Mesh(vertices, faces), aabb, grid_size_fine, ctx, meta
++
++
++def _stac_decode_tex_by_regions(decoder, joint_slat, ctx):
++    """STAC 2026-11-13: the texture decode on the shape decode's regions, each guided by its own subdivisions."""
++    dr = _stac_regions_module()
++    cut = ctx.stac
++    tex_blocks = _stac_local_blocks(decoder, "tex_slat_decoder")
++    if tex_blocks != cut["tex_blocks"]:
++        raise RuntimeError(f"tex_slat_decoder: num_blocks {tex_blocks}, and the regions' margin was sized for "
++                           f"{cut['tex_blocks']}")
++    device = joint_slat.feats.device
++    xyz = joint_slat.coords[:, 1:].long()
++
++    def run_region(n, rows):
++        slat = _stac_region_slat(joint_slat, rows)
++        subs = [_sparse_to_device_clean(s, device) for s in ctx.subs_inflated[n]]
++        if not torch.equal(subs[0].coords, slat.coords):
++            raise RuntimeError(f"region {n}: the texture latents' voxels are not the shape latents' voxels — the "
++                               "shape decoder's subdivisions cannot guide them")
++        ctx.subs_inflated[n] = None
++        h = decoder(slat, guide_subs=subs)
++        return h.coords[:, 1:], h.feats
++
++    log = lambda line: print(line, flush=True)  # noqa: E731
++    coords, feats = dr.decode_tex(xyz, cut["regions"], cut["margin"], cut["levels"], cut["lattice"], run_region,
++                                  log=log)
++    batch = torch.zeros((coords.shape[0], 1), dtype=joint_slat.coords.dtype, device=device)
++    return SparseTensor(feats=feats * 0.5 + 0.5, coords=torch.cat([batch, coords.to(batch.dtype)], dim=1))
++
++
+ @torch.no_grad()
+ def joint_decode_shape(
+     decoder,
+@@ -249,6 +406,8 @@ def joint_decode_shape(
+     max_chunks_per_group: Optional[int] = None,
+     max_inflated_voxels: Optional[int] = None,
+     overlap_r_in: int = 16,
++    stac_max_voxels: int = 0,
++    stac_tex_blocks: Optional[List[int]] = None,
+ ) -> Tuple[Mesh, torch.Tensor, torch.Tensor, JointDecodeContext, Dict]:
+     """Joint shape decode + joint mesh extraction.
+ 
+@@ -288,6 +447,12 @@ def joint_decode_shape(
+     grid_size_fine = ((meta["maxs"] - meta["mins"]) * upscale).int()
+     vm = decoder.voxel_margin
+ 
++    # STAC 2026-11-13: over genrecon.joint_decode_max_voxels latent voxels the scene is decoded by regions; at or
++    # under it (and with the key at 0) the vendor's single pass below, untouched.
++    if stac_max_voxels > 0 and int(joint_slat.coords.shape[0]) > stac_max_voxels:
++        return _stac_decode_shape_by_regions(
++            decoder, joint_slat, meta, aabb, grid_size_fine, R_in, upscale, int(stac_max_voxels), stac_tex_blocks)
++
+     if not use_chunked:
+         # Single-pass: original behavior. Decode → channel-extract → mesh-extract once.
+         h_joint, joint_subs = SparseUnetVaeDecoder.forward(decoder, joint_slat, return_subs=True)
+@@ -484,6 +649,9 @@ def joint_decode_tex(
+     """
+     joint_slat, _ = _merge_chunk_slats(slats, relative_transl, ctx.R_in)
+ 
++    if ctx.stac is not None:
++        return _stac_decode_tex_by_regions(decoder, joint_slat, ctx)
++
+     if ctx.inflated_aabbs is None:
+         # Single-pass: original behavior.
+         h_joint = decoder(joint_slat, guide_subs=ctx.subs_inflated[0])
 diff --git a/genrecon/pipelines/samplers/multi_diff_orchestrator.py b/genrecon/pipelines/samplers/multi_diff_orchestrator.py
 index 34adb89..90bf47a 100644
 --- a/genrecon/pipelines/samplers/multi_diff_orchestrator.py
@@ -930,10 +1165,80 @@ index aeb44be..608296c 100644
                      if not cv2.imwrite(str(dst), undist):
                          raise RuntimeError(f"Failed to write undistorted frame: {dst}")
 diff --git a/reconstruct_scene.py b/reconstruct_scene.py
-index 58a831e..fb57019 100644
+index 58a831e..b0723ae 100644
 --- a/reconstruct_scene.py
 +++ b/reconstruct_scene.py
-@@ -290,9 +290,257 @@ def build_parser() -> argparse.ArgumentParser:
+@@ -26,6 +26,7 @@ import numpy as np
+ import torch
+ from PIL import Image
+ 
++from genrecon.modules.sparse import SparseTensor
+ from genrecon.pipelines.full_scene_images_to_3d import FullSceneImagesTo3DPipeline
+ from inference.get_chunks import (
+     IphoneChunker,
+@@ -161,6 +162,61 @@ def _save_to_glb_inputs(
+     print(f"[chunked] saved {label}to_glb_inputs to {out_path / 'to_glb_inputs.pt'}")
+ 
+ 
++def _finish_world(out_path: Path, scene_mesh, coords_list, coords_resolution: int, chunk_indices, m_c2o) -> None:
++    """STAC: the world save of a decoded scene — mesh.ply, coords_*.ply, to_glb_inputs.pt, chunk_inputs.pt. ONE
++    function for the run that sampled its latents and for the run that continues at the decode from saved ones
++    (``m_c2o``: every chunk's cube -> world matrix, a list or a [chunks, 4, 4] tensor)."""
++    # Joint frame = chunker's chunk-0 local frame, so m_c2o[0] lifts it to world.
++    chunk_size = m_c2o[0][0, 0].item()
++    chunk_center0 = m_c2o[0][:3, 3].to(scene_mesh.vertices.device, dtype=scene_mesh.vertices.dtype)
++    _save_plys(
++        out_path,
++        scene_mesh,
++        coords_list,
++        coords_resolution,
++        chunk_indices,
++        mesh_transform=m_c2o[0],
++        coords_transform=lambda i: m_c2o[i],
++        label="\n PLY saved!",
++    )
++
++    # ── Save inputs for chunked GLB conversion (testing harness) ──
++    _save_to_glb_inputs(
++        out_path,
++        scene_mesh,
++        vertices=scene_mesh.vertices * chunk_size + chunk_center0,
++        voxel_size=scene_mesh.voxel_size * chunk_size,
++        origin=[scene_mesh.origin[i].item() * chunk_size + chunk_center0[i].item() for i in range(3)],
++        label="",
++    )
++
++    chunk_inputs = {
++        "chunk_centers_world": torch.stack([m_c2o[i][:3, 3] for i in chunk_indices]).detach().cpu(),
++        "chunk_size_world": chunk_size,
++        "chunk_indices": list(chunk_indices),
++    }
++    torch.save(chunk_inputs, out_path / "chunk_inputs.pt")
++    print(f"[chunked] saved chunk metadata to {out_path / 'chunk_inputs.pt'}")
++
++
++def _decode_saved_latents(pipeline, latents_path: Path, pipeline_type: str, out_path: Path) -> None:
++    """STAC (USER 2026-11-12: "la regla es que se continúa desde el punto de falla"): the run continues AT THE DECODE
++    — the sampled latents of a --save_latents file decoded and saved as the run that sampled them would have."""
++    import latents  # tools/genrecon (run_cloud.sh puts that folder alone on the path)
++
++    rec = latents.load(latents_path)
++    if rec["pipeline_type"] != pipeline_type:
++        raise RuntimeError(f"{latents_path} holds pipeline {rec['pipeline_type']} latents, this run is --pipeline {pipeline_type}")
++    resolution = pipeline.models[f"shape_slat_flow_model_{pipeline_type}"].resolution
++    if rec["coords_resolution"] != resolution:
++        raise RuntimeError(f"{latents_path} was sampled at resolution {rec['coords_resolution']}, this model's is {resolution}")
++    print(f"[STAC] sampled latents read from {latents_path}: {latents.summary(rec)} — the run continues at the decode")
++    dev = pipeline.device
++    shape, tex = ([SparseTensor(feats=f.to(dev), coords=c.to(dev)) for f, c in rec[k]] for k in ("shape", "tex"))
++    scene_mesh = pipeline.decode_latents(shape, tex, rec["relative_translations"], pipeline_type)
++    _finish_world(out_path, scene_mesh, rec["coords_list"], resolution, rec["chunk_indices"], rec["m_c2o"])
++
++
+ def build_parser() -> argparse.ArgumentParser:
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--mode", required=True, choices=list(MODES))
+@@ -290,9 +346,268 @@ def build_parser() -> argparse.ArgumentParser:
          "Pure performance knob, no numerical effect. Drop to 2048/1024 when "
          "running with very many views (e.g. all-frames iPhone captures).",
      )
@@ -976,6 +1281,17 @@ index 58a831e..fb57019 100644
 +        help="STAC: a voxel is active when it holds at least this many cloud points (a bound against flyers, "
 +        "declared with the occupancy distribution in coords_from_points.json).",
 +    )
++    parser.add_argument("--joint_decode_max_voxels", type=int, default=0,
++                        help="STAC 2026-11-13 (genrecon.joint_decode_max_voxels): a scene with MORE latent voxels than "
++                        "this is decoded by regions (tools/genrecon/decode_regions.py: each region decoded with the "
++                        "margin its decoders reach, the single pass's mesh and texture voxels put together again), so "
++                        "the card's memory follows the region and not the scene; 0 = always the single pass.")
++    parser.add_argument("--save_latents", type=str, default=None,
++                        help="STAC: write the sampled latents here before the decode (tools/genrecon/latents.py) — "
++                        "the point a run whose decode failed continues from.")
++    parser.add_argument("--resume_latents", type=str, default=None,
++                        help="STAC: decode THESE sampled latents (a --save_latents file): no chunker, no image "
++                        "selection, no sampling — the run continues at the decode.")
      return parser
  
  
@@ -1191,7 +1507,25 @@ index 58a831e..fb57019 100644
  def main() -> None:
      parser = build_parser()
      args = parser.parse_args()
-@@ -380,6 +628,42 @@ def main() -> None:
+@@ -327,8 +642,17 @@ def main() -> None:
+     )
+     if args.proj_batch_voxels is not None:
+         pipeline.proj_batch_voxels = args.proj_batch_voxels
++    if args.joint_decode_max_voxels < 0:
++        parser.error("--joint_decode_max_voxels is a number of latent voxels (0 = always the single pass)")
++    pipeline.joint_decode_max_voxels = args.joint_decode_max_voxels      # STAC: genrecon.joint_decode_max_voxels
+     pipeline.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+ 
++    if args.resume_latents is not None:
++        if args.save_latents is not None or args.validation_crop_idx is not None:
++            parser.error("--resume_latents goes alone: no --save_latents, no --validation_crop_idx")
++        _decode_saved_latents(pipeline, Path(args.resume_latents), args.pipeline, out_path)
++        return
++
+     chunker_cls, selecter_cls, transforms_json = MODES[args.mode]
+     if args.mode == "Iphone":
+         transforms_json = lambda p, sub=args.colmap_subdir: p / sub / "cameras.txt"
+@@ -380,6 +704,42 @@ def main() -> None:
          seed=args.seed,
      )
      rel_t_kept = [rel_t[i] for i in sel.chunk_indices]
@@ -1234,7 +1568,32 @@ index 58a831e..fb57019 100644
  
      if args.save_imgs:
          scene_dir = out_path / "scene"
-@@ -407,6 +691,10 @@ def main() -> None:
+@@ -398,6 +758,24 @@ def main() -> None:
+     slat_sampler_params: dict = {}
+     if args.boundary_sensitive_slat:
+         slat_sampler_params = {"boundary_sensitive": True, "boundary_width": args.boundary_width_slat}
++    latents_hook = None
++    if args.save_latents is not None:
++        if args.validation_crop_idx is not None:
++            parser.error("--save_latents is for the world run: no --validation_crop_idx")
++        import latents  # tools/genrecon (run_cloud.sh puts that folder alone on the path)
++
++        def _save_sampled(shape_slats, tex_slats, sampled_coords):
++            saved = latents.save(
++                Path(args.save_latents),
++                shape=[(z.feats, z.coords) for z in shape_slats], tex=[(z.feats, z.coords) for z in tex_slats],
++                coords_list=sampled_coords, relative_translations=rel_t_kept, m_c2o=m_c2o,
++                chunk_indices=sel.chunk_indices,
++                coords_resolution=pipeline.models[f"shape_slat_flow_model_{args.pipeline}"].resolution,
++                pipeline_type=args.pipeline)
++            print(f"[STAC] sampled latents saved before the decode ({saved}): {latents.summary(latents.load(saved))}")
++
++        latents_hook = _save_sampled
++
+     scene_mesh, coords_list = pipeline.run(
+         sel,
+         rel_t_kept,
+@@ -407,6 +785,11 @@ def main() -> None:
          shape_slat_sampler_params=slat_sampler_params,
          tex_slat_sampler_params=slat_sampler_params,
          occ_threshold=args.occ_threshold,
@@ -1242,6 +1601,46 @@ index 58a831e..fb57019 100644
 +        coords_hook=coords_hook,
 +        shape_latents_override=shape_latents,
 +        shape_refine_t=args.shape_refine_t,
++        latents_hook=latents_hook,
      )
  
      coords_resolution = pipeline.models[f"shape_slat_flow_model_{args.pipeline}"].resolution
+@@ -448,37 +831,7 @@ def main() -> None:
+         torch.save(chunk_inputs, out_path / "chunk_inputs.pt")
+         print(f"[chunked] saved chunk metadata to {out_path / 'chunk_inputs.pt'}")
+     else:
+-        # Joint frame = chunker's chunk-0 local frame, so m_c2o[0] lifts it to world.
+-        chunk_size = m_c2o[0][0, 0].item()
+-        chunk_center0 = m_c2o[0][:3, 3].to(scene_mesh.vertices.device, dtype=scene_mesh.vertices.dtype)
+-        _save_plys(
+-            out_path,
+-            scene_mesh,
+-            coords_list,
+-            coords_resolution,
+-            sel.chunk_indices,
+-            mesh_transform=m_c2o[0],
+-            coords_transform=lambda i: m_c2o[i],
+-            label="\n PLY saved!",
+-        )
+-
+-        # ── Save inputs for chunked GLB conversion (testing harness) ──
+-        _save_to_glb_inputs(
+-            out_path,
+-            scene_mesh,
+-            vertices=scene_mesh.vertices * chunk_size + chunk_center0,
+-            voxel_size=scene_mesh.voxel_size * chunk_size,
+-            origin=[scene_mesh.origin[i].item() * chunk_size + chunk_center0[i].item() for i in range(3)],
+-            label="",
+-        )
+-
+-        chunk_inputs = {
+-            "chunk_centers_world": torch.stack([m_c2o[i][:3, 3] for i in sel.chunk_indices]).detach().cpu(),
+-            "chunk_size_world": chunk_size,
+-            "chunk_indices": list(sel.chunk_indices),
+-        }
+-        torch.save(chunk_inputs, out_path / "chunk_inputs.pt")
+-        print(f"[chunked] saved chunk metadata to {out_path / 'chunk_inputs.pt'}")
++        _finish_world(out_path, scene_mesh, coords_list, coords_resolution, sel.chunk_indices, m_c2o)
+ 
+ 
+ if __name__ == "__main__":

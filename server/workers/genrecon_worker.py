@@ -39,6 +39,8 @@ _MARKS = [
     ("levels:", 8, "floor and ceiling levels from the segmentation"),
     ("images, ", 12, "keyframes, poses and cloud written"),
     ("undistorted", 18, "keyframes undistorted"),
+    # the loop below takes the FIRST mark a line holds: the decode's line before the mesh step's, which it contains
+    ("=== RESUME AT THE DECODE", 60, "the sampled latents reused — continuing at the decode"),
     ("=== RESUME", 70, "the reconstruction reused — continuing at the mesh step"),
     ("coords from the cloud", 25, "active voxels from the cloud"),
     ("Sampling sparse structure", 25, "the model generating the scene's structure"),
@@ -202,7 +204,11 @@ def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
            "GENRECON_DENOISE_NORMAL_ITERS": _number(gcfg, "denoise_normal_iters", int, 0, 1000),
            "GENRECON_DENOISE_VERTEX_ITERS": _number(gcfg, "denoise_vertex_iters", int, 0, 1000),
            "GENRECON_DENOISE_SIGMA_R": _number(gcfg, "denoise_sigma_r", float, 0.01, 2.0),
-           "GENRECON_DENOISE_BLOCK_FACES": _number(gcfg, "denoise_block_faces", int, 1, 1 << 31)}
+           "GENRECON_DENOISE_BLOCK_FACES": _number(gcfg, "denoise_block_faces", int, 1, 1 << 31),
+           # USER 2026-11-13 ("Debemos hacer entrar pccr2408 hay que ver la forma la técnica para que sea escalable a
+           # nubes masivas"): over this many latent voxels the scene is decoded by regions with a margin instead of in
+           # one pass (tools/genrecon/decode_regions.py); 0 = always the single pass
+           "GENRECON_DECODE_MAX_VOXELS": _number(gcfg, "joint_decode_max_voxels", int, 0, 1 << 31)}
     if not _SCRIPT.exists():
         raise FileNotFoundError(f"GenRecon runner missing: {_SCRIPT}")
     stop_semantic_service_verified(pipe, stage="GenRecon mesh")

@@ -20,9 +20,22 @@ disk carry that same stamp and are whole (the two files the mesh step loads by s
 file). `seal` writes the pending stamp beside the products once reconstruct_scene.py has succeeded. Every
 difference is NAMED and the run then starts at the adapter, as always.
 
+AT THE DECODE (USER 2026-11-13: "Debemos hacer entrar pccr2408 hay que ver la forma la técnica para que sea
+escalable a nubes masivas"). reconstruct_scene.py is two steps: the GENERATION (chunks, images, the sampling of one
+shape and one texture latent per chunk — the long part) and the DECODE of all of them together (the part that grows
+with the scene). The sampled latents are written before the decode (latents.py, <O>/latents.pt) and carry a stamp
+of their own — the same as above WITHOUT the decode's own code (decode_files(): the vendor's joint_decode.py and
+decode_regions.py) and with the generation's command line (the reconstruction's without the decode's parameters:
+genrecon.joint_decode_max_voxels). A run whose decode failed, or whose decode code or cap changed, continues at the
+decode on those latents; anything the latents are made from that changed is named and the run starts at the adapter.
+
   python resume.py check <SES> <W> <O> --conf <c> --adapter "<adapter args>" --reconstruct "<command>"
-                                        exit 0 = reusable, 3 = not reusable (the reasons printed)
-  python resume.py seal  <SES> <W> <O>
+                         [--generation "<command>"] [--dry]
+        exit 0 = the products are reusable (the run continues at the mesh step), 4 = they are not but the sampled
+        latents are (with --generation: the run continues at the decode), 3 = neither (the reasons printed).
+        --dry: nothing is written or removed (asking is then safe beside a live run of the same session)
+  python resume.py seal-latents <SES> <W> <O>      once reconstruct_scene.py has EXITED and left its latents
+  python resume.py seal         <SES> <W> <O>      once it has succeeded
 """
 from __future__ import annotations
 
@@ -44,6 +57,13 @@ import repro  # noqa: E402
 STAMP_NAME = "reconstruct.stamp.json"
 #: exit code of `check` when the products are not reusable (0 = reusable, anything else = the check itself failed)
 NOT_REUSABLE = 3
+#: exit code of `check --generation` when the products are not reusable and the sampled latents are
+AT_THE_DECODE = 4
+#: the sampled latents in the reconstruction's output folder (tools/genrecon/latents.py) and their stamp
+LATENTS_NAME = "latents.pt"
+LATENTS_STAMP_NAME = "latents.stamp.json"
+#: vendor files of the DECODE alone (after the sampling): a change there keeps the sampled latents
+DECODE_STEP_FILES = ("genrecon/pipelines/joint_decode.py",)
 #: what the mesh step loads from the reconstruction's output folder
 PRODUCTS = ("to_glb_inputs.pt", "chunk_inputs.pt")
 #: vendor files of the MESH step (after the reconstruction): a change there keeps the reconstruction's products
@@ -58,10 +78,11 @@ _VENDOR_SOURCE = (".py", ".json", ".yaml", ".yml")
 _OPTIONAL_INPUTS = ("camera_frames.txt", "frame_list.json", "floor_transform.npz", "segmentation_result.json")
 
 
-def pending_path(out: Path) -> Path:
-    """The stamp computed before the adapter, waiting for the reconstruction to succeed: beside the output folder
-    (the script wipes that folder before reconstruct_scene.py runs)."""
-    return out.parent / f"{out.name}.{STAMP_NAME}.pending"
+def pending_path(out: Path, name: str = STAMP_NAME) -> Path:
+    """The stamp computed before the adapter, waiting for the reconstruction to succeed (``name``: the products'
+    stamp, or LATENTS_STAMP_NAME for the sampled latents'): beside the output folder (the script wipes that folder
+    before reconstruct_scene.py runs)."""
+    return out.parent / f"{out.name}.{name}.pending"
 
 
 def session_inputs(ses: Path, conf: float) -> Dict[str, Path]:
@@ -125,9 +146,22 @@ def code_files() -> List[Path]:
     return [HERE / "adapter.py", HERE / "presence.py", HERE / "genrecon_levels.py", HERE / "layout_gpu.py",
             HERE / "remap_gpu.py", SERVER / "jpeg_gpu.py",
             HERE / "cloud_shape.py",     # the shape from the cloud: reconstruct_scene.py imports it (USER 2026-11-12)
+            HERE / "latents.py",         # the sampled latents on disk: reconstruct_scene.py writes and reads them
+            HERE / "decode_regions.py",  # the decode by regions: the vendor's joint_decode.py loads it (2026-11-13)
             SERVER / "correction" / "session.py", SERVER / "correction" / "floor.py",
             SERVER / "segmentation" / "perfect_object.py", SERVER / "segmentation" / "session_io.py",
             *vendor_sources()]
+
+
+def decode_files() -> List[Path]:
+    """The code that runs at the DECODE alone, after the latents are sampled: a change there keeps the latents."""
+    return [HERE / "decode_regions.py", *(VENDOR / m for m in DECODE_STEP_FILES)]
+
+
+def generation_code_files() -> List[Path]:
+    """What the sampled latents are made by: code_files() without the decode's own."""
+    late = {p.resolve() for p in decode_files()}
+    return [p for p in code_files() if p.resolve() not in late]
 
 
 def checkpoints(vendor: Optional[Path] = None) -> Dict[str, Optional[int]]:
@@ -150,11 +184,20 @@ def compute(ses: Path, conf: float, adapter_args: str, reconstruct_cmd: str) -> 
                                "checkpoints": checkpoints()})
 
 
-def products(work: Path, out: Path) -> Dict[str, Any]:
+def compute_generation(ses: Path, conf: float, adapter_args: str, generation_cmd: str) -> Dict[str, Any]:
+    """The stamp of the SAMPLED LATENTS: compute() without the decode's code and with the generation's command."""
+    return repro.stamp(inputs=session_inputs(ses, conf), code=generation_code_files(),
+                       config={"order": {"adapter": str(adapter_args), "generation": str(generation_cmd)},
+                               "adapter_config": adapter_config(), "keyframes": keyframes(ses),
+                               "checkpoints": checkpoints()})
+
+
+def products(work: Path, out: Path, names=PRODUCTS) -> Dict[str, Any]:
     """The reconstruction's products as they are on disk: the files the mesh step loads (None = missing) and the
-    work folder file by file — a file by its size, a link by its target."""
+    work folder file by file — a file by its size, a link by its target. ``names``: the output folder's files to
+    list (the mesh step's two, or the sampled latents' one)."""
     got: Dict[str, Any] = {}
-    for name in PRODUCTS:
+    for name in names:
         p = out / name
         got[f"out/{name}"] = p.stat().st_size if p.is_file() else None
     for root, dirs, files in os.walk(work):
@@ -171,14 +214,11 @@ def _write_json(path: Path, obj: Any) -> None:
     os.replace(tmp, path)
 
 
-def check(ses: Path, work: Path, out: Path, conf: float, adapter_args: str, reconstruct_cmd: str) -> List[str]:
-    """Why the products in ``work`` / ``out`` cannot be reused for this order ([] = reusable). The order's stamp is
-    left pending for :func:`seal` either way."""
-    now = compute(ses, conf, adapter_args, reconstruct_cmd)
-    _write_json(pending_path(out), now)
-    saved_p = out / STAMP_NAME
+def _reasons(saved_p: Path, now: Dict[str, Any], has: Dict[str, Any], what: str) -> List[str]:
+    """Why what the stamp file ``saved_p`` describes (``what``) cannot be reused under the stamp ``now`` with
+    ``has`` on disk ([] = reusable)."""
     if not saved_p.is_file():
-        return [f"no {STAMP_NAME} beside the reconstruction's products ({out})"]
+        return [f"no {saved_p.name} beside {what} ({saved_p.parent})"]
     try:
         saved = json.loads(saved_p.read_text())
     except ValueError as e:
@@ -186,7 +226,7 @@ def check(ses: Path, work: Path, out: Path, conf: float, adapter_args: str, reco
     if not isinstance(saved, dict):
         return [f"{saved_p} is not a stamp record"]
     diffs = list(repro.check_stamp(saved.get("stamp"), now))
-    was, has = saved.get("products"), products(work, out)
+    was = saved.get("products")
     if not isinstance(was, dict):
         diffs.append("the saved stamp lists no products")
         return diffs
@@ -200,46 +240,103 @@ def check(ses: Path, work: Path, out: Path, conf: float, adapter_args: str, reco
     return diffs
 
 
-def seal(work: Path, out: Path) -> Path:
-    """Write the pending stamp and the products' listing beside the products (after reconstruct_scene.py succeeded)."""
-    pend = pending_path(out)
+def check(ses: Path, work: Path, out: Path, conf: float, adapter_args: str, reconstruct_cmd: str,
+          dry: bool = False) -> List[str]:
+    """Why the products in ``work`` / ``out`` cannot be reused for this order ([] = reusable). The order's stamp is
+    left pending for :func:`seal` either way — unless ``dry``: then nothing is written."""
+    now = compute(ses, conf, adapter_args, reconstruct_cmd)
+    if not dry:
+        _write_json(pending_path(out), now)
+        # a generation stamp left pending by an earlier launch is not this order's: seal_latents never reads it
+        pending_path(out, LATENTS_STAMP_NAME).unlink(missing_ok=True)
+    return _reasons(out / STAMP_NAME, now, products(work, out), "the reconstruction's products")
+
+
+def check_latents(ses: Path, work: Path, out: Path, conf: float, adapter_args: str, generation_cmd: str,
+                  dry: bool = False) -> List[str]:
+    """Why the sampled latents in ``out`` cannot be decoded for this order ([] = reusable: the run continues at the
+    decode). The generation's stamp is left pending for :func:`seal_latents` either way — unless ``dry``. Call it
+    AFTER :func:`check` (which clears the pending generation stamp of an earlier launch)."""
+    now = compute_generation(ses, conf, adapter_args, generation_cmd)
+    if not dry:
+        _write_json(pending_path(out, LATENTS_STAMP_NAME), now)
+    return _reasons(out / LATENTS_STAMP_NAME, now, products(work, out, (LATENTS_NAME,)), "the sampled latents")
+
+
+def _seal(work: Path, out: Path, name: str, names) -> Path:
+    pend = pending_path(out, name)
     if not pend.is_file():
         raise RuntimeError(f"{pend} is missing — `check` computes the stamp before the adapter runs; sealing without "
                            f"it would stamp the inputs after the fact")
     now = json.loads(pend.read_text())
-    got = products(work, out)
-    missing = [k for k in (f"out/{n}" for n in PRODUCTS) if got.get(k) is None]
+    got = products(work, out, names)
+    missing = [k for k in (f"out/{n}" for n in names) if got.get(k) is None]
     if missing:
         raise RuntimeError(f"the reconstruction left no {', '.join(missing)} in {out} — nothing to stamp")
-    _write_json(out / STAMP_NAME, {"stamp": now, "products": got})
+    _write_json(out / name, {"stamp": now, "products": got})
     pend.unlink()
-    return out / STAMP_NAME
+    return out / name
+
+
+def seal(work: Path, out: Path) -> Path:
+    """Write the pending stamp and the products' listing beside the products (after reconstruct_scene.py succeeded)."""
+    return _seal(work, out, STAMP_NAME, PRODUCTS)
+
+
+def seal_latents(work: Path, out: Path) -> Path:
+    """Write the generation's pending stamp and the latents' listing beside the sampled latents — once
+    reconstruct_scene.py has EXITED, whether its decode succeeded or not: a failed decode continues from them."""
+    return _seal(work, out, LATENTS_STAMP_NAME, (LATENTS_NAME,))
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="GenRecon: reuse the reconstruction's products when they carry this order's stamp")
-    ap.add_argument("action", choices=("check", "seal"))
+    ap = argparse.ArgumentParser(description="GenRecon: reuse the reconstruction's products — or its sampled latents — "
+                                             "when they carry this order's stamp")
+    ap.add_argument("action", choices=("check", "seal", "seal-latents"))
     ap.add_argument("ses", type=Path)
     ap.add_argument("work", type=Path)
     ap.add_argument("out", type=Path)
     ap.add_argument("--conf", type=float, default=0.0)
     ap.add_argument("--adapter", default=None, help="the adapter's arguments as the script passes them")
     ap.add_argument("--reconstruct", default=None, help="reconstruct_scene.py's command line as the script runs it")
+    ap.add_argument("--generation", default=None,
+                    help="reconstruct_scene.py's command line without the decode's parameters: with it `check` also "
+                         "says whether the sampled latents can be decoded (exit 4)")
+    ap.add_argument("--dry", action="store_true", help="check: write and remove nothing")
     a = ap.parse_args(argv)
     if a.action == "seal":
         print(f"[resume] the reconstruction's products stamped: {seal(a.work, a.out)}", flush=True)
         return 0
+    if a.action == "seal-latents":
+        print(f"[resume] the sampled latents stamped: {seal_latents(a.work, a.out)}", flush=True)
+        return 0
     if a.adapter is None or a.reconstruct is None:
         ap.error("check needs --adapter and --reconstruct")
-    diffs = check(a.ses, a.work, a.out, a.conf, a.adapter, a.reconstruct)
+    diffs = check(a.ses, a.work, a.out, a.conf, a.adapter, a.reconstruct, dry=a.dry)
     if not diffs:
-        pending_path(a.out).unlink()                         # nothing will be sealed: the products stay as stamped
+        if not a.dry:
+            pending_path(a.out).unlink()                     # nothing will be sealed: the products stay as stamped
         print("[resume] the reconstruction's products carry this order's stamp and are whole — reused, the run "
               "continues at the mesh step", flush=True)
         return 0
+    late = None if a.generation is None else check_latents(a.ses, a.work, a.out, a.conf, a.adapter, a.generation,
+                                                           dry=a.dry)
+    if late is not None and not late:
+        if not a.dry:                                        # the latents stay as stamped; the products' pending
+            pending_path(a.out, LATENTS_STAMP_NAME).unlink() # stamp waits for `seal`, after the decode
+        print("[resume] the reconstruction's products are not reusable:", flush=True)
+        for d in diffs:
+            print(f"[resume]   {d}", flush=True)
+        print("[resume] the sampled latents carry this order's generation stamp and are whole — reused, the run "
+              "continues at the decode", flush=True)
+        return AT_THE_DECODE
     print("[resume] the reconstruction's products are not reusable — the run starts at the adapter:", flush=True)
     for d in diffs:
         print(f"[resume]   {d}", flush=True)
+    if late is not None:
+        print("[resume] nor are the sampled latents:", flush=True)
+        for d in late:
+            print(f"[resume]   {d}", flush=True)
     return NOT_REUSABLE
 
 

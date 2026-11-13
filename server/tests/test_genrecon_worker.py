@@ -75,7 +75,8 @@ _CFG = {"mesh_name": "genrecon_photo", "mode": "cloud", "generative_mesh_name": 
         "min_points_per_voxel": 10, "simplify_faces_per_chunk": 150000, "texture_size": 2048, "bake_views": 3,
         "cube_size_m": 3.7, "undistort_device": "cuda", "solid_ground": False, "shape_from_cloud": True,
         "shape_refine_t": 0.0, "smooth_iters": 0, "edge_filter": True, "denoise_normal_iters": 20,
-        "denoise_vertex_iters": 10, "denoise_sigma_r": 0.35, "denoise_block_faces": 2000000}
+        "denoise_vertex_iters": 10, "denoise_sigma_r": 0.35, "denoise_block_faces": 2000000,
+        "joint_decode_max_voxels": 100000}
 
 
 def test_both_variants_in_order(tmp_path, monkeypatch):
@@ -182,3 +183,36 @@ def test_the_shape_from_the_cloud_keys_reach_the_runner_typed(tmp_path, monkeypa
         with pytest.raises(RuntimeError, match=msg):
             _run(tmp_path / f"bad{n}", monkeypatch, cfg)
     assert not envs                                               # nothing was launched
+
+
+def test_the_decode_cap_reaches_the_runner_typed(tmp_path, monkeypatch):
+    """USER 2026-11-13 ("Debemos hacer entrar pccr2408 hay que ver la forma la técnica para que sea escalable a nubes
+    masivas"): genrecon.joint_decode_max_voxels reaches run_cloud.sh as GENRECON_DECODE_MAX_VOXELS — 0 (always the
+    single pass) included; a missing key or anything but a non-negative integer fails naming it, nothing launched."""
+    for n, (value, said) in enumerate(((100000, "100000"), (0, "0"))):
+        envs.clear()
+        _run(tmp_path / f"ok{n}", monkeypatch, {**_CFG, "generative_mesh_name": "", "joint_decode_max_voxels": value})
+        assert envs[0]["GENRECON_DECODE_MAX_VOXELS"] == said
+    envs.clear()
+    missing = {k: v for k, v in _CFG.items() if k != "joint_decode_max_voxels"}
+    with pytest.raises(RuntimeError, match="genrecon.joint_decode_max_voxels is missing"):
+        _run(tmp_path / "missing", monkeypatch, missing)
+    for n, bad in enumerate((-1, 2.5, True, "100000", None)):
+        with pytest.raises(RuntimeError, match=r"genrecon.joint_decode_max_voxels must be a int in \[0, "):
+            _run(tmp_path / f"bad{n}", monkeypatch, {**_CFG, "joint_decode_max_voxels": bad})
+    assert not envs                                               # nothing was launched
+
+
+def test_the_two_resume_lines_of_the_runner_have_their_own_marks():
+    """run_cloud.sh says where a resumed run continues; the worker's loop takes the FIRST mark a line holds, and the
+    decode's line holds the mesh step's "=== RESUME" too — each line reaches its own message."""
+    script = (Path(G.__file__).resolve().parent.parent / "tools" / "genrecon" / "run_cloud.sh").read_text()
+    assert 'echo "=== RESUME AT THE DECODE $sid ' in script and 'echo "=== RESUME $sid at the mesh step ' in script
+
+    def first(line):
+        return next((p, msg) for mark, p, msg in G._MARKS if mark in line)
+
+    assert first("=== RESUME AT THE DECODE pccr 07:10:02") == (60, "the sampled latents reused — continuing at the decode")
+    assert first("=== RESUME pccr at the mesh step 07:10:02") == (70, "the reconstruction reused — continuing at the mesh step")
+    decode = [p for mark, p, _ in G._MARKS if mark.startswith("joint_decode")]
+    assert decode and min(decode) > 60                            # the decode's own marks still advance after it

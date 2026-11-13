@@ -213,7 +213,18 @@ genrecon:
                                      # the neighbour pairs of this many faces are on the card at a time. Measured on
                                      # bufferStop's 7,211,584 faces, the card's peak / the time: all at once 13.3 GB /
                                      # 3.7 s, 2,000,000 4.7 GB / 3.4 s, 500,000 2.2 GB / 3.6 s
-  solid_ground: false                # USER 2026-11-12 ("la nube a veces está por debajo de y =0, no debe rellenarse por
+  joint_decode_max_voxels: 100000    # USER 2026-11-13 ("Debemos hacer entrar pccr2408 hay que ver la forma la técnica
+                                     # para que sea escalable a nubes masivas"): a scene of more latent voxels than
+                                     # this is decoded BY REGIONS (tools/genrecon/decode_regions.py: each region on its
+                                     # box widened by the decoders' own reach, 19 voxels, every fine voxel taken from
+                                     # the one region that owns it), so the card's peak follows the region and not the
+                                     # cloud; at or under it the vendor's single pass, untouched. 0 = always the single
+                                     # pass. The value is the vendor's own (full_scene_images_to_3d.py: max_inflated_
+                                     # voxels = 100_000 for its grouped decode). The single pass measured at 2.5 m · 3
+                                     # points, shape / texture decode: bufferStop 7,014 voxels 4.24 / 4.41 GB, pccr
+                                     # 2026-08-31 42,689 17.79 / 18.96 GB, observatorio 109,523 31.87 / 34.68 GB; pccr
+                                     # 2026-08-24 holds 220,739 — over the card in one pass, 4 regions under this cap
+  solid_ground: false               # USER 2026-11-12 ("la nube a veces está por debajo de y =0, no debe rellenarse por
                                      # debajo sino que debe respetar toda la excursión de la nube con geometría
                                      # correcta"): OFF. true = presence.plan_layout fills every column holding an active
                                      # voxel at a support level's height down to the lattice base (USER 2026-11-08 "el
