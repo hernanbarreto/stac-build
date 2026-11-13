@@ -1,5 +1,5 @@
 diff --git a/chunked_to_glb.py b/chunked_to_glb.py
-index a46c4e5..cfc69a5 100644
+index a46c4e5..c57a0ae 100644
 --- a/chunked_to_glb.py
 +++ b/chunked_to_glb.py
 @@ -15,6 +15,7 @@ from __future__ import annotations
@@ -10,7 +10,32 @@ index a46c4e5..cfc69a5 100644
  import traceback
  from pathlib import Path
  
-@@ -157,7 +158,9 @@ def main() -> None:
+@@ -74,6 +75,16 @@ def main() -> None:
+         help="Dihedral angle threshold (deg). Vertices on edges above this — plus all "
+         "boundary / non-manifold edges — are locked and not smoothed.",
+     )
++    parser.add_argument(
++        "--edge_filter",
++        nargs=4,
++        default=None,
++        metavar=("NORMAL_ITERS", "VERTEX_ITERS", "SIGMA_R", "BLOCK_FACES"),
++        help="STAC: bilateral normal filtering of the global mesh after the remesh and the Taubin smoothing, before "
++        "the chunk partition (server/tools/genrecon/denoise.py): the passes over the faces' normals, the vertex "
++        "updates, how unlike two normals may be and still average, and how many faces' neighbour pairs are in "
++        "memory at a time. Absent = disabled.",
++    )
+     parser.add_argument(
+         "--dump_geometry_plys",
+         action="store_true",
+@@ -148,6 +159,7 @@ def main() -> None:
+             smooth_lambda=args.smooth_lambda,
+             smooth_mu=args.smooth_mu,
+             smooth_feature_angle=args.smooth_feature_angle,
++            edge_filter=args.edge_filter,
+             simplify_threshold=args.simplify_threshold,
+             texture_size=args.texture_size,
+             dump_geometry_dir=out_dir if args.dump_geometry_plys else None,
+@@ -157,7 +169,9 @@ def main() -> None:
      except Exception:
          print("[chunked_to_glb] FAILED:")
          traceback.print_exc()
@@ -456,7 +481,7 @@ index 34adb89..90bf47a 100644
          if boundary_sensitive:
  
 diff --git a/inference/chunked_glb.py b/inference/chunked_glb.py
-index f9a9459..513b1ba 100644
+index f9a9459..3237a84 100644
 --- a/inference/chunked_glb.py
 +++ b/inference/chunked_glb.py
 @@ -3,6 +3,7 @@
@@ -467,7 +492,7 @@ index f9a9459..513b1ba 100644
  import time
  from pathlib import Path
  from typing import Any, Sequence
-@@ -14,6 +15,48 @@ import torch
+@@ -14,6 +15,62 @@ import torch
  import trimesh
  
  
@@ -487,6 +512,20 @@ index f9a9459..513b1ba 100644
 +
 +
 +_remesh_resolution = _stac_remesh_resolution()
++
++
++def _stac_edge_filter():
++    """STAC 2026-11-12: the edge filter of the global mesh (bilateral normal filtering) is server/tools/genrecon/
++    denoise.py, loaded by its path as the remesh resolution above — only when the filter is asked for
++    (chunked_to_glb's edge_filter), before any work, a missing module failing there naming its path."""
++    import importlib.util
++    path = Path(__file__).resolve().parents[3] / "server" / "tools" / "genrecon" / "denoise.py"
++    spec = importlib.util.spec_from_file_location("stac_edge_filter", path)
++    if spec is None or spec.loader is None or not path.is_file():
++        raise ImportError(f"STAC edge filter module not found: {path}")
++    mod = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(mod)
++    return mod
 +
 +
 +def _stac_clamp_dual_contour() -> None:
@@ -516,7 +555,37 @@ index f9a9459..513b1ba 100644
  def _feature_locked_mask(vertices: torch.Tensor, faces: torch.Tensor, feature_angle_deg: float) -> torch.Tensor:
      """Return a (V,) bool mask of vertices that should be held fixed during smoothing.
  
-@@ -226,6 +269,8 @@ def chunked_to_glb(
+@@ -188,6 +245,7 @@ def chunked_to_glb(
+     smooth_lambda: float = 0.5,
+     smooth_mu: float = -0.53,
+     smooth_feature_angle: float = 25.0,
++    edge_filter: Sequence[Any] | None = None,
+     simplify_threshold: int = 5_000_000,
+     texture_size: int = 4096,
+     dump_geometry_dir: str | Path | None = None,
+@@ -203,8 +261,21 @@ def chunked_to_glb(
+     chunk_NNN.glb immediately after bake. On a subsequent run, any chunk whose GLB
+     already exists at that path is loaded from disk instead of re-baked, making the
+     per-scene pipeline resumable across crashes (e.g. VRAM OOM on a single chunk).
++
++    STAC: edge_filter = (normal iterations, vertex iterations, sigma_r, block faces) runs the bilateral normal filter
++    of server/tools/genrecon/denoise.py on the global mesh at Step 1.5; None = GenRecon's own behaviour.
+     """
+ 
++    if edge_filter is not None:
++        if len(edge_filter) != 4:
++            raise ValueError(f"edge_filter takes 4 values (normal iterations, vertex iterations, sigma_r, block faces), "
++                             f"got {len(edge_filter)}")
++        ef_normal_iters, ef_vertex_iters = int(edge_filter[0]), int(edge_filter[1])
++        ef_sigma_r, ef_block_faces = float(edge_filter[2]), int(edge_filter[3])
++        if ef_normal_iters < 0 or ef_vertex_iters < 0 or not ef_sigma_r > 0 or ef_block_faces < 1:
++            raise ValueError(f"edge_filter: iterations >= 0, sigma_r > 0, block faces >= 1 (got {list(edge_filter)})")
++        _edge_filter = _stac_edge_filter()
++
+     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+ 
+     vertices_world = vertices_world.to(device, dtype=torch.float32)
+@@ -226,6 +297,8 @@ def chunked_to_glb(
          pre_mesh = cumesh.CuMesh()
          pre_mesh.init(vertices_world, faces)
          pre_mesh.fill_holes(max_hole_perimeter=hole_perim)
@@ -525,7 +594,7 @@ index f9a9459..513b1ba 100644
          if verbose:
              print(
                  f"[chunked_to_glb] after global fill_holes: "
-@@ -240,6 +285,7 @@ def chunked_to_glb(
+@@ -240,6 +313,7 @@ def chunked_to_glb(
      if do_remesh:
          bvh = cumesh.cuBVH(pre_v, pre_f)
  
@@ -533,7 +602,7 @@ index f9a9459..513b1ba 100644
          if remesh_res is None:
              extent = float((aabb_t[1] - aabb_t[0]).max().item())
              vs_scalar = _voxel_size_scalar(voxel_size_world)
-@@ -252,17 +298,59 @@ def chunked_to_glb(
+@@ -252,17 +326,59 @@ def chunked_to_glb(
          center = aabb_t.mean(dim=0)
          scale = float((aabb_t[1] - aabb_t[0]).max().item())
  
@@ -604,7 +673,29 @@ index f9a9459..513b1ba 100644
          mesh = cumesh.CuMesh()
          mesh.init(new_v, new_f)
          if verbose:
-@@ -309,8 +397,12 @@ def chunked_to_glb(
+@@ -294,6 +410,21 @@ def chunked_to_glb(
+         if verbose:
+             print(f"[chunked_to_glb] smoothing: {time.perf_counter() - t_smooth:.1f}s")
+ 
++    # ── Step 1.5 (STAC 2026-11-12): the edge filter ─────────────────────
++    # USER, after bufferStop's generated mesh side by side with and without it ("No noto la diferencia"): "Lo dejamos
++    # el filtro igual porque podrían haber mallas que si lo requieran. Implementamos el filtro y hacemos las mallas de
++    # todas las sesiones con el filtro" — bilateral normal filtering of the global mesh (server/tools/genrecon/
++    # denoise.py): the last step that moves the geometry, after the remesh, before the partition, the chunks'
++    # simplification and the bake. The dump pass and the merge pass both run it, on the same remeshed mesh; float64
++    # under torch's deterministic algorithms, the neighbour pairs in blocks of faces (the result does not depend on
++    # the block). gf is not touched. Its two lines say the mesh and the values, then what moved, the time and the card.
++    if edge_filter is not None:
++        torch.cuda.empty_cache()
++        gv, _, _lines = _edge_filter.filter_mesh(gv.contiguous(), gf.contiguous(), ef_normal_iters, ef_vertex_iters,
++                                                 ef_sigma_r, ef_block_faces)
++        for _line in _lines:
++            print(f"[STAC] edge filter: {_line}", flush=True)
++
+     # ── Optional debug dump: write the global pre-bake mesh as a flat PLY ──
+     if dump_geometry_dir is not None:
+         dump_dir = Path(dump_geometry_dir)
+@@ -309,8 +440,12 @@ def chunked_to_glb(
  
      # ── Step 2: Spatial partition by face centroid (nearest chunk center) ─
      centroids = gv[gf.long()].mean(dim=1)  # (F, 3)
@@ -619,7 +710,7 @@ index f9a9459..513b1ba 100644
      if verbose:
          for k, idx in enumerate(chunk_indices):
              print(f"[chunked_to_glb] chunk {idx:03d}: {(assignment == k).sum().item():,} faces")
-@@ -383,11 +475,26 @@ def chunked_to_glb(
+@@ -383,11 +518,26 @@ def chunked_to_glb(
              )
  
          t1 = time.perf_counter()
@@ -839,7 +930,7 @@ index aeb44be..608296c 100644
                      if not cv2.imwrite(str(dst), undist):
                          raise RuntimeError(f"Failed to write undistorted frame: {dst}")
 diff --git a/reconstruct_scene.py b/reconstruct_scene.py
-index 58a831e..d02918c 100644
+index 58a831e..fb57019 100644
 --- a/reconstruct_scene.py
 +++ b/reconstruct_scene.py
 @@ -290,9 +290,257 @@ def build_parser() -> argparse.ArgumentParser:
@@ -1100,7 +1191,7 @@ index 58a831e..d02918c 100644
  def main() -> None:
      parser = build_parser()
      args = parser.parse_args()
-@@ -380,6 +628,35 @@ def main() -> None:
+@@ -380,6 +628,42 @@ def main() -> None:
          seed=args.seed,
      )
      rel_t_kept = [rel_t[i] for i in sel.chunk_indices]
@@ -1121,9 +1212,16 @@ index 58a831e..d02918c 100644
 +            import cloud_shape  # tools/genrecon (run_cloud.sh puts that folder alone on the path)
 +            _enc = cloud_shape.load_encoder(pipeline.device)
 +            _P = torch.as_tensor(np.load(args.coords_from_points), device=pipeline.device, dtype=torch.float64)
++            # the camera that saw each point (the adapter's cam_genrecon.npy / cam_of_point.npy, beside the cloud):
++            # the side of the surface where the air is — one sheet per surface
++            _cdir = Path(args.coords_from_points).parent
++            _cams = torch.as_tensor(np.load(_cdir / "cam_genrecon.npy"), device=pipeline.device, dtype=torch.float64)
++            _cop = torch.as_tensor(np.load(_cdir / "cam_of_point.npy").astype(np.int64), device=pipeline.device)
++            if len(_cop) != len(_P):
++                raise RuntimeError(f"cam_of_point.npy holds {len(_cop):,} points, the cloud {len(_P):,}")
 +            _m = [torch.linalg.inv(m_c2o[c].to(torch.float64)) for c in sel.chunk_indices]
-+            shape_latents = cloud_shape.encode_chunks(_P, _m, _enc, R=512, log=print)
-+            del _enc, _P
++            shape_latents = cloud_shape.encode_chunks(_P, _cams[_cop], _m, _enc, R=512, log=print)
++            del _enc, _P, _cams, _cop
 +            torch.cuda.empty_cache()
 +            coords_override = [z.coords.to(torch.int32) for z in shape_latents]
 +            print(f"[STAC] shape from the cloud: {[int(z.feats.shape[0]) for z in shape_latents]} latent voxels per chunk")
@@ -1136,7 +1234,7 @@ index 58a831e..d02918c 100644
  
      if args.save_imgs:
          scene_dir = out_path / "scene"
-@@ -407,6 +684,10 @@ def main() -> None:
+@@ -407,6 +691,10 @@ def main() -> None:
          shape_slat_sampler_params=slat_sampler_params,
          tex_slat_sampler_params=slat_sampler_params,
          occ_threshold=args.occ_threshold,

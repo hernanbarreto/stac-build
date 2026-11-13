@@ -131,6 +131,21 @@ if DEV == "numpy":
 else:
     P_g = P_t
     np.save(WORK / "cloud_genrecon.npy", P_t.to(torch.float32).cpu().numpy())
+# USER 2026-11-12 ("el piso es una lámina así debe ser igual que las paredes"): the side each point was SEEN from — the
+# camera of its birth keyframe (the cloud's frame_global) — for tools/genrecon/cloud_shape.py, which orients the surface
+# by it (one sign change per line: one sheet). cam_genrecon.npy: the keyframes' centres in GenRecon's frame;
+# cam_of_point.npy: per point of cloud_genrecon.npy, its keyframe's row there
+_fr = np.asarray([int(x) for x in s.frames], np.int64)
+_fg = np.asarray(f["frame_global"], np.int64)
+if old2new is not None:
+    _fg = _fg[keep_all]
+_ord = np.argsort(_fr, kind="stable")
+_pos = np.clip(np.searchsorted(_fr[_ord], _fg), 0, len(_fr) - 1)
+_miss = int((_fr[_ord][_pos] != _fg).sum())
+if _miss:
+    raise SystemExit(f"adapter.py: {_miss:,} points were born in keyframes without a pose (frame_global not in the session's frames)")
+np.save(WORK / "cam_genrecon.npy", cams_g.astype(np.float64))
+np.save(WORK / "cam_of_point.npy", _ord[_pos].astype(np.int32))
 import yaml
 from correction.floor import head_noun
 _cfg = yaml.safe_load(open(SERVER / "config.yaml"))

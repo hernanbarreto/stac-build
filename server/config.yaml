@@ -112,7 +112,23 @@ genrecon:
                                      # cualquier cosa, nos quedamos con el genrecon photo". "genrecon_generative" runs,
                                      # after mesh_name, a second mesh whose presence the MODEL decides from the keyframes
                                      # (the cloud only lays out the chunks) with the texture it generated, no photo bake
-  cube_size_m: 3.7                   # USER 2026-11-05 ("los genrecon están espantosos … volver a como estaba antes, sí con
+  cube_size_m: 2.5                   # USER 2026-11-12 (21:46 CDMX): "Perdón perdón genera la de 2.5 con voxel de 3 puntos
+                                     # perdón y 3m con 3 puntos" — BOTH runs of the search on bufferStop, for his eye: 3 m
+                                     # (published 21:55 CDMX, kept aside) and then this one, 2.5 m — 7.81 cm voxels, ~4.9 mm
+                                     # surface. The value stays where the second run left it until his word. Before, 3.0:
+                                     # USER 2026-11-12 (21:43 CDMX, his eye on bufferStop published at 2.775 m / 6 points:
+                                     # "visto de frente ambas columnas que tiene están huecas"): "Mándalo a 3m con 3 puntos
+                                     # por voxel" — 9.375 cm voxels, ~5.9 mm surface. Minutes before (21:36 CDMX, "veo que
+                                     # tiene huecos") he had said "ajusta a cubo de 2.5m con 3 puntos por voxel": that run
+                                     # was cut two minutes in, on this order, and never published. Before, 2.775:
+                                     # USER 2026-11-12 (evening, his eye on bufferStop's GENERATED shape at 3.7 / 2.775 /
+                                     # 2.31 / 1.85 / 0.925 m — "Vamos a ir avanzando por aproximaciones sucesivas, hasta dar
+                                     # con el mejor tamaño"): "Vamos con 2.775 y con esto hacemos todas las sesiones con
+                                     # textura dale" — 8.67 cm voxels, ~5.4 mm surface. Measured there against 3.7 m: mesh
+                                     # beyond 3 cm of the cloud 31.8 → 23.0 %, cloud beyond 3 cm of the mesh 48.2 → 31.0 %,
+                                     # holes from the keyframes 10.7 → 7.9 %, the floor one sheet 42.5 → 58.6 %, the tube's
+                                     # mouth open (1.85 m closed it with a membrane, the gravel as blocks). Before, 3.7:
+                                     # USER 2026-11-05 ("los genrecon están espantosos … volver a como estaba antes, sí con
                                      # el apilado y que abarque toda la nube, el resto como estuvo siempre"): back to 3.7
                                      # (2.85 was tried that night). (USER 2026-11-02 ("vamos con los tamaños de cubo con los que se entrenó, y deberían
                                      # ser tantos como sean necesarios para cubrir la altura desde la parte más baja a la
@@ -122,7 +138,12 @@ genrecon:
                                      # inside GenRecon's training range (ScanNet++ rooms ×1.2, SAGE 2.85 m): 11.6 cm
                                      # voxels, ~7 mm surface. 0 = one layer floor to ceiling (station: 5.85 m → 18 cm,
                                      # 6.98 m with the tracks → 22 cm)
-  min_points_per_voxel: 10           # USER 2026-11-09 (zaragoza's genrecon_photo with 1: sheets of noise — "con un
+  min_points_per_voxel: 3            # USER 2026-11-12 (21:36 and 21:43 CDMX, against the holes): "Mándalo a 3m con 3 puntos
+                                     # por voxel" — HIS number. Before, 6 (2026-11-12, with cube_size_m 2.775): his 10
+                                     # points a voxel of 11.56 cm (3.7 m cubes)
+                                     # held as the SAME DENSITY on the 8.67 cm voxel — 10 x (8.67 / 11.56)^2 = 5.6 -> 6 —
+                                     # the value the 2.775 m mesh his eye chose was made with. Before, 10:
+                                     # USER 2026-11-09 (zaragoza's genrecon_photo with 1: sheets of noise — "con un
                                      # solo punto cualquier ruido genera malla … hay que subirlo a 10 como estaba
                                      # originalmente" / "sí, ok, dale"): back to the original 10. Was 1 since:
                                      # USER 2026-11-08 (after genrecon_photo on the COLMAP-rule cloud, "bien bonita
@@ -147,7 +168,12 @@ genrecon:
   presence_vote: false               # OFF (USER 2026-11-05: back to how it always was): presence by min_points_per_voxel
   presence_min_views: 2              # the keyframe it was born in + at least one more (only with presence_vote)
   presence_device: cuda
-  shape_from_cloud: true             # USER 2026-11-12 ("la única que acepto es genrecon pero correcta" / "la geometría debe
+  shape_from_cloud: false            # USER 2026-11-12 (evening): "Vamos con 2.775 y con esto hacemos todas las sesiones con
+                                     # textura dale" — "esto" is GenRecon's GENERATED shape inside the cloud's active
+                                     # voxels, the family of the cube-size series his eye chose from (the shape from the
+                                     # cloud, below: "No tiene la calidad de genrecon lo que veo" / "Ninguno está bien").
+                                     # true, as it was that morning:
+                                     # USER 2026-11-12 ("la única que acepto es genrecon pero correcta" / "la geometría debe
                                      # ser correcta, exactamente igual a la nube lisa y correcta con detalle" / "el piso es
                                      # una lámina así debe ser igual que las paredes"): the SHAPE is the cloud's, written in
                                      # GenRecon's cells (one sheet per surface, edges by dual contouring) and encoded by its
@@ -161,8 +187,32 @@ genrecon:
   shape_refine_t: 0.0                # with shape_from_cloud: 0 = the cloud's shape as encoded; > 0 (< 1) = GenRecon's shape
                                      # flow continues from it noised to that t, guided by the photos (sharper edges than
                                      # the cloud — USER 2026-11-12 "debe ser mejor incluso que la nube"; his eye decides)
-  smooth_iters: 30                   # with shape_from_cloud: GenRecon's own feature-preserving Taubin smoothing in the
-                                     # bake (inference/chunked_glb.py, its 25 degrees feature lock), iterations
+  smooth_iters: 0                    # with shape_from_cloud: GenRecon's own feature-preserving Taubin smoothing in the
+                                     # bake (inference/chunked_glb.py, its 25 degrees feature lock), iterations — OFF
+                                     # (USER 2026-11-12 "pero no se ve nada liso": its lock holds every noisy vertex, the
+                                     # noise stayed); the bilateral filter below replaces it
+  edge_filter: true                  # USER 2026-11-12 (night; bufferStop's generated mesh at 2.5 m · 3 points side by side
+                                     # with and without it — "No noto la diferencia"): "Lo dejamos el filtro igual porque
+                                     # podrían haber mallas que si lo requieran. Implementamos el filtro y hacemos las
+                                     # mallas de todas las sesiones con el filtro". The bilateral normal filtering of
+                                     # tools/genrecon/denoise.py (Zheng, Fu, Au & Tai 2011) on the mesh before the bake —
+                                     # the GENERATED shape: inside GenRecon's mesh step, after its global remesh, before
+                                     # the chunks' simplification (chunked_to_glb.py --edge_filter); the shape from the
+                                     # cloud: on its decoded mesh. Measured on bufferStop's remeshed 7,211,584 faces:
+                                     # normals turned 1.66 deg median (p99 64), vertices moved 0.083 mm median (p99 2.3,
+                                     # max 8 mm). false = no filter, in either family
+  denoise_normal_iters: 20           # the filter's passes over the faces' normals (USER 2026-11-12 "no se ve nada liso",
+                                     # set on the shape from the cloud; the generated mesh his eye saw was filtered with
+                                     # these same three values): on a noisy cube the faces came 5.5x closer to their
+                                     # planes and the edges 2.2x closer to their lines (not rounded)
+  denoise_vertex_iters: 10           # ... then the vertices moved to the filtered normals, passes
+  denoise_sigma_r: 0.35              # ... how unlike two normals may be and still average (the paper's value): across a
+                                     # crease they weigh nothing
+  denoise_block_faces: 2000000       # MEMORY ONLY — the result does not depend on it (tests/test_cloud_shape.py holds it
+                                     # bit for bit; USER 2026-11-12 "hacelo escalable que pueda manejar nubes masivas"):
+                                     # the neighbour pairs of this many faces are on the card at a time. Measured on
+                                     # bufferStop's 7,211,584 faces, the card's peak / the time: all at once 13.3 GB /
+                                     # 3.7 s, 2,000,000 4.7 GB / 3.4 s, 500,000 2.2 GB / 3.6 s
   solid_ground: false                # USER 2026-11-12 ("la nube a veces está por debajo de y =0, no debe rellenarse por
                                      # debajo sino que debe respetar toda la excursión de la nube con geometría
                                      # correcta"): OFF. true = presence.plan_layout fills every column holding an active

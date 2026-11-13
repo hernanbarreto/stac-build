@@ -54,6 +54,20 @@ COORDS="--coords_from_points $W/cloud_genrecon.npy --coords_min_points $minpts -
 if [ "${GENRECON_SHAPE_FROM_CLOUD:?genrecon.shape_from_cloud (the worker sets it)}" = "1" ] && [ "$mode" = "cloud" ]; then
   COORDS="$COORDS --shape_from_cloud --shape_refine_t ${GENRECON_SHAPE_REFINE_T:?genrecon.shape_refine_t (the worker sets it)}"
 fi
+# THE EDGE FILTER (USER 2026-11-12 night, bufferStop's generated mesh side by side with and without it — "No noto la
+# diferencia": "Lo dejamos el filtro igual porque podrían haber mallas que si lo requieran. Implementamos el filtro y
+# hacemos las mallas de todas las sesiones con el filtro"): GENRECON_EDGE_FILTER=1 (genrecon.edge_filter) — the bilateral
+# normal filtering of tools/genrecon/denoise.py on the mesh before the bake. Its four values are read HERE: a missing one
+# fails before the reconstruction, naming its key. The generated shape: inside the vendor's mesh step, after the global
+# remesh (chunked_to_glb.py --edge_filter, the dump pass and the merge pass alike). The shape from the cloud: on the
+# decoded mesh (this file's denoise.py call, below).
+EDGE=${GENRECON_EDGE_FILTER:?genrecon.edge_filter (the worker sets it)}; EDGE_ARGS=""
+if [ "$EDGE" = "1" ]; then
+  EDGE_ARGS="${GENRECON_DENOISE_NORMAL_ITERS:?genrecon.denoise_normal_iters (the worker sets it)}"
+  EDGE_ARGS="$EDGE_ARGS ${GENRECON_DENOISE_VERTEX_ITERS:?genrecon.denoise_vertex_iters (the worker sets it)}"
+  EDGE_ARGS="$EDGE_ARGS ${GENRECON_DENOISE_SIGMA_R:?genrecon.denoise_sigma_r (the worker sets it)}"
+  EDGE_ARGS="$EDGE_ARGS ${GENRECON_DENOISE_BLOCK_FACES:?genrecon.denoise_block_faces (the worker sets it)}"
+fi
 NOTE="sparse structure FROM THE CLOUD (coords_from_points, min $minpts pts/voxel, mode $mode, the points at confidence >= $CONF of the viewer's slider), cubes over the whole cloud"
 if [ "$mode" = "generative" ]; then
   COORDS=""
@@ -98,7 +112,17 @@ INPUTS=$O/to_glb_inputs.pt; BAKE_FLAGS=""
 if [ "$GENRECON_SHAPE_FROM_CLOUD" = "1" ] && [ "$mode" = "cloud" ]; then
   (cd /workspace/stac-build/server && $DA3 $T/drop_loose.py $O/to_glb_inputs.pt $W $O/to_glb_inputs_clean.pt) || { echo "drop loose failed $sid"; exit 1; }
   INPUTS=$O/to_glb_inputs_clean.pt
+  if [ "$EDGE" = "1" ]; then
+    # USER 2026-11-12 ("pero no se ve nada liso"): the decoded mesh smoothed with its edges kept (tools/genrecon/denoise.py,
+    # bilateral normal filtering) — GenRecon's own Taubin locks every vertex bent over 25 degrees, the noisy ones too
+    (cd /workspace/stac-build/server && $DA3 $T/denoise.py $O/to_glb_inputs_clean.pt $O/to_glb_inputs_smooth.pt $EDGE_ARGS) || { echo "denoise failed $sid"; exit 1; }
+    INPUTS=$O/to_glb_inputs_smooth.pt
+  fi
   BAKE_FLAGS="--skip_remesh --smooth_iters ${GENRECON_SMOOTH_ITERS:?genrecon.smooth_iters (the worker sets it)}"
+elif [ "$EDGE" = "1" ]; then
+  # the generated shape: the filter inside the mesh step, after its global remesh — the dump pass and the merge pass below
+  # both carry it and filter the same remeshed mesh, so the chunks baked from the dump are the chunks the merge expects
+  BAKE_FLAGS="--edge_filter $EDGE_ARGS"
 fi
 # GENRECON_SIMPLIFY 0 (USER 2026-11-05: "no simplificar cada cubo — la malla guarda todo el detalle, los tiles la muestran
 # liviana"): no decimation target. GENRECON_BAKE_WORKERS > 1: the per-chunk bakes (UV atlas + texture, one CPU thread a

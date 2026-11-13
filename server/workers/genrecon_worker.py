@@ -53,7 +53,8 @@ _MARKS = [
 # every "<step> failed <sid>" line of run_cloud.sh: a failure names its step (2026-11-12: pccr 2026-08-24 died in the
 # dump of the mesh step and the stage said only "exit 1") — tests/test_genrecon_worker.py holds the two lists equal
 _FAILS = ("adapter failed", "reconstruct failed", "bake failed", "publish failed", "hull failed", "dump failed",
-          "bake worker failed", "tiles failed", "resume check failed", "resume stamp failed", "drop loose failed")
+          "bake worker failed", "tiles failed", "resume check failed", "resume stamp failed", "drop loose failed",
+          "denoise failed")
 
 
 def _run_variant(pipe: WorkerPipe, output_dir: Path, sid: str, scan: str, name: str, min_pts: int, mode: str,
@@ -192,7 +193,16 @@ def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
            # the smoothing of the bake that keeps the single sheets
            "GENRECON_SHAPE_FROM_CLOUD": _flag(gcfg, "shape_from_cloud"),
            "GENRECON_SHAPE_REFINE_T": _number(gcfg, "shape_refine_t", float, 0.0, 1.0),
-           "GENRECON_SMOOTH_ITERS": _number(gcfg, "smooth_iters", int, 0, 1000)}
+           "GENRECON_SMOOTH_ITERS": _number(gcfg, "smooth_iters", int, 0, 1000),
+           # USER 2026-11-12 ("pero no se ve nada liso", then on the generated mesh: "Implementamos el filtro y hacemos
+           # las mallas de todas las sesiones con el filtro"): the edge filter — the bilateral normal filtering of the
+           # mesh before the bake (tools/genrecon/denoise.py), its values, and how many faces' neighbour pairs it holds
+           # in memory at a time
+           "GENRECON_EDGE_FILTER": _flag(gcfg, "edge_filter"),
+           "GENRECON_DENOISE_NORMAL_ITERS": _number(gcfg, "denoise_normal_iters", int, 0, 1000),
+           "GENRECON_DENOISE_VERTEX_ITERS": _number(gcfg, "denoise_vertex_iters", int, 0, 1000),
+           "GENRECON_DENOISE_SIGMA_R": _number(gcfg, "denoise_sigma_r", float, 0.01, 2.0),
+           "GENRECON_DENOISE_BLOCK_FACES": _number(gcfg, "denoise_block_faces", int, 1, 1 << 31)}
     if not _SCRIPT.exists():
         raise FileNotFoundError(f"GenRecon runner missing: {_SCRIPT}")
     stop_semantic_service_verified(pipe, stage="GenRecon mesh")
