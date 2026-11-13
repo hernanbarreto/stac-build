@@ -752,6 +752,10 @@ autoprompt:
 #   bash scripts/serve_semantic.sh [backend]
 semantic:
   enabled: true
+  chat_on_demand: true         # USER 2026-11-12 ("baja al chat, no se usa" / "el chat debe cargar a demanda en esta
+                               # instancia, si no lo usamos debe estar abajo"): the chat's vLLM is NOT reloaded after a
+                               # stage, a pipeline or the server's start (USER 2026-08-28's "always available" undone) —
+                               # it loads when the chat is opened or asked. false = reloaded whenever the GPU frees
 
   service:
     host: "127.0.0.1"

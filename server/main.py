@@ -1081,7 +1081,16 @@ def _semantic_reload_if_idle(reason: str = "") -> None:
     runs and concurrent sessions would OOM the very job holding the GPU).
     Blocking (health probe + Popen) — call via run_in_executor from async code."""
     try:
-        if not (cfg.get("semantic", {}) or {}).get("enabled", True):
+        sem = cfg.get("semantic", {}) or {}
+        if not sem.get("enabled", True):
+            return
+        # USER 2026-11-12 ("baja al chat, no se usa" / "el chat debe cargar a demanda en esta instancia, si no lo usamos
+        # debe estar abajo"): with semantic.chat_on_demand the service is NOT brought back after the GPU work — it
+        # loads when the chat is opened or asked (/semantic/status?warmup, /spatial_qa)
+        if not isinstance(sem.get("chat_on_demand"), bool):
+            raise RuntimeError("config.yaml: semantic.chat_on_demand is missing or not true / false")
+        if sem["chat_on_demand"]:
+            print(f"[Semantic] chat on demand — not reloaded ({reason or 'n/a'}); it loads when the chat is used")
             return
         busy = any(j.get("status") in ("running", "queued")
                    for j in pipeline_manager.get_all_jobs().values())
