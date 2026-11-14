@@ -1091,8 +1091,9 @@ def _semantic_reload_if_idle(reason: str = "") -> None:
         sem = cfg.get("semantic", {}) or {}
         if not sem.get("enabled", True):
             return
-        # USER 2026-11-12 ("baja al chat, no se usa" / "el chat debe cargar a demanda en esta instancia, si no lo usamos
-        # debe estar abajo"): with semantic.chat_on_demand the service is NOT brought back after the GPU work — it
+        # semantic.chat_on_demand: false (USER 2026-11-14: the chat's VLM and the voice engines "deberan iniciar
+        # cuando levante el backend porque son el core del funcionamiento de stac build") — started here, at the
+        # server's start and after every GPU work. true (USER 2026-11-12, "si no lo usamos debe estar abajo"): it
         # loads when the chat is opened or asked (/semantic/status?warmup, /spatial_qa)
         if not isinstance(sem.get("chat_on_demand"), bool):
             raise RuntimeError("config.yaml: semantic.chat_on_demand is missing or not true / false")
@@ -1112,6 +1113,10 @@ def _semantic_reload_if_idle(reason: str = "") -> None:
         # permit under this very pid, a server GPU task (meshing, the Segmentation Manager's
         # SAM3) — means vLLM is not started; ensure_service says so and returns False
         ensure_service(log=print, timeout_s=0.0, owner=CHAT_OWNER)
+        # … and its first call (the decode graphs, the tools' grammar) is paid here, when it is up —
+        # never by the user's first question
+        from phase5_qa.api import warm_engine_when_up
+        warm_engine_when_up(float((sem.get("service") or {}).get("startup_timeout_s", 900)))
     except Exception as e:  # noqa: BLE001 — never break the caller over the chat
         print(f"[Semantic] chat reload failed (non-fatal): {e}")
 

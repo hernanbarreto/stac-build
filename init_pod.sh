@@ -62,24 +62,25 @@ else
     echo "⏭  Electron desktop skipped (START_ELECTRON=0)."
 fi
 
-# 3b. SEMANTIC SERVICE (vLLM / Qwen3-VL, the chat's engine). CHAT ON DEMAND (USER 2026-11-12:
-#     "el chat debe cargar a demanda en esta instancia, si no lo usamos debe estar abajo"): with
-#     config.yaml semantic.chat_on_demand: true it is NOT started at boot — it loads when the chat
-#     is opened or asked (until 2026-11-13 this script started it anyway and it held ~42 GB of the
-#     card from the pod's start). START_SEMANTIC=1 forces the start, START_SEMANTIC=0 skips it;
-#     unset = what the configuration says.
+# 3b. SEMANTIC SERVICE (vLLM / Qwen3-VL, the chat's engine) AND THE VOICE ENGINES — STARTED BY THE BACKEND at its
+#     own start (USER 2026-11-14: "tanto el motor de voz y habla del sistema como el chat vlm deberan iniciar cuando
+#     levante el backend porque son el core del funcionamiento de stac build"), with the chat's own engine profile
+#     (semantic.chat.engine), which this script cannot give: a vLLM started here would be adopted by the backend
+#     with the stages' profile, about three times slower for the chat. So nothing is launched here by default.
+#     semantic.chat_on_demand: true keeps the engine down until the chat is used (USER 2026-11-12).
+#     START_SEMANTIC=1 forces a stand-alone vLLM in tmux 'semantic' (a machine with no backend).
 if [ -z "${START_SEMANTIC:-}" ]; then
-    START_SEMANTIC="$(/workspace/miniforge3/envs/da3/bin/python - <<'PY'
+    START_SEMANTIC=0
+    /workspace/miniforge3/envs/da3/bin/python - <<'PY' || echo "❌ init_pod: semantic.chat_on_demand could not be read from config.yaml"
 import sys
 import yaml
 sem = (yaml.safe_load(open("/workspace/stac-build/server/config.yaml")) or {}).get("semantic") or {}
 on_demand = sem.get("chat_on_demand")
 if not isinstance(on_demand, bool):
     sys.exit("config.yaml: semantic.chat_on_demand is missing or not true / false")
-print("0" if on_demand else "1")
+print("🧠 Chat on demand (semantic.chat_on_demand: true): the engine loads when the chat is used." if on_demand
+      else "🧠 The backend starts the chat's engine (and the voice engines) at its own start.")
 PY
-)" || { echo "❌ init_pod: semantic.chat_on_demand could not be read from config.yaml"; START_SEMANTIC=0; }
-    [ "$START_SEMANTIC" = "0" ] && echo "🧠 Chat on demand (semantic.chat_on_demand: true): vLLM is not started at boot."
 fi
 if [ "$START_SEMANTIC" = "1" ]; then
     tmux new-session -d -s semantic

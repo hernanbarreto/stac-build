@@ -100,3 +100,36 @@ def test_the_tools_schemas_need_no_store():
     from phase5_qa.tools import SpatialTools
     names = [t["function"]["name"] for t in SpatialTools.openai_schemas()]
     assert len(names) == len(set(names)) and "get_clearance" in names and "small_talk" in names
+
+
+def test_the_backend_warms_the_engine_it_started_when_it_answers(monkeypatch):
+    """semantic.chat_on_demand: false (USER 2026-11-14: the chat's VLM "debe iniciar cuando levante
+    el backend"): the backend asks for the engine at its start and ONE waiter sends the warm-up
+    call when the engine answers — or gives up when a job takes the card meanwhile."""
+    from phase5_qa import api
+    import semantic.service as service
+
+    looks = {"n": 0}
+
+    def _alive(*a, **k):
+        looks["n"] += 1
+        return looks["n"] >= 3                         # loading, loading, up
+
+    warmed = []
+    monkeypatch.setattr(service, "is_alive", _alive)
+    monkeypatch.setattr(api, "_engine_busy", lambda: None)
+    monkeypatch.setattr(api, "warm_engine", lambda *a, **k: warmed.append(1))
+    monkeypatch.setattr(api, "_WARM_POLL_S", 0.01)
+    monkeypatch.setattr(api, "_WARM_WAITER", {"thread": None})
+
+    api.warm_engine_when_up(10.0)
+    api.warm_engine_when_up(10.0)                      # asked twice while waiting: one waiter
+    api._WARM_WAITER["thread"].join(10)
+    assert warmed == [1] and looks["n"] == 3
+
+    # a job took the engine while it loaded: nothing is sent (that job's end asks again)
+    looks["n"] = 0
+    monkeypatch.setattr(api, "_engine_busy", lambda: "a pipeline is using the GPU")
+    api.warm_engine_when_up(10.0)
+    api._WARM_WAITER["thread"].join(10)
+    assert warmed == [1] and looks["n"] == 0

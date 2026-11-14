@@ -816,10 +816,12 @@ autoprompt:
 #   bash scripts/serve_semantic.sh [backend]
 semantic:
   enabled: true
-  chat_on_demand: true         # USER 2026-11-12 ("baja al chat, no se usa" / "el chat debe cargar a demanda en esta
-                               # instancia, si no lo usamos debe estar abajo"): the chat's vLLM is NOT reloaded after a
-                               # stage, a pipeline or the server's start (USER 2026-08-28's "always available" undone) —
-                               # it loads when the chat is opened or asked. false = reloaded whenever the GPU frees
+  chat_on_demand: false        # USER 2026-11-14 ("tanto el motor de voz y habla del sistema como el chat vlm deberan
+                               # iniciar cuando levante el backend porque son el core del funcionamiento de stac
+                               # build"): the chat's engine STARTS WITH THE BACKEND, is warmed there (its first call)
+                               # and comes back whenever the GPU frees (after a stage, a pipeline). true = it loads
+                               # when the chat is opened or asked (USER 2026-11-12 "si no lo usamos debe estar abajo",
+                               # undone by the above). The voice engines follow voice.start_with_backend
 
   service:
     host: "127.0.0.1"

@@ -197,6 +197,37 @@ def warm_engine(backend: str = "qwen_local") -> None:
     threading.Thread(target=_call, name="chat-engine-warmup", daemon=True).start()
 
 
+_WARM_WAITER: dict = {"thread": None}
+_WARM_POLL_S = 3.0                       # between two looks at an engine that is loading
+
+
+def warm_engine_when_up(timeout_s: float) -> None:
+    """The backend just asked for the chat's engine (its start, the end of a pipeline): wait for it
+    in ONE thread, bounded, and send its warm-up call when it answers. Ends without it when a job
+    takes the engine meanwhile (that job's end asks again)."""
+    with _WARM_LOCK:
+        t = _WARM_WAITER["thread"]
+        if t is not None and t.is_alive():
+            return
+
+        def _wait():
+            import time as _time
+            from semantic.service import is_alive
+            deadline = _time.time() + float(timeout_s)
+            while _time.time() < deadline:
+                if _engine_busy():
+                    return
+                if is_alive():
+                    warm_engine()
+                    return
+                _time.sleep(_WARM_POLL_S)
+            print(f"[Chat] the engine did not answer within {timeout_s:.0f} s — not warmed")
+
+        t = threading.Thread(target=_wait, name="chat-engine-warm-when-up", daemon=True)
+        _WARM_WAITER["thread"] = t
+        t.start()
+
+
 @router.get("/semantic/status")
 async def semantic_status(warmup: bool = False):
     """State of the Qwen3-VL service, so the chat can say "loading…" the moment it
