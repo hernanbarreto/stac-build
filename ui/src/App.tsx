@@ -788,17 +788,14 @@ function App() {
                 : s.meta?.method === 'poisson_scene' ? ' Poisson — whole scene'
                 : s.folder === 'scene' ? ' Whole scene' : s.folder),
           folder: s.folder,
-          // Scene meshes start visible (auto-loaded). Per-instance meshes are
-          // lazy: every refresh follows a viewer reset (reloadTsdf / session
-          // load) that dropped them back to not-loaded, so their checkbox
-          // always resets to unchecked — checking it triggers the on-demand
-          // download in the Viewport (setTsdfVisibility).
-          // A per-instance mesh that is NEW in a refresh that keeps visibility (tsdf_ready, the
-          // refresh button) was just loaded into the scene by the Viewport (addNewTsdfEntries)
-          // and shows checked (USER 2026-10-15).
-          visible: typeof s.meta?.instance_id === 'number'
-            ? (resetVisibility ? false : (prevVis.get(s.folder) ?? true))
-            : (prevVis.get(s.folder) ?? true),
+          // EVERY mesh starts hidden and not loaded (USER 2026-11-13: the GenRecon meshes off when a
+          // session opens, so it opens fast): a refresh that resets visibility follows a viewer reset
+          // (reloadTsdf / session load) that left them all pending, so every checkbox is unchecked —
+          // checking it triggers the on-demand load in the Viewport (setTsdfVisibility).
+          // A mesh that is NEW in a refresh that keeps visibility (tsdf_ready, the refresh button)
+          // was just loaded into the scene by the Viewport (addNewTsdfEntries) and shows checked
+          // (USER 2026-10-15).
+          visible: resetVisibility ? false : (prevVis.get(s.folder) ?? true),
         }))
       })
     } catch { /* ignore */ }
@@ -2250,7 +2247,7 @@ function App() {
             onStatusMessage={setStatusMessage}
             onSegments={list => { setSegments(list); refreshUnsegmentedCount(activeSession) }}
             onEraseLedger={() => reloadSegments(activeSession)}
-            onTsdfReady={sid => { refreshTsdfMeshList(sid, false) }}
+            onTsdfReady={(sid, stage) => { refreshTsdfMeshList(sid, stage === 'session-open') }}
             onSceneObjectsChanged={setPlacedObjects}
             onSceneObjectSelected={id => { setSceneObjSel(id); setAlignTarget(''); setAlignTargets(id != null ? (viewportRef.current?.getSceneAlignTargets() || []) : []) }}
             onPipelineProgress={handlePipelineProgress}

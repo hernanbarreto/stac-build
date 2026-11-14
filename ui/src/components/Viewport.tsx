@@ -2223,31 +2223,14 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         parentGroup.add(group)
         tsdfGroupRef.current = group
 
-        // Lazy split: only whole-scene meshes (no instance_id — scene /
-        // scene_poisson) download at session open. Eagerly pulling every
-        // per-instance GLB blew up big sessions (test2: 40 GLBs ≈ 230 MB on
-        // top of the point cloud  renderer OOM). Instance meshes wait in
-        // tsdfPendingRef until setTsdfVisibility(folder, true) requests them.
-        const eager: TsdfListEntry[] = []
-        for (const sh of meshes) {
-            if (typeof sh.meta?.instance_id === 'number') tsdfPendingRef.current.set(sh.folder, sh)
-            else eager.push(sh)
-        }
-
-        let loaded = 0
-        for (const sh of eager) {
-            if (gen !== tsdfLoadGenRef.current) return
-            try {
-                if (await loadTsdfMeshEntry(sh)) loaded += 1
-            } catch (e) {
-                console.warn(`[Viewport] failed to load TSDF mesh ${sh.glb_url}`, e)
-            }
-        }
-        if (onStatusMessage && loaded > 0) {
-            const pending = tsdfPendingRef.current.size
-            onStatusMessage(tt('vp.loadedSceneMeshes', { n: loaded, pending }))
-        }
-    }, [clearAllTsdf, loadTsdfMeshEntry, onStatusMessage])
+        // NOTHING downloads at session open (USER 2026-11-13: "al abrir las sesiones por defecto aparezcan las
+        // mallas genrecon apagadas para que abra rapido la sesion"): every mesh — the scene's GenRecon tiles
+        // and the per-instance GLBs alike — waits in tsdfPendingRef, unchecked in the list, until
+        // setTsdfVisibility(folder, true) asks for it. (Before: the whole-scene meshes loaded eagerly and
+        // only the per-instance ones were lazy.)
+        for (const sh of meshes) tsdfPendingRef.current.set(sh.folder, sh)
+        if (onStatusMessage) onStatusMessage(tt('vp.meshesAvailable', { n: meshes.length }))
+    }, [clearAllTsdf, onStatusMessage])
 
     // ── INCREMENTAL mesh refresh (USER 2026-10-15: a GLB from any method must appear in the
     // list and the scene without unloading the session): list again and add only the folders
@@ -2269,7 +2252,24 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const addNewTsdfEntries = useCallback(async (sessionId: string): Promise<number> => {
         const parent = potreeLoaderRef.current?.getOctreeGroup() || sceneRef.current
         if (!parent) return 0
-        if (!tsdfGroupRef.current) { await loadTsdfIntoGroup(sessionId, parent); return tsdfPendingRef.current.size }
+        if (!tsdfGroupRef.current) {
+            // the session's FIRST mesh appeared while it is open: the full loader lists it (pending, as at
+            // session open) and it loads at once — it is what the user is waiting for
+            await loadTsdfIntoGroup(sessionId, parent)
+            const fresh = [...tsdfPendingRef.current.values()]
+            for (const sh of fresh) {
+                tsdfLoadingRef.current.add(sh.folder)
+                try {
+                    const g = await loadTsdfMeshEntry(sh)
+                    if (g) {
+                        tsdfPendingRef.current.delete(sh.folder)
+                        if (wireframeRef.current.has(`tsdf-${sh.folder}`)) applyWireframe(g, true)
+                    }
+                } catch (e) { console.warn(`[Viewport] failed to load TSDF mesh ${sh.glb_url}`, e) }
+                finally { tsdfLoadingRef.current.delete(sh.folder) }
+            }
+            return fresh.length
+        }
         let res: Response
         try { res = await fetch(`/api/segmentation/tsdf/list/${sessionId}`) } catch { return 0 }
         if (!res.ok) return 0
@@ -5077,7 +5077,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const sessionIdForShapes = msg.session_id as string | undefined
                 const octreeGroupForShapes = loader.getOctreeGroup()
                 if (sessionIdForShapes && octreeGroupForShapes) {
+                    // the scan's meshes are LISTED here (none loaded: all wait, unchecked); the app's list follows
+                    // every (re)load of a cloud — a scan change included — with every box unchecked
                     loadTsdfIntoGroup(sessionIdForShapes, octreeGroupForShapes)
+                        .then(() => onTsdfReadyRef.current?.(sessionIdForShapes, 'session-open'))
+                        .catch(() => { /* the list keeps what it had */ })
                     const preloadedScene = msg.scene as { elements?: Array<any> } | undefined
                     loadReconSceneIntoGroup(sessionIdForShapes, octreeGroupForShapes, preloadedScene)
                 }
