@@ -2447,7 +2447,7 @@ function App() {
                   {sabanaFullMeta && activeSession && <BIMAnalysisPanel meta={sabanaFullMeta} sessionId={activeSession} />}
                 </div>
               ),
-              assistant: <AssistantPanel sessionId={activeSession} viewport={viewportRef} onVlmStatus={setVlmStatus} onFocusObjects={focusSegments} onVolumesChanged={refreshVolumes} onViewerAction={runViewerAction} />,
+              assistant: <AssistantPanel sessionId={activeSession} scanKey={activeScanTab} viewport={viewportRef} onVlmStatus={setVlmStatus} onFocusObjects={focusSegments} onVolumesChanged={refreshVolumes} onViewerAction={runViewerAction} />,
             }} />
         )}
       </div>

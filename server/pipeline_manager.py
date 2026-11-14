@@ -589,6 +589,19 @@ class PipelineManager:
             logger.warning(f"[Pipeline] the engine lease could not be released: {e}")
             return False
 
+    @staticmethod
+    def _stop_chat_tools(reason: str) -> None:
+        """End the chat's tools process (it holds a CUDA context: a compute process on the card
+        every exclusive-GPU check would refuse). A stop that cannot be verified is an ERROR in
+        the log — the stage's own check of the card then says who is on it."""
+        try:
+            from phase5_qa import tools_worker
+            if not tools_worker.stop(reason, log=lambda m: logger.info(m)):
+                logger.error("[Pipeline] the chat's tools process did not end — the next GPU "
+                             "step will find it on the card")
+        except Exception as e:  # noqa: BLE001 — declared, never fatal for the job
+            logger.warning(f"[Pipeline] the chat's tools process could not be stopped: {e}")
+
     async def _take_job_lease(self, job: "PipelineJob", on_progress: Optional[ProgressCallback]
                               ) -> None:
         """Take the job's permit — WAITING while a GPU task of the server itself holds it
@@ -611,6 +624,11 @@ class PipelineManager:
                 if said is not None:
                     logger.info(f"[Pipeline] {job.session_id}: the GPU permit is free again after "
                                 f"{time.time() - said:.0f} s — the job starts")
+                # the card is this job's from here: the chat's tools process (its measurements
+                # on the GPU, phase5_qa.tools_worker) ends NOW — verified — and cannot start
+                # again while the lease is held
+                await asyncio.get_running_loop().run_in_executor(
+                    None, self._stop_chat_tools, f"job {job.session_id} took the GPU")
                 return
             except EngineBusy:
                 holder = engine_lease_holder()

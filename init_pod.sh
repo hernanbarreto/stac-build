@@ -62,10 +62,25 @@ else
     echo "⏭  Electron desktop skipped (START_ELECTRON=0)."
 fi
 
-# 3b. SEMANTIC SERVICE (Phase 0 — persistent vLLM/Qwen3-VL endpoint shared by
-#     every pipeline consumer). Flag: set START_SEMANTIC=0 to skip (e.g. when the
-#     GPU is fully needed by a heavy reconstruction run — see convivencia notes).
-START_SEMANTIC="${START_SEMANTIC:-1}"
+# 3b. SEMANTIC SERVICE (vLLM / Qwen3-VL, the chat's engine). CHAT ON DEMAND (USER 2026-11-12:
+#     "el chat debe cargar a demanda en esta instancia, si no lo usamos debe estar abajo"): with
+#     config.yaml semantic.chat_on_demand: true it is NOT started at boot — it loads when the chat
+#     is opened or asked (until 2026-11-13 this script started it anyway and it held ~42 GB of the
+#     card from the pod's start). START_SEMANTIC=1 forces the start, START_SEMANTIC=0 skips it;
+#     unset = what the configuration says.
+if [ -z "${START_SEMANTIC:-}" ]; then
+    START_SEMANTIC="$(/workspace/miniforge3/envs/da3/bin/python - <<'PY'
+import sys
+import yaml
+sem = (yaml.safe_load(open("/workspace/stac-build/server/config.yaml")) or {}).get("semantic") or {}
+on_demand = sem.get("chat_on_demand")
+if not isinstance(on_demand, bool):
+    sys.exit("config.yaml: semantic.chat_on_demand is missing or not true / false")
+print("0" if on_demand else "1")
+PY
+)" || { echo "❌ init_pod: semantic.chat_on_demand could not be read from config.yaml"; START_SEMANTIC=0; }
+    [ "$START_SEMANTIC" = "0" ] && echo "🧠 Chat on demand (semantic.chat_on_demand: true): vLLM is not started at boot."
+fi
 if [ "$START_SEMANTIC" = "1" ]; then
     tmux new-session -d -s semantic
     tmux send-keys -t semantic "$CONDA && $ENV && cd /workspace/stac-build && bash scripts/serve_semantic.sh" Enter

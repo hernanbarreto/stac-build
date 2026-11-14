@@ -928,6 +928,7 @@
     "thinking": "pensando",
     "noAnswer": "(sin respuesta)",
     "couldNotAnswer": "No se pudo responder: {detail}",
+    "unverified": "Sin medición de herramienta en esta respuesta: {items}. Tomalo como no verificado.",
     "placeholder": "Preguntá sobre la escena",
     "send": "Enviar",
     "volumes": "Volúmenes de evaluación",

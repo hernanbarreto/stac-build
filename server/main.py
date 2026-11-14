@@ -876,6 +876,13 @@ def _take_gpu_permit(task: str, session_id: str, token: str) -> dict:
     except EngineBusy as e:
         raise _gpu_permit_refusal(task, e) from e
     print(f"[gpu] permit taken: {task} (session {session_id}, token {token})")
+    # the card is this task's: the chat's tools process (phase5_qa.tools_worker — the chat's
+    # measurements on the GPU) ends now and is not started again while the permit is held
+    try:
+        from phase5_qa import tools_worker as _chat_tools
+        _chat_tools.stop(f"server GPU task {task} took the GPU")
+    except Exception as _e:  # noqa: BLE001 — declared, never fatal for the task
+        print(f"[gpu] the chat's tools process could not be stopped: {_e}")
     return doc
 
 
@@ -1286,6 +1293,12 @@ async def lifespan(app: FastAPI):
     if _ACTIVE_WORKERS:
         print(f"[Server] shutdown — killing {len(_ACTIVE_WORKERS)} active worker(s)")
         _kill_active_workers("server shutdown")
+    # the chat's tools process too (PR_SET_PDEATHSIG covers a hard death)
+    try:
+        from phase5_qa import tools_worker as _chat_tools
+        _chat_tools.stop("server shutdown")
+    except Exception as _e:  # noqa: BLE001
+        print(f"[Server] shutdown — the chat's tools process stop failed: {_e}")
     # vLLM too (USER 2026-10-06: "todo lo que haya debe morir" — the VLM included; a hard
     # death is covered by semantic/watchdog.py on the backend's pid)
     try:

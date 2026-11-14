@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -70,12 +71,114 @@ def _closest_point_on_obb(point: np.ndarray, T: np.ndarray, aabb: np.ndarray) ->
     return (T @ np.append(clipped, 1.0))[:3]
 
 
+_CHAT_CONFIG_CACHE: dict[str, Any] = {}
+_DEVICE_OVERRIDE: str | None = None
+
+
+def use_device(dev: str | None) -> str | None:
+    """Set the device of every tool set built without one (None = back to
+    ``semantic.chat.tools_device``); returns the previous override. tests/conftest.py runs
+    the suite on 'cpu'."""
+    global _DEVICE_OVERRIDE
+    prev = _DEVICE_OVERRIDE
+    if dev is not None:
+        from . import tools_torch as _tt
+        dev = _tt.resolve_device(dev)
+    _DEVICE_OVERRIDE = dev
+    return prev
+
+
+def effective_device() -> str:
+    """The device the chat's point tools run on: the override, else the configured key."""
+    return _DEVICE_OVERRIDE if _DEVICE_OVERRIDE is not None else chat_config()["tools_device"]
+
+
+def chat_config() -> dict[str, Any]:
+    """``semantic.chat`` of config.yaml, typed: ``list_limit`` (the objects a listing names one
+    by one; beyond it the listing is by label, with counts and id ranges), ``history_turns``
+    (the earlier turns of the conversation a question carries) and ``tools_device`` (numpy |
+    cpu | cuda — where the measurements over the points run, tools_torch). A missing key fails
+    naming it."""
+    from semantic import semantic_config as _sc
+    # read once per config.yaml on disk (its mtime): the file is 4,700 lines of YAML and a
+    # question's tools ask for these keys several times
+    path = getattr(_sc, "_CONFIG_PATH", None)
+    try:
+        stamp = (str(path), path.stat().st_mtime_ns) if path is not None else None
+    except OSError:
+        stamp = None
+    if stamp is not None and _CHAT_CONFIG_CACHE.get("stamp") == stamp:
+        return dict(_CHAT_CONFIG_CACHE["value"])
+    chat = (_sc.load_semantic_config() or {}).get("chat")
+    if not isinstance(chat, dict):
+        raise RuntimeError("config.yaml: semantic.chat is missing")
+    out = {}
+    for k, lo in (("list_limit", 1), ("history_turns", 0)):
+        v = chat.get(k)
+        if isinstance(v, bool) or not isinstance(v, int) or v < lo:
+            raise RuntimeError(f"config.yaml: semantic.chat.{k} is missing or not an integer >= {lo}")
+        out[k] = v
+    from . import tools_torch as _tt
+    dev = chat.get("tools_device")
+    if not isinstance(dev, str) or dev not in _tt.DEVICES:
+        raise RuntimeError(f"config.yaml: {_tt.KEY} is missing or not one of {list(_tt.DEVICES)}")
+    out["tools_device"] = dev
+    if stamp is not None:
+        _CHAT_CONFIG_CACHE.update(stamp=stamp, value=dict(out))
+    return out
+
+
+def norm_label(text: Any) -> str:
+    """A label as it is compared: lower case, '_' and '-' as spaces, single spaces — the list
+    writes fire_extinguisher, a person writes "fire extinguisher"."""
+    return " ".join(str(text or "").lower().replace("_", " ").replace("-", " ").split())
+
+
+def id_ranges(ids) -> str:
+    """Sorted ids as ranges: [2, 3, 4, 9] -> '2-4, 9'."""
+    v = sorted({int(i) for i in ids})
+    out, k = [], 0
+    while k < len(v):
+        j = k
+        while j + 1 < len(v) and v[j + 1] == v[j] + 1:
+            j += 1
+        out.append(str(v[k]) if j == k else f"{v[k]}-{v[j]}")
+        k = j + 1
+    return ", ".join(out)
+
+
+# label#id as the Instances list writes it (sign#797, fire_extinguisher#425), a bare #797,
+# or "id 797" / "id=797"
+_REF_LABELLED = re.compile(r"([A-Za-zÀ-ÿ][\w\-]*)\s*#\s*(\d+)")
+_REF_BARE = re.compile(r"(?:#\s*|\bids?\s*[=:]?\s*)(\d+)", re.IGNORECASE)
+
+
+# the tools that read an object's POINTS (everything else is a lookup in the store): with
+# semantic.chat.tools_device = cuda they run in the chat's own tools process
+# (phase5_qa.tools_worker) — the backend never touches the card
+POINT_TOOLS = frozenset({
+    "get_clearance", "measure_between", "get_extent", "fits_through", "get_plumb", "get_level",
+    "get_height_profile", "get_flatness_report", "define_volume", "measure_volume",
+    "evaluate_volume", "objects_in_volume", "fits_in_volume"})
+
+
 class SpatialTools:
     """Bound to one scene's InstanceStore. Methods are the tool implementations;
     `openai_schemas()` returns the tool-calling specs for the orchestrator.
-    All geometry is served in the DISPLAY frame (see module docstring)."""
+    All geometry is served in the DISPLAY frame (see module docstring).
 
-    def __init__(self, store: InstanceStore, display_transform: np.ndarray | None = None):
+    ``device``: numpy (the path of record) | cpu | cuda — where the measurements over the
+    points run (tools_torch); None = ``semantic.chat.tools_device``."""
+
+    def __init__(self, store: InstanceStore, display_transform: np.ndarray | None = None,
+                 device: str | None = None):
+        from . import tools_torch as _tt
+        self._tt = _tt
+        self._dev = _tt.resolve_device(device if device is not None else effective_device())
+        self._tpts_cache: dict[int, Any] = {}
+        self._band_cache: dict[int, dict] = {}
+        self._pooled = None
+        self._pooled_t = None
         self.store = store
         if display_transform is None:
             # Stores built by segmentation/pipeline.py are ALREADY in the
@@ -96,6 +199,7 @@ class SpatialTools:
         self._s = (float(np.cbrt(abs(np.linalg.det(self._M[:3, :3]))))
                    if self._M is not None else 1.0)
         self._pts_cache: dict[int, np.ndarray | None] = {}
+        self._inst_cache: dict[int, dict] | None = None
 
     # ── frame helpers ────────────────────────────────────────────────
     def _to_display(self, pts: np.ndarray) -> np.ndarray:
@@ -107,7 +211,12 @@ class SpatialTools:
     def _obb(self, iid: int, window_id: str = "global"):
         """(T, aabb, pos) in the DISPLAY frame (rigid T, extents ×s)."""
         obb = self.store.get_obb(iid, window_id)
-        if obb is None or self._M is None:
+        if obb is None:
+            return None
+        # float64 like the points (2026-11-13): the store's float32 values, promoted, so the
+        # box's inverse and every coordinate in it are computed once, the same on both paths
+        obb = tuple(np.asarray(v, np.float64) for v in obb)
+        if self._M is None:
             return obb
         T, aabb, _pos = obb
         R_m = self._M[:3, :3] / self._s
@@ -116,18 +225,131 @@ class SpatialTools:
         T2[:3, 3] = self._to_display(T2[:3, 3][None])[0]
         return T2, np.asarray(aabb, float) * self._s, T2[:3, 3]
 
+    def all_obbs(self, window_id: str = "global") -> dict[int, tuple]:
+        """Every object's (T, aabb, pos) in the DISPLAY frame from ONE query — the same
+        values as ``_obb`` object by object."""
+        raw = {iid: tuple(np.asarray(v, np.float64) for v in obb)
+               for iid, obb in self.store.list_obbs(window_id).items()}
+        if self._M is None:
+            return raw
+        R_m = self._M[:3, :3] / self._s
+        out = {}
+        for iid, (T, aabb, _pos) in raw.items():
+            T2 = np.asarray(T, float).copy()
+            T2[:3, :3] = R_m @ T2[:3, :3]
+            T2[:3, 3] = self._to_display(T2[:3, 3][None])[0]
+            out[iid] = (T2, np.asarray(aabb, float) * self._s, T2[:3, 3])
+        return out
+
     # ── helpers ─────────────────────────────────────────────────────
+    def _instances(self) -> dict[int, dict]:
+        """The store's instances by id, read ONCE per tool set (a question's tools named
+        list_instances dozens of times; nothing in the chat adds or removes an instance)."""
+        if self._inst_cache is None:
+            self._inst_cache = {int(i["instance_id"]): i for i in self.store.list_instances()}
+        return self._inst_cache
+
     def _instance(self, iid: int) -> dict | None:
-        for i in self.store.list_instances():
-            if i["instance_id"] == iid:
-                return i
-        return None
+        try:
+            return self._instances().get(int(iid))
+        except (TypeError, ValueError):
+            return None
+
+    def _match_label(self, label: str | None) -> list[dict]:
+        """The instances a label asks for: the normalised text inside the normalised label
+        (fire extinguisher = fire_extinguisher), and when nothing matches a plural, its
+        singular (signs -> sign)."""
+        insts = list(self._instances().values())
+        want = norm_label(label)
+        if not want:
+            return insts
+        hit = [i for i in insts if want in norm_label(i["label"])]
+        if not hit:
+            for suffix in ("es", "s"):
+                if want.endswith(suffix) and len(want) > len(suffix) + 1:
+                    hit = [i for i in insts if want[:-len(suffix)] in norm_label(i["label"])]
+                    if hit:
+                        break
+        return hit
+
+    def labels_summary(self, insts: list[dict] | None = None) -> list[dict]:
+        """Every label with its count and its ids as ranges, the most numerous first."""
+        by: dict[str, list[int]] = {}
+        for i in (insts if insts is not None else self._instances().values()):
+            by.setdefault(i["label"], []).append(int(i["instance_id"]))
+        n_pts = self.store.list_point_counts()
+        out = []
+        for lab, ids in sorted(by.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+            row = {"label": lab, "count": len(ids), "ids": id_ranges(ids)}
+            if len(ids) > 1:
+                # the label's largest object (most points; the lowest id among equals): "the
+                # floor", "the ceiling" of a scene with several is this one
+                row["largest_id"] = min(ids, key=lambda k: (-n_pts.get(k, 0), k))
+            out.append(row)
+        return out
+
+    def resolve_references(self, text: str) -> list[dict]:
+        """The objects a question names by id — ``sign#797``, ``#797``, ``id 797`` — looked up
+        in THIS scan's store, deterministically, before the model reads the question: each
+        with whether it exists, its label, and whether the label written beside it is its own."""
+        refs: dict[int, str | None] = {}
+        for m in _REF_LABELLED.finditer(text or ""):
+            refs.setdefault(int(m.group(2)), m.group(1))
+        for m in _REF_BARE.finditer(text or ""):
+            refs.setdefault(int(m.group(1)), None)
+        out = []
+        for iid, said in refs.items():
+            inst = self._instance(iid)
+            entry: dict[str, Any] = {"id": iid, "exists": inst is not None}
+            if inst is None:
+                same = self._match_label(said) if said else []
+                if same:
+                    entry["label_asked"] = said
+                    entry["ids_with_that_label"] = id_ranges(i["instance_id"] for i in same)
+            else:
+                entry["label"] = inst["label"]
+                if said and norm_label(said) not in norm_label(inst["label"]) \
+                        and norm_label(inst["label"]) not in norm_label(said):
+                    entry["label_asked"] = said
+                obb = self._obb(iid)
+                if obb is not None:
+                    _T, aabb, pos = obb
+                    entry["position_m"] = [round(float(v), 3) for v in pos]
+                    entry["size_m"] = [round(float(aabb[1] - aabb[0]), 3),
+                                       round(float(aabb[3] - aabb[2]), 3),
+                                       round(float(aabb[5] - aabb[4]), 3)]
+            out.append(entry)
+        return out
 
     def _points(self, iid: int) -> np.ndarray | None:
+        """An object's points in the display frame, FLOAT64. The store keeps float32; until
+        2026-11-13 a display-frame store was measured in float32 arithmetic. The same values
+        are now promoted first, so the numpy path and the device path (float64, the GPU ports'
+        rule) agree to 1e-9 — a figure can differ from before in its last printed digit."""
         if iid not in self._pts_cache:
             pts = self.store.get_points(iid)
-            self._pts_cache[iid] = self._to_display(pts) if pts is not None else None
+            self._pts_cache[iid] = (np.asarray(self._to_display(pts), np.float64)
+                                    if pts is not None else None)
         return self._pts_cache[iid]
+
+    def _tp(self, iid: int):
+        """The object's points on the device (float64), kept for the life of this tool set."""
+        if iid not in self._tpts_cache:
+            self._tpts_cache[iid] = self._tt.tensor(self._points(iid), self._dev)
+        return self._tpts_cache[iid]
+
+    def _bands(self, iid: int) -> dict:
+        if iid not in self._band_cache:
+            self._band_cache[iid] = self._tt.band_stats(self._tp(iid))
+        return self._band_cache[iid]
+
+    def release(self) -> None:
+        """Drop what this tool set holds on the device and hand the cached blocks back."""
+        self._tpts_cache.clear()
+        self._band_cache.clear()
+        self._pooled_t = None
+        if self._dev != "numpy":
+            self._tt.release(self._dev)
 
     def _density_confidence(self, iid: int) -> float:
         pts = self._points(iid)
@@ -141,15 +363,24 @@ class SpatialTools:
 
     # ── discovery (R3D) ─────────────────────────────────────────────
     def list_objects(self, label: str | None = None) -> dict:
-        """List tracked objects (id + class + Phase 2 enrichment), optionally
-        filtered by class/label substring."""
-        insts = self.store.list_instances()
-        if label:
-            insts = [i for i in insts if label.lower() in i["label"].lower()]
+        """List tracked objects (id + class + Phase 2 enrichment), optionally filtered by
+        label. Up to ``semantic.chat.list_limit`` objects are named one by one; beyond it the
+        answer is BY LABEL — each label's count and its ids as ranges — so a scene of
+        thousands of objects still answers whole (pccr 2408's 8,777 objects were 486 kB of
+        JSON: more than the model's context, the question failed with HTTP 400)."""
+        insts = self._match_label(label)
+        limit = chat_config()["list_limit"]
+        if len(insts) > limit:
+            return {"count": len(insts), "listed": "by_label", "labels": self.labels_summary(insts),
+                    "note": f"more than {limit} objects: listed by label with id ranges — "
+                            f"filter with a label, or use the ids directly"}
+        cls = self.store.list_classifications()
+        n_pts = self.store.list_point_counts()
         out = []
         for i in insts:
-            entry = {"id": i["instance_id"], "label": i["label"], "status": i["status"]}
-            c = self.store.get_classification(i["instance_id"])
+            entry = {"id": i["instance_id"], "label": i["label"], "status": i["status"],
+                     "points": n_pts.get(int(i["instance_id"]), 0)}
+            c = cls.get(int(i["instance_id"]))
             if c:
                 entry["class"] = c["class_final"]
                 if c.get("material"):
@@ -157,11 +388,37 @@ class SpatialTools:
                 if c.get("state"):
                     entry["state"] = c["state"]
             out.append(entry)
-        return {"objects": out}
+        return {"count": len(out), "objects": out}
 
     def count_objects(self, label: str | None = None) -> dict:
-        """Count objects, optionally of a given class."""
-        return {"count": len(self.list_objects(label)["objects"]), "unit": "count"}
+        """Count objects of a label; with no label, the total AND the count of every label."""
+        insts = self._match_label(label)
+        res: dict[str, Any] = {"count": len(insts), "unit": "count"}
+        if not norm_label(label):
+            res["by_label"] = {r["label"]: r["count"] for r in self.labels_summary(insts)}
+        else:
+            res["label"] = label
+            res["matched_labels"] = sorted({i["label"] for i in insts})
+        return res
+
+    def get_object(self, id: int) -> dict:
+        """One object in one call: label, position, size and vertical extent."""
+        inst = self._instance(id)
+        if inst is None:
+            return _insufficient(f"no object with id {id} in this scan")
+        res: dict[str, Any] = {"id": int(inst["instance_id"]), "label": inst["label"],
+                               "status": inst["status"]}
+        obb = self._obb(int(inst["instance_id"]))
+        if obb is not None:
+            _T, aabb, pos = obb
+            res["position_m"] = [round(float(v), 4) for v in pos]
+            res["size_m"] = {"width": round(float(aabb[1] - aabb[0]), 4),
+                             "height": round(float(aabb[3] - aabb[2]), 4),
+                             "depth": round(float(aabb[5] - aabb[4]), 4)}
+        res["confidence"] = self._density_confidence(int(inst["instance_id"]))
+        res["unit"] = "m"
+        res["source"] = "tool_measured"
+        return res
 
     # ── position / size / volume (R3D) ──────────────────────────────
     def get_position(self, id: int) -> dict:
@@ -253,13 +510,17 @@ class SpatialTools:
         p1, p2 = self._points(id1), self._points(id2)
         if p1 is None or p2 is None or len(p1) < 30 or len(p2) < 30:
             return _insufficient("insufficient points for a reliable clearance")
-        from scipy.spatial import cKDTree
-        tree = cKDTree(p2)
-        dists, idx = tree.query(p1, k=1)
-        j = int(np.argmin(dists))
-        return {"clearance_m": round(float(dists[j]), 4), "unit": "m",
+        if self._dev == "numpy":
+            from scipy.spatial import cKDTree
+            tree = cKDTree(p2)
+            dists, idx = tree.query(p1, k=1)
+            j = int(np.argmin(dists))
+            dist, i2 = float(dists[j]), int(idx[j])
+        else:
+            dist, j, i2 = self._tt.closest_pair(self._tp(id1), self._tp(id2))
+        return {"clearance_m": round(float(dist), 4), "unit": "m",
                 "point_a_m": [round(float(v), 4) for v in p1[j]],
-                "point_b_m": [round(float(v), 4) for v in p2[idx[j]]],
+                "point_b_m": [round(float(v), 4) for v in p2[i2]],
                 "confidence": min(self._density_confidence(id1), self._density_confidence(id2)),
                 "source": "tool_measured"}
 
@@ -269,7 +530,12 @@ class SpatialTools:
         composite shapes — a curved ceiling has a lower AND an upper part, a
         ladder a base and a top; bands of the actual points capture them)."""
         pts = self._points(iid)
-        if pts is not None and len(pts) >= 30:
+        if pts is not None and len(pts) >= 30 and self._dev != "numpy":
+            st = self._bands(iid)
+            name = {"upper": "top", "base": "bottom", "lower": "bottom"}.get(feature, feature)
+            if name in ("top", "bottom", "highest", "lowest", "centroid"):
+                return st[name]
+        elif pts is not None and len(pts) >= 30:
             y = pts[:, 1]
             y_min, y_max = float(y.min()), float(y.max())
             band = max(0.05, 0.05 * (y_max - y_min))
@@ -339,11 +605,15 @@ class SpatialTools:
         pts = self._points(id)
         if pts is None or len(pts) < 30:
             return _insufficient("insufficient points for an extent")
-        mn, mx = pts.min(0), pts.max(0)
-        y = pts[:, 1]
-        band = max(0.05, 0.05 * float(mx[1] - mn[1]))
-        low_c = pts[y <= mn[1] + band].mean(0)
-        high_c = pts[y >= mx[1] - band].mean(0)
+        if self._dev == "numpy":
+            mn, mx = pts.min(0), pts.max(0)
+            y = pts[:, 1]
+            band = max(0.05, 0.05 * float(mx[1] - mn[1]))
+            low_c = pts[y <= mn[1] + band].mean(0)
+            high_c = pts[y >= mx[1] - band].mean(0)
+        else:
+            st = self._bands(id)
+            mn, mx, low_c, high_c = st["min"], st["max"], st["bottom"], st["top"]
         return {"min_m": [round(float(v), 4) for v in mn],
                 "max_m": [round(float(v), 4) for v in mx],
                 "size_m": [round(float(v), 4) for v in (mx - mn)],
@@ -399,8 +669,11 @@ class SpatialTools:
         pts = self._points(id)
         if pts is None or len(pts) < 50:
             return _insufficient("insufficient points for plumb")
-        c = pts.mean(0)
-        u, s, vt = np.linalg.svd(pts - c, full_matrices=False)
+        if self._dev == "numpy":
+            c = pts.mean(0)
+            u, s, vt = np.linalg.svd(pts - c, full_matrices=False)
+        else:
+            c, vt = self._tt.principal_axes(self._tp(id))
         axis = vt[0]
         if axis[1] < 0:
             axis = -axis
@@ -418,8 +691,11 @@ class SpatialTools:
         pts = self._points(id)
         if pts is None or len(pts) < 50:
             return _insufficient("insufficient points for level")
-        c = pts.mean(0)
-        u, s, vt = np.linalg.svd(pts - c, full_matrices=False)
+        if self._dev == "numpy":
+            c = pts.mean(0)
+            u, s, vt = np.linalg.svd(pts - c, full_matrices=False)
+        else:
+            c, vt = self._tt.principal_axes(self._tp(id))
         normal = vt[2]  # smallest-variance direction = plane normal
         if normal[1] < 0:
             normal = -normal
@@ -451,31 +727,46 @@ class SpatialTools:
         if pts is None or len(pts) < 50 or obb is None:
             return _insufficient("insufficient points for a height profile")
         T, aabb, _p = obb
-        ext_x, ext_z = aabb[1] - aabb[0], aabb[5] - aabb[4]
-        axis_i = 0 if ext_x >= ext_z else 2
-        local = obb_local_coords(pts, T)
-        s_lo, s_hi = (aabb[0], aabb[1]) if axis_i == 0 else (aabb[4], aabb[5])
-        span = max(s_hi - s_lo, 1e-9)
-        station_of = np.clip(((local[:, axis_i] - s_lo) / span * n_stations).astype(int),
-                             0, n_stations - 1)
-        floor_pts = self._points(floor_id) if floor_id is not None else None
+        if self._dev == "numpy":
+            ext_x, ext_z = aabb[1] - aabb[0], aabb[5] - aabb[4]
+            axis_i = 0 if ext_x >= ext_z else 2
+            local = obb_local_coords(pts, T)
+            s_lo, s_hi = (aabb[0], aabb[1]) if axis_i == 0 else (aabb[4], aabb[5])
+            span = max(s_hi - s_lo, 1e-9)
+            station_of = np.clip(((local[:, axis_i] - s_lo) / span * n_stations).astype(int),
+                                 0, n_stations - 1)
+            floor_pts = self._points(floor_id) if floor_id is not None else None
+            rows = []                       # per station: (points, y_min, y_max, clearance)
+            for k in range(n_stations):
+                sel = station_of == k
+                if int(sel.sum()) < 10:
+                    rows.append((int(sel.sum()), None, None, None))
+                    continue
+                ys = pts[sel][:, 1]
+                clearance = None
+                if floor_pts is not None and len(floor_pts) >= 30:
+                    # clearance = object's underside minus the floor level below it
+                    xz = pts[sel][:, [0, 2]].mean(0)
+                    near = floor_pts[np.linalg.norm(floor_pts[:, [0, 2]] - xz, axis=1) < max(span / n_stations, 0.5)]
+                    if len(near) >= 10:
+                        clearance = float(ys.min() - float(np.median(near[:, 1])))
+                rows.append((int(sel.sum()), float(ys.min()), float(ys.max()), clearance))
+        else:
+            floor_t = (self._tp(floor_id)
+                       if floor_id is not None and self._points(floor_id) is not None else None)
+            axis_i, s_lo, span, rows = self._tt.height_profile(self._tp(id), T, aabb,
+                                                               n_stations, floor_t)
         stations = []
-        for k in range(n_stations):
-            sel = station_of == k
-            if int(sel.sum()) < 10:
+        for k, (cnt, y_lo, y_hi, clearance) in enumerate(rows):
+            if cnt < 10:
                 stations.append({"station": k, "insufficient_data": True})
                 continue
-            ys = pts[sel][:, 1]
             entry = {"station": k,
                      "position_along_m": round(float(s_lo + (k + 0.5) / n_stations * span), 3),
-                     "y_min_m": round(float(ys.min()), 4),
-                     "y_max_m": round(float(ys.max()), 4)}
-            if floor_pts is not None and len(floor_pts) >= 30:
-                # clearance = object's underside minus the floor level below it
-                xz = pts[sel][:, [0, 2]].mean(0)
-                near = floor_pts[np.linalg.norm(floor_pts[:, [0, 2]] - xz, axis=1) < max(span / n_stations, 0.5)]
-                if len(near) >= 10:
-                    entry["clearance_m"] = round(float(ys.min() - float(np.median(near[:, 1]))), 4)
+                     "y_min_m": round(float(y_lo), 4),
+                     "y_max_m": round(float(y_hi), 4)}
+            if clearance is not None:
+                entry["clearance_m"] = round(float(clearance), 4)
             stations.append(entry)
         valid = [st for st in stations if "y_min_m" in st]
         if not valid:
@@ -517,14 +808,20 @@ class SpatialTools:
         if pts is None or len(pts) < 100:
             return _insufficient("no surface_fit artifact and too few points "
                                  "for a plane-fit flatness estimate")
-        from phase_r.depth_regularization import fit_plane
-        n, d0 = fit_plane(pts)
-        res_mm = np.abs(pts @ n + d0) * 1000.0
+        if self._dev == "numpy":
+            from phase_r.depth_regularization import fit_plane
+            n, d0 = fit_plane(pts)
+            res_mm = np.abs(pts @ n + d0) * 1000.0
+            rms, p95, worst = (float(np.sqrt((res_mm ** 2).mean())),
+                               float(np.percentile(res_mm, 95)), float(res_mm.max()))
+        else:
+            st = self._tt.plane_residuals_mm(self._tp(id))
+            rms, p95, worst = st["rms"], st["p95"], st["max"]
         return {"source": "tool_measured", "backend": "plane_fit_fallback",
-                "rms_mm": round(float(np.sqrt((res_mm ** 2).mean())), 2),
-                "p95_mm": round(float(np.percentile(res_mm, 95)), 2),
-                "max_mm": round(float(res_mm.max()), 2),
-                "flatness_pass": bool(np.percentile(res_mm, 95) <= tolerance_mm),
+                "rms_mm": round(rms, 2),
+                "p95_mm": round(p95, 2),
+                "max_mm": round(worst, 2),
+                "flatness_pass": bool(p95 <= tolerance_mm),
                 "tolerance_mm": tolerance_mm, "unit": "mm",
                 "confidence": self._density_confidence(id),
                 "note": "plane-fit fallback — run surface_fitting for the "
@@ -613,6 +910,31 @@ class SpatialTools:
             self._pooled = (np.vstack(clouds), np.concatenate(owners)) if clouds \
                 else (np.empty((0, 3)), np.empty((0,), np.int64))
         return self._pooled
+
+    def _pool_t(self):
+        """Every instance's points on the device with their owner, from ONE read of the store
+        (float32 as stored, float64 on the device) — the pool of the volume tools, kept for
+        the life of this tool set. MEASURED 2026-11-13: pccr 2026-08-31's 18.6 M points took
+        17.5 s through 1,360 per-instance reads, 0.2 s in one query (warm cache)."""
+        if self._pooled_t is None:
+            torch = self._tt._torch()
+            ids, clouds = [], []
+            for iid, pts in self.store.iter_points():
+                if pts is None or not len(pts):
+                    continue
+                if self._M is not None:                    # a legacy raw-frame store
+                    pts = self._to_display(pts)
+                ids.append(np.full(len(pts), iid, np.int64))
+                clouds.append(pts)
+            if clouds:
+                P = torch.as_tensor(np.concatenate(clouds), device=self._dev).to(torch.float64)
+                owners = torch.as_tensor(np.concatenate(ids), device=self._dev)
+            else:
+                P = torch.zeros((0, 3), dtype=torch.float64, device=self._dev)
+                owners = torch.zeros((0,), dtype=torch.int64, device=self._dev)
+            uid, cnt = self._tt.counts_by_owner(owners)
+            self._pooled_t = (P, owners, {int(a): int(b) for a, b in zip(uid, cnt)})
+        return self._pooled_t
 
     def _resolve_volume(self, center, size, yaw_deg, volume_id):
         """Return (center, size, yaw_deg) from explicit args or a saved volume.
@@ -715,23 +1037,29 @@ class SpatialTools:
         pts = self._points(int(id))
         if pts is None or len(pts) < 30:
             return _insufficient("insufficient points on the object")
-        local = obb_local_coords(pts, T)
-        outside = np.maximum(np.abs(local) - half[None, :], 0.0)
-        d = np.linalg.norm(outside, axis=1)
-        j = int(np.argmin(d))
-        n_inside = int((d <= 1e-9).sum())
+        if self._dev == "numpy":
+            local = obb_local_coords(pts, T)
+            outside = np.maximum(np.abs(local) - half[None, :], 0.0)
+            d = np.linalg.norm(outside, axis=1)
+            j = int(np.argmin(d))
+            n_inside = int((d <= 1e-9).sum())
+            d_j, local_j, centroid = float(d[j]), local[j], pts.mean(0)
+        else:
+            r = self._tt.box_clearance(self._tp(int(id)), T, half)
+            j, n_inside, d_j, local_j, centroid = (r["j"], r["n_inside"], r["distance"],
+                                                   r["local_j"], r["centroid"])
         # nearest object point and its counterpart on the box surface
         p_obj = pts[j]
-        clipped = np.clip(local[j], -half, half)
+        clipped = np.clip(local_j, -half, half)
         p_box = (np.asarray(T)[:3, :3] @ clipped) + np.asarray(T)[:3, 3]
-        dist = abs(float(p_obj[1] - p_box[1])) if axis == "vertical" else float(d[j])
+        dist = abs(float(p_obj[1] - p_box[1])) if axis == "vertical" else d_j
         return {"clearance_m": round(dist, 4), "unit": "m", "axis": axis,
                 "intersects": bool(n_inside > 0),
                 "points_inside": n_inside,
                 "point_a_m": [round(float(v), 4) for v in p_box],
                 "point_b_m": [round(float(v), 4) for v in p_obj],
                 "center_distance_m": round(float(np.linalg.norm(
-                    np.asarray(c, float) - pts.mean(0))), 4),
+                    np.asarray(c, float) - centroid)), 4),
                 "confidence": self._density_confidence(int(id)),
                 "source": "tool_measured"}
 
@@ -747,29 +1075,40 @@ class SpatialTools:
         c, s, yaw = r
         T, half = self._volume_frame(c, s, yaw)
         box_vol = float(np.prod(np.abs(s)))
-        pts, owners = self._all_points()
-        if not len(pts):
-            return _insufficient("no reconstructed points to evaluate the volume")
-        inside = self._inside_mask(pts, T, half)
-        n_in = int(inside.sum())
-        # per-object occupancy
-        objs = []
-        for iid in np.unique(owners[inside]) if n_in else []:
-            cnt = int((owners[inside] == iid).sum())
-            objs.append({"id": int(iid), "label": self._label_of(int(iid)),
-                         "points_inside": cnt})
-        objs.sort(key=lambda o: -o["points_inside"])
-        # voxel occupancy of the box interior
         voxel_m = max(0.02, float(voxel_m))
         n_vox = np.maximum(1, np.floor(np.abs(s) / voxel_m)).astype(int)
         total_vox = int(np.prod(n_vox))
-        occ_frac = 0.0
-        if n_in:
-            local = obb_local_coords(pts[inside], T) + half  # 0..size
-            keys = np.floor(local / voxel_m).astype(np.int64)
-            keys = np.clip(keys, 0, n_vox - 1)
-            occ_vox = len(np.unique(keys, axis=0))
-            occ_frac = min(1.0, occ_vox / total_vox)
+        occ_vox = 0
+        if self._dev == "numpy":
+            pts, owners = self._all_points()
+            if not len(pts):
+                return _insufficient("no reconstructed points to evaluate the volume")
+            inside = self._inside_mask(pts, T, half)
+            n_in = int(inside.sum())
+            # per-object occupancy
+            per_owner = [(int(iid), int((owners[inside] == iid).sum()))
+                         for iid in (np.unique(owners[inside]) if n_in else [])]
+            # voxel occupancy of the box interior
+            if n_in:
+                local = obb_local_coords(pts[inside], T) + half  # 0..size
+                keys = np.floor(local / voxel_m).astype(np.int64)
+                keys = np.clip(keys, 0, n_vox - 1)
+                occ_vox = len(np.unique(keys, axis=0))
+        else:
+            P, owners_t, _totals = self._pool_t()
+            if not int(P.shape[0]):
+                return _insufficient("no reconstructed points to evaluate the volume")
+            inside = self._tt.inside_mask(P, T, half)
+            n_in = int(inside.sum())
+            uid, cnt = self._tt.counts_by_owner(owners_t[inside])
+            per_owner = [(int(a_), int(b_)) for a_, b_ in zip(uid, cnt)]
+            if n_in:
+                occ_vox = self._tt.occupied_voxels(
+                    self._tt.voxel_keys(P[inside], T, half, voxel_m, n_vox), n_vox)
+        objs = [{"id": iid, "label": self._label_of(iid), "points_inside": cnt}
+                for iid, cnt in per_owner]
+        objs.sort(key=lambda o: -o["points_inside"])
+        occ_frac = min(1.0, occ_vox / total_vox) if n_in else 0.0
         free_frac = float(max(0.0, 1.0 - occ_frac))
         return {"volume_id": (int(volume_id) if volume_id is not None else None),
                 "explicit_box": volume_id is None,
@@ -791,16 +1130,27 @@ class SpatialTools:
         c, s, yaw = r
         T, half = self._volume_frame(c, s, yaw)
         out = []
-        for i in self.store.list_instances():
-            pts = self._points(i["instance_id"])
-            if pts is None or not len(pts):
-                continue
-            inside = self._inside_mask(pts, T, half)
-            frac = float(inside.mean())
-            if inside.any():
-                out.append({"id": i["instance_id"], "label": i["label"],
-                            "fraction_inside": round(frac, 3),
-                            "points_inside": int(inside.sum())})
+        if self._dev == "numpy":
+            for i in self.store.list_instances():
+                pts = self._points(i["instance_id"])
+                if pts is None or not len(pts):
+                    continue
+                inside = self._inside_mask(pts, T, half)
+                frac = float(inside.mean())
+                if inside.any():
+                    out.append({"id": i["instance_id"], "label": i["label"],
+                                "fraction_inside": round(frac, 3),
+                                "points_inside": int(inside.sum())})
+        else:
+            P, owners_t, totals = self._pool_t()
+            uid, cnt = self._tt.counts_by_owner(owners_t[self._tt.inside_mask(P, T, half)])
+            n_inside = {int(a_): int(b_) for a_, b_ in zip(uid, cnt)}
+            for i in self.store.list_instances():          # the record's order
+                k = n_inside.get(int(i["instance_id"]))
+                if k:
+                    out.append({"id": i["instance_id"], "label": i["label"],
+                                "fraction_inside": round(k / totals[int(i["instance_id"])], 3),
+                                "points_inside": k})
         out.sort(key=lambda o: -o["fraction_inside"])
         return {"objects": out, "count": len(out), "source": "tool_measured"}
 
@@ -822,24 +1172,34 @@ class SpatialTools:
                     "source": "tool_measured"}
         voxel_m = max(0.02, float(voxel_m))
         n_vox = np.maximum(1, np.floor(np.abs(s) / voxel_m)).astype(int)
-        occ = np.zeros(tuple(n_vox), bool)
-        pts, _o = self._all_points()
-        inside = self._inside_mask(pts, T, half) if len(pts) else np.zeros(0, bool)
-        if inside.any():
-            local = obb_local_coords(pts[inside], T) + half
-            keys = np.clip(np.floor(local / voxel_m).astype(int), 0, n_vox - 1)
-            occ[keys[:, 0], keys[:, 1], keys[:, 2]] = True
-        # integral image for O(1) empty-box tests
-        free = (~occ).astype(np.int64)
-        ii = free.cumsum(0).cumsum(1).cumsum(2)
         need = np.maximum(1, np.ceil(item / voxel_m).astype(int))
-        if np.any(need > n_vox):
-            return {"fits": False, "reason": "item larger than the volume",
-                    "source": "tool_measured"}
-        placement = self._find_empty_box(ii, n_vox, need)
+        if self._dev == "numpy":
+            occ = np.zeros(tuple(n_vox), bool)
+            pts, _o = self._all_points()
+            inside = self._inside_mask(pts, T, half) if len(pts) else np.zeros(0, bool)
+            if inside.any():
+                local = obb_local_coords(pts[inside], T) + half
+                keys = np.clip(np.floor(local / voxel_m).astype(int), 0, n_vox - 1)
+                occ[keys[:, 0], keys[:, 1], keys[:, 2]] = True
+            # integral image for O(1) empty-box tests
+            free = (~occ).astype(np.int64)
+            ii = free.cumsum(0).cumsum(1).cumsum(2)
+            if np.any(need > n_vox):
+                return {"fits": False, "reason": "item larger than the volume",
+                        "source": "tool_measured"}
+            placement = self._find_empty_box(ii, n_vox, need)
+            n_free = int(free.sum())
+        else:
+            if np.any(need > n_vox):
+                return {"fits": False, "reason": "item larger than the volume",
+                        "source": "tool_measured"}
+            P, _owners, _totals = self._pool_t()
+            inside = self._tt.inside_mask(P, T, half)
+            keys = self._tt.voxel_keys(P[inside], T, half, voxel_m, n_vox)
+            placement, n_free = self._tt.free_placement(keys, n_vox, need)
         if placement is None:
             return {"fits": False, "reason": "no free region large enough",
-                    "free_volume_m3": round(float(free.sum()) * voxel_m ** 3, 4),
+                    "free_volume_m3": round(float(n_free) * voxel_m ** 3, 4),
                     "source": "tool_measured"}
         pos_local = (np.asarray(placement) * voxel_m).tolist()
         return {"fits": True, "placement_box_local_m": [round(v, 3) for v in pos_local],
@@ -897,7 +1257,7 @@ class SpatialTools:
         return {"project": project, "session": session_dir.name,
                 "scan_frames": n_frames, "cloud_points": n_cloud,
                 "n_objects": len(insts),
-                "object_labels": [i["label"] for i in insts],
+                "object_labels": {r["label"]: r["count"] for r in self.labels_summary(insts)},
                 "scene_type": self.store.get_meta("scene_type"),
                 "scene_description": self.store.get_meta("scene_description"),
                 "floor_leveled": (out_dir / "floor_transform.npz").exists()
@@ -1010,7 +1370,7 @@ class SpatialTools:
                     "votes": "mv_votes", "mv_votes": "mv_votes", "deviation": "deviation"}
 
     def _known_ids(self, ids) -> tuple[list[int], list]:
-        have = {int(i["instance_id"]) for i in self.store.list_instances()}
+        have = set(self._instances())
         ok, bad = [], []
         for x in (ids if isinstance(ids, (list, tuple)) else [ids]):
             try:
@@ -1152,11 +1512,15 @@ class SpatialTools:
         ]
         return {"method": method, "session": facts, "source": "tool_measured"}
 
-    def impls(self) -> dict:
+    def impls(self, remote=None) -> dict:
         """Tool implementations. Every returned measurement is stamped with
         the session's geometry epoch + human-directed-corrections count
         (USER 2026-09-08: a supervision measurement never hides that the
-        geometry was corrected by a person)."""
+        geometry was corrected by a person).
+
+        ``remote(tool, kwargs)``: when given, the tools that read points (POINT_TOOLS) are
+        run by it — the chat's tools process on the card (tools_worker) — and this tool set
+        only looks things up in the store."""
         from pathlib import Path as _Path
         from correction.epoch import stamp as _stamp_epoch
         _out_dir = _Path(self.store.path).parent
@@ -1170,11 +1534,15 @@ class SpatialTools:
             return _inner
 
         raw = self._impls_raw()
+        if remote is not None:
+            for name in POINT_TOOLS:
+                raw[name] = (lambda _n: (lambda **kw: remote(_n, kw)))(name)
         return {name: _wrap(fn) for name, fn in raw.items()}
 
     def _impls_raw(self) -> dict:
         return {
             "list_objects": self.list_objects, "count_objects": self.count_objects,
+            "get_object": self.get_object,
             "get_position": self.get_position, "get_object_size": self.get_object_size,
             "get_object_volume": self.get_object_volume, "get_distance": self.get_distance,
             "get_my_position": self.get_my_position,
@@ -1216,10 +1584,20 @@ class SpatialTools:
         idp = {"type": "integer", "description": "object id from list_objects"}
         arr = {"type": "array", "items": {"type": "number"}}
         return [
-            fn("list_objects", "List tracked objects (id + class + material/state). Call this first.",
-               {"label": {"type": "string", "description": "optional class filter"}}),
-            fn("count_objects", "Count objects, optionally of a class.",
-               {"label": {"type": "string"}}),
+            fn("list_objects",
+               "List the objects of a label (id + label + class/material/state). ALWAYS pass the "
+               "label the question names (in the inventory's English: 'sign', 'fire extinguisher'). "
+               "A long listing comes back by label with counts and id ranges.",
+               {"label": {"type": "string", "description": "the kind of object, e.g. 'sign'"}}),
+            fn("count_objects",
+               "How many objects of a label there are — pass the label the question names "
+               "('how many signs' -> label='sign'). With no label: the total and the count of "
+               "every label.",
+               {"label": {"type": "string", "description": "the kind of object, e.g. 'sign'"}}),
+            fn("get_object",
+               "One object by id in one call: label, position (m), size w/h/d (m). Use it to "
+               "check that an id exists and what it is.",
+               {"id": idp}, ["id"]),
             fn("get_position", "World position (metres) of an object.", {"id": idp}, ["id"]),
             fn("get_object_size", "Object size w/h/d in metres.", {"id": idp}, ["id"]),
             fn("get_object_volume", "Bounding-box volume in cubic metres.", {"id": idp}, ["id"]),

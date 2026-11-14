@@ -34,10 +34,16 @@ interface Message {
   pending?: boolean
   note?: string          // what the pending bubble is waiting on
   error?: boolean
+  /** figures / tools of the answer the server's provenance check could not trace to a tool
+   *  call of this turn, after asking the model again — shown under the answer, never hidden */
+  unverified?: string[]
 }
 
 interface Props {
   sessionId: string | null
+  /** the scan the viewer shows ("date/source") — the chat answers about THIS scan's store
+   *  (USER 2026-11-13: with pccr 3108 open it answered from pccr 2408) */
+  scanKey?: string | null
   viewport: React.RefObject<ViewportHandle | null>
   /** Model state changes (up | loading | busy | down) — drives the header icon. */
   onVlmStatus?: (status: 'up' | 'loading' | 'busy' | 'down') => void
@@ -67,11 +73,15 @@ function objectsOfTrace(trace: TraceEntry[]): number[] {
 
 const SUGGESTION_KEYS = ['count', 'clearance', 'plumb', 'defects', 'freeSpace'] as const
 
-function api(session: string | null, path: string, body: Record<string, unknown>) {
-  return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: session, ...body }) })
+function post(session: string | null, scan: string | null | undefined, path: string, body: Record<string, unknown>) {
+  return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: session, ...(scan ? { scan } : {}), ...body }) })
 }
 
-export default function AssistantPanel({ sessionId, viewport, onVlmStatus, onFocusObjects, onVolumesChanged, onViewerAction }: Props) {
+export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStatus, onFocusObjects, onVolumesChanged, onViewerAction }: Props) {
+  const api = useCallback((session: string | null, path: string, body: Record<string, unknown>) => post(session, scanKey, path, body), [scanKey])
+  // the scene's objects reached the viewer for THIS session + scan (an answer never changes them)
+  const objectsLoadedRef = useRef(false)
+  const messagesRef = useRef<Message[]>([])
   const t = useT()
   const fmt = useFmt()
   const [messages, setMessages] = useState<Message[]>([])
@@ -101,19 +111,31 @@ export default function AssistantPanel({ sessionId, viewport, onVlmStatus, onFoc
         } catch { /* keep default colour */ }
       }
     } catch { /* ignore */ }
-  }, [sessionId, viewport])
+  }, [sessionId, viewport, api])
 
   useEffect(() => {
     if (!sessionId) return
     let cancelled = false
+    objectsLoadedRef.current = false
     api(sessionId, '/api/scene/objects', {}).then(r => r.json()).then(d => {
-      if (!cancelled && d.objects) viewport.current?.setAssistantObjects(d.objects)
+      if (!cancelled && d.objects) { viewport.current?.setAssistantObjects(d.objects); objectsLoadedRef.current = true }
     }).catch(() => { /* store may not exist yet */ })
     refreshVolumes()
     return () => { cancelled = true }
-  }, [sessionId, viewport, refreshVolumes])
+  }, [sessionId, viewport, refreshVolumes, api])
 
-  useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' }) }, [messages])
+  // another scan (or session): the conversation was about the other one — it starts over
+  useEffect(() => { setMessages([]) }, [sessionId, scanKey])
+
+  // the chat's measurements run on the GPU in their own process (semantic.chat.tools_device):
+  // it is started when the chat opens on a scan, so the first measurement does not wait for it
+  // (the server answers 'busy' while a pipeline has the card)
+  useEffect(() => {
+    if (!sessionId) return
+    api(sessionId, '/api/spatial_qa/warmup', {}).catch(() => { /* the first question starts it */ })
+  }, [sessionId, api])
+
+  useEffect(() => { messagesRef.current = messages; scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' }) }, [messages])
 
   // CLOSING THE CHAT (its tab left or the inspector closed — the panel unmounts): the answers'
   // measurements leave the scene and the questions start over (USER 2026-10-09); the volumes
@@ -147,13 +169,16 @@ export default function AssistantPanel({ sessionId, viewport, onVlmStatus, onFoc
 
   const ask = useCallback(async (question: string) => {
     if (!question.trim() || busy) return
+    // the conversation so far goes with the question (the server keeps its last turns), so
+    // "and the other one?" has a referent
+    const history = messagesRef.current.filter(m => !m.pending && !m.error && m.text.trim()).map(m => ({ role: m.role, text: m.text }))
     setMessages(m => [...m, { role: 'user', text: question }, { role: 'assistant', text: '', pending: true }])
     setInput(''); setBusy(true)
     try {
       let d: Record<string, unknown>
       const deadline = Date.now() + 10 * 60_000
       for (;;) {
-        const r = await api(sessionId, '/api/spatial_qa', { question })
+        const r = await api(sessionId, '/api/spatial_qa', { question, history })
         d = await r.json()
         if (r.ok) break
         if (r.status !== 503 || d.status !== 'loading' || Date.now() > deadline) throw new Error(String(d.error || `HTTP ${r.status}`))
@@ -161,15 +186,25 @@ export default function AssistantPanel({ sessionId, viewport, onVlmStatus, onFoc
         await new Promise(res => setTimeout(res, 8000))
       }
       const trace: TraceEntry[] = (d.tool_trace as TraceEntry[]) || []
-      if (trace.length) {
+      // the answer is shown FIRST; the objects are fetched only when the viewer does not hold
+      // them yet (every answer re-read all of them before it appeared: seconds on a scan of
+      // thousands of objects)
+      const prov = d.provenance as { ok?: boolean; figures?: string[]; tools?: string[] } | undefined
+      const unverified = prov && prov.ok === false ? [...(prov.figures || []), ...(prov.tools || [])] : undefined
+      setMessages(m => replaceLast(m, { role: 'assistant', text: String(d.answer || t('assistant.noAnswer')), trace, unverified }))
+      if (trace.length && !objectsLoadedRef.current) {
         try {
           const or = await api(sessionId, '/api/scene/objects', {})
           const od = await or.json()
-          if (od.objects) viewport.current?.setAssistantObjects(od.objects)
+          if (od.objects) { viewport.current?.setAssistantObjects(od.objects); objectsLoadedRef.current = true }
         } catch { /* keep whatever objects we had */ }
       }
       viewport.current?.visualizeMeasurement(trace)
+      // the objects the tools were called on, then the ones the question named by id (the
+      // server resolved them: an answer straight from that block calls no tool on them)
       const focusIds = objectsOfTrace(trace)
+      for (const r of (Array.isArray(d.references) ? d.references as Array<{ id: number; exists: boolean }> : []))
+        if (r.exists && !focusIds.includes(r.id)) focusIds.push(r.id)
       if (focusIds.length) onFocusObjects?.(focusIds)
       // the viewer actions, in the order the tools were called (after the focus: a travel or a
       // view the user asked for wins)
@@ -178,13 +213,12 @@ export default function AssistantPanel({ sessionId, viewport, onVlmStatus, onFoc
         if (act && typeof act === 'object') onViewerAction?.(act as Record<string, unknown>)
       }
       if (trace.some(x => x.tool === 'define_volume')) { await refreshVolumes(); onVolumesChanged?.() }
-      setMessages(m => replaceLast(m, { role: 'assistant', text: String(d.answer || t('assistant.noAnswer')), trace }))
     } catch (e) {
       setMessages(m => replaceLast(m, { role: 'assistant', error: true, text: t('assistant.couldNotAnswer', { detail: e instanceof Error ? e.message : String(e) }) }))
     } finally {
       setBusy(false)
     }
-  }, [sessionId, busy, viewport, refreshVolumes, t, onFocusObjects, onVolumesChanged, onViewerAction])
+  }, [sessionId, busy, viewport, refreshVolumes, t, onFocusObjects, onVolumesChanged, onViewerAction, api])
 
   const addVolume = useCallback(async () => {
     if (!sessionId) return
@@ -200,7 +234,7 @@ export default function AssistantPanel({ sessionId, viewport, onVlmStatus, onFoc
       setShowVolForm(false)
       ask(t('assistant.evaluateVolumeQuestion', { name: v.name }))
     }
-  }, [sessionId, volForm, viewport, ask, t, onVolumesChanged])
+  }, [sessionId, volForm, viewport, ask, t, onVolumesChanged, api])
 
   const removeVolume = useCallback(async (id: number) => {
     if (!sessionId) return
@@ -208,7 +242,7 @@ export default function AssistantPanel({ sessionId, viewport, onVlmStatus, onFoc
     setVolumes(prev => prev.filter(v => v.volume_id !== id))
     viewport.current?.removeUserVolume(id)
     onVolumesChanged?.()
-  }, [sessionId, viewport, onVolumesChanged])
+  }, [sessionId, viewport, onVolumesChanged, api])
 
   const inputPlaceholder = vlmStatus === 'up' ? t('assistant.placeholder') : vlmStatus === 'loading' ? t('assistant.modelLoading') : vlmStatus === 'busy' ? t('assistant.modelBusy') : t('assistant.modelStarting')
 
@@ -236,6 +270,9 @@ export default function AssistantPanel({ sessionId, viewport, onVlmStatus, onFoc
             ) : (
               <>
                 <div className="stac-assistant__text stac-selectable">{m.text}</div>
+                {m.unverified && m.unverified.length > 0 && (
+                  <Banner tone="warn" compact>{t('assistant.unverified', { items: m.unverified.join(', ') })}</Banner>
+                )}
                 {m.trace && m.trace.length > 0 && (
                   <div className="stac-assistant__trace">
                     <Ruler aria-hidden />

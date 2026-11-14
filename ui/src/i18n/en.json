@@ -928,6 +928,7 @@
     "thinking": "thinking",
     "noAnswer": "(no answer)",
     "couldNotAnswer": "Could not answer: {detail}",
+    "unverified": "Not traced to a tool measurement in this answer: {items}. Treat as unverified.",
     "placeholder": "Ask about the scene",
     "send": "Send",
     "volumes": "Evaluation volumes",

@@ -27,4 +27,6 @@ def _hole_audit_evidence_on_cpu():
     floor.use_draws("numpy")             # the floor bootstrap on the reference's stream
     edge_metric.use_device("cpu")        # the edge metric's torch path, on the CPU
     gauge.use_device("cpu")              # F2's window gains, on the CPU
+    from phase5_qa import tools as chat_tools
+    chat_tools.use_device("cpu")         # the chat's measurements: the torch path, on the CPU
     yield

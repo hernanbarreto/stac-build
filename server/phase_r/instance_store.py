@@ -303,6 +303,22 @@ class InstanceStore:
             return None
         return _arr(row[0], (row[1], 3))
 
+    def list_point_counts(self) -> dict[int, int]:
+        """{instance_id: its number of points}, in ONE query."""
+        return {int(r[0]): int(r[1] or 0) for r in self.conn.execute(
+            "SELECT instance_id,num_points FROM instance_points")}
+
+    def iter_points(self):
+        """(instance_id, points) of every instance that has points, by instance id, from ONE
+        query — get_points instance by instance was 1,360 queries and 17.5 s on pccr
+        2026-08-31 (measured 2026-11-13) against 0.2 s."""
+        for iid, blob, n in self.conn.execute(
+                "SELECT instance_id,points_blob,num_points FROM instance_points "
+                "ORDER BY instance_id"):
+            if blob is None:
+                continue
+            yield int(iid), _arr(blob, (n, 3))
+
     def get_point_frames(self, instance_id: int) -> np.ndarray | None:
         """int32 (N,) source frame per stored point (R.2/R.3 per-window splits)."""
         row = self.conn.execute(
@@ -365,6 +381,15 @@ class InstanceStore:
         if not row:
             return None
         return (_arr(row[0], (4, 4)), _arr(row[1], (6,)), _arr(row[2], (3,)))
+
+    def list_obbs(self, window_id: str = "global") -> dict[int, tuple]:
+        """Every instance's OBB of one window in ONE query: {instance_id: (T, aabb, pos)} —
+        what a per-instance get_obb loop returns (8,777 queries on pccr 2408 were seconds of
+        every chat answer)."""
+        return {int(r[0]): (_arr(r[1], (4, 4)), _arr(r[2], (6,)), _arr(r[3], (3,)))
+                for r in self.conn.execute(
+                    "SELECT instance_id,obb_transform,obb_aabb,position FROM instance_obb "
+                    "WHERE window_id=?", (window_id,))}
 
     def list_obb_windows(self, instance_id: int) -> list[str]:
         return [r[0] for r in self.conn.execute(
@@ -441,6 +466,20 @@ class InstanceStore:
         d = dict(zip(keys, row))
         d["conflict"] = bool(d["conflict"]); d["whitelist_eligible"] = bool(d["whitelist_eligible"])
         return d
+
+    def list_classifications(self) -> dict[int, dict]:
+        """Every instance's classification in ONE query: {instance_id: get_classification's
+        dict}."""
+        keys = ["class_final", "material", "state", "notes", "confidence", "conflict",
+                "whitelist_eligible", "origin", "best_frame"]
+        out: dict[int, dict] = {}
+        for row in self.conn.execute(
+                "SELECT instance_id,class_final,material,state,notes,confidence,conflict,"
+                "whitelist_eligible,origin,best_frame FROM instance_classification"):
+            d = dict(zip(keys, row[1:]))
+            d["conflict"] = bool(d["conflict"]); d["whitelist_eligible"] = bool(d["whitelist_eligible"])
+            out[int(row[0])] = d
+        return out
 
     # ── Phase 3 findings ────────────────────────────────────────────
     def add_finding(self, *, instance_id: int | None, type: str, severity: str,
@@ -574,6 +613,12 @@ class InstanceStore:
     def get_meta(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM scene_meta WHERE key=?", (key,)).fetchone()
         return row[0] if row else None
+
+    def list_meta(self, prefix: str) -> dict[str, str]:
+        """Every scene_meta entry whose key starts with ``prefix``, in ONE query."""
+        esc = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return {r[0]: r[1] for r in self.conn.execute(
+            "SELECT key,value FROM scene_meta WHERE key LIKE ? ESCAPE '\\'", (esc + "%",))}
 
     # ── reads for downstream phases ─────────────────────────────────
     def list_instances(self, status: str | None = None) -> list[dict[str, Any]]:

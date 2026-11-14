@@ -106,11 +106,15 @@ class SemanticClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         consumer: str | None = None,
+        first_tool_choice: str | dict | None = None,
     ) -> dict[str, Any]:
         """Run the model with tools until it produces a final text answer or the
         iteration budget is exhausted. Returns
         {answer, iterations, tool_trace, messages}. Every tool result is
         appended to the conversation and every LLM turn is logged.
+
+        ``first_tool_choice``: the tool_choice of the FIRST call only ("required" = the model
+        must call a tool before it may answer); every later call is "auto".
         """
         consumer = consumer or self.consumer
         max_iterations = max_iterations or self._max_iterations
@@ -121,7 +125,7 @@ class SemanticClient:
             resp = self.chat(
                 convo,
                 tools=tools,
-                tool_choice="auto",
+                tool_choice=(first_tool_choice if (it == 0 and first_tool_choice) else "auto"),
                 temperature=temperature,
                 max_tokens=max_tokens,
                 consumer=f"{consumer}#it{it}",

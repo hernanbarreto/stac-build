@@ -26,34 +26,42 @@ router = APIRouter(prefix="/api", tags=["spatial_qa"])
 
 
 def _resolve_store(body: dict) -> str | None:
+    """The instance store the question is about: the scan the VIEWER shows (``scan`` =
+    "date/source"), else the project's active scan — through project_paths, as every other
+    route. (Before 2026-11-13 this was the FIRST ``scene_r.db`` a glob found under the
+    project: with pccr 2026-08-31 open the chat answered from pccr 2026-08-24's store —
+    sign#797 "did not exist" and the counts were another scan's.)"""
     sp = body.get("store_path")
     if sp and Path(sp).exists():
         return sp
-    # session convention: <PROJECTS_DIR>/<session>/.../output/scene_r.db
     session_id = body.get("session_id")
-    if session_id:
+    if not session_id:
+        return None
+    try:
+        import project_paths
+        server_dir = Path(__file__).resolve().parent.parent          # main.SERVER_DIR
+        ctx = project_paths.resolve_session(str(server_dir), session_id,
+                                            scan_key=body.get("scan") or None)
+        out_dir = Path(ctx.output_dir)
+    except Exception as e:  # noqa: BLE001
+        print(f"[SpatialQA] session {session_id!r} (scan {body.get('scan')!r}) not resolved: {e}")
+        return None
+    store = out_dir / "scene_r.db"
+    if store.exists():
+        return str(store)
+    # Segmented scan but no store (segmented before scene_r.db existed, or the store was
+    # wiped by a recon re-run while the result survived) → rebuild it from
+    # segmentation_result.json so the chat gets its measurement tools back (2026-08-28:
+    # text-only answers with no 3D interaction traced back to exactly this).
+    res = out_dir / "segmentation_result.json"
+    if res.exists():
         try:
-            from config import PROJECTS_DIR
-            for cand in Path(PROJECTS_DIR).glob(f"**/{session_id}/**/scene_r.db"):
-                return str(cand)
-            for cand in Path(PROJECTS_DIR).glob("**/output/scene_r.db"):
-                if session_id in str(cand):
-                    return str(cand)
-            # Segmented session but no store (segmented before scene_r.db
-            # existed, or the store was wiped by a recon re-run while the
-            # result survived) → rebuild it from segmentation_result.json so
-            # the chat gets its measurement tools back (2026-08-28: text-only
-            # answers with no 3D interaction traced back to exactly this).
-            for res in Path(PROJECTS_DIR).glob(
-                    f"**/{session_id}/**/segmentation_result.json"):
-                print(f"[SpatialQA] no scene_r.db for {session_id} — rebuilding "
-                      f"from {res}")
-                from segmentation.pipeline import rebuild_instance_store
-                if rebuild_instance_store(res.parent):
-                    return str(res.parent / "scene_r.db")
-                break
+            print(f"[SpatialQA] no scene_r.db for {session_id} — rebuilding from {res}")
+            from segmentation.pipeline import rebuild_instance_store
+            if rebuild_instance_store(out_dir):
+                return str(store)
         except Exception as e:  # noqa: BLE001
-            print(f"[SpatialQA] store resolve/rebuild failed: {e}")
+            print(f"[SpatialQA] store rebuild failed: {e}")
     return None
 
 
@@ -192,7 +200,8 @@ async def spatial_qa(body: dict):
         try:
             return qa.ask(question,
                           images=_resolve_images(body, store_path) or None,
-                          max_iterations=body.get("max_iterations", 8))
+                          max_iterations=body.get("max_iterations", 8),
+                          history=body.get("history") if isinstance(body.get("history"), list) else None)
         finally:
             qa.close()
 
@@ -273,13 +282,15 @@ async def scene_objects(body: dict):
     try:
         from phase5_qa.tools import SpatialTools
         tools = SpatialTools(store)
+        obbs = tools.all_obbs()                 # ONE query each (2 per object before:
+        cls = store.list_classifications()      # seconds on pccr 2408's 8,777 objects)
         out = []
         for i in store.list_instances():
             iid = i["instance_id"]
-            obb = tools._obb(iid)
+            obb = obbs.get(int(iid))
             entry = {"id": iid, "label": i["label"], "status": i["status"],
                      "n_views": i.get("n_views")}
-            c = store.get_classification(iid)
+            c = cls.get(int(iid))
             if c:
                 entry["class"] = c["class_final"]
                 entry["material"] = c["material"]
@@ -354,24 +365,98 @@ async def volumes_delete(body: dict):
 
 
 def _volume_tool(body: dict, method: str):
-    store, err = _store_or_error(body)
-    if err:
-        return err
+    """One volume measurement for the viewer (a box dragged, the chat opened). With
+    ``semantic.chat.tools_device: cuda`` it runs in the chat's tools process, which keeps the
+    scene's points on the card — and answers 'busy' while a job has the GPU (the backend never
+    measures beside a stage, and never falls back to the CPU by itself)."""
+    sp = _resolve_store(body or {})
+    if not sp:
+        return JSONResponse(
+            {"error": "no instance store (pass store_path or session_id)"}, status_code=404)
+    from phase5_qa.tools import SpatialTools, effective_device
+    kwargs = {k: body[k] for k in ("volume_id", "center", "size", "yaw_deg", "voxel_m",
+                                   "item_size") if k in body}
+    dev = effective_device()
+    if dev == "cuda":
+        busy = _engine_busy_response()
+        if busy is not None:
+            return busy
+        from phase5_qa import tools_worker
+        try:
+            return JSONResponse(tools_worker.call(sp, method, kwargs, device="cuda"))
+        except tools_worker.ToolsWorkerBusy as e:
+            return JSONResponse({"status": "busy", "error": str(e)}, status_code=503)
+        except tools_worker.ToolsWorkerError as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    from phase_r.instance_store import InstanceStore
+    store = InstanceStore(sp)
     try:
-        from phase5_qa.tools import SpatialTools
-        t = SpatialTools(store)
-        kwargs = {k: body[k] for k in ("volume_id", "center", "size", "yaw_deg", "voxel_m",
-                                       "item_size") if k in body}
-        return JSONResponse(getattr(t, method)(**kwargs))
+        t = SpatialTools(store, device=dev)
+        try:
+            return JSONResponse(getattr(t, method)(**kwargs))
+        finally:
+            t.release()
     finally:
         store.close()
 
 
 @router.post("/scene/volumes/evaluate")
 async def volumes_evaluate(body: dict):
-    return _volume_tool(body, "evaluate_volume")
+    # in a thread: the measurement (and the tools process's start) must not hold the event loop
+    import asyncio as _aio
+    return await _aio.get_running_loop().run_in_executor(
+        None, lambda: _volume_tool(body, "evaluate_volume"))
 
 
 @router.post("/scene/volumes/fits")
 async def volumes_fits(body: dict):
-    return _volume_tool(body, "fits_in_volume")
+    import asyncio as _aio
+    return await _aio.get_running_loop().run_in_executor(
+        None, lambda: _volume_tool(body, "fits_in_volume"))
+
+
+@router.get("/spatial_qa/tools")
+async def spatial_qa_tools_status():
+    """Is the chat's tools process up, on which device and store."""
+    from phase5_qa import tools_worker
+    from phase5_qa.tools import effective_device
+    return JSONResponse({"device": effective_device(), **tools_worker.status()})
+
+
+@router.post("/spatial_qa/tools/stop")
+async def spatial_qa_tools_stop():
+    """End the chat's tools process (its CUDA context leaves the card). The pipeline manager
+    and the server's GPU tasks do this by themselves when they take the engine lease; this is
+    for GPU work launched OUTSIDE them (a script in a shell), whose exclusive-GPU check would
+    find the process on the card. The next measurement of the chat starts it again."""
+    import asyncio as _aio
+    from phase5_qa import tools_worker
+    gone = await _aio.get_running_loop().run_in_executor(
+        None, lambda: tools_worker.stop("asked through the API"))
+    return JSONResponse({"stopped": bool(gone), **tools_worker.status()})
+
+
+@router.post("/spatial_qa/warmup")
+async def spatial_qa_warmup(body: dict):
+    """The chat was opened on a scan: start its tools process (semantic.chat.tools_device:
+    cuda) so the first measurement does not wait for it. Never beside a job: 'busy' then."""
+    from phase5_qa.tools import effective_device
+    dev = effective_device()
+    if dev != "cuda":
+        return JSONResponse({"status": "not_needed", "device": dev})
+    if _engine_busy():
+        return JSONResponse({"status": "busy"})
+    sp = _resolve_store(body or {})
+    if not sp:
+        return JSONResponse({"status": "no_store"})
+    import asyncio as _aio
+    from phase5_qa import tools_worker
+
+    def _start():
+        try:
+            return tools_worker.warm(sp, device="cuda")
+        except Exception as e:  # noqa: BLE001 — declared; the first question will say why
+            print(f"[ChatTools] warm-up failed: {e}")
+            return False
+    _aio.get_running_loop().run_in_executor(None, _start)          # fire and forget
+    return JSONResponse({"status": "starting", "device": dev})

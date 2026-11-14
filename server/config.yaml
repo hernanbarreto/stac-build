@@ -877,6 +877,27 @@ semantic:
   tool_calling:
     max_iterations: 8           # bound the Q&A tool loop (Phase 5)
 
+  chat:                         # the spatial chat (phase5_qa) — both keys typed and required
+    list_limit: 60              # BOUND (context): the objects a listing — the prompt's inventory,
+                                # list_objects — names one by one; beyond it the listing is BY LABEL
+                                # (count + ids as ranges), so every id of a scene of thousands of
+                                # objects is still known to the model. 60 = the inventory's bound
+                                # since 2026-08 (it cut the list there and the rest was unknown:
+                                # USER 2026-11-13 "no encontro sign#797, estaba bien escrito")
+    history_turns: 6            # BOUND (context): the earlier turns of the conversation a question
+                                # carries (3 questions + 3 answers), so "y el otro?" has a referent;
+                                # 0 = every question alone, as before 2026-11-13
+    tools_device: cuda          # numpy | cpu | cuda — where the chat's measurements over the points
+                                # run (USER 2026-11-13: "el vlm y todas sus herramientas deben
+                                # funcionar en GPU"). numpy = the path of record (scipy's k-d tree,
+                                # numpy): MEASURED on pccr 2026-08-31, the clearance floor - wall
+                                # (1.06 M against 0.74 M points) did not end in 8 min of one core.
+                                # cuda = phase5_qa/tools_torch.py in the chat's own tools process
+                                # (phase5_qa/tools_worker.py — the backend never touches the card;
+                                # the process ends when a job takes the GPU); cpu = the same torch
+                                # code on the CPU, in the backend (the tests). cuda with no card
+                                # FAILS naming this key
+
   logging:
     enabled: true
     jsonl_path: "logs/semantic_calls.jsonl"   # every call: consumer/prompt/imgs/response/latency
