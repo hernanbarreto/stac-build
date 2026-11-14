@@ -213,6 +213,11 @@ genrecon:
                                      # the neighbour pairs of this many faces are on the card at a time. Measured on
                                      # bufferStop's 7,211,584 faces, the card's peak / the time: all at once 13.3 GB /
                                      # 3.7 s, 2,000,000 4.7 GB / 3.4 s, 500,000 2.2 GB / 3.6 s
+  keep_work: false                   # USER 2026-11-14 ("borra los intermedios y procura que se eliminen cuando termina
+                                     # genrecon para que no quede basura" — 29.4 GB of five finished runs sat in
+                                     # vendor/GenRecon/work): a run that ENDS WELL (published and tiled) removes its work
+                                     # directories (tools/genrecon/drop_work.sh); a FAILED run keeps them, it resumes
+                                     # from them. true = keep them after a good run too (to look at a run's own files)
   joint_decode_max_voxels: 100000    # USER 2026-11-13 ("Debemos hacer entrar pccr2408 hay que ver la forma la técnica
                                      # para que sea escalable a nubes masivas"): a scene of more latent voxels than
                                      # this is decoded BY REGIONS (tools/genrecon/decode_regions.py: each region on its

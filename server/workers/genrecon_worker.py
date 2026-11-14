@@ -208,7 +208,10 @@ def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
            # USER 2026-11-13 ("Debemos hacer entrar pccr2408 hay que ver la forma la técnica para que sea escalable a
            # nubes masivas"): over this many latent voxels the scene is decoded by regions with a margin instead of in
            # one pass (tools/genrecon/decode_regions.py); 0 = always the single pass
-           "GENRECON_DECODE_MAX_VOXELS": _number(gcfg, "joint_decode_max_voxels", int, 0, 1 << 31)}
+           "GENRECON_DECODE_MAX_VOXELS": _number(gcfg, "joint_decode_max_voxels", int, 0, 1 << 31),
+           # USER 2026-11-14 ("procura que se eliminen cuando termina genrecon para que no quede basura"): the run's
+           # work directories leave when it ends well (tools/genrecon/drop_work.sh); true keeps them
+           "GENRECON_KEEP_WORK": _flag(gcfg, "keep_work")}
     if not _SCRIPT.exists():
         raise FileNotFoundError(f"GenRecon runner missing: {_SCRIPT}")
     stop_semantic_service_verified(pipe, stage="GenRecon mesh")
@@ -222,7 +225,9 @@ def _genrecon_work(pipe: WorkerPipe, session_dir: str, config: dict):
             pipe.send_log(f"[genrecon] cancelled before {tag}")
             return
         lo, hi = 100 * k // len(variants), 100 * (k + 1) // len(variants)
-        meta = _run_variant(pipe, output_dir, sid, scan, vname, min_pts, vmode, env, lo, hi, tag)
+        # the adapter's inputs stay for the variant that follows (it reuses them); the last one removes them
+        venv = {**env, "GENRECON_KEEP_INPUTS": "1" if k < len(variants) - 1 else "0"}
+        meta = _run_variant(pipe, output_dir, sid, scan, vname, min_pts, vmode, venv, lo, hi, tag)
         done.append(f"{vname} ({meta.get('n_faces', '?')} faces)")
     pipe.send_progress(100, f"GenRecon mesh published: {', '.join(done)}", stage=STAGE)
 

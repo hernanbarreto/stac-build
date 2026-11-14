@@ -24,6 +24,9 @@ export CUDA_HOME=/workspace/miniforge3/envs/genrecon OMP_NUM_THREADS=8 HF_HOME=$
 spec=$1; name=${2:-genrecon_photo}; raw=${name}_raw; minpts=${3:-10}; mode=${4:-cloud}; sid=${spec%%:*}; scan=${spec##*:}
 tag=cloud; [ "$mode" = "cloud+hull+unseen" ] && tag=full; [ "$mode" = "cloud+unseen" ] && tag=fill; [ "$mode" = "cloud+objects" ] && tag=obj; [ "$mode" = "cloud+hull" ] && tag=hull; [ "$mode" = "generative" ] && tag=gen
 SES=/workspace/stac-build/server/projects/$sid/scans/$scan/src_default; W=$G/work/$sid; O=$G/work/${sid}_${tag}_out; OL=$G/work/${sid}_${tag}_out_light
+# the work directories leave when the run ends well (drop_work.sh: USER 2026-11-14 "procura que se eliminen cuando
+# termina genrecon para que no quede basura"); a failed run keeps them — it resumes from them
+source $T/drop_work.sh
 echo "=== SESSION $sid ($scan) $(date +%H:%M:%S)"
 tile_published() {
   [ "${GENRECON_TILES:-0}" = "1" ] || return 0
@@ -172,6 +175,7 @@ if [ "$mode" = "generative" ]; then
   (cd /workspace/stac-build/server && $DA3 $T/publish.py $OL/scene.glb $SES $name $W "$NOTE") || { echo "publish failed $sid"; exit 1; }
   [ -f $SES/output/tsdf/$name/$name.glb ] || { echo "publish failed $sid"; exit 1; }
   tile_published $name
+  drop_work
   echo "=== DONE $sid $(date +%H:%M:%S)"
   exit 0
 fi
@@ -181,4 +185,5 @@ rm -rf $SES/output/genrecon/$raw $SES/output/tsdf/$raw
 [ -f $SES/output/genrecon/$raw/$raw.glb ] || { echo "publish failed $sid"; exit 1; }
 (cd /workspace/stac-build/server && $DA3 $T/photo_albedo.py $SES $SES/output/genrecon/$raw/$raw.glb $name ${GENRECON_TOPK:-3}) || { echo "bake failed $sid"; exit 1; }
 tile_published $name
+drop_work
 echo "=== DONE $sid $(date +%H:%M:%S)"

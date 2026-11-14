@@ -76,7 +76,7 @@ _CFG = {"mesh_name": "genrecon_photo", "mode": "cloud", "generative_mesh_name": 
         "cube_size_m": 3.7, "undistort_device": "cuda", "solid_ground": False, "shape_from_cloud": True,
         "shape_refine_t": 0.0, "smooth_iters": 0, "edge_filter": True, "denoise_normal_iters": 20,
         "denoise_vertex_iters": 10, "denoise_sigma_r": 0.35, "denoise_block_faces": 2000000,
-        "joint_decode_max_voxels": 100000}
+        "joint_decode_max_voxels": 100000, "keep_work": False}
 
 
 def test_both_variants_in_order(tmp_path, monkeypatch):
@@ -216,3 +216,44 @@ def test_the_two_resume_lines_of_the_runner_have_their_own_marks():
     assert first("=== RESUME pccr at the mesh step 07:10:02") == (70, "the reconstruction reused — continuing at the mesh step")
     decode = [p for mark, p, _ in G._MARKS if mark.startswith("joint_decode")]
     assert decode and min(decode) > 60                            # the decode's own marks still advance after it
+
+
+def test_the_work_directories_leave_after_a_good_run(tmp_path, monkeypatch):
+    """USER 2026-11-14: "borra los intermedios y procura que se eliminen cuando termina genrecon para que no quede
+    basura" — genrecon.keep_work reaches the runner typed; the adapter's inputs stay only for a variant that follows."""
+    envs.clear()
+    _run(tmp_path / "two", monkeypatch, _CFG)
+    assert [(e["GENRECON_KEEP_WORK"], e["GENRECON_KEEP_INPUTS"]) for e in envs] == [("0", "1"), ("0", "0")]
+    envs.clear()
+    _run(tmp_path / "keep", monkeypatch, {**_CFG, "generative_mesh_name": "", "keep_work": True})
+    assert [(e["GENRECON_KEEP_WORK"], e["GENRECON_KEEP_INPUTS"]) for e in envs] == [("1", "0")]
+    envs.clear()
+    with pytest.raises(RuntimeError, match="genrecon.keep_work is missing"):
+        _run(tmp_path / "bad", monkeypatch, {k: v for k, v in _CFG.items() if k != "keep_work"})
+    assert not envs
+
+
+def test_drop_work_removes_only_the_runs_own_directories(tmp_path):
+    """drop_work.sh: $W, $O and $OL go; kept on GENRECON_KEEP_WORK; $W kept on GENRECON_KEEP_INPUTS; a path that is
+    not strictly inside $G/work/ is never removed; a failure's way out of run_cloud.sh never calls it."""
+    import subprocess
+    root = Path(G.__file__).resolve().parent.parent / "tools" / "genrecon"
+
+    def go(env, w="s"):
+        g = tmp_path / env.replace("=", "_") / "G"
+        for d in ("s", "s_cloud_out", "s_cloud_out_light", "other"):
+            (g / "work" / d).mkdir(parents=True)
+            (g / "work" / d / "f").write_text("x")
+        sh = (f'G={g}; W=$G/work/{w}; O=$G/work/s_cloud_out; OL=$G/work/s_cloud_out_light; '
+              f'source {root / "drop_work.sh"}; {env} drop_work')
+        subprocess.run(["bash", "-c", sh], check=True, capture_output=True)
+        return sorted(p.name for p in (g / "work").iterdir())
+
+    assert go("X=1") == ["other"]
+    assert go("GENRECON_KEEP_WORK=1") == ["other", "s", "s_cloud_out", "s_cloud_out_light"]
+    assert go("GENRECON_KEEP_INPUTS=1") == ["other", "s"]
+    assert go("Y=1", w="") == ["other", "s"]                      # an empty session id: $G/work/ itself is never removed
+    sh = (root / "run_cloud.sh").read_text()
+    assert sh.count("\ndrop_work\n") + sh.count("\n  drop_work\n") == 2
+    for line in sh.splitlines():                                  # no failure exit removes the work
+        assert not ("exit 1" in line and "drop_work" in line)
