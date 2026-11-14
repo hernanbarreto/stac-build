@@ -276,11 +276,16 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   · A TURN is ONE call of the model on the candidates of the sentence (`commands/router.py`: the scene's tools
     while a scan is open + the interface's and system's found by the sentence's words in the three languages;
     conversation and help always). WHAT TELLS A COMMAND FROM A QUESTION IS THE ROW THE MODEL PICKS.
-    THE DATABASE HOLDS 267 COMMANDS IN 31 AREAS (2026-11-14): 44 of the scene, 2 of the system, 46 of the
-    interface that STAC runs, and the other 175 commands of the interface — every menu entry, button, toggle
-    and row action inventoried in the UI (233 controls) — as `manual`: declared in the three languages, found
-    by how people ask for them, and answered "se hace a mano por ahora, en <área>". Wiring one = its executor
-    in App.tsx + `status: available` + its `done` text + `python -m commands.export_ui`. The
+    THE DATABASE HOLDS 270 COMMANDS IN 31 AREAS (2026-11-14): STAC RUNS 132 — 44 of the scene, 2 of the
+    system, 86 of the interface (the connection, sessions, scans and their tabs, panels, full screen, language,
+    the viewer's tools, how the cloud is drawn, meshes, cubes, volumes, placed objects, the brush's settings,
+    physics, calibration, its own voice) — and the other 138 commands of the interface (every menu entry,
+    button, toggle and row action inventoried in the UI: 233 controls) are `manual`: declared in the three
+    languages, found by how people ask for them, and answered "se hace a mano por ahora, en <área>". They are
+    what launches GPU work or deletes data (`confirm: true` — a spoken confirmation is NOT built: on his word)
+    and what lives inside a dialog's own state (the Segmentation Manager, the references, BIM, the team, the
+    call, the admin forms). Wiring one = its executor in App.tsx + `status: available` + its `done` text +
+    `python -m commands.export_ui`. The
     interface's commands come back as `ui_actions`; the interface runs them and words the outcome with the
     server's texts. `manual` rows are offered too: STAC says they are done by hand. What launches GPU work or
     deletes data only OPENS ITS WINDOW by voice (a confirmed launch by voice: not built — on his word).

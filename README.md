@@ -2309,11 +2309,13 @@ offered — declared in `router.py`, not built.
 its executor where the compiler asks; for `scene` / `system` write its handler and, when the tool layer should word
 its result, its composer in `answers.py`. Nothing else lists commands.
 
-The database holds **267 commands in 31 areas**: 44 of the scene, 2 of the system, 46 of the interface that STAC
-runs, and the other 175 commands of the interface — every menu entry, button, toggle and row action — as `manual`:
+The database holds **270 commands in 31 areas**. STAC runs 132 of them: 44 of the scene, 2 of the system and 86 of
+the interface (the connection, sessions and scans, panels, full screen, language, the viewer's tools, how the cloud
+is drawn, meshes, cubes, volumes, placed objects, the brush's settings, physics, calibration, its own voice). The
+other 138 commands of the interface — every remaining menu entry, button, toggle and row action — are `manual`:
 declared in the three languages and found by how people ask for them; STAC answers that they are done by hand and
-under which area. What launches GPU work or deletes data is declared with `confirm: true`; those are `manual` today
-(the commands STAC runs only open their windows).
+under which area. They are what launches GPU work or deletes data (`confirm: true`: a spoken confirmation is not
+built yet) and what lives inside a dialog's own state.
 
 Tests: `tests/test_commands_db.py`, `tests/test_commands_turn.py`.
 
