@@ -49,6 +49,21 @@ def _is_one(text: str) -> bool:
         return False
 
 
+def cut_for_speech(text: str, max_chars: int) -> str:
+    """A text too long to be said in one go, cut at the end of the last whole sentence that fits
+    (a long listing is read on screen; the voice says its beginning). The text as it is when it
+    fits; when no sentence ends within the bound, the words that fit."""
+    text = str(text or "").strip()
+    if len(text) <= max_chars:
+        return text
+    head = text[:max_chars]
+    ends = [head.rfind(c) for c in (". ", "? ", "! ", "; ", ": ")]
+    end = max(ends)
+    if end >= max_chars // 3:
+        return head[:end + 1].strip()
+    return head[:head.rfind(" ")].strip() if " " in head else head
+
+
 def say(text: str, lang: str) -> str:
     """``text`` as it is said in ``lang`` (es | en | fr; anything else is read as English)."""
     lang = lang if lang in LANGS else "en"

@@ -190,3 +190,12 @@ def test_the_interfaces_names_join_the_recognisers_vocabulary():
     assert voice_api.with_names(base, "pccr,zaragoza,pccr,2026-08-31 default") == base + " pccr, zaragoza, 2026-08-31 default."
     assert voice_api.with_names(base, "<script>x</script>,a" + "b" * 80) == base + " script x script, a" + "b" * 39 + "."
     assert voice_api.with_names(base, ",".join(f"s{k}" for k in range(100))).count(",") == 1 + 39
+
+
+def test_a_long_answer_is_said_up_to_its_last_whole_sentence():
+    long = "Primera frase corta. " + "Segunda frase algo más larga que la primera. " + "palabra " * 80
+    cut = spoken.cut_for_speech(long, 80)
+    assert cut == "Primera frase corta. Segunda frase algo más larga que la primera." and len(cut) <= 80
+    assert spoken.cut_for_speech("corto", 80) == "corto"
+    assert spoken.cut_for_speech("palabra " * 30, 50) == ("palabra " * 6).strip()          # no sentence end: whole words
+    assert len(spoken.cut_for_speech("x" * 500, 50)) == 50

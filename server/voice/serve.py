@@ -202,9 +202,9 @@ class Engines:
         said = spoken.say(text, lang)
         if not said:
             raise VoiceError("nothing to say")
-        if len(said) > self.cfg["tts"]["max_chars"]:
-            raise VoiceError(f"the text has {len(said)} characters — more than voice.tts.max_chars "
-                             f"({self.cfg['tts']['max_chars']})")
+        # a text longer than voice.tts.max_chars is said up to its last whole sentence that fits
+        # (the whole answer is on screen) — never refused: STAC does not go silent on a long list
+        said = spoken.cut_for_speech(said, int(self.cfg["tts"]["max_chars"]))
         t0 = time.time()
         voice = self.cfg["tts"]["voices"][lang]["voice"]
         with torch.no_grad():
