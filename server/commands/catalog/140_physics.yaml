@@ -54,3 +54,125 @@ commands:
       - lâcher une sphère
       done: Panneau de physique ouvert.
       done_off: Panneau de physique fermé.
+- id: physics.set_ball
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'The sphere of the gravity sandbox: its diameter in centimetres (2 to 100) and how much it bounces (0 to
+    1).'
+  args:
+    diameter_cm:
+      type: number
+      minimum: 2
+      maximum: 100
+      description: centimetres, 2 to 100
+    bounce:
+      type: number
+      minimum: 0
+      maximum: 1
+      description: 0 to 1
+  needs:
+  - session
+  text:
+    es:
+      title: Diámetro y rebote de la esfera
+      say:
+      - hacela de 30 centímetros de diámetro
+      - bajale el rebote
+      - más rebote
+    en:
+      title: Diameter and bounce of the sphere
+      say:
+      - make it 30 centimetres across
+      - make it bounce less
+      - more bounce
+    fr:
+      title: Diamètre et rebond de la sphère
+      say:
+      - donne-lui 30 centimètres de diamètre
+      - qu'elle rebondisse moins
+      - plus de rebond
+- id: physics.toggle_placing
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Gravity sandbox: put spheres with the pointer (on): each one follows the pointer over the surface and
+    a click lets it go there; off stops it.'
+  args:
+    'on':
+      type: boolean
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Colocar esferas con el mouse
+      say:
+      - colocalas con el mouse
+      - que caiga donde haga clic
+      - dejá de colocarlas
+    en:
+      title: Place spheres with the mouse
+      say:
+      - place them with the mouse
+      - let it fall at the click
+      - stop placing them
+    fr:
+      title: Placer des sphères à la souris
+      say:
+      - place-les à la souris
+      - qu'elle tombe à l'endroit du clic
+      - arrête de les placer
+- id: physics.drop
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Gravity sandbox: let one sphere fall from 1.5 m above the centre of the view; it bounces on the cloud
+    and the meshes.'
+  needs:
+  - session
+  text:
+    es:
+      title: Dejar caer una esfera al centro
+      say:
+      - dejá caer otra al centro
+      - que caiga en el medio de la vista
+      - largá una bola
+    en:
+      title: Let a sphere fall at the centre
+      say:
+      - let another one fall at the centre
+      - one in the middle of the view
+      - release one
+    fr:
+      title: Faire tomber une sphère au centre
+      say:
+      - fais-en tomber une autre au centre
+      - une au milieu de la vue
+      - libère une bille
+- id: physics.clear
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Gravity sandbox: remove every sphere from the scene.'
+  needs:
+  - session
+  text:
+    es:
+      title: Borrar las esferas
+      say:
+      - borralas todas
+      - sacalas de la escena
+      - limpiá lo que cayó
+    en:
+      title: Clear the spheres
+      say:
+      - clear them all
+      - remove them from the scene
+      - clean up what fell
+    fr:
+      title: Effacer les sphères
+      say:
+      - efface-les toutes
+      - enlève-les de la scène
+      - nettoie ce qui est tombé

@@ -1,0 +1,51 @@
+# The 'reports' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: reports
+position: 280
+title:
+  es: Reporte
+  en: Report
+  fr: Rapport
+summary:
+  es: 'El reporte de análisis BIM del panel inferior: la comparación con su tolerancia y sus estadísticas.'
+  en: 'The BIM analysis report of the bottom dock: the comparison with its tolerance and its statistics.'
+  fr: 'Le rapport d''analyse BIM du panneau inférieur : la comparaison avec sa tolérance et ses statistiques.'
+commands:
+- id: reports.run_deviation
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'LAUNCH the deviation analysis of the Report tab: each object against its IFC element with a tolerance
+    in millimetres (1 to 50); it gives the share of points within tolerance, the mean and the maximum deviation,
+    a histogram and a table per element. Server work that takes a while.'
+  confirm: true
+  args:
+    tolerance_mm:
+      type: integer
+      minimum: 1
+      maximum: 50
+      description: millimetres, 1 to 50
+      required: true
+  needs:
+  - session
+  - segmentation
+  - bim
+  text:
+    es:
+      title: Ejecutar el análisis de desviación
+      say:
+      - ejecutá el análisis con tolerancia de 15 milímetros
+      - calculá qué porcentaje queda dentro de tolerancia
+      - corré el reporte de tolerancias
+    en:
+      title: Run the deviation analysis
+      say:
+      - run the analysis with a 15 millimetre tolerance
+      - compute the share within tolerance
+      - run the tolerance report
+    fr:
+      title: Lancer l'analyse des écarts
+      say:
+      - lance l'analyse avec une tolérance de 15 millimètres
+      - calcule la part dans la tolérance
+      - lance le rapport des tolérances

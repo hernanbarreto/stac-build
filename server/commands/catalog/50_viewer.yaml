@@ -519,3 +519,208 @@ commands:
       - enlève le reste du nuage
       done: Points non segmentés affichés.
       done_off: Points non segmentés masqués.
+- id: viewer.orient_view
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'The labelled cube at the corner of the viewer, used with the pointer: a click on one of its faces, edges
+    or corners snaps the camera to look from that direction. (A standard view by command is set_view.)'
+  args:
+    dir:
+      type: array
+      items:
+        type: number
+      description: '[x, y, z], where the camera sits: top [0,1,0], bottom [0,-1,0], front [0,0,1], back [0,0,-1],
+        right [1,0,0], left [-1,0,0]'
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Orientar la vista con el cubo de navegación
+      say:
+      - usá el cubo de la esquina para orientar la vista
+      - clic en la cara superior del cubo
+      - mirá desde una arista del cubo
+    en:
+      title: Orient the view with the navigation cube
+      say:
+      - use the cube in the corner to orient the view
+      - click the top face of the cube
+      - look from an edge of the cube
+    fr:
+      title: Orienter la vue avec le cube de navigation
+      say:
+      - utilise le cube du coin pour orienter la vue
+      - clique sur la face supérieure du cube
+      - regarde depuis une arête du cube
+- id: viewer.fly_to_camera_pose
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Jump into one of the scan''s cameras: a click on a camera marker in the viewer (the camera poses must
+    be shown) puts the view at that keyframe''s position, looking where it looked.'
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Mirar desde una cámara del escaneo
+      say:
+      - llevame a esa cámara
+      - mirá desde un keyframe
+      - saltá al punto de vista de la toma
+    en:
+      title: Look from a camera of the scan
+      say:
+      - take me to that camera
+      - look from a keyframe
+      - jump to the viewpoint of a shot
+    fr:
+      title: Regarder depuis une caméra du scan
+      say:
+      - emmène-moi à cette caméra
+      - regarde depuis une image clé
+      - saute au point de vue d'une prise
+- id: viewer.fly_to_point
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Fly the camera to a point of the scene given by its COORDINATES (the Go, Other side and kf buttons of the
+    quality kit do it for a flagged place or an edge's keyframe). An object is reached with focus_object, not with
+    this.
+  args:
+    position:
+      type: array
+      items:
+        type: number
+      description: '[x, y, z], metres'
+      required: true
+    radius:
+      type: number
+      minimum: 0
+      description: how much of the scene around the point is framed, metres
+  needs:
+  - session
+  text:
+    es:
+      title: Volar a un punto de la escena
+      say:
+      - llevame a ese punto señalado
+      - andá al otro lado de la arista
+      - volá a esas coordenadas
+    en:
+      title: Fly to a point of the scene
+      say:
+      - take me to that flagged point
+      - go to the other side of the edge
+      - fly to those coordinates
+    fr:
+      title: Voler vers un point de la scène
+      say:
+      - emmène-moi à ce point signalé
+      - va de l'autre côté de l'arête
+      - vole vers ces coordonnées
+- id: viewer.frame_box
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Frame a box of the scene in the view, given by its two opposite corners (the Show in the model button of
+    a stored calibration, the frame button of a volume).
+  args:
+    min:
+      type: array
+      items:
+        type: number
+      description: '[x, y, z] of the lower corner, metres'
+      required: true
+    max:
+      type: array
+      items:
+        type: number
+      description: '[x, y, z] of the upper corner, metres'
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Encuadrar una zona en la vista
+      say:
+      - encuadrá esa zona en la vista
+      - ubicá en el modelo la medida guardada
+      - encuadrá el volumen
+    en:
+      title: Frame a zone in the view
+      say:
+      - frame that zone in the view
+      - find the stored measurement in the model
+      - frame the volume
+    fr:
+      title: Cadrer une zone dans la vue
+      say:
+      - cadre cette zone dans la vue
+      - retrouve dans le modèle la mesure enregistrée
+      - cadre le volume
+- id: viewer.align_set_gizmo_mode
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Whether the gizmo of the Align tool rotates or translates (moves) the whole scan.
+  args:
+    mode:
+      type: string
+      enum:
+      - rotate
+      - translate
+      required: true
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Modo del gizmo de alineación
+      say:
+      - gizmo de alineación en rotar
+      - pasá el gizmo a trasladar
+      - girá todo el modelo con el gizmo
+    en:
+      title: Mode of the alignment gizmo
+      say:
+      - set the gizmo to rotate
+      - switch the gizmo to translate
+      - turn the whole model with the gizmo
+    fr:
+      title: Mode du gizmo d'alignement
+      say:
+      - gizmo d'alignement en rotation
+      - passe le gizmo en translation
+      - tourne tout le modèle avec le gizmo
+- id: viewer.align_save
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Keep the placement made with the Align tool: it OVERWRITES the stored transform of the session''s points
+    (where they sit and how they are turned) with the one on screen.'
+  confirm: true
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Guardar la alineación
+      say:
+      - guardá la alineación
+      - conservá el giro que le di al modelo
+      - fijá la posición nueva
+    en:
+      title: Save the alignment
+      say:
+      - save the alignment
+      - keep the turn given to the model
+      - store the new position
+    fr:
+      title: Enregistrer l'alignement
+      say:
+      - enregistre l'alignement
+      - garde la rotation donnée au modèle
+      - fixe la nouvelle position

@@ -42,3 +42,318 @@ commands:
       - place l'humain de référence
       - ajouter un objet
       done: Bibliothèque d'objets ouverte.
+- id: objects.add
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Insert one item of the object library into the scene as a reference object: it is placed in the viewer
+    (a collection object stands on the floor) to be aligned with its gizmo. The source file is not touched.'
+  args:
+    name:
+      type: string
+      description: the library item's name
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Insertar un modelo de la biblioteca
+      say:
+      - insertá el humano de la colección
+      - elegí esa pieza de la colección
+      - colocá ese modelo en la escena
+    en:
+      title: Insert a model from the library
+      say:
+      - insert the human of the collection
+      - pick that item of the collection
+      - put that model into the scene
+    fr:
+      title: Insérer un modèle de la bibliothèque
+      say:
+      - insère l'humain de la collection
+      - choisis cette pièce de la collection
+      - pose ce modèle dans la scène
+- id: objects.focus
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Fly the camera to a reference object placed in the scene (a click on its row in the list). It is not for
+    the objects of the segmentation.
+  args:
+    id:
+      type:
+      - integer
+      - string
+      description: the placed object's id or name
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Ir a un objeto colocado
+      say:
+      - llevame al objeto colocado
+      - enfocá el humano que puse
+      - dónde quedó el modelo insertado
+    en:
+      title: Go to a placed object
+      say:
+      - take me to the placed object
+      - focus the inserted human
+      - where did the inserted model end up
+    fr:
+      title: Aller à un objet placé
+      say:
+      - emmène-moi à l'objet placé
+      - cible l'humain inséré
+      - où est le modèle inséré
+- id: objects.set_gizmo_mode
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'With a reference object of the scene selected: what its gizmo does, translate (move), rotate or resize
+    it (scale).'
+  args:
+    mode:
+      type: string
+      enum:
+      - translate
+      - rotate
+      - scale
+      required: true
+  needs:
+  - session
+  - selection
+  text:
+    es:
+      title: Modo del gizmo del objeto colocado
+      say:
+      - mové el objeto colocado
+      - rotá el humano que puse
+      - escalá el modelo insertado
+    en:
+      title: Gizmo mode of the placed object
+      say:
+      - move the reference object with the gizmo
+      - rotate the inserted human
+      - resize the inserted model
+    fr:
+      title: Mode du gizmo de l'objet placé
+      say:
+      - déplace l'objet placé
+      - fais pivoter l'humain posé
+      - redimensionne le modèle inséré
+- id: objects.align
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Align the selected placed object: floor (rest it on the floor, base at y = 0), or relative to a target
+    object: same_base, on_top, center_xz (centred horizontally) or center_y (centred vertically).'
+  args:
+    op:
+      type: string
+      enum:
+      - floor
+      - same_base
+      - on_top
+      - center_xz
+      - center_y
+      required: true
+    target:
+      type: string
+      description: the object to align with (not for floor)
+  needs:
+  - session
+  - selection
+  text:
+    es:
+      title: Apoyar o centrar el objeto colocado
+      say:
+      - llevalo al piso
+      - misma base que el objetivo
+      - centralo con el objetivo
+    en:
+      title: Rest or centre the placed object
+      say:
+      - send it to the floor
+      - same base as the target
+      - centre it with the target
+    fr:
+      title: Poser ou centrer l'objet placé
+      say:
+      - mets-le au sol
+      - même base que la cible
+      - centre-le avec la cible
+- id: objects.remove_selected
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'REMOVE the selected placed object from this scene (only the reference goes: the source file is never touched).'
+  confirm: true
+  needs:
+  - session
+  - selection
+  text:
+    es:
+      title: Quitar el objeto colocado seleccionado
+      say:
+      - quitá de la escena el que tengo seleccionado
+      - quitá la referencia seleccionada
+      - descartá el modelo que estoy moviendo
+    en:
+      title: Remove the selected placed object
+      say:
+      - remove the selected one from the scene
+      - remove the selected reference
+      - discard the model being moved
+    fr:
+      title: Retirer l'objet placé sélectionné
+      say:
+      - retire de la scène celui qui est sélectionné
+      - retire la référence sélectionnée
+      - abandonne le modèle en cours de déplacement
+- id: objects.remove
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'REMOVE one placed reference object from this scene, by its id or name (the bin of its row in the list):
+    only the reference goes, the source file is never touched.'
+  confirm: true
+  args:
+    id:
+      type:
+      - integer
+      - string
+      description: the placed object's id or name
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Quitar un objeto colocado
+      say:
+      - quitá el humano de la escena
+      - sacá el objeto colocado número 2
+      - eliminá ese modelo insertado
+    en:
+      title: Remove a placed object
+      say:
+      - remove the human from the scene
+      - take away placed object number 2
+      - delete that inserted model
+    fr:
+      title: Retirer un objet placé
+      say:
+      - retire l'humain de la scène
+      - enlève l'objet placé numéro 2
+      - supprime ce modèle inséré
+- id: objects.rename
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Rename a placed reference object (its name in the list).
+  args:
+    id:
+      type:
+      - integer
+      - string
+      description: the placed object's id or name
+      required: true
+    name:
+      type: string
+      description: the new name
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Renombrar un objeto colocado
+      say:
+      - renombrá el objeto colocado
+      - dale otro nombre al maniquí
+      - que el modelo insertado se llame grúa
+    en:
+      title: Rename a placed object
+      say:
+      - rename the placed object
+      - give the human another name
+      - call the inserted model crane
+    fr:
+      title: Renommer un objet placé
+      say:
+      - renomme l'objet placé
+      - donne un autre nom à l'humain
+      - appelle grue le modèle inséré
+- id: objects.set_visible
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Show or hide one placed reference object (the eye of its row).
+  args:
+    id:
+      type:
+      - integer
+      - string
+      description: the placed object's id or name
+      required: true
+    'on':
+      type: boolean
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Mostrar u ocultar un objeto colocado
+      say:
+      - ocultá el humano que puse
+      - mostrá de nuevo el objeto colocado
+      - escondé el modelo insertado
+    en:
+      title: Show or hide a placed object
+      say:
+      - hide the inserted human
+      - bring the placed object back
+      - hide the inserted model
+    fr:
+      title: Afficher ou masquer un objet placé
+      say:
+      - masque l'humain posé
+      - réaffiche l'objet placé
+      - cache le modèle inséré
+- id: objects.set_obb
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Turn the bounding box (with its dimensions) of one placed reference object on or off.
+  args:
+    id:
+      type:
+      - integer
+      - string
+      description: the placed object's id or name
+      required: true
+    'on':
+      type: boolean
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Caja de un objeto colocado
+      say:
+      - prendé la caja del objeto colocado
+      - cuánto mide el humano que puse
+      - apagá la caja del modelo insertado
+    en:
+      title: Box of a placed object
+      say:
+      - turn on the box of the placed object
+      - how big is the inserted human
+      - turn off the box of the inserted model
+    fr:
+      title: Boîte d'un objet placé
+      say:
+      - active la boîte de l'objet placé
+      - combien mesure l'humain posé
+      - désactive la boîte du modèle inséré

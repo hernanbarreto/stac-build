@@ -1,0 +1,112 @@
+# The 'deviation' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: deviation
+position: 210
+title:
+  es: Desviación contra el BIM
+  en: Deviation against the BIM
+  fr: Écart avec le BIM
+summary:
+  es: Comparar la nube con el modelo BIM y colorearla por desviación.
+  en: Comparing the cloud with the BIM model and colouring it by deviation.
+  fr: Comparer le nuage avec le modèle BIM et le colorer par écart.
+commands:
+- id: deviation.open_compare
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Open the window of the BIM comparison (the model against the scan), where its registration is chosen.
+    It only opens the window: the comparison is launched from it.'
+  needs:
+  - session
+  - segmentation
+  - bim
+  text:
+    es:
+      title: Abrir la comparación con el BIM
+      say:
+      - abrí la comparación con el modelo
+      - comparar el modelo contra el escaneo
+      - ventana de comparación
+    en:
+      title: Open the BIM comparison
+      say:
+      - open the comparison with the model
+      - compare the model against the scan
+      - comparison window
+    fr:
+      title: Ouvrir la comparaison avec le BIM
+      say:
+      - ouvre la comparaison avec le modèle
+      - comparer le modèle au scan
+      - fenêtre de comparaison
+- id: deviation.run_comparison
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'LAUNCH the BIM comparison: each object of the segmentation is matched with its IFC element and compared
+    against it, and the cloud is loaded again coloured by deviation. Server work that takes a while. registration:
+    auto (the scan is registered on the model) or manual (the alignment made by hand is kept).'
+  confirm: true
+  args:
+    registration:
+      type: string
+      enum:
+      - auto
+      - manual
+      required: true
+  needs:
+  - session
+  - segmentation
+  - bim
+  text:
+    es:
+      title: Ejecutar la comparación con el BIM
+      say:
+      - ejecutá la comparación con el modelo
+      - compará cada objeto con su elemento IFC
+      - corré la comparación con registro manual
+    en:
+      title: Run the BIM comparison
+      say:
+      - run the comparison with the model
+      - compare each object with its IFC element
+      - run the comparison with manual registration
+    fr:
+      title: Lancer la comparaison avec le BIM
+      say:
+      - lance la comparaison avec le modèle
+      - compare chaque objet à son élément IFC
+      - lance la comparaison avec recalage manuel
+- id: deviation.toggle_view
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Draw (on) or hide (off) the cloud coloured by its deviation from the BIM model (the result of the last
+    comparison); hiding it loads the scan's own cloud again.
+  args:
+    'on':
+      type: boolean
+      required: true
+  needs:
+  - session
+  - bim
+  text:
+    es:
+      title: Mostrar u ocultar la desviación
+      say:
+      - mostrá la desviación
+      - ocultá el mapa de desviación
+      - volvé a la nube original
+    en:
+      title: Show or hide the deviation
+      say:
+      - show the deviation
+      - hide the deviation map
+      - back to the original cloud
+    fr:
+      title: Afficher ou masquer l'écart
+      say:
+      - affiche l'écart
+      - masque la carte des écarts
+      - reviens au nuage d'origine

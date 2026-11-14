@@ -98,3 +98,227 @@ commands:
       - quelles sessions y a-t-il
       - liste les projets
       done: 'Sessions : {detail}.'
+- id: sessions.select
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Select (highlight) one row of the Sessions list in the side panel; nothing is opened.
+  args:
+    session:
+      type: string
+      description: the session's name
+      required: true
+  text:
+    es:
+      title: Seleccionar una sesión en la lista
+      say:
+      - seleccioná ese proyecto en la lista
+      - marcá esa fila nada más
+      - resaltala
+    en:
+      title: Select a row of the sessions list
+      say:
+      - select that project in the list
+      - highlight that row only
+    fr:
+      title: Sélectionner une session dans la liste
+      say:
+      - sélectionne ce projet dans la liste
+      - surligne seulement cette ligne
+- id: sessions.create
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Create a new, empty session on the server with the given name (a video is then uploaded to it). For administrators
+    and managers.
+  args:
+    name:
+      type: string
+      description: 'the new session''s name: letters, digits, dashes and underscores only'
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Crear una sesión
+      say:
+      - creá un proyecto nuevo
+      - uno nuevo llamado obra norte
+      - armá uno vacío
+    en:
+      title: Create a session
+      say:
+      - create a new project
+      - a new one called north site
+      - set up an empty one
+    fr:
+      title: Créer une session
+      say:
+      - crée un nouveau projet
+      - une nouvelle, nommée chantier nord
+      - prépare un projet vide
+- id: sessions.rename
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Rename a session on the server: its folder and its id take the new name, everything in it is kept. For
+    administrators and managers.'
+  args:
+    session:
+      type: string
+      description: the session's current name
+      required: true
+    name:
+      type: string
+      description: 'the new name: letters, digits, dashes and underscores only'
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Renombrar una sesión
+      say:
+      - renombrá ese proyecto
+      - cambiale el nombre
+      - que pase a llamarse obra sur
+    en:
+      title: Rename a session
+      say:
+      - rename that project
+      - change its name
+      - call it south site
+    fr:
+      title: Renommer une session
+      say:
+      - renomme ce projet
+      - change son nom
+      - appelle-le chantier sud
+- id: sessions.delete
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'DELETE a session from the server with ALL its data: video, frames, cloud, segmentation, meshes. It cannot
+    be undone. For administrators and managers.'
+  confirm: true
+  args:
+    session:
+      type: string
+      description: the session's name
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Eliminar una sesión
+      say:
+      - eliminá ese proyecto con todos sus datos
+      - borralo del servidor
+      - sacalo para siempre
+    en:
+      title: Delete a session
+      say:
+      - delete that project and all its data
+      - erase it from the server
+      - remove it for good
+    fr:
+      title: Supprimer une session
+      say:
+      - supprime ce projet avec toutes ses données
+      - efface-le du serveur
+      - retire-le définitivement
+- id: sessions.filter
+  kind: query
+  runs_on: ui
+  status: manual
+  model: Narrow the sessions shown in the side panel to those whose name holds a text typed in the search box.
+  args:
+    text:
+      type: string
+      description: the text to look for
+      required: true
+  text:
+    es:
+      title: Buscar en la lista de sesiones
+      say:
+      - buscá el proyecto que diga estación
+      - filtrá la lista por nombre
+      - encontrá uno por su nombre
+    en:
+      title: Search among the sessions
+      say:
+      - search the projects for station
+      - filter them by name
+      - find one by its name
+    fr:
+      title: Rechercher dans la liste des sessions
+      say:
+      - recherche le projet qui contient gare
+      - filtre la liste par nom
+      - trouve-le par son nom
+- id: sessions.upload_video
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Upload a video to a session that has no frames yet: the file is picked by hand, uploaded, and the server
+    then extracts its frames (a long background job). For administrators and managers.'
+  confirm: true
+  args:
+    session:
+      type: string
+      description: the session's name
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Subir un video a una sesión
+      say:
+      - subí la filmación a ese proyecto
+      - sumá la filmación de la visita
+      - extraé los cuadros de la filmación
+    en:
+      title: Upload a video to a session
+      say:
+      - upload the footage to that project
+      - add the footage of the walk
+      - extract the frames of the footage
+    fr:
+      title: Téléverser une vidéo dans une session
+      say:
+      - téléverse le film dans ce projet
+      - ajoute le film de la visite
+      - extrais les images du film
+- id: sessions.segment_auto
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Segment the objects of the loaded session automatically (the Segment objects button of its row): the VLM
+    names what the keyframes show and SAM3 segments it. Long GPU work in the background (it can take hours on a
+    large one).'
+  confirm: true
+  args:
+    session:
+      type: string
+      description: the session's name; omit for the open one
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Segmentar los objetos de la sesión
+      say:
+      - segmentá los objetos del proyecto cargado
+      - corré la segmentación de objetos
+      - botón segmentar objetos
+    en:
+      title: Segment the session's objects
+      say:
+      - segment the objects of the loaded project
+      - run the object segmentation
+      - the segment objects button
+    fr:
+      title: Segmenter les objets de la session
+      say:
+      - segmente les objets du projet chargé
+      - lance la segmentation des objets
+      - bouton segmenter les objets

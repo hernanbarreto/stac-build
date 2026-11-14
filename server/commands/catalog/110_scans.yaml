@@ -99,3 +99,143 @@ commands:
       - je veux fusionner les scans
       - fusionner les scans
       done: Fenêtre de fusion ouverte.
+- id: scans.close_tab
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Close the tab of an open scan (nothing is lost: the list reopens it). Closing the active tab shows the
+    neighbouring one.'
+  args:
+    scan:
+      type: string
+      description: the scan's date (YYYY-MM-DD) or label; omit for the active tab
+  needs:
+  - session
+  - scan
+  text:
+    es:
+      title: Cerrar la pestaña de un escaneo
+      say:
+      - cerrá esa pestaña
+      - sacá la pestaña activa
+      - cerrá la pestaña de la toma anterior
+    en:
+      title: Close a scan's tab
+      say:
+      - close that tab
+      - get rid of the active tab
+      - close the tab of the earlier capture
+    fr:
+      title: Fermer l'onglet d'un scan
+      say:
+      - ferme cet onglet
+      - enlève l'onglet actif
+      - ferme l'onglet de la capture précédente
+- id: scans.cycle_tab
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Go to the next or the previous open scan tab (Ctrl+Tab); it needs two or more tabs open.
+  args:
+    direction:
+      type: string
+      enum:
+      - next
+      - prev
+      required: true
+  needs:
+  - session
+  - scan
+  text:
+    es:
+      title: Pasar a la pestaña siguiente o anterior
+      say:
+      - pasá a la pestaña siguiente
+      - pestaña anterior
+      - rotá entre las pestañas
+    en:
+      title: Next or previous scan tab
+      say:
+      - go to the next tab
+      - previous tab
+      - cycle through the tabs
+    fr:
+      title: Onglet suivant ou précédent
+      say:
+      - passe à l'onglet suivant
+      - onglet précédent
+      - fais défiler les onglets
+- id: scans.set_reference
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Mark one scan as the composition reference: the one the others are registered on when fusing, and the
+    one shown first when the session is opened.'
+  args:
+    scan:
+      type: string
+      description: the scan's date (YYYY-MM-DD) or label
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Usar un escaneo como referencia de composición
+      say:
+      - usá este como referencia de composición
+      - marcá la estrella de esa toma
+      - que este sea el de referencia
+    en:
+      title: Use a scan as the composition reference
+      say:
+      - use this one as the composition reference
+      - star that capture
+      - make this one the reference
+    fr:
+      title: Utiliser un scan comme référence de composition
+      say:
+      - utilise celui-ci comme référence de composition
+      - mets l'étoile sur cette capture
+      - que celui-ci soit la référence
+- id: scans.fuse
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'LAUNCH the registration and merge from the Fuse window: each chosen scan is registered on the reference
+    one through the objects that carry the same label in both, and the merged cloud is built as a new entry of the
+    list. Several minutes of server work.'
+  confirm: true
+  args:
+    session:
+      type: string
+      description: the session's name; omit for the open one
+    scans:
+      type: array
+      items:
+        type: string
+      description: the scans merged into the reference (date or label)
+      required: true
+    exclude:
+      type: object
+      description: per scan, the labels of the object pairs left out of the registration
+  needs:
+  - session
+  text:
+    es:
+      title: Ejecutar la fusión
+      say:
+      - registrá y construí la nube fusionada
+      - corré el registro de las tomas elegidas
+      - lanzala desde su ventana
+    en:
+      title: Run the fusion
+      say:
+      - register and build the fused cloud
+      - run the registration of the chosen captures
+      - launch it from its window
+    fr:
+      title: Lancer la fusion
+      say:
+      - recale et construis le nuage fusionné
+      - lance le recalage des captures choisies
+      - lance-la depuis sa fenêtre

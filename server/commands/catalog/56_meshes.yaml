@@ -114,3 +114,107 @@ commands:
       - je veux générer le maillage
       - fenêtre genrecon
       done: Fenêtre GenRecon ouverte.
+- id: meshes.delete
+  kind: action
+  runs_on: ui
+  status: manual
+  model: DELETE one mesh of the session from the disk for good (its folder among the session's meshes). It cannot
+    be undone.
+  confirm: true
+  args:
+    mesh:
+      type: string
+      description: the mesh's name or folder
+      required: true
+  needs:
+  - session
+  - mesh
+  text:
+    es:
+      title: Eliminar una malla
+      say:
+      - eliminá del disco la malla vieja
+      - borrá para siempre ese mallado
+      - descartá el resultado de genrecon
+    en:
+      title: Delete a mesh
+      say:
+      - delete the old mesh from the disk
+      - erase that meshing for good
+      - discard the genrecon result
+    fr:
+      title: Supprimer un maillage
+      say:
+      - supprime du disque l'ancien maillage
+      - efface définitivement ce maillage
+      - abandonne le résultat de genrecon
+- id: meshes.focus
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Fly the camera to one mesh of the session (a click on its row in the list).
+  args:
+    mesh:
+      type: string
+      description: the mesh's name or folder
+      required: true
+  needs:
+  - session
+  - mesh
+  text:
+    es:
+      title: Ir a una malla
+      say:
+      - llevame a esa malla
+      - encuadrá el mallado
+      - dónde quedó el resultado de genrecon
+    en:
+      title: Go to a mesh
+      say:
+      - take me to that mesh
+      - frame the meshing
+      - where is the genrecon result
+    fr:
+      title: Aller à un maillage
+      say:
+      - emmène-moi à ce maillage
+      - cadre le maillage
+      - où est le résultat de genrecon
+- id: meshes.run_genrecon
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'LAUNCH GenRecon on the open scan from its window: the mesh of the published cloud is generated and textured
+    from the photos, as a queued job of long GPU work (tens of minutes to hours). confidence = the cloud''s confidence
+    filter, 0 (every point) to 0.99.'
+  confirm: true
+  args:
+    confidence:
+      type: number
+      minimum: 0
+      maximum: 0.99
+      description: the cloud's confidence filter, 0 to 0.99
+      required: true
+  needs:
+  - session
+  - scan
+  - cloud
+  text:
+    es:
+      title: Ejecutar GenRecon
+      say:
+      - ejecutá genrecon
+      - lanzá la generación del mallado
+      - corré genrecon con confianza cero
+    en:
+      title: Run GenRecon
+      say:
+      - run genrecon
+      - launch the generation of the meshing
+      - start genrecon at zero confidence
+    fr:
+      title: Lancer GenRecon
+      say:
+      - lance genrecon
+      - démarre la génération du maillage
+      - genrecon avec une confiance de zéro

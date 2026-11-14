@@ -1,0 +1,542 @@
+# The 'admin' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: admin
+position: 270
+title:
+  es: Administración
+  en: Administration
+  fr: Administration
+summary:
+  es: Gestión de usuarios y equipos (solo administradores).
+  en: User and team management (administrators only).
+  fr: Gestion des utilisateurs et des équipes (administrateurs seulement).
+commands:
+- id: admin.open
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Bring up the Administration window (user and team management). For administrators.
+  needs:
+  - admin
+  text:
+    es:
+      title: Abrir la administración
+      say:
+      - abrí la gestión de usuarios
+      - administración del sistema
+      - ventana de altas y bajas de usuarios
+    en:
+      title: Open the administration
+      say:
+      - open user management
+      - the administration window
+      - where users are created and removed
+    fr:
+      title: Ouvrir l'administration
+      say:
+      - ouvre la gestion des utilisateurs
+      - administration du système
+      - fenêtre de création et de suppression des utilisateurs
+- id: admin.set_tab
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Administration window: which tab is shown, users or teams.'
+  args:
+    tab:
+      type: string
+      enum:
+      - users
+      - teams
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Pestañas de la administración
+      say:
+      - pestaña de usuarios de la administración
+      - pasá a la pestaña de equipos
+      - listado de usuarios del sistema
+    en:
+      title: Administration tabs
+      say:
+      - the users tab of the administration
+      - go to the tab of the groups
+      - list of the system's users
+    fr:
+      title: Onglets de l'administration
+      say:
+      - onglet des utilisateurs de l'administration
+      - passe à l'onglet des équipes
+      - liste des utilisateurs du système
+- id: admin.create_user
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Administration: create a user account: its user name, its role (admin, manager, editor, viewer or recorder)
+    and, optionally, a full name and an e-mail. The password is typed by hand in the form: it is never an argument.'
+  args:
+    username:
+      type: string
+      description: the account's user name
+      required: true
+    role:
+      type: string
+      enum:
+      - admin
+      - manager
+      - editor
+      - viewer
+      - recorder
+      required: true
+    full_name:
+      type: string
+    email:
+      type: string
+  needs:
+  - admin
+  text:
+    es:
+      title: Crear un usuario
+      say:
+      - creá un usuario nuevo
+      - dale una cuenta a la arquitecta como editora
+      - nuevo usuario con rol de registrador
+    en:
+      title: Create a user
+      say:
+      - create a new user
+      - give the architect an account as an editor
+      - a new user with the recorder role
+    fr:
+      title: Créer un utilisateur
+      say:
+      - crée un nouvel utilisateur
+      - donne un compte à l'architecte comme éditrice
+      - nouvel utilisateur avec le rôle d'opérateur de capture
+- id: admin.set_user_role
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Administration: change a user''s role: admin, manager, editor, viewer or recorder.'
+  args:
+    user:
+      type: string
+      description: the user's name
+      required: true
+    role:
+      type: string
+      enum:
+      - admin
+      - manager
+      - editor
+      - viewer
+      - recorder
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Cambiar el rol de un usuario
+      say:
+      - hacé gerente a la arquitecta
+      - pasá ese usuario a editor
+      - dale al topógrafo otro rol
+    en:
+      title: Change a user's role
+      say:
+      - make the architect a manager
+      - turn that user into an editor
+      - give the surveyor another role
+    fr:
+      title: Changer le rôle d'un utilisateur
+      say:
+      - passe l'architecte en responsable
+      - fais de cet utilisateur un éditeur
+      - donne un autre rôle au géomètre
+- id: admin.toggle_user_active
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Administration: disable a user''s account (they can no longer sign in) or enable it again: on = true enables
+    it, false disables it. Nothing of theirs is deleted.'
+  args:
+    user:
+      type: string
+      description: the user's name
+      required: true
+    'on':
+      type: boolean
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Activar o desactivar un usuario
+      say:
+      - desactivá la cuenta del topógrafo
+      - activá de nuevo a la arquitecta
+      - bloqueá el acceso de ese usuario
+    en:
+      title: Enable or disable a user
+      say:
+      - disable the surveyor's account
+      - enable the architect again
+      - block that user's access
+    fr:
+      title: Activer ou désactiver un utilisateur
+      say:
+      - désactive le compte du géomètre
+      - réactive l'architecte
+      - bloque l'accès de cet utilisateur
+- id: admin.edit_user
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Administration: edit a user''s full name and e-mail. A new password, when one is set, is typed by hand
+    in the form: it is never an argument.'
+  args:
+    user:
+      type: string
+      description: the user's name
+      required: true
+    full_name:
+      type: string
+    email:
+      type: string
+  needs:
+  - admin
+  text:
+    es:
+      title: Editar un usuario
+      say:
+      - cambiale el correo a la arquitecta
+      - corregí el nombre completo del topógrafo
+      - editá los datos de ese usuario
+    en:
+      title: Edit a user
+      say:
+      - change the architect's e-mail
+      - fix the surveyor's full name
+      - edit that user's details
+    fr:
+      title: Modifier un utilisateur
+      say:
+      - change l'e-mail de l'architecte
+      - corrige le nom complet du géomètre
+      - modifie les données de cet utilisateur
+- id: admin.delete_user
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Administration: DELETE a user account for good. It cannot be undone.'
+  confirm: true
+  args:
+    user:
+      type: string
+      description: the user's name
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Eliminar un usuario
+      say:
+      - eliminá el usuario del topógrafo
+      - borrá esa cuenta
+      - sacá a la arquitecta del sistema
+    en:
+      title: Delete a user
+      say:
+      - delete the surveyor's user
+      - erase that account
+      - remove the architect from the system
+    fr:
+      title: Supprimer un utilisateur
+      say:
+      - supprime l'utilisateur du géomètre
+      - efface ce compte
+      - retire l'architecte du système
+- id: admin.create_team
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Administration: create a team with its name, an optional description and its manager (a user with the
+    manager or admin role).'
+  args:
+    name:
+      type: string
+      description: the new team's name
+      required: true
+    description:
+      type: string
+    manager:
+      type: string
+      description: the manager's user name
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Crear un equipo
+      say:
+      - creá un grupo nuevo
+      - armá el de estructuras con la arquitecta de gerente
+      - un grupo nuevo de obra
+    en:
+      title: Create a team
+      say:
+      - create a new group
+      - set up the structures one with the architect as its manager
+      - a new site crew
+    fr:
+      title: Créer une équipe
+      say:
+      - crée un nouveau groupe
+      - monte celui des structures avec l'architecte comme responsable
+      - un nouveau groupe de chantier
+- id: admin.delete_team
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Administration: DELETE a team with its memberships and its assignments (the sessions themselves are not
+    deleted).'
+  confirm: true
+  args:
+    team:
+      type: string
+      description: the team's name
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Eliminar un equipo
+      say:
+      - eliminá el grupo de estructuras
+      - borralo con sus asignaciones
+      - disolvé ese grupo
+    en:
+      title: Delete a team
+      say:
+      - delete the structures group
+      - erase it with its assignments
+      - dissolve that crew
+    fr:
+      title: Supprimer une équipe
+      say:
+      - supprime le groupe structures
+      - efface-le avec ses attributions
+      - dissous ce groupe
+- id: admin.change_team_manager
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Administration: change who manages a team (a user with the manager or admin role).'
+  args:
+    team:
+      type: string
+      description: the team's name
+      required: true
+    manager:
+      type: string
+      description: the new manager's user name
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Cambiar el gerente de un equipo
+      say:
+      - que la arquitecta sea la gerente del grupo
+      - cambiá quién lo dirige
+      - nuevo responsable del grupo de obra
+    en:
+      title: Change a team's manager
+      say:
+      - make the architect the group's manager
+      - change who leads it
+      - a new manager for the site crew
+    fr:
+      title: Changer le responsable d'une équipe
+      say:
+      - que l'architecte soit la responsable du groupe
+      - change qui le dirige
+      - nouveau responsable pour le groupe de chantier
+- id: admin.add_team_member
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Administration: add a user to a team.'
+  args:
+    team:
+      type: string
+      description: the team's name
+      required: true
+    user:
+      type: string
+      description: the user's name
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Sumar un usuario a un equipo
+      say:
+      - desde la administración, sumá al topógrafo al grupo de obra
+      - asigná ese usuario al grupo
+      - meté a la arquitecta en estructuras
+    en:
+      title: Add a user to a team
+      say:
+      - from the administration, add the surveyor to the site crew
+      - assign that user to the group
+      - put the architect in structures
+    fr:
+      title: Ajouter un utilisateur à une équipe
+      say:
+      - depuis l'administration, ajoute le géomètre au groupe de chantier
+      - attribue cet utilisateur au groupe
+      - mets l'architecte dans structures
+- id: admin.remove_team_member
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Administration: REMOVE a user from a team (the user account stays).'
+  confirm: true
+  args:
+    team:
+      type: string
+      description: the team's name
+      required: true
+    user:
+      type: string
+      description: the user's name
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Quitar un usuario de un equipo
+      say:
+      - desde la administración, quitá al topógrafo del grupo de obra
+      - sacá ese usuario de estructuras
+      - que la arquitecta deje el grupo
+    en:
+      title: Remove a user from a team
+      say:
+      - from the administration, remove the surveyor from the site crew
+      - take that user out of structures
+      - the architect leaves the group
+    fr:
+      title: Retirer un utilisateur d'une équipe
+      say:
+      - depuis l'administration, retire le géomètre du groupe de chantier
+      - enlève cet utilisateur de structures
+      - que l'architecte quitte le groupe
+- id: admin.assign_session
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Administration: assign a session to a team (its members can then work on it).'
+  args:
+    team:
+      type: string
+      description: the team's name
+      required: true
+    session:
+      type: string
+      description: the session's name
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Asignar una sesión a un equipo
+      say:
+      - asigná el proyecto al grupo de obra
+      - dale acceso a ese grupo
+      - que estructuras lo pueda ver
+    en:
+      title: Assign a session to a team
+      say:
+      - assign the project to the site crew
+      - give that group access to it
+      - let structures see it
+    fr:
+      title: Attribuer une session à une équipe
+      say:
+      - attribue le projet au groupe de chantier
+      - donne l'accès à ce groupe
+      - que structures puisse le voir
+- id: admin.unassign_session
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Administration: take a session away from a team (its members no longer see it; nothing is deleted).'
+  args:
+    team:
+      type: string
+      description: the team's name
+      required: true
+    session:
+      type: string
+      description: the session's name
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Quitar una sesión de un equipo
+      say:
+      - quitale el proyecto al grupo de obra
+      - sacá esa asignación
+      - que estructuras ya no lo vea
+    en:
+      title: Unassign a session from a team
+      say:
+      - take the project away from the site crew
+      - remove that assignment
+      - structures no longer sees it
+    fr:
+      title: Retirer une session à une équipe
+      say:
+      - retire le projet au groupe de chantier
+      - retire cette attribution
+      - que structures ne le voie plus
+- id: admin.create_team_session
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Administration: create a new, empty session and assign it to a team in one step.'
+  args:
+    team:
+      type: string
+      description: the team's name
+      required: true
+    name:
+      type: string
+      description: the new session's name
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Crear una sesión para un equipo
+      say:
+      - creá un proyecto nuevo para el grupo de obra
+      - uno nuevo asignado a estructuras
+      - uno vacío para ese grupo
+    en:
+      title: Create a session for a team
+      say:
+      - create a new project for the site crew
+      - a new one assigned to structures
+      - an empty one for that group
+    fr:
+      title: Créer une session pour une équipe
+      say:
+      - crée un nouveau projet pour le groupe de chantier
+      - un nouveau attribué à structures
+      - un vide pour ce groupe

@@ -43,3 +43,161 @@ commands:
       - lis le scan
       - parcours vidéo et scène 3D
       done: Parcours ouvert.
+- id: flythrough.play_pause
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Start or pause the flythrough''s video (the 3D view follows it): on = true to start it, false to pause;
+    omit to switch.'
+  args:
+    'on':
+      type: boolean
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Reproducir o pausar el recorrido
+      say:
+      - pausá el video
+      - dale play
+      - seguí reproduciendo
+    en:
+      title: Play or pause the flythrough
+      say:
+      - pause the video
+      - press play
+      - resume the video
+    fr:
+      title: Lire ou mettre en pause le parcours
+      say:
+      - mets la vidéo en pause
+      - appuie sur lecture
+      - reprends la vidéo
+- id: flythrough.step_frame
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Step the flythrough''s video by frames (it pauses): frames = how many, positive forward, negative back.'
+  args:
+    frames:
+      type: integer
+      description: 'frames to step: positive forward, negative back'
+      required: true
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Avanzar o retroceder cuadro a cuadro
+      say:
+      - avanzá un cuadro
+      - retrocedé un cuadro
+      - adelantá cinco cuadros
+    en:
+      title: Step frame by frame
+      say:
+      - step one frame forward
+      - one frame back
+      - go five frames ahead
+    fr:
+      title: Avancer ou reculer image par image
+      say:
+      - avance d'une image
+      - recule d'une image
+      - avance de cinq images
+- id: flythrough.seek
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Move the flythrough's video to a time, in seconds from its start (the 3D view jumps with it).
+  args:
+    seconds:
+      type: number
+      minimum: 0
+      description: seconds from the start
+      required: true
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Ir a un momento del recorrido
+      say:
+      - andá al segundo 30 del video
+      - saltá al minuto 2
+      - volvé al inicio del video
+    en:
+      title: Go to a time of the flythrough
+      say:
+      - go to second 30 of the video
+      - jump to minute 2
+      - back to the start of the video
+    fr:
+      title: Aller à un instant du parcours
+      say:
+      - va à la seconde 30 de la vidéo
+      - saute à la minute 2
+      - reviens au début de la vidéo
+- id: flythrough.set_speed
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Playback speed of the flythrough''s video: 0.25, 0.5, 1 (normal) or 2 times.'
+  args:
+    rate:
+      type: number
+      enum:
+      - 0.25
+      - 0.5
+      - 1
+      - 2
+      required: true
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Velocidad del recorrido
+      say:
+      - poné el video al doble de velocidad
+      - a cámara lenta
+      - velocidad normal
+    en:
+      title: Flythrough speed
+      say:
+      - video at double speed
+      - slow motion
+      - normal speed
+    fr:
+      title: Vitesse du parcours
+      say:
+      - vidéo en vitesse double
+      - au ralenti
+      - vitesse normale
+- id: flythrough.close
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Close the flythrough (its player): the viewer returns to the free 3D view.'
+  needs:
+  - session
+  text:
+    es:
+      title: Cerrar el recorrido
+      say:
+      - cerrá el recorrido
+      - salí del reproductor
+      - cerrá el video
+    en:
+      title: Close the flythrough
+      say:
+      - close the flythrough
+      - leave the player
+      - close the video
+    fr:
+      title: Fermer le parcours
+      say:
+      - ferme le parcours
+      - quitte le lecteur
+      - ferme la vidéo

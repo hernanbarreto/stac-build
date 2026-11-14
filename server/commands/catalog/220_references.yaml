@@ -1,0 +1,549 @@
+# The 'references' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: references
+position: 220
+title:
+  es: Referencias de evaluación
+  en: Evaluation references
+  fr: Références d'évaluation
+summary:
+  es: Cotas y planos de referencia marcados sobre las imágenes de los keyframes, para la batería de evaluación.
+  en: Reference distances and planes marked on the keyframe images, for the evaluation battery.
+  fr: Cotes et plans de référence marqués sur les images clés, pour la batterie d'évaluation.
+commands:
+- id: references.set_mode
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the reference window (on the keyframe images): what a click marks: distance (the two ends of a measured
+    distance) or plane (the vertices of a polygon on a flat surface).'
+  args:
+    mode:
+      type: string
+      enum:
+      - distance
+      - plane
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Modo de marcado de las referencias
+      say:
+      - pasá a dibujar polígonos
+      - modo cota
+      - alterná entre cota y polígono
+    en:
+      title: Marking mode of the references
+      say:
+      - switch to drawing polygons
+      - distance mode
+      - toggle between distance and polygon
+    fr:
+      title: Mode de marquage des références
+      say:
+      - passe au dessin de polygones
+      - mode distance
+      - alterne entre distance et polygone
+- id: references.go_to_keyframe
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the reference window: show another keyframe image, by its position (1 = the first).'
+  args:
+    index:
+      type: integer
+      minimum: 1
+      description: the keyframe's position, from 1
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Ir a un keyframe en las referencias
+      say:
+      - keyframe siguiente en las referencias
+      - imagen anterior
+      - andá a la imagen 25
+    en:
+      title: Go to a keyframe in the references
+      say:
+      - next keyframe in the references
+      - previous image
+      - go to image 25
+    fr:
+      title: Aller à une image clé dans les références
+      say:
+      - image clé suivante dans les références
+      - image précédente
+      - va à l'image 25
+- id: references.zoom
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the reference window: zoom the keyframe image in or out, or fit it to the window.'
+  args:
+    direction:
+      type: string
+      enum:
+      - in
+      - out
+      - reset
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Zoom de la imagen en las referencias
+      say:
+      - acercá la imagen de las referencias
+      - alejala
+      - encajá la imagen en la ventana
+    en:
+      title: Zoom the image in the references
+      say:
+      - zoom in on the reference image
+      - zoom out
+      - fit the image to the window
+    fr:
+      title: Zoom de l'image dans les références
+      say:
+      - zoome sur l'image des références
+      - dézoome
+      - ajuste l'image à la fenêtre
+- id: references.place_point
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the reference window: a click on the keyframe image, an end of a distance (two clicks fix it) or a
+    vertex of the polygon being drawn, at the pixel (u, v).'
+  args:
+    u:
+      type: number
+      description: pixel column on the image
+      required: true
+    v:
+      type: number
+      description: pixel row on the image
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Marcar un punto sobre el keyframe
+      say:
+      - marcá el extremo de la cota sobre la imagen
+      - poné un vértice del polígono
+      - clic en el extremo B
+    en:
+      title: Mark a point on the keyframe
+      say:
+      - mark the end of the distance on the image
+      - put a vertex of the polygon
+      - click on end B
+    fr:
+      title: Marquer un point sur l'image clé
+      say:
+      - marque l'extrémité de la distance sur l'image
+      - pose un sommet du polygone
+      - clique sur l'extrémité B
+- id: references.close_polygon
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the reference window (plane mode): close the polygon being drawn (Enter or a double click): with three
+    or more vertices it becomes a reference plane, or one more polygon of the armed plane.'
+  needs:
+  - session
+  text:
+    es:
+      title: Cerrar el polígono
+      say:
+      - cerrá el polígono
+      - terminá de dibujar la superficie
+      - listo el polígono de la pared
+    en:
+      title: Close the polygon
+      say:
+      - close the polygon
+      - finish drawing the surface
+      - the wall's polygon is done
+    fr:
+      title: Fermer le polygone
+      say:
+      - ferme le polygone
+      - termine de dessiner la surface
+      - le polygone du mur est fini
+- id: references.undo_vertex
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the reference window (plane mode): remove the last vertex of the polygon being drawn (Backspace).'
+  needs:
+  - session
+  text:
+    es:
+      title: Quitar el último vértice
+      say:
+      - quitá el último vértice
+      - sacá el vértice que acabo de poner
+      - retrocedé un vértice
+    en:
+      title: Remove the last vertex
+      say:
+      - remove the last vertex
+      - take back the vertex just put
+      - go back one vertex
+    fr:
+      title: Retirer le dernier sommet
+      say:
+      - retire le dernier sommet
+      - enlève le sommet tout juste posé
+      - recule d'un sommet
+- id: references.cancel_pending
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the reference window: cancel what is half done (Esc): the first end of a distance, the polygon being
+    drawn, the armed item.'
+  needs:
+  - session
+  text:
+    es:
+      title: Cancelar lo pendiente en las referencias
+      say:
+      - cancelá lo pendiente
+      - descartá el polígono a medio dibujar
+      - soltá el extremo A
+    en:
+      title: Cancel what is pending in the references
+      say:
+      - cancel what is pending
+      - drop the half-drawn polygon
+      - release end A
+    fr:
+      title: Annuler l'action en attente dans les références
+      say:
+      - annule l'action en attente
+      - abandonne le polygone à moitié dessiné
+      - relâche l'extrémité A
+- id: references.select_item
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the reference window: select one reference distance or plane of the list (the image jumps to a keyframe
+    where it was marked).'
+  args:
+    id:
+      type: string
+      description: the reference's id, e.g. d1 or p2
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Seleccionar una referencia de la lista
+      say:
+      - seleccioná la cota d1
+      - andá al plano p2 del listado
+      - elegí esa referencia
+    en:
+      title: Select a reference of the list
+      say:
+      - select distance d1
+      - go to plane p2 of the list
+      - pick that reference
+    fr:
+      title: Sélectionner une référence de la liste
+      say:
+      - sélectionne la distance d1
+      - va au plan p2 de la liste
+      - choisis cette référence
+- id: references.arm_add_observation
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the reference window: arm one reference so the next clicks add to it: another observation of the same
+    two ends on another keyframe (a distance) or another polygon (a plane).'
+  args:
+    id:
+      type: string
+      description: the reference's id, e.g. d1 or p2
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Sumar una observación a una referencia
+      say:
+      - sumá otra observación a la cota d1
+      - otro polígono para el plano p2
+      - marcá los mismos extremos en otro keyframe
+    en:
+      title: One more observation of a reference
+      say:
+      - one more observation for distance d1
+      - another polygon for plane p2
+      - mark the same ends on another keyframe
+    fr:
+      title: Une observation de plus pour une référence
+      say:
+      - une observation de plus pour la distance d1
+      - un autre polygone pour le plan p2
+      - marque les mêmes extrémités sur une autre image clé
+- id: references.edit_distance
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the reference window: edit one reference distance: its measured value and uncertainty in metres, its
+    role (gauge = it calibrates the scale, test = it measures the error), the instrument (tape, laser, total station)
+    and a note. Kept when the references are saved.'
+  args:
+    id:
+      type: string
+      description: the reference's id, e.g. d1 or p2
+      required: true
+    value_m:
+      type: number
+      minimum: 0
+      description: the measured value, metres
+    sigma_m:
+      type: number
+      minimum: 0
+      description: its uncertainty, metres
+    role:
+      type: string
+      enum:
+      - gauge
+      - test
+    tool:
+      type: string
+      enum:
+      - tape
+      - laser
+      - total_station
+    note:
+      type: string
+  needs:
+  - session
+  text:
+    es:
+      title: Editar una cota de referencia
+      say:
+      - el valor medido de d1 es 3 metros 20
+      - cambiá el instrumento a láser
+      - esa cota calibra
+    en:
+      title: Edit a reference distance
+      say:
+      - the measured value of d1 is 3.20 metres
+      - change the instrument to laser
+      - that distance calibrates
+    fr:
+      title: Modifier une distance de référence
+      say:
+      - la valeur mesurée de d1 est 3,20 mètres
+      - change l'instrument en laser
+      - cette distance étalonne
+- id: references.edit_plane
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the reference window: edit one reference plane: its label (what the surface is) and a note. Kept when
+    the references are saved.'
+  args:
+    id:
+      type: string
+      description: the reference's id, e.g. d1 or p2
+      required: true
+    label:
+      type: string
+      description: what the surface is
+    note:
+      type: string
+  needs:
+  - session
+  text:
+    es:
+      title: Editar un plano de referencia
+      say:
+      - p1 es la pared norte
+      - cambiá la etiqueta del plano
+      - ponele una nota al plano p2
+    en:
+      title: Edit a reference plane
+      say:
+      - p1 is the north wall
+      - change the plane's label
+      - give plane p2 a note
+    fr:
+      title: Modifier un plan de référence
+      say:
+      - p1 est le mur nord
+      - change l'étiquette du plan
+      - mets une note au plan p2
+- id: references.remove_observation
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the reference window: remove one observation (the end marked on one keyframe) from a reference distance.'
+  args:
+    id:
+      type: string
+      description: the reference's id, e.g. d1 or p2
+      required: true
+    end:
+      type: integer
+      enum:
+      - 0
+      - 1
+      description: 0 = end A, 1 = end B
+      required: true
+    index:
+      type: integer
+      minimum: 0
+      description: which observation of that end, from 0
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Quitar una observación de una cota
+      say:
+      - quitá la observación del keyframe 12
+      - sacá ese extremo marcado
+      - descartá la observación de d1
+    en:
+      title: Remove an observation of a distance
+      say:
+      - remove the observation on keyframe 12
+      - take away that marked end
+      - discard the observation of distance d1
+    fr:
+      title: Retirer une observation d'une distance
+      say:
+      - retire l'observation de l'image clé 12
+      - enlève cette extrémité marquée
+      - abandonne l'observation de la distance d1
+- id: references.remove_polygon
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the reference window: remove one polygon (drawn on one keyframe) from a reference plane.'
+  args:
+    id:
+      type: string
+      description: the reference's id, e.g. d1 or p2
+      required: true
+    index:
+      type: integer
+      minimum: 0
+      description: which polygon of the plane, from 0
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Quitar un polígono de un plano
+      say:
+      - quitá el polígono del keyframe 8
+      - sacá ese contorno del plano p1
+      - descartá el polígono mal dibujado
+    en:
+      title: Remove a polygon of a plane
+      say:
+      - remove the polygon on keyframe 8
+      - take that outline out of plane p1
+      - discard the badly drawn polygon
+    fr:
+      title: Retirer un polygone d'un plan
+      say:
+      - retire le polygone de l'image clé 8
+      - enlève ce contour du plan p1
+      - abandonne le polygone mal dessiné
+- id: references.delete_item
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the reference window: DELETE one reference distance or plane with all its observations. It leaves the
+    stored document when the references are saved.'
+  confirm: true
+  args:
+    id:
+      type: string
+      description: the reference's id, e.g. d1 or p2
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Eliminar una referencia
+      say:
+      - eliminá la cota d1
+      - borrá el plano p2 del listado
+      - sacá esa referencia con sus observaciones
+    en:
+      title: Delete a reference
+      say:
+      - delete distance d1
+      - erase plane p2 from the list
+      - remove that reference with its observations
+    fr:
+      title: Supprimer une référence
+      say:
+      - supprime la distance d1
+      - efface le plan p2 de la liste
+      - retire cette référence avec ses observations
+- id: references.save
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Save the references of the scan (the Save of the reference window): the whole document, every distance
+    and plane as it is now, is written to the session in place of the stored one; the server validates it first.'
+  needs:
+  - session
+  text:
+    es:
+      title: Guardar las referencias
+      say:
+      - guardá las referencias
+      - guardá las cotas y los planos
+      - escribí el documento
+    en:
+      title: Save the references
+      say:
+      - save the references
+      - save the distances and the planes
+      - write the document
+    fr:
+      title: Enregistrer les références
+      say:
+      - enregistre les références
+      - enregistre les distances et les plans
+      - écris le document
+- id: references.close
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Close the reference window (with unsaved changes it asks whether to discard them).
+  needs:
+  - session
+  text:
+    es:
+      title: Cerrar las referencias
+      say:
+      - cerrá las referencias
+      - cerrá la ventana de cotas
+      - salí del marcado sobre keyframes
+    en:
+      title: Close the references
+      say:
+      - close the references
+      - close the window of reference distances
+      - leave the marking on keyframes
+    fr:
+      title: Fermer les références
+      say:
+      - ferme les références
+      - ferme la fenêtre des distances de référence
+      - quitte le marquage sur images clés

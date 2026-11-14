@@ -1,0 +1,442 @@
+# The 'brush' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: brush
+position: 180
+title:
+  es: Pincel de segmentos
+  en: Segment brush
+  fr: Pinceau de segments
+summary:
+  es: 'El pincel del visor: marcar zonas de la nube para sacarlas de sus segmentos, reasignarlas, fusionar segmentos,
+    filtrar por confianza.'
+  en: 'The viewer''s brush: marking zones of the cloud to take them out of their segments, reassign them, merge
+    segments, filter by confidence.'
+  fr: 'Le pinceau de la visionneuse : marquer des zones du nuage pour les retirer de leurs segments, les réaffecter,
+    fusionner des segments, filtrer par confiance.'
+commands:
+- id: brush.set_shape
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Shape of the tool that marks zones of the cloud: sphere, cube, or box (a selection box that is placed
+    and then moved, rotated and stretched).'
+  args:
+    shape:
+      type: string
+      enum:
+      - sphere
+      - cube
+      - box
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Forma del pincel
+      say:
+      - marcá con una esfera
+      - usá la caja de selección para marcar
+      - forma cúbica para marcar
+    en:
+      title: Brush shape
+      say:
+      - mark with a sphere
+      - use the selection box to mark
+      - a cubic shape to mark
+    fr:
+      title: Forme du pinceau
+      say:
+      - marque avec une sphère
+      - utilise la boîte de sélection pour marquer
+      - forme cubique pour marquer
+- id: brush.set_size
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Size of the tool that marks zones of the cloud: its radius in metres, 0.03 to 1.5.'
+  args:
+    radius_m:
+      type: number
+      minimum: 0.03
+      maximum: 1.5
+      description: radius, metres
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Tamaño del pincel
+      say:
+      - agrandá el radio de marcado
+      - marcador de 20 centímetros
+      - achicá el radio
+    en:
+      title: Brush size
+      say:
+      - enlarge the marking radius
+      - a 20 centimetre marker
+      - reduce the radius
+    fr:
+      title: Taille du pinceau
+      say:
+      - agrandis le rayon de marquage
+      - marqueur de 20 centimètres
+      - réduis le rayon
+- id: brush.set_rotation
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Rotation of the marking cube about the vertical, 0 to 90 degrees (only the cube shape turns).
+  args:
+    yaw_deg:
+      type: number
+      minimum: 0
+      maximum: 90
+      description: degrees about the vertical
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Rotación del cubo de marcado
+      say:
+      - girá el cubo de marcado 45 grados
+      - cubo de marcado a 30 grados
+      - cubo de marcado sin girar
+    en:
+      title: Rotation of the marking cube
+      say:
+      - turn the marking cube 45 degrees
+      - marking cube at 30 degrees
+      - marking cube not turned
+    fr:
+      title: Rotation du cube de marquage
+      say:
+      - tourne le cube de marquage de 45 degrés
+      - cube de marquage à 30 degrés
+      - cube de marquage sans rotation
+- id: brush.preview_confidence
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Preview the confidence filter of the segment editing: the points under the threshold (0 to 1) are lit
+    in red in the viewer. Nothing changes until it is applied.'
+  args:
+    threshold:
+      type: number
+      minimum: 0
+      maximum: 1
+      description: 0 to 1
+      required: true
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Vista previa del filtro de confianza
+      say:
+      - iluminá en rojo lo de baja confianza
+      - previsualizá el filtro al 25 por ciento
+      - qué quedaría debajo del umbral de confianza
+    en:
+      title: Preview of the confidence filter
+      say:
+      - light in red what has low confidence
+      - preview the filter at 25 percent
+      - what would fall under the confidence threshold
+    fr:
+      title: Aperçu du filtre de confiance
+      say:
+      - allume en rouge ce qui a une faible confiance
+      - prévisualise le filtre à 25 pour cent
+      - ce qui passerait sous le seuil de confiance
+- id: brush.apply_confidence_filter
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'APPLY the confidence filter to the segmentation: the points of the visible objects under the threshold
+    leave their objects (they become unsegmented); when the unsegmented points are shown too, their low-confidence
+    points are DELETED from the cloud for good and the undo history is lost.'
+  confirm: true
+  args:
+    threshold:
+      type: number
+      minimum: 0
+      maximum: 1
+      description: 0 to 1
+      required: true
+  needs:
+  - session
+  - segmentation
+  text:
+    es:
+      title: Aplicar el filtro de confianza
+      say:
+      - aplicá el filtro de confianza
+      - sacá de los segmentos lo de baja confianza
+      - eliminá lo que tiene menos del 25 por ciento de confianza
+    en:
+      title: Apply the confidence filter
+      say:
+      - apply the confidence filter
+      - take the low-confidence part out of the segments
+      - delete what is under 25 percent confidence
+    fr:
+      title: Appliquer le filtre de confiance
+      say:
+      - applique le filtre de confiance
+      - retire des segments ce qui a une faible confiance
+      - supprime ce qui est sous 25 pour cent de confiance
+- id: brush.cancel_confidence_preview
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Turn the confidence filter's red preview off without applying it.
+  needs:
+  - session
+  text:
+    es:
+      title: Apagar la vista previa de confianza
+      say:
+      - apagá la vista previa
+      - cancelá la previsualización del filtro
+      - sacá el rojo de baja confianza
+    en:
+      title: Turn the confidence preview off
+      say:
+      - turn the preview off
+      - cancel the filter preview
+      - remove the red of low confidence
+    fr:
+      title: Désactiver l'aperçu de confiance
+      say:
+      - désactive l'aperçu
+      - annule la prévisualisation du filtre
+      - enlève le rouge de faible confiance
+- id: brush.set_box_gizmo_mode
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'With a selection box selected (the box that marks a zone): what its gizmo does, translate (move), rotate
+    or scale (stretch).'
+  args:
+    mode:
+      type: string
+      enum:
+      - translate
+      - rotate
+      - scale
+      required: true
+  needs:
+  - session
+  - selection
+  text:
+    es:
+      title: Modo del gizmo de la caja de selección
+      say:
+      - mové la caja de selección
+      - rotá la caja de selección
+      - estirá la caja de selección
+    en:
+      title: Gizmo mode of the selection box
+      say:
+      - move the selection box
+      - rotate the selection box
+      - stretch the selection box
+    fr:
+      title: Mode du gizmo de la boîte de sélection
+      say:
+      - déplace la boîte de sélection
+      - fais pivoter la boîte de sélection
+      - étire la boîte de sélection
+- id: brush.remove_box
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Remove the selected selection box (its mark goes; the cloud is not touched).
+  needs:
+  - session
+  - selection
+  text:
+    es:
+      title: Quitar la caja de selección
+      say:
+      - quitá la caja de selección
+      - sacá ese marcador rectangular
+      - descartá la caja elegida
+    en:
+      title: Remove the selection box
+      say:
+      - remove the selection box
+      - take that rectangular marker away
+      - discard the chosen box
+    fr:
+      title: Supprimer la boîte de sélection
+      say:
+      - supprime la boîte de sélection
+      - enlève ce marqueur rectangulaire
+      - abandonne la boîte choisie
+- id: brush.erase_marked
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'ERASE the marked zones: the points inside them leave their objects and become unsegmented (only the visible
+    objects lose points). The undo of the segment editing restores them.'
+  confirm: true
+  needs:
+  - session
+  - segmentation
+  text:
+    es:
+      title: Borrar las zonas marcadas
+      say:
+      - borrá las zonas marcadas
+      - sacá de los segmentos la parte marcada
+      - aplicá el borrado
+    en:
+      title: Erase the marked zones
+      say:
+      - erase the marked zones
+      - take the marked part out of the segments
+      - apply the erase
+    fr:
+      title: Effacer les zones marquées
+      say:
+      - efface les zones marquées
+      - retire des segments la partie marquée
+      - applique l'effacement
+- id: brush.assign_marked
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'REASSIGN the marked zones to one object: every point inside them moves into the chosen object, or into
+    a NEW object created with the given name (the masks are edited with it).'
+  confirm: true
+  args:
+    target:
+      type:
+      - integer
+      - string
+      description: 'the object that receives the points: its id or label, or ''new'' to create one'
+      required: true
+    name:
+      type: string
+      description: the new object's name, when target is 'new'
+  needs:
+  - session
+  - segmentation
+  text:
+    es:
+      title: Asignar las zonas marcadas a un segmento
+      say:
+      - asigná las zonas marcadas a la pared
+      - reasigná lo marcado al piso
+      - creá un segmento nuevo con lo marcado
+    en:
+      title: Assign the marked zones to a segment
+      say:
+      - assign the marked zones to the wall
+      - reassign the marked part to the floor
+      - create a new segment from the marked part
+    fr:
+      title: Attribuer les zones marquées à un segment
+      say:
+      - attribue les zones marquées au mur
+      - réattribue la partie marquée au sol
+      - crée un nouveau segment avec la partie marquée
+- id: brush.merge_segments
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'MERGE whole objects into one: every point and mask of the source objects passes to the target object and
+    the sources leave the list.'
+  confirm: true
+  args:
+    target:
+      type:
+      - integer
+      - string
+      description: 'the object that stays: its id or label'
+      required: true
+    sources:
+      type: array
+      items:
+        type: integer
+      description: the ids of the objects merged into it
+      required: true
+  needs:
+  - session
+  - segmentation
+  text:
+    es:
+      title: Fusionar segmentos
+      say:
+      - fusioná estos tres segmentos en uno
+      - uní las dos paredes en una sola
+      - juntá los segmentos duplicados
+    en:
+      title: Merge segments
+      say:
+      - merge these three segments into one
+      - join the two walls into a single one
+      - put the duplicated segments together
+    fr:
+      title: Fusionner des segments
+      say:
+      - fusionne ces trois segments en un
+      - réunis les deux murs en un seul
+      - regroupe les segments en double
+- id: brush.clear_marks
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Remove every marked zone without applying anything (the cloud and the objects are not touched).
+  needs:
+  - session
+  text:
+    es:
+      title: Quitar las marcas
+      say:
+      - quitá las marcas
+      - descartá lo que marqué sin aplicar
+      - dejá la nube sin marcas
+    en:
+      title: Clear the marks
+      say:
+      - clear the marks
+      - discard the marked zones without applying
+      - leave the cloud with no marks
+    fr:
+      title: Retirer les marques
+      say:
+      - retire les marques
+      - abandonne les zones marquées sans appliquer
+      - laisse le nuage sans marques
+- id: brush.undo
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Undo the last change applied to the segments by hand (an erase, a reassign or a confidence filter): its
+    points go back to the objects they had.'
+  needs:
+  - session
+  - segmentation
+  text:
+    es:
+      title: Deshacer el pincel
+      say:
+      - deshacé el último borrado
+      - volvé atrás la reasignación
+      - restaurá lo que saqué recién
+    en:
+      title: Undo the brush
+      say:
+      - undo the last erase
+      - revert the reassignment
+      - restore what was just taken out
+    fr:
+      title: Annuler le pinceau
+      say:
+      - annule le dernier effacement
+      - reviens sur la réattribution
+      - restaure ce qui vient d'être retiré

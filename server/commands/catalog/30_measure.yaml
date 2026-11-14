@@ -390,3 +390,57 @@ commands:
       - quelle est la planéité du sol
       - planéité du mur
       - respecte-t-il une tolérance de 5 millimètres
+- id: measure.finish_plane
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Close the plane being marked on the 3D model for a calibration (the Enter key): with three or more points
+    picked it is fitted and the Calibration window opens with it.'
+  needs:
+  - session
+  text:
+    es:
+      title: Cerrar el plano en curso
+      say:
+      - cerrá el plano con Enter
+      - ya puse los tres vértices
+      - terminá el contorno
+    en:
+      title: Close the plane in progress
+      say:
+      - close the plane with Enter
+      - the three vertices are in
+      - finish the outline
+    fr:
+      title: Fermer le plan en cours
+      say:
+      - ferme le plan avec Entrée
+      - les trois sommets sont posés
+      - termine le contour
+- id: measure.cancel_pending
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Cancel the hand measurement in progress in the viewer (the Esc key): the points picked so far for the
+    distance, the angle or the plane are dropped. What was already measured stays.'
+  needs:
+  - session
+  text:
+    es:
+      title: Cancelar la medición en curso
+      say:
+      - cancelá lo que estoy midiendo
+      - descartá los clics que hice
+      - empezá de cero
+    en:
+      title: Cancel the measurement in progress
+      say:
+      - cancel what is being measured
+      - drop the clicks already made
+      - start from scratch
+    fr:
+      title: Annuler la mesure en cours
+      say:
+      - annule la mesure commencée
+      - abandonne les clics déjà faits
+      - repars de zéro

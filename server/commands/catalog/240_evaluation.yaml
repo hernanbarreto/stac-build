@@ -1,0 +1,127 @@
+# The 'evaluation' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: evaluation
+position: 240
+title:
+  es: Evaluación
+  en: Evaluation
+  fr: Évaluation
+summary:
+  es: Las corridas de la batería de evaluación y sus archivos, en el panel inferior (solo lectura).
+  en: The runs of the evaluation battery and their files, in the bottom dock (read only).
+  fr: Les exécutions de la batterie d'évaluation et leurs fichiers, dans le panneau inférieur (lecture seule).
+commands:
+- id: evaluation.refresh_runs
+  kind: query
+  runs_on: ui
+  status: manual
+  model: 'Evaluation tab of the bottom dock: read the list of the battery''s runs again from the server.'
+  text:
+    es:
+      title: Actualizar las corridas de la batería
+      say:
+      - actualizá las corridas
+      - refrescá el listado de la batería
+      - hay corridas nuevas
+    en:
+      title: Refresh the battery's runs
+      say:
+      - refresh the runs
+      - reload the battery's list
+      - are there new runs
+    fr:
+      title: Actualiser les exécutions de la batterie
+      say:
+      - actualise les exécutions
+      - recharge la liste de la batterie
+      - y a-t-il de nouvelles exécutions
+- id: evaluation.select_run
+  kind: query
+  runs_on: ui
+  status: manual
+  model: 'Evaluation tab: choose which run of the battery is read (its files are then listed).'
+  args:
+    run_id:
+      type: string
+      description: the run's id
+      required: true
+  text:
+    es:
+      title: Elegir una corrida de la batería
+      say:
+      - elegí la última corrida
+      - leé la corrida de ayer
+      - pasá a otra corrida
+    en:
+      title: Choose a run of the battery
+      say:
+      - pick the last run
+      - read yesterday's run
+      - go to another run
+    fr:
+      title: Choisir une exécution de la batterie
+      say:
+      - choisis la dernière exécution
+      - lis l'exécution d'hier
+      - passe à une autre exécution
+- id: evaluation.open_file
+  kind: query
+  runs_on: ui
+  status: manual
+  model: 'Evaluation tab: read one file of the chosen run (a csv as a table, a json, an image, a log), by its path
+    in the run.'
+  args:
+    path:
+      type: string
+      description: the file's path inside the run
+      required: true
+  text:
+    es:
+      title: Leer un archivo de la corrida
+      say:
+      - leé el csv de métricas de la corrida
+      - leeme el log de la corrida
+      - el json de resumen
+    en:
+      title: Read a file of the run
+      say:
+      - read the run's metrics csv
+      - read me the log of the run
+      - the summary json
+    fr:
+      title: Lire un fichier de l'exécution
+      say:
+      - lis le csv des métriques de l'exécution
+      - lis-moi le journal de l'exécution
+      - le json de synthèse
+- id: evaluation.set_json_view
+  kind: query
+  runs_on: ui
+  status: manual
+  model: 'Evaluation tab: how a json file is read: structured (sections of keys and values) or raw (its text).'
+  args:
+    mode:
+      type: string
+      enum:
+      - structured
+      - raw
+      required: true
+  text:
+    es:
+      title: Vista de un archivo json
+      say:
+      - json en vista estructurada
+      - el json como texto
+      - alterná la vista del json
+    en:
+      title: View of a json file
+      say:
+      - json in structured view
+      - the json as text
+      - toggle the json view
+    fr:
+      title: Vue d'un fichier json
+      say:
+      - json en vue structurée
+      - le json tel quel, en texte
+      - alterne la vue du json

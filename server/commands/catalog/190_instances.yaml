@@ -1,0 +1,254 @@
+# The 'instances' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: instances
+position: 190
+title:
+  es: Instancias
+  en: Instances
+  fr: Instances
+summary:
+  es: 'La lista de instancias: renombrar o eliminar un objeto, buscar, el piso en y = 0, los cubos del corte.'
+  en: 'The list of instances: renaming or deleting an object, searching, the floor at y = 0, the cubes of the cut.'
+  fr: 'La liste des instances : renommer ou supprimer un objet, chercher, le sol à y = 0, les cubes de la découpe.'
+commands:
+- id: instances.rename
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Rename ONE object of the segmentation (its label in the list and on its box).
+  args:
+    id:
+      type:
+      - integer
+      - string
+      description: id or label
+      required: true
+    label:
+      type: string
+      description: the new label
+      required: true
+  needs:
+  - session
+  - segmentation
+  text:
+    es:
+      title: Renombrar un objeto
+      say:
+      - renombrá la instancia 12 como tablero
+      - cambiale la etiqueta a ese objeto
+      - ese segmento es una columna
+    en:
+      title: Rename an object
+      say:
+      - rename instance 12 as panel
+      - change that object's label
+      - that segment is a column
+    fr:
+      title: Renommer un objet
+      say:
+      - renomme l'instance 12 en tableau
+      - change l'étiquette de cet objet
+      - ce segment est un poteau
+- id: instances.delete
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'DELETE one object of the segmentation for good: its entry and its masks (its points stay in the cloud,
+    unsegmented). It cannot be undone. Hiding an object is another command.'
+  confirm: true
+  args:
+    id:
+      type:
+      - integer
+      - string
+      description: id or label
+      required: true
+  needs:
+  - session
+  - segmentation
+  text:
+    es:
+      title: Eliminar un objeto
+      say:
+      - eliminá la instancia 12
+      - borrá ese objeto de la segmentación
+      - sacá ese segmento para siempre
+    en:
+      title: Delete an object
+      say:
+      - delete instance 12
+      - erase that object from the segmentation
+      - remove that segment for good
+    fr:
+      title: Supprimer un objet
+      say:
+      - supprime l'instance 12
+      - efface cet objet de la segmentation
+      - retire ce segment définitivement
+- id: instances.filter
+  kind: query
+  runs_on: ui
+  status: manual
+  model: 'Filter the Instances list by a text typed in its search box: only the objects, placed objects, volumes
+    and meshes whose name or id holds it stay listed. It changes the list, not the viewer.'
+  args:
+    text:
+      type: string
+      description: the text to look for
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Buscar en la lista de instancias
+      say:
+      - buscá puerta en ese listado
+      - filtrá el listado por extintor
+      - dejá solo los caños en el listado
+    en:
+      title: Search the instances list
+      say:
+      - search door in that list
+      - filter the list by extinguisher
+      - leave only the pipes listed
+    fr:
+      title: Rechercher dans la liste des instances
+      say:
+      - recherche porte dans cette liste
+      - filtre la liste par extincteur
+      - n'y laisse que les tuyaux
+- id: instances.set_floor_level
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Choose which object is the FLOOR at y = 0: the scene is levelled on it. It REWRITES the scan''s floor
+    frame and every object''s box.'
+  confirm: true
+  args:
+    id:
+      type:
+      - integer
+      - string
+      description: the floor object's id or label
+      required: true
+  needs:
+  - session
+  - segmentation
+  text:
+    es:
+      title: Poner el piso en y = 0
+      say:
+      - poné el piso en y igual a cero
+      - nivelá la escena con este piso
+      - usá la losa 3 como piso
+    en:
+      title: Set the floor at y = 0
+      say:
+      - put the floor at y equals zero
+      - level the scene on this floor
+      - use slab 3 as the floor
+    fr:
+      title: Mettre le sol à y = 0
+      say:
+      - mets le sol à y égal zéro
+      - nivelle la scène sur ce sol
+      - utilise la dalle 3 comme sol
+- id: instances.cubes_set_visible
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Show or hide ONE cube of the reconstruction's cut (the boxes the walk was divided into) in the viewer,
+    by its number.
+  args:
+    id:
+      type: integer
+      description: the cube's number
+      required: true
+    'on':
+      type: boolean
+      required: true
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Mostrar u ocultar un cubo del corte
+      say:
+      - prendé el cubo 3 del corte
+      - ocultá ese cubo de la reconstrucción
+      - apagá el cubo 6
+    en:
+      title: Show or hide a cube of the cut
+      say:
+      - turn on cube 3 of the cut
+      - hide that reconstruction cube
+      - turn off cube 6
+    fr:
+      title: Afficher ou masquer un cube de la découpe
+      say:
+      - active le cube 3 de la découpe
+      - masque ce cube de la reconstruction
+      - désactive le cube 6
+- id: instances.cubes_set_all_visible
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Show or hide EVERY cube of the reconstruction's cut at once.
+  args:
+    'on':
+      type: boolean
+      required: true
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Mostrar u ocultar todos los cubos del corte
+      say:
+      - prendé todos los cubos del corte
+      - ocultá todos los cubos
+      - apagá los cubos de la reconstrucción
+    en:
+      title: Show or hide every cube of the cut
+      say:
+      - turn on every cube of the cut
+      - hide all the cubes
+      - turn the reconstruction cubes off
+    fr:
+      title: Afficher ou masquer tous les cubes de la découpe
+      say:
+      - active tous les cubes de la découpe
+      - masque tous les cubes
+      - désactive les cubes de la reconstruction
+- id: instances.cubes_focus
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Fly the camera to one cube of the reconstruction's cut, by its number.
+  args:
+    id:
+      type: integer
+      description: the cube's number
+      required: true
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Ir a un cubo del corte
+      say:
+      - llevame al cubo 4 del corte
+      - enfocá ese cubo de la reconstrucción
+      - dónde está el cubo 7
+    en:
+      title: Go to a cube of the cut
+      say:
+      - take me to cube 4 of the cut
+      - focus that reconstruction cube
+      - where is cube 7
+    fr:
+      title: Aller à un cube de la découpe
+      say:
+      - emmène-moi au cube 4 de la découpe
+      - cible ce cube de la reconstruction
+      - où est le cube 7

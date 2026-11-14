@@ -1,0 +1,170 @@
+# The 'call' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: call
+position: 260
+title:
+  es: Videollamada
+  en: Video call
+  fr: Appel vidéo
+summary:
+  es: Videollamadas entre los miembros del equipo.
+  en: Video calls between the members of the team.
+  fr: Appels vidéo entre les membres de l'équipe.
+commands:
+- id: call.start
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Start a video call with a member of the team (it uses this computer's camera and microphone).
+  args:
+    user:
+      type: string
+      description: the member's name
+      required: true
+  text:
+    es:
+      title: Iniciar una videollamada
+      say:
+      - llamá por video a la arquitecta
+      - hacé una videollamada con el topógrafo
+      - hablar con el gerente por videollamada
+    en:
+      title: Start a video call
+      say:
+      - call the architect
+      - start a video call with the surveyor
+      - talk with the manager on video
+    fr:
+      title: Démarrer un appel vidéo
+      say:
+      - appelle l'architecte
+      - lance un appel vidéo avec le géomètre
+      - parler avec le responsable en visio
+- id: call.accept
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Accept the incoming video call.
+  text:
+    es:
+      title: Aceptar la videollamada
+      say:
+      - aceptá la llamada entrante
+      - atendé al que llama
+      - contestá
+    en:
+      title: Accept the call
+      say:
+      - accept the call
+      - answer the video call
+      - pick up
+    fr:
+      title: Accepter l'appel
+      say:
+      - accepte l'appel
+      - réponds à l'appel vidéo
+      - décroche
+- id: call.decline
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Decline the incoming video call.
+  text:
+    es:
+      title: Rechazar la videollamada
+      say:
+      - rechazá la llamada entrante
+      - no atiendas
+      - ahora no puedo atender
+    en:
+      title: Decline the call
+      say:
+      - decline the call
+      - leave the video call unanswered
+      - not now, busy
+    fr:
+      title: Refuser l'appel
+      say:
+      - refuse l'appel
+      - ne réponds pas à l'appel vidéo
+      - pas maintenant, occupé
+- id: call.end
+  kind: action
+  runs_on: ui
+  status: manual
+  model: End the video call in progress, or cancel the one being placed.
+  text:
+    es:
+      title: Terminar la videollamada
+      say:
+      - terminá la llamada
+      - cortá la comunicación
+      - colgá
+    en:
+      title: End the call
+      say:
+      - end the call
+      - hang up the video call
+      - hang up
+    fr:
+      title: Terminer l'appel
+      say:
+      - termine l'appel
+      - coupe l'appel vidéo
+      - raccroche
+- id: call.set_mute
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'During a video call: mute this user''s microphone (on) or unmute it (off).'
+  args:
+    'on':
+      type: boolean
+      required: true
+  text:
+    es:
+      title: Silenciar el micrófono
+      say:
+      - silenciá el micrófono
+      - activá de nuevo el micrófono
+      - videollamada sin audio de este lado
+    en:
+      title: Mute the microphone
+      say:
+      - mute the microphone
+      - unmute the microphone
+      - no sound from this side of the video call
+    fr:
+      title: Couper le microphone
+      say:
+      - coupe le microphone
+      - réactive le microphone
+      - pas de son de ce côté pendant la visio
+- id: call.set_camera
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'During a video call: turn this user''s own camera on or off.'
+  args:
+    'on':
+      type: boolean
+      required: true
+  text:
+    es:
+      title: Cámara web en la videollamada
+      say:
+      - apagá la cámara web
+      - encendé la cámara web
+      - videollamada sin imagen de este lado
+    en:
+      title: Camera of the video call
+      say:
+      - turn the camera off in the call
+      - turn the webcam on
+      - no picture from this side of the video call
+    fr:
+      title: Caméra de l'appel vidéo
+      say:
+      - désactive la caméra de l'appel
+      - allume la webcam
+      - pas d'image de ce côté pendant la visio

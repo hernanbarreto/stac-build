@@ -243,3 +243,41 @@ commands:
       - masque le panneau inférieur
       - ferme la console
       done: Panneau inférieur masqué.
+- id: layout.resize_panel
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Resize a panel by dragging its edge: the left panel or the inspector (their width) or the bottom dock
+    (its height), in pixels.'
+  args:
+    panel:
+      type: string
+      enum:
+      - left
+      - inspector
+      - dock
+      required: true
+    size_px:
+      type: number
+      minimum: 0
+      description: the new width (left, inspector) or height (dock), pixels
+      required: true
+  text:
+    es:
+      title: Redimensionar un panel
+      say:
+      - hacé más ancho el panel lateral
+      - inspector más angosto
+      - panel inferior más alto
+    en:
+      title: Resize a panel
+      say:
+      - make the side panel wider
+      - narrower inspector
+      - taller bottom dock
+    fr:
+      title: Redimensionner un panneau
+      say:
+      - élargis le panneau latéral
+      - inspecteur plus étroit
+      - panneau inférieur plus haut

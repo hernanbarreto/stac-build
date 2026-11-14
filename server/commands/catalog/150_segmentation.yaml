@@ -41,3 +41,785 @@ commands:
       - je veux segmenter automatiquement
       - autosegmentation
       done: Fenêtre d'autosegmentation ouverte.
+- id: segmentation.resume_run
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Resume the propagation an interrupted interactive segmentation left incomplete (the Incomplete segmentation
+    window): its objects are seeded again from their saved masks and propagated in batches. Long GPU work.'
+  confirm: true
+  needs:
+  - session
+  - segmentation
+  text:
+    es:
+      title: Reanudar la propagación incompleta
+      say:
+      - reanudá la propagación
+      - terminá de propagar las instancias incompletas
+      - retomá lo que quedó interrumpido
+    en:
+      title: Resume the incomplete propagation
+      say:
+      - resume the propagation
+      - finish propagating the incomplete instances
+      - pick up what was interrupted
+    fr:
+      title: Reprendre la propagation incomplète
+      say:
+      - reprends la propagation
+      - termine de propager les instances incomplètes
+      - reprends ce qui a été interrompu
+- id: segmentation.resume_cancel_delete
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Cancel the interrupted propagation and DELETE for good every incomplete object it left: from the list,
+    its masks and its files (the Incomplete segmentation window). The complete objects are not touched.'
+  confirm: true
+  needs:
+  - session
+  - segmentation
+  text:
+    es:
+      title: Cancelar la propagación y eliminar lo incompleto
+      say:
+      - cancelá y eliminá las incompletas
+      - borrá lo que quedó a medio propagar
+      - descartá la propagación interrumpida
+    en:
+      title: Cancel the propagation and delete what is incomplete
+      say:
+      - cancel and delete the incomplete ones
+      - delete what was left half propagated
+      - discard the interrupted propagation
+    fr:
+      title: Annuler la propagation et supprimer l'incomplet
+      say:
+      - annule et supprime les incomplètes
+      - supprime ce qui est resté à moitié propagé
+      - abandonne la propagation interrompue
+- id: segmentation.open_manager
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Open the Segmentation manager of the open session (interactive segmentation on the keyframes: points,
+    a text or automatic). Opening it LOADS the SAM3 model on the GPU.'
+  confirm: true
+  args:
+    session:
+      type: string
+      description: the session's name; omit for the open one
+  needs:
+  - session
+  text:
+    es:
+      title: Abrir el gestor de segmentación
+      say:
+      - abrí el gestor de segmentación
+      - segmentación interactiva
+      - segmentar a mano sobre los keyframes
+    en:
+      title: Open the segmentation manager
+      say:
+      - open the segmentation manager
+      - interactive segmentation
+      - segment by hand on the keyframes
+    fr:
+      title: Ouvrir le gestionnaire de segmentation
+      say:
+      - ouvre le gestionnaire de segmentation
+      - segmentation interactive
+      - segmenter à la main sur les images clés
+- id: segmentation.close_manager
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Close the Segmentation manager. When objects were changed in it, closing QUEUES the projection of the masks
+    onto the cloud again (a GPU job that rewrites the segmentation); with no change nothing is recomputed.
+  confirm: true
+  needs:
+  - session
+  text:
+    es:
+      title: Cerrar el gestor de segmentación
+      say:
+      - cerrá el gestor de segmentación
+      - salí de la segmentación interactiva
+      - terminé de segmentar a mano
+    en:
+      title: Close the segmentation manager
+      say:
+      - close the segmentation manager
+      - leave the interactive segmentation
+      - done segmenting by hand
+    fr:
+      title: Fermer le gestionnaire de segmentation
+      say:
+      - ferme le gestionnaire de segmentation
+      - quitte la segmentation interactive
+      - fini de segmenter à la main
+- id: segmentation.manager_set_mode
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager: the way an object is given to SAM3: manual (points clicked on the image),
+    text (a description) or auto (the VLM finds the objects).'
+  args:
+    mode:
+      type: string
+      enum:
+      - manual
+      - text
+      - auto
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Modo del gestor de segmentación
+      say:
+      - pasá el gestor a modo texto
+      - modo manual por puntos
+      - modo automático del gestor
+    en:
+      title: Mode of the segmentation manager
+      say:
+      - switch the manager to text mode
+      - manual mode by points
+      - the manager's automatic mode
+    fr:
+      title: Mode du gestionnaire de segmentation
+      say:
+      - passe le gestionnaire en mode texte
+      - mode manuel par points
+      - mode automatique du gestionnaire
+- id: segmentation.manager_go_to_frame
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager: show another keyframe, by its position in the strip (1 = the first).'
+  args:
+    index:
+      type: integer
+      minimum: 1
+      description: the keyframe's position in the strip, from 1
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Ir a un keyframe en el gestor
+      say:
+      - keyframe siguiente en el gestor
+      - volvé al keyframe anterior
+      - andá al keyframe 40
+    en:
+      title: Go to a keyframe in the manager
+      say:
+      - next keyframe in the manager
+      - back to the previous keyframe
+      - go to keyframe 40
+    fr:
+      title: Aller à une image clé dans le gestionnaire
+      say:
+      - image clé suivante dans le gestionnaire
+      - reviens à l'image clé précédente
+      - va à l'image clé 40
+- id: segmentation.manager_zoom
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager: zoom the keyframe image in or out, or reset it to fit.'
+  args:
+    direction:
+      type: string
+      enum:
+      - in
+      - out
+      - reset
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Zoom de la imagen en el gestor
+      say:
+      - acercá la imagen del gestor
+      - alejá el keyframe
+      - restablecé el zoom del gestor
+    en:
+      title: Zoom the image in the manager
+      say:
+      - zoom in on the manager's image
+      - zoom out of the keyframe
+      - reset the manager's zoom
+    fr:
+      title: Zoom de l'image dans le gestionnaire
+      say:
+      - zoome sur l'image du gestionnaire
+      - dézoome l'image clé
+      - réinitialise le zoom du gestionnaire
+- id: segmentation.manager_mark_frame_and_next
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager: include (true) or exclude (false) the current keyframe in the set the object
+    will be propagated to, and advance to the next keyframe.'
+  args:
+    include:
+      type: boolean
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Incluir o excluir el keyframe y avanzar
+      say:
+      - incluí este keyframe y avanzá
+      - excluí el keyframe y pasá al siguiente
+      - este cuadro no va en la propagación
+    en:
+      title: Include or exclude the keyframe and advance
+      say:
+      - include this keyframe and advance
+      - exclude the keyframe and go on
+      - leave this frame out of the propagation
+    fr:
+      title: Inclure ou exclure l'image clé et avancer
+      say:
+      - inclus cette image clé et avance
+      - exclus l'image clé et passe à la suivante
+      - cette image ne va pas dans la propagation
+- id: segmentation.manager_toggle_frame_selection
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager: tick or untick one keyframe of the strip as part of the set the object will
+    be propagated to.'
+  args:
+    index:
+      type: integer
+      minimum: 1
+      description: the keyframe's position in the strip, from 1
+      required: true
+    'on':
+      type: boolean
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Tildar un keyframe para la propagación
+      say:
+      - tildá el keyframe 12 para propagar
+      - destildá ese keyframe
+      - sacá el keyframe 30 de la tanda
+    en:
+      title: Tick a keyframe for the propagation
+      say:
+      - tick keyframe 12 for the propagation
+      - untick that keyframe
+      - take keyframe 30 out of the set
+    fr:
+      title: Cocher une image clé pour la propagation
+      say:
+      - coche l'image clé 12 pour la propagation
+      - décoche cette image clé
+      - retire l'image clé 30 du lot
+- id: segmentation.manager_add_point
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager (manual mode): a click on the keyframe image, a positive point (the object
+    is here) or a negative one (this is not the object); SAM3 updates the mask.'
+  args:
+    x_px:
+      type: number
+      description: pixel column on the image
+      required: true
+    y_px:
+      type: number
+      description: pixel row on the image
+      required: true
+    positive:
+      type: boolean
+      description: true = the object is here; false = it is not
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Poner un punto sobre la imagen
+      say:
+      - poné un punto positivo sobre el objeto
+      - un punto negativo acá
+      - clic sobre la imagen para segmentar
+    en:
+      title: Put a point on the image
+      say:
+      - put a positive point on the object
+      - a negative point here
+      - click on the image to segment
+    fr:
+      title: Poser un point sur l'image
+      say:
+      - pose un point positif sur l'objet
+      - un point négatif ici
+      - clique sur l'image pour segmenter
+- id: segmentation.manager_undo_point
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager: undo the last point clicked on the image (Ctrl+Z).'
+  needs:
+  - session
+  text:
+    es:
+      title: Deshacer el último punto
+      say:
+      - deshacé el último punto
+      - sacá el punto que acabo de poner
+      - control zeta en el gestor
+    en:
+      title: Undo the last point
+      say:
+      - undo the last point
+      - remove the point just put
+      - control z in the manager
+    fr:
+      title: Annuler le dernier point
+      say:
+      - annule le dernier point
+      - enlève le point tout juste posé
+      - contrôle z dans le gestionnaire
+- id: segmentation.manager_clear_object
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager: clear the points of the object being edited only (the queue and the saved
+    objects are not touched).'
+  needs:
+  - session
+  text:
+    es:
+      title: Limpiar el objeto en edición
+      say:
+      - limpiá los puntos del objeto en edición
+      - empezá de nuevo este objeto
+      - sacá mis clics de este objeto
+    en:
+      title: Clear the object being edited
+      say:
+      - clear the points of the object being edited
+      - start this object again
+      - remove my clicks on this object
+    fr:
+      title: Effacer l'objet en cours d'édition
+      say:
+      - efface les points de l'objet en cours
+      - recommence cet objet
+      - enlève mes clics sur cet objet
+- id: segmentation.manager_clear_all
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager: discard the object being edited AND every object queued in this batch (the
+    saved objects are kept).'
+  needs:
+  - session
+  text:
+    es:
+      title: Limpiar todo el lote
+      say:
+      - limpiá todo el lote
+      - descartá la cola del gestor
+      - sacá todos los puntos del gestor
+    en:
+      title: Clear the whole batch
+      say:
+      - clear all
+      - discard the manager's queue
+      - remove every point in the manager
+    fr:
+      title: Tout effacer dans le lot
+      say:
+      - efface tout le lot
+      - abandonne la file d'attente du gestionnaire
+      - enlève tous les points du gestionnaire
+- id: segmentation.manager_text_prompt
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager (text mode): segment on the current keyframe the object a text describes.
+    SAM3 runs on the GPU.'
+  confirm: true
+  args:
+    text:
+      type: string
+      description: the object's description, e.g. the red sofa
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Segmentar por descripción
+      say:
+      - segmentá el sofá rojo
+      - encontrá el extintor por texto
+      - segmentar con una descripción
+    en:
+      title: Segment by description
+      say:
+      - segment the red sofa
+      - find the extinguisher by text
+      - segment from a description
+    fr:
+      title: Segmenter par description
+      say:
+      - segmente le canapé rouge
+      - trouve l'extincteur par texte
+      - segmenter à partir d'une description
+- id: segmentation.manager_auto
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager (auto mode): LAUNCH its automatic segmentation: the VLM analyses every keyframe,
+    detects the objects and SAM3 segments them. Long GPU work that changes the session''s segmentation.'
+  confirm: true
+  needs:
+  - session
+  text:
+    es:
+      title: Iniciar la segmentación automática del gestor
+      say:
+      - iniciá la segmentación automática del gestor
+      - que el VLM detecte y segmente todo
+      - arrancá el modo automático
+    en:
+      title: Start the manager's automatic segmentation
+      say:
+      - start the manager's automatic segmentation
+      - let the VLM detect and segment everything
+      - start the automatic mode
+    fr:
+      title: Lancer la segmentation automatique du gestionnaire
+      say:
+      - lance la segmentation automatique du gestionnaire
+      - que le VLM détecte et segmente tout
+      - démarre le mode automatique
+- id: segmentation.manager_evaluate
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager: find on which keyframes the object being edited appears (DINOv2 over every
+    keyframe, on the GPU) and tick those for the propagation.'
+  confirm: true
+  needs:
+  - session
+  text:
+    es:
+      title: Evaluar en qué keyframes aparece el objeto
+      say:
+      - evaluá en qué keyframes aparece
+      - elegí los cuadros donde se ve el objeto
+      - evaluar antes de propagar
+    en:
+      title: Evaluate on which keyframes the object appears
+      say:
+      - evaluate on which keyframes it appears
+      - pick the frames where the object is seen
+      - evaluate before propagating
+    fr:
+      title: Évaluer sur quelles images clés l'objet apparaît
+      say:
+      - évalue sur quelles images clés il apparaît
+      - choisis les images où l'on voit l'objet
+      - évaluer avant de propager
+- id: segmentation.manager_add_object
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager: put the object being edited in the queue and start the next one (the queued
+    objects are propagated together).'
+  needs:
+  - session
+  text:
+    es:
+      title: Poner el objeto en cola
+      say:
+      - poné este objeto en cola
+      - empezá el siguiente objeto
+      - pasá este objeto al lote
+    en:
+      title: Queue the object
+      say:
+      - queue this object
+      - start the next object
+      - put this object in the batch
+    fr:
+      title: Mettre l'objet en file d'attente
+      say:
+      - mets cet objet en file d'attente
+      - commence l'objet suivant
+      - glisse cet objet dans le lot
+- id: segmentation.manager_set_label
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager: the label (name) the object being edited will be saved with.'
+  args:
+    label:
+      type: string
+      description: the object's label
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Etiqueta del objeto en edición
+      say:
+      - este objeto es un extintor
+      - ponele la etiqueta puerta
+      - que lo que estoy marcando se guarde como tablero
+    en:
+      title: Label of the object being edited
+      say:
+      - this object is an extinguisher
+      - give it the label door
+      - save what is being marked as a panel
+    fr:
+      title: Étiquette de l'objet en cours
+      say:
+      - cet objet est un extincteur
+      - donne-lui l'étiquette porte
+      - enregistre ce qui est marqué comme tableau
+- id: segmentation.manager_propagate
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager: PROPAGATE the object being edited and every queued one through the ticked
+    keyframes: SAM3 tracks them on the GPU (minutes) and they are saved as objects of the session.'
+  confirm: true
+  args:
+    frames:
+      type: array
+      items:
+        type: integer
+      description: the keyframes' positions, from 1; omit for the ticked ones
+  needs:
+  - session
+  text:
+    es:
+      title: Propagar los objetos
+      say:
+      - propagá el objeto a los keyframes tildados
+      - propagar todo el lote
+      - seguí el objeto en los demás cuadros
+    en:
+      title: Propagate the objects
+      say:
+      - propagate the object to the ticked keyframes
+      - propagate the whole batch
+      - track the object through the other frames
+    fr:
+      title: Propager les objets
+      say:
+      - propage l'objet sur les images clés cochées
+      - propager tout le lot
+      - suis l'objet dans les autres images
+- id: segmentation.manager_select_instance
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager: select one saved object of its list to see and edit its mask on the keyframe
+    (paint mode: a left click adds area, a right click removes it); selecting it again deselects it.'
+  args:
+    id:
+      type:
+      - integer
+      - string
+      description: the saved object's id or label
+      required: true
+  needs:
+  - session
+  - segmentation
+  text:
+    es:
+      title: Editar la máscara de un objeto
+      say:
+      - editá la máscara de la puerta
+      - seleccioná el objeto 5 en el gestor
+      - corregí esa máscara pintando
+    en:
+      title: Edit an object's mask
+      say:
+      - edit the door's mask
+      - select object 5 in the manager
+      - fix that mask by painting
+    fr:
+      title: Modifier le masque d'un objet
+      say:
+      - modifie le masque de la porte
+      - sélectionne l'objet 5 dans le gestionnaire
+      - corrige ce masque en peignant
+- id: segmentation.manager_rename_instance
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager: rename one saved object of its list.'
+  args:
+    id:
+      type:
+      - integer
+      - string
+      description: the saved object's id or label
+      required: true
+    label:
+      type: string
+      description: the new label
+      required: true
+  needs:
+  - session
+  - segmentation
+  text:
+    es:
+      title: Renombrar un objeto en el gestor
+      say:
+      - en el gestor, renombrá el objeto 5
+      - nueva etiqueta para esa máscara
+      - que la etiqueta pase a ser ventana
+    en:
+      title: Rename an object in the manager
+      say:
+      - in the manager, rename object 5
+      - a new label for that mask
+      - the label becomes window
+    fr:
+      title: Renommer un objet dans le gestionnaire
+      say:
+      - dans le gestionnaire, renomme l'objet 5
+      - nouvelle étiquette pour ce masque
+      - que l'étiquette devienne fenêtre
+- id: segmentation.manager_toggle_exclude
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager: exclude one saved object from the cloud (true) or include it again (false);
+    an excluded object stays in the list, greyed.'
+  args:
+    id:
+      type:
+      - integer
+      - string
+      description: the saved object's id or label
+      required: true
+    excluded:
+      type: boolean
+      description: true = excluded from the cloud
+      required: true
+  needs:
+  - session
+  - segmentation
+  text:
+    es:
+      title: Excluir un objeto de la nube
+      say:
+      - excluí ese objeto de la nube
+      - volvé a incluir el objeto 5
+      - que la persona no entre en la nube
+    en:
+      title: Exclude an object from the cloud
+      say:
+      - exclude that object from the cloud
+      - include object 5 again
+      - keep the person out of the cloud
+    fr:
+      title: Exclure un objet du nuage
+      say:
+      - exclus cet objet du nuage
+      - inclus de nouveau l'objet 5
+      - que la personne n'entre pas dans le nuage
+- id: segmentation.manager_delete_instance
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the Segmentation manager: DELETE one saved object for good, with all its masks and its 3D data. It
+    cannot be undone.'
+  confirm: true
+  args:
+    id:
+      type:
+      - integer
+      - string
+      description: the saved object's id or label
+      required: true
+  needs:
+  - session
+  - segmentation
+  text:
+    es:
+      title: Eliminar un objeto en el gestor
+      say:
+      - en el gestor, eliminá el objeto 5
+      - borrá esa máscara con todos sus datos
+      - sacá ese objeto para siempre del gestor
+    en:
+      title: Delete an object in the manager
+      say:
+      - in the manager, delete object 5
+      - erase that mask with all its data
+      - remove that object for good in the manager
+    fr:
+      title: Supprimer un objet dans le gestionnaire
+      say:
+      - dans le gestionnaire, supprime l'objet 5
+      - efface ce masque avec toutes ses données
+      - retire cet objet définitivement du gestionnaire
+- id: segmentation.run_autosegment
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'LAUNCH the Autosegment chain from its window, on the cloud on disk: the chosen stages (VLM scene understanding,
+    SAM3 + mask projection, certification, object captions) run as one queued job per scan. Long GPU work (hours
+    on a large scan) that writes the scan''s segmentation anew; the prompts given are saved in the session.'
+  confirm: true
+  args:
+    scans:
+      type: array
+      items:
+        type: string
+      description: the scans to segment (date or label); omit for the open one
+    vlm_prompt:
+      type: string
+      description: the VLM prompt; omit for the saved one
+    sam3_prompts:
+      type: array
+      items:
+        type: string
+      description: what SAM3 segments, one phrase each; used when SAM3 runs without the VLM
+    stages:
+      type: object
+      description: 'which stages run: vlm, sam3, certify, captions as booleans; omit for vlm + sam3'
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Ejecutar la autosegmentación
+      say:
+      - ejecutá la autosegmentación
+      - corré VLM y SAM3 sobre la nube
+      - lanzá la cadena de segmentación
+    en:
+      title: Run autosegment
+      say:
+      - run autosegment
+      - run the VLM and SAM3 on the cloud
+      - launch the segmentation chain
+    fr:
+      title: Lancer l'autosegmentation
+      say:
+      - lance l'autosegmentation
+      - exécute le VLM et SAM3 sur le nuage
+      - démarre la chaîne de segmentation

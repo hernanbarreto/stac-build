@@ -305,3 +305,292 @@ commands:
       - apparence de la scène
       - fond et grille
       done: Fenêtre du fond et de la grille ouverte.
+- id: display.set_precision_layer
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Show or hide one of the reconstruction''s diagnostic layers over the cloud: flyers (the points flagged
+    as flying), mono_detail (the PointDiT detail layer) or mixed_unresolved (the mixed pixels left out of the cloud).'
+  args:
+    layer:
+      type: string
+      enum:
+      - flyers
+      - mono_detail
+      - mixed_unresolved
+      required: true
+    'on':
+      type: boolean
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Capas de diagnóstico
+      say:
+      - prendé la capa de voladores
+      - capa de detalle PointDiT
+      - píxeles mezclados sin resolver
+    en:
+      title: Diagnostic layers
+      say:
+      - turn on the flyers layer
+      - PointDiT detail layer
+      - mixed unresolved pixels
+    fr:
+      title: Couches de diagnostic
+      say:
+      - active la couche des points volants
+      - couche de détail PointDiT
+      - pixels mixtes non résolus
+- id: display.set_background
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Kind of background of the viewer (in the Background and grid window): default (the grey gradient), horizon
+    (green ground and a sky) or plain (one colour, given as #rrggbb).'
+  args:
+    kind:
+      type: string
+      enum:
+      - default
+      - horizon
+      - plain
+      required: true
+    color:
+      type: string
+      description: '#rrggbb, for the plain kind'
+  needs:
+  - session
+  text:
+    es:
+      title: Tipo de fondo
+      say:
+      - poné el fondo de horizonte con cielo
+      - un color liso detrás del modelo
+      - gris difuminado predeterminado
+    en:
+      title: Kind of background
+      say:
+      - horizon background with a sky
+      - one plain colour behind the model
+      - the default grey gradient
+    fr:
+      title: Type de fond
+      say:
+      - fond d'horizon avec ciel
+      - une couleur unie derrière le modèle
+      - dégradé gris par défaut
+- id: display.set_grid_style
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Style of the floor grid (in the Background and grid window): the cell size in metres (0.1, 0.25, 0.5,
+    1, 2 or 5), a major line every 2, 4, 5 or 10 cells, and its colour as #rrggbb.'
+  args:
+    cell_m:
+      type: number
+      enum:
+      - 0.1
+      - 0.25
+      - 0.5
+      - 1
+      - 2
+      - 5
+      description: cell size, metres
+    major_every:
+      type: integer
+      enum:
+      - 2
+      - 4
+      - 5
+      - 10
+      description: a major line every this many cells
+    color:
+      type: string
+      description: '#rrggbb'
+  needs:
+  - session
+  text:
+    es:
+      title: Celdas y color de la cuadrícula
+      say:
+      - celdas de medio metro
+      - línea gruesa cada diez celdas
+      - pintá la cuadrícula de azul
+    en:
+      title: Cells and colour of the grid
+      say:
+      - half metre cells
+      - a major line every ten cells
+      - paint the grid lines blue
+    fr:
+      title: Cellules et couleur de la grille
+      say:
+      - cellules d'un demi-mètre
+      - une ligne principale toutes les dix cellules
+      - peins les lignes en bleu
+- id: display.reset_scene_look
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Put the viewer's background and grid back to their defaults (grey gradient, 1 m cells, a major line every
+    10).
+  needs:
+  - session
+  text:
+    es:
+      title: Restablecer fondo y cuadrícula
+      say:
+      - restablecé el aspecto predeterminado
+      - deshacé los cambios de aspecto
+      - como venía de fábrica
+    en:
+      title: Reset background and grid
+      say:
+      - restore the default values
+      - undo the look changes
+      - as it came out of the box
+    fr:
+      title: Réinitialiser le fond et la grille
+      say:
+      - rétablis les valeurs par défaut
+      - annule les changements d'aspect
+      - comme à l'origine
+- id: display.set_point_budget
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Detail of the cloud: how many million points the viewer draws at once (2 to 40). More shows more of the
+    cloud and asks more of the computer''s graphics card.'
+  args:
+    millions:
+      type: number
+      minimum: 2
+      maximum: 40
+      description: million points drawn at once
+      required: true
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Detalle de la nube
+      say:
+      - subí el detalle
+      - dibujá 20 millones
+      - bajá el detalle para que ande más fluido
+    en:
+      title: Cloud detail
+      say:
+      - raise the detail
+      - draw 20 million
+      - lower the detail so it runs smoother
+    fr:
+      title: Détail du nuage
+      say:
+      - augmente le détail
+      - dessine 20 millions
+      - baisse le détail pour plus de fluidité
+- id: display.set_confidence_threshold
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Confidence filter of the viewer: only the points whose confidence is at or above the threshold (0 to 1)
+    are drawn; 0 draws every point. Nothing is deleted.'
+  args:
+    threshold:
+      type: number
+      minimum: 0
+      maximum: 1
+      description: 0 to 1
+      required: true
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Filtro de confianza del visor
+      say:
+      - filtrá por confianza
+      - dejá solo lo que supera el 30 por ciento de confianza
+      - sacá el filtro de confianza
+    en:
+      title: Confidence filter of the viewer
+      say:
+      - filter by confidence
+      - keep only what is above 30 percent confidence
+      - remove the confidence filter
+    fr:
+      title: Filtre de confiance de la visionneuse
+      say:
+      - filtre par confiance
+      - ne garde que ce qui dépasse 30 pour cent de confiance
+      - enlève le filtre de confiance
+- id: display.set_votes_threshold
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Threshold of the Votes colouring: the number of agreeing views (0 to 8) from which a point is painted
+    green; under it, red.'
+  args:
+    views:
+      type: integer
+      minimum: 0
+      maximum: 8
+      description: agreeing views, 0 to 8
+      required: true
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Umbral de votos
+      say:
+      - umbral de votos en 3 vistas
+      - pintá en rojo lo que tiene menos de 4 vistas
+      - subí el umbral de vistas
+    en:
+      title: Votes threshold
+      say:
+      - votes threshold at 3 views
+      - paint red what has fewer than 4 views
+      - raise the views threshold
+    fr:
+      title: Seuil des votes
+      say:
+      - seuil des votes à 3 vues
+      - peins en rouge ce qui a moins de 4 vues
+      - monte le seuil de vues
+- id: display.hide_below_votes
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'With the Votes colouring: hide (on) or draw again (off) the points under the votes threshold, to see the
+    cloud without them. Nothing is deleted.'
+  args:
+    'on':
+      type: boolean
+      required: true
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Ocultar los puntos bajo el umbral de votos
+      say:
+      - ocultá los puntos por debajo de 3 vistas
+      - dejá fuera lo que está debajo del umbral
+      - devolvé lo de pocas vistas
+    en:
+      title: Hide the points under the votes threshold
+      say:
+      - hide the points below 3 views
+      - leave out what is under the threshold
+      - bring back the low-vote part
+    fr:
+      title: Masquer les points sous le seuil des votes
+      say:
+      - masque les points à moins de 3 vues
+      - laisse de côté ce qui est sous le seuil
+      - ramène la partie à peu de vues

@@ -129,3 +129,292 @@ commands:
       - ouvre la distance de référence
       - plan de référence sur les photos
       done: Fenêtre des références ouverte.
+- id: calibration.calibrate_readout
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Turn a distance already measured by hand in the viewer into a calibration (the pin on its readout): the
+    Calibration window opens with it as a draft, to fill in its real length.'
+  args:
+    readout_id:
+      type: string
+      description: the measured distance's id; omit for the last one measured
+  needs:
+  - session
+  - measurement
+  text:
+    es:
+      title: Calibrar con una distancia ya medida
+      say:
+      - tocá el pin de la lectura
+      - que esa distancia fije la escala
+      - mandá la lectura a la ventana de calibración
+    en:
+      title: Calibrate with a distance already measured
+      say:
+      - press the pin on the readout
+      - let that distance fix the scale
+      - send the readout to the calibration window
+    fr:
+      title: Étalonner avec une distance déjà mesurée
+      say:
+      - appuie sur l'épingle de la lecture
+      - que cette distance fixe l'échelle
+      - envoie la lecture à la fenêtre d'étalonnage
+- id: calibration.save_distance
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Store the distance being drafted in the Calibration window: its real length, its uncertainty, its role
+    (gauge = it fixes the scale, test = it verifies it), where the length comes from (tape, laser, total station
+    or another scan) and a note.'
+  args:
+    value_m:
+      type: number
+      minimum: 0
+      description: the real length, metres
+      required: true
+    sigma_m:
+      type: number
+      minimum: 0
+      description: its uncertainty, metres
+    role:
+      type: string
+      enum:
+      - gauge
+      - test
+      description: gauge = it fixes the scale; test = it verifies it
+      required: true
+    tool:
+      type: string
+      enum:
+      - tape
+      - laser
+      - total_station
+      - other_scan
+      description: where the real length comes from
+      required: true
+    reference_scan:
+      type: string
+      description: the scan the length was read on, when tool is other_scan
+    note:
+      type: string
+  needs:
+  - session
+  - measurement
+  text:
+    es:
+      title: Guardar una distancia de calibración
+      say:
+      - guardala como calibración
+      - la longitud real es 2 metros 40
+      - guardala con rol de verificación
+    en:
+      title: Store a calibration distance
+      say:
+      - save it as a calibration
+      - the real length is 2.40 metres
+      - save it with the verification role
+    fr:
+      title: Enregistrer une distance d'étalonnage
+      say:
+      - enregistre-la comme étalonnage
+      - la longueur réelle est de 2,40 mètres
+      - enregistre-la avec le rôle de vérification
+- id: calibration.save_plane
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Store the plane being drafted in the Calibration window (the points marked on the model), with what the
+    surface is (floor, wall, table) and a note.
+  args:
+    label:
+      type: string
+      description: 'what the surface is: floor, wall, table'
+    note:
+      type: string
+  needs:
+  - session
+  - measurement
+  text:
+    es:
+      title: Guardar un plano de calibración
+      say:
+      - guardá el plano marcado
+      - la superficie marcada es el piso
+      - guardalo con la etiqueta pared
+    en:
+      title: Store a calibration plane
+      say:
+      - save the marked plane
+      - the marked surface is the floor
+      - save it with the label wall
+    fr:
+      title: Enregistrer un plan d'étalonnage
+      say:
+      - enregistre le plan marqué
+      - la surface marquée est le sol
+      - enregistre-le avec l'étiquette mur
+- id: calibration.toggle_role
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Change the role of a stored calibration distance: gauge (it fixes the scale) or test (it verifies the
+    scale the others give).'
+  args:
+    id:
+      type: string
+      description: the stored distance's id
+      required: true
+    role:
+      type: string
+      enum:
+      - gauge
+      - test
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Cambiar el rol de una distancia guardada
+      say:
+      - que esa medida verifique
+      - que la medida c2 calibre
+      - pasá su rol a verificación
+    en:
+      title: Change the role of a stored distance
+      say:
+      - make that one verify
+      - make distance c2 calibrate
+      - switch its role to test
+    fr:
+      title: Changer le rôle d'une distance enregistrée
+      say:
+      - passe-la en vérification
+      - passe la distance c2 en étalonnage
+      - change son rôle
+- id: calibration.delete_measurement
+  kind: action
+  runs_on: ui
+  status: manual
+  model: DELETE a stored calibration distance of the scan for good (the scale factor is computed again without it).
+  confirm: true
+  args:
+    id:
+      type: string
+      description: the stored distance's id
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Eliminar una distancia de calibración
+      say:
+      - eliminá la medida c2
+      - borrá esa distancia guardada
+      - sacá esa fila de la tabla
+    en:
+      title: Delete a calibration distance
+      say:
+      - delete distance c2
+      - erase that stored distance
+      - remove that row from the table
+    fr:
+      title: Supprimer une distance d'étalonnage
+      say:
+      - supprime la distance c2
+      - efface cette distance enregistrée
+      - retire cette ligne du tableau
+- id: calibration.delete_plane
+  kind: action
+  runs_on: ui
+  status: manual
+  model: DELETE a stored calibration plane for good.
+  confirm: true
+  args:
+    id:
+      type: string
+      description: the stored plane's id
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Eliminar un plano de calibración
+      say:
+      - eliminá el plano p1
+      - borrá ese plano guardado
+      - sacá esa superficie de la tabla
+    en:
+      title: Delete a calibration plane
+      say:
+      - delete plane p1
+      - erase that stored plane
+      - remove that surface from the table
+    fr:
+      title: Supprimer un plan d'étalonnage
+      say:
+      - supprime le plan p1
+      - efface ce plan enregistré
+      - retire cette surface du tableau
+- id: calibration.set_mode
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Type of calibration of the scan: global (one scale factor for the whole cloud) or axes (one factor per
+    axis X, Y, Z; it needs a gauge distance along each axis; a per-axis calibration is a diagnosis, it cannot be
+    applied to the scan).'
+  args:
+    mode:
+      type: string
+      enum:
+      - global
+      - axes
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Tipo de calibración
+      say:
+      - un factor por cada eje
+      - un solo factor global
+      - cambiá el tipo de factor
+    en:
+      title: Type of calibration
+      say:
+      - one factor per axis
+      - a single global factor
+      - change the kind of factor
+    fr:
+      title: Type d'étalonnage
+      say:
+      - un facteur par axe
+      - un seul facteur global
+      - change le type de facteur
+- id: calibration.close
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Close the Calibration window (an unsaved draft goes with it).
+  needs:
+  - session
+  text:
+    es:
+      title: Cerrar la calibración
+      say:
+      - cerrá la calibración
+      - cerrá esa ventana
+      - salí de esa tabla
+    en:
+      title: Close the calibration
+      say:
+      - close the calibration
+      - close that window
+      - leave that table
+    fr:
+      title: Fermer l'étalonnage
+      say:
+      - ferme l'étalonnage
+      - ferme cette fenêtre
+      - quitte ce tableau

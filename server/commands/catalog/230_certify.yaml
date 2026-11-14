@@ -1,0 +1,154 @@
+# The 'certify' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: certify
+position: 230
+title:
+  es: Acta y épocas
+  en: Certificate and epochs
+  fr: Certificat et époques
+summary:
+  es: 'El panel del acta: comparar épocas geométricas, elegir cuál se muestra, la trayectoria y sus aristas.'
+  en: 'The certificate panel: comparing geometric epochs, choosing which one is shown, the trajectory and its edges.'
+  fr: 'Le panneau du certificat : comparer les époques géométriques, choisir celle qui s''affiche, la trajectoire
+    et ses arêtes.'
+commands:
+- id: certify.set_epoch_layers
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the certificate panel: overlay the previous geometric epoch''s cloud as a tinted layer (before) and
+    draw or hide the current one (after), to compare them in the viewer.'
+  args:
+    before:
+      type: boolean
+      description: true = the previous epoch is overlaid
+    after:
+      type: boolean
+      description: true = the current cloud is drawn
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Comparar la época anterior y la actual
+      say:
+      - superponé la época anterior
+      - ocultá la actual para ver el antes
+      - antes y después de la corrección
+    en:
+      title: Compare the previous and the current epoch
+      say:
+      - overlay the previous epoch
+      - hide the current one to see the before
+      - before and after the correction
+    fr:
+      title: Comparer l'époque précédente et l'actuelle
+      say:
+      - superpose l'époque précédente
+      - masque l'actuelle pour voir l'avant
+      - avant et après la correction
+- id: certify.show_trajectory_edges
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the certificate panel: draw or hide the edges of the camera''s trajectory in the viewer: the odometry
+    (the walk itself) and the loop edges (the closures between revisits).'
+  args:
+    odometry:
+      type: boolean
+      description: true = the walk's edges are drawn
+    loops:
+      type: boolean
+      description: true = the loop edges are drawn
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Trayectoria y aristas de lazo
+      say:
+      - dibujá la odometría
+      - ocultá las aristas de lazo
+      - dibujá la trayectoria con sus cierres
+    en:
+      title: Trajectory and loop edges
+      say:
+      - draw the odometry
+      - hide the loop edges
+      - draw the trajectory with its closures
+    fr:
+      title: Trajectoire et arêtes de boucle
+      say:
+      - dessine l'odométrie
+      - masque les arêtes de boucle
+      - dessine la trajectoire avec ses fermetures
+- id: certify.select_epoch
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Choose which geometric epoch of the session is the one drawn and worked on (0 = the original reconstruction).
+    Every epoch stays on disk: nothing is deleted.'
+  args:
+    epoch:
+      type: integer
+      minimum: 0
+      description: the epoch's number; 0 = the original
+      required: true
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Elegir la época geométrica
+      say:
+      - pasá a la época 2
+      - volvé a la época original
+      - usá la época anterior
+    en:
+      title: Choose the geometric epoch
+      say:
+      - go to epoch 2
+      - back to the original epoch
+      - use the previous epoch
+    fr:
+      title: Choisir l'époque géométrique
+      say:
+      - passe à l'époque 2
+      - reviens à l'époque d'origine
+      - utilise l'époque précédente
+- id: certify.set_section_tab
+  kind: query
+  runs_on: ui
+  status: manual
+  model: 'In the certificate panel: which of its sections is read: attention (where the system is least sure), edges
+    (the loop edges), duplicates or acta (the certificate''s metrics).'
+  args:
+    tab:
+      type: string
+      enum:
+      - attention
+      - edges
+      - duplicates
+      - acta
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Secciones del kit de calidad
+      say:
+      - leeme la lista de atención
+      - pestaña de duplicados
+      - tabla de aristas de lazo
+    en:
+      title: Sections of the quality kit
+      say:
+      - read me the attention list
+      - duplicates tab
+      - table of loop edges
+    fr:
+      title: Sections du kit qualité
+      say:
+      - lis-moi les points d'attention
+      - onglet des doublons
+      - tableau des arêtes de boucle

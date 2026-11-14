@@ -1,0 +1,193 @@
+# The 'team' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: team
+position: 250
+title:
+  es: Equipo
+  en: Team
+  fr: Équipe
+summary:
+  es: 'El panel del equipo: miembros, chat y actividad.'
+  en: 'The team panel: members, chat and activity.'
+  fr: 'Le panneau de l''équipe : membres, chat et activité.'
+commands:
+- id: team.select
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'In the side panel: choose which of the user''s teams is shown (its members, chat and activity).'
+  args:
+    team:
+      type: string
+      description: the team's name
+      required: true
+  text:
+    es:
+      title: Elegir el equipo
+      say:
+      - pasá al grupo de obra norte
+      - mi otro grupo
+      - elegí el de estructuras
+    en:
+      title: Choose the team
+      say:
+      - go to the north site crew
+      - my other group
+      - pick the structures one
+    fr:
+      title: Choisir l'équipe
+      say:
+      - passe au groupe du chantier nord
+      - mon autre groupe
+      - choisis celui des structures
+- id: team.set_tab
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Team tab: which of its sections is shown: members (who belongs and who is online), chat (the messages)
+    or activity (what the members did).'
+  args:
+    tab:
+      type: string
+      enum:
+      - members
+      - chat
+      - activity
+      required: true
+  text:
+    es:
+      title: Pestañas del equipo
+      say:
+      - decime quiénes son los miembros
+      - chat del grupo
+      - qué actividad hubo
+    en:
+      title: Sections of the team tab
+      say:
+      - who are the members
+      - group chat
+      - what activity was there
+    fr:
+      title: Onglets de l'équipe
+      say:
+      - qui sont les membres
+      - chat du groupe
+      - quelle activité y a-t-il eu
+- id: team.send_message
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Send a text message to the chat of the selected team: every member sees it.'
+  args:
+    text:
+      type: string
+      description: the message
+      required: true
+  text:
+    es:
+      title: Enviar un mensaje al equipo
+      say:
+      - mandale un mensaje al grupo
+      - escribí en el chat que el relevamiento terminó
+      - avisá a todos los miembros
+    en:
+      title: Send a message to the team
+      say:
+      - send the group a message
+      - write in the chat that the survey is done
+      - tell every member
+    fr:
+      title: Envoyer un message à l'équipe
+      say:
+      - envoie un message au groupe
+      - écris dans le chat que le relevé est fini
+      - préviens tous les membres
+- id: team.open_add_member
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Bring up the list of users that can join the selected team (it only shows the list). For its manager.
+  needs:
+  - admin
+  text:
+    es:
+      title: Ver a quién sumar al equipo
+      say:
+      - buscá a quién incorporar al grupo
+      - lista de usuarios disponibles
+      - ventana de nuevo miembro
+    en:
+      title: See who can join the team
+      say:
+      - who can join the group
+      - list of the users available
+      - new member window
+    fr:
+      title: Voir qui peut rejoindre l'équipe
+      say:
+      - qui peut rejoindre le groupe
+      - liste des utilisateurs disponibles
+      - fenêtre de nouveau membre
+- id: team.add_member
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Add one user to the selected team (a click on the user in the list the side panel brings up). For its manager.
+  args:
+    user:
+      type: string
+      description: the user's name
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Sumar un miembro al equipo
+      say:
+      - sumá a la arquitecta al grupo
+      - incorporá ese usuario
+      - que el topógrafo sea miembro
+    en:
+      title: Add a member to the team
+      say:
+      - add the architect to the group
+      - let that user join
+      - make the surveyor a member
+    fr:
+      title: Ajouter un membre à l'équipe
+      say:
+      - ajoute l'architecte au groupe
+      - fais entrer cet utilisateur
+      - que le géomètre soit membre
+- id: team.remove_member
+  kind: action
+  runs_on: ui
+  status: manual
+  model: REMOVE one member from the selected team (they lose its sessions and its chat). For its manager.
+  confirm: true
+  args:
+    user:
+      type: string
+      description: the user's name
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Quitar un miembro del equipo
+      say:
+      - quitá a la arquitecta del grupo
+      - sacá ese miembro
+      - que el topógrafo ya no esté
+    en:
+      title: Remove a member from the team
+      say:
+      - remove the architect from the group
+      - take that member out
+      - the surveyor is no longer in it
+    fr:
+      title: Retirer un membre de l'équipe
+      say:
+      - retire l'architecte du groupe
+      - enlève ce membre
+      - que le géomètre n'y soit plus

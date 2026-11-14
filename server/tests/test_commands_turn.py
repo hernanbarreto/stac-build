@@ -282,8 +282,9 @@ def test_a_command_done_by_hand_is_known_and_said_so(tmp_path, monkeypatch):
     assert res["ui_actions"] == [] and res["acted_only"] is False          # nothing is run, nothing confirmed
     area = db.area_title(row["area"], "es")
     assert res["answer"] == f"«{row['title']}» se hace a mano por ahora, en {area}."
-    res, _ = _ask(monkeypatch, tmp_path, [(row["tool"], {})], question, ui={**UI, "session": "pccr"}, lang="fr")
     fr = db.get(row["id"], "fr")
+    res, _ = _ask(monkeypatch, tmp_path, [(row["tool"], {})], fr["say"][0], ui={**UI, "session": "pccr"}, lang="fr")
+    assert res["lang"] == "fr"
     assert res["answer"] == f"« {fr['title']} » se fait à la main pour l'instant, dans {db.area_title(row['area'], 'fr')}."
     # the help lists them apart
     listed = commands.SystemTools(db, "es").help_commands(row["area"])

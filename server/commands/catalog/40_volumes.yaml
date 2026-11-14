@@ -249,3 +249,207 @@ commands:
       - un équipement d'un demi-mètre rentre-t-il dans le volume 1
       - un tableau y rentre-t-il
       - y a-t-il de la place pour 1 sur 1 sur 2
+- id: volumes.focus
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Fly the camera to a saved evaluation volume (a click on its row in the list).
+  args:
+    volume_id:
+      type: integer
+      description: the volume's id
+      required: true
+  needs:
+  - session
+  - volume
+  text:
+    es:
+      title: Ir a un volumen
+      say:
+      - llevame al volumen 2
+      - enfocá esa caja de evaluación
+      - dónde quedó el volumen
+    en:
+      title: Go to a volume
+      say:
+      - take me to volume 2
+      - focus that evaluation box
+      - where is the volume
+    fr:
+      title: Aller à un volume
+      say:
+      - emmène-moi au volume 2
+      - cible cette boîte d'évaluation
+      - où est le volume
+- id: volumes.set_visible
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Draw or hide one saved evaluation volume in the viewer (the eye of its row).
+  args:
+    volume_id:
+      type: integer
+      description: the volume's id
+      required: true
+    'on':
+      type: boolean
+      required: true
+  needs:
+  - session
+  - volume
+  text:
+    es:
+      title: Mostrar u ocultar un volumen
+      say:
+      - ocultá el volumen 1
+      - mostrá de nuevo esa caja de evaluación
+      - escondé el volumen
+    en:
+      title: Show or hide a volume
+      say:
+      - hide volume 1
+      - bring that box back
+      - hide the volume
+    fr:
+      title: Afficher ou masquer un volume
+      say:
+      - masque le volume 1
+      - réaffiche cette boîte d'évaluation
+      - cache le volume
+- id: volumes.set_obb
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Turn the dimensioned outline (height, width, depth) of one evaluation volume on or off.
+  args:
+    volume_id:
+      type: integer
+      description: the volume's id
+      required: true
+    'on':
+      type: boolean
+      required: true
+  needs:
+  - session
+  - volume
+  text:
+    es:
+      title: Dimensiones de un volumen
+      say:
+      - prendé las dimensiones del volumen 1
+      - cuánto mide esa caja de evaluación
+      - apagá las cotas del volumen
+    en:
+      title: Dimensions of a volume
+      say:
+      - turn on the dimensions of volume 1
+      - how big is that evaluation box
+      - turn the volume's dimensions off
+    fr:
+      title: Dimensions d'un volume
+      say:
+      - active les dimensions du volume 1
+      - combien mesure cette boîte d'évaluation
+      - désactive les cotes du volume
+- id: volumes.delete
+  kind: action
+  runs_on: ui
+  status: manual
+  model: DELETE a saved evaluation volume from the scene for good.
+  confirm: true
+  args:
+    volume_id:
+      type: integer
+      description: the volume's id
+      required: true
+  needs:
+  - session
+  - volume
+  text:
+    es:
+      title: Borrar un volumen
+      say:
+      - borrá el volumen 2
+      - eliminá esa caja de evaluación
+      - sacá el volumen de la escena
+    en:
+      title: Delete a volume
+      say:
+      - delete volume 2
+      - remove that evaluation box
+      - take the volume out of the scene
+    fr:
+      title: Supprimer un volume
+      say:
+      - supprime le volume 2
+      - efface cette boîte d'évaluation
+      - retire le volume de la scène
+- id: volumes.set_gizmo_mode
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'With an evaluation volume selected in the viewer: what its gizmo does, translate (move), rotate or scale
+    (resize). The volume is saved and evaluated again as it changes.'
+  args:
+    mode:
+      type: string
+      enum:
+      - translate
+      - rotate
+      - scale
+      required: true
+  needs:
+  - session
+  - selection
+  - volume
+  text:
+    es:
+      title: Modo del gizmo del volumen
+      say:
+      - mové el volumen con el gizmo
+      - rotá la caja de evaluación
+      - redimensioná el volumen
+    en:
+      title: Gizmo mode of the volume
+      say:
+      - move the volume with the gizmo
+      - rotate the evaluation box
+      - resize the volume
+    fr:
+      title: Mode du gizmo du volume
+      say:
+      - déplace le volume avec le gizmo
+      - fais pivoter la boîte d'évaluation
+      - redimensionne le volume
+- id: volumes.set_solid
+  kind: action
+  runs_on: ui
+  status: manual
+  model: Draw the selected evaluation volume as a solid box (on) or as its outline (off).
+  args:
+    'on':
+      type: boolean
+      required: true
+  needs:
+  - session
+  - selection
+  - volume
+  text:
+    es:
+      title: Volumen sólido o en contorno
+      say:
+      - rellená el volumen
+      - volumen solo en contorno
+      - caja de evaluación maciza
+    en:
+      title: Solid or outlined volume
+      say:
+      - fill the volume
+      - volume as an outline only
+      - a filled evaluation box
+    fr:
+      title: Volume plein ou en contour
+      say:
+      - remplis le volume
+      - volume en contour seulement
+      - boîte d'évaluation pleine

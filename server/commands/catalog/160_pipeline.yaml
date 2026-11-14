@@ -43,3 +43,73 @@ commands:
       - je veux reconstruire la session
       - reconstruire la géométrie
       done: Fenêtre de reconstruction ouverte.
+- id: pipeline.run
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'LAUNCH the reconstruction of a session''s scans from the Reconstruct window: long GPU work (tens of minutes
+    to hours). With replace on it DELETES the scans'' existing outputs and starts from zero; off, it resumes what
+    is missing.'
+  confirm: true
+  args:
+    session:
+      type: string
+      description: the session's name; omit for the open one
+    scans:
+      type: array
+      items:
+        type: string
+      description: the scans to rebuild (date or label); omit for every scan
+    replace:
+      type: boolean
+      description: true = wipe the existing outputs and start over; false = resume
+      required: true
+    segment:
+      type: array
+      items:
+        type: string
+      description: the scans whose segmentation runs after the cloud
+  text:
+    es:
+      title: Ejecutar la reconstrucción
+      say:
+      - ejecutá la reconstrucción
+      - lanzá la reconstrucción reemplazando las salidas
+      - reanudá la reconstrucción que quedó a medias
+    en:
+      title: Run the reconstruction
+      say:
+      - run the reconstruction
+      - launch the reconstruction replacing the outputs
+      - resume the half-done reconstruction
+    fr:
+      title: Lancer la reconstruction
+      say:
+      - lance la reconstruction
+      - lance la reconstruction en remplaçant les sorties
+      - reprends la reconstruction inachevée
+- id: pipeline.cancel
+  kind: action
+  runs_on: ui
+  status: manual
+  model: 'Cancel the session''s pipeline job that is running or queued (a reconstruction, an autosegment or a GenRecon
+    run): the stage in progress is stopped.'
+  text:
+    es:
+      title: Cancelar la corrida en curso
+      say:
+      - cancelá la reconstrucción
+      - detené el trabajo en curso
+      - pará la corrida
+    en:
+      title: Cancel the run in progress
+      say:
+      - cancel the reconstruction
+      - stop the running job
+      - abort the run
+    fr:
+      title: Annuler l'exécution en cours
+      say:
+      - annule la reconstruction
+      - arrête la tâche en cours
+      - stoppe l'exécution
