@@ -423,7 +423,10 @@ segmentation:
                               # consolidation AND the attach, and every drop is written into
                               # `absorbed` as `too_small` so the list endpoint hides the mask
                               # instead of showing it at zero. Same value as
-                              # `correction.visit_drift.min_points`.
+                              # `correction.visit_drift.min_points`. FOR EVERY LABEL (USER
+                              # 2026-11-13): the structural ones were exempted from 2026-10-15
+                              # to 2026-11-13 by the code's own reading of structural_always —
+                              # doors and beams of one point in the lists; that exemption is gone.
                               # (History: 0 = SIN MÍNIMO, USER 2026-09-16, when this was a
                               # pre-attach sliver filter.)
   mask_dedupe_iou: 0.90       # SAM3 occasionally returns ONE observation under several object

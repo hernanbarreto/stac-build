@@ -5351,20 +5351,12 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
     if _min_pts > 0:
         _sz = {id(i): int(len(i.get("globalIndices") or ())) for i in instances}
         tiny = [inst for inst in instances if _sz[id(inst)] < _min_pts]
-        # USER 2026-10-15 ("no debe olvidarse lo estructural nunca"): a STRUCTURAL instance (a
-        # distant window, a narrow pipe) is never dropped for its size under structural_always —
-        # kept, with its margin recorded as negative
-        _pol = _merge_policy_of(cfg)
-        if _pol.structural_always and tiny:
-            from segmentation.autoprompt.consolidate_prompts import is_structural as _is_struct
-            kept_struct = [t for t in tiny if _is_struct(str(t.get("label") or "").replace("_", " "))]
-            if kept_struct:
-                print(f"[SegPipeline]   {len(kept_struct)} structural instance(s) under {_min_pts} pts "
-                      f"KEPT (structural_always, USER 2026-10-15): "
-                      + ", ".join("{}#{}({})".format(t["label"], t["id"], _sz[id(t)]) for t in kept_struct[:10]))
-                for t in kept_struct:
-                    t["kept_structural_under_min_points"] = True
-                tiny = [t for t in tiny if t not in kept_struct]
+        # THE MINIMUM HOLDS FOR EVERY LABEL (USER 2026-11-13, on doors and beams of ONE point in the
+        # lists: "Quién dijo que lo estructural nunca se exime … quién inventó esa mierda"). From
+        # 2026-10-15 to 2026-11-13 a STRUCTURAL instance under the minimum was kept here
+        # (`kept_structural_under_min_points`): that was this code's own reading of his "no debe
+        # olvidarse lo estructural nunca", which is about the VOCABULARY (structural_always: the
+        # envelope is always asked of the VLM and never cut by a bound) — never about the size
         if tiny:
             _tiny_desc = ", ".join("{}#{}({})".format(t["label"], t["id"], _sz[id(t)])
                                    for t in tiny[:10])
