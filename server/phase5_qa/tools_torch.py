@@ -344,15 +344,22 @@ def band_stats(P) -> dict:
             "lowest": P[int(torch.argmin(y))].cpu().numpy()}
 
 
-def principal_axes(P) -> Tuple[np.ndarray, np.ndarray]:
-    """(centroid, vt) — vt's rows are the right singular vectors of the centred points, largest
-    singular value first (numpy.linalg.svd's vt up to the sign of a row): the QR of the centred
-    points and the SVD of its 3 × 3 triangular factor."""
+def principal_axes_values(P) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(centroid, vt, s) — vt's rows are the right singular vectors of the centred points and s
+    their singular values, largest first (numpy.linalg.svd's vt up to the sign of a row, and its
+    s): the QR of the centred points and the SVD of its 3 × 3 triangular factor, which has the
+    points' own singular values."""
     torch = _torch()
     c = P.mean(0)
     r = torch.linalg.qr(P - c, mode="r").R
-    vt = torch.linalg.svd(r).Vh
-    return c.cpu().numpy(), vt.cpu().numpy()
+    _u, s, vt = torch.linalg.svd(r)
+    return c.cpu().numpy(), vt.cpu().numpy(), s.cpu().numpy()
+
+
+def principal_axes(P) -> Tuple[np.ndarray, np.ndarray]:
+    """(centroid, vt) of :func:`principal_axes_values`."""
+    c, vt, _s = principal_axes_values(P)
+    return c, vt
 
 
 def median(v) -> float:

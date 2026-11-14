@@ -187,6 +187,86 @@ def _same(a, b, where=""):
         assert a == b, (where, a, b)
 
 
+def _add(store, iid, label, pts):
+    store.upsert_instance(iid, label, source="test")
+    store.set_points(iid, pts)
+    obb = fit_gravity_aligned_obb(np.asarray(pts, np.float32).astype(np.float64))
+    store.set_obb(iid, obb[0], obb[1], obb[2], n_points=len(pts))
+
+
+def test_plumb_and_level_follow_the_elements_shape(tmp_path):
+    """A wall is measured on its FACE and a column on its AXIS (until 2026-11-14 the long axis was
+    taken for everything: pccr 3108's largest wall read "out of plumb 89°") — and the same on
+    both paths."""
+    store = _store(tmp_path)
+    rng = np.random.default_rng(5)
+    lean = math.radians(2.0)
+    # a wall 8 m long leaning 2° about its length (x): the face's normal tilts 2° off horizontal
+    h = rng.uniform(0, 2.6, 9000)
+    _add(store, 9, "wall", np.c_[rng.uniform(-4, 4, 9000), h * math.cos(lean),
+                                 -3 + h * math.sin(lean) + 0.002 * rng.normal(size=9000)])
+    # a post leaning 3° towards +x
+    t, hh = rng.uniform(0, 2 * np.pi, 4000), rng.uniform(0, 3.0, 4000)
+    tilt = math.radians(3.0)
+    _add(store, 10, "post", np.c_[2 + 0.05 * np.cos(t) + hh * math.sin(tilt), hh * math.cos(tilt),
+                                  2 + 0.05 * np.sin(t)])
+    try:
+        rec = SpatialTools(store, device="numpy")
+        dev = SpatialTools(store, device="cpu")
+        for name, iid in (("get_plumb", 2), ("get_plumb", 9), ("get_plumb", 4), ("get_plumb", 10),
+                          ("get_plumb", 1), ("get_plumb", 5), ("get_level", 1), ("get_level", 5),
+                          ("get_level", 2), ("get_level", 4), ("get_level", 9)):
+            _same(getattr(rec, name)(iid), getattr(dev, name)(iid), f"{name}({iid})")
+
+        wall, leaning = rec.get_plumb(2), rec.get_plumb(9)
+        assert wall["measured_on"] == "face" and wall["vertical_element"] is True
+        assert wall["plumb_deviation_deg"] < 0.05                      # built vertical
+        assert leaning["measured_on"] == "face"
+        assert leaning["plumb_deviation_deg"] == pytest.approx(2.0, abs=0.02)
+        assert leaning["deviation_mm_per_m"] == pytest.approx(math.tan(lean) * 1000, abs=0.4)
+
+        column, post = rec.get_plumb(4), rec.get_plumb(10)
+        assert column["measured_on"] == "axis" and column["plumb_deviation_deg"] < 0.5
+        assert post["measured_on"] == "axis"
+        assert post["plumb_deviation_deg"] == pytest.approx(3.0, abs=0.05)
+
+        # plumb does not apply to what lies flat: said, with no mm/m
+        floor, beam = rec.get_plumb(1), rec.get_plumb(5)
+        assert floor["measured_on"] == "face" and floor["vertical_element"] is False
+        assert floor["plumb_deviation_deg"] > 89.9 and "deviation_mm_per_m" not in floor
+        assert beam["measured_on"] == "axis" and beam["vertical_element"] is False
+
+        # level: the floor's face, the beam's axis; a wall is not a horizontal element
+        assert rec.get_level(1)["measured_on"] == "face" and rec.get_level(1)["level_deviation_deg"] < 0.05
+        lvl = rec.get_level(5)
+        assert lvl["measured_on"] == "axis" and lvl["horizontal_element"] is True
+        assert lvl["level_deviation_deg"] < 0.5
+        up = rec.get_level(2)
+        assert up["horizontal_element"] is False and "deviation_mm_per_m" not in up
+
+        # the sentence the tool layer writes says what was measured
+        from phase5_qa import answers
+        say = lambda tool, iid, lang: answers.compose(     # noqa: E731
+            tool, {"id": iid}, {**getattr(rec, tool)(iid), "id": iid, "label": "x"}, lang)
+        assert "desplome de su cara" in say("get_plumb", 9, "es")
+        assert "desplome de su eje" in say("get_plumb", 10, "es")
+        assert "no es un elemento vertical" in say("get_plumb", 1, "es")
+        assert "its face is out of plumb" in say("get_plumb", 9, "en")
+        assert "no es un elemento horizontal" in say("get_level", 2, "es")
+        assert "desnivel de su eje" in say("get_level", 5, "es")
+    finally:
+        store.close()
+
+
+def test_the_devices_singular_values_are_numpys():
+    rng = np.random.default_rng(3)
+    for scale in ([5, 2, 0.01], [3, 0.2, 0.2], [1, 1, 1]):
+        p = rng.normal(size=(4000, 3)) * scale + [10, -3, 7]
+        _u, s, _vt = np.linalg.svd(p - p.mean(0), full_matrices=False)
+        _c, _v, got = tt.principal_axes_values(tt.tensor(p, "cpu"))
+        assert np.allclose(got, s, rtol=1e-12, atol=0)
+
+
 def _compare(store, device):
     rec = SpatialTools(store, device="numpy")
     dev = SpatialTools(store, device=device)

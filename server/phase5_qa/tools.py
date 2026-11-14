@@ -671,50 +671,87 @@ class SpatialTools:
         return _insufficient("pass opening_id OR id1+id2")
 
     # ── plumb / level (ours, vs gravity) ────────────────────────────
-    def get_plumb(self, id: int) -> dict:
-        """Out-of-plumb of a vertical element: tilt of its principal vertical
-        axis from true vertical, degrees + mm-per-metre. Vertical = +Y of the
-        DISPLAY frame (floor-aligned)."""
+    def _principal(self, id):
+        """(vt, extents) of an object's points, or None under 50 points: vt's rows are its
+        principal directions, the largest extent first; extents = the standard deviation of the
+        points along each, metres."""
         pts = self._points(id)
         if pts is None or len(pts) < 50:
-            return _insufficient("insufficient points for plumb")
+            return None
         if self._dev == "numpy":
-            c = pts.mean(0)
-            u, s, vt = np.linalg.svd(pts - c, full_matrices=False)
+            _u, sv, vt = np.linalg.svd(pts - pts.mean(0), full_matrices=False)
         else:
-            c, vt = self._tt.principal_axes(self._tp(id))
-        axis = vt[0]
-        if axis[1] < 0:
-            axis = -axis
+            _c, vt, sv = self._tt.principal_axes_values(self._tp(id))
+        return vt, np.asarray(sv, float) / np.sqrt(float(len(pts)))
+
+    @staticmethod
+    def _is_face(extents) -> bool:
+        """Is the element measured on its FACE (a wall, a door, a plate) or on its AXIS (a column,
+        a post, a beam)? A face when its middle extent is nearer the largest than the smallest
+        on a ratio scale: e1 / e0 >= e2 / e1. No threshold: the element's own three extents."""
+        e0, e1, e2 = (float(v) for v in extents)
+        return e1 * e1 >= e0 * e2
+
+    def get_plumb(self, id: int) -> dict:
+        """Out-of-plumb of an element, degrees + mm-per-metre. Vertical = +Y of the DISPLAY frame
+        (floor-aligned). What is measured follows the element's own shape (:meth:`_is_face`):
+
+          - a FACE (wall, door, panel): the tilt of its plane from the plumb line — the angle
+            between the plane and the vertical, asin|n·y| with n the plane's normal;
+          - an AXIS (column, post, riser): the tilt of its long axis from the vertical.
+
+        Until 2026-11-14 the long axis was taken for every element: a wall's longest direction is
+        horizontal, so its "out of plumb" read 89°. ``vertical_element`` False = the face / axis
+        is nearer the horizontal than the vertical (plumb does not apply; mm/m not given)."""
+        pr = self._principal(id)
+        if pr is None:
+            return _insufficient("insufficient points for plumb")
+        vt, ext = pr
         vertical = np.array([0.0, 1.0, 0.0])
-        cos = abs(float(np.dot(axis, vertical)))
-        tilt_deg = float(np.degrees(np.arccos(min(1.0, cos))))
-        return {"plumb_deviation_deg": round(tilt_deg, 3),
-                "deviation_mm_per_m": round(float(np.tan(np.radians(tilt_deg)) * 1000), 2),
-                "unit": "deg", "confidence": self._density_confidence(id),
-                "source": "tool_measured"}
+        face = self._is_face(ext)
+        if face:
+            sin = abs(float(np.dot(vt[2], vertical)))            # the plane's normal
+            tilt_deg = float(np.degrees(np.arcsin(min(1.0, sin))))
+        else:
+            cos = abs(float(np.dot(vt[0], vertical)))            # the long axis
+            tilt_deg = float(np.degrees(np.arccos(min(1.0, cos))))
+        out = {"plumb_deviation_deg": round(tilt_deg, 3),
+               "measured_on": "face" if face else "axis",
+               "vertical_element": bool(tilt_deg < 45.0),
+               "extents_m": [round(float(e), 4) for e in ext],
+               "unit": "deg", "confidence": self._density_confidence(id),
+               "source": "tool_measured"}
+        if out["vertical_element"]:
+            out["deviation_mm_per_m"] = round(float(np.tan(np.radians(tilt_deg)) * 1000), 2)
+        return out
 
     def get_level(self, id: int) -> dict:
-        """Out-of-level of a horizontal element: tilt of its plane from
-        horizontal, degrees + mm-per-metre (DISPLAY frame, floor-aligned)."""
-        pts = self._points(id)
-        if pts is None or len(pts) < 50:
+        """Out-of-level of an element, degrees + mm-per-metre (DISPLAY frame, floor-aligned). As
+        :meth:`get_plumb`, by the element's own shape: a FACE (floor, slab, table top) — the tilt
+        of its plane from the horizontal; an AXIS (beam, pipe run) — the tilt of its long axis
+        from the horizontal. ``horizontal_element`` False = nearer the vertical (level does not
+        apply; mm/m not given)."""
+        pr = self._principal(id)
+        if pr is None:
             return _insufficient("insufficient points for level")
-        if self._dev == "numpy":
-            c = pts.mean(0)
-            u, s, vt = np.linalg.svd(pts - c, full_matrices=False)
-        else:
-            c, vt = self._tt.principal_axes(self._tp(id))
-        normal = vt[2]  # smallest-variance direction = plane normal
-        if normal[1] < 0:
-            normal = -normal
+        vt, ext = pr
         vertical = np.array([0.0, 1.0, 0.0])
-        cos = abs(float(np.dot(normal, vertical)))
-        tilt_deg = float(np.degrees(np.arccos(min(1.0, cos))))
-        return {"level_deviation_deg": round(tilt_deg, 3),
-                "deviation_mm_per_m": round(float(np.tan(np.radians(tilt_deg)) * 1000), 2),
-                "unit": "deg", "confidence": self._density_confidence(id),
-                "source": "tool_measured"}
+        face = self._is_face(ext)
+        if face:
+            cos = abs(float(np.dot(vt[2], vertical)))            # the plane's normal
+            tilt_deg = float(np.degrees(np.arccos(min(1.0, cos))))
+        else:
+            sin = abs(float(np.dot(vt[0], vertical)))            # the long axis
+            tilt_deg = float(np.degrees(np.arcsin(min(1.0, sin))))
+        out = {"level_deviation_deg": round(tilt_deg, 3),
+               "measured_on": "face" if face else "axis",
+               "horizontal_element": bool(tilt_deg < 45.0),
+               "extents_m": [round(float(e), 4) for e in ext],
+               "unit": "deg", "confidence": self._density_confidence(id),
+               "source": "tool_measured"}
+        if out["horizontal_element"]:
+            out["deviation_mm_per_m"] = round(float(np.tan(np.radians(tilt_deg)) * 1000), 2)
+        return out
 
     def get_span(self, id: int) -> dict:
         """Largest horizontal extent (span) of an object, metres."""
@@ -1683,7 +1720,8 @@ class SpatialTools:
                {"id": idp}, ["id"]),
             fn("get_distance", "Approx surface distance between two objects (m).",
                {"id1": idp, "id2": idp}, ["id1", "id2"]),
-            fn("get_clearance", "Minimum real clearance between two objects (m) with the closest point pair.",
+            fn("get_clearance", "Minimum real clearance (gap, separation, holgura) between ANY two "
+               "objects (m) with the closest point pair — a floor and a wall included.",
                {"id1": idp, "id2": idp}, ["id1", "id2"]),
             fn("measure_between",
                "Distance between NAMED PARTS of two objects (m), from their real "
@@ -1736,14 +1774,15 @@ class SpatialTools:
                {"item_size": {**arr, "description": "[w,h,d] metres"},
                 "opening_id": idp, "id1": idp, "id2": idp,
                 "margin_m": {"type": "number"}}, ["item_size"]),
-            fn("get_plumb", "Out-of-plumb (tilt from vertical) of an element, degrees + mm/m.",
-               {"id": idp}, ["id"]),
-            fn("get_level", "Out-of-level (tilt from horizontal) of a surface, degrees + mm/m.",
-               {"id": idp}, ["id"]),
+            fn("get_plumb", "Out-of-plumb (tilt from vertical) of an element — a wall's face, a "
+               "column's axis — degrees + mm/m.", {"id": idp}, ["id"]),
+            fn("get_level", "Out-of-level (tilt from horizontal) of an element — a floor's face, a "
+               "beam's axis — degrees + mm/m.", {"id": idp}, ["id"]),
             fn("get_span", "Largest horizontal extent (span) of an object, metres.", {"id": idp}, ["id"]),
             fn("get_height_profile",
-               "Height/clearance profile (gálibos) along an object's longest axis; "
-               "pass floor_id for floor-to-underside clearances.",
+               "FREE HEIGHT (headroom, altura libre, gálibo) UNDER an overhead object (ceiling, "
+               "beam, duct) along its longest axis: floor_id = the floor. Only for heights — the "
+               "gap between two objects is get_clearance.",
                {"id": idp, "n_stations": {"type": "integer"}, "floor_id": idp}, ["id"]),
             fn("get_flatness_report",
                "Flatness report (mm): surface_fitting residuals when available, "

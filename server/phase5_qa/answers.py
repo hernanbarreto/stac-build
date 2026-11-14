@@ -156,17 +156,33 @@ def _get_height_profile(a, r, lang):
               f"{_obj(r, 'id', a)}: its height runs from {_n(lo)} to {_n(hi)} m over {len(st)} stations.")
 
 
+def _on(r, lang):
+    """What the tilt was measured on: the element's face or its long axis."""
+    return _t(lang, "su cara" if r.get("measured_on") == "face" else "su eje",
+              "its face" if r.get("measured_on") == "face" else "its axis")
+
+
 def _get_plumb(a, r, lang):
-    return _t(lang, f"{_obj(r, 'id', a)}: desplome {_n(r['plumb_deviation_deg'], 3)}° "
+    if r.get("vertical_element") is False:
+        return _t(lang, f"{_obj(r, 'id', a)} no es un elemento vertical: {_on(r, lang)} está a "
+                        f"{_n(r['plumb_deviation_deg'], 1)}° de la vertical.",
+                  f"{_obj(r, 'id', a)} is not a vertical element: {_on(r, lang)} is "
+                  f"{_n(r['plumb_deviation_deg'], 1)}° from the vertical.")
+    return _t(lang, f"{_obj(r, 'id', a)}: desplome de {_on(r, lang)} {_n(r['plumb_deviation_deg'], 3)}° "
                     f"({_n(r['deviation_mm_per_m'], 1)} mm/m).",
-              f"{_obj(r, 'id', a)}: out of plumb {_n(r['plumb_deviation_deg'], 3)}° "
+              f"{_obj(r, 'id', a)}: {_on(r, lang)} is out of plumb by {_n(r['plumb_deviation_deg'], 3)}° "
               f"({_n(r['deviation_mm_per_m'], 1)} mm/m).")
 
 
 def _get_level(a, r, lang):
-    return _t(lang, f"{_obj(r, 'id', a)}: desnivel {_n(r['level_deviation_deg'], 3)}° "
+    if r.get("horizontal_element") is False:
+        return _t(lang, f"{_obj(r, 'id', a)} no es un elemento horizontal: {_on(r, lang)} está a "
+                        f"{_n(r['level_deviation_deg'], 1)}° de la horizontal.",
+                  f"{_obj(r, 'id', a)} is not a horizontal element: {_on(r, lang)} is "
+                  f"{_n(r['level_deviation_deg'], 1)}° from the horizontal.")
+    return _t(lang, f"{_obj(r, 'id', a)}: desnivel de {_on(r, lang)} {_n(r['level_deviation_deg'], 3)}° "
                     f"({_n(r['deviation_mm_per_m'], 1)} mm/m).",
-              f"{_obj(r, 'id', a)}: out of level {_n(r['level_deviation_deg'], 3)}° "
+              f"{_obj(r, 'id', a)}: {_on(r, lang)} is out of level by {_n(r['level_deviation_deg'], 3)}° "
               f"({_n(r['deviation_mm_per_m'], 1)} mm/m).")
 
 

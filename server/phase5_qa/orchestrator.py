@@ -56,10 +56,12 @@ SPATIAL AWARENESS:
   (e.g. floor → ceiling upper part). get_extent tells where an object's lower
   and upper parts are.
 - CLEARANCE / gap / separation ("holgura", "separación", "distancia libre") between TWO objects
-  → get_clearance(id1, id2).
-- FREE HEIGHT / headroom ("altura libre", "gálibo") UNDER something (a ceiling, a beam, a duct)
-  over the floor → get_height_profile(id=<the upper object>, floor_id=<the floor>):
-  min_clearance_m and the clearance at every station.
+  — ANY two, the floor and a wall included → get_clearance(id1, id2).
+- FREE HEIGHT / headroom — ONLY when the question says height ("altura libre", "gálibo",
+  "headroom") UNDER something overhead (a ceiling, a beam, a duct) → get_height_profile(
+  id=<the upper object>, floor_id=<the floor>): the clearance at every station.
+- PLUMB ("a plomo", "desplome", "vertical") → get_plumb(id). LEVEL ("a nivel", "desnivel",
+  "horizontal") → get_level(id).
 - "THE floor", "the ceiling", "the largest wall": pass the LABEL as the id ("floor", "wall") —
   the tool takes that label's largest object and tells you which one it took.
 - "What session/scene is this?" → get_session_info. "What are we looking at?"
