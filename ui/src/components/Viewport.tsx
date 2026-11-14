@@ -235,7 +235,9 @@ export interface ViewportHandle {
      *  when they are in memory; ``onProgress`` gets the fraction. */
     prefetchFlythrough: (c2wRowMajor: number[][], fovYDeg: number,
                          onProgress?: (frac: number) => void, isCancelled?: () => boolean) => Promise<void>
-    setCameraToPose: (c2wRowMajor: number[]) => void
+    /** ``rollDeg``: the scan's frames were stored sideways — the camera is rolled about its optical
+     *  axis by the degrees (clockwise) that set them upright, so the scene is seen as the video is */
+    setCameraToPose: (c2wRowMajor: number[], rollDeg?: number) => void
     // Match the 3D camera's vertical FOV to the real camera (from intrinsics) so
     // the flythrough frames the scene exactly like the video. Restored on close.
     setCameraFov: (fovYDeg: number) => void
@@ -3487,7 +3489,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             cam.fov = fovYDeg
             cam.updateProjectionMatrix()
         },
-        setCameraToPose: (c2wRowMajor: number[]) => {
+        setCameraToPose: (c2wRowMajor: number[], rollDeg = 0) => {
             const cam = cameraRef.current
             const ctrl = controlsRef.current
             if (!cam || !c2wRowMajor || c2wRowMajor.length < 16) return
@@ -3511,6 +3513,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             world.decompose(pos, quat, scl)
             cam.position.copy(pos)
             cam.quaternion.copy(quat)
+            // frames stored sideways: turning the image clockwise by r brings its left edge to the
+            // top, so the camera's up becomes its own -X — a roll of +r about its +Z (backward) axis
+            if (rollDeg) cam.rotateZ(rollDeg * Math.PI / 180)
             cam.updateMatrixWorld(true)
             if (ctrl) {
                 const fwd = _ctpFwd.set(0, 0, -1).applyQuaternion(quat)
@@ -5824,7 +5829,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             {camTooltip && (
                 <div className="stac-vptip" style={{ '--tip-x': `${camTooltip.x + 16}px`, '--tip-y': `${camTooltip.y - 80}px` } as React.CSSProperties}>
                     <div className="stac-mono">{camTooltip.frameName}</div>
-                    <img className="stac-vptip__thumb" src={`/api/sessions/${camTooltip.sessionId}/frames/${camTooltip.frameName}`} alt={camTooltip.frameName}
+                    <img className="stac-vptip__thumb" src={`/api/sessions/${camTooltip.sessionId}/frames/${camTooltip.frameName}?upright=1`} alt={camTooltip.frameName}
                         onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
                 </div>
             )}

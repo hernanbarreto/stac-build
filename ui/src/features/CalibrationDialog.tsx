@@ -165,7 +165,7 @@ export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft,
   const [busy, setBusy] = useState(false)
   // ── THE REAL RESCALE: the calibration applied to the scan's geometry (a new epoch) ──
   const [applyAsk, setApplyAsk] = useState(false)
-  const [applyState, setApplyState] = useState<{ status: 'idle' | 'running' | 'done' | 'failed'; progress?: number; message?: string; error?: string; epoch_to?: number; scale?: number } | null>(null)
+  const [applyState, setApplyState] = useState<{ status: 'idle' | 'running' | 'done' | 'failed'; progress?: number; message?: string; error?: string; epoch_to?: number; scale?: number; keeps_bytes?: number } | null>(null)
 
   // ── the draft's form ──
   const [value, setValue] = useState<number | ''>('')
@@ -512,7 +512,7 @@ export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft,
               ) : factor != null && applyState?.status !== 'running' ? (
                 applyAsk ? (
                   <Stack gap={2}>
-                    <Banner tone="warn" compact>{t('calibration.applyConfirm', { factor: fmt.number(factor, 5) })}</Banner>
+                    <Banner tone="warn" compact>{t('calibration.applyConfirm', { factor: fmt.number(factor, 5), size: fmt.bytesMb((applyState?.keeps_bytes ?? 0) / 1e6) })}</Banner>
                     <Row>
                       <Button variant="primary" icon={<Scaling aria-hidden />} onClick={applyCalibration}>{t('calibration.applyYes')}</Button>
                       <Button onClick={() => setApplyAsk(false)}>{t('common.cancel')}</Button>

@@ -732,7 +732,7 @@
     "colAxis": "Eje",
     "apply": "Aplicar al {@scan}",
     "applyYes": "Reescalar el {@scan}",
-    "applyConfirm": "El {@scan} se reescribe a {factor} × su tamaño actual como una nueva {@epoch}: la nube, las cámaras, los objetos, las mallas y estas medidas. La {@epoch} actual se conserva; la escala inversa lo deshace. Tarda de segundos a minutos.",
+    "applyConfirm": "El {@scan} se reescribe a {factor} × su tamaño actual como una nueva {@epoch}: la nube, las cámaras, los objetos, las mallas y estas medidas. La {@epoch} actual se conserva ({size} más en disco); la escala inversa lo deshace. Tarda de segundos a minutos.",
     "applyRunning": "Reescalando el {@scan}: {pct} %. {message}",
     "applyDone": "El {@scan} quedó a la escala calibrada ({@epoch} {epoch}).",
     "applyFailed": "El {@scan} no se reescaló: {detail}",

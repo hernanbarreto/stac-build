@@ -732,7 +732,7 @@
     "colAxis": "Axis",
     "apply": "Apply to the {@scan}",
     "applyYes": "Rescale the {@scan}",
-    "applyConfirm": "The {@scan} is rewritten at {factor} × its present size as a new {@epoch}: the cloud, the cameras, the objects, the meshes and these measurements. The present {@epoch} is kept; the inverse scale undoes it. It takes from seconds to minutes.",
+    "applyConfirm": "The {@scan} is rewritten at {factor} × its present size as a new {@epoch}: the cloud, the cameras, the objects, the meshes and these measurements. The present {@epoch} is kept ({size} more on disk); the inverse scale undoes it. It takes from seconds to minutes.",
     "applyRunning": "Rescaling the {@scan}: {pct} %. {message}",
     "applyDone": "The {@scan} is at the calibrated scale ({@epoch} {epoch}).",
     "applyFailed": "The {@scan} was not rescaled: {detail}",

@@ -320,6 +320,75 @@ def upright_rotation(orientation_meta: float) -> Optional[str]:
     return UPRIGHT[deg]
 
 
+# ── scans whose frames were stored sideways: upright FOR DISPLAY ─────────────────────────────
+# USER 2026-11-14, on bufferStop (extracted before the frames were set upright, every product
+# computed on its sideways frames): "solo gira las imagenes cuando se muestran en las poses de
+# camara en el viewer y en el video nomas, no hace falta mas nada". The stored frames and every
+# product stay as they are; what is SHOWN is turned.
+DEGREES_CLOCKWISE = {"ROTATE_90_CLOCKWISE": 90, "ROTATE_180": 180, "ROTATE_90_COUNTERCLOCKWISE": 270}
+_DISPLAY_MEMO: Dict[tuple, Optional[str]] = {}
+
+
+def display_rotation(scan_dir: os.PathLike) -> Optional[str]:
+    """The ``cv2.rotate`` flag (its name) that sets this scan's STORED frames upright for
+    display; None when they are upright already — extracted upright (the manifest says
+    ``orientation_applied``), or from a video with no rotation. A scan with no manifest (its
+    frames predate them) is answered by its source video's own rotation. Memoised on the
+    manifest's and the video's stamps."""
+    scan_dir = Path(scan_dir)
+    mp, videos = manifest_path(scan_dir), sorted(scan_dir.glob("source_video.*"))
+
+    def _stamp(p: Path):
+        try:
+            st = p.stat()
+            return (str(p), st.st_size, st.st_mtime_ns)
+        except OSError:
+            return (str(p), None, None)
+    key = (_stamp(mp), tuple(_stamp(v) for v in videos))
+    if key in _DISPLAY_MEMO:
+        return _DISPLAY_MEMO[key]
+    meta: Optional[float] = None
+    try:
+        man = load_manifest(scan_dir)
+    except FramesManifestError:
+        man = None
+    if man is not None:
+        dec = man.get("decoder") or {}
+        if dec.get("orientation_applied"):
+            _DISPLAY_MEMO[key] = None
+            return None
+        if isinstance(dec.get("orientation_meta"), (int, float)):
+            meta = float(dec["orientation_meta"])
+    if meta is None and videos:
+        import cv2
+        cap = cv2.VideoCapture(str(videos[0]), cv2.CAP_FFMPEG)
+        try:
+            if cap.isOpened():
+                meta = float(cap.get(cv2.CAP_PROP_ORIENTATION_META))
+        finally:
+            cap.release()
+    try:
+        flag = upright_rotation(meta) if meta is not None else None
+    except FramesManifestError:
+        flag = None                                   # not a quarter turn: shown as stored
+    _DISPLAY_MEMO[key] = flag
+    return flag
+
+
+def upright_jpeg(frame_path: os.PathLike, flag: str, quality: int = 90) -> bytes:
+    """One stored frame turned upright, as JPEG bytes — for DISPLAY only (the frame on disk,
+    which every product was computed on, is not touched)."""
+    import cv2
+    import numpy as np
+    img = cv2.imdecode(np.frombuffer(Path(frame_path).read_bytes(), np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise FramesManifestError(f"{frame_path} cannot be decoded")
+    ok, buf = cv2.imencode(".jpg", cv2.rotate(img, getattr(cv2, flag)), [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
+    if not ok:
+        raise FramesManifestError(f"{frame_path} could not be encoded upright")
+    return buf.tobytes()
+
+
 # ── the manifest's bytes ────────────────────────────────────────────────────────────────────
 
 def manifest_bytes(doc: Mapping[str, Any]) -> bytes:

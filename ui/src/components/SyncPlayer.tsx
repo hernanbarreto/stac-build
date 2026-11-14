@@ -12,6 +12,9 @@ interface Flythrough {
   intrinsics: number[] | null // [fx, fy, cx, cy] at reconstruction resolution
   fps: number | null          // source video fps (for time->frame mapping)
   video_n_frames: number | null // total frames in the source video
+  /** degrees (clockwise) that set the scan's stored frames upright: 0, or 90 / 180 / 270 for a
+   *  video recorded upright and extracted sideways — the 3D camera is rolled by it */
+  frame_rotation?: number
   video_url: string
 }
 
@@ -124,6 +127,8 @@ export function SyncPlayer({ sessionId, viewportRef, onClose }: {
   const forceRef = useRef(true)
   const errLoggedRef = useRef(0)
   const outArr = useRef<number[]>(new Array(16).fill(0))
+  /** degrees the 3D camera is rolled by (the scan's frames were stored sideways) */
+  const rollRef = useRef(0)
   const closedRef = useRef(false)
 
   // 1) Load poses + match the 3D camera FOV to the real camera + the flythrough render profile
@@ -139,9 +144,13 @@ export function SyncPlayer({ sessionId, viewportRef, onClose }: {
         pathRef.current = buildPath(d)
         setData(d)
         const K = d.intrinsics
+        rollRef.current = d.frame_rotation || 0
+        const quarter = rollRef.current === 90 || rollRef.current === 270
         let fovY = 60
-        if (K && K.length >= 4 && K[1] > 0 && K[3] > 0) {
-          fovY = 2 * Math.atan(K[3] / K[1]) * 180 / Math.PI
+        if (K && K.length >= 4 && K[0] > 0 && K[1] > 0 && K[3] > 0) {
+          // the view's vertical is the stored frame's vertical — its horizontal when the frames
+          // are shown turned a quarter (cx / fx in place of cy / fy)
+          fovY = 2 * Math.atan(quarter ? K[2] / K[0] : K[3] / K[1]) * 180 / Math.PI
           viewportRef.current?.setCameraFov(fovY)
         }
         // the cloud along the whole path, fetched while the video downloads
@@ -224,7 +233,7 @@ export function SyncPlayer({ sessionId, viewportRef, onClose }: {
     o[4] = xy; o[5] = yy; o[6] = zy; o[7] = py
     o[8] = xz; o[9] = yz; o[10] = zz; o[11] = pz
     o[12] = 0; o[13] = 0; o[14] = 0; o[15] = 1
-    viewportRef.current?.setCameraToPose(o)
+    viewportRef.current?.setCameraToPose(o, rollRef.current)
     return (s >= 0.5 ? hi : lo) + 1
   }, [viewportRef])
 

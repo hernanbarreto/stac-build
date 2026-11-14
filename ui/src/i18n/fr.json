@@ -732,7 +732,7 @@
     "colAxis": "Axe",
     "apply": "Appliquer au {@scan}",
     "applyYes": "Remettre le {@scan} à l'échelle",
-    "applyConfirm": "Le {@scan} est réécrit à {factor} × sa taille actuelle sous la forme d'une nouvelle {@epoch} : le nuage, les caméras, les objets, les maillages et ces mesures. L'{@epoch} actuelle est conservée ; l'échelle inverse annule l'opération. Cela prend de quelques secondes à quelques minutes.",
+    "applyConfirm": "Le {@scan} est réécrit à {factor} × sa taille actuelle sous la forme d'une nouvelle {@epoch} : le nuage, les caméras, les objets, les maillages et ces mesures. L'{@epoch} actuelle est conservée ({size} de plus sur le disque) ; l'échelle inverse annule l'opération. Cela prend de quelques secondes à quelques minutes.",
     "applyRunning": "Remise à l'échelle du {@scan} : {pct} %. {message}",
     "applyDone": "Le {@scan} est à l'échelle étalonnée ({@epoch} {epoch}).",
     "applyFailed": "Le {@scan} n'a pas été remis à l'échelle : {detail}",

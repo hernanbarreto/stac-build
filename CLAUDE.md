@@ -584,11 +584,15 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   `orientation_applied`). Measured on bufferStop's video: the explicit ROTATE_90_CLOCKWISE of the coded frame IS
   the decoder's own automatic rotation bit for bit; 90 / 180 / 270 held equal to it by tests on tagged videos; a
   video with no rotation is extracted as before. (The Stray capture keeps its coded frames: its depth maps are
-  aligned to them.) BUFFERSTOP ITSELF IS NOT FIXED: its frames on disk are the sideways ones and every product
-  was computed on them — setting them upright means re-extracting and RE-RUNNING the session (cloud, segmentation,
-  mesh: a GPU run ON HIS ORDER; it would also be the first PORTRAIT session through the pipeline, never
-  validated). Rotating the stored frames in place would break every pixel reference (cameras, the cloud's
-  provenance, the masks): not done.
+  aligned to them.) BUFFERSTOP ITSELF (its frames on disk are the sideways ones and every product
+  was computed on them): HIS DECISION 2026-11-14, between re-running it upright and turning what is shown — "solo
+  gira las imagenes cuando se muestran en las poses de camara en el viewer y en el video nomas, no hace falta mas
+  nada". DONE: `frames_manifest.display_rotation(scan)` (the turn that sets a scan's STORED frames upright: None
+  when they were extracted upright or the video has no rotation; bufferStop → 90° clockwise, the other four
+  sessions → none), `/api/sessions/{id}/frames/{file}?upright=1` (the camera pose's image in the viewer, turned
+  on the way out), and the flythrough's `frame_rotation` (its 3D camera rolled by it, the vertical field of view
+  taken from the frame's horizontal). The stored frames and every product are untouched; the Segmentation
+  Manager and the image references still show the frames as stored (not asked). NOT TRIED IN A BROWSER. No re-run.
 - The pipeline's and the general lists: `docs/pipeline_final.md` §4 — capture distance (when he says), the weighted
   vote (his word), smarter segmentation, epoch renumbering, the GPU ports of the intake, MEJORAS_OBLIGATORIAS
   (never built), the brush lock, the BIM comparison, viewer checks; station's heavy residual tail (USER 2026-11-08

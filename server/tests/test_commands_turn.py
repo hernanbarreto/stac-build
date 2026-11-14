@@ -264,3 +264,27 @@ def test_the_conversation_is_in_the_turns_language(tmp_path, monkeypatch):
     assert res["answer"] == "I am fine, thank you. What do you need?"
     res, engine = _ask(monkeypatch, tmp_path, [("small_talk", {"reply": "Très bien, merci."})], "comment ça va ?", ui=UI)
     assert res["lang"] == "fr" and res["answer"] == "Très bien, merci." and "THE ANSWER'S LANGUAGE: French" in engine.chats[0]["system"]
+
+
+def test_a_command_done_by_hand_is_known_and_said_so(tmp_path, monkeypatch):
+    """A command of the interface STAC does not run (status: manual — it needs the pointer, a file
+    or credentials, or it is not wired yet) is still in the database, is offered to the model
+    when the sentence asks for it, and STAC says it is done by hand and where."""
+    import commands
+    db = commands.database()
+    manual = db.list("es", runs_on="ui", status="manual")
+    if not manual:
+        pytest.skip("the catalogue has no manual row yet")
+    row = manual[0]
+    question = row["say"][0]
+    res, engine = _ask(monkeypatch, tmp_path, [(row["tool"], {})], question, ui={**UI, "session": "pccr"}, lang="es")
+    assert row["tool"] in engine.chats[0]["tools"]                         # found by how it is asked for
+    assert res["ui_actions"] == [] and res["acted_only"] is False          # nothing is run, nothing confirmed
+    area = db.area_title(row["area"], "es")
+    assert res["answer"] == f"«{row['title']}» se hace a mano por ahora, en {area}."
+    res, _ = _ask(monkeypatch, tmp_path, [(row["tool"], {})], question, ui={**UI, "session": "pccr"}, lang="fr")
+    fr = db.get(row["id"], "fr")
+    assert res["answer"] == f"« {fr['title']} » se fait à la main pour l'instant, dans {db.area_title(row['area'], 'fr')}."
+    # the help lists them apart
+    listed = commands.SystemTools(db, "es").help_commands(row["area"])
+    assert row["title"] in listed["manual"] and row["title"] not in listed["commands"]

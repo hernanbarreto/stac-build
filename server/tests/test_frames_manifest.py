@@ -410,3 +410,60 @@ def test_extraction_caps_the_long_side(tmp_path):
     s3 = _scan(tmp_path, "src_big_cap")
     FM.extract_video(_video(s3 / "source_video.avi"), s3, max_long_side=1024, log=lambda *a: None)
     assert cv2.imread(str(s3 / "frames" / "000000.jpg")).shape[:2] == (H, W), "under the cap: untouched"
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs the ffmpeg CLI to tag rotation")
+def test_frames_stored_sideways_are_turned_for_display_only(tmp_path):
+    """USER 2026-11-14, on bufferStop (extracted sideways, every product computed on those frames):
+    "solo gira las imagenes cuando se muestran en las poses de camara en el viewer y en el video
+    nomas". The scan's stored frames say which turn sets them upright; a frame is turned on the
+    way out, never on disk."""
+    src = tmp_path / "v.mp4"
+    w = cv2.VideoWriter(str(src), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (W, H))
+    frame = np.zeros((H, W, 3), np.uint8)
+    frame[: H // 2, : W // 3] = (10, 200, 30)
+    for _ in range(2):
+        w.write(frame)
+    w.release()
+    s = _scan(tmp_path)
+    rot = s / "source_video.mp4"
+    r = subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-display_rotation", "90", "-i",
+                        str(src), "-c", "copy", str(rot)], capture_output=True, timeout=60)
+    if r.returncode != 0:
+        pytest.skip(f"this ffmpeg cannot tag a display rotation: {r.stderr[-200:]!r}")
+    cap = cv2.VideoCapture(str(rot), cv2.CAP_FFMPEG)
+    meta = cap.get(cv2.CAP_PROP_ORIENTATION_META)
+    cap.release()
+    want = FM.upright_rotation(meta)
+    assert want is not None
+
+    # 1. extracted upright (today): nothing to turn
+    FM.extract_video(rot, s, log=lambda *a: None)
+    assert FM.display_rotation(s) is None
+
+    # 2. a scan extracted as coded with a manifest that only recorded the rotation (before 2026-11-14)
+    s2 = _scan(tmp_path, "src_old")
+    shutil.copy(rot, s2 / "source_video.mp4")
+    FM.extract_video(s2 / "source_video.mp4", s2, log=lambda *a: None, upright=False)
+    assert json.loads(FM.manifest_path(s2).read_text())["decoder"]["orientation_applied"] is None
+    assert FM.display_rotation(s2) == want
+    stored = sorted((s2 / "frames").glob("*.jpg"))[0]
+    before = stored.read_bytes()
+    shown = cv2.imdecode(np.frombuffer(FM.upright_jpeg(stored, want), np.uint8), cv2.IMREAD_COLOR)
+    coded = cv2.imread(str(stored))
+    assert coded.shape[:2] == (H, W) and shown.shape[:2] == (W, H)             # a quarter turn
+    assert np.abs(shown.astype(int) - cv2.rotate(coded, getattr(cv2, want)).astype(int)).mean() < 3.0   # a JPEG apart
+    assert stored.read_bytes() == before                                       # the frame on disk is not touched
+    assert FM.DEGREES_CLOCKWISE[want] in (90, 270)
+
+    # 3. frames that predate manifests (bufferStop): the source video answers
+    s3 = _scan(tmp_path, "src_legacy")
+    (s3 / "frames").mkdir(exist_ok=True)
+    shutil.copy(stored, s3 / "frames" / stored.name)
+    shutil.copy(rot, s3 / "source_video.mp4")
+    assert FM.display_rotation(s3) == want
+    # … and a scan with neither a rotation nor a video is shown as stored
+    s4 = _scan(tmp_path, "src_plain")
+    FM.extract_video(_video(s4 / "source_video.avi"), s4, log=lambda *a: None)
+    assert FM.display_rotation(s4) is None
+    assert FM.display_rotation(_scan(tmp_path, "src_empty")) is None

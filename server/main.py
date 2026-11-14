@@ -1569,9 +1569,18 @@ async def get_flythrough(session_id: str):
     except Exception:
         pass
 
+    # frames stored sideways (see serve_session_frame): the poses are the sideways camera's —
+    # the client rolls its 3D camera by this many degrees so the scene is seen as the video is
+    frame_rotation = 0
+    try:
+        import intake.frames_manifest as FM
+        frame_rotation = FM.DEGREES_CLOCKWISE.get(FM.display_rotation(ctx.source_dir) or "", 0)
+    except Exception as _e:  # noqa: BLE001 — declared; the view is then the stored frames'
+        print(f"[flythrough] the frames' display rotation could not be read: {_e}")
+
     return {"n_frames": len(frames), "frames": frames, "poses": mats,
             "scale": 1.0, "intrinsics": K, "fps": fps,
-            "video_n_frames": video_n_frames,
+            "video_n_frames": video_n_frames, "frame_rotation": frame_rotation,
             "video_url": f"/api/sessions/{session_id}/video"}
 
 # Mount auth routes
@@ -2522,8 +2531,12 @@ async def get_segments(session_id: str):
 
 
 @app.get("/api/sessions/{session_id}/frames/{filename}")
-async def serve_session_frame(session_id: str, filename: str):
-    """Serve individual frame images from a session's frames directory."""
+async def serve_session_frame(session_id: str, filename: str, upright: bool = False):
+    """Serve individual frame images from a session's frames directory. ``upright=1``: the frame
+    as it is WATCHED — turned for display when the scan's frames were stored sideways (a video
+    recorded upright and extracted before 2026-11-14: bufferStop; USER 2026-11-14 "solo gira las
+    imagenes cuando se muestran en las poses de camara en el viewer y en el video"). The frame
+    on disk, which every product was computed on, is what every other reader gets."""
     from fastapi.responses import FileResponse
 
     ctx = _ctx(session_id)
@@ -2532,6 +2545,12 @@ async def serve_session_frame(session_id: str, filename: str):
     if not frame_path.exists():
         raise HTTPException(status_code=404, detail=f"Frame not found: {filename}")
 
+    if upright:
+        import intake.frames_manifest as FM
+        flag = await asyncio.get_running_loop().run_in_executor(None, FM.display_rotation, ctx.source_dir)
+        if flag:
+            data = await asyncio.get_running_loop().run_in_executor(None, FM.upright_jpeg, frame_path, flag)
+            return Response(content=data, media_type="image/jpeg")
     return FileResponse(str(frame_path), media_type="image/jpeg")
 
 @app.get("/api/sessions/{session_id}/keyframes")

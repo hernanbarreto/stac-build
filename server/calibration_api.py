@@ -214,11 +214,26 @@ def apply_refusal(summary: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def kept_epoch_bytes(out: Path) -> int:
+    """What a rescale ADDS to the disk: the present epoch is kept beside the new one — its cloud,
+    its raw cloud and its octree are the bulk of it. (The volume's quota is invisible to the
+    system: the user is told the figure before confirming.)"""
+    total = 0
+    for rel in ("cleaned_cloud.ply", "cleaned_cloud_raw.ply"):
+        p = out / rel
+        if p.exists():
+            total += p.stat().st_size
+    potree = out / "potree"
+    if potree.is_dir():
+        total += sum(f.stat().st_size for f in potree.iterdir() if f.is_file())
+    return int(total)
+
+
 @router.get("/{session_id}/apply")
 def apply_status(session_id: str, scan_key: Optional[str] = Query(default=None)):
     out = _output_dir(session_id, scan_key)
     st = _APPLY.get(str(out))
-    return {"ok": True, **(st or {"status": "idle"})}
+    return {"ok": True, "keeps_bytes": kept_epoch_bytes(out), **(st or {"status": "idle"})}
 
 
 @router.post("/{session_id}/apply")
