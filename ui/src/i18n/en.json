@@ -1193,6 +1193,7 @@
     "saveAlignment": "Save alignment",
     "loadedObjectMeshes": "{n} object meshes loaded",
     "loadedSceneMeshes": "{n} scene meshes loaded ({pending} per {@instance} on demand)",
+    "meshesAvailable": "{n} meshes available, hidden (check one in the list to load it)",
     "loadedReconScene": "Reconstructed scene loaded: {n} elements",
     "epochLoadFailed": "Could not load the epoch octree. {detail}",
     "scanLayerFailed": "Could not load the {@scan} layer {key}",

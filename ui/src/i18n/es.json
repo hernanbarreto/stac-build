@@ -1193,6 +1193,7 @@
     "saveAlignment": "Guardar alineación",
     "loadedObjectMeshes": "{n} mallas de objeto cargadas",
     "loadedSceneMeshes": "{n} mallas de escena cargadas ({pending} por {@instance} a pedido)",
+    "meshesAvailable": "{n} mallas disponibles, apagadas (tildá una en la lista para cargarla)",
     "loadedReconScene": "Escena reconstruida cargada: {n} elementos",
     "epochLoadFailed": "No se pudo cargar el octree de la época. {detail}",
     "scanLayerFailed": "No se pudo cargar la capa del {@scan} {key}",
