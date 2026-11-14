@@ -1,0 +1,128 @@
+# The 'calibration' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: calibration
+position: 120
+title:
+  es: Calibración
+  en: Calibration
+  fr: Étalonnage
+summary:
+  es: Calibrar la escala de la nube con medidas reales sobre el modelo 3D.
+  en: Calibrating the cloud's scale with real measurements on the 3D model.
+  fr: Étalonner l'échelle du nuage avec des mesures réelles sur le modèle 3D.
+commands:
+- id: calibration.measure_distance
+  kind: action
+  runs_on: ui
+  model: 'Start a calibration by distance: the distance tool is armed and the user picks two points on the 3D model.'
+  needs:
+  - session
+  text:
+    es:
+      title: Calibrar con una distancia
+      say:
+      - quiero calibrar con una distancia
+      - medida de calibración
+      - calibrar la escala
+      done: Marca dos puntos sobre el modelo para la medida de calibración.
+    en:
+      title: Calibrate with a distance
+      say:
+      - I want to calibrate with a distance
+      - calibration measurement
+      - calibrate the scale
+      done: Pick two points on the model for the calibration measurement.
+    fr:
+      title: Étalonner avec une distance
+      say:
+      - je veux étalonner avec une distance
+      - mesure d'étalonnage
+      - étalonner l'échelle
+      done: Marquez deux points sur le modèle pour la mesure d'étalonnage.
+- id: calibration.measure_plane
+  kind: action
+  runs_on: ui
+  model: 'Start marking a calibration plane: the user picks three or more points of a plane on the 3D model.'
+  needs:
+  - session
+  text:
+    es:
+      title: Marcar un plano de calibración
+      say:
+      - quiero marcar un plano
+      - calibración por plano
+      - plano de referencia sobre el modelo
+      done: Marca tres o más puntos del plano sobre el modelo y pulsa Enter.
+    en:
+      title: Mark a calibration plane
+      say:
+      - I want to mark a plane
+      - calibration by plane
+      - reference plane on the model
+      done: Pick three or more points of the plane on the model and press Enter.
+    fr:
+      title: Marquer un plan d'étalonnage
+      say:
+      - je veux marquer un plan
+      - étalonnage par plan
+      done: Marquez au moins trois points du plan sur le modèle et appuyez sur Entrée.
+- id: calibration.open
+  kind: action
+  runs_on: ui
+  model: 'Open the Calibration window: the stored calibration and verification measurements and the scale factor.'
+  needs:
+  - session
+  text:
+    es:
+      title: Abrir la calibración
+      say:
+      - abrí la calibración
+      - mostrá las medidas de calibración
+      - está calibrada la nube
+      done: Ventana de calibración abierta.
+    en:
+      title: Open the calibration
+      say:
+      - open the calibration
+      - show the calibration measurements
+      - is the cloud calibrated
+      done: Calibration window open.
+    fr:
+      title: Ouvrir l'étalonnage
+      say:
+      - ouvre l'étalonnage
+      - affiche les mesures d'étalonnage
+      - le nuage est-il étalonné
+      done: Fenêtre d'étalonnage ouverte.
+- id: calibration.open_reference
+  kind: action
+  runs_on: ui
+  model: Open the reference window on the keyframe IMAGES (a known distance or a plane marked on a photo).
+  args:
+    mode:
+      type: string
+      enum:
+      - distance
+      - plane
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Referencias sobre las imágenes
+      say:
+      - abrí la distancia de referencia
+      - plano de referencia en las fotos
+      done: Ventana de referencias abierta.
+    en:
+      title: References on the images
+      say:
+      - open the reference distance
+      - reference plane on the photos
+      done: Reference window open.
+    fr:
+      title: Références sur les images
+      say:
+      - ouvre la distance de référence
+      - plan de référence sur les photos
+      done: Fenêtre des références ouverte.

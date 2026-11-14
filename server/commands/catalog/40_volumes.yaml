@@ -14,7 +14,7 @@ commands:
 - id: volumes.define_volume
   tool: define_volume
   kind: action
-  runs_on: server
+  runs_on: scene
   model: 'Place a user-defined evaluation box. DEFAULT: it RESTS ON the floor, centred on the floor (or on anchor_id''s
     x/z). Pass size [w,h,d] m or volume_m3 (cube). Only pass center to override x/z; center y is honoured only with
     on_floor=false.'
@@ -67,7 +67,7 @@ commands:
 - id: volumes.list_volumes
   tool: list_volumes
   kind: query
-  runs_on: server
+  runs_on: scene
   model: The evaluation volumes saved in this scene.
   needs:
   - segmentation
@@ -93,7 +93,7 @@ commands:
 - id: volumes.measure_volume
   tool: measure_volume
   kind: query
-  runs_on: server
+  runs_on: scene
   model: 'Measure FROM a saved volume to an object: clearance box-surface → object points (intersects=true when
     points are inside), plus centre distance. axis=''vertical'' → |Δy|.'
   args:
@@ -135,7 +135,7 @@ commands:
 - id: volumes.evaluate_volume
   tool: evaluate_volume
   kind: query
-  runs_on: server
+  runs_on: scene
   model: 'Evaluate a space: objects inside, occupied vs free fraction, and free volume (m³). Pass volume_id OR center+size(+yaw).'
   args:
     volume_id:
@@ -172,7 +172,7 @@ commands:
 - id: volumes.objects_in_volume
   tool: objects_in_volume
   kind: query
-  runs_on: server
+  runs_on: scene
   model: List objects intersecting a user-defined volume with each one's fraction inside. Pass volume_id OR center+size(+yaw).
   args:
     volume_id:
@@ -209,7 +209,7 @@ commands:
 - id: volumes.fits_in_volume
   tool: fits_in_volume
   kind: query
-  runs_on: server
+  runs_on: scene
   model: Check whether an item of size [w,h,d] metres fits in the FREE space of a user-defined volume; returns a
     candidate placement.
   args:

@@ -181,10 +181,16 @@ def warm_engine(backend: str = "qwen_local") -> None:
             from phase5_qa.tools import SpatialTools, chat_config
             from semantic.client import get_semantic_client
             from semantic.types import system, user
+            import commands
+            db = commands.database()
             client = get_semantic_client(backend=backend, consumer="phase5.qa.warmup")
-            client.chat([system("Warm-up of the engine: call small_talk."), user("hola")],
-                        tools=SpatialTools.openai_schemas(), tool_choice="required",
-                        max_tokens=chat_config()["max_tokens"], consumer="phase5.qa.warmup")
+            talk = db.tool_schemas(db.core())
+            # the chat's two shapes: a scan open (the scene's tools, a long prompt) and none (a
+            # short prompt, a few commands — its first call took 2.2 s when not warmed, 0.3 after)
+            for tools in (SpatialTools.openai_schemas() + talk, talk):
+                client.chat([system("Warm-up of the engine: call small_talk with the reply 'ok'."), user("hola")],
+                            tools=tools, tool_choice="required",
+                            max_tokens=chat_config()["max_tokens"], consumer="phase5.qa.warmup")
             state = "warm"
         except Exception as e:  # noqa: BLE001 — declared; the first question then pays the call
             print(f"[Chat] the engine's warm-up call failed: {e}")
@@ -287,13 +293,10 @@ async def spatial_qa(body: dict):
             status_code=503)
 
     backend = body.get("backend", "qwen_local")
-    store_path = _resolve_store(body)
-    if not store_path:
-        # No instance store — the session was never segmented (or no session is
-        # loaded). Still answer (user 2026-08-28): general chat, no tools. The
-        # provenance rule holds because the model is told it CANNOT measure and
-        # must not invent figures.
-        return await _general_chat(question, body, backend)
+    # No instance store (no session open, or one never segmented): STAC still converses and
+    # OPERATES THE APPLICATION (USER 2026-11-14: "le pedi que conecte con el servidor y no
+    # conecto" / "le pedi que abra pccr y no abrio nada") — it only cannot measure, and is told so
+    store_path = _resolve_store(body) or None
 
     # Run the WHOLE tool loop in a thread: it blocks for the full multi-call
     # vLLM conversation (30–120 s) and running it inline froze the event loop —
@@ -320,10 +323,13 @@ async def spatial_qa(body: dict):
         try:
             t_ask = _time.time()
             out = qa.ask(question,
-                         images=_resolve_images(body, store_path) or None,
+                         images=(_resolve_images(body, store_path) or None) if store_path else None,
                          max_iterations=body.get("max_iterations", 8),
                          history=body.get("history") if isinstance(body.get("history"), list) else None,
-                         lang=body.get("lang") if isinstance(body.get("lang"), str) else None)
+                         lang=body.get("lang") if isinstance(body.get("lang"), str) else None,
+                         user_name=body.get("user_name") if isinstance(body.get("user_name"), str) else None,
+                         ui=body.get("ui") if isinstance(body.get("ui"), dict) else None,
+                         expecting=body.get("expecting") if isinstance(body.get("expecting"), str) else None)
             # where the request's time went outside the model (the whole answer is asked in
             # 1-2 s: every tenth of a second is accounted for)
             out["timing_s"] = {"before_thread": round(t_run - t_request, 3),
@@ -342,54 +348,6 @@ async def spatial_qa(body: dict):
     if isinstance(res.get("timing_s"), dict):
         res["timing_s"]["total"] = round(_time.time() - t_request, 3)
     return JSONResponse(res)
-
-
-_GENERAL_SYSTEM = (
-    "You are the assistant of STAC-Build, a construction-site 3D reconstruction "
-    "and supervision tool (video scan → point cloud → segmentation → measured "
-    "spatial Q&A). The CURRENT session has NO segmentation / instance store yet, "
-    "so the deterministic measurement tools are unavailable. Answer general "
-    "questions helpfully (construction, reconstruction workflow, how to use the "
-    "tool, anything you know). If asked for scene-specific measurements or "
-    "object counts, explain that the session must be segmented first (Segment "
-    "button / Segmentation Manager) so every figure can be tool-measured — "
-    "NEVER estimate or invent measurements. Answer in the SAME LANGUAGE as the "
-    "question."
-)
-
-
-async def _general_chat(question: str, body: dict, backend: str) -> JSONResponse:
-    """Tool-less fallback chat for sessions without a Phase R store."""
-    import time
-
-    from semantic.client import get_semantic_client
-    from semantic.types import system, user
-
-    t0 = time.time()
-    # the semantic client is asked for right BEFORE the call (point 81)
-    busy = _engine_busy_response()
-    if busy is not None:
-        return busy
-    try:
-        client = get_semantic_client(backend=backend, consumer="phase5.qa.general")
-        images = list(body.get("images") or [])
-        import asyncio as _aio
-        # thread, not inline: a vLLM completion takes tens of seconds and must
-        # not freeze the event loop (same fix as the orchestrated path)
-        resp = await _aio.get_running_loop().run_in_executor(
-            None, lambda: client.chat([system(_GENERAL_SYSTEM),
-                                       user(question, images=images or None)]))
-        return JSONResponse({
-            "question": question,
-            "answer": resp.content or "(no answer)",
-            "tool_trace": [],
-            "iterations": 1,
-            "stopped": "general_chat_no_store",
-            "latency_s": round(time.time() - t0, 2),
-        })
-    except Exception as e:  # noqa: BLE001
-        return JSONResponse({"error": f"general chat failed: {e}"},
-                            status_code=500)
 
 
 # ── scene geometry + user volumes (immersive viewer) ────────────────

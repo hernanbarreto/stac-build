@@ -113,7 +113,7 @@ def chat_config() -> dict[str, Any]:
     if not isinstance(chat, dict):
         raise RuntimeError("config.yaml: semantic.chat is missing")
     out = {}
-    for k, lo in (("list_limit", 1), ("history_turns", 0), ("max_tokens", 1)):
+    for k, lo in (("list_limit", 1), ("history_turns", 0), ("max_tokens", 1), ("command_candidates", 1)):
         v = chat.get(k)
         if isinstance(v, bool) or not isinstance(v, int) or v < lo:
             raise RuntimeError(f"config.yaml: semantic.chat.{k} is missing or not an integer >= {lo}")
@@ -404,11 +404,6 @@ class SpatialTools:
             res["label"] = label
             res["matched_labels"] = sorted({i["label"] for i in insts})
         return res
-
-    def small_talk(self) -> dict:
-        """The tool of a turn that needs none (every answer is preceded by a tool call): a
-        greeting, thanks, a question that is not about the scene or the viewer."""
-        return {"ok": True, "note": "nothing was measured and nothing changed in the viewer"}
 
     def get_object(self, id: int) -> dict:
         """One object in one call: label, position, size and vertical extent."""
@@ -1648,7 +1643,7 @@ class SpatialTools:
     def _impls_raw(self) -> dict:
         return {
             "list_objects": self.list_objects, "count_objects": self.count_objects,
-            "get_object": self.get_object, "small_talk": self.small_talk,
+            "get_object": self.get_object,
             "get_position": self.get_position, "get_object_size": self.get_object_size,
             "get_object_volume": self.get_object_volume, "get_distance": self.get_distance,
             "get_my_position": self.get_my_position,
@@ -1683,194 +1678,8 @@ class SpatialTools:
 
     @staticmethod
     def openai_schemas() -> list[dict]:
-        """The tools as the engine reads them — the same for every scan (no store is read): the
-        engine's warm-up sends them too, so the grammar of a required call is compiled once."""
-        def fn(name, desc, props=None, required=None):
-            return {"type": "function", "function": {
-                "name": name, "description": desc,
-                "parameters": {"type": "object", "properties": props or {},
-                               "required": required or []}}}
-        # short on purpose: every word of the schema is read by the engine at each call, and the
-        # rule (a label stands for that label's largest object) is said once in the prompt
-        idp = {"type": ["integer", "string"], "description": "id or label"}
-        arr = {"type": "array", "items": {"type": "number"}}
-        return [
-            fn("list_objects",
-               "List the objects of a label (id + label + class/material/state). ALWAYS pass the "
-               "label the question names (in the inventory's English: 'sign', 'fire extinguisher'). "
-               "A long listing comes back by label with counts and id ranges.",
-               {"label": {"type": "string", "description": "the kind of object, e.g. 'sign'"}}),
-            fn("count_objects",
-               "How many objects of a label there are — pass the label the question names "
-               "('how many signs' -> label='sign'). With no label: the total and the count of "
-               "every label.",
-               {"label": {"type": "string", "description": "the kind of object, e.g. 'sign'"}}),
-            fn("small_talk",
-               "ONLY for a greeting, thanks, or a question that is NOT about the scene, its objects "
-               "or the viewer: nothing is measured and nothing changes. Never for anything else."),
-            fn("get_object",
-               "One object by id in one call: label, position (m), size w/h/d (m). Use it to "
-               "check that an id exists and what it is.",
-               {"id": idp}, ["id"]),
-            fn("get_position", "World position (metres) of an object.", {"id": idp}, ["id"]),
-            fn("get_object_size", "Object size w/h/d in metres.", {"id": idp}, ["id"]),
-            fn("get_object_volume", "Bounding-box volume in cubic metres.", {"id": idp}, ["id"]),
-            fn("get_my_position", "Position of the camera at the end of the scan ('me')."),
-            fn("get_distance_from_me", "Distance from the scan-end camera to an object (m).",
-               {"id": idp}, ["id"]),
-            fn("get_distance", "Approx surface distance between two objects (m).",
-               {"id1": idp, "id2": idp}, ["id1", "id2"]),
-            fn("get_clearance", "Minimum real clearance (gap, separation, holgura) between ANY two "
-               "objects (m) with the closest point pair — a floor and a wall included.",
-               {"id1": idp, "id2": idp}, ["id1", "id2"]),
-            fn("measure_between",
-               "Distance between NAMED PARTS of two objects (m), from their real "
-               "point clouds. Parts: centroid | top/upper | bottom/base/lower "
-               "(surface bands — a curved ceiling has BOTH) | highest/lowest "
-               "(extreme points) | closest. axis='vertical' → height difference "
-               "|Δy| (e.g. free height floor→ceiling upper part); 'straight' → 3-D.",
-               {"id1": idp, "id2": idp,
-                "feature1": {"type": "string",
-                             "enum": ["centroid", "top", "upper", "bottom", "base",
-                                      "lower", "highest", "lowest", "closest"]},
-                "feature2": {"type": "string",
-                             "enum": ["centroid", "top", "upper", "bottom", "base",
-                                      "lower", "highest", "lowest", "closest"]},
-                "axis": {"type": "string", "enum": ["straight", "vertical"]}},
-               ["id1", "id2"]),
-            fn("get_extent",
-               "True point-cloud extent of an object: min/max XYZ, height, and "
-               "the centres of its lowest and highest surface bands (where the "
-               "lower and upper parts of a curved/composite object are).",
-               {"id": idp}, ["id"]),
-            fn("get_session_info",
-               "Which session/scene is open: project + session name, scan frame "
-               "count, cloud size, objects, floor leveling, cached scene "
-               "description. Call for any 'what am I looking at' question."),
-            fn("describe_scene",
-               "LOOK at sampled scan keyframes (VLM) and describe what the scene "
-               "is — kind of space, structures, materials, notable items. Cached "
-               "in the scene db; refresh=true re-runs. Interpretation "
-               "(vlm_proposed), NEVER measurements.",
-               {"refresh": {"type": "boolean"}}),
-            fn("describe_object",
-               "Detailed dossier of ONE segmented object: qué es, descripción, "
-               "características, materiales, estado, función, interacción con "
-               "el entorno (vlm_proposed, cached by the CAD/propose pass). Use "
-               "when asked what an object is / its materials / condition.",
-               {"id": idp}, ["id"]),
-            fn("remember_note",
-               "Persist a conclusion/observation about this scene in its db for "
-               "future conversations (key + note). Never store figures that did "
-               "not come from a tool.",
-               {"key": {"type": "string"}, "note": {"type": "string"}},
-               ["key", "note"]),
-            fn("recall_notes",
-               "Read notes previously stored about this scene (all, or one key).",
-               {"key": {"type": "string"}}),
-            fn("fits_through",
-               "Can an item [w,h,d] m pass through an opening (door/window: "
-               "opening_id) or through the gap between two objects (id1+id2)?",
-               {"item_size": {**arr, "description": "[w,h,d] metres"},
-                "opening_id": idp, "id1": idp, "id2": idp,
-                "margin_m": {"type": "number"}}, ["item_size"]),
-            fn("get_plumb", "Out-of-plumb (tilt from vertical) of an element — a wall's face, a "
-               "column's axis — degrees + mm/m.", {"id": idp}, ["id"]),
-            fn("get_level", "Out-of-level (tilt from horizontal) of an element — a floor's face, a "
-               "beam's axis — degrees + mm/m.", {"id": idp}, ["id"]),
-            fn("get_span", "Largest horizontal extent (span) of an object, metres.", {"id": idp}, ["id"]),
-            fn("get_height_profile",
-               "FREE HEIGHT (headroom, altura libre, gálibo) UNDER an overhead object (ceiling, "
-               "beam, duct) along its longest axis: floor_id = the floor. Only for heights — the "
-               "gap between two objects is get_clearance.",
-               {"id": idp, "n_stations": {"type": "integer"}, "floor_id": idp}, ["id"]),
-            fn("get_flatness_report",
-               "Flatness report (mm): surface_fitting residuals when available, "
-               "plane-fit fallback otherwise.",
-               {"id": idp, "tolerance_mm": {"type": "number"}}, ["id"]),
-            fn("get_alignment_health", "Alignment health: vote entropy + onion metric.", {"id": idp}, ["id"]),
-            fn("get_onion_report",
-               "Doubled-surface report: mode separation (m) + state (+ per-seam via seam).",
-               {"id": idp, "seam": {"type": "string"}}, ["id"]),
-            fn("get_instance_history", "Windows seen + residuals for an object.", {"id": idp}, ["id"]),
-            fn("get_findings", "Visual findings for an object/region (Phase 3).",
-               {"id": idp, "region": {"type": "string"}}),
-            fn("define_volume",
-               "Place a user-defined evaluation box. DEFAULT: it RESTS ON the "
-               "floor, centred on the floor (or on anchor_id's x/z). Pass size "
-               "[w,h,d] m or volume_m3 (cube). Only pass center to override "
-               "x/z; center y is honoured only with on_floor=false.",
-               {"name": {"type": "string"},
-                "size": {**arr, "description": "[w,h,d] full extents, metres"},
-                "volume_m3": {"type": "number", "description": "cube of this volume instead of size"},
-                "center": {**arr, "description": "optional [x,y,z] override, metres"},
-                "anchor_id": {"type": "integer", "description": "object whose centroid gives x/z (default: the floor)"},
-                "on_floor": {"type": "boolean", "description": "default true: base sits ON the floor"},
-                "yaw_deg": {"type": "number", "description": "rotation about vertical"}},
-               ["name"]),
-            fn("list_volumes", "The evaluation volumes saved in this scene."),
-            fn("measure_volume",
-               "Measure FROM a saved volume to an object: clearance box-surface → "
-               "object points (intersects=true when points are inside), plus "
-               "centre distance. axis='vertical' → |Δy|.",
-               {"volume_id": {"type": "integer"}, "id": idp,
-                "axis": {"type": "string", "enum": ["straight", "vertical"]}},
-               ["volume_id", "id"]),
-            fn("evaluate_volume",
-               "Evaluate a space: objects inside, occupied vs free fraction, and "
-               "free volume (m³). Pass volume_id OR center+size(+yaw).",
-               {"volume_id": {"type": "integer"}, "center": arr, "size": arr,
-                "yaw_deg": {"type": "number"}}),
-            fn("objects_in_volume",
-               "List objects intersecting a user-defined volume with each one's "
-               "fraction inside. Pass volume_id OR center+size(+yaw).",
-               {"volume_id": {"type": "integer"}, "center": arr, "size": arr,
-                "yaw_deg": {"type": "number"}}),
-            fn("focus_object",
-               "VIEWER: select ONE object — its OBB and dimensions light up and the camera "
-               "travels to it. Call it whenever the answer is about a specific object.",
-               {"id": idp}, ["id"]),
-            fn("show_objects",
-               "VIEWER: show (visible=true) or hide (false) objects. For EVERY object of a kind "
-               "pass label ('door') instead of listing ids.",
-               {"ids": {"type": "array", "items": {"type": "integer"}},
-                "label": {"type": "string", "description": "every object of this label"},
-                "visible": {"type": "boolean"}}),
-            fn("show_only",
-               "VIEWER: show ONLY these objects, hide every other one. For EVERY object of a kind "
-               "pass label ('door') instead of listing ids.",
-               {"ids": {"type": "array", "items": {"type": "integer"}},
-                "label": {"type": "string", "description": "every object of this label"}}),
-            fn("show_all_objects", "VIEWER: show every object again."),
-            fn("set_obb",
-               "VIEWER: turn the OBB (bounding box + dimensions) of objects on/off. For EVERY "
-               "object of a kind pass label instead of listing ids.",
-               {"ids": {"type": "array", "items": {"type": "integer"}},
-                "label": {"type": "string", "description": "every object of this label"},
-                "on": {"type": "boolean"}}),
-            fn("set_view", "VIEWER: camera to a standard view of the scene.",
-               {"view": {"type": "string", "enum": ["top", "front", "back", "left", "right",
-                                                     "bottom", "iso", "home"]}}, ["view"]),
-            fn("rotate_view", "VIEWER: orbit the camera around its target (degrees; yaw = around "
-               "the vertical, pitch = up/down).",
-               {"yaw_deg": {"type": "number"}, "pitch_deg": {"type": "number"}}),
-            fn("travel", "VIEWER: travel from one object to another (the camera flies from the "
-               "first to the second).", {"from_id": idp, "to_id": idp}, ["from_id", "to_id"]),
-            fn("color_cloud", "VIEWER: colour the cloud: rgb (real colour), confidence/status "
-               "(per-point witness status), votes (multi-view votes), deviation (vs BIM).",
-               {"mode": {"type": "string", "enum": ["rgb", "confidence", "status", "votes",
-                                                     "deviation"]}}, ["mode"]),
-            fn("clear_view", "VIEWER: deselect, clear measurements and OBBs shown by the chat."),
-            fn("explain_reconstruction",
-               "HOW this session was made: the pipeline's method step by step and the "
-               "session's own records (keyframes, chunks, epoch, segmentation rounds, coverage, "
-               "certification, point confidence). Call for any question about the method, the "
-               "reconstruction, the segmentation or how reliable the points are."),
-            fn("fits_in_volume",
-               "Check whether an item of size [w,h,d] metres fits in the FREE space "
-               "of a user-defined volume; returns a candidate placement.",
-               {"item_size": {**arr, "description": "[w,h,d] metres"},
-                "volume_id": {"type": "integer"}, "center": arr, "size": arr,
-                "yaw_deg": {"type": "number"}},
-               ["item_size"]),
-        ]
+        """The scene's tools as the engine reads them — THE DATABASE OF COMMANDS' rows that run
+        on the scene (server/commands/catalog/*.yaml: a tool's description and arguments are
+        declared there, once), the same for every scan."""
+        import commands
+        return commands.database().tool_schemas(runs_on="scene")

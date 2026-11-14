@@ -136,7 +136,7 @@ def test_a_label_or_a_written_reference_stands_for_an_id(tmp_path):
         out = t.impls()["get_distance"](id1="floor", id2="sign#7")
         assert out["objects_taken_by_label"] == {"id1": {"label": "floor", "id": 1}}
         assert "distance_m" in out
-        assert t.impls()["small_talk"]()["ok"] is True
+        assert "small_talk" not in t.impls()          # the conversation is the system's (commands)
     finally:
         store.close()
 
@@ -199,7 +199,8 @@ class _FakeClient:
         self.first, self.steps, self.calls, self.chats = first, list(steps), [], []
 
     def chat(self, messages, tools=None, tool_choice=None, max_tokens=None, consumer=None, **_kw):
-        self.chats.append({"messages": list(messages), "tool_choice": tool_choice, "max_tokens": max_tokens})
+        self.chats.append({"messages": list(messages), "tool_choice": tool_choice, "max_tokens": max_tokens,
+                           "tools": [t["function"]["name"] for t in (tools or [])]})
         return self.first
 
     def run_tool_loop(self, messages, tools, tool_impls, max_iterations=None, consumer=None,
@@ -306,7 +307,7 @@ def test_what_still_fails_is_declared_with_the_answer(tmp_path, monkeypatch):
 
 def test_the_last_turns_of_the_conversation_go_with_the_question(tmp_path, monkeypatch):
     _limits(monkeypatch, history_turns=2)
-    qa, fake = _qa(tmp_path, monkeypatch, _Reply(calls=[("small_talk", {})]))
+    qa, fake = _qa(tmp_path, monkeypatch, _Reply(calls=[("small_talk", {"reply": "Claro."})]))
     history = [{"role": "user", "text": "q1"}, {"role": "assistant", "text": "a1"},
                {"role": "user", "text": "q2"}, {"role": "assistant", "text": "a2"},
                {"role": "tool", "text": "ignored"}, {"role": "user", "text": "  "}]

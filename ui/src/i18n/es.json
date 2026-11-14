@@ -997,7 +997,8 @@
         "loading": "Los motores de voz se están cargando. Prueba de nuevo en unos segundos.",
         "failed": "La voz no respondió. Prueba de nuevo."
       }
-    }
+    },
+    "askName": "Hola, soy STAC. ¿Cómo te llamas?"
   },
   "viz": {
     "fits": "cabe: {dims} m",

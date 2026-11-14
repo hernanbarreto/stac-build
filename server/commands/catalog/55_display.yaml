@@ -1,0 +1,298 @@
+# The 'display' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: display
+position: 55
+title:
+  es: Apariencia de la nube
+  en: Cloud display
+  fr: Affichage du nuage
+summary:
+  es: 'Cómo se dibuja la escena: sombras, ejes, grilla, cámaras, tamaño y opacidad de los puntos, luz.'
+  en: 'How the scene is drawn: shadows, axes, grid, cameras, point size and opacity, light.'
+  fr: 'Comment la scène est dessinée : ombres, axes, grille, caméras, taille et opacité des points, lumière.'
+commands:
+- id: display.shadows
+  kind: action
+  runs_on: ui
+  model: Shadows on or off.
+  args:
+    'on': &id001
+      type: boolean
+      required: true
+  text:
+    es:
+      title: Sombras
+      say:
+      - activá las sombras
+      - sacá las sombras
+      - sin sombras
+      done: Sombras activadas.
+      done_off: Sombras desactivadas.
+    en:
+      title: Shadows
+      say:
+      - turn the shadows on
+      - remove the shadows
+      - no shadows
+      done: Shadows on.
+      done_off: Shadows off.
+    fr:
+      title: Ombres
+      say:
+      - active les ombres
+      - enlève les ombres
+      - sans ombres
+      done: Ombres activées.
+      done_off: Ombres désactivées.
+- id: display.axes
+  kind: action
+  runs_on: ui
+  model: The X Y Z axes shown or hidden.
+  args:
+    'on': *id001
+  text:
+    es:
+      title: Ejes
+      say:
+      - mostrá los ejes
+      - ocultá los ejes
+      done: Ejes visibles.
+      done_off: Ejes ocultos.
+    en:
+      title: Axes
+      say:
+      - show the axes
+      - hide the axes
+      done: Axes shown.
+      done_off: Axes hidden.
+    fr:
+      title: Axes
+      say:
+      - affiche les axes
+      - masque les axes
+      done: Axes affichés.
+      done_off: Axes masqués.
+- id: display.grid
+  kind: action
+  runs_on: ui
+  model: The floor grid shown or hidden.
+  args:
+    'on': *id001
+  text:
+    es:
+      title: Grilla
+      say:
+      - mostrá la grilla
+      - ocultá la grilla
+      - sacá la cuadrícula
+      done: Grilla visible.
+      done_off: Grilla oculta.
+    en:
+      title: Grid
+      say:
+      - show the grid
+      - hide the grid
+      done: Grid shown.
+      done_off: Grid hidden.
+    fr:
+      title: Grille
+      say:
+      - affiche la grille
+      - masque la grille
+      done: Grille affichée.
+      done_off: Grille masquée.
+- id: display.camera_poses
+  kind: action
+  runs_on: ui
+  model: The cameras of the scan (where each keyframe was taken) shown or hidden.
+  args:
+    'on': *id001
+  needs:
+  - session
+  text:
+    es:
+      title: Cámaras del escaneo
+      say:
+      - mostrá las cámaras
+      - ocultá las cámaras
+      - mostrá el recorrido de la cámara
+      done: Cámaras visibles.
+      done_off: Cámaras ocultas.
+    en:
+      title: Scan cameras
+      say:
+      - show the cameras
+      - hide the cameras
+      - show the camera path
+      done: Cameras shown.
+      done_off: Cameras hidden.
+    fr:
+      title: Caméras du scan
+      say:
+      - affiche les caméras
+      - masque les caméras
+      - affiche le trajet de la caméra
+      done: Caméras affichées.
+      done_off: Caméras masquées.
+- id: display.points_as_cubes
+  kind: action
+  runs_on: ui
+  model: Draw the cloud's points as cubes (on) or as discs (off).
+  args:
+    'on': *id001
+  text:
+    es:
+      title: Puntos como cubos
+      say:
+      - dibujá los puntos como cubos
+      - puntos como discos
+      done: Puntos como cubos.
+      done_off: Puntos como discos.
+    en:
+      title: Points as cubes
+      say:
+      - draw the points as cubes
+      - points as discs
+      done: Points drawn as cubes.
+      done_off: Points drawn as discs.
+    fr:
+      title: Points en cubes
+      say:
+      - dessine les points en cubes
+      - points en disques
+      done: Points en cubes.
+      done_off: Points en disques.
+- id: display.point_size
+  kind: action
+  runs_on: ui
+  model: 'Size of the cloud''s points: size = a value from 0.01 to 5, or change = larger | smaller.'
+  args:
+    size:
+      type: number
+      minimum: 0.01
+      maximum: 5
+    change:
+      type: string
+      enum:
+      - larger
+      - smaller
+  needs:
+  - session
+  text:
+    es:
+      title: Tamaño de los puntos
+      say:
+      - agrandá los puntos
+      - puntos más chicos
+      - tamaño de punto 2
+      done: 'Tamaño de punto: {detail}.'
+    en:
+      title: Point size
+      say:
+      - make the points larger
+      - smaller points
+      - point size 2
+      done: 'Point size: {detail}.'
+    fr:
+      title: Taille des points
+      say:
+      - agrandis les points
+      - points plus petits
+      - taille de point 2
+      done: 'Taille des points : {detail}.'
+- id: display.point_opacity
+  kind: action
+  runs_on: ui
+  model: Opacity of the cloud's points, 0 (transparent) to 1 (opaque).
+  args:
+    opacity:
+      type: number
+      minimum: 0
+      maximum: 1
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Opacidad de los puntos
+      say:
+      - hacé la nube más transparente
+      - opacidad 0.5
+      - nube opaca
+      done: 'Opacidad de los puntos: {opacity}.'
+    en:
+      title: Point opacity
+      say:
+      - make the cloud more transparent
+      - opacity 0.5
+      - opaque cloud
+      done: 'Point opacity: {opacity}.'
+    fr:
+      title: Opacité des points
+      say:
+      - rends le nuage plus transparent
+      - opacité 0,5
+      - nuage opaque
+      done: 'Opacité des points : {opacity}.'
+- id: display.light
+  kind: action
+  runs_on: ui
+  model: Intensity of the scene's light, 0 to 2 (1 = normal).
+  args:
+    intensity:
+      type: number
+      minimum: 0
+      maximum: 2
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Luz de la escena
+      say:
+      - más luz
+      - bajá la luz
+      - luz normal
+      done: 'Luz: {intensity}.'
+    en:
+      title: Scene light
+      say:
+      - more light
+      - dim the light
+      - normal light
+      done: 'Light: {intensity}.'
+    fr:
+      title: Lumière de la scène
+      say:
+      - plus de lumière
+      - baisse la lumière
+      - lumière normale
+      done: 'Lumière : {intensity}.'
+- id: display.scene_look
+  kind: action
+  runs_on: ui
+  model: 'Open the window of the scene''s look: background and grid.'
+  needs:
+  - session
+  text:
+    es:
+      title: Fondo y grilla
+      say:
+      - cambiá el fondo
+      - abrí fondo y grilla
+      - apariencia de la escena
+      done: Ventana de fondo y grilla abierta.
+    en:
+      title: Background and grid
+      say:
+      - change the background
+      - open background and grid
+      - scene look
+      done: Background and grid window open.
+    fr:
+      title: Fond et grille
+      say:
+      - change le fond
+      - ouvre fond et grille
+      - apparence de la scène
+      done: Fenêtre du fond et de la grille ouverte.

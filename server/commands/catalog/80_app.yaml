@@ -1,0 +1,213 @@
+# The 'app' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: app
+position: 80
+title:
+  es: Aplicación
+  en: Application
+  fr: Application
+summary:
+  es: 'La aplicación en sí: conexión con el servidor, pantalla completa, configuración, idioma.'
+  en: 'The application itself: connection to the server, full screen, settings, language.'
+  fr: 'L''application elle-même : connexion au serveur, plein écran, paramètres, langue.'
+commands:
+- id: app.connect
+  kind: action
+  runs_on: ui
+  model: Connect the application to the STAC server (needed before the sessions can be listed or opened).
+  text:
+    es:
+      title: Conectar con el servidor
+      say:
+      - conectá con el servidor
+      - conéctate al servidor
+      - conectar
+      done: Conectado al servidor.
+    en:
+      title: Connect to the server
+      say:
+      - connect to the server
+      - connect
+      done: Connected to the server.
+    fr:
+      title: Se connecter au serveur
+      say:
+      - connecte-toi au serveur
+      - connexion au serveur
+      - connecter
+      done: Connecté au serveur.
+- id: app.disconnect
+  kind: action
+  runs_on: ui
+  model: Disconnect the application from the STAC server.
+  text:
+    es:
+      title: Desconectar del servidor
+      say:
+      - desconectá del servidor
+      - desconéctate
+      - desconectar
+      done: Desconectado del servidor.
+    en:
+      title: Disconnect from the server
+      say:
+      - disconnect from the server
+      - disconnect
+      done: Disconnected from the server.
+    fr:
+      title: Se déconnecter du serveur
+      say:
+      - déconnecte-toi du serveur
+      - déconnexion
+      - déconnecter
+      done: Déconnecté du serveur.
+- id: app.fullscreen
+  kind: action
+  runs_on: ui
+  model: 'Full screen: on = true to enlarge the application to the whole screen, false to leave full screen; omit
+    to switch.'
+  args:
+    'on':
+      type: boolean
+  text:
+    es:
+      title: Pantalla completa
+      say:
+      - ampliá la pantalla
+      - pantalla completa
+      - agrandá la pantalla
+      - salí de pantalla completa
+      - achicá la pantalla
+      done: Pantalla completa.
+      done_off: Salí de pantalla completa.
+    en:
+      title: Full screen
+      say:
+      - enlarge the screen
+      - full screen
+      - maximise
+      - leave full screen
+      - exit full screen
+      done: Full screen.
+      done_off: Left full screen.
+    fr:
+      title: Plein écran
+      say:
+      - agrandis l'écran
+      - plein écran
+      - maximise
+      - quitte le plein écran
+      done: Plein écran.
+      done_off: Plein écran quitté.
+- id: app.open_settings
+  kind: action
+  runs_on: ui
+  model: Open the Settings window of the application.
+  text:
+    es:
+      title: Abrir la configuración
+      say:
+      - abrí la configuración
+      - ajustes
+      - preferencias
+      done: Configuración abierta.
+    en:
+      title: Open settings
+      say:
+      - open the settings
+      - preferences
+      done: Settings open.
+    fr:
+      title: Ouvrir les paramètres
+      say:
+      - ouvre les paramètres
+      - préférences
+      - réglages
+      done: Paramètres ouverts.
+- id: app.open_command_palette
+  kind: action
+  runs_on: ui
+  model: Open the command palette (the search box of actions, sessions and objects).
+  text:
+    es:
+      title: Abrir la paleta de comandos
+      say:
+      - abrí la paleta de comandos
+      - buscador de acciones
+      done: Paleta de comandos abierta.
+    en:
+      title: Open the command palette
+      say:
+      - open the command palette
+      - search actions
+      done: Command palette open.
+    fr:
+      title: Ouvrir la palette de commandes
+      say:
+      - ouvre la palette de commandes
+      - recherche d'actions
+      done: Palette de commandes ouverte.
+- id: app.set_language
+  kind: action
+  runs_on: ui
+  model: 'Change the language of the interface''s texts: es (Spanish) or en (English).'
+  args:
+    lang:
+      type: string
+      enum:
+      - es
+      - en
+      required: true
+  text:
+    es:
+      title: Idioma de la interfaz
+      say:
+      - poné la interfaz en inglés
+      - cambiá el idioma a español
+      - interfaz en español
+      done: Idioma de la interfaz cambiado.
+    en:
+      title: Interface language
+      say:
+      - put the interface in Spanish
+      - change the language to English
+      - interface in English
+      done: Interface language changed.
+    fr:
+      title: Langue de l'interface
+      say:
+      - mets l'interface en anglais
+      - change la langue en espagnol
+      done: Langue de l'interface changée.
+- id: app.set_density
+  kind: action
+  runs_on: ui
+  model: 'Density of the interface: compact or comfortable.'
+  args:
+    density:
+      type: string
+      enum:
+      - compact
+      - comfortable
+      required: true
+  text:
+    es:
+      title: Densidad de la interfaz
+      say:
+      - interfaz compacta
+      - interfaz cómoda
+      - más espacio en la interfaz
+      done: Densidad de la interfaz cambiada.
+    en:
+      title: Interface density
+      say:
+      - compact interface
+      - comfortable interface
+      - more room in the interface
+      done: Interface density changed.
+    fr:
+      title: Densité de l'interface
+      say:
+      - interface compacte
+      - interface confortable
+      done: Densité de l'interface changée.

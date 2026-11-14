@@ -997,7 +997,8 @@
         "loading": "The voice engines are loading. Try again in a few seconds.",
         "failed": "The voice did not answer. Try again."
       }
-    }
+    },
+    "askName": "Hello, I am STAC. What is your name?"
   },
   "viz": {
     "fits": "fits: {dims} m",

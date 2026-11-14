@@ -14,7 +14,7 @@ commands:
 - id: notes.remember_note
   tool: remember_note
   kind: action
-  runs_on: server
+  runs_on: scene
   model: Persist a conclusion/observation about this scene in its db for future conversations (key + note). Never
     store figures that did not come from a tool.
   args:
@@ -48,7 +48,7 @@ commands:
 - id: notes.recall_notes
   tool: recall_notes
   kind: query
-  runs_on: server
+  runs_on: scene
   model: Read notes previously stored about this scene (all, or one key).
   args:
     key:

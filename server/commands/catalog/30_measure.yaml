@@ -14,7 +14,7 @@ commands:
 - id: measure.get_distance
   tool: get_distance
   kind: query
-  runs_on: server
+  runs_on: scene
   model: Approx surface distance between two objects (m).
   args:
     id1:
@@ -51,7 +51,7 @@ commands:
 - id: measure.get_clearance
   tool: get_clearance
   kind: query
-  runs_on: server
+  runs_on: scene
   model: Minimum real clearance (gap, separation, holgura) between ANY two objects (m) with the closest point pair
     — a floor and a wall included.
   args:
@@ -87,7 +87,7 @@ commands:
 - id: measure.measure_between
   tool: measure_between
   kind: query
-  runs_on: server
+  runs_on: scene
   model: 'Distance between NAMED PARTS of two objects (m), from their real point clouds. Parts: centroid | top/upper
     | bottom/base/lower (surface bands — a curved ceiling has BOTH) | highest/lowest (extreme points) | closest.
     axis=''vertical'' → height difference |Δy| (e.g. free height floor→ceiling upper part); ''straight'' → 3-D.'
@@ -153,7 +153,7 @@ commands:
 - id: measure.get_extent
   tool: get_extent
   kind: query
-  runs_on: server
+  runs_on: scene
   model: 'True point-cloud extent of an object: min/max XYZ, height, and the centres of its lowest and highest surface
     bands (where the lower and upper parts of a curved/composite object are).'
   args:
@@ -185,7 +185,7 @@ commands:
 - id: measure.fits_through
   tool: fits_through
   kind: query
-  runs_on: server
+  runs_on: scene
   model: 'Can an item [w,h,d] m pass through an opening (door/window: opening_id) or through the gap between two
     objects (id1+id2)?'
   args:
@@ -230,7 +230,7 @@ commands:
 - id: measure.get_plumb
   tool: get_plumb
   kind: query
-  runs_on: server
+  runs_on: scene
   model: Out-of-plumb (tilt from vertical) of an element — a wall's face, a column's axis — degrees + mm/m.
   args:
     id:
@@ -261,7 +261,7 @@ commands:
 - id: measure.get_level
   tool: get_level
   kind: query
-  runs_on: server
+  runs_on: scene
   model: Out-of-level (tilt from horizontal) of an element — a floor's face, a beam's axis — degrees + mm/m.
   args:
     id:
@@ -292,7 +292,7 @@ commands:
 - id: measure.get_span
   tool: get_span
   kind: query
-  runs_on: server
+  runs_on: scene
   model: Largest horizontal extent (span) of an object, metres.
   args:
     id:
@@ -323,7 +323,7 @@ commands:
 - id: measure.get_height_profile
   tool: get_height_profile
   kind: query
-  runs_on: server
+  runs_on: scene
   model: 'FREE HEIGHT (headroom, altura libre, gálibo) UNDER an overhead object (ceiling, beam, duct) along its
     longest axis: floor_id = the floor. Only for heights — the gap between two objects is get_clearance.'
   args:
@@ -360,7 +360,7 @@ commands:
 - id: measure.get_flatness_report
   tool: get_flatness_report
   kind: query
-  runs_on: server
+  runs_on: scene
   model: 'Flatness report (mm): surface_fitting residuals when available, plane-fit fallback otherwise.'
   args:
     id:

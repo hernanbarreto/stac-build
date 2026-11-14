@@ -1,0 +1,42 @@
+# The 'flythrough' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: flythrough
+position: 170
+title:
+  es: Recorrido
+  en: Flythrough
+  fr: Parcours
+summary:
+  es: El video del escaneo junto al modelo 3D, sincronizados.
+  en: The scan's video beside the 3D model, synchronised.
+  fr: La vidéo du scan à côté du modèle 3D, synchronisés.
+commands:
+- id: flythrough.open
+  kind: action
+  runs_on: ui
+  model: 'Open the flythrough of the open session: the scan''s video beside the 3D model, synchronised.'
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Abrir el recorrido
+      say:
+      - abrí el recorrido
+      - mostrá el video con el modelo
+      - reproducí el escaneo
+      done: Recorrido abierto.
+    en:
+      title: Open the flythrough
+      say:
+      - open the flythrough
+      - show the video with the model
+      - play the scan
+      done: Flythrough open.
+    fr:
+      title: Ouvrir le parcours
+      say:
+      - ouvre le parcours
+      - affiche la vidéo avec le modèle
+      - lis le scan
+      done: Parcours ouvert.

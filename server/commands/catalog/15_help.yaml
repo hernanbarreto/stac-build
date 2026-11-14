@@ -1,0 +1,47 @@
+# The 'help' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: help
+position: 15
+title:
+  es: Ayuda
+  en: Help
+  fr: Aide
+summary:
+  es: Qué puede hacer STAC y cómo pedírselo.
+  en: What STAC can do and how to ask for it.
+  fr: Ce que STAC sait faire et comment le lui demander.
+commands:
+- id: help.commands
+  kind: query
+  runs_on: system
+  handler: help_commands
+  model: 'What STAC can do: the areas of commands, or the commands of ONE area (area = an area id from the list
+    of areas). For ''what can you do'', ''help'', ''which commands are there'', ''how do I …''.'
+  core: true
+  args:
+    area:
+      type: string
+      description: an area id; omit for the list of areas
+  text:
+    es:
+      title: Qué puede hacer STAC
+      say:
+      - qué puedes hacer
+      - ayuda
+      - qué comandos hay
+      - qué sabes hacer
+      - cómo te pido algo
+    en:
+      title: What STAC can do
+      say:
+      - what can you do
+      - help
+      - which commands are there
+      - how do I ask you
+    fr:
+      title: Ce que STAC sait faire
+      say:
+      - que peux-tu faire
+      - aide
+      - quelles commandes y a-t-il
+      - comment te demander

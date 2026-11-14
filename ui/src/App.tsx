@@ -42,6 +42,8 @@ import { Inspector } from './layout/Inspector'
 import { BottomDock } from './layout/BottomDock'
 import { StatusBar } from './layout/StatusBar'
 import { CommandPalette, type Command } from './layout/CommandPalette'
+import { registerCommands, findByName, type Executors, type Outcome } from './commands/registry'
+import type { UiCommandId } from './commands/catalog.generated'
 import { SettingsDialog } from './layout/SettingsDialog'
 import { SceneLookDialog } from './layout/SceneLookDialog'
 import { DEFAULT_LOOK, gridLength, parseLook, type SceneLook } from './components/viewport/sceneLook'
@@ -1525,7 +1527,7 @@ function App() {
 
   const hasSession = activeSession !== null
   // ── Shell wiring (prompt_ui.txt §5): layout regions, palette, toasts ──
-  const { t, fmt } = useI18n()
+  const { t, fmt, lang, setLang } = useI18n()
   const layout = useLayout()
   const { notify } = useToast()
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -1965,6 +1967,199 @@ function App() {
     } catch { /* silent */ }
     finally { setSessionLoading(null) }
   }, [interactiveSessionId, reloadSegments, refreshUnsegmentedCount, refreshFloorLevel, report, t])
+
+  // ── STAC's commands of the interface (the database of commands: server/commands; the
+  //    executors: ui/src/commands/registry.ts). USER 2026-11-14: "le pedi que conecte con el
+  //    servidor y no conecto" / "le pedi que abra pccr y no abrio nada" — every command the
+  //    catalogue declares for the interface has its executor HERE (the type below does not
+  //    compile otherwise). They read the app's CURRENT state through a ref: registered once.
+  const cmd = useRef({
+    connected, connectToServer, disconnect, sessions, activeSession, handleSessionLoad, handleUnload,
+    projectScans, activeScanTab, activateScan, openFuse, layout, setLang, lang, pointSize, tsdfMeshes,
+    openObjectLibrary, openAutosegment, handleReconstruct,
+  })
+  cmd.current = {
+    connected, connectToServer, disconnect, sessions, activeSession, handleSessionLoad, handleUnload,
+    projectScans, activeScanTab, activateScan, openFuse, layout, setLang, lang, pointSize, tsdfMeshes,
+    openObjectLibrary, openAutosegment, handleReconstruct,
+  }
+  /** what the interface says of itself with every question to STAC (the model needs the
+   *  sessions' names to open one) */
+  const getUiState = useCallback(() => {
+    const c = cmd.current
+    return {
+      connected: c.connected, session: c.activeSession, scan: c.activeScanTab,
+      sessions: c.sessions.map(x => x.name),
+      scans: c.projectScans.map((sc: any) => (sc.kind === 'fused' ? String(sc.label) : `${sc.date} ${sc.label}`)),
+      fullscreen: !!document.fullscreenElement, lang: c.lang,
+    }
+  }, [])
+  useEffect(() => {
+    type AppCommandId = Exclude<UiCommandId, 'talk.set_user_name' | 'talk.forget_user_name'>
+    const done: Outcome = { ok: true }
+    const noSession: Outcome = { ok: false, reason: 'no_session' }
+    const open = () => cmd.current.activeSession
+    const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
+    /** wait (bounded) for the app's state to follow an action: the ref is rewritten at each render */
+    const until = async (test: () => boolean, ms: number) => {
+      const end = Date.now() + ms
+      while (!test() && Date.now() < end) await new Promise(r => setTimeout(r, 40))
+      return test()
+    }
+    const ensureConnected = async () => {
+      if (cmd.current.connected) return true
+      await cmd.current.connectToServer()
+      return until(() => cmd.current.connected, 4000)
+    }
+    const TOOL: Record<string, Tool> = {
+      navigate: 'navigate', measure_distance: 'measure-distance', measure_angle: 'measure-angle',
+      section_box: 'section-box', brush: 'erase', align: 'align',
+    }
+    const scanNames = (sc: any): string[] => {
+      const date = String(sc.date || '')
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date)
+      // a scan is called by its date as people say it too: 2026-08-24 is "2408", "24/08"
+      return [String(sc.key), date, String(sc.label || ''), `${date} ${sc.label || ''}`, ...(m ? [`${m[3]}${m[2]}`, `${m[3]}/${m[2]}`, `${m[3]} ${m[2]}`] : [])]
+    }
+    const executors: Executors<AppCommandId> = {
+      'app.connect': async () => ((await ensureConnected()) ? done : { ok: false, reason: 'server_down' }),
+      'app.disconnect': () => { cmd.current.disconnect(false); return done },
+      'app.fullscreen': async ({ on }) => {
+        const is = !!document.fullscreenElement
+        const want = on ?? !is
+        if (want !== is) {
+          // the browser allows it only shortly after a click or a key (the microphone's press counts)
+          try { if (want) await document.documentElement.requestFullscreen(); else await document.exitFullscreen() } catch { return { ok: false, reason: 'needs_gesture' } }
+        }
+        return { ok: true, state: want }
+      },
+      'app.open_settings': () => { setSettingsOpen(true); return done },
+      'app.open_command_palette': () => { setPaletteOpen(true); return done },
+      'app.set_language': ({ lang: l }) => { cmd.current.setLang(l); return done },
+      'app.set_density': ({ density }) => { cmd.current.layout.setDensity(density); return done },
+      'layout.show_panel': ({ panel }) => {
+        if ((panel === 'instances' || panel === 'scans' || panel === 'bim') && !open()) return noSession
+        cmd.current.layout.setLeftTab(panel); return done
+      },
+      'layout.hide_side_panel': () => { cmd.current.layout.setLeftTab(null); return done },
+      'layout.show_inspector': ({ tab }) => { cmd.current.layout.openInspector(tab); return done },
+      'layout.hide_inspector': () => { cmd.current.layout.setInspectorOpen(false); return done },
+      'layout.show_dock': ({ tab }) => { cmd.current.layout.openDock(tab); return done },
+      'layout.hide_dock': () => { cmd.current.layout.setDockOpen(false); return done },
+      'sessions.open': async ({ session }) => {
+        if (!(await ensureConnected())) return { ok: false, reason: 'server_down' }
+        await until(() => cmd.current.sessions.length > 0, 2000)
+        const found = findByName(cmd.current.sessions, session, x => [x.id, x.name])
+        if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.map(x => x.name).join(', ') }
+        if (!found.item) return { ok: false, reason: 'not_found', detail: session }
+        cmd.current.handleSessionLoad(found.item.id)
+        return { ok: true, detail: found.item.name }
+      },
+      'sessions.close': () => { if (!open()) return noSession; cmd.current.handleUnload(); return done },
+      'sessions.list': async () => {
+        if (!(await ensureConnected())) return { ok: false, reason: 'server_down' }
+        await until(() => cmd.current.sessions.length > 0, 2000)
+        const names = cmd.current.sessions.map(x => x.name)
+        return names.length ? { ok: true, detail: names.join(', ') } : { ok: false, reason: 'nothing_to_do' }
+      },
+      'scans.open': ({ scan }) => {
+        const sid = open()
+        if (!sid) return noSession
+        const found = findByName(cmd.current.projectScans as any[], scan, scanNames)
+        if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.map((sc: any) => `${sc.date} ${sc.label}`).join(', ') }
+        if (!found.item) return { ok: false, reason: 'not_found', detail: scan }
+        const sc: any = found.item
+        cmd.current.activateScan(sid, { key: sc.key, label: sc.label, date: sc.date, kind: (sc.kind || 'scan') as 'scan' | 'fused' })
+        return { ok: true, detail: `${sc.date} ${sc.label}` }
+      },
+      'scans.list': () => {
+        if (!open()) return noSession
+        const names = (cmd.current.projectScans as any[]).map(sc => (sc.kind === 'fused' ? String(sc.label) : `${sc.date} ${sc.label}`))
+        return names.length ? { ok: true, detail: names.join(', ') } : { ok: false, reason: 'nothing_to_do' }
+      },
+      'scans.open_fuse': () => {
+        const sid = open()
+        if (!sid) return noSession
+        if ((cmd.current.projectScans as any[]).filter(sc => sc.kind !== 'fused').length < 2) return { ok: false, reason: 'nothing_to_do' }
+        cmd.current.openFuse(sid); return done
+      },
+      'viewer.set_tool': ({ tool }) => { if (!open()) return noSession; setActiveTool(TOOL[tool]); return done },
+      'viewer.clear_measurements': () => { if (!open()) return noSession; viewportRef.current?.clearMeasurements(); return done },
+      'viewer.remove_section_box': () => { if (!open()) return noSession; viewportRef.current?.resetSectionBox(); setActiveTool('navigate'); return done },
+      'viewer.show_unsegmented': ({ on }) => { if (!open()) return noSession; setUnsegmentedVisible(on); viewportRef.current?.setSegmentVisibility(0, on); return { ok: true, state: on } },
+      'display.shadows': ({ on }) => { setShadowsOn(on); return { ok: true, state: on } },
+      'display.axes': ({ on }) => { setShowAxes(on); return { ok: true, state: on } },
+      'display.grid': ({ on }) => { setShowGrid(on); return { ok: true, state: on } },
+      'display.camera_poses': ({ on }) => { if (!open()) return noSession; setShowCameraPoses(on); return { ok: true, state: on } },
+      'display.points_as_cubes': ({ on }) => { setCubesOn(on); return { ok: true, state: on } },
+      'display.point_size': ({ size, change }) => {
+        if (!open()) return noSession
+        // "larger" / "smaller": one step of the size, as a turn of the slider
+        const now = cmd.current.pointSize
+        const v = clamp(size ?? (change === 'larger' ? now * 1.5 : change === 'smaller' ? now / 1.5 : now), 0.01, 5)
+        setPointSize(v)
+        return { ok: true, detail: String(Math.round(v * 100) / 100) }
+      },
+      'display.point_opacity': ({ opacity }) => { if (!open()) return noSession; setPointOpacity(clamp(opacity, 0, 1)); return done },
+      'display.light': ({ intensity }) => { if (!open()) return noSession; setLightIntensity(clamp(intensity, 0, 2)); return done },
+      'display.scene_look': () => { if (!open()) return noSession; setSceneLookOpen(true); return done },
+      'meshes.show': ({ on, mesh }) => {
+        if (!open()) return noSession
+        const all = cmd.current.tsdfMeshes
+        if (!all.length) return { ok: false, reason: 'nothing_to_do' }
+        let targets = all
+        if (mesh) {
+          const found = findByName(all, mesh, m => [m.folder, m.label])
+          if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.map(m => m.label || m.folder).join(', ') }
+          if (!found.item) return { ok: false, reason: 'not_found', detail: mesh }
+          targets = [found.item]
+        }
+        const folders = new Set(targets.map(m => m.folder))
+        setTsdfMeshes(prev => prev.map(x => (folders.has(x.folder) ? { ...x, visible: on } : x)))
+        folders.forEach(f => viewportRef.current?.setTsdfVisibility(f, on))
+        return { ok: true, state: on }
+      },
+      'meshes.wireframe': ({ on }) => {
+        if (!open()) return noSession
+        const all = cmd.current.tsdfMeshes
+        if (!all.length) return { ok: false, reason: 'nothing_to_do' }
+        setTsdfMeshes(prev => prev.map(x => ({ ...x, wireframe: on })))
+        all.forEach(m => viewportRef.current?.setMeshWireframe('tsdf', m.folder, on))
+        return { ok: true, state: on }
+      },
+      'meshes.open_genrecon': () => { if (!open()) return noSession; setGenreconOpen(true); return done },
+      'calibration.measure_distance': () => {
+        if (!open()) return noSession
+        setCalibrating('distance'); setActiveTool('measure-distance'); setStatusMessage(tt('calibration.measureStatus')); return done
+      },
+      'calibration.measure_plane': () => {
+        if (!open()) return noSession
+        setCalibrating('plane'); setActiveTool('measure-plane'); setStatusMessage(tt('calibration.planeStatus')); return done
+      },
+      'calibration.open': () => { if (!open()) return noSession; setCalibrationDraft(null); setCalibrationOpen(true); return done },
+      'calibration.open_reference': ({ mode }) => { if (!open()) return noSession; setReferenceDialog(mode); return done },
+      'objects.open_library': () => { if (!open()) return noSession; void cmd.current.openObjectLibrary(); return done },
+      'physics.panel': ({ on }) => { if (!open()) return noSession; setPhysicsOpen(on); return { ok: true, state: on } },
+      'segmentation.open_autosegment': () => { if (!open()) return noSession; void cmd.current.openAutosegment(); return done },
+      'pipeline.open': async ({ session }) => {
+        let sid = open()
+        if (session) {
+          if (!(await ensureConnected())) return { ok: false, reason: 'server_down' }
+          const found = findByName(cmd.current.sessions, session, x => [x.id, x.name])
+          if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.map(x => x.name).join(', ') }
+          if (!found.item) return { ok: false, reason: 'not_found', detail: session }
+          sid = found.item.id
+        }
+        if (!sid) return noSession
+        void cmd.current.handleReconstruct(sid)
+        return done
+      },
+      'flythrough.open': () => { const sid = open(); if (!sid) return noSession; setFlythroughOpen(sid); return done },
+    }
+    return registerCommands(executors)
+  // (every value is read through `cmd`; the setters are stable)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // ── Menus (File / View / Tools / Help) — the same actions as before ──
   const menus: HeaderMenu[] = [
@@ -2485,7 +2680,7 @@ function App() {
                   {sabanaFullMeta && activeSession && <BIMAnalysisPanel meta={sabanaFullMeta} sessionId={activeSession} />}
                 </div>
               ),
-              assistant: <AssistantPanel sessionId={activeSession} scanKey={activeScanTab} viewport={viewportRef} onVlmStatus={setVlmStatus} onFocusObjects={focusSegments} onVolumesChanged={refreshVolumes} onViewerAction={runViewerAction} />,
+              assistant: <AssistantPanel sessionId={activeSession} scanKey={activeScanTab} viewport={viewportRef} userKey={user?.username ?? null} getUiState={getUiState} onVlmStatus={setVlmStatus} onFocusObjects={focusSegments} onVolumesChanged={refreshVolumes} onViewerAction={runViewerAction} />,
             }} />
         )}
       </div>

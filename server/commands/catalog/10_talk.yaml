@@ -14,9 +14,10 @@ commands:
 - id: talk.small_talk
   tool: small_talk
   kind: talk
-  runs_on: server
-  model: 'ONLY for a greeting, thanks, or a question that is NOT about the scene, its objects or the viewer: nothing
-    is measured and nothing changes. Never for anything else.'
+  runs_on: system
+  model: 'CONVERSATION: a greeting, thanks, who you are, how you are, or anything that is NOT about the scene, its
+    objects or operating the application. Write what STAC answers in reply: the user''s language, one or two sentences,
+    by their name when you know it. NEVER a figure about the scene; never for a measurement, a count or an action.'
   core: true
   text:
     es:
@@ -40,3 +41,67 @@ commands:
       - merci
       - comment ça va
       - qui es-tu
+  args:
+    reply:
+      type: string
+      description: what STAC answers the user
+      required: true
+- id: talk.set_user_name
+  kind: action
+  runs_on: ui
+  model: 'The user says their name or how they want to be called (''me llamo Ana'', ''call me John'', ''je m''appelle
+    Luc'', or just the name when STAC asked for it): store it. name = the name alone, written as a person''s name.'
+  args:
+    name:
+      type: string
+      description: the person's name
+      required: true
+  text:
+    es:
+      title: Decir mi nombre
+      say:
+      - me llamo Hernán
+      - soy Ana
+      - llámame Juan
+      - mi nombre es
+      done: Encantado, {name}. Dime qué necesitas.
+    en:
+      title: Tell my name
+      say:
+      - my name is John
+      - call me Ana
+      - I am
+      done: Nice to meet you, {name}. Tell me what you need.
+    fr:
+      title: Dire mon nom
+      say:
+      - je m'appelle Luc
+      - appelle-moi Marie
+      - mon nom est
+      done: Enchanté, {name}. Dites-moi ce dont vous avez besoin.
+- id: talk.forget_user_name
+  kind: action
+  runs_on: ui
+  model: Forget the user's name (they ask STAC to stop using it, or to ask for it again).
+  text:
+    es:
+      title: Olvidar mi nombre
+      say:
+      - olvida mi nombre
+      - no me llames así
+      - pregúntame el nombre de nuevo
+      done: Olvidé tu nombre. ¿Cómo quieres que te llame?
+    en:
+      title: Forget my name
+      say:
+      - forget my name
+      - do not call me that
+      - ask my name again
+      done: I forgot your name. What should I call you?
+    fr:
+      title: Oublier mon nom
+      say:
+      - oublie mon nom
+      - ne m'appelle pas comme ça
+      - redemande mon nom
+      done: J'ai oublié votre nom. Comment dois-je vous appeler ?

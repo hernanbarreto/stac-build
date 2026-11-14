@@ -58,24 +58,26 @@ def test_the_engines_first_call_is_the_warm_ups(monkeypatch):
     while api.engine_warm_state() != "warm" and time.time() < deadline:
         time.sleep(0.02)
     assert api.engine_warm_state() == "warm"
-    assert len(calls) == 1
-    # the chat's own shape: its tools' schemas and a required call (the grammar compiled then)
-    assert calls[0]["tools"] > 20 and calls[0]["tool_choice"] == "required"
+    # the chat's two shapes, each with a required call: a scan open (the scene's tools) and none
+    # (a short prompt, the commands every sentence is offered)
+    assert len(calls) == 2
+    assert calls[0]["tools"] > 20 and calls[1]["tools"] < 5
+    assert all(c["tool_choice"] == "required" for c in calls)
     api.warm_engine()                                  # warm: nothing is sent
-    assert len(calls) == 1
+    assert len(calls) == 2
 
     # another engine (restarted) is cold again; a question answered by it marks it warm
     engine["key"] = (222, 2.0)
     assert api.engine_warm_state() == "cold"
     api.mark_engine_warm()
     assert api.engine_warm_state() == "warm"
-    assert len(calls) == 1
+    assert len(calls) == 2
 
     # an engine with no identity record cannot be told apart: treated as warm, nothing sent
     engine["key"] = None
     assert api.engine_warm_state() == "warm"
     api.warm_engine()
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_a_failed_warm_up_leaves_the_engine_cold(monkeypatch):
@@ -99,7 +101,8 @@ def test_a_failed_warm_up_leaves_the_engine_cold(monkeypatch):
 def test_the_tools_schemas_need_no_store():
     from phase5_qa.tools import SpatialTools
     names = [t["function"]["name"] for t in SpatialTools.openai_schemas()]
-    assert len(names) == len(set(names)) and "get_clearance" in names and "small_talk" in names
+    assert len(names) == len(set(names)) and "get_clearance" in names
+    assert "small_talk" not in names                   # the conversation is no tool of the scene
 
 
 def test_the_backend_warms_the_engine_it_started_when_it_answers(monkeypatch):

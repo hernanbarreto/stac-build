@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from .catalog import AREAS_DIR, LANGS, Catalog, load_catalog, tool_schema
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DB_PATH = Path(__file__).resolve().parent / "commands.db"
 
 _SCHEMA = """
@@ -37,14 +37,14 @@ CREATE TABLE area_text(area_id TEXT NOT NULL REFERENCES areas(id), lang TEXT NOT
 CREATE TABLE commands(
     id TEXT PRIMARY KEY, area TEXT NOT NULL REFERENCES areas(id), tool TEXT NOT NULL UNIQUE,
     kind TEXT NOT NULL CHECK(kind IN ('action', 'query', 'talk')),
-    runs_on TEXT NOT NULL CHECK(runs_on IN ('server', 'ui')),
+    runs_on TEXT NOT NULL CHECK(runs_on IN ('scene', 'system', 'ui')),
     handler TEXT NOT NULL, model TEXT NOT NULL, args_json TEXT NOT NULL, needs_json TEXT NOT NULL,
     confirm INTEGER NOT NULL, core INTEGER NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('available', 'planned')),
+    status TEXT NOT NULL CHECK(status IN ('available', 'manual', 'planned')),
     since TEXT NOT NULL, position INTEGER NOT NULL);
 CREATE TABLE command_text(command_id TEXT NOT NULL REFERENCES commands(id), lang TEXT NOT NULL,
                           title TEXT NOT NULL, about TEXT NOT NULL, say_json TEXT NOT NULL,
-                          done TEXT NOT NULL, PRIMARY KEY(command_id, lang));
+                          done TEXT NOT NULL, done_off TEXT NOT NULL, PRIMARY KEY(command_id, lang));
 CREATE VIRTUAL TABLE command_search USING fts5(
     command_id UNINDEXED, lang UNINDEXED, title, about, say,
     tokenize = 'unicode61 remove_diacritics 2');
@@ -77,10 +77,14 @@ def build(catalog: Catalog, path: Path | str | None) -> sqlite3.Connection:
             json.dumps(c["needs"]), int(c["confirm"]), int(c["core"]), c["status"], c["since"], pos))
         for lang in LANGS:
             t = c["text"][lang]
-            con.execute("INSERT INTO command_text VALUES (?,?,?,?,?,?)", (
-                c["id"], lang, t["title"], t["about"], json.dumps(t["say"], ensure_ascii=False), t["done"]))
+            con.execute("INSERT INTO command_text VALUES (?,?,?,?,?,?,?)", (
+                c["id"], lang, t["title"], t["about"], json.dumps(t["say"], ensure_ascii=False),
+                t["done"], t["done_off"]))
+            # (the model's description, English, is indexed with the English text: a sentence
+            # finds a command by it too)
             con.execute("INSERT INTO command_search VALUES (?,?,?,?,?)", (
-                c["id"], lang, t["title"], t["about"], " . ".join(t["say"])))
+                c["id"], lang, t["title"], t["about"] or (c["model"] if lang == "en" else ""),
+                " . ".join(t["say"])))
     con.commit()
     if path is not None:
         path = Path(path)
@@ -139,21 +143,23 @@ class CommandsDB:
             "FROM areas a JOIN area_text t ON t.area_id = a.id AND t.lang = ? ORDER BY a.position, a.id",
             (_lang(lang),))]
 
-    def list(self, lang: str = "en", area: Optional[str] = None, runs_on: Optional[str] = None,
-             status: Optional[str] = "available") -> List[Dict[str, Any]]:
+    def list(self, lang: str = "en", area: Optional[str] = None, runs_on: Any = None,
+             status: Any = "available") -> List[Dict[str, Any]]:
         """Every command (with its text in ``lang``), in the catalogue's order."""
-        sql = ("SELECT c.*, t.title, t.about, t.say_json, t.done FROM commands c "
+        sql = ("SELECT c.*, t.title, t.about, t.say_json, t.done, t.done_off FROM commands c "
                "JOIN command_text t ON t.command_id = c.id AND t.lang = ? WHERE 1 = 1")
         args: List[Any] = [_lang(lang)]
         for col, val in (("c.area", area), ("c.runs_on", runs_on), ("c.status", status)):
-            if val is not None:
-                sql += f" AND {col} = ?"
-                args.append(val)
+            if val is None:
+                continue
+            vals = [val] if isinstance(val, str) else list(val)
+            sql += f" AND {col} IN ({', '.join('?' * len(vals))})"
+            args.extend(vals)
         return [self._command(r) for r in self._rows(sql + " ORDER BY c.position", args)]
 
     def get(self, cid: str, lang: str = "en") -> Optional[Dict[str, Any]]:
         rows = self._rows(
-            "SELECT c.*, t.title, t.about, t.say_json, t.done FROM commands c "
+            "SELECT c.*, t.title, t.about, t.say_json, t.done, t.done_off FROM commands c "
             "JOIN command_text t ON t.command_id = c.id AND t.lang = ? WHERE c.id = ?", (_lang(lang), cid))
         return self._command(rows[0]) if rows else None
 
@@ -168,14 +174,18 @@ class CommandsDB:
 
     # ── search ──────────────────────────────────────────────────────────────────────────────
     def search(self, text: str, lang: Optional[str] = None, limit: int = 20,
-               runs_on: Optional[str] = None) -> List[Dict[str, Any]]:
+               runs_on: Any = None, stems: bool = False) -> List[Dict[str, Any]]:
         """The commands whose name, description or way of asking share words with ``text``, best
         first (BM25 over the index of ``lang``; every language when None). Deterministic: ties
         go to the catalogue's order."""
         words = sorted(set(fold(text).split()))
         if not words:
             return []
-        match = " OR ".join(f'"{w}"' for w in words)
+        # ``stems``: a word of four letters or more also matches the words that share its start
+        # ("conectá" finds "conectar", "puertas" finds "puerta") — how a spoken sentence finds
+        # its candidates; the model then chooses among them
+        match = " OR ".join((f"{w[:max(3, len(w) - 2)]}*" if stems and len(w) >= 4 else f'"{w}"')
+                            for w in words)
         # the index is asked alone (its ranking function cannot be used through a join or an
         # aggregate); the best row per command, the filters and the order are applied here
         sql = "SELECT command_id, rank FROM command_search WHERE command_search MATCH ?"
@@ -191,12 +201,13 @@ class CommandsDB:
         info = {r["id"]: r for r in self._rows("SELECT id, status, runs_on, position FROM commands")}
         hits = [(score, info[cid]["position"], cid) for cid, score in best.items()
                 if info[cid]["status"] == "available"
-                and (runs_on is None or info[cid]["runs_on"] == runs_on)]
+                and (runs_on is None or info[cid]["runs_on"] in
+                     ([runs_on] if isinstance(runs_on, str) else list(runs_on)))]
         hits.sort()
         return [{"id": cid, "score": score} for score, _pos, cid in hits[:int(limit)]]
 
     # ── what the model is offered ───────────────────────────────────────────────────────────
-    def tool_schemas(self, ids: Optional[Iterable[str]] = None, runs_on: Optional[str] = None) -> List[dict]:
+    def tool_schemas(self, ids: Optional[Iterable[str]] = None, runs_on: Any = None) -> List[dict]:
         """The commands as functions the model can call, in the catalogue's order — all the
         available ones, or the given ids."""
         rows = self.list(runs_on=runs_on)

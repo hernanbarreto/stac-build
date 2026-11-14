@@ -1,0 +1,40 @@
+# The 'segmentation' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: segmentation
+position: 150
+title:
+  es: Segmentación
+  en: Segmentation
+  fr: Segmentation
+summary:
+  es: 'Segmentar la nube en objetos: automática o manual.'
+  en: 'Segmenting the cloud into objects: automatic or by hand.'
+  fr: 'Segmenter le nuage en objets : automatique ou manuelle.'
+commands:
+- id: segmentation.open_autosegment
+  kind: action
+  runs_on: ui
+  model: 'Open the Autosegment window (the VLM and SAM3 prompts). It only opens the window: the run is launched
+    by hand.'
+  needs:
+  - session
+  text:
+    es:
+      title: Abrir la autosegmentación
+      say:
+      - abrí autosegmentar
+      - quiero segmentar automáticamente
+      - ventana de autosegmentación
+      done: Ventana de autosegmentación abierta.
+    en:
+      title: Open autosegment
+      say:
+      - open autosegment
+      - I want to segment automatically
+      done: Autosegment window open.
+    fr:
+      title: Ouvrir l'autosegmentation
+      say:
+      - ouvre l'autosegmentation
+      - je veux segmenter automatiquement
+      done: Fenêtre d'autosegmentation ouverte.

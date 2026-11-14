@@ -1,0 +1,47 @@
+# The 'physics' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: physics
+position: 140
+title:
+  es: Física
+  en: Physics
+  fr: Physique
+summary:
+  es: Simulación física sobre la escena.
+  en: Physics simulation on the scene.
+  fr: Simulation physique sur la scène.
+commands:
+- id: physics.panel
+  kind: action
+  runs_on: ui
+  model: Show or hide the physics panel (drop balls on the scene).
+  args:
+    'on':
+      type: boolean
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Panel de física
+      say:
+      - abrí la física
+      - cerrá el panel de física
+      - quiero tirar pelotas
+      done: Panel de física abierto.
+      done_off: Panel de física cerrado.
+    en:
+      title: Physics panel
+      say:
+      - open the physics
+      - close the physics panel
+      - I want to drop balls
+      done: Physics panel open.
+      done_off: Physics panel closed.
+    fr:
+      title: Panneau de physique
+      say:
+      - ouvre la physique
+      - ferme le panneau de physique
+      done: Panneau de physique ouvert.
+      done_off: Panneau de physique fermé.

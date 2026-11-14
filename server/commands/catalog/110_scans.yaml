@@ -1,0 +1,98 @@
+# The 'scans' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: scans
+position: 110
+title:
+  es: Escaneos
+  en: Scans
+  fr: Scans
+summary:
+  es: 'Los escaneos de una sesión: abrir otro, listarlos, fusionarlos.'
+  en: 'The scans of a session: open another, list, fuse.'
+  fr: 'Les scans d''une session : en ouvrir un autre, les lister, les fusionner.'
+commands:
+- id: scans.open
+  kind: action
+  runs_on: ui
+  model: Open another scan of the open session, by its date or label (INTERFACE STATE lists the scans).
+  args:
+    scan:
+      type: string
+      description: the scan's date (YYYY-MM-DD) or label
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Abrir un escaneo
+      say:
+      - abrí el escaneo del 31 de agosto
+      - cambiá al escaneo 2408
+      - abrí el otro escaneo
+      done: Abriendo el escaneo {detail}.
+    en:
+      title: Open a scan
+      say:
+      - open the scan of August 31
+      - switch to scan 2408
+      - open the other scan
+      done: Opening scan {detail}.
+    fr:
+      title: Ouvrir un scan
+      say:
+      - ouvre le scan du 31 août
+      - passe au scan 2408
+      - ouvre l'autre scan
+      done: Ouverture du scan {detail}.
+- id: scans.list
+  kind: query
+  runs_on: ui
+  model: Which scans the open session has.
+  needs:
+  - session
+  text:
+    es:
+      title: Listar los escaneos
+      say:
+      - qué escaneos tiene la sesión
+      - listame los escaneos
+      - cuántos escaneos hay
+      done: 'Escaneos: {detail}.'
+    en:
+      title: List the scans
+      say:
+      - which scans does the session have
+      - list the scans
+      done: 'Scans: {detail}.'
+    fr:
+      title: Lister les scans
+      say:
+      - quels scans a la session
+      - liste les scans
+      done: 'Scans : {detail}.'
+- id: scans.open_fuse
+  kind: action
+  runs_on: ui
+  model: 'Open the window to fuse (merge) the scans of the open session. It only opens the window: the fusion is
+    launched by hand.'
+  needs:
+  - session
+  text:
+    es:
+      title: Abrir la fusión de escaneos
+      say:
+      - abrí la fusión
+      - quiero fusionar los escaneos
+      done: Ventana de fusión abierta.
+    en:
+      title: Open the fusion of scans
+      say:
+      - open the fusion
+      - I want to fuse the scans
+      done: Fuse window open.
+    fr:
+      title: Ouvrir la fusion des scans
+      say:
+      - ouvre la fusion
+      - je veux fusionner les scans
+      done: Fenêtre de fusion ouverte.

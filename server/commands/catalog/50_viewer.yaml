@@ -14,7 +14,7 @@ commands:
 - id: viewer.focus_object
   tool: focus_object
   kind: action
-  runs_on: server
+  runs_on: scene
   model: 'VIEWER: select ONE object — its OBB and dimensions light up and the camera travels to it. Call it whenever
     the answer is about a specific object.'
   args:
@@ -51,7 +51,7 @@ commands:
 - id: viewer.show_objects
   tool: show_objects
   kind: action
-  runs_on: server
+  runs_on: scene
   model: 'VIEWER: show (visible=true) or hide (false) objects. For EVERY object of a kind pass label (''door'')
     instead of listing ids.'
   args:
@@ -91,7 +91,7 @@ commands:
 - id: viewer.show_only
   tool: show_only
   kind: action
-  runs_on: server
+  runs_on: scene
   model: 'VIEWER: show ONLY these objects, hide every other one. For EVERY object of a kind pass label (''door'')
     instead of listing ids.'
   args:
@@ -126,7 +126,7 @@ commands:
 - id: viewer.show_all_objects
   tool: show_all_objects
   kind: action
-  runs_on: server
+  runs_on: scene
   model: 'VIEWER: show every object again.'
   needs:
   - segmentation
@@ -152,7 +152,7 @@ commands:
 - id: viewer.set_obb
   tool: set_obb
   kind: action
-  runs_on: server
+  runs_on: scene
   model: 'VIEWER: turn the OBB (bounding box + dimensions) of objects on/off. For EVERY object of a kind pass label
     instead of listing ids.'
   args:
@@ -189,7 +189,7 @@ commands:
 - id: viewer.set_view
   tool: set_view
   kind: action
-  runs_on: server
+  runs_on: scene
   model: 'VIEWER: camera to a standard view of the scene.'
   args:
     view:
@@ -234,7 +234,7 @@ commands:
 - id: viewer.rotate_view
   tool: rotate_view
   kind: action
-  runs_on: server
+  runs_on: scene
   model: 'VIEWER: orbit the camera around its target (degrees; yaw = around the vertical, pitch = up/down).'
   args:
     yaw_deg:
@@ -268,7 +268,7 @@ commands:
 - id: viewer.travel
   tool: travel
   kind: action
-  runs_on: server
+  runs_on: scene
   model: 'VIEWER: travel from one object to another (the camera flies from the first to the second).'
   args:
     from_id:
@@ -303,7 +303,7 @@ commands:
 - id: viewer.color_cloud
   tool: color_cloud
   kind: action
-  runs_on: server
+  runs_on: scene
   model: 'VIEWER: colour the cloud: rgb (real colour), confidence/status (per-point witness status), votes (multi-view
     votes), deviation (vs BIM).'
   args:
@@ -343,7 +343,7 @@ commands:
 - id: viewer.clear_view
   tool: clear_view
   kind: action
-  runs_on: server
+  runs_on: scene
   model: 'VIEWER: deselect, clear measurements and OBBs shown by the chat.'
   needs:
   - segmentation
@@ -366,3 +366,142 @@ commands:
       - nettoie la vue
       - désélectionne tout
       - efface les mesures et les boîtes du chat
+- id: viewer.set_tool
+  kind: action
+  runs_on: ui
+  model: 'Choose the active tool of the 3D viewer: navigate, measure_distance (the user then picks two points),
+    measure_angle, section_box (cut the cloud with a box), brush (mark points to erase or reassign), align (move
+    / rotate the cloud).'
+  args:
+    tool:
+      type: string
+      enum:
+      - navigate
+      - measure_distance
+      - measure_angle
+      - section_box
+      - brush
+      - align
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Herramienta del visor
+      say:
+      - quiero medir una distancia
+      - activá la herramienta de ángulo
+      - caja de sección
+      - pincel
+      - volver a navegar
+      - alinear la nube
+      done: Herramienta cambiada.
+    en:
+      title: Viewer tool
+      say:
+      - I want to measure a distance
+      - activate the angle tool
+      - section box
+      - brush
+      - back to navigate
+      - align the cloud
+      done: Tool changed.
+    fr:
+      title: Outil de la visionneuse
+      say:
+      - je veux mesurer une distance
+      - active l'outil angle
+      - boîte de section
+      - pinceau
+      - revenir à la navigation
+      - aligner le nuage
+      done: Outil changé.
+- id: viewer.clear_measurements
+  kind: action
+  runs_on: ui
+  model: Remove the distances and angles the user measured by hand in the viewer.
+  needs:
+  - session
+  text:
+    es:
+      title: Borrar mediciones manuales
+      say:
+      - borrá las mediciones
+      - limpiá las medidas
+      - quitá las distancias medidas
+      done: Mediciones borradas.
+    en:
+      title: Clear hand measurements
+      say:
+      - clear the measurements
+      - remove the measured distances
+      done: Measurements cleared.
+    fr:
+      title: Effacer les mesures manuelles
+      say:
+      - efface les mesures
+      - supprime les distances mesurées
+      done: Mesures effacées.
+- id: viewer.remove_section_box
+  kind: action
+  runs_on: ui
+  model: Remove the section box (the whole cloud is shown again).
+  needs:
+  - session
+  text:
+    es:
+      title: Quitar la caja de sección
+      say:
+      - quitá la caja de sección
+      - sacá el corte
+      - mostrá la nube entera
+      done: Caja de sección quitada.
+    en:
+      title: Remove the section box
+      say:
+      - remove the section box
+      - remove the cut
+      - show the whole cloud
+      done: Section box removed.
+    fr:
+      title: Supprimer la boîte de section
+      say:
+      - supprime la boîte de section
+      - enlève la coupe
+      - affiche tout le nuage
+      done: Boîte de section supprimée.
+- id: viewer.show_unsegmented
+  kind: action
+  runs_on: ui
+  model: Show or hide the points that belong to no object (the unsegmented points).
+  args:
+    'on':
+      type: boolean
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Puntos sin segmentar
+      say:
+      - ocultá los puntos sin segmentar
+      - mostrá lo no segmentado
+      - sacá el resto de la nube
+      done: Puntos sin segmentar visibles.
+      done_off: Puntos sin segmentar ocultos.
+    en:
+      title: Unsegmented points
+      say:
+      - hide the unsegmented points
+      - show what is not segmented
+      - remove the rest of the cloud
+      done: Unsegmented points shown.
+      done_off: Unsegmented points hidden.
+    fr:
+      title: Points non segmentés
+      say:
+      - masque les points non segmentés
+      - affiche le non segmenté
+      - enlève le reste du nuage
+      done: Points non segmentés affichés.
+      done_off: Points non segmentés masqués.

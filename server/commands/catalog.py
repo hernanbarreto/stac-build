@@ -15,8 +15,14 @@ import yaml
 AREAS_DIR = Path(__file__).resolve().parent / "catalog"
 LANGS = ("es", "en", "fr")                   # the system's three languages
 KINDS = ("action", "query", "talk")          # STAC operates / STAC measures or reads / conversation
-RUNS_ON = ("server", "ui")                   # the server's tool layer / the interface
-STATUS = ("available", "planned")
+# WHO EXECUTES A COMMAND: the scene's tool layer (phase5_qa.tools.SpatialTools — it needs a
+# segmented scan), the server with no scene (commands.system_tools — help, conversation) or the
+# interface (ui/src/commands — its executors are typed against the rows)
+RUNS_ON = ("scene", "system", "ui")
+# available = STAC runs it · manual = it exists in the interface and is operated by hand (it needs
+# the pointer, a file or credentials): STAC knows it and says so · planned = not built yet
+STATUS = ("available", "manual", "planned")
+_PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
 # what a command needs to be there before it can run (the interface greys it otherwise)
 NEEDS = ("session", "scan", "cloud", "segmentation", "selection", "mesh", "bim", "volume",
          "measurement", "admin", "engine")
@@ -198,14 +204,23 @@ def load_catalog(directory: Path | str | None = None) -> Catalog:
             status = row.get("status", "available")
             if status not in STATUS:
                 _fail(where, f"'status' must be one of {list(STATUS)}")
-            # an action of the interface says what was done; a server tool's answer is written
-            # from its result (phase5_qa/answers.py)
+            # a command of the interface says what was done (``done``; ``done_off`` when what it
+            # did was to turn something OFF); a tool of the server words its own result
+            # (phase5_qa/answers.py)
+            spoken = runs_on == "ui" and status == "available"
             text = _texts(where, row.get("text"),
                           {"title": True, "about": False, "say": True,
-                           "done": runs_on == "ui"})
+                           "done": spoken, "done_off": False})
+            arg_names = set(_args(where, row.get("args")))
+            for lang in LANGS:
+                for field in ("done", "done_off"):
+                    unknown = set(_PLACEHOLDER.findall(text[lang][field])) - arg_names - {"detail"}
+                    if unknown:
+                        _fail(where, f"'{lang}.{field}' names {sorted(unknown)}: not an argument of the "
+                                     f"command (nor 'detail', what the executor reports)")
             commands.append({
                 "id": cid, "area": area, "tool": tool, "kind": kind, "runs_on": runs_on,
-                "handler": str(row.get("handler") or (tool if runs_on == "server" else cid)),
+                "handler": str(row.get("handler") or (cid if runs_on == "ui" else tool)),
                 "model": " ".join(model.split()), "args": _args(where, row.get("args")),
                 "needs": list(needs), "confirm": confirm, "core": core, "status": status,
                 "since": str(row.get("since") or ""), "text": text})

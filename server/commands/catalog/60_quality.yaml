@@ -14,7 +14,7 @@ commands:
 - id: quality.get_alignment_health
   tool: get_alignment_health
   kind: query
-  runs_on: server
+  runs_on: scene
   model: 'Alignment health: vote entropy + onion metric.'
   args:
     id:
@@ -47,7 +47,7 @@ commands:
 - id: quality.get_onion_report
   tool: get_onion_report
   kind: query
-  runs_on: server
+  runs_on: scene
   model: 'Doubled-surface report: mode separation (m) + state (+ per-seam via seam).'
   args:
     id:
@@ -80,7 +80,7 @@ commands:
 - id: quality.get_instance_history
   tool: get_instance_history
   kind: query
-  runs_on: server
+  runs_on: scene
   model: Windows seen + residuals for an object.
   args:
     id:
@@ -111,7 +111,7 @@ commands:
 - id: quality.get_findings
   tool: get_findings
   kind: query
-  runs_on: server
+  runs_on: scene
   model: Visual findings for an object/region (Phase 3).
   args:
     id:
@@ -143,7 +143,7 @@ commands:
 - id: quality.explain_reconstruction
   tool: explain_reconstruction
   kind: query
-  runs_on: server
+  runs_on: scene
   model: 'HOW this session was made: the pipeline''s method step by step and the session''s own records (keyframes,
     chunks, epoch, segmentation rounds, coverage, certification, point confidence). Call for any question about
     the method, the reconstruction, the segmentation or how reliable the points are.'

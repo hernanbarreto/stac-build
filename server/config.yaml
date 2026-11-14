@@ -941,6 +941,10 @@ semantic:
                                 # log-probabilities bit for bit on 12 requests in three orders and
                                 # across two launches of the engine. A question end to end through
                                 # the backend: 0.95-1.16 s (pccr 2026-08-31, 2026-11-14)
+    command_candidates: 10      # BOUND (context): the commands of the interface and the system a sentence is
+                                # offered beside the scene's tools (commands.router: found by the sentence's
+                                # words among all of them; conversation and help are always offered). A tool
+                                # costs ~100 tokens of prompt; 12 new tools added 0.06 s to a call (2026-11-14)
     max_tokens: 512             # BOUND (work): the tokens of ONE call of the chat's loop — a tool call
                                 # or a brief answer never needs more; the engine's 2048 let a forced
                                 # tool call that did not close run 97 s (2026-11-13)

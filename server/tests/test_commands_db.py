@@ -38,7 +38,7 @@ _GOOD = """
       - id: demo.count
         tool: count_things
         kind: query
-        runs_on: server
+        runs_on: scene
         model: Count things.
         text:
           es: {title: Contar, say: [cuántas cosas hay]}
@@ -64,23 +64,70 @@ def test_the_real_catalogue_is_complete_in_three_languages():
         assert any(x["area"] == a["id"] for x in c.commands), a["id"]
 
 
-def test_every_tool_of_the_chat_is_a_row_and_the_model_is_offered_the_same():
-    """Until the chat reads its tools from the database, the rows must BE the tools: the same
-    function, description and arguments the model was validated on, and an executor for each."""
+def test_every_command_has_its_executor():
+    """A command is never half built: every row that runs on the scene has its handler in the
+    tool layer (with the row's argument names), every system row its handler, and the interface's
+    are typed against the generated file — which must be the catalogue's."""
+    import inspect
+    from commands import export_ui
     from phase5_qa.tools import SpatialTools
     db = commands.database()
-    rows = {t["function"]["name"]: t for t in db.tool_schemas(runs_on="server")}
-    code = {t["function"]["name"]: t for t in SpatialTools.openai_schemas()}
-    assert set(rows) == set(code)
-    import json
-    for name in code:
-        assert json.dumps(rows[name]) == json.dumps(code[name]), name
-    # … and every row of the server has its executor in the tool layer
-    import inspect
-    for r in db.list(runs_on="server"):
-        assert callable(getattr(SpatialTools, r["handler"], None)), r["id"]
-        assert set(r["args"]) <= set(inspect.signature(getattr(SpatialTools, r["handler"])).parameters) | {"id"}, r["id"]
-    assert db.core() == ["talk.small_talk"]
+    scene = db.list(runs_on="scene")
+    assert len(scene) >= 44
+    for r in scene:
+        fn = getattr(SpatialTools, r["handler"], None)
+        assert callable(fn), r["id"]
+        assert set(r["args"]) <= set(inspect.signature(fn).parameters), r["id"]
+    # … and the model is offered exactly the rows (the tool layer reads its tools from the database)
+    assert [t["function"]["name"] for t in SpatialTools.openai_schemas()] == [r["tool"] for r in scene]
+    system = commands.SystemTools(db, "es").impls()
+    assert set(system) == {r["tool"] for r in db.list(runs_on="system")} == {"small_talk", "help__commands"}
+    assert db.core() == ["talk.small_talk", "help.commands"]
+    assert export_ui.check(), "ui/src/commands/catalog.generated.ts is stale: python -m commands.export_ui"
+    ui = db.list(runs_on="ui")
+    text = export_ui.OUT.read_text()
+    assert all(f"'{r['id']}'" in text for r in ui) and len(ui) >= 40
+    for r in ui:
+        assert r["tool"] == r["id"].replace(".", "__") and r["done"], r["id"]
+
+
+def test_the_systems_own_commands():
+    db = commands.database()
+    es, fr = commands.SystemTools(db, "es"), commands.SystemTools(db, "fr")
+    assert es.small_talk("Hola")["reply"] == "Hola"
+    areas = es.help_commands()
+    assert areas["total"] == db.count() and areas["areas"][0]["title"] == "Conversación"
+    assert fr.help_commands()["areas"][0]["title"] == "Conversation"
+    one = es.help_commands("paneles")
+    assert one["area"] == "layout" and "Mostrar el inspector" in one["commands"]
+    assert es.help_commands("Panels")["area"] == "layout" and es.help_commands("layout")["area"] == "layout"
+    assert es.help_commands("zzz")["insufficient_data"] is True
+
+
+def test_the_candidates_a_sentence_is_offered():
+    from commands import router
+    db = commands.database()
+    for text, want in (("conectá con el servidor", "app.connect"), ("abrí pccr", "sessions.open"),
+                       ("ampliá la pantalla", "app.fullscreen"), ("ocultá la grilla", "display.grid"),
+                       ("mostrame la malla", "meshes.show"), ("open the console", "layout.show_dock"),
+                       ("affiche les axes", "display.axes"), ("me llamo Ana", "talk.set_user_name"),
+                       ("quiero calibrar", "calibration.measure_distance")):
+        got = router.candidates(db, text, limit=10)
+        assert got[:2] == ["talk.small_talk", "help.commands"], text      # always offered
+        assert got[2] == want, (text, got)
+    # with no session open, opening one is offered whatever is said
+    got = router.candidates(db, "pccr", limit=10, ui={"session": None})
+    assert got[:5] == ["talk.small_talk", "help.commands", "sessions.open", "sessions.list", "app.connect"]
+    assert "sessions.open" not in router.candidates(db, "zzz", limit=10, ui={"session": "pccr"})
+    assert len(router.candidates(db, "abrí la sesión y mostrá la consola y los ejes", limit=3)) <= 2 + 3
+    # STAC asked the name: only its answer's commands
+    assert router.candidates(db, "Ana", limit=10, expecting="user_name") == ["talk.set_user_name", "talk.small_talk"]
+    row = db.get("display.point_opacity")
+    assert router.validate_args(row, {"opacity": 0.5}) is None
+    assert "over 1" in router.validate_args(row, {"opacity": 2})
+    assert "missing" in router.validate_args(row, {}) and "unknown" in router.validate_args(row, {"x": 1})
+    assert "must be one of" in router.validate_args(db.get("layout.show_dock"), {"tab": "nope"})
+    assert "must be boolean" in router.validate_args(db.get("display.grid"), {"on": "yes"})
 
 
 def test_the_database_is_the_declarations_image_and_is_rebuilt_when_they_change(tmp_path):
@@ -110,7 +157,7 @@ def test_the_database_is_the_declarations_image_and_is_rebuilt_when_they_change(
     _area(tmp_path, _GOOD + """
       - id: demo.new_one
         kind: talk
-        runs_on: server
+        runs_on: scene
         model: Something new.
         text:
           es: {title: Nuevo, say: [algo nuevo]}
@@ -130,7 +177,9 @@ def test_the_search_finds_a_command_by_how_people_ask_for_it(tmp_path):
     assert db.search("how many things are there", "en")[0]["id"] == "demo.count"
     assert db.search("how many things", "es") == []                    # another language's words
     assert db.search("how many things", None)[0]["id"] == "demo.count"  # every language
-    assert db.search("pantalla", "es", runs_on="server") == []
+    assert db.search("pantalla", "es", runs_on="scene") == []
+    assert db.search("pantallas", "es") == []                           # another word, exactly
+    assert db.search("pantallas", "es", stems=True)[0]["id"] == "demo.full_screen"    # … by its start
     assert db.search("", "es") == [] and db.search("¿?", "es") == []
 
     real = commands.database()

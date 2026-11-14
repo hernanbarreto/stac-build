@@ -1,0 +1,42 @@
+# The 'pipeline' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: pipeline
+position: 160
+title:
+  es: Reconstrucción
+  en: Reconstruction
+  fr: Reconstruction
+summary:
+  es: Reconstruir una sesión desde su video.
+  en: Reconstructing a session from its video.
+  fr: Reconstruire une session à partir de sa vidéo.
+commands:
+- id: pipeline.open
+  kind: action
+  runs_on: ui
+  model: 'Open the Reconstruct window of a session (the open one when none is named). It only opens the window:
+    the reconstruction is launched by hand.'
+  args:
+    session:
+      type: string
+      description: the session's name; omit for the open one
+  text:
+    es:
+      title: Abrir la reconstrucción
+      say:
+      - abrí reconstruir
+      - quiero reconstruir la sesión
+      - ventana de reconstrucción
+      done: Ventana de reconstrucción abierta.
+    en:
+      title: Open reconstruct
+      say:
+      - open reconstruct
+      - I want to reconstruct the session
+      done: Reconstruct window open.
+    fr:
+      title: Ouvrir la reconstruction
+      say:
+      - ouvre reconstruire
+      - je veux reconstruire la session
+      done: Fenêtre de reconstruction ouverte.

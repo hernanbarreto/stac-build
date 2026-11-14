@@ -1,0 +1,116 @@
+# The 'meshes' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: meshes
+position: 56
+title:
+  es: Mallas
+  en: Meshes
+  fr: Maillages
+summary:
+  es: 'Las mallas GenRecon de la sesión: verlas, ocultarlas, generarlas.'
+  en: 'The GenRecon meshes of the session: show, hide, generate.'
+  fr: 'Les maillages GenRecon de la session : afficher, masquer, générer.'
+commands:
+- id: meshes.show
+  kind: action
+  runs_on: ui
+  model: 'Show or hide the GenRecon meshes of the session: every mesh, or one by its name.'
+  args:
+    'on': &id001
+      type: boolean
+      required: true
+    mesh:
+      type: string
+      description: name of one mesh; omit for every mesh
+  needs:
+  - session
+  - mesh
+  text:
+    es:
+      title: Mostrar u ocultar mallas
+      say:
+      - mostrá la malla
+      - ocultá las mallas
+      - prendé el genrecon
+      - apagá la malla
+      done: Mallas visibles.
+      done_off: Mallas ocultas.
+    en:
+      title: Show or hide meshes
+      say:
+      - show the mesh
+      - hide the meshes
+      - turn genrecon on
+      - turn the mesh off
+      done: Meshes shown.
+      done_off: Meshes hidden.
+    fr:
+      title: Afficher ou masquer les maillages
+      say:
+      - affiche le maillage
+      - masque les maillages
+      - active genrecon
+      - désactive le maillage
+      done: Maillages affichés.
+      done_off: Maillages masqués.
+- id: meshes.wireframe
+  kind: action
+  runs_on: ui
+  model: Draw the meshes in wireframe (on) or solid (off).
+  args:
+    'on': *id001
+  needs:
+  - session
+  - mesh
+  text:
+    es:
+      title: Mallas en alambre
+      say:
+      - mallas en alambre
+      - mostrá la malla sólida
+      - wireframe
+      done: Mallas en alambre.
+      done_off: Mallas sólidas.
+    en:
+      title: Meshes in wireframe
+      say:
+      - meshes in wireframe
+      - show the mesh solid
+      done: Meshes in wireframe.
+      done_off: Meshes solid.
+    fr:
+      title: Maillages en fil de fer
+      say:
+      - maillages en fil de fer
+      - affiche le maillage plein
+      done: Maillages en fil de fer.
+      done_off: Maillages pleins.
+- id: meshes.open_genrecon
+  kind: action
+  runs_on: ui
+  model: 'Open the GenRecon window (to generate the mesh of the scan). It only opens the window: the run is launched
+    by hand.'
+  needs:
+  - session
+  text:
+    es:
+      title: Abrir GenRecon
+      say:
+      - abrí genrecon
+      - quiero generar la malla
+      - ventana de genrecon
+      done: Ventana de GenRecon abierta.
+    en:
+      title: Open GenRecon
+      say:
+      - open genrecon
+      - I want to generate the mesh
+      - genrecon window
+      done: GenRecon window open.
+    fr:
+      title: Ouvrir GenRecon
+      say:
+      - ouvre genrecon
+      - je veux générer le maillage
+      - fenêtre genrecon
+      done: Fenêtre GenRecon ouverte.

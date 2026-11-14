@@ -1,0 +1,41 @@
+# The 'objects' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: objects
+position: 130
+title:
+  es: Objetos de referencia
+  en: Reference objects
+  fr: Objets de référence
+summary:
+  es: 'Objetos 3D que se agregan a la escena: el humano de referencia, mallas de la colección.'
+  en: '3D objects added to the scene: the reference human, meshes of the collection.'
+  fr: 'Objets 3D ajoutés à la scène : l''humain de référence, maillages de la collection.'
+commands:
+- id: objects.open_library
+  kind: action
+  runs_on: ui
+  model: Open the library of 3D objects to add one to the scene (the reference human, meshes of the collection).
+  needs:
+  - session
+  text:
+    es:
+      title: Agregar un objeto
+      say:
+      - agregá un objeto
+      - abrí la biblioteca de objetos
+      - poné el humano de referencia
+      done: Biblioteca de objetos abierta.
+    en:
+      title: Add an object
+      say:
+      - add an object
+      - open the object library
+      - place the reference human
+      done: Object library open.
+    fr:
+      title: Ajouter un objet
+      say:
+      - ajoute un objet
+      - ouvre la bibliothèque d'objets
+      - place l'humain de référence
+      done: Bibliothèque d'objets ouverte.

@@ -1,0 +1,212 @@
+# The 'layout' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: layout
+position: 90
+title:
+  es: Paneles
+  en: Panels
+  fr: Panneaux
+summary:
+  es: 'Los paneles de la interfaz: lateral, inspector e inferior.'
+  en: 'The panels of the interface: side, inspector and bottom dock.'
+  fr: 'Les panneaux de l''interface : latéral, inspecteur et inférieur.'
+commands:
+- id: layout.show_panel
+  kind: action
+  runs_on: ui
+  model: 'Show a panel on the left: sessions (the projects), instances (the list of objects, cubes, meshes), scans,
+    bim, team.'
+  args:
+    panel:
+      type: string
+      enum:
+      - sessions
+      - instances
+      - scans
+      - bim
+      - team
+      required: true
+  text:
+    es:
+      title: Mostrar un panel lateral
+      say:
+      - mostrá la lista de objetos
+      - abrí el panel de sesiones
+      - mostrame los escaneos
+      - abrí instancias
+      - panel de bim
+      - panel del equipo
+      done: Panel abierto.
+    en:
+      title: Show a side panel
+      say:
+      - show the list of objects
+      - open the sessions panel
+      - show the scans
+      - open instances
+      - bim panel
+      - team panel
+      done: Panel open.
+    fr:
+      title: Afficher un panneau latéral
+      say:
+      - affiche la liste des objets
+      - ouvre le panneau des sessions
+      - montre les scans
+      - panneau bim
+      - panneau de l'équipe
+      done: Panneau ouvert.
+- id: layout.hide_side_panel
+  kind: action
+  runs_on: ui
+  model: Hide the panel on the left.
+  text:
+    es:
+      title: Ocultar el panel lateral
+      say:
+      - ocultá el panel lateral
+      - cerrá el panel izquierdo
+      - más lugar para la nube
+      done: Panel lateral oculto.
+    en:
+      title: Hide the side panel
+      say:
+      - hide the side panel
+      - close the left panel
+      - more room for the cloud
+      done: Side panel hidden.
+    fr:
+      title: Masquer le panneau latéral
+      say:
+      - masque le panneau latéral
+      - ferme le panneau gauche
+      done: Panneau latéral masqué.
+- id: layout.show_inspector
+  kind: action
+  runs_on: ui
+  model: 'Show the inspector on the right at a tab: properties, acta (certificate and quality) or assistant (this
+    chat).'
+  args:
+    tab:
+      type: string
+      enum:
+      - properties
+      - acta
+      - assistant
+      required: true
+  text:
+    es:
+      title: Mostrar el inspector
+      say:
+      - abrí propiedades
+      - mostrá el certificado
+      - abrí el asistente
+      - mostrá el acta
+      done: Inspector abierto.
+    en:
+      title: Show the inspector
+      say:
+      - open properties
+      - show the certificate
+      - open the assistant
+      done: Inspector open.
+    fr:
+      title: Afficher l'inspecteur
+      say:
+      - ouvre les propriétés
+      - affiche le certificat
+      - ouvre l'assistant
+      done: Inspecteur ouvert.
+- id: layout.hide_inspector
+  kind: action
+  runs_on: ui
+  model: 'Hide the inspector on the right (it holds this chat: the conversation closes with it).'
+  text:
+    es:
+      title: Ocultar el inspector
+      say:
+      - ocultá el inspector
+      - cerrá el panel derecho
+      done: Inspector oculto.
+    en:
+      title: Hide the inspector
+      say:
+      - hide the inspector
+      - close the right panel
+      done: Inspector hidden.
+    fr:
+      title: Masquer l'inspecteur
+      say:
+      - masque l'inspecteur
+      - ferme le panneau droit
+      done: Inspecteur masqué.
+- id: layout.show_dock
+  kind: action
+  runs_on: ui
+  model: 'Show the bottom dock at a tab: console (the server''s log), jobs (the pipelines running), timeline, report
+    or evaluation.'
+  args:
+    tab:
+      type: string
+      enum:
+      - console
+      - jobs
+      - timeline
+      - report
+      - evaluation
+      required: true
+  text:
+    es:
+      title: Mostrar el panel inferior
+      say:
+      - abrí la consola
+      - mostrá los trabajos
+      - cómo va el pipeline
+      - abrí el reporte
+      - mostrá la evaluación
+      - línea de tiempo
+      done: Panel inferior abierto.
+    en:
+      title: Show the bottom dock
+      say:
+      - open the console
+      - show the jobs
+      - how is the pipeline going
+      - open the report
+      - show the evaluation
+      - timeline
+      done: Bottom dock open.
+    fr:
+      title: Afficher le panneau inférieur
+      say:
+      - ouvre la console
+      - montre les tâches
+      - ouvre le rapport
+      - affiche l'évaluation
+      - chronologie
+      done: Panneau inférieur ouvert.
+- id: layout.hide_dock
+  kind: action
+  runs_on: ui
+  model: Hide the bottom dock.
+  text:
+    es:
+      title: Ocultar el panel inferior
+      say:
+      - ocultá el panel inferior
+      - cerrá la consola
+      - cerrá el panel de abajo
+      done: Panel inferior oculto.
+    en:
+      title: Hide the bottom dock
+      say:
+      - hide the bottom dock
+      - close the console
+      - close the bottom panel
+      done: Bottom dock hidden.
+    fr:
+      title: Masquer le panneau inférieur
+      say:
+      - masque le panneau inférieur
+      - ferme la console
+      done: Panneau inférieur masqué.

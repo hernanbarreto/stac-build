@@ -1,0 +1,100 @@
+# The 'sessions' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: sessions
+position: 100
+title:
+  es: Sesiones
+  en: Sessions
+  fr: Sessions
+summary:
+  es: 'Las sesiones (proyectos) del servidor: listarlas, abrirlas, cerrarlas.'
+  en: 'The sessions (projects) on the server: list, open, close.'
+  fr: 'Les sessions (projets) du serveur : lister, ouvrir, fermer.'
+commands:
+- id: sessions.open
+  kind: action
+  runs_on: ui
+  model: 'Open (load) a session by its name: its cloud is shown in the viewer. session = the name as INTERFACE STATE
+    lists it.'
+  args:
+    session:
+      type: string
+      description: the session's name
+      required: true
+  text:
+    es:
+      title: Abrir una sesión
+      say:
+      - abrí pccr
+      - abrí la sesión zaragoza
+      - cargá la sesión
+      - abre el proyecto
+      done: Abriendo la sesión {detail}.
+    en:
+      title: Open a session
+      say:
+      - open pccr
+      - open the session zaragoza
+      - load the session
+      - open the project
+      done: Opening session {detail}.
+    fr:
+      title: Ouvrir une session
+      say:
+      - ouvre pccr
+      - ouvre la session zaragoza
+      - charge la session
+      - ouvre le projet
+      done: Ouverture de la session {detail}.
+- id: sessions.close
+  kind: action
+  runs_on: ui
+  model: Close (unload) the open session.
+  needs:
+  - session
+  text:
+    es:
+      title: Cerrar la sesión abierta
+      say:
+      - cerrá la sesión
+      - descargá la sesión
+      - cerrá el proyecto
+      done: Sesión cerrada.
+    en:
+      title: Close the open session
+      say:
+      - close the session
+      - unload the session
+      - close the project
+      done: Session closed.
+    fr:
+      title: Fermer la session ouverte
+      say:
+      - ferme la session
+      - décharge la session
+      - ferme le projet
+      done: Session fermée.
+- id: sessions.list
+  kind: query
+  runs_on: ui
+  model: Which sessions (projects) exist on the server.
+  text:
+    es:
+      title: Listar las sesiones
+      say:
+      - qué sesiones hay
+      - listame los proyectos
+      - cuáles sesiones tenemos
+      done: 'Sesiones: {detail}.'
+    en:
+      title: List the sessions
+      say:
+      - which sessions are there
+      - list the projects
+      done: 'Sessions: {detail}.'
+    fr:
+      title: Lister les sessions
+      say:
+      - quelles sessions y a-t-il
+      - liste les projets
+      done: 'Sessions : {detail}.'

@@ -14,7 +14,7 @@ commands:
 - id: scene.list_objects
   tool: list_objects
   kind: query
-  runs_on: server
+  runs_on: scene
   model: 'List the objects of a label (id + label + class/material/state). ALWAYS pass the label the question names
     (in the inventory''s English: ''sign'', ''fire extinguisher''). A long listing comes back by label with counts
     and id ranges.'
@@ -47,7 +47,7 @@ commands:
 - id: scene.count_objects
   tool: count_objects
   kind: query
-  runs_on: server
+  runs_on: scene
   model: 'How many objects of a label there are — pass the label the question names (''how many signs'' -> label=''sign'').
     With no label: the total and the count of every label.'
   args:
@@ -78,7 +78,7 @@ commands:
 - id: scene.get_object
   tool: get_object
   kind: query
-  runs_on: server
+  runs_on: scene
   model: 'One object by id in one call: label, position (m), size w/h/d (m). Use it to check that an id exists and
     what it is.'
   args:
@@ -112,7 +112,7 @@ commands:
 - id: scene.get_position
   tool: get_position
   kind: query
-  runs_on: server
+  runs_on: scene
   model: World position (metres) of an object.
   args:
     id:
@@ -143,7 +143,7 @@ commands:
 - id: scene.get_object_size
   tool: get_object_size
   kind: query
-  runs_on: server
+  runs_on: scene
   model: Object size w/h/d in metres.
   args:
     id:
@@ -174,7 +174,7 @@ commands:
 - id: scene.get_object_volume
   tool: get_object_volume
   kind: query
-  runs_on: server
+  runs_on: scene
   model: Bounding-box volume in cubic metres.
   args:
     id:
@@ -205,7 +205,7 @@ commands:
 - id: scene.get_my_position
   tool: get_my_position
   kind: query
-  runs_on: server
+  runs_on: scene
   model: Position of the camera at the end of the scan ('me').
   needs:
   - segmentation
@@ -231,7 +231,7 @@ commands:
 - id: scene.get_distance_from_me
   tool: get_distance_from_me
   kind: query
-  runs_on: server
+  runs_on: scene
   model: Distance from the scan-end camera to an object (m).
   args:
     id:
@@ -262,7 +262,7 @@ commands:
 - id: scene.get_session_info
   tool: get_session_info
   kind: query
-  runs_on: server
+  runs_on: scene
   model: 'Which session/scene is open: project + session name, scan frame count, cloud size, objects, floor leveling,
     cached scene description. Call for any ''what am I looking at'' question.'
   needs:
@@ -289,7 +289,7 @@ commands:
 - id: scene.describe_scene
   tool: describe_scene
   kind: query
-  runs_on: server
+  runs_on: scene
   model: LOOK at sampled scan keyframes (VLM) and describe what the scene is — kind of space, structures, materials,
     notable items. Cached in the scene db; refresh=true re-runs. Interpretation (vlm_proposed), NEVER measurements.
   args:
@@ -319,7 +319,7 @@ commands:
 - id: scene.describe_object
   tool: describe_object
   kind: query
-  runs_on: server
+  runs_on: scene
   model: 'Detailed dossier of ONE segmented object: qué es, descripción, características, materiales, estado, función,
     interacción con el entorno (vlm_proposed, cached by the CAD/propose pass). Use when asked what an object is
     / its materials / condition.'

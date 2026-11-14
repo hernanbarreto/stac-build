@@ -23,8 +23,9 @@ import { Banner } from './ui/Banner'
 import { Badge } from './ui/Badge'
 import { Section, Row, Stack } from './ui/Panel'
 import { Tooltip } from './ui/Tooltip'
-import { useFmt, useT } from '../i18n'
+import { useFmt, useI18n, useT } from '../i18n'
 import { useVoice, voiceSupported, type VoiceLang } from '../voice/useVoice'
+import { registerCommands, runActions, type AnswerTexts, type Executors, type UiAction } from '../commands/registry'
 
 interface TraceEntry { tool: string; arguments: Record<string, unknown>; result: Record<string, unknown> }
 
@@ -56,6 +57,12 @@ interface Props {
   /** an action on the viewer one of the answer's tools returned (focus, show/hide, OBB, view,
    *  orbit, travel, colour, clear) — USER 2026-10-09: the chat drives the viewer */
   onViewerAction?: (action: Record<string, unknown>) => void
+  /** who is signed in: STAC remembers each user's name (USER 2026-11-14: "debe preguntarnos
+   *  primero el nombre, y hablarnos usando nuestro nombre") */
+  userKey?: string | null
+  /** what the interface says of itself, sent with every question (connected, session, scan,
+   *  the sessions' names …) — the model needs it to operate the application */
+  getUiState?: () => Record<string, unknown>
 }
 
 // the object ids the answer's tools were called on (get_position(id), measure_between(id1, id2),
@@ -82,11 +89,20 @@ function readSpeakPref(): boolean | null {
 function writeSpeakPref(on: boolean) { try { localStorage.setItem(SPEAK_KEY, on ? '1' : '0') } catch { /* a private window */ } }
 const VOICE_LANGS: readonly string[] = ['es', 'en', 'fr']
 
+// how each user wants to be called — kept in this browser, per signed-in user
+const nameKey = (user: string | null | undefined) => `stac.user.name.${user || 'anonymous'}`
+function readName(user: string | null | undefined): string | null {
+  try { return localStorage.getItem(nameKey(user)) || null } catch { return null }
+}
+function writeName(user: string | null | undefined, name: string | null) {
+  try { if (name) localStorage.setItem(nameKey(user), name); else localStorage.removeItem(nameKey(user)) } catch { /* a private window */ }
+}
+
 function post(session: string | null, scan: string | null | undefined, path: string, body: Record<string, unknown>) {
   return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: session, ...(scan ? { scan } : {}), ...body }) })
 }
 
-export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStatus, onFocusObjects, onVolumesChanged, onViewerAction }: Props) {
+export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStatus, onFocusObjects, onVolumesChanged, onViewerAction, userKey, getUiState }: Props) {
   const api = useCallback((session: string | null, path: string, body: Record<string, unknown>) => post(session, scanKey, path, body), [scanKey])
   // the scene's objects reached the viewer for THIS session + scan (an answer never changes them)
   const objectsLoadedRef = useRef(false)
@@ -107,6 +123,29 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
   const speakOnRef = useRef(speakOn)
   useEffect(() => { speakOnRef.current = speakOn }, [speakOn])
   const [voiceNote, setVoiceNote] = useState<string | null>(null)
+  // ── the user's name: asked first, then used (USER 2026-11-14) ──
+  const [userName, setUserName] = useState<string | null>(() => readName(userKey))
+  const userNameRef = useRef(userName)
+  useEffect(() => { userNameRef.current = userName }, [userName])
+  useEffect(() => { const n = readName(userKey); setUserName(n); userNameRef.current = n }, [userKey])
+  /** STAC has asked the name and the next thing said is the answer */
+  const expectingNameRef = useRef(false)
+  // the two commands this panel owns (the rest are the app's: App.tsx)
+  useEffect(() => {
+    const executors: Executors<'talk.set_user_name' | 'talk.forget_user_name'> = {
+      'talk.set_user_name': ({ name }) => {
+        const clean = String(name || '').trim()
+        if (!clean) return { ok: false, reason: 'unavailable' }
+        writeName(userKey, clean); setUserName(clean); userNameRef.current = clean; expectingNameRef.current = false
+        return { ok: true }
+      },
+      'talk.forget_user_name': () => {
+        writeName(userKey, null); setUserName(null); userNameRef.current = null; expectingNameRef.current = true
+        return { ok: true }
+      },
+    }
+    return registerCommands(executors)
+  }, [userKey])
   // the voice engines' own state (they load in ~30 s after the server starts and leave the card
   // while a pipeline runs): the microphone waits for them, and a "loading" notice ends by itself
   const [voiceStatus, setVoiceStatus] = useState<'up' | 'loading' | 'busy' | 'down' | 'disabled' | null>(null)
@@ -148,7 +187,7 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
   }, [sessionId, viewport, refreshVolumes, api])
 
   // another scan (or session): the conversation was about the other one — it starts over
-  useEffect(() => { setMessages([]) }, [sessionId, scanKey])
+  useEffect(() => { setMessages(m => (expectingNameRef.current ? m : [])) }, [sessionId, scanKey])
 
   // the chat's measurements run on the GPU in their own process (semantic.chat.tools_device):
   // it is started when the chat opens on a scan, so the first measurement does not wait for it
@@ -209,7 +248,12 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
       const deadline = Date.now() + 10 * 60_000
       for (;;) {
         // a spoken question is answered in the language it was spoken in
-        const r = await api(sessionId, '/api/spatial_qa', { question, history, ...(spoken ? { lang: spoken } : {}) })
+        const r = await api(sessionId, '/api/spatial_qa', {
+          question, history, ...(spoken ? { lang: spoken } : {}),
+          ...(userNameRef.current ? { user_name: userNameRef.current } : {}),
+          ...(expectingNameRef.current ? { expecting: 'user_name' } : {}),
+          ui: getUiState?.() ?? {},
+        })
         d = await r.json()
         if (r.ok) break
         if (r.status !== 503 || d.status !== 'loading' || Date.now() > deadline) throw new Error(String(d.error || `HTTP ${r.status}`))
@@ -222,11 +266,20 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
       // thousands of objects)
       const prov = d.provenance as { ok?: boolean; figures?: string[]; tools?: string[] } | undefined
       const unverified = prov && prov.ok === false ? [...(prov.figures || []), ...(prov.tools || [])] : undefined
-      setMessages(m => replaceLast(m, { role: 'assistant', text: String(d.answer || t('assistant.noAnswer')), trace, unverified }))
+      // THE COMMANDS OF THE INTERFACE the model chose (ui_actions): run here, in order, and
+      // worded with the texts the server sent in the conversation's language
+      const actions = (Array.isArray(d.ui_actions) ? d.ui_actions : []) as UiAction[]
+      let answer = String(d.answer || '')
+      if (actions.length) {
+        const texts = (d.texts || { done_prefix: '', reasons: {} }) as AnswerTexts
+        answer = (await runActions(actions, answer, texts, !!d.acted_only)).text
+      }
+      expectingNameRef.current = d.expecting === 'user_name'
+      setMessages(m => replaceLast(m, { role: 'assistant', text: answer || t('assistant.noAnswer'), trace, unverified }))
       // … and said, in the answer's language (the server's: the question's)
-      if (speakOnRef.current && d.answer) {
+      if (speakOnRef.current && answer) {
         const lang = VOICE_LANGS.includes(String(d.lang)) ? (d.lang as VoiceLang) : spoken
-        if (lang) void voice.speak(String(d.answer), lang)
+        if (lang) void voice.speak(answer, lang)
       }
       if (trace.length && !objectsLoadedRef.current) {
         try {
@@ -254,7 +307,21 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
     } finally {
       setBusy(false)
     }
-  }, [sessionId, busy, viewport, refreshVolumes, t, onFocusObjects, onVolumesChanged, onViewerAction, api, voice])
+  }, [sessionId, busy, viewport, refreshVolumes, t, onFocusObjects, onVolumesChanged, onViewerAction, api, voice, getUiState])
+
+  // STAC ASKS THE NAME FIRST: once the model is up, to a user it does not know — written, and
+  // said when the spoken answers are on. What the user says next is taken as the answer.
+  const { lang: uiLang } = useI18n()
+  const askedNameRef = useRef(false)
+  useEffect(() => {
+    if (vlmStatus !== 'up' || userName || askedNameRef.current || messagesRef.current.length) return
+    askedNameRef.current = true
+    expectingNameRef.current = true
+    const text = t('assistant.askName')
+    setMessages(m => (m.length ? m : [{ role: 'assistant', text }]))
+    if (speakOnRef.current && VOICE_LANGS.includes(uiLang)) void voice.speak(text, uiLang as VoiceLang)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vlmStatus, userName])
 
   // THE MICROPHONE: one press starts listening, the next sends what was said (the recording
   // also ends by itself at the server's bound). What STAC heard is asked as a typed question is.

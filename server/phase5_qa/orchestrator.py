@@ -24,6 +24,7 @@ import numpy as np
 
 from phase_r.instance_store import InstanceStore
 
+from . import answers
 from .tools import SpatialTools
 
 _SYSTEM_TEMPLATE = """You are the spatial intelligence of STAC-Build: you supervise a 3D-reconstructed construction scene, you KNOW what session/scene you are looking at, and every figure you give is tool-measured.
@@ -215,11 +216,111 @@ def _session_block(store: InstanceStore) -> str:
     return "\n".join(lines)
 
 
+# ── the interface's commands in a turn ───────────────────────────────────────────────────────
+def _ui_call(row: dict, sentence: str = ""):
+    """What "running" a command of the interface means on the server: its arguments are checked
+    against the row and the call is handed to the interface (``ui_actions``), which runs it."""
+    def call(**kwargs):
+        from commands import router
+        why = router.validate_args(row, kwargs)
+        if why:
+            return {"error": f"{row['id']}: {why}"}
+        if row["id"] == "talk.set_user_name" and not answers.name_in_sentence(str(kwargs.get("name") or ""), sentence):
+            # a name the user did not say is never stored
+            return {"insufficient_data": True, "reason": "no name was given"}
+        return {"ui": {"id": row["id"], "args": kwargs}}
+    return call
+
+
+def _failed(entry: dict) -> bool:
+    res = entry.get("result")
+    return not isinstance(res, dict) or bool(res.get("error") or res.get("insufficient_data"))
+
+
+def _is_ui_action(entry: dict) -> bool:
+    res = entry.get("result")
+    return entry.get("runs_on") == "ui" and isinstance(res, dict) and isinstance(res.get("ui"), dict)
+
+
+def _ui_action(entry: dict, rows: dict) -> dict:
+    """One command for the interface to run, with the texts it words the outcome with (in the
+    conversation's language): ``done`` / ``done_off`` and the command's title."""
+    row = rows[entry["tool"]]
+    return {"id": row["id"], "tool": row["tool"], "args": entry["result"]["ui"]["args"],
+            "kind": row["kind"], "confirm": bool(row["confirm"]), "title": row["title"],
+            "done": row["done"], "done_off": row["done_off"]}
+
+
+# ── the application: what the prompt says of it ─────────────────────────────────────────────
+_APP_BLOCK = """
+THE APPLICATION (the tools whose names carry "__": app__fullscreen, sessions__open, …): they
+operate STAC Build itself — the connection, sessions and scans, panels, full screen, the viewer's
+tools, how the cloud is drawn, the meshes, windows. Call them when the user asks STAC to DO
+something in the application; the interface runs them and says what was done. Only the ones
+offered in this turn exist. When the user tells their name → talk__set_user_name. What STAC can
+do → help__commands. CONVERSATION (a greeting, thanks, who you are, how you are) → small_talk,
+writing your reply there: the user's language, one or two sentences.
+"""
+
+_NO_SCENE_TEMPLATE = """You are STAC, the assistant of STAC Build — 3D reconstruction of construction sites from
+video: point clouds, their objects, meshes and measurements. People speak or write to you and
+you operate the application for them.
+
+NO SCAN WITH OBJECTS IS OPEN: nothing can be measured, counted or located now. When the user
+asks for that, open the session they name (sessions__open) or tell them, with small_talk, that
+a session has to be open first.
+
+HOW A TURN WORKS: you answer with TOOL CALLS only — every tool the request needs, all in this
+one turn. The tools whose names carry "__" operate the application (the interface runs them
+and says what was done). When the user tells their name → talk__set_user_name. What STAC can
+do → help__commands. CONVERSATION (a greeting, thanks, who you are, what STAC Build is) →
+small_talk, writing your reply there: the user's language, one or two sentences. NEVER state a
+figure: you measured nothing.
+"""
+
+_EXPECTING_NAME = """You are STAC, the assistant of STAC Build. You have just asked the user their name; their
+answer follows. If it gives a name (the name alone, or "me llamo …", "soy …", "call me …",
+"je m'appelle …"), call talk__set_user_name with THAT name alone — the first name as they said
+it, first letter in upper case; never a name that is not in their answer. If their answer gives
+no name, call small_talk and ask again, briefly, in their language."""
+
+
+def _clean(value: Any, limit: int = 60) -> str:
+    """A value of the interface's state as one short line of the prompt."""
+    return " ".join(str(value).split())[:limit]
+
+
+def _state_block(ui: dict | None, user_name: str | None) -> str:
+    """What the interface says of itself (the request's ``ui``) and who the user is — the model
+    needs the sessions' names to open one, and the user's name to speak to them."""
+    lines = []
+    if ui:
+        bits = []
+        if isinstance(ui.get("connected"), bool):
+            bits.append(f"connected to the server: {'yes' if ui['connected'] else 'NO (app__connect)'}")
+        bits.append(f"session open: {_clean(ui['session'])}" if ui.get("session") else "session open: none")
+        if ui.get("scan"):
+            bits.append(f"scan on screen: {_clean(ui['scan'])}")
+        if isinstance(ui.get("fullscreen"), bool):
+            bits.append(f"full screen: {'yes' if ui['fullscreen'] else 'no'}")
+        lines.append("INTERFACE STATE: " + "; ".join(bits) + ".")
+        for key, label in (("sessions", "sessions on the server"), ("scans", "scans of the open session")):
+            vals = [_clean(v) for v in (ui.get(key) or []) if isinstance(v, (str, int, float))][:40]
+            if vals:
+                lines.append(f"  {label}: " + ", ".join(vals))
+    lines.append(f"THE USER: their name is {user_name} — speak to them by it." if user_name
+                 else "THE USER: their name is not known.")
+    return "\n".join(lines)
+
+
 class SpatialQA:
-    def __init__(self, store_path: str, backend: str = "qwen_local",
+    def __init__(self, store_path: str | None, backend: str = "qwen_local",
                  session_log_dir: str | Path | None = None):
-        self.store_path = str(store_path)
-        self.store = InstanceStore(store_path)
+        """``store_path`` None = no scan with objects is open: STAC still converses and operates
+        the application (USER 2026-11-14: "conectá con el servidor", "abrí pccr" must work
+        before any session is open) — it only cannot measure."""
+        self.store_path = str(store_path) if store_path else None
+        self.store = InstanceStore(store_path) if store_path else None
         # WHERE THE MEASUREMENTS RUN (semantic.chat.tools_device): with cuda the tools that read
         # points run in the chat's own tools process on the card (tools_worker) and this
         # process — the backend, which never touches the GPU — keeps a tool set that only reads
@@ -227,19 +328,34 @@ class SpatialQA:
         from .tools import effective_device
         self.tools_device = effective_device()
         self.tools = SpatialTools(                   # display frame (viewer-consistent)
-            self.store, device=("numpy" if self.tools_device == "cuda" else self.tools_device))
+            self.store, device=("numpy" if self.tools_device == "cuda" else self.tools_device)) \
+            if self.store is not None else None
         self.backend = backend
-        # session logs default next to the scene store: output/spatial_qa_logs/
-        self.session_log_dir = Path(session_log_dir) if session_log_dir \
-            else Path(store_path).parent / "spatial_qa_logs"
+        # session logs default next to the scene store: output/spatial_qa_logs/ (with no scene:
+        # the repo's logs/)
+        if session_log_dir:
+            self.session_log_dir = Path(session_log_dir)
+        elif store_path:
+            self.session_log_dir = Path(store_path).parent / "spatial_qa_logs"
+        else:
+            self.session_log_dir = Path(__file__).resolve().parent.parent.parent / "logs" / "spatial_qa_logs"
 
-    def system_prompt(self) -> str:
-        return _SYSTEM_TEMPLATE.format(session=_session_block(self.store),
-                                       inventory=_inventory(self.store, self.tools))
+    def system_prompt(self, ui: dict | None = None, user_name: str | None = None,
+                      expecting: str | None = None) -> str:
+        if expecting == "user_name":
+            return _EXPECTING_NAME
+        state = _state_block(ui, user_name)
+        if self.store is None:
+            return _NO_SCENE_TEMPLATE + "\n" + state + "\n"
+        return (_SYSTEM_TEMPLATE.format(session=_session_block(self.store),
+                                        inventory=_inventory(self.store, self.tools))
+                + _APP_BLOCK + "\n" + state + "\n")
 
     def question_with_references(self, question: str) -> tuple[str, list[dict]]:
         """The question followed by the objects it names by id, resolved on this scan by the
         tool layer (never by the model): what exists, its label, where it is."""
+        if self.tools is None:
+            return question, []
         refs = self.tools.resolve_references(question)
         if not refs:
             return question, refs
@@ -261,45 +377,100 @@ class SpatialQA:
 
     def ask(self, question: str, images: list | None = None,
             max_iterations: int = 8, history: list | None = None,
-            lang: str | None = None) -> dict[str, Any]:
+            lang: str | None = None, user_name: str | None = None,
+            ui: dict | None = None, expecting: str | None = None) -> dict[str, Any]:
         """``history``: the conversation's earlier turns, oldest first, as
         [{"role": "user" | "assistant", "text": str}] — the last
         ``semantic.chat.history_turns`` of them go with the question. ``lang``: the language
-        of the answer ('es' | 'en'); None = the question's own, by its function words.
+        of the answer ('es' | 'en' | 'fr'); None = the question's own, by its function words.
+        ``user_name``: how the user is called (STAC speaks to them by it). ``ui``: what the
+        interface says of itself (connected, session, scan, sessions, scans, fullscreen, lang).
+        ``expecting``: what STAC has just asked ('user_name').
 
         ONE CALL OF THE MODEL (USER 2026-11-13: "Determinista pero en 1 o 2 segundos ninguna es
-        negociable"): the model chooses the tool(s) and their arguments, the tool layer runs
-        them and WRITES the answer from their results (answers.py) — the same sentence for the
-        same result, the tool's own figures, no second call of the engine. Only a tool with no
-        wording there sends the turn back to the model, with the provenance check."""
+        negociable"): the model chooses the command(s) and their arguments among the ones this
+        sentence is offered (commands.router) — the scene's tools while a scan is open, the
+        interface's and the system's candidates. What tells a COMMAND from a QUESTION is the row
+        it picks (commands.db: kind = action | query | talk). The scene's and the system's
+        tools run here and the tool layer WRITES the answer from their results (answers.py);
+        the interface's commands are returned as ``ui_actions`` for the interface to run and
+        word. Only a tool with no wording sends the turn back to the model, with the
+        provenance check."""
+        import commands
+        from commands import router
         from semantic.client import get_semantic_client
         from semantic.types import assistant, system, user
+        from . import answers
         from .tools import chat_config
 
         t0 = time.time()
+        cfg = chat_config()
+        ui = ui if isinstance(ui, dict) else None
+        expecting = expecting if expecting in router.EXPECTING else None
+        lang = lang if lang in answers.LANGS else answers.language_of(
+            question, default=str((ui or {}).get("lang") or "es"))
+        name = " ".join(str(user_name or "").split())[:60] or None
+        # ── what this sentence is offered ─────────────────────────────────────────────────
+        db = commands.database()
+        cand = router.candidates(db, question, limit=cfg["command_candidates"], ui=ui, expecting=expecting)
+        scene_ids = [r["id"] for r in db.list(runs_on="scene")] \
+            if self.tools is not None and expecting is None else []
+        offered = scene_ids + [c for c in cand if c not in scene_ids]
+        tools = db.tool_schemas(offered)
+        want = set(offered)
+        rows = {r["tool"]: r for r in db.list(lang) if r["id"] in want}
+        impls: dict[str, Any] = {}
+        if scene_ids:
+            impls.update(self.tools.impls(remote=self._remote if self.tools_device == "cuda" else None))
+        impls.update(commands.SystemTools(db, lang).impls())
+        for tool, row in rows.items():
+            if row["runs_on"] == "ui":
+                impls[tool] = _ui_call(row, question)
+
         client = get_semantic_client(backend=self.backend, consumer="phase5.qa")
-        messages = [system(self.system_prompt())]
-        keep = chat_config()["history_turns"]
+        messages = [system(self.system_prompt(ui=ui, user_name=name, expecting=expecting))]
+        keep = cfg["history_turns"]
         turns = [h for h in (history or []) if isinstance(h, dict)
                  and h.get("role") in ("user", "assistant") and str(h.get("text") or "").strip()]
-        for h in (turns[-keep:] if keep else []):
+        for h in (turns[-keep:] if keep and expecting is None else []):
             messages.append(user(str(h["text"])) if h["role"] == "user"
                             else assistant(text=str(h["text"])))
         asked, refs = self.question_with_references(question)
         messages.append(user(asked, images=images))
         t_prompt = time.time() - t0
-        tools = self.tools.openai_schemas()
-        impls = self.tools.impls(remote=self._remote if self.tools_device == "cuda" else None)
         # A TOOL CALL COMES FIRST, always (2026-11-13): left to choose, the model answered "only the
         # extinguishers are shown" having shown nothing, and "1.14 m" having measured nothing — an
         # answer is preceded by at least one call of the tool layer, then checked
-        cap = chat_config()["max_tokens"]         # a call or a brief answer never needs more
-        from . import answers
-        lang = lang if lang in answers.LANGS else answers.language_of(question)
+        cap = cfg["max_tokens"]                    # a call or a brief answer never needs more
         t_llm = time.time()
         first = client.chat(messages, tools=tools, tool_choice="required", max_tokens=cap,
                             consumer="phase5.qa#call")
         llm_s = time.time() - t_llm
+
+        def _finish(result: dict, trace: list, composed: bool) -> dict:
+            """What every answer carries beside its text: the interface's commands to run, the
+            texts the interface words them with, who was spoken to and how long it took."""
+            ui_actions = [_ui_action(e, rows) for e in trace if _is_ui_action(e)]
+            failed = any(_failed(e) for e in trace)
+            acted_only = bool(trace) and not failed and all(e.get("kind") == "action" for e in trace)
+            if composed and not ui_actions:
+                # (with commands of the interface in the turn, the interface words the whole
+                # answer once it has run them: it knows whether they worked)
+                result["answer"] = answers.address(result["answer"], name, lang, acted=acted_only,
+                                                   first=not turns)
+            # what STAC is still waiting for: its name question, until a name is given
+            still = expecting if expecting == "user_name" and not ui_actions else None
+            result.update(
+                ui_actions=ui_actions, acted_only=acted_only, lang=lang, user_name=name, expecting=still,
+                texts={"done_prefix": answers.done_prefix(name, lang), "name_first": not turns,
+                       "reasons": answers.ui_reasons(lang)},
+                commands=[{"id": e.get("command"), "kind": e.get("kind"), "runs_on": e.get("runs_on")}
+                          for e in trace],
+                prompt_s=round(t_prompt, 2), model_s=round(llm_s, 2),
+                latency_s=round(time.time() - t0, 2))
+            self._log_session(result, n_images=len(images or []))
+            return result
+
         if first.has_tool_calls:
             trace = []
             for tc in first.tool_calls:
@@ -308,20 +479,25 @@ class SpatialQA:
                     res = impl(**tc.arguments) if impl else {"error": f"unknown tool '{tc.name}'"}
                 except Exception as e:  # noqa: BLE001 — told as the tool's result
                     res = {"error": f"{type(e).__name__}: {e}"}
-                trace.append({"iteration": 0, "tool": tc.name, "arguments": tc.arguments, "result": res})
-            written = answers.compose_turn(trace, lang)
+                row = rows.get(tc.name) or {}
+                trace.append({"iteration": 0, "tool": tc.name, "arguments": tc.arguments, "result": res,
+                              "command": row.get("id"), "kind": row.get("kind"), "runs_on": row.get("runs_on")})
+            server_trace = [e for e in trace if not _is_ui_action(e)]
+            if expecting == "user_name":
+                named = [e for e in trace if _is_ui_action(e) and e.get("command") == "talk.set_user_name"]
+                trace = named[:1]                  # the name, or nothing: STAC asks again itself
+                server_trace = []
+                written = "" if named else answers.ask_name(lang)
+            else:
+                written = answers.compose_turn(server_trace, lang) if server_trace else ""
             if written is not None:
-                result = {
+                return _finish({
                     "question": question, "answer": written, "tool_trace": trace, "iterations": 1,
                     "stopped": "composed_by_tools", "references": refs,
                     # every figure IS a tool's: the sentence was written from the results
                     "provenance": {"ok": True, "figures": [], "tools": [], "retried": False,
                                    "written_by": "tool_layer"},
-                    "lang": lang, "prompt_s": round(t_prompt, 2), "model_s": round(llm_s, 2),
-                    "latency_s": round(time.time() - t0, 2),
-                }
-                self._log_session(result, n_images=len(images or []))
-                return result
+                }, trace, composed=True)
             # a tool the tool layer has no wording for: the model words the turn (below), its
             # calls already made — they are handed to it as the loop's first step
             convo = list(messages) + [assistant(text=first.content, tool_calls=first.tool_calls)]
@@ -379,7 +555,12 @@ class SpatialQA:
                    "messages": again["messages"]}
             verdict = provenance.check(out["answer"], out["tool_trace"], tool_names=impls,
                                        context_numbers=context)
-        result = {
+        for e in out["tool_trace"]:                 # the loop's own calls: which command each is
+            row = rows.get(e.get("tool")) or {}
+            e.setdefault("command", row.get("id"))
+            e.setdefault("kind", row.get("kind"))
+            e.setdefault("runs_on", row.get("runs_on"))
+        return _finish({
             "question": question,
             "answer": out["answer"],
             "tool_trace": out["tool_trace"],     # traceability: tool + args + result
@@ -387,11 +568,7 @@ class SpatialQA:
             "stopped": out["stopped"],
             "provenance": {**verdict, "retried": retried},
             "references": refs,
-            "prompt_s": round(t_prompt, 2),          # building the prompt (store reads)
-            "latency_s": round(time.time() - t0, 2),
-        }
-        self._log_session(result, n_images=len(images or []))
-        return result
+        }, out["tool_trace"], composed=False)
 
     def _log_session(self, result: dict, n_images: int = 0) -> None:
         """Persist the full JSON session log (spec: log JSON completo por sesión) — in its own
@@ -419,5 +596,7 @@ class SpatialQA:
         return tools_worker.call(self.store_path, tool, kwargs, device="cuda")
 
     def close(self):
-        self.tools.release()
-        self.store.close()
+        if self.tools is not None:
+            self.tools.release()
+        if self.store is not None:
+            self.store.close()

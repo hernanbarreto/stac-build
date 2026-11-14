@@ -24,3 +24,4 @@ A new function of STAC = one more declaration (and its executor). Nothing else l
 """
 from .catalog import AREAS_DIR, KINDS, LANGS, RUNS_ON, Catalog, CatalogError, load_catalog  # noqa: F401
 from .db import CommandsDB, build, database  # noqa: F401
+from .system_tools import SystemTools  # noqa: F401
