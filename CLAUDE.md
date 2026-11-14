@@ -289,6 +289,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     aunque tambien se acepta"). STAC ASKS THE USER'S NAME FIRST and speaks to them by it (his "debe preguntarnos
     primero el nombre, y hablarnos usando nuestro nombre"; kept per signed-in user in the browser; a name the
     user did not say is never stored).
+  · THE THIRD LANGUAGE (2026-11-14): the interface is in French too — `ui/src/i18n/fr.json` (1,296 texts, the
+    same keys as es / en; a key missing there falls back to English), the glossary's French words, Settings →
+    language, and `app.set_language` by voice. HIS EYE on the French: pending.
   · Measured 2026-11-14: a spoken turn after the user stops = transcription 0.3-0.4 s + the model 0.4 s (no
     scan) / 1.0-1.5 s (a scan open) + synthesis 0.1 s. HIS EAR on the three voices and HIS EYE on the commands
     in the browser: pending (nothing of the interface side was tried in a browser by the assistant).
@@ -574,11 +577,18 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   THE MIDDLE, √s each, by labels; he wants 3108 → 2408), the lengths shown, or the scan's geometry.
 - BUFFERSTOP'S IMAGES ARE ROTATED (USER 2026-11-13: "las imagenes de bufferstop, estan rotadas, deben estar
   correctamente orientadas, revisa eso y acomodalas, y verifica que siempre no solo en esta sesion que es la unica
-  rotada sino en las siguientes queden correctamente orientadas"). CAUSE FOUND, NOT FIXED: the video carries a
-  display matrix of −90° and the frame extraction pins the decoder's rotation OFF (`intake/frames_manifest.py`
-  ORIENTATION_AUTO = 0, with its test). PENDING after the voice and the rescale: future extractions honouring
-  the rotation, and — HIS DECISION — bufferStop itself (showing its frames rotated, or re-extracting and
-  re-running the session: a GPU run on his order).
+  rotada sino en las siguientes queden correctamente orientadas"). CAUSE: the video carries a rotation of 90°
+  (CAP_PROP_ORIENTATION_META) and the frame extraction only RECORDED it. FIXED FOR EVERY FUTURE EXTRACTION
+  (2026-11-14, `intake/frames_manifest.py`): the decoder's own rotation stays off and the container's rotation is
+  applied here to every frame (`UPRIGHT`, cv2.rotate — an exact permutation, recorded in the manifest as
+  `orientation_applied`). Measured on bufferStop's video: the explicit ROTATE_90_CLOCKWISE of the coded frame IS
+  the decoder's own automatic rotation bit for bit; 90 / 180 / 270 held equal to it by tests on tagged videos; a
+  video with no rotation is extracted as before. (The Stray capture keeps its coded frames: its depth maps are
+  aligned to them.) BUFFERSTOP ITSELF IS NOT FIXED: its frames on disk are the sideways ones and every product
+  was computed on them — setting them upright means re-extracting and RE-RUNNING the session (cloud, segmentation,
+  mesh: a GPU run ON HIS ORDER; it would also be the first PORTRAIT session through the pipeline, never
+  validated). Rotating the stored frames in place would break every pixel reference (cameras, the cloud's
+  provenance, the masks): not done.
 - The pipeline's and the general lists: `docs/pipeline_final.md` §4 — capture distance (when he says), the weighted
   vote (his word), smarter segmentation, epoch renumbering, the GPU ports of the intake, MEJORAS_OBLIGATORIAS
   (never built), the brush lock, the BIM comparison, viewer checks; station's heavy residual tail (USER 2026-11-08

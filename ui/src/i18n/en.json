@@ -235,7 +235,8 @@
     "language": "Language",
     "languageHint": "Applies immediately to the whole interface.",
     "spanish": "Español (México)",
-    "english": "English"
+    "english": "English",
+    "french": "Français"
   },
   "status": {
     "serverUp": "Server online",

@@ -23,7 +23,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
         </Field>
         <Field label={t('settings.language')} hint={t('settings.languageHint')}>
           <SegmentedControl<Lang> ariaLabel={t('settings.language')} value={lang} onChange={setLang}
-            options={[{ value: 'es', label: t('settings.spanish') }, { value: 'en', label: t('settings.english') }]} />
+            options={[{ value: 'es', label: t('settings.spanish') }, { value: 'en', label: t('settings.english') }, { value: 'fr', label: t('settings.french') }]} />
         </Field>
       </Stack>
     </Dialog>

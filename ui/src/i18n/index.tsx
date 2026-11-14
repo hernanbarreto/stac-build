@@ -15,12 +15,13 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import es from './es.json'
 import en from './en.json'
+import fr from './fr.json'
 import { GLOSSARY, GLOSSARY_PLURAL, type GlossaryTerm } from './glossary'
 
-export type Lang = 'es' | 'en'
-export const LOCALES: Record<Lang, string> = { es: 'es-MX', en: 'en-US' }
+export type Lang = 'es' | 'en' | 'fr'
+export const LOCALES: Record<Lang, string> = { es: 'es-MX', en: 'en-US', fr: 'fr-FR' }
 const STORAGE_KEY = 'stac.lang'
-const DICTS: Record<Lang, Record<string, unknown>> = { es, en }
+const DICTS: Record<Lang, Record<string, unknown>> = { es, en, fr }
 
 type Vars = Record<string, string | number | null | undefined>
 
@@ -161,7 +162,7 @@ const I18nContext = createContext<I18nContextValue>({
 export function readStoredLang(): Lang {
   try {
     const v = localStorage.getItem(STORAGE_KEY)
-    if (v === 'es' || v === 'en') return v
+    if (v === 'es' || v === 'en' || v === 'fr') return v
   } catch { /* storage unavailable */ }
   return 'es'
 }

@@ -106,24 +106,70 @@ def test_stride_and_max_frames_keep_the_decode_order_numbers(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs the ffmpeg CLI to tag rotation")
-def test_orientation_policy_is_pinned_unrotated(tmp_path):
-    """A video carrying a 90° display matrix decodes UNROTATED (CAP_PROP_ORIENTATION_AUTO 0, set
-    explicitly) — how bufferStop's and fosa_pan's frames on disk are — and the manifest records
-    the container's orientation metadata."""
+@pytest.mark.parametrize("tag", [90, 180, 270])
+def test_a_rotated_video_is_extracted_upright(tmp_path, tag):
+    """USER 2026-11-13: "las imagenes de bufferstop, estan rotadas, deben estar correctamente
+    orientadas … verifica que siempre … queden correctamente orientadas". The frames of a video
+    that carries a rotation are what the decoder's OWN automatic rotation gives (how a player
+    shows it), bit for bit — applied here explicitly, the decoder's left off — and the manifest
+    records it."""
     src = tmp_path / "v.mp4"
     w = cv2.VideoWriter(str(src), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (W, H))
+    rng = np.random.default_rng(tag)
     for k in range(3):
-        w.write(np.full((H, W, 3), 40 * k, np.uint8))
+        frame = np.zeros((H, W, 3), np.uint8)
+        frame[: H // 2, : W // 3] = (40 * k + 10, 200, 30)              # nothing symmetric: a turn shows
+        frame[H // 2:, W // 2:] = rng.integers(0, 255, size=3)
+        w.write(frame)
     w.release()
     s = _scan(tmp_path)
     rot = s / "source_video.mp4"
-    r = subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-display_rotation", "90", "-i",
+    r = subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-display_rotation", str(tag), "-i",
                         str(src), "-c", "copy", str(rot)], capture_output=True, timeout=60)
     if r.returncode != 0:
         pytest.skip(f"this ffmpeg cannot tag a display rotation: {r.stderr[-200:]!r}")
+
+    def decode(auto):
+        cap = cv2.VideoCapture(str(rot), cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, auto)
+        meta = cap.get(cv2.CAP_PROP_ORIENTATION_META)
+        frames = []
+        while True:
+            ok, f = cap.read()
+            if not ok:
+                break
+            frames.append(f)
+        cap.release()
+        return meta, frames
+
+    meta, coded = decode(0)
+    _meta, shown = decode(1)                                             # as a player shows it
+    assert int(round(meta)) % 360 in (90, 180, 270) and len(coded) == len(shown) == 3
     doc = FM.extract_video(rot, s, log=lambda *a: None)
-    assert doc["decoder"]["orientation_meta"] != 0.0 and doc["decoder"]["orientation_auto"] == 0.0
-    assert cv2.imread(str(s / "frames" / "000000.jpg")).shape[:2] == (H, W)   # not rotated
+    dec = doc["decoder"]
+    assert dec["orientation_auto"] == 0.0 and dec["orientation_meta"] == meta
+    assert dec["orientation_applied"] == FM.UPRIGHT[int(round(meta)) % 360] is not None
+    turn = getattr(cv2, dec["orientation_applied"])
+    for k in range(3):
+        upright = cv2.rotate(coded[k], turn)
+        assert upright.shape == shown[k].shape and (upright == shown[k]).all()       # the decoder's own rotation
+        ok, buf = cv2.imencode(".jpg", upright, FM.jpeg_params(cv2))
+        assert (s / "frames" / f"{k:06d}.jpg").read_bytes() == buf.tobytes()         # … is what was sealed
+    quarter = int(round(meta)) % 180 == 90
+    assert cv2.imread(str(s / "frames" / "000000.jpg")).shape[:2] == ((W, H) if quarter else (H, W))
+
+
+def test_a_video_with_no_rotation_is_extracted_as_before_and_an_odd_angle_is_refused(tmp_path):
+    s = _scan(tmp_path)
+    v = _video(s / "source_video.avi")
+    doc = FM.extract_video(v, s, log=lambda *a: None)
+    assert doc["decoder"]["orientation_applied"] is None and doc["decoder"]["orientation_auto"] == 0.0
+    assert cv2.imread(str(s / "frames" / "000000.jpg")).shape[:2] == (H, W)
+    assert FM.upright_rotation(0.0) is None and FM.upright_rotation(360.0) is None
+    assert FM.upright_rotation(-90.0) == "ROTATE_90_COUNTERCLOCKWISE" == FM.upright_rotation(270.0)
+    with pytest.raises(FM.FramesManifestError) as e:
+        FM.upright_rotation(45.0)
+    assert "not a quarter turn" in str(e.value)
 
 
 def test_an_interrupted_extraction_blocks_every_reader_until_the_next_upload(tmp_path, monkeypatch):

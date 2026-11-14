@@ -155,8 +155,10 @@ def extract_frames(
     token = FM.claim_writer(scan_dir, FM.ORIGIN_STRAY)      # refused while another writes
     try:
         # refused when frames exist or an interrupted extraction left the temp dir non-empty
+        # upright=False: this capture's depth maps, confidence maps and intrinsics are aligned to
+        # the video's CODED frame — its frames stay as coded whatever the container's rotation
         doc = FM.extract_video(mp4_path, scan_dir, origin=FM.ORIGIN_STRAY, stride=stride,
-                               max_frames=max_frames)
+                               max_frames=max_frames, upright=False)
     finally:
         FM.release_writer(scan_dir, token)
     print(f"[StrayScanner] Extracted {doc['n_frames']}/{doc['frame_count_reported']} frames "

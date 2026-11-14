@@ -235,7 +235,8 @@
     "language": "Idioma",
     "languageHint": "Se aplica de inmediato a toda la interfaz.",
     "spanish": "Español (México)",
-    "english": "English"
+    "english": "English",
+    "french": "Français"
   },
   "status": {
     "serverUp": "Servidor en línea",

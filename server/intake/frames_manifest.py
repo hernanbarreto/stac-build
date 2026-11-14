@@ -22,9 +22,13 @@ same frame number (``000123.jpg`` + ``000123.png``) were both listed. Now:
   on such a scan (``pipeline_manager``), nor does the intake read it (:func:`check_ready`).
 - The manifest pins and records the decoder (OpenCV's version, the FFMPEG backend requested
   explicitly, the video I/O libraries from ``cv2.getBuildInformation()``, the orientation policy
-  SET explicitly — ``CAP_PROP_ORIENTATION_AUTO`` 0, measured to be OpenCV 4.11.0's default: a
-  video carrying a 90° display matrix decodes unrotated, which is how bufferStop's and
-  fosa_pan's frames on disk are — and the container's own orientation metadata), the encoder
+  — the decoder's own rotation OFF (``CAP_PROP_ORIENTATION_AUTO`` 0, set explicitly) and THE
+  CONTAINER'S ROTATION APPLIED HERE, explicitly, to every frame (:data:`UPRIGHT`): the frames on
+  disk are UPRIGHT, as the video is watched (USER 2026-11-13: "las imagenes de bufferstop, estan
+  rotadas, deben estar correctamente orientadas … verifica que siempre no solo en esta sesion …
+  queden correctamente orientadas"). Until 2026-11-14 the rotation was only recorded: a video
+  carrying a 90° display matrix was extracted unrotated, which is how bufferStop's frames of
+  2026-08-11 are — and the container's own orientation metadata), the encoder
   (``cv2.imencode('.jpg')`` with every JPEG option given explicitly at the values that produced
   the frames on disk, plus the libjpeg build), the reported vs decoded frame count, the video's
   name / size / sha256 and each frame's name + sha256. Its bytes are deterministic: sorted keys,
@@ -292,12 +296,28 @@ def jpeg_encoder_record() -> Dict[str, Any]:
             "jpeg_library": opencv_build_record()["jpeg"]}
 
 
-# The orientation policy of the decoder: OpenCV's automatic rotation OFF — the frames are the
-# video's coded pixels. Measured 2026-10-07 on env da3 (OpenCV 4.11.0, FFMPEG backend): the
-# default IS off (a video with a 90° display matrix decodes unrotated; bufferStop's and fosa_pan's
-# videos carry -90° and their frames on disk are the unrotated 1024x576 / 768x576), so setting it
-# explicitly keeps every extraction identical to the frames already on disk.
+# The orientation policy. The DECODER's automatic rotation stays OFF (set explicitly: OpenCV
+# 4.11.0's default, measured 2026-10-07) — the frames it delivers are the video's coded pixels —
+# and the container's rotation (``CAP_PROP_ORIENTATION_META``, degrees) is APPLIED HERE to every
+# frame with ``cv2.rotate``: an exact permutation of the pixels, recorded in the manifest.
+# USER 2026-11-13: "las imagenes de bufferstop, estan rotadas, deben estar correctamente
+# orientadas … verifica que siempre … queden correctamente orientadas".
+# MEASURED 2026-11-14 on bufferStop's video (meta 90): cv2.rotate(frame, ROTATE_90_CLOCKWISE) of
+# the unrotated decode IS the decoder's own automatic rotation, bit for bit; 180 and 270 are held
+# equal to it by the tests on tagged videos. A video with no rotation (every other session) is
+# extracted exactly as before.
 ORIENTATION_AUTO = 0
+UPRIGHT = {0: None, 90: "ROTATE_90_CLOCKWISE", 180: "ROTATE_180", 270: "ROTATE_90_COUNTERCLOCKWISE"}
+
+
+def upright_rotation(orientation_meta: float) -> Optional[str]:
+    """The ``cv2.rotate`` flag (its name) that sets a frame of a video with this container
+    rotation upright, None for no rotation. FAILS on an angle that is not a quarter turn."""
+    deg = int(round(float(orientation_meta))) % 360
+    if deg not in UPRIGHT:
+        raise FramesManifestError(f"the video's rotation is {orientation_meta!r}°: not a quarter turn "
+                                  f"— it cannot be set upright by a rotation of the pixels")
+    return UPRIGHT[deg]
 
 
 # ── the manifest's bytes ────────────────────────────────────────────────────────────────────
@@ -422,14 +442,16 @@ def reduced_size(w: int, h: int, max_long_side: int) -> Tuple[int, int]:
 def extract_video(video_path: os.PathLike, scan_dir: os.PathLike, *, origin: str = ORIGIN_VIDEO,
                   stride: int = 1, max_frames: int = 0, max_long_side: int = 0,
                   progress: Optional[Callable[[int, int], Any]] = None,
-                  log: Callable[[str], Any] = print) -> Dict[str, Any]:
+                  log: Callable[[str], Any] = print, upright: bool = True) -> Dict[str, Any]:
     """Decode ``video_path`` into the scan's frames, sealed (module doc): frame ``i`` of the
     decode order → ``<i:06d>.jpg`` (only ``i % stride == 0``, at most ``max_frames`` when > 0 —
     the Stray extractor's legacy stride). The decoder is OpenCV's FFMPEG backend, requested
     explicitly, orientation policy :data:`ORIENTATION_AUTO` set and read back; the encoder
     :func:`jpeg_params`. Refused when the scan already holds frames or a manifest, or when the
     temp dir holds anything (an interrupted writer: :func:`discard_partial` first). Returns the
-    manifest."""
+    manifest. ``upright`` False keeps the coded pixels whatever the container's rotation — for a
+    capture whose OTHER products are aligned to the coded frame (the Stray scanner's depth maps
+    and intrinsics)."""
     import cv2
     scan_dir = Path(scan_dir)
     have = frames_present(scan_dir)
@@ -458,10 +480,14 @@ def extract_video(video_path: os.PathLike, scan_dir: os.PathLike, *, origin: str
                    "video_io": video_io_build_record(),
                    "orientation_auto": float(cap.get(cv2.CAP_PROP_ORIENTATION_AUTO)),
                    "orientation_meta": float(cap.get(cv2.CAP_PROP_ORIENTATION_META)),
+                   # the container's rotation, applied here to every frame: they are UPRIGHT
+                   "orientation_applied": upright_rotation(cap.get(cv2.CAP_PROP_ORIENTATION_META))
+                   if upright else None,
                    "stride": stride, "max_frames": max_frames,
                    # USER 2026-11-09 ("a 1024 todo"): frames longer than this are reduced (INTER_AREA)
                    "max_long_side": int(max_long_side), "resize": "INTER_AREA" if int(max_long_side) > 0 else None}
         params = jpeg_params(cv2)
+        turn = getattr(cv2, decoder["orientation_applied"]) if decoder["orientation_applied"] else None
         sealer = FrameSealer(scan_dir)
         decoded = kept = 0
         while True:
@@ -472,6 +498,8 @@ def extract_video(video_path: os.PathLike, scan_dir: os.PathLike, *, origin: str
             decoded += 1
             if i % stride:
                 continue
+            if turn is not None:
+                frame = cv2.rotate(frame, turn)
             if int(max_long_side) > 0 and max(frame.shape[:2]) > int(max_long_side):
                 h0, w0 = frame.shape[:2]
                 frame = cv2.resize(frame, reduced_size(w0, h0, max_long_side), interpolation=cv2.INTER_AREA)

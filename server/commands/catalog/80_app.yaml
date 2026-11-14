@@ -150,19 +150,21 @@ commands:
 - id: app.set_language
   kind: action
   runs_on: ui
-  model: 'Change the language of the interface''s texts: es (Spanish) or en (English).'
+  model: 'Change the language of the interface''s texts: es (Spanish), en (English) or fr (French).'
   args:
     lang:
       type: string
       enum:
       - es
       - en
+      - fr
       required: true
   text:
     es:
       title: Idioma de la interfaz
       say:
       - poné la interfaz en inglés
+      - interfaz en francés
       - cambiá el idioma a español
       - interfaz en español
       done: Idioma de la interfaz cambiado.
@@ -170,6 +172,7 @@ commands:
       title: Interface language
       say:
       - put the interface in Spanish
+      - interface in French
       - change the language to English
       - interface in English
       done: Interface language changed.
@@ -177,6 +180,7 @@ commands:
       title: Langue de l'interface
       say:
       - mets l'interface en anglais
+      - interface en français
       - change la langue en espagnol
       done: Langue de l'interface changée.
 - id: app.set_density

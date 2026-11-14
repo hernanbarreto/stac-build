@@ -2,7 +2,7 @@
 // The commands of the interface STAC can run: their ids and the type of each one's arguments.
 // A new command is declared in the catalogue; this file is then regenerated and the compiler
 // asks for its executor (ui/src/commands/registry.ts).
-export const CATALOG_SHA256 = '9032cc0735c7f82d1d8329ebc9ea34981ababa74f8ba8048aa7f12874515ed20'
+export const CATALOG_SHA256 = 'e2dbab5b79664bfab2bfa7c4934e33a3718c08a7e6d4324c00b0a2cf1e447b1f'
 
 export const UI_COMMAND_IDS = [
   'talk.set_user_name',
@@ -79,7 +79,7 @@ export interface UiCommandArgs {
   'app.fullscreen': { on?: boolean }
   'app.open_settings': Record<string, never>
   'app.open_command_palette': Record<string, never>
-  'app.set_language': { lang: 'es' | 'en' }
+  'app.set_language': { lang: 'es' | 'en' | 'fr' }
   'app.set_density': { density: 'compact' | 'comfortable' }
   'layout.show_panel': { panel: 'sessions' | 'instances' | 'scans' | 'bim' | 'team' }
   'layout.hide_side_panel': Record<string, never>
