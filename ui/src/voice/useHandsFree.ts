@@ -65,6 +65,7 @@ export function useHandsFree(enabled: boolean, paused: boolean, onUtterance: (wa
     let stream: MediaStream | null = null
     let ctx: AudioContext | null = null
     let node: ScriptProcessorNode | null = null
+    let resume: (() => void) | null = null
     setError(null)
     ;(async () => {
       if (!navigator.mediaDevices?.getUserMedia || typeof AudioContext === 'undefined') { setError('unsupported'); return }
@@ -76,12 +77,23 @@ export function useHandsFree(enabled: boolean, paused: boolean, onUtterance: (wa
         return
       }
       if (stopped) { stream.getTracks().forEach(t => t.stop()); return }
-      try { ctx = new AudioContext({ sampleRate: TARGET_RATE }) } catch { ctx = new AudioContext() }
-      const rate = ctx.sampleRate
+      // captured at the recogniser's rate when the browser can (Chrome resamples the microphone);
+      // a browser that cannot join a 16 kHz context to the device (Firefox) captures at the
+      // device's rate and the utterance is resampled before it is sent
+      let source: MediaStreamAudioSourceNode
+      try {
+        ctx = new AudioContext({ sampleRate: TARGET_RATE })
+        source = ctx.createMediaStreamSource(stream)
+      } catch {
+        try { await ctx?.close() } catch { /* never opened */ }
+        ctx = new AudioContext()
+        source = ctx.createMediaStreamSource(stream)
+      }
+      const live = ctx
+      const rate = live.sampleRate
       const size = rate <= 16000 ? 512 : rate <= 32000 ? 1024 : 2048       // ~32-43 ms a frame
       const frameMs = size / rate * 1000
-      const source = ctx.createMediaStreamSource(stream)
-      node = ctx.createScriptProcessor(size, 1, 1)
+      node = live.createScriptProcessor(size, 1, 1)
       const preRoll: Float32Array[] = []
       let chunks: Float32Array[] = []
       let noise = ABS_FLOOR, inSpeech = false, speechRun = 0, silenceMs = 0, spokenMs = 0, lengthMs = 0
@@ -118,11 +130,22 @@ export function useHandsFree(enabled: boolean, paused: boolean, onUtterance: (wa
         }
       }
       source.connect(node)
-      node.connect(ctx.destination)          // a script processor only runs when connected; it outputs silence
-      setListening(true)
-    })()
+      node.connect(live.destination)         // a script processor only runs when connected; it outputs silence
+      // a context opened with no click behind it (hands-free left on, the page reloaded) starts
+      // SUSPENDED: it is not listening until the user touches the page — said as it is
+      const sync = () => { if (!stopped) setListening(live.state === 'running') }
+      live.onstatechange = sync
+      if (live.state === 'suspended') {
+        try { await live.resume() } catch { /* needs a gesture */ }
+        resume = () => { void live.resume().catch(() => { /* still not allowed */ }) }
+        document.addEventListener('pointerdown', resume)
+        document.addEventListener('keydown', resume)
+      }
+      sync()
+    })().catch(() => { if (!stopped) setError('failed') })
     return () => {
       stopped = true
+      if (resume) { document.removeEventListener('pointerdown', resume); document.removeEventListener('keydown', resume) }
       if (node) { node.onaudioprocess = null; try { node.disconnect() } catch { /* already */ } }
       stream?.getTracks().forEach(t => t.stop())
       void ctx?.close().catch(() => { /* already closed */ })
