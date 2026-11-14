@@ -107,6 +107,12 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
 - ONE task at a time; one GPU job at a time (A/B timing under contention is invalid); never several agents on his
   session; never change a validated recipe on a hypothesis; when porting, reproduce its numbers EXACTLY on the real
   session before saying it is done.
+- ANSWER HIM FIRST (2026-11-13, after two hours of one turn in which his "como venimos con la implementación de
+  todos los puntos" went unanswered: "Contéstame … Ya mismo … Es una orden"): a question of his is answered BEFORE
+  anything else; work goes in SHORT turns, one point at a time — "comités y push es en la medida que vayas
+  terminando y me vas a pasar reporte cada vez que un punto quede cerrado"; the report is a few lines ("anda de a
+  poco que metiste mucho texto"); a point of his list is never folded into another in a summary; no long suite or
+  measurement runs in the foreground of a turn.
 - Long runs: a performance checkpoint in the first minutes; progress reported unprompted (~20 min — silence reads
   as a hang); a stall detector that reads the stage process and the card, not the log alone (F5's rungs are silent
   4–6 min at 100 %).
@@ -143,7 +149,11 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   torch twin in float64 on ONE declared device with the numpy function KEPT as the path of record; a test holding
   both equal (exact for integer decisions and verdicts, 1e-9 for geometry); the device key typed (`numpy | cpu |
   cuda`; cuda with no card FAILS naming the key); tests on cpu (`tests/conftest.py use_device("cpu")`). Stays on the
-  CPU, declared: PotreeConverter (one thread — byte identity), sqlite, PLY / JSON / npz I/O, JPEG decoding.
+  CPU, declared: PotreeConverter (`potree_threads: 16`, USER 2026-11-09), sqlite, PLY / JSON I/O, every JPEG encode.
+  THE BACKEND NEVER TOUCHES THE CARD (found again 2026-11-13): a CUDA context in the server process is a compute
+  process on the GPU for its whole life and `repro.require_exclusive_gpu` then refuses the card to every stage — GPU
+  work of the server's own features runs in a child process that ENDS before a job starts (the chat's tools:
+  `phase5_qa/tools_worker.py`, stopped by pipeline_manager / main when the engine lease is taken).
 - ARCHITECTURE: the server process never loads a GPU model — workers in subprocesses (`WorkerPipe`: progress, log,
   done, error; `check_cancel`; free the card on exit); paths only through `project_paths.py`; a point's origin
   (`frame_global`, `pixel_row`, `pixel_col`) is never broken; Potree LOD through `PotreeLoader`; geometry epochs are
@@ -169,7 +179,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   restart DROPS THE QUEUE: re-send the stalled session with replace OFF and the rest as they were, in order.
 - Services: backend `bash scripts/start.sh` (tmux `backend`, port 8765, `logs/latest.log`); semantic service `bash
   scripts/serve_semantic.sh` (vLLM / Qwen3-VL on 127.0.0.1:8799). Every VLM stage launches its OWN vLLM from the job's
-  frozen config and stops it; the chat reloads it when the pipeline is idle. From a shell vLLM needs `setsid nohup`
+  frozen config and stops it; the chat's vLLM loads ON DEMAND (`semantic.chat_on_demand: true`, USER 2026-11-12) —
+  when the chat is opened or asked, not at the pod's start (init_pod.sh reads the key since 2026-11-13; it started
+  vLLM at boot before) and not after a pipeline. From a shell vLLM needs `setsid nohup`
   (launched from a short python it dies with it) and ≥ 40 GB free. Restart the backend to pick up new stages / routes.
 - API: `POST /api/pipeline/run {session_id, scans: [key], replace, segment: [key]}` (the Reconstruir button);
   `GET /api/pipelines/active` (running / queued jobs and their stages); scan keys `<date>/<source>` from `GET
@@ -188,13 +200,30 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
 
 ## 5 · THE APP AROUND THE PIPELINE
 - Reconstruir: per-scan *Segment when done* (OFF by default) and Replace (OFF = resume). Instances → Autosegment:
-  the VLM prompt + SAM3 prompts (editable, saved in `output/autosegment.json`) and a checkbox per stage, GenRecon
-  with the viewer's confidence. Instances → Cubes (each cube as its own box). The Fuse icon sits on the PROJECT row
-  of the Sessions tab when it holds two or more scans.
+  the VLM prompt + SAM3 prompts (editable, saved in `output/autosegment.json`) and a checkbox per stage; GenRecon is
+  its OWN button with the viewer's confidence (USER 2026-11-05). Instances → Cubes (each cube as its own box). The
+  Fuse icon sits on the PROJECT row of the Sessions tab when it holds two or more scans.
+- OPENING A SESSION (USER 2026-11-13: "al abrir las sesiones por defecto aparezcan las mallas genrecon apagadas para
+  que abra rapido la sesion"): every mesh is listed unchecked and NOT downloaded; checking one loads it; a mesh that
+  appears while the session is open loads at once.
+- CALIBRATION ON THE 3D MODEL (USER 2026-11-13: "para calibrar debe hacerse tomando mediciones sobre el modelo 3d no
+  sobre las imagenes porque es dificil, se debe poder seleccionar que una medicion es de calibracion y deben quedar
+  almacenadas"): the distance tool, the pin of a readout → the Calibration window (real length, sigma, role gauge /
+  test, source tape / laser / total station / ANOTHER SCAN) → `output/calibration_3d.json` (calibration3d.py,
+  `/api/calibration/{session}`); the model's length is computed by the server from the two points and carries its
+  geometry epoch (another epoch = stale, not used); the scale factor = the battery's `gauge_scale` over the gauge
+  ones, with the fit's residuals and the error on the test ones. THE FACTOR IS REPORTED, NOT APPLIED — what it is
+  applied to (the comparison's composition transform, the measurements shown, the scan's geometry) is HIS decision,
+  pending. The image-anchored references (ReferenceDialog, the battery's) stay as they were.
 - Chat = spatial intelligence (`phase5_qa`): runs in a worker thread (never on the event loop); tools for measuring
   (feature bands, vertical axis, extents), `describe_scene` (VLM, cached), persistent notes, evaluation VOLUMES
   (rest on the floor, gizmo Move / Rotate / Resize, collision tint, `measure_volume`); a session with no instance
-  store gets it rebuilt from `segmentation_result.json`.
+  store gets it rebuilt from `segmentation_result.json`. SINCE 2026-11-13 (§7 THE CHAT): it answers about the scan
+  ON SCREEN; its prompt holds the WHOLE inventory (by label with id ranges beyond `semantic.chat.list_limit`); the
+  objects a question names (`sign#797`) are resolved on the store before the model reads it; the last
+  `history_turns` turns go with the question; EVERY FIGURE of an answer is checked against the tools' results
+  (provenance.py: one retry with a tool call required, what still fails is shown as unverified); the tools that
+  read points run ON THE CARD in the chat's own process (`semantic.chat.tools_device: cuda`, tools_worker.py).
 - Segment cleaning: RANSAC on, DBSCAN OFF (*"este sí borra puntos"*), the 5 cm voxel quads OFF; OBBs fitted to the
   points. Viewer: segmentation lamps / windows as lights, point opacity, shadows for meshes.
 
@@ -291,8 +320,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   held identical and needs his eye — a project, on his word.
   Still on the CPU, declared: SAM3's vendor tracker logic (Python control, the GPU ~50 % busy during SAM3), the UV
   unwrap above, every JPEG ENCODE (the VLM's views, the greyed frames, GenRecon's undistorted frames: another
-  encoder writes other bytes), vLLM's own image decode, the floor's warp (seconds; a GPU warp differs in the last
-  bit), the fragment consolidation (< 20 s); disk, sqlite, PotreeConverter.
+  encoder writes other bytes), vLLM's own image decode; disk, sqlite, PotreeConverter. (The epoch warp and the fragment
+  consolidation have device paths: correction/warp_torch.py, segmentation/fragments_torch.py.)
   THE POD'S THREADS (found 2026-11-12): `nproc` shows the host's 252 cores and the cgroup grants 26.35 CPUs — a
   torch / BLAS job left to its own thread count is throttled to a crawl (18 frames in ~170 s). Every CPU job runs
   with OMP_NUM_THREADS set (run_cloud.sh: 8; the tests: 4).
@@ -363,12 +392,17 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   keyframes, 3–12 % of the cloud's pixels meet NO mesh (vegetation, fence: fragments) and 10–20 % meet it > 10 cm
   behind (the gravel as lumps). The decoder's own mesh.ply gives the same; fill_holes, the remesh, the per-chunk
   simplification and every level of the tiles add nothing (3D holes 0.13–0.32 % at every tile depth).
-- GENRECON, THE SEARCH FOR A CORRECT MESH ON BUFFERSTOP (USER 2026-11-12, day and night CDMX). main c00e2f3 +
-  UNCOMMITTED work (config.yaml, run_cloud.sh, the worker, the adapter, cloud_shape / drop_loose / denoise.py,
-  main.py) — a commit on his word. Each value with its hour and his words: config.yaml, `genrecon:`.
-  · DELETED on his word: every session's GenRecon mesh of the night's queue ("elimina los genrecon que tenemos en
-    todas las esiones") and the queue of the other sessions ("corta las corridas y elimina la cola"). ONLY bufferStop
-    holds a mesh; pccr 3108, pccr 2408, zaragoza and observatorio are NOT relaunched without his word.
+- GENRECON, THE SEARCH FOR A CORRECT MESH ON BUFFERSTOP (USER 2026-11-12, day and night CDMX), committed as a1a0b60
+  and 82fbdbd. Each value with its hour and his words: config.yaml, `genrecon:`.
+  · STATE 2026-11-13 (verified on disk): ALL FIVE sessions hold `tsdf/genrecon_photo` + tiles at 2.5 m · 3 points
+    with the edge filter, published 2026-11-13 06:05–12:39 UTC after his "Implementamos el filtro y hacemos las
+    mallas de todas las sesiones con el filtro" and "deben quedar todas las sesiones implementadas y validadas" —
+    faces: bufferStop 1,963,415 · pccr 3108 13,284,219 · observatorio 19,829,073 · zaragoza 18,935,256 · pccr 2408
+    33,262,077 (the joint decode by regions, 82fbdbd: `genrecon.joint_decode_max_voxels`, the resume at the decode).
+    His eye on these five: not recorded yet.
+  · DELETED on his word (2026-11-12, before the above): every session's GenRecon mesh of the night's queue ("elimina
+    los genrecon que tenemos en todas las esiones") and the queue of the other sessions ("corta las corridas y
+    elimina la cola").
   · THE SHAPE FROM THE CLOUD (1d3e806 and the uncommitted work on it: the bilateral normal filter denoise.py, the
     generative refinement T 0.5–0.7): REJECTED by his eye — "Pero no se ve nada liso" / "No tiene la calidad de
     genrecon lo que veo" / "Ninguno está bien"; "Es que la única que acepto es genrecon pero correcta no asi".
@@ -380,25 +414,72 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     huecas" → 3 m · 3 pts: "Hasta ahora gana 3m 3 puntos" → 2.5 m · 3 pts: "Parece que 2.5m 3 puntos es la mejor"
     and, on 14 textured views of it alone, "Se ven espectaculares las imágenes!!!". IN FORCE, his numbers:
     `cube_size_m: 2.5` (7.81 cm voxels, 4.88 mm cells), `min_points_per_voxel: 3`; bufferStop's mesh published with
-    them (1,983,731 faces, 162 MB, the stage 800.6 s). The published meshes, 2.775 m · 6 | 3 m · 3 | 2.5 m · 3: mesh
+    them (1,983,731 faces, 162 MB, the stage 800.6 s; with the edge filter, a1a0b60: 1,963,415 faces, 157 MB, 35
+    tiles to depth 5). The published meshes, 2.775 m · 6 | 3 m · 3 | 2.5 m · 3: mesh
     beyond 3 cm of the cloud 23.4 | 24.8 | 21.4 %, cloud beyond 3 cm of the mesh 31.1 | 32.7 | 17.3 %, holes from the
     keyframes 7.8 | 6.6 | 5.65 %.
   · FOUND, not corrected (on his word): production's mesh step changes the generated mesh — the global remesh closes
     every sheet into a shell (the floor seen as two sheets on 85–99.8 % of the rays) and the simplification to
     150,000 faces a chunk leaves the faceting. The generation is not identical run to run (seen, not investigated).
     The loose pieces stay in this family.
-  · THE EDGE FILTER ON THE GENERATED MESH — TESTED, NO VISIBLE GAIN (USER 2026-11-12 night: "es posible aplicar el
+  · THE EDGE FILTER ON THE GENERATED MESH — NO VISIBLE GAIN, KEPT ON (USER 2026-11-12 night: "es posible aplicar el
     filtro que teníamos para las aristas?" / "Lo que quiero es que corras sobre la de 2.5m 3 puntos el afilado de
-    aristas y Mostrame imágenes comparativas lado a lado con y sin filtro de aristas"): denoise.py (20 / 10 / 0.35)
-    on the SAME decoded mesh after the global remesh, before the chunks' simplification — a scratch driver, NOT
-    wired, the published mesh untouched. 7,211,584 faces in 2 s (12.9 GB): normals turned 1.66° median (p99 64°),
+    aristas y Mostrame imágenes comparativas lado a lado con y sin filtro de aristas"; then "Lo dejamos el filtro
+    igual porque podrían haber mallas que si lo requieran"): `genrecon.edge_filter: true`, denoise.py (20 / 10 /
+    0.35) at Step 1.5 of the mesh step, after the global remesh, before the chunks' simplification (a1a0b60). The
+    test that preceded it, on the SAME decoded mesh: 7,211,584 faces in 2 s (12.9 GB): normals turned 1.66° median (p99 64°),
     vertices moved 0.083 mm median (p99 2.3 mm, max 8 mm); the result 1,965,867 faces. Without | with: keyframe
     12's window with no mesh 7.36 | 7.37 %, keyframe 108's 1.85 | 1.84 %; the three steel plates' normal median
     1.3 | 1.3°, p90 3.3 | 4.1°, relief 2.4 | 2.3 mm. HIS EYE on four side-by-side views (textured and shaded):
-    "No noto la diferencia". The filter stays out of the generated family.
+    "No noto la diferencia".
   · CHAT ON DEMAND (USER 2026-11-12: "Baja al chat, no se usa" / "El chat debe cargar a demanda en esta instancia,
     si no lo usamos debe estar abajo"): `semantic.chat_on_demand: true` — vLLM is not reloaded after a stage or at
     the server's start; it loads when the chat is opened or asked. An idle auto-stop: on his value.
+- THE CHAT (USER 2026-11-13: "el chat no supo encontrar elementos por ejemplo en pccr3108 no encontro sign#797,
+  estaba bien escrito, ademas la cantidad de elementos que encontro eran menores a la cantidad de la lista, esta
+  desactualizado, trabaja fuerte con el chat, muchas ocsas no las entiende, no las encuentra, ademas tarda
+  muchisimo en ocntestar con la placa a disposición" / then "el vlm y todas sus herramientas deben funcionar en
+  GPU"). ROOT CAUSES, read on his own questions of 2026-11-13 21:30–21:38 UTC (spatial_qa_logs): (1) the store was
+  the FIRST scene_r.db a glob found under the project — pccr 2026-08-24's 8,777 objects while he looked at
+  2026-08-31 (its sign#797 is a wall there; the counts were the other scan's); (2) the prompt listed the first 60
+  objects and the model answered "ids 1 to 63"; (3) list_objects with no label = 486 kB → HTTP 400; (4) 9.9 s of
+  every question building the prompt (a query per instance), and the panel re-read every object before showing an
+  answer; (5) found while testing: the model stated "1.14 m, measured with get_distance" having called NO tool.
+  DONE: the scan on screen (`scan` in the request, else the active scan, project_paths); the whole inventory; the
+  references resolved by the tool layer; bounded listings, labels compared as people write them; the conversation's
+  turns; the provenance check; the store read in single queries (prompt 9.9 → 1.4 s on pccr 2408); and the GPU
+  port — phase5_qa/tools_torch.py, float64, numpy KEPT as the record, every tool identical on pccr 3108 on both
+  paths: the clearance floor – wall (1.06 M × 0.74 M points) did not end in 8 min of scipy's tree, 0.09 s on the
+  card (an EXACT search: octree cells with tight boxes, pruned by box distance against a real pair's distance;
+  verified by an independent exact search); floor – work surface 13.3 → 0.10 s; a volume 3.3–6.7 → 0.03–0.58 s.
+  The points and boxes are now promoted to float64 on BOTH paths (a display-frame store was measured in float32
+  before: a figure can move in its last printed digit) — declared. His eye / use of the chat after it: pending.
+  PENDING, HIS DECISION — THE CHAT'S ENGINE: a question's time is now the model's. Measured 2026-11-13 on the card,
+  the same two-call turn on the 9.1 k-token prompt: the deterministic serve flags (enforce-eager, no prefix cache,
+  batch invariance — his 2026-09-22 "debe ser lo mas determinista posible") 21.7 tok/s and 5.6 s; without them (CUDA
+  graphs + prefix caching) 57.9 tok/s and 2.0 s cold / 1.0 s with the prompt cached, the same tool call. A fast
+  profile for the CHAT's engine alone (the stages launch their own, deterministic) touches the engine's identity /
+  lease code: on his word. Also on his word: a "free height" tool (the model now uses get_height_profile(ceiling,
+  floor): 1.66 m min on pccr 3108).
+- SEGMENTS OF ONE OR A FEW POINTS (USER 2026-11-13: "en las listas de segmentaciones aparecen muchos elementos con 1
+  o muy pocos puntos segmentados, teniamos un maximo de elementos"). MEASURED: every instance under
+  `min_instance_points` (1000, USER 2026-09-19) is a STRUCTURAL label (door, beam, duct, pipe, wall, opening …) kept
+  by `structural_always` (USER 2026-10-15 "no debe olvidarse lo estructural nunca"), each marked
+  `kept_structural_under_min_points`: pccr 2408 845 of 8,777 (39 of ≤ 1 point, 142 of ≤ 10, 388 under 100), pccr
+  3108 161 of 1,374 (8 / 25 / 67), bufferStop 77 of 347 (1 / 5 / 41), zaragoza 70 of 408 (2 / 14 / 30), observatorio
+  60 of 529 (7 / 21 / 40). HIS ANSWER (2026-11-13): "Quién dijo que lo estructural nunca se exime quién te dijo
+  quién inventó esa mierda" — his "no debe olvidarse lo estructural nunca" (2026-10-15) was never an exemption from
+  the minimum: that reading was the assistant's own (commit 28aa741). THE MINIMUM HOLDS FOR EVERYTHING.
+- THE SCALES OF PCCR 2408 AND 3108 (USER 2026-11-13: "revisa como podriamos emparejar las escalas de pccr2408 y de
+  3108 para que coincidan al compararse, sobre todo llevar la del 3108 a la del 2408 que es mas chica, deberia
+  hacerse con la calibracion"). THE WAY, built: measure the same element on both scans and store it on 3108 as a
+  calibration measurement whose source is the OTHER SCAN (the length read on 2408) — the factor of 3108 is then the
+  one that brings it to 2408's scale, with its residuals over several elements. A FIRST LOOK, not a measurement of
+  the factor: the heights of the same kinds of object (≥ 5000 points) — doors 1.814 m (236) on 2408 against 1.875 m
+  (12) on 3108, ratio 1.034 [1.012, 1.077]; doors + racks 1.018 [0.999, 1.037]; racks alone 1.004 [0.82, 1.06]:
+  3108 between 0 and ~7 % larger, too loose to set a factor (few objects on 3108, other segmentations). PENDING, HIS
+  DECISION: where the factor is applied — the comparison's composition transform (fuse_scans meets both scans IN
+  THE MIDDLE, √s each, by labels; he wants 3108 → 2408), the lengths shown, or the scan's geometry.
 - The pipeline's and the general lists: `docs/pipeline_final.md` §4 — capture distance (when he says), the weighted
   vote (his word), smarter segmentation, epoch renumbering, the GPU ports of the intake, MEJORAS_OBLIGATORIAS
   (never built), the brush lock, the BIM comparison, viewer checks; station's heavy residual tail (USER 2026-11-08

@@ -45,15 +45,18 @@ A **precision core** then measures and corrects, in order:
   through it, and no better-supported surface hides it — or, failing the count, when its witnesses' surfaces agree with
   its own depth (published where it is, never moved).
 
-The published cloud is built from that voted depth. A vision–language model then names everything in the keyframes,
-SAM 3.1 segments and tracks it, the masks are projected onto the cloud as object instances, and the floor is levelled
-on the segmented support surfaces. On demand, **GenRecon** (a Trellis-class sparse-voxel generative model) builds a
-textured scene mesh. Presence comes from the cloud: a voxel is active when it holds enough of the cloud's points. The
-model shapes the surface, and the keyframes are baked onto it as its real texture.
+The published cloud is built from that voted depth. A vision–language model then names everything in the keyframes
+and SAM 3.1 segments and tracks it, in rounds, until the model names nothing that is not already segmented. The masks
+are projected onto the cloud as object instances, and the floor is levelled on the segmented support surfaces. On
+demand, **GenRecon** (a Trellis-class sparse-voxel generative model) builds a textured scene mesh. Presence comes from
+the cloud: a voxel is active when it holds enough of the cloud's points. The model shapes the surface inside those
+voxels, the keyframes are baked onto it as its real texture, and the mesh is published as 3D Tiles.
 
 Every decision that moves geometry follows **one statistical rule**. A change is applied only when a paired bootstrap on
 held-out evidence says it improves, by more than its own measured error, with enough independent judges. Every stage runs
-on the GPU in deterministic mode. Every product is stamped with the inputs, configuration and code that made it.
+on the GPU, and each GPU port keeps its CPU function as the path of record. The reconstruction and the segmentation
+chain run in deterministic mode; the declared exceptions are listed in §19. Every product is stamped with the inputs,
+configuration and code that made it.
 
 **Reference runs** (2026-11-09, the user's visual validation of both):
 
@@ -87,31 +90,33 @@ on the GPU in deterministic mode. Every product is stamped with the inputs, conf
 19. [Determinism, devices and reproducibility](#19-determinism-devices-and-reproducibility)
 20. [Running it](#20-running-it)
 21. [Repository map](#21-repository-map)
+22. [The session in the viewer: meshes, the spatial chat, calibration](#22-the-session-in-the-viewer-meshes-the-spatial-chat-calibration)
 
 ---
 
 ## 1. What runs when a reconstruction is launched
 
 **Reconstruir** in the UI sends one order per scan to the pipeline manager (`server/pipeline_manager.py`). The manager
-runs the jobs one at a time on the card. Each stage is a separate worker process in its own conda environment, and every
-stage is resumable against stamped products. The default chain is:
-
-The stage order is `pipeline_manager.DEFAULT_STAGE_ORDER`:
+runs the jobs one at a time on the card. Each stage is a separate worker process, each model runs in its own conda
+environment (§2), and every stage is resumable against stamped products. The default chain is
+`pipeline_manager.DEFAULT_STAGE_ORDER`:
 
 | # | Stage | Worker | What it produces |
 |---|---|---|---|
 | 1 | **Reconstruction** | `workers/map_worker.py` | intake (I0, focal probe, I1) → AMB3R-SLAM over the whole video, put in metres → the coverage fill of the keyframes → turn frames → I3 → the cubes → VGGT-Ω per cube, the bridges of the revisits and the cube Sim(3) graph → metric scale and upright frame → precision core F0–F6 → the published cloud (`output/cleaned_cloud.ply`) and its octree |
 | 2 | **Cloud → viewer** | `workers/cloudcompy_worker.py` | the cleaned cloud handed to the viewer (Potree octree) |
-| 3 | **Scene analysis** | `workers/vlm_worker.py` | Qwen3-VL reads every keyframe; the SAM 3 vocabulary (`output/vlm_analysis.json`) |
-| 4 | **Segmentation** | `workers/sam3_worker.py` | SAM 3.1 masks on every keyframe, in rounds until the VLM names nothing new |
-| 5 | **Projection** | `segmentation/pipeline.py` | the masks projected onto the cloud as instances with oriented boxes (`output/segmentation_result.json`, `instance_ids.npy`, `scene_r.db`); SAM 3 projects what it segments, so this stage runs on its own only for a resume or an order of the projection alone |
+| 3 | **Scene analysis** | `workers/vlm_worker.py` | Qwen3-VL reads every keyframe, on a vLLM the stage launches from the job's frozen configuration and stops; the SAM 3 vocabulary (`output/vlm_analysis.json`) |
+| 4 | **Segmentation** | `workers/sam3_worker.py` | SAM 3.1 masks on every keyframe, four concepts at a time on one vision backbone, in rounds (VLM → SAM 3) until the VLM names nothing new or the prompt bound is full (`output/seg_masks.npz`, `segmentation.json`, `segmentation_census.json`, `seg_rounds.json`) |
+| 5 | **Projection** | `segmentation/pipeline.py` | the masks projected onto the cloud as instances with oriented boxes (`output/segmentation_result.json`, `instance_ids.npy`, `scene_r.db`) and audited against their masks (`mask_audit.json`); SAM 3 projects what it segments, once, after the last round, so this stage runs on its own only for a resume or an order of the projection alone |
 | 6 | **Floor** | `workers/floor_worker.py` | the floor levelled on the segmented support surfaces, one rigid motion per session (`pipeline.auto_floor: true`, after every projection) |
 | 7 | **Certification** | `workers/certify_worker.py` | switched off (`certify.auto_after_segmentation: false`) |
-| 8 | **GenRecon** | `workers/genrecon_worker.py` | the scene mesh, only when ordered (`pipeline.auto_genrecon: false`) with the cloud's confidence threshold chosen for that order |
+| 8 | **GenRecon** | `workers/genrecon_worker.py` | the scene mesh with the keyframes baked into its atlas, and its 3D Tiles (`output/tsdf/genrecon_photo/`), only when ordered (`pipeline.auto_genrecon: false`) with the cloud's confidence threshold chosen for that order |
 
 A **Reconstruir** order runs stages 1, 2 and 6 (and 3–5 when *Segment when done* is ticked). The **Autosegment** window
-orders any subset of VLM, SAM 3 and GenRecon on the cloud already on disk, with editable prompts; the floor follows SAM
-3. A GenRecon ordered alone runs no floor.
+orders the VLM and SAM 3 on the cloud already on disk, with editable prompts; the floor follows the projection. The
+**GenRecon** button orders stage 8 alone, and no floor runs with it. An order through the API (§20) can also ask for
+the projection alone: the masks on disk are projected on the cloud on disk, nothing is segmented again, and the floor
+follows.
 
 **Replace.** **Reconstruir** with *Replace* empties the scan down to its frames, their manifest, its video and its
 capture inputs: `intake/`, `output/` (the VLM and SAM 3 products included — masks made on other keyframes are invalid)
@@ -133,20 +138,25 @@ has these properties:
 - Each stage declares its products. A resumed job (*Replace* off) skips a step whose stamp — inputs, the configuration
   sections it reads, its code — matches, and restarts at the first step whose stamp differs. *Replace* on wipes the scan
   down to its frames and video.
-- GPU stages require the **whole card** (`repro.require_exclusive_gpu`). The vLLM service is stopped before them and
-  restarted when the chain needs it.
+- GPU stages require the **whole card** (`repro.require_exclusive_gpu`): the vLLM service is stopped, and the stop
+  verified, before them. A stage that needs the VLM (the scene analysis, a segmentation round) launches **its own**
+  vLLM from the job's frozen configuration under an engine lease, and stops it when it ends
+  (`semantic/service.job_engine`).
+- The chat's vLLM loads **on demand** (`semantic.chat_on_demand: true`). It is not reloaded after a stage, a pipeline
+  or the server's start; it comes up when the chat is opened or asked. `false` reloads it whenever the card frees.
 - A cancel is cooperative: the running stage gets a bounded time to stop at a safe point, then its process tree is
   killed. Products already on disk (cubes, bridges, finished steps) are resumed by the next order.
 
-**Environments.** Each worker runs in its own environment:
+**Environments.** The stage workers are processes of the backend's interpreter (`da3`), and a job is refused when the
+backend runs on another one. Each model runs in its own environment:
 
-| Environment | Workers |
+| Environment | What runs in it |
 |---|---|
-| `da3` | backend, DA3, SAM 3.1, F0, F2, F6, scale/orientation, the cleaner, photo bake |
-| `mapanything` | the VGGT-Ω fork, F4, F3, F5 and the sky segmenter |
+| `da3` | the backend and every stage's worker process, DA3, SAM 3.1, the projection, the floor, F0, F2, F6, scale/orientation, the cleaner, GenRecon's adapter, resume stamps and photo bake |
+| `mapanything` | the VGGT-Ω fork, F4, F5 and the sky segmenter |
 | `amb3r` | AMB3R-SLAM, the whole-video first pass |
 | `semantic` | vLLM serving Qwen3-VL |
-| `genrecon` | GenRecon |
+| `genrecon` | GenRecon: the generation, the decode, the mesh step and the per-cube bakes |
 | `nodejs` | 3D Tiles builder |
 
 **Geometry epochs.** Every correction that moves geometry publishes a **geometry epoch**: a journaled, transactional swap
@@ -161,9 +171,11 @@ not) and no finished step has moved the geometry yet, the runner returns them an
 
 - a Potree-format octree viewer streams the cloud; a confidence slider filters it with the same arithmetic used by the
   GenRecon adapter (§18.1);
-- mesh layers stream as 3D Tiles;
+- mesh layers stream as 3D Tiles — listed unchecked when a session opens and loaded when checked (§22.1);
 - panels show instances, oriented boxes and measurement tools, and a chat assistant answers spatial questions with
-  deterministic tools (the VLM proposes; tools measure);
+  deterministic tools (the VLM proposes; tools measure; every figure of an answer is checked against the tools'
+  results, §22.2);
+- a distance measured on the model can be stored as a calibration measurement of the scan (§22.3);
 - the **Instances** tab shows the cubes of the cut, each one switched on and off on its own;
 - **View → Background and grid** sets, per session, the background (Default: a charcoal gradient; Horizon: a graduated
   sky over a green ground at $y=0$; Plain: a chosen colour) and the grid (cell 0.1–5 m, a major line every 2/4/5/10
@@ -175,9 +187,13 @@ not) and no finished step has moved the geometry yet, the runner returns them an
 - `frames/`: the video frames (long side at most 1024 px) and their sha256 manifest;
 - `intake/`: quality, parallax, the focal probe, AMB3R's whole-video pass, the coverage fill, the walk, the cubes, and
   their stamps;
-- `output/`: the frozen configuration, model passes, epochs, cloud, octree, segmentation, meshes;
+- `output/`: the frozen configuration, model passes, epochs, cloud, octree, the mask store and the segmentation, and
+  the meshes (`output/tsdf/<mesh>/<mesh>.glb` with its `tiles/`; the raw generated mesh in `output/genrecon/`);
 - `user_prefs/<user>.json`: each user's viewer preferences for that session (point size, budget, light, opacity,
   background and grid). Deleting the session, or a *Replace*, deletes them.
+
+GenRecon's intermediate products — the adapter's folder, the sampled latents, the decoded mesh, the cache of baked
+cubes — live outside the session, in `vendor/GenRecon/work/`, and are what a resumed mesh order reuses (§18.7).
 
 ---
 
@@ -186,16 +202,20 @@ not) and no finished step has moved the geometry yet, the runner returns them an
 | Role | Model | Where |
 |---|---|---|
 | Multi-view feed-forward reconstruction (poses, intrinsics, depth, confidence) | **VGGT-Ω** 1B, `vggt_omega_1b_512.pt`, bf16 | `vendor/VGGT-Long` (fork, branch `gpu-main`) |
-| First pass over the whole video: every frame's pose, loops, what each frame saw | **AMB3R-SLAM**: DA3-Small front-end, VGGT-Ω submaps, DBoW loops, offline pose graph | `vendor/AMB3R-SLAM` (fork, branch `stac`) |
+| First pass over the whole video: every frame's pose, loops, what each frame saw | **AMB3R-SLAM**: DA3-Small front-end, VGGT-Ω submaps, DBoW loops, offline pose graph | `vendor/AMB3R-SLAM` @ 5418465 + `server/tools/amb3r/amb3r_stac.patch` |
 | Metric multi-view depth: focal probe, I3 windows, scale anchors | **Depth Anything 3**, `DA3NESTED-GIANT-LARGE-1.1` | `vendor/depth-anything-3` |
 | Place recognition for the chunk layouts' loop candidates (not run on cubes: the revisits are AMB3R's map's, §10.1) | **DINOv2 ViT-B/14 + SALAD** (8448-D descriptor) | fork `LoopModels/` |
 | Sky segmentation | `skyseg.onnx` (sha256-pinned), onnxruntime CPU | fork `loop_utils/sky_mask.py` |
 | Native-pixel point tracks | **VGGSfM v2** tracker (sha256-pinned) | fork `dependency/vggsfm_tracker` |
 | Monocular detail at depth discontinuities | **PointDiT-H/16** with DINOv3 ViT-H+/16 | `vendor/pointdit` |
 | Scene understanding (vocabulary, descriptions) | **Qwen3-VL** served by vLLM | `server/semantic/` |
-| Promptable segmentation and video tracking | **SAM 3.1** | `server/segmentation/` |
-| Scene mesh | **GenRecon** (Trellis.2-class sparse-structure + shape/texture SLat flows, fine-tuned, conditioned on DINOv3 ViT-L/16 features of posed images) | `vendor/GenRecon` @ eaf1468 + `server/tools/genrecon/genrecon_stac.patch` |
+| Promptable segmentation and video tracking | **SAM 3.1** Object Multiplex | `vendor/sam31`, driven by `server/segmentation/` |
+| Scene mesh | **GenRecon** (Trellis.2-class sparse-structure + shape/texture SLat flows, fine-tuned, conditioned on DINOv3 ViT-L/16 features of posed images; half-precision shape and texture decoders) | `vendor/GenRecon` @ eaf1468 + `server/tools/genrecon/genrecon_stac.patch` |
 | Rasterisation for the photo bake | nvdiffrast | env `da3` |
+
+Two NVIDIA libraries serve the device ports of §19.1 and are not models: **nvJPEG** (the `libnvjpeg` that torchvision
+ships, called from `server/jpeg_gpu.py`) and **nvCOMP** (`nvidia-nvcomp-cu12` 6.0.0.12 in env `da3`, the Deflate codec
+of the mask store).
 
 ---
 
@@ -330,7 +350,8 @@ $q_w=f_x\tan(0.222°)$ of parallax (`witness_min_parallax_deg`; 1.5 px at the ca
 
 ## 6. The first pass: AMB3R-SLAM over the whole video
 
-`server/reconstruction/amb3r_probe.py` runs **AMB3R-SLAM** (`vendor/AMB3R-SLAM`, branch `stac`) right after I1, over
+`server/reconstruction/amb3r_probe.py` runs **AMB3R-SLAM** (`vendor/AMB3R-SLAM`: upstream 5418465 with the STAC commits
+recorded as `server/tools/amb3r/amb3r_stac.patch`) right after I1, over
 **every frame of the video** (frame stride 1), at the session's Ω grid rounded to the model's patch. Its role is to say
 where every frame is and what every frame saw. It never decides the keyframes or the cubes.
 
@@ -763,8 +784,12 @@ The precision core (`server/precision/`) measures and corrects the reconstructio
 **Chain.** With `cloud.source: omega_bent`, the runner executes:
 
 ```text
-F0 camera → F2 gauge → F4 tracks → F3 resolution probe (report) → F5 refinement → F6 bend → chunk check (report)
+F0 camera → F2 gauge → F4 tracks → F5 refinement → F6 bend → chunk check (report)
 ```
+
+What only reported and corrected nothing was removed on 2026-11-10 — F3 (§14.4), F5's fourth rung and its temporal
+test, the rolling-shutter diagnostic and the prior-depth cross-check: nothing that does not correct geometry costs
+machine time.
 
 **Epochs.** F2 and F5 publish pose-only geometry epochs. F6 publishes the new cloud epoch.
 
@@ -869,10 +894,11 @@ score) runs on CUDA under deterministic torch.
 - A track is **held out** when the first 8 bytes of SHA-256(seed, query frame, $u$, $v$), read as an integer, fall below
   $0.2\cdot2^{64}$. This is a deterministic 20 % split, independent of order.
 
-### 14.4 F3 — resolution probe (report only)
+### 14.4 F3 — resolution probe (removed)
 
-The central 32 keyframes are inferred at 512, 768 and 1024. Each pair's projective depth mismatch is
-$m_{ij}=\operatorname{med}|z_{i\to j}-z_j|/z_j$. The lowest median is reported; the resolution is the user's setting.
+F3 inferred the central 32 keyframes at 512, 768 and 1024 and reported the projective depth mismatch of each pair. It
+decided nothing — the Ω resolution is §10.2's — and was removed from the chain on 2026-11-10, with its step, its module
+and its configuration section. The number of this subsection is kept so that the references to §14.5 and §14.6 hold.
 
 ### 14.5 F5 — joint refinement (`precision/refine.py`, `precision/ba_torch.py`)
 
@@ -911,15 +937,26 @@ E=\tfrac12\sum_{jk}\rho\big(\|\pi_\theta(R_kX_j+t_k)-u_{jk}\|^2\big)+\tfrac12\su
   ```
 
 - **Step control:** gain ratio $\varrho=(E-E')/L$. Accept when $\varrho>10^{-3}$, with $\lambda\leftarrow\lambda\max(\tfrac13,1-(2\varrho-1)^3)$; on rejection, $\lambda\leftarrow\nu\lambda$ and $\nu\leftarrow2\nu$.
-- **Stop:** $|\Delta E|/E<10^{-6}$ or a negligible step. Anything but convergence fails the stage.
+- **Stop:** $|\Delta E|/E<10^{-6}$ or a negligible step. Anything but convergence fails the stage. A problem that no
+  landmark reaches is refused: a bundle adjustment of the priors alone is no solve.
+
+**Massive sessions** (pccr 2026-08-24: 13.0 M landmarks, 101.6 M residual blocks). Two bounds on memory, neither a
+decision:
+
+- The track groups are held as arrays only, and the lens undistortion runs in chunks of whole tracks (at most 2 M
+  observations). As Python lists the groups took 66 GB per grouping and the batched undistortion's Jacobian 32 GB,
+  and F5 went over the pod's 117 GB.
+- Above 24 M residual blocks the solver works in **chunks of consecutive landmarks** of at most 8 M observations. A
+  landmark is never split, so every landmark block, every Schur pair and every back-substitution stays inside one
+  chunk. The camera system is summed chunk by chunk in a fixed order, and the per-observation Jacobians are made again
+  per chunk instead of kept. The equations are the same and the solve is deterministic; below the threshold it is the
+  one-piece path, bit for bit.
 
 **Rungs.** The camera is freed in rungs:
 
 - R0: θ fixed.
 - R1: $+f_x,f_y,c_x,c_y$.
 - R2: $+k_1,k_2,p_1,p_2$.
-- R3: focal lengths per 60-keyframe block. This rung is tried only if a permutation test shows block structure, and it
-  is reported, never applied.
 
 **The judge.** A rung enters only if the decision rule says it improves the **held-out** tracks:
 
@@ -1144,6 +1181,20 @@ The report lists what it would correct. Nothing is applied.
 > **The VLM proposes, describes and names. It never measures.** Every number comes from deterministic tools over the
 > geometry. Every label that enters a product is tagged `vlm_proposed`, `tool_measured` or `human_validated`.
 
+**The chain.** Four stages of the pipeline manager (§1), each a process of its own, one at a time on the card:
+
+```text
+VLM round 1 → SAM 3.1 round 1 → [ VLM round k → SAM 3.1 round k ]… → projection (once) → floor
+```
+
+- The chain's array work — decoding frames, reading and writing masks, matching them to points, the boxes — runs on
+  **one declared device**, `surface_fit.evidence_device` (`cuda`; `cpu` in the tests). Each port keeps its CPU function
+  as the path of record, and a test holds the two equal (§19.1).
+- SAM 3 and the projection work on the reconstruction's **product epoch**. It is made live before SAM 3 starts, and a
+  product epoch that is no longer on disk fails the stage before a frame is touched.
+- **Nothing partial is delivered.** A prompt SAM 3 did not run to the end fails the stage and the previous store
+  stays; a projection step that cannot run fails the projection and no result is written.
+
 ### 17.1 The vocabulary (`server/segmentation/autoprompt/`)
 
 **Model and determinism.** **Qwen3-VL-8B-Instruct** is served by vLLM on `127.0.0.1:8799` with:
@@ -1154,32 +1205,93 @@ The report lists what it would correct. Nothing is applied.
 
 Re-asked calls are compared byte for byte.
 
-**The calls.** Each keyframe gets one call. The model returns JSON with:
+**The stage's own engine** (`semantic/service.job_engine`). The stage takes the engine lease, stops whatever vLLM was
+up (a verified stop), requires a card with no other process on it, and launches vLLM from the job's **frozen**
+configuration. It verifies the engine's identity (the weights' sha256, the card, the versions), writes it into
+`vlm_analysis.json`, and stops the engine when it ends. When the session's analysis is reusable under its stamp, that
+identity is computed without a launch and no engine is started. A service that does not come up within its bound, a
+call that fails or a configuration error fails the stage: there is no fallback model.
+
+**The calls.** Each keyframe gets one call (`autoprompt.vlm_sampling.all_keyframes`, one view per keyframe). The frame
+is decoded on the card with PIL's pixels and PIL's header (§19.1), so the JPEG the model receives is the same bytes
+either way. The model returns JSON with:
 
 - the scene type;
-- the structural envelope;
+- the structural envelope, in a field of its own;
 - the objects: category, description, and a shape with form, material and detail.
 
-The rules it is asked to follow: whole objects only, one name per object, nothing as background.
+The rules it is asked to follow: whole objects and never their pieces, one thing per entry, one name per object, the
+envelope is never background, and every distinct thing gets its own entry.
 
 **Names to prompts.**
 
 - Names are normalised: lower-cased, articles and counts dropped, singularised.
 - Each name is counted by the number of keyframes that named it.
 - A merge pass asks short yes/no questions: is it a whole object or a piece? same kind as? a unit of a support surface?
-  The links are closed transitively and never form cycles.
+  The links are closed transitively and never form cycles. Only a support surface absorbs its parts and units
+  (`fold_only_into_support`), and two names are the same kind only when they share their head noun
+  (`same_kind_same_head_only`).
 - Structural names go first. The list is bounded at `max_sam3_prompts` = 150.
 - Every phrase's fate is recorded in `output/segmentation_census.json`.
 
-**Rounds.** After SAM 3 has run, the keyframes are shown again with every segmented pixel painted grey, and the model is
-asked to name only what is not grey. New names enter as new prompts. The loop stops when a round names nothing new.
+**Rounds** (`autoprompt/rounds.py`, `autoprompt.segmentation_rounds: true`). After SAM 3 has run, round $k\ge2$ shows
+the VLM every keyframe of round 1 again, with every pixel some masklet already covers painted flat grey (128), and
+asks the same question plus one instruction: name only what is not grey.
 
-### 17.2 Masks (`server/segmentation/sam3_wrapper.py`)
+- **The grey frame** is built on the card. The masks of a frame are inflated there and OR-ed; the frame is decoded
+  there; the mask is brought to the frame's grid by OpenCV's own nearest-neighbour samples and painted with one
+  `torch.where`. Only the JPEG encode for the VLM stays on the CPU.
+- **What is fresh.** A name already prompted (round 1, the store, an earlier round — whether SAM 3 found anything or
+  not) or already judged by an earlier merge is not fresh. A name whose head noun names no kind of thing (`object`,
+  `item`, `thing`, …) is never a prompt. A name that one keyframe alone proposed is dropped (two witnesses), unless
+  it is structural (`structural_always`).
+- **The merge.** The fresh names go through the merge pass together with the prompts so far. Each ends as *covered* by
+  a prompt already segmented, *merged* into another name, or a *new prompt*. Structural names go first and the total
+  never exceeds `max_sam3_prompts`.
+- **SAM 3** runs the new prompts over every keyframe and appends their masks to the same store.
+- **The end.** The loop stops when a round names nothing new, or when the prompt bound is reached. A round that
+  starts with the bound already full is not run at all: no engine is launched, the round is recorded with no new
+  prompt (pccr 2026-08-24 reached 150 prompts in round 1).
 
-**Model.** **SAM 3.1 Object Multiplex**, run in bf16 under strict deterministic torch.
+Every round is recorded in `output/seg_rounds.json` (what each keyframe proposed, the fate of every name). The masks
+of all the rounds are projected on the cloud once, after the last one.
+
+### 17.2 Masks (`server/segmentation/sam3_wrapper.py`, `sam3_group.py`, `pipeline.py`)
+
+**Model.** **SAM 3.1 Object Multiplex** (`vendor/sam31`), run in bf16 under strict deterministic torch (TF32 off,
+cuDNN deterministic, fixed seeds). The stage stops the semantic service (verified) and refuses a shared card.
+
+**Frames on the card** (`segmentation/sam3_frames_gpu.py`). The model's lazy frame loader is replaced at load time —
+no vendor file is edited. Each frame is decoded on the card (PIL's pixels, §19.1), resized to the model's square by
+Pillow's own fixed-point bilinear passes, and normalised by a gather from a (3, 256) float16 table that the vendor's
+own CPU arithmetic computes once. No float is computed on the card, so the tensor is the vendor's bit for bit; a frame
+costs 4.1–4.5 ms instead of 30–36 ms.
 
 **Propagation.** For each text concept and each batch of 250 keyframes (overlap 10), the prompt is added on the first
-frame and propagated forward.
+frame and propagated forward. Every concept runs on every keyframe: the VLM gives the vocabulary only, no frame lists
+and no box seeds.
+
+**Concept groups** (`models.segmentation.concept_group` = 4). SAM 3.1 propagates one concept per session, and its
+detector used to compute the vision backbone (the 32-block ViT at 1008 px and its three necks) of every 16-frame chunk
+again for every concept. Now four concepts advance together over a batch:
+
+- the first runs in the batch's own session, the others in sessions cloned over the same decoded frames;
+- their propagations are stepped in turn, frame by frame, so every member processes the same frames in the same turn;
+- the backbone of each chunk is computed once and the same tensors are served to every member.
+
+The image features do not depend on the text and the inference draws no random number, so **each concept's masks are
+the ones it gets alone**. Measured on pccr 2026-08-31 (250 keyframes, 8 concepts, the card exclusive): 333.8 s one at
+a time, 236.6 s in groups of four (×1.41), all 4448 mask and label arrays identical bit for bit. A concept its group
+could not complete (the tracker's stop, an error) runs alone on its own call; a group that runs out of memory hands
+every member back to run alone.
+
+Two more settings come with the groups:
+
+- `keep_frame_outputs: false` — the vendor's per-frame cache of every object's video-resolution mask (its interactive
+  demo's) is not kept, and a session's state is reset as soon as its masks are copied out.
+- `planning_copy: shallow` — the vendor deep-copies every object's score on every frame propagated so far, again on
+  every frame (22 % of a concept on 120 frames, growing with the frames). The shallow copy copies each frame's dict
+  and shares its score tensors: no writer touches a past frame, and the masks are identical.
 
 **Identity.**
 
@@ -1188,12 +1300,82 @@ frame and propagated forward.
 - Across batches, objects are matched greedily by median IoU over the overlap frames.
 - Appearance is never used: tracking is the identity.
 
+The pixel counts behind both run on the device (`segmentation/sam3_pairs_torch.py`): a frame's masks are uploaded as
+booleans, the intersections are products of 0/1 rows in float32 — every partial sum an integer below $2^{24}$, so
+exact — and the IoU is the same float64 division of the same two integers.
+
 **Thresholds** (SAM 3.1): detection 0.3, new detection 0.5, confirmation after 3 consecutive frames.
+
+**A stop is continued, never dropped.** A propagation can stop midway for two reasons: the vendor tracker's own stop,
+or CUDA running out of memory (one concept with hundreds of objects). In both cases the frames it completed are kept,
+and the rest of the batch is propagated again from (stop − overlap) in a fresh session, linked by the same overlap rule
+as any two batches. With no progress the overlap is reduced, down to a seam whose objects get fresh ids. Every
+continuation is declared in the census (`identity_decisions`). An out-of-memory stop depends on the card: the same
+card with the GPU exclusive stops at the same frame. The only out-of-memory that fails the stage is a session that
+cannot complete even one frame. Any other SAM 3 error fails the stage.
+
+**Fallback.** A bare category that confirms nothing is retried with its origins — the VLM's descriptions of it, then
+the names merged into it, at most `sam3_fallback_max` = 3 — and the first that finds something is kept under the
+category's label.
+
+**The mask store** (`output/seg_masks.npz` + `segmentation.json`).
+
+- **Appended while SAM 3 runs.** Each concept's masks are saved as it finishes, by a writer thread, while the next
+  concept runs on the card.
+- **Canonical.** At the end the store is rewritten with its members ordered by (object, frame) and a fixed zip entry
+  time, with the keyframe list and the reconstruction's id as members: one logical store is one byte sequence.
+- **Sealed.** `segmentation.json` carries a stamp of the mask bytes, the prompts, the keyframes, the model and the
+  code. A reader refuses a store whose seal names other bytes, or whose swap into `output/` did not complete.
+- **Deflated on the card** (`segmentation/store_deflate_gpu.py`). The members are laid out on the device as rows of
+  `.npy` bytes, deflated by nvCOMP (raw Deflate streams), their CRC-32 computed there (`crc32_gpu.py`), and **every
+  stream is inflated back and held equal to its member before it is written**. Measured on the real stores: pccr
+  2026-08-31, 55 079 masks, 81.1 → 19.6 s; pccr 2026-08-24, 290 418 masks, 1280.1 → 93.3 s.
+- **Declared.** The streams are nvCOMP's, not zlib's. Every member inflates to the record's bytes, but the file is
+  another byte sequence and 2.2× larger (65.5 → 143.8 MB, 349.2 → 771.7 MB). The server's interactive edits keep
+  zlib: the server process holds no CUDA context.
+
+**The census** (`output/segmentation_census.json`, version 3) says what the VLM looked at, every phrase and its one
+fate, and for every prompt its SAM 3 status and masklets. It is built from `segmentation.json` alone: the masks are not
+read back. It is a compared artifact — no clock, no pid, no temporary path; the seconds per prompt go to
+`segmentation_timing.json`.
+
+**Cost.** SAM 3 is the slowest stage of the chain: 1 h 43 min on pccr 2026-08-31 (547 keyframes, 87 concepts) and
+about 10.5 h on pccr 2026-08-24 (2765 keyframes, 150 concepts, about 4.1 min per concept), where the VLM took
+48.5 min. The tracker's control logic is the vendor's Python and the card is about half busy during it.
 
 ### 17.3 Masks to cloud (`server/segmentation/pipeline.py`)
 
-**Assignment.** Every point was born at one pixel of one keyframe. Its candidates are the objects whose mask contains that
-pixel, and it takes the one with the **smallest mask area**, ties going to the lower id.
+The projection is a pure function of its inputs: the cloud, the raw mask store, the keyframe list, the poses, the
+session camera, the floor transform, the frozen configuration and the code. Its result carries the stamp of all of them
+and the margin of every decision it took (`decisions`).
+
+**Assignment.** Every point was born at one pixel of one keyframe; the exact grid maps of the session camera take that
+pixel from the record grid to the mask grid. Its candidates are the objects whose mask contains the pixel, and it takes
+the one with the **smallest mask area**, ties going to the lower id:
+
+```math
+o^*(p)=\arg\min_{o\,:\,m_{f,o}(u_p,v_p)=1}\ \big(|m_{f,o}|\cdot M+o\big),\qquad f=\text{the keyframe of }p,\quad M=\max o+1 .
+```
+
+A point can only be covered by the masks of its own keyframe, so the match walks the cloud **by frame** on the device
+(`segmentation/mask_match_torch.py`): all the masks of a keyframe are inflated on the card in one batch, their areas
+are pixel counts, and the winner and the runner-up are the two smallest integer keys. Contested points whose two
+areas differ by less than 1.1 × the masks' own frame-to-frame area variation are counted and declared; the rule is
+unchanged.
+
+**Audit** (`segmentation/mask_filter.py`). The cloud is checked against the masks, and nothing is removed.
+
+- An instance's points are projected into the keyframes where SAM 3 drew it, visit by visit. A visit is a run of
+  consecutive mask keyframes (`visit_gap_kf` = 1), and its `max_frames_per_visit` = 8 keyframes showing most of the
+  object judge it.
+- The mask is dilated by 2 px (`dilate_px`); a point hidden by the cloud's z-buffer (0.15 m) or by the instance's own
+  (0.10 m) is not judged.
+- A point that lands off its own mask in any view that sees it is marked **out of place** (`out_of_place.npy`, with
+  the count of views behind each mark).
+- An instance whose mass is off the mask in one visit and on it in another is a `drift_duplicate`; off the mask in
+  every visit, `unsupported` (`mask_audit.json`).
+
+The masks of a visit are inflated and dilated in one batch on the device.
 
 **Merges and splits.**
 
@@ -1203,11 +1385,17 @@ pixel, and it takes the one with the **smallest mask area**, ties going to the l
   J_f=\min\Big(\frac{|V_i(f)\cap V_j|}{|V_i(f)|},\ \frac{|V_j(f)\cap V_i|}{|V_j(f)|}\Big),
   ```
 
-  and the pair merges when the "above a bar" rule passes at 0.5.
+  and the pair merges when the "above a bar" rule passes at 0.5 **and the larger of the two is a support surface**
+  (`segmentation.merge_support_only: true`, since 2026-11-11). Every other object stays as SAM 3 gave it: a merge by
+  shared space sometimes joined two objects far apart, so the same object named twice by the VLM now stays twice, and
+  every refused pair is recorded with its shares.
 - **Fragments.** Fragments of a support surface that touch (at least 5 adjacent 10 cm voxel pairs) are united.
 - **Co-visible split.** Co-visible components separated by free space are split.
-- **Attach.** Unlabelled points within 3 cm take the majority label of their 3 nearest labelled points.
+- **Attach.** Unlabelled points within 3 cm take the majority label of their 3 nearest labelled points, over 4 rounds.
+- **One owner.** A point belongs to one instance or to none; a conflict goes to the smaller instance.
 - **Minimum size.** Instances under 1000 points are dropped, except structural ones.
+
+Per-object cleaning is off (`models.segmentation.segment_cleaning.enabled: false`).
 
 **Oriented boxes.** Built on the instance's core component:
 
@@ -1218,8 +1406,28 @@ pixel, and it takes the one with the **smallest mask area**, ties going to the l
   support wins;
 - the extents are the core's min and max.
 
-**Products.** `segmentation_result.json`, `instance_ids.npy`, `classification.npy`, the instance store `scene_r.db`, and an
-octree rebuilt with the class bytes.
+The box is computed end to end on the device (`segmentation/obb_gpu.py`). The stable point keys, the stable sample and
+the flyer components are the record's, exactly. The hull (gift wrapping), the rotating calipers and the extents are the
+same construction in the device's floating point. The RANSAC triplets and the bootstrap's keep / drop flags are
+**drawn on the card** by torch's generator, seeded from the configuration and from the point set: deterministic on one
+card, but not the numpy record's draws. Measured against the record on pccr 2026-08-31: every object, point, class,
+fusion and audit mark is identical, and 421 of 1363 boxes turned by more than 5° (median 1.5°, max 45°; centre p95
+8 cm). For about a third of the objects the yaw depends on the RANSAC draw itself; more iterations, until the same
+planes come out of every draw, is the open way to remove that.
+
+**Products.** `segmentation_result.json` (with its stamp and decisions), `instance_ids.npy`, `classification.npy`,
+`mask_audit.json`, `out_of_place.npy`, the instance store `scene_r.db`, and an octree with the class bytes — built by
+the floor's epoch when the floor stage follows. The instance store is written on the pod's local disk and put back in
+one copy (`phase_r/instance_store.store_on_local_disk`): sqlite on the network volume wrote a 1.8 GB journal page by
+page for over half an hour on pccr 2026-08-24.
+
+**Measured.** The whole projection of pccr 2026-08-31 went from 967 s to 535 s with the device ports (the second
+figure taken while another job shared the card), with the same classes, instances, fusion map, audit and marks. The runs of 2026-11-12: zaragoza 408 segments; bufferStop 347,
+covering 96.87 % of its 3 837 478 points; observatorio 529, covering 99.80 % of its 23 374 569 points.
+
+**Known.** The audit looks an instance's masks up through the *fused* view of the store (`fusion_map.json`, written by
+the previous projection). The SAM 3 stage deletes that map, so SAM 3 → projection is not affected; a projection run
+again on its own audits the parts that map had folded as instances without a mask.
 
 ### 17.4 The floor (`workers/floor_worker.py`, `correction/floor.py`)
 
@@ -1231,36 +1439,95 @@ levels the whole session (`correction.floor.model_default: session`, `solve_floo
   points below their own keyframe's camera, declared;
 - levels are searched along the support's own normal; **the floor** is the level under the most cameras, and other real
   levels (a platform, a ramp's landing) keep their step;
-- the motion takes the floor to horizontal at $y=0$ and is published as a geometry epoch.
+- the tilt is applied, about the floor's centroid, only when it exceeds 1.1 × its own error; the height — the floor
+  under the walk's start taken to $y=0$ — only when it exceeds 1.1 × its own;
+- the motion is published as one transactional geometry epoch: the cloud, the poses, the segmentation with its boxes
+  recomputed, the octree and the instance store. The epoch it replaced is discarded, so the session keeps one cloud.
 
-A session filmed with the phone rotated comes out of the reconstruction on its side and is set upright here (bufferStop:
-92.74° on its segmented floor).
+The epoch's warp moves every point at once on the device (`correction/warp_torch.py`). A floor already level within
+its own error publishes no epoch, and the octree of the live cloud is built here instead. The stage's record
+(`floor_session.json`) names the live geometry it left and the segmentation it was found on; it is complete only while
+both are still the session's.
+
+A session filmed with the phone rotated comes out of the reconstruction on its side and is set upright here
+(bufferStop: 92.68° on its segmented floor, 174 of 174 cameras over it).
 
 ---
 
 ## 18. GenRecon scene mesh
 
-GenRecon runs only when ordered (`pipeline.auto_genrecon: false`): from the **Autosegment** window or the **GenRecon**
-button, with the cloud's confidence threshold chosen for that order (the reference runs use 0 %: the published cloud is
-already filtered by the vote). `workers/genrecon_worker.py` → `server/tools/genrecon/run_cloud.sh`, mode `cloud`. In
-order:
+GenRecon runs only when ordered (`pipeline.auto_genrecon: false`): from the **GenRecon** button of the Instances panel
+or an API order (§20), with the cloud's confidence threshold chosen for that order (the reference runs use 0 %: the
+published cloud is already filtered by the vote). `workers/genrecon_worker.py` → `server/tools/genrecon/run_cloud.sh`,
+mode `cloud`. The worker stops the semantic service and types the keys of the shape, the edge filter, the decode cap
+and the devices before anything is launched: a missing key or a wrong type fails naming it. In order:
 
-1. the adapter: the confidence filter, the levels and the layout;
-2. GenRecon's generation;
-3. the global hole fill and remesh, and the per-chunk bakes in parallel;
-4. the raw mesh, published to `output/genrecon/`;
-5. the photo bake, published to `output/tsdf/genrecon_photo/`;
-6. the 3D Tiles.
+1. the resume check (§18.7);
+2. the adapter: the confidence filter, the levels and the layout (§18.1, §18.2);
+3. GenRecon's generation, and the sampled latents saved (§18.3);
+4. the joint decode, in one pass or by regions (§18.3);
+5. the mesh step: the global hole fill and remesh, the edge filter, the per-cube bakes in parallel (§18.4);
+6. the raw mesh, published to `output/genrecon/`;
+7. the photo bake, published to `output/tsdf/genrecon_photo/` (§18.5);
+8. the 3D Tiles (§18.6).
 
 **The rule of this stage: the cloud is the limit.** Presence (which voxels hold surface) comes from the cloud's points.
-The model shapes the surface inside the active voxels and the keyframes are its texture.
+The model shapes the surface inside the active voxels and the keyframes are its texture. The mesh's meta says so:
+geometry and material `vlm_generated`, base colour `tool_measured`.
 
-**Known issue** (2026-11-09, pending). On zaragoza's mesh 36.5 % of the area (423 of 1160 m²) has no cloud point within
-one voxel (11.56 cm), 409 m² of it between $y$ = −0.5 and +0.5 m, with no point within 23 cm for 84 % of those faces.
-It is not noise (the nearby points' confidence is normal). The main suspect is the solid ground of §18.2, which fills
-the columns under every support level down to the lattice base; a run without it is the proposed test.
+**What was measured against the cloud, and what it changed** (2026-11-12, on the meshes of 3.7 m cubes with a solid
+ground).
+
+- **Surface where the cloud has none.** 25–72 % of each mesh lay beyond one voxel (11.56 cm) of the cloud: zaragoza
+  2233 of 3090 m², pccr 2026-08-24 1376 of 3554, pccr 2026-08-31 259 of 625, observatorio 416 of 1253, bufferStop 23
+  of 90. Of that area, 92–99.8 % sat in the voxels of the solid-ground fill (§18.2), which were 37–69 % of the active
+  voxels. The fill is off since then (`genrecon.solid_ground: false`); on bufferStop that surface went from 22.6 to
+  0.04 m².
+- **Holes where the cloud is.** The cloud decides only which voxels are active; the geometry inside a voxel is
+  generated. 99.5–99.8 % of the cloud had mesh within one voxel, but only 54–73 % within 3 cm, and from bufferStop's
+  keyframes 3–12 % of the cloud's pixels met no mesh at all. The decoder's own mesh shows the same: the hole fill,
+  the remesh, the simplification and the tiles add none of it.
+- **Smaller cubes.** Only the 512 models exist, so the voxel is the cube / 32 and the surface cell the cube / 512: a
+  smaller cube gives the model finer voxels and cells. Against 3.7 m, 2.775 m took the mesh beyond 3 cm of the cloud
+  from 31.8 to 23.0 %, the cloud beyond 3 cm of the mesh from 48.2 to 31.0 %, and the holes seen from the keyframes
+  from 10.7 to 7.9 %; at 1.85 m the model closed a tube's mouth with a membrane and turned gravel into blocks.
+
+The cube and the points per voxel were then chosen by eye on bufferStop, among 3.7, 3, 2.775, 2.5, 2.31, 1.85 and
+0.925 m. The three meshes that were published there, measured the same way:
+
+| Cube · points per voxel | Mesh beyond 3 cm of the cloud | Cloud beyond 3 cm of the mesh | Holes seen from the keyframes |
+|---|---|---|---|
+| 2.775 m · 6 | 23.4 % | 31.1 % | 7.8 % |
+| 3 m · 3 | 24.8 % | 32.7 % | 6.6 % |
+| **2.5 m · 3** (in force) | **21.4 %** | **17.3 %** | **5.65 %** |
+
+**The meshes on disk** (runs of 2026-11-13: 2.5 m cubes, 3 points per voxel, confidence 0, the edge filter on). The
+numbers are each mesh's own records — `genrecon_photo.meta.json`, `tiles/tiles_report.json`, the layout — and its
+stage log.
+
+| Session | Points | Cubes | Latent voxels | Joint decode, card peak (shape / texture) | Remesh cell | Faces | Texels photographed | Tiles |
+|---|---|---|---|---|---|---|---|---|
+| bufferStop | 3.84 M | 24 | 7 014 | one pass, 4.24 / 4.41 GB | 4.89 mm | 1.96 M | 75.5 % | 35, depth 5, 0.20 GB |
+| pccr 2026-08-31 | 18.8 M | 158 | 42 689 | one pass, 17.79 / 18.96 GB | 4.89 mm | 13.28 M | 86.8 % | 235, depth 7, 1.33 GB |
+| zaragoza | 23.3 M | 230 | 99 387 | one pass, 24.48 / 26.78 GB | 4.89 mm | 18.94 M | 63.4 % | 333, depth 8, 1.78 GB |
+| observatorio | 23.4 M | 251 | 109 523 | one pass, 31.87 / 34.68 GB (run before the cap of §18.3) | 4.89 mm | 19.83 M | 70.1 % | 353, depth 8, 2.08 GB |
+| pccr 2026-08-24 | 114.5 M | 358 | 220 739 | 4 regions, 26.64 / 28.91 GB | **10.24 mm** | 33.26 M | 78.3 % | 635, depth 9, 3.66 GB |
+
+**Known, not corrected.**
+
+- The global remesh closes every sheet into a shell (the floor was seen as two sheets on 85–99.8 % of the rays), and
+  the simplification to 150 000 faces per cube leaves faceting.
+- The global remesh is the one step that still grows with the whole scene. On pccr 2026-08-24 it ran out of the card
+  at the decoder's 4.89 mm cells and was retried coarser four times, down to 10.24 mm (§18.4), declared in the log.
+- The generation is not identical run to run (§19). Loose floating pieces are not removed in this family.
+- The work folders are keyed by the session's id (`vendor/GenRecon/work/<session>…`): a second scan of one session
+  replaces the first one's.
 
 ### 18.1 The points GenRecon receives
+
+**The frame.** The adapter (`tools/genrecon/adapter.py`) hands the scene over in the session's display frame — the
+floor transform applied, so up is up — turned from $y$-up to $z$-up, with the keyframes' certified poses as COLMAP
+world-to-camera and the session's OPENCV camera. The transform back to the raw frame is saved for the publication.
 
 **The confidence filter.** The raw `confidence` (the vote's support, §14.6) is normalised by the octree's min and max,
 exactly as the viewer's slider does (`PotreeLoader.ts`), and a point stays when
@@ -1269,11 +1536,21 @@ exactly as the viewer's slider does (`PotreeLoader.ts`), and a point stays when
 \frac{c-c_{\min}}{c_{\max}-c_{\min}}\ge c^*,\qquad c^*\in[0,1)\ \text{the order's threshold}.
 ```
 
-**Active voxels.** A voxel of GenRecon's lattice is active when at least `genrecon.min_points_per_voxel` = **10** of the
-points that stayed lie in it — GenRecon's own presence rule (USER 2026-11-09, back to the original 10: "con un solo punto
-cualquier ruido genera malla"). Measured on 2026-11-08 against one point: 10 drops 7.2 % (pccr), 16.1 % (observatorio)
-and 10.9 % (zaragoza) of the voxels, 97–99 % of them at a surface's edge or a sparse part. zaragoza 2026-11-09: 66 535
-active voxels with one point, 58 406 with ten.
+**Active voxels.** A voxel of GenRecon's lattice is active when at least `genrecon.min_points_per_voxel` = **3** of the
+points that stayed lie in it. The value follows the cube: it was 10 on the 11.56 cm voxels of 3.7 m cubes (with one
+point, any noise made mesh), and 3 was chosen against the holes on the 7.81 cm voxels of 2.5 m cubes.
+
+**On the device** (`genrecon.adapter_device: cuda`, `tools/genrecon/layout_gpu.py`). The arithmetic over the cloud's
+points — the frame change, the levels of the heights, each point's voxel and the count of every voxel, the objects'
+stands — has float64 twins on one device:
+
+- the frame change is written row by row, one rounding per operation, so the same bits on the CPU and on the card;
+- the levels and the percentiles are read from one sort with numpy's own arithmetic;
+- the voxel keys use a true division on the card too (a multiplication by the inverse moves a point lying on a voxel's
+  face to the voxel before it).
+
+Every file the adapter writes is byte-identical to the record's on pccr 2026-08-31 (18 770 254 points) and pccr
+2026-08-24 (114 451 841 points), in 21.6 s instead of 28.0 s and 63.5 s instead of 121.2 s.
 
 The keyframes' presence vote (`tools/genrecon/presence.py`: every point put to the other keyframes, kept when its
 support reaches `presence_min_views` and no more keyframes see through it) stays in the code and is off
@@ -1282,7 +1559,8 @@ support reaches `presence_min_views` and no more keyframes see through it) stays
 ### 18.2 Cubes over the whole cloud
 
 `plan_layout` reproduces GenRecon's own chunker over the **exact extent** of the points that stayed, with no percentile
-and no subsample. Cube side $L$ = `genrecon.cube_size_m` = 3.7 m, so the voxel is $v=L/32$ = 11.56 cm.
+and no subsample. Cube side $L$ = `genrecon.cube_size_m` = 2.5 m, so the voxel is $v=L/32$ = 7.81 cm and the decoder's
+surface cell $L/512$ = 4.88 mm.
 
 **Plan ($x$, $y$).** The plan is padded by $\tfrac{3.5}{16}L$ on each side. With $D$ the padded extent and $\delta=L/16$,
 take the fewest cubes $n$ whose stride
@@ -1293,30 +1571,51 @@ s_n=\Big\lceil\frac{D-L}{(n-1)\,\delta}\Big\rceil\,\delta
 
 is at most $\tfrac34L$, centred on the midpoint.
 
-**Height ($z$), anchored on the floor** (`genrecon_levels.anchored_centers`). One cube base sits **exactly on the lowest
-measured support level** (the model was trained with the floor at a cube's base). Layers rise from it by the same stride
-rule, and continue down only where the cloud reaches lower (station's tracks under the platform), so the whole cloud is
-covered and every cube stays on one lattice.
+**Height ($z$), anchored on the floor** (`genrecon_levels.anchored_centers`). A *level* is a 5 cm slice of heights
+holding at least 1 % of the points it is counted over. One cube base sits **exactly on the lowest level**, of the
+segmented support surfaces or of the whole cloud (the model was trained with the floor at a cube's base). Layers rise
+from it by the same stride rule, and continue down only where the cloud reaches lower, so the whole cloud is covered
+and every cube stays on one lattice.
 
-**Solid ground** (`plan_layout(support_levels=…)`, USER 2026-11-08: "el suelo es sólido"). Every column holding an
-active voxel in the 5 cm slice of a support level is filled active from under that slice down to the lattice base, so no
-floor has air below it in any cube and the model paints only its top face (against the double floor of 2026-11-08).
+**Solid ground — off** (`genrecon.solid_ground: false`; `plan_layout(support_levels=…)`). When on, every column holding
+an active voxel in the 5 cm slice of a support level is filled active from under that slice down to the lattice base,
+so that no floor has air below it and the model paints only its top face. It was the answer to a double floor, and it
+was where the mesh invented surface (above): the mesh now follows the cloud's whole excursion, below $y=0$ too.
 
 **Lattice.** All cubes' $32^3$ grids form **one lattice**, because every stride is a multiple of two voxels. A cube is kept
 when its block contains an active cell (summed-area table); each cube's active voxels are exactly the lattice's
 (`layout.json`, `active_cells.npy`).
 
-### 18.3 Generation (`vendor/GenRecon`, Trellis.2-class)
+### 18.3 Generation and decode (`vendor/GenRecon`, Trellis.2-class)
+
+**Frames.** For a camera with distortion GenRecon undistorts every frame it reads. With `genrecon.undistort_device:
+cuda` the decode and the remap run on the card (`tools/genrecon/remap_gpu.py`): the JPEG decoded with PIL's pixels,
+then OpenCV's 8-bit remap as OpenCV computes it — the integer bilinear table, $(\sum w\,p+2^{14})\gg15$, a neighbour
+outside the image 0 — for the pixels of the crop alone. The vendor's own `cv2.imwrite` writes the result: 0 of the 916
+files differ on bufferStop, observatorio and pccr 2026-08-31. No time is gained (about 3 s either way: the JPEG encode
+that stays weighs the most). A frame with an EXIF orientation is refused.
 
 **Conditioning.** Each active voxel of each cube is conditioned on the images that see it:
 
-- DINOv3 ViT-L/16 features of the undistorted posed keyframes, at 512 px;
+- the scene images are at most 999 keyframes, evenly spaced along the walk, each non-square frame as two square crops
+  along its longer axis, at 512 px;
+- DINOv3 ViT-L/16 features of them, encoded 64 images at a time;
 - for each view, the patch feature at the voxel centre's projection, taken from the nearest patch;
 - an IBRNet-style aggregation over the views:
 
   ```math
   F=\mu+\sum_n w_n\,\mathrm{MLP}_f\big([F_n,\mu,\sigma^2]\big),\qquad w=\operatorname{softmax}_n\mathrm{MLP}_w(\cdot).
   ```
+
+The projection holds a tensor of voxels × images × features. Its voxel batch is cut so that voxels × images stays at
+the working size of a 547-image scene,
+
+```math
+b=\max\Big(1,\ \min\Big(2048,\ \Big\lfloor\frac{2048\cdot547}{N_{\text{img}}}\Big\rfloor\Big)\Big),
+```
+
+and the aggregation is per voxel, so the numbers are the same: the projection's memory no longer grows with the number
+of images.
 
 **Sampling.** The sparse-structure stage is skipped: the active voxels are the coordinates. Two rectified-flow transformers
 are sampled jointly over all cubes:
@@ -1335,8 +1634,48 @@ Classifier-free guidance applies $v=w\,v_c+(1-w)v_\emptyset$ inside the guidance
 After every step, the features of voxels shared by overlapping cubes are replaced by their mean over the cubes. That is
 what keeps the cubes consistent.
 
-**Decoding.** The latents are decoded at 512 per cube, $L/512$ = 7.2 mm: the surface on a flexible dual grid, and a
-PBR attribute volume (base colour, metallic, roughness, alpha).
+**The sampled latents are saved** before the decode (`tools/genrecon/latents.py`, `latents.pt`): one (features, voxels)
+pair per cube for the shape and for the texture, and the cubes' transforms. The image features leave the card at the
+same point. A decode that fails, or whose code changes, starts again from them (§18.7).
+
+**Decoding.** The cubes' latents are merged on the lattice into one joint latent (the voxels that overlapping cubes
+share are averaged), and decoded at 512 per cube, $L/512$ = 4.88 mm: the surface on a flexible dual grid (one vertex
+per fine voxel, quads across the crossed edges), and a PBR attribute volume (base colour, metallic, roughness, alpha).
+Both decoders are half-precision checkpoints.
+
+**Decode by regions** (`genrecon.joint_decode_max_voxels` = 100 000, `tools/genrecon/decode_regions.py`). The vendor
+decodes the whole scene in one pass, so the card's memory grows with the scene: 4.24 / 4.41 GB (shape / texture) for
+bufferStop's 7 014 latent voxels, 17.79 / 18.96 GB for pccr 2026-08-31's 42 689, 31.87 / 34.68 GB for observatorio's
+109 523. pccr 2026-08-24 holds 220 739, more than an 80 GB card takes. A scene above the cap is decoded by regions; at
+or under it, or with the key at 0, the vendor's single pass runs untouched.
+
+- **Why it can be cut.** Both decoders are local: stacks of 3×3×3 submanifold convolution blocks with per-voxel norms,
+  and one subdivision block (a parent → its children) between levels. The structure is checked at run time and any
+  other is refused by name. What a decoder writes on a fine voxel therefore depends on the latents within a finite
+  radius of its ancestor at the latent level. With $B_\ell$ blocks at level $\ell$ (0 the latent level, $n$ the finest):
+
+  ```math
+  r_n=0,\qquad r_{\ell-1}=\Big\lceil\frac{r_\ell+B_\ell+1}{2}\Big\rceil+1,\qquad \rho=r_0+B_0 .
+  ```
+
+  For both decoders $B=(4,16,8,4,0)$ and $\rho=18$ latent voxels.
+- **The margin** is $\max(\rho_{\text{shape}}+1,\ \rho_{\text{tex}\mid\text{shape}})$ = **19 latent voxels** (1.48 m at
+  2.5 m cubes). The $+1$: a quad anchored on a fine voxel reads its neighbours one fine voxel further. The texture
+  decoder's subdivisions are given by the shape decoder's, so the shape's radius at each level enters its own.
+- **The cut.** A box whose decode — the box and its margin — receives at most the cap is a region. Otherwise it is
+  cut across its longest axis at the median of its voxels, each half shrunk to its own voxels. It is a pure function
+  of the voxels, the margin and the cap.
+- **The merge.** Each region is decoded with its margin. From it are kept the vertices of the fine voxels whose
+  ancestor it owns, the faces whose anchor (the per-axis minimum of their corners) it owns, and its texture voxels.
+  A face looks its vertices up by voxel, so a quad that straddles two regions joins the two regions' own vertices and
+  the mesh has no seam. The parts are put in the row order of the single pass, so the arrays are the same whatever
+  the cut.
+- **How equal.** In exact arithmetic the result is the single pass's. The decoders run in half precision and a region
+  is another batch, so the last bits can differ. A face one of whose corners its owner region did not decode (two
+  regions disagreeing on a subdivision bit) is not made, and is counted. Tests hold the logic exact on an integer
+  decoder.
+
+pccr 2026-08-24 is cut into 4 regions.
 
 ### 18.4 One surface, baked per cube (`inference/chunked_glb.py`)
 
@@ -1344,9 +1683,44 @@ PBR attribute volume (base colour, metallic, roughness, alpha).
 resolution produce **one** surface for the whole scene:
 
 - every DC vertex is clamped to its own cell;
-- vertices are projected back by $v'=v-0.9(v-\mathrm{proj})$.
+- vertices are projected back by $v'=v-0.9(v-\mathrm{proj})$, where the projection is the closest point of the surface
+  (elsewhere the vertex stays in its cell).
 
-Each face is then assigned to the cube centre nearest its centroid.
+**Out of memory in the remesh.** The retry runs at the largest resolution the remesher accepts that is not above 85 %
+of the failed one (`tools/genrecon/remesh_resolution.py`). The remesher builds its grid by doubling a base of at most
+32 cells, so it accepts a resolution only when halving it down to 32 never meets an odd number: 3712 → 3072, never
+3155. Each retry is declared with its cell size.
+
+**The edge filter** (`genrecon.edge_filter: true`, `tools/genrecon/denoise.py`, step 1.5 of the mesh step). Bilateral
+normal filtering (Zheng, Fu, Au & Tai, 2011) of the global mesh: the last step that moves the geometry, after the
+remesh and before the partition and the simplification. With $A_i$, $\mathbf c_i$, $\mathbf n_i$ the area, the centre
+and the normal of face $i$, and $\mathcal N(i)$ the faces sharing a vertex with it, each of
+`denoise_normal_iters` = 20 passes sets
+
+```math
+\mathbf n_i\leftarrow\operatorname{normalize}\Big(A_i\mathbf n_i+\sum_{j\in\mathcal N(i)}A_j\,
+e^{-\|\mathbf c_i-\mathbf c_j\|^2/2\sigma_s^2}\ e^{-\|\mathbf n_i-\mathbf n_j\|^2/2\sigma_r^2}\ \mathbf n_j\Big),
+```
+
+with $\sigma_s$ the mean distance between neighbouring centres and $\sigma_r$ = `denoise_sigma_r` = 0.35. Noise
+averages out on a face; across a crease the other face's normals weigh nothing and the crease stays. Then
+`denoise_vertex_iters` = 10 passes move each vertex toward the planes of its faces $F(\mathbf v)$:
+
+```math
+\mathbf v\leftarrow\mathbf v+\frac{1}{|F(\mathbf v)|}\sum_{f\in F(\mathbf v)}\mathbf n_f\,\big(\mathbf n_f\cdot(\mathbf c_f-\mathbf v)\big).
+```
+
+- It runs in float64 under torch's deterministic algorithms.
+- The pairs of neighbouring faces are never held all at once: they are made for `denoise_block_faces` = 2 000 000
+  source faces at a time, and every face's sum runs over its own neighbours in the same order. The result is the same
+  bit for bit whatever the block (a test holds it); the key is memory only.
+- Measured on bufferStop's remeshed 7 211 584 faces: normals turned 1.66° at the median (p99 64°), vertices moved
+  0.083 mm at the median (p99 2.3 mm, max 8 mm). The card's peak and the time: 13.3 GB / 3.7 s in one block, 4.7 GB /
+  3.4 s at 2 000 000 faces, 2.2 GB / 3.6 s at 500 000.
+- On that mesh, side-by-side views with and without it showed no visible difference. It stays on for the meshes that
+  may need it.
+
+**Partition.** Each face is then assigned to the cube centre nearest its centroid.
 
 **Face budget.** Each cube is simplified to `genrecon.simplify_faces_per_chunk` (150 000) faces with quadric error. When
 no per-cube target is asked, a GLB counts its length in 32 bits and the tiler reads it into one 4 GiB buffer, so the
@@ -1356,19 +1730,31 @@ faces are capped by a **total budget shared in proportion**, each cube keeping t
 \alpha=\min\Big(1,\frac{F_{\text{budget}}}{\sum_cF_c}\Big),\qquad F'_c=\max(1000,\lceil\alpha F_c\rceil),\qquad F_{\text{budget}}=64\text{ M}.
 ```
 
-**Per-cube bake.** In parallel processes (`bake_chunks_parallel.py`, `genrecon.bake_workers` = 6), each cube is:
+The atlases are `genrecon.texture_size` = 2048 px per cube. They are reduced, to a power of two, only when the GLB's
+estimated size — the faces kept and two atlases per cube — would pass 3.5 GB; the five meshes of §18 kept 2048.
+
+**Per-cube bake.** In parallel processes (`bake_chunks_parallel.py`, `genrecon.bake_workers` = 6). A first pass of the
+mesh step writes every cube's mesh, the workers bake them into a cache, and a second pass merges from the cache; both
+passes run the global steps, on the same mesh. Each cube is:
 
 - simplified with quadric error;
 - UV-unwrapped;
-- textured by sampling the attribute volume trilinearly.
+- textured by sampling the attribute volume trilinearly, the volume cropped to the cube's box and 2 voxels around.
+
+The UV unwrap runs on the CPU and is 97–98.5 % of a cube's bake (7.6, 16.4 and 19.1 s on three cubes of 147–149 k
+faces). An atlas made on the card would give other UVs, and therefore other textures: it cannot be held identical.
 
 ### 18.5 The real texture (`server/tools/genrecon/photo_albedo.py`)
 
-Every texel of GenRecon's own atlas is re-coloured from the keyframes that **see** its surface point $P$.
+Every texel of GenRecon's own atlas is re-coloured from the keyframes that **see** its surface point $P$. The
+keyframes are decoded on the card with PIL's pixels (§19.1).
 
 **Occlusion.** The mesh's own depth $D_k$ is rendered per keyframe with nvdiffrast, in batches of $2^{23}$ triangles, then
 min-filtered over 3×3. A self-check against the cloud's z-buffer fixes the image conventions, and the bake fails beyond
 25 cm.
+
+**Candidate views.** For each part, every keyframe whose frustum holds a point of the part's box or whose camera stands
+inside it. There is no distance bound: a hall's far wall is photographed from 20 m away.
 
 **Visibility and weight.** View $k$ sees $P$ when
 
@@ -1376,56 +1762,124 @@ min-filtered over 3×3. A self-check against the cloud's z-buffer fixes the imag
 Z>0.1,\qquad Z\le D_k+0.03+0.01Z,\qquad |\cos\theta|>0.2,
 ```
 
-and its weight is $w=\cos^4\theta/\max(Z,0.3)^2$. The best 3 views are blended: $c=\sum wc_k/\sum w$.
+and its weight is $w=\cos^4\theta/\max(Z,0.3)^2$. The best 3 views (`genrecon.bake_views`) are blended:
+$c=\sum wc_k/\sum w$, each $c_k$ sampled bilinearly in its keyframe.
 
-**Segmentation guard.** A view whose pixel shows **another SAM 3 instance** than the texel's does not colour it. The
-texel's instance comes from the cloud's 2 cm cell; the pixel's is the nearest cloud point's label in that keyframe.
+**Texels no keyframe sees** keep the generated colour, tone-matched to the photographed texels of their part (an
+affine map of mean and deviation per channel, when the part has more than 1000 photographed texels).
 
-**Texels no keyframe sees** take the cloud's own colour (the mean of the 2 cm cell). Only where the cloud has no point
-either do they keep the generated colour, tone-matched to the photographed texels per part.
+**What stays.** Only the base colour changes. The atlas keeps the size it was generated with, and the
+metallic-roughness texture, the factors and the UVs stay as generated. Three texels of padding past the triangle edges
+keep the old colour from bleeding at the seams.
 
-**Atlas size.** Each part $p$ wants texels the size of the finest photo pixel on it. With
-$\tau_p=d_p/\bar f_x$ ($d_p$ the nearest camera distance) and $A_p$, $A^{uv}_p$ its 3-D and UV areas:
-
-```math
-n_p=\frac{\sqrt{A_p/A^{uv}_p}}{\tau_p},\qquad
-s=\min\Big(1,\sqrt{\frac{N_{\text{kf}}WH}{\sum_pn_p^2}}\Big),\qquad
-T_p=\operatorname{clip}\big(2^{\lfloor\log_2(n_ps)\rfloor},\,512,\,4096\big).
-```
-
-The atlases together never hold more texels than the photos have pixels, because no detail exists beyond them. Only the
-base colour changes; the metallic-roughness texture, the factors and the UVs stay as generated.
-
-zaragoza, 2026-11-09 (10 points per voxel): 8.37 M faces, 60.9 % of the covered texels photographed, the bake 212 s.
+The share of the covered texels that were photographed is recorded in the mesh's meta: 63–87 % on the five sessions
+(§18).
 
 ### 18.6 3D Tiles (`tools/glb/tile_mesh.mjs`)
 
-**Tree.** A k-d tree over the GLB's primitives: a split at the median centroid along the longest axis.
+A tileset is to the mesh what the octree is to the cloud: the viewer loads only the tiles on screen, each at the
+detail the screen needs.
 
-**Levels.** A node of height $h$ simplifies its triangles to $\lfloor F/2^h\rfloor$ with meshoptimizer, borders locked. Its
-geometric error is the measured simplification error, or the texel footprint if that is larger.
+**Tree.** The mesh's own primitives — one per baked cube, each with its atlas — are the leaves, at full detail. A k-d
+tree is built over them: a split at the median centroid along the longest axis.
+
+**Levels.** A tile of height $h$ holds every primitive below it, each simplified by meshoptimizer from its $F$
+triangles to $\lfloor F/2^h\rfloor$ with its border locked, so the cut between two cubes never opens. Its textures
+are at the source side $\gg\lceil h/2\rceil$. Its geometric error is measured:
+
+```math
+\varepsilon=\max\Big(\varepsilon_{\text{simplifier}},\ \max_p\sqrt{\frac{A_p}{A^{uv}_p\,w_p\,h_p}},\ \max_{\text{children}}\varepsilon\Big),
+\qquad \varepsilon_{\text{leaf}}=0,
+```
+
+the simplifier's own absolute error, the world size of one texel of each primitive at that texture side, and never
+less than its children's.
+
+**Never an empty primitive.** The simplifier can leave a small closed piece with no triangle (a speck of 8 triangles
+in 1.4 cm, on pccr 2026-08-24). Written as an empty primitive it stopped the encoder. Such a primitive keeps the
+geometry, and the error, of the tile below: a tile never loses a primitive. A primitive of the source with no triangle
+has nothing to tile and is left out. Both are declared in the log and in `tiles_report.json`.
 
 **Encoding.**
 
-- KTX2 UASTC textures with mipmaps;
-- quantised positions, normals and UVs;
+- KTX2 UASTC textures with mipmaps (zstd), so they stay compressed on the card;
+- positions quantised to 16 bits, normals to 10, UVs to 14;
 - meshopt compression.
 
-The viewer refines to 2 px of screen error.
+The tileset is built in a folder beside the final one and renamed at the end, so a viewer never reads half of it, and
+the old tileset leaves before the new mesh is published. The viewer refines to 2 px of screen error.
+
+### 18.7 Resume (`server/tools/genrecon/resume.py`)
+
+**The rule: a run continues from the point of failure, never from a stale product.** The reconstruction's products
+carry a stamp of what they are made from:
+
+- **inputs** — the session files the adapter reads: the published cloud, the poses and their frame list, the camera,
+  and when they exist the floor transform and the segmentation (the octree's metadata when the order filters by
+  confidence);
+- **code** — the adapter's files and every source file of the vendor tree, except the two of the mesh step (a fix there
+  keeps the products);
+- **configuration** — the order's command lines, the configuration values the adapter reads, the keyframes and the
+  checkpoints by name and size.
+
+The stamp is computed **before** the adapter runs — an input that changed during the run must not be stamped as what
+made the products — and sealed after the reconstruction succeeds. Then an order starts at one of three points:
+
+| The stamp | The run continues |
+|---|---|
+| the products carry it and are whole | at the **mesh step** (its own folder emptied) |
+| the products do not, but the sampled latents carry the generation's stamp — the same without the decode's own code and cap | at the **decode** |
+| neither | at the adapter, every difference named |
+
+So a failed mesh step does not repeat the generation, and a failed decode — or a fix of its code, or another cap —
+does not repeat the sampling. What follows the mesh step (the publication, the photo bake, the tiles) has no resume
+point of its own: a failure there continues at the mesh step. The trial modes that take extra points from the mask
+store never resume. `GENRECON_DRY_RESUME=1` says where an order would continue and runs nothing.
+
+The worker names the step that failed and sends the run's last 120 lines to the stage log. The runner echoes its
+commands, among them the line that carries the model hub's token. Those lines are kept out of the stage log except
+in that tail, so the log of a failed run is to be treated as sensitive.
+
+### 18.8 The shape from the cloud (selectable, off)
+
+`genrecon.shape_from_cloud: false`. The other family tried on 2026-11-12 gives GenRecon the cloud's **shape** and not
+only its presence (`tools/genrecon/cloud_shape.py`).
+
+- The cloud is written in GenRecon's own cell representation, 512 cells per cube. Every cell corner takes a signed
+  distance to the planes of the points around it, each plane turned toward the camera that saw its point — the side
+  where the air is — so along any line the value changes sign once per surface: **one sheet**. An edge is crossed where
+  the sign changes, and each voxel's vertex is placed by dual contouring on the planes of its crossings.
+- GenRecon's own shape encoder turns the cells into the shape latent, each cube encoded with 64 cells of the cloud
+  around it so that overlapping cubes agree.
+- `shape_refine_t` > 0 lets the shape flow continue from that latent, noised to $t$:
+  $x_t=(1-t)\,x_0+t\,\varepsilon$, then guided by the photos.
+- The loose pieces go before the bake (`tools/genrecon/drop_loose.py`): kept are the largest piece, every piece that
+  reaches the floor, and — to convergence — every piece whose gap to the kept surface is no more than its own size.
+  No length decides.
+- The bake keeps the single sheets: no global remesh, and the edge filter on the decoded mesh.
+
+Measured on bufferStop before the bake: the floor is one sheet in 85 % of its 1 cm columns (78 % after GenRecon's
+encoder and decoder; 6 % for the closed shell published before), and the holes seen from the keyframes are 3.1 %
+(10.6 % for the generated shape of that day). Judged by eye it was not smooth and did not have the quality of the
+generated surface, so the generated shape is the product. The code stays, selectable.
 
 ---
 
 ## 19. Determinism, devices and reproducibility
 
 - **One GPU job at a time.** Every GPU stage checks that it has the whole card, and stops the VLM service first.
-- **Deterministic torch everywhere**, AMB3R-SLAM included (`reconstruction/amb3r_launch.py`). That means:
+- **Deterministic torch** in the reconstruction and in the segmentation chain, AMB3R-SLAM and SAM 3.1 included
+  (`reconstruction/amb3r_launch.py`, `sam3_wrapper.load_model`). That means:
   - `use_deterministic_algorithms(True)` and cuDNN deterministic, with no benchmarking and TF32 off;
   - seeded RNGs and `CUBLAS_WORKSPACE_CONFIG=:4096:8`;
   - z-buffers and medians computed by stable sorts and min/max scatters, with no floating-point atomics;
   - the coverage map and the cut counted with integers (cumulative sums over runs), never with float atomics;
   - the bundle adjustment's normal equations accumulated by sorted segment sums.
-- **Torch twins.** Each GPU port keeps the numpy function as the path of record. Tests hold the torch twin equal to it:
-  exactly for decisions, and to $10^{-9}$ for geometry.
+- **Torch twins.** Each GPU port keeps its CPU function as the path of record — numpy, PIL, OpenCV, zlib or the
+  vendor's own lines. Tests hold the twin equal to it: exactly for decisions and integers, and to $10^{-9}$ for geometry.
+- **Typed devices.** A port's device is a key of `config.yaml`: `surface_fit.evidence_device` (`cuda | cpu`) for the
+  segmentation chain, `genrecon.adapter_device` and `genrecon.undistort_device` (`numpy | cpu | cuda`). `cuda` with no
+  visible card fails naming the key: nothing runs somewhere else. The tests run on `cpu`.
 - **Stamps and resume.** Every product is stamped with the sha256 of its inputs, its configuration section and its code.
   A resumed job re-runs exactly the steps whose stamp changed. Each job's configuration is frozen and verified by every
   worker.
@@ -1434,23 +1888,77 @@ The viewer refines to 2 px of screen error.
   constant someone chose.
 - **The octree** is byte-identical for any thread count: PotreeConverter writes every chunk in a canonical order
   before the hierarchy (§15). The cleaner by pieces is byte-identical to the in-memory cleaner.
+- **Threads.** The container shows the host's 252 cores while its cgroup grants about 26 CPUs: a torch or BLAS job
+  left to its own thread count is throttled to a crawl. Every CPU job sets its own (GenRecon's runner and AMB3R-SLAM
+  8, the precision steps a fixed count).
 - **Observed on the real sessions.** Re-running zaragoza and pccr 2026-08-31 on 2026-11-09 from a VGGT-Ω pass redone
   under changed code gave the same seams, closures and graph moves to the last printed digit, and on zaragoza the same F5 held-out
   (0.398 434 657 933 px).
+
+### 19.1 The device ports, from the VLM to GenRecon
+
+| Step | Path of record | On the device | How equal | Measured |
+|---|---|---|---|---|
+| JPEG decode: the VLM's frames, the rounds' frames, SAM 3's loader, GenRecon's frames and texture stack (`jpeg_gpu.py`) | PIL | nvJPEG gives the file's native planes; libjpeg-turbo's chroma upsampling and fixed-point YCbCr → RGB are written in integers on the device | PIL's pixels, bit for bit: 20 279 frames of five sessions, 25 651 937 280 values, 0 differ | 0.215 ms a frame against 2.485 ms |
+| SAM 3's frame loader (`sam3_frames_gpu.py`) | the vendor's loader | decode, Pillow's fixed-point bilinear resize, a (3, 256) table for the normalisation | 0 bits differ | 30–36 → 4.1–4.5 ms a frame |
+| The rounds' grey painting (`autoprompt/rounds.py`) | PIL + `cv2.resize` nearest | decode, OpenCV's nearest samples as an index table, one `torch.where` | 547 + 2765 frames: 0 images and 0 JPEG payloads differ | 13.8 / 14.7 → 4.75 / 5.35 ms a frame |
+| SAM 3's identity IoUs (`sam3_pairs_torch.py`) | numpy, pair by pair | float32 products of 0/1 rows, integer sums below $2^{24}$ | value for value, in order | — |
+| Mask store, read (`mask_store_gpu.py`) | zlib, member by member | the file uploaded once, a request's members inflated together by nvCOMP | the same bytes | — |
+| Mask store, write (`store_deflate_gpu.py`, `crc32_gpu.py`) | zlib | nvCOMP Deflate, CRC-32 on the card, every stream read back | every member inflates to the record's bytes; **other streams, a file 2.2× larger** | 81.1 → 19.6 s (55 079 masks); 1280.1 → 93.3 s (290 418) |
+| Mask → point match and its near-ties (`mask_match_torch.py`) | masklet by masklet | frame by frame, integer keys | identical arrays | — |
+| The audit's masks (`mask_filter.py`) | zlib + scipy's dilation | inflated and dilated in one batch per visit | identical marks | of the audit's 368 s on pccr 2026-08-31, 186 s were the CPU dilation and about 96 s the zlib reads |
+| Space dedupe, fragments, split, attach, components | numpy | the record's arithmetic on the device | the same decisions | — |
+| Oriented boxes (`obb_gpu.py`) | numpy's seeded generator | keys, sample and components exact; hull and calipers in the device's floats; **draws on the card** | deterministic on one card, not the record's boxes (§17.3) | — |
+| The epoch warp (`correction/warp_torch.py`) | numpy, keyframe by keyframe | every point at once, the same float64 arithmetic | up to the last bit of a sum | — |
+| GenRecon's adapter (`layout_gpu.py`) | numpy | float64 twins | every output file byte-identical | 28.0 → 21.6 s; 121.2 → 63.5 s |
+| GenRecon's frame undistortion (`remap_gpu.py`) | `cv2.imread` + `cv2.remap` | decode + OpenCV's integer remap | 0 of 916 files differ | no time gained |
+| GenRecon's edge filter (`denoise.py`) | — | float64, deterministic algorithms | the same bits whatever the block | 3.4 s on 7.2 M faces |
+| The chat's closest pair of two objects (`phase5_qa/tools_torch.py`) | scipy's k-d tree, one core | exact search down an octree of each set, float64 (§22.2) | the tree's distance to $10^{-12}$ and its pair | floor against wall, 1.06 M × 0.74 M points: not ended in 8 min → 0.09 s; 13.3 → 0.10 s; 5.6 → 1.2 s (first call) |
+| The chat's bands, axes, profiles, flatness and volumes (`phase5_qa/tools_torch.py`) | numpy | float64 twins; numpy's median and percentile on sorted values | every tool's answer identical on pccr 2026-08-31 | a volume: 3.3–6.7 s → 0.58 s the first, 0.03 s after |
+
+**The JPEG decoder's scope.** torchvision's own GPU decode is not used: its chroma upsampling and colour conversion are
+nvJPEG's, not libjpeg's, and its pixels are not PIL's. The decoder takes sequential Huffman JPEGs of 8 bits, grey or
+YCbCr 4:4:4, 4:2:2 or 4:2:0. A progressive, CMYK or truncated file fails naming the file: nothing is decoded somewhere
+else in silence.
+
+**Stays on the CPU, declared.**
+
+- SAM 3's tracker logic: the vendor's Python control flow.
+- GenRecon's UV unwrap: another atlas would give other textures (§18.4).
+- Every JPEG **encode** — the VLM's views, the greyed frames, GenRecon's undistorted frames: another encoder writes
+  other bytes — and vLLM's own decode of the image it receives.
+- Reading files, sqlite (the instance store is worked on the local disk and copied back once), PotreeConverter, the
+  PLY and JSON I/O.
+- The mask store's interactive edits by the server, which holds no CUDA context.
+- The chat's lookups in the instance store (sqlite) and the Python that words an answer. Its measurements over the
+  points run on the card in the chat's own tools process, never in the server (§22.2).
+
+**Declared exceptions to bit-identity.**
+
+- **GenRecon's sampling** is not identical run to run (not investigated). The sampled latents are saved, so a decode
+  can be repeated on the same latents.
+- **The decode by regions** against the single pass: the last bits of half-precision decoders (§18.3).
+- **The oriented boxes** are drawn on the card: deterministic on one card, other boxes than the numpy record's.
+- **A mask store written on the card** holds nvCOMP's streams: the same masks, other bytes than zlib's. Written twice
+  on the card it is the same bytes.
+- **SAM 3's out-of-memory stops** depend on the card's memory: the same card with the GPU exclusive stops at the same
+  frame, and every continuation is declared in the census.
 
 ---
 
 ## 20. Running it
 
-Hardware: one NVIDIA A100 80 GB (developed on an RTX A6000 48 GB), about 30 CPUs, 117 GB RAM. Everything runs locally.
+Hardware: one NVIDIA A100 80 GB (developed on an RTX A6000 48 GB), 117 GB RAM and a CPU quota of about 26 cores.
+Everything runs locally.
 
 ```bash
 git clone --recurse-submodules <this repo> stac-build && cd stac-build
 bash scripts/setup_vendors.sh                 # pinned vendor clones (vendor/VENDORS.lock.md)
 bash scripts/setup_pod_envs.sh                # conda envs: da3, mapanything, semantic, genrecon, nodejs, …
 bash server/tools/genrecon/setup_env.sh       # env genrecon + CUDA extensions + the STAC patch
+conda run -n da3 pip install nvidia-nvcomp-cu12==6.0.0.12   # the mask store on the card (§17.2)
 
-bash scripts/start.sh                         # backend → https://localhost:8765 (starts the VLM service too)
+bash scripts/start.sh                         # backend → https://localhost:8765 (the chat's VLM loads on demand)
 cd ui && npm run dev:web                      # the UI (Vite) → http://localhost:5173
 ```
 
@@ -1459,10 +1967,29 @@ cd ui && npm run dev:web                      # the UI (Vite) → http://localho
 1. Create a session, upload a video, and press **Reconstruir**: the reconstruction, the cloud, then VLM + SAM 3 and the
    floor. **Instances → Cubes** shows how the scene was cut.
 2. Inspect the cloud. Set the **confidence** slider to the value that leaves the geometry clean.
-3. Order **GenRecon** from the Autosegment window or the segmentation panel, with the confidence threshold for this
-   session (the slider's value is pre-filled).
+3. Order **GenRecon** with its button in the Instances panel, with the confidence threshold for this session (the
+   slider's value is pre-filled). **Autosegment**, beside it, runs the VLM and SAM 3 again on the cloud on disk, with
+   editable prompts.
 4. **View → Background and grid** sets the session's background and grid; every viewer preference is saved per session
    and per user.
+
+**Orders through the API.** The same commands the UI sends (`POST /api/pipeline/run`; scan keys `<date>/<source>` from
+`GET /sessions/<id>/scans`; running and queued jobs at `GET /api/pipelines/active`):
+
+```bash
+RUN='curl -k -X POST https://localhost:8765/api/pipeline/run -H Content-Type:application/json -d'
+# reconstruct (replace false = resume on the stamps), segmenting the scans listed in "segment"
+$RUN '{"session_id": "<id>", "scans": ["<date>/<source>"], "replace": false, "segment": ["<date>/<source>"]}'
+# the segmentation chain on the cloud on disk; the floor follows
+$RUN '{"session_id": "<id>", "scans": ["<date>/<source>"], "autosegment": {"stages": {"vlm": true, "sam3": true}}}'
+# the projection alone: the masks on disk on the cloud on disk, nothing segmented again; the floor follows
+$RUN '{"session_id": "<id>", "scans": ["<date>/<source>"], "autosegment": {"stages": {"projection": true}}}'
+# GenRecon alone, at the viewer's confidence (0 = every point)
+$RUN '{"session_id": "<id>", "scans": ["<date>/<source>"], "autosegment": {"stages": {"genrecon": true}, "genrecon_confidence": 0.0}}'
+```
+
+An order freezes `config.yaml` as it is at that moment; a GenRecon order that finds its reconstruction's products
+under the same stamp continues at the mesh step (§18.7).
 
 All configuration lives in `server/config.yaml`. The loaders are typed, and a missing key fails at load.
 
@@ -1474,27 +2001,44 @@ All configuration lives in `server/config.yaml`. The loaders are typed, and a mi
 stac-build/
 ├─ server/
 │   ├─ main.py                 # FastAPI app: REST, WebSockets, the run orders (Reconstruir, Autosegment, GenRecon)
-│   ├─ pipeline_manager.py     # stages, frozen config per job, resume probes, the queue, the GPU hand-over
+│   ├─ pipeline_manager.py     # stages, frozen config per job, resume probes, the queue, the GPU hand-over, the
+│   │                          #   segmentation rounds
 │   ├─ view_range.py           # THE RANGE: reconstruction.view_range_m, the one range of every stage
+│   ├─ jpeg_gpu.py             # JPEG frames decoded on the card with PIL's pixels (nvJPEG + libjpeg-turbo's integers)
+│   ├─ repro.py                # stamps, the deterministic environment, the exclusive-GPU check
+│   ├─ potree_converter.py     # the octree: PotreeConverter's launch and its stamp
 │   ├─ workers/                # map (reconstruction), cloudcompy, vlm, sam3, floor, genrecon, certify (off)
 │   ├─ intake/                 # I0 quality, focal probe, I1 parallax, I3 walk, turn frames, VRAM sizing
 │   ├─ reconstruction/         # amb3r_probe (the whole-video pass and its metre), coverage_fill (the keyframes completed
 │   │                          #   on the map), cubes + chunk_covis (the cut), cube_boxes (the viewer's cubes), chunk_plan
 │   │                          #   (Ω resolution), scale_align, orient, sky precompute, stream_clean + gpu_cloud_clean
-│   │                          #   (the cleaner), potree_converter
-│   ├─ precision/              # F0 camera, F2 gauge, F4 tracks, F3 probe, F5 refine + ba_torch, F6 depth_on_f5 +
-│   │                          #   mono_detail + f6_torch, corrected cloud, chunk check, epochs
-│   ├─ correction/             # epochs (apply/select, ledger, replay), restart (the way back to epoch 0), floor
-│   ├─ segmentation/           # autoprompt (VLM), SAM 3 wrapper, mask → cloud, instances, OBBs, store
-│   ├─ semantic/               # vLLM launcher and client
-│   ├─ tools/genrecon/         # adapter, presence (the vote + layout), run_cloud.sh, bake_chunks_parallel,
-│   │                          #   photo_albedo, publish, measure_mesh, genrecon_stac.patch
+│   │                          #   (the cleaner), surface_fit (the evidence device)
+│   ├─ precision/              # F0 camera, F2 gauge, F4 tracks, F5 refine + ba_torch, F6 depth_on_f5 + mono_detail +
+│   │                          #   f6_torch, corrected cloud, chunk check, epochs
+│   ├─ correction/             # epochs (apply/select, ledger, replay), restart (the way back to epoch 0), floor,
+│   │                          #   warp_torch (the epoch warp on the device)
+│   ├─ segmentation/           # autoprompt/ (the VLM's vocabulary, the merge, rounds), sam3_wrapper + sam3_group +
+│   │                          #   sam3_fast + sam3_frames_gpu (SAM 3.1), pipeline (the store, mask → cloud, instances,
+│   │                          #   boxes), census, mask_filter (the audit), mask_store_gpu + store_deflate_gpu +
+│   │                          #   crc32_gpu (the store on the card), mask_match_torch, sam3_pairs_torch,
+│   │                          #   fragments_torch, obb_gpu and the other device twins
+│   ├─ semantic/               # vLLM launcher (deterministic serve flags), the engine lease and job_engine, client
+│   ├─ phase_r/                # the instance store (scene_r.db)
+│   ├─ phase5_qa/              # the spatial chat: orchestrator (prompt, references, provenance retry), tools.py (the
+│   │                          #   record), tools_torch.py (the device), tools_worker.py (the tools process), provenance.py
+│   ├─ calibration3d.py  calibration_api.py   # calibration measurements taken on the 3D model, per scan
+│   ├─ tools/genrecon/         # adapter + layout_gpu, presence (the vote + layout), genrecon_levels, run_cloud.sh,
+│   │                          #   resume + latents, decode_regions, remesh_resolution, denoise (the edge filter),
+│   │                          #   remap_gpu, bake_chunks_parallel, photo_albedo, publish, cloud_shape + drop_loose
+│   │                          #   (the shape from the cloud, off), measure_mesh, genrecon_stac.patch
+│   ├─ tools/amb3r/            # the AMB3R-SLAM driver and amb3r_stac.patch
 │   └─ config.yaml
 ├─ vendor/
 │   ├─ VGGT-Long/              # the fork (branch gpu-main): cube_run (Ω per cube, metric lock, seams, revisit bridges
 │   │                          #   and closures, ownership), context/witness views, the Sim(3) graph, the decision rule
-│   ├─ AMB3R-SLAM/             # the fork (branch stac): the whole-video pass and its light map
-│   ├─ depth-anything-3/  pointdit/  sam31/  GenRecon/  …
+│   ├─ AMB3R-SLAM/             # upstream 5418465 + tools/amb3r/amb3r_stac.patch: the whole-video pass and its light map
+│   ├─ GenRecon/               # upstream eaf1468 + tools/genrecon/genrecon_stac.patch; work/ holds each run's products
+│   ├─ depth-anything-3/  pointdit/  sam31/  PotreeConverter/  …
 ├─ ui/                         # React + TypeScript + Vite; the viewer (viewport/: HUD, palette, sceneLook), panels,
 │                              #   GenRecon, Autosegment and Background-and-grid windows; design tokens and i18n
 ├─ tools/glb/                  # tile_mesh.mjs (3D Tiles)
@@ -1510,3 +2054,135 @@ stac-build/
 - team workspaces.
 
 See `docs/` for their design.
+
+---
+
+## 22. The session in the viewer: meshes, the spatial chat, calibration
+
+### 22.1 Opening a session
+
+The cloud opens first. Every mesh of the scan — the GenRecon tiles and the per-instance GLBs — is **listed unchecked
+and not downloaded**; checking one loads it (`Viewport.setTsdfVisibility`). A mesh that appears while the session is
+open, a GenRecon stage ending, loads at once: it is what the user is waiting for. Before 2026-11-13 the scene meshes
+loaded with the session.
+
+### 22.2 The spatial chat (`server/phase5_qa/`)
+
+The assistant is a tool-calling loop over Qwen3-VL. The model proposes, describes and orchestrates; **it never
+measures**: every figure of an answer comes from a deterministic tool over the scan's instance store.
+
+**The scan it answers about.** The request carries the scan the viewer shows (`scan`); without it the project's
+active scan is used (`project_paths.resolve_session`). The store is `output/scene_r.db` of that scan.
+
+**What the model reads.**
+
+- *The session*: project, scan, number of objects, the cached scene description.
+- *The whole inventory.* Up to `semantic.chat.list_limit` objects, one line each (label, class, vertical extent). Beyond
+  it, every **label** with its count, its ids as ranges and its largest object:
+  `sign (3): ids 795-797 — largest: 795`. A label scattered over more id runs than the limit is given as a span and
+  `list_objects(label)` returns its ids. The model therefore knows every id that exists; a listing never exceeds the
+  context (pccr 2026-08-24's 8,777 objects were 486 kB of JSON before).
+- *The objects the question names.* `label#id`, `#id` and `id N` — as the Instances list writes them — are looked up
+  in the store **before** the model reads the question, and the result is appended to it: the id's own label, whether
+  it exists, and the ids of that label when it does not. Positions are not written there (read in a prompt they were
+  subtracted into distances no tool had measured); `get_object(id)` returns them.
+- *The conversation*: its last `semantic.chat.history_turns` turns.
+
+**The provenance check** (`provenance.py`). Let an answer state a figure $v$ written with $d$ decimals and a unit, and
+let $T$ be the numbers the tools returned in this turn, the numbers of the tool layer's own text and the numbers the
+user wrote. The figure is grounded when
+
+$$\exists\, t \in T,\ k \in K(\text{unit}) :\quad \lvert t\,k - v \rvert \le \tfrac12\,10^{-d},$$
+
+with $K$ the changes of unit of the figure's family (m: 1, $10^{-3}$, $10^{-2}$; cm: 100, 1, 0.1; mm: 1000, 1, 10;
+areas, volumes and degrees: 1). Every number of a bracketed vector that holds a decimal is checked the same way, and
+every tool the answer cites must have been called in this turn. An answer that fails is sent back **once** with the
+failing figures and a tool call required (`tool_choice: required`); what still fails is returned with the answer
+(`provenance.ok = false`, the figures listed) and shown under it. Found on pccr 2026-08-31: asked for a distance, the
+model answered "1.14 m, measured with get_distance" having called no tool.
+
+**Where the measurements run** (`semantic.chat.tools_device`: `numpy` | `cpu` | `cuda`). The tools that read an
+object's points — clearance, parts and bands, extent, plumb, level, height profile, flatness, the volumes — are
+`POINT_TOOLS`. With `cuda` they run in the chat's **own process** (`tools_worker.py`), not in the server: a CUDA
+context in the backend is a compute process on the card for its whole life, and every GPU step after it refuses a
+card that is not free (`repro.require_exclusive_gpu`). The process starts when the chat opens on a scan, keeps the
+store and the points it measured on the device between questions, and **ends** — joined, the card free — when a
+pipeline job or a server GPU task takes the engine lease, when the question is about another scan, when the scan's
+segmentation is written again, and with the backend. While the lease is held it is not started: the chat answers
+"busy". A `cuda` with no card fails naming the key.
+
+The points and the boxes are promoted from the store's float32 to **float64** before any arithmetic, on both paths
+(before 2026-11-13 a display-frame store was measured in float32: a figure can differ in its last printed digit).
+
+**The closest pair of two objects, exact** (`tools_torch.closest_pair`). Each set is sorted along the Morton curve of
+a grid of $2^{10}$ cells per side over its own box, so the cells of every coarser level are runs of the sorted
+points; a cell keeps the tight box $[\mathbf{lo}, \mathbf{hi}]$ of its own points. For cell $i$ of one set and $j$ of
+the other,
+
+$$\ell_{ij}^2 = \sum_{a \in \{x,y,z\}} \max\bigl(0,\ lo_{i,a} - hi_{j,a},\ lo_{j,a} - hi_{i,a}\bigr)^2 \;\le\; \lVert \mathbf p - \mathbf q \rVert^2 \quad \forall\, \mathbf p \in i,\ \mathbf q \in j,$$
+
+also in floating point, every step being monotone. An upper bound $u^2$ is the squared distance of a **real** pair
+(strided samples of the pairs of cells with the smallest $\ell$). A pair of cells is kept while $\ell_{ij}^2 \le u^2$;
+the kept pairs are split into their children at the next level and bounded again, until the point pairs left fit the
+work bound, and those are measured outright. The pair that realises the minimum is never pruned — its bound cannot
+exceed its own distance — so the distance is the k-d tree's. Squared distances are $dx^2 + dy^2 + dz^2$ in that
+order. Among pairs at exactly the same distance the first point of the first set wins, then the first of the second;
+the tree breaks a tie inside the second set its own way: the pair, never the distance, can differ there.
+
+The other kernels are float64 twins of the numpy code, which stays the path of record: the bands and extremes; the
+principal axes from the QR of the centred points and the SVD of its $3\times3$ factor; numpy's median and linear
+percentile on sorted values; the stations of a height profile; the box coordinates of a volume, its occupancy voxels
+and the first free placement of an item in $i, j, k$ order from a summed-area table.
+
+Measured on pccr 2026-08-31 (18.6 M points in 1,360 instances), the numpy path against the card:
+
+| | numpy, one core | card |
+|---|---:|---:|
+| Clearance, floor (1,062,834 points) – wall (743,629) | not ended in 8 min | 0.09 s (1.8 mm; the same pair by an independent exact search) |
+| Clearance, floor – work surface (59,366) | 13.3 s | 0.10 s |
+| Clearance, two objects of 59 k points | 5.6 s | 1.2 s (first call of the process) |
+| A 2 m box: objects inside, free volume | 3.3–6.7 s | 0.58 s the first, 0.03 s after |
+| Every instance's points read from the store | 17.5 s (1,360 queries) | 0.2 s (one query) |
+| Building the prompt, pccr 2026-08-24 (8,777 objects) | 9.9 s | 1.4 s (sqlite, batched) |
+| The tools process, start | — | 8.5–9.5 s, once per chat opening |
+
+Every tool compared gave the identical answer on both paths. With the tools on the card a question's time is the
+model's: the engine serves 21 tokens/s under the deterministic serve flags (§17.1), about 3 s per call of the loop on
+a 9 k-token prompt.
+
+**Tests.** `tests/test_chat_tools_torch.py` (the closest pair against scipy's tree in seven configurations and with
+the octree forced; ties; numpy's median, percentile and SVD; the free placement against the record's loops; every
+point tool on both paths over a store; the same on the card in strict deterministic mode; the tools process: it
+measures, survives a tool's error, ends, is not started beside a job, restarts on a new segmentation) and
+`tests/test_chat_assistant.py` (the scan asked, the inventory, the references, the listings, the provenance check and
+its retry, the conversation's turns).
+
+### 22.3 Calibration on the 3D model (`server/calibration3d.py`)
+
+A calibration measurement is taken **on the model**, not on the keyframes: with the distance tool the user marks two
+points on the cloud or on a mesh and presses the pin of the readout. The window (`ui/src/features/CalibrationDialog.tsx`)
+asks for the real length, its uncertainty $\sigma$, its source — tape, laser, total station, or **another scan** of
+the project — and its role:
+
+- **gauge**: it calibrates the scale;
+- **test**: it measures the error that remains after calibrating.
+
+The server stores it in `output/calibration_3d.json` of the scan. The model's length $m = \lVert \mathbf b - \mathbf a
+\rVert$ is computed there from the two stored points, never taken from the client, and carries the geometry epoch it
+was picked on: a measurement of another epoch is *stale* — listed, not used, not drawn.
+
+The scan's scale factor is the evaluation battery's estimator over the gauge measurements of the current epoch
+(`evaluation.geometry.gauge_scale`):
+
+$$s = \arg\min_s \sum_i w_i\,(s\,m_i - t_i)^2 = \frac{\sum_i w_i\, m_i\, t_i}{\sum_i w_i\, m_i^2}, \qquad w_i = \frac{1}{\sigma_i^2},$$
+
+with $t_i$ the real length (equal weights when every $\sigma$ is 0; a $\sigma$ of 0 among positive ones takes the
+smallest positive one). The window shows $s$, the residuals $s\,m_i - t_i$ of the fit and the error on the test
+measurements. With **another scan** as the source, the same element is measured on both scans and the other scan's
+length is the "real" one: $s$ is then the factor that brings this scan to that scan's scale.
+
+The factor is **reported, not applied**: no cloud, pose or mesh is rescaled by it. The stored measurements are drawn
+on the model in their own colour and stay through "clear measurements".
+
+Routes: `GET /api/calibration/{session}?scan_key=`, `POST …/measurements`, `PATCH …/measurements/{id}`,
+`DELETE …/measurements/{id}`. Tests: `tests/test_calibration3d.py`.
