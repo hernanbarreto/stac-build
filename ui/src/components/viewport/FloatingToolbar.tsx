@@ -10,20 +10,22 @@
  * the toolbar as glass popovers. Every action here already existed in the
  * previous toolbar / Tools menu; nothing new is invented.
  */
-import { useState, type ReactNode } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import {
   Axis3D, Box, Brush, Camera, Check, Circle, Eraser, Grid3X3, Home, Maximize, Move, Package, Palette,
   RotateCcw, Ruler, Scale, Scissors, SlidersHorizontal, Square, Thermometer, Trash2, TriangleRight, Undo2, Unlock, X, ArrowDownToLine, AlignVerticalJustifyEnd, ArrowUpToLine, AlignHorizontalJustifyCenter, AlignVerticalJustifyCenter, Loader2,
   Pin, Pentagon, Scaling,
 } from 'lucide-react'
 import { IconButton } from '../ui/IconButton'
+import { Menu } from '../ui/Menu'
 import { Button } from '../ui/Button'
 import { Slider, Select, SegmentedControl, Checkbox, SearchInput } from '../ui/Field'
 import { Badge } from '../ui/Badge'
 import { Sep } from '../ui/Panel'
 import { useFmt, useT } from '../../i18n'
 
-export type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align' | 'erase'
+export type CalibrationKind = 'distance' | 'plane'
+export type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'measure-plane' | 'section-box' | 'align' | 'erase'
 export type ColorMode = 'rgb' | 'status' | 'mv_votes' | 'deviation'
 export type EraseShape = 'sphere' | 'cube' | 'box'
 
@@ -117,10 +119,12 @@ interface FloatingToolbarProps {
   onResetCamera: () => void
   onClearMeasurements: () => void
   /** reference distance / plane on keyframe images (evaluation battery): modal dialogs, not viewport tools */
-  onReferenceDistance: () => void
-  onReferencePlane: () => void
-  /** the scan's calibration measurements taken on the 3D model (USER 2026-11-13) */
-  onCalibration: () => void
+  /** CALIBRATION, ONE BUTTON (USER 2026-11-13: "ambos metodos de calibracion deben estar agrupados en un unico
+   *  boton que sea calibracion, debe desplegar un pequeño selector con el tipo de calibracion que se va a hacer"):
+   *  a distance or a plane marked on the 3D model, or the list of what is stored */
+  onCalibration: (kind: CalibrationKind | 'list') => void
+  /** the kind being measured for a calibration right now (the button stays lit) */
+  calibrating?: CalibrationKind | null
   onAddObject: () => void
   onResetSection: () => void
   brush: BrushState
@@ -134,7 +138,7 @@ interface FloatingToolbarProps {
 
 type Popover = 'brush' | 'display' | 'color' | null
 
-export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeasurements, onReferenceDistance, onReferencePlane, onCalibration, onAddObject, onResetSection, brush, display, view, color, compare, placed, sabanaVisible }: FloatingToolbarProps) {
+export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeasurements, onCalibration, calibrating = null, onAddObject, onResetSection, brush, display, view, color, compare, placed, sabanaVisible }: FloatingToolbarProps) {
   const t = useT()
   const fmt = useFmt()
   const [popover, setPopover] = useState<Popover>(null)
@@ -143,6 +147,8 @@ export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeas
   const [mergeTarget, setMergeTarget] = useState('')
   const [merging, setMerging] = useState(false)
   const toggle = (p: Popover) => setPopover(cur => (cur === p ? null : p))
+  const calibrationBtn = useRef<HTMLButtonElement>(null)
+  const [calibrationMenu, setCalibrationMenu] = useState(false)
   const brushOn = activeTool === 'erase'
 
   return (
@@ -165,9 +171,17 @@ export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeas
               <IconButton size="lg" tone="measure" label={t('toolbar.measureDistance')} shortcut="M" icon={<Ruler aria-hidden />} active={activeTool === 'measure-distance'} onClick={() => onTool('measure-distance')} />
               <IconButton size="lg" tone="measure" label={t('toolbar.measureAngle')} shortcut="A" icon={<TriangleRight aria-hidden />} active={activeTool === 'measure-angle'} onClick={() => onTool('measure-angle')} />
               <IconButton size="lg" label={t('toolbar.clearMeasurements')} icon={<Trash2 aria-hidden />} onClick={onClearMeasurements} />
-              <IconButton size="lg" tone="measure" label={t('toolbar.referenceDistance')} icon={<Pin aria-hidden />} onClick={onReferenceDistance} />
-              <IconButton size="lg" tone="measure" label={t('toolbar.referencePlane')} icon={<Pentagon aria-hidden />} onClick={onReferencePlane} />
-              <IconButton size="lg" tone="measure" label={t('toolbar.calibration')} icon={<Scaling aria-hidden />} onClick={onCalibration} />
+              <IconButton ref={calibrationBtn} size="lg" tone="measure" label={t('toolbar.calibration')} icon={<Scaling aria-hidden />}
+                active={!!calibrating || calibrationMenu} aria-haspopup="menu" aria-expanded={calibrationMenu} onClick={() => setCalibrationMenu(o => !o)} />
+              <Menu open={calibrationMenu} onClose={() => setCalibrationMenu(false)} anchor={calibrationBtn.current?.getBoundingClientRect() ?? null}
+                ariaLabel={t('toolbar.calibration')}
+                entries={[
+                  { type: 'header', id: 'kind', label: t('calibration.pickKind') },
+                  { id: 'distance', label: t('calibration.kindDistance'), hint: t('calibration.kindDistanceHint'), icon: <Ruler aria-hidden />, checked: calibrating === 'distance', onSelect: () => onCalibration('distance') },
+                  { id: 'plane', label: t('calibration.kindPlane'), hint: t('calibration.kindPlaneHint'), icon: <Pentagon aria-hidden />, checked: calibrating === 'plane', onSelect: () => onCalibration('plane') },
+                  { type: 'separator', id: 'sep' },
+                  { id: 'list', label: t('calibration.savedList'), icon: <Pin aria-hidden />, onSelect: () => onCalibration('list') },
+                ]} />
             </Group>
             <Sep />
             <Group>

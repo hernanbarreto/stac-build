@@ -5,6 +5,10 @@
                                                                     + the real length)
     PATCH  /api/calibration/{session_id}/measurements/{mid}         what the user states about it
     DELETE /api/calibration/{session_id}/measurements/{mid}?scan_key=
+    POST   /api/calibration/{session_id}/planes                     add a plane (three or more
+                                                                    picked points)
+    PATCH  /api/calibration/{session_id}/planes/{pid}               its label / note
+    DELETE /api/calibration/{session_id}/planes/{pid}?scan_key=
 
 Wired by ``main.py`` through :func:`configure` (the session resolver and the audit log are the
 server's; this module never imports main), as the evaluation router is.
@@ -112,4 +116,64 @@ def delete_measurement(session_id: str, mid: str, scan_key: Optional[str] = Quer
     except KeyError:
         raise HTTPException(404, f"no calibration measurement {mid!r}")
     _log("calibration.delete", session_id, {"id": mid})
+    return _answer(out, doc)
+
+
+@router.post("/{session_id}/planes")
+def add_plane(session_id: str, body: Dict[str, Any]):
+    scan_key = body.get("scan_key") or body.get("scan") or None
+    out = _output_dir(session_id, scan_key)
+    doc = _load(out)
+    try:
+        pl = C.add_plane(doc, body, _epoch(out))
+        C.save(out, doc)
+    except C.CalibrationError as e:
+        raise HTTPException(400, detail={"error": str(e)}) from e
+    _log("calibration.plane.add", session_id, {"id": pl["id"], "label": pl["label"],
+                                               "inclination_deg": pl["inclination_deg"]})
+    return _answer(out, doc, plane=pl)
+
+
+@router.patch("/{session_id}/planes/{pid}")
+def update_plane(session_id: str, pid: str, body: Dict[str, Any]):
+    scan_key = body.get("scan_key") or body.get("scan") or None
+    out = _output_dir(session_id, scan_key)
+    doc = _load(out)
+    try:
+        pl = C.update_plane(doc, pid, body)
+        C.save(out, doc)
+    except KeyError:
+        raise HTTPException(404, f"no calibration plane {pid!r}")
+    except C.CalibrationError as e:
+        raise HTTPException(400, detail={"error": str(e)}) from e
+    _log("calibration.plane.update", session_id, {"id": pid})
+    return _answer(out, doc, plane=pl)
+
+
+@router.delete("/{session_id}/planes/{pid}")
+def delete_plane(session_id: str, pid: str, scan_key: Optional[str] = Query(default=None)):
+    out = _output_dir(session_id, scan_key)
+    doc = _load(out)
+    try:
+        C.remove_plane(doc, pid)
+        C.save(out, doc)
+    except KeyError:
+        raise HTTPException(404, f"no calibration plane {pid!r}")
+    _log("calibration.plane.delete", session_id, {"id": pid})
+    return _answer(out, doc)
+
+
+@router.put("/{session_id}/mode")
+def set_mode(session_id: str, body: Dict[str, Any]):
+    """The type of calibration: 'global' (one factor) or 'axes' (one per axis — refused unless a
+    gauge measurement runs along each of the three axes)."""
+    scan_key = body.get("scan_key") or body.get("scan") or None
+    out = _output_dir(session_id, scan_key)
+    doc = _load(out)
+    try:
+        mode = C.set_mode(doc, body.get("mode"), _epoch(out))
+        C.save(out, doc)
+    except C.CalibrationError as e:
+        raise HTTPException(400, detail={"error": str(e)}) from e
+    _log("calibration.mode", session_id, {"mode": mode})
     return _answer(out, doc)

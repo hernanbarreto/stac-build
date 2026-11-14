@@ -11,11 +11,17 @@
  * taken from, to bring this scan to that scan's scale — and it is stored by the server
  * (`/api/calibration/{session}`; the model's length is computed there from the two points).
  *
+ * A PLANE is calibrated the same way (USER 2026-11-13: "la calibracion por plano tambien debe
+ * quedar sobre la nube … y debe dibujar el plano sobre la nube 3d"): the plane tool marks three or
+ * more points on a flat surface of the model, the draft arrives here, the user names it, and the
+ * server stores it with the plane it fits — its inclination, how far the points lie from it, its
+ * area. Stored planes are drawn on the cloud.
+ *
  * The window lists what is stored with the scale factor the gauge measurements give and the
- * error on the test ones. The factor is REPORTED: nothing is rescaled from here.
+ * error on the test ones. The factor is REPORTED: nothing is rescaled or levelled from here.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Crosshair, Pin, Ruler, Save, Trash2 } from 'lucide-react'
+import { Crosshair, Pentagon, Pin, Ruler, Save, Trash2 } from 'lucide-react'
 import { Dialog } from '../components/ui/Dialog'
 import { Button } from '../components/ui/Button'
 import { IconButton } from '../components/ui/IconButton'
@@ -58,6 +64,12 @@ interface CalRow {
   stale: boolean
   calibrated_m: number | null
   residual_m: number | null
+  /** the axis it runs along (its largest component): X and Z horizontal, Y vertical */
+  axis: 'X' | 'Y' | 'Z'
+  /** the direction it was measured in: 0 horizontal, 90 vertical */
+  elevation_deg: number
+  /** a verifying measurement against the uncertainty the user stated for it (null: none stated) */
+  within_sigma: boolean | null
 }
 
 export interface CalSummary {
@@ -69,15 +81,54 @@ export interface CalSummary {
   scale_factor: number | null
   weighting: string | null
   rows: CalRow[]
+  planes?: CalPlaneRow[]
   gauge_fit_residual_rms_m?: number
   gauge_fit_residual_max_m?: number
   gauge_ratio_min?: number
   gauge_ratio_max?: number
   test_abs_error_m?: { median: number | null; max: number; n: number }
   test_rel_error?: { median: number | null; max: number; n: number }
+  /** the type chosen and the one in use: per axis only when chosen AND a gauge runs along each axis */
+  mode: 'global' | 'axes'
+  mode_used: 'global' | 'axes'
+  axes: { covered: string[]; missing: string[]; ready: boolean; factors: { x: number; y: number; z: number } | null; reason: string | null }
+  /** uncalibrated: nothing calibrates on this geometry; calibrated: a factor, not checked; verified: checked */
+  state: 'uncalibrated' | 'calibrated' | 'verified'
+  verification: { n: number; max_abs_m: number; max_rel: number; worst_id: string; worst_difference_m: number
+                  n_with_sigma: number; all_within_sigma: boolean | null } | null
 }
 
-export interface CalibrationDraft { readoutId: string; a: number[]; b: number[]; metres: number }
+export interface CalPlane {
+  id: string
+  points: number[][]
+  label: string
+  note: string
+  inclination_deg: number
+  height_m: number
+  rms_m: number
+  max_m: number
+  area_m2: number
+  geometry_epoch: number
+  created: string
+}
+
+interface CalPlaneRow {
+  id: string
+  label: string
+  inclination_deg: number
+  height_m: number
+  rms_m: number
+  max_m: number
+  area_m2: number
+  n_points: number
+  geometry_epoch: number
+  stale: boolean
+}
+
+/** what was just measured on the model and waits to be stored: a distance or a plane */
+export type CalibrationDraft =
+  | { kind: 'distance'; readoutId: string; a: number[]; b: number[]; metres: number }
+  | { kind: 'plane'; readoutId: string; points: number[][] }
 
 interface CalibrationDialogProps {
   open: boolean
@@ -89,14 +140,14 @@ interface CalibrationDialogProps {
   /** a distance just measured on the model, waiting to be marked (null: the list only) */
   draft: CalibrationDraft | null
   onClose: () => void
-  /** start the distance tool on the model (the window closes; the pin of the readout comes back here) */
-  onMeasure: () => void
-  /** the stored set changed (or was loaded): the viewer draws its marks */
-  onChanged: (measurements: CalMeasurement[], summary: CalSummary) => void
+  /** start the distance or the plane tool on the model (the window closes; what is measured comes back here) */
+  onMeasure: (kind: 'distance' | 'plane') => void
+  /** the stored set changed (or was loaded): the viewer draws its marks and planes */
+  onChanged: (measurements: CalMeasurement[], summary: CalSummary, planes: CalPlane[]) => void
   /** the draft was stored: its temporary measurement leaves the scene */
   onStored: (readoutId: string) => void
-  /** fly to a stored measurement */
-  onFrame: (m: CalMeasurement) => void
+  /** fly to a stored measurement or plane (its points) */
+  onFrame: (points: number[][]) => void
 }
 
 const scanQuery = (scanKey: string | null) => (scanKey ? `?scan_key=${encodeURIComponent(scanKey)}` : '')
@@ -107,6 +158,8 @@ export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft,
   const { notify } = useToast()
 
   const [measurements, setMeasurements] = useState<CalMeasurement[]>([])
+  const [planes, setPlanes] = useState<CalPlane[]>([])
+  const [planeLabel, setPlaneLabel] = useState('')
   const [summary, setSummary] = useState<CalSummary | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -119,11 +172,13 @@ export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft,
   const [refScan, setRefScan] = useState<string>('')
   const [note, setNote] = useState('')
 
-  const take = useCallback((d: { document?: { measurements?: CalMeasurement[] }; summary?: CalSummary }) => {
+  const take = useCallback((d: { document?: { measurements?: CalMeasurement[]; planes?: CalPlane[] }; summary?: CalSummary }) => {
     const ms = d.document?.measurements ?? []
+    const ps = d.document?.planes ?? []
     setMeasurements(ms)
+    setPlanes(ps)
     setSummary(d.summary ?? null)
-    if (d.summary) onChanged(ms, d.summary)
+    if (d.summary) onChanged(ms, d.summary, ps)
   }, [onChanged])
 
   useEffect(() => {
@@ -140,9 +195,44 @@ export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft,
   // a new draft starts a clean form (the instrument and the role chosen last are kept)
   useEffect(() => { if (draft) { setValue(''); setSigma(''); setNote('') } }, [draft])
 
-  const canSave = !!draft && typeof value === 'number' && value > 0 && (tool !== 'other_scan' || !!refScan) && !busy
+  const distance = draft?.kind === 'distance' ? draft : null
+  const plane = draft?.kind === 'plane' ? draft : null
+  const canSave = !!distance && typeof value === 'number' && value > 0 && (tool !== 'other_scan' || !!refScan) && !busy
+
+  const storePlane = useCallback(async () => {
+    if (!plane || !sessionId) return
+    setBusy(true)
+    try {
+      const r = await fetch(`/api/calibration/${encodeURIComponent(sessionId)}/planes`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scan_key: scanKey ?? undefined, points: plane.points, label: planeLabel.trim(), note }),
+      })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d?.detail?.error || d?.detail || `HTTP ${r.status}`)
+      take(d)
+      onStored(plane.readoutId)
+      notify(t('calibration.planeSaved', { id: d.plane?.id ?? '' }), { tone: 'ok' })
+    } catch (e) {
+      notify(t('calibration.saveFailed', { detail: e instanceof Error ? e.message : String(e) }), { tone: 'err' })
+    } finally { setBusy(false) }
+  }, [plane, sessionId, scanKey, planeLabel, note, take, onStored, notify, t])
+
+  const removePlane = useCallback(async (id: string) => {
+    if (!sessionId) return
+    setBusy(true)
+    try {
+      const r = await fetch(`/api/calibration/${encodeURIComponent(sessionId)}/planes/${encodeURIComponent(id)}${scanQuery(scanKey)}`, { method: 'DELETE' })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d?.detail?.error || d?.detail || `HTTP ${r.status}`)
+      take(d)
+      notify(t('calibration.deleted', { id }), { tone: 'ok' })
+    } catch (e) {
+      notify(t('calibration.saveFailed', { detail: e instanceof Error ? e.message : String(e) }), { tone: 'err' })
+    } finally { setBusy(false) }
+  }, [sessionId, scanKey, take, notify, t])
 
   const store = useCallback(async () => {
+    const draft = distance
     if (!draft || !sessionId || typeof value !== 'number') return
     setBusy(true)
     try {
@@ -159,7 +249,7 @@ export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft,
     } catch (e) {
       notify(t('calibration.saveFailed', { detail: e instanceof Error ? e.message : String(e) }), { tone: 'err' })
     } finally { setBusy(false) }
-  }, [draft, sessionId, scanKey, value, sigma, role, tool, note, refScan, take, onStored, notify, t])
+  }, [distance, sessionId, scanKey, value, sigma, role, tool, note, refScan, take, onStored, notify, t])
 
   const patch = useCallback(async (id: string, body: Record<string, unknown>) => {
     if (!sessionId) return
@@ -200,15 +290,22 @@ export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft,
     { id: 'model', header: t('calibration.colModel'), align: 'right', mono: true, cell: r => fmt.lengthText(r.measured_m), sortValue: r => r.measured_m },
     { id: 'real', header: t('calibration.colReal'), align: 'right', mono: true, cell: r => fmt.lengthText(r.value_m), sortValue: r => r.value_m },
     { id: 'ratio', header: t('calibration.colRatio'), align: 'right', mono: true, cell: r => fmt.number(r.ratio, 4), sortValue: r => r.ratio },
+    { id: 'axis', header: t('calibration.colAxis'), mono: true, cell: r => r.axis, sortValue: r => r.axis },
+    { id: 'cal', header: t('calibration.colCalibrated'), align: 'right', mono: true, cell: r => (r.calibrated_m == null ? '' : fmt.lengthText(r.calibrated_m)) },
     { id: 'residual', header: t('calibration.colResidual'), align: 'right', mono: true,
-      cell: r => (r.residual_m == null ? '' : fmt.mm(r.residual_m * 1000, 1)), sortValue: r => (r.residual_m == null ? null : Math.abs(r.residual_m)) },
+      cell: r => (r.residual_m == null ? '' : (
+        <span>
+          {`${r.residual_m >= 0 ? '+' : ''}${fmt.mm(r.residual_m * 1000, 1)}`}
+          {r.role === 'test' && r.within_sigma != null && <Badge tone={r.within_sigma ? 'ok' : 'err'} size="sm">{r.within_sigma ? t('calibration.checks') : t('calibration.checksNot')}</Badge>}
+        </span>
+      )), sortValue: r => (r.residual_m == null ? null : Math.abs(r.residual_m)) },
     { id: 'source', header: t('calibration.tool'),
       cell: r => { const m = byId.get(r.id); return m?.tool === 'other_scan' ? t('calibration.fromScan', { name: scanLabel(m.reference_scan) }) : t(`calibration.tool_${r.tool}`) } },
     { id: 'state', header: '', cell: r => (r.stale ? <Badge tone="neutral" size="sm" title={t('calibration.staleHint')}>{t('calibration.stale', { n: r.geometry_epoch })}</Badge> : byId.get(r.id)?.note ?? '') },
     { id: 'actions', header: '', align: 'right',
       cell: r => (
         <Row justify="end">
-          <IconButton size="sm" label={t('calibration.frame')} icon={<Crosshair aria-hidden />} onClick={() => { const m = byId.get(r.id); if (m) onFrame(m) }} />
+          <IconButton size="sm" label={t('calibration.frame')} icon={<Crosshair aria-hidden />} onClick={() => { const m = byId.get(r.id); if (m) onFrame([m.a, m.b]) }} />
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => patch(r.id, { role: r.role === 'gauge' ? 'test' : 'gauge' })}>
             {r.role === 'gauge' ? t('calibration.makeTest') : t('calibration.makeGauge')}
           </Button>
@@ -217,6 +314,39 @@ export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft,
       ) },
   ], [t, fmt, byId, scanLabel, busy, patch, remove, onFrame])
 
+  const setMode = useCallback(async (mode: 'global' | 'axes') => {
+    if (!sessionId) return
+    setBusy(true)
+    try {
+      const r = await fetch(`/api/calibration/${encodeURIComponent(sessionId)}/mode`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scan_key: scanKey ?? undefined, mode }),
+      })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d?.detail?.error || d?.detail || `HTTP ${r.status}`)
+      take(d)
+    } catch (e) {
+      notify(t('calibration.saveFailed', { detail: e instanceof Error ? e.message : String(e) }), { tone: 'err' })
+    } finally { setBusy(false) }
+  }, [sessionId, scanKey, take, notify, t])
+
+  const planeById = useMemo(() => new Map(planes.map(pl => [pl.id, pl])), [planes])
+  const planeColumns: Column<CalPlaneRow>[] = useMemo(() => [
+    { id: 'id', header: t('calibration.colId'), mono: true, cell: r => r.id },
+    { id: 'label', header: t('calibration.planeLabel'), cell: r => r.label },
+    { id: 'incl', header: t('calibration.colInclination'), align: 'right', mono: true, cell: r => `${fmt.number(r.inclination_deg, 2)}°`, sortValue: r => r.inclination_deg },
+    { id: 'rms', header: t('calibration.colPlaneRms'), align: 'right', mono: true, cell: r => fmt.mm(r.rms_m * 1000, 1), sortValue: r => r.rms_m },
+    { id: 'area', header: t('calibration.colArea'), align: 'right', mono: true, cell: r => `${fmt.number(r.area_m2, 2)} m²`, sortValue: r => r.area_m2 },
+    { id: 'n', header: t('calibration.colPoints'), align: 'right', mono: true, cell: r => fmt.integer(r.n_points) },
+    { id: 'state', header: '', cell: r => (r.stale ? <Badge tone="neutral" size="sm" title={t('calibration.staleHint')}>{t('calibration.stale', { n: r.geometry_epoch })}</Badge> : planeById.get(r.id)?.note ?? '') },
+    { id: 'actions', header: '', align: 'right',
+      cell: r => (
+        <Row justify="end">
+          <IconButton size="sm" label={t('calibration.frame')} icon={<Crosshair aria-hidden />} onClick={() => { const pl = planeById.get(r.id); if (pl) onFrame(pl.points) }} />
+          <IconButton size="sm" variant="danger" label={t('common.delete')} icon={<Trash2 aria-hidden />} disabled={busy} onClick={() => removePlane(r.id)} />
+        </Row>
+      ) },
+  ], [t, fmt, planeById, busy, removePlane, onFrame])
+
   const factor = summary?.scale_factor ?? null
 
   return (
@@ -224,17 +354,37 @@ export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft,
       icon={<Pin aria-hidden />} size="lg" onClose={onClose}
       footer={
         <>
-          <Button icon={<Ruler aria-hidden />} disabled={!sessionId} onClick={onMeasure} title={t('calibration.measureHint')}>{t('calibration.measure')}</Button>
+          <Button icon={<Ruler aria-hidden />} disabled={!sessionId} onClick={() => onMeasure('distance')} title={t('calibration.measureHint')}>{t('calibration.measure')}</Button>
+          <Button icon={<Pentagon aria-hidden />} disabled={!sessionId} onClick={() => onMeasure('plane')} title={t('calibration.planeHint')}>{t('calibration.measurePlane')}</Button>
           <Button onClick={onClose}>{t('common.close')}</Button>
         </>
       }>
       <Stack gap={3}>
         {loadError && <Banner tone="err">{t('calibration.loadFailed', { detail: loadError })}</Banner>}
 
-        {draft && (
+        {plane && (
+          <Section title={t('calibration.planeDraftTitle')}>
+            <Stack gap={2}>
+              <KeyValue label={t('calibration.planePoints')} mono>{fmt.integer(plane.points.length)}</KeyValue>
+              <Row wrap>
+                <Field label={t('calibration.planeLabel')} hint={t('calibration.planeLabelHint')}>
+                  <Input value={planeLabel} onChange={e => setPlaneLabel(e.target.value)} data-autofocus aria-label={t('calibration.planeLabel')} />
+                </Field>
+                <Field label={t('calibration.note')}>
+                  <Input value={note} onChange={e => setNote(e.target.value)} aria-label={t('calibration.note')} />
+                </Field>
+              </Row>
+              <Row justify="end">
+                <Button variant="primary" icon={<Save aria-hidden />} disabled={busy} onClick={storePlane}>{t('calibration.savePlane')}</Button>
+              </Row>
+            </Stack>
+          </Section>
+        )}
+
+        {distance && (
           <Section title={t('calibration.draftTitle')}>
             <Stack gap={2}>
-              <KeyValue label={t('calibration.modelLength')} mono>{fmt.lengthText(draft.metres)}</KeyValue>
+              <KeyValue label={t('calibration.modelLength')} mono>{fmt.lengthText(distance.metres)}</KeyValue>
               <Row wrap>
                 <Field label={t('calibration.realLength')}>
                   <NumberInput value={value} onChange={setValue} unit="m" min={0} step={0.001} data-autofocus aria-label={t('calibration.realLength')} />
@@ -274,7 +424,29 @@ export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft,
         <Section title={t('calibration.summaryTitle')}>
           {summary && summary.n > 0 ? (
             <Stack gap={1}>
-              <KeyValue label={t('calibration.factor')} mono>{factor != null ? `× ${fmt.number(factor, 5)}` : t('calibration.noFactor')}</KeyValue>
+              <KeyValue label={t('calibration.state')}>
+                <Badge tone={summary.state === 'verified' ? 'ok' : summary.state === 'calibrated' ? 'info' : 'warn'}>{t(`calibration.state_${summary.state}`)}</Badge>
+              </KeyValue>
+              <Field label={t('calibration.mode')} hint={summary.axes.ready ? t('calibration.modeHint') : t('calibration.modeAxesMissing', { axes: summary.axes.missing.join(', ') || 'X, Y, Z' })}>
+                <SegmentedControl<'global' | 'axes'> value={summary.mode_used} onChange={setMode} ariaLabel={t('calibration.mode')}
+                  options={[{ value: 'global', label: t('calibration.modeGlobal') },
+                            { value: 'axes', label: t('calibration.modeAxes'), disabled: !summary.axes.ready || busy }]} />
+              </Field>
+              {summary.mode_used === 'axes' && summary.axes.factors ? (
+                <KeyValue label={t('calibration.factorAxes')} mono>
+                  {`X × ${fmt.number(summary.axes.factors.x, 5)}   Y × ${fmt.number(summary.axes.factors.y, 5)}   Z × ${fmt.number(summary.axes.factors.z, 5)}`}
+                </KeyValue>
+              ) : (
+                <KeyValue label={t('calibration.factor')} mono>{factor != null ? `× ${fmt.number(factor, 5)}` : t('calibration.noFactor')}</KeyValue>
+              )}
+              {summary.verification && (
+                <KeyValue label={t('calibration.verification')} mono>
+                  {t('calibration.verificationValue', { n: summary.verification.n, id: summary.verification.worst_id,
+                                                        diff: `${summary.verification.worst_difference_m >= 0 ? '+' : ''}${fmt.mm(summary.verification.worst_difference_m * 1000, 1)}`,
+                                                        pct: fmt.percent(summary.verification.max_rel, 2) })}
+                </KeyValue>
+              )}
+              {summary.state === 'calibrated' && <Banner tone="info" compact>{t('calibration.needsVerification')}</Banner>}
               <KeyValue label={t('calibration.counts')}>{t('calibration.countsValue', { gauge: summary.n_gauge, test: summary.n_test, stale: summary.n_stale })}</KeyValue>
               {summary.gauge_fit_residual_rms_m != null && (
                 <KeyValue label={t('calibration.fitResidual')} mono>{`${fmt.mm(summary.gauge_fit_residual_rms_m * 1000, 1)} rms, ${fmt.mm((summary.gauge_fit_residual_max_m ?? 0) * 1000, 1)} max`}</KeyValue>
@@ -294,6 +466,12 @@ export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft,
 
         {summary && summary.rows.length > 0 && (
           <Table columns={columns} rows={summary.rows} rowKey={r => r.id} caption={t('calibration.rows', { n: summary.rows.length })} />
+        )}
+
+        {summary && (summary.planes?.length ?? 0) > 0 && (
+          <Section title={t('calibration.planesTitle')} hint={t('calibration.planesHint')}>
+            <Table columns={planeColumns} rows={summary.planes ?? []} rowKey={r => r.id} caption={t('calibration.planeRows', { n: summary.planes?.length ?? 0 })} />
+          </Section>
         )}
       </Stack>
     </Dialog>

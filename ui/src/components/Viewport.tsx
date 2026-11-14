@@ -47,7 +47,7 @@ function makeGltfLoader(): GLTFLoader {
 // coarse atlases at room distances.
 const MESH_TILES_ERROR_TARGET = 2
 
-type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align' | 'erase'
+type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'measure-plane' | 'section-box' | 'align' | 'erase'
 
 interface ViewportProps {
     pointSize: number
@@ -103,6 +103,10 @@ interface ViewportProps {
     onCursor?: (p: { x: number; y: number; z: number } | null) => void
     /** Measurement labels projected to screen space (HUD readouts). */
     onReadouts?: (anchors: ReadoutAnchor[]) => void
+    /** a distance was measured on the model (its readout id, its two picked points, the model's length) */
+    onDistanceMeasured?: (m: { id: string; a: number[]; b: number[]; metres: number }) => void
+    /** a plane was marked on the model with the plane tool: its id and the picked points, in order */
+    onPlaneMeasured?: (p: { id: string; points: number[][] }) => void
     /** Metres per screen pixel at the orbit target (HUD scale bar). */
     onViewScale?: (metersPerPixel: number) => void
     /** a click on a point of the cloud (navigate tool) names its segment by CLASS BYTE (USER 2026-10-04) */
@@ -243,7 +247,7 @@ export interface ViewportHandle {
     /** remove one finished distance measurement (it became a calibration mark) */
     removeDistance: (id: string) => void
     /** the scan's stored calibration measurements, drawn on the model (replaces the previous set) */
-    setCalibrationMarks: (marks: CalibrationMark[]) => void
+    setCalibrationMarks: (marks: CalibrationMark[], planes?: CalibrationPlane[]) => void
     setAssistantObjects: (objects: SceneObject[]) => void
     visualizeMeasurement: (trace: TraceEntry[]) => void
     clearAssistantViz: () => void
@@ -556,7 +560,7 @@ function createArc(
 
 // ── Measurement data types ──
 interface Measurement {
-    type: 'distance' | 'angle'
+    type: 'distance' | 'angle' | 'plane'
     objects: THREE.Object3D[]  // markers, lines, labels, arcs
     /** the id of its HUD readout (a distance: what the calibration dialog asks for by) */
     id?: string
@@ -565,6 +569,25 @@ interface Measurement {
 /** A calibration measurement stored for the scan (calibration3d.py): drawn on the model in its own
  *  colour and kept through "clear measurements" (USER 2026-11-13: "deben quedar almacenadas"). */
 export interface CalibrationMark { id: string; a: number[]; b: number[]; metres: number; role: 'gauge' | 'test' }
+/** A calibration PLANE stored for the scan: the picked points, drawn as a translucent polygon on the cloud
+ *  (USER 2026-11-13: "debe dibujar el plano sobre la nube 3d"). */
+export interface CalibrationPlane { id: string; points: number[][]; label: string; inclinationDeg: number }
+
+/** A polygon through picked points as a translucent sheet (a fan around their centroid), drawn over the cloud. */
+function createPlaneFill(points: THREE.Vector3[], color: number): THREE.Mesh {
+    const c = points.reduce((sum, pt) => sum.add(pt), new THREE.Vector3()).multiplyScalar(1 / points.length)
+    const verts: number[] = []
+    for (let i = 0; i < points.length; i++) {
+        const a = points[i], b = points[(i + 1) % points.length]
+        verts.push(c.x, c.y, c.z, a.x, a.y, a.z, b.x, b.y, b.z)
+    }
+    const geom = new THREE.BufferGeometry()
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3))
+    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.28, side: THREE.DoubleSide, depthWrite: false, depthTest: false })
+    const mesh = new THREE.Mesh(geom, mat)
+    mesh.renderOrder = 998
+    return mesh
+}
 
 // ── frameCloud: isometric view framing the full point cloud extent ──
 function frameCloud(bbox: THREE.Box3, cam: THREE.PerspectiveCamera, ctrl: { target: THREE.Vector3; update: () => void }) {
@@ -644,7 +667,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, sceneLook = DEFAULT_LOOK, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onCubes, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onViewScale, onSegmentPicked },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, sceneLook = DEFAULT_LOOK, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onCubes, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onDistanceMeasured, onPlaneMeasured, onViewScale, onSegmentPicked },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -1091,6 +1114,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     useEffect(() => { onCursorRef.current = onCursor }, [onCursor])
     const onReadoutsRef = useRef(onReadouts)
     useEffect(() => { onReadoutsRef.current = onReadouts }, [onReadouts])
+    const onDistanceMeasuredRef = useRef(onDistanceMeasured)
+    useEffect(() => { onDistanceMeasuredRef.current = onDistanceMeasured }, [onDistanceMeasured])
+    const onPlaneMeasuredRef = useRef(onPlaneMeasured)
+    useEffect(() => { onPlaneMeasuredRef.current = onPlaneMeasured }, [onPlaneMeasured])
+    const finalizePlaneRef = useRef<() => void>(() => {})
     const onSegmentPickedRef = useRef(onSegmentPicked)
     useEffect(() => { onSegmentPickedRef.current = onSegmentPicked }, [onSegmentPicked])
     /** the selected segment's key (its OBB lit, its H / W / D dimensions drawn) — survives an OBB rebuild */
@@ -1100,7 +1128,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // HUD readouts: world anchors of the measurement labels, projected each frame
     type WorldReadout = { id: string; kind: 'distance' | 'angle'; pos: THREE.Vector3; anchor: THREE.Vector3; metres?: number; degrees?: number; tag?: string
                           /** a user's distance: its two picked points — it can be marked as a calibration measurement */
-                          a?: THREE.Vector3; b?: THREE.Vector3; calibratable?: boolean; cal?: 'gauge' | 'test' }
+                          a?: THREE.Vector3; b?: THREE.Vector3; calibratable?: boolean; cal?: 'gauge' | 'test' | 'plane' }
     const calibGroupRef = useRef<THREE.Group | null>(null)
     const readoutsWorldRef = useRef<WorldReadout[]>([])
     const liveReadoutRef = useRef<WorldReadout | null>(null)
@@ -1196,7 +1224,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     useEffect(() => {
         const controls = controlsRef.current
         if (!controls) return
-        if (activeTool === 'measure-distance' || activeTool === 'measure-angle' || activeTool === 'section-box' || activeTool === 'align') {
+        if (activeTool === 'measure-distance' || activeTool === 'measure-angle' || activeTool === 'measure-plane' || activeTool === 'section-box' || activeTool === 'align') {
             controls.mouseButtons.LEFT = undefined as unknown as THREE.MOUSE
         } else {
             controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE
@@ -1300,7 +1328,41 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
 
         if (onStatusMessage) onStatusMessage(tt('vp.distance', { value: label }))
+        onDistanceMeasuredRef.current?.({ id: readoutId, a: p1.toArray(), b: p2.toArray(), metres: dist })
     }, [onStatusMessage])
+
+    // Finalize a plane marked with three or more points: a translucent sheet through them, on the cloud
+    const finalizePlane = useCallback(() => {
+        const group = measureGroupRef.current
+        const pts = pendingPointsRef.current
+        if (!group || pts.length < 3) return
+        if (pendingLineRef.current) {
+            group.remove(pendingLineRef.current)
+            pendingLineRef.current.geometry.dispose()
+                ; (pendingLineRef.current.material as THREE.Material).dispose()
+            pendingLineRef.current = null
+        }
+        const col = tokenHex(VP.calibration)
+        const fill = createPlaneFill(pts, col)
+        const outline = createMeasurementLine([...pts, pts[0]], col)
+        group.add(fill, outline)
+        const id = `p${Date.now()}`
+        measurementsRef.current.push({ type: 'plane', objects: [...pendingMarkersRef.current, fill, outline], id })
+        const points = pts.map(pt => pt.toArray())
+        pendingPointsRef.current = []
+        pendingMarkersRef.current = []
+        if (livePreviewRef.current) {
+            group.remove(livePreviewRef.current)
+            livePreviewRef.current.traverse(c => {
+                if ((c as any).geometry) (c as any).geometry.dispose()
+                if ((c as any).material) { const m = (c as any).material; if (m.map) m.map.dispose(); m.dispose() }
+            })
+            livePreviewRef.current = null
+        }
+        liveReadoutRef.current = null
+        onPlaneMeasuredRef.current?.({ id, points })
+    }, [])
+    useEffect(() => { finalizePlaneRef.current = finalizePlane }, [finalizePlane])
 
     // Finalize an angle measurement
     const finalizeAngle = useCallback((p1: THREE.Vector3, vertex: THREE.Vector3, p3: THREE.Vector3) => {
@@ -1369,7 +1431,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
     const handleMeasureHover = useCallback((event: MouseEvent) => {
         const tool = activeToolRef.current
-        if (tool !== 'measure-distance' && tool !== 'measure-angle') {
+        if (tool !== 'measure-distance' && tool !== 'measure-angle' && tool !== 'measure-plane') {
             if (hoverHighlightRef.current) hoverHighlightRef.current.visible = false
             onCursorRef.current?.(null)
             return
@@ -1488,7 +1550,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
             const previewGroup = new THREE.Group()
             const lastPt = pending[pending.length - 1]
-            const lineColor = tool === 'measure-distance' ? tokenHex(VP.measure) : tokenHex(VP.angle)
+            const lineColor = tool === 'measure-distance' ? tokenHex(VP.measure) : tool === 'measure-plane' ? tokenHex(VP.calibration) : tokenHex(VP.angle)
 
             // Dashed line
             const lineGeom = new THREE.BufferGeometry().setFromPoints([lastPt, hitPoint])
@@ -1514,7 +1576,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // Handle click for measurement
     const handleMeasureClick = useCallback((event: MouseEvent) => {
         const tool = activeToolRef.current
-        if (tool !== 'measure-distance' && tool !== 'measure-angle') return
+        if (tool !== 'measure-distance' && tool !== 'measure-angle' && tool !== 'measure-plane') return
         if (event.button !== 0) return  // Left click only
 
         const renderer = rendererRef.current
@@ -1572,10 +1634,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         if (!hit) return
 
         const hitPoint = hit.point.clone()
+        // THE PLANE TOOL closes on its first point: with three or more points marked, a click on the first
+        // marker (within 12 px on screen) finishes the polygon instead of adding a point; Enter does the same
+        if (tool === 'measure-plane' && pendingPointsRef.current.length >= 3) {
+            const first = pendingPointsRef.current[0].clone().project(camera)
+            const fx = (first.x * 0.5 + 0.5) * rect.width + rect.left, fy = (-first.y * 0.5 + 0.5) * rect.height + rect.top
+            if (Math.hypot(event.clientX - fx, event.clientY - fy) <= 12) { finalizePlaneRef.current(); return }
+        }
         pendingPointsRef.current.push(hitPoint)
 
         // Place marker
-        const markerColor = tool === 'measure-distance' ? tokenHex(VP.measure) : tokenHex(VP.angle)
+        const markerColor = tool === 'measure-distance' ? tokenHex(VP.measure) : tool === 'measure-plane' ? tokenHex(VP.calibration) : tokenHex(VP.angle)
         const marker = createMarker(hitPoint, markerColor)
         group.add(marker)
         pendingMarkersRef.current.push(marker)
@@ -1589,9 +1658,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 pendingLineRef.current.geometry.dispose()
                     ; (pendingLineRef.current.material as THREE.Material).dispose()
             }
-            const lineColor = tool === 'measure-distance' ? tokenHex(VP.measure) : tokenHex(VP.angle)
+            const lineColor = tool === 'measure-distance' ? tokenHex(VP.measure) : tool === 'measure-plane' ? tokenHex(VP.calibration) : tokenHex(VP.angle)
             const previewLine = createMeasurementLine(
-                pendingPointsRef.current.slice(),
+                // the plane's outline is shown closed as soon as it has three points
+                tool === 'measure-plane' && nPoints >= 3 ? [...pendingPointsRef.current, pendingPointsRef.current[0]] : pendingPointsRef.current.slice(),
                 lineColor
             )
             group.add(previewLine)
@@ -2469,7 +2539,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             readoutsWorldRef.current = readoutsWorldRef.current.filter(x => x.id !== id)
             lastReadoutKeyRef.current = ''
         },
-        setCalibrationMarks: (marks: CalibrationMark[]) => {
+        setCalibrationMarks: (marks: CalibrationMark[], planes: CalibrationPlane[] = []) => {
             const group = calibGroupRef.current
             if (!group) return
             while (group.children.length > 0) {
@@ -2487,6 +2557,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const mid = a.clone().add(b).multiplyScalar(0.5)
                 readoutsWorldRef.current.push({ id: `cal-${m.id}`, kind: 'distance', pos: mid.clone(), anchor: mid.clone(),
                                                 metres: m.metres, tag: m.id, cal: m.role })
+            }
+            // the stored planes: a translucent sheet through the picked points, its outline, and its inclination
+            for (const pl of planes) {
+                const pts = pl.points.map(q => new THREE.Vector3().fromArray(q))
+                if (pts.length < 3) continue
+                const col = tokenHex(VP.calibration)
+                group.add(createPlaneFill(pts, col), createMeasurementLine([...pts, pts[0]], col))
+                for (const q of pts) group.add(createMarker(q, col))
+                const c = pts.reduce((sum, q) => sum.add(q), new THREE.Vector3()).multiplyScalar(1 / pts.length)
+                readoutsWorldRef.current.push({ id: `cal-${pl.id}`, kind: 'angle', pos: c.clone(), anchor: c.clone(),
+                                                degrees: pl.inclinationDeg, tag: pl.label || pl.id, cal: 'plane' })
             }
             lastReadoutKeyRef.current = ''
         },
@@ -3864,7 +3945,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             onSegmentPickedRef.current(attr.getX(hit.index as number))
         }
         const onContextMenu = (e: MouseEvent) => {
-            if (activeToolRef.current === 'measure-distance' || activeToolRef.current === 'measure-angle') {
+            if (activeToolRef.current === 'measure-distance' || activeToolRef.current === 'measure-angle' || activeToolRef.current === 'measure-plane') {
                 e.preventDefault()
                 cancelPending()
             }
@@ -3872,6 +3953,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
         const onKeyDown = (e: KeyboardEvent) => {
             if (e.key === 'Escape') cancelPending()
+            // Enter closes the plane being marked (three or more points)
+            if (e.key === 'Enter' && activeToolRef.current === 'measure-plane') finalizePlaneRef.current()
         }
         // Section box drag handlers
         const onSectionDown = (e: MouseEvent) => handleSectionMouseDown(e)
@@ -5705,7 +5788,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     useEffect(() => { renderOBBsRef.current = renderOBBs }, [renderOBBs])
 
     const T = getT()
-    const measuring = activeTool === 'measure-distance' || activeTool === 'measure-angle'
+    const measuring = activeTool === 'measure-distance' || activeTool === 'measure-angle' || activeTool === 'measure-plane'
     return (
         <div className="viewport-root">
             <div ref={containerRef} className={`viewport-canvas ${measuring ? 'viewport-canvas--measure' : ''}`.trim()} />

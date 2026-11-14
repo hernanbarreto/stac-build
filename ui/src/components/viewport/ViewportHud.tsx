@@ -37,7 +37,7 @@ export interface ReadoutAnchor {
   /** a distance the user measured on the model: it can be marked as a calibration measurement */
   calibratable?: boolean
   /** a stored calibration measurement of the scan (its role) */
-  cal?: 'gauge' | 'test'
+  cal?: 'gauge' | 'test' | 'plane'
 }
 
 interface ViewportHudProps {
@@ -61,12 +61,17 @@ interface ViewportHudProps {
   onCalibrate?: (readoutId: string) => void
   /** a stored calibration measurement's readout was pressed (open it in the calibration window) */
   onOpenCalibration?: (calibrationId: string) => void
+  /** THE CLOUD'S CALIBRATION, shown from the moment it opens (USER 2026-11-13: "debe indicarse si la nube esta
+   *  calibrada o no, eso lo debe indicar al abrir la nube"): null while it is not known */
+  calibration?: { state: 'uncalibrated' | 'calibrated' | 'verified'; factor: number | null; worstDifferenceM: number | null
+                  /** the per-axis factors when the calibration in use is per axis */
+                  axes?: { x: number; y: number; z: number } | null } | null
   banner?: ReactNode
 }
 
 const SCALE_STEPS_M = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100]
 
-export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, metersPerPixel, gridLabel, colorMode, mvThreshold, statusFractions, deviationRange, readouts, onCalibrate, onOpenCalibration, banner }: ViewportHudProps) {
+export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, metersPerPixel, gridLabel, colorMode, mvThreshold, statusFractions, deviationRange, readouts, onCalibrate, onOpenCalibration, calibration, banner }: ViewportHudProps) {
   const t = useT()
   const fmt = useFmt()
 
@@ -101,6 +106,19 @@ export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, 
           </div>
         )}
         {gridLabel && <span className="stac-hud__grid stac-mono">{gridLabel}</span>}
+        {calibration && (
+          <button type="button" className={`stac-hud__calstate stac-hud__calstate--${calibration.state}`} title={t('calibration.open')}
+            onClick={() => onOpenCalibration?.('')}>
+            <Pin aria-hidden />
+            <span>{t(`calibration.state_${calibration.state}`)}</span>
+            {calibration.axes
+              ? <span className="stac-mono">{`X × ${fmt.number(calibration.axes.x, 4)} Y × ${fmt.number(calibration.axes.y, 4)} Z × ${fmt.number(calibration.axes.z, 4)}`}</span>
+              : calibration.factor != null && <span className="stac-mono">{`× ${fmt.number(calibration.factor, 4)}`}</span>}
+            {calibration.state === 'verified' && calibration.worstDifferenceM != null && (
+              <span className="stac-mono">{`${calibration.worstDifferenceM >= 0 ? '+' : ''}${fmt.mm(calibration.worstDifferenceM * 1000, 1)}`}</span>
+            )}
+          </button>
+        )}
       </div>
 
       {colorMode !== 'rgb' && (

@@ -68,7 +68,7 @@ import { ObjectLibraryDialog } from './features/ObjectLibraryDialog'
 import { AutosegmentDialog, type AutosegmentState, type AutosegmentStages } from './features/AutosegmentDialog'
 import { GenreconDialog } from './features/GenreconDialog'
 import { ReferenceDialog, type ReferenceMode } from './features/ReferenceDialog'
-import { CalibrationDialog, type CalibrationDraft, type CalMeasurement, type CalSummary } from './features/CalibrationDialog'
+import { CalibrationDialog, type CalibrationDraft, type CalMeasurement, type CalPlane, type CalSummary } from './features/CalibrationDialog'
 import { EvaluationPanel } from './features/EvaluationPanel'
 import { PhysicsPanel } from './features/PhysicsPanel'
 import { ConsolePanel, JobsPanel, PropertiesPanel } from './features/DockPanels'
@@ -109,7 +109,7 @@ interface PipelineState {
   scans?: string[]  // scan keys being rebuilt
 }
 
-type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'section-box' | 'align' | 'erase'
+type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'measure-plane' | 'section-box' | 'align' | 'erase'
 
 const THREE_DEG = Math.PI / 180
 
@@ -147,6 +147,16 @@ function App() {
   // the pin of a measured distance opens the window with that measurement as its draft
   const [calibrationOpen, setCalibrationOpen] = useState(false)
   const [calibrationDraft, setCalibrationDraft] = useState<CalibrationDraft | null>(null)
+  // the kind chosen in the Calibration button's selector (a distance or a plane): the next measurement of that
+  // kind made on the model opens the window as its draft
+  const [calibrating, setCalibrating] = useState<'distance' | 'plane' | null>(null)
+  const calibratingRef = useRef<'distance' | 'plane' | null>(null)
+  useEffect(() => { calibratingRef.current = calibrating }, [calibrating])
+  // leaving the tool leaves the calibration it was armed for
+  useEffect(() => {
+    if (calibrating === 'distance' && activeTool !== 'measure-distance') setCalibrating(null)
+    if (calibrating === 'plane' && activeTool !== 'measure-plane') setCalibrating(null)
+  }, [activeTool, calibrating])
   const [eraseRadius, setEraseRadius] = useState(0.15)
   const [eraseMarks, setEraseMarks] = useState(0)
   const [eraseTarget, setEraseTarget] = useState<string>('')
@@ -1655,18 +1665,27 @@ function App() {
   const [readouts, setReadouts] = useState<ReadoutAnchor[]>([])
   // the scan's stored calibration measurements, drawn on the model: the ones of the CURRENT geometry epoch (a stale
   // one was picked on another cloud: its points are no longer on this one)
-  const drawCalibrationMarks = useCallback((measurements: CalMeasurement[], summary: CalSummary) => {
-    const stale = new Set(summary.rows.filter(r => r.stale).map(r => r.id))
-    viewportRef.current?.setCalibrationMarks(measurements.filter(m => !stale.has(m.id))
-      .map(m => ({ id: m.id, a: m.a, b: m.b, metres: m.measured_m, role: m.role })))
+  const [calibrationSummary, setCalibrationSummary] = useState<CalSummary | null>(null)
+  const drawCalibrationMarks = useCallback((measurements: CalMeasurement[], summary: CalSummary, planes: CalPlane[] = []) => {
+    setCalibrationSummary(summary)
+    const stale = new Set([...summary.rows.filter(r => r.stale).map(r => r.id), ...(summary.planes ?? []).filter(pl => pl.stale).map(pl => pl.id)])
+    viewportRef.current?.setCalibrationMarks(
+      measurements.filter(m => !stale.has(m.id)).map(m => ({ id: m.id, a: m.a, b: m.b, metres: m.measured_m, role: m.role })),
+      planes.filter(pl => !stale.has(pl.id)).map(pl => ({ id: pl.id, points: pl.points, label: pl.label, inclinationDeg: pl.inclination_deg })))
   }, [])
   useEffect(() => {
     viewportRef.current?.setCalibrationMarks([])
+    setCalibrationSummary(null)
     if (!activeSession || !cloudEverShown) return
     let cancelled = false
     fetch(`/api/calibration/${encodeURIComponent(activeSession)}${activeScanTab ? `?scan_key=${encodeURIComponent(activeScanTab)}` : ''}`)
       .then(r => (r.ok ? r.json() : null))
-      .then(d => { if (!cancelled && d?.summary) drawCalibrationMarks(d.document?.measurements ?? [], d.summary) })
+      .then(d => {
+        if (cancelled || !d?.summary) return
+        drawCalibrationMarks(d.document?.measurements ?? [], d.summary, d.document?.planes ?? [])
+        // said as the cloud opens (USER 2026-11-13: "para mostrarle al usuario que esa nube aun no esta calibrada")
+        if (d.summary.state === 'uncalibrated') setStatusMessage(tt('calibration.openUncalibrated'))
+      })
       .catch(() => { /* a scan with no calibration yet */ })
     return () => { cancelled = true }
   }, [activeSession, activeScanTab, cloudEverShown, drawCalibrationMarks])
@@ -2297,6 +2316,17 @@ function App() {
             onHasCameraPoses={setHasCameraPoses}
             onCursor={setCursor}
             onReadouts={setReadouts}
+            onDistanceMeasured={m => {
+              // armed from the Calibration button: the distance just measured IS the calibration's draft
+              if (calibratingRef.current !== 'distance') return
+              setCalibrationDraft({ kind: 'distance', readoutId: m.id, a: m.a, b: m.b, metres: m.metres })
+              setCalibrationOpen(true); setCalibrating(null); setActiveTool('navigate')
+            }}
+            onPlaneMeasured={pl => {
+              // a plane is only ever marked for a calibration: the window opens with it as its draft
+              setCalibrationDraft({ kind: 'plane', readoutId: pl.id, points: pl.points })
+              setCalibrationOpen(true); setCalibrating(null); setActiveTool('navigate')
+            }}
             onSegmentPicked={cls => {
               // a point of an object: select it (OBB + dimensions) and travel to it; a click on
               // nothing or on unsegmented points deselects (USER 2026-10-09)
@@ -2310,8 +2340,13 @@ function App() {
             <FloatingToolbar
               activeTool={activeTool} onTool={setActiveTool} onResetCamera={() => viewportRef.current?.resetCamera()}
               onClearMeasurements={() => viewportRef.current?.clearMeasurements()} onAddObject={openObjectLibrary}
-              onReferenceDistance={() => setReferenceDialog('distance')} onReferencePlane={() => setReferenceDialog('plane')}
-              onCalibration={() => { setCalibrationDraft(null); setCalibrationOpen(true) }}
+              calibrating={calibrating}
+              onCalibration={kind => {
+                if (kind === 'list') { setCalibrationDraft(null); setCalibrationOpen(true); return }
+                setCalibrating(kind)
+                setActiveTool(kind === 'distance' ? 'measure-distance' : 'measure-plane')
+                setStatusMessage(tt(kind === 'distance' ? 'calibration.measureStatus' : 'calibration.planeStatus'))
+              }}
               onResetSection={() => viewportRef.current?.resetSectionBox()} sabanaVisible={sabanaVisible}
               brush={{
                 shape: eraseShape, onShape: setEraseShape, radiusM: eraseRadius, onRadiusM: setEraseRadius, yawDeg: eraseYawDeg, onYawDeg: setEraseYawDeg,
@@ -2383,8 +2418,11 @@ function App() {
               statusFractions={certifyState?.report_metrics?.witnesses?.status_fraction ?? null}
               deviationRange={sabanaVisible && sabanaMetrics ? { maxMm: (sabanaMetrics.tolerance_mm || 15) * 3, toleranceMm: sabanaMetrics.tolerance_mm || 15 } : null}
               showEdges={showCertifyKit} readouts={readouts}
-              onCalibrate={id => { const d = viewportRef.current?.getDistance(id); if (d) { setCalibrationDraft({ readoutId: id, ...d }); setCalibrationOpen(true) } }}
+              onCalibrate={id => { const d = viewportRef.current?.getDistance(id); if (d) { setCalibrationDraft({ kind: 'distance', readoutId: id, ...d }); setCalibrationOpen(true) } }}
               onOpenCalibration={() => { setCalibrationDraft(null); setCalibrationOpen(true) }}
+              calibration={calibrationSummary ? { state: calibrationSummary.state, factor: calibrationSummary.scale_factor,
+                                                  axes: calibrationSummary.mode_used === 'axes' ? calibrationSummary.axes.factors : null,
+                                                  worstDifferenceM: calibrationSummary.verification?.worst_difference_m ?? null } : null}
               banner={pipelineActiveHere && (viewerHasCloud || sessionHasPublishedCloud) && currentStage ? (
                 <Banner glass compact tone="brand" title={t('pipeline.runningBanner', { stage: currentStage.label })} action={<Button size="sm" variant="ghost" onClick={handlePipelineCancel}>{t('common.cancel')}</Button>}>
                   {currentStage.message} {fmt.percent(currentStage.pct / 100)}
@@ -2537,13 +2575,22 @@ function App() {
       {activeSession && (
         <CalibrationDialog open={calibrationOpen} sessionId={activeSession} scanKey={activeScanTab} draft={calibrationDraft}
           otherScans={projectScans.filter((sc: any) => sc.key !== activeScanTab && sc.kind !== 'fused').map((sc: any) => ({ key: sc.key, label: sc.label || sc.key }))}
-          onClose={() => { setCalibrationOpen(false); setCalibrationDraft(null) }}
-          onMeasure={() => { setCalibrationOpen(false); setCalibrationDraft(null); setActiveTool('measure-distance'); setStatusMessage(tt('calibration.measureStatus')) }}
+          onClose={() => {
+            // a draft that was not stored leaves the scene with the window
+            if (calibrationDraft?.kind === 'plane') viewportRef.current?.removeDistance(calibrationDraft.readoutId)
+            setCalibrationOpen(false); setCalibrationDraft(null)
+          }}
+          onMeasure={kind => {
+            setCalibrationOpen(false); setCalibrationDraft(null); setCalibrating(kind)
+            setActiveTool(kind === 'distance' ? 'measure-distance' : 'measure-plane')
+            setStatusMessage(tt(kind === 'distance' ? 'calibration.measureStatus' : 'calibration.planeStatus'))
+          }}
           onChanged={drawCalibrationMarks}
           onStored={id => { viewportRef.current?.removeDistance(id); setCalibrationDraft(null) }}
-          onFrame={m => {
-            const pad = Math.max(0.3, m.measured_m * 0.5)
-            viewportRef.current?.frameBox(m.a.map((v, k) => Math.min(v, m.b[k]) - pad), m.a.map((v, k) => Math.max(v, m.b[k]) + pad))
+          onFrame={pts => {
+            const lo = [0, 1, 2].map(k => Math.min(...pts.map(q => q[k]))), hi = [0, 1, 2].map(k => Math.max(...pts.map(q => q[k])))
+            const pad = Math.max(0.3, 0.5 * Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]))
+            viewportRef.current?.frameBox(lo.map(v => v - pad), hi.map(v => v + pad))
           }} />
       )}
 

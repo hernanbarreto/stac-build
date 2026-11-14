@@ -279,6 +279,25 @@
   pointer-events: none;
 }
 
+/* the cloud's calibration, in the corner from the moment it opens: not calibrated / calibrated / verified */
+.stac-hud__calstate {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-2);
+  border: var(--bw) solid var(--border-2);
+  border-radius: var(--r-1);
+  background: var(--glass-bg);
+  color: var(--text-1);
+  font-size: var(--fs-0);
+  cursor: pointer;
+}
+.stac-hud__calstate svg { width: var(--icon-sm); height: var(--icon-sm); }
+.stac-hud__calstate--uncalibrated { border-color: var(--warn); color: var(--warn-fg); }
+.stac-hud__calstate--calibrated { border-color: var(--vp-calibration); }
+.stac-hud__calstate--verified { border-color: var(--vp-calibration); color: var(--ok-fg); }
+
 /* the pin of a measured distance (mark it as a calibration measurement) and of a stored one */
 .stac-hud__calibrate {
   pointer-events: auto;
@@ -298,6 +317,7 @@
 .stac-hud__calibrate svg { width: var(--icon-sm); height: var(--icon-sm); }
 .stac-hud__readout--cal-gauge .stac-readout { --readout-color: var(--vp-calibration); }
 .stac-hud__readout--cal-test .stac-readout { --readout-color: var(--vp-angle); }
+.stac-hud__readout--cal-plane .stac-readout { --readout-color: var(--vp-calibration); }
 
 /* ── Overlays inside the viewport (Viewport.tsx) ────────────────────── */
 .stac-vpcard {
