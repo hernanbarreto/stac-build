@@ -294,11 +294,12 @@ def rescale_composition(paths, scan_key: str, scale: float) -> Optional[Dict[str
 
 # ── the rescale ─────────────────────────────────────────────────────────────────────────────
 def apply_scale(output_dir, scale: float, *, source: Optional[Dict[str, Any]] = None,
-                paths=None, scan_key: Optional[str] = None, cfg=None,
+                paths=None, scan_key: Optional[str] = None, cfg=None, rebuild_octree: bool = True,
                 log: Callable[[str], Any] = print, progress=None) -> Dict[str, Any]:
     """Rewrite the scan in ``output_dir`` at ``scale`` × its present size (see the module).
     ``source``: what decided the factor (the calibration's summary), sealed into the epoch's
-    record. ``paths`` / ``scan_key``: the project and the scan's key in it, for the composition.
+    record. ``rebuild_octree``: the viewer's octree is rebuilt inside the transaction (False
+    only where there is no converter: the tests). ``paths`` / ``scan_key``: the project and the scan's key in it, for the composition.
     Returns the report (also written to ``corrections/report_<id>.json``)."""
     from correction import diagnose as diag_mod
     from correction import ledger
@@ -317,7 +318,8 @@ def apply_scale(output_dir, scale: float, *, source: Optional[Dict[str, Any]] = 
     output_dir = Path(output_dir)
     cfg = cfg if cfg is not None else load_correction_config()
     # a rescale moves every point and changes none: no point is deleted, nothing is re-fitted
-    cfg = dataclasses.replace(cfg, apply=dataclasses.replace(cfg.apply, mask_filter=False, reconsolidate=False))
+    cfg = dataclasses.replace(cfg, apply=dataclasses.replace(
+        cfg.apply, mask_filter=False, reconsolidate=False, potree_rebuild=bool(rebuild_octree)))
     session = load_session(output_dir)
     epoch_from = int(current_epoch(output_dir))
     R_kf, t_kf, k_kf = uniform_scale_arrays(session, s)

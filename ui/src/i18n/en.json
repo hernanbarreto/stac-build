@@ -671,7 +671,6 @@
     "ratioRange": "Real / model, range",
     "testError": "Error on the verifying ones",
     "median": "median",
-    "notApplied": "The factor is reported: nothing is rescaled from here.",
     "empty": "No calibration measurement yet",
     "emptyHint": "Measure a distance on the model (M), then press the pin of its readout.",
     "rows": "{n} measurements",
@@ -729,7 +728,15 @@
     "modeHint": "Global: one factor for the whole cloud. Per axis: one factor for each axis; the measurements that verify are checked with it.",
     "modeAxesMissing": "Per axis needs a calibrating measurement along each of the three axes — missing: {axes}. With one or two the calibration is global and the others verify.",
     "factorAxes": "Factors per axis",
-    "colAxis": "Axis"
+    "colAxis": "Axis",
+    "apply": "Apply to the {@scan}",
+    "applyYes": "Rescale the {@scan}",
+    "applyConfirm": "The {@scan} is rewritten at {factor} × its present size as a new {@epoch}: the cloud, the cameras, the objects, the meshes and these measurements. The present {@epoch} is kept; the inverse scale undoes it. It takes from seconds to minutes.",
+    "applyRunning": "Rescaling the {@scan}: {pct} %. {message}",
+    "applyDone": "The {@scan} is at the calibrated scale ({@epoch} {epoch}).",
+    "applyFailed": "The {@scan} was not rescaled: {detail}",
+    "applyAxes": "A calibration per axis is a diagnosis: only a global factor is applied to the geometry (a different factor on each axis would pull the cloud away from its own images). Set the calibration to global to apply it.",
+    "applyAlready": "The {@scan} is at the calibrated scale: the factor is 1."
   },
   "reference": {
     "title": "Evaluation references",

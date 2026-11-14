@@ -21,7 +21,7 @@
  * error on the test ones. The factor is REPORTED: nothing is rescaled or levelled from here.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Crosshair, Pentagon, Pin, Ruler, Save, Trash2 } from 'lucide-react'
+import { Crosshair, Loader2, Pentagon, Pin, Ruler, Save, Scaling, Trash2 } from 'lucide-react'
 import { Dialog } from '../components/ui/Dialog'
 import { Button } from '../components/ui/Button'
 import { IconButton } from '../components/ui/IconButton'
@@ -163,6 +163,9 @@ export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft,
   const [summary, setSummary] = useState<CalSummary | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // ── THE REAL RESCALE: the calibration applied to the scan's geometry (a new epoch) ──
+  const [applyAsk, setApplyAsk] = useState(false)
+  const [applyState, setApplyState] = useState<{ status: 'idle' | 'running' | 'done' | 'failed'; progress?: number; message?: string; error?: string; epoch_to?: number; scale?: number } | null>(null)
 
   // ── the draft's form ──
   const [value, setValue] = useState<number | ''>('')
@@ -191,6 +194,44 @@ export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft,
       .catch(e => { if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e)) })
     return () => { cancelled = true }
   }, [open, sessionId, scanKey, take])
+
+  // the rescale runs in the server (minutes on a large scan): its state is polled while it runs,
+  // also when the window is opened on a scan that is being rescaled; when it ends the document
+  // is read again — the calibration that was applied then reads a factor of 1
+  useEffect(() => {
+    if (!open || !sessionId) return
+    let cancelled = false
+    let timer: number | undefined
+    const poll = async () => {
+      try {
+        const d = await (await fetch(`/api/calibration/${encodeURIComponent(sessionId)}/apply${scanQuery(scanKey)}`)).json()
+        if (cancelled) return
+        setApplyState(prev => {
+          if (prev?.status === 'running' && d.status === 'done') {
+            fetch(`/api/calibration/${encodeURIComponent(sessionId)}${scanQuery(scanKey)}`).then(r => r.json()).then(doc => { if (!cancelled) take(doc) }).catch(() => { /* the next opening reads it */ })
+          }
+          return d.status === 'idle' && prev?.status !== 'running' ? prev : d
+        })
+        if (d.status === 'running') timer = window.setTimeout(poll, 2000)
+      } catch { /* an older server: no rescale route */ }
+    }
+    if (applyState == null || applyState.status === 'running') void poll()
+    return () => { cancelled = true; if (timer) window.clearTimeout(timer) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, sessionId, scanKey, applyState?.status])
+
+  const applyCalibration = useCallback(async () => {
+    if (!sessionId) return
+    setApplyAsk(false)
+    try {
+      const r = await fetch(`/api/calibration/${encodeURIComponent(sessionId)}/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scan_key: scanKey ?? undefined }) })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d?.detail?.error || d?.detail || `HTTP ${r.status}`)
+      setApplyState(d)
+    } catch (e) {
+      setApplyState({ status: 'failed', error: e instanceof Error ? e.message : String(e) })
+    }
+  }, [sessionId, scanKey])
 
   // a new draft starts a clean form (the instrument and the role chosen last are kept)
   useEffect(() => { if (draft) { setValue(''); setSigma(''); setNote('') } }, [draft])
@@ -457,7 +498,30 @@ export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft,
               {summary.test_abs_error_m && (
                 <KeyValue label={t('calibration.testError')} mono>{`${fmt.mm((summary.test_abs_error_m.median ?? 0) * 1000, 1)} ${t('calibration.median')}, ${fmt.mm(summary.test_abs_error_m.max * 1000, 1)} max (${summary.test_abs_error_m.n})`}</KeyValue>
               )}
-              <p className="stac-muted">{t('calibration.notApplied')}</p>
+              {applyState?.status === 'running' && (
+                <Banner tone="info" compact icon={<Loader2 className="stac-spin" aria-hidden />}>
+                  {t('calibration.applyRunning', { pct: applyState.progress ?? 0, message: applyState.message ?? '' })}
+                </Banner>
+              )}
+              {applyState?.status === 'done' && <Banner tone="ok" compact>{t('calibration.applyDone', { epoch: applyState.epoch_to ?? '' })}</Banner>}
+              {applyState?.status === 'failed' && <Banner tone="err" compact>{t('calibration.applyFailed', { detail: applyState.error ?? '' })}</Banner>}
+              {summary.mode_used === 'axes' ? (
+                <p className="stac-muted">{t('calibration.applyAxes')}</p>
+              ) : factor != null && factor === 1 ? (
+                <p className="stac-muted">{t('calibration.applyAlready')}</p>
+              ) : factor != null && applyState?.status !== 'running' ? (
+                applyAsk ? (
+                  <Stack gap={2}>
+                    <Banner tone="warn" compact>{t('calibration.applyConfirm', { factor: fmt.number(factor, 5) })}</Banner>
+                    <Row>
+                      <Button variant="primary" icon={<Scaling aria-hidden />} onClick={applyCalibration}>{t('calibration.applyYes')}</Button>
+                      <Button onClick={() => setApplyAsk(false)}>{t('common.cancel')}</Button>
+                    </Row>
+                  </Stack>
+                ) : (
+                  <Row><Button icon={<Scaling aria-hidden />} disabled={busy} onClick={() => setApplyAsk(true)}>{t('calibration.apply')}</Button></Row>
+                )
+              ) : null}
             </Stack>
           ) : (
             <EmptyState compact title={t('calibration.empty')} description={t('calibration.emptyHint')} />

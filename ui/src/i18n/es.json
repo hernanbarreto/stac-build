@@ -671,7 +671,6 @@
     "ratioRange": "Real / modelo, rango",
     "testError": "Error en las que verifican",
     "median": "mediana",
-    "notApplied": "El factor se informa: desde acá no se reescala nada.",
     "empty": "Todavía no hay mediciones de calibración",
     "emptyHint": "Medí una distancia sobre el modelo (M) y tocá el pin de su lectura.",
     "rows": "{n} mediciones",
@@ -729,7 +728,15 @@
     "modeHint": "Global: un factor para toda la nube. Por ejes: un factor para cada eje; las medidas que verifican se comprueban con él.",
     "modeAxesMissing": "Por ejes necesita una medida que calibre a lo largo de cada uno de los tres ejes — faltan: {axes}. Con una o dos la calibración es global y las demás verifican.",
     "factorAxes": "Factores por eje",
-    "colAxis": "Eje"
+    "colAxis": "Eje",
+    "apply": "Aplicar al {@scan}",
+    "applyYes": "Reescalar el {@scan}",
+    "applyConfirm": "El {@scan} se reescribe a {factor} × su tamaño actual como una nueva {@epoch}: la nube, las cámaras, los objetos, las mallas y estas medidas. La {@epoch} actual se conserva; la escala inversa lo deshace. Tarda de segundos a minutos.",
+    "applyRunning": "Reescalando el {@scan}: {pct} %. {message}",
+    "applyDone": "El {@scan} quedó a la escala calibrada ({@epoch} {epoch}).",
+    "applyFailed": "El {@scan} no se reescaló: {detail}",
+    "applyAxes": "La calibración por ejes es un diagnóstico: a la geometría solo se aplica un factor global (un factor distinto por eje despegaría la nube de sus propias imágenes). Pasa la calibración a global para aplicarla.",
+    "applyAlready": "El {@scan} está a la escala calibrada: el factor es 1."
   },
   "reference": {
     "title": "Referencias de evaluación",

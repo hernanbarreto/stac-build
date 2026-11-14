@@ -237,10 +237,18 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   then "pero ojo, el reescalado debe ser real, porque hay humano de referencia, comparacion contra otras nubes,
   debe generarse la nube real escalada … sino solo sirve localmente pero para comparar contra objetos glb de la
   coleccion, contra el humano de referencia, contra otras sesiones"): a NEW GEOMETRY of the scan at the calibrated
-  scale — cloud, cameras, boxes, database, octree, meshes. NOT BUILT YET (next after the voice, his order
-  2026-11-14: "cuando termines con esta implementacion completa continuas con los puntos pendientes que teniamos
-  de escalado, etc"). Open question to put to him before building: the per-axis mode deforms the cloud against
-  its cameras.
+  scale — cloud, cameras, boxes, database, octree, meshes. BUILT 2026-11-14 (10b84e9 + the route):
+  `correction/rescale.py apply_scale` — a UNIFORM scale as a new epoch through the corrections' own transaction
+  (every point s·x, every camera centre s·c, the floor transform's translation × s and re-sealed, the boxes
+  scaled exactly and never refit, the store, the octree) plus what an epoch does not carry (the volumes' centres,
+  the placed objects' positions — a reference human keeps its real size —, the meshes by a transform at their
+  root, the calibration document re-expressed so it then reads a factor of 1, the project's composition). UNDO =
+  the inverse scale. `POST /api/calibration/{session}/apply` runs it in its own process (CPU only: the chat stays
+  up) and the Calibration window has the button, with a confirmation. Measured on a COPY of bufferStop:
+  3,837,478 points, epoch 4 → 5 in 29 s, the cloud within 0.24 µm of s·x, the octree's box × s exactly. NEVER
+  RUN ON A REAL SESSION BY THE ASSISTANT: applying it is his action. PER AXIS IS NOT APPLIED TO THE GEOMETRY
+  (USER 2026-11-14, to "only the global factor is applied, per axis stays a diagnosis": "si, me parece") — an
+  anisotropic scale is not a similarity: the cameras cannot follow it.
 - Chat = spatial intelligence (`phase5_qa`): runs in a worker thread (never on the event loop); tools for measuring
   (feature bands, vertical axis, extents), `describe_scene` (VLM, cached), persistent notes, evaluation VOLUMES
   (rest on the floor, gizmo Move / Rotate / Resize, collision tint, `measure_volume`); a session with no instance

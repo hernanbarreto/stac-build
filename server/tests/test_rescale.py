@@ -101,7 +101,8 @@ def test_a_rescale_is_a_new_epoch_with_everything_at_the_new_scale(tmp_path):
     assert C.summary(C.load(out), epoch)["scale_factor"] == pytest.approx(S, rel=1e-9)
 
     logs = []
-    rep = RS.apply_scale(out, S, source={"mode": "global", "factor": S}, cfg=make_correction_cfg(), log=logs.append)
+    rep = RS.apply_scale(out, S, source={"mode": "global", "factor": S}, cfg=make_correction_cfg(),
+                         rebuild_octree=False, log=logs.append)
 
     # ── the epoch ──
     assert rep["epoch_from"] == epoch and rep["epoch_to"] == epoch + 1 == int(current_epoch(out))
@@ -173,7 +174,7 @@ def test_a_rescale_is_a_new_epoch_with_everything_at_the_new_scale(tmp_path):
     assert any(json.loads(line)["kind"] == "scale" for line in (out / "corrections.jsonl").read_text().splitlines())
 
     # ── UNDO: the inverse scale, another epoch — everything comes back ──
-    back = RS.apply_scale(out, 1.0 / S, cfg=make_correction_cfg(), log=logs.append)
+    back = RS.apply_scale(out, 1.0 / S, cfg=make_correction_cfg(), rebuild_octree=False, log=logs.append)
     assert back["epoch_to"] == epoch + 2
     again = load_session(out)
     np.testing.assert_allclose(again.xyz, xyz0, rtol=0, atol=4e-6)
@@ -239,3 +240,17 @@ def test_the_projects_composition_follows_a_rescaled_scan(tmp_path):
         assert RS.rescale_composition(paths, "zzz/default", 2.0) is None        # a scan with no transform: nothing
     finally:
         project_scans.load_meta = orig
+
+
+def test_which_calibration_may_be_applied_to_the_geometry():
+    """Only a GLOBAL factor (USER 2026-11-14, on applying the per-axis factors to the geometry:
+    "si, me parece" — to: only the global factor is applied, per axis stays a diagnosis)."""
+    import calibration_api as A
+    ok = {"state": "verified", "scale_factor": 1.0375, "mode_used": "global"}
+    assert A.apply_refusal(ok) is None
+    assert A.apply_refusal({**ok, "state": "calibrated"}) is None
+    assert "no calibration measurement" in A.apply_refusal({"state": "uncalibrated", "scale_factor": None, "mode_used": "global"})
+    assert "per axis" in A.apply_refusal({**ok, "mode_used": "axes"}) and "GLOBAL" in A.apply_refusal({**ok, "mode_used": "axes"})
+    assert "exactly 1" in A.apply_refusal({**ok, "scale_factor": 1.0})
+    assert "not a scale" in A.apply_refusal({**ok, "scale_factor": 0.0})
+    assert "not a scale" in A.apply_refusal({**ok, "scale_factor": float("nan")})

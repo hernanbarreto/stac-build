@@ -5007,7 +5007,17 @@ app.include_router(evaluation_api.router)
 # ── calibration measurements taken on the 3D model (USER 2026-11-13: "para calibrar debe hacerse
 #    tomando mediciones sobre el modelo 3d … deben quedar almacenadas"): per scan, calibration3d.py ──
 import calibration_api
-calibration_api.configure(resolve_ctx=_ctx, audit_log=_audit_log)
+def _calibration_apply_busy(session_id: str) -> Optional[str]:
+    """Why a scan's geometry cannot be rewritten now (the real rescale): a pipeline job of that
+    session is running or queued — its stages read and write the same files."""
+    for j in pipeline_manager.get_all_jobs().values():
+        if j.get("session_id") == session_id and j.get("status") in ("running", "queued"):
+            return f"a pipeline job of {session_id} is {j.get('status')}: the scan is rescaled when it ends"
+    return None
+
+
+calibration_api.configure(resolve_ctx=_ctx, audit_log=_audit_log, busy=_calibration_apply_busy,
+                          on_cloud_changed=_correction_notify_viewer)
 app.include_router(calibration_api.router)
 
 # STAC's voice (USER 2026-11-14): speech → text and text → speech, relayed to the voice service
