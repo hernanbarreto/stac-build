@@ -881,6 +881,8 @@ def _take_gpu_permit(task: str, session_id: str, token: str) -> dict:
     try:
         from phase5_qa import tools_worker as _chat_tools
         _chat_tools.stop(f"server GPU task {task} took the GPU")
+        from voice import service as _voice
+        _voice.stop(f"server GPU task {task} took the GPU")
     except Exception as _e:  # noqa: BLE001 — declared, never fatal for the task
         print(f"[gpu] the chat's tools process could not be stopped: {_e}")
     return doc
@@ -1079,6 +1081,24 @@ def _semantic_unload_for_gpu(reason: str = "") -> None:
         print(f"[Semantic] chat unload failed (non-fatal): {e}")
 
 
+def _voice_start_if_idle(reason: str = "") -> None:
+    """Start STAC's voice service (USER 2026-11-14: the voice engines and the chat's VLM "deberan
+    iniciar cuando levante el backend porque son el core del funcionamiento de stac build") — at
+    the server's start and whenever the card frees, never while a pipeline is running or queued
+    (it holds a CUDA context: voice.service.stop ends it when a job takes the card)."""
+    try:
+        from voice import service as _voice, voice_config as _vc
+        vc = _vc.load()
+        if not (vc["enabled"] and vc["start_with_backend"]):
+            return
+        if any(j.get("status") in ("running", "queued") for j in pipeline_manager.get_all_jobs().values()):
+            print(f"[Voice] start skipped ({reason or 'n/a'}) — a pipeline is using the GPU")
+            return
+        _voice.start()
+    except Exception as e:  # noqa: BLE001 — never break the caller over the voice
+        print(f"[Voice] start failed (non-fatal): {e}")
+
+
 def _semantic_reload_if_idle(reason: str = "") -> None:
     """Bring the vLLM chat service back up after GPU-heavy work (USER DECISION
     2026-08-28: the chat is ALWAYS available; a reconstruction unloads it to free
@@ -1087,6 +1107,7 @@ def _semantic_reload_if_idle(reason: str = "") -> None:
     weights load. Skipped while any pipeline is still running/queued (multi-scan
     runs and concurrent sessions would OOM the very job holding the GPU).
     Blocking (health probe + Popen) — call via run_in_executor from async code."""
+    _voice_start_if_idle(reason)              # the voice comes back with the chat's engine
     try:
         sem = cfg.get("semantic", {}) or {}
         if not sem.get("enabled", True):
@@ -1304,6 +1325,11 @@ async def lifespan(app: FastAPI):
         _chat_tools.stop("server shutdown")
     except Exception as _e:  # noqa: BLE001
         print(f"[Server] shutdown — the chat's tools process stop failed: {_e}")
+    try:
+        from voice import service as _voice
+        _voice.stop("server shutdown")
+    except Exception as _e:  # noqa: BLE001
+        print(f"[Server] shutdown — the voice service stop failed: {_e}")
     # vLLM too (USER 2026-10-06: "todo lo que haya debe morir" — the VLM included; a hard
     # death is covered by semantic/watchdog.py on the backend's pid)
     try:
@@ -4983,6 +5009,10 @@ app.include_router(evaluation_api.router)
 import calibration_api
 calibration_api.configure(resolve_ctx=_ctx, audit_log=_audit_log)
 app.include_router(calibration_api.router)
+
+# STAC's voice (USER 2026-11-14): speech → text and text → speech, relayed to the voice service
+from voice import api as voice_api
+app.include_router(voice_api.router)
 
 
 @app.get("/api/autosegment/{session_id}")

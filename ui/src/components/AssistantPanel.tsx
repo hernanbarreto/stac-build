@@ -13,7 +13,7 @@
 // Hernán Barreto - Ingerop IN3 Session IV - STAC
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Send, Box as BoxIcon, Trash2, Sparkles, Ruler, Loader2, Crosshair, Plus, Pause } from 'lucide-react'
+import { Send, Box as BoxIcon, Trash2, Sparkles, Ruler, Loader2, Crosshair, Plus, Pause, Mic, Square, Volume2, VolumeX } from 'lucide-react'
 import type { ViewportHandle } from './Viewport'
 import type { UserVolume } from './assistantViz'
 import { Button } from './ui/Button'
@@ -24,6 +24,7 @@ import { Badge } from './ui/Badge'
 import { Section, Row, Stack } from './ui/Panel'
 import { Tooltip } from './ui/Tooltip'
 import { useFmt, useT } from '../i18n'
+import { useVoice, voiceSupported, type VoiceLang } from '../voice/useVoice'
 
 interface TraceEntry { tool: string; arguments: Record<string, unknown>; result: Record<string, unknown> }
 
@@ -73,6 +74,14 @@ function objectsOfTrace(trace: TraceEntry[]): number[] {
 
 const SUGGESTION_KEYS = ['count', 'clearance', 'plumb', 'defects', 'freeSpace'] as const
 
+// STAC answers ALOUD (USER 2026-11-14): on once the user has spoken to it, off when they mute it
+const SPEAK_KEY = 'stac.voice.speak'
+function readSpeakPref(): boolean | null {
+  try { const v = localStorage.getItem(SPEAK_KEY); return v === '1' ? true : v === '0' ? false : null } catch { return null }
+}
+function writeSpeakPref(on: boolean) { try { localStorage.setItem(SPEAK_KEY, on ? '1' : '0') } catch { /* a private window */ } }
+const VOICE_LANGS: readonly string[] = ['es', 'en', 'fr']
+
 function post(session: string | null, scan: string | null | undefined, path: string, body: Record<string, unknown>) {
   return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: session, ...(scan ? { scan } : {}), ...body }) })
 }
@@ -92,6 +101,20 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
   const [vlmStatus, setVlmStatus] = useState<'up' | 'loading' | 'busy' | 'down' | null>(null)
   const [volForm, setVolForm] = useState<{ name: string; cx: number | ''; cy: number | ''; cz: number | ''; w: number | ''; h: number | ''; d: number | '' }>({ name: 'Bay', cx: 0, cy: 0, cz: 0, w: 2, h: 2, d: 2 })
   const scrollRef = useRef<HTMLDivElement>(null)
+  // ── STAC's voice: the user speaks, the server writes it and STAC answers aloud ──
+  const voice = useVoice(sessionId, scanKey)
+  const [speakOn, setSpeakOn] = useState<boolean>(() => readSpeakPref() ?? false)
+  const speakOnRef = useRef(speakOn)
+  useEffect(() => { speakOnRef.current = speakOn }, [speakOn])
+  const [voiceNote, setVoiceNote] = useState<string | null>(null)
+  // the voice engines' own state (they load in ~30 s after the server starts and leave the card
+  // while a pipeline runs): the microphone waits for them, and a "loading" notice ends by itself
+  const [voiceStatus, setVoiceStatus] = useState<'up' | 'loading' | 'busy' | 'down' | 'disabled' | null>(null)
+  const voiceErrorKind = voice.error?.kind
+  const clearVoiceError = voice.clearError
+  useEffect(() => {
+    if (voiceStatus === 'up' && (voiceErrorKind === 'loading' || voiceErrorKind === 'busy')) clearVoiceError()
+  }, [voiceStatus, voiceErrorKind, clearVoiceError])
 
   // Volumes: fetch, draw in the viewport, and tint by collision state.
   const refreshVolumes = useCallback(async () => {
@@ -157,7 +180,14 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
         if (cancelled) return
         setVlmStatus(d.status)
         onVlmStatus?.(d.status)
-        setTimeout(tick, d.status === 'up' ? 30000 : 8000)
+        let voiceUp = true
+        try {
+          const vd = await (await fetch('/api/voice/status?start=true')).json()
+          if (cancelled) return
+          setVoiceStatus(vd.status)
+          voiceUp = vd.status === 'up' || vd.status === 'disabled'
+        } catch { /* an older server without the voice: the microphone stays off */ }
+        setTimeout(tick, d.status === 'up' && voiceUp ? 30000 : 8000)
       } catch {
         if (!cancelled) setTimeout(tick, 15000)
       }
@@ -167,7 +197,7 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
      
   }, [])
 
-  const ask = useCallback(async (question: string) => {
+  const ask = useCallback(async (question: string, spoken?: VoiceLang) => {
     if (!question.trim() || busy) return
     // the conversation so far goes with the question (the server keeps its last turns), so
     // "and the other one?" has a referent
@@ -178,7 +208,8 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
       let d: Record<string, unknown>
       const deadline = Date.now() + 10 * 60_000
       for (;;) {
-        const r = await api(sessionId, '/api/spatial_qa', { question, history })
+        // a spoken question is answered in the language it was spoken in
+        const r = await api(sessionId, '/api/spatial_qa', { question, history, ...(spoken ? { lang: spoken } : {}) })
         d = await r.json()
         if (r.ok) break
         if (r.status !== 503 || d.status !== 'loading' || Date.now() > deadline) throw new Error(String(d.error || `HTTP ${r.status}`))
@@ -192,6 +223,11 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
       const prov = d.provenance as { ok?: boolean; figures?: string[]; tools?: string[] } | undefined
       const unverified = prov && prov.ok === false ? [...(prov.figures || []), ...(prov.tools || [])] : undefined
       setMessages(m => replaceLast(m, { role: 'assistant', text: String(d.answer || t('assistant.noAnswer')), trace, unverified }))
+      // … and said, in the answer's language (the server's: the question's)
+      if (speakOnRef.current && d.answer) {
+        const lang = VOICE_LANGS.includes(String(d.lang)) ? (d.lang as VoiceLang) : spoken
+        if (lang) void voice.speak(String(d.answer), lang)
+      }
       if (trace.length && !objectsLoadedRef.current) {
         try {
           const or = await api(sessionId, '/api/scene/objects', {})
@@ -218,7 +254,23 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
     } finally {
       setBusy(false)
     }
-  }, [sessionId, busy, viewport, refreshVolumes, t, onFocusObjects, onVolumesChanged, onViewerAction, api])
+  }, [sessionId, busy, viewport, refreshVolumes, t, onFocusObjects, onVolumesChanged, onViewerAction, api, voice])
+
+  // THE MICROPHONE: one press starts listening, the next sends what was said (the recording
+  // also ends by itself at the server's bound). What STAC heard is asked as a typed question is.
+  const toggleMic = useCallback(async () => {
+    if (voice.recording) { voice.stop(); return }
+    setVoiceNote(null)
+    const heard = await voice.start()
+    if (!heard) return
+    if (heard.noSpeech) { setVoiceNote(t('assistant.voice.noSpeech')); return }
+    if (readSpeakPref() == null) { setSpeakOn(true); speakOnRef.current = true; writeSpeakPref(true) }
+    ask(heard.text, heard.language)
+  }, [voice, ask, t])
+  const toggleSpeak = useCallback(() => {
+    setSpeakOn(on => { writeSpeakPref(!on); if (on) voice.stopSpeaking(); return !on })
+  }, [voice])
+  const voiceError = voice.error ? t(`assistant.voice.error.${voice.error.kind}`) : null
 
   const addVolume = useCallback(async () => {
     if (!sessionId) return
@@ -244,7 +296,7 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
     onVolumesChanged?.()
   }, [sessionId, viewport, onVolumesChanged, api])
 
-  const inputPlaceholder = vlmStatus === 'up' ? t('assistant.placeholder') : vlmStatus === 'loading' ? t('assistant.modelLoading') : vlmStatus === 'busy' ? t('assistant.modelBusy') : t('assistant.modelStarting')
+  const inputPlaceholder = voice.recording ? t('assistant.voice.listening') : voice.transcribing ? t('assistant.voice.transcribing') : vlmStatus === 'up' ? t('assistant.placeholder') : vlmStatus === 'loading' ? t('assistant.modelLoading') : vlmStatus === 'busy' ? t('assistant.modelBusy') : t('assistant.modelStarting')
 
   return (
     <div className="stac-assistant">
@@ -316,8 +368,16 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
         ))}
       </Section>
 
+      {(voiceError || voiceNote) && (
+        <Banner tone="warn" compact>{voiceError ?? voiceNote}</Banner>
+      )}
       <form className="stac-assistant__input" onSubmit={e => { e.preventDefault(); ask(input) }}>
-        <Input value={input} disabled={busy || vlmStatus !== 'up'} placeholder={inputPlaceholder} aria-label={t('assistant.placeholder')} onChange={e => setInput(e.target.value)} />
+        <IconButton type="button" variant={voice.recording ? 'danger' : 'ghost'} label={voice.recording ? t('assistant.voice.stop') : t('assistant.voice.start')}
+          icon={voice.recording ? <Square aria-hidden /> : <Mic aria-hidden />} loading={voice.transcribing}
+          disabled={!voiceSupported() || busy || voice.transcribing || vlmStatus !== 'up' || voiceStatus !== 'up'} onClick={toggleMic} />
+        <Input value={input} disabled={busy || vlmStatus !== 'up' || voice.recording} placeholder={inputPlaceholder} aria-label={t('assistant.placeholder')} onChange={e => setInput(e.target.value)} />
+        <IconButton type="button" variant="ghost" label={speakOn ? t('assistant.voice.speakOff') : t('assistant.voice.speakOn')}
+          icon={speakOn ? <Volume2 aria-hidden /> : <VolumeX aria-hidden />} onClick={toggleSpeak} />
         <IconButton type="submit" variant="primary" tone="measure" label={t('assistant.send')} icon={<Send aria-hidden />} loading={busy} disabled={!input.trim() || vlmStatus !== 'up'} />
       </form>
     </div>

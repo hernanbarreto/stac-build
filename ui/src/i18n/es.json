@@ -980,7 +980,24 @@
     "frameVolume": "Encuadrar en la vista",
     "evaluate": "Evaluar",
     "evaluateVolumeQuestion": "Evaluá el volumen {name}: qué hay adentro y cuánto espacio libre queda.",
-    "evaluateVolumeById": "Evaluá el volumen {id}: objetos dentro y espacio libre."
+    "evaluateVolumeById": "Evaluá el volumen {id}: objetos dentro y espacio libre.",
+    "voice": {
+      "start": "Hablar con STAC",
+      "stop": "Terminar y enviar",
+      "listening": "Te escucho: presiona otra vez para enviar",
+      "transcribing": "Escribiendo lo que dijiste",
+      "noSpeech": "STAC no escuchó voz. Presiona el micrófono y habla de nuevo.",
+      "speakOn": "Respuestas con voz: apagadas",
+      "speakOff": "Respuestas con voz: encendidas",
+      "error": {
+        "unsupported": "Este navegador no puede usar el micrófono aquí. Abre STAC Build por https.",
+        "denied": "El micrófono está bloqueado para esta página. Permítelo en el navegador y prueba de nuevo.",
+        "no-microphone": "No se encontró un micrófono.",
+        "busy": "La voz está apagada mientras la GPU reconstruye. Vuelve cuando termine el trabajo.",
+        "loading": "Los motores de voz se están cargando. Prueba de nuevo en unos segundos.",
+        "failed": "La voz no respondió. Prueba de nuevo."
+      }
+    }
   },
   "viz": {
     "fits": "cabe: {dims} m",

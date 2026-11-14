@@ -814,6 +814,44 @@ autoprompt:
 # reached only through the semantic_client HTTP client (server/semantic/).
 # Consumed by: server/semantic/* (launcher + client). Launch:
 #   bash scripts/serve_semantic.sh [backend]
+# ── STAC's VOICE (USER 2026-11-14: "incorpora herramientas para hablarle y que traduzca a texto y que responda con
+#    voz sintetica en los 3 idiomas del sistema, ingles, español y frances") — server/voice/. Its own process in the
+#    `voice` env (scripts/build_voice_env.sh), local, on the card; the backend talks to it over HTTP.
+voice:
+  enabled: true
+  start_with_backend: true     # USER 2026-11-14: "tanto el motor de voz y habla del sistema como el chat vlm deberan
+                               # iniciar cuando levante el backend porque son el core del funcionamiento de stac
+                               # build". Stopped while a job holds the card (it has a CUDA context), started again after
+  name: "STAC"                 # USER 2026-11-14: "el sistema se llama stac, no hace falta llamarlo por el nombre
+                               # completo stac build, aunque tambien se acepta"
+  device: cuda                 # cpu | cuda — where both engines run; cuda with no card FAILS naming this key
+  languages: [es, en, fr]      # the system's languages: the speech's language is detected AMONG these
+  service:
+    host: "127.0.0.1"
+    port: 8798
+    startup_timeout_s: 300     # BOUND (wait): the weights load in ~40 s from the pod's HF cache
+    request_timeout_s: 60      # BOUND (wait): one transcription / one synthesis
+  stt:
+    model: "openai/whisper-large-v3-turbo"   # MIT. Measured 2026-11-14 on the card: 7-8 s of speech in 0.23-0.29 s,
+                                             # the language right on es / en / fr; 1.5 GB of the card
+    max_audio_s: 30            # BOUND (work): one spoken command or question — Whisper's own window
+    max_new_tokens: 200        # BOUND (work): the tokens of one transcription
+    no_speech_threshold: 0.6   # VENDOR DEFAULT (Whisper): with logprob_threshold, silence is not transcribed
+    logprob_threshold: -1.0    # VENDOR DEFAULT (Whisper)
+    prompt_max_labels: 60      # BOUND (context): the scene's labels given to the recogniser as vocabulary (with the
+                               # system's name), the most frequent first — Whisper's prompt holds ~220 tokens
+    vad_threshold: 0.5         # VENDOR DEFAULT (Silero VAD, MIT): is there speech at all — asked BEFORE the
+                               # recogniser, which writes a word for silence ("you") and whose own no-speech
+                               # flag stayed at 0.0 on silence, a tone and noise (measured 2026-11-14)
+  tts:
+    model: "hexgrad/Kokoro-82M"              # Apache-2.0. Measured 2026-11-14: 7-8 s of speech in 0.08 s; 0.3 GB
+    voices:                    # one voice per language (Kokoro's names) — HIS EAR decides (samples sent 2026-11-14)
+      es: {voice: "ef_dora", lang_code: "e"}
+      en: {voice: "af_heart", lang_code: "a"}
+      fr: {voice: "ff_siwis", lang_code: "f"}
+    speed: 1.0                 # VENDOR DEFAULT
+    max_chars: 1200            # BOUND (work): the text of one spoken answer
+
 semantic:
   enabled: true
   chat_on_demand: false        # USER 2026-11-14 ("tanto el motor de voz y habla del sistema como el chat vlm deberan

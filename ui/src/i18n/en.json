@@ -980,7 +980,24 @@
     "frameVolume": "Frame in view",
     "evaluate": "Evaluate",
     "evaluateVolumeQuestion": "Evaluate the volume {name}: what is inside and how much free space is there?",
-    "evaluateVolumeById": "Evaluate volume {id}: objects inside and free space."
+    "evaluateVolumeById": "Evaluate volume {id}: objects inside and free space.",
+    "voice": {
+      "start": "Speak to STAC",
+      "stop": "Stop and send",
+      "listening": "Listening: press again to send",
+      "transcribing": "Writing what you said",
+      "noSpeech": "STAC heard no speech. Press the microphone and speak again.",
+      "speakOn": "Spoken answers: off",
+      "speakOff": "Spoken answers: on",
+      "error": {
+        "unsupported": "This browser cannot use the microphone here. Open STAC Build over https.",
+        "denied": "The microphone is blocked for this page. Allow it in the browser and try again.",
+        "no-microphone": "No microphone was found.",
+        "busy": "The voice is off while the GPU is reconstructing. It returns when the job ends.",
+        "loading": "The voice engines are loading. Try again in a few seconds.",
+        "failed": "The voice did not answer. Try again."
+      }
+    }
   },
   "viz": {
     "fits": "fits: {dims} m",

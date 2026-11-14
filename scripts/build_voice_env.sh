@@ -37,6 +37,9 @@ pip install --no-input --no-cache-dir "transformers>=4.57,<5" accelerate
 echo "[$(date +%T)] text → speech (Kokoro) + audio I/O"
 pip install --no-input --no-cache-dir "kokoro>=0.9.4" "misaki[en]" soundfile espeakng-loader phonemizer-fork
 
+echo "[$(date +%T)] voice activity detection (Silero VAD, MIT): silence is never transcribed"
+pip install --no-input --no-cache-dir "silero-vad>=5"
+
 echo "[$(date +%T)] the service's own deps"
 pip install --no-input --no-cache-dir fastapi "uvicorn[standard]" python-multipart pyyaml numpy av
 

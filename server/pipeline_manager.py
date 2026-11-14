@@ -601,6 +601,14 @@ class PipelineManager:
                              "step will find it on the card")
         except Exception as e:  # noqa: BLE001 — declared, never fatal for the job
             logger.warning(f"[Pipeline] the chat's tools process could not be stopped: {e}")
+        # … and STAC's voice service, which holds a CUDA context too (voice/service.py)
+        try:
+            from voice import service as voice_service
+            if not voice_service.stop(reason, log=lambda m: logger.info(m)):
+                logger.error("[Pipeline] the voice service did not end — the next GPU step will "
+                             "find it on the card")
+        except Exception as e:  # noqa: BLE001 — declared, never fatal for the job
+            logger.warning(f"[Pipeline] the voice service could not be stopped: {e}")
 
     async def _take_job_lease(self, job: "PipelineJob", on_progress: Optional[ProgressCallback]
                               ) -> None:
