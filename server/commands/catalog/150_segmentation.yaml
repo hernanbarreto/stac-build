@@ -25,16 +25,19 @@ commands:
       - abrí autosegmentar
       - quiero segmentar automáticamente
       - ventana de autosegmentación
+      - autosegmentar
       done: Ventana de autosegmentación abierta.
     en:
       title: Open autosegment
       say:
       - open autosegment
       - I want to segment automatically
+      - autosegment
       done: Autosegment window open.
     fr:
       title: Ouvrir l'autosegmentation
       say:
       - ouvre l'autosegmentation
       - je veux segmenter automatiquement
+      - autosegmentation
       done: Fenêtre d'autosegmentation ouverte.

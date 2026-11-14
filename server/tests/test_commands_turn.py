@@ -173,7 +173,15 @@ def test_stac_asks_the_name_and_never_stores_one_that_was_not_said(tmp_path, mon
     res, engine = _ask(monkeypatch, tmp_path, [("talk__set_user_name", {"name": "Pedro"})], "mi nombre no importa",
                        ui=UI, lang="es")
     assert "talk__set_user_name" in engine.chats[0]["tools"]
-    assert res["ui_actions"] == [] and res["answer"].startswith("No hay datos suficientes")
+    # (the refused call leaves the turn: it is not an error to tell the user about)
+    assert res["ui_actions"] == [] and res["tool_trace"] == [] and res["answer"] == answers.small_talk_default("es")
+    # another person's name said in the sentence is still the model's to leave alone — when it
+    # does call the command with it, the name WAS said and is stored: the description tells the
+    # model the command is for the user's OWN name
+    res, engine = _ask(monkeypatch, tmp_path, [("small_talk", {"reply": "Hello, Virginia!"})],
+                       "the name of my wife is Virginia. Say hello, please.", ui=UI, user_name="Hernan")
+    assert res["lang"] == "en" and res["answer"] == "Hello, Virginia!" and res["ui_actions"] == []
+    assert "THEIR OWN name" in next(t for t in __import__("commands").database().tool_schemas(["talk.set_user_name"]))["function"]["description"]
     # … and a command the sentence was not offered does not run at all
     res, engine = _ask(monkeypatch, tmp_path, [("talk__set_user_name", {"name": "Pedro"})], "gracias", ui=UI, lang="es")
     assert "talk__set_user_name" not in engine.chats[0]["tools"]
@@ -241,3 +249,18 @@ def test_how_the_user_is_addressed():
     assert say("La holgura es 1 m.", "Ana", "es", acted=False, first=False) == "La holgura es 1 m."
     assert say("Hola, Ana.", "Ana", "es", acted=True, first=True) == "Hola, Ana."                    # already said
     assert say("Vista cambiada.", None, "es", acted=True, first=True) == "Vista cambiada."
+
+
+def test_the_conversation_is_in_the_turns_language(tmp_path, monkeypatch):
+    """USER 2026-11-14: "a veces le hablo en ingles y contesta en español". The model is TOLD the
+    answer's language, and a reply whose own words are another language's is not said."""
+    res, engine = _ask(monkeypatch, tmp_path, [("small_talk", {"reply": "¡Hola, Hernan! Aquí estoy, listo para ayudarte con el escenario."})],
+                       "this place is right for kids.", ui=UI, user_name="Hernan", conversation_lang="es")
+    assert res["lang"] == "en"                                           # the sentence's own words
+    assert "THE ANSWER'S LANGUAGE: English" in engine.chats[0]["system"]
+    assert res["answer"] == answers.small_talk_default("en")              # the Spanish reply is not said
+    res, _ = _ask(monkeypatch, tmp_path, [("small_talk", {"reply": "I am fine, thank you. What do you need?"})],
+                  "how are you today?", ui=UI)
+    assert res["answer"] == "I am fine, thank you. What do you need?"
+    res, engine = _ask(monkeypatch, tmp_path, [("small_talk", {"reply": "Très bien, merci."})], "comment ça va ?", ui=UI)
+    assert res["lang"] == "fr" and res["answer"] == "Très bien, merci." and "THE ANSWER'S LANGUAGE: French" in engine.chats[0]["system"]

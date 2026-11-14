@@ -110,12 +110,14 @@ commands:
       - abrí la configuración
       - ajustes
       - preferencias
+      - configuración
       done: Configuración abierta.
     en:
       title: Open settings
       say:
       - open the settings
       - preferences
+      - settings
       done: Settings open.
     fr:
       title: Ouvrir les paramètres
@@ -123,6 +125,7 @@ commands:
       - ouvre les paramètres
       - préférences
       - réglages
+      - paramètres
       done: Paramètres ouverts.
 - id: app.open_command_palette
   kind: action

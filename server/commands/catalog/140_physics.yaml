@@ -28,6 +28,9 @@ commands:
       - abrí la física
       - cerrá el panel de física
       - quiero tirar pelotas
+      - gravedad
+      - herramienta de gravedad
+      - soltar una esfera
       done: Panel de física abierto.
       done_off: Panel de física cerrado.
     en:
@@ -36,6 +39,9 @@ commands:
       - open the physics
       - close the physics panel
       - I want to drop balls
+      - gravity
+      - gravity tool
+      - drop a sphere
       done: Physics panel open.
       done_off: Physics panel closed.
     fr:
@@ -43,5 +49,8 @@ commands:
       say:
       - ouvre la physique
       - ferme le panneau de physique
+      - gravité
+      - outil de gravité
+      - lâcher une sphère
       done: Panneau de physique ouvert.
       done_off: Panneau de physique fermé.

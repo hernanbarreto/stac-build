@@ -49,8 +49,9 @@ commands:
 - id: talk.set_user_name
   kind: action
   runs_on: ui
-  model: 'The user says their name or how they want to be called (''me llamo Ana'', ''call me John'', ''je m''appelle
-    Luc'', or just the name when STAC asked for it): store it. name = the name alone, written as a person''s name.'
+  model: 'The user tells THEIR OWN name or how THEY want to be called (''me llamo Ana'', ''call me John'', ''je
+    m''appelle Luc'', or just the name when STAC asked for it): store it. name = that name alone, as they said it.
+    NEVER for another person''s name (''my wife is Ana'', ''say hello to Luis''): that is conversation.'
   args:
     name:
       type: string

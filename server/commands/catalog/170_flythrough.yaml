@@ -25,6 +25,7 @@ commands:
       - abrí el recorrido
       - mostrá el video con el modelo
       - reproducí el escaneo
+      - recorrido video y escena 3D
       done: Recorrido abierto.
     en:
       title: Open the flythrough
@@ -32,6 +33,7 @@ commands:
       - open the flythrough
       - show the video with the model
       - play the scan
+      - flythrough video and 3D scene
       done: Flythrough open.
     fr:
       title: Ouvrir le parcours
@@ -39,4 +41,5 @@ commands:
       - ouvre le parcours
       - affiche la vidéo avec le modèle
       - lis le scan
+      - parcours vidéo et scène 3D
       done: Parcours ouvert.

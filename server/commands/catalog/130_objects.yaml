@@ -24,6 +24,7 @@ commands:
       - agregá un objeto
       - abrí la biblioteca de objetos
       - poné el humano de referencia
+      - agregar objeto
       done: Biblioteca de objetos abierta.
     en:
       title: Add an object
@@ -31,6 +32,7 @@ commands:
       - add an object
       - open the object library
       - place the reference human
+      - add object
       done: Object library open.
     fr:
       title: Ajouter un objet
@@ -38,4 +40,5 @@ commands:
       - ajoute un objet
       - ouvre la bibliothèque d'objets
       - place l'humain de référence
+      - ajouter un objet
       done: Bibliothèque d'objets ouverte.

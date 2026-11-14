@@ -79,6 +79,7 @@ commands:
       - abrí la calibración
       - mostrá las medidas de calibración
       - está calibrada la nube
+      - calibración sobre el modelo 3D
       done: Ventana de calibración abierta.
     en:
       title: Open the calibration
@@ -86,6 +87,7 @@ commands:
       - open the calibration
       - show the calibration measurements
       - is the cloud calibrated
+      - calibration on the 3D model
       done: Calibration window open.
     fr:
       title: Ouvrir l'étalonnage
@@ -93,6 +95,7 @@ commands:
       - ouvre l'étalonnage
       - affiche les mesures d'étalonnage
       - le nuage est-il étalonné
+      - étalonnage sur le modèle 3D
       done: Fenêtre d'étalonnage ouverte.
 - id: calibration.open_reference
   kind: action

@@ -36,6 +36,10 @@ commands:
       - abrí instancias
       - panel de bim
       - panel del equipo
+      - instancias
+      - sesiones
+      - escaneos
+      - equipo
       done: Panel abierto.
     en:
       title: Show a side panel
@@ -46,6 +50,10 @@ commands:
       - open instances
       - bim panel
       - team panel
+      - instances
+      - sessions
+      - scans
+      - team
       done: Panel open.
     fr:
       title: Afficher un panneau latéral
@@ -55,6 +63,10 @@ commands:
       - montre les scans
       - panneau bim
       - panneau de l'équipe
+      - instances
+      - sessions
+      - scans
+      - équipe
       done: Panneau ouvert.
 - id: layout.hide_side_panel
   kind: action
@@ -102,6 +114,9 @@ commands:
       - mostrá el certificado
       - abrí el asistente
       - mostrá el acta
+      - certificado y calidad
+      - propiedades
+      - asistente
       done: Inspector abierto.
     en:
       title: Show the inspector
@@ -109,6 +124,9 @@ commands:
       - open properties
       - show the certificate
       - open the assistant
+      - certificate and quality
+      - properties
+      - assistant
       done: Inspector open.
     fr:
       title: Afficher l'inspecteur
@@ -116,6 +134,9 @@ commands:
       - ouvre les propriétés
       - affiche le certificat
       - ouvre l'assistant
+      - certificat et qualité
+      - propriétés
+      - assistant
       done: Inspecteur ouvert.
 - id: layout.hide_inspector
   kind: action
@@ -165,6 +186,10 @@ commands:
       - abrí el reporte
       - mostrá la evaluación
       - línea de tiempo
+      - trabajos
+      - reporte
+      - evaluación
+      - consola
       done: Panel inferior abierto.
     en:
       title: Show the bottom dock
@@ -175,6 +200,10 @@ commands:
       - open the report
       - show the evaluation
       - timeline
+      - jobs
+      - report
+      - evaluation
+      - console
       done: Bottom dock open.
     fr:
       title: Afficher le panneau inférieur
@@ -184,6 +213,10 @@ commands:
       - ouvre le rapport
       - affiche l'évaluation
       - chronologie
+      - tâches
+      - rapport
+      - évaluation
+      - console
       done: Panneau inférieur ouvert.
 - id: layout.hide_dock
   kind: action

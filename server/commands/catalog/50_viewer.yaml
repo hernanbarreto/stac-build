@@ -395,6 +395,11 @@ commands:
       - pincel
       - volver a navegar
       - alinear la nube
+      - pincel de segmentos
+      - medir distancia
+      - medir ángulo
+      - alinear nube
+      - navegar
       done: Herramienta cambiada.
     en:
       title: Viewer tool
@@ -405,6 +410,11 @@ commands:
       - brush
       - back to navigate
       - align the cloud
+      - segment brush
+      - measure distance
+      - measure angle
+      - align cloud
+      - navigate
       done: Tool changed.
     fr:
       title: Outil de la visionneuse
@@ -415,6 +425,10 @@ commands:
       - pinceau
       - revenir à la navigation
       - aligner le nuage
+      - pinceau de segments
+      - mesurer une distance
+      - mesurer un angle
+      - naviguer
       done: Outil changé.
 - id: viewer.clear_measurements
   kind: action

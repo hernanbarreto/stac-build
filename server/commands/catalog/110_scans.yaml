@@ -83,16 +83,19 @@ commands:
       say:
       - abrí la fusión
       - quiero fusionar los escaneos
+      - fusionar escaneos
       done: Ventana de fusión abierta.
     en:
       title: Open the fusion of scans
       say:
       - open the fusion
       - I want to fuse the scans
+      - fuse scans
       done: Fuse window open.
     fr:
       title: Ouvrir la fusion des scans
       say:
       - ouvre la fusion
       - je veux fusionner les scans
+      - fusionner les scans
       done: Fenêtre de fusion ouverte.

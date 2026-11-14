@@ -27,16 +27,19 @@ commands:
       - abrí reconstruir
       - quiero reconstruir la sesión
       - ventana de reconstrucción
+      - reconstruir geometría
       done: Ventana de reconstrucción abierta.
     en:
       title: Open reconstruct
       say:
       - open reconstruct
       - I want to reconstruct the session
+      - reconstruct geometry
       done: Reconstruct window open.
     fr:
       title: Ouvrir la reconstruction
       say:
       - ouvre reconstruire
       - je veux reconstruire la session
+      - reconstruire la géométrie
       done: Fenêtre de reconstruction ouverte.

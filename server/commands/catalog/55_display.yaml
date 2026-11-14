@@ -85,6 +85,7 @@ commands:
       - mostrá la grilla
       - ocultá la grilla
       - sacá la cuadrícula
+      - cuadrícula del piso
       done: Grilla visible.
       done_off: Grilla oculta.
     en:
@@ -92,6 +93,7 @@ commands:
       say:
       - show the grid
       - hide the grid
+      - floor grid
       done: Grid shown.
       done_off: Grid hidden.
     fr:
@@ -99,6 +101,7 @@ commands:
       say:
       - affiche la grille
       - masque la grille
+      - quadrillage du sol
       done: Grille affichée.
       done_off: Grille masquée.
 - id: display.camera_poses
@@ -116,6 +119,7 @@ commands:
       - mostrá las cámaras
       - ocultá las cámaras
       - mostrá el recorrido de la cámara
+      - poses de cámara
       done: Cámaras visibles.
       done_off: Cámaras ocultas.
     en:
@@ -124,6 +128,7 @@ commands:
       - show the cameras
       - hide the cameras
       - show the camera path
+      - camera poses
       done: Cameras shown.
       done_off: Cameras hidden.
     fr:
@@ -132,6 +137,7 @@ commands:
       - affiche les caméras
       - masque les caméras
       - affiche le trajet de la caméra
+      - poses de caméra
       done: Caméras affichées.
       done_off: Caméras masquées.
 - id: display.points_as_cubes
@@ -281,6 +287,7 @@ commands:
       - cambiá el fondo
       - abrí fondo y grilla
       - apariencia de la escena
+      - fondo y cuadrícula
       done: Ventana de fondo y grilla abierta.
     en:
       title: Background and grid
@@ -288,6 +295,7 @@ commands:
       - change the background
       - open background and grid
       - scene look
+      - background and grid
       done: Background and grid window open.
     fr:
       title: Fond et grille
@@ -295,4 +303,5 @@ commands:
       - change le fond
       - ouvre fond et grille
       - apparence de la scène
+      - fond et grille
       done: Fenêtre du fond et de la grille ouverte.

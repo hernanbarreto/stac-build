@@ -293,7 +293,10 @@ def _clean(value: Any, limit: int = 60) -> str:
     return " ".join(str(value).split())[:limit]
 
 
-def _state_block(ui: dict | None, user_name: str | None) -> str:
+_LANG_NAMES = {"es": "Spanish", "en": "English", "fr": "French"}
+
+
+def _state_block(ui: dict | None, user_name: str | None, lang: str | None = None) -> str:
     """What the interface says of itself (the request's ``ui``) and who the user is — the model
     needs the sessions' names to open one, and the user's name to speak to them."""
     lines = []
@@ -315,6 +318,11 @@ def _state_block(ui: dict | None, user_name: str | None) -> str:
                 lines.append(f"  {label}: " + ", ".join(vals))
     lines.append(f"THE USER: their name is {user_name} — speak to them by it." if user_name
                  else "THE USER: their name is not known.")
+    if lang in _LANG_NAMES:
+        # (the model answered an English sentence in Spanish when the conversation before it
+        # was in Spanish, 2026-11-14: the turn's language is decided by the tool layer and SAID)
+        lines.append(f"THE ANSWER'S LANGUAGE: {_LANG_NAMES[lang]} — whatever you write for the user "
+                     f"(small_talk's reply) is in {_LANG_NAMES[lang]}.")
     return "\n".join(lines)
 
 
@@ -346,8 +354,8 @@ class SpatialQA:
             self.session_log_dir = Path(__file__).resolve().parent.parent.parent / "logs" / "spatial_qa_logs"
 
     def system_prompt(self, ui: dict | None = None, user_name: str | None = None,
-                      expecting: str | None = None) -> str:
-        state = _state_block(ui, user_name) + (_EXPECTING_NAME if expecting == "user_name" else "")
+                      expecting: str | None = None, lang: str | None = None) -> str:
+        state = _state_block(ui, user_name, lang) + (_EXPECTING_NAME if expecting == "user_name" else "")
         if self.store is None:
             return _NO_SCENE_TEMPLATE + "\n" + state + "\n"
         return (_SYSTEM_TEMPLATE.format(session=_session_block(self.store),
@@ -442,7 +450,7 @@ class SpatialQA:
                 impls[tool] = _ui_call(row, question)
 
         client = get_semantic_client(backend=self.backend, consumer="phase5.qa")
-        messages = [system(self.system_prompt(ui=ui, user_name=name, expecting=expecting))]
+        messages = [system(self.system_prompt(ui=ui, user_name=name, expecting=expecting, lang=lang))]
         keep = cfg["history_turns"]
         turns = [h for h in (history or []) if isinstance(h, dict)
                  and h.get("role") in ("user", "assistant") and str(h.get("text") or "").strip()]
@@ -470,8 +478,11 @@ class SpatialQA:
             if composed and not ui_actions:
                 # (with commands of the interface in the turn, the interface words the whole
                 # answer once it has run them: it knows whether they worked)
-                result["answer"] = answers.address(result["answer"], name, lang, acted=acted_only,
-                                                   first=not turns)
+                # (a conversation's reply is the model's own words — it was told the user's name:
+                # the tool layer puts no name in front of it)
+                result["answer"] = answers.address(
+                    result["answer"], name, lang, acted=acted_only,
+                    first=not turns and any(e.get("kind") != "talk" for e in trace))
             # what STAC is still waiting for: its name question, until a name is given
             still = expecting if expecting == "user_name" and not any(
                 a["id"] == "talk.set_user_name" for a in ui_actions) else None
@@ -503,16 +514,20 @@ class SpatialQA:
                               "command": row.get("id"), "kind": row.get("kind"), "runs_on": row.get("runs_on")})
             server_trace = [e for e in trace if not _is_ui_action(e)]
             named = any(_is_ui_action(e) and e.get("command") == "talk.set_user_name" for e in trace)
-            if expecting == "user_name" and not named:
-                # no name was given. A refused name leaves the turn; when nothing else was asked
-                # (only conversation) STAC asks again itself, in the same words
-                trace = [e for e in trace if e.get("command") != "talk.set_user_name"]
+            # A NAME THE USER DID NOT SAY IS REFUSED (the tool layer checks it against the sentence)
+            # and the refused call leaves the turn — it is not an error to tell the user about
+            # ("the name of my wife is Virginia. Say hello" was answered "Insufficient data: no
+            # name was given", 2026-11-14)
+            refused = [e for e in trace if e.get("command") == "talk.set_user_name" and not _is_ui_action(e)]
+            if refused:
+                trace = [e for e in trace if e not in refused]
                 server_trace = [e for e in trace if not _is_ui_action(e)]
-                if all(e.get("kind") == "talk" for e in trace):
-                    trace, server_trace = [], []
-                    written = answers.ask_name(lang)
-                else:
-                    written = answers.compose_turn(server_trace, lang) if server_trace else ""
+            if expecting == "user_name" and not named and all(e.get("kind") == "talk" for e in trace):
+                # STAC asked the name and only conversation came back: it asks again itself
+                trace, server_trace = [], []
+                written = answers.ask_name(lang)
+            elif not trace:
+                written = answers.small_talk_default(lang)      # nothing was left to do or say
             else:
                 written = answers.compose_turn(server_trace, lang) if server_trace else ""
             if written is not None:

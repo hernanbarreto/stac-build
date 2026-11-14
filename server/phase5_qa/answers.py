@@ -401,7 +401,8 @@ def _small_talk(a, r, lang):
     reply = " ".join(str(r.get("reply") or "").split())
     if reply:
         from . import provenance
-        if not provenance.figures_in(reply):
+        # … and in the turn's language: a reply whose own words say another language is not said
+        if not provenance.figures_in(reply) and language_of(reply, default=lang) == lang:
             return reply
     return small_talk_default(lang)
 

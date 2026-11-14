@@ -2,7 +2,7 @@
 // The commands of the interface STAC can run: their ids and the type of each one's arguments.
 // A new command is declared in the catalogue; this file is then regenerated and the compiler
 // asks for its executor (ui/src/commands/registry.ts).
-export const CATALOG_SHA256 = 'e2dbab5b79664bfab2bfa7c4934e33a3718c08a7e6d4324c00b0a2cf1e447b1f'
+export const CATALOG_SHA256 = 'b00477cf64b866b5e4133d8aa1fada333418de867dc592b5185f7b7d48dd7fb1'
 
 export const UI_COMMAND_IDS = [
   'talk.set_user_name',
