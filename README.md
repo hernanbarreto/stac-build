@@ -90,7 +90,7 @@ configuration and code that made it.
 19. [Determinism, devices and reproducibility](#19-determinism-devices-and-reproducibility)
 20. [Running it](#20-running-it)
 21. [Repository map](#21-repository-map)
-22. [The session in the viewer: meshes, the spatial chat, calibration](#22-the-session-in-the-viewer-meshes-the-spatial-chat-calibration)
+22. [The session in the viewer: meshes, the spatial chat, calibration, STAC's commands and voice](#22-the-session-in-the-viewer-meshes-the-spatial-chat-calibration-stacs-commands-and-voice)
 
 ---
 
@@ -2024,8 +2024,14 @@ stac-build/
 │   │                          #   fragments_torch, obb_gpu and the other device twins
 │   ├─ semantic/               # vLLM launcher (deterministic serve flags), the engine lease and job_engine, client
 │   ├─ phase_r/                # the instance store (scene_r.db)
-│   ├─ phase5_qa/              # the spatial chat: orchestrator (prompt, references, provenance retry), tools.py (the
-│   │                          #   record), tools_torch.py (the device), tools_worker.py (the tools process), provenance.py
+│   ├─ phase5_qa/              # the spatial chat: orchestrator (one call of the model per turn), answers.py (the
+│   │                          #   answer written by the tool layer, es / en / fr), tools.py (the record),
+│   │                          #   tools_torch.py (the device), tools_worker.py (the tools process), provenance.py
+│   ├─ commands/               # THE DATABASE OF COMMANDS: catalog/*.yaml (the declarations), catalog.py (validated),
+│   │                          #   db.py (commands.db: sqlite + FTS5), router.py (what a sentence is offered),
+│   │                          #   system_tools.py (conversation, help), export_ui.py (the interface's typed ids)
+│   ├─ voice/                  # STAC's voice: serve.py (Whisper + Kokoro, its own process), spoken.py (a written answer
+│   │                          #   as it is said), wake.py ("STAC, …"), service.py (its life), api.py (/api/voice)
 │   ├─ calibration3d.py  calibration_api.py   # calibration measurements taken on the 3D model, per scan
 │   ├─ tools/genrecon/         # adapter + layout_gpu, presence (the vote + layout), genrecon_levels, run_cloud.sh,
 │   │                          #   resume + latents, decode_regions, remesh_resolution, denoise (the edge filter),
@@ -2057,7 +2063,7 @@ See `docs/` for their design.
 
 ---
 
-## 22. The session in the viewer: meshes, the spatial chat, calibration
+## 22. The session in the viewer: meshes, the spatial chat, calibration, STAC's commands and voice
 
 ### 22.1 Opening a session
 
@@ -2068,8 +2074,28 @@ loaded with the session.
 
 ### 22.2 The spatial chat (`server/phase5_qa/`)
 
-The assistant is a tool-calling loop over Qwen3-VL. The model proposes, describes and orchestrates; **it never
-measures**: every figure of an answer comes from a deterministic tool over the scan's instance store.
+The assistant — **STAC** — is Qwen3-VL choosing among commands. The model proposes, describes and orchestrates; **it
+never measures**: every figure of an answer comes from a deterministic tool over the scan's instance store.
+
+**One call of the model per question.** The model's part of a turn is to pick the command(s) and their arguments
+(`tool_choice: required`); the tools run, and the sentence the user reads is **written by the tool layer** from their
+results (`answers.py`): the same sentence for the same result, the tool's own figures, in Spanish, English or French,
+and no second call of the engine. Only a tool with no wording sends the turn back to the model, with the provenance
+check below. The conversation itself (a greeting, thanks) is the one thing the model words: its reply is an argument
+of the `small_talk` command, and is refused when it carries a figure with a unit.
+
+**The chat's engine.** The chat starts its own vLLM with the profile `semantic.chat.engine: single_sequence`: one
+sequence at a time (no answer depends on a batch), no batch-invariant kernels, decode graphs without compilation, no
+prefix cache, a fixed seed. Measured on the A100: the same tokens and log-probabilities bit for bit across request
+orders and across launches, 0.8 s a call; a question end to end 0.95–1.16 s. A pipeline stage always launches its own
+engine with the batch-invariant profile, and the chat-only keys do not enter that engine's identity. The engine starts
+with the backend (`semantic.chat_on_demand: false`), is warmed there (its first call), and leaves the card while a
+job runs.
+
+**The language of an answer** is the sentence's own when its words tell (`answers.language_of`), else the
+conversation's so far, else the speech recogniser's, else the interface's. A description the VLM wrote for a scan is
+kept in Spanish and translated once per language by the model (figures, names and ids unchanged), then kept in the
+store.
 
 **The scan it answers about.** The request carries the scan the viewer shows (`scan`); without it the project's
 active scan is used (`project_paths.resolve_session`). The store is `output/scene_r.db` of that scan.
@@ -2078,10 +2104,10 @@ active scan is used (`project_paths.resolve_session`). The store is `output/scen
 
 - *The session*: project, scan, number of objects, the cached scene description.
 - *The whole inventory.* Up to `semantic.chat.list_limit` objects, one line each (label, class, vertical extent). Beyond
-  it, every **label** with its count, its ids as ranges and its largest object:
-  `sign (3): ids 795-797 — largest: 795`. A label scattered over more id runs than the limit is given as a span and
-  `list_objects(label)` returns its ids. The model therefore knows every id that exists; a listing never exceeds the
-  context (pccr 2026-08-24's 8,777 objects were 486 kB of JSON before).
+  it, every **label** with its count and its largest object: `sign (3, #795)`. An id or a label written in the
+  question is resolved by the tool layer, a label standing for that label's largest object ("the floor", "the largest
+  wall"); `list_objects(label)` returns a label's ids. A listing never exceeds the context (pccr 2026-08-24's 8,777
+  objects were 486 kB of JSON before).
 - *The objects the question names.* `label#id`, `#id` and `id N` — as the Instances list writes them — are looked up
   in the store **before** the model reads the question, and the result is appended to it: the id's own label, whether
   it exists, and the ids of that label when it does not. Positions are not written there (read in a prompt they were
@@ -2181,8 +2207,104 @@ smallest positive one). The window shows $s$, the residuals $s\,m_i - t_i$ of th
 measurements. With **another scan** as the source, the same element is measured on both scans and the other scan's
 length is the "real" one: $s$ is then the factor that brings this scan to that scan's scale.
 
-The factor is **reported, not applied**: no cloud, pose or mesh is rescaled by it. The stored measurements are drawn
-on the model in their own colour and stay through "clear measurements".
+**Planes.** A calibration plane is marked on the model too: three or more picked points (Enter closes it), drawn
+filled on the cloud; the server fits the plane and stores its normal, inclination, height, rms and area.
+
+**Global or per axis.** `mode: global` gives the one factor above. `mode: axes` gives one factor per axis from
+$t_i^2 = \sum_k (s_k\, d_{ik})^2$ ($d_{ik}$: the measurement's component along axis $k$), solved by least squares for
+$s_k^2$ — and is refused unless a gauge measurement runs along each of the three axes; with one or two the calibration
+is global and the others verify. **Verification**: every *test* measurement is reported with its calibrated length, its
+difference to the real one and whether it lies within its $\sigma$. The scan's state — *uncalibrated*, *calibrated*,
+*verified* — is shown on the viewer as the cloud opens.
+
+The factor is **reported, not yet applied**: no cloud, pose or mesh is rescaled by it (the real rescale of the scan's
+geometry is the next step). The stored measurements are drawn on the model in their own colour and stay through
+"clear measurements".
 
 Routes: `GET /api/calibration/{session}?scan_key=`, `POST …/measurements`, `PATCH …/measurements/{id}`,
-`DELETE …/measurements/{id}`. Tests: `tests/test_calibration3d.py`.
+`DELETE …/measurements/{id}`, `POST …/planes`, `PATCH …/planes/{id}`, `DELETE …/planes/{id}`, `PUT …/mode`.
+Tests: `tests/test_calibration3d.py`.
+
+### 22.4 STAC's commands (`server/commands/`)
+
+Everything STAC can be asked to do is a **command**, declared once and kept in a database. A person speaks or writes;
+the model picks a command; what it picked says what the sentence was — an **action** (STAC operates the system), a
+**query** (STAC measures or reads) or **talk** (conversation).
+
+**The declarations** are `server/commands/catalog/*.yaml`, one file per area. A command states its `kind`
+(`action | query | talk`), who executes it (`runs_on: scene | system | ui`), its `status` (`available`: STAC runs it;
+`manual`: it exists in the interface and is operated by hand — STAC knows it and says so; `planned`), its arguments,
+whether it asks for confirmation, and in **es / en / fr** its name, the ways people ask for it and what STAC says when
+it is done (`done`, and `done_off` when what it did was to turn something off). `catalog.py` validates them: a missing
+or mistyped field fails the load naming the file, the command and the field.
+
+**The database** `commands.db` (sqlite with an FTS5 index, diacritics folded) is the declarations' deterministic image,
+rebuilt whenever their sha256 changes and read from a copy in memory. A search over every command in the three
+languages costs 0.1–0.4 ms.
+
+**The executors.**
+
+| `runs_on` | executed by | a command with no executor |
+|---|---|---|
+| `scene` | `phase5_qa/tools.py` (`SpatialTools`): the measurements and the viewer actions over a segmented scan | fails a test |
+| `system` | `commands/system_tools.py`: the conversation, the help | fails at the first turn, naming it |
+| `ui` | `ui/src/App.tsx` (and the Assistant panel for the user's name), through `ui/src/commands/registry.ts` | **does not compile** |
+
+`python -m commands.export_ui` writes `ui/src/commands/catalog.generated.ts` — the ids of the interface's commands and
+the type of each one's arguments; the app's executors are typed `Executors<UiCommandId>` against it. A test holds the
+generated file equal to the catalogue.
+
+**A turn.** `commands/router.py` chooses what a sentence is offered: every tool of the scene while a scan is open, the
+commands always offered (conversation, help), opening a session when none is open, and the interface's and system's
+commands whose names or ways of asking share words with the sentence — in the three languages at once, a word of four
+letters or more also matching the words that share its start (`conectá` finds `conectar`), at most
+`semantic.chat.command_candidates` of them. The model then makes its one call. The scene's and the system's commands
+run on the server; the interface's come back as `ui_actions`, each with the texts to word its outcome in the
+conversation's language, and the interface runs them in order. With no scan open STAC still converses and operates
+the application; it is told it cannot measure.
+
+A tool costs about 100 tokens of prompt, so the list offered must stay short however many commands exist. On the
+chat's engine a new set of tools costs 0.03–0.2 s the first time. When the catalogue outgrows word search, the next
+step is a first call of the model on the list of *areas* alone (0.3 s measured on a short prompt), its commands then
+offered — declared in `router.py`, not built.
+
+**To add a command:** declare it in its area's file; for `runs_on: ui` run `python -m commands.export_ui` and write
+its executor where the compiler asks; for `scene` / `system` write its handler and, when the tool layer should word
+its result, its composer in `answers.py`. Nothing else lists commands.
+
+What launches GPU work or deletes data is declared with `confirm: true` and today only opens its window.
+
+Tests: `tests/test_commands_db.py`, `tests/test_commands_turn.py`.
+
+### 22.5 STAC's voice (`server/voice/`)
+
+STAC is spoken to and answers aloud, in Spanish, English and French, with engines that run locally on the card in
+their own process (the `voice` conda env, `scripts/build_voice_env.sh`; the backend never loads a model).
+
+- **Speech → text**: Whisper large-v3-turbo. A voice-activity detector (Silero) is asked first whether there is
+  speech at all. The language is decided **among the system's three** from the first decoder step; decoding is
+  greedy, so the same audio gives the same text. The recogniser is given a vocabulary: the system's name, the labels
+  of the scan on screen, the sessions' and scans' names.
+- **Text → speech**: Kokoro-82M, one voice per language (`voice.tts.voices`). Before it is said, a written answer is
+  turned into what a person would say (`spoken.py`): `0.0018 m (1.8 mm)` → "0,0018 metros, 1,8 milímetros",
+  `sign#797` → "sign 797". Only the form changes: every figure said is the figure written.
+
+Measured on the A100: 7–8 s of speech written in 0.28–0.37 s with the language right; 6.7 s of audio synthesised in
+0.12 s; both engines load in 25–35 s and take 2.9 GB of the card. A spoken turn after the user stops speaking is the
+transcription plus the model's one call (0.4 s with no scan open, 1.0–1.5 s with one) plus the synthesis.
+
+**In the Assistant panel**: a microphone (press, speak, press again); spoken answers on / off; and **hands-free** (the
+ear button): the microphone stays open, the browser cuts each utterance out (its level against the room's own noise)
+and the server writes it. Only what **names STAC** is taken — "STAC, open pccr", "STAC Build, …", after a greeting or
+at the end of the sentence, as a recogniser may spell it (`voice/wake.py`, deterministic); the rest is dropped by the
+interface and nothing of it reaches the model. Saying the name alone makes STAC listen for the next sentence.
+
+**The user's name.** STAC asks it first and speaks to the user by it: it confirms by name a turn in which it only
+acted ("Listo, Ana."), starts a conversation's first answer with it, and is told it for its own replies. A name the
+user did not say is never stored (the tool layer checks that the name is in the sentence).
+
+**Life.** The voice service starts with the backend (`voice.start_with_backend`), ends — verified — when a job or a GPU
+task of the server takes the card (it holds a CUDA context), and starts again when the card frees.
+
+Routes: `GET /api/voice/status`, `POST /api/voice/transcribe` (the recorded audio → text, language, `addressed`,
+`command`), `POST /api/voice/speak` ({text, lang} → WAV), `POST /api/voice/stop`. Tests: `tests/test_voice.py`.
