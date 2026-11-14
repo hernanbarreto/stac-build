@@ -42,7 +42,7 @@ import { Inspector } from './layout/Inspector'
 import { BottomDock } from './layout/BottomDock'
 import { StatusBar } from './layout/StatusBar'
 import { CommandPalette, type Command } from './layout/CommandPalette'
-import { registerCommands, findByName, type Executors, type Outcome } from './commands/registry'
+import { registerCommands, findByName, type Executors, type Outcome, type PanelCommandId } from './commands/registry'
 import type { UiCommandId } from './commands/catalog.generated'
 import { SettingsDialog } from './layout/SettingsDialog'
 import { SceneLookDialog } from './layout/SceneLookDialog'
@@ -1995,7 +1995,7 @@ function App() {
     }
   }, [])
   useEffect(() => {
-    type AppCommandId = Exclude<UiCommandId, 'talk.set_user_name' | 'talk.forget_user_name'>
+    type AppCommandId = Exclude<UiCommandId, PanelCommandId>
     const done: Outcome = { ok: true }
     const noSession: Outcome = { ok: false, reason: 'no_session' }
     const open = () => cmd.current.activeSession

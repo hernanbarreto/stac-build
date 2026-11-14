@@ -418,3 +418,34 @@ commands:
       - ferme l'étalonnage
       - ferme cette fenêtre
       - quitte ce tableau
+- id: calibration.apply
+  kind: action
+  runs_on: ui
+  status: manual
+  confirm: true
+  model: 'APPLY the scan''s calibration to its geometry — the real rescale: the cloud, the cameras, the objects
+    and the meshes are REWRITTEN at the calibrated scale as a new geometric epoch (the ''Apply to the scan'' button
+    of the Calibration window). Only a global factor; undone by the inverse scale.'
+  needs:
+  - session
+  - cloud
+  - measurement
+  text:
+    es:
+      title: Aplicar la calibración al escaneo
+      say:
+      - aplicá la calibración
+      - reescalá la nube
+      - llevá el escaneo a escala real
+    en:
+      title: Apply the calibration to the scan
+      say:
+      - apply the calibration
+      - rescale the cloud
+      - bring the scan to real scale
+    fr:
+      title: Appliquer l'étalonnage au scan
+      say:
+      - applique l'étalonnage
+      - remets le nuage à l'échelle
+      - mets le scan à l'échelle réelle

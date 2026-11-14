@@ -373,6 +373,22 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
     }
     askRef.current(said, heard.language)
   }, [])
+  // STAC's own voice, by command ("STAC, dejá de escuchar", "respondeme con voz")
+  useEffect(() => {
+    const executors: Executors<'talk.spoken_answers' | 'talk.hands_free'> = {
+      'talk.spoken_answers': ({ on }) => {
+        setSpeakOn(on); speakOnRef.current = on; writeSpeakPref(on)
+        if (!on) voiceRef.current.stopSpeaking()
+        return { ok: true, state: on }
+      },
+      'talk.hands_free': ({ on }) => {
+        if (on && !voiceSupported()) return { ok: false, reason: 'unavailable' }
+        setHandsFree(on); writeHandsFree(on)
+        return { ok: true, state: on }
+      },
+    }
+    return registerCommands(executors)
+  }, [])
   const handsFreeOn = handsFree && voiceStatus === 'up' && vlmStatus === 'up'
   const ear = useHandsFree(handsFreeOn, busy || voice.speaking || voice.recording || voice.transcribing, onUtterance)
   const toggleHandsFree = useCallback(() => {

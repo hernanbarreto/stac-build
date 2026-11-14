@@ -2,11 +2,13 @@
 // The commands of the interface STAC can run: their ids and the type of each one's arguments.
 // A new command is declared in the catalogue; this file is then regenerated and the compiler
 // asks for its executor (ui/src/commands/registry.ts).
-export const CATALOG_SHA256 = '84b5dfef45c040b4f6ee372ceccb3a7fbd59d3b1418b2f429e751d00fc8ae6c2'
+export const CATALOG_SHA256 = '1bffa16de38199ef86072af205fe2686d3e03f48abb6f843269c85756cc4d875'
 
 export const UI_COMMAND_IDS = [
   'talk.set_user_name',
   'talk.forget_user_name',
+  'talk.spoken_answers',
+  'talk.hands_free',
   'viewer.set_tool',
   'viewer.clear_measurements',
   'viewer.remove_section_box',
@@ -58,6 +60,8 @@ export type UiCommandId = typeof UI_COMMAND_IDS[number]
 export interface UiCommandArgs {
   'talk.set_user_name': { name: string }
   'talk.forget_user_name': Record<string, never>
+  'talk.spoken_answers': { on: boolean }
+  'talk.hands_free': { on: boolean }
   'viewer.set_tool': { tool: 'navigate' | 'measure_distance' | 'measure_angle' | 'section_box' | 'brush' | 'align' }
   'viewer.clear_measurements': Record<string, never>
   'viewer.remove_section_box': Record<string, never>

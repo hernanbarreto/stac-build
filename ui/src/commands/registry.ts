@@ -23,6 +23,9 @@ export type Outcome =
 export type Executor<K extends UiCommandId = UiCommandId> = (args: UiCommandArgs[K]) => Outcome | Promise<Outcome>
 export type Executors<K extends UiCommandId = UiCommandId> = { [I in K]: Executor<I> }
 
+/** the commands the Assistant panel owns (the user's name, STAC's own voice); every other one is the app's */
+export type PanelCommandId = 'talk.set_user_name' | 'talk.forget_user_name' | 'talk.spoken_answers' | 'talk.hands_free'
+
 /** one command of an answer, as the server sends it */
 export interface UiAction {
   id: string

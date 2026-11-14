@@ -106,3 +106,83 @@ commands:
       - ne m'appelle pas comme ça
       - redemande mon nom
       done: J'ai oublié votre nom. Comment dois-je vous appeler ?
+- id: talk.spoken_answers
+  kind: action
+  runs_on: ui
+  model: 'STAC answers ALOUD (on = true) or in writing only (on = false): ''answer me with your voice'', ''stop
+    talking'', ''be quiet'', ''mute''.'
+  args:
+    'on': &id001
+      type: boolean
+      required: true
+  text:
+    es:
+      title: Respuestas con voz
+      say:
+      - respondeme con voz
+      - hablame
+      - dejá de hablar
+      - callate
+      - silencio
+      - respondé solo por escrito
+      done: Respondo con voz.
+      done_off: Respondo solo por escrito.
+    en:
+      title: Spoken answers
+      say:
+      - answer me with your voice
+      - talk to me
+      - stop talking
+      - be quiet
+      - mute
+      - answer in writing only
+      done: I answer aloud.
+      done_off: I answer in writing only.
+    fr:
+      title: Réponses vocales
+      say:
+      - réponds-moi à voix haute
+      - parle-moi
+      - arrête de parler
+      - tais-toi
+      - silence
+      - réponds seulement par écrit
+      done: Je réponds à voix haute.
+      done_off: Je réponds seulement par écrit.
+- id: talk.hands_free
+  kind: action
+  runs_on: ui
+  model: 'Hands-free listening on or off: with it on the microphone stays open and STAC acts on what names it (''STAC,
+    …''); off = it listens only while the microphone button is pressed. ''stop listening'', ''listen to me without
+    the button''.'
+  args:
+    'on': *id001
+  text:
+    es:
+      title: Manos libres
+      say:
+      - activá manos libres
+      - escuchame sin el botón
+      - dejá de escuchar
+      - apagá manos libres
+      - no me escuches más
+      done: 'Manos libres activado: di «STAC» y tu pedido.'
+      done_off: Manos libres apagado.
+    en:
+      title: Hands-free
+      say:
+      - turn hands-free on
+      - listen to me without the button
+      - stop listening
+      - turn hands-free off
+      done: 'Hands-free is on: say “STAC” and your request.'
+      done_off: Hands-free is off.
+    fr:
+      title: Mains libres
+      say:
+      - active le mode mains libres
+      - écoute-moi sans le bouton
+      - arrête d'écouter
+      - désactive le mode mains libres
+      done: 'Mains libres activé : dites « STAC » puis votre demande.'
+      done_off: Mains libres désactivé.
