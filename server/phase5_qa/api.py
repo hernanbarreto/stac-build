@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -119,6 +120,83 @@ def _engine_busy_response() -> JSONResponse | None:
     return None
 
 
+# ── the engine's first call ──────────────────────────────────────────────────────────────────
+# A started engine answers its FIRST request of the chat's shape in ~9.5 s (the decode graphs are
+# captured and the grammar of the tools' required call is compiled then) and every later one in
+# ~0.8 s (measured 2026-11-13/14, semantic.chat.engine: single_sequence). The chat pays that once,
+# while its panel says "loading" — never on the user's first question (USER 2026-11-13:
+# "Determinista pero en 1 o 2 segundos ninguna es negociable").
+_WARM: dict = {"engine": None, "state": "cold", "seconds": None}
+_WARM_LOCK = threading.Lock()
+
+
+def _engine_key():
+    """Which engine is answering now (its launcher's pid and start): a restarted one is cold."""
+    try:
+        from semantic.service import service_identity
+        proc = (service_identity() or {}).get("process") or {}
+    except Exception:  # noqa: BLE001 — no record: an engine nobody can tell apart
+        return None
+    return (proc.get("pid"), proc.get("started_unix")) if proc.get("pid") is not None else None
+
+
+def engine_warm_state() -> str:
+    """'warm' | 'warming' | 'cold' for the engine answering now ('warm' too for an engine with
+    no identity record: it cannot be told apart from a warmed one, and a question warms it)."""
+    key = _engine_key()
+    if key is None:
+        return "warm"
+    with _WARM_LOCK:
+        if _WARM["engine"] != key:
+            _WARM.update(engine=key, state="cold", seconds=None)
+        return _WARM["state"]
+
+
+def mark_engine_warm() -> None:
+    """A question was answered by the engine: it is warm, whoever sent the first call."""
+    key = _engine_key()
+    if key is None:
+        return
+    with _WARM_LOCK:
+        if _WARM["engine"] != key or _WARM["state"] != "warm":
+            _WARM.update(engine=key, state="warm")
+
+
+def warm_engine(backend: str = "qwen_local") -> None:
+    """Send the engine ONE call of the chat's own shape (the tools' schemas, a required call) in
+    a thread, unless it is warm or being warmed. Never beside a job (the caller checked)."""
+    key = _engine_key()
+    if key is None:
+        return
+    with _WARM_LOCK:
+        if _WARM["engine"] == key and _WARM["state"] in ("warm", "warming"):
+            return
+        _WARM.update(engine=key, state="warming", seconds=None)
+
+    def _call():
+        import time as _time
+        t0 = _time.time()
+        state = "cold"
+        try:
+            from phase5_qa.tools import SpatialTools, chat_config
+            from semantic.client import get_semantic_client
+            from semantic.types import system, user
+            client = get_semantic_client(backend=backend, consumer="phase5.qa.warmup")
+            client.chat([system("Warm-up of the engine: call small_talk."), user("hola")],
+                        tools=SpatialTools.openai_schemas(), tool_choice="required",
+                        max_tokens=chat_config()["max_tokens"], consumer="phase5.qa.warmup")
+            state = "warm"
+        except Exception as e:  # noqa: BLE001 — declared; the first question then pays the call
+            print(f"[Chat] the engine's warm-up call failed: {e}")
+        with _WARM_LOCK:
+            if _WARM["engine"] == key:
+                _WARM.update(state=state, seconds=round(_time.time() - t0, 2))
+        if state == "warm":
+            print(f"[Chat] the engine is warm (its first call took {_time.time() - t0:.1f} s)")
+
+    threading.Thread(target=_call, name="chat-engine-warmup", daemon=True).start()
+
+
 @router.get("/semantic/status")
 async def semantic_status(warmup: bool = False):
     """State of the Qwen3-VL service, so the chat can say "loading…" the moment it
@@ -135,7 +213,13 @@ async def semantic_status(warmup: bool = False):
     if busy:
         return JSONResponse({"status": "busy", "detail": busy})
     if is_alive():
-        return JSONResponse({"status": "up"})
+        # up for the chat = alive AND past its first call (asked for when the chat warms it up)
+        # (an engine that is alive is the chat's to use — no job holds it: the call is sent
+        # whether or not this poll asked to START an engine)
+        if engine_warm_state() == "warm":
+            return JSONResponse({"status": "up"})
+        warm_engine()
+        return JSONResponse({"status": "loading", "detail": "warming the engine (its first call)"})
     if is_starting():
         return JSONResponse({"status": "loading"})
 
@@ -189,20 +273,33 @@ async def spatial_qa(body: dict):
     class _Busy(Exception):
         pass
 
+    import time as _time
+    t_request = _time.time()
+
     def _run():
         # the semantic client is asked for right BEFORE the call (point 81): the store was
         # resolved meanwhile and a job may have taken the engine
+        t_run = _time.time()
         why = _engine_busy()
         if why:
             raise _Busy(why)
         from phase5_qa.orchestrator import SpatialQA
+        t_open = _time.time()
         qa = SpatialQA(store_path, backend=backend)
         try:
-            return qa.ask(question,
-                          images=_resolve_images(body, store_path) or None,
-                          max_iterations=body.get("max_iterations", 8),
-                          history=body.get("history") if isinstance(body.get("history"), list) else None,
-                          lang=body.get("lang") if isinstance(body.get("lang"), str) else None)
+            t_ask = _time.time()
+            out = qa.ask(question,
+                         images=_resolve_images(body, store_path) or None,
+                         max_iterations=body.get("max_iterations", 8),
+                         history=body.get("history") if isinstance(body.get("history"), list) else None,
+                         lang=body.get("lang") if isinstance(body.get("lang"), str) else None)
+            # where the request's time went outside the model (the whole answer is asked in
+            # 1-2 s: every tenth of a second is accounted for)
+            out["timing_s"] = {"before_thread": round(t_run - t_request, 3),
+                               "engine_check": round(t_open - t_run, 3),
+                               "open_store": round(t_ask - t_open, 3),
+                               "ask": round(_time.time() - t_ask, 3)}
+            return out
         finally:
             qa.close()
 
@@ -210,6 +307,9 @@ async def spatial_qa(body: dict):
         res = await _aio.get_running_loop().run_in_executor(None, _run)
     except _Busy as e:
         return JSONResponse({"status": "busy", "error": str(e)}, status_code=503)
+    mark_engine_warm()
+    if isinstance(res.get("timing_s"), dict):
+        res["timing_s"]["total"] = round(_time.time() - t_request, 3)
     return JSONResponse(res)
 
 

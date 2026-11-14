@@ -356,3 +356,38 @@ def test_the_vlm_worker_runs_on_its_own_engine_and_has_no_fallback(tmp_path, mon
     off["autoprompt"]["enabled"] = False
     with pytest.raises(RuntimeError, match="InternVL3 fallback is gone"):
         vlm_worker._vlm_work(_Pipe(), str(tmp_path), off)
+
+
+def test_the_chats_engine_profile_and_the_stage_engines_identity(monkeypatch):
+    """USER 2026-11-13 ("Determinista pero en 1 o 2 segundos"): the chat's own engine serves one
+    sequence at a time without the batch-invariant kernels; a stage's engine and its identity are
+    what they were — and the chat's settings are not part of that identity."""
+    from semantic import serve
+    stage = serve.profile_serve_args("batch_invariant", 24576, 0)
+    chat = serve.profile_serve_args("single_sequence", 24576, 0)
+    assert stage == serve.deterministic_serve_args(24576, 0) and "--enforce-eager" in stage
+    assert "--enforce-eager" not in chat and chat[chat.index("--max-num-seqs") + 1] == "1"
+    assert "--no-enable-prefix-caching" in chat and chat[chat.index("--seed") + 1] == "0"
+    cc = json.loads(chat[chat.index("--compilation-config") + 1])
+    assert cc == {"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY"}            # graphs, no compilation
+    with pytest.raises(serve.ServeError):
+        serve.profile_serve_args("fast", 24576, 0)
+    base = {"VLLM_BATCH_INVARIANT": "1"}
+    assert serve.service_environment(base)["VLLM_BATCH_INVARIANT"] == "1"
+    assert "VLLM_BATCH_INVARIANT" not in serve.service_environment(base, profile="single_sequence")
+    # the chat's keys do not move the stage engine's configuration hash
+    block = {"service": {"port": 8799}, "generation": {"seed": 0}}
+    with_chat = {**block, "chat_on_demand": True, "chat": {"engine": "single_sequence", "list_limit": 60}}
+    assert serve.semantic_config_sha256(with_chat) == serve.semantic_config_sha256(block)
+    assert serve.semantic_config_sha256({**block, "generation": {"seed": 1}}) != serve.semantic_config_sha256(block)
+
+
+def test_only_the_chat_starts_its_profile(monkeypatch):
+    from semantic import service
+    said = []
+    cfg = {"semantic": {"chat": {"engine": "single_sequence"}}}
+    assert service._chat_launch_args(cfg, "chat", said.append) == ["--profile", "single_sequence"]
+    assert service._chat_launch_args(cfg, "intel", said.append) == []
+    assert service._chat_launch_args(cfg, None, said.append) == []
+    with pytest.raises(RuntimeError, match="semantic.chat.engine"):
+        service._chat_launch_args({"semantic": {"chat": {}}}, "chat", said.append)

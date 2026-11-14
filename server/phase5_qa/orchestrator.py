@@ -392,8 +392,15 @@ class SpatialQA:
         return result
 
     def _log_session(self, result: dict, n_images: int = 0) -> None:
-        """Persist the full JSON session log (spec: log JSON completo por
-        sesión). Best-effort — logging must never break an answer."""
+        """Persist the full JSON session log (spec: log JSON completo por sesión) — in its own
+        thread: the write goes to the network volume and the answer does not wait for it."""
+        import threading
+        doc = dict(result)
+        threading.Thread(target=self._write_log, args=(doc, n_images), daemon=True,
+                         name="spatial-qa-log").start()
+
+    def _write_log(self, result: dict, n_images: int = 0) -> None:
+        """Best-effort — logging must never break an answer."""
         try:
             self.session_log_dir.mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y%m%d_%H%M%S")

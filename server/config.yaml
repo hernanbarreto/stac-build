@@ -890,6 +890,17 @@ semantic:
     history_turns: 6            # BOUND (context): the earlier turns of the conversation a question
                                 # carries (3 questions + 3 answers), so "y el otro?" has a referent;
                                 # 0 = every question alone, as before 2026-11-13
+    engine: single_sequence     # batch_invariant | single_sequence — the profile of the engine the CHAT
+                                # starts for itself (semantic.serve.PROFILES; a stage always launches
+                                # its own, batch_invariant). USER 2026-11-13: "Determinista pero en 1 o
+                                # 2 segundos ninguna es negociable". single_sequence = one sequence at
+                                # a time, so no answer depends on a batch, WITHOUT the batch-invariant
+                                # kernels (46 ms a token, the whole of an answer's time), decode
+                                # graphs without compilation, no prefix cache, the fixed seed:
+                                # measured 0.78-1.06 s a call against 1.5-2.5 s; the same tokens AND
+                                # log-probabilities bit for bit on 12 requests in three orders and
+                                # across two launches of the engine. A question end to end through
+                                # the backend: 0.95-1.16 s (pccr 2026-08-31, 2026-11-14)
     max_tokens: 512             # BOUND (work): the tokens of ONE call of the chat's loop — a tool call
                                 # or a brief answer never needs more; the engine's 2048 let a forced
                                 # tool call that did not close run 97 s (2026-11-13)

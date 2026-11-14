@@ -145,10 +145,19 @@ def semantic_config_from(path: Optional[os.PathLike]) -> Dict[str, Any]:
     return _deep_merge(_DEFAULTS, block)
 
 
+# The keys of the semantic block that configure the CHAT — how its conversation is run, where
+# its tools measure, when and with which profile its own engine starts — and nothing of the
+# engine a STAGE launches. They are not part of that engine's identity: with them in it, every
+# setting of the chat (2026-11-12 chat_on_demand, 2026-11-13 the chat block) made each stored VLM
+# analysis another engine's and the next run derived it again (48 min on pccr 2026-08-24).
+CHAT_ONLY_KEYS = ("chat", "chat_on_demand")
+
+
 def semantic_config_sha256(cfg: Mapping[str, Any]) -> str:
     """The identity of a semantic configuration block (canonical JSON sha256) — what the
-    stage compares against the frozen run configuration it was given."""
-    return repro.sha256_json(dict(cfg))
+    stage compares against the frozen run configuration it was given. The chat's own keys
+    (:data:`CHAT_ONLY_KEYS`) are left out: the block hashes as it did before they existed."""
+    return repro.sha256_json({k: v for k, v in dict(cfg).items() if k not in CHAT_ONLY_KEYS})
 
 
 # ── the weights ──────────────────────────────────────────────────────────────────────────
@@ -235,9 +244,44 @@ def deterministic_serve_args(max_model_len: int, seed: int) -> List[str]:
             "--attention-backend", ATTENTION_BACKEND]
 
 
+# THE ENGINE'S PROFILES. batch_invariant: every stage's engine, and the default — several
+# sequences at once, the batch-invariant kernels making each answer independent of the batch.
+# single_sequence: the CHAT's own engine (USER 2026-11-13: "Determinista pero en 1 o 2 segundos
+# ninguna es negociable").
+PROFILES = ("batch_invariant", "single_sequence")
+DEFAULT_PROFILE = "batch_invariant"
+
+
+def single_sequence_serve_args(max_model_len: int, seed: int) -> List[str]:
+    """The flags of the chat's engine. The same determinism by ANOTHER route: ONE sequence at a
+    time (``--max-num-seqs 1``) — a request never shares a batch, so its answer is a function of
+    the request alone without the batch-invariant kernels, which are what an answer's time was
+    (measured 2026-11-13 on the A100, the chat's 6.9 k-token request: 46 ms a token and 0.75 s
+    of prefill with them, against 0.78-1.06 s for the whole call without). Still no prefix
+    caching (a cached prefix was computed inside another request's shapes), a fixed token
+    batch, vLLM's own generation defaults, the fixed seed, the pinned attention backend, and
+    NO compilation: the decode steps are replayed as CUDA graphs of the same kernels
+    (``mode 0`` = no Inductor, ``FULL_DECODE_ONLY``) — under the batch-invariant flags the
+    graphs gave the eager engine's tokens AND log-probabilities bit for bit."""
+    return ["--no-enable-prefix-caching",
+            "--max-num-batched-tokens", str(int(max_model_len)),
+            "--max-num-seqs", "1",
+            "--compilation-config", json.dumps({"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY"}),
+            "--generation-config", "vllm",
+            "--seed", str(int(seed)),
+            "--attention-backend", ATTENTION_BACKEND]
+
+
+def profile_serve_args(profile: str, max_model_len: int, seed: int) -> List[str]:
+    if profile not in PROFILES:
+        raise ServeError(f"engine profile must be one of {list(PROFILES)}, got {profile!r}")
+    return (single_sequence_serve_args(max_model_len, seed) if profile == "single_sequence"
+            else deterministic_serve_args(max_model_len, seed))
+
+
 def build_argv(backend: str, overrides: Optional[dict] = None,
                cfg: Optional[Mapping[str, Any]] = None, *, model_ref: Optional[str] = None,
-               ) -> List[str]:
+               profile: str = DEFAULT_PROFILE) -> List[str]:
     """The ``vllm serve`` command line of ``backend`` under ``cfg`` (default: the merged
     config.yaml block). ``model_ref`` is the verified local weights directory
     (:func:`weights_identity`); without it the backend's declared ``weights_path_abs`` is
@@ -279,7 +323,7 @@ def build_argv(backend: str, overrides: Optional[dict] = None,
     # a thinking Qwen3 backend flips it on and vLLM parses <think> blocks.
     if b.get("reasoning"):
         argv += ["--reasoning-parser", "qwen3"]
-    argv += deterministic_serve_args(max_len, int(seed))
+    argv += profile_serve_args(profile, max_len, int(seed))
     extra = b.get("extra_serve_args") or []
     argv += [str(x) for x in extra]
     return argv
@@ -296,12 +340,17 @@ def batch_invariance_record(capability: str) -> Dict[str, Any]:
             "form": "batch_invariant_matmul" if mm else "cublas_workspace"}
 
 
-def service_environment(base: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
+def service_environment(base: Optional[Mapping[str, str]] = None,
+                        profile: str = DEFAULT_PROFILE) -> Dict[str, str]:
     """The environment ``vllm serve`` runs with: :func:`repro.deterministic_env` (the cuBLAS
-    workspace, PYTHONHASHSEED=0), batch invariance ON, Hugging Face OFFLINE (the weights are
+    workspace, PYTHONHASHSEED=0), batch invariance ON — OFF, and removed from what the launcher
+    script exported, under the single_sequence profile — Hugging Face OFFLINE (the weights are
     local and verified; nothing is ever fetched), the one HF cache."""
     env = repro.deterministic_env(base)
-    env["VLLM_BATCH_INVARIANT"] = "1"
+    if profile == "single_sequence":
+        env.pop("VLLM_BATCH_INVARIANT", None)
+    else:
+        env["VLLM_BATCH_INVARIANT"] = "1"
     env["HF_HUB_OFFLINE"] = "1"
     env.setdefault("HF_HOME", "/workspace/hf_cache")
     return env
@@ -313,7 +362,8 @@ def _versions() -> Dict[str, Optional[str]]:
 
 def identity_record(backend: str, cfg: Mapping[str, Any], argv: List[str],
                     weights: Mapping[str, Any], env: Mapping[str, str],
-                    config_path: Optional[os.PathLike]) -> Dict[str, Any]:
+                    config_path: Optional[os.PathLike],
+                    profile: str = DEFAULT_PROFILE) -> Dict[str, Any]:
     """What the service about to start IS — the stable part (``identity``: what a product
     made with it records and stamps) and the volatile part (``process``: pid, times, the
     file the configuration came from). The card is read through repro.card_identity (a
@@ -335,10 +385,12 @@ def identity_record(backend: str, cfg: Mapping[str, Any], argv: List[str],
         "served_model_name": b["served_model_name"],
         "weights": dict(weights),
         "argv": [_rel(a) if os.path.isabs(a) else a for a in argv],
-        "deterministic_args": deterministic_serve_args(
-            int(b.get("max_model_len", 32768)), int((cfg.get("generation") or {}).get("seed"))),
+        "deterministic_args": profile_serve_args(
+            profile, int(b.get("max_model_len", 32768)), int((cfg.get("generation") or {}).get("seed"))),
         "generation": dict(cfg.get("generation") or {}),
-        "batch_invariance": batch_invariance_record(card["capability"]),
+        "batch_invariance": (batch_invariance_record(card["capability"]) if profile != "single_sequence"
+                             else {"enabled": False, "capability": str(card["capability"]),
+                                   "form": "single_sequence (one sequence at a time, no batch to be invariant to)"}),
         "env": {k: env.get(k) for k in ("VLLM_BATCH_INVARIANT", "PYTHONHASHSEED",
                                         repro.CUBLAS_WORKSPACE_ENV, "HF_HUB_OFFLINE", "HF_HOME")},
         "versions": _versions(),
@@ -347,6 +399,8 @@ def identity_record(backend: str, cfg: Mapping[str, Any], argv: List[str],
                  "memory_total_mib": card["memory_total_mib"]},
         "semantic_config_sha256": semantic_config_sha256(cfg),
     }
+    if profile != DEFAULT_PROFILE:
+        identity["profile"] = profile          # the default profile's identity is as it always was
     identity["sha256"] = repro.sha256_json(identity)
     return {"identity": identity,
             "process": {"pid": os.getpid(), "started_unix": time.time(),
@@ -466,6 +520,9 @@ def main() -> None:
     ap.add_argument("--print-only", action="store_true", help="print the vllm command and exit")
     ap.add_argument("--verify-weights-only", action="store_true",
                     help="verify the backend's local weights against the pinned sha256s and exit")
+    ap.add_argument("--profile", default=DEFAULT_PROFILE, choices=list(PROFILES),
+                    help="batch_invariant (every stage; default) or single_sequence (the chat's "
+                         "own engine: one sequence at a time, no batch-invariant kernels)")
     ap.add_argument("--identity-only", action="store_true",
                     help="verify the weights, compute the identity this launch would write and "
                          "print it (one JSON line) WITHOUT starting vLLM and without writing "
@@ -479,16 +536,19 @@ def main() -> None:
         "max_model_len": args.max_model_len,
     }
     if args.print_only:
-        print("[semantic.serve] " + " ".join(build_argv(backend, overrides, cfg)), flush=True)
+        extra = {} if args.profile == DEFAULT_PROFILE else {"profile": args.profile}
+        print("[semantic.serve] " + " ".join(build_argv(backend, overrides, cfg, **extra)), flush=True)
         return
     b = backend_config(backend, cfg)
     weights = weights_identity(b, log=lambda m: print(m, flush=True))
     if args.verify_weights_only:
         print(json.dumps(weights, indent=1), flush=True)
         return
-    argv = build_argv(backend, overrides, cfg, model_ref=b["weights_path_abs"])
-    env = service_environment()
-    doc = identity_record(backend, cfg, argv, weights, env, args.config)
+    # the default profile is called exactly as before it had a name (the stage's engine)
+    extra = {} if args.profile == DEFAULT_PROFILE else {"profile": args.profile}
+    argv = build_argv(backend, overrides, cfg, model_ref=b["weights_path_abs"], **extra)
+    env = service_environment(**extra)
+    doc = identity_record(backend, cfg, argv, weights, env, args.config, **extra)
     if args.identity_only:
         # the identity a launch under this configuration would write — printed for
         # semantic.serve.expected_identity, never written: no vLLM is serving it

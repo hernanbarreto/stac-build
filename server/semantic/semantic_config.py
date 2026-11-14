@@ -61,14 +61,39 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
+# config.yaml parsed ONCE per file on disk: {"stamp": (path, inode, size, mtime_ns), "value": merged}
+_CACHE: dict[str, Any] = {}
+
+
+def _config_stamp() -> tuple | None:
+    """What identifies config.yaml as it is on disk now; None when it does not exist."""
+    try:
+        st = _CONFIG_PATH.stat()
+    except OSError:
+        return None
+    return (str(_CONFIG_PATH), st.st_ino, st.st_size, st.st_mtime_ns)
+
+
 def load_semantic_config() -> dict[str, Any]:
-    """Return the merged `semantic:` config block (defaults <- config.yaml)."""
+    """Return the merged `semantic:` config block (defaults <- config.yaml).
+
+    The file is parsed once per (inode, size, mtime) and every call gets its OWN copy of the
+    block: config.yaml is ~4,700 lines and its parse took 0.32 s — paid twice by every question
+    of the chat (the client and the call log, measured 2026-11-14), 0.65 s of an answer asked in
+    1-2 s. An edit of the file is read at the next call, as before."""
+    import copy
+    stamp = _config_stamp()
+    if stamp is not None and _CACHE.get("stamp") == stamp:
+        return copy.deepcopy(_CACHE["value"])
     data: dict[str, Any] = {}
-    if _CONFIG_PATH.exists():
+    if stamp is not None:
         with open(_CONFIG_PATH, "r") as f:
             full = yaml.safe_load(f) or {}
         data = full.get("semantic", {}) or {}
-    return _deep_merge(_DEFAULTS, data)
+    merged = _deep_merge(_DEFAULTS, data)
+    if stamp is not None and _config_stamp() == stamp:      # not rewritten while it was read
+        _CACHE.update(stamp=stamp, value=copy.deepcopy(merged))
+    return merged
 
 
 def base_url(cfg: dict[str, Any] | None = None) -> str:

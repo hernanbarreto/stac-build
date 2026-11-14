@@ -634,6 +634,28 @@ def _launcher_log_tail(n: int = 12) -> str:
         return "(no launcher log)"
 
 
+CHAT_OWNER_NAME = "chat"                # phase5_qa.api.CHAT_OWNER — the chat's name at the lease
+
+
+def _chat_launch_args(config: Optional[dict], owner: Optional[str],
+                      log: Callable[[str], Any]) -> List[str]:
+    """The launcher's arguments for an engine THIS function starts: the chat's own profile
+    (``semantic.chat.engine``: batch_invariant | single_sequence — typed, required) when the
+    chat asks for it; the default profile for anyone else. A stage never passes here: it
+    launches its own engine from the job's frozen configuration (:func:`job_engine`)."""
+    if owner != CHAT_OWNER_NAME:
+        return []
+    from semantic.serve import PROFILES
+    from semantic.semantic_config import load_semantic_config
+    sem = (config or {}).get("semantic") if isinstance(config, dict) and "semantic" in (config or {}) \
+        else load_semantic_config()
+    engine = ((sem or {}).get("chat") or {}).get("engine")
+    if engine not in PROFILES:
+        raise RuntimeError(f"config.yaml: semantic.chat.engine is missing or not one of {list(PROFILES)}")
+    log(f"Semantic service: the chat's engine profile is {engine}")
+    return ["--profile", engine]
+
+
 def ensure_service(config: Optional[dict] = None,
                    log: Optional[Callable[[str], Any]] = None,
                    cancelled: Optional[Callable[[], bool]] = None,
@@ -699,7 +721,7 @@ def ensure_service(config: Optional[dict] = None,
     release_cached_vram(_log)
 
     try:
-        proc = _launch([], _log)
+        proc = _launch(_chat_launch_args(config, owner, _log), _log)
     except Exception as e:  # noqa: BLE001
         _log(f"Could not launch semantic service: {e}")
         return False

@@ -1644,7 +1644,10 @@ class SpatialTools:
             "explain_reconstruction": self.explain_reconstruction,
         }
 
-    def openai_schemas(self) -> list[dict]:
+    @staticmethod
+    def openai_schemas() -> list[dict]:
+        """The tools as the engine reads them — the same for every scan (no store is read): the
+        engine's warm-up sends them too, so the grammar of a required call is compiled once."""
         def fn(name, desc, props=None, required=None):
             return {"type": "function", "function": {
                 "name": name, "description": desc,
