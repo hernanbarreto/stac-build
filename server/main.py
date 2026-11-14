@@ -4868,6 +4868,21 @@ def _camera_poses_payload(output_dir: Path, frames_dir: Optional[Path]):
         return None
 
 
+@app.post("/api/sessions/{session_id}/cloud_changed")
+async def session_cloud_changed(session_id: str, body: Optional[dict] = None):
+    """A scan's cloud products were rewritten OUTSIDE this process (a maintenance tool: the minimum
+    object size applied to a segmented scan, an octree rebuilt by hand): every open viewer of the
+    session is told to load the octree again — the potree_ready of a correction. Without it a viewer
+    keeps the OLD octree's index over the NEW file (USER 2026-11-13: "estoy seleccionando los objetos
+    por ejemplo de pccr y estan desfasados … hay un desfase importantisimo": the five octrees had
+    been rebuilt under his open viewer and nothing told it)."""
+    ctx = _ctx(session_id, (body or {}).get("scan") or None)
+    if not (ctx.output_dir / "potree" / "metadata.json").exists():
+        raise HTTPException(404, f"{session_id}: no octree to announce")
+    await _correction_notify_viewer(session_id, ctx.output_dir)
+    return {"ok": True, "session_id": session_id}
+
+
 async def _correction_notify_viewer(session_id: str, output_dir: Path):
     """potree_ready broadcast after a correction/undo rebuild — same message
     the session-open flow sends, so the viewport reloads the octree."""

@@ -16,7 +16,9 @@ This is the same drop for the scans projected in between, WITHOUT running the pr
      instance become unsegmented, as they are after a projection;
   3. the instance store — ``InstanceStore.reconcile``: the chat and the reports stop naming them;
   4. the octree — rebuilt by the caller (``potree_converter.convert_ply_to_potree``: its stamp
-     carries the classification's hash, so the published one no longer matches).
+     carries the classification's hash, so the published one no longer matches);
+  5. the open viewers — told to load the octree again (:func:`notify_viewers`): a viewer keeps the
+     old octree's index in memory, and over the new file every selection is displaced.
 
 Nothing else changes: no point moves, no instance above the minimum is touched, the masks and the
 fusion map stay as provenance. The files of steps 1-3 are copied to ``<output>/_before_min_points/``
@@ -145,6 +147,30 @@ def apply(output_dir, min_points: int | None = None,
     log(f"[min-points] {out}: {p['drop']} instance(s) under {mn} points dropped "
         f"({p['drop_points']:,} points), {len(keep_ids)} kept")
     return report
+
+
+def notify_viewers(session_id: str, scan_key: str | None = None,
+                   log: Callable[[str], None] = print) -> bool:
+    """Tell the backend the scan's cloud products changed, so every open viewer loads the octree
+    again (POST /api/sessions/<id>/cloud_changed). REQUIRED after the octree is rebuilt by a tool
+    that is not the backend: a viewer left with the old octree's index over the new file shows
+    every selection displaced (2026-11-13). False — said — when the backend does not answer."""
+    import ssl
+    import urllib.request
+    body = json.dumps({"scan": scan_key} if scan_key else {}).encode()
+    for scheme in ("https", "http"):
+        try:
+            req = urllib.request.Request(f"{scheme}://127.0.0.1:8765/api/sessions/{session_id}/cloud_changed",
+                                         body, {"Content-Type": "application/json"})
+            ctx = ssl._create_unverified_context() if scheme == "https" else None
+            urllib.request.urlopen(req, timeout=120, context=ctx).read()
+            log(f"[min-points] {session_id}: the open viewers were told to load the octree again")
+            return True
+        except Exception as e:  # noqa: BLE001 — tried the other scheme, then said
+            last = e
+    log(f"[min-points] {session_id}: the backend was NOT told the cloud changed ({last}) — an open "
+        f"viewer must reopen the session")
+    return False
 
 
 def restore(output_dir, log: Callable[[str], None] = print) -> int:
