@@ -121,7 +121,8 @@ def test_the_candidates_a_sentence_is_offered():
     assert "sessions.open" not in router.candidates(db, "zzz", limit=10, ui={"session": "pccr"})
     assert len(router.candidates(db, "abrí la sesión y mostrá la consola y los ejes", limit=3)) <= 2 + 3
     # STAC asked the name: only its answer's commands
-    assert router.candidates(db, "Ana", limit=10, expecting="user_name") == ["talk.set_user_name", "talk.small_talk"]
+    got = router.candidates(db, "soy Ana, abrí pccr", limit=10, expecting="user_name")
+    assert got[:3] == ["talk.set_user_name", "talk.small_talk", "help.commands"] and "sessions.open" in got
     row = db.get("display.point_opacity")
     assert router.validate_args(row, {"opacity": 0.5}) is None
     assert "over 1" in router.validate_args(row, {"opacity": 2})

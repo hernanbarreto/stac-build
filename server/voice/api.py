@@ -22,7 +22,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
-from . import service, voice_config
+from . import service, voice_config, wake
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
 _VOCAB: Dict[str, Any] = {}
@@ -35,6 +35,19 @@ def _busy() -> Optional[str]:
         return _engine_busy()
     except Exception:  # noqa: BLE001 — no chat module (a test): nothing to wait for
         return None
+
+
+def with_names(prompt: str, names: Optional[str], limit: int = 40) -> str:
+    """The vocabulary followed by the names the interface sends (the sessions on the server, the
+    scans): a recogniser that has not read "pccr" writes "PCC R". Bounded: ``limit`` names of at
+    most 40 characters, letters / digits / space / - / _ only."""
+    import re
+    clean = []
+    for n in str(names or "").split(","):
+        n = " ".join(re.sub(r"[^\w \-]", " ", n, flags=re.UNICODE).split())[:40]
+        if n and n not in clean:
+            clean.append(n)
+    return prompt + (" " + ", ".join(clean[:limit]) + "." if clean else "")
 
 
 def vocabulary(store_path: Optional[str], cfg: Dict[str, Any]) -> str:
@@ -103,7 +116,8 @@ async def voice_status(start: bool = False):
 
 
 @router.post("/transcribe")
-async def voice_transcribe(request: Request, session_id: Optional[str] = None, scan: Optional[str] = None):
+async def voice_transcribe(request: Request, session_id: Optional[str] = None, scan: Optional[str] = None,
+                           vocab: Optional[str] = None):
     import asyncio
     cfg = voice_config.load()
     if not cfg["enabled"]:
@@ -125,11 +139,17 @@ async def voice_transcribe(request: Request, session_id: Optional[str] = None, s
                 store = _resolve_store({"session_id": session_id, "scan": scan})
             except Exception:  # noqa: BLE001 — no store: the vocabulary is the name alone
                 store = None
-        prompt = vocabulary(store, cfg)
+        prompt = with_names(vocabulary(store, cfg), vocab)
         try:
             with _post("/transcribe?" + urllib.parse.urlencode({"prompt": prompt}), data, ctype,
                        cfg["service"]["request_timeout_s"]) as r:
-                return JSONResponse(json.loads(r.read()))
+                heard = json.loads(r.read())
+            # WAS STAC SPOKEN TO (voice/wake.py): its name at the start or the end of what was
+            # heard; ``command`` = what was said to it. The hands-free listening drops the rest.
+            addressed, command = wake.split(str(heard.get("text") or ""))
+            heard.update(addressed=addressed, command=command,
+                         ack=wake.ACK.get(str(heard.get("language")), wake.ACK["en"]))
+            return JSONResponse(heard)
         except Exception as e:  # noqa: BLE001 — relayed as what it is
             return _relay_error(e)
     return await asyncio.get_running_loop().run_in_executor(None, _do)

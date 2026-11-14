@@ -21,8 +21,8 @@ from typing import Any, List, Mapping, Optional
 
 from .db import CommandsDB
 
-# when STAC has just asked something, only the answer's commands are offered
-EXPECTING = {"user_name": ["talk.set_user_name", "talk.small_talk"]}
+# when STAC has just asked something, the answer's commands are always offered
+EXPECTING = {"user_name": ["talk.set_user_name"]}
 # what the interface's state calls for whatever the sentence says
 WITHOUT_SESSION = ["sessions.open", "sessions.list", "app.connect"]
 
@@ -31,13 +31,16 @@ def candidates(db: CommandsDB, text: str, *, limit: int, ui: Optional[Mapping[st
                expecting: Optional[str] = None) -> List[str]:
     """The ids of the interface's and the system's commands this sentence is offered, the ones
     always offered first, then the sentence's own by rank; at most ``limit`` of the latter."""
-    known = {c["id"] for c in db.list(runs_on=("ui", "system"))}
-    if expecting in EXPECTING:
-        return [c for c in EXPECTING[expecting] if c in known]
-    ids: List[str] = [c for c in db.core() if c in known]
+    known = {c["id"] for c in db.list(runs_on=("ui", "system"), status=("available", "manual"))}
+    # STAC has just asked something: the answer's commands are offered first — beside the
+  # sentence's own (the user may answer AND ask: "soy Ana, abrí pccr")
+    ids: List[str] = [c for c in EXPECTING.get(expecting or "", []) if c in known]
+    ids += [c for c in db.core() if c in known and c not in ids]
     if ui is not None and not ui.get("session"):
         ids += [c for c in WITHOUT_SESSION if c in known and c not in ids]
-    for hit in db.search(text, None, limit=int(limit), runs_on=("ui", "system"), stems=True):
+    # (a command the interface only does by hand is a candidate too: STAC then says so)
+    for hit in db.search(text, None, limit=int(limit), runs_on=("ui", "system"), stems=True,
+                         status=("available", "manual")):
         if hit["id"] not in ids:
             ids.append(hit["id"])
     return ids

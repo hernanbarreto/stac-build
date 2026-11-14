@@ -329,7 +329,9 @@ async def spatial_qa(body: dict):
                          lang=body.get("lang") if isinstance(body.get("lang"), str) else None,
                          user_name=body.get("user_name") if isinstance(body.get("user_name"), str) else None,
                          ui=body.get("ui") if isinstance(body.get("ui"), dict) else None,
-                         expecting=body.get("expecting") if isinstance(body.get("expecting"), str) else None)
+                         expecting=body.get("expecting") if isinstance(body.get("expecting"), str) else None,
+                         conversation_lang=body.get("conversation_lang")
+                         if isinstance(body.get("conversation_lang"), str) else None)
             # where the request's time went outside the model (the whole answer is asked in
             # 1-2 s: every tenth of a second is accounted for)
             out["timing_s"] = {"before_thread": round(t_run - t_request, 3),

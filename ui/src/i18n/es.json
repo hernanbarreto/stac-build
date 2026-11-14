@@ -996,7 +996,11 @@
         "busy": "La voz está apagada mientras la GPU reconstruye. Vuelve cuando termine el trabajo.",
         "loading": "Los motores de voz se están cargando. Prueba de nuevo en unos segundos.",
         "failed": "La voz no respondió. Prueba de nuevo."
-      }
+      },
+      "handsFreeOn": "Manos libres: apagado. Enciéndelo y di «STAC, …»",
+      "handsFreeOff": "Manos libres: encendido. Di «STAC, …»",
+      "handsFreeHint": "Escuchando: di «STAC, …»",
+      "hearing": "Te escucho"
     },
     "askName": "Hola, soy STAC. ¿Cómo te llamas?"
   },

@@ -452,6 +452,12 @@ def compose(tool: str, args: Dict[str, Any], result: Any, lang: str) -> Optional
     bad = _insufficient(result, lang)
     if bad:
         return bad
+    if result.get("manual"):
+        # a command the interface only does by hand (commands.db status: manual)
+        title, area = result.get("title", ""), result.get("area", "")
+        return _t(lang, f"«{title}» se hace a mano por ahora, en {area}.",
+                  f"“{title}” is done by hand for now, under {area}.",
+                  f"« {title} » se fait à la main pour l'instant, dans {area}.")
     fn = COMPOSERS.get(tool)
     if fn is None:
         return None
@@ -515,6 +521,12 @@ def ask_name(lang: str) -> str:
     """STAC's first question to someone whose name it does not know."""
     return _t(lang if lang in LANGS else "es", "Hola, soy STAC. ¿Cómo te llamas?",
               "Hello, I am STAC. What is your name?", "Bonjour, je suis STAC. Comment vous appelez-vous ?")
+
+
+def ask_name_again(lang: str) -> str:
+    """… after doing what was asked by someone who has not said their name yet."""
+    return _t(lang if lang in LANGS else "es", "¿Y cómo te llamas?", "And what is your name?",
+              "Et comment vous appelez-vous ?")
 
 
 def name_in_sentence(name: str, sentence: str) -> bool:

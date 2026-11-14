@@ -141,13 +141,19 @@ def test_the_three_languages(tmp_path, monkeypatch):
 
 
 def test_stac_asks_the_name_and_never_stores_one_that_was_not_said(tmp_path, monkeypatch):
-    # the answer gives a name: only the name's commands were offered, the name goes to the interface
+    # the answer gives a name: the name's command is offered first, beside the sentence's own
     res, engine = _ask(monkeypatch, tmp_path, [("talk__set_user_name", {"name": "Hernán"})], "me llamo Hernán Barreto",
                        ui=UI, expecting="user_name", lang="es")
-    assert engine.chats[0]["tools"] == ["small_talk", "talk__set_user_name"] and engine.chats[0]["n_messages"] == 2
-    assert "You have just asked the user their name" in engine.chats[0]["system"]
+    assert {"talk__set_user_name", "small_talk", "help__commands"} <= set(engine.chats[0]["tools"])
+    assert "STAC HAS JUST ASKED THE USER THEIR NAME" in engine.chats[0]["system"]
     assert res["ui_actions"][0]["args"] == {"name": "Hernán"} and res["expecting"] is None
     assert res["ui_actions"][0]["done"] == "Encantado, {name}. Dime qué necesitas." and res["answer"] == ""
+    # the name AND a request in one sentence (he said "My name is Hernan. Could you connect the server"):
+    # both are done
+    res, _ = _ask(monkeypatch, tmp_path, [("talk__set_user_name", {"name": "Hernan"}), ("app__connect", {})],
+                  "Hello, STAC Build. My name is Hernan. Could you connect the server, please?", ui=UI, expecting="user_name")
+    assert res["lang"] == "en" and [a["id"] for a in res["ui_actions"]] == ["talk.set_user_name", "app.connect"]
+    assert res["expecting"] is None and res["texts"]["tail"] == ""
     # the model "extracts" a name the user did not say: nothing is stored and STAC asks again itself
     for calls in ([("talk__set_user_name", {"name": "Hernán"})],
                   [("small_talk", {"reply": "¿Cómo te llamas?"}), ("talk__set_user_name", {"name": "Hernán"})],
@@ -155,6 +161,12 @@ def test_stac_asks_the_name_and_never_stores_one_that_was_not_said(tmp_path, mon
         res, _ = _ask(monkeypatch, tmp_path, calls, "no te voy a decir", ui=UI, expecting="user_name", lang="es")
         assert res["ui_actions"] == [] and res["expecting"] == "user_name"
         assert res["answer"] == answers.ask_name("es") == "Hola, soy STAC. ¿Cómo te llamas?"
+    # no name, but a request: it is done, and the name is asked once more after it
+    res, _ = _ask(monkeypatch, tmp_path, [("sessions__open", {"session": "pccr"})], "abrí pccr", ui=UI, expecting="user_name")
+    assert [a["id"] for a in res["ui_actions"]] == ["sessions.open"] and res["expecting"] == "user_name"
+    assert res["texts"]["tail"] == "¿Y cómo te llamas?"
+    res, _ = _ask(monkeypatch, tmp_path, [("help__commands", {})], "qué puedes hacer?", ui=UI, expecting="user_name")
+    assert res["expecting"] == "user_name" and res["answer"].endswith("¿Y cómo te llamas?") and res["texts"]["tail"] == ""
     assert answers.name_in_sentence("Hernán", "soy hernan, mucho gusto") and answers.name_in_sentence("Ana María", "me llamo ana maría")
     assert not answers.name_in_sentence("Hernán", "no te voy a decir") and not answers.name_in_sentence("", "ana")
     # outside the question too: a name is stored only when it was said
@@ -166,6 +178,48 @@ def test_stac_asks_the_name_and_never_stores_one_that_was_not_said(tmp_path, mon
     res, engine = _ask(monkeypatch, tmp_path, [("talk__set_user_name", {"name": "Pedro"})], "gracias", ui=UI, lang="es")
     assert "talk__set_user_name" not in engine.chats[0]["tools"]
     assert res["ui_actions"] == [] and "unknown tool" in res["answer"]
+
+
+def test_the_answers_language_is_the_sentences_then_the_conversations(tmp_path, monkeypatch):
+    """USER 2026-11-14: "a veces le hablo en ingles y contesta en español, debe mantener el idioma de
+    la conversacion". The recogniser's language token is a hint, not the verdict (it said Spanish
+    for his English while writing the English words)."""
+    sp = _store(tmp_path)
+    for question, hint, conversation, want in (
+            ("Connect the server, please.", "es", None, "en"),            # the words tell: English
+            ("Please open observatory.", "es", "es", "en"),
+            ("Describe what I are seeing in this scene.", "es", None, "en"),
+            ("abrí pccr", "en", "en", "es"),
+            ("ouvre la session", "es", "es", "fr"),
+            ("PCCR", "es", "en", "en"),                                   # no telling: the conversation's
+            ("PCCR", "fr", None, "fr"),                                   # … then the recogniser's
+            ("PCCR", None, None, "en")):                                  # … then the interface's (UI: en)
+        res, _ = _ask(monkeypatch, tmp_path, [("count_objects", {})], question, store=sp, ui=UI, lang=hint,
+                      conversation_lang=conversation)
+        assert res["lang"] == want, (question, hint, conversation)
+    # a description the VLM wrote in Spanish is said in the conversation's language: translated
+    # once by the model, kept in the store
+    from phase_r.instance_store import InstanceStore
+    from phase5_qa.tools import SpatialTools
+    import semantic.client as client_mod
+    store = InstanceStore(sp)
+    store.set_meta("scene_description", "Sala técnica con 3 racks.")
+    asked = []
+
+    class _Translator:
+        def chat(self, messages, **_kw):
+            asked.append(messages[0].text)
+            return type("R", (), {"content": "Technical room with 3 racks."})()
+    monkeypatch.setattr(client_mod, "get_semantic_client", lambda **_kw: _Translator())
+    try:
+        t = SpatialTools(store, device="numpy")
+        assert t.describe_scene()["description"] == "Sala técnica con 3 racks." and asked == []     # Spanish: as written
+        t.lang = "en"
+        assert t.describe_scene()["description"] == "Technical room with 3 racks."
+        assert t.describe_scene()["description"] == "Technical room with 3 racks." and len(asked) == 1   # kept
+        assert "Spanish to English" in asked[0] and store.get_meta("scene_description@en") == "Technical room with 3 racks."
+    finally:
+        store.close()
 
 
 def test_a_call_that_is_not_the_commands_is_refused_by_the_tool_layer(tmp_path, monkeypatch):

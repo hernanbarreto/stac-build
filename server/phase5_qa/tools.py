@@ -1305,6 +1305,40 @@ class SpatialTools:
                                  or (out_dir / ".orientation_applied").exists(),
                 "source": "tool_measured"}
 
+    # the language of the conversation (set by the orchestrator at each turn): the texts the VLM
+    # wrote for a scan are kept in Spanish and said in the user's language
+    lang = "es"
+    _LANG_NAMES = {"en": "English", "fr": "French"}
+
+    def _in_language(self, text: str, key: str) -> str:
+        """``text`` (a description the VLM wrote in Spanish, stored under ``key``) in the
+        conversation's language — USER 2026-11-14: "a veces le hablo en ingles y contesta en
+        español, debe mantener el idioma de la conversacion". Translated ONCE by the model (figures,
+        names and ids unchanged) and kept in the store under ``key@lang``; the Spanish text when
+        the engine cannot be asked (declared in the log)."""
+        target = self._LANG_NAMES.get(self.lang)
+        if not target or not text:
+            return text
+        kept = self.store.get_meta(f"{key}@{self.lang}")
+        if kept:
+            return kept
+        try:
+            from semantic.client import get_semantic_client
+            from semantic.types import system as _sys, user as _usr
+            client = get_semantic_client(consumer="phase5.translate")
+            resp = client.chat([
+                _sys(f"You translate technical descriptions of construction scenes from Spanish to {target}. "
+                     f"Keep every figure, unit, proper name and object id exactly as written. "
+                     f"Answer with the translation alone."),
+                _usr(text)])
+            out = (resp.content or "").strip()
+        except Exception as e:  # noqa: BLE001 — declared: the answer is then the Spanish text
+            print(f"[SpatialTools] the description could not be translated to {target} ({e})")
+            return text
+        if out:
+            self.store.set_meta(f"{key}@{self.lang}", out)
+        return out or text
+
     def describe_scene(self, refresh: bool = False) -> dict:
         """WHAT the scene is: the VLM LOOKS at sampled scan keyframes and
         writes a short description (kind of space, structures, materials,
@@ -1313,7 +1347,7 @@ class SpatialTools:
         still come only from the measuring tools."""
         cached = self.store.get_meta("scene_description")
         if cached and not refresh:
-            return {"description": cached, "cached": True,
+            return {"description": self._in_language(cached, "scene_description"), "cached": True,
                     "source": "vlm_proposed"}
         session_dir = Path(self.store.path).parent.parent
         frames = sorted((session_dir / "frames").glob("*.jpg"))
@@ -1339,7 +1373,9 @@ class SpatialTools:
         if desc:
             self.store.set_meta("scene_description", desc)
             self.store.set_meta("scene_description_origin", "vlm_proposed")
-        return {"description": desc or "(no answer)", "cached": False,
+            for other in ("en", "fr"):                 # the translations were of the old text
+                self.store.set_meta(f"scene_description@{other}", "")
+        return {"description": self._in_language(desc, "scene_description") if desc else "(no answer)", "cached": False,
                 "frames_used": [p.name for p in pick],
                 "source": "vlm_proposed"}
 

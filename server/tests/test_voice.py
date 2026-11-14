@@ -150,3 +150,43 @@ def test_the_wav_the_service_answers_with_and_the_decoder_bounds():
         serve.decode_audio(b"", 30)
     with pytest.raises(serve.VoiceError):
         serve.decode_audio(b"this is not audio", 30)
+
+
+@pytest.mark.parametrize("heard, addressed, command", [
+    ("STAC, ¿cuántas puertas hay?", True, "cuántas puertas hay?"),
+    ("Stack mostrame solo las puertas", True, "mostrame solo las puertas"),
+    ("Estac, abrí la consola", True, "abrí la consola"),
+    ("Stak cerrá la sesión", True, "cerrá la sesión"),
+    ("Hey Stac Build, open pccr", True, "open pccr"),
+    ("STAC-Build conectá con el servidor", True, "conectá con el servidor"),
+    ("Dis STAC, ouvre la session", True, "ouvre la session"),
+    ("OK, STAC: pantalla completa", True, "pantalla completa"),
+    ("¿cuántas puertas hay, STAC?", True, "¿cuántas puertas hay"),
+    ("hola STAC", True, "hola"),                       # a greeting alone is what was said to it
+    ("STAC", True, ""), ("stac.", True, ""),           # only its name: it listens
+    ("Hey SDAC Build, show me the doors.", True, "show me the doors."),     # as a recogniser wrote it
+    ("S.T.A.C., abrí pccr", True, "abrí pccr"), ("s t a c mostrame las puertas", True, "mostrame las puertas"),
+    ("stacy is here", False, "stacy is here"), ("estado de la obra", False, "estado de la obra"),
+    ("mostrame las puertas", False, "mostrame las puertas"),
+    ("the stacking of boxes", False, "the stacking of boxes"),
+    ("estacionamiento lleno", False, "estacionamiento lleno"),
+    ("un stack de cajas", False, "un stack de cajas"),          # the word inside a sentence is not a call
+    ("hasta acá llegamos", False, "hasta acá llegamos"),
+    ("", False, ""),
+])
+def test_stac_is_spoken_to_when_what_was_heard_names_it(heard, addressed, command):
+    """USER 2026-11-14: "el sistema se llama stac, no hace falta llamarlo por el nombre completo
+    stac build, aunque tambien se acepta"."""
+    from voice import wake
+    assert wake.split(heard) == (addressed, command)
+    assert set(wake.ACK) == {"es", "en", "fr"}
+
+
+def test_the_interfaces_names_join_the_recognisers_vocabulary():
+    """A recogniser that has not read "pccr" writes "PCC R" (2026-11-14): the sessions' and
+    scans' names the interface sends are added, cleaned and bounded."""
+    base = "STAC, STAC Build."
+    assert voice_api.with_names(base, None) == base and voice_api.with_names(base, " , ,") == base
+    assert voice_api.with_names(base, "pccr,zaragoza,pccr,2026-08-31 default") == base + " pccr, zaragoza, 2026-08-31 default."
+    assert voice_api.with_names(base, "<script>x</script>,a" + "b" * 80) == base + " script x script, a" + "b" * 39 + "."
+    assert voice_api.with_names(base, ",".join(f"s{k}" for k in range(100))).count(",") == 1 + 39

@@ -233,8 +233,10 @@ def _ui_call(row: dict, sentence: str = ""):
 
 
 def _failed(entry: dict) -> bool:
+    """The call did not do what was asked: an error, no data, or a command STAC only names
+    because it is done by hand."""
     res = entry.get("result")
-    return not isinstance(res, dict) or bool(res.get("error") or res.get("insufficient_data"))
+    return not isinstance(res, dict) or bool(res.get("error") or res.get("insufficient_data") or res.get("manual"))
 
 
 def _is_ui_action(entry: dict) -> bool:
@@ -278,11 +280,12 @@ small_talk, writing your reply there: the user's language, one or two sentences.
 figure: you measured nothing.
 """
 
-_EXPECTING_NAME = """You are STAC, the assistant of STAC Build. You have just asked the user their name; their
-answer follows. If it gives a name (the name alone, or "me llamo …", "soy …", "call me …",
-"je m'appelle …"), call talk__set_user_name with THAT name alone — the first name as they said
-it, first letter in upper case; never a name that is not in their answer. If their answer gives
-no name, call small_talk and ask again, briefly, in their language."""
+_EXPECTING_NAME = """
+STAC HAS JUST ASKED THE USER THEIR NAME. If their sentence gives it (the name alone, or "me
+llamo …", "soy …", "my name is …", "call me …", "je m'appelle …"), call talk__set_user_name with
+THAT name alone — the first name as they said it, first letter in upper case — BESIDE the calls
+for whatever else they ask. Never a name that is not in their sentence.
+"""
 
 
 def _clean(value: Any, limit: int = 60) -> str:
@@ -297,7 +300,9 @@ def _state_block(ui: dict | None, user_name: str | None) -> str:
     if ui:
         bits = []
         if isinstance(ui.get("connected"), bool):
-            bits.append(f"connected to the server: {'yes' if ui['connected'] else 'NO (app__connect)'}")
+            bits.append("connected to the server: yes" if ui["connected"] else
+                        "NOT connected to the server (app__connect connects; sessions__open and "
+                        "sessions__list connect by themselves: call them directly)")
         bits.append(f"session open: {_clean(ui['session'])}" if ui.get("session") else "session open: none")
         if ui.get("scan"):
             bits.append(f"scan on screen: {_clean(ui['scan'])}")
@@ -342,9 +347,7 @@ class SpatialQA:
 
     def system_prompt(self, ui: dict | None = None, user_name: str | None = None,
                       expecting: str | None = None) -> str:
-        if expecting == "user_name":
-            return _EXPECTING_NAME
-        state = _state_block(ui, user_name)
+        state = _state_block(ui, user_name) + (_EXPECTING_NAME if expecting == "user_name" else "")
         if self.store is None:
             return _NO_SCENE_TEMPLATE + "\n" + state + "\n"
         return (_SYSTEM_TEMPLATE.format(session=_session_block(self.store),
@@ -378,7 +381,8 @@ class SpatialQA:
     def ask(self, question: str, images: list | None = None,
             max_iterations: int = 8, history: list | None = None,
             lang: str | None = None, user_name: str | None = None,
-            ui: dict | None = None, expecting: str | None = None) -> dict[str, Any]:
+            ui: dict | None = None, expecting: str | None = None,
+            conversation_lang: str | None = None) -> dict[str, Any]:
         """``history``: the conversation's earlier turns, oldest first, as
         [{"role": "user" | "assistant", "text": str}] — the last
         ``semantic.chat.history_turns`` of them go with the question. ``lang``: the language
@@ -407,24 +411,34 @@ class SpatialQA:
         cfg = chat_config()
         ui = ui if isinstance(ui, dict) else None
         expecting = expecting if expecting in router.EXPECTING else None
-        lang = lang if lang in answers.LANGS else answers.language_of(
-            question, default=str((ui or {}).get("lang") or "es"))
+        # THE LANGUAGE OF THE ANSWER (USER 2026-11-14: "a veces le hablo en ingles y contesta en
+        # español, debe mantener el idioma de la conversacion"): the sentence's own when its words
+        # tell (the recogniser's language token said Spanish for his English four times that
+        # day while writing the English words); else the conversation's so far; else the
+        # recogniser's (``lang``); else the interface's
+        hint = next((x for x in (conversation_lang, lang, (ui or {}).get("lang")) if x in answers.LANGS), "es")
+        lang = answers.language_of(question, default=hint)
+        if self.tools is not None:
+            self.tools.lang = lang
         name = " ".join(str(user_name or "").split())[:60] or None
         # ── what this sentence is offered ─────────────────────────────────────────────────
         db = commands.database()
         cand = router.candidates(db, question, limit=cfg["command_candidates"], ui=ui, expecting=expecting)
-        scene_ids = [r["id"] for r in db.list(runs_on="scene")] \
-            if self.tools is not None and expecting is None else []
+        scene_ids = [r["id"] for r in db.list(runs_on="scene")] if self.tools is not None else []
         offered = scene_ids + [c for c in cand if c not in scene_ids]
         tools = db.tool_schemas(offered)
         want = set(offered)
-        rows = {r["tool"]: r for r in db.list(lang) if r["id"] in want}
+        rows = {r["tool"]: r for r in db.list(lang, status=("available", "manual")) if r["id"] in want}
         impls: dict[str, Any] = {}
         if scene_ids:
             impls.update(self.tools.impls(remote=self._remote if self.tools_device == "cuda" else None))
         impls.update(commands.SystemTools(db, lang).impls())
         for tool, row in rows.items():
-            if row["runs_on"] == "ui":
+            if row["runs_on"] == "ui" and row["status"] == "manual":
+                # done by hand in the interface: STAC knows it and says where (answers.compose)
+                impls[tool] = (lambda _row=row: (lambda **_kw: {
+                    "manual": True, "title": _row["title"], "area": db.area_title(_row["area"], lang)}))()
+            elif row["runs_on"] == "ui":
                 impls[tool] = _ui_call(row, question)
 
         client = get_semantic_client(backend=self.backend, consumer="phase5.qa")
@@ -432,7 +446,7 @@ class SpatialQA:
         keep = cfg["history_turns"]
         turns = [h for h in (history or []) if isinstance(h, dict)
                  and h.get("role") in ("user", "assistant") and str(h.get("text") or "").strip()]
-        for h in (turns[-keep:] if keep and expecting is None else []):
+        for h in (turns[-keep:] if keep else []):
             messages.append(user(str(h["text"])) if h["role"] == "user"
                             else assistant(text=str(h["text"])))
         asked, refs = self.question_with_references(question)
@@ -459,11 +473,16 @@ class SpatialQA:
                 result["answer"] = answers.address(result["answer"], name, lang, acted=acted_only,
                                                    first=not turns)
             # what STAC is still waiting for: its name question, until a name is given
-            still = expecting if expecting == "user_name" and not ui_actions else None
+            still = expecting if expecting == "user_name" and not any(
+                a["id"] == "talk.set_user_name" for a in ui_actions) else None
+            # … asked once more after what was done, when the sentence asked for something else
+            tail = answers.ask_name_again(lang) if still and result["answer"] != answers.ask_name(lang) else ""
+            if tail and not ui_actions:
+                result["answer"] = f"{result['answer']} {tail}".strip()
             result.update(
                 ui_actions=ui_actions, acted_only=acted_only, lang=lang, user_name=name, expecting=still,
                 texts={"done_prefix": answers.done_prefix(name, lang), "name_first": not turns,
-                       "reasons": answers.ui_reasons(lang)},
+                       "reasons": answers.ui_reasons(lang), "tail": tail if ui_actions else ""},
                 commands=[{"id": e.get("command"), "kind": e.get("kind"), "runs_on": e.get("runs_on")}
                           for e in trace],
                 prompt_s=round(t_prompt, 2), model_s=round(llm_s, 2),
@@ -483,11 +502,17 @@ class SpatialQA:
                 trace.append({"iteration": 0, "tool": tc.name, "arguments": tc.arguments, "result": res,
                               "command": row.get("id"), "kind": row.get("kind"), "runs_on": row.get("runs_on")})
             server_trace = [e for e in trace if not _is_ui_action(e)]
-            if expecting == "user_name":
-                named = [e for e in trace if _is_ui_action(e) and e.get("command") == "talk.set_user_name"]
-                trace = named[:1]                  # the name, or nothing: STAC asks again itself
-                server_trace = []
-                written = "" if named else answers.ask_name(lang)
+            named = any(_is_ui_action(e) and e.get("command") == "talk.set_user_name" for e in trace)
+            if expecting == "user_name" and not named:
+                # no name was given. A refused name leaves the turn; when nothing else was asked
+                # (only conversation) STAC asks again itself, in the same words
+                trace = [e for e in trace if e.get("command") != "talk.set_user_name"]
+                server_trace = [e for e in trace if not _is_ui_action(e)]
+                if all(e.get("kind") == "talk" for e in trace):
+                    trace, server_trace = [], []
+                    written = answers.ask_name(lang)
+                else:
+                    written = answers.compose_turn(server_trace, lang) if server_trace else ""
             else:
                 written = answers.compose_turn(server_trace, lang) if server_trace else ""
             if written is not None:

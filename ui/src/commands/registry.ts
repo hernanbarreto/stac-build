@@ -39,6 +39,8 @@ export interface AnswerTexts {
   done_prefix: string
   name_first?: boolean
   reasons: Record<string, string>
+  /** a sentence STAC adds after the commands' outcomes (its name question, asked once more) */
+  tail?: string
 }
 
 const registry = new Map<string, (args: never) => Outcome | Promise<Outcome>>()
@@ -99,6 +101,7 @@ export async function runActions(actions: UiAction[], serverAnswer: string, text
   const informs = actions.some(a => a.kind !== 'action')
   if (actedOnly && allOk && !informs && texts.done_prefix && !text.toLowerCase().includes(texts.done_prefix.replace(/[.,]/g, '').split(' ').pop()!.toLowerCase()))
     text = `${texts.done_prefix} ${text}`
+  if (texts.tail) text = `${text} ${texts.tail}`.trim()
   return { text, outcomes }
 }
 

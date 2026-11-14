@@ -167,6 +167,10 @@ class CommandsDB:
         rows = self._rows("SELECT id FROM commands WHERE tool = ?", (tool,))
         return self.get(rows[0][0], lang) if rows else None
 
+    def area_title(self, area: str, lang: str = "en") -> str:
+        rows = self._rows("SELECT title FROM area_text WHERE area_id = ? AND lang = ?", (area, _lang(lang)))
+        return rows[0][0] if rows else area
+
     def core(self) -> List[str]:
         """The commands every sentence is offered whatever it says (conversation, help)."""
         return [r[0] for r in self._rows(
@@ -174,7 +178,7 @@ class CommandsDB:
 
     # ── search ──────────────────────────────────────────────────────────────────────────────
     def search(self, text: str, lang: Optional[str] = None, limit: int = 20,
-               runs_on: Any = None, stems: bool = False) -> List[Dict[str, Any]]:
+               runs_on: Any = None, stems: bool = False, status: Any = "available") -> List[Dict[str, Any]]:
         """The commands whose name, description or way of asking share words with ``text``, best
         first (BM25 over the index of ``lang``; every language when None). Deterministic: ties
         go to the catalogue's order."""
@@ -200,7 +204,7 @@ class CommandsDB:
                 best[cid] = score
         info = {r["id"]: r for r in self._rows("SELECT id, status, runs_on, position FROM commands")}
         hits = [(score, info[cid]["position"], cid) for cid, score in best.items()
-                if info[cid]["status"] == "available"
+                if info[cid]["status"] in ([status] if isinstance(status, str) else list(status))
                 and (runs_on is None or info[cid]["runs_on"] in
                      ([runs_on] if isinstance(runs_on, str) else list(runs_on)))]
         hits.sort()
@@ -210,10 +214,11 @@ class CommandsDB:
     def tool_schemas(self, ids: Optional[Iterable[str]] = None, runs_on: Any = None) -> List[dict]:
         """The commands as functions the model can call, in the catalogue's order — all the
         available ones, or the given ids."""
-        rows = self.list(runs_on=runs_on)
-        if ids is not None:
+        if ids is None:
+            rows = self.list(runs_on=runs_on)
+        else:                                   # the given ids, a command done by hand included
             want = set(ids)
-            rows = [r for r in rows if r["id"] in want]
+            rows = [r for r in self.list(runs_on=runs_on, status=("available", "manual")) if r["id"] in want]
         return [tool_schema(r) for r in rows]
 
 

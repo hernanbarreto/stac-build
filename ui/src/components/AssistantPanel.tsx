@@ -13,7 +13,7 @@
 // Hernán Barreto - Ingerop IN3 Session IV - STAC
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Send, Box as BoxIcon, Trash2, Sparkles, Ruler, Loader2, Crosshair, Plus, Pause, Mic, Square, Volume2, VolumeX } from 'lucide-react'
+import { Send, Box as BoxIcon, Trash2, Sparkles, Ruler, Loader2, Crosshair, Plus, Pause, Mic, Square, Volume2, VolumeX, Ear, EarOff } from 'lucide-react'
 import type { ViewportHandle } from './Viewport'
 import type { UserVolume } from './assistantViz'
 import { Button } from './ui/Button'
@@ -25,6 +25,7 @@ import { Section, Row, Stack } from './ui/Panel'
 import { Tooltip } from './ui/Tooltip'
 import { useFmt, useI18n, useT } from '../i18n'
 import { useVoice, voiceSupported, type VoiceLang } from '../voice/useVoice'
+import { useHandsFree } from '../voice/useHandsFree'
 import { registerCommands, runActions, type AnswerTexts, type Executors, type UiAction } from '../commands/registry'
 
 interface TraceEntry { tool: string; arguments: Record<string, unknown>; result: Record<string, unknown> }
@@ -88,6 +89,10 @@ function readSpeakPref(): boolean | null {
 }
 function writeSpeakPref(on: boolean) { try { localStorage.setItem(SPEAK_KEY, on ? '1' : '0') } catch { /* a private window */ } }
 const VOICE_LANGS: readonly string[] = ['es', 'en', 'fr']
+// HANDS-FREE: the microphone stays open and STAC acts on what names it ("STAC, …")
+const HANDS_FREE_KEY = 'stac.voice.handsfree'
+function readHandsFree(): boolean { try { return localStorage.getItem(HANDS_FREE_KEY) === '1' } catch { return false } }
+function writeHandsFree(on: boolean) { try { localStorage.setItem(HANDS_FREE_KEY, on ? '1' : '0') } catch { /* a private window */ } }
 
 // how each user wants to be called — kept in this browser, per signed-in user
 const nameKey = (user: string | null | undefined) => `stac.user.name.${user || 'anonymous'}`
@@ -118,7 +123,11 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
   const [volForm, setVolForm] = useState<{ name: string; cx: number | ''; cy: number | ''; cz: number | ''; w: number | ''; h: number | ''; d: number | '' }>({ name: 'Bay', cx: 0, cy: 0, cz: 0, w: 2, h: 2, d: 2 })
   const scrollRef = useRef<HTMLDivElement>(null)
   // ── STAC's voice: the user speaks, the server writes it and STAC answers aloud ──
-  const voice = useVoice(sessionId, scanKey)
+  const getNames = useCallback(() => {
+    const ui = getUiState?.() ?? {}
+    return [...((ui.sessions as string[] | undefined) ?? []), ...((ui.scans as string[] | undefined) ?? [])]
+  }, [getUiState])
+  const voice = useVoice(sessionId, scanKey, getNames)
   const [speakOn, setSpeakOn] = useState<boolean>(() => readSpeakPref() ?? false)
   const speakOnRef = useRef(speakOn)
   useEffect(() => { speakOnRef.current = speakOn }, [speakOn])
@@ -130,6 +139,8 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
   useEffect(() => { const n = readName(userKey); setUserName(n); userNameRef.current = n }, [userKey])
   /** STAC has asked the name and the next thing said is the answer */
   const expectingNameRef = useRef(false)
+  /** the language of the conversation so far (the last answer's) */
+  const convLangRef = useRef<string | null>(null)
   // the two commands this panel owns (the rest are the app's: App.tsx)
   useEffect(() => {
     const executors: Executors<'talk.set_user_name' | 'talk.forget_user_name'> = {
@@ -252,6 +263,8 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
           question, history, ...(spoken ? { lang: spoken } : {}),
           ...(userNameRef.current ? { user_name: userNameRef.current } : {}),
           ...(expectingNameRef.current ? { expecting: 'user_name' } : {}),
+          // the conversation keeps its language when a sentence's own cannot be told
+          ...(convLangRef.current ? { conversation_lang: convLangRef.current } : {}),
           ui: getUiState?.() ?? {},
         })
         d = await r.json()
@@ -275,6 +288,7 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
         answer = (await runActions(actions, answer, texts, !!d.acted_only)).text
       }
       expectingNameRef.current = d.expecting === 'user_name'
+      if (VOICE_LANGS.includes(String(d.lang))) convLangRef.current = String(d.lang)
       setMessages(m => replaceLast(m, { role: 'assistant', text: answer || t('assistant.noAnswer'), trace, unverified }))
       // … and said, in the answer's language (the server's: the question's)
       if (speakOnRef.current && answer) {
@@ -332,12 +346,48 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
     if (!heard) return
     if (heard.noSpeech) { setVoiceNote(t('assistant.voice.noSpeech')); return }
     if (readSpeakPref() == null) { setSpeakOn(true); speakOnRef.current = true; writeSpeakPref(true) }
-    ask(heard.text, heard.language)
+    // (the press IS the address: "STAC, …" is not needed here, and is not part of the request)
+    ask(heard.addressed && heard.command ? heard.command : heard.text, heard.language)
   }, [voice, ask, t])
+
+  // HANDS-FREE (USER 2026-11-14: "el usuario debe poder hablar con stac"): every utterance is
+  // written by the server; only what names STAC is taken ("STAC, abrí pccr") — or what answers a
+  // question STAC has just asked, or what follows its name said alone. The rest is dropped here.
+  const [handsFree, setHandsFree] = useState<boolean>(readHandsFree)
+  const followUpRef = useRef(false)
+  const askRef = useRef(ask)
+  useEffect(() => { askRef.current = ask }, [ask])
+  const voiceRef = useRef(voice)
+  useEffect(() => { voiceRef.current = voice }, [voice])
+  const onUtterance = useCallback(async (wav: Blob) => {
+    const heard = await voiceRef.current.transcribe(wav)
+    if (!heard || heard.noSpeech) return
+    const expected = expectingNameRef.current || followUpRef.current
+    if (!heard.addressed && !expected) return                     // not said to STAC
+    followUpRef.current = false
+    const said = heard.addressed ? heard.command : heard.text
+    if (!said.trim()) {                                            // only its name: STAC listens
+      followUpRef.current = true
+      if (heard.ack) void voiceRef.current.speak(heard.ack, heard.language)
+      return
+    }
+    askRef.current(said, heard.language)
+  }, [])
+  const handsFreeOn = handsFree && voiceStatus === 'up' && vlmStatus === 'up'
+  const ear = useHandsFree(handsFreeOn, busy || voice.speaking || voice.recording || voice.transcribing, onUtterance)
+  const toggleHandsFree = useCallback(() => {
+    setHandsFree(on => {
+      writeHandsFree(!on)
+      // STAC answers aloud when it is spoken to with no hands
+      if (!on && readSpeakPref() == null) { setSpeakOn(true); speakOnRef.current = true; writeSpeakPref(true) }
+      return !on
+    })
+  }, [])
   const toggleSpeak = useCallback(() => {
     setSpeakOn(on => { writeSpeakPref(!on); if (on) voice.stopSpeaking(); return !on })
   }, [voice])
   const voiceError = voice.error ? t(`assistant.voice.error.${voice.error.kind}`) : null
+  const earError = handsFree && ear.error ? t(`assistant.voice.error.${ear.error}`) : null
 
   const addVolume = useCallback(async () => {
     if (!sessionId) return
@@ -363,7 +413,7 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
     onVolumesChanged?.()
   }, [sessionId, viewport, onVolumesChanged, api])
 
-  const inputPlaceholder = voice.recording ? t('assistant.voice.listening') : voice.transcribing ? t('assistant.voice.transcribing') : vlmStatus === 'up' ? t('assistant.placeholder') : vlmStatus === 'loading' ? t('assistant.modelLoading') : vlmStatus === 'busy' ? t('assistant.modelBusy') : t('assistant.modelStarting')
+  const inputPlaceholder = voice.recording ? t('assistant.voice.listening') : voice.transcribing ? t('assistant.voice.transcribing') : ear.hearing ? t('assistant.voice.hearing') : ear.listening ? t('assistant.voice.handsFreeHint') : vlmStatus === 'up' ? t('assistant.placeholder') : vlmStatus === 'loading' ? t('assistant.modelLoading') : vlmStatus === 'busy' ? t('assistant.modelBusy') : t('assistant.modelStarting')
 
   return (
     <div className="stac-assistant">
@@ -435,13 +485,15 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
         ))}
       </Section>
 
-      {(voiceError || voiceNote) && (
-        <Banner tone="warn" compact>{voiceError ?? voiceNote}</Banner>
+      {(voiceError || earError || voiceNote) && (
+        <Banner tone="warn" compact>{voiceError ?? earError ?? voiceNote}</Banner>
       )}
       <form className="stac-assistant__input" onSubmit={e => { e.preventDefault(); ask(input) }}>
         <IconButton type="button" variant={voice.recording ? 'danger' : 'ghost'} label={voice.recording ? t('assistant.voice.stop') : t('assistant.voice.start')}
           icon={voice.recording ? <Square aria-hidden /> : <Mic aria-hidden />} loading={voice.transcribing}
           disabled={!voiceSupported() || busy || voice.transcribing || vlmStatus !== 'up' || voiceStatus !== 'up'} onClick={toggleMic} />
+        <IconButton type="button" variant={ear.listening ? 'secondary' : 'ghost'} label={handsFree ? t('assistant.voice.handsFreeOff') : t('assistant.voice.handsFreeOn')}
+          icon={handsFree ? <Ear aria-hidden /> : <EarOff aria-hidden />} disabled={!voiceSupported() || voiceStatus !== 'up'} onClick={toggleHandsFree} />
         <Input value={input} disabled={busy || vlmStatus !== 'up' || voice.recording} placeholder={inputPlaceholder} aria-label={t('assistant.placeholder')} onChange={e => setInput(e.target.value)} />
         <IconButton type="button" variant="ghost" label={speakOn ? t('assistant.voice.speakOff') : t('assistant.voice.speakOn')}
           icon={speakOn ? <Volume2 aria-hidden /> : <VolumeX aria-hidden />} onClick={toggleSpeak} />

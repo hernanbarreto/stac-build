@@ -17,6 +17,12 @@ export interface Heard {
   /** the recogniser's detector found no speech in the recording */
   noSpeech: boolean
   audioSeconds: number
+  /** what was heard names STAC ("STAC, …" — the server's voice/wake.py) */
+  addressed: boolean
+  /** what was said TO STAC: the text without its name ("" when only the name was said) */
+  command: string
+  /** what STAC says when only its name was said ("Dime."), in the language heard */
+  ack: string
 }
 
 export type VoiceError = 'unsupported' | 'denied' | 'no-microphone' | 'busy' | 'loading' | 'failed'
@@ -35,7 +41,7 @@ export function voiceSupported(): boolean {
   return typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia && typeof MediaRecorder !== 'undefined'
 }
 
-export function useVoice(sessionId: string | null, scanKey?: string | null) {
+export function useVoice(sessionId: string | null, scanKey?: string | null, getNames?: () => string[]) {
   const [recording, setRecording] = useState(false)
   const [transcribing, setTranscribing] = useState(false)
   const [speaking, setSpeaking] = useState(false)
@@ -69,6 +75,9 @@ export function useVoice(sessionId: string | null, scanKey?: string | null) {
       const q = new URLSearchParams()
       if (sessionId) q.set('session_id', sessionId)
       if (scanKey) q.set('scan', scanKey)
+      // the names the recogniser should know how to write: the sessions on the server, the scans
+      const names = getNames?.() ?? []
+      if (names.length) q.set('vocab', names.slice(0, 40).join(','))
       const r = await fetch(`/api/voice/transcribe?${q.toString()}`, { method: 'POST', headers: { 'Content-Type': blob.type || 'application/octet-stream' }, body: blob })
       const d = await r.json().catch(() => ({}))
       if (!r.ok) {
@@ -76,14 +85,17 @@ export function useVoice(sessionId: string | null, scanKey?: string | null) {
         setError({ kind, detail: String(d.error || `HTTP ${r.status}`) })
         return null
       }
-      return { text: String(d.text || ''), language: (d.language as VoiceLang) || 'es', noSpeech: !!d.no_speech || !String(d.text || '').trim(), audioSeconds: Number(d.audio_s || 0) }
+      return {
+        text: String(d.text || ''), language: (d.language as VoiceLang) || 'es', noSpeech: !!d.no_speech || !String(d.text || '').trim(),
+        audioSeconds: Number(d.audio_s || 0), addressed: !!d.addressed, command: String(d.command ?? d.text ?? ''), ack: String(d.ack || ''),
+      }
     } catch (e) {
       setError({ kind: 'failed', detail: e instanceof Error ? e.message : String(e) })
       return null
     } finally {
       setTranscribing(false)
     }
-  }, [sessionId, scanKey])
+  }, [sessionId, scanKey, getNames])
 
   /** Start recording. Resolves — when stop() is called or the bound is reached — with what was heard. */
   const start = useCallback(async (): Promise<Heard | null> => {
@@ -169,5 +181,5 @@ export function useVoice(sessionId: string | null, scanKey?: string | null) {
 
   const clearError = useCallback(() => setError(null), [])
 
-  return { recording, transcribing, speaking, error, clearError, start, stop, cancel, speak, stopSpeaking }
+  return { recording, transcribing, speaking, error, clearError, start, stop, cancel, speak, stopSpeaking, transcribe }
 }
