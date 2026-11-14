@@ -271,6 +271,14 @@ No invented magnitude decides a correction. The bars are the sample's own noise.
 `intake/frames_manifest.reduced_size`, and F0 checks the frames against the cap the manifest declares). Every frame is
 sealed by its sha256 in `frames/manifest.json`.
 
+**Upright.** A video recorded with the phone held upright carries a rotation in its container and is stored
+sideways. The decoder's own rotation is left off and the container's rotation is applied to every decoded frame,
+explicitly (`frames_manifest.UPRIGHT`: 90° → a clockwise quarter turn, 180°, 270° → a counter-clockwise one; an
+exact permutation of the pixels, recorded in the manifest as `orientation_applied`), so the frames on disk — and
+everything computed from them — are as the video is watched. The explicit turn is the decoder's own automatic
+rotation, bit for bit (measured on a real recording and held by tests on tagged videos); a video with no rotation
+is extracted exactly as before. Sessions extracted before 2026-11-14 keep the frames they were computed on.
+
 ### 5.1 I0 — frame quality (`server/intake/quality.py`)
 
 Each frame is read as grey $g$.
@@ -2217,13 +2225,42 @@ is global and the others verify. **Verification**: every *test* measurement is r
 difference to the real one and whether it lies within its $\sigma$. The scan's state — *uncalibrated*, *calibrated*,
 *verified* — is shown on the viewer as the cloud opens.
 
-The factor is **reported, not yet applied**: no cloud, pose or mesh is rescaled by it (the real rescale of the scan's
-geometry is the next step). The stored measurements are drawn on the model in their own colour and stay through
-"clear measurements".
+The stored measurements are drawn on the model in their own colour and stay through "clear measurements".
+
+**Applying it: the real rescale** (`server/correction/rescale.py`). "Apply to the scan" in the window rewrites the
+scan's geometry at the calibrated scale, so that everything measured or compared afterwards — against another scan,
+a reference human, a mesh of the collection, a BIM model — is at real scale. Only a **global** factor is applied: a
+different factor on each axis is not a similarity, and the cameras could not follow it (the scene would no longer
+project onto its own images); the per-axis mode stays a diagnosis.
+
+With $s$ the factor, the rescale is a new **geometry epoch**, built by the same transaction as every correction
+(staged, sealed, swapped under a journal, the previous epoch kept and selectable):
+
+$$\mathbf x' = s\,\mathbf x \quad\text{(every point of the cloud and of the raw cloud)}, \qquad
+\mathbf c' = s\,\mathbf c,\ \ R' = R \quad\text{(every camera)}, \qquad
+\mathbf t_f' = s\,\mathbf t_f \quad\text{(the floor transform } \mathbf d = s_f R_f\,\mathbf x + \mathbf t_f\text{)},$$
+
+so the display frame scales about its own origin and the floor stays at height 0. The intrinsics are pixels and do
+not change. The objects' boxes are scaled exactly (centre and half extents $\times s$), never refit; the instance
+store, the depth sidecar and the octree follow inside the transaction. Nothing is deleted and nothing re-fitted.
+
+What an epoch does not carry is rewritten with it: the evaluation volumes' centres (their sizes are the user's own
+metres), the placed objects' positions (a reference human keeps its real size), the meshes — scaled by a transform
+at their root (the 3D tiles' `root.transform`, a wrapper node of the GLB), so they are the same mesh at the new
+scale — the calibration document (its measurements re-expressed on the new epoch: the calibration that was applied
+then reads a factor of 1), and the project's composition (the rescaled scan's transform to the reference composed
+with $1/s$; when the reference itself is rescaled, every other scan's with $s$). **Undo** is the inverse scale.
+
+Measured on a copy of bufferStop (3,837,478 points, 174 keyframes): 29 s, $\max \lVert \mathbf x' - s\,\mathbf x
+\rVert = 0.24\,\mu\text{m}$ (the cloud's float32), the octree's bounding box $\times s$ on its six bounds.
+
+To bring one scan to another's scale, the same elements are measured on both, stored on the scan to change with
+*another scan* as their source, verified, and applied.
 
 Routes: `GET /api/calibration/{session}?scan_key=`, `POST …/measurements`, `PATCH …/measurements/{id}`,
-`DELETE …/measurements/{id}`, `POST …/planes`, `PATCH …/planes/{id}`, `DELETE …/planes/{id}`, `PUT …/mode`.
-Tests: `tests/test_calibration3d.py`.
+`DELETE …/measurements/{id}`, `POST …/planes`, `PATCH …/planes/{id}`, `DELETE …/planes/{id}`, `PUT …/mode`,
+`POST …/apply` (the real rescale, in its own process; `GET …/apply` for its state).
+Tests: `tests/test_calibration3d.py`, `tests/test_rescale.py`.
 
 ### 22.4 STAC's commands (`server/commands/`)
 
@@ -2278,8 +2315,9 @@ Tests: `tests/test_commands_db.py`, `tests/test_commands_turn.py`.
 
 ### 22.5 STAC's voice (`server/voice/`)
 
-STAC is spoken to and answers aloud, in Spanish, English and French, with engines that run locally on the card in
-their own process (the `voice` conda env, `scripts/build_voice_env.sh`; the backend never loads a model).
+STAC is spoken to and answers aloud, in Spanish, English and French — the interface's own three languages
+(`ui/src/i18n/{es,en,fr}.json`, the same keys in each) — with engines that run locally on the card in their own
+process (the `voice` conda env, `scripts/build_voice_env.sh`; the backend never loads a model).
 
 - **Speech → text**: Whisper large-v3-turbo. A voice-activity detector (Silero) is asked first whether there is
   speech at all. The language is decided **among the system's three** from the first decoder step; decoding is
