@@ -113,6 +113,12 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   terminando y me vas a pasar reporte cada vez que un punto quede cerrado"; the report is a few lines ("anda de a
   poco que metiste mucho texto"); a point of his list is never folded into another in a summary; no long suite or
   measurement runs in the foreground of a turn.
+- THE BACKEND'S RESTART (2026-11-14: "a vos no te esta funcionando reiniciarlo, revisa que estas haciendo mal …
+  sino te quedas colgado y perdemos tiempo"): only through `bash scripts/restart_backend.sh` (it waits for the
+  shell, forces, starts from the prompt, waits BOUNDED) — never a Ctrl-C + sleep + an unbounded wait typed by
+  hand. A restart reloads the chat's VLM (~2.5 min) and the voice (~30 s): while he is trying the app it is
+  ANNOUNCED first, in one line, and server changes are batched into one restart. No probe is run against the
+  live chat engine while he tests (one sequence at a time: it queues behind his questions).
 - Long runs: a performance checkpoint in the first minutes; progress reported unprompted (~20 min — silence reads
   as a hang); a stall detector that reads the stage process and the card, not the log alone (F5's rungs are silent
   4–6 min at 100 %).
@@ -179,9 +185,14 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   restart DROPS THE QUEUE: re-send the stalled session with replace OFF and the rest as they were, in order.
 - Services: backend `bash scripts/start.sh` (tmux `backend`, port 8765, `logs/latest.log`); semantic service `bash
   scripts/serve_semantic.sh` (vLLM / Qwen3-VL on 127.0.0.1:8799). Every VLM stage launches its OWN vLLM from the job's
-  frozen config and stops it; the chat's vLLM loads ON DEMAND (`semantic.chat_on_demand: true`, USER 2026-11-12) —
-  when the chat is opened or asked, not at the pod's start (init_pod.sh reads the key since 2026-11-13; it started
-  vLLM at boot before) and not after a pipeline. From a shell vLLM needs `setsid nohup`
+  frozen config and stops it. THE CHAT'S VLM AND THE VOICE START WITH THE BACKEND (USER 2026-11-14: "tanto el motor
+  de voz y habla del sistema como el chat vlm deberan iniciar cuando levante el backend porque son el core del
+  funcionamiento de stac build" — `semantic.chat_on_demand: false`, `voice.start_with_backend: true`; his
+  2026-11-12 "si no lo usamos debe estar abajo" undone by it): the backend launches both at its start and after
+  every GPU work, warms the VLM (its first call), and both END when a job takes the card (the voice service
+  holds a CUDA context, as the chat's tools process does). init_pod.sh starts no vLLM of its own (it would be
+  adopted with the stages' profile, ~3× slower for the chat). The voice: `scripts/serve_voice.sh` (env `voice`,
+  built by `scripts/build_voice_env.sh`; 127.0.0.1:8798, `logs/voice_latest.log`). From a shell vLLM needs `setsid nohup`
   (launched from a short python it dies with it) and ≥ 40 GB free. Restart the backend to pick up new stages / routes.
 - API: `POST /api/pipeline/run {session_id, scans: [key], replace, segment: [key]}` (the Reconstruir button);
   `GET /api/pipelines/active` (running / queued jobs and their stages); scan keys `<date>/<source>` from `GET
@@ -193,7 +204,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   into pkgs), `vendor/GenRecon/work` (every GenRecon run rmtree's and recreates its own dirs) — USER 2026-11-08
   "ok, sin romper nada" / "los genrecon que se usaron a modo de pruebas eliminalos" (37 GB freed).
 - Envs (`/workspace/miniforge3/envs`): da3 (backend + core + PointDiT), mapanything (Omega, F4, F5), semantic (vLLM),
-  amb3r (AMB3R-SLAM), genrecon, CloudComPy310, gs, nodejs, colmap (evaluation only). One HF cache: `HF_HOME=
+  voice (Whisper large-v3-turbo MIT + Kokoro-82M Apache-2.0 + Silero VAD MIT, 2026-11-14), amb3r (AMB3R-SLAM), genrecon, CloudComPy310, gs, nodejs, colmap (evaluation only). One HF cache: `HF_HOME=
   /workspace/hf_cache`. No paid external APIs; everything local.
 - texrecon (`vendor/mvs-texturing`, kept *"por las dudas"*) was relinked against libtiff 6 (its own link.txt,
   `libtbb.so.12.19` → `libtbb.so.12`); a full `cmake ..` fails on the vendored oneTBB.
@@ -212,9 +223,24 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   test, source tape / laser / total station / ANOTHER SCAN) → `output/calibration_3d.json` (calibration3d.py,
   `/api/calibration/{session}`); the model's length is computed by the server from the two points and carries its
   geometry epoch (another epoch = stale, not used); the scale factor = the battery's `gauge_scale` over the gauge
-  ones, with the fit's residuals and the error on the test ones. THE FACTOR IS REPORTED, NOT APPLIED — what it is
-  applied to (the comparison's composition transform, the measurements shown, the scan's geometry) is HIS decision,
-  pending. The image-anchored references (ReferenceDialog, the battery's) stay as they were.
+  ones, with the fit's residuals and the error on the test ones. The image-anchored references (ReferenceDialog, the battery's) stay as they were.
+  SINCE 2026-11-13 (97517eb), his words: "la calibracion por plano tambien debe quedar sobre la nube … y debe
+  dibujar el plano sobre la nube 3d" (the plane tool: three or more picked points, Enter closes it, drawn filled);
+  "ambos metodos de calibracion deben estar agrupados en un unico boton que sea calibracion, debe desplegar un
+  pequeño selector" (ONE Calibration button: Distance / Plane / Stored); "debemos tener medidas de claibracion y
+  de comprobacion, el tipo lo indica el usuario … sino debe indicarse la diferencia" (gauge / test; the
+  verification's difference and whether it is within sigma); "debe indicarse si la nube esta calibrada o no, eso
+  lo debe indicar al abrir la nube" (the HUD chip: uncalibrated / calibrated / verified); "si es por ejes, debe
+  indicarse y no debe dejarse calibrar si no estan las 3 medidas, si solo hay una o dos se hace global y la otra
+  medida es de verificacion" (`mode` global | axes — axes refused unless a gauge runs along each axis).
+  ⭐ THE FACTOR MUST BE APPLIED, FOR REAL (USER 2026-11-13: "si" to applying it to everything measured and seen;
+  then "pero ojo, el reescalado debe ser real, porque hay humano de referencia, comparacion contra otras nubes,
+  debe generarse la nube real escalada … sino solo sirve localmente pero para comparar contra objetos glb de la
+  coleccion, contra el humano de referencia, contra otras sesiones"): a NEW GEOMETRY of the scan at the calibrated
+  scale — cloud, cameras, boxes, database, octree, meshes. NOT BUILT YET (next after the voice, his order
+  2026-11-14: "cuando termines con esta implementacion completa continuas con los puntos pendientes que teniamos
+  de escalado, etc"). Open question to put to him before building: the per-axis mode deforms the cloud against
+  its cameras.
 - Chat = spatial intelligence (`phase5_qa`): runs in a worker thread (never on the event loop); tools for measuring
   (feature bands, vertical axis, extents), `describe_scene` (VLM, cached), persistent notes, evaluation VOLUMES
   (rest on the floor, gizmo Move / Rotate / Resize, collision tint, `measure_volume`); a session with no instance
@@ -224,6 +250,40 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   `history_turns` turns go with the question; EVERY FIGURE of an answer is checked against the tools' results
   (provenance.py: one retry with a tool call required, what still fails is shown as unverified); the tools that
   read points run ON THE CARD in the chat's own process (`semantic.chat.tools_device: cuda`, tools_worker.py).
+- ⭐ STAC SPEAKS, LISTENS AND OPERATES THE APPLICATION (USER 2026-11-14: "incorpora herramientas para hablarle y
+  que traduzca a texto y que responda con voz sintetica en los 3 idiomas del sistemas, ingles, español y frances,
+  el usuario debe poder hablar con stac build y stac build operar sobre todo el sistema, ampliar pantalla, usar
+  todas las herramientas que tiene, preparado para todas las que tiene ahora y en un futuro … todo a traves del
+  vlm … debe poder discernir entre un comando y una consulta de chat … como se integraran los del futuro que
+  seran muchisimos"):
+  · THE DATABASE OF COMMANDS (his "debes armar una base de datos con absolutamente todos los comandos a los que
+    luego se iran incorporando los nuevos comandos"): `server/commands/` — every command is DECLARED once in
+    `catalog/*.yaml` (area, kind action / query / talk, runs_on scene / system / ui, status available / manual /
+    planned, arguments, and in es / en / fr its name, how people ask for it, what STAC says when done);
+    `commands.db` (sqlite + FTS5) is its derived image, rebuilt when the declarations change. A NEW FUNCTION OF
+    STAC = one declaration + its executor: the scene's in `phase5_qa/tools.py`, the system's in
+    `commands/system_tools.py`, the interface's in `ui/src/App.tsx` — typed against
+    `ui/src/commands/catalog.generated.ts` (`python -m commands.export_ui` after any change of the ui rows: a
+    declared command with no executor does not compile; a test holds the file current).
+  · A TURN is ONE call of the model on the candidates of the sentence (`commands/router.py`: the scene's tools
+    while a scan is open + the interface's and system's found by the sentence's words in the three languages;
+    conversation and help always). WHAT TELLS A COMMAND FROM A QUESTION IS THE ROW THE MODEL PICKS. The
+    interface's commands come back as `ui_actions`; the interface runs them and words the outcome with the
+    server's texts. `manual` rows are offered too: STAC says they are done by hand. What launches GPU work or
+    deletes data only OPENS ITS WINDOW by voice (a confirmed launch by voice: not built — on his word).
+    The scaling path when the catalogue outgrows word search (a first call on the AREAS, 0.3 s) is declared in
+    router.py, not built.
+  · THE VOICE: `server/voice/` (its own process, never the backend) — speech → text with the language detected
+    among es / en / fr, text → speech with one voice per language, a written answer turned into what is SAID
+    (`spoken.py`). The Assistant panel: a microphone (press, speak, press), spoken answers on / off, and
+    HANDS-FREE (the ear button): every utterance is written and only what names STAC is taken ("STAC, …",
+    `voice/wake.py` — his "el sistema se llama stac, no hace falta llamarlo por el nombre completo stac build,
+    aunque tambien se acepta"). STAC ASKS THE USER'S NAME FIRST and speaks to them by it (his "debe preguntarnos
+    primero el nombre, y hablarnos usando nuestro nombre"; kept per signed-in user in the browser; a name the
+    user did not say is never stored).
+  · Measured 2026-11-14: a spoken turn after the user stops = transcription 0.3-0.4 s + the model 0.4 s (no
+    scan) / 1.0-1.5 s (a scan open) + synthesis 0.1 s. HIS EAR on the three voices and HIS EYE on the commands
+    in the browser: pending (nothing of the interface side was tried in a browser by the assistant).
 - Segment cleaning: RANSAC on, DBSCAN OFF (*"este sí borra puntos"*), the 5 cm voxel quads OFF; OBBs fitted to the
   points. Viewer: segmentation lamps / windows as lights, point opacity, shadows for meshes.
 
@@ -454,7 +514,13 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   verified by an independent exact search); floor – work surface 13.3 → 0.10 s; a volume 3.3–6.7 → 0.03–0.58 s.
   The points and boxes are now promoted to float64 on BOTH paths (a display-frame store was measured in float32
   before: a figure can move in its last printed digit) — declared. His eye / use of the chat after it: pending.
-  PENDING, HIS DECISION — THE CHAT'S ENGINE: a question's time is now the model's. Measured 2026-11-13 on the card,
+  DECIDED (USER 2026-11-13: "Determinista pero en 1 o 2 segundos ninguna es negociable") — THE CHAT'S OWN ENGINE
+  PROFILE: `semantic.chat.engine: single_sequence` (one sequence at a time, no batch-invariant kernels, decode
+  graphs without compilation, no prefix cache, the fixed seed): the same tokens and log-probabilities bit for
+  bit across request orders and across launches, 0.8 s a call; ONE call a question, the answer WRITTEN BY THE
+  TOOL LAYER from the tools' results (phase5_qa/answers.py, es / en / fr) — 0.95-1.16 s a question end to end
+  (2026-11-14). A stage's engine is untouched (batch_invariant; the chat-only keys do not enter its identity).
+  What was measured before the decision: a question's time is now the model's. Measured 2026-11-13 on the card,
   the same two-call turn on the 9.1 k-token prompt: the deterministic serve flags (enforce-eager, no prefix cache,
   batch invariance — his 2026-09-22 "debe ser lo mas determinista posible") 21.7 tok/s and 5.6 s; without them (CUDA
   graphs + prefix caching) 57.9 tok/s and 2.0 s cold / 1.0 s with the prompt cached, the same tool call. A fast
@@ -469,7 +535,25 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   3108 161 of 1,374 (8 / 25 / 67), bufferStop 77 of 347 (1 / 5 / 41), zaragoza 70 of 408 (2 / 14 / 30), observatorio
   60 of 529 (7 / 21 / 40). HIS ANSWER (2026-11-13): "Quién dijo que lo estructural nunca se exime quién te dijo
   quién inventó esa mierda" — his "no debe olvidarse lo estructural nunca" (2026-10-15) was never an exemption from
-  the minimum: that reading was the assistant's own (commit 28aa741). THE MINIMUM HOLDS FOR EVERYTHING.
+  the minimum: that reading was the assistant's own (commit 28aa741). THE MINIMUM HOLDS FOR EVERYTHING — done 2026-11-13 (a086804): the
+  projection drops every instance under the minimum whatever its label, and `segmentation/apply_min_points.py`
+  applied it to the five sessions already projected (backups in `output/_before_min_points/`, kept until he says:
+  pccr 2408 7,932 elements left, pccr 3108 1,213, bufferStop 270, zaragoza 338, observatorio 469).
+  THE LIST COMES FROM THE DATABASE (USER 2026-11-13: "Los objetos con menos de 1000 puntos quedan como
+  unsegmented y salen de la lista y de la base de datos de hecho la lista debe ser tomada de la base de datos" —
+  f218fcf: /segmentation/instances answers from scene_r.db, `source: database`; "la lista de todos debe quedar
+  correctamente no solo la del 3108"). THE FILTER BELONGS AT THE ORIGIN (USER 2026-11-13: "ese filtrado de puntos
+  de 1000 minimo, debe generarse en origen, ni siquiera deben volcarse a la base de datos y despues eliminarse") —
+  the projection already drops them before the store is written; apply_min_points was the one-off for the past.
+  A CLOUD REWRITTEN OUTSIDE THE BACKEND MUST TELL THE OPEN VIEWERS (USER 2026-11-13: "estoy seleccionando los
+  objetos por ejemplo de pccr y estan desfasados … hay un desfase importantisimo … todo debe estar trazado desde
+  una misma y unica fuente"): the five octrees were rebuilt under his open viewer, whose index then pointed into
+  the new file — `POST /api/sessions/{id}/cloud_changed` (e3b7056); every tool that rewrites cloud products
+  calls it.
+  A PROJECT, ONLY ON HIS ORDER (USER 2026-11-13: "habria que ver la manera de migrar del el archivo a la base de
+  datos siempre, incluso con el segmentation manager tambien, es un cambio grande, pero deberiamos dejar de
+  depender del archivo y trabajar siempre con la base de datos"): the database as the single source instead of
+  segmentation_result.json, the Segmentation Manager included.
 - THE SCALES OF PCCR 2408 AND 3108 (USER 2026-11-13: "revisa como podriamos emparejar las escalas de pccr2408 y de
   3108 para que coincidan al compararse, sobre todo llevar la del 3108 a la del 2408 que es mas chica, deberia
   hacerse con la calibracion"). THE WAY, built: measure the same element on both scans and store it on 3108 as a
@@ -480,6 +564,13 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   3108 between 0 and ~7 % larger, too loose to set a factor (few objects on 3108, other segmentations). PENDING, HIS
   DECISION: where the factor is applied — the comparison's composition transform (fuse_scans meets both scans IN
   THE MIDDLE, √s each, by labels; he wants 3108 → 2408), the lengths shown, or the scan's geometry.
+- BUFFERSTOP'S IMAGES ARE ROTATED (USER 2026-11-13: "las imagenes de bufferstop, estan rotadas, deben estar
+  correctamente orientadas, revisa eso y acomodalas, y verifica que siempre no solo en esta sesion que es la unica
+  rotada sino en las siguientes queden correctamente orientadas"). CAUSE FOUND, NOT FIXED: the video carries a
+  display matrix of −90° and the frame extraction pins the decoder's rotation OFF (`intake/frames_manifest.py`
+  ORIENTATION_AUTO = 0, with its test). PENDING after the voice and the rescale: future extractions honouring
+  the rotation, and — HIS DECISION — bufferStop itself (showing its frames rotated, or re-extracting and
+  re-running the session: a GPU run on his order).
 - The pipeline's and the general lists: `docs/pipeline_final.md` §4 — capture distance (when he says), the weighted
   vote (his word), smarter segmentation, epoch renumbering, the GPU ports of the intake, MEJORAS_OBLIGATORIAS
   (never built), the brush lock, the BIM comparison, viewer checks; station's heavy residual tail (USER 2026-11-08
