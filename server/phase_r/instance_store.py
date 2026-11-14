@@ -323,9 +323,12 @@ class InstanceStore:
         return _arr(row[0], (row[1], 3))
 
     def list_point_counts(self) -> dict[int, int]:
-        """{instance_id: its number of points}, in ONE query."""
+        """{instance_id: its number of points}, in ONE query — read from the objects' global boxes
+        (instance_obb.n_points), a small table. NOT from instance_points: its count sits behind
+        the points' blob in the row, and reaching it walks every blob's pages — the whole 1.7 GB
+        of pccr 2026-08-24's store on a cold cache (found 2026-11-13: over two minutes)."""
         return {int(r[0]): int(r[1] or 0) for r in self.conn.execute(
-            "SELECT instance_id,num_points FROM instance_points")}
+            "SELECT instance_id,n_points FROM instance_obb WHERE window_id='global'")}
 
     def iter_points(self):
         """(instance_id, points) of every instance that has points, by instance id, from ONE

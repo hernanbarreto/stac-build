@@ -36,10 +36,13 @@ SCENE INVENTORY (from the reconstruction; ids are stable):
 
 OBJECT REFERENCES: the user names an object as label#id (sign#797, fire_extinguisher#425), #id
 or "id N" — exactly as the Instances list of the viewer writes it. The number IS the object id:
-use it directly in the tools. The inventory above covers EVERY object of this scan; an id inside
-a label's ranges exists. NEVER answer that an id does not exist, or that you have no access to
-it, without a tool saying so (get_object(id)). When the question carries a
+use it directly in the tools. The inventory above names EVERY label of this scan. NEVER say an
+id does not exist without a tool saying so (get_object(id)). When the question carries a
 [REFERENCED OBJECTS] block, it was resolved by the tool layer on this scan: trust it.
+
+HOW A TURN WORKS: you answer with TOOL CALLS only — every tool the question needs, all in this
+one turn (several calls are fine: focus an object AND measure it). The tool layer runs them and
+writes the answer to the user from their results; you do not write it.
 
 NAMES: the inventory's names are the CURRENT ones. "name=given-by-user" marks a name the user
 gave the object — always call it by that name. Notes from earlier conversations
@@ -121,21 +124,13 @@ def _inventory(store: InstanceStore, tools: SpatialTools | None = None) -> str:
     if not insts:
         return "\n".join(lines + ["  (no objects in store)"])
     if len(insts) > chat_config()["list_limit"]:
-        limit = chat_config()["list_limit"]
-        lines.append(f"{len(insts)} objects — every label, its count and its ids:")
+        # every LABEL with its count and its largest object. The ids are not listed: an id or a
+        # label written in the question is resolved by the tool layer (references, resolve_id),
+        # and every token of the prompt is paid at each call of the engine
+        lines.append(f"{len(insts)} objects, by label (count, the largest object's id):")
         for r in tools.labels_summary(insts):
-            runs = r["ids"].split(", ")
-            if len(runs) > limit:
-                # a label scattered over more id runs than a listing names: its span here,
-                # its ids from list_objects(label)
-                lo, hi = runs[0].split("-")[0], runs[-1].split("-")[-1]
-                ln = (f"  {r['label']} ({r['count']}): ids between {lo} and {hi}, not "
-                      f"contiguous — list_objects('{r['label']}') gives them")
-            else:
-                ln = f"  {r['label']} ({r['count']}): ids {r['ids']}"
-            if "largest_id" in r:
-                ln += f" — largest: {r['largest_id']}"
-            lines.append(ln)
+            big = r.get("largest_id", r["ids"].split(",")[0].split("-")[0])
+            lines.append(f"  {r['label']} ({r['count']}, #{big})")
         named = [i for i in insts if i.get("label_origin") == "human_validated"]
         for i in named:
             lines.append(f"  id={i['instance_id']} {i['label']} name=given-by-user")
@@ -263,10 +258,18 @@ class SpatialQA:
         return question + "\n".join(lines), refs
 
     def ask(self, question: str, images: list | None = None,
-            max_iterations: int = 8, history: list | None = None) -> dict[str, Any]:
+            max_iterations: int = 8, history: list | None = None,
+            lang: str | None = None) -> dict[str, Any]:
         """``history``: the conversation's earlier turns, oldest first, as
         [{"role": "user" | "assistant", "text": str}] — the last
-        ``semantic.chat.history_turns`` of them go with the question."""
+        ``semantic.chat.history_turns`` of them go with the question. ``lang``: the language
+        of the answer ('es' | 'en'); None = the question's own, by its function words.
+
+        ONE CALL OF THE MODEL (USER 2026-11-13: "Determinista pero en 1 o 2 segundos ninguna es
+        negociable"): the model chooses the tool(s) and their arguments, the tool layer runs
+        them and WRITES the answer from their results (answers.py) — the same sentence for the
+        same result, the tool's own figures, no second call of the engine. Only a tool with no
+        wording there sends the turn back to the model, with the provenance check."""
         from semantic.client import get_semantic_client
         from semantic.types import assistant, system, user
         from .tools import chat_config
@@ -289,9 +292,52 @@ class SpatialQA:
         # extinguishers are shown" having shown nothing, and "1.14 m" having measured nothing — an
         # answer is preceded by at least one call of the tool layer, then checked
         cap = chat_config()["max_tokens"]         # a call or a brief answer never needs more
-        out = client.run_tool_loop(
-            messages, tools=tools, tool_impls=impls, max_iterations=max_iterations,
-            max_tokens=cap, consumer="phase5.qa", first_tool_choice="required")
+        from . import answers
+        lang = lang if lang in answers.LANGS else answers.language_of(question)
+        t_llm = time.time()
+        first = client.chat(messages, tools=tools, tool_choice="required", max_tokens=cap,
+                            consumer="phase5.qa#call")
+        llm_s = time.time() - t_llm
+        if first.has_tool_calls:
+            trace = []
+            for tc in first.tool_calls:
+                impl = impls.get(tc.name)
+                try:
+                    res = impl(**tc.arguments) if impl else {"error": f"unknown tool '{tc.name}'"}
+                except Exception as e:  # noqa: BLE001 — told as the tool's result
+                    res = {"error": f"{type(e).__name__}: {e}"}
+                trace.append({"iteration": 0, "tool": tc.name, "arguments": tc.arguments, "result": res})
+            written = answers.compose_turn(trace, lang)
+            if written is not None:
+                result = {
+                    "question": question, "answer": written, "tool_trace": trace, "iterations": 1,
+                    "stopped": "composed_by_tools", "references": refs,
+                    # every figure IS a tool's: the sentence was written from the results
+                    "provenance": {"ok": True, "figures": [], "tools": [], "retried": False,
+                                   "written_by": "tool_layer"},
+                    "lang": lang, "prompt_s": round(t_prompt, 2), "model_s": round(llm_s, 2),
+                    "latency_s": round(time.time() - t0, 2),
+                }
+                self._log_session(result, n_images=len(images or []))
+                return result
+            # a tool the tool layer has no wording for: the model words the turn (below), its
+            # calls already made — they are handed to it as the loop's first step
+            convo = list(messages) + [assistant(text=first.content, tool_calls=first.tool_calls)]
+            from semantic.types import tool_result as _tool_result
+            from semantic.client import _to_text
+            for tc, e in zip(first.tool_calls, trace):
+                convo.append(_tool_result(tc.id, _to_text(e["result"]), name=tc.name))
+            rest = client.run_tool_loop(convo, tools=tools, tool_impls=impls,
+                                        max_iterations=max_iterations, max_tokens=cap,
+                                        consumer="phase5.qa")
+            for e in rest["tool_trace"]:
+                e["iteration"] = int(e.get("iteration", 0)) + 1
+            out = {"answer": rest["answer"], "stopped": rest["stopped"],
+                   "tool_trace": trace + list(rest["tool_trace"]),
+                   "iterations": 1 + int(rest["iterations"]), "messages": rest["messages"]}
+        else:
+            out = {"answer": first.content or "", "stopped": "final_answer", "tool_trace": [],
+                   "iterations": 1, "messages": list(messages)}
         if not (out["answer"] or "").strip() and not out["tool_trace"]:
             # the required call ran to the token bound without closing (seen 2026-11-13: a list of
             # 56 ids written under the forced format) — asked again, free to choose

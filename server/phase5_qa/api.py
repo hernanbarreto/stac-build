@@ -201,7 +201,8 @@ async def spatial_qa(body: dict):
             return qa.ask(question,
                           images=_resolve_images(body, store_path) or None,
                           max_iterations=body.get("max_iterations", 8),
-                          history=body.get("history") if isinstance(body.get("history"), list) else None)
+                          history=body.get("history") if isinstance(body.get("history"), list) else None,
+                          lang=body.get("lang") if isinstance(body.get("lang"), str) else None)
         finally:
             qa.close()
 

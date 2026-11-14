@@ -77,11 +77,8 @@ def test_the_inventory_names_every_object(tmp_path, monkeypatch):
         _limits(monkeypatch, list_limit=3)
         by_label = _inventory(store)
         assert "11 objects" in by_label
-        assert "sign (2): ids 7-8 — largest: 7" in by_label
-        assert "door (4): ids 20-22, 40 — largest: 20" in by_label
-        assert "floor (1): ids 1\n" in by_label + "\n"
-        _limits(monkeypatch, list_limit=1)              # a label scattered over more runs
-        assert "door (4): ids between 20 and 40, not contiguous — list_objects('door')" in _inventory(store)
+        # every label, its count and its largest object — the ids are the tool layer's to resolve
+        assert "  sign (2, #7)" in by_label and "  door (4, #20)" in by_label and "  floor (1, #1)" in by_label
     finally:
         store.close()
 
@@ -178,11 +175,32 @@ def test_rounding_units_and_the_users_own_numbers_are_allowed():
     assert "1.14 metros" in provenance.retry_message({"figures": ["1.14 metros"], "tools": []})
 
 
-class _FakeClient:
-    """run_tool_loop scripted: each step names the tools it calls and the answer it gives."""
+class _Call:
+    def __init__(self, name, arguments, k):
+        self.name, self.arguments, self.id = name, arguments, f"call_{k}"
 
-    def __init__(self, steps):
-        self.steps, self.calls = list(steps), []
+    def log_view(self):
+        return {"name": self.name, "arguments": self.arguments}
+
+
+class _Reply:
+    def __init__(self, content="", calls=()):
+        self.content = content
+        self.tool_calls = [_Call(n, a, k) for k, (n, a) in enumerate(calls)]
+        self.has_tool_calls = bool(self.tool_calls)
+
+
+class _FakeClient:
+    """The engine, scripted. ``first``: the reply of the one call a question makes (tool calls,
+    or text). ``steps``: what run_tool_loop answers when the turn goes on to the model (a tool
+    with no wording, a provenance retry) — each names the tools it calls and its answer."""
+
+    def __init__(self, first, steps=()):
+        self.first, self.steps, self.calls, self.chats = first, list(steps), [], []
+
+    def chat(self, messages, tools=None, tool_choice=None, max_tokens=None, consumer=None, **_kw):
+        self.chats.append({"messages": list(messages), "tool_choice": tool_choice, "max_tokens": max_tokens})
+        return self.first
 
     def run_tool_loop(self, messages, tools, tool_impls, max_iterations=None, consumer=None,
                       first_tool_choice=None, **_kw):
@@ -196,17 +214,65 @@ class _FakeClient:
                 "messages": list(messages), "stopped": "final_answer"}
 
 
-def _qa(tmp_path, monkeypatch, steps):
+def _qa(tmp_path, monkeypatch, first, steps=()):
     import semantic.client as client_mod
     qa = SpatialQA(_store(tmp_path), session_log_dir=tmp_path / "logs")
-    fake = _FakeClient(steps)
+    fake = _FakeClient(first, steps)
     monkeypatch.setattr(client_mod, "get_semantic_client", lambda **_kw: fake)
     return qa, fake
 
 
+def test_one_call_and_the_tool_layer_writes_the_answer(tmp_path, monkeypatch):
+    qa, fake = _qa(tmp_path, monkeypatch, _Reply(calls=[("get_distance", {"id1": "fire_extinguisher#6", "id2": 7})]))
+    try:
+        res = qa.ask("a que distancia esta el fire_extinguisher#6 del sign#7?")
+        again = qa.ask("a que distancia esta el fire_extinguisher#6 del sign#7?")
+    finally:
+        qa.close()
+    d = res["tool_trace"][0]["result"]["distance_m"]
+    assert res["stopped"] == "composed_by_tools" and res["iterations"] == 1 and fake.calls == []
+    assert fake.chats[0]["tool_choice"] == "required"
+    assert res["answer"].startswith("La distancia entre fire_extinguisher#6 y sign#7 es ")
+    assert res["answer"] == again["answer"]                              # the same result, the same sentence
+    assert f"{d:.2f}".rstrip("0").rstrip(".") in res["answer"]
+    assert res["provenance"]["ok"] and res["provenance"]["written_by"] == "tool_layer"
+    assert res["lang"] == "es"
+
+
+def test_the_answer_is_in_the_questions_language_and_names_what_a_label_took(tmp_path, monkeypatch):
+    qa, _fake = _qa(tmp_path, monkeypatch, _Reply(calls=[("get_distance", {"id1": "floor", "id2": "wall"}),
+                                                         ("count_objects", {"label": "doors"})]))
+    try:
+        res = qa.ask("what is the distance between the floor and the largest wall, and how many doors are there?")
+    finally:
+        qa.close()
+    assert res["lang"] == "en"
+    assert res["answer"].startswith("The distance between floor#1 and wall#2 is ")
+    assert res["answer"].endswith("There are 4 “door” objects.")
+    assert res["tool_trace"][0]["result"]["objects_taken_by_label"]["id2"] == {"label": "wall", "id": 2}
+
+
+def test_a_tool_with_no_wording_goes_to_the_model(tmp_path, monkeypatch):
+    qa, fake = _qa(tmp_path, monkeypatch, _Reply(calls=[("list_volumes", {})]),
+                   steps=[{"answer": "No hay volúmenes guardados."}])
+    try:
+        res = qa.ask("que volumenes hay?")
+    finally:
+        qa.close()
+    assert res["stopped"] == "final_answer" and res["answer"] == "No hay volúmenes guardados."
+    assert [m.role for m in fake.calls[0]["messages"]][-2:] == ["assistant", "tool"]   # its call went along
+    assert res["tool_trace"][0]["tool"] == "list_volumes"
+    # … while a tool that says it has no data is worded by the tool layer itself
+    qa, fake = _qa(tmp_path, monkeypatch, _Reply(calls=[("get_my_position", {})]))
+    try:
+        res = qa.ask("donde estoy?")
+    finally:
+        qa.close()
+    assert res["stopped"] == "composed_by_tools" and res["answer"].startswith("No hay datos suficientes")
+
+
 def test_an_invented_figure_sends_the_answer_back_with_a_tool_required(tmp_path, monkeypatch):
-    qa, fake = _qa(tmp_path, monkeypatch, [
-        {"answer": "La distancia es de 1.14 metros, medida con get_distance."},
+    qa, fake = _qa(tmp_path, monkeypatch, _Reply("La distancia es de 1.14 metros, medida con get_distance."), steps=[
         {"tools": [("get_distance", {"id1": 6, "id2": 7})],
          "answer": lambda tr: f"La distancia es de {tr[0]['result']['distance_m']} m (get_distance)."}])
     try:
@@ -214,25 +280,23 @@ def test_an_invented_figure_sends_the_answer_back_with_a_tool_required(tmp_path,
     finally:
         qa.close()
     assert res["provenance"] == {"ok": True, "figures": [], "tools": [], "retried": True}
-    assert [c["first_tool_choice"] for c in fake.calls] == ["required", "required"]
+    assert [c["first_tool_choice"] for c in fake.calls] == ["required"]
     assert [e["tool"] for e in res["tool_trace"]] == ["get_distance"]
-    assert "PROVENANCE CHECK" in fake.calls[1]["messages"][-1].text
+    assert "PROVENANCE CHECK" in fake.calls[0]["messages"][-1].text
     assert [r["id"] for r in res["references"]] == [6, 7]
 
 
 def test_a_measured_answer_is_not_asked_again(tmp_path, monkeypatch):
-    qa, fake = _qa(tmp_path, monkeypatch, [
-        {"tools": [("get_distance", {"id1": 6, "id2": 7})],
-         "answer": lambda tr: f"{tr[0]['result']['distance_m']} m"}])
+    qa, fake = _qa(tmp_path, monkeypatch, _Reply(calls=[("get_distance", {"id1": 6, "id2": 7})]))
     try:
         res = qa.ask("distancia entre #6 y #7")
     finally:
         qa.close()
-    assert res["provenance"]["ok"] and not res["provenance"]["retried"] and len(fake.calls) == 1
+    assert res["provenance"]["ok"] and not res["provenance"]["retried"] and fake.calls == []
 
 
 def test_what_still_fails_is_declared_with_the_answer(tmp_path, monkeypatch):
-    qa, _fake = _qa(tmp_path, monkeypatch, [{"answer": "Mide 3.21 m."}, {"answer": "Mide 3.21 m."}])
+    qa, _fake = _qa(tmp_path, monkeypatch, _Reply("Mide 3.21 m."), steps=[{"answer": "Mide 3.21 m."}])
     try:
         res = qa.ask("cuanto mide el muro?")
     finally:
@@ -242,7 +306,7 @@ def test_what_still_fails_is_declared_with_the_answer(tmp_path, monkeypatch):
 
 def test_the_last_turns_of_the_conversation_go_with_the_question(tmp_path, monkeypatch):
     _limits(monkeypatch, history_turns=2)
-    qa, fake = _qa(tmp_path, monkeypatch, [{"answer": "ok"}])
+    qa, fake = _qa(tmp_path, monkeypatch, _Reply(calls=[("small_talk", {})]))
     history = [{"role": "user", "text": "q1"}, {"role": "assistant", "text": "a1"},
                {"role": "user", "text": "q2"}, {"role": "assistant", "text": "a2"},
                {"role": "tool", "text": "ignored"}, {"role": "user", "text": "  "}]
@@ -250,6 +314,6 @@ def test_the_last_turns_of_the_conversation_go_with_the_question(tmp_path, monke
         qa.ask("y el otro?", history=history)
     finally:
         qa.close()
-    msgs = fake.calls[0]["messages"]
+    msgs = fake.chats[0]["messages"]
     assert [m.role for m in msgs] == ["system", "user", "assistant", "user"]
     assert [m.text for m in msgs[1:]] == ["q2", "a2", "y el otro?"]

@@ -1563,17 +1563,25 @@ class SpatialTools:
 
         def _with_labels(fn):
             # "the floor", "the largest wall": the model may pass a LABEL where an id is asked —
-            # the tool layer takes that label's largest object and says which one it took
+            # the tool layer takes that label's largest object and says which one it took.
+            # Every object a call is about is named in its result (`about`): the answer is
+            # written from it (phase5_qa/answers.py), never from the model's wording
             def _inner(*a, **k):
-                took = {}
+                took, named = {}, {}
                 for key in ID_ARGS:
-                    if key in k:
+                    if key in k and k[key] is not None:
                         k[key], used = self.resolve_id(k[key])
                         if used:
                             took[key] = used
+                        inst = self._instance(k[key])
+                        if inst is not None:
+                            named[key] = {"id": int(inst["instance_id"]), "label": inst["label"]}
                 res = fn(*a, **k)
-                if took and isinstance(res, dict):
-                    res["objects_taken_by_label"] = took
+                if isinstance(res, dict):
+                    if named:
+                        res["about"] = named
+                    if took:
+                        res["objects_taken_by_label"] = took
                 return res
             return _inner
 
@@ -1642,9 +1650,9 @@ class SpatialTools:
                 "name": name, "description": desc,
                 "parameters": {"type": "object", "properties": props or {},
                                "required": required or []}}}
-        idp = {"type": ["integer", "string"],
-               "description": "an object id — or a label ('floor', 'wall'): that label's LARGEST "
-                              "object is taken, which is what 'the floor' / 'the largest wall' mean"}
+        # short on purpose: every word of the schema is read by the engine at each call, and the
+        # rule (a label stands for that label's largest object) is said once in the prompt
+        idp = {"type": ["integer", "string"], "description": "id or label"}
         arr = {"type": "array", "items": {"type": "number"}}
         return [
             fn("list_objects",
