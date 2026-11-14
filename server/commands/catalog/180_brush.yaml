@@ -17,7 +17,6 @@ commands:
 - id: brush.set_shape
   kind: action
   runs_on: ui
-  status: manual
   model: 'Shape of the tool that marks zones of the cloud: sphere, cube, or box (a selection box that is placed
     and then moved, rotated and stretched).'
   args:
@@ -37,22 +36,24 @@ commands:
       - marcá con una esfera
       - usá la caja de selección para marcar
       - forma cúbica para marcar
+      done: Forma del pincel cambiada.
     en:
       title: Brush shape
       say:
       - mark with a sphere
       - use the selection box to mark
       - a cubic shape to mark
+      done: Brush shape changed.
     fr:
       title: Forme du pinceau
       say:
       - marque avec une sphère
       - utilise la boîte de sélection pour marquer
       - forme cubique pour marquer
+      done: Forme du pinceau changée.
 - id: brush.set_size
   kind: action
   runs_on: ui
-  status: manual
   model: 'Size of the tool that marks zones of the cloud: its radius in metres, 0.03 to 1.5.'
   args:
     radius_m:
@@ -70,22 +71,24 @@ commands:
       - agrandá el radio de marcado
       - marcador de 20 centímetros
       - achicá el radio
+      done: 'Tamaño del pincel: {detail} m.'
     en:
       title: Brush size
       say:
       - enlarge the marking radius
       - a 20 centimetre marker
       - reduce the radius
+      done: 'Brush size: {detail} m.'
     fr:
       title: Taille du pinceau
       say:
       - agrandis le rayon de marquage
       - marqueur de 20 centimètres
       - réduis le rayon
+      done: 'Taille du pinceau : {detail} m.'
 - id: brush.set_rotation
   kind: action
   runs_on: ui
-  status: manual
   model: Rotation of the marking cube about the vertical, 0 to 90 degrees (only the cube shape turns).
   args:
     yaw_deg:
@@ -103,22 +106,24 @@ commands:
       - girá el cubo de marcado 45 grados
       - cubo de marcado a 30 grados
       - cubo de marcado sin girar
+      done: 'Rotación del cubo: {detail}°.'
     en:
       title: Rotation of the marking cube
       say:
       - turn the marking cube 45 degrees
       - marking cube at 30 degrees
       - marking cube not turned
+      done: 'Cube rotation: {detail}°.'
     fr:
       title: Rotation du cube de marquage
       say:
       - tourne le cube de marquage de 45 degrés
       - cube de marquage à 30 degrés
       - cube de marquage sans rotation
+      done: 'Rotation du cube : {detail}°.'
 - id: brush.preview_confidence
   kind: action
   runs_on: ui
-  status: manual
   model: 'Preview the confidence filter of the segment editing: the points under the threshold (0 to 1) are lit
     in red in the viewer. Nothing changes until it is applied.'
   args:
@@ -138,18 +143,21 @@ commands:
       - iluminá en rojo lo de baja confianza
       - previsualizá el filtro al 25 por ciento
       - qué quedaría debajo del umbral de confianza
+      done: Vista previa de confianza a {detail}.
     en:
       title: Preview of the confidence filter
       say:
       - light in red what has low confidence
       - preview the filter at 25 percent
       - what would fall under the confidence threshold
+      done: Confidence preview at {detail}.
     fr:
       title: Aperçu du filtre de confiance
       say:
       - allume en rouge ce qui a une faible confiance
       - prévisualise le filtre à 25 pour cent
       - ce qui passerait sous le seuil de confiance
+      done: Aperçu de confiance à {detail}.
 - id: brush.apply_confidence_filter
   kind: action
   runs_on: ui
@@ -190,7 +198,6 @@ commands:
 - id: brush.cancel_confidence_preview
   kind: action
   runs_on: ui
-  status: manual
   model: Turn the confidence filter's red preview off without applying it.
   needs:
   - session
@@ -201,18 +208,21 @@ commands:
       - apagá la vista previa
       - cancelá la previsualización del filtro
       - sacá el rojo de baja confianza
+      done: Vista previa apagada.
     en:
       title: Turn the confidence preview off
       say:
       - turn the preview off
       - cancel the filter preview
       - remove the red of low confidence
+      done: Preview off.
     fr:
       title: Désactiver l'aperçu de confiance
       say:
       - désactive l'aperçu
       - annule la prévisualisation du filtre
       - enlève le rouge de faible confiance
+      done: Aperçu désactivé.
 - id: brush.set_box_gizmo_mode
   kind: action
   runs_on: ui
@@ -389,7 +399,6 @@ commands:
 - id: brush.clear_marks
   kind: action
   runs_on: ui
-  status: manual
   model: Remove every marked zone without applying anything (the cloud and the objects are not touched).
   needs:
   - session
@@ -400,22 +409,24 @@ commands:
       - quitá las marcas
       - descartá lo que marqué sin aplicar
       - dejá la nube sin marcas
+      done: Marcas quitadas.
     en:
       title: Clear the marks
       say:
       - clear the marks
       - discard the marked zones without applying
       - leave the cloud with no marks
+      done: Marks cleared.
     fr:
       title: Retirer les marques
       say:
       - retire les marques
       - abandonne les zones marquées sans appliquer
       - laisse le nuage sans marques
+      done: Marques effacées.
 - id: brush.undo
   kind: action
   runs_on: ui
-  status: manual
   model: 'Undo the last change applied to the segments by hand (an erase, a reassign or a confidence filter): its
     points go back to the objects they had.'
   needs:
@@ -428,15 +439,18 @@ commands:
       - deshacé el último borrado
       - volvé atrás la reasignación
       - restaurá lo que saqué recién
+      done: Último cambio del pincel deshecho.
     en:
       title: Undo the brush
       say:
       - undo the last erase
       - revert the reassignment
       - restore what was just taken out
+      done: Last brush change undone.
     fr:
       title: Annuler le pinceau
       say:
       - annule le dernier effacement
       - reviens sur la réattribution
       - restaure ce qui vient d'être retiré
+      done: Dernière modification du pinceau annulée.

@@ -101,7 +101,6 @@ commands:
 - id: sessions.select
   kind: action
   runs_on: ui
-  status: manual
   model: Select (highlight) one row of the Sessions list in the side panel; nothing is opened.
   args:
     session:
@@ -115,16 +114,19 @@ commands:
       - seleccioná ese proyecto en la lista
       - marcá esa fila nada más
       - resaltala
+      done: Sesión {detail} seleccionada.
     en:
       title: Select a row of the sessions list
       say:
       - select that project in the list
       - highlight that row only
+      done: Session {detail} selected.
     fr:
       title: Sélectionner une session dans la liste
       say:
       - sélectionne ce projet dans la liste
       - surligne seulement cette ligne
+      done: Session {detail} sélectionnée.
 - id: sessions.create
   kind: action
   runs_on: ui

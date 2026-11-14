@@ -178,7 +178,6 @@ commands:
 - id: flythrough.close
   kind: action
   runs_on: ui
-  status: manual
   model: 'Close the flythrough (its player): the viewer returns to the free 3D view.'
   needs:
   - session
@@ -189,15 +188,18 @@ commands:
       - cerrá el recorrido
       - salí del reproductor
       - cerrá el video
+      done: Recorrido cerrado.
     en:
       title: Close the flythrough
       say:
       - close the flythrough
       - leave the player
       - close the video
+      done: Flythrough closed.
     fr:
       title: Fermer le parcours
       say:
       - ferme le parcours
       - quitte le lecteur
       - ferme la vidéo
+      done: Parcours fermé.

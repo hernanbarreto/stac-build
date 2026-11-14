@@ -77,7 +77,6 @@ commands:
 - id: objects.focus
   kind: action
   runs_on: ui
-  status: manual
   model: Fly the camera to a reference object placed in the scene (a click on its row in the list). It is not for
     the objects of the segmentation.
   args:
@@ -96,22 +95,24 @@ commands:
       - llevame al objeto colocado
       - enfocá el humano que puse
       - dónde quedó el modelo insertado
+      done: '{detail} enfocado.'
     en:
       title: Go to a placed object
       say:
       - take me to the placed object
       - focus the inserted human
       - where did the inserted model end up
+      done: '{detail} in view.'
     fr:
       title: Aller à un objet placé
       say:
       - emmène-moi à l'objet placé
       - cible l'humain inséré
       - où est le modèle inséré
+      done: '{detail} cadré.'
 - id: objects.set_gizmo_mode
   kind: action
   runs_on: ui
-  status: manual
   model: 'With a reference object of the scene selected: what its gizmo does, translate (move), rotate or resize
     it (scale).'
   args:
@@ -132,22 +133,24 @@ commands:
       - mové el objeto colocado
       - rotá el humano que puse
       - escalá el modelo insertado
+      done: Modo del gizmo cambiado.
     en:
       title: Gizmo mode of the placed object
       say:
       - move the reference object with the gizmo
       - rotate the inserted human
       - resize the inserted model
+      done: Gizmo mode changed.
     fr:
       title: Mode du gizmo de l'objet placé
       say:
       - déplace l'objet placé
       - fais pivoter l'humain posé
       - redimensionne le modèle inséré
+      done: Mode du gizmo changé.
 - id: objects.align
   kind: action
   runs_on: ui
-  status: manual
   model: 'Align the selected placed object: floor (rest it on the floor, base at y = 0), or relative to a target
     object: same_base, on_top, center_xz (centred horizontally) or center_y (centred vertically).'
   args:
@@ -173,18 +176,21 @@ commands:
       - llevalo al piso
       - misma base que el objetivo
       - centralo con el objetivo
+      done: Objeto alineado.
     en:
       title: Rest or centre the placed object
       say:
       - send it to the floor
       - same base as the target
       - centre it with the target
+      done: Object aligned.
     fr:
       title: Poser ou centrer l'objet placé
       say:
       - mets-le au sol
       - même base que la cible
       - centre-le avec la cible
+      done: Objet aligné.
 - id: objects.remove_selected
   kind: action
   runs_on: ui
@@ -288,7 +294,6 @@ commands:
 - id: objects.set_visible
   kind: action
   runs_on: ui
-  status: manual
   model: Show or hide one placed reference object (the eye of its row).
   args:
     id:
@@ -309,22 +314,27 @@ commands:
       - ocultá el humano que puse
       - mostrá de nuevo el objeto colocado
       - escondé el modelo insertado
+      done: '{detail} visible.'
+      done_off: '{detail} oculto.'
     en:
       title: Show or hide a placed object
       say:
       - hide the inserted human
       - bring the placed object back
       - hide the inserted model
+      done: '{detail} shown.'
+      done_off: '{detail} hidden.'
     fr:
       title: Afficher ou masquer un objet placé
       say:
       - masque l'humain posé
       - réaffiche l'objet placé
       - cache le modèle inséré
+      done: '{detail} affiché.'
+      done_off: '{detail} masqué.'
 - id: objects.set_obb
   kind: action
   runs_on: ui
-  status: manual
   model: Turn the bounding box (with its dimensions) of one placed reference object on or off.
   args:
     id:
@@ -345,15 +355,21 @@ commands:
       - prendé la caja del objeto colocado
       - cuánto mide el humano que puse
       - apagá la caja del modelo insertado
+      done: Caja de {detail} encendida.
+      done_off: Caja de {detail} apagada.
     en:
       title: Box of a placed object
       say:
       - turn on the box of the placed object
       - how big is the inserted human
       - turn off the box of the inserted model
+      done: Box of {detail} on.
+      done_off: Box of {detail} off.
     fr:
       title: Boîte d'un objet placé
       say:
       - active la boîte de l'objet placé
       - combien mesure l'humain posé
       - désactive la boîte du modèle inséré
+      done: Boîte de {detail} activée.
+      done_off: Boîte de {detail} désactivée.

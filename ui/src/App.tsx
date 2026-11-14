@@ -1977,11 +1977,15 @@ function App() {
     connected, connectToServer, disconnect, sessions, activeSession, handleSessionLoad, handleUnload,
     projectScans, activeScanTab, activateScan, openFuse, layout, setLang, lang, pointSize, tsdfMeshes,
     openObjectLibrary, openAutosegment, handleReconstruct,
+    scanTabs, closeScanTab, handleSessionSelect, placedObjects, cubes, userVolumes, focusVolume, undoBrush,
+    physicsDiameterCm, physicsBounce, isAdmin: user?.role === 'admin',
   })
   cmd.current = {
     connected, connectToServer, disconnect, sessions, activeSession, handleSessionLoad, handleUnload,
     projectScans, activeScanTab, activateScan, openFuse, layout, setLang, lang, pointSize, tsdfMeshes,
     openObjectLibrary, openAutosegment, handleReconstruct,
+    scanTabs, closeScanTab, handleSessionSelect, placedObjects, cubes, userVolumes, focusVolume, undoBrush,
+    physicsDiameterCm, physicsBounce, isAdmin: user?.role === 'admin',
   }
   /** what the interface says of itself with every question to STAC (the model needs the
    *  sessions' names to open one) */
@@ -2010,6 +2014,18 @@ function App() {
       if (cmd.current.connected) return true
       await cmd.current.connectToServer()
       return until(() => cmd.current.connected, 4000)
+    }
+    const HEX_COLOUR = /^#[0-9a-fA-F]{6}$/
+    /** a placed object by its id or by what the user called it */
+    const placedBy = (id: number | string): { id: number; name: string } | Outcome => {
+      if (!open()) return noSession
+      const all = cmd.current.placedObjects
+      if (!all.length) return { ok: false, reason: 'nothing_to_do' }
+      const byId = typeof id === 'number' || /^\d+$/.test(String(id)) ? all.find(o => o.id === Number(id)) : undefined
+      if (byId) return byId
+      const found = findByName(all, String(id), o => [o.name])
+      if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.map(o => o.name).join(', ') }
+      return found.item ?? { ok: false, reason: 'not_found', detail: String(id) }
     }
     const TOOL: Record<string, Tool> = {
       navigate: 'navigate', measure_distance: 'measure-distance', measure_angle: 'measure-angle',
@@ -2155,6 +2171,169 @@ function App() {
         return done
       },
       'flythrough.open': () => { const sid = open(); if (!sid) return noSession; setFlythroughOpen(sid); return done },
+      'flythrough.close': () => { setFlythroughOpen(null); return done },
+      // ── the second set (2026-11-14): what was a simple control of the interface ──
+      'app.logout': () => { cmd.current.disconnect(true); return done },
+      'admin.open': () => { if (!cmd.current.isAdmin) return { ok: false, reason: 'unavailable' }; setAdminOpen(true); return done },
+      'calibration.close': () => { setCalibrationOpen(false); setCalibrationDraft(null); return done },
+      'sessions.select': async ({ session }) => {
+        if (!(await ensureConnected())) return { ok: false, reason: 'server_down' }
+        const found = findByName(cmd.current.sessions, session, x => [x.id, x.name])
+        if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.map(x => x.name).join(', ') }
+        if (!found.item) return { ok: false, reason: 'not_found', detail: session }
+        cmd.current.handleSessionSelect(found.item.id); cmd.current.layout.setLeftTab('sessions')
+        return { ok: true, detail: found.item.name }
+      },
+      'scans.close_tab': ({ scan }) => {
+        const tabs = cmd.current.scanTabs
+        if (!open() || !tabs.length) return noSession
+        let key = cmd.current.activeScanTab
+        if (scan) {
+          const found = findByName(tabs, scan, scanNames)
+          if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.map(x => `${x.date} ${x.label}`).join(', ') }
+          if (!found.item) return { ok: false, reason: 'not_found', detail: scan }
+          key = found.item.key
+        }
+        if (!key) return { ok: false, reason: 'nothing_to_do' }
+        cmd.current.closeScanTab(key); return done
+      },
+      'scans.cycle_tab': ({ direction }) => {
+        const sid = open(), tabs = cmd.current.scanTabs
+        if (!sid) return noSession
+        if (tabs.length < 2) return { ok: false, reason: 'nothing_to_do' }
+        const i = tabs.findIndex(x => x.key === cmd.current.activeScanTab)
+        const next = tabs[(i + (direction === 'prev' ? tabs.length - 1 : 1)) % tabs.length]
+        cmd.current.activateScan(sid, next)
+        return { ok: true, detail: `${next.date} ${next.label}` }
+      },
+      'display.set_precision_layer': ({ layer, on }) => {
+        if (!open()) return noSession
+        if (layer === 'flyers') setFlyersOn(on); else if (layer === 'mono_detail') setMonoDetailOn(on); else setUnresolvedOn(on)
+        return { ok: true, state: on }
+      },
+      'display.set_background': ({ kind, color }) => {
+        if (!open()) return noSession
+        setSceneLook(prev => ({ ...prev, background: { kind, color: color && HEX_COLOUR.test(color) ? color : prev.background.color } }))
+        return done
+      },
+      'display.set_grid_style': ({ cell_m, major_every, color }) => {
+        if (!open()) return noSession
+        setSceneLook(prev => ({ ...prev, grid: { cellM: cell_m ?? prev.grid.cellM, majorEvery: major_every ?? prev.grid.majorEvery, color: color && HEX_COLOUR.test(color) ? color : prev.grid.color } }))
+        return done
+      },
+      'display.reset_scene_look': () => { if (!open()) return noSession; setSceneLook(DEFAULT_LOOK); return done },
+      'display.set_point_budget': ({ millions }) => {
+        if (!open()) return noSession
+        const m = clamp(millions, 2, 40); setPointBudget(m * 1e6)
+        return { ok: true, detail: String(Math.round(m * 10) / 10) }
+      },
+      'display.set_confidence_threshold': ({ threshold }) => {
+        if (!open()) return noSession
+        const v = clamp(threshold > 1 ? threshold / 100 : threshold, 0, 1); setConfidenceThreshold(v)   // "30" is 30 %
+        return { ok: true, detail: `${Math.round(v * 100)} %` }
+      },
+      'display.set_votes_threshold': ({ views }) => {
+        if (!open()) return noSession
+        const v = Math.round(clamp(views, 0, 8)); setMvThreshold(v)
+        return { ok: true, detail: String(v) }
+      },
+      'display.hide_below_votes': ({ on }) => { if (!open()) return noSession; setMvHide(on); return { ok: true, state: on } },
+      'brush.set_shape': ({ shape }) => { if (!open()) return noSession; setEraseShape(shape); return done },
+      'brush.set_size': ({ radius_m }) => {
+        if (!open()) return noSession
+        const r = clamp(radius_m, 0.03, 1.5); setEraseRadius(r)
+        return { ok: true, detail: String(Math.round(r * 100) / 100) }
+      },
+      'brush.set_rotation': ({ yaw_deg }) => {
+        if (!open()) return noSession
+        const a = clamp(yaw_deg, 0, 90); setEraseYawDeg(a)
+        return { ok: true, detail: String(Math.round(a)) }
+      },
+      'brush.preview_confidence': ({ threshold }) => {
+        if (!open()) return noSession
+        const v = clamp(threshold > 1 ? threshold / 100 : threshold, 0, 1); viewportRef.current?.setConfHighlight(v)
+        return { ok: true, detail: `${Math.round(v * 100)} %` }
+      },
+      'brush.cancel_confidence_preview': () => { if (!open()) return noSession; viewportRef.current?.setConfHighlight(null); return done },
+      'brush.clear_marks': () => { if (!open()) return noSession; viewportRef.current?.clearEraseMarks(); return done },
+      'brush.undo': () => { if (!open()) return noSession; void cmd.current.undoBrush(); return done },
+      'objects.focus': ({ id }) => {
+        const o = placedBy(id)
+        if ('ok' in o) return o
+        return viewportRef.current?.flyToObject('placed', o.id) ? { ok: true, detail: o.name } : { ok: false, reason: 'unavailable' }
+      },
+      'objects.set_visible': ({ id, on }) => {
+        const o = placedBy(id)
+        if ('ok' in o) return o
+        viewportRef.current?.setSceneObjectVisible(o.id, on)
+        return { ok: true, state: on, detail: o.name }
+      },
+      'objects.set_obb': ({ id, on }) => {
+        const o = placedBy(id)
+        if ('ok' in o) return o
+        togglePlacedObb(o.id, on)
+        return { ok: true, state: on, detail: o.name }
+      },
+      'objects.set_gizmo_mode': ({ mode }) => { if (!open()) return noSession; viewportRef.current?.setSceneObjectMode(mode); return done },
+      'objects.align': ({ op, target }) => { if (!open()) return noSession; viewportRef.current?.alignSceneObject(op, target); return done },
+      'instances.cubes_set_visible': ({ id, on }) => {
+        if (!open()) return noSession
+        if (!cmd.current.cubes.some(c => c.id === id)) return { ok: false, reason: 'not_found', detail: String(id) }
+        setCubeVisible(prev => { const n = new Set(prev); if (on) n.add(id); else n.delete(id); return n })
+        viewportRef.current?.setCubeVisible(id, on)
+        return { ok: true, state: on }
+      },
+      'instances.cubes_set_all_visible': ({ on }) => {
+        if (!open()) return noSession
+        const all = cmd.current.cubes
+        if (!all.length) return { ok: false, reason: 'nothing_to_do' }
+        setCubeVisible(on ? new Set(all.map(c => c.id)) : new Set())
+        all.forEach(c => viewportRef.current?.setCubeVisible(c.id, on))
+        return { ok: true, state: on }
+      },
+      'instances.cubes_focus': ({ id }) => {
+        if (!open()) return noSession
+        if (!cmd.current.cubes.some(c => c.id === id)) return { ok: false, reason: 'not_found', detail: String(id) }
+        viewportRef.current?.focusCube(id); return done
+      },
+      'volumes.focus': ({ volume_id }) => {
+        const v = cmd.current.userVolumes.find(x => x.volume_id === volume_id)
+        if (!open()) return noSession
+        if (!v) return { ok: false, reason: 'not_found', detail: String(volume_id) }
+        cmd.current.focusVolume(volume_id); return { ok: true, detail: v.name }
+      },
+      'volumes.set_visible': ({ volume_id, on }) => {
+        if (!open()) return noSession
+        if (!cmd.current.userVolumes.some(x => x.volume_id === volume_id)) return { ok: false, reason: 'not_found', detail: String(volume_id) }
+        toggleVolume(volume_id, on); return { ok: true, state: on }
+      },
+      'volumes.set_obb': ({ volume_id, on }) => {
+        if (!open()) return noSession
+        if (!cmd.current.userVolumes.some(x => x.volume_id === volume_id)) return { ok: false, reason: 'not_found', detail: String(volume_id) }
+        toggleVolumeObb(volume_id, on); return { ok: true, state: on }
+      },
+      'meshes.focus': ({ mesh }) => {
+        if (!open()) return noSession
+        const all = cmd.current.tsdfMeshes
+        if (!all.length) return { ok: false, reason: 'nothing_to_do' }
+        const found = all.length === 1 ? { item: all[0] } : findByName(all, mesh, m => [m.folder, m.label])
+        if ('ambiguous' in found && found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.map(m => m.label || m.folder).join(', ') }
+        if (!found.item) return { ok: false, reason: 'not_found', detail: mesh }
+        return viewportRef.current?.flyToObject('tsdf', found.item.folder) ? { ok: true, detail: found.item.label || found.item.folder } : { ok: false, reason: 'unavailable' }
+      },
+      'physics.set_ball': ({ diameter_cm, bounce }) => {
+        if (!open()) return noSession
+        const d = diameter_cm != null ? clamp(diameter_cm, 2, 100) : cmd.current.physicsDiameterCm
+        const b = bounce != null ? clamp(bounce, 0, 1) : cmd.current.physicsBounce
+        setPhysicsDiameterCm(d); setPhysicsBounce(b); setPhysicsOpen(true)
+        return { ok: true, detail: `${Math.round(d)} cm, ${Math.round(b * 100)} %` }
+      },
+      'physics.toggle_placing': ({ on }) => { if (!open()) return noSession; setPhysicsOpen(true); setPhysicsPlacing(on); return { ok: true, state: on } },
+      'physics.drop': () => {
+        if (!open()) return noSession
+        setPhysicsOpen(true); viewportRef.current?.physicsDrop(cmd.current.physicsDiameterCm / 100, cmd.current.physicsBounce); return done
+      },
+      'physics.clear': () => { if (!open()) return noSession; viewportRef.current?.physicsClear(); return done },
     }
     return registerCommands(executors)
   // (every value is read through `cmd`; the setters are stable)

@@ -14,7 +14,6 @@ commands:
 - id: admin.open
   kind: action
   runs_on: ui
-  status: manual
   model: Bring up the Administration window (user and team management). For administrators.
   needs:
   - admin
@@ -25,18 +24,21 @@ commands:
       - abrí la gestión de usuarios
       - administración del sistema
       - ventana de altas y bajas de usuarios
+      done: Administración abierta.
     en:
       title: Open the administration
       say:
       - open user management
       - the administration window
       - where users are created and removed
+      done: Administration open.
     fr:
       title: Ouvrir l'administration
       say:
       - ouvre la gestion des utilisateurs
       - administration du système
       - fenêtre de création et de suppression des utilisateurs
+      done: Administration ouverte.
 - id: admin.set_tab
   kind: action
   runs_on: ui

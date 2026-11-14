@@ -395,7 +395,6 @@ commands:
 - id: calibration.close
   kind: action
   runs_on: ui
-  status: manual
   model: Close the Calibration window (an unsaved draft goes with it).
   needs:
   - session
@@ -406,18 +405,21 @@ commands:
       - cerrá la calibración
       - cerrá esa ventana
       - salí de esa tabla
+      done: Ventana de calibración cerrada.
     en:
       title: Close the calibration
       say:
       - close the calibration
       - close that window
       - leave that table
+      done: Calibration window closed.
     fr:
       title: Fermer l'étalonnage
       say:
       - ferme l'étalonnage
       - ferme cette fenêtre
       - quitte ce tableau
+      done: Fenêtre d'étalonnage fermée.
 - id: calibration.apply
   kind: action
   runs_on: ui

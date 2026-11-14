@@ -102,7 +102,6 @@ commands:
 - id: scans.close_tab
   kind: action
   runs_on: ui
-  status: manual
   model: 'Close the tab of an open scan (nothing is lost: the list reopens it). Closing the active tab shows the
     neighbouring one.'
   args:
@@ -119,22 +118,24 @@ commands:
       - cerrá esa pestaña
       - sacá la pestaña activa
       - cerrá la pestaña de la toma anterior
+      done: Pestaña cerrada.
     en:
       title: Close a scan's tab
       say:
       - close that tab
       - get rid of the active tab
       - close the tab of the earlier capture
+      done: Tab closed.
     fr:
       title: Fermer l'onglet d'un scan
       say:
       - ferme cet onglet
       - enlève l'onglet actif
       - ferme l'onglet de la capture précédente
+      done: Onglet fermé.
 - id: scans.cycle_tab
   kind: action
   runs_on: ui
-  status: manual
   model: Go to the next or the previous open scan tab (Ctrl+Tab); it needs two or more tabs open.
   args:
     direction:
@@ -153,18 +154,21 @@ commands:
       - pasá a la pestaña siguiente
       - pestaña anterior
       - rotá entre las pestañas
+      done: Escaneo {detail}.
     en:
       title: Next or previous scan tab
       say:
       - go to the next tab
       - previous tab
       - cycle through the tabs
+      done: Scan {detail}.
     fr:
       title: Onglet suivant ou précédent
       say:
       - passe à l'onglet suivant
       - onglet précédent
       - fais défiler les onglets
+      done: Scan {detail}.
 - id: scans.set_reference
   kind: action
   runs_on: ui

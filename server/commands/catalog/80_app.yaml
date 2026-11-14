@@ -221,7 +221,6 @@ commands:
 - id: app.logout
   kind: action
   runs_on: ui
-  status: manual
   model: 'Sign the user out of the application: the open session leaves the viewer, the link with the server is
     closed and the login page is shown.'
   text:
@@ -231,15 +230,18 @@ commands:
       - salir de mi cuenta
       - desloguearme
       - cambiá de usuario
+      done: Sesión de usuario cerrada.
     en:
       title: Sign out
       say:
       - sign me out
       - log out
       - switch user
+      done: Signed out.
     fr:
       title: Quitter mon compte
       say:
       - quitte mon compte
       - changer d'utilisateur
       - sortir de mon compte
+      done: Déconnecté du compte.

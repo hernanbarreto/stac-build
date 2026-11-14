@@ -156,7 +156,6 @@ commands:
 - id: instances.cubes_set_visible
   kind: action
   runs_on: ui
-  status: manual
   model: Show or hide ONE cube of the reconstruction's cut (the boxes the walk was divided into) in the viewer,
     by its number.
   args:
@@ -177,22 +176,27 @@ commands:
       - prendé el cubo 3 del corte
       - ocultá ese cubo de la reconstrucción
       - apagá el cubo 6
+      done: Cubo {id} visible.
+      done_off: Cubo {id} oculto.
     en:
       title: Show or hide a cube of the cut
       say:
       - turn on cube 3 of the cut
       - hide that reconstruction cube
       - turn off cube 6
+      done: Cube {id} shown.
+      done_off: Cube {id} hidden.
     fr:
       title: Afficher ou masquer un cube de la découpe
       say:
       - active le cube 3 de la découpe
       - masque ce cube de la reconstruction
       - désactive le cube 6
+      done: Cube {id} affiché.
+      done_off: Cube {id} masqué.
 - id: instances.cubes_set_all_visible
   kind: action
   runs_on: ui
-  status: manual
   model: Show or hide EVERY cube of the reconstruction's cut at once.
   args:
     'on':
@@ -208,22 +212,27 @@ commands:
       - prendé todos los cubos del corte
       - ocultá todos los cubos
       - apagá los cubos de la reconstrucción
+      done: Cubos visibles.
+      done_off: Cubos ocultos.
     en:
       title: Show or hide every cube of the cut
       say:
       - turn on every cube of the cut
       - hide all the cubes
       - turn the reconstruction cubes off
+      done: Cubes shown.
+      done_off: Cubes hidden.
     fr:
       title: Afficher ou masquer tous les cubes de la découpe
       say:
       - active tous les cubes de la découpe
       - masque tous les cubes
       - désactive les cubes de la reconstruction
+      done: Cubes affichés.
+      done_off: Cubes masqués.
 - id: instances.cubes_focus
   kind: action
   runs_on: ui
-  status: manual
   model: Fly the camera to one cube of the reconstruction's cut, by its number.
   args:
     id:
@@ -240,15 +249,18 @@ commands:
       - llevame al cubo 4 del corte
       - enfocá ese cubo de la reconstrucción
       - dónde está el cubo 7
+      done: Cubo {id} enfocado.
     en:
       title: Go to a cube of the cut
       say:
       - take me to cube 4 of the cut
       - focus that reconstruction cube
       - where is cube 7
+      done: Cube {id} in view.
     fr:
       title: Aller à un cube de la découpe
       say:
       - emmène-moi au cube 4 de la découpe
       - cible ce cube de la reconstruction
       - où est le cube 7
+      done: Cube {id} cadré.

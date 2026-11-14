@@ -52,7 +52,7 @@ def test_the_real_catalogue_is_complete_in_three_languages():
     assert c.sha256 == cat.load_catalog().sha256                       # no clock, no order at random
     assert len({x["id"] for x in c.commands}) == len(c.commands) >= 260      # every command of the interface is a row
     by_status = {s: sum(1 for x in c.commands if x["status"] == s) for s in cat.STATUS}
-    assert by_status["available"] >= 92 and by_status["manual"] >= 170
+    assert by_status["available"] >= 132 and by_status["available"] + by_status["manual"] >= 270
     # what launches GPU work or deletes data asks for confirmation — and is not run by voice yet
     assert all(x["status"] == "manual" for x in c.commands if x["confirm"])
     assert len({x["tool"] for x in c.commands}) == len(c.commands)

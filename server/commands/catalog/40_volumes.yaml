@@ -252,7 +252,6 @@ commands:
 - id: volumes.focus
   kind: action
   runs_on: ui
-  status: manual
   model: Fly the camera to a saved evaluation volume (a click on its row in the list).
   args:
     volume_id:
@@ -269,22 +268,24 @@ commands:
       - llevame al volumen 2
       - enfocá esa caja de evaluación
       - dónde quedó el volumen
+      done: Volumen {detail} enfocado.
     en:
       title: Go to a volume
       say:
       - take me to volume 2
       - focus that evaluation box
       - where is the volume
+      done: Volume {detail} in view.
     fr:
       title: Aller à un volume
       say:
       - emmène-moi au volume 2
       - cible cette boîte d'évaluation
       - où est le volume
+      done: Volume {detail} cadré.
 - id: volumes.set_visible
   kind: action
   runs_on: ui
-  status: manual
   model: Draw or hide one saved evaluation volume in the viewer (the eye of its row).
   args:
     volume_id:
@@ -304,22 +305,27 @@ commands:
       - ocultá el volumen 1
       - mostrá de nuevo esa caja de evaluación
       - escondé el volumen
+      done: Volumen visible.
+      done_off: Volumen oculto.
     en:
       title: Show or hide a volume
       say:
       - hide volume 1
       - bring that box back
       - hide the volume
+      done: Volume shown.
+      done_off: Volume hidden.
     fr:
       title: Afficher ou masquer un volume
       say:
       - masque le volume 1
       - réaffiche cette boîte d'évaluation
       - cache le volume
+      done: Volume affiché.
+      done_off: Volume masqué.
 - id: volumes.set_obb
   kind: action
   runs_on: ui
-  status: manual
   model: Turn the dimensioned outline (height, width, depth) of one evaluation volume on or off.
   args:
     volume_id:
@@ -339,18 +345,24 @@ commands:
       - prendé las dimensiones del volumen 1
       - cuánto mide esa caja de evaluación
       - apagá las cotas del volumen
+      done: Dimensiones del volumen visibles.
+      done_off: Dimensiones del volumen ocultas.
     en:
       title: Dimensions of a volume
       say:
       - turn on the dimensions of volume 1
       - how big is that evaluation box
       - turn the volume's dimensions off
+      done: Volume dimensions shown.
+      done_off: Volume dimensions hidden.
     fr:
       title: Dimensions d'un volume
       say:
       - active les dimensions du volume 1
       - combien mesure cette boîte d'évaluation
       - désactive les cotes du volume
+      done: Dimensions du volume affichées.
+      done_off: Dimensions du volume masquées.
 - id: volumes.delete
   kind: action
   runs_on: ui

@@ -151,7 +151,6 @@ commands:
 - id: meshes.focus
   kind: action
   runs_on: ui
-  status: manual
   model: Fly the camera to one mesh of the session (a click on its row in the list).
   args:
     mesh:
@@ -168,18 +167,21 @@ commands:
       - llevame a esa malla
       - encuadrá el mallado
       - dónde quedó el resultado de genrecon
+      done: Malla {detail} enfocada.
     en:
       title: Go to a mesh
       say:
       - take me to that mesh
       - frame the meshing
       - where is the genrecon result
+      done: Mesh {detail} in view.
     fr:
       title: Aller à un maillage
       say:
       - emmène-moi à ce maillage
       - cadre le maillage
       - où est le résultat de genrecon
+      done: Maillage {detail} cadré.
 - id: meshes.run_genrecon
   kind: action
   runs_on: ui

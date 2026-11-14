@@ -308,7 +308,6 @@ commands:
 - id: display.set_precision_layer
   kind: action
   runs_on: ui
-  status: manual
   model: 'Show or hide one of the reconstruction''s diagnostic layers over the cloud: flyers (the points flagged
     as flying), mono_detail (the PointDiT detail layer) or mixed_unresolved (the mixed pixels left out of the cloud).'
   args:
@@ -331,22 +330,27 @@ commands:
       - prendé la capa de voladores
       - capa de detalle PointDiT
       - píxeles mezclados sin resolver
+      done: Capa de diagnóstico visible.
+      done_off: Capa de diagnóstico oculta.
     en:
       title: Diagnostic layers
       say:
       - turn on the flyers layer
       - PointDiT detail layer
       - mixed unresolved pixels
+      done: Diagnosis layer shown.
+      done_off: Diagnosis layer hidden.
     fr:
       title: Couches de diagnostic
       say:
       - active la couche des points volants
       - couche de détail PointDiT
       - pixels mixtes non résolus
+      done: Couche de diagnostic affichée.
+      done_off: Couche de diagnostic masquée.
 - id: display.set_background
   kind: action
   runs_on: ui
-  status: manual
   model: 'Kind of background of the viewer (in the Background and grid window): default (the grey gradient), horizon
     (green ground and a sky) or plain (one colour, given as #rrggbb).'
   args:
@@ -369,22 +373,24 @@ commands:
       - poné el fondo de horizonte con cielo
       - un color liso detrás del modelo
       - gris difuminado predeterminado
+      done: Fondo cambiado.
     en:
       title: Kind of background
       say:
       - horizon background with a sky
       - one plain colour behind the model
       - the default grey gradient
+      done: Background changed.
     fr:
       title: Type de fond
       say:
       - fond d'horizon avec ciel
       - une couleur unie derrière le modèle
       - dégradé gris par défaut
+      done: Fond changé.
 - id: display.set_grid_style
   kind: action
   runs_on: ui
-  status: manual
   model: 'Style of the floor grid (in the Background and grid window): the cell size in metres (0.1, 0.25, 0.5,
     1, 2 or 5), a major line every 2, 4, 5 or 10 cells, and its colour as #rrggbb.'
   args:
@@ -418,22 +424,24 @@ commands:
       - celdas de medio metro
       - línea gruesa cada diez celdas
       - pintá la cuadrícula de azul
+      done: Cuadrícula cambiada.
     en:
       title: Cells and colour of the grid
       say:
       - half metre cells
       - a major line every ten cells
       - paint the grid lines blue
+      done: Grid changed.
     fr:
       title: Cellules et couleur de la grille
       say:
       - cellules d'un demi-mètre
       - une ligne principale toutes les dix cellules
       - peins les lignes en bleu
+      done: Grille changée.
 - id: display.reset_scene_look
   kind: action
   runs_on: ui
-  status: manual
   model: Put the viewer's background and grid back to their defaults (grey gradient, 1 m cells, a major line every
     10).
   needs:
@@ -445,22 +453,24 @@ commands:
       - restablecé el aspecto predeterminado
       - deshacé los cambios de aspecto
       - como venía de fábrica
+      done: Fondo y cuadrícula restablecidos.
     en:
       title: Reset background and grid
       say:
       - restore the default values
       - undo the look changes
       - as it came out of the box
+      done: Background and grid reset.
     fr:
       title: Réinitialiser le fond et la grille
       say:
       - rétablis les valeurs par défaut
       - annule les changements d'aspect
       - comme à l'origine
+      done: Fond et grille réinitialisés.
 - id: display.set_point_budget
   kind: action
   runs_on: ui
-  status: manual
   model: 'Detail of the cloud: how many million points the viewer draws at once (2 to 40). More shows more of the
     cloud and asks more of the computer''s graphics card.'
   args:
@@ -480,22 +490,24 @@ commands:
       - subí el detalle
       - dibujá 20 millones
       - bajá el detalle para que ande más fluido
+      done: 'Detalle de la nube: {detail} millones de puntos.'
     en:
       title: Cloud detail
       say:
       - raise the detail
       - draw 20 million
       - lower the detail so it runs smoother
+      done: 'Cloud detail: {detail} million points.'
     fr:
       title: Détail du nuage
       say:
       - augmente le détail
       - dessine 20 millions
       - baisse le détail pour plus de fluidité
+      done: 'Détail du nuage : {detail} millions de points.'
 - id: display.set_confidence_threshold
   kind: action
   runs_on: ui
-  status: manual
   model: 'Confidence filter of the viewer: only the points whose confidence is at or above the threshold (0 to 1)
     are drawn; 0 draws every point. Nothing is deleted.'
   args:
@@ -515,22 +527,24 @@ commands:
       - filtrá por confianza
       - dejá solo lo que supera el 30 por ciento de confianza
       - sacá el filtro de confianza
+      done: 'Filtro de confianza: {detail}.'
     en:
       title: Confidence filter of the viewer
       say:
       - filter by confidence
       - keep only what is above 30 percent confidence
       - remove the confidence filter
+      done: 'Confidence filter: {detail}.'
     fr:
       title: Filtre de confiance de la visionneuse
       say:
       - filtre par confiance
       - ne garde que ce qui dépasse 30 pour cent de confiance
       - enlève le filtre de confiance
+      done: 'Filtre de confiance : {detail}.'
 - id: display.set_votes_threshold
   kind: action
   runs_on: ui
-  status: manual
   model: 'Threshold of the Votes colouring: the number of agreeing views (0 to 8) from which a point is painted
     green; under it, red.'
   args:
@@ -550,22 +564,24 @@ commands:
       - umbral de votos en 3 vistas
       - pintá en rojo lo que tiene menos de 4 vistas
       - subí el umbral de vistas
+      done: 'Umbral de votos: {detail} vistas.'
     en:
       title: Votes threshold
       say:
       - votes threshold at 3 views
       - paint red what has fewer than 4 views
       - raise the views threshold
+      done: 'Votes threshold: {detail} views.'
     fr:
       title: Seuil des votes
       say:
       - seuil des votes à 3 vues
       - peins en rouge ce qui a moins de 4 vues
       - monte le seuil de vues
+      done: 'Seuil de votes : {detail} vues.'
 - id: display.hide_below_votes
   kind: action
   runs_on: ui
-  status: manual
   model: 'With the Votes colouring: hide (on) or draw again (off) the points under the votes threshold, to see the
     cloud without them. Nothing is deleted.'
   args:
@@ -582,15 +598,21 @@ commands:
       - ocultá los puntos por debajo de 3 vistas
       - dejá fuera lo que está debajo del umbral
       - devolvé lo de pocas vistas
+      done: Puntos bajo el umbral ocultos.
+      done_off: Puntos bajo el umbral visibles.
     en:
       title: Hide the points under the votes threshold
       say:
       - hide the points below 3 views
       - leave out what is under the threshold
       - bring back the low-vote part
+      done: Points under the threshold hidden.
+      done_off: Points under the threshold shown.
     fr:
       title: Masquer les points sous le seuil des votes
       say:
       - masque les points à moins de 3 vues
       - laisse de côté ce qui est sous le seuil
       - ramène la partie à peu de vues
+      done: Points sous le seuil masqués.
+      done_off: Points sous le seuil affichés.
