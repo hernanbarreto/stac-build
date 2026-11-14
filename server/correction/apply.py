@@ -207,6 +207,31 @@ def reconsolidation_decision(cfg: CorrectionConfig,
                   "correction.apply.reconsolidate are both true")
 
 
+def scale_obbs(result: dict, scale: float, log=print) -> dict:
+    """The result's OBBs under a UNIFORM scale of the display frame about its origin (the real
+    rescale, correction/rescale.py): centre and half extents × s, the rotation as it is, the
+    areas of the fit's own record × s². EXACT — a refit would run the box's fit again on the
+    scaled points against thresholds that are in metres, and turn boxes (CLAUDE.md §7, the OBB)."""
+    s = float(scale)
+    n = 0
+    for inst in result.get("instances", []):
+        obb = inst.get("obb")
+        if not isinstance(obb, dict) or "center" not in obb or "half_extents" not in obb:
+            continue
+        obb["center"] = [float(v) * s for v in obb["center"]]
+        obb["half_extents"] = [float(v) * s for v in obb["half_extents"]]
+        dec = obb.get("decisions")
+        if isinstance(dec, dict):
+            for key, val in list(dec.items()):
+                if key.endswith("_m2") and isinstance(val, (int, float)) and not isinstance(val, bool):
+                    dec[key] = float(val) * s * s
+                elif key.endswith("_m") and isinstance(val, (int, float)) and not isinstance(val, bool):
+                    dec[key] = float(val) * s
+        n += 1
+    log(f"  segmentation_result.json OBBs scaled × {s:.6f} ({n} instance(s), exact)")
+    return result
+
+
 def _recompute_obbs(output_dir: Path, xyz_new: np.ndarray,
                     result: dict, log=print,
                     floor_npz: Optional[dict] = None) -> dict:
@@ -244,7 +269,9 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
                       log=print, progress=None,
                       b_kf: Optional[np.ndarray] = None,
                       record_extra: Optional[dict] = None,
-                      extra_files: Optional[Dict[str, bytes]] = None) -> dict:
+                      extra_files: Optional[Dict[str, bytes]] = None,
+                      global_scale: Optional[float] = None,
+                      floor_leveled_by: Optional[str] = None) -> dict:
     """Build every new-epoch artifact under output/_tx_epoch_<N>/. Returns
     {"tx_dir", "epoch_from", "epoch_to", "artifacts": [...],
      "pose_copies_skipped": [...], "points_moved": int}. Raises on any
@@ -253,7 +280,14 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
     ``record_extra``: fields sealed into the epoch's ``geometry_epoch.json`` (the
     certification's run-configuration sha256 and input stamp, points 126 / 139).
     ``extra_files``: {relative path: bytes} more epoch artifacts to stage (the
-    mask filter's vote record, point 106 / 133)."""
+    mask filter's vote record, point 106 / 133).
+    ``global_scale``: the epoch is a UNIFORM SCALE of the whole scan about the origin
+    (correction/rescale.py — the caller passes the equivalent per-keyframe arrays R = I,
+    t = (s − 1)·c, k = s, which move the poses and the findings): every point is then written
+    as s·x — the points with no keyframe too, which a per-keyframe warp leaves where they are —
+    every pose copy is scaled whatever its row count, and the OBBs are scaled, not refit.
+    ``floor_leveled_by``: what the floor seal says of a staged ``floor_npz`` (default: the
+    floor alignment's own words)."""
     output_dir = session.output_dir
     assert_no_interrupted_swap(output_dir)
     # read BEFORE anything is staged: a configuration that cannot say whether
@@ -289,7 +323,11 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
 
     # 1) cloud ------------------------------------------------------------
     _p(55, "tx: warping cloud per keyframe...")
-    xyz_new, n_moved = warp_full_cloud(session, R_kf, t_kf, k_kf, log=log, b_kf=b_kf)
+    if global_scale is not None:
+        xyz_new = np.asarray(session.xyz, np.float64) * float(global_scale)
+        n_moved = int(len(xyz_new))
+    else:
+        xyz_new, n_moved = warp_full_cloud(session, R_kf, t_kf, k_kf, log=log, b_kf=b_kf)
     data_new = session.data.copy()
     data_new["x"] = xyz_new[:, 0].astype(session.data.dtype["x"])
     data_new["y"] = xyz_new[:, 1].astype(session.data.dtype["y"])
@@ -310,7 +348,10 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
             ks=session.ks, frames=session.frames, kf_index=session.kf_index,
             poses=session.poses, cam_center=session.cam_center,
             raw_header=None, raw_data=None, pose_copies=[])
-        raw_new, _ = warp_full_cloud(raw_sess, R_kf, t_kf, k_kf, log=log, b_kf=b_kf)
+        if global_scale is not None:
+            raw_new = raw_xyz * float(global_scale)
+        else:
+            raw_new, _ = warp_full_cloud(raw_sess, R_kf, t_kf, k_kf, log=log, b_kf=b_kf)
         raw_data_new = session.raw_data.copy()
         raw_data_new["x"] = raw_new[:, 0].astype(session.raw_data.dtype["x"])
         raw_data_new["y"] = raw_new[:, 1].astype(session.raw_data.dtype["y"])
@@ -331,6 +372,15 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
         if rel == "camera_poses.txt":
             continue
         rows = read_poses(copy_path)
+        if global_scale is not None:
+            # a uniform scale needs no keyframe to move a pose: every copy follows
+            scaled = np.array(rows, dtype=np.float64, copy=True)
+            scaled[:, :3, 3] *= float(global_scale)
+            out = tx / rel
+            out.parent.mkdir(parents=True, exist_ok=True)
+            write_poses(out, scaled)
+            _art(rel)
+            continue
         if len(rows) != session.n_kf:
             pose_copies_skipped.append({
                 "path": rel, "rows": len(rows),
@@ -471,9 +521,12 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
     xyz_final = xyz_new[kept_mask] if kept_mask is not None else xyz_new
     res_tx = tx / "segmentation_result.json"
     if res_tx.exists():
-        result = _recompute_obbs(output_dir, xyz_final,
-                                 json.loads(res_tx.read_text()),
-                                 log=log, floor_npz=floor_npz)
+        if global_scale is not None:
+            result = scale_obbs(json.loads(res_tx.read_text()), float(global_scale), log=log)
+        else:
+            result = _recompute_obbs(output_dir, xyz_final,
+                                     json.loads(res_tx.read_text()),
+                                     log=log, floor_npz=floor_npz)
         res_tx.write_text(json.dumps(result))
     try:
         from segmentation.republish import republish_membership
@@ -541,8 +594,9 @@ def stage_transaction(session: CorrectionSession, cfg: CorrectionConfig,
     if floor_npz is not None:
         from correction.epoch import reconstruction_id_or_none
         from repro import sha256_file
-        seal = {"leveled_by": f"certification: floor alignment epoch {epoch_to} "
-                              f"(correction.floor, kind floor; correction_id {correction_id})",
+        seal = {"leveled_by": floor_leveled_by or (
+                    f"certification: floor alignment epoch {epoch_to} "
+                    f"(correction.floor, kind floor; correction_id {correction_id})"),
                 "selected_instance_id": None,
                 "stamp": {"reconstruction_id": reconstruction_id_or_none(output_dir),
                           "cloud_sha256": sha256_file(tx / "cleaned_cloud.ply"),
