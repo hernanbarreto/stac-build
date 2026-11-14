@@ -334,6 +334,41 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   segmented, replaced it).
 
 ## 7 · PENDING
+- ⭐⭐ THE LIST TO RESUME FROM (USER 2026-11-14: "anota todo esto como pendiente claro en claude.md para retomar en la
+  proxima sesion"). The state on 2026-11-14, main a51092a pushed to origin main and master; each item's detail is
+  in its own entry below. NEXT QUESTION TO HIM: start with the fusion (merge + compare)?
+  A · FOR DECEMBER, in his order:
+    1. FUSION — a. MERGE (scans of different days as ONE cloud and mesh); b. COMPARE (pccr 2408 against 3108,
+       aligned on the zones they share).
+    2. BIM COMPARISON — take up what exists, an IFC in place of the second scan; maybe a base BIM model.
+    3. TICKETS — a simple tool to mark review items / non-conformities, to show the concept.
+    4. DA3 → MapAnything as the metric source, for the licence ("luego, ahora no").
+  B · WAITING FOR HIS DECISION:
+    · the scales of pccr 2408 / 3108: where the factor that brings 3108 to 2408 is applied (the comparison's
+      transform, the lengths shown, or the scan's geometry);
+    · a spoken confirmation for the commands that launch GPU work or delete data (by voice they only open
+      their window today); the 138 `manual` commands of the interface;
+    · the database as the single source of the segmentation, the Segmentation Manager included (a project);
+    · GenRecon's mesh step: the global remesh closes every sheet into a shell (the floor as two sheets) and the
+      simplification leaves the faceting — found, not corrected; the UV unwrap on the card (other textures);
+    · a projection-only re-run audits against the PREVIOUS projection's fusion map — found, not fixed;
+    · the 13 tests failing the same since before the GPU ports — not investigated;
+    · a "free height" tool for the chat;
+    · the backups `output/_before_min_points/` of the five sessions — kept until he says.
+  C · WAITING FOR HIS EYE / EAR:
+    · the five GenRecon meshes at 2.5 m · 3 points with the edge filter;
+    · observatorio's cloud (not seen by him yet);
+    · the boxes computed on the card (a third turn with the RANSAC draw);
+    · the chat after its fixes;
+    · the three voices, the commands in the browser, the interface's French;
+    · bufferStop: its images upright at the camera poses and in the flythrough (not tried in a browser), and
+      whether its cloud stands or lies on its side in the viewer;
+    · the calibration's factor applied to a real session — his action, never the assistant's.
+  D · AFTER DECEMBER: scene understanding (the 3D relations layer, a much better VLM stage); speed (SAM3 ~10.5 h
+    on pccr 2408); an evaluation against laser ground truth (ScanNet++ / ETH3D), on his word.
+  E · MINOR: zaragoza's split column and pccr 2408's small duplicates (waved off by him); docs/ARCHITECTURE.md
+    and ROADMAP.md out of date (update or delete on his word); the general list of `docs/pipeline_final.md` §4.
+  NOT YET IN FORCE: `genrecon.keep_work` (a51092a) is read by the backend only after its next restart.
 - ⭐ NEXT, AS SOON AS THE RECONSTRUCTION STAGE CLOSES (USER 2026-11-09, ~01:30 CDMX: "anotá para lo que sigue porque
   presentamos el proyecto en poco más de un mes … ni bien terminemos es lo que sigue"), in this order:
   1. FUSION — TWO functions (USER 2026-11-09), both needing the scans coherent in POSITION and above all in SCALE:
