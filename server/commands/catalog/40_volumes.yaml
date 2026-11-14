@@ -1,0 +1,251 @@
+# The 'volumes' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: volumes
+position: 40
+title:
+  es: Volúmenes de evaluación
+  en: Evaluation volumes
+  fr: Volumes d'évaluation
+summary:
+  es: 'Cajas de evaluación: definirlas, ver qué hay dentro, espacio libre, si algo entra.'
+  en: 'Evaluation boxes: define them, see what is inside, free space, whether something fits.'
+  fr: 'Boîtes d''évaluation : les définir, voir ce qu''elles contiennent, l''espace libre, si un objet y entre.'
+commands:
+- id: volumes.define_volume
+  tool: define_volume
+  kind: action
+  runs_on: server
+  model: 'Place a user-defined evaluation box. DEFAULT: it RESTS ON the floor, centred on the floor (or on anchor_id''s
+    x/z). Pass size [w,h,d] m or volume_m3 (cube). Only pass center to override x/z; center y is honoured only with
+    on_floor=false.'
+  args:
+    name:
+      type: string
+      required: true
+    size:
+      type: array
+      items: &id001
+        type: number
+      description: '[w,h,d] full extents, metres'
+    volume_m3:
+      type: number
+      description: cube of this volume instead of size
+    center:
+      type: array
+      items: *id001
+      description: optional [x,y,z] override, metres
+    anchor_id:
+      type: integer
+      description: 'object whose centroid gives x/z (default: the floor)'
+    on_floor:
+      type: boolean
+      description: 'default true: base sits ON the floor'
+    yaw_deg:
+      type: number
+      description: rotation about vertical
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Definir un volumen
+      say:
+      - poné un cubo de 2 metros cúbicos en el centro del piso
+      - definí una caja de 1 por 2 por 1
+      - creá un volumen junto a la columna
+    en:
+      title: Define a volume
+      say:
+      - put a 2 cubic metre cube at the centre of the floor
+      - define a 1 by 2 by 1 box
+      - create a volume next to the column
+    fr:
+      title: Définir un volume
+      say:
+      - place un cube de 2 mètres cubes au centre du sol
+      - définis une boîte de 1 sur 2 sur 1
+      - crée un volume près du poteau
+- id: volumes.list_volumes
+  tool: list_volumes
+  kind: query
+  runs_on: server
+  model: The evaluation volumes saved in this scene.
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Listar volúmenes
+      say:
+      - qué volúmenes hay
+      - listame las cajas de evaluación
+      - cuáles volúmenes definí
+    en:
+      title: List volumes
+      say:
+      - what volumes are there
+      - list the evaluation boxes
+      - which volumes did I define
+    fr:
+      title: Lister les volumes
+      say:
+      - quels volumes y a-t-il
+      - liste les boîtes d'évaluation
+      - quels volumes ai-je définis
+- id: volumes.measure_volume
+  tool: measure_volume
+  kind: query
+  runs_on: server
+  model: 'Measure FROM a saved volume to an object: clearance box-surface → object points (intersects=true when
+    points are inside), plus centre distance. axis=''vertical'' → |Δy|.'
+  args:
+    volume_id:
+      type: integer
+      required: true
+    id:
+      type:
+      - integer
+      - string
+      description: id or label
+      required: true
+    axis:
+      type: string
+      enum:
+      - straight
+      - vertical
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Medir desde un volumen
+      say:
+      - qué distancia hay del volumen 1 a la pared
+      - cuánto falta para que la caja toque el rack
+      - holgura entre el volumen y el objeto
+    en:
+      title: Measure from a volume
+      say:
+      - what is the distance from volume 1 to the wall
+      - how far is the box from touching the rack
+      - clearance between the volume and the object
+    fr:
+      title: Mesurer depuis un volume
+      say:
+      - quelle distance du volume 1 au mur
+      - combien manque-t-il pour que la boîte touche la baie
+      - jeu entre le volume et l'objet
+- id: volumes.evaluate_volume
+  tool: evaluate_volume
+  kind: query
+  runs_on: server
+  model: 'Evaluate a space: objects inside, occupied vs free fraction, and free volume (m³). Pass volume_id OR center+size(+yaw).'
+  args:
+    volume_id:
+      type: integer
+    center:
+      type: array
+      items: *id001
+    size:
+      type: array
+      items: *id001
+    yaw_deg:
+      type: number
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Evaluar un volumen
+      say:
+      - qué hay dentro del volumen 1
+      - cuánto espacio libre tiene la caja
+      - está ocupado ese espacio
+    en:
+      title: Evaluate a volume
+      say:
+      - what is inside volume 1
+      - how much free space does the box have
+      - is that space taken
+    fr:
+      title: Évaluer un volume
+      say:
+      - qu'y a-t-il dans le volume 1
+      - combien d'espace libre a la boîte
+      - cet espace est-il occupé
+- id: volumes.objects_in_volume
+  tool: objects_in_volume
+  kind: query
+  runs_on: server
+  model: List objects intersecting a user-defined volume with each one's fraction inside. Pass volume_id OR center+size(+yaw).
+  args:
+    volume_id:
+      type: integer
+    center:
+      type: array
+      items: *id001
+    size:
+      type: array
+      items: *id001
+    yaw_deg:
+      type: number
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Objetos en un volumen
+      say:
+      - qué objetos toca el volumen 1
+      - qué hay dentro de la caja
+      - cuáles objetos cruzan ese espacio
+    en:
+      title: Objects in a volume
+      say:
+      - which objects does volume 1 touch
+      - what is inside the box
+      - which objects cross that space
+    fr:
+      title: Objets dans un volume
+      say:
+      - quels objets le volume 1 touche-t-il
+      - qu'y a-t-il dans la boîte
+      - quels objets traversent cet espace
+- id: volumes.fits_in_volume
+  tool: fits_in_volume
+  kind: query
+  runs_on: server
+  model: Check whether an item of size [w,h,d] metres fits in the FREE space of a user-defined volume; returns a
+    candidate placement.
+  args:
+    item_size:
+      type: array
+      items: *id001
+      description: '[w,h,d] metres'
+      required: true
+    volume_id:
+      type: integer
+    center:
+      type: array
+      items: *id001
+    size:
+      type: array
+      items: *id001
+    yaw_deg:
+      type: number
+  needs:
+  - segmentation
+  text:
+    es:
+      title: ¿Entra en el volumen?
+      say:
+      - entra un equipo de medio metro en el volumen 1
+      - cabe un tablero ahí
+      - hay lugar para algo de 1 por 1 por 2
+    en:
+      title: Does it fit in the volume?
+      say:
+      - does a half metre unit fit in volume 1
+      - does a panel fit there
+      - is there room for something 1 by 1 by 2
+    fr:
+      title: Est-ce que ça rentre dans le volume ?
+      say:
+      - un équipement d'un demi-mètre rentre-t-il dans le volume 1
+      - un tableau y rentre-t-il
+      - y a-t-il de la place pour 1 sur 1 sur 2

@@ -1,0 +1,76 @@
+# The 'notes' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: notes
+position: 70
+title:
+  es: Notas
+  en: Notes
+  fr: Notes
+summary:
+  es: Guardar y recuperar notas sobre la escena.
+  en: Saving and recalling notes about the scene.
+  fr: Enregistrer et retrouver des notes sur la scène.
+commands:
+- id: notes.remember_note
+  tool: remember_note
+  kind: action
+  runs_on: server
+  model: Persist a conclusion/observation about this scene in its db for future conversations (key + note). Never
+    store figures that did not come from a tool.
+  args:
+    key:
+      type: string
+      required: true
+    note:
+      type: string
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Guardar una nota
+      say:
+      - anotá que falta el matafuego
+      - recordá que la puerta 3 está trabada
+      - guardá esta observación
+    en:
+      title: Save a note
+      say:
+      - note that the extinguisher is missing
+      - remember that door 3 is jammed
+      - save this observation
+    fr:
+      title: Enregistrer une note
+      say:
+      - note qu'il manque l'extincteur
+      - retiens que la porte 3 est bloquée
+      - enregistre cette observation
+- id: notes.recall_notes
+  tool: recall_notes
+  kind: query
+  runs_on: server
+  model: Read notes previously stored about this scene (all, or one key).
+  args:
+    key:
+      type: string
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Leer las notas
+      say:
+      - qué notas hay
+      - qué habíamos anotado
+      - leeme las notas de esta escena
+    en:
+      title: Read the notes
+      say:
+      - what notes are there
+      - what had we noted
+      - read me the notes of this scene
+    fr:
+      title: Lire les notes
+      say:
+      - quelles notes y a-t-il
+      - qu'avions-nous noté
+      - lis-moi les notes de cette scène

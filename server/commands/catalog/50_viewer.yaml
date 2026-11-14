@@ -1,0 +1,368 @@
+# The 'viewer' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: viewer
+position: 50
+title:
+  es: Visor 3D
+  en: 3D viewer
+  fr: Visionneuse 3D
+summary:
+  es: 'Mover la cámara y decidir qué se ve: enfocar, mostrar, ocultar, vistas, color de la nube.'
+  en: 'Moving the camera and choosing what is shown: focus, show, hide, views, cloud colour.'
+  fr: 'Déplacer la caméra et choisir ce qui s''affiche : cibler, afficher, masquer, vues, couleur du nuage.'
+commands:
+- id: viewer.focus_object
+  tool: focus_object
+  kind: action
+  runs_on: server
+  model: 'VIEWER: select ONE object — its OBB and dimensions light up and the camera travels to it. Call it whenever
+    the answer is about a specific object.'
+  args:
+    id:
+      type: &id001
+      - integer
+      - string
+      description: id or label
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Ubicar / enfocar un objeto
+      say:
+      - ubicá el cartel 797
+      - llevame a la puerta más grande
+      - enfocá el extintor
+      - dónde está, mostrámelo
+    en:
+      title: Locate / focus an object
+      say:
+      - locate sign 797
+      - take me to the largest door
+      - focus the extinguisher
+      - where is it, show me
+    fr:
+      title: Localiser / cibler un objet
+      say:
+      - localise le panneau 797
+      - emmène-moi à la plus grande porte
+      - cible l'extincteur
+      - où est-il, montre-le-moi
+- id: viewer.show_objects
+  tool: show_objects
+  kind: action
+  runs_on: server
+  model: 'VIEWER: show (visible=true) or hide (false) objects. For EVERY object of a kind pass label (''door'')
+    instead of listing ids.'
+  args:
+    ids:
+      type: array
+      items:
+        type: integer
+    label:
+      type: string
+      description: every object of this label
+    visible:
+      type: boolean
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Mostrar u ocultar objetos
+      say:
+      - ocultá las paredes
+      - mostrá de nuevo los caños
+      - sacá el techo
+      - escondé las puertas
+    en:
+      title: Show or hide objects
+      say:
+      - hide the walls
+      - show the pipes again
+      - remove the ceiling
+      - hide the doors
+    fr:
+      title: Afficher ou masquer des objets
+      say:
+      - masque les murs
+      - réaffiche les tuyaux
+      - enlève le plafond
+      - cache les portes
+- id: viewer.show_only
+  tool: show_only
+  kind: action
+  runs_on: server
+  model: 'VIEWER: show ONLY these objects, hide every other one. For EVERY object of a kind pass label (''door'')
+    instead of listing ids.'
+  args:
+    ids:
+      type: array
+      items:
+        type: integer
+    label:
+      type: string
+      description: every object of this label
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Mostrar solo
+      say:
+      - mostrame solo las puertas
+      - dejá solo los extintores
+      - quiero ver únicamente las tuberías
+    en:
+      title: Show only
+      say:
+      - show me only the doors
+      - leave only the extinguishers
+      - I want to see just the pipes
+    fr:
+      title: Afficher uniquement
+      say:
+      - montre-moi seulement les portes
+      - ne laisse que les extincteurs
+      - je veux voir uniquement les tuyaux
+- id: viewer.show_all_objects
+  tool: show_all_objects
+  kind: action
+  runs_on: server
+  model: 'VIEWER: show every object again.'
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Mostrar todo
+      say:
+      - mostrá todo de nuevo
+      - volvé a mostrar todos los objetos
+      - que se vea todo
+    en:
+      title: Show everything
+      say:
+      - show everything again
+      - bring back all the objects
+      - make everything visible
+    fr:
+      title: Tout afficher
+      say:
+      - réaffiche tout
+      - remontre tous les objets
+      - que tout soit visible
+- id: viewer.set_obb
+  tool: set_obb
+  kind: action
+  runs_on: server
+  model: 'VIEWER: turn the OBB (bounding box + dimensions) of objects on/off. For EVERY object of a kind pass label
+    instead of listing ids.'
+  args:
+    ids:
+      type: array
+      items:
+        type: integer
+    label:
+      type: string
+      description: every object of this label
+    'on':
+      type: boolean
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Cajas de los objetos
+      say:
+      - prendé las cajas de las puertas
+      - mostrá la caja y las dimensiones del rack
+      - apagá las cajas
+    en:
+      title: Object boxes
+      say:
+      - turn on the boxes of the doors
+      - show the box and dimensions of the rack
+      - turn the boxes off
+    fr:
+      title: Boîtes des objets
+      say:
+      - active les boîtes des portes
+      - affiche la boîte et les dimensions de la baie
+      - désactive les boîtes
+- id: viewer.set_view
+  tool: set_view
+  kind: action
+  runs_on: server
+  model: 'VIEWER: camera to a standard view of the scene.'
+  args:
+    view:
+      type: string
+      enum:
+      - top
+      - front
+      - back
+      - left
+      - right
+      - bottom
+      - iso
+      - home
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Vista estándar
+      say:
+      - vista desde arriba
+      - mostrame la planta
+      - ponelo de frente
+      - vista isométrica
+      - vista lateral
+    en:
+      title: Standard view
+      say:
+      - view from above
+      - show me the plan
+      - put it front on
+      - isometric view
+      - side view
+    fr:
+      title: Vue standard
+      say:
+      - vue de dessus
+      - montre-moi le plan
+      - mets-le de face
+      - vue isométrique
+      - vue de côté
+- id: viewer.rotate_view
+  tool: rotate_view
+  kind: action
+  runs_on: server
+  model: 'VIEWER: orbit the camera around its target (degrees; yaw = around the vertical, pitch = up/down).'
+  args:
+    yaw_deg:
+      type: number
+    pitch_deg:
+      type: number
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Girar la vista
+      say:
+      - girá 90 grados
+      - rotá la vista a la derecha
+      - dá la vuelta
+      - mirá un poco más desde arriba
+    en:
+      title: Rotate the view
+      say:
+      - rotate 90 degrees
+      - turn the view to the right
+      - go around
+      - look a bit more from above
+    fr:
+      title: Faire pivoter la vue
+      say:
+      - tourne de 90 degrés
+      - fais pivoter la vue vers la droite
+      - fais le tour
+      - regarde un peu plus d'en haut
+- id: viewer.travel
+  tool: travel
+  kind: action
+  runs_on: server
+  model: 'VIEWER: travel from one object to another (the camera flies from the first to the second).'
+  args:
+    from_id:
+      type: *id001
+      description: id or label
+      required: true
+    to_id:
+      type: *id001
+      description: id or label
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Viajar entre objetos
+      say:
+      - llevame de la puerta al tablero
+      - andá del extintor al cartel
+      - recorré desde un objeto hasta otro
+    en:
+      title: Travel between objects
+      say:
+      - take me from the door to the panel
+      - go from the extinguisher to the sign
+      - travel from one object to another
+    fr:
+      title: Voyager entre des objets
+      say:
+      - emmène-moi de la porte au tableau
+      - va de l'extincteur au panneau
+      - parcours d'un objet à un autre
+- id: viewer.color_cloud
+  tool: color_cloud
+  kind: action
+  runs_on: server
+  model: 'VIEWER: colour the cloud: rgb (real colour), confidence/status (per-point witness status), votes (multi-view
+    votes), deviation (vs BIM).'
+  args:
+    mode:
+      type: string
+      enum:
+      - rgb
+      - confidence
+      - status
+      - votes
+      - deviation
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Color de la nube
+      say:
+      - coloreá por confianza
+      - volvé al color real
+      - mostrá los votos
+      - coloreá por desviación contra el BIM
+    en:
+      title: Cloud colour
+      say:
+      - colour by confidence
+      - back to real colour
+      - show the votes
+      - colour by deviation against the BIM
+    fr:
+      title: Couleur du nuage
+      say:
+      - colore par confiance
+      - reviens à la couleur réelle
+      - affiche les votes
+      - colore par écart avec le BIM
+- id: viewer.clear_view
+  tool: clear_view
+  kind: action
+  runs_on: server
+  model: 'VIEWER: deselect, clear measurements and OBBs shown by the chat.'
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Limpiar la vista
+      say:
+      - limpiá la vista
+      - deseleccioná todo
+      - borrá las mediciones y las cajas del chat
+    en:
+      title: Clear the view
+      say:
+      - clear the view
+      - deselect everything
+      - remove the chat's measurements and boxes
+    fr:
+      title: Nettoyer la vue
+      say:
+      - nettoie la vue
+      - désélectionne tout
+      - efface les mesures et les boîtes du chat

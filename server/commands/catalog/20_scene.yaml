@@ -1,0 +1,351 @@
+# The 'scene' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: scene
+position: 20
+title:
+  es: Escena y objetos
+  en: Scene and objects
+  fr: Scène et objets
+summary:
+  es: 'Qué hay en el escaneo: listar, contar, ubicar y describir objetos y la escena.'
+  en: 'What the scan holds: list, count, locate and describe objects and the scene.'
+  fr: 'Ce que contient le scan : lister, compter, localiser et décrire les objets et la scène.'
+commands:
+- id: scene.list_objects
+  tool: list_objects
+  kind: query
+  runs_on: server
+  model: 'List the objects of a label (id + label + class/material/state). ALWAYS pass the label the question names
+    (in the inventory''s English: ''sign'', ''fire extinguisher''). A long listing comes back by label with counts
+    and id ranges.'
+  args:
+    label:
+      type: string
+      description: the kind of object, e.g. 'sign'
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Listar objetos
+      say:
+      - listame las puertas
+      - qué objetos hay
+      - decime todos los carteles
+      - muéstrame la lista de tuberías
+    en:
+      title: List objects
+      say:
+      - list the doors
+      - what objects are there
+      - give me all the signs
+    fr:
+      title: Lister les objets
+      say:
+      - liste les portes
+      - quels objets y a-t-il
+      - donne-moi tous les panneaux
+- id: scene.count_objects
+  tool: count_objects
+  kind: query
+  runs_on: server
+  model: 'How many objects of a label there are — pass the label the question names (''how many signs'' -> label=''sign'').
+    With no label: the total and the count of every label.'
+  args:
+    label:
+      type: string
+      description: the kind of object, e.g. 'sign'
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Contar objetos
+      say:
+      - cuántas puertas hay
+      - cuántos objetos hay en total
+      - contá los extintores
+    en:
+      title: Count objects
+      say:
+      - how many doors are there
+      - how many objects in total
+      - count the extinguishers
+    fr:
+      title: Compter les objets
+      say:
+      - combien de portes y a-t-il
+      - combien d'objets au total
+      - compte les extincteurs
+- id: scene.get_object
+  tool: get_object
+  kind: query
+  runs_on: server
+  model: 'One object by id in one call: label, position (m), size w/h/d (m). Use it to check that an id exists and
+    what it is.'
+  args:
+    id:
+      type: &id001
+      - integer
+      - string
+      description: id or label
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Datos de un objeto
+      say:
+      - qué es el objeto 797
+      - existe el sign 797
+      - datos del objeto
+    en:
+      title: Object details
+      say:
+      - what is object 797
+      - does sign 797 exist
+      - details of the object
+    fr:
+      title: Détails d'un objet
+      say:
+      - qu'est-ce que l'objet 797
+      - le panneau 797 existe-t-il
+      - détails de l'objet
+- id: scene.get_position
+  tool: get_position
+  kind: query
+  runs_on: server
+  model: World position (metres) of an object.
+  args:
+    id:
+      type: *id001
+      description: id or label
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Posición de un objeto
+      say:
+      - dónde está la puerta 34
+      - en qué posición está
+      - coordenadas del objeto
+    en:
+      title: Object position
+      say:
+      - where is door 34
+      - what is its position
+      - coordinates of the object
+    fr:
+      title: Position d'un objet
+      say:
+      - où est la porte 34
+      - quelle est sa position
+      - coordonnées de l'objet
+- id: scene.get_object_size
+  tool: get_object_size
+  kind: query
+  runs_on: server
+  model: Object size w/h/d in metres.
+  args:
+    id:
+      type: *id001
+      description: id or label
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Tamaño de un objeto
+      say:
+      - qué tamaño tiene el rack
+      - cuánto mide la puerta
+      - dimensiones del objeto
+    en:
+      title: Object size
+      say:
+      - how big is the rack
+      - how much does the door measure
+      - dimensions of the object
+    fr:
+      title: Taille d'un objet
+      say:
+      - quelle est la taille de la baie
+      - combien mesure la porte
+      - dimensions de l'objet
+- id: scene.get_object_volume
+  tool: get_object_volume
+  kind: query
+  runs_on: server
+  model: Bounding-box volume in cubic metres.
+  args:
+    id:
+      type: *id001
+      description: id or label
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Volumen de un objeto
+      say:
+      - qué volumen tiene el tanque
+      - cuántos metros cúbicos ocupa
+      - volumen de la caja del objeto
+    en:
+      title: Object volume
+      say:
+      - what is the tank's volume
+      - how many cubic metres does it take
+      - volume of the object's box
+    fr:
+      title: Volume d'un objet
+      say:
+      - quel est le volume du réservoir
+      - combien de mètres cubes occupe-t-il
+      - volume de la boîte de l'objet
+- id: scene.get_my_position
+  tool: get_my_position
+  kind: query
+  runs_on: server
+  model: Position of the camera at the end of the scan ('me').
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Mi posición
+      say:
+      - dónde estoy
+      - dónde terminó el escaneo
+      - mi posición
+    en:
+      title: My position
+      say:
+      - where am I
+      - where did the scan end
+      - my position
+    fr:
+      title: Ma position
+      say:
+      - où suis-je
+      - où s'est terminé le scan
+      - ma position
+- id: scene.get_distance_from_me
+  tool: get_distance_from_me
+  kind: query
+  runs_on: server
+  model: Distance from the scan-end camera to an object (m).
+  args:
+    id:
+      type: *id001
+      description: id or label
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Distancia desde mí
+      say:
+      - a qué distancia estoy de la puerta
+      - qué tan lejos me queda el tablero
+      - distancia desde mi posición
+    en:
+      title: Distance from me
+      say:
+      - how far am I from the door
+      - how far is the panel from me
+      - distance from my position
+    fr:
+      title: Distance depuis moi
+      say:
+      - à quelle distance suis-je de la porte
+      - à quelle distance est le tableau
+      - distance depuis ma position
+- id: scene.get_session_info
+  tool: get_session_info
+  kind: query
+  runs_on: server
+  model: 'Which session/scene is open: project + session name, scan frame count, cloud size, objects, floor leveling,
+    cached scene description. Call for any ''what am I looking at'' question.'
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Sesión abierta
+      say:
+      - qué sesión es esta
+      - qué escaneo estoy viendo
+      - datos de la sesión
+    en:
+      title: Open session
+      say:
+      - which session is this
+      - which scan am I looking at
+      - session details
+    fr:
+      title: Session ouverte
+      say:
+      - quelle est cette session
+      - quel scan suis-je en train de voir
+      - détails de la session
+- id: scene.describe_scene
+  tool: describe_scene
+  kind: query
+  runs_on: server
+  model: LOOK at sampled scan keyframes (VLM) and describe what the scene is — kind of space, structures, materials,
+    notable items. Cached in the scene db; refresh=true re-runs. Interpretation (vlm_proposed), NEVER measurements.
+  args:
+    refresh:
+      type: boolean
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Describir la escena
+      say:
+      - qué estamos viendo
+      - describime la escena
+      - qué lugar es este
+    en:
+      title: Describe the scene
+      say:
+      - what are we looking at
+      - describe the scene
+      - what place is this
+    fr:
+      title: Décrire la scène
+      say:
+      - que regardons-nous
+      - décris la scène
+      - quel est ce lieu
+- id: scene.describe_object
+  tool: describe_object
+  kind: query
+  runs_on: server
+  model: 'Detailed dossier of ONE segmented object: qué es, descripción, características, materiales, estado, función,
+    interacción con el entorno (vlm_proposed, cached by the CAD/propose pass). Use when asked what an object is
+    / its materials / condition.'
+  args:
+    id:
+      type: *id001
+      description: id or label
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Describir un objeto
+      say:
+      - describime el objeto 12
+      - qué es esto y de qué material
+      - contame sobre el tablero
+    en:
+      title: Describe an object
+      say:
+      - describe object 12
+      - what is this and what is it made of
+      - tell me about the panel
+    fr:
+      title: Décrire un objet
+      say:
+      - décris l'objet 12
+      - qu'est-ce que c'est et en quel matériau
+      - parle-moi du tableau

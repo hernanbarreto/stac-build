@@ -1,0 +1,392 @@
+# The 'measure' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: measure
+position: 30
+title:
+  es: Mediciones
+  en: Measurements
+  fr: Mesures
+summary:
+  es: 'Medir sobre la nube: distancias, holguras, alturas, plomo, nivel, planitud, pasos.'
+  en: 'Measuring on the cloud: distances, clearances, heights, plumb, level, flatness, passages.'
+  fr: 'Mesurer sur le nuage : distances, jeux, hauteurs, aplomb, niveau, planéité, passages.'
+commands:
+- id: measure.get_distance
+  tool: get_distance
+  kind: query
+  runs_on: server
+  model: Approx surface distance between two objects (m).
+  args:
+    id1:
+      type: &id001
+      - integer
+      - string
+      description: id or label
+      required: true
+    id2:
+      type: *id001
+      description: id or label
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Distancia entre dos objetos
+      say:
+      - a qué distancia está el cartel del extintor
+      - cuánto hay entre la puerta y el rack
+      - distancia entre dos objetos
+    en:
+      title: Distance between two objects
+      say:
+      - how far is the sign from the extinguisher
+      - how much is there between the door and the rack
+      - distance between two objects
+    fr:
+      title: Distance entre deux objets
+      say:
+      - à quelle distance est le panneau de l'extincteur
+      - combien y a-t-il entre la porte et la baie
+      - distance entre deux objets
+- id: measure.get_clearance
+  tool: get_clearance
+  kind: query
+  runs_on: server
+  model: Minimum real clearance (gap, separation, holgura) between ANY two objects (m) with the closest point pair
+    — a floor and a wall included.
+  args:
+    id1:
+      type: *id001
+      description: id or label
+      required: true
+    id2:
+      type: *id001
+      description: id or label
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Holgura entre dos objetos
+      say:
+      - qué holgura hay entre el piso y la pared
+      - qué separación hay entre el caño y el techo
+      - distancia libre entre dos objetos
+    en:
+      title: Clearance between two objects
+      say:
+      - what is the clearance between the floor and the wall
+      - what gap is there between the pipe and the ceiling
+      - free distance between two objects
+    fr:
+      title: Jeu entre deux objets
+      say:
+      - quel jeu y a-t-il entre le sol et le mur
+      - quel écart entre le tuyau et le plafond
+      - distance libre entre deux objets
+- id: measure.measure_between
+  tool: measure_between
+  kind: query
+  runs_on: server
+  model: 'Distance between NAMED PARTS of two objects (m), from their real point clouds. Parts: centroid | top/upper
+    | bottom/base/lower (surface bands — a curved ceiling has BOTH) | highest/lowest (extreme points) | closest.
+    axis=''vertical'' → height difference |Δy| (e.g. free height floor→ceiling upper part); ''straight'' → 3-D.'
+  args:
+    id1:
+      type: *id001
+      description: id or label
+      required: true
+    id2:
+      type: *id001
+      description: id or label
+      required: true
+    feature1:
+      type: string
+      enum:
+      - centroid
+      - top
+      - upper
+      - bottom
+      - base
+      - lower
+      - highest
+      - lowest
+      - closest
+    feature2:
+      type: string
+      enum:
+      - centroid
+      - top
+      - upper
+      - bottom
+      - base
+      - lower
+      - highest
+      - lowest
+      - closest
+    axis:
+      type: string
+      enum:
+      - straight
+      - vertical
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Medir entre partes
+      say:
+      - del piso a la parte alta del techo
+      - distancia vertical entre la base de la escalera y la viga
+      - medí entre la parte de arriba de uno y la de abajo del otro
+    en:
+      title: Measure between parts
+      say:
+      - from the floor to the upper part of the ceiling
+      - vertical distance between the ladder's base and the beam
+      - measure between the top of one and the bottom of the other
+    fr:
+      title: Mesurer entre des parties
+      say:
+      - du sol à la partie haute du plafond
+      - distance verticale entre la base de l'échelle et la poutre
+      - mesure entre le haut de l'un et le bas de l'autre
+- id: measure.get_extent
+  tool: get_extent
+  kind: query
+  runs_on: server
+  model: 'True point-cloud extent of an object: min/max XYZ, height, and the centres of its lowest and highest surface
+    bands (where the lower and upper parts of a curved/composite object are).'
+  args:
+    id:
+      type: *id001
+      description: id or label
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Extensión de un objeto
+      say:
+      - de dónde a dónde va el techo
+      - qué altura real tiene el objeto
+      - dónde están su parte baja y alta
+    en:
+      title: Extent of an object
+      say:
+      - from where to where does the ceiling go
+      - what is the object's real height
+      - where are its lower and upper parts
+    fr:
+      title: Étendue d'un objet
+      say:
+      - d'où à où va le plafond
+      - quelle est la hauteur réelle de l'objet
+      - où sont ses parties basse et haute
+- id: measure.fits_through
+  tool: fits_through
+  kind: query
+  runs_on: server
+  model: 'Can an item [w,h,d] m pass through an opening (door/window: opening_id) or through the gap between two
+    objects (id1+id2)?'
+  args:
+    item_size:
+      type: array
+      items:
+        type: number
+      description: '[w,h,d] metres'
+      required: true
+    opening_id:
+      type: *id001
+      description: id or label
+    id1:
+      type: *id001
+      description: id or label
+    id2:
+      type: *id001
+      description: id or label
+    margin_m:
+      type: number
+  needs:
+  - segmentation
+  text:
+    es:
+      title: ¿Pasa por la abertura?
+      say:
+      - pasa un equipo de 1 por 2 por la puerta
+      - entra esto entre el rack y la pared
+      - cabe por el hueco
+    en:
+      title: Does it fit through?
+      say:
+      - does a 1 by 2 unit pass through the door
+      - does this go between the rack and the wall
+      - does it fit through the gap
+    fr:
+      title: Est-ce que ça passe ?
+      say:
+      - un équipement de 1 sur 2 passe-t-il par la porte
+      - est-ce que ça passe entre la baie et le mur
+      - passe-t-il par l'ouverture
+- id: measure.get_plumb
+  tool: get_plumb
+  kind: query
+  runs_on: server
+  model: Out-of-plumb (tilt from vertical) of an element — a wall's face, a column's axis — degrees + mm/m.
+  args:
+    id:
+      type: *id001
+      description: id or label
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Plomo (verticalidad)
+      say:
+      - está a plomo la pared
+      - cuánto desplome tiene la columna
+      - está vertical
+    en:
+      title: Plumb (verticality)
+      say:
+      - is the wall plumb
+      - how much out of plumb is the column
+      - is it vertical
+    fr:
+      title: Aplomb (verticalité)
+      say:
+      - le mur est-il d'aplomb
+      - quel est le faux aplomb du poteau
+      - est-il vertical
+- id: measure.get_level
+  tool: get_level
+  kind: query
+  runs_on: server
+  model: Out-of-level (tilt from horizontal) of an element — a floor's face, a beam's axis — degrees + mm/m.
+  args:
+    id:
+      type: *id001
+      description: id or label
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Nivel (horizontalidad)
+      say:
+      - está a nivel el piso
+      - qué desnivel tiene la viga
+      - está horizontal
+    en:
+      title: Level (horizontality)
+      say:
+      - is the floor level
+      - how much out of level is the beam
+      - is it horizontal
+    fr:
+      title: Niveau (horizontalité)
+      say:
+      - le sol est-il de niveau
+      - quelle est la pente de la poutre
+      - est-il horizontal
+- id: measure.get_span
+  tool: get_span
+  kind: query
+  runs_on: server
+  model: Largest horizontal extent (span) of an object, metres.
+  args:
+    id:
+      type: *id001
+      description: id or label
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Luz de un elemento
+      say:
+      - qué luz tiene la viga
+      - cuál es el largo horizontal del objeto
+      - cuánto se extiende
+    en:
+      title: Span of an element
+      say:
+      - what is the beam's span
+      - what is the object's horizontal length
+      - how far does it extend
+    fr:
+      title: Portée d'un élément
+      say:
+      - quelle est la portée de la poutre
+      - quelle est la longueur horizontale de l'objet
+      - sur quelle longueur s'étend-il
+- id: measure.get_height_profile
+  tool: get_height_profile
+  kind: query
+  runs_on: server
+  model: 'FREE HEIGHT (headroom, altura libre, gálibo) UNDER an overhead object (ceiling, beam, duct) along its
+    longest axis: floor_id = the floor. Only for heights — the gap between two objects is get_clearance.'
+  args:
+    id:
+      type: *id001
+      description: id or label
+      required: true
+    n_stations:
+      type: integer
+    floor_id:
+      type: *id001
+      description: id or label
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Altura libre (gálibo)
+      say:
+      - cuál es la altura libre bajo el techo
+      - qué gálibo hay bajo la viga
+      - altura libre bajo el conducto
+    en:
+      title: Free height (headroom)
+      say:
+      - what is the free height under the ceiling
+      - what headroom is there under the beam
+      - clear height under the duct
+    fr:
+      title: Hauteur libre (gabarit)
+      say:
+      - quelle est la hauteur libre sous le plafond
+      - quel gabarit sous la poutre
+      - hauteur libre sous la gaine
+- id: measure.get_flatness_report
+  tool: get_flatness_report
+  kind: query
+  runs_on: server
+  model: 'Flatness report (mm): surface_fitting residuals when available, plane-fit fallback otherwise.'
+  args:
+    id:
+      type: *id001
+      description: id or label
+      required: true
+    tolerance_mm:
+      type: number
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Planitud
+      say:
+      - qué tan plano está el piso
+      - planitud de la pared
+      - cumple una tolerancia de 5 milímetros
+    en:
+      title: Flatness
+      say:
+      - how flat is the floor
+      - flatness of the wall
+      - does it meet a 5 millimetre tolerance
+    fr:
+      title: Planéité
+      say:
+      - quelle est la planéité du sol
+      - planéité du mur
+      - respecte-t-il une tolérance de 5 millimètres

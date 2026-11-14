@@ -1,0 +1,42 @@
+# The 'talk' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: talk
+position: 10
+title:
+  es: Conversación
+  en: Conversation
+  fr: Conversation
+summary:
+  es: 'Hablar con STAC: saludos, su nombre, el tuyo, lo que no es sobre la escena.'
+  en: 'Talking with STAC: greetings, its name, yours, what is not about the scene.'
+  fr: 'Parler avec STAC : salutations, son nom, le vôtre, ce qui ne concerne pas la scène.'
+commands:
+- id: talk.small_talk
+  tool: small_talk
+  kind: talk
+  runs_on: server
+  model: 'ONLY for a greeting, thanks, or a question that is NOT about the scene, its objects or the viewer: nothing
+    is measured and nothing changes. Never for anything else.'
+  core: true
+  text:
+    es:
+      title: Conversar
+      say:
+      - hola
+      - gracias
+      - cómo estás
+      - quién sos
+    en:
+      title: Chat
+      say:
+      - hello
+      - thanks
+      - how are you
+      - who are you
+    fr:
+      title: Converser
+      say:
+      - bonjour
+      - merci
+      - comment ça va
+      - qui es-tu

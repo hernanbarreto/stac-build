@@ -1,0 +1,170 @@
+# The 'quality' commands of STAC (server/commands — the database of commands is built from
+# these declarations). One entry per command; texts in es / en / fr.
+area: quality
+position: 60
+title:
+  es: Calidad de la reconstrucción
+  en: Reconstruction quality
+  fr: Qualité de la reconstruction
+summary:
+  es: Cómo se hizo el escaneo y qué tan confiable es cada objeto.
+  en: How the scan was made and how reliable each object is.
+  fr: Comment le scan a été réalisé et quelle est la fiabilité de chaque objet.
+commands:
+- id: quality.get_alignment_health
+  tool: get_alignment_health
+  kind: query
+  runs_on: server
+  model: 'Alignment health: vote entropy + onion metric.'
+  args:
+    id:
+      type: &id001
+      - integer
+      - string
+      description: id or label
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Salud de la alineación
+      say:
+      - qué tan bien alineado está el objeto
+      - es confiable esta pared
+      - salud de la alineación
+    en:
+      title: Alignment health
+      say:
+      - how well aligned is the object
+      - is this wall reliable
+      - alignment health
+    fr:
+      title: Santé de l'alignement
+      say:
+      - l'objet est-il bien aligné
+      - ce mur est-il fiable
+      - santé de l'alignement
+- id: quality.get_onion_report
+  tool: get_onion_report
+  kind: query
+  runs_on: server
+  model: 'Doubled-surface report: mode separation (m) + state (+ per-seam via seam).'
+  args:
+    id:
+      type: *id001
+      description: id or label
+      required: true
+    seam:
+      type: string
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Superficie duplicada
+      say:
+      - tiene superficie duplicada la pared
+      - hay capas dobles en este objeto
+      - reporte de capas
+    en:
+      title: Doubled surface
+      say:
+      - does the wall have a doubled surface
+      - are there double layers in this object
+      - layers report
+    fr:
+      title: Surface dédoublée
+      say:
+      - le mur a-t-il une surface dédoublée
+      - y a-t-il des couches doubles dans cet objet
+      - rapport de couches
+- id: quality.get_instance_history
+  tool: get_instance_history
+  kind: query
+  runs_on: server
+  model: Windows seen + residuals for an object.
+  args:
+    id:
+      type: *id001
+      description: id or label
+      required: true
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Historia de un objeto
+      say:
+      - en cuántas vistas se vio el objeto
+      - historia del objeto
+      - con qué residuos se reconstruyó
+    en:
+      title: History of an object
+      say:
+      - in how many views was the object seen
+      - history of the object
+      - with what residuals was it reconstructed
+    fr:
+      title: Historique d'un objet
+      say:
+      - dans combien de vues l'objet a-t-il été vu
+      - historique de l'objet
+      - avec quels résidus a-t-il été reconstruit
+- id: quality.get_findings
+  tool: get_findings
+  kind: query
+  runs_on: server
+  model: Visual findings for an object/region (Phase 3).
+  args:
+    id:
+      type: *id001
+      description: id or label
+    region:
+      type: string
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Hallazgos visuales
+      say:
+      - qué hallazgos tiene el objeto
+      - hay defectos en esta zona
+      - qué se encontró ahí
+    en:
+      title: Visual findings
+      say:
+      - what findings does the object have
+      - are there defects in this zone
+      - what was found there
+    fr:
+      title: Constats visuels
+      say:
+      - quels constats pour l'objet
+      - y a-t-il des défauts dans cette zone
+      - qu'a-t-on trouvé là
+- id: quality.explain_reconstruction
+  tool: explain_reconstruction
+  kind: query
+  runs_on: server
+  model: 'HOW this session was made: the pipeline''s method step by step and the session''s own records (keyframes,
+    chunks, epoch, segmentation rounds, coverage, certification, point confidence). Call for any question about
+    the method, the reconstruction, the segmentation or how reliable the points are.'
+  needs:
+  - segmentation
+  text:
+    es:
+      title: Cómo se reconstruyó
+      say:
+      - cómo se hizo esta nube
+      - explicame el método
+      - qué tan confiables son los puntos
+    en:
+      title: How it was reconstructed
+      say:
+      - how was this cloud made
+      - explain the method
+      - how reliable are the points
+    fr:
+      title: Comment il a été reconstruit
+      say:
+      - comment ce nuage a-t-il été fait
+      - explique-moi la méthode
+      - quelle est la fiabilité des points
