@@ -237,6 +237,13 @@ export interface ViewportHandle {
     setCameraFov: (fovYDeg: number) => void
     // Immersive assistant: feed scene objects (for OBB lookup), animate the
     // geometry behind a spatial answer, and manage user-defined volumes.
+    /** a finished distance measurement by the id of its readout: its two picked points (world =
+     *  the scan's display frame) and the model's length between them */
+    getDistance: (id: string) => { a: number[]; b: number[]; metres: number } | null
+    /** remove one finished distance measurement (it became a calibration mark) */
+    removeDistance: (id: string) => void
+    /** the scan's stored calibration measurements, drawn on the model (replaces the previous set) */
+    setCalibrationMarks: (marks: CalibrationMark[]) => void
     setAssistantObjects: (objects: SceneObject[]) => void
     visualizeMeasurement: (trace: TraceEntry[]) => void
     clearAssistantViz: () => void
@@ -551,7 +558,13 @@ function createArc(
 interface Measurement {
     type: 'distance' | 'angle'
     objects: THREE.Object3D[]  // markers, lines, labels, arcs
+    /** the id of its HUD readout (a distance: what the calibration dialog asks for by) */
+    id?: string
 }
+
+/** A calibration measurement stored for the scan (calibration3d.py): drawn on the model in its own
+ *  colour and kept through "clear measurements" (USER 2026-11-13: "deben quedar almacenadas"). */
+export interface CalibrationMark { id: string; a: number[]; b: number[]; metres: number; role: 'gauge' | 'test' }
 
 // ── frameCloud: isometric view framing the full point cloud extent ──
 function frameCloud(bbox: THREE.Box3, cam: THREE.PerspectiveCamera, ctrl: { target: THREE.Vector3; update: () => void }) {
@@ -1085,7 +1098,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const onViewScaleRef = useRef(onViewScale)
     useEffect(() => { onViewScaleRef.current = onViewScale }, [onViewScale])
     // HUD readouts: world anchors of the measurement labels, projected each frame
-    type WorldReadout = { id: string; kind: 'distance' | 'angle'; pos: THREE.Vector3; anchor: THREE.Vector3; metres?: number; degrees?: number; tag?: string }
+    type WorldReadout = { id: string; kind: 'distance' | 'angle'; pos: THREE.Vector3; anchor: THREE.Vector3; metres?: number; degrees?: number; tag?: string
+                          /** a user's distance: its two picked points — it can be marked as a calibration measurement */
+                          a?: THREE.Vector3; b?: THREE.Vector3; calibratable?: boolean; cal?: 'gauge' | 'test' }
+    const calibGroupRef = useRef<THREE.Group | null>(null)
     const readoutsWorldRef = useRef<WorldReadout[]>([])
     const liveReadoutRef = useRef<WorldReadout | null>(null)
     const lastReadoutKeyRef = useRef('')
@@ -1205,10 +1221,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         pendingMarkersRef.current = []
         pendingLineRef.current = null
         measurementsRef.current = []
-        readoutsWorldRef.current = []
+        // the scan's stored calibration marks are not measurements of the moment: they stay
+        readoutsWorldRef.current = readoutsWorldRef.current.filter(r => r.id.startsWith('cal-'))
         liveReadoutRef.current = null
         lastReadoutKeyRef.current = ''
-        onReadoutsRef.current?.([])
+        if (!readoutsWorldRef.current.length) onReadoutsRef.current?.([])
     }, [])
 
     // Cancel in-progress measurement
@@ -1255,14 +1272,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
         const line = createMeasurementLine([p1, p2], tokenHex(VP.measure))
         const mid = p1.clone().add(p2).multiplyScalar(0.5)
-        readoutsWorldRef.current.push({ id: `d${Date.now()}`, kind: 'distance', pos: mid.clone(), anchor: mid.clone(), metres: dist })
+        const readoutId = `d${Date.now()}`
+        readoutsWorldRef.current.push({ id: readoutId, kind: 'distance', pos: mid.clone(), anchor: mid.clone(), metres: dist,
+                                        a: p1.clone(), b: p2.clone(), calibratable: true })
         liveReadoutRef.current = null
 
         group.add(line)
 
         const measurement: Measurement = {
             type: 'distance',
-            objects: [...pendingMarkersRef.current, line]
+            objects: [...pendingMarkersRef.current, line],
+            id: readoutId,
         }
         measurementsRef.current.push(measurement)
 
@@ -2429,6 +2449,47 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             mesh.userData.userObb = visible
             mesh.visible = visible || selectedSegKeyRef.current === key
         },
+        getDistance: (id: string) => {
+            const r = readoutsWorldRef.current.find(x => x.id === id)
+            if (!r || !r.a || !r.b || r.metres == null) return null
+            return { a: r.a.toArray(), b: r.b.toArray(), metres: r.metres }
+        },
+        removeDistance: (id: string) => {
+            const group = measureGroupRef.current
+            const m = measurementsRef.current.find(x => x.id === id)
+            if (m && group) {
+                for (const o of m.objects) {
+                    group.remove(o)
+                    const mesh = o as THREE.Mesh
+                    if (mesh.geometry) mesh.geometry.dispose()
+                    if (mesh.material) (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).forEach(x => x.dispose())
+                }
+                measurementsRef.current = measurementsRef.current.filter(x => x !== m)
+            }
+            readoutsWorldRef.current = readoutsWorldRef.current.filter(x => x.id !== id)
+            lastReadoutKeyRef.current = ''
+        },
+        setCalibrationMarks: (marks: CalibrationMark[]) => {
+            const group = calibGroupRef.current
+            if (!group) return
+            while (group.children.length > 0) {
+                const child = group.children[0] as THREE.Mesh
+                group.remove(child)
+                if (child.geometry) child.geometry.dispose()
+                if (child.material) (Array.isArray(child.material) ? child.material : [child.material]).forEach(x => x.dispose())
+            }
+            readoutsWorldRef.current = readoutsWorldRef.current.filter(r => !r.id.startsWith('cal-'))
+            for (const m of marks) {
+                const a = new THREE.Vector3().fromArray(m.a), b = new THREE.Vector3().fromArray(m.b)
+                // a gauge calibrates (the brand's own colour); a test only measures the error
+                const col = tokenHex(m.role === 'gauge' ? VP.calibration : VP.angle)
+                group.add(createMarker(a, col), createMarker(b, col), createMeasurementLine([a, b], col))
+                const mid = a.clone().add(b).multiplyScalar(0.5)
+                readoutsWorldRef.current.push({ id: `cal-${m.id}`, kind: 'distance', pos: mid.clone(), anchor: mid.clone(),
+                                                metres: m.metres, tag: m.id, cal: m.role })
+            }
+            lastReadoutKeyRef.current = ''
+        },
         setAssistantObjects: (objects: SceneObject[]) => {
             assistantVizRef.current?.setObjects(objects)
         },
@@ -3499,6 +3560,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         scene.add(measureGroup)
         measureGroupRef.current = measureGroup
 
+        // the scan's stored calibration measurements (kept through "clear measurements")
+        const calibGroup = new THREE.Group()
+        calibGroup.name = 'calibrationGroup'
+        scene.add(calibGroup)
+        calibGroupRef.current = calibGroup
+
         // Immersive assistant overlay (animated measurements + evaluation volumes)
         const assistantViz = new AssistantViz()
         scene.add(assistantViz.group)
@@ -3677,7 +3744,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     v.copy(r.pos).project(camera)
                     const x = (v.x * 0.5 + 0.5) * w, y = (-v.y * 0.5 + 0.5) * h, visible = v.z < 1 && x >= 0 && x <= w && y >= 0 && y <= h
                     v.copy(r.anchor).project(camera)
-                    return { id: r.id, kind: r.kind, tag: r.tag, x: Math.round(x), y: Math.round(y), ax: Math.round((v.x * 0.5 + 0.5) * w), ay: Math.round((-v.y * 0.5 + 0.5) * h), metres: r.metres, degrees: r.degrees, visible }
+                    return { id: r.id, kind: r.kind, tag: r.tag, x: Math.round(x), y: Math.round(y), ax: Math.round((v.x * 0.5 + 0.5) * w), ay: Math.round((-v.y * 0.5 + 0.5) * h), metres: r.metres, degrees: r.degrees, visible,
+                             calibratable: r.calibratable, cal: r.cal }
                 })
                 const key = out.map(r => `${r.id}:${r.x}:${r.y}:${r.visible ? 1 : 0}`).join('|')
                 // during the flythrough the readouts would re-render the app every frame

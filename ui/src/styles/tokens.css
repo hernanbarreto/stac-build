@@ -136,6 +136,7 @@
   --vp-hover: #283041;
   --vp-marker: #4fd1ff;
   --vp-angle: #f5b041;
+  --vp-calibration: #3fb950;      /* a stored calibration measurement that calibrates (gauge) */
   --vp-section-box: #4fd1ff;
   --vp-erase-mark: #f85149;
   --vp-erase-box: #f85149;

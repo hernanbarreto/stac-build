@@ -59,6 +59,7 @@ export const VP = {
   measure: '--measure',
   marker: '--vp-marker',
   angle: '--vp-angle',
+  calibration: '--vp-calibration',
   sectionBox: '--vp-section-box',
   eraseMark: '--vp-erase-mark',
   eraseBox: '--vp-erase-box',

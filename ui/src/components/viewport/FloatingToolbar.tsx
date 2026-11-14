@@ -14,7 +14,7 @@ import { useState, type ReactNode } from 'react'
 import {
   Axis3D, Box, Brush, Camera, Check, Circle, Eraser, Grid3X3, Home, Maximize, Move, Package, Palette,
   RotateCcw, Ruler, Scale, Scissors, SlidersHorizontal, Square, Thermometer, Trash2, TriangleRight, Undo2, Unlock, X, ArrowDownToLine, AlignVerticalJustifyEnd, ArrowUpToLine, AlignHorizontalJustifyCenter, AlignVerticalJustifyCenter, Loader2,
-  Pin, Pentagon,
+  Pin, Pentagon, Scaling,
 } from 'lucide-react'
 import { IconButton } from '../ui/IconButton'
 import { Button } from '../ui/Button'
@@ -119,6 +119,8 @@ interface FloatingToolbarProps {
   /** reference distance / plane on keyframe images (evaluation battery): modal dialogs, not viewport tools */
   onReferenceDistance: () => void
   onReferencePlane: () => void
+  /** the scan's calibration measurements taken on the 3D model (USER 2026-11-13) */
+  onCalibration: () => void
   onAddObject: () => void
   onResetSection: () => void
   brush: BrushState
@@ -132,7 +134,7 @@ interface FloatingToolbarProps {
 
 type Popover = 'brush' | 'display' | 'color' | null
 
-export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeasurements, onReferenceDistance, onReferencePlane, onAddObject, onResetSection, brush, display, view, color, compare, placed, sabanaVisible }: FloatingToolbarProps) {
+export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeasurements, onReferenceDistance, onReferencePlane, onCalibration, onAddObject, onResetSection, brush, display, view, color, compare, placed, sabanaVisible }: FloatingToolbarProps) {
   const t = useT()
   const fmt = useFmt()
   const [popover, setPopover] = useState<Popover>(null)
@@ -165,6 +167,7 @@ export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeas
               <IconButton size="lg" label={t('toolbar.clearMeasurements')} icon={<Trash2 aria-hidden />} onClick={onClearMeasurements} />
               <IconButton size="lg" tone="measure" label={t('toolbar.referenceDistance')} icon={<Pin aria-hidden />} onClick={onReferenceDistance} />
               <IconButton size="lg" tone="measure" label={t('toolbar.referencePlane')} icon={<Pentagon aria-hidden />} onClick={onReferencePlane} />
+              <IconButton size="lg" tone="measure" label={t('toolbar.calibration')} icon={<Scaling aria-hidden />} onClick={onCalibration} />
             </Group>
             <Sep />
             <Group>

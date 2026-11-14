@@ -68,6 +68,7 @@ import { ObjectLibraryDialog } from './features/ObjectLibraryDialog'
 import { AutosegmentDialog, type AutosegmentState, type AutosegmentStages } from './features/AutosegmentDialog'
 import { GenreconDialog } from './features/GenreconDialog'
 import { ReferenceDialog, type ReferenceMode } from './features/ReferenceDialog'
+import { CalibrationDialog, type CalibrationDraft, type CalMeasurement, type CalSummary } from './features/CalibrationDialog'
 import { EvaluationPanel } from './features/EvaluationPanel'
 import { PhysicsPanel } from './features/PhysicsPanel'
 import { ConsolePanel, JobsPanel, PropertiesPanel } from './features/DockPanels'
@@ -141,6 +142,11 @@ function App() {
   const [activeTool, setActiveTool] = useState<Tool>('navigate')
   // reference distance / plane dialog of the evaluation battery (keyframe images); null = closed
   const [referenceDialog, setReferenceDialog] = useState<ReferenceMode | null>(null)
+  // CALIBRATION ON THE 3D MODEL (USER 2026-11-13: "para calibrar debe hacerse tomando mediciones sobre el modelo 3d
+  // no sobre las imagenes … se debe poder seleccionar que una medicion es de calibracion y deben quedar almacenadas"):
+  // the pin of a measured distance opens the window with that measurement as its draft
+  const [calibrationOpen, setCalibrationOpen] = useState(false)
+  const [calibrationDraft, setCalibrationDraft] = useState<CalibrationDraft | null>(null)
   const [eraseRadius, setEraseRadius] = useState(0.15)
   const [eraseMarks, setEraseMarks] = useState(0)
   const [eraseTarget, setEraseTarget] = useState<string>('')
@@ -1647,6 +1653,23 @@ function App() {
   }
   const [cursor, setCursor] = useState<{ x: number; y: number; z: number } | null>(null)
   const [readouts, setReadouts] = useState<ReadoutAnchor[]>([])
+  // the scan's stored calibration measurements, drawn on the model: the ones of the CURRENT geometry epoch (a stale
+  // one was picked on another cloud: its points are no longer on this one)
+  const drawCalibrationMarks = useCallback((measurements: CalMeasurement[], summary: CalSummary) => {
+    const stale = new Set(summary.rows.filter(r => r.stale).map(r => r.id))
+    viewportRef.current?.setCalibrationMarks(measurements.filter(m => !stale.has(m.id))
+      .map(m => ({ id: m.id, a: m.a, b: m.b, metres: m.measured_m, role: m.role })))
+  }, [])
+  useEffect(() => {
+    viewportRef.current?.setCalibrationMarks([])
+    if (!activeSession || !cloudEverShown) return
+    let cancelled = false
+    fetch(`/api/calibration/${encodeURIComponent(activeSession)}${activeScanTab ? `?scan_key=${encodeURIComponent(activeScanTab)}` : ''}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (!cancelled && d?.summary) drawCalibrationMarks(d.document?.measurements ?? [], d.summary) })
+      .catch(() => { /* a scan with no calibration yet */ })
+    return () => { cancelled = true }
+  }, [activeSession, activeScanTab, cloudEverShown, drawCalibrationMarks])
   const [metersPerPixel, setMetersPerPixel] = useState<number | null>(null)
   const [certifyState, setCertifyState] = useState<any>(null)
   const [hasWitness, setHasWitness] = useState(false)
@@ -2288,6 +2311,7 @@ function App() {
               activeTool={activeTool} onTool={setActiveTool} onResetCamera={() => viewportRef.current?.resetCamera()}
               onClearMeasurements={() => viewportRef.current?.clearMeasurements()} onAddObject={openObjectLibrary}
               onReferenceDistance={() => setReferenceDialog('distance')} onReferencePlane={() => setReferenceDialog('plane')}
+              onCalibration={() => { setCalibrationDraft(null); setCalibrationOpen(true) }}
               onResetSection={() => viewportRef.current?.resetSectionBox()} sabanaVisible={sabanaVisible}
               brush={{
                 shape: eraseShape, onShape: setEraseShape, radiusM: eraseRadius, onRadiusM: setEraseRadius, yawDeg: eraseYawDeg, onYawDeg: setEraseYawDeg,
@@ -2359,6 +2383,8 @@ function App() {
               statusFractions={certifyState?.report_metrics?.witnesses?.status_fraction ?? null}
               deviationRange={sabanaVisible && sabanaMetrics ? { maxMm: (sabanaMetrics.tolerance_mm || 15) * 3, toleranceMm: sabanaMetrics.tolerance_mm || 15 } : null}
               showEdges={showCertifyKit} readouts={readouts}
+              onCalibrate={id => { const d = viewportRef.current?.getDistance(id); if (d) { setCalibrationDraft({ readoutId: id, ...d }); setCalibrationOpen(true) } }}
+              onOpenCalibration={() => { setCalibrationDraft(null); setCalibrationOpen(true) }}
               banner={pipelineActiveHere && (viewerHasCloud || sessionHasPublishedCloud) && currentStage ? (
                 <Banner glass compact tone="brand" title={t('pipeline.runningBanner', { stage: currentStage.label })} action={<Button size="sm" variant="ghost" onClick={handlePipelineCancel}>{t('common.cancel')}</Button>}>
                   {currentStage.message} {fmt.percent(currentStage.pct / 100)}
@@ -2507,6 +2533,18 @@ function App() {
       {activeSession && (
         <ReferenceDialog open={referenceDialog !== null} sessionId={activeSession} scanKey={activeScanTab} initialMode={referenceDialog ?? 'distance'}
           onClose={() => setReferenceDialog(null)} />
+      )}
+      {activeSession && (
+        <CalibrationDialog open={calibrationOpen} sessionId={activeSession} scanKey={activeScanTab} draft={calibrationDraft}
+          otherScans={projectScans.filter((sc: any) => sc.key !== activeScanTab && sc.kind !== 'fused').map((sc: any) => ({ key: sc.key, label: sc.label || sc.key }))}
+          onClose={() => { setCalibrationOpen(false); setCalibrationDraft(null) }}
+          onMeasure={() => { setCalibrationOpen(false); setCalibrationDraft(null); setActiveTool('measure-distance'); setStatusMessage(tt('calibration.measureStatus')) }}
+          onChanged={drawCalibrationMarks}
+          onStored={id => { viewportRef.current?.removeDistance(id); setCalibrationDraft(null) }}
+          onFrame={m => {
+            const pad = Math.max(0.3, m.measured_m * 0.5)
+            viewportRef.current?.frameBox(m.a.map((v, k) => Math.min(v, m.b[k]) - pad), m.a.map((v, k) => Math.max(v, m.b[k]) + pad))
+          }} />
       )}
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />

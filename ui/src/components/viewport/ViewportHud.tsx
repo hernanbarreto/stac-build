@@ -10,7 +10,7 @@
  * (that is the only Three.js work involved); this component only draws.
  */
 import type { ReactNode } from 'react'
-import { ArrowDown } from 'lucide-react'
+import { ArrowDown, Pin } from 'lucide-react'
 import type * as THREE from 'three'
 import { Legend } from '../ui/Legend'
 import { Tooltip } from '../ui/Tooltip'
@@ -34,6 +34,10 @@ export interface ReadoutAnchor {
   metres?: number
   degrees?: number
   visible: boolean
+  /** a distance the user measured on the model: it can be marked as a calibration measurement */
+  calibratable?: boolean
+  /** a stored calibration measurement of the scan (its role) */
+  cal?: 'gauge' | 'test'
 }
 
 interface ViewportHudProps {
@@ -52,12 +56,17 @@ interface ViewportHudProps {
   deviationRange?: { maxMm: number; toleranceMm: number } | null
   showEdges?: boolean
   readouts: ReadoutAnchor[]
+  /** the pin of a measured distance was pressed: mark it as a calibration measurement
+   *  (USER 2026-11-13: "se debe poder seleccionar que una medicion es de calibracion") */
+  onCalibrate?: (readoutId: string) => void
+  /** a stored calibration measurement's readout was pressed (open it in the calibration window) */
+  onOpenCalibration?: (calibrationId: string) => void
   banner?: ReactNode
 }
 
 const SCALE_STEPS_M = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100]
 
-export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, metersPerPixel, gridLabel, colorMode, mvThreshold, statusFractions, deviationRange, readouts, banner }: ViewportHudProps) {
+export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, metersPerPixel, gridLabel, colorMode, mvThreshold, statusFractions, deviationRange, readouts, onCalibrate, onOpenCalibration, banner }: ViewportHudProps) {
   const t = useT()
   const fmt = useFmt()
 
@@ -120,11 +129,19 @@ export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, 
       {readouts.filter(r => r.visible).map(r => {
         const len = r.metres != null ? fmt.length(r.metres) : null
         return (
-          <div key={r.id} className="stac-hud__readout" style={{ '--rx': `${r.x}px`, '--ry': `${r.y}px` } as React.CSSProperties}>
+          <div key={r.id} className={`stac-hud__readout ${r.cal ? `stac-hud__readout--cal stac-hud__readout--cal-${r.cal}` : ''}`.trim()} style={{ '--rx': `${r.x}px`, '--ry': `${r.y}px` } as React.CSSProperties}>
             <span className="stac-readout stac-readout--compact stac-readout--measure">
               {r.tag && <span className="stac-readout__tag">{r.tag}</span>}
               {r.kind === 'distance' && len && <><span className="stac-readout__value">{len.value}</span><span className="stac-readout__unit">{len.unit}</span></>}
               {r.kind === 'angle' && r.degrees != null && <><span className="stac-readout__value">{fmt.number(r.degrees, 1)}</span><span className="stac-readout__unit">°</span></>}
+              {r.calibratable && onCalibrate && (
+                <button type="button" className="stac-hud__calibrate" title={t('calibration.markHint')} aria-label={t('calibration.markHint')}
+                  onClick={e => { e.stopPropagation(); onCalibrate(r.id) }}><Pin aria-hidden /></button>
+              )}
+              {r.cal && onOpenCalibration && (
+                <button type="button" className="stac-hud__calibrate" title={t('calibration.open')} aria-label={t('calibration.open')}
+                  onClick={e => { e.stopPropagation(); onOpenCalibration(r.id.replace(/^cal-/, '')) }}><Pin aria-hidden /></button>
+              )}
             </span>
           </div>
         )

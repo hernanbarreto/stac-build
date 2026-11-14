@@ -4931,6 +4931,12 @@ from evaluation import api as evaluation_api
 evaluation_api.configure(resolve_ctx=_ctx, audit_log=_audit_log)
 app.include_router(evaluation_api.router)
 
+# ── calibration measurements taken on the 3D model (USER 2026-11-13: "para calibrar debe hacerse
+#    tomando mediciones sobre el modelo 3d … deben quedar almacenadas"): per scan, calibration3d.py ──
+import calibration_api
+calibration_api.configure(resolve_ctx=_ctx, audit_log=_audit_log)
+app.include_router(calibration_api.router)
+
 
 @app.get("/api/autosegment/{session_id}")
 async def autosegment_state(session_id: str, scan: Optional[str] = None):
