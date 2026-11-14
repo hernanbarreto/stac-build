@@ -887,6 +887,9 @@ semantic:
     history_turns: 6            # BOUND (context): the earlier turns of the conversation a question
                                 # carries (3 questions + 3 answers), so "y el otro?" has a referent;
                                 # 0 = every question alone, as before 2026-11-13
+    max_tokens: 512             # BOUND (work): the tokens of ONE call of the chat's loop — a tool call
+                                # or a brief answer never needs more; the engine's 2048 let a forced
+                                # tool call that did not close run 97 s (2026-11-13)
     tools_device: cuda          # numpy | cpu | cuda — where the chat's measurements over the points
                                 # run (USER 2026-11-13: "el vlm y todas sus herramientas deben
                                 # funcionar en GPU"). numpy = the path of record (scipy's k-d tree,

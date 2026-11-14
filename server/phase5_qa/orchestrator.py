@@ -52,10 +52,13 @@ SPATIAL AWARENESS:
   ladder has a base and a top. Use axis="vertical" for free heights
   (e.g. floor → ceiling upper part). get_extent tells where an object's lower
   and upper parts are.
-- FREE HEIGHT / headroom / clear height under something (a ceiling, a beam, a duct) over the
-  floor → get_height_profile(id=<the upper object>, floor_id=<the floor>): min_clearance_m and
-  the clearance at every station. The floor and the ceiling of a room are usually the LARGEST
-  instances with that label (list_objects(label) gives each object's points).
+- CLEARANCE / gap / separation ("holgura", "separación", "distancia libre") between TWO objects
+  → get_clearance(id1, id2).
+- FREE HEIGHT / headroom ("altura libre", "gálibo") UNDER something (a ceiling, a beam, a duct)
+  over the floor → get_height_profile(id=<the upper object>, floor_id=<the floor>):
+  min_clearance_m and the clearance at every station.
+- "THE floor", "the ceiling", "the largest wall": pass the LABEL as the id ("floor", "wall") —
+  the tool takes that label's largest object and tells you which one it took.
 - "What session/scene is this?" → get_session_info. "What are we looking at?"
   → describe_scene (the VLM looks at the actual scan frames; interpretation,
   vlm_proposed). Store durable conclusions with remember_note; check
@@ -96,6 +99,9 @@ RULES:
 - Descriptions from describe_scene / notes are vlm_proposed context, never
   measurements.
 - Answer in the SAME LANGUAGE as the question.
+- BE BRIEF (USER 2026-11-13: the chat "tarda muchisimo en contestar"; every word is generated at the engine's
+  pace): one or two sentences — what was asked, with its figure and unit and the objects as label#id. No
+  introduction, no explanation of what a tool does, no closing question, no offer of further help.
 """
 
 
@@ -279,9 +285,20 @@ class SpatialQA:
         t_prompt = time.time() - t0
         tools = self.tools.openai_schemas()
         impls = self.tools.impls(remote=self._remote if self.tools_device == "cuda" else None)
+        # A TOOL CALL COMES FIRST, always (2026-11-13): left to choose, the model answered "only the
+        # extinguishers are shown" having shown nothing, and "1.14 m" having measured nothing — an
+        # answer is preceded by at least one call of the tool layer, then checked
+        cap = chat_config()["max_tokens"]         # a call or a brief answer never needs more
         out = client.run_tool_loop(
             messages, tools=tools, tool_impls=impls, max_iterations=max_iterations,
-            consumer="phase5.qa")
+            max_tokens=cap, consumer="phase5.qa", first_tool_choice="required")
+        if not (out["answer"] or "").strip() and not out["tool_trace"]:
+            # the required call ran to the token bound without closing (seen 2026-11-13: a list of
+            # 56 ids written under the forced format) — asked again, free to choose
+            print("[SpatialQA] the required tool call did not close within the bound — asked again")
+            out = client.run_tool_loop(
+                messages, tools=tools, tool_impls=impls, max_iterations=max_iterations,
+                max_tokens=cap, consumer="phase5.qa.retry")
         # PROVENANCE CHECK (phase5_qa/provenance.py): a figure no tool returned in this turn,
         # or a tool cited and never called, sends the answer back ONCE with a tool call
         # required; what still fails is declared with the answer, never hidden
@@ -299,13 +316,13 @@ class SpatialQA:
             try:
                 again = client.run_tool_loop(
                     convo, tools=tools, tool_impls=impls, max_iterations=max_iterations,
-                    consumer="phase5.qa.provenance", first_tool_choice="required")
+                    max_tokens=cap, consumer="phase5.qa.provenance", first_tool_choice="required")
             except Exception as e:  # noqa: BLE001 — an engine without tool_choice=required
                 print(f"[SpatialQA] provenance retry with a required tool call failed ({e}); "
                       f"asked again with tool_choice auto")
                 again = client.run_tool_loop(
                     convo, tools=tools, tool_impls=impls, max_iterations=max_iterations,
-                    consumer="phase5.qa.provenance")
+                    max_tokens=cap, consumer="phase5.qa.provenance")
             for e in again["tool_trace"]:
                 e["iteration"] = int(e.get("iteration", 0)) + int(out["iterations"])
             out = {"answer": again["answer"], "stopped": again["stopped"],

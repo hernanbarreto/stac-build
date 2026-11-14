@@ -113,7 +113,7 @@ def chat_config() -> dict[str, Any]:
     if not isinstance(chat, dict):
         raise RuntimeError("config.yaml: semantic.chat is missing")
     out = {}
-    for k, lo in (("list_limit", 1), ("history_turns", 0)):
+    for k, lo in (("list_limit", 1), ("history_turns", 0), ("max_tokens", 1)):
         v = chat.get(k)
         if isinstance(v, bool) or not isinstance(v, int) or v < lo:
             raise RuntimeError(f"config.yaml: semantic.chat.{k} is missing or not an integer >= {lo}")
@@ -160,6 +160,10 @@ POINT_TOOLS = frozenset({
     "get_clearance", "measure_between", "get_extent", "fits_through", "get_plumb", "get_level",
     "get_height_profile", "get_flatness_report", "define_volume", "measure_volume",
     "evaluate_volume", "objects_in_volume", "fits_in_volume"})
+
+
+# the arguments of the tools that name ONE object
+ID_ARGS = ("id", "id1", "id2", "floor_id", "opening_id", "anchor_id", "from_id", "to_id")
 
 
 class SpatialTools:
@@ -400,6 +404,11 @@ class SpatialTools:
             res["label"] = label
             res["matched_labels"] = sorted({i["label"] for i in insts})
         return res
+
+    def small_talk(self) -> dict:
+        """The tool of a turn that needs none (every answer is preceded by a tool call): a
+        greeting, thanks, a question that is not about the scene or the viewer."""
+        return {"ok": True, "note": "nothing was measured and nothing changed in the viewer"}
 
     def get_object(self, id: int) -> dict:
         """One object in one call: label, position, size and vertical extent."""
@@ -1389,28 +1398,42 @@ class SpatialTools:
                 "done": "the object is selected: its OBB and dimensions are shown and the "
                         "camera travels to it"}
 
-    def show_objects(self, ids: list, visible: bool = True) -> dict:
-        ok, bad = self._known_ids(ids)
-        if not ok:
-            return _insufficient(f"no known object among {ids}")
-        return {"viewer": {"action": "visibility", "ids": ok, "visible": bool(visible)},
-                "labels": [self._label_of(i) for i in ok], "unknown_ids": bad}
+    def _ids_or_label(self, ids, label) -> tuple[list[int], list]:
+        """The objects a viewer command is about: the ids listed, plus EVERY object of a label
+        ("show only the doors" is show_only(label="door") — no list of ids to write)."""
+        ok, bad = self._known_ids(ids if ids is not None else [])
+        if label:
+            for i in self._match_label(label):
+                if int(i["instance_id"]) not in ok:
+                    ok.append(int(i["instance_id"]))
+        return ok, bad
 
-    def show_only(self, ids: list) -> dict:
-        ok, bad = self._known_ids(ids)
+    def show_objects(self, ids: list | None = None, visible: bool = True,
+                     label: str | None = None) -> dict:
+        ok, bad = self._ids_or_label(ids, label)
         if not ok:
-            return _insufficient(f"no known object among {ids}")
+            return _insufficient(f"no known object among {ids if ids else label}")
+        return {"viewer": {"action": "visibility", "ids": ok, "visible": bool(visible)},
+                "count": len(ok), "labels": sorted({self._label_of(i) for i in ok}),
+                "unknown_ids": bad}
+
+    def show_only(self, ids: list | None = None, label: str | None = None) -> dict:
+        ok, bad = self._ids_or_label(ids, label)
+        if not ok:
+            return _insufficient(f"no known object among {ids if ids else label}")
         return {"viewer": {"action": "show_only", "ids": ok},
-                "labels": [self._label_of(i) for i in ok], "unknown_ids": bad}
+                "count": len(ok), "labels": sorted({self._label_of(i) for i in ok}),
+                "unknown_ids": bad}
 
     def show_all_objects(self) -> dict:
         return {"viewer": {"action": "show_all"}}
 
-    def set_obb(self, ids: list, on: bool = True) -> dict:
-        ok, bad = self._known_ids(ids)
+    def set_obb(self, ids: list | None = None, on: bool = True, label: str | None = None) -> dict:
+        ok, bad = self._ids_or_label(ids, label)
         if not ok:
-            return _insufficient(f"no known object among {ids}")
-        return {"viewer": {"action": "obb", "ids": ok, "on": bool(on)}, "unknown_ids": bad}
+            return _insufficient(f"no known object among {ids if ids else label}")
+        return {"viewer": {"action": "obb", "ids": ok, "on": bool(on)}, "count": len(ok),
+                "unknown_ids": bad}
 
     def set_view(self, view: str) -> dict:
         v = str(view or "").lower()
@@ -1537,12 +1560,50 @@ class SpatialTools:
         if remote is not None:
             for name in POINT_TOOLS:
                 raw[name] = (lambda _n: (lambda **kw: remote(_n, kw)))(name)
-        return {name: _wrap(fn) for name, fn in raw.items()}
+
+        def _with_labels(fn):
+            # "the floor", "the largest wall": the model may pass a LABEL where an id is asked —
+            # the tool layer takes that label's largest object and says which one it took
+            def _inner(*a, **k):
+                took = {}
+                for key in ID_ARGS:
+                    if key in k:
+                        k[key], used = self.resolve_id(k[key])
+                        if used:
+                            took[key] = used
+                res = fn(*a, **k)
+                if took and isinstance(res, dict):
+                    res["objects_taken_by_label"] = took
+                return res
+            return _inner
+
+        return {name: _wrap(_with_labels(fn)) for name, fn in raw.items()}
+
+    def resolve_id(self, value):
+        """(id, None) for an id — an integer or its digits — and (the id of the label's LARGEST
+        object, {"label", "id"}) for a label; the value itself when nothing matches (the tool
+        then says the object does not exist)."""
+        if isinstance(value, bool) or value is None:
+            return value, None
+        if isinstance(value, (int, float)):
+            return int(value), None
+        text = str(value).strip()
+        m = re.search(r"#\s*(\d+)\s*$", text)          # "sign#797", "#797": the id is the number
+        if m:
+            return int(m.group(1)), None
+        if text.isdigit():
+            return int(text), None
+        hit = self._match_label(text)
+        if not hit:
+            return value, None
+        n_pts = self.store.list_point_counts()
+        best = min(hit, key=lambda i: (-n_pts.get(int(i["instance_id"]), 0), int(i["instance_id"])))
+        return int(best["instance_id"]), {"label": best["label"], "id": int(best["instance_id"])}
 
     def _impls_raw(self) -> dict:
         return {
             "list_objects": self.list_objects, "count_objects": self.count_objects,
-            "get_object": self.get_object,
+            "get_object": self.get_object, "small_talk": self.small_talk,
             "get_position": self.get_position, "get_object_size": self.get_object_size,
             "get_object_volume": self.get_object_volume, "get_distance": self.get_distance,
             "get_my_position": self.get_my_position,
@@ -1581,7 +1642,9 @@ class SpatialTools:
                 "name": name, "description": desc,
                 "parameters": {"type": "object", "properties": props or {},
                                "required": required or []}}}
-        idp = {"type": "integer", "description": "object id from list_objects"}
+        idp = {"type": ["integer", "string"],
+               "description": "an object id — or a label ('floor', 'wall'): that label's LARGEST "
+                              "object is taken, which is what 'the floor' / 'the largest wall' mean"}
         arr = {"type": "array", "items": {"type": "number"}}
         return [
             fn("list_objects",
@@ -1594,6 +1657,9 @@ class SpatialTools:
                "('how many signs' -> label='sign'). With no label: the total and the count of "
                "every label.",
                {"label": {"type": "string", "description": "the kind of object, e.g. 'sign'"}}),
+            fn("small_talk",
+               "ONLY for a greeting, thanks, or a question that is NOT about the scene, its objects "
+               "or the viewer: nothing is measured and nothing changes. Never for anything else."),
             fn("get_object",
                "One object by id in one call: label, position (m), size w/h/d (m). Use it to "
                "check that an id exists and what it is.",
@@ -1714,15 +1780,24 @@ class SpatialTools:
                "VIEWER: select ONE object — its OBB and dimensions light up and the camera "
                "travels to it. Call it whenever the answer is about a specific object.",
                {"id": idp}, ["id"]),
-            fn("show_objects", "VIEWER: show (visible=true) or hide (false) objects.",
+            fn("show_objects",
+               "VIEWER: show (visible=true) or hide (false) objects. For EVERY object of a kind "
+               "pass label ('door') instead of listing ids.",
                {"ids": {"type": "array", "items": {"type": "integer"}},
-                "visible": {"type": "boolean"}}, ["ids"]),
-            fn("show_only", "VIEWER: show ONLY these objects, hide every other one.",
-               {"ids": {"type": "array", "items": {"type": "integer"}}}, ["ids"]),
+                "label": {"type": "string", "description": "every object of this label"},
+                "visible": {"type": "boolean"}}),
+            fn("show_only",
+               "VIEWER: show ONLY these objects, hide every other one. For EVERY object of a kind "
+               "pass label ('door') instead of listing ids.",
+               {"ids": {"type": "array", "items": {"type": "integer"}},
+                "label": {"type": "string", "description": "every object of this label"}}),
             fn("show_all_objects", "VIEWER: show every object again."),
-            fn("set_obb", "VIEWER: turn the OBB (bounding box + dimensions) of objects on/off.",
-               {"ids": {"type": "array", "items": {"type": "integer"}}, "on": {"type": "boolean"}},
-               ["ids"]),
+            fn("set_obb",
+               "VIEWER: turn the OBB (bounding box + dimensions) of objects on/off. For EVERY "
+               "object of a kind pass label instead of listing ids.",
+               {"ids": {"type": "array", "items": {"type": "integer"}},
+                "label": {"type": "string", "description": "every object of this label"},
+                "on": {"type": "boolean"}}),
             fn("set_view", "VIEWER: camera to a standard view of the scene.",
                {"view": {"type": "string", "enum": ["top", "front", "back", "left", "right",
                                                      "bottom", "iso", "home"]}}, ["view"]),

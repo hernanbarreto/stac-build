@@ -125,6 +125,25 @@ def test_the_chat_answers_about_the_scan_asked(tmp_path, monkeypatch):
     assert api._resolve_store({}) is None
 
 
+def test_a_label_or_a_written_reference_stands_for_an_id(tmp_path):
+    sp = _store(tmp_path)
+    store = InstanceStore(sp)
+    try:
+        t = SpatialTools(store, device="numpy")
+        assert t.resolve_id(7) == (7, None) and t.resolve_id("7") == (7, None)
+        assert t.resolve_id("sign#8") == (8, None) and t.resolve_id("#21") == (21, None)
+        # a label: its largest object (all have 200 points here: the lowest id among equals)
+        assert t.resolve_id("wall") == (2, {"label": "wall", "id": 2})
+        assert t.resolve_id("fire extinguisher") == (6, {"label": "fire_extinguisher", "id": 6})
+        assert t.resolve_id("crane") == ("crane", None)
+        out = t.impls()["get_distance"](id1="floor", id2="sign#7")
+        assert out["objects_taken_by_label"] == {"id1": {"label": "floor", "id": 1}}
+        assert "distance_m" in out
+        assert t.impls()["small_talk"]()["ok"] is True
+    finally:
+        store.close()
+
+
 # ── the provenance check ────────────────────────────────────────────────────────────────────
 NAMES = ["measure_between", "get_distance", "count_objects", "get_object", "travel"]
 
@@ -195,7 +214,7 @@ def test_an_invented_figure_sends_the_answer_back_with_a_tool_required(tmp_path,
     finally:
         qa.close()
     assert res["provenance"] == {"ok": True, "figures": [], "tools": [], "retried": True}
-    assert [c["first_tool_choice"] for c in fake.calls] == [None, "required"]
+    assert [c["first_tool_choice"] for c in fake.calls] == ["required", "required"]
     assert [e["tool"] for e in res["tool_trace"]] == ["get_distance"]
     assert "PROVENANCE CHECK" in fake.calls[1]["messages"][-1].text
     assert [r["id"] for r in res["references"]] == [6, 7]
