@@ -127,6 +127,40 @@ def created_by_projection(enriched_by_id: Dict[int, dict], listed: Sequence[dict
     return out
 
 
+def from_database(listed: Sequence[dict], hidden: Sequence[dict], enriched_by_id: Dict[int, dict],
+                  absorbed: Dict[int, Dict[str, Any]], database: Optional[Dict[int, dict]]):
+    """(listed, hidden) with THE DATABASE as the list (USER 2026-11-13: "la lista debe ser tomada de
+    la base de datos"): an object is listed when the instance store holds it, with the store's label
+    and point count; what the files still name and the store does not is hidden as
+    ``not_in_database``; an object the store holds and no file names is listed from the store alone.
+    The one exception is a mask with NO record anywhere — just propagated in the Segmentation
+    Manager, not projected yet: it stays listed, as before, or it could not be seen until projected.
+    ``database`` None (a scan with no store): the lists come back as they were."""
+    if database is None:
+        return list(listed), list(hidden)
+    out: List[dict] = []
+    hid: List[dict] = list(hidden)
+    seen = set()
+    for inst in listed:
+        iid = instance_id_of(inst)
+        if iid is not None and int(iid) in database:
+            rec = dict(inst)
+            rec["label"] = database[int(iid)]["label"]
+            rec["total_points"] = database[int(iid)]["points"]
+            rec.setdefault("instance_id", int(iid))
+            out.append(rec)
+            seen.add(int(iid))
+        elif iid is not None and (int(iid) in enriched_by_id or int(iid) in absorbed):
+            hid.append({**inst, "reason": "not_in_database"})
+        else:
+            out.append(dict(inst))                       # just propagated: no record anywhere
+    for iid in sorted(database):
+        if iid not in seen:
+            out.append({"instance_id": iid, "id": iid - 1, "label": database[iid]["label"],
+                        "total_points": database[iid]["points"], **enriched_by_id.get(iid, {})})
+    return out, hid
+
+
 def by_reason(hidden: Sequence[dict]) -> Dict[str, int]:
     counts: Dict[str, int] = {}
     for h in hidden:

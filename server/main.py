@@ -4003,6 +4003,19 @@ async def get_segmentation_instances(session_id: str):
         from segmentation.mask_fates import created_by_projection
         merged.extend(created_by_projection(enriched_by_id, merged, hidden))
 
+        # THE LIST IS THE DATABASE (USER 2026-11-13: "la lista debe ser tomada de la base de datos"):
+        # what the instance store holds is what is listed, with its label and its points — the list,
+        # the chat and the reports name the same objects by construction
+        from phase_r.instance_store import read_instances
+        from segmentation.mask_fates import from_database
+        try:
+            database = await asyncio.get_running_loop().run_in_executor(
+                None, read_instances, output_dir / "scene_r.db")
+        except Exception as _e:  # noqa: BLE001 — an unreadable store is said, the files' list stands
+            print(f"[Segments] the instance store could not be read ({_e}) — list from the files")
+            database = None
+        merged, hidden = from_database(merged, hidden, enriched_by_id, absorbed, database)
+
         from segmentation.republish import viewer_key_of
         code = viewer_key_of(output_dir)
         if code:
@@ -4047,6 +4060,7 @@ async def get_segmentation_instances(session_id: str):
 
         return {
             "instances": merged,
+            "source": "database" if database is not None else "files",
             "prompts": prompts,
             "resolution": resolution,
             # what the list is NOT showing, and why — the count the panel can

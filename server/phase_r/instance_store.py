@@ -194,6 +194,25 @@ def store_on_local_disk(final_path, keep_existing: bool):
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def read_instances(path) -> dict | None:
+    """{instance_id: {"label", "points"}} of the store at ``path``, READ-ONLY (no schema script, no
+    journal change, nothing written) — what the Instances list is taken from (USER 2026-11-13: "la
+    lista debe ser tomada de la base de datos"). ``points`` is the object's point count as its global
+    box records it. None when there is no store."""
+    path = Path(path)
+    if not path.exists():
+        return None
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        rows = con.execute(
+            "SELECT i.instance_id, i.label, o.n_points FROM instances i "
+            "LEFT JOIN instance_obb o ON o.instance_id = i.instance_id AND o.window_id = 'global' "
+            "ORDER BY i.instance_id").fetchall()
+    finally:
+        con.close()
+    return {int(r[0]): {"label": r[1], "points": int(r[2] or 0)} for r in rows}
+
+
 class InstanceStore:
     """SQLite-backed canonical instance store (one file per scene)."""
 
