@@ -44,6 +44,10 @@ export type FlythroughCommandId = 'flythrough.play_pause' | 'flythrough.step_fra
 export type CalibrationCommandId = 'calibration.save_distance' | 'calibration.save_plane' | 'calibration.toggle_role'
   | 'calibration.delete_measurement' | 'calibration.delete_plane' | 'calibration.set_mode' | 'calibration.apply'
 
+/** … the BIM model's tree, while its panel is open */
+export type BimCommandId = 'bim.load_ifc' | 'bim.delete_ifc' | 'bim.set_element_visible' | 'bim.select_element' | 'bim.set_element_opacity'
+  | 'bim.filter' | 'bim.ctx_set_transparency' | 'bim.ctx_hide' | 'bim.ctx_isolate' | 'bim.ctx_show_all'
+
 /** one command of an answer, as the server sends it */
 export interface UiAction {
   id: string
@@ -86,9 +90,27 @@ export function registerCommands<K extends UiCommandId>(executors: Executors<K>)
 
 export function isRegistered(id: string): boolean { return registry.has(id) }
 
+// THE WINDOW A COMMAND LIVES IN: the commands of a panel or a dialog are registered while it is
+// open. Asked for with it closed, STAC opens it first — the app says how, per area of the
+// catalogue (the id's first part) — and the command runs once the window has registered it.
+// An opener returns false when it cannot open now (no session, a window that needs a pick).
+const openers = new Map<string, () => boolean | void>()
+export function registerOpeners(byArea: Record<string, () => boolean | void>): () => void {
+  for (const [area, fn] of Object.entries(byArea)) openers.set(area, fn)
+  return () => { for (const [area, fn] of Object.entries(byArea)) if (openers.get(area) === fn) openers.delete(area) }
+}
+const OPEN_WAIT_MS = 2000
+async function opened(id: string): Promise<Entry | undefined> {
+  const open = openers.get(id.split('.')[0])
+  if (!open || open() === false) return undefined
+  const end = Date.now() + OPEN_WAIT_MS
+  while (!registry.has(id) && Date.now() < end) await new Promise(r => setTimeout(r, 40))
+  return registry.get(id)
+}
+
 /** Run one command. Never throws: a failure is an outcome. */
 export async function runCommand(id: string, args: Record<string, unknown>, step: 'run' | 'prepare' | 'confirmed' = 'run'): Promise<Outcome> {
-  const ex = registry.get(id)
+  const ex = registry.get(id) ?? await opened(id)
   // (every command of the catalogue has an executor — the compiler holds it; one that is not
   // registered NOW belongs to a window that is not open: the flythrough, a dialog)
   if (!ex) return { ok: false, reason: 'window_closed' }

@@ -14,7 +14,6 @@ commands:
 - id: bim.load_ifc
   kind: action
   runs_on: ui
-  status: manual
   model: 'Bring a BIM model into the scan on screen: an .ifc file picked by hand is uploaded to the server and drawn
     in the viewer over the cloud. For administrators and managers.'
   needs:
@@ -27,22 +26,24 @@ commands:
       - subí un IFC
       - traé el modelo BIM de la obra
       - sumá un archivo IFC
+      done: 'Elige el archivo .ifc en la ventana que se abrió: se sube y se dibuja sobre la nube.'
     en:
       title: Load an IFC model
       say:
       - upload an IFC
       - bring in the site's design model
       - attach an IFC file
+      done: 'Pick the .ifc file in the window that opened: it is uploaded and drawn over the cloud.'
     fr:
       title: Charger un modèle IFC
       say:
       - téléverse un IFC
       - importe le modèle BIM du chantier
       - joins un fichier IFC
+      done: 'Choisissez le fichier .ifc dans la fenêtre qui s''est ouverte : il est téléversé et dessiné sur le nuage.'
 - id: bim.delete_ifc
   kind: action
   runs_on: ui
-  status: manual
   model: DELETE one BIM model (its .ifc file) from the server for good. For administrators and managers.
   confirm: true
   args:
@@ -61,22 +62,27 @@ commands:
       - eliminá el modelo de la obra
       - borrá ese IFC
       - sacá ese archivo IFC del servidor
+      done: Modelo BIM {detail} eliminado.
+      ask: Voy a eliminar del servidor el modelo BIM {detail}.
     en:
       title: Delete an IFC model
       say:
       - delete the site's design model
       - erase that IFC
       - remove that IFC file from the server
+      done: BIM model {detail} deleted.
+      ask: I am going to delete the BIM model {detail} from the server.
     fr:
       title: Supprimer un modèle IFC
       say:
       - supprime le modèle du chantier
       - efface cet IFC
       - retire ce fichier IFC du serveur
+      done: Modèle BIM {detail} supprimé.
+      ask: Je vais supprimer du serveur le modèle BIM {detail}.
 - id: bim.set_element_visible
   kind: action
   runs_on: ui
-  status: manual
   model: Draw or hide one element of the BIM model, with everything under it in the tree (the eye of its row in
     the model's tree).
   args:
@@ -99,22 +105,27 @@ commands:
       - ocultá los muros del IFC
       - devolvé las losas del IFC
       - escondé ese elemento IFC
+      done: '{detail} visible.'
+      done_off: '{detail} oculto.'
     en:
       title: Show or hide a model element
       say:
       - hide the IFC walls
       - bring the IFC slabs back
       - hide that IFC element
+      done: '{detail} shown.'
+      done_off: '{detail} hidden.'
     fr:
       title: Afficher ou masquer un élément du modèle
       say:
       - masque les murs de l'IFC
       - ramène les dalles de l'IFC
       - cache cet élément IFC
+      done: '{detail} affiché.'
+      done_off: '{detail} masqué.'
 - id: bim.select_element
   kind: action
   runs_on: ui
-  status: manual
   model: 'Select one element of the BIM model in its tree: it is highlighted in the viewer (selecting it again deselects
     it).'
   args:
@@ -134,22 +145,24 @@ commands:
       - seleccioná la columna C3 del IFC
       - resaltá ese elemento del IFC
       - cuál es este elemento IFC
+      done: '{detail}: selección cambiada.'
     en:
       title: Select a model element
       say:
       - select column C3 of the IFC
       - highlight that IFC element
       - which IFC element is this
+      done: '{detail}: selection switched.'
     fr:
       title: Sélectionner un élément du modèle
       say:
       - sélectionne le poteau C3 de l'IFC
       - surligne cet élément de l'IFC
       - quel est cet élément IFC
+      done: '{detail} : sélection changée.'
 - id: bim.set_element_opacity
   kind: action
   runs_on: ui
-  status: manual
   model: Opacity of the selected element of the BIM model (and what is under it in the tree), 0 (invisible) to 1
     (opaque), with the slider of the model's tree.
   args:
@@ -175,22 +188,24 @@ commands:
       - bajá la opacidad de los muros del IFC
       - dejá ese elemento del IFC a medio ver
       - que se vea el escaneo a través del IFC
+      done: 'Opacidad de {detail}: {opacity}.'
     en:
       title: Opacity of a model element
       say:
       - lower the opacity of the IFC walls
       - leave that IFC element half visible
       - let the scan be seen through the IFC
+      done: 'Opacity of {detail}: {opacity}.'
     fr:
       title: Opacité d'un élément du modèle
       say:
       - baisse l'opacité des murs de l'IFC
       - laisse cet élément de l'IFC à moitié visible
       - que le scan se voie à travers l'IFC
+      done: 'Opacité de {detail} : {opacity}.'
 - id: bim.filter
   kind: query
   runs_on: ui
-  status: manual
   model: 'Filter the tree of the BIM model by a text typed in its search box: only the elements whose name or IFC
     type holds it stay listed.'
   args:
@@ -208,22 +223,24 @@ commands:
       - buscá las puertas en el árbol IFC
       - filtrá los elementos por IfcWall
       - encontrá la columna C3 en el IFC
+      done: Árbol del BIM filtrado por «{text}».
     en:
       title: Search the model's elements
       say:
       - search the doors in the IFC tree
       - filter the elements by IfcWall
       - find column C3 in the IFC
+      done: BIM tree filtered by “{text}”.
     fr:
       title: Rechercher des éléments du modèle
       say:
       - recherche les portes dans l'arbre IFC
       - filtre les éléments par IfcWall
       - trouve le poteau C3 dans l'IFC
+      done: Arbre du BIM filtré par « {text} ».
 - id: bim.ctx_set_transparency
   kind: action
   runs_on: ui
-  status: manual
   model: 'Right-click menu of an element of the BIM model in the viewer: its transparency, 0 (opaque) to 100 percent.'
   args:
     element:
@@ -248,22 +265,24 @@ commands:
       - clic derecho sobre el muro del IFC y hacelo traslúcido
       - ese elemento IFC al 70 por ciento
       - ver a través de esa losa
+      done: 'Transparencia de {detail}: {transparency} %.'
     en:
       title: Transparency of a model element
       say:
       - right-click the IFC wall and make it see-through
       - that IFC element at 70 percent
       - look through that slab
+      done: 'Transparency of {detail}: {transparency} %.'
     fr:
       title: Transparence d'un élément du modèle
       say:
       - clic droit sur le mur de l'IFC pour le rendre translucide
       - cet élément IFC à 70 pour cent
       - voir à travers cette dalle
+      done: 'Transparence de {detail} : {transparency} %.'
 - id: bim.ctx_hide
   kind: action
   runs_on: ui
-  status: manual
   model: 'Right-click menu of an element of the BIM model in the viewer: hide that element.'
   args:
     element:
@@ -282,22 +301,24 @@ commands:
       - clic derecho y ocultar ese elemento del IFC
       - escondé el muro del IFC que estoy señalando
       - sacá de la vista esa losa del IFC
+      done: '{detail} oculto.'
     en:
       title: Hide a model element from the viewer
       say:
       - right-click and hide that IFC element
       - hide the IFC wall under the pointer
       - take that IFC slab out of view
+      done: '{detail} hidden.'
     fr:
       title: Masquer un élément du modèle depuis la visionneuse
       say:
       - clic droit et masquer cet élément de l'IFC
       - cache le mur de l'IFC sous le pointeur
       - retire de la vue cette dalle de l'IFC
+      done: '{detail} masqué.'
 - id: bim.ctx_isolate
   kind: action
   runs_on: ui
-  status: manual
   model: 'Right-click menu of an element of the BIM model in the viewer: isolate it (every other element of the
     model is hidden).'
   args:
@@ -317,22 +338,24 @@ commands:
       - aislá este elemento del IFC
       - dejá visible solo ese muro del IFC
       - clic derecho y aislar
+      done: '{detail} aislado.'
     en:
       title: Isolate a model element
       say:
       - isolate this IFC element
       - leave only that IFC wall visible
       - right-click and isolate
+      done: '{detail} isolated.'
     fr:
       title: Isoler un élément du modèle
       say:
       - isole cet élément de l'IFC
       - ne laisse visible que ce mur de l'IFC
       - clic droit et isoler
+      done: '{detail} isolé.'
 - id: bim.ctx_show_all
   kind: action
   runs_on: ui
-  status: manual
   model: 'Right-click menu of the BIM model in the viewer: draw every element of the model again and give each one
     its original transparency back.'
   needs:
@@ -345,15 +368,18 @@ commands:
       - que se vea de nuevo todo el modelo
       - devolvé los elementos ocultos del IFC
       - clic derecho y mostrar todo
+      done: Todo el BIM visible.
     en:
       title: Show the whole BIM
       say:
       - let the whole model be seen again
       - bring back the hidden IFC elements
       - right-click and show all
+      done: The whole BIM model is shown.
     fr:
       title: Afficher tout le BIM
       say:
       - que tout le modèle se voie de nouveau
       - ramène les éléments masqués de l'IFC
       - clic droit et tout afficher
+      done: Tout le BIM est affiché.

@@ -42,7 +42,7 @@ import { Inspector } from './layout/Inspector'
 import { BottomDock } from './layout/BottomDock'
 import { StatusBar } from './layout/StatusBar'
 import { CommandPalette, type Command } from './layout/CommandPalette'
-import { registerCommands, findByName, type Executors, type CalibrationCommandId, type FlythroughCommandId, type Outcome, type PanelCommandId, type ViewportCommandId } from './commands/registry'
+import { registerCommands, registerOpeners, findByName, type Executors, type BimCommandId, type CalibrationCommandId, type FlythroughCommandId, type Outcome, type PanelCommandId, type ViewportCommandId } from './commands/registry'
 import type { UiCommandId } from './commands/catalog.generated'
 import { SettingsDialog } from './layout/SettingsDialog'
 import { SceneLookDialog } from './layout/SceneLookDialog'
@@ -1970,6 +1970,18 @@ function App() {
     finally { setSessionLoading(null) }
   }, [interactiveSessionId, reloadSegments, refreshUnsegmentedCount, refreshFloorLevel, report, t])
 
+  /** delete one BIM model from the server; `confirmed`: already confirmed (STAC's spoken confirmation) */
+  const deleteIfc = useCallback(async (filename: string, confirmed = false): Promise<boolean> => {
+    if (!activeSession || !token) return false
+    const ok = confirmed || await confirmDanger(t('bim.deleteMessage', { name: filename }), t('bim.deleteTitle'))
+    if (!ok) return false
+    try {
+      const res = await fetch(`/api/sessions/${activeSession}/bim/${filename}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${token}` } })
+      if (res.ok) { report(t('bim.deleted', { name: filename }), 'ok'); viewportRef.current?.removeBIMGroup(filename); setBimModels(prev => prev.filter(m => m.filename !== filename)); connectToServer(); return true }
+      report(t('bim.deleteFailed', { detail: (await res.json()).detail }), 'err')
+    } catch (err: any) { report(t('bim.deleteFailed', { detail: err.message }), 'err') }
+    return false
+  }, [activeSession, token, confirmDanger, report, t, connectToServer])
   const renamePlaced = useCallback(async (id: number, name: string): Promise<boolean> => {
     if (!activeSession) return false
     try {
@@ -2034,7 +2046,7 @@ function App() {
     }
   }, [])
   useEffect(() => {
-    type AppCommandId = Exclude<UiCommandId, PanelCommandId | ViewportCommandId | FlythroughCommandId | CalibrationCommandId>
+    type AppCommandId = Exclude<UiCommandId, PanelCommandId | ViewportCommandId | FlythroughCommandId | CalibrationCommandId | BimCommandId>
     const done: Outcome = { ok: true }
     const noSession: Outcome = { ok: false, reason: 'no_session' }
     const open = () => cmd.current.activeSession
@@ -2513,7 +2525,14 @@ function App() {
       },
       'physics.clear': () => { if (!open()) return noSession; viewportRef.current?.physicsClear(); return done },
     }
-    return registerCommands(executors)
+    // the window each area's commands live in: opened first when one of them is asked for
+    const withSession = (openIt: () => void) => () => { if (!open()) return false; openIt() }
+    const unOpeners = registerOpeners({
+      bim: withSession(() => cmd.current.layout.setLeftTab('bim')),
+      calibration: withSession(() => setCalibrationOpen(true)),
+    })
+    const unCommands = registerCommands(executors)
+    return () => { unCommands(); unOpeners() }
   // (every value is read through `cmd`; the setters are stable)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -2780,16 +2799,7 @@ function App() {
                     } else report(t('bim.uploadFailed', { detail: (await res.json()).detail }), 'err')
                   } catch (err: any) { report(t('bim.uploadFailed', { detail: err.message }), 'err') }
                 }}
-                onDeleteIFC={async filename => {
-                  if (!activeSession || !token) return
-                  const ok = await confirmDanger(t('bim.deleteMessage', { name: filename }), t('bim.deleteTitle'))
-                  if (!ok) return
-                  try {
-                    const res = await fetch(`/api/sessions/${activeSession}/bim/${filename}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${token}` } })
-                    if (res.ok) { report(t('bim.deleted', { name: filename }), 'ok'); viewportRef.current?.removeBIMGroup(filename); setBimModels(prev => prev.filter(m => m.filename !== filename)); connectToServer() }
-                    else report(t('bim.deleteFailed', { detail: (await res.json()).detail }), 'err')
-                  } catch (err: any) { report(t('bim.deleteFailed', { detail: err.message }), 'err') }
-                }} />
+                onDeleteIFC={deleteIfc} />
             )}
             {layout.state.leftTab === 'team' && <TeamPanel onCallUser={(userId, username) => setCallTarget({ userId, username })} />}
           </SidePanel>

@@ -4,7 +4,8 @@
  * toggles, opacity control and selection highlighting. Built on the
  * catalog Tree; type icons come from lucide by IFC class.
  */
-import { useState, useMemo, useCallback, useRef, type ReactNode } from 'react'
+import { useState, useMemo, useCallback, useEffect, useRef, type ReactNode } from 'react'
+import { findByName, registerCommands, type BimCommandId, type Executors, type Outcome } from '../commands/registry'
 import { Building2, Box, Columns3, DoorOpen, Eye, EyeOff, FileBox, Globe, Layers, Minus, Square, Trash2, Upload, Wrench, AppWindow, Armchair, Home, Grid2X2, Landmark, Ruler } from 'lucide-react'
 import type { IFCTreeNode, IFCLoadResult } from './IFCLoader'
 import { countDescendants, collectMeshNames } from './IFCLoader'
@@ -24,7 +25,8 @@ export interface BIMNavigatorProps {
   onSelectElement: (meshNames: string[]) => void
   onSetOpacity: (meshNames: string[], opacity: number) => void
   onUploadIFC: (file: File) => void
-  onDeleteIFC: (filename: string) => void
+  /** `confirmed`: the user already confirmed it (STAC's spoken confirmation) — no dialog is shown */
+  onDeleteIFC: (filename: string, confirmed?: boolean) => Promise<boolean>
 }
 
 function matchesSearch(node: IFCTreeNode, text: string): boolean {
@@ -114,6 +116,78 @@ export default function BIMNavigator({ models, userRole, onToggleVisibility, onS
       children: node.children.map(c => toTreeNode(c, depth + 1)).filter((n): n is TreeNodeData<IFCTreeNode> => n !== null),
     }
   }, [searchText, hiddenNodes, nodeOpacities, handleToggleVisibility, t, fmt])
+
+  // STAC's commands of the BIM model (server/commands/catalog/200_bim.yaml): registered while
+  // this panel is open, each one through the same handler its control uses
+  const bcmd = useRef({ models, isAdmin, handleToggleVisibility, handleSelect, handleOpacityChange, onToggleVisibility, onSetOpacity, onDeleteIFC })
+  bcmd.current = { models, isAdmin, handleToggleVisibility, handleSelect, handleOpacityChange, onToggleVisibility, onSetOpacity, onDeleteIFC }
+  useEffect(() => {
+    const done: Outcome = { ok: true }
+    const all = (): IFCTreeNode[] => {
+      const out: IFCTreeNode[] = []
+      const walk = (n: IFCTreeNode) => { out.push(n); n.children.forEach(walk) }
+      bcmd.current.models.forEach(m => m.hierarchy.forEach(walk))
+      return out
+    }
+    const label = (n: IFCTreeNode) => `${n.type.replace('Ifc', '')} ${n.name}`.trim()
+    /** an element of the model by its IFC id or its name */
+    const nodeBy = (element: number | string): IFCTreeNode | Outcome => {
+      const nodes = all()
+      if (!nodes.length) return { ok: false, reason: 'nothing_to_do' }
+      const byId = typeof element === 'number' || /^\d+$/.test(String(element)) ? nodes.find(n => n.expressID === Number(element)) : undefined
+      if (byId) return byId
+      const found = findByName(nodes, String(element), n => [n.name, label(n)])
+      if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.slice(0, 8).map(n => `${label(n)} (${n.expressID})`).join(', ') }
+      return found.item ?? { ok: false, reason: 'not_found', detail: String(element) }
+    }
+    const on = (element: number | string, act: (n: IFCTreeNode) => void, state?: boolean): Outcome => {
+      const n = nodeBy(element)
+      if ('ok' in n) return n
+      act(n)
+      return { ok: true, detail: label(n), ...(state === undefined ? {} : { state }) }
+    }
+    const model = (filename: string): { filename: string } | Outcome => {
+      const found = findByName(bcmd.current.models, filename, m => [m.filename, m.filename.replace(/\.ifc$/i, '')])
+      if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.map(m => m.filename).join(', ') }
+      return found.item ?? { ok: false, reason: 'not_found', detail: filename }
+    }
+    const executors: Executors<BimCommandId> = {
+      // (the file itself is picked by hand: the browser's file window opens)
+      'bim.load_ifc': () => { if (!bcmd.current.isAdmin) return { ok: false, reason: 'not_allowed' }; fileInputRef.current?.click(); return done },
+      'bim.delete_ifc': {
+        prepare: ({ filename }) => { if (!bcmd.current.isAdmin) return { ok: false, reason: 'not_allowed' }; const m = model(filename); return 'ok' in m ? m : { ok: true, detail: m.filename } },
+        run: async ({ filename }) => {
+          if (!bcmd.current.isAdmin) return { ok: false, reason: 'not_allowed' }
+          const m = model(filename)
+          if ('ok' in m) return m
+          return (await bcmd.current.onDeleteIFC(m.filename, true)) ? { ok: true, detail: m.filename } : { ok: false, reason: 'failed', detail: m.filename }
+        },
+      },
+      'bim.set_element_visible': ({ element, on: show }) => on(element, n => bcmd.current.handleToggleVisibility(n, show), show),
+      'bim.select_element': ({ element }) => on(element, n => bcmd.current.handleSelect(n)),
+      'bim.set_element_opacity': ({ element, opacity }) => on(element, n => bcmd.current.handleOpacityChange(n, opacity)),
+      'bim.filter': ({ text }) => { setSearchText(text); return done },
+      'bim.ctx_set_transparency': ({ element, transparency }) => on(element, n => bcmd.current.handleOpacityChange(n, 1 - transparency / 100)),
+      'bim.ctx_hide': ({ element }) => on(element, n => bcmd.current.handleToggleVisibility(n, false)),
+      'bim.ctx_isolate': ({ element }) => on(element, n => {
+        const keep = new Set<number>()
+        const mark = (x: IFCTreeNode) => { keep.add(x.expressID); x.children.forEach(mark) }
+        mark(n)
+        bcmd.current.models.forEach(m => m.hierarchy.forEach(r => bcmd.current.onToggleVisibility(collectMeshNames(r), false)))
+        bcmd.current.onToggleVisibility(collectMeshNames(n), true)
+        setHiddenNodes(new Set(all().filter(x => !keep.has(x.expressID) && x.children.length === 0).map(x => x.expressID)))
+      }),
+      'bim.ctx_show_all': () => {
+        const roots = bcmd.current.models.flatMap(m => m.hierarchy)
+        if (!roots.length) return { ok: false, reason: 'nothing_to_do' }
+        const names = roots.flatMap(r => collectMeshNames(r))
+        bcmd.current.onToggleVisibility(names, true); bcmd.current.onSetOpacity(names, 1)
+        setHiddenNodes(new Set()); setNodeOpacities(new Map())
+        return done
+      },
+    }
+    return registerCommands(executors)
+  }, [])
 
   const selectedOpacity = selectedNode ? nodeOpacities.get(selectedNode.expressID) ?? 1 : 1
 

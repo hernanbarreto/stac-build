@@ -2,7 +2,7 @@
 // The commands of the interface STAC can run: their ids and the type of each one's arguments.
 // A new command is declared in the catalogue; this file is then regenerated and the compiler
 // asks for its executor (ui/src/commands/registry.ts).
-export const CATALOG_SHA256 = '7d013a3efa794d534eb45f7ad42ddc0be5b1f7754807da2cc45e9220e466c7e9'
+export const CATALOG_SHA256 = '810dc5d70f2b9cbdb9e708a404ba5f030ddb2f28e06300ba66a107e53a766f4c'
 
 export const UI_COMMAND_IDS = [
   'talk.set_user_name',
@@ -127,6 +127,16 @@ export const UI_COMMAND_IDS = [
   'instances.cubes_set_visible',
   'instances.cubes_set_all_visible',
   'instances.cubes_focus',
+  'bim.load_ifc',
+  'bim.delete_ifc',
+  'bim.set_element_visible',
+  'bim.select_element',
+  'bim.set_element_opacity',
+  'bim.filter',
+  'bim.ctx_set_transparency',
+  'bim.ctx_hide',
+  'bim.ctx_isolate',
+  'bim.ctx_show_all',
   'admin.open',
 ] as const
 
@@ -142,6 +152,7 @@ export const UI_CONFIRM_IDS = [
   'objects.remove_selected',
   'objects.remove',
   'pipeline.cancel',
+  'bim.delete_ifc',
 ] as const
 
 export type UiConfirmId = typeof UI_CONFIRM_IDS[number]
@@ -269,5 +280,15 @@ export interface UiCommandArgs {
   'instances.cubes_set_visible': { id: number; on: boolean }
   'instances.cubes_set_all_visible': { on: boolean }
   'instances.cubes_focus': { id: number }
+  'bim.load_ifc': Record<string, never>
+  'bim.delete_ifc': { filename: string }
+  'bim.set_element_visible': { element: number | string; on: boolean }
+  'bim.select_element': { element: number | string }
+  'bim.set_element_opacity': { element: number | string; opacity: number }
+  'bim.filter': { text: string }
+  'bim.ctx_set_transparency': { element: number | string; transparency: number }
+  'bim.ctx_hide': { element: number | string }
+  'bim.ctx_isolate': { element: number | string }
+  'bim.ctx_show_all': Record<string, never>
   'admin.open': Record<string, never>
 }
