@@ -14,7 +14,6 @@ commands:
 - id: deviation.open_compare
   kind: action
   runs_on: ui
-  status: manual
   model: 'Open the window of the BIM comparison (the model against the scan), where its registration is chosen.
     It only opens the window: the comparison is launched from it.'
   needs:
@@ -28,22 +27,24 @@ commands:
       - abrí la comparación con el modelo
       - comparar el modelo contra el escaneo
       - ventana de comparación
+      done: Ventana de comparación con el BIM abierta.
     en:
       title: Open the BIM comparison
       say:
       - open the comparison with the model
       - compare the model against the scan
       - comparison window
+      done: BIM comparison window open.
     fr:
       title: Ouvrir la comparaison avec le BIM
       say:
       - ouvre la comparaison avec le modèle
       - comparer le modèle au scan
       - fenêtre de comparaison
+      done: Fenêtre de comparaison avec le BIM ouverte.
 - id: deviation.run_comparison
   kind: action
   runs_on: ui
-  status: manual
   model: 'LAUNCH the BIM comparison: each object of the segmentation is matched with its IFC element and compared
     against it, and the cloud is loaded again coloured by deviation. Server work that takes a while. registration:
     auto (the scan is registered on the model) or manual (the alignment made by hand is kept).'
@@ -66,22 +67,27 @@ commands:
       - ejecutá la comparación con el modelo
       - compará cada objeto con su elemento IFC
       - corré la comparación con registro manual
+      done: Comparación con el BIM de {detail} lanzada.
+      ask: 'Voy a lanzar la comparación de {detail} con el BIM, con registro {registration}: la nube se vuelve a cargar coloreada por desviación.'
     en:
       title: Run the BIM comparison
       say:
       - run the comparison with the model
       - compare each object with its IFC element
       - run the comparison with manual registration
+      done: BIM comparison of {detail} launched.
+      ask: 'I am going to launch the BIM comparison of {detail}, with {registration} registration: the cloud is loaded again coloured by deviation.'
     fr:
       title: Lancer la comparaison avec le BIM
       say:
       - lance la comparaison avec le modèle
       - compare chaque objet à son élément IFC
       - lance la comparaison avec recalage manuel
+      done: Comparaison avec le BIM de {detail} lancée.
+      ask: 'Je vais lancer la comparaison de {detail} avec le BIM, avec un recalage {registration} : le nuage est rechargé coloré par l''écart.'
 - id: deviation.toggle_view
   kind: action
   runs_on: ui
-  status: manual
   model: Draw (on) or hide (off) the cloud coloured by its deviation from the BIM model (the result of the last
     comparison); hiding it loads the scan's own cloud again.
   args:
@@ -98,15 +104,21 @@ commands:
       - mostrá la desviación
       - ocultá el mapa de desviación
       - volvé a la nube original
+      done: Nube coloreada por desviación.
+      done_off: 'Desviación oculta: vuelve la nube del escaneo.'
     en:
       title: Show or hide the deviation
       say:
       - show the deviation
       - hide the deviation map
       - back to the original cloud
+      done: Cloud coloured by deviation.
+      done_off: 'Deviation hidden: the scan''s own cloud is back.'
     fr:
       title: Afficher ou masquer l'écart
       say:
       - affiche l'écart
       - masque la carte des écarts
       - reviens au nuage d'origine
+      done: Nuage coloré par l'écart.
+      done_off: 'Écart masqué : le nuage du scan est de retour.'

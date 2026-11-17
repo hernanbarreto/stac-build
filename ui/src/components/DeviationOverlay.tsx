@@ -4,6 +4,7 @@
  * the bottom dock's Report tab. Histogram bars use the deviation ramp tokens.
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { registerCommands, type Executors, type Outcome, type ReportCommandId } from '../commands/registry'
 import { Play } from 'lucide-react'
 import type { ViewportHandle } from './Viewport'
 import { Button } from './ui/Button'
@@ -56,6 +57,16 @@ export default function DeviationOverlay({ sessionId, viewportRef, onHeatmapData
   const [tolerance, setTolerance] = useState(15) // mm
   const [error, setError] = useState<string | null>(null)
   const histCanvasRef = useRef<HTMLCanvasElement>(null)
+  // STAC's command of this tab (reports.run_deviation): on a spoken confirmation
+  const rcmd = useRef<{ matches: number; loading: boolean; run: (tol: number) => unknown }>({ matches: 0, loading: false, run: () => undefined })
+  useEffect(() => {
+    const ready = ({ tolerance_mm }: { tolerance_mm: number }): Outcome =>
+      rcmd.current.matches === 0 || rcmd.current.loading ? { ok: false, reason: 'nothing_to_do' } : { ok: true, detail: `${sessionId}, ${tolerance_mm} mm` }
+    const executors: Executors<ReportCommandId> = {
+      'reports.run_deviation': { prepare: ready, run: a => { const o = ready(a); if (o.ok) { setTolerance(a.tolerance_mm); void rcmd.current.run(a.tolerance_mm) } return o } },
+    }
+    return registerCommands(executors)
+  }, [sessionId])
 
   // Auto-match on mount
   useEffect(() => {
@@ -65,14 +76,16 @@ export default function DeviationOverlay({ sessionId, viewportRef, onHeatmapData
       .catch(() => setError(t('deviation.autoMatchFailed')))
   }, [sessionId, t])
 
-  const runComparison = useCallback(async () => {
+  const runComparison = useCallback(async (withTolerance?: unknown) => {
     if (!matches.length) return
+    // (a click passes its event: only a number is a tolerance asked for by command)
+    const tol = typeof withTolerance === 'number' ? withTolerance : tolerance
     setLoading(true)
     setError(null)
     try {
       const res = await fetch('/api/bim/compare', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId, matches: matches.map(m => ({ segment_label: m.segment_label, element_key: m.element_key, ifc_type: m.ifc_type })), tolerance_mm: tolerance }),
+        body: JSON.stringify({ session_id: sessionId, matches: matches.map(m => ({ segment_label: m.segment_label, element_key: m.element_key, ifc_type: m.ifc_type })), tolerance_mm: tol }),
       })
       if (!res.ok) throw new Error(await res.text())
       const data: DeviationResult = await res.json()
@@ -94,6 +107,7 @@ export default function DeviationOverlay({ sessionId, viewportRef, onHeatmapData
       setLoading(false)
     }
   }, [sessionId, matches, tolerance, onHeatmapData, viewportRef, t])
+  rcmd.current = { matches: matches.length, loading, run: runComparison }
 
   // Histogram: bars coloured by the deviation ramp, tolerance line in cyan
   useEffect(() => {

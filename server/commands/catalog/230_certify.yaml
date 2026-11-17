@@ -15,7 +15,6 @@ commands:
 - id: certify.set_epoch_layers
   kind: action
   runs_on: ui
-  status: manual
   model: 'In the certificate panel: overlay the previous geometric epoch''s cloud as a tinted layer (before) and
     draw or hide the current one (after), to compare them in the viewer.'
   args:
@@ -35,22 +34,24 @@ commands:
       - superponé la época anterior
       - ocultá la actual para ver el antes
       - antes y después de la corrección
+      done: Capas de época cambiadas.
     en:
       title: Compare the previous and the current epoch
       say:
       - overlay the previous epoch
       - hide the current one to see the before
       - before and after the correction
+      done: Epoch layers changed.
     fr:
       title: Comparer l'époque précédente et l'actuelle
       say:
       - superpose l'époque précédente
       - masque l'actuelle pour voir l'avant
       - avant et après la correction
+      done: Couches d'époque changées.
 - id: certify.show_trajectory_edges
   kind: action
   runs_on: ui
-  status: manual
   model: 'In the certificate panel: draw or hide the edges of the camera''s trajectory in the viewer: the odometry
     (the walk itself) and the loop edges (the closures between revisits).'
   args:
@@ -70,22 +71,24 @@ commands:
       - dibujá la odometría
       - ocultá las aristas de lazo
       - dibujá la trayectoria con sus cierres
+      done: Aristas de la trayectoria cambiadas.
     en:
       title: Trajectory and loop edges
       say:
       - draw the odometry
       - hide the loop edges
       - draw the trajectory with its closures
+      done: Trajectory edges changed.
     fr:
       title: Trajectoire et arêtes de boucle
       say:
       - dessine l'odométrie
       - masque les arêtes de boucle
       - dessine la trajectoire avec ses fermetures
+      done: Arêtes de la trajectoire changées.
 - id: certify.select_epoch
   kind: action
   runs_on: ui
-  status: manual
   model: 'Choose which geometric epoch of the session is the one drawn and worked on (0 = the original reconstruction).
     Every epoch stays on disk: nothing is deleted.'
   args:
@@ -104,22 +107,24 @@ commands:
       - pasá a la época 2
       - volvé a la época original
       - usá la época anterior
+      done: Época {epoch} elegida.
     en:
       title: Choose the geometric epoch
       say:
       - go to epoch 2
       - back to the original epoch
       - use the previous epoch
+      done: Epoch {epoch} selected.
     fr:
       title: Choisir l'époque géométrique
       say:
       - passe à l'époque 2
       - reviens à l'époque d'origine
       - utilise l'époque précédente
+      done: Époque {epoch} choisie.
 - id: certify.set_section_tab
   kind: query
   runs_on: ui
-  status: manual
   model: 'In the certificate panel: which of its sections is read: attention (where the system is least sure), edges
     (the loop edges), duplicates or acta (the certificate''s metrics).'
   args:
@@ -140,15 +145,18 @@ commands:
       - leeme la lista de atención
       - pestaña de duplicados
       - tabla de aristas de lazo
+      done: Sección {tab} del certificado.
     en:
       title: Sections of the quality kit
       say:
       - read me the attention list
       - duplicates tab
       - table of loop edges
+      done: Certificate section {tab}.
     fr:
       title: Sections du kit qualité
       say:
       - lis-moi les points d'attention
       - onglet des doublons
       - tableau des arêtes de boucle
+      done: Section {tab} du certificat.

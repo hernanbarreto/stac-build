@@ -42,7 +42,7 @@ import { Inspector } from './layout/Inspector'
 import { BottomDock } from './layout/BottomDock'
 import { StatusBar } from './layout/StatusBar'
 import { CommandPalette, type Command } from './layout/CommandPalette'
-import { registerCommands, registerOpeners, findByName, type Executors, type BimCommandId, type CalibrationCommandId, type FlythroughCommandId, type Outcome, type PanelCommandId, type ViewportCommandId } from './commands/registry'
+import { registerCommands, registerOpeners, findByName, type Executors, type BimCommandId, type CalibrationCommandId, type CertifyCommandId, type EvaluationCommandId, type ReportCommandId, type FlythroughCommandId, type Outcome, type PanelCommandId, type ViewportCommandId } from './commands/registry'
 import type { UiCommandId } from './commands/catalog.generated'
 import { SettingsDialog } from './layout/SettingsDialog'
 import { SceneLookDialog } from './layout/SceneLookDialog'
@@ -568,7 +568,7 @@ function App() {
   const [interactiveSessionId, setInteractiveSessionId] = useState<string | null>(null)
   const interactiveSessionRef = useRef(interactiveSessionId)
   const [compareDialogOpen, setCompareDialogOpen] = useState(false)
-  const [useManualAlignment, setUseManualAlignment] = useState(true)
+  const [manualAlignmentChosen, setUseManualAlignment] = useState(true)
   // Video upload  frame extraction, keyed by session id. Presence means the
   // session has no frames yet and is uploading/extracting; pct drives the spinner.
   const [extractingSessions, setExtractingSessions] = useState<Record<string, number>>({})
@@ -1234,17 +1234,18 @@ function App() {
   // USER 2026-11-05: "GenRecon es un botón más, como el de autosegmentar": the mesh of the OPEN scan, with the
   // confidence chosen in its window — an order of the GenRecon stage alone (pipeline.auto_genrecon is off)
   const [genreconOpen, setGenreconOpen] = useState(false)
-  const runGenrecon = useCallback(async (confidence: number) => {
-    if (!activeSession) return
+  const runGenrecon = useCallback(async (confidence: number): Promise<true | string> => {
+    if (!activeSession) return 'no session'
     const rr = await fetch('/api/pipeline/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session_id: activeSession, replace: false, scans: activeScanTab ? [activeScanTab] : [],
                              autosegment: { stages: { genrecon: true }, genrecon_confidence: confidence } }),
     })
     const dd = await rr.json().catch(() => ({}))
-    if (!rr.ok || !dd.ok) { setStatusMessage(dd.detail || dd.error || 'GenRecon: command rejected'); return }
+    if (!rr.ok || !dd.ok) { setStatusMessage(dd.detail || dd.error || 'GenRecon: command rejected'); return String(dd.detail || dd.error || 'GenRecon: command rejected') }
     setGenreconOpen(false)
     setStatusMessage(tt('genrecon.started', { session: activeSession, pct: Math.round(confidence * 100) }))
+    return true
   }, [activeSession, activeScanTab])
 
   const openAutosegment = useCallback(async () => {
@@ -1437,8 +1438,10 @@ function App() {
   }, [activeSession])
 
   // Actually run the comparison after dialog confirm
-  const runComparison = useCallback(async () => {
+  const runComparison = useCallback(async (registration?: unknown) => {
     if (!activeSession) return
+    // (a click passes its event: only 'auto' / 'manual' is a registration asked for by command)
+    const useManualAlignment = registration === 'manual' ? true : registration === 'auto' ? false : manualAlignmentChosen
     setCompareDialogOpen(false)
     setSabanaLoading(true)
     setSabanaMetrics(null)
@@ -1489,7 +1492,7 @@ function App() {
       setStatusMessage(tt('deviation.failed', { detail: e.message }))
     }
     setSabanaLoading(false)
-  }, [activeSession, sabanaVisible, useManualAlignment])
+  }, [activeSession, sabanaVisible, manualAlignmentChosen])
 
   // ── Sábana: Toggle visibility via Potree streaming ──
   const handleToggleSabana = useCallback(() => {
@@ -1797,16 +1800,18 @@ function App() {
     } catch { report(t('sessions.renameFailed'), 'err'); return t('sessions.renameFailed') }
   }, [token, connectToServer, report, t])
 
-  const deleteSession = useCallback(async (id: string) => {
-    const ok = await confirmDanger(t('sessions.deleteMessage', { id }), t('sessions.deleteTitle', { id }))
-    if (!ok) return
+  const deleteSession = useCallback(async (id: string, confirmed?: boolean): Promise<boolean> => {
+    // (`confirmed` === true: STAC's spoken confirmation was given — no dialog)
+    const ok = confirmed === true || await confirmDanger(t('sessions.deleteMessage', { id }), t('sessions.deleteTitle', { id }))
+    if (!ok) return false
     try {
       const headers: HeadersInit = {}
       if (token) headers['Authorization'] = `Bearer ${token}`
       const res = await fetch(`/sessions/${id}`, { method: 'DELETE', headers })
       if (!res.ok) { const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` })); report(err.detail || t('sessions.deleteFailed'), 'err') }
-      else { if (activeSession === id) handleUnload(); report(t('sessions.deleted', { id }), 'ok'); connectToServer() }
+      else { if (activeSession === id) handleUnload(); report(t('sessions.deleted', { id }), 'ok'); connectToServer(); return true }
     } catch (err: any) { report(t('sessions.deleteFailedDetail', { detail: err?.message || err }), 'err') }
+    return false
   }, [token, activeSession, handleUnload, connectToServer, confirmDanger, report, t])
 
   const createSession = useCallback(async (name: string) => {
@@ -1847,9 +1852,9 @@ function App() {
     return true
   }, [activeSession, report, t])
 
-  const deleteSegment = useCallback(async (seg: SegmentInstance) => {
-    const ok = await confirmDanger(t('instances.deleteMessage', { label: seg.label }), t('instances.deleteTitle'))
-    if (!ok || !activeSession) return
+  const deleteSegment = useCallback(async (seg: SegmentInstance, confirmed?: boolean): Promise<boolean> => {
+    const ok = confirmed === true || await confirmDanger(t('instances.deleteMessage', { label: seg.label }), t('instances.deleteTitle'))
+    if (!ok || !activeSession) return false
     const res = await fetch('/api/segmentation/delete', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       // label pins the EXACT row: instance_id alone collides across writers (strip the ' #N' suffix)
@@ -1860,16 +1865,19 @@ function App() {
       viewportRef.current?.setSegmentVisibility(seg.classId, false)
       viewportRef.current?.refreshSegmentOBBs(activeSession)
       report(t('instances.deleted', { label: seg.label }), 'ok')
-    } else report(t('instances.deleteFailed', { status: res.status }), 'err')
+      return true
+    }
+    report(t('instances.deleteFailed', { status: res.status }), 'err')
+    return false
   }, [activeSession, confirmDanger, report, t])
 
   // a generated (ShapeR) object: rename = its label; delete = its WHOLE folder, after a confirmation
   // like a segment's (USER 2026-10-01)
 
-  const deleteTsdfMesh = useCallback(async (m: MeshListItem) => {
-    if (!activeSession) return
-    const ok = await confirmDanger(t('instances.deleteMeshMessage', { label: m.label, folder: m.folder }), t('instances.deleteMeshTitle'))
-    if (!ok) return
+  const deleteTsdfMesh = useCallback(async (m: MeshListItem, confirmed?: boolean): Promise<boolean> => {
+    if (!activeSession) return false
+    const ok = confirmed === true || await confirmDanger(t('instances.deleteMeshMessage', { label: m.label, folder: m.folder }), t('instances.deleteMeshTitle'))
+    if (!ok) return false
     try {
       const r = await fetch('/api/segmentation/tsdf/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, folder: m.folder }) })
       const d = await r.json()
@@ -1878,8 +1886,11 @@ function App() {
         viewportRef.current?.clearTsdf()
         await refreshTsdfMeshList(activeSession)
         viewportRef.current?.reloadTsdf(activeSession)
-      } else report(t('instances.meshDeleteFailed', { detail: d.detail || '' }), 'err')
+        return true
+      }
+      report(t('instances.meshDeleteFailed', { detail: d.detail || '' }), 'err')
     } catch { report(t('instances.meshDeleteFailed', { detail: '' }), 'err') }
+    return false
   }, [activeSession, confirmDanger, refreshTsdfMeshList, report, t])
 
   const resumeRun = useCallback(async () => {
@@ -2024,6 +2035,8 @@ function App() {
     physicsDiameterCm, physicsBounce, isAdmin: user?.role === 'admin', deleteVolume, sceneObjSel,
     segments, canManage, renameSession, createSession, setReference, renameSegment, renamePlaced, addLibraryItem,
     handlePipelineCancel, pipelineRunning, eraseBoxSel, readouts,
+    bimModels, sabanaVisible, sabanaLoading, handleGenerateComparison, runComparison, handleToggleSabana,
+    deleteSession, deleteSegment, deleteTsdfMesh, runGenrecon, applyFloorLevel,
   })
   cmd.current = {
     connected, connectToServer, disconnect, sessions, activeSession, handleSessionLoad, handleUnload,
@@ -2033,6 +2046,8 @@ function App() {
     physicsDiameterCm, physicsBounce, isAdmin: user?.role === 'admin', deleteVolume, sceneObjSel,
     segments, canManage, renameSession, createSession, setReference, renameSegment, renamePlaced, addLibraryItem,
     handlePipelineCancel, pipelineRunning, eraseBoxSel, readouts,
+    bimModels, sabanaVisible, sabanaLoading, handleGenerateComparison, runComparison, handleToggleSabana,
+    deleteSession, deleteSegment, deleteTsdfMesh, runGenrecon, applyFloorLevel,
   }
   /** what the interface says of itself with every question to STAC (the model needs the
    *  sessions' names to open one) */
@@ -2046,7 +2061,8 @@ function App() {
     }
   }, [])
   useEffect(() => {
-    type AppCommandId = Exclude<UiCommandId, PanelCommandId | ViewportCommandId | FlythroughCommandId | CalibrationCommandId | BimCommandId>
+    type AppCommandId = Exclude<UiCommandId, PanelCommandId | ViewportCommandId | FlythroughCommandId | CalibrationCommandId | BimCommandId
+      | CertifyCommandId | EvaluationCommandId | ReportCommandId>
     const done: Outcome = { ok: true }
     const noSession: Outcome = { ok: false, reason: 'no_session' }
     const open = () => cmd.current.activeSession
@@ -2100,6 +2116,30 @@ function App() {
       if (!job || ['done', 'failed', 'cancelled'].includes(job.status)) return { ok: false, reason: 'nothing_to_do' }
       return { ok: true, detail: job.session_id || open() || '' }
     }
+    /** the BIM comparison needs a model and a segmentation */
+    const comparable = (): Outcome => {
+      if (!open()) return noSession
+      return cmd.current.bimModels.length > 0 && cmd.current.segments.length > 0 ? done : { ok: false, reason: 'nothing_to_do' }
+    }
+    const meshBy = (mesh: string): MeshListItem | Outcome => {
+      if (!open()) return noSession
+      const all = cmd.current.tsdfMeshes
+      if (!all.length) return { ok: false, reason: 'nothing_to_do' }
+      const found = findByName(all, mesh, m => [m.folder, m.label])
+      if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.map(m => m.label || m.folder).join(', ') }
+      return found.item ?? { ok: false, reason: 'not_found', detail: mesh }
+    }
+    /** a command with confirmation over one found item: `prepare` names it, `run` acts on it */
+    const onFound = <A, T>(find: (a: A) => T | Outcome, name: (x: T) => string, act: (x: T, a: A) => Promise<unknown> | unknown) => ({
+      prepare: (a: A): Outcome => { const x = find(a); return isOutcome(x) ? x : { ok: true, detail: name(x) } },
+      run: async (a: A): Promise<Outcome> => {
+        const x = find(a)
+        if (isOutcome(x)) return x
+        const r = await act(x, a)
+        return r === false || typeof r === 'string' ? { ok: false, reason: 'failed', detail: typeof r === 'string' ? r : name(x) } : { ok: true, detail: name(x) }
+      },
+    })
+    const isOutcome = (x: unknown): x is Outcome => typeof x === 'object' && x !== null && 'ok' in x && typeof (x as { ok: unknown }).ok === 'boolean'
     const TOOL: Record<string, Tool> = {
       navigate: 'navigate', measure_distance: 'measure-distance', measure_angle: 'measure-angle',
       section_box: 'section-box', brush: 'erase', align: 'align',
@@ -2428,6 +2468,27 @@ function App() {
         const r = await cmd.current.renameSession(sn.id, name)
         return r === true ? { ok: true, detail: sn.name } : { ok: false, reason: 'failed', detail: r }
       },
+      'sessions.delete': onFound(
+        ({ session }: { session: string }) => (cmd.current.canManage ? sessionBy(session) : notAllowed),
+        sn => sn.name, sn => cmd.current.deleteSession(sn.id, true)),
+      'instances.delete': onFound(({ id }: { id: number | string }) => segmentBy(id), seg => `${seg.label} (${seg.id})`, seg => cmd.current.deleteSegment(seg, true)),
+      'instances.set_floor_level': onFound(({ id }: { id: number | string }) => segmentBy(id), seg => `${seg.label} (${seg.id})`,
+        seg => cmd.current.applyFloorLevel(open()!, 'explicit', seg.id)),
+      'meshes.delete': onFound(({ mesh }: { mesh: string }) => meshBy(mesh), m => m.label || m.folder, m => cmd.current.deleteTsdfMesh(m, true)),
+      'meshes.run_genrecon': onFound(
+        (_a: { confidence: number }) => { const sid = open(); return sid ? { sid, scan: cmd.current.activeScanTab } : noSession },
+        x => `${x.sid}${x.scan ? ` ${x.scan}` : ''}`, (_x, a) => cmd.current.runGenrecon(a.confidence)),
+      'deviation.open_compare': () => { const c = comparable(); if (c.ok) cmd.current.handleGenerateComparison(); return c },
+      'deviation.run_comparison': onFound(
+        (_a: { registration: 'auto' | 'manual' }) => { const c = comparable(); return !c.ok ? c : cmd.current.sabanaLoading ? { ok: false as const, reason: 'unavailable' as const } : { sid: open()! } },
+        x => x.sid, (_x, a) => { setUseManualAlignment(a.registration === 'manual'); void cmd.current.runComparison(a.registration) }),
+      'deviation.toggle_view': ({ on }) => {
+        const sid = open()
+        if (!sid) return noSession
+        if (!cmd.current.sessions.find(x => x.id === sid)?.hasSabana) return { ok: false, reason: 'nothing_to_do' }
+        if (on !== cmd.current.sabanaVisible) cmd.current.handleToggleSabana()
+        return { ok: true, state: on }
+      },
       'sessions.filter': ({ text }) => { cmd.current.layout.setLeftTab('sessions'); setSessionFilter(text); return done },
       'scans.set_reference': async ({ scan }) => {
         const sid = open()
@@ -2529,6 +2590,9 @@ function App() {
     const withSession = (openIt: () => void) => () => { if (!open()) return false; openIt() }
     const unOpeners = registerOpeners({
       bim: withSession(() => cmd.current.layout.setLeftTab('bim')),
+      certify: withSession(() => { setShowCertifyKit(true); cmd.current.layout.openInspector('acta') }),
+      evaluation: () => cmd.current.layout.openDock('evaluation'),
+      reports: () => { if (!comparable().ok) return false; cmd.current.layout.openDock('report') },
       calibration: withSession(() => setCalibrationOpen(true)),
     })
     const unCommands = registerCommands(executors)
@@ -3093,7 +3157,7 @@ function App() {
         footer={<><Button onClick={() => setCompareDialogOpen(false)}>{t('common.cancel')}</Button><Button variant="primary" onClick={runComparison} data-autofocus>{t('deviation.runComparison')}</Button></>}>
         <p className="stac-dialog__message">{t('deviation.compareDesc')}</p>
         <Field label={t('deviation.registration')} inline>
-          <SegmentedControl<'auto' | 'manual'> ariaLabel={t('deviation.registration')} value={useManualAlignment ? 'manual' : 'auto'} onChange={v => setUseManualAlignment(v === 'manual')}
+          <SegmentedControl<'auto' | 'manual'> ariaLabel={t('deviation.registration')} value={manualAlignmentChosen ? 'manual' : 'auto'} onChange={v => setUseManualAlignment(v === 'manual')}
             options={[{ value: 'auto', label: t('deviation.registrationAuto') }, { value: 'manual', label: t('deviation.registrationManual') }]} />
         </Field>
       </Dialog>
@@ -3109,7 +3173,7 @@ function App() {
         onClose={() => setAutosegOpen(false)} onRun={runAutosegment} />
 
       <GenreconDialog open={genreconOpen} sessionId={activeSession} scanLabel={activeScanTab} defaultConfidence={confidenceThreshold}
-        onClose={() => setGenreconOpen(false)} onRun={runGenrecon} />
+        onClose={() => setGenreconOpen(false)} onRun={async c => { await runGenrecon(c) }} />
 
       {activeSession && (
         <ReferenceDialog open={referenceDialog !== null} sessionId={activeSession} scanKey={activeScanTab} initialMode={referenceDialog ?? 'distance'}

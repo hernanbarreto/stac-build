@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { registerCommands, type CertifyCommandId, type Executors } from '../commands/registry'
 import { CheckCircle2, Crosshair, AlertTriangle } from 'lucide-react'
 import { Section, Row, Stack, KeyValue } from './ui/Panel'
 import { Button } from './ui/Button'
@@ -131,10 +132,38 @@ export default function CertifyKitPanel({ session, token, viewport, onStatus, re
       const d = await r.json().catch(() => ({}))
       onStatus(r.ok ? t('certify.selected', { epoch: d.epoch ?? epoch })
         : t('certify.selectFailed', { detail: typeof d.detail === 'string' ? d.detail : JSON.stringify(d.detail || d) }))
-    } catch { onStatus(t('certify.selectFailed', { detail: '' })) }
+      if (!r.ok) { setBusy(false); load(); return typeof d.detail === 'string' ? d.detail : JSON.stringify(d.detail || d) }
+    } catch { onStatus(t('certify.selectFailed', { detail: '' })); setBusy(false); load(); return 'failed' }
     setBusy(false)
     load()
+    return null
   }
+
+  // STAC's commands of the certificate panel (server/commands/catalog/230_certify.yaml), while it is open
+  const kcmd = useRef({ selectEpoch, busy, hasPrevious: false })
+  kcmd.current = { selectEpoch, busy, hasPrevious: !!epochs?.previous?.find((p: any) => p.potree) }
+  useEffect(() => {
+    const executors: Executors<CertifyCommandId> = {
+      'certify.set_epoch_layers': ({ before, after }) => {
+        if (before && !kcmd.current.hasPrevious) return { ok: false, reason: 'unavailable' }
+        if (before !== undefined) setBeforeOn(before)
+        if (after !== undefined) setAfterOn(after)
+        return { ok: true }
+      },
+      'certify.show_trajectory_edges': ({ odometry, loops }) => {
+        if (odometry !== undefined) setShowOdometry(odometry)
+        if (loops !== undefined) setShowLoops(loops)
+        return { ok: true }
+      },
+      'certify.select_epoch': async ({ epoch }) => {
+        if (kcmd.current.busy) return { ok: false, reason: 'unavailable' }
+        const why = await kcmd.current.selectEpoch(epoch)
+        return why == null ? { ok: true } : { ok: false, reason: 'failed', detail: why }
+      },
+      'certify.set_section_tab': ({ tab: section }) => { setTab(section); return { ok: true } },
+    }
+    return registerCommands(executors)
+  }, [])
 
   const fly = (p: number[] | null | undefined, radius = 3) => { if (p && viewport) viewport.flyToPoint(p, radius) }
   const cm = (m: number | null | undefined, digits = 1) => (m != null ? `${fmt.number(m * 100, digits)} cm` : t('status.dash'))

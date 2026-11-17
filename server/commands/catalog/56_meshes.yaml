@@ -117,7 +117,6 @@ commands:
 - id: meshes.delete
   kind: action
   runs_on: ui
-  status: manual
   model: DELETE one mesh of the session from the disk for good (its folder among the session's meshes). It cannot
     be undone.
   confirm: true
@@ -136,18 +135,24 @@ commands:
       - eliminá del disco la malla vieja
       - borrá para siempre ese mallado
       - descartá el resultado de genrecon
+      done: Malla {detail} eliminada.
+      ask: Voy a eliminar del disco la malla {detail}. No se puede deshacer.
     en:
       title: Delete a mesh
       say:
       - delete the old mesh from the disk
       - erase that meshing for good
       - discard the genrecon result
+      done: Mesh {detail} deleted.
+      ask: I am going to delete the mesh {detail} from the disk. It cannot be undone.
     fr:
       title: Supprimer un maillage
       say:
       - supprime du disque l'ancien maillage
       - efface définitivement ce maillage
       - abandonne le résultat de genrecon
+      done: Maillage {detail} supprimé.
+      ask: Je vais supprimer du disque le maillage {detail}. C'est irréversible.
 - id: meshes.focus
   kind: action
   runs_on: ui
@@ -185,7 +190,6 @@ commands:
 - id: meshes.run_genrecon
   kind: action
   runs_on: ui
-  status: manual
   model: 'LAUNCH GenRecon on the open scan from its window: the mesh of the published cloud is generated and textured
     from the photos, as a queued job of long GPU work (tens of minutes to hours). confidence = the cloud''s confidence
     filter, 0 (every point) to 0.99.'
@@ -208,15 +212,21 @@ commands:
       - ejecutá genrecon
       - lanzá la generación del mallado
       - corré genrecon con confianza cero
+      done: GenRecon de {detail} lanzado.
+      ask: 'Voy a lanzar GenRecon sobre {detail} con confianza {confidence}: trabajo largo de GPU, en cola.'
     en:
       title: Run GenRecon
       say:
       - run genrecon
       - launch the generation of the meshing
       - start genrecon at zero confidence
+      done: GenRecon of {detail} launched.
+      ask: 'I am going to launch GenRecon on {detail} with confidence {confidence}: long GPU work, queued.'
     fr:
       title: Lancer GenRecon
       say:
       - lance genrecon
       - démarre la génération du maillage
       - genrecon avec une confiance de zéro
+      done: GenRecon de {detail} lancé.
+      ask: 'Je vais lancer GenRecon sur {detail} avec la confiance {confidence} : long travail GPU, en file d''attente.'

@@ -8,7 +8,8 @@
  * Endpoints: GET /api/evaluation/runs, GET /api/evaluation/runs/{run_id},
  * GET /api/evaluation/runs/{run_id}/file?path=<relative path>.
  */
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { findByName, registerCommands, type EvaluationCommandId, type Executors } from '../commands/registry'
 import { Braces, File, FileSpreadsheet, FileText, FlaskConical, Folder, Image, RefreshCw } from 'lucide-react'
 import { Badge, type BadgeTone } from '../components/ui/Badge'
 import { Banner } from '../components/ui/Banner'
@@ -216,6 +217,31 @@ export function EvaluationPanel() {
       .finally(() => { if (!cancelled) setContentLoading(false) })
     return () => { cancelled = true }
   }, [selected, runId])
+
+  // STAC's commands of this tab (server/commands/catalog/240_evaluation.yaml), while it is open
+  const ecmd = useRef({ runs, detail, loadRuns })
+  ecmd.current = { runs, detail, loadRuns }
+  useEffect(() => {
+    const executors: Executors<EvaluationCommandId> = {
+      'evaluation.refresh_runs': async () => { await ecmd.current.loadRuns(); return { ok: true } },
+      'evaluation.select_run': ({ run_id }) => {
+        const found = findByName(ecmd.current.runs, run_id, r => [r.run_id])
+        if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.slice(0, 8).map(r => r.run_id).join(', ') }
+        if (!found.item) return { ok: false, reason: 'not_found', detail: run_id }
+        setRunId(found.item.run_id); return { ok: true, detail: found.item.run_id }
+      },
+      'evaluation.open_file': ({ path }) => {
+        const files = ecmd.current.detail?.files ?? []
+        if (!files.length) return { ok: false, reason: 'nothing_to_do' }
+        const found = findByName(files, path, f => [f.path, f.path.split('/').pop() ?? f.path])
+        if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.slice(0, 8).map(f => f.path).join(', ') }
+        if (!found.item) return { ok: false, reason: 'not_found', detail: path }
+        setSelected(found.item); return { ok: true, detail: found.item.path }
+      },
+      'evaluation.set_json_view': ({ mode }) => { setJsonMode(mode); return { ok: true } },
+    }
+    return registerCommands(executors)
+  }, [])
 
   const run = runs.find(r => r.run_id === runId) ?? null
   const sizeText = useCallback((bytes: number) => (bytes >= 1e6 ? fmt.bytesMb(bytes / 1e6) : t('evaluation.kb', { n: fmt.integer(Math.max(1, Math.round(bytes / 1024))) })), [fmt, t])

@@ -2,7 +2,7 @@
 // The commands of the interface STAC can run: their ids and the type of each one's arguments.
 // A new command is declared in the catalogue; this file is then regenerated and the compiler
 // asks for its executor (ui/src/commands/registry.ts).
-export const CATALOG_SHA256 = '810dc5d70f2b9cbdb9e708a404ba5f030ddb2f28e06300ba66a107e53a766f4c'
+export const CATALOG_SHA256 = '0eb25577c71ea07016806f9c7c7ed9a035bb99b35a1fecb8b4b16465555f0b10'
 
 export const UI_COMMAND_IDS = [
   'talk.set_user_name',
@@ -47,7 +47,9 @@ export const UI_COMMAND_IDS = [
   'meshes.show',
   'meshes.wireframe',
   'meshes.open_genrecon',
+  'meshes.delete',
   'meshes.focus',
+  'meshes.run_genrecon',
   'app.connect',
   'app.disconnect',
   'app.fullscreen',
@@ -69,6 +71,7 @@ export const UI_COMMAND_IDS = [
   'sessions.select',
   'sessions.create',
   'sessions.rename',
+  'sessions.delete',
   'sessions.filter',
   'scans.open',
   'scans.list',
@@ -123,7 +126,9 @@ export const UI_COMMAND_IDS = [
   'brush.clear_marks',
   'brush.undo',
   'instances.rename',
+  'instances.delete',
   'instances.filter',
+  'instances.set_floor_level',
   'instances.cubes_set_visible',
   'instances.cubes_set_all_visible',
   'instances.cubes_focus',
@@ -137,7 +142,19 @@ export const UI_COMMAND_IDS = [
   'bim.ctx_hide',
   'bim.ctx_isolate',
   'bim.ctx_show_all',
+  'deviation.open_compare',
+  'deviation.run_comparison',
+  'deviation.toggle_view',
+  'certify.set_epoch_layers',
+  'certify.show_trajectory_edges',
+  'certify.select_epoch',
+  'certify.set_section_tab',
+  'evaluation.refresh_runs',
+  'evaluation.select_run',
+  'evaluation.open_file',
+  'evaluation.set_json_view',
   'admin.open',
+  'reports.run_deviation',
 ] as const
 
 export type UiCommandId = typeof UI_COMMAND_IDS[number]
@@ -146,13 +163,20 @@ export type UiCommandId = typeof UI_COMMAND_IDS[number]
 export const UI_CONFIRM_IDS = [
   'volumes.delete',
   'viewer.align_save',
+  'meshes.delete',
+  'meshes.run_genrecon',
+  'sessions.delete',
   'calibration.delete_measurement',
   'calibration.delete_plane',
   'calibration.apply',
   'objects.remove_selected',
   'objects.remove',
   'pipeline.cancel',
+  'instances.delete',
+  'instances.set_floor_level',
   'bim.delete_ifc',
+  'deviation.run_comparison',
+  'reports.run_deviation',
 ] as const
 
 export type UiConfirmId = typeof UI_CONFIRM_IDS[number]
@@ -200,7 +224,9 @@ export interface UiCommandArgs {
   'meshes.show': { on: boolean; mesh?: string }
   'meshes.wireframe': { on: boolean }
   'meshes.open_genrecon': Record<string, never>
+  'meshes.delete': { mesh: string }
   'meshes.focus': { mesh: string }
+  'meshes.run_genrecon': { confidence: number }
   'app.connect': Record<string, never>
   'app.disconnect': Record<string, never>
   'app.fullscreen': { on?: boolean }
@@ -222,6 +248,7 @@ export interface UiCommandArgs {
   'sessions.select': { session: string }
   'sessions.create': { name: string }
   'sessions.rename': { session: string; name: string }
+  'sessions.delete': { session: string }
   'sessions.filter': { text: string }
   'scans.open': { scan: string }
   'scans.list': Record<string, never>
@@ -276,7 +303,9 @@ export interface UiCommandArgs {
   'brush.clear_marks': Record<string, never>
   'brush.undo': Record<string, never>
   'instances.rename': { id: number | string; label: string }
+  'instances.delete': { id: number | string }
   'instances.filter': { text: string }
+  'instances.set_floor_level': { id: number | string }
   'instances.cubes_set_visible': { id: number; on: boolean }
   'instances.cubes_set_all_visible': { on: boolean }
   'instances.cubes_focus': { id: number }
@@ -290,5 +319,17 @@ export interface UiCommandArgs {
   'bim.ctx_hide': { element: number | string }
   'bim.ctx_isolate': { element: number | string }
   'bim.ctx_show_all': Record<string, never>
+  'deviation.open_compare': Record<string, never>
+  'deviation.run_comparison': { registration: 'auto' | 'manual' }
+  'deviation.toggle_view': { on: boolean }
+  'certify.set_epoch_layers': { before?: boolean; after?: boolean }
+  'certify.show_trajectory_edges': { odometry?: boolean; loops?: boolean }
+  'certify.select_epoch': { epoch: number }
+  'certify.set_section_tab': { tab: 'attention' | 'edges' | 'duplicates' | 'acta' }
+  'evaluation.refresh_runs': Record<string, never>
+  'evaluation.select_run': { run_id: string }
+  'evaluation.open_file': { path: string }
+  'evaluation.set_json_view': { mode: 'structured' | 'raw' }
   'admin.open': Record<string, never>
+  'reports.run_deviation': { tolerance_mm: number }
 }

@@ -202,7 +202,6 @@ commands:
 - id: sessions.delete
   kind: action
   runs_on: ui
-  status: manual
   model: 'DELETE a session from the server with ALL its data: video, frames, cloud, segmentation, meshes. It cannot
     be undone. For administrators and managers.'
   confirm: true
@@ -220,18 +219,24 @@ commands:
       - eliminá ese proyecto con todos sus datos
       - borralo del servidor
       - sacalo para siempre
+      done: Sesión {detail} eliminada.
+      ask: 'Voy a ELIMINAR del servidor la sesión {detail} con todos sus datos: video, cuadros, nube, segmentación y mallas. No se puede deshacer.'
     en:
       title: Delete a session
       say:
       - delete that project and all its data
       - erase it from the server
       - remove it for good
+      done: Session {detail} deleted.
+      ask: 'I am going to DELETE the session {detail} from the server with all its data: video, frames, cloud, segmentation and meshes. It cannot be undone.'
     fr:
       title: Supprimer une session
       say:
       - supprime ce projet avec toutes ses données
       - efface-le du serveur
       - retire-le définitivement
+      done: Session {detail} supprimée.
+      ask: 'Je vais SUPPRIMER du serveur la session {detail} avec toutes ses données : vidéo, images, nuage, segmentation et maillages. C''est irréversible.'
 - id: sessions.filter
   kind: query
   runs_on: ui

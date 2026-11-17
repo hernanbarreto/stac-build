@@ -48,6 +48,11 @@ export type CalibrationCommandId = 'calibration.save_distance' | 'calibration.sa
 export type BimCommandId = 'bim.load_ifc' | 'bim.delete_ifc' | 'bim.set_element_visible' | 'bim.select_element' | 'bim.set_element_opacity'
   | 'bim.filter' | 'bim.ctx_set_transparency' | 'bim.ctx_hide' | 'bim.ctx_isolate' | 'bim.ctx_show_all'
 
+/** … the certificate panel, the Evaluation tab and the Report tab of the dock, while each is open */
+export type CertifyCommandId = 'certify.set_epoch_layers' | 'certify.show_trajectory_edges' | 'certify.select_epoch' | 'certify.set_section_tab'
+export type EvaluationCommandId = 'evaluation.refresh_runs' | 'evaluation.select_run' | 'evaluation.open_file' | 'evaluation.set_json_view'
+export type ReportCommandId = 'reports.run_deviation'
+
 /** one command of an answer, as the server sends it */
 export interface UiAction {
   id: string

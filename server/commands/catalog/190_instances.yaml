@@ -54,7 +54,6 @@ commands:
 - id: instances.delete
   kind: action
   runs_on: ui
-  status: manual
   model: 'DELETE one object of the segmentation for good: its entry and its masks (its points stay in the cloud,
     unsegmented). It cannot be undone. Hiding an object is another command.'
   confirm: true
@@ -75,18 +74,24 @@ commands:
       - eliminá la instancia 12
       - borrá ese objeto de la segmentación
       - sacá ese segmento para siempre
+      done: Objeto {detail} eliminado.
+      ask: 'Voy a eliminar el objeto {detail} de la segmentación: su entrada y sus máscaras. Sus puntos quedan en la nube, sin segmentar. No se puede deshacer.'
     en:
       title: Delete an object
       say:
       - delete instance 12
       - erase that object from the segmentation
       - remove that segment for good
+      done: Object {detail} deleted.
+      ask: 'I am going to delete the object {detail} from the segmentation: its entry and its masks. Its points stay in the cloud, unsegmented. It cannot be undone.'
     fr:
       title: Supprimer un objet
       say:
       - supprime l'instance 12
       - efface cet objet de la segmentation
       - retire ce segment définitivement
+      done: Objet {detail} supprimé.
+      ask: 'Je vais supprimer l''objet {detail} de la segmentation : son entrée et ses masques. Ses points restent dans le nuage, non segmentés. C''est irréversible.'
 - id: instances.filter
   kind: query
   runs_on: ui
@@ -124,7 +129,6 @@ commands:
 - id: instances.set_floor_level
   kind: action
   runs_on: ui
-  status: manual
   model: 'Choose which object is the FLOOR at y = 0: the scene is levelled on it. It REWRITES the scan''s floor
     frame and every object''s box.'
   confirm: true
@@ -145,18 +149,24 @@ commands:
       - poné el piso en y igual a cero
       - nivelá la escena con este piso
       - usá la losa 3 como piso
+      done: Piso nivelado sobre {detail}.
+      ask: 'Voy a poner el piso en y = 0 sobre {detail}: se reescribe el marco del piso del escaneo y la caja de cada objeto.'
     en:
       title: Set the floor at y = 0
       say:
       - put the floor at y equals zero
       - level the scene on this floor
       - use slab 3 as the floor
+      done: Floor levelled on {detail}.
+      ask: 'I am going to set the floor at y = 0 on {detail}: the scan''s floor frame and every object''s box are rewritten.'
     fr:
       title: Mettre le sol à y = 0
       say:
       - mets le sol à y égal zéro
       - nivelle la scène sur ce sol
       - utilise la dalle 3 comme sol
+      done: Sol nivelé sur {detail}.
+      ask: 'Je vais placer le sol à y = 0 sur {detail} : le repère du sol du scan et la boîte de chaque objet sont réécrits.'
 - id: instances.cubes_set_visible
   kind: action
   runs_on: ui
