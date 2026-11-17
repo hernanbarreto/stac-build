@@ -8,6 +8,7 @@
 // Nothing is recognised or synthesised in the browser and no audio leaves the pod: the browser
 // only records (MediaRecorder) and plays.
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { readStoredLang } from '../i18n'
 
 export type VoiceLang = 'es' | 'en' | 'fr'
 
@@ -76,6 +77,8 @@ export function useVoice(sessionId: string | null, scanKey?: string | null, getN
       if (sessionId) q.set('session_id', sessionId)
       if (scanKey) q.set('scan', scanKey)
       // the names the recogniser should know how to write: the sessions on the server, the scans
+      // the language selected in the settings: what a silence is taken to be in (English by default)
+      q.set('lang', readStoredLang())
       const names = getNames?.() ?? []
       if (names.length) q.set('vocab', names.slice(0, 40).join(','))
       const r = await fetch(`/api/voice/transcribe?${q.toString()}`, { method: 'POST', headers: { 'Content-Type': blob.type || 'application/octet-stream' }, body: blob })
@@ -86,7 +89,7 @@ export function useVoice(sessionId: string | null, scanKey?: string | null, getN
         return null
       }
       return {
-        text: String(d.text || ''), language: (d.language as VoiceLang) || 'es', noSpeech: !!d.no_speech || !String(d.text || '').trim(),
+        text: String(d.text || ''), language: (d.language as VoiceLang) || readStoredLang(), noSpeech: !!d.no_speech || !String(d.text || '').trim(),
         audioSeconds: Number(d.audio_s || 0), addressed: !!d.addressed, command: String(d.command ?? d.text ?? ''), ack: String(d.ack || ''),
       }
     } catch (e) {

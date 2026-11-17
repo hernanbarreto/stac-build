@@ -315,6 +315,32 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   · Measured 2026-11-14: a spoken turn after the user stops = transcription 0.3-0.4 s + the model 0.4 s (no
     scan) / 1.0-1.5 s (a scan open) + synthesis 0.1 s. HIS EAR on the three voices and HIS EYE on the commands
     in the browser: pending (nothing of the interface side was tried in a browser by the assistant).
+- ⭐ THE DEFAULT LANGUAGE IS ENGLISH, OR THE ONE SELECTED IN THE SETTINGS (USER 2026-11-17: "el idioma por defecto
+  tanto para escuchar como para conversar debe ser ingles, o el seleccionado en la configuracion"): the interface
+  with no language chosen is English (`ui/src/i18n` DEFAULT_LANG); a turn's language is the sentence's own when its
+  words tell, else the conversation's, else THE SETTINGS', else the recogniser's, else English
+  (`answers.default_language` — the settings now come BEFORE the recogniser's guess); a silence is reported in the
+  settings' language. Speech itself is still written in the language DETECTED among es / en / fr — whether the
+  recogniser should instead always listen in the settings' language: asked to him, not decided.
+- ⭐ THE EXPORTER (USER 2026-11-17: "hagamos un exportador a IFC … podriamos exportar la nube de puntos compatible
+  con varios programas, la malla glb con la textura, y el IFC … y que la persona lo pueda descargar en su maquina";
+  to the proposal: "si los 3" / "correcto, tal como lo indicas" / "correcto, coincido con vos"): `server/exporter/`
+  + `exporter_api.py` + the Export window (Instances panel, the tools menu, `export.open` / `export.run` by voice).
+  One ZIP per scan, kept in the project's `exports/` (a new export replaces it), chosen by ticks: the cloud as E57
+  + LAS 1.4 + PLY (filtered by the viewer's confidence, as GenRecon's), every published mesh as its GLB, the
+  building elements as IFC, every object as CSV, and a README (es / en / fr). ONE FRAME: the display frame written
+  Z-up, (x, y, z) → (x, −z, y); the GLB keeps glTF's Y-up. EXPORTED AS ON DISK: an unapplied calibration is NOT in
+  the files — the README says the epoch, the calibration's state and its factor. The files are written on the
+  local disk (`export.scratch_dir`) and the export runs in its own process (CPU). pccr 3108, the six items: 50 s,
+  1.85 GB. pye57 was installed in the da3 env for it. NOT TRIED IN A BROWSER; no file was opened in another
+  program (ReCap, CloudCompare, Revit) — only read back with the libraries that wrote them.
+- AN IFC FROM A SCAN (USER 2026-11-17: "create un IFC vos a partir de PCCR3108, para comparar contra ese mismo,
+  porque es simple"): `bim/ifc_from_scan.py` — each segmented BUILDING element (floor, tile, wall, drywall,
+  ceiling, door, window, beam, column, duct, pipe: the assistant's list) as the box the store holds, named
+  `<label>:<label>:<instance id>` (the key the comparison matches by), byte-identical on a re-run.
+  `projects/pccr/ifcs/pccr_2026-08-31_default_from_scan.ifc`: 578 elements. THE BIM COMPARISON ITSELF (bim/
+  comparison.py, March) still reads the pre-scan layout (cleaned_cloud.ply and globalIndices at the session's
+  root): not run against it yet — the next step of that point.
 - Segment cleaning: RANSAC on, DBSCAN OFF (*"este sí borra puntos"*), the 5 cm voxel quads OFF; OBBs fitted to the
   points. Viewer: segmentation lamps / windows as lights, point opacity, shadows for meshes.
 
@@ -347,6 +373,12 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
 - ⭐⭐ THE LIST TO RESUME FROM (USER 2026-11-14: "anota todo esto como pendiente claro en claude.md para retomar en la
   proxima sesion"). The state on 2026-11-14, main a51092a pushed to origin main and master; each item's detail is
   in its own entry below. NEXT QUESTION TO HIM: start with the fusion (merge + compare)?
+  (2026-11-17: the commands and the spoken confirmation DONE — §5; the exporter and an IFC of pccr 3108 built —
+  §5; FUSION, his words: to compare two or more epochs their scales must be paired — "deberian marcarse dos puntos
+  y decir estos son los mismos en ambas … y que se ajusten a uno de ellos, o a una medida externa … para que se
+  puedan posar uno sobre otro y comparar"; answered: with levelled scans two common points fix scale, yaw and
+  position, three or more give a residual. NEXT: the BIM comparison of pccr 3108 against its own IFC, then
+  merge / compare 3108 with 2408 through marked common points.)
   A · FOR DECEMBER, in his order:
     1. FUSION — a. MERGE (scans of different days as ONE cloud and mesh); b. COMPARE (pccr 2408 against 3108,
        aligned on the zones they share).

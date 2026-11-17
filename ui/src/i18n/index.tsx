@@ -152,11 +152,16 @@ interface I18nContextValue {
   fmt: Formatters
 }
 
+// THE DEFAULT LANGUAGE IS ENGLISH (USER 2026-11-17: "el idioma por defecto tanto para escuchar como para
+// conversar debe ser ingles, o el seleccionado en la configuracion"): the interface, what STAC answers in when a
+// sentence's own language cannot be told, and what it takes a silence or an unclear utterance to be in
+export const DEFAULT_LANG: Lang = 'en'
+
 const I18nContext = createContext<I18nContextValue>({
-  lang: 'es',
+  lang: DEFAULT_LANG,
   setLang: () => {},
-  t: makeTranslator('es'),
-  fmt: makeFormatters('es'),
+  t: makeTranslator(DEFAULT_LANG),
+  fmt: makeFormatters(DEFAULT_LANG),
 })
 
 export function readStoredLang(): Lang {
@@ -164,7 +169,7 @@ export function readStoredLang(): Lang {
     const v = localStorage.getItem(STORAGE_KEY)
     if (v === 'es' || v === 'en' || v === 'fr') return v
   } catch { /* storage unavailable */ }
-  return 'es'
+  return DEFAULT_LANG
 }
 
 // Module-level accessors for non-React code (Three.js helpers, canvas

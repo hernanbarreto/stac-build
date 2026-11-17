@@ -134,20 +134,25 @@ class Engines:
         self.transcribe(np.zeros(SAMPLE_RATE_IN, np.float32), "")
 
     # ── speech → text ───────────────────────────────────────────────────────────────────────
-    def transcribe(self, audio: "Any", prompt: str = "") -> Dict[str, Any]:
+    def transcribe(self, audio: "Any", prompt: str = "", default: str = "") -> Dict[str, Any]:
+        """``default``: the language a silence is reported in — the one selected in the interface's
+        settings, English when none is given (USER 2026-11-17: "el idioma por defecto tanto para
+        escuchar como para conversar debe ser ingles, o el seleccionado en la configuracion").
+        Speech itself is written in the language detected among ``voice.languages``."""
         torch = self.torch
+        quiet = default if default in self.langs else ("en" if "en" in self.langs else self.langs[0])
         t0 = time.time()
         seconds = len(audio) / SAMPLE_RATE_IN
         langs0 = {l: 0.0 for l in self.langs}
         if seconds == 0.0:
-            return {"text": "", "language": self.langs[0], "probabilities": langs0, "no_speech": True,
+            return {"text": "", "language": quiet, "probabilities": langs0, "no_speech": True,
                     "speech_s": 0.0, "audio_s": 0.0, "seconds": round(time.time() - t0, 3)}
         with torch.no_grad():
             spans = self._speech_timestamps(torch.from_numpy(audio), self.vad, sampling_rate=SAMPLE_RATE_IN,
                                             threshold=float(self.cfg["stt"]["vad_threshold"]))
         speech_s = sum(sp["end"] - sp["start"] for sp in spans) / SAMPLE_RATE_IN
         if not spans:
-            return {"text": "", "language": self.langs[0], "probabilities": langs0, "no_speech": True,
+            return {"text": "", "language": quiet, "probabilities": langs0, "no_speech": True,
                     "speech_s": 0.0, "audio_s": round(seconds, 2), "seconds": round(time.time() - t0, 3)}
         enc = self.proc.feature_extractor(audio, sampling_rate=SAMPLE_RATE_IN, return_tensors="pt",
                                           return_attention_mask=True)
@@ -229,11 +234,11 @@ def build_app(engines: Engines):
                 "loaded_s": engines.loaded_s, "pid": os.getpid()}
 
     @app.post("/transcribe")
-    async def transcribe(request: Request, prompt: str = ""):
+    async def transcribe(request: Request, prompt: str = "", default: str = ""):
         data = await request.body()
         try:
             audio = decode_audio(data, cfg["stt"]["max_audio_s"])
-            return engines.transcribe(audio, prompt)
+            return engines.transcribe(audio, prompt, default)
         except VoiceError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
 

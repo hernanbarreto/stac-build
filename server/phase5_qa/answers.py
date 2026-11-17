@@ -14,6 +14,16 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional
 
 LANGS = ("es", "en", "fr")               # the system's three languages
+# THE DEFAULT LANGUAGE (USER 2026-11-17: "el idioma por defecto tanto para escuchar como para
+# conversar debe ser ingles, o el seleccionado en la configuracion"): English, unless the
+# interface's settings say another — it decides when a sentence's own words do not
+DEFAULT_LANG = "en"
+
+
+def default_language(conversation: object, settings: object, recogniser: object) -> str:
+    """The language a turn falls back to when its sentence does not tell: the conversation's so
+    far, else the one selected in the settings, else what the recogniser heard, else English."""
+    return next((x for x in (conversation, settings, recogniser) if x in LANGS), DEFAULT_LANG)
 
 _ES_WORDS = {"el", "la", "los", "las", "que", "qué", "cual", "cuál", "cuanto", "cuánto", "cuantos",
              "cuántos", "cuantas", "cuántas", "hay", "entre", "donde", "dónde", "esta", "está",
@@ -45,7 +55,7 @@ _FR_WORDS = {"le", "la", "les", "un", "une", "des", "du", "de", "est", "sont", "
              "maintenant", "ici", "très", "bien", "aussi"}
 
 
-def language_of(question: str, default: str = "es") -> str:
+def language_of(question: str, default: str = DEFAULT_LANG) -> str:
     """The language of a WRITTEN question, by counting its function words (deterministic).
     ``default`` when no language has more than the others (a spoken question's language is the
     recogniser's, not this)."""
@@ -55,7 +65,7 @@ def language_of(question: str, default: str = "es") -> str:
     best = max(n.values())
     winners = [l for l in LANGS if n[l] == best]
     if best == 0 or len(winners) != 1:
-        return default if default in LANGS else "es"
+        return default if default in LANGS else DEFAULT_LANG
     return winners[0]
 
 
@@ -449,7 +459,7 @@ def compose(tool: str, args: Dict[str, Any], result: Any, lang: str) -> Optional
     here."""
     if not isinstance(result, dict):
         return None
-    lang = lang if lang in LANGS else "es"
+    lang = lang if lang in LANGS else DEFAULT_LANG
     bad = _insufficient(result, lang)
     if bad:
         return bad
@@ -524,25 +534,25 @@ _UI_REASONS = {
 # USER 2026-11-17: "confirmacion hablada con lo que stac nos dice que va a hacer, STAC, SI CONFIRMO"
 def confirm_how(lang: str) -> str:
     """What STAC adds after saying what it is going to do: how to confirm it."""
-    return _t(lang if lang in LANGS else "es", "Para hacerlo, di: «STAC, sí confirmo».",
+    return _t(lang if lang in LANGS else DEFAULT_LANG, "Para hacerlo, di: «STAC, sí confirmo».",
               "To go ahead, say: “STAC, yes, I confirm”.", "Pour continuer, dites : « STAC, oui, je confirme ».")
 
 
 def cancelled(lang: str) -> str:
-    return _t(lang if lang in LANGS else "es", "Cancelado: no hice nada.", "Cancelled: nothing was done.",
+    return _t(lang if lang in LANGS else DEFAULT_LANG, "Cancelado: no hice nada.", "Cancelled: nothing was done.",
               "Annulé : rien n'a été fait.")
 
 
 def not_confirmed(title: str, lang: str) -> str:
     """… when the sentence after STAC's question was something else: the held command is dropped."""
-    return _t(lang if lang in LANGS else "es", f"No lo confirmaste: «{title}» queda sin hacer.",
+    return _t(lang if lang in LANGS else DEFAULT_LANG, f"No lo confirmaste: «{title}» queda sin hacer.",
               f"You did not confirm: “{title}” was not done.",
               f"Vous n'avez pas confirmé : « {title} » n'a pas été fait.")
 
 
 def ui_reasons(lang: str) -> Dict[str, str]:
     """reason code → sentence, in ``lang``."""
-    lang = lang if lang in LANGS else "es"
+    lang = lang if lang in LANGS else DEFAULT_LANG
     return {k: _t(lang, *v) for k, v in _UI_REASONS.items()}
 
 
@@ -553,13 +563,13 @@ def ui_reasons(lang: str) -> Dict[str, str]:
 # as it is (the conversation's replies are written by the model, which is told the name).
 def ask_name(lang: str) -> str:
     """STAC's first question to someone whose name it does not know."""
-    return _t(lang if lang in LANGS else "es", "Hola, soy STAC. ¿Cómo te llamas?",
+    return _t(lang if lang in LANGS else DEFAULT_LANG, "Hola, soy STAC. ¿Cómo te llamas?",
               "Hello, I am STAC. What is your name?", "Bonjour, je suis STAC. Comment vous appelez-vous ?")
 
 
 def ask_name_again(lang: str) -> str:
     """… after doing what was asked by someone who has not said their name yet."""
-    return _t(lang if lang in LANGS else "es", "¿Y cómo te llamas?", "And what is your name?",
+    return _t(lang if lang in LANGS else DEFAULT_LANG, "¿Y cómo te llamas?", "And what is your name?",
               "Et comment vous appelez-vous ?")
 
 
@@ -577,7 +587,7 @@ def done_prefix(name: Optional[str], lang: str) -> str:
     name = " ".join(str(name or "").split())
     if not name:
         return ""
-    return _t(lang if lang in LANGS else "es", f"Listo, {name}.", f"Done, {name}.", f"C'est fait, {name}.")
+    return _t(lang if lang in LANGS else DEFAULT_LANG, f"Listo, {name}.", f"Done, {name}.", f"C'est fait, {name}.")
 
 
 def _lower_first(text: str) -> str:

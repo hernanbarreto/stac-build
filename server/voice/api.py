@@ -117,7 +117,8 @@ async def voice_status(start: bool = False):
 
 @router.post("/transcribe")
 async def voice_transcribe(request: Request, session_id: Optional[str] = None, scan: Optional[str] = None,
-                           vocab: Optional[str] = None):
+                           vocab: Optional[str] = None, lang: Optional[str] = None):
+    """``lang``: the language selected in the interface's settings — what a silence is taken to be in."""
     import asyncio
     cfg = voice_config.load()
     if not cfg["enabled"]:
@@ -141,7 +142,7 @@ async def voice_transcribe(request: Request, session_id: Optional[str] = None, s
                 store = None
         prompt = with_names(vocabulary(store, cfg), vocab)
         try:
-            with _post("/transcribe?" + urllib.parse.urlencode({"prompt": prompt}), data, ctype,
+            with _post("/transcribe?" + urllib.parse.urlencode({"prompt": prompt, "default": lang or ""}), data, ctype,
                        cfg["service"]["request_timeout_s"]) as r:
                 heard = json.loads(r.read())
             # WAS STAC SPOKEN TO (voice/wake.py): its name at the start or the end of what was

@@ -137,7 +137,7 @@ def test_the_three_languages(tmp_path, monkeypatch):
     assert answers.language_of("open the session and show the axes") == "en"
     assert answers.language_of("abrí la sesión y mostrá los ejes") == "es"
     assert answers.language_of("no te voy a decir") == "es"
-    assert answers.language_of("pccr", default="fr") == "fr" and answers.language_of("pccr", default="xx") == "es"
+    assert answers.language_of("pccr", default="fr") == "fr" and answers.language_of("pccr", default="xx") == "en"
 
 
 def test_stac_asks_the_name_and_never_stores_one_that_was_not_said(tmp_path, monkeypatch):
@@ -200,11 +200,19 @@ def test_the_answers_language_is_the_sentences_then_the_conversations(tmp_path, 
             ("abrí pccr", "en", "en", "es"),
             ("ouvre la session", "es", "es", "fr"),
             ("PCCR", "es", "en", "en"),                                   # no telling: the conversation's
-            ("PCCR", "fr", None, "fr"),                                   # … then the recogniser's
-            ("PCCR", None, None, "en")):                                  # … then the interface's (UI: en)
+            # … then THE ONE SELECTED IN THE SETTINGS (UI: en), ahead of the recogniser's guess (USER
+            # 2026-11-17: "el idioma por defecto tanto para escuchar como para conversar debe ser
+            # ingles, o el seleccionado en la configuracion")
+            ("PCCR", "fr", None, "en"),
+            ("PCCR", None, None, "en")):
         res, _ = _ask(monkeypatch, tmp_path, [("count_objects", {})], question, store=sp, ui=UI, lang=hint,
                       conversation_lang=conversation)
         assert res["lang"] == want, (question, hint, conversation)
+    # the settings say French: that is the default; with no settings, the recogniser's, then English
+    for ui, hint, want in (({**UI, "lang": "fr"}, "es", "fr"), ({**UI, "lang": None}, "es", "es"),
+                           ({**UI, "lang": None}, None, "en"), (None, None, "en")):
+        res, _ = _ask(monkeypatch, tmp_path, [("count_objects", {})], "PCCR", store=sp, ui=ui, lang=hint)
+        assert res["lang"] == want, (ui and ui["lang"], hint)
     # a description the VLM wrote in Spanish is said in the conversation's language: translated
     # once by the model, kept in the store
     from phase_r.instance_store import InstanceStore

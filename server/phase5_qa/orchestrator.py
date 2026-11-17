@@ -405,8 +405,7 @@ class SpatialQA:
         from commands import confirm
         from . import answers
         t0 = time.time()
-        hint = next((x for x in (conversation_lang, lang, (ui if isinstance(ui, dict) else {}).get("lang"))
-                     if x in answers.LANGS), "es")
+        hint = answers.default_language(conversation_lang, (ui if isinstance(ui, dict) else {}).get("lang"), lang)
         held = confirm.held(commands.database(), pending, hint) if pending else None
         said = confirm.verdict(question) if held else None
         if held is None or said is None:
@@ -474,9 +473,11 @@ class SpatialQA:
         # THE LANGUAGE OF THE ANSWER (USER 2026-11-14: "a veces le hablo en ingles y contesta en
         # español, debe mantener el idioma de la conversacion"): the sentence's own when its words
         # tell (the recogniser's language token said Spanish for his English four times that
-        # day while writing the English words); else the conversation's so far; else the
-        # recogniser's (``lang``); else the interface's
-        hint = next((x for x in (conversation_lang, lang, (ui or {}).get("lang")) if x in answers.LANGS), "es")
+        # day while writing the English words); else the conversation's so far; else THE ONE
+        # SELECTED IN THE SETTINGS (the interface's — USER 2026-11-17: "el idioma por defecto tanto
+        # para escuchar como para conversar debe ser ingles, o el seleccionado en la
+        # configuracion"); else the recogniser's (``lang``); else English
+        hint = answers.default_language(conversation_lang, (ui or {}).get("lang"), lang)
         lang = answers.language_of(question, default=hint)
         if self.tools is not None:
             self.tools.lang = lang
