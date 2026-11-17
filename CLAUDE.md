@@ -276,28 +276,29 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   · A TURN is ONE call of the model on the candidates of the sentence (`commands/router.py`: the scene's tools
     while a scan is open + the interface's and system's found by the sentence's words in the three languages;
     conversation and help always). WHAT TELLS A COMMAND FROM A QUESTION IS THE ROW THE MODEL PICKS.
-    THE DATABASE HOLDS 270 COMMANDS IN 31 AREAS (2026-11-14): STAC RUNS 132 — 44 of the scene, 2 of the
-    system, 86 of the interface (the connection, sessions, scans and their tabs, panels, full screen, language,
-    the viewer's tools, how the cloud is drawn, meshes, cubes, volumes, placed objects, the brush's settings,
-    physics, calibration, its own voice) — and the other 138 commands of the interface (every menu entry,
-    button, toggle and row action inventoried in the UI: 233 controls) are `manual`: declared in the three
-    languages, found by how people ask for them, and answered "se hace a mano por ahora, en <área>". They are
-    what launches GPU work or deletes data (`confirm: true` — a spoken confirmation is NOT built: on his word)
-    and what lives inside a dialog's own state (the Segmentation Manager, the references, BIM, the team, the
-    call, the admin forms). Wiring one = its executor in App.tsx + `status: available` + its `done` text +
-    `python -m commands.export_ui`. The
-    interface's commands come back as `ui_actions`; the interface runs them and words the outcome with the
-    server's texts. `manual` rows are offered too: STAC says they are done by hand. What launches GPU work or
-    deletes data only OPENS ITS WINDOW by voice (a confirmed launch by voice: not built — on his word).
+    THE DATABASE HOLDS 270 COMMANDS IN 31 AREAS AND STAC RUNS ALL OF THEM (2026-11-17, his "sobre todo los 138
+    comandos de la interfaz que siguen a mano" / "segui con los 100 que faltan … vamos a terminar de cerrar el
+    tema de comandos"): 44 of the scene, 2 of the system, 224 of the interface. A command of the interface is
+    executed by the component that OWNS its state — App.tsx, the viewer, or a panel / dialog that registers its
+    commands while it is open (Calibration, references, BIM tree, certificate, Evaluation, Report, Team, the
+    call, Administration, the Segmentation manager, Fuse, the flythrough); asked for with its window closed,
+    STAC opens it first (`registerOpeners`, by area). The owner's id type lives in `ui/src/commands/registry.ts`
+    and is excluded from `AppCommandId`. The interface's commands come back as `ui_actions`; the interface runs
+    them and words the outcome with the server's texts. A password and a file are never arguments (creating a
+    user fills the form; an IFC / a video opens the file window). `manual` stays as a status for a command
+    declared before its executor exists. Wiring one: `python -m commands.wire texts.yaml` + its executor +
+    `python -m commands.export_ui`.
   · THE SPOKEN CONFIRMATION (USER 2026-11-17: "confirmacion hablada con lo que stac nos dice que va a hacer,
-    STAC, SI CONFIRMO"): a `confirm: true` command STAC runs carries an `ask` text (what it is going to do) and
-    its executor is a `{ prepare, run }` pair — `prepare` changes nothing and names what will be acted on; the
-    interface HOLDS the command for ONE sentence and sends it back (`pending`); `commands/confirm.py` decides on
-    the sentence's WORDS, never the model ("sí confirmo" / "yes, I confirm" / "oui, je confirme"; a bare "sí"
-    does not confirm): yes → released (`confirmed`), a refusal → cancelled, anything else → dropped and said.
-    In hands-free the confirmation needs STAC's name. First wired 2026-11-17: volumes.delete, objects.remove,
-    objects.remove_selected (135 run, 135 manual). Wiring one: `python -m commands.wire texts.yaml` + the
-    executor + `python -m commands.export_ui`. NOT TRIED IN A BROWSER.
+    STAC, SI CONFIRMO"): the 40 `confirm: true` commands (GPU launches, deletions, what rewrites a scan —
+    pipeline.cancel and segmentation.manager_clear_all were ADDED to them by the assistant, declared to him)
+    carry an `ask` text and a `{ prepare, run }` executor — `prepare` changes nothing and names what will be
+    acted on; the interface HOLDS the command for ONE sentence and sends it back (`pending`);
+    `commands/confirm.py` decides on the sentence's WORDS, never the model ("sí confirmo" / "yes, I confirm" /
+    "oui, je confirme"; a bare "sí" does not confirm): yes → released (`confirmed`), a refusal → cancelled,
+    anything else → dropped and said. In hands-free the confirmation needs STAC's name. The handlers that asked
+    a danger dialog take `confirmed` (no dialog after a spoken confirmation). calibration.apply is among them:
+    by voice it is still HIS action. A CATALOGUE CHANGE NEEDS A BACKEND RESTART when the loader's code changed
+    with it (the running process re-reads the YAML with its OLD code). NOTHING OF THIS WAS TRIED IN A BROWSER.
     The scaling path when the catalogue outgrows word search (a first call on the AREAS, 0.3 s) is declared in
     router.py, not built.
   · THE VOICE: `server/voice/` (its own process, never the backend) — speech → text with the language detected
@@ -355,8 +356,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   B · WAITING FOR HIS DECISION:
     · the scales of pccr 2408 / 3108: where the factor that brings 3108 to 2408 is applied (the comparison's
       transform, the lengths shown, or the scan's geometry);
-    · (IN PROGRESS since 2026-11-17, his "sobre todo los 138 comandos de la interfaz que siguen a mano": the
-      spoken confirmation is built — §5 — and the manual commands are being wired area by area: 135 left);
+    · (DONE 2026-11-17, main 01ebfe7: the spoken confirmation and the 138 manual commands — §5; his eye /
+      ear on them in the browser is pending, section C);
     · the database as the single source of the segmentation, the Segmentation Manager included (a project);
     · GenRecon's mesh step: the global remesh closes every sheet into a shell (the floor as two sheets) and the
       simplification leaves the faceting — found, not corrected; the UV unwrap on the card (other textures);

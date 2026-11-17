@@ -2309,15 +2309,22 @@ offered — declared in `router.py`, not built.
 its executor where the compiler asks; for `scene` / `system` write its handler and, when the tool layer should word
 its result, its composer in `answers.py`. Nothing else lists commands.
 
-The database holds **270 commands in 31 areas**. STAC runs 132 of them: 44 of the scene, 2 of the system and 86 of
-the interface (the connection, sessions and scans, panels, full screen, language, the viewer's tools, how the cloud
-is drawn, meshes, cubes, volumes, placed objects, the brush's settings, physics, calibration, its own voice). The
-other 138 commands of the interface — every remaining menu entry, button, toggle and row action — are `manual`:
-declared in the three languages and found by how people ask for them; STAC answers that they are done by hand and
-under which area. They are what launches GPU work or deletes data (`confirm: true`: a spoken confirmation is not
-built yet) and what lives inside a dialog's own state.
+The database holds **270 commands in 31 areas** and STAC runs all of them: 44 of the scene, 2 of the system and
+224 of the interface. A command of the interface is executed by the component that owns its state — the app, the
+viewer, or a panel / dialog (Calibration, references, the BIM tree, the certificate, Evaluation, Report, Team, the
+call, Administration, the Segmentation manager, Fuse, the flythrough), which registers its commands while it is
+open; asked for with its window closed, STAC opens the window first (`registerOpeners`). `manual` stays as a status
+for a future command with no executor yet.
 
-Tests: `tests/test_commands_db.py`, `tests/test_commands_turn.py`.
+**The spoken confirmation** (`commands/confirm.py`). The 40 commands that launch GPU work, delete data or rewrite a
+scan are declared `confirm: true`: each has an `ask` text and a `{ prepare, run }` executor. `prepare` changes
+nothing and names exactly what would be acted on; STAC says it ("I am going to delete the session X … To go ahead,
+say: STAC, yes, I confirm") and the interface holds the command for ONE sentence. The next sentence is judged on its
+words alone, with no call of the model: the confirmation releases the command, a refusal cancels it, anything else
+drops it — said — and is answered as the turn it is. A password and a file are never arguments: the commands that
+need one fill the form or open the file window.
+
+Tests: `tests/test_commands_db.py`, `tests/test_commands_turn.py`, `tests/test_commands_confirm.py`.
 
 ### 22.5 STAC's voice (`server/voice/`)
 
