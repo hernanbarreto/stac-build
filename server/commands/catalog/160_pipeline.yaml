@@ -91,9 +91,9 @@ commands:
 - id: pipeline.cancel
   kind: action
   runs_on: ui
-  status: manual
   model: 'Cancel the session''s pipeline job that is running or queued (a reconstruction, an autosegment or a GenRecon
     run): the stage in progress is stopped.'
+  confirm: true
   text:
     es:
       title: Cancelar la corrida en curso
@@ -101,15 +101,21 @@ commands:
       - cancelá la reconstrucción
       - detené el trabajo en curso
       - pará la corrida
+      done: Corrida de {detail} cancelada.
+      ask: 'Voy a cancelar la corrida de {detail}: la etapa en curso se detiene.'
     en:
       title: Cancel the run in progress
       say:
       - cancel the reconstruction
       - stop the running job
       - abort the run
+      done: Run of {detail} cancelled.
+      ask: 'I am going to cancel the run of {detail}: the stage in progress is stopped.'
     fr:
       title: Annuler l'exécution en cours
       say:
       - annule la reconstruction
       - arrête la tâche en cours
       - stoppe l'exécution
+      done: Exécution de {detail} annulée.
+      ask: 'Je vais annuler l''exécution de {detail} : l''étape en cours est arrêtée.'

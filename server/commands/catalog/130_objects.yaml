@@ -45,7 +45,6 @@ commands:
 - id: objects.add
   kind: action
   runs_on: ui
-  status: manual
   model: 'Insert one item of the object library into the scene as a reference object: it is placed in the viewer
     (a collection object stands on the floor) to be aligned with its gizmo. The source file is not touched.'
   args:
@@ -62,18 +61,21 @@ commands:
       - insertá el humano de la colección
       - elegí esa pieza de la colección
       - colocá ese modelo en la escena
+      done: '{detail} insertado en la escena.'
     en:
       title: Insert a model from the library
       say:
       - insert the human of the collection
       - pick that item of the collection
       - put that model into the scene
+      done: '{detail} inserted into the scene.'
     fr:
       title: Insérer un modèle de la bibliothèque
       say:
       - insère l'humain de la collection
       - choisis cette pièce de la collection
       - pose ce modèle dans la scène
+      done: '{detail} inséré dans la scène.'
 - id: objects.focus
   kind: action
   runs_on: ui
@@ -267,7 +269,6 @@ commands:
 - id: objects.rename
   kind: action
   runs_on: ui
-  status: manual
   model: Rename a placed reference object (its name in the list).
   args:
     id:
@@ -289,18 +290,21 @@ commands:
       - renombrá el objeto colocado
       - dale otro nombre al maniquí
       - que el modelo insertado se llame grúa
+      done: Objeto {detail} renombrado a {name}.
     en:
       title: Rename a placed object
       say:
       - rename the placed object
       - give the human another name
       - call the inserted model crane
+      done: Object {detail} renamed to {name}.
     fr:
       title: Renommer un objet placé
       say:
       - renomme l'objet placé
       - donne un autre nom à l'humain
       - appelle grue le modèle inséré
+      done: Objet {detail} renommé en {name}.
 - id: objects.set_visible
   kind: action
   runs_on: ui

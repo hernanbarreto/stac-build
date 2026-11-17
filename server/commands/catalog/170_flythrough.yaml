@@ -46,7 +46,6 @@ commands:
 - id: flythrough.play_pause
   kind: action
   runs_on: ui
-  status: manual
   model: 'Start or pause the flythrough''s video (the 3D view follows it): on = true to start it, false to pause;
     omit to switch.'
   args:
@@ -62,22 +61,27 @@ commands:
       - pausá el video
       - dale play
       - seguí reproduciendo
+      done: Recorrido en marcha.
+      done_off: Recorrido en pausa.
     en:
       title: Play or pause the flythrough
       say:
       - pause the video
       - press play
       - resume the video
+      done: Flythrough playing.
+      done_off: Flythrough paused.
     fr:
       title: Lire ou mettre en pause le parcours
       say:
       - mets la vidéo en pause
       - appuie sur lecture
       - reprends la vidéo
+      done: Parcours en lecture.
+      done_off: Parcours en pause.
 - id: flythrough.step_frame
   kind: action
   runs_on: ui
-  status: manual
   model: 'Step the flythrough''s video by frames (it pauses): frames = how many, positive forward, negative back.'
   args:
     frames:
@@ -94,22 +98,24 @@ commands:
       - avanzá un cuadro
       - retrocedé un cuadro
       - adelantá cinco cuadros
+      done: Recorrido movido {frames} cuadros.
     en:
       title: Step frame by frame
       say:
       - step one frame forward
       - one frame back
       - go five frames ahead
+      done: Flythrough stepped {frames} frames.
     fr:
       title: Avancer ou reculer image par image
       say:
       - avance d'une image
       - recule d'une image
       - avance de cinq images
+      done: Parcours déplacé de {frames} images.
 - id: flythrough.seek
   kind: action
   runs_on: ui
-  status: manual
   model: Move the flythrough's video to a time, in seconds from its start (the 3D view jumps with it).
   args:
     seconds:
@@ -127,22 +133,24 @@ commands:
       - andá al segundo 30 del video
       - saltá al minuto 2
       - volvé al inicio del video
+      done: Recorrido en el segundo {detail}.
     en:
       title: Go to a time of the flythrough
       say:
       - go to second 30 of the video
       - jump to minute 2
       - back to the start of the video
+      done: Flythrough at second {detail}.
     fr:
       title: Aller à un instant du parcours
       say:
       - va à la seconde 30 de la vidéo
       - saute à la minute 2
       - reviens au début de la vidéo
+      done: Parcours à la seconde {detail}.
 - id: flythrough.set_speed
   kind: action
   runs_on: ui
-  status: manual
   model: 'Playback speed of the flythrough''s video: 0.25, 0.5, 1 (normal) or 2 times.'
   args:
     rate:
@@ -163,18 +171,21 @@ commands:
       - poné el video al doble de velocidad
       - a cámara lenta
       - velocidad normal
+      done: 'Velocidad del recorrido: {rate}×.'
     en:
       title: Flythrough speed
       say:
       - video at double speed
       - slow motion
       - normal speed
+      done: 'Flythrough speed: {rate}×.'
     fr:
       title: Vitesse du parcours
       say:
       - vidéo en vitesse double
       - au ralenti
       - vitesse normale
+      done: 'Vitesse du parcours : {rate}×.'
 - id: flythrough.close
   kind: action
   runs_on: ui

@@ -504,6 +504,13 @@ _UI_REASONS = {
                   "That command is not wired to the interface yet.",
                   "Cette commande n'est pas encore reliée à l'interface."),
     "failed": ("No se pudo: {detail}.", "It failed: {detail}.", "Échec : {detail}."),
+    "window_closed": ("«{detail}» se hace con su ventana abierta: ábrela primero.",
+                      "“{detail}” works with its window open: open it first.",
+                      "« {detail} » se fait avec sa fenêtre ouverte : ouvrez-la d'abord."),
+    "needs_selection": ("Primero hay que seleccionarlo en el visor.", "It has to be selected in the viewer first.",
+                        "Il faut d'abord le sélectionner dans la vue."),
+    "not_allowed": ("Eso es para administradores y gerentes.", "That is for administrators and managers.",
+                    "C'est réservé aux administrateurs et aux responsables."),
     # (commands/confirm.py) a second command that needs confirmation in the same sentence
     "one_confirmation": ("«{detail}» queda para después: confirmo de a una cosa por vez.",
                          "“{detail}” has to wait: I confirm one thing at a time.",

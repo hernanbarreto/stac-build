@@ -226,7 +226,6 @@ commands:
 - id: brush.set_box_gizmo_mode
   kind: action
   runs_on: ui
-  status: manual
   model: 'With a selection box selected (the box that marks a zone): what its gizmo does, translate (move), rotate
     or scale (stretch).'
   args:
@@ -247,22 +246,24 @@ commands:
       - mové la caja de selección
       - rotá la caja de selección
       - estirá la caja de selección
+      done: Modo del gizmo de la caja cambiado.
     en:
       title: Gizmo mode of the selection box
       say:
       - move the selection box
       - rotate the selection box
       - stretch the selection box
+      done: Box gizmo mode changed.
     fr:
       title: Mode du gizmo de la boîte de sélection
       say:
       - déplace la boîte de sélection
       - fais pivoter la boîte de sélection
       - étire la boîte de sélection
+      done: Mode du gizmo de la boîte changé.
 - id: brush.remove_box
   kind: action
   runs_on: ui
-  status: manual
   model: Remove the selected selection box (its mark goes; the cloud is not touched).
   needs:
   - session
@@ -274,18 +275,21 @@ commands:
       - quitá la caja de selección
       - sacá ese marcador rectangular
       - descartá la caja elegida
+      done: Caja de selección quitada.
     en:
       title: Remove the selection box
       say:
       - remove the selection box
       - take that rectangular marker away
       - discard the chosen box
+      done: Selection box removed.
     fr:
       title: Supprimer la boîte de sélection
       say:
       - supprime la boîte de sélection
       - enlève ce marqueur rectangulaire
       - abandonne la boîte choisie
+      done: Boîte de sélection retirée.
 - id: brush.erase_marked
   kind: action
   runs_on: ui

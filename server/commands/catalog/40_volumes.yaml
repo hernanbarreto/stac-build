@@ -404,7 +404,6 @@ commands:
 - id: volumes.set_gizmo_mode
   kind: action
   runs_on: ui
-  status: manual
   model: 'With an evaluation volume selected in the viewer: what its gizmo does, translate (move), rotate or scale
     (resize). The volume is saved and evaluated again as it changes.'
   args:
@@ -426,22 +425,24 @@ commands:
       - mové el volumen con el gizmo
       - rotá la caja de evaluación
       - redimensioná el volumen
+      done: Modo del gizmo del volumen cambiado.
     en:
       title: Gizmo mode of the volume
       say:
       - move the volume with the gizmo
       - rotate the evaluation box
       - resize the volume
+      done: Volume gizmo mode changed.
     fr:
       title: Mode du gizmo du volume
       say:
       - déplace le volume avec le gizmo
       - fais pivoter la boîte d'évaluation
       - redimensionne le volume
+      done: Mode du gizmo du volume changé.
 - id: volumes.set_solid
   kind: action
   runs_on: ui
-  status: manual
   model: Draw the selected evaluation volume as a solid box (on) or as its outline (off).
   args:
     'on':
@@ -458,15 +459,21 @@ commands:
       - rellená el volumen
       - volumen solo en contorno
       - caja de evaluación maciza
+      done: Volumen sólido.
+      done_off: Volumen en contorno.
     en:
       title: Solid or outlined volume
       say:
       - fill the volume
       - volume as an outline only
       - a filled evaluation box
+      done: Volume drawn solid.
+      done_off: Volume drawn as its outline.
     fr:
       title: Volume plein ou en contour
       say:
       - remplis le volume
       - volume en contour seulement
       - boîte d'évaluation pleine
+      done: Volume plein.
+      done_off: Volume en contour.

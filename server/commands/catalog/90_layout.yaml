@@ -246,7 +246,6 @@ commands:
 - id: layout.resize_panel
   kind: action
   runs_on: ui
-  status: manual
   model: 'Resize a panel by dragging its edge: the left panel or the inspector (their width) or the bottom dock
     (its height), in pixels.'
   args:
@@ -269,15 +268,18 @@ commands:
       - hacé más ancho el panel lateral
       - inspector más angosto
       - panel inferior más alto
+      done: Panel redimensionado a {detail} píxeles.
     en:
       title: Resize a panel
       say:
       - make the side panel wider
       - narrower inspector
       - taller bottom dock
+      done: Panel resized to {detail} pixels.
     fr:
       title: Redimensionner un panneau
       say:
       - élargis le panneau latéral
       - inspecteur plus étroit
       - panneau inférieur plus haut
+      done: Panneau redimensionné à {detail} pixels.

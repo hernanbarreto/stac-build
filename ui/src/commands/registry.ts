@@ -13,7 +13,7 @@ import { UI_CONFIRM_IDS } from './catalog.generated'
 import type { UiCommandArgs, UiCommandId, UiConfirmId } from './catalog.generated'
 
 /** why a command did not run — worded by the server in the conversation's language (answers.ui_reasons) */
-export type Reason = 'no_session' | 'not_connected' | 'server_down' | 'not_found' | 'ambiguous' | 'nothing_to_do' | 'needs_gesture' | 'unavailable' | 'not_wired' | 'failed' | 'one_confirmation' | 'needs_confirmation'
+export type Reason = 'no_session' | 'not_connected' | 'server_down' | 'not_found' | 'ambiguous' | 'nothing_to_do' | 'needs_gesture' | 'unavailable' | 'not_wired' | 'failed' | 'one_confirmation' | 'needs_confirmation' | 'window_closed' | 'needs_selection' | 'not_allowed'
 
 export type Outcome =
   /** `detail`: what the command reports (the session it opened, a list); `state`: for an on / off
@@ -33,6 +33,12 @@ export type Executors<K extends UiCommandId = UiCommandId> = { [I in K]: I exten
 
 /** the commands the Assistant panel owns (the user's name, STAC's own voice); every other one is the app's */
 export type PanelCommandId = 'talk.set_user_name' | 'talk.forget_user_name' | 'talk.spoken_answers' | 'talk.hands_free'
+
+/** the commands the 3D viewer owns (its own tools' state: gizmos, the measurement in progress, the Align tool) */
+export type ViewportCommandId = 'volumes.set_gizmo_mode' | 'volumes.set_solid' | 'measure.finish_plane' | 'measure.cancel_pending'
+  | 'viewer.align_set_gizmo_mode' | 'viewer.align_save' | 'viewer.fly_to_camera_pose'
+/** … and the flythrough's player, while it is open */
+export type FlythroughCommandId = 'flythrough.play_pause' | 'flythrough.step_frame' | 'flythrough.seek' | 'flythrough.set_speed'
 
 /** one command of an answer, as the server sends it */
 export interface UiAction {
@@ -79,7 +85,9 @@ export function isRegistered(id: string): boolean { return registry.has(id) }
 /** Run one command. Never throws: a failure is an outcome. */
 export async function runCommand(id: string, args: Record<string, unknown>, step: 'run' | 'prepare' | 'confirmed' = 'run'): Promise<Outcome> {
   const ex = registry.get(id)
-  if (!ex) return { ok: false, reason: 'not_wired' }
+  // (every command of the catalogue has an executor — the compiler holds it; one that is not
+  // registered NOW belongs to a window that is not open: the flythrough, a dialog)
+  if (!ex) return { ok: false, reason: 'window_closed' }
   try {
     if (typeof ex === 'function') {
       // (the catalogue is the authority: a command it declares with confirm never runs unconfirmed)

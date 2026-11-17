@@ -393,7 +393,6 @@ commands:
 - id: measure.finish_plane
   kind: action
   runs_on: ui
-  status: manual
   model: 'Close the plane being marked on the 3D model for a calibration (the Enter key): with three or more points
     picked it is fitted and the Calibration window opens with it.'
   needs:
@@ -405,22 +404,24 @@ commands:
       - cerrá el plano con Enter
       - ya puse los tres vértices
       - terminá el contorno
+      done: Plano cerrado.
     en:
       title: Close the plane in progress
       say:
       - close the plane with Enter
       - the three vertices are in
       - finish the outline
+      done: Plane closed.
     fr:
       title: Fermer le plan en cours
       say:
       - ferme le plan avec Entrée
       - les trois sommets sont posés
       - termine le contour
+      done: Plan fermé.
 - id: measure.cancel_pending
   kind: action
   runs_on: ui
-  status: manual
   model: 'Cancel the hand measurement in progress in the viewer (the Esc key): the points picked so far for the
     distance, the angle or the plane are dropped. What was already measured stays.'
   needs:
@@ -432,15 +433,18 @@ commands:
       - cancelá lo que estoy midiendo
       - descartá los clics que hice
       - empezá de cero
+      done: Medición en curso cancelada.
     en:
       title: Cancel the measurement in progress
       say:
       - cancel what is being measured
       - drop the clicks already made
       - start from scratch
+      done: Measurement in progress cancelled.
     fr:
       title: Annuler la mesure en cours
       say:
       - annule la mesure commencée
       - abandonne les clics déjà faits
       - repars de zéro
+      done: Mesure en cours annulée.

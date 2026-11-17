@@ -42,7 +42,7 @@ import { Inspector } from './layout/Inspector'
 import { BottomDock } from './layout/BottomDock'
 import { StatusBar } from './layout/StatusBar'
 import { CommandPalette, type Command } from './layout/CommandPalette'
-import { registerCommands, findByName, type Executors, type Outcome, type PanelCommandId } from './commands/registry'
+import { registerCommands, findByName, type Executors, type FlythroughCommandId, type Outcome, type PanelCommandId, type ViewportCommandId } from './commands/registry'
 import type { UiCommandId } from './commands/catalog.generated'
 import { SettingsDialog } from './layout/SettingsDialog'
 import { SceneLookDialog } from './layout/SceneLookDialog'
@@ -1792,9 +1792,9 @@ function App() {
       const headers: HeadersInit = { 'Content-Type': 'application/json' }
       if (token) headers['Authorization'] = `Bearer ${token}`
       const res = await fetch(`/sessions/${id}`, { method: 'PATCH', headers, body: JSON.stringify({ name }) })
-      if (!res.ok) { const err = await res.json().catch(() => ({})); report(err.detail || t('sessions.renameFailed'), 'err') }
-      else { report(t('sessions.renamed', { name }), 'ok'); connectToServer() }
-    } catch { report(t('sessions.renameFailed'), 'err') }
+      if (!res.ok) { const err = await res.json().catch(() => ({})); report(err.detail || t('sessions.renameFailed'), 'err'); return String(err.detail || t('sessions.renameFailed')) }
+      report(t('sessions.renamed', { name }), 'ok'); connectToServer(); return true
+    } catch { report(t('sessions.renameFailed'), 'err'); return t('sessions.renameFailed') }
   }, [token, connectToServer, report, t])
 
   const deleteSession = useCallback(async (id: string) => {
@@ -1814,22 +1814,23 @@ function App() {
       const headers: HeadersInit = { 'Content-Type': 'application/json' }
       if (token) headers['Authorization'] = `Bearer ${token}`
       const res = await fetch('/sessions', { method: 'POST', headers, body: JSON.stringify({ name }) })
-      if (!res.ok) { const err = await res.json().catch(() => ({})); report(err.detail || t('sessions.createFailed'), 'err') }
-      else { report(t('sessions.created', { name }), 'ok'); connectToServer() }
-    } catch { report(t('sessions.createFailed'), 'err') }
+      if (!res.ok) { const err = await res.json().catch(() => ({})); report(err.detail || t('sessions.createFailed'), 'err'); return String(err.detail || t('sessions.createFailed')) }
+      report(t('sessions.created', { name }), 'ok'); connectToServer(); return true
+    } catch { report(t('sessions.createFailed'), 'err'); return t('sessions.createFailed') }
   }, [token, connectToServer, report, t])
 
   const setReference = useCallback(async (sid: string, sc: any) => {
-    if (sc.is_reference || sc.kind === 'fused') return
+    if (sc.is_reference || sc.kind === 'fused') return false
     try {
       await fetch(`/api/project/${sid}/composition/reference`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scan_key: sc.key }) })
       report(t('scans.referenceSet', { label: sc.label }), 'ok')
       loadProjectScans(sid)
-    } catch { report(t('scans.referenceFailed'), 'err') }
+      return true
+    } catch { report(t('scans.referenceFailed'), 'err'); return false }
   }, [loadProjectScans, report, t])
 
-  const renameSegment = useCallback(async (seg: SegmentInstance, newLabel: string) => {
-    if (!activeSession) return
+  const renameSegment = useCallback(async (seg: SegmentInstance, newLabel: string): Promise<boolean> => {
+    if (!activeSession) return false
     try {
       const r = await fetch('/api/segmentation/rename', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1838,11 +1839,12 @@ function App() {
       if (!r.ok) {
         const d = await r.json().catch(() => ({}))
         report(t('instances.renameFailed', { detail: d.detail || r.status }), 'err')
-        return
+        return false
       }
-    } catch (e) { report(t('instances.renameFailed', { detail: String(e) }), 'err'); return }
+    } catch (e) { report(t('instances.renameFailed', { detail: String(e) }), 'err'); return false }
     setSegments(prev => prev.map(s => (s.key === seg.key ? { ...s, label: newLabel } : s)))
     viewportRef.current?.refreshSegmentOBBs(activeSession)
+    return true
   }, [activeSession, report, t])
 
   const deleteSegment = useCallback(async (seg: SegmentInstance) => {
@@ -1968,6 +1970,35 @@ function App() {
     finally { setSessionLoading(null) }
   }, [interactiveSessionId, reloadSegments, refreshUnsegmentedCount, refreshFloorLevel, report, t])
 
+  const renamePlaced = useCallback(async (id: number, name: string): Promise<boolean> => {
+    if (!activeSession) return false
+    try {
+      const r = await fetch('/api/objects/scene/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, id, name }) })
+      if (r.ok) { setPlacedObjects(prev => prev.map(o => (o.id === id ? { ...o, name } : o))); return true }
+      report(t('instances.renameFailed', { status: r.status }), 'err')
+    } catch { report(t('instances.renameFailed', { status: '' }), 'err') }
+    return false
+  }, [activeSession, report, t])
+  /** insert one item of the object library into the scene as a reference object */
+  const addLibraryItem = useCallback(async (it: { source: string; name: string; url: string }): Promise<boolean> => {
+    if (!activeSession) return false
+    try {
+      const r = await fetch('/api/objects/scene/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, name: it.name, url: it.url }) })
+      const d = await r.json()
+      if (d.ok) {
+        setShowObjectLibrary(false)
+        await viewportRef.current?.placeSceneObject(d.object)
+        // a collection object (the reference human…) stands ON the floor, y = 0 (USER 2026-10-01)
+        if (it.source === 'collection') viewportRef.current?.alignSceneObject('floor')
+        return true
+      }
+    } catch { report(t('library.addFailed'), 'err') }
+    return false
+  }, [activeSession, report, t])
+  // the lists' search boxes: the app's state, so STAC filters them by command
+  const [sessionFilter, setSessionFilter] = useState('')
+  const [instanceSearch, setInstanceSearch] = useState('')
+
   // ── STAC's commands of the interface (the database of commands: server/commands; the
   //    executors: ui/src/commands/registry.ts). USER 2026-11-14: "le pedi que conecte con el
   //    servidor y no conecto" / "le pedi que abra pccr y no abrio nada" — every command the
@@ -1979,6 +2010,8 @@ function App() {
     openObjectLibrary, openAutosegment, handleReconstruct,
     scanTabs, closeScanTab, handleSessionSelect, placedObjects, cubes, userVolumes, focusVolume, undoBrush,
     physicsDiameterCm, physicsBounce, isAdmin: user?.role === 'admin', deleteVolume, sceneObjSel,
+    segments, canManage, renameSession, createSession, setReference, renameSegment, renamePlaced, addLibraryItem,
+    handlePipelineCancel, pipelineRunning, eraseBoxSel,
   })
   cmd.current = {
     connected, connectToServer, disconnect, sessions, activeSession, handleSessionLoad, handleUnload,
@@ -1986,6 +2019,8 @@ function App() {
     openObjectLibrary, openAutosegment, handleReconstruct,
     scanTabs, closeScanTab, handleSessionSelect, placedObjects, cubes, userVolumes, focusVolume, undoBrush,
     physicsDiameterCm, physicsBounce, isAdmin: user?.role === 'admin', deleteVolume, sceneObjSel,
+    segments, canManage, renameSession, createSession, setReference, renameSegment, renamePlaced, addLibraryItem,
+    handlePipelineCancel, pipelineRunning, eraseBoxSel,
   }
   /** what the interface says of itself with every question to STAC (the model needs the
    *  sessions' names to open one) */
@@ -1999,7 +2034,7 @@ function App() {
     }
   }, [])
   useEffect(() => {
-    type AppCommandId = Exclude<UiCommandId, PanelCommandId>
+    type AppCommandId = Exclude<UiCommandId, PanelCommandId | ViewportCommandId | FlythroughCommandId>
     const done: Outcome = { ok: true }
     const noSession: Outcome = { ok: false, reason: 'no_session' }
     const open = () => cmd.current.activeSession
@@ -2026,6 +2061,32 @@ function App() {
       const found = findByName(all, String(id), o => [o.name])
       if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.map(o => o.name).join(', ') }
       return found.item ?? { ok: false, reason: 'not_found', detail: String(id) }
+    }
+    const notAllowed: Outcome = { ok: false, reason: 'not_allowed' }
+    /** a session of the server by what the user called it */
+    const sessionBy = (spoken: string): { id: string; name: string } | Outcome => {
+      const found = findByName(cmd.current.sessions, spoken, x => [x.id, x.name])
+      if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.map(x => x.name).join(', ') }
+      return found.item ?? { ok: false, reason: 'not_found', detail: spoken }
+    }
+    /** an object of the segmentation by its id or its label */
+    const segmentBy = (id: number | string): SegmentInstance | Outcome => {
+      if (!open()) return noSession
+      const all = cmd.current.segments
+      if (!all.length) return { ok: false, reason: 'nothing_to_do' }
+      const byId = typeof id === 'number' || /^\d+$/.test(String(id)) ? all.find(x => x.id === Number(id)) : undefined
+      if (byId) return byId
+      const found = findByName(all, String(id), x => [x.label])
+      if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.slice(0, 8).map(x => `${x.label} (${x.id})`).join(', ') }
+      return found.item ?? { ok: false, reason: 'not_found', detail: String(id) }
+    }
+    const vec3 = (v: unknown): [number, number, number] | null =>
+      Array.isArray(v) && v.length === 3 && v.every(x => typeof x === 'number' && Number.isFinite(x)) ? (v as [number, number, number]) : null
+    /** the session's pipeline job that can still be cancelled */
+    const liveJob = (): Outcome => {
+      const job = cmd.current.pipelineRunning
+      if (!job || ['done', 'failed', 'cancelled'].includes(job.status)) return { ok: false, reason: 'nothing_to_do' }
+      return { ok: true, detail: job.session_id || open() || '' }
     }
     const TOOL: Record<string, Tool> = {
       navigate: 'navigate', measure_distance: 'measure-distance', measure_angle: 'measure-angle',
@@ -2332,6 +2393,84 @@ function App() {
           run: () => { const o = selected(); if ('ok' in o) return o; viewportRef.current?.removeSceneObject(o.id); return { ok: true, detail: o.name } },
         }
       })(),
+      'sessions.create': async ({ name }) => {
+        if (!cmd.current.canManage) return notAllowed
+        if (!(await ensureConnected())) return { ok: false, reason: 'server_down' }
+        const r = await cmd.current.createSession(name)
+        return r === true ? done : { ok: false, reason: 'failed', detail: r }
+      },
+      'sessions.rename': async ({ session, name }) => {
+        if (!cmd.current.canManage) return notAllowed
+        if (!(await ensureConnected())) return { ok: false, reason: 'server_down' }
+        const sn = sessionBy(session)
+        if ('ok' in sn) return sn
+        const r = await cmd.current.renameSession(sn.id, name)
+        return r === true ? { ok: true, detail: sn.name } : { ok: false, reason: 'failed', detail: r }
+      },
+      'sessions.filter': ({ text }) => { cmd.current.layout.setLeftTab('sessions'); setSessionFilter(text); return done },
+      'scans.set_reference': async ({ scan }) => {
+        const sid = open()
+        if (!sid) return noSession
+        const found = findByName((cmd.current.projectScans as any[]).filter(sc => sc.kind !== 'fused'), scan, scanNames)
+        if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.map((sc: any) => `${sc.date} ${sc.label}`).join(', ') }
+        if (!found.item) return { ok: false, reason: 'not_found', detail: scan }
+        const sc: any = found.item
+        if (sc.is_reference) return { ok: true, detail: `${sc.date} ${sc.label}` }
+        return (await cmd.current.setReference(sid, sc)) ? { ok: true, detail: `${sc.date} ${sc.label}` } : { ok: false, reason: 'failed', detail: `${sc.date} ${sc.label}` }
+      },
+      'objects.add': async ({ name }) => {
+        if (!open()) return noSession
+        let items: Array<{ source: string; name: string; url: string }> = []
+        try { const r = await fetch('/api/objects/library'); if (r.ok) items = (await r.json()).items || [] } catch { return { ok: false, reason: 'server_down' } }
+        if (!items.length) return { ok: false, reason: 'nothing_to_do' }
+        const found = findByName(items, name, it => [it.name, it.name.replace(/\.[a-z0-9]+$/i, '')])
+        if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.slice(0, 8).map(it => it.name).join(', ') }
+        if (!found.item) return { ok: false, reason: 'not_found', detail: name }
+        return (await cmd.current.addLibraryItem(found.item)) ? { ok: true, detail: found.item.name } : { ok: false, reason: 'failed', detail: found.item.name }
+      },
+      'objects.rename': async ({ id, name }) => {
+        const o = placedBy(id)
+        if ('ok' in o) return o
+        return (await cmd.current.renamePlaced(o.id, name)) ? { ok: true, detail: o.name } : { ok: false, reason: 'failed', detail: o.name }
+      },
+      'pipeline.cancel': { prepare: liveJob, run: () => { const o = liveJob(); if (o.ok) cmd.current.handlePipelineCancel(); return o } },
+      'brush.set_box_gizmo_mode': ({ mode }) => { if (!cmd.current.eraseBoxSel) return { ok: false, reason: 'needs_selection' }; viewportRef.current?.setEraseBoxMode(mode); return done },
+      'brush.remove_box': () => { if (!cmd.current.eraseBoxSel) return { ok: false, reason: 'needs_selection' }; viewportRef.current?.removeSelectedEraseBox(); return done },
+      'instances.rename': async ({ id, label }) => {
+        const seg = segmentBy(id)
+        if ('ok' in seg) return seg
+        const clean = label.trim()
+        if (!clean) return { ok: false, reason: 'failed', detail: label }
+        return (await cmd.current.renameSegment(seg, clean)) ? { ok: true, detail: `${seg.label} (${seg.id})` } : { ok: false, reason: 'failed', detail: seg.label }
+      },
+      'instances.filter': ({ text }) => { if (!open()) return noSession; cmd.current.layout.setLeftTab('instances'); setInstanceSearch(text); return done },
+      'viewer.orient_view': ({ dir }) => {
+        if (!open()) return noSession
+        const d = vec3(dir)
+        if (!d || Math.hypot(d[0], d[1], d[2]) === 0) return { ok: false, reason: 'failed', detail: JSON.stringify(dir) }
+        viewportRef.current?.orientView(d); return done
+      },
+      'viewer.fly_to_point': ({ position, radius }) => {
+        if (!open()) return noSession
+        const p = vec3(position)
+        if (!p) return { ok: false, reason: 'failed', detail: JSON.stringify(position) }
+        // (no radius asked: 2 m of scene around the point — a framing, not a measurement)
+        viewportRef.current?.flyToPoint(p, radius && radius > 0 ? radius : 2); return done
+      },
+      'viewer.frame_box': ({ min, max }) => {
+        if (!open()) return noSession
+        const lo = vec3(min), hi = vec3(max)
+        if (!lo || !hi) return { ok: false, reason: 'failed', detail: JSON.stringify([min, max]) }
+        viewportRef.current?.frameBox(lo.map((v, k) => Math.min(v, hi[k])), lo.map((v, k) => Math.max(v, hi[k]))); return done
+      },
+      'layout.resize_panel': async ({ panel, size_px }) => {
+        const l = cmd.current.layout
+        if (panel === 'left') l.setLeftWidth(size_px); else if (panel === 'inspector') l.setInspectorWidth(size_px); else l.setDockHeight(size_px)
+        // (the layout clamps the size to its limits: what STAC says is what the panel took)
+        await new Promise(r => setTimeout(r, 60))
+        const st = cmd.current.layout.state
+        return { ok: true, detail: String(Math.round(panel === 'left' ? st.leftWidth : panel === 'inspector' ? st.inspectorWidth : st.dockHeight)) }
+      },
       'volumes.set_visible': ({ volume_id, on }) => {
         if (!open()) return noSession
         if (!cmd.current.userVolumes.some(x => x.volume_id === volume_id)) return { ok: false, reason: 'not_found', detail: String(volume_id) }
@@ -2542,14 +2681,7 @@ function App() {
     onToggleTsdf: (m, v) => { setTsdfMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, visible: v } : x))); viewportRef.current?.setTsdfVisibility(m.folder, v) },
     onToggleTsdfWireframe: (m, on) => { setTsdfMeshes(prev => prev.map(x => (x.folder === m.folder ? { ...x, wireframe: on } : x))); viewportRef.current?.setMeshWireframe('tsdf', m.folder, on) },
     onDeleteTsdf: deleteTsdfMesh,
-    onRenamePlaced: async (id, name) => {
-                  if (!activeSession) return
-                  try {
-                    const r = await fetch('/api/objects/scene/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, id, name }) })
-                    if (r.ok) setPlacedObjects(prev => prev.map(o => (o.id === id ? { ...o, name } : o)))
-                    else report(t('instances.renameFailed', { status: r.status }), 'err')
-                  } catch { report(t('instances.renameFailed', { status: '' }), 'err') }
-                },
+    onRenamePlaced: renamePlaced,
     onFocusItem: (kind, key, instanceId) => {
                   // the object's own bounds; a mesh not loaded yet → its instance's OBB
                   if (viewportRef.current?.flyToObject(kind, key)) return
@@ -2599,7 +2731,7 @@ function App() {
         {layout.state.leftTab && (
           <SidePanel>
             {layout.state.leftTab === 'sessions' && (
-              <SessionsPanel connected={connected} sessions={sessions} selectedSession={selectedSession} activeSession={activeSession}
+              <SessionsPanel filter={sessionFilter} onFilter={setSessionFilter} connected={connected} sessions={sessions} selectedSession={selectedSession} activeSession={activeSession}
                 scansOf={sid => (sid === activeSession && projectScans.length ? projectScans : (allProjectScans[sid] || []))}
                 activeScanKey={activeScanTab} pipelineJobs={pipelineJobs}
                 extracting={extractingSessions} canManage={canManage}
@@ -2610,7 +2742,7 @@ function App() {
                 onFuse={openFuse} onOpenScan={openScanFromTree} onSetReference={setReference} />
             )}
             {layout.state.leftTab === 'instances' && activeSession && (
-              <InstancesPanel {...instancesCb} cubes={cubes} cubeVisible={cubeVisible} volumes={userVolumes}   obbKeys={obbKeys}  placedObb={placedObb}  volumeHidden={volumeHidden} volumeObb={volumeObb}   segments={segments} unsegmentedVisible={unsegmentedVisible} unsegmentedCount={unsegmentedCount} absorbedCount={absorbedCount} floorLevel={floorLevel}
+              <InstancesPanel {...instancesCb} search={instanceSearch} onSearch={setInstanceSearch} cubes={cubes} cubeVisible={cubeVisible} volumes={userVolumes}   obbKeys={obbKeys}  placedObb={placedObb}  volumeHidden={volumeHidden} volumeObb={volumeObb}   segments={segments} unsegmentedVisible={unsegmentedVisible} unsegmentedCount={unsegmentedCount} absorbedCount={absorbedCount} floorLevel={floorLevel}
                 placedObjects={placedObjects} tsdfMeshes={tsdfMeshes} selectedSegmentId={selectedSegmentId}
  />
             )}
@@ -2948,19 +3080,7 @@ function App() {
       </Dialog>
 
       <ObjectLibraryDialog open={showObjectLibrary} items={objectLibrary} onClose={() => setShowObjectLibrary(false)}
-        onPick={async it => {
-          if (!activeSession) return
-          try {
-            const r = await fetch('/api/objects/scene/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, name: it.name, url: it.url }) })
-            const d = await r.json()
-            if (d.ok) {
-              setShowObjectLibrary(false)
-              await viewportRef.current?.placeSceneObject(d.object)
-              // a collection object (the reference human…) stands ON the floor, y = 0 (USER 2026-10-01)
-              if (it.source === 'collection') viewportRef.current?.alignSceneObject('floor')
-            }
-          } catch { report(t('library.addFailed'), 'err') }
-        }} />
+        onPick={addLibraryItem} />
 
 
       <AutosegmentDialog open={autosegOpen} sessionId={activeSession} state={autosegState} loading={autosegLoading}

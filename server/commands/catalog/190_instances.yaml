@@ -14,7 +14,6 @@ commands:
 - id: instances.rename
   kind: action
   runs_on: ui
-  status: manual
   model: Rename ONE object of the segmentation (its label in the list and on its box).
   args:
     id:
@@ -37,18 +36,21 @@ commands:
       - renombrá la instancia 12 como tablero
       - cambiale la etiqueta a ese objeto
       - ese segmento es una columna
+      done: '{detail} renombrado a {label}.'
     en:
       title: Rename an object
       say:
       - rename instance 12 as panel
       - change that object's label
       - that segment is a column
+      done: '{detail} renamed to {label}.'
     fr:
       title: Renommer un objet
       say:
       - renomme l'instance 12 en tableau
       - change l'étiquette de cet objet
       - ce segment est un poteau
+      done: '{detail} renommé en {label}.'
 - id: instances.delete
   kind: action
   runs_on: ui
@@ -88,7 +90,6 @@ commands:
 - id: instances.filter
   kind: query
   runs_on: ui
-  status: manual
   model: 'Filter the Instances list by a text typed in its search box: only the objects, placed objects, volumes
     and meshes whose name or id holds it stay listed. It changes the list, not the viewer.'
   args:
@@ -105,18 +106,21 @@ commands:
       - buscá puerta en ese listado
       - filtrá el listado por extintor
       - dejá solo los caños en el listado
+      done: Lista de instancias filtrada por «{text}».
     en:
       title: Search the instances list
       say:
       - search door in that list
       - filter the list by extinguisher
       - leave only the pipes listed
+      done: Instances list filtered by “{text}”.
     fr:
       title: Rechercher dans la liste des instances
       say:
       - recherche porte dans cette liste
       - filtre la liste par extincteur
       - n'y laisse que les tuyaux
+      done: Liste des instances filtrée par « {text} ».
 - id: instances.set_floor_level
   kind: action
   runs_on: ui

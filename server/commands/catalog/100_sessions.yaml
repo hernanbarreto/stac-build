@@ -130,7 +130,6 @@ commands:
 - id: sessions.create
   kind: action
   runs_on: ui
-  status: manual
   model: Create a new, empty session on the server with the given name (a video is then uploaded to it). For administrators
     and managers.
   args:
@@ -147,22 +146,24 @@ commands:
       - creá un proyecto nuevo
       - uno nuevo llamado obra norte
       - armá uno vacío
+      done: Sesión {name} creada.
     en:
       title: Create a session
       say:
       - create a new project
       - a new one called north site
       - set up an empty one
+      done: Session {name} created.
     fr:
       title: Créer une session
       say:
       - crée un nouveau projet
       - une nouvelle, nommée chantier nord
       - prépare un projet vide
+      done: Session {name} créée.
 - id: sessions.rename
   kind: action
   runs_on: ui
-  status: manual
   model: 'Rename a session on the server: its folder and its id take the new name, everything in it is kept. For
     administrators and managers.'
   args:
@@ -183,18 +184,21 @@ commands:
       - renombrá ese proyecto
       - cambiale el nombre
       - que pase a llamarse obra sur
+      done: Sesión {detail} renombrada a {name}.
     en:
       title: Rename a session
       say:
       - rename that project
       - change its name
       - call it south site
+      done: Session {detail} renamed to {name}.
     fr:
       title: Renommer une session
       say:
       - renomme ce projet
       - change son nom
       - appelle-le chantier sud
+      done: Session {detail} renommée en {name}.
 - id: sessions.delete
   kind: action
   runs_on: ui
@@ -231,7 +235,6 @@ commands:
 - id: sessions.filter
   kind: query
   runs_on: ui
-  status: manual
   model: Narrow the sessions shown in the side panel to those whose name holds a text typed in the search box.
   args:
     text:
@@ -245,18 +248,21 @@ commands:
       - buscá el proyecto que diga estación
       - filtrá la lista por nombre
       - encontrá uno por su nombre
+      done: Lista de sesiones filtrada por «{text}».
     en:
       title: Search among the sessions
       say:
       - search the projects for station
       - filter them by name
       - find one by its name
+      done: Sessions list filtered by “{text}”.
     fr:
       title: Rechercher dans la liste des sessions
       say:
       - recherche le projet qui contient gare
       - filtre la liste par nom
       - trouve-le par son nom
+      done: Liste des sessions filtrée par « {text} ».
 - id: sessions.upload_video
   kind: action
   runs_on: ui

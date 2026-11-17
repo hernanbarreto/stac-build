@@ -63,17 +63,20 @@ interface SessionsPanelProps {
   onSegment: (id: string) => void
   onOpenManager: (id: string) => void
   onUnload: () => void
-  onRename: (id: string, name: string) => Promise<void>
+  onRename: (id: string, name: string) => Promise<unknown>
   onDelete: (id: string) => void
-  onCreate: (name: string) => Promise<void>
+  onCreate: (name: string) => Promise<unknown>
   onOpenScan: (sessionId: string, scan: ScanRow) => void
   onSetReference: (sessionId: string, scan: ScanRow) => void
+  /** the search box's text — the app's state: STAC sets it by command (sessions.filter) */
+  filter: string
+  onFilter: (text: string) => void
 }
 
 export function SessionsPanel(p: SessionsPanelProps) {
   const t = useT()
   const fmt = useFmt()
-  const [filter, setFilter] = useState('')
+  const { filter, onFilter: setFilter } = p
   const [renaming, setRenaming] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [creating, setCreating] = useState(false)

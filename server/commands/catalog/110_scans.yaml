@@ -172,7 +172,6 @@ commands:
 - id: scans.set_reference
   kind: action
   runs_on: ui
-  status: manual
   model: 'Mark one scan as the composition reference: the one the others are registered on when fusing, and the
     one shown first when the session is opened.'
   args:
@@ -189,18 +188,21 @@ commands:
       - usá este como referencia de composición
       - marcá la estrella de esa toma
       - que este sea el de referencia
+      done: '{detail} es ahora el escaneo de referencia.'
     en:
       title: Use a scan as the composition reference
       say:
       - use this one as the composition reference
       - star that capture
       - make this one the reference
+      done: '{detail} is now the reference scan.'
     fr:
       title: Utiliser un scan comme référence de composition
       say:
       - utilise celui-ci comme référence de composition
       - mets l'étoile sur cette capture
       - que celui-ci soit la référence
+      done: '{detail} est maintenant le scan de référence.'
 - id: scans.fuse
   kind: action
   runs_on: ui

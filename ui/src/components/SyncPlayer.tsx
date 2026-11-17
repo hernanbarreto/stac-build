@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
+import { registerCommands, type Executors, type FlythroughCommandId, type Outcome } from '../commands/registry'
 import { Play, Pause, X, Loader2, SkipBack, SkipForward } from 'lucide-react'
 import type { ViewportHandle } from './Viewport'
 import { IconButton } from './ui/IconButton'
@@ -376,6 +377,34 @@ export function SyncPlayer({ sessionId, viewportRef, onClose }: {
     v.pause()
     seekTo(v.currentTime + frames / (fpsRef.current || 30), true)
   }, [ready, seekTo])
+
+  // STAC's commands of the flythrough (server/commands/catalog/170_flythrough.yaml): registered
+  // while the player is open, reading its current state through a ref
+  const playerCmd = useRef({ ready, seekTo, step })
+  playerCmd.current = { ready, seekTo, step }
+  useEffect(() => {
+    const notReady: Outcome = { ok: false, reason: 'unavailable' }
+    const video = () => (playerCmd.current.ready ? videoRef.current : null)
+    const executors: Executors<FlythroughCommandId> = {
+      'flythrough.play_pause': ({ on }) => {
+        const v = video()
+        if (!v) return notReady
+        const want = on ?? v.paused
+        if (want && v.paused) { anchorRef.current = null; v.play().catch(() => { }) } else if (!want && !v.paused) v.pause()
+        return { ok: true, state: want }
+      },
+      'flythrough.step_frame': ({ frames }) => { if (!video()) return notReady; playerCmd.current.step(frames); return { ok: true } },
+      'flythrough.seek': ({ seconds }) => {
+        const v = video()
+        if (!v) return notReady
+        const sec = Math.min(Math.max(0, seconds), Number.isFinite(v.duration) ? v.duration : seconds)
+        playerCmd.current.seekTo(sec, true)
+        return { ok: true, detail: String(Math.round(sec * 10) / 10) }
+      },
+      'flythrough.set_speed': ({ rate: r }) => { if (!video()) return notReady; setRate(String(r) as Rate); return { ok: true } },
+    }
+    return registerCommands(executors)
+  }, [])
 
   // keyboard: captured on the window so the app's own shortcuts (Home → reset camera) never
   // fight the player while it is open

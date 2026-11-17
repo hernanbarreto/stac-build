@@ -17,6 +17,7 @@ import { PotreeOctreeLoader } from './PotreeLoader'
 import { AssistantViz, arrowDimension, labelSprite, objectDims, thickBox, thickSegment, type SceneObject, type UserVolume, type TraceEntry } from './assistantViz'
 import { Eye, EyeOff, Focus, RotateCw, Move, Save, Trash2, X, Box as BoxIcon, Scaling, RefreshCw, MonitorX } from 'lucide-react'
 import { getT, getFmt } from '../i18n'
+import { registerCommands, type Executors, type Outcome, type ViewportCommandId } from '../commands/registry'
 import { tokenColor, tokenHex, edgeColorHex, VP } from './viewport/palette'
 import { applyBackground, DEFAULT_LOOK, disposeGroup, makeHorizon, makeLookGrid, type SceneLook } from './viewport/sceneLook'
 import { Button } from './ui/Button'
@@ -2479,6 +2480,65 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
     }, [clearAllReconScene, onStatusMessage])
 
+    /** put the view AT one of the scan's cameras (its marker in the camera group), looking where it looked */
+    const jumpToCamPose = useCallback((marker: THREE.Object3D): boolean => {
+        const camera = cameraRef.current, controls = controlsRef.current
+        const lookDir = marker.userData.lookDir as THREE.Vector3 | undefined
+        if (!camera || !controls || !lookDir) return false
+        const pos = marker.position.clone()
+        camera.position.copy(pos)
+        controls.target.copy(pos).addScaledVector(lookDir, 0.5)
+        // the field of view from the intrinsics when they are there
+        const intr = marker.userData.intrinsics
+        if (intr && intr.fy && intr.cy) {
+            camera.fov = 2 * Math.atan(intr.cy / intr.fy) * 180 / Math.PI
+            camera.updateProjectionMatrix()
+        }
+        controls.update()
+        return true
+    }, [])
+
+    // STAC's commands the viewer owns (server/commands: the gizmos of what is selected here, the
+    // measurement in progress, the Align tool, the scan's cameras) — registered once, reading the
+    // viewer's CURRENT state through a ref
+    const vcmd = useRef({ selVolume, alignDirty, activeTool, activeSession, saveAlignment, cancelPending })
+    vcmd.current = { selVolume, alignDirty, activeTool, activeSession, saveAlignment, cancelPending }
+    useEffect(() => {
+        const done: Outcome = { ok: true }
+        const needsSelection: Outcome = { ok: false, reason: 'needs_selection' }
+        const nothing: Outcome = { ok: false, reason: 'nothing_to_do' }
+        const alignReady = (): Outcome => {
+            const c = vcmd.current
+            if (!c.activeSession) return { ok: false, reason: 'no_session' }
+            if (c.activeTool !== 'align' || !c.alignDirty) return nothing
+            return { ok: true, detail: c.activeSession }
+        }
+        const executors: Executors<ViewportCommandId> = {
+            'volumes.set_gizmo_mode': ({ mode }) => { if (vcmd.current.selVolume == null) return needsSelection; setVolMode(mode); return done },
+            'volumes.set_solid': ({ on }) => {
+                const id = vcmd.current.selVolume
+                if (id == null) return needsSelection
+                setVolSolid(on); assistantVizRef.current?.setVolumeSolid(id, on)
+                return { ok: true, state: on }
+            },
+            'measure.finish_plane': () => {
+                if (activeToolRef.current !== 'measure-plane' || pendingPointsRef.current.length < 3) return nothing
+                finalizePlaneRef.current(); return done
+            },
+            'measure.cancel_pending': () => { if (!pendingPointsRef.current.length) return nothing; vcmd.current.cancelPending(); return done },
+            'viewer.align_set_gizmo_mode': ({ mode }) => { if (vcmd.current.activeTool !== 'align') return { ok: false, reason: 'unavailable' }; setAlignMode(mode); return done },
+            'viewer.align_save': { prepare: alignReady, run: async () => { const o = alignReady(); if (o.ok) await vcmd.current.saveAlignment(); return o } },
+            'viewer.fly_to_camera_pose': ({ keyframe }) => {
+                const markers = (cameraGroupRef.current?.children ?? []).filter(c => c.userData.isCamPose)
+                if (!markers.length) return { ok: false, reason: 'unavailable' }
+                const m = markers[keyframe - 1]
+                if (!m) return { ok: false, reason: 'not_found', detail: String(keyframe) }
+                return jumpToCamPose(m) ? { ok: true, detail: String(m.userData.frameName ?? '') } : { ok: false, reason: 'unavailable' }
+            },
+        }
+        return registerCommands(executors)
+    }, [jumpToCamPose])
+
     useImperativeHandle(ref, () => ({
         sendCommand: (cmd: Record<string, unknown>) => {
             if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -4784,22 +4844,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const spheres = camGroup.children.filter(c => (c as THREE.Mesh).isMesh && c.userData.isCamPose)
             const hits = rc.intersectObjects(spheres, false)
             if (hits.length > 0) {
-                const hit = hits[0].object
-                const pos = hit.position.clone()
-                const lookDir = hit.userData.lookDir as THREE.Vector3
-                if (lookDir) {
-                    // Move camera to pose position, look along pose direction
-                    camera.position.copy(pos)
-                    controls.target.copy(pos).addScaledVector(lookDir, 0.5)
-                    // Set FOV from intrinsics if available
-                    const intr = hit.userData.intrinsics
-                    if (intr && intr.fy && intr.cy) {
-                        const fovRad = 2 * Math.atan(intr.cy / intr.fy)
-                        camera.fov = fovRad * 180 / Math.PI
-                        camera.updateProjectionMatrix()
-                    }
-                    controls.update()
-                }
+                jumpToCamPose(hits[0].object)
             }
         }
         container.addEventListener('click', handleClick)

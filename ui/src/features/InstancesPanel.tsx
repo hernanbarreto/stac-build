@@ -51,13 +51,13 @@ interface InstancesPanelProps {
    *  generated objects, meshes (USER 2026-10-01) */
   onSetAllVisible: (visible: boolean, listed: ListedRows) => void
   onToggleSegment: (seg: SegmentInstance, visible: boolean) => void
-  onRenameSegment: (seg: SegmentInstance, label: string) => Promise<void>
+  onRenameSegment: (seg: SegmentInstance, label: string) => Promise<unknown>
   onDeleteSegment: (seg: SegmentInstance) => void
   onToggleUnsegmented: (visible: boolean) => void
   onFloorLevel: (instanceId: number) => void
   onTogglePlaced: (id: number, visible: boolean) => void
   onRemovePlaced: (id: number) => void
-  onRenamePlaced: (id: number, name: string) => Promise<void>
+  onRenamePlaced: (id: number, name: string) => Promise<unknown>
   /** a row that is not a segment was clicked: fly to it */
   onFocusItem: (kind: 'placed' | 'shape' | 'tsdf', key: string | number, instanceId?: number) => void
   onToggleTsdf: (m: MeshListItem, visible: boolean) => void
@@ -75,12 +75,15 @@ interface InstancesPanelProps {
   onToggleCube: (id: number, visible: boolean) => void
   onSetAllCubes: (visible: boolean) => void
   onFocusCube: (id: number) => void
+  /** the search box's text — the app's state: STAC sets it by command (instances.filter) */
+  search: string
+  onSearch: (text: string) => void
 }
 
 function InstancesPanelImpl(p: InstancesPanelProps) {
   const t = useT()
   const fmt = useFmt()
-  const [search, setSearch] = useState('')
+  const { search, onSearch: setSearch } = p
   const [editing, setEditing] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
 
