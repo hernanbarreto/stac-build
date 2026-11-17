@@ -62,6 +62,12 @@ export type AdminCommandId = 'admin.set_tab' | 'admin.create_user' | 'admin.set_
   | 'admin.delete_user' | 'admin.create_team' | 'admin.delete_team' | 'admin.change_team_manager' | 'admin.add_team_member'
   | 'admin.remove_team_member' | 'admin.assign_session' | 'admin.unassign_session' | 'admin.create_team_session'
 
+/** … the reference window (the references marked on the keyframe images), while it is open */
+export type ReferenceCommandId = 'references.set_mode' | 'references.go_to_keyframe' | 'references.zoom' | 'references.place_point'
+  | 'references.close_polygon' | 'references.undo_vertex' | 'references.cancel_pending' | 'references.select_item'
+  | 'references.arm_add_observation' | 'references.edit_distance' | 'references.edit_plane' | 'references.remove_observation'
+  | 'references.remove_polygon' | 'references.delete_item' | 'references.save' | 'references.close'
+
 /** one command of an answer, as the server sends it */
 export interface UiAction {
   id: string

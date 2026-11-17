@@ -12,6 +12,7 @@
  * overlay canvas always covers it exactly, at any zoom.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { registerCommands, type Executors, type Outcome, type ReferenceCommandId } from '../commands/registry'
 import { ChevronLeft, ChevronRight, Maximize, Pentagon, Pin, Plus, Save, Trash2, Undo2, X, ZoomIn, ZoomOut } from 'lucide-react'
 import { ConfirmDialog, Dialog } from '../components/ui/Dialog'
 import { Button } from '../components/ui/Button'
@@ -431,7 +432,7 @@ export function ReferenceDialog({ open, sessionId, scanKey, initialMode, onClose
   }
 
   // ── save ──
-  const save = async () => {
+  const save = async (): Promise<true | string> => {
     setSaving(true)
     setProblems([])
     try {
@@ -445,7 +446,7 @@ export function ReferenceDialog({ open, sessionId, scanKey, initialMode, onClose
         const list: string[] = Array.isArray(det?.problems) ? det.problems.map(String) : []
         setProblems(list)
         notify(t('reference.invalid', { error: typeof det?.error === 'string' ? det.error : t('reference.invalidGeneric'), n: list.length }), { tone: 'err' })
-        return
+        return [typeof det?.error === 'string' ? det.error : t('reference.invalidGeneric'), ...list.slice(0, 3)].join('; ')
       }
       if (!r.ok) throw new Error(`${r.status}`)
       setDirty(false)
@@ -453,8 +454,10 @@ export function ReferenceDialog({ open, sessionId, scanKey, initialMode, onClose
       setWarnings(Array.isArray(data?.warnings) ? data.warnings.map(String) : [])
       const c = data?.counts ?? counts
       notify(t('reference.saved', { distances: c.distances ?? 0, gauge: c.gauge ?? 0, test: c.test ?? 0, planes: c.planes ?? 0 }), { tone: 'ok' })
+      return true
     } catch (e: any) {
       notify(t('reference.saveFailed', { detail: e?.message ?? String(e) }), { tone: 'err' })
+      return String(e?.message ?? e)
     } finally {
       setSaving(false)
     }
@@ -465,6 +468,98 @@ export function ReferenceDialog({ open, sessionId, scanKey, initialMode, onClose
     if (dirty) { setDiscardOpen(true); return }
     onClose()
   }
+
+  // STAC's commands of this window (server/commands/catalog/220_references.yaml): registered
+  // while it is open, each one through the function its control or its key uses
+  const fcmd = useRef({ doc, keyframes, mode, polygon, pendingA, armedId, currentFrame, currentFile, loading, saving, placeDistancePoint, closePolygon, cancelPending, selectDistance, selectPlane, patchDistance, patchPlane, removeObservation, removePolygon, deleteItem, save, requestClose })
+  fcmd.current = { doc, keyframes, mode, polygon, pendingA, armedId, currentFrame, currentFile, loading, saving, placeDistancePoint, closePolygon, cancelPending, selectDistance, selectPlane, patchDistance, patchPlane, removeObservation, removePolygon, deleteItem, save, requestClose }
+  useEffect(() => {
+    if (!open) return
+    const done: Outcome = { ok: true }
+    const nothing: Outcome = { ok: false, reason: 'nothing_to_do' }
+    const missing = (id: string): Outcome => ({ ok: false, reason: 'not_found', detail: id })
+    const same = (id: string) => (x: { id: string }) => x.id.toLowerCase() === id.trim().toLowerCase()
+    const distance = (id: string) => fcmd.current.doc.distances.find(same(id))
+    const plane = (id: string) => fcmd.current.doc.planes.find(same(id))
+    const executors: Executors<ReferenceCommandId> = {
+      'references.set_mode': ({ mode: m }) => { fcmd.current.cancelPending(); setMode(m); return done },
+      'references.go_to_keyframe': ({ index }) => {
+        const n = fcmd.current.keyframes.length
+        if (!n) return nothing
+        if (index > n) return { ok: false, reason: 'not_found', detail: String(index) }
+        setKfIndex(index - 1); return done
+      },
+      'references.zoom': ({ direction }) => {
+        if (direction === 'reset') { setZoom(1); setPan({ x: 0, y: 0 }) }
+        else setZoom(z => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z + (direction === 'in' ? ZOOM_STEP : -ZOOM_STEP))))
+        return done
+      },
+      'references.place_point': ({ u, v }) => {
+        const c = fcmd.current
+        const img = imgRef.current
+        if (!img || c.currentFrame == null || !c.currentFile || c.loading) return { ok: false, reason: 'unavailable' }
+        if (u < 0 || v < 0 || u > img.naturalWidth || v > img.naturalHeight) return { ok: false, reason: 'failed', detail: `(${u}, ${v}) / ${img.naturalWidth} × ${img.naturalHeight}` }
+        if (c.mode === 'distance') c.placeDistancePoint({ frame: c.currentFrame, file: c.currentFile, u, v })
+        else setPolygon(p => [...p, [u, v]])
+        return done
+      },
+      'references.close_polygon': () => { const c = fcmd.current; if (c.mode !== 'plane' || c.polygon.length < 3) return nothing; c.closePolygon(); return done },
+      'references.undo_vertex': () => { if (!fcmd.current.polygon.length) return nothing; setPolygon(p => p.slice(0, -1)); return done },
+      'references.cancel_pending': () => {
+        const c = fcmd.current
+        if (!c.pendingA && !c.polygon.length && !c.armedId) return nothing
+        c.cancelPending(); return done
+      },
+      'references.select_item': ({ id }) => {
+        const d = distance(id), p = plane(id)
+        if (d) fcmd.current.selectDistance(d); else if (p) fcmd.current.selectPlane(p); else return missing(id)
+        return { ok: true, detail: (d ?? p)!.id }
+      },
+      'references.arm_add_observation': ({ id }) => {
+        const d = distance(id), p = plane(id)
+        if (d) fcmd.current.selectDistance(d); else if (p) fcmd.current.selectPlane(p); else return missing(id)
+        setArmedId((d ?? p)!.id)
+        return { ok: true, detail: (d ?? p)!.id }
+      },
+      'references.edit_distance': ({ id, ...fields }) => {
+        const d = distance(id)
+        if (!d) return missing(id)
+        const patch = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined))
+        if (!Object.keys(patch).length) return nothing
+        fcmd.current.patchDistance(d.id, patch); return { ok: true, detail: d.id }
+      },
+      'references.edit_plane': ({ id, ...fields }) => {
+        const p = plane(id)
+        if (!p) return missing(id)
+        const patch = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined))
+        if (!Object.keys(patch).length) return nothing
+        fcmd.current.patchPlane(p.id, patch); return { ok: true, detail: p.id }
+      },
+      'references.remove_observation': ({ id, end, index }) => {
+        const d = distance(id)
+        if (!d) return missing(id)
+        if (index >= d.ends[end].observations.length) return { ok: false, reason: 'not_found', detail: `${d.id} ${end === 0 ? 'A' : 'B'} ${index}` }
+        fcmd.current.removeObservation(d.id, end, index); return { ok: true, detail: d.id }
+      },
+      'references.remove_polygon': ({ id, index }) => {
+        const p = plane(id)
+        if (!p) return missing(id)
+        if (index >= p.polygons.length) return { ok: false, reason: 'not_found', detail: `${p.id} ${index}` }
+        fcmd.current.removePolygon(p.id, index); return { ok: true, detail: p.id }
+      },
+      'references.delete_item': {
+        prepare: ({ id }) => { const x = distance(id) ?? plane(id); return x ? { ok: true, detail: x.id } : missing(id) },
+        run: ({ id }) => { const x = distance(id) ?? plane(id); if (!x) return missing(id); fcmd.current.deleteItem(x.id); return { ok: true, detail: x.id } },
+      },
+      'references.save': async () => {
+        if (fcmd.current.saving) return { ok: false, reason: 'unavailable' }
+        const r = await fcmd.current.save()
+        return r === true ? done : { ok: false, reason: 'failed', detail: r }
+      },
+      'references.close': () => { fcmd.current.requestClose(); return done },
+    }
+    return registerCommands(executors)
+  }, [open])
 
   // ── derived text ──
   const hint = (() => {

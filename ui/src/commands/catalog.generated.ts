@@ -2,7 +2,7 @@
 // The commands of the interface STAC can run: their ids and the type of each one's arguments.
 // A new command is declared in the catalogue; this file is then regenerated and the compiler
 // asks for its executor (ui/src/commands/registry.ts).
-export const CATALOG_SHA256 = '404d8768213b74b55acb181b34643bb297cf77c1544950033d64809709541e1e'
+export const CATALOG_SHA256 = '34a8c9d0fc3f6a420b849d7d454850e37fd717b77f9493cac5e619c3e48b013d'
 
 export const UI_COMMAND_IDS = [
   'talk.set_user_name',
@@ -145,6 +145,22 @@ export const UI_COMMAND_IDS = [
   'deviation.open_compare',
   'deviation.run_comparison',
   'deviation.toggle_view',
+  'references.set_mode',
+  'references.go_to_keyframe',
+  'references.zoom',
+  'references.place_point',
+  'references.close_polygon',
+  'references.undo_vertex',
+  'references.cancel_pending',
+  'references.select_item',
+  'references.arm_add_observation',
+  'references.edit_distance',
+  'references.edit_plane',
+  'references.remove_observation',
+  'references.remove_polygon',
+  'references.delete_item',
+  'references.save',
+  'references.close',
   'certify.set_epoch_layers',
   'certify.show_trajectory_edges',
   'certify.select_epoch',
@@ -202,6 +218,7 @@ export const UI_CONFIRM_IDS = [
   'instances.set_floor_level',
   'bim.delete_ifc',
   'deviation.run_comparison',
+  'references.delete_item',
   'team.remove_member',
   'admin.delete_user',
   'admin.delete_team',
@@ -352,6 +369,22 @@ export interface UiCommandArgs {
   'deviation.open_compare': Record<string, never>
   'deviation.run_comparison': { registration: 'auto' | 'manual' }
   'deviation.toggle_view': { on: boolean }
+  'references.set_mode': { mode: 'distance' | 'plane' }
+  'references.go_to_keyframe': { index: number }
+  'references.zoom': { direction: 'in' | 'out' | 'reset' }
+  'references.place_point': { u: number; v: number }
+  'references.close_polygon': Record<string, never>
+  'references.undo_vertex': Record<string, never>
+  'references.cancel_pending': Record<string, never>
+  'references.select_item': { id: string }
+  'references.arm_add_observation': { id: string }
+  'references.edit_distance': { id: string; value_m?: number; sigma_m?: number; role?: 'gauge' | 'test'; tool?: 'tape' | 'laser' | 'total_station'; note?: string }
+  'references.edit_plane': { id: string; label?: string; note?: string }
+  'references.remove_observation': { id: string; end: 0 | 1; index: number }
+  'references.remove_polygon': { id: string; index: number }
+  'references.delete_item': { id: string }
+  'references.save': Record<string, never>
+  'references.close': Record<string, never>
   'certify.set_epoch_layers': { before?: boolean; after?: boolean }
   'certify.show_trajectory_edges': { odometry?: boolean; loops?: boolean }
   'certify.select_epoch': { epoch: number }
