@@ -40,6 +40,10 @@ export type ViewportCommandId = 'volumes.set_gizmo_mode' | 'volumes.set_solid' |
 /** … and the flythrough's player, while it is open */
 export type FlythroughCommandId = 'flythrough.play_pause' | 'flythrough.step_frame' | 'flythrough.seek' | 'flythrough.set_speed'
 
+/** … and the Calibration window, while it is open */
+export type CalibrationCommandId = 'calibration.save_distance' | 'calibration.save_plane' | 'calibration.toggle_role'
+  | 'calibration.delete_measurement' | 'calibration.delete_plane' | 'calibration.set_mode' | 'calibration.apply'
+
 /** one command of an answer, as the server sends it */
 export interface UiAction {
   id: string

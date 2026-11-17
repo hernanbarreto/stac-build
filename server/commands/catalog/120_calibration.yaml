@@ -132,7 +132,6 @@ commands:
 - id: calibration.calibrate_readout
   kind: action
   runs_on: ui
-  status: manual
   model: 'Turn a distance already measured by hand in the viewer into a calibration (the pin on its readout): the
     Calibration window opens with it as a draft, to fill in its real length.'
   args:
@@ -149,22 +148,24 @@ commands:
       - tocá el pin de la lectura
       - que esa distancia fije la escala
       - mandá la lectura a la ventana de calibración
+      done: 'Calibración abierta con la distancia medida de {detail}: falta su longitud real.'
     en:
       title: Calibrate with a distance already measured
       say:
       - press the pin on the readout
       - let that distance fix the scale
       - send the readout to the calibration window
+      done: 'Calibration open with the measured distance of {detail}: its real length is missing.'
     fr:
       title: Étalonner avec une distance déjà mesurée
       say:
       - appuie sur l'épingle de la lecture
       - que cette distance fixe l'échelle
       - envoie la lecture à la fenêtre d'étalonnage
+      done: 'Calibration ouverte avec la distance mesurée de {detail} : il manque sa longueur réelle.'
 - id: calibration.save_distance
   kind: action
   runs_on: ui
-  status: manual
   model: 'Store the distance being drafted in the Calibration window: its real length, its uncertainty, its role
     (gauge = it fixes the scale, test = it verifies it), where the length comes from (tape, laser, total station
     or another scan) and a note.'
@@ -209,22 +210,24 @@ commands:
       - guardala como calibración
       - la longitud real es 2 metros 40
       - guardala con rol de verificación
+      done: Distancia de calibración {detail} guardada.
     en:
       title: Store a calibration distance
       say:
       - save it as a calibration
       - the real length is 2.40 metres
       - save it with the verification role
+      done: Calibration distance {detail} stored.
     fr:
       title: Enregistrer une distance d'étalonnage
       say:
       - enregistre-la comme étalonnage
       - la longueur réelle est de 2,40 mètres
       - enregistre-la avec le rôle de vérification
+      done: Distance de calibration {detail} enregistrée.
 - id: calibration.save_plane
   kind: action
   runs_on: ui
-  status: manual
   model: Store the plane being drafted in the Calibration window (the points marked on the model), with what the
     surface is (floor, wall, table) and a note.
   args:
@@ -243,22 +246,24 @@ commands:
       - guardá el plano marcado
       - la superficie marcada es el piso
       - guardalo con la etiqueta pared
+      done: Plano de calibración {detail} guardado.
     en:
       title: Store a calibration plane
       say:
       - save the marked plane
       - the marked surface is the floor
       - save it with the label wall
+      done: Calibration plane {detail} stored.
     fr:
       title: Enregistrer un plan d'étalonnage
       say:
       - enregistre le plan marqué
       - la surface marquée est le sol
       - enregistre-le avec l'étiquette mur
+      done: Plan de calibration {detail} enregistré.
 - id: calibration.toggle_role
   kind: action
   runs_on: ui
-  status: manual
   model: 'Change the role of a stored calibration distance: gauge (it fixes the scale) or test (it verifies the
     scale the others give).'
   args:
@@ -281,22 +286,24 @@ commands:
       - que esa medida verifique
       - que la medida c2 calibre
       - pasá su rol a verificación
+      done: Rol de la distancia {detail} cambiado a {role}.
     en:
       title: Change the role of a stored distance
       say:
       - make that one verify
       - make distance c2 calibrate
       - switch its role to test
+      done: Role of distance {detail} changed to {role}.
     fr:
       title: Changer le rôle d'une distance enregistrée
       say:
       - passe-la en vérification
       - passe la distance c2 en étalonnage
       - change son rôle
+      done: Rôle de la distance {detail} changé en {role}.
 - id: calibration.delete_measurement
   kind: action
   runs_on: ui
-  status: manual
   model: DELETE a stored calibration distance of the scan for good (the scale factor is computed again without it).
   confirm: true
   args:
@@ -313,22 +320,27 @@ commands:
       - eliminá la medida c2
       - borrá esa distancia guardada
       - sacá esa fila de la tabla
+      done: Distancia de calibración {detail} eliminada.
+      ask: 'Voy a eliminar la distancia de calibración {detail}: el factor de escala se calcula de nuevo sin ella.'
     en:
       title: Delete a calibration distance
       say:
       - delete distance c2
       - erase that stored distance
       - remove that row from the table
+      done: Calibration distance {detail} deleted.
+      ask: 'I am going to delete the calibration distance {detail}: the scale factor is computed again without it.'
     fr:
       title: Supprimer une distance d'étalonnage
       say:
       - supprime la distance c2
       - efface cette distance enregistrée
       - retire cette ligne du tableau
+      done: Distance de calibration {detail} supprimée.
+      ask: 'Je vais supprimer la distance de calibration {detail} : le facteur d''échelle est recalculé sans elle.'
 - id: calibration.delete_plane
   kind: action
   runs_on: ui
-  status: manual
   model: DELETE a stored calibration plane for good.
   confirm: true
   args:
@@ -345,22 +357,27 @@ commands:
       - eliminá el plano p1
       - borrá ese plano guardado
       - sacá esa superficie de la tabla
+      done: Plano de calibración {detail} eliminado.
+      ask: Voy a eliminar el plano de calibración {detail}.
     en:
       title: Delete a calibration plane
       say:
       - delete plane p1
       - erase that stored plane
       - remove that surface from the table
+      done: Calibration plane {detail} deleted.
+      ask: I am going to delete the calibration plane {detail}.
     fr:
       title: Supprimer un plan d'étalonnage
       say:
       - supprime le plan p1
       - efface ce plan enregistré
       - retire cette surface du tableau
+      done: Plan de calibration {detail} supprimé.
+      ask: Je vais supprimer le plan de calibration {detail}.
 - id: calibration.set_mode
   kind: action
   runs_on: ui
-  status: manual
   model: 'Type of calibration of the scan: global (one scale factor for the whole cloud) or axes (one factor per
     axis X, Y, Z; it needs a gauge distance along each axis; a per-axis calibration is a diagnosis, it cannot be
     applied to the scan).'
@@ -380,18 +397,21 @@ commands:
       - un factor por cada eje
       - un solo factor global
       - cambiá el tipo de factor
+      done: 'Tipo de calibración: {mode}.'
     en:
       title: Type of calibration
       say:
       - one factor per axis
       - a single global factor
       - change the kind of factor
+      done: 'Type of calibration: {mode}.'
     fr:
       title: Type d'étalonnage
       say:
       - un facteur par axe
       - un seul facteur global
       - change le type de facteur
+      done: 'Type de calibration : {mode}.'
 - id: calibration.close
   kind: action
   runs_on: ui
@@ -423,7 +443,6 @@ commands:
 - id: calibration.apply
   kind: action
   runs_on: ui
-  status: manual
   confirm: true
   model: 'APPLY the scan''s calibration to its geometry — the real rescale: the cloud, the cameras, the objects
     and the meshes are REWRITTEN at the calibrated scale as a new geometric epoch (the ''Apply to the scan'' button
@@ -439,15 +458,21 @@ commands:
       - aplicá la calibración
       - reescalá la nube
       - llevá el escaneo a escala real
+      done: 'Reescalado lanzado: {detail}.'
+      ask: 'Voy a aplicar la calibración a la geometría del escaneo, {detail}: la nube, las cámaras, los objetos y las mallas se reescriben a la escala calibrada como una nueva época.'
     en:
       title: Apply the calibration to the scan
       say:
       - apply the calibration
       - rescale the cloud
       - bring the scan to real scale
+      done: 'Rescale launched: {detail}.'
+      ask: 'I am going to apply the calibration to the scan''s geometry, {detail}: the cloud, the cameras, the objects and the meshes are rewritten at the calibrated scale as a new epoch.'
     fr:
       title: Appliquer l'étalonnage au scan
       say:
       - applique l'étalonnage
       - remets le nuage à l'échelle
       - mets le scan à l'échelle réelle
+      done: 'Remise à l''échelle lancée : {detail}.'
+      ask: 'Je vais appliquer la calibration à la géométrie du scan, {detail} : le nuage, les caméras, les objets et les maillages sont réécrits à l''échelle calibrée comme une nouvelle époque.'

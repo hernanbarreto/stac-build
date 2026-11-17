@@ -2,7 +2,7 @@
 // The commands of the interface STAC can run: their ids and the type of each one's arguments.
 // A new command is declared in the catalogue; this file is then regenerated and the compiler
 // asks for its executor (ui/src/commands/registry.ts).
-export const CATALOG_SHA256 = '6c06dde0ce99d83d91eb06db36e7fda7bd4335d21a47cafbcca0f176ec4e13fc'
+export const CATALOG_SHA256 = '7d013a3efa794d534eb45f7ad42ddc0be5b1f7754807da2cc45e9220e466c7e9'
 
 export const UI_COMMAND_IDS = [
   'talk.set_user_name',
@@ -80,7 +80,15 @@ export const UI_COMMAND_IDS = [
   'calibration.measure_plane',
   'calibration.open',
   'calibration.open_reference',
+  'calibration.calibrate_readout',
+  'calibration.save_distance',
+  'calibration.save_plane',
+  'calibration.toggle_role',
+  'calibration.delete_measurement',
+  'calibration.delete_plane',
+  'calibration.set_mode',
   'calibration.close',
+  'calibration.apply',
   'objects.open_library',
   'objects.add',
   'objects.focus',
@@ -128,6 +136,9 @@ export type UiCommandId = typeof UI_COMMAND_IDS[number]
 export const UI_CONFIRM_IDS = [
   'volumes.delete',
   'viewer.align_save',
+  'calibration.delete_measurement',
+  'calibration.delete_plane',
+  'calibration.apply',
   'objects.remove_selected',
   'objects.remove',
   'pipeline.cancel',
@@ -211,7 +222,15 @@ export interface UiCommandArgs {
   'calibration.measure_plane': Record<string, never>
   'calibration.open': Record<string, never>
   'calibration.open_reference': { mode: 'distance' | 'plane' }
+  'calibration.calibrate_readout': { readout_id?: string }
+  'calibration.save_distance': { value_m: number; sigma_m?: number; role: 'gauge' | 'test'; tool: 'tape' | 'laser' | 'total_station' | 'other_scan'; reference_scan?: string; note?: string }
+  'calibration.save_plane': { label?: string; note?: string }
+  'calibration.toggle_role': { id: string; role: 'gauge' | 'test' }
+  'calibration.delete_measurement': { id: string }
+  'calibration.delete_plane': { id: string }
+  'calibration.set_mode': { mode: 'global' | 'axes' }
   'calibration.close': Record<string, never>
+  'calibration.apply': Record<string, never>
   'objects.open_library': Record<string, never>
   'objects.add': { name: string }
   'objects.focus': { id: number | string }

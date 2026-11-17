@@ -42,7 +42,7 @@ import { Inspector } from './layout/Inspector'
 import { BottomDock } from './layout/BottomDock'
 import { StatusBar } from './layout/StatusBar'
 import { CommandPalette, type Command } from './layout/CommandPalette'
-import { registerCommands, findByName, type Executors, type FlythroughCommandId, type Outcome, type PanelCommandId, type ViewportCommandId } from './commands/registry'
+import { registerCommands, findByName, type Executors, type CalibrationCommandId, type FlythroughCommandId, type Outcome, type PanelCommandId, type ViewportCommandId } from './commands/registry'
 import type { UiCommandId } from './commands/catalog.generated'
 import { SettingsDialog } from './layout/SettingsDialog'
 import { SceneLookDialog } from './layout/SceneLookDialog'
@@ -2011,7 +2011,7 @@ function App() {
     scanTabs, closeScanTab, handleSessionSelect, placedObjects, cubes, userVolumes, focusVolume, undoBrush,
     physicsDiameterCm, physicsBounce, isAdmin: user?.role === 'admin', deleteVolume, sceneObjSel,
     segments, canManage, renameSession, createSession, setReference, renameSegment, renamePlaced, addLibraryItem,
-    handlePipelineCancel, pipelineRunning, eraseBoxSel,
+    handlePipelineCancel, pipelineRunning, eraseBoxSel, readouts,
   })
   cmd.current = {
     connected, connectToServer, disconnect, sessions, activeSession, handleSessionLoad, handleUnload,
@@ -2020,7 +2020,7 @@ function App() {
     scanTabs, closeScanTab, handleSessionSelect, placedObjects, cubes, userVolumes, focusVolume, undoBrush,
     physicsDiameterCm, physicsBounce, isAdmin: user?.role === 'admin', deleteVolume, sceneObjSel,
     segments, canManage, renameSession, createSession, setReference, renameSegment, renamePlaced, addLibraryItem,
-    handlePipelineCancel, pipelineRunning, eraseBoxSel,
+    handlePipelineCancel, pipelineRunning, eraseBoxSel, readouts,
   }
   /** what the interface says of itself with every question to STAC (the model needs the
    *  sessions' names to open one) */
@@ -2034,7 +2034,7 @@ function App() {
     }
   }, [])
   useEffect(() => {
-    type AppCommandId = Exclude<UiCommandId, PanelCommandId | ViewportCommandId | FlythroughCommandId>
+    type AppCommandId = Exclude<UiCommandId, PanelCommandId | ViewportCommandId | FlythroughCommandId | CalibrationCommandId>
     const done: Outcome = { ok: true }
     const noSession: Outcome = { ok: false, reason: 'no_session' }
     const open = () => cmd.current.activeSession
@@ -2236,6 +2236,15 @@ function App() {
       // ── the second set (2026-11-14): what was a simple control of the interface ──
       'app.logout': () => { cmd.current.disconnect(true); return done },
       'admin.open': () => { if (!cmd.current.isAdmin) return { ok: false, reason: 'unavailable' }; setAdminOpen(true); return done },
+      'calibration.calibrate_readout': ({ readout_id }) => {
+        if (!open()) return noSession
+        const distances = cmd.current.readouts.filter(r => r.kind === 'distance' && !r.tag)
+        const id = readout_id ?? distances[distances.length - 1]?.id
+        const d = id ? viewportRef.current?.getDistance(id) : null
+        if (!id || !d) return readout_id ? { ok: false, reason: 'not_found', detail: readout_id } : { ok: false, reason: 'nothing_to_do' }
+        setCalibrationDraft({ kind: 'distance', readoutId: id, ...d }); setCalibrationOpen(true)
+        return { ok: true, detail: `${d.metres.toFixed(3)} m` }
+      },
       'calibration.close': () => { setCalibrationOpen(false); setCalibrationDraft(null); return done },
       'sessions.select': async ({ session }) => {
         if (!(await ensureConnected())) return { ok: false, reason: 'server_down' }

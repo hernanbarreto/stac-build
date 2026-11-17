@@ -20,7 +20,8 @@
  * The window lists what is stored with the scale factor the gauge measurements give and the
  * error on the test ones. The factor is REPORTED: nothing is rescaled or levelled from here.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { findByName, registerCommands, type CalibrationCommandId, type Executors, type Outcome } from '../commands/registry'
 import { Crosshair, Loader2, Pentagon, Pin, Ruler, Save, Scaling, Trash2 } from 'lucide-react'
 import { Dialog } from '../components/ui/Dialog'
 import { Button } from '../components/ui/Button'
@@ -369,6 +370,116 @@ export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft,
       notify(t('calibration.saveFailed', { detail: e instanceof Error ? e.message : String(e) }), { tone: 'err' })
     } finally { setBusy(false) }
   }, [sessionId, scanKey, take, notify, t])
+
+  // STAC's commands of this window (server/commands/catalog/120_calibration.yaml): registered
+  // while it is open, on its CURRENT state. Each one is the same request its button sends.
+  const wcmd = useRef({ sessionId, scanKey, distance, plane, measurements, planes, summary, otherScans, busy, applyState, take, onStored })
+  wcmd.current = { sessionId, scanKey, distance, plane, measurements, planes, summary, otherScans, busy, applyState, take, onStored }
+  useEffect(() => {
+    if (!open) return
+    const lengths = (m: CalMeasurement) => `${m.id} (${m.measured_m.toFixed(3)} m → ${m.value_m.toFixed(3)} m)`
+    /** one request of the calibration API; the document it returns is taken */
+    const send = async (method: string, path: string, body?: Record<string, unknown>): Promise<Outcome & { data?: any }> => {
+      const c = wcmd.current
+      if (!c.sessionId) return { ok: false, reason: 'no_session' }
+      if (c.busy) return { ok: false, reason: 'unavailable' }
+      setBusy(true)
+      try {
+        const r = await fetch(`/api/calibration/${encodeURIComponent(c.sessionId)}${path}${method === 'DELETE' ? scanQuery(c.scanKey) : ''}`, {
+          method, ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scan_key: c.scanKey ?? undefined, ...body }) } : {}),
+        })
+        const d = await r.json()
+        if (!r.ok) return { ok: false, reason: 'failed', detail: String(d?.detail?.error || d?.detail || `HTTP ${r.status}`) }
+        c.take(d)
+        return { ok: true, data: d }
+      } catch (e) {
+        return { ok: false, reason: 'failed', detail: e instanceof Error ? e.message : String(e) }
+      } finally { setBusy(false) }
+    }
+    const measurement = (id: string): CalMeasurement | Outcome =>
+      wcmd.current.measurements.find(m => m.id.toLowerCase() === id.trim().toLowerCase()) ?? { ok: false, reason: 'not_found', detail: id }
+    const storedPlane = (id: string): CalPlane | Outcome =>
+      wcmd.current.planes.find(p => p.id.toLowerCase() === id.trim().toLowerCase()) ?? { ok: false, reason: 'not_found', detail: id }
+    /** can the calibration be applied to the geometry — and with which factor */
+    const applicable = (): Outcome => {
+      const c = wcmd.current
+      if (!c.sessionId) return { ok: false, reason: 'no_session' }
+      const f = c.summary?.scale_factor ?? null
+      if (!c.summary || c.summary.mode_used === 'axes' || f == null || f === 1 || c.applyState?.status === 'running') return { ok: false, reason: 'nothing_to_do' }
+      return { ok: true, detail: `${c.sessionId}${c.scanKey ? ` ${c.scanKey}` : ''} × ${f.toFixed(5)}` }
+    }
+    const executors: Executors<CalibrationCommandId> = {
+      'calibration.save_distance': async ({ value_m, sigma_m, role: r, tool: tl, reference_scan, note: n }) => {
+        const c = wcmd.current
+        if (!c.distance) return { ok: false, reason: 'nothing_to_do' }
+        if (!(value_m > 0)) return { ok: false, reason: 'failed', detail: String(value_m) }
+        let ref: string | undefined
+        if (tl === 'other_scan') {
+          const found = findByName(c.otherScans, reference_scan ?? '', s => [s.key, s.label])
+          if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.map(s => s.label).join(', ') }
+          if (!found.item) return { ok: false, reason: 'not_found', detail: reference_scan ?? '' }
+          ref = found.item.key
+        }
+        const draftId = c.distance.readoutId
+        const o = await send('POST', '/measurements', { a: c.distance.a, b: c.distance.b, value_m, sigma_m: sigma_m ?? 0, role: r, tool: tl, note: n ?? '', ...(ref ? { reference_scan: ref } : {}) })
+        if (!o.ok) return o
+        c.onStored(draftId)
+        return { ok: true, detail: String(o.data?.measurement?.id ?? '') }
+      },
+      'calibration.save_plane': async ({ label, note: n }) => {
+        const c = wcmd.current
+        if (!c.plane) return { ok: false, reason: 'nothing_to_do' }
+        const draftId = c.plane.readoutId
+        const o = await send('POST', '/planes', { points: c.plane.points, label: (label ?? '').trim(), note: n ?? '' })
+        if (!o.ok) return o
+        c.onStored(draftId)
+        return { ok: true, detail: String(o.data?.plane?.id ?? '') }
+      },
+      'calibration.toggle_role': async ({ id, role: r }) => {
+        const m = measurement(id)
+        if ('ok' in m) return m
+        const o = await send('PATCH', `/measurements/${encodeURIComponent(m.id)}`, { role: r })
+        return o.ok ? { ok: true, detail: m.id } : o
+      },
+      'calibration.delete_measurement': {
+        prepare: ({ id }) => { const m = measurement(id); return 'ok' in m ? m : { ok: true, detail: lengths(m) } },
+        run: async ({ id }) => {
+          const m = measurement(id)
+          if ('ok' in m) return m
+          const o = await send('DELETE', `/measurements/${encodeURIComponent(m.id)}`)
+          return o.ok ? { ok: true, detail: m.id } : o
+        },
+      },
+      'calibration.delete_plane': {
+        prepare: ({ id }) => { const p = storedPlane(id); return 'ok' in p ? p : { ok: true, detail: p.label ? `${p.id} (${p.label})` : p.id } },
+        run: async ({ id }) => {
+          const p = storedPlane(id)
+          if ('ok' in p) return p
+          const o = await send('DELETE', `/planes/${encodeURIComponent(p.id)}`)
+          return o.ok ? { ok: true, detail: p.id } : o
+        },
+      },
+      'calibration.set_mode': async ({ mode }) => { const o = await send('PUT', '/mode', { mode }); return o.ok ? { ok: true } : o },
+      'calibration.apply': {
+        prepare: applicable,
+        run: async () => {
+          const ready = applicable()
+          if (!ready.ok) return ready
+          const c = wcmd.current
+          try {
+            const r = await fetch(`/api/calibration/${encodeURIComponent(c.sessionId!)}/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scan_key: c.scanKey ?? undefined }) })
+            const d = await r.json()
+            if (!r.ok) return { ok: false, reason: 'failed', detail: String(d?.detail?.error || d?.detail || `HTTP ${r.status}`) }
+            setApplyAsk(false); setApplyState(d)
+            return ready
+          } catch (e) {
+            return { ok: false, reason: 'failed', detail: e instanceof Error ? e.message : String(e) }
+          }
+        },
+      },
+    }
+    return registerCommands(executors)
+  }, [open])
 
   const planeById = useMemo(() => new Map(planes.map(pl => [pl.id, pl])), [planes])
   const planeColumns: Column<CalPlaneRow>[] = useMemo(() => [
