@@ -2,7 +2,7 @@
 // The commands of the interface STAC can run: their ids and the type of each one's arguments.
 // A new command is declared in the catalogue; this file is then regenerated and the compiler
 // asks for its executor (ui/src/commands/registry.ts).
-export const CATALOG_SHA256 = '0eb25577c71ea07016806f9c7c7ed9a035bb99b35a1fecb8b4b16465555f0b10'
+export const CATALOG_SHA256 = '404d8768213b74b55acb181b34643bb297cf77c1544950033d64809709541e1e'
 
 export const UI_COMMAND_IDS = [
   'talk.set_user_name',
@@ -153,7 +153,33 @@ export const UI_COMMAND_IDS = [
   'evaluation.select_run',
   'evaluation.open_file',
   'evaluation.set_json_view',
+  'team.select',
+  'team.set_tab',
+  'team.send_message',
+  'team.open_add_member',
+  'team.add_member',
+  'team.remove_member',
+  'call.start',
+  'call.accept',
+  'call.decline',
+  'call.end',
+  'call.set_mute',
+  'call.set_camera',
   'admin.open',
+  'admin.set_tab',
+  'admin.create_user',
+  'admin.set_user_role',
+  'admin.toggle_user_active',
+  'admin.edit_user',
+  'admin.delete_user',
+  'admin.create_team',
+  'admin.delete_team',
+  'admin.change_team_manager',
+  'admin.add_team_member',
+  'admin.remove_team_member',
+  'admin.assign_session',
+  'admin.unassign_session',
+  'admin.create_team_session',
   'reports.run_deviation',
 ] as const
 
@@ -176,6 +202,10 @@ export const UI_CONFIRM_IDS = [
   'instances.set_floor_level',
   'bim.delete_ifc',
   'deviation.run_comparison',
+  'team.remove_member',
+  'admin.delete_user',
+  'admin.delete_team',
+  'admin.remove_team_member',
   'reports.run_deviation',
 ] as const
 
@@ -330,6 +360,32 @@ export interface UiCommandArgs {
   'evaluation.select_run': { run_id: string }
   'evaluation.open_file': { path: string }
   'evaluation.set_json_view': { mode: 'structured' | 'raw' }
+  'team.select': { team: string }
+  'team.set_tab': { tab: 'members' | 'chat' | 'activity' }
+  'team.send_message': { text: string }
+  'team.open_add_member': Record<string, never>
+  'team.add_member': { user: string }
+  'team.remove_member': { user: string }
+  'call.start': { user: string }
+  'call.accept': Record<string, never>
+  'call.decline': Record<string, never>
+  'call.end': Record<string, never>
+  'call.set_mute': { on: boolean }
+  'call.set_camera': { on: boolean }
   'admin.open': Record<string, never>
+  'admin.set_tab': { tab: 'users' | 'teams' }
+  'admin.create_user': { username: string; role: 'admin' | 'manager' | 'editor' | 'viewer' | 'recorder'; full_name?: string; email?: string }
+  'admin.set_user_role': { user: string; role: 'admin' | 'manager' | 'editor' | 'viewer' | 'recorder' }
+  'admin.toggle_user_active': { user: string; on: boolean }
+  'admin.edit_user': { user: string; full_name?: string; email?: string }
+  'admin.delete_user': { user: string }
+  'admin.create_team': { name: string; description?: string; manager: string }
+  'admin.delete_team': { team: string }
+  'admin.change_team_manager': { team: string; manager: string }
+  'admin.add_team_member': { team: string; user: string }
+  'admin.remove_team_member': { team: string; user: string }
+  'admin.assign_session': { team: string; session: string }
+  'admin.unassign_session': { team: string; session: string }
+  'admin.create_team_session': { team: string; name: string }
   'reports.run_deviation': { tolerance_mm: number }
 }

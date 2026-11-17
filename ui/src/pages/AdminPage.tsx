@@ -1,7 +1,8 @@
 // STAC-BUILD: Admin Panel — User & Team Management
 // Create, edit, and manage users and teams (admin only)
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { findByName, registerCommands, type AdminCommandId, type Executors, type Outcome } from '../commands/registry'
 import { Settings, Users, Building2, Plus, Save, Trash2, Pencil, Power, PowerOff, ChevronDown, ChevronRight, X, FolderOpen } from 'lucide-react'
 import { useAuth, AuthUser } from '../context/AuthContext'
 import { useConfirmDialog } from '../components/ConfirmDialog'
@@ -157,6 +158,135 @@ export default function AdminPage({ onClose }: Props) {
     } else { const err = await res.json().catch(() => ({})); alert(err.detail || t('admin.createSessionFailed'), t('admin.error')) }
   }
   const handleChangeManager = async (teamId: number, managerId: number) => { await fetch(`/api/teams/${teamId}`, { method: 'PUT', headers, body: JSON.stringify({ manager_id: managerId }) }); fetchTeams() }
+
+  // STAC's commands of the Administration window (server/commands/catalog/270_admin.yaml), while
+  // it is open: each one is the request its control sends. A password is never an argument:
+  // creating a user fills the form, the password is typed and the form saved by hand.
+  const acmd = useRef({ users, teams, allSessions, headers, fetchUsers, fetchTeams, fetchAllSessions, currentId: currentUser?.id })
+  acmd.current = { users, teams, allSessions, headers, fetchUsers, fetchTeams, fetchAllSessions, currentId: currentUser?.id }
+  useEffect(() => {
+    const named = <T,>(items: T[], spoken: string, names: (x: T) => string[]): T | Outcome => {
+      const found = findByName(items, spoken, names)
+      if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.slice(0, 8).map(x => names(x)[0]).join(', ') }
+      return found.item ?? { ok: false, reason: 'not_found', detail: spoken }
+    }
+    const userBy = (name: string) => named(acmd.current.users, name, u => [u.username, ...(u.full_name ? [u.full_name] : [])])
+    const teamBy = (name: string) => named(acmd.current.teams, name, x => [x.name])
+    const send = async (method: string, url: string, body?: unknown): Promise<Outcome> => {
+      try {
+        const r = await fetch(url, { method, headers: acmd.current.headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
+        if (r.ok) return { ok: true }
+        const d = await r.json().catch(() => ({}))
+        return { ok: false, reason: 'failed', detail: String(d.detail || `HTTP ${r.status}`) }
+      } catch (e) { return { ok: false, reason: 'failed', detail: e instanceof Error ? e.message : String(e) } }
+    }
+    const then = (o: Outcome, refresh: () => unknown, detail: string): Outcome => { if (!o.ok) return o; refresh(); return { ok: true, detail } }
+    const memberOf = ({ team, user }: { team: string; user: string }) => {
+      const tm = teamBy(team)
+      if ('ok' in tm) return tm
+      const m = named(tm.members, user, x => [x.username, ...(x.full_name ? [x.full_name] : [])])
+      return 'ok' in m ? m : { tm, m }
+    }
+    const executors: Executors<AdminCommandId> = {
+      'admin.set_tab': ({ tab }) => { setActiveTab(tab); return { ok: true } },
+      'admin.create_user': ({ username, role, full_name, email }) => {
+        setActiveTab('users'); setShowCreate(true)
+        setNewUsername(username); setNewRole(role); setNewFullName(full_name ?? ''); setNewEmail(email ?? ''); setNewPassword('')
+        return { ok: true }
+      },
+      'admin.set_user_role': async ({ user, role }) => {
+        const u = userBy(user)
+        if ('ok' in u) return u
+        return then(await send('PUT', `/api/auth/users/${u.id}`, { role }), acmd.current.fetchUsers, u.username)
+      },
+      'admin.toggle_user_active': async ({ user, on }) => {
+        const u = userBy(user)
+        if ('ok' in u) return u
+        if (u.id === acmd.current.currentId && !on) return { ok: false, reason: 'not_allowed' }
+        const o = then(await send('PUT', `/api/auth/users/${u.id}`, { is_active: on }), acmd.current.fetchUsers, u.username)
+        return o.ok ? { ...o, state: on } : o
+      },
+      'admin.edit_user': async ({ user, full_name, email }) => {
+        const u = userBy(user)
+        if ('ok' in u) return u
+        const body: Record<string, string> = {}
+        if (full_name !== undefined) body.full_name = full_name
+        if (email !== undefined) body.email = email
+        if (!Object.keys(body).length) return { ok: false, reason: 'nothing_to_do' }
+        return then(await send('PUT', `/api/auth/users/${u.id}`, body), acmd.current.fetchUsers, u.username)
+      },
+      'admin.delete_user': {
+        prepare: ({ user }) => { const u = userBy(user); return 'ok' in u ? u : u.id === acmd.current.currentId ? { ok: false, reason: 'not_allowed' } : { ok: true, detail: u.username } },
+        run: async ({ user }) => {
+          const u = userBy(user)
+          if ('ok' in u) return u
+          if (u.id === acmd.current.currentId) return { ok: false, reason: 'not_allowed' }
+          return then(await send('DELETE', `/api/auth/users/${u.id}`), acmd.current.fetchUsers, u.username)
+        },
+      },
+      'admin.create_team': async ({ name, description, manager }) => {
+        const m = named(acmd.current.users.filter(u => u.role === 'manager' || u.role === 'admin'), manager, u => [u.username, ...(u.full_name ? [u.full_name] : [])])
+        if ('ok' in m) return m
+        return then(await send('POST', '/api/teams', { name, description: description || null, manager_id: m.id }), acmd.current.fetchTeams, name)
+      },
+      'admin.delete_team': {
+        prepare: ({ team }) => { const tm = teamBy(team); return 'ok' in tm ? tm : { ok: true, detail: tm.name } },
+        run: async ({ team }) => {
+          const tm = teamBy(team)
+          if ('ok' in tm) return tm
+          return then(await send('DELETE', `/api/teams/${tm.id}`), acmd.current.fetchTeams, tm.name)
+        },
+      },
+      'admin.change_team_manager': async ({ team, manager }) => {
+        const tm = teamBy(team)
+        if ('ok' in tm) return tm
+        const m = named(acmd.current.users.filter(u => u.role === 'manager' || u.role === 'admin'), manager, u => [u.username, ...(u.full_name ? [u.full_name] : [])])
+        if ('ok' in m) return m
+        return then(await send('PUT', `/api/teams/${tm.id}`, { manager_id: m.id }), acmd.current.fetchTeams, `${tm.name}: ${m.username}`)
+      },
+      'admin.add_team_member': async ({ team, user }) => {
+        const tm = teamBy(team)
+        if ('ok' in tm) return tm
+        const u = userBy(user)
+        if ('ok' in u) return u
+        return then(await send('POST', `/api/teams/${tm.id}/members`, { user_id: u.id }), acmd.current.fetchTeams, `${u.username} → ${tm.name}`)
+      },
+      'admin.remove_team_member': {
+        prepare: a => { const x = memberOf(a); return 'ok' in x ? x : { ok: true, detail: `${x.m.username} (${x.tm.name})` } },
+        run: async a => {
+          const x = memberOf(a)
+          if ('ok' in x) return x
+          return then(await send('DELETE', `/api/teams/${x.tm.id}/members/${x.m.user_id}`), acmd.current.fetchTeams, `${x.m.username} (${x.tm.name})`)
+        },
+      },
+      'admin.assign_session': async ({ team, session }) => {
+        const tm = teamBy(team)
+        if ('ok' in tm) return tm
+        const sn = named(acmd.current.allSessions, session, x => [x.id])
+        if ('ok' in sn) return sn
+        return then(await send('POST', `/api/teams/${tm.id}/sessions`, { session_id: sn.id }), acmd.current.fetchTeams, `${sn.id} → ${tm.name}`)
+      },
+      'admin.unassign_session': async ({ team, session }) => {
+        const tm = teamBy(team)
+        if ('ok' in tm) return tm
+        const sn = named(tm.sessions, session, x => [x.session_id])
+        if ('ok' in sn) return sn
+        return then(await send('DELETE', `/api/teams/${tm.id}/sessions/${sn.session_id}`), acmd.current.fetchTeams, `${sn.session_id} (${tm.name})`)
+      },
+      'admin.create_team_session': async ({ team, name }) => {
+        const tm = teamBy(team)
+        if ('ok' in tm) return tm
+        try {
+          const res = await fetch('/sessions', { method: 'POST', headers: acmd.current.headers, body: JSON.stringify({ name: name.trim() }) })
+          const data = await res.json().catch(() => ({}))
+          if (!res.ok) return { ok: false, reason: 'failed', detail: String(data.detail || `HTTP ${res.status}`) }
+          const o = await send('POST', `/api/teams/${tm.id}/sessions`, { session_id: data.session_id })
+          return then(o, () => { acmd.current.fetchTeams(); acmd.current.fetchAllSessions() }, `${data.session_id} → ${tm.name}`)
+        } catch (e) { return { ok: false, reason: 'failed', detail: e instanceof Error ? e.message : String(e) } }
+      },
+    }
+    return registerCommands(executors)
+  }, [])
 
   const roleOptions = ROLES.map(r => ({ value: r, label: t(`role.${r}`) }))
   const managers = users.filter(u => u.role === 'manager' || u.role === 'admin')

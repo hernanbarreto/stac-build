@@ -4,6 +4,7 @@
  * Hernán Barreto — Ingerop IN3
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { findByName, registerCommands, type Executors, type Outcome, type TeamCommandId } from '../commands/registry'
 import { UserPlus, Users, MessageSquare, Activity, Send, Video, X, Crown, ClipboardList, Pencil, Eye, Camera, User } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { useAuth } from '../context/AuthContext'
@@ -133,6 +134,84 @@ export default function TeamPanel({ onCallUser }: TeamPanelProps) {
 
   const isOnline = (userId: number) => onlineUsers.some(u => u.user_id === userId)
   const getUserTask = (userId: number) => onlineUsers.find(u => u.user_id === userId)?.task || ''
+  // STAC's commands of the team (server/commands/catalog/250_team.yaml), while this panel is open
+  const tcmd = useRef({ teams, selectedTeam, isManager, authHeaders, fetchTeams, openAddMember, onCallUser, userId: user?.id })
+  tcmd.current = { teams, selectedTeam, isManager, authHeaders, fetchTeams, openAddMember, onCallUser, userId: user?.id }
+  useEffect(() => {
+    const nothing: Outcome = { ok: false, reason: 'nothing_to_do' }
+    const current = () => tcmd.current.teams.find(x => x.id === tcmd.current.selectedTeam)
+    /** the selected team, for its manager */
+    const managed = (): TeamData | Outcome => {
+      const tm = current()
+      if (!tm) return nothing
+      return tcmd.current.isManager(tm.id) ? tm : { ok: false, reason: 'not_allowed' }
+    }
+    const named = <T,>(items: T[], spoken: string, names: (x: T) => string[]): T | Outcome => {
+      const found = findByName(items, spoken, names)
+      if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.slice(0, 8).map(x => names(x)[0]).join(', ') }
+      return found.item ?? { ok: false, reason: 'not_found', detail: spoken }
+    }
+    const person = (m: { username: string; full_name: string | null }) => [m.username, ...(m.full_name ? [m.full_name] : [])]
+    const member = (userName: string): { tm: TeamData; m: TeamMemberData } | Outcome => {
+      const tm = managed()
+      if ('ok' in tm) return tm
+      const m = named(tm.members, userName, person)
+      return 'ok' in m ? m : { tm, m }
+    }
+    const executors: Executors<TeamCommandId> = {
+      'team.select': ({ team: name }) => {
+        const tm = named(tcmd.current.teams, name, x => [x.name])
+        if ('ok' in tm) return tm
+        setSelectedTeam(tm.id); return { ok: true, detail: tm.name }
+      },
+      'team.set_tab': ({ tab }) => { setActiveTab(tab); return { ok: true } },
+      'team.send_message': ({ text }) => {
+        const tm = current()
+        const ws = wsRef.current
+        if (!tm || !text.trim()) return nothing
+        if (!ws || ws.readyState !== WebSocket.OPEN) return { ok: false, reason: 'server_down' }
+        ws.send(JSON.stringify({ type: 'team_message', team_id: tm.id, content: text.trim() }))
+        return { ok: true, detail: tm.name }
+      },
+      'team.open_add_member': async () => { const tm = managed(); if ('ok' in tm) return tm; await tcmd.current.openAddMember(); return { ok: true } },
+      'team.add_member': async ({ user: userName }) => {
+        const tm = managed()
+        if ('ok' in tm) return tm
+        try {
+          const res = await fetch('/api/teams/available-users', { headers: tcmd.current.authHeaders() })
+          const u = named(((await res.json()).users || []) as AvailableUser[], userName, person)
+          if ('ok' in u) return u
+          const r = await fetch(`/api/teams/${tm.id}/members`, { method: 'POST', headers: tcmd.current.authHeaders(), body: JSON.stringify({ user_id: u.id }) })
+          if (!r.ok) return { ok: false, reason: 'failed', detail: `HTTP ${r.status}` }
+          setAddMemberOpen(false); tcmd.current.fetchTeams()
+          return { ok: true, detail: `${u.username} → ${tm.name}` }
+        } catch (e) { return { ok: false, reason: 'failed', detail: e instanceof Error ? e.message : String(e) } }
+      },
+      'team.remove_member': {
+        prepare: ({ user: userName }) => { const x = member(userName); return 'ok' in x ? x : { ok: true, detail: `${x.m.username} (${x.tm.name})` } },
+        run: async ({ user: userName }) => {
+          const x = member(userName)
+          if ('ok' in x) return x
+          try {
+            const r = await fetch(`/api/teams/${x.tm.id}/members/${x.m.user_id}`, { method: 'DELETE', headers: tcmd.current.authHeaders() })
+            if (!r.ok) return { ok: false, reason: 'failed', detail: `HTTP ${r.status}` }
+            tcmd.current.fetchTeams()
+            return { ok: true, detail: `${x.m.username} (${x.tm.name})` }
+          } catch (e) { return { ok: false, reason: 'failed', detail: e instanceof Error ? e.message : String(e) } }
+        },
+      },
+      'call.start': ({ user: userName }) => {
+        const everyone = tcmd.current.teams.flatMap(x => x.members).filter((m, k, all) => m.user_id !== tcmd.current.userId && all.findIndex(o => o.user_id === m.user_id) === k)
+        if (!everyone.length) return nothing
+        const m = named(everyone, userName, person)
+        if ('ok' in m) return m
+        tcmd.current.onCallUser?.(m.user_id, m.username)
+        return { ok: true, detail: m.username }
+      },
+    }
+    return registerCommands(executors)
+  }, [])
+
   const team = teams.find(x => x.id === selectedTeam)
 
   if (!user) return null

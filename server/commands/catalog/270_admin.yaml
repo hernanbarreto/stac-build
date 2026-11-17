@@ -42,7 +42,6 @@ commands:
 - id: admin.set_tab
   kind: action
   runs_on: ui
-  status: manual
   model: 'Administration window: which tab is shown, users or teams.'
   args:
     tab:
@@ -60,22 +59,24 @@ commands:
       - pestaña de usuarios de la administración
       - pasá a la pestaña de equipos
       - listado de usuarios del sistema
+      done: Pestaña {tab} de la administración.
     en:
       title: Administration tabs
       say:
       - the users tab of the administration
       - go to the tab of the groups
       - list of the system's users
+      done: Administration tab {tab}.
     fr:
       title: Onglets de l'administration
       say:
       - onglet des utilisateurs de l'administration
       - passe à l'onglet des équipes
       - liste des utilisateurs du système
+      done: Onglet {tab} de l'administration.
 - id: admin.create_user
   kind: action
   runs_on: ui
-  status: manual
   model: 'Administration: create a user account: its user name, its role (admin, manager, editor, viewer or recorder)
     and, optionally, a full name and an e-mail. The password is typed by hand in the form: it is never an argument.'
   args:
@@ -105,22 +106,24 @@ commands:
       - creá un usuario nuevo
       - dale una cuenta a la arquitecta como editora
       - nuevo usuario con rol de registrador
+      done: 'Formulario del usuario {username} listo: falta escribir la contraseña a mano y guardar.'
     en:
       title: Create a user
       say:
       - create a new user
       - give the architect an account as an editor
       - a new user with the recorder role
+      done: 'Form of the user {username} ready: the password has to be typed by hand, then saved.'
     fr:
       title: Créer un utilisateur
       say:
       - crée un nouvel utilisateur
       - donne un compte à l'architecte comme éditrice
       - nouvel utilisateur avec le rôle d'opérateur de capture
+      done: 'Formulaire de l''utilisateur {username} prêt : il reste à saisir le mot de passe à la main et à enregistrer.'
 - id: admin.set_user_role
   kind: action
   runs_on: ui
-  status: manual
   model: 'Administration: change a user''s role: admin, manager, editor, viewer or recorder.'
   args:
     user:
@@ -145,22 +148,24 @@ commands:
       - hacé gerente a la arquitecta
       - pasá ese usuario a editor
       - dale al topógrafo otro rol
+      done: 'Rol de {detail}: {role}.'
     en:
       title: Change a user's role
       say:
       - make the architect a manager
       - turn that user into an editor
       - give the surveyor another role
+      done: 'Role of {detail}: {role}.'
     fr:
       title: Changer le rôle d'un utilisateur
       say:
       - passe l'architecte en responsable
       - fais de cet utilisateur un éditeur
       - donne un autre rôle au géomètre
+      done: 'Rôle de {detail} : {role}.'
 - id: admin.toggle_user_active
   kind: action
   runs_on: ui
-  status: manual
   model: 'Administration: disable a user''s account (they can no longer sign in) or enable it again: on = true enables
     it, false disables it. Nothing of theirs is deleted.'
   args:
@@ -180,22 +185,27 @@ commands:
       - desactivá la cuenta del topógrafo
       - activá de nuevo a la arquitecta
       - bloqueá el acceso de ese usuario
+      done: Cuenta de {detail} activada.
+      done_off: Cuenta de {detail} desactivada.
     en:
       title: Enable or disable a user
       say:
       - disable the surveyor's account
       - enable the architect again
       - block that user's access
+      done: Account of {detail} enabled.
+      done_off: Account of {detail} disabled.
     fr:
       title: Activer ou désactiver un utilisateur
       say:
       - désactive le compte du géomètre
       - réactive l'architecte
       - bloque l'accès de cet utilisateur
+      done: Compte de {detail} activé.
+      done_off: Compte de {detail} désactivé.
 - id: admin.edit_user
   kind: action
   runs_on: ui
-  status: manual
   model: 'Administration: edit a user''s full name and e-mail. A new password, when one is set, is typed by hand
     in the form: it is never an argument.'
   args:
@@ -216,22 +226,24 @@ commands:
       - cambiale el correo a la arquitecta
       - corregí el nombre completo del topógrafo
       - editá los datos de ese usuario
+      done: Usuario {detail} actualizado.
     en:
       title: Edit a user
       say:
       - change the architect's e-mail
       - fix the surveyor's full name
       - edit that user's details
+      done: User {detail} updated.
     fr:
       title: Modifier un utilisateur
       say:
       - change l'e-mail de l'architecte
       - corrige le nom complet du géomètre
       - modifie les données de cet utilisateur
+      done: Utilisateur {detail} mis à jour.
 - id: admin.delete_user
   kind: action
   runs_on: ui
-  status: manual
   model: 'Administration: DELETE a user account for good. It cannot be undone.'
   confirm: true
   args:
@@ -248,22 +260,27 @@ commands:
       - eliminá el usuario del topógrafo
       - borrá esa cuenta
       - sacá a la arquitecta del sistema
+      done: Usuario {detail} eliminado.
+      ask: Voy a ELIMINAR la cuenta del usuario {detail}. No se puede deshacer.
     en:
       title: Delete a user
       say:
       - delete the surveyor's user
       - erase that account
       - remove the architect from the system
+      done: User {detail} deleted.
+      ask: I am going to DELETE the account of the user {detail}. It cannot be undone.
     fr:
       title: Supprimer un utilisateur
       say:
       - supprime l'utilisateur du géomètre
       - efface ce compte
       - retire l'architecte du système
+      done: Utilisateur {detail} supprimé.
+      ask: Je vais SUPPRIMER le compte de l'utilisateur {detail}. C'est irréversible.
 - id: admin.create_team
   kind: action
   runs_on: ui
-  status: manual
   model: 'Administration: create a team with its name, an optional description and its manager (a user with the
     manager or admin role).'
   args:
@@ -286,22 +303,24 @@ commands:
       - creá un grupo nuevo
       - armá el de estructuras con la arquitecta de gerente
       - un grupo nuevo de obra
+      done: Equipo {detail} creado.
     en:
       title: Create a team
       say:
       - create a new group
       - set up the structures one with the architect as its manager
       - a new site crew
+      done: Team {detail} created.
     fr:
       title: Créer une équipe
       say:
       - crée un nouveau groupe
       - monte celui des structures avec l'architecte comme responsable
       - un nouveau groupe de chantier
+      done: Équipe {detail} créée.
 - id: admin.delete_team
   kind: action
   runs_on: ui
-  status: manual
   model: 'Administration: DELETE a team with its memberships and its assignments (the sessions themselves are not
     deleted).'
   confirm: true
@@ -319,22 +338,27 @@ commands:
       - eliminá el grupo de estructuras
       - borralo con sus asignaciones
       - disolvé ese grupo
+      done: Equipo {detail} eliminado.
+      ask: Voy a eliminar el equipo {detail} con sus miembros y sus asignaciones; las sesiones no se borran.
     en:
       title: Delete a team
       say:
       - delete the structures group
       - erase it with its assignments
       - dissolve that crew
+      done: Team {detail} deleted.
+      ask: I am going to delete the team {detail} with its memberships and its assignments; the sessions are not deleted.
     fr:
       title: Supprimer une équipe
       say:
       - supprime le groupe structures
       - efface-le avec ses attributions
       - dissous ce groupe
+      done: Équipe {detail} supprimée.
+      ask: Je vais supprimer l'équipe {detail} avec ses membres et ses affectations ; les sessions ne sont pas supprimées.
 - id: admin.change_team_manager
   kind: action
   runs_on: ui
-  status: manual
   model: 'Administration: change who manages a team (a user with the manager or admin role).'
   args:
     team:
@@ -354,22 +378,24 @@ commands:
       - que la arquitecta sea la gerente del grupo
       - cambiá quién lo dirige
       - nuevo responsable del grupo de obra
+      done: Gerente cambiado, {detail}.
     en:
       title: Change a team's manager
       say:
       - make the architect the group's manager
       - change who leads it
       - a new manager for the site crew
+      done: Manager changed, {detail}.
     fr:
       title: Changer le responsable d'une équipe
       say:
       - que l'architecte soit la responsable du groupe
       - change qui le dirige
       - nouveau responsable pour le groupe de chantier
+      done: Responsable changé, {detail}.
 - id: admin.add_team_member
   kind: action
   runs_on: ui
-  status: manual
   model: 'Administration: add a user to a team.'
   args:
     team:
@@ -389,22 +415,24 @@ commands:
       - desde la administración, sumá al topógrafo al grupo de obra
       - asigná ese usuario al grupo
       - meté a la arquitecta en estructuras
+      done: 'Miembro sumado: {detail}.'
     en:
       title: Add a user to a team
       say:
       - from the administration, add the surveyor to the site crew
       - assign that user to the group
       - put the architect in structures
+      done: 'Member added: {detail}.'
     fr:
       title: Ajouter un utilisateur à une équipe
       say:
       - depuis l'administration, ajoute le géomètre au groupe de chantier
       - attribue cet utilisateur au groupe
       - mets l'architecte dans structures
+      done: 'Membre ajouté : {detail}.'
 - id: admin.remove_team_member
   kind: action
   runs_on: ui
-  status: manual
   model: 'Administration: REMOVE a user from a team (the user account stays).'
   confirm: true
   args:
@@ -425,22 +453,27 @@ commands:
       - desde la administración, quitá al topógrafo del grupo de obra
       - sacá ese usuario de estructuras
       - que la arquitecta deje el grupo
+      done: '{detail} quitado del equipo.'
+      ask: Voy a quitar del equipo a {detail}; su cuenta queda.
     en:
       title: Remove a user from a team
       say:
       - from the administration, remove the surveyor from the site crew
       - take that user out of structures
       - the architect leaves the group
+      done: '{detail} removed from the team.'
+      ask: I am going to remove {detail} from the team; the account stays.
     fr:
       title: Retirer un utilisateur d'une équipe
       say:
       - depuis l'administration, retire le géomètre du groupe de chantier
       - enlève cet utilisateur de structures
       - que l'architecte quitte le groupe
+      done: '{detail} retiré de l''équipe.'
+      ask: Je vais retirer {detail} de l'équipe ; son compte reste.
 - id: admin.assign_session
   kind: action
   runs_on: ui
-  status: manual
   model: 'Administration: assign a session to a team (its members can then work on it).'
   args:
     team:
@@ -460,22 +493,24 @@ commands:
       - asigná el proyecto al grupo de obra
       - dale acceso a ese grupo
       - que estructuras lo pueda ver
+      done: 'Sesión asignada: {detail}.'
     en:
       title: Assign a session to a team
       say:
       - assign the project to the site crew
       - give that group access to it
       - let structures see it
+      done: 'Session assigned: {detail}.'
     fr:
       title: Attribuer une session à une équipe
       say:
       - attribue le projet au groupe de chantier
       - donne l'accès à ce groupe
       - que structures puisse le voir
+      done: 'Session affectée : {detail}.'
 - id: admin.unassign_session
   kind: action
   runs_on: ui
-  status: manual
   model: 'Administration: take a session away from a team (its members no longer see it; nothing is deleted).'
   args:
     team:
@@ -495,22 +530,24 @@ commands:
       - quitale el proyecto al grupo de obra
       - sacá esa asignación
       - que estructuras ya no lo vea
+      done: 'Sesión quitada del equipo: {detail}.'
     en:
       title: Unassign a session from a team
       say:
       - take the project away from the site crew
       - remove that assignment
       - structures no longer sees it
+      done: 'Session taken from the team: {detail}.'
     fr:
       title: Retirer une session à une équipe
       say:
       - retire le projet au groupe de chantier
       - retire cette attribution
       - que structures ne le voie plus
+      done: 'Session retirée de l''équipe : {detail}.'
 - id: admin.create_team_session
   kind: action
   runs_on: ui
-  status: manual
   model: 'Administration: create a new, empty session and assign it to a team in one step.'
   args:
     team:
@@ -530,15 +567,18 @@ commands:
       - creá un proyecto nuevo para el grupo de obra
       - uno nuevo asignado a estructuras
       - uno vacío para ese grupo
+      done: 'Sesión creada y asignada: {detail}.'
     en:
       title: Create a session for a team
       say:
       - create a new project for the site crew
       - a new one assigned to structures
       - an empty one for that group
+      done: 'Session created and assigned: {detail}.'
     fr:
       title: Créer une session pour une équipe
       say:
       - crée un nouveau projet pour le groupe de chantier
       - un nouveau attribué à structures
       - un vide pour ce groupe
+      done: 'Session créée et affectée : {detail}.'

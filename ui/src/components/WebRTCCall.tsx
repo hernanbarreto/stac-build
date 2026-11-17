@@ -4,6 +4,7 @@
  * Hernán Barreto — Ingerop IN3
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { registerCommands, type CallCommandId, type Executors, type Outcome } from '../commands/registry'
 import { Mic, MicOff, Phone, PhoneOff, Video, VideoOff } from 'lucide-react'
 import { Button } from './ui/Button'
 import { IconButton } from './ui/IconButton'
@@ -194,6 +195,29 @@ export default function WebRTCCall({ wsRef, callTarget, incomingCall, onClose, o
     stream.getVideoTracks().forEach(tr => { tr.enabled = !tr.enabled })
     setIsCameraOff(prev => !prev)
   }
+
+  // STAC's commands of the call (server/commands/catalog/260_call.yaml), while there is one
+  const ccmd = useRef({ callState, isMuted, isCameraOff, acceptCall, declineCall, endCall, toggleMute, toggleCamera })
+  ccmd.current = { callState, isMuted, isCameraOff, acceptCall, declineCall, endCall, toggleMute, toggleCamera }
+  useEffect(() => {
+    const nothing: Outcome = { ok: false, reason: 'nothing_to_do' }
+    const executors: Executors<CallCommandId> = {
+      'call.accept': async () => { if (ccmd.current.callState !== 'incoming') return nothing; await ccmd.current.acceptCall(); return { ok: true } },
+      'call.decline': () => { if (ccmd.current.callState !== 'incoming') return nothing; ccmd.current.declineCall(); return { ok: true } },
+      'call.end': () => { if (!['ringing', 'connected'].includes(ccmd.current.callState)) return nothing; ccmd.current.endCall(); return { ok: true } },
+      'call.set_mute': ({ on }) => {
+        if (ccmd.current.callState !== 'connected' || !localStreamRef.current) return nothing
+        if (ccmd.current.isMuted !== on) ccmd.current.toggleMute()
+        return { ok: true, state: on }
+      },
+      'call.set_camera': ({ on }) => {
+        if (ccmd.current.callState !== 'connected' || !localStreamRef.current) return nothing
+        if (ccmd.current.isCameraOff === on) ccmd.current.toggleCamera()
+        return { ok: true, state: on }
+      },
+    }
+    return registerCommands(executors)
+  }, [])
 
   if (callState === 'incoming') {
     return (

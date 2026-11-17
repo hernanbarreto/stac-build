@@ -42,7 +42,7 @@ import { Inspector } from './layout/Inspector'
 import { BottomDock } from './layout/BottomDock'
 import { StatusBar } from './layout/StatusBar'
 import { CommandPalette, type Command } from './layout/CommandPalette'
-import { registerCommands, registerOpeners, findByName, type Executors, type BimCommandId, type CalibrationCommandId, type CertifyCommandId, type EvaluationCommandId, type ReportCommandId, type FlythroughCommandId, type Outcome, type PanelCommandId, type ViewportCommandId } from './commands/registry'
+import { registerCommands, registerOpeners, findByName, type Executors, type AdminCommandId, type BimCommandId, type CalibrationCommandId, type CallCommandId, type TeamCommandId, type CertifyCommandId, type EvaluationCommandId, type ReportCommandId, type FlythroughCommandId, type Outcome, type PanelCommandId, type ViewportCommandId } from './commands/registry'
 import type { UiCommandId } from './commands/catalog.generated'
 import { SettingsDialog } from './layout/SettingsDialog'
 import { SceneLookDialog } from './layout/SceneLookDialog'
@@ -2062,7 +2062,7 @@ function App() {
   }, [])
   useEffect(() => {
     type AppCommandId = Exclude<UiCommandId, PanelCommandId | ViewportCommandId | FlythroughCommandId | CalibrationCommandId | BimCommandId
-      | CertifyCommandId | EvaluationCommandId | ReportCommandId>
+      | CertifyCommandId | EvaluationCommandId | ReportCommandId | TeamCommandId | CallCommandId | AdminCommandId>
     const done: Outcome = { ok: true }
     const noSession: Outcome = { ok: false, reason: 'no_session' }
     const open = () => cmd.current.activeSession
@@ -2592,6 +2592,8 @@ function App() {
       bim: withSession(() => cmd.current.layout.setLeftTab('bim')),
       certify: withSession(() => { setShowCertifyKit(true); cmd.current.layout.openInspector('acta') }),
       evaluation: () => cmd.current.layout.openDock('evaluation'),
+      team: () => cmd.current.layout.setLeftTab('team'),
+      admin: () => { if (!cmd.current.isAdmin) return false; setAdminOpen(true) },
       reports: () => { if (!comparable().ok) return false; cmd.current.layout.openDock('report') },
       calibration: withSession(() => setCalibrationOpen(true)),
     })

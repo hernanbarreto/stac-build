@@ -14,7 +14,6 @@ commands:
 - id: call.start
   kind: action
   runs_on: ui
-  status: manual
   model: Start a video call with a member of the team (it uses this computer's camera and microphone).
   args:
     user:
@@ -28,22 +27,24 @@ commands:
       - llamá por video a la arquitecta
       - hacé una videollamada con el topógrafo
       - hablar con el gerente por videollamada
+      done: Llamando a {detail}.
     en:
       title: Start a video call
       say:
       - call the architect
       - start a video call with the surveyor
       - talk with the manager on video
+      done: Calling {detail}.
     fr:
       title: Démarrer un appel vidéo
       say:
       - appelle l'architecte
       - lance un appel vidéo avec le géomètre
       - parler avec le responsable en visio
+      done: Appel de {detail}.
 - id: call.accept
   kind: action
   runs_on: ui
-  status: manual
   model: Accept the incoming video call.
   text:
     es:
@@ -52,22 +53,24 @@ commands:
       - aceptá la llamada entrante
       - atendé al que llama
       - contestá
+      done: Videollamada aceptada.
     en:
       title: Accept the call
       say:
       - accept the call
       - answer the video call
       - pick up
+      done: Video call accepted.
     fr:
       title: Accepter l'appel
       say:
       - accepte l'appel
       - réponds à l'appel vidéo
       - décroche
+      done: Appel vidéo accepté.
 - id: call.decline
   kind: action
   runs_on: ui
-  status: manual
   model: Decline the incoming video call.
   text:
     es:
@@ -76,22 +79,24 @@ commands:
       - rechazá la llamada entrante
       - no atiendas
       - ahora no puedo atender
+      done: Videollamada rechazada.
     en:
       title: Decline the call
       say:
       - decline the call
       - leave the video call unanswered
       - not now, busy
+      done: Video call declined.
     fr:
       title: Refuser l'appel
       say:
       - refuse l'appel
       - ne réponds pas à l'appel vidéo
       - pas maintenant, occupé
+      done: Appel vidéo refusé.
 - id: call.end
   kind: action
   runs_on: ui
-  status: manual
   model: End the video call in progress, or cancel the one being placed.
   text:
     es:
@@ -100,22 +105,24 @@ commands:
       - terminá la llamada
       - cortá la comunicación
       - colgá
+      done: Videollamada terminada.
     en:
       title: End the call
       say:
       - end the call
       - hang up the video call
       - hang up
+      done: Video call ended.
     fr:
       title: Terminer l'appel
       say:
       - termine l'appel
       - coupe l'appel vidéo
       - raccroche
+      done: Appel vidéo terminé.
 - id: call.set_mute
   kind: action
   runs_on: ui
-  status: manual
   model: 'During a video call: mute this user''s microphone (on) or unmute it (off).'
   args:
     'on':
@@ -128,22 +135,27 @@ commands:
       - silenciá el micrófono
       - activá de nuevo el micrófono
       - videollamada sin audio de este lado
+      done: Micrófono silenciado.
+      done_off: Micrófono activo.
     en:
       title: Mute the microphone
       say:
       - mute the microphone
       - unmute the microphone
       - no sound from this side of the video call
+      done: Microphone muted.
+      done_off: Microphone on.
     fr:
       title: Couper le microphone
       say:
       - coupe le microphone
       - réactive le microphone
       - pas de son de ce côté pendant la visio
+      done: Micro coupé.
+      done_off: Micro actif.
 - id: call.set_camera
   kind: action
   runs_on: ui
-  status: manual
   model: 'During a video call: turn this user''s own camera on or off.'
   args:
     'on':
@@ -156,15 +168,21 @@ commands:
       - apagá la cámara web
       - encendé la cámara web
       - videollamada sin imagen de este lado
+      done: Cámara encendida.
+      done_off: Cámara apagada.
     en:
       title: Camera of the video call
       say:
       - turn the camera off in the call
       - turn the webcam on
       - no picture from this side of the video call
+      done: Camera on.
+      done_off: Camera off.
     fr:
       title: Caméra de l'appel vidéo
       say:
       - désactive la caméra de l'appel
       - allume la webcam
       - pas d'image de ce côté pendant la visio
+      done: Caméra allumée.
+      done_off: Caméra éteinte.

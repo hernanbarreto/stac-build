@@ -53,6 +53,15 @@ export type CertifyCommandId = 'certify.set_epoch_layers' | 'certify.show_trajec
 export type EvaluationCommandId = 'evaluation.refresh_runs' | 'evaluation.select_run' | 'evaluation.open_file' | 'evaluation.set_json_view'
 export type ReportCommandId = 'reports.run_deviation'
 
+/** … the Team panel (a call is started from its members) and the video call while there is one */
+export type TeamCommandId = 'team.select' | 'team.set_tab' | 'team.send_message' | 'team.open_add_member' | 'team.add_member' | 'team.remove_member' | 'call.start'
+export type CallCommandId = 'call.accept' | 'call.decline' | 'call.end' | 'call.set_mute' | 'call.set_camera'
+
+/** … and the Administration window, while it is open */
+export type AdminCommandId = 'admin.set_tab' | 'admin.create_user' | 'admin.set_user_role' | 'admin.toggle_user_active' | 'admin.edit_user'
+  | 'admin.delete_user' | 'admin.create_team' | 'admin.delete_team' | 'admin.change_team_manager' | 'admin.add_team_member'
+  | 'admin.remove_team_member' | 'admin.assign_session' | 'admin.unassign_session' | 'admin.create_team_session'
+
 /** one command of an answer, as the server sends it */
 export interface UiAction {
   id: string
