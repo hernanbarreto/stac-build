@@ -194,7 +194,6 @@ commands:
 - id: objects.remove_selected
   kind: action
   runs_on: ui
-  status: manual
   model: 'REMOVE the selected placed object from this scene (only the reference goes: the source file is never touched).'
   confirm: true
   needs:
@@ -207,22 +206,27 @@ commands:
       - quitá de la escena el que tengo seleccionado
       - quitá la referencia seleccionada
       - descartá el modelo que estoy moviendo
+      done: Objeto {detail} quitado de la escena.
+      ask: Voy a quitar de la escena el objeto seleccionado, {detail}.
     en:
       title: Remove the selected placed object
       say:
       - remove the selected one from the scene
       - remove the selected reference
       - discard the model being moved
+      done: Object {detail} removed from the scene.
+      ask: I am going to remove the selected object, {detail}, from the scene.
     fr:
       title: Retirer l'objet placé sélectionné
       say:
       - retire de la scène celui qui est sélectionné
       - retire la référence sélectionnée
       - abandonne le modèle en cours de déplacement
+      done: Objet {detail} retiré de la scène.
+      ask: Je vais retirer de la scène l'objet sélectionné, {detail}.
 - id: objects.remove
   kind: action
   runs_on: ui
-  status: manual
   model: 'REMOVE one placed reference object from this scene, by its id or name (the bin of its row in the list):
     only the reference goes, the source file is never touched.'
   confirm: true
@@ -242,18 +246,24 @@ commands:
       - quitá el humano de la escena
       - sacá el objeto colocado número 2
       - eliminá ese modelo insertado
+      done: Objeto {detail} quitado de la escena.
+      ask: Voy a quitar de la escena el objeto colocado {detail}.
     en:
       title: Remove a placed object
       say:
       - remove the human from the scene
       - take away placed object number 2
       - delete that inserted model
+      done: Object {detail} removed from the scene.
+      ask: I am going to remove the placed object {detail} from the scene.
     fr:
       title: Retirer un objet placé
       say:
       - retire l'humain de la scène
       - enlève l'objet placé numéro 2
       - supprime ce modèle inséré
+      done: Objet {detail} retiré de la scène.
+      ask: Je vais retirer de la scène l'objet placé {detail}.
 - id: objects.rename
   kind: action
   runs_on: ui

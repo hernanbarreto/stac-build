@@ -53,8 +53,13 @@ def test_the_real_catalogue_is_complete_in_three_languages():
     assert len({x["id"] for x in c.commands}) == len(c.commands) >= 260      # every command of the interface is a row
     by_status = {s: sum(1 for x in c.commands if x["status"] == s) for s in cat.STATUS}
     assert by_status["available"] >= 132 and by_status["available"] + by_status["manual"] >= 270
-    # what launches GPU work or deletes data asks for confirmation — and is not run by voice yet
-    assert all(x["status"] == "manual" for x in c.commands if x["confirm"])
+    # what launches GPU work or deletes data asks for confirmation: STAC runs it only with the text
+    # that says what it is going to do, in every language (commands/confirm.py)
+    for x in c.commands:
+        if x["confirm"] and x["status"] == "available":
+            assert x["runs_on"] == "ui" and all(x["text"][lang]["ask"] for lang in ("es", "en", "fr")), x["id"]
+        if not x["confirm"]:
+            assert not any(x["text"][lang]["ask"] for lang in ("es", "en", "fr")), x["id"]
     assert len({x["tool"] for x in c.commands}) == len(c.commands)
     for x in c.commands:
         assert x["kind"] in cat.KINDS and x["runs_on"] in cat.RUNS_ON

@@ -250,7 +250,10 @@ def _ui_action(entry: dict, rows: dict) -> dict:
     row = rows[entry["tool"]]
     return {"id": row["id"], "tool": row["tool"], "args": entry["result"]["ui"]["args"],
             "kind": row["kind"], "confirm": bool(row["confirm"]), "title": row["title"],
-            "done": row["done"], "done_off": row["done_off"]}
+            "done": row["done"], "done_off": row["done_off"],
+            # what STAC says it is going to do before a command with confirm: the interface
+            # holds such a command until the user's next sentence confirms it (commands/confirm.py)
+            **({"ask": row["ask"]} if row["confirm"] else {})}
 
 
 # ── the application: what the prompt says of it ─────────────────────────────────────────────
@@ -390,7 +393,56 @@ class SpatialQA:
             max_iterations: int = 8, history: list | None = None,
             lang: str | None = None, user_name: str | None = None,
             ui: dict | None = None, expecting: str | None = None,
-            conversation_lang: str | None = None) -> dict[str, Any]:
+            conversation_lang: str | None = None, pending: dict | None = None) -> dict[str, Any]:
+        """A turn. ``pending``: the command the interface is HOLDING FOR CONFIRMATION, as it
+        sent it back ({id, args, detail}) — USER 2026-11-17: "confirmacion hablada con lo que
+        stac nos dice que va a hacer, STAC, SI CONFIRMO". Decided on the sentence's words, with
+        no call of the model (commands/confirm.py): the confirmation releases the command to the
+        interface (``ui_actions``, ``confirmed``), a refusal cancels it, and any other sentence
+        drops it and is answered as the turn it is, STAC saying first that nothing was done.
+        The other arguments: :meth:`_turn`."""
+        import commands
+        from commands import confirm
+        from . import answers
+        t0 = time.time()
+        hint = next((x for x in (conversation_lang, lang, (ui if isinstance(ui, dict) else {}).get("lang"))
+                     if x in answers.LANGS), "es")
+        held = confirm.held(commands.database(), pending, hint) if pending else None
+        said = confirm.verdict(question) if held else None
+        if held is None or said is None:
+            out = self._turn(question, images=images, max_iterations=max_iterations, history=history,
+                             lang=lang, user_name=user_name, ui=ui, expecting=expecting,
+                             conversation_lang=conversation_lang)
+            if held is not None:
+                held = confirm.held(commands.database(), pending, out.get("lang") or hint)
+                out["answer"] = f"{answers.not_confirmed(held['title'], out.get('lang') or hint)} {out['answer']}".strip()
+                out["confirmation"] = {"id": held["id"], "verdict": "dropped"}
+            return out
+        name = " ".join(str(user_name or "").split())[:60] or None
+        action = {"id": held["id"], "tool": held["tool"], "args": held["call_args"], "kind": held["kind"],
+                  "confirm": True, "confirmed": True, "title": held["title"], "done": held["done"],
+                  "done_off": held["done_off"], "ask": held["ask"]}
+        result = {
+            "question": question, "answer": "" if said == "yes" else answers.cancelled(hint),
+            "tool_trace": [], "iterations": 0, "stopped": "confirmed" if said == "yes" else "cancelled",
+            "references": [],
+            "provenance": {"ok": True, "figures": [], "tools": [], "retried": False, "written_by": "tool_layer"},
+            "ui_actions": [action] if said == "yes" else [], "acted_only": said == "yes", "lang": hint,
+            "user_name": name, "expecting": expecting if expecting == "user_name" else None,
+            "texts": {"done_prefix": answers.done_prefix(name, hint), "name_first": False,
+                      "reasons": answers.ui_reasons(hint), "tail": "",
+                      "confirm_how": answers.confirm_how(hint)},
+            "commands": [{"id": held["id"], "kind": held["kind"], "runs_on": "ui"}] if said == "yes" else [],
+            "confirmation": {"id": held["id"], "args": held["call_args"], "detail": held["detail"], "verdict": said},
+            "prompt_s": 0.0, "model_s": 0.0, "latency_s": round(time.time() - t0, 2)}
+        self._log_session(result)
+        return result
+
+    def _turn(self, question: str, images: list | None = None,
+              max_iterations: int = 8, history: list | None = None,
+              lang: str | None = None, user_name: str | None = None,
+              ui: dict | None = None, expecting: str | None = None,
+              conversation_lang: str | None = None) -> dict[str, Any]:
         """``history``: the conversation's earlier turns, oldest first, as
         [{"role": "user" | "assistant", "text": str}] — the last
         ``semantic.chat.history_turns`` of them go with the question. ``lang``: the language
@@ -493,7 +545,8 @@ class SpatialQA:
             result.update(
                 ui_actions=ui_actions, acted_only=acted_only, lang=lang, user_name=name, expecting=still,
                 texts={"done_prefix": answers.done_prefix(name, lang), "name_first": not turns,
-                       "reasons": answers.ui_reasons(lang), "tail": tail if ui_actions else ""},
+                       "reasons": answers.ui_reasons(lang), "tail": tail if ui_actions else "",
+                       "confirm_how": answers.confirm_how(lang)},
                 commands=[{"id": e.get("command"), "kind": e.get("kind"), "runs_on": e.get("runs_on")}
                           for e in trace],
                 prompt_s=round(t_prompt, 2), model_s=round(llm_s, 2),

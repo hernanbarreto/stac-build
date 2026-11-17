@@ -1978,14 +1978,14 @@ function App() {
     projectScans, activeScanTab, activateScan, openFuse, layout, setLang, lang, pointSize, tsdfMeshes,
     openObjectLibrary, openAutosegment, handleReconstruct,
     scanTabs, closeScanTab, handleSessionSelect, placedObjects, cubes, userVolumes, focusVolume, undoBrush,
-    physicsDiameterCm, physicsBounce, isAdmin: user?.role === 'admin',
+    physicsDiameterCm, physicsBounce, isAdmin: user?.role === 'admin', deleteVolume, sceneObjSel,
   })
   cmd.current = {
     connected, connectToServer, disconnect, sessions, activeSession, handleSessionLoad, handleUnload,
     projectScans, activeScanTab, activateScan, openFuse, layout, setLang, lang, pointSize, tsdfMeshes,
     openObjectLibrary, openAutosegment, handleReconstruct,
     scanTabs, closeScanTab, handleSessionSelect, placedObjects, cubes, userVolumes, focusVolume, undoBrush,
-    physicsDiameterCm, physicsBounce, isAdmin: user?.role === 'admin',
+    physicsDiameterCm, physicsBounce, isAdmin: user?.role === 'admin', deleteVolume, sceneObjSel,
   }
   /** what the interface says of itself with every question to STAC (the model needs the
    *  sessions' names to open one) */
@@ -2302,6 +2302,36 @@ function App() {
         if (!v) return { ok: false, reason: 'not_found', detail: String(volume_id) }
         cmd.current.focusVolume(volume_id); return { ok: true, detail: v.name }
       },
+      // (confirm: true — `prepare` changes nothing and names what `run` will act on)
+      'volumes.delete': (() => {
+        const find = ({ volume_id }: { volume_id: number }): Outcome => {
+          if (!open()) return noSession
+          const v = cmd.current.userVolumes.find(x => x.volume_id === volume_id)
+          return v ? { ok: true, detail: v.name || String(volume_id) } : { ok: false, reason: 'not_found', detail: String(volume_id) }
+        }
+        return { prepare: find, run: async a => { const o = find(a); if (o.ok) await cmd.current.deleteVolume(a.volume_id); return o } }
+      })(),
+      'objects.remove': {
+        prepare: ({ id }) => { const o = placedBy(id); return 'ok' in o ? o : { ok: true, detail: o.name } },
+        run: ({ id }) => {
+          const o = placedBy(id)
+          if ('ok' in o) return o
+          viewportRef.current?.removeSceneObject(o.id)
+          return { ok: true, detail: o.name }
+        },
+      },
+      'objects.remove_selected': (() => {
+        const selected = (): { id: number; name: string } | Outcome => {
+          if (!open()) return noSession
+          const id = cmd.current.sceneObjSel
+          const o = id == null ? undefined : cmd.current.placedObjects.find(x => x.id === id)
+          return o ?? { ok: false, reason: 'nothing_to_do' }
+        }
+        return {
+          prepare: () => { const o = selected(); return 'ok' in o ? o : { ok: true, detail: o.name } },
+          run: () => { const o = selected(); if ('ok' in o) return o; viewportRef.current?.removeSceneObject(o.id); return { ok: true, detail: o.name } },
+        }
+      })(),
       'volumes.set_visible': ({ volume_id, on }) => {
         if (!open()) return noSession
         if (!cmd.current.userVolumes.some(x => x.volume_id === volume_id)) return { ok: false, reason: 'not_found', detail: String(volume_id) }

@@ -42,6 +42,13 @@ def render(catalog: Catalog) -> str:
         "",
         "export type UiCommandId = typeof UI_COMMAND_IDS[number]",
         "",
+        "// the ones STAC runs only after a spoken confirmation: their executor is a { prepare, run } pair",
+        "export const UI_CONFIRM_IDS = [",
+        *[f"  '{c['id']}'," for c in rows if c["confirm"]],
+        "] as const",
+        "",
+        "export type UiConfirmId = typeof UI_CONFIRM_IDS[number]",
+        "",
         "export interface UiCommandArgs {",
     ]
     for c in rows:

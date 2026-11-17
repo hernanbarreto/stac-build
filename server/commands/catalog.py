@@ -208,12 +208,16 @@ def load_catalog(directory: Path | str | None = None) -> Catalog:
             # did was to turn something OFF); a tool of the server words its own result
             # (phase5_qa/answers.py)
             spoken = runs_on == "ui" and status == "available"
+            # … and one that asks for confirmation says WHAT IT IS GOING TO DO first (``ask``, USER
+            # 2026-11-17: "confirmacion hablada con lo que stac nos dice que va a hacer")
             text = _texts(where, row.get("text"),
                           {"title": True, "about": False, "say": True,
-                           "done": spoken, "done_off": False})
+                           "done": spoken, "done_off": False, "ask": spoken and confirm})
+            if not confirm and any(text[lang]["ask"] for lang in LANGS):
+                _fail(where, "'ask' is the text of a command with confirm: true")
             arg_names = set(_args(where, row.get("args")))
             for lang in LANGS:
-                for field in ("done", "done_off"):
+                for field in ("done", "done_off", "ask"):
                     unknown = set(_PLACEHOLDER.findall(text[lang][field])) - arg_names - {"detail"}
                     if unknown:
                         _fail(where, f"'{lang}.{field}' names {sorted(unknown)}: not an argument of the "

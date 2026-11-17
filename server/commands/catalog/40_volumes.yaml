@@ -366,7 +366,6 @@ commands:
 - id: volumes.delete
   kind: action
   runs_on: ui
-  status: manual
   model: DELETE a saved evaluation volume from the scene for good.
   confirm: true
   args:
@@ -384,18 +383,24 @@ commands:
       - borrá el volumen 2
       - eliminá esa caja de evaluación
       - sacá el volumen de la escena
+      done: Volumen {detail} borrado.
+      ask: Voy a borrar el volumen {detail}.
     en:
       title: Delete a volume
       say:
       - delete volume 2
       - remove that evaluation box
       - take the volume out of the scene
+      done: Volume {detail} deleted.
+      ask: I am going to delete the volume {detail}.
     fr:
       title: Supprimer un volume
       say:
       - supprime le volume 2
       - efface cette boîte d'évaluation
       - retire le volume de la scène
+      done: Volume {detail} supprimé.
+      ask: Je vais supprimer le volume {detail}.
 - id: volumes.set_gizmo_mode
   kind: action
   runs_on: ui

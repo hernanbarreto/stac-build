@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from .catalog import AREAS_DIR, LANGS, Catalog, load_catalog, tool_schema
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DB_PATH = Path(__file__).resolve().parent / "commands.db"
 
 _SCHEMA = """
@@ -44,7 +44,8 @@ CREATE TABLE commands(
     since TEXT NOT NULL, position INTEGER NOT NULL);
 CREATE TABLE command_text(command_id TEXT NOT NULL REFERENCES commands(id), lang TEXT NOT NULL,
                           title TEXT NOT NULL, about TEXT NOT NULL, say_json TEXT NOT NULL,
-                          done TEXT NOT NULL, done_off TEXT NOT NULL, PRIMARY KEY(command_id, lang));
+                          done TEXT NOT NULL, done_off TEXT NOT NULL, ask TEXT NOT NULL,
+                          PRIMARY KEY(command_id, lang));
 CREATE VIRTUAL TABLE command_search USING fts5(
     command_id UNINDEXED, lang UNINDEXED, title, about, say,
     tokenize = 'unicode61 remove_diacritics 2');
@@ -77,9 +78,9 @@ def build(catalog: Catalog, path: Path | str | None) -> sqlite3.Connection:
             json.dumps(c["needs"]), int(c["confirm"]), int(c["core"]), c["status"], c["since"], pos))
         for lang in LANGS:
             t = c["text"][lang]
-            con.execute("INSERT INTO command_text VALUES (?,?,?,?,?,?,?)", (
+            con.execute("INSERT INTO command_text VALUES (?,?,?,?,?,?,?,?)", (
                 c["id"], lang, t["title"], t["about"], json.dumps(t["say"], ensure_ascii=False),
-                t["done"], t["done_off"]))
+                t["done"], t["done_off"], t["ask"]))
             # (the model's description, English, is indexed with the English text: a sentence
             # finds a command by it too)
             con.execute("INSERT INTO command_search VALUES (?,?,?,?,?)", (
@@ -146,7 +147,7 @@ class CommandsDB:
     def list(self, lang: str = "en", area: Optional[str] = None, runs_on: Any = None,
              status: Any = "available") -> List[Dict[str, Any]]:
         """Every command (with its text in ``lang``), in the catalogue's order."""
-        sql = ("SELECT c.*, t.title, t.about, t.say_json, t.done, t.done_off FROM commands c "
+        sql = ("SELECT c.*, t.title, t.about, t.say_json, t.done, t.done_off, t.ask FROM commands c "
                "JOIN command_text t ON t.command_id = c.id AND t.lang = ? WHERE 1 = 1")
         args: List[Any] = [_lang(lang)]
         for col, val in (("c.area", area), ("c.runs_on", runs_on), ("c.status", status)):
@@ -159,7 +160,7 @@ class CommandsDB:
 
     def get(self, cid: str, lang: str = "en") -> Optional[Dict[str, Any]]:
         rows = self._rows(
-            "SELECT c.*, t.title, t.about, t.say_json, t.done, t.done_off FROM commands c "
+            "SELECT c.*, t.title, t.about, t.say_json, t.done, t.done_off, t.ask FROM commands c "
             "JOIN command_text t ON t.command_id = c.id AND t.lang = ? WHERE c.id = ?", (_lang(lang), cid))
         return self._command(rows[0]) if rows else None
 

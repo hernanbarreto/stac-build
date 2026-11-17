@@ -2,7 +2,7 @@
 // The commands of the interface STAC can run: their ids and the type of each one's arguments.
 // A new command is declared in the catalogue; this file is then regenerated and the compiler
 // asks for its executor (ui/src/commands/registry.ts).
-export const CATALOG_SHA256 = 'e5c5e503f2c7f166dc2f344a6320fdccde5a16d565f946bd6993640b1fda971d'
+export const CATALOG_SHA256 = '7ad81058b8765a3154380f2e540de7f6ecf8765dd36fcedbdc32ee8d513f13fc'
 
 export const UI_COMMAND_IDS = [
   'talk.set_user_name',
@@ -12,6 +12,7 @@ export const UI_COMMAND_IDS = [
   'volumes.focus',
   'volumes.set_visible',
   'volumes.set_obb',
+  'volumes.delete',
   'viewer.set_tool',
   'viewer.clear_measurements',
   'viewer.remove_section_box',
@@ -69,6 +70,8 @@ export const UI_COMMAND_IDS = [
   'objects.focus',
   'objects.set_gizmo_mode',
   'objects.align',
+  'objects.remove_selected',
+  'objects.remove',
   'objects.set_visible',
   'objects.set_obb',
   'physics.panel',
@@ -95,6 +98,15 @@ export const UI_COMMAND_IDS = [
 
 export type UiCommandId = typeof UI_COMMAND_IDS[number]
 
+// the ones STAC runs only after a spoken confirmation: their executor is a { prepare, run } pair
+export const UI_CONFIRM_IDS = [
+  'volumes.delete',
+  'objects.remove_selected',
+  'objects.remove',
+] as const
+
+export type UiConfirmId = typeof UI_CONFIRM_IDS[number]
+
 export interface UiCommandArgs {
   'talk.set_user_name': { name: string }
   'talk.forget_user_name': Record<string, never>
@@ -103,6 +115,7 @@ export interface UiCommandArgs {
   'volumes.focus': { volume_id: number }
   'volumes.set_visible': { volume_id: number; on: boolean }
   'volumes.set_obb': { volume_id: number; on: boolean }
+  'volumes.delete': { volume_id: number }
   'viewer.set_tool': { tool: 'navigate' | 'measure_distance' | 'measure_angle' | 'section_box' | 'brush' | 'align' }
   'viewer.clear_measurements': Record<string, never>
   'viewer.remove_section_box': Record<string, never>
@@ -160,6 +173,8 @@ export interface UiCommandArgs {
   'objects.focus': { id: number | string }
   'objects.set_gizmo_mode': { mode: 'translate' | 'rotate' | 'scale' }
   'objects.align': { op: 'floor' | 'same_base' | 'on_top' | 'center_xz' | 'center_y'; target?: string }
+  'objects.remove_selected': Record<string, never>
+  'objects.remove': { id: number | string }
   'objects.set_visible': { id: number | string; on: boolean }
   'objects.set_obb': { id: number | string; on: boolean }
   'physics.panel': { on: boolean }

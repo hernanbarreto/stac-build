@@ -289,6 +289,15 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     interface's commands come back as `ui_actions`; the interface runs them and words the outcome with the
     server's texts. `manual` rows are offered too: STAC says they are done by hand. What launches GPU work or
     deletes data only OPENS ITS WINDOW by voice (a confirmed launch by voice: not built — on his word).
+  · THE SPOKEN CONFIRMATION (USER 2026-11-17: "confirmacion hablada con lo que stac nos dice que va a hacer,
+    STAC, SI CONFIRMO"): a `confirm: true` command STAC runs carries an `ask` text (what it is going to do) and
+    its executor is a `{ prepare, run }` pair — `prepare` changes nothing and names what will be acted on; the
+    interface HOLDS the command for ONE sentence and sends it back (`pending`); `commands/confirm.py` decides on
+    the sentence's WORDS, never the model ("sí confirmo" / "yes, I confirm" / "oui, je confirme"; a bare "sí"
+    does not confirm): yes → released (`confirmed`), a refusal → cancelled, anything else → dropped and said.
+    In hands-free the confirmation needs STAC's name. First wired 2026-11-17: volumes.delete, objects.remove,
+    objects.remove_selected (135 run, 135 manual). Wiring one: `python -m commands.wire texts.yaml` + the
+    executor + `python -m commands.export_ui`. NOT TRIED IN A BROWSER.
     The scaling path when the catalogue outgrows word search (a first call on the AREAS, 0.3 s) is declared in
     router.py, not built.
   · THE VOICE: `server/voice/` (its own process, never the backend) — speech → text with the language detected
@@ -346,8 +355,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   B · WAITING FOR HIS DECISION:
     · the scales of pccr 2408 / 3108: where the factor that brings 3108 to 2408 is applied (the comparison's
       transform, the lengths shown, or the scan's geometry);
-    · a spoken confirmation for the commands that launch GPU work or delete data (by voice they only open
-      their window today); the 138 `manual` commands of the interface;
+    · (IN PROGRESS since 2026-11-17, his "sobre todo los 138 comandos de la interfaz que siguen a mano": the
+      spoken confirmation is built — §5 — and the manual commands are being wired area by area: 135 left);
     · the database as the single source of the segmentation, the Segmentation Manager included (a project);
     · GenRecon's mesh step: the global remesh closes every sheet into a shell (the floor as two sheets) and the
       simplification leaves the faceting — found, not corrected; the UV unwrap on the card (other textures);

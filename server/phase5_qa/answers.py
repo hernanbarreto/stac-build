@@ -504,7 +504,33 @@ _UI_REASONS = {
                   "That command is not wired to the interface yet.",
                   "Cette commande n'est pas encore reliée à l'interface."),
     "failed": ("No se pudo: {detail}.", "It failed: {detail}.", "Échec : {detail}."),
+    # (commands/confirm.py) a second command that needs confirmation in the same sentence
+    "one_confirmation": ("«{detail}» queda para después: confirmo de a una cosa por vez.",
+                         "“{detail}” has to wait: I confirm one thing at a time.",
+                         "« {detail} » attendra : je confirme une chose à la fois."),
+    "needs_confirmation": ("«{detail}» necesita tu confirmación.", "“{detail}” needs your confirmation.",
+                           "« {detail} » a besoin de votre confirmation."),
 }
+
+
+# ── the spoken confirmation (commands/confirm.py) ───────────────────────────────────────────
+# USER 2026-11-17: "confirmacion hablada con lo que stac nos dice que va a hacer, STAC, SI CONFIRMO"
+def confirm_how(lang: str) -> str:
+    """What STAC adds after saying what it is going to do: how to confirm it."""
+    return _t(lang if lang in LANGS else "es", "Para hacerlo, di: «STAC, sí confirmo».",
+              "To go ahead, say: “STAC, yes, I confirm”.", "Pour continuer, dites : « STAC, oui, je confirme ».")
+
+
+def cancelled(lang: str) -> str:
+    return _t(lang if lang in LANGS else "es", "Cancelado: no hice nada.", "Cancelled: nothing was done.",
+              "Annulé : rien n'a été fait.")
+
+
+def not_confirmed(title: str, lang: str) -> str:
+    """… when the sentence after STAC's question was something else: the held command is dropped."""
+    return _t(lang if lang in LANGS else "es", f"No lo confirmaste: «{title}» queda sin hacer.",
+              f"You did not confirm: “{title}” was not done.",
+              f"Vous n'avez pas confirmé : « {title} » n'a pas été fait.")
 
 
 def ui_reasons(lang: str) -> Dict[str, str]:

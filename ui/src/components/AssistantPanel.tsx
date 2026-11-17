@@ -26,7 +26,7 @@ import { Tooltip } from './ui/Tooltip'
 import { useFmt, useI18n, useT } from '../i18n'
 import { useVoice, voiceSupported, type VoiceLang } from '../voice/useVoice'
 import { useHandsFree } from '../voice/useHandsFree'
-import { registerCommands, runActions, type AnswerTexts, type Executors, type UiAction } from '../commands/registry'
+import { registerCommands, runActions, type AnswerTexts, type Executors, type PendingCommand, type UiAction } from '../commands/registry'
 
 interface TraceEntry { tool: string; arguments: Record<string, unknown>; result: Record<string, unknown> }
 
@@ -139,6 +139,8 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
   useEffect(() => { const n = readName(userKey); setUserName(n); userNameRef.current = n }, [userKey])
   /** STAC has asked the name and the next thing said is the answer */
   const expectingNameRef = useRef(false)
+  /** the command STAC said it is going to do and holds until the next sentence confirms it */
+  const pendingRef = useRef<PendingCommand | null>(null)
   /** the language of the conversation so far (the last answer's) */
   const convLangRef = useRef<string | null>(null)
   // the two commands this panel owns (the rest are the app's: App.tsx)
@@ -198,7 +200,8 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
   }, [sessionId, viewport, refreshVolumes, api])
 
   // another scan (or session): the conversation was about the other one — it starts over
-  useEffect(() => { setMessages(m => (expectingNameRef.current ? m : [])) }, [sessionId, scanKey])
+  // (and a command held for confirmation was about the other one too: it is dropped)
+  useEffect(() => { pendingRef.current = null; setMessages(m => (expectingNameRef.current ? m : [])) }, [sessionId, scanKey])
 
   // the chat's measurements run on the GPU in their own process (semantic.chat.tools_device):
   // it is started when the chat opens on a scan, so the first measurement does not wait for it
@@ -254,6 +257,9 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
     const history = messagesRef.current.filter(m => !m.pending && !m.error && m.text.trim()).map(m => ({ role: m.role, text: m.text }))
     setMessages(m => [...m, { role: 'user', text: question }, { role: 'assistant', text: '', pending: true }])
     setInput(''); setBusy(true)
+    // a held command lives for ONE sentence: this one
+    const held = pendingRef.current
+    pendingRef.current = null
     try {
       let d: Record<string, unknown>
       const deadline = Date.now() + 10 * 60_000
@@ -263,6 +269,8 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
           question, history, ...(spoken ? { lang: spoken } : {}),
           ...(userNameRef.current ? { user_name: userNameRef.current } : {}),
           ...(expectingNameRef.current ? { expecting: 'user_name' } : {}),
+          // the command STAC is holding: this sentence confirms it, or drops it (commands/confirm.py)
+          ...(held ? { pending: held } : {}),
           // the conversation keeps its language when a sentence's own cannot be told
           ...(convLangRef.current ? { conversation_lang: convLangRef.current } : {}),
           ui: getUiState?.() ?? {},
@@ -285,7 +293,9 @@ export default function AssistantPanel({ sessionId, scanKey, viewport, onVlmStat
       let answer = String(d.answer || '')
       if (actions.length) {
         const texts = (d.texts || { done_prefix: '', reasons: {} }) as AnswerTexts
-        answer = (await runActions(actions, answer, texts, !!d.acted_only)).text
+        const ran = await runActions(actions, answer, texts, !!d.acted_only)
+        answer = ran.text
+        pendingRef.current = ran.pending ?? null
       }
       expectingNameRef.current = d.expecting === 'user_name'
       if (VOICE_LANGS.includes(String(d.lang))) convLangRef.current = String(d.lang)
