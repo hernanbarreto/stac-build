@@ -4866,3 +4866,11 @@ evaluation:
       fusion_min_num_pixels: 5        # StereoFusion.min_num_pixels (the vendor's default)
     min_model_images: 3               # a model with fewer registered images gets no dense cloud (recorded)
     timeout_s: 21600                  # BOUND: per COLMAP command
+
+# ── THE EXPORTER (server/exporter — USER 2026-11-17: "hagamos un exportador … que la persona lo pueda
+#    descargar en su maquina") ───────────────────────────────────────────────────────────────────────
+export:
+  scratch_dir: /tmp/stac_export        # where an export's files are written before they enter the ZIP: the
+                                       # container's local disk, not the MooseFS volume (measured 2026-11-17 on
+                                       # pccr 3108: the E57 writer advanced ~1.7 MB/s on the volume). The ZIP
+                                       # itself is kept in the project's exports/ directory, one per scan.

@@ -1444,5 +1444,32 @@
     "gridColorHint": "S'applique quel que soit le fond.",
     "reset": "Réinitialiser",
     "saved": "Enregistré pour cette {@session}, dans vos préférences."
+  },
+  "export": {
+    "title": "Exporter",
+    "button": "Exporter",
+    "hint": "Télécharger le nuage, le maillage, l'IFC et le tableau des objets de ce scan",
+    "run": "Exporter",
+    "description": "Choisissez ce qu'il faut exporter de ce scan. Un ZIP est construit sur le serveur et vous le téléchargez sur votre machine ; il contient un LISEZMOI qui dit ce qu'est chaque fichier.",
+    "item_e57": "Nuage E57 (ReCap / Revit, CloudCompare, Navisworks)",
+    "item_las": "Nuage LAS 1.4 (CloudCompare, QGIS)",
+    "item_ply": "Nuage PLY (MeshLab, Blender)",
+    "item_glb": "Maillage texturé GLB (Blender, visionneuses web)",
+    "item_ifc": "Éléments IFC (Revit, Navisworks, Solibri)",
+    "item_csv": "Tableau des objets CSV (Excel)",
+    "upTo": "jusqu'à {{size}}",
+    "elements": "{{n}} éléments",
+    "objects": "{{n}} objets",
+    "confidence": "Confiance du nuage : {{pct}} %",
+    "confidenceHint": "Le nuage est exporté avec les points que la vue affiche à ce filtre ; 0 % exporte les {{points}} points publiés.",
+    "asOnDisk": "La géométrie est exportée telle qu'elle est sur le disque (époque {{epoch}}).",
+    "scaleUncalibrated": "Échelle : non calibrée.",
+    "scaleApplied": "Échelle : calibration appliquée.",
+    "scalePending": "Échelle : une calibration est mesurée et NON appliquée (facteur {{factor}}) ; elle n'est pas dans les fichiers, le LISEZMOI le dit.",
+    "totalUpTo": "Taille avant compression : jusqu'à {{size}}.",
+    "failed": "L'export a échoué : {{detail}}",
+    "download": "Télécharger",
+    "ready": "Export prêt : {{file}} ({{size}}).",
+    "previous": "Dernier export de ce scan : {{file}} ({{size}}, {{when}})."
   }
 }

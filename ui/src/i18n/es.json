@@ -1444,5 +1444,32 @@
     "gridColorHint": "Se aplica con cualquier fondo.",
     "reset": "Restablecer",
     "saved": "Se guarda para esta {@session}, en tus preferencias."
+  },
+  "export": {
+    "title": "Exportar",
+    "button": "Exportar",
+    "hint": "Descarga la nube, la malla, el IFC y la tabla de objetos de este escaneo",
+    "run": "Exportar",
+    "description": "Elige qué exportar de este escaneo. Se arma un ZIP en el servidor y lo descargas a tu máquina; incluye un LEEME que dice qué es cada archivo.",
+    "item_e57": "Nube E57 (ReCap / Revit, CloudCompare, Navisworks)",
+    "item_las": "Nube LAS 1.4 (CloudCompare, QGIS)",
+    "item_ply": "Nube PLY (MeshLab, Blender)",
+    "item_glb": "Malla con textura GLB (Blender, visores web)",
+    "item_ifc": "Elementos IFC (Revit, Navisworks, Solibri)",
+    "item_csv": "Tabla de objetos CSV (Excel)",
+    "upTo": "hasta {{size}}",
+    "elements": "{{n}} elementos",
+    "objects": "{{n}} objetos",
+    "confidence": "Confianza de la nube: {{pct}} %",
+    "confidenceHint": "La nube se exporta con los puntos que el visor muestra con este filtro; 0 % exporta los {{points}} puntos publicados.",
+    "asOnDisk": "Se exporta la geometría tal como está en disco (época {{epoch}}).",
+    "scaleUncalibrated": "Escala: sin calibrar.",
+    "scaleApplied": "Escala: calibración aplicada.",
+    "scalePending": "Escala: hay una calibración medida y NO aplicada (factor {{factor}}); no está en los archivos, el LEEME lo dice.",
+    "totalUpTo": "Tamaño antes de comprimir: hasta {{size}}.",
+    "failed": "La exportación falló: {{detail}}",
+    "download": "Descargar",
+    "ready": "Exportación lista: {{file}} ({{size}}).",
+    "previous": "Última exportación de este escaneo: {{file}} ({{size}}, {{when}})."
   }
 }

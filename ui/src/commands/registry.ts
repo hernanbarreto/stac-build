@@ -77,6 +77,9 @@ export type ManagerCommandId = 'segmentation.close_manager' | 'segmentation.mana
   | 'segmentation.manager_rename_instance' | 'segmentation.manager_toggle_exclude' | 'segmentation.manager_delete_instance'
 export type FuseCommandId = 'scans.fuse'
 
+/** … and the Export window */
+export type ExportCommandId = 'export.run'
+
 /** one command of an answer, as the server sends it */
 export interface UiAction {
   id: string

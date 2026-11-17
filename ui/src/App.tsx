@@ -26,7 +26,7 @@ import AdminPage from './pages/AdminPage'
 import SegmentationManager from './components/InteractiveSegmentation'
 import { useConfirmDialog } from './components/ConfirmDialog'
 import AssistantPanel from './components/AssistantPanel'
-import {
+import { PackageOpen,
   Search, Tag, Plug, Upload, Settings, Crosshair, Maximize, Monitor, Grid3X3, RotateCcw, Ruler, TriangleRight, Scissors,
   Move, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D, Building2, Package, ArrowUpFromLine, Trash2, Unlock,
   Clock, Scale, BarChart3, Home, Camera, SlidersHorizontal, Sparkles, Undo2, Brush, Layers, Star, Terminal,
@@ -42,7 +42,7 @@ import { Inspector } from './layout/Inspector'
 import { BottomDock } from './layout/BottomDock'
 import { StatusBar } from './layout/StatusBar'
 import { CommandPalette, type Command } from './layout/CommandPalette'
-import { registerCommands, registerOpeners, findByName, type Executors, type AdminCommandId, type BimCommandId, type FuseCommandId, type ManagerCommandId, type ReferenceCommandId, type CalibrationCommandId, type CallCommandId, type TeamCommandId, type CertifyCommandId, type EvaluationCommandId, type ReportCommandId, type FlythroughCommandId, type Outcome, type PanelCommandId, type ViewportCommandId } from './commands/registry'
+import { registerCommands, registerOpeners, findByName, type Executors, type AdminCommandId, type BimCommandId, type ExportCommandId, type FuseCommandId, type ManagerCommandId, type ReferenceCommandId, type CalibrationCommandId, type CallCommandId, type TeamCommandId, type CertifyCommandId, type EvaluationCommandId, type ReportCommandId, type FlythroughCommandId, type Outcome, type PanelCommandId, type ViewportCommandId } from './commands/registry'
 import type { UiCommandId } from './commands/catalog.generated'
 import { SettingsDialog } from './layout/SettingsDialog'
 import { SceneLookDialog } from './layout/SceneLookDialog'
@@ -69,6 +69,7 @@ import { ResumeDialog } from './features/ResumeDialog'
 import { ObjectLibraryDialog } from './features/ObjectLibraryDialog'
 import { AutosegmentDialog, type AutosegmentState, type AutosegmentStages } from './features/AutosegmentDialog'
 import { GenreconDialog } from './features/GenreconDialog'
+import { ExportDialog } from './features/ExportDialog'
 import { ReferenceDialog, type ReferenceMode } from './features/ReferenceDialog'
 import { CalibrationDialog, type CalibrationDraft, type CalMeasurement, type CalPlane, type CalSummary } from './features/CalibrationDialog'
 import { EvaluationPanel } from './features/EvaluationPanel'
@@ -1234,6 +1235,8 @@ function App() {
   // USER 2026-11-05: "GenRecon es un botón más, como el de autosegmentar": the mesh of the OPEN scan, with the
   // confidence chosen in its window — an order of the GenRecon stage alone (pipeline.auto_genrecon is off)
   const [genreconOpen, setGenreconOpen] = useState(false)
+  // the exporter (USER 2026-11-17: "hagamos un exportador … que la persona lo pueda descargar en su maquina")
+  const [exportOpen, setExportOpen] = useState(false)
   const runGenrecon = useCallback(async (confidence: number): Promise<true | string> => {
     if (!activeSession) return 'no session'
     const rr = await fetch('/api/pipeline/run', {
@@ -2084,7 +2087,7 @@ function App() {
   useEffect(() => {
     type AppCommandId = Exclude<UiCommandId, PanelCommandId | ViewportCommandId | FlythroughCommandId | CalibrationCommandId | BimCommandId
       | CertifyCommandId | EvaluationCommandId | ReportCommandId | TeamCommandId | CallCommandId | AdminCommandId | ReferenceCommandId
-      | ManagerCommandId | FuseCommandId>
+      | ManagerCommandId | FuseCommandId | ExportCommandId>
     const done: Outcome = { ok: true }
     const noSession: Outcome = { ok: false, reason: 'no_session' }
     const open = () => cmd.current.activeSession
@@ -2324,6 +2327,7 @@ function App() {
         return { ok: true, state: on }
       },
       'meshes.open_genrecon': () => { if (!open()) return noSession; setGenreconOpen(true); return done },
+      'export.open': () => { if (!open()) return noSession; setExportOpen(true); return done },
       'calibration.measure_distance': () => {
         if (!open()) return noSession
         setCalibrating('distance'); setActiveTool('measure-distance'); setStatusMessage(tt('calibration.measureStatus')); return done
@@ -2748,6 +2752,7 @@ function App() {
       certify: withSession(() => { setShowCertifyKit(true); cmd.current.layout.openInspector('acta') }),
       evaluation: () => cmd.current.layout.openDock('evaluation'),
       team: () => cmd.current.layout.setLeftTab('team'),
+      export: withSession(() => setExportOpen(true)),
       // (the Fuse window of the open session; the Segmentation manager is opened by its own
       // command, on a confirmation: it loads SAM3 on the card)
       scans: withSession(() => cmd.current.openFuse(open()!)),
@@ -2814,6 +2819,7 @@ function App() {
       { type: 'separator', id: 's4' },
       { id: 'segmentation', label: t('instances.segmentation'), icon: <Crosshair aria-hidden />, onSelect: () => activeSession && openSegmentationManager(activeSession) },
       { id: 'autosegment', label: t('instances.autosegment'), icon: <Wand2 aria-hidden />, disabled: !activeSession, onSelect: openAutosegment },
+      { id: 'export', label: t('export.title'), icon: <PackageOpen aria-hidden />, disabled: !activeSession, onSelect: () => setExportOpen(true) },
       { id: 'fuse', label: t('sessions.fuse'), icon: <Layers aria-hidden />, disabled: projectScans.filter(sc => sc.kind !== 'fused').length < 2, onSelect: () => activeSession && openFuse(activeSession) },
       ...(hasCameraPoses ? [{ id: 'poses', label: t('menu.cameraPoses'), icon: <Camera aria-hidden />, checked: showCameraPoses, onSelect: () => setShowCameraPoses(v => !v) } as MenuEntry] : []),
     ] },
@@ -2944,6 +2950,7 @@ function App() {
     onOpenSegmentation: () => { if (activeSession) openSegmentationManager(activeSession) },
     onOpenAutosegment: openAutosegment,
     onOpenGenrecon: () => { if (activeSession) setGenreconOpen(true) },
+    onOpenExport: () => { if (activeSession) setExportOpen(true) },
   })
 
   if (authLoading) {
@@ -3321,6 +3328,9 @@ function App() {
         selectedScans={autosegScansTicked}
         onToggleScan={(key, on) => setAutosegScans(prev => (on ? [...prev.filter(k => k !== key), key] : prev.filter(k => k !== key)))}
         onClose={() => setAutosegOpen(false)} onRun={async (vlm, sam3, stages) => { await runAutosegment(vlm, sam3, stages) }} />
+
+      <ExportDialog open={exportOpen} sessionId={activeSession} scanKey={activeScanTab} defaultConfidence={confidenceThreshold}
+        onClose={() => setExportOpen(false)} />
 
       <GenreconDialog open={genreconOpen} sessionId={activeSession} scanLabel={activeScanTab} defaultConfidence={confidenceThreshold}
         onClose={() => setGenreconOpen(false)} onRun={async c => { await runGenrecon(c) }} />

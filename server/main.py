@@ -5039,6 +5039,21 @@ calibration_api.configure(resolve_ctx=_ctx, audit_log=_audit_log, busy=_calibrat
                           on_cloud_changed=_correction_notify_viewer)
 app.include_router(calibration_api.router)
 
+# THE EXPORTER (USER 2026-11-17: "hagamos un exportador … que la persona lo pueda descargar en su
+# maquina"): a scan's cloud (E57 / LAS / PLY), mesh (GLB), elements (IFC) and objects (CSV) in one ZIP
+import exporter_api
+def _export_busy(session_id: str) -> Optional[str]:
+    """Why a scan's files cannot be read for an export now: a pipeline job of that session is
+    running or queued — its stages rewrite them."""
+    for j in pipeline_manager.get_all_jobs().values():
+        if j.get("session_id") == session_id and j.get("status") in ("running", "queued"):
+            return f"a pipeline job of {session_id} is {j.get('status')}: the scan is exported when it ends"
+    return None
+
+
+exporter_api.configure(busy=_export_busy, audit_log=_audit_log)
+app.include_router(exporter_api.router)
+
 # STAC's voice (USER 2026-11-14): speech → text and text → speech, relayed to the voice service
 from voice import api as voice_api
 app.include_router(voice_api.router)

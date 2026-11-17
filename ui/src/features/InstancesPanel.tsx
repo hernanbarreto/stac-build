@@ -5,7 +5,7 @@
  * footer buttons open Segmentation and Meshing.
  */
 import { memo, useState } from 'react'
-import { Box, CheckSquare, Crosshair, Grid3x3, Pencil, Square, Tag, Trash2, Wand2 } from 'lucide-react'
+import { PackageOpen, Box, CheckSquare, Crosshair, Grid3x3, Pencil, Square, Tag, Trash2, Wand2 } from 'lucide-react'
 import type { CubeInfo, SegmentInstance } from '../components/Viewport'
 import { Panel, Section, Stack } from '../components/ui/Panel'
 import { Tree, type TreeNodeData } from '../components/ui/Tree'
@@ -68,6 +68,8 @@ interface InstancesPanelProps {
   /** the segmentation chain on demand, prompts editable (USER 2026-10-05) */
   onOpenAutosegment: () => void
   onOpenGenrecon: () => void
+  /** the exporter: the scan's cloud, mesh, elements and objects as files to download (USER 2026-11-17) */
+  onOpenExport: () => void
   /** the cubes of the session's cut (USER 2026-11-06: "en la pestaña de segmentación, ahí poder prender y apagar los
    *  cubos") */
   cubes: CubeInfo[]
@@ -161,6 +163,7 @@ function InstancesPanelImpl(p: InstancesPanelProps) {
           <Button size="sm" icon={<Crosshair aria-hidden />} onClick={p.onOpenSegmentation}>{t('instances.segmentation')}</Button>
           <Button size="sm" icon={<Wand2 aria-hidden />} onClick={p.onOpenAutosegment} title={t('instances.autosegmentHint')}>{t('instances.autosegment')}</Button>
           <Button size="sm" icon={<Box aria-hidden />} onClick={p.onOpenGenrecon} title={t('instances.genreconHint')}>{t('instances.genrecon')}</Button>
+          <Button size="sm" icon={<PackageOpen aria-hidden />} onClick={p.onOpenExport} title={t('export.hint')}>{t('export.button')}</Button>
         </div>
       }>
       <Stack gap={1}>

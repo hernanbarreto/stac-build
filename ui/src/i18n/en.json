@@ -1444,5 +1444,32 @@
     "gridColorHint": "Applies with any background.",
     "reset": "Reset",
     "saved": "Saved for this {@session}, in your preferences."
+  },
+  "export": {
+    "title": "Export",
+    "button": "Export",
+    "hint": "Download this scan's cloud, mesh, IFC and objects table",
+    "run": "Export",
+    "description": "Choose what to export of this scan. A ZIP is built on the server and you download it to your machine; it holds a README that says what each file is.",
+    "item_e57": "Cloud E57 (ReCap / Revit, CloudCompare, Navisworks)",
+    "item_las": "Cloud LAS 1.4 (CloudCompare, QGIS)",
+    "item_ply": "Cloud PLY (MeshLab, Blender)",
+    "item_glb": "Textured mesh GLB (Blender, web viewers)",
+    "item_ifc": "Elements IFC (Revit, Navisworks, Solibri)",
+    "item_csv": "Objects table CSV (Excel)",
+    "upTo": "up to {{size}}",
+    "elements": "{{n}} elements",
+    "objects": "{{n}} objects",
+    "confidence": "Cloud confidence: {{pct}} %",
+    "confidenceHint": "The cloud is exported with the points the viewer shows at this filter; 0 % exports the {{points}} published points.",
+    "asOnDisk": "The geometry is exported as it is on disk (epoch {{epoch}}).",
+    "scaleUncalibrated": "Scale: uncalibrated.",
+    "scaleApplied": "Scale: calibration applied.",
+    "scalePending": "Scale: a calibration is measured and NOT applied (factor {{factor}}); it is not in the files, the README says so.",
+    "totalUpTo": "Size before compression: up to {{size}}.",
+    "failed": "The export failed: {{detail}}",
+    "download": "Download",
+    "ready": "Export ready: {{file}} ({{size}}).",
+    "previous": "Last export of this scan: {{file}} ({{size}}, {{when}})."
   }
 }

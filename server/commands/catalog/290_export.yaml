@@ -1,0 +1,89 @@
+area: export
+position: 290
+title:
+  es: Exportación
+  en: Export
+  fr: Export
+summary:
+  es: 'Exportar un escaneo para otros programas: la nube (E57, LAS, PLY), la malla (GLB), los elementos (IFC) y la tabla de objetos (CSV), en un ZIP para descargar.'
+  en: 'Exporting a scan for other programs: the cloud (E57, LAS, PLY), the mesh (GLB), the elements (IFC) and the objects table (CSV), in a ZIP to download.'
+  fr: 'Exporter un scan pour d''autres logiciels : le nuage (E57, LAS, PLY), le maillage (GLB), les éléments (IFC) et le tableau des objets (CSV), dans un ZIP à télécharger.'
+commands:
+- id: export.open
+  kind: action
+  runs_on: ui
+  model: 'Open the Export window of the open scan: there the user ticks what to export (the cloud as E57, LAS or PLY,
+    the textured mesh as GLB, the building elements as IFC, the objects table as CSV) and downloads the ZIP. It only
+    opens the window.'
+  needs:
+  - session
+  text:
+    es:
+      title: Abrir la exportación
+      say:
+      - abrí la exportación
+      - quiero exportar el escaneo
+      - quiero descargar la nube
+      - exportar a IFC
+      done: Ventana de exportación abierta.
+    en:
+      title: Open export
+      say:
+      - open the export window
+      - I want to export the scan
+      - I want to download the cloud
+      - export to IFC
+      done: Export window open.
+    fr:
+      title: Ouvrir l'export
+      say:
+      - ouvre l'export
+      - je veux exporter le scan
+      - je veux télécharger le nuage
+      - exporter en IFC
+      done: Fenêtre d'export ouverte.
+- id: export.run
+  kind: action
+  runs_on: ui
+  model: 'Build the export of the open scan on the server: a ZIP with the chosen items (e57, las, ply = the point cloud;
+    glb = the textured mesh; ifc = the building elements; csv = the objects table) and a README. The cloud can be
+    filtered by the viewer''s confidence (0 = every point). Server work of minutes on a large scan; the user then
+    downloads the ZIP from the window. It replaces the scan''s previous export.'
+  args:
+    items:
+      type: array
+      items:
+        type: string
+      description: 'what to export, among e57, las, ply, glb, ifc, csv; omit for everything the scan has'
+    confidence:
+      type: number
+      minimum: 0
+      maximum: 0.99
+      description: the cloud's confidence filter, 0 to 0.99; omit for every point
+  needs:
+  - session
+  text:
+    es:
+      title: Exportar el escaneo
+      say:
+      - exportá la nube en E57
+      - armá el ZIP con la nube, la malla y el IFC
+      - exportá todo el escaneo
+      - generá el IFC y el CSV para descargar
+      done: 'Exportación en marcha: {detail}. Cuando termine, el ZIP se descarga desde la ventana.'
+    en:
+      title: Export the scan
+      say:
+      - export the cloud as E57
+      - build the ZIP with the cloud, the mesh and the IFC
+      - export the whole scan
+      - make the IFC and the CSV to download
+      done: 'Export under way: {detail}. When it ends, the ZIP is downloaded from the window.'
+    fr:
+      title: Exporter le scan
+      say:
+      - exporte le nuage en E57
+      - construis le ZIP avec le nuage, le maillage et l'IFC
+      - exporte tout le scan
+      - génère l'IFC et le CSV à télécharger
+      done: 'Export en cours : {detail}. Quand il se termine, le ZIP se télécharge depuis la fenêtre.'
