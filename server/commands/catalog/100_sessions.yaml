@@ -271,7 +271,6 @@ commands:
 - id: sessions.upload_video
   kind: action
   runs_on: ui
-  status: manual
   model: 'Upload a video to a session that has no frames yet: the file is picked by hand, uploaded, and the server
     then extracts its frames (a long background job). For administrators and managers.'
   confirm: true
@@ -289,22 +288,27 @@ commands:
       - subí la filmación a ese proyecto
       - sumá la filmación de la visita
       - extraé los cuadros de la filmación
+      done: Elige el video de {detail} en la ventana que se abrió.
+      ask: 'Voy a abrir la ventana para elegir el video de la sesión {detail}: al elegirlo se sube y el servidor extrae sus cuadros.'
     en:
       title: Upload a video to a session
       say:
       - upload the footage to that project
       - add the footage of the walk
       - extract the frames of the footage
+      done: Pick the video of {detail} in the window that opened.
+      ask: 'I am going to open the window to pick the video of the session {detail}: once picked it is uploaded and the server extracts its frames.'
     fr:
       title: Téléverser une vidéo dans une session
       say:
       - téléverse le film dans ce projet
       - ajoute le film de la visite
       - extrais les images du film
+      done: Choisissez la vidéo de {detail} dans la fenêtre qui s'est ouverte.
+      ask: 'Je vais ouvrir la fenêtre pour choisir la vidéo de la session {detail} : une fois choisie, elle est téléversée et le serveur extrait ses images.'
 - id: sessions.segment_auto
   kind: action
   runs_on: ui
-  status: manual
   model: 'Segment the objects of the loaded session automatically (the Segment objects button of its row): the VLM
     names what the keyframes show and SAM3 segments it. Long GPU work in the background (it can take hours on a
     large one).'
@@ -323,15 +327,21 @@ commands:
       - segmentá los objetos del proyecto cargado
       - corré la segmentación de objetos
       - botón segmentar objetos
+      done: Segmentación automática de {detail} lanzada.
+      ask: 'Voy a lanzar la segmentación automática de {detail}: trabajo largo de GPU.'
     en:
       title: Segment the session's objects
       say:
       - segment the objects of the loaded project
       - run the object segmentation
       - the segment objects button
+      done: Automatic segmentation of {detail} launched.
+      ask: 'I am going to launch the automatic segmentation of {detail}: long GPU work.'
     fr:
       title: Segmenter les objets de la session
       say:
       - segmente les objets du projet chargé
       - lance la segmentation des objets
       - bouton segmenter les objets
+      done: Segmentation automatique de {detail} lancée.
+      ask: 'Je vais lancer la segmentation automatique de {detail} : long travail GPU.'

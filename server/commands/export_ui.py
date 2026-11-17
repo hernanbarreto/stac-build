@@ -24,7 +24,10 @@ def _arg_type(spec: Dict[str, Any]) -> str:
     if "enum" in spec:
         return " | ".join(repr(v) if isinstance(v, str) else str(v).lower() for v in spec["enum"])
     types = spec["type"] if isinstance(spec["type"], list) else [spec["type"]]
-    return " | ".join(dict.fromkeys(_TS[t] for t in types))
+    # an array whose items are declared is typed by them (string[] / number[])
+    item = (spec.get("items") or {}).get("type")
+    of = {"array": f"{_TS[item]}[]"} if isinstance(item, str) and item in ("string", "integer", "number", "boolean") else {}
+    return " | ".join(dict.fromkeys(of.get(t, _TS[t]) for t in types))
 
 
 def render(catalog: Catalog) -> str:

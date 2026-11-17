@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { findByName, registerCommands, type Executors, type ManagerCommandId, type Outcome } from '../commands/registry'
 import { X, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Maximize, Check, Pencil, Eye, EyeOff, Plus, Play, Trash2, Brain, MousePointer, Type, Bot, Crosshair } from 'lucide-react'
 import { useConfirmDialog } from './ConfirmDialog'
 import { Dialog } from './ui/Dialog'
@@ -53,7 +54,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     const [maskOverlay, setMaskOverlay] = useState<string | null>(null)
     const [hasPrompts, setHasPrompts] = useState(false)
     const [labelName, setLabelName] = useState('')
-    const [textPrompt, setTextPrompt] = useState('')
+    const [typedPrompt, setTextPrompt] = useState('')
     const [promptPoints, setPromptPoints] = useState<{ x: number, y: number, label: number }[]>([])
     // Prompt/mask caches are keyed by "<frame>:<obj_id>" — NOT by frame alone.
     // Two objects edited on the same frame must never share an entry, or the
@@ -472,7 +473,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
 
     // ── Manual click handler ──────────────────────────────────
     const lastClickTime = useRef(0)
-    const handleImageClick = useCallback(async (e: React.MouseEvent<HTMLCanvasElement>, isPositive: boolean) => {
+    const handleImageClick = (e: React.MouseEvent<HTMLCanvasElement>, isPositive: boolean) => {
         e.preventDefault()
         e.stopPropagation()
         // Debounce: ignore clicks within 300ms of each other
@@ -484,16 +485,19 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             wasDragging.current = false
             return
         }
-        if (mode !== 'manual' || !currentFrame) return
         if (!imgRef.current || !overlayCanvasRef.current) return
-
         const rect = overlayCanvasRef.current.getBoundingClientRect()
+        const scaleX = imgRef.current.naturalWidth / rect.width
+        const scaleY = imgRef.current.naturalHeight / rect.height
+        void pointAt((e.clientX - rect.left) * scaleX, (e.clientY - rect.top) * scaleY, isPositive)
+    }
+    /** a point on the keyframe image, in image pixels: a prompt for SAM3, or mask area painted on
+     *  the selected saved object (the click's own work — STAC's manager_add_point calls it too) */
+    const pointAt = useCallback(async (x: number, y: number, isPositive: boolean) => {
+        if (mode !== 'manual' || !currentFrame) return
+        if (!imgRef.current) return
         const natW = imgRef.current.naturalWidth
         const natH = imgRef.current.naturalHeight
-        const scaleX = natW / rect.width
-        const scaleY = natH / rect.height
-        const x = (e.clientX - rect.left) * scaleX
-        const y = (e.clientY - rect.top) * scaleY
 
         // ── Edit existing instance (paint mode) ──
         if (selectedInstance !== null) {
@@ -650,7 +654,9 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     }, [promptPoints])
 
     // ── Text prompt handler ──────────────────────────────────
-    const handleTextPrompt = useCallback(async () => {
+    const handleTextPrompt = useCallback(async (given?: unknown) => {
+        // (a click passes its event: only a string is a description given by command)
+        const textPrompt = typeof given === 'string' ? given : typedPrompt
         if (!stateId || !textPrompt.trim() || loading) return
         try {
             setLoading(true)
@@ -673,7 +679,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
         } finally {
             setLoading(false)
         }
-    }, [stateId, textPrompt, loading, currentFrameIdx])
+    }, [stateId, typedPrompt, loading, currentFrameIdx])
 
     // ── Propagate handler (SSE streaming) ─────────────────
     const [propagationPct, setPropagationPct] = useState(-1)  // -1 = not propagating
@@ -970,8 +976,9 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     }, [sessionId, onUpdate, instances])
 
     // ── Delete instance ──────────────────────────────────
-    const handleDelete = useCallback(async (instId: number, label: string) => {
-        const ok = await confirmDanger(tt('seg.deleteMessage', { label }), tt('instances.deleteTitle'))
+    const handleDelete = useCallback(async (instId: number, label: string, confirmed?: boolean) => {
+        // (`confirmed` === true: STAC's spoken confirmation was given — no dialog)
+        const ok = confirmed === true || await confirmDanger(tt('seg.deleteMessage', { label }), tt('instances.deleteTitle'))
         if (!ok) return
         try {
             setStatus(tt('seg.deleting', { label }))
@@ -1040,9 +1047,9 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
     // ── Render ──────────────────────────────────────────────
     const t = useT()
     const fmt = useFmt()
-    const clearAllPrompts = async () => {
+    const clearAllPrompts = async (confirmed?: unknown) => {
         const n = pendingObjects.length + (hasPrompts ? 1 : 0)
-        const ok = await confirmDanger(t('seg.clearAllMessage', { n: pendingObjects.length }), t('seg.clearAllTitle'))
+        const ok = confirmed === true || await confirmDanger(t('seg.clearAllMessage', { n: pendingObjects.length }), t('seg.clearAllTitle'))
         if (!ok) return
         setPromptPoints([]); setPendingObjects([]); setMaskOverlay(null); setHasPrompts(false); setLabelName('')
         promptPointsMapRef.current.clear(); maskCacheRef.current.clear()
@@ -1056,6 +1063,148 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
             finally { setLoading(false) }
         } else setStatus(t('seg.allCleared'))
     }
+    // STAC's commands of the manager (server/commands/catalog/150_segmentation.yaml): registered
+    // while it is open, each one through the function its control or its key uses. What runs
+    // SAM3 / the VLM on the GPU, deletes or closes with changes waits for the spoken confirmation.
+    const mcmd = useRef({ keyframes, kfIndex, mode, loading, stateId, hasPrompts, pendingObjects, selectedFrames, selectedInstance, instances, currentFrame, promptPoints,
+        pointAt, undoLastPoint, clearCurrentObject, clearAllPrompts, handleTextPrompt, handleAutoSegment, handleEvaluate, handleAddObject, handlePropagate,
+        handleRename, handleToggleExclude, handleDelete, fetchInstanceMask, onClose })
+    mcmd.current = { keyframes, kfIndex, mode, loading, stateId, hasPrompts, pendingObjects, selectedFrames, selectedInstance, instances, currentFrame, promptPoints,
+        pointAt, undoLastPoint, clearCurrentObject, clearAllPrompts, handleTextPrompt, handleAutoSegment, handleEvaluate, handleAddObject, handlePropagate,
+        handleRename, handleToggleExclude, handleDelete, fetchInstanceMask, onClose }
+    useEffect(() => {
+        const done: Outcome = { ok: true }
+        const nothing: Outcome = { ok: false, reason: 'nothing_to_do' }
+        const busy: Outcome = { ok: false, reason: 'unavailable' }
+        const frameAt = (index: number): number | Outcome =>
+            index >= 1 && index <= mcmd.current.keyframes.length ? index - 1 : { ok: false, reason: 'not_found', detail: String(index) }
+        const instanceBy = (id: number | string): InstanceInfo | Outcome => {
+            const all = mcmd.current.instances
+            if (!all.length) return nothing
+            const byId = typeof id === 'number' || /^\d+$/.test(String(id)) ? all.find(x => x.id === Number(id)) : undefined
+            if (byId) return byId
+            const found = findByName(all, String(id), x => [x.label])
+            if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.slice(0, 8).map(x => `${x.label} (${x.id})`).join(', ') }
+            return found.item ?? { ok: false, reason: 'not_found', detail: String(id) }
+        }
+        /** the SAM3 session is up and idle */
+        const ready = (): Outcome => (mcmd.current.stateId && !mcmd.current.loading ? { ok: true, detail: sessionId } : busy)
+        const toTrack = () => mcmd.current.pendingObjects.length + (mcmd.current.hasPrompts ? 1 : 0)
+        const confirmedStep = (check: () => Outcome, act: () => unknown) => ({
+            prepare: check,
+            run: async (): Promise<Outcome> => { const o = check(); if (o.ok) await act(); return o },
+        })
+        const executors: Executors<ManagerCommandId> = {
+            'segmentation.close_manager': confirmedStep(() => ({ ok: true, detail: sessionId }), () => mcmd.current.onClose(isDirty.current)),
+            'segmentation.manager_set_mode': ({ mode: m }) => { setMode(m); return done },
+            'segmentation.manager_go_to_frame': ({ index }) => { const k = frameAt(index); if (typeof k !== 'number') return k; setKfIndex(k); return done },
+            'segmentation.manager_zoom': ({ direction }) => {
+                if (direction === 'reset') { setZoom(1); setPan({ x: 0, y: 0 }) }
+                else setZoom(z => (direction === 'in' ? Math.min(8, z + 0.5) : Math.max(0.5, z - 0.5)))
+                return done
+            },
+            'segmentation.manager_mark_frame_and_next': ({ include }) => {
+                const { kfIndex: k, keyframes: kfs } = mcmd.current
+                if (!kfs.length) return nothing
+                setSelectedFrames(prev => { const next = new Set(prev); if (include) next.add(k); else next.delete(k); return next })
+                if (k < kfs.length - 1) setKfIndex(k + 1)
+                return { ok: true, state: include }
+            },
+            'segmentation.manager_toggle_frame_selection': ({ index, on }) => {
+                const k = frameAt(index)
+                if (typeof k !== 'number') return k
+                setSelectedFrames(prev => { const next = new Set(prev); if (on) next.add(k); else next.delete(k); return next })
+                return { ok: true, state: on }
+            },
+            'segmentation.manager_add_point': async ({ x_px, y_px, positive }) => {
+                const c = mcmd.current
+                const img = imgRef.current
+                if (c.mode !== 'manual' || !c.currentFrame || !img) return busy
+                if (x_px < 0 || y_px < 0 || x_px > img.naturalWidth || y_px > img.naturalHeight) return { ok: false, reason: 'failed', detail: `(${x_px}, ${y_px}) / ${img.naturalWidth} × ${img.naturalHeight}` }
+                await c.pointAt(x_px, y_px, positive)
+                return done
+            },
+            'segmentation.manager_undo_point': async () => { if (!mcmd.current.promptPoints.length) return nothing; await mcmd.current.undoLastPoint(); return done },
+            'segmentation.manager_clear_object': async () => { if (!mcmd.current.hasPrompts) return nothing; await mcmd.current.clearCurrentObject(); return done },
+            'segmentation.manager_clear_all': confirmedStep(
+                () => (toTrack() === 0 ? nothing : mcmd.current.loading ? busy : { ok: true, detail: String(toTrack()) }),
+                () => mcmd.current.clearAllPrompts(true)),
+            'segmentation.manager_text_prompt': {
+                prepare: ({ text }) => (text.trim() ? ready() : nothing),
+                run: async ({ text }) => { const o = text.trim() ? ready() : nothing; if (o.ok) { setMode('text'); setTextPrompt(text); await mcmd.current.handleTextPrompt(text) } return o },
+            },
+            'segmentation.manager_auto': confirmedStep(() => (mcmd.current.loading ? busy : { ok: true, detail: sessionId }), () => { void mcmd.current.handleAutoSegment() }),
+            'segmentation.manager_evaluate': confirmedStep(() => (!mcmd.current.hasPrompts ? nothing : ready()), () => { void mcmd.current.handleEvaluate() }),
+            'segmentation.manager_add_object': () => { if (!mcmd.current.hasPrompts) return nothing; mcmd.current.handleAddObject(); return done },
+            'segmentation.manager_set_label': ({ label }) => { setLabelName(label); return done },
+            'segmentation.manager_propagate': {
+                prepare: ({ frames }) => {
+                    if (toTrack() === 0) return nothing
+                    const r = ready()
+                    if (!r.ok) return r
+                    if (frames && frames.some(f => typeof frameAt(f) !== 'number')) return { ok: false, reason: 'not_found', detail: frames.join(', ') }
+                    const n = frames ? new Set(frames).size : mcmd.current.selectedFrames.size
+                    return n ? { ok: true, detail: `${toTrack()} → ${n} keyframes` } : nothing
+                },
+                run: async ({ frames }) => {
+                    if (toTrack() === 0) return nothing
+                    const r = ready()
+                    if (!r.ok) return r
+                    if (frames) {
+                        if (frames.some(f => typeof frameAt(f) !== 'number')) return { ok: false, reason: 'not_found', detail: frames.join(', ') }
+                        const want = new Set(frames.map(f => f - 1))
+                        setSelectedFrames(want)
+                        // (the propagation reads the ticked keyframes of its own render: wait for it)
+                        const same = () => mcmd.current.selectedFrames.size === want.size && [...want].every(k => mcmd.current.selectedFrames.has(k))
+                        const end = Date.now() + 2000
+                        while (!same() && Date.now() < end) await new Promise(res => setTimeout(res, 40))
+                        if (!same()) return busy
+                    }
+                    if (!mcmd.current.selectedFrames.size) return nothing
+                    const detail = `${toTrack()} → ${mcmd.current.selectedFrames.size} keyframes`
+                    void mcmd.current.handlePropagate()
+                    return { ok: true, detail }
+                },
+            },
+            'segmentation.manager_select_instance': ({ id }) => {
+                const inst = instanceBy(id)
+                if ('ok' in inst) return inst
+                const c = mcmd.current
+                const newSel = inst.id === c.selectedInstance ? null : inst.id
+                setSelectedInstance(newSel)
+                if (newSel !== null && c.currentFrame) void c.fetchInstanceMask(newSel, c.currentFrame, c.kfIndex)
+                else setMaskOverlay(null)
+                return { ok: true, detail: inst.label, state: newSel !== null }
+            },
+            'segmentation.manager_rename_instance': async ({ id, label }) => {
+                const inst = instanceBy(id)
+                if ('ok' in inst) return inst
+                if (!label.trim()) return { ok: false, reason: 'failed', detail: label }
+                setInstances(prev => prev.map(i => (i.id === inst.id ? { ...i, label: label.trim() } : i)))
+                await mcmd.current.handleRename(inst.id, label.trim())
+                return { ok: true, detail: inst.label }
+            },
+            'segmentation.manager_toggle_exclude': async ({ id, excluded }) => {
+                const inst = instanceBy(id)
+                if ('ok' in inst) return inst
+                await mcmd.current.handleToggleExclude(inst.id, excluded)
+                return { ok: true, detail: inst.label, state: excluded }
+            },
+            'segmentation.manager_delete_instance': {
+                prepare: ({ id }) => { const inst = instanceBy(id); return 'ok' in inst ? inst : { ok: true, detail: `${inst.label} (${inst.id})` } },
+                run: async ({ id }) => {
+                    const inst = instanceBy(id)
+                    if ('ok' in inst) return inst
+                    await mcmd.current.handleDelete(inst.id, inst.label, true)
+                    return mcmd.current.instances.some(i => i.id === inst.id) ? { ok: false, reason: 'failed', detail: inst.label } : { ok: true, detail: `${inst.label} (${inst.id})` }
+                },
+            },
+        }
+        return registerCommands(executors)
+    // (every value is read through `mcmd`; the setters are stable)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [sessionId])
+
     const propagateLabel = pendingObjects.length > 0
         ? t('seg.propagateMany', { objects: pendingObjects.length + (hasPrompts ? 1 : 0), frames: selectedFrames.size })
         : t('seg.propagate', { frames: selectedFrames.size })
@@ -1136,8 +1285,8 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
 
                     {mode === 'text' && (
                         <div className="stac-seg__bar">
-                            <Input placeholder={t('seg.textPlaceholder')} value={textPrompt} onChange={e => setTextPrompt(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleTextPrompt()} disabled={loading} />
-                            <Button variant="primary" onClick={handleTextPrompt} disabled={loading || !textPrompt.trim()}>{t('seg.segment')}</Button>
+                            <Input placeholder={t('seg.textPlaceholder')} value={typedPrompt} onChange={e => setTextPrompt(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleTextPrompt()} disabled={loading} />
+                            <Button variant="primary" onClick={handleTextPrompt} disabled={loading || !typedPrompt.trim()}>{t('seg.segment')}</Button>
                         </div>
                     )}
                     {mode === 'auto' && (

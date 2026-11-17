@@ -42,7 +42,7 @@ import { Inspector } from './layout/Inspector'
 import { BottomDock } from './layout/BottomDock'
 import { StatusBar } from './layout/StatusBar'
 import { CommandPalette, type Command } from './layout/CommandPalette'
-import { registerCommands, registerOpeners, findByName, type Executors, type AdminCommandId, type BimCommandId, type ReferenceCommandId, type CalibrationCommandId, type CallCommandId, type TeamCommandId, type CertifyCommandId, type EvaluationCommandId, type ReportCommandId, type FlythroughCommandId, type Outcome, type PanelCommandId, type ViewportCommandId } from './commands/registry'
+import { registerCommands, registerOpeners, findByName, type Executors, type AdminCommandId, type BimCommandId, type FuseCommandId, type ManagerCommandId, type ReferenceCommandId, type CalibrationCommandId, type CallCommandId, type TeamCommandId, type CertifyCommandId, type EvaluationCommandId, type ReportCommandId, type FlythroughCommandId, type Outcome, type PanelCommandId, type ViewportCommandId } from './commands/registry'
 import type { UiCommandId } from './commands/catalog.generated'
 import { SettingsDialog } from './layout/SettingsDialog'
 import { SceneLookDialog } from './layout/SceneLookDialog'
@@ -470,7 +470,7 @@ function App() {
   const [autosegOpen, setAutosegOpen] = useState(false)
   const [autosegState, setAutosegState] = useState<AutosegmentState | null>(null)
   const [autosegLoading, setAutosegLoading] = useState(false)
-  const [autosegScans, setAutosegScans] = useState<string[]>([])
+  const [autosegScansTicked, setAutosegScans] = useState<string[]>([])
   const [pipelineRunning, setPipelineRunning] = useState<PipelineState | null>(() => {
     try {
       const saved = sessionStorage.getItem('pipelineRunning')
@@ -1268,8 +1268,10 @@ function App() {
     }
   }, [activeSession, activeScanTab])
 
-  const runAutosegment = useCallback(async (vlmPrompt: string, sam3Prompts: string[], stages: AutosegmentStages) => {
-    if (!activeSession || autosegScans.length === 0) return
+  const runAutosegment = useCallback(async (vlmPrompt: string, sam3Prompts: string[], stages: AutosegmentStages, scansOfCommand?: string[]): Promise<true | string> => {
+    // (`scansOfCommand`: the scans STAC was asked for — the window's ticked ones otherwise)
+    const autosegScans = scansOfCommand ?? autosegScansTicked
+    if (!activeSession || autosegScans.length === 0) return 'no scan'
     // the SAM3 prompts travel only when SAM3 runs WITHOUT a new VLM pass (a VLM pass makes them)
     const sam3List = stages.sam3 && !stages.vlm ? sam3Prompts : undefined
     // the prompts are saved in EACH marked scan (the session's record), then ONE order queues one task per scan.
@@ -1284,7 +1286,7 @@ function App() {
       const d = await r.json().catch(() => ({}))
       if (!r.ok || !d.ok) {
         const busy = r.status === 409 && (d.busy === true || d.detail?.busy === true)
-        if (!busy) { setStatusMessage(d.detail?.error || d.detail || d.error || `autosegment ${scan}: prompts not saved`); return }
+        if (!busy) { const why = String(d.detail?.error || d.detail || d.error || `autosegment ${scan}: prompts not saved`); setStatusMessage(why); return why }
         deferred.push(scan)
       }
     }
@@ -1297,11 +1299,12 @@ function App() {
       body: JSON.stringify({ session_id: activeSession, replace: false, scans: autosegScans, autosegment }),
     })
     const dd = await rr.json().catch(() => ({}))
-    if (!rr.ok || !dd.ok) { setStatusMessage(dd.detail || dd.error || 'autosegment: command rejected'); return }
+    if (!rr.ok || !dd.ok) { const why = String(dd.detail || dd.error || 'autosegment: command rejected'); setStatusMessage(why); return why }
     setAutosegOpen(false)
     const note = deferred.length ? ` — ${deferred.join(', ')}: a job is active, the queued job writes the prompts when it runs` : ''
     setStatusMessage(tt('autosegment.started', { session: `${activeSession} (${autosegScans.length})` }) + note)
-  }, [activeSession, autosegScans])
+    return true
+  }, [activeSession, autosegScansTicked])
 
   const handlePipelineCancel = useCallback(() => {
     const targetSession = pipelineRunning?.session_id || activeSession
@@ -1993,6 +1996,20 @@ function App() {
     } catch (err: any) { report(t('bim.deleteFailed', { detail: err.message }), 'err') }
     return false
   }, [activeSession, token, confirmDanger, report, t, connectToServer])
+  /** merge whole objects of the segmentation into one */
+  const mergeSegments = useCallback(async (target: number, sources: number[]): Promise<boolean> => {
+    if (!activeSession) return false
+    try {
+      const r = await fetch('/api/segmentation/merge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, target_id: target, source_ids: sources }) })
+      const d = await r.json()
+      if (!r.ok) { report(t('brush.mergeFailed', { detail: d.detail || r.status }), 'err'); return false }
+      const tgt = segments.find(x => x.id === target)
+      report(t('brush.merged', { n: sources.length, target: tgt ? `${tgt.label} ${tgt.id}` : String(target) }), 'ok')
+      await reloadSegments(activeSession)
+      viewportRef.current?.refreshSegmentOBBs(activeSession)
+      return true
+    } catch (e) { report(t('brush.mergeFailed', { detail: String(e) }), 'err'); return false }
+  }, [activeSession, segments, reloadSegments, report, t])
   const renamePlaced = useCallback(async (id: number, name: string): Promise<boolean> => {
     if (!activeSession) return false
     try {
@@ -2037,6 +2054,8 @@ function App() {
     handlePipelineCancel, pipelineRunning, eraseBoxSel, readouts,
     bimModels, sabanaVisible, sabanaLoading, handleGenerateComparison, runComparison, handleToggleSabana,
     deleteSession, deleteSegment, deleteTsdfMesh, runGenrecon, applyFloorLevel,
+    mergeSegments, eraseMarks, hasConfidence, unsegmentedVisible, handlePickVideo, handleSegment, openSegmentationManager,
+    resumeDialog, resumeBusy, resumeRun, resumeCancel, runAutosegment, interactiveSessionId,
   })
   cmd.current = {
     connected, connectToServer, disconnect, sessions, activeSession, handleSessionLoad, handleUnload,
@@ -2048,6 +2067,8 @@ function App() {
     handlePipelineCancel, pipelineRunning, eraseBoxSel, readouts,
     bimModels, sabanaVisible, sabanaLoading, handleGenerateComparison, runComparison, handleToggleSabana,
     deleteSession, deleteSegment, deleteTsdfMesh, runGenrecon, applyFloorLevel,
+    mergeSegments, eraseMarks, hasConfidence, unsegmentedVisible, handlePickVideo, handleSegment, openSegmentationManager,
+    resumeDialog, resumeBusy, resumeRun, resumeCancel, runAutosegment, interactiveSessionId,
   }
   /** what the interface says of itself with every question to STAC (the model needs the
    *  sessions' names to open one) */
@@ -2062,7 +2083,8 @@ function App() {
   }, [])
   useEffect(() => {
     type AppCommandId = Exclude<UiCommandId, PanelCommandId | ViewportCommandId | FlythroughCommandId | CalibrationCommandId | BimCommandId
-      | CertifyCommandId | EvaluationCommandId | ReportCommandId | TeamCommandId | CallCommandId | AdminCommandId | ReferenceCommandId>
+      | CertifyCommandId | EvaluationCommandId | ReportCommandId | TeamCommandId | CallCommandId | AdminCommandId | ReferenceCommandId
+      | ManagerCommandId | FuseCommandId>
     const done: Outcome = { ok: true }
     const noSession: Outcome = { ok: false, reason: 'no_session' }
     const open = () => cmd.current.activeSession
@@ -2140,6 +2162,51 @@ function App() {
       },
     })
     const isOutcome = (x: unknown): x is Outcome => typeof x === 'object' && x !== null && 'ok' in x && typeof (x as { ok: unknown }).ok === 'boolean'
+    const visibleIds = () => cmd.current.segments.filter(x => x.visible).map(x => x.id)
+    /** the scans of a session (read from the server: a session that is not open has none here) */
+    const scansOf = async (sid: string): Promise<any[]> => {
+      try { const r = await fetch(`/sessions/${sid}/scans`); return r.ok ? ((await r.json()).scans || []).filter((sc: any) => sc.kind !== 'fused') : [] } catch { return [] }
+    }
+    /** scan keys by how the user called them; every scan when none is named */
+    const keysOf = (all: any[], named: string[] | undefined): string[] | Outcome => {
+      if (!all.length) return { ok: false, reason: 'nothing_to_do' }
+      if (!named || !named.length) return all.map(sc => String(sc.key))
+      const keys: string[] = []
+      for (const n of named) {
+        const found = findByName(all, n, scanNames)
+        if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.map((sc: any) => `${sc.date} ${sc.label}`).join(', ') }
+        if (!found.item) return { ok: false, reason: 'not_found', detail: n }
+        if (!keys.includes(String(found.item.key))) keys.push(String(found.item.key))
+      }
+      return keys
+    }
+    /** what a reconstruction order is, resolved: the session, the scans, replace, what is segmented after */
+    const reconstruction = async (a: { session?: string; scans?: string[]; replace: boolean; segment?: string[] }) => {
+      if (!(await ensureConnected())) return { ok: false, reason: 'server_down' } as Outcome
+      const sn = a.session ? sessionBy(a.session) : (open() ? { id: open()!, name: open()! } : noSession)
+      if (isOutcome(sn)) return sn
+      const all = await scansOf(sn.id)
+      const scans = keysOf(all, a.scans)
+      if (isOutcome(scans)) return scans
+      const segment = a.segment && a.segment.length ? keysOf(all, a.segment) : []
+      if (isOutcome(segment)) return segment
+      return { sid: sn.id, scans, segment: segment.filter(k => scans.includes(k)),
+               detail: `${sn.name}: ${scans.join(', ')}${segment.length ? ` (+ ${segment.join(', ')})` : ''}` }
+    }
+    const autosegStages = (st: Record<string, unknown> | undefined) => ({
+      vlm: typeof st?.vlm === 'boolean' ? st.vlm : true, sam3: typeof st?.sam3 === 'boolean' ? st.sam3 : true,
+      certify: st?.certify === true, captions: st?.captions === true, genrecon: false,
+    })
+    /** the scans an autosegment order runs on: the named ones, else the open scan */
+    const autosegScansOf = (named: string[] | undefined): string[] | Outcome => {
+      if (!open()) return noSession
+      if (!named || !named.length) return cmd.current.activeScanTab ? [cmd.current.activeScanTab] : { ok: false, reason: 'nothing_to_do' }
+      return keysOf((cmd.current.projectScans as any[]).filter(sc => sc.kind !== 'fused'), named)
+    }
+    const interrupted = (): Outcome => {
+      const r = cmd.current.resumeDialog
+      return !r ? { ok: false, reason: 'nothing_to_do' } : cmd.current.resumeBusy ? { ok: false, reason: 'unavailable' } : { ok: true, detail: `${r.session} (${r.incomplete.length})` }
+    }
     const TOOL: Record<string, Tool> = {
       navigate: 'navigate', measure_distance: 'measure-distance', measure_angle: 'measure-angle',
       section_box: 'section-box', brush: 'erase', align: 'align',
@@ -2489,6 +2556,94 @@ function App() {
         if (on !== cmd.current.sabanaVisible) cmd.current.handleToggleSabana()
         return { ok: true, state: on }
       },
+      // (the file itself is picked by hand: the browser's file window opens; the upload and the
+      // frame extraction start once a video is chosen)
+      'sessions.upload_video': onFound(
+        ({ session }: { session: string }) => (cmd.current.canManage ? sessionBy(session) : notAllowed),
+        sn => sn.name, sn => cmd.current.handlePickVideo(sn.id)),
+      'sessions.segment_auto': onFound(
+        ({ session }: { session?: string }) => {
+          const sid = open()
+          if (!sid) return noSession
+          if (!session) return { id: sid, name: sid }
+          const sn = sessionBy(session)
+          // (the button segments the LOADED session: another one has to be opened first)
+          return isOutcome(sn) ? sn : sn.id === sid ? sn : { ok: false as const, reason: 'unavailable' as const }
+        },
+        sn => sn.name, sn => cmd.current.handleSegment(sn.id)),
+      'pipeline.run': {
+        prepare: async a => { const r = await reconstruction(a); return isOutcome(r) ? r : { ok: true, detail: r.detail } },
+        run: async a => {
+          const r = await reconstruction(a)
+          if (isOutcome(r)) return r
+          try {
+            const res = await fetch('/api/pipeline/run', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                         body: JSON.stringify({ session_id: r.sid, replace: a.replace, scans: r.scans, segment: r.segment }) })
+            const d = await res.json().catch(() => ({}))
+            if (!res.ok || !d.ok) return { ok: false, reason: 'failed', detail: String(d.detail || d.error || `HTTP ${res.status}`) }
+            setPipelineRunning({ session_id: r.sid, status: 'queued', current_stage_idx: -1, stages: [], scans: r.scans })
+            setStatusMessage(tt('pipeline.started', { session: r.sid, n: r.scans.length }))
+            return { ok: true, detail: r.detail }
+          } catch (e) { return { ok: false, reason: 'failed', detail: e instanceof Error ? e.message : String(e) } }
+        },
+      },
+      'segmentation.open_manager': onFound(
+        ({ session }: { session?: string }) => {
+          const sid = open()
+          if (!sid) return noSession
+          if (cmd.current.interactiveSessionId) return { ok: false as const, reason: 'nothing_to_do' as const }
+          if (!session) return { id: sid, name: sid }
+          const sn = sessionBy(session)
+          return isOutcome(sn) ? sn : sn.id === sid ? sn : { ok: false as const, reason: 'unavailable' as const }
+        },
+        sn => sn.name, sn => cmd.current.openSegmentationManager(sn.id)),
+      'segmentation.resume_run': { prepare: interrupted, run: () => { const o = interrupted(); if (o.ok) void cmd.current.resumeRun(); return o } },
+      'segmentation.resume_cancel_delete': { prepare: interrupted, run: () => { const o = interrupted(); if (o.ok) void cmd.current.resumeCancel(); return o } },
+      'segmentation.run_autosegment': {
+        prepare: ({ scans }) => { const k = autosegScansOf(scans); return isOutcome(k) ? k : { ok: true, detail: `${open()}: ${k.join(', ')}` } },
+        run: async ({ scans, vlm_prompt, sam3_prompts, stages }) => {
+          const k = autosegScansOf(scans)
+          if (isOutcome(k)) return k
+          let prompt = vlm_prompt, list = sam3_prompts
+          if (prompt === undefined || list === undefined) {
+            // the prompts not given are the scan's saved ones
+            try {
+              const r = await fetch(`/api/autosegment/${open()}?scan=${encodeURIComponent(k[0])}`)
+              const d = await r.json()
+              if (!r.ok || !d.ok) return { ok: false, reason: 'failed', detail: String(d.detail || d.error || `HTTP ${r.status}`) }
+              prompt = prompt ?? String(d.vlm_prompt ?? ''); list = list ?? (Array.isArray(d.sam3_prompts) ? d.sam3_prompts.map(String) : [])
+            } catch (e) { return { ok: false, reason: 'failed', detail: e instanceof Error ? e.message : String(e) } }
+          }
+          const r = await cmd.current.runAutosegment(prompt ?? '', list ?? [], autosegStages(stages), k)
+          return r === true ? { ok: true, detail: `${open()}: ${k.join(', ')}` } : { ok: false, reason: 'failed', detail: r }
+        },
+      },
+      'brush.apply_confidence_filter': onFound(
+        (_a: { threshold: number }) => (!open() ? noSession : !cmd.current.hasConfidence ? { ok: false as const, reason: 'unavailable' as const } : { sid: open()! }),
+        x => x.sid, async (_x, a) => { await viewportRef.current?.applyConfidenceFilter(a.threshold, visibleIds(), cmd.current.unsegmentedVisible); setEraseConfThr(a.threshold); setEraseConfArmed(false) }),
+      'brush.erase_marked': onFound(
+        (_a: Record<string, never>) => (!open() ? noSession : cmd.current.eraseMarks > 0 ? { n: cmd.current.eraseMarks } : { ok: false as const, reason: 'nothing_to_do' as const }),
+        x => String(x.n), () => viewportRef.current?.commitErase(null, undefined, visibleIds())),
+      'brush.assign_marked': onFound(
+        ({ target, name }: { target: number | string; name?: string }) => {
+          if (!open()) return noSession
+          if (cmd.current.eraseMarks <= 0) return { ok: false as const, reason: 'nothing_to_do' as const }
+          if (String(target).toLowerCase() === 'new') return name && name.trim() ? { fresh: name.trim() } : { ok: false as const, reason: 'failed' as const, detail: 'name' }
+          const seg = segmentBy(target)
+          return isOutcome(seg) ? seg : { seg }
+        },
+        x => ('fresh' in x ? x.fresh! : `${x.seg.label} (${x.seg.id})`),
+        async x => { await viewportRef.current?.commitErase('fresh' in x ? null : x.seg.id, 'fresh' in x ? x.fresh : undefined, visibleIds(), cmd.current.unsegmentedVisible); setEraseTarget('') }),
+      'brush.merge_segments': onFound(
+        ({ target, sources }: { target: number | string; sources: number[] }) => {
+          const seg = segmentBy(target)
+          if (isOutcome(seg)) return seg
+          const ids = [...new Set(sources)].filter(id => id !== seg.id)
+          const gone = ids.filter(id => !cmd.current.segments.some(x => x.id === id))
+          if (gone.length) return { ok: false as const, reason: 'not_found' as const, detail: gone.join(', ') }
+          return ids.length ? { seg, ids } : { ok: false as const, reason: 'nothing_to_do' as const }
+        },
+        x => `${x.ids.join(', ')} → ${x.seg.label} (${x.seg.id})`, x => cmd.current.mergeSegments(x.seg.id, x.ids)),
       'sessions.filter': ({ text }) => { cmd.current.layout.setLeftTab('sessions'); setSessionFilter(text); return done },
       'scans.set_reference': async ({ scan }) => {
         const sid = open()
@@ -2593,6 +2748,9 @@ function App() {
       certify: withSession(() => { setShowCertifyKit(true); cmd.current.layout.openInspector('acta') }),
       evaluation: () => cmd.current.layout.openDock('evaluation'),
       team: () => cmd.current.layout.setLeftTab('team'),
+      // (the Fuse window of the open session; the Segmentation manager is opened by its own
+      // command, on a confirmation: it loads SAM3 on the card)
+      scans: withSession(() => cmd.current.openFuse(open()!)),
       references: withSession(() => setReferenceDialog(prev => prev ?? 'distance')),
       admin: () => { if (!cmd.current.isAdmin) return false; setAdminOpen(true) },
       reports: () => { if (!comparable().ok) return false; cmd.current.layout.openDock('report') },
@@ -2989,18 +3147,7 @@ function App() {
                   setEraseTarget('')
                 },
                 onClearMarks: () => viewportRef.current?.clearEraseMarks(), onUndo: undoBrush,
-                onMerge: async (target, sources) => {
-                  if (!activeSession) return
-                  try {
-                    const r = await fetch('/api/segmentation/merge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, target_id: target, source_ids: sources }) })
-                    const d = await r.json()
-                    if (!r.ok) { report(t('brush.mergeFailed', { detail: d.detail || r.status }), 'err'); return }
-                    const tgt = segments.find(s => s.id === target)
-                    report(t('brush.merged', { n: sources.length, target: tgt ? `${tgt.label} ${tgt.id}` : String(target) }), 'ok')
-                    await reloadSegments(activeSession)
-                    viewportRef.current?.refreshSegmentOBBs(activeSession)
-                  } catch (e) { report(t('brush.mergeFailed', { detail: String(e) }), 'err') }
-                },
+                onMerge: async (target, sources) => { await mergeSegments(target, sources) },
               }}
               display={{ pointSize, onPointSize: setPointSize, light: lightIntensity, onLight: setLightIntensity, pointOpacity, onPointOpacity: setPointOpacity, budgetM: pointBudget / 1_000_000, onBudgetM: v => setPointBudget(v * 1_000_000), hasConfidence, confidence: confidenceThreshold, onConfidence: setConfidenceThreshold }}
               view={{ hasCameraPoses, showCameraPoses, onToggleCameraPoses: () => setShowCameraPoses(v => !v), showGrid, onToggleGrid: () => setShowGrid(v => !v), showAxes, onToggleAxes: () => setShowAxes(v => !v), onFullscreen: toggleFullscreen }}
@@ -3171,9 +3318,9 @@ function App() {
 
       <AutosegmentDialog open={autosegOpen} sessionId={activeSession} state={autosegState} loading={autosegLoading}
         scans={projectScans.filter((sc: any) => sc.kind !== 'fused').map((sc: any) => ({ key: sc.key, label: `${sc.date} ${sc.label}` }))}
-        selectedScans={autosegScans}
+        selectedScans={autosegScansTicked}
         onToggleScan={(key, on) => setAutosegScans(prev => (on ? [...prev.filter(k => k !== key), key] : prev.filter(k => k !== key)))}
-        onClose={() => setAutosegOpen(false)} onRun={runAutosegment} />
+        onClose={() => setAutosegOpen(false)} onRun={async (vlm, sam3, stages) => { await runAutosegment(vlm, sam3, stages) }} />
 
       <GenreconDialog open={genreconOpen} sessionId={activeSession} scanLabel={activeScanTab} defaultConfidence={confidenceThreshold}
         onClose={() => setGenreconOpen(false)} onRun={async c => { await runGenrecon(c) }} />

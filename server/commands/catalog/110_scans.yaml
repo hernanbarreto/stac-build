@@ -206,7 +206,6 @@ commands:
 - id: scans.fuse
   kind: action
   runs_on: ui
-  status: manual
   model: 'LAUNCH the registration and merge from the Fuse window: each chosen scan is registered on the reference
     one through the objects that carry the same label in both, and the merged cloud is built as a new entry of the
     list. Several minutes of server work.'
@@ -233,15 +232,21 @@ commands:
       - registrá y construí la nube fusionada
       - corré el registro de las tomas elegidas
       - lanzala desde su ventana
+      done: 'Fusión lanzada: {detail}.'
+      ask: 'Voy a lanzar la fusión: {detail}. Varios minutos de trabajo del servidor.'
     en:
       title: Run the fusion
       say:
       - register and build the fused cloud
       - run the registration of the chosen captures
       - launch it from its window
+      done: 'Fusion launched: {detail}.'
+      ask: 'I am going to launch the fusion: {detail}. Several minutes of server work.'
     fr:
       title: Lancer la fusion
       say:
       - recale et construis le nuage fusionné
       - lance le recalage des captures choisies
       - lance-la depuis sa fenêtre
+      done: 'Fusion lancée : {detail}.'
+      ask: 'Je vais lancer la fusion : {detail}. Plusieurs minutes de travail du serveur.'

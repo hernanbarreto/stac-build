@@ -2,7 +2,7 @@
 // The commands of the interface STAC can run: their ids and the type of each one's arguments.
 // A new command is declared in the catalogue; this file is then regenerated and the compiler
 // asks for its executor (ui/src/commands/registry.ts).
-export const CATALOG_SHA256 = '34a8c9d0fc3f6a420b849d7d454850e37fd717b77f9493cac5e619c3e48b013d'
+export const CATALOG_SHA256 = '605e0bab3229ea412344f55fac91c1c41e20b9b4cb4af124a3894c72ed259aaa'
 
 export const UI_COMMAND_IDS = [
   'talk.set_user_name',
@@ -73,12 +73,15 @@ export const UI_COMMAND_IDS = [
   'sessions.rename',
   'sessions.delete',
   'sessions.filter',
+  'sessions.upload_video',
+  'sessions.segment_auto',
   'scans.open',
   'scans.list',
   'scans.open_fuse',
   'scans.close_tab',
   'scans.cycle_tab',
   'scans.set_reference',
+  'scans.fuse',
   'calibration.measure_distance',
   'calibration.measure_plane',
   'calibration.open',
@@ -108,7 +111,32 @@ export const UI_COMMAND_IDS = [
   'physics.drop',
   'physics.clear',
   'segmentation.open_autosegment',
+  'segmentation.resume_run',
+  'segmentation.resume_cancel_delete',
+  'segmentation.open_manager',
+  'segmentation.close_manager',
+  'segmentation.manager_set_mode',
+  'segmentation.manager_go_to_frame',
+  'segmentation.manager_zoom',
+  'segmentation.manager_mark_frame_and_next',
+  'segmentation.manager_toggle_frame_selection',
+  'segmentation.manager_add_point',
+  'segmentation.manager_undo_point',
+  'segmentation.manager_clear_object',
+  'segmentation.manager_clear_all',
+  'segmentation.manager_text_prompt',
+  'segmentation.manager_auto',
+  'segmentation.manager_evaluate',
+  'segmentation.manager_add_object',
+  'segmentation.manager_set_label',
+  'segmentation.manager_propagate',
+  'segmentation.manager_select_instance',
+  'segmentation.manager_rename_instance',
+  'segmentation.manager_toggle_exclude',
+  'segmentation.manager_delete_instance',
+  'segmentation.run_autosegment',
   'pipeline.open',
+  'pipeline.run',
   'pipeline.cancel',
   'flythrough.open',
   'flythrough.play_pause',
@@ -120,9 +148,13 @@ export const UI_COMMAND_IDS = [
   'brush.set_size',
   'brush.set_rotation',
   'brush.preview_confidence',
+  'brush.apply_confidence_filter',
   'brush.cancel_confidence_preview',
   'brush.set_box_gizmo_mode',
   'brush.remove_box',
+  'brush.erase_marked',
+  'brush.assign_marked',
+  'brush.merge_segments',
   'brush.clear_marks',
   'brush.undo',
   'instances.rename',
@@ -208,12 +240,31 @@ export const UI_CONFIRM_IDS = [
   'meshes.delete',
   'meshes.run_genrecon',
   'sessions.delete',
+  'sessions.upload_video',
+  'sessions.segment_auto',
+  'scans.fuse',
   'calibration.delete_measurement',
   'calibration.delete_plane',
   'calibration.apply',
   'objects.remove_selected',
   'objects.remove',
+  'segmentation.resume_run',
+  'segmentation.resume_cancel_delete',
+  'segmentation.open_manager',
+  'segmentation.close_manager',
+  'segmentation.manager_clear_all',
+  'segmentation.manager_text_prompt',
+  'segmentation.manager_auto',
+  'segmentation.manager_evaluate',
+  'segmentation.manager_propagate',
+  'segmentation.manager_delete_instance',
+  'segmentation.run_autosegment',
+  'pipeline.run',
   'pipeline.cancel',
+  'brush.apply_confidence_filter',
+  'brush.erase_marked',
+  'brush.assign_marked',
+  'brush.merge_segments',
   'instances.delete',
   'instances.set_floor_level',
   'bim.delete_ifc',
@@ -245,10 +296,10 @@ export interface UiCommandArgs {
   'viewer.clear_measurements': Record<string, never>
   'viewer.remove_section_box': Record<string, never>
   'viewer.show_unsegmented': { on: boolean }
-  'viewer.orient_view': { dir: unknown[] }
+  'viewer.orient_view': { dir: number[] }
   'viewer.fly_to_camera_pose': { keyframe: number }
-  'viewer.fly_to_point': { position: unknown[]; radius?: number }
-  'viewer.frame_box': { min: unknown[]; max: unknown[] }
+  'viewer.fly_to_point': { position: number[]; radius?: number }
+  'viewer.frame_box': { min: number[]; max: number[] }
   'viewer.align_set_gizmo_mode': { mode: 'rotate' | 'translate' }
   'viewer.align_save': Record<string, never>
   'display.shadows': { on: boolean }
@@ -297,12 +348,15 @@ export interface UiCommandArgs {
   'sessions.rename': { session: string; name: string }
   'sessions.delete': { session: string }
   'sessions.filter': { text: string }
+  'sessions.upload_video': { session: string }
+  'sessions.segment_auto': { session?: string }
   'scans.open': { scan: string }
   'scans.list': Record<string, never>
   'scans.open_fuse': Record<string, never>
   'scans.close_tab': { scan?: string }
   'scans.cycle_tab': { direction: 'next' | 'prev' }
   'scans.set_reference': { scan: string }
+  'scans.fuse': { session?: string; scans: string[]; exclude?: Record<string, unknown> }
   'calibration.measure_distance': Record<string, never>
   'calibration.measure_plane': Record<string, never>
   'calibration.open': Record<string, never>
@@ -332,7 +386,32 @@ export interface UiCommandArgs {
   'physics.drop': Record<string, never>
   'physics.clear': Record<string, never>
   'segmentation.open_autosegment': Record<string, never>
+  'segmentation.resume_run': Record<string, never>
+  'segmentation.resume_cancel_delete': Record<string, never>
+  'segmentation.open_manager': { session?: string }
+  'segmentation.close_manager': Record<string, never>
+  'segmentation.manager_set_mode': { mode: 'manual' | 'text' | 'auto' }
+  'segmentation.manager_go_to_frame': { index: number }
+  'segmentation.manager_zoom': { direction: 'in' | 'out' | 'reset' }
+  'segmentation.manager_mark_frame_and_next': { include: boolean }
+  'segmentation.manager_toggle_frame_selection': { index: number; on: boolean }
+  'segmentation.manager_add_point': { x_px: number; y_px: number; positive: boolean }
+  'segmentation.manager_undo_point': Record<string, never>
+  'segmentation.manager_clear_object': Record<string, never>
+  'segmentation.manager_clear_all': Record<string, never>
+  'segmentation.manager_text_prompt': { text: string }
+  'segmentation.manager_auto': Record<string, never>
+  'segmentation.manager_evaluate': Record<string, never>
+  'segmentation.manager_add_object': Record<string, never>
+  'segmentation.manager_set_label': { label: string }
+  'segmentation.manager_propagate': { frames?: number[] }
+  'segmentation.manager_select_instance': { id: number | string }
+  'segmentation.manager_rename_instance': { id: number | string; label: string }
+  'segmentation.manager_toggle_exclude': { id: number | string; excluded: boolean }
+  'segmentation.manager_delete_instance': { id: number | string }
+  'segmentation.run_autosegment': { scans?: string[]; vlm_prompt?: string; sam3_prompts?: string[]; stages?: Record<string, unknown> }
   'pipeline.open': { session?: string }
+  'pipeline.run': { session?: string; scans?: string[]; replace: boolean; segment?: string[] }
   'pipeline.cancel': Record<string, never>
   'flythrough.open': Record<string, never>
   'flythrough.play_pause': { on?: boolean }
@@ -344,9 +423,13 @@ export interface UiCommandArgs {
   'brush.set_size': { radius_m: number }
   'brush.set_rotation': { yaw_deg: number }
   'brush.preview_confidence': { threshold: number }
+  'brush.apply_confidence_filter': { threshold: number }
   'brush.cancel_confidence_preview': Record<string, never>
   'brush.set_box_gizmo_mode': { mode: 'translate' | 'rotate' | 'scale' }
   'brush.remove_box': Record<string, never>
+  'brush.erase_marked': Record<string, never>
+  'brush.assign_marked': { target: number | string; name?: string }
+  'brush.merge_segments': { target: number | string; sources: number[] }
   'brush.clear_marks': Record<string, never>
   'brush.undo': Record<string, never>
   'instances.rename': { id: number | string; label: string }

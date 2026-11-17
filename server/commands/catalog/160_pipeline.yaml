@@ -46,7 +46,6 @@ commands:
 - id: pipeline.run
   kind: action
   runs_on: ui
-  status: manual
   model: 'LAUNCH the reconstruction of a session''s scans from the Reconstruct window: long GPU work (tens of minutes
     to hours). With replace on it DELETES the scans'' existing outputs and starts from zero; off, it resumes what
     is missing.'
@@ -76,18 +75,24 @@ commands:
       - ejecutá la reconstrucción
       - lanzá la reconstrucción reemplazando las salidas
       - reanudá la reconstrucción que quedó a medias
+      done: 'Reconstrucción lanzada: {detail}.'
+      ask: 'Voy a lanzar la reconstrucción de {detail}, con reemplazo: {replace}. Con reemplazo en true se BORRAN las salidas existentes de esos escaneos y se empieza de cero; en false se retoma lo que falta. Trabajo largo de GPU.'
     en:
       title: Run the reconstruction
       say:
       - run the reconstruction
       - launch the reconstruction replacing the outputs
       - resume the half-done reconstruction
+      done: 'Reconstruction launched: {detail}.'
+      ask: 'I am going to launch the reconstruction of {detail}, with replace: {replace}. With replace true the existing outputs of those scans are DELETED and it starts from zero; with false it resumes what is missing. Long GPU work.'
     fr:
       title: Lancer la reconstruction
       say:
       - lance la reconstruction
       - lance la reconstruction en remplaçant les sorties
       - reprends la reconstruction inachevée
+      done: 'Reconstruction lancée : {detail}.'
+      ask: 'Je vais lancer la reconstruction de {detail}, avec remplacement : {replace}. Avec true, les sorties existantes de ces scans sont SUPPRIMÉES et tout repart de zéro ; avec false, elle reprend ce qui manque. Long travail GPU.'
 - id: pipeline.cancel
   kind: action
   runs_on: ui

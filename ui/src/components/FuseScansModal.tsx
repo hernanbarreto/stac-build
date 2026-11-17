@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { findByName, registerCommands, type Executors, type FuseCommandId, type Outcome } from '../commands/registry'
 import { Layers } from 'lucide-react'
 import { Dialog } from './ui/Dialog'
 import { Button } from './ui/Button'
@@ -78,18 +79,70 @@ export default function FuseScansModal({ project, scans, onClose, onStatus, onFu
     return () => clearInterval(iv)
   }, [running, project])
 
+  // STAC's command of this window (scans.fuse, on a spoken confirmation): the scans named are
+  // registered on the reference with at least two object pairs each, as the button requires
+  const ucmd = useRef<{ running: boolean; run: (order: { keys: string[]; exclude: Record<string, string[]> }) => unknown }>({ running: false, run: () => undefined })
+  useEffect(() => {
+    const order = async (a: { session?: string; scans: string[]; exclude?: Record<string, unknown> }): Promise<{ keys: string[]; exclude: Record<string, string[]>; detail: string } | Outcome> => {
+      if (a.session && !findByName([{ id: project }], a.session, x => [x.id]).item) return { ok: false, reason: 'not_found', detail: a.session }
+      if (!reference || !candidates.length) return { ok: false, reason: 'nothing_to_do' }
+      if (ucmd.current.running) return { ok: false, reason: 'unavailable' }
+      const names = (sc: Scan) => [sc.key, sc.date, sc.label, `${sc.date} ${sc.label}`]
+      const chosen: Scan[] = []
+      for (const n of a.scans) {
+        const found = findByName(candidates, n, names)
+        if (found.ambiguous) return { ok: false, reason: 'ambiguous', detail: found.ambiguous.map(sc => `${sc.date} ${sc.label}`).join(', ') }
+        if (!found.item) return { ok: false, reason: 'not_found', detail: n }
+        if (!chosen.includes(found.item)) chosen.push(found.item)
+      }
+      if (!chosen.length) return { ok: false, reason: 'nothing_to_do' }
+      const exclude: Record<string, string[]> = {}
+      for (const sc of chosen) {
+        const given = Object.entries(a.exclude ?? {}).find(([k]) => findByName([sc], k, names).item)?.[1]
+        exclude[sc.key] = Array.isArray(given) ? given.map(String) : []
+      }
+      // the pairs the registration would use, as the window reads them
+      try {
+        const r = await fetch(`/api/project/${project}/fuse/pairs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scans: chosen.map(sc => sc.key) }) })
+        const d = await r.json()
+        for (const sc of chosen) {
+          const left = ((d.scans || {})[sc.key]?.pairs || []).filter((p: Pair) => !exclude[sc.key].includes(p.label)).length
+          if (left < 2) return { ok: false, reason: 'failed', detail: `${sc.date} ${sc.label}: ${left} / 2` }
+        }
+      } catch (e) { return { ok: false, reason: 'failed', detail: e instanceof Error ? e.message : String(e) } }
+      return { keys: chosen.map(sc => sc.key), exclude, detail: `${chosen.map(sc => `${sc.date} ${sc.label}`).join(', ')} → ${reference.date} ${reference.label}` }
+    }
+    const executors: Executors<FuseCommandId> = {
+      'scans.fuse': {
+        prepare: async a => { const o = await order(a); return 'ok' in o ? o : { ok: true, detail: o.detail } },
+        run: async a => {
+          const o = await order(a)
+          if ('ok' in o) return o
+          setSelected(new Set(o.keys))
+          void ucmd.current.run({ keys: o.keys, exclude: o.exclude })
+          return { ok: true, detail: o.detail }
+        },
+      },
+    }
+    return registerCommands(executors)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project, scans])
+
   const canRun = reference && selected.size > 0 && !loadingPairs && !running &&
     Array.from(selected).every(k => (pairs[k]?.pairs || []).filter(p => p.include).length >= 2)
 
-  const run = async () => {
+  ucmd.current.running = running
+  const run = async (order?: unknown) => {
+    // (a click passes its event; STAC's order carries its own scans and exclusions)
+    const asked = order && typeof order === 'object' && 'keys' in order ? order as { keys: string[]; exclude: Record<string, string[]> } : null
     setRunning(true); setError(null); setReport(null); setProgress({ pct: 0, detail: t('fuse.starting') })
     onStatus(t('fuse.statusRunning'))
     try {
-      const exclude: Record<string, string[]> = {}
-      for (const k of selected) exclude[k] = (pairs[k]?.pairs || []).filter(p => !p.include).map(p => p.label)
+      const exclude: Record<string, string[]> = asked ? asked.exclude : {}
+      if (!asked) for (const k of selected) exclude[k] = (pairs[k]?.pairs || []).filter(p => !p.include).map(p => p.label)
       const r = await fetch(`/api/project/${project}/fuse/run`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scans: Array.from(selected), exclude }),
+        body: JSON.stringify({ scans: asked ? asked.keys : Array.from(selected), exclude }),
       })
       const d = await r.json().catch(() => ({}))
       if (!r.ok) throw new Error(d.detail || t('fuse.failed'))
@@ -102,6 +155,7 @@ export default function FuseScansModal({ project, scans, onClose, onStatus, onFu
     }
     setRunning(false)
   }
+  ucmd.current.run = run
 
   return (
     <Dialog open title={t('fuse.title')} icon={<Layers aria-hidden />} size="lg" onClose={onClose} busy={running}

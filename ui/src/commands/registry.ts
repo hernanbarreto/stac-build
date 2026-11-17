@@ -68,6 +68,15 @@ export type ReferenceCommandId = 'references.set_mode' | 'references.go_to_keyfr
   | 'references.arm_add_observation' | 'references.edit_distance' | 'references.edit_plane' | 'references.remove_observation'
   | 'references.remove_polygon' | 'references.delete_item' | 'references.save' | 'references.close'
 
+/** … the Segmentation manager, while it is open, and the Fuse window */
+export type ManagerCommandId = 'segmentation.close_manager' | 'segmentation.manager_set_mode' | 'segmentation.manager_go_to_frame'
+  | 'segmentation.manager_zoom' | 'segmentation.manager_mark_frame_and_next' | 'segmentation.manager_toggle_frame_selection'
+  | 'segmentation.manager_add_point' | 'segmentation.manager_undo_point' | 'segmentation.manager_clear_object' | 'segmentation.manager_clear_all'
+  | 'segmentation.manager_text_prompt' | 'segmentation.manager_auto' | 'segmentation.manager_evaluate' | 'segmentation.manager_add_object'
+  | 'segmentation.manager_set_label' | 'segmentation.manager_propagate' | 'segmentation.manager_select_instance'
+  | 'segmentation.manager_rename_instance' | 'segmentation.manager_toggle_exclude' | 'segmentation.manager_delete_instance'
+export type FuseCommandId = 'scans.fuse'
+
 /** one command of an answer, as the server sends it */
 export interface UiAction {
   id: string
