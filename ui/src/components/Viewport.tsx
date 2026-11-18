@@ -116,7 +116,9 @@ interface ViewportProps {
      *  has one: a listener that returns true TOOK the click (a ticket being placed) and no segment is selected */
     onPointPicked?: (p: { x: number; y: number; z: number }, classId: number | null) => boolean | void
     /** the tickets marked on the scan on screen: a numbered pin on each one's point */
-    tickets?: Array<{ id: string; position: number[]; number: number; tone: 'review' | 'issue' | 'resolved' | 'stale'; title: string; selected?: boolean }>
+    tickets?: Array<{ id: string; position: number[]; number: number; tone: 'review' | 'issue' | 'resolved' | 'stale' | 'common'; title: string; selected?: boolean
+                      /** shown instead of the number (a common point's name) */
+                      label?: string }>
 }
 
 /** a cube of the session's cut (reconstruction/cubes.py), as the Instances list shows it */
@@ -1137,7 +1139,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     useEffect(() => {
         ticketsRef.current = (tickets ?? []).filter(tk => tk.position.length === 3).map(tk => ({
             id: `ticket-${tk.id}`, pos: new THREE.Vector3(tk.position[0], tk.position[1], tk.position[2]),
-            ticket: { number: tk.number, tone: tk.tone, title: tk.title, selected: tk.selected } }))
+            ticket: { number: tk.number, tone: tk.tone, title: tk.title, selected: tk.selected, label: tk.label } }))
         ticketsDirtyRef.current = true                             // (a changed list is drawn at the next frame)
     }, [tickets])
     /** the selected segment's key (its OBB lit, its H / W / D dimensions drawn) — survives an OBB rebuild */

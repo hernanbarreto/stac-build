@@ -344,6 +344,8 @@
 .stac-hud__ticket--issue { --ticket-color: var(--err-fg); }
 .stac-hud__ticket--resolved { --ticket-color: var(--ok-fg); opacity: 0.6; }
 .stac-hud__ticket--stale { --ticket-color: var(--text-3); border-style: dashed; }
+/* a point marked as the same on two scans of the project (the common points window) */
+.stac-hud__ticket--common { --ticket-color: var(--measure); }
 .stac-hud__ticket:hover,
 .stac-hud__ticket:focus-visible,
 .stac-hud__ticket.is-selected { opacity: 1; outline: var(--bw-selected) solid color-mix(in srgb, var(--ticket-color) 45%, transparent); }

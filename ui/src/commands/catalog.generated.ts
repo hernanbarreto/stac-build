@@ -2,7 +2,7 @@
 // The commands of the interface STAC can run: their ids and the type of each one's arguments.
 // A new command is declared in the catalogue; this file is then regenerated and the compiler
 // asks for its executor (ui/src/commands/registry.ts).
-export const CATALOG_SHA256 = '2a3922c71644477dcea6f7d9a9823063984ed03e07a661cf4cb341cfc5f4a3d6'
+export const CATALOG_SHA256 = '48a463a389917ae326744517c2ce065764044fcf3adc7f86f175463753bf9e1b'
 
 export const UI_COMMAND_IDS = [
   'talk.set_user_name',
@@ -84,6 +84,9 @@ export const UI_COMMAND_IDS = [
   'scans.cycle_tab',
   'scans.set_reference',
   'scans.fuse',
+  'scans.common_points_open',
+  'scans.common_point_mark',
+  'scans.common_points_factor',
   'calibration.measure_distance',
   'calibration.measure_plane',
   'calibration.open',
@@ -371,6 +374,9 @@ export interface UiCommandArgs {
   'scans.cycle_tab': { direction: 'next' | 'prev' }
   'scans.set_reference': { scan: string }
   'scans.fuse': { session?: string; scans: string[]; exclude?: Record<string, unknown> }
+  'scans.common_points_open': Record<string, never>
+  'scans.common_point_mark': { name?: string }
+  'scans.common_points_factor': Record<string, never>
   'calibration.measure_distance': Record<string, never>
   'calibration.measure_plane': Record<string, never>
   'calibration.open': Record<string, never>

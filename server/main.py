@@ -5060,6 +5060,12 @@ def _export_busy(session_id: str) -> Optional[str]:
 exporter_api.configure(busy=_export_busy, audit_log=_audit_log)
 app.include_router(exporter_api.router)
 
+# COMMON POINTS (USER 2026-11-17: "deberían marcarse dos puntos y decir estos son los mismos en ambas …
+# para que se puedan posar uno sobre otro y comparar") — fusion/common_points.py / common_points_api.py
+import common_points_api
+common_points_api.configure(resolve_ctx=_ctx, audit_log=_audit_log)
+app.include_router(common_points_api.router)
+
 # TICKETS (USER 2026-11-09: "una herramienta simple para marcar tickets … como un punto de revisión o una
 # no conformidad: es para mostrar el concepto nomás") — tickets.py / tickets_api.py
 import tickets_api

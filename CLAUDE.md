@@ -524,11 +524,30 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   NOT ADAPTED, declared: the coverage engine (the ray casting towards the cameras; OFF by config since before —
   a tree of the whole cloud per element); ONE SHEET PER PROJECT (the last compared scan's, shown over
   whichever scan is open — sabana_meta.json now names its scan). NOT TRIED IN A BROWSER.
+- ⭐ COMMON POINTS — THE FIRST STEP OF COMPARING TWO SCANS (2026-11-18; his words of 2026-11-17: "para comparar
+  dos o más épocas hay que emparejar sus escalas … deberían marcarse dos puntos y decir estos son los mismos en
+  ambas … y que se ajusten a uno de ellos, o a una medida externa … para que se puedan posar uno sobre otro y
+  comparar"): `server/fusion/common_points.py` + `common_points_api.py`, the Common points window (Tools menu;
+  `CommonPointsDialog`), 3 commands by voice (`scans.common_points_open` / `common_point_mark` /
+  `common_points_factor`; the catalogue: 284 commands). A point is marked by ONE CLICK on the model on each scan
+  (open one, mark; open the other, mark the same point): `<project>/common_points.json`, each mark with its
+  scan's geometry epoch (a mark of an earlier geometry is listed and not used). From the points marked on both
+  (≥ 2) the server gives THE SIMILARITY THAT BRINGS THE SCAN ON SCREEN ONTO THE OTHER — the scans' display frames
+  are levelled, so: a scale, a turn about the vertical, a shift (least squares, closed form) — with each point's
+  residual; 2 points fix the plan exactly (their residual is the height the scans disagree by), 3 or more say
+  how well they agree; a scale GIVEN ("o a una medida externa") leaves the points the turn and the shift.
+  ⚠ REPORTED, NOT APPLIED: nothing of a scan or of the project's composition is changed — WHERE THE FACTOR GOES
+  (the composition's transform, the lengths shown, the scan's geometry; one scan to the other or both to the
+  middle as fuse_scans does) IS STILL HIS DECISION (§7 B-5). This gives him the number to decide with: mark 2–3
+  points on pccr 2408 and 3108 and the window shows the factor between them. Tested: 7 tests (the similarity
+  recovered to 1e-12, the degenerate cases, the routes) and the routes read-only through the live backend on
+  pccr. NOT TRIED IN A BROWSER. NOT BUILT: laying one scan on the other with it, and the comparison itself
+  (cloud to cloud) — they follow his decision.
 - ⭐ TICKETS (2026-11-18, the item of his 2026-11-09 list: "TICKETS — una herramienta simple para marcar tickets
   en cualquier parte del proyecto, como un punto de revisión o una no conformidad: es para mostrar el concepto
   nomás"): `server/tickets.py` + `tickets_api.py`, the Tickets window (Tools menu → Tickets; `TicketsDialog`),
   numbered pins on the model, and 7 commands by voice (`tickets.*`: open, create, list, focus, resolve, reopen,
-  delete — the last on a spoken confirmation; the catalogue: 281 commands in 33 areas). A ticket is marked in
+  delete — the last on a spoken confirmation; the catalogue then: 281 commands in 33 areas). A ticket is marked in
   TWO steps: its kind (review / non-conformity) and its title in the window (or said: "STAC, marcá una no
   conformidad: falta la tapa"), then ONE CLICK on the model — the point is the user's, never guessed. It keeps
   the point (the scan's display frame), the scan, the object the point lies on (instance id and label), who
@@ -614,7 +633,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   4 · FUSION: merge + compare pccr 3108 with 2408; the scales paired by MARKED COMMON POINTS (his: "deberian
      marcarse dos puntos y decir estos son los mismos en ambas … que se ajusten a uno de ellos, o a una medida
      externa"): with levelled scans two points fix scale, yaw and position; three or more give a residual.
-     Not started.
+     FIRST STEP BUILT 2026-11-18 (§5 "COMMON POINTS"): the points and the similarity they give, reported.
+     NEXT, on his decision of where the factor goes: lay one scan on the other with it, then compare.
   5 · TICKETS: BUILT 2026-11-18 (§5 "TICKETS"), his eye pending. Then DA3 → MapAnything: not started.
   6 · WAITING FOR HIS WORD: whether the recogniser should ALWAYS listen in the settings' language (today it
      detects among es / en / fr and the settings decide only a silence); the IFC's own values if his eye asks.
@@ -632,8 +652,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   2026-11-18 — none folded into another. The block above holds the detail of what this session added.
   A · FOR DECEMBER, in his order
     1a. FUSION, MERGE (scans of different days as one cloud and mesh) ............ NOT STARTED
-    1b. FUSION, COMPARE (pccr 2408 with 3108 on their common zones) ............... NOT STARTED — his way to pair
-        the scales: mark the same points on both and fit one to the other, or to an outside measure
+    1b. FUSION, COMPARE (pccr 2408 with 3108 on their common zones) ............... FIRST STEP BUILT 2026-11-18:
+        the common points (§5) — marked on both scans, the factor / turn / shift they give REPORTED with
+        residuals. Laying one scan on the other with it and the comparison itself follow his decision (5.)
     2.  BIM COMPARISON (an IFC in place of the second scan) ........................ RUNS on a scan of today
         (2026-11-18, §5): pccr 3108 against its own IFC — 280 elements, mean 22.2 mm, 94.7 % within 50 mm;
         HIS EYE on the sheet and the analysis panel: PENDING; what is compared and how: his ("luego vemos")
@@ -641,7 +662,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
         "TICKETS"): the window, the pins on the model, the voice commands — HIS EYE in the browser: PENDING
     4.  DA3 → MapAnything as the metric source, for the licence .................... NOT STARTED ("luego, ahora no")
   B · WAITING FOR HIS DECISION
-    5.  The scales of pccr 2408 / 3108: where the factor is applied ................ OPEN (goes with 1b)
+    5.  The scales of pccr 2408 / 3108: where the factor is applied ................ OPEN (goes with 1b) — the
+        Common points window now gives the factor from points he marks on both: his to mark, his to decide
     6.  A spoken confirmation for what launches GPU work or deletes data ........... DONE 2026-11-17
     7.  The 138 `manual` commands of the interface .................................. DONE 2026-11-17 (272 commands)
     8.  THE DATABASE AS THE SINGLE SOURCE OF THE SEGMENTATION, the Segmentation
@@ -711,6 +733,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
         d. `runs/` (5.5 GB), the logs and /workspace/tmp (6.3 GB) are not carried by the kit;
         e. whether the older setup scripts (scripts/setup_vendors.sh, setup_pod_envs.sh, setup_weights.sh,
            export_envs.sh, scripts/setup.sh, docs/migration/) are deleted — they name removed envs and old pins.
+    45. COMMON POINTS (§5) — BUILT 2026-11-18, reported only; HIS: mark points on pccr 2408 / 3108, read the
+        factor, decide where it is applied (item 5); his eye on the window and its pins.
     44. TICKETS (§5) — BUILT 2026-11-18; HIS EYE: the window, placing one with a click, the pins, the commands.
     43. THE BIM COMPARISON (§5), what is owed after 2026-11-18: his eye on pccr 3108's sheet; the candidates'
         search on the card too (scipy's tree on the CPU is now most of the 95 s); the coverage engine at

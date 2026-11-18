@@ -26,8 +26,9 @@ import AdminPage from './pages/AdminPage'
 import SegmentationManager from './components/InteractiveSegmentation'
 import { useConfirmDialog } from './components/ConfirmDialog'
 import { TicketsDialog, ticketTone, type Ticket, type TicketCounts, type TicketDraft } from './features/TicketsDialog'
+import { CommonPointsDialog, type CommonFit, type CommonPoint } from './features/CommonPointsDialog'
 import AssistantPanel from './components/AssistantPanel'
-import { Flag, PackageOpen,
+import { Flag, Waypoints, PackageOpen,
   Search, Tag, Plug, Settings, Crosshair, Maximize, Monitor, Grid3X3, RotateCcw, Ruler, TriangleRight, Scissors,
   Move, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D, Building2, Package, ArrowUpFromLine, Trash2, Unlock,
   Clock, Scale, BarChart3, Home, Camera, SlidersHorizontal, Sparkles, Undo2, Brush, Layers, Star, Terminal,
@@ -1932,6 +1933,90 @@ function App() {
     .map(x => ({ id: x.id, position: x.position, number: x.number, tone: ticketTone(x), title: x.title, selected: x.id === selectedTicket })),
   [tickets, activeScanTab, selectedTicket])
 
+  // ── COMMON POINTS (USER 2026-11-17: "deberían marcarse dos puntos y decir estos son los mismos en ambas …
+  // para que se puedan posar uno sobre otro y comparar") ──
+  // The same physical point marked on two scans of the project (a click on each), and the factor, turn
+  // and shift the points marked on both give — REPORTED by the server, nothing applied.
+  const [commonOpen, setCommonOpen] = useState(false)
+  const [commonPoints, setCommonPoints] = useState<CommonPoint[]>([])
+  const [commonPlacing, setCommonPlacing] = useState<string | null>(null)
+  const commonPlacingRef = useRef<string | null>(null)
+  useEffect(() => { commonPlacingRef.current = commonPlacing }, [commonPlacing])
+  const [commonOther, setCommonOther] = useState<string | null>(null)
+  const [commonScale, setCommonScale] = useState<number | ''>('')
+  const [commonFit, setCommonFit] = useState<CommonFit | null>(null)
+  const [commonNote, setCommonNote] = useState<string | null>(null)
+  const [commonError, setCommonError] = useState<string | null>(null)
+  const commonBase = activeSession ? `/api/project/${encodeURIComponent(activeSession)}/common_points` : null
+  const otherScans = useMemo(() => projectScans.filter((sc: any) => sc.key !== activeScanTab && sc.kind !== 'fused')
+    .map((sc: any) => ({ key: sc.key as string, label: `${sc.date} ${sc.label ?? ''}`.trim() })), [projectScans, activeScanTab])
+
+  const commonRequest = useCallback(async (method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown) => {
+    if (!commonBase) throw new Error('no session')
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (token) headers['Authorization'] = `Bearer ${token}`
+    const r = await fetch(`${commonBase}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+    const d = await r.json().catch(() => ({}))
+    if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : `HTTP ${r.status}`)
+    return d
+  }, [commonBase, token])
+
+  // (read when the window opens and when the session changes: the points are the project's)
+  useEffect(() => {
+    setCommonPlacing(null); setCommonFit(null); setCommonNote(null)
+    if (!commonOpen || !commonBase) { if (!commonBase) setCommonPoints([]); return }
+    commonRequest('GET', '').then(d => { setCommonPoints(d.points); setCommonError(null) })
+      .catch((e: any) => setCommonError(String(e?.message ?? e)))
+  }, [commonOpen, commonBase])  // eslint-disable-line react-hooks/exhaustive-deps
+  // the other scan: the first of the project that is not the one on screen, until the user picks one
+  useEffect(() => {
+    if (!otherScans.some(o => o.key === commonOther)) setCommonOther(otherScans[0]?.key ?? null)
+  }, [otherScans, commonOther])
+  // what the points give between the scan on screen and the other one, asked again whenever they change
+  useEffect(() => {
+    if (!commonOpen || !commonBase || !activeScanTab || !commonOther) { setCommonFit(null); return }
+    let stale = false
+    const q = new URLSearchParams({ scan: activeScanTab, reference: commonOther })
+    if (commonScale !== '' && commonScale > 0) q.set('scale', String(commonScale))
+    commonRequest('GET', `/solve?${q}`).then(d => { if (!stale) { setCommonFit(d); setCommonNote(null) } })
+      .catch((e: any) => { if (!stale) { setCommonFit(null); setCommonNote(String(e?.message ?? e)) } })
+    return () => { stale = true }
+  }, [commonOpen, commonBase, activeScanTab, commonOther, commonScale, commonPoints])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  const startCommonMark = useCallback(async (pointId: string | null) => {
+    if (!activeScanTab) return String(t('commonPoints.needsTwoScans'))
+    try {
+      let id = pointId
+      if (!id) { const d = await commonRequest('POST', '', {}); setCommonPoints(d.points); id = d.point as string }
+      setCommonOpen(true); setCommonPlacing(id); setActiveTool('navigate')
+      return true as const
+    } catch (e: any) { report(t('commonPoints.failed', { detail: e?.message ?? e }), 'err'); return String(e?.message ?? e) }
+  }, [activeScanTab, commonRequest, report, t])
+
+  // the click on the model that a common point being marked was waiting for
+  const placeCommonPoint = useCallback(async (p: { x: number; y: number; z: number }) => {
+    const id = commonPlacingRef.current
+    if (!id || !activeScanTab) return
+    setCommonPlacing(null)
+    try {
+      const d = await commonRequest('PUT', `/${id}/marks`, { scan: activeScanTab, position: [p.x, p.y, p.z] })
+      setCommonPoints(d.points)
+      report(t('commonPoints.marked_done', { name: (d.points as CommonPoint[]).find(x => x.id === id)?.name ?? '' }), 'ok')
+    } catch (e: any) { report(t('commonPoints.failed', { detail: e?.message ?? e }), 'err') }
+  }, [activeScanTab, commonRequest, report, t])
+
+  const commonChange = useCallback(async (method: 'DELETE', path: string) => {
+    try { const d = await commonRequest(method, path); setCommonPoints(d.points) }
+    catch (e: any) { report(t('commonPoints.failed', { detail: e?.message ?? e }), 'err') }
+  }, [commonRequest, report, t])
+
+  // their pins: the points marked on the scan on screen (shown while their window is open)
+  const commonPins = useMemo(() => (!commonOpen || !activeScanTab ? [] : commonPoints
+    .filter(x => x.marks[activeScanTab])
+    .map(x => ({ id: `cp:${x.id}`, position: x.marks[activeScanTab].position, number: 0, label: x.name,
+                 tone: (x.marks[activeScanTab].stale ? 'stale' : 'common') as 'stale' | 'common', title: x.name, selected: x.id === commonPlacing }))),
+  [commonOpen, commonPoints, activeScanTab, commonPlacing])
+
   // THE SESSION AS ONE ZIP (USER 2026-11-18: "una función en cada sesión para descargarla como zip").
   // A browser download: the browser writes the ZIP to the disk as it arrives — a 100 GB session never
   // sits in the page's memory. A link cannot carry the login, so the server gives a link for it; the
@@ -2259,6 +2344,7 @@ function App() {
     segments, canManage, renameSession, createSession, setReference, renameSegment, renamePlaced, addLibraryItem,
     downloadSessionZip, pickSessionZip,
     tickets, ticketCounts, startTicket, setTicketStatus, deleteTicket, focusTicket, signedIn: !!user,
+    commonPoints, commonFit, startCommonMark, otherScans,
     handlePipelineCancel, pipelineRunning, eraseBoxSel, readouts,
     bimModels, sabanaVisible, sabanaLoading, handleGenerateComparison, runComparison, handleToggleSabana,
     deleteSession, deleteSegment, deleteTsdfMesh, runGenrecon, applyFloorLevel,
@@ -2274,6 +2360,7 @@ function App() {
     segments, canManage, renameSession, createSession, setReference, renameSegment, renamePlaced, addLibraryItem,
     downloadSessionZip, pickSessionZip,
     tickets, ticketCounts, startTicket, setTicketStatus, deleteTicket, focusTicket, signedIn: !!user,
+    commonPoints, commonFit, startCommonMark, otherScans,
     handlePipelineCancel, pipelineRunning, eraseBoxSel, readouts,
     bimModels, sabanaVisible, sabanaLoading, handleGenerateComparison, runComparison, handleToggleSabana,
     deleteSession, deleteSegment, deleteTsdfMesh, runGenrecon, applyFloorLevel,
@@ -2537,6 +2624,28 @@ function App() {
       },
       'meshes.open_genrecon': () => { if (!open()) return noSession; setGenreconOpen(true); return done },
       'export.open': () => { if (!open()) return noSession; setExportOpen(true); return done },
+      // ── common points: the same point marked on two scans, and what they give between them ──
+      'scans.common_points_open': () => {
+        if (!open()) return noSession
+        if (!cmd.current.otherScans.length) return { ok: false, reason: 'failed', detail: tt('commonPoints.needsTwoScans') }
+        setCommonOpen(true); return done
+      },
+      // (a NEW point, or the named one; the POINT itself is the user's next click on the model)
+      'scans.common_point_mark': async ({ name }) => {
+        if (!open()) return noSession
+        const wanted = String(name ?? '').trim()
+        const existing = wanted ? cmd.current.commonPoints.find(x => x.name.toLowerCase() === wanted.toLowerCase()) : undefined
+        if (wanted && !existing) return { ok: false, reason: 'not_found', detail: wanted }
+        const r = await cmd.current.startCommonMark(existing ? existing.id : null)
+        return r === true ? { ok: true, detail: existing ? existing.name : '' } : { ok: false, reason: 'failed', detail: r }
+      },
+      'scans.common_points_factor': () => {
+        if (!open()) return noSession
+        setCommonOpen(true)
+        const f = cmd.current.commonFit
+        return { ok: true, detail: f ? tt('commonPoints.factorSpoken', { scale: f.scale.toFixed(4), yaw: f.yaw_deg.toFixed(1), rms: (f.rms_m * 1000).toFixed(0), n: f.pairs })
+                                    : tt('commonPoints.noFit') }
+      },
       // ── tickets: a point of the model marked as a review item or a non-conformity ──
       'tickets.open': () => { if (!open()) return noSession; setTicketsOpen(true); return done },
       // (the kind and the title are taken; the POINT is the user's next click on the model)
@@ -3082,6 +3191,7 @@ function App() {
       { id: 'refdistance', label: t('toolbar.referenceDistance'), icon: <Pin aria-hidden />, disabled: !activeSession, onSelect: () => setReferenceDialog('distance') },
       { id: 'refplane', label: t('toolbar.referencePlane'), icon: <Pentagon aria-hidden />, disabled: !activeSession, onSelect: () => setReferenceDialog('plane') },
       { id: 'tickets', label: t('tickets.title'), icon: <Flag aria-hidden />, disabled: !activeSession, checked: ticketsOpen, onSelect: () => setTicketsOpen(v => !v) },
+      { id: 'commonpoints', label: t('commonPoints.menu'), icon: <Waypoints aria-hidden />, disabled: !activeSession || otherScans.length === 0, checked: commonOpen, onSelect: () => setCommonOpen(v => !v) },
       { type: 'separator', id: 's2' },
       { id: 'brush', label: t('toolbar.brush'), icon: <Brush aria-hidden />, checked: activeTool === 'erase', onSelect: () => setActiveTool(activeTool === 'erase' ? 'navigate' : 'erase') },
       { id: 'undobrush', label: t('brush.undo'), icon: <Undo2 aria-hidden />, onSelect: undoBrush },
@@ -3391,8 +3501,13 @@ function App() {
               setCalibrationDraft({ kind: 'plane', readoutId: pl.id, points: pl.points })
               setCalibrationOpen(true); setCalibrating(null); setActiveTool('navigate')
             }}
-            tickets={ticketPins}
-            onPointPicked={(p, cls) => { if (!ticketDraftRef.current) return false; void placeTicket(p, cls); return true }}
+            tickets={commonPins.length ? [...ticketPins, ...commonPins] : ticketPins}
+            onPointPicked={(p, cls) => {
+              // a click the user was asked for: a ticket being marked, or a common point
+              if (ticketDraftRef.current) { void placeTicket(p, cls); return true }
+              if (commonPlacingRef.current) { void placeCommonPoint(p); return true }
+              return false
+            }}
             onSegmentPicked={cls => {
               // a point of an object: select it (OBB + dimensions) and travel to it; a click on
               // nothing or on unsegmented points deselects (USER 2026-10-09)
@@ -3475,7 +3590,7 @@ function App() {
               showEdges={showCertifyKit} readouts={readouts}
               onCalibrate={id => { const d = viewportRef.current?.getDistance(id); if (d) { setCalibrationDraft({ kind: 'distance', readoutId: id, ...d }); setCalibrationOpen(true) } }}
               onOpenCalibration={() => { setCalibrationDraft(null); setCalibrationOpen(true) }}
-              onOpenTicket={id => { setSelectedTicket(id); setTicketsOpen(true) }}
+              onOpenTicket={id => { if (id.startsWith('cp:')) setCommonOpen(true); else { setSelectedTicket(id); setTicketsOpen(true) } }}
               calibration={calibrationSummary ? { state: calibrationSummary.state, factor: calibrationSummary.scale_factor,
                                                   axes: calibrationSummary.mode_used === 'axes' ? calibrationSummary.axes.factors : null,
                                                   worstDifferenceM: calibrationSummary.verification?.worst_difference_m ?? null } : null}
@@ -3617,6 +3732,15 @@ function App() {
         onStartPlacing={startTicket} onCancelPlacing={() => { setTicketDraft(null); setStatusMessage('') }}
         onSelect={setSelectedTicket} onFocus={focusTicket} onSetStatus={(tk, st) => { void setTicketStatus(tk, st) }}
         onDelete={tk => { void deleteTicket(tk) }} onClose={() => { setTicketsOpen(false); setTicketDraft(null) }} />
+
+      <CommonPointsDialog open={commonOpen && !!activeSession} sessionId={activeSession} scanKey={activeScanTab} others={otherScans}
+        other={commonOther} onOther={setCommonOther} points={commonPoints} placing={commonPlacing} fit={commonFit} fitNote={commonNote}
+        loadError={commonError} givenScale={commonScale} onGivenScale={setCommonScale}
+        onNewPoint={() => { void startCommonMark(null) }} onMark={id => { void startCommonMark(id) }} onCancelMark={() => setCommonPlacing(null)}
+        onUnmark={id => { if (activeScanTab) void commonChange('DELETE', `/${id}/marks?scan=${encodeURIComponent(activeScanTab)}`) }}
+        onDelete={id => { void commonChange('DELETE', `/${id}`) }}
+        onFocus={pt => { const m = activeScanTab ? pt.marks[activeScanTab] : undefined; if (m) viewportRef.current?.flyToPoint(m.position, 1.5) }}
+        onClose={() => { setCommonOpen(false); setCommonPlacing(null) }} />
 
       <GenreconDialog open={genreconOpen} sessionId={activeSession} scanLabel={activeScanTab} defaultConfidence={confidenceThreshold}
         onClose={() => setGenreconOpen(false)} onRun={async c => { await runGenrecon(c) }} />

@@ -250,3 +250,97 @@ commands:
       - lance-la depuis sa fenêtre
       done: 'Fusion lancée : {detail}.'
       ask: 'Je vais lancer la fusion : {detail}. Plusieurs minutes de travail du serveur.'
+- id: scans.common_points_open
+  kind: action
+  runs_on: ui
+  model: 'Open the Common points window: the same physical point marked on two scans of the project, and the factor,
+    the turn and the shift they give between the two scans (to lay one scan on the other and compare them). It only
+    opens the window. Not the fusion and not the calibration.'
+  needs:
+  - session
+  text:
+    es:
+      title: Abrir los puntos comunes
+      say:
+      - abrí los puntos comunes
+      - quiero emparejar las escalas de los dos escaneos
+      - marquemos los mismos puntos en las dos tomas
+      done: Ventana de puntos comunes abierta.
+    en:
+      title: Open the common points
+      say:
+      - open the common points
+      - I want to match the scales of the two scans
+      - let us mark the same points on both captures
+      done: Common points window open.
+    fr:
+      title: Ouvrir les points communs
+      say:
+      - ouvre les points communs
+      - je veux accorder les échelles des deux scans
+      - marquons les mêmes points sur les deux captures
+      done: Fenêtre des points communs ouverte.
+- id: scans.common_point_mark
+  kind: action
+  runs_on: ui
+  model: 'Mark a common point on the scan on screen: a NEW one, or — by its name (P1, P2 …) — one already marked on
+    another scan. It then WAITS for the user to click that point on the model: the point is never guessed.'
+  args:
+    name:
+      type: string
+      description: 'the name of an existing common point (P1, P2 …); leave it out for a new point'
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Marcar un punto común
+      say:
+      - marcá un punto común nuevo
+      - marcá el punto P2 en este escaneo
+      - este es el mismo punto que en la otra toma
+      done: 'Tocá en el modelo el punto {detail}.'
+    en:
+      title: Mark a common point
+      say:
+      - mark a new common point
+      - mark point P2 on this scan
+      - this is the same point as on the other capture
+      done: 'Click on the model the point {detail}.'
+    fr:
+      title: Marquer un point commun
+      say:
+      - marque un nouveau point commun
+      - marque le point P2 sur ce scan
+      - c'est le même point que sur l'autre capture
+      done: 'Cliquez sur le modèle le point {detail}.'
+- id: scans.common_points_factor
+  kind: query
+  runs_on: ui
+  model: 'Say what the common points give between the scan on screen and the other scan chosen in the Common points
+    window: the scale factor, the turn, and the residual. For "what is the factor between the two scans", "how
+    well do the two captures match". It reports; it applies nothing.'
+  needs:
+  - session
+  text:
+    es:
+      title: Qué dan los puntos comunes
+      say:
+      - qué factor hay entre los dos escaneos
+      - cuánto difieren las escalas de las dos tomas
+      - qué tan bien coinciden los puntos comunes
+      done: 'Puntos comunes: {detail}.'
+    en:
+      title: What the common points give
+      say:
+      - what is the factor between the two scans
+      - how much do the scales of the two captures differ
+      - how well do the common points match
+      done: 'Common points: {detail}.'
+    fr:
+      title: Ce que donnent les points communs
+      say:
+      - quel est le facteur entre les deux scans
+      - de combien diffèrent les échelles des deux captures
+      - les points communs concordent-ils bien
+      done: 'Points communs : {detail}.'

@@ -31,7 +31,9 @@ export interface ReadoutAnchor {
   kind: 'distance' | 'angle' | 'ticket'
   /** a ticket marked on the model (USER 2026-11-09: "marcar tickets en cualquier parte del proyecto"):
    *  its number, what it is — a review item, a non-conformity, resolved, or of a geometry that moved — and its title */
-  ticket?: { number: number; tone: 'review' | 'issue' | 'resolved' | 'stale'; title: string; selected?: boolean }
+  ticket?: { number: number; tone: 'review' | 'issue' | 'resolved' | 'stale' | 'common'; title: string; selected?: boolean
+             /** what the pin shows instead of the number (a common point's name: the same pin, another tone) */
+             label?: string }
   /** a short label in front of the value (H / W / D of a selected segment) */
   tag?: string
   metres?: number
@@ -155,10 +157,10 @@ export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, 
           const tk = r.ticket
           if (!tk) return null
           return (
-            <button key={r.id} type="button" title={tk.title} aria-label={`${t('tickets.one')} ${tk.number}: ${tk.title}`}
+            <button key={r.id} type="button" title={tk.title} aria-label={tk.label ? tk.title : `${t('tickets.one')} ${tk.number}: ${tk.title}`}
               className={`stac-hud__ticket stac-hud__ticket--${tk.tone} ${tk.selected ? 'is-selected' : ''}`.trim()}
               style={{ '--rx': `${r.x}px`, '--ry': `${r.y}px` } as React.CSSProperties}
-              onClick={e => { e.stopPropagation(); onOpenTicket?.(r.id.replace(/^ticket-/, '')) }}>{tk.number}</button>
+              onClick={e => { e.stopPropagation(); onOpenTicket?.(r.id.replace(/^ticket-/, '')) }}>{tk.label ?? tk.number}</button>
           )
         }
         const len = r.metres != null ? fmt.length(r.metres) : null
