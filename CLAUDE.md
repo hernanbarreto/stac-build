@@ -415,7 +415,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   STAC); the exporter (E57 / LAS / PLY, GLB, IFC, CSV in one ZIP); English as the default language; the dead
   "Export point cloud" entry of the File menu replaced by the working Export; the IFC = the GenRecon mesh cut by
   the segmentation, with his values (whole mesh, large triangles split, majority of 128 points, every object).
-  1 · ONE OWNER PER SURFACE — THE RULE IS DECIDED, NOT YET APPLIED TO HIS SESSIONS. The segmentation is interleaved point by
+  1 · ONE OWNER PER SURFACE — DECIDED AND APPLIED TO THE FIVE SESSIONS (item 32 of the list below); his eye pending. The segmentation is interleaved point by
      point (pccr 3108: 39 % of a point's 8 nearest neighbours are another object's) because each point takes the
      mask of its own keyframe and nothing but the floor merges since his 2026-11-11 rule. He allowed the merge
      ("1. Si") and then asked "las baldosas son piso verdad?" — answered YES: a tile and the floor are one
@@ -434,10 +434,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
      same merge on a scan already projected, backup in `_before_same_surface/`, `--restore`). TESTED END TO END
      ON A COPY of pccr 3108's files (deleted after): 1213 → 280 objects, 933 absorbed, 38.5 % → 4.0 %, result +
      per-point ids + store consistent, 4 min (the boxes are fitted on the card: it must be visible).
-     NEXT, ON HIS WORD — it rewrites his sessions' segmentation: apply it to the five scans (each: apply, rebuild
-     the octree with `potree_converter.convert_ply_to_potree`, tell the viewers with
-     `apply_min_points.notify_viewers`), then his eye on the lists (pccr 3108: 280 objects) and cut the IFC
-     again. The neighbour search is scipy on the CPU (~20 s on 18.8 M points): a device twin is owed.
+     APPLIED to the five scans on his order (each: apply, the octree with
+     `potree_converter.convert_ply_to_potree`, the viewers with `apply_min_points.notify_viewers`) and the IFC
+     of pccr 3108 cut again. The neighbour search is scipy on the CPU (~20 s on 18.8 M points): a device twin is owed.
   2 · THE IFC. In pccr's project (the viewer loads it at every open): the LIGHT one, 10 % of the triangles, 46 MB
      ("de momento dejemos el liviano, es para probar"); the whole one (433 MB; web-ifc opens it in 20 s using
      4.7 GB) is what the exporter writes. HIS EYE on it: pending. His complaints on the FIRST (box) IFC — "no le
@@ -510,19 +509,30 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   E · MINOR
     28. Zaragoza's split column .................................................... as it was (waved off)
     29. pccr 2408's small duplicates ............................................... as it was (waved off) — the
-        same-surface merge of item 30 may change them: to look at when it is applied
+        same-surface merge of item 32 is applied now: whether they are gone is for his eye
     30. docs/ARCHITECTURE.md and ROADMAP.md out of date ............................ as they were (on his word)
     31. The general list of docs/pipeline_final.md §4 (capture distance, the weighted
         vote, the GPU ports of the intake, among others) ........................... as it was
   F · ADDED IN THIS SESSION (2026-11-17 / 18)
-    32. ONE OWNER PER SURFACE: the rule is decided and ON for new projections; APPLYING IT TO THE FIVE
-        SESSIONS is pending, on his word (it rewrites their segmentation; then the octree, then the IFC again)
+    32. ONE OWNER PER SURFACE: DONE 2026-11-18 on his order ("Hace todo esto ahora y déjalo listo con el nuevo
+        ifc coherente") — APPLIED TO THE FIVE SESSIONS, each with its octree rebuilt and the viewers told, no
+        failure, ids = store = boxes checked on each:
+          pccr 3108      1213 → 280 objects    neighbours of another object 38.5 % → 4.0 %     90 s
+          bufferStop      270 →  49                                          28.5 % → 3.0 %     29 s
+          zaragoza        338 →  64                                          30.4 % → 2.4 %    116 s
+          observatorio    469 →  60                                          34.7 % → 2.9 %    109 s
+          pccr 2408      7932 → 1946                                         37.9 % → 6.6 %    773 s
+        The IFC of pccr 3108 cut again on it, no object left out: the viewer's (10 %) 281 elements, 43 MB; the
+        exporter's (whole) 281 elements, 438 MB. HIS EYE on the five lists and on the IFC: PENDING. The backups
+        `output/_before_same_surface/` (restore: `python -m segmentation.apply_same_surface <output> --restore`,
+        then the octree) are KEPT until he says. Not done: an IFC of the other four sessions (not asked).
     33. The IFC in the viewer: the light one (10 %) "para probar" — his eye pending; the whole one is exported
     34. His two complaints on the first IFC (the opacity; points that stay when an object is turned off) —
         not reproduced; to re-check with him on the mesh IFC
     35. The exporter: his eye on the window and on the files opened in other programs
     36. Whether the recogniser always listens in the settings' language — his decision
-    37. The test files in `projects/pccr/exports/` (a ZIP of 1.85 GB, an IFC of 433 MB) — his to keep or drop
+    37. The test files in `projects/pccr/exports/` — his to keep or drop: the whole IFC (438 MB, current) and the
+        ZIP of 2026-11-17 (1.85 GB — STALE: it holds the old box IFC; a new export replaces it)
     38. A device twin of the same-surface neighbour search (scipy on the CPU today)
     39. He said "tengo más consultas luego"
   ⚠ HOW TO WORK, AGAIN (USER 2026-11-18: "Que prueba estás haciendo?, el Pod es muy caro" / "Contéstame lo que te
