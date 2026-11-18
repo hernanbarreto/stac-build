@@ -119,6 +119,12 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   hand. A restart reloads the chat's VLM (~2.5 min) and the voice (~30 s): while he is trying the app it is
   ANNOUNCED first, in one line, and server changes are batched into one restart. No probe is run against the
   live chat engine while he tests (one sequence at a time: it queues behind his questions).
+- THE WHOLE SUITE ON THE LIVE POD STOPS THE CHAT'S VLM (found 2026-11-18, the assistant's own run): around its
+  half, tests/test_intake_run.py — among the 13 that fail — reaches the worker's REAL stopper of the semantic
+  service (its mock no longer covers what the worker calls), and vLLM shuts down (it was down 15 min before
+  the assistant noticed, on the card's memory). After a whole-suite run: `bash scripts/restart_backend.sh` and
+  check that the chat is warm. Never run the whole suite while he is using the chat. (test_die_with_parent
+  also fails when the backend is restarted under it.)
 - Long runs: a performance checkpoint in the first minutes; progress reported unprompted (~20 min — silence reads
   as a hang); a stall detector that reads the stage process and the card, not the log alone (F5's rungs are silent
   4–6 min at 100 %).
