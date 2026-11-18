@@ -96,6 +96,10 @@ def apply(output_dir, log: Callable[[str], None] = print) -> Dict[str, Any]:
     if not report["absorbed"]:
         log(f"[same-surface] {out}: no two objects share a surface — nothing to do")
         return {**report, "changed": False}
+    # the survivors' boxes FIRST (they are fitted on the card: a failure here must leave nothing written)
+    res, xyz = m["result"], m["xyz"]
+    for inst in m["grown"]:
+        inst["obb"] = _compute_obb(xyz[np.asarray(inst["globalIndices"], dtype=np.int64)], cfg=m["cfg"])
     bak.mkdir()
     for f in _files(out):
         if f.exists():
@@ -103,9 +107,6 @@ def apply(output_dir, log: Callable[[str], None] = print) -> Dict[str, Any]:
     log(f"[same-surface] {out}: backup of {len(list(bak.iterdir()))} file(s) in {bak.name}/")
 
     # ── 1. the result ─────────────────────────────────────────────────────────────────────────
-    res, xyz = m["result"], m["xyz"]
-    for inst in m["grown"]:
-        inst["obb"] = _compute_obb(xyz[np.asarray(inst["globalIndices"], dtype=np.int64)], cfg=m["cfg"])
     res["instances"] = m["instances"]
     absorbed = res.setdefault("absorbed", {})
     for loser, how in m["record"].items():
