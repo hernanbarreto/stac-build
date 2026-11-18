@@ -4,8 +4,8 @@ sesión … crear una vacía o subir un archivo zip que va a comprobar que tenga
 … la sube y la descomprime, elimina el zip y se queda con la sesión perfectamente utilizable").
 
     GET    /api/session_archive/{session_id}/plan        what the ZIP will hold (files, bytes, scans), or why not now
-    POST   /api/session_archive/{session_id}/ticket      a one-use link to the download (60 s to start it)
-    GET    /api/session_archive/{session_id}/download    the ZIP, streamed as it is written (?ticket=)
+    POST   /api/session_archive/{session_id}/ticket      the link to the download (60 s to start it)
+    GET    /api/session_archive/{session_id}/download    the ZIP (?ticket=) — whole, or the RANGE asked for
 
     POST   /api/session_import                           {filename, size, name?} — open an upload → {job, part_bytes}
     PUT    /api/session_import/{job}/part?offset=N       the next part of the file (raw body)
@@ -15,28 +15,35 @@ sesión … crear una vacía o subir un archivo zip que va a comprobar que tenga
 
 Admin and manager only, as creating a session is. THE DOWNLOAD is a browser download (the browser
 writes it to the disk as it arrives — a 100 GB session never sits in the page's memory), and a link
-cannot carry the login header: the ticket is asked for WITH the login and names the session, once.
-THE ZIP IS NEVER ON THE VOLUME: it is written into the response (session_archive.write_zip). While a
-session is being read no pipeline job of it may start, and it is not read while one runs.
+cannot carry the login header: the ticket is asked for WITH the login and names the session.
+THE ZIP IS NEVER ON THE VOLUME: its bytes are read from the session as they are sent
+(session_archive.Layout). ITS SIZE IS KNOWN before the first byte (Content-Length: the browser shows
+what is left) and ANY RANGE of it can be asked for again (Accept-Ranges + ETag): a download cut by
+the network is RESUMED by the browser — or by `curl -C -` / `wget -c` on the same link — where it
+stopped. The link starts within 60 s and then stays good for that download and its resumptions
+(RESUME_SECONDS; shorter than a login). While a session is being read no pipeline job of it may
+start, and it is not read while one runs.
 
 THE UPLOAD comes in parts (32 MB): a proxy's body limit or a cut connection costs one part, not the
 file; each part is appended only at the offset the server already holds (a repeated or lost part is
 answered with that offset). The file is written beside the sessions, under a hidden name, and
-removed whatever the outcome.
+removed whatever the outcome. The session's manifest is the ZIP's first entry: as soon as it has
+arrived the upload is refused for what the manifest alone tells (not a session, a name that exists)
+— not after the last of 100 GB.
 """
 from __future__ import annotations
 
 import asyncio
-import os
-import queue
+import re
 import secrets
 import threading
 import time
+from email.utils import formatdate
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 import session_archive as A
@@ -45,12 +52,14 @@ router = APIRouter(tags=["session archive"])
 _security = HTTPBearer(auto_error=False)
 
 PART_BYTES = 32 * 1024 * 1024
-TICKET_SECONDS = 60
+TICKET_SECONDS = 60                                                # to START the download
+RESUME_SECONDS = 12 * 3600                                         # … and then to resume it (a login lasts 24 h)
+MAX_TICKETS = 8                                                    # (each holds its session's manifest)
 _projects_dir: Optional[Path] = None
 _busy: Optional[Callable[[str], Optional[str]]] = None            # (session_id) -> why its files cannot be read now
 _audit_log: Optional[Callable[..., None]] = None
 _commit = ""
-_TICKETS: Dict[str, Dict[str, Any]] = {}                           # ticket -> {session_id, expires, user}
+_TICKETS: Dict[str, Dict[str, Any]] = {}                           # ticket -> {session_id, layout, expires, used, user, …}
 _READING: Dict[str, int] = {}                                      # session_id -> downloads in progress
 _IMPORTS: Dict[str, Dict[str, Any]] = {}                           # job -> state
 _lock = threading.Lock()
@@ -86,126 +95,129 @@ def _project(session_id: str) -> Path:
     return d
 
 
-def _plan(session_id: str) -> Dict[str, Any]:
+def _free(session_id: str) -> Path:
     d = _project(session_id)
     why = _busy(session_id) if _busy is not None else None
     if why:
         raise HTTPException(status_code=409, detail=why)
+    return d
+
+
+def _layout(session_id: str) -> A.Layout:
+    d = _free(session_id)
     try:
-        return A.plan(d, session_id)
+        return A.Layout(d, session_id, A.manifest_of(d, session_id, _commit))
     except A.ArchiveError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
+
+
+def _summary(layout: A.Layout) -> Dict[str, Any]:
+    m = layout.manifest
+    return {"session_id": m["session_id"], "files": m["files"], "bytes": m["bytes"], "scans": m["scans"],
+            "zip_bytes": layout.total, "downloading": bool(_READING.get(m["session_id"]))}
 
 
 # ── the download ───────────────────────────────────────────────────────────────────────────────
 @router.get("/api/session_archive/{session_id}/plan")
 def archive_plan(session_id: str, _user: Dict[str, Any] = Depends(_manager)):
-    return {"ok": True, **_plan(session_id)}
+    return {"ok": True, **_summary(_layout(session_id))}
 
 
 @router.post("/api/session_archive/{session_id}/ticket")
 def archive_ticket(session_id: str, user: Dict[str, Any] = Depends(_manager)):
-    plan = _plan(session_id)
+    layout = _layout(session_id)
     now = time.time()
+    ticket = secrets.token_urlsafe(32)
     with _lock:
         for t in [t for t, v in _TICKETS.items() if v["expires"] < now]:
             del _TICKETS[t]
-        ticket = secrets.token_urlsafe(32)
-        _TICKETS[ticket] = {"session_id": session_id, "expires": now + TICKET_SECONDS,
+        for t in sorted(_TICKETS, key=lambda t: _TICKETS[t]["created"])[:max(0, len(_TICKETS) - MAX_TICKETS + 1)]:
+            del _TICKETS[t]
+        _TICKETS[ticket] = {"session_id": session_id, "layout": layout, "created": now, "expires": now + TICKET_SECONDS,
+                            "used": False, "failed": None,
                             "user": user.get("username", user.get("sub", "unknown")), "role": user.get("role", "")}
-    return {"ok": True, **plan, "url": f"/api/session_archive/{session_id}/download?ticket={ticket}",
-            "filename": f"{session_id}_stac_session.zip", "expires_in": TICKET_SECONDS}
+    return {"ok": True, **_summary(layout), "url": f"/api/session_archive/{session_id}/download?ticket={ticket}",
+            "filename": f"{session_id}_stac_session.zip", "expires_in": TICKET_SECONDS, "resume_seconds": RESUME_SECONDS}
 
 
-class _Pipe:
-    """What zipfile writes into: a bounded queue the response drains (it cannot seek — zipfile then
-    writes each file's size and CRC after its data)."""
+_RANGE = re.compile(r"\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*$")
 
-    def __init__(self, stop: threading.Event):
-        self.q: "queue.Queue" = queue.Queue(maxsize=32)
-        self.stop = stop
 
-    def write(self, data) -> int:
-        data = bytes(data)
-        while not self.stop.is_set():
-            try:
-                self.q.put(data, timeout=0.5)
-                return len(data)
-            except queue.Full:
-                continue
-        raise A.ArchiveError("the download was cancelled")
-
-    def flush(self) -> None:
+def _range(header: Optional[str], total: int) -> Optional[Tuple[int, int]]:
+    """The ONE range a request asks for, as [start, stop) — None when it asks for none (or for
+    several, or in a form this does not read: the whole ZIP is then the answer, which is always
+    right); a range that lies outside the ZIP raises 416."""
+    m = _RANGE.match(header or "")
+    if not m or not (m.group(1) or m.group(2)):
         return None
+    if m.group(1):
+        start = int(m.group(1))
+        stop = min(int(m.group(2)) + 1, total) if m.group(2) else total
+    else:
+        start, stop = max(0, total - int(m.group(2))), total      # (the last n bytes)
+    if start >= stop:
+        raise HTTPException(status_code=416, detail="No such range", headers={"Content-Range": f"bytes */{total}"})
+    return start, stop
 
 
-@router.get("/api/session_archive/{session_id}/download")
-def archive_download(session_id: str, ticket: str = Query(...)):
+@router.api_route("/api/session_archive/{session_id}/download", methods=["GET", "HEAD"])
+def archive_download(session_id: str, request: Request, ticket: str = Query(...)):
+    now = time.time()
+    first = False
     with _lock:
-        t = _TICKETS.pop(ticket, None)
-    if t is None or t["session_id"] != session_id or t["expires"] < time.time():
+        t = _TICKETS.get(ticket)
+        if t is not None and (t["session_id"] != session_id or t["expires"] < now):
+            _TICKETS.pop(ticket, None)
+            t = None
+        if t is not None and not t["used"]:
+            first = True
+            t.update(used=True, expires=t["created"] + RESUME_SECONDS)
+    if t is None:
         raise HTTPException(status_code=403, detail="This download link is not valid any more: ask for the download again")
-    d = _project(session_id)
-    why = _busy(session_id) if _busy is not None else None
-    if why:
-        raise HTTPException(status_code=409, detail=why)
-    try:
-        manifest = A.manifest_of(d, session_id, _commit)
-    except A.ArchiveError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
-
-    if _audit_log is not None:
+    if t["failed"]:
+        raise HTTPException(status_code=409, detail=t["failed"])
+    _free(session_id)
+    layout: A.Layout = t["layout"]
+    etag = f'"{layout.etag}"'
+    headers = {"Content-Disposition": f'attachment; filename="{session_id}_stac_session.zip"',
+               "Accept-Ranges": "bytes", "ETag": etag, "Last-Modified": formatdate(t["created"], usegmt=True),
+               "X-STAC-Session-Bytes": str(layout.manifest["bytes"]), "X-STAC-Session-Files": str(layout.manifest["files"]),
+               "Cache-Control": "private, no-store"}
+    start, stop, status = 0, layout.total, 200
+    # (If-Range: "only if it is still that ZIP" — another one, and the whole of this one is sent)
+    if request.headers.get("if-range", etag).strip() == etag:
+        asked = _range(request.headers.get("range"), layout.total)
+        if asked is not None:
+            start, stop = asked
+            status = 206
+            headers["Content-Range"] = f"bytes {start}-{stop - 1}/{layout.total}"
+    headers["Content-Length"] = str(stop - start)
+    if request.method == "HEAD":
+        return Response(status_code=status, headers=headers, media_type="application/zip")
+    if first and _audit_log is not None:
         _audit_log("archive.download", session_id, user=t["user"], role=t["role"],
-                   detail=f"files={manifest['files']} bytes={manifest['bytes']}")
-    return StreamingResponse(_stream_session(session_id, d, manifest), media_type="application/zip", headers={
-        "Content-Disposition": f'attachment; filename="{session_id}_stac_session.zip"',
-        "X-STAC-Session-Bytes": str(manifest["bytes"]), "X-STAC-Session-Files": str(manifest["files"]),
-        "Cache-Control": "no-store"})
+                   detail=f"files={layout.manifest['files']} bytes={layout.manifest['bytes']} zip={layout.total}")
+    return StreamingResponse(_stream(session_id, layout, start, stop, t), status_code=status,
+                             media_type="application/zip", headers=headers)
 
 
-def _stream_session(session_id: str, project_dir: Path, manifest: Dict[str, Any]):
-    """The ZIP's bytes as they are written: a generator the response drains. While it is being read
-    the session counts as READ (reading()); when the reader leaves — the end, or a client that went
-    away — the writer stops at its next block and the session is free again."""
-    stop = threading.Event()
-    pipe = _Pipe(stop)
-    failure: Dict[str, str] = {}
-    END = object()
-
-    def writer() -> None:
-        try:
-            A.write_zip(project_dir, session_id, pipe, manifest=manifest, cancelled=stop.is_set)
-        except BaseException as e:  # noqa: BLE001 — told to the reader of the stream, which ends it
-            failure["error"] = f"{type(e).__name__}: {e}"
-        finally:
-            while True:                                            # (the end mark must get in even when the queue is full)
-                try:
-                    pipe.q.put(END, timeout=0.5)
-                    break
-                except queue.Full:
-                    if stop.is_set():
-                        break
-
-    thread = threading.Thread(target=writer, name=f"session-zip-{session_id}", daemon=True)
-    # (counted and started HERE, at the first byte asked for: a response that is never read leaves
-    #  nothing counted and no thread)
+def _stream(session_id: str, layout: A.Layout, start: int, stop: int, ticket: Optional[Dict[str, Any]] = None) -> Iterator[bytes]:
+    """The ZIP's bytes [start, stop) as they are read from the session. While they are read the
+    session counts as READ (reading()); when the reader leaves — the end, or a client that went
+    away — it is free again. A session that is no longer the one the download began with ends the
+    response short of its declared length (the browser reports the download as failed, never a cut
+    ZIP as whole) and the link answers no more."""
+    # (counted HERE, at the first byte asked for: a response that is never read leaves nothing counted)
     with _lock:
         _READING[session_id] = _READING.get(session_id, 0) + 1
-    thread.start()
     try:
-        while True:
-            item = pipe.q.get()
-            if item is END:
-                if failure:
-                    # ending the response without its last chunk is how a stream says "this failed": the
-                    # browser reports the download as failed instead of keeping a cut ZIP
-                    print(f"[archive] ❌ {session_id}: {failure['error']}", flush=True)
-                    raise RuntimeError(failure["error"])
-                return
-            yield item
+        yield from layout.stream(start, stop)
+    except A.ArchiveError as e:
+        print(f"[archive] ❌ {session_id}: {e}", flush=True)
+        if ticket is not None:
+            ticket["failed"] = f"{e} — ask for the download again"
+        raise RuntimeError(str(e)) from e
     finally:
-        stop.set()                                                 # (a client that left: the writer stops at its next block)
-        thread.join(timeout=30)
         with _lock:
             _READING[session_id] = max(0, _READING.get(session_id, 1) - 1)
             if not _READING[session_id]:
@@ -247,6 +259,7 @@ async def import_open(body: Dict[str, Any], user: Dict[str, Any] = Depends(_mana
     path.write_bytes(b"")
     _IMPORTS[job] = {"job": job, "phase": "uploading", "filename": str(body.get("filename") or "session.zip")[:200],
                      "size": size, "received": 0, "name": name, "pct": 0.0, "error": None, "session_id": None,
+                     "head": 30,                                  # bytes needed to read the manifest; 0 = said, or not sayable
                      "path": str(path), "cancel": threading.Event(),
                      "user": user.get("username", user.get("sub", "unknown")), "role": user.get("role", ""), "started_at": time.time()}
     return {"ok": True, "job": job, "part_bytes": PART_BYTES}
@@ -278,7 +291,18 @@ async def import_part(job: str, request: Request, offset: int = Query(..., ge=0)
         raise
     st["received"] += written
     st["pct"] = round(100.0 * st["received"] / st["size"], 1)
-    return {"ok": True, "received": st["received"]}
+    if st["head"] and st["received"] >= min(st["head"], st["size"]):
+        # the manifest is the ZIP's first entry: what it alone tells is told NOW, not after the last part
+        try:
+            manifest, need = A.manifest_at_head(Path(st["path"]))
+            if manifest is not None:
+                report = A.check_head(manifest, _projects_dir, st["name"])
+                st.update(session_id=report["session_id"], files=report["files"], bytes=report["bytes"])
+            st["head"] = 0 if manifest is not None or st["received"] >= st["size"] else need
+        except A.ArchiveError as e:
+            _fail(st, str(e))
+            raise HTTPException(status_code=422, detail=str(e)) from e
+    return {"ok": True, "received": st["received"], "session_id": st["session_id"]}
 
 
 def _fail(st: Dict[str, Any], why: str) -> None:

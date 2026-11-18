@@ -70,7 +70,9 @@ Running it on the pod that already works changes nothing: an env it did not buil
 its commit and a weight with the right sha256 are kept.
 
 **The sessions** (`server/projects/`, 147 GB) are not in the kit: each travels as its own ZIP — the app's
-"download session" and, in "new session", "upload a ZIP".
+"download session" and, in "new session", "upload a ZIP" (`server/session_archive.py`). The download's size is
+known from its first byte and it can be RESUMED where it was cut (the browser's own resume, or the link the
+download started with given to `curl -C - -o <file> '<link>'` / `wget -c`): pccr is one ZIP of 107 GB.
 
 ## Keeping it true — after EVERY change of the pod
 

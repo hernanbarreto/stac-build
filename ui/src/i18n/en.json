@@ -327,7 +327,7 @@
     "built": "reconstructed",
     "notBuilt": "no reconstruction",
     "downloadZip": "Download the {@session} as a ZIP",
-    "zipStarted": "Download of {name} started: {files} files, {gb} GB. The ZIP is written as it downloads.",
+    "zipStarted": "Download of {name} started: {files} files, {gb} GB. If it is cut, the browser can resume it where it stopped.",
     "zipFailed": "The download could not be prepared.",
     "zipFailedDetail": "Could not download {name}. {detail}",
     "newEmpty": "Empty",
@@ -340,7 +340,10 @@
       "uploading": "Uploading {name} — {pct}",
       "validating": "Checking {name}",
       "extracting": "Extracting {name} — {pct}"
-    }
+    },
+    "zipPreparing": "Preparing the download of {name}…",
+    "zipNamePlaceholder": "name (empty: the ZIP's own)",
+    "chooseZip": "Choose the ZIP"
   },
   "scans": {
     "title": "{@Scans}",

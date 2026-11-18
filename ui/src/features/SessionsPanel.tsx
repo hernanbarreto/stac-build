@@ -72,8 +72,9 @@ interface SessionsPanelProps {
    *  needed to upload it again and have the same session */
   onDownloadZip: (id: string) => void
   /** "new session → from a ZIP": opens the file window; the upload, its check and
-   *  its extraction follow (`importing`) */
-  onPickZip: () => void
+   *  its extraction follow (`importing`). `name`: another name for the session
+   *  than the one it has in the ZIP (needed when that one exists here) */
+  onPickZip: (name?: string) => void
   /** a session ZIP on its way in: what the server is doing with it and how far */
   importing: { phase: 'uploading' | 'validating' | 'extracting'; pct: number; name: string } | null
   onCancelImport: () => void
@@ -90,8 +91,9 @@ export function SessionsPanel(p: SessionsPanelProps) {
   const { filter, onFilter: setFilter } = p
   const [renaming, setRenaming] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
-  // false = the button; 'choose' = empty or from a ZIP; 'empty' = the name of an empty one
-  const [creating, setCreating] = useState<false | 'choose' | 'empty'>(false)
+  // false = the button; 'choose' = empty or from a ZIP; 'empty' = the name of an empty one;
+  // 'zip' = the (optional) name of the one a ZIP brings, then its file
+  const [creating, setCreating] = useState<false | 'choose' | 'empty' | 'zip'>(false)
   const [newName, setNewName] = useState('')
 
   const commitRename = async (id: string) => {
@@ -103,6 +105,10 @@ export function SessionsPanel(p: SessionsPanelProps) {
     const v = newName.trim()
     if (!v) return
     await p.onCreate(v)
+    setNewName(''); setCreating(false)
+  }
+  const commitZip = () => {
+    p.onPickZip(newName.trim() || undefined)
     setNewName(''); setCreating(false)
   }
 
@@ -225,8 +231,16 @@ export function SessionsPanel(p: SessionsPanelProps) {
         ) : creating === 'choose' ? (
           <Row className="stac-sessions__create">
             <Button size="sm" icon={<Plus aria-hidden />} onClick={() => setCreating('empty')}>{t('sessions.newEmpty')}</Button>
-            <Button size="sm" icon={<Upload aria-hidden />} title={t('sessions.newFromZipHint')} onClick={() => { setCreating(false); p.onPickZip() }}>{t('sessions.newFromZip')}</Button>
+            <Button size="sm" icon={<Upload aria-hidden />} title={t('sessions.newFromZipHint')} onClick={() => { setNewName(''); setCreating('zip') }}>{t('sessions.newFromZip')}</Button>
             <IconButton size="sm" label={t('common.cancel')} icon={<X aria-hidden />} onClick={() => setCreating(false)} />
+          </Row>
+        ) : creating === 'zip' ? (
+          // the session keeps the name it has in the ZIP unless another one is written here
+          <Row className="stac-sessions__create">
+            <Input size="sm" autoFocus placeholder={t('sessions.zipNamePlaceholder')} value={newName} onChange={e => setNewName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') commitZip(); if (e.key === 'Escape') { setCreating(false); setNewName('') } }} aria-label={t('sessions.zipNamePlaceholder')} />
+            <IconButton size="sm" label={t('sessions.chooseZip')} icon={<Upload aria-hidden />} variant="primary" onClick={commitZip} />
+            <IconButton size="sm" label={t('common.cancel')} icon={<X aria-hidden />} onClick={() => { setCreating(false); setNewName('') }} />
           </Row>
         ) : creating === 'empty' ? (
           <Row className="stac-sessions__create">

@@ -405,23 +405,34 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   voice (the catalogue: 274 commands). THE ZIP IS THE PROJECT DIRECTORY, whole — the scans with their frames,
   video and products, exports/, the links, the empty folders — less what any use writes again (bytecode,
   notebook checkpoints, SQLite's -shm and its EMPTY -wal); `STAC_SESSION.json` lists every entry with its bytes,
-  its date to the nanosecond and its mode, and the copy has them. THE DOWNLOAD IS A STREAM: the ZIP is written
-  into the response and is never on the volume (a 100 GB session has no second copy); the browser saves it as
-  it arrives, through a one-use link asked for with the login; text is deflated, the rest stored; a file that
-  changes under it ends the stream with an error; a session with a pipeline job, a video being extracted or a
-  database with unwritten changes is refused; while one is read no job of it starts and it is neither renamed
-  nor deleted. THE UPLOAD comes in 32 MB parts (resumed at the offset the server holds), beside the sessions
-  under a hidden name; then validate() — the format, one top folder, safe paths and links, every manifest entry
-  present with its size and nothing beside them, project.json, the scans' layout, the name free — BEFORE a byte
-  is extracted; extract() checks every CRC and size, sets dates and modes, renames into place last; the ZIP is
-  removed whatever the outcome, and a failure leaves no session. A name that exists is refused (the session
-  keeps the name it had; another one can be given to the route, not yet in the window). MEASURED through the
-  live backend: bufferStop out and back under another name — 5.20 GB, 2,088 files: the download 46 s
-  (113 MB/s on the loopback), the upload 41 s, the check and extraction 34 s; 2,094 entries equal (sizes, dates
-  to the ns, modes, links, empty folders) and the 2,088 files equal by sha256; the app lists both the same; a
-  5 GiB file with an entry after it (ZIP64) identical; 16 tests. The team assignments of a session are the
-  users' database's, not the ZIP's. NOT TRIED IN A BROWSER (the buttons, the browser's own download of a large
-  session through the pod's proxy, the upload's progress line).
+  its date to the nanosecond and its mode, and the copy has them. THE DOWNLOAD IS A STREAM THAT CAN BE RESUMED:
+  the ZIP is never on the volume (its bytes are read from the session as they are sent); every entry is STORED,
+  so the ZIP is a function of the manifest (`session_archive.Layout`) — its size is known before the first byte
+  (the browser shows what is left) and ANY RANGE of it can be asked for again: a download cut by the network is
+  resumed by the browser, or by `curl -C -` / `wget -c`, on the same link (asked for with the login: 60 s to
+  start it, then good 12 h for that download and its resumptions). STORED, NOT DEFLATED — the assistant's
+  choice, his to undo: pccr's ZIP is 106.7 GB of which 12 GB are JSON that would shrink to ~2, but a deflated
+  entry's size is only known after compressing it and then nothing can be resumed. A file that changed under
+  the download ends it (the response stops short of its declared length and the link answers no more); a
+  session with a pipeline job, a video being extracted or a database with unwritten changes is refused; while
+  one is read no job of it starts and it is neither renamed nor deleted. THE UPLOAD comes in 32 MB parts
+  (resumed at the offset the server holds), beside the sessions under a hidden name; the manifest is the ZIP's
+  first entry, so what it alone tells — not a session, a name that exists — is refused at the FIRST part, not
+  after the last of 100 GB; then validate() — the format, one top folder, safe paths and links, every manifest
+  entry present with its size and nothing beside them, project.json, the scans' layout, the name free — BEFORE
+  a byte is extracted; extract() checks every CRC and size, sets dates and modes, renames into place last; the
+  ZIP is removed whatever the outcome, and a failure leaves no session. The session keeps the name it has in
+  the ZIP unless another one is written in the window ("Upload a ZIP" → name, optional → the file). The upload
+  needs room for the ZIP AND the session until it is extracted (twice the session). MEASURED through the live
+  backend (2026-11-18): bufferStop out and back under another name — 5.47 GB, 2,088 files: the download 18–21 s
+  (263–297 MB/s on the loopback), the upload 39 s, the check and extraction 30 s; 2,094 entries equal (sizes,
+  dates to the ns, modes, links, empty folders) and the 2,088 files equal by sha256; the app lists both the
+  same; a download cut twice and resumed with `curl -C -` = the whole one byte for byte; pccr: the link in
+  4.8 s (35,047 files listed with their stats in parallel), 106.74 GB declared, a range deep inside it served at
+  once; a 5 GiB file, one of 2 GiB − 1 and 70,001 entries (ZIP64) read back by zipfile and by `unzip`;
+  21 tests. The team assignments of a session are the users' database's, not the ZIP's. NOT TRIED IN A BROWSER
+  (the buttons, the browser's own download and resume of a large session through the pod's proxy, the upload's
+  progress line) and no real session was uploaded from outside the pod.
 - ⭐ THE IFC IS THE GENRECON MESH CUT BY THE SEGMENTATION (USER 2026-11-17, on the box IFC below: "el IFC de pccr es
   muy grande gordo, no se de donde lo sacaste" / "por que no exportas el genrecon que esta perfecto, para eso
   esta" / "asi debe ser ifc desde la malla genrecon cortada desde la segmentacion, exacto"): `bim/ifc_from_mesh.py`.

@@ -327,7 +327,7 @@
     "built": "reconstruite",
     "notBuilt": "sans reconstruction",
     "downloadZip": "Télécharger la {@session} en ZIP",
-    "zipStarted": "Téléchargement de {name} lancé : {files} fichiers, {gb} Go. Le ZIP est écrit pendant le téléchargement.",
+    "zipStarted": "Téléchargement de {name} lancé : {files} fichiers, {gb} Go. S'il est interrompu, le navigateur peut le reprendre là où il s'est arrêté.",
     "zipFailed": "Le téléchargement n'a pas pu être préparé.",
     "zipFailedDetail": "Impossible de télécharger {name}. {detail}",
     "newEmpty": "Vide",
@@ -340,7 +340,10 @@
       "uploading": "Téléversement de {name} — {pct}",
       "validating": "Vérification de {name}",
       "extracting": "Décompression de {name} — {pct}"
-    }
+    },
+    "zipPreparing": "Préparation du téléchargement de {name}…",
+    "zipNamePlaceholder": "nom (vide : celui du ZIP)",
+    "chooseZip": "Choisir le ZIP"
   },
   "scans": {
     "title": "{@Scans}",

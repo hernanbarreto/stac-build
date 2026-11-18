@@ -327,7 +327,7 @@
     "built": "reconstruido",
     "notBuilt": "sin reconstrucción",
     "downloadZip": "Descargar la {@session} como ZIP",
-    "zipStarted": "Descarga de {name} iniciada: {files} archivos, {gb} GB. El ZIP se arma mientras baja.",
+    "zipStarted": "Descarga de {name} iniciada: {files} archivos, {gb} GB. Si se corta, el navegador puede reanudarla donde quedó.",
     "zipFailed": "No se pudo preparar la descarga.",
     "zipFailedDetail": "No se pudo descargar {name}. {detail}",
     "newEmpty": "Vacía",
@@ -340,7 +340,10 @@
       "uploading": "Subiendo {name} — {pct}",
       "validating": "Comprobando {name}",
       "extracting": "Descomprimiendo {name} — {pct}"
-    }
+    },
+    "zipPreparing": "Preparando la descarga de {name}…",
+    "zipNamePlaceholder": "nombre (vacío: el que trae el ZIP)",
+    "chooseZip": "Elegir el ZIP"
   },
   "scans": {
     "title": "{@Scans}",

@@ -16,10 +16,14 @@ EMPTY write-ahead log, an upload in flight. The ZIP holds
                                  directory — so that the copy is the SAME tree: sizes, dates, modes
     <session id>/…               the tree
 
-WRITTEN AS A STREAM (write_zip): no second copy of a 100 GB session is ever on the volume; text is
-deflated, everything else (frames, clouds, octrees, meshes: already dense) is stored. A file that
-changes while it is being sent ENDS the stream with an error: a half-consistent archive is never
-finished.
+WRITTEN AS A FUNCTION OF THE MANIFEST (Layout): every entry is STORED, so the place of every byte
+of the ZIP is known before a file is read — its whole size (the browser shows how much is left) and
+any RANGE of it (a download of 100 GB cut by the network is RESUMED, not started again). No second
+copy of the session is ever on the volume: the bytes are read from the session as they are sent. A
+file that is not, when it is read, the one the manifest lists ENDS the stream with an error: a
+half-consistent archive is never finished. (Stored, not deflated: the JSON of a session would shrink
+— 12 of pccr's 107 GB — but a deflated entry's size is only known after compressing it, and then
+nothing can be resumed.)
 
 READ BACK IN TWO STEPS: validate() opens the uploaded ZIP and holds it to the manifest before a
 single byte is extracted — the format, one top-level directory, safe paths, every manifest entry
@@ -30,15 +34,22 @@ no session and no partial tree.
 """
 from __future__ import annotations
 
+import bisect
+import calendar
+import hashlib
 import json
 import os
 import re
 import shutil
 import stat
+import struct
+import threading
 import time
 import zipfile
+import zlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 FORMAT = "stac-session"
 VERSION = 1
@@ -50,9 +61,7 @@ BLOCK = 1 << 20
 # what a use of the session writes again, and never part of it
 SKIP_DIRS = {"__pycache__", ".ipynb_checkpoints"}
 SKIP_SUFFIXES = ("-shm", ".uploading", ".pyc")
-# deflated (text); everything else is stored as it is
-TEXT_SUFFIXES = (".json", ".jsonl", ".yaml", ".yml", ".txt", ".csv", ".tsv", ".log", ".md", ".xml", ".ifc", ".html",
-                 ".obj", ".mtl", ".svg")
+STAT_THREADS = 16                                             # (the volume is a network one: a file's stat is ~1 ms, in turn)
 
 Progress = Optional[Callable[[int, int, str], None]]          # (bytes done, bytes total, what)
 
@@ -68,29 +77,34 @@ def entries(project_dir: Path) -> List[Dict[str, Any]]:
     project_dir = Path(project_dir)
     if not (project_dir / "project.json").is_file():
         raise ArchiveError(f"{project_dir.name}: no project.json — not a session of this layout")
-    if list(project_dir.rglob("frames.extracting")):
-        raise ArchiveError(f"{project_dir.name}: a video is being extracted into it — download it when that ends")
-    out: List[Dict[str, Any]] = []
+    walked: List[Tuple[str, List[str], bool]] = []              # (directory, its names that are not walked directories, has walked directories)
     for root, dirs, files in os.walk(project_dir):
+        if "frames.extracting" in dirs or "frames.extracting" in files:
+            raise ArchiveError(f"{project_dir.name}: a video is being extracted into it — download it when that ends")
+        linked = [d for d in dirs if os.path.islink(os.path.join(root, d))]   # (a link to a directory is an entry, not a walk)
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and d not in linked)
+        walked.append((root, sorted(files + linked), bool(dirs)))
+    paths = [os.path.join(root, name) for root, names, _ in walked for name in names]
+    try:
+        with ThreadPoolExecutor(STAT_THREADS) as pool:
+            stats = dict(zip(paths, pool.map(os.lstat, paths)))
+    except OSError as e:
+        raise ArchiveError(f"{project_dir.name}: {e.filename} changed while the session was being listed — "
+                           f"it is being written; try again when that ends") from e
+    out: List[Dict[str, Any]] = []
+    for root, names, has_dirs in walked:
         rel_root = os.path.relpath(root, project_dir)
-        for d in sorted(dirs):
-            full = os.path.join(root, d)
-            if os.path.islink(full):
-                files.append(d)                                 # (a link to a directory is an entry, not a walk)
-        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not os.path.islink(os.path.join(root, d)))
         kept = 0
-        for name in sorted(files):
+        for name in names:
             full = os.path.join(root, name)
             rel = os.path.normpath(os.path.join(rel_root, name)).replace(os.sep, "/")
-            if os.path.islink(full):
+            st = stats[full]
+            if stat.S_ISLNK(st.st_mode):
                 out.append({"p": rel, "l": os.readlink(full)})
                 kept += 1
                 continue
-            if name.endswith(SKIP_SUFFIXES):
-                continue
-            st = os.stat(full)
-            if not stat.S_ISREG(st.st_mode):
-                continue                                        # (a socket, a pipe: not data)
+            if name.endswith(SKIP_SUFFIXES) or not stat.S_ISREG(st.st_mode):
+                continue                                        # (… and a socket, a pipe: not data)
             if name.endswith("-wal"):
                 if st.st_size == 0:
                     continue                                    # (an empty write-ahead log: SQLite makes it again)
@@ -98,7 +112,7 @@ def entries(project_dir: Path) -> List[Dict[str, Any]]:
                                    f"({st.st_size} bytes) — the session is being written; close it and download again")
             out.append({"p": rel, "s": st.st_size, "m": st.st_mtime_ns, "x": stat.S_IMODE(st.st_mode)})
             kept += 1
-        if not dirs and not kept and rel_root != ".":
+        if not has_dirs and not kept and rel_root != ".":
             out.append({"p": rel_root.replace(os.sep, "/"), "d": 1})
     return sorted(out, key=lambda e: e["p"])
 
@@ -129,51 +143,239 @@ def plan(project_dir: Path, session_id: str) -> Dict[str, Any]:
 
 
 # ── write ──────────────────────────────────────────────────────────────────────────────────────
-def _info(name: str, mtime_ns: int, mode: int, size: int = 0) -> zipfile.ZipInfo:
-    t = time.gmtime(max(mtime_ns // 1_000_000_000, 315532800))   # (a ZIP's clock starts in 1980; the exact date is the manifest's)
-    info = zipfile.ZipInfo(name, date_time=t[:6])
-    info.external_attr = (mode & 0xFFFF) << 16
-    info.compress_type = zipfile.ZIP_DEFLATED if name.lower().endswith(TEXT_SUFFIXES) else zipfile.ZIP_STORED
-    info.file_size = size
-    return info
+# The ZIP's own numbers (APPNOTE 4.3 … 4.5), written as zipfile writes them so that zipfile — which
+# reads the upload back — and any other tool read the same archive.
+ZIP64_LIMIT = (1 << 31) - 1                                    # a size or an offset from here on goes to the ZIP64 fields
+COUNT_LIMIT = (1 << 16) - 1
+FLAG_UTF8, FLAG_DESCRIPTOR = 0x800, 0x08
+CRC_STEP = 64 * BLOCK                                          # a file's running CRC is remembered every 64 MB: a resumed
+                                                               # download reads at most that much again before it sends
+_BYTES, _FILE, _DESCRIPTOR, _DIRECTORY = 0, 1, 2, 3
+
+
+def _dos(seconds: int) -> Tuple[int, int]:
+    """A ZIP's clock (1980 … 2107, 2 s): what its tools show; the exact date is the manifest's."""
+    t = time.gmtime(min(max(seconds, 315532800), 4354819199))
+    return t[3] << 11 | t[4] << 5 | t[5] // 2, (t[0] - 1980) << 9 | t[1] << 5 | t[2]
+
+
+class _Item:
+    """One entry of the ZIP: known content (``data``: the manifest, a link's target, a directory) or
+    a file of the session (``path``), read when it is sent."""
+    __slots__ = ("name", "mode", "time", "date", "size", "mtime", "path", "data", "crc", "offset", "big")
+
+    def __init__(self, name: str, mode: int, seconds: int, data: Optional[bytes] = None, path: Optional[str] = None,
+                 size: int = 0, mtime: int = 0):
+        self.name = name.encode("utf-8")
+        self.mode = mode
+        self.time, self.date = _dos(seconds)
+        self.data, self.path, self.mtime = data, path, mtime
+        self.size = len(data) if data is not None else size
+        self.crc = zlib.crc32(data) if data is not None else None
+        self.big = self.size >= ZIP64_LIMIT
+        self.offset = 0
+
+    def local_header(self) -> bytes:
+        described = self.data is None                           # (a file's CRC is only known once it was read: after its bytes)
+        flags = FLAG_UTF8 | (FLAG_DESCRIPTOR if described else 0)
+        size = 0 if described else self.size
+        extra = b""
+        if self.big:
+            extra, size = struct.pack("<HHQQ", 1, 16, size, size), 0xFFFFFFFF
+        return struct.pack("<4sHHHHHLLLHH", b"PK\x03\x04", 45 if self.big else 20, flags, 0, self.time, self.date,
+                           0 if described else self.crc, size, size, len(self.name), len(extra)) + self.name + extra
+
+    def descriptor(self, crc: int) -> bytes:
+        return struct.pack("<4sLQQ" if self.big else "<4sLLL", b"PK\x07\x08", crc, self.size, self.size)
+
+    def _directory_extra(self) -> Tuple[int, ...]:
+        return ((self.size, self.size) if self.big else ()) + ((self.offset,) if self.offset > ZIP64_LIMIT else ())
+
+    def directory_length(self) -> int:
+        n = len(self._directory_extra())
+        return 46 + len(self.name) + (4 + 8 * n if n else 0)
+
+    def directory_entry(self, crc: int) -> bytes:
+        wide = self._directory_extra()
+        extra = struct.pack("<HH" + "Q" * len(wide), 1, 8 * len(wide), *wide) if wide else b""
+        version = 45 if wide else 20
+        flags = FLAG_UTF8 | (FLAG_DESCRIPTOR if self.data is None else 0)
+        size = 0xFFFFFFFF if self.big else self.size
+        attributes = (self.mode & 0xFFFF) << 16 | (0x10 if stat.S_ISDIR(self.mode) else 0)
+        return struct.pack("<4s4B4HL2L5H2L", b"PK\x01\x02", version, 3, version, 0, flags, 0, self.time, self.date, crc,
+                           size, size, len(self.name), len(extra), 0, 0, 0, attributes,
+                           0xFFFFFFFF if self.offset > ZIP64_LIMIT else self.offset) + self.name + extra
+
+
+def _end_records(count: int, directory_size: int, directory_offset: int) -> bytes:
+    out = b""
+    if count > COUNT_LIMIT or directory_offset > ZIP64_LIMIT or directory_size > ZIP64_LIMIT:
+        out += struct.pack("<4sQ2H2L4Q", b"PK\x06\x06", 44, 45, 45, 0, 0, count, count, directory_size, directory_offset)
+        out += struct.pack("<4sLQL", b"PK\x06\x07", 0, directory_offset + directory_size, 1)
+        count, directory_size, directory_offset = min(count, 0xFFFF), min(directory_size, 0xFFFFFFFF), min(directory_offset, 0xFFFFFFFF)
+    return out + struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, count, count, directory_size, directory_offset, 0)
+
+
+class Layout:
+    """THE SESSION'S ZIP AS A FUNCTION OF ITS MANIFEST. Everything is stored, so where each byte of
+    the archive lies is known from the manifest alone: ``total`` (the ZIP's size), ``etag`` (the same
+    manifest = the same bytes) and ``stream(start, stop)`` — any range of it, read from the session
+    at that moment. What is not known before a file was read is its CRC-32, written AFTER its bytes
+    and again in the ZIP's directory: a stream that passes over a file keeps it (and its running
+    value every CRC_STEP, for a download resumed inside a large file); a range that needs one nobody
+    read yet reads that file (slower, never wrong).
+
+    One Layout serves every request of one download — its first bytes and its resumptions."""
+
+    def __init__(self, project_dir: Path, session_id: str, manifest: Dict[str, Any]):
+        self.project_dir, self.session_id, self.manifest = Path(project_dir), session_id, manifest
+        body = json.dumps(manifest, ensure_ascii=False).encode("utf-8")
+        self.etag = hashlib.sha256(body).hexdigest()[:32]
+        try:
+            made = calendar.timegm(time.strptime(manifest.get("created_at", ""), "%Y-%m-%dT%H:%M:%SZ"))
+        except ValueError:
+            made = 0
+        self.items: List[_Item] = [_Item(MANIFEST, stat.S_IFREG | 0o644, made, data=body)]
+        for e in manifest["entries"]:
+            name = f"{session_id}/{e['p']}"
+            if "d" in e:
+                self.items.append(_Item(name + "/", stat.S_IFDIR | 0o755, made, data=b""))
+            elif "l" in e:
+                self.items.append(_Item(name, stat.S_IFLNK | 0o777, made, data=e["l"].encode("utf-8")))
+            else:
+                self.items.append(_Item(name, stat.S_IFREG | e["x"], e["m"] // 1_000_000_000, path=e["p"], size=e["s"], mtime=e["m"]))
+        self._starts: List[int] = []
+        self._pieces: List[Tuple[int, int, int, Optional[bytes]]] = []       # (kind, item, length, bytes when known)
+        pos = 0
+
+        def add(kind: int, item: int, length: int, data: Optional[bytes] = None) -> None:
+            nonlocal pos
+            if length:
+                self._starts.append(pos)
+                self._pieces.append((kind, item, length, data))
+                pos += length
+
+        for i, it in enumerate(self.items):
+            it.offset = pos
+            header = it.local_header()
+            add(_BYTES, i, len(header), header)
+            if it.data is not None:
+                add(_BYTES, i, len(it.data), it.data)
+            else:
+                add(_FILE, i, it.size)
+                add(_DESCRIPTOR, i, 24 if it.big else 16)
+        self.directory_offset = pos
+        for i, it in enumerate(self.items):
+            add(_DIRECTORY, i, it.directory_length())
+        end = _end_records(len(self.items), pos - self.directory_offset, self.directory_offset)
+        add(_BYTES, -1, len(end), end)
+        self.total = pos
+        self._crc: Dict[int, int] = {i: it.crc for i, it in enumerate(self.items) if it.crc is not None}
+        self._marks: Dict[Tuple[int, int], int] = {}             # (item, offset) -> the CRC of the file's bytes before it
+        self._lock = threading.Lock()
+
+    def _changed(self, it: _Item) -> ArchiveError:
+        return ArchiveError(f"{self.session_id}: {it.path} changed while the session was being sent")
+
+    def _read(self, i: int, start: int, stop: int, cancelled: Optional[Callable[[], bool]]) -> Iterator[bytes]:
+        """The bytes [start, stop) of file ``i`` — read from the nearest point whose running CRC is
+        known (the file's start when there is none), so that the CRC is kept as the read advances."""
+        it = self.items[i]
+        full = self.project_dir / it.path
+        try:
+            st = os.stat(full)
+        except OSError:
+            raise self._changed(it) from None
+        if st.st_size != it.size or st.st_mtime_ns != it.mtime:
+            raise self._changed(it)
+        base = start - start % CRC_STEP
+        with self._lock:
+            crc = 0 if base == 0 else self._marks.get((i, base))
+        if crc is None:
+            base, crc = 0, 0
+        pos = base
+        with open(full, "rb") as f:
+            if base:
+                f.seek(base)
+            while pos < stop:
+                if cancelled is not None and cancelled():
+                    raise ArchiveError(f"{self.session_id}: the download was cancelled")
+                block = f.read(min(BLOCK, it.size - pos))
+                if not block:
+                    raise self._changed(it)
+                crc = zlib.crc32(block, crc)
+                lo, hi = max(start - pos, 0), min(stop - pos, len(block))
+                if hi > lo:
+                    yield block[lo:hi]
+                pos += len(block)
+                if pos % CRC_STEP == 0 and pos < it.size:
+                    with self._lock:
+                        self._marks[(i, pos)] = crc
+            if pos == it.size:
+                if f.read(1):
+                    raise self._changed(it)
+                with self._lock:
+                    self._crc[i] = crc
+
+    def crc(self, i: int, cancelled: Optional[Callable[[], bool]] = None) -> int:
+        with self._lock:
+            known = self._crc.get(i)
+        if known is None:                                         # (nobody read it to its end yet: read it)
+            size = self.items[i].size
+            for _ in self._read(i, size, size, cancelled):
+                pass
+            known = self._crc[i]
+        return known
+
+    def _parts(self, start: int, stop: int, cancelled: Optional[Callable[[], bool]]) -> Iterator[bytes]:
+        k = bisect.bisect_right(self._starts, start) - 1
+        while k < len(self._pieces) and self._starts[k] < stop:
+            kind, i, length, data = self._pieces[k]
+            lo, hi = max(start - self._starts[k], 0), min(stop - self._starts[k], length)
+            if hi <= lo:
+                k += 1
+                continue
+            if kind == _FILE:
+                yield from self._read(i, lo, hi, cancelled)
+            else:
+                if kind == _DESCRIPTOR:
+                    data = self.items[i].descriptor(self.crc(i, cancelled))
+                elif kind == _DIRECTORY:
+                    data = self.items[i].directory_entry(self.crc(i, cancelled))
+                yield data[lo:hi]
+            k += 1
+
+    def stream(self, start: int = 0, stop: Optional[int] = None, cancelled: Optional[Callable[[], bool]] = None) -> Iterator[bytes]:
+        """The ZIP's bytes [start, stop), in blocks (the small pieces — headers, a directory of
+        thousands of entries, small files — joined)."""
+        stop = self.total if stop is None else min(stop, self.total)
+        if start < 0 or start > stop:
+            raise ValueError(f"no such range: {start}-{stop} of {self.total}")
+        held = bytearray()
+        for part in self._parts(start, stop, cancelled):
+            if not held and len(part) >= BLOCK:
+                yield part
+                continue
+            held += part
+            if len(held) >= BLOCK:
+                yield bytes(held)
+                held.clear()
+        if held:
+            yield bytes(held)
 
 
 def write_zip(project_dir: Path, session_id: str, stream, manifest: Optional[Dict[str, Any]] = None,
               progress: Progress = None, cancelled: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
     """Write the session to ``stream`` (any object with write(): it need not seek). Returns the
     manifest. Raises ArchiveError when a file is not, at the moment it is read, the one listed."""
-    project_dir = Path(project_dir)
-    manifest = manifest or manifest_of(project_dir, session_id)
-    total, done = int(manifest["bytes"]), 0
-    with zipfile.ZipFile(stream, "w", allowZip64=True) as zf:
-        zf.writestr(_info(MANIFEST, time.time_ns(), stat.S_IFREG | 0o644), json.dumps(manifest, ensure_ascii=False),
-                    compress_type=zipfile.ZIP_DEFLATED, compresslevel=6)
-        for e in manifest["entries"]:
-            name = f"{session_id}/{e['p']}"
-            full = project_dir / e["p"]
-            if "d" in e:
-                zf.writestr(_info(name + "/", time.time_ns(), stat.S_IFDIR | 0o755), b"")
-                continue
-            if "l" in e:
-                zf.writestr(_info(name, time.time_ns(), stat.S_IFLNK | 0o777), e["l"])
-                continue
-            st = os.stat(full)
-            if st.st_size != e["s"] or st.st_mtime_ns != e["m"]:
-                raise ArchiveError(f"{session_id}: {e['p']} changed while the session was being sent")
-            info = _info(name, e["m"], stat.S_IFREG | e["x"], e["s"])
-            sent = 0
-            with open(full, "rb") as src, zf.open(info, "w", force_zip64=e["s"] >= (1 << 31) - 1) as dst:
-                for block in iter(lambda: src.read(BLOCK), b""):
-                    if cancelled is not None and cancelled():
-                        raise ArchiveError(f"{session_id}: the download was cancelled")
-                    dst.write(block)
-                    sent += len(block)
-                    done += len(block)
-                    if progress is not None:
-                        progress(done, total, e["p"])
-            if sent != e["s"]:
-                raise ArchiveError(f"{session_id}: {e['p']} changed while the session was being sent")
-    return manifest
+    layout = Layout(project_dir, session_id, manifest or manifest_of(project_dir, session_id))
+    sent = 0
+    for block in layout.stream(cancelled=cancelled):
+        stream.write(block)
+        sent += len(block)
+        if progress is not None:
+            progress(sent, layout.total, "")
+    return layout.manifest
 
 
 # ── read ───────────────────────────────────────────────────────────────────────────────────────
@@ -181,15 +383,7 @@ def _safe(rel: str) -> bool:
     return bool(rel) and not rel.startswith("/") and "\\" not in rel and ".." not in rel.split("/") and "\0" not in rel
 
 
-def read_manifest(zf: zipfile.ZipFile) -> Dict[str, Any]:
-    try:
-        raw = zf.read(MANIFEST)
-    except KeyError:
-        raise ArchiveError(f"this ZIP is not a STAC session: it has no {MANIFEST}") from None
-    try:
-        m = json.loads(raw)
-    except ValueError:
-        raise ArchiveError(f"{MANIFEST} is not readable") from None
+def _checked(m: Any) -> Dict[str, Any]:
     if not isinstance(m, dict) or m.get("format") != FORMAT:
         raise ArchiveError("this ZIP is not a STAC session (its manifest names another format)")
     if m.get("version") != VERSION:
@@ -202,6 +396,70 @@ def read_manifest(zf: zipfile.ZipFile) -> Dict[str, Any]:
     return m
 
 
+def read_manifest(zf: zipfile.ZipFile) -> Dict[str, Any]:
+    try:
+        raw = zf.read(MANIFEST)
+    except KeyError:
+        raise ArchiveError(f"this ZIP is not a STAC session: it has no {MANIFEST}") from None
+    try:
+        return _checked(json.loads(raw))
+    except ValueError as e:
+        if isinstance(e, ArchiveError):
+            raise
+        raise ArchiveError(f"{MANIFEST} is not readable") from None
+
+
+def _target(m: Dict[str, Any], projects_dir: Path, name: Optional[str]) -> str:
+    target = (name or m["session_id"]).strip()
+    if not ID_RE.match(target):
+        raise ArchiveError("a session's name can only contain letters, numbers, dashes and underscores")
+    if (Path(projects_dir) / target).exists():
+        raise ArchiveError(f"a session named '{target}' already exists — give this one another name, or delete that one first")
+    return target
+
+
+def manifest_at_head(zip_path: Path) -> Tuple[Optional[Dict[str, Any]], int]:
+    """The manifest read from the FIRST bytes of a ZIP that is still arriving (a session's ZIP
+    carries it first, stored): (manifest, 0) once the file holds it whole; (None, n) while its
+    first n bytes are needed to say; (None, 0) when this ZIP does not begin with it — the verdict
+    then waits for the whole file (validate)."""
+    with open(zip_path, "rb") as f:
+        head = f.read(30)
+        if len(head) < 30:
+            return None, 30
+        sig, _version, flags, method, _t, _d, crc, size, _usize, name_len, extra_len = struct.unpack("<4sHHHHHLLLHH", head)
+        if sig != b"PK\x03\x04" or method != 0 or flags & (FLAG_DESCRIPTOR | 0x1) or size == 0xFFFFFFFF:
+            return None, 0
+        if name_len != len(MANIFEST):
+            return None, 0
+        need = 30 + name_len + extra_len + size
+        rest = f.read(need - 30)
+    if len(rest) >= name_len and rest[:name_len] != MANIFEST.encode():
+        return None, 0
+    if len(rest) < need - 30:
+        return None, need
+    body = rest[name_len + extra_len:]
+    if zlib.crc32(body) != crc:
+        raise ArchiveError(f"the ZIP is damaged: {MANIFEST} does not match its checksum")
+    try:
+        return _checked(json.loads(body)), 0
+    except ValueError as e:
+        if isinstance(e, ArchiveError):
+            raise
+        raise ArchiveError(f"{MANIFEST} is not readable") from None
+
+
+def check_head(m: Dict[str, Any], projects_dir: Path, name: Optional[str] = None) -> Dict[str, Any]:
+    """What can be refused from the manifest alone, while the rest of the ZIP is still on its way:
+    the name the session would take (valid, and free) and the manifest's own totals."""
+    target = _target(m, projects_dir, name)
+    files = sum(1 for e in m["entries"] if isinstance(e, dict) and "s" in e)
+    total = sum(e.get("s", 0) for e in m["entries"] if isinstance(e, dict) and isinstance(e.get("s"), int))
+    if files != m.get("files") or total != m.get("bytes"):
+        raise ArchiveError("the manifest's totals do not match its own entries")
+    return {"session_id": target, "source_id": m["session_id"], "files": files, "bytes": total, "scans": m.get("scans", [])}
+
+
 def validate(zip_path: Path, projects_dir: Path, name: Optional[str] = None) -> Dict[str, Any]:
     """Hold the ZIP to its manifest and to a session's shape BEFORE anything is extracted. Returns
     {"session_id" (the name it will have), "source_id", "files", "bytes", "scans"}; raises
@@ -212,11 +470,7 @@ def validate(zip_path: Path, projects_dir: Path, name: Optional[str] = None) -> 
     with zipfile.ZipFile(zip_path) as zf:
         m = read_manifest(zf)
         source_id = m["session_id"]
-        target = (name or source_id).strip()
-        if not ID_RE.match(target):
-            raise ArchiveError("a session's name can only contain letters, numbers, dashes and underscores")
-        if (projects_dir / target).exists():
-            raise ArchiveError(f"a session named '{target}' already exists — give this one another name, or delete that one first")
+        target = _target(m, projects_dir, name)
         in_zip: Dict[str, zipfile.ZipInfo] = {}
         for info in zf.infolist():
             if info.filename in in_zip:
@@ -344,8 +598,3 @@ def tree_state(project_dir: Path) -> Dict[str, Any]:
     """{path: (bytes, mtime ns, mode) | link target | 'dir'} of a session — what two copies of one
     session have equal (tests, and the proof on a real session)."""
     return {e["p"]: (e["l"] if "l" in e else "dir" if "d" in e else (e["s"], e["m"], e["x"])) for e in entries(project_dir)}
-
-
-def iter_blocks(path: Path) -> Iterator[bytes]:
-    with open(path, "rb") as f:
-        yield from iter(lambda: f.read(BLOCK), b"")

@@ -580,6 +580,7 @@ function App() {
   const zipInputRef = useRef<HTMLInputElement>(null)
   const [sessionImport, setSessionImport] = useState<{ phase: 'uploading' | 'validating' | 'extracting'; pct: number; name: string } | null>(null)
   const sessionImportJob = useRef<{ job: string | null; cancelled: boolean } | null>(null)
+  const sessionZipName = useRef<string | undefined>(undefined)   // another name for the session the ZIP brings
   const [scansList, setScansList] = useState<{ date: string; source: string; key: string; frame_count: number; has_output: boolean; recon_state?: string; cached_chunks?: number }[]>([])
   const [selectedScans, setSelectedScans] = useState<string[]>([])
 
@@ -1837,11 +1838,13 @@ function App() {
 
   // THE SESSION AS ONE ZIP (USER 2026-11-18: "una función en cada sesión para descargarla como zip").
   // A browser download: the browser writes the ZIP to the disk as it arrives — a 100 GB session never
-  // sits in the page's memory. A link cannot carry the login, so the server gives a one-use link for it.
+  // sits in the page's memory. A link cannot carry the login, so the server gives a link for it; the
+  // ZIP's size is known from the start and the browser can RESUME it on that link if it is cut.
   const downloadSessionZip = useCallback(async (id: string) => {
     try {
       const headers: HeadersInit = {}
       if (token) headers['Authorization'] = `Bearer ${token}`
+      report(t('sessions.zipPreparing', { name: id }))            // (the server lists the session first: seconds on a large one)
       const res = await fetch(`/api/session_archive/${encodeURIComponent(id)}/ticket`, { method: 'POST', headers })
       const d = await res.json().catch(() => ({}))
       if (!res.ok) {
@@ -1855,7 +1858,8 @@ function App() {
       document.body.appendChild(a)
       a.click()
       a.remove()
-      report(t('sessions.zipStarted', { name: id, files: d.files, gb: (d.bytes / 1e9).toFixed(d.bytes >= 1e10 ? 0 : 1) }), 'ok')
+      const size = d.zip_bytes ?? d.bytes
+      report(t('sessions.zipStarted', { name: id, files: d.files, gb: (size / 1e9).toFixed(size >= 1e10 ? 0 : 1) }), 'ok')
       return true
     } catch (err: any) {
       report(t('sessions.zipFailedDetail', { name: id, detail: err?.message ?? err }), 'err')
@@ -1863,7 +1867,8 @@ function App() {
     }
   }, [token, report, t])
 
-  const pickSessionZip = useCallback(() => {
+  const pickSessionZip = useCallback((name?: string) => {
+    sessionZipName.current = name
     if (zipInputRef.current) {
       zipInputRef.current.value = ''
       zipInputRef.current.click()
@@ -1889,7 +1894,7 @@ function App() {
     try {
       setSessionImport({ phase: 'uploading', pct: 0, name: file.name })
       const opened = await fetch('/api/session_import', { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: file.name, size: file.size }) })
+        body: JSON.stringify({ filename: file.name, size: file.size, name: sessionZipName.current ?? null }) })
       const o = await opened.json().catch(() => ({}))
       if (!opened.ok) return fail(detailOf(o, `HTTP ${opened.status}`))
       state.job = o.job
@@ -1913,7 +1918,7 @@ function App() {
         }
         retries = 0
         offset = d.received
-        setSessionImport({ phase: 'uploading', pct: 100 * offset / file.size, name: file.name })
+        setSessionImport({ phase: 'uploading', pct: 100 * offset / file.size, name: d.session_id || file.name })
       }
       const fin = await fetch(`/api/session_import/${o.job}/finish`, { method: 'POST', headers: auth })
       if (!fin.ok) return fail(detailOf(await fin.json().catch(() => ({})), `HTTP ${fin.status}`))
