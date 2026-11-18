@@ -464,6 +464,71 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
      `pccr_2026-08-31_elements_whole.ifc`, 433 MB). INSTALLED in da3: pye57. APPROVED and NOT installed:
      fast-simplification ("tambien estas aprobado para el simplificador, lo que necesitas") — only needed if
      the IFC is ever simplified again (open3d's decimation: ~4 min on 13 M triangles).
+- ⭐⭐⭐ THE WHOLE LIST, ITEM BY ITEM (USER 2026-11-18: "En la lista de pendientes no mencionaste la base de datos de
+  segmentos como única fuente. No veo que hayas hecho un trabajo serio de listar en serio lo que falta aún cuando
+  yo te pasé la lista en esta misma conversación"). HIS LIST of 2026-11-17, every item with its state on
+  2026-11-18 — none folded into another. The block above holds the detail of what this session added.
+  A · FOR DECEMBER, in his order
+    1a. FUSION, MERGE (scans of different days as one cloud and mesh) ............ NOT STARTED
+    1b. FUSION, COMPARE (pccr 2408 with 3108 on their common zones) ............... NOT STARTED — his way to pair
+        the scales: mark the same points on both and fit one to the other, or to an outside measure
+    2.  BIM COMPARISON (an IFC in place of the second scan) ........................ NOT STARTED — the IFC of pccr
+        3108 exists (the GenRecon mesh cut by the segmentation); bim/comparison.py (March) must be adapted to scans
+    3.  TICKETS (review items / non-conformities, to show the concept) ............. NOT STARTED
+    4.  DA3 → MapAnything as the metric source, for the licence .................... NOT STARTED ("luego, ahora no")
+  B · WAITING FOR HIS DECISION
+    5.  The scales of pccr 2408 / 3108: where the factor is applied ................ OPEN (goes with 1b)
+    6.  A spoken confirmation for what launches GPU work or deletes data ........... DONE 2026-11-17
+    7.  The 138 `manual` commands of the interface .................................. DONE 2026-11-17 (272 commands)
+    8.  THE DATABASE AS THE SINGLE SOURCE OF THE SEGMENTATION, the Segmentation
+        Manager included (off segmentation_result.json) ............................ NOT STARTED — a large
+        project, on his order; today the list endpoint reads the database, everything else the file
+    9.  GenRecon's mesh step: the remesh closes every sheet into a shell (the floor
+        as two sheets) and the simplification leaves the faceting .................. NOT CORRECTED
+    10. A projection-only re-run audits against the PREVIOUS fusion map ............ NOT FIXED
+    11. The 13 tests failing since before the GPU ports ............................ NOT INVESTIGATED
+    12. GenRecon's UV unwrap on the card (other textures: needs his eye) ........... NOT STARTED
+    13. A "free height" tool for the chat .......................................... NOT STARTED
+    14. The backups `output/_before_min_points/` of the five sessions .............. STILL KEPT, until he says
+  C · WAITING FOR HIS EYE / EAR
+    15. The five GenRecon meshes at 2.5 m · 3 points with the edge filter .......... PENDING (2026-11-17: "el
+        genrecon que esta perfecto", said of pccr 3108 while asking for the IFC — not a verdict on the five)
+    16. Observatorio's cloud ....................................................... PENDING
+    17. The oriented boxes computed on the card (a third turns with the draw) ...... PENDING
+    18. The chat after its fixes ................................................... PENDING
+    19. The three voices ........................................................... PENDING
+    20. The commands in the browser (now all of them, and the spoken confirmation) . PENDING
+    21. The interface's French ..................................................... PENDING
+    22. bufferStop: its images upright at the camera poses and in the flythrough ... PENDING
+    23. bufferStop: its cloud standing or on its side in the viewer ................ PENDING
+    24. The calibration's factor applied to a real session — HIS action ............ PENDING (by voice too, now,
+        on a spoken confirmation)
+  D · AFTER DECEMBER
+    25. Scene understanding (the 3D relations layer, a much better VLM stage) ...... NOT STARTED
+    26. Speed (SAM3 ~10.5 h on pccr 2408) .......................................... NOT STARTED
+    27. An evaluation against laser ground truth (ScanNet++ / ETH3D), on his word .. NOT STARTED
+  E · MINOR
+    28. Zaragoza's split column .................................................... as it was (waved off)
+    29. pccr 2408's small duplicates ............................................... as it was (waved off) — the
+        same-surface merge of item 30 may change them: to look at when it is applied
+    30. docs/ARCHITECTURE.md and ROADMAP.md out of date ............................ as they were (on his word)
+    31. The general list of docs/pipeline_final.md §4 (capture distance, the weighted
+        vote, the GPU ports of the intake, among others) ........................... as it was
+  F · ADDED IN THIS SESSION (2026-11-17 / 18)
+    32. ONE OWNER PER SURFACE: the rule is decided and ON for new projections; APPLYING IT TO THE FIVE
+        SESSIONS is pending, on his word (it rewrites their segmentation; then the octree, then the IFC again)
+    33. The IFC in the viewer: the light one (10 %) "para probar" — his eye pending; the whole one is exported
+    34. His two complaints on the first IFC (the opacity; points that stay when an object is turned off) —
+        not reproduced; to re-check with him on the mesh IFC
+    35. The exporter: his eye on the window and on the files opened in other programs
+    36. Whether the recogniser always listens in the settings' language — his decision
+    37. The test files in `projects/pccr/exports/` (a ZIP of 1.85 GB, an IFC of 433 MB) — his to keep or drop
+    38. A device twin of the same-surface neighbour search (scipy on the CPU today)
+    39. He said "tengo más consultas luego"
+  ⚠ HOW TO WORK, AGAIN (USER 2026-11-18: "Que prueba estás haciendo?, el Pod es muy caro" / "Contéstame lo que te
+  pregunté siempre la prioridad es contestarme a mi"): a test he did not ask for is ANNOUNCED in one line before
+  it is launched, with how long it takes; "push a todo nomas" means the push and nothing else; his question is
+  answered before any tool call.
 - ⭐⭐ THE LIST TO RESUME FROM (USER 2026-11-14: "anota todo esto como pendiente claro en claude.md para retomar en la
   proxima sesion"). The state on 2026-11-14, main a51092a pushed to origin main and master; each item's detail is
   in its own entry below. NEXT QUESTION TO HIM: start with the fusion (merge + compare)?
