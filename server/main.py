@@ -5929,119 +5929,138 @@ async def get_active_pipelines():
 
 
 @app.get("/api/bim/auto_match/{session_id}")
-async def bim_auto_match(session_id: str):
+async def bim_auto_match(session_id: str, scan: Optional[str] = None):
     """
-    Automatically match segment labels to IFC element name suffixes.
-    Returns all discovered matches for this session.
+    Pair the scan's segmented objects with the IFC's elements (bim/scan_data.py): by INSTANCE ID
+    when STAC wrote the IFC from a scan (its elements are named <label>:<label>:<instance id>), by
+    the segment's LABEL — the element's number, typed by hand — for any other IFC.
+    ``scan`` ("date/source"): the scan on screen; without it the project's active scan.
     """
-    ctx = _ctx(session_id)
-    output_dir = ctx.output_dir
-    
-    # Load segmentation
-    seg_result_path = output_dir / "segmentation_result.json"
-    seg_path = output_dir / "segmentation.json"
-    if seg_result_path.exists():
-        seg_data = json.loads(seg_result_path.read_text())
-    elif seg_path.exists():
-        seg_data = json.loads(seg_path.read_text())
-    else:
-        return {"matches": [], "error": "No segmentation data"}
-    
-    seg_labels = {str(inst.get("label", "")) for inst in seg_data.get("instances", [])}
-    
-    # Find IFC file and build name index
-    ifc_files = list(ctx.ifcs_dir.glob("*.ifc"))
-    if not ifc_files:
-        return {"matches": [], "error": "No IFC file found"}
-    
-    import ifcopenshell
-    ifc_file = ifcopenshell.open(str(ifc_files[0]))
-    
-    # Build name suffix → element info map
-    ifc_elements = {}
-    for el in ifc_file.by_type('IfcProduct'):
-        name = getattr(el, 'Name', None)
-        if not name:
-            continue
-        name = str(name)
-        parts = name.split(':')
-        suffix = parts[-1].strip()
-        if suffix.isdigit():
-            ifc_elements[suffix] = {
-                "element_key": suffix,
-                "ifc_type": el.is_a(),
-                "ifc_name": name,
-                "ifc_id": el.id(),
-            }
-    
-    # Find matches
-    matches = []
-    for label in seg_labels:
-        if label in ifc_elements:
-            matches.append({
-                "segment_label": label,
-                **ifc_elements[label],
-            })
-    
-    return {
-        "matches": matches,
-        "total_segments": len(seg_labels),
-        "total_ifc_elements": len(ifc_elements),
-    }
+    from bim.scan_data import Scan, ScanError, element_keys, first_ifc, stac_source
+    ctx = _ctx(session_id, scan)
+
+    def _match():
+        ifc_path = first_ifc(ctx.ifcs_dir, ctx.session_dir)
+        if ifc_path is None:
+            return {"matches": [], "error": "No IFC file found"}
+        try:
+            scanned = Scan(ctx.output_dir)
+        except ScanError as e:
+            return {"matches": [], "error": str(e)}
+        import ifcopenshell
+        ifc_file = ifcopenshell.open(str(ifc_path))
+        elements = element_keys(ifc_file)
+        source = stac_source(ifc_file)
+        matches = scanned.match(elements, by_instance_id=source is not None)
+        return {
+            "matches": matches,
+            "matched_by": "instance_id" if source is not None else "label",
+            "ifc": ifc_path.name,
+            "ifc_scan": source[1] if source is not None else None,
+            "total_segments": len(scanned.instances),
+            "total_ifc_elements": len(elements),
+        }
+
+    return await asyncio.get_running_loop().run_in_executor(None, _match)
+
+
+# The BIM comparisons in flight or just ended: "<session>|<scan>" -> {status, progress, message, …}
+_bim_compare_runs: Dict[str, Dict[str, Any]] = {}
 
 
 @app.post("/api/bim/compare")
 async def bim_compare(request: Request):
     """
-    Run Cloud-to-Mesh deviation analysis.
-    Body: { session_id, matches: [{ segment_label, element_key }], tolerance_mm?: number }
+    Launch the Cloud-to-Mesh deviation analysis of a scan against the project's IFC.
+    Body: { session_id, matches (what /api/bim/auto_match gives), skip_registration?, scan? }
+
+    IT ANSWERS AT ONCE ({ok, status: "running"}) and the comparison runs in its own process
+    (bim/compare_job.py): a scan of today is compared in minutes (pccr 2026-08-31: 18.8 M points,
+    281 elements), an HTTP answer that takes over 100 s never arrives through the pod's proxy, and
+    the server keeps its threads. Ask GET /api/bim/compare/{session_id}/status for the state; when
+    it is "done" the sheet and sabana_meta.json are on disk.
     """
+    import tempfile
     from task_manager import task_manager
     body = await request.json()
     session_id = body.get("session_id")
     matches = body.get("matches", [])
-    skip_registration = body.get("skip_registration", False)
+    skip_registration = bool(body.get("skip_registration", False))
+    scan = body.get("scan") or None
     # Tolerance from config.yaml bim.deviation.tolerance_mm (mm)
     bim_cfg = cfg.get("bim", {}).get("deviation", {})
-    tolerance_mm = bim_cfg.get("tolerance_mm", 50.0)
-    
-    if not session_id or not matches:
+    tolerance_mm = float(bim_cfg.get("tolerance_mm", 50.0))
+
+    if not session_id or not isinstance(matches, list) or not matches:
         raise HTTPException(400, "session_id and matches required")
-    
-    ctx = _ctx(session_id)
+
+    ctx = _ctx(session_id, scan)
     session_dir = str(ctx.session_dir)
-    
-    loop = asyncio.get_event_loop()
+    key = f"{session_id}|{scan or ''}"
+    if (_bim_compare_runs.get(key) or {}).get("status") == "running":
+        raise HTTPException(409, "This scan is being compared already")
+    why = _export_busy(session_id)                    # (a pipeline job rewrites the files the comparison reads)
+    if why:
+        raise HTTPException(409, why.replace("the scan is exported when it ends", "compare it when it ends"))
+
+    with tempfile.NamedTemporaryFile("w", suffix=".json", prefix="stac_bim_matches_", delete=False) as f:
+        json.dump(matches, f)
+        matches_path = f.name
+    argv = [sys.executable, "-m", "bim.compare_job", "--session-dir", session_dir, "--matches", matches_path,
+            "--tolerance-mm", repr(tolerance_mm)] + (["--manual"] if skip_registration else [])
+    env = dict(os.environ)
+    env.setdefault("OMP_NUM_THREADS", "8")            # the pod grants ~26 CPUs and shows 252
+    env["CUDA_VISIBLE_DEVICES"] = ""                  # the comparison is numpy's: it never touches the card
+    state: Dict[str, Any] = {"status": "running", "progress": 0, "message": "starting", "started_at": time.time(),
+                             "matches": len(matches), "tolerance_mm": tolerance_mm}
+    _bim_compare_runs[key] = state
     tid = task_manager.start(session_id, "bim_compare", "BIM vs Scan Comparison")
-    
-    try:
-        def _compare():
-            try:
-                from bim_comparison import run_comparison
-                
-                def on_progress(pct, detail=""):
-                    task_manager.update(tid, pct=pct, detail=detail)
-                
-                result = run_comparison(
-                    session_dir,
-                    matches,
-                    tolerance=tolerance_mm / 1000.0,
-                    progress_callback=on_progress,
-                    skip_registration=skip_registration,
-                )
+
+    async def _run():
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv, cwd=str(SERVER_DIR), env=env, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT)
+            assert proc.stdout is not None
+            report, error, tail = None, None, []
+            async for raw in proc.stdout:
+                line = raw.decode("utf-8", "replace").rstrip()
+                if line.startswith("RESULT "):
+                    report = json.loads(line[7:])
+                elif line.startswith("ERROR "):
+                    error = line[6:]
+                elif line.startswith("PROGRESS "):
+                    pct, _, msg = line[9:].partition(" ")
+                    state.update(progress=int(pct) if pct.isdigit() else state["progress"], message=msg)
+                    task_manager.update(tid, pct=state["progress"], detail=msg)
+                elif line.strip():
+                    print(line, flush=True)
+                    tail = (tail + [line])[-5:]
+            code = await proc.wait()
+            if code == 0 and report is not None:
+                state.update(status="done", progress=100, message="done", seconds=round(time.time() - state["started_at"], 1), **report)
                 task_manager.finish(tid)
-                return result
-            except Exception as e:
-                task_manager.fail(tid, str(e))
-                raise
-        
-        result = await loop.run_in_executor(None, _compare)
-        return result
-    
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(500, str(e))
+            else:
+                state.update(status="failed", error=error or f"the comparison ended with code {code}: {' | '.join(tail)}")
+                task_manager.fail(tid, state["error"])
+        except Exception as e:  # noqa: BLE001 — declared in the state the interface polls
+            state.update(status="failed", error=f"{type(e).__name__}: {e}")
+            task_manager.fail(tid, state["error"])
+        finally:
+            try:
+                os.unlink(matches_path)
+            except OSError:
+                pass
+
+    asyncio.get_running_loop().create_task(_run())
+    return {"ok": True, **state}
+
+
+@app.get("/api/bim/compare/{session_id}/status")
+async def bim_compare_status(session_id: str, scan: Optional[str] = None):
+    """How the comparison of a scan is going: {status: idle | running | done | failed, progress, message,
+    and — done — its summary; failed — error}."""
+    return {"ok": True, **(_bim_compare_runs.get(f"{session_id}|{scan or ''}") or {"status": "idle"})}
 
 
 @app.get("/api/sessions/{session_id}/sabana/exists")

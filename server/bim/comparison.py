@@ -2,11 +2,21 @@
 STAC Build — BIM vs Scan Comparison
 Cloud-to-Mesh (C2M) deviation analysis.
 
-For each matched pair (scan segment ↔ IFC element), computes the
+For each matched pair (scan object ↔ IFC element), computes the
 shortest distance from every scan point to the BIM mesh surface.
 Returns per-point deviations for heatmap rendering.
 
 Hernán Barreto — Ingerop IN3
+
+ADAPTED TO THE SCANS OF TODAY (2026-11-18, his "create un IFC vos a partir de PCCR3108, para
+comparar contra ese mismo"): written in March for clouds of a million points whose segments were
+labelled by hand with their BIM element's number, it now reads a scan through bim/scan_data.py —
+the objects from the instance store, their points from the per-point ids, matched by INSTANCE ID
+to an IFC that STAC wrote from a scan and by label to any other — and holds at today's sizes
+(pccr 2026-08-31: 18.8 M points, 281 elements): the cloud is read once, the deviation sheet is
+kept as arrays (never as JSON lists in the HTTP answer), the IFC's products are asked for by type.
+THE DISTANCE IS EXACT (compute_c2m_distances) and the coverage's surface samples are drawn from a
+generator seeded by the element (the same comparison gives the same numbers).
 """
 
 import numpy as np
@@ -48,6 +58,61 @@ def _build_name_index(ifc_file) -> dict:
         if suffix.isdigit():
             index[suffix] = el
     return index
+
+
+def _faceset_mesh(element, unit_scale: float) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """(vertices in metres, world frame; faces) of an element whose body is made of
+    IfcTriangulatedFaceSet only — READ FROM THE FILE: its own points and triangles, placed by the
+    element's placement. None for anything else (the geometry kernel then builds it).
+
+    Why not the kernel for these too (measured 2026-11-18 on pccr's IFC, 281 elements, 1.4 M
+    triangles): it turns each triangle into a face of a shell — 0.17 ms a triangle, minutes for the
+    file — and welds the result (a pipe of 3,409 triangles came back with 3,393). The file's own
+    triangles are the element."""
+    import ifcopenshell.util.placement
+    representation = getattr(element, "Representation", None)
+    if representation is None or getattr(element, "HasOpenings", None):
+        return None                                               # (an opening is cut by the kernel)
+    items = [item for rep in representation.Representations for item in rep.Items]
+    if not items or any(not item.is_a("IfcTriangulatedFaceSet") or item.PnIndex for item in items):
+        return None
+    vertices, faces, base = [], [], 0
+    for item in items:
+        coords = np.asarray(item.Coordinates.CoordList, dtype=np.float64).reshape(-1, 3)
+        index = np.asarray(item.CoordIndex, dtype=np.int64).reshape(-1, 3) - 1
+        if len(coords) == 0 or len(index) == 0:
+            continue
+        vertices.append(coords)
+        faces.append(index + base)
+        base += len(coords)
+    if not faces:
+        return None
+    M = np.asarray(ifcopenshell.util.placement.get_local_placement(element.ObjectPlacement), dtype=np.float64)
+    world = (np.concatenate(vertices) @ M[:3, :3].T + M[:3, 3]) * unit_scale
+    return world, np.concatenate(faces).astype(np.int32)
+
+
+def _element_mesh(element, settings, unit_scale: float) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """(vertices, faces) of one IFC element in the viewer's frame (Y up) — None when it has no
+    geometry. A triangulated element is read from the file, any other built by the kernel."""
+    import ifcopenshell.geom
+    mesh = _faceset_mesh(element, unit_scale)
+    if mesh is None:
+        shape = ifcopenshell.geom.create_shape(settings, element)   # (kept: the geometry's arrays live in it)
+        geom = shape.geometry
+        if len(geom.verts) == 0 or len(geom.faces) == 0:
+            return None
+        mesh = (np.array(geom.verts, dtype=np.float64).reshape(-1, 3), np.array(geom.faces, dtype=np.int32).reshape(-1, 3))
+    vertices, faces = mesh
+    # Convert IFC Z-up to Three.js Y-up: [x,y,z] → [x, z, -y]
+    vertices = vertices[:, [0, 2, 1]]
+    vertices[:, 2] = -vertices[:, 2]
+    return np.ascontiguousarray(vertices), faces
+
+
+def _unit_scale(ifc_file) -> float:
+    import ifcopenshell.util.unit
+    return float(ifcopenshell.util.unit.calculate_unit_scale(ifc_file))
 
 
 def extract_ifc_triangles(
@@ -119,6 +184,7 @@ def extract_all_ifc_triangles(
     settings.set("use-world-coords", True)
     settings.set("weld-vertices", True)
     
+    unit_scale = _unit_scale(ifc_file)
     results = {}
     for key in element_keys:
         key_str = str(key)
@@ -127,24 +193,10 @@ def extract_all_ifc_triangles(
             print(f"[BIM-Compare] Key '{key_str}' not found in IFC")
             continue
         try:
-            shape = ifcopenshell.geom.create_shape(settings, element)
-            geom = shape.geometry
-            
-            if len(geom.verts) == 0 or len(geom.faces) == 0:
+            mesh = _element_mesh(element, settings, unit_scale)
+            if mesh is None:
                 continue
-            
-            vertices = np.array(geom.verts, dtype=np.float64).reshape(-1, 3)
-            faces = np.array(geom.faces, dtype=np.int32).reshape(-1, 3)
-            
-            # Convert IFC Z-up to Three.js Y-up: [x,y,z] → [x, z, -y]
-            vertices = vertices[:, [0, 2, 1]]
-            vertices[:, 2] = -vertices[:, 2]
-            
-            results[key_str] = (vertices, faces)
-            
-            print(f"[BIM-Compare] '{key_str}' (#{element.id()} {element.is_a()} — "
-                  f"{getattr(element, 'Name', '?')}): "
-                  f"{len(vertices)} verts, {len(faces)} tris")
+            results[key_str] = mesh
         except Exception as e:
             print(f"[BIM-Compare] '{key_str}': {e}")
     
@@ -161,6 +213,7 @@ _SKIP_IFC_TYPES = frozenset({
 
 def extract_all_ifc_geometry(
     ifc_path: str,
+    ifc_file=None,
 ) -> Dict[str, Tuple[np.ndarray, np.ndarray, str, str]]:
     """
     Extract meshes for ALL IFC elements that have geometry.
@@ -168,11 +221,16 @@ def extract_all_ifc_geometry(
     
     Returns dict: element_key → (vertices, faces, ifc_type, element_name)
     where element_key is the Revit UniqueId suffix from the element Name.
+
+    ``ifc_file``: the file already opened (it is not opened twice). The products are asked for BY
+    TYPE: walking every entity of an IFC whose elements are meshes (millions of points and faces)
+    to find its few hundred products took longer than their geometry.
     """
     import ifcopenshell
     import ifcopenshell.geom
     
-    ifc_file = ifcopenshell.open(ifc_path)
+    if ifc_file is None:
+        ifc_file = ifcopenshell.open(ifc_path)
     
     settings = ifcopenshell.geom.settings()
     settings.set("use-world-coords", True)
@@ -182,15 +240,12 @@ def extract_all_ifc_geometry(
     processed = 0
     skipped = 0
     
-    for element in ifc_file:
+    unit_scale = _unit_scale(ifc_file)
+    for element in ifc_file.by_type('IfcProduct'):
         ifc_type = element.is_a()
         
         # Skip non-physical types
         if ifc_type in _SKIP_IFC_TYPES:
-            continue
-        
-        # Only process IfcProduct subtypes (things with geometry)
-        if not element.is_a('IfcProduct'):
             continue
         
         # Skip elements without representation
@@ -198,18 +253,10 @@ def extract_all_ifc_geometry(
             continue
         
         try:
-            shape = ifcopenshell.geom.create_shape(settings, element)
-            geom = shape.geometry
-            
-            if len(geom.verts) == 0 or len(geom.faces) == 0:
+            mesh = _element_mesh(element, settings, unit_scale)
+            if mesh is None:
                 continue
-            
-            vertices = np.array(geom.verts, dtype=np.float64).reshape(-1, 3)
-            faces = np.array(geom.faces, dtype=np.int32).reshape(-1, 3)
-            
-            # Convert IFC Z-up to Three.js Y-up: [x,y,z] → [x, z, -y]
-            vertices = vertices[:, [0, 2, 1]]
-            vertices[:, 2] = -vertices[:, 2]
+            vertices, faces = mesh
             
             # Build element key from Name (Revit UniqueId suffix)
             name = getattr(element, 'Name', '') or ''
@@ -280,77 +327,130 @@ def _point_to_triangle_distance_batch(
     return np.linalg.norm(points - closest, axis=1)
 
 
+C2M_CHUNK = 200_000          # points per pass, at most
+C2M_MIN_CHUNK = 20_000       # … and at least (an object of a few thousand points is one pass)
+C2M_FIRST_K = 8              # triangles tried first, nearest centroid first
+C2M_THREADS = 8              # passes at once (the pod's cgroup grants ~26 CPUs, not the host's 252)
+C2M_PAIRS = 20_000_000       # point × candidate pairs held at once by a wider search
+C2M_CLASS_SHARE = 0.02       # a size class under this share of the triangles joins the next larger one
+
+
+def _nearest_in_class(P, best, A, B, C, tree, reach, radius):
+    """Lower ``best`` (the distance of each point of P to the nearest triangle found so far) with
+    the triangles (A, B, C) of ONE size class — exactly. A triangle lies within ``reach`` of its
+    centroid, so one whose centroid is at c from the point holds no point nearer than c − reach:
+    it is worth looking further only while c < best + reach (``reach``: the class's largest such
+    distance), and a triangle is worth its exact distance only if c − its own ``radius`` < best.
+    Centroids are taken nearest first, k at a time; a point is done when the next centroid is
+    beyond the bound (a class with nothing within reach of a point costs it its look-up and no
+    distance), and asked for more (4 k) when all k were within it."""
+    F = len(A)
+    todo = np.arange(len(P))
+    k = min(C2M_FIRST_K, F)
+    while len(todo):
+        step = max(1, C2M_PAIRS // k)
+        left = []
+        for s0 in range(0, len(todo), step):
+            part = todo[s0:s0 + step]
+            cd, ci = tree.query(P[part], k=k)
+            if k == 1:
+                cd, ci = cd[:, None], ci[:, None]
+            d = best[part]
+            live = np.arange(len(part))                           # rows still worth another triangle
+            for j in range(k):
+                live = live[cd[live, j] < d[live] + reach]
+                if not len(live):
+                    break
+                f = ci[live, j]
+                near = cd[live, j] - radius[f] < d[live]          # (this one can hold a nearer point)
+                rows, f = live[near], f[near]
+                if len(rows):
+                    d[rows] = np.minimum(d[rows], _point_to_tri_batch(P[part[rows]], A[f], B[f], C[f]))
+            best[part] = d
+            if k < F and len(live):
+                left.append(part[live[cd[live, -1] < d[live] + reach]])
+        if k >= F or not left:
+            break
+        todo = np.concatenate(left)
+        k = min(k * 4, F)
+    return best
+
+
 def compute_c2m_distances(
     scan_points: np.ndarray,
     mesh_verts: np.ndarray,
     mesh_faces: np.ndarray,
     progress_callback=None,
+    quiet: bool = False,
 ) -> np.ndarray:
     """
-    Compute Cloud-to-Mesh distances using a hybrid approach:
-    1. KDTree on mesh vertices for fast approximate nearest
-    2. Refine with exact point-to-triangle projection
-    
+    EXACT Cloud-to-Mesh distance: for every point, the distance to the nearest point of the mesh
+    surface (unsigned), in float64.
+
     scan_points: (N, 3) scan point coordinates
     mesh_verts: (V, 3) mesh vertex coordinates  
     mesh_faces: (F, 3) triangle face indices
-    
-    Returns: (N,) signed distances (positive = point is outside mesh)
+
+    Until 2026-11-18 this took the 8 triangles with the nearest CENTROIDS and the smallest of their
+    distances: right for a mesh of small even triangles, wrong for a BIM solid (a wall is 12
+    triangles metres long — the face a point lies on can be the one whose centroid is farthest).
+    Now the search is proven (_nearest_in_class), and the triangles are taken in SIZE CLASSES (a
+    factor of two in the centroid-to-vertex distance), each with its own centroid tree: a few huge
+    triangles in a fine mesh do not widen the search of the fine ones.
     """
-    from scipy.spatial import KDTree
-    
-    n_points = len(scan_points)
-    n_faces = len(mesh_faces)
-    
-    print(f"[BIM-Compare] Computing C2M: {n_points} points vs {n_faces} triangles")
+    from concurrent.futures import ThreadPoolExecutor
+    from scipy.spatial import cKDTree
+
+    P = np.ascontiguousarray(scan_points, dtype=np.float64)
+    V = np.asarray(mesh_verts, dtype=np.float64)
+    F = np.asarray(mesh_faces)
+    n_points, n_faces = len(P), len(F)
+    if n_points == 0:
+        return np.empty(0, dtype=np.float64)
+    if n_faces == 0:
+        raise ValueError("the mesh has no triangle: no distance to it")
     t0 = time.time()
-    
-    # Step 1: Build KDTree on triangle centroids for fast lookup
-    centroids = mesh_verts[mesh_faces].mean(axis=1)  # (F, 3)
-    centroid_tree = KDTree(centroids)
-    
-    # Step 2: For each point, find k nearest triangle centroids
-    # then compute exact distance to those triangles
-    k = min(8, n_faces)  # check 8 nearest triangles per point
-    
-    # Process in chunks for memory efficiency + progress
-    chunk_size = 10000
-    distances = np.empty(n_points, dtype=np.float64)
-    
-    for start in range(0, n_points, chunk_size):
-        end = min(start + chunk_size, n_points)
-        chunk = scan_points[start:end]
-        
-        # Find k nearest triangle centroids
-        _, tri_indices = centroid_tree.query(chunk, k=k)
-        if k == 1:
-            tri_indices = tri_indices.reshape(-1, 1)
-        
-        # For each point, compute exact distance to candidate triangles
-        chunk_dists = np.full(end - start, np.inf)
-        
-        for j in range(k):
-            face_idx = tri_indices[:, j]
-            v0 = mesh_verts[mesh_faces[face_idx, 0]]
-            v1 = mesh_verts[mesh_faces[face_idx, 1]]
-            v2 = mesh_verts[mesh_faces[face_idx, 2]]
-            
-            # Vectorized point-to-triangle distance
-            d = _point_to_tri_batch(chunk, v0, v1, v2)
-            chunk_dists = np.minimum(chunk_dists, d)
-        
-        distances[start:end] = chunk_dists
-        
-        if progress_callback and n_points > chunk_size:
-            pct = round(end / n_points * 100)
-            progress_callback(pct)
-    
-    elapsed = time.time() - t0
-    print(f"[BIM-Compare] C2M done: {elapsed:.1f}s, "
-          f"mean={np.mean(distances)*1000:.1f}mm, "
-          f"max={np.max(distances)*1000:.1f}mm")
-    
-    return distances
+
+    tri = V[F]                                                    # (F, 3, 3)
+    centroids = tri.mean(axis=1)
+    radius = np.linalg.norm(tri - centroids[:, None, :], axis=2).max(axis=1)
+    size_class = np.floor(np.log2(np.maximum(radius, 1e-12))).astype(np.int64)
+    classes, counts = np.unique(size_class, return_counts=True)
+    # a class of a handful of triangles joins the next larger one (each class costs every point a
+    # look-up; its few small triangles are then searched with the larger reach, which stays exact)
+    for i in range(len(classes) - 1):
+        if counts[i] < C2M_CLASS_SHARE * n_faces:
+            size_class[size_class == classes[i]] = classes[i + 1]
+            counts[i + 1] += counts[i]
+            counts[i] = 0
+    classes, counts = classes[counts > 0], counts[counts > 0]
+    order = np.argsort(-counts, kind="stable")                    # the class with most triangles first
+    best = np.full(n_points, np.inf)
+    done = 0
+    chunk = min(C2M_CHUNK, max(C2M_MIN_CHUNK, -(-n_points // C2M_THREADS)))
+    for c in classes[order]:
+        sel = np.flatnonzero(size_class == c)
+        A, B, C = tri[sel, 0], tri[sel, 1], tri[sel, 2]
+        tree = cKDTree(centroids[sel])
+        own = radius[sel]
+        reach = float(own.max())
+        def one_pass(start, A=A, B=B, C=C, tree=tree, reach=reach, own=own):
+            end = min(start + chunk, n_points)
+            best[start:end] = _nearest_in_class(P[start:end], best[start:end], A, B, C, tree, reach, own)
+            return end - start
+
+        # the passes are independent (each writes its own points): in threads — numpy and the tree
+        # release the interpreter in their loops
+        with ThreadPoolExecutor(C2M_THREADS) as pool:
+            for n in pool.map(one_pass, range(0, n_points, chunk)):
+                done += n
+                if progress_callback and n_points > chunk:
+                    progress_callback(round(done / (n_points * len(classes)) * 100))
+
+    if not quiet:
+        print(f"[BIM-Compare] C2M: {n_points} points vs {n_faces} triangles in {len(classes)} size "
+              f"class(es), {time.time() - t0:.1f}s — mean={np.mean(best)*1000:.1f}mm, max={np.max(best)*1000:.1f}mm")
+    return best
 
 
 def compute_c2m_with_projections(
@@ -572,6 +672,7 @@ def compute_sabana_cloud(
     scan_points: np.ndarray,
     distances: np.ndarray,
     tolerance: float = DEFAULT_TOLERANCE,
+    quiet: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate deviation-colored point cloud for the 'sábana' visualization.
@@ -606,8 +707,9 @@ def compute_sabana_cloud(
     
     colors = np.column_stack([r, g, b, a])
     
-    print(f"[BIM-Compare] Sábana cloud: {n_pts} points, "
-          f"mean={np.mean(dist_mm):.1f}mm, max={np.max(dist_mm):.1f}mm")
+    if not quiet:
+        print(f"[BIM-Compare] Sábana cloud: {n_pts} points, "
+              f"mean={np.mean(dist_mm):.1f}mm, max={np.max(dist_mm):.1f}mm")
     
     return scan_points, colors
 
@@ -621,17 +723,29 @@ def compute_mesh_area(verts: np.ndarray, faces: np.ndarray) -> float:
     return float(np.sum(np.linalg.norm(crosses, axis=1)) * 0.5)
 
 
+COVERAGE_SAMPLES_PER_M2 = 4.0
+COVERAGE_MAX_SAMPLES = 50000
+
+
 def compute_coverage_pct(
     mesh_verts: np.ndarray,
     mesh_faces: np.ndarray,
     scan_points: np.ndarray,
     proximity_m: float,
+    seed: int = 0,
+    quiet: bool = False,
 ) -> float:
     """
     Estimate what % of the BIM mesh surface is covered by scan points.
     
-    Samples the mesh surface uniformly (not just centroids) to handle
-    large triangles correctly. Uses KDTree for efficient proximity check.
+    Samples the mesh surface (~4 samples per m², at least one per triangle, 50,000 at most — each
+    weighted by the area it stands for) and counts the area whose sample has a scan point within
+    ``proximity_m``.
+
+    ``seed``: the samples are drawn from a generator seeded with it (run_comparison passes the
+    element's own key) — until 2026-11-18 they came from numpy's global generator and the same
+    comparison gave another coverage at every run. One draw for the whole element (the loop over
+    its triangles took seconds on an element of 300,000 of them).
     """
     if len(scan_points) == 0 or len(mesh_faces) == 0:
         return 0.0
@@ -645,45 +759,29 @@ def compute_coverage_pct(
     if total_area < 1e-10:
         return 0.0
     
-    # Sample mesh surface: ~4 samples per m² (min 1 per face, cap at 50k total)
-    samples_per_m2 = 4.0
-    all_samples = []
-    all_weights = []
-    
-    for i in range(len(mesh_faces)):
-        n = max(1, int(areas[i] * samples_per_m2))
-        # Random barycentric coordinates for uniform sampling
-        r1 = np.sqrt(np.random.rand(n))
-        r2 = np.random.rand(n)
-        pts = ((1 - r1)[:, None] * v0[i] +
-               (r1 * (1 - r2))[:, None] * v1[i] +
-               (r1 * r2)[:, None] * v2[i])
-        all_samples.append(pts)
-        all_weights.append(np.full(n, areas[i] / n))
-    
-    sample_pts = np.vstack(all_samples)
-    sample_wts = np.concatenate(all_weights)
-    
-    # Cap at 50k samples for performance
-    if len(sample_pts) > 50000:
-        idx = np.random.choice(len(sample_pts), 50000, replace=False)
-        sample_pts = sample_pts[idx]
-        sample_wts = sample_wts[idx]
-        # Re-normalize weights
-        sample_wts *= total_area / np.sum(sample_wts)
+    rng = np.random.default_rng(seed)
+    per_face = np.maximum(1, (areas * COVERAGE_SAMPLES_PER_M2).astype(np.int64))
+    face = np.repeat(np.arange(len(mesh_faces)), per_face)
+    sample_wts = (areas / per_face)[face]
+    if len(face) > COVERAGE_MAX_SAMPLES:
+        keep = np.sort(rng.choice(len(face), COVERAGE_MAX_SAMPLES, replace=False))
+        face, sample_wts = face[keep], sample_wts[keep]
+        sample_wts = sample_wts * (total_area / np.sum(sample_wts))   # the kept ones stand for the whole area
+    # uniform in each triangle (barycentric)
+    r1 = np.sqrt(rng.random(len(face)))
+    r2 = rng.random(len(face))
+    sample_pts = ((1 - r1)[:, None] * v0[face] + (r1 * (1 - r2))[:, None] * v1[face] + (r1 * r2)[:, None] * v2[face])
     
     # KDTree on scan points → query surface samples
-    tree = KDTree(scan_points)
-    dists, _ = tree.query(sample_pts)
+    from scipy.spatial import cKDTree
+    dists, _ = cKDTree(scan_points).query(sample_pts, workers=C2M_THREADS)
     
     covered_area = np.sum(sample_wts[dists <= proximity_m])
     result = round(float(covered_area / total_area * 100), 1)
     
-    print(f"[Coverage] {len(mesh_faces)} faces → {len(sample_pts)} samples, "
-          f"{len(scan_points)} scan pts, proximity={proximity_m:.3f}m")
-    print(f"[Coverage]   dist min={np.min(dists):.4f} median={np.median(dists):.4f} "
-          f"max={np.max(dists):.4f} | covered: {np.sum(dists <= proximity_m)}/{len(sample_pts)}")
-    print(f"[Coverage]   covered_area={covered_area:.2f}/{total_area:.2f} m² → {result}%")
+    if not quiet:
+        print(f"[Coverage] {len(mesh_faces)} faces → {len(sample_pts)} samples, {len(scan_points)} scan pts, "
+              f"proximity={proximity_m:.3f}m: covered {covered_area:.2f}/{total_area:.2f} m² → {result}%")
     
     return result
 
@@ -693,26 +791,19 @@ def save_sabana(
     results: list,
     tolerance: float,
     summary: dict,
+    positions: Optional[np.ndarray] = None,
+    colors: Optional[np.ndarray] = None,
 ):
     """
     Save sábana data to sabana.npz for later loading.
-    Combines all evaluated element positions/colors into one cloud.
+    ``positions`` (N, 3) and ``colors`` (N, 4, RGBA in 0-1): every evaluated element's points, as
+    arrays — a scan of today is millions of points, never a list in the results.
     """
     # Resolve correct output directory for sábana artifacts
-    from project_paths import resolve_session
-    _sd = Path(session_dir)
-    # Detect project slug: new-style = .../projects/{slug}/scans/{date}/src_{name}
-    if 'projects' in _sd.parts:
-        _slug = _sd.parts[_sd.parts.index('projects') + 1]
-    else:
-        _slug = _sd.name
-    _ctx = resolve_session(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), _slug)
-    sabana_dir = str(_ctx.bim_comparison_dir) if hasattr(_ctx, 'bim_comparison_dir') else session_dir
+    sabana_dir = str(project_dirs(session_dir)[1])
     os.makedirs(sabana_dir, exist_ok=True)
     import json
     
-    all_pos = []
-    all_col = []
     metrics = []
     
     for r in results:
@@ -724,13 +815,6 @@ def save_sabana(
                 "status": r["status"],
             })
             continue
-        
-        n = r["sabana_n_points"]
-        if n > 0:
-            pos = np.array(r["sabana_positions"]).reshape(-1, 3)
-            col = np.array(r["sabana_colors"]).reshape(-1, 4)
-            all_pos.append(pos)
-            all_col.append(col)
         
         metrics.append({
             "element_key": r["element_key"],
@@ -744,12 +828,11 @@ def save_sabana(
             "bim_surface_m2": r.get("bim_surface_m2", 0),
         })
     
-    if all_pos:
-        positions = np.concatenate(all_pos, axis=0).astype(np.float32)
-        colors = np.concatenate(all_col, axis=0).astype(np.float32)
-    else:
+    if positions is None or colors is None or len(positions) == 0:
         positions = np.empty((0, 3), dtype=np.float32)
         colors = np.empty((0, 4), dtype=np.float32)
+    positions = np.asarray(positions, dtype=np.float32)
+    colors = np.asarray(colors, dtype=np.float32)
     
     # Save compressed npz (archival)
     out_path = os.path.join(sabana_dir, "sabana.npz")
@@ -843,8 +926,19 @@ def save_sabana(
         "elements": metrics,
     }
     meta_path = os.path.join(sabana_dir, "sabana_meta.json")
-    from correction.epoch import stamp_nearest as _stamp_epoch
-    _stamp_epoch(meta, sabana_dir)
+    # The geometry epoch is the SCAN's — the cloud the sheet was computed on. (Until 2026-11-18 it was
+    # looked for above the sheet's own folder: in a project that is the project's root, where no
+    # scan is — the comparison of a project's scan ended here with an error.)
+    _scan = _scan_of(Path(session_dir))
+    if _scan is not None:
+        meta["scan"] = _scan[1]
+    _output = Path(session_dir) / "output"
+    if _output.is_dir():
+        from correction.epoch import stamp as _stamp_epoch
+        _stamp_epoch(meta, _output)
+    else:
+        from correction.epoch import stamp_nearest as _stamp_epoch
+        _stamp_epoch(meta, sabana_dir)
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
     
@@ -875,6 +969,37 @@ def load_scan_points(
 #  FULL COMPARISON PIPELINE
 # ═══════════════════════════════════════════════════════════════════
 
+def _scan_of(session_path: Path) -> Optional[Tuple[str, str]]:
+    """(project, "date/source") of a scan directory …/projects/<project>/scans/<date>/src_<source>."""
+    parts = session_path.parts
+    if "projects" in parts and "scans" in parts:
+        i, j = parts.index("projects"), parts.index("scans")
+        if len(parts) > j + 2 and parts[j + 2].startswith("src_"):
+            return parts[i + 1], f"{parts[j + 1]}/{parts[j + 2][4:]}"
+    return None
+
+
+def project_dirs(session_dir) -> Tuple[Path, Path]:
+    """(ifcs, bim_comparison) — the folders of the project a scan belongs to. A scan directory
+    …/projects/<project>/scans/<date>/src_<source> names its own project (wherever that tree is);
+    a session of the old layout is resolved as before."""
+    session_path = Path(session_dir)
+    if _scan_of(session_path) is not None:
+        from project_paths import ProjectPaths
+        i = session_path.parts.index("projects")
+        paths = ProjectPaths(str(Path(*session_path.parts[:i + 1])), session_path.parts[i + 1])
+        return paths.ifcs_dir, paths.bim_comparison_dir
+    from project_paths import resolve_session
+    slug = session_path.parts[session_path.parts.index("projects") + 1] if "projects" in session_path.parts else session_path.name
+    ctx = resolve_session(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), slug)
+    return (ctx.ifcs_dir if hasattr(ctx, "ifcs_dir") else session_path,
+            ctx.bim_comparison_dir if hasattr(ctx, "bim_comparison_dir") else session_path)
+
+
+def _moved(points: np.ndarray, T: np.ndarray) -> np.ndarray:
+    return points @ T[:3, :3].T + T[:3, 3]
+
+
 def run_comparison(
     session_dir: str,
     matches: List[dict],
@@ -890,9 +1015,16 @@ def run_comparison(
       4. For unmatched elements: gray transparent (not yet built)
       5. Cumulative coverage tracking with occlusion detection
     
-    matches: [{"segment_label": "292127", "element_key": "292127", "ifc_type": "..."}]
+    matches: what bim.scan_data.Scan.match gives —
+      [{"segment_label", "segment_ids": [instance ids], "element_key", "ifc_type", …}]
+    (a match with no ``segment_ids`` names every object labelled ``segment_label``, as in March).
+
+    The answer carries each element's numbers and NO point: the sheet is on disk (save_sabana).
     """
-    from bim.registration import register, transform_points, _load_cloud_and_segments
+    import zlib
+
+    from bim.registration import register
+    from bim.scan_data import Scan, ScanError, first_ifc, stac_source
     import yaml as _yaml
     
     # Coverage engine imports (graceful fallback if not yet available)
@@ -919,19 +1051,12 @@ def run_comparison(
     completion_threshold = ce_cfg.get("completion_threshold", 80.0)
     quality_threshold = ce_cfg.get("quality_threshold", 80.0)
     
+    t_start = time.time()
     session_path = Path(session_dir)
     output_dir = session_path / "output"
     
     # Resolve project-level paths (IFCs, bim_comparison dir)
-    from project_paths import resolve_session
-    _sd = Path(session_dir)
-    if 'projects' in _sd.parts:
-        _slug = _sd.parts[_sd.parts.index('projects') + 1]
-    else:
-        _slug = _sd.name
-    _ctx = resolve_session(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), _slug)
-    ifcs_dir = _ctx.ifcs_dir if hasattr(_ctx, 'ifcs_dir') else session_path
-    bim_dir = _ctx.bim_comparison_dir if hasattr(_ctx, 'bim_comparison_dir') else session_path
+    ifcs_dir, bim_dir = project_dirs(session_path)
     
     # Clean up previous sábana artifacts before regenerating
     import shutil
@@ -951,37 +1076,35 @@ def run_comparison(
         shutil.rmtree(legacy_potree)
     
     # Find IFC file (check ifcs_dir first, then session_path for legacy)
-    ifc_files = list(ifcs_dir.glob("*.ifc"))
-    if not ifc_files:
-        ifc_files = list(session_path.glob("*.ifc"))
-    if not ifc_files:
+    ifc_path = first_ifc(ifcs_dir, session_path)
+    if ifc_path is None:
         return {"error": "No IFC file found in session"}
-    ifc_path = str(ifc_files[0])
     
-    # Load segmentation
-    seg_result_path = output_dir / "segmentation_result.json"
-    seg_path = output_dir / "segmentation.json"
-    if seg_result_path.exists():
-        seg_data = json.loads(seg_result_path.read_text())
-    elif seg_path.exists():
-        seg_data = json.loads(seg_path.read_text())
-    else:
-        return {"error": "No segmentation data found"}
+    # The scan: its objects and (read once, below) its cloud
+    try:
+        scan = Scan(output_dir)
+    except ScanError as e:
+        return {"error": str(e)}
     
-    label_to_inst = {}
-    for inst in seg_data.get("instances", []):
-        label_to_inst[str(inst.get("label", ""))] = inst
+    import ifcopenshell
+    ifc_file = ifcopenshell.open(str(ifc_path))
     
-    # Build match index: element_key → segment_label
-    match_index = {}
-    for m in matches:
-        match_index[str(m["element_key"])] = str(m["segment_label"])
+    # Build match index: element_key → the match (its points are asked from the scan)
+    match_index = {str(m["element_key"]): m for m in matches}
     
     # ── Step 1: Registration (alignment using matched segments) ──
     if progress_callback:
         progress_callback(5, "Registering scan to BIM...")
     
-    if skip_registration:
+    # An IFC that STAC wrote from THIS scan is in this scan's display frame by construction: there
+    # is nothing to register (and the registration would take its proxies for floors).
+    registration = "manual" if skip_registration else "auto"
+    own = stac_source(ifc_file)
+    if own is not None and own == _scan_of(session_path):
+        registration = "own_scan"
+        print(f"[BIM-Compare] {ifc_path.name} was written from this scan ({own[1]}): same frame, no registration")
+    
+    if registration != "auto":
         # Use saved floor_transform (gizmo-aligned position) as the transform
         transform_path = output_dir / "floor_transform.npz"
         if transform_path.exists():
@@ -992,7 +1115,8 @@ def run_comparison(
             T = np.eye(4)
             T[:3, :3] = s * R
             T[:3, 3] = t
-            print(f"[BIM-Compare] Using manual alignment (floor_transform), skipping auto-registration")
+            if registration == "manual":
+                print(f"[BIM-Compare] Using manual alignment (floor_transform), skipping auto-registration")
         else:
             T = np.eye(4)
             print(f"[BIM-Compare] No floor_transform found, using identity")
@@ -1006,18 +1130,28 @@ def run_comparison(
     if progress_callback:
         progress_callback(80, "Extracting all BIM geometry...")
     
-    all_bim = extract_all_ifc_geometry(ifc_path)
+    t_geom = time.time()
+    all_bim = extract_all_ifc_geometry(str(ifc_path), ifc_file)
+    t_geom = time.time() - t_geom
     
     # Load scan cloud (raw points)
-    xyz_all, _ = _load_cloud_and_segments(session_dir)
-    if xyz_all is None:
-        return {"error": "Could not load cleaned_cloud.ply"}
+    try:
+        xyz_all = scan.xyz
+    except ScanError as e:
+        return {"error": str(e)}
+    print(f"[BIM-Compare] scan: {len(xyz_all)} points, {len(scan.instances)} objects ({scan.source}); "
+          f"IFC {ifc_path.name}: {len(all_bim)} elements with geometry ({t_geom:.1f}s); {len(match_index)} matched")
     
     # ── Step 2b: Coverage engine setup ──
+    # (OFF by config.yaml coverage_engine.enabled since before the scans of today; its ray casting
+    #  is still March's — a tree of the whole cloud per element — and was not adapted to them)
     cam_positions = None
     seg_labels = None
     cov_store = None
+    scan_registered = None
     scan_id = time.strftime("%Y%m%d_%H%M%S")
+    seg_result_path = output_dir / "segmentation_result.json"
+    seg_path = output_dir / "segmentation.json"
     
     if ce_enabled:
         if progress_callback:
@@ -1035,6 +1169,7 @@ def run_comparison(
             # Build per-point segment labels for occluder identification
             seg_file = str(seg_result_path if seg_result_path.exists() else seg_path)
             seg_labels = build_segment_labels(len(xyz_all), seg_file)
+            scan_registered = _moved(xyz_all, T)
             
             # Initialize coverage store
             cov_store = CoverageStore(session_dir)
@@ -1045,52 +1180,50 @@ def run_comparison(
     
     # ── Step 3: Evaluate each BIM element ──
     results = []
+    sheet_positions = []
+    sheet_colors = []
     total = len(all_bim)
     tolerance_mm = tolerance * 1000
+    t_c2m = t_cov = 0.0
     
     for i, (key, (mesh_verts, mesh_faces, ifc_type, elem_name)) in enumerate(all_bim.items()):
         n_faces = len(mesh_faces)
         
         if key in match_index:
             # ── MATCHED: compare segment points vs BIM mesh ──
-            label = match_index[key]
-            inst = label_to_inst.get(label)
-            
-            if inst is None:
-                # Matched but segment not found
+            indices = scan.indices_of_match(match_index[key])
+            if len(indices) == 0:
                 results.append({
                     "element_key": key, "label": elem_name,
                     "ifc_type": ifc_type, "status": "error",
-                    "error": "Segment not found",
-                })
-                continue
-            
-            indices = inst.get("globalIndices", inst.get("point_indices", []))
-            if not indices:
-                results.append({
-                    "element_key": key, "label": elem_name,
-                    "ifc_type": ifc_type, "status": "error",
-                    "error": "No point indices",
+                    "error": "No points: the scan has no object for this match",
                 })
                 continue
             
             # Transform segment points with registration
-            scan_points = transform_points(xyz_all[indices], T)
+            scan_points = _moved(xyz_all[indices], T)
             
             # C2M distances: how far each constructed point is from the BIM design
-            distances = compute_c2m_distances(scan_points, mesh_verts, mesh_faces)
+            _t = time.time()
+            distances = compute_c2m_distances(scan_points, mesh_verts, mesh_faces, quiet=True)
+            t_c2m += time.time() - _t
             report = build_deviation_report(distances, tolerance)
             
             # Sábana: scan points at their real positions, colored by C2M deviation
             # Shows the CONSTRUCTION, colored by how well it matches the design
             sabana_pos, sabana_colors = compute_sabana_cloud(
-                scan_points, distances, tolerance
+                scan_points, distances, tolerance, quiet=True
             )
+            sheet_positions.append(np.asarray(sabana_pos, dtype=np.float32))
+            sheet_colors.append(np.asarray(sabana_colors, dtype=np.float32))
             
             # Coverage: what % of this BIM element's surface has scan data
+            _t = time.time()
             coverage = compute_coverage_pct(
-                mesh_verts, mesh_faces, scan_points, proximity_m
+                mesh_verts, mesh_faces, scan_points, proximity_m,
+                seed=zlib.crc32(str(key).encode()), quiet=True,
             )
+            t_cov += time.time() - _t
             
             # BIM element surface area (m²)
             v0 = mesh_verts[mesh_faces[:, 0]]
@@ -1108,9 +1241,6 @@ def run_comparison(
                 try:
                     # Initialize or load existing coverage for this element
                     ec = cov_store.init_element(key, mesh_verts, mesh_faces)
-                    
-                    # Transform scan cloud for ray-casting (already registered)
-                    scan_registered = transform_points(xyz_all, T)
                     
                     # Classify BIM surface samples with ray-casting
                     scan_result = classify_bim_surface(
@@ -1164,8 +1294,6 @@ def run_comparison(
                 "element_state": element_state,
                 "bim_surface_m2": round(bim_surface_m2, 4),
                 **report,
-                "sabana_positions": sabana_pos.flatten().round(4).tolist(),
-                "sabana_colors": sabana_colors.flatten().round(3).tolist(),
                 "sabana_n_points": len(sabana_pos),
             })
         else:
@@ -1194,7 +1322,8 @@ def run_comparison(
 
     print(f"[BIM-Compare] Summary: {n_evaluated} evaluated, "
           f"{n_unmatched} unmatched (not built), {n_error} errors, "
-          f"{total} total elements")
+          f"{total} total elements — distances {t_c2m:.1f}s, coverage {t_cov:.1f}s, "
+          f"{time.time() - t_start:.1f}s in all")
     
     if progress_callback:
         progress_callback(100, "Comparison complete")
@@ -1204,6 +1333,8 @@ def run_comparison(
         "evaluated": n_evaluated,
         "unmatched": n_unmatched,
         "errors": n_error,
+        "registration": registration,
+        "ifc": ifc_path.name,
     }
     
     # Add coverage engine summary if available
@@ -1220,7 +1351,11 @@ def run_comparison(
                 summary["coverage_engine"]["elements_by_state"].get(state, 0) + 1
     
     # Save sábana to session for later loading
-    save_sabana(session_dir, results, tolerance, summary)
+    save_sabana(
+        session_dir, results, tolerance, summary,
+        np.concatenate(sheet_positions) if sheet_positions else None,
+        np.concatenate(sheet_colors) if sheet_colors else None,
+    )
     
     return {
         "ok": True,
@@ -1230,4 +1365,3 @@ def run_comparison(
         "summary": summary,
         "results": results,
     }
-

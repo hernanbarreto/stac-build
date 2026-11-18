@@ -376,63 +376,17 @@ def classify_matches(
 
 
 def _load_cloud_and_segments(session_dir: str):
-    """Load cleaned_cloud.ply and segmentation data."""
-    session_path = Path(session_dir)
-    output_dir = session_path / "output"
-    
-    # Load segmentation
-    seg_result_path = output_dir / "segmentation_result.json"
-    seg_path = output_dir / "segmentation.json"
-    if seg_result_path.exists():
-        seg_data = json.loads(seg_result_path.read_text())
-    elif seg_path.exists():
-        seg_data = json.loads(seg_path.read_text())
-    else:
+    """The scan's cloud (N, 3) and its objects — (xyz, Scan), or (None, None) when the scan cannot
+    be read. Through bim/scan_data.py since 2026-11-18: the cloud as a memory map (the loop that
+    unpacked each vertex took a minute on a cloud of today) and the objects from the instance
+    store, each with the points the per-point ids give it."""
+    from bim.scan_data import Scan, ScanError
+    try:
+        scan = Scan(Path(session_dir) / "output")
+        return scan.xyz, scan
+    except ScanError as e:
+        print(f"[Registration] {e}")
         return None, None
-    
-    label_to_inst = {}
-    for inst in seg_data.get("instances", []):
-        label_to_inst[str(inst.get("label", ""))] = inst
-    
-    # Load cloud (binary PLY with float x,y,z + uchar rgb + int frame + 2 short)
-    cloud_path = output_dir / "cleaned_cloud.ply"
-    if not cloud_path.exists():
-        return None, None
-    
-    import struct
-    with open(str(cloud_path), 'rb') as f:
-        n_verts = 0
-        props = []
-        while True:
-            line = f.readline().decode('ascii', errors='replace').strip()
-            if line.startswith('element vertex'):
-                n_verts = int(line.split()[-1])
-            elif line.startswith('property'):
-                parts = line.split()
-                props.append((parts[1], parts[2]))
-            elif line == 'end_header':
-                break
-        
-        # Compute stride from properties
-        type_sizes = {
-            'float': 4, 'double': 8,
-            'uchar': 1, 'uint8': 1, 'char': 1, 'int8': 1,
-            'ushort': 2, 'uint16': 2, 'short': 2, 'int16': 2,
-            'uint': 4, 'uint32': 4, 'int': 4, 'int32': 4,
-            'float32': 4, 'float64': 8,
-        }
-        stride = sum(type_sizes.get(t, 4) for t, _ in props)
-        
-        # Read all vertices
-        raw = f.read(stride * n_verts)
-    
-    # Extract xyz (first 3 floats)
-    xyz = np.empty((n_verts, 3), dtype=np.float32)
-    for i in range(n_verts):
-        off = i * stride
-        xyz[i] = struct.unpack('<3f', raw[off:off+12])
-    
-    return xyz, label_to_inst
 
 
 def register(
@@ -461,7 +415,7 @@ def register(
         T_floor = np.eye(4)
     
     # ── Load scan points + segments ──
-    xyz_raw, label_to_inst = _load_cloud_and_segments(session_dir)
+    xyz_raw, scan = _load_cloud_and_segments(session_dir)
     if xyz_raw is None:
         print("[Registration] Could not load scan data")
         return None
@@ -488,23 +442,16 @@ def register(
     
     # ── Extract IFC meshes ──
     # Resolve IFC location (ifcs_dir for new-style, session_path for legacy)
-    from project_paths import resolve_session
-    _sd = session_path
-    if 'projects' in _sd.parts:
-        _slug = _sd.parts[_sd.parts.index('projects') + 1]
-    else:
-        _slug = _sd.name
-    _ctx = resolve_session(str(Path(__file__).parent.parent), _slug)
-    _ifcs_dir = _ctx.ifcs_dir if hasattr(_ctx, 'ifcs_dir') else session_path
-    ifc_files = list(_ifcs_dir.glob("*.ifc"))
-    if not ifc_files:
-        ifc_files = list(session_path.glob("*.ifc"))
-    if not ifc_files:
+    from bim.comparison import project_dirs
+    _ifcs_dir = project_dirs(session_path)[0]
+    from bim.scan_data import first_ifc
+    ifc_path = first_ifc(_ifcs_dir, session_path)                # (the same file the comparison reads)
+    if ifc_path is None:
         print("[Registration] No IFC file found")
         return None
     
     all_keys = [str(m["element_key"]) for m in floors + objects]
-    ifc_meshes = extract_all_ifc_triangles(str(ifc_files[0]), all_keys)
+    ifc_meshes = extract_all_ifc_triangles(str(ifc_path), all_keys)
     
     # Print BIM info for debugging
     for key, (v, f) in ifc_meshes.items():
@@ -528,15 +475,10 @@ def register(
         bim_floor_ds = []
         
         for fm in floors:
-            label = str(fm["segment_label"])
             key = str(fm["element_key"])
             
-            inst = label_to_inst.get(label)
-            if inst is None:
-                continue
-            
-            indices = inst.get("globalIndices", inst.get("point_indices", []))
-            if not indices:
+            indices = scan.indices_of_match(fm)
+            if len(indices) == 0:
                 continue
             
             # Use viewer-space scan points
@@ -581,15 +523,10 @@ def register(
         all_obj_bim_f = []
         
         for om in objects:
-            label = str(om["segment_label"])
             key = str(om["element_key"])
             
-            inst = label_to_inst.get(label)
-            if inst is None:
-                continue
-            
-            indices = inst.get("globalIndices", inst.get("point_indices", []))
-            if not indices:
+            indices = scan.indices_of_match(om)
+            if len(indices) == 0:
                 continue
             
             scan_pts = xyz_raw[indices]

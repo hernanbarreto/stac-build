@@ -478,6 +478,39 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   `projects/pccr/ifcs/pccr_2026-08-31_default_from_scan.ifc`: 578 elements. THE BIM COMPARISON ITSELF (bim/
   comparison.py, March) still reads the pre-scan layout (cleaned_cloud.ply and globalIndices at the session's
   root): not run against it yet — the next step of that point.
+- ⭐ THE BIM COMPARISON ON A SCAN OF TODAY (2026-11-18 — the step his 2026-11-17 order asked for: "create un IFC
+  vos a partir de PCCR3108, para comparar contra ese mismo, porque es simple"). March's comparison
+  (bim/comparison.py, registration.py: C2M deviation per element, the coloured "sábana", coverage) now reads a
+  scan through `bim/scan_data.py`: the objects from the instance store, their points from `instance_ids.npy`,
+  MATCHED BY INSTANCE ID to an IFC that STAC wrote from a scan (told by the name inside its header) and by the
+  segment's LABEL (the element's number typed by hand) to any other IFC, as in March. An IFC written from THE
+  SAME scan is compared with no registration (the same frame by construction — and March's registration takes
+  every IfcBuildingElementProxy for a floor). The interface compares THE SCAN ON SCREEN (pccr's active scan is
+  2408 and its IFC is 3108's).
+  FOUND ON THE WAY, each fixed and tested: (a) in a project the comparison ENDED WITH AN ERROR (the geometry
+  epoch was looked for above bim_comparison/, where no scan is) — it could not have run on any session of the
+  project layout; (b) "the distance" was the smallest over the 8 triangles with the nearest CENTROIDS —
+  centimetres too far beside the end of a pipe (the test) — now EXACT (`compute_c2m_distances`: the triangles
+  in size classes, each with its centroid tree, searched until proven; equal to every-point-against-every-
+  triangle to 1e-12); (c) the coverage's surface samples came from numpy's global generator (another coverage
+  at every run) — now a generator seeded by the element; (d) the answer carried EVERY POINT as JSON lists —
+  now numbers only (342 kB), the sheet as arrays on disk; (e) the IFC's triangulated elements were rebuilt by
+  the geometry kernel (0.17 ms a triangle: over 10 min on pccr's IFC, and a pipe came back with 16 triangles
+  fewer) — now read from the file itself (4 s); (f) the cloud was unpacked vertex by vertex in Python.
+  IT RUNS IN ITS OWN PROCESS (`bim/compare_job.py`; POST /api/bim/compare answers at once, the interface asks
+  GET …/status; the job also builds the sheet's octree): a scan of today takes minutes, and an HTTP answer
+  over 100 s never arrives through the pod's proxy.
+  MEASURED through the live backend, pccr 3108 against its own IFC (the 10 % one: 281 elements, 1.4 M
+  triangles): 280 elements matched and evaluated, 18,573,249 points; mean deviation 22.2 mm (the floor
+  22.8 mm, 90.6 % within tolerance: GenRecon's mesh is a shell around the cloud's sheet — §7 item 9), 94.7 %
+  of the points within the 50 mm tolerance, every element's coverage ≥ 97.5 %; by March's thresholds 250 good /
+  20 regular / 10 bad elements, global advance 96.1 %; the worst are small objects whose piece of mesh lies
+  elsewhere (light#701 1.3 m, equipment_rack#432 0.97 m). 564 s IN ALL (the distances 8.5 min of numpy + scipy
+  in 8 threads on the CPU; the octree 45 s). THE RESULT IS IN pccr's bim_comparison/ (1.2 GB) FOR HIS EYE —
+  open the 3108 scan, BIM, the sheet's toggle; deleting that folder's content removes it.
+  NOT ADAPTED, declared: the coverage engine (the ray casting towards the cameras; OFF by config since before —
+  a tree of the whole cloud per element); ONE SHEET PER PROJECT (the last compared scan's, shown over
+  whichever scan is open — sabana_meta.json now names its scan). NOT TRIED IN A BROWSER.
 - Segment cleaning: RANSAC on, DBSCAN OFF (*"este sí borra puntos"*), the 5 cm voxel quads OFF; OBBs fitted to the
   points. Viewer: segmentation lamps / windows as lights, point opacity, shadows for meshes.
 
@@ -543,10 +576,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
      puntos" — were NOT reproduced (no browser): the opacity code reads right; the second is probably point 1.
      Re-check both with him on the mesh IFC. Once point 1 is settled the IFC is cut again (its ragged borders
      are point 1's). The IFC needs a scan whose orientation is baked (all five are).
-  3 · THE BIM COMPARISON of pccr 3108 against its own IFC: `bim/comparison.py` is of March and reads the
-     pre-scan layout (cleaned_cloud.ply and `globalIndices` at the session's root, a match by LABEL): to be
-     adapted to scans and to the IFC's key (the instance id) — not started. Then "luego vemos que se compara
-     y como" (his).
+  3 · THE BIM COMPARISON of pccr 3108 against its own IFC: RUNS (2026-11-18, §5 "THE BIM COMPARISON ON A SCAN
+     OF TODAY") — adapted to scans and to the IFC's key (the instance id), exact, in its own process; the
+     result is in pccr's bim_comparison/ for his eye. Then "luego vemos que se compara y como" (his).
   4 · FUSION: merge + compare pccr 3108 with 2408; the scales paired by MARKED COMMON POINTS (his: "deberian
      marcarse dos puntos y decir estos son los mismos en ambas … que se ajusten a uno de ellos, o a una medida
      externa"): with levelled scans two points fix scale, yaw and position; three or more give a residual.
@@ -570,8 +602,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     1a. FUSION, MERGE (scans of different days as one cloud and mesh) ............ NOT STARTED
     1b. FUSION, COMPARE (pccr 2408 with 3108 on their common zones) ............... NOT STARTED — his way to pair
         the scales: mark the same points on both and fit one to the other, or to an outside measure
-    2.  BIM COMPARISON (an IFC in place of the second scan) ........................ NOT STARTED — the IFC of pccr
-        3108 exists (the GenRecon mesh cut by the segmentation); bim/comparison.py (March) must be adapted to scans
+    2.  BIM COMPARISON (an IFC in place of the second scan) ........................ RUNS on a scan of today
+        (2026-11-18, §5): pccr 3108 against its own IFC — 280 elements, mean 22.2 mm, 94.7 % within 50 mm;
+        HIS EYE on the sheet and the analysis panel: PENDING; what is compared and how: his ("luego vemos")
     3.  TICKETS (review items / non-conformities, to show the concept) ............. NOT STARTED
     4.  DA3 → MapAnything as the metric source, for the licence .................... NOT STARTED ("luego, ahora no")
   B · WAITING FOR HIS DECISION
@@ -645,6 +678,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
         d. `runs/` (5.5 GB), the logs and /workspace/tmp (6.3 GB) are not carried by the kit;
         e. whether the older setup scripts (scripts/setup_vendors.sh, setup_pod_envs.sh, setup_weights.sh,
            export_envs.sh, scripts/setup.sh, docs/migration/) are deleted — they name removed envs and old pins.
+    43. THE BIM COMPARISON (§5), what is owed after 2026-11-18: his eye on pccr 3108's sheet; a DEVICE TWIN of
+        the distance (numpy + scipy on the CPU today: 8.5 min on pccr 3108 — his rule is the card); the
+        coverage engine at today's sizes; one sheet per SCAN instead of one per project.
     42. THE SESSIONS AS ZIPS (§5) — DONE 2026-11-18, his order of that night; HIS EYE: the Download action and
         "New session → Upload a ZIP" in the browser, and a real session downloaded through the pod's proxy.
     41. The repo hernanbarreto/stac-build is PUBLIC on GitHub (the VGGT-Long fork too), `scripts/key.pem` — the

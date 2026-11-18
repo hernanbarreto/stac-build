@@ -653,7 +653,8 @@
     "runningManual": "Comparaison du BIM avec le {@scan} (alignement manuel)",
     "noMatches": "Aucune correspondance entre les {@instances} et les éléments IFC",
     "failed": "La comparaison a échoué. {detail}",
-    "elementsChip": "{n} éléments sur {total}"
+    "elementsChip": "{n} éléments sur {total}",
+    "progress": "Comparaison avec le BIM : {pct} %"
   },
   "calibration": {
     "title": "Étalonnage sur le modèle 3D",

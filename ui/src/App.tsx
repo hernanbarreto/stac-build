@@ -1464,10 +1464,12 @@ function App() {
     setActivePanel('bim')
     setStatusMessage(useManualAlignment ? tt('deviation.runningManual') : tt('deviation.runningAuto'))
     try {
-      const matchRes = await fetch(`/api/bim/auto_match/${activeSession}`)
+      // the scan ON SCREEN is the one compared (a project holds several)
+      const scanQuery = activeScanTab ? `?scan=${encodeURIComponent(activeScanTab)}` : ''
+      const matchRes = await fetch(`/api/bim/auto_match/${activeSession}${scanQuery}`)
       const matchData = await matchRes.json()
       if (!matchData.matches?.length) {
-        setStatusMessage(tt('deviation.noMatches'))
+        setStatusMessage(matchData.error ? tt('deviation.failed', { detail: matchData.error }) : tt('deviation.noMatches'))
         setSabanaLoading(false)
         return
       }
@@ -1478,11 +1480,20 @@ function App() {
           session_id: activeSession,
           matches: matchData.matches,
           skip_registration: useManualAlignment,
+          scan: activeScanTab || null,
         }),
       })
-      const compareData = await compareRes.json()
-      if (!compareData.ok) {
-        setStatusMessage(tt('deviation.failed', { detail: compareData.error || '' }))
+      // The server answers at once and compares in its own process (minutes on a scan of today):
+      // its state is asked for until it ends.
+      let compareData = await compareRes.json()
+      while (compareRes.ok && compareData.status === 'running') {
+        await new Promise(r => setTimeout(r, 1500))
+        compareData = await (await fetch(`/api/bim/compare/${activeSession}/status${scanQuery}`)).json()
+        if (compareData.status === 'running') setStatusMessage(tt('deviation.progress', { pct: compareData.progress ?? 0 }))
+      }
+      if (!compareRes.ok || compareData.status !== 'done') {
+        const why = compareData.error || (typeof compareData.detail === 'string' ? compareData.detail : '')
+        setStatusMessage(tt('deviation.failed', { detail: why }))
         setSabanaLoading(false)
         return
       }
@@ -1504,7 +1515,7 @@ function App() {
       setStatusMessage(tt('deviation.failed', { detail: e.message }))
     }
     setSabanaLoading(false)
-  }, [activeSession, sabanaVisible, manualAlignmentChosen])
+  }, [activeSession, activeScanTab, sabanaVisible, manualAlignmentChosen])
 
   // ── Sábana: Toggle visibility via Potree streaming ──
   const handleToggleSabana = useCallback(() => {

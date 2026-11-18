@@ -653,7 +653,8 @@
     "runningManual": "Comparing BIM against the {@scan} (manual alignment)",
     "noMatches": "No matches between {@instances} and IFC elements",
     "failed": "The comparison failed. {detail}",
-    "elementsChip": "{n} of {total} elements"
+    "elementsChip": "{n} of {total} elements",
+    "progress": "BIM comparison: {pct} %"
   },
   "calibration": {
     "title": "Calibration on the 3D model",
