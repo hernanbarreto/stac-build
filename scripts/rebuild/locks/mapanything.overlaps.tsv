@@ -1,0 +1,4 @@
+nvidia-cudnn-cu12	nvidia-cudnn-cu13	18
+nvidia-cusparselt-cu12	nvidia-cusparselt-cu13	2
+nvidia-nccl-cu12	nvidia-nccl-cu13	42
+nvidia-nvshmem-cu12	nvidia-nvshmem-cu13	15

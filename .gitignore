@@ -71,6 +71,10 @@ server/scans/
 
 # Models folder - large model checkpoints
 models/
+# …but these two `models/` are SOURCE, not checkpoints (found 2026-11-18 while preparing the rebuild of the
+# pod: a fresh clone had no MapAnything model code — Omega, F4 and F5 could not run from it)
+!vendor/MapAnything2/mapanything/models/
+!scripts/rebuild/overlays/**/
 
 # Logs
 *.log

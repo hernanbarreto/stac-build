@@ -1,0 +1,2 @@
+flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.3/flash_attn-2.7.3+cu12torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl#sha256=d7d5ccad1cc385bd9d49f8ab61901948f7aa054f3ce9bec5c5a72e0305290017
+utils3d @ git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
