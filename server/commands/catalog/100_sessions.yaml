@@ -306,6 +306,72 @@ commands:
       - extrais les images du film
       done: Choisissez la vidéo de {detail} dans la fenêtre qui s'est ouverte.
       ask: 'Je vais ouvrir la fenêtre pour choisir la vidéo de la session {detail} : une fois choisie, elle est téléversée et le serveur extrait ses images.'
+- id: sessions.download_zip
+  kind: action
+  runs_on: ui
+  model: 'Download a whole session as one ZIP file to the user''s computer: everything needed to upload it again
+    (to this STAC or another) and have the same session. The browser saves it; large sessions take a while.
+    For administrators and managers. Not the exporter (clouds, meshes, IFC for other programs): this is the
+    session itself, as a backup or to move it.'
+  args:
+    session:
+      type: string
+      description: the session's name
+      required: true
+  needs:
+  - admin
+  text:
+    es:
+      title: Descargar una sesión como ZIP
+      say:
+      - bajá la sesión completa en un zip
+      - guardame una copia del proyecto entero
+      - quiero llevarme la sesión a otra máquina
+      done: Descarga de la sesión {detail} iniciada.
+    en:
+      title: Download a session as a ZIP
+      say:
+      - download the whole session as a zip
+      - save me a copy of the entire project
+      - I want to take the session to another machine
+      done: Download of the session {detail} started.
+    fr:
+      title: Télécharger une session en ZIP
+      say:
+      - télécharge la session entière dans un zip
+      - garde-moi une copie de tout le projet
+      - je veux emporter la session sur une autre machine
+      done: Téléchargement de la session {detail} lancé.
+- id: sessions.upload_zip
+  kind: action
+  runs_on: ui
+  model: 'Create a session from a ZIP that STAC downloaded (a whole session): the file is picked by hand, uploaded,
+    checked against a session''s structure, extracted and removed, and the session is then ready to use. For
+    administrators and managers. Not a video upload and not an IFC upload.'
+  needs:
+  - admin
+  text:
+    es:
+      title: Subir una sesión desde un ZIP
+      say:
+      - subí una sesión desde un zip
+      - restaurá el proyecto que bajé en un archivo
+      - cargá la copia de la sesión que tengo guardada
+      done: Elige el ZIP de la sesión en la ventana que se abrió.
+    en:
+      title: Upload a session from a ZIP
+      say:
+      - upload a session from a zip
+      - restore the project I downloaded as a file
+      - bring in the saved copy of the session
+      done: Pick the session's ZIP in the window that opened.
+    fr:
+      title: Téléverser une session depuis un ZIP
+      say:
+      - téléverse une session depuis un zip
+      - restaure le projet que j'ai téléchargé en fichier
+      - importe la copie de la session que j'ai gardée
+      done: Choisissez le ZIP de la session dans la fenêtre qui s'est ouverte.
 - id: sessions.segment_auto
   kind: action
   runs_on: ui

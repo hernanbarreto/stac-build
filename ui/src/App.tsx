@@ -575,6 +575,11 @@ function App() {
   const [extractingSessions, setExtractingSessions] = useState<Record<string, number>>({})
   const videoInputRef = useRef<HTMLInputElement>(null)
   const pendingVideoSession = useRef<string | null>(null)
+  // a session ZIP on its way in ("new session → from a ZIP"): the upload in parts, then the
+  // server's check and extraction — one at a time
+  const zipInputRef = useRef<HTMLInputElement>(null)
+  const [sessionImport, setSessionImport] = useState<{ phase: 'uploading' | 'validating' | 'extracting'; pct: number; name: string } | null>(null)
+  const sessionImportJob = useRef<{ job: string | null; cancelled: boolean } | null>(null)
   const [scansList, setScansList] = useState<{ date: string; source: string; key: string; frame_count: number; has_output: boolean; recon_state?: string; cached_chunks?: number }[]>([])
   const [selectedScans, setSelectedScans] = useState<string[]>([])
 
@@ -1830,6 +1835,103 @@ function App() {
     } catch { report(t('sessions.createFailed'), 'err'); return t('sessions.createFailed') }
   }, [token, connectToServer, report, t])
 
+  // THE SESSION AS ONE ZIP (USER 2026-11-18: "una función en cada sesión para descargarla como zip").
+  // A browser download: the browser writes the ZIP to the disk as it arrives — a 100 GB session never
+  // sits in the page's memory. A link cannot carry the login, so the server gives a one-use link for it.
+  const downloadSessionZip = useCallback(async (id: string) => {
+    try {
+      const headers: HeadersInit = {}
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const res = await fetch(`/api/session_archive/${encodeURIComponent(id)}/ticket`, { method: 'POST', headers })
+      const d = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        const why = typeof d.detail === 'string' ? d.detail : t('sessions.zipFailed')
+        report(t('sessions.zipFailedDetail', { name: id, detail: why }), 'err')
+        return String(why)
+      }
+      const a = document.createElement('a')
+      a.href = d.url
+      a.download = d.filename
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      report(t('sessions.zipStarted', { name: id, files: d.files, gb: (d.bytes / 1e9).toFixed(d.bytes >= 1e10 ? 0 : 1) }), 'ok')
+      return true
+    } catch (err: any) {
+      report(t('sessions.zipFailedDetail', { name: id, detail: err?.message ?? err }), 'err')
+      return String(err?.message ?? err)
+    }
+  }, [token, report, t])
+
+  const pickSessionZip = useCallback(() => {
+    if (zipInputRef.current) {
+      zipInputRef.current.value = ''
+      zipInputRef.current.click()
+    }
+  }, [])
+
+  const cancelSessionImport = useCallback(() => {
+    const cur = sessionImportJob.current
+    if (!cur) return
+    cur.cancelled = true
+    if (cur.job) void fetch(`/api/session_import/${cur.job}`, { method: 'DELETE', headers: token ? { 'Authorization': `Bearer ${token}` } : {} }).catch(() => {})
+  }, [token])
+
+  // The ZIP goes up in parts (a proxy's body limit or a cut connection costs one part, not the file),
+  // then the server checks it against a session's structure, extracts it and removes it.
+  const handleSessionZipSelected = useCallback(async (file: File) => {
+    if (sessionImportJob.current) return
+    const auth: Record<string, string> = token ? { 'Authorization': `Bearer ${token}` } : {}
+    const state = { job: null as string | null, cancelled: false }
+    sessionImportJob.current = state
+    const fail = (detail: string) => { setSessionImport(null); sessionImportJob.current = null; report(t('sessions.importFailed', { name: file.name, detail }), 'err') }
+    const detailOf = (d: any, fallback: string) => typeof d?.detail === 'string' ? d.detail : fallback
+    try {
+      setSessionImport({ phase: 'uploading', pct: 0, name: file.name })
+      const opened = await fetch('/api/session_import', { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: file.name, size: file.size }) })
+      const o = await opened.json().catch(() => ({}))
+      if (!opened.ok) return fail(detailOf(o, `HTTP ${opened.status}`))
+      state.job = o.job
+      const part: number = o.part_bytes
+      let offset = 0, retries = 0
+      while (offset < file.size) {
+        if (state.cancelled) { setSessionImport(null); sessionImportJob.current = null; report(t('sessions.importCancelled', { name: file.name }), 'warn'); return }
+        let res: Response
+        try {
+          res = await fetch(`/api/session_import/${o.job}/part?offset=${offset}`, { method: 'PUT', headers: auth, body: file.slice(offset, offset + part) })
+        } catch (err: any) {
+          if (++retries > 5) return fail(String(err?.message ?? err))
+          await new Promise(r => setTimeout(r, 1500 * retries))
+          continue
+        }
+        const d = await res.json().catch(() => ({}))
+        if (res.status === 409 && typeof d?.detail?.received === 'number') { offset = d.detail.received; continue }   // the server says where it is
+        if (!res.ok) {
+          if (res.status >= 500 && res.status !== 507 && ++retries <= 5) { await new Promise(r => setTimeout(r, 1500 * retries)); continue }
+          return fail(detailOf(d, `HTTP ${res.status}`))
+        }
+        retries = 0
+        offset = d.received
+        setSessionImport({ phase: 'uploading', pct: 100 * offset / file.size, name: file.name })
+      }
+      const fin = await fetch(`/api/session_import/${o.job}/finish`, { method: 'POST', headers: auth })
+      if (!fin.ok) return fail(detailOf(await fin.json().catch(() => ({})), `HTTP ${fin.status}`))
+      for (;;) {
+        await new Promise(r => setTimeout(r, 1000))
+        const st = await (await fetch(`/api/session_import/${o.job}`, { headers: auth })).json()
+        if (st.phase === 'failed') return fail(st.error || '')
+        if (st.phase === 'done') {
+          setSessionImport(null); sessionImportJob.current = null
+          report(t('sessions.importDone', { name: st.session_id }), 'ok')
+          connectToServer()
+          return
+        }
+        setSessionImport({ phase: st.phase === 'extracting' ? 'extracting' : 'validating', pct: st.pct ?? 0, name: st.session_id || file.name })
+      }
+    } catch (err: any) { fail(String(err?.message ?? err)) }
+  }, [token, report, t, connectToServer])
+
   const setReference = useCallback(async (sid: string, sc: any) => {
     if (sc.is_reference || sc.kind === 'fused') return false
     try {
@@ -2054,6 +2156,7 @@ function App() {
     scanTabs, closeScanTab, handleSessionSelect, placedObjects, cubes, userVolumes, focusVolume, undoBrush,
     physicsDiameterCm, physicsBounce, isAdmin: user?.role === 'admin', deleteVolume, sceneObjSel,
     segments, canManage, renameSession, createSession, setReference, renameSegment, renamePlaced, addLibraryItem,
+    downloadSessionZip, pickSessionZip,
     handlePipelineCancel, pipelineRunning, eraseBoxSel, readouts,
     bimModels, sabanaVisible, sabanaLoading, handleGenerateComparison, runComparison, handleToggleSabana,
     deleteSession, deleteSegment, deleteTsdfMesh, runGenrecon, applyFloorLevel,
@@ -2067,6 +2170,7 @@ function App() {
     scanTabs, closeScanTab, handleSessionSelect, placedObjects, cubes, userVolumes, focusVolume, undoBrush,
     physicsDiameterCm, physicsBounce, isAdmin: user?.role === 'admin', deleteVolume, sceneObjSel,
     segments, canManage, renameSession, createSession, setReference, renameSegment, renamePlaced, addLibraryItem,
+    downloadSessionZip, pickSessionZip,
     handlePipelineCancel, pipelineRunning, eraseBoxSel, readouts,
     bimModels, sabanaVisible, sabanaLoading, handleGenerateComparison, runComparison, handleToggleSabana,
     deleteSession, deleteSegment, deleteTsdfMesh, runGenrecon, applyFloorLevel,
@@ -2560,6 +2664,21 @@ function App() {
         if (on !== cmd.current.sabanaVisible) cmd.current.handleToggleSabana()
         return { ok: true, state: on }
       },
+      'sessions.download_zip': async ({ session }) => {
+        if (!cmd.current.canManage) return notAllowed
+        if (!(await ensureConnected())) return { ok: false, reason: 'server_down' }
+        const sn = sessionBy(session)
+        if ('ok' in sn) return sn
+        const r = await cmd.current.downloadSessionZip(sn.id)
+        return r === true ? { ok: true, detail: sn.name } : { ok: false, reason: 'failed', detail: r }
+      },
+      // (the ZIP is picked by hand: the file window opens; the upload, the check and the extraction follow)
+      'sessions.upload_zip': async () => {
+        if (!cmd.current.canManage) return notAllowed
+        if (!(await ensureConnected())) return { ok: false, reason: 'server_down' }
+        cmd.current.pickSessionZip()
+        return done
+      },
       // (the file itself is picked by hand: the browser's file window opens; the upload and the
       // frame extraction start once a video is chosen)
       'sessions.upload_video': onFound(
@@ -2971,6 +3090,8 @@ function App() {
       <input ref={videoInputRef} type="file" className="stac-hidden"
         accept="video/mp4,video/x-msvideo,video/quicktime,video/x-matroska,.mp4,.avi,.mov,.mkv,.m4v"
         onChange={e => { const f = e.target.files?.[0]; if (f) handleVideoSelected(f) }} />
+      <input ref={zipInputRef} type="file" className="stac-hidden" accept=".zip,application/zip,application/x-zip-compressed"
+        onChange={e => { const f = e.target.files?.[0]; if (f) void handleSessionZipSelected(f) }} />
 
       <div className="stac-app__header">
         <AppHeader menus={menus} connected={connected}
@@ -2998,6 +3119,7 @@ function App() {
                 onFlythrough={id => { if (activeSession !== id) handleSessionLoad(id); setFlythroughOpen(id) }}
                 onReconstruct={handleReconstruct} onPickVideo={handlePickVideo} onSegment={handleSegment} onOpenManager={openSegmentationManager}
                 onUnload={handleUnload} onRename={renameSession} onDelete={deleteSession} onCreate={createSession}
+                onDownloadZip={downloadSessionZip} onPickZip={pickSessionZip} importing={sessionImport} onCancelImport={cancelSessionImport}
                 onFuse={openFuse} onOpenScan={openScanFromTree} onSetReference={setReference} />
             )}
             {layout.state.leftTab === 'instances' && activeSession && (

@@ -395,6 +395,33 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   local disk (`export.scratch_dir`) and the export runs in its own process (CPU). pccr 3108, the six items: 50 s,
   1.85 GB. pye57 was installed in the da3 env for it. NOT TRIED IN A BROWSER; no file was opened in another
   program (ReCap, CloudCompare, Revit) — only read back with the libraries that wrote them.
+- ⭐ A SESSION AS ONE ZIP — OUT OF THE POD AND BACK IN (USER 2026-11-18: "Para las sesiones vamos a hacer una
+  función en cada sesión para descargarla como zip, debe descargar todo lo necesario para que pueda volver a
+  subirse y correr exactamente igual. Y para subirla podemos agregar una función en nueva sesión que sea crear
+  una vacía o subir un archivo zip que va a comprobar que tengas estructura correcta de los datos que contiene
+  el zip y si está todo ok la sube y la descomprime elimina el zip y se queda con la sesión perfectamente
+  utilizable"): `server/session_archive.py` + `session_archive_api.py`, the Sessions panel (a Download action on
+  every session row; "New session" → Empty | Upload a ZIP), `sessions.download_zip` / `sessions.upload_zip` by
+  voice (the catalogue: 274 commands). THE ZIP IS THE PROJECT DIRECTORY, whole — the scans with their frames,
+  video and products, exports/, the links, the empty folders — less what any use writes again (bytecode,
+  notebook checkpoints, SQLite's -shm and its EMPTY -wal); `STAC_SESSION.json` lists every entry with its bytes,
+  its date to the nanosecond and its mode, and the copy has them. THE DOWNLOAD IS A STREAM: the ZIP is written
+  into the response and is never on the volume (a 100 GB session has no second copy); the browser saves it as
+  it arrives, through a one-use link asked for with the login; text is deflated, the rest stored; a file that
+  changes under it ends the stream with an error; a session with a pipeline job, a video being extracted or a
+  database with unwritten changes is refused; while one is read no job of it starts and it is neither renamed
+  nor deleted. THE UPLOAD comes in 32 MB parts (resumed at the offset the server holds), beside the sessions
+  under a hidden name; then validate() — the format, one top folder, safe paths and links, every manifest entry
+  present with its size and nothing beside them, project.json, the scans' layout, the name free — BEFORE a byte
+  is extracted; extract() checks every CRC and size, sets dates and modes, renames into place last; the ZIP is
+  removed whatever the outcome, and a failure leaves no session. A name that exists is refused (the session
+  keeps the name it had; another one can be given to the route, not yet in the window). MEASURED through the
+  live backend: bufferStop out and back under another name — 5.20 GB, 2,088 files: the download 46 s
+  (113 MB/s on the loopback), the upload 41 s, the check and extraction 34 s; 2,094 entries equal (sizes, dates
+  to the ns, modes, links, empty folders) and the 2,088 files equal by sha256; the app lists both the same; a
+  5 GiB file with an entry after it (ZIP64) identical; 16 tests. The team assignments of a session are the
+  users' database's, not the ZIP's. NOT TRIED IN A BROWSER (the buttons, the browser's own download of a large
+  session through the pod's proxy, the upload's progress line).
 - ⭐ THE IFC IS THE GENRECON MESH CUT BY THE SEGMENTATION (USER 2026-11-17, on the box IFC below: "el IFC de pccr es
   muy grande gordo, no se de donde lo sacaste" / "por que no exportas el genrecon que esta perfecto, para eso
   esta" / "asi debe ser ifc desde la malla genrecon cortada desde la segmentacion, exacto"): `bim/ifc_from_mesh.py`.
@@ -607,6 +634,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
         d. `runs/` (5.5 GB), the logs and /workspace/tmp (6.3 GB) are not carried by the kit;
         e. whether the older setup scripts (scripts/setup_vendors.sh, setup_pod_envs.sh, setup_weights.sh,
            export_envs.sh, scripts/setup.sh, docs/migration/) are deleted — they name removed envs and old pins.
+    42. THE SESSIONS AS ZIPS (§5) — DONE 2026-11-18, his order of that night; HIS EYE: the Download action and
+        "New session → Upload a ZIP" in the browser, and a real session downloaded through the pod's proxy.
     41. The repo hernanbarreto/stac-build is PUBLIC on GitHub (the VGGT-Long fork too), `scripts/key.pem` — the
         self-signed certificate's private key — is tracked in it, and vendor/depth-anything-3's `fork` remote
         holds a GitHub token in its URL (on the volume) — told to him 2026-11-18; his decisions.

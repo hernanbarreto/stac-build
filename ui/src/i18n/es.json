@@ -325,7 +325,22 @@
     "queued": "en cola ({n} adelante)",
     "queuedNext": "en cola",
     "built": "reconstruido",
-    "notBuilt": "sin reconstrucción"
+    "notBuilt": "sin reconstrucción",
+    "downloadZip": "Descargar la {@session} como ZIP",
+    "zipStarted": "Descarga de {name} iniciada: {files} archivos, {gb} GB. El ZIP se arma mientras baja.",
+    "zipFailed": "No se pudo preparar la descarga.",
+    "zipFailedDetail": "No se pudo descargar {name}. {detail}",
+    "newEmpty": "Vacía",
+    "newFromZip": "Subir un ZIP",
+    "newFromZipHint": "Una {@session} descargada como ZIP desde STAC: se comprueba, se descomprime y queda lista",
+    "importDone": "{@Session} {name} subida y lista para usar.",
+    "importFailed": "No se pudo subir {name}. {detail}",
+    "importCancelled": "Subida de {name} cancelada.",
+    "import": {
+      "uploading": "Subiendo {name} — {pct}",
+      "validating": "Comprobando {name}",
+      "extracting": "Descomprimiendo {name} — {pct}"
+    }
   },
   "scans": {
     "title": "{@Scans}",

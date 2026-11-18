@@ -2,7 +2,7 @@
 // The commands of the interface STAC can run: their ids and the type of each one's arguments.
 // A new command is declared in the catalogue; this file is then regenerated and the compiler
 // asks for its executor (ui/src/commands/registry.ts).
-export const CATALOG_SHA256 = '64033765dee2b7abacbe8400fc6a15e9e68e90b3bee8b16432cd645e49a46b4b'
+export const CATALOG_SHA256 = 'be9402267869f046ca74785579c4efa7f2b1db680284aed7a7d9f12a0e6af687'
 
 export const UI_COMMAND_IDS = [
   'talk.set_user_name',
@@ -74,6 +74,8 @@ export const UI_COMMAND_IDS = [
   'sessions.delete',
   'sessions.filter',
   'sessions.upload_video',
+  'sessions.download_zip',
+  'sessions.upload_zip',
   'sessions.segment_auto',
   'scans.open',
   'scans.list',
@@ -351,6 +353,8 @@ export interface UiCommandArgs {
   'sessions.delete': { session: string }
   'sessions.filter': { text: string }
   'sessions.upload_video': { session: string }
+  'sessions.download_zip': { session: string }
+  'sessions.upload_zip': Record<string, never>
   'sessions.segment_auto': { session?: string }
   'scans.open': { scan: string }
   'scans.list': Record<string, never>

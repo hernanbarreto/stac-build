@@ -3,11 +3,13 @@
  * their scans as children (reference marked, double-click opens the scan
  * as a tab), row actions (load, flythrough, reconstruct / upload video,
  * fuse — only when the project holds two or more scans (USER 2026-09-24) —,
- * segment, manager, unload, rename, delete) and "New session" for
- * admins/managers. Presentational: every handler comes from App.
+ * segment, manager, unload, download as a ZIP, rename, delete) and "New session"
+ * for admins/managers — an empty one, or one uploaded as the ZIP another STAC
+ * downloaded (USER 2026-11-18: "en nueva sesión … crear una vacía o subir un
+ * archivo zip"). Presentational: every handler comes from App.
  */
 import { useState } from 'react'
-import { ArrowUpFromLine, Building2, Crosshair, FolderOpen, Hammer, Layers, Loader2, Pencil, Play, Plug, Plus, Star, Tag, Trash2, Check, X } from 'lucide-react'
+import { ArrowUpFromLine, Building2, Crosshair, Download, FolderOpen, Hammer, Layers, Loader2, Pencil, Play, Plug, Plus, Star, Tag, Trash2, Upload, Check, X } from 'lucide-react'
 import { Panel, Row, Stack } from '../components/ui/Panel'
 import { Tree, type TreeNodeData } from '../components/ui/Tree'
 import { IconButton } from '../components/ui/IconButton'
@@ -66,6 +68,15 @@ interface SessionsPanelProps {
   onRename: (id: string, name: string) => Promise<unknown>
   onDelete: (id: string) => void
   onCreate: (name: string) => Promise<unknown>
+  /** the session as ONE ZIP the browser downloads (admin / manager) — everything
+   *  needed to upload it again and have the same session */
+  onDownloadZip: (id: string) => void
+  /** "new session → from a ZIP": opens the file window; the upload, its check and
+   *  its extraction follow (`importing`) */
+  onPickZip: () => void
+  /** a session ZIP on its way in: what the server is doing with it and how far */
+  importing: { phase: 'uploading' | 'validating' | 'extracting'; pct: number; name: string } | null
+  onCancelImport: () => void
   onOpenScan: (sessionId: string, scan: ScanRow) => void
   onSetReference: (sessionId: string, scan: ScanRow) => void
   /** the search box's text — the app's state: STAC sets it by command (sessions.filter) */
@@ -79,7 +90,8 @@ export function SessionsPanel(p: SessionsPanelProps) {
   const { filter, onFilter: setFilter } = p
   const [renaming, setRenaming] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
-  const [creating, setCreating] = useState(false)
+  // false = the button; 'choose' = empty or from a ZIP; 'empty' = the name of an empty one
+  const [creating, setCreating] = useState<false | 'choose' | 'empty'>(false)
   const [newName, setNewName] = useState('')
 
   const commitRename = async (id: string) => {
@@ -161,6 +173,7 @@ export function SessionsPanel(p: SessionsPanelProps) {
             {loaded && <IconButton size="sm" label={t('sessions.segmentAuto')} icon={<Tag aria-hidden />} onClick={() => p.onSegment(s.id)} />}
             {loaded && <IconButton size="sm" label={t('sessions.segmentManual')} icon={<Crosshair aria-hidden />} onClick={() => p.onOpenManager(s.id)} />}
             {loaded && <IconButton size="sm" label={t('sessions.unload')} icon={<ArrowUpFromLine aria-hidden />} onClick={p.onUnload} />}
+            {p.canManage && <IconButton size="sm" label={t('sessions.downloadZip')} icon={<Download aria-hidden />} onClick={() => p.onDownloadZip(s.id)} />}
             {p.canManage && <IconButton size="sm" label={t('sessions.rename')} icon={<Pencil aria-hidden />} onClick={() => { setRenaming(s.id); setRenameValue(s.id) }} />}
             {p.canManage && <IconButton size="sm" variant="danger" label={t('sessions.delete')} icon={<Trash2 aria-hidden />} onClick={() => p.onDelete(s.id)} />}
           </>
@@ -200,16 +213,29 @@ export function SessionsPanel(p: SessionsPanelProps) {
       isEmpty={!p.connected || p.sessions.length === 0}
       empty={!p.connected
         ? <EmptyState icon={<Plug aria-hidden />} title={t('sessions.notConnectedTitle')} description={t('welcome.connectHint')} action={<Button variant="primary" icon={<Plug aria-hidden />} onClick={p.onConnect}>{t('welcome.connect')}</Button>} />
-        : <EmptyState icon={<FolderOpen aria-hidden />} title={t('sessions.emptyTitle')} description={t('sessions.emptyDesc')} action={p.canManage ? <Button variant="primary" icon={<Plus aria-hidden />} onClick={() => setCreating(true)}>{t('sessions.new')}</Button> : undefined} />}
+        : <EmptyState icon={<FolderOpen aria-hidden />} title={t('sessions.emptyTitle')} description={t('sessions.emptyDesc')} action={p.canManage ? <Button variant="primary" icon={<Plus aria-hidden />} onClick={() => setCreating('choose')}>{t('sessions.new')}</Button> : undefined} />}
       footer={p.connected && p.canManage ? (
-        creating ? (
+        p.importing ? (
+          // a ZIP on its way in: one line that says what the server is doing with it
+          <Row className="stac-sessions__create">
+            <Loader2 className="stac-spin" aria-hidden />
+            <span className="stac-sessions__importing" role="status">{t(`sessions.import.${p.importing.phase}`, { name: p.importing.name, pct: fmt.percent(p.importing.pct / 100) })}</span>
+            <IconButton size="sm" label={t('common.cancel')} icon={<X aria-hidden />} onClick={p.onCancelImport} />
+          </Row>
+        ) : creating === 'choose' ? (
+          <Row className="stac-sessions__create">
+            <Button size="sm" icon={<Plus aria-hidden />} onClick={() => setCreating('empty')}>{t('sessions.newEmpty')}</Button>
+            <Button size="sm" icon={<Upload aria-hidden />} title={t('sessions.newFromZipHint')} onClick={() => { setCreating(false); p.onPickZip() }}>{t('sessions.newFromZip')}</Button>
+            <IconButton size="sm" label={t('common.cancel')} icon={<X aria-hidden />} onClick={() => setCreating(false)} />
+          </Row>
+        ) : creating === 'empty' ? (
           <Row className="stac-sessions__create">
             <Input size="sm" autoFocus placeholder={t('sessions.newPlaceholder')} value={newName} onChange={e => setNewName(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') commitCreate(); if (e.key === 'Escape') { setCreating(false); setNewName('') } }} aria-label={t('sessions.newPlaceholder')} />
             <IconButton size="sm" label={t('sessions.create')} icon={<Check aria-hidden />} variant="primary" disabled={!newName.trim()} onClick={commitCreate} />
             <IconButton size="sm" label={t('common.cancel')} icon={<X aria-hidden />} onClick={() => { setCreating(false); setNewName('') }} />
           </Row>
-        ) : <Button block icon={<Plus aria-hidden />} onClick={() => setCreating(true)}>{t('sessions.new')}</Button>
+        ) : <Button block icon={<Plus aria-hidden />} onClick={() => setCreating('choose')}>{t('sessions.new')}</Button>
       ) : undefined}>
       <Stack gap={1}>
         <Tree ariaLabel={t('sessions.title')} nodes={nodes} selectedId={selectedId} activeId={activeId}

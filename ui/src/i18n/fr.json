@@ -325,7 +325,22 @@
     "queued": "en attente ({n} devant)",
     "queuedNext": "en attente",
     "built": "reconstruite",
-    "notBuilt": "sans reconstruction"
+    "notBuilt": "sans reconstruction",
+    "downloadZip": "Télécharger la {@session} en ZIP",
+    "zipStarted": "Téléchargement de {name} lancé : {files} fichiers, {gb} Go. Le ZIP est écrit pendant le téléchargement.",
+    "zipFailed": "Le téléchargement n'a pas pu être préparé.",
+    "zipFailedDetail": "Impossible de télécharger {name}. {detail}",
+    "newEmpty": "Vide",
+    "newFromZip": "Téléverser un ZIP",
+    "newFromZipHint": "Une {@session} téléchargée en ZIP depuis STAC : elle est vérifiée, décompressée et prête à l'emploi",
+    "importDone": "{@Session} {name} téléversée et prête à l'emploi.",
+    "importFailed": "Impossible de téléverser {name}. {detail}",
+    "importCancelled": "Téléversement de {name} annulé.",
+    "import": {
+      "uploading": "Téléversement de {name} — {pct}",
+      "validating": "Vérification de {name}",
+      "extracting": "Décompression de {name} — {pct}"
+    }
   },
   "scans": {
     "title": "{@Scans}",

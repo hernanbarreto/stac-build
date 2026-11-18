@@ -325,7 +325,22 @@
     "queued": "queued ({n} ahead)",
     "queuedNext": "queued",
     "built": "reconstructed",
-    "notBuilt": "no reconstruction"
+    "notBuilt": "no reconstruction",
+    "downloadZip": "Download the {@session} as a ZIP",
+    "zipStarted": "Download of {name} started: {files} files, {gb} GB. The ZIP is written as it downloads.",
+    "zipFailed": "The download could not be prepared.",
+    "zipFailedDetail": "Could not download {name}. {detail}",
+    "newEmpty": "Empty",
+    "newFromZip": "Upload a ZIP",
+    "newFromZipHint": "A {@session} downloaded as a ZIP from STAC: it is checked, extracted and ready to use",
+    "importDone": "{@Session} {name} uploaded and ready to use.",
+    "importFailed": "Could not upload {name}. {detail}",
+    "importCancelled": "Upload of {name} cancelled.",
+    "import": {
+      "uploading": "Uploading {name} — {pct}",
+      "validating": "Checking {name}",
+      "extracting": "Extracting {name} — {pct}"
+    }
   },
   "scans": {
     "title": "{@Scans}",

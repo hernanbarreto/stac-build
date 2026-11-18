@@ -1977,6 +1977,8 @@ async def upload_video(
     st = _video_extract_state.get(session_id)
     if st and st.get("phase") == "extracting":
         raise HTTPException(status_code=409, detail="A video is already being processed for this session")
+    if session_archive_api.reading(session_id):
+        raise HTTPException(status_code=409, detail=session_archive_api.reading(session_id))
 
     from intake import frames_manifest as FM
     scan_dir = ctx.source_dir
@@ -2083,6 +2085,8 @@ async def delete_session(
         target = legacy_dir
     else:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
+    if session_archive_api.reading(session_id):
+        raise HTTPException(status_code=409, detail=session_archive_api.reading(session_id))
 
     # Unload if currently active
     if frame_storage and frame_storage.current_session and frame_storage.current_session.session_id == session_id:
@@ -2138,6 +2142,8 @@ async def rename_session(
         is_legacy = True
     else:
         raise HTTPException(status_code=404, detail=f"Project '{session_id}' not found")
+    if session_archive_api.reading(session_id):
+        raise HTTPException(status_code=409, detail=session_archive_api.reading(session_id))
 
     # Check new name doesn't conflict
     new_dir = (legacy_scans if is_legacy else projects_dir) / new_name
@@ -5054,6 +5060,36 @@ def _export_busy(session_id: str) -> Optional[str]:
 exporter_api.configure(busy=_export_busy, audit_log=_audit_log)
 app.include_router(exporter_api.router)
 
+# THE SESSION ARCHIVE (USER 2026-11-18: "una función en cada sesión para descargarla como zip … y para
+# subirla … en nueva sesión … crear una vacía o subir un archivo zip"): a session streamed out as one ZIP
+# and a ZIP validated, extracted and removed — session_archive.py / session_archive_api.py
+import session_archive_api
+def _archive_busy(session_id: str) -> Optional[str]:
+    """Why a session's files cannot be read for a download now: a pipeline job of it is running or
+    queued (its stages rewrite them), or a video is being extracted into it."""
+    why = _export_busy(session_id)
+    if why:
+        return why.replace("the scan is exported when it ends", "download it when it ends")
+    if (_video_extract_state.get(session_id) or {}).get("phase") == "extracting":
+        return f"a video is being extracted into {session_id}: download it when that ends"
+    return None
+
+
+def _code_commit() -> str:
+    try:
+        import subprocess
+        return subprocess.run(["git", "-C", SERVER_DIR, "rev-parse", "--short", "HEAD"], capture_output=True,
+                              text=True, timeout=10).stdout.strip()
+    except Exception:  # noqa: BLE001 — the manifest then names no commit
+        return ""
+
+
+session_archive_api.configure(PROJECTS_DIR, busy=_archive_busy, audit_log=_audit_log, commit=_code_commit())
+_left = session_archive_api.discard_leftovers()
+if _left:
+    print(f"[archive] removed {_left} leftover(s) of an upload a restart cut short", flush=True)
+app.include_router(session_archive_api.router)
+
 # STAC's voice (USER 2026-11-14): speech → text and text → speech, relayed to the voice service
 from voice import api as voice_api
 app.include_router(voice_api.router)
@@ -6438,6 +6474,13 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
     {"ok": bool, ...}; a rejection (one and only one) carries its reason."""
     # Pipeline-based reconstruction (subprocess workers)
     session_id = cmd.get("session_id")
+    # a session that is being downloaded as a ZIP is read file by file: nothing rewrites it meanwhile
+    _why_reading = session_archive_api.reading(session_id) if session_id else None
+    if _why_reading:
+        print(f"[Pipeline] ✋ run_pipeline REJECTED for {session_id}: {_why_reading}")
+        await viewer_manager.send_text(websocket, json.dumps({
+            "type": "error", "message": f"Reconstruction command rejected: {_why_reading}."}))
+        return {"ok": False, "error": _why_reading}
 
     # ONE AND ONLY ONE (USER ORDER 2026-09-05: "para reconstruccion
     # no debe haber cola de comandos, hay uno y solo uno"): a

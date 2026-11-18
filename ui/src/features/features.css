@@ -25,6 +25,17 @@
   flex: 1;
 }
 
+/* a session ZIP on its way in: the one line that says what the server is doing with it */
+.stac-sessions__importing {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: var(--fs-1);
+}
+
 .stac-instances__footer {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
