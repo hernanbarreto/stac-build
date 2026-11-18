@@ -287,7 +287,10 @@ def write(rows, out: Path) -> None:
         if cls == "private":
             digest = digest if digest.endswith("files") else "-"
         if cls == "git-head":
-            why = f"{why}; {tracked.get(path.rstrip('/'), 0)} tracked files"
+            if path == REPO_REL + "/":
+                digest, why = "-", "the repo this file is committed in (its commit is whatever is cloned)"
+            else:
+                why = f"{why}; {tracked.get(path.rstrip('/'), 0)} tracked files"
         lines.append("\t".join(str(c) for c in (cls, path, size, digest, why)))
     out.write_text("# class\tpath (relative to the workspace)\tbytes\tsha256 | commit | n files\tnote\n"
                    + "".join(line + "\n" for line in lines))

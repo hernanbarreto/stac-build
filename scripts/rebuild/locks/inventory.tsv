@@ -305,7 +305,7 @@ asis	hf_cache/xet/logs/xet_20261103T220230118+0000_11530.log	38651	1bc1c4e83ca61
 asis	hf_cache/xet/logs/xet_20261112T170351968+0000_1671972.log	46629	aca3cd22af30bdb56b4d86f684f010a873bd3729af0adad4e987899ae9c08cbb	
 asis	hf_cache/xet/logs/xet_20261114T032804730+0000_421560.log	104925	6a9f608c56981fbfc1d8a1f8ae36a2c3931fb89960fec68cc6e1464f82cbfa50	
 env	miniforge3/	0	-	Miniforge's pinned installer + locks/<env>.* + the env archive
-git-head	stac-build/	0	dd1c533d923a830e1c011940ed9226d0556fd4a8	diff 877441de7b6350fd; 3123 tracked files
+git-head	stac-build/	0	-	the repo this file is committed in (its commit is whatever is cloned)
 private	stac-build/.claude/	53268	2 files	the assistant's local settings for this repo
 private	stac-build/.env	1643	-	the tokens
 cache	stac-build/.ipynb_checkpoints/	0	-	jupyter
@@ -316,47 +316,6 @@ data	stac-build/logs/	353801535	645 files	the backend's logs
 data	stac-build/runs/	5510458922	3933 files	evaluation runs
 cache	stac-build/scripts/__pycache__/	0	-	python bytecode
 cache	stac-build/scripts/rebuild/__pycache__/	0	-	python bytecode
-asis	stac-build/scripts/rebuild/audit_env_files.py	5242	13d295022b52cf2923b2e896a4c1e2b3f97bfba2cdce108ece9791838d16c7f4	
-asis	stac-build/scripts/rebuild/backup.py	21814	2b9c79049bb7ac95627ba3c545621e8a382a5ccc59580a5efffb6e2723ca1fe7	
-asis	stac-build/scripts/rebuild/capture_models.py	2992	00713f403f6f39a0b1494eb6354785c63ffb888700e6fa4bb71fcee4b9173eab	
-asis	stac-build/scripts/rebuild/compare_env.py	5116	1aaded488ad385988c4340148f2a8801c50ac686275007633004121de25e07f6	
-asis	stac-build/scripts/rebuild/drift.py	11691	bcdac01868589aa1fea271bbf57e44f73cdafdebbce21b6db8a30766eb14b0be	
-asis	stac-build/scripts/rebuild/inventory.py	19411	5487d90c2d58bd6616891d9a143a82cc3d279b85c60cd9291803460e40d0c64a	
-asis	stac-build/scripts/rebuild/locks/CloudComPy310.asis-files.tsv	335	f900da504461a62906d97487bc066b4b75dff195c259b9679220e3d4be7b0795	
-asis	stac-build/scripts/rebuild/locks/CloudComPy310.conda-modified.tsv	34	66f2f33157748ac9c6bdb1415b70e760cded38b14ba75ceff1561ce7c71e609f	
-asis	stac-build/scripts/rebuild/locks/CloudComPy310.orphans.tsv	359	3d7fdc5b68398d40ffff06166cb4f5faf6ca5e7d6c812f91481bb8f14ed48287	
-asis	stac-build/scripts/rebuild/locks/amb3r.asis-files.tsv	658	1bcfc0a43ba18aadec44aebbb4f8b01748c74beba7e19d710a851925b95b5c19	
-asis	stac-build/scripts/rebuild/locks/amb3r.conda-modified.tsv	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
-asis	stac-build/scripts/rebuild/locks/amb3r.orphans.tsv	45	c44f8cf47e9582fc90b35a40b6d44aed28cd218201831a99611b5d177fde735a	
-asis	stac-build/scripts/rebuild/locks/base.conda-explicit.txt	10410	929ddd3822d8e87670338fed1e3d6a8c84a78d9fe3e9a582dc5874ac63084597	
-asis	stac-build/scripts/rebuild/locks/colmap.asis-files.tsv	40	062399483a51ac3724e5473f6eb5fa0f21f31ad0cd6037bb8f9f98f0aef9a51c	
-asis	stac-build/scripts/rebuild/locks/colmap.conda-modified.tsv	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
-asis	stac-build/scripts/rebuild/locks/colmap.orphans.tsv	45	1cc4fbfedb8f61eeb1a85ebe186cbd1a768c33be1a2689d53cfd8a72b0572bfa	
-asis	stac-build/scripts/rebuild/locks/da3.asis-files.tsv	23903	adaa9cb5ba372faf8900d23084b43c7655d646326adbedc04e32d77fa1271486	
-asis	stac-build/scripts/rebuild/locks/da3.conda-modified.tsv	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
-asis	stac-build/scripts/rebuild/locks/da3.orphans.tsv	53	3ca12226599119827737f01fb5ff8508d39646b5685a39ac8813947ff25eac22	
-asis	stac-build/scripts/rebuild/locks/genrecon.asis-files.tsv	14477	b01d20d0c986bebfa48f54b9b4869a68836de4e07546149e953ecf0d14606e24	
-asis	stac-build/scripts/rebuild/locks/genrecon.conda-modified.tsv	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
-asis	stac-build/scripts/rebuild/locks/genrecon.orphans.tsv	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
-asis	stac-build/scripts/rebuild/locks/gs.asis-files.tsv	150519	30060d7176445f4f3c7a6230dca6be4acfb56fd180dac178f430e917ffcce596	
-asis	stac-build/scripts/rebuild/locks/gs.conda-modified.tsv	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
-asis	stac-build/scripts/rebuild/locks/gs.orphans.tsv	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
-asis	stac-build/scripts/rebuild/locks/inventory.tsv	963829	08180b8c133d587cfc3f803322408f0ae09791dbb1010b3a4e6a23ee74ca54b7	
-asis	stac-build/scripts/rebuild/locks/mapanything.asis-files.tsv	4849	85361303b8a7e6c8fdc6dc0662bb944cfe6d0c5ffcc9ad2937ddbf58eb6e2b45	
-asis	stac-build/scripts/rebuild/locks/mapanything.conda-modified.tsv	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
-asis	stac-build/scripts/rebuild/locks/mapanything.orphans.tsv	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
-asis	stac-build/scripts/rebuild/locks/nodejs.conda-modified.tsv	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
-asis	stac-build/scripts/rebuild/locks/nodejs.orphans.tsv	881	2f069e97235ab2f9e9373928130fa580cb0544e6356c3bd09aaa79677159ed04	
-asis	stac-build/scripts/rebuild/locks/semantic.asis-files.tsv	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
-asis	stac-build/scripts/rebuild/locks/semantic.conda-modified.tsv	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
-asis	stac-build/scripts/rebuild/locks/semantic.orphans.tsv	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
-asis	stac-build/scripts/rebuild/locks/usdtools.pip.txt	82	e10f1a60fd38b90e2b08e030be84dd6d352ddc0bf497d16c2b962cb000f8e901	
-asis	stac-build/scripts/rebuild/locks/usdtools.records.tsv	652	af8b954dc36963251c935b6d8e8128ed7f9d5c3ff98b31a046bc9100be645d43	
-asis	stac-build/scripts/rebuild/locks/usdtools.wheels.tsv	1371	aadc58e93ec1be8570db644a7cef7d10229ed70df3cead51195a7b55bb179aee	
-asis	stac-build/scripts/rebuild/locks/voice.asis-files.tsv	418	d8fd02492282ca1c83828ce576645b34f682e5e2f6cfcb9cccc388c3acd684d2	
-asis	stac-build/scripts/rebuild/locks/voice.conda-modified.tsv	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
-asis	stac-build/scripts/rebuild/locks/voice.orphans.tsv	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
-asis	stac-build/scripts/rebuild/steps_backup.sh	3080	56371254d32df36e2ec173ec5c5b093da17fbd6d00ec061ee3edaca2c6f9ee0f	
 cache	stac-build/server/.cache/	0	-	derived images of the sessions (floor seal, segment views)
 cache	stac-build/server/.ipynb_checkpoints/	0	-	jupyter
 private	stac-build/server/.jwt_secret	64	-	the sessions' signing key
@@ -422,7 +381,6 @@ cache	stac-build/server/segmentation/tests/__pycache__/	0	-	python bytecode
 cache	stac-build/server/semantic/__pycache__/	0	-	python bytecode
 cache	stac-build/server/tests/.pytest_cache/	0	-	pytest
 cache	stac-build/server/tests/__pycache__/	0	-	python bytecode
-asis	stac-build/server/tests/test_rebuild_kit.py	6854	4318ac031d410c3fb7e294ca9264991c56d295b4ae9409c24ff93e287db95a30	
 cache	stac-build/server/tools/__pycache__/	0	-	python bytecode
 cache	stac-build/server/tools/amb3r/__pycache__/	0	-	python bytecode
 cache	stac-build/server/tools/genrecon/__pycache__/	0	-	python bytecode
