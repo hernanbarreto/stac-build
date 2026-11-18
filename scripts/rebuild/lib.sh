@@ -22,6 +22,8 @@ LOGS="$STATE/logs"
 STAC_ENVS=(da3 mapanything semantic voice amb3r genrecon CloudComPy310 nodejs colmap gs)
 # envs whose failure does not stop a rebuild (not used by the pipeline nor the app)
 STAC_OPTIONAL_ENVS=(colmap gs)
+# ENVS="da3 voice" rebuild.sh — only these envs (everything else of the run stays)
+if [ -n "${ENVS:-}" ]; then read -ra STAC_ENVS <<<"$ENVS"; fi
 
 export STAC_REBUILD_CACHE="$CACHE" STAC_ROOT REBUILD_DIR WORKSPACE CONDA_ROOT
 export HF_HOME PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 PYTHONUNBUFFERED=1
@@ -64,8 +66,8 @@ fetch() {
     local url="$1" dest="$2" sha="${3:-}"
     if [ -f "$dest" ] && [ -n "$sha" ] && [ "$(sha256sum "$dest" | cut -d' ' -f1)" = "$sha" ]; then return 0; fi
     mkdir -p "$(dirname "$dest")"
-    curl -fL --retry 8 --retry-delay 5 --retry-all-errors --connect-timeout 30 -C - -o "$dest.part" "$url" \
-        || { rm -f "$dest.part"; curl -fL --retry 8 --retry-delay 5 --retry-all-errors --connect-timeout 30 -o "$dest.part" "$url"; }
+    curl -fL --retry 8 --retry-delay 5 --connect-timeout 30 -C - -o "$dest.part" "$url" \
+        || { rm -f "$dest.part"; curl -fL --retry 8 --retry-delay 5 --connect-timeout 30 -o "$dest.part" "$url"; }
     if [ -n "$sha" ]; then
         local got; got="$(sha256sum "$dest.part" | cut -d' ' -f1)"
         [ "$got" = "$sha" ] || { rm -f "$dest.part"; echo "sha256 of $url is $got, expected $sha" >&2; return 1; }

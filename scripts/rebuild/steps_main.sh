@@ -31,7 +31,8 @@ PY
     fi
 }
 
-step_models() { python3 "$REBUILD_DIR/models.py" fetch --jobs "${MODEL_JOBS:-6}"; }
+# MODEL_MATCH=text — only the weights whose path or source holds it (a partial rebuild)
+step_models() { python3 "$REBUILD_DIR/models.py" fetch --jobs "${MODEL_JOBS:-6}" ${MODEL_MATCH:+--match "$MODEL_MATCH"}; }
 step_models_links() { python3 "$REBUILD_DIR/models.py" fetch --only link,copy; }
 
 step_verify() {

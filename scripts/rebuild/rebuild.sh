@@ -11,6 +11,7 @@
 #     1.  nano /workspace/.env                  # the four secrets — scripts/rebuild/env.template
 #     2.  source /workspace/.env
 #         git clone https://$GIT_USER:$GIT_TOKEN@github.com/hernanbarreto/stac-build.git /workspace/stac-build
+#         git -C /workspace/stac-build remote set-url origin https://github.com/hernanbarreto/stac-build.git
 #         cp /workspace/.env /workspace/stac-build/.env
 #     3.  bash /workspace/stac-build/scripts/rebuild/rebuild.sh
 #     4.  bash /workspace/stac-build/init_pod.sh        # the services, as on every boot
@@ -160,5 +161,5 @@ case "${1:-}" in
     --verify) load_env; FORCE=1 run_step verify step_verify; cat "$LOGS/verify.log" ;;
     --only)   [ -n "${2:-}" ] || die "--only needs a step name (rebuild.sh --list)"; load_env; git_credentials; run_only "$2"; [ ${#FAILED[@]} -eq 0 ] ;;
     "")       main ;;
-    *)        sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 2 ;;
+    *)        sed -n '2,33p' "${BASH_SOURCE[0]}"; exit 2 ;;
 esac

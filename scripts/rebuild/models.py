@@ -1,7 +1,10 @@
 """Every model weight of the pod, put back where it was from where it came — checked by sha256.
 
-    python3 models.py fetch   [--jobs N] [--only KIND,KIND]      download / link / copy what is missing
+    python3 models.py fetch   [--jobs N] [--only KIND,KIND] [--match TEXT]
+                                                                 download / link / copy what is missing
     python3 models.py verify                                     check every file against the manifest
+    python3 models.py remote                                     ask every SOURCE if it still gives that file
+                                                                 (nothing is downloaded)
     python3 models.py list                                       what the manifest holds, by source
 
 The manifest is ``models.tsv`` beside this file (kind, dest, source, sha256, bytes, note). A file
@@ -24,6 +27,8 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -32,7 +37,8 @@ ROOT = Path(os.environ.get("STAC_ROOT") or HERE.parent.parent)
 HF_HOME = Path(os.environ.get("HF_HOME") or "/workspace/hf_cache")
 TMP = Path(os.environ.get("STAC_REBUILD_CACHE") or "/tmp/stac_rebuild") / "models"
 MIRROR = os.environ.get("STAC_MIRROR", "").rstrip("/")
-TUM_PARTS = 32
+TUM_RANGES, TUM_WORKERS = 64, 12
+TUM_SLOTS = threading.BoundedSemaphore(TUM_WORKERS)
 
 
 def rows():
@@ -67,7 +73,8 @@ def git_blob_id(path: Path) -> str:
 
 def curl(url: str, dest: Path, headers=(), extra=()) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    cmd = ["curl", "-fL", "-sS", "--retry", "8", "--retry-delay", "5", "--retry-all-errors", "--connect-timeout", "30",
+    # (--retry alone: timeouts and 5xx are tried again, a 403 / 404 is an answer)
+    cmd = ["curl", "-fL", "-sS", "--retry", "8", "--retry-delay", "5", "--connect-timeout", "30",
            "-C", "-", "-o", str(dest), *extra]
     for h in headers:
         cmd += ["-H", h]
@@ -108,24 +115,30 @@ def from_mirror(row, part: Path) -> bool:
 
 
 def tum_ranged(url: str, part: Path, size: int) -> None:
-    """GenRecon's server gives ~0.25 MB/s a connection: the file in TUM_PARTS ranges at once."""
-    chunk = -(-size // TUM_PARTS)
+    """GenRecon's server is slow per connection (~1 MB/s) and REFUSES connections beyond about
+    twenty at once (measured 2026-11-18: 12 of 32 simultaneous requests got no answer): the file in
+    TUM_RANGES ranges, TUM_WORKERS at a time, a refused range waited for and asked again."""
+    chunk = -(-size // TUM_RANGES)
 
     def piece(i: int) -> Path:
         start, end = i * chunk, min(size, (i + 1) * chunk) - 1
-        p = part.with_name(f"{part.name}.{i:02d}")
-        for _ in range(8):
+        want = end - start + 1
+        p = part.with_name(f"{part.name}.{i:03d}")
+        for attempt in range(40):
             have = p.stat().st_size if p.exists() else 0
-            if have >= end - start + 1:
+            if have >= want:
                 break
-            subprocess.run(["curl", "-fsS", "--connect-timeout", "30", "--max-time", "7200", "-r", f"{start + have}-{end}", url],
-                           stdout=open(p, "ab"), stderr=subprocess.DEVNULL)
-        if p.stat().st_size != end - start + 1:
-            raise RuntimeError(f"{url}: range {i} holds {p.stat().st_size} bytes of {end - start + 1}")
+            with TUM_SLOTS, open(p, "ab") as out:              # (the three files share the server's limit)
+                subprocess.run(["curl", "-fsS", "--connect-timeout", "30", "--max-time", "3600", "-r", f"{start + have}-{end}", url],
+                               stdout=out, stderr=subprocess.DEVNULL)
+            if (p.stat().st_size if p.exists() else 0) < want:
+                time.sleep(min(30, 2 + attempt))
+        if p.stat().st_size != want:
+            raise RuntimeError(f"{url}: range {i} holds {p.stat().st_size} bytes of {want}")
         return p
 
-    with ThreadPoolExecutor(max_workers=TUM_PARTS) as pool:
-        pieces = list(pool.map(piece, range(TUM_PARTS)))
+    with ThreadPoolExecutor(max_workers=TUM_WORKERS) as pool:
+        pieces = list(pool.map(piece, range(TUM_RANGES)))
     with open(part, "wb") as out:
         for p in pieces:
             with open(p, "rb") as f:
@@ -220,7 +233,14 @@ def fetch_one(row) -> str:
         elif kind == "tum":
             tum_ranged(row["source"], part, row["size"])
         elif kind == "dinov3":
-            curl(dinov3_url(row["source"]), part)
+            try:
+                curl(dinov3_url(row["source"]), part)
+            except RuntimeError as e:
+                if "403" in str(e):
+                    raise RuntimeError("Meta's DINOv3 link has EXPIRED (HTTP 403): ask for a new one at "
+                                       "https://ai.meta.com/resources/models-and-libraries/dinov3-downloads/, put it in "
+                                       ".env as DINOV3_URL and run rebuild.sh again") from None
+                raise
         else:
             raise RuntimeError(f"unknown kind {kind!r}")
     if row["sha"] not in ("", "-"):
@@ -256,8 +276,9 @@ def place_links_and_copies(all_rows) -> list:
     return failed
 
 
-def fetch(jobs: int, only) -> int:
-    all_rows = [r for r in rows() if not only or r["kind"] in only]
+def fetch(jobs: int, only, match=None) -> int:
+    all_rows = [r for r in rows() if (not only or r["kind"] in only)
+                and (not match or match in r["dest"] or match in r["source"])]
     work = [r for r in all_rows if r["kind"] not in ("link", "copy", "convert")]
     # the slow server first and alone on its connections; the rest in parallel
     results = {}
@@ -296,6 +317,55 @@ def verify() -> int:
     return 1 if bad else 0
 
 
+def remote() -> int:
+    """Ask every source, WITHOUT downloading, whether it still gives the manifest's file: the HTTP
+    status, the size, and for a Hugging Face LFS file its sha256 (the hub's own x-linked-etag)."""
+    def head(url, headers=(), follow=False):
+        """(status, fields) of the answer — of the LAST one when redirections are followed."""
+        cmd = ["curl", "-s", "-I", "--max-time", "60"] + (["-L"] if follow else [])
+        for h in headers:
+            cmd += ["-H", h]
+        text = subprocess.run(cmd + [url], capture_output=True, text=True).stdout.replace("\r", "")
+        block = [b for b in text.split("\n\n") if b.strip().startswith("HTTP/")][-1:] or [""]
+        status = (re.findall(r"^HTTP/\S+ (\d+)", block[0], re.M) or ["000"])[-1]
+        fields = {k.lower(): v.strip() for k, v in re.findall(r"^([A-Za-z-]+):\s*(.*)$", block[0], re.M)}
+        return status, fields
+
+    def one(row):
+        kind = row["kind"]
+        label = row["dest"] if kind != "hfcache" else row["source"]
+        try:
+            if kind in ("hf", "hfcache"):
+                repo, revision, name = hf_parts(row["source"])
+                status, f = head(f"https://huggingface.co/{repo}/resolve/{revision}/{name}", hf_headers())
+                size = int(f.get("x-linked-size") or f.get("content-length") or 0)
+                etag = (f.get("x-linked-etag") or "").strip('"')
+                # (an LFS file's etag is its sha256; a small file's is its git id — its size and pinned revision hold it)
+                lfs = len(etag) == 64
+                ok = status in ("200", "302", "307") and size == row["size"] and (not lfs or row["sha"] in ("", "-") or etag == row["sha"])
+                return ok, f"{label}: HTTP {status}, {size} bytes" + ("" if ok else f" — the manifest says {row['size']} bytes, sha256 {row['sha'][:12]}, the hub {etag[:12]}")
+            if kind in ("url", "targz", "tum"):
+                status, f = head(row["source"], follow=True)
+                size = int(f.get("content-length") or 0)
+                ok = status == "200" and (kind == "targz" or size == row["size"])
+                return ok, f"{label}: HTTP {status}, {size} bytes"
+            if kind == "dinov3":
+                status, f = head(dinov3_url(row["source"]))
+                return status == "200", f"{label}: HTTP {status}" + ("" if status == "200" else " — Meta's link has expired: a new one is needed (DINOV3_URL)")
+        except Exception as e:
+            return False, f"{label}: {e}"
+        return True, ""
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        results = list(pool.map(one, rows()))
+    bad = [text for ok, text in results if not ok]
+    asked = sum(1 for _ok, text in results if text)
+    print(f"sources: {asked - len(bad)} of {asked} answer with the manifest's file" + ("" if not bad else f" — {len(bad)} DO NOT"))
+    for text in bad:
+        print(f"  NOT AVAILABLE  {text}")
+    return 1 if bad else 0
+
+
 def listing() -> int:
     by = {}
     for row in rows():
@@ -309,10 +379,13 @@ if __name__ == "__main__":
     argv = sys.argv[1:]
     jobs = int(argv[argv.index("--jobs") + 1]) if "--jobs" in argv else 6
     only = set(argv[argv.index("--only") + 1].split(",")) if "--only" in argv else None
+    match = argv[argv.index("--match") + 1] if "--match" in argv else None
     if argv[:1] == ["fetch"]:
-        sys.exit(fetch(jobs, only))
+        sys.exit(fetch(jobs, only, match))
     if argv[:1] == ["verify"]:
         sys.exit(verify())
+    if argv[:1] == ["remote"]:
+        sys.exit(remote())
     if argv[:1] == ["list"]:
         sys.exit(listing())
     sys.exit(__doc__)

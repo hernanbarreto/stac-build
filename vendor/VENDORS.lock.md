@@ -5,6 +5,12 @@ weights) — a fresh `git clone` lands **without** it. This file is the single
 source of truth for what must live under `vendor/` and how each entry is
 provisioned on a new machine.
 
+> **2026-11-18 — THE PINS A REBUILD USES ARE IN `scripts/rebuild/`** (`steps_vendors.sh`: every clone at the commit
+> the pod holds, `bundles/`: our commits that are on no remote, `models.tsv`: every weight). They were read from the
+> working pod and each tree was cloned again and compared. The tables below are the history of each vendor; where a
+> pin here differs (sam31, VGGT-Long, depth-anything-3), `scripts/rebuild/` is right. `scripts/setup_vendors.sh`
+> and `setup_weights.sh` predate it and name removed vendors.
+
 **Restore the git-based vendors:** `bash scripts/setup_vendors.sh`
 **List without touching anything:** `bash scripts/setup_vendors.sh --list`
 **Model weights (separate):** `bash setup_weights.sh`
