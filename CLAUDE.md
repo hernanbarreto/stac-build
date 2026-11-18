@@ -350,7 +350,10 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   different objects: 29 % by the points on the triangle, 14 % by the 32 nearest points, 9 % by 128 — and 58 / 85 /
   140 of the 1213 objects lose every triangle), and the likely reason of his "cuando apago los elementos
   segmentados de la nube de puntos no desaparecen los puntos" (NOT verified in a browser). The level kept and
-  the cut's neighbourhood are HIS to choose; the root (one owner per surface in the projection) is the pending
+  the cut's neighbourhood are HIS to choose (THE CANDIDATE shown to him 2026-11-18, `config.yaml export.ifc`: keep
+  0.1, triangles over 2 voxels split before the cut — a floor of 1.85 m triangles under 57 cm tiles —, majority of
+  128 neighbours: `projects/pccr/ifcs/pccr_2026-08-31_default_from_mesh.ifc`, 45.6 MB, 1109 elements, 1.41 M
+  triangles, p95 0.52 mm, 5 min; 104 small objects with no triangle; THE EXPORTER'S IFC IS THIS ONE NOW, + ~5 min); the root (one owner per surface in the projection) is the pending
   "smarter segmentation". `fast-simplification` was NOT installed (the permission system refused: only pye57 was
   approved by him).
 - AN IFC FROM A SCAN (USER 2026-11-17: "create un IFC vos a partir de PCCR3108, para comparar contra ese mismo,
