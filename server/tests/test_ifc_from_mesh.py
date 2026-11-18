@@ -135,3 +135,28 @@ def test_large_triangles_are_split_in_their_plane():
     assert np.linalg.norm(nv[nf] - nv[nf[:, [1, 2, 0]]], axis=2).max() <= 0.5 and len(nf) > 60
     assert area(nv, nf) == pytest.approx(area(v, f), rel=1e-6)                  # the same surface
     assert M.split_large(v, f, 10.0)[1] is f                                    # nothing over the size: untouched
+
+
+def test_every_object_appears_even_one_the_majority_leaves_out(tmp_path):
+    """USER 2026-11-18: "deben aparecer todos los elementos". A small object on a surface another
+    one dominates loses every triangle to the majority of the neighbours — it takes the triangles
+    its own points lie on."""
+    out, glb, wall, _chair = _scan(tmp_path)
+    ids = np.load(out / "instance_ids.npy")
+    from exporter import cloud as C
+    data = C.open_ply(out / "cleaned_cloud.ply")
+    xyz = np.column_stack([data["x"], data["y"], data["z"]])
+    del data
+    # a "label" stuck on the wall: one point in ten of a 30 cm patch
+    patch = np.flatnonzero((ids == 1) & (np.abs(xyz[:, 0] - 1.0) < 0.15) & (np.abs(xyz[:, 1] - 1.3) < 0.15))
+    ids[patch[::10]] = 9
+    np.save(out / "instance_ids.npy", ids)
+    store = InstanceStore(out / "scene_r.db")
+    store.upsert_instance(9, "label", source="test")
+    store.set_obb(9, np.eye(4), np.array([-1, 1, -1, 1, -1, 1], np.float32), np.zeros(3), n_points=int((ids == 9).sum()))
+    store.close()
+    elements, report = M.elements_of(out, glb, keep=1.0, max_distance=0.05, neighbours=32, log=lambda _m: None)
+    assert sorted(e["id"] for e in elements) == [1, 5, 9] and report["objects_without_faces"] == []
+    assert report["objects_left_out_by_the_majority"] == 1 and report["objects_rescued"] == 1
+    label = next(e for e in elements if e["id"] == 9)
+    assert 0 < len(label["faces"]) < 0.1 * len(wall.faces)

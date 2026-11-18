@@ -120,17 +120,29 @@ def cut_by_neighbours(vertices: np.ndarray, faces: np.ndarray, points: np.ndarra
         block[d[:, 0] > max_distance] = -1
         far += int((d[:, 0] > max_distance).sum())
         owner[k:k + 1_000_000] = block
-    return owner, {"faces_no_object": far, "neighbours": int(neighbours)}
+    # EVERY OBJECT APPEARS (USER 2026-11-18: "deben aparecer todos los elementos"): an object the
+    # majority left with no triangle — a small one on a surface another object dominates — takes
+    # the triangles ITS OWN POINTS LIE ON (each point's nearest triangle, exact)
+    lost = np.setdiff1d(np.unique(ids[ids > 0]), np.unique(owner[owner > 0]))
+    rescued = 0
+    if len(lost):
+        mine = np.flatnonzero(np.isin(ids, lost))
+        own, _ = cut(vertices, faces, points[mine], ids[mine], max_distance, fill=False)
+        take = own > 0
+        owner[take] = own[take]
+        rescued = int(len(np.unique(own[take])))
+    return owner, {"faces_no_object": far, "neighbours": int(neighbours), "objects_rescued": rescued,
+                   "objects_left_out_by_the_majority": int(len(lost))}
 
 
 def cut(vertices: np.ndarray, faces: np.ndarray, points: np.ndarray, point_ids: np.ndarray,
-        max_distance: float) -> Tuple[np.ndarray, Dict[str, Any]]:
+        max_distance: float, fill: bool = True) -> Tuple[np.ndarray, Dict[str, Any]]:
     """The object of each triangle: THE OBJECT MOST OF THE POINTS LYING ON IT BELONG TO.
 
     Every cloud point lies on its nearest triangle (exact, over the surface); a triangle is the
     object of the majority of its points (a tie: the smaller id). A triangle no point lies on
     takes the object of the cloud point nearest its centre — and belongs to no object (−1) when
-    that point is farther than ``max_distance``.
+    that point is farther than ``max_distance`` (``fill`` False: it is left unassigned, −2).
 
     Why not the nearest point alone (measured on pccr 3108, 2026-11-18): on one surface the points
     of several objects are interleaved, and by the nearest point 20 % of the neighbouring
@@ -156,6 +168,8 @@ def cut(vertices: np.ndarray, faces: np.ndarray, points: np.ndarray, point_ids: 
     owner = np.full(len(faces), -2, np.int64)
     owner[gf[best][first]] = gi[best][first]
     empty = np.flatnonzero(owner == -2)
+    if not fill:                                      # (only the triangles points lie on: the rest stay −2)
+        return owner, {"faces_without_points": int(len(empty))}
     if len(empty):
         d, k = cKDTree(points).query(vertices[faces[empty]].mean(axis=1), k=1, workers=-1)
         owner[empty] = np.where(d <= max_distance, ids[k], -1)

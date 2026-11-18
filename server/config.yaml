@@ -4876,15 +4876,17 @@ export:
                                        # itself is kept in the project's exports/ directory, one per scan.
   ifc:                                 # THE IFC IS THE GENRECON MESH CUT BY THE SEGMENTATION (USER 2026-11-17: "asi debe
                                        # ser ifc desde la malla genrecon cortada desde la segmentacion, exacto" —
-                                       # bim/ifc_from_mesh.py). ⚠ THE THREE VALUES ARE THE ASSISTANT'S CANDIDATES, measured
-                                       # on pccr 3108 and shown to him 2026-11-18: HIS EYE DECIDES THEM.
-    keep: 0.1                          # the share of the mesh's triangles kept (the whole mesh is simplified as one
-                                       # surface, then cut). Against the full mesh, 95 % of the surface within: 1.01 mm
-                                       # at 0.05, 0.52 mm at 0.1, 0.13 mm at 0.25; the IFC: ~32 / 64 / 161 MB (640 whole)
-    neighbours: 128                    # a triangle is the object of most of this many cloud points nearest its centre
-                                       # (0 = of the points lying on it). The segmentation is interleaved point by
-                                       # point: adjacent triangles in different objects 29 % at 0, 14 % at 32, 9 % at
-                                       # 128 — and 43 / 105 of the 1213 objects left with no triangle at 32 / 128
+                                       # bim/ifc_from_mesh.py). HIS VALUES (USER 2026-11-18, on the candidate at 0.1):
+                                       # "Debe ser entera, partir las caras grandes, mayoría de sus 128 puntos, pero
+                                       # deben aparecer todos los elementos"
+    keep: 1.0                          # the share of the mesh's triangles kept: 1 = THE WHOLE MESH. (Measured on pccr
+                                       # 3108, against the full mesh, 95 % of the surface within 1.01 mm at 0.05,
+                                       # 0.52 mm at 0.1, 0.13 mm at 0.25.)
+    neighbours: 128                    # a triangle is the object of most of this many cloud points nearest its centre.
+                                       # The segmentation is interleaved point by point: adjacent triangles in
+                                       # different objects 29 % by the points on the triangle, 14 % at 32, 9 % at 128.
+                                       # An object the majority leaves with no triangle takes the triangles its own
+                                       # points lie on: every object appears.
     max_edge_voxels: 2                 # triangles with an edge over this many GenRecon voxels (genrecon.cube_size_m
                                        # / 32) are split before the cut — in their plane, the surface does not move —
-                                       # so the cut can follow objects smaller than them (0 = none): + 6 % of triangles
+                                       # so the cut can follow objects smaller than them
