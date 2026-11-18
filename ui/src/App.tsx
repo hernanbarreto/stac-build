@@ -981,6 +981,46 @@ function App() {
     return () => clearTimeout(timer)
   }, [sessionLoading, pipelineRunning, activeSession])  
 
+  // A comparison runs in the server's own process: its state is asked for until it ends, then its
+  // sheet is shown. Shared by the launch and by a session opened WHILE one runs (a page reloaded
+  // during the minutes it takes must still end showing the sheet).
+  const followComparison = useCallback(async (sid: string, scan: string | null, first?: any) => {
+    const scanQuery = scan ? `?scan=${encodeURIComponent(scan)}` : ''
+    let data = first ?? { status: 'running' }
+    setSabanaLoading(true)
+    try {
+      while (data.status === 'running') {
+        setStatusMessage(tt('deviation.progress', { pct: data.progress ?? 0 }))
+        await new Promise(r => setTimeout(r, 1500))
+        data = await (await fetch(`/api/bim/compare/${sid}/status${scanQuery}`)).json()
+      }
+      if (data.status !== 'done') {
+        const why = data.error || (typeof data.detail === 'string' ? data.detail : '')
+        setStatusMessage(tt('deviation.failed', { detail: why }))
+        return
+      }
+      viewportRef.current?.sendCommand({ type: 'load_sabana', session_id: sid })
+      viewportRef.current?.setOBBsVisible(false)
+      setActiveTool(prev => prev === 'align' ? 'navigate' : prev)
+      setSabanaVisible(true)
+      setSessions(prev => prev.map(s => s.id === sid ? { ...s, hasSabana: true } : s))
+      setSabanaScan(scan)
+      try {
+        const metaRes = await fetch(`/api/sessions/${sid}/sabana/meta`)
+        if (metaRes.ok) {
+          const fullMeta = await metaRes.json()
+          setSabanaMetrics(fullMeta)
+          setSabanaFullMeta(fullMeta)
+          setActivePanel('analysis')
+        }
+      } catch { /* ignore */ }
+    } catch (e: any) {
+      setStatusMessage(tt('deviation.failed', { detail: e.message }))
+    } finally {
+      setSabanaLoading(false)
+    }
+  }, [])
+
   // Auto-detect sábana when BIM models first appear after session load
   const prevBimCount = useRef(0)
   useEffect(() => {
@@ -988,9 +1028,16 @@ function App() {
     prevBimCount.current = bimModels.length
     // Only trigger when transitioning from 0  N models (fresh session load)
     if (!wasZero || bimModels.length === 0 || !activeSession) return
-    fetch(`/api/sessions/${activeSession}/sabana/exists`)
-      .then(r => r.json())
+    const sid = activeSession, scan = activeScanTab ?? null
+    // a comparison of this scan still running (launched before a reload): follow it to its sheet
+    fetch(`/api/bim/compare/${sid}/status${scan ? `?scan=${encodeURIComponent(scan)}` : ''}`)
+      .then(r => r.json()).catch(() => null)
+      .then(st => {
+        if (st?.status === 'running') { setActivePanel('bim'); setSessionLoading(null); followComparison(sid, scan, st); return null }
+        return fetch(`/api/sessions/${sid}/sabana/exists`).then(r => r.json())
+      })
       .then(d => {
+        if (!d) return
         setSabanaScan(d.exists ? d.scan ?? null : null)
         // (a sheet of ANOTHER scan of the project is not shown over this one)
         if (d.exists && (!d.scan || !activeScanTab || d.scan === activeScanTab)) {
@@ -1016,7 +1063,7 @@ function App() {
         }
       })
       .catch(() => { setActivePanel('bim'); setSessionLoading(null) })
-  }, [bimModels, activeSession])
+  }, [bimModels, activeSession, followComparison])
 
   // the overlay text the tasks poll put up, so it takes down exactly that one
   const taskOverlayRef = useRef<string | null>(null)
@@ -1492,38 +1539,19 @@ function App() {
       })
       // The server answers at once and compares in its own process (minutes on a scan of today):
       // its state is asked for until it ends.
-      let compareData = await compareRes.json()
-      while (compareRes.ok && compareData.status === 'running') {
-        await new Promise(r => setTimeout(r, 1500))
-        compareData = await (await fetch(`/api/bim/compare/${activeSession}/status${scanQuery}`)).json()
-        if (compareData.status === 'running') setStatusMessage(tt('deviation.progress', { pct: compareData.progress ?? 0 }))
-      }
-      if (!compareRes.ok || compareData.status !== 'done') {
+      const compareData = await compareRes.json()
+      if (!compareRes.ok) {
         const why = compareData.error || (typeof compareData.detail === 'string' ? compareData.detail : '')
         setStatusMessage(tt('deviation.failed', { detail: why }))
         setSabanaLoading(false)
         return
       }
-      viewportRef.current?.sendCommand({ type: 'load_sabana', session_id: activeSession })
-      viewportRef.current?.setOBBsVisible(false)
-      if (activeTool === 'align') setActiveTool('navigate')
-      setSabanaVisible(true)
-      setSessions(prev => prev.map(s => s.id === activeSession ? { ...s, hasSabana: true } : s))
-      setSabanaScan(activeScanTab ?? null)
-      try {
-        const metaRes = await fetch(`/api/sessions/${activeSession}/sabana/meta`)
-        if (metaRes.ok) {
-          const fullMeta = await metaRes.json()
-          setSabanaMetrics(fullMeta)
-          setSabanaFullMeta(fullMeta)
-          setActivePanel('analysis')
-        }
-      } catch { /* ignore */ }
+      await followComparison(activeSession, activeScanTab ?? null, compareData)
     } catch (e: any) {
       setStatusMessage(tt('deviation.failed', { detail: e.message }))
     }
     setSabanaLoading(false)
-  }, [activeSession, activeScanTab, sabanaVisible, manualAlignmentChosen])
+  }, [activeSession, activeScanTab, sabanaVisible, manualAlignmentChosen, followComparison])
 
   // ── Sábana: Toggle visibility via Potree streaming ──
   const handleToggleSabana = useCallback(() => {
