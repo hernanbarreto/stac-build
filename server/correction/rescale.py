@@ -280,7 +280,7 @@ def rescale_composition(paths, scan_key: str, scale: float) -> Optional[Dict[str
         else:
             continue
         entry["matrix"] = [float(v) for v in M.reshape(-1)]
-        entry["scale_scan_to_ref"] = float(abs(np.linalg.det(M[:3, :3])) ** (1.0 / 3.0))
+        entry["scale_scan_to_ref"] = float(np.cbrt(abs(np.linalg.det(M[:3, :3]))))
         entry.setdefault("rescaled", []).append({"scan": scan_key, "scale": float(scale)})
         changed.append(key)
     if not changed:
