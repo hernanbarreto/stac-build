@@ -88,8 +88,13 @@ step_pip_env() {
         echo "── building $name $version from source"
         "$py" -m pip install --no-deps "$dir/$(basename "${url%%#*}")"
     done < "$LOCKS/$env.wheels.tsv"
-    # wheels by URL and git commits
-    if [ -s "$LOCKS/$env.pip-url.txt" ]; then "$py" -m pip install --no-deps -r "$LOCKS/$env.pip-url.txt"; fi
+    # wheels by URL (exact files, sha256 in the line) and git commits (built at install: with the backup
+    # set their installed files come from it, as the source distributions' do)
+    if [ -s "$LOCKS/$env.pip-url.txt" ]; then
+        if use_prebuilt; then grep -v ' @ git+' "$LOCKS/$env.pip-url.txt" > "$dir/by-url.txt" || true
+        else cp "$LOCKS/$env.pip-url.txt" "$dir/by-url.txt"; fi
+        if [ -s "$dir/by-url.txt" ]; then "$py" -m pip install --no-deps -r "$dir/by-url.txt"; fi
+    fi
     # the packages whose files won over another's on the original pod: installed again, last
     if [ -s "$LOCKS/$env.overlaps.tsv" ]; then
         local winner
@@ -103,6 +108,7 @@ step_pip_env() {
             done < "$LOCKS/$env.wheels.tsv"
         done
     fi
+    "$py" "$REBUILD_DIR/capture_env.py" scripts "$env" "$LOCKS"      # (python / python3.x in each launcher's first line)
     "$py" -m pip --version
 }
 

@@ -1,0 +1,13 @@
+bin/f2py	python
+bin/isympy	python
+bin/markdown-it	python
+bin/numpy-config	python
+bin/proton	python
+bin/proton-viewer	python
+bin/py.test	python
+bin/pygmentize	python
+bin/pytest	python
+bin/torchfrtrace	python
+bin/torchrun	python
+bin/tqdm	python
+bin/wheel	python3.10

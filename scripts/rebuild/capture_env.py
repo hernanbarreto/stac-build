@@ -21,6 +21,7 @@ and writes, in ``<locks dir>``:
   <env>.records.tsv     name, version, origin (index / url / git / local), the digest of the
                         files the distribution installed, its wheel tags — verify_env.py recomputes
                         the digest in the rebuilt env: the same digest = the same files, byte for byte
+  <env>.scripts.tsv     the launchers pip wrote in bin/ and the interpreter name each starts with
   <env>.overlaps.tsv    winner, loser, files: two packages that installed the same path — the
                         winner (its content is the file's today) is installed LAST by the rebuild
   <env>.modified.tsv    source files that no longer match their RECORD and that no other package
@@ -179,6 +180,22 @@ def main(env: str, out_dir: str) -> None:
     def write(suffix, lines):
         (out / f"{env}.{suffix}").write_text("".join(f"{line}\n" for line in sorted(lines, key=str.lower)))
 
+    # the launchers pip wrote in bin/: `pip install …` gives them #!<prefix>/bin/python3.11, `python -m pip
+    # install …` gives #!<prefix>/bin/python — the same interpreter under two names. Which one each has is
+    # recorded, so a rebuild writes the same first line.
+    import os
+    prefix = os.path.normpath(sys.prefix)
+    scripts = []
+    for name, dist in kept:
+        for f in dist.files or []:
+            full = os.path.normpath(str(dist.locate_file(f)))
+            if os.path.dirname(full) != os.path.join(prefix, "bin") or not os.path.isfile(full):
+                continue
+            with open(full, "rb") as fh:
+                first = fh.readline().strip()
+            if first.startswith(b"#!" + prefix.encode() + b"/bin/"):
+                scripts.append(f"bin/{os.path.basename(full)}\t{first.rsplit(b'/', 1)[-1].decode()}")
+    write("scripts.tsv", sorted(set(scripts)))
     over = overlaps(kept)
     # (a file of a package overwritten by another one's is not a hand edit)
     losers = {loser for _w, loser, _n in over}
@@ -213,6 +230,10 @@ def asis(env: str, out_dir: str) -> None:
             cols = line.split("\t")
             if len(cols) >= 6 and (cols[5] == "sdist" or (len(cols) >= 7 and cols[6] != "identical")):
                 names.add(norm(cols[0]))
+    # a git commit is built at install too (its WHEEL names the setuptools of that day)
+    by_url = out / f"{env}.pip-url.txt"
+    if by_url.exists():
+        names |= {norm(line.split(" @ ")[0]) for line in by_url.read_text().splitlines() if " @ git+" in line}
     prefix = os.path.normpath(sys.prefix)
     paths = set()
     for dist in metadata.distributions():
@@ -237,9 +258,37 @@ def asis(env: str, out_dir: str) -> None:
     print(f"{env}: {len(paths)} file(s) of {len(names)} distribution(s) to archive as they are")
 
 
+def scripts(env: str, out_dir: str) -> None:
+    """After a rebuild's pip step: every launcher of ``<env>.scripts.tsv`` starts with the
+    interpreter name it had on the original pod (see main)."""
+    import os
+    prefix = os.path.normpath(sys.prefix)
+    head = b"#!" + prefix.encode() + b"/bin/"
+    fixed = missing = 0
+    listing = Path(out_dir) / f"{env}.scripts.tsv"
+    for line in listing.read_text().splitlines() if listing.exists() else []:
+        rel, interpreter = line.split("\t")
+        full = os.path.join(prefix, rel)
+        if not os.path.isfile(full):
+            missing += 1
+            continue
+        with open(full, "rb") as fh:
+            data = fh.read()
+        first, _, rest = data.partition(b"\n")
+        if first.startswith(head) and first[len(head):].strip() != interpreter.encode():
+            mode = os.stat(full).st_mode
+            with open(full, "wb") as fh:
+                fh.write(head + interpreter.encode() + b"\n" + rest)
+            os.chmod(full, mode)
+            fixed += 1
+    print(f"{env}: {fixed} launcher(s) set to the interpreter name they had" + (f", {missing} not installed here" if missing else ""))
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 4 and sys.argv[1] == "asis":
         asis(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) == 4 and sys.argv[1] == "scripts":
+        scripts(sys.argv[2], sys.argv[3])
     elif len(sys.argv) == 3:
         main(sys.argv[1], sys.argv[2])
     else:

@@ -114,7 +114,7 @@ def env_full(env: str, tmp: Path) -> list:
         run = subprocess.run([str(python), str(HERE / "capture_env.py"), env, str(out)], capture_output=True, text=True)
         if run.returncode != 0:
             return problems + [f"{env}: capture_env.py failed: {run.stderr.strip()[-200:]}"]
-        for suffix in ("pip.txt", "pip-url.txt", "pip-local.tsv", "records.tsv", "overlaps.tsv", "modified.tsv"):
+        for suffix in ("pip.txt", "pip-url.txt", "pip-local.tsv", "records.tsv", "overlaps.tsv", "modified.tsv", "scripts.tsv"):
             diff(f"{env} {suffix}", lines(LOCKS / f"{env}.{suffix}"), lines(out / f"{env}.{suffix}"), problems)
         saved = {p.relative_to(HERE / "overlays" / env).as_posix() for p in (HERE / "overlays" / env).rglob("*") if p.is_file()} \
             if (HERE / "overlays" / env).is_dir() else set()

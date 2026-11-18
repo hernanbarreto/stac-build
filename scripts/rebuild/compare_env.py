@@ -83,12 +83,13 @@ def classify(rel, a, b, original, rebuilt):
         return "bookkeeping" if bookkeeping(rel) else "ONLY IN REBUILT"
     sa, sb = os.lstat(a[rel]), os.lstat(b[rel])
     if sa.st_size == sb.st_size and not os.path.islink(a[rel]) and sa.st_size > (64 << 20):
-        ha, hb = hashlib.sha256(), hashlib.sha256()                # (a large file: by digest, in blocks)
+        ha, hb = hashlib.sha256(), hashlib.sha256()                # (a large file: by digest first, in blocks)
         for path, h in ((a[rel], ha), (b[rel], hb)):
             with open(path, "rb") as f:
                 for block in iter(lambda: f.read(1 << 22), b""):
                     h.update(block)
-        return "identical" if ha.digest() == hb.digest() else "DIFFERENT"
+        if ha.digest() == hb.digest():
+            return "identical"
     ca, cb = content(a[rel]), content(b[rel])
     if ca == cb:
         return "identical"
