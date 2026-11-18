@@ -20,7 +20,7 @@ import os
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ROOTS = [Path("/workspace/hf_cache"), Path("/workspace/.cache/huggingface")]
+ROOTS = [Path("/workspace/hf_cache"), Path("/workspace/.cache/huggingface")]      # (as the manifest writes them)
 
 
 def cache_rows(notes):

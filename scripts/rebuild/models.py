@@ -50,8 +50,20 @@ def rows():
     return out
 
 
+CANON = "/workspace"                                           # the volume as the manifest writes it
+WS = (os.environ.get("WORKSPACE") or CANON).rstrip("/")
+
+
+def relocate(path: str) -> str:
+    """An absolute path of the manifest on THIS volume: the manifest names /workspace/…, a rebuild
+    into another root (a test tree) must never write to the pod's own."""
+    if WS != CANON and (path == CANON or path.startswith(CANON + "/")):
+        return WS + path[len(CANON):]
+    return path
+
+
 def path_of(dest: str) -> Path:
-    return Path(dest) if dest.startswith("/") else ROOT / dest
+    return Path(relocate(dest)) if dest.startswith("/") else ROOT / dest
 
 
 def sha256_of(path: Path) -> str:
@@ -165,7 +177,7 @@ def cache_base(row) -> Path:
     root (the pod has two: /workspace/hf_cache — the backend's — and /workspace/.cache/huggingface —
     HF_HOME of the pod's template, used by what is launched from a shell), with ``#main`` when the
     cache's refs/main names the row's revision."""
-    root = row["dest"].partition("#")[0]
+    root = relocate(row["dest"].partition("#")[0])
     repo, _revision, _name = hf_parts(row["source"])
     return Path(root) / "hub" / ("models--" + repo.replace("/", "--"))
 
@@ -205,7 +217,7 @@ def target(row) -> Path:
 def in_place(row, deep: bool) -> bool:
     p = target(row)
     if row["kind"] == "link":
-        return p.is_symlink() and os.readlink(p).rstrip("/") == row["source"].rstrip("/")
+        return p.is_symlink() and os.readlink(p).rstrip("/") == relocate(row["source"]).rstrip("/")
     if not p.exists():
         return False
     if row["kind"] == "copy":
@@ -295,7 +307,7 @@ def place_links_and_copies(all_rows) -> list:
                 p.parent.mkdir(parents=True, exist_ok=True)
                 if p.is_symlink() or p.exists():
                     p.unlink()
-                p.symlink_to(row["source"])
+                p.symlink_to(relocate(row["source"]))
             elif row["kind"] == "copy" and not in_place(row, False):
                 p.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path_of(row["source"]), p)

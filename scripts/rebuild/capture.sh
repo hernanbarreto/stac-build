@@ -87,7 +87,7 @@ sys.path[:] = ['$WORKSPACE/usdtools/lib/python3.11/site-packages', '/usr/lib/pyt
 sys.argv = ['capture_env.py', 'usdtools', '$LOCKS']
 runpy.run_path('$HERE/capture_env.py', run_name='__main__')"
         grep -vE '^(pip|setuptools)==' "$LOCKS/usdtools.pip.txt" > "$LOCKS/usdtools.pip.txt.tmp" && mv "$LOCKS/usdtools.pip.txt.tmp" "$LOCKS/usdtools.pip.txt"
-        rm -f "$LOCKS"/usdtools.{pip-url.txt,pip-local.tsv,modified.tsv,overlaps.tsv}
+        rm -f "$LOCKS"/usdtools.{pip-url.txt,pip-local.tsv,modified.tsv,overlaps.tsv,scripts.tsv}
         CHECK=1 resolve_pins usdtools /usr/bin/python3.11
     fi
     # the hub caches' rows of the model manifest, from what the caches hold

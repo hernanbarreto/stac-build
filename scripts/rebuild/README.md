@@ -11,7 +11,7 @@ So this is not a list of things to install. It starts from **what is on the volu
 
 | class | what | how it comes back | exact? |
 |---|---|---|---|
-| `git` | the repo, 11 vendor repositories, their submodules | the commit of each (`steps_vendors.sh`), our patches | the same commit and diff |
+| `git` | the repo, 13 vendor repositories (submodules and nested ones) | the commit of each (`steps_vendors.sh`), our patches | the same commit and diff |
 | `env` | the ten conda envs, conda's base, the USD venv | `locks/<env>.conda-explicit.txt` (URL + md5), `locks/<env>.wheels.tsv` (URL + sha256) | the same package files |
 | `weight` | 99 model files, 82 GB, in the repo's trees and in the TWO hub caches | `models.tsv`: source, pinned revision, sha256 | sha256-checked |
 | `download` | KTX, CloudComPy's binary, Tailscale, cloudflared, Miniforge's installer, MapAnything's DINOv2 code | their pinned sources | held to the recorded sha256 |
@@ -88,15 +88,54 @@ the fast half in the suite. What a capture cannot guess, it names:
 - An installer's own records of an install (conda-meta's dates, a distribution's RECORD of an editable install)
   are written again; `compare_env.py` counts them apart from the files that matter.
 
-## What was checked, and what was not
+## What was checked on 2026-11-18, and what was not
 
-See the last section of CLAUDE.md §4 for the dated record. In short, in a scratch tree on the pod's local disk,
-never touching the live install: every pip package downloaded and compared byte for byte with the installed one;
-every conda package still published; every weight source asked for its size and sha256; every env rebuilt from
-nothing and compared with the live one file by file (`compare_env.py`); the vendor trees, the compiled parts, the
-local git work and the secrets restored from the set and compared; the inventory of the rebuilt volume against
-the lock. NOT done: one single run on a really empty volume (the pod has no room for a second copy of itself) —
-the envs were rebuilt one at a time and the weights by sample; nothing was started on the card from a rebuilt env.
+In a scratch volume on the pod's local disk, at a path as long as `/workspace` (conda and pip then write the same
+launchers and the same padding as on the real volume), the live install read and never written — but for one
+mistake, below:
+
+- **the packages**: every pip package of the nine python envs and the USD venv (1,065) downloaded and compared
+  with the installed one — the same files byte for byte, but for what is compiled on the pod (in the set); the
+  1,080 conda packages still published; a fresh Miniforge 26.3.2-2 gives the locked base env (89 packages);
+- **the ten envs, rebuilt one at a time by `rebuild.sh` with the set, compared FILE BY FILE with the live ones**
+  (`compare_env.py` — identical / the env's own path written in the file / the installers' bookkeeping / different):
+
+  | env | identical | path-only | bookkeeping | DIFFERENT |
+  |---|---|---|---|---|
+  | da3 | 65,872 | 474 | 120 | 0 |
+  | mapanything | 43,329 | 262 | 248 | 0 |
+  | semantic | 48,313 | 265 | 375 | 0 |
+  | voice | 31,805 | 257 | 251 | 0 |
+  | amb3r | 72,178 | 1,304 | 450 | 0 |
+  | genrecon | 55,462 | 658 | 438 | 0 |
+  | CloudComPy310 | 87,873 | 1,367 | 563 | 0 |
+  | colmap | 33,560 | 1,093 | 275 | 0 |
+  | gs | 26,281 | 218 | 105 | 0 |
+  | nodejs | 2,522 | 14 | 14 | 0 |
+
+  no file on one side only; the compiled extensions restored from the set in 1–4 s an env, nothing compiled;
+- **the repositories**: the repo and its 13 vendor repositories (submodules and nested ones included) — the same
+  commit, uncommitted diff, branches (29 in the repo), stashes, remotes, worktrees;
+- **the set**: its 4,293 `asis` members and 20 `private` members restored and equal to its lists;
+- **the volume**: `inventory.py check` on the rebuilt volume against the lock — no difference in any class of
+  software (git heads, downloads by sha256, asis, private, npm); only the data, the caches and the weights not
+  fetched in this test were absent;
+- **the weights**: the 99 entries verified on the pod; 65 of the 67 sources answer with the manifest's size and
+  sha256 (the two others are DINOv3's: fetched from the set's mirror in the test); one file of every kind of
+  source downloaded and identical, a hub cache tree rebuilt identical;
+- **without the set** (the public-sources path): da3, mapanything, voice, amb3r, genrecon, colmap and nodejs built
+  with their compiled extensions and verified; the rebuilt PotreeConverter gives the same `octree.bin`,
+  `hierarchy.bin` and `metadata.json` as the pod's on bufferStop's cloud; the backend imports from a fresh clone.
+
+NOT done: one single run on a really empty volume (the pod has no room for a second copy of itself: the envs were
+rebuilt one at a time, the 82 GB of weights not downloaded again in full); nothing was started on the card from a
+rebuilt env.
+
+THE MISTAKE: the conversion of GenRecon's DINOv3 (`server/tools/genrecon/convert_dinov3.py`) had its paths
+written as `/workspace/stac-build/…`; run from the scratch tree it REWROTE THE LIVE POD'S FILE, twice — with the
+same bytes (its sha256 is the manifest's). The script now takes its paths from its own repo, and `models.py`
+relocates every absolute path of the manifest under `$WORKSPACE`: a rebuild into another root cannot write to
+`/workspace`.
 
 The older scripts (`scripts/setup_vendors.sh`, `scripts/setup_pod_envs.sh`, `setup_weights.sh`, `export_envs.sh`,
 `scripts/setup.sh`, `docs/migration/`) predate this and name removed envs and old pins.

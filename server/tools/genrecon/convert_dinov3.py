@@ -3,8 +3,11 @@ layout GenRecon loads (DINOv3ViTModel.from_pretrained), validated against Meta's
 import sys, json, torch, numpy as np
 from pathlib import Path
 from transformers import DINOv3ViTConfig, DINOv3ViTModel
-SRC = Path("/workspace/stac-build/vendor/pointdit/pretrained/dinov3/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth")
-DST = Path("/workspace/stac-build/vendor/GenRecon/weights/dinov3-vitl16-hf")
+# (relative to THIS repo, wherever it is: a rebuild tested in a scratch tree ran this script with the paths
+#  written as /workspace/stac-build/… and rewrote the LIVE pod's file — with the same bytes — on 2026-11-18)
+VENDOR = Path(__file__).resolve().parents[3] / "vendor"
+SRC = VENDOR / "pointdit" / "pretrained" / "dinov3" / "dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+DST = VENDOR / "GenRecon" / "weights" / "dinov3-vitl16-hf"
 sd = torch.load(SRC, map_location="cpu"); sd = sd.get("model", sd) if isinstance(sd, dict) and "model" in sd else sd
 D = sd["cls_token"].shape[-1]; L = len({k.split(".")[1] for k in sd if k.startswith("blocks.")}); R = sd["storage_tokens"].shape[1]
 cfg = DINOv3ViTConfig(hidden_size=D, intermediate_size=sd["blocks.0.mlp.fc1.weight"].shape[0], num_hidden_layers=L,
@@ -38,7 +41,7 @@ print("rope periods max rel diff", float(((per - hf_per).abs() / per).max()))
 DST.mkdir(parents=True, exist_ok=True); m.save_pretrained(DST, safe_serialization=True)
 print("saved", DST, sorted(p.name for p in DST.iterdir()))
 # validation against Meta's reference implementation (the hub code the pod already has)
-sys.path.insert(0, "/workspace/stac-build/vendor/pointdit/third_party/dinov3")
+sys.path.insert(0, str(VENDOR / "pointdit" / "third_party" / "dinov3"))
 try:
     from dinov3.hub.backbones import dinov3_vitl16
     ref = dinov3_vitl16(pretrained=True, weights=str(SRC)).eval()
