@@ -794,7 +794,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     on pccr 2408); an evaluation against laser ground truth (ScanNet++ / ETH3D), on his word.
   E · MINOR: zaragoza's split column and pccr 2408's small duplicates (waved off by him); docs/ARCHITECTURE.md
     and ROADMAP.md out of date (update or delete on his word); the general list of `docs/pipeline_final.md` §4.
-  NOT YET IN FORCE: `genrecon.keep_work` (a51092a) is read by the backend only after its next restart.
+  `genrecon.keep_work: false` (a51092a) IS IN FORCE since the backend's restarts of 2026-11-17 / 18.
 - ⭐ NEXT, AS SOON AS THE RECONSTRUCTION STAGE CLOSES (USER 2026-11-09, ~01:30 CDMX: "anotá para lo que sigue porque
   presentamos el proyecto en poco más de un mes … ni bien terminemos es lo que sigue"), in this order:
   1. FUSION — TWO functions (USER 2026-11-09), both needing the scans coherent in POSITION and above all in SCALE:
