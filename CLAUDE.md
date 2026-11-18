@@ -334,6 +334,25 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   local disk (`export.scratch_dir`) and the export runs in its own process (CPU). pccr 3108, the six items: 50 s,
   1.85 GB. pye57 was installed in the da3 env for it. NOT TRIED IN A BROWSER; no file was opened in another
   program (ReCap, CloudCompare, Revit) — only read back with the libraries that wrote them.
+- ⭐ THE IFC IS THE GENRECON MESH CUT BY THE SEGMENTATION (USER 2026-11-17, on the box IFC below: "el IFC de pccr es
+  muy grande gordo, no se de donde lo sacaste" / "por que no exportas el genrecon que esta perfecto, para eso
+  esta" / "asi debe ser ifc desde la malla genrecon cortada desde la segmentacion, exacto"): `bim/ifc_from_mesh.py`.
+  The boxes were measured: a wall's box 25 cm thick (median) around points 2 cm thick, the floors' 1.5 m — the box
+  IFC was taken out of pccr's project. MEASURED on pccr 3108 (13.28 M triangles): (1) the textured mesh repeats
+  its vertices at the texture's seams — welded by position (8.68 M → 6.71 M) it is ONE surface (4,202 pieces);
+  (2) SIMPLIFY THE WHOLE MESH FIRST, CUT AFTER: simplifying each object's part gave 12 mm p95 / metres at the
+  worst (its crumbs are deleted); the whole surface first gives, against the full mesh, p95 1.01 mm keeping 5 %,
+  0.52 mm keeping 10 %, 0.13 mm keeping 25 % (open3d's decimation: ~4 min a level; an IFC of 32 / 64 / 161 MB,
+  ~640 MB whole); (3) ⚠ THE SEGMENTATION ITSELF IS INTERLEAVED: of a cloud point's 8 nearest neighbours (within
+  7 mm) 39 % belong to ANOTHER OBJECT and 32 % carry ANOTHER LABEL (door 59 %, drywall 55 %, large_white_object
+  47 %, floor 40 %, wall 39 %, tile 33 %; the pairs: floor / tile, wall / drywall, panel / wall) — two concepts
+  own one surface point by point. It is why the boxes are fat, why the cut crumbles (adjacent triangles in
+  different objects: 29 % by the points on the triangle, 14 % by the 32 nearest points, 9 % by 128 — and 58 / 85 /
+  140 of the 1213 objects lose every triangle), and the likely reason of his "cuando apago los elementos
+  segmentados de la nube de puntos no desaparecen los puntos" (NOT verified in a browser). The level kept and
+  the cut's neighbourhood are HIS to choose; the root (one owner per surface in the projection) is the pending
+  "smarter segmentation". `fast-simplification` was NOT installed (the permission system refused: only pye57 was
+  approved by him).
 - AN IFC FROM A SCAN (USER 2026-11-17: "create un IFC vos a partir de PCCR3108, para comparar contra ese mismo,
   porque es simple"): `bim/ifc_from_scan.py` — each segmented BUILDING element (floor, tile, wall, drywall,
   ceiling, door, window, beam, column, duct, pipe: the assistant's list) as the box the store holds, named

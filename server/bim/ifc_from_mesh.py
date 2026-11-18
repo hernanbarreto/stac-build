@@ -86,6 +86,43 @@ def read_glb(path: Path | str) -> Tuple[np.ndarray, np.ndarray]:
     return np.vstack(verts), np.vstack(faces)
 
 
+def _most_frequent(rows: np.ndarray) -> np.ndarray:
+    """The most frequent value of each row (a tie: the smaller)."""
+    s = np.sort(rows, axis=1)
+    run = np.ones_like(s)
+    for j in range(1, s.shape[1]):
+        run[:, j] = np.where(s[:, j] == s[:, j - 1], run[:, j - 1] + 1, 1)
+    return s[np.arange(len(s)), run.argmax(axis=1)]
+
+
+def cut_by_neighbours(vertices: np.ndarray, faces: np.ndarray, points: np.ndarray, point_ids: np.ndarray,
+                      max_distance: float, neighbours: int) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """The object of each triangle: the object MOST OF THE ``neighbours`` CLOUD POINTS NEAREST ITS
+    CENTRE belong to (a tie: the smaller id); none (−1) when the nearest of them is farther than
+    ``max_distance``.
+
+    Why a neighbourhood (measured on pccr 3108, 2026-11-18): THE SEGMENTATION ITSELF IS
+    INTERLEAVED — a cloud point and its nearest neighbour, 3.7 mm away, belong to different
+    objects 37 % of the time (floor / tile, wall / drywall, panel / wall: two concepts on one
+    surface). A triangle cut by the points lying on it alone has a neighbour of another object
+    29 % of the time; by 32 neighbours 14 %, by 128 neighbours 9 % — and the wider the
+    neighbourhood, the more small objects lose every triangle (58 / 85 / 140 of 1213)."""
+    from scipy.spatial import cKDTree
+    ids = np.asarray(point_ids, np.int64)
+    centres = vertices[faces].mean(axis=1)
+    tree = cKDTree(points)
+    owner = np.empty(len(faces), np.int64)
+    far = 0
+    for k in range(0, len(faces), 1_000_000):
+        d, idx = tree.query(centres[k:k + 1_000_000], k=int(neighbours), workers=-1)
+        d, idx = d.reshape(len(d), -1), idx.reshape(len(idx), -1)
+        block = _most_frequent(ids[idx])
+        block[d[:, 0] > max_distance] = -1
+        far += int((d[:, 0] > max_distance).sum())
+        owner[k:k + 1_000_000] = block
+    return owner, {"faces_no_object": far, "neighbours": int(neighbours)}
+
+
 def cut(vertices: np.ndarray, faces: np.ndarray, points: np.ndarray, point_ids: np.ndarray,
         max_distance: float) -> Tuple[np.ndarray, Dict[str, Any]]:
     """The object of each triangle: THE OBJECT MOST OF THE POINTS LYING ON IT BELONG TO.
@@ -162,7 +199,7 @@ def deviation(v: np.ndarray, sv: np.ndarray, sf: np.ndarray) -> np.ndarray:
 
 
 def elements_of(output_dir: Path | str, mesh_path: Path | str, *, keep: float, max_distance: float,
-                measure: bool = False, log: Callable[[str], Any] = print) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                neighbours: int = 0, measure: bool = False, log: Callable[[str], Any] = print) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """The scan's elements, each with its part of the mesh (display frame), and the report.
 
     THE ORDER MATTERS: the whole mesh is simplified FIRST, as the one surface it is, and cut
@@ -195,7 +232,9 @@ def elements_of(output_dir: Path | str, mesh_path: Path | str, *, keep: float, m
     if len(ids) != len(cloud):
         raise MeshError(f"{out}: instance_ids.npy holds {len(ids):,} ids for a cloud of {len(cloud):,} points")
     points = np.column_stack([cloud["x"], cloud["y"], cloud["z"]])
-    owner, cut_report = cut(vertices, faces, points, ids, max_distance)
+    # ``neighbours`` = 0: the points lying ON the triangle; else that many nearest points
+    owner, cut_report = (cut_by_neighbours(vertices, faces, points, ids, max_distance, neighbours) if neighbours
+                         else cut(vertices, faces, points, ids, max_distance))
     report.update(cut_report)
     log(f"cut: {cut_report}")
     con = sqlite3.connect(f"file:{out / 'scene_r.db'}?mode=ro", uri=True)
@@ -304,7 +343,7 @@ def mesh_of(output_dir: Path | str) -> Path:
     return glb
 
 
-def write(session: str, scan_key: str, *, keep: float, out: Path | str | None = None, measure: bool = True,
+def write(session: str, scan_key: str, *, keep: float, neighbours: int = 0, out: Path | str | None = None, measure: bool = True,
           log: Callable[[str], Any] = print) -> Dict[str, Any]:
     """Build the scan's IFC from its GenRecon mesh and write it (default: the project's IFC
     directory). Returns the report: elements, triangles, the simplification's measured deviation."""
@@ -319,7 +358,7 @@ def write(session: str, scan_key: str, *, keep: float, out: Path | str | None = 
         con.close()
     epoch = str(row[0]) if row else "?"
     elements, report = elements_of(output_dir, mesh_of(output_dir), keep=keep, max_distance=voxel_of(),
-                                   measure=measure, log=log)
+                                   neighbours=neighbours, measure=measure, log=log)
     dev = report.get("deviation_m")
     described = (f"STAC Build — built from the GenRecon mesh of the scan {session} {scan_key}, geometry epoch {epoch}, "
                  f"cut by its segmentation: each element is its object's part of the mesh. Triangles kept: "
@@ -345,9 +384,11 @@ def main(argv: List[str]) -> int:
     ap.add_argument("session")
     ap.add_argument("scan")
     ap.add_argument("--keep", type=float, required=True, help="the share of the mesh's triangles kept, (0, 1]")
+    ap.add_argument("--neighbours", type=int, default=0,
+                    help="a triangle's object: the majority of this many nearest cloud points (0: of the points on it)")
     ap.add_argument("--out", default=None)
     a = ap.parse_args(argv)
-    print(json.dumps(write(a.session, a.scan, keep=a.keep, out=a.out), default=float))
+    print(json.dumps(write(a.session, a.scan, keep=a.keep, neighbours=a.neighbours, out=a.out), default=float))
     return 0
 
 

@@ -99,6 +99,9 @@ def test_interleaved_points_do_not_crumble_the_cut(tmp_path):
     np.save(out / "instance_ids.npy", ids)
     elements, _report = M.elements_of(out, glb, keep=1.0, max_distance=0.05, log=lambda _m: None)
     wall_faces = len(next(e for e in elements if e["id"] == 1)["faces"])
+    # … and by a neighbourhood of nearest points the wall is whole
+    wide, report = M.elements_of(out, glb, keep=1.0, max_distance=0.05, neighbours=32, log=lambda _m: None)
+    assert len(next(e for e in wide if e["id"] == 1)["faces"]) == len(wall.faces) and report["neighbours"] == 32
     # (the nearest point alone would give it about 80 %: the share of its points that still say "wall")
     assert wall_faces >= 0.9 * len(wall.faces)
 
