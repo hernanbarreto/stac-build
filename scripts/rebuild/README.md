@@ -1,93 +1,102 @@
-# Rebuilding the pod on an empty volume
+# Rebuilding the pod on an empty volume — exactly as it is
 
-USER 2026-11-18 (RunPod announced a maintenance of the pod's server): *"Prepara todo en .sh
-para que se creen automáticamente los entornos se descarguen todos los modelos y se vuelva a armar en un nuevo
-volumen en cuestión de poco tiempo … de forma completa y sin errores"*.
+USER 2026-11-18 (RunPod announced a maintenance of the pod's server): *"Prepara todo en .sh para que se creen
+automáticamente los entornos se descarguen todos los modelos y se vuelva a armar en un nuevo volumen en cuestión
+de poco tiempo … de forma completa y sin errores"* — and, on the first version: *"debe quedar exactamente como
+está ahora … No decidas por mí … cada cosa que avancemos debemos actualizarlo para que siempre quede actualizado
+a la perfección … Revisa pointdit r3d etc etc son muchos"*.
 
-Everything here was written FROM the pod that works and installs **the exact files it holds**, not "the latest".
+So this is not a list of things to install. It starts from **what is on the volume** — every file, classified
+(`inventory.py`) — and each class has the one thing that puts it back:
+
+| class | what | how it comes back | exact? |
+|---|---|---|---|
+| `git` | the repo, 11 vendor repositories, their submodules | the commit of each (`steps_vendors.sh`), our patches | the same commit and diff |
+| `env` | the ten conda envs, conda's base, the USD venv | `locks/<env>.conda-explicit.txt` (URL + md5), `locks/<env>.wheels.tsv` (URL + sha256) | the same package files |
+| `weight` | 99 model files, 82 GB, in the repo's trees and in the TWO hub caches | `models.tsv`: source, pinned revision, sha256 | sha256-checked |
+| `download` | KTX, CloudComPy's binary, Tailscale, cloudflared, Miniforge's installer, MapAnything's DINOv2 code | their pinned sources | held to the recorded sha256 |
+| `npm` | `node_modules` (interface, mesh tools), the global CLI | `npm ci` on the tracked lock | npm's integrity hashes |
+| `asis` | what exists nowhere else: everything COMPILED on the pod, the built interface, sidecars, empty directories | **the backup set** — archived as it is, put back byte for byte | the same bytes |
+| `private` | `.env`, stored tokens, the sessions' signing key, the users' database, Tailscale's identity | **the backup set**'s private archive | the same bytes |
+| `data` | the sessions (147 GB), runs, logs, scratch | copied apart — it is not software | — |
+| `cache` | bytecode, pip's cache, derived images | whatever uses it writes it again | — |
+
+## The two halves
+
+**The kit** — this directory, in git: the scripts, the locks, the manifest, the inventory. Public sources only.
+
+**The backup set** — `python3 scripts/rebuild/backup.py make` writes it to `/workspace/stac_backup` (≈ 0.2 GB plus
+hard links to Meta's two DINOv3 files, 4.6 GB): `asis.tar.gz`, `envs.tar.gz` (the distributions compiled on the
+pod, inside the envs), `private.tar.gz`, `git/` (every local branch, stash and worktree of every repository; the
+commits that are on no remote, as bundles), `mirror/` (the weights whose source may refuse). **It is not a
+backup while it sits on the volume it describes: it must be copied off the pod, and again after every capture.**
+`private.tar.gz` holds secrets.
+
+With the set, a rebuild compiles nothing: the compiled parts are the old pod's own bytes (PotreeConverter's
+sha256 is in every octree's stamp — a new compilation would be the same program and another stamp). Without it
+the rebuild still completes from public sources, compiles those parts again, restores no secret and no local git
+work, and says so.
 
 ## Run it
 
-A pod of the same template (Ubuntu 24.04, CUDA 12.8.1 **devel**, python 3.11 in `/usr/bin`; the image is, by what
-the pod shows, RunPod's PyTorch 2.8 / CUDA 12.8.1 one — copy its exact name from the pod's page before deleting
-anything), the volume mounted at `/workspace`:
+A pod of the same template (Ubuntu 24.04, CUDA 12.8.1 **devel**, pythons 3.10–3.13 in `/usr/bin`; by what the pod
+shows it is RunPod's PyTorch 2.8 / CUDA 12.8.1 image — copy its exact name from the pod's page before deleting
+anything), the volume at `/workspace`:
 
 ```bash
-nano /workspace/.env                 # the four secrets — see env.template
-source /workspace/.env
-git clone https://$GIT_USER:$GIT_TOKEN@github.com/hernanbarreto/stac-build.git /workspace/stac-build
-git -C /workspace/stac-build remote set-url origin https://github.com/hernanbarreto/stac-build.git
-cp /workspace/.env /workspace/stac-build/.env
+git clone https://github.com/hernanbarreto/stac-build.git /workspace/stac-build
+# copy the backup set to /workspace/stac_backup      (without it: write /workspace/stac-build/.env — env.template)
 bash /workspace/stac-build/scripts/rebuild/rebuild.sh
-bash /workspace/stac-build/init_pod.sh           # the services, as on every boot
+bash /workspace/stac-build/init_pod.sh               # the services, as on every boot
 ```
 
-About an hour (measured step by step on the pod's local disk, 2026-11-18: an env's conda packages 4–50 s, its pip
-packages 80–160 s, the compiled extensions 0.5–7 min an env, the vendor clones 5 min; 78 GB of weights at the
-pod's 100+ MB/s; a network volume writes slower). A failure stops only what depends on it; **run the same command
-again** and every finished step is skipped. `rebuild.sh --list` shows the steps, `--only STEP` runs one,
-`--verify` checks an installed pod against the locks. Logs: `/workspace/.stac_rebuild/logs/<step>.log`.
+About an hour (measured step by step on the pod's local disk: an env's conda packages 4–50 s, its pip packages
+80–160 s, the vendor clones 5 min, 82 GB of weights at the pod's 100+ MB/s; a network volume writes slower). A
+failure stops only what depends on it; **run the same command again** and every finished step is skipped.
+`rebuild.sh --list` shows the steps, `--only STEP` runs one, `--verify` checks an installed pod, `ENVS="da3 voice"`
+rebuilds some envs. Logs: `/workspace/.stac_rebuild/logs/<step>.log`.
 
 Running it on the pod that already works changes nothing: an env it did not build is left alone, a vendor tree at
 its commit and a weight with the right sha256 are kept.
 
-## What it restores
+## Keeping it true — after EVERY change of the pod
 
-| | from | exactness |
-|---|---|---|
-| the ten conda envs | `locks/<env>.conda-explicit.txt` (URL + md5), `locks/<env>.wheels.tsv` (URL + sha256) | the same packages, the same files |
-| what pip built from a directory | `steps_envs.sh` — the editable vendor trees, GenRecon's five extensions at pinned commits, AMB3R's native builds | the same sources; compiled again |
-| a file patched inside an env | `overlays/<env>/` (uniception's DINOv2 loader in `mapanything`) | byte for byte |
-| the vendor trees | `steps_vendors.sh` — commits; `bundles/` — our commits that are on no remote; the patches | the same commits and diffs |
-| the model weights | `models.tsv` (77 entries, 78.5 GB: source, pinned revision, sha256, size) | sha256-checked |
-| the octree converter, oneTBB, KTX, CloudComPy's binary, node packages, the USD venv, tailscale / cloudflared | `steps_builds.sh`, `steps_vendors.sh`, `steps_envs.sh` | built or downloaded again |
+```bash
+python3 scripts/rebuild/drift.py          # is the kit still the pod? (≈ 4 min, read-only; --fast: seconds)
+bash scripts/rebuild/capture.sh           # write the locks, the manifest's cache rows, the inventory, the set
+git add scripts/rebuild && git commit     # … and copy /workspace/stac_backup off the pod; push on the user's word
+```
 
-## What it does NOT restore — copy these yourself
+A `pip install`, a `conda install`, a vendor clone or commit, a new weight, a compilation, a new secret: each
+makes the kit false without any error. `drift.py` compares the live pod with the kit part by part — every env's
+packages and files, every vendor's commit and diff, every weight, every file of the volume in its class, the
+backup set, what is not committed or pushed — and names each difference. `server/tests/test_rebuild_kit.py` runs
+the fast half in the suite. What a capture cannot guess, it names:
+- a file edited in place inside an env (`locks/<env>.modified.tsv`) → save it under `overlays/<env>/`;
+- a large file with no source (a weight downloaded by hand) → give it a row in `models.tsv`;
+- a commit made in a vendor clone → it goes into the set's bundle; pushing it to a remote of ours is better.
 
-- **The sessions**: `server/projects/` (videos, clouds, segmentations, meshes) and **the users' database**
-  `server/data/` (stac.db, personnel, teams). Data, not software.
-- **`.env`** (the tokens) and Tailscale's node identity (`bash scripts/tailscale_up.sh` authorises a new node).
-- **Meta's two DINOv3 checkpoints when `DINOV3_URL` has expired** (it had on 2026-11-18): PointDiT and GenRecon
-  need them. Ask Meta for a new link, put it in `.env`, run `rebuild.sh` again — or keep a copy of the two files
-  (4.6 GB, `vendor/pointdit/pretrained/dinov3/`) and point `STAC_MIRROR` at a folder holding them named by their
-  sha256.
-- `texrecon` (`vendor/mvs-texturing`, kept "por las dudas"): cloned, not built — it was relinked by hand.
+## What a rebuild cannot give back, and what is different
 
-## What was checked on 2026-11-18, and what was not
+- **The sessions and the other `data`** are not in the set. `python3 scripts/rebuild/inventory.py summary` lists
+  them with their sizes.
+- **Meta's two DINOv3 checkpoints** (PointDiT, GenRecon): Meta's link in `.env` expires (it had on 2026-11-18).
+  The set's `mirror/` holds them; without the set a new link is needed (`env.template` says where).
+- **The USD venv** (`/workspace/usdtools`, the AR export): on the pod of 2026-11-18 it does NOT work — it was made
+  when `/usr/bin/python3` was 3.11 and the image moved it to 3.12 (`import pxr` fails). The rebuild makes it with
+  python 3.11 by name, so the rebuilt one works: the one place where the rebuilt pod is not the old one.
+- An installer's own records of an install (conda-meta's dates, a distribution's RECORD of an editable install)
+  are written again; `compare_env.py` counts them apart from the files that matter.
 
-Checked, in a scratch tree on the pod's local disk, never touching the live install:
-- **every pip package of the nine python envs** (1,060) downloaded and compared with the installed one: the same
-  files byte for byte, but for gsplat in the unused env `gs` (compiled on the pod; the rebuild takes PyPI's wheel);
-- **every conda package** (1,080 URLs) still published; **every weight source** asked for its size and sha256
-  (`models.py remote`): 65 of 67 give the manifest's file — the two that do not are DINOv3's (the expired link);
-  the 77 entries verified against the pod's own files (`models.py verify`);
-- **the envs `da3`, `mapanything`, `voice`, `amb3r`, `genrecon`, `colmap`, `nodejs` rebuilt from nothing** and
-  verified (`verify_env.py`): every package identical or built; the backend imports from a fresh clone with the
-  rebuilt `da3` (159 routes, as with the live env);
-- **the twelve vendor trees** cloned from nothing: the same commits and local diffs; KTX's and CloudComPy's binary
-  trees byte-identical; a fresh clone's submodule update FAILS on depth-anything-3 (its last commit is on no
-  remote) and the bundle repairs it;
-- **the rebuilt PotreeConverter** gives the same `octree.bin`, `hierarchy.bin` and `metadata.json` as the pod's on
-  bufferStop's cloud (3.84 M points); **GenRecon's DINOv3 conversion** with the rebuilt env gives the same file;
-  one GenRecon checkpoint (2.86 GB) fetched from TUM's server: identical;
-- **`rebuild.sh` itself** end to end on a subset (two envs, one model): phases, background steps, stamps.
+## What was checked, and what was not
 
-NOT checked: the whole run on a really empty volume; the envs `semantic`, `CloudComPy310` and `gs` were not
-rebuilt (their packages were all checked, as above); the 78 GB were not downloaded again in full; nothing was
-started on the card from a rebuilt env.
-
-Known differences of a rebuilt pod: PotreeConverter's binary has another sha256 (same output) — it is part of
-every octree's stamp, so a restored session's octree is converted again when asked; compiled extensions are
-other builds of the same sources.
-
-## Keeping it true
-
-After any `pip install` / `conda install` in an env: `bash scripts/rebuild/capture.sh <env>` and commit
-`locks/` (`CHECK=1` also downloads every wheel and compares it with the installed one, ~12 min for all). The
-audit names a file edited in place inside an env (`locks/<env>.modified.tsv`): save it under `overlays/<env>/`.
-A new weight is a new row of `models.tsv`; a new vendor tree a row of `steps_vendors.sh`. A commit made in a
-vendor clone must be pushed to a remote of ours or bundled into `bundles/`.
+See the last section of CLAUDE.md §4 for the dated record. In short, in a scratch tree on the pod's local disk,
+never touching the live install: every pip package downloaded and compared byte for byte with the installed one;
+every conda package still published; every weight source asked for its size and sha256; every env rebuilt from
+nothing and compared with the live one file by file (`compare_env.py`); the vendor trees, the compiled parts, the
+local git work and the secrets restored from the set and compared; the inventory of the rebuilt volume against
+the lock. NOT done: one single run on a really empty volume (the pod has no room for a second copy of itself) —
+the envs were rebuilt one at a time and the weights by sample; nothing was started on the card from a rebuilt env.
 
 The older scripts (`scripts/setup_vendors.sh`, `scripts/setup_pod_envs.sh`, `setup_weights.sh`, `export_envs.sh`,
-`scripts/setup.sh`, `docs/migration/`) predate this and name removed envs and old pins: this directory replaces
-them.
+`scripts/setup.sh`, `docs/migration/`) predate this and name removed envs and old pins.

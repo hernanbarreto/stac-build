@@ -2,6 +2,7 @@
 ones installed here.
 
     python wheels.py resolve <env> <locks dir> <pip report.json> [<pip report.json> …]
+    python wheels.py current <env> <locks dir>        (exit 0: the lock already covers the pins)
     python wheels.py check   <env> <locks dir> <cache dir> [--jobs N]
     python wheels.py fetch   <env> <locks dir> <cache dir> <out dir> [--jobs N]
 
@@ -206,6 +207,18 @@ def check(env: str, locks: Path, cache: Path, jobs: int) -> int:
     return 0
 
 
+def current(env: str, locks: Path) -> int:
+    """0 when ``<env>.wheels.tsv`` already holds exactly the pins of ``<env>.pip.txt``, each with its
+    verdict — nothing to resolve or download again; 1 otherwise."""
+    tsv = locks / f"{env}.wheels.tsv"
+    if not tsv.exists():
+        return 1
+    rows = read(tsv)
+    have = {(norm(r[0]), r[1]) for r in rows}
+    want = {(norm(line.split("==")[0]), line.split("==")[1]) for line in (locks / f"{env}.pip.txt").read_text().split() if "==" in line}
+    return 0 if have == want and all(len(r) >= 7 and r[6] for r in rows) else 1
+
+
 def fetch(env: str, locks: Path, cache: Path, out_dir: Path, jobs: int) -> int:
     rows = read(locks / f"{env}.wheels.tsv")
     files = fetch_all(rows, cache, jobs)
@@ -226,6 +239,8 @@ if __name__ == "__main__":
     jobs = int(sys.argv[sys.argv.index("--jobs") + 1]) if "--jobs" in sys.argv else 16
     if "--jobs" in sys.argv:
         args.remove(str(jobs))
+    if len(args) == 3 and args[0] == "current":
+        sys.exit(current(args[1], Path(args[2])))
     if len(args) >= 4 and args[0] == "resolve":
         sys.exit(resolve(args[1], Path(args[2]), args[3:]))
     if len(args) == 4 and args[0] == "check":

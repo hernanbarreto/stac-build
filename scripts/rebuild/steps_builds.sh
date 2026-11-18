@@ -47,21 +47,25 @@ step_potree() {
     ls -la "$bin" "$src/build/liblaszip.so"
 }
 
-# remote access: the static binaries (the node's identity is NOT restored — `bash scripts/tailscale_up.sh`
-# prints the link to authorise the new node)
+# remote access: the static binaries at the pod's versions, held to their sha256 (the node's identity
+# is in the backup set's private archive; without it `bash scripts/tailscale_up.sh` authorises a new node)
 step_remote_tools() {
-    local ts="$WORKSPACE/tailscale"
-    if [ ! -x "$ts/tailscaled" ]; then
-        fetch https://pkgs.tailscale.com/stable/tailscale_1.86.2_amd64.tgz "$CACHE/dl/tailscale_1.86.2_amd64.tgz"
-        mkdir -p "$ts" && tar -xzf "$CACHE/dl/tailscale_1.86.2_amd64.tgz" -C "$CACHE/dl"
+    local ts="$WORKSPACE/tailscale" tgz="$CACHE/dl/tailscale_1.86.2_amd64.tgz"
+    if [ ! -x "$ts/tailscaled" ] || [ ! -x "$ts/tailscale" ]; then
+        fetch https://pkgs.tailscale.com/stable/tailscale_1.86.2_amd64.tgz "$tgz"
+        mkdir -p "$ts" && tar -xzf "$tgz" -C "$CACHE/dl"
         cp "$CACHE/dl/tailscale_1.86.2_amd64/tailscale" "$CACHE/dl/tailscale_1.86.2_amd64/tailscaled" "$ts/"
     fi
-    if [ ! -x "$WORKSPACE/cloudflared" ]; then
-        fetch https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 "$WORKSPACE/cloudflared"
-        chmod +x "$WORKSPACE/cloudflared"
-    fi
-    "$ts/tailscale" version | head -1
+    echo "$TAILSCALE_SHA256  $ts/tailscale" | sha256sum -c -
+    echo "$TAILSCALED_SHA256  $ts/tailscaled" | sha256sum -c -
+    fetch https://github.com/cloudflare/cloudflared/releases/download/2026.8.2/cloudflared-linux-amd64 "$WORKSPACE/cloudflared" "$CLOUDFLARED_SHA256"
+    chmod +x "$WORKSPACE/cloudflared"
+    "$ts/tailscale" version | head -1; "$WORKSPACE/cloudflared" --version
+    mkdir -p "$WORKSPACE/weights" "$WORKSPACE/tmp"            # (two directories the pod has: the first is empty)
 }
+TAILSCALE_SHA256="349b69aa2e8db0ce430c9ef600e16b1e4b2820286d354a0ca6bb5fdb66b8fa55"
+TAILSCALED_SHA256="dd5ff38a1539554498e8b9d6bb0ed3dc565c70c42eeecb6ecca7695f8e0be870"
+CLOUDFLARED_SHA256="fcfb02b575a52ca1af2e3267af4e1517bcdeb30ac48c834c69abaed3c0576ad2"
 
 # GenRecon's DINOv3 in the transformers layout, converted from Meta's ViT-L/16 checkpoint (the same
 # conversion as on the pod; its result is checked against the manifest's sha256 by `models.py verify`)

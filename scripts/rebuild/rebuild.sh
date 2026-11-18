@@ -34,6 +34,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib.sh"
 source "$HERE/steps_vendors.sh"          # (git_credentials; the steps themselves run through step.sh)
+source "$HERE/steps_backup.sh"           # (have_backup)
 
 T0=$SECONDS
 FAILED=()
@@ -59,10 +60,10 @@ wait_background() {
 
 list_steps() {
     local s
-    for s in preflight system submodules vendor_clones vendor_binaries miniforge models \
+    for s in backup_check restore_private preflight system submodules vendor_clones vendor_binaries miniforge restore_asis models \
              $(printf 'conda_%s ' "${STAC_ENVS[@]}") fetch_wheels $(printf 'pip_%s ' "${STAC_ENVS[@]}") \
              extras_da3 extras_mapanything extras_semantic extras_voice extras_amb3r extras_genrecon extras_CloudComPy310 \
-             extras_colmap extras_gs extras_nodejs onetbb potree usdtools remote_tools models_links convert_dinov3 verify; do
+             extras_colmap extras_gs extras_nodejs onetbb potree usdtools remote_tools models_links convert_dinov3 restore_git verify; do
         if step_done "$s"; then printf '  ✓ %-24s %s\n' "$s" "$(cat "$STATE/done/$s")"; else printf '  · %-24s\n' "$s"; fi
     done
 }
@@ -79,9 +80,17 @@ run_only() {
 }
 
 main() {
+    log "STAC Build rebuild — logs in $LOGS"
+    # ── 0. the backup set, when it is here: checked whole, and the secrets first (.env) ──────────
+    if have_backup; then
+        log "backup set: $BACKUP_SET — the compiled parts, the secrets and the local git work come from it, as they were"
+        FORCE=1 run_step backup_check step_backup_check || die "the backup set is damaged — nothing was changed"
+        required restore_private step_restore_private
+    else
+        warn "NO BACKUP SET at $BACKUP_SET: what was compiled on the old pod is compiled AGAIN (the same sources, other bytes); its secrets, local branches and stashes are NOT restored"
+    fi
     load_env || warn "no .env found in $STAC_ROOT nor $WORKSPACE — the private repos and the gated weights will fail"
     git_credentials
-    log "STAC Build rebuild — logs in $LOGS"
 
     # ── A. the ground: tools, access, the code of others ─────────────────────────────────────────
     FORCE=1 run_step preflight step_preflight || die "preflight failed — nothing was changed"
@@ -90,6 +99,7 @@ main() {
     required vendor_clones   step_vendor_clones
     required vendor_binaries step_vendor_binaries
     required miniforge       step_miniforge
+    have_backup && required restore_asis step_restore_asis        # (into the vendor trees just cloned, the caches, the interface)
     [ ${#FAILED[@]} -eq 0 ] || { summary; exit 1; }
 
     # ── B. in the background, all along: ~78 GB of weights, and every wheel of every env ─────────
@@ -136,6 +146,7 @@ main() {
     wait "$MODELS_PID" || FAILED+=(models)
     required models_links   step_models_links
     step_done extras_genrecon && required convert_dinov3 step_convert_dinov3
+    have_backup && required restore_git step_restore_git          # (every local branch, stash and worktree)
     FORCE=1 required verify step_verify
     summary
 }
@@ -145,7 +156,8 @@ summary() {
     log "════ REBUILD: $(( (SECONDS - T0) / 60 )) min ════"
     list_steps
     if [ ${#FAILED[@]} -eq 0 ]; then
-        log "ALL DONE. Next: bash $STAC_ROOT/init_pod.sh"
+        if have_backup; then log "ALL DONE — with the backup set: the pod as it was. Next: bash $STAC_ROOT/init_pod.sh"
+        else log "ALL DONE — WITHOUT the backup set: the compiled parts are new builds. Next: bash $STAC_ROOT/init_pod.sh"; fi
         if [ "${KEEP_CACHE:-0}" != 1 ]; then rm -rf "$CACHE"; "$CONDA_ROOT/bin/conda" clean --all -y -q >/dev/null 2>&1 || true; log "download cache removed"; fi
         cat "$LOGS/verify.log" 2>/dev/null | sed 's/^/   /'
         return 0

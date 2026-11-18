@@ -43,12 +43,13 @@ step_submodules() {
         IFS='|' read -r path branch <<<"$row"
         want="$(git ls-tree HEAD "$path" | awk '{print $3}')"
         [ -n "$want" ] || { echo "$path is not a submodule of this commit"; return 1; }
-        if ! git submodule update --init "$path"; then
+        # (--recursive: depth-anything-3 carries its own submodule, da3_streaming/loop_utils/salad)
+        if ! git submodule update --init --recursive "$path"; then
             # the clone is there, the pinned commit is not on the remote: it is in the bundle
             [ "$branch" != - ] && [ -e "$path/.git" ] || { echo "$path: clone failed (GIT_TOKEN in .env? network?)"; return 1; }
             echo "$path: $want is not on the remote — taking it from scripts/rebuild/bundles/$(basename "$path").bundle"
             git -C "$path" fetch "$REBUILD_DIR/bundles/$(basename "$path").bundle" "refs/heads/$branch:refs/remotes/bundle/$branch"
-            git submodule update --init "$path"
+            git submodule update --init --recursive "$path"
         fi
         got="$(git -C "$path" rev-parse HEAD)"
         [ "$got" = "$want" ] || { echo "$path is at $got, the repo pins $want"; return 1; }

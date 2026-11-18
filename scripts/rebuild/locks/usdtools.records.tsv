@@ -1,0 +1,7 @@
+numpy	2.4.6	index	0072679f4ab4da10a704c1d37d1c334e	cp311-cp311-manylinux_2_27_x86_64,cp311-cp311-manylinux_2_28_x86_64
+pillow	12.3.0	index	0ea6365f3958a3779e7c5154da0a6635	cp311-cp311-manylinux_2_27_x86_64,cp311-cp311-manylinux_2_28_x86_64
+pip	24.0	index	4002ea9b5475a0507cd5621d1ac62213	py3-none-any
+pymeshlab	2025.7.post1	index	c7587565e77d5342f9e756a04144f311	cp311-cp311-manylinux_2_35_x86_64
+setuptools	65.5.0	index	d600b8b13967fa08b44713c4daebb87b	py3-none-any
+trimesh	5.0.0	index	3bbdd9c8a76f51bf4ff8e94726750602	py3-none-any
+usd-core	26.8	index	141b675b6437d91a6439e89b6466c1d0	cp311-none-manylinux_2_27_x86_64,cp311-none-manylinux_2_28_x86_64

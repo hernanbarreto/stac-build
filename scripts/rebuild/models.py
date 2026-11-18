@@ -12,7 +12,7 @@ already in place with the right sha256 is never fetched again; a file whose sha2
 ERROR, never kept. Standard library + curl: no environment is needed, so the weights download
 while the environments are being built.
 
-Environment: STAC_ROOT, HF_HOME (the cache), HF_TOKEN (the gated repos: SAM 3 / 3.1, VGGT-Omega),
+Environment: STAC_ROOT, HF_TOKEN (the gated repos: SAM 3 / 3.1, VGGT-Omega),
 DINOV3_URL (Meta's signed link — any of the two files' links, or the ``*`` form: it expires, ask
 for a new one at https://ai.meta.com/resources/models-and-libraries/dinov3-downloads/),
 STAC_MIRROR (optional: a directory or an http(s) base holding files named by their sha256 — tried
@@ -34,7 +34,6 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = Path(os.environ.get("STAC_ROOT") or HERE.parent.parent)
-HF_HOME = Path(os.environ.get("HF_HOME") or "/workspace/hf_cache")
 TMP = Path(os.environ.get("STAC_REBUILD_CACHE") or "/tmp/stac_rebuild") / "models"
 MIRROR = os.environ.get("STAC_MIRROR", "").rstrip("/")
 TUM_RANGES, TUM_WORKERS = 64, 12
@@ -161,11 +160,21 @@ def dinov3_url(name: str) -> str:
     return f"{origin}/{name}?{query}"
 
 
+def cache_base(row) -> Path:
+    """The repo's directory in the hub cache the row names. An ``hfcache`` row's dest is the cache's
+    root (the pod has two: /workspace/hf_cache — the backend's — and /workspace/.cache/huggingface —
+    HF_HOME of the pod's template, used by what is launched from a shell), with ``#main`` when the
+    cache's refs/main names the row's revision."""
+    root = row["dest"].partition("#")[0]
+    repo, _revision, _name = hf_parts(row["source"])
+    return Path(root) / "hub" / ("models--" + repo.replace("/", "--"))
+
+
 def hf_cache_place(row, blob_src: Path) -> None:
     """Put a downloaded file into the hub cache the way huggingface_hub lays it out: blobs/<id>,
-    snapshots/<revision>/<path> → the blob, and refs/main when today's cache has it."""
-    repo, revision, name = hf_parts(row["source"])
-    base = HF_HOME / "hub" / ("models--" + repo.replace("/", "--"))
+    snapshots/<revision>/<path> → the blob, and refs/<ref> when the row says the cache has it."""
+    _repo, revision, name = hf_parts(row["source"])
+    base = cache_base(row)
     blob_id = row["sha"] if row["sha"] not in ("", "-") else git_blob_id(blob_src)
     blob = base / "blobs" / blob_id
     blob.parent.mkdir(parents=True, exist_ok=True)
@@ -178,14 +187,15 @@ def hf_cache_place(row, blob_src: Path) -> None:
     if link.is_symlink() or link.exists():
         link.unlink()
     link.symlink_to(os.path.relpath(blob, link.parent))
-    if row["dest"] == "ref=main":
+    ref = row["dest"].partition("#")[2]
+    if ref:
         (base / "refs").mkdir(exist_ok=True)
-        (base / "refs" / "main").write_text(revision)
+        (base / "refs" / ref).write_text(revision)
 
 
 def hf_cache_file(row) -> Path:
-    repo, revision, name = hf_parts(row["source"])
-    return HF_HOME / "hub" / ("models--" + repo.replace("/", "--")) / "snapshots" / revision / name
+    _repo, revision, name = hf_parts(row["source"])
+    return cache_base(row) / "snapshots" / revision / name
 
 
 def target(row) -> Path:
@@ -208,15 +218,33 @@ def in_place(row, deep: bool) -> bool:
     return sha256_of(p) == row["sha"]
 
 
+def twin_in_place(row, part: Path) -> bool:
+    """Copy the file from another place of the volume that already holds the same sha256 (the
+    second hub cache repeats most of the first: no second download)."""
+    if row["sha"] in ("", "-"):
+        return False
+    for other in rows():
+        if other is row or other["sha"] != row["sha"] or (other["dest"], other["source"]) == (row["dest"], row["source"]):
+            continue
+        p = target(other)
+        if other["kind"] != "link" and p.exists() and p.stat().st_size == row["size"]:
+            shutil.copy2(os.path.realpath(p), part)
+            return True
+    return False
+
+
 def fetch_one(row) -> str:
     kind, p = row["kind"], target(row)
     if kind in ("link", "copy", "convert"):
         return "later"
     if in_place(row, deep=True):
         return "present"
-    part = TMP / (row["sha"] if row["sha"] not in ("", "-") else re.sub(r"[^A-Za-z0-9._-]", "_", row["source"]))
+    # (the row's own name in the scratch: two rows may want the same content in two places)
+    part = TMP / hashlib.sha256(f"{row['dest']}|{row['source']}".encode()).hexdigest()[:24]
     part.parent.mkdir(parents=True, exist_ok=True)
-    if not from_mirror(row, part):
+    if twin_in_place(row, part):
+        pass
+    elif not from_mirror(row, part):
         if kind in ("hf", "hfcache"):
             repo, revision, name = hf_parts(row["source"])
             curl(f"https://huggingface.co/{repo}/resolve/{revision}/{name}", part, hf_headers())

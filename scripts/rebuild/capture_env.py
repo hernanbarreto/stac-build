@@ -139,7 +139,7 @@ def describe(dist):
 
 def main(env: str, out_dir: str) -> None:
     out = Path(out_dir)
-    index, by_url, local, records, modified, kept = [], [], [], [], [], []
+    index, by_url, local, records, modified, kept, audit = [], [], [], [], [], [], []
     seen = set()
     for dist in metadata.distributions():
         name = dist.metadata["Name"]
@@ -162,13 +162,19 @@ def main(env: str, out_dir: str) -> None:
                         if line.startswith("Tag:"))
         records.append(f"{name}\t{version}\t{origin}\t{digest(rows) if rows else '-'}\t{tags or '-'}")
         for path, recorded in rows or []:
-            if not path.endswith(AUDITED):
-                continue
-            real = Path(dist.locate_file(path))
-            if not real.exists():
-                modified.append(f"{name}\t{version}\tMISSING\t{path}")
-            elif file_hash(real) != recorded:
-                modified.append(f"{name}\t{version}\tEDITED\t{path}")
+            if path.endswith(AUDITED):
+                audit.append((name, version, path, Path(dist.locate_file(path)), recorded))
+
+    def audited(task):
+        name, version, path, real, recorded = task
+        if not real.exists():
+            return f"{name}\t{version}\tMISSING\t{path}"
+        return f"{name}\t{version}\tEDITED\t{path}" if file_hash(real) != recorded else None
+
+    # (tens of thousands of small files on a network volume: read them many at a time)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=32) as pool:
+        modified = [line for line in pool.map(audited, audit) if line]
 
     def write(suffix, lines):
         (out / f"{env}.{suffix}").write_text("".join(f"{line}\n" for line in sorted(lines, key=str.lower)))
@@ -187,7 +193,54 @@ def main(env: str, out_dir: str) -> None:
           f"directory; {len(over)} overlap(s); {len(modified)} file(s) edited or missing after their install")
 
 
+def asis(env: str, out_dir: str) -> None:
+    """``<env>.asis-files.tsv`` — the paths (relative to the env's prefix) a rebuild cannot download:
+    the files and metadata of the distributions installed from a directory or compiled on the pod
+    (a source distribution, a wheel that is not the index's), and the files no package owns
+    (``<env>.orphans.tsv``, audit_env_files.py). backup.py archives them; restored after the pip
+    step they make the env's compiled parts the SAME bytes, not a new compilation."""
+    import os
+    import re
+    out = Path(out_dir)
+
+    def norm(n):
+        return re.sub(r"[-_.]+", "-", n).lower()
+
+    names = {norm(line.split("\t")[0]) for line in (out / f"{env}.pip-local.tsv").read_text().splitlines() if line.strip()}
+    wheels = out / f"{env}.wheels.tsv"
+    if wheels.exists():
+        for line in wheels.read_text().splitlines():
+            cols = line.split("\t")
+            if len(cols) >= 6 and (cols[5] == "sdist" or (len(cols) >= 7 and cols[6] != "identical")):
+                names.add(norm(cols[0]))
+    prefix = os.path.normpath(sys.prefix)
+    paths = set()
+    for dist in metadata.distributions():
+        if norm(dist.metadata["Name"] or "") not in names:
+            continue
+        for f in dist.files or []:
+            full = os.path.normpath(str(dist.locate_file(f)))
+            if full.startswith(prefix + os.sep) and not full.endswith(".pyc") and os.path.lexists(full):
+                paths.add(os.path.relpath(full, prefix))
+        info = getattr(dist, "_path", None)
+        if info is not None and os.path.isdir(str(info)) and os.path.normpath(str(info)).startswith(prefix + os.sep):
+            for root, _dirs, files in os.walk(str(info)):
+                for name in files:
+                    paths.add(os.path.relpath(os.path.join(root, name), prefix))
+    orphans = out / f"{env}.orphans.tsv"
+    if orphans.exists():
+        for line in orphans.read_text().splitlines():
+            rel = line.split("\t")[0]
+            if rel and not rel.startswith(("lib/node_modules/", "bin/")):     # (npm's global packages: npm puts them back)
+                paths.add(rel)
+    (out / f"{env}.asis-files.tsv").write_text("".join(f"{p}\n" for p in sorted(paths)))
+    print(f"{env}: {len(paths)} file(s) of {len(names)} distribution(s) to archive as they are")
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
+    if len(sys.argv) == 4 and sys.argv[1] == "asis":
+        asis(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) == 3:
+        main(sys.argv[1], sys.argv[2])
+    else:
         sys.exit(__doc__)
-    main(sys.argv[1], sys.argv[2])

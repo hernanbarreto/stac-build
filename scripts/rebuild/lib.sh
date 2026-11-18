@@ -26,6 +26,10 @@ STAC_OPTIONAL_ENVS=(colmap gs)
 if [ -n "${ENVS:-}" ]; then read -ra STAC_ENVS <<<"$ENVS"; fi
 
 export STAC_REBUILD_CACHE="$CACHE" STAC_ROOT REBUILD_DIR WORKSPACE CONDA_ROOT
+# the backup set (backup.py): its mirror/ holds, by sha256, the weights whose source may refuse (DINOv3)
+if [ -z "${STAC_MIRROR:-}" ] && [ -d "${STAC_BACKUP:-$WORKSPACE/stac_backup}/mirror" ]; then
+    export STAC_MIRROR="${STAC_BACKUP:-$WORKSPACE/stac_backup}/mirror"
+fi
 export HF_HOME PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 PYTHONUNBUFFERED=1
 # the pod grants ~26 CPUs and shows the host's 252: an unbounded build or BLAS job is throttled to a crawl
 export MAX_JOBS="${MAX_JOBS:-16}" MAKEFLAGS="${MAKEFLAGS:--j16}" OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"

@@ -8,6 +8,7 @@ source "$HERE/steps_vendors.sh"
 source "$HERE/steps_envs.sh"
 source "$HERE/steps_builds.sh"
 source "$HERE/steps_main.sh"
+source "$HERE/steps_backup.sh"
 load_env || true
 mkdir -p "$CACHE"
 "$@"

@@ -1,7 +1,7 @@
 # STAC Build — every model weight of the pod: where it lives, where it comes from, its sha256 and size.
 # Written from the pod of 2026-11-18 (scripts/rebuild/capture.sh does not rewrite it: a new model = a new row).
-# kind: hf (a file of a Hugging Face repo at a pinned revision) | hfcache (the same, into HF_HOME's cache;
-#       dest 'ref=main' = the snapshot refs/main points at) | url | targz (the member of an archive) |
+# kind: hf (a file of a Hugging Face repo at a pinned revision) | hfcache (the same, into a hub cache: dest is the
+#       cache root, "#main" when its refs/main names that revision — capture_models.py writes these rows) | url | targz |
 #       dinov3 (Meta's signed link, DINOV3_URL in .env) | tum (GenRecon's server) | link | copy | convert
 # dest: relative to the repo, or absolute. sha256 '-' = not checked (a small file pinned by its revision).
 # kind	dest	source	sha256	bytes	note
@@ -51,34 +51,56 @@ copy	vendor/GenRecon/checkpoints/shape_gen/config.json	vendor/GenRecon/configs/g
 copy	vendor/GenRecon/checkpoints/tex_gen/config.json	vendor/GenRecon/configs/gen/slat_flow_imgshape2tex/genrecon_512.json	-	5588	
 convert	vendor/GenRecon/weights/dinov3-vitl16-hf/model.safetensors	server/tools/genrecon/convert_dinov3.py	dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179	1212559808	Meta's ViT-L/16 checkpoint in the transformers layout (env genrecon)
 convert	vendor/GenRecon/weights/dinov3-vitl16-hf/config.json	server/tools/genrecon/convert_dinov3.py	e551a1746249173d72b818ffbd9f0f02de7e883170bc7e500a278188fbf94a75	734	
-hfcache	ref=main	depth-anything/DA3NESTED-GIANT-LARGE-1.1@b2359bdf726fb44ef62acca04d629dcf158053e7:config.json	-	3113	DA3: the metric source
-hfcache	ref=main	depth-anything/DA3NESTED-GIANT-LARGE-1.1@b2359bdf726fb44ef62acca04d629dcf158053e7:model.safetensors	8ebe871a022ed58d2fc8fdfb2ebdb31d57b60fe39611c849095851a7b7c6020c	6759558100	DA3: the metric source
-hfcache	ref=main	facebook/map-anything-apache@00f9c245bbcb60522d1ed7f9e9d88462c6e3f38a:config.json	-	5776	MapAnything
-hfcache	ref=main	facebook/map-anything-apache@00f9c245bbcb60522d1ed7f9e9d88462c6e3f38a:model.safetensors	fa06c0fdccefc5048e072c85935d5789b1e36b307f3859033c17f9dcb9fd5201	4914062480	MapAnything
-hfcache	ref=main	facebook/sam3@3c879f39826c281e95690f02c7821c4de09afae7:config.json	-	25843	GATED — SAM 3.0, the rollback baseline
-hfcache	ref=main	facebook/sam3@3c879f39826c281e95690f02c7821c4de09afae7:sam3.pt	9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e	3450062241	GATED — SAM 3.0, the rollback baseline
-hfcache	-	gberton/MegaLoc@7cb9f7970d366fdf059963d04d372e503e8e9df9:model.safetensors	d4f9f2bcb60018f91eb6a8e061ed054fd55654e10c2569cf13841ea986ffb4f8	914577436	retrieval
-hfcache	ref=main	hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987:config.json	-	2351	the voice (text to speech)
-hfcache	ref=main	hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987:kokoro-v1_0.pth	496dba118d1a58f5f3db2efc88dbdc216e0483fc89fe6e47ee1f2c53f18ad1e4	327212226	the voice (text to speech)
-hfcache	ref=main	hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987:voices/af_heart.pt	0ab5709b8ffab19bfd849cd11d98f75b60af7733253ad0d67b12382a102cb4ff	523425	the voice (text to speech)
-hfcache	ref=main	hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987:voices/ef_dora.pt	d9d69b0f8a2b87a345f269d89639f89dfbd1a6c9da0c498ae36dd34afcf35530	523420	the voice (text to speech)
-hfcache	ref=main	hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987:voices/ff_siwis.pt	8073bf2d2c4b9543a90f2f0fd2144de4ed157e2d4b79ddeb0d5123066171fbc9	523425	the voice (text to speech)
-hfcache	ref=main	microsoft/TRELLIS-image-large@25e0d31ffbebe4b5a97464dd851910efc3002d96:ckpts/ss_dec_conv3d_16l8_fp16.json	-	245	GenRecon
-hfcache	ref=main	microsoft/TRELLIS-image-large@25e0d31ffbebe4b5a97464dd851910efc3002d96:ckpts/ss_dec_conv3d_16l8_fp16.safetensors	1c76d4a40519aa2d711cc263a8404105231ac26db31d946bed48b84fee79009a	147591972	GenRecon
-hfcache	ref=main	microsoft/TRELLIS.2-4B@af44b45f2e35a493886929c6d786e563ec68364d:ckpts/shape_dec_next_dc_f16c32_fp16.json	-	678	GenRecon
-hfcache	ref=main	microsoft/TRELLIS.2-4B@af44b45f2e35a493886929c6d786e563ec68364d:ckpts/shape_dec_next_dc_f16c32_fp16.safetensors	e3b718d3e43e4f8780e9a24ac6fff231811a67e3b058e336e10fe654c911d581	948490494	GenRecon
-hfcache	ref=main	microsoft/TRELLIS.2-4B@af44b45f2e35a493886929c6d786e563ec68364d:ckpts/shape_enc_next_dc_f16c32_fp16.json	-	653	GenRecon
-hfcache	ref=main	microsoft/TRELLIS.2-4B@af44b45f2e35a493886929c6d786e563ec68364d:ckpts/shape_enc_next_dc_f16c32_fp16.safetensors	f37c5ff5b983b68e9946060000f09bc131f3e84318a2c8b7430a81e4b4636c41	708797208	GenRecon
-hfcache	ref=main	microsoft/TRELLIS.2-4B@af44b45f2e35a493886929c6d786e563ec68364d:ckpts/tex_dec_next_dc_f16c32_fp16.json	-	705	GenRecon
-hfcache	ref=main	microsoft/TRELLIS.2-4B@af44b45f2e35a493886929c6d786e563ec68364d:ckpts/tex_dec_next_dc_f16c32_fp16.safetensors	97ea69addea2ecd9312910f5f548234665eef51c088386180b7cd5b258645e3c	948458812	GenRecon
-hfcache	ref=main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:added_tokens.json	-	34648	the voice (speech to text)
-hfcache	ref=main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:config.json	-	1256	the voice (speech to text)
-hfcache	ref=main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:generation_config.json	-	3772	the voice (speech to text)
-hfcache	ref=main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:merges.txt	-	493869	the voice (speech to text)
-hfcache	ref=main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:model.safetensors	542566a422ae4f3fd23f1ba11add198fca01bbf82e66e6a2857b3f608b1eb9d1	1617824864	the voice (speech to text)
-hfcache	ref=main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:normalizer.json	-	52666	the voice (speech to text)
-hfcache	ref=main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:preprocessor_config.json	-	340	the voice (speech to text)
-hfcache	ref=main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:special_tokens_map.json	-	2186	the voice (speech to text)
-hfcache	ref=main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:tokenizer.json	-	2710337	the voice (speech to text)
-hfcache	ref=main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:tokenizer_config.json	-	282843	the voice (speech to text)
-hfcache	ref=main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:vocab.json	-	1036558	the voice (speech to text)
+hfcache	/workspace/hf_cache#main	depth-anything/DA3NESTED-GIANT-LARGE-1.1@b2359bdf726fb44ef62acca04d629dcf158053e7:config.json	-	3113	DA3: the metric source
+hfcache	/workspace/hf_cache#main	depth-anything/DA3NESTED-GIANT-LARGE-1.1@b2359bdf726fb44ef62acca04d629dcf158053e7:model.safetensors	8ebe871a022ed58d2fc8fdfb2ebdb31d57b60fe39611c849095851a7b7c6020c	6759558100	DA3: the metric source
+hfcache	/workspace/hf_cache#main	facebook/map-anything-apache@00f9c245bbcb60522d1ed7f9e9d88462c6e3f38a:config.json	-	5776	MapAnything
+hfcache	/workspace/hf_cache#main	facebook/map-anything-apache@00f9c245bbcb60522d1ed7f9e9d88462c6e3f38a:model.safetensors	fa06c0fdccefc5048e072c85935d5789b1e36b307f3859033c17f9dcb9fd5201	4914062480	MapAnything
+hfcache	/workspace/hf_cache#main	facebook/sam3@3c879f39826c281e95690f02c7821c4de09afae7:config.json	-	25843	GATED — SAM 3.0, the rollback baseline
+hfcache	/workspace/hf_cache#main	facebook/sam3@3c879f39826c281e95690f02c7821c4de09afae7:sam3.pt	9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e	3450062241	GATED — SAM 3.0, the rollback baseline
+hfcache	/workspace/hf_cache	gberton/MegaLoc@7cb9f7970d366fdf059963d04d372e503e8e9df9:model.safetensors	d4f9f2bcb60018f91eb6a8e061ed054fd55654e10c2569cf13841ea986ffb4f8	914577436	retrieval
+hfcache	/workspace/hf_cache#main	hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987:config.json	-	2351	the voice (text to speech)
+hfcache	/workspace/hf_cache#main	hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987:kokoro-v1_0.pth	496dba118d1a58f5f3db2efc88dbdc216e0483fc89fe6e47ee1f2c53f18ad1e4	327212226	the voice (text to speech)
+hfcache	/workspace/hf_cache#main	hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987:voices/af_heart.pt	0ab5709b8ffab19bfd849cd11d98f75b60af7733253ad0d67b12382a102cb4ff	523425	the voice (text to speech)
+hfcache	/workspace/hf_cache#main	hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987:voices/ef_dora.pt	d9d69b0f8a2b87a345f269d89639f89dfbd1a6c9da0c498ae36dd34afcf35530	523420	the voice (text to speech)
+hfcache	/workspace/hf_cache#main	hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987:voices/ff_siwis.pt	8073bf2d2c4b9543a90f2f0fd2144de4ed157e2d4b79ddeb0d5123066171fbc9	523425	the voice (text to speech)
+hfcache	/workspace/hf_cache#main	microsoft/TRELLIS-image-large@25e0d31ffbebe4b5a97464dd851910efc3002d96:ckpts/ss_dec_conv3d_16l8_fp16.json	-	245	GenRecon
+hfcache	/workspace/hf_cache#main	microsoft/TRELLIS-image-large@25e0d31ffbebe4b5a97464dd851910efc3002d96:ckpts/ss_dec_conv3d_16l8_fp16.safetensors	1c76d4a40519aa2d711cc263a8404105231ac26db31d946bed48b84fee79009a	147591972	GenRecon
+hfcache	/workspace/hf_cache#main	microsoft/TRELLIS.2-4B@af44b45f2e35a493886929c6d786e563ec68364d:ckpts/shape_dec_next_dc_f16c32_fp16.json	-	678	GenRecon
+hfcache	/workspace/hf_cache#main	microsoft/TRELLIS.2-4B@af44b45f2e35a493886929c6d786e563ec68364d:ckpts/shape_dec_next_dc_f16c32_fp16.safetensors	e3b718d3e43e4f8780e9a24ac6fff231811a67e3b058e336e10fe654c911d581	948490494	GenRecon
+hfcache	/workspace/hf_cache#main	microsoft/TRELLIS.2-4B@af44b45f2e35a493886929c6d786e563ec68364d:ckpts/shape_enc_next_dc_f16c32_fp16.json	-	653	GenRecon
+hfcache	/workspace/hf_cache#main	microsoft/TRELLIS.2-4B@af44b45f2e35a493886929c6d786e563ec68364d:ckpts/shape_enc_next_dc_f16c32_fp16.safetensors	f37c5ff5b983b68e9946060000f09bc131f3e84318a2c8b7430a81e4b4636c41	708797208	GenRecon
+hfcache	/workspace/hf_cache#main	microsoft/TRELLIS.2-4B@af44b45f2e35a493886929c6d786e563ec68364d:ckpts/tex_dec_next_dc_f16c32_fp16.json	-	705	GenRecon
+hfcache	/workspace/hf_cache#main	microsoft/TRELLIS.2-4B@af44b45f2e35a493886929c6d786e563ec68364d:ckpts/tex_dec_next_dc_f16c32_fp16.safetensors	97ea69addea2ecd9312910f5f548234665eef51c088386180b7cd5b258645e3c	948458812	GenRecon
+hfcache	/workspace/hf_cache#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:added_tokens.json	-	34648	the voice (speech to text)
+hfcache	/workspace/hf_cache#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:config.json	-	1256	the voice (speech to text)
+hfcache	/workspace/hf_cache#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:generation_config.json	-	3772	the voice (speech to text)
+hfcache	/workspace/hf_cache#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:merges.txt	-	493869	the voice (speech to text)
+hfcache	/workspace/hf_cache#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:model.safetensors	542566a422ae4f3fd23f1ba11add198fca01bbf82e66e6a2857b3f608b1eb9d1	1617824864	the voice (speech to text)
+hfcache	/workspace/hf_cache#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:normalizer.json	-	52666	the voice (speech to text)
+hfcache	/workspace/hf_cache#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:preprocessor_config.json	-	340	the voice (speech to text)
+hfcache	/workspace/hf_cache#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:special_tokens_map.json	-	2186	the voice (speech to text)
+hfcache	/workspace/hf_cache#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:tokenizer.json	-	2710337	the voice (speech to text)
+hfcache	/workspace/hf_cache#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:tokenizer_config.json	-	282843	the voice (speech to text)
+hfcache	/workspace/hf_cache#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:vocab.json	-	1036558	the voice (speech to text)
+hfcache	/workspace/.cache/huggingface#main	hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987:config.json	-	2351	the voice (text to speech)
+hfcache	/workspace/.cache/huggingface#main	hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987:kokoro-v1_0.pth	496dba118d1a58f5f3db2efc88dbdc216e0483fc89fe6e47ee1f2c53f18ad1e4	327212226	the voice (text to speech)
+hfcache	/workspace/.cache/huggingface#main	hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987:voices/af_heart.pt	0ab5709b8ffab19bfd849cd11d98f75b60af7733253ad0d67b12382a102cb4ff	523425	the voice (text to speech)
+hfcache	/workspace/.cache/huggingface#main	hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987:voices/ef_dora.pt	d9d69b0f8a2b87a345f269d89639f89dfbd1a6c9da0c498ae36dd34afcf35530	523420	the voice (text to speech)
+hfcache	/workspace/.cache/huggingface#main	hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987:voices/ff_siwis.pt	8073bf2d2c4b9543a90f2f0fd2144de4ed157e2d4b79ddeb0d5123066171fbc9	523425	the voice (text to speech)
+hfcache	/workspace/.cache/huggingface#main	microsoft/TRELLIS-image-large@25e0d31ffbebe4b5a97464dd851910efc3002d96:ckpts/ss_dec_conv3d_16l8_fp16.json	-	245	GenRecon
+hfcache	/workspace/.cache/huggingface#main	microsoft/TRELLIS-image-large@25e0d31ffbebe4b5a97464dd851910efc3002d96:ckpts/ss_dec_conv3d_16l8_fp16.safetensors	1c76d4a40519aa2d711cc263a8404105231ac26db31d946bed48b84fee79009a	147591972	GenRecon
+hfcache	/workspace/.cache/huggingface#main	microsoft/TRELLIS.2-4B@af44b45f2e35a493886929c6d786e563ec68364d:ckpts/shape_dec_next_dc_f16c32_fp16.json	-	678	GenRecon
+hfcache	/workspace/.cache/huggingface#main	microsoft/TRELLIS.2-4B@af44b45f2e35a493886929c6d786e563ec68364d:ckpts/shape_dec_next_dc_f16c32_fp16.safetensors	e3b718d3e43e4f8780e9a24ac6fff231811a67e3b058e336e10fe654c911d581	948490494	GenRecon
+hfcache	/workspace/.cache/huggingface#main	microsoft/TRELLIS.2-4B@af44b45f2e35a493886929c6d786e563ec68364d:ckpts/tex_dec_next_dc_f16c32_fp16.json	-	705	GenRecon
+hfcache	/workspace/.cache/huggingface#main	microsoft/TRELLIS.2-4B@af44b45f2e35a493886929c6d786e563ec68364d:ckpts/tex_dec_next_dc_f16c32_fp16.safetensors	97ea69addea2ecd9312910f5f548234665eef51c088386180b7cd5b258645e3c	948458812	GenRecon
+hfcache	/workspace/.cache/huggingface#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:added_tokens.json	-	34648	the voice (speech to text)
+hfcache	/workspace/.cache/huggingface#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:config.json	-	1256	the voice (speech to text)
+hfcache	/workspace/.cache/huggingface#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:generation_config.json	-	3772	the voice (speech to text)
+hfcache	/workspace/.cache/huggingface#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:merges.txt	-	493869	the voice (speech to text)
+hfcache	/workspace/.cache/huggingface#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:model.safetensors	542566a422ae4f3fd23f1ba11add198fca01bbf82e66e6a2857b3f608b1eb9d1	1617824864	the voice (speech to text)
+hfcache	/workspace/.cache/huggingface#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:normalizer.json	-	52666	the voice (speech to text)
+hfcache	/workspace/.cache/huggingface#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:preprocessor_config.json	-	340	the voice (speech to text)
+hfcache	/workspace/.cache/huggingface#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:special_tokens_map.json	-	2186	the voice (speech to text)
+hfcache	/workspace/.cache/huggingface#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:tokenizer.json	-	2710337	the voice (speech to text)
+hfcache	/workspace/.cache/huggingface#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:tokenizer_config.json	-	282843	the voice (speech to text)
+hfcache	/workspace/.cache/huggingface#main	openai/whisper-large-v3-turbo@41f01f3fe87f28c78e2fbf8b568835947dd65ed9:vocab.json	-	1036558	the voice (speech to text)
