@@ -602,6 +602,20 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   STAC); the exporter (E57 / LAS / PLY, GLB, IFC, CSV in one ZIP); English as the default language; the dead
   "Export point cloud" entry of the File menu replaced by the working Export; the IFC = the GenRecon mesh cut by
   the segmentation, with his values (whole mesh, large triangles split, majority of 128 points, every object).
+  ⭐ DONE IN THE NIGHT OF 2026-11-18 while he slept (his order: "luego de hacer esto y terminarlo y pushear y
+  commitear todo quiero que sigas con la lista de pendientes … prioriza lo que es más importante"), each block
+  committed and pushed, details in §5 — ALL OF IT WAITS FOR HIS EYE IN THE BROWSER (the pod has no browser:
+  nothing of the interface was opened by the assistant):
+    · the rebuild kit with its backup set in the repo (§4) — drift.py at the end of the night: THE KIT IS THE POD;
+    · a session as one ZIP, downloaded (its size known, RESUMED where it was cut) and uploaded as a new session;
+    · the BIM comparison on a scan of today — exact, in its own process, its distances on the card (pccr 3108
+      against its own IFC: 171 s; mean 22.2 mm, 94.7 % within 50 mm). No result left in pccr: he runs it;
+    · TICKETS (the window, the click that places one, the pins, 7 voice commands);
+    · COMMON POINTS (the same point marked on two scans → the factor, turn and shift between them, REPORTED).
+  WHAT IS HIS NOW, in the order it unblocks work: (1) mark 2–3 common points on pccr 2408 and 3108, read the
+  factor, and DECIDE WHERE IT IS APPLIED (B-5) — the fusion's compare follows from it; (2) look at the BIM
+  comparison of pccr 3108 and say what is compared and how ("luego vemos"); (3) his eye on the tickets;
+  (4) keep STAC_BACKUP_KEY off the pod (item 40 a).
   1 · ONE OWNER PER SURFACE — DECIDED AND APPLIED TO THE FIVE SESSIONS (item 32 of the list below); his eye pending. The segmentation is interleaved point by
      point (pccr 3108: 39 % of a point's 8 nearest neighbours are another object's) because each point takes the
      mask of its own keyframe and nothing but the floor merges since his 2026-11-11 rule. He allowed the merge
