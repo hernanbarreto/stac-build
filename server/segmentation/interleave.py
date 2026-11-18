@@ -137,25 +137,27 @@ def merge_instances(instances: List[dict], xyz: np.ndarray, n_points: int, *, sh
     points = {i: len(inst.get("globalIndices") or []) for i, inst in by_id.items()}
     before = _mixed(shares, points)
     absorbed = groups(shares, points, share)
+    # (the instances' points are disjoint: a survivor's are its own and its absorbed ones', sorted —
+    # arrays, not python sets: pccr 2408's floor alone is tens of millions of points)
+    taken: Dict[int, List[np.ndarray]] = {}
     for loser, how in sorted(absorbed.items()):
         keeper, gone = by_id[how["into"]], by_id[loser]
-        keeper["globalIndices"] = sorted(set(keeper["globalIndices"]) | set(gone["globalIndices"]))
-        keeper["total_points"] = len(keeper["globalIndices"])
+        taken.setdefault(how["into"], [np.asarray(keeper["globalIndices"], np.int64)]).append(
+            np.asarray(gone["globalIndices"], np.int64))
         if record is not None:
             record[int(loser)] = {"into": int(how["into"]), "into_label": keeper.get("label"),
                                   "label": gone.get("label"), "reason": "same_surface",
                                   "interleaved_share": how["share"], "points": len(gone["globalIndices"])}
+    for survivor, parts in taken.items():
+        merged = np.unique(np.concatenate(parts))
+        by_id[survivor]["globalIndices"] = merged.tolist()
+        by_id[survivor]["total_points"] = int(len(merged))
     if absorbed:
         instances[:] = [inst for inst in instances if iid(inst) not in absorbed]
-        owner_after = owner.copy()
-        remap = np.arange(int(owner.max()) + 1)
-        for loser, how in absorbed.items():
-            remap[loser] = how["into"]
-        owner_after = remap[owner]
-        after = _mixed(neighbour_shares(xyz, owner_after, neighbours),
-                       {iid(i): len(i["globalIndices"]) for i in instances})
-    else:
-        after = before
+    # (after: the same neighbour pairs, those of two objects that are one now no longer mixed —
+    # no second search over the cloud)
+    root = {i: absorbed[i]["into"] if i in absorbed else i for i in by_id}
+    after = _mixed({k: v for k, v in shares.items() if root[k[0]] != root[k[1]]}, points)
     report = {"rule": "USER 2026-11-18: objects that share a surface point by point are one object "
                       "(a pair merges when either has >= share of its points' nearest neighbours in the other)",
               "share": float(share), "neighbours": int(neighbours), "objects_before": len(by_id),
