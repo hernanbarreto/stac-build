@@ -127,6 +127,11 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
 - A task is closed when implemented, wired, tested and committed — never leave a pending item silently. Record his
   verdicts here with the date and his words. Short answers; no tests nobody asked for.
 - He writes Spanish (rioplatense); everything in the repo — code, YAML, comments, docstrings, commits — is ENGLISH.
+- THE POD CHANGES, THE REBUILD KIT FOLLOWS (USER 2026-11-18: "cada cosa que avancemos debemos actualizarlo para que
+  siempre quede actualizado a la perfección"; and "No decidas por mí": nothing of the pod is "optional" or
+  "equivalent" on the assistant's say): any install, clone, download, compilation or new secret is followed, in
+  the same block of work, by drift.py → capture.sh → the commit of scripts/rebuild/ → the backup set copied off
+  the pod (§4, the rebuild).
 - Commits on main, one per block, his words in the message; GPU ports on `gpu-main`, fast-forwarded after the suite.
   Nothing is pushed without his order; the git history is never rewritten (2026-11-08: *"dejalo así"*).
 
@@ -208,28 +213,41 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   /workspace/hf_cache`. No paid external APIs; everything local.
 - texrecon (`vendor/mvs-texturing`, kept *"por las dudas"*) was relinked against libtiff 6 (its own link.txt,
   `libtbb.so.12.19` → `libtbb.so.12`); a full `cmake ..` fails on the vendored oneTBB.
-- ⭐ THE REBUILD ON AN EMPTY VOLUME (USER 2026-11-18, after RunPod's maintenance notice: "Prepara todo en .sh para
-  que se creen automáticamente los entornos se descarguen todos los modelos y se vuelva a armar en un nuevo volumen
-  en cuestión de poco tiempo … de forma completa y sin errores"): `scripts/rebuild/` — `rebuild.sh` (resumable,
-  one log per step; its README is the manual), written FROM the working pod: per env conda's exact packages and
-  the exact wheel files (URL + sha256), every vendor tree at its commit (our commits that are on no remote as git
-  bundles), every weight (`models.tsv`: source, pinned revision, sha256), the file patched inside an env
-  (`overlays/`). AFTER ANY `pip` / `conda install`: `bash scripts/rebuild/capture.sh <env>` and commit `locks/`.
-  A commit made in a vendor clone is pushed to a remote of ours or bundled. CHECKED 2026-11-18 in a scratch tree
-  on the local disk (the live install untouched): the 1,060 pip packages downloaded and equal byte for byte to
-  the installed ones (but gsplat of the unused env gs); the 1,080 conda packages published; da3, mapanything,
-  voice, amb3r, genrecon, colmap and nodejs rebuilt from nothing and verified, the backend importing from a fresh
-  clone with the rebuilt da3; the twelve vendor trees identical; the rebuilt PotreeConverter giving the same
-  octree bytes on bufferStop; 65 of the 67 weight sources giving the manifest's file. NOT run: the whole thing on
-  a really empty volume. FOUND WHILE DOING IT: (1) a fresh clone was BROKEN — `vendor/MapAnything2/mapanything/
-  models/` (80 source files) was git-ignored by the `models/` rule, and the repo pins depth-anything-3 at a31f3c7,
-  a commit that is on no remote (the fork's main is c3caa84); sam31's a3c52e5 was on no remote either;
-  (2) Meta's DINOv3 link in .env has EXPIRED (403): the two checkpoints (PointDiT, GenRecon; 4.6 GB) cannot be
-  downloaded again until he asks Meta for a new one — the one thing a rebuild cannot fetch today; (3) the
-  mapanything env holds a file edited in place (uniception's DINOv2 loader → /workspace/dinov2_mapanything);
-  (4) THE REPO hernanbarreto/stac-build IS PUBLIC on GitHub (and the VGGT-Long fork; the Depth-Anything-3 fork is
-  private) — told to him 2026-11-18, his to decide (§1: nothing goes public without his order). The rebuild does
-  not restore DATA: server/projects, server/data (the users' database), .env, Tailscale's identity.
+- ⭐ THE REBUILD ON AN EMPTY VOLUME, EXACTLY AS IT IS (USER 2026-11-18, after RunPod's maintenance notice:
+  "Prepara todo en .sh para que se creen automáticamente los entornos se descarguen todos los modelos y se vuelva a
+  armar en un nuevo volumen en cuestión de poco tiempo … de forma completa y sin errores"; and on the first
+  version, which had called two envs "optional", left texrecon unbuilt and accepted recompiled parts as "the same":
+  "Pero debe quedar exactamente como está ahora / No decidas por mí / … cada cosa que avancemos debemos
+  actualizarlo para que siempre quede actualizado a la perfección / Revisa pointdit r3d etc etc son muchos eh").
+  `scripts/rebuild/` — its README is the manual. It starts from WHAT IS ON THE VOLUME: `inventory.py` walks it and
+  every file falls in a class that names how it comes back — git (the commit), env (the locks: conda's exact
+  packages, pip's exact wheel files), weight (`models.tsv`: source, pinned revision, sha256), download (pinned
+  source + sha256), npm, ASIS (exists nowhere else: everything compiled on the pod, the built interface, sidecars)
+  and PRIVATE (.env, stored tokens, the users' database, Tailscale's identity) — these two are THE BACKUP SET
+  (`backup.py make` → /workspace/stac_backup: asis / envs / private archives, every local branch, stash, worktree
+  and remote of every repository with the commits that are on no remote, Meta's DINOv3 as hard links) — data (the
+  sessions: copied apart) and cache. `rebuild.sh` WITH the set compiles nothing: the compiled parts are the old
+  pod's own bytes; without it, it completes from public sources and says what it could not give back.
+  ⚠ THE RULE THAT KEEPS IT TRUE — AFTER EVERY CHANGE OF THE POD (a `pip` / `conda install`, a vendor clone or
+  commit, a new weight, a compilation, a new secret): `python3 scripts/rebuild/drift.py` (is the kit still the
+  pod? ≈ 6 min, read-only; `--fast` in server/tests/test_rebuild_kit.py), `bash scripts/rebuild/capture.sh`,
+  commit scripts/rebuild/, AND COPY THE BACKUP SET OFF THE POD (it is no backup on the volume it describes);
+  push on his word. An edit in place inside an env → `overlays/<env>/`; a weight downloaded by hand → a row of
+  `models.tsv`; a commit in a vendor clone → the set's bundle (or a remote of ours).
+  FOUND WHILE DOING IT (none of it was written anywhere): a fresh clone was BROKEN — MapAnything's model code (80
+  files) was git-ignored by the `models/` rule, and the repo pins depth-anything-3 at a31f3c7, on no remote (the
+  fork's main is c3caa84), sam31's a3c52e5 on none either, depth-anything-3's own submodule (salad) not fetched;
+  a SECOND hub cache, /workspace/.cache/huggingface — HF_HOME of the pod's template (/etc/rp_environment), read
+  by whatever is launched outside the backend; the Hugging Face token stored inside both cache directories; nine
+  local branches of the repo, two stashes, two stashes of VGGT-Long and three worktrees with work on no remote;
+  uniception's DINOv2 loader edited in place inside the mapanything env (→ /workspace/dinov2_mapanything);
+  triton comes from PyTorch's index in the envs whose torch does (another build, same version); Meta's DINOv3
+  link in .env EXPIRED (403 — the set's mirror holds the two files); /workspace/usdtools DOES NOT WORK on today's
+  image (/usr/bin/python3 moved 3.11 → 3.12: `import pxr` fails — the AR export; the rebuild makes it with
+  python3.11 by name, HIS to say whether the broken one is wanted); THE REPO hernanbarreto/stac-build IS PUBLIC on
+  GitHub (the VGGT-Long fork too; the Depth-Anything-3 fork is private), `scripts/key.pem` (the self-signed
+  certificate's private key) is tracked in it, and vendor/depth-anything-3's `fork` remote carries a token in its
+  URL (on the volume only) — all told to him, his to decide (§1: nothing goes public without his order).
 
 ## 5 · THE APP AROUND THE PIPELINE
 - Reconstruir: per-scan *Segment when done* (OFF by default) and Replace (OFF = resume). Instances → Autosegment:

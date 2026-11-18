@@ -60,60 +60,67 @@ def bookkeeping(rel: str) -> bool:
 
 
 def without(data: bytes, prefix: str) -> bytes:
-    """The content with the env's own path removed (and the NUL padding conda writes after a
-    replaced prefix in a binary)."""
+    """The content with the env's own path taken out. In a binary conda overwrites a long
+    placeholder with the prefix and pads what is left of the STRING with NULs, so a shorter or
+    longer prefix moves the padding: every run of NULs is read as one."""
     token = prefix.encode()
     if token not in data:
         return data
-    pieces = data.split(token)
-    return b"<PREFIX>".join(p.lstrip(b"\0") if i else p for i, p in enumerate(pieces)).rstrip(b"\0")
+    import re
+    data = data.replace(token, b"<PREFIX>")
+    # a script's first line: pip writes `#!<python>` — or, when that path is longer than a kernel
+    # accepts in a shebang (127 bytes: a deep test tree, never /workspace/miniforge3), a /bin/sh line
+    # that execs it. The same launcher either way.
+    data = re.sub(rb"\A#!/bin/sh\n'''exec' \"(<PREFIX>[^\"]*)\" \"\$0\" \"\$@\" #'''\n", rb"#!\1\n", data)
+    return re.sub(rb"\0+", b"\0", data)
+
+
+def classify(rel, a, b, original, rebuilt):
+    """The class of one path present on one side or both."""
+    if rel not in b:
+        return "bookkeeping" if bookkeeping(rel) else "ONLY IN ORIGINAL"
+    if rel not in a:
+        return "bookkeeping" if bookkeeping(rel) else "ONLY IN REBUILT"
+    sa, sb = os.lstat(a[rel]), os.lstat(b[rel])
+    if sa.st_size == sb.st_size and not os.path.islink(a[rel]) and sa.st_size > (64 << 20):
+        ha, hb = hashlib.sha256(), hashlib.sha256()                # (a large file: by digest, in blocks)
+        for path, h in ((a[rel], ha), (b[rel], hb)):
+            with open(path, "rb") as f:
+                for block in iter(lambda: f.read(1 << 22), b""):
+                    h.update(block)
+        return "identical" if ha.digest() == hb.digest() else "DIFFERENT"
+    ca, cb = content(a[rel]), content(b[rel])
+    if ca == cb:
+        return "identical"
+    if bookkeeping(rel):
+        return "bookkeeping"
+    if without(ca, os.path.normpath(original)) == without(cb, os.path.normpath(rebuilt)):
+        return "path-only"
+    return "DIFFERENT"
 
 
 def main(original: str, rebuilt: str, show: int) -> int:
+    from concurrent.futures import ThreadPoolExecutor
     a, b = walk(Path(original)), walk(Path(rebuilt))
+    rels = sorted(set(a) | set(b))
+    # (tens of thousands of small files, one side on a network volume: many at a time)
+    with ThreadPoolExecutor(max_workers=32) as pool:
+        classes = list(pool.map(lambda rel: classify(rel, a, b, original, rebuilt), rels))
     counts = {}
     listed = {"DIFFERENT": [], "ONLY IN ORIGINAL": [], "ONLY IN REBUILT": []}
-
-    def count(cls, rel=None):
+    for rel, cls in zip(rels, classes):
         counts[cls] = counts.get(cls, 0) + 1
-        if rel is not None and cls in listed:
+        if cls in listed:
             listed[cls].append(rel)
-
-    for rel in sorted(set(a) | set(b)):
-        if rel not in b:
-            count("bookkeeping" if bookkeeping(rel) else "ONLY IN ORIGINAL", rel)
-            continue
-        if rel not in a:
-            count("bookkeeping" if bookkeeping(rel) else "ONLY IN REBUILT", rel)
-            continue
-        sa, sb = os.lstat(a[rel]), os.lstat(b[rel])
-        if sa.st_size == sb.st_size and not os.path.islink(a[rel]) and sa.st_size > (64 << 20):
-            # (a large file: by digest, in blocks)
-            ha, hb = hashlib.sha256(), hashlib.sha256()
-            for path, h in ((a[rel], ha), (b[rel], hb)):
-                with open(path, "rb") as f:
-                    for block in iter(lambda: f.read(1 << 22), b""):
-                        h.update(block)
-            count("identical" if ha.digest() == hb.digest() else "DIFFERENT", rel)
-            continue
-        ca, cb = content(a[rel]), content(b[rel])
-        if ca == cb:
-            count("identical")
-        elif bookkeeping(rel):
-            count("bookkeeping")
-        elif without(ca, os.path.normpath(original)) == without(cb, os.path.normpath(rebuilt)):
-            count("path-only")
-        else:
-            count("DIFFERENT", rel)
     order = ("identical", "path-only", "bookkeeping", "DIFFERENT", "ONLY IN ORIGINAL", "ONLY IN REBUILT")
     print("  " + ", ".join(f"{k} {counts.get(k, 0)}" for k in order))
     bad = 0
-    for cls, rels in listed.items():
-        bad += len(rels)
-        for rel in rels[:show]:
+    for cls, found in listed.items():
+        bad += len(found)
+        for rel in found[:show]:
             print(f"   {cls:17s} {rel}")
-        if len(rels) > show:
-            print(f"   {cls:17s} … and {len(rels) - show} more")
+        if len(found) > show:
+            print(f"   {cls:17s} … and {len(found) - show} more")
     return 1 if bad else 0
 
 

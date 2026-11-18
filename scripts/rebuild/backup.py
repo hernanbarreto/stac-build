@@ -256,6 +256,10 @@ def restore_git(set_dir: Path) -> int:
                     git(repo, "remote", "add", ref, extra)
                 elif git(repo, "remote", "get-url", ref).strip() != extra:
                     git(repo, "remote", "set-url", ref, extra)
+        # a branch may sit on a commit of a remote this clone has just been given (depth-anything-3's
+        # local main is upstream's, and the rebuilt clone's origin was our fork): ask the remotes for it
+        if any(kind == "branch" and git(repo, "cat-file", "-t", sha).strip() != "commit" for kind, _r, sha, _e in rows):
+            subprocess.run(["git", "-C", str(repo), "fetch", "--quiet", "--all"], capture_output=True, text=True, timeout=900)
         for kind, ref, sha, extra in rows:
             if kind == "branch":
                 if git(repo, "cat-file", "-t", sha).strip() != "commit":
@@ -267,8 +271,11 @@ def restore_git(set_dir: Path) -> int:
                         if run.returncode != 0:
                             print(f"  {name}: {ref} is checked out and cannot be fast-forwarded to {sha[:10]}: {run.stderr.strip()[:120]}")
                             problems += 1
-                else:
-                    git(repo, "branch", "--quiet", "-f", ref, sha, check=True)
+                elif git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{ref}").strip() != sha:
+                    run = subprocess.run(["git", "-C", str(repo), "branch", "--quiet", "-f", ref, sha], capture_output=True, text=True)
+                    if run.returncode != 0:                                 # (a branch a worktree holds elsewhere)
+                        print(f"  {name}: branch {ref} could not be set to {sha[:10]}: {run.stderr.strip()[:140]}")
+                        problems += 1
                 if extra and git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/{extra}").strip():
                     git(repo, "branch", "--quiet", f"--set-upstream-to={extra}", ref)
         have = [l.split("\t")[0] for l in git(repo, "stash", "list", "--format=%H").splitlines()]
