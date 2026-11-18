@@ -5060,6 +5060,12 @@ def _export_busy(session_id: str) -> Optional[str]:
 exporter_api.configure(busy=_export_busy, audit_log=_audit_log)
 app.include_router(exporter_api.router)
 
+# TICKETS (USER 2026-11-09: "una herramienta simple para marcar tickets … como un punto de revisión o una
+# no conformidad: es para mostrar el concepto nomás") — tickets.py / tickets_api.py
+import tickets_api
+tickets_api.configure(resolve_ctx=_ctx, audit_log=_audit_log)
+app.include_router(tickets_api.router)
+
 # THE SESSION ARCHIVE (USER 2026-11-18: "una función en cada sesión para descargarla como zip … y para
 # subirla … en nueva sesión … crear una vacía o subir un archivo zip"): a session streamed out as one ZIP
 # and a ZIP validated, extracted and removed — session_archive.py / session_archive_api.py

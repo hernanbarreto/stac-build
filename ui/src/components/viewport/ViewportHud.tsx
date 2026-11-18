@@ -28,7 +28,10 @@ export interface ReadoutAnchor {
   /** guide-line origin (the measured point) in screen px */
   ax: number
   ay: number
-  kind: 'distance' | 'angle'
+  kind: 'distance' | 'angle' | 'ticket'
+  /** a ticket marked on the model (USER 2026-11-09: "marcar tickets en cualquier parte del proyecto"):
+   *  its number, what it is — a review item, a non-conformity, resolved, or of a geometry that moved — and its title */
+  ticket?: { number: number; tone: 'review' | 'issue' | 'resolved' | 'stale'; title: string; selected?: boolean }
   /** a short label in front of the value (H / W / D of a selected segment) */
   tag?: string
   metres?: number
@@ -61,6 +64,8 @@ interface ViewportHudProps {
   onCalibrate?: (readoutId: string) => void
   /** a stored calibration measurement's readout was pressed (open it in the calibration window) */
   onOpenCalibration?: (calibrationId: string) => void
+  /** a ticket's pin was pressed (open it in the tickets window) */
+  onOpenTicket?: (ticketId: string) => void
   /** THE CLOUD'S CALIBRATION, shown from the moment it opens (USER 2026-11-13: "debe indicarse si la nube esta
    *  calibrada o no, eso lo debe indicar al abrir la nube"): null while it is not known */
   calibration?: { state: 'uncalibrated' | 'calibrated' | 'verified'; factor: number | null; worstDifferenceM: number | null
@@ -71,7 +76,7 @@ interface ViewportHudProps {
 
 const SCALE_STEPS_M = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100]
 
-export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, metersPerPixel, gridLabel, colorMode, mvThreshold, statusFractions, deviationRange, readouts, onCalibrate, onOpenCalibration, calibration, banner }: ViewportHudProps) {
+export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, metersPerPixel, gridLabel, colorMode, mvThreshold, statusFractions, deviationRange, readouts, onCalibrate, onOpenCalibration, onOpenTicket, calibration, banner }: ViewportHudProps) {
   const t = useT()
   const fmt = useFmt()
 
@@ -142,9 +147,20 @@ export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, 
       )}
 
       <svg className="stac-hud__guides" aria-hidden>
-        {readouts.filter(r => r.visible).map(r => <line key={r.id} x1={r.ax} y1={r.ay} x2={r.x} y2={r.y} className="stac-hud__guide" />)}
+        {readouts.filter(r => r.visible && r.kind !== 'ticket').map(r => <line key={r.id} x1={r.ax} y1={r.ay} x2={r.x} y2={r.y} className="stac-hud__guide" />)}
       </svg>
       {readouts.filter(r => r.visible).map(r => {
+        if (r.kind === 'ticket') {
+          // a ticket: its number on the point it was marked on
+          const tk = r.ticket
+          if (!tk) return null
+          return (
+            <button key={r.id} type="button" title={tk.title} aria-label={`${t('tickets.one')} ${tk.number}: ${tk.title}`}
+              className={`stac-hud__ticket stac-hud__ticket--${tk.tone} ${tk.selected ? 'is-selected' : ''}`.trim()}
+              style={{ '--rx': `${r.x}px`, '--ry': `${r.y}px` } as React.CSSProperties}
+              onClick={e => { e.stopPropagation(); onOpenTicket?.(r.id.replace(/^ticket-/, '')) }}>{tk.number}</button>
+          )
+        }
         const len = r.metres != null ? fmt.length(r.metres) : null
         return (
           <div key={r.id} className={`stac-hud__readout ${r.cal ? `stac-hud__readout--cal stac-hud__readout--cal-${r.cal}` : ''}`.trim()} style={{ '--rx': `${r.x}px`, '--ry': `${r.y}px` } as React.CSSProperties}>

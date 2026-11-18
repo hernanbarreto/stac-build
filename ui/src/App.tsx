@@ -8,7 +8,7 @@
  * (features/*) that receive their handlers as props — prompt_ui.txt §5.
  * Status messages go through i18n (`tt` = translator for callbacks).
  */
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import Viewport, { ViewportHandle, SegmentInstance, type CubeInfo } from './components/Viewport'
 import type { UserVolume } from './components/assistantViz'
 import { SyncPlayer } from './components/SyncPlayer'
@@ -25,8 +25,9 @@ import LoginPage from './pages/LoginPage'
 import AdminPage from './pages/AdminPage'
 import SegmentationManager from './components/InteractiveSegmentation'
 import { useConfirmDialog } from './components/ConfirmDialog'
+import { TicketsDialog, ticketTone, type Ticket, type TicketCounts, type TicketDraft } from './features/TicketsDialog'
 import AssistantPanel from './components/AssistantPanel'
-import { PackageOpen,
+import { Flag, PackageOpen,
   Search, Tag, Plug, Settings, Crosshair, Maximize, Monitor, Grid3X3, RotateCcw, Ruler, TriangleRight, Scissors,
   Move, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D, Building2, Package, ArrowUpFromLine, Trash2, Unlock,
   Clock, Scale, BarChart3, Home, Camera, SlidersHorizontal, Sparkles, Undo2, Brush, Layers, Star, Terminal,
@@ -1847,6 +1848,90 @@ function App() {
     } catch { report(t('sessions.createFailed'), 'err'); return t('sessions.createFailed') }
   }, [token, connectToServer, report, t])
 
+  // ── TICKETS (USER 2026-11-09: "una herramienta simple para marcar tickets en cualquier parte del proyecto,
+  // como un punto de revisión o una no conformidad: es para mostrar el concepto nomás") ──
+  // The project's tickets, the one being marked (its kind and title are stated in the window, its POINT
+  // is the next click on the model — never guessed) and the one selected.
+  const [ticketsOpen, setTicketsOpen] = useState(false)
+  const [tickets, setTickets] = useState<Ticket[]>([])
+  const [ticketCounts, setTicketCounts] = useState<TicketCounts | null>(null)
+  const [ticketDraft, setTicketDraft] = useState<TicketDraft | null>(null)
+  const ticketDraftRef = useRef<TicketDraft | null>(null)
+  useEffect(() => { ticketDraftRef.current = ticketDraft }, [ticketDraft])
+  const [selectedTicket, setSelectedTicket] = useState<string | null>(null)
+  const [ticketsError, setTicketsError] = useState<string | null>(null)
+
+  const loadTickets = useCallback(async (sid: string | null) => {
+    if (!sid) { setTickets([]); setTicketCounts(null); setTicketsError(null); return }
+    try {
+      const r = await fetch(`/api/tickets/${encodeURIComponent(sid)}`)
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : `HTTP ${r.status}`)
+      setTickets(d.tickets); setTicketCounts(d.counts); setTicketsError(null)
+    } catch (e: any) { setTicketsError(String(e?.message ?? e)) }
+  }, [])
+  useEffect(() => { setTicketDraft(null); setSelectedTicket(null); void loadTickets(activeSession) }, [activeSession, loadTickets])
+  // (read again at each opening: another user of the session may have marked or resolved one)
+  useEffect(() => { if (ticketsOpen) void loadTickets(activeSession) }, [ticketsOpen])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  const ticketRequest = useCallback(async (method: 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown) => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (token) headers['Authorization'] = `Bearer ${token}`
+    const r = await fetch(`/api/tickets/${encodeURIComponent(activeSession ?? '')}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+    const d = await r.json().catch(() => ({}))
+    if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : `HTTP ${r.status}`)
+    return d
+  }, [token, activeSession])
+
+  const startTicket = useCallback((draft: TicketDraft) => {
+    setTicketDraft(draft); setTicketsOpen(true); setActiveTool('navigate')
+    setStatusMessage(t('tickets.placing', { title: draft.title }))
+  }, [t])
+
+  // the click on the model that a ticket being marked was waiting for
+  const placeTicket = useCallback(async (p: { x: number; y: number; z: number }, classId: number | null) => {
+    const draft = ticketDraftRef.current
+    if (!draft || !activeSession) return
+    setTicketDraft(null)
+    const seg = classId != null ? segments.find(sg => sg.classId === classId) : undefined
+    try {
+      const d = await ticketRequest('POST', '', { ...draft, position: [p.x, p.y, p.z], scan: activeScanTab ?? null,
+                                                 instance_id: seg ? seg.id : null, label: seg ? seg.label : null })
+      setTickets(prev => [...prev, d.ticket]); setTicketCounts(d.counts); setSelectedTicket(d.ticket.id)
+      report(t('tickets.created', { n: d.ticket.number }), 'ok')
+    } catch (e: any) { report(t('tickets.failed', { detail: e?.message ?? e }), 'err') }
+  }, [activeSession, activeScanTab, segments, ticketRequest, report, t])
+
+  const setTicketStatus = useCallback(async (tk: Ticket, status: 'open' | 'resolved') => {
+    try {
+      const d = await ticketRequest('PATCH', `/${tk.id}`, { status })
+      setTickets(prev => prev.map(x => (x.id === tk.id ? d.ticket : x))); setTicketCounts(d.counts)
+      return true as const
+    } catch (e: any) { report(t('tickets.failed', { detail: e?.message ?? e }), 'err'); return String(e?.message ?? e) }
+  }, [ticketRequest, report, t])
+
+  const deleteTicket = useCallback(async (tk: Ticket, confirmed?: boolean) => {
+    const ok = confirmed === true || await confirmDanger(t('tickets.deleteMessage', { n: tk.number, title: tk.title }), t('tickets.deleteTitle'))
+    if (!ok) return 'cancelled'
+    try {
+      const d = await ticketRequest('DELETE', `/${tk.id}`)
+      setTickets(prev => prev.filter(x => x.id !== tk.id)); setTicketCounts(d.counts)
+      setSelectedTicket(prev => (prev === tk.id ? null : prev))
+      return true as const
+    } catch (e: any) { report(t('tickets.failed', { detail: e?.message ?? e }), 'err'); return String(e?.message ?? e) }
+  }, [ticketRequest, confirmDanger, report, t])
+
+  const focusTicket = useCallback((tk: Ticket) => {
+    setSelectedTicket(tk.id)
+    viewportRef.current?.flyToPoint(tk.position, 1.5)
+  }, [])
+
+  // the pins on the model: the tickets of the scan on screen
+  const ticketPins = useMemo(() => tickets
+    .filter(x => !x.scan || !activeScanTab || x.scan === activeScanTab)
+    .map(x => ({ id: x.id, position: x.position, number: x.number, tone: ticketTone(x), title: x.title, selected: x.id === selectedTicket })),
+  [tickets, activeScanTab, selectedTicket])
+
   // THE SESSION AS ONE ZIP (USER 2026-11-18: "una función en cada sesión para descargarla como zip").
   // A browser download: the browser writes the ZIP to the disk as it arrives — a 100 GB session never
   // sits in the page's memory. A link cannot carry the login, so the server gives a link for it; the
@@ -2173,6 +2258,7 @@ function App() {
     physicsDiameterCm, physicsBounce, isAdmin: user?.role === 'admin', deleteVolume, sceneObjSel,
     segments, canManage, renameSession, createSession, setReference, renameSegment, renamePlaced, addLibraryItem,
     downloadSessionZip, pickSessionZip,
+    tickets, ticketCounts, startTicket, setTicketStatus, deleteTicket, focusTicket, signedIn: !!user,
     handlePipelineCancel, pipelineRunning, eraseBoxSel, readouts,
     bimModels, sabanaVisible, sabanaLoading, handleGenerateComparison, runComparison, handleToggleSabana,
     deleteSession, deleteSegment, deleteTsdfMesh, runGenrecon, applyFloorLevel,
@@ -2187,6 +2273,7 @@ function App() {
     physicsDiameterCm, physicsBounce, isAdmin: user?.role === 'admin', deleteVolume, sceneObjSel,
     segments, canManage, renameSession, createSession, setReference, renameSegment, renamePlaced, addLibraryItem,
     downloadSessionZip, pickSessionZip,
+    tickets, ticketCounts, startTicket, setTicketStatus, deleteTicket, focusTicket, signedIn: !!user,
     handlePipelineCancel, pipelineRunning, eraseBoxSel, readouts,
     bimModels, sabanaVisible, sabanaLoading, handleGenerateComparison, runComparison, handleToggleSabana,
     deleteSession, deleteSegment, deleteTsdfMesh, runGenrecon, applyFloorLevel,
@@ -2236,6 +2323,8 @@ function App() {
       return found.item ?? { ok: false, reason: 'not_found', detail: String(id) }
     }
     const notAllowed: Outcome = { ok: false, reason: 'not_allowed' }
+    const ticketBy = (number: number): Ticket | Outcome =>
+      cmd.current.tickets.find(x => x.number === Number(number)) ?? { ok: false, reason: 'not_found', detail: String(number) }
     /** a session of the server by what the user called it */
     const sessionBy = (spoken: string): { id: string; name: string } | Outcome => {
       const found = findByName(cmd.current.sessions, spoken, x => [x.id, x.name])
@@ -2448,6 +2537,55 @@ function App() {
       },
       'meshes.open_genrecon': () => { if (!open()) return noSession; setGenreconOpen(true); return done },
       'export.open': () => { if (!open()) return noSession; setExportOpen(true); return done },
+      // ── tickets: a point of the model marked as a review item or a non-conformity ──
+      'tickets.open': () => { if (!open()) return noSession; setTicketsOpen(true); return done },
+      // (the kind and the title are taken; the POINT is the user's next click on the model)
+      'tickets.create': ({ kind, title }) => {
+        if (!open()) return noSession
+        if (!cmd.current.signedIn) return notAllowed
+        const v = String(title ?? '').trim()
+        if (!v) return { ok: false, reason: 'failed', detail: tt('tickets.needsTitle') }
+        cmd.current.startTicket({ kind, title: v, description: '' })
+        return { ok: true, detail: v }
+      },
+      'tickets.list': () => {
+        if (!open()) return noSession
+        setTicketsOpen(true)
+        const c = cmd.current.ticketCounts ?? { open: 0, resolved: 0, review: 0, non_conformity: 0 }
+        return { ok: true, detail: tt('tickets.countsSpoken', { open: c.open, issues: c.non_conformity, reviews: c.review, resolved: c.resolved }) }
+      },
+      'tickets.focus': ({ number }) => {
+        if (!open()) return noSession
+        const tk = ticketBy(number)
+        if ('ok' in tk) return tk
+        setTicketsOpen(true); cmd.current.focusTicket(tk)
+        return { ok: true, detail: `${tk.number}, ${tk.title}` }
+      },
+      'tickets.resolve': async ({ number }) => {
+        if (!open()) return noSession
+        const tk = ticketBy(number)
+        if ('ok' in tk) return tk
+        const r = await cmd.current.setTicketStatus(tk, 'resolved')
+        return r === true ? { ok: true, detail: String(tk.number) } : { ok: false, reason: 'failed', detail: r }
+      },
+      'tickets.reopen': async ({ number }) => {
+        if (!open()) return noSession
+        const tk = ticketBy(number)
+        if ('ok' in tk) return tk
+        const r = await cmd.current.setTicketStatus(tk, 'open')
+        return r === true ? { ok: true, detail: String(tk.number) } : { ok: false, reason: 'failed', detail: r }
+      },
+      // (confirm: true — `prepare` changes nothing and names what `run` will remove)
+      'tickets.delete': {
+        prepare: ({ number }) => { if (!open()) return noSession; const tk = ticketBy(number); return 'ok' in tk ? tk : { ok: true, detail: `${tk.number}, ${tk.title}` } },
+        run: async ({ number }) => {
+          if (!open()) return noSession
+          const tk = ticketBy(number)
+          if ('ok' in tk) return tk
+          const r = await cmd.current.deleteTicket(tk, true)
+          return r === true ? { ok: true, detail: String(tk.number) } : { ok: false, reason: 'failed', detail: r }
+        },
+      },
       'calibration.measure_distance': () => {
         if (!open()) return noSession
         setCalibrating('distance'); setActiveTool('measure-distance'); setStatusMessage(tt('calibration.measureStatus')); return done
@@ -2888,6 +3026,7 @@ function App() {
       evaluation: () => cmd.current.layout.openDock('evaluation'),
       team: () => cmd.current.layout.setLeftTab('team'),
       export: withSession(() => setExportOpen(true)),
+      tickets: withSession(() => setTicketsOpen(true)),
       // (the Fuse window of the open session; the Segmentation manager is opened by its own
       // command, on a confirmation: it loads SAM3 on the card)
       scans: withSession(() => cmd.current.openFuse(open()!)),
@@ -2942,6 +3081,7 @@ function App() {
       { id: 'clearm', label: t('toolbar.clearMeasurements'), icon: <Trash2 aria-hidden />, onSelect: () => viewportRef.current?.clearMeasurements() },
       { id: 'refdistance', label: t('toolbar.referenceDistance'), icon: <Pin aria-hidden />, disabled: !activeSession, onSelect: () => setReferenceDialog('distance') },
       { id: 'refplane', label: t('toolbar.referencePlane'), icon: <Pentagon aria-hidden />, disabled: !activeSession, onSelect: () => setReferenceDialog('plane') },
+      { id: 'tickets', label: t('tickets.title'), icon: <Flag aria-hidden />, disabled: !activeSession, checked: ticketsOpen, onSelect: () => setTicketsOpen(v => !v) },
       { type: 'separator', id: 's2' },
       { id: 'brush', label: t('toolbar.brush'), icon: <Brush aria-hidden />, checked: activeTool === 'erase', onSelect: () => setActiveTool(activeTool === 'erase' ? 'navigate' : 'erase') },
       { id: 'undobrush', label: t('brush.undo'), icon: <Undo2 aria-hidden />, onSelect: undoBrush },
@@ -3251,6 +3391,8 @@ function App() {
               setCalibrationDraft({ kind: 'plane', readoutId: pl.id, points: pl.points })
               setCalibrationOpen(true); setCalibrating(null); setActiveTool('navigate')
             }}
+            tickets={ticketPins}
+            onPointPicked={(p, cls) => { if (!ticketDraftRef.current) return false; void placeTicket(p, cls); return true }}
             onSegmentPicked={cls => {
               // a point of an object: select it (OBB + dimensions) and travel to it; a click on
               // nothing or on unsegmented points deselects (USER 2026-10-09)
@@ -3333,6 +3475,7 @@ function App() {
               showEdges={showCertifyKit} readouts={readouts}
               onCalibrate={id => { const d = viewportRef.current?.getDistance(id); if (d) { setCalibrationDraft({ kind: 'distance', readoutId: id, ...d }); setCalibrationOpen(true) } }}
               onOpenCalibration={() => { setCalibrationDraft(null); setCalibrationOpen(true) }}
+              onOpenTicket={id => { setSelectedTicket(id); setTicketsOpen(true) }}
               calibration={calibrationSummary ? { state: calibrationSummary.state, factor: calibrationSummary.scale_factor,
                                                   axes: calibrationSummary.mode_used === 'axes' ? calibrationSummary.axes.factors : null,
                                                   worstDifferenceM: calibrationSummary.verification?.worst_difference_m ?? null } : null}
@@ -3468,6 +3611,12 @@ function App() {
 
       <ExportDialog open={exportOpen} sessionId={activeSession} scanKey={activeScanTab} defaultConfidence={confidenceThreshold}
         onClose={() => setExportOpen(false)} />
+
+      <TicketsDialog open={ticketsOpen && !!activeSession} sessionId={activeSession} scanKey={activeScanTab} tickets={tickets} counts={ticketCounts}
+        userName={user?.username ?? null} canManage={canManage} placing={ticketDraft} selectedId={selectedTicket} loadError={ticketsError}
+        onStartPlacing={startTicket} onCancelPlacing={() => { setTicketDraft(null); setStatusMessage('') }}
+        onSelect={setSelectedTicket} onFocus={focusTicket} onSetStatus={(tk, st) => { void setTicketStatus(tk, st) }}
+        onDelete={tk => { void deleteTicket(tk) }} onClose={() => { setTicketsOpen(false); setTicketDraft(null) }} />
 
       <GenreconDialog open={genreconOpen} sessionId={activeSession} scanLabel={activeScanTab} defaultConfidence={confidenceThreshold}
         onClose={() => setGenreconOpen(false)} onRun={async c => { await runGenrecon(c) }} />

@@ -882,3 +882,15 @@
   font-weight: var(--fw-medium);
   color: var(--text-2);
 }
+
+/* the tickets window: a ticket's title and, under it, its object, author and date */
+.stac-tickets__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stac-tickets__meta {
+  color: var(--text-secondary);
+  font-size: var(--fs-0);
+}

@@ -112,6 +112,11 @@ interface ViewportProps {
     onViewScale?: (metersPerPixel: number) => void
     /** a click on a point of the cloud (navigate tool) names its segment by CLASS BYTE (USER 2026-10-04) */
     onSegmentPicked?: (classId: number) => void
+    /** … and, before that, the point itself (the scan's display frame) with its class byte when the cloud
+     *  has one: a listener that returns true TOOK the click (a ticket being placed) and no segment is selected */
+    onPointPicked?: (p: { x: number; y: number; z: number }, classId: number | null) => boolean | void
+    /** the tickets marked on the scan on screen: a numbered pin on each one's point */
+    tickets?: Array<{ id: string; position: number[]; number: number; tone: 'review' | 'issue' | 'resolved' | 'stale'; title: string; selected?: boolean }>
 }
 
 /** a cube of the session's cut (reconstruction/cubes.py), as the Instances list shows it */
@@ -670,7 +675,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, sceneLook = DEFAULT_LOOK, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onCubes, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onDistanceMeasured, onPlaneMeasured, onViewScale, onSegmentPicked },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, sceneLook = DEFAULT_LOOK, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onCubes, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onDistanceMeasured, onPlaneMeasured, onViewScale, onSegmentPicked, onPointPicked, tickets },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -1124,6 +1129,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const finalizePlaneRef = useRef<() => void>(() => {})
     const onSegmentPickedRef = useRef(onSegmentPicked)
     useEffect(() => { onSegmentPickedRef.current = onSegmentPicked }, [onSegmentPicked])
+    const onPointPickedRef = useRef(onPointPicked)
+    useEffect(() => { onPointPickedRef.current = onPointPicked }, [onPointPicked])
+    // the tickets' pins: their points as vectors, projected with the readouts every frame
+    const ticketsRef = useRef<Array<{ id: string; pos: THREE.Vector3; ticket: NonNullable<ReadoutAnchor['ticket']> }>>([])
+    const ticketsDirtyRef = useRef(false)
+    useEffect(() => {
+        ticketsRef.current = (tickets ?? []).filter(tk => tk.position.length === 3).map(tk => ({
+            id: `ticket-${tk.id}`, pos: new THREE.Vector3(tk.position[0], tk.position[1], tk.position[2]),
+            ticket: { number: tk.number, tone: tk.tone, title: tk.title, selected: tk.selected } }))
+        ticketsDirtyRef.current = true                             // (a changed list is drawn at the next frame)
+    }, [tickets])
     /** the selected segment's key (its OBB lit, its H / W / D dimensions drawn) — survives an OBB rebuild */
     const selectedSegKeyRef = useRef<string | null>(null)
     const onViewScaleRef = useRef(onViewScale)
@@ -3893,9 +3909,17 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     return { id: r.id, kind: r.kind, tag: r.tag, x: Math.round(x), y: Math.round(y), ax: Math.round((v.x * 0.5 + 0.5) * w), ay: Math.round((-v.y * 0.5 + 0.5) * h), metres: r.metres, degrees: r.degrees, visible,
                              calibratable: r.calibratable, cal: r.cal }
                 })
+                for (const tk of ticketsRef.current) {
+                    v.copy(tk.pos).project(camera)
+                    const x = Math.round((v.x * 0.5 + 0.5) * w), y = Math.round((-v.y * 0.5 + 0.5) * h)
+                    out.push({ id: tk.id, kind: 'ticket', x, y, ax: x, ay: y, ticket: tk.ticket,
+                               visible: v.z < 1 && x >= 0 && x <= w && y >= 0 && y <= h })
+                }
                 const key = out.map(r => `${r.id}:${r.x}:${r.y}:${r.visible ? 1 : 0}`).join('|')
                 // during the flythrough the readouts would re-render the app every frame
-                if (!flying && key !== lastReadoutKeyRef.current) { lastReadoutKeyRef.current = key; onReadoutsRef.current?.(out) }
+                if (!flying && (key !== lastReadoutKeyRef.current || ticketsDirtyRef.current)) {
+                    lastReadoutKeyRef.current = key; ticketsDirtyRef.current = false; onReadoutsRef.current?.(out)
+                }
                 const mpp = (2 * orbitDist * Math.tan((camera.fov * Math.PI / 180) / 2)) / Math.max(1, h)
                 if (Math.abs(mpp - lastMppRef.current) > lastMppRef.current * 0.01) { lastMppRef.current = mpp; onViewScaleRef.current?.(mpp) }
             }
@@ -4006,6 +4030,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             if (!hit) { onSegmentPickedRef.current(-1); return }     // a click on nothing deselects
             const geo = (hit.object as THREE.Points).geometry as THREE.BufferGeometry
             const attr = geo.getAttribute('classId') as THREE.BufferAttribute | undefined
+            // the point itself first: a listener that takes it (a ticket being placed) ends the click here
+            if (onPointPickedRef.current?.({ x: hit.point.x, y: hit.point.y, z: hit.point.z }, attr ? attr.getX(hit.index as number) : null)) return
             if (!attr) return
             onSegmentPickedRef.current(attr.getX(hit.index as number))
         }

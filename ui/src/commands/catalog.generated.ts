@@ -2,7 +2,7 @@
 // The commands of the interface STAC can run: their ids and the type of each one's arguments.
 // A new command is declared in the catalogue; this file is then regenerated and the compiler
 // asks for its executor (ui/src/commands/registry.ts).
-export const CATALOG_SHA256 = 'be9402267869f046ca74785579c4efa7f2b1db680284aed7a7d9f12a0e6af687'
+export const CATALOG_SHA256 = '2a3922c71644477dcea6f7d9a9823063984ed03e07a661cf4cb341cfc5f4a3d6'
 
 export const UI_COMMAND_IDS = [
   'talk.set_user_name',
@@ -233,6 +233,13 @@ export const UI_COMMAND_IDS = [
   'reports.run_deviation',
   'export.open',
   'export.run',
+  'tickets.open',
+  'tickets.create',
+  'tickets.list',
+  'tickets.focus',
+  'tickets.resolve',
+  'tickets.reopen',
+  'tickets.delete',
 ] as const
 
 export type UiCommandId = typeof UI_COMMAND_IDS[number]
@@ -279,6 +286,7 @@ export const UI_CONFIRM_IDS = [
   'admin.delete_team',
   'admin.remove_team_member',
   'reports.run_deviation',
+  'tickets.delete',
 ] as const
 
 export type UiConfirmId = typeof UI_CONFIRM_IDS[number]
@@ -512,4 +520,11 @@ export interface UiCommandArgs {
   'reports.run_deviation': { tolerance_mm: number }
   'export.open': Record<string, never>
   'export.run': { items?: string[]; confidence?: number }
+  'tickets.open': Record<string, never>
+  'tickets.create': { kind: 'review' | 'non_conformity'; title: string }
+  'tickets.list': Record<string, never>
+  'tickets.focus': { number: number }
+  'tickets.resolve': { number: number }
+  'tickets.reopen': { number: number }
+  'tickets.delete': { number: number }
 }

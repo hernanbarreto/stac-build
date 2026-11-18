@@ -524,6 +524,25 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   NOT ADAPTED, declared: the coverage engine (the ray casting towards the cameras; OFF by config since before —
   a tree of the whole cloud per element); ONE SHEET PER PROJECT (the last compared scan's, shown over
   whichever scan is open — sabana_meta.json now names its scan). NOT TRIED IN A BROWSER.
+- ⭐ TICKETS (2026-11-18, the item of his 2026-11-09 list: "TICKETS — una herramienta simple para marcar tickets
+  en cualquier parte del proyecto, como un punto de revisión o una no conformidad: es para mostrar el concepto
+  nomás"): `server/tickets.py` + `tickets_api.py`, the Tickets window (Tools menu → Tickets; `TicketsDialog`),
+  numbered pins on the model, and 7 commands by voice (`tickets.*`: open, create, list, focus, resolve, reopen,
+  delete — the last on a spoken confirmation; the catalogue: 281 commands in 33 areas). A ticket is marked in
+  TWO steps: its kind (review / non-conformity) and its title in the window (or said: "STAC, marcá una no
+  conformidad: falta la tapa"), then ONE CLICK on the model — the point is the user's, never guessed. It keeps
+  the point (the scan's display frame), the scan, the object the point lies on (instance id and label), who
+  marked it and when, open / resolved (by whom, when), and the scan's GEOMETRY EPOCH: after a correction that
+  moved the cloud it is listed as "earlier geometry" instead of being drawn as if it were still there. They are
+  the PROJECT's (`<project>/tickets.json`, one numbering for all its scans; the session's ZIP carries them);
+  the pins shown are those of the scan on screen. Reading is anyone's who opens the session; marking and
+  resolving need a signed-in user; removing one is its author's, a manager's or an administrator's.
+  `provenance: human_stated` — a ticket is a person's statement, nothing is measured. The viewer gained ONE
+  hook for it (`onPointPicked`: the clicked point of the cloud, before the segment selection) and the HUD a
+  third kind of anchor. Tested: 7 tests (logic and routes) and the routes through the live backend on a
+  temporary session; the interface compiles against the generated catalogue. NOT TRIED IN A BROWSER (the
+  window, the click that places a ticket, the pins, the commands). NOT DONE, not asked: photos or comments on
+  a ticket, an assignee, an export of the list, tickets on an IFC element or a mesh (the click is on the cloud).
 - Segment cleaning: RANSAC on, DBSCAN OFF (*"este sí borra puntos"*), the 5 cm voxel quads OFF; OBBs fitted to the
   points. Viewer: segmentation lamps / windows as lights, point opacity, shadows for meshes.
 
@@ -596,7 +615,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
      marcarse dos puntos y decir estos son los mismos en ambas … que se ajusten a uno de ellos, o a una medida
      externa"): with levelled scans two points fix scale, yaw and position; three or more give a residual.
      Not started.
-  5 · TICKETS (a simple tool, to show the concept), then DA3 → MapAnything: not started.
+  5 · TICKETS: BUILT 2026-11-18 (§5 "TICKETS"), his eye pending. Then DA3 → MapAnything: not started.
   6 · WAITING FOR HIS WORD: whether the recogniser should ALWAYS listen in the settings' language (today it
      detects among es / en / fr and the settings decide only a silence); the IFC's own values if his eye asks.
   7 · WAITING FOR HIS EYE / EAR (nothing of 2026-11-17 / 18 was tried in a browser by the assistant): the
@@ -618,7 +637,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     2.  BIM COMPARISON (an IFC in place of the second scan) ........................ RUNS on a scan of today
         (2026-11-18, §5): pccr 3108 against its own IFC — 280 elements, mean 22.2 mm, 94.7 % within 50 mm;
         HIS EYE on the sheet and the analysis panel: PENDING; what is compared and how: his ("luego vemos")
-    3.  TICKETS (review items / non-conformities, to show the concept) ............. NOT STARTED
+    3.  TICKETS (review items / non-conformities, to show the concept) ............. BUILT 2026-11-18 (§5
+        "TICKETS"): the window, the pins on the model, the voice commands — HIS EYE in the browser: PENDING
     4.  DA3 → MapAnything as the metric source, for the licence .................... NOT STARTED ("luego, ahora no")
   B · WAITING FOR HIS DECISION
     5.  The scales of pccr 2408 / 3108: where the factor is applied ................ OPEN (goes with 1b)
@@ -691,6 +711,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
         d. `runs/` (5.5 GB), the logs and /workspace/tmp (6.3 GB) are not carried by the kit;
         e. whether the older setup scripts (scripts/setup_vendors.sh, setup_pod_envs.sh, setup_weights.sh,
            export_envs.sh, scripts/setup.sh, docs/migration/) are deleted — they name removed envs and old pins.
+    44. TICKETS (§5) — BUILT 2026-11-18; HIS EYE: the window, placing one with a click, the pins, the commands.
     43. THE BIM COMPARISON (§5), what is owed after 2026-11-18: his eye on pccr 3108's sheet; the candidates'
         search on the card too (scipy's tree on the CPU is now most of the 95 s); the coverage engine at
         today's sizes; one sheet per SCAN instead of one per project.

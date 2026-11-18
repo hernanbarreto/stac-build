@@ -1,0 +1,248 @@
+area: tickets
+position: 300
+title:
+  es: Tickets
+  en: Tickets
+  fr: Tickets
+summary:
+  es: 'Marcar puntos del modelo como algo a revisar o como una no conformidad, con título, quién lo marcó y si sigue abierto o ya se resolvió.'
+  en: 'Marking points of the model as something to review or as a non-conformity, with a title, who marked it and whether it is still open or was resolved.'
+  fr: 'Marquer des points du modèle comme élément à vérifier ou comme non-conformité, avec un titre, son auteur et son état, ouvert ou résolu.'
+commands:
+- id: tickets.open
+  kind: action
+  runs_on: ui
+  model: 'Open the Tickets window of the open session: the list of the points marked on the model as review items
+    or non-conformities, and the form to mark a new one. It only opens the window.'
+  needs:
+  - session
+  text:
+    es:
+      title: Abrir los tickets
+      say:
+      - abrí los tickets
+      - mostrame las no conformidades
+      - quiero ver los puntos de revisión
+      done: Ventana de tickets abierta.
+    en:
+      title: Open the tickets
+      say:
+      - open the tickets
+      - show me the non-conformities
+      - I want to see the review items
+      done: Tickets window open.
+    fr:
+      title: Ouvrir les tickets
+      say:
+      - ouvre les tickets
+      - montre-moi les non-conformités
+      - je veux voir les points à vérifier
+      done: Fenêtre des tickets ouverte.
+- id: tickets.create
+  kind: action
+  runs_on: ui
+  model: 'Mark a NEW ticket on the model: a review item (something to look at) or a non-conformity (something built
+    wrong or missing). It takes the kind and a short title and then WAITS for the user to click the point of the
+    model the ticket is about — the point is never guessed. Not a note of the chat and not a measurement.'
+  args:
+    kind:
+      type: string
+      enum:
+      - review
+      - non_conformity
+      description: 'review = a point to look at or to check; non_conformity = something that does not comply'
+      required: true
+    title:
+      type: string
+      description: a short title for the ticket, in the user's words
+      required: true
+  needs:
+  - session
+  - cloud
+  text:
+    es:
+      title: Marcar un ticket
+      say:
+      - marcá una no conformidad, falta la tapa de la bandeja
+      - creá un ticket de revisión acá
+      - anotá un punto a revisar en esta pared
+      done: 'Tocá en el modelo el punto del ticket «{detail}».'
+    en:
+      title: Mark a ticket
+      say:
+      - mark a non-conformity, the tray cover is missing
+      - create a review ticket here
+      - note a point to check on this wall
+      done: 'Click on the model the point of the ticket "{detail}".'
+    fr:
+      title: Marquer un ticket
+      say:
+      - marque une non-conformité, il manque le couvercle du chemin de câbles
+      - crée un ticket de vérification ici
+      - note un point à vérifier sur ce mur
+      done: 'Cliquez sur le modèle le point du ticket « {detail} ».'
+- id: tickets.list
+  kind: query
+  runs_on: ui
+  model: 'Say how many tickets the open session has — open and resolved, review items and non-conformities — and
+    open their window. For "how many tickets / non-conformities are there", "what is pending to review".'
+  needs:
+  - session
+  text:
+    es:
+      title: Cuántos tickets hay
+      say:
+      - cuántos tickets hay abiertos
+      - cuántas no conformidades quedan
+      - qué falta revisar
+      done: '{detail}.'
+    en:
+      title: How many tickets there are
+      say:
+      - how many tickets are open
+      - how many non-conformities are left
+      - what is left to review
+      done: '{detail}.'
+    fr:
+      title: Combien de tickets
+      say:
+      - combien de tickets sont ouverts
+      - combien de non-conformités restent
+      - que reste-t-il à vérifier
+      done: '{detail}.'
+- id: tickets.focus
+  kind: action
+  runs_on: ui
+  model: Travel with the camera to a ticket, by its number, and select it in the Tickets window.
+  args:
+    number:
+      type: integer
+      description: the ticket's number
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Ir a un ticket
+      say:
+      - llevame al ticket 3
+      - mostrame la no conformidad 5
+      - andá al punto del ticket dos
+      done: Ticket {detail}.
+    en:
+      title: Go to a ticket
+      say:
+      - take me to ticket 3
+      - show me non-conformity 5
+      - go to the point of ticket two
+      done: Ticket {detail}.
+    fr:
+      title: Aller à un ticket
+      say:
+      - emmène-moi au ticket 3
+      - montre-moi la non-conformité 5
+      - va au point du ticket deux
+      done: Ticket {detail}.
+- id: tickets.resolve
+  kind: action
+  runs_on: ui
+  model: 'Mark a ticket as RESOLVED, by its number (it stays in the list, with who resolved it and when).'
+  args:
+    number:
+      type: integer
+      description: the ticket's number
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Resolver un ticket
+      say:
+      - resolvé el ticket 3
+      - la no conformidad 5 ya está corregida
+      - cerrá el ticket dos
+      done: Ticket {detail} resuelto.
+    en:
+      title: Resolve a ticket
+      say:
+      - resolve ticket 3
+      - non-conformity 5 has been corrected
+      - close ticket two
+      done: Ticket {detail} resolved.
+    fr:
+      title: Résoudre un ticket
+      say:
+      - résous le ticket 3
+      - la non-conformité 5 est corrigée
+      - ferme le ticket deux
+      done: Ticket {detail} résolu.
+- id: tickets.reopen
+  kind: action
+  runs_on: ui
+  model: Open again a ticket that was marked as resolved, by its number.
+  args:
+    number:
+      type: integer
+      description: the ticket's number
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Reabrir un ticket
+      say:
+      - reabrí el ticket 3
+      - el ticket 5 no quedó resuelto
+      - volvé a abrir la no conformidad dos
+      done: Ticket {detail} abierto otra vez.
+    en:
+      title: Reopen a ticket
+      say:
+      - reopen ticket 3
+      - ticket 5 was not really solved
+      - open non-conformity two again
+      done: Ticket {detail} open again.
+    fr:
+      title: Rouvrir un ticket
+      say:
+      - rouvre le ticket 3
+      - le ticket 5 n'est pas vraiment résolu
+      - ouvre de nouveau la non-conformité deux
+      done: Ticket {detail} rouvert.
+- id: tickets.delete
+  kind: action
+  runs_on: ui
+  model: 'DELETE a ticket for good, by its number (not resolving it: removing it from the project).'
+  confirm: true
+  args:
+    number:
+      type: integer
+      description: the ticket's number
+      required: true
+  needs:
+  - session
+  text:
+    es:
+      title: Borrar un ticket
+      say:
+      - borrá el ticket 3
+      - eliminá la no conformidad 5
+      - sacá ese ticket del proyecto
+      done: Ticket {detail} borrado.
+      ask: Voy a borrar el ticket {detail}.
+    en:
+      title: Delete a ticket
+      say:
+      - delete ticket 3
+      - remove non-conformity 5
+      - take that ticket out of the project
+      done: Ticket {detail} deleted.
+      ask: I am going to delete the ticket {detail}.
+    fr:
+      title: Supprimer un ticket
+      say:
+      - supprime le ticket 3
+      - retire la non-conformité 5
+      - enlève ce ticket du projet
+      done: Ticket {detail} supprimé.
+      ask: Je vais supprimer le ticket {detail}.

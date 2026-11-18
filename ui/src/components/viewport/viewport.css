@@ -319,6 +319,35 @@
 .stac-hud__readout--cal-test .stac-readout { --readout-color: var(--vp-angle); }
 .stac-hud__readout--cal-plane .stac-readout { --readout-color: var(--vp-calibration); }
 
+/* a ticket marked on the model: its number on its point (review: info; a non-conformity: err;
+   resolved: ok, dimmed; of a geometry that moved since: neutral, dashed) */
+.stac-hud__ticket {
+  position: absolute;
+  left: var(--rx);
+  top: var(--ry);
+  transform: translate(-50%, -50%);
+  z-index: var(--z-hud);
+  pointer-events: auto;
+  min-width: var(--sp-5);
+  height: var(--sp-5);
+  padding: 0 var(--sp-1);
+  border: var(--bw-selected) solid var(--ticket-color);
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--surface-2) 82%, var(--ticket-color));
+  color: var(--text-1);
+  font-size: var(--fs-1);
+  font-weight: var(--fw-semibold);
+  line-height: 1;
+  cursor: pointer;
+}
+.stac-hud__ticket--review { --ticket-color: var(--info-fg); }
+.stac-hud__ticket--issue { --ticket-color: var(--err-fg); }
+.stac-hud__ticket--resolved { --ticket-color: var(--ok-fg); opacity: 0.6; }
+.stac-hud__ticket--stale { --ticket-color: var(--text-3); border-style: dashed; }
+.stac-hud__ticket:hover,
+.stac-hud__ticket:focus-visible,
+.stac-hud__ticket.is-selected { opacity: 1; outline: var(--bw-selected) solid color-mix(in srgb, var(--ticket-color) 45%, transparent); }
+
 /* ── Overlays inside the viewport (Viewport.tsx) ────────────────────── */
 .stac-vpcard {
   position: absolute;
