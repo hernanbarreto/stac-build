@@ -125,3 +125,13 @@ def test_simplifying_keeps_the_surface_and_what_is_far_from_the_cloud_is_no_obje
     elements, report = M.elements_of(out, glb, keep=1.0, max_distance=0.05, log=lambda _m: None)
     assert [e["id"] for e in elements] == [1] and report["faces_no_object"] == len(chair.faces)
     assert report["objects_without_faces"] == [5]
+
+
+def test_large_triangles_are_split_in_their_plane():
+    v = np.array([[0, 0, 0], [4, 0, 0], [0, 3, 0], [0, 0, 0.1]], np.float32)
+    f = np.array([[0, 1, 2], [0, 1, 3]])                       # a 4 x 3 m triangle and a 4 m x 10 cm sliver
+    area = lambda vv, ff: np.linalg.norm(np.cross(vv[ff[:, 1]] - vv[ff[:, 0]], vv[ff[:, 2]] - vv[ff[:, 0]]), axis=1).sum() / 2
+    nv, nf = M.split_large(v, f, 0.5)
+    assert np.linalg.norm(nv[nf] - nv[nf[:, [1, 2, 0]]], axis=2).max() <= 0.5 and len(nf) > 60
+    assert area(nv, nf) == pytest.approx(area(v, f), rel=1e-6)                  # the same surface
+    assert M.split_large(v, f, 10.0)[1] is f                                    # nothing over the size: untouched

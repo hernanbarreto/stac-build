@@ -190,6 +190,20 @@ def simplify(v: np.ndarray, f: np.ndarray, keep: float) -> Tuple[np.ndarray, np.
     return (out_v, out_f) if len(out_f) else (v, f)
 
 
+def split_large(v: np.ndarray, f: np.ndarray, max_edge: float) -> Tuple[np.ndarray, np.ndarray]:
+    """The triangles whose longest edge is over ``max_edge`` split (in their own plane: the
+    surface does not move) until none is. A simplification leaves triangles of metres on a flat
+    floor or wall — larger than the objects on it (a 57 cm tile), so the cut could not follow
+    them (measured on pccr 3108 at 10 %: the longest edge reached 1.85 m)."""
+    import trimesh
+    edges = np.linalg.norm(v[f] - v[f[:, [1, 2, 0]]], axis=2).max(axis=1)
+    big = edges > max_edge
+    if not big.any():
+        return v, f
+    nv, nf = trimesh.remesh.subdivide_to_size(np.asarray(v, np.float64), f[big], max_edge=max_edge, max_iter=30)
+    return np.vstack([v, nv.astype(v.dtype)]), np.vstack([f[~big], nf.astype(np.int64) + len(v)])
+
+
 def deviation(v: np.ndarray, sv: np.ndarray, sf: np.ndarray) -> np.ndarray:
     """The distance from each original vertex ``v`` to the simplified surface (sv, sf), metres."""
     import open3d as o3d
@@ -199,7 +213,8 @@ def deviation(v: np.ndarray, sv: np.ndarray, sf: np.ndarray) -> np.ndarray:
 
 
 def elements_of(output_dir: Path | str, mesh_path: Path | str, *, keep: float, max_distance: float,
-                neighbours: int = 0, measure: bool = False, log: Callable[[str], Any] = print) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                neighbours: int = 0, max_edge: Optional[float] = None, measure: bool = False,
+                log: Callable[[str], Any] = print) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """The scan's elements, each with its part of the mesh (display frame), and the report.
 
     THE ORDER MATTERS: the whole mesh is simplified FIRST, as the one surface it is, and cut
@@ -227,6 +242,11 @@ def elements_of(output_dir: Path | str, mesh_path: Path | str, *, keep: float, m
         report["deviation_m"] = {"median": float(np.median(d)), "p95": float(np.percentile(d, 95)),
                                  "p99": float(np.percentile(d, 99)), "max": float(d.max())}
     del full_v, full_f
+    if max_edge:
+        vertices, faces = split_large(vertices, faces, float(max_edge))
+        report["faces_after_split"] = int(len(faces))
+        report["max_edge"] = float(max_edge)
+        log(f"triangles over {max_edge * 100:.1f} cm split: {len(faces):,} triangles")
     cloud = C.open_ply(out / "cleaned_cloud.ply")
     ids = np.load(out / "instance_ids.npy")
     if len(ids) != len(cloud):
@@ -343,7 +363,8 @@ def mesh_of(output_dir: Path | str) -> Path:
     return glb
 
 
-def write(session: str, scan_key: str, *, keep: float, neighbours: int = 0, out: Path | str | None = None, measure: bool = True,
+def write(session: str, scan_key: str, *, keep: float, neighbours: int = 0, max_edge_voxels: float = 0.0,
+          out: Path | str | None = None, measure: bool = True,
           log: Callable[[str], Any] = print) -> Dict[str, Any]:
     """Build the scan's IFC from its GenRecon mesh and write it (default: the project's IFC
     directory). Returns the report: elements, triangles, the simplification's measured deviation."""
@@ -358,7 +379,8 @@ def write(session: str, scan_key: str, *, keep: float, neighbours: int = 0, out:
         con.close()
     epoch = str(row[0]) if row else "?"
     elements, report = elements_of(output_dir, mesh_of(output_dir), keep=keep, max_distance=voxel_of(),
-                                   neighbours=neighbours, measure=measure, log=log)
+                                   neighbours=neighbours, max_edge=max_edge_voxels * voxel_of() or None,
+                                   measure=measure, log=log)
     dev = report.get("deviation_m")
     described = (f"STAC Build — built from the GenRecon mesh of the scan {session} {scan_key}, geometry epoch {epoch}, "
                  f"cut by its segmentation: each element is its object's part of the mesh. Triangles kept: "
@@ -386,9 +408,12 @@ def main(argv: List[str]) -> int:
     ap.add_argument("--keep", type=float, required=True, help="the share of the mesh's triangles kept, (0, 1]")
     ap.add_argument("--neighbours", type=int, default=0,
                     help="a triangle's object: the majority of this many nearest cloud points (0: of the points on it)")
+    ap.add_argument("--max-edge-voxels", type=float, default=0.0,
+                    help="split the triangles whose longest edge is over this many GenRecon voxels (0: none)")
     ap.add_argument("--out", default=None)
     a = ap.parse_args(argv)
-    print(json.dumps(write(a.session, a.scan, keep=a.keep, neighbours=a.neighbours, out=a.out), default=float))
+    print(json.dumps(write(a.session, a.scan, keep=a.keep, neighbours=a.neighbours, max_edge_voxels=a.max_edge_voxels,
+                           out=a.out), default=float))
     return 0
 
 
