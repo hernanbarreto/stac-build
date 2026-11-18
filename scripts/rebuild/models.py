@@ -15,8 +15,8 @@ while the environments are being built.
 Environment: STAC_ROOT, HF_TOKEN (the gated repos: SAM 3 / 3.1, VGGT-Omega),
 DINOV3_URL (Meta's signed link — any of the two files' links, or the ``*`` form: it expires, ask
 for a new one at https://ai.meta.com/resources/models-and-libraries/dinov3-downloads/),
-STAC_MIRROR (optional: a directory or an http(s) base holding files named by their sha256 — tried
-FIRST, for what the official source may no longer give).
+STAC_MIRROR (optional: a directory or an http(s) base holding files named by their sha256). A mirror
+is tried FIRST: STAC_MIRROR when set, else the repo's draft release (set/mirror.tsv, needs GIT_TOKEN).
 """
 from __future__ import annotations
 
@@ -107,10 +107,28 @@ def hf_headers():
     return [f"Authorization: Bearer {token}"] if token else []
 
 
+MIRROR_ERRORS = {}                                           # {sha256: why the mirror could not give it}
+
+
 def from_mirror(row, part: Path) -> bool:
-    """The file from the mirror when one is configured and holds it (named by its sha256)."""
-    if not MIRROR or row["sha"] in ("", "-"):
+    """The file from a mirror that holds it by its sha256: STAC_MIRROR when it is set (a directory or
+    an http base), else the draft release of the repo (scripts/rebuild/set/mirror.tsv — the weights
+    whose own source may refuse: Meta's DINOv3 link expires)."""
+    if row["sha"] in ("", "-"):
         return False
+    if not MIRROR:
+        import backup                                       # (it imports this module: not at the top)
+        try:
+            got = backup.fetch_from_release(row["sha"], part)
+        except Exception as e:                              # (kept: the weight's own source is tried, and if
+            MIRROR_ERRORS[row["sha"]] = str(e)              #  that fails too both reasons are told)
+            part.unlink(missing_ok=True)
+            return False
+        if got and sha256_of(part) != row["sha"]:
+            MIRROR_ERRORS[row["sha"]] = "the release's file has another sha256"
+            part.unlink(missing_ok=True)
+            return False
+        return got
     try:
         if MIRROR.startswith("http"):
             curl(f"{MIRROR}/{row['sha']}", part)
@@ -317,6 +335,7 @@ def place_links_and_copies(all_rows) -> list:
 
 
 def fetch(jobs: int, only, match=None) -> int:
+    free = shutil.disk_usage(TMP.parent if TMP.parent.exists() else "/").free
     all_rows = [r for r in rows() if (not only or r["kind"] in only)
                 and (not match or match in r["dest"] or match in r["source"])]
     work = [r for r in all_rows if r["kind"] not in ("link", "copy", "convert")]
@@ -327,8 +346,14 @@ def fetch(jobs: int, only, match=None) -> int:
         try:
             return row, fetch_one(row), ""
         except Exception as e:
-            return row, "FAILED", str(e)
+            why = str(e)
+            if row["sha"] in MIRROR_ERRORS:
+                why = f"the mirror: {MIRROR_ERRORS[row['sha']]} — then its own source: {why}"
+            return row, "FAILED", why
 
+    need = sum(r["size"] for r in work if not in_place(r, deep=False))
+    if need > free:
+        print(f"  WARNING: {need / 1e9:.1f} GB to fetch and {free / 1e9:.1f} GB free where the downloads land ({TMP})")
     with ThreadPoolExecutor(max_workers=jobs) as pool:
         for row, state, why in pool.map(run, sorted(work, key=lambda r: (r["kind"] != "tum", -r["size"]))):
             results[id(row)] = (state, why)

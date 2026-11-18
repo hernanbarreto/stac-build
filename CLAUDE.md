@@ -209,7 +209,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   into pkgs), `vendor/GenRecon/work` (every GenRecon run rmtree's and recreates its own dirs) — USER 2026-11-08
   "ok, sin romper nada" / "los genrecon que se usaron a modo de pruebas eliminalos" (37 GB freed).
 - Envs (`/workspace/miniforge3/envs`): da3 (backend + core + PointDiT), mapanything (Omega, F4, F5), semantic (vLLM),
-  voice (Whisper large-v3-turbo MIT + Kokoro-82M Apache-2.0 + Silero VAD MIT, 2026-11-14), amb3r (AMB3R-SLAM), genrecon, CloudComPy310, gs, nodejs, colmap (evaluation only). One HF cache: `HF_HOME=
+  voice (Whisper large-v3-turbo MIT + Kokoro-82M Apache-2.0 + Silero VAD MIT, 2026-11-14), amb3r (AMB3R-SLAM), genrecon, CloudComPy310, gs, nodejs, colmap (USER 2026-11-18: "De hecho colmap se usa" — none of the ten is optional). One HF cache: `HF_HOME=
   /workspace/hf_cache`. No paid external APIs; everything local.
 - texrecon (`vendor/mvs-texturing`, kept *"por las dudas"*) was relinked against libtiff 6 (its own link.txt,
   `libtbb.so.12.19` → `libtbb.so.12`); a full `cmake ..` fails on the vendored oneTBB.
@@ -223,23 +223,32 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   every file falls in a class that names how it comes back — git (the commit), env (the locks: conda's exact
   packages, pip's exact wheel files), weight (`models.tsv`: source, pinned revision, sha256), download (pinned
   source + sha256), npm, ASIS (exists nowhere else: everything compiled on the pod, the built interface, sidecars)
-  and PRIVATE (.env, stored tokens, the users' database, Tailscale's identity) — these two are THE BACKUP SET
-  (`backup.py make` → /workspace/stac_backup: asis / envs / private archives, every local branch, stash, worktree
-  and remote of every repository with the commits that are on no remote, Meta's DINOv3 as hard links) — data (the
-  sessions: copied apart) and cache. `rebuild.sh` WITH the set compiles nothing: the compiled parts are the old
-  pod's own bytes; without it, it completes from public sources and says what it could not give back.
+  and PRIVATE (.env, stored tokens, the users' database, Tailscale's identity) — these two are THE BACKUP SET,
+  and THE SET IS IN THE KIT (USER 2026-11-18: "Que el kit restaure la base de usuarios y todo lo que se
+  necesita" / "Nada es opcional todo debe quedar como está. De hecho colmap se usa" / "Para los push no te
+  preocupes ahora está público pero pasa a privado en poco tiempo"): `backup.py make` writes
+  scripts/rebuild/set/ (≈ 210 MB, committed: asis/ one archive per vendor tree, envs.tar.gz, every local
+  branch / stash / remote / worktree of every repository with the commits that are on no remote) with the
+  private archive ENCRYPTED (gpg AES-256, `STAC_BACKUP_KEY` — in .env and nowhere else: HE MUST KEEP IT OFF THE
+  POD; the repo is public and tokens are not committed in the clear), and Meta's two DINOv3 files as the assets
+  of a DRAFT release of the repo (`backup.py publish-mirror`, fetched with GIT_TOKEN). A new volume: clone,
+  `export STAC_BACKUP_KEY=…`, rebuild.sh. NOTHING IS OPTIONAL: every env and step is required. THE SESSIONS
+  travel as ZIPs (his: "vamos a hacer una función en cada sesión para descargarla como zip … y para subirla …
+  en nueva sesión … crear una vacía o subir un archivo zip"). `rebuild.sh` WITH the set compiles nothing: the
+  compiled parts are the old pod's own bytes; COMPILE=1 compiles them again (another card).
   ⚠ THE RULE THAT KEEPS IT TRUE — AFTER EVERY CHANGE OF THE POD (a `pip` / `conda install`, a vendor clone or
   commit, a new weight, a compilation, a new secret): `python3 scripts/rebuild/drift.py` (is the kit still the
   pod? ≈ 6 min, read-only; `--fast` in server/tests/test_rebuild_kit.py), `bash scripts/rebuild/capture.sh`,
-  commit scripts/rebuild/, AND COPY THE BACKUP SET OFF THE POD (it is no backup on the volume it describes);
-  push on his word. An edit in place inside an env → `overlays/<env>/`; a weight downloaded by hand → a row of
+  commit scripts/rebuild/ (the set is in it) and push (2026-11-18: "Para los push no te preocupes … Avanza sin
+  problemas"). An edit in place inside an env → `overlays/<env>/`; a weight downloaded by hand → a row of
   `models.tsv`; a commit in a vendor clone → the set's bundle (or a remote of ours).
   CHECKED 2026-11-18 in a scratch volume on the local disk, at a path as long as /workspace: the 1,065 pip
   packages downloaded and equal byte for byte to the installed ones (but what is compiled here: in the set); THE
   TEN ENVS rebuilt by rebuild.sh with the set and compared FILE BY FILE with the live ones — 467,195 files
   identical, 5,912 differing only by the env's own path, 2,839 installers' records, NONE different, none on one
   side only; the repo and its 13 vendor repositories with the same commits, diffs, 29 + 12 branches, stashes,
-  remotes and worktrees; the set's 4,293 + 20 members restored equal; the inventory of the rebuilt volume against
+  remotes and worktrees; the set, from the repo with nothing but the key: 4,292 + 21 members restored equal (the users' database,
+  .env, the hub token byte for byte), the two DINOv3 files from the draft release identical; the inventory of the rebuilt volume against
   the lock with no difference in any class of software; the rebuilt PotreeConverter giving the same octree bytes
   on bufferStop (the public-sources path). NOT done: one run on a really empty volume (the pod has no room for a
   second copy of itself), the 82 GB of weights downloaded again in full, anything started on the card from a
@@ -587,20 +596,16 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
         ZIP of 2026-11-17 (1.85 GB — STALE: it holds the old box IFC; a new export replaces it)
     38. A device twin of the same-surface neighbour search (scipy on the CPU today)
     39. He said "tengo más consultas luego"
-    40. THE REBUILD KIT (scripts/rebuild/, §4) — built, rebuilt on his word ("debe quedar exactamente como está
-        ahora … No decidas por mí") and tested 2026-11-18. ON THE VOLUME ONLY UNTIL HE SAYS: the commits are local
-        (nothing pushed), the backup set is at /workspace/stac_backup (not copied off). WAITING FOR HIS WORD:
-        a. THE PUSH — and how his private fork's commit a31f3c7 of depth-anything-3 travels: its bundle is in
-           scripts/rebuild/bundles/ of the PUBLIC repo's local commits (pushing them publishes it), or it is
-           pushed to his private fork and those local commits are redone without it before the push;
-        b. WHERE THE BACKUP SET LIVES OFF THE POD (0.2 GB + Meta's two DINOv3 files, 4.6 GB; private.tar.gz holds
-           his secrets) — and it must be copied again after every capture;
-        c. THE DATA (inventory.py summary: the sessions 147 GB, runs 5.5 GB, /workspace/tmp 6.3 GB, logs): where
-           it is copied — the kit does not carry it;
-        d. /workspace/usdtools (the AR export) DOES NOT WORK today; the rebuild makes a working one — whether he
-           wants the live one repaired now, or left as it is;
-        e. the exact name of the pod's image (RunPod's page) into scripts/rebuild/README.md;
-        f. whether the older setup scripts (scripts/setup_vendors.sh, setup_pod_envs.sh, setup_weights.sh,
+    40. THE REBUILD KIT (scripts/rebuild/, §4) — DONE 2026-11-18 and pushed: the set is in the repo, the private
+        archive encrypted, DINOv3 in the draft release, depth-anything-3's commit a31f3c7 pushed to his private
+        fork (branch stac-main: the repo's pin is fetchable). HIS, STILL:
+        a. ⚠ KEEP `STAC_BACKUP_KEY` (in /workspace/stac-build/.env) OFF THE POD — it is the one thing a new
+           volume needs that is nowhere else; without it the users' database and .env are not restored;
+        b. the exact name of the pod's image (RunPod's page) into scripts/rebuild/README.md;
+        c. /workspace/usdtools (the AR export) DOES NOT WORK today (python3 3.11 → 3.12 in the image); the rebuild
+           makes a working one — the live one was left as it is;
+        d. `runs/` (5.5 GB), the logs and /workspace/tmp (6.3 GB) are not carried by the kit;
+        e. whether the older setup scripts (scripts/setup_vendors.sh, setup_pod_envs.sh, setup_weights.sh,
            export_envs.sh, scripts/setup.sh, docs/migration/) are deleted — they name removed envs and old pins.
     41. The repo hernanbarreto/stac-build is PUBLIC on GitHub (the VGGT-Long fork too), `scripts/key.pem` — the
         self-signed certificate's private key — is tracked in it, and vendor/depth-anything-3's `fork` remote

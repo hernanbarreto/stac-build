@@ -16,26 +16,35 @@ So this is not a list of things to install. It starts from **what is on the volu
 | `weight` | 99 model files, 82 GB, in the repo's trees and in the TWO hub caches | `models.tsv`: source, pinned revision, sha256 | sha256-checked |
 | `download` | KTX, CloudComPy's binary, Tailscale, cloudflared, Miniforge's installer, MapAnything's DINOv2 code | their pinned sources | held to the recorded sha256 |
 | `npm` | `node_modules` (interface, mesh tools), the global CLI | `npm ci` on the tracked lock | npm's integrity hashes |
-| `asis` | what exists nowhere else: everything COMPILED on the pod, the built interface, sidecars, empty directories | **the backup set** — archived as it is, put back byte for byte | the same bytes |
-| `private` | `.env`, stored tokens, the sessions' signing key, the users' database, Tailscale's identity | **the backup set**'s private archive | the same bytes |
-| `data` | the sessions (147 GB), runs, logs, scratch | copied apart — it is not software | — |
+| `asis` | what exists nowhere else: everything COMPILED on the pod, the built interface, sidecars, empty directories | **the backup set** (`set/`, in the repo) — archived as it is, put back byte for byte | the same bytes |
+| `private` | `.env`, stored tokens, the sessions' signing key, **the users' database**, Tailscale's identity | the set's encrypted archive, opened by `STAC_BACKUP_KEY` | the same bytes |
+| `data` | the sessions (147 GB), runs, logs, scratch | the sessions: each as its ZIP (the app's download / upload) | — |
 | `cache` | bytecode, pip's cache, derived images | whatever uses it writes it again | — |
 
-## The two halves
+## The kit carries its own backup set
 
-**The kit** — this directory, in git: the scripts, the locks, the manifest, the inventory. Public sources only.
+USER 2026-11-18, asked where the set should live: *"Que el kit restaure la base de usuarios y todo lo que se
+necesita"* / *"Nada es opcional todo debe quedar como está. De hecho colmap se usa"*. So the set is committed —
+`scripts/rebuild/set/` (≈ 210 MB), written by `backup.py make` (capture.sh runs it):
 
-**The backup set** — `python3 scripts/rebuild/backup.py make` writes it to `/workspace/stac_backup` (≈ 0.2 GB plus
-hard links to Meta's two DINOv3 files, 4.6 GB): `asis.tar.gz`, `envs.tar.gz` (the distributions compiled on the
-pod, inside the envs), `private.tar.gz`, `git/` (every local branch, stash and worktree of every repository; the
-commits that are on no remote, as bundles), `mirror/` (the weights whose source may refuse). **It is not a
-backup while it sits on the volume it describes: it must be copied off the pod, and again after every capture.**
-`private.tar.gz` holds secrets.
+- `asis/<group>.tar.gz` — one archive per vendor tree / area (a change rewrites one archive, not all; an archive
+  over 45 MB is cut in parts: GitHub refuses a file over 100 MB);
+- `envs.tar.gz` — inside the envs: the distributions compiled on the pod, or installed from a directory or a
+  git commit, and the files no package owns;
+- `private.tar.gz.gpg` — **the users' database**, `.env`, the hub client's stored tokens, the sessions' signing
+  key, Tailscale's identity, the assistant's settings, a point cloud left in `ui/` — **encrypted** (gpg,
+  AES-256) with `STAC_BACKUP_KEY`: the repo is public today, and tokens are not committed in the clear in a
+  private one either. **The key is in `.env` and nowhere else: keep a copy of it off the pod.** Without it this
+  one archive cannot be opened; everything else still is restored;
+- `git/` — every local branch, stash, remote and worktree of every repository, and the commits that are on no
+  remote (bundles);
+- `mirror.tsv` — the weights whose source may refuse (Meta's two DINOv3 files, 4.6 GB): kept as the assets of a
+  **draft** release of the repo (`backup.py publish-mirror`; a draft is seen only by who may push), fetched with
+  `GIT_TOKEN`.
 
-With the set, a rebuild compiles nothing: the compiled parts are the old pod's own bytes (PotreeConverter's
-sha256 is in every octree's stamp — a new compilation would be the same program and another stamp). Without it
-the rebuild still completes from public sources, compiles those parts again, restores no secret and no local git
-work, and says so.
+With the set a rebuild compiles nothing: the compiled parts are the old pod's own bytes (PotreeConverter's
+sha256 is in every octree's stamp — a new compilation would be the same program and another stamp). `COMPILE=1`
+compiles them again, for a card that is not an A100.
 
 ## Run it
 
@@ -44,27 +53,31 @@ shows it is RunPod's PyTorch 2.8 / CUDA 12.8.1 image — copy its exact name fro
 anything), the volume at `/workspace`:
 
 ```bash
-git clone https://github.com/hernanbarreto/stac-build.git /workspace/stac-build
-# copy the backup set to /workspace/stac_backup      (without it: write /workspace/stac-build/.env — env.template)
+git clone https://github.com/hernanbarreto/stac-build.git /workspace/stac-build      # with a token once it is private
+export STAC_BACKUP_KEY=…                                # the one secret to keep: it opens .env and the users' database
 bash /workspace/stac-build/scripts/rebuild/rebuild.sh
-bash /workspace/stac-build/init_pod.sh               # the services, as on every boot
+bash /workspace/stac-build/init_pod.sh                  # the services, as on every boot
 ```
 
-About an hour (measured step by step on the pod's local disk: an env's conda packages 4–50 s, its pip packages
-80–160 s, the vendor clones 5 min, 82 GB of weights at the pod's 100+ MB/s; a network volume writes slower). A
-failure stops only what depends on it; **run the same command again** and every finished step is skipped.
-`rebuild.sh --list` shows the steps, `--only STEP` runs one, `--verify` checks an installed pod, `ENVS="da3 voice"`
-rebuilds some envs. Logs: `/workspace/.stac_rebuild/logs/<step>.log`.
+Without the key: write `/workspace/stac-build/.env` by hand (`env.template`); the users' database and Tailscale's
+identity are then not restored. About an hour (measured step by step on the pod's local disk: an env's conda
+packages 4–50 s, its pip packages 80–160 s, the vendor clones 1–5 min, 82 GB of weights at the pod's 100+ MB/s; a
+network volume writes slower). A failure stops only what depends on it; **run the same command again** and every
+finished step is skipped. `rebuild.sh --list` shows the steps, `--only STEP` runs one, `--verify` checks an
+installed pod, `ENVS="da3 voice"` rebuilds some envs. Logs: `/workspace/.stac_rebuild/logs/<step>.log`.
 
 Running it on the pod that already works changes nothing: an env it did not build is left alone, a vendor tree at
 its commit and a weight with the right sha256 are kept.
+
+**The sessions** (`server/projects/`, 147 GB) are not in the kit: each travels as its own ZIP — the app's
+"download session" and, in "new session", "upload a ZIP".
 
 ## Keeping it true — after EVERY change of the pod
 
 ```bash
 python3 scripts/rebuild/drift.py          # is the kit still the pod? (≈ 4 min, read-only; --fast: seconds)
 bash scripts/rebuild/capture.sh           # write the locks, the manifest's cache rows, the inventory, the set
-git add scripts/rebuild && git commit     # … and copy /workspace/stac_backup off the pod; push on the user's word
+git add scripts/rebuild && git commit     # the set is in scripts/rebuild/set/: the push carries it
 ```
 
 A `pip install`, a `conda install`, a vendor clone or commit, a new weight, a compilation, a new secret: each
@@ -78,13 +91,13 @@ the fast half in the suite. What a capture cannot guess, it names:
 
 ## What a rebuild cannot give back, and what is different
 
-- **The sessions and the other `data`** are not in the set. `python3 scripts/rebuild/inventory.py summary` lists
-  them with their sizes.
-- **Meta's two DINOv3 checkpoints** (PointDiT, GenRecon): Meta's link in `.env` expires (it had on 2026-11-18).
-  The set's `mirror/` holds them; without the set a new link is needed (`env.template` says where).
+- **The sessions** — each as its ZIP (above). `runs/`, the logs and `/workspace/tmp` are not carried
+  (`python3 scripts/rebuild/inventory.py summary` lists them with their sizes).
+- **Without `STAC_BACKUP_KEY`**: the users' database, `.env` and Tailscale's identity.
 - **The USD venv** (`/workspace/usdtools`, the AR export): on the pod of 2026-11-18 it does NOT work — it was made
   when `/usr/bin/python3` was 3.11 and the image moved it to 3.12 (`import pxr` fails). The rebuild makes it with
-  python 3.11 by name, so the rebuilt one works: the one place where the rebuilt pod is not the old one.
+  python 3.11 by name, from the same five wheels, so the rebuilt one works: the one place where the rebuilt pod is
+  not the old one.
 - An installer's own records of an install (conda-meta's dates, a distribution's RECORD of an editable install)
   are written again; `compare_env.py` counts them apart from the files that matter.
 
@@ -116,7 +129,9 @@ mistake, below:
   no file on one side only; the compiled extensions restored from the set in 1–4 s an env, nothing compiled;
 - **the repositories**: the repo and its 13 vendor repositories (submodules and nested ones included) — the same
   commit, uncommitted diff, branches (29 in the repo), stashes, remotes, worktrees;
-- **the set**: its 4,293 `asis` members and 20 `private` members restored and equal to its lists;
+- **the set**, from the repo with nothing but `STAC_BACKUP_KEY`: its 4,292 `asis` members and 21 `private`
+  members restored and equal to its lists — the users' database, `.env` and the hub token byte for byte; Meta's two
+  DINOv3 files fetched from the draft release (the one in two parts joined) and identical to the pod's;
 - **the volume**: `inventory.py check` on the rebuilt volume against the lock — no difference in any class of
   software (git heads, downloads by sha256, asis, private, npm); only the data, the caches and the weights not
   fetched in this test were absent;

@@ -26,6 +26,9 @@ VENDOR_SUBMODULES=(
   "vendor/depth-anything-3|stac-main"
 )
 
+# our commits on top of an upstream pin exist on no remote: the backup set carries them (set/git/, backup.py)
+vendor_bundle() { echo "$REBUILD_DIR/set/git/stac-build__vendor__$1.bundle"; }
+
 # git over HTTPS with the token of .env (the private repos: stac-build itself, the Depth-Anything-3
 # fork) — the same helper init_pod.sh installs: the token never lands in a remote URL or .gitconfig.
 git_credentials() {
@@ -47,8 +50,8 @@ step_submodules() {
         if ! git submodule update --init --recursive "$path"; then
             # the clone is there, the pinned commit is not on the remote: it is in the bundle
             [ "$branch" != - ] && [ -e "$path/.git" ] || { echo "$path: clone failed (GIT_TOKEN in .env? network?)"; return 1; }
-            echo "$path: $want is not on the remote — taking it from scripts/rebuild/bundles/$(basename "$path").bundle"
-            git -C "$path" fetch "$REBUILD_DIR/bundles/$(basename "$path").bundle" "refs/heads/$branch:refs/remotes/bundle/$branch"
+            echo "$path: $want is not on the remote — taking it from the set's bundle"
+            git -C "$path" fetch "$(vendor_bundle "$(basename "$path")")" "refs/heads/$branch:refs/remotes/bundle/$branch"
             git submodule update --init --recursive "$path"
         fi
         got="$(git -C "$path" rev-parse HEAD)"
@@ -93,7 +96,7 @@ step_vendor_clones() {
             clone_at "$dest" "$url" "$base"
             if [ "$branch" != - ]; then
                 # our own commits on top of the upstream pin: they exist on no remote
-                git -C "$dest" fetch --quiet "$REBUILD_DIR/bundles/$name.bundle" "refs/heads/$branch:refs/heads/$branch"
+                git -C "$dest" fetch --quiet "$(vendor_bundle "$name")" "refs/heads/$branch:refs/heads/$branch"
                 git -C "$dest" checkout --quiet "$branch"
             fi
             [ "$(git -C "$dest" rev-parse HEAD)" = "$final" ] || { echo "$name is at $(git -C "$dest" rev-parse HEAD), expected $final"; return 1; }

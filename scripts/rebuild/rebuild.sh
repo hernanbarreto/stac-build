@@ -40,10 +40,9 @@ T0=$SECONDS
 FAILED=()
 mkdir -p "$STATE/done" "$LOGS" "$CACHE"
 
-# required <name> <function> [args] — a failure is recorded and the run goes on with what does not
-# depend on it; optional — a failure is a warning.
+# required <name> <function> [args] — a failure is recorded and the run goes on with what does not depend
+# on it. Every step is required: nothing of the pod is optional.
 required() { run_step "$@" || FAILED+=("$1"); }
-optional() { run_step "$@" || warn "$1 failed (optional — not needed by the pipeline nor the app)"; }
 
 # in_background <name> <function> [args] — the same, detached; collect with wait_background
 BG_PIDS=(); BG_NAMES=()
@@ -51,9 +50,7 @@ in_background() { ( run_step "$@" ) & BG_PIDS+=($!); BG_NAMES+=("$1"); }
 wait_background() {
     local i
     for i in "${!BG_PIDS[@]}"; do
-        if ! wait "${BG_PIDS[$i]}"; then
-            if [[ " ${OPTIONAL_STEPS[*]:-} " == *" ${BG_NAMES[$i]} "* ]]; then warn "${BG_NAMES[$i]} failed (optional)"; else FAILED+=("${BG_NAMES[$i]}"); fi
-        fi
+        wait "${BG_PIDS[$i]}" || FAILED+=("${BG_NAMES[$i]}")
     done
     BG_PIDS=(); BG_NAMES=()
 }
@@ -83,11 +80,15 @@ main() {
     log "STAC Build rebuild — logs in $LOGS"
     # ── 0. the backup set, when it is here: checked whole, and the secrets first (.env) ──────────
     if have_backup; then
-        log "backup set: $BACKUP_SET — the compiled parts, the secrets and the local git work come from it, as they were"
+        log "backup set: $BACKUP_SET — the compiled parts and the local git work come from it, as they were"
         FORCE=1 run_step backup_check step_backup_check || die "the backup set is damaged — nothing was changed"
-        required restore_private step_restore_private
+        if [ -n "${STAC_BACKUP_KEY:-}" ] || grep -qs "STAC_BACKUP_KEY=" "$STAC_ROOT/.env" "$WORKSPACE/.env"; then
+            required restore_private step_restore_private
+        else
+            warn "STAC_BACKUP_KEY is not set: the private archive (the USERS' DATABASE, .env, Tailscale's identity) is NOT restored — export STAC_BACKUP_KEY=… and run again; meanwhile .env must be written by hand (env.template)"
+        fi
     else
-        warn "NO BACKUP SET at $BACKUP_SET: what was compiled on the old pod is compiled AGAIN (the same sources, other bytes); its secrets, local branches and stashes are NOT restored"
+        warn "NO BACKUP SET at $BACKUP_SET: what was compiled on the old pod is compiled AGAIN (the same sources, other bytes); its secrets, the users' database, local branches and stashes are NOT restored"
     fi
     load_env || warn "no .env found in $STAC_ROOT nor $WORKSPACE — the private repos and the gated weights will fail"
     git_credentials
@@ -110,12 +111,11 @@ main() {
     # ── C. the conda packages, one env after another (they share conda's package cache) ──────────
     local env
     for env in "${STAC_ENVS[@]}"; do
-        if is_optional_env "$env"; then optional "conda_$env" step_conda_env "$env"; else required "conda_$env" step_conda_env "$env"; fi
+        required "conda_$env" step_conda_env "$env"
     done
     wait "$WHEELS_PID" || FAILED+=(fetch_wheels)
 
     # ── D. the pip packages: the envs are independent, four at a time ───────────────────────────
-    OPTIONAL_STEPS=(pip_colmap pip_gs)
     local running=0
     for env in "${STAC_ENVS[@]}"; do
         step_done "conda_$env" || continue
@@ -133,13 +133,13 @@ main() {
     step_done pip_amb3r        && required extras_amb3r        step_extras_amb3r
     step_done pip_genrecon     && required extras_genrecon     step_extras_genrecon
     step_done pip_CloudComPy310 && required extras_CloudComPy310 step_extras_plain CloudComPy310
-    step_done pip_colmap       && optional extras_colmap       step_extras_plain colmap
-    step_done pip_gs           && optional extras_gs           step_extras_plain gs
+    step_done pip_colmap       && required extras_colmap       step_extras_plain colmap
+    step_done pip_gs           && required extras_gs           step_extras_plain gs
     step_done conda_nodejs     && required extras_nodejs       step_extras_nodejs
     required onetbb       step_onetbb
     required potree       step_potree
-    optional usdtools     step_usdtools
-    optional remote_tools step_remote_tools
+    required usdtools     step_usdtools
+    required remote_tools step_remote_tools
 
     # ── F. the weights are in: the links between them, the one conversion, the check of it all ───
     log "waiting for the weights (log: $LOGS/models.log)"

@@ -47,7 +47,7 @@ step_verify() {
     local env rc=0
     for env in "${STAC_ENVS[@]}"; do
         [ -s "$LOCKS/$env.records.tsv" ] && [ -x "$(env_python "$env")" ] || continue
-        "$(env_python "$env")" "$REBUILD_DIR/verify_env.py" "$env" "$LOCKS" || { is_optional_env "$env" || rc=1; }
+        "$(env_python "$env")" "$REBUILD_DIR/verify_env.py" "$env" "$LOCKS" || rc=1
     done
     python3 "$REBUILD_DIR/models.py" verify || rc=1
     if have_backup; then step_backup_verify || rc=1; fi

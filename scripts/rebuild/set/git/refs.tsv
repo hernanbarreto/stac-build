@@ -1,0 +1,91 @@
+# repo	kind	name	commit	upstream | message | branch
+stac-build	head	main	17787e84d413dcff5888e14828ce84e73993cbad	
+stac-build	remote	origin	-	https://github.com/hernanbarreto/stac-build.git
+stac-build	branch	amb3r-probe	a376a3faf51e053fc51d8fd6e87fb94fb41b68bb	
+stac-build	branch	audit/precision-geometry-2026-10-23	2643294742867d185c22e353a724753a126f22a9	origin/audit/precision-geometry-2026-10-23
+stac-build	branch	chunk-structure	78a9bb2c06699c6cd39977c0c0f2279e3830b478	
+stac-build	branch	cubes-by-sight	e1b3cada0fb0bed7f4de34059b1bcd2d482a2f64	
+stac-build	branch	f3	886939ab0678b9911021e52172c4cb5db2b66be5	
+stac-build	branch	f4	99c18af9316159f6388487b038f57c464fd9e406	
+stac-build	branch	f5	08d7a2298589ccc59d0b6e93ad213f85c2300ed1	
+stac-build	branch	f6	b3e354e4b5b9063532d9460b2773e03ac24d90d9	
+stac-build	branch	feat/semantic-pipeline	bbab2c759ccbc85af8edf39fb35db28e94974e9a	
+stac-build	branch	gpu-certify	973256e77471e205579087b55fffad50982c0224	
+stac-build	branch	gpu-core	f07a93824e5fb64c00662de0979636125bf8764c	origin/gpu-core
+stac-build	branch	gpu-main	f3233a20a6271f48769398ce56e32fe7d328b414	
+stac-build	branch	gpu-projection	2045900d8aaaf9ed60f49e473f1a6337bd7b0c39	
+stac-build	branch	gs-layer	69d2e13c9141b000ca630c917c7972ab396b6620	origin/gs-layer
+stac-build	branch	integ	ffa03c5b48efbed0a9ab55090177fa16951b16ed	
+stac-build	branch	main	17787e84d413dcff5888e14828ce84e73993cbad	origin/main
+stac-build	branch	master	e811235522473e657caafb1300b0941b1cc262b6	
+stac-build	branch	merge/gpu-main-2026-11-02	1662e368fef3f3f66df19c7b35daaa933961cf29	
+stac-build	branch	obb-device-draws	d58d07aa88836f648055f246030670626e753633	
+stac-build	branch	omega-sections	3a2930cc5268fda59a76418c3f4b8aa11c51ac2c	
+stac-build	branch	run8-exact	ec45d0739a366a65704912d6810606bb998c424b	
+stac-build	branch	slam2-omega	12e5c149be9ed60199c4554865083a06c08822e6	
+stac-build	branch	turn-frames	bd14be682ee2d7a43538676226ad4a7ee4e925a4	
+stac-build	branch	vggt-slam2-omega	e87d048808c9713b5dd127d5f6a48f7ea1af348f	
+stac-build	branch	wip-mask-score-20260916	f1b2f1c772550480320670415e35d516b356da6a	
+stac-build	branch	wip/precision-f2-f4-snapshot	d140777da2d7681020f799b554bebce4690bb07c	
+stac-build	branch	worktree-agent-a33a78e3f86c5d342	c9e9796729ca0005ffc7dba551bd42f75114fc74	
+stac-build	branch	worktree-agent-a7ba1e660a9936451	c9e9796729ca0005ffc7dba551bd42f75114fc74	
+stac-build	branch	worktree-wf_44315fd6-ad6-3	e817de2e19a274ddd7d0b46928ea6bb775cb1354	
+stac-build	stash	0	1c3db3035b907fe2c65ffef2a47344435f428697	On stac-main: stopped agents partial work 2026-10-01 (stage10, VLM captions, ShapeR button)
+stac-build	stash	1	1726e59c6dcb08a317bd8302a50b64ec9395e6a1	On stac-main: chunk 60/30 + max_walk fuera + scale advisory (2026-09-22) — SIN APLICAR, a la espera de su orden
+stac-build	worktree	tmp/wt_gpu_main	f3233a20a6271f48769398ce56e32fe7d328b414	gpu-main
+stac-build	worktree	tmp/wt_scale	82fbdbd1e71acf2bc420122d377aeca07ad3a2a8	detached
+stac-build__vendor__VGGT-Long	head	gpu-main	bcdb0d94b8f4155d86ca734ff8ace47874fa323b	
+stac-build__vendor__VGGT-Long	remote	origin	-	https://github.com/hernanbarreto/VGGT-Long.git
+stac-build__vendor__VGGT-Long	branch	chunk-structure	86d8fecb749c6f1e45d751082a77699bbfa100ab	
+stac-build__vendor__VGGT-Long	branch	gpu-main	bcdb0d94b8f4155d86ca734ff8ace47874fa323b	
+stac-build__vendor__VGGT-Long	branch	main	c47628355b0be319a08870b43102a66ecaad2c75	origin/main
+stac-build__vendor__VGGT-Long	branch	stac-metric-graph	f576cbf490144277ceca1151a9bb6cff86790ce3	origin/stac-metric-graph
+stac-build__vendor__VGGT-Long	branch	stac-slam2	ed362ab4b1f9eb7748efb3bb488c0ad57fdbc278	
+stac-build__vendor__VGGT-Long	branch	turn-frames	749615c87e423a47c7a699357cf7b9c3078a2453	
+stac-build__vendor__VGGT-Long	stash	0	86a178068ed8350fc138d7f17cea2bfd97c4e38d	WIP on stac-slam2: ed362ab slam2 phase 4 (fork): the seam instrument's SESSION rule per counterfactual — every seam's judged held-out residuals pooled with the shared frames as judges, the aggregation loop_utils.common_k applies in-run, so seam_radial.json says offline what the in-run judgement would say (the battery's skip rule reads it); tests on the focal-error and same-K scenes
+stac-build__vendor__VGGT-Long	stash	1	d22e9f046431f7bd155384ced32d042b72bfa801	WIP on stac-slam2: ed362ab slam2 phase 4 (fork): the seam instrument's SESSION rule per counterfactual — every seam's judged held-out residuals pooled with the shared frames as judges, the aggregation loop_utils.common_k applies in-run, so seam_radial.json says offline what the in-run judgement would say (the battery's skip rule reads it); tests on the focal-error and same-K scenes
+stac-build__vendor__depth-anything-3	head	stac-main	a31f3c780be716f67d23eeb08d3d0bd6ef1db815	
+stac-build__vendor__depth-anything-3	remote	fork	-	https://github.com/hernanbarreto/Depth-Anything-3.git
+stac-build__vendor__depth-anything-3	remote	origin	-	https://github.com/ByteDance-Seed/Depth-Anything-3.git
+stac-build__vendor__depth-anything-3	branch	main	41736238f5bced4debf3f2a12375d2466874866d	origin/main
+stac-build__vendor__depth-anything-3	branch	stac-main	a31f3c780be716f67d23eeb08d3d0bd6ef1db815	
+stac-build__vendor__depth-anything-3	branch	stac-patches	5c32cef49014202b7562067660411543af225f84	
+stac-build__vendor__depth-anything-3__da3_streaming__loop_utils__salad	head	HEAD	6aede13a3f6c25750bf7fde10209c06cb73060bb	
+stac-build__vendor__depth-anything-3__da3_streaming__loop_utils__salad	remote	origin	-	https://github.com/serizba/salad.git
+stac-build__vendor__depth-anything-3__da3_streaming__loop_utils__salad	branch	main	6aede13a3f6c25750bf7fde10209c06cb73060bb	origin/main
+stac-build__vendor__pointdit	head	main	11f53a30aeb4d34d49d2beda655ee6f19b2ad7f8	
+stac-build__vendor__pointdit	remote	origin	-	https://github.com/google-research/pointdit.git
+stac-build__vendor__pointdit	branch	main	11f53a30aeb4d34d49d2beda655ee6f19b2ad7f8	origin/main
+stac-build__vendor__sam31	head	stac-determinism	a3c52e5c5228f47d74f88a1c09ecfe9a54943663	
+stac-build__vendor__sam31	remote	origin	-	https://github.com/facebookresearch/sam3.git
+stac-build__vendor__sam31	branch	main	5dd401d1c5c1d5c3eedff06d41b77af824517619	origin/main
+stac-build__vendor__sam31	branch	stac-determinism	a3c52e5c5228f47d74f88a1c09ecfe9a54943663	
+stac-build__vendor__AMB3R-SLAM	head	stac	4de8946af3fac4584f8375b317bae2796687559b	
+stac-build__vendor__AMB3R-SLAM	remote	origin	-	https://github.com/HengyiWang/amb3r-slam.git
+stac-build__vendor__AMB3R-SLAM	branch	main	54184655c259078bd60bc5ddebc838d8f5acda55	origin/main
+stac-build__vendor__AMB3R-SLAM	branch	stac	4de8946af3fac4584f8375b317bae2796687559b	
+stac-build__vendor__GenRecon	head	main	eaf1468118d20469d17079a4a19737297d2ef87b	
+stac-build__vendor__GenRecon	remote	origin	-	https://github.com/kasothaphie/GenRecon.git
+stac-build__vendor__GenRecon	branch	main	eaf1468118d20469d17079a4a19737297d2ef87b	origin/main
+stac-build__vendor__GenRecon	worktree	tmp/genrecon_vanilla	eaf1468118d20469d17079a4a19737297d2ef87b	detached
+stac-build__vendor__GenRecon__o-voxel__third_party__eigen	head	HEAD	21e4582d1739107337a03460c81412981130373e	
+stac-build__vendor__GenRecon__o-voxel__third_party__eigen	remote	origin	-	https://gitlab.com/libeigen/eigen.git
+stac-build__vendor__GenRecon__o-voxel__third_party__eigen	branch	master	c44c4c81552795ce910e3c8e40ceb514f428e5e9	origin/master
+stac-build__vendor__nvdiffrast	head	main	253ac4fcea7de5f396371124af597e6cc957bfae	
+stac-build__vendor__nvdiffrast	remote	origin	-	https://github.com/NVlabs/nvdiffrast.git
+stac-build__vendor__nvdiffrast	branch	main	253ac4fcea7de5f396371124af597e6cc957bfae	origin/main
+stac-build__vendor__vggt-omega	head	main	39a0cb8af88554f15ddcb5354cd52bde588fa014	
+stac-build__vendor__vggt-omega	remote	origin	-	https://github.com/facebookresearch/vggt-omega.git
+stac-build__vendor__vggt-omega	branch	main	39a0cb8af88554f15ddcb5354cd52bde588fa014	origin/main
+stac-build__vendor__r3d	head	main	9669cacd799345933c6d0241e134cfe560f4600f	
+stac-build__vendor__r3d	remote	origin	-	https://github.com/facebookresearch/r3d.git
+stac-build__vendor__r3d	branch	main	9669cacd799345933c6d0241e134cfe560f4600f	origin/main
+stac-build__vendor__mvs-texturing	head	master	f3374298ac959cb5afe47a14e4d35d2ac7fbdbb1	
+stac-build__vendor__mvs-texturing	remote	origin	-	https://github.com/nmoehrle/mvs-texturing.git
+stac-build__vendor__mvs-texturing	branch	master	f3374298ac959cb5afe47a14e4d35d2ac7fbdbb1	origin/master
+stac-build__vendor__oneTBB-src	head	master	e9af1a1b38b858e8eb41a866e1eed32811e0fb4c	
+stac-build__vendor__oneTBB-src	remote	origin	-	https://github.com/uxlfoundation/oneTBB.git
+stac-build__vendor__oneTBB-src	branch	master	e9af1a1b38b858e8eb41a866e1eed32811e0fb4c	origin/master
+stac-build__vendor__pointdit__third_party__dinov3	head	main	6876159a11b4df116f30f667f8c9888617df0751	
+stac-build__vendor__pointdit__third_party__dinov3	remote	origin	-	https://github.com/facebookresearch/dinov3.git
+stac-build__vendor__pointdit__third_party__dinov3	branch	main	6876159a11b4df116f30f667f8c9888617df0751	origin/main

@@ -68,7 +68,10 @@ for env in "${ENVS_ARG[@]}"; do
         resolve_pins "$env" "$prefix/bin/python"
     fi
     "$prefix/bin/python" "$HERE/capture_env.py" asis "$env" "$LOCKS"
-    [ -s "$LOCKS/$env.modified.tsv" ] && warn "$env: files edited in place after their install — save them under overlays/$env/: $(cut -f4 "$LOCKS/$env.modified.tsv" | tr '\n' ' ')"
+    # a file edited in place inside the env must be saved as an overlay, or a rebuild loses it
+    while IFS=$'\t' read -r _name _version _state edited; do
+        [ -f "$HERE/overlays/$env/$edited" ] || warn "$env: $edited was edited in place after its install and is NOT saved under overlays/$env/"
+    done < "$LOCKS/$env.modified.tsv"
 done
 
 if [ $# -eq 0 ]; then
@@ -102,4 +105,4 @@ else
     python3 "$HERE/inventory.py" scan
 fi
 rm -rf "$HERE/__pycache__"
-log "capture done. NEXT: git add scripts/rebuild && git commit — and copy $WORKSPACE/stac_backup OFF the pod"
+log "capture done. NEXT: git add scripts/rebuild && git commit (the backup set is in scripts/rebuild/set/: the push carries it)"

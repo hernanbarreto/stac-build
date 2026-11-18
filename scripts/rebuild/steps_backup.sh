@@ -2,13 +2,11 @@
 # STAC Build — REBUILD, the backup set: what no public source can give back, put back as it was.
 # Sourced by rebuild.sh and step.sh.
 #
-# The set (scripts/rebuild/backup.py make) is looked for at $STAC_BACKUP, default /workspace/stac_backup.
-# WITH it the rebuilt pod holds the same bytes as the old one in everything compiled on it (no
-# compilation is run), its secrets, its local git branches and stashes. WITHOUT it the rebuild still
-# completes from public sources: the compiled parts are compiled again (the same sources, other
-# bytes), and it says so in its summary.
+# The set is PART OF THE KIT: scripts/rebuild/set/, committed (backup.py make). With it the rebuilt pod holds
+# the same bytes as the old one in everything compiled on it (no compilation is run), its local git branches
+# and stashes — and, WHEN STAC_BACKUP_KEY IS GIVEN, its secrets and the users' database (private.tar.gz.gpg).
 
-BACKUP_SET="${STAC_BACKUP:-$WORKSPACE/stac_backup}"
+BACKUP_SET="${STAC_BACKUP:-$REBUILD_DIR/set}"
 
 have_backup() { [ -f "$BACKUP_SET/MANIFEST.tsv" ]; }
 
@@ -17,7 +15,7 @@ have_backup() { [ -f "$BACKUP_SET/MANIFEST.tsv" ]; }
 # again (the secrets, the local git work and the rest of the set are still restored).
 use_prebuilt() { have_backup && [ "${COMPILE:-0}" != 1 ]; }
 
-# every archive of the set against its recorded sha256 — a set damaged in its copy is refused whole
+# every file of the set against its recorded sha256 — a set damaged in its copy is refused whole
 step_backup_check() {
     local file sha size note got
     while IFS=$'\t' read -r file sha size note; do
@@ -25,33 +23,27 @@ step_backup_check() {
         [ -f "$BACKUP_SET/$file" ] || { echo "the set lacks $file"; return 1; }
         got="$(sha256sum "$BACKUP_SET/$file" | cut -d' ' -f1)"
         [ "$got" = "$sha" ] || { echo "$file: sha256 $got, the set's manifest says $sha"; return 1; }
-        echo "ok  $file"
     done < "$BACKUP_SET/MANIFEST.tsv"
+    echo "$(grep -vc '^#' "$BACKUP_SET/MANIFEST.tsv") file(s) of the set, each with its recorded sha256"
+    command -v gpg >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends gnupg; }
 }
 
-# the secrets and the personal state: .env first of all (the tokens every later step needs)
-step_restore_private() {
-    tar -xzf "$BACKUP_SET/private.tar.gz" -C "$WORKSPACE"
-    echo "$(wc -l < "$BACKUP_SET/private.files.tsv") member(s) restored (names not printed: private)"
-}
+# the secrets and the personal state — .env first of all (the tokens every later step needs), the users'
+# database, the sessions' signing key, Tailscale's identity. Encrypted: STAC_BACKUP_KEY opens it.
+step_restore_private() { python3 "$REBUILD_DIR/backup.py" restore private --set "$BACKUP_SET"; }
 
 # what was compiled, generated or copied by hand outside the envs — after the vendor trees are cloned
-step_restore_asis() {
-    tar -xzf "$BACKUP_SET/asis.tar.gz" -C "$WORKSPACE"
-    echo "$(wc -l < "$BACKUP_SET/asis.files.tsv") member(s) restored"
-}
+step_restore_asis() { python3 "$REBUILD_DIR/backup.py" restore asis --set "$BACKUP_SET"; }
 
-# inside one env: the distributions compiled on the old pod and the files no package owns — after
-# the env's pip step, INSTEAD of compiling. Only the envs that exist are touched.
+# inside one env: the distributions compiled on the old pod and the files no package owns — after the env's
+# pip step, INSTEAD of compiling. Only the env named is touched.
 restore_env_archive() {
-    local env="$1" rel
-    rel="$(realpath --relative-to="$WORKSPACE" "$CONDA_ROOT/envs/$env")"
-    if ! grep -q "^$rel/" "$BACKUP_SET/envs.files.tsv"; then echo "$env: nothing of it in the set"; return 0; fi
-    tar -xzf "$BACKUP_SET/envs.tar.gz" -C "$WORKSPACE" --wildcards "$rel/*"
-    echo "$env: $(grep -c "^$rel/" "$BACKUP_SET/envs.files.tsv") member(s) restored from the set (nothing compiled)"
+    local rel
+    rel="$(realpath --relative-to="$WORKSPACE" "$CONDA_ROOT/envs/$1")"
+    python3 "$REBUILD_DIR/backup.py" restore envs --set "$BACKUP_SET" --prefix "$rel/"
 }
 
-# every local branch, stash and worktree of every repository
+# every local branch, stash, remote and worktree of every repository
 step_restore_git() { python3 "$REBUILD_DIR/backup.py" restore-git --set "$BACKUP_SET"; }
 
 # the files on the volume against the set's lists, member by member

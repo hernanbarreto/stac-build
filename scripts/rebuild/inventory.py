@@ -58,7 +58,7 @@ RULES = [
     ("cache",    f"{R}/server/.cache/",                     "derived images of the sessions (floor seal, segment views)"),
     ("cache",    f"{R}/server/commands/commands.db",        "the commands database: derived from catalog/*.yaml at start"),
     ("cache",    ".stac_rebuild/",                          "the rebuild's own stamps, logs and downloads"),
-    ("cache",    "stac_backup/",                            "the backup set itself (backup.py writes it)"),
+    ("cache",    f"{R}/scripts/rebuild/set/",               "the backup set itself (backup.py writes it; committed)"),
     # the conda installation: audited per env by audit_env_files.py + the locks
     ("env",      "miniforge3/",                             "Miniforge's pinned installer + locks/<env>.* + the env archive"),
     ("env",      "usdtools/",                               "locks/usdtools.* (a venv of the system's python 3.11)"),
@@ -69,6 +69,7 @@ RULES = [
     ("private",  f"{R}/server/.jwt_secret",                 "the sessions' signing key"),
     ("private",  f"{R}/server/data/",                       "the users' database, personnel, teams"),
     ("private",  f"{R}/.claude/",                           "the assistant's local settings for this repo"),
+    ("private",  f"{R}/ui/cloud.bin",                       "a point cloud left in ui/ (a session's data: not published)"),
     ("private",  "tailscale/state/",                        "the Tailscale node's identity"),
     ("private",  "hf_cache/token",                          "the Hugging Face token the hub client stored"),
     ("private",  "hf_cache/stored_tokens",                  "the Hugging Face token the hub client stored"),

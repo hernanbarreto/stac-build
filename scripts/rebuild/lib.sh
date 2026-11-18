@@ -18,28 +18,17 @@ CACHE="${STAC_REBUILD_CACHE:-$WORKSPACE/.stac_rebuild/cache}"
 STATE="${STAC_REBUILD_STATE:-$WORKSPACE/.stac_rebuild}"        # stamps + logs: on the volume, they survive a restart
 LOGS="$STATE/logs"
 
-# every env of the pod, in the order they are built (the first six are the product's)
+# every env of the pod, in the order they are built. NONE IS OPTIONAL (USER 2026-11-18: "Nada es opcional todo
+# debe quedar como está. De hecho colmap se usa"): a failure of any of them is a failure of the rebuild.
 STAC_ENVS=(da3 mapanything semantic voice amb3r genrecon CloudComPy310 nodejs colmap gs)
-# envs whose failure does not stop a rebuild (not used by the pipeline nor the app)
-STAC_OPTIONAL_ENVS=(colmap gs)
 # ENVS="da3 voice" rebuild.sh — only these envs (everything else of the run stays)
 if [ -n "${ENVS:-}" ]; then read -ra STAC_ENVS <<<"$ENVS"; fi
 
 export STAC_REBUILD_CACHE="$CACHE" STAC_ROOT REBUILD_DIR WORKSPACE CONDA_ROOT
-# the backup set (backup.py): its mirror/ holds, by sha256, the weights whose source may refuse (DINOv3)
-if [ -z "${STAC_MIRROR:-}" ] && [ -d "${STAC_BACKUP:-$WORKSPACE/stac_backup}/mirror" ]; then
-    export STAC_MIRROR="${STAC_BACKUP:-$WORKSPACE/stac_backup}/mirror"
-fi
-export HF_HOME PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 PYTHONUNBUFFERED=1
-# the pod grants ~26 CPUs and shows the host's 252: an unbounded build or BLAS job is throttled to a crawl
-export MAX_JOBS="${MAX_JOBS:-16}" MAKEFLAGS="${MAKEFLAGS:--j16}" OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
-export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0}"     # the A100 (sm_80)
 
 log()  { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 warn() { printf '[%s] WARNING: %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 die()  { printf '[%s] FAILED: %s\n' "$(date +%H:%M:%S)" "$*" >&2; exit 1; }
-
-is_optional_env() { local e; for e in "${STAC_OPTIONAL_ENVS[@]}"; do [ "$e" = "$1" ] && return 0; done; return 1; }
 
 # done <step> — was the step completed by an earlier run?   mark <step> — it is now.
 step_done() { [ -f "$STATE/done/$1" ]; }

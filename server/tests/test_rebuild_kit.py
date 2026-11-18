@@ -93,7 +93,7 @@ def test_vendor_pins_and_bundles():
     assert len(rows) >= 8
     for name, _url, base, branch, final, patch, _rec in rows:
         if branch != "-":
-            assert (KIT / "bundles" / f"{name}.bundle").exists(), f"{name}: its own commits are in no bundle"
+            assert (KIT / "set" / "git" / f"stac-build__vendor__{name}.bundle").exists(), f"{name}: its own commits are in no bundle"
         else:
             assert base == final, f"{name}: no bundle and two commits"
         if patch != "-":

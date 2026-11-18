@@ -18,8 +18,8 @@ download and compilation. This is what tells one from the other, part by part:
   git        what is not committed and not pushed in the repo itself — a kit that is not on the
              remote does not exist for a new volume
 
-When it reports a difference: `bash scripts/rebuild/capture.sh`, commit scripts/rebuild/, copy the
-backup set off the pod (and push, on the user's word).
+When it reports a difference: `bash scripts/rebuild/capture.sh`, commit scripts/rebuild/ (the backup
+set is in it) and push.
 """
 from __future__ import annotations
 
@@ -217,8 +217,8 @@ def main() -> int:
         print(f"   {n}")
     rc |= bool(notes)
     print("\nTHE KIT IS THE POD." if not rc else
-          "\nTHE KIT IS NOT THE POD: bash scripts/rebuild/capture.sh, commit scripts/rebuild/, copy the backup set off "
-          "the pod (and push, on the user's word).")
+          "\nTHE KIT IS NOT THE POD: bash scripts/rebuild/capture.sh, then commit scripts/rebuild/ (the set is in it) "
+          "and push.")
     return rc
 
 
