@@ -58,7 +58,7 @@ MAP_VERSION = 2
 # and `fused_or_unmatched` carry `into: None` — they are not part of anything
 # and their masks stay in the parent, where the user can still re-propagate
 # them.
-FUSING = ("fragment", "space_dedupe", "overlap_dedupe")
+FUSING = ("fragment", "space_dedupe", "overlap_dedupe", "same_surface")
 
 _MASK_KEY_RE = re.compile(r"^f(\d+)_o(\d+)$")
 

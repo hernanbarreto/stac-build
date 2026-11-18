@@ -5245,6 +5245,23 @@ def _match_masks_to_cloud(output_dir, ply_path=None, cfg: Optional[dict] = None,
                                   support_only=_support_only)
     decisions["space_dedupe"] = dedupe_decisions
 
+    # ── ONE OWNER PER SURFACE (USER 2026-11-18, segmentation/interleave.py) ──────────
+    # Two objects whose points are interleaved millimetres apart are the same surface seen in
+    # different keyframes under two names or two ids: they are ONE object. (Not the 5 cm
+    # same-space merge his 2026-11-11 rule restricts to the floor: this test cannot join
+    # distant objects.)
+    from segmentation import interleave as _interleave
+    _il = _interleave.config(cfg)
+    if _il["enabled"] and len(instances) > 1:
+        _before = {int(i.get("instance_id", i.get("id"))): len(i["globalIndices"]) for i in instances}
+        decisions["same_surface"] = _interleave.merge_instances(
+            instances, xyz_display, n_pts, share=_il["share"], neighbours=_il["neighbours"], record=absorbed_into)
+        for inst in instances:                      # a survivor's box is of all its points now
+            if len(inst["globalIndices"]) != _before[int(inst.get("instance_id", inst.get("id")))]:
+                inst["obb"] = _compute_obb(xyz_display[np.asarray(inst["globalIndices"], dtype=np.int64)], cfg=cfg)
+    else:
+        decisions["same_surface"] = {"applied": False, "enabled": _il["enabled"]}
+
     # ── Same-label fragment consolidation ──────────────────────────────
     # SAM3 returns one mask per visually separable region, so one physical
     # surface arrives as many instances of ONE label (pccr 2026-09-14: 48

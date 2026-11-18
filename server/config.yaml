@@ -402,6 +402,18 @@ segmentation:
                               # piso eso sí, pero nada más, porque a veces une dos objetos que están muy
                               # alejados"): the duplicate merges (the index overlap and the space dedupe)
                               # take place only when the survivor is a SUPPORT surface
+  interleave_merge:           # ONE OWNER PER SURFACE (USER 2026-11-18: "hay que arreglarlo de raíz" — segmentation/
+                              # interleave.py). Each point takes the mask of its own keyframe, so a surface two
+                              # keyframes see under two names or two ids is shared by two objects POINT BY POINT
+                              # (pccr 3108: of a point's 8 nearest neighbours, 39 % were another object's).
+    enabled: false            # ⚠ OFF until the rule is settled with him. Asked "do I change your rule of 11-11
+                              # to allow this merge?": "1. Si" — but the dry run on pccr 3108 showed the EITHER
+                              # test at 0.10 lets the big surfaces SWALLOW real objects (212 tiles → the floor,
+                              # servers → the glass enclosure): containment, not identity. Being reworked.
+    share: 0.10               # a pair is one object when EITHER has at least this share of its points' nearest
+                              # neighbours in the other. The value recommended to him: pccr 3108 1213 → 280
+                              # objects, 39.3 % → 5.1 % (0.20: 583 objects, 16.2 %). It cannot join distant objects
+    neighbours: 8             # the nearest neighbours looked at (the assistant's: within ~7 mm on pccr 3108)
                               # (autoprompt.support_surfaces: the floor and its kin); every other object
                               # stays as SAM3 gave it — the same object named twice by the VLM stays twice.
                               # The fragment consolidation was already support-only (USER 2026-10-15).

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
 
-REASONS = ("space_dedupe", "overlap_dedupe", "fragment", "too_small",
+REASONS = ("space_dedupe", "overlap_dedupe", "same_surface", "fragment", "too_small",
            "unmatched", "fused_or_unmatched")
 
 
