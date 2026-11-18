@@ -612,6 +612,11 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
       against its own IFC: 171 s; mean 22.2 mm, 94.7 % within 50 mm). No result left in pccr: he runs it;
     · TICKETS (the window, the click that places one, the pins, 7 voice commands);
     · COMMON POINTS (the same point marked on two scans → the factor, turn and shift between them, REPORTED).
+  THE SUITE at the end of that night (the card hidden, 43 min): 2,444 pass, 52 skip, 1 xfail, and THE SAME 13
+  FAIL as on 2026-11-12 (item 11: chunked_metric × 3, intake_focal × 2, intake_run × 3, omega_complete,
+  p5_orchestration, potree_preview, precision_runner × 2). test_die_with_parent failed once in that run — the
+  backend was being restarted under it — and passes alone. A 14th, of the calibration's rescale (a cube root
+  written as a power with a literal), was fixed (942d69d).
   WHAT IS HIS NOW, in the order it unblocks work: (1) mark 2–3 common points on pccr 2408 and 3108, read the
   factor, and DECIDE WHERE IT IS APPLIED (B-5) — the fusion's compare follows from it; (2) look at the BIM
   comparison of pccr 3108 and say what is compared and how ("luego vemos"); (3) his eye on the tickets;
