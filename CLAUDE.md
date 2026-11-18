@@ -505,8 +505,12 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   22.8 mm, 90.6 % within tolerance: GenRecon's mesh is a shell around the cloud's sheet — §7 item 9), 94.7 %
   of the points within the 50 mm tolerance, every element's coverage ≥ 97.5 %; by March's thresholds 250 good /
   20 regular / 10 bad elements, global advance 96.1 %; the worst are small objects whose piece of mesh lies
-  elsewhere (light#701 1.3 m, equipment_rack#432 0.97 m). THE RESULT IS IN pccr's bim_comparison/ (1.2 GB) FOR
-  HIS EYE — open the 3108 scan, BIM, the sheet's toggle; deleting that folder's content removes it.
+  elsewhere (light#701 1.3 m, equipment_rack#432 0.97 m). THE RESULT WAS REMOVED FROM pccr AGAIN (the
+  assistant's own correction, the same morning): the interface LOADS THE SHEET BY ITSELF when a session that
+  has one opens (March's behaviour) — left there, opening pccr, whose active scan is 2408, would have shown
+  3108's sheet in place of the cloud. pccr's bim_comparison/ is empty as he left it; TO SEE IT: open the 3108
+  scan → BIM → compare (≈ 3 min). And the sheet now says whose it is: `/sabana/exists` names its scan and the
+  interface neither loads it over another scan of the project nor offers it there.
   THE DISTANCES ON THE CARD (the same day — his rule: "todo debe ser GPU"): `bim/c2m_torch.py`, float64, the
   numpy path KEPT as the record, selected by `bim.deviation.device: cuda` (numpy | cpu | cuda; the child
   process holds the card while it runs: no pipeline job starts meanwhile, and none may be running or queued
@@ -522,8 +526,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   (it doubled the run under the backend — read once a process now). The floor is the cost: 4.67 M points that
   lie 2–5 cm off a shell, ~80 triangles tried per point.
   NOT ADAPTED, declared: the coverage engine (the ray casting towards the cameras; OFF by config since before —
-  a tree of the whole cloud per element); ONE SHEET PER PROJECT (the last compared scan's, shown over
-  whichever scan is open — sabana_meta.json now names its scan). NOT TRIED IN A BROWSER.
+  a tree of the whole cloud per element); ONE SHEET PER PROJECT (the last compared scan's: comparing another
+  scan replaces it). NOT TRIED IN A BROWSER.
 - ⭐ COMMON POINTS — THE FIRST STEP OF COMPARING TWO SCANS (2026-11-18; his words of 2026-11-17: "para comparar
   dos o más épocas hay que emparejar sus escalas … deberían marcarse dos puntos y decir estos son los mismos en
   ambas … y que se ajusten a uno de ellos, o a una medida externa … para que se puedan posar uno sobre otro y
@@ -628,8 +632,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
      Re-check both with him on the mesh IFC. Once point 1 is settled the IFC is cut again (its ragged borders
      are point 1's). The IFC needs a scan whose orientation is baked (all five are).
   3 · THE BIM COMPARISON of pccr 3108 against its own IFC: RUNS (2026-11-18, §5 "THE BIM COMPARISON ON A SCAN
-     OF TODAY") — adapted to scans and to the IFC's key (the instance id), exact, in its own process; the
-     result is in pccr's bim_comparison/ for his eye. Then "luego vemos que se compara y como" (his).
+     OF TODAY") — adapted to scans and to the IFC's key (the instance id), exact, on the card, in its own
+     process. Nothing was left in pccr: open the 3108 scan → BIM → compare (≈ 3 min) to see it. Then "luego
+     vemos que se compara y como" (his).
   4 · FUSION: merge + compare pccr 3108 with 2408; the scales paired by MARKED COMMON POINTS (his: "deberian
      marcarse dos puntos y decir estos son los mismos en ambas … que se ajusten a uno de ellos, o a una medida
      externa"): with levelled scans two points fix scale, yaw and position; three or more give a residual.
@@ -736,7 +741,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     45. COMMON POINTS (§5) — BUILT 2026-11-18, reported only; HIS: mark points on pccr 2408 / 3108, read the
         factor, decide where it is applied (item 5); his eye on the window and its pins.
     44. TICKETS (§5) — BUILT 2026-11-18; HIS EYE: the window, placing one with a click, the pins, the commands.
-    43. THE BIM COMPARISON (§5), what is owed after 2026-11-18: his eye on pccr 3108's sheet; the candidates'
+    43. THE BIM COMPARISON (§5), what is owed after 2026-11-18: his eye on pccr 3108's sheet (he runs it:
+        the 3108 scan → BIM → compare; the assistant left no result in the session); the candidates'
         search on the card too (scipy's tree on the CPU is now most of the 95 s); the coverage engine at
         today's sizes; one sheet per SCAN instead of one per project.
     42. THE SESSIONS AS ZIPS (§5) — DONE 2026-11-18, his order of that night; HIS EYE: the Download action and

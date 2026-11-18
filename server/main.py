@@ -6116,7 +6116,9 @@ async def sabana_exists(session_id: str):
         import json as _json
         meta = _json.loads(meta_path.read_text())
     
-    return {"exists": True, "meta": meta}
+    # THE SHEET IS ONE SCAN'S (the project keeps one: the last compared scan's). ``scan`` names it so
+    # that the interface neither loads it over another scan of the project nor offers it there.
+    return {"exists": True, "meta": meta, "scan": (meta or {}).get("scan")}
 
 
 @app.get("/api/sessions/{session_id}/sabana/meta")

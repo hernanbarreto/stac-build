@@ -450,6 +450,9 @@ function App() {
   const [sabanaLoading, setSabanaLoading] = useState(false)
   const [sabanaMetrics, setSabanaMetrics] = useState<any>(null)
   const [sabanaFullMeta, setSabanaFullMeta] = useState<any>(null)
+  // the scan the comparison sheet on disk was computed on (the project keeps ONE sheet): it is neither
+  // loaded nor offered over another scan of the project
+  const [sabanaScan, setSabanaScan] = useState<string | null>(null)
 
   // ── Camera Poses state ──
   const [showCameraPoses, setShowCameraPoses] = useState(true)
@@ -988,7 +991,9 @@ function App() {
     fetch(`/api/sessions/${activeSession}/sabana/exists`)
       .then(r => r.json())
       .then(d => {
-        if (d.exists) {
+        setSabanaScan(d.exists ? d.scan ?? null : null)
+        // (a sheet of ANOTHER scan of the project is not shown over this one)
+        if (d.exists && (!d.scan || !activeScanTab || d.scan === activeScanTab)) {
           setSabanaVisible(true)
           setSabanaLoading(true)
           setSessionLoading(tt('deviation.loadingComparison'))
@@ -1504,6 +1509,7 @@ function App() {
       if (activeTool === 'align') setActiveTool('navigate')
       setSabanaVisible(true)
       setSessions(prev => prev.map(s => s.id === activeSession ? { ...s, hasSabana: true } : s))
+      setSabanaScan(activeScanTab ?? null)
       try {
         const metaRes = await fetch(`/api/sessions/${activeSession}/sabana/meta`)
         if (metaRes.ok) {
@@ -2345,6 +2351,7 @@ function App() {
     downloadSessionZip, pickSessionZip,
     tickets, ticketCounts, startTicket, setTicketStatus, deleteTicket, focusTicket, signedIn: !!user,
     commonPoints, commonFit, startCommonMark, otherScans,
+    sabanaIsThisScan: !sabanaScan || !activeScanTab || sabanaScan === activeScanTab,
     handlePipelineCancel, pipelineRunning, eraseBoxSel, readouts,
     bimModels, sabanaVisible, sabanaLoading, handleGenerateComparison, runComparison, handleToggleSabana,
     deleteSession, deleteSegment, deleteTsdfMesh, runGenrecon, applyFloorLevel,
@@ -2361,6 +2368,7 @@ function App() {
     downloadSessionZip, pickSessionZip,
     tickets, ticketCounts, startTicket, setTicketStatus, deleteTicket, focusTicket, signedIn: !!user,
     commonPoints, commonFit, startCommonMark, otherScans,
+    sabanaIsThisScan: !sabanaScan || !activeScanTab || sabanaScan === activeScanTab,
     handlePipelineCancel, pipelineRunning, eraseBoxSel, readouts,
     bimModels, sabanaVisible, sabanaLoading, handleGenerateComparison, runComparison, handleToggleSabana,
     deleteSession, deleteSegment, deleteTsdfMesh, runGenrecon, applyFloorLevel,
@@ -2923,7 +2931,7 @@ function App() {
       'deviation.toggle_view': ({ on }) => {
         const sid = open()
         if (!sid) return noSession
-        if (!cmd.current.sessions.find(x => x.id === sid)?.hasSabana) return { ok: false, reason: 'nothing_to_do' }
+        if (!cmd.current.sessions.find(x => x.id === sid)?.hasSabana || !cmd.current.sabanaIsThisScan) return { ok: false, reason: 'nothing_to_do' }
         if (on !== cmd.current.sabanaVisible) cmd.current.handleToggleSabana()
         return { ok: true, state: on }
       },
@@ -3282,6 +3290,7 @@ function App() {
   // the selected segment lights its OBB and shows H / W / D in the viewport (USER 2026-10-04)
   useEffect(() => { viewportRef.current?.setSelectedSegment(selectedSegment?.key ?? null) }, [selectedSegment?.key])
   const hasSabanaResult = !!sessions.find(s => s.id === activeSession)?.hasSabana
+    && (!sabanaScan || !activeScanTab || sabanaScan === activeScanTab)
 
   // (a hook: before the early returns below — React counts hooks per render)
   // the Instances list's callbacks, stable (the list is memoized — see InstancesPanel)
