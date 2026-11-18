@@ -352,8 +352,24 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   segmentados de la nube de puntos no desaparecen los puntos" (NOT verified in a browser). The level kept and
   the cut's neighbourhood are HIS to choose (THE CANDIDATE shown to him 2026-11-18, `config.yaml export.ifc`: keep
   0.1, triangles over 2 voxels split before the cut — a floor of 1.85 m triangles under 57 cm tiles —, majority of
-  128 neighbours: `projects/pccr/ifcs/pccr_2026-08-31_default_from_mesh.ifc`, 45.6 MB, 1109 elements, 1.41 M
-  triangles, p95 0.52 mm, 5 min; 104 small objects with no triangle; THE EXPORTER'S IFC IS THIS ONE NOW, + ~5 min); the root (one owner per surface in the projection) is the pending
+  128 neighbours — 45.6 MB, 1109 elements, 104 small objects with no triangle).
+  ⭐ HIS VALUES (USER 2026-11-18): "Debe ser entera, partir las caras grandes, mayoría de sus 128 puntos, pero deben
+  aparecer todos los elementos, hay que arreglarlo de raíz además" → `export.ifc`: keep 1.0, max_edge_voxels 2,
+  neighbours 128; an object the majority leaves with no triangle takes the triangles ITS OWN POINTS lie on. THE
+  WHOLE IFC of pccr 3108: 433 MB, 1214 elements (the 1213 objects + "unsegmented"), 13.28 M triangles, 3.5 min —
+  the exporter's IFC, and `projects/pccr/exports/pccr_2026-08-31_elements_whole.ifc`. web-ifc (the viewer's
+  engine, in node) opens it in 7 + 13 s using 4.7 GB (the 10 % one: 2 s, 0.6 GB): IN THE PROJECT'S ifcs/ — which
+  the viewer loads at every session open — the 10 % one was left (46 MB, 1209 elements), the whole one there is
+  HIS call. "tambien estas aprobado para el simplificador, lo que necesitas" (not installed: nothing to simplify).
+  ⭐ THE ROOT, measured read-only on pccr 3108 (2026-11-18), HIS DECISION PENDING: the interleaving is his own
+  rule's consequence — "no quiero hacer una pasada para fusionar objetos, solo el piso" (2026-11-11,
+  `segmentation.merge_support_only`), given because the 5 cm same-space merge "a veces une dos objetos que están
+  muy alejados": two objects that are the same surface seen in different keyframes stay two and share it point by
+  point. (a) A VOTE of each point's nearest points: 39 % → 10 % (8 neighbours, 3 passes) / 5 % (32), but 217 /
+  278 of the 1213 objects fall under the 1000-point minimum — the duplicates die; his eye: still speckled.
+  (b) MERGING THE OBJECTS THAT ARE INTERLEAVED POINT BY POINT (a pair merges when one has ≥ X of its points'
+  8 nearest neighbours in the other — it cannot join distant objects): X 20 % → 583 objects, 16 % left; X 10 % →
+  280 objects, 5 % left; the tiles stay separate tiles, a rack becomes one object (image sent to him). the root (one owner per surface in the projection) is the pending
   "smarter segmentation". `fast-simplification` was NOT installed (the permission system refused: only pye57 was
   approved by him).
 - AN IFC FROM A SCAN (USER 2026-11-17: "create un IFC vos a partir de PCCR3108, para comparar contra ese mismo,
