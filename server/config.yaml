@@ -1358,6 +1358,11 @@ bim:
 
   deviation:
     tolerance_mm: 50                   # main C2M deviation threshold
+    # Where the exact cloud-to-mesh distances are computed: numpy (the path of record) | cpu | cuda
+    # (bim/c2m_torch.py — the same distances, tests/test_bim_scan_comparison.py). The comparison is a
+    # child process of the backend (bim/compare_job.py): on cuda it holds the card while it runs, and
+    # no pipeline job starts meanwhile. cuda with no card fails naming this key.
+    device: cuda
     method: "point_to_surface"         # "point_to_surface" | "point_to_point"
     # Display heatmap thresholds (mm)
     warning_threshold: 10.0

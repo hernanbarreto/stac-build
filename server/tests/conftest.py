@@ -29,4 +29,6 @@ def _hole_audit_evidence_on_cpu():
     gauge.use_device("cpu")              # F2's window gains, on the CPU
     from phase5_qa import tools as chat_tools
     chat_tools.use_device("cpu")         # the chat's measurements: the torch path, on the CPU
+    from bim import comparison as bim_comparison
+    bim_comparison.use_device("cpu")     # the BIM comparison's distances: the torch path, on the CPU
     yield

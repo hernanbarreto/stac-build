@@ -1,6 +1,6 @@
 """THE BIM COMPARISON IN ITS OWN PROCESS.
 
-    python -m bim.compare_job --session-dir DIR --matches FILE [--tolerance-mm 50] [--manual]
+    python -m bim.compare_job --session-dir DIR --matches FILE [--tolerance-mm 50] [--manual] [--device cuda]
 
 A scan of today is compared in minutes, not in the seconds of March's (pccr 2026-08-31: 18.8 M
 points against 281 elements): run inside the server it held one of its threads and its HTTP answer
@@ -13,7 +13,9 @@ proxy. The server launches this, answers at once and is asked for the state (mai
                         (and the sheet's octree built, so that the viewer shows it at once)
     ERROR <why>         … and a non-zero exit
 
-CPU only (the caller hides the card): the distances are numpy's, in threads.
+The distances are computed where config.yaml ``bim.deviation.device`` says (numpy | cpu | cuda — the
+same distances on each, bim/c2m_torch.py). On cuda this process holds the card while it runs: the
+server starts no pipeline job meanwhile, and launches no comparison while one runs or waits.
 """
 from __future__ import annotations
 
@@ -31,13 +33,18 @@ def main(argv=None) -> int:
     ap.add_argument("--matches", required=True, help="a JSON file: the matches (bim.scan_data.Scan.match)")
     ap.add_argument("--tolerance-mm", type=float, default=50.0)
     ap.add_argument("--manual", action="store_true", help="the scan's own alignment (its floor transform), no registration")
+    ap.add_argument("--device", default=None, help="numpy | cpu | cuda — where the distances are computed "
+                                                   "(default: config.yaml bim.deviation.device)")
     args = ap.parse_args(argv)
 
     def progress(pct, detail: str = "") -> None:
         print(f"PROGRESS {int(pct)} {detail}", flush=True)
 
     try:
-        from bim.comparison import run_comparison
+        from bim.comparison import device_of, run_comparison, use_device
+        if args.device is not None:
+            use_device(args.device)
+        print(f"[BIM-Compare] the distances on: {device_of()}", flush=True)       # (cuda with no card fails here, naming the key)
         matches = json.loads(Path(args.matches).read_text())
         if not isinstance(matches, list) or not matches:
             raise ValueError("no matches: nothing of the scan is paired with an element of the IFC")

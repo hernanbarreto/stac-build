@@ -5968,6 +5968,15 @@ async def bim_auto_match(session_id: str, scan: Optional[str] = None):
 _bim_compare_runs: Dict[str, Dict[str, Any]] = {}
 
 
+def _bim_compare_on_card() -> Optional[str]:
+    """Why no pipeline job can start now: a BIM comparison is computing its distances on the card
+    (its own process — a minute or two); a stage asks for the card alone."""
+    for key, run in _bim_compare_runs.items():
+        if run.get("status") == "running" and run.get("device") == "cuda":
+            return f"a BIM comparison of {key.split('|')[0]} is using the card: launch when it ends (a minute or two)"
+    return None
+
+
 @app.post("/api/bim/compare")
 async def bim_compare(request: Request):
     """
@@ -5978,7 +5987,10 @@ async def bim_compare(request: Request):
     (bim/compare_job.py): a scan of today is compared in minutes (pccr 2026-08-31: 18.8 M points,
     281 elements), an HTTP answer that takes over 100 s never arrives through the pod's proxy, and
     the server keeps its threads. Ask GET /api/bim/compare/{session_id}/status for the state; when
-    it is "done" the sheet and sabana_meta.json are on disk.
+    it is "done" the sheet and sabana_meta.json are on disk. The distances are computed where
+    config.yaml bim.deviation.device says; on cuda that process holds the card while it runs, and
+    no pipeline job starts meanwhile (_bim_compare_on_card) — as none of the session may be running
+    or queued when a comparison is launched.
     """
     import tempfile
     from task_manager import task_manager
@@ -5990,6 +6002,8 @@ async def bim_compare(request: Request):
     # Tolerance from config.yaml bim.deviation.tolerance_mm (mm)
     bim_cfg = cfg.get("bim", {}).get("deviation", {})
     tolerance_mm = float(bim_cfg.get("tolerance_mm", 50.0))
+    # where the distances are computed (numpy | cpu | cuda): the child validates it and fails naming the key
+    device = str(bim_cfg.get("device", ""))
 
     if not session_id or not isinstance(matches, list) or not matches:
         raise HTTPException(400, "session_id and matches required")
@@ -6002,6 +6016,11 @@ async def bim_compare(request: Request):
     why = _export_busy(session_id)                    # (a pipeline job rewrites the files the comparison reads)
     if why:
         raise HTTPException(409, why.replace("the scan is exported when it ends", "compare it when it ends"))
+    if device == "cuda":                              # … and ANY job's stages ask for the card alone
+        for j in pipeline_manager.get_all_jobs().values():
+            if j.get("status") in ("running", "queued"):
+                raise HTTPException(409, f"a pipeline job of {j.get('session_id')} is {j.get('status')}: the comparison "
+                                         f"computes on the card and a stage asks for it alone — compare when it ends")
 
     with tempfile.NamedTemporaryFile("w", suffix=".json", prefix="stac_bim_matches_", delete=False) as f:
         json.dump(matches, f)
@@ -6010,9 +6029,10 @@ async def bim_compare(request: Request):
             "--tolerance-mm", repr(tolerance_mm)] + (["--manual"] if skip_registration else [])
     env = dict(os.environ)
     env.setdefault("OMP_NUM_THREADS", "8")            # the pod grants ~26 CPUs and shows 252
-    env["CUDA_VISIBLE_DEVICES"] = ""                  # the comparison is numpy's: it never touches the card
+    if device != "cuda":
+        env["CUDA_VISIBLE_DEVICES"] = ""              # declared off the card: it cannot touch it
     state: Dict[str, Any] = {"status": "running", "progress": 0, "message": "starting", "started_at": time.time(),
-                             "matches": len(matches), "tolerance_mm": tolerance_mm}
+                             "matches": len(matches), "tolerance_mm": tolerance_mm, "device": device}
     _bim_compare_runs[key] = state
     tid = task_manager.start(session_id, "bim_compare", "BIM vs Scan Comparison")
 
@@ -6494,7 +6514,7 @@ async def _run_pipeline_command(cmd: dict, websocket=None) -> dict:
     # Pipeline-based reconstruction (subprocess workers)
     session_id = cmd.get("session_id")
     # a session that is being downloaded as a ZIP is read file by file: nothing rewrites it meanwhile
-    _why_reading = session_archive_api.reading(session_id) if session_id else None
+    _why_reading = (session_archive_api.reading(session_id) if session_id else None) or _bim_compare_on_card()
     if _why_reading:
         print(f"[Pipeline] ✋ run_pipeline REJECTED for {session_id}: {_why_reading}")
         await viewer_manager.send_text(websocket, json.dumps({

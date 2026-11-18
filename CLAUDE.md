@@ -505,9 +505,22 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   22.8 mm, 90.6 % within tolerance: GenRecon's mesh is a shell around the cloud's sheet — §7 item 9), 94.7 %
   of the points within the 50 mm tolerance, every element's coverage ≥ 97.5 %; by March's thresholds 250 good /
   20 regular / 10 bad elements, global advance 96.1 %; the worst are small objects whose piece of mesh lies
-  elsewhere (light#701 1.3 m, equipment_rack#432 0.97 m). 564 s IN ALL (the distances 8.5 min of numpy + scipy
-  in 8 threads on the CPU; the octree 45 s). THE RESULT IS IN pccr's bim_comparison/ (1.2 GB) FOR HIS EYE —
-  open the 3108 scan, BIM, the sheet's toggle; deleting that folder's content removes it.
+  elsewhere (light#701 1.3 m, equipment_rack#432 0.97 m). THE RESULT IS IN pccr's bim_comparison/ (1.2 GB) FOR
+  HIS EYE — open the 3108 scan, BIM, the sheet's toggle; deleting that folder's content removes it.
+  THE DISTANCES ON THE CARD (the same day — his rule: "todo debe ser GPU"): `bim/c2m_torch.py`, float64, the
+  numpy path KEPT as the record, selected by `bim.deviation.device: cuda` (numpy | cpu | cuda; the child
+  process holds the card while it runs: no pipeline job starts meanwhile, and none may be running or queued
+  when a comparison is launched). The candidates' search stays scipy's tree on the CPU (in threads); the exact
+  distance to each candidate and the proof's bookkeeping are the device's. THE SAME BITS on the three paths:
+  the sheet's file has ONE sha256 from numpy, from the card and from every launch, and sabana_meta.json is
+  equal but its date (found for it: torch's float64 sqrt on the CPU is NOT correctly rounded — one unit in
+  the last place off for 1.4 % of values, numpy's and the card's for none; the record's sums are written term
+  by term so that both do the same operations). TIME, pccr 3108 through the live backend: 171 s in all on the
+  card (the distances 95 s, the coverage 8 s, the sheet's octree 40 s) against 564 s of the first version;
+  numpy now 271 s (its candidates measured in blocks of columns, 8 threads). What made it slow, in order:
+  one triangle column at a time (thousands of tiny steps), then THE CONFIGURATION PARSED AT EVERY ELEMENT
+  (it doubled the run under the backend — read once a process now). The floor is the cost: 4.67 M points that
+  lie 2–5 cm off a shell, ~80 triangles tried per point.
   NOT ADAPTED, declared: the coverage engine (the ray casting towards the cameras; OFF by config since before —
   a tree of the whole cloud per element); ONE SHEET PER PROJECT (the last compared scan's, shown over
   whichever scan is open — sabana_meta.json now names its scan). NOT TRIED IN A BROWSER.
@@ -678,9 +691,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
         d. `runs/` (5.5 GB), the logs and /workspace/tmp (6.3 GB) are not carried by the kit;
         e. whether the older setup scripts (scripts/setup_vendors.sh, setup_pod_envs.sh, setup_weights.sh,
            export_envs.sh, scripts/setup.sh, docs/migration/) are deleted — they name removed envs and old pins.
-    43. THE BIM COMPARISON (§5), what is owed after 2026-11-18: his eye on pccr 3108's sheet; a DEVICE TWIN of
-        the distance (numpy + scipy on the CPU today: 8.5 min on pccr 3108 — his rule is the card); the
-        coverage engine at today's sizes; one sheet per SCAN instead of one per project.
+    43. THE BIM COMPARISON (§5), what is owed after 2026-11-18: his eye on pccr 3108's sheet; the candidates'
+        search on the card too (scipy's tree on the CPU is now most of the 95 s); the coverage engine at
+        today's sizes; one sheet per SCAN instead of one per project.
     42. THE SESSIONS AS ZIPS (§5) — DONE 2026-11-18, his order of that night; HIS EYE: the Download action and
         "New session → Upload a ZIP" in the browser, and a real session downloaded through the pod's proxy.
     41. The repo hernanbarreto/stac-build is PUBLIC on GitHub (the VGGT-Long fork too), `scripts/key.pem` — the

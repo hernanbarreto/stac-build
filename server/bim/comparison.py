@@ -327,12 +327,58 @@ def _point_to_triangle_distance_batch(
     return np.linalg.norm(points - closest, axis=1)
 
 
+# WHERE THE DISTANCES ARE COMPUTED (bim.deviation.device): numpy — the path of record — | cpu | cuda
+# (bim/c2m_torch.py, the same distances: tests/test_bim_scan_comparison.py).
+_DEVICE_OVERRIDE: Optional[str] = None
+
+
+def use_device(dev: Optional[str]) -> Optional[str]:
+    """The device of every C2M distance after this call ('cpu' in the tests — the torch path on the
+    CPU, the same code as the card); None = the configuration's (``bim.deviation.device``)."""
+    global _DEVICE_OVERRIDE
+    _DEVICE_OVERRIDE = None if dev is None else str(dev)
+    return _DEVICE_OVERRIDE
+
+
+_CONFIGURED_DEVICE: Optional[str] = None
+
+
+def device_of() -> str:
+    """:func:`use_device`'s, else config.yaml ``bim.deviation.device`` — a missing key FAILS naming it.
+    The file is read ONCE a process: the distance of each of a scan's hundreds of elements asks
+    this, and parsing the whole configuration each time doubled pccr's comparison (measured)."""
+    global _CONFIGURED_DEVICE
+    from bim.c2m_torch import resolve_device
+    if _DEVICE_OVERRIDE is not None:
+        return resolve_device(_DEVICE_OVERRIDE)
+    if _CONFIGURED_DEVICE is None:
+        import yaml
+        with open(os.path.join(os.path.dirname(__file__), "..", "config.yaml")) as f:
+            cfg = yaml.safe_load(f)
+        try:
+            _CONFIGURED_DEVICE = resolve_device(cfg["bim"]["deviation"]["device"])
+        except (KeyError, TypeError):
+            raise KeyError("config.yaml: bim.deviation.device is missing (numpy | cpu | cuda)") from None
+    return _CONFIGURED_DEVICE
+
+
 C2M_CHUNK = 200_000          # points per pass, at most
 C2M_MIN_CHUNK = 20_000       # … and at least (an object of a few thousand points is one pass)
-C2M_FIRST_K = 8              # triangles tried first, nearest centroid first
+C2M_FIRST_K = 8              # triangles looked up first, nearest centroid first
+C2M_BLOCK = 8                # … and measured in blocks of columns: 8, 8, 16, 32, …
 C2M_THREADS = 8              # passes at once (the pod's cgroup grants ~26 CPUs, not the host's 252)
 C2M_PAIRS = 20_000_000       # point × candidate pairs held at once by a wider search
 C2M_CLASS_SHARE = 0.02       # a size class under this share of the triangles joins the next larger one
+
+
+def _column_blocks(k: int):
+    """The k candidates of a look-up (nearest centroid first), in blocks: [0, 8), [8, 16), [16, 32),
+    [32, 64) … — the first triangles settle most points, the wide blocks are for the few left."""
+    j0 = 0
+    while j0 < k:
+        j1 = min(k, max(C2M_BLOCK, 2 * j0))
+        yield j0, j1
+        j0 = j1
 
 
 def _nearest_in_class(P, best, A, B, C, tree, reach, radius):
@@ -341,9 +387,12 @@ def _nearest_in_class(P, best, A, B, C, tree, reach, radius):
     centroid, so one whose centroid is at c from the point holds no point nearer than c − reach:
     it is worth looking further only while c < best + reach (``reach``: the class's largest such
     distance), and a triangle is worth its exact distance only if c − its own ``radius`` < best.
-    Centroids are taken nearest first, k at a time; a point is done when the next centroid is
-    beyond the bound (a class with nothing within reach of a point costs it its look-up and no
-    distance), and asked for more (4 k) when all k were within it."""
+    Centroids are taken nearest first, k at a time and in blocks of columns (_column_blocks): every
+    triangle of a block that can still be nearer — by the distances the block began with — is
+    measured at once, the points' distances lowered, and the points whose last centroid of the
+    block is beyond the bound are done. (Measuring a triangle the lowered distance would have
+    ruled out changes nothing: it cannot be nearer.) A point with all k within the bound is asked
+    for 4 k."""
     F = len(A)
     todo = np.arange(len(P))
     k = min(C2M_FIRST_K, F)
@@ -357,18 +406,22 @@ def _nearest_in_class(P, best, A, B, C, tree, reach, radius):
                 cd, ci = cd[:, None], ci[:, None]
             d = best[part]
             live = np.arange(len(part))                           # rows still worth another triangle
-            for j in range(k):
-                live = live[cd[live, j] < d[live] + reach]
+            for j0, j1 in _column_blocks(k):
+                cdb, cib = cd[live, j0:j1], ci[live, j0:j1]
+                bound = d[live][:, None]
+                r, c = np.nonzero((cdb < bound + reach) & (cdb - radius[cib] < bound))
+                if len(r):
+                    f = cib[r, c]
+                    rows = live[r]                                 # (ascending: one run per row)
+                    dist = _point_to_tri_batch(P[part[rows]], A[f], B[f], C[f])
+                    first = np.flatnonzero(np.r_[True, rows[1:] != rows[:-1]])
+                    d[rows[first]] = np.minimum(d[rows[first]], np.minimum.reduceat(dist, first))
+                live = live[cd[live, j1 - 1] < d[live] + reach]
                 if not len(live):
                     break
-                f = ci[live, j]
-                near = cd[live, j] - radius[f] < d[live]          # (this one can hold a nearer point)
-                rows, f = live[near], f[near]
-                if len(rows):
-                    d[rows] = np.minimum(d[rows], _point_to_tri_batch(P[part[rows]], A[f], B[f], C[f]))
             best[part] = d
             if k < F and len(live):
-                left.append(part[live[cd[live, -1] < d[live] + reach]])
+                left.append(part[live])
         if k >= F or not left:
             break
         todo = np.concatenate(left)
@@ -382,10 +435,12 @@ def compute_c2m_distances(
     mesh_faces: np.ndarray,
     progress_callback=None,
     quiet: bool = False,
+    device: Optional[str] = None,
 ) -> np.ndarray:
     """
     EXACT Cloud-to-Mesh distance: for every point, the distance to the nearest point of the mesh
-    surface (unsigned), in float64.
+    surface (unsigned), in float64. ``device``: numpy | cpu | cuda (None: :func:`device_of`) — the
+    same distances on each.
 
     scan_points: (N, 3) scan point coordinates
     mesh_verts: (V, 3) mesh vertex coordinates  
@@ -425,6 +480,16 @@ def compute_c2m_distances(
             counts[i] = 0
     classes, counts = classes[counts > 0], counts[counts > 0]
     order = np.argsort(-counts, kind="stable")                    # the class with most triangles first
+    device = device_of() if device is None else device
+    if device != "numpy":
+        from bim import c2m_torch
+        best = c2m_torch.distances(P, tri, centroids, radius, size_class, classes[order], c2m_torch.resolve_device(device),
+                                   C2M_CHUNK, C2M_FIRST_K, C2M_PAIRS, C2M_THREADS, _column_blocks,
+                                   (lambda pct: progress_callback(pct)) if progress_callback else None)
+        if not quiet:
+            print(f"[BIM-Compare] C2M ({device}): {n_points} points vs {n_faces} triangles in {len(classes)} size "
+                  f"class(es), {time.time() - t0:.1f}s — mean={np.mean(best)*1000:.1f}mm, max={np.max(best)*1000:.1f}mm")
+        return best
     best = np.full(n_points, np.inf)
     done = 0
     chunk = min(C2M_CHUNK, max(C2M_MIN_CHUNK, -(-n_points // C2M_THREADS)))
@@ -517,6 +582,11 @@ def compute_c2m_with_projections(
     return distances, projections
 
 
+def _dot3(u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """(N,) row-wise dot product of two (N, 3) arrays, its three products added left to right."""
+    return u[:, 0] * v[:, 0] + u[:, 1] * v[:, 1] + u[:, 2] * v[:, 2]
+
+
 def _point_to_tri_batch(
     P: np.ndarray,  # (N, 3)
     A: np.ndarray,  # (N, 3) - vertex 0 per point
@@ -530,27 +600,32 @@ def _point_to_tri_batch(
     
     Implementation of the Ericson real-time collision detection algorithm,
     fully vectorized with numpy.
+
+    THE PATH OF RECORD of the C2M distance; bim/c2m_torch.point_to_tri is its twin on a device. The
+    sums of three products and the final norm are written out term by term, left to right (since
+    2026-11-18; np.sum and np.linalg.norm before, the same values to the last bit or two): the twin
+    then computes the SAME operations in the same order and its distances are these, bit for bit.
     """
     AB = B - A
     AC = C - A
     AP = P - A
     
-    d1 = np.sum(AB * AP, axis=1)
-    d2 = np.sum(AC * AP, axis=1)
+    d1 = _dot3(AB, AP)
+    d2 = _dot3(AC, AP)
     
     # Region 1: closest to vertex A
     mask_a = (d1 <= 0) & (d2 <= 0)
     
     BP = P - B
-    d3 = np.sum(AB * BP, axis=1)
-    d4 = np.sum(AC * BP, axis=1)
+    d3 = _dot3(AB, BP)
+    d4 = _dot3(AC, BP)
     
     # Region 2: closest to vertex B
     mask_b = (d3 >= 0) & (d4 <= d3)
     
     CP = P - C
-    d5 = np.sum(AB * CP, axis=1)
-    d6 = np.sum(AC * CP, axis=1)
+    d5 = _dot3(AB, CP)
+    d6 = _dot3(AC, CP)
     
     # Region 3: closest to vertex C
     mask_c = (d6 >= 0) & (d5 <= d6)
@@ -597,7 +672,8 @@ def _point_to_tri_batch(
                                 + v_in[mask_inside, None] * AB[mask_inside]
                                 + w_in[mask_inside, None] * AC[mask_inside])
     
-    dists = np.linalg.norm(P - closest, axis=1)
+    D = P - closest
+    dists = np.sqrt(D[:, 0] * D[:, 0] + D[:, 1] * D[:, 1] + D[:, 2] * D[:, 2])
     if return_closest:
         return dists, closest
     return dists

@@ -72,7 +72,65 @@ def test_the_distance_is_exact_on_a_triangle_soup():
     verts = rng.uniform(-2, 2, (300, 3))
     faces = rng.integers(0, 300, (500, 3)).astype(np.int32)
     points = rng.uniform(-3, 3, (4000, 3))
-    assert np.abs(C.compute_c2m_distances(points, verts, faces, quiet=True) - brute(points, verts, faces)).max() < 1e-12
+    assert np.abs(C.compute_c2m_distances(points, verts, faces, quiet=True, device="numpy") - brute(points, verts, faces)).max() < 1e-12
+
+
+def cases():
+    """The meshes the distance is held on: a soup, a pipe, a fine mesh with huge triangles in it, a
+    shell 4 cm off its points (pccr's floor: tens of triangles tried per point), degenerate triangles."""
+    rng = np.random.default_rng(21)
+    soup_v = rng.uniform(-2, 2, (300, 3))
+    yield "soup", rng.uniform(-3, 3, (3000, 3)), soup_v, rng.integers(0, 300, (500, 3)).astype(np.int32)
+    pv, pf = pipe()
+    ang = rng.uniform(0, 2 * np.pi, 3000)
+    off = 0.1 + rng.uniform(0.0, 0.03, 3000)
+    yield "pipe", np.stack([rng.uniform(-0.2, 6.2, 3000), off * np.cos(ang), off * np.sin(ang)], axis=1), pv, pf
+    fine_v, fine_f = grid(40, 2.0)
+    big_v, big_f = box((-20.0, -3.0, -20.0), (20.0, -2.9, 20.0))
+    yield ("mixed", rng.uniform(-6, 6, (3000, 3)), np.concatenate([fine_v, big_v]),
+           np.concatenate([fine_f, big_f + len(fine_v)]).astype(np.int32))
+    up_v, up_f = grid(60, 3.0, y=0.04)
+    down_v, down_f = grid(60, 3.0, y=-0.04)
+    yield ("shell", np.stack([rng.uniform(0, 3, 6000), rng.normal(0, 0.004, 6000), rng.uniform(0, 3, 6000)], axis=1),
+           np.concatenate([up_v, down_v]), np.concatenate([up_f, down_f + len(up_v)]).astype(np.int32))
+    deg_v = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0], [0, 1, 0], [0.5, 0.5, 0.5]], dtype=np.float64)
+    yield "degenerate", rng.uniform(-1, 3, (2000, 3)), deg_v, np.array([[0, 1, 2], [0, 0, 0], [0, 1, 3], [4, 4, 1]], dtype=np.int32)
+
+
+def test_the_torch_path_gives_the_record_distances():
+    """bim/c2m_torch.py on the CPU against numpy — the path of record: 1e-9 is the rule, and the
+    same triangles tried in the same order give the same bits."""
+    for name, points, verts, faces in cases():
+        record = C.compute_c2m_distances(points, verts, faces, quiet=True, device="numpy")
+        twin = C.compute_c2m_distances(points, verts, faces, quiet=True, device="cpu")
+        assert np.abs(twin - record).max() < 1e-9, name
+        assert np.array_equal(twin, record), name
+        assert np.abs(record - brute(points, verts, faces)).max() < 1e-12, name
+
+
+def test_the_card_gives_the_record_distances():
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("no card visible")
+    for name, points, verts, faces in cases():
+        record = C.compute_c2m_distances(points, verts, faces, quiet=True, device="numpy")
+        card = C.compute_c2m_distances(points, verts, faces, quiet=True, device="cuda")
+        assert np.abs(card - record).max() < 1e-9, name
+        assert np.array_equal(card, record), name
+
+
+def test_the_device_is_a_declared_one():
+    from bim.c2m_torch import resolve_device
+    with pytest.raises(ValueError, match="bim.deviation.device must be one of"):
+        resolve_device("gpu")
+    assert C.device_of() == "cpu"                                             # (conftest: the tests run the torch path on the CPU)
+    before = C.use_device(None)
+    try:
+        assert C.device_of() in ("numpy", "cpu", "cuda")                      # the configuration's
+    except RuntimeError as e:                                                 # cuda declared, no card visible here: said
+        assert "bim.deviation.device is 'cuda' and torch sees no card" in str(e)
+    finally:
+        C.use_device("cpu")
 
 
 def pipe(sides=16, radius=0.1, length=6.0):
@@ -339,8 +397,8 @@ def test_a_triangulated_element_is_read_from_the_file_itself(tmp_path):
 def run_job(*args):
     import subprocess
     server = Path(__file__).resolve().parents[1]
-    return subprocess.run([sys.executable, "-m", "bim.compare_job", *args], cwd=server, capture_output=True, text=True,
-                          env={**__import__("os").environ, "CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "2"})
+    return subprocess.run([sys.executable, "-m", "bim.compare_job", "--device", "cpu", *args], cwd=server, capture_output=True,
+                          text=True, env={**__import__("os").environ, "CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "2"})
 
 
 def test_the_job_says_its_progress_and_its_result(tmp_path):
@@ -372,3 +430,15 @@ def test_the_job_says_why_it_failed(tmp_path):
     first_ifc(C.project_dirs(scan_dir)[0]).unlink()
     run = run_job("--session-dir", str(scan_dir), "--matches", str(tmp_path / "matches.json"))
     assert run.returncode == 1 and any("No IFC file found" in l for l in run.stdout.splitlines() if l.startswith("ERROR "))
+
+
+def test_the_job_on_the_card_with_no_card_says_the_key(tmp_path):
+    scan_dir = make_project(tmp_path)
+    _, matches, _ = matches_of(scan_dir)
+    (tmp_path / "matches.json").write_text(json.dumps(matches))
+    import subprocess
+    run = subprocess.run([sys.executable, "-m", "bim.compare_job", "--device", "cuda", "--session-dir", str(scan_dir),
+                          "--matches", str(tmp_path / "matches.json")], cwd=Path(__file__).resolve().parents[1],
+                         capture_output=True, text=True, env={**__import__("os").environ, "CUDA_VISIBLE_DEVICES": ""})
+    assert run.returncode == 1
+    assert any(l.startswith("ERROR RuntimeError: bim.deviation.device is 'cuda' and torch sees no card") for l in run.stdout.splitlines())
