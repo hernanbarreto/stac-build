@@ -8,7 +8,8 @@ The worker's entry point (exporter_api launches it in its own process): it print
 
   e57 · las · ply   the published cloud (exporter/cloud.py), filtered by the viewer's confidence
   glb               every published mesh of the scan (its textured binary glTF, as it is on disk)
-  ifc               the segmented building elements as their stored boxes (bim/ifc_from_scan.py)
+  ifc               the GenRecon mesh cut by the segmentation: one element per object, with its
+                    real shape (bim/ifc_from_mesh.py; config.yaml export.ifc)
   csv               every segmented object: id, label, points, where it is and how large
 
 EXPORTED AS IT IS ON DISK (USER 2026-11-17: "correcto, tal como lo indicas"): the geometry of the
@@ -104,16 +105,16 @@ def plan(session: str, scan_key: Optional[str]) -> Dict[str, Any]:
                     if found else {"available": False, "why": "no published mesh"})
     store = out / "scene_r.db"
     if store.exists():
-        from bim.ifc_from_scan import elements_of
         con = sqlite3.connect(f"file:{store}?mode=ro", uri=True)
         try:
             objects = int(con.execute("SELECT COUNT(*) FROM instance_obb WHERE window_id = 'global'").fetchone()[0])
         finally:
             con.close()
-        elements = len(elements_of(store))
         items["csv"] = {"available": objects > 0, "objects": objects, **({} if objects else {"why": "no segmented object"})}
-        items["ifc"] = {"available": elements > 0, "elements": elements,
-                        **({} if elements else {"why": "no segmented building element"})}
+        # THE IFC IS THE GENRECON MESH CUT BY THE SEGMENTATION (USER 2026-11-17): it needs both
+        why = ("no segmented object" if not objects else "no published GenRecon mesh" if not found
+               else "no per-point instance ids" if not (out / "instance_ids.npy").exists() else None)
+        items["ifc"] = {"available": why is None, "elements": objects, **({} if why is None else {"why": why})}
     else:
         items["csv"] = {"available": False, "why": "the scan is not segmented"}
         items["ifc"] = {"available": False, "why": "the scan is not segmented"}
@@ -227,12 +228,15 @@ _T = {
         "en": "{file} — textured mesh (binary glTF), {faces} faces. Provenance: {prov}. Blender, web viewers, Unreal / Unity.",
         "fr": "{file} — maillage texturé (glTF binaire), {faces} faces. Provenance : {prov}. Blender, visionneuses web, Unreal / Unity."},
     "ifc": {
-        "es": "{file} — IFC4: {n} elementos constructivos de la segmentación (muros, pisos, puertas, vigas, ductos…), cada uno la caja "
-              "medida de su objeto (no es un modelo de diseño; no se inventa espesor ni forma). Revit, Navisworks, BIMcollab, Solibri.",
-        "en": "{file} — IFC4: {n} building elements of the segmentation (walls, floors, doors, beams, ducts…), each one the measured "
-              "box of its object (not a design model; no thickness or shape is invented). Revit, Navisworks, BIMcollab, Solibri.",
-        "fr": "{file} — IFC4 : {n} éléments de construction de la segmentation (murs, sols, portes, poutres, gaines…), chacun la boîte "
-              "mesurée de son objet (ce n'est pas un modèle de conception ; aucune épaisseur ni forme n'est inventée). Revit, Navisworks, BIMcollab, Solibri."},
+        "es": "{file} — IFC4: la malla GenRecon cortada por la segmentación, {n} elementos, cada uno la parte de la malla de su objeto, "
+              "con su clase (muro, losa, puerta, viga, ducto…; el resto como IfcBuildingElementProxy) y su id. Se conserva el {kept} % de los "
+              "triángulos de la malla; el 95 % de la superficie queda a menos de {p95} mm de la malla completa. Revit, Navisworks, BIMcollab, Solibri.",
+        "en": "{file} — IFC4: the GenRecon mesh cut by the segmentation, {n} elements, each one its object's part of the mesh, with its "
+              "class (wall, slab, door, beam, duct…; the rest as IfcBuildingElementProxy) and its id. {kept} % of the mesh's triangles are "
+              "kept; 95 % of the surface lies within {p95} mm of the full mesh. Revit, Navisworks, BIMcollab, Solibri.",
+        "fr": "{file} — IFC4 : le maillage GenRecon découpé par la segmentation, {n} éléments, chacun la partie du maillage de son objet, "
+              "avec sa classe (mur, dalle, porte, poutre, gaine… ; le reste en IfcBuildingElementProxy) et son id. {kept} % des triangles du "
+              "maillage sont conservés ; 95 % de la surface est à moins de {p95} mm du maillage complet. Revit, Navisworks, BIMcollab, Solibri."},
     "csv": {
         "es": "{file} — los {n} objetos segmentados: id, etiqueta (propuesta por el VLM), puntos, centro, tamaño de su caja (a, b, altura) y giro. Excel.",
         "en": "{file} — the {n} segmented objects: id, label (proposed by the VLM), points, centre, the size of its box (a, b, height) and yaw. Excel.",
@@ -330,14 +334,27 @@ def run(session: str, scan_key: Optional[str], items: List[str], *, confidence: 
         store = out / "scene_r.db"
         if "ifc" in items:
             at("ifc", 0.0, "writing the IFC")
-            from bim import ifc_from_scan
-            elements = ifc_from_scan.elements_of(store)
+            from bim import ifc_from_mesh
+            from reconstruction.grid_knn import config_section
+            how = config_section(("export", "ifc"), ("keep", "neighbours", "max_edge_voxels"))
+            voxel = ifc_from_mesh.voxel_of()
+            elements, cut = ifc_from_mesh.elements_of(
+                out, ifc_from_mesh.mesh_of(out), keep=float(how["keep"]), max_distance=voxel,
+                neighbours=int(how["neighbours"]), max_edge=float(how["max_edge_voxels"]) * voxel or None,
+                measure=True, log=lambda m: at("ifc", 0.5, m))
             path = work / f"{name}_elements.ifc"
-            ifc_from_scan.build(elements, session=session, scan_key=scan_key or "",
-                                geometry_epoch=str(state_of(out)["geometry_epoch"])).write(str(path))
+            ifc_from_mesh.build(elements, session=session, scan_key=scan_key or "",
+                                geometry_epoch=str(state_of(out)["geometry_epoch"]),
+                                described=f"STAC Build — the GenRecon mesh of {session} {scan_key or ''} cut by its segmentation"
+                                ).write(str(path))
             files.append({"path": path, "arc": path.name, "key": "ifc"})
-            lines.append(_t("ifc", lang, file=path.name, n=len(elements)))
+            dev = cut.get("deviation_m")
+            lines.append(_t("ifc", lang, file=path.name, n=len(elements), kept=f"{100.0 * cut['faces'] / cut['mesh_faces']:.0f}",
+                            p95=f"{dev['p95'] * 1000:.2f}" if dev else "0"))
             report["ifc_elements"] = len(elements)
+            report["ifc"] = {k: cut[k] for k in ("mesh_faces", "faces", "faces_written", "faces_no_object", "keep") if k in cut}
+            if dev:
+                report["ifc"]["deviation_m"] = dev
         if "csv" in items:
             at("csv", 0.0, "writing the objects' table")
             path = work / f"{name}_objects.csv"
