@@ -436,7 +436,12 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   same; a download cut twice and resumed with `curl -C -` = the whole one byte for byte; pccr: the link in
   4.8 s (35,047 files listed with their stats in parallel), 106.74 GB declared, a range deep inside it served at
   once; a 5 GiB file, one of 2 GiB − 1 and 70,001 entries (ZIP64) read back by zipfile and by `unzip`;
-  21 tests. The team assignments of a session are the users' database's, not the ZIP's. NOT TRIED IN A BROWSER
+  21 tests. EVERY REAL SESSION THROUGH THE LIVE ROUTE (read only, the same morning): zaragoza 17.65 GB / 3,080
+  files and observatorio 17.04 GB / 2,322 files downloaded with the declared length and verified entry by entry
+  by `unzip -t` (every CRC): no errors; pccr's 106.74 GB / 35,047 files read to the end in 551 s (194 MB/s),
+  the declared length to the byte; bufferStop as above; and through the interface's dev server (the path the
+  browser takes): the length, a range and the ZIP's last bytes answered. The team assignments of a session are
+  the users' database's, not the ZIP's. NOT TRIED IN A BROWSER
   (the buttons, the browser's own download and resume of a large session through the pod's proxy, the upload's
   progress line) and no real session was uploaded from outside the pod.
 - ⭐ THE IFC IS THE GENRECON MESH CUT BY THE SEGMENTATION (USER 2026-11-17, on the box IFC below: "el IFC de pccr es
