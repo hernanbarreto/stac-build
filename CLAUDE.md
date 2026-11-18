@@ -408,6 +408,58 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   segmented, replaced it).
 
 ## 7 · PENDING
+- ⭐⭐⭐ WHERE THE WORK STANDS — 2026-11-18, main (USER: "Cuando termines anota los puntos que quedan pendientes de lo
+  que teníamos que hacer anótalo para la próxima sesión de trabajo"). This block is the one to resume from; the
+  2026-11-14 list below is its background. He also said "tengo más consultas luego".
+  DONE 2026-11-17 / 18 (details in §5): the 138 manual commands + the spoken confirmation (272 commands, all run by
+  STAC); the exporter (E57 / LAS / PLY, GLB, IFC, CSV in one ZIP); English as the default language; the dead
+  "Export point cloud" entry of the File menu replaced by the working Export; the IFC = the GenRecon mesh cut by
+  the segmentation, with his values (whole mesh, large triangles split, majority of 128 points, every object).
+  1 · ONE OWNER PER SURFACE — OPEN, THE FIRST THING TO SETTLE WITH HIM. The segmentation is interleaved point by
+     point (pccr 3108: 39 % of a point's 8 nearest neighbours are another object's) because each point takes the
+     mask of its own keyframe and nothing but the floor merges since his 2026-11-11 rule. He allowed the merge
+     ("1. Si") and then asked "las baldosas son piso verdad?" — answered YES: a tile and the floor are one
+     surface under two names. MEASURED, read-only, on pccr 3108 (1213 objects):
+       · EITHER object ≥ 10 % interleaved in the other → merge (what is coded): 280 objects, 4.0 % left — but the
+         big surfaces swallow what is seen on or through them: tile → floor 212 (right, by his answer), and
+         server_unit / server / door / equipment → glass_enclosure, cable → floor, beam → ceiling (real objects lost);
+       · MUTUAL ≥ 10 % (identity) → 905 objects, 26 % left; MUTUAL ≥ 5 % → 616 objects, 15.6 %;
+       · mutual + "the smaller object claims the surface it shares": 9–22 % left, it does not settle and the
+         floor is eaten (1.13 M → 76 k points) — NOT a solution;
+       · a vote of the nearest points: 10 % (8 neighbours × 3) / 5 % (32), 217 / 278 objects under 1000 points.
+     TO DECIDE WITH HIM: which pairs are "the same thing" (tile / floor yes) and which are not (a server behind
+     glass), i.e. whether the EITHER merge needs a guard — by label families (coverings into their support), by
+     what is seen THROUGH glass, or his list. CODE: `segmentation/interleave.py` (+ the hook in the projection,
+     `decisions.same_surface`, reason `same_surface`), `segmentation/apply_same_surface.py` (the same merge on
+     a projected scan, with backup / restore; NEVER RUN on a session — only `--dry`), config
+     `segmentation.interleave_merge` — `enabled: FALSE`. The neighbour search is scipy on the CPU (~20 s on
+     18.8 M points): a device twin is owed.
+  2 · THE IFC. In pccr's project (the viewer loads it at every open): the LIGHT one, 10 % of the triangles, 46 MB
+     ("de momento dejemos el liviano, es para probar"); the whole one (433 MB; web-ifc opens it in 20 s using
+     4.7 GB) is what the exporter writes. HIS EYE on it: pending. His complaints on the FIRST (box) IFC — "no le
+     funciona la opacidad" and "cuando apago los elementos segmentados de la nube de puntos no desaparecen los
+     puntos" — were NOT reproduced (no browser): the opacity code reads right; the second is probably point 1.
+     Re-check both with him on the mesh IFC. Once point 1 is settled the IFC is cut again (its ragged borders
+     are point 1's). The IFC needs a scan whose orientation is baked (all five are).
+  3 · THE BIM COMPARISON of pccr 3108 against its own IFC: `bim/comparison.py` is of March and reads the
+     pre-scan layout (cleaned_cloud.ply and `globalIndices` at the session's root, a match by LABEL): to be
+     adapted to scans and to the IFC's key (the instance id) — not started. Then "luego vemos que se compara
+     y como" (his).
+  4 · FUSION: merge + compare pccr 3108 with 2408; the scales paired by MARKED COMMON POINTS (his: "deberian
+     marcarse dos puntos y decir estos son los mismos en ambas … que se ajusten a uno de ellos, o a una medida
+     externa"): with levelled scans two points fix scale, yaw and position; three or more give a residual.
+     Not started.
+  5 · TICKETS (a simple tool, to show the concept), then DA3 → MapAnything: not started.
+  6 · WAITING FOR HIS WORD: whether the recogniser should ALWAYS listen in the settings' language (today it
+     detects among es / en / fr and the settings decide only a silence); the IFC's own values if his eye asks.
+  7 · WAITING FOR HIS EYE / EAR (nothing of 2026-11-17 / 18 was tried in a browser by the assistant): the
+     commands and the spoken confirmation ("STAC, borrá el volumen 2" → "STAC, sí confirmo"), the Export
+     window and its ZIP opened in other programs (ReCap, CloudCompare, Revit, Blender), the mesh IFC in the BIM
+     panel, English by default; and everything of section C of the 2026-11-14 list.
+  8 · ON DISK, HIS TO KEEP OR DROP: `projects/pccr/exports/` (the test ZIP, 1.85 GB, and
+     `pccr_2026-08-31_elements_whole.ifc`, 433 MB). INSTALLED in da3: pye57. APPROVED and NOT installed:
+     fast-simplification ("tambien estas aprobado para el simplificador, lo que necesitas") — only needed if
+     the IFC is ever simplified again (open3d's decimation: ~4 min on 13 M triangles).
 - ⭐⭐ THE LIST TO RESUME FROM (USER 2026-11-14: "anota todo esto como pendiente claro en claude.md para retomar en la
   proxima sesion"). The state on 2026-11-14, main a51092a pushed to origin main and master; each item's detail is
   in its own entry below. NEXT QUESTION TO HIM: start with the fusion (merge + compare)?
