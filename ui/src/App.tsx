@@ -1043,7 +1043,9 @@ function App() {
         if (d.exists && (!d.scan || !activeScanTab || d.scan === activeScanTab)) {
           setSabanaVisible(true)
           setSabanaLoading(true)
-          setSessionLoading(tt('deviation.loadingComparison'))
+          // (never a session load: the cloud is usually on screen already, and nothing would end that
+          // load again — the toolbar stayed hidden; the sheet has its own status line)
+          setSessionLoading(null)
           setStatusMessage(tt('deviation.loadingComparison'))
           viewportRef.current?.sendCommand({ type: 'load_sabana', session_id: activeSession })
           viewportRef.current?.setOBBsVisible(false)
