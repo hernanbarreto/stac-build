@@ -175,7 +175,6 @@
     "help": "Aide",
     "connect": "Se connecter au serveur",
     "disconnect": "Se déconnecter du serveur",
-    "exportCloud": "Exporter le nuage de points",
     "settings": "Paramètres",
     "hidePanel": "Masquer le panneau latéral",
     "showPanel": "Afficher le panneau latéral",

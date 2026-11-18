@@ -27,7 +27,7 @@ import SegmentationManager from './components/InteractiveSegmentation'
 import { useConfirmDialog } from './components/ConfirmDialog'
 import AssistantPanel from './components/AssistantPanel'
 import { PackageOpen,
-  Search, Tag, Plug, Upload, Settings, Crosshair, Maximize, Monitor, Grid3X3, RotateCcw, Ruler, TriangleRight, Scissors,
+  Search, Tag, Plug, Settings, Crosshair, Maximize, Monitor, Grid3X3, RotateCcw, Ruler, TriangleRight, Scissors,
   Move, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D, Building2, Package, ArrowUpFromLine, Trash2, Unlock,
   Clock, Scale, BarChart3, Home, Camera, SlidersHorizontal, Sparkles, Undo2, Brush, Layers, Star, Terminal,
   ListTodo, FileCheck2, PanelLeftClose, PanelLeftOpen, Wand2,
@@ -2774,7 +2774,7 @@ function App() {
         ? { id: 'disconnect', label: t('menu.disconnect'), icon: <ArrowUpFromLine aria-hidden />, onSelect: () => disconnect(false) }
         : { id: 'connect', label: t('menu.connect'), icon: <Plug aria-hidden />, onSelect: connectToServer },
       { type: 'separator', id: 's1' },
-      { id: 'export', label: t('menu.exportCloud'), icon: <Upload aria-hidden />, shortcut: 'Mod+E', disabled: true, onSelect: () => {} },
+      { id: 'export', label: t('export.title'), icon: <PackageOpen aria-hidden />, disabled: !activeSession, onSelect: () => setExportOpen(true) },
       { type: 'separator', id: 's2' },
       { id: 'settings', label: t('menu.settings'), icon: <Settings aria-hidden />, shortcut: 'Mod+,', onSelect: () => setSettingsOpen(true) },
     ] },
@@ -2819,7 +2819,6 @@ function App() {
       { type: 'separator', id: 's4' },
       { id: 'segmentation', label: t('instances.segmentation'), icon: <Crosshair aria-hidden />, onSelect: () => activeSession && openSegmentationManager(activeSession) },
       { id: 'autosegment', label: t('instances.autosegment'), icon: <Wand2 aria-hidden />, disabled: !activeSession, onSelect: openAutosegment },
-      { id: 'export', label: t('export.title'), icon: <PackageOpen aria-hidden />, disabled: !activeSession, onSelect: () => setExportOpen(true) },
       { id: 'fuse', label: t('sessions.fuse'), icon: <Layers aria-hidden />, disabled: projectScans.filter(sc => sc.kind !== 'fused').length < 2, onSelect: () => activeSession && openFuse(activeSession) },
       ...(hasCameraPoses ? [{ id: 'poses', label: t('menu.cameraPoses'), icon: <Camera aria-hidden />, checked: showCameraPoses, onSelect: () => setShowCameraPoses(v => !v) } as MenuEntry] : []),
     ] },

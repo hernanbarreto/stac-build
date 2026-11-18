@@ -175,7 +175,6 @@
     "help": "Help",
     "connect": "Connect to server",
     "disconnect": "Disconnect",
-    "exportCloud": "Export point cloud",
     "settings": "Settings",
     "hidePanel": "Hide side panel",
     "showPanel": "Show side panel",
