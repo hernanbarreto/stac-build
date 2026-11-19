@@ -845,10 +845,15 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   FREED ON HIS CHOICE (~32 GB): the ORIGINAL pccr 2408's output/omega_run, output/da3_run and
   maplong_run/context_views (that scan can no longer RESUME its reconstruction; its products are intact),
   runs/eval, and /workspace/tmp whole — the worktrees wt_gpu_main and wt_scale removed with `git worktree remove`
-  (wt_scale's 7 uncommitted files are gone; the branch gpu-main stays). ⚠ OWED: the rebuild kit's drift.py /
-  capture.sh after that (the set records the worktrees).
-  ALSO OWED: the console icon's count takes a pipeline job TWICE (main.py registers it in the task manager as type
-  "pipeline" too) — the interface must leave that type out; an interface edit, to be announced.
+  (wt_scale's 7 uncommitted files are gone; the branch gpu-main stays). THE REBUILD KIT FOLLOWED (his "si a
+  ambas", 9cfe944): drift.py found the two worktrees, the private archive and the nodejs env's command-line tool
+  (it had updated itself, 2.1.327 → 2.1.328); capture.sh run whole; drift.py after it: THE KIT IS THE POD.
+  THE CONSOLE ICON'S COUNT took a pipeline job TWICE (main.py registers it in the task manager as type "pipeline"
+  too): the interface leaves that type out of the tasks (57e9284, his "si a ambas"); his eye pending.
+  IN THE COPY, VERIFIED AFTER ITS INTAKE (his: "y donde queda hueco, ojo!, habria que rellenar total tenemos
+  frames, como hacemos en las rotaciones"): 13,692 of 13,692 frames usable, 2756 keyframes, NO gap over 8 frames
+  between keyframes; 26 keyframes inside the dark turn (video 6274–6403) and 3 inside the second hole; 1957 of the
+  original's 2765 keyframes are the copy's too (the selection after the first hole shifted).
   THE ASSISTANT'S ERRORS IN THIS STUDY, told to him: "the front has only 4,616 points, almost all from one image"
   (they were the OBJECT's points, not the face's: "no puede ser … contestame antes esto"); expecting the cut at the
   hole to close the rack (5 cm); the invented safety net above.
