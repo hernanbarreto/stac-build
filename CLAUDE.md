@@ -995,6 +995,24 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     disagree with the solution and 762 are off by more than 50 cm (of the set-aside ones only 35–38 % agree in
     POSE, whatever their scale) — another cause, not found: to be studied (false revisits in a room of identical
     racks and tiles? the bridges' own fits?).
+  · ⭐ WHAT THE CLOSURES THAT DISAGREE ARE — LOOKED AT AND REFEREED BY A THIRD SOURCE (2026-11-19 21:40 UTC, after
+    his "Ojo con sacar conclusiones erradas eh!!!!"; contact sheets sent to him). On the corrected graph: 774 of
+    1726 agree (3 sigma); 762 are off by more than 50 cm, 579 by more than 2 m, 402 by more than 5 m; the
+    disagreeing ones' rotation is off by a median of 17 deg (119 by more than 150), their own bridge fit residual
+    11.5 cm against 4.6. FOR EACH CLOSURE, THE DISTANCE BETWEEN ITS TWO CAMERAS BY THREE SOURCES — the closure
+    (the bridge), the graph, the first pass (AMB3R, which knows nothing of cubes or bridges):
+      the 774 that agree:   closure 3.49 m | graph 3.47 | first pass 3.53  (viewing directions 53 / 53 / 53 deg)
+      the 762 that are off: closure 3.39 m | graph 6.45 | first pass 6.59  (85 / 81 / 80 deg)
+    For the ones that are off the GRAPH and the FIRST PASS agree with each other (0.44 m, 2 deg at the median) and
+    the CLOSURE is the one apart (2.93 m, 24 deg); in 714 of 762 the first pass is nearer the graph than the
+    closure (in 48 nearer the closure — a set to look at); the closure puts the two cameras under 1 m apart in 116
+    of them, the other two sources in none. THEY ARE BRIDGES BETWEEN VIEWS THAT ARE FAR APART: by the first pass
+    the two cameras of an agreeing closure are under 3 m apart in 297, 3–6 m in 416, over 6 m in 61; of one that
+    is off, 38 / 252 / 472. The joint pass of the two windows then puts them much nearer than they are. So: the
+    half that disagrees is mostly WRONG BRIDGES, not right corrections the graph fails to honour — the Cauchy
+    loss already carries them (which is why putting 644 more in moved the cubes 12 cm only). NOT concluded, not
+    proposed: any distance at which a revisit is not bridged (that would be a criterion of ours again; the
+    bridges over 6 m cost ~40 min of the card on this session — his to weigh).
   · APPLIED TO THE COPY WITHOUT INFERRING ITS CUBES AGAIN (the clean way — the rule changed in cube_run.py — would
     discard the 170 cubes by the stamp: 5.5 h; told to him, he was told he could ask for it): stage 2 cancelled
     at 20:22 UTC (it was building on the old graph and about to delete the cubes); scratchpad regraph.py —
@@ -1425,11 +1443,20 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
      two cubes loaded per pair): ~50 min for 510 pairs (18:25 → ~19:15), card idle.
   3. closures() + graph() — the bridges' fits read back, the scale bound, the Sim(3) solve (scipy): started
      ~19:15, over 15 min, 160 % of one process, card idle. (Time to be completed when it ends.)
-  4. apply() — every cube's points moved onto its pose and saved again (np.save, 676 MB each). To be measured.
-  5. uncertainty(), depth_graph(), outputs() (a PLY + origins per cube: ~22 GB), camera_poses(). To be measured
-     (the original: 4.5 + 2.5 + 2.5 + 7 min for 86 cubes).
-  6. after the fork returns (workers/map_worker.py): the PLYs COPIED to output/chunk_*.ply (another ~22 GB),
-     _emit_omega_depth (a compressed npz a keyframe: zlib on the CPU), scale_align. To be measured.
+  4. apply() — every cube's points moved onto its pose and saved again (np.save, 676 MB each): 14 min
+     (19:47 → 20:01; the scratchpad's own re-placement of the 170: 11 min).
+  5. uncertainty() 4.7 min, depth_graph() 6.1 min, outputs() (a PLY + origins per cube, ~14 GB) + camera_poses()
+     13.6 min (the second launch of stage 2: 20:50 → 21:15).
+  6. after the fork returns (workers/map_worker.py): the PLYs and origins moved to output/chunk_*.ply 5.1 min,
+     _emit_omega_depth (a compressed npz a keyframe: zlib on the CPU) 5.4 min, scale_align 6+ min; a resume's own
+     overhead before all this (stamps, the model loaded, 170 cubes checked) 5.7 min.
+  THE WHOLE STAGE WITH THE CARD IDLE ON THIS SESSION: about 2 h 30 a run. 3 was the graph's solve: 28 min.
+  ⭐ THE DESIGN PROPOSED TO HIM FOR WHAT IS LEFT (2026-11-19 21:35 UTC, WAITING FOR HIS WORD — a restructuring,
+  not a port): the time is the cubes read from and written to the network volume about ten times (115 GB do not
+  fit the local disk's 50). (1) the lock computed right after the inference, the cube still in memory, before
+  its first save — one read and one write of every cube less; (2) ONE pass after the graph with a window of
+  four cubes on the card doing the placement, the uncertainty, the points and the records together, the placed
+  cubes never written (today they are saved and deleted soon after). Estimated: 2 h 30 → ~25 min.
   Also inside the inference loop and the bridges the card waits on np.save of the cube, the sky masks and the
   context views (a cube takes 27–30 s of which the forward pass is a part) — to be profiled.
   ⭐ IN PROGRESS SINCE 2026-11-19 21:00 UTC, HIS ORDERS ("lo más importante además es dejar el criterio en el
