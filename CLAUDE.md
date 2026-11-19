@@ -919,6 +919,36 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   42, video 3540–3725 — the original's weak seam 21–22; then 56, the two of the dark turn, and 28 at video
   2468–2661 — the original's unexplained seam 13–14). The kit after the tool's reinstall and the deletions:
   drift.py — THE KIT IS THE POD, nothing to capture.
+  ⭐ BEFORE THE GRAPH — THE COPY'S 170 CUBES MEASURED AS THEY LIE ON DISK (2026-11-19 16:15 UTC; all inferred by
+  15:50, the metric lock done 16:05, then 1726 bridges of 1908 revisits at ~7.4 s each: the graph expected ~19:35
+  UTC). Scratchpad seam_preview.py — the assistant's own measure, of the kind of the pipeline's seam sigma, NOT
+  that number: for each pair of neighbouring cubes, the points both reconstructed at the same pixels of the 48
+  keyframes they share, one cube fitted onto the other with one similarity, and what is left.
+  · 169 pairs: left over median 0.9 cm (p90 2.4, max 8.8); shared cameras rms median 1.5 cm (max 12.7).
+  · THE LEAST AGREEING PAIRS AND WHAT THE CAMERA SAW THERE (contact sheets looked at and sent to him): 42–43
+    (video 3578–3725) 8.8 cm and 26–27 (2410–2510) 6.9 cm — in BOTH the camera goes THROUGH A DOOR and a blank
+    surface a few centimetres from the lens fills the image (2480–2540: a tan door leaf, then a white wall;
+    3560–3620: the yellow frame of the glass enclosure, glass reflections before it); 140–141 (11325–11566)
+    5.2 cm — rows of black racks, little texture, the camera almost still; 75–76 (the dark turn) 5.0 cm. These
+    are the original's weak seams too (13–14 = the first door, "unexplained" until now; 21–22 = the second; 69–70;
+    37–38–39 = the dark turn): THE WALK'S WEAK LINKS ARE WHERE THE IMAGE CARRIES NO USABLE INFORMATION — a door
+    crossed with the frame blocked, darkness, black low-texture surfaces.
+  · THE DARK TURN: pairs 72–73 / 73–74 0.7 cm; 74–75 / 75–76 / 76–77 (the ones sharing the keyframes inside it)
+    3.4 / 5.0 / 3.4 cm — against the original's seam sigmas of 10 / 24 / 20 cm there.
+  · ⚠ THE PER-CUBE METRIC LOCK (DA3's median ratio over the cube's 64 anchors) IS UNRELIABLE IN PLACES — his
+    hypothesis "o bien, la profundidad no es la correcta". Inside a cube the keyframes' DA3 / Omega ratio varies
+    ±6.5 % at the median, but ±31–56 % in the cubes over the two doors (copy: cubes 25–28, 39, 44; original:
+    13, 14, 20–22, 24) — NOT a matter of brightness (correlation with the share of dark keyframes +0.08).
+    Neighbouring cubes' scales disagree x0.702–x1.520 (median x1.000). Each cube's metre against the first
+    pass's (path over the cube's keyframes): median x1.011, half within x0.944–x1.077, 90 % within
+    x0.733–x1.274, from x0.45 (cubes 41, 42, 27: locked twice too big, the doors) to x1.69 (166, 167: the end,
+    the camera looking down at a rack's foot from very close). The graph carries no per-cube prior (§6: DA3
+    priors on the cubes were discarded), so it is the seams' own scales that must chain the walk — TO BE READ ON
+    THE GRAPH: the walk's profile against the first pass (walk_profile.py) after it.
+  · THE RACK, READY (scratchpad rack_copy.py): the SAME pixels of the same images in both reconstructions — the
+    rear face (the face of wall#598's L parallel to the front: 7,671 points, video 4038–4105) and the front face
+    (24,916 points on cabinet#2534's plane, video 10000–10094). The original, as published: FRONT TO REAR
+    1.547 m, the faces 3.2 deg from parallel. `rack_copy.py measure <copy scan dir>` once the cubes are placed.
   ⚠⚠ THE FIVE SCANS WERE STRIPPED OF MORE THAN "INTERMEDIATES" — THE ASSISTANT'S ERROR, TOLD TO HIM 2026-11-19
   (found when he asked that the freeing be automatic: "Esto de liberar los intermedios debería hacerse de forma
   automática, se podría hacer una vez que termina la nube o recién cuando termina genrecon? Pero como sea y
