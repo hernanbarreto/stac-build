@@ -915,6 +915,10 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   x0.98 / x0.99; cube 75: 0.87 m and 110.4 deg, x0.95 / x1.00; cubes 71–81 fit the first pass as one piece
   within 0.5–2.9 cm rms. (The original's cubes: 0.30 m where 0.80 m, the next stretch x1.64.) INSIDE A CUBE the
   hole is mended; the seams and the graph are not measured yet (they need the 82 cubes left).
+  ALL 88 CUBES ON DISK, each fitted as one piece to the first pass: median 0.7 cm rms, p90 1.6 cm, max 3.6 cm (cube
+  42, video 3540–3725 — the original's weak seam 21–22; then 56, the two of the dark turn, and 28 at video
+  2468–2661 — the original's unexplained seam 13–14). The kit after the tool's reinstall and the deletions:
+  drift.py — THE KIT IS THE POD, nothing to capture.
   THE ASSISTANT'S ERRORS IN THIS STUDY, told to him: "the front has only 4,616 points, almost all from one image"
   (they were the OBJECT's points, not the face's: "no puede ser … contestame antes esto"); expecting the cut at the
   hole to close the rack (5 cm); the invented safety net above; THE DISK — "hay margen" / "el tramo 1 entra con
