@@ -1566,8 +1566,16 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   apply` the server patch, the seven test files into server/tests/, the related tests, drift.py / capture.sh
   (a vendor commit: the set's bundle), commit, push. THEN, with the card free: the twins measured ON THE CARD on
   a real session, and the keys switched on his word.
-  NOT LOOKED AT YET: scale_align's own passes (6+ min), a resume's check of every cube (it loads each whole
-  cube to read its stamp: 5.7 min on 170), the inference loop's own writes.
+  h. A RESUME'S CHECK OF EVERY CUBE (0007): infer(k) read each whole cube back to learn it was this run's
+     (170 cubes: 5.7 min of every resume) — a cube that left its lock record (written AFTER the cube's save, with
+     the file's size, under the layout and the stamp) is taken on that record; a size that differs is read as
+     before. 1 test.
+  LOOKED AT, NOT CHANGED (on his word): after the cube run the server rewrites the 22 GB of chunk PLYs TWICE —
+  scale_align (x s; in chunked-metric mode the residual of the locked cubes) and then orient (the upright
+  rotation) — each with its marker and its sidecar of sha256; one pass doing both in the record's order would
+  save one read and one write of the cloud (~2.5 min on the copy) but touches the markers' meaning.
+  NOT MEASURABLE WITHOUT THE CARD: the inference loop itself (a cube = TWO forward passes: its keyframes +
+  context, then its keyframes + witnesses for F6 — and the log carries no time stamps) and the bridges.
   NOT MEASURED YET: anything ON THE CARD (the copy's run holds it; a second CUDA context would make
   require_exclusive_gpu refuse the card to its next stage) — the twins were run with device "cpu". STILL TO DO:
   the metric lock, apply, the uncertainty, the outputs, _emit_omega_depth (items 1, 4, 5, 6) and the profile of
