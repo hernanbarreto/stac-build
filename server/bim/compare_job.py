@@ -48,16 +48,22 @@ def main(argv=None) -> int:
         matches = json.loads(Path(args.matches).read_text())
         if not isinstance(matches, list) or not matches:
             raise ValueError("no matches: nothing of the scan is paired with an element of the IFC")
+        from bim.comparison import NEW_SHEET_DIR, project_dirs, publish_sheet
+        bim_dir = project_dirs(args.session_dir)[1]
+        new_dir = bim_dir / NEW_SHEET_DIR                           # (the stored sheet stays until this one is whole)
         result = run_comparison(args.session_dir, matches, tolerance=args.tolerance_mm / 1000.0,
                                 progress_callback=lambda pct, detail="": progress(min(int(pct) * 95 // 100, 95), detail),
-                                skip_registration=args.manual)
+                                skip_registration=args.manual, out_dir=new_dir)
         if not result.get("ok"):
             raise RuntimeError(result.get("error") or "the comparison gave no result")
-        # the sheet's octree, now: the viewer then shows it at once (it would build it at the first look)
+        # the sheet's octree: made from the scan's own by run_comparison (then only its stamp is read
+        # here), else built from the sheet's cloud
         progress(97, "Building the sheet's octree...")
-        from bim.comparison import project_dirs
         from potree_converter import convert_sabana_to_potree
-        result["summary"]["octree"] = bool(convert_sabana_to_potree(project_dirs(args.session_dir)[1]))
+        result["summary"]["octree"] = bool(convert_sabana_to_potree(new_dir))
+        if not result["summary"]["octree"]:
+            raise RuntimeError("the sheet's octree could not be built: the stored comparison is kept")
+        publish_sheet(new_dir, bim_dir)
         progress(100, "Comparison complete")
     except Exception as e:  # noqa: BLE001 — said on the protocol's line, with the trace on stderr
         import traceback

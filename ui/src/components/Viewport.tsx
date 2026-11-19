@@ -3036,13 +3036,18 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         setBIMOpacity: (meshNames: string[], opacity: number) => {
             const bimGroup = bimGroupRef.current
             if (!bimGroup) return
+            const wanted = new Set(meshNames)
+            const put = (m: THREE.Material | THREE.Material[] | undefined) => {
+                for (const x of Array.isArray(m) ? m : m ? [m] : []) { x.opacity = opacity; x.transparent = opacity < 1.0; x.needsUpdate = true }
+            }
             bimGroup.traverse((child) => {
-                if (child instanceof THREE.Mesh && meshNames.includes(child.name)) {
-                    const mat = child.material as THREE.MeshStandardMaterial
-                    mat.opacity = opacity
-                    mat.transparent = opacity < 1.0
-                    mat.needsUpdate = true
-                }
+                if (!(child instanceof THREE.Mesh) || !wanted.has(child.name)) return
+                put(child.material)
+                // an element shown dimmed (the deviation on screen) or highlighted keeps its own material aside: the
+                // opacity is the ELEMENT's, whichever of the two is on screen (it was set on the shown one alone
+                // and lost when the other came back)
+                const own = child.userData._originalMaterial as THREE.Material | THREE.Material[] | undefined
+                if (own && own !== child.material) put(own)
             })
         },
         applyDeviationSurface: (sabanaData: Record<string, { positions: number[], colors: number[] }>, unmatchedKeys: string[]) => {
@@ -5417,7 +5422,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             totalPointsRef.current = 0
 
             // 2) Load sábana via PotreeOctreeLoader (forceClassId=-1  always visible)
-            const loader = new PotreeOctreeLoader(scene, camera, mat, pointBudget, -1)
+            // (each point keeps ITS OBJECT's id when the sheet's octree carries it — the scan's own octree
+            //  recoloured does: a click on the sheet selects the segmented object, USER 2026-11-19 "debo poder
+            //  seguir seleccionando sobre la sabana los objetos segmentados"; a sheet with no ids is all -1)
+            const loader = new PotreeOctreeLoader(scene, camera, mat, pointBudget)
             potreeLoaderRef.current = loader
             loader.load(url).then((loadedPts) => {
                 // Guard: if a newer load was started, discard this stale result
@@ -5454,11 +5462,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     console.warn('[Viewport] No bimGroup to dim!')
                 }
 
-                // 4) Hide OBB wireframes (segmentation bboxes are noise in sábana mode)
-                const obbGroup = obbGroupRef.current
-                if (obbGroup) obbGroup.visible = false
+                // (the boxes stay as on the cloud — USER 2026-11-19: "cuando hago click sobre algun elemento no se
+                //  muestra el obb y las cotas de medidas": hiding the whole group hid the SELECTED object's box and
+                //  its dimensions too)
 
-                if (onSabanaLoaded) onSabanaLoaded(loadedPts)
+                if (onSabanaLoaded) onSabanaLoaded(nPts || loadedPts)             // (the sheet's points: an octree loads none at once)
             }).catch((err) => {
                 if (sabanaLoadIdRef.current !== thisLoadId) return  // stale, ignore error too
                 console.error('[Viewport] Sábana Potree load error:', err)

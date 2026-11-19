@@ -8,7 +8,7 @@ import { useState, useMemo, useCallback, useEffect, useRef, type ReactNode } fro
 import { findByName, registerCommands, type BimCommandId, type Executors, type Outcome } from '../commands/registry'
 import { Building2, Box, Columns3, DoorOpen, Eye, EyeOff, FileBox, Globe, Layers, Minus, Square, Trash2, Upload, Wrench, AppWindow, Armchair, Home, Grid2X2, Landmark, Ruler } from 'lucide-react'
 import type { IFCTreeNode, IFCLoadResult } from './IFCLoader'
-import { countDescendants, collectMeshNames } from './IFCLoader'
+import { countDescendants, collectMeshNames, BIM_DEFAULT_OPACITY } from './IFCLoader'
 import { Panel, Section } from './ui/Panel'
 import { Tree, type TreeNodeData } from './ui/Tree'
 import { IconButton } from './ui/IconButton'
@@ -63,6 +63,8 @@ export default function BIMNavigator({ models, userRole, onToggleVisibility, onS
   const [hiddenNodes, setHiddenNodes] = useState<Set<number>>(new Set())
   const [selectedNode, setSelectedNode] = useState<IFCTreeNode | null>(null)
   const [nodeOpacities, setNodeOpacities] = useState<Map<number, number>>(new Map())
+  // the WHOLE tree's opacity (the general slider); an element moved on its own keeps its value in nodeOpacities
+  const [modelOpacity, setModelOpacity] = useState(BIM_DEFAULT_OPACITY)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const isAdmin = userRole === 'admin' || userRole === 'manager'
 
@@ -95,13 +97,21 @@ export default function BIMNavigator({ models, userRole, onToggleVisibility, onS
     onSetOpacity(meshNames, opacity)
   }, [nodeOpacities, onSetOpacity])
 
+  const handleModelOpacity = useCallback((opacity: number) => {
+    const names: string[] = []
+    models.forEach(m => m.hierarchy.forEach(r => names.push(...collectMeshNames(r))))
+    setModelOpacity(opacity)
+    setNodeOpacities(new Map())                                   // (every element takes the tree's)
+    onSetOpacity(names, opacity)
+  }, [models, onSetOpacity])
+
   const totalElements = useMemo(() => models.reduce((count, model) => count + model.hierarchy.reduce((c, root) => c + countDescendants(root), 0), 0), [models])
 
   const toTreeNode = useCallback((node: IFCTreeNode, depth: number): TreeNodeData<IFCTreeNode> | null => {
     if (searchText && !matchesSearch(node, searchText)) return null
     const isHidden = hiddenNodes.has(node.expressID)
     const childCount = countDescendants(node) - 1
-    const opacity = nodeOpacities.get(node.expressID) ?? 1
+    const opacity = nodeOpacities.get(node.expressID) ?? modelOpacity
     return {
       id: String(node.expressID),
       data: node,
@@ -109,13 +119,13 @@ export default function BIMNavigator({ models, userRole, onToggleVisibility, onS
       label: <><span className="stac-bim__type">{node.type.replace('Ifc', '')}</span> {node.name}</>,
       title: `${node.type} ${node.name} (${node.expressID})`,
       badge: childCount > 0 ? fmt.integer(childCount) : undefined,
-      meta: opacity < 1 ? fmt.percent(opacity) : undefined,
+      meta: opacity !== modelOpacity ? fmt.percent(opacity) : undefined,   // (an element moved apart from the tree)
       muted: isHidden,
       defaultExpanded: depth < 2,
       actions: <IconButton size="sm" label={isHidden ? t('bim.show') : t('bim.hide')} icon={isHidden ? <EyeOff aria-hidden /> : <Eye aria-hidden />} onClick={() => handleToggleVisibility(node, isHidden)} />,
       children: node.children.map(c => toTreeNode(c, depth + 1)).filter((n): n is TreeNodeData<IFCTreeNode> => n !== null),
     }
-  }, [searchText, hiddenNodes, nodeOpacities, handleToggleVisibility, t, fmt])
+  }, [searchText, hiddenNodes, nodeOpacities, modelOpacity, handleToggleVisibility, t, fmt])
 
   // STAC's commands of the BIM model (server/commands/catalog/200_bim.yaml): registered while
   // this panel is open, each one through the same handler its control uses
@@ -182,14 +192,14 @@ export default function BIMNavigator({ models, userRole, onToggleVisibility, onS
         if (!roots.length) return { ok: false, reason: 'nothing_to_do' }
         const names = roots.flatMap(r => collectMeshNames(r))
         bcmd.current.onToggleVisibility(names, true); bcmd.current.onSetOpacity(names, 1)
-        setHiddenNodes(new Set()); setNodeOpacities(new Map())
+        setHiddenNodes(new Set()); setNodeOpacities(new Map()); setModelOpacity(1)
         return done
       },
     }
     return registerCommands(executors)
   }, [])
 
-  const selectedOpacity = selectedNode ? nodeOpacities.get(selectedNode.expressID) ?? 1 : 1
+  const selectedOpacity = selectedNode ? nodeOpacities.get(selectedNode.expressID) ?? modelOpacity : modelOpacity
 
   return (
     <Panel title={t('bim.title')} subtitle={totalElements > 0 ? t.plural('bim.elements', totalElements) : undefined}
@@ -203,11 +213,15 @@ export default function BIMNavigator({ models, userRole, onToggleVisibility, onS
           <input ref={fileInputRef} type="file" accept=".ifc" className="stac-hidden" onChange={e => { const f = e.target.files?.[0]; if (f) { onUploadIFC(f); e.target.value = '' } }} />
         </>
       ) : undefined}>
-      {selectedNode && !hiddenNodes.has(selectedNode.expressID) && (
-        <div className="stac-bim__opacity">
-          <Slider min={0} max={100} step={1} value={Math.round(selectedOpacity * 100)} onChange={v => handleOpacityChange(selectedNode, v / 100)} label={t('bim.opacity')} format={v => `${v} %`} />
-        </div>
-      )}
+      {/* the opacity: the whole tree's, always there; and the selected element's (or branch's) own */}
+      <div className="stac-bim__opacity">
+        <Slider min={0} max={100} step={1} value={Math.round(modelOpacity * 100)} onChange={v => handleModelOpacity(v / 100)}
+          label={`${t('bim.opacity')} · ${t('bim.model')}`} format={v => `${v} %`} />
+        {selectedNode && !hiddenNodes.has(selectedNode.expressID) && (
+          <Slider min={0} max={100} step={1} value={Math.round(selectedOpacity * 100)} onChange={v => handleOpacityChange(selectedNode, v / 100)}
+            label={`${t('bim.opacity')} · ${selectedNode.name || selectedNode.type.replace('Ifc', '')}`} format={v => `${v} %`} />
+        )}
+      </div>
       {models.map(model => (
         <Section key={model.filename} flush title={<span className="stac-mono">{model.filename}</span>}
           actions={isAdmin ? <IconButton size="sm" variant="danger" label={t('bim.deleteModel')} icon={<Trash2 aria-hidden />} onClick={() => onDeleteIFC(model.filename)} /> : <Badge size="sm">{t('bim.model')}</Badge>}>

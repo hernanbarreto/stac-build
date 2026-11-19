@@ -154,53 +154,51 @@ export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeas
   return (
     <div className="stac-vptoolbar-wrap">
       <div className="stac-vptoolbar" role="toolbar" aria-label={t('toolbar.label')}>
-        {!sabanaVisible && (
-          <>
-            <Group>
-              <IconButton size="lg" label={t('toolbar.navigate')} shortcut="V" icon={<RotateCcw aria-hidden />} active={activeTool === 'navigate'} onClick={() => onTool('navigate')} />
-              <IconButton size="lg" label={t('toolbar.resetView')} shortcut="Home" icon={<Home aria-hidden />} onClick={onResetCamera} />
-            </Group>
-            <Sep />
-            <Group>
-              <IconButton size="lg" label={t('toolbar.brush')} icon={<Brush aria-hidden />} active={brushOn}
-                onClick={() => { onTool(brushOn ? 'navigate' : 'erase'); setPopover(brushOn ? null : 'brush') }} />
-              {brushOn && <IconButton size="lg" label={t('toolbar.brushOptions')} icon={<SlidersHorizontal aria-hidden />} active={popover === 'brush'} onClick={() => toggle('brush')} badge={brush.marks || undefined} />}
-            </Group>
-            <Sep />
-            <Group>
-              <IconButton size="lg" tone="measure" label={t('toolbar.measureDistance')} shortcut="M" icon={<Ruler aria-hidden />} active={activeTool === 'measure-distance'} onClick={() => onTool('measure-distance')} />
-              <IconButton size="lg" tone="measure" label={t('toolbar.measureAngle')} shortcut="A" icon={<TriangleRight aria-hidden />} active={activeTool === 'measure-angle'} onClick={() => onTool('measure-angle')} />
-              <IconButton size="lg" label={t('toolbar.clearMeasurements')} icon={<Trash2 aria-hidden />} onClick={onClearMeasurements} />
-              <IconButton ref={calibrationBtn} size="lg" tone="measure" label={t('toolbar.calibration')} icon={<Scaling aria-hidden />}
-                active={!!calibrating || calibrationMenu} aria-haspopup="menu" aria-expanded={calibrationMenu} onClick={() => setCalibrationMenu(o => !o)} />
-              <Menu open={calibrationMenu} onClose={() => setCalibrationMenu(false)} anchor={calibrationBtn.current?.getBoundingClientRect() ?? null}
-                ariaLabel={t('toolbar.calibration')}
-                entries={[
-                  { type: 'header', id: 'kind', label: t('calibration.pickKind') },
-                  { id: 'distance', label: t('calibration.kindDistance'), hint: t('calibration.kindDistanceHint'), icon: <Ruler aria-hidden />, checked: calibrating === 'distance', onSelect: () => onCalibration('distance') },
-                  { id: 'plane', label: t('calibration.kindPlane'), hint: t('calibration.kindPlaneHint'), icon: <Pentagon aria-hidden />, checked: calibrating === 'plane', onSelect: () => onCalibration('plane') },
-                  { type: 'separator', id: 'sep' },
-                  { id: 'list', label: t('calibration.savedList'), icon: <Pin aria-hidden />, onSelect: () => onCalibration('list') },
-                ]} />
-            </Group>
-            <Sep />
-            <Group>
-              <IconButton size="lg" label={t('toolbar.alignCloud')} shortcut="G" icon={<Move aria-hidden />} active={activeTool === 'align'} onClick={() => onTool(activeTool === 'align' ? 'navigate' : 'align')} />
-              <IconButton size="lg" label={t('toolbar.addObject')} icon={<Package aria-hidden />} onClick={onAddObject} />
-              <IconButton size="lg" label={t('toolbar.sectionBox')} shortcut="X" icon={<Scissors aria-hidden />} active={activeTool === 'section-box'} onClick={() => onTool('section-box')} />
-              <IconButton size="lg" label={t('toolbar.resetSection')} icon={<Unlock aria-hidden />} onClick={() => { onResetSection(); onTool('navigate') }} />
-            </Group>
-            <Sep />
-            <Group>
-              <IconButton size="lg" label={t('toolbar.display')} icon={<SlidersHorizontal aria-hidden />} active={popover === 'display'} onClick={() => toggle('display')} />
-              <IconButton size="lg" label={t('toolbar.colorBy')} icon={<Palette aria-hidden />} active={popover === 'color' || color.mode !== 'rgb'} onClick={() => toggle('color')} />
-            </Group>
-            <Sep />
-          </>
-        )}
+        {/* every tool is always shown; with the deviation sheet on screen the three that act on the scan cloud
+            (which is not on screen then) are shown disabled: the brush, the cloud alignment, the camera poses */}
         <Group>
-          {!sabanaVisible && view.hasCameraPoses && (
-            <IconButton size="lg" label={view.showCameraPoses ? t('toolbar.hideCameraPoses') : t('toolbar.showCameraPoses')} icon={<Camera aria-hidden />} active={view.showCameraPoses} onClick={view.onToggleCameraPoses} />
+          <IconButton size="lg" label={t('toolbar.navigate')} shortcut="V" icon={<RotateCcw aria-hidden />} active={activeTool === 'navigate'} onClick={() => onTool('navigate')} />
+          <IconButton size="lg" label={t('toolbar.resetView')} shortcut="Home" icon={<Home aria-hidden />} onClick={onResetCamera} />
+        </Group>
+        <Sep />
+        <Group>
+          <IconButton size="lg" label={t('toolbar.brush')} icon={<Brush aria-hidden />} active={brushOn} disabled={sabanaVisible}
+            onClick={() => { onTool(brushOn ? 'navigate' : 'erase'); setPopover(brushOn ? null : 'brush') }} />
+          {brushOn && <IconButton size="lg" label={t('toolbar.brushOptions')} icon={<SlidersHorizontal aria-hidden />} active={popover === 'brush'} onClick={() => toggle('brush')} badge={brush.marks || undefined} />}
+        </Group>
+        <Sep />
+        <Group>
+          <IconButton size="lg" tone="measure" label={t('toolbar.measureDistance')} shortcut="M" icon={<Ruler aria-hidden />} active={activeTool === 'measure-distance'} onClick={() => onTool('measure-distance')} />
+          <IconButton size="lg" tone="measure" label={t('toolbar.measureAngle')} shortcut="A" icon={<TriangleRight aria-hidden />} active={activeTool === 'measure-angle'} onClick={() => onTool('measure-angle')} />
+          <IconButton size="lg" label={t('toolbar.clearMeasurements')} icon={<Trash2 aria-hidden />} onClick={onClearMeasurements} />
+          <IconButton ref={calibrationBtn} size="lg" tone="measure" label={t('toolbar.calibration')} icon={<Scaling aria-hidden />}
+            active={!!calibrating || calibrationMenu} aria-haspopup="menu" aria-expanded={calibrationMenu} onClick={() => setCalibrationMenu(o => !o)} />
+          <Menu open={calibrationMenu} onClose={() => setCalibrationMenu(false)} anchor={calibrationBtn.current?.getBoundingClientRect() ?? null}
+            ariaLabel={t('toolbar.calibration')}
+            entries={[
+              { type: 'header', id: 'kind', label: t('calibration.pickKind') },
+              { id: 'distance', label: t('calibration.kindDistance'), hint: t('calibration.kindDistanceHint'), icon: <Ruler aria-hidden />, checked: calibrating === 'distance', onSelect: () => onCalibration('distance') },
+              { id: 'plane', label: t('calibration.kindPlane'), hint: t('calibration.kindPlaneHint'), icon: <Pentagon aria-hidden />, checked: calibrating === 'plane', onSelect: () => onCalibration('plane') },
+              { type: 'separator', id: 'sep' },
+              { id: 'list', label: t('calibration.savedList'), icon: <Pin aria-hidden />, onSelect: () => onCalibration('list') },
+            ]} />
+        </Group>
+        <Sep />
+        <Group>
+          <IconButton size="lg" label={t('toolbar.alignCloud')} shortcut="G" icon={<Move aria-hidden />} active={activeTool === 'align'} disabled={sabanaVisible} onClick={() => onTool(activeTool === 'align' ? 'navigate' : 'align')} />
+          <IconButton size="lg" label={t('toolbar.addObject')} icon={<Package aria-hidden />} onClick={onAddObject} />
+          <IconButton size="lg" label={t('toolbar.sectionBox')} shortcut="X" icon={<Scissors aria-hidden />} active={activeTool === 'section-box'} onClick={() => onTool('section-box')} />
+          <IconButton size="lg" label={t('toolbar.resetSection')} icon={<Unlock aria-hidden />} onClick={() => { onResetSection(); onTool('navigate') }} />
+        </Group>
+        <Sep />
+        <Group>
+          <IconButton size="lg" label={t('toolbar.display')} icon={<SlidersHorizontal aria-hidden />} active={popover === 'display'} onClick={() => toggle('display')} />
+          <IconButton size="lg" label={t('toolbar.colorBy')} icon={<Palette aria-hidden />} active={popover === 'color' || color.mode !== 'rgb'} onClick={() => toggle('color')} />
+        </Group>
+        <Sep />
+        <Group>
+          {view.hasCameraPoses && (
+            <IconButton size="lg" label={view.showCameraPoses ? t('toolbar.hideCameraPoses') : t('toolbar.showCameraPoses')} icon={<Camera aria-hidden />} active={view.showCameraPoses} disabled={sabanaVisible} onClick={view.onToggleCameraPoses} />
           )}
           <IconButton size="lg" label={view.showGrid ? t('toolbar.hideGrid') : t('toolbar.showGrid')} icon={<Grid3X3 aria-hidden />} active={view.showGrid} onClick={view.onToggleGrid} />
           <IconButton size="lg" label={view.showAxes ? t('toolbar.hideAxes') : t('toolbar.showAxes')} icon={<Axis3D aria-hidden />} active={view.showAxes} onClick={view.onToggleAxes} />

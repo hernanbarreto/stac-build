@@ -98,8 +98,9 @@ def cases():
 
 
 def test_the_torch_path_gives_the_record_distances():
-    """bim/c2m_torch.py on the CPU against numpy — the path of record: 1e-9 is the rule, and the
-    same triangles tried in the same order give the same bits."""
+    """The device path on the CPU (bim/c2m_grid.py: the search; bim/c2m_torch.py: the distance)
+    against numpy — the path of record: 1e-9 is the rule, and the minimum of the same distances
+    is the same bits."""
     for name, points, verts, faces in cases():
         record = C.compute_c2m_distances(points, verts, faces, quiet=True, device="numpy")
         twin = C.compute_c2m_distances(points, verts, faces, quiet=True, device="cpu")
@@ -117,6 +118,67 @@ def test_the_card_gives_the_record_distances():
         card = C.compute_c2m_distances(points, verts, faces, quiet=True, device="cuda")
         assert np.abs(card - record).max() < 1e-9, name
         assert np.array_equal(card, record), name
+
+
+def test_the_search_on_the_device_gives_the_record_distances_in_any_batches():
+    """bim/c2m_grid.py (USER 2026-11-19: "la comparacion debe hacerse en GPU"): the triangles a point
+    is measured against are found on the device — a grid of their centroids, proven level by level.
+    Held in batches of a few points and pairs, far from the mesh, on it, and against one triangle."""
+    from bim import c2m_grid
+    old = c2m_grid.PAIR_BUDGET, c2m_grid.EXACT_BUDGET, c2m_grid.POINT_BLOCK
+    c2m_grid.PAIR_BUDGET, c2m_grid.EXACT_BUDGET, c2m_grid.POINT_BLOCK = 500, 97, 211
+    try:
+        for name, points, verts, faces in cases():
+            record = C.compute_c2m_distances(points, verts, faces, quiet=True, device="numpy")
+            assert np.array_equal(C.compute_c2m_distances(points, verts, faces, quiet=True, device="cpu"), record), name
+    finally:
+        c2m_grid.PAIR_BUDGET, c2m_grid.EXACT_BUDGET, c2m_grid.POINT_BLOCK = old
+    rng = np.random.default_rng(7)
+    verts = rng.uniform(-1, 1, (200, 3))
+    faces = rng.integers(0, 200, (300, 3)).astype(np.int32)
+    for name, points, v, f in (("far", rng.uniform(40, 60, (500, 3)), verts, faces),
+                               ("one triangle", rng.uniform(-3, 3, (500, 3)), verts[:3], np.array([[0, 1, 2]], dtype=np.int32)),
+                               ("on the mesh", verts[faces[:150, 0]], verts, faces)):
+        got = C.compute_c2m_distances(points, v, f, quiet=True, device="cpu")
+        assert np.abs(got - brute(points, v, f)).max() < 1e-12, name
+
+
+def test_every_element_in_one_pass_gives_each_element_its_record():
+    """USER 2026-11-19: "hace que todo se procese en una sola pasada". The points of several elements
+    together, each with its element's number, against the triangles of all of them: every point gets
+    the distance to ITS element's mesh (the elements overlap in space here — only the number tells
+    them apart), and every surface sample is covered by ITS element's points only."""
+    from scipy.spatial import cKDTree
+    from bim import c2m_grid
+    els = []
+    for i, (name, points, verts, faces) in enumerate(cases()):
+        shift = np.array([0.7 * i, 0.0, 0.3 * i])
+        els.append((name, points + shift, np.asarray(verts, dtype=np.float64) + shift, faces))
+    P = np.concatenate([e[1] for e in els])
+    pe = np.repeat(np.arange(len(els)), [len(e[1]) for e in els])
+    tri = np.concatenate([e[2][e[3]] for e in els])
+    te = np.repeat(np.arange(len(els)), [len(e[3]) for e in els])
+    samples = [C._coverage_samples(e[2], e[3], 11 + i) for i, e in enumerate(els)]
+    S = np.concatenate([sm[0] for sm in samples])
+    se = np.repeat(np.arange(len(els)), [len(sm[0]) for sm in samples])
+    perm = np.random.default_rng(0).permutation(len(P))                       # (the points in any order)
+    old = c2m_grid.PAIR_BUDGET, c2m_grid.EXACT_BUDGET, c2m_grid.POINT_BLOCK, c2m_grid.SUPER_BLOCK
+    for budgets in (old, (700, 97, 211, 5000)):
+        c2m_grid.PAIR_BUDGET, c2m_grid.EXACT_BUDGET, c2m_grid.POINT_BLOCK, c2m_grid.SUPER_BLOCK = budgets
+        try:
+            d = np.empty(len(P))
+            d[perm] = c2m_grid.distances_all(P[perm], pe[perm], tri, te, "cpu")
+            near = c2m_grid.within_all(P[perm], pe[perm], S, se, 0.15, "cpu")
+        finally:
+            c2m_grid.PAIR_BUDGET, c2m_grid.EXACT_BUDGET, c2m_grid.POINT_BLOCK, c2m_grid.SUPER_BLOCK = old
+        at = sat = 0
+        for i, (name, points, verts, faces) in enumerate(els):
+            record = C.compute_c2m_distances(points, verts, faces, quiet=True, device="numpy")
+            assert np.array_equal(d[at:at + len(points)], record), name
+            at += len(points)
+            n = len(samples[i][0])
+            assert np.array_equal(near[sat:sat + n], cKDTree(points).query(samples[i][0])[0] <= 0.15), name
+            sat += n
 
 
 def test_the_device_is_a_declared_one():
@@ -322,7 +384,8 @@ def test_the_comparison_of_a_scan_with_its_own_ifc(tmp_path):
     _, matches, _ = matches_of(scan_dir)
     result = C.run_comparison(str(scan_dir), matches, tolerance=0.05)
     assert result["ok"] and result["summary"] == {
-        "total_elements": 4, "evaluated": 3, "unmatched": 1, "errors": 0, "registration": "own_scan", "ifc": "model.ifc"}
+        "total_elements": 4, "evaluated": 3, "unmatched": 1, "errors": 0, "registration": "own_scan", "ifc": "model.ifc",
+        "sheet_octree": "built from the sheet's cloud"}                         # (this scan has no octree of its own to recolour)
     assert np.array_equal(np.array(result["transform"]), np.eye(4))           # the same frame by construction
     by = {r["element_key"]: r for r in result["results"]}
     floor, wall, rack, beam = by["3"], by["7"], by["12"], by["99"]

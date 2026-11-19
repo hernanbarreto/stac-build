@@ -328,7 +328,8 @@ def _point_to_triangle_distance_batch(
 
 
 # WHERE THE DISTANCES ARE COMPUTED (bim.deviation.device): numpy — the path of record — | cpu | cuda
-# (bim/c2m_torch.py, the same distances: tests/test_bim_scan_comparison.py).
+# (bim/c2m_grid.py: the search and the distances on the device, the same distances —
+# tests/test_bim_scan_comparison.py).
 _DEVICE_OVERRIDE: Optional[str] = None
 
 
@@ -482,10 +483,12 @@ def compute_c2m_distances(
     order = np.argsort(-counts, kind="stable")                    # the class with most triangles first
     device = device_of() if device is None else device
     if device != "numpy":
-        from bim import c2m_torch
-        best = c2m_torch.distances(P, tri, centroids, radius, size_class, classes[order], c2m_torch.resolve_device(device),
-                                   C2M_CHUNK, C2M_FIRST_K, C2M_PAIRS, C2M_THREADS, _column_blocks,
-                                   (lambda pct: progress_callback(pct)) if progress_callback else None)
+        # the search AND the distances on the device (bim/c2m_grid.py — USER 2026-11-19: "la comparacion debe
+        # hacerse en GPU"): pccr 2026-08-31's 280 elements in 28 s, 98 s with the candidates from scipy's tree
+        from bim import c2m_grid
+        from bim.c2m_torch import resolve_device
+        best = c2m_grid.distances(P, tri, resolve_device(device),
+                                  (lambda pct: progress_callback(pct)) if progress_callback else None)
         if not quiet:
             print(f"[BIM-Compare] C2M ({device}): {n_points} points vs {n_faces} triangles in {len(classes)} size "
                   f"class(es), {time.time() - t0:.1f}s — mean={np.mean(best)*1000:.1f}mm, max={np.max(best)*1000:.1f}mm")
@@ -810,9 +813,13 @@ def compute_coverage_pct(
     proximity_m: float,
     seed: int = 0,
     quiet: bool = False,
+    device: Optional[str] = None,
 ) -> float:
     """
     Estimate what % of the BIM mesh surface is covered by scan points.
+
+    ``device``: numpy (scipy's tree — the record) | cpu | cuda (bim/c2m_grid.within: the same
+    question asked on the device); None: :func:`device_of`.
     
     Samples the mesh surface (~4 samples per m², at least one per triangle, 50,000 at most — each
     weighted by the area it stands for) and counts the area whose sample has a scan point within
@@ -825,7 +832,39 @@ def compute_coverage_pct(
     """
     if len(scan_points) == 0 or len(mesh_faces) == 0:
         return 0.0
-    
+    drawn = _coverage_samples(mesh_verts, mesh_faces, seed)
+    if drawn is None:
+        return 0.0
+    sample_pts, sample_wts, total_area = drawn
+
+    # has each surface sample a scan point within proximity_m?
+    device = device_of() if device is None else device
+    if device == "numpy":
+        from scipy.spatial import cKDTree
+        dists, _ = cKDTree(scan_points).query(sample_pts, workers=C2M_THREADS)
+        near = dists <= proximity_m
+    else:
+        from bim import c2m_grid
+        from bim.c2m_torch import resolve_device
+        near = c2m_grid.within(np.ascontiguousarray(scan_points, dtype=np.float64), sample_pts, proximity_m,
+                               resolve_device(device))
+    result = _coverage_of(near, sample_wts, total_area)
+    if not quiet:
+        print(f"[Coverage] {len(mesh_faces)} faces → {len(sample_pts)} samples, {len(scan_points)} scan pts, "
+              f"proximity={proximity_m:.3f}m → {result}%")
+    return result
+
+
+def _coverage_of(near: np.ndarray, sample_wts: np.ndarray, total_area: float) -> float:
+    """The covered share of an element's surface, in % to one decimal: the area of its samples
+    that have a scan point near, over its area."""
+    return round(float(np.sum(sample_wts[near]) / total_area * 100), 1)
+
+
+def _coverage_samples(mesh_verts: np.ndarray, mesh_faces: np.ndarray, seed: int):
+    """The surface samples of an element's coverage — (points (S, 3), the area each stands for
+    (S,), the element's area), or None for a surface of no area. Drawn from a generator seeded
+    with ``seed``: the same element gives the same samples."""
     v0 = mesh_verts[mesh_faces[:, 0]]
     v1 = mesh_verts[mesh_faces[:, 1]]
     v2 = mesh_verts[mesh_faces[:, 2]]
@@ -833,7 +872,7 @@ def compute_coverage_pct(
     total_area = np.sum(areas)
     
     if total_area < 1e-10:
-        return 0.0
+        return None
     
     rng = np.random.default_rng(seed)
     per_face = np.maximum(1, (areas * COVERAGE_SAMPLES_PER_M2).astype(np.int64))
@@ -847,19 +886,98 @@ def compute_coverage_pct(
     r1 = np.sqrt(rng.random(len(face)))
     r2 = rng.random(len(face))
     sample_pts = ((1 - r1)[:, None] * v0[face] + (r1 * (1 - r2))[:, None] * v1[face] + (r1 * r2)[:, None] * v2[face])
-    
-    # KDTree on scan points → query surface samples
-    from scipy.spatial import cKDTree
-    dists, _ = cKDTree(scan_points).query(sample_pts, workers=C2M_THREADS)
-    
-    covered_area = np.sum(sample_wts[dists <= proximity_m])
-    result = round(float(covered_area / total_area * 100), 1)
-    
-    if not quiet:
-        print(f"[Coverage] {len(mesh_faces)} faces → {len(sample_pts)} samples, {len(scan_points)} scan pts, "
-              f"proximity={proximity_m:.3f}m: covered {covered_area:.2f}/{total_area:.2f} m² → {result}%")
-    
-    return result
+    return sample_pts, sample_wts, total_area
+
+
+def _evaluate_on_the_device(all_bim: dict, match_index: dict, scan, xyz_all: np.ndarray, T: np.ndarray,
+                            proximity_m: float, device: str):
+    """EVERY matched element's distances and coverage in ONE pass on the device (bim/c2m_grid.py —
+    USER 2026-11-19: "hace que todo se procese en una sola pasada"): the points of all the elements
+    together, each with its element's number, against the triangles of all of them.
+    Returns ({element key: (cloud indices, its points, their distances, its coverage %)}, the
+    seconds of the distances, the seconds of the coverage). An element with no point is not in it."""
+    import zlib
+    from bim import c2m_grid
+    keys, idx, pts, tris, samples = [], [], [], [], []
+    for key, (mesh_verts, mesh_faces, _ifc_type, _name) in all_bim.items():
+        if key not in match_index or len(mesh_faces) == 0:
+            continue
+        indices = scan.indices_of_match(match_index[key])
+        if len(indices) == 0:
+            continue
+        keys.append(key)
+        idx.append(indices)
+        pts.append(_moved(xyz_all[indices], T))                   # (element by element: the record's own numbers)
+        tris.append(np.asarray(mesh_verts, dtype=np.float64)[np.asarray(mesh_faces)])
+        samples.append(_coverage_samples(mesh_verts, mesh_faces, zlib.crc32(str(key).encode())))
+    if not keys:
+        return {}, 0.0, 0.0
+    bounds = np.cumsum([0] + [len(p) for p in pts])
+    P = np.concatenate(pts)
+    pe = np.repeat(np.arange(len(keys)), np.diff(bounds))
+    t0 = time.time()
+    d = c2m_grid.distances_all(P, pe, np.concatenate(tris), np.repeat(np.arange(len(keys)), [len(t) for t in tris]), device)
+    t_c2m = time.time() - t0
+    t0 = time.time()
+    drawn = [e for e, sm in enumerate(samples) if sm is not None]
+    near = (c2m_grid.within_all(P, pe, np.concatenate([samples[e][0] for e in drawn]),
+                                np.repeat(drawn, [len(samples[e][0]) for e in drawn]), proximity_m, device)
+            if drawn else np.zeros(0, dtype=bool))
+    t_cov = time.time() - t0
+    out, at = {}, 0
+    for e, key in enumerate(keys):
+        coverage = 0.0
+        if samples[e] is not None:
+            n = len(samples[e][0])
+            coverage = _coverage_of(near[at:at + n], samples[e][1], samples[e][2])
+            at += n
+        out[key] = (idx[e], P[bounds[e]:bounds[e + 1]], d[bounds[e]:bounds[e + 1]], coverage)
+    return out, t_c2m, t_cov
+
+
+SHEET_REPORT = "sabana_report.json"
+SHEET_META = "sabana_meta.json"
+SHEET_OCTREE = "sabana_potree"
+SHEET_FILES = ("sabana_cloud.ply", "sabana.npz", SHEET_REPORT)   # + the octree's folder; the meta goes last
+NEW_SHEET_DIR = ".new_sheet"
+
+
+def stored_sheet(bim_dir) -> Optional[dict]:
+    """The WHOLE sheet stored in a project's bim_comparison folder — its meta — or None. A sheet is
+    whole when its meta (written last) and its octree are there: the files of a run that was
+    stopped, or that is still writing, are not a sheet (USER 2026-11-19: "si no hay sabana por que
+    mierda me muestra esa opcion")."""
+    import json
+    bim_dir = Path(bim_dir)
+    meta_path = bim_dir / SHEET_META
+    if not meta_path.is_file() or not (bim_dir / SHEET_OCTREE / "metadata.json").is_file():
+        return None
+    try:
+        return json.loads(meta_path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def publish_sheet(new_dir, bim_dir) -> None:
+    """A NEW sheet, whole in ``new_dir``, takes the stored one's place — only now (USER 2026-11-19:
+    "la comparacion debe generarse y correrse una vez, y se debe guardar"; a launch used to delete
+    the stored sheet at its START, and a run that failed or was stopped left the project with
+    none). The stored meta goes first and the new meta comes last: in between there is no sheet,
+    never half of one."""
+    import shutil
+    new_dir, bim_dir = Path(new_dir), Path(bim_dir)
+    if not (new_dir / SHEET_META).is_file() or not (new_dir / SHEET_OCTREE / "metadata.json").is_file():
+        raise RuntimeError(f"{new_dir} holds no whole sheet (its meta or its octree is missing): the stored one is kept")
+    bim_dir.mkdir(parents=True, exist_ok=True)
+    (bim_dir / SHEET_META).unlink(missing_ok=True)
+    if (bim_dir / SHEET_OCTREE).exists():
+        shutil.rmtree(bim_dir / SHEET_OCTREE)
+    (new_dir / SHEET_OCTREE).rename(bim_dir / SHEET_OCTREE)
+    for name in SHEET_FILES:
+        if (new_dir / name).exists():
+            os.replace(new_dir / name, bim_dir / name)
+    os.replace(new_dir / SHEET_META, bim_dir / SHEET_META)
+    shutil.rmtree(new_dir, ignore_errors=True)
 
 
 def save_sabana(
@@ -869,14 +987,23 @@ def save_sabana(
     summary: dict,
     positions: Optional[np.ndarray] = None,
     colors: Optional[np.ndarray] = None,
+    out_dir=None,
+    overall: Optional[dict] = None,
 ):
     """
-    Save sábana data to sabana.npz for later loading.
+    ``out_dir``: where the files are written (the project's bim_comparison folder when None).
+    sabana_report.json holds every element's numbers and histogram — what the Report tab shows —
+    and sabana_meta.json is written LAST: a folder with it holds a whole sheet.
+
+    Save the sheet: sabana_cloud.ply (its points and their deviation colours), sabana_meta.json (the
+    numbers of every element) and sabana.npz (how many points, at which tolerance — until 2026-11-19 a
+    second, compressed copy of the PLY's points that nothing read: seconds of every comparison).
     ``positions`` (N, 3) and ``colors`` (N, 4, RGBA in 0-1): every evaluated element's points, as
     arrays — a scan of today is millions of points, never a list in the results.
+    Returns the (N, 3) uint8 colours as written in the PLY.
     """
     # Resolve correct output directory for sábana artifacts
-    sabana_dir = str(project_dirs(session_dir)[1])
+    sabana_dir = str(out_dir) if out_dir is not None else str(project_dirs(session_dir)[1])
     os.makedirs(sabana_dir, exist_ok=True)
     import json
     
@@ -910,13 +1037,8 @@ def save_sabana(
     positions = np.asarray(positions, dtype=np.float32)
     colors = np.asarray(colors, dtype=np.float32)
     
-    # Save compressed npz (archival)
     out_path = os.path.join(sabana_dir, "sabana.npz")
-    np.savez_compressed(
-        out_path,
-        positions=positions,
-        colors=colors,
-    )
+    np.savez(out_path, points=np.int64(len(positions)), tolerance_m=np.float64(tolerance))
     
     # Save as binary PLY for Potree streaming (same format as cleaned_cloud.ply)
     ply_path = os.path.join(sabana_dir, "sabana_cloud.ply")
@@ -1015,11 +1137,15 @@ def save_sabana(
     else:
         from correction.epoch import stamp_nearest as _stamp_epoch
         _stamp_epoch(meta, sabana_dir)
+    with open(os.path.join(sabana_dir, SHEET_REPORT), "w") as f:
+        json.dump({"ok": True, "date": meta.get("date"), "tolerance_mm": round(tolerance * 1000, 1),
+                   "scan": meta.get("scan"), "overall": overall, "results": results}, f)
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
     
     print(f"[BIM-Compare] Saved sábana: {len(positions)} points → {out_path}")
     print(f"[BIM-Compare] Global advance: {global_advance}% ({len(advance_values)} elements)")
+    return rgb
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1082,8 +1208,14 @@ def run_comparison(
     tolerance: float = DEFAULT_TOLERANCE,
     progress_callback=None,
     skip_registration: bool = False,
+    out_dir=None,
 ) -> dict:
     """
+    ``out_dir``: the folder the sheet is written in. None — the project's bim_comparison folder
+    itself, whose previous sheet is removed first (the tests, a direct call). The job gives a
+    folder beside it and publishes the sheet when it is whole (:func:`publish_sheet`): the stored
+    one stays until then.
+
     Run full BIM vs Scan comparison:
       1. Registration using matched segments (alignment only)
       2. Extract ALL BIM element geometry
@@ -1134,16 +1266,22 @@ def run_comparison(
     # Resolve project-level paths (IFCs, bim_comparison dir)
     ifcs_dir, bim_dir = project_dirs(session_path)
     
-    # Clean up previous sábana artifacts before regenerating
     import shutil
-    for old_file in ["sabana.npz", "sabana_cloud.ply", "sabana_meta.json"]:
+    sheet_dir = bim_dir if out_dir is None else Path(out_dir)
+    if out_dir is not None:
+        # the stored sheet is NOT touched: the new one is written beside it and published whole
+        if sheet_dir.exists():
+            shutil.rmtree(sheet_dir)
+        sheet_dir.mkdir(parents=True)
+    # Clean up previous sábana artifacts before regenerating (a direct call writes in place)
+    for old_file in ["sabana.npz", "sabana_cloud.ply", "sabana_meta.json", SHEET_REPORT] if out_dir is None else []:
         for search_dir in [bim_dir, session_path]:
             p = search_dir / old_file
             if p.exists():
                 p.unlink()
                 print(f"[BIM] 🗑️ Deleted old {old_file}")
     sabana_potree_dir = bim_dir / "sabana_potree"
-    if sabana_potree_dir.exists():
+    if out_dir is None and sabana_potree_dir.exists():
         shutil.rmtree(sabana_potree_dir)
         print("[BIM] 🗑️ Deleted old sabana_potree/")
     # Also check session_path for legacy location
@@ -1179,6 +1317,16 @@ def run_comparison(
     if own is not None and own == _scan_of(session_path):
         registration = "own_scan"
         print(f"[BIM-Compare] {ifc_path.name} was written from this scan ({own[1]}): same frame, no registration")
+        # … and its elements ARE this scan's objects, one by one: the pairing is the scan's own, by
+        # instance id, whatever the request carried. (The Report tab sent its pairing without the
+        # object ids: every element was compared with ALL the points of its label — 266 M points in
+        # place of 18.6 M, over 20 minutes and a wrong sheet, 2026-11-18.)
+        from bim.scan_data import element_keys
+        own_index = {str(m["element_key"]): m for m in scan.match(element_keys(ifc_file), by_instance_id=True)}
+        if any(not m.get("segment_ids") for m in match_index.values()):
+            print(f"[BIM-Compare] the request's pairing carried no object ids: the scan's own pairing is used "
+                  f"({len(own_index)} objects by instance id)")
+        match_index = own_index
     
     if registration != "auto":
         # Use saved floor_transform (gizmo-aligned position) as the transform
@@ -1258,31 +1406,41 @@ def run_comparison(
     results = []
     sheet_positions = []
     sheet_colors = []
+    sheet_indices = []                                            # the cloud index of every point of the sheet
+    sheet_distances = []                                          # … and its distance to its element
     total = len(all_bim)
     tolerance_mm = tolerance * 1000
     t_c2m = t_cov = 0.0
+    # on a device: every element's distances and coverage in ONE pass, before the loop
+    on_device = {}
+    if device_of() != "numpy":
+        on_device, t_c2m, t_cov = _evaluate_on_the_device(all_bim, match_index, scan, xyz_all, T, proximity_m, device_of())
     
     for i, (key, (mesh_verts, mesh_faces, ifc_type, elem_name)) in enumerate(all_bim.items()):
         n_faces = len(mesh_faces)
         
         if key in match_index:
             # ── MATCHED: compare segment points vs BIM mesh ──
-            indices = scan.indices_of_match(match_index[key])
-            if len(indices) == 0:
-                results.append({
-                    "element_key": key, "label": elem_name,
-                    "ifc_type": ifc_type, "status": "error",
-                    "error": "No points: the scan has no object for this match",
-                })
-                continue
-            
-            # Transform segment points with registration
-            scan_points = _moved(xyz_all[indices], T)
-            
-            # C2M distances: how far each constructed point is from the BIM design
-            _t = time.time()
-            distances = compute_c2m_distances(scan_points, mesh_verts, mesh_faces, quiet=True)
-            t_c2m += time.time() - _t
+            coverage = None
+            if key in on_device:
+                indices, scan_points, distances, coverage = on_device[key]
+            else:
+                indices = scan.indices_of_match(match_index[key])
+                if len(indices) == 0:
+                    results.append({
+                        "element_key": key, "label": elem_name,
+                        "ifc_type": ifc_type, "status": "error",
+                        "error": "No points: the scan has no object for this match",
+                    })
+                    continue
+
+                # Transform segment points with registration
+                scan_points = _moved(xyz_all[indices], T)
+
+                # C2M distances: how far each constructed point is from the BIM design
+                _t = time.time()
+                distances = compute_c2m_distances(scan_points, mesh_verts, mesh_faces, quiet=True)
+                t_c2m += time.time() - _t
             report = build_deviation_report(distances, tolerance)
             
             # Sábana: scan points at their real positions, colored by C2M deviation
@@ -1292,14 +1450,17 @@ def run_comparison(
             )
             sheet_positions.append(np.asarray(sabana_pos, dtype=np.float32))
             sheet_colors.append(np.asarray(sabana_colors, dtype=np.float32))
+            sheet_indices.append(np.asarray(indices, dtype=np.int64))
+            sheet_distances.append(distances)
             
             # Coverage: what % of this BIM element's surface has scan data
-            _t = time.time()
-            coverage = compute_coverage_pct(
-                mesh_verts, mesh_faces, scan_points, proximity_m,
-                seed=zlib.crc32(str(key).encode()), quiet=True,
-            )
-            t_cov += time.time() - _t
+            if coverage is None:
+                _t = time.time()
+                coverage = compute_coverage_pct(
+                    mesh_verts, mesh_faces, scan_points, proximity_m,
+                    seed=zlib.crc32(str(key).encode()), quiet=True,
+                )
+                t_cov += time.time() - _t
             
             # BIM element surface area (m²)
             v0 = mesh_verts[mesh_faces[:, 0]]
@@ -1363,6 +1524,7 @@ def run_comparison(
                 "label": elem_name,
                 "ifc_type": ifc_type,
                 "status": "evaluated",
+                "segment_ids": [int(i) for i in (match_index[key].get("segment_ids") or [])],   # the scan's objects compared
                 "total_points": len(distances),
                 "coverage_pct": coverage,
                 "coverage_cumulative": coverage_cumulative,
@@ -1426,12 +1588,50 @@ def run_comparison(
             summary["coverage_engine"]["elements_by_state"][state] = \
                 summary["coverage_engine"]["elements_by_state"].get(state, 0) + 1
     
+    # EVERY COMPARED POINT TOGETHER: its numbers, and its histogram over 0 … 2 × tolerance — the scale the
+    # points are painted with (green at 0, the tolerance in the middle, red at twice it) — with the count
+    # of those beyond. (The Report's chart was the first element's histogram alone, USER 2026-11-19: "no se
+    # entiende el reporte".)
+    overall = None
+    if sheet_distances:
+        every = np.concatenate(sheet_distances)
+        edges = np.linspace(0.0, 2.0 * tolerance, 41)
+        overall = {"stats": build_deviation_report(every, tolerance)["stats"],
+                   "histogram": {"counts": np.histogram(every, bins=edges)[0].tolist(), "bin_edges_mm": (edges * 1000).tolist(),
+                                 "beyond": int(np.sum(every > 2.0 * tolerance))}}
+
     # Save sábana to session for later loading
-    save_sabana(
+    _t = time.time()
+    sheet_rgb = save_sabana(
         session_dir, results, tolerance, summary,
         np.concatenate(sheet_positions) if sheet_positions else None,
         np.concatenate(sheet_colors) if sheet_colors else None,
+        out_dir=sheet_dir, overall=overall,
     )
+    t_save = time.time() - _t
+
+    # The sheet's octree FROM THE SCAN'S OWN (bim/sheet_octree.py): the same points, their colours
+    # replaced — seconds, where building one from the sheet's cloud took 40. When the scan's octree
+    # cannot stand for the cloud the reason is said and the job builds the octree the old way.
+    _t = time.time()
+    summary["sheet_octree"] = "built from the sheet's cloud"
+    if sheet_indices and len(sheet_rgb) and not np.array_equal(T, np.eye(4)):
+        # (the sheet's points were MOVED by the alignment: they are not the scan's octree's)
+        print("[BIM-Compare] the sheet's octree: the scan was moved to the model — built from the sheet's cloud")
+    elif sheet_indices and len(sheet_rgb):
+        try:
+            from bim import sheet_octree
+            from potree_converter import potree_stamp_for, write_potree_stamp
+            rgb_cloud = np.empty((len(xyz_all), 3), dtype=np.uint8)
+            rgb_cloud[:] = sheet_octree.NO_DATA_RGB8
+            rgb_cloud[np.concatenate(sheet_indices)] = sheet_rgb
+            made, said = sheet_octree.build(output_dir / "potree", scan.cloud, rgb_cloud, sheet_dir / SHEET_OCTREE, device_of())
+            if made:
+                write_potree_stamp(sheet_dir / SHEET_OCTREE, potree_stamp_for(sheet_dir / "sabana_cloud.ply"))
+                summary["sheet_octree"] = "the scan's own octree, recoloured"
+            print(f"[BIM-Compare] the sheet's octree: {said} — {time.time() - _t:.1f}s (the sheet's files {t_save:.1f}s)")
+        except Exception as e:  # noqa: BLE001 — said; the job then builds the octree from the sheet's cloud
+            print(f"[BIM-Compare] the sheet's octree could not be made from the scan's ({type(e).__name__}: {e})")
     
     return {
         "ok": True,
@@ -1439,5 +1639,6 @@ def run_comparison(
         "tolerance_mm": round(tolerance * 1000, 1),
         "transform": T.tolist(),
         "summary": summary,
+        "overall": overall,
         "results": results,
     }

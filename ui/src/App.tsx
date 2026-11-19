@@ -18,7 +18,7 @@ import WebRTCCall from './components/WebRTCCall'
 import BIMNavigator from './components/BIMNavigator'
 import FuseScansModal from './components/FuseScansModal'
 import CertifyKitPanel from './components/CertifyKitPanel'
-import DeviationOverlay from './components/DeviationOverlay'
+import DeviationOverlay, { type DeviationResult } from './components/DeviationOverlay'
 import type { IFCLoadResult } from './components/IFCLoader'
 import { useAuth } from './context/AuthContext'
 import LoginPage from './pages/LoginPage'
@@ -453,6 +453,13 @@ function App() {
   // the scan the comparison sheet on disk was computed on (the project keeps ONE sheet): it is neither
   // loaded nor offered over another scan of the project
   const [sabanaScan, setSabanaScan] = useState<string | null>(null)
+  // THE COMPARISON'S TOLERANCE, in mm — ONE (USER 2026-11-19: "deja la tolerancia por defecto en 50mm pero toma la
+  // del slider"): the Report tab's slider sets it, every launch sends it, the server compares with it and the
+  // legend shows the one the stored comparison was run with. It starts at the stored comparison's, else at
+  // the configuration's.
+  const [deviationTolerance, setDeviationTolerance] = useState(50)
+  // the comparison STORED in the project, of the scan on screen: every element's numbers (the Report tab)
+  const [deviationReport, setDeviationReport] = useState<DeviationResult | null>(null)
 
   // ── Camera Poses state ──
   const [showCameraPoses, setShowCameraPoses] = useState(true)
@@ -951,6 +958,7 @@ function App() {
     setSabanaVisible(false)
     setSabanaMetrics(null)
     setSabanaFullMeta(null)
+    setDeviationReport(null)
     // Reset OBBs visibility
     viewportRef.current?.setOBBsVisible(true)
   }, [sessions])  
@@ -984,6 +992,15 @@ function App() {
   // A comparison runs in the server's own process: its state is asked for until it ends, then its
   // sheet is shown. Shared by the launch and by a session opened WHILE one runs (a page reloaded
   // during the minutes it takes must still end showing the sheet).
+  const loadDeviationReport = useCallback(async (sid: string) => {
+    try {
+      const r = await fetch(`/api/sessions/${sid}/sabana/report`)
+      const d = r.ok ? await r.json() : null
+      setDeviationReport(d && Array.isArray(d.results) ? d : null)
+      if (d && typeof d.tolerance_mm === 'number') setDeviationTolerance(d.tolerance_mm)
+    } catch { setDeviationReport(null) }
+  }, [])
+
   const followComparison = useCallback(async (sid: string, scan: string | null, first?: any) => {
     const scanQuery = scan ? `?scan=${encodeURIComponent(scan)}` : ''
     let data = first ?? { status: 'running' }
@@ -1000,7 +1017,6 @@ function App() {
         return
       }
       viewportRef.current?.sendCommand({ type: 'load_sabana', session_id: sid })
-      viewportRef.current?.setOBBsVisible(false)
       setActiveTool(prev => prev === 'align' ? 'navigate' : prev)
       setSabanaVisible(true)
       setSessions(prev => prev.map(s => s.id === sid ? { ...s, hasSabana: true } : s))
@@ -1014,12 +1030,13 @@ function App() {
           setActivePanel('analysis')
         }
       } catch { /* ignore */ }
+      await loadDeviationReport(sid)
     } catch (e: any) {
       setStatusMessage(tt('deviation.failed', { detail: e.message }))
     } finally {
       setSabanaLoading(false)
     }
-  }, [])
+  }, [loadDeviationReport])
 
   // Auto-detect sábana when BIM models first appear after session load
   const prevBimCount = useRef(0)
@@ -1030,42 +1047,34 @@ function App() {
     if (!wasZero || bimModels.length === 0 || !activeSession) return
     const sid = activeSession, scan = activeScanTab ?? null
     // a comparison of this scan still running (launched before a reload): follow it to its sheet
-    fetch(`/api/bim/compare/${sid}/status${scan ? `?scan=${encodeURIComponent(scan)}` : ''}`)
-      .then(r => r.json()).catch(() => null)
-      .then(st => {
-        if (st?.status === 'running') { setActivePanel('bim'); setSessionLoading(null); followComparison(sid, scan, st); return null }
+    // (asked by the scan's key and with none: a run launched before the tabs knew the scan named none)
+    const ask = (q: string) => fetch(`/api/bim/compare/${sid}/status${q}`).then(r => r.json()).catch(() => null)
+    ask(scan ? `?scan=${encodeURIComponent(scan)}` : '')
+      .then(async st => {
+        if (typeof st?.default_tolerance_mm === 'number') setDeviationTolerance(st.default_tolerance_mm)
+        let runScan = scan
+        if (st?.status !== 'running' && scan) { st = await ask(''); runScan = null }
+        if (st?.status === 'running') {
+          setSessionLoading(null)
+          followComparison(sid, runScan, st).then(() => { if (scan) setSabanaScan(scan) })
+          return null
+        }
         return fetch(`/api/sessions/${sid}/sabana/exists`).then(r => r.json())
       })
       .then(d => {
         if (!d) return
         setSabanaScan(d.exists ? d.scan ?? null : null)
-        // (a sheet of ANOTHER scan of the project is not shown over this one)
-        if (d.exists && (!d.scan || !activeScanTab || d.scan === activeScanTab)) {
-          setSabanaVisible(true)
-          setSabanaLoading(true)
-          // (never a session load: the cloud is usually on screen already, and nothing would end that
-          // load again — the toolbar stayed hidden; the sheet has its own status line)
-          setSessionLoading(null)
-          setStatusMessage(tt('deviation.loadingComparison'))
-          viewportRef.current?.sendCommand({ type: 'load_sabana', session_id: activeSession })
-          viewportRef.current?.setOBBsVisible(false)
-          fetch(`/api/sessions/${activeSession}/sabana/meta`)
-            .then(r2 => r2.ok ? r2.json() : null)
-            .then(fullMeta => {
-              if (fullMeta) {
-                setSabanaMetrics(fullMeta)
-                setSabanaFullMeta(fullMeta)
-                setActivePanel('analysis')
-              }
-            })
-            .catch(() => { })
-        } else {
-          setActivePanel('bim')
-          setSessionLoading(null)
-        }
+        // OPENING A SESSION SHOWS ITS CLOUD AND NOTHING ELSE (USER 2026-11-19: "cuando abro la sesion se abre
+        // automaticamente la sabana, no!, solo cuando la solicito … cargar si los segmentos, el BIM, pero mostrar
+        // la nube y quedarse en el panel de sesiones, nada mas"). A stored comparison of the scan on screen is only
+        // made AVAILABLE: the toolbar offers it, the Report tab holds its numbers. No panel is switched.
+        setSessions(prev => prev.map(x => (x.id === sid ? { ...x, hasSabana: !!d.exists } : x)))
+        if (d.exists && (!d.scan || !activeScanTab || d.scan === activeScanTab)) void loadDeviationReport(sid)
+        else setDeviationReport(null)
+        setSessionLoading(null)
       })
-      .catch(() => { setActivePanel('bim'); setSessionLoading(null) })
-  }, [bimModels, activeSession, followComparison])
+      .catch(() => { setSessionLoading(null) })
+  }, [bimModels, activeSession, followComparison, loadDeviationReport])
 
   // the overlay text the tasks poll put up, so it takes down exactly that one
   const taskOverlayRef = useRef<string | null>(null)
@@ -1506,7 +1515,7 @@ function App() {
   }, [activeSession])
 
   // Actually run the comparison after dialog confirm
-  const runComparison = useCallback(async (registration?: unknown) => {
+  const runComparison = useCallback(async (registration?: unknown, toleranceMm?: number) => {
     if (!activeSession) return
     // (a click passes its event: only 'auto' / 'manual' is a registration asked for by command)
     const useManualAlignment = registration === 'manual' ? true : registration === 'auto' ? false : manualAlignmentChosen
@@ -1537,6 +1546,7 @@ function App() {
           matches: matchData.matches,
           skip_registration: useManualAlignment,
           scan: activeScanTab || null,
+          tolerance_mm: typeof toleranceMm === 'number' ? toleranceMm : deviationTolerance,
         }),
       })
       // The server answers at once and compares in its own process (minutes on a scan of today):
@@ -1553,7 +1563,7 @@ function App() {
       setStatusMessage(tt('deviation.failed', { detail: e.message }))
     }
     setSabanaLoading(false)
-  }, [activeSession, activeScanTab, sabanaVisible, manualAlignmentChosen, followComparison])
+  }, [activeSession, activeScanTab, sabanaVisible, manualAlignmentChosen, followComparison, deviationTolerance])
 
   // ── Sábana: Toggle visibility via Potree streaming ──
   const handleToggleSabana = useCallback(() => {
@@ -1572,7 +1582,6 @@ function App() {
     // Toggle ON  load sábana + hide OBBs + fetch analysis meta
     setStatusMessage(tt('deviation.loading'))
     viewportRef.current?.sendCommand({ type: 'load_sabana', session_id: activeSession })
-    viewportRef.current?.setOBBsVisible(false)
     if (activeTool === 'align') setActiveTool('navigate')
     setSabanaVisible(true)
     // Fetch full metadata  show analysis panel
@@ -1607,15 +1616,18 @@ function App() {
   // exactamente el elemento como si lo hubiera clickeado"). The frame comes from the
   // instance's own OBB, so a 9 m floor and a 20 cm light both fill the view; an instance with
   // no OBB (just propagated, no points) simply does not move the camera.
-  const selectSegmentRef = useRef<(id: number | null) => void>(() => {})
-  const selectSegment = useCallback((id: number | null) => selectSegmentRef.current(id), [])
+  const selectSegmentRef = useRef<(id: number | null, fromModel?: boolean) => void>(() => {})
+  const selectSegment = useCallback((id: number | null, fromModel = false) => selectSegmentRef.current(id, fromModel), [])
   const focusSegmentsRef = useRef<(ids: number[]) => void>(() => {})
   const focusSegments = useCallback((ids: number[]) => focusSegmentsRef.current(ids), [])
-  selectSegmentRef.current = (id: number | null) => {
+  selectSegmentRef.current = (id: number | null, fromModel = false) => {
     setSelectedSegmentId(id)
     if (id == null) return
-    // the chat stays open when it is the inspector's tab (switching would close it)
-    if (layout.state.inspectorTab !== 'assistant') layout.openInspector('properties')
+    // A TOUCH ON THE MODEL OPENS NO PANEL (USER 2026-11-19: "siempre que toque un objeto no quiero ni que abra el
+    // panel lateral derecho ni el izquierdo, nunca"): the object is selected — its box, its dimensions — and
+    // the panels stay as he has them. (A selection from the list or the palette still shows its properties;
+    // the chat stays open when it is the inspector's tab: switching would close it.)
+    if (!fromModel && layout.state.inspectorTab !== 'assistant') layout.openInspector('properties')
     const seg = segments.find(s => s.id === id)
     if (seg?.focus) viewportRef.current?.flyToPoint(seg.focus.center, seg.focus.radius)
   }
@@ -3522,7 +3534,7 @@ function App() {
             }}
             onHasConfidence={setHasConfidence}
             onHasWitness={setHasWitness}
-            onBimLoaded={models => { setBimModels(models); if (models.length > 0) { setShowAxes(false); setShowGrid(false) } }}
+            onBimLoaded={models => setBimModels(models)}   /* (the grid and the axes stay as the user has them: they were turned off at every BIM load — USER 2026-11-19 "me desaparece la grilla, o sea no respeta lo que selecciono el usuario") */
             onSabanaLoaded={nPts => { setSabanaLoading(false); setSessionLoading(null); setStatusMessage(t('deviation.loadedPoints', { n: fmt.integer(nPts ?? 0) })) }}
             showCameraPoses={showCameraPoses && !sabanaVisible}
             onCubes={setCubes}
@@ -3551,12 +3563,14 @@ function App() {
               // a point of an object: select it (OBB + dimensions) and travel to it; a click on
               // nothing or on unsegmented points deselects (USER 2026-10-09)
               const seg = segments.find(s => s.classId === cls)
-              if (seg) { layout.setLeftTab('instances'); selectSegment(seg.id) } else selectSegment(null)
+              if (seg) selectSegment(seg.id, true); else selectSegment(null)
             }}
             onViewScale={setMetersPerPixel}
           />
 
-          {hasSession && !sessionLoading && (
+          {/* THE TOOLBAR IS ALWAYS THERE (USER 2026-11-18: "la barra debe estar siempre ahi"): never hidden by a
+              load in course, a server task (a BIM comparison) or the deviation sheet */}
+          {hasSession && (
             <FloatingToolbar
               activeTool={activeTool} onTool={setActiveTool} onResetCamera={() => viewportRef.current?.resetCamera()}
               onClearMeasurements={() => viewportRef.current?.clearMeasurements()} onAddObject={openObjectLibrary}
@@ -3625,7 +3639,7 @@ function App() {
               onHome={() => viewportRef.current?.resetCamera()}
               colorMode={sabanaVisible ? 'deviation' : colorMode} mvThreshold={mvThreshold}
               statusFractions={certifyState?.report_metrics?.witnesses?.status_fraction ?? null}
-              deviationRange={sabanaVisible && sabanaMetrics ? { maxMm: (sabanaMetrics.tolerance_mm || 15) * 3, toleranceMm: sabanaMetrics.tolerance_mm || 15 } : null}
+              deviationRange={sabanaVisible && sabanaMetrics ? { maxMm: (sabanaMetrics.tolerance_mm || 50) * 2, toleranceMm: sabanaMetrics.tolerance_mm || 50 } : null}
               showEdges={showCertifyKit} readouts={readouts}
               onCalibrate={id => { const d = viewportRef.current?.getDistance(id); if (d) { setCalibrationDraft({ kind: 'distance', readoutId: id, ...d }); setCalibrationOpen(true) } }}
               onOpenCalibration={() => { setCalibrationDraft(null); setCalibrationOpen(true) }}
@@ -3666,7 +3680,11 @@ function App() {
                 timeline: <ScansPanel variant="timeline" sessionId={activeSession} scans={projectScans} activeScanKey={activeScanTab}
                   onOpenScan={sc => activeSession && openScanFromTree(activeSession, sc)} onSetReference={sc => activeSession && setReference(activeSession, sc)} />,
                 report: activeSession && bimModels.length > 0 && segments.length > 0
-                  ? <DeviationOverlay sessionId={activeSession} viewportRef={viewportRef} onClose={() => layout.setDockOpen(false)} />
+                  ? <DeviationOverlay sessionId={activeSession} scanKey={activeScanTab} tolerance={deviationTolerance} onTolerance={setDeviationTolerance}
+                      onRun={tol => { void runComparison(undefined, tol) }} running={sabanaLoading} report={deviationReport}
+                      selectedInstanceId={selectedSegmentId}
+                      onSelectInstance={id => { if (segments.some(sg => sg.id === id)) selectSegment(id, true) }}
+                      onClose={() => layout.setDockOpen(false)} />
                   : <EmptyState compact icon={<BarChart3 aria-hidden />} title={t('report.emptyTitle')} description={t('report.emptyDesc')} />,
                 evaluation: <EvaluationPanel />,
               }} />

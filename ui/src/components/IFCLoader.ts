@@ -223,6 +223,11 @@ function buildHierarchy(
 /**
  * Count total descendant elements (including self) in a hierarchy node.
  */
+/** The opacity every BIM element is loaded with, and where the BIM panel's sliders start (USER 2026-11-19: "en el
+ *  apartado BIM todos los elementos ademas del arbol general deben tener la opcion de slide de opacidad y por
+ *  defecto estar al 80%"). */
+export const BIM_DEFAULT_OPACITY = 0.8
+
 export function countDescendants(node: IFCTreeNode): number {
     let count = 1
     for (const child of node.children) {
@@ -320,8 +325,8 @@ export async function loadIFC(url: string, name: string): Promise<IFCLoadResult>
 
             const material = new THREE.MeshStandardMaterial({
                 color: new THREE.Color(r, g, b),
-                opacity: a,
-                transparent: a < 1.0,
+                opacity: Math.min(a, BIM_DEFAULT_OPACITY),      // (a material the IFC makes more transparent keeps its own)
+                transparent: Math.min(a, BIM_DEFAULT_OPACITY) < 1.0,
                 side: THREE.DoubleSide,
                 metalness: 0.0,
                 roughness: 0.6,

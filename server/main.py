@@ -1831,7 +1831,10 @@ async def get_sessions(
                 # BIM / IFC files
                 ifc_files = list(ctx.ifcs_dir.glob("*.ifc")) if ctx.ifcs_dir.exists() else []
                 has_bim = len(ifc_files) > 0
-                has_sabana = (ctx.bim_comparison_dir / "sabana.npz").exists() if hasattr(ctx, 'bim_comparison_dir') else False
+                has_sabana = False
+                if hasattr(ctx, 'bim_comparison_dir'):
+                    from bim.comparison import stored_sheet as _stored_sheet
+                    has_sabana = _stored_sheet(ctx.bim_comparison_dir) is not None
                 
                 sessions.append({
                     "id": d.name,
@@ -6011,9 +6014,19 @@ async def bim_compare(request: Request):
     matches = body.get("matches", [])
     skip_registration = bool(body.get("skip_registration", False))
     scan = body.get("scan") or None
-    # Tolerance from config.yaml bim.deviation.tolerance_mm (mm)
+    # THE TOLERANCE IS THE REQUEST'S (USER 2026-11-19: "deja la tolerancia por defecto en 50mm pero toma la
+    # del slider" — it was sent and ignored: the legend said 50 mm beside a slider at 15); the
+    # configuration's (config.yaml bim.deviation.tolerance_mm) when the request gives none.
     bim_cfg = cfg.get("bim", {}).get("deviation", {})
-    tolerance_mm = float(bim_cfg.get("tolerance_mm", 50.0))
+    tolerance_mm = body.get("tolerance_mm")
+    if tolerance_mm is None:
+        tolerance_mm = bim_cfg.get("tolerance_mm", 50.0)
+    try:
+        tolerance_mm = float(tolerance_mm)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"tolerance_mm must be a number of millimetres, got {tolerance_mm!r}")
+    if not (tolerance_mm > 0) or tolerance_mm != tolerance_mm or tolerance_mm == float("inf"):
+        raise HTTPException(400, f"tolerance_mm must be a positive number of millimetres, got {tolerance_mm!r}")
     # where the distances are computed (numpy | cpu | cuda): the child validates it and fails naming the key
     device = str(bim_cfg.get("device", ""))
 
@@ -6022,7 +6035,9 @@ async def bim_compare(request: Request):
 
     ctx = _ctx(session_id, scan)
     session_dir = str(ctx.session_dir)
-    key = f"{session_id}|{scan or ''}"
+    # keyed by the scan's own directory: a launch that names no scan (= the active one) and a status
+    # asked for by the scan's key are the SAME run (they were two keys: a reloaded page did not find it)
+    key = f"{session_id}|{session_dir}"
     if (_bim_compare_runs.get(key) or {}).get("status") == "running":
         raise HTTPException(409, "This scan is being compared already")
     why = _export_busy(session_id)                    # (a pipeline job rewrites the files the comparison reads)
@@ -6091,34 +6106,40 @@ async def bim_compare(request: Request):
 @app.get("/api/bim/compare/{session_id}/status")
 async def bim_compare_status(session_id: str, scan: Optional[str] = None):
     """How the comparison of a scan is going: {status: idle | running | done | failed, progress, message,
-    and — done — its summary; failed — error}."""
-    return {"ok": True, **(_bim_compare_runs.get(f"{session_id}|{scan or ''}") or {"status": "idle"})}
+    and — done — its summary; failed — error}; and ``default_tolerance_mm``, the configuration's
+    (what the Report tab's slider starts at when the project stores no comparison)."""
+    return {"ok": True, "default_tolerance_mm": float(cfg.get("bim", {}).get("deviation", {}).get("tolerance_mm", 50.0)),
+            **(_bim_compare_runs.get(f"{session_id}|{_ctx(session_id, scan or None).session_dir}")
+                            or {"status": "idle"})}
 
 
 @app.get("/api/sessions/{session_id}/sabana/exists")
 async def sabana_exists(session_id: str):
     """Check if a sábana has been generated for this session."""
     ctx = _ctx(session_id)
-    # Check both bim_comparison_dir (migrated) and session_dir (newly generated)
-    npz_path = ctx.bim_comparison_dir / "sabana.npz"
-    if not npz_path.exists():
-        npz_path = ctx.session_dir / "sabana.npz"
-    meta_path = ctx.bim_comparison_dir / "sabana_meta.json"
-    if not meta_path.exists():
-        meta_path = ctx.session_dir / "sabana_meta.json"
-    
-    if not npz_path.exists():
+    # A sheet is there when it is WHOLE — its meta, written last, and its octree (bim.comparison.
+    # stored_sheet): the files of a run that was stopped or is still writing are not one (USER
+    # 2026-11-19: "si no hay sabana por que mierda me muestra esa opcion").
+    from bim.comparison import stored_sheet
+    meta = stored_sheet(ctx.bim_comparison_dir)
+    if meta is None:
         return {"exists": False}
-    
-    # Return metadata if available
-    meta = None
-    if meta_path.exists():
-        import json as _json
-        meta = _json.loads(meta_path.read_text())
-    
     # THE SHEET IS ONE SCAN'S (the project keeps one: the last compared scan's). ``scan`` names it so
     # that the interface neither loads it over another scan of the project nor offers it there.
-    return {"exists": True, "meta": meta, "scan": (meta or {}).get("scan")}
+    return {"exists": True, "meta": meta, "scan": meta.get("scan")}
+
+
+@app.get("/api/sessions/{session_id}/sabana/report")
+async def sabana_report(session_id: str):
+    """The stored comparison's numbers, element by element — what the Report tab shows (each
+    element's statistics and histogram, the tolerance it was run with, its date and scan). 404 when
+    the project stores no whole comparison."""
+    from bim.comparison import SHEET_REPORT, stored_sheet
+    ctx = _ctx(session_id)
+    path = ctx.bim_comparison_dir / SHEET_REPORT
+    if stored_sheet(ctx.bim_comparison_dir) is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="No comparison stored")
+    return json.loads(path.read_text())
 
 
 @app.get("/api/sessions/{session_id}/sabana/meta")

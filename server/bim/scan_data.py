@@ -117,14 +117,21 @@ class Scan:
 
     # ── the cloud ────────────────────────────────────────────────────────────────────────────
     @property
-    def xyz(self) -> np.ndarray:
-        """(N, 3) float64 — the cloud as it is on disk (display frame on a scan whose orientation is baked)."""
-        if self._xyz is None:
+    def cloud(self):
+        """The cloud's own table (exporter.cloud.open_ply): every field of every point, as on disk."""
+        if getattr(self, "_cloud", None) is None:
             from exporter.cloud import open_ply
             path = self.output_dir / "cleaned_cloud.ply"
             if not path.exists():
                 raise ScanError(f"{path}: the scan has no cloud")
-            cloud = open_ply(path)
+            self._cloud = open_ply(path)
+        return self._cloud
+
+    @property
+    def xyz(self) -> np.ndarray:
+        """(N, 3) float64 — the cloud as it is on disk (display frame on a scan whose orientation is baked)."""
+        if self._xyz is None:
+            cloud = self.cloud
             self._xyz = np.stack([np.asarray(cloud[a], dtype=np.float64) for a in ("x", "y", "z")], axis=1)
             if self.points_total and self.points_total != len(self._xyz) and self._order is not None:
                 raise ScanError(f"{self.output_dir}: the cloud has {len(self._xyz)} points and the per-point ids "

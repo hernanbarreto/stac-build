@@ -28,9 +28,15 @@ export function Legend({ title, ramp, min, max, unit, categories, orientation = 
       {title && <div className="stac-legend__title">{title}</div>}
       {gradient && (
         <div className="stac-legend__ramp-wrap">
-          <span className="stac-legend__end stac-legend__end--max">{max}{unit ? ` ${unit}` : ''}</span>
+          {/* vertical: the maximum on top; horizontal: the ramp runs left to right, so the MINIMUM comes first
+              (it printed the maximum at the ramp's low end: "237 mm en verde y 0 en rojo", USER 2026-11-19) */}
+          {orientation === 'vertical'
+            ? <span className="stac-legend__end stac-legend__end--max">{max}{unit ? ` ${unit}` : ''}</span>
+            : <span className="stac-legend__end stac-legend__end--min">{min}{unit ? ` ${unit}` : ''}</span>}
           <div className="stac-legend__ramp" style={{ '--legend-gradient': `linear-gradient(${dir}, ${gradient})` } as React.CSSProperties} />
-          <span className="stac-legend__end stac-legend__end--min">{min}{unit ? ` ${unit}` : ''}</span>
+          {orientation === 'vertical'
+            ? <span className="stac-legend__end stac-legend__end--min">{min}{unit ? ` ${unit}` : ''}</span>
+            : <span className="stac-legend__end stac-legend__end--max">{max}{unit ? ` ${unit}` : ''}</span>}
         </div>
       )}
       {categories && (
