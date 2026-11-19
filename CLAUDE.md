@@ -1544,9 +1544,30 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
      cube), an uncertainty map's statistics, the files (PLY; zlib of the origins and records, in threads).
      ⚠ The record itself is the machine's: a pod whose numpy picks another BLAS kernel would give other last
      bits on the numpy path — the test of the placement says so if it happens.
-  STILL OWED FOR THE CLOSING: the SERVER's side — _emit_omega_depth taking the fork's records (a rename) when
-  they are there, the PLYs and origins moved to output/ by a rename instead of a copy and a zlib round trip (5 min
-  on the copy), the two keys in config.yaml + the builder; scale_align's own passes (6+ min) not looked at yet.
+  g. THE SERVER'S SIDE, PREPARED AND NOT APPLIED (a clone of the repo on the local disk, /root/dev/stac-build,
+     with the working copy of the fork as its vendor/VGGT-Long; the patch: server/0001-server-side-of-the-cube-
+     closing.patch — `git apply --check` on the live tree: clean). workers/map_worker.py: the four keys typed in
+     _structure_config (`cube_closing` steps | single_pass; `cube_closing_device`, `cube_seams_device`,
+     `cube_graph_device` numpy | cpu | cuda; an absent key = the record) and written by _apply_cube_closing beside
+     the cube's other keys — single_pass together with certify.keep_aligned_chunks FAILS naming both;
+     _emit_omega_depth takes the cube run's own records by a RENAME when omega_records.json is there
+     (_adopt_omega_records: the layout of chunk_sim3.json, exactly this run's keyframes in order, idempotent, a
+     hole fails); the fork's PLYs and origins get their output names by a HARD LINK (_link_or_copy; checked: the
+     volume links, fork_scratch.remove only unlinks) instead of a copy of 22 GB and a zlib round trip of every
+     origins file (5.1 min on the copy). config.yaml: the four keys AT THE RECORD'S VALUES (steps / numpy) —
+     MERGING CHANGES NOTHING BY ITSELF; switching them is a later step, announced to him with the card's
+     measurements. 9 tests + one end to end (the records the server ends with are the same whichever closing
+     ran). In the clone, the related files of the suite: 203 pass, 7 fail = the 4 that fail the same in the live
+     tree (test_chunked_metric x 3, test_omega_complete x 1) + 3 artefacts of the clone (skyseg.onnx absent,
+     vggt-omega linked from outside).
+  WHERE IT ALL IS: /workspace/tmp/dev/patches/ (0001–0006 of the fork, server/, every test, the A/B scripts) and
+  a second copy /workspace/dev_patches_20261119.tar.gz; the working trees on the LOCAL disk (/root/dev — gone at
+  a pod restart). TO MERGE WHEN THE COPY'S CLOUD IS PUBLISHED: `git am` 0001–0006 in vendor/VGGT-Long, `git
+  apply` the server patch, the seven test files into server/tests/, the related tests, drift.py / capture.sh
+  (a vendor commit: the set's bundle), commit, push. THEN, with the card free: the twins measured ON THE CARD on
+  a real session, and the keys switched on his word.
+  NOT LOOKED AT YET: scale_align's own passes (6+ min), a resume's check of every cube (it loads each whole
+  cube to read its stamp: 5.7 min on 170), the inference loop's own writes.
   NOT MEASURED YET: anything ON THE CARD (the copy's run holds it; a second CUDA context would make
   require_exclusive_gpu refuse the card to its next stage) — the twins were run with device "cpu". STILL TO DO:
   the metric lock, apply, the uncertainty, the outputs, _emit_omega_depth (items 1, 4, 5, 6) and the profile of
