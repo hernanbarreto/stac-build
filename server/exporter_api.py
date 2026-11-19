@@ -15,6 +15,12 @@ project's loaded IFCs.
     POST /api/export/{session_id}/session               {scans: {scan key: [items]}, loaded_ifcs, confidence, lang}
     GET  /api/export/{session_id}/session_status
     GET  /api/export/{session_id}/session_download      the ZIP of the session's last export
+    POST /api/export/{session_id}/session_cancel        stop the one running; nothing half-written stays
+
+AN EXPORT IS A JOB (USER 2026-11-19: "cerre la ventana de exportacion y no figura en jobs la tarea de
+exportar … deberia figurar en jobs, y poder cancelarse o dejarla continuar"): each run is registered
+in the task manager (type "export") — the Jobs list and the count on the console icon read it there —
+and ends there as finished, failed or cancelled. Closing the window never stops it.
 
 The export runs in a child process (CPU only — the chat and the voice stay up) that reads the
 scan's files: it is refused while a pipeline job of the session is running or queued (its stages
@@ -36,6 +42,8 @@ router = APIRouter(prefix="/api/export", tags=["export"])
 _busy: Optional[Callable] = None                 # (session_id) -> why the scan's files cannot be read now, or None
 _audit_log: Optional[Callable] = None
 _RUNS: Dict[str, Dict[str, Any]] = {}
+_PROCS: Dict[str, Any] = {}                      # key -> the running export's child process (for a cancel)
+CANCEL_WAIT_S = 10.0                             # a cancelled export is given this long to unwind, then it is killed
 _SERVER_DIR = Path(__file__).resolve().parent
 
 
@@ -77,20 +85,28 @@ def _checked(body: Dict[str, Any]) -> tuple:
     return float(confidence), lang
 
 
-def _launch(key: str, argv: list, state: Dict[str, Any]) -> None:
-    """Run the export's child process (CPU only) and keep ``state`` — what the interface polls — current."""
+def _launch(key: str, argv: list, state: Dict[str, Any], session_id: str, label: str, target: Callable[[], Path]) -> None:
+    """Run the export's child process (CPU only) and keep ``state`` — what the interface polls — and
+    its task (the Jobs list) current. ``target()``: the ZIP it writes, for what a cancelled or killed
+    run leaves behind."""
     import asyncio
     import os
+    from task_manager import task_manager
     env = dict(os.environ)
     env.setdefault("OMP_NUM_THREADS", "8")       # the pod grants ~26 CPUs and shows 252
     env["CUDA_VISIBLE_DEVICES"] = ""             # an export never touches the card
     _RUNS[key] = state
+    tid = task_manager.start(session_id, "export", label)
+    state["task_id"] = tid
 
     async def _run():
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv, cwd=str(_SERVER_DIR), env=env, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT)
+            _PROCS[key] = proc
+            if state.get("cancel"):               # (cancelled before the process existed)
+                proc.terminate()
             assert proc.stdout is not None
             report, error, tail = None, None, []
             async for raw in proc.stdout:
@@ -102,18 +118,63 @@ def _launch(key: str, argv: list, state: Dict[str, Any]) -> None:
                 elif line.startswith("PROGRESS "):
                     pct, _, msg = line[9:].partition(" ")
                     state.update(progress=int(pct) if pct.isdigit() else state["progress"], message=msg)
+                    task_manager.update(tid, pct=state["progress"], detail=msg)
                 elif line.strip():
                     print(f"[export] {line}")
                     tail = (tail + [line])[-5:]
             code = await proc.wait()
-            if code == 0 and report is not None:
+            if state.get("cancel"):
+                state.update(status="cancelled", message="cancelled")
+            elif code == 0 and report is not None:
                 state.update(status="done", progress=100, message="done", report=report)
             else:
                 state.update(status="failed", error=error or f"the export ended with code {code}: {' | '.join(tail)}")
         except Exception as e:  # noqa: BLE001 — declared in the state the interface polls
             state.update(status="failed", error=f"{type(e).__name__}: {e}")
+        finally:
+            _PROCS.pop(key, None)
+            if state.get("status") == "running":                      # (the task itself was cancelled: the server stopping)
+                state.update(status="failed", error="the export was interrupted")
+            if state["status"] != "done":
+                try:
+                    left = P.discard_partial(target())                # (a killed child removes nothing itself)
+                    if left:
+                        print(f"[export] {session_id}: removed what the export left: {left}", flush=True)
+                except Exception as e:  # noqa: BLE001 — said, never hidden
+                    print(f"[export] ❌ {session_id}: could not remove what the export left: {e}", flush=True)
+            if state["status"] == "done":
+                task_manager.finish(tid)
+            elif state["status"] == "cancelled":
+                task_manager.cancel(tid, "by the user")
+            else:
+                task_manager.fail(tid, str(state.get("error") or ""))
 
     asyncio.get_running_loop().create_task(_run())
+
+
+async def _cancel(key: str) -> Dict[str, Any]:
+    """Stop the running export ``key``: asked to end (it removes what it was writing), killed if it
+    has not ended within CANCEL_WAIT_S. Returns its state."""
+    import asyncio
+    state = _RUNS.get(key)
+    if not state or state.get("status") != "running":
+        raise HTTPException(409, detail={"error": "no export is running"})
+    state["cancel"] = True
+    proc = _PROCS.get(key)
+    if proc is not None and proc.returncode is None:
+        proc.terminate()
+    waited = 0.0
+    while state.get("status") == "running" and waited < CANCEL_WAIT_S:
+        await asyncio.sleep(0.1)
+        waited += 0.1
+    if state.get("status") == "running":
+        proc = _PROCS.get(key)
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+        while state.get("status") == "running" and waited < CANCEL_WAIT_S + 5.0:
+            await asyncio.sleep(0.1)
+            waited += 0.1
+    return state
 
 
 @router.post("/{session_id}")
@@ -142,7 +203,8 @@ async def export_run(session_id: str, body: Dict[str, Any]):
                              "progress": 0, "message": "starting"}
     if _audit_log is not None:
         _audit_log("export.run", session_id, detail=json.dumps({"scan": scan_key, "items": items, "confidence": confidence}))
-    _launch(key, argv, state)
+    _launch(key, argv, state, session_id, f"Export of {session_id} {scan_key or ''}".strip(),
+            lambda: P.zip_path(P.context(session_id, scan_key), session_id, scan_key))
     return {"ok": True, **state}
 
 
@@ -216,7 +278,18 @@ async def export_session_run(session_id: str, body: Dict[str, Any]):
                              "progress": 0, "message": "starting"}
     if _audit_log is not None:
         _audit_log("export.run", session_id, detail=json.dumps({**selection, "confidence": confidence}))
-    _launch(key, argv, state)
+    _launch(key, argv, state, session_id, f"Export of {session_id}",
+            lambda: P.session_zip_path(P.context_of_project(session_id), session_id))
+    return {"ok": True, **state}
+
+
+@router.post("/{session_id}/session_cancel")
+async def export_session_cancel(session_id: str):
+    """Stop the session's running export (the Jobs list's Cancel). Nothing half-written stays; the
+    previous whole export, if any, is untouched."""
+    state = await _cancel(_session_key(session_id))
+    if _audit_log is not None:
+        _audit_log("export.cancel", session_id, detail=json.dumps({"status": state.get("status")}))
     return {"ok": True, **state}
 
 

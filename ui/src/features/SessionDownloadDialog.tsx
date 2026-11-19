@@ -9,14 +9,15 @@
  * Its two sections:
  *   · DOWNLOAD SESSION — the session as it is, one ZIP that uploads again as a session; its scans are ticked (all
  *     of them at first) and one left out is not in the ZIP. The browser's own download (it can be resumed).
- *   · EXPORT — files other programs open, one ZIP built on the server and downloaded when it is ready: of each scan
+ *   · EXPORT — files other programs open, one ZIP built on the server and downloaded when it is ready (BY THE APP:
+ *     the export is a job — it is listed in Jobs, where it can be cancelled, and this window may be closed): of each scan
  *     the cloud (E57 / LAS / PLY), its meshes (GLB), the mesh as IFC, the objects table (CSV); and the IFCs loaded
  *     in the project. Nothing is ticked at first. The files hold the geometry AS IT IS ON DISK — each scan's README
  *     says its epoch and calibration.
  * There is no other Export in the interface: STAC's export commands open this window.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Download, Play } from 'lucide-react'
+import { Ban, Download, Play } from 'lucide-react'
 import { Dialog } from '../components/ui/Dialog'
 import { Button } from '../components/ui/Button'
 import { Banner } from '../components/ui/Banner'
@@ -37,7 +38,7 @@ interface ArchivePlan { files: number; bytes: number; scans: string[]; by_scan: 
 interface PlanItem { available: boolean; bytes?: number; why?: string; elements?: number; objects?: number; meshes?: string[] }
 interface ScanState { geometry_epoch: number; calibration: { state?: string; scale_factor?: number | null; mode?: string } }
 interface ScanPlan { points: number; items: Record<ExportItem, PlanItem>; state: ScanState | null }
-interface ExportRun { status: 'idle' | 'running' | 'done' | 'failed'; progress?: number; message?: string; error?: string }
+interface ExportRun { status: 'idle' | 'running' | 'done' | 'failed' | 'cancelled'; progress?: number; message?: string; error?: string }
 interface ExportPlan {
   scans: Record<string, ScanPlan>
   loaded_ifcs: { file: string; bytes: number }[]
@@ -59,6 +60,10 @@ interface SessionDownloadDialogProps {
   defaultConfidence: number
   /** start the browser's download of the session with these scans (none given: all) — true, or why not */
   onDownloadSession: (id: string, scans?: string[]) => Promise<true | string>
+  /** an export was launched from this window: the app follows it from here on (Jobs, its ZIP when it ends) */
+  onExportLaunched: (id: string) => void
+  /** stop the session's running export */
+  onCancelExport: (id: string) => void
   onClose: () => void
 }
 
@@ -66,7 +71,7 @@ const reason = (d: any, status: number): string =>
   String(d?.detail?.error || (typeof d?.detail === 'string' ? d.detail : '') || `HTTP ${status}`)
 const scanName = (key: string) => key.replace(/\/default$/, '')
 
-export function SessionDownloadDialog({ open, sessionId, initialSection, canManage, token, activeScanKey, defaultConfidence, onDownloadSession, onClose }: SessionDownloadDialogProps) {
+export function SessionDownloadDialog({ open, sessionId, initialSection, canManage, token, activeScanKey, defaultConfidence, onDownloadSession, onExportLaunched, onCancelExport, onClose }: SessionDownloadDialogProps) {
   const t = useT()
   const fmt = useFmt()
   const { lang } = useI18n()
@@ -84,10 +89,9 @@ export function SessionDownloadDialog({ open, sessionId, initialSection, canMana
   const [chosen, setChosen] = useState<Set<string>>(new Set())           // "<scan key>|<item>"
   const [withIfcs, setWithIfcs] = useState(false)
   const [pct, setPct] = useState(Math.round((defaultConfidence || 0) * 100))
+  // (an export launched here is the APP's from then on: it downloads the ZIP when the export ends, with this window
+  //  open or closed — USER 2026-11-19: "cerre la ventana de exportacion y no figura en jobs la tarea de exportar")
   const [run, setRun] = useState<ExportRun>({ status: 'idle' })
-  // an export launched from THIS window: when it ends its ZIP is downloaded at once (one action, not Export and
-  // then Download)
-  const launched = useRef(false)
 
   const size = (bytes: number) => (bytes >= 1e9 ? `${fmt.number(bytes / 1e9, bytes >= 1e10 ? 0 : 1)} GB` : fmt.bytesMb(bytes / 1e6))
   const base = sessionId ? `/api/export/${encodeURIComponent(sessionId)}` : ''
@@ -134,16 +138,7 @@ export function SessionDownloadDialog({ open, sessionId, initialSection, canMana
       try {
         const d = await (await fetch(`${base}/session_status`)).json()
         setRun(d as ExportRun)
-        if (d.status !== 'running') {
-          const p = await loadPlan()
-          if (d.status === 'done' && launched.current && p?.previous) {
-            const a = document.createElement('a')
-            a.href = `${base}/session_download`
-            a.download = p.previous.file
-            document.body.appendChild(a); a.click(); a.remove()
-          }
-          launched.current = false
-        }
+        if (d.status !== 'running') await loadPlan()
       } catch { /* the next poll tells */ }
     }, 1500)
     return () => clearInterval(iv)
@@ -157,10 +152,10 @@ export function SessionDownloadDialog({ open, sessionId, initialSection, canMana
       const d = await r.json().catch(() => ({}))
       if (!r.ok) { const why = reason(d, r.status); setRun({ status: 'failed', error: why }); return why }
       setRun(d as ExportRun)
-      launched.current = true
+      if (sessionId) onExportLaunched(sessionId)
       return true
     } catch (e) { const why = e instanceof Error ? e.message : String(e); setRun({ status: 'failed', error: why }); return why }
-  }, [base, lang])
+  }, [base, lang, sessionId, onExportLaunched])
 
   // ── the session: what is ticked ──
   const kept = archive ? archive.scans.filter(k => scans.has(k)) : []
@@ -319,7 +314,16 @@ export function SessionDownloadDialog({ open, sessionId, initialSection, canMana
                 {!nothing && exportBytes > 0 && <p className="stac-muted">{t('export.totalUpTo', { size: size(exportBytes) })}</p>}
               </>
             )}
-            {running && <Progress value={run.progress ?? 0} label={run.message ?? ''} />}
+            {running && (
+              <>
+                <Progress value={run.progress ?? 0} label={run.message ?? ''} />
+                <Banner tone="info" compact
+                  action={<Button size="sm" variant="danger" icon={<Ban aria-hidden />} onClick={() => { if (sessionId) onCancelExport(sessionId) }}>{t('export.cancel')}</Button>}>
+                  {t('export.keepsRunning')}
+                </Banner>
+              </>
+            )}
+            {run.status === 'cancelled' && <Banner tone="warn" compact>{t('export.cancelled')}</Banner>}
             {run.status === 'failed' && <Banner tone="err" compact>{t('export.failed', { detail: run.error ?? '' })}</Banner>}
             {!running && plan?.previous && (
               <Banner tone={run.status === 'done' ? 'ok' : 'info'} compact

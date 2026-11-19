@@ -75,7 +75,7 @@ import { ReferenceDialog, type ReferenceMode } from './features/ReferenceDialog'
 import { CalibrationDialog, type CalibrationDraft, type CalMeasurement, type CalPlane, type CalSummary } from './features/CalibrationDialog'
 import { EvaluationPanel } from './features/EvaluationPanel'
 import { PhysicsPanel } from './features/PhysicsPanel'
-import { ConsolePanel, JobsPanel, PropertiesPanel } from './features/DockPanels'
+import { ConsolePanel, JobsPanel, PropertiesPanel, type JobTask } from './features/DockPanels'
 
 /** Translator for callbacks defined before the i18n hook is read. */
 const tt = (key: string, vars?: Record<string, string | number | null | undefined>) => getT()(key, vars)
@@ -482,7 +482,8 @@ function App() {
   // cual en cola"). The manager runs one at a time and queues the rest, so a
   // project list has to say which is which. Polled, because the progress
   // broadcast only carries the job that moved.
-  const [pipelineJobs, setPipelineJobs] = useState<Record<string, { status: string; queue_position: number; scan_key?: string }>>({})
+  const [pipelineJobs, setPipelineJobs] = useState<Record<string, { status: string; queue_position: number; scan_key?: string;
+                                                                    scans?: Record<string, { status: string; queue_position: number }> }>>({})
   useEffect(() => {
     let stop = false
     const poll = async () => {
@@ -1069,7 +1070,7 @@ function App() {
         // it has its own progress, and taking it for one hid the toolbar of a session whose
         // segmentation sat queued behind another scan for hours (USER 2026-10-09, observatorio)
         const tasks = ((data.tasks || []) as { label: string; pct: number; detail: string; task_type?: string }[])
-          .filter(tk => tk.task_type !== 'pipeline')
+          .filter(tk => tk.task_type !== 'pipeline' && tk.task_type !== 'export')   // (nor is an export: it reads, in its own process)
         if (tasks && tasks.length > 0) {
           const t = tasks[0]  // show the first active task
           const msg = t.detail ? `${t.label} — ${t.detail}` : t.label
@@ -1741,7 +1742,7 @@ function App() {
   }, [activeSession, activeScanTab, cloudEverShown, drawCalibrationMarks])
   const [metersPerPixel, setMetersPerPixel] = useState<number | null>(null)
   const [certifyState, setCertifyState] = useState<any>(null)
-  const [activeTasks, setActiveTasks] = useState<Array<{ label: string; pct: number; detail: string }>>([])
+  const [activeTasks, setActiveTasks] = useState<JobTask[]>([])
   const canManage = user?.role === 'admin' || user?.role === 'manager'
 
   useEffect(() => { setSelectedSegmentId(null); setReadouts([]) }, [activeSession])
@@ -1752,17 +1753,25 @@ function App() {
     fetch(`/api/certify/state/${activeSession}`).then(r => (r.ok ? r.json() : null)).then(st => { if (!cancelled) setCertifyState(st) }).catch(() => {})
     return () => { cancelled = true }
   }, [activeSession, certifyRefresh])
-  // active server tasks for the Jobs dock
+  // EVERY running server task, of every session, for the Jobs dock and the count on the console icon (USER
+  // 2026-11-19: "deberia figurar en jobs" / "en el icono de consola deberia figurar el numero de tareas que se
+  // estan ejecutando o en cola") — an export, a comparison, a fusion… (pipeline jobs: /api/pipelines/active)
   useEffect(() => {
-    if (!activeSession || !connected) { setActiveTasks([]); return }
-    const iv = setInterval(async () => {
+    if (!connected) { setActiveTasks([]); return }
+    let stop = false
+    const poll = async () => {
       try {
-        const d = await fetch(`/api/tasks/${activeSession}`).then(r => r.json())
-        setActiveTasks((d.tasks || []).map((x: any) => ({ label: x.label || x.task_type || '', pct: x.pct || 0, detail: x.detail || '' })))
+        const d = await fetch('/api/tasks').then(r => r.json())
+        const next: JobTask[] = (d.tasks || []).map((x: any) => ({ id: String(x.task_id ?? ''), session: String(x.session_id ?? ''), type: String(x.task_type ?? ''),
+                                                                  label: x.label || x.task_type || '', pct: x.pct || 0, detail: x.detail || '' }))
+        // (the same list is the same state: the app is not drawn again every poll)
+        if (!stop) setActiveTasks(prev => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next))
       } catch { /* keep last */ }
-    }, 4000)
-    return () => clearInterval(iv)
-  }, [activeSession, connected])
+    }
+    void poll()
+    const iv = setInterval(poll, 4000)
+    return () => { stop = true; clearInterval(iv) }
+  }, [connected])
 
   // keyboard: palette, inspector, left panel, console, reset camera
   useEffect(() => {
@@ -1784,6 +1793,55 @@ function App() {
     setStatusMessage(msg)
     if (tone !== 'info') notify(msg, { tone })
   }, [notify])
+
+  // AN EXPORT IS A JOB OF THE APP, NOT OF ITS WINDOW (USER 2026-11-19: "cerre la ventana de exportacion y no figura
+  // en jobs la tarea de exportar, que paso?, se corto? … deberia figurar en jobs, y poder cancelarse o dejarla
+  // continuar"): the exports this page launched are followed HERE — their window may be closed — and when one ends
+  // its ZIP is downloaded, or its failure said. Kept across a page reload, as the running pipeline is.
+  const exportWatch = useRef<Set<string>>(new Set())
+  const [exportsWatched, setExportsWatched] = useState(0)                   // how many: it starts and stops the poll
+  const keepExportWatch = useCallback(() => {
+    try { sessionStorage.setItem('exportsWatched', JSON.stringify([...exportWatch.current])) } catch { /* no storage: this page only */ }
+    setExportsWatched(exportWatch.current.size)
+  }, [])
+  const watchExport = useCallback((sid: string) => { exportWatch.current.add(sid); keepExportWatch() }, [keepExportWatch])
+  useEffect(() => {
+    try {
+      for (const sid of JSON.parse(sessionStorage.getItem('exportsWatched') || '[]')) if (typeof sid === 'string') exportWatch.current.add(sid)
+    } catch { /* nothing kept */ }
+    setExportsWatched(exportWatch.current.size)
+  }, [])
+  useEffect(() => {
+    if (!exportsWatched || !connected) return
+    const iv = setInterval(async () => {
+      for (const sid of [...exportWatch.current]) {
+        try {
+          const d = await (await fetch(`/api/export/${encodeURIComponent(sid)}/session_status`)).json()
+          if (d.status === 'running' || !exportWatch.current.delete(sid)) continue    // (the delete: ONE tick hands it over)
+          keepExportWatch()
+          if (d.status === 'done' && d.report?.file) {
+            const a = document.createElement('a')
+            a.href = `/api/export/${encodeURIComponent(sid)}/session_download`
+            a.download = d.report.file
+            document.body.appendChild(a); a.click(); a.remove()
+            report(t('jobs.exportReady', { session: sid, file: d.report.file }), 'ok')
+          } else if (d.status === 'failed') report(t('jobs.exportFailed', { session: sid, detail: d.error ?? '' }), 'err')
+          else if (d.status === 'cancelled') report(t('jobs.exportCancelled', { session: sid }), 'warn')
+          else report(t('jobs.exportLost', { session: sid }), 'err')                 // (the server was restarted under it)
+        } catch { /* the next tick tells */ }
+      }
+    }, 2000)
+    return () => clearInterval(iv)
+  }, [exportsWatched, connected, keepExportWatch, report, t])
+  const cancelExport = useCallback(async (sid: string) => {
+    try {
+      const r = await fetch(`/api/export/${encodeURIComponent(sid)}/session_cancel`, { method: 'POST' })
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok) { report(t('jobs.exportCancelFailed', { session: sid, detail: String(d?.detail?.error ?? `HTTP ${r.status}`) }), 'err'); return }
+      // (an export this page launched is reported by its watch above; another page's, here)
+      if (!exportWatch.current.has(sid)) report(t('jobs.exportCancelled', { session: sid }), 'warn')
+    } catch (err: any) { report(t('jobs.exportCancelFailed', { session: sid, detail: String(err?.message ?? err) }), 'err') }
+  }, [report, t])
 
   const disconnect = useCallback((andLogout = false) => {
     viewportRef.current?.sendCommand({ type: 'cleared' })
@@ -3279,9 +3337,18 @@ function App() {
     { id: 'docs', icon: <FileText aria-hidden />, label: t('docs.title'), active: layout.state.leftTab === 'docs', disabled: !hasSession, onClick: () => layout.toggleLeftTab('docs') },
     { id: 'gantt', icon: <ChartNoAxesGantt aria-hidden />, label: t('gantt.title'), active: layout.state.leftTab === 'gantt', disabled: !hasSession, onClick: () => layout.toggleLeftTab('gantt') },
   ]
+  // HOW MANY TASKS ARE RUNNING OR QUEUED (USER 2026-11-19: "en el icono de consola deberia figurar el numero de
+  // tareas que se estan ejecutando o en cola"): every pipeline job — each scan's, running or waiting its turn —,
+  // every server task (an export, a comparison, a fusion…) and every video being extracted
+  const pipelineQueue = Object.entries(pipelineJobs).flatMap(([sid, g]) => {
+    const scans = Object.entries(g.scans ?? {})
+    return scans.length ? scans.map(([scan, s]) => ({ session: sid, scan: scan as string | undefined, status: s.status, position: s.queue_position }))
+      : [{ session: sid, scan: g.scan_key, status: g.status, position: g.queue_position }]
+  })
+  const jobCount = pipelineQueue.length + activeTasks.length + Object.keys(extractingSessions).length
   const activityBottom: ActivityItem[] = [
     { id: 'team', icon: <Users aria-hidden />, label: t('team.title'), active: layout.state.leftTab === 'team', onClick: () => layout.toggleLeftTab('team') },
-    { id: 'console', icon: <Monitor aria-hidden />, label: t('dock.console'), shortcut: 'Mod+`', active: consoleOpen, onClick: () => setConsoleOpen(!consoleOpen) },
+    { id: 'console', icon: <Monitor aria-hidden />, label: t('dock.console'), shortcut: 'Mod+`', badge: jobCount || undefined, active: consoleOpen, onClick: () => setConsoleOpen(!consoleOpen) },
     { id: 'settings', icon: <Settings aria-hidden />, label: t('menu.settings'), onClick: () => setSettingsOpen(true) },
   ]
 
@@ -3695,14 +3762,15 @@ function App() {
             <BottomDock
               tabs={[
                 { id: 'console', label: t('dock.console'), icon: <Terminal aria-hidden /> },
-                { id: 'jobs', label: t('dock.jobs'), icon: <ListTodo aria-hidden />, badge: pipelineRunning ? 1 : undefined },
+                { id: 'jobs', label: t('dock.jobs'), icon: <ListTodo aria-hidden />, badge: jobCount || undefined },
                 { id: 'timeline', label: t('dock.timeline'), icon: <Clock aria-hidden /> },
                 { id: 'evaluation', label: t('dock.evaluation'), icon: <FlaskConical aria-hidden /> },
               ]}
               panels={{
                 console: <ConsolePanel logs={consoleLogs} />,
                 jobs: <JobsPanel pipeline={pipelineRunning ? { session_id: pipelineRunning.session_id, status: pipelineRunning.status, stages: pipelineStages } : null} onCancelPipeline={handlePipelineCancel}
-                  resume={resumeBusy ? resumeProgress : null} extracting={extractingSessions} tasks={activeTasks} />,
+                  queue={pipelineQueue.filter(q => !(pipelineRunning && q.status === 'running' && q.session === pipelineRunning.session_id))}
+                  resume={resumeBusy ? resumeProgress : null} extracting={extractingSessions} tasks={activeTasks} onCancelExport={cancelExport} />,
                 timeline: <ScansPanel variant="timeline" sessionId={activeSession} scans={projectScans} activeScanKey={activeScanTab}
                   onOpenScan={sc => activeSession && openScanFromTree(activeSession, sc)} onSetReference={sc => activeSession && setReference(activeSession, sc)} />,
                 evaluation: <EvaluationPanel />,
@@ -3794,7 +3862,8 @@ function App() {
           canManage={canManage} token={token}
           activeScanKey={downloadDialog.session === activeSession ? activeScanTab : null}
           defaultConfidence={downloadDialog.session === activeSession ? confidenceThreshold : 0}
-          onDownloadSession={downloadSessionZip} onClose={() => setDownloadDialog(null)} />
+          onDownloadSession={downloadSessionZip} onExportLaunched={watchExport} onCancelExport={cancelExport}
+          onClose={() => setDownloadDialog(null)} />
       )}
 
       {/* THE SELECTED OBJECT'S MENU (a right click on one of its points) and the modal a ticket is written in */}

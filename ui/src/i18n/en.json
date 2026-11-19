@@ -584,13 +584,21 @@
   },
   "jobs": {
     "empty": "No jobs running",
-    "emptyDesc": "Reconstructions, {@corrections} and meshing show up here with their progress.",
+    "emptyDesc": "Reconstructions, {@corrections}, comparisons and exports show up here with their progress.",
     "pipeline": "Reconstruction of {session}",
     "meshing": "Meshing",
     "object": "Generative object",
     "resume": "Resume propagation",
     "extracting": "Frame extraction of {session}",
-    "hint": "Every job keeps running on the server even if you close this view."
+    "hint": "Every job keeps running on the server even if you close this view.",
+    "export": "Export of {session}",
+    "taskOf": "{label} — {session}",
+    "queuedAt": "queued ({n})",
+    "exportReady": "Export of {session} ready: {file} is being downloaded.",
+    "exportFailed": "The export of {session} failed: {detail}",
+    "exportCancelled": "Export of {session} cancelled.",
+    "exportCancelFailed": "Could not cancel the export of {session}: {detail}",
+    "exportLost": "The export of {session} was interrupted (the server restarted): launch it again."
   },
   "console": {
     "empty": "No server messages yet"
@@ -1488,7 +1496,10 @@
     "previous": "Last export: {file} ({size}, {when}).",
     "downloadAgain": "Download again",
     "scanPoints": "{points} points",
-    "loadedIfcs": "IFCs loaded in the project ({n}) — {size}"
+    "loadedIfcs": "IFCs loaded in the project ({n}) — {size}",
+    "keepsRunning": "You can close this window: the export keeps running, it is listed in Jobs, and the ZIP is downloaded when it is ready.",
+    "cancel": "Cancel export",
+    "cancelled": "Export cancelled."
   },
   "tickets": {
     "title": "Tickets",

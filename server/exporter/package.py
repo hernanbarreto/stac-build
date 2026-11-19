@@ -339,10 +339,36 @@ def _produce(session: str, scan_key: Optional[str], items: List[str], *, confide
     return files, lines, report
 
 
+def partial_of(target: Path) -> Path:
+    """The ZIP while it is being written, beside ``target`` (it takes its name only when it is whole)."""
+    return target.with_name(f".{target.name}.tmp")
+
+
+def scratch_of(target: Path) -> Path:
+    from reconstruction.grid_knn import config_section
+    return Path(str(config_section(("export",), ("scratch_dir",))["scratch_dir"])) / target.stem
+
+
+def discard_partial(target: Path) -> List[str]:
+    """Remove what an export of ``target`` that did not end left behind — the ZIP being written and
+    its folder on the scratch disk (an export CANCELLED or killed: USER 2026-11-19, "deberia figurar
+    en jobs, y poder cancelarse o dejarla continuar"). The previous whole export stays. Returns what
+    was removed."""
+    gone = []
+    tmp = partial_of(target)
+    if tmp.exists():
+        tmp.unlink()
+        gone.append(tmp.name)
+    work = scratch_of(target)
+    if work.exists():
+        shutil.rmtree(work, ignore_errors=True)
+        gone.append(str(work))
+    return gone
+
+
 def _scratch(target: Path, need: int) -> Path:
     """The folder on the local disk (export.scratch_dir) the files are written in before they enter the ZIP."""
-    from reconstruction.grid_knn import config_section
-    work = Path(str(config_section(("export",), ("scratch_dir",))["scratch_dir"])) / target.stem
+    work = scratch_of(target)
     if work.exists():
         shutil.rmtree(work)
     work.mkdir(parents=True)
@@ -357,20 +383,24 @@ def _pack(target: Path, entries: List[Tuple[Dict[str, Any], str]], texts: List[T
           at: Callable[[float, str], None]) -> None:
     """Write the ZIP ``target``: ``texts`` [(arc, text)] and ``entries`` [(file, arc)]; a file written
     for the export is removed once it is in."""
-    tmp = target.with_name(f".{target.name}.tmp")
+    tmp = partial_of(target)
     total = sum(f["path"].stat().st_size for f, _ in entries) or 1
     done = 0
-    with zipfile.ZipFile(tmp, "w", allowZip64=True) as z:
-        for arc, text in texts:
-            z.writestr(arc, text, compress_type=zipfile.ZIP_DEFLATED)
-        for f, arc in entries:
-            at(done / total, f"packing {f['arc']}")
-            stored = f["path"].suffix.lower() in _STORED
-            z.write(f["path"], arc, compress_type=zipfile.ZIP_STORED if stored else zipfile.ZIP_DEFLATED,
-                    compresslevel=None if stored else 1)
-            done += f["path"].stat().st_size
-            if not f.get("source"):
-                f["path"].unlink()                                    # (a written file is in the ZIP now)
+    try:
+        with zipfile.ZipFile(tmp, "w", allowZip64=True) as z:
+            for arc, text in texts:
+                z.writestr(arc, text, compress_type=zipfile.ZIP_DEFLATED)
+            for f, arc in entries:
+                at(done / total, f"packing {f['arc']}")
+                stored = f["path"].suffix.lower() in _STORED
+                z.write(f["path"], arc, compress_type=zipfile.ZIP_STORED if stored else zipfile.ZIP_DEFLATED,
+                        compresslevel=None if stored else 1)
+                done += f["path"].stat().st_size
+                if not f.get("source"):
+                    f["path"].unlink()                                # (a written file is in the ZIP now)
+    except BaseException:                                             # (a failure — or the export cancelled: SystemExit)
+        tmp.unlink(missing_ok=True)
+        raise
     tmp.replace(target)
 
 
@@ -538,6 +568,11 @@ def main(argv: List[str]) -> int:
     ap.add_argument("--lang", default="es")
     a = ap.parse_args(argv)
     say = lambda p, m: print(f"PROGRESS {p} {m}", flush=True)       # noqa: E731
+
+    def _stop(_signum, _frame):                                     # a CANCELLED export (the routes send SIGTERM):
+        raise SystemExit(143)                                       # unwind — what was being written is removed
+    import signal
+    signal.signal(signal.SIGTERM, _stop)
     try:
         if a.selection:
             sel = json.loads(a.selection)

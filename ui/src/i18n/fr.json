@@ -584,13 +584,21 @@
   },
   "jobs": {
     "empty": "Aucune tâche en cours",
-    "emptyDesc": "Les reconstructions, {@corrections} et maillages apparaissent ici avec leur progression.",
+    "emptyDesc": "Les reconstructions, {@corrections}, comparaisons et exports apparaissent ici avec leur progression.",
     "pipeline": "Reconstruction de {session}",
     "meshing": "Maillage",
     "object": "Objet génératif",
     "resume": "Reprise de la propagation",
     "extracting": "Extraction des images de {session}",
-    "hint": "Chaque tâche continue de s'exécuter sur le serveur même si vous fermez cette vue."
+    "hint": "Chaque tâche continue de s'exécuter sur le serveur même si vous fermez cette vue.",
+    "export": "Export de {session}",
+    "taskOf": "{label} — {session}",
+    "queuedAt": "en file ({n})",
+    "exportReady": "Export de {session} prêt : {file} est en cours de téléchargement.",
+    "exportFailed": "L’export de {session} a échoué : {detail}",
+    "exportCancelled": "Export de {session} annulé.",
+    "exportCancelFailed": "Impossible d’annuler l’export de {session} : {detail}",
+    "exportLost": "L’export de {session} a été interrompu (le serveur a redémarré) : relancez-le."
   },
   "console": {
     "empty": "Pas encore de messages du serveur"
@@ -1488,7 +1496,10 @@
     "previous": "Dernier export : {file} ({size}, {when}).",
     "downloadAgain": "Télécharger à nouveau",
     "scanPoints": "{points} points",
-    "loadedIfcs": "IFC chargés dans le projet ({n}) — {size}"
+    "loadedIfcs": "IFC chargés dans le projet ({n}) — {size}",
+    "keepsRunning": "Vous pouvez fermer cette fenêtre : l’export continue, il figure dans Tâches, et le ZIP est téléchargé dès qu’il est prêt.",
+    "cancel": "Annuler l’export",
+    "cancelled": "Export annulé."
   },
   "tickets": {
     "title": "Tickets",

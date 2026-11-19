@@ -386,6 +386,21 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     `run_many`; `GET /api/export/{id}/session_plan`, `POST …/session`, `…/session_status`,
     `…/session_download`; its own process (CPU), downloaded by the page when it ends. NOTHING is ticked at
     first (the assistant's choice, told to him: everything ticked on pccr is ~17 GB of clouds).
+  · AN EXPORT IS A JOB (USER 2026-11-19, having closed the window while his first one ran: "cerre la ventana de
+    exportacion y no figura en jobs la tarea de exportar, que paso?, se corto?, no se corto pero en ningun lado
+    la reporta? no esta bien, deberia figurar en jobs, y poder cancelarse o dejarla continuar" / "y en el icono
+    de consola deberia figurar el numero de tareas que se estan ejecutando o en cola"): every export registers
+    in the task manager (type `export`, exporter_api._launch). The Jobs dock lists EVERY running task of every
+    session (`GET /api/tasks`) and the other pipeline jobs (running elsewhere, queued); the export's row has
+    Cancel (`POST /api/export/{id}/session_cancel`: the child is asked to stop and unwinds, killed after 10 s;
+    what it was writing is removed, the previous whole ZIP stays). The page that launched an export follows
+    it WITH THE WINDOW CLOSED (App `exportWatch`, kept across a reload) and downloads the ZIP when it ends, or
+    says its failure. The console icon of the left rail and the Jobs tab carry THE NUMBER OF TASKS RUNNING OR
+    QUEUED: every pipeline job (each session's and scan's) + every server task + every video being extracted.
+    An export is never taken for a session load (the tasks poll's overlay). CHECKED through the live backend:
+    an export of bufferStop's cloud listed at 12 % ("writing the cloud as E57"), cancelled in 1.1 s, nothing
+    left behind; 9 tests. HIS FIRST EXPORT (pccr 2026-08-31, mesh + IFC) ended whole with the window closed:
+    pccr/exports/pccr_stac_export.zip, 1.04 GB. Not tried in a browser by the assistant.
   · NO OTHER EXPORT in the interface: the File menu's entry, the Instances panel's button and ExportDialog are
     gone. By voice `export.open` / `export.run` open this window (export.run = the scan on screen) and
     `sessions.download_zip` still downloads the whole session at once.

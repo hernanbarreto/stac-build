@@ -5921,6 +5921,15 @@ async def refresh_segmentation(body: dict):
     return {"ok": True, "queued": True, "job": job.to_dict(), "instances": []}
 
 
+@app.get("/api/tasks")
+async def get_all_active_tasks():
+    """Every running task, of every session — the Jobs list and the count on the console icon
+    (USER 2026-11-19: "en el icono de consola deberia figurar el numero de tareas que se estan
+    ejecutando o en cola"). Pipeline jobs are not here: /api/pipelines/active."""
+    from task_manager import task_manager
+    return {"tasks": task_manager.get_active()}
+
+
 @app.get("/api/tasks/{session_id}")
 async def get_active_tasks(session_id: str):
     """Return all active (running) tasks for a session."""

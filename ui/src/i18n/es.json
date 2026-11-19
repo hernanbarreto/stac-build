@@ -584,13 +584,21 @@
   },
   "jobs": {
     "empty": "No hay trabajos en curso",
-    "emptyDesc": "Las reconstrucciones, {@corrections} y mallados aparecen acá con su progreso.",
+    "emptyDesc": "Las reconstrucciones, {@corrections}, comparaciones y exportaciones aparecen acá con su progreso.",
     "pipeline": "Reconstrucción de {session}",
     "meshing": "Mallado",
     "object": "Objeto generativo",
     "resume": "Reanudar propagación",
     "extracting": "Extracción de cuadros de {session}",
-    "hint": "Cada trabajo sigue corriendo en el servidor aunque cierres esta vista."
+    "hint": "Cada trabajo sigue corriendo en el servidor aunque cierres esta vista.",
+    "export": "Exportación de {session}",
+    "taskOf": "{label} — {session}",
+    "queuedAt": "en cola ({n})",
+    "exportReady": "Exportación de {session} lista: se está descargando {file}.",
+    "exportFailed": "La exportación de {session} falló: {detail}",
+    "exportCancelled": "Exportación de {session} cancelada.",
+    "exportCancelFailed": "No se pudo cancelar la exportación de {session}: {detail}",
+    "exportLost": "La exportación de {session} se interrumpió (el servidor se reinició): lanzala de nuevo."
   },
   "console": {
     "empty": "Todavía no hay mensajes del servidor"
@@ -1488,7 +1496,10 @@
     "previous": "Última exportación: {file} ({size}, {when}).",
     "downloadAgain": "Volver a descargar",
     "scanPoints": "{points} puntos",
-    "loadedIfcs": "IFC cargados en el proyecto ({n}) — {size}"
+    "loadedIfcs": "IFC cargados en el proyecto ({n}) — {size}",
+    "keepsRunning": "Podés cerrar esta ventana: la exportación sigue corriendo, figura en Trabajos, y el ZIP se descarga cuando está listo.",
+    "cancel": "Cancelar exportación",
+    "cancelled": "Exportación cancelada."
   },
   "tickets": {
     "title": "Tickets",

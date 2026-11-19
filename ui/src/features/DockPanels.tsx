@@ -34,17 +34,26 @@ export function ConsolePanel({ logs }: { logs: LogEntry[] }) {
   )
 }
 
+/** a running server task (the task manager's): an export, a BIM comparison, a fusion… */
+export interface JobTask { id: string; session: string; type: string; label: string; pct: number; detail: string }
+
 export interface JobsState {
   pipeline: { session_id?: string; status: string; stages: ProgressStage[] } | null
   onCancelPipeline: () => void
+  /** the other pipeline jobs: one running that this page does not follow, and those waiting their turn */
+  queue: Array<{ session: string; scan?: string; status: string; position: number }>
   resume: { pct: number; detail: string } | null
   extracting: Record<string, number>
-  tasks: Array<{ label: string; pct: number; detail: string }>
+  /** every running task, of every session */
+  tasks: JobTask[]
+  /** stop a session's running export — the one task that is stopped from here (USER 2026-11-19: "deberia figurar
+   *  en jobs, y poder cancelarse o dejarla continuar") */
+  onCancelExport: (session: string) => void
 }
 
 export function JobsPanel(j: JobsState) {
   const t = useT()
-  const any = j.pipeline || j.resume || Object.keys(j.extracting).length || j.tasks.length
+  const any = j.pipeline || j.queue.length || j.resume || Object.keys(j.extracting).length || j.tasks.length
   return (
     <div className="stac-jobs">
       {!any && <EmptyState compact icon={<ListTodo aria-hidden />} title={t('jobs.empty')} description={t('jobs.emptyDesc')} />}
@@ -55,12 +64,23 @@ export function JobsPanel(j: JobsState) {
           <Progress stages={j.pipeline.stages} tone="brand" />
         </Section>
       )}
+      {j.queue.map(q => (
+        <Section key={`${q.session}|${q.scan ?? ''}`} title={t('jobs.pipeline', { session: q.scan ? `${q.session} · ${q.scan}` : q.session })} flush
+          actions={<Badge tone={q.status === 'running' ? 'info' : 'neutral'}>
+            {q.status === 'queued' && q.position > 0 ? t('jobs.queuedAt', { n: q.position }) : t(`jobStatus.${q.status}`)}</Badge>} />
+      ))}
       {j.resume && <Section title={t('jobs.resume')} flush><Progress value={j.resume.pct} label={j.resume.detail} /></Section>}
       {Object.entries(j.extracting).map(([sid, pct]) => (
         <Section key={sid} title={t('jobs.extracting', { session: sid })} flush><Progress value={pct} /></Section>
       ))}
       {j.tasks.map((tk, i) => (
-        <Section key={i} title={tk.label} flush><Progress value={tk.pct} label={tk.detail} /></Section>
+        <Section key={tk.id || i} flush
+          title={tk.type === 'export' ? t('jobs.export', { session: tk.session }) : tk.session ? t('jobs.taskOf', { label: tk.label, session: tk.session }) : tk.label}
+          actions={tk.type === 'export'
+            ? <Button size="sm" variant="danger" icon={<Ban aria-hidden />} onClick={() => j.onCancelExport(tk.session)}>{t('common.cancel')}</Button>
+            : undefined}>
+          <Progress value={tk.pct} label={tk.detail} />
+        </Section>
       ))}
       <p className="stac-jobs__hint">{t('jobs.hint')}</p>
     </div>
