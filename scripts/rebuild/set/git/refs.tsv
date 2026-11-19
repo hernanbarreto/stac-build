@@ -1,5 +1,5 @@
 # repo	kind	name	commit	upstream | message | branch
-stac-build	head	main	17787e84d413dcff5888e14828ce84e73993cbad	
+stac-build	head	main	57e9284fda8b2fe7954365eb4a5a543ceb603a45	
 stac-build	remote	origin	-	https://github.com/hernanbarreto/stac-build.git
 stac-build	branch	amb3r-probe	a376a3faf51e053fc51d8fd6e87fb94fb41b68bb	
 stac-build	branch	audit/precision-geometry-2026-10-23	2643294742867d185c22e353a724753a126f22a9	origin/audit/precision-geometry-2026-10-23
@@ -16,7 +16,7 @@ stac-build	branch	gpu-main	f3233a20a6271f48769398ce56e32fe7d328b414
 stac-build	branch	gpu-projection	2045900d8aaaf9ed60f49e473f1a6337bd7b0c39	
 stac-build	branch	gs-layer	69d2e13c9141b000ca630c917c7972ab396b6620	origin/gs-layer
 stac-build	branch	integ	ffa03c5b48efbed0a9ab55090177fa16951b16ed	
-stac-build	branch	main	17787e84d413dcff5888e14828ce84e73993cbad	origin/main
+stac-build	branch	main	57e9284fda8b2fe7954365eb4a5a543ceb603a45	origin/main
 stac-build	branch	master	e811235522473e657caafb1300b0941b1cc262b6	
 stac-build	branch	merge/gpu-main-2026-11-02	1662e368fef3f3f66df19c7b35daaa933961cf29	
 stac-build	branch	obb-device-draws	d58d07aa88836f648055f246030670626e753633	
@@ -32,8 +32,6 @@ stac-build	branch	worktree-agent-a7ba1e660a9936451	c9e9796729ca0005ffc7dba551bd4
 stac-build	branch	worktree-wf_44315fd6-ad6-3	e817de2e19a274ddd7d0b46928ea6bb775cb1354	
 stac-build	stash	0	1c3db3035b907fe2c65ffef2a47344435f428697	On stac-main: stopped agents partial work 2026-10-01 (stage10, VLM captions, ShapeR button)
 stac-build	stash	1	1726e59c6dcb08a317bd8302a50b64ec9395e6a1	On stac-main: chunk 60/30 + max_walk fuera + scale advisory (2026-09-22) — SIN APLICAR, a la espera de su orden
-stac-build	worktree	tmp/wt_gpu_main	f3233a20a6271f48769398ce56e32fe7d328b414	gpu-main
-stac-build	worktree	tmp/wt_scale	82fbdbd1e71acf2bc420122d377aeca07ad3a2a8	detached
 stac-build__vendor__VGGT-Long	head	gpu-main	bcdb0d94b8f4155d86ca734ff8ace47874fa323b	
 stac-build__vendor__VGGT-Long	remote	origin	-	https://github.com/hernanbarreto/VGGT-Long.git
 stac-build__vendor__VGGT-Long	branch	chunk-structure	86d8fecb749c6f1e45d751082a77699bbfa100ab	

@@ -59,7 +59,7 @@ weight	.cache/huggingface/hub/models--openai--whisper-large-v3-turbo/snapshots/4
 weight	.cache/huggingface/hub/models--openai--whisper-large-v3-turbo/snapshots/41f01f3fe87f28c78e2fbf8b568835947dd65ed9/vocab.json	52	-	models.tsv
 asis	.cache/huggingface/hub/version.txt	1	6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b	
 cache	.cache/huggingface/xet/	0	-	the hub client's transfer cache and logs
-cache	.cache/pip/	0	-	pip's download cache (PIP_CACHE_DIR of the pod's template)
+cache	.stac_rebuild/	0	-	the rebuild's own stamps, logs and downloads
 download	Miniforge3-Linux-x86_64.sh	106038245	42260ffe3830fb953d5eee1bbb32229ff06aa7c3833c1ed7a9a0420a95685d94	Miniforge3 26.3.2-2
 download	cloudflared	39799316	fcfb02b575a52ca1af2e3267af4e1517bcdeb30ac48c834c69abaed3c0576ad2	cloudflared 2026.8.2
 data	cloudflared.log	15552	-	log
@@ -312,8 +312,8 @@ cache	stac-build/.ipynb_checkpoints/	0	-	jupyter
 cache	stac-build/.pytest_cache/	0	-	pytest
 asis	stac-build/archive/sam3_env_20260703.yml	5957	1f28058f8c12f6ef6dab41bdfa0e6d2e51b208847a6ef9795ed3c1c9a6e60c32	
 asis	stac-build/archive/shaper_env_20260703.yml	7470	e4eca92f3de656cb7783521529bb25568b5616ff49fc2eb53f855184c2bbc4df	
-data	stac-build/logs/	353801535	645 files	the backend's logs
-data	stac-build/runs/	5510458922	3933 files	evaluation runs
+data	stac-build/logs/	355285822	693 files	the backend's logs
+data	stac-build/runs/	0	0 files	evaluation runs
 cache	stac-build/scripts/__pycache__/	0	-	python bytecode
 cache	stac-build/scripts/rebuild/__pycache__/	0	-	python bytecode
 cache	stac-build/scripts/rebuild/set/	0	-	the backup set itself (backup.py writes it; committed)
@@ -337,9 +337,9 @@ cache	stac-build/server/__pycache__/	0	-	python bytecode
 cache	stac-build/server/auth/__pycache__/	0	-	python bytecode
 cache	stac-build/server/bim/__pycache__/	0	-	python bytecode
 cache	stac-build/server/commands/__pycache__/	0	-	python bytecode
-cache	stac-build/server/commands/commands.db	688128	-	the commands database: derived from catalog/*.yaml at start
+cache	stac-build/server/commands/commands.db	696320	-	the commands database: derived from catalog/*.yaml at start
 cache	stac-build/server/correction/__pycache__/	0	-	python bytecode
-private	stac-build/server/data/	119759	5 files	the users' database, personnel, teams
+private	stac-build/server/data/	120014	5 files	the users' database, personnel, teams
 cache	stac-build/server/db/__pycache__/	0	-	python bytecode
 cache	stac-build/server/evaluation/__pycache__/	0	-	python bytecode
 cache	stac-build/server/exporter/__pycache__/	0	-	python bytecode
@@ -348,7 +348,7 @@ cache	stac-build/server/fusion/__pycache__/	0	-	python bytecode
 cache	stac-build/server/gaussians/__pycache__/	0	-	python bytecode
 cache	stac-build/server/ingestors/__pycache__/	0	-	python bytecode
 cache	stac-build/server/intake/__pycache__/	0	-	python bytecode
-data	stac-build/server/logs/	24657234	2 files	logs
+data	stac-build/server/logs/	24799553	2 files	logs
 cache	stac-build/server/patches/__pycache__/	0	-	python bytecode
 cache	stac-build/server/phase2_classify/__pycache__/	0	-	python bytecode
 cache	stac-build/server/phase2_classify/tests/__pycache__/	0	-	python bytecode
@@ -365,7 +365,7 @@ cache	stac-build/server/phase7_validation/tests/__pycache__/	0	-	python bytecode
 cache	stac-build/server/phase_r/__pycache__/	0	-	python bytecode
 cache	stac-build/server/phase_r/tests/__pycache__/	0	-	python bytecode
 cache	stac-build/server/precision/__pycache__/	0	-	python bytecode
-data	stac-build/server/projects/	146879678352	42551 files	THE SESSIONS (videos, clouds, segmentations, meshes)
+data	stac-build/server/projects/	106002218049	46728 files	THE SESSIONS (videos, clouds, segmentations, meshes)
 data	stac-build/server/quick_cloud.log	72	-	logs
 cache	stac-build/server/reconstruction/__pycache__/	0	-	python bytecode
 cache	stac-build/server/reconstruction/certify/__pycache__/	0	-	python bytecode
@@ -5657,7 +5657,7 @@ download	tailscale/tailscale	21268215	349b69aa2e8db0ce430c9ef600e16b1e4b2820286d
 download	tailscale/tailscaled	40048426	dd5ff38a1539554498e8b9d6bb0ed3dc565c70c42eeecb6ecca7695f8e0be870	Tailscale 1.86.2
 data	tailscale/tailscaled.log	36044	-	log
 data	tailscale/tailscaled.sock	0	-	a socket
-data	tmp/	6309709956	10673 files	scratch of past work (worktrees are recreated from locks/git-refs.tsv)
+data	tmp/	0	0 files	scratch of past work (worktrees are recreated from locks/git-refs.tsv)
 cache	torch_cache/.ipynb_checkpoints/	0	-	jupyter
 weight	torch_cache/hub/checkpoints/dinov2_vitb14_pretrain.pth	346378731	-	models.tsv
 asis	torch_cache/hub/facebookresearch_dinov2_main/.github/workflows/lint.yaml	796	843ad6a49b4b9d5c852ac97c2261038424bc14dc3ccee1f5cdbdc4f79a4fbbaf	
