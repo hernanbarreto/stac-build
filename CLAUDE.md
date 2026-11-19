@@ -401,6 +401,23 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     an export of bufferStop's cloud listed at 12 % ("writing the cloud as E57"), cancelled in 1.1 s, nothing
     left behind; 9 tests. HIS FIRST EXPORT (pccr 2026-08-31, mesh + IFC) ended whole with the window closed:
     pccr/exports/pccr_stac_export.zip, 1.04 GB. Not tried in a browser by the assistant.
+  · A FLOOR ADJUSTMENT REACHES EVERY EXPORTED FILE (USER 2026-11-19 — bufferStop's "Mesh as IFC" failed: "the
+    scan has a floor transform — the mesh's frame is not the display frame"; told why: "dale, si, hacelo
+    siempre dale" / "y cuando se aplica ajuste de piso debe alcanzar a las mallas tambien, total es una
+    rotacion"). bufferStop carries a floor-level adjustment since 2026-11-17 23:55 UTC (the floor-level tool on
+    object 1: 0.13°, 3.6 mm) as floor_transform.npz — the viewer applies it to the cloud and to the meshes,
+    which hang from the cloud's group; it is baked nowhere. The other four scans hold the identity.
+    `bim/ifc_from_mesh.elements_of` no longer refuses such a scan: it cuts in the stored frame (the mesh and
+    the cloud on disk coincide there) and moves every element by the adjustment. The exported GLB is the
+    published one with the adjustment IN ITS VERTICES AND NORMALS (`exporter/mesh.bake_transform`: every other
+    byte equal, the published mesh untouched). A transform on a root node was written first and dropped: the
+    published meshes are trimesh's, with a root node named "world" that trimesh takes for the scene's base
+    when it reads — a node above it is ignored by that reader. The README says the adjustment is in the
+    files. MEASURED on bufferStop through the live route: GLB + IFC in 42 s, 50 elements; exported GLB =
+    A·stored + t within 0.0002 mm (it moves a vertex up to 8.8 mm); the IFC's vertices on the adjusted mesh
+    within 0.05 mm (its rounding) and 2.4 mm off the stored one. NOT CHECKED: the objects' CSV of an adjusted
+    scan (the store's boxes are documented as display-frame; 3 mm is below what a measurement tells there),
+    nor who applied that adjustment on the 17th (not asked).
   · NO OTHER EXPORT in the interface: the File menu's entry, the Instances panel's button and ExportDialog are
     gone. By voice `export.open` / `export.run` open this window (export.run = the scan on screen) and
     `sessions.download_zip` still downloads the whole session at once.
@@ -847,7 +864,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
      funciona la opacidad" and "cuando apago los elementos segmentados de la nube de puntos no desaparecen los
      puntos" — were NOT reproduced (no browser): the opacity code reads right; the second is probably point 1.
      Re-check both with him on the mesh IFC. Once point 1 is settled the IFC is cut again (its ragged borders
-     are point 1's). The IFC needs a scan whose orientation is baked (all five are).
+     are point 1's). (SINCE 2026-11-19 the IFC is written for a scan with a floor adjustment too — §5 "ONE DOWNLOAD
+     WINDOW"; bufferStop has carried one since 2026-11-17, the other four hold the identity.)
   3 · THE BIM COMPARISON of pccr 3108 against its own IFC: RUNS (2026-11-18, §5 "THE BIM COMPARISON ON A SCAN
      OF TODAY") — adapted to scans and to the IFC's key (the instance id), exact, on the card, in its own
      process. Nothing was left in pccr: open the 3108 scan → BIM → compare (≈ 3 min) to see it. Then "luego

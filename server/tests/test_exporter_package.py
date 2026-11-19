@@ -152,3 +152,102 @@ def test_the_sessions_export_is_one_zip_of_what_was_ticked(scan, tmp_path, monke
     with pytest.raises(P.ExportError, match="no scan"):
         P.run_many("s", {"2026-09-09/default": ["ply"]})
 
+
+def test_a_floor_adjustment_is_in_every_exported_file(scan, tmp_path):
+    """ONE FRAME, the display frame — also for a scan whose floor was adjusted after its mesh (USER
+    2026-11-19: "cuando se aplica ajuste de piso debe alcanzar a las mallas tambien, total es una
+    rotacion"): the cloud, the IFC and the GLB carry it — the GLB in its vertices and normals, so
+    that EVERY reader places it right; the published mesh is not touched — and the README says so."""
+    import trimesh
+    ctx, rec = scan
+    c, s_ = np.cos(np.radians(5.0)), np.sin(np.radians(5.0))
+    R = np.array([[c, 0.0, s_], [0.0, 1.0, 0.0], [-s_, 0.0, c]])
+    t = np.array([0.1, 0.02, -0.3])
+    np.savez(ctx.output_dir / "floor_transform.npz", s=np.float64(1.0), R=R, t=t)
+    stored = ctx.output_dir / "tsdf" / "genrecon_photo" / "genrecon_photo.glb"
+    before = stored.read_bytes()
+    assert P.plan("s", "2026-01-01/default")["state"]["floor_adjusted"] is True
+    report = P.run("s", "2026-01-01/default", ["ply", "glb", "ifc"], lang="en", now=0.0)
+    assert stored.read_bytes() == before                                       # the published mesh: as it was
+    with zipfile.ZipFile(report["path"]) as z:
+        assert "FLOOR. The scan has a floor-level adjustment" in z.read("s_2026-01-01/README.txt").decode()
+        glb = tmp_path / "exported.glb"
+        glb.write_bytes(z.read("s_2026-01-01/s_2026-01-01_mesh_genrecon_photo.glb"))
+        (tmp_path / "back.ply").write_bytes(z.read("s_2026-01-01/s_2026-01-01_cloud.ply"))
+        ifc_text = z.read("s_2026-01-01/s_2026-01-01_elements.ifc")
+    # any glTF reader places the mesh where the viewer shows it: the stored vertices moved by the adjustment,
+    # triangle by triangle (the indices are the file's own)
+    raw = trimesh.load(stored, force="mesh", process=False)
+    shown = trimesh.load(glb, force="mesh", process=False)
+    assert np.array_equal(shown.faces, raw.faces)
+    assert np.allclose(shown.vertices, raw.vertices @ R.T + t, atol=1e-6)
+    # the cloud's file is the display frame written Z-up; the IFC is written from the same scan
+    back = C.open_ply(tmp_path / "back.ply")
+    xyz = np.column_stack([rec["x"], rec["y"], rec["z"]]).astype(np.float64) @ R.T + t
+    assert np.allclose(np.column_stack([back["x"], back["y"], back["z"]]), xyz @ C.Z_UP.T, atol=1e-4)
+    assert ifc_text.count(b"IFCTRIANGULATEDFACESET") == 2
+    assert not any((tmp_path / "scratch").rglob("*.*"))                        # the GLB's copy left the scratch disk
+
+
+def test_a_mesh_is_moved_in_its_vertices_and_nothing_else(tmp_path):
+    """exporter.mesh.bake_transform on a textured mesh as GenRecon publishes it (trimesh's: a root
+    node "world", positions, normals, texture coordinates): positions moved, normals turned, the
+    accessor's bounds true, every other byte of the binary chunk the same; what it cannot move
+    right is refused."""
+    import struct
+    import trimesh
+    from exporter import mesh as MX
+    box = trimesh.creation.box(extents=[4.0, 2.6, 0.1]).subdivide()
+    box.apply_translation([0, 1.3, 2])
+    box.visual = trimesh.visual.TextureVisuals(uv=np.random.default_rng(0).uniform(0, 1, (len(box.vertices), 2)))
+    _ = box.vertex_normals                                                       # (written into the file)
+    src, dst = tmp_path / "published.glb", tmp_path / "exported.glb"
+    src.write_bytes(trimesh.exchange.gltf.export_glb(box, include_normals=True))
+    c, s_ = np.cos(np.radians(30.0)), np.sin(np.radians(30.0))
+    R = np.array([[1.0, 0.0, 0.0], [0.0, c, -s_], [0.0, s_, c]])
+    t = np.array([1.0, -2.0, 0.5])
+    info = MX.bake_transform(src, dst, 1.5 * R, t)                               # (a similarity: scale 1.5)
+    assert info["vertices"] == len(box.vertices)
+
+    def parts(path):
+        with open(path, "rb") as f:
+            _magic, _ver, total = struct.unpack("<III", f.read(12))
+            clen, _ = struct.unpack("<II", f.read(8))
+            doc = json.loads(f.read(clen))
+            blen, _ = struct.unpack("<II", f.read(8))
+            data = f.read(blen)
+        assert total == path.stat().st_size == 12 + 8 + clen + 8 + blen and clen % 4 == 0
+        return doc, data
+
+    (d0, b0), (d1, b1) = parts(src), parts(dst)
+    prim = d1["meshes"][0]["primitives"][0]["attributes"]
+    assert {"POSITION", "NORMAL", "TEXCOORD_0"} <= set(prim)
+
+    def array(doc, data, index, comps):
+        a, v = doc["accessors"][index], doc["bufferViews"][doc["accessors"][index]["bufferView"]]
+        start = v.get("byteOffset", 0) + a.get("byteOffset", 0)
+        return np.frombuffer(data[start:start + a["count"] * 4 * comps], "<f4").reshape(-1, comps), (start, start + a["count"] * 4 * comps)
+
+    p0, span_p = array(d0, b0, prim["POSITION"], 3)
+    p1, _ = array(d1, b1, prim["POSITION"], 3)
+    n0, span_n = array(d0, b0, prim["NORMAL"], 3)
+    n1, _ = array(d1, b1, prim["NORMAL"], 3)
+    assert np.allclose(p1, p0.astype(np.float64) @ (1.5 * R).T + t, atol=1e-6)
+    assert np.allclose(n1, n0.astype(np.float64) @ R.T, atol=1e-6) and np.allclose(np.linalg.norm(n1, axis=1), 1.0, atol=1e-5)
+    acc = d1["accessors"][prim["POSITION"]]
+    assert np.array_equal(np.float32(acc["min"]), p1.min(axis=0)) and np.array_equal(np.float32(acc["max"]), p1.max(axis=0))
+    # everything else in the binary chunk is the published file's, byte for byte
+    keep = np.ones(len(b0), bool)
+    keep[span_p[0]:span_p[1]] = False
+    keep[span_n[0]:span_n[1]] = False
+    assert len(b1) == len(b0) and np.array_equal(np.frombuffer(b0, np.uint8)[keep], np.frombuffer(b1, np.uint8)[keep])
+    assert trimesh.load(dst, force="mesh", process=False).faces.shape == box.faces.shape
+    # refused, never written wrong: a skewed "adjustment", and a mesh whose nodes carry transforms
+    with pytest.raises(MX.MeshExportError, match="not a rotation"):
+        MX.bake_transform(src, tmp_path / "bad.glb", np.array([[1.0, 0.3, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]), t)
+    scene = trimesh.Scene()
+    scene.add_geometry(box, transform=trimesh.transformations.translation_matrix([1, 0, 0]))
+    moved = tmp_path / "with_nodes.glb"
+    moved.write_bytes(trimesh.exchange.gltf.export_glb(scene))
+    with pytest.raises(MX.MeshExportError, match="carries a transform"):
+        MX.bake_transform(moved, tmp_path / "bad2.glb", R, t)

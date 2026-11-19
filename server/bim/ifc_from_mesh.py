@@ -231,6 +231,14 @@ def elements_of(output_dir: Path | str, mesh_path: Path | str, *, keep: float, m
                 log: Callable[[str], Any] = print) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """The scan's elements, each with its part of the mesh (display frame), and the report.
 
+    THE FRAME (USER 2026-11-19, after bufferStop's export was refused for its floor adjustment: "dale,
+    si, hacelo siempre" / "cuando se aplica ajuste de piso debe alcanzar a las mallas tambien, total
+    es una rotacion"): the mesh on disk and the cloud on disk are in ONE frame, the scan's stored one
+    — the cut happens there. A floor adjustment (floor_transform.npz: the floor-level tool, the
+    alignment gizmo) is applied by the viewer to both, the meshes hanging from the cloud's group; it
+    is applied HERE to every element's vertices, so the IFC lies on the cloud as it is shown and
+    exported. (It used to refuse such a scan.)
+
     THE ORDER MATTERS: the whole mesh is simplified FIRST, as the one surface it is, and cut
     AFTER. Simplifying each object's part on its own was measured (pccr 3108): the parts' ragged
     borders and loose crumbs are deleted by the decimation — 12 mm of deviation at the 95th
@@ -239,10 +247,8 @@ def elements_of(output_dir: Path | str, mesh_path: Path | str, *, keep: float, m
     out = Path(output_dir)
     if not (0.0 < keep <= 1.0):
         raise MeshError(f"keep must be in (0, 1], got {keep!r}")
-    A, t = C.floor_transform(out)
-    if not (np.array_equal(A, np.eye(3)) and not t.any()):
-        raise MeshError(f"{out}: the scan has a floor transform — the mesh's frame is not the display frame "
-                        f"(an IFC from the mesh is built on a scan whose orientation is baked)")
+    A, t = C.floor_transform(out)                               # display = A · stored + t
+    adjusted = not (np.array_equal(A, np.eye(3)) and not t.any())
     raw_v, raw_f = read_glb(mesh_path)
     full_v, full_f = submesh(raw_v, raw_f)                       # welded: one surface
     del raw_v, raw_f
@@ -290,11 +296,14 @@ def elements_of(output_dir: Path | str, mesh_path: Path | str, *, keep: float, m
         v, f = submesh(vertices, faces[order[bounds[k]:bounds[k + 1]]])
         if not len(f):
             continue
+        if adjusted:
+            v = np.asarray(v, np.float64) @ A.T + t             # the floor adjustment, as the viewer applies it
         label = "unsegmented" if iid == UNSEGMENTED else str(labels[iid])
         elements.append({"id": iid, "label": label, "ifc": IFC_CLASS.get(label, PROXY), "vertices": v, "faces": f,
                          "n_points": int(n_points.get(iid, 0))})
     with_faces = {e["id"] for e in elements}
-    report.update(elements=len(elements), faces_written=int(sum(len(e["faces"]) for e in elements)),
+    report.update(floor_adjusted=bool(adjusted),
+                  elements=len(elements), faces_written=int(sum(len(e["faces"]) for e in elements)),
                   faces_unsegmented=int((owner == UNSEGMENTED).sum()),
                   objects_without_faces=sorted(int(i) for i in set(labels) - with_faces))
     return elements, report

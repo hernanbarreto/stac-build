@@ -160,3 +160,26 @@ def test_every_object_appears_even_one_the_majority_leaves_out(tmp_path):
     assert report["objects_left_out_by_the_majority"] == 1 and report["objects_rescued"] == 1
     label = next(e for e in elements if e["id"] == 9)
     assert 0 < len(label["faces"]) < 0.1 * len(wall.faces)
+
+
+def test_a_floor_adjustment_reaches_the_ifc(tmp_path):
+    """USER 2026-11-19 (bufferStop's export was refused: "the scan has a floor transform"): "dale, si,
+    hacelo siempre" / "cuando se aplica ajuste de piso debe alcanzar a las mallas tambien, total es
+    una rotacion". The mesh and the cloud on disk are in one frame; the floor adjustment the viewer
+    applies to both is applied to every element — the same elements, moved by it."""
+    out, glb, _wall, _chair = _scan(tmp_path)
+    plain, plain_report = M.elements_of(out, glb, keep=1.0, max_distance=0.05, log=lambda m: None)
+    assert plain_report["floor_adjusted"] is False
+    c, s_ = np.cos(np.radians(7.0)), np.sin(np.radians(7.0))
+    R = np.array([[1.0, 0.0, 0.0], [0.0, c, -s_], [0.0, s_, c]])
+    t = np.array([0.0, 0.25, -0.1])
+    np.savez(out / "floor_transform.npz", s=np.float64(1.0), R=R, t=t)
+    moved, report = M.elements_of(out, glb, keep=1.0, max_distance=0.05, log=lambda m: None)
+    assert report["floor_adjusted"] is True and [e["id"] for e in moved] == [e["id"] for e in plain]
+    for a, b in zip(plain, moved):
+        assert np.array_equal(a["faces"], b["faces"])
+        assert np.allclose(b["vertices"], np.asarray(a["vertices"], np.float64) @ R.T + t, atol=1e-12)
+    # … and the IFC is written from them (it used to be refused)
+    text = M.build(moved, session="s", scan_key="2026-01-01/default", geometry_epoch="0", described="t").to_string()
+    assert text.count("IFCTRIANGULATEDFACESET") == 2
+

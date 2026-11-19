@@ -34,6 +34,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from . import cloud as C
+from . import mesh as MX
 
 ITEMS = ("e57", "las", "ply", "glb", "ifc", "csv")
 CLOUD_ITEMS = ("e57", "las", "ply")
@@ -112,7 +113,8 @@ def plan(session: str, scan_key: Optional[str]) -> Dict[str, Any]:
             con.close()
         items["csv"] = {"available": objects > 0, "objects": objects, **({} if objects else {"why": "no segmented object"})}
         # THE IFC IS THE GENRECON MESH CUT BY THE SEGMENTATION (USER 2026-11-17): it needs both
-        why = ("no segmented object" if not objects else "no published GenRecon mesh" if not found
+        why = ("no segmented object" if not objects
+               else "no published GenRecon mesh" if not any(m["folder"] == "genrecon_photo" for m in found)
                else "no per-point instance ids" if not (out / "instance_ids.npy").exists() else None)
         items["ifc"] = {"available": why is None, "elements": objects, **({} if why is None else {"why": why})}
     else:
@@ -136,7 +138,8 @@ def state_of(output_dir: Path) -> Dict[str, Any]:
                  "n_gauge": s.get("n_gauge"), "n_test": s.get("n_test")}
     except cal.CalibrationError as e:
         calib = {"state": "unknown", "error": str(e)}
-    return {"geometry_epoch": epoch, "calibration": calib}
+    return {"geometry_epoch": epoch, "calibration": calib,
+            "floor_adjusted": not MX.is_identity(*C.floor_transform(output_dir))}
 
 
 def write_objects_csv(store: Path, out: Path) -> int:
@@ -202,6 +205,13 @@ _T = {
         "es": "ESCALA: calibración por ejes (un diagnóstico; no se aplica a la geometría). Estado «{state}».",
         "en": "SCALE: a per-axis calibration (a diagnosis; it is not applied to the geometry). State “{state}”.",
         "fr": "ÉCHELLE : calibration par axes (un diagnostic ; elle n'est pas appliquée à la géométrie). État « {state} »."},
+    "leveled": {
+        "es": "PISO. El escaneo tiene un ajuste de nivel de piso que el visor aplica al mostrarlo: está aplicado en todos estos "
+              "archivos (en el GLB, en sus vértices y normales; la malla publicada en el servidor no se modifica).",
+        "en": "FLOOR. The scan has a floor-level adjustment that the viewer applies when it shows it: it is applied in every one "
+              "of these files (in the GLB, in its vertices and normals; the mesh published on the server is not modified).",
+        "fr": "SOL. Le scan a un ajustement de niveau du sol que la vue applique à l'affichage : il est appliqué dans tous ces "
+              "fichiers (dans le GLB, dans ses sommets et ses normales ; le maillage publié sur le serveur n'est pas modifié)."},
     "cloud": {
         "es": "NUBE. {points} puntos de los {total} publicados{filter}. Cada punto es el del disco, medido por la reconstrucción.",
         "en": "CLOUD. {points} points of the {total} published{filter}. Each point is the one on disk, measured by the reconstruction.",
@@ -266,6 +276,8 @@ def readme(lang: str, *, session: str, scan_key: Optional[str], state: Dict[str,
         scale = _t("pending", lang, state=cal.get("state"), factor=f"{float(factor):.5f}")
     head = [_t("title", lang, scan=f"{session} {scan_key or ''}".strip()), _t("made", lang, when=when), "",
             _t("frame", lang), "", _t("epoch", lang, epoch=state["geometry_epoch"]), "", scale, ""]
+    if state.get("floor_adjusted"):
+        head += [_t("leveled", lang), ""]
     return "\n".join(head + lines) + "\n"
 
 
@@ -300,9 +312,19 @@ def _produce(session: str, scan_key: Optional[str], items: List[str], *, confide
         del cloud
     if "glb" in items:
         at("glb", 0.0, "the mesh")
+        A, t = C.floor_transform(out)
+        adjusted = not MX.is_identity(A, t)
         for m in meshes(out):
             arc = f"{name}_mesh_{m['folder']}.glb"
-            files.append({"path": m["path"], "arc": arc, "key": "glb", "source": True})
+            if adjusted:
+                # ONE FRAME, the display frame (USER 2026-11-19: "cuando se aplica ajuste de piso debe alcanzar a
+                # las mallas tambien, total es una rotacion"): the viewer applies the floor adjustment to the mesh
+                # as to the cloud; the exported GLB has it in its vertices (the published mesh is not touched)
+                path = work / arc
+                MX.bake_transform(m["path"], path, A, t)
+                files.append({"path": path, "arc": arc, "key": "glb"})
+            else:
+                files.append({"path": m["path"], "arc": arc, "key": "glb", "source": True})
             lines.append(_t("glb", lang, file=arc, faces=f"{int(m['faces']):,}" if m["faces"] else "?",
                             prov=m["provenance"] or "?"))
     store = out / "scene_r.db"
@@ -337,6 +359,15 @@ def _produce(session: str, scan_key: Optional[str], items: List[str], *, confide
         lines.append(_t("csv", lang, file=path.name, n=n))
         report["objects"] = n
     return files, lines, report
+
+
+def _scratch_need(output_dir: Path, items: List[str], available: Dict[str, Any]) -> int:
+    """The bytes a scan's ``items`` put on the scratch disk at most: its cloud files, and its meshes'
+    copies when the scan has a floor adjustment (a GLB with no adjustment is read where it is)."""
+    need = sum(int(available[k].get("bytes") or 0) for k in items if k in CLOUD_ITEMS)
+    if "glb" in items and not MX.is_identity(*C.floor_transform(output_dir)):
+        need += int(available["glb"].get("bytes") or 0)
+    return need
 
 
 def partial_of(target: Path) -> Path:
@@ -422,7 +453,7 @@ def run(session: str, scan_key: Optional[str], items: List[str], *, confidence: 
     target = zip_path(ctx, session, scan_key)
     target.parent.mkdir(parents=True, exist_ok=True)
     # the files are written on the local disk (export.scratch_dir) and enter the ZIP from there
-    work = _scratch(target, sum(int(available[k].get("bytes") or 0) for k in items if k in CLOUD_ITEMS))
+    work = _scratch(target, _scratch_need(out, items, available))
     name = slug(session, scan_key)
     report: Dict[str, Any] = {"session": session, "scan": scan_key, "items": items, "confidence": float(confidence)}
     # the steps' share of the bar: the cloud's writers and the ZIP weigh the most
@@ -512,7 +543,7 @@ def run_many(session: str, selection: Dict[str, List[str]], *, with_loaded_ifcs:
     for key, items in chosen:
         available = plan(session, key)["items"]
         missing += [f"{key} {k}: {available[k].get('why')}" for k in items if not available[k]["available"]]
-        need += sum(int(available[k].get("bytes") or 0) for k in items if k in CLOUD_ITEMS)
+        need += _scratch_need(Path(context(session, key).output_dir), items, available)
     if missing:
         raise ExportError("cannot export " + "; ".join(missing))
     say = progress or (lambda _p, _m: None)
