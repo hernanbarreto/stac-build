@@ -142,6 +142,11 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     real cause of that night came from a screenshot of his, none from a guess.
   · A browser on the pod for the assistant to try the interface: REFUSED by him that night ("no estas autorizado
     a hacer nada porque no sabes siquiera como validarlo") — not to be installed without his word.
+- NEVER BLOCK ON A QUESTION WHILE A RUN NEEDS ATTENDING (2026-11-19, the copy of pccr 2026-08-24): the
+  question window (AskUserQuestion) waited 4.5 h for him — he was asleep — and the run had died 22 minutes into
+  the wait (the volume full); the assistant could not react and THE CARD SAT IDLE 4.5 h. While a run is alive a
+  question is asked in PLAIN TEXT at the end of a turn, and whatever must happen meanwhile (a stop before the
+  volume fills, a relaunch) is left to a process that acts on its own.
 - THE BACKEND'S RESTART (2026-11-14: "a vos no te esta funcionando reiniciarlo, revisa que estas haciendo mal …
   sino te quedas colgado y perdemos tiempo"): only through `bash scripts/restart_backend.sh` (it waits for the
   shell, forces, starts from the prompt, waits BOUNDED) — never a Ctrl-C + sleep + an unbounded wait typed by
@@ -220,6 +225,25 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
 - /workspace is RunPod's MooseFS FUSE volume (`mfs#ca-mtl-3.runpod.net`), quota 400 GB invisible to `df`: a full
   quota fails every write with Errno 122 and the worker dies without a traceback. The local disk (/root/.cache: torch
   hub, the VGGSfM tracker, PointDiT's DINOv3 3.1 GB copy) is wiped by a pod restart and refilled once.
+- ⚠ THE VOLUME'S QUOTA IS CHARGED ON ALLOCATED SIZE, NOT ON THE FILES' LENGTHS (measured 2026-11-19, after the
+  volume filled under a guard that read "368 GB"): `du -b` / `--apparent-size` — what every earlier figure of
+  this file was measured with — misses about 100 KB per small file (ui/node_modules 725 MB long = 2.5 GB
+  allocated; the voice env 8.2 = 12.8 GB; miniforge3 95 = 197 GB; stac-build without the sessions ≈ 70 GB). The
+  whole volume measured 439.5 GB allocated (`du -s --block-size=1`, ~30 min) while 36.5 GB could still be
+  written: the limit is about 476–483 GB in that measure (450 GiB). HOW TO KNOW THE FREE SPACE: a PROBE — write
+  zeros until Errno 122, then EMPTY the file (`: > file`) and remove it (36.5 GB in 1.5 min) — or the allocated
+  `du`. Never the apparent size. A big file is freed at once when it is emptied before it is removed (measured:
+  35.5 GB removed that way, 36.5 GB writable right after).
+  WHAT A FULL VOLUME DID (2026-11-19 09:43 UTC, Errno 122 in the cube run's np.savez): the worker died — its
+  traceback is in the backend's tmux pane, NOT in the log file (tee stops writing a file at its first refused
+  write: logs/latest.log stays stale until the backend is restarted); the chat's VLM and the voice, started by
+  the backend when the job ended, died at once (0-byte files); and at 14:16 the command-line tool's own
+  self-update wrote EVERY FILE OF ITS PACKAGE EMPTY (the running session survived in memory; the shell's search
+  wrapper answered "claude.exe: Success") — repaired with `npm install -g @anthropic-ai/claude-code@2.1.328` in
+  the nodejs env, the version of the kit's lock. A CUBE OF THE CUBE RUN IS 676 MB (64 keyframes at 464x832) plus
+  ~105 MB of context views, and EVERY cube stays on disk until the cubes are placed: 86 cubes ≈ 67 GB, 170 ≈
+  133 GB; the I3 window depth (25.8 GB on 2756 keyframes) stays until F2 unless `intake.walk.delete_windows`
+  removes it (F2 regenerates it, ~30 min of the card).
 - INCIDENT 2026-11-08 (an hour of his pod): at 09:12 CDMX everything stopped during F5 — no traceback, no OOM, the
   log silent until the pod restarted at 10:14; cause not determined (a provider stop or the volume freezing). The
   first resume then hung in `intake.run`: its main thread in the kernel's `request_wait_answer` (a FUSE request never
@@ -875,9 +899,27 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   frames, como hacemos en las rotaciones"): 13,692 of 13,692 frames usable, 2756 keyframes, NO gap over 8 frames
   between keyframes; 26 keyframes inside the dark turn (video 6274–6403) and 3 inside the second hole; 1957 of the
   original's 2765 keyframes are the copy's too (the selection after the first hole shifted).
+  ⭐ THE COPY'S STATE (2026-11-19 14:30 UTC): CUT AS HE ASKED — 170 cubes of 62–67 keyframes, every pair of
+  neighbours sharing 3/4 (a keyframe lies in 4 cubes), 510 pairs sharing frames, 1908 revisits, Omega at the same
+  832 as the original — and STOPPED BY THE FULL VOLUME at cube 89 of 170 (09:43 UTC; 27–30 s a cube). The 88
+  cubes are on disk (a resume skips them; the 89th's cut witness file is re-made). Its I3 window depth was removed
+  with the pipeline's own function (25.8 GB; F2 regenerates it if stage 2 is ordered).
+  FREED ON HIS CHOICE (the question's answer "Intermedios de las 5 sesiones", 35.5 GB): pccr 2408's
+  output/_restart_epochs, and of pccr 3108, zaragoza, observatorio and bufferStop: output/_restart_epochs,
+  omega_run, da3_run and maplong_run/context_views — NONE OF THE FIVE SCANS CAN RESUME OR RESTART ITS
+  RECONSTRUCTION ANY MORE (a new one is a Replace). Free after it: 36.5 GB; the 82 cubes left need ~67 GB: HIS
+  DECISION PENDING (a larger volume / a smaller experiment / more to free).
+  ⭐ THE FIRST SIGNAL (scratchpad cube_turn_check.py: each cube's cameras fitted as ONE piece to the first pass,
+  then its local lengths against it): the copy's cubes that cross the dark turn read it RIGHT — cube 74: 0.93 m
+  and 110.7 deg where the first pass gives 0.87 m and 109.2 deg (video 6269 → 6408), the walk before / after it
+  x0.98 / x0.99; cube 75: 0.87 m and 110.4 deg, x0.95 / x1.00; cubes 71–81 fit the first pass as one piece
+  within 0.5–2.9 cm rms. (The original's cubes: 0.30 m where 0.80 m, the next stretch x1.64.) INSIDE A CUBE the
+  hole is mended; the seams and the graph are not measured yet (they need the 82 cubes left).
   THE ASSISTANT'S ERRORS IN THIS STUDY, told to him: "the front has only 4,616 points, almost all from one image"
   (they were the OBJECT's points, not the face's: "no puede ser … contestame antes esto"); expecting the cut at the
-  hole to close the rack (5 cm); the invented safety net above.
+  hole to close the rack (5 cm); the invented safety net above; THE DISK — "hay margen" / "el tramo 1 entra con
+  holgura" said on an estimate of ~50 GB for a stage that needs ~165 GB, a guard that measured the wrong size, and
+  a question window that left the pod idle 4.5 h (§2, §4).
 - ⭐⭐⭐ THE LIST OF 2026-11-19 — HIS POINTS, WITH HIS NUMBERS (RESUME HERE; the 2026-11-18 block below is its
   background). He tried the night's work in the browser and it failed nearly everywhere; each point was then
   worked with him, one change at a time, on his screenshots. HIS VERDICTS (2026-11-19: "1. confirmado, 2.
