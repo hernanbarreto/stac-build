@@ -821,6 +821,20 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     The agreeing closures across the hole disagree among themselves as scatter (13 cm mean, 2 cm mean vector).
   · NOT EXPLAINED YET: seam 13–14 (sigma 12.5 cm, no gap, own scale 1.17); why half of this session's closures are
     false.
+  · ⭐ THE FIRST PASS SAW THE DARK TURN (measured 2026-11-19 while the copy ran; scratchpad walk_profile.py <scan
+    dir> [poses file]). AMB3R-SLAM runs over EVERY video frame — the brightness rule never cut it — and its poses
+    are the same in the original and in the copy (rotations bit for bit, positions equal once divided by each
+    run's metre: 1.5594 / 1.5760 m per unit, the 16 focal-probe frames differ). Through video 6273 → 6404 it is
+    continuous (largest step between frames 1.4 cm, as everywhere): THE CAMERA MOVED 0.80 m AND TURNED 104.9 deg.
+    The original's cubes, with no keyframe in there, put those two cameras 0.30 m apart at the cube stage
+    (camera_poses.txt.prescale; 0.44 m in the final poses) and made the 16 keyframes after it x1.64 longer (x1.22
+    final). Controls: the 131 frames before 0.96 m against 0.92 m; the second dark stretch 0.18 against 0.17 m.
+    THE PROFILE OVER THE WHOLE WALK (stretches of 16 keyframes, the cubes' length over the first pass's): pccr 3108
+    (healthy) half within x0.970–x1.049, 90 % within x0.929–x1.121; pccr 2408 final x0.893–x1.014 and
+    x0.752–x1.289, its worst place the dark turn (x0.61), then the walk's first 3 m (x1.3–1.4, the camera barely
+    moving) and video 11529–11679 (x0.68). A RULER FOR THE COPY: the same profile on its placed cubes says whether
+    the turn reads 0.80 m. (Not a ground truth — the first pass drifts over long distances — but over a short
+    stretch it is the camera followed frame by frame.)
   HIS PRINCIPLES FOR THE FIX (2026-11-19, on the assistant's "a cube whose seams give five times the normal is
   marked bent and not published"): "no me gusta cuando decis este tipo de cosas … de donde sacaste eso, lo que hay
   que hacer ademas en realidad es que compartan muchas mas imagenes entre cubos, tal vez agrandar el cubo un poco,
