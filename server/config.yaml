@@ -406,11 +406,20 @@ segmentation:
                               # interleave.py). Each point takes the mask of its own keyframe, so a surface two
                               # keyframes see under two names or two ids is shared by two objects POINT BY POINT
                               # (pccr 3108: of a point's 8 nearest neighbours, 39 % were another object's).
-    enabled: true             # asked "do I change your rule of 11-11 to allow this merge?": "1. Si". The dry
-                              # run on pccr 3108 showed the big surfaces absorb what lies on or behind them
-                              # (212 tiles → the floor, servers → the glass enclosure); told so, HIS ANSWER
-                              # (2026-11-18): "las baldosas son piso verdad?" / "Si los grandes se comen a los
-                              # pequeños no está mal" — the rule stands as it is
+    enabled: false            # OFF — UNDONE BY HIM 2026-11-19, having seen it on the five sessions: "quedo como
+                              # el culo, fusiono objetos que no tenia que fusionar y no fusiono objetos que si
+                              # tenia que fusionar" / "ya habiamos hecho fusion de piso durante la fase que va
+                              # desde vlm al genrecon, y habiamos elegido no hacer fusiones, porque el sistema
+                              # confundia objetos, no esta pulida esa parte" / to "do I undo it?": "si, en todos
+                              # los casos, dale". Measured on pccr 3108 after it: 85 of 355 tiles left loose,
+                              # 25 of 27 doors absorbed (glass enclosure, drywall, wall, panel …), 19 of 19
+                              # servers, 27 of 28 server units, 15 panels / 9 cables / 5 pipes into the floor.
+                              # It measures how MIXED two objects' points are, not whether they are the same
+                              # thing. His rule of 2026-11-11 stands again: only the floor merges
+                              # (merge_support_only). The code stays, selectable. (How it came to be on,
+                              # 2026-11-18: asked "do I change your rule of 11-11 to allow this merge?": "1. Si";
+                              # told the big surfaces absorb what lies on or behind them: "Si los grandes se
+                              # comen a los pequeños no está mal".)
     share: 0.10               # a pair is one object when EITHER has at least this share of its points' nearest
                               # neighbours in the other. The value recommended to him: pccr 3108 1213 → 280
                               # objects, 39.3 % → 5.1 % (0.20: 583 objects, 16.2 %). It cannot join distant objects

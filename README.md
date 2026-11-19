@@ -58,6 +58,12 @@ on the GPU, and each GPU port keeps its CPU function as the path of record. The 
 chain run in deterministic mode; the declared exceptions are listed in §19. Every product is stamped with the inputs,
 configuration and code that made it.
 
+**Around the reconstruction** (§22) the same backend and viewer hold what a scan is used for: a spatial assistant that
+answers with deterministic tools and operates the application by voice in three languages; calibration measured on the
+3-D model and applied as a real rescale; the comparison of a scan against a BIM model, exact, computed on the card and
+stored; an IFC written from the scene mesh cut by the segmentation; the export of clouds, meshes, IFC and tables for
+other programs; a session as one resumable ZIP, out of the machine and back in; and tickets marked on the model.
+
 **Reference runs** (2026-11-09, the user's visual validation of both):
 
 | Session | Keyframes / cubes | Seams after the graph | F5 held-out | F6 coverage | Published points (5 mm) |
@@ -90,7 +96,9 @@ configuration and code that made it.
 19. [Determinism, devices and reproducibility](#19-determinism-devices-and-reproducibility)
 20. [Running it](#20-running-it)
 21. [Repository map](#21-repository-map)
-22. [The session in the viewer: meshes, the spatial chat, calibration, STAC's commands and voice](#22-the-session-in-the-viewer-meshes-the-spatial-chat-calibration-stacs-commands-and-voice)
+22. [The application around the pipeline](#22-the-application-around-the-pipeline): opening a session, the spatial
+    chat, calibration, STAC's commands and voice, the BIM comparison, the IFC from a scan, downloads and exports, jobs,
+    tickets, common points
 
 ---
 
@@ -142,8 +150,9 @@ has these properties:
   verified, before them. A stage that needs the VLM (the scene analysis, a segmentation round) launches **its own**
   vLLM from the job's frozen configuration under an engine lease, and stops it when it ends
   (`semantic/service.job_engine`).
-- The chat's vLLM loads **on demand** (`semantic.chat_on_demand: true`). It is not reloaded after a stage, a pipeline
-  or the server's start; it comes up when the chat is opened or asked. `false` reloads it whenever the card frees.
+- The chat's vLLM and the voice service **start with the backend** (`semantic.chat_on_demand: false`,
+  `voice.start_with_backend: true`) and again whenever the card frees; both leave the card while a job runs (§22.2,
+  §22.5). After a restart the chat's engine takes about three minutes to load and warm, the voice half a minute.
 - A cancel is cooperative: the running stage gets a bounded time to stop at a safe point, then its process tree is
   killed. Products already on disk (cubes, bridges, finished steps) are resumed by the next order.
 
@@ -1401,7 +1410,19 @@ The masks of a visit are inflated and dilated in one batch on the device.
 - **Co-visible split.** Co-visible components separated by free space are split.
 - **Attach.** Unlabelled points within 3 cm take the majority label of their 3 nearest labelled points, over 4 rounds.
 - **One owner.** A point belongs to one instance or to none; a conflict goes to the smaller instance.
-- **Minimum size.** Instances under 1000 points are dropped, except structural ones.
+- **Minimum size.** Instances under 1000 points are dropped, whatever their label (`min_instance_points`; structural
+  labels were exempt until 2026-11-13). The filter acts before the instance store is written: the Instances list is
+  read from the store.
+- **Same surface — tried, and off.** Each point takes the mask of its own keyframe, so a surface that two keyframes
+  see under two names or two ids is shared by two objects point by point (pccr 2026-08-31: of a point's 8 nearest
+  neighbours, 39 % were another object's). A merge of the objects whose points are so interleaved
+  (`segmentation.interleave_merge`: a pair merges when either has at least 10 % of its points' nearest neighbours in
+  the other) was applied to the five sessions on 2026-11-18 and **undone on 2026-11-19 on the user's eye**: it
+  measures how mixed two objects' points are, not whether they are the same thing. On pccr 2026-08-31 (1213 → 280
+  objects) 85 of 355 tiles stayed loose — cleanly segmented, they lie beside the floor, not mixed with it — while 25
+  of 27 doors, all 19 servers and 27 of 28 server units were absorbed by the surfaces they stand against or behind.
+  The code stays, selectable; only a support surface merges (above). One owner per surface is open work of the scene
+  understanding.
 
 Per-object cleaning is off (`models.segmentation.segment_cleaning.enabled: false`).
 
@@ -1960,13 +1981,12 @@ Hardware: one NVIDIA A100 80 GB (developed on an RTX A6000 48 GB), 117 GB RAM an
 Everything runs locally.
 
 ```bash
-git clone --recurse-submodules <this repo> stac-build && cd stac-build
-bash scripts/setup_vendors.sh                 # pinned vendor clones (vendor/VENDORS.lock.md)
-bash scripts/setup_pod_envs.sh                # conda envs: da3, mapanything, semantic, genrecon, nodejs, …
-bash server/tools/genrecon/setup_env.sh       # env genrecon + CUDA extensions + the STAC patch
-conda run -n da3 pip install nvidia-nvcomp-cu12==6.0.0.12   # the mask store on the card (§17.2)
+git clone <this repo> /workspace/stac-build && cd /workspace/stac-build
+export STAC_BACKUP_KEY=…                      # opens the kit's private archive (§20.1); kept off the machine by its owner
+bash scripts/rebuild/rebuild.sh               # vendors, the ten conda envs, the weights, the compiled parts (§20.1)
 
-bash scripts/start.sh                         # backend → https://localhost:8765 (the chat's VLM loads on demand)
+bash scripts/start.sh                         # backend → https://localhost:8765; the chat's VLM and the voice start with it
+bash scripts/restart_backend.sh               # the one way to restart it (bounded waits)
 cd ui && npm run dev:web                      # the UI (Vite) → http://localhost:5173
 ```
 
@@ -1980,6 +2000,9 @@ cd ui && npm run dev:web                      # the UI (Vite) → http://localho
    editable prompts.
 4. **View → Background and grid** sets the session's background and grid; every viewer preference is saved per session
    and per user.
+5. **BIM**: load an IFC — or write one from the scan (§22.7) — and compare (§22.6); the panel's *Report* view lists
+   the elements.
+6. The **Download** button of a session's row: the session itself as one ZIP, or an export for other programs (§22.8).
 
 **Orders through the API.** The same commands the UI sends (`POST /api/pipeline/run`; scan keys `<date>/<source>` from
 `GET /sessions/<id>/scans`; running and queued jobs at `GET /api/pipelines/active`):
@@ -2000,6 +2023,33 @@ An order freezes `config.yaml` as it is at that moment; a GenRecon order that fi
 under the same stamp continues at the mesh step (§18.7).
 
 All configuration lives in `server/config.yaml`. The loaders are typed, and a missing key fails at load.
+
+### 20.1 Rebuilding the machine on an empty volume (`scripts/rebuild/`)
+
+The system is ten conda environments, thirteen vendor repositories, 82 GB of weights and several parts compiled in
+place; `scripts/rebuild/` puts all of it back on an empty volume **exactly as it was** (its README is the manual). It
+does not start from a list of things to install but from what is on the volume: `inventory.py` walks it and every file
+falls in a class that names how it comes back.
+
+| Class | What | How it comes back |
+|---|---|---|
+| `git` | the repo and the vendor repositories | the commit of each, and our patches |
+| `env` | the conda envs | conda's exact package list and pip's exact wheel files (URL + hash) |
+| `weight` | the model files | `models.tsv`: source, pinned revision, sha256 |
+| `download`, `npm` | pinned binaries, `node_modules` | their pinned sources, `npm ci` on the tracked lock |
+| `asis` | what exists nowhere else: everything compiled on the machine, the built interface | the **backup set** (`set/`, in the repo) |
+| `private` | `.env`, stored tokens, the users' database | the set's archive, **encrypted** (AES-256) under `STAC_BACKUP_KEY` |
+| `data` | the sessions | each as its ZIP (§22.8) |
+
+With the set, `rebuild.sh` compiles nothing: the compiled parts are the old machine's own bytes (`COMPILE=1` compiles
+them again, for another card). After any change of the machine — an install, a vendor commit, a new weight, a
+compilation, a secret — `drift.py` says whether the kit is still the machine, and `capture.sh` brings it up to date.
+
+Checked 2026-11-18 on a scratch volume at a path as long as the real one: the ten envs rebuilt and compared **file by
+file** with the live ones — 467,195 files identical, 5,912 differing only by the env's own path, none different; the
+1,065 pip packages downloaded again equal byte for byte; the repo and its vendor repositories at the same commits and
+diffs. Not done: a run on a really empty volume, the 82 GB of weights downloaded again in full, anything started on
+the card from a rebuilt env.
 
 ---
 
@@ -2041,6 +2091,16 @@ stac-build/
 │   ├─ voice/                  # STAC's voice: serve.py (Whisper + Kokoro, its own process), spoken.py (a written answer
 │   │                          #   as it is said), wake.py ("STAC, …"), service.py (its life), api.py (/api/voice)
 │   ├─ calibration3d.py  calibration_api.py   # calibration measurements taken on the 3D model, per scan
+│   ├─ bim/                    # the BIM comparison: scan_data (a scan's objects and their pairing), comparison +
+│   │                          #   compare_job (its own process), c2m_grid + c2m_torch (the exact cloud-to-mesh distance
+│   │                          #   on the device), sheet_octree (the deviation sheet from the scan's own octree),
+│   │                          #   ifc_from_mesh (an IFC from the scene mesh cut by the segmentation)
+│   ├─ exporter/               # the export: cloud (E57 / LAS / PLY in the export frame), mesh (the GLB in the display
+│   │                          #   frame), package (one ZIP with its READMEs)
+│   ├─ session_archive.py  session_archive_api.py   # a session as one ZIP: streamed, resumable; upload, check, extract
+│   ├─ exporter_api.py  task_manager.py             # the export's routes (a job, with its cancel); the running tasks
+│   ├─ tickets.py  tickets_api.py                   # tickets marked on the model, per project
+│   ├─ fusion/                 # common_points (the same point marked on two scans → scale, turn, shift)
 │   ├─ tools/genrecon/         # adapter + layout_gpu, presence (the vote + layout), genrecon_levels, run_cloud.sh,
 │   │                          #   resume + latents, decode_regions, remesh_resolution, denoise (the edge filter),
 │   │                          #   remap_gpu, bake_chunks_parallel, photo_albedo, publish, cloud_shape + drop_loose
@@ -2055,30 +2115,47 @@ stac-build/
 │   ├─ depth-anything-3/  pointdit/  sam31/  PotreeConverter/  …
 ├─ ui/                         # React + TypeScript + Vite; the viewer (viewport/: HUD, palette, sceneLook), panels,
 │                              #   GenRecon, Autosegment and Background-and-grid windows; design tokens and i18n
+├─ scripts/                    # start.sh, restart_backend.sh, serve_semantic.sh, serve_voice.sh; rebuild/ — the kit that
+│                              #   rebuilds the machine on an empty volume, with its backup set (§20.1)
 ├─ tools/glb/                  # tile_mesh.mjs (3D Tiles)
 └─ docs/                       # design notes, A/B results, determinism plan, comparisons
 ```
 
 **Beyond the reconstruction.** The same backend serves:
 
-- the viewer's measurement tools;
-- the spatial assistant, which answers with deterministic tools and replays its measurements as geometry;
-- IFC/BIM registration and deviation maps;
+- the viewer's measurement tools and the calibration on the model (§22.3);
+- the spatial assistant, which answers with deterministic tools and replays its measurements as geometry, its
+  commands and its voice (§22.2, §22.4, §22.5);
+- the comparison against a BIM model and the IFC written from a scan (§22.6, §22.7);
+- downloads — the session as one ZIP, the export for other programs — and the jobs list (§22.8, §22.9);
+- tickets, and the common points of two scans (§22.10, §22.11);
 - the WebXR view on the phone;
 - team workspaces.
 
-See `docs/` for their design.
+See `docs/` for the design of the last two.
 
 ---
 
-## 22. The session in the viewer: meshes, the spatial chat, calibration, STAC's commands and voice
+## 22. The application around the pipeline
 
-### 22.1 Opening a session
+### 22.1 Opening a session, and what is always on screen
 
-The cloud opens first. Every mesh of the scan — the GenRecon tiles and the per-instance GLBs — is **listed unchecked
-and not downloaded**; checking one loads it (`Viewport.setTsdfVisibility`). A mesh that appears while the session is
-open, a GenRecon stage ending, loads at once: it is what the user is waiting for. Before 2026-11-13 the scene meshes
-loaded with the session.
+Opening a session shows **its cloud and nothing else**: no panel is switched, the grid and the axes stay as the user
+left them, and a stored BIM comparison is only made available — it is shown when asked for. Every mesh of the scan —
+the GenRecon tiles and the per-instance GLBs — is **listed unchecked and not downloaded**; checking one loads it
+(`Viewport.setTsdfVisibility`). A mesh that appears while the session is open, a GenRecon stage ending, loads at once:
+it is what the user is waiting for.
+
+- **The toolbar is always there** while a session is open, whole: a load in course, a server task or the deviation
+  sheet never hide it (with the sheet on screen the brush, the cloud alignment and the camera poses are disabled).
+- **A click on an object selects it** — its box and its dimensions — and opens no panel.
+- **The viewer keeps what the user chose** — point size (0.15 when none was chosen), background, grid — per session
+  and per user. The page renews its login before it expires (`POST /api/auth/refresh`): a login that had expired on
+  a page left open made the preferences read as empty and refused the downloads.
+- **The left rail**: Sessions, Instances, Tickets, Scans, BIM (*Model | Report*), Documentation and Gantt (two
+  sections still empty) and Team; its console icon carries the number of tasks running or queued (§22.9).
+- A scan that is **not calibrated** carries a small warning triangle by its name (a badge when calibrated or
+  verified).
 
 ### 22.2 The spatial chat (`server/phase5_qa/`)
 
@@ -2101,7 +2178,8 @@ with the backend (`semantic.chat_on_demand: false`), is warmed there (its first 
 job runs.
 
 **The language of an answer** is the sentence's own when its words tell (`answers.language_of`), else the
-conversation's so far, else the speech recogniser's, else the interface's. A description the VLM wrote for a scan is
+conversation's so far, else the one chosen in the settings, else the speech recogniser's, else English
+(`answers.default_language`); the interface with no language chosen is English. A description the VLM wrote for a scan is
 kept in Spanish and translated once per language by the model (figures, names and ids unchanged), then kept in the
 store.
 
@@ -2223,7 +2301,7 @@ $t_i^2 = \sum_k (s_k\, d_{ik})^2$ ($d_{ik}$: the measurement's component along a
 $s_k^2$ — and is refused unless a gauge measurement runs along each of the three axes; with one or two the calibration
 is global and the others verify. **Verification**: every *test* measurement is reported with its calibrated length, its
 difference to the real one and whether it lies within its $\sigma$. The scan's state — *uncalibrated*, *calibrated*,
-*verified* — is shown on the viewer as the cloud opens.
+*verified* — is shown by the scan's name: a warning triangle while it is uncalibrated.
 
 The stored measurements are drawn on the model in their own colour and stay through "clear measurements".
 
@@ -2309,14 +2387,14 @@ offered — declared in `router.py`, not built.
 its executor where the compiler asks; for `scene` / `system` write its handler and, when the tool layer should word
 its result, its composer in `answers.py`. Nothing else lists commands.
 
-The database holds **270 commands in 31 areas** and STAC runs all of them: 44 of the scene, 2 of the system and
-224 of the interface. A command of the interface is executed by the component that owns its state — the app, the
-viewer, or a panel / dialog (Calibration, references, the BIM tree, the certificate, Evaluation, Report, Team, the
-call, Administration, the Segmentation manager, Fuse, the flythrough), which registers its commands while it is
-open; asked for with its window closed, STAC opens the window first (`registerOpeners`). `manual` stays as a status
-for a future command with no executor yet.
+The database holds **277 commands in 32 areas** and STAC runs all of them: 44 of the scene, 2 of the system and
+231 of the interface. A command of the interface is executed by the component that owns its state — the app, the
+viewer, or a panel / dialog (Calibration, references, the BIM tree, Evaluation, Report, Team, the call,
+Administration, the Segmentation manager, Fuse, the flythrough, the download window, Common points), which registers
+its commands while it is open; asked for with its window closed, STAC opens the window first (`registerOpeners`).
+`manual` stays as a status for a future command with no executor yet.
 
-**The spoken confirmation** (`commands/confirm.py`). The 40 commands that launch GPU work, delete data or rewrite a
+**The spoken confirmation** (`commands/confirm.py`). The 41 commands that launch GPU work, delete data or rewrite a
 scan are declared `confirm: true`: each has an `ask` text and a `{ prepare, run }` executor. `prepare` changes
 nothing and names exactly what would be acted on; STAC says it ("I am going to delete the session X … To go ahead,
 say: STAC, yes, I confirm") and the interface holds the command for ONE sentence. The next sentence is judged on its
@@ -2359,3 +2437,229 @@ task of the server takes the card (it holds a CUDA context), and starts again wh
 
 Routes: `GET /api/voice/status`, `POST /api/voice/transcribe` (the recorded audio → text, language, `addressed`,
 `command`), `POST /api/voice/speak` ({text, lang} → WAV), `POST /api/voice/stop`. Tests: `tests/test_voice.py`.
+
+### 22.6 The comparison against a BIM model (`server/bim/`)
+
+A scan is compared with an IFC **element by element**: the distance from each point of the element's object to the
+element's surface, the share of that surface the scan covers, and a copy of the cloud coloured by deviation — the
+**deviation sheet**.
+
+**Pairing** (`bim/scan_data.py`). The objects are the instance store's and their points are `instance_ids.npy`'s. An
+IFC that STAC wrote from a scan (§22.7) says so in its header and is paired **by instance id** — its elements are
+named `<label>:<label>:<instance id>` — whatever the request carries; when it comes from the same scan it is compared
+with no registration, the two being in one frame by construction. Any other IFC is paired by the object's label
+against the element's number, entered by hand. The interface compares the scan on screen.
+
+**The distance is exact.** For a point $\mathbf p$ of an element with triangles $T$,
+
+$$d(\mathbf p) = \min_{\tau \in T}\ \lVert \mathbf p - \operatorname{closest}_\tau(\mathbf p) \rVert ,$$
+
+the minimum over **every** triangle of that element, never over a nearest-$k$ guess (the closest point on a triangle,
+in float64). The search that makes it affordable runs on the device too (`bim/c2m_grid.py`), every element in **one
+pass**:
+
+- the triangles go in size classes by their *reach* $r$, the centroid-to-vertex distance (a factor of two a class);
+- each class has a hash grid of its centroids, keyed by cell and element, at levels $L = 0, 1, \dots$ with cell
+  $h = 2r\,2^L$;
+- a point looks at the 27 cells around its own: every centroid within $h$ of it is there, so a triangle that was not
+  looked at has no point nearer than $h - r$. With $b$ the best distance found, the point is **done when
+  $b \le h - r$**; otherwise it is looked at once more, at the level whose cell covers $b + r$;
+- of the candidates, only those whose bounding sphere can still be nearer get the exact distance.
+
+The minimum of the same float64 values is the same value in whatever order they are found: the distances are the
+numpy record's **bit for bit** (the record searches each size class with a centroid tree until proven; both equal
+every point against every triangle to $10^{-12}$). `bim.deviation.device: numpy | cpu | cuda` selects the path. An
+earlier version took the smallest distance over the 8 triangles with the nearest centroids — centimetres too far
+beside the end of a pipe.
+
+**Coverage.** The element's surface is sampled by a generator seeded by the element (the same samples at every run),
+and a sample is covered when a point of the element's object lies within the proximity; the question is asked through
+the same grid.
+
+**The sheet is the scan's own octree** (`bim/sheet_octree.py`). The sheet's points are the scan's points, and the
+scan's octree is uncompressed — one record of fixed size a point — so the sheet's octree is that file with one field
+changed, each point's colour: green at 0, the tolerance in the middle, red at twice the tolerance; a point of no
+compared object is grey. A point of the octree is found in the cloud by its origin (frame, pixel row, pixel column),
+which no two points share. No second octree is built.
+
+**Run once, stored.** The comparison runs in its own process (`bim/compare_job.py`); it holds the card, so no
+pipeline job starts meanwhile, and none may be running or queued when it is launched. A new sheet is written beside
+the stored one and takes its place only when it is whole; a sheet *exists* when its metadata — written last — and its
+octree are there. `sabana_report.json` keeps every element's numbers and the whole comparison's histogram (40 bins
+over 0 … twice the tolerance, and the points beyond). The tolerance is one: `bim.deviation.tolerance_mm` (50) unless
+the Report's slider gives another, and the legend shows the stored comparison's.
+
+**In the interface.** One comparison, launched from the toolbar or from the BIM panel's *Report* view. The report
+lists the elements with their deviation and coverage; a row selects its object on the sheet and the selected object's
+row is marked. The objects stay selectable on the sheet, with their boxes and dimensions; the legend is a thin bar at
+the bottom of the viewer. The BIM panel has an opacity slider for the whole model and one for the selected element or
+branch; every element loads at 80 %.
+
+**Measured**, pccr 2026-08-31 against the IFC written from its own mesh (1209 elements, 1.4 M triangles; 1208
+evaluated on 18,559,423 points), on the A100 through the backend: **49 s** start to end — the comparison 25 s (the
+distances 8.6 s, the coverage 2.0 s), the sheet's files 2 s, its octree 4.5 s. Before the search moved to the device
+the same took 171–186 s (the distances 95 s, the coverage 8 s, an octree built again 40 s).
+
+Its figures — 78.5 % of the points within 50 mm, mean 62.4 mm, median 18.3 mm, global advance 70.6 % — are those of
+a scan compared with an IFC cut from its own mesh by a segmentation in which two objects can share one surface point
+by point (§17.3): a triangle goes to one of them, and the other's points are measured against what is left of their
+own element. With those objects merged (the same-surface merge, undone) the same comparison read 94.7 % within
+50 mm and a mean of 22.2 mm over 281 elements — at the price of the objects themselves. The mesh's own share is the
+floor's ~23 mm: GenRecon's remesh closes a sheet into a shell around the cloud (§18).
+
+Routes: `POST /api/bim/compare` (answers at once), `GET /api/bim/compare/{session}/status`,
+`GET /api/sessions/{id}/sabana/exists`, `…/sabana/report`, `…/sabana/meta`. Tests:
+`tests/test_bim_scan_comparison.py`.
+
+### 22.7 An IFC written from the scan (`server/bim/ifc_from_mesh.py`)
+
+The IFC of a scan is **its GenRecon mesh cut by its segmentation**: each object becomes an element whose geometry is
+that object's part of the mesh. (An earlier writer, `bim/ifc_from_scan.py`, gave each building element the box the
+store holds; measured too fat to stand for the element — a wall's box 25 cm thick around points 2 cm thick — it is
+kept and not used by the export.)
+
+- **One surface first.** A textured mesh repeats its vertices along the texture's seams; welded by position it is
+  one surface (pccr 2026-08-31: 8.68 M → 6.71 M vertices).
+- **Simplify the whole, cut after** (`export.ifc.keep`; 1 = the whole mesh, the value in force). Simplifying each
+  object's part on its own deletes the parts' ragged borders: 12 mm at the 95th percentile, metres at the worst.
+  The whole surface first, measured against the full mesh: the 95th percentile within 1.01 mm keeping 5 % of the
+  triangles, 0.52 mm keeping 10 %, 0.13 mm keeping 25 %.
+- **The cut.** Triangles longer than `export.ifc.max_edge_voxels` GenRecon voxels (2) are split first — a floor of
+  1.85 m triangles lay under 57 cm tiles. A triangle then goes to the object that holds the majority of the
+  `export.ifc.neighbours` (128) cloud points nearest to it, within one voxel; an object the majority leaves with no
+  triangle takes the triangles its own points lie on, so every object appears.
+- **The frame.** The mesh and the cloud on disk are in one frame and the cut happens there. A floor adjustment made
+  after the mesh (§17.4, the floor-level tool) is then applied to every element, as the viewer applies it to both.
+- **The file.** IFC4: one `IfcTriangulatedFaceSet` an element, its class from its label (wall, slab, door, beam,
+  duct …; the rest `IfcBuildingElementProxy`), named `<label>:<label>:<instance id>` — the key the comparison pairs
+  by — with its instance id, label, points, triangles, scan, geometry epoch and provenance (shape: `vlm_generated`;
+  object: the segmentation; label: `vlm_proposed`). The identifiers are derived from the names and no clock enters
+  the file: the same scan gives the same bytes.
+
+Measured on pccr 2026-08-31 (13.28 M triangles, 1213 objects): the whole IFC is about 435 MB, written in 3.5 min;
+keeping 10 % of the triangles, 46 MB and 1209 elements (95 % of the surface within 0.52 mm of the full mesh) — the
+one kept in the project for the viewer, whose IFC engine opens the whole one in 20 s using 4.7 GB. Tests:
+`tests/test_ifc_from_mesh.py`.
+
+### 22.8 Downloads: the session as one ZIP, and the export (`server/session_archive.py`, `server/exporter/`)
+
+The Download button of a session's row opens one window with two sections
+(`ui/src/features/SessionDownloadDialog.tsx`); there is no other export in the interface.
+
+**Download session — the session itself.** One ZIP that uploads again as a session, here or on another STAC.
+
+- *What it holds.* The project directory, whole — the scans with their frames, video and products, the exports,
+  the links, the empty folders — less what any use writes again (bytecode, SQLite's side files).
+  `STAC_SESSION.json`, the ZIP's first entry, lists every entry with its bytes, its date to the nanosecond and its
+  mode.
+- *A stream that can be resumed.* The ZIP is never on the volume: its bytes are read from the session as they are
+  sent. Every entry is **stored**, so the archive is a function of its manifest — its size is known before the
+  first byte and any range of it can be asked for again. A download cut by the network is resumed by the browser, or
+  by `curl -C -`, on the same link (asked for with the login; good 12 h for that download and its resumptions).
+  ZIP64 throughout. A file that changes under the download ends it short of its declared length — never a cut ZIP
+  passed as whole.
+- *Some scans only.* Each scan has a tick. A scan left out is not in the archive, nor its scan day when no scan is
+  left in it, nor the stored BIM comparison when it was that scan's; `project.json` travels rewritten without it
+  (the manifest carries the rewritten text, so the archive stays a function of its manifest). What comes down is
+  still a whole session.
+- *Refused* while a pipeline job of the session runs or waits, a video is being extracted into it, or its database
+  holds unwritten changes; while it is read, no job of it starts and it is neither renamed nor deleted.
+- *The upload* ("New session → Upload a ZIP") comes in 32 MB parts, resumed at the offset the server holds. The
+  manifest alone already refuses what is not a session, or a name that exists — at the first part, not after the
+  last of 100 GB. The whole archive is then validated before a byte is extracted (the format, one top folder, safe
+  paths and links, every manifest entry present with its size and nothing beside them, the scans' layout); every
+  CRC and size is checked while extracting, dates and modes are set, and the session is renamed into place last.
+  The ZIP is removed whatever the outcome; a failure leaves no session.
+
+Measured through the live backend: bufferStop out and back under another name — 5.47 GB, 2,088 files — download
+18–21 s, upload 39 s, check and extraction 30 s, every file equal by sha256 with its date and mode; pccr's
+106.74 GB / 35,047 files read to the declared length in 551 s (194 MB/s); zaragoza and observatorio verified entry
+by entry by `unzip -t`.
+
+**Export — files other programs open.** One ZIP for the session (`<project>/exports/<session>_stac_export.zip`; a
+new export replaces it), built by a process of its own on the CPU and downloaded by the page when it ends. Ticked
+per scan:
+
+| Item | File | Notes |
+|---|---|---|
+| cloud | E57 (ASTM E2807), LAS 1.4 (point format 7), PLY | filtered by the viewer's confidence, as GenRecon's input; LAS and PLY carry each point's confidence and origin (frame, pixel row, pixel column) |
+| mesh | GLB | every published mesh of the scan, with its textures |
+| mesh as IFC | IFC4 | §22.7 |
+| objects | CSV | each object's id, label, points, box centre, size and yaw |
+
+and, for the project, the IFC files loaded in it, as they were uploaded. Each scan's folder has a README (es / en /
+fr) that says what each file is.
+
+- **One frame**: the display frame written $z$-up, $(x, y, z) \to (x, -z, y)$, metres, the floor at $z = 0$; the
+  GLB keeps glTF's $y$-up, which readers turn by the same rule.
+- **As on disk**: the geometry of the scan's current epoch. A calibration measured and not applied is **not** in
+  the files; the README says the epoch, the calibration's state and its factor.
+- **A floor adjustment is in every file.** The cloud's files are the display frame; the IFC's elements are moved by
+  the adjustment; the exported GLB is the published one with the adjustment written into its positions and normals,
+  every other byte copied (`exporter/mesh.py`), the published mesh untouched. A transform on a root node is not
+  enough: the published meshes carry a root node named `world`, which one common reader takes for the scene's base,
+  ignoring a node above it.
+- The cloud's writers work on the machine's local disk (`export.scratch_dir`): on the network volume the E57
+  writer advanced 1.7 MB/s.
+
+Measured: bufferStop's mesh and IFC, 42 s and 178 MB; the exported GLB equals the stored one moved by the floor
+adjustment within 0.0002 mm, and the IFC's vertices lie on that mesh within their own 0.1 mm rounding.
+
+Routes: `GET /api/session_archive/{id}/plan`, `POST …/ticket` (`{scans}`), `GET …/download?ticket=` (ranges);
+`POST /api/session_import`, `PUT …/{job}/part`, `POST …/{job}/finish`; `GET /api/export/{id}/session_plan`,
+`POST …/session`, `GET …/session_status`, `POST …/session_cancel`, `GET …/session_download`. Tests:
+`tests/test_session_archive.py`, `tests/test_exporter_cloud.py`, `tests/test_exporter_package.py`,
+`tests/test_exporter_jobs.py`.
+
+### 22.9 Jobs (`server/task_manager.py`)
+
+Whatever runs on the server for minutes is listed in the **Jobs** tab of the bottom dock, whoever launched it and
+with its window closed:
+
+- the pipeline job this page follows, with its stages, and the other pipeline jobs — running, or waiting their turn;
+- every task of the task manager, of every session — an export, a BIM comparison, a fusion, a propagation — with its
+  progress;
+- the videos being extracted.
+
+An export has a **Cancel** there: the process is asked to stop and unwinds (killed after 10 s), the ZIP being
+written and its scratch folder are removed, and the previous whole export stays. The page that launched an export
+follows it with the window closed — across a reload too — and downloads its ZIP when it ends, or says its failure.
+The console icon of the left rail carries **the number of tasks running or queued**.
+
+Routes: `GET /api/tasks` (every running task), `GET /api/tasks/{session}`, `GET /api/pipelines/active`.
+
+### 22.10 Tickets (`server/tickets.py`)
+
+A ticket is a review item or a non-conformity marked **on an object of the scan**: the object is selected first, a
+right click on it gives the menu, and *New ticket* opens the form (kind, title, description). The ticket keeps the
+clicked point (display frame), the scan, the object (instance id and label), who marked it and when, its state —
+open, resolved, deleted — and the scan's **geometry epoch**: after a correction that moved the cloud it is listed as
+of an earlier geometry instead of being drawn as if it were still there. Every change is appended to its history; a
+deleted ticket stays as history and its number is never given again.
+
+Tickets are the project's (`<project>/tickets.json`, one numbering for all its scans; the session's ZIP carries
+them). They have their own section of the left rail, between Instances and Scans: the list with each one's state and
+history, show all or each, go to it. On the model each is a numbered pin whose tooltip says the rest. Reading is
+anyone's who opens the session; marking and resolving need a signed-in user; removing one is its author's, a
+manager's or an administrator's. Provenance: `human_stated` — a person's statement, nothing measured.
+
+Routes: `GET /api/tickets/{session}`, `POST /api/tickets/{session}`, `PATCH …/{ticket}`, `DELETE …/{ticket}`.
+Tests: `tests/test_tickets.py`.
+
+### 22.11 Common points between two scans (`server/fusion/common_points.py`)
+
+To lay one scan of a project on another — two days of the same room — the same physical point is marked on both, by
+one click on each scan (`<project>/common_points.json`; a mark carries its scan's geometry epoch, and one of an
+earlier geometry is listed, not used). The scans' display frames are levelled, so the motion sought is a similarity
+about the vertical: for marks $\mathbf a_i$ on the scan on screen and $\mathbf b_i$ on the other,
+
+$$\min_{s,\,\theta,\,\mathbf t}\ \sum_i \lVert s\,R_y(\theta)\,\mathbf a_i + \mathbf t - \mathbf b_i \rVert^2 ,$$
+
+solved in closed form, with each point's residual. Two points fix the plan exactly — their residual is the height
+the scans disagree by; three or more say how well they agree. A scale given from outside (a tape measurement) leaves
+the points the turn and the shift. **The result is reported, not applied**: where the factor goes — the
+composition's transform, the lengths shown, a scan's geometry — is the user's decision, still open; laying one scan
+on the other and comparing them cloud to cloud follow it.
+
+Routes: `GET /api/project/{project}/common_points`, `GET …/common_points/solve`, `POST …/common_points`,
+`PUT …/common_points/{point}/marks`, `DELETE …/common_points/{point}`. Tests: `tests/test_common_points.py`.

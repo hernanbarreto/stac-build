@@ -107,6 +107,13 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
 - ONE task at a time; one GPU job at a time (A/B timing under contention is invalid); never several agents on his
   session; never change a validated recipe on a hypothesis; when porting, reproduce its numbers EXACTLY on the real
   session before saying it is done.
+- A RULE OF HIS IS LIFTED ON HIS EYE, ON ONE SESSION — NEVER ON NUMBERS, NEVER ON ALL FIVE (2026-11-19, the
+  same-surface merge: proposed by the assistant on 2026-11-18 AGAINST his rule of 2026-11-11 — "no quiero hacer
+  una pasada para fusionar objetos, solo el piso" — to mend the IFC's borders, accepted by him on a description
+  and figures ("1. Si" / "Si los grandes se comen a los pequeños no está mal"), applied to the five sessions the
+  same night, and wrong on his screen: "ya … habiamos elegido no hacer fusiones, porque el sistema confundia
+  objetos"). What changes what he sees in a session is shown to him on ONE session first; it reaches the others
+  after his eye says yes.
 - ANSWER HIM FIRST (2026-11-13, after two hours of one turn in which his "como venimos con la implementación de
   todos los puntos" went unanswered: "Contéstame … Ya mismo … Es una orden"): a question of his is answered BEFORE
   anything else; work goes in SHORT turns, one point at a time — "comités y push es en la medida que vayas
@@ -775,7 +782,10 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   rotation, a uniform scale of a copy, camera rotation — the duplicates lay ALONG the line of sight (depth).
 - SEGMENTATION: the VLM on a sample of keyframes (it saw 8 of 289); 2×2 crops; one prompt per head noun (dropped 22
   of 52 phrases); a second VLM pass over the unsegmented points (2026-10-04 — the rounds, which grey what is
-  segmented, replaced it).
+  segmented, replaced it); THE SAME-SURFACE MERGE of the objects whose points are interleaved
+  (`segmentation.interleave_merge`, applied to the five sessions 2026-11-18, undone 2026-11-19 — "fusiono objetos
+  que no tenia que fusionar y no fusiono objetos que si tenia que fusionar": it joins what is MIXED, not what is
+  the same; §7, the list of 2026-11-19, point 9).
 
 ## 7 · PENDING
 - ⭐⭐⭐ THE LIST OF 2026-11-19 — HIS POINTS, WITH HIS NUMBERS (RESUME HERE; the 2026-11-18 block below is its
@@ -797,9 +807,43 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   Flyers / PointDiT / mixed unresolved and Certificate & quality removed · 20, 21 ✓ the Documentation and Gantt
   sections (empty) · the retouches ✓. (What each is: §5.)
   OPEN:
-  9. The same-surface merge is WRONG to his eye ("dejo todos los tiles que son piso, los dejos sueltos y junto
-     como piso a las puertas y a otras cosas") — NOT STARTED; the five backups output/_before_same_surface/ are
-     KEPT (they are what undoes it); whether it is undone: asked, not answered.
+  9. THE SAME-SURFACE MERGE: UNDONE ON HIS WORD, 2026-11-19 — applied, waiting for his eye on the five lists.
+     His words: "dejo todos los tiles que son piso, los dejos sueltos y junto como piso a las puertas y a otras
+     cosas" / "quedo como el culo, fusiono objetos que no tenia que fusionar y no fusiono objetos que si tenia que
+     fusionar, que paso ahi?" / "ya habiamos hecho fusion de piso durante la fase que va desde vlm al genrecon, y
+     habiamos elegido no hacer fusiones, porque el sistema confundia objetos, no esta pulida esa parte" / to "do
+     I undo it?": "si, en todos los casos, dale" / "para todas las sesiones recupera todo eh!, porque ese error
+     esta en todas las sesiones".
+     WHY IT WAS WRONG (measured on pccr 3108 after it, 1213 → 280 objects): the rule measures how MIXED two
+     objects' points are, not whether they are the same thing. 85 of 355 tiles stayed loose (cleanly segmented,
+     a tile lies BESIDE the floor, not mixed with it) while 25 of 27 doors (glass enclosure 6, drywall 4, wall 3,
+     panel 2, window 2 …), 19 of 19 servers, 27 of 28 server units, 25 of 30 cables were absorbed by what they
+     stand against or behind, and 15 panels / 9 cables / 5 pipes / 3 walls went into the floor.
+     WHAT WAS DONE: each scan's files of before the merge put back from output/_before_same_surface/ (the
+     backups are GONE: used), what was written into the store after the merge KEPT (the chat's scene
+     descriptions of bufferStop and pccr 2408 — the only difference found, every other table equal), the ids
+     of the cloud checked against the store, the octree rebuilt with the restored classes, the viewers told:
+     bufferStop 270 objects · pccr 3108 1213 · zaragoza 338 · observatorio 469 · pccr 2408 7932.
+     `segmentation.interleave_merge.enabled: false` — HIS RULE OF 2026-11-11 STANDS AGAIN: only the floor
+     merges; the code stays, selectable. pccr 3108's IFC cut again from the restored objects (10 %: 1209
+     elements, 46.5 MB) and its stored BIM comparison run again (both were of the merged objects).
+     ⚠ THE CONSEQUENCE, TOLD TO HIM: against that IFC the comparison reads WORSE without the merge — 1209
+     elements, 78.5 % of the points within 50 mm (94.7 % with the merge), mean 62.4 mm (22.2), median 18.3 mm,
+     advance 70.6 % (96.1 %), 568 good / 286 regular / 354 bad (250 / 20 / 10): two objects that share one
+     surface point by point are separate again, a triangle goes to one of them and the other's points are far
+     from "their" element. One owner per surface is STILL UNSOLVED (the scene-understanding work).
+     THE COMPARISON'S TIME WITH 1209 ELEMENTS: 49 s through the backend (the comparison 25 s; distances 8.6 s,
+     coverage 2.0 s; the sheet's files 2 s, its octree 4.5 s) — not the number of elements. ⚠ TWO RUNS WERE
+     SLOW that night (8.6 and 8.3 min; he saw it "clavado en el 95% hace muchisimos minutos"), in the ~20 min
+     after the five octree rebuilds: the sheet's files took 201 s and its octree 232 / 254 s. In them the
+     process spent its time IN THE KERNEL (system time 206 s against 31 s of user time, no page fault, no file
+     read or write counted) during plain memory operations; the volume wrote at 660 MB/s, the container had
+     68 GB free, the same operations took 1 s in a fresh process, a CUDA context did not slow them. NOT
+     REPRODUCED afterwards (47 s by a probe, 48.8 s through the backend); THE CAUSE WAS NOT ESTABLISHED (the pod
+     has no strace / perf; the host is shared: its load average read 95 then). Told to him so. A lead not
+     tested: numpy asks the kernel for huge pages on big arrays (madvise), whose direct compaction stalls when
+     free memory is fragmented — `NUMPY_MADVISE_HUGEPAGE=0` in the job's environment would take it out; not
+     changed (a hypothesis).
   10. The IFC export "does not work" — it is now the Export section of the session's download window (§5 "ONE
       DOWNLOAD WINDOW"): APPLIED, WAITING FOR HIS EYE ("vamos a validar la herramienta de exportacion"). The
       138 MB ZIP written that night is kept in pccr/exports as evidence.
@@ -808,7 +852,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
       design: APPLIED, WAITING FOR HIS EYE. (It matters before the maintenance of the 23rd.)
   ALSO THAT NIGHT: the volume at 94 % (a log write was refused once, Errno 122) — freed on his "si, dale": the
   five output/_before_min_points/ backups, the old test data of /workspace/tmp, the pip cache, the whole IFC
-  of pccr/exports (13.8 GB); KEPT: the same-surface backups, /workspace/tmp's two git worktrees (wt_scale has
+  of pccr/exports (13.8 GB); KEPT: the same-surface backups (used and removed later by the undo of point 9),
+  /workspace/tmp's two git worktrees (wt_scale has
   7 uncommitted files) and the export ZIP. pccr 2026-08-31 HOLDS A STORED COMPARISON (his run, 50 mm).
 - ⭐⭐⭐ WHERE THE WORK STANDS — 2026-11-18, main (USER: "Cuando termines anota los puntos que quedan pendientes de lo
   que teníamos que hacer anótalo para la próxima sesión de trabajo"). This block is the one to resume from; the
@@ -836,7 +881,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   factor, and DECIDE WHERE IT IS APPLIED (B-5) — the fusion's compare follows from it; (2) look at the BIM
   comparison of pccr 3108 and say what is compared and how ("luego vemos"); (3) his eye on the tickets;
   (4) keep STAC_BACKUP_KEY off the pod (item 40 a).
-  1 · ONE OWNER PER SURFACE — DECIDED AND APPLIED TO THE FIVE SESSIONS (item 32 of the list below); his eye pending. The segmentation is interleaved point by
+  1 · ONE OWNER PER SURFACE [UNDONE 2026-11-19 ON HIS WORD — the list of 2026-11-19, point 9; what follows is
+     what was applied and why] — DECIDED AND APPLIED TO THE FIVE SESSIONS (item 32 of the list below); his eye pending. The segmentation is interleaved point by
      point (pccr 3108: 39 % of a point's 8 nearest neighbours are another object's) because each point takes the
      mask of its own keyframe and nothing but the floor merges since his 2026-11-11 rule. He allowed the merge
      ("1. Si") and then asked "las baldosas son piso verdad?" — answered YES: a tile and the floor are one
@@ -941,7 +987,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     31. The general list of docs/pipeline_final.md §4 (capture distance, the weighted
         vote, the GPU ports of the intake, among others) ........................... as it was
   F · ADDED IN THIS SESSION (2026-11-17 / 18)
-    32. ONE OWNER PER SURFACE: DONE 2026-11-18 on his order ("Hace todo esto ahora y déjalo listo con el nuevo
+    32. ONE OWNER PER SURFACE [UNDONE 2026-11-19 ON HIS WORD — the list of 2026-11-19, point 9; the five scans
+        are back at 270 / 1213 / 338 / 469 / 7932 objects]: DONE 2026-11-18 on his order ("Hace todo esto ahora y déjalo listo con el nuevo
         ifc coherente") — APPLIED TO THE FIVE SESSIONS, each with its octree rebuilt and the viewers told, no
         failure, ids = store = boxes checked on each:
           pccr 3108      1213 → 280 objects    neighbours of another object 38.5 % → 4.0 %     90 s
