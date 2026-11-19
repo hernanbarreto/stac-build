@@ -965,6 +965,53 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   scale bound |log s − 0.0011| ≤ 0.0961; of the 1726 bridges 1082 became closures and 644 were declared out of the
   bound; "the 170 DA3 per-cube scales recorded, not used (the locks disagree by 3.2 % between neighbours; the
   metre is scale_align's, the scale along the walk F2's)".
+  ⭐⭐ THE COPY'S GRAPH (19:47 UTC) AND THE CLOSURES SET ASIDE BY "OUR OWN CRITERION" — HIS ORDER, APPLIED TO THE
+  COPY 2026-11-19 ~20:30 UTC. The pipeline's own numbers, original | copy (scratchpad eval_graph.py): cubes 86 |
+  170; seams 92 | 510; seam sigma median 2.0 | 2.0 cm, max 24.2 | 17.9; LEFT AFTER THE GRAPH median 2.3 | 1.4 cm,
+  max 51.0 (the dark turn) | 32.3 (the first door, cubes 26–29; then 123–126, video 10140–10672, 30.8); over 10 cm
+  4 | 9; THE DARK TURN'S SEAMS left 42–51 cm | median 3.1, max 9.7 cm, and the walk across it 0.30 m | 0.85 m where
+  the first pass gives 0.87 (the next stretch x1.64 | x1.02); closures agreeing with the solution 48 % | 49 %; the
+  walk's local length against the first pass as spread as before (half within x0.917–x1.061, 90 % within
+  x0.754–x1.332; the worst now the walk's start, x1.34–1.38, in both runs). THE RACK on the same pixels
+  (rack_copy.py): front to rear 1.548 m in the original as published → 0.859 m on the copy's placed cubes.
+  USER, told that the graph had used 1082 of the 1726 bridges and set 644 aside ("relative scale outside the
+  session's bound — not an edge"): "tampoco está bien que rechacemos costuras y correcciones que si son correctas
+  pero las rechazamos con criterio nuestro" / "corrijamos esa coherencia y volvamos a correr la etapa para que
+  quede bien corregido y no descartar mal".
+  · WHAT THE CODE DOES (vendor/VGGT-Long/loop_utils/cube_run.py): the SEAMS are all applied with their own Sim(3)
+    scale ("kept free" = the Sim(3) kept, not the rigid fit: his "ajustalo libre" of 2026-11-09). The CLOSURES are
+    dropped BEFORE the solve when sa/sb — the ratio of the two cubes' units — is outside the bound measured on the
+    seams of NEIGHBOURS (here |log s| ≤ 0.096). But the per-cube metric locks are off by up to x2 (the block
+    above), so a right closure between a well and a badly locked cube MUST have a scale away from 1.
+  · MEASURED: a seam's scale against the ratio of its two cubes' metres (first pass per cube unit): correlation
+    −0.92, 1.3 % left. Of the 644 closures set aside, 519 (81 %) have a scale that the two cubes' metres explain
+    as well as 90 % of the accepted ones. The cubes most often in a set-aside closure: 167 (x1.65), 143 (x1.28),
+    157–159, 76–77 (the dark turn).
+  · THE WHAT-IF (scratchpad graph_whatif.py; the vectorised solver reproduces the pipeline's solve — cost
+    5508.4726 = stored, poses within 0.087 mm — in 116 s against the pipeline's 28 min): EVERY BRIDGE A CLOSURE
+    under the same Cauchy loss → cost 8965.50, the same optimum from two starts; the cubes move median 12 cm, max
+    21 cm, scales x0.997–x1.016; seams left 1.6 cm median (1.4), max 32.2; closures agreeing (all 1726) 45 % (43);
+    the rack 0.809 m (0.859). ⚠ NOT THE ROOT FIX, TOLD TO HIM: with every closure in, more than half still
+    disagree with the solution and 762 are off by more than 50 cm (of the set-aside ones only 35–38 % agree in
+    POSE, whatever their scale) — another cause, not found: to be studied (false revisits in a room of identical
+    racks and tiles? the bridges' own fits?).
+  · APPLIED TO THE COPY WITHOUT INFERRING ITS CUBES AGAIN (the clean way — the rule changed in cube_run.py — would
+    discard the 170 cubes by the stamp: 5.5 h; told to him, he was told he could ask for it): stage 2 cancelled
+    at 20:22 UTC (it was building on the old graph and about to delete the cubes); scratchpad regraph.py —
+    `solve`: the run's 510 seams + every bridge fit on disk as a closure in the run's order of revisits (the 1082
+    the run used rebuilt identically), loop_utils.chunk_graph.solve ITSELF started at the vectorised solution
+    (425 s, converged, cost 8965.4975, moved 0.000 mm from that start) → the document in the run's own format
+    with a `closures_rule` block that DECLARES all this; `test`: the re-placement on a copy of cube 74 — against
+    the 4x4 form of the same motion 0.0010 mm at most (float32 resolves 0.0019 mm at 17.9 m), depth x1.009448,
+    same fields; `place`: every placed cube moved from the pose it carries to the corrected one (world points,
+    depth, _stac_cube_pose; written whole, then swapped in), chunk_graph.json replaced (the run's own kept as
+    chunk_graph.as_solved_by_the_run.json), chunk_sim3.json's poses rewritten, uncertainty.json / depth_graph.json
+    / uncert / pcd cleared. THE COPY IS THEREFORE NOT A CLEAN RUN: against one, its points differ by the float32
+    rounding of one more transform.
+  · OWED IN THE PIPELINE, AFTER THE COPY (the file is in the cube stage's stamp): cube_run.closures without the
+    a-priori scale test (the Cauchy loss judges a loop edge; validated when the pipeline's own solve gives cost
+    8965.4975 on this session), and the graph solve vectorised / on the card (item 3 of the list of CPU steps:
+    28 min → 2 min on the CPU as it is).
   ⚠⚠ THE FIVE SCANS WERE STRIPPED OF MORE THAN "INTERMEDIATES" — THE ASSISTANT'S ERROR, TOLD TO HIM 2026-11-19
   (found when he asked that the freeing be automatic: "Esto de liberar los intermedios debería hacerse de forma
   automática, se podría hacer una vez que termina la nube o recién cuando termina genrecon? Pero como sea y
