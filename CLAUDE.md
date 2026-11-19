@@ -1513,6 +1513,40 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
      and only the cubes that left none (a cube with no anchor, a cube of an older run). ON A REAL CUBE (74,
      brought back to its unlocked state): the cube FILE has the same sha256 as the live code's, metric_lock.json
      is equal. 4 tests. It removes the 15-minute pass.
+  e. THE CLOSING PASS (0005 — the second change of that design): cube_run.CubeRun.close() with
+     `Model.cube_closing: single_pass` reads every cube ONCE as it was inferred, places it in memory and takes from
+     it every piece of apply → uncertainty → depth graph → outputs → poses AND the per-keyframe Omega records
+     (omega_records/ + omega_records.json, written last; the server's _emit_omega_depth read every placed cube
+     back for them). No placed cube is written. A cube's points wait in memory until every cube that owns a frame
+     it backfills has been read (2 cubes on the copy's layout; never more than MAX_PENDING 8 — the rest are read
+     twice). THE DEPTH GRAPH decides only after every cube: the products are written as if it left the geometry
+     untouched — ITS VERDICT ON ALL SIX SESSIONS MEASURED (depth_graph.json: SKIP on pccr 2408, the copy, pccr
+     3108, zaragoza, observatorio, bufferStop) — and the cubes holding a frame it moves are read and written again
+     if it applies; with its solution on disk (a resume) the correction is applied at the first read. The steps
+     stay the record (`steps`, the default), their per-cube pieces now shared (_unc_*, _dg_*, _out_*, _pose_*).
+     ON SIX REAL CUBES of the copy (72–77, local disk, scratch closing_ab.py): the 278 products — 6 PLY, 6
+     origins, 114 uncertainty maps, 145 records against the SERVER's own writer, poses, the JSONs — IDENTICAL to
+     the live code's, 6 cube reads against 42 and no cube write against 6; identical too with the depth graph
+     FORCED to apply (386 frame copies moved), on a resume over its own products, and with no cube allowed to
+     wait. 9 tests.
+  f. THE CLOSING PASS ON A DEVICE, THE SAME BITS (0006, `Model.cube_closing_device: numpy | cpu | cuda`,
+     loop_utils/closing_torch.py). FOUND: the record's placement (`np.matmul(R, p)`, a BLAS call per point) and
+     the record depth (`(p - c) @ axis`) are, on this pod (numpy 2.4.4, OpenBLAS 0.3.31 Haswell kernels),
+     fma(a2*x2 + fma(a0*x0 + a1*x1)) — one product rounded, two FUSED multiply-adds (found with exact rational
+     arithmetic; a plain sum differs in 34 % of the values). torch has no fused multiply-add to ask for:
+     closing_torch.fma builds it EXACTLY from plain float64 operations (Veltkamp / Dekker, Knuth, rounding to
+     odd — Boldo & Melquiond 2008): 0 differences from rational arithmetic on 1.4 M adversarial values, and the
+     placement of a whole real cube (74 M values) equal to the record's bit for bit. The comparisons of a
+     float32 confidence with a Python number are done as the running numpy does them (f32_ge / f32_gt); the
+     square root is numpy's on the CPU (torch's is not correctly rounded there). ON THE SIX REAL CUBES, the
+     device arithmetic run on the CPU: the 278 products IDENTICAL, also with the depth graph forced to apply.
+     14 + 4 tests. Left on the CPU, declared: each cube's write threshold (the fork's own percentile, ~0.3 s a
+     cube), an uncertainty map's statistics, the files (PLY; zlib of the origins and records, in threads).
+     ⚠ The record itself is the machine's: a pod whose numpy picks another BLAS kernel would give other last
+     bits on the numpy path — the test of the placement says so if it happens.
+  STILL OWED FOR THE CLOSING: the SERVER's side — _emit_omega_depth taking the fork's records (a rename) when
+  they are there, the PLYs and origins moved to output/ by a rename instead of a copy and a zlib round trip (5 min
+  on the copy), the two keys in config.yaml + the builder; scale_align's own passes (6+ min) not looked at yet.
   NOT MEASURED YET: anything ON THE CARD (the copy's run holds it; a second CUDA context would make
   require_exclusive_gpu refuse the card to its next stage) — the twins were run with device "cpu". STILL TO DO:
   the metric lock, apply, the uncertainty, the outputs, _emit_omega_depth (items 1, 4, 5, 6) and the profile of
