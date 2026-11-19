@@ -639,18 +639,26 @@ def _omega_chunk_of_keyframes(session: CorrectionSession) -> np.ndarray:
 
 
 def omega_chunk_of_frames(output_dir, frames) -> np.ndarray:
-    """The Omega chunk that OWNS each of ``frames`` (the reconstruction's own records)."""
+    """The Omega chunk that OWNS each of ``frames``: the reconstruction's own records — or, for a keyframe
+    whose record was released, what was kept of it for THIS reconstruction (correction.release:
+    omega_chunks.json, written from the records before they went)."""
     frames = list(frames)
     out = np.full(len(frames), -1, np.int64)
     rec = Path(output_dir) / "omega_run" / "results_output"
+    kept = None
     for i, f in enumerate(frames):
         p = rec / f"frame_{int(f)}.npz"
         if p.exists():
             with np.load(p) as z:
                 out[i] = int(z["chunk"]) if "chunk" in z.files else 0
+        else:
+            if kept is None:
+                from correction.release import kept_chunks
+                kept = kept_chunks(output_dir)
+            out[i] = int(kept.get(int(f), -1))
     if (out < 0).any():
-        raise RuntimeError(f"{int((out < 0).sum())} keyframe(s) have no Omega record in {rec} — "
-                           f"the chunk of a keyframe is unknown")
+        raise RuntimeError(f"{int((out < 0).sum())} keyframe(s) have no Omega record in {rec} and no kept "
+                           f"chunk (omega_chunks.json) — the chunk of a keyframe is unknown")
     return out
 
 

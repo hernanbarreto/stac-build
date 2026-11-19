@@ -97,6 +97,18 @@ RECONSTRUCTION_ID_FILES = ("camera_frames.txt", "vggt_omega_config.yaml",
                            ".orientation_applied")
 RECONSTRUCTION_ID_KEY = "reconstruction_id"
 
+# THE IDENTITY, KEPT WHEN THE RECORDS ARE RELEASED (USER 2026-11-19: "Esto de liberar los intermedios debería
+# hacerse de forma automática ... como sea y cuando se pueda el sistema debe liberar ese espacio" / "Ok lo de la
+# huella con archivos chicos dale hacelo"). The Omega records are gigabytes (2.6 MB a keyframe) and the identity
+# is what every later stage needs of them: the floor transform's seal names it (point 158), the artifacts read
+# across runs carry it. Before the records go, the identity is written here — the id, and the sha256 of each of the
+# OTHER identity files as it was — and a session without records answers with it, as long as those files are still
+# what they were. The records decide while they exist: this file is never read then.
+RECONSTRUCTION_ID_RECORD = "reconstruction_id.json"
+RECONSTRUCTION_ID_RECORD_VERSION = 1
+RECORDS_REL = "omega_run/results_output"
+KEPT_ID_FILES = tuple(rel for rel in RECONSTRUCTION_ID_FILES if rel != RECORDS_REL)
+
 
 class ReconstructionIdError(RuntimeError):
     """The session has no reconstruction to name — with the exact reason."""
@@ -113,8 +125,7 @@ def reconstruction_id(output_dir) -> str:
     out = Path(output_dir)
     rec = out / "omega_run" / "results_output"
     if not rec.is_dir() or not any(rec.glob("frame_*.npz")):
-        raise ReconstructionIdError(f"{rec} holds no Omega record (frame_*.npz) — the session has "
-                                    f"no reconstruction to name")
+        return _kept_reconstruction_id(out, rec)
     if not (out / "camera_frames.txt").is_file():
         raise ReconstructionIdError(f"{out / 'camera_frames.txt'} is missing — the keyframe list "
                                     f"is part of the reconstruction's identity")
@@ -133,6 +144,98 @@ def reconstruction_id(output_dir) -> str:
 
 
 _RID_MEMO: Dict[str, Tuple[tuple, str]] = {}
+
+
+def _kept_reconstruction_id(out: Path, rec: Path) -> str:
+    """The identity of a reconstruction whose Omega records were RELEASED: the one
+    :data:`RECONSTRUCTION_ID_RECORD` holds, taken only while every other identity file is what it was when
+    the identity was kept (same sha256; absent then, absent now). RAISES — as a session that never had
+    records does — when there is no such file, when it cannot be read, or when one of those files differs:
+    an identity that cannot be held to anything is not an identity."""
+    from repro import sha256_file
+    p = out / RECONSTRUCTION_ID_RECORD
+    if not p.is_file():
+        raise ReconstructionIdError(f"{rec} holds no Omega record (frame_*.npz) — the session has "
+                                    f"no reconstruction to name")
+    ident = ("kept", _file_ident(p)) + tuple(
+        (rel, _file_ident(out / rel) if (out / rel).exists() else None) for rel in KEPT_ID_FILES)
+    hit = _RID_MEMO.get(str(out))
+    if hit is not None and hit[0] == ident:
+        return hit[1]
+    try:
+        doc = json.loads(p.read_text())
+    except (OSError, ValueError) as e:
+        raise ReconstructionIdError(f"{p} is unreadable ({e}) — the kept identity cannot be taken") from e
+    rid = doc.get(RECONSTRUCTION_ID_KEY) if isinstance(doc, dict) else None
+    files = doc.get("files") if isinstance(doc, dict) else None
+    if (not isinstance(doc, dict) or doc.get("version") != RECONSTRUCTION_ID_RECORD_VERSION
+            or not isinstance(rid, str) or len(rid) != 64 or any(c not in "0123456789abcdef" for c in rid)
+            or not isinstance(files, dict) or set(files) != set(KEPT_ID_FILES)):
+        raise ReconstructionIdError(f"{p} is not a kept identity of version {RECONSTRUCTION_ID_RECORD_VERSION} "
+                                    f"(its id, and the sha256 of {', '.join(KEPT_ID_FILES)})")
+    for rel in KEPT_ID_FILES:
+        q, want = out / rel, files[rel]
+        if want is None:
+            if q.exists():
+                raise ReconstructionIdError(f"{q} exists and was absent when the identity was kept — "
+                                            f"this is no longer the reconstruction {p.name} names")
+            continue
+        if not q.is_file():
+            raise ReconstructionIdError(f"{q} is missing — it is part of the identity {p.name} names")
+        have = sha256_file(q)
+        if have != want:
+            raise ReconstructionIdError(f"{q} is {have[:12]}…, the identity was kept with {str(want)[:12]}… — "
+                                        f"this is no longer the reconstruction {p.name} names")
+    _RID_MEMO[str(out)] = (ident, rid)
+    return rid
+
+
+def write_reconstruction_id_record(output_dir, rid: str, *, source: str, **extra: Any) -> Path:
+    """Write :data:`RECONSTRUCTION_ID_RECORD`: ``rid`` and the sha256 of every other identity file as it is
+    NOW (None for an absent one). ``source`` says where the id comes from — ``records`` (computed from the
+    Omega records, :func:`keep_reconstruction_id`) or ``recovered`` (correction.release.recover: the records
+    were already gone) — and ``extra`` what the writer adds to say so. Atomic; no clock in it; the same
+    content is not rewritten (the file's date is part of the floor seal memo's signature)."""
+    from atomic_io import atomic_write_json
+    from repro import sha256_file
+    out = Path(output_dir)
+    if not isinstance(rid, str) or len(rid) != 64:
+        raise ValueError(f"not a reconstruction id: {rid!r}")
+    if not (out / "camera_frames.txt").is_file():
+        raise ReconstructionIdError(f"{out / 'camera_frames.txt'} is missing — the keyframe list "
+                                    f"is part of the reconstruction's identity")
+    doc: Dict[str, Any] = {"version": RECONSTRUCTION_ID_RECORD_VERSION, RECONSTRUCTION_ID_KEY: rid,
+                           "files": {rel: (sha256_file(out / rel) if (out / rel).is_file() else None)
+                                     for rel in KEPT_ID_FILES},
+                           "source": str(source), "provenance": "tool_measured"}
+    for k, v in sorted(extra.items()):
+        if k in doc:
+            raise ValueError(f"write_reconstruction_id_record: {k!r} is a fixed field of the record")
+        doc[k] = v
+    p = out / RECONSTRUCTION_ID_RECORD
+    try:
+        if p.is_file() and json.loads(p.read_text()) == json.loads(json.dumps(doc)):
+            return p
+    except (OSError, ValueError):
+        pass
+    atomic_write_json(p, doc, indent=1, sort_keys=True)
+    return p
+
+
+def keep_reconstruction_id(output_dir) -> str:
+    """Keep the identity of a reconstruction whose Omega records are ON DISK (they decide it), so that it
+    outlives them: computed as always, written to :data:`RECONSTRUCTION_ID_RECORD`. To be called before
+    the records are released — and never the other way round. Returns the id."""
+    out = Path(output_dir)
+    rec = out / RECORDS_REL
+    n = sum(1 for _ in rec.glob("frame_*.npz")) if rec.is_dir() else 0
+    if n == 0:
+        raise ReconstructionIdError(f"{rec} holds no Omega record — an identity is kept FROM the records, "
+                                    f"before they are released (a session that lost them: "
+                                    f"correction.release.recover)")
+    rid = reconstruction_id(out)
+    write_reconstruction_id_record(out, rid, source="records", records=int(n))
+    return rid
 
 
 def _file_ident(p: Path) -> tuple:

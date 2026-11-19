@@ -80,7 +80,9 @@ def _rule_identity() -> str:
             parts = [inspect.getsource(_pipeline._floor_seal_status),
                      inspect.getsource(_epoch.reconstruction_id_or_none),
                      inspect.getsource(_epoch.reconstruction_id),
+                     inspect.getsource(_epoch._kept_reconstruction_id),
                      repr(_epoch.RECONSTRUCTION_ID_FILES),
+                     repr((_epoch.RECONSTRUCTION_ID_RECORD, _epoch.RECONSTRUCTION_ID_RECORD_VERSION)),
                      inspect.getsource(repro.stamp), inspect.getsource(repro.sha256_path),
                      inspect.getsource(repro.sha256_file),
                      repr(getattr(repro, "STAMP_VERSION", None))]
@@ -159,11 +161,14 @@ def _sig(path: Path) -> Optional[tuple]:
 
 
 def _signature(output_dir: Path, cloud_path: Path) -> tuple:
-    from correction.epoch import RECONSTRUCTION_ID_FILES
+    from correction.epoch import RECONSTRUCTION_ID_FILES, RECONSTRUCTION_ID_RECORD
     out = Path(output_dir)
+    # (the kept identity — what a session whose records were released answers with — is read by the seal
+    #  check too: its appearing, changing or going changes the verdict)
     return (str(Path(cloud_path).resolve()), _sig(cloud_path), _sig(out / "floor_transform.npz"),
             _sig(out / "floor_level.json"),
-            tuple(_sig(out / rel) for rel in RECONSTRUCTION_ID_FILES))
+            tuple(_sig(out / rel) for rel in RECONSTRUCTION_ID_FILES),
+            _sig(out / RECONSTRUCTION_ID_RECORD))
 
 
 def floor_seal_verdict(output_dir, cloud_path=None) -> Tuple[bool, str]:
