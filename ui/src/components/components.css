@@ -880,6 +880,38 @@
   overflow: hidden;
 }
 
+/* … in the BIM panel (USER 2026-11-19: "el report me aparece como una opcion dentro del panel BIM"): one
+   column that scrolls as a whole */
+.stac-devrep--stacked {
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  overflow-y: auto;
+}
+
+.stac-devrep--stacked .stac-devrep__side,
+.stac-devrep--stacked .stac-devrep__main {
+  overflow: visible;
+}
+
+/* the BIM panel's two views (the model's tree | the report) under their switch */
+.stac-bimtab {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+}
+
+.stac-bimtab__switch {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: var(--bw) solid var(--border-1);
+}
+
+.stac-bimtab > :last-child {
+  flex: 1;
+  min-height: 0;
+}
+
 .stac-devrep__side {
   min-width: 0;
   overflow-y: auto;

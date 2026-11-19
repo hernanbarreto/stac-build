@@ -8,8 +8,6 @@
  */
 import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
-import { Home } from 'lucide-react'
-import { Tooltip } from '../ui/Tooltip'
 import { useT } from '../../i18n'
 
 export interface ViewCubeProps {
@@ -196,11 +194,8 @@ export function ViewCube({ getQuaternion, onOrient, onOrbit, onHome, size = 112 
         <span className="stac-viewcube__dir stac-viewcube__dir--s">{t('view.south')}</span>
         <span className="stac-viewcube__dir stac-viewcube__dir--w">{t('view.west')}</span>
       </div>
-      <Tooltip label={t('toolbar.resetView')} side="left">
-        <button type="button" className="stac-viewcube__home" onClick={onHome} aria-label={t('toolbar.resetView')}>
-          <Home aria-hidden />
-        </button>
-      </Tooltip>
+      {/* (the reset-view button that sat here is gone — USER 2026-11-19: "la casa de home que esta al lado del panel
+          de vista a la derecha sacala, ya tenemos una reset view" in the toolbar) */}
     </div>
   )
 }

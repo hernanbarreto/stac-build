@@ -128,18 +128,106 @@ def scans_of(project_dir: Path) -> List[str]:
     return found
 
 
-def manifest_of(project_dir: Path, session_id: str, commit: str = "") -> Dict[str, Any]:
+def _scan_dir(key: str) -> str:
+    day, source = key.split("/", 1)
+    return f"scans/{day}/src_{source}"
+
+
+def _for_scans(project_dir: Path, listed: List[Dict[str, Any]], every: List[str],
+               keep: List[str]) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+    """The session with ONLY the scans ``keep`` (USER 2026-11-19: the session's download, "asi completa
+    como esta, y eventualmente seleccionar cual de los escaneos quiere agregar o excluir"): the entries
+    without the other scans' folders — and without a scan day left with no scan, and without the
+    stored BIM comparison when it is of a scan that is left out — and the text project.json has in
+    that archive: the same file with the other scans taken off its list, off the composition and
+    off "active_scan". The archive is still a whole session: it uploads and opens as one.
+    (The composition is of scans TO THE REFERENCE scan: when the reference is left out, what places
+    the others on it means nothing any more and is dropped.)"""
+    gone = [k for k in every if k not in keep]
+    gone_dirs = tuple(_scan_dir(k) for k in gone)
+    kept_days = {k.split("/", 1)[0] for k in keep}
+    sheet_meta = project_dir / "bim_comparison" / "sabana_meta.json"
+    drop_sheet = False
+    if sheet_meta.is_file():
+        try:
+            drop_sheet = json.loads(sheet_meta.read_text()).get("scan") in gone
+        except (OSError, ValueError):
+            drop_sheet = False
+
+    def stays(p: str) -> bool:
+        if any(p == g or p.startswith(g + "/") for g in gone_dirs):
+            return False
+        parts = p.split("/")
+        if parts[0] == "scans" and len(parts) >= 2 and SCAN_DAY_RE.match(parts[1]) and parts[1] not in kept_days:
+            return False
+        return not (drop_sheet and parts[0] == "bim_comparison")
+
+    out = [dict(e) for e in listed if stays(e["p"])]
+    meta = json.loads((project_dir / "project.json").read_text())
+    if isinstance(meta.get("scans"), list):
+        meta["scans"] = [x for x in meta["scans"] if not (isinstance(x, dict) and x.get("key") in gone)]
+    composition = meta.get("composition")
+    if isinstance(composition, dict):
+        if composition.get("reference") in gone:
+            composition["reference"] = keep[0]
+            composition["transforms"] = {}
+        elif isinstance(composition.get("transforms"), dict):
+            composition["transforms"] = {k: v for k, v in composition["transforms"].items() if k not in gone}
+    if meta.get("active_scan") in gone:
+        meta["active_scan"] = keep[0]
+    text = json.dumps(meta, indent=2, ensure_ascii=False) + "\n"
+    for e in out:
+        if e["p"] == "project.json":
+            e["s"] = len(text.encode("utf-8"))
+    return out, {"project.json": text}
+
+
+def manifest_of(project_dir: Path, session_id: str, commit: str = "", scans: Optional[List[str]] = None) -> Dict[str, Any]:
+    """The session's manifest. ``scans``: only these scans of it (None: every one) — the manifest then
+    carries ``rewritten`` ({path: text}), the files whose content in the archive is not the disk's
+    (project.json without the scans left out): the ZIP stays a function of its manifest."""
+    project_dir = Path(project_dir)
     listed = entries(project_dir)
-    return {"format": FORMAT, "version": VERSION, "session_id": session_id,
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "stac_commit": commit,
-            "files": sum(1 for e in listed if "s" in e), "bytes": sum(e.get("s", 0) for e in listed),
-            "scans": scans_of(project_dir), "entries": listed}
+    every = scans_of(project_dir)
+    kept, rewritten = every, None
+    if scans is not None:
+        asked = list(dict.fromkeys(scans))
+        unknown = [k for k in asked if k not in every]
+        if unknown:
+            raise ArchiveError(f"{session_id}: no scan {unknown} (its scans: {every})")
+        kept = [k for k in every if k in asked]
+        if not kept:
+            raise ArchiveError(f"{session_id}: choose at least one scan to download")
+        if len(kept) < len(every):
+            listed, rewritten = _for_scans(project_dir, listed, every, kept)
+    m = {"format": FORMAT, "version": VERSION, "session_id": session_id,
+         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "stac_commit": commit,
+         "files": sum(1 for e in listed if "s" in e), "bytes": sum(e.get("s", 0) for e in listed),
+         "scans": kept, "entries": listed}
+    if rewritten:
+        m["rewritten"] = rewritten
+    return m
+
+
+def sizes_of(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    """How much of a manifest is each scan's (``by_scan``) and how much the project's own (``common``:
+    its IFCs, tickets, stored comparison …) — for a download of some of its scans."""
+    dirs = {k: _scan_dir(k) + "/" for k in manifest["scans"]}
+    by_scan = {k: {"files": 0, "bytes": 0} for k in manifest["scans"]}
+    common = {"files": 0, "bytes": 0}
+    for e in manifest["entries"]:
+        if "s" in e:
+            owner = next((k for k, d in dirs.items() if e["p"].startswith(d)), None)
+            bucket = by_scan[owner] if owner is not None else common
+            bucket["files"] += 1
+            bucket["bytes"] += e["s"]
+    return {"by_scan": by_scan, "common": common}
 
 
 def plan(project_dir: Path, session_id: str) -> Dict[str, Any]:
-    """What a download of the session holds (no entry list): files, bytes, scans."""
+    """What a download of the session holds (no entry list): files, bytes, scans, and each scan's share."""
     m = manifest_of(project_dir, session_id)
-    return {k: m[k] for k in ("session_id", "files", "bytes", "scans")}
+    return {**{k: m[k] for k in ("session_id", "files", "bytes", "scans")}, **sizes_of(m)}
 
 
 # ── write ──────────────────────────────────────────────────────────────────────────────────────
@@ -236,12 +324,15 @@ class Layout:
         except ValueError:
             made = 0
         self.items: List[_Item] = [_Item(MANIFEST, stat.S_IFREG | 0o644, made, data=body)]
+        rewritten = manifest.get("rewritten") or {}              # {path: text}: not the disk's content (manifest_of)
         for e in manifest["entries"]:
             name = f"{session_id}/{e['p']}"
             if "d" in e:
                 self.items.append(_Item(name + "/", stat.S_IFDIR | 0o755, made, data=b""))
             elif "l" in e:
                 self.items.append(_Item(name, stat.S_IFLNK | 0o777, made, data=e["l"].encode("utf-8")))
+            elif e["p"] in rewritten:
+                self.items.append(_Item(name, stat.S_IFREG | e["x"], e["m"] // 1_000_000_000, data=rewritten[e["p"]].encode("utf-8")))
             else:
                 self.items.append(_Item(name, stat.S_IFREG | e["x"], e["m"] // 1_000_000_000, path=e["p"], size=e["s"], mtime=e["m"]))
         self._starts: List[int] = []

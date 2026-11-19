@@ -12,7 +12,7 @@
  */
 import { useRef, useState, type ReactNode } from 'react'
 import {
-  Axis3D, Box, Brush, Camera, Check, Circle, Eraser, Grid3X3, Home, Maximize, Move, Package, Palette,
+  Axis3D, Box, Brush, Camera, Check, Circle, Eraser, Grid3X3, Home, Maximize, Move, Package,
   RotateCcw, Ruler, Scale, Scissors, SlidersHorizontal, Square, Thermometer, Trash2, TriangleRight, Undo2, Unlock, X, ArrowDownToLine, AlignVerticalJustifyEnd, ArrowUpToLine, AlignHorizontalJustifyCenter, AlignVerticalJustifyCenter, Loader2,
   Pin, Pentagon, Scaling,
 } from 'lucide-react'
@@ -26,7 +26,10 @@ import { useFmt, useT } from '../../i18n'
 
 export type CalibrationKind = 'distance' | 'plane'
 export type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'measure-plane' | 'section-box' | 'align' | 'erase'
-export type ColorMode = 'rgb' | 'status' | 'mv_votes' | 'deviation'
+/** what the cloud is painted with: its real colour, or the stored comparison's deviation (the status and votes
+ *  colourings left the interface — USER 2026-11-19: "las vistas de Flayers, PointDit mixed unsolved, deben
+ *  sacarse, no sirven para nada, lo mismo que la funcion colour by, de la barra de herramientas") */
+export type ColorMode = 'rgb' | 'deviation'
 export type EraseShape = 'sphere' | 'cube' | 'box'
 
 export interface BrushState {
@@ -84,15 +87,6 @@ export interface ViewState {
   onFullscreen: () => void
 }
 
-export interface ColorState {
-  mode: ColorMode
-  onMode: (m: ColorMode) => void
-  mvThreshold: number
-  onMvThreshold: (v: number) => void
-  hasWitness: boolean
-  hasDeviation: boolean
-}
-
 export interface CompareState {
   available: boolean
   loading: boolean
@@ -130,15 +124,14 @@ interface FloatingToolbarProps {
   brush: BrushState
   display: DisplayState
   view: ViewState
-  color: ColorState
   compare: CompareState
   placed: PlacedObjectState | null
   sabanaVisible: boolean
 }
 
-type Popover = 'brush' | 'display' | 'color' | null
+type Popover = 'brush' | 'display' | null
 
-export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeasurements, onCalibration, calibrating = null, onAddObject, onResetSection, brush, display, view, color, compare, placed, sabanaVisible }: FloatingToolbarProps) {
+export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeasurements, onCalibration, calibrating = null, onAddObject, onResetSection, brush, display, view, compare, placed, sabanaVisible }: FloatingToolbarProps) {
   const t = useT()
   const fmt = useFmt()
   const [popover, setPopover] = useState<Popover>(null)
@@ -193,7 +186,6 @@ export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeas
         <Sep />
         <Group>
           <IconButton size="lg" label={t('toolbar.display')} icon={<SlidersHorizontal aria-hidden />} active={popover === 'display'} onClick={() => toggle('display')} />
-          <IconButton size="lg" label={t('toolbar.colorBy')} icon={<Palette aria-hidden />} active={popover === 'color' || color.mode !== 'rgb'} onClick={() => toggle('color')} />
         </Group>
         <Sep />
         <Group>
@@ -300,21 +292,6 @@ export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeas
           {display.hasConfidence && (
             <Slider min={0} max={1} step={0.01} value={display.confidence} onChange={display.onConfidence} label={t('display.confidence')} format={v => fmt.percent(v)} />
           )}
-        </div>
-      )}
-
-      {popover === 'color' && (
-        <div className="stac-vppopover" role="group" aria-label={t('toolbar.colorBy')}>
-          <SegmentedControl<ColorMode> size="sm" ariaLabel={t('toolbar.colorBy')} value={color.mode} onChange={color.onMode} options={[
-            { value: 'rgb', label: t('colorMode.rgb') },
-            { value: 'status', label: t('colorMode.status'), disabled: !color.hasWitness },
-            { value: 'mv_votes', label: t('colorMode.votes'), disabled: !color.hasWitness },
-            { value: 'deviation', label: t('colorMode.deviation'), disabled: !color.hasDeviation },
-          ]} />
-          {color.mode === 'mv_votes' && (
-            <Slider min={0} max={8} step={1} value={color.mvThreshold} onChange={color.onMvThreshold} label={t('colorMode.threshold')} format={v => t('colorMode.views', { n: fmt.integer(v) })} />
-          )}
-          {!color.hasWitness && <p className="stac-vppopover__hint">{t('colorMode.noWitness')}</p>}
         </div>
       )}
 

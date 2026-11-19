@@ -326,7 +326,7 @@
     "queuedNext": "en cola",
     "built": "reconstruido",
     "notBuilt": "sin reconstrucción",
-    "downloadZip": "Descargar la {@session} como ZIP",
+    "downloadZip": "Descargar o exportar la {@session}",
     "zipStarted": "Descarga de {name} iniciada: {files} archivos, {gb} GB. Si se corta, el navegador puede reanudarla donde quedó.",
     "zipFailed": "No se pudo preparar la descarga.",
     "zipFailedDetail": "No se pudo descargar {name}. {detail}",
@@ -881,7 +881,8 @@
     "deleteMessage": "Se eliminará el modelo {name} de la {@session}.",
     "deleteTitle": "Eliminar modelo BIM",
     "deleted": "Modelo BIM {name} eliminado",
-    "deleteFailed": "No se pudo eliminar el modelo. {detail}"
+    "deleteFailed": "No se pudo eliminar el modelo. {detail}",
+    "viewModel": "Modelo"
   },
   "team": {
     "title": "Equipo",
@@ -1386,7 +1387,7 @@
     "layer_flyers": "Capa de voladores cargada (rojo borde · naranja vistas · azul textura · gris otro)",
     "layer_mono_detail": "Capa PointDiT cargada (gris detalle · verde frente · azul fondo)",
     "layer_mixed_unresolved": "Píxeles mezclados sin resolver cargados (rojo): excluidos de la nube",
-    "layerMissing": "La capa '{{name}}' no está en esta sesión todavía",
+    "layerMissing": "La capa '{name}' no está en esta sesión todavía",
     "cube": "Cubo {id}"
   },
   "xr": {
@@ -1441,9 +1442,9 @@
     "title": "Malla GenRecon",
     "run": "Generar",
     "description": "Genera la malla de la nube publicada: las fotos deciden dónde hay superficie, los cubos cubren toda la nube y la textura sale de las fotos.",
-    "confidence": "Confianza de la nube: {{pct}} %",
+    "confidence": "Confianza de la nube: {pct} %",
     "confidenceHint": "GenRecon usa los puntos que el visor muestra con este filtro (arranca en el valor del visor de esta sesión). Depende de cómo se capturó: 0 % usa todos los puntos.",
-    "started": "GenRecon en cola para {{session}} (confianza {{pct}} %)"
+    "started": "GenRecon en cola para {session} (confianza {pct} %)"
   },
   "sceneLook": {
     "title": "Fondo y cuadrícula",
@@ -1464,31 +1465,30 @@
     "saved": "Se guarda para esta {@session}, en tus preferencias."
   },
   "export": {
-    "title": "Exportar",
-    "button": "Exportar",
-    "hint": "Descarga la nube, la malla, el IFC y la tabla de objetos de este escaneo",
     "run": "Exportar",
-    "description": "Elige qué exportar de este escaneo. Se arma un ZIP en el servidor y lo descargas a tu máquina; incluye un LEEME que dice qué es cada archivo.",
+    "description": "Archivos para abrir en otros programas — no es una {@session} para volver a subir. Tildá qué exportar de cada escaneo; se arma un ZIP en el servidor y se descarga a tu máquina cuando está listo, con un LEEME que dice qué es cada archivo.",
     "item_e57": "Nube E57 (ReCap / Revit, CloudCompare, Navisworks)",
     "item_las": "Nube LAS 1.4 (CloudCompare, QGIS)",
     "item_ply": "Nube PLY (MeshLab, Blender)",
     "item_glb": "Malla con textura GLB (Blender, visores web)",
-    "item_ifc": "Elementos IFC (Revit, Navisworks, Solibri)",
+    "item_ifc": "Malla convertida a IFC (Revit, Navisworks, Solibri)",
     "item_csv": "Tabla de objetos CSV (Excel)",
-    "upTo": "hasta {{size}}",
-    "elements": "{{n}} elementos",
-    "objects": "{{n}} objetos",
-    "confidence": "Confianza de la nube: {{pct}} %",
-    "confidenceHint": "La nube se exporta con los puntos que el visor muestra con este filtro; 0 % exporta los {{points}} puntos publicados.",
-    "asOnDisk": "Se exporta la geometría tal como está en disco (época {{epoch}}).",
+    "upTo": "hasta {size}",
+    "elements": "{n} elementos",
+    "objects": "{n} objetos",
+    "confidence": "Confianza de la nube: {pct} %",
+    "confidenceHint": "Las nubes se exportan con los puntos que el visor muestra con este filtro; 0 % exporta todos los puntos publicados.",
+    "asOnDisk": "Se exporta la geometría tal como está en disco (época {epoch}).",
     "scaleUncalibrated": "Escala: sin calibrar.",
     "scaleApplied": "Escala: calibración aplicada.",
-    "scalePending": "Escala: hay una calibración medida y NO aplicada (factor {{factor}}); no está en los archivos, el LEEME lo dice.",
-    "totalUpTo": "Tamaño antes de comprimir: hasta {{size}}.",
-    "failed": "La exportación falló: {{detail}}",
-    "download": "Descargar",
-    "ready": "Exportación lista: {{file}} ({{size}}).",
-    "previous": "Última exportación de este escaneo: {{file}} ({{size}}, {{when}})."
+    "scalePending": "Escala: hay una calibración medida y NO aplicada (factor {factor}); no está en los archivos, el LEEME lo dice.",
+    "totalUpTo": "Tamaño antes de comprimir: hasta {size}.",
+    "failed": "La exportación falló: {detail}",
+    "ready": "Exportación lista: {file} ({size}).",
+    "previous": "Última exportación: {file} ({size}, {when}).",
+    "downloadAgain": "Volver a descargar",
+    "scanPoints": "{points} puntos",
+    "loadedIfcs": "IFC cargados en el proyecto ({n}) — {size}"
   },
   "tickets": {
     "title": "Tickets",
@@ -1518,14 +1518,25 @@
     "reopen": "Reabrir",
     "delete": "Borrar el ticket",
     "deleteTitle": "Borrar el ticket",
-    "deleteMessage": "Se borra el ticket {n} («{title}») del proyecto. No se puede deshacer.",
+    "deleteMessage": "El ticket {n} («{title}») se marca como eliminado: sale del modelo y queda en la lista como histórico.",
     "emptyTitle": "Sin tickets",
-    "emptyDesc": "Poné un título y marcá en el modelo el primer punto a revisar.",
+    "emptyDesc": "Seleccioná un objeto, hacé clic derecho sobre él y elegí «Nuevo ticket».",
     "created": "Ticket {n} marcado.",
     "failed": "No se pudo guardar el ticket. {detail}",
     "loadFailed": "No se pudieron leer los tickets. {detail}",
     "needsTitle": "el ticket necesita un título",
-    "countsSpoken": "Hay {open} tickets abiertos ({issues} no conformidades, {reviews} de revisión) y {resolved} resueltos"
+    "countsSpoken": "Hay {open} tickets abiertos ({issues} no conformidades, {reviews} de revisión) y {resolved} resueltos",
+    "showAll": "Mostrar todos",
+    "hideAll": "Ocultar todos",
+    "show": "Mostrar en el modelo",
+    "hide": "Ocultar en el modelo",
+    "history_created": "Marcado por {name}, {date}",
+    "history_resolved": "Resuelto por {name}, {date}",
+    "history_reopened": "Reabierto por {name}, {date}",
+    "history_edited": "Editado por {name}, {date}",
+    "status_deleted": "Eliminado",
+    "history_deleted": "Eliminado por {name}, {date}",
+    "showDeleted": "Mostrar eliminados"
   },
   "commonPoints": {
     "title": "Puntos comunes",
@@ -1571,5 +1582,34 @@
     "needsTwoScans": "el proyecto tiene un solo {@scan}",
     "factorSpoken": "factor {scale}, giro {yaw} grados, residuo {rms} milímetros con {n} puntos",
     "noFit": "todavía no hay dos puntos marcados en los dos"
+  },
+  "docs": {
+    "title": "Documentación",
+    "subtitle": "Contrato, ingeniería, requisitos",
+    "branch_contract": "Contrato",
+    "branch_engineering": "Ingeniería",
+    "branch_requirements": "Matriz de requisitos",
+    "empty": "vacío",
+    "emptyTitle": "Todavía no hay documentos",
+    "emptyDesc": "Los documentos del proyecto van a vivir en este árbol."
+  },
+  "gantt": {
+    "title": "Gantt",
+    "emptyTitle": "Todavía no hay cronograma",
+    "emptyDesc": "El cronograma del proyecto se va a mostrar acá."
+  },
+  "download": {
+    "title": "Descargar",
+    "sectionSession": "Descargar {@session}",
+    "sectionExport": "Exportar",
+    "sessionDescription": "La {@session} tal como está, en un ZIP que se puede volver a subir como {@session} (Nueva {@session} → Subir un ZIP). Destildá un escaneo para dejarlo fuera del ZIP.",
+    "listing": "Listando los archivos…",
+    "reading": "Leyendo qué se puede exportar…",
+    "scanLine": "{scan} — {size}, {files} archivos",
+    "common": "Archivos propios del proyecto (IFC cargados, tickets, comparación guardada…): {size}, {files} archivos — van siempre en el ZIP.",
+    "total": "El ZIP: {size}, {files} archivos.",
+    "needScan": "Tildá al menos un escaneo.",
+    "run": "Descargar {@session}",
+    "started": "La descarga empezó: el navegador muestra el avance y puede reanudarla si se corta."
   }
 }

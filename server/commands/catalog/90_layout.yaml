@@ -96,14 +96,12 @@ commands:
 - id: layout.show_inspector
   kind: action
   runs_on: ui
-  model: 'Show the inspector on the right at a tab: properties, acta (certificate and quality) or assistant (this
-    chat).'
+  model: 'Show the inspector on the right at a tab: properties or assistant (this chat).'
   args:
     tab:
       type: string
       enum:
       - properties
-      - acta
       - assistant
       required: true
   text:
@@ -111,10 +109,7 @@ commands:
       title: Mostrar el inspector
       say:
       - abrí propiedades
-      - mostrá el certificado
       - abrí el asistente
-      - mostrá el acta
-      - certificado y calidad
       - propiedades
       - asistente
       done: Inspector abierto.
@@ -122,9 +117,7 @@ commands:
       title: Show the inspector
       say:
       - open properties
-      - show the certificate
       - open the assistant
-      - certificate and quality
       - properties
       - assistant
       done: Inspector open.
@@ -132,9 +125,7 @@ commands:
       title: Afficher l'inspecteur
       say:
       - ouvre les propriétés
-      - affiche le certificat
       - ouvre l'assistant
-      - certificat et qualité
       - propriétés
       - assistant
       done: Inspecteur ouvert.

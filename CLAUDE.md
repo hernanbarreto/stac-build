@@ -140,7 +140,10 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   shell, forces, starts from the prompt, waits BOUNDED) — never a Ctrl-C + sleep + an unbounded wait typed by
   hand. A restart reloads the chat's VLM (~2.5 min) and the voice (~30 s): while he is trying the app it is
   ANNOUNCED first, in one line, and server changes are batched into one restart. No probe is run against the
-  live chat engine while he tests (one sequence at a time: it queues behind his questions).
+  live chat engine while he tests (one sequence at a time: it queues behind his questions). AND SAY WHEN IT IS
+  BACK (2026-11-19: an announced restart was still read as a hang — "no esta pudiendo terminar de cargar el
+  modelo qween o el kokoro, quedo cargando eternamente" — while it was the usual ~3 min): after a restart,
+  watch for "[Chat] the engine is warm" in the log and tell him, unprompted.
 - THE WHOLE SUITE ON THE LIVE POD STOPS THE CHAT'S VLM (found 2026-11-18, the assistant's own run): around its
   half, tests/test_intake_run.py — among the 13 that fail — reaches the worker's REAL stopper of the semantic
   service (its mock no longer covers what the worker calls), and vLLM shuts down (it was down 15 min before
@@ -323,6 +326,75 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   · THE BIM PANEL'S OPACITY ("todos los elementos ademas del arbol general deben tener la opcion de slide de
     opacidad y por defecto estar al 80%"): a slider for the whole tree, always there, and one for the selected
     element or branch; every element loads at 80 %.
+  LATER THE SAME DAY — his points 7, 8, 16 – 21 and the retouches, each CONFIRMED by him:
+  · THE VIEWER KEEPS WHAT THE USER CHOSE (7: "no respeta lo que selecciono el usuario"; "por defecto en 0.15"):
+    the point size is the user's, 0.15 when they chose none (`DEFAULT_POINT_SIZE`). THE CAUSE of the size
+    falling to 5 AND of the ZIP's "Invalid or expired token" was ONE: the login lasts 24 h and a page left
+    open outlived it — the prefs then answered `{}`. Now `POST /api/auth/refresh` (the page renews its login
+    when under 12 h are left: AuthContext), the prefs routes answer 401, a prefs load that fails keeps the
+    values on screen.
+  · TICKETS (8: "es muy incomodo, deberia levantar el tiket cuando hago click derecho sobre la nube o sobre la
+    sabana … me muestra un menu, seleciono tiket, y ahi abre un modal … los tikets me aparecen en un apartado
+    nuevo entre instancias y scans, ahi aparece toda la lista de tikets, y el estado, todo el historico,
+    tambien al seleccionarlo me lleva al tiket, y deben poder mostrarse todos o cada uno, y si me poso sobre
+    el numero de tiket me muestra en un tooltip la observacion, el estado"; "primero el objeto debe estar
+    seleccionado, luego recien ahi permitir el click derecho, para que no seleccione cualquier cosa por
+    error"; "si se elimino deberia quedar como historico no?"): an object SELECTED first → a right click ON IT
+    → a menu → New ticket → a modal (TicketCreateDialog). The Tickets section of the left rail
+    (features/TicketsPanel.tsx), between Instances and Scans: each ticket's state and history (the server
+    appends its events), show all / each, go to it; the pin's tooltip says the rest. A deleted ticket is
+    MARKED deleted and stays as history — its number is never given again (tickets.py). The window in the
+    Tools menu (TicketsDialog) is gone.
+  · THE REPORT IS IN THE BIM PANEL (16: "el report me aparece como una opcion dentro del panel BIM … y quitarlo
+    de la funcion consola que no tiene nada que ver que este ahi"): a "Model | Report" switch in the BIM tab;
+    the bottom dock holds no Report.
+  · THE DEVIATION LEGEND (17: "hay que ubicarlo mejor abajo, horizontal, y mas finito"): a thin horizontal bar
+    at the bottom of the viewer.
+  · NOT CALIBRATED (18: "debe estar en realidad como un simbolo de exclamacion ese triangulito amarillo sobre
+    el nombre de la sesion … no hace falta cargar mas la pantalla"): a small yellow triangle in the scan's
+    tab (a badge when calibrated / verified); no chip over the viewer.
+  · REMOVED (19: "las vistas de Flayers, PointDit mixed unsolved, deben sacarse, no sirven para nada, lo mismo
+    que la funcion colour by, de la barra de herramientas tambien, tambien todo el panel de certificate and
+    qualiti tampoco debe estar ya"): the toolbar's Colour by, the View menu's Flyers / PointDiT / mixed
+    unresolved, the status / votes colourings, the Certificate & quality panel (CertifyKitPanel,
+    BIMAnalysisPanel, the catalogue's `certify` area: 277 commands in 32 areas).
+  · DOCUMENTATION AND GANTT (20, 21: "al panel izquiero le vamos a agregar dos campos mas, uno es de
+    docuemntacion, donde ahi vamos a tener documentacion de contrato, ingenieria, matriz de requisitos, etc,
+    es un arbol completo, pero por el momento vacio, y otro campo mas que es el gantt"): two sections of the
+    left rail (features/ProjectPanels.tsx), empty for now; the tree's other branches ("etc") are his to name.
+  · RETOUCHES: no Home button by the view cube ("ya tenemos una reset view"); the browser's own menu never
+    opens over the viewer; Disconnect is in the user's menu, above Sign out; Documentation's icon is a
+    document, Gantt's a gantt chart.
+- ⭐ ONE DOWNLOAD WINDOW — THE SESSION, OR AN EXPORT (USER 2026-11-19: "para exportar aparece expor o download,
+  cual es la diferencia?, son redundantes?" / "descargar la sesion el boton que esta al lado de la sesion, dee
+  desplegar una opcion con todo lo que tiene la sesion y tildar que si y que no, y lo baja en un zip., export no
+  deberia existir, porque el boton download ya hace el export" / "uno que sea … download session, asi completa
+  como esta, y eventualmente seleccionar cual de los escaneos quiere agregar o excluir, y otro apartado dentro
+  del mismo modal con export, que genera otro zip pero no a nivel sesion, con todos los datos como para volver
+  a subir sino que baja en un zip las nubes que se seleccionen, los mesh, los mesh convertidos a IFC, los IFC
+  que hay cargados, etc" / "dale, arrancamos"). APPLIED 2026-11-19, WAITING FOR HIS EYE.
+  `ui/src/features/SessionDownloadDialog.tsx`, opened by the Download button of a session's row:
+  · DOWNLOAD SESSION — the session as it is, a tick per scan (all ticked). A scan left out:
+    `session_archive.manifest_of(…, scans=[…])` — the archive lacks that scan's folder (its scan day when no
+    scan is left in it; the stored BIM comparison when it was that scan's) and carries project.json REWRITTEN
+    (the manifest's `rewritten`: the scans' list, the composition and active_scan without it; a composition
+    whose reference scan is left out is dropped). It is still a whole session: it uploads and opens.
+    `POST /api/session_archive/{id}/ticket {scans}`; the plan gives each scan's share (`by_scan`, `common`).
+  · EXPORT — one ZIP (`<project>/exports/<session>_stac_export.zip`; a new one replaces it): of each scan what
+    was ticked (the cloud as E57 / LAS / PLY, its meshes as GLB, the mesh as IFC, the objects' CSV) in a folder
+    of its own with its README, and the project's loaded IFCs as they are. `exporter.package.plan_all` /
+    `run_many`; `GET /api/export/{id}/session_plan`, `POST …/session`, `…/session_status`,
+    `…/session_download`; its own process (CPU), downloaded by the page when it ends. NOTHING is ticked at
+    first (the assistant's choice, told to him: everything ticked on pccr is ~17 GB of clouds).
+  · NO OTHER EXPORT in the interface: the File menu's entry, the Instances panel's button and ExportDialog are
+    gone. By voice `export.open` / `export.run` open this window (export.run = the scan on screen) and
+    `sessions.download_zip` still downloads the whole session at once.
+  · CHECKED: 28 tests (a session downloaded with one scan left out, validated and extracted as a session — by
+    the functions and through the routes; the session's export of two scans + a loaded IFC); the export's
+    routes through the live backend and the dev server WITHOUT a login (the plan of pccr: both scans, 1 loaded
+    IFC; what they refuse). NOT CHECKED: the session's link with scans through the LIVE route (it needs a
+    login: making one for the check was refused by the permission system — rightly); no export was launched on
+    a real session; nothing in a browser.
 - ⭐ THE BIM COMPARISON AS IT STANDS (2026-11-19, his points 1, 2, 4, 5, 6 — confirmed / closed by him):
   · ONE comparison, from the toolbar's button and from the Report tab's (App.runComparison); the Report tab
     (DeviationOverlay.tsx) owns none — it was March's, with its own launch (a pairing WITHOUT object ids: every
@@ -453,7 +525,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   (`answers.default_language` — the settings now come BEFORE the recogniser's guess); a silence is reported in the
   settings' language. Speech itself is still written in the language DETECTED among es / en / fr — whether the
   recogniser should instead always listen in the settings' language: asked to him, not decided.
-- ⭐ THE EXPORTER (USER 2026-11-17: "hagamos un exportador a IFC … podriamos exportar la nube de puntos compatible
+- ⭐ THE EXPORTER [ITS WINDOW IS NOW THE EXPORT SECTION OF THE SESSION'S DOWNLOAD WINDOW — "ONE DOWNLOAD WINDOW",
+  2026-11-19; the per-scan export below is kept as the function under it] (USER 2026-11-17: "hagamos un exportador a IFC … podriamos exportar la nube de puntos compatible
   con varios programas, la malla glb con la textura, y el IFC … y que la persona lo pueda descargar en su maquina";
   to the proposal: "si los 3" / "correcto, tal como lo indicas" / "correcto, coincido con vos"): `server/exporter/`
   + `exporter_api.py` + the Export window (Instances panel, the tools menu, `export.open` / `export.run` by voice).
@@ -465,7 +538,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   local disk (`export.scratch_dir`) and the export runs in its own process (CPU). pccr 3108, the six items: 50 s,
   1.85 GB. pye57 was installed in the da3 env for it. NOT TRIED IN A BROWSER; no file was opened in another
   program (ReCap, CloudCompare, Revit) — only read back with the libraries that wrote them.
-- ⭐ A SESSION AS ONE ZIP — OUT OF THE POD AND BACK IN (USER 2026-11-18: "Para las sesiones vamos a hacer una
+- ⭐ A SESSION AS ONE ZIP — OUT OF THE POD AND BACK IN [since 2026-11-19 the row's Download opens the download
+  window, where a scan can be left out — "ONE DOWNLOAD WINDOW"] (USER 2026-11-18: "Para las sesiones vamos a hacer una
   función en cada sesión para descargarla como zip, debe descargar todo lo necesario para que pueda volver a
   subirse y correr exactamente igual. Y para subirla podemos agregar una función en nueva sesión que sea crear
   una vacía o subir un archivo zip que va a comprobar que tengas estructura correcta de los datos que contiene
@@ -622,7 +696,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   recovered to 1e-12, the degenerate cases, the routes) and the routes read-only through the live backend on
   pccr. NOT TRIED IN A BROWSER. NOT BUILT: laying one scan on the other with it, and the comparison itself
   (cloud to cloud) — they follow his decision.
-- ⭐ TICKETS (2026-11-18, the item of his 2026-11-09 list: "TICKETS — una herramienta simple para marcar tickets
+- ⭐ TICKETS [REDESIGNED 2026-11-19 ON HIS USE OF IT — "THE INTERFACE AS HE WANTS IT", TICKETS: the window in
+  Tools and the click that placed one are GONE; what follows is the first form, its data model holds]
+  (2026-11-18, the item of his 2026-11-09 list: "TICKETS — una herramienta simple para marcar tickets
   en cualquier parte del proyecto, como un punto de revisión o una no conformidad: es para mostrar el concepto
   nomás"): `server/tickets.py` + `tickets_api.py`, the Tickets window (Tools menu → Tickets; `TicketsDialog`),
   numbered pins on the model, and 7 commands by voice (`tickets.*`: open, create, list, focus, resolve, reopen,
@@ -680,20 +756,24 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   whole sheet · 6 ✓ tolerance 50 mm by default, the slider's is used · 12 ✓ objects are selected on the sheet ·
   13 ✓ the BIM panel's opacity sliders, 80 % by default · 14 ✓ a touch on an object opens no panel · 15 ✓ a row
   of the Report selects its object. (What each is: §5.)
+  LATER THAT DAY ("7, confirmado, 8. confirmado, 11. la descarga puede ser que fncione, pero para exportar aparece
+  expor o download, cual es la diferencia?, son redundantes?, vamos a atacar eso, 16. confirmado, 17 confirmado,
+  18. confirmado, 19. confirmado, 20 y 21 confirmado, retoques. confirmado"):
+  7 ✓ the viewer keeps what the user chose (point size 0.15 by default) · 8 ✓ tickets: a right click on the
+  selected object, their own section, their history · 16 ✓ the Report inside the BIM panel · 17 ✓ the deviation
+  legend as a thin bar at the bottom · 18 ✓ "not calibrated" as a triangle by the scan's name · 19 ✓ Colour by,
+  Flyers / PointDiT / mixed unresolved and Certificate & quality removed · 20, 21 ✓ the Documentation and Gantt
+  sections (empty) · the retouches ✓. (What each is: §5.)
   OPEN:
-  7. The viewer must respect what the user chose ("cuando abro la sesion, pasa a la ventana de BIM, me deja los
-     puntos el 5, cuando yo los setie en otro valor, me desaparece la grilla") — the panel and the grid are
-     DONE with point 2's change; THE POINT SIZE IS NOT: it is read from the per-user prefs at every cloud load
-     and falls to 5.0 when they hold none (a file in the ACTIVE scan's directory, user_prefs/<user>.json).
-  8. Tickets do not work — NOT STARTED; cause not found (the server received only GETs: the click that places
-     one never became a POST; the window lets clicks through by CSS).
   9. The same-surface merge is WRONG to his eye ("dejo todos los tiles que son piso, los dejos sueltos y junto
      como piso a las puertas y a otras cosas") — NOT STARTED; the five backups output/_before_same_surface/ are
      KEPT (they are what undoes it); whether it is undone: asked, not answered.
-  10. The IFC export does not work — NOT STARTED, not looked at (a ZIP of 138 MB was written while he waited
-      on the window; it is kept in pccr/exports as evidence).
-  11. Downloading a session as a ZIP: "Could not download zaragoza. Invalid or expired token" — NOT STARTED.
-      (It matters before the maintenance of the 23rd.)
+  10. The IFC export "does not work" — it is now the Export section of the session's download window (§5 "ONE
+      DOWNLOAD WINDOW"): APPLIED, WAITING FOR HIS EYE ("vamos a validar la herramienta de exportacion"). The
+      138 MB ZIP written that night is kept in pccr/exports as evidence.
+  11. The session's ZIP: "Invalid or expired token" was the login expired on a page left open (fixed with
+      point 7; his: "la descarga puede ser que fncione"). Export and Download joined in ONE window on his
+      design: APPLIED, WAITING FOR HIS EYE. (It matters before the maintenance of the 23rd.)
   ALSO THAT NIGHT: the volume at 94 % (a log write was refused once, Errno 122) — freed on his "si, dale": the
   five output/_before_min_points/ backups, the old test data of /workspace/tmp, the pip cache, the whole IFC
   of pccr/exports (13.8 GB); KEPT: the same-surface backups, /workspace/tmp's two git worktrees (wt_scale has

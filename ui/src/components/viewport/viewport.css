@@ -256,6 +256,25 @@
   max-width: var(--inspector-w);
 }
 
+/* the deviation's legend: a thin bar along the bottom (USER 2026-11-19: "el panel de desviación hay que ubicarlo
+   mejor abajo, horizontal, y mas finito") */
+.stac-hud__legend--bar {
+  top: auto;
+  right: var(--hud-inset);
+  bottom: var(--hud-inset);
+  max-width: none;
+  --legend-w: calc(var(--sp-1) * 1.5);
+  --legend-h: calc(var(--sp-8) * 5);
+}
+
+.stac-hud__legend--bar .stac-legend {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-1) var(--sp-3);
+  white-space: nowrap;
+}
+
 .stac-hud__guides {
   position: absolute;
   inset: 0;

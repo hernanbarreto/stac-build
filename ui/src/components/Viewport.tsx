@@ -115,8 +115,11 @@ interface ViewportProps {
     /** … and, before that, the point itself (the scan's display frame) with its class byte when the cloud
      *  has one: a listener that returns true TOOK the click (a ticket being placed) and no segment is selected */
     onPointPicked?: (p: { x: number; y: number; z: number }, classId: number | null) => boolean | void
+    /** a RIGHT click (no drag) on a point of the cloud while an object is selected: the point, its object's
+     *  class and where the cursor is. True = taken (the listener shows its own menu). */
+    onPointContext?: (p: { x: number; y: number; z: number }, classId: number | null, at: { x: number; y: number }) => boolean | void
     /** the tickets marked on the scan on screen: a numbered pin on each one's point */
-    tickets?: Array<{ id: string; position: number[]; number: number; tone: 'review' | 'issue' | 'resolved' | 'stale' | 'common'; title: string; selected?: boolean
+    tickets?: Array<{ id: string; position: number[]; number: number; tone: 'review' | 'issue' | 'resolved' | 'stale' | 'common'; title: string; tooltip?: string; selected?: boolean
                       /** shown instead of the number (a common point's name) */
                       label?: string }>
 }
@@ -677,7 +680,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, sceneLook = DEFAULT_LOOK, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onCubes, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onDistanceMeasured, onPlaneMeasured, onViewScale, onSegmentPicked, onPointPicked, tickets },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, sceneLook = DEFAULT_LOOK, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onCubes, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onDistanceMeasured, onPlaneMeasured, onViewScale, onSegmentPicked, onPointPicked, onPointContext, tickets },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -1133,13 +1136,15 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     useEffect(() => { onSegmentPickedRef.current = onSegmentPicked }, [onSegmentPicked])
     const onPointPickedRef = useRef(onPointPicked)
     useEffect(() => { onPointPickedRef.current = onPointPicked }, [onPointPicked])
+    const onPointContextRef = useRef(onPointContext)
+    useEffect(() => { onPointContextRef.current = onPointContext }, [onPointContext])
     // the tickets' pins: their points as vectors, projected with the readouts every frame
     const ticketsRef = useRef<Array<{ id: string; pos: THREE.Vector3; ticket: NonNullable<ReadoutAnchor['ticket']> }>>([])
     const ticketsDirtyRef = useRef(false)
     useEffect(() => {
         ticketsRef.current = (tickets ?? []).filter(tk => tk.position.length === 3).map(tk => ({
             id: `ticket-${tk.id}`, pos: new THREE.Vector3(tk.position[0], tk.position[1], tk.position[2]),
-            ticket: { number: tk.number, tone: tk.tone, title: tk.title, selected: tk.selected, label: tk.label } }))
+            ticket: { number: tk.number, tone: tk.tone, title: tk.title, tooltip: tk.tooltip, selected: tk.selected, label: tk.label } }))
         ticketsDirtyRef.current = true                             // (a changed list is drawn at the next frame)
     }, [tickets])
     /** the selected segment's key (its OBB lit, its H / W / D dimensions drawn) — survives an OBB rebuild */
@@ -4833,12 +4838,33 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
             const bimGroup = bimGroupRef.current
             const camera = cameraRef.current
-            if (!bimGroup || !camera || bimGroup.children.length === 0 || !bimGroup.visible) return
+            if (!camera) return
             const rect = container.getBoundingClientRect()
             const mouse = new THREE.Vector2(
                 ((e.clientX - rect.left) / rect.width) * 2 - 1,
                 -((e.clientY - rect.top) / rect.height) * 2 + 1
             )
+            // A RIGHT CLICK ON A POINT WHILE AN OBJECT IS SELECTED (USER 2026-11-19: "primero el objeto debe estar
+            // seleccionado, luego recien ahi permitir el click derecho"): the listener decides — the object's own
+            // menu when the point is the selected object's. The cloud and the deviation sheet are the same here.
+            const scene = sceneRef.current
+            if (onPointContextRef.current && scene && selectedSegKeyRef.current) {
+                const prc = new THREE.Raycaster()
+                prc.setFromCamera(mouse, camera)
+                prc.params.Points = { threshold: 0.02 }
+                const targets: THREE.Object3D[] = []
+                scene.getObjectByName('potree-octree')?.children.forEach(c => { if ((c.name || '').startsWith('potree-node-') && c.visible) targets.push(c) })
+                const hit = prc.intersectObjects(targets, false).find(h => h.index != null && hitIsVisibleRef.current(h))
+                if (hit) {
+                    const attr = ((hit.object as THREE.Points).geometry as THREE.BufferGeometry).getAttribute('classId') as THREE.BufferAttribute | undefined
+                    if (onPointContextRef.current({ x: hit.point.x, y: hit.point.y, z: hit.point.z }, attr ? attr.getX(hit.index as number) : null, { x: e.clientX, y: e.clientY })) {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        return
+                    }
+                }
+            }
+            if (!bimGroup || bimGroup.children.length === 0 || !bimGroup.visible) return
             const rc = camRaycasterRef.current
             rc.setFromCamera(mouse, camera)
             const bimHits = rc.intersectObjects(bimGroup.children, true)

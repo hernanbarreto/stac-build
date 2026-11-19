@@ -2,7 +2,7 @@
 // The commands of the interface STAC can run: their ids and the type of each one's arguments.
 // A new command is declared in the catalogue; this file is then regenerated and the compiler
 // asks for its executor (ui/src/commands/registry.ts).
-export const CATALOG_SHA256 = '48a463a389917ae326744517c2ce065764044fcf3adc7f86f175463753bf9e1b'
+export const CATALOG_SHA256 = '768cc4e8f6b0bf60eff008b4b2789200babf58dfcc71833aa6df3f8ff212325c'
 
 export const UI_COMMAND_IDS = [
   'talk.set_user_name',
@@ -36,14 +36,11 @@ export const UI_COMMAND_IDS = [
   'display.point_opacity',
   'display.light',
   'display.scene_look',
-  'display.set_precision_layer',
   'display.set_background',
   'display.set_grid_style',
   'display.reset_scene_look',
   'display.set_point_budget',
   'display.set_confidence_threshold',
-  'display.set_votes_threshold',
-  'display.hide_below_votes',
   'meshes.show',
   'meshes.wireframe',
   'meshes.open_genrecon',
@@ -198,10 +195,6 @@ export const UI_COMMAND_IDS = [
   'references.delete_item',
   'references.save',
   'references.close',
-  'certify.set_epoch_layers',
-  'certify.show_trajectory_edges',
-  'certify.select_epoch',
-  'certify.set_section_tab',
   'evaluation.refresh_runs',
   'evaluation.select_run',
   'evaluation.open_file',
@@ -326,14 +319,11 @@ export interface UiCommandArgs {
   'display.point_opacity': { opacity: number }
   'display.light': { intensity: number }
   'display.scene_look': Record<string, never>
-  'display.set_precision_layer': { layer: 'flyers' | 'mono_detail' | 'mixed_unresolved'; on: boolean }
   'display.set_background': { kind: 'default' | 'horizon' | 'plain'; color?: string }
   'display.set_grid_style': { cell_m?: 0.1 | 0.25 | 0.5 | 1 | 2 | 5; major_every?: 2 | 4 | 5 | 10; color?: string }
   'display.reset_scene_look': Record<string, never>
   'display.set_point_budget': { millions: number }
   'display.set_confidence_threshold': { threshold: number }
-  'display.set_votes_threshold': { views: number }
-  'display.hide_below_votes': { on: boolean }
   'meshes.show': { on: boolean; mesh?: string }
   'meshes.wireframe': { on: boolean }
   'meshes.open_genrecon': Record<string, never>
@@ -350,7 +340,7 @@ export interface UiCommandArgs {
   'app.logout': Record<string, never>
   'layout.show_panel': { panel: 'sessions' | 'instances' | 'scans' | 'bim' | 'team' }
   'layout.hide_side_panel': Record<string, never>
-  'layout.show_inspector': { tab: 'properties' | 'acta' | 'assistant' }
+  'layout.show_inspector': { tab: 'properties' | 'assistant' }
   'layout.hide_inspector': Record<string, never>
   'layout.show_dock': { tab: 'console' | 'jobs' | 'timeline' | 'report' | 'evaluation' }
   'layout.hide_dock': Record<string, never>
@@ -488,10 +478,6 @@ export interface UiCommandArgs {
   'references.delete_item': { id: string }
   'references.save': Record<string, never>
   'references.close': Record<string, never>
-  'certify.set_epoch_layers': { before?: boolean; after?: boolean }
-  'certify.show_trajectory_edges': { odometry?: boolean; loops?: boolean }
-  'certify.select_epoch': { epoch: number }
-  'certify.set_section_tab': { tab: 'attention' | 'edges' | 'duplicates' | 'acta' }
   'evaluation.refresh_runs': Record<string, never>
   'evaluation.select_run': { run_id: string }
   'evaluation.open_file': { path: string }

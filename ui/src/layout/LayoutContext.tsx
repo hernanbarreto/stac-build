@@ -14,9 +14,9 @@
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 
-export type LeftTab = 'sessions' | 'instances' | 'scans' | 'bim' | 'team'
-export type InspectorTab = 'properties' | 'acta' | 'assistant'
-export type DockTab = 'console' | 'jobs' | 'timeline' | 'report' | 'evaluation'
+export type LeftTab = 'sessions' | 'instances' | 'tickets' | 'scans' | 'bim' | 'docs' | 'gantt' | 'team'
+export type InspectorTab = 'properties' | 'assistant'
+export type DockTab = 'console' | 'jobs' | 'timeline' | 'evaluation'
 export type Density = 'compact' | 'comfortable'
 
 export interface LayoutState {
@@ -68,6 +68,10 @@ function load(): LayoutState {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return d
     const saved = JSON.parse(raw) as Partial<LayoutState>
+    // (the report was a tab of the dock until 2026-11-19: it lives in the BIM panel)
+    if ((saved.dockTab as string | undefined) === 'report') saved.dockTab = d.dockTab
+    // (the certificate panel — the inspector's 'acta' tab — left the interface on 2026-11-19)
+    if ((saved.inspectorTab as string | undefined) === 'acta') saved.inspectorTab = 'properties'
     return { ...d, ...saved }
   } catch { return d }
 }

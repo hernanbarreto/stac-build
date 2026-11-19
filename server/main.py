@@ -3946,15 +3946,14 @@ async def get_viewer_prefs(
     session_id: str,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ):
-    """Load per-user viewer preferences for a session."""
+    """Load per-user viewer preferences for a session. 401 when the login is missing or no longer
+    valid — it answered {} then, and the interface took "this user has no preferences": the point
+    size fell to its default on a page whose login had expired (USER 2026-11-19: "me deja los puntos
+    el 5, cuando yo los setie en otro valor")."""
     from auth import decode_token
     if not credentials:
-        return {}
-    try:
-        payload = decode_token(credentials.credentials)
-        username = payload.get("username", "")
-    except Exception:
-        return {}
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    username = decode_token(credentials.credentials).get("username", "")     # (401: invalid or expired)
     
     ctx = _ctx(session_id)
     prefs_file = ctx.session_dir / "user_prefs" / f"{username}.json"
@@ -3968,15 +3967,12 @@ async def save_viewer_prefs(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ):
-    """Save per-user viewer preferences for a session."""
+    """Save per-user viewer preferences for a session (401 when the login is missing or no longer
+    valid: it answered 200 with an error inside, and what the user chose was silently not saved)."""
     from auth import decode_token
     if not credentials:
-        return {"error": "Not authenticated"}
-    try:
-        payload = decode_token(credentials.credentials)
-        username = payload.get("username", "")
-    except Exception:
-        return {"error": "Invalid token"}
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    username = decode_token(credentials.credentials).get("username", "")     # (401: invalid or expired)
     
     prefs = await request.json()
     ctx = _ctx(session_id)

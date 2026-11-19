@@ -59,19 +59,28 @@ def test_resolving_records_who_and_when_and_reopening_clears_it(tmp_path):
 def test_a_removed_tickets_number_is_not_given_again(tmp_path):
     a = T.create(tmp_path, kind="review", title="a", position=[0, 0, 0], author="ana")
     T.create(tmp_path, kind="review", title="b", position=[0, 0, 0], author="ana")
-    assert T.delete(tmp_path, a["id"])["number"] == 1
+    gone = T.delete(tmp_path, a["id"], "eva")
+    assert gone["number"] == 1 and gone["status"] == "deleted" and gone["deleted_by"] == "eva"
     c = T.create(tmp_path, kind="review", title="c", position=[0, 0, 0], author="ana")
-    assert c["number"] == 3 and [t["number"] for t in T.load(tmp_path)["tickets"]] == [2, 3]
+    # a deleted ticket STAYS, as history (USER 2026-11-19: "si se elimino deberia quedar como historico no?")
+    kept = T.load(tmp_path)["tickets"]
+    assert c["number"] == 3 and [(t["number"], t["status"]) for t in kept] == [(1, "deleted"), (2, "open"), (3, "open")]
+    assert [h["action"] for h in kept[0]["history"]] == ["created", "deleted"] and kept[0]["history"][-1]["by"] == "eva"
+    assert T.listing(tmp_path)["counts"]["open"] == 2 and T.listing(tmp_path)["counts"]["deleted"] == 1
+    with pytest.raises(T.TicketError, match="deleted"):
+        T.update(tmp_path, a["id"], {"status": "open"}, "eva")
+    with pytest.raises(KeyError):
+        T.delete(tmp_path, a["id"], "eva")
 
 
 def test_the_listing_counts_and_tells_what_the_geometry_left_behind(tmp_path):
-    assert T.listing(tmp_path) == {"tickets": [], "counts": {"open": 0, "resolved": 0, "review": 0, "non_conformity": 0}}
+    assert T.listing(tmp_path) == {"tickets": [], "counts": {"open": 0, "resolved": 0, "deleted": 0, "review": 0, "non_conformity": 0}}
     a = T.create(tmp_path, kind="non_conformity", title="a", position=[0, 0, 0], author="ana", scan="2026-08-31/default", geometry_epoch=4)
     b = T.create(tmp_path, kind="review", title="b", position=[0, 0, 0], author="ana", scan="2026-08-24/default", geometry_epoch=2)
     c = T.create(tmp_path, kind="review", title="c", position=[0, 0, 0], author="ana")
     T.update(tmp_path, c["id"], {"status": "resolved"}, "ana")
     out = T.listing(tmp_path, {"2026-08-31/default": 5, "2026-08-24/default": 2})
-    assert out["counts"] == {"open": 2, "resolved": 1, "review": 1, "non_conformity": 1}
+    assert out["counts"] == {"open": 2, "resolved": 1, "deleted": 0, "review": 1, "non_conformity": 1}
     assert {t["number"]: t["stale"] for t in out["tickets"]} == {a["number"]: True, b["number"]: False, c["number"]: False}
     (tmp_path / T.FILE).write_text(json.dumps({"version": 99, "tickets": []}))
     with pytest.raises(T.TicketError, match="not a ticket document"):
@@ -117,7 +126,7 @@ def client(tmp_path):
 
 def test_tickets_through_the_routes(client):
     c, who, outs, log, project = client
-    assert c.get("/api/tickets/site").json() == {"ok": True, "tickets": [], "counts": {"open": 0, "resolved": 0, "review": 0, "non_conformity": 0}}
+    assert c.get("/api/tickets/site").json() == {"ok": True, "tickets": [], "counts": {"open": 0, "resolved": 0, "deleted": 0, "review": 0, "non_conformity": 0}}
     assert c.get("/api/tickets/elsewhere").status_code == 404
     r = c.post("/api/tickets/site", json={"kind": "non_conformity", "title": "Loose cover", "position": [1, 2, 3],
                                           "scan": "2026-08-31/default", "instance_id": 7, "label": "panel"})
@@ -134,7 +143,7 @@ def test_tickets_through_the_routes(client):
     # resolved by another user, by its number
     who["user"] = {"username": "luis", "role": "viewer"}
     r = c.patch("/api/tickets/site/1", json={"status": "resolved"})
-    assert r.status_code == 200 and r.json()["ticket"]["resolved_by"] == "luis" and r.json()["counts"] == {"open": 0, "resolved": 1, "review": 0, "non_conformity": 0}
+    assert r.status_code == 200 and r.json()["ticket"]["resolved_by"] == "luis" and r.json()["counts"] == {"open": 0, "resolved": 1, "deleted": 0, "review": 0, "non_conformity": 0}
     assert c.patch("/api/tickets/site/1", json={"position": [0, 0, 0]}).status_code == 400
     assert c.patch("/api/tickets/site/99", json={"title": "x"}).status_code == 404
     # removed by its author, a manager or an administrator — not by another viewer

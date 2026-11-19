@@ -33,6 +33,7 @@ VERSION = 1
 FILE = "tickets.json"
 KINDS = ("review", "non_conformity")
 STATUSES = ("open", "resolved")
+DELETED = "deleted"          # a ticket is never removed: it is marked deleted and stays in the history
 TITLE_MAX, TEXT_MAX = 200, 4000
 _lock = threading.Lock()
 
@@ -110,7 +111,13 @@ def create(project_dir: Path | str, *, kind: str, title: str, position: Any, aut
         "updated_at": None,
         "resolved_by": None,
         "resolved_at": None,
+        "deleted_by": None,
+        "deleted_at": None,
+        # EVERY change of the ticket, oldest first — who, when, what (USER 2026-11-19: the list shows "el
+        # estado, todo el historico"): created, resolved, reopened, edited
+        "history": [],
     }
+    ticket["history"].append({"at": ticket["created_at"], "by": ticket["created_by"], "action": "created"})
     if instance_id is not None:
         if isinstance(instance_id, bool) or not isinstance(instance_id, int) or instance_id <= 0:
             raise TicketError("instance_id must be the id of a segmented object")
@@ -140,31 +147,52 @@ def update(project_dir: Path | str, ticket_id: str, changes: Dict[str, Any], aut
     with _lock:
         doc = load(project_dir)
         t = _find(doc, ticket_id)
+        if t["status"] == DELETED:
+            raise TicketError("a deleted ticket is not changed")
+        who = _text(author, "author", TITLE_MAX, required=True)
+        # (a ticket marked before the history was kept: what it records of itself opens it)
+        history = t.setdefault("history", [{"at": t["created_at"], "by": t["created_by"], "action": "created"}]
+                               + ([{"at": t["resolved_at"], "by": t["resolved_by"], "action": "resolved"}] if t.get("resolved_at") else []))
+        said = (t["title"], t["description"], t["kind"])
         if "title" in changes:
             t["title"] = _text(changes["title"], "title", TITLE_MAX, required=True)
         if "description" in changes:
             t["description"] = _text(changes["description"], "description", TEXT_MAX)
         if "kind" in changes:
             t["kind"] = _kind(changes["kind"])
+        now = _now()
+        if (t["title"], t["description"], t["kind"]) != said:
+            history.append({"at": now, "by": who, "action": "edited"})
         if "status" in changes:
             if changes["status"] not in STATUSES:
                 raise TicketError(f"status must be one of {list(STATUSES)}")
             if changes["status"] != t["status"]:
                 t["status"] = changes["status"]
                 resolved = t["status"] == "resolved"
-                t["resolved_by"] = _text(author, "author", TITLE_MAX, required=True) if resolved else None
-                t["resolved_at"] = _now() if resolved else None
-        t["updated_at"] = _now()
+                t["resolved_by"] = who if resolved else None
+                t["resolved_at"] = now if resolved else None
+                history.append({"at": now, "by": who, "action": "resolved" if resolved else "reopened"})
+        t["updated_at"] = now
         _save(project_dir, doc)
     return t
 
 
-def delete(project_dir: Path | str, ticket_id: str) -> Dict[str, Any]:
-    """Remove a ticket (its number is not given again). Returns what was removed."""
+def delete(project_dir: Path | str, ticket_id: str, author: str) -> Dict[str, Any]:
+    """Delete a ticket: it is MARKED deleted — who, when — and stays in the project as history (USER
+    2026-11-19: "si se elimino deberia quedar como historico no?"; until then it was removed with no
+    trace). Its number is not given again. A ticket already deleted is not found (KeyError)."""
     with _lock:
         doc = load(project_dir)
         t = _find(doc, ticket_id)
-        doc["tickets"].remove(t)
+        if t["status"] == DELETED:
+            raise KeyError(ticket_id)
+        who = _text(author, "author", TITLE_MAX, required=True)
+        now = _now()
+        history = t.setdefault("history", [{"at": t["created_at"], "by": t["created_by"], "action": "created"}]
+                               + ([{"at": t["resolved_at"], "by": t["resolved_by"], "action": "resolved"}] if t.get("resolved_at") else []))
+        t["status"] = DELETED
+        t["deleted_by"], t["deleted_at"], t["updated_at"] = who, now, now
+        history.append({"at": now, "by": who, "action": "deleted"})
         _save(project_dir, doc)
     return t
 
@@ -179,5 +207,6 @@ def listing(project_dir: Path | str, epochs: Optional[Dict[str, int]] = None) ->
         now = (epochs or {}).get(t.get("scan") or "")
         out.append({**t, "stale": now is not None and t.get("geometry_epoch") is not None and int(now) != int(t["geometry_epoch"])})
     counts = {"open": sum(1 for t in out if t["status"] == "open"), "resolved": sum(1 for t in out if t["status"] == "resolved"),
+              "deleted": sum(1 for t in out if t["status"] == DELETED),
               **{k: sum(1 for t in out if t["kind"] == k and t["status"] == "open") for k in KINDS}}
     return {"tickets": out, "counts": counts}

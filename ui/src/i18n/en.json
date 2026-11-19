@@ -326,7 +326,7 @@
     "queuedNext": "queued",
     "built": "reconstructed",
     "notBuilt": "no reconstruction",
-    "downloadZip": "Download the {@session} as a ZIP",
+    "downloadZip": "Download or export the {@session}",
     "zipStarted": "Download of {name} started: {files} files, {gb} GB. If it is cut, the browser can resume it where it stopped.",
     "zipFailed": "The download could not be prepared.",
     "zipFailedDetail": "Could not download {name}. {detail}",
@@ -881,7 +881,8 @@
     "deleteMessage": "The model {name} will be removed from the {@session}.",
     "deleteTitle": "Delete BIM model",
     "deleted": "BIM model {name} deleted",
-    "deleteFailed": "Could not delete the model. {detail}"
+    "deleteFailed": "Could not delete the model. {detail}",
+    "viewModel": "Model"
   },
   "team": {
     "title": "Team",
@@ -1386,7 +1387,7 @@
     "layer_flyers": "Flyer layer loaded (red edge · orange views · blue texture · grey other)",
     "layer_mono_detail": "PointDiT layer loaded (grey detail · green front · blue back)",
     "layer_mixed_unresolved": "Mixed unresolved pixels loaded (red): excluded from the cloud",
-    "layerMissing": "Layer '{{name}}' is not on this session yet",
+    "layerMissing": "Layer '{name}' is not on this session yet",
     "cube": "Cube {id}"
   },
   "xr": {
@@ -1441,9 +1442,9 @@
     "title": "GenRecon mesh",
     "run": "Generate",
     "description": "Generates the mesh of the published cloud: the photos decide where there is surface, the cubes cover the whole cloud and the texture comes from the photos.",
-    "confidence": "Cloud confidence: {{pct}} %",
+    "confidence": "Cloud confidence: {pct} %",
     "confidenceHint": "GenRecon uses the points the viewer shows at this filter (it starts at this session's viewer value). It depends on how the scene was captured: 0 % uses every point.",
-    "started": "GenRecon queued for {{session}} (confidence {{pct}} %)"
+    "started": "GenRecon queued for {session} (confidence {pct} %)"
   },
   "sceneLook": {
     "title": "Background and grid",
@@ -1464,31 +1465,30 @@
     "saved": "Saved for this {@session}, in your preferences."
   },
   "export": {
-    "title": "Export",
-    "button": "Export",
-    "hint": "Download this scan's cloud, mesh, IFC and objects table",
     "run": "Export",
-    "description": "Choose what to export of this scan. A ZIP is built on the server and you download it to your machine; it holds a README that says what each file is.",
+    "description": "Files other programs open — not a {@session} to upload again. Tick what to export of each scan; one ZIP is built on the server and downloaded to your machine when it is ready, with a README that says what each file is.",
     "item_e57": "Cloud E57 (ReCap / Revit, CloudCompare, Navisworks)",
     "item_las": "Cloud LAS 1.4 (CloudCompare, QGIS)",
     "item_ply": "Cloud PLY (MeshLab, Blender)",
     "item_glb": "Textured mesh GLB (Blender, web viewers)",
-    "item_ifc": "Elements IFC (Revit, Navisworks, Solibri)",
+    "item_ifc": "Mesh as IFC (Revit, Navisworks, Solibri)",
     "item_csv": "Objects table CSV (Excel)",
-    "upTo": "up to {{size}}",
-    "elements": "{{n}} elements",
-    "objects": "{{n}} objects",
-    "confidence": "Cloud confidence: {{pct}} %",
-    "confidenceHint": "The cloud is exported with the points the viewer shows at this filter; 0 % exports the {{points}} published points.",
-    "asOnDisk": "The geometry is exported as it is on disk (epoch {{epoch}}).",
+    "upTo": "up to {size}",
+    "elements": "{n} elements",
+    "objects": "{n} objects",
+    "confidence": "Cloud confidence: {pct} %",
+    "confidenceHint": "The clouds are exported with the points the viewer shows at this filter; 0 % exports every published point.",
+    "asOnDisk": "The geometry is exported as it is on disk (epoch {epoch}).",
     "scaleUncalibrated": "Scale: uncalibrated.",
     "scaleApplied": "Scale: calibration applied.",
-    "scalePending": "Scale: a calibration is measured and NOT applied (factor {{factor}}); it is not in the files, the README says so.",
-    "totalUpTo": "Size before compression: up to {{size}}.",
-    "failed": "The export failed: {{detail}}",
-    "download": "Download",
-    "ready": "Export ready: {{file}} ({{size}}).",
-    "previous": "Last export of this scan: {{file}} ({{size}}, {{when}})."
+    "scalePending": "Scale: a calibration is measured and NOT applied (factor {factor}); it is not in the files, the README says so.",
+    "totalUpTo": "Size before compression: up to {size}.",
+    "failed": "The export failed: {detail}",
+    "ready": "Export ready: {file} ({size}).",
+    "previous": "Last export: {file} ({size}, {when}).",
+    "downloadAgain": "Download again",
+    "scanPoints": "{points} points",
+    "loadedIfcs": "IFCs loaded in the project ({n}) — {size}"
   },
   "tickets": {
     "title": "Tickets",
@@ -1518,14 +1518,25 @@
     "reopen": "Reopen",
     "delete": "Delete the ticket",
     "deleteTitle": "Delete the ticket",
-    "deleteMessage": "Ticket {n} (“{title}”) is removed from the project. This cannot be undone.",
+    "deleteMessage": "Ticket {n} (“{title}”) is marked as deleted: it leaves the model and stays in the list as history.",
     "emptyTitle": "No tickets",
-    "emptyDesc": "Give it a title and mark on the model the first point to review.",
+    "emptyDesc": "Select an object, right-click it and choose “New ticket”.",
     "created": "Ticket {n} marked.",
     "failed": "The ticket could not be saved. {detail}",
     "loadFailed": "The tickets could not be read. {detail}",
     "needsTitle": "the ticket needs a title",
-    "countsSpoken": "There are {open} open tickets ({issues} non-conformities, {reviews} to review) and {resolved} resolved"
+    "countsSpoken": "There are {open} open tickets ({issues} non-conformities, {reviews} to review) and {resolved} resolved",
+    "showAll": "Show all",
+    "hideAll": "Hide all",
+    "show": "Show on the model",
+    "hide": "Hide on the model",
+    "history_created": "Marked by {name}, {date}",
+    "history_resolved": "Resolved by {name}, {date}",
+    "history_reopened": "Reopened by {name}, {date}",
+    "history_edited": "Edited by {name}, {date}",
+    "status_deleted": "Deleted",
+    "history_deleted": "Deleted by {name}, {date}",
+    "showDeleted": "Show deleted"
   },
   "commonPoints": {
     "title": "Common points",
@@ -1571,5 +1582,34 @@
     "needsTwoScans": "the project holds one {@scan} only",
     "factorSpoken": "factor {scale}, turn {yaw} degrees, residual {rms} millimetres with {n} points",
     "noFit": "there are not yet two points marked on both"
+  },
+  "docs": {
+    "title": "Documentation",
+    "subtitle": "Contract, engineering, requirements",
+    "branch_contract": "Contract",
+    "branch_engineering": "Engineering",
+    "branch_requirements": "Requirements matrix",
+    "empty": "empty",
+    "emptyTitle": "No documents yet",
+    "emptyDesc": "The project’s documents will live in this tree."
+  },
+  "gantt": {
+    "title": "Gantt",
+    "emptyTitle": "No schedule yet",
+    "emptyDesc": "The project’s schedule will be shown here."
+  },
+  "download": {
+    "title": "Download",
+    "sectionSession": "Download {@session}",
+    "sectionExport": "Export",
+    "sessionDescription": "The {@session} as it is, in one ZIP that can be uploaded again as a {@session} (New {@session} → Upload a ZIP). Untick a scan to leave it out of the ZIP.",
+    "listing": "Listing the files…",
+    "reading": "Reading what can be exported…",
+    "scanLine": "{scan} — {size}, {files} files",
+    "common": "The project's own files (loaded IFCs, tickets, stored comparison…): {size}, {files} files — always in the ZIP.",
+    "total": "The ZIP: {size}, {files} files.",
+    "needScan": "Tick at least one scan.",
+    "run": "Download {@session}",
+    "started": "The download started: the browser shows its progress and can resume it if it is cut."
   }
 }

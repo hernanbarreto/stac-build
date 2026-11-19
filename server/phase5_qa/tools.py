@@ -1443,8 +1443,9 @@ class SpatialTools:
     # These tools MEASURE nothing: each returns a ``viewer`` action the viewer performs as the
     # answer arrives (AssistantPanel → App). Object ids are checked against the store.
     _VIEWS = ("top", "front", "back", "left", "right", "bottom", "iso", "home")
-    _COLOR_MODES = {"rgb": "rgb", "color": "rgb", "status": "status", "confidence": "status",
-                    "votes": "mv_votes", "mv_votes": "mv_votes", "deviation": "deviation"}
+    # (the status and votes colourings left the interface — USER 2026-11-19: "las vistas de Flayers, PointDit mixed
+    #  unsolved, deben sacarse, no sirven para nada")
+    _COLOR_MODES = {"rgb": "rgb", "color": "rgb", "deviation": "deviation"}
 
     def _known_ids(self, ids) -> tuple[list[int], list]:
         have = set(self._instances())

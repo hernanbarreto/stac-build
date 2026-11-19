@@ -132,11 +132,13 @@ def tickets_delete(session_id: str, ticket: str, user: Optional[Dict[str, Any]] 
         found = T._find(T.load(project_dir), ticket)
         if user.get("role") not in ("admin", "manager") and found["created_by"] != _name(user):
             raise HTTPException(403, "A ticket is removed by who marked it, a manager or an administrator")
-        removed = T.delete(project_dir, found["id"])
+        removed = T.delete(project_dir, found["id"], _name(user))
     except KeyError:
         raise HTTPException(404, f"no ticket {ticket} in {session_id}") from None
     except T.TicketError as e:
         raise HTTPException(400, str(e)) from e
     if _audit_log is not None:
         _audit_log("ticket.delete", session_id, user=_name(user), role=user.get("role", ""), detail=f"#{removed['number']}")
-    return {"ok": True, "removed": removed["id"], "counts": _listing(session_id)["counts"]}
+    listing = _listing(session_id)
+    return {"ok": True, "removed": removed["id"], "ticket": next(t for t in listing["tickets"] if t["id"] == removed["id"]),
+            "counts": listing["counts"]}

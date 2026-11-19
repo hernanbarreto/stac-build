@@ -90,7 +90,9 @@ interface Props {
   /** a row was touched: select its object in the viewer (USER 2026-11-19: "en la lista de elementos, cuando
    *  toco alguno debe mostrarmelo como seleccionado en la sabana") */
   onSelectInstance?: (instanceId: number) => void
-  onClose: () => void
+  /** in a narrow panel (the BIM panel): one column, the element list with its three main columns */
+  compact?: boolean
+  onClose?: () => void
 }
 
 /** The scan's objects of a row: the ids the comparison recorded, else the element's own key when it
@@ -100,7 +102,7 @@ function instancesOf(r: DeviationElementResult): number[] {
   return /^\d+$/.test(r.element_key) ? [Number(r.element_key)] : []
 }
 
-export default function DeviationOverlay({ sessionId, scanKey, tolerance, onTolerance, onRun, running, report, selectedInstanceId, onSelectInstance }: Props) {
+export default function DeviationOverlay({ sessionId, scanKey, tolerance, onTolerance, onRun, running, report, selectedInstanceId, onSelectInstance, compact = false }: Props) {
   const t = useT()
   const fmt = useFmt()
   const [matched, setMatched] = useState<number | null>(null)
@@ -183,7 +185,7 @@ export default function DeviationOverlay({ sessionId, scanKey, tolerance, onTole
   ]
 
   return (
-    <div className="stac-devrep">
+    <div className={`stac-devrep ${compact ? 'stac-devrep--stacked' : ''}`.trim()}>
       <div className="stac-devrep__side">
         <Stack gap={3}>
           <Slider tone="measure" min={1} max={50} step={1} value={tolerance} onChange={onTolerance} label={t('deviation.tolerance')} format={v => fmt.mm(v, 0)} />
@@ -211,7 +213,7 @@ export default function DeviationOverlay({ sessionId, scanKey, tolerance, onTole
               <canvas ref={histCanvasRef} className="stac-devrep__canvas" />
               <Legend orientation="horizontal" ramp={DEV_RAMP} min={fmt.number(0, 0)} max={hist ? `${fmt.number(hist.maxMm, 0)}${hist.beyond > 0 ? '+' : ''}` : undefined} unit="mm" />
             </div>
-            <Table columns={columns} rows={result.results} rowKey={r => r.element_key} caption={t('report.elements', { n: result.results.length })} initialSort={{ id: 'pass', dir: 'asc' }}
+            <Table columns={compact ? columns.filter(c => c.id === 'label' || c.id === 'pass' || c.id === 'mean') : columns} rows={result.results} rowKey={r => r.element_key} caption={t('report.elements', { n: result.results.length })} initialSort={{ id: 'pass', dir: 'asc' }}
               selectedKey={selectedInstanceId != null ? result.results.find(r => instancesOf(r).includes(selectedInstanceId))?.element_key : undefined}
               onRowClick={r => { const id = instancesOf(r)[0]; if (id !== undefined) onSelectInstance?.(id) }} />
           </>

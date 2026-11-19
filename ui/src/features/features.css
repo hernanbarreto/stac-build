@@ -343,6 +343,22 @@
 }
 
 /* scan tabs strip */
+/* the calibration's state, by the scan's name: a yellow triangle when it is not calibrated, a check when it is */
+.stac-scantabs__cal {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.stac-scantabs__cal svg {
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+}
+
+.stac-scantabs__cal--uncalibrated { color: var(--warn); }
+.stac-scantabs__cal--calibrated { color: var(--text-2); }
+.stac-scantabs__cal--verified { color: var(--ok); }
+
 .stac-scantabs__ref {
   width: var(--icon-sm);
   height: var(--icon-sm);
@@ -893,4 +909,111 @@
 .stac-tickets__meta {
   color: var(--text-secondary);
   font-size: var(--fs-0);
+}
+
+/* the tickets' section of the left panel: one block a ticket — its number and what it says, what it is and
+   its state, its history, its actions */
+.stac-ticketlist {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stac-ticketlist__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-bottom: var(--bw) solid var(--border-1);
+}
+
+.stac-ticketlist__item.is-selected {
+  background: var(--surface-2);
+}
+
+.stac-ticketlist__item.is-muted .stac-ticketlist__main {
+  opacity: 0.55;
+}
+
+.stac-ticketlist__main {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.stac-ticketlist__num {
+  flex: none;
+  min-width: var(--sp-6);
+  padding: 0 var(--sp-1);
+  border: var(--bw) solid var(--ticket-color, var(--border-2));
+  border-radius: var(--r-1);
+  color: var(--ticket-color, var(--text-1));
+  font-family: var(--font-mono);
+  font-size: var(--fs-1);
+  text-align: center;
+}
+
+.stac-ticketlist__num--review { --ticket-color: var(--info-fg); }
+.stac-ticketlist__num--issue { --ticket-color: var(--err-fg); }
+.stac-ticketlist__num--resolved { --ticket-color: var(--ok-fg); }
+.stac-ticketlist__num--stale { --ticket-color: var(--text-3); border-style: dashed; }
+
+.stac-ticketlist__text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.stac-ticketlist__desc,
+.stac-ticketlist__history {
+  color: var(--text-secondary);
+  font-size: var(--fs-0);
+}
+
+.stac-ticketlist__history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* ── the session's download window (SessionDownloadDialog): a scan's block, its ticks in two columns ── */
+.stac-dl__scan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-top: var(--sp-3);
+  border-top: var(--bw) solid var(--border-1);
+}
+
+.stac-dl__scanhead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+
+.stac-dl__items {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-1) var(--sp-4);
+}
+
+@media (max-width: 640px) {
+  .stac-dl__items {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

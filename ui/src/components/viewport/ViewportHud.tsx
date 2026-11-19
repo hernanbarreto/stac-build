@@ -16,7 +16,7 @@ import { Legend } from '../ui/Legend'
 import { Tooltip } from '../ui/Tooltip'
 import { ViewCube } from './ViewCube'
 import { useFmt, useT } from '../../i18n'
-import { STATUS_TOKENS, DEV_RAMP } from './palette'
+import { DEV_RAMP } from './palette'
 import type { ColorMode } from './FloatingToolbar'
 
 export type ViewPreset = 'top' | 'front' | 'right' | 'left' | 'back' | 'bottom' | 'iso'
@@ -32,6 +32,8 @@ export interface ReadoutAnchor {
   /** a ticket marked on the model (USER 2026-11-09: "marcar tickets en cualquier parte del proyecto"):
    *  its number, what it is — a review item, a non-conformity, resolved, or of a geometry that moved — and its title */
   ticket?: { number: number; tone: 'review' | 'issue' | 'resolved' | 'stale' | 'common'; title: string; selected?: boolean
+             /** what the pin says when the cursor rests on it: the observation, the state, who and when */
+             tooltip?: string
              /** what the pin shows instead of the number (a common point's name: the same pin, another tone) */
              label?: string }
   /** a short label in front of the value (H / W / D of a selected segment) */
@@ -56,8 +58,6 @@ interface ViewportHudProps {
   /** What the grid's cells and major lines measure (USER 2026-11-09); null when the grid is hidden. */
   gridLabel?: string | null
   colorMode: ColorMode
-  mvThreshold: number
-  statusFractions?: Record<string, number> | null
   deviationRange?: { maxMm: number; toleranceMm: number } | null
   showEdges?: boolean
   readouts: ReadoutAnchor[]
@@ -68,17 +68,12 @@ interface ViewportHudProps {
   onOpenCalibration?: (calibrationId: string) => void
   /** a ticket's pin was pressed (open it in the tickets window) */
   onOpenTicket?: (ticketId: string) => void
-  /** THE CLOUD'S CALIBRATION, shown from the moment it opens (USER 2026-11-13: "debe indicarse si la nube esta
-   *  calibrada o no, eso lo debe indicar al abrir la nube"): null while it is not known */
-  calibration?: { state: 'uncalibrated' | 'calibrated' | 'verified'; factor: number | null; worstDifferenceM: number | null
-                  /** the per-axis factors when the calibration in use is per axis */
-                  axes?: { x: number; y: number; z: number } | null } | null
   banner?: ReactNode
 }
 
 const SCALE_STEPS_M = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100]
 
-export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, metersPerPixel, gridLabel, colorMode, mvThreshold, statusFractions, deviationRange, readouts, onCalibrate, onOpenCalibration, onOpenTicket, calibration, banner }: ViewportHudProps) {
+export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, metersPerPixel, gridLabel, colorMode, deviationRange, readouts, onCalibrate, onOpenCalibration, onOpenTicket, banner }: ViewportHudProps) {
   const t = useT()
   const fmt = useFmt()
 
@@ -113,38 +108,14 @@ export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, 
           </div>
         )}
         {gridLabel && <span className="stac-hud__grid stac-mono">{gridLabel}</span>}
-        {calibration && (
-          <button type="button" className={`stac-hud__calstate stac-hud__calstate--${calibration.state}`} title={t('calibration.open')}
-            onClick={() => onOpenCalibration?.('')}>
-            <Pin aria-hidden />
-            <span>{t(`calibration.state_${calibration.state}`)}</span>
-            {calibration.axes
-              ? <span className="stac-mono">{`X × ${fmt.number(calibration.axes.x, 4)} Y × ${fmt.number(calibration.axes.y, 4)} Z × ${fmt.number(calibration.axes.z, 4)}`}</span>
-              : calibration.factor != null && <span className="stac-mono">{`× ${fmt.number(calibration.factor, 4)}`}</span>}
-            {calibration.state === 'verified' && calibration.worstDifferenceM != null && (
-              <span className="stac-mono">{`${calibration.worstDifferenceM >= 0 ? '+' : ''}${fmt.mm(calibration.worstDifferenceM * 1000, 1)}`}</span>
-            )}
-          </button>
-        )}
       </div>
 
-      {colorMode !== 'rgb' && (
-        <div className="stac-hud__legend">
-          {colorMode === 'status' && (
-            <Legend glass title={t('colorMode.status')} categories={Object.entries(STATUS_TOKENS).map(([k, tok]) => ({
-              color: tok, label: t(`witness.${k}`), value: statusFractions?.[k] != null ? fmt.percent(statusFractions[k], 1) : undefined,
-            }))} />
-          )}
-          {colorMode === 'mv_votes' && (
-            <Legend glass title={t('colorMode.votes')} categories={[
-              { color: '--ok', label: t('colorMode.votesAtLeast', { n: fmt.integer(mvThreshold) }) },
-              { color: '--err', label: t('colorMode.votesFewer', { n: fmt.integer(mvThreshold) }) },
-            ]} />
-          )}
-          {colorMode === 'deviation' && (
-            <Legend glass title={t('colorMode.deviation')} ramp={DEV_RAMP} min={fmt.number(0, 0)} max={deviationRange ? fmt.number(deviationRange.maxMm, 0) : undefined} unit="mm"
+      {/* the deviation's legend: a thin bar along the bottom (USER 2026-11-19: "el panel de desviación hay que
+          ubicarlo mejor abajo, horizontal, y mas finito") */}
+      {colorMode === 'deviation' && (
+        <div className="stac-hud__legend stac-hud__legend--bar">
+          <Legend glass orientation="horizontal" title={t('colorMode.deviation')} ramp={DEV_RAMP} min={fmt.number(0, 0)} max={deviationRange ? fmt.number(deviationRange.maxMm, 0) : undefined} unit="mm"
               categories={deviationRange ? [{ color: '--measure', label: t('deviation.tolerance'), value: fmt.mm(deviationRange.toleranceMm, 0) }] : undefined} />
-          )}
         </div>
       )}
 
@@ -157,7 +128,7 @@ export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, 
           const tk = r.ticket
           if (!tk) return null
           return (
-            <button key={r.id} type="button" title={tk.title} aria-label={tk.label ? tk.title : `${t('tickets.one')} ${tk.number}: ${tk.title}`}
+            <button key={r.id} type="button" title={tk.tooltip ?? tk.title} aria-label={tk.label ? tk.title : `${t('tickets.one')} ${tk.number}: ${tk.title}`}
               className={`stac-hud__ticket stac-hud__ticket--${tk.tone} ${tk.selected ? 'is-selected' : ''}`.trim()}
               style={{ '--rx': `${r.x}px`, '--ry': `${r.y}px` } as React.CSSProperties}
               onClick={e => { e.stopPropagation(); onOpenTicket?.(r.id.replace(/^ticket-/, '')) }}>{tk.label ?? tk.number}</button>

@@ -29,7 +29,7 @@ import sys
 import time
 import zipfile
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -237,6 +237,10 @@ _T = {
         "fr": "{file} — IFC4 : le maillage GenRecon découpé par la segmentation, {n} éléments, chacun la partie du maillage de son objet, "
               "avec sa classe (mur, dalle, porte, poutre, gaine… ; le reste en IfcBuildingElementProxy) et son id. {kept} % des triangles du "
               "maillage sont conservés ; 95 % de la surface est à moins de {p95} mm du maillage complet. Revit, Navisworks, BIMcollab, Solibri."},
+    "loaded_title": {"es": "STAC Build — IFC cargados en el proyecto {session}", "en": "STAC Build — IFC files loaded in the project {session}",
+                     "fr": "STAC Build — IFC chargés dans le projet {session}"},
+    "loaded": {"es": "{file} — IFC cargado en el proyecto, tal como se subió.", "en": "{file} — an IFC loaded in the project, as it was uploaded.",
+               "fr": "{file} — IFC chargé dans le projet, tel qu'il a été téléversé."},
     "csv": {
         "es": "{file} — los {n} objetos segmentados: id, etiqueta (propuesta por el VLM), puntos, centro, tamaño de su caja (a, b, altura) y giro. Excel.",
         "en": "{file} — the {n} segmented objects: id, label (proposed by the VLM), points, centre, the size of its box (a, b, height) and yaw. Excel.",
@@ -266,6 +270,110 @@ def readme(lang: str, *, session: str, scan_key: Optional[str], state: Dict[str,
 
 
 # ── the export ──────────────────────────────────────────────────────────────────────────────
+def _produce(session: str, scan_key: Optional[str], items: List[str], *, confidence: float, lang: str, work: Path,
+             at: Callable[[str, float, str], None]) -> Tuple[List[Dict[str, Any]], List[str], Dict[str, Any]]:
+    """The files of ONE scan's ``items``: written in ``work`` (a mesh is read where it is) —
+    ([{path, arc, key, source?}], the README's lines about them, what the report says of the scan)."""
+    ctx = context(session, scan_key)
+    out = Path(ctx.output_dir)
+    name = slug(session, scan_key)
+    files: List[Dict[str, Any]] = []                                  # {path, arc, key}
+    lines: List[str] = []
+    report: Dict[str, Any] = {}
+    cloud_items = [k for k in items if k in CLOUD_ITEMS]
+    if cloud_items:
+        at(cloud_items[0], 0.0, "reading the cloud")
+        cloud = C.Cloud(out, confidence)
+        st = cloud.stats()
+        report.update(points=st["points"], points_published=st["total"], bounds_min=st["min"], bounds_max=st["max"])
+        flt = ""
+        if cloud.range is not None:
+            flt = _t("filter", lang, conf=f"{confidence:.2f}", lo=f"{cloud.range[0]:g}", hi=f"{cloud.range[1]:g}", src=cloud.range[2])
+        lines += [_t("cloud", lang, points=f"{st['points']:,}", total=f"{st['total']:,}", filter=flt), ""]
+        writers = {"ply": C.write_ply, "las": C.write_las,
+                   "e57": lambda c, p, progress=None: C.write_e57(c, p, name=name, progress=progress)}
+        for k in cloud_items:
+            path = work / f"{name}_cloud.{k}"
+            writers[k](cloud, path, progress=lambda f, _k=k: at(_k, f, f"writing the cloud as {_k.upper()}"))
+            files.append({"path": path, "arc": path.name, "key": k})
+            lines.append(_t(k, lang, file=path.name))
+        del cloud
+    if "glb" in items:
+        at("glb", 0.0, "the mesh")
+        for m in meshes(out):
+            arc = f"{name}_mesh_{m['folder']}.glb"
+            files.append({"path": m["path"], "arc": arc, "key": "glb", "source": True})
+            lines.append(_t("glb", lang, file=arc, faces=f"{int(m['faces']):,}" if m["faces"] else "?",
+                            prov=m["provenance"] or "?"))
+    store = out / "scene_r.db"
+    if "ifc" in items:
+        at("ifc", 0.0, "writing the IFC")
+        from bim import ifc_from_mesh
+        from reconstruction.grid_knn import config_section
+        how = config_section(("export", "ifc"), ("keep", "neighbours", "max_edge_voxels"))
+        voxel = ifc_from_mesh.voxel_of()
+        elements, cut = ifc_from_mesh.elements_of(
+            out, ifc_from_mesh.mesh_of(out), keep=float(how["keep"]), max_distance=voxel,
+            neighbours=int(how["neighbours"]), max_edge=float(how["max_edge_voxels"]) * voxel or None,
+            measure=True, log=lambda m: at("ifc", 0.5, m))
+        path = work / f"{name}_elements.ifc"
+        ifc_from_mesh.build(elements, session=session, scan_key=scan_key or "",
+                            geometry_epoch=str(state_of(out)["geometry_epoch"]),
+                            described=f"STAC Build — the GenRecon mesh of {session} {scan_key or ''} cut by its segmentation"
+                            ).write(str(path))
+        files.append({"path": path, "arc": path.name, "key": "ifc"})
+        dev = cut.get("deviation_m")
+        lines.append(_t("ifc", lang, file=path.name, n=len(elements), kept=f"{100.0 * cut['faces'] / cut['mesh_faces']:.0f}",
+                        p95=f"{dev['p95'] * 1000:.2f}" if dev else "0"))
+        report["ifc_elements"] = len(elements)
+        report["ifc"] = {k: cut[k] for k in ("mesh_faces", "faces", "faces_written", "faces_no_object", "keep") if k in cut}
+        if dev:
+            report["ifc"]["deviation_m"] = dev
+    if "csv" in items:
+        at("csv", 0.0, "writing the objects' table")
+        path = work / f"{name}_objects.csv"
+        n = write_objects_csv(store, path)
+        files.append({"path": path, "arc": path.name, "key": "csv"})
+        lines.append(_t("csv", lang, file=path.name, n=n))
+        report["objects"] = n
+    return files, lines, report
+
+
+def _scratch(target: Path, need: int) -> Path:
+    """The folder on the local disk (export.scratch_dir) the files are written in before they enter the ZIP."""
+    from reconstruction.grid_knn import config_section
+    work = Path(str(config_section(("export",), ("scratch_dir",))["scratch_dir"])) / target.stem
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    free = shutil.disk_usage(work).free
+    if need > free:
+        raise ExportError(f"the export's cloud files need up to {need / 2**30:.1f} GB in {work.parent} "
+                          f"(export.scratch_dir) and {free / 2**30:.1f} GB are free")
+    return work
+
+
+def _pack(target: Path, entries: List[Tuple[Dict[str, Any], str]], texts: List[Tuple[str, str]],
+          at: Callable[[float, str], None]) -> None:
+    """Write the ZIP ``target``: ``texts`` [(arc, text)] and ``entries`` [(file, arc)]; a file written
+    for the export is removed once it is in."""
+    tmp = target.with_name(f".{target.name}.tmp")
+    total = sum(f["path"].stat().st_size for f, _ in entries) or 1
+    done = 0
+    with zipfile.ZipFile(tmp, "w", allowZip64=True) as z:
+        for arc, text in texts:
+            z.writestr(arc, text, compress_type=zipfile.ZIP_DEFLATED)
+        for f, arc in entries:
+            at(done / total, f"packing {f['arc']}")
+            stored = f["path"].suffix.lower() in _STORED
+            z.write(f["path"], arc, compress_type=zipfile.ZIP_STORED if stored else zipfile.ZIP_DEFLATED,
+                    compresslevel=None if stored else 1)
+            done += f["path"].stat().st_size
+            if not f.get("source"):
+                f["path"].unlink()                                    # (a written file is in the ZIP now)
+    tmp.replace(target)
+
+
 def run(session: str, scan_key: Optional[str], items: List[str], *, confidence: float = 0.0, lang: str = "es",
         progress: Optional[Callable[[int, str], Any]] = None, now: Optional[float] = None) -> Dict[str, Any]:
     """Write the ZIP of ``items`` for the scan and return what it holds."""
@@ -284,19 +392,8 @@ def run(session: str, scan_key: Optional[str], items: List[str], *, confidence: 
     target = zip_path(ctx, session, scan_key)
     target.parent.mkdir(parents=True, exist_ok=True)
     # the files are written on the local disk (export.scratch_dir) and enter the ZIP from there
-    from reconstruction.grid_knn import config_section
-    work = Path(str(config_section(("export",), ("scratch_dir",))["scratch_dir"])) / target.stem
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir(parents=True)
-    need = sum(int(available[k].get("bytes") or 0) for k in items if k in CLOUD_ITEMS)
-    free = shutil.disk_usage(work).free
-    if need > free:
-        raise ExportError(f"the export's cloud files need up to {need / 2**30:.1f} GB in {work.parent} "
-                          f"(export.scratch_dir) and {free / 2**30:.1f} GB are free")
+    work = _scratch(target, sum(int(available[k].get("bytes") or 0) for k in items if k in CLOUD_ITEMS))
     name = slug(session, scan_key)
-    files: List[Dict[str, Any]] = []                                  # {path, arc, key}
-    lines: List[str] = []
     report: Dict[str, Any] = {"session": session, "scan": scan_key, "items": items, "confidence": float(confidence)}
     # the steps' share of the bar: the cloud's writers and the ZIP weigh the most
     steps = [k for k in items] + ["zip"]
@@ -306,83 +403,125 @@ def run(session: str, scan_key: Optional[str], items: List[str], *, confidence: 
         say(int(min(99, (steps.index(step) + frac) * span)), message)
 
     try:
-        cloud_items = [k for k in items if k in CLOUD_ITEMS]
-        if cloud_items:
-            at(cloud_items[0], 0.0, "reading the cloud")
-            cloud = C.Cloud(out, confidence)
-            st = cloud.stats()
-            report.update(points=st["points"], points_published=st["total"], bounds_min=st["min"], bounds_max=st["max"])
-            flt = ""
-            if cloud.range is not None:
-                flt = _t("filter", lang, conf=f"{confidence:.2f}", lo=f"{cloud.range[0]:g}", hi=f"{cloud.range[1]:g}", src=cloud.range[2])
-            lines += [_t("cloud", lang, points=f"{st['points']:,}", total=f"{st['total']:,}", filter=flt), ""]
-            writers = {"ply": C.write_ply, "las": C.write_las,
-                       "e57": lambda c, p, progress=None: C.write_e57(c, p, name=name, progress=progress)}
-            for k in cloud_items:
-                path = work / f"{name}_cloud.{k}"
-                writers[k](cloud, path, progress=lambda f, _k=k: at(_k, f, f"writing the cloud as {_k.upper()}"))
-                files.append({"path": path, "arc": path.name, "key": k})
-                lines.append(_t(k, lang, file=path.name))
-            del cloud
-        if "glb" in items:
-            at("glb", 0.0, "the mesh")
-            for m in meshes(out):
-                arc = f"{name}_mesh_{m['folder']}.glb"
-                files.append({"path": m["path"], "arc": arc, "key": "glb", "source": True})
-                lines.append(_t("glb", lang, file=arc, faces=f"{int(m['faces']):,}" if m["faces"] else "?",
-                                prov=m["provenance"] or "?"))
-        store = out / "scene_r.db"
-        if "ifc" in items:
-            at("ifc", 0.0, "writing the IFC")
-            from bim import ifc_from_mesh
-            from reconstruction.grid_knn import config_section
-            how = config_section(("export", "ifc"), ("keep", "neighbours", "max_edge_voxels"))
-            voxel = ifc_from_mesh.voxel_of()
-            elements, cut = ifc_from_mesh.elements_of(
-                out, ifc_from_mesh.mesh_of(out), keep=float(how["keep"]), max_distance=voxel,
-                neighbours=int(how["neighbours"]), max_edge=float(how["max_edge_voxels"]) * voxel or None,
-                measure=True, log=lambda m: at("ifc", 0.5, m))
-            path = work / f"{name}_elements.ifc"
-            ifc_from_mesh.build(elements, session=session, scan_key=scan_key or "",
-                                geometry_epoch=str(state_of(out)["geometry_epoch"]),
-                                described=f"STAC Build — the GenRecon mesh of {session} {scan_key or ''} cut by its segmentation"
-                                ).write(str(path))
-            files.append({"path": path, "arc": path.name, "key": "ifc"})
-            dev = cut.get("deviation_m")
-            lines.append(_t("ifc", lang, file=path.name, n=len(elements), kept=f"{100.0 * cut['faces'] / cut['mesh_faces']:.0f}",
-                            p95=f"{dev['p95'] * 1000:.2f}" if dev else "0"))
-            report["ifc_elements"] = len(elements)
-            report["ifc"] = {k: cut[k] for k in ("mesh_faces", "faces", "faces_written", "faces_no_object", "keep") if k in cut}
-            if dev:
-                report["ifc"]["deviation_m"] = dev
-        if "csv" in items:
-            at("csv", 0.0, "writing the objects' table")
-            path = work / f"{name}_objects.csv"
-            n = write_objects_csv(store, path)
-            files.append({"path": path, "arc": path.name, "key": "csv"})
-            lines.append(_t("csv", lang, file=path.name, n=n))
-            report["objects"] = n
+        files, lines, part = _produce(session, scan_key, items, confidence=confidence, lang=lang, work=work, at=at)
+        report.update(part)
         state = state_of(out)
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(now if now is not None else time.time()))
         text = readme(lang, session=session, scan_key=scan_key, state=state, lines=lines, when=when)
-        tmp = target.with_name(f".{target.name}.tmp")
-        total = sum(f["path"].stat().st_size for f in files) or 1
-        done = 0
-        with zipfile.ZipFile(tmp, "w", allowZip64=True) as z:
-            z.writestr(f"{name}/{_README_NAME[lang]}", text, compress_type=zipfile.ZIP_DEFLATED)
-            for f in files:
-                at("zip", done / total, f"packing {f['arc']}")
-                stored = f["path"].suffix.lower() in _STORED
-                z.write(f["path"], f"{name}/{f['arc']}", compress_type=zipfile.ZIP_STORED if stored else zipfile.ZIP_DEFLATED,
-                        compresslevel=None if stored else 1)
-                done += f["path"].stat().st_size
-                if not f.get("source"):
-                    f["path"].unlink()                                # (a written file is in the ZIP now)
-        tmp.replace(target)
+        _pack(target, [(f, f"{name}/{f['arc']}") for f in files], [(f"{name}/{_README_NAME[lang]}", text)],
+              lambda frac, message: at("zip", frac, message))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     report.update(file=target.name, path=str(target), bytes=target.stat().st_size, state=state,
                   files=[{"name": f["arc"], "item": f["key"]} for f in files], readme=_README_NAME[lang])
+    say(100, "done")
+    return report
+
+
+# ── several scans, and the project's loaded IFCs, in one ZIP ─────────────────────────────────────
+def session_zip_path(ctx, session: str) -> Path:
+    return Path(ctx.project_dir) / "exports" / f"{session}_stac_export.zip"
+
+
+def loaded_ifcs(ctx) -> List[Path]:
+    """The IFC files loaded in the project (as they were uploaded)."""
+    folder = Path(ctx.ifcs_dir)
+    return sorted(p for p in folder.glob("*.ifc") if p.is_file()) if folder.is_dir() else []
+
+
+def scans_of(session: str) -> List[str]:
+    """The scan keys of the session's project ("<date>/<source>"), in order."""
+    import session_archive
+    ctx = context_of_project(session)
+    return session_archive.scans_of(Path(ctx.project_dir))
+
+
+def context_of_project(session: str):
+    from project_paths import resolve_session
+    return resolve_session(str(_server_dir()), session)
+
+
+def plan_all(session: str) -> Dict[str, Any]:
+    """What the SESSION can export (USER 2026-11-19: the Export of the session's download window —
+    "baja en un zip las nubes que se seleccionen, los mesh, los mesh convertidos a IFC, los IFC que
+    hay cargados"): each scan's items (:func:`plan`) and the project's loaded IFCs."""
+    ctx = context_of_project(session)
+    scans: Dict[str, Any] = {}
+    for key in scans_of(session):
+        try:
+            one = plan(session, key)
+            scans[key] = {"points": one["points"], "items": one["items"], "state": one["state"]}
+        except (ExportError, C.CloudError, FileNotFoundError) as e:
+            scans[key] = {"points": 0, "items": {k: {"available": False, "why": str(e)} for k in ITEMS}, "state": None}
+    previous = session_zip_path(ctx, session)
+    return {"session": session, "scans": scans,
+            "loaded_ifcs": [{"file": p.name, "bytes": p.stat().st_size} for p in loaded_ifcs(ctx)],
+            "previous": ({"file": previous.name, "bytes": previous.stat().st_size,
+                          "modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(previous.stat().st_mtime))}
+                         if previous.exists() else None)}
+
+
+def run_many(session: str, selection: Dict[str, List[str]], *, with_loaded_ifcs: bool = False, confidence: float = 0.0,
+             lang: str = "es", progress: Optional[Callable[[int, str], Any]] = None, now: Optional[float] = None) -> Dict[str, Any]:
+    """ONE ZIP for the session: for each scan of ``selection`` ({scan key: [items]}) its files in a
+    folder of its own with its README, and — ``with_loaded_ifcs`` — the project's loaded IFCs as
+    they are. Returns what it holds."""
+    if lang not in LANGS:
+        raise ExportError(f"language '{lang}' (one of {list(LANGS)})")
+    known = scans_of(session)
+    unknown = [k for k in selection if k not in known]
+    if unknown:
+        raise ExportError(f"{session}: no scan {unknown} (its scans: {known})")
+    chosen = [(key, [k for k in ITEMS if k in (selection.get(key) or [])]) for key in known]
+    chosen = [(key, items) for key, items in chosen if items]
+    ctx = context_of_project(session)
+    ifcs = loaded_ifcs(ctx) if with_loaded_ifcs else []
+    if not chosen and not ifcs:
+        raise ExportError("nothing to export: tick something of a scan, or the loaded IFCs")
+    need, missing = 0, []
+    for key, items in chosen:
+        available = plan(session, key)["items"]
+        missing += [f"{key} {k}: {available[k].get('why')}" for k in items if not available[k]["available"]]
+        need += sum(int(available[k].get("bytes") or 0) for k in items if k in CLOUD_ITEMS)
+    if missing:
+        raise ExportError("cannot export " + "; ".join(missing))
+    say = progress or (lambda _p, _m: None)
+    target = session_zip_path(ctx, session)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    work = _scratch(target, need)
+    steps = [f"{key}|{k}" for key, items in chosen for k in items] + ["zip"]
+    span = 100.0 / len(steps)
+    top = f"{session}_export"
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(now if now is not None else time.time()))
+    entries: List[Tuple[Dict[str, Any], str]] = []
+    texts: List[Tuple[str, str]] = []
+    report: Dict[str, Any] = {"session": session, "confidence": float(confidence), "scans": {}, "loaded_ifcs": [p.name for p in ifcs]}
+    try:
+        for key, items in chosen:
+            folder = slug(session, key)
+            scan_work = work / folder
+            scan_work.mkdir()
+
+            def at(step: str, frac: float, message: str, _key: str = key) -> None:
+                say(int(min(99, (steps.index(f"{_key}|{step}") + frac) * span)), f"{_key}: {message}")
+
+            files, lines, part = _produce(session, key, items, confidence=confidence, lang=lang, work=scan_work, at=at)
+            state = state_of(Path(context(session, key).output_dir))
+            texts.append((f"{top}/{folder}/{_README_NAME[lang]}",
+                          readme(lang, session=session, scan_key=key, state=state, lines=lines, when=when)))
+            entries += [(f, f"{top}/{folder}/{f['arc']}") for f in files]
+            report["scans"][key] = {"items": items, **part, "state": state,
+                                    "files": [{"name": f["arc"], "item": f["key"]} for f in files]}
+        for p in ifcs:
+            entries.append(({"path": p, "arc": p.name, "key": "loaded_ifc", "source": True}, f"{top}/ifc/{p.name}"))
+        if ifcs:
+            texts.append((f"{top}/ifc/{_README_NAME[lang]}",
+                          "\n".join([_t("loaded_title", lang, session=session), _t("made", lang, when=when), ""]
+                                    + [_t("loaded", lang, file=p.name) for p in ifcs]) + "\n"))
+        _pack(target, entries, texts, lambda frac, message: say(int(min(99, (len(steps) - 1 + frac) * span)), message))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    report.update(file=target.name, path=str(target), bytes=target.stat().st_size, readme=_README_NAME[lang])
     say(100, "done")
     return report
 
@@ -392,14 +531,23 @@ def main(argv: List[str]) -> int:
     ap = argparse.ArgumentParser(prog="exporter.package")
     ap.add_argument("--session", required=True)
     ap.add_argument("--scan", default=None)
-    ap.add_argument("--items", required=True)
+    ap.add_argument("--items", default=None)
+    ap.add_argument("--selection", default=None, help="JSON: {\"scans\": {scan key: [items]}, \"loaded_ifcs\": bool} — "
+                                                      "several scans and the loaded IFCs in one ZIP")
     ap.add_argument("--confidence", type=float, default=0.0)
     ap.add_argument("--lang", default="es")
     a = ap.parse_args(argv)
+    say = lambda p, m: print(f"PROGRESS {p} {m}", flush=True)       # noqa: E731
     try:
-        report = run(a.session, a.scan, [k.strip() for k in a.items.split(",") if k.strip()],
-                     confidence=a.confidence, lang=a.lang,
-                     progress=lambda p, m: print(f"PROGRESS {p} {m}", flush=True))
+        if a.selection:
+            sel = json.loads(a.selection)
+            report = run_many(a.session, dict(sel.get("scans") or {}), with_loaded_ifcs=bool(sel.get("loaded_ifcs")),
+                              confidence=a.confidence, lang=a.lang, progress=say)
+        else:
+            if not a.items:
+                raise ExportError("--items (or --selection) is required")
+            report = run(a.session, a.scan, [k.strip() for k in a.items.split(",") if k.strip()],
+                         confidence=a.confidence, lang=a.lang, progress=say)
     except (ExportError, C.CloudError, FileNotFoundError, ValueError) as e:
         print(f"ERROR {e}", flush=True)
         return 1

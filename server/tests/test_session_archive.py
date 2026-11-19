@@ -477,6 +477,31 @@ def test_download_then_upload_through_the_routes(client):
     assert [a[0][0] for a in log] == ["archive.download", "archive.import"]
 
 
+def test_a_link_for_some_scans_through_the_routes(client):
+    """The window's "Download session" with a scan unticked: the plan says each scan's share, the link
+    takes the scans to keep, and what comes down uploads as a session without the other."""
+    c, projects, busy, log, R = client
+    other = projects / "site_a" / "scans" / "2026-02-03" / "src_default" / "output"
+    other.mkdir(parents=True)
+    (other / "cleaned_cloud.ply").write_bytes(os.urandom(50_000))
+    plan = c.get("/api/session_archive/site_a/plan").json()
+    assert plan["scans"] == ["2026-01-02/default", "2026-02-03/default"] and plan["by_scan"]["2026-02-03/default"] == {"files": 1, "bytes": 50_000}
+    assert sum(b["bytes"] for b in plan["by_scan"].values()) + plan["common"]["bytes"] == plan["bytes"]
+    t = c.post("/api/session_archive/site_a/ticket", json={"scans": ["2026-01-02/default"]}).json()
+    assert t["scans"] == ["2026-01-02/default"] and t["files"] == plan["files"] - 1
+    data = c.get(t["url"]).content
+    assert len(data) == t["zip_bytes"] and not any("2026-02-03" in n for n in zipfile.ZipFile(io.BytesIO(data)).namelist())
+    st = upload(c, R, data, name="site_c", part=100_000)
+    assert st["phase"] == "done" and st["session_id"] == "site_c"
+    assert (projects / "site_c" / "scans" / "2026-01-02").is_dir() and not (projects / "site_c" / "scans" / "2026-02-03").exists()
+    assert (other / "cleaned_cloud.ply").exists()                              # the session itself keeps its scan
+    # every scan named = the whole session; a scan that is not its own, none, or not a list: said
+    assert c.post("/api/session_archive/site_a/ticket", json={"scans": plan["scans"]}).json()["files"] == plan["files"]
+    assert c.post("/api/session_archive/site_a/ticket", json={"scans": ["2026-09-09/default"]}).status_code == 409
+    assert c.post("/api/session_archive/site_a/ticket", json={"scans": []}).status_code == 409
+    assert c.post("/api/session_archive/site_a/ticket", json={"scans": "all"}).status_code == 400
+
+
 def test_the_routes_refuse(client):
     c, projects, busy, log, R = client
     assert c.get("/api/session_archive/nope/plan").status_code == 404
@@ -614,3 +639,52 @@ def test_an_upload_is_refused_as_soon_as_its_manifest_says_so(client):
     with pytest.raises(A.ArchiveError, match="does not match its checksum"):
         A.manifest_at_head(z)
     z.unlink()
+
+
+def test_a_download_of_some_scans_is_still_a_whole_session(tmp_path):
+    """USER 2026-11-19: the session's download, "asi completa como esta, y eventualmente seleccionar
+    cual de los escaneos quiere agregar o excluir". Without a scan the archive lacks that scan's
+    folder, its scan day when no other scan is left in it, the stored BIM comparison when it was
+    that scan's — and project.json names only the scans that travel. It uploads as a session."""
+    src = make_session(tmp_path / "pod_a")
+    other = src / "scans" / "2026-02-03" / "src_default"
+    (other / "output").mkdir(parents=True)
+    (other / "output" / "cleaned_cloud.ply").write_bytes(b"ply\n" + os.urandom(40_000))
+    (src / "scans" / "2026-02-03" / "scan_day.json").write_text("{}")
+    (src / "bim_comparison").mkdir()
+    (src / "bim_comparison" / "sabana_meta.json").write_text(json.dumps({"scan": "2026-02-03/default"}))
+    (src / "tickets.json").write_text(json.dumps({"tickets": [], "next_number": 1}))
+    (src / "project.json").write_text(json.dumps({
+        "name": "site_a", "slug": "site_a",
+        "scans": [{"key": "2026-01-02/default"}, {"key": "2026-02-03/default"}], "active_scan": "2026-02-03/default",
+        "composition": {"reference": "2026-02-03/default", "transforms": {"2026-01-02/default": {"matrix": [1]}}}}))
+    sizes = A.plan(src, "site_a")
+    assert set(sizes["by_scan"]) == {"2026-01-02/default", "2026-02-03/default"}
+    assert sum(b["bytes"] for b in sizes["by_scan"].values()) + sizes["common"]["bytes"] == sizes["bytes"]
+    assert A.manifest_of(src, "site_a", scans=["2026-01-02/default", "2026-02-03/default"]).get("rewritten") is None   # every scan: as it is
+
+    manifest = A.manifest_of(src, "site_a", scans=["2026-01-02/default"])
+    paths = {e["p"] for e in manifest["entries"]}
+    assert manifest["scans"] == ["2026-01-02/default"] and "tickets.json" in paths
+    assert not any(p.startswith(("scans/2026-02-03", "bim_comparison")) for p in paths)
+    zip_path = tmp_path / "one_scan.zip"
+    with open(zip_path, "wb") as f:
+        for part in A.Layout(src, "site_a", manifest).stream():
+            f.write(part)
+    projects = tmp_path / "pod_b"
+    projects.mkdir()
+    assert A.validate(zip_path, projects)["scans"] == ["2026-01-02/default"]
+    A.extract(zip_path, projects)
+    meta = json.loads((projects / "site_a" / "project.json").read_text())
+    assert [x["key"] for x in meta["scans"]] == ["2026-01-02/default"] and meta["active_scan"] == "2026-01-02/default"
+    assert meta["composition"] == {"reference": "2026-01-02/default", "transforms": {}}          # (its reference is not there)
+    assert not (projects / "site_a" / "scans" / "2026-02-03").exists() and not (projects / "site_a" / "bim_comparison").exists()
+    assert (projects / "site_a" / "scans" / "2026-01-02" / "src_default" / "output" / "cleaned_cloud.ply").stat().st_size == 2_500_004
+    assert json.loads((src / "project.json").read_text())["active_scan"] == "2026-02-03/default"      # the session itself: untouched
+    # the same manifest is the same ZIP (a resumed download), and a scan that is not the session's is said
+    assert b"".join(A.Layout(src, "site_a", manifest).stream(100, 5000)) == zip_path.read_bytes()[100:5000]
+    with pytest.raises(A.ArchiveError, match="no scan"):
+        A.manifest_of(src, "site_a", scans=["2026-09-09/default"])
+    with pytest.raises(A.ArchiveError, match="at least one scan"):
+        A.manifest_of(src, "site_a", scans=[])
+

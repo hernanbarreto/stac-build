@@ -304,16 +304,12 @@ commands:
   tool: color_cloud
   kind: action
   runs_on: scene
-  model: 'VIEWER: colour the cloud: rgb (real colour), confidence/status (per-point witness status), votes (multi-view
-    votes), deviation (vs BIM).'
+  model: 'VIEWER: colour the cloud: rgb (real colour) or deviation (the stored comparison against the BIM).'
   args:
     mode:
       type: string
       enum:
       - rgb
-      - confidence
-      - status
-      - votes
       - deviation
       required: true
   needs:
@@ -322,23 +318,17 @@ commands:
     es:
       title: Color de la nube
       say:
-      - coloreá por confianza
       - volvé al color real
-      - mostrá los votos
       - coloreá por desviación contra el BIM
     en:
       title: Cloud colour
       say:
-      - colour by confidence
       - back to real colour
-      - show the votes
       - colour by deviation against the BIM
     fr:
       title: Couleur du nuage
       say:
-      - colore par confiance
       - reviens à la couleur réelle
-      - affiche les votes
       - colore par écart avec le BIM
 - id: viewer.clear_view
   tool: clear_view

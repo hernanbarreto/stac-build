@@ -40,9 +40,9 @@ import threading
 import time
 from email.utils import formatdate
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -103,10 +103,10 @@ def _free(session_id: str) -> Path:
     return d
 
 
-def _layout(session_id: str) -> A.Layout:
+def _layout(session_id: str, scans: Optional[List[str]] = None) -> A.Layout:
     d = _free(session_id)
     try:
-        return A.Layout(d, session_id, A.manifest_of(d, session_id, _commit))
+        return A.Layout(d, session_id, A.manifest_of(d, session_id, _commit, scans))
     except A.ArchiveError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
 
@@ -120,12 +120,21 @@ def _summary(layout: A.Layout) -> Dict[str, Any]:
 # ── the download ───────────────────────────────────────────────────────────────────────────────
 @router.get("/api/session_archive/{session_id}/plan")
 def archive_plan(session_id: str, _user: Dict[str, Any] = Depends(_manager)):
-    return {"ok": True, **_summary(_layout(session_id))}
+    """What a download of the session holds, and how much of it is each scan's (``by_scan``) and the
+    project's own (``common``) — for the window where its scans are ticked."""
+    layout = _layout(session_id)
+    return {"ok": True, **_summary(layout), **A.sizes_of(layout.manifest)}
 
 
 @router.post("/api/session_archive/{session_id}/ticket")
-def archive_ticket(session_id: str, user: Dict[str, Any] = Depends(_manager)):
-    layout = _layout(session_id)
+def archive_ticket(session_id: str, body: Optional[Dict[str, Any]] = Body(default=None), user: Dict[str, Any] = Depends(_manager)):
+    """The link to the session's download. Body (optional): {"scans": [keys]} — only these scans of
+    it (USER 2026-11-19: "seleccionar cual de los escaneos quiere agregar o excluir"); the archive
+    is still a whole session that uploads and opens."""
+    scans = (body or {}).get("scans")
+    if scans is not None and (not isinstance(scans, list) or any(not isinstance(k, str) for k in scans)):
+        raise HTTPException(status_code=400, detail="scans must be a list of scan keys")
+    layout = _layout(session_id, scans)
     now = time.time()
     ticket = secrets.token_urlsafe(32)
     with _lock:

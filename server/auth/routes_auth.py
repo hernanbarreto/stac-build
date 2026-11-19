@@ -86,6 +86,20 @@ async def get_me(current_user: dict = Depends(get_current_user)):
         return {"user": user.to_dict()}
 
 
+@router.post("/refresh")
+async def refresh_token(current_user: dict = Depends(get_current_user)):
+    """A NEW token for a signed-in user — the same user, 24 hours from now. The interface asks for one
+    while the page is in use, so that a login does not expire under a user who is working (USER
+    2026-11-19: on a page left open over a day the viewer preferences came back empty — "me deja los
+    puntos el 5" — and the session download answered "Invalid or expired token")."""
+    async with async_session_factory() as session:
+        user = await session.get(User, current_user["id"])
+        if not user or not user.is_active:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        token = create_access_token({"sub": str(user.id), "username": user.username, "role": user.role})
+        return {"token": token, "user": user.to_dict()}
+
+
 @router.post("/change-password")
 async def change_password(
     body: ChangePasswordRequest,

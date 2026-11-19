@@ -12,12 +12,10 @@ import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import Viewport, { ViewportHandle, SegmentInstance, type CubeInfo } from './components/Viewport'
 import type { UserVolume } from './components/assistantViz'
 import { SyncPlayer } from './components/SyncPlayer'
-import { BIMAnalysisPanel } from './components/BIMAnalysisPanel'
 import TeamPanel from './components/TeamPanel'
 import WebRTCCall from './components/WebRTCCall'
 import BIMNavigator from './components/BIMNavigator'
 import FuseScansModal from './components/FuseScansModal'
-import CertifyKitPanel from './components/CertifyKitPanel'
 import DeviationOverlay, { type DeviationResult } from './components/DeviationOverlay'
 import type { IFCLoadResult } from './components/IFCLoader'
 import { useAuth } from './context/AuthContext'
@@ -25,14 +23,15 @@ import LoginPage from './pages/LoginPage'
 import AdminPage from './pages/AdminPage'
 import SegmentationManager from './components/InteractiveSegmentation'
 import { useConfirmDialog } from './components/ConfirmDialog'
-import { TicketsDialog, ticketTone, type Ticket, type TicketCounts, type TicketDraft } from './features/TicketsDialog'
+import { DocumentationPanel, GanttPanel } from './features/ProjectPanels'
+import { TicketsPanel, TicketCreateDialog, ticketTone, ticketHistory, objectName, type Ticket, type TicketCounts, type TicketDraft } from './features/TicketsPanel'
 import { CommonPointsDialog, type CommonFit, type CommonPoint } from './features/CommonPointsDialog'
 import AssistantPanel from './components/AssistantPanel'
-import { Flag, Waypoints, PackageOpen,
+import { TriangleAlert, BadgeCheck, FileText, ChartNoAxesGantt, Flag, Waypoints,
   Search, Tag, Plug, Settings, Crosshair, Maximize, Monitor, Grid3X3, RotateCcw, Ruler, TriangleRight, Scissors,
   Move, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D, Building2, Package, ArrowUpFromLine, Trash2, Unlock,
   Clock, Scale, BarChart3, Home, Camera, SlidersHorizontal, Sparkles, Undo2, Brush, Layers, Star, Terminal,
-  ListTodo, FileCheck2, PanelLeftClose, PanelLeftOpen, Wand2,
+  ListTodo, PanelLeftClose, PanelLeftOpen, Wand2,
   Circle, Sun, FlaskConical, Pin, Pentagon, Palette,
 } from 'lucide-react'
 import { useI18n, getT } from './i18n'
@@ -44,7 +43,7 @@ import { Inspector } from './layout/Inspector'
 import { BottomDock } from './layout/BottomDock'
 import { StatusBar } from './layout/StatusBar'
 import { CommandPalette, type Command } from './layout/CommandPalette'
-import { registerCommands, registerOpeners, findByName, type Executors, type AdminCommandId, type BimCommandId, type ExportCommandId, type FuseCommandId, type ManagerCommandId, type ReferenceCommandId, type CalibrationCommandId, type CallCommandId, type TeamCommandId, type CertifyCommandId, type EvaluationCommandId, type ReportCommandId, type FlythroughCommandId, type Outcome, type PanelCommandId, type ViewportCommandId } from './commands/registry'
+import { registerCommands, registerOpeners, findByName, type Executors, type AdminCommandId, type BimCommandId, type ExportCommandId, type FuseCommandId, type ManagerCommandId, type ReferenceCommandId, type CalibrationCommandId, type CallCommandId, type TeamCommandId, type EvaluationCommandId, type ReportCommandId, type FlythroughCommandId, type Outcome, type PanelCommandId, type ViewportCommandId } from './commands/registry'
 import type { UiCommandId } from './commands/catalog.generated'
 import { SettingsDialog } from './layout/SettingsDialog'
 import { SceneLookDialog } from './layout/SceneLookDialog'
@@ -56,9 +55,9 @@ import { Dialog } from './components/ui/Dialog'
 import { Field, SegmentedControl } from './components/ui/Field'
 import { EmptyState } from './components/ui/EmptyState'
 import { useToast } from './components/ui/Toast'
-import type { MenuEntry } from './components/ui/Menu'
+import { Menu, type MenuEntry } from './components/ui/Menu'
 import type { ProgressStage } from './components/ui/Progress'
-import { FloatingToolbar, type ColorMode } from './components/viewport/FloatingToolbar'
+import { FloatingToolbar } from './components/viewport/FloatingToolbar'
 import { ViewportHud, type ReadoutAnchor, type ViewPreset } from './components/viewport/ViewportHud'
 import { SplashOverlay } from './components/viewport/SplashOverlay'
 import { WelcomeScreen } from './components/viewport/WelcomeScreen'
@@ -71,7 +70,7 @@ import { ResumeDialog } from './features/ResumeDialog'
 import { ObjectLibraryDialog } from './features/ObjectLibraryDialog'
 import { AutosegmentDialog, type AutosegmentState, type AutosegmentStages } from './features/AutosegmentDialog'
 import { GenreconDialog } from './features/GenreconDialog'
-import { ExportDialog } from './features/ExportDialog'
+import { SessionDownloadDialog, type DownloadSection } from './features/SessionDownloadDialog'
 import { ReferenceDialog, type ReferenceMode } from './features/ReferenceDialog'
 import { CalibrationDialog, type CalibrationDraft, type CalMeasurement, type CalPlane, type CalSummary } from './features/CalibrationDialog'
 import { EvaluationPanel } from './features/EvaluationPanel'
@@ -137,6 +136,8 @@ function useStableCallbacks<T extends Record<string, (...args: any[]) => any>>(f
   return stable.current
 }
 
+const DEFAULT_POINT_SIZE = 0.15
+
 function App() {
   // auth first: token feeds the handlers' deps below (TDZ)
   const { user, token, loading: authLoading, logout } = useAuth()
@@ -192,13 +193,6 @@ function App() {
   useEffect(() => { viewportRef.current?.setAmbientLight(lightIntensity) }, [lightIntensity])
   const [pointOpacity, setPointOpacity] = useState(1.0)
   useEffect(() => { viewportRef.current?.setPointOpacity(pointOpacity) }, [pointOpacity])
-  // the precision core's diagnostic layers (flyers, mono detail, mixed unresolved): off by default, per session
-  const [flyersOn, setFlyersOn] = useState(false)
-  const [monoDetailOn, setMonoDetailOn] = useState(false)
-  const [unresolvedOn, setUnresolvedOn] = useState(false)
-  useEffect(() => { void viewportRef.current?.setPrecisionLayer('flyers', flyersOn, activeSession) }, [flyersOn, activeSession])
-  useEffect(() => { void viewportRef.current?.setPrecisionLayer('mono_detail', monoDetailOn, activeSession) }, [monoDetailOn, activeSession])
-  useEffect(() => { void viewportRef.current?.setPrecisionLayer('mixed_unresolved', unresolvedOn, activeSession) }, [unresolvedOn, activeSession])
   const [physicsDiameterCm, setPhysicsDiameterCm] = useState(20)
   const [physicsBounce, setPhysicsBounce] = useState(0.7)
   const [physicsCount, setPhysicsCount] = useState(0)
@@ -221,28 +215,8 @@ function App() {
   const [placedObjects, setPlacedObjects] = useState<Array<{ id: number; name: string; visible: boolean }>>([])
   const [alignTargets, setAlignTargets] = useState<Array<{ key: string; label: string }>>([])
   const [alignTarget, setAlignTarget] = useState('')
-  //  Certification kit (claude_stac.txt §11): epochs before/after, colour by
-  // witness status / mv_votes, trajectory with loop edges, duplicates,
-  // attention list, acta — the user judges by selecting between the epochs.
-  const [showCertifyKit, setShowCertifyKit] = useState(false)
-  // bumped when a pipeline finishes: the certification stage ran inside it,
-  // so an open kit re-reads the acta / epochs / edges
+  // bumped when a pipeline finishes: the geometry epoch (status bar, properties) is read again
   const [certifyRefresh, setCertifyRefresh] = useState(0)
-  // No button (USER 2026-09-13): the kit opens BY ITSELF when the session has
-  // a certification acta with pending epochs to judge (after the pipeline's
-  // certify stage, or on opening such a session).
-  useEffect(() => {
-    if (!activeSession) { setShowCertifyKit(false); return }
-    let cancelled = false
-    fetch(`/api/certify/state/${activeSession}`)
-      .then(r => (r.ok ? r.json() : null))
-      .then(st => {
-        if (cancelled || !st) return
-        if (st.acta && (st.epochs?.length ?? 0) > 1) setShowCertifyKit(true)
-      })
-      .catch(() => {})
-    return () => { cancelled = true }
-  }, [activeSession, certifyRefresh])
   // ── Multi-scan project, VS-Code-style TABS (USER 2026-09-06): one tab
   // per open scan; the ACTIVE tab is the scan being viewed AND worked on
   // (segmentation, brush, meshing, chat). Closing a tab loses
@@ -392,10 +366,13 @@ function App() {
   }, [activeTool])
   // shell state now lives in LayoutContext (prompt_ui.txt §5)
   const layoutCtx = useLayout()
+  // the BIM panel's two views: the model's tree and the comparison's REPORT (USER 2026-11-19: "el report me aparece
+  // como una opcion dentro del panel BIM, ahi me debe mostrar report, y quitarlo de la funcion consola")
+  const [bimView, setBimView] = useState<'model' | 'report'>('model')
   const setActivePanel = useCallback((p: 'sessions' | 'segments' | 'bim' | 'team' | 'analysis' | 'assistant' | null) => {
     if (p === null) layoutCtx.setLeftTab(null)
     else if (p === 'segments') layoutCtx.setLeftTab('instances')
-    else if (p === 'analysis') layoutCtx.openDock('report')
+    else if (p === 'analysis') { layoutCtx.setLeftTab('bim'); setBimView('report') }
     else if (p === 'assistant') layoutCtx.openInspector('assistant')
     else layoutCtx.setLeftTab(p)
   }, [layoutCtx])
@@ -406,7 +383,9 @@ function App() {
 
   const [bimModels, setBimModels] = useState<IFCLoadResult[]>([])
   const [vlmStatus, setVlmStatus] = useState<'up' | 'loading' | 'busy' | 'down' | null>(null)
-  const [pointSize, setPointSize] = useState(5.0)
+  // THE POINT SIZE OF A SCAN WITH NO STORED PREFERENCE — HIS (USER 2026-11-19: "por defecto en 0.15"; it was 5, the
+  // slider's maximum: "me deja los puntos el 5"). A scan he has set keeps his own value (per user, per scan).
+  const [pointSize, setPointSize] = useState(DEFAULT_POINT_SIZE)
   // Potree LOD point budget (max points rendered at once). Higher = more of the
   // cloud visible, but more client GPU/RAM. Slider lets it scale to any
   // cloud/machine. Default 10M (good overview for large clouds; raise if your
@@ -449,7 +428,6 @@ function App() {
   const [sabanaVisible, setSabanaVisible] = useState(false)
   const [sabanaLoading, setSabanaLoading] = useState(false)
   const [sabanaMetrics, setSabanaMetrics] = useState<any>(null)
-  const [sabanaFullMeta, setSabanaFullMeta] = useState<any>(null)
   // the scan the comparison sheet on disk was computed on (the project keeps ONE sheet): it is neither
   // loaded nor offered over another scan of the project
   const [sabanaScan, setSabanaScan] = useState<string | null>(null)
@@ -957,7 +935,6 @@ function App() {
     // Clear sábana state
     setSabanaVisible(false)
     setSabanaMetrics(null)
-    setSabanaFullMeta(null)
     setDeviationReport(null)
     // Reset OBBs visibility
     viewportRef.current?.setOBBsVisible(true)
@@ -1026,8 +1003,6 @@ function App() {
         if (metaRes.ok) {
           const fullMeta = await metaRes.json()
           setSabanaMetrics(fullMeta)
-          setSabanaFullMeta(fullMeta)
-          setActivePanel('analysis')
         }
       } catch { /* ignore */ }
       await loadDeviationReport(sid)
@@ -1307,7 +1282,11 @@ function App() {
   // confidence chosen in its window — an order of the GenRecon stage alone (pipeline.auto_genrecon is off)
   const [genreconOpen, setGenreconOpen] = useState(false)
   // the exporter (USER 2026-11-17: "hagamos un exportador … que la persona lo pueda descargar en su maquina")
-  const [exportOpen, setExportOpen] = useState(false)
+  // THE SESSION'S DOWNLOAD WINDOW (USER 2026-11-19): opened by the Download button of a session's row — the
+  // session as it is (its scans ticked) or an export for other programs; there is no other Export. `n` makes
+  // each opening a new window (its ticks start clean).
+  const [downloadDialog, setDownloadDialog] = useState<{ session: string; section: DownloadSection; n: number } | null>(null)
+  const openDownload = useCallback((session: string, section: DownloadSection) => setDownloadDialog({ session, section, n: Date.now() }), [])
   const runGenrecon = useCallback(async (confidence: number): Promise<true | string> => {
     if (!activeSession) return 'no session'
     const rr = await fetch('/api/pipeline/run', {
@@ -1463,9 +1442,9 @@ function App() {
     fetch(`/api/sessions/${activeSession}/prefs`, {
       headers: { 'Authorization': `Bearer ${token}` }
     })
-      .then(r => r.json())
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
       .then(prefs => {
-        setPointSize(typeof prefs.pointSize === 'number' ? prefs.pointSize : 5.0)
+        setPointSize(typeof prefs.pointSize === 'number' ? prefs.pointSize : DEFAULT_POINT_SIZE)
         setConfidenceThreshold(typeof prefs.confidenceThreshold === 'number' ? prefs.confidenceThreshold : 0.0)
         setPointBudget(typeof prefs.pointBudget === 'number' ? prefs.pointBudget : 10_000_000)
         // USER 2026-11-05 ("la muestra instantáneamente y después la apaga"): a session OPENS with its cloud on screen.
@@ -1479,13 +1458,9 @@ function App() {
         setTimeout(() => { prefsLoadedRef.current = true }, 300)
       })
       .catch(() => {
-        setPointSize(5.0)
-        setConfidenceThreshold(0.0)
-        setPointBudget(10_000_000)
-        setLightIntensity(1.0)
-        setPointOpacity(1.0)
-        setSceneLook(DEFAULT_LOOK)
-        prefsLoadedRef.current = true
+        // the preferences could NOT be read (the login no longer valid, the server away): what the user has on
+        // screen stays — it was put back to the defaults, 5 for the point size — and nothing is saved over the
+        // stored ones until they are read (prefsLoadedRef stays false)
       })
   }, [pointCount])  
 
@@ -1522,7 +1497,6 @@ function App() {
     setCompareDialogOpen(false)
     setSabanaLoading(true)
     setSabanaMetrics(null)
-    setSabanaFullMeta(null)
     if (sabanaVisible) setSabanaVisible(false)
     viewportRef.current?.sendCommand({ type: 'load_session', session_id: activeSession })
     viewportRef.current?.setOBBsVisible(true)
@@ -1574,7 +1548,6 @@ function App() {
       viewportRef.current?.setOBBsVisible(true)
       setSabanaVisible(false)
       setSabanaMetrics(null)
-      setSabanaFullMeta(null)
       setStatusMessage(tt('deviation.reloadingCloud'))
       setActivePanel('bim')
       return
@@ -1590,12 +1563,15 @@ function App() {
       .then(fullMeta => {
         if (fullMeta) {
           setSabanaMetrics(fullMeta)
-          setSabanaFullMeta(fullMeta)
-          setActivePanel('analysis')
         }
       })
       .catch(() => { })
   }, [activeSession, sabanaVisible])
+  // (the assistant's colour action — declared above — reads these)
+  const sabanaVisibleRef = useRef(false)
+  sabanaVisibleRef.current = sabanaVisible
+  const handleToggleSabanaRef = useRef<() => void>(() => undefined)
+  handleToggleSabanaRef.current = handleToggleSabana
 
 
   const hasSession = activeSession !== null
@@ -1605,11 +1581,6 @@ function App() {
   const { notify } = useToast()
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [colorMode, setColorMode] = useState<ColorMode>('rgb')
-  const [mvThreshold, setMvThreshold] = useState(2)
-  // hide the red band instead of painting it (kit "Votes"): the cloud
-  // as it would look without its single-witness mass. Nothing is deleted.
-  const [mvHide, setMvHide] = useState(false)
   const [selectedSegmentId, setSelectedSegmentId] = useState<number | null>(null)
   // Select an object and FLY TO it (USER 2026-09-21) — the instance list's click, and the
   // assistant's answer about an object (USER 2026-10-09: "debe mover la escena y enfocar
@@ -1735,7 +1706,8 @@ function App() {
         if (ids.length > 1) setTimeout(() => focusSegmentsRef.current(ids.slice(1, 2)), 2200)
         break
       }
-      case 'color': setColorMode(a.mode as ColorMode); break
+      // (the real colour or the stored comparison's deviation: the status and votes colourings are gone)
+      case 'color': if ((a.mode === 'deviation') !== sabanaVisibleRef.current) handleToggleSabanaRef.current(); break
       case 'clear': setSelectedSegmentId(null); vp?.clearAssistantViz(); break
     }
   }
@@ -1769,17 +1741,10 @@ function App() {
   }, [activeSession, activeScanTab, cloudEverShown, drawCalibrationMarks])
   const [metersPerPixel, setMetersPerPixel] = useState<number | null>(null)
   const [certifyState, setCertifyState] = useState<any>(null)
-  const [hasWitness, setHasWitness] = useState(false)
   const [activeTasks, setActiveTasks] = useState<Array<{ label: string; pct: number; detail: string }>>([])
   const canManage = user?.role === 'admin' || user?.role === 'manager'
 
-  // witness colour mode -> viewer (the certification kit shares this state)
-  useEffect(() => {
-    const mode = colorMode === 'status' || colorMode === 'mv_votes' ? colorMode : 'rgb'
-    viewportRef.current?.setWitnessColorMode(mode, mvThreshold, mvHide && hasWitness)
-  }, [colorMode, mvThreshold, mvHide, hasWitness, pointCount])
-  useEffect(() => { if (colorMode === 'deviation' && !sabanaVisible) setColorMode('rgb') }, [sabanaVisible, colorMode])
-  useEffect(() => { setColorMode('rgb'); setSelectedSegmentId(null); setReadouts([]) }, [activeSession])
+  useEffect(() => { setSelectedSegmentId(null); setReadouts([]) }, [activeSession])
   // geometry epoch for the status bar: certify state (re-read with the kit)
   useEffect(() => {
     if (!activeSession) { setCertifyState(null); return }
@@ -1787,8 +1752,6 @@ function App() {
     fetch(`/api/certify/state/${activeSession}`).then(r => (r.ok ? r.json() : null)).then(st => { if (!cancelled) setCertifyState(st) }).catch(() => {})
     return () => { cancelled = true }
   }, [activeSession, certifyRefresh])
-  // the certification kit lives in the Inspector's Acta tab
-  useEffect(() => { if (showCertifyKit) layout.openInspector('acta') }, [showCertifyKit])  
   // active server tasks for the Jobs dock
   useEffect(() => {
     if (!activeSession || !connected) { setActiveTasks([]); return }
@@ -1901,7 +1864,13 @@ function App() {
   // como un punto de revisión o una no conformidad: es para mostrar el concepto nomás") ──
   // The project's tickets, the one being marked (its kind and title are stated in the window, its POINT
   // is the next click on the model — never guessed) and the one selected.
-  const [ticketsOpen, setTicketsOpen] = useState(false)
+  // the tickets whose pin is not drawn ("deben poder mostrarse todos o cada uno")
+  const [hiddenTickets, setHiddenTickets] = useState<Set<string>>(new Set())
+  // THE SELECTED OBJECT'S MENU (a right click on one of its points) and the ticket being written from it
+  const [objectMenu, setObjectMenu] = useState<{ x: number; y: number; point: [number, number, number]; segmentId: number } | null>(null)
+  const [ticketForm, setTicketForm] = useState<{ point: [number, number, number]; segmentId: number } | null>(null)
+  const [ticketSaving, setTicketSaving] = useState(false)
+  const [ticketFormError, setTicketFormError] = useState<string | null>(null)
   const [tickets, setTickets] = useState<Ticket[]>([])
   const [ticketCounts, setTicketCounts] = useState<TicketCounts | null>(null)
   const [ticketDraft, setTicketDraft] = useState<TicketDraft | null>(null)
@@ -1921,7 +1890,7 @@ function App() {
   }, [])
   useEffect(() => { setTicketDraft(null); setSelectedTicket(null); void loadTickets(activeSession) }, [activeSession, loadTickets])
   // (read again at each opening: another user of the session may have marked or resolved one)
-  useEffect(() => { if (ticketsOpen) void loadTickets(activeSession) }, [ticketsOpen])  // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (layout.state.leftTab === 'tickets') void loadTickets(activeSession) }, [layout.state.leftTab])  // eslint-disable-line react-hooks/exhaustive-deps
 
   const ticketRequest = useCallback(async (method: 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown) => {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -1933,7 +1902,7 @@ function App() {
   }, [token, activeSession])
 
   const startTicket = useCallback((draft: TicketDraft) => {
-    setTicketDraft(draft); setTicketsOpen(true); setActiveTool('navigate')
+    setTicketDraft(draft); layout.setLeftTab('tickets'); setActiveTool('navigate')
     setStatusMessage(t('tickets.placing', { title: draft.title }))
   }, [t])
 
@@ -1964,7 +1933,8 @@ function App() {
     if (!ok) return 'cancelled'
     try {
       const d = await ticketRequest('DELETE', `/${tk.id}`)
-      setTickets(prev => prev.filter(x => x.id !== tk.id)); setTicketCounts(d.counts)
+      // (a deleted ticket STAYS in the list, as history: marked deleted, with no pin)
+      setTickets(prev => prev.map(x => (x.id === tk.id ? (d.ticket ?? { ...x, status: 'deleted' as const }) : x))); setTicketCounts(d.counts)
       setSelectedTicket(prev => (prev === tk.id ? null : prev))
       return true as const
     } catch (e: any) { report(t('tickets.failed', { detail: e?.message ?? e }), 'err'); return String(e?.message ?? e) }
@@ -1975,11 +1945,30 @@ function App() {
     viewportRef.current?.flyToPoint(tk.position, 1.5)
   }, [])
 
-  // the pins on the model: the tickets of the scan on screen
+  // a ticket written in the modal the selected object's menu opened: its point is the right click's
+  const createTicketAt = useCallback(async (draft: TicketDraft) => {
+    if (!ticketForm || !activeSession) return
+    const seg = segments.find(sg => sg.id === ticketForm.segmentId)
+    setTicketSaving(true); setTicketFormError(null)
+    try {
+      const d = await ticketRequest('POST', '', { ...draft, position: ticketForm.point, scan: activeScanTab ?? null,
+                                                 instance_id: seg ? seg.id : null, label: seg ? seg.label : null })
+      setTickets(prev => [...prev, d.ticket]); setTicketCounts(d.counts); setSelectedTicket(d.ticket.id)
+      setTicketForm(null)
+      report(t('tickets.created', { n: d.ticket.number }), 'ok')
+    } catch (e: any) { setTicketFormError(String(e?.message ?? e)) }
+    finally { setTicketSaving(false) }
+  }, [ticketForm, activeSession, activeScanTab, segments, ticketRequest, report, t])
+
+  // the pins on the model: the tickets of the scan on screen that are not hidden; a pin says the rest when the
+  // cursor rests on it ("si me poso sobre el numero de tiket me muestra en un tooltip la observacion, el estado etc")
   const ticketPins = useMemo(() => tickets
-    .filter(x => !x.scan || !activeScanTab || x.scan === activeScanTab)
-    .map(x => ({ id: x.id, position: x.position, number: x.number, tone: ticketTone(x), title: x.title, selected: x.id === selectedTicket })),
-  [tickets, activeScanTab, selectedTicket])
+    .filter(x => x.status !== 'deleted' && (!x.scan || !activeScanTab || x.scan === activeScanTab) && !hiddenTickets.has(x.id))
+    .map(x => ({ id: x.id, position: x.position, number: x.number, tone: ticketTone(x), title: x.title, selected: x.id === selectedTicket,
+      tooltip: [`#${x.number} · ${t(`tickets.kind_${x.kind}`)} · ${t(`tickets.status_${x.status}`)}`, x.title, x.description,
+                x.object ? objectName(x.object) : '',
+                ...ticketHistory(x).map(h => t(`tickets.history_${h.action}`, { name: h.by, date: fmt.date(h.at) }))].filter(Boolean).join('\n') })),
+  [tickets, activeScanTab, selectedTicket, hiddenTickets, t, fmt])
 
   // ── COMMON POINTS (USER 2026-11-17: "deberían marcarse dos puntos y decir estos son los mismos en ambas …
   // para que se puedan posar uno sobre otro y comparar") ──
@@ -2069,12 +2058,16 @@ function App() {
   // A browser download: the browser writes the ZIP to the disk as it arrives — a 100 GB session never
   // sits in the page's memory. A link cannot carry the login, so the server gives a link for it; the
   // ZIP's size is known from the start and the browser can RESUME it on that link if it is cut.
-  const downloadSessionZip = useCallback(async (id: string) => {
+  // `scans`: only these scans of it (USER 2026-11-19: "seleccionar cual de los escaneos quiere agregar o excluir");
+  // none given = the whole session.
+  const downloadSessionZip = useCallback(async (id: string, scans?: string[]) => {
     try {
-      const headers: HeadersInit = {}
+      const headers: Record<string, string> = {}
       if (token) headers['Authorization'] = `Bearer ${token}`
+      if (scans) headers['Content-Type'] = 'application/json'
       report(t('sessions.zipPreparing', { name: id }))            // (the server lists the session first: seconds on a large one)
-      const res = await fetch(`/api/session_archive/${encodeURIComponent(id)}/ticket`, { method: 'POST', headers })
+      const res = await fetch(`/api/session_archive/${encodeURIComponent(id)}/ticket`,
+                              { method: 'POST', headers, body: scans ? JSON.stringify({ scans }) : undefined })
       const d = await res.json().catch(() => ({}))
       if (!res.ok) {
         const why = typeof d.detail === 'string' ? d.detail : t('sessions.zipFailed')
@@ -2430,7 +2423,7 @@ function App() {
   }, [])
   useEffect(() => {
     type AppCommandId = Exclude<UiCommandId, PanelCommandId | ViewportCommandId | FlythroughCommandId | CalibrationCommandId | BimCommandId
-      | CertifyCommandId | EvaluationCommandId | ReportCommandId | TeamCommandId | CallCommandId | AdminCommandId | ReferenceCommandId
+      | EvaluationCommandId | ReportCommandId | TeamCommandId | CallCommandId | AdminCommandId | ReferenceCommandId
       | ManagerCommandId | FuseCommandId | ExportCommandId>
     const done: Outcome = { ok: true }
     const noSession: Outcome = { ok: false, reason: 'no_session' }
@@ -2589,7 +2582,7 @@ function App() {
       'layout.hide_side_panel': () => { cmd.current.layout.setLeftTab(null); return done },
       'layout.show_inspector': ({ tab }) => { cmd.current.layout.openInspector(tab); return done },
       'layout.hide_inspector': () => { cmd.current.layout.setInspectorOpen(false); return done },
-      'layout.show_dock': ({ tab }) => { cmd.current.layout.openDock(tab); return done },
+      'layout.show_dock': ({ tab }) => { if (tab === 'report') setActivePanel('analysis'); else cmd.current.layout.openDock(tab); return done },   // (the report lives in the BIM panel)
       'layout.hide_dock': () => { cmd.current.layout.setDockOpen(false); return done },
       'sessions.open': async ({ session }) => {
         if (!(await ensureConnected())) return { ok: false, reason: 'server_down' }
@@ -2673,7 +2666,7 @@ function App() {
         return { ok: true, state: on }
       },
       'meshes.open_genrecon': () => { if (!open()) return noSession; setGenreconOpen(true); return done },
-      'export.open': () => { if (!open()) return noSession; setExportOpen(true); return done },
+      'export.open': () => { const sid = open(); if (!sid) return noSession; openDownload(sid, 'export'); return done },
       // ── common points: the same point marked on two scans, and what they give between them ──
       'scans.common_points_open': () => {
         if (!open()) return noSession
@@ -2697,7 +2690,7 @@ function App() {
                                     : tt('commonPoints.noFit') }
       },
       // ── tickets: a point of the model marked as a review item or a non-conformity ──
-      'tickets.open': () => { if (!open()) return noSession; setTicketsOpen(true); return done },
+      'tickets.open': () => { if (!open()) return noSession; cmd.current.layout.setLeftTab('tickets'); return done },
       // (the kind and the title are taken; the POINT is the user's next click on the model)
       'tickets.create': ({ kind, title }) => {
         if (!open()) return noSession
@@ -2709,7 +2702,7 @@ function App() {
       },
       'tickets.list': () => {
         if (!open()) return noSession
-        setTicketsOpen(true)
+        cmd.current.layout.setLeftTab('tickets')
         const c = cmd.current.ticketCounts ?? { open: 0, resolved: 0, review: 0, non_conformity: 0 }
         return { ok: true, detail: tt('tickets.countsSpoken', { open: c.open, issues: c.non_conformity, reviews: c.review, resolved: c.resolved }) }
       },
@@ -2717,7 +2710,7 @@ function App() {
         if (!open()) return noSession
         const tk = ticketBy(number)
         if ('ok' in tk) return tk
-        setTicketsOpen(true); cmd.current.focusTicket(tk)
+        cmd.current.layout.setLeftTab('tickets'); cmd.current.focusTicket(tk)
         return { ok: true, detail: `${tk.number}, ${tk.title}` }
       },
       'tickets.resolve': async ({ number }) => {
@@ -2816,11 +2809,6 @@ function App() {
         cmd.current.activateScan(sid, next)
         return { ok: true, detail: `${next.date} ${next.label}` }
       },
-      'display.set_precision_layer': ({ layer, on }) => {
-        if (!open()) return noSession
-        if (layer === 'flyers') setFlyersOn(on); else if (layer === 'mono_detail') setMonoDetailOn(on); else setUnresolvedOn(on)
-        return { ok: true, state: on }
-      },
       'display.set_background': ({ kind, color }) => {
         if (!open()) return noSession
         setSceneLook(prev => ({ ...prev, background: { kind, color: color && HEX_COLOUR.test(color) ? color : prev.background.color } }))
@@ -2842,12 +2830,6 @@ function App() {
         const v = clamp(threshold > 1 ? threshold / 100 : threshold, 0, 1); setConfidenceThreshold(v)   // "30" is 30 %
         return { ok: true, detail: `${Math.round(v * 100)} %` }
       },
-      'display.set_votes_threshold': ({ views }) => {
-        if (!open()) return noSession
-        const v = Math.round(clamp(views, 0, 8)); setMvThreshold(v)
-        return { ok: true, detail: String(v) }
-      },
-      'display.hide_below_votes': ({ on }) => { if (!open()) return noSession; setMvHide(on); return { ok: true, state: on } },
       'brush.set_shape': ({ shape }) => { if (!open()) return noSession; setEraseShape(shape); return done },
       'brush.set_size': ({ radius_m }) => {
         if (!open()) return noSession
@@ -3181,17 +3163,16 @@ function App() {
     const withSession = (openIt: () => void) => () => { if (!open()) return false; openIt() }
     const unOpeners = registerOpeners({
       bim: withSession(() => cmd.current.layout.setLeftTab('bim')),
-      certify: withSession(() => { setShowCertifyKit(true); cmd.current.layout.openInspector('acta') }),
       evaluation: () => cmd.current.layout.openDock('evaluation'),
       team: () => cmd.current.layout.setLeftTab('team'),
-      export: withSession(() => setExportOpen(true)),
-      tickets: withSession(() => setTicketsOpen(true)),
+      export: withSession(() => { const sid = cmd.current.activeSession; if (sid) openDownload(sid, 'export') }),
+      tickets: withSession(() => cmd.current.layout.setLeftTab('tickets')),
       // (the Fuse window of the open session; the Segmentation manager is opened by its own
       // command, on a confirmation: it loads SAM3 on the card)
       scans: withSession(() => cmd.current.openFuse(open()!)),
       references: withSession(() => setReferenceDialog(prev => prev ?? 'distance')),
       admin: () => { if (!cmd.current.isAdmin) return false; setAdminOpen(true) },
-      reports: () => { if (!comparable().ok) return false; cmd.current.layout.openDock('report') },
+      reports: () => { if (!comparable().ok) return false; setActivePanel('analysis') },
       calibration: withSession(() => setCalibrationOpen(true)),
     })
     const unCommands = registerCommands(executors)
@@ -3203,12 +3184,6 @@ function App() {
   // ── Menus (File / View / Tools / Help) — the same actions as before ──
   const menus: HeaderMenu[] = [
     { id: 'file', label: t('menu.file'), entries: [
-      connected
-        ? { id: 'disconnect', label: t('menu.disconnect'), icon: <ArrowUpFromLine aria-hidden />, onSelect: () => disconnect(false) }
-        : { id: 'connect', label: t('menu.connect'), icon: <Plug aria-hidden />, onSelect: connectToServer },
-      { type: 'separator', id: 's1' },
-      { id: 'export', label: t('export.title'), icon: <PackageOpen aria-hidden />, disabled: !activeSession, onSelect: () => setExportOpen(true) },
-      { type: 'separator', id: 's2' },
       { id: 'settings', label: t('menu.settings'), icon: <Settings aria-hidden />, shortcut: 'Mod+,', onSelect: () => setSettingsOpen(true) },
     ] },
     { id: 'view', label: t('menu.view'), entries: [
@@ -3219,9 +3194,6 @@ function App() {
       { id: 'fullscreen', label: t('toolbar.fullscreen'), icon: <Maximize aria-hidden />, shortcut: 'F11', onSelect: toggleFullscreen },
       { id: 'shadows', label: t('menu.shadows'), icon: <Sun aria-hidden />, checked: shadowsOn, onSelect: () => setShadowsOn(v => !v) },
       { id: 'cubes', label: t('menu.cubes'), icon: <Package aria-hidden />, checked: cubesOn, onSelect: () => setCubesOn(v => !v) },
-      { id: 'flyers', label: t('menu.flyers'), icon: <Circle aria-hidden />, checked: flyersOn, disabled: !hasSession, onSelect: () => setFlyersOn(v => !v) },
-      { id: 'monoDetail', label: t('menu.monoDetail'), icon: <Circle aria-hidden />, checked: monoDetailOn, disabled: !hasSession, onSelect: () => setMonoDetailOn(v => !v) },
-      { id: 'mixedUnresolved', label: t('menu.mixedUnresolved'), icon: <Circle aria-hidden />, checked: unresolvedOn, disabled: !hasSession, onSelect: () => setUnresolvedOn(v => !v) },
       { type: 'separator', id: 's2' },
       { id: 'console', label: t('dock.console'), icon: <Monitor aria-hidden />, shortcut: 'Mod+`', checked: consoleOpen, onSelect: () => setConsoleOpen(!consoleOpen) },
       { id: 'jobs', label: t('dock.jobs'), icon: <ListTodo aria-hidden />, checked: layout.state.dockOpen && layout.state.dockTab === 'jobs', onSelect: () => layout.openDock('jobs') },
@@ -3240,7 +3212,6 @@ function App() {
       { id: 'clearm', label: t('toolbar.clearMeasurements'), icon: <Trash2 aria-hidden />, onSelect: () => viewportRef.current?.clearMeasurements() },
       { id: 'refdistance', label: t('toolbar.referenceDistance'), icon: <Pin aria-hidden />, disabled: !activeSession, onSelect: () => setReferenceDialog('distance') },
       { id: 'refplane', label: t('toolbar.referencePlane'), icon: <Pentagon aria-hidden />, disabled: !activeSession, onSelect: () => setReferenceDialog('plane') },
-      { id: 'tickets', label: t('tickets.title'), icon: <Flag aria-hidden />, disabled: !activeSession, checked: ticketsOpen, onSelect: () => setTicketsOpen(v => !v) },
       { id: 'commonpoints', label: t('commonPoints.menu'), icon: <Waypoints aria-hidden />, disabled: !activeSession || otherScans.length === 0, checked: commonOpen, onSelect: () => setCommonOpen(v => !v) },
       { type: 'separator', id: 's2' },
       { id: 'brush', label: t('toolbar.brush'), icon: <Brush aria-hidden />, checked: activeTool === 'erase', onSelect: () => setActiveTool(activeTool === 'erase' ? 'navigate' : 'erase') },
@@ -3272,6 +3243,10 @@ function App() {
     ...(user?.role === 'admin' ? [{ id: 'admin', label: t('menu.userManagement'), icon: <Users aria-hidden />, onSelect: () => setAdminOpen(true) } as MenuEntry] : []),
     { id: 'settings', label: t('menu.settings'), icon: <Settings aria-hidden />, onSelect: () => setSettingsOpen(true) },
     { type: 'separator', id: 's1' },
+    // (USER 2026-11-19: "en File esta la opcion disconnects, debe estar en las opciones del usuario … arriba de sign out")
+    connected
+      ? { id: 'disconnect', label: t('menu.disconnect'), icon: <ArrowUpFromLine aria-hidden />, onSelect: () => disconnect(false) }
+      : { id: 'connect', label: t('menu.connect'), icon: <Plug aria-hidden />, onSelect: connectToServer },
     { id: 'logout', label: t('menu.logout'), icon: <LogOut aria-hidden />, onSelect: () => disconnect(true) },
   ]
 
@@ -3288,8 +3263,7 @@ function App() {
     { id: 'nav.bim', label: t('bim.title'), group: t('palette.navigate'), icon: <Building2 aria-hidden />, run: () => layout.setLeftTab('bim') },
     { id: 'nav.team', label: t('team.title'), group: t('palette.navigate'), icon: <Users aria-hidden />, run: () => layout.setLeftTab('team') },
     { id: 'nav.assistant', label: t('assistant.title'), group: t('palette.navigate'), icon: <Sparkles aria-hidden />, run: () => layout.openInspector('assistant') },
-    { id: 'nav.acta', label: t('inspector.acta'), group: t('palette.navigate'), icon: <FileCheck2 aria-hidden />, run: () => layout.openInspector('acta') },
-    { id: 'nav.report', label: t('dock.report'), group: t('palette.navigate'), icon: <BarChart3 aria-hidden />, run: () => layout.openDock('report') },
+    { id: 'nav.report', label: t('dock.report'), group: t('palette.navigate'), icon: <BarChart3 aria-hidden />, run: () => setActivePanel('analysis') },
     { id: 'nav.evaluation', label: t('dock.evaluation'), group: t('palette.navigate'), icon: <FlaskConical aria-hidden />, run: () => layout.openDock('evaluation') },
     { id: 'nav.timeline', label: t('dock.timeline'), group: t('palette.navigate'), icon: <Clock aria-hidden />, run: () => layout.openDock('timeline') },
   ]
@@ -3297,8 +3271,13 @@ function App() {
   const activityItems: ActivityItem[] = [
     { id: 'sessions', icon: <FolderOpen aria-hidden />, label: t('sessions.title'), shortcut: 'Mod+B', badge: sessions.length || undefined, active: layout.state.leftTab === 'sessions', onClick: () => layout.toggleLeftTab('sessions') },
     { id: 'instances', icon: <Tag aria-hidden />, label: t('instances.title'), badge: segments.length || undefined, active: layout.state.leftTab === 'instances', disabled: !hasSession, onClick: () => layout.toggleLeftTab('instances') },
+    { id: 'tickets', icon: <Flag aria-hidden />, label: t('tickets.title'), badge: ticketCounts?.open || undefined, active: layout.state.leftTab === 'tickets', disabled: !hasSession, onClick: () => layout.toggleLeftTab('tickets') },
     { id: 'scans', icon: <Layers aria-hidden />, label: t('scans.title'), badge: projectScans.length || undefined, active: layout.state.leftTab === 'scans', disabled: !hasSession, onClick: () => layout.toggleLeftTab('scans') },
     { id: 'bim', icon: <Building2 aria-hidden />, label: t('bim.title'), badge: bimModels.length || undefined, active: layout.state.leftTab === 'bim', disabled: !hasSession, onClick: () => layout.toggleLeftTab('bim') },
+    // (USER 2026-11-19: "al panel izquiero le vamos a agregar dos campos mas, uno es de docuemntacion … es un arbol
+    //  completo, pero por el momento vacio, y otro campo mas que es el gantt")
+    { id: 'docs', icon: <FileText aria-hidden />, label: t('docs.title'), active: layout.state.leftTab === 'docs', disabled: !hasSession, onClick: () => layout.toggleLeftTab('docs') },
+    { id: 'gantt', icon: <ChartNoAxesGantt aria-hidden />, label: t('gantt.title'), active: layout.state.leftTab === 'gantt', disabled: !hasSession, onClick: () => layout.toggleLeftTab('gantt') },
   ]
   const activityBottom: ActivityItem[] = [
     { id: 'team', icon: <Users aria-hidden />, label: t('team.title'), active: layout.state.leftTab === 'team', onClick: () => layout.toggleLeftTab('team') },
@@ -3331,6 +3310,30 @@ function App() {
   const selectedSegment = segments.find(s => s.id === selectedSegmentId) ?? null
   // the selected segment lights its OBB and shows H / W / D in the viewport (USER 2026-10-04)
   useEffect(() => { viewportRef.current?.setSelectedSegment(selectedSegment?.key ?? null) }, [selectedSegment?.key])
+  // THE CALIBRATION'S STATE, BY THE SCAN'S NAME (USER 2026-11-13: "debe indicarse si la nube esta calibrada o no";
+  // 2026-11-19, of the chip that said it in the viewer: "debe estar en realidad como un simbolo de exclamacion ese
+  // triangulito amarillo sobre el nombre de la sesion … no hace falta cargar mas la pantalla"): a yellow triangle on
+  // the scan's tab when it is not calibrated, a check when it is; what it says, and the calibration, on a click.
+  const openCalibrationWindow = () => { setCalibrationDraft(null); setCalibrationOpen(true) }
+  const calibrationMark = calibrationSummary ? (() => {
+    const cs = calibrationSummary
+    const title = [
+      t(`calibration.state_${cs.state}`),
+      cs.mode_used === 'axes' && cs.axes?.factors
+        ? `X × ${fmt.number(cs.axes.factors.x, 4)} Y × ${fmt.number(cs.axes.factors.y, 4)} Z × ${fmt.number(cs.axes.factors.z, 4)}`
+        : cs.scale_factor != null ? `× ${fmt.number(cs.scale_factor, 4)}` : '',
+      cs.state === 'verified' && cs.verification?.worst_difference_m != null
+        ? `${cs.verification.worst_difference_m >= 0 ? '+' : ''}${fmt.mm(cs.verification.worst_difference_m * 1000, 1)}` : '',
+      t('calibration.open'),
+    ].filter(Boolean).join(' · ')
+    return (
+      <span role="button" tabIndex={0} className={`stac-scantabs__cal stac-scantabs__cal--${cs.state}`} title={title} aria-label={title}
+        onClick={e => { e.stopPropagation(); openCalibrationWindow() }}
+        onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); openCalibrationWindow() } }}>
+        {cs.state === 'uncalibrated' ? <TriangleAlert aria-hidden /> : <BadgeCheck aria-hidden />}
+      </span>
+    )
+  })() : null
   const hasSabanaResult = !!sessions.find(s => s.id === activeSession)?.hasSabana
     && (!sabanaScan || !activeScanTab || sabanaScan === activeScanTab)
 
@@ -3385,7 +3388,6 @@ function App() {
     onOpenSegmentation: () => { if (activeSession) openSegmentationManager(activeSession) },
     onOpenAutosegment: openAutosegment,
     onOpenGenrecon: () => { if (activeSession) setGenreconOpen(true) },
-    onOpenExport: () => { if (activeSession) setExportOpen(true) },
   })
 
   if (authLoading) {
@@ -3436,7 +3438,7 @@ function App() {
                 onFlythrough={id => { if (activeSession !== id) handleSessionLoad(id); setFlythroughOpen(id) }}
                 onReconstruct={handleReconstruct} onPickVideo={handlePickVideo} onSegment={handleSegment} onOpenManager={openSegmentationManager}
                 onUnload={handleUnload} onRename={renameSession} onDelete={deleteSession} onCreate={createSession}
-                onDownloadZip={downloadSessionZip} onPickZip={pickSessionZip} importing={sessionImport} onCancelImport={cancelSessionImport}
+                onDownloadZip={id => openDownload(id, 'session')} onPickZip={pickSessionZip} importing={sessionImport} onCancelImport={cancelSessionImport}
                 onFuse={openFuse} onOpenScan={openScanFromTree} onSetReference={setReference} />
             )}
             {layout.state.leftTab === 'instances' && activeSession && (
@@ -3448,28 +3450,52 @@ function App() {
               <ScansPanel sessionId={activeSession} scans={projectScans} activeScanKey={activeScanTab}
                 onOpenScan={sc => activeSession && openScanFromTree(activeSession, sc)} onSetReference={sc => activeSession && setReference(activeSession, sc)} />
             )}
+            {layout.state.leftTab === 'docs' && <DocumentationPanel />}
+            {layout.state.leftTab === 'gantt' && <GanttPanel />}
+            {layout.state.leftTab === 'tickets' && (
+              <TicketsPanel sessionId={activeSession} scanKey={activeScanTab} tickets={tickets} counts={ticketCounts}
+                userName={user?.username ?? null} canManage={canManage} selectedId={selectedTicket} hidden={hiddenTickets} loadError={ticketsError}
+                onSelect={tk => { if (!tk.scan || !activeScanTab || tk.scan === activeScanTab) focusTicket(tk); else setSelectedTicket(tk.id) }}
+                onSetHidden={(ids, hide) => setHiddenTickets(prev => { const next = new Set(prev); ids.forEach(id => { if (hide) next.add(id); else next.delete(id) }); return next })}
+                onSetStatus={(tk, st) => { void setTicketStatus(tk, st) }} onDelete={tk => { void deleteTicket(tk) }} />
+            )}
             {layout.state.leftTab === 'bim' && (
-              <BIMNavigator models={bimModels} userRole={activeSession ? (user?.role || 'viewer') : 'viewer'}
-                onToggleVisibility={(names, v) => viewportRef.current?.toggleBIMVisibility(names, v)}
-                onSelectElement={names => viewportRef.current?.highlightBIMElement(names)}
-                onSetOpacity={(names, o) => viewportRef.current?.setBIMOpacity(names, o)}
-                onUploadIFC={async file => {
-                  if (!activeSession || !token) return
-                  const formData = new FormData(); formData.append('file', file)
-                  try {
-                    const res = await fetch(`/api/sessions/${activeSession}/bim/upload`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}` }, body: formData })
-                    if (res.ok) {
-                      setStatusMessage(t('bim.uploadedLoading', { name: file.name }))
-                      const { loadIFC } = await import('./components/IFCLoader')
-                      const result = await loadIFC(`/api/sessions/${activeSession}/bim/${file.name}`, file.name)
-                      viewportRef.current?.addBIMGroup(result.group)
-                      setBimModels(prev => [...prev, result])
-                      report(t('bim.loaded', { name: file.name, n: result.group.children.length }), 'ok')
-                      connectToServer()
-                    } else report(t('bim.uploadFailed', { detail: (await res.json()).detail }), 'err')
-                  } catch (err: any) { report(t('bim.uploadFailed', { detail: err.message }), 'err') }
-                }}
-                onDeleteIFC={deleteIfc} />
+              <div className="stac-bimtab">
+                <div className="stac-bimtab__switch">
+                  <SegmentedControl<'model' | 'report'> ariaLabel={t('bim.title')} value={bimView} onChange={setBimView}
+                    options={[{ value: 'model', label: t('bim.viewModel') }, { value: 'report', label: t('dock.report') }]} />
+                </div>
+                {bimView === 'report' ? (
+                  activeSession && bimModels.length > 0 && segments.length > 0
+                    ? <DeviationOverlay compact sessionId={activeSession} scanKey={activeScanTab} tolerance={deviationTolerance} onTolerance={setDeviationTolerance}
+                        onRun={tol => { void runComparison(undefined, tol) }} running={sabanaLoading} report={deviationReport}
+                        selectedInstanceId={selectedSegmentId}
+                        onSelectInstance={id => { if (segments.some(sg => sg.id === id)) selectSegment(id, true) }} />
+                    : <EmptyState compact icon={<BarChart3 aria-hidden />} title={t('report.emptyTitle')} description={t('report.emptyDesc')} />
+                ) : (
+                  <BIMNavigator models={bimModels} userRole={activeSession ? (user?.role || 'viewer') : 'viewer'}
+                    onToggleVisibility={(names, v) => viewportRef.current?.toggleBIMVisibility(names, v)}
+                    onSelectElement={names => viewportRef.current?.highlightBIMElement(names)}
+                    onSetOpacity={(names, o) => viewportRef.current?.setBIMOpacity(names, o)}
+                    onUploadIFC={async file => {
+                      if (!activeSession || !token) return
+                      const formData = new FormData(); formData.append('file', file)
+                      try {
+                        const res = await fetch(`/api/sessions/${activeSession}/bim/upload`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}` }, body: formData })
+                        if (res.ok) {
+                          setStatusMessage(t('bim.uploadedLoading', { name: file.name }))
+                          const { loadIFC } = await import('./components/IFCLoader')
+                          const result = await loadIFC(`/api/sessions/${activeSession}/bim/${file.name}`, file.name)
+                          viewportRef.current?.addBIMGroup(result.group)
+                          setBimModels(prev => [...prev, result])
+                          report(t('bim.loaded', { name: file.name, n: result.group.children.length }), 'ok')
+                          connectToServer()
+                        } else report(t('bim.uploadFailed', { detail: (await res.json()).detail }), 'err')
+                      } catch (err: any) { report(t('bim.uploadFailed', { detail: err.message }), 'err') }
+                    }}
+                    onDeleteIFC={deleteIfc} />
+                )}
+              </div>
             )}
             {layout.state.leftTab === 'team' && <TeamPanel onCallUser={(userId, username) => setCallTarget({ userId, username })} />}
           </SidePanel>
@@ -3483,14 +3509,18 @@ function App() {
               const sc = projectScans.find((s: any) => s.key === tab.key)
               return {
                 id: tab.key, closable: true, title: `${tab.date} ${tab.label}${sc?.is_reference ? ` (${t('header.reference')})` : ''}`,
-                icon: sc?.is_reference ? <Star className="stac-scantabs__ref" aria-hidden /> : tab.kind === 'fused' ? <Layers aria-hidden /> : undefined,
+                icon: <>{sc?.is_reference ? <Star className="stac-scantabs__ref" aria-hidden /> : tab.kind === 'fused' ? <Layers aria-hidden /> : null}
+                  {tab.key === activeScanTab ? calibrationMark : null}</>,
                 label: tab.kind === 'fused' ? tab.label : `${tab.date} ${tab.label}`,
               }
             })}
             value={activeScanTab} onChange={key => { const tab = scanTabs.find(x => x.key === key); if (tab && tab.key !== activeScanTab) activateScan(activeSession, tab) }} onClose={closeScanTab} />
         )}
 
-        <div className={`stac-main__viewport ${loadingOverlay ? 'stac-main__viewport--hidden' : ''} ${flythroughOpen ? 'stac-main__viewport--flythrough' : ''}`.trim()}>
+        {/* (no browser menu anywhere over the viewer — its own menus are the only ones: a right click on a ticket's
+            pin, a button drawn over the canvas, opened the browser's. USER 2026-11-19: "no debe aparecer nada") */}
+        <div className={`stac-main__viewport ${loadingOverlay ? 'stac-main__viewport--hidden' : ''} ${flythroughOpen ? 'stac-main__viewport--flythrough' : ''}`.trim()}
+          onContextMenu={e => e.preventDefault()}>
           <Viewport
             ref={viewportRef}
             openScanKey={openScanKey}
@@ -3533,7 +3563,6 @@ function App() {
               try { await fetch('/api/scene/volumes/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, volume_id: volumeId }) }) } catch { /* ignore */ }
             }}
             onHasConfidence={setHasConfidence}
-            onHasWitness={setHasWitness}
             onBimLoaded={models => setBimModels(models)}   /* (the grid and the axes stay as the user has them: they were turned off at every BIM load — USER 2026-11-19 "me desaparece la grilla, o sea no respeta lo que selecciono el usuario") */
             onSabanaLoaded={nPts => { setSabanaLoading(false); setSessionLoading(null); setStatusMessage(t('deviation.loadedPoints', { n: fmt.integer(nPts ?? 0) })) }}
             showCameraPoses={showCameraPoses && !sabanaVisible}
@@ -3553,6 +3582,12 @@ function App() {
               setCalibrationOpen(true); setCalibrating(null); setActiveTool('navigate')
             }}
             tickets={commonPins.length ? [...ticketPins, ...commonPins] : ticketPins}
+            onPointContext={(p, cls, at) => {
+              // the object's menu: only on a point of THE SELECTED object
+              if (!selectedSegment || cls == null || selectedSegment.classId !== cls) return false
+              setObjectMenu({ x: at.x, y: at.y, point: [p.x, p.y, p.z], segmentId: selectedSegment.id })
+              return true
+            }}
             onPointPicked={(p, cls) => {
               // a click the user was asked for: a ticket being marked, or a common point
               if (ticketDraftRef.current) { void placeTicket(p, cls); return true }
@@ -3605,10 +3640,6 @@ function App() {
               }}
               display={{ pointSize, onPointSize: setPointSize, light: lightIntensity, onLight: setLightIntensity, pointOpacity, onPointOpacity: setPointOpacity, budgetM: pointBudget / 1_000_000, onBudgetM: v => setPointBudget(v * 1_000_000), hasConfidence, confidence: confidenceThreshold, onConfidence: setConfidenceThreshold }}
               view={{ hasCameraPoses, showCameraPoses, onToggleCameraPoses: () => setShowCameraPoses(v => !v), showGrid, onToggleGrid: () => setShowGrid(v => !v), showAxes, onToggleAxes: () => setShowAxes(v => !v), onFullscreen: toggleFullscreen }}
-              color={{
-                mode: sabanaVisible ? 'deviation' : colorMode, hasWitness, hasDeviation: hasSabanaResult, mvThreshold, onMvThreshold: setMvThreshold,
-                onMode: m => { if (m === 'deviation') { if (!sabanaVisible) handleToggleSabana() } else { if (sabanaVisible) handleToggleSabana(); setColorMode(m) } },
-              }}
               compare={{
                 available: bimModels.length > 0 && segments.length > 0, loading: sabanaLoading, hasResult: hasSabanaResult, showing: sabanaVisible,
                 onRun: handleGenerateComparison, onToggle: handleToggleSabana,
@@ -3637,16 +3668,12 @@ function App() {
               onOrient={dir => viewportRef.current?.orientView(dir)}
               onOrbit={(a, e) => viewportRef.current?.orbitBy(a, e)}
               onHome={() => viewportRef.current?.resetCamera()}
-              colorMode={sabanaVisible ? 'deviation' : colorMode} mvThreshold={mvThreshold}
-              statusFractions={certifyState?.report_metrics?.witnesses?.status_fraction ?? null}
+              colorMode={sabanaVisible ? 'deviation' : 'rgb'}
               deviationRange={sabanaVisible && sabanaMetrics ? { maxMm: (sabanaMetrics.tolerance_mm || 50) * 2, toleranceMm: sabanaMetrics.tolerance_mm || 50 } : null}
-              showEdges={showCertifyKit} readouts={readouts}
+              showEdges={false} readouts={readouts}
               onCalibrate={id => { const d = viewportRef.current?.getDistance(id); if (d) { setCalibrationDraft({ kind: 'distance', readoutId: id, ...d }); setCalibrationOpen(true) } }}
               onOpenCalibration={() => { setCalibrationDraft(null); setCalibrationOpen(true) }}
-              onOpenTicket={id => { if (id.startsWith('cp:')) setCommonOpen(true); else { setSelectedTicket(id); setTicketsOpen(true) } }}
-              calibration={calibrationSummary ? { state: calibrationSummary.state, factor: calibrationSummary.scale_factor,
-                                                  axes: calibrationSummary.mode_used === 'axes' ? calibrationSummary.axes.factors : null,
-                                                  worstDifferenceM: calibrationSummary.verification?.worst_difference_m ?? null } : null}
+              onOpenTicket={id => { if (id.startsWith('cp:')) setCommonOpen(true); else setSelectedTicket(id) }}
               banner={pipelineActiveHere && (viewerHasCloud || sessionHasPublishedCloud) && currentStage ? (
                 <Banner glass compact tone="brand" title={t('pipeline.runningBanner', { stage: currentStage.label })} action={<Button size="sm" variant="ghost" onClick={handlePipelineCancel}>{t('common.cancel')}</Button>}>
                   {currentStage.message} {fmt.percent(currentStage.pct / 100)}
@@ -3670,7 +3697,6 @@ function App() {
                 { id: 'console', label: t('dock.console'), icon: <Terminal aria-hidden /> },
                 { id: 'jobs', label: t('dock.jobs'), icon: <ListTodo aria-hidden />, badge: pipelineRunning ? 1 : undefined },
                 { id: 'timeline', label: t('dock.timeline'), icon: <Clock aria-hidden /> },
-                { id: 'report', label: t('dock.report'), icon: <BarChart3 aria-hidden /> },
                 { id: 'evaluation', label: t('dock.evaluation'), icon: <FlaskConical aria-hidden /> },
               ]}
               panels={{
@@ -3679,13 +3705,6 @@ function App() {
                   resume={resumeBusy ? resumeProgress : null} extracting={extractingSessions} tasks={activeTasks} />,
                 timeline: <ScansPanel variant="timeline" sessionId={activeSession} scans={projectScans} activeScanKey={activeScanTab}
                   onOpenScan={sc => activeSession && openScanFromTree(activeSession, sc)} onSetReference={sc => activeSession && setReference(activeSession, sc)} />,
-                report: activeSession && bimModels.length > 0 && segments.length > 0
-                  ? <DeviationOverlay sessionId={activeSession} scanKey={activeScanTab} tolerance={deviationTolerance} onTolerance={setDeviationTolerance}
-                      onRun={tol => { void runComparison(undefined, tol) }} running={sabanaLoading} report={deviationReport}
-                      selectedInstanceId={selectedSegmentId}
-                      onSelectInstance={id => { if (segments.some(sg => sg.id === id)) selectSegment(id, true) }}
-                      onClose={() => layout.setDockOpen(false)} />
-                  : <EmptyState compact icon={<BarChart3 aria-hidden />} title={t('report.emptyTitle')} description={t('report.emptyDesc')} />,
                 evaluation: <EvaluationPanel />,
               }} />
           </div>
@@ -3697,22 +3716,11 @@ function App() {
           <Inspector
             tabs={[
               { id: 'properties', label: t('inspector.properties') },
-              { id: 'acta', label: t('inspector.acta'), badge: storedEpochs > 0 ? storedEpochs : undefined },
               { id: 'assistant', label: t('assistant.title') },
             ]}
             panels={{
               properties: <PropertiesPanel sessionId={activeSession} scanLabel={activeScanRow ? `${activeScanRow.date} ${activeScanRow.label}` : null} isReference={!!activeScanRow?.is_reference}
                 pointCount={pointCount} fps={fps} epoch={epoch} storedEpochs={storedEpochs} segments={segments} selected={selectedSegment} unsegmentedCount={unsegmentedCount} bimCount={bimModels.length} hasSabana={hasSabanaResult} />,
-              acta: (
-                <div className="stac-inspector__stack">
-                  {activeSession ? (
-                    <CertifyKitPanel session={activeSession} token={token} viewport={viewportRef.current} onStatus={setStatusMessage} refreshKey={certifyRefresh}
-                      colorMode={colorMode} onColorMode={setColorMode} mvThreshold={mvThreshold} onMvThreshold={setMvThreshold}
-                      mvHide={mvHide} onMvHide={setMvHide} hasWitness={hasWitness} onStateLoaded={setCertifyState} />
-                  ) : <EmptyState icon={<FileCheck2 aria-hidden />} title={t('properties.noSession')} description={t('welcome.pickSession')} />}
-                  {sabanaFullMeta && activeSession && <BIMAnalysisPanel meta={sabanaFullMeta} sessionId={activeSession} />}
-                </div>
-              ),
               assistant: <AssistantPanel sessionId={activeSession} scanKey={activeScanTab} viewport={viewportRef} userKey={user?.username ?? null} getUiState={getUiState} onVlmStatus={setVlmStatus} onFocusObjects={focusSegments} onVolumesChanged={refreshVolumes} onViewerAction={runViewerAction} />,
             }} />
         )}
@@ -3781,14 +3789,26 @@ function App() {
         onToggleScan={(key, on) => setAutosegScans(prev => (on ? [...prev.filter(k => k !== key), key] : prev.filter(k => k !== key)))}
         onClose={() => setAutosegOpen(false)} onRun={async (vlm, sam3, stages) => { await runAutosegment(vlm, sam3, stages) }} />
 
-      <ExportDialog open={exportOpen} sessionId={activeSession} scanKey={activeScanTab} defaultConfidence={confidenceThreshold}
-        onClose={() => setExportOpen(false)} />
+      {downloadDialog && (
+        <SessionDownloadDialog key={downloadDialog.n} open sessionId={downloadDialog.session} initialSection={downloadDialog.section}
+          canManage={canManage} token={token}
+          activeScanKey={downloadDialog.session === activeSession ? activeScanTab : null}
+          defaultConfidence={downloadDialog.session === activeSession ? confidenceThreshold : 0}
+          onDownloadSession={downloadSessionZip} onClose={() => setDownloadDialog(null)} />
+      )}
 
-      <TicketsDialog open={ticketsOpen && !!activeSession} sessionId={activeSession} scanKey={activeScanTab} tickets={tickets} counts={ticketCounts}
-        userName={user?.username ?? null} canManage={canManage} placing={ticketDraft} selectedId={selectedTicket} loadError={ticketsError}
-        onStartPlacing={startTicket} onCancelPlacing={() => { setTicketDraft(null); setStatusMessage('') }}
-        onSelect={setSelectedTicket} onFocus={focusTicket} onSetStatus={(tk, st) => { void setTicketStatus(tk, st) }}
-        onDelete={tk => { void deleteTicket(tk) }} onClose={() => { setTicketsOpen(false); setTicketDraft(null) }} />
+      {/* THE SELECTED OBJECT'S MENU (a right click on one of its points) and the modal a ticket is written in */}
+      <Menu open={!!objectMenu} onClose={() => setObjectMenu(null)} anchor={objectMenu ? { x: objectMenu.x, y: objectMenu.y } : null}
+        ariaLabel={selectedSegment ? objectName({ instance_id: selectedSegment.id, label: selectedSegment.label }) : t('tickets.one')}
+        entries={[
+          { type: 'header', id: 'object', label: selectedSegment ? objectName({ instance_id: selectedSegment.id, label: selectedSegment.label }) : t('tickets.one') },
+          { id: 'ticket', label: t('tickets.newTitle'), icon: <Flag aria-hidden />, disabled: !user,
+            onSelect: () => { if (objectMenu) { setTicketFormError(null); setTicketForm({ point: objectMenu.point, segmentId: objectMenu.segmentId }) } } },
+        ]} />
+      <TicketCreateDialog key={ticketForm ? ticketForm.point.join(',') : 'none'} open={!!ticketForm}
+        objectLabel={(() => { const sg = ticketForm ? segments.find(x => x.id === ticketForm.segmentId) : null; return sg ? objectName({ instance_id: sg.id, label: sg.label }) : null })()}
+        busy={ticketSaving} error={ticketFormError} onCreate={draft => { void createTicketAt(draft) }}
+        onClose={() => { if (!ticketSaving) { setTicketForm(null); setTicketFormError(null) } }} />
 
       <CommonPointsDialog open={commonOpen && !!activeSession} sessionId={activeSession} scanKey={activeScanTab} others={otherScans}
         other={commonOther} onOther={setCommonOther} points={commonPoints} placing={commonPlacing} fit={commonFit} fitNote={commonNote}

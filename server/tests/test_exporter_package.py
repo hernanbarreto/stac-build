@@ -111,3 +111,44 @@ def test_what_the_scan_does_not_have_is_refused(scan):
     with pytest.raises(P.ExportError, match="nothing to export"):
         P.run("s", "2026-01-01/default", ["dwg"])
     assert not (ctx.project_dir / "exports").exists() or not list((ctx.project_dir / "exports").iterdir())
+
+
+def test_the_sessions_export_is_one_zip_of_what_was_ticked(scan, tmp_path, monkeypatch):
+    """USER 2026-11-19 — the Export of the session's download window: "genera otro zip pero no a nivel
+    sesion … baja en un zip las nubes que se seleccionen, los mesh, los mesh convertidos a IFC, los
+    IFC que hay cargados". Each scan's ticked items in its own folder with its README, the project's
+    loaded IFCs as they are; a scan with nothing ticked is not in it."""
+    ctx, _rec = scan
+    ifcs = tmp_path / "project" / "ifcs"
+    ifcs.mkdir(parents=True)
+    (ifcs / "design.ifc").write_bytes(b"ISO-10303-21;\nthe design\n")
+    project = types.SimpleNamespace(project_dir=tmp_path / "project", ifcs_dir=ifcs)
+    monkeypatch.setattr(P, "context_of_project", lambda session: project)
+    monkeypatch.setattr(P, "scans_of", lambda session: ["2026-01-01/default", "2026-02-02/default", "2026-03-03/default"])
+    plan = P.plan_all("s")
+    assert list(plan["scans"]) == ["2026-01-01/default", "2026-02-02/default", "2026-03-03/default"]
+    assert plan["scans"]["2026-02-02/default"]["items"]["glb"]["available"] and plan["previous"] is None
+    assert plan["loaded_ifcs"] == [{"file": "design.ifc", "bytes": 25}]
+    seen = []
+    report = P.run_many("s", {"2026-01-01/default": ["csv", "ply"], "2026-02-02/default": ["glb", "ifc"], "2026-03-03/default": []},
+                        with_loaded_ifcs=True, lang="en", progress=lambda p, m: seen.append(p), now=0.0)
+    path = tmp_path / "project" / "exports" / "s_stac_export.zip"
+    assert report["path"] == str(path) and seen == sorted(seen) and seen[-1] == 100
+    assert list(report["scans"]) == ["2026-01-01/default", "2026-02-02/default"] and report["loaded_ifcs"] == ["design.ifc"]
+    with zipfile.ZipFile(path) as z:
+        assert sorted(z.namelist()) == sorted(f"s_export/{n}" for n in (
+            "s_2026-01-01/README.txt", "s_2026-01-01/s_2026-01-01_cloud.ply", "s_2026-01-01/s_2026-01-01_objects.csv",
+            "s_2026-02-02/README.txt", "s_2026-02-02/s_2026-02-02_mesh_genrecon_photo.glb", "s_2026-02-02/s_2026-02-02_elements.ifc",
+            "ifc/README.txt", "ifc/design.ifc"))
+        assert z.read("s_export/ifc/design.ifc") == b"ISO-10303-21;\nthe design\n"
+        assert "design.ifc — an IFC loaded in the project" in z.read("s_export/ifc/README.txt").decode()
+        assert "the GenRecon mesh cut by the segmentation, 2 elements" in z.read("s_export/s_2026-02-02/README.txt").decode()
+    assert (ifcs / "design.ifc").exists() and not any((tmp_path / "scratch").rglob("*.*"))     # the loaded IFC stays where it is
+    assert P.plan_all("s")["previous"]["file"] == "s_stac_export.zip"
+    # the loaded IFCs alone are an export; nothing ticked is not; a scan that is not the session's is said
+    assert P.run_many("s", {}, with_loaded_ifcs=True)["scans"] == {}
+    with pytest.raises(P.ExportError, match="nothing to export"):
+        P.run_many("s", {"2026-01-01/default": []})
+    with pytest.raises(P.ExportError, match="no scan"):
+        P.run_many("s", {"2026-09-09/default": ["ply"]})
+

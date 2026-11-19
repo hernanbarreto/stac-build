@@ -326,7 +326,7 @@
     "queuedNext": "en attente",
     "built": "reconstruite",
     "notBuilt": "sans reconstruction",
-    "downloadZip": "Télécharger la {@session} en ZIP",
+    "downloadZip": "Télécharger ou exporter la {@session}",
     "zipStarted": "Téléchargement de {name} lancé : {files} fichiers, {gb} Go. S'il est interrompu, le navigateur peut le reprendre là où il s'est arrêté.",
     "zipFailed": "Le téléchargement n'a pas pu être préparé.",
     "zipFailedDetail": "Impossible de télécharger {name}. {detail}",
@@ -881,7 +881,8 @@
     "deleteMessage": "Le modèle {name} sera retiré de la {@session}.",
     "deleteTitle": "Supprimer le modèle BIM",
     "deleted": "Modèle BIM {name} supprimé",
-    "deleteFailed": "Impossible de supprimer le modèle. {detail}"
+    "deleteFailed": "Impossible de supprimer le modèle. {detail}",
+    "viewModel": "Modèle"
   },
   "team": {
     "title": "Équipe",
@@ -1386,7 +1387,7 @@
     "layer_flyers": "Couche des points volants chargée (rouge bord · orange vues · bleu texture · gris autre)",
     "layer_mono_detail": "Couche PointDiT chargée (gris détail · vert avant · bleu arrière)",
     "layer_mixed_unresolved": "Pixels mixtes non résolus chargés (rouge) : exclus du nuage",
-    "layerMissing": "La couche « {{name}} » n'est pas encore dans cette session",
+    "layerMissing": "La couche « {name} » n'est pas encore dans cette session",
     "cube": "Cube {id}"
   },
   "xr": {
@@ -1441,9 +1442,9 @@
     "title": "Maillage GenRecon",
     "run": "Générer",
     "description": "Génère le maillage du nuage publié : les photos décident où il y a de la surface, les cubes couvrent tout le nuage et la texture provient des photos.",
-    "confidence": "Confiance du nuage : {{pct}} %",
+    "confidence": "Confiance du nuage : {pct} %",
     "confidenceHint": "GenRecon utilise les points que la visionneuse affiche avec ce filtre (il démarre à la valeur de la visionneuse pour cette session). Cela dépend de la façon dont la scène a été capturée : 0 % utilise tous les points.",
-    "started": "GenRecon mis en file d'attente pour {{session}} (confiance {{pct}} %)"
+    "started": "GenRecon mis en file d'attente pour {session} (confiance {pct} %)"
   },
   "sceneLook": {
     "title": "Fond et grille",
@@ -1464,31 +1465,30 @@
     "saved": "Enregistré pour cette {@session}, dans vos préférences."
   },
   "export": {
-    "title": "Exporter",
-    "button": "Exporter",
-    "hint": "Télécharger le nuage, le maillage, l'IFC et le tableau des objets de ce scan",
     "run": "Exporter",
-    "description": "Choisissez ce qu'il faut exporter de ce scan. Un ZIP est construit sur le serveur et vous le téléchargez sur votre machine ; il contient un LISEZMOI qui dit ce qu'est chaque fichier.",
+    "description": "Des fichiers que d’autres logiciels ouvrent — pas une {@session} à téléverser à nouveau. Cochez ce qu’il faut exporter de chaque scan ; un ZIP est construit sur le serveur et téléchargé sur votre machine dès qu’il est prêt, avec un LISEZMOI qui dit ce qu’est chaque fichier.",
     "item_e57": "Nuage E57 (ReCap / Revit, CloudCompare, Navisworks)",
     "item_las": "Nuage LAS 1.4 (CloudCompare, QGIS)",
     "item_ply": "Nuage PLY (MeshLab, Blender)",
     "item_glb": "Maillage texturé GLB (Blender, visionneuses web)",
-    "item_ifc": "Éléments IFC (Revit, Navisworks, Solibri)",
+    "item_ifc": "Maillage converti en IFC (Revit, Navisworks, Solibri)",
     "item_csv": "Tableau des objets CSV (Excel)",
-    "upTo": "jusqu'à {{size}}",
-    "elements": "{{n}} éléments",
-    "objects": "{{n}} objets",
-    "confidence": "Confiance du nuage : {{pct}} %",
-    "confidenceHint": "Le nuage est exporté avec les points que la vue affiche à ce filtre ; 0 % exporte les {{points}} points publiés.",
-    "asOnDisk": "La géométrie est exportée telle qu'elle est sur le disque (époque {{epoch}}).",
+    "upTo": "jusqu'à {size}",
+    "elements": "{n} éléments",
+    "objects": "{n} objets",
+    "confidence": "Confiance du nuage : {pct} %",
+    "confidenceHint": "Les nuages sont exportés avec les points que la vue montre avec ce filtre ; 0 % exporte tous les points publiés.",
+    "asOnDisk": "La géométrie est exportée telle qu'elle est sur le disque (époque {epoch}).",
     "scaleUncalibrated": "Échelle : non calibrée.",
     "scaleApplied": "Échelle : calibration appliquée.",
-    "scalePending": "Échelle : une calibration est mesurée et NON appliquée (facteur {{factor}}) ; elle n'est pas dans les fichiers, le LISEZMOI le dit.",
-    "totalUpTo": "Taille avant compression : jusqu'à {{size}}.",
-    "failed": "L'export a échoué : {{detail}}",
-    "download": "Télécharger",
-    "ready": "Export prêt : {{file}} ({{size}}).",
-    "previous": "Dernier export de ce scan : {{file}} ({{size}}, {{when}})."
+    "scalePending": "Échelle : une calibration est mesurée et NON appliquée (facteur {factor}) ; elle n'est pas dans les fichiers, le LISEZMOI le dit.",
+    "totalUpTo": "Taille avant compression : jusqu'à {size}.",
+    "failed": "L'export a échoué : {detail}",
+    "ready": "Export prêt : {file} ({size}).",
+    "previous": "Dernier export : {file} ({size}, {when}).",
+    "downloadAgain": "Télécharger à nouveau",
+    "scanPoints": "{points} points",
+    "loadedIfcs": "IFC chargés dans le projet ({n}) — {size}"
   },
   "tickets": {
     "title": "Tickets",
@@ -1518,14 +1518,25 @@
     "reopen": "Rouvrir",
     "delete": "Supprimer le ticket",
     "deleteTitle": "Supprimer le ticket",
-    "deleteMessage": "Le ticket {n} (« {title} ») est retiré du projet. Cette action est irréversible.",
+    "deleteMessage": "Le ticket {n} (« {title} ») est marqué comme supprimé : il quitte le modèle et reste dans la liste comme historique.",
     "emptyTitle": "Aucun ticket",
-    "emptyDesc": "Donnez un titre et marquez sur le modèle le premier point à vérifier.",
+    "emptyDesc": "Sélectionnez un objet, faites un clic droit dessus et choisissez « Nouveau ticket ».",
     "created": "Ticket {n} marqué.",
     "failed": "Le ticket n'a pas pu être enregistré. {detail}",
     "loadFailed": "Les tickets n'ont pas pu être lus. {detail}",
     "needsTitle": "le ticket a besoin d'un titre",
-    "countsSpoken": "Il y a {open} tickets ouverts ({issues} non-conformités, {reviews} à vérifier) et {resolved} résolus"
+    "countsSpoken": "Il y a {open} tickets ouverts ({issues} non-conformités, {reviews} à vérifier) et {resolved} résolus",
+    "showAll": "Tout afficher",
+    "hideAll": "Tout masquer",
+    "show": "Afficher sur le modèle",
+    "hide": "Masquer sur le modèle",
+    "history_created": "Marqué par {name}, {date}",
+    "history_resolved": "Résolu par {name}, {date}",
+    "history_reopened": "Rouvert par {name}, {date}",
+    "history_edited": "Modifié par {name}, {date}",
+    "status_deleted": "Supprimé",
+    "history_deleted": "Supprimé par {name}, {date}",
+    "showDeleted": "Afficher les supprimés"
   },
   "commonPoints": {
     "title": "Points communs",
@@ -1571,5 +1582,34 @@
     "needsTwoScans": "le projet ne contient qu'un seul {@scan}",
     "factorSpoken": "facteur {scale}, rotation {yaw} degrés, résidu {rms} millimètres avec {n} points",
     "noFit": "il n'y a pas encore deux points marqués sur les deux"
+  },
+  "docs": {
+    "title": "Documentation",
+    "subtitle": "Contrat, ingénierie, exigences",
+    "branch_contract": "Contrat",
+    "branch_engineering": "Ingénierie",
+    "branch_requirements": "Matrice des exigences",
+    "empty": "vide",
+    "emptyTitle": "Aucun document pour l’instant",
+    "emptyDesc": "Les documents du projet vivront dans cet arbre."
+  },
+  "gantt": {
+    "title": "Gantt",
+    "emptyTitle": "Aucun planning pour l’instant",
+    "emptyDesc": "Le planning du projet s’affichera ici."
+  },
+  "download": {
+    "title": "Télécharger",
+    "sectionSession": "Télécharger la {@session}",
+    "sectionExport": "Exporter",
+    "sessionDescription": "La {@session} telle qu’elle est, dans un ZIP qui peut être téléversé à nouveau comme {@session} (Nouvelle {@session} → Téléverser un ZIP). Décochez un scan pour le laisser hors du ZIP.",
+    "listing": "Liste des fichiers…",
+    "reading": "Lecture de ce qui peut être exporté…",
+    "scanLine": "{scan} — {size}, {files} fichiers",
+    "common": "Fichiers propres au projet (IFC chargés, tickets, comparaison enregistrée…) : {size}, {files} fichiers — toujours dans le ZIP.",
+    "total": "Le ZIP : {size}, {files} fichiers.",
+    "needScan": "Cochez au moins un scan.",
+    "run": "Télécharger la {@session}",
+    "started": "Le téléchargement a commencé : le navigateur montre sa progression et peut le reprendre s’il est coupé."
   }
 }
