@@ -1432,6 +1432,41 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
      _emit_omega_depth (a compressed npz a keyframe: zlib on the CPU), scale_align. To be measured.
   Also inside the inference loop and the bridges the card waits on np.save of the cube, the sky masks and the
   context views (a cube takes 27–30 s of which the forward pass is a part) — to be profiled.
+  ⭐ IN PROGRESS SINCE 2026-11-19 21:00 UTC, HIS ORDERS ("lo más importante además es dejar el criterio en el
+  pipeline programado para que no se rechacen ni en esta ni en las otras escenas" / "Además de codificar todos los
+  pasos en la placa porque es tiempo perdido"; and, on the assistant's "false revisits" guess: "Ojo con sacar
+  conclusiones erradas eh!!!!" — a suspicion is not written as a cause before the images of those closures have
+  been looked at). DONE IN A SEPARATE WORKING COPY, NOT YET IN THE LIVE TREE: /root/dev/VGGT-Long (a clone of
+  vendor/VGGT-Long on the pod's LOCAL disk, branch closures-and-card, three commits) — SAVED ON THE VOLUME as
+  /workspace/tmp/dev/patches/ (0001–0003 *.patch, the three test files, the A/B scripts); test data on the local
+  disk, /root/dev_data (12 real cubes of the copy placed and un-placed, its 1726 bridge fits, its records: gone at
+  a pod restart). TO MERGE WHEN THE COPY'S CLOUD IS PUBLISHED (`git am` the patches in vendor/VGGT-Long, the tests
+  into server/tests/, the two device keys into config.yaml + the builders, drift.py / capture.sh for the kit):
+  a. THE CLOSURE RULE (0001): cube_run.closures sets no bridge aside by the seams' scale bound; each closure
+     carries `scale_outside_seams_bound`, the count is declared. On the copy's real fits: 1726 closures, 644
+     declared — the very edges, order and numbers of the corrected graph the copy runs on (difference 0.0).
+     4 tests (they fail on the live code).
+  b. THE GRAPH SOLVE (0002): loop_utils/chunk_graph_torch.py — the same scipy solver, tolerances and 2-point
+     finite-difference rule, the residuals of every edge and of every perturbed copy of the unknowns in one
+     float64 batch on a device; `Model.cube_graph_device` (numpy = the record). The residual function equals the
+     record's to 1e-12; ON THE COPY'S REAL GRAPH, on four CPU threads: 69 s against the pipeline's 28 min, cost
+     5508.4726 = stored, poses within 0.04 mm (1726 closures: 114 s, cost 8965.4975 = stored, within 0.97 mm).
+     ⚠ TOLD TO HIM: an iterative solve driven by a finite-difference Jacobian cannot be held to 1e-9 — the record
+     itself is not determined that far (two exact copies of it started 1e-13 apart end tenths of a millimetre
+     apart); what is held is the residual function, the cost, and that the twin is deterministic. 7 tests.
+  c. THE SEAMS (0003): each cube read ONCE (the pairs come sorted: nothing below the current cube is asked for
+     again — 6 reads instead of 18 on six cubes, the same seams bit for bit) and loop_utils/seams_torch.py —
+     masks (the range decided on the squared distance against the largest float64 whose square root is within
+     it), SplitMix64 and the stable pick in wrapping int64, robust_sim3 / robust_rigid in float64 with numpy's
+     own 3x3 SVD and medians; `Model.cube_seams_device`. ON SIX REAL CUBES (12 pairs, the dark turn): the same
+     pairs, fits, correspondences and pixels left out; every number within 1e-13. 7 tests (mask and sample
+     element by element). ⚠ THE ASSISTANT'S WRONG CLAIM, CORRECTED TO HIM: "almost all of it is re-reading the
+     cubes" — measured, a pair costs 6 s of numpy passes over ~18 M points (cProfile: reductions 2.8 s, the two
+     fits 4.3 s, norms 1.6 s, the reads 0.9 s from the local disk); reading once saves seconds.
+  NOT MEASURED YET: anything ON THE CARD (the copy's run holds it; a second CUDA context would make
+  require_exclusive_gpu refuse the card to its next stage) — the twins were run with device "cpu". STILL TO DO:
+  the metric lock, apply, the uncertainty, the outputs, _emit_omega_depth (items 1, 4, 5, 6) and the profile of
+  the inference loop.
   ⚠ NOT TO BE TOUCHED WHILE THE COPY RUNS: these files are in the cube stage's stamp (a change discards the 170
   cubes). AFTER IT, by the rule of §3 (GPU PORTS): measure each on this session, the torch twin in float64 with
   numpy kept as the path of record, a test holding both equal — and the cubes kept in memory / on the local disk
