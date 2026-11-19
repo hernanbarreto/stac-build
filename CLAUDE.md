@@ -1013,6 +1013,23 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     loss already carries them (which is why putting 644 more in moved the cubes 12 cm only). NOT concluded, not
     proposed: any distance at which a revisit is not bridged (that would be a criterion of ours again; the
     bridges over 6 m cost ~40 min of the card on this session — his to weigh).
+  · ⭐ THE DISTANCES — TO WORK WITH HIM WHEN THE REDESIGN OF THE TIMES IS DONE (USER 2026-11-19: "el resto de los
+    temas de distancia es importante que lo veamos en detalle" / shown the tables: "Bueno, tenemos un dato ahi.
+    Quiero trabajarlo luego cuando termines"). NOTHING IS DECIDED; the data, the copy's 1726 closures against the
+    corrected graph (scratchpad closures_three_sources.npy, closures_study.npz):
+      by the distance between the closure's two cameras (first pass) — closures, % that agree:
+        0–1 m 17, 76 % · 1–2 m 96, 77 % · 2–3 m 266, 79 % · 3–4 m 246, 66 % · 4–5 m 260, 55 % · 5–6 m 275, 40 % ·
+        6–8 m 339, 16 % · 8–10 m 149, 4 % · over 10 m 78, 0 %
+      by the angle between their viewing directions: 0–30 deg 60 % · 30–60 47 % · 60–90 38 % · 90–120 37 % ·
+        120–150 39 % · 150–180 33 %; together: under 3 m 82 / 76 / 65 % (under 60 / 60–120 / over 120 deg),
+        3–6 m 52 / 52 / 60 %, over 6 m 13 / 9 / 11 % — the distance decides, the angle hardly
+      by THE BRIDGE'S OWN FIT RESIDUAL (a measure of the bridge itself, not a number of ours): 0–3 cm 164, 90 % ·
+        3–6 cm 511, 72 % · 6–10 cm 392, 41 % · 10–20 cm 485, 18 % · over 20 cm 174, 5 %
+      the card's time: 1726 bridges 129 min; over 6 m 566 = 42 min; over 5 m 841 = 63 min; over 4 m 1101 = 83 min
+    THE OTHER DISTANCE MATTERS named to him for that same sitting: the camera a few centimetres from a blank
+    surface (the two doors: the worst seams, the cube's lock off by up to x2) and THE RANGE of 15 m (his rule).
+    Not done: the same tables by the plan's own co-visible share (the closures' keyframe indices are not the
+    plan's pair indices — 29 of 1726 matched as they are; to be mapped through kf_slot).
   · APPLIED TO THE COPY WITHOUT INFERRING ITS CUBES AGAIN (the clean way — the rule changed in cube_run.py — would
     discard the 170 cubes by the stamp: 5.5 h; told to him, he was told he could ask for it): stage 2 cancelled
     at 20:22 UTC (it was building on the old graph and about to delete the cubes); scratchpad regraph.py —
@@ -1490,6 +1507,12 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
      element by element). ⚠ THE ASSISTANT'S WRONG CLAIM, CORRECTED TO HIM: "almost all of it is re-reading the
      cubes" — measured, a pair costs 6 s of numpy passes over ~18 M points (cProfile: reductions 2.8 s, the two
      fits 4.3 s, norms 1.6 s, the reads 0.9 s from the local disk); reading once saves seconds.
+  d. THE LOCK AT THE INFERENCE (0004 — the first of the two changes of the design he agreed to: "Dije que si al
+     diseño, dale"): cube_run._lock_in_memory measures and applies a cube's DA3 lock on the prediction about to
+     be saved, the cube is written ONCE, a small record lock_<k>.json follows it; metric_lock() reads the records
+     and only the cubes that left none (a cube with no anchor, a cube of an older run). ON A REAL CUBE (74,
+     brought back to its unlocked state): the cube FILE has the same sha256 as the live code's, metric_lock.json
+     is equal. 4 tests. It removes the 15-minute pass.
   NOT MEASURED YET: anything ON THE CARD (the copy's run holds it; a second CUDA context would make
   require_exclusive_gpu refuse the card to its next stage) — the twins were run with device "cpu". STILL TO DO:
   the metric lock, apply, the uncertainty, the outputs, _emit_omega_depth (items 1, 4, 5, 6) and the profile of
