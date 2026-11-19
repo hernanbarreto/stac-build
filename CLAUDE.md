@@ -943,12 +943,50 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   NOT AFFECTED: the clouds, octrees, meshes, segmentations and stores as they are; the export's plan answered on
   pccr and bufferStop. The files cannot be brought back from the pod (emptied before removal; pccr 2408's removed
   by a plain delete in the morning).
-  PROPOSED TO HIM, WAITING FOR HIS OK (nothing started): (1) the identity persisted in a small file when the
-  reconstruction ends — on the five recovered from the value their own sealed artifacts carry (floor_level.json's
-  stamp; every artifact that carries it must agree), declared as recovered; (2) the keyframe's chunk read from
-  chunk_sim3.json; (3) with both, the system releases by itself, once the cloud is published, what no later stage
-  reads: the records, the F6 context views, the restart epochs (about 40 GB on pccr 2408) — his requirement. The
-  readers still to audit before it: da3_run's (session_io / mask_space fallbacks, tsdf_export), the VLM's depth.
+  ⭐ REPAIRED ON HIS WORD (USER 2026-11-19: "Ok lo de la huella con archivos chicos dale hacelo y no te mandes más
+  cagadas que son muchas horas de trabajo y un costo enorme si tenemos que rehacer todas las sesiones nuevamente" /
+  "Ok dale te dije") — 7990a6f and the commit after it:
+  · correction/epoch.py: `reconstruction_id.json` — the id and the sha256 of each OTHER identity file as it was. A
+    session without records answers with it while those files are what they were; THE RECORDS DECIDE WHILE THEY
+    EXIST (the file is never read then). correction/release.py: keep() writes the identity and each keyframe's
+    chunk (`omega_chunks.json`) FROM the records; recover() is for a session that already lost them — the id its
+    own artifacts carry (all must name ONE id, one beside the floor seal among them; the digest a step's
+    repro.stamp keeps of the id is held to it too), the chunks from the cube plan's owner list (a record's chunk
+    IS that owner: map_worker._emit_omega_depth). correction/floor.py reads the kept chunks; the floor seal's
+    memo (segmentation/floor_frame.py) follows the kept file.
+  · THE FIVE SCANS: in each, 10 artifacts written by different stages over days (gauge.json, precision/refine,
+    corrected_cloud, depth_on_f5, cloud_metrics, chunk_check, fusion_map, mask_audit, segmentation.json,
+    floor_level.json) name ONE id — 2408 97ede9b7…, 3108 b4cc97a6…, zaragoza 78a195da…, observatorio d7a936f3…,
+    bufferStop 588a632d… — and the SAM3 stage's stamp was computed with it. The two files were written (nothing
+    else touched) and VERIFIED with the code's own functions on the five: the identity equals the floor seal's,
+    floor_seal_verdict True for this reconstruction and this cloud, the viewer's floor transform applied, every
+    keyframe's cube known (86 / 17 / 8 / 6 / 5), _display_transform works. 25 new tests
+    (tests/test_kept_identity.py); the 94 existing ones on the identity, the seal, the projection and the epochs
+    pass.
+  · ⚠ THE LIVE BACKEND STILL RUNS THE CODE IT LOADED AT 14:24 UTC (it answers "no reconstruction id" for the five
+    until restarted; visible only on bufferStop: its 3.6 mm adjustment). A RESTART IS OWED AS SOON AS THE COPY'S
+    STAGE 1 ENDS — never while its job runs (a restart kills it). Announce it; say when the chat is warm.
+  · NOT RECOVERABLE, TOLD TO HIM: the per-keyframe DEPTH of the five. Its one reader after the cloud is the VLM
+    stage's association (segmentation/autoprompt: the depth at a detection's centre lifts it to 3D to link
+    detections across keyframes, `autoprompt.use_depth: true`; without it, `assumed_depth_m: 5.0`): a NEW scene
+    analysis on those scans would associate with 5 m. Their existing segmentations are untouched.
+  · THE RELEASE ITSELF (correction.release.release, RELEASED): once the cloud is PUBLISHED (product_is_live), after
+    keep(): the way back to epoch 0 (`_restart_epochs` — restore_epoch0 alone; the floor stage stashes the
+    pre-floor cloud there: 14.8 GB on 2408), F6's context views (`maplong_run/context_views` — depth_on_f5 alone)
+    and the DA3 per-frame depth (`da3_run/results_output` — the reconstruction's own steps; elsewhere fallbacks).
+    A file with another link is unlinked, never emptied; a symlink never followed; refused before the cloud is
+    published or when the session could not name its reconstruction afterwards. THE RECORDS ARE NOT RELEASED
+    (the VLM's depth reader) — HIS DECISION PENDING: whether that reader takes its depth from the published
+    cloud instead (it changes the VLM stage's input: one session first, his eye), which would free them too
+    (~2.6 MB a keyframe).
+  · ⚠ NOT WIRED INTO THE PIPELINE YET, ON PURPOSE: the call (after _discard_previous_epochs, at the end of the
+    reconstruction in workers/map_worker.py and of the floor stage in workers/floor_worker.py) and its switch in
+    config.yaml wait until the copy's experiment is over — a new order freezes the current config.yaml and the
+    copy's finished stamps must not be put at risk by an edit of the workers or of the configuration. Checked
+    for today's edits: the cube stage's stamp covers vendor/VGGT-Long, vendor/vggt-omega and, of server/, only
+    reconstruction/{__init__,da3_anchor,vio_scale}.py, reconstruction/loops/*, repro.py; the intake's 17 files
+    are intake/*, card_table.py, da3_weights.py, extract_da3_depth.py, repro.py — NONE of those may change
+    while the copy lives.
   THE ASSISTANT'S ERRORS IN THIS STUDY, told to him: "the front has only 4,616 points, almost all from one image"
   (they were the OBJECT's points, not the face's: "no puede ser … contestame antes esto"); expecting the cut at the
   hole to close the rack (5 cm); the invented safety net above; THE DISK — "hay margen" / "el tramo 1 entra con

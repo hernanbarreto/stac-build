@@ -25,9 +25,18 @@ alone, with ``chunk = k``).
     python -m correction.release recover <output dir>            what would be written, and from what
     python -m correction.release recover <output dir> --write    write it
     python -m correction.release keep <output dir>               from the records on disk
+    python -m correction.release release <output dir> [--dry]    free what a published session no longer reads
 
-Not kept, declared: the per-keyframe DEPTH itself. Its one reader after the cloud is the VLM stage's
-association (segmentation.autoprompt, ``use_depth``), which falls back to its assumed depth without it.
+THE RELEASE (:func:`release`, :data:`RELEASED`): once the cloud is PUBLISHED, what only a precision chain that
+starts again would read goes — the way back to epoch 0, F6's context views, the DA3 per-frame depth. Each entry
+names its readers, found by reading every place of server/ that names the folder (2026-11-19); nothing enters
+that list on a description. A session released this way cannot restart or resume its reconstruction: a new one
+is a Replace.
+
+NOT RELEASED, declared: the Omega records themselves. The identity and the chunks are kept beside them (so the
+day they go nothing is lost), but their per-keyframe DEPTH has one more reader after the cloud — the VLM stage's
+association (segmentation.autoprompt ``use_depth``: the depth at a detection's centre, else an assumed 5 m) —
+and that stage runs whenever he asks for it. They stay until that reader has another source.
 """
 from __future__ import annotations
 
@@ -49,6 +58,19 @@ _CARRIER_MAX_BYTES = 64 * 1024 * 1024
 
 class ReleaseError(RuntimeError):
     """What was asked cannot be done without taking something on trust — the message says what."""
+
+
+#: (what it is, folder relative to output/, who reads it) — what a session whose cloud is PUBLISHED no longer
+#: reads. Readers as found 2026-11-19 by reading every file of server/ that names the folder.
+RELEASED: Tuple[Tuple[str, str, str], ...] = (
+    ("the way back to epoch 0", "_restart_epochs",
+     "correction.restart.restore_epoch0 alone: a precision chain that starts again from its first step"),
+    ("F6's context views", "maplong_run/context_views",
+     "precision.depth_on_f5 alone: the vote's witnesses, read while the cloud is being made"),
+    ("the DA3 per-frame depth", "da3_run/results_output",
+     "the reconstruction's own steps (the metric lock, the anchors, the gauge); elsewhere only as a fallback "
+     "of paths that exist (session_io, mask_space, tsdf_export, correction.revisit)"),
+)
 
 
 def _keyframes(out: Path) -> List[int]:
@@ -271,14 +293,85 @@ def recover(output_dir, *, write: bool = False, log: Callable[[str], object] = p
     return report
 
 
+# ── release: what a published session no longer reads ───────────────────────────────────────────
+def _tree_bytes(path: Path) -> int:
+    total = 0
+    for base, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                st = os.lstat(os.path.join(base, name))
+            except OSError:
+                continue
+            total += st.st_size
+    return total
+
+
+def _remove_tree(path: Path) -> None:
+    """Remove ``path`` so that its bytes are free AT ONCE: a regular file that nothing else links is emptied
+    before it is unlinked (the volume charges allocated size; measured 2026-11-19: 35.5 GB removed this way
+    were writable right after). A file with another link is only unlinked — its bytes belong to that link
+    too — and a symlink is removed, never followed."""
+    import shutil
+    import stat as _stat
+    if path.is_symlink() or not path.is_dir():
+        raise ReleaseError(f"{path} is not a directory of the session")
+    for base, _dirs, files in os.walk(path):
+        for name in files:
+            p = os.path.join(base, name)
+            try:
+                st = os.lstat(p)
+                if _stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_size:
+                    os.truncate(p, 0)
+            except OSError:
+                continue
+    shutil.rmtree(path)
+
+
+def release(output_dir, *, dry: bool = False, log: Callable[[str], object] = print) -> Dict[str, Any]:
+    """Free what a session whose cloud is PUBLISHED no longer reads (:data:`RELEASED`). Before anything goes,
+    the identity and the keyframes' chunks are kept FROM the Omega records (which stay); a session that could
+    not name its reconstruction afterwards is refused. Returns {"freed": {folder: bytes}, "bytes",
+    "reconstruction_id"}; ``dry`` only measures."""
+    from precision.product import product_is_live
+    out = Path(output_dir)
+    live, why = product_is_live(out)
+    if not live:
+        raise ReleaseError(f"{out}: nothing is released before the cloud is published — {why}")
+    rec = out / E.RECORDS_REL
+    if rec.is_dir() and any(rec.glob("frame_*.npz")):
+        if not dry:
+            keep(out, log=log)
+    rid = E.reconstruction_id_or_none(out)
+    if rid is None and not dry:
+        raise ReleaseError(f"{out}: the session cannot name its reconstruction (no Omega records, no kept "
+                           f"identity) — nothing is released from it")
+    freed: Dict[str, int] = {}
+    for what, rel, _readers in RELEASED:
+        d = out / rel
+        if d.is_symlink() or not d.is_dir():
+            continue
+        n = _tree_bytes(d)
+        if not dry:
+            _remove_tree(d)
+        freed[rel] = n
+        log(f"[release] {'would free' if dry else 'freed'} {n / 1e9:.2f} GB — {what} ({rel})")
+    total = sum(freed.values())
+    log(f"[release] {out}: {total / 1e9:.2f} GB {'would be' if dry else ''} freed; the session keeps its identity"
+        + (f" {rid[:12]}…" if rid else "") + ", its cloud and everything a later stage reads; its reconstruction "
+        "can no longer be resumed or restarted (a new one is a Replace)")
+    return {"freed": freed, "bytes": total, "reconstruction_id": rid}
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if len(argv) < 2 or argv[0] not in ("keep", "recover"):
+    if len(argv) < 2 or argv[0] not in ("keep", "recover", "release"):
         print(__doc__)
         return 2
     try:
         if argv[0] == "keep":
             keep(argv[1])
+        elif argv[0] == "release":
+            release(argv[1], dry="--dry" in argv[2:])
         else:
             recover(argv[1], write="--write" in argv[2:])
     except (ReleaseError, E.ReconstructionIdError) as e:

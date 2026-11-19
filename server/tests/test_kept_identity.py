@@ -306,3 +306,75 @@ def test_the_memoised_verdict_follows_the_kept_identity(tmp_path, monkeypatch):
     (out / E.RECONSTRUCTION_ID_RECORD).unlink()
     E._RID_MEMO.clear()
     assert FF.floor_seal_verdict(out)[0] is False
+
+
+# ── the release: what a published session no longer reads ───────────────────────────────────────
+def _published(tmp_path: Path, monkeypatch, live=(True, "corrected_cloud (epoch 2) on disk")):
+    import precision.product as PP
+    out = _session(tmp_path)
+    monkeypatch.setattr(PP, "product_is_live", lambda _o: live)
+    for rel, n in (("_restart_epochs/_epoch_1", 3), ("maplong_run/context_views", 5), ("da3_run/results_output", 4)):
+        d = out / rel
+        d.mkdir(parents=True)
+        for i in range(n):
+            (d / f"f{i}.bin").write_bytes(bytes(1000 * (i + 1)))
+    (out / "da3_run" / "camera_poses.txt").write_text("1 0 0 0\n")
+    (out / "cleaned_cloud.ply").write_bytes(b"ply")
+    return out
+
+
+def test_release_frees_what_a_published_session_no_longer_reads_and_keeps_the_rest(tmp_path, monkeypatch):
+    out = _published(tmp_path, monkeypatch)
+    rid = E.reconstruction_id(out)
+    logs = []
+    dry = R.release(out, dry=True, log=logs.append)
+    assert dry["bytes"] == 6000 + 15000 + 10000 and (out / "_restart_epochs").is_dir(), "a dry run removes nothing"
+    assert not (out / E.RECONSTRUCTION_ID_RECORD).exists(), "a dry run writes nothing"
+    got = R.release(out, log=logs.append)
+    assert got["freed"] == dry["freed"] and got["reconstruction_id"] == rid
+    for rel in ("_restart_epochs", "maplong_run/context_views", "da3_run/results_output"):
+        assert not (out / rel).exists()
+    # what stays: the records, the kept identity and chunks, the cloud, the small files beside the released ones
+    assert len(list((out / "omega_run" / "results_output").glob("frame_*.npz"))) == len(FRAMES)
+    assert (out / E.RECONSTRUCTION_ID_RECORD).is_file() and (out / R.KEPT_CHUNKS_FILE).is_file()
+    assert (out / "cleaned_cloud.ply").is_file() and (out / "da3_run" / "camera_poses.txt").is_file()
+    assert (out / "maplong_run" / "chunk_sim3.json").is_file()
+    assert E.reconstruction_id(out) == rid
+    assert R.release(out, log=logs.append)["bytes"] == 0, "a second release finds nothing"
+
+
+def test_nothing_is_released_before_the_cloud_is_published(tmp_path, monkeypatch):
+    out = _published(tmp_path, monkeypatch, live=(False, "no published cloud (corrected_cloud.json / fuse_report.json) yet"))
+    with pytest.raises(R.ReleaseError, match="before the cloud is published"):
+        R.release(out, log=lambda m: None)
+    assert (out / "_restart_epochs").is_dir() and (out / "maplong_run" / "context_views").is_dir()
+    assert not (out / E.RECONSTRUCTION_ID_RECORD).exists()
+
+
+def test_nothing_is_released_from_a_session_that_could_not_name_its_reconstruction(tmp_path, monkeypatch):
+    out = _published(tmp_path, monkeypatch)
+    _release(out)                                                            # the records gone, nothing kept
+    with pytest.raises(R.ReleaseError, match="cannot name its reconstruction"):
+        R.release(out, log=lambda m: None)
+    assert (out / "_restart_epochs").is_dir() and (out / "da3_run" / "results_output").is_dir()
+
+
+def test_a_released_file_that_something_else_links_keeps_its_bytes(tmp_path, monkeypatch):
+    import os
+    out = _published(tmp_path, monkeypatch)
+    live = out / "cleaned_cloud_raw.ply"
+    live.write_bytes(b"the cloud's own bytes")
+    os.link(live, out / "_restart_epochs" / "_epoch_1" / "cleaned_cloud_raw.ply")     # a store that links, not copies
+    target = tmp_path / "elsewhere.bin"
+    target.write_bytes(b"not the session's")
+    os.symlink(target, out / "maplong_run" / "context_views" / "link.bin")
+    R.release(out, log=lambda m: None)
+    assert live.read_bytes() == b"the cloud's own bytes", "a linked file is unlinked, never emptied"
+    assert target.read_bytes() == b"not the session's", "a symlink is removed, never followed"
+
+
+def test_the_release_list_names_only_folders_whose_readers_were_read():
+    # the records are NOT in it: the VLM stage's association reads their depth after the cloud
+    rels = [rel for _what, rel, _readers in R.RELEASED]
+    assert rels == ["_restart_epochs", "maplong_run/context_views", "da3_run/results_output"]
+    assert E.RECORDS_REL not in rels and all(readers for _w, _r, readers in R.RELEASED)
