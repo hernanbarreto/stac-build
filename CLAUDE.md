@@ -113,6 +113,28 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   terminando y me vas a pasar reporte cada vez que un punto quede cerrado"; the report is a few lines ("anda de a
   poco que metiste mucho texto"); a point of his list is never folded into another in a summary; no long suite or
   measurement runs in the foreground of a turn.
+- THE NIGHT OF 2026-11-18 / 19 — WHAT IT COST HIM AND THE RULES IT LEFT (his words: "anda todo como el orto" / "te
+  pido que te calmes y trabajes de forma prolija" / "si no te paras a pensar y diseñas conmigo nunca va a
+  funcionar" / "contesta lo que te pregunte" / "quien te dijo que empieces???" / "anda o no anda, es binario" /
+  "lo unico que haces son test, que no sirven … porque nada funciona"). What was delivered the night before had
+  never been tried in a browser and nearly all of it failed under his hand: the tests held the calculation and
+  the routes, never the path HE uses — the button, then what the screen shows. The rules:
+  · AN EDIT UNDER ui/src RELOADS HIS PAGE (vite's dev server; a hook added to App remounts it; a "hot" update
+    keeps the viewer's old state — he must press F5 to see a change of what is built at load): three edits
+    while he was trying the comparison, one of them lost a running comparison's result. While he uses the app
+    an interface edit is ANNOUNCED in one line and batched — as the backend's restart is.
+  · A question of his gets ONLY its answer: no cause he did not ask for, no proposal, no second list.
+  · THE LIST OF PENDING POINTS IS ONE, HIS, WITH HIS NUMBERS: never renumbered, split into steps or regrouped
+    ("te la pasas haciendo listas sobre listas"). Three states: confirmed by him / applied, waiting for his
+    eye / not started.
+  · NOTHING STARTS ON A "sí" TO A PLAN — only on his word to start ("avanza", "implementalo", "terminalo").
+    "detené todo" / "empezamos desde cero" = stop, one line, listen. Before a step: how long it takes. No jump
+    to another point while one is open.
+  · A point is DONE OR NOT DONE; "a part is done" is not progress to report.
+  · WHAT WORKED: one small change, then ONE thing for him to look at, and HIS SCREENSHOT when it fails — every
+    real cause of that night came from a screenshot of his, none from a guess.
+  · A browser on the pod for the assistant to try the interface: REFUSED by him that night ("no estas autorizado
+    a hacer nada porque no sabes siquiera como validarlo") — not to be installed without his word.
 - THE BACKEND'S RESTART (2026-11-14: "a vos no te esta funcionando reiniciarlo, revisa que estas haciendo mal …
   sino te quedas colgado y perdemos tiempo"): only through `bash scripts/restart_backend.sh` (it waits for the
   shell, forces, starts from the prompt, waits BOUNDED) — never a Ctrl-C + sleep + an unbounded wait typed by
@@ -281,6 +303,48 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   the VLM prompt + SAM3 prompts (editable, saved in `output/autosegment.json`) and a checkbox per stage; GenRecon is
   its OWN button with the viewer's confidence (USER 2026-11-05). Instances → Cubes (each cube as its own box). The
   Fuse icon sits on the PROJECT row of the Sessions tab when it holds two or more scans.
+- ⭐ THE INTERFACE AS HE WANTS IT — HIS WORDS OF 2026-11-18 / 19, each CONFIRMED by his eye that night:
+  · THE TOOLBAR IS ALWAYS THERE ("la barra debe estar siempre ahi" / "que mierda tiene que ver el modo sabana"):
+    drawn whenever a session is open, whole — never hidden by a load in course, by a server task (the tasks
+    poll hid it for the minutes of a comparison) or by the deviation sheet. With the sheet on screen the brush,
+    the cloud alignment and the camera poses are shown DISABLED (the assistant's choice, told to him).
+  · OPENING A SESSION SHOWS ITS CLOUD AND NOTHING ELSE ("cuando abro la sesion se abre automaticamente la
+    sabana, no!, solo cuando la solicito … cargar si los segmentos, el BIM, pero mostrar la nube y quedarse en
+    el panel de sesiones, nada mas"): no panel is switched, the grid and the axes stay as he has them, a stored
+    comparison is only made available (the toolbar's thermometer shows it, the Report tab holds its numbers).
+  · A TOUCH ON AN OBJECT OPENS NO PANEL ("siempre que toque un objeto no quiero ni que abra el panel lateral
+    derecho ni el izquierdo, nunca"): it is selected — its box, its dimensions — and the panels stay. (A
+    selection from the Instances list still opens its properties: told to him, not objected.)
+  · ON THE DEVIATION SHEET THE OBJECTS ARE STILL THE OBJECTS ("debo poder seguir seleccionando sobre la sabana
+    los objetos segmentados" / "cuando hago click sobre algun elemento no se muestra el obb y las cotas"): the
+    sheet's points keep their object's id, a click selects it with its box and dimensions; a row of the
+    Report's element list selects its object too ("cuando toco alguno debe mostrarmelo como seleccionado en la
+    sabana") and the selected object's row is marked.
+  · THE BIM PANEL'S OPACITY ("todos los elementos ademas del arbol general deben tener la opcion de slide de
+    opacidad y por defecto estar al 80%"): a slider for the whole tree, always there, and one for the selected
+    element or branch; every element loads at 80 %.
+- ⭐ THE BIM COMPARISON AS IT STANDS (2026-11-19, his points 1, 2, 4, 5, 6 — confirmed / closed by him):
+  · ONE comparison, from the toolbar's button and from the Report tab's (App.runComparison); the Report tab
+    (DeviationOverlay.tsx) owns none — it was March's, with its own launch (a pairing WITHOUT object ids: every
+    element against all the points of its label, 266 M points, over 20 minutes, a wrong sheet).
+  · An IFC written from the scan is paired BY THE SCAN ITSELF (by instance id) whatever the request carries.
+  · THE TOLERANCE IS ONE ("deja la tolerancia por defecto en 50mm pero toma la del slider"): the Report tab's
+    slider; the server compares with it (config.yaml bim.deviation.tolerance_mm, 50, when the request gives
+    none) and the legend shows the stored comparison's. ONE colour scale everywhere: green at 0, the tolerance
+    in the middle, red at TWICE it (the viewer's legend said three times; the Report's chart was the first
+    element's histogram with its scale printed backwards — "237mm en verde y 0 en rojo").
+  · RUN ONCE, STORED ("la comparacion debe generarse y correrse una vez, y se debe guardar"): a new sheet is
+    written beside the stored one (bim_comparison/.new_sheet) and takes its place only when it is whole
+    (comparison.publish_sheet); a sheet EXISTS when its meta — written last — and its octree are there
+    (comparison.stored_sheet: "si no hay sabana por que mierda me muestra esa opcion"); sabana_report.json holds
+    every element's numbers and the whole comparison's histogram (GET /api/sessions/{id}/sabana/report).
+  · ON THE CARD, EVERY ELEMENT IN ONE PASS ("la comparacion debe hacerse en GPU en un instante" / "hace que todo
+    se procese en una sola pasada"): bim/c2m_grid.py — the triangles a point is measured against are found on
+    the device (a grid of their centroids per size class and element, proven level by level), the record's
+    distances bit for bit; the coverage's question on the device too; bim/sheet_octree.py — the sheet's octree
+    is the scan's own, uncompressed, with each point's colour replaced (the point found by its origin triple;
+    a point of no compared object is grey). pccr 2026-08-31, start to end: 46 s (171 – 186 s before; distances
+    95 → 12 s, coverage 8 → 2 s, octree 40 → 5 s). HE CLOSED THE POINT AT THAT.
 - OPENING A SESSION (USER 2026-11-13: "al abrir las sesiones por defecto aparezcan las mallas genrecon apagadas para
   que abra rapido la sesion"): every mesh is listed unchecked and NOT downloaded; checking one loads it; a mesh that
   appears while the session is open loads at once.
@@ -606,6 +670,34 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   segmented, replaced it).
 
 ## 7 · PENDING
+- ⭐⭐⭐ THE LIST OF 2026-11-19 — HIS POINTS, WITH HIS NUMBERS (RESUME HERE; the 2026-11-18 block below is its
+  background). He tried the night's work in the browser and it failed nearly everywhere; each point was then
+  worked with him, one change at a time, on his screenshots. HIS VERDICTS (2026-11-19: "1. confirmado, 2.
+  confirmado, 3. confirmado, 4. cerrado, 5. confirmado, 6. confirmado, 12. confirmado, 13. confirmado, 14.
+  confirmado, 15. confirmado"):
+  1 ✓ after a comparison the sheet and the report appear · 2 ✓ a comparison is run once and stays stored · 3 ✓
+  the toolbar never disappears · 4 ✓ CLOSED the comparison on the GPU (46 s) · 5 ✓ "show deviation" only with a
+  whole sheet · 6 ✓ tolerance 50 mm by default, the slider's is used · 12 ✓ objects are selected on the sheet ·
+  13 ✓ the BIM panel's opacity sliders, 80 % by default · 14 ✓ a touch on an object opens no panel · 15 ✓ a row
+  of the Report selects its object. (What each is: §5.)
+  OPEN:
+  7. The viewer must respect what the user chose ("cuando abro la sesion, pasa a la ventana de BIM, me deja los
+     puntos el 5, cuando yo los setie en otro valor, me desaparece la grilla") — the panel and the grid are
+     DONE with point 2's change; THE POINT SIZE IS NOT: it is read from the per-user prefs at every cloud load
+     and falls to 5.0 when they hold none (a file in the ACTIVE scan's directory, user_prefs/<user>.json).
+  8. Tickets do not work — NOT STARTED; cause not found (the server received only GETs: the click that places
+     one never became a POST; the window lets clicks through by CSS).
+  9. The same-surface merge is WRONG to his eye ("dejo todos los tiles que son piso, los dejos sueltos y junto
+     como piso a las puertas y a otras cosas") — NOT STARTED; the five backups output/_before_same_surface/ are
+     KEPT (they are what undoes it); whether it is undone: asked, not answered.
+  10. The IFC export does not work — NOT STARTED, not looked at (a ZIP of 138 MB was written while he waited
+      on the window; it is kept in pccr/exports as evidence).
+  11. Downloading a session as a ZIP: "Could not download zaragoza. Invalid or expired token" — NOT STARTED.
+      (It matters before the maintenance of the 23rd.)
+  ALSO THAT NIGHT: the volume at 94 % (a log write was refused once, Errno 122) — freed on his "si, dale": the
+  five output/_before_min_points/ backups, the old test data of /workspace/tmp, the pip cache, the whole IFC
+  of pccr/exports (13.8 GB); KEPT: the same-surface backups, /workspace/tmp's two git worktrees (wt_scale has
+  7 uncommitted files) and the export ZIP. pccr 2026-08-31 HOLDS A STORED COMPARISON (his run, 50 mm).
 - ⭐⭐⭐ WHERE THE WORK STANDS — 2026-11-18, main (USER: "Cuando termines anota los puntos que quedan pendientes de lo
   que teníamos que hacer anótalo para la próxima sesión de trabajo"). This block is the one to resume from; the
   2026-11-14 list below is its background. He also said "tengo más consultas luego".
