@@ -949,6 +949,22 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     rear face (the face of wall#598's L parallel to the front: 7,671 points, video 4038–4105) and the front face
     (24,916 points on cabinet#2534's plane, video 10000–10094). The original, as published: FRONT TO REAR
     1.547 m, the faces 3.2 deg from parallel. `rack_copy.py measure <copy scan dir>` once the cubes are placed.
+  ⭐ STAGE 2 ORDERED (USER 2026-11-19 ~18:05 UTC: "si si, cuando termine hacemos el tramo 2, hasta la nube no nos
+  detenemos, reinicia y lanza el tramo 2") and THE VOLUME RAISED TWICE BY HIM that day: to 500 GB ("Lleve el Pod a
+  500GB", 14:40 — 78 GB then written by the probe) and to 550 GB ("lo deje en 550GB", ~18:10 — asked for because
+  stage 2 writes ~48 GB before it can delete the 115 GB of cubes: the uncertainty maps 4 GB, a PLY per cube ~22 GB
+  and their copy to output/chunk_*.ply ~22 GB; then the records 7 GB; then the cubes go). THE SEQUENCE, no word
+  of his needed: (1) the graph appears → the numbers to him (eval_graph.py, copy_poses.py place + walk_profile.py,
+  rack_copy.py measure); (2) chunk_sim3.json → watch_copy.py cancels the job; (3) a PROBE of the free space, the
+  backend restarted with scripts/restart_backend.sh (the five scans' repair goes live; say when the chat is
+  warm — it goes down again when the job takes the card), the copy ordered again with replace OFF and the THREE
+  values written into config.yaml for the order (cube_overlap 0.75, luma_lo 0.0, clip_frac_max 1.0), the frozen
+  run_config.yaml checked, config.yaml put back; (4) disk_guard.py with the probe's figure, watch_stage2.py (it
+  never cancels); a checkpoint in the first minutes ("aligned already", "resumed past it" — nothing recomputed).
+  THE CHAIN'S OWN LINES AT THE GRAPH (19:19 UTC): 510 seams, sigma 0.5–17.9 cm (the original: max 24.2); the seam
+  scale bound |log s − 0.0011| ≤ 0.0961; of the 1726 bridges 1082 became closures and 644 were declared out of the
+  bound; "the 170 DA3 per-cube scales recorded, not used (the locks disagree by 3.2 % between neighbours; the
+  metre is scale_align's, the scale along the walk F2's)".
   ⚠⚠ THE FIVE SCANS WERE STRIPPED OF MORE THAN "INTERMEDIATES" — THE ASSISTANT'S ERROR, TOLD TO HIM 2026-11-19
   (found when he asked that the freeing be automatic: "Esto de liberar los intermedios debería hacerse de forma
   automática, se podría hacer una vez que termina la nube o recién cuando termina genrecon? Pero como sea y
@@ -1350,6 +1366,30 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   diciembre uno de los puntos a mejorar es justamente la velocidad"). Reference: pccr 2408 (2765 kf, 150 concepts)
   VLM 48.5 min + SAM3 ~10.5 h at ~4.1 min / concept even with the shared backbone (3ccb7c6); pccr 3108 (547 kf,
   87 concepts) SAM3 1 h 43 min. Robustness stays the bar: speed is never bought with a lost mask or a looser geometry.
+- ⭐⭐ THE CUBE STAGE'S STEPS THAT RUN ON THE CPU WITH THE CARD IDLE — TO BE PORTED, HIS ORDER (USER 2026-11-19,
+  watching the copy of pccr 2026-08-24: "No entiendo por qué siguen habiendo tantas partes que no usan la placa.
+  Todo debe hacerse en placa" / "anota los pasos"). All in vendor/VGGT-Long/loop_utils/cube_run.py (process_cubes)
+  and what map_worker does right after it; each reads the cubes from the network volume (676 MB a cube, np.load
+  of a pickled dict) and does its arithmetic in numpy. MEASURED ON THE COPY (170 cubes of 64 keyframes at
+  464x832, 510 seams, 1726 bridges — with 86 cubes and 92 seams, as every session before, they were minutes and
+  went unseen):
+  1. metric_lock() — each cube's DA3 scale from its anchors, the cube rewritten: 15 min (15:50 → 16:05 UTC), card idle.
+  2. seams() — the exact Sim(3) of every pair of cubes that share frames (robust_sim3 on 200,000 correspondences,
+     two cubes loaded per pair): ~50 min for 510 pairs (18:25 → ~19:15), card idle.
+  3. closures() + graph() — the bridges' fits read back, the scale bound, the Sim(3) solve (scipy): started
+     ~19:15, over 15 min, 160 % of one process, card idle. (Time to be completed when it ends.)
+  4. apply() — every cube's points moved onto its pose and saved again (np.save, 676 MB each). To be measured.
+  5. uncertainty(), depth_graph(), outputs() (a PLY + origins per cube: ~22 GB), camera_poses(). To be measured
+     (the original: 4.5 + 2.5 + 2.5 + 7 min for 86 cubes).
+  6. after the fork returns (workers/map_worker.py): the PLYs COPIED to output/chunk_*.ply (another ~22 GB),
+     _emit_omega_depth (a compressed npz a keyframe: zlib on the CPU), scale_align. To be measured.
+  Also inside the inference loop and the bridges the card waits on np.save of the cube, the sky masks and the
+  context views (a cube takes 27–30 s of which the forward pass is a part) — to be profiled.
+  ⚠ NOT TO BE TOUCHED WHILE THE COPY RUNS: these files are in the cube stage's stamp (a change discards the 170
+  cubes). AFTER IT, by the rule of §3 (GPU PORTS): measure each on this session, the torch twin in float64 with
+  numpy kept as the path of record, a test holding both equal — and the cubes kept in memory / on the local disk
+  between steps instead of read ten times from the network volume (reconstruction/fork_scratch.py already
+  places them on the local disk when they fit: 115 GB did not fit its 50 GB).
 - GPU, EVERYTHING THAT CAN (USER 2026-11-11: "todo lo que me marcaste que puede pasarse a GPU hay que hacerlo en GPU,
   ya lo dije mil quinientas veces. Nada debe hacerse en cpu"). Done 2026-11-11, identical results: the mask→point
   match, the audit's dilation and its mask reads in batches, the split's cloud extent, SAM3's batch IoUs and
