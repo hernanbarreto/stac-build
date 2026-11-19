@@ -919,11 +919,44 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   42, video 3540–3725 — the original's weak seam 21–22; then 56, the two of the dark turn, and 28 at video
   2468–2661 — the original's unexplained seam 13–14). The kit after the tool's reinstall and the deletions:
   drift.py — THE KIT IS THE POD, nothing to capture.
+  ⚠⚠ THE FIVE SCANS WERE STRIPPED OF MORE THAN "INTERMEDIATES" — THE ASSISTANT'S ERROR, TOLD TO HIM 2026-11-19
+  (found when he asked that the freeing be automatic: "Esto de liberar los intermedios debería hacerse de forma
+  automática, se podría hacer una vez que termina la nube o recién cuando termina genrecon? Pero como sea y
+  cuando se pueda el sistema debe liberar ese espacio"). output/omega_run/results_output — the per-keyframe Omega
+  RECORDS (depth, confidence, pose, K, chunk) — was removed with omega_run on pccr 2408 (07:00 UTC, his OK to
+  "Intermedios de la original") and on pccr 3108, zaragoza, observatorio and bufferStop (14:21 UTC, his answer
+  "Intermedios de las 5 sesiones"), each time described by the assistant as serving only a resume, WITHOUT TRACING
+  ITS READERS. THEY ARE READ AFTER THE CLOUD:
+  · correction.epoch.reconstruction_id hashes them — the reconstruction's IDENTITY; it RAISES with no record. The
+    floor transform's seal (floor_level.json: reconstruction id + the cloud's sha256, point 158) can then match
+    nothing: floor_seal_verdict = (False, "the session has no reconstruction id (no Omega records)") on the five
+    (measured with the functions themselves). THE VIEWER then ignores floor_transform.npz (declared in the log):
+    no change on four scans — their npz is the identity — and bufferStop loses its adjustment of 2026-11-17
+    (0.13 deg, 3.6 mm). EVERY STAGE THAT PROJECTS (segmentation.pipeline._display_transform: the projection,
+    sam3_worker, erase, fuse_parent, geometric_cleanup, cube_boxes) RAISES on the five, since an npz is there and
+    no seal can match; a new levelling or a calibration's rescale would be sealed with the id None.
+  · correction/floor.py omega_chunk_of_frames (the automatic floor step, line 974; precision/cloud_metrics): the
+    chunk that owns each keyframe, read from each record — raises without them (chunk_sim3.json holds the same
+    owner list).
+  · segmentation/autoprompt/session_builder._depth_provider: the VLM stage's optional per-frame depth (None when
+    the folder is absent).
+  NOT AFFECTED: the clouds, octrees, meshes, segmentations and stores as they are; the export's plan answered on
+  pccr and bufferStop. The files cannot be brought back from the pod (emptied before removal; pccr 2408's removed
+  by a plain delete in the morning).
+  PROPOSED TO HIM, WAITING FOR HIS OK (nothing started): (1) the identity persisted in a small file when the
+  reconstruction ends — on the five recovered from the value their own sealed artifacts carry (floor_level.json's
+  stamp; every artifact that carries it must agree), declared as recovered; (2) the keyframe's chunk read from
+  chunk_sim3.json; (3) with both, the system releases by itself, once the cloud is published, what no later stage
+  reads: the records, the F6 context views, the restart epochs (about 40 GB on pccr 2408) — his requirement. The
+  readers still to audit before it: da3_run's (session_io / mask_space fallbacks, tsdf_export), the VLM's depth.
   THE ASSISTANT'S ERRORS IN THIS STUDY, told to him: "the front has only 4,616 points, almost all from one image"
   (they were the OBJECT's points, not the face's: "no puede ser … contestame antes esto"); expecting the cut at the
   hole to close the rack (5 cm); the invented safety net above; THE DISK — "hay margen" / "el tramo 1 entra con
   holgura" said on an estimate of ~50 GB for a stage that needs ~165 GB, a guard that measured the wrong size, and
-  a question window that left the pod idle 4.5 h (§2, §4).
+  a question window that left the pod idle 4.5 h (§2, §4); AND THE GRAVEST — folders deleted on his five validated
+  scans on the assistant's own description of them, without reading who reads them (the block above). THE RULE IT
+  LEAVES: nothing is deleted from a session before `grep` has listed every reader of it in server/ and each one
+  has been read; "intermediate" is a claim to prove, not a name.
 - ⭐⭐⭐ THE LIST OF 2026-11-19 — HIS POINTS, WITH HIS NUMBERS (RESUME HERE; the 2026-11-18 block below is its
   background). He tried the night's work in the browser and it failed nearly everywhere; each point was then
   worked with him, one change at a time, on his screenshots. HIS VERDICTS (2026-11-19: "1. confirmado, 2.
