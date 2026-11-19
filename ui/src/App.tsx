@@ -1762,7 +1762,9 @@ function App() {
     const poll = async () => {
       try {
         const d = await fetch('/api/tasks').then(r => r.json())
-        const next: JobTask[] = (d.tasks || []).map((x: any) => ({ id: String(x.task_id ?? ''), session: String(x.session_id ?? ''), type: String(x.task_type ?? ''),
+        // (a pipeline job is registered there too, as type 'pipeline': it has its own rows — the followed job's stages
+        //  and the queue, from /api/pipelines/active — and counted here as well it showed 2 for one reconstruction)
+        const next: JobTask[] = (d.tasks || []).filter((x: any) => x.task_type !== 'pipeline').map((x: any) => ({ id: String(x.task_id ?? ''), session: String(x.session_id ?? ''), type: String(x.task_type ?? ''),
                                                                   label: x.label || x.task_type || '', pct: x.pct || 0, detail: x.detail || '' }))
         // (the same list is the same state: the app is not drawn again every poll)
         if (!stop) setActiveTasks(prev => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next))
