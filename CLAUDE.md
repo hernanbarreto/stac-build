@@ -837,11 +837,18 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     cloud only, with — in ITS OWN frozen configuration only, config.yaml put back identical — cube_overlap 0.75,
     intake.quality.luma_lo 0.0 and clip_frac_max 1.0 (no frame is rejected by its exposure: 60 of the hole's frames
     would otherwise fall to the clipped-pixels rule).
-  · STAGE 1 ENDS AT THE CUBE GRAPH: scratchpad watch_copy.py cancels the job when
-    output/maplong_run/chunk_graph.json appears. THEN: the seams (does the hole's zone come down to ~2 cm?), the
-    cubes' scales, the closures, the rack — numbers to him. STAGE 2 (F2 … F6, ~15 h) ONLY ON HIS WORD: the same order
-    with replace OFF resumes on the stamps. The original took ~20 h in all (AMB3R ~1 h; cubes, Omega, bridges and
-    graph 3.8 h; tracks 5.8 h; refine 5.7 h; F6 2.9 h).
+  · STAGE 1 ENDS AT THE CUBE GRAPH — STOPPED WHEN THE CUBES ARE PLACED: scratchpad watch_copy.py reports when
+    output/maplong_run/chunk_graph.json appears (the numbers can be read then: scratchpad eval_graph.py <scan dir>,
+    which gives the original's too) and CANCELS the job when chunk_sim3.json appears — after the graph the run moves
+    every cube's points onto its pose (cube_run.apply: np.save, not a rename), and a kill inside a save would leave a
+    cut file that a resume takes for a placed cube. THEN: the seams (does the hole's zone come down to ~2 cm?), the
+    cubes' scales, the closures, the rack — numbers to him. STAGE 2 (F2 … F6, ~15 h) ONLY ON HIS WORD.
+    ⚠ THE RESUME'S TRAP: a new order freezes the CURRENT config.yaml (pipeline_manager: "what differs from the
+    session's frozen one is declared and the job freezes its own") — with replace OFF and config.yaml as it is, the
+    copy would be cut again at one half and its frames rejected again. Stage 2 is ordered as stage 1 was: the three
+    values written into config.yaml for the order (cube_overlap 0.75, luma_lo 0.0, clip_frac_max 1.0), the frozen
+    run_config.yaml checked, config.yaml put back identical. The original took ~20 h in all (AMB3R ~1 h; cubes,
+    Omega, bridges and graph 3.8 h; tracks 5.8 h; refine 5.7 h; F6 2.9 h).
   FREED ON HIS CHOICE (~32 GB): the ORIGINAL pccr 2408's output/omega_run, output/da3_run and
   maplong_run/context_views (that scan can no longer RESUME its reconstruction; its products are intact),
   runs/eval, and /workspace/tmp whole — the worktrees wt_gpu_main and wt_scale removed with `git worktree remove`
