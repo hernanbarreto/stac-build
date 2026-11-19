@@ -1959,6 +1959,15 @@ reconstruction:
                                         # tener menos de 32 kf por ejemplo"): a cube under this many keyframes
                                         # merges into its neighbour at the cut (the 99.8 cm seam stood on a
                                         # 5-shared-frame joint)
+      cube_overlap: 0.5                 # the share of its keyframes a cube has in common with the next. 0.5 = the
+                                        # VALIDATED half (USER 2026-11-08: "siempre deben tener el 50 % de solape").
+                                        # A parameter since 2026-11-19, for the study of pccr 2026-08-24 on a parallel
+                                        # copy (USER: "lo que hay que hacer … es que compartan muchas mas imagenes
+                                        # entre cubos, tal vez agrandar el cubo un poco, es decir, cada cubo debe
+                                        # tener coherencia y con sus vecinos"; asked which values: "64, comparten
+                                        # 3/4") — 0.75: every keyframe lies in four cubes, a seam stands on 48 shared
+                                        # keyframes instead of 32, twice the cubes. NOT changed here: the copy's job
+                                        # carries its own value.
     scale_align: true                   # metric: DA3 anchor + scale_align (global similarity:
                                         # scales cloud + poses by s = median DA3/Omega depth).
                                         # false → up-to-scale (raw Omega isolation test).

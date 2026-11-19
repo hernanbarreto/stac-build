@@ -788,6 +788,70 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   the same; §7, the list of 2026-11-19, point 9).
 
 ## 7 · PENDING
+- ⭐⭐⭐ THE STUDY OF PCCR 2026-08-24 AND ITS PARALLEL COPY — RUNNING (started 2026-11-19; RESUME HERE FIRST).
+  USER, on two parts of one rack that do not join (wall#598: its side and rear, cabinet#2534: its front): "quiero
+  que veas algo y pensemos juntos como resolverlo" / "en algun punto se estiro el recorrido y derivo, o bien, la
+  profundidad no es la correcta" / "habria que buscar donde hay huecos similares que rompen las costuras" / "el
+  piso en esa zona no solo esta duplicado sino que esta mas abajo, hizo un escalonazo tremendo que hay que
+  corregir, no te rindas" / "debemos encontrar una solucion de fondo, pero estudiemos el caso … aprovechemos que es
+  un caso bien complejo y completo".
+  WHAT WAS MEASURED (read only; the scripts are in the session's scratchpad, not in the repo):
+  · THE RACK: the L was published by keyframes 786–801 (video 4020–4105, 28 % of the walk, cube 24); the front by
+    keyframes 1932–1951 (video 10000–10094, 70 %, cubes 59 / 60). The front FACE holds 55,046 points, each with 5–36
+    confirming views (median 15) — the vote's minimum is 5 (`min_support_views`, his of 2026-11-08), not 10. The first
+    0.9 m of the side, from the front, was seen well by 6 keyframes only: COVERAGE, not drift. Front to rear: 1.59 m
+    in the cloud (the real depth: asked, not answered).
+  · THE CUBE GRAPH (output/maplong_run/chunk_graph.json): 86 cubes, 92 seams (sigma median 2.0 cm), 1320 revisit
+    closures of which ONLY 48 % agree with the solution within 3 sigma (pccr 3108 98 %, zaragoza and observatorio
+    100 %, bufferStop 71 %); 556 are off by more than 50 cm, 103 by more than 135 deg. The chain alone had STRETCHED:
+    the graph shrank the cubes of the second half by up to 17 % and moved them by a median of 4.2 m. Between the
+    first visit of the rack's zone (cubes 14–33) and the later ones (40–63): 42 closures, 8 agree, left over 14–30 cm.
+  · ⭐ THE HOLE. The video has exactly TWO runs of frames whose mean brightness is under 40 —
+    `intake.quality.luma_lo: 40`, a fixed BOUND, "dark = unusable" — and they are the ONLY two gaps of more than 8
+    frames between keyframes: video 6274–6403 (130 frames, 4.3 s: a turn in a dark corner; 62 of them between 30
+    and 40, as good as the corridor accepted right after at 40–50) and 11188–11201 (14 frames at 37–38). Before and
+    after the first one the views share nothing; cubes 37 and 38 hold keyframes of both sides (38: one of before,
+    63 of after) and GUESSED: seams 37–38 / 38–39 / 38–40 with sigma 10.0 / 24.2 / 19.8 cm, left 51 / 42 / 42 cm
+    off by the graph; F6's per-keyframe depth scale jumps from x0.965 to x1.23 at the hole; AND THE FLOOR OF CUBES
+    37 AND 38 IS PUBLISHED 36 AND 32 cm LOW (1.37 M points — his "escalonazo"). Cubes 39 and 40, whole after the
+    hole, are right (floor at -7 and -1 cm, their seam 1.9 cm).
+  · THE GRAPH SOLVED AGAIN OFFLINE from its stored edges (it reproduces the stored solution within 0.34 mm):
+    cutting the seam 37–38 opens it to 88 cm but moves the rack's two parts 5.4 cm only; without the false closures,
+    9–16 cm; NO variant lifts the low floor (within 7 cm) — the error is INSIDE those cubes, not in where they sit.
+    The agreeing closures across the hole disagree among themselves as scatter (13 cm mean, 2 cm mean vector).
+  · NOT EXPLAINED YET: seam 13–14 (sigma 12.5 cm, no gap, own scale 1.17); why half of this session's closures are
+    false.
+  HIS PRINCIPLES FOR THE FIX (2026-11-19, on the assistant's "a cube whose seams give five times the normal is
+  marked bent and not published"): "no me gusta cuando decis este tipo de cosas … de donde sacaste eso, lo que hay
+  que hacer ademas en realidad es que compartan muchas mas imagenes entre cubos, tal vez agrandar el cubo un poco,
+  es decir, cada cubo debe tener coherencia y con sus vecinos, ademas, si empezamos a descartar costuras buenas por
+  un error, eso si esta mal, las costuras buenas deben aplicarse" — RETRACTED by the assistant (an invented number,
+  and it hid the failure). THE GOOD SEAMS ARE ALWAYS APPLIED; a cube is made COHERENT, never dropped.
+  THE EXPERIMENT (his: "dale, pero apliquemos no solo en esa zona, en todo el recorrido, quiero ver como queda en
+  una copia paralela, sin el sam sin nada de eso, pero si rehacer lo que podamos en una copia"; his choices: IN TWO
+  STAGES · cubes of 64 sharing 3/4 · free the three things):
+  · `reconstruction.vggtomega.structure.cube_overlap` — the share of its keyframes a cube has in common with the
+    next, a parameter since today (cubes.py `overlap`, exact fractions; 0.5 gives the plan of before, tested).
+    config.yaml keeps 0.5.
+  · THE COPY: session `pccr2408_prueba` (the same video and frames), launched 2026-11-19 07:16 UTC, replace ON,
+    cloud only, with — in ITS OWN frozen configuration only, config.yaml put back identical — cube_overlap 0.75,
+    intake.quality.luma_lo 0.0 and clip_frac_max 1.0 (no frame is rejected by its exposure: 60 of the hole's frames
+    would otherwise fall to the clipped-pixels rule).
+  · STAGE 1 ENDS AT THE CUBE GRAPH: scratchpad watch_copy.py cancels the job when
+    output/maplong_run/chunk_graph.json appears. THEN: the seams (does the hole's zone come down to ~2 cm?), the
+    cubes' scales, the closures, the rack — numbers to him. STAGE 2 (F2 … F6, ~15 h) ONLY ON HIS WORD: the same order
+    with replace OFF resumes on the stamps. The original took ~20 h in all (AMB3R ~1 h; cubes, Omega, bridges and
+    graph 3.8 h; tracks 5.8 h; refine 5.7 h; F6 2.9 h).
+  FREED ON HIS CHOICE (~32 GB): the ORIGINAL pccr 2408's output/omega_run, output/da3_run and
+  maplong_run/context_views (that scan can no longer RESUME its reconstruction; its products are intact),
+  runs/eval, and /workspace/tmp whole — the worktrees wt_gpu_main and wt_scale removed with `git worktree remove`
+  (wt_scale's 7 uncommitted files are gone; the branch gpu-main stays). ⚠ OWED: the rebuild kit's drift.py /
+  capture.sh after that (the set records the worktrees).
+  ALSO OWED: the console icon's count takes a pipeline job TWICE (main.py registers it in the task manager as type
+  "pipeline" too) — the interface must leave that type out; an interface edit, to be announced.
+  THE ASSISTANT'S ERRORS IN THIS STUDY, told to him: "the front has only 4,616 points, almost all from one image"
+  (they were the OBJECT's points, not the face's: "no puede ser … contestame antes esto"); expecting the cut at the
+  hole to close the rack (5 cm); the invented safety net above.
 - ⭐⭐⭐ THE LIST OF 2026-11-19 — HIS POINTS, WITH HIS NUMBERS (RESUME HERE; the 2026-11-18 block below is its
   background). He tried the night's work in the browser and it failed nearly everywhere; each point was then
   worked with him, one change at a time, on his screenshots. HIS VERDICTS (2026-11-19: "1. confirmado, 2.

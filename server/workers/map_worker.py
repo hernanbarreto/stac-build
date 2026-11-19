@@ -2002,7 +2002,17 @@ def _structure_config(va_cfg: dict) -> dict:
             "cut": str(st.get("cut", "covis")),
             # USER 2026-11-08 ("los chunks pequeños deben fusionarse, no debemos tener menos de 32 kf"):
             # a cube under this many keyframes merges into its neighbour at the cut
-            "min_chunk_keyframes": int(st.get("min_chunk_keyframes", 32))}
+            "min_chunk_keyframes": int(st.get("min_chunk_keyframes", 32)),
+            # USER 2026-11-19 ("lo que hay que hacer … es que compartan muchas mas imagenes entre cubos"): the share
+            # of its keyframes a cube has in common with the next; 0.5 = the half of 2026-11-08
+            "cube_overlap": _cube_overlap(st.get("cube_overlap", 0.5))}
+
+
+def _cube_overlap(v) -> float:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not (0.0 < float(v) < 1.0):
+        raise RuntimeError(f"reconstruction.vggtomega.structure.cube_overlap {v!r}: the share of its keyframes a cube "
+                           f"has in common with the next, in (0, 1) — 0.5 is the validated half")
+    return float(v)
 
 
 def _single_pass_capacity(config: dict, vggt_config: dict, frames_dir, n_keyframes: int, n_witness: int,
@@ -2553,7 +2563,7 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
                                sky_cache=output_dir / "maplong_run" / "sky_masks", log=pipe.send_log,
                                probe=_st_cfg["probe"], cube_m=_st_cfg["cube_m"], walk_m=_walk0,
                                cut=_st_cfg["cut"], min_kf=int(_st_cfg["min_chunk_keyframes"]),
-                               view_range_m=_view_range_m(config))
+                               view_range_m=_view_range_m(config), overlap=_st_cfg["cube_overlap"])
     _cubes = _cplan["cubes"]
     # no SALAD on cubes, one cube or many (the revisits are AMB3R's map's: which keyframe sees what —
     # reconstruction/cubes.py 7): a previous reconstruction's revisit reference and SALAD pairs are deleted — never

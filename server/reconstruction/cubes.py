@@ -195,6 +195,7 @@ def cube_box(cams: np.ndarray, size: float):
     return lo, hi, mid, hx
 
 
+OVERLAP = 0.5                   # the share of its keyframes a cube has in common with the next (USER 2026-11-08: "50 % de solape, siempre")
 COVIS_TAU = 0.3                 # a keyframe still "sees" the next while they share ≥ this of its view (chunk_covis.TAU)
 
 
@@ -223,11 +224,19 @@ def covis_lengths(covis: Dict, kf_frames: Sequence[int], tau: float = COVIS_TAU)
 def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], *, metres_per_unit: float, cube_m: float = CUBE_M,
                max_views: int = MAX_CUBE_VIEWS, device: str = "cuda", cut: str = "covis",
                covis: Optional[Dict] = None, kf_frames: Optional[Sequence[int]] = None,
-               covis_tau: float = COVIS_TAU, budget: Optional[float] = None, min_kf: int = 0) -> Dict:
+               covis_tau: float = COVIS_TAU, budget: Optional[float] = None, min_kf: int = 0,
+               overlap: float = OVERLAP) -> Dict:
     """The cubes of ``units`` (units_of) along the walk (module doc 2–4): a cube takes the units in order while their
     mean cameras fit a box of ``cube_m`` (the probe's metre: ``metres_per_unit``) on every axis of the gravity frame
     and its views stay within ``max_views`` — at least two units, so that neighbours share one; the next cube starts at
-    the unit where half of this cube's keyframes lie behind it; a unit's owner is the cube where it lies deepest."""
+    the unit where the share ``1 − overlap`` of this cube's keyframes lies behind it (``overlap`` 0.5: half — USER
+    2026-11-08; 0.75: neighbours share three quarters and every keyframe lies in four cubes — USER 2026-11-19, "lo
+    que hay que hacer … es que compartan muchas mas imagenes entre cubos"); a unit's owner is the cube where it lies
+    deepest."""
+    from fractions import Fraction
+    if isinstance(overlap, bool) or not isinstance(overlap, (int, float)) or not (0.0 < float(overlap) < 1.0):
+        raise CubePlanError(f"overlap {overlap!r}: the share of its keyframes a cube has in common with the next, in (0, 1)")
+    ov = Fraction(str(float(overlap)))                           # exact: 0.5 → 1/2, 0.75 → 3/4 (integer comparisons below)
     U = len(units)
     if U == 0:
         raise CubePlanError("no unit to plan")
@@ -281,10 +290,11 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], *, metres_per_unit: float,
         spans.append((s0, e))
         if e == U - 1:
             break
-        # half of this cube's keyframes behind the next start (at least one unit shared, always a step forward)
+        # the share (1 − overlap) of this cube's keyframes behind the next start — half of them at overlap 1/2 — (at
+        # least one unit shared, always a step forward)
         behind, nxt = 0, e
         for u in range(s0, e + 1):
-            if behind * 2 >= int(nk[s0:e + 1].sum()):
+            if behind * ov.denominator >= (ov.denominator - ov.numerator) * int(nk[s0:e + 1].sum()):
                 nxt = u
                 break
             behind += int(nk[u])
@@ -317,9 +327,10 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], *, metres_per_unit: float,
         if merged:
             print(f"[cubes] {merged} cube(s) under {int(min_kf)} keyframes fused into their neighbours "
                   f"(USER 2026-11-08: 'los chunks pequeños deben fusionarse') — {len(spans)} cube(s) remain")
-    # 50 % OVERLAP, ALWAYS (USER 2026-11-08: "siempre deben tener el 50 % de solape" — the 99.8 cm seam stood
-    # on 5 shared frames): consecutive cubes share at least HALF of the smaller one's keyframes; a short seam
-    # extends the next cube's start backwards, one unit at a time, left to right (deterministic).
+    # THE OVERLAP, ALWAYS (USER 2026-11-08: "siempre deben tener el 50 % de solape" — the 99.8 cm seam stood
+    # on 5 shared frames): consecutive cubes share at least the share ``overlap`` (HALF, at 1/2) of the smaller
+    # one's keyframes; a short seam extends the next cube's start backwards, one unit at a time, left to right
+    # (deterministic).
     if len(spans) > 1:
         widened = 0
         for i in range(len(spans) - 1):
@@ -328,14 +339,15 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], *, metres_per_unit: float,
                 a0, b0 = spans[i]
                 sh = int(nk[max(a1, a0):min(b0, b1) + 1].sum()) if a1 <= b0 else 0
                 k0, k1 = int(nk[a0:b0 + 1].sum()), int(nk[a1:b1 + 1].sum())
-                if sh * 2 >= min(k0, k1) or a1 <= a0:
+                if sh * ov.denominator >= ov.numerator * min(k0, k1) or a1 <= a0:
                     break
                 a1 -= 1
                 widened += 1
             spans[i + 1] = (a1, b1)
         if widened:
             print(f"[cubes] overlap widened by {widened} unit step(s): every pair of neighbours shares at least "
-                  f"half of the smaller cube's keyframes (USER 2026-11-08: '50 % de solape, siempre')")
+                  f"{ov.numerator}/{ov.denominator} of the smaller cube's keyframes (USER 2026-11-08: '50 % de solape, "
+                  f"siempre'; the share is reconstruction.vggtomega.structure.cube_overlap)")
     owner_unit = []
     for u in range(U):
         cand = [(min(u - a, b - u), -i) for i, (a, b) in enumerate(spans) if a <= u <= b]
@@ -366,6 +378,7 @@ def plan_cubes(c2w_kf: np.ndarray, units: List[Dict], *, metres_per_unit: float,
     ov = [cubes[i]["shared_keyframes"] / max(len(cubes[i]["keyframes"]), 1) for i in range(len(cubes))]
     return {"gravity_frame": R.tolist(), "max_views": int(max_views), "cube_m": float(cube_m),
             "cut": cut, "covis_budget_lengths": (H if cut == "covis" else None), "covis_tau": float(covis_tau),
+            "overlap": float(overlap),
             "unit_budget": du.tolist(),
             "metres_per_unit": float(metres_per_unit), "cubes": cubes, "owner_unit": owner_unit,
             "owner": owner.tolist(),
@@ -470,7 +483,7 @@ def analyse(probe_npz: Path, inputs: Dict, *, device: str = "cuda", log: Callabl
     del cmap
     plan = plan_cubes(kf_c2w, units, metres_per_unit=mpu, cube_m=cube_m, max_views=int(inputs["max_views"]),
                       device=device, cut=str(inputs.get("cut", "covis")), covis=kf_cov, kf_frames=kf,
-                      min_kf=int(inputs.get("min_chunk_keyframes", 0)))
+                      min_kf=int(inputs.get("min_chunk_keyframes", 0)), overlap=float(inputs.get("overlap", OVERLAP)))
     ctx = cube_extras(plan["cubes"], kf, turns)
     wit = cube_extras(plan["cubes"], kf, inputs.get("witness") or [])
     for cb, cx, wx in zip(plan["cubes"], ctx, wit):
@@ -556,7 +569,7 @@ def session_cubes(scan_dir: Path, frames_dir: Path, sel_files: Sequence[str], tu
                   witness_files: Sequence[str], cfg_v: dict, *, resolution: int, max_views: int,
                   sky_cache: Optional[Path], log: Callable[[str], None], probe: str = "omega",
                   cube_m: float = CUBE_M, walk_m: float = 0.0, cut: str = "covis", min_kf: int = 0,
-                  view_range_m: float = 0.0) -> Dict:
+                  view_range_m: float = 0.0, overlap: float = OVERLAP) -> Dict:
     """The session's cube plan on the STRUCTURE PROBE — ``probe`` "amb3r": AMB3R-SLAM's whole-video pass
     (intake/amb3r_video.npz, run right after the intake's keyframes — workers/map_worker._run_intake_selection —
     and the keyframes completed on it, reconstruction/coverage_fill.py); "omega": one Omega pass over every keyframe
@@ -616,6 +629,9 @@ def session_cubes(scan_dir: Path, frames_dir: Path, sel_files: Sequence[str], tu
               "cube_m": float(cube_m), "walk_m": float(walk_m),
               # THE RANGE (reconstruction.view_range_m): the AMB3R map the cut reads holds only points within it
               "view_range_m": float(view_range_m)}
+    if float(overlap) != OVERLAP:
+        # (only when it is not the half of 2026-11-08: the plans cut at one half keep the inputs they were stamped with)
+        inputs["overlap"] = float(overlap)
     h = hashlib.sha256(json.dumps(stamp, sort_keys=True).encode())
     h.update(code_sha().encode())
     h.update(json.dumps(inputs, sort_keys=True).encode())
