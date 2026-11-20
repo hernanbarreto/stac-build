@@ -1308,11 +1308,37 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
       scrolls; a menu is measured once drawn and moved back inside the screen (Menu.tsx).
     – the interface's own checks: type-check and eslint clean; check-tokens 51 findings before and after
       (none new; the live tree already failed it, check-inline and check-strings).
-  · STAGE 1, STILL TO DO (1b — in the copy first): the deviation legend over the scale bar (ViewportHud: one
-    bottom container that wraps) — the mock does not show the sheet: to be forced or reasoned; the
-    Segmentation manager (footer wrap, the keyframe's max-height), Reference tools (the list under its form),
-    the Common points window over the model, the tables' action columns (empty header), the header and the
-    status bar when tight. THEN stages 2 (tablet + touch basics), 3 (phone), 4 (the viewer by touch).
+  · ⭐ STAGE 1, SECOND BATCH — APPLIED TO HIS PAGE 2026-11-20 05:06 / 05:08 UTC (de1a603; USER: "ok, continua"),
+    WAITING FOR HIS EYE. 52 pictures (13 states × 4 PC sizes): no control cut, no page error.
+    – ⚠ A REAL DEFECT, FOUND BY RENDERING IT (the audit had it as "not verified"): `ui/Table` gives every cell
+      `max-width: 0`; a column of ROW BUTTONS under an empty header got its padding only — 32 px of a 608-px
+      table, and of the Common points row's four buttons ONLY DELETE COULD BE SEEN (Mark here, Focus, Unmark:
+      0 % visible); the same in the Calibration tables. He was about to try it ("donde esta la opcion de los
+      puntos comunes?" → Tools → Common points, enabled with a session of two or more scans): the fix went to
+      his page at once. A column with no header text (or `fit: true`) is as wide as its content, unclipped.
+    – Common points: `size="md"` (440 px; it left the viewer 374 px at 1366, now 574), the name column takes
+      the free width. The viewer's bottom edge is ONE wrapping line (`.stac-hud__bottom`: the chips, then the
+      deviation's legend — it goes ABOVE them when both do not fit). Segmentation manager: the footer wraps,
+      the keyframe is sized in container units of ITS box. Reference tools: the list keeps four rows, the
+      column scrolls on a short window. The physics panel between the toolbar's row and the bottom chips.
+    – the rig gained: a `deviation` state (the served App module patched in the browser — the mock has no BIM
+      model; the source is not edited), states that open Common points / Reference / Segmentation manager /
+      physics from the menus, `ui/scripts/probe-page.mjs` (one page, what is clipped in its `[data-box]`es)
+      and, IN THE PRIVATE COPY ONLY, probe-table.html + src/__probe__/table.tsx (the Table with a buttons
+      column at 608 / 408 / 328 px). The mock: a fixture for the common points, instance names as long as
+      real ones.
+    – NOT SEEN (the mock has no keyframes): the Segmentation manager's keyframe and the Reference tools with
+      an image and an item selected — reasoned from the rules; his eye.
+  · HIS QUESTION OF THE SAME HOUR, HIS DECISION PENDING: "pero las funciones Reference distance y reference
+    plane, no quedaron en calibration on 3d model?, o sea son obsoletas" — ANSWERED: two tools; the toolbar's
+    Calibration (on the cloud, his order of 2026-11-13) and the Tools menu's Reference distance / Reference
+    plane, the OLD window that marks on the keyframes' images (ReferenceDialog; left "as they were" then): it
+    feeds only the evaluation battery (evaluation/references.py, variants.py, the dock's Evaluation tab), 16
+    voice commands open it (commands/catalog/220_references.yaml), NO session holds a
+    `reference_measures.json` (nor a `calibration_3d.json`). ASKED: remove the two menu entries and the voice
+    commands? Nothing touched.
+  · STILL TO DO: the header and the status bar when tight (they fit from 1280 up; under it they belong to
+    stage 2); THEN stages 2 (tablet + touch basics), 3 (phone), 4 (the viewer by touch).
 - ⭐⭐⭐ THE LIST OF 2026-11-19 — HIS POINTS, WITH HIS NUMBERS (RESUME HERE; the 2026-11-18 block below is its
   background). He tried the night's work in the browser and it failed nearly everywhere; each point was then
   worked with him, one change at a time, on his screenshots. HIS VERDICTS (2026-11-19: "1. confirmado, 2.
