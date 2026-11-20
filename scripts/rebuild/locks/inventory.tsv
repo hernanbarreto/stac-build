@@ -63,7 +63,7 @@ cache	.stac_rebuild/	0	-	the rebuild's own stamps, logs and downloads
 download	Miniforge3-Linux-x86_64.sh	106038245	42260ffe3830fb953d5eee1bbb32229ff06aa7c3833c1ed7a9a0420a95685d94	Miniforge3 26.3.2-2
 download	cloudflared	39799316	fcfb02b575a52ca1af2e3267af4e1517bcdeb30ac48c834c69abaed3c0576ad2	cloudflared 2026.8.2
 data	cloudflared.log	15552	-	log
-asis	dev_patches_20261119.tar.gz	103172	b661413e7be2ebe775ab1e0d3cef86757174aea263bd33ec3b254e2b85f18ba9	
+asis	dev_patches_20261120.tar.gz	244232	72d381094ef0468c8f582765ff68eb8d298c620f20ada8151b67de50730c2d96	
 cache	dinov2_mapanything/__pycache__/	0	-	python bytecode
 download	dinov2_mapanything/dinov2/__init__.py	218	0d2b87b7e71c7f7279ccc4b4f8b541d26071425284a0ea01a5a435fac4511cfe	facebookresearch/dinov2 @ 9c7e324 (hubconf.py + dinov2/)
 cache	dinov2_mapanything/dinov2/__pycache__/	0	-	python bytecode
@@ -313,7 +313,7 @@ cache	stac-build/.ipynb_checkpoints/	0	-	jupyter
 cache	stac-build/.pytest_cache/	0	-	pytest
 asis	stac-build/archive/sam3_env_20260703.yml	5957	1f28058f8c12f6ef6dab41bdfa0e6d2e51b208847a6ef9795ed3c1c9a6e60c32	
 asis	stac-build/archive/shaper_env_20260703.yml	7470	e4eca92f3de656cb7783521529bb25568b5616ff49fc2eb53f855184c2bbc4df	
-data	stac-build/logs/	357242011	704 files	the backend's logs
+data	stac-build/logs/	359404909	713 files	the backend's logs
 data	stac-build/runs/	0	0 files	evaluation runs
 cache	stac-build/scripts/__pycache__/	0	-	python bytecode
 cache	stac-build/scripts/rebuild/__pycache__/	0	-	python bytecode
@@ -349,7 +349,7 @@ cache	stac-build/server/fusion/__pycache__/	0	-	python bytecode
 cache	stac-build/server/gaussians/__pycache__/	0	-	python bytecode
 cache	stac-build/server/ingestors/__pycache__/	0	-	python bytecode
 cache	stac-build/server/intake/__pycache__/	0	-	python bytecode
-data	stac-build/server/logs/	27026239	2 files	logs
+data	stac-build/server/logs/	27313654	2 files	logs
 cache	stac-build/server/patches/__pycache__/	0	-	python bytecode
 cache	stac-build/server/phase2_classify/__pycache__/	0	-	python bytecode
 cache	stac-build/server/phase2_classify/tests/__pycache__/	0	-	python bytecode
@@ -366,7 +366,7 @@ cache	stac-build/server/phase7_validation/tests/__pycache__/	0	-	python bytecode
 cache	stac-build/server/phase_r/__pycache__/	0	-	python bytecode
 cache	stac-build/server/phase_r/tests/__pycache__/	0	-	python bytecode
 cache	stac-build/server/precision/__pycache__/	0	-	python bytecode
-data	stac-build/server/projects/	128545504273	62115 files	THE SESSIONS (videos, clouds, segmentations, meshes)
+data	stac-build/server/projects/	133394926713	63594 files	THE SESSIONS (videos, clouds, segmentations, meshes)
 data	stac-build/server/quick_cloud.log	72	-	logs
 cache	stac-build/server/reconstruction/__pycache__/	0	-	python bytecode
 cache	stac-build/server/reconstruction/certify/__pycache__/	0	-	python bytecode
@@ -2558,7 +2558,7 @@ asis	stac-build/vendor/PotreeConverter/build/resources/page_template/libs/tween/
 asis	stac-build/vendor/PotreeConverter/build/resources/page_template/libs/tween/tween.min.js	5766	eeb205d3d1ba5c21728424a712849a9190d61fabbf3f57b54c249aa2c4184ef8	
 asis	stac-build/vendor/PotreeConverter/build/resources/page_template/libs/zstd-codec/bundle.js	3127381	3d0976628cfa4cb0abca2cca8fb0f65c245fa8829d0d3097ba0876d62b786c54	
 asis	stac-build/vendor/PotreeConverter/build/resources/page_template/viewer_template.html	2199	2b4e5aff401503a3913212275e15094093f396be6cfa76d56763a39d83041727	
-git-head	stac-build/vendor/VGGT-Long/	0	bcdb0d94b8f4155d86ca734ff8ace47874fa323b	clean; 2261 tracked files
+git-head	stac-build/vendor/VGGT-Long/	0	bcd2a539a28464606b6ccdd6ff4a50261335c093	clean; 2264 tracked files
 cache	stac-build/vendor/VGGT-Long/.pytest_cache/	0	-	pytest
 cache	stac-build/vendor/VGGT-Long/LoopModelDBoW/retrieval/__pycache__/	0	-	python bytecode
 cache	stac-build/vendor/VGGT-Long/LoopModels/__pycache__/	0	-	python bytecode
@@ -5656,9 +5656,9 @@ private	tailscale/certs/	5068	2 files	the Tailscale node's TLS certificate
 private	tailscale/state/	24355	5 files	the Tailscale node's identity
 download	tailscale/tailscale	21268215	349b69aa2e8db0ce430c9ef600e16b1e4b2820286d354a0ca6bb5fdb66b8fa55	Tailscale 1.86.2
 download	tailscale/tailscaled	40048426	dd5ff38a1539554498e8b9d6bb0ed3dc565c70c42eeecb6ecca7695f8e0be870	Tailscale 1.86.2
-data	tailscale/tailscaled.log	27777	-	log
+data	tailscale/tailscaled.log	42125	-	log
 data	tailscale/tailscaled.sock	0	-	a socket
-data	tmp/	725105	48 files	scratch of past work (worktrees are recreated from locks/git-refs.tsv)
+data	tmp/	806211	53 files	scratch of past work (worktrees are recreated from locks/git-refs.tsv)
 cache	torch_cache/.ipynb_checkpoints/	0	-	jupyter
 weight	torch_cache/hub/checkpoints/dinov2_vitb14_pretrain.pth	346378731	-	models.tsv
 asis	torch_cache/hub/facebookresearch_dinov2_main/.github/workflows/lint.yaml	796	843ad6a49b4b9d5c852ac97c2261038424bc14dc3ccee1f5cdbdc4f79a4fbbaf	
