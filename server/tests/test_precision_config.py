@@ -192,3 +192,21 @@ def test_the_torch_solvers_rules_are_declared_and_mandatory():
     del raw["reconstruction"]["precision"]["refine"]["torch_ba"]["lambda_init"]
     with pytest.raises(PrecisionConfigError, match="torch_ba.lambda_init"):
         load_precision_config(raw)
+
+
+def test_the_tracks_file_threads_are_typed_and_a_session_frozen_before_the_key_is_the_record():
+    """`tracks.npz_threads` (2026-11-20): how the file is written and read, never what the tracks are — a frozen
+    configuration without the key loads as the record (0); a wrong value fails naming the key."""
+    import copy
+    from config import cfg as raw_cfg
+    from precision.config import PrecisionConfigError, load_precision_config
+    assert load_precision_config().tracks.npz_threads == 0, "config.yaml keeps the record"
+    raw = copy.deepcopy(dict(raw_cfg))
+    raw["reconstruction"]["precision"]["tracks"].pop("npz_threads")
+    assert load_precision_config(raw).tracks.npz_threads == 0
+    raw["reconstruction"]["precision"]["tracks"]["npz_threads"] = 12
+    assert load_precision_config(raw).tracks.npz_threads == 12
+    for bad in (-1, 2.5, True, "8"):
+        raw["reconstruction"]["precision"]["tracks"]["npz_threads"] = bad
+        with pytest.raises(PrecisionConfigError, match="npz_threads"):
+            load_precision_config(raw)
