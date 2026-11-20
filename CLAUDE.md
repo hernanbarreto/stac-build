@@ -1258,10 +1258,61 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     targets, visible row actions, long press = right click, touch resizers, 16-px inputs, `100dvh`); four
     stages, each ending with ONE thing for him to look at: 1 his PC (nothing hidden), 2 tablet + touch basics,
     3 phone, 4 the viewer by touch (+ a lighter default on a phone: his decision).
-  · ASKED OF HIM, unanswered: the OK to the cuts and to stage 1; whether the assistant may RENDER THE PAGE ON
-    THE POD to see each size before he does (refused on 2026-11-19; Playwright 1.63 is already a dev dependency
-    of the interface, its browser is not downloaded — an install on the local disk; a test login would be
-    needed; software rendering only, never the card).
+  · HIS ANSWERS (USER 2026-11-20, to "¿te sirven esos cortes y arranco por la etapa 1?" and "¿me autorizás a
+    abrir la página en un navegador dentro del pod?"): "1. si, y 2. si por supuesto!". THE REFUSAL OF 2026-11-19
+    IS LIFTED FOR THIS: the assistant may render the page on the pod.
+  · ⭐ THE RIG THAT LETS THE ASSISTANT SEE THE PAGE (built 2026-11-20; NEVER AGAINST THE LIVE BACKEND):
+    – ⚠ `load_session` CHANGES THE SERVER'S ONE SESSION FOR EVERYONE (main.py: alignment reset, frame storage
+      reloaded, the active scan set to the reference on an open) — found while he was browsing sessions through
+      the new address. A test browser therefore never opens a session on the real backend, and NO TEST USER
+      WAS CREATED (not needed): the interface already had a mock backend and a screenshot script of 2026-09-14
+      (`ui/scripts/mock-server.mjs`, port 8790: fake sessions, a synthetic octree, the websockets, a mock
+      login; `ui/scripts/screenshots.mjs` — which WIPES ui/design-review/ and runs a second vite in the live
+      tree: not used).
+    – A PRIVATE WORKING COPY on the local disk, /root/dev/ui-work (ui/src, public, scripts copied;
+      node_modules a symlink; its vite.config.ts with its OWN cacheDir and fs.allow — the live dev server's
+      cache is never written), `STAC_API_TARGET=http://localhost:8790 vite --port 5199`. Changes are made and
+      looked at THERE and reach his page in ONE announced batch (cp of the changed files: CSS hot-swaps, a
+      component that exports only components and types hot-refreshes — FloatingToolbar, Menu did).
+    – The browser: Playwright's Chrome Headless Shell 153 (`npx --no-install playwright install --only-shell
+      chromium` in ui/, 266 MB in /root/.cache/ms-playwright — the LOCAL disk, gone at a pod restart) + apt's
+      libnss3 / libnspr4 (the container's disk too). SOFTWARE RENDERING ONLY: `--use-angle=swiftshader
+      --enable-unsafe-swiftshader --ignore-gpu-blocklist`, the system's EGL vendors hidden
+      (`__EGL_VENDOR_LIBRARY_DIRS=/nonexistent`); `ui/scripts/webgl-probe.mjs` showed the renderer "SwiftShader
+      Device (Subzero)" and nvidia-smi's process list unchanged (setting VK_ICD_FILENAMES to the bundled file
+      BREAKS WebGL). Its first start was held until F5 had passed its exclusive-card check.
+    – `ui/scripts/responsive-shots.mjs <out> --sizes … --states …`: per size × state the picture and, in
+      report.json, what a user cannot reach — every control cut by a clipping ancestor or the page's edge
+      with no scroll to bring it back —, the viewer overlays that intersect, the controls under 40 px on a
+      touch size. Sizes: pc1920 1920×950, pc1366 1366×625 (HIS PC), pc1280, short 1366×480, tabL 1024×768,
+      tabP 768×1024, phoneP 390×844, phoneL 844×390. (taskset -c 0-7 nice -n 15; never `pkill -f` with a
+      pattern that is in the command itself — it killed the assistant's own shell, again.)
+  · ⭐ STAGE 1 (HIS PC), FIRST BATCH — APPLIED TO HIS PAGE 2026-11-20 04:39 UTC (54b611b), WAITING FOR HIS EYE.
+    Before → after in 28 pictures (4 PC sizes × 7 states): controls cut 1–11 a picture → 0 in all; the toolbar
+    × cube overlap (72–130 px) → none. The baseline CONFIRMED the audit's computed claims in a real rendering
+    (Send 100 % outside the right panel, Delete session 54 % cut, the brush's last four controls off the
+    viewer with the dock open, Settings cut on a 480-px-high page).
+    – the toolbar (viewport.css): a wrapper spanning the viewer in three columns [free | bar | ≥ the cube's
+      box, `--hud-cube-box`]: centred while there is room, left of the cube when narrow, tighter spacing under
+      760 px of viewer (a container query: `.stac-main__viewport {container: viewer / size}` — tooltips, menus
+      and dialogs are portalled to body, so its containment moves no fixed element), then it SCROLLS (wheel
+      too); its option panels in the bar's column, scrolling inside the viewer's height;
+    – `.stac-input {min-width: 0}`: the assistant's row keeps Send and the speaker inside the panel;
+    – a two-line tree row wraps (a session's facts, then its actions — both visible; the loaded session's row
+      is one line taller); a one-line row's hover actions lie OVER the row's end and take no width (nor
+      clicks) while hidden: an instance's name gets ~50 px more (his eye: the count is covered on hover);
+    – the rail: KEPT AS HE HAS IT (icons one after another; anchoring the bottom three at the bottom was the
+      assistant's first version, withdrawn: a look he did not ask for), tighter under 600 px of page height,
+      scrolling below; `100dvh`; side panels as `minmax(0, width)` beside a viewer of at least
+      `--viewer-min-w` (min(560px, 45vw)); the dock at most 60 % of the middle column; the physics panel
+      scrolls; a menu is measured once drawn and moved back inside the screen (Menu.tsx).
+    – the interface's own checks: type-check and eslint clean; check-tokens 51 findings before and after
+      (none new; the live tree already failed it, check-inline and check-strings).
+  · STAGE 1, STILL TO DO (1b — in the copy first): the deviation legend over the scale bar (ViewportHud: one
+    bottom container that wraps) — the mock does not show the sheet: to be forced or reasoned; the
+    Segmentation manager (footer wrap, the keyframe's max-height), Reference tools (the list under its form),
+    the Common points window over the model, the tables' action columns (empty header), the header and the
+    status bar when tight. THEN stages 2 (tablet + touch basics), 3 (phone), 4 (the viewer by touch).
 - ⭐⭐⭐ THE LIST OF 2026-11-19 — HIS POINTS, WITH HIS NUMBERS (RESUME HERE; the 2026-11-18 block below is its
   background). He tried the night's work in the browser and it failed nearly everywhere; each point was then
   worked with him, one change at a time, on his screenshots. HIS VERDICTS (2026-11-19: "1. confirmado, 2.
@@ -1733,6 +1784,16 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     medians over the witnesses (three sorts of [V, H, W] a keyframe) restricted to the pixels that read them:
     worth it or not is read on the fast vote's profile on the card; (c) the publish (935 s): its split comes
     from the copy's stamped log.
+  · ⚠ THE CARD IDLE BETWEEN F4 AND F5 — MEASURED ON THE COPY (USER 2026-11-20, watching it: "la veo ocupada
+    pero no operativa, o esta ocupada por algun modelo que se colo" — no model: F4's own process, 65 GB held):
+    F4's last window at 03:46:20 UTC; then `np.savez_compressed` of tracks.npz — 17 arrays, 12.5 GB raw → 4.5 GB,
+    zlib on ONE core — until 03:55:28 (9.2 min, the card held and idle), F4 ✓ 03:56:16 (343.5 min in all); F5
+    read the file back and built its problem on the CPU until 04:00:44: 14.4 MINUTES OF CARD IDLE at every run
+    of this size. TO PROGRAM in the clone (precision/tracks.py is in the live tree's no-touch list while the job
+    runs): the members deflated in parallel threads and assembled in the same order (the same bytes when each
+    member is its own zlib stream — to be verified), F5 reading them in threads; measured on the card after.
+    F5 ON THE COPY SO FAR: R0 fit 0.593 px, held-out 0.6594 px over 3,167,825 tracks (the original's R0:
+    0.6558; its applied R1 0.6301), 25.6 min for the rung.
   THE SERVER PATCHES NOW: 0001 the cube closing's server side · 0002 F6's fast vote · 0003 F5's kept plans and
   Jacobians · 0004 F6's records on threads (/workspace/tmp/dev/patches/server/, second copy in
   /workspace/dev_patches_20261119.tar.gz; the clone /root/dev/stac-build on the LOCAL disk). EVERY KEY THEY ADD
