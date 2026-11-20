@@ -883,7 +883,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
 
 ## 7 · PENDING
 - ⭐⭐⭐⭐ THE COPY'S CLOUD IS PUBLISHED, AND THE STAGE THAT RE-OPENS WHAT THE GRAPH CLOSED IS FOUND: F2, THE GAUGE
-  (2026-11-20 08:08 UTC; RESUME HERE FIRST — the study below is its background). TOLD TO HIM 08:20 UTC WITH THE
+  (2026-11-20 08:08 UTC; RESUME HERE FIRST — the study below is its background). TOLD TO HIM 08:17 UTC WITH THE
   QUESTION "¿la lanzo?" (the test below): HIS ANSWER AND HIS EYE ON THE COPY'S CLOUD ARE PENDING. Nothing of the
   pipeline was changed.
   · THE RUN: session `pccr2408_prueba`, stage 2 from 20:50 UTC to 08:14 — no failure, no relaunch: F2 35 min,
@@ -945,6 +945,28 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     are to be launched one by one, on his order): about 4–5 h of the card; the copy's cloud of today is
     replaced. §6 holds what was tried before on the graph's side: "DA3 per-cube priors and Cauchy on the
     seams (broke seams by 16–33 cm)" — the same instrument, DA3's local metre.
+    PREPARED, NOTHING LAUNCHED: (a) THE VARIANT — server patch 0009 in the clone:
+    `reconstruction.precision.gauge.profile: along_walk | constant` (along_walk = THE RECORD and the value in
+    config.yaml; absent = the record). constant = the weighted least-squares fit of ONE value to the applied
+    instrument's rows; the profile along the walk is still solved, judged and reported, and gauge.json says
+    what it would have applied; the record's document, parameters and stamp carry no new key. 2 tests (a
+    walk that returns to its start stays closed with one scale and opens with the profile). It applies to the
+    live tree on its own (it does not need patches 0001–0008): THE TEST RUNS ON THE CODE THAT MADE THE COPY'S
+    CLOUD PLUS THIS ONE PATCH — only the gauge differs; the other patches are merged AFTER the test (held on
+    purpose, told to him). (b) HOW IT IS LAUNCHED (read in the code, not written yet): the copy's FROZEN
+    run_config.yaml with that one key changed (never config.yaml: the copy's three values stay), then
+    precision.runner.run_chain(steps=[f2_gauge, f5_refine, f6_bend, the floor check]) — the chain's own
+    machinery: with that list no finished record matches, `needs_epoch0` goes back to epoch 0 from
+    _restart_epochs, F4 is not in the list and tracks.npz stays (tools/amb3r/chain.py runs the chain that
+    way). OUTSIDE THE BACKEND, so: the card's lease taken by the driver (semantic.service.acquire_engine_lease
+    — a file, made for this: the chat, the voice and a job he might launch then answer "busy" / are
+    refused), the voice ended through `POST /api/voice/stop` (its own docstring: "for GPU work launched
+    OUTSIDE the backend"), the chat's engine through workers.base.stop_semantic_service_verified; at the end
+    `POST /api/sessions/{id}/cloud_changed`, the lease released, the chat back through
+    `/semantic/status?warmup` and the voice through `/api/voice/status?start=true`. THE EPOCHS ARE KEPT after
+    it (the worker's own end discards them: they are what the stage-by-stage measurement reads). BEFORE IT: a
+    PROBE of the free space (F2 regenerates the DA3 windows, 25.8 GB on this session; F6's chunks ~22 GB),
+    a guard and a watcher of its own (the scratchpad's ones read the backend's job).
 - ⭐⭐⭐ THE STUDY OF PCCR 2026-08-24 AND ITS PARALLEL COPY — ITS RUN ENDED 2026-11-20 08:14 UTC (the block above is where to resume).
   USER, on two parts of one rack that do not join (wall#598: its side and rear, cabinet#2534: its front): "quiero
   que veas algo y pensemos juntos como resolverlo" / "en algun punto se estiro el recorrido y derivo, o bien, la
