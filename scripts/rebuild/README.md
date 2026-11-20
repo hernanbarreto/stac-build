@@ -38,7 +38,7 @@ necesita"* / *"Nada es opcional todo debe quedar como está. De hecho colmap se 
   one archive cannot be opened; everything else still is restored;
 - `git/` — every local branch, stash, remote and worktree of every repository, and the commits that are on no
   remote (bundles);
-- `mirror.tsv` — the weights whose source may refuse (Meta's two DINOv3 files, 4.6 GB): kept as the assets of a
+- `mirror.tsv` — the weights whose source may refuse (Meta's DINOv3 ViT-L/16 file, 1.2 GB — the source of GenRecon's encoder): kept as the assets of a
   **draft** release of the repo (`backup.py publish-mirror`; a draft is seen only by who may push), fetched with
   `GIT_TOKEN`.
 
