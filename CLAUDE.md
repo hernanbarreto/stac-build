@@ -1903,18 +1903,52 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     F4's last window at 03:46:20 UTC; then `np.savez_compressed` of tracks.npz — 17 arrays, 12.5 GB raw → 4.5 GB,
     zlib on ONE core — until 03:55:28 (9.2 min, the card held and idle), F4 ✓ 03:56:16 (343.5 min in all); F5
     read the file back and built its problem on the CPU until 04:00:44: 14.4 MINUTES OF CARD IDLE at every run
-    of this size. TO PROGRAM in the clone (precision/tracks.py is in the live tree's no-touch list while the job
-    runs): the members deflated in parallel threads and assembled in the same order (the same bytes when each
-    member is its own zlib stream — to be verified), F5 reading them in threads; measured on the card after.
+    of this size. DONE IN THE CLONE 2026-11-20 (server patch 0005; `reconstruction.precision.tracks.npz_threads`,
+    0 = THE RECORD, the value in config.yaml): precision/npz_threads.py — every member's .npy stream cut in
+    pieces of 16 MiB deflated at the same time and written in order (a piece that is not a member's last ends
+    on a sync flush: the pieces end to end are one deflate stream any ZIP reader inflates); the raw member is
+    numpy's own .npy; no clock in the file (numpy's had one): the same arrays give the same file whatever the
+    thread count; F5 / F6 / the sweep read the members on threads; the two `set(obs["frame"])` of the report
+    (228 M numpy scalars walked in Python: the 39 s after the file) replaced by a presence table
+    (`frames_of`). The thread count is no parameter of the tracks (not in `meta`; in tracks.timing.json with
+    `write_s`). ON THE COPY'S REAL FILE (228,244,119 observations, 37,240,252 tracks, 12.34 GB; read only,
+    four low-priority cores while F6 ran): read in 21.5 s (the record's read in that run's F5: 40.0 s);
+    written in 152.4 s — at most 610 thread-seconds, so ABOUT 40 s ON 16 THREADS (an estimate: to be timed
+    with the cores free); every member's raw .npy of the same length and CRC-32 as in the run's file, and
+    numpy's own reader gives the same arrays from the threaded file bit for bit (12.34 GB compared);
+    4.4811 GB against 4.4810. 18 tests (pieces of 1 byte to 1 MB, arrays of every kind and order against
+    numpy's own file, a member over 4 GiB, a failing piece, F4's own run with either writer and reader).
+    Noticed, not touched: `obs_score` is `obs_vis` written a second time (913 MB raw, 383 MB deflated — the
+    v1 key kept for old readers); `track_split_of` hashes the 37 M tracks one by one in Python (to be timed).
+  · ⚠ F5: THE CARD IDLE 20.9 OF ITS 75.3 MINUTES — MEASURED ON THE COPY (the passive sampler, every 5 s; one
+    CPU thread at 100 % meanwhile): the first 8.2 min (03:56:23 → 04:04:33: the tracks read in 40.0 s, then
+    the range filter, the groupings and the first triangulation — the card's memory at 4 MiB until 04:00:34),
+    1.2–1.4 min after each rung's solves, and shorter stretches between a solve and its continuation. F5's
+    own timing file on the copy: solves 3048 s (R0 243 + its continuation 825, R1 986 + 272, R2 363 + 360),
+    tracks read 40.0 s, held-out leave-one-view-out 57.7 s, witnesses 17.1 s — 4518 s in all: 22.6 MIN ARE
+    OUTSIDE EVERY MEASURED PHASE. THE ASSISTANT'S FIRST SUSPECT WAS MEASURED AND DISCARDED (the per-landmark
+    Python dictionaries of triangulate_tracks / the held-out: 0.1–0.4 min each at 30 M landmarks on a
+    micro-benchmark — they do not explain 21 minutes). NOT ATTRIBUTED: to be PROFILED on the copy's real
+    session (read only) when the card is free — never guessed.
+  · TWO OLD TESTS OF F5 FAIL IN THE LIVE TREE TOO (found 2026-11-20 while running the related tests; they
+    need pycolmap 4 = the mapanything env, so the suite, run in da3, SKIPS their file — they are not among
+    the 13): tests/test_refine_judge.py::test_rungs_are_warm_started_nested_and_carry_their_continuation
+    (it expects R1 to start at R0; the code starts R1 at the gauge since point 61's change of 2026-10-07)
+    and ::test_a_rung_that_ends_above_its_parent_is_not_taken_and_the_next_starts_from_the_parent. Tests
+    left behind by a rule change, not a defect of the step; not touched (on his word).
     F5 ON THE COPY, DONE 05:11:45 UTC IN 75.3 MIN (the original: 149 min, with the removed R3): R0 fit 0.593 /
     held-out 0.6594 px (the original's R0 0.6558); R1 fit 0.558 / held-out 0.62927 px over 3,073,956 tracks —
     TAKEN, the applied rung (the original's applied R1: 0.6301); R2 not taken (the cost did not move: 9
     steps); cameras moved ≤ 48.8 cm, witnesses 6845 / 8547 localized (bound 9.64 px), epoch 1 → 2. F6 STARTED
     05:13:16 UTC (PointDiT loaded 05:14:58; the original's F6: 173 min).
   THE SERVER PATCHES NOW: 0001 the cube closing's server side · 0002 F6's fast vote · 0003 F5's kept plans and
-  Jacobians · 0004 F6's records on threads (/workspace/tmp/dev/patches/server/, second copy in
-  /workspace/dev_patches_20261119.tar.gz; the clone /root/dev/stac-build on the LOCAL disk). EVERY KEY THEY ADD
-  IS AT THE RECORD'S VALUE: merging changes nothing; each is switched after its measurement on the card.
+  Jacobians · 0004 F6's records on threads · 0005 F4's tracks file on threads (/workspace/tmp/dev/patches/server/,
+  second copy of all the patches and their tests in /workspace/dev_patches_20261120.tar.gz; the clone
+  /root/dev/stac-build on the LOCAL disk). The five apply in order to the live tree as it is (checked on a
+  scratch index 2026-11-20 07:50 UTC). EVERY KEY THEY ADD IS AT THE RECORD'S VALUE: merging changes nothing in
+  what is computed — but it changes the steps' CODE and configuration sections, which are in their stamps: a
+  session stamped before the merge has its precision steps recomputed if its reconstruction is resumed after
+  it. Each key is switched after its measurement on the card.
   PASSIVE RECORDS LEFT RUNNING ON THE COPY (scratchpad, read only): stage_sampler.py → stage_usage.csv (every
   5 s: stage, card utilisation / memory / power, the stage process's CPU and its busiest threads) and
   stage_log_stamped.txt (every stage line of the log with its UTC time) — they give the real split of F5's
@@ -2031,9 +2065,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
      ran). In the clone, the related files of the suite: 203 pass, 7 fail = the 4 that fail the same in the live
      tree (test_chunked_metric x 3, test_omega_complete x 1) + 3 artefacts of the clone (skyseg.onnx absent,
      vggt-omega linked from outside).
-  WHERE IT ALL IS: /workspace/tmp/dev/patches/ (0001–0006 of the fork, server/, every test, the A/B scripts) and
-  a second copy /workspace/dev_patches_20261119.tar.gz; the working trees on the LOCAL disk (/root/dev — gone at
-  a pod restart). TO MERGE WHEN THE COPY'S CLOUD IS PUBLISHED: `git am` 0001–0006 in vendor/VGGT-Long, `git
+  WHERE IT ALL IS: /workspace/tmp/dev/patches/ (0001–0007 of the fork, server/ 0001–0005, every test, the A/B
+  scripts) and a second copy /workspace/dev_patches_20261120.tar.gz; the working trees on the LOCAL disk
+  (/root/dev — gone at a pod restart). TO MERGE WHEN THE COPY'S CLOUD IS PUBLISHED: `git am` 0001–0006 in vendor/VGGT-Long, `git
   apply` the server patch, the seven test files into server/tests/, the related tests, drift.py / capture.sh
   (a vendor commit: the set's bundle), commit, push. THEN, with the card free: the twins measured ON THE CARD on
   a real session, and the keys switched on his word.
