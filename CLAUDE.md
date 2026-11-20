@@ -1510,6 +1510,24 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     them with 3d-tiles-renderer on three.js) — CesiumJS's native format: a mesh on the globe needs a placement,
     no conversion. The CLOUD is Potree's octree: Cesium does not read it (a conversion, or the mesh on the
     globe and the cloud in the detail viewer).
+  · ⭐ HIS DECISION AND THE INSTALL (USER 2026-11-20: "A cesium vamos a correrlo localmente con la mejor potencia
+    y la mejor calidad sin cuentas externas. Si es mejor mapbox usamos mapbox con algún token. Investiga qué es
+    mejor. E instálalo y luego definimos cómo implementarlo"). INVESTIGATED: CesiumJS — Apache-2.0, no account,
+    runs wholly from our server (its own offline guide), OGC 3D Tiles native (our tiled meshes open as they
+    are), a true WGS84 globe; Mapbox GL JS v3 — proprietary, an access token and billing (or its paid
+    self-hosted Atlas), NO native 3D Tiles (a custom three.js layer, Web Mercator); MapLibre (the open fork) has
+    a globe since 5.0 and no native 3D Tiles either. → CESIUM. (Mapbox's imagery can still be a base LAYER of
+    Cesium with a token, later, his call.) INSTALLED in ui/: `cesium` 1.147.0 exact (released 2026-11-02;
+    `npm install --save-exact --ignore-scripts`; @cesium/engine 26.5.0, @cesium/widgets 16.3.1; 32 packages,
+    3,492 files, 108 MB long / 394 MB allocated on the volume). ⚠ TOLD TO HIM: Cesium ≥ 1.141 DECLARES Node
+    ≥ 22 (1.147: ≥ 22.17) and the pod's nodejs env is Node 20.20.2 (npm warns EBADENGINE) — checked: it loads
+    under Node 20 and the interface's own bundler (esbuild 0.21.5, vite's) packages it clean (a 9.6 MB bundle
+    of a throw-away entry); the last release that declares Node 20 is 1.139.0. NOTHING OF THE INTERFACE WAS
+    TOUCHED (no import, no screen, no vite plugin for its run-time assets: Build/Cesium/{Workers, Assets,
+    ThirdParty, Widgets}, 342 files, ~7 MB). ITS OFFLINE WORLD MAP IS COARSE: Natural Earth II, 43 tiles,
+    levels 0–2 (~20 km a pixel) — a globe seen from space; each work seen from near needs open imagery (and
+    terrain) of its zone stored on the pod: THE IMPLEMENTATION IS DEFINED WITH HIM NEXT ("luego definimos cómo
+    implementarlo").
   · HIS TO DECIDE: where a work's place comes from; the base map (CesiumJS itself is Apache-2.0 and self-hosted;
     Cesium ion's terrain / imagery is an outside service with an account — against "no paid external APIs,
     everything local": an open map online without an account, or the five zones' tiles served by us); ONE
