@@ -31,6 +31,9 @@
   /* (a side panel open OVER the viewer: the bar keeps to the part in sight — layout.css, --ov-left / --ov-right) */
   left: calc(var(--hud-inset) + var(--ov-left, var(--sp-0)));
   right: calc(var(--hud-inset) + var(--ov-right, var(--sp-0)));
+  /* (the right panel as a sheet from the bottom: what is drawn over the viewer stops above it. The sheet is a
+      share of the viewer's cell — the viewer and the scan tabs' strip over it) */
+  bottom: calc(var(--hud-inset) + (100% + var(--tabs-h)) * var(--ov-bottom-frac, 0));
   z-index: var(--z-float);
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(calc(var(--hud-cube-box) + var(--sp-2)), 1fr);
@@ -242,7 +245,7 @@
   position: absolute;
   left: calc(var(--hud-inset) + var(--ov-left, var(--sp-0)));
   right: calc(var(--hud-inset) + var(--ov-right, var(--sp-0)));
-  bottom: var(--hud-inset);
+  bottom: calc(var(--hud-inset) + (100% + var(--tabs-h)) * var(--ov-bottom-frac, 0));
   z-index: var(--z-hud);
   display: flex;
   flex-wrap: wrap-reverse;

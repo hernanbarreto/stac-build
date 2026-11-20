@@ -101,6 +101,38 @@
   }
 }
 
+/* ── THE RIGHT PANEL COMES UP FROM THE BOTTOM ON AN UPRIGHT SCREEN (USER 2026-11-20: "en telefono y tal vez en
+   tablet el agente debe aparecer desde abajo no?") ──────────────────────────────────────────────────────────
+   Upright, a phone or a tablet has height to spare and no width: the assistant and the properties open as a
+   SHEET over the lower part of the viewer's cell, and the model stays in sight above it while he talks to it —
+   the assistant acts on the viewer. The viewer's toolbar, cube and bottom line keep to the part above the sheet
+   (--ov-bottom-frac, viewport.css). A screen wider than tall keeps the panel at the right: there it is height
+   that is short. */
+@media (max-width: 1279px) and (orientation: portrait) {
+  .stac-app {
+    --ov-right: var(--sp-0);
+    --ov-bottom-frac: var(--sheet-frac);
+  }
+
+  .stac-app--inspector-closed {
+    --ov-bottom-frac: 0;
+  }
+
+  .stac-app .stac-app__inspector {
+    justify-self: stretch;
+    align-self: end;
+    width: auto;
+    max-width: none;
+    height: calc(100% * var(--sheet-frac));
+    margin-left: var(--ov-left);          /* (beside a left panel that is open too, where both fit) */
+    border-top: var(--bw) solid var(--border-2);
+  }
+
+  .stac-app__inspector .stac-resize--left {
+    display: none;                        /* (its width is the screen's) */
+  }
+}
+
 /* ── NARROW: a phone held upright (USER 2026-11-20, the cuts he approved: "1. si") ────────────────────────
    Under 768 px of page, upright, WIDTH is what the page lacks: the icon rail becomes a bar at the BOTTOM (its
    icons scroll sideways — regions.css), the viewer takes the whole width, and a panel opened over it takes the
@@ -133,8 +165,7 @@
     grid-row: 4;
   }
 
-  .stac-app__left,
-  .stac-app__inspector {
+  .stac-app__left {
     width: 100%;
     max-width: none;
     box-shadow: none;

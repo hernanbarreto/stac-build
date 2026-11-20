@@ -212,6 +212,14 @@ const STATES = {
       }
     }
   }, keepPointer: true },
+  // the assistant open over a loaded session (where one side panel fits, opening it closes the sessions' list)
+  assistant: { scenario: 'cloud', layout: { inspectorTab: 'assistant' }, run: async page => {
+    await loadSession(page)
+    if (!(await page.locator('.stac-inspector').isVisible().catch(() => false))) {
+      await clickIf(page.getByRole('button', { name: new RegExp(`^${T('assistant.title')} —`) }).first())
+      await page.waitForTimeout(500)
+    }
+  } },
   nosession: { scenario: 'sessions', run: async () => {} },
   settings: { scenario: 'sessions', run: async page => { await clickIf(byLabel(page, 'menu.settings')); await page.waitForTimeout(400) } },
   login: { scenario: 'sessions', loggedOut: true, run: async () => {} },
