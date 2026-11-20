@@ -973,6 +973,55 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     the DA3 lock per cube redundant; WRITTEN AND READ BY NOTHING: precision/layer_mono_detail.glb and
     layer_mixed_unresolved.glb, precision/refine_residuals.npz, maplong_run/uncert/, depth_graph.json (verdict SKIP
     on six sessions), omega_probe.json; the scale is decided five times, two are needed.
+  · ⭐ THE AUDIT DONE AGAIN ON HIS WORD, TWICE — `docs/pipeline_audit_2026-11-20.md` IS THE RECORD (781540b, 1ed41a1;
+    sent to him 18:15 UTC). His words: "hay que juzgarlo de dos maneras conceptualmente y como se aplicó. Si está
+    mal conceptualmente entonces ya está mal, si está bien conceptualmente pero está mal aplicado, eso es lo más
+    importante. También tenemos bufferstop para analizar tenemos dos corridas … esa conclusión debe ser sólida
+    matemáticamente correcta" / "no solo de f1 a f6 sino todo lo anterior también toda la cadena de reconstrucción
+    y de verificación y de publicación todo". HOW: three lemmas (a depth factor the cameras do not match displaces
+    in proportion to range; a scale along the walk applied as an open chain opens loops; a later step that does
+    not contain the earlier step's objective moves freely where its own data are silent), every calculation with
+    CONCEPT / APPLICATION / EVIDENCE / VERDICT, four read-only inventories of the code (spot-checked), and the
+    sessions' own files. NOTHING OF THE PIPELINE WAS CHANGED. WHAT IT ADDS TO THE VERDICTS ABOVE:
+    – F5's PRIOR is the calculation that is right in concept and wrong in application: one INDEPENDENT position
+      prior per keyframe (σ from 0.03 mm to 15 cm along the walk on pccr; a 3.6 cm step "held" to ± 376 %), an open
+      chain that knows nothing of the graph's closures — where the tracks are silent F5 moves freely (the path
+      cut × 0.48 – 0.59 at door 1). BUFFERSTOP'S TWO RUNS: cube stages 0.68 cm apart, the old F2 up to 9 cm — after
+      F5 the cameras coincide to 0.1 mm: where the tracks determine the geometry F5 erases all that came before.
+      F6's factor per keyframe therefore stands or falls with F5 (a small gain on bufferStop, the harm on pccr).
+    – THE SCALE REACHES THE CAMERAS AND NEVER THE DEPTH: the records stay in the cube world's units; F6 fits
+      again a factor that is known (× 0.9546 on pccr).
+    – THE INTAKE: the brightness gate (`intake.quality.luma_lo` 40) is wrong by concept — it made pccr 08-24's
+      130-frame hole; config.yaml still holds it (the copy ran with it open). The 8-frame rule placed 28 % of the
+      keyframes on the pccr copy, 83 % on zaragoza, 88 % on observatorio. The coverage fill added 0 keyframes on
+      three sessions (2 on bufferStop, 16 – 18 on pccr 08-24). NO CUBE OF THE SIX SESSIONS IS CLOSED BY THE
+      CO-VISIBILITY BUDGET (largest sum 5.1 – 7.3 of 13.67): the cap of 64 closes every cube.
+    – THE CUBES: the DA3 lock per cube is a gauge choice the graph removes (proof in the document); its one real
+      effect is the 15 m range evaluated in locked units (locks off × 0.45 … × 1.69 on the copy). A closure's weight
+      (its two fits' own residuals) does not measure what a closure asserts; `verify_loop` (split halves) and
+      `judge_leave_one_out` exist in the fork and are NOT called on cubes; a solve that does not converge falls
+      back to the seams' tree with a log line. Omega's focal is 2 – 8 % short of F5's on every session.
+    – F4 ON THE COPY (serio/f4_windows_by_kind.py): 4,712 windows = 230 keyframe / 1,908 loop / 2,574 witness
+      (about 9 / 60 / 31 % of F4's time). 1,462 OF THE 1,908 LOOP WINDOWS YIELD NO TRACK SEEN IN BOTH VISITS. Of
+      the tracks that reach F5's 2°: 86.4 % are loop-window tracks inside ONE visit (the same places tracked
+      again), 7.6 % the keyframe windows, 4.1 % the witness windows (4.7 % of their 13.2 M tracks reach 2°), 1.9 %
+      the tracks that link two visits (288,390). The witness frames' poses F5 localises (witness_poses.txt) are
+      loaded by F6 and used by nothing: F6 places its interval witnesses with Omega's relative pose.
+    – THE VERIFICATION LAYER: every acceptance of the chain is a SELF-CONSISTENCY (a fit with its own data, the
+      network with itself, F5 with its own landmarks) — no power against a common error; R0 is taken with no
+      verdict; scale_align, the locks and the graph have no acceptance at all. Proposed to him: the agreement of
+      different passes in the images (the pair ruler) as the one acceptance measure independent of the chain.
+    – PUBLICATION: cleaned_cloud_raw.ply is a byte-identical second copy of the cloud; the cube check (f6_check)
+      judges the bent depth, not the published cloud, and its result is read only by the certification (OFF); the
+      chat's quality tool asks cloud_metrics.json for keys it does not have (only the undulation arrives).
+    – THE CORRECTIONS IN ITS ORDER (Part VIII · D; his decisions, none started but the first): 1 F6 one factor
+      (running) · 2 F5 carries the cube graph · 3 the scale carried to the depth · 4 the brightness gate open ·
+      5 closures verified, the graph judged · 6 F4's loop and witness windows (to be MEASURED on one session
+      first: the non-linking loop windows still supply ~86 % of F5's landmarks) · 7 what decides nothing, out
+      (F2 35 min, witness windows ~1 h 45, bridges over 6 m 42 min, depth graph 6 min, cube check 5 min on pccr
+      08-24's size) · 8 an acceptance measure independent of the chain.
+    – THE F6 TEST'S OWN FIRST FIGURE (its log, 17:25 UTC): with one factor the session's neighbour disagreement
+      (τ, the 75th percentile) reads 1.15 % against 1.86 % with the factor per keyframe on the same F5.
   · HIS DECISIONS PENDING (asked, none taken): his eye on the copy's new cloud; then F5 (hold its camera steps where
     it has no information); which redundant / unused steps go; the 566 bridges over 6 m (42 min of card); THE REAL
     SIZE OF A TILE of that floor (published it reads 0.585 m — with 600 or 609.6 mm the cloud is 2.5–4 % small).
