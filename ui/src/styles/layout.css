@@ -29,6 +29,7 @@
   width: 100%;
   height: 100vh;
   height: 100dvh;               /* what is VISIBLE: a phone browser's bars are not counted */
+  height: var(--page-h, 100dvh); /* … nor its on-screen keyboard (LayoutContext, on a touch screen only) */
   background: var(--surface-0);
   color: var(--text-1);
 }
@@ -100,6 +101,46 @@
   }
 }
 
+/* ── NARROW: a phone held upright (USER 2026-11-20, the cuts he approved: "1. si") ────────────────────────
+   Under 768 px of page, upright, WIDTH is what the page lacks: the icon rail becomes a bar at the BOTTOM (its
+   icons scroll sideways — regions.css), the viewer takes the whole width, and a panel opened over it takes the
+   whole of it (its own icon in the bar, or its close button, brings the viewer back). A phone on its side keeps
+   the rail at the left: there it is height that is short. */
+@media (max-width: 767px) and (orientation: portrait) {
+  .stac-app,
+  .stac-app--left-closed,
+  .stac-app--inspector-closed,
+  .stac-app--left-closed.stac-app--inspector-closed {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: var(--header-h) minmax(0, 1fr) auto var(--statusbar-h);
+    --ov-left: var(--sp-0);
+    --ov-right: var(--sp-0);
+  }
+
+  .stac-app .stac-app__main,
+  .stac-app .stac-app__left,
+  .stac-app .stac-app__inspector {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .stac-app .stac-app__activity {
+    grid-column: 1;
+    grid-row: 3;
+  }
+
+  .stac-app .stac-app__status {
+    grid-row: 4;
+  }
+
+  .stac-app__left,
+  .stac-app__inspector {
+    width: 100%;
+    max-width: none;
+    box-shadow: none;
+  }
+}
+
 /* The header and the status bar sit above the three scrolling regions, so a
    panel can never paint over the menu bar; the menus themselves portal to the
    body at --z-popover and stay above both. */
@@ -154,7 +195,7 @@
 
 .stac-main__viewport {
   flex: 1;
-  min-height: 0;
+  min-height: min(var(--viewer-min-h), 50%);   /* the dock gives way first (below) */
   position: relative;
   overflow: hidden;
   background: var(--surface-0);
@@ -167,7 +208,8 @@
 }
 
 .stac-main__dock {
-  flex-shrink: 0;
+  flex-shrink: 1;               /* on a short page it gives way to the viewer's minimum; its own panels scroll */
+  min-height: 0;
   height: var(--dock-h);
   max-height: 60%;              /* the dock never takes more than this of the middle column: the viewer stays */
 }

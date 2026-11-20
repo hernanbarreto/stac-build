@@ -55,6 +55,16 @@ const T = (key, vars = {}) => t(key).replace(/\{(@?\w+)\}/g, (m, k) => (k.starts
 const clickIf = async (loc, timeout = 2500) => { try { await loc.click({ timeout }); return true } catch { return false } }
 const byLabel = (page, key) => page.getByLabel(T(key), { exact: true }).first()
 const setScenario = name => fetch(`${MOCK}/__mock/scenario`, { method: 'POST', body: JSON.stringify({ name }) })
+// a menu's entry, by its texts: through the menu bar, or through the single button the bar becomes on a narrow page
+const menuItem = async (page, menuKey, itemKey) => {
+  const bar = page.getByRole('button', { name: T(menuKey), exact: true }).first()
+  if (await bar.isVisible().catch(() => false)) await clickIf(bar)
+  else await clickIf(page.locator('.stac-header__burger').first())
+  await page.waitForTimeout(200)
+  const item = page.getByRole('menuitemcheckbox', { name: new RegExp(T(itemKey)) }).first()
+  await item.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {})
+  return clickIf(item)
+}
 
 async function openApp(page, { layout = {}, density } = {}) {
   await page.addInitScript(({ layout, density, lang }) => {
@@ -130,8 +140,7 @@ const STATES = {
   // footers and what they cover are what is looked at)
   commonpoints: { scenario: 'cloud', run: async page => {
     await loadSession(page)
-    await clickIf(page.getByRole('button', { name: T('menu.tools'), exact: true }).first())
-    await clickIf(page.getByRole('menuitemcheckbox', { name: new RegExp(T('commonPoints.menu')) }).first())
+    await menuItem(page, 'menu.tools', 'commonPoints.menu')
     await page.waitForTimeout(700)
   } },
   reference: { scenario: 'cloud', run: async page => {
@@ -142,8 +151,7 @@ const STATES = {
   } },
   physics: { scenario: 'cloud', layout: { dockOpen: true, dockTab: 'jobs' }, run: async page => {
     await loadSession(page)
-    await clickIf(page.getByRole('button', { name: T('menu.tools'), exact: true }).first())
-    await clickIf(page.getByRole('menuitemcheckbox', { name: new RegExp(T('physics.title')) }).first())
+    await menuItem(page, 'menu.tools', 'physics.title')
     await page.waitForTimeout(700)
   } },
   segmanager: { scenario: 'cloud', run: async page => {

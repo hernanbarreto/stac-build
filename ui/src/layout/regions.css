@@ -199,6 +199,36 @@
   flex-shrink: 0;
 }
 
+/* a phone held upright: the rail is a bar along the bottom, its icons scroll sideways (layout.css, NARROW) */
+@media (max-width: 767px) and (orientation: portrait) {
+  .stac-activity {
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: var(--sp-1);
+    width: 100%;
+    max-height: none;
+    padding: 0 var(--sp-1);
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: none;
+    border-top: var(--bw) solid var(--border-1);
+  }
+
+  .stac-activity__group {
+    flex-direction: row;
+  }
+
+  .stac-activity__slot {
+    padding: 0 var(--sp-half);
+    border-left: none;
+    border-top: var(--bw-selected) solid transparent;
+  }
+
+  .stac-activity__slot--active {
+    border-top-color: var(--brand-orange);
+  }
+}
+
 /* a short page (a squat window, a phone on its side): the ten icons tighten before they have to scroll */
 @media (max-height: 600px) {
   .stac-activity__group {

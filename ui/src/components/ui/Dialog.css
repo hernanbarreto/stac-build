@@ -156,9 +156,49 @@
 
 .stac-dialog__footer {
   display: flex;
+  flex-wrap: wrap;               /* buttons wider than the window go to a second line: none is cut (the left ones were) */
   justify-content: flex-end;
   gap: var(--sp-2);
   padding: var(--sp-3) var(--sp-4);
   border-top: var(--bw) solid var(--border-1);
   flex-shrink: 0;
+}
+
+/* ── A PHONE, OR A PAGE TOO SHORT (USER 2026-11-20: the page on every screen) ─────────────────────────────
+   A window takes the whole screen — its header and footer stay, its body scrolls; a confirmation stays a card.
+   A window that stays open WHILE THE MODEL IS USED (non-blocking: Common points) is a sheet over the lower half:
+   whole-screen it would hide the model it needs clicks on. */
+@media (max-width: 767px), (max-height: 520px) {
+  .stac-dialog-layer,
+  .stac-dialog-layer--top,
+  .stac-dialog-layer--right {
+    padding: var(--sp-0);
+    align-items: center;
+    justify-content: center;
+  }
+
+  .stac-dialog--md,
+  .stac-dialog--lg,
+  .stac-dialog--full {
+    width: 100%;
+    height: 100%;
+    border: none;
+    border-radius: var(--r-0);
+  }
+
+  .stac-dialog--sm,
+  .stac-dialog--fit {
+    max-width: calc(100% - var(--sp-4));
+    max-height: calc(100% - var(--sp-4));
+  }
+
+  .stac-dialog-layer--passthrough {
+    align-items: flex-end;
+  }
+
+  .stac-dialog-layer--passthrough .stac-dialog {
+    height: auto;
+    max-height: 50%;
+    border-top: var(--bw) solid var(--border-2);
+  }
 }

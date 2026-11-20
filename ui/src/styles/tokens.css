@@ -222,6 +222,7 @@
   /* what the side panels always leave the viewer (its toolbar's everyday buttons beside the view cube need 538 px);
      never more than 45 % of a narrow page */
   --viewer-min-w: min(560px, 45vw);
+  --viewer-min-h: 160px;          /* … and what the bottom dock always leaves it (its toolbar and one line of options) */
   --panel-min-w: 200px;
   --panel-max-w: 640px;
   --resize-handle-w: 5px;

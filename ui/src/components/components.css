@@ -1066,6 +1066,24 @@
   gap: var(--sp-half);
 }
 
+/* a narrow page (a phone upright): the instances' list above, a third of the window at most, the image below */
+@media (max-width: 767px) {
+  .stac-seg__body {
+    flex-direction: column;
+  }
+
+  .stac-seg__sidebar {
+    width: 100%;
+    max-height: 30%;
+    border-right: none;
+    border-bottom: var(--bw) solid var(--border-1);
+  }
+
+  .stac-seg__bar {
+    flex-wrap: wrap;
+  }
+}
+
 .stac-seg__viewer {
   flex: 1;
   min-width: 0;

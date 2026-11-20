@@ -135,6 +135,24 @@ export function LayoutProvider({ children }: { children: ReactNode }) {
     setState(s => ({ ...s, ...(typeof p === 'function' ? p(s) : p) }))
   }, [])
 
+  // THE ON-SCREEN KEYBOARD (a touch screen): it covers the bottom of the page without making the page shorter
+  // (an iPhone never does; the assistant's question field sat under it). The part in sight is given to the
+  // frame as --page-h (styles/layout.css). Only while the page is not zoomed — a pinch is not a keyboard.
+  useEffect(() => {
+    const vv = window.visualViewport
+    let coarse = false
+    try { coarse = window.matchMedia('(pointer: coarse)').matches } catch { /* no media queries */ }
+    if (!vv || !coarse) return
+    const root = document.documentElement
+    const set = () => {
+      if (Math.abs(vv.scale - 1) < 0.01) root.style.setProperty('--page-h', `${Math.round(vv.height)}px`)
+      else root.style.removeProperty('--page-h')
+    }
+    set()
+    vv.addEventListener('resize', set)
+    return () => { vv.removeEventListener('resize', set); root.style.removeProperty('--page-h') }
+  }, [])
+
   // a page that became too narrow for both panels (a rotated tablet, a shrunk window): the one opened last is
   // not known here — the right one gives way, as at load
   useEffect(() => {
