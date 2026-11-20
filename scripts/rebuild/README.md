@@ -59,6 +59,20 @@ bash /workspace/stac-build/scripts/rebuild/rebuild.sh
 bash /workspace/stac-build/init_pod.sh                  # the services, as on every boot
 ```
 
+**The pod's own settings** live on the provider's side, not on the volume — a new pod needs them set again. Its
+*Container Start Command* (RunPod → the pod → Edit Pod; saving it restarts the pod), so that everything starts by
+itself at every pod start (`scripts/pod_autostart.sh` — USER 2026-11-20: *"todo debe arrancar automaticamente al
+iniciar el pod"*):
+
+```bash
+bash -c "bash /workspace/stac-build/scripts/pod_autostart.sh & exec /start.sh"
+```
+
+Without it the services are started by hand with `init_pod.sh`, as above (which refuses a second start). The page
+from outside the pod (`scripts/remote_access.sh`): Tailscale's identity comes back with the private archive — the
+same node of the same tailnet, for which Funnel was enabled once — and so does the gate's key (`.env`); the secret
+link is `bash scripts/remote_access.sh link`.
+
 Without the key: write `/workspace/stac-build/.env` by hand (`env.template`); the users' database and Tailscale's
 identity are then not restored. About an hour (measured step by step on the pod's local disk: an env's conda
 packages 4–50 s, its pip packages 80–160 s, the vendor clones 1–5 min, 82 GB of weights at the pod's 100+ MB/s; a

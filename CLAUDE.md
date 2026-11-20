@@ -298,12 +298,39 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     semantic.service.engine_available_to, the chat model's launcher asks it first too, and the engine lease is
     the pipeline's for the WHOLE job; the card held the copy's process alone, no chat / voice process, ports
     8798 / 8799 closed, the voice's log untouched. Nothing to kill.
-  · LEFT, told to him: (a) THE POD DOES NOT START ITS SERVICES BY ITSELF — init_pod.sh is run by hand after
-    every pod start (PID 1 is the provider's /start.sh): making it automatic is a setting of the pod (its
-    start command), changed with the pod STOPPED — after the copy; (b) a login on EVERY backend route, so the
-    gate is not the only wall (a backend change: never restarted while a job runs); (c) the dev server is what
-    is published (his live changes): a public address WITHOUT the gate would have to serve the built app
-    (ui/dist is of 2026-11-09) — never the dev server, which shows the source.
+  · LEFT, told to him: (a) the pod starting its services by itself — the next entry; (b) a login on EVERY
+    backend route, so the gate is not the only wall (a backend change: never restarted while a job runs);
+    (c) the dev server is what is published (his live changes): a public address WITHOUT the gate would have
+    to serve the built app (ui/dist is of 2026-11-09) — never the dev server, which shows the source.
+- ⭐ EVERYTHING STARTS BY ITSELF WHEN THE POD STARTS (USER 2026-11-20: "y que todo debe arrancar automaticamente al
+  iniciar el pod tambien") — BUILT AND DRY-TESTED, NOT WIRED YET. THE LAST STEP IS A SETTING OF THE POD, set
+  with the pod STOPPED (saving it restarts the pod: never while a job runs) — RunPod → the pod → Edit Pod →
+  "Container Start Command":
+      bash -c "bash /workspace/stac-build/scripts/pod_autostart.sh & exec /start.sh"
+  · WHY THERE: the container's disk is new at every pod start (the image's /start.sh has its hooks,
+    /pre_start.sh and /post_start.sh, on that disk); the volume and the pod's settings are what survives.
+    /start.sh runs under `set -e` — a failing hook would end the pod's first process before anyone could log in
+    — so the script runs in the BACKGROUND of the start command: /start.sh is exec'ed whatever happens, every
+    wait is bounded, the exit code is always 0. Without the setting nothing changes (init_pod.sh by hand).
+  · scripts/pod_autostart.sh: waits for the volume and for /etc/rp_environment, builds THE ENVIRONMENT OF THE
+    SSH LOGIN the services have always been started from (measured against the running tmux server: of 85
+    common variables 84 equal — the 85th is bash's own `_` —, none extra; not given: SSH_CLIENT /
+    SSH_CONNECTION / SSH_TTY and the login shell's LS_COLORS), runs init_pod.sh ONCE with its output in
+    logs/autostart_<utc>.log (the container's disk when the volume refuses the write) and says a few lines in
+    the container's log (RunPod's Logs tab; never a secret).
+  · init_pod.sh REFUSES A SECOND START (the assistant's addition, told to him): it types its commands into
+    tmux panes — run again with everything up, it typed into the live backend's pane. "already started —
+    nothing done" when the tmux session `backend` exists; STAC_INIT_FORCE=1 runs it anyway. Its apt step runs
+    with DEBIAN_FRONTEND=noninteractive (no terminal at a pod start).
+  · DRY-TESTED 2026-11-20 with the pod's own start environment (/start.sh's, read from /proc) and a stub in
+    place of init_pod.sh: the environment above, the stub started in /root with no terminal, its output in the
+    log, exit 0 when it fails; the real script with the services up does nothing (tmux panes and processes
+    unchanged); the start command's shape returns at once; a second start while one runs does nothing; the
+    guard of init_pod.sh on a cut copy. ⚠ NOT TESTED: A REAL POD START — the first one after the setting is the
+    test (apt on a fresh container, tmux with no terminal, the backend's own start): watch
+    logs/autostart_latest.log with him. If it fails nothing is lost: the pod is up, init_pod.sh by hand.
+  · NOT STARTED BY IT: a pipeline job that was running when the pod stopped (the queue is dropped: re-sent by
+    hand, replace OFF) and the assistant's own session (tmux `claude` is created ready; `claude` is typed).
 - API: `POST /api/pipeline/run {session_id, scans: [key], replace, segment: [key]}` (the Reconstruir button);
   `GET /api/pipelines/active` (running / queued jobs and their stages); scan keys `<date>/<source>` from `GET
   /sessions/<id>/scans`. A session lives in `server/projects/<id>/scans/<date>/src_<source>/`.
