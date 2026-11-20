@@ -4,7 +4,7 @@ USER 2026-11-18 (RunPod announced a maintenance of the pod's server): *"Prepara 
 automáticamente los entornos se descarguen todos los modelos y se vuelva a armar en un nuevo volumen en cuestión
 de poco tiempo … de forma completa y sin errores"* — and, on the first version: *"debe quedar exactamente como
 está ahora … No decidas por mí … cada cosa que avancemos debemos actualizarlo para que siempre quede actualizado
-a la perfección … Revisa pointdit r3d etc etc son muchos"*.
+a la perfección"*.
 
 So this is not a list of things to install. It starts from **what is on the volume** — every file, classified
 (`inventory.py`) — and each class has the one thing that puts it back:

@@ -181,7 +181,7 @@ function App() {
   // shadows: meshes cast + receive, the cloud receives (USER 2026-10-01); on by default
   const [shadowsOn, setShadowsOn] = useState(true)
   useEffect(() => { viewportRef.current?.setShadows(shadowsOn) }, [shadowsOn])
-  // points as cubes (USER 2026-10-04: "cubos como en la página de PointDiT"); OFF by default since
+  // points as cubes (USER 2026-10-04); OFF by default since
   // 2026-10-16 (USER: "destildado … para que siempre arranque con puntos")
   const [cubesOn, setCubesOn] = useState(false)
   useEffect(() => { viewportRef.current?.setPointShape(cubesOn ? 'cube' : 'disc') }, [cubesOn])

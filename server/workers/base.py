@@ -86,8 +86,8 @@ class WorkerPipe:
 
 
 def die_with_parent(poll_s: float = 2.0) -> None:
-    """USER 2026-10-06: "cuando mato el proceso debe matar todo lo que tenía corriendo,
-    omega, da3, vlm, sam3, pointdit, todo". A daemon thread watches the parent; the
+    """USER 2026-10-06: "cuando mato el proceso debe matar todo lo que tenía corriendo …
+    todo". A daemon thread watches the parent; the
     moment it is gone (the server restarted, killed, crashed) the WHOLE process group
     of this stage dies with SIGKILL — the worker, the inline child, Omega's
     vggt_long.py, DA3, SAM3, the precision steps: everything launched under

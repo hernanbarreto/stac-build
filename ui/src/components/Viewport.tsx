@@ -162,7 +162,7 @@ export interface ViewportHandle {
     physicsClear: () => void
     /** meshes cast and receive shadows, the point cloud receives them (USER 2026-10-01) */
     setShadows: (on: boolean) => void
-    /** how a point is drawn: a disc, or a cube of its own size (USER 2026-10-04, as PointDiT's page) */
+    /** how a point is drawn: a disc, or a cube of its own size (USER 2026-10-04) */
     setPointShape: (shape: 'disc' | 'cube') => void
     /** light intensity (USER 2026-10-16): the cloud's colour × intensity (1 = as captured, 0.85 = the
      *  previous look, up to 2) and the scene's ambient light 0.25 + 0.30 × intensity for the meshes */
@@ -337,7 +337,7 @@ const vertexShader = `
   varying float vFocalPx;
   uniform float pointSize;
   uniform float uSpriteMax;
-  // point shape (USER 2026-10-04: "cubos como en la página de PointDiT"): 0 = disc, 1 = cube — a
+  // point shape (USER 2026-10-04): 0 = disc, 1 = cube — a
   // world-axis-aligned cube of the point's own size, ray-cast per fragment (see the fragment shader)
   uniform int uPointShape;
   uniform float uViewportH;      // pixels — with projectionMatrix[1][1] it gives the focal length in px

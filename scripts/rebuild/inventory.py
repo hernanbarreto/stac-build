@@ -6,8 +6,8 @@
     python3 inventory.py summary [FILE]           the classes, their files and bytes
 
 USER 2026-11-18: "debe quedar exactamente como está ahora … cada cosa que avancemos debemos
-actualizarlo para que siempre quede actualizado a la perfección … Revisa pointdit r3d etc etc son
-muchos". A list of things to restore can forget one; this cannot: it starts from what IS on the
+actualizarlo para que siempre quede actualizado a la perfección".
+A list of things to restore can forget one; this cannot: it starts from what IS on the
 volume and every file must fall in a class that names how it comes back —
 
   git        tracked by a git repository (the repo itself, a vendor clone, a submodule): its commit

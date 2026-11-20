@@ -27,8 +27,8 @@ import { useFmt, useT } from '../../i18n'
 export type CalibrationKind = 'distance' | 'plane'
 export type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'measure-plane' | 'section-box' | 'align' | 'erase'
 /** what the cloud is painted with: its real colour, or the stored comparison's deviation (the status and votes
- *  colourings left the interface — USER 2026-11-19: "las vistas de Flayers, PointDit mixed unsolved, deben
- *  sacarse, no sirven para nada, lo mismo que la funcion colour by, de la barra de herramientas") */
+ *  colourings left the interface — USER 2026-11-19: "deben sacarse, no sirven para nada, lo mismo
+ *  que la funcion colour by, de la barra de herramientas") */
 export type ColorMode = 'rgb' | 'deviation'
 export type EraseShape = 'sphere' | 'cube' | 'box'
 

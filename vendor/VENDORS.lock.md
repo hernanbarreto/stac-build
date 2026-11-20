@@ -86,12 +86,7 @@ Not clonable. Provision as noted; none is fetched by `git`.
 - `vendor/DepthLM_Official`, `vendor/perception_models` — **dead `.gitmodules`
   entries** (declared but never tracked and absent on disk). Removed from
   `.gitmodules`. Re-add as real submodules if these deps come back.
-- `vendor/pointdit` — REMOVED 2026-11-20 (USER: "el detalle de bordes pointdit nunca me cerro un modelo con licencia no
-  comercial que tarda un huevo sin un resultado ni necesidad aparente, hay que sacarlo, eliminalo de la cadena, del
-  repo, de todo, no tiene ningun sentido"): the submodule, its code in F6 (`precision/mono_detail.py`,
-  `precision/pointdit_runner.py`), its configuration section, its tests, its weights (PointDiT-H / -L and DINOv3
-  ViT-H+/16) and the two packages added to env `da3` for it (`torchmetrics`, `lightning-utilities`). Meta's DINOv3
-  ViT-L/16 checkpoint that GenRecon's conversion reads lived under PointDiT's `pretrained/dinov3`: it is now
+- Meta's DINOv3 ViT-L/16 checkpoint that GenRecon's conversion reads:
   `vendor/GenRecon/weights/src/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth` (sha256 prefix 8aa4cbdd, verified).
 
 - `vendor/meshflow` — REMOVED 2026-10-04 (USER: "saca del vendor los pesos, del config y del código"): the

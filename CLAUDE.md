@@ -59,7 +59,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   arman lo decidimos nosotros"*) → coverage fill (one second view ≥ 2°) → turn frames → cubes.py 9 (≤ 5 m and ≤ 64
   views along the walk, neighbours sharing half their keyframes; `kf_covisibility` c > 0: *"ven lo mismo es ver
   total o parcialmente el sector"*) → Omega per cube + ONE Sim(3) graph on the seams alone → F0 F2 F4 F3 F5 → F6:
-  Omega bent to F5's landmarks + PointDiT at the edges + the vote of EVERY co-visible keyframe (widest baseline
+  Omega bent to F5's landmarks + the edge-detail model at the edges + the vote of EVERY co-visible keyframe (widest baseline
   first), a pixel published only with ≥ 10 views ≥ 2° that test its depth (*"prefiero poco y bueno que mucho y
   mierda"*) → cloud → [VLM → SAM3 → rounds → projection] → floor (automatic). GenRecon manual; certification OFF.
 - pccr: coverage 63.6 %, 11.46 M points, F5 held-out 0.462 px, 491 segments (`docs/pipeline_final.md` §2).
@@ -122,6 +122,23 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   · WHEN HE GIVES AN ORDER IT IS CARRIED OUT — not asked again ("Dije que si no me hagas que te pida las cosas 50
     veces"); "detené todo" / "pará todo" = stop and answer; his standing order still stands once he is answered.
   · When he is worn out or upset, the work stops and HE is attended first; the work waits.
+- ⭐⭐⭐ "TERMINADO" MEANS 100 % — AND IT IS SHOWN, NOT SAID (USER 2026-11-20, night: "cuando dije yo que una tarea se haga a
+  medias???, cuando dije yo que una tarea se de por cerrada aunque quedaran puntos pendientes?" / "no quiero que me
+  digas temrinado, peeero, no no, a ver, si hay pero entonces no etsa terminado, no lo voy a volver a repetir" / "dije
+  limpio … no esta terminado entonces si quedan citas"). WHAT HAPPENED: checklist line 1 (the edge-detail model
+  removed) had been declared closed and committed WITHOUT a whole check; told to do it complete, the assistant found
+  the leftovers of its own closure (the kit's mirror list and the repo's release still held the removed model's
+  weight, stale texts of the kit, a git setting), then reported "closed, but eight comment lines quote your words" —
+  and of the four lines it had called closed it could vouch for NONE. THE RULES:
+  · before a line is started, ONE sentence says what must read zero for it to be closed;
+  · the closure is a WRITTEN CHECK in the repo (`scripts/checklist/check_<line>.sh`: read only, the same answer at
+    every run, ONE last line CLOSED / NOT CLOSED) and ITS OUTPUT is what he is shown — never the assistant's word
+    (his side, as he was told: "mostrame la comprobación");
+  · "terminado" / "cerrado" is not said while anything is left: no "pero", no "salvo", no list of exceptions — what
+    is left is worked on, not reported;
+  · "removed" = the name is NOWHERE in the repo: comments, his quoted words and the records included (a description
+    takes its place);
+  · the lines closed before this rule (2, 3, 4) are NOT vouched for until each has its check.
 - ⭐ A FIX THAT IS TESTED IS APPLIED — NO EXCEPTIONS (USER 2026-11-20: "de qué sirve que hagas las correcciones si no
   las aplicas regla siempre una vez probadas se aplican todas las mejoras [sin] excepciones" / "Estuviste toda la
   puta tarde mejorando tiempos?, no aplicaste nada, detectaste que f2 rompe, no aplicaste la corrección" / "no
@@ -291,7 +308,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   and needs 40 bytes a point: 21.9 GB for the 588.8 M voted points of pccr 2026-08-24. The assistant had filled
   that disk with its own test data (/root/dev_data: 23 GB of real cubes kept for tests; its scratchpad 4.9 GB) and,
   WHILE F6 RAN, copied a 3.4 GB scan there for the next test, having looked only at "21 GB free". F6 computed for
-  1 h 52 (PointDiT, the vote: coverage 55.0 %), the cleaner refused at its first line ("17.3 GB free, … needs up to
+  1 h 52 (the edge-detail model, the vote: coverage 55.0 %), the cleaner refused at its first line ("17.3 GB free, … needs up to
   21.9 GB"), and F6 KEEPS NOTHING when its publication fails: the whole step ran again (relaunched 19:03 UTC with
   33 GB free). THE RULES IT LEAVES: (1) while a reconstruction is alive NOTHING is written to the local disk —
   test data goes to the volume or is removed first; before a run: `df /root` must show the cleaner's need (40 B ×
@@ -402,7 +419,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   armar en un nuevo volumen en cuestión de poco tiempo … de forma completa y sin errores"; and on the first
   version, which had called two envs "optional", left texrecon unbuilt and accepted recompiled parts as "the same":
   "Pero debe quedar exactamente como está ahora / No decidas por mí / … cada cosa que avancemos debemos
-  actualizarlo para que siempre quede actualizado a la perfección / Revisa pointdit r3d etc etc son muchos eh").
+  actualizarlo para que siempre quede actualizado a la perfección / Revisa [el modelo de detalle] r3d etc etc son muchos eh").
   `scripts/rebuild/` — its README is the manual. It starts from WHAT IS ON THE VOLUME: `inventory.py` walks it and
   every file falls in a class that names how it comes back — git (the commit), env (the locks: conda's exact
   packages, pip's exact wheel files), weight (`models.tsv`: source, pinned revision, sha256), download (pinned
@@ -506,9 +523,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   · NOT CALIBRATED (18: "debe estar en realidad como un simbolo de exclamacion ese triangulito amarillo sobre
     el nombre de la sesion … no hace falta cargar mas la pantalla"): a small yellow triangle in the scan's
     tab (a badge when calibrated / verified); no chip over the viewer.
-  · REMOVED (19: "las vistas de Flayers, PointDit mixed unsolved, deben sacarse, no sirven para nada, lo mismo
+  · REMOVED (19: "las vistas de Flayers, [el modelo de detalle] mixed unsolved, deben sacarse, no sirven para nada, lo mismo
     que la funcion colour by, de la barra de herramientas tambien, tambien todo el panel de certificate and
-    qualiti tampoco debe estar ya"): the toolbar's Colour by, the View menu's Flyers / PointDiT / mixed
+    qualiti tampoco debe estar ya"): the toolbar's Colour by, the View menu's Flyers / the edge-detail model / mixed
     unresolved, the status / votes colourings, the Certificate & quality panel (CertifyKitPanel,
     BIMAnalysisPanel, the catalogue's `certify` area: 277 commands in 32 areas).
   · DOCUMENTATION AND GANTT (20, 21: "al panel izquiero le vamos a agregar dos campos mas, uno es de
@@ -906,19 +923,19 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   points. Viewer: segmentation lamps / windows as lights, point opacity, shadows for meshes.
 
 ## 6 · TRIED AND DISCARDED — do not bring back without his word (details in `git show 2f13136:CLAUDE.md`)
-- ⭐ POINTDIT (the monocular detail at the edges, inside F6 since 2026-10-04): REMOVED 2026-11-20 — USER: "el detalle de
-  bordes pointdit nunca me cerro un modelo con licencia no comercial que tarda un huevo sin un resultado ni necesidad
+- ⭐ THE EDGE-DETAIL MODEL (the monocular detail at the edges, inside F6 since 2026-10-04): REMOVED 2026-11-20 — USER: "el detalle de
+  bordes the edge-detail model nunca me cerro un modelo con licencia no comercial que tarda un huevo sin un resultado ni necesidad
   aparente, hay que sacarlo, eliminalo de la cadena, del repo, de todo, no tiene ningun sentido". Deleted: its code
-  in F6 (`precision/mono_detail.py`, `pointdit_runner.py`, `mono_ab.py`, twelve device functions of `f6_torch.py`,
+  in F6 (its detail module, its runner module, its A/B module, twelve device functions of `f6_torch.py`,
   its hook between the depth and the vote, its report, its two viewer layers and their texts), its section of the
   typed configuration and of config.yaml, its
-  tests, its evaluation variant, the submodule `vendor/pointdit` with 15 GB of weights, the two packages added to
+  tests, its evaluation variant, the submodule (its vendor tree) with 15 GB of weights, the two packages added to
   env `da3` for it, its rows of the rebuild kit. F6 takes the card always (its vote runs on it) and its seed is the
   bend's. What every stage after it did with a "mixed" pixel at an edge is now the vote's alone. GenRecon's DINOv3
-  ViT-L source file moved to `vendor/GenRecon/weights/src/`. Every mention of PointDiT elsewhere in this file is the
+  ViT-L source file moved to `vendor/GenRecon/weights/src/`. Every mention of the edge-detail model elsewhere in this file is the
   record of how the pipeline was BEFORE that date.
 - AS THE RECONSTRUCTION: VGGT-SLAM 2.0, VidMap, AMB3R's own cloud (2026-11-04: none beat the pipeline); LoGeR +
-  PointDiT + DA3 (2026-10-06); the DA3-streaming cloud (*"no es mejor ni cerca"*); DA3 depth in the cloud (*"capas
+  the edge-detail model + DA3 (2026-10-06); the DA3-streaming cloud (*"no es mejor ni cerca"*); DA3 depth in the cloud (*"capas
   duplicadas y puntos voladores"*); the plane sweep / witness fusion (`cloud.source: fusion`, selectable).
 - THE CUT: one pass for the whole walk; fixed 60/30 chunks; walk-sized 12 / 15 m chunks; chunks planned by
   co-visibility lengths (2026-09-22 … 10-06); cubes grouped by what the keyframes see (cubes.py 3–6); 5 m cubes with
@@ -926,7 +943,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
 - THE GRAPH: DA3 per-cube priors and Cauchy on the seams (broke seams by 16–33 cm); SALAD on cubes (revisits come
   from AMB3R's map); the "3× drift budget" bar; the frustum veto of SALAD pairs; a top-view silhouette witness.
 - F6: witnesses capped at 18; the NEAREST co-visible witnesses (20 cm apart: the corridor's door lost); τ 0.3 of
-  co-visibility; the coverage fill to 10 views (686 keyframes: more cubes, more time, worse); PointDiT detail on every
+  co-visibility; the coverage fill to 10 views (686 keyframes: more cubes, more time, worse); the edge-detail model detail on every
   surface (bent walls); the "≥ 3 views within τ_rel" confirmation; the "witness ≥ 1 m of walk" rule.
 - MESHING (removed 2026-10-16/17 with their code and envs): PGSR, TSDF, Poisson, NKSR, ShapeR, MeshFlow, forms,
   hull, plane segments, Manhattan snapping, point2cad (CC-BY-NC); GenRecon's generative variant (*"inventó cualquier
@@ -960,7 +977,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   · Nothing he did not ask for goes into the code (a load-time guard naming his decision, added by the assistant, was
     removed on his word: "yo no dije que pongas nada, asi que no debe estar ahi").
   · What a touched stage still does on the CPU moves to the card ("todo en placa nada en cpu").
-  STATE: line 1 (PointDiT removed from the chain, the repo, the pod and the kit) DONE, 9a13f32 · line 2 (ONE depth
+  STATE: line 1 (the edge-detail model removed from the chain, the repo, the pod and the kit) DONE, 9a13f32 · line 2 (ONE depth
   factor in F6 — `precision.depth_on_f5.session_factor`; the factor per keyframe, its window choice, its
   "verification", their device twin and their configuration keys, `bend.scope` among them, DELETED) DONE, the commit
   after it (074cc6e) · line 3 (conclusion 31: the decision by zone) DONE, the commit after 074cc6e — his word to
@@ -1072,9 +1089,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     estimate of the metre, moves no ruler (REDUNDANT); the old F2 HARMFUL; F4 + F5 = 7.5 of the chain's 11.5 h, they
     bring 3.2 → 1.5 cm between passes and the camera model (tiles 3.4 % → 1.5 % off) and cost the far piece 0.9 →
     2.9 cm; F6's factor per keyframe HARMFUL, as a scale REDUNDANT; the vote necessary but no safety net (no witness
-    sees through the plate at any angle); PointDiT (55 min, 20.7 M of the 112.4 M points) NOT JUDGED by these rulers;
-    the DA3 lock per cube redundant; WRITTEN AND READ BY NOTHING: precision/layer_mono_detail.glb and
-    layer_mixed_unresolved.glb, precision/refine_residuals.npz, maplong_run/uncert/, depth_graph.json (verdict SKIP
+    sees through the plate at any angle); the edge-detail model (55 min, 20.7 M of the 112.4 M points) NOT JUDGED by these rulers;
+    the DA3 lock per cube redundant; WRITTEN AND READ BY NOTHING: the detail layer's file (precision/layer_*.glb) and
+    the mixed layer's file (layer_*.glb), precision/refine_residuals.npz, maplong_run/uncert/, depth_graph.json (verdict SKIP
     on six sessions), omega_probe.json; the scale is decided five times, two are needed.
   · ⭐ THE AUDIT DONE AGAIN ON HIS WORD, TWICE — `docs/pipeline_audit_2026-11-20.md` IS THE RECORD (781540b, 1ed41a1;
     sent to him 18:15 UTC). His words: "hay que juzgarlo de dos maneras conceptualmente y como se aplicó. Si está
@@ -1152,7 +1169,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
       again; still worse somewhere → the stage is discarded, the best state stays, the reason is recorded. NEVER
       CUT AND PASTE (two solutions joined leave a border — another duplicate): always one coherent state. The
       guarantee is "no zone worse than before", not the best of all combinations. Decided ON THE FLY only what is
-      independent from one keyframe to the next (PointDiT's detail, the vote pixel by pixel). "Holding a zone to
+      independent from one keyframe to the next (the edge-detail model's detail, the vote pixel by pixel). "Holding a zone to
       the previous state" is the same mechanism as "F5 with the graph inside". The diagram sent to him:
       scratchpad dl/flujo/flujo_decisiones_v2.png (flujo2.py). NOT STARTED IN CODE — it waits for his word.
     – THE REMOVALS, UNDER WAY (each tested before it is applied): DONE 2026-11-20 — the depth graph
@@ -1807,7 +1824,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     device; (2) the section box's handles finger-sized (screen-sized on a touch screen)? (3) a lighter
     default on a phone (pixel ratio capped at 2, a smaller point budget per device)? (4) the names of the
     toolbar's icons on touch (they live in hover tooltips).
-    ⚠ THE SCREENSHOT RUNS COST THE RUNNING STAGE A FEW PER CENT (PointDiT 1.17 s a keyframe idle, 1.2–1.3 s
+    ⚠ THE SCREENSHOT RUNS COST THE RUNNING STAGE A FEW PER CENT (the edge-detail model 1.17 s a keyframe idle, 1.2–1.3 s
     during a 60-picture run on 8 cores): long sets on 4 cores (`taskset -c 0-3`), and never to time a stage.
 - ⭐⭐⭐ THE LIST OF 2026-11-19 — HIS POINTS, WITH HIS NUMBERS (RESUME HERE; the 2026-11-18 block below is its
   background). He tried the night's work in the browser and it failed nearly everywhere; each point was then
@@ -1825,7 +1842,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   7 ✓ the viewer keeps what the user chose (point size 0.15 by default) · 8 ✓ tickets: a right click on the
   selected object, their own section, their history · 16 ✓ the Report inside the BIM panel · 17 ✓ the deviation
   legend as a thin bar at the bottom · 18 ✓ "not calibrated" as a triangle by the scan's name · 19 ✓ Colour by,
-  Flyers / PointDiT / mixed unresolved and Certificate & quality removed · 20, 21 ✓ the Documentation and Gantt
+  Flyers / the edge-detail model / mixed unresolved and Certificate & quality removed · 20, 21 ✓ the Documentation and Gantt
   sections (empty) · the retouches ✓. (What each is: §5.)
   OPEN:
   9. THE SAME-SURFACE MERGE: UNDONE ON HIS WORD, 2026-11-19 — applied, waiting for his eye on the five lists.
@@ -2215,7 +2232,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     for ~2.6e9 pairs) with the same result. CAMERA_DAMPING "hessian" (Ceres' own; station's R3: 37 iterations
     in 12 s against 42 in 22 s) is coded and OFF: "the USER's call" (another path, the same optimum within the
     solver's tolerance).
-  · F6 (precision/depth_on_f5.py, f6_torch.py): compute 9434 s + publish 935 s. PointDiT 3164 s (2 tiles a
+  · F6 (precision/depth_on_f5.py, f6_torch.py): compute 9434 s + publish 935 s. the edge-detail model 3164 s (2 tiles a
     keyframe as ONE batch, bf16, VRAM peak 18.9 GB of 80). The rest of compute ~6000 s is mostly THE VOTE:
     781,066 (keyframe, witness) pairs looped one by one in Python — each pair UPLOADS the witness's depth and
     judge maps from numpy again (f6_torch._t: no cache; four uploads a pair) though every map of the session
@@ -2223,12 +2240,12 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     plus ~100 small float64 kernels; then a sort along the witnesses for the medians. A reorganisation (maps
     resident on the card, witnesses in batches, the z-buffer without the double sort if scatter-amin is exact
     and allowed under strict determinism) keeps every decision. Also sequential: the 2765 records read one by
-    one (zlib), each frame's JPEG decoded twice (PointDiT, publish). Publish: chunks written (16 GB), the
+    one (zlib), each frame's JPEG decoded twice (the edge-detail model, publish). Publish: chunks written (16 GB), the
     cleaner, read back, the octree.
   THE LEVERS AS GIVEN TO HIM (estimates until measured on the card): 1 F6 vote reorganised (60–85 min, same
   result) · 2 F5 pair plan kept + Jacobians not repeated (20–40 min, same result) · 3 (WITHDRAWN: R3 was removed
   on 2026-11-10, above) · 4 F4 TF32 (1.5–3 h; last decimals, his eye) · 5 F5 "hessian" damping (30–60 min; within
-  tolerance) · 6 PointDiT in larger batches (15–25 min; last decimals) · 7 more cards for F4 / F6 / the cubes
+  tolerance) · 6 the edge-detail model in larger batches (15–25 min; last decimals) · 7 more cards for F4 / F6 / the cubes
   (time divided by the cards at the same total cost; a multi-card pod and deterministic sharding).
   ⭐ HIS WORD (USER 2026-11-20): "las palancas si, todo lo queno cambie el resultado debe programarse mas rapido,
   y lo del modo rapido, si no cambia resultado, sirve dependiendo de cuanto ahorre, el paralelismo con mas placas
@@ -2324,7 +2341,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     into per-track structures); the two held-outs and the judge after each rung 1.4–1.8 min. scratchpad
     f5_start_profile.py runs the start alone (refine_core with solve off) on a real session, read only.
   · ⚠ F6 ON THE COPY, PHASE BY PHASE (the stamped log + the sampler): records + bend 14.4 min (the card
-    under 5 % for 5.8 of them) · PointDiT 55.8 min (card mean 77 %) · the witness lists 2.2 min (card idle) ·
+    under 5 % for 5.8 of them) · the edge-detail model 55.8 min (card mean 77 %) · the witness lists 2.2 min (card idle) ·
     THE VOTE 83.4 MIN WITH THE CARD AT 48 % (one Python thread feeding it: the fast vote of patch 0002 is for
     this) · the chunks written 2.7 min · the cleaner 4.2 min (597,721,940 → 117,482,315 points) · THEN 6.4
     SILENT MINUTES, one thread at 100 %, no disk activity (07:58:16 → 08:04:39): source_column() compared
@@ -2332,7 +2349,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     patch 0008): the points ordered by frame once, each frame's run looked up in its map — the same bytes
     (the loop kept as the test's reference); at the copy's size 19–21 s on one core against ~5.3 min. Then
     the publication (the cloud's hash, PotreeConverter). NOTICED, NOT TOUCHED: every F6 still writes
-    precision/layer_mono_detail.glb and layer_mixed_unresolved.glb (2,000,000 and 13,524,502 points on the
+    the two viewer-layer files (precision/layer_*.glb) (2,000,000 and 13,524,502 points on the
     copy) — the two viewer layers he had REMOVED from the interface on 2026-11-19 (point 19); whether their
     writing goes too is his word.
   · TWO OLD TESTS OF F5 FAIL IN THE LIVE TREE TOO (found 2026-11-20 while running the related tests; they
@@ -2345,7 +2362,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     held-out 0.6594 px (the original's R0 0.6558); R1 fit 0.558 / held-out 0.62927 px over 3,073,956 tracks —
     TAKEN, the applied rung (the original's applied R1: 0.6301); R2 not taken (the cost did not move: 9
     steps); cameras moved ≤ 48.8 cm, witnesses 6845 / 8547 localized (bound 9.64 px), epoch 1 → 2. F6 STARTED
-    05:13:16 UTC (PointDiT loaded 05:14:58; the original's F6: 173 min).
+    05:13:16 UTC (the edge-detail model loaded 05:14:58; the original's F6: 173 min).
   THE SERVER PATCHES NOW: 0001 the cube closing's server side · 0002 F6's fast vote · 0003 F5's kept plans and
   Jacobians · 0004 F6's records on threads · 0005 F4's tracks file on threads · 0006 F5's phases measured ·
   0007 a session frozen before `tracks.npz_threads` loads as the record (absent = 0, as vote_batch and

@@ -14,7 +14,7 @@ bufferStop in its two runs (174 keyframes, 5 cubes, 13.4 m, outdoors: `bufferSto
 scratchpad (`serio/`).
 
 STATE OF THIS DOCUMENT: the whole chain is covered — the intake (Part III), the cube stage (IV), the precision chain
-F0, F4, F2, F5, F6 with PointDiT and the cleaner (V), the publication and what follows it (VI), the verification
+F0, F4, F2, F5, F6 with the edge-detail model and the cleaner (V), the publication and what follows it (VI), the verification
 layer (VII) and the whole (VIII: what is decided more than once, every calculation by its verdict, the corrections).
 The other sessions (pccr 2026-08-31, zaragoza, observatorio, the original pccr 2026-08-24) are read from their own
 stored files where a row quotes them. What no ruler of this audit reaches is listed as not judged (VIII · B).
@@ -278,14 +278,14 @@ per keyframe becomes legitimate again only once F5 is corrected, and then with a
 | The published depth = the median of the pixel's own depth and the agreeing witnesses' | a small smoothing within τ | — | — | sound |
 | Who the witnesses are: the keyframes at ± 3, 6, 12; the turn frames of the cubes' second pass, placed with Omega's relative pose to their anchor; every keyframe the first pass's map says shares anything (c > 0) | every witness is the same network's depth, with the same factor, on the same F5 poses: the vote tests their mutual consistency, not their truth | as coded | — | sound as a noise filter (the limit is two rows above) |
 
-### F6 — PointDiT detail (`precision/mono_detail.py`)
+### F6 — the edge-detail model detail (its detail module)
 
 | Calculation | Concept | Application | Evidence | Verdict |
 |---|---|---|---|---|
 | A monocular detail network on tiles of each keyframe, fitted to the bent depth tile by tile (affine); its high-frequency part replaces Omega's near depth discontinuities, within τ | it cannot move a surface by more than τ (1.9 % on pccr): by construction it neither creates nor mends a displaced copy. Its value is at the edges | as coded | the relaunch of the copy: detail on 15.6 % of the valid pixels; 55 min of the card | not judged by these rulers — his eye |
 | The pixels between two surfaces at an edge ("mixed"): sent to the front or the back surface, or removed when neither is supported | a depth map interpolates across an edge: those pixels lie on no surface, and removing them removes floating points | as coded | 24.4 M mixed pixels → 4.6 M to the front, 5.7 M to the back, 14.2 M removed | sound: it is what keeps the edges clean |
 | A tile is rejected when its fit's residual is over the 95th percentile of the session's own tiles | a fixed RATE, not a measurement: 5 % of the tiles are rejected whether they are good or bad | as coded (the code calls the bar "self-referential") | 275 of 5,544 tiles (4.96 %), the bar at 13.4 %; 46 more by too little support | harmless (a rejected tile keeps Omega's depth); not a judgement of quality |
-| `layer_mono_detail.glb`, `layer_mixed_unresolved.glb` | the two viewer layers whose menu entries were removed from the interface on 2026-11-19 | still written at every run; the server keeps the route that serves them (`/api/precision/layer`) | nothing in the interface asks for them | UNNECESSARY (the writing and the route's two entries) |
+| `the detail layer's file (layer_*.glb)`, `the mixed layer's file (layer_*.glb)` | the two viewer layers whose menu entries were removed from the interface on 2026-11-19 | still written at every run; the server keeps the route that serves them (`/api/precision/layer`) | nothing in the interface asks for them | UNNECESSARY (the writing and the route's two entries) |
 
 ### F6 — the cleaner (`reconstruction/gpu_cloud_clean.py`)
 
@@ -303,7 +303,7 @@ per keyframe becomes legitimate again only once F5 is corrected, and then with a
 | The publication (`precision/corrected_cloud.py`): the new cloud replaces the old one in one transaction; the epoch's lineage, the provenance column, the cloud's sha256, the octree | integrity of the product | as coded; no geometric acceptance | — | NECESSARY, sound |
 | `cleaned_cloud_raw.ply` | a second name for the cloud | written with the same rows — its own reader requires the two files to "hold the same rows"; four other readers take either name | byte-identical to `cleaned_cloud.ply` on bufferStop's test run (checked); on pccr that is a second copy of 112 M points written and hashed | a DUPLICATE |
 | "The product is live" (`precision/product.py`): the report exists, the epoch descends from it, the file exists | what makes a resume skip the reconstruction | existence only — the file is not hashed against the report's sha256 | — | sound as a resume rule; it does not detect a changed file |
-| The cube check (`f6_check`, `precision/chunk_check.py`): each cube's floor and ceiling departures, from Omega's depth × the factor on the published poses | a check of the BENT depth — not of the published cloud (it runs on what the vote, PointDiT and the cleaner have not yet touched) | its result (`chunk_check.json`, with a "to correct" list) is read only by the certification, which is OFF; a missing input there raises AFTER the cloud is already published | 5 min on the copy | report read by nothing in force: **UNNECESSARY as applied** |
+| The cube check (`f6_check`, `precision/chunk_check.py`): each cube's floor and ceiling departures, from Omega's depth × the factor on the published poses | a check of the BENT depth — not of the published cloud (it runs on what the vote, the edge-detail model and the cleaner have not yet touched) | its result (`chunk_check.json`, with a "to correct" list) is read only by the certification, which is OFF; a missing input there raises AFTER the cloud is already published | 5 min on the copy | report read by nothing in force: **UNNECESSARY as applied** |
 | The cloud metrics (`precision/cloud_metrics.py`): the floor's thickness, undulation and tilt on the published cloud | a measurement, "no verdict" | written; the chat's quality tool asks it for four facts under names the file does not use (`thickness_median_m`, `thickness_p90_m`, `tilt_deg` against `thickness_m.median`, `thickness_m.p90`, `plane.tilt_vs_camera_up_deg`): only the undulation reaches the chat | pccr copy: undulation 16.9 cm | report; a naming defect to mend |
 | The floor step (`correction/floor.py`; only after a segmentation): ONE rigid motion from the segmented floor under the cameras | a gauge transformation (Lemma 1: it can break nothing); a measurement of "down" where orient assumed | its gates are advisory: a failed gate is declared and the motion applied | tilts of 0.44° (pccr 08-24), 2.75° (zaragoza), 3.25° (observatorio); 92.7° on bufferStop | NECESSARY — the measured "down" |
 | The certification | — | OFF since 2026-11-05 (his) | — | not in the chain |
@@ -333,7 +333,7 @@ the meaning of that "error" — and both are the caller's.
 | F6's factor per keyframe | landmarks of the same F5 | NO against F5's own error | a wider window; when none verifies, the widest pooled fit is applied all the same |
 | F6's τ | the 75th percentile of the session's neighbour disagreement | NO: by construction 75 % of the sampled neighbours agree within it | — |
 | A published pixel (the vote) | other views of the same network's depth, with the same factor, on the same poses | against independent noise yes; against a common error NO | the pixel is not published |
-| A PointDiT tile | the session's own 95th percentile | NO | it keeps Omega's depth |
+| A the edge-detail model tile | the session's own 95th percentile | NO | it keeps Omega's depth |
 | A point (the outlier rule) | the cloud's own statistic | NO | removed |
 | The cube check; the cloud metrics | the geometry against itself; DA3 anchors already used upstream | partly | advisory: nothing happens |
 | The floor's motion | the floor plane against its own bootstrap; advisory gates | NO | declared, applied |
@@ -369,7 +369,7 @@ his decision.)
 | The metre | DA3's own alignment of each window (I3) → the first pass's metre (its range only) → the lock of each cube (170 on the copy) → **scale_align (one number)** → F2 (a second estimate) → F6's fitted factor (per keyframe: 2,772 of them; or one) → his calibration | ONE estimate, carried to the cameras AND to the depth |
 | The camera | DA3's probe (for I1) → the first pass, per record → Omega, per keyframe → F0's median → **F5** | a start, and F5 |
 | The poses | the first pass (visibility only) → Omega, per cube → **the graph** → (the old F2) → **F5** | the graph and F5 — F5 carrying the graph |
-| A keyframe's depth | Omega (the owner cube) → the depth graph (never applied) → F6's factor → PointDiT's detail → the vote's median | Omega, the known factor, the vote |
+| A keyframe's depth | Omega (the owner cube) → the depth graph (never applied) → F6's factor → the edge-detail model's detail → the vote's median | Omega, the known factor, the vote |
 | "Down" | the cube plan's frame (the viewer's boxes) → orient (assumed) → **the floor step (measured)** | one, measured |
 | Who sees whom | I1's model of a shared field → the fill's test (the session's tolerance) → the plan's test (a fixed 25 %) → F6's witness lists | one test |
 | The keyframes | I1's bars → the 8-frame rule → the fill | the first two |
@@ -407,7 +407,7 @@ stage that is off) · the 566 bridges over 6 m (42 min).
 **Duplicates** — `cleaned_cloud_raw.ply` (the cloud a second time, byte for byte) · `obs_score` of `tracks.npz` (the
 visibility a second time).
 
-**Written and used by nothing** — `layer_mono_detail.glb`, `layer_mixed_unresolved.glb` (a server route remains, no
+**Written and used by nothing** — `the detail layer's file (layer_*.glb)`, `the mixed layer's file (layer_*.glb)` (a server route remains, no
 menu asks for them) · `refine_residuals.npz` (opened by F6's loader for a value F6 never uses) ·
 `witness_poses.txt` (loaded by F6, used by none of its calculations) · `obs_uv_sigma` of `tracks.npz` · the
 uncertainty maps · `metric_lock.json`, `chunk_graph.json` but its poses, `depth_graph.json`,
@@ -415,7 +415,7 @@ uncertainty maps · `metric_lock.json`, `chunk_graph.json` but its poses, `depth
 `laplacian`, `inter_frame_diff` · scale_align's diagnostics · configuration keys no code reads (Part IV).
 
 **Not judged here** (no ruler of this audit reaches them — his eye, or a measurement still to be made) — the turn
-frames and the second pass of every cube · PointDiT's detail · the upper limit of 30° of the vote · "in place"
+frames and the second pass of every cube · the edge-detail model's detail · the upper limit of 30° of the vote · "in place"
 re-admitting what the majority or the veto rejected · whether F5's two focal lengths should be one (fx / fy = 0.973 –
 0.982 on the three pccr runs, 0.991 – 1.007 on the three 16:9 sessions).
 
