@@ -524,3 +524,67 @@ def test_gauge_json_is_stamped_and_gauge_applied_trusts_only_a_matching_stamp_on
     np.savez(rec, **{**d, "depth": d["depth"] * 1.001})
     with pytest.raises(G.GaugeError, match="reconstruction"):
         G.gauge_applied(out)
+
+
+def test_one_scale_for_the_session_keeps_a_closed_walk_closed(tmp_path, monkeypatch):
+    """`gauge.profile` (2026-11-20: on pccr 2026-08-24's copy the scale along the walk moved cameras up to 2.3 m
+    after the cube graph had closed the revisits). along_walk — the record — rescales every step and chains the
+    walk again: a walk that came back to its start no longer does. constant applies ONE value, the weighted fit of
+    the same rows: the walk is scaled about its first camera, it stays closed and every distance changes alike. The
+    record's document carries no new key; the model along the walk is solved and reported in both."""
+    chainage = _write_session(tmp_path, _drift, _drift)
+    frames = sorted(chainage)
+    walk = {"walk_length_m": WALK_M, "chainage": [{"frame": f, "chainage_m": chainage[f]} for f in frames], "windows": []}
+    from intake.walk import plan_windows
+    walk["windows"] = [{"frames": [a, b - 1]} for a, b in plan_windows(len(frames), 32, 0.5)]
+    (tmp_path / "intake").mkdir()
+    (tmp_path / "intake" / "walk.json").write_text(json.dumps(walk))
+    ang = np.linspace(0.0, 2 * np.pi, len(frames))
+    poses = np.tile(np.eye(4), (len(frames), 1, 1))
+    poses[:, 0, 3] = WALK_M / (2 * np.pi) * np.cos(ang)
+    poses[:, 2, 3] = WALK_M / (2 * np.pi) * np.sin(ang)
+    C = poses[:, :3, 3]
+    assert np.linalg.norm(C[-1] - C[0]) < 1e-9, "the walk comes back to where it started"
+    import precision.poses_epoch as PE
+    monkeypatch.setattr(PE, "load_poses", lambda out: (frames, poses))
+    base = {**GCFG.__dict__, "instruments": ("da3_windows", "da3_mono")}
+    assert base["profile"] == "along_walk", "config.yaml keeps the record"
+    rec = G.run_gauge(tmp_path, SimpleNamespace(**base), apply=False, log=lambda *a: None)
+    one = G.run_gauge(tmp_path, SimpleNamespace(**{**base, "profile": "constant"}), apply=False, log=lambda *a: None)
+    assert "profile" not in rec and "constant" not in rec and "profile" not in rec["params"]
+    assert one["profile"] == "constant" and one["params"]["profile"] == "constant"
+    for k in ("x", "knots_m", "lambda", "applied_instrument", "sigma_by_instrument", "heldout_by_instrument"):
+        assert one[k] == rec[k], k                                   # the same model, solved and judged alike
+    s = one["constant"]["s"]
+    assert one["s_keyframes"] == {"min": s, "max": s}
+    assert rec["s_keyframes"]["min"] < s < rec["s_keyframes"]["max"]
+    assert one["constant"]["along_walk_would_apply"] == {"s_min": rec["s_keyframes"]["min"], "s_max": rec["s_keyframes"]["max"],
+                                                           "camera_shift_max_m": rec["camera_shift_max_m"]}
+    # the one value is the weighted mean of the applied instrument's rows (its own least squares)
+    assert abs(math.log(s) - np.mean([_drift(c) for c in chainage.values()])) < 0.01
+    # what each does to the walk
+    knots, x = np.array(rec["knots_m"]), np.array(rec["x"])
+    s_walk = np.exp([float(G.hat(chainage[f], knots) @ x) for f in frames])
+    _k, t_walk = G.continuous_transforms(C, s_walk)
+    _k, t_one = G.continuous_transforms(C, np.full(len(C), s))
+    opened = np.linalg.norm((C + t_walk)[-1] - (C + t_walk)[0])
+    assert opened > 0.5 and abs(np.linalg.norm(t_walk, axis=1).max() - rec["camera_shift_max_m"]) < 1e-12
+    new = C + t_one
+    assert np.linalg.norm(new[-1] - new[0]) < 1e-9, "one scale: the walk still closes"
+    assert np.allclose(new - new[0], s * (C - C[0]), atol=1e-9), "scaled about its first camera, every distance alike"
+    assert abs(np.linalg.norm(t_one, axis=1).max() - one["camera_shift_max_m"]) < 1e-12
+
+
+def test_the_gauge_profile_is_typed_and_a_session_frozen_before_the_key_is_the_record():
+    import copy
+    from config import cfg as raw_cfg
+    from precision.config import PrecisionConfigError
+    raw = copy.deepcopy(dict(raw_cfg))
+    assert load_precision_config(raw).gauge.profile == "along_walk"
+    raw["reconstruction"]["precision"]["gauge"].pop("profile")
+    assert load_precision_config(raw).gauge.profile == "along_walk"
+    raw["reconstruction"]["precision"]["gauge"]["profile"] = "constant"
+    assert load_precision_config(raw).gauge.profile == "constant"
+    raw["reconstruction"]["precision"]["gauge"]["profile"] = "flat"
+    with pytest.raises(PrecisionConfigError, match="gauge.profile"):
+        load_precision_config(raw)

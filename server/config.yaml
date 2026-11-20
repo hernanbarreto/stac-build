@@ -2708,6 +2708,13 @@ reconstruction:
                                         # windows); a 1024 frame runs exactly as the 1024 sessions do (1036)
       model_id: depth-anything/DA3NESTED-GIANT-LARGE-1.1
       knot_walk_m: 2.0                  # BOUND: knot spacing of the continuous scale model
+      # WHAT F2 APPLIES. along_walk (THE RECORD): the scale fitted along the chainage — every step of the walk is
+      # rescaled by it and the walk is chained again from the first camera (precision.gauge.continuous_transforms).
+      # constant: ONE scale for the whole session, the weighted fit of one value to the same rows — the walk keeps
+      # the shape the cube graph closed. A TEST VARIANT (2026-11-20: on pccr 2026-08-24's copy along_walk applied
+      # x0.81–x1.25, moved cameras up to 2.3 m after the graph had closed the revisits and moved the 774 honoured
+      # ones 24 cm at the median); which one the pipeline uses is THE USER'S decision.
+      profile: along_walk
       heldout_confidence: 0.95          # declared confidence of the held-out comparisons (the
                                         # same bar as correction_graph.graph.heldout_confidence)
       smooth_grid: [0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]

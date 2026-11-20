@@ -194,6 +194,9 @@ class CameraConfig:
 GAUGE_INSTRUMENTS = ("da3_windows", "da3_mono", "vio", "stray", "known_dims")
 
 
+GAUGE_PROFILES = ("along_walk", "constant")
+
+
 @dataclass(frozen=True)
 class GaugeConfig:
     window_frames: int          # BOUND: keyframes per DA3 multi-view window (one joint inference)
@@ -221,6 +224,13 @@ class GaugeConfig:
     device: str = "numpy"           # 2026-11-01: numpy (the path of record) | cpu | cuda — where the per-frame
                                     #   Huber gains of the I3 windows run (precision/gauge_torch.py: a window's
                                     #   frames at once; 178 s of F2 on pccr on numpy)
+    profile: str = "along_walk"     # WHAT IS APPLIED: along_walk (THE RECORD) = the scale s(c) fitted along the
+                                    #   chainage, every step of the walk rescaled by it and the walk chained again
+                                    #   from the first camera; constant = ONE scale for the whole session (the
+                                    #   weighted fit of one value to the same rows): the walk keeps the shape the
+                                    #   cube graph closed. A test variant (2026-11-20, pccr 2026-08-24's copy:
+                                    #   along_walk moved cameras up to 2.3 m AFTER the graph had closed the
+                                    #   revisits) — which one the pipeline uses is THE USER'S decision
 
 
 # ── F4: native-pixel tracks ───────────────────────────────────────────────
@@ -727,7 +737,11 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         instruments=tuple(_str_list(g, "instruments", "gauge", allowed=GAUGE_INSTRUMENTS)),
         delete_windows_after_chain=_bool(g, "delete_windows_after_chain", "gauge"),
         device=_enum(g, "device", "gauge", ("numpy", "cpu", "cuda")),
+        profile=g.get("profile", "along_walk"),     # absent (a session frozen before the key) = the record
     )
+    if gauge.profile not in GAUGE_PROFILES:
+        raise PrecisionConfigError(
+            f"'{SECTION}.gauge.profile' {gauge.profile!r}: one of {list(GAUGE_PROFILES)}")
     if gauge.window_overlap_frac >= 1.0 or gauge.heldout_confidence >= 1.0:
         raise PrecisionConfigError(
             f"'{SECTION}.gauge.window_overlap_frac' and '.heldout_confidence' must be below 1")

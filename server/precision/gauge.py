@@ -1067,6 +1067,29 @@ def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = pr
                          f"chainage in walk.json (e.g. {missing}) — the walk and the "
                          f"reconstruction were made from different keyframe sets")
     s_kf = np.exp([float(hat(c, knots) @ x) for c in c_kf])
+    profile = str(getattr(gcfg, "profile", "along_walk"))
+    constant = None
+    if profile == "constant":
+        # ONE scale for the whole session (gauge.profile): the value that fits the applied instrument's rows
+        # with the model's own weights — min Σ((x − y)/σ)², the same least squares with every knot held equal
+        # (a relative row says nothing of a constant). Every step of the walk is then rescaled by the SAME
+        # factor: the walk is scaled about its first camera and keeps its shape — the revisits the cube graph
+        # closed stay closed. The profile along the walk is still solved, judged and reported as before.
+        rs = [r for r in rows if r.absolute and r.instrument == model["applied_instrument"]]
+        w = np.array([1.0 / float(r.sigma) ** 2 for r in rs], np.float64)
+        y = np.array([float(r.y) for r in rs], np.float64)
+        x_const = float(np.sum(w * y) / np.sum(w))
+        constant = {"x": x_const, "s": float(np.exp(x_const)), "rows": len(rs),
+                    "rule": "the weighted least-squares fit of ONE value to the applied instrument's absolute rows "
+                            "(weights 1/sigma^2 as in the model)",
+                    "along_walk_would_apply": {"s_min": float(s_kf.min()), "s_max": float(s_kf.max()),
+                                               "camera_shift_max_m": float(np.linalg.norm(
+                                                   continuous_transforms(poses[:, :3, 3], s_kf)[1], axis=1).max())}}
+        s_kf = np.full(len(c_kf), np.exp(x_const), np.float64)
+        log(f"{LOG_TAG} profile: constant — ONE scale x{constant['s']:.4f} for the whole session (the profile along "
+            f"the walk would have applied x{constant['along_walk_would_apply']['s_min']:.4f}–"
+            f"x{constant['along_walk_would_apply']['s_max']:.4f} and moved a camera up to "
+            f"{constant['along_walk_would_apply']['camera_shift_max_m']:.2f} m)")
     k_kf, t_kf = continuous_transforms(poses[:, :3, 3], s_kf)
     params = gauge_params(gcfg, fac)
     doc = {"version": GAUGE_VERSION, "provenance": PROVENANCE, "geometry_epoch": epoch,
@@ -1087,6 +1110,9 @@ def run_gauge(session_dir: Path, gcfg, *, apply: bool = True, log: Callable = pr
            "s_keyframes": {"min": float(s_kf.min()), "max": float(s_kf.max())},
            "camera_shift_max_m": float(np.linalg.norm(t_kf, axis=1).max()),
            "applied": False}
+    if constant is not None:                 # (the record's document carries no new key)
+        doc["profile"] = "constant"
+        doc["constant"] = constant
     if apply:
         from precision.poses_epoch import apply_pose_epoch
         R = np.tile(np.eye(3), (len(k_kf), 1, 1))
@@ -1140,12 +1166,16 @@ GAUGE_STAMP_KEY = "stamp"
 
 def gauge_params(gcfg, fac: float) -> Dict[str, Any]:
     """The parameters an F2 run is made with (gauge.json ``params``)."""
-    return {"knot_walk_m": gcfg.knot_walk_m, "smooth_grid": list(gcfg.smooth_grid),
-            "huber_k": gcfg.huber_k, "huber_tol": gcfg.huber_tol,
-            "huber_max_iter": gcfg.huber_max_iter,
-            "heldout_confidence": gcfg.heldout_confidence,
-            "instruments": list(gcfg.instruments),
-            "improvement_error_factor": float(fac)}
+    p = {"knot_walk_m": gcfg.knot_walk_m, "smooth_grid": list(gcfg.smooth_grid),
+         "huber_k": gcfg.huber_k, "huber_tol": gcfg.huber_tol,
+         "huber_max_iter": gcfg.huber_max_iter,
+         "heldout_confidence": gcfg.heldout_confidence,
+         "instruments": list(gcfg.instruments),
+         "improvement_error_factor": float(fac)}
+    profile = str(getattr(gcfg, "profile", "along_walk"))
+    if profile != "along_walk":              # (the record's parameters — and so its stamp — carry no new key)
+        p["profile"] = profile
+    return p
 
 
 def gauge_stamp(session_dir: Path, params: Mapping[str, Any], rid: Optional[str]) -> Dict[str, Any]:
