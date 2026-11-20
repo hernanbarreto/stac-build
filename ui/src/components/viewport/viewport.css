@@ -20,17 +20,25 @@
 }
 
 /* ── Floating toolbar ───────────────────────────────────────────────── */
+/* NOTHING OF THE BAR IS EVER CUT (USER 2026-11-20: "la barra de herramientas … muchas cosas no tienen scroll, y
+   quedan ocultas segun la resolucion"). The wrapper spans the viewer — clicks pass through it — in three columns,
+   [free | the bar | at least the view cube's box]: the bar is centred on the viewer while there is room, moves
+   left when the cube is near, and SCROLLS sideways once the viewer is narrower than bar + cube. Its option
+   panels open in the bar's own column (never under the cube) and scroll inside the viewer's height. */
 .stac-vptoolbar-wrap {
   position: absolute;
-  top: var(--hud-inset);
-  left: 50%;
-  transform: translateX(-50%);
+  inset: var(--hud-inset);
   z-index: var(--z-float);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--sp-2);
-  max-width: calc(100% - var(--sp-8));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(calc(var(--hud-cube-box) + var(--sp-2)), 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  row-gap: var(--sp-2);
+  pointer-events: none;
+}
+
+.stac-vptoolbar-wrap > * {
+  grid-column: 2;
+  pointer-events: auto;
 }
 
 .stac-vptoolbar {
@@ -44,7 +52,27 @@
   border: var(--bw) solid var(--border-2);
   border-radius: var(--r-3);
   box-shadow: var(--elev-2);
+  grid-row: 1;
+  min-width: 0;
   overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.stac-vptoolbar > * {
+  flex-shrink: 0;
+}
+
+/* a narrow viewer (the two side panels open on a 1366-px screen leave it 718 px): the bar closes its spacing so
+   that its everyday buttons fit beside the cube without scrolling */
+@container viewer (max-width: 760px) {
+  .stac-vptoolbar {
+    gap: var(--sp-half);
+    padding: 0 var(--sp-1);
+  }
+
+  .stac-vptoolbar .stac-sep {
+    margin: 0 var(--sp-half);
+  }
 }
 
 .stac-vptoolbar__group {
@@ -57,7 +85,13 @@
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
-  min-width: var(--toast-w);
+  grid-row: 2;
+  justify-self: center;
+  align-self: start;
+  min-width: min(var(--toast-w), 100%);
+  max-width: 100%;
+  max-height: 100%;
+  overflow-y: auto;
   padding: var(--sp-3);
   background: var(--glass-bg);
   backdrop-filter: blur(var(--glass-blur));
@@ -66,6 +100,10 @@
   box-shadow: var(--elev-2);
   color: var(--text-1);
   font-size: var(--fs-1);
+}
+
+.stac-vppopover > * {
+  flex-shrink: 0;              /* (the panel scrolls; a row is never flattened to make it fit) */
 }
 
 .stac-vppopover--placed {

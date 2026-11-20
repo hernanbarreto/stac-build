@@ -146,7 +146,8 @@ export function FloatingToolbar({ activeTool, onTool, onResetCamera, onClearMeas
 
   return (
     <div className="stac-vptoolbar-wrap">
-      <div className="stac-vptoolbar" role="toolbar" aria-label={t('toolbar.label')}>
+      <div className="stac-vptoolbar" role="toolbar" aria-label={t('toolbar.label')}
+        onWheel={e => { const el = e.currentTarget; if (el.scrollWidth > el.clientWidth && Math.abs(e.deltaY) > Math.abs(e.deltaX)) el.scrollLeft += e.deltaY }}>
         {/* every tool is always shown; with the deviation sheet on screen the three that act on the scan cloud
             (which is not on screen then) are shown disabled: the brush, the cloud alignment, the camera poses */}
         <Group>

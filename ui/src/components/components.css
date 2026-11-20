@@ -1287,6 +1287,8 @@
   z-index: 5;
   width: 300px;
   max-width: calc(100% - 2 * var(--sp-4));
+  max-height: calc(100% - 2 * var(--sp-4) - var(--toolbar-float-h));
+  overflow-y: auto;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;

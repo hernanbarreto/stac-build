@@ -110,6 +110,11 @@
   flex-direction: column;
   justify-content: space-between;
   width: var(--activity-w);
+  max-height: 100%;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;              /* a page shorter than the icons: they scroll, none is lost (USER 2026-11-20) */
+  scrollbar-width: none;
   padding: var(--sp-1) 0;
   background: var(--surface-brand);
   border-right: var(--bw) solid var(--border-1);
@@ -141,6 +146,27 @@
 .stac-activity__btn svg {
   width: var(--icon-xl);
   height: var(--icon-xl);
+}
+
+.stac-activity__group,
+.stac-activity__slot {
+  flex-shrink: 0;
+}
+
+/* a short page (a squat window, a phone on its side): the ten icons tighten before they have to scroll */
+@media (max-height: 600px) {
+  .stac-activity__group {
+    gap: 0;
+  }
+
+  .stac-activity__slot {
+    padding: 0;
+  }
+
+  .stac-activity__btn {
+    width: var(--sp-8);
+    height: var(--sp-8);
+  }
 }
 
 /* ── Side panel ─────────────────────────────────────────────────────── */
@@ -211,12 +237,15 @@
 
 .stac-dock__head .stac-tabs {
   border-bottom: none;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .stac-dock__actions {
   display: flex;
   align-items: center;
   gap: var(--sp-1);
+  flex-shrink: 0;
 }
 
 .stac-dock__body {

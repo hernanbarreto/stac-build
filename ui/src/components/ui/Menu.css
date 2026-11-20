@@ -6,9 +6,10 @@
   display: flex;
   flex-direction: column;
   min-width: var(--popover-min-w);
-  max-width: var(--drawer-w);
-  max-height: calc(100vh - var(--header-h) - var(--statusbar-h) - var(--sp-8));
+  max-width: min(var(--drawer-w), calc(100vw - var(--sp-4)));
+  max-height: min(calc(100vh - var(--header-h) - var(--statusbar-h) - var(--sp-8)), calc(100dvh - var(--sp-4)));
   overflow-y: auto;
+  translate: var(--menu-dx, var(--sp-0)) var(--menu-dy, var(--sp-0));   /* Menu.tsx moves it back inside the screen */
   padding: var(--sp-1);
   background: var(--surface-2);
   border: var(--bw) solid var(--border-2);

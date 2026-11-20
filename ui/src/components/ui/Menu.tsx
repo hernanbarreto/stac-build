@@ -3,7 +3,7 @@
  * checked state, separators, disabled. Opens below/right of its trigger,
  * closes on outside click and Escape; arrows move, Enter activates.
  */
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, ChevronDown } from 'lucide-react'
 import { Kbd } from './Kbd'
@@ -47,6 +47,29 @@ export function Menu({ entries, open, onClose, anchor, align = 'left', ariaLabel
   }, [open, onClose, entries, focusIdx])
 
   useEffect(() => { if (!open) setFocusIdx(-1) }, [open])
+
+  // INSIDE THE SCREEN, ALWAYS (USER 2026-11-20: "muchas cosas … quedan ocultas segun la resolucion"): a menu was
+  // drawn at its anchor whatever room was left — near the right or the bottom edge its end was off the page. Once
+  // drawn it is measured and moved back in; under a button with no room below, it opens above it.
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!open || !el) return
+    el.style.removeProperty('--menu-dx')
+    el.style.removeProperty('--menu-dy')
+    const pad = 8
+    const r = el.getBoundingClientRect()
+    const vw = window.innerWidth, vh = window.innerHeight
+    let dx = 0, dy = 0
+    if (r.right > vw - pad) dx = vw - pad - r.right
+    if (r.left + dx < pad) dx = pad - r.left
+    if (r.bottom > vh - pad) {
+      const above = anchor && 'width' in anchor ? (anchor as DOMRect).top - (r.top - (anchor as DOMRect).bottom) - r.height : -1
+      dy = above >= pad ? above - r.top : vh - pad - r.bottom
+    }
+    if (r.top + dy < pad) dy = pad - r.top
+    if (dx) el.style.setProperty('--menu-dx', `${Math.round(dx)}px`)
+    if (dy) el.style.setProperty('--menu-dy', `${Math.round(dy)}px`)
+  })
 
   if (!open || !anchor) return null
   const isRect = 'width' in anchor

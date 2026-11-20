@@ -219,6 +219,9 @@
   --dock-h: 200px;
   --left-panel-w: 280px;
   --inspector-w: 320px;
+  /* what the side panels always leave the viewer (its toolbar's everyday buttons beside the view cube need 538 px);
+     never more than 45 % of a narrow page */
+  --viewer-min-w: min(560px, 45vw);
   --panel-min-w: 200px;
   --panel-max-w: 640px;
   --resize-handle-w: 5px;
@@ -243,6 +246,8 @@
   --scale-bar-max-w: 120px;
   --nav-cube-size: 64px;
   --hud-inset: 12px;
+  /* the view cube's box (ViewCube's default size 112 px + its 36-px compass ring): what the toolbar keeps clear */
+  --hud-cube-box: 148px;
 
   /* ── Control geometry shared by both densities ─────────────────────── */
   --slider-track-h: 4px;

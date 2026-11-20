@@ -16,21 +16,25 @@
      only --left-w needs one here (re-declaring the other two as
      `var(--inspector-w)` would be a self-reference and void the grid). */
   --left-w: var(--left-panel-w);
+  /* THE VIEWER KEEPS ITS ROOM (USER 2026-11-20: "muchas cosas … quedan ocultas segun la resolucion"): the two side
+     panels take their stored widths only while the viewer keeps --viewer-min-w (tokens.css); on a narrower page
+     they give way, equally, instead of squeezing it to nothing */
   display: grid;
   grid-template-rows: var(--header-h) minmax(0, 1fr) var(--statusbar-h);
-  grid-template-columns: var(--activity-w) var(--left-w) minmax(0, 1fr) var(--inspector-w);
+  grid-template-columns: var(--activity-w) minmax(0, var(--left-w)) minmax(var(--viewer-min-w), 1fr) minmax(0, var(--inspector-w));
   width: 100%;
   height: 100vh;
+  height: 100dvh;               /* what is VISIBLE: a phone browser's bars are not counted */
   background: var(--surface-0);
   color: var(--text-1);
 }
 
 .stac-app--left-closed {
-  grid-template-columns: var(--activity-w) 0 minmax(0, 1fr) var(--inspector-w);
+  grid-template-columns: var(--activity-w) 0 minmax(var(--viewer-min-w), 1fr) minmax(0, var(--inspector-w));
 }
 
 .stac-app--inspector-closed {
-  grid-template-columns: var(--activity-w) var(--left-w) minmax(0, 1fr) 0;
+  grid-template-columns: var(--activity-w) minmax(0, var(--left-w)) minmax(var(--viewer-min-w), 1fr) 0;
 }
 
 .stac-app--left-closed.stac-app--inspector-closed {
@@ -50,6 +54,8 @@
 .stac-app__activity {
   grid-row: 2;
   grid-column: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .stac-app__left {
@@ -93,6 +99,7 @@
   position: relative;
   overflow: hidden;
   background: var(--surface-0);
+  container: viewer / size;     /* its overlays answer to ITS size (the panels and the dock change it), not the page's */
 }
 
 .stac-main__viewport--hidden .viewport-canvas {
@@ -103,6 +110,7 @@
 .stac-main__dock {
   flex-shrink: 0;
   height: var(--dock-h);
+  max-height: 60%;              /* the dock never takes more than this of the middle column: the viewer stays */
 }
 
 /* Flythrough: viewport shrinks to the right half above the control row */
