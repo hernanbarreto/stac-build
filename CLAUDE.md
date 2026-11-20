@@ -1030,6 +1030,48 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     surface (the two doors: the worst seams, the cube's lock off by up to x2) and THE RANGE of 15 m (his rule).
     Not done: the same tables by the plan's own co-visible share (the closures' keyframe indices are not the
     plan's pair indices — 29 of 1726 matched as they are; to be mapped through kf_slot).
+  · ⭐⭐ THE SITTING ON THE BRIDGES AND THEIR DISTANCE (USER 2026-11-20, quoting the assistant's own note: "esto"),
+    offline on the copy's stored graph (scratchpad bridges_whatif.py, bridges_physics.py, bridges_heldout.py,
+    bridges_where.py; chunk_graph_torch's solve from the seams' tree, ~1 min a variant; nothing of the run
+    touched). NOTHING DECIDED OR CHANGED — the data is his.
+    ⚠ THE ASSISTANT'S FIRST READING WAS WRONG AND WAS CORRECTED IN THE SAME TURN: "the graph with NO closure
+    agrees with the first pass far better than the graph with all (9 against 37 cm on the 1726 revisit pairs'
+    camera distances; the cameras 2.6 m apart at the median between the two graphs)" looked like "the bridges
+    spoil it". A physical check said otherwise: THE FIRST PASS DRIFTS AS THE CHAIN DOES (the slow part of the
+    camera height ranges 0.43 m over the walk in the first pass, 0.44 m with the seams alone, 0.19–0.27 m with
+    closures) — it is NO REFEREE of the walk's global shape, only of a short stretch. (It weakens one leg of the
+    "three sources" note above; the bridges' own residual and the fall of their agreement with distance stand.)
+    WHAT IS MEASURED:
+    (1) THE BRIDGES ARE NEEDED: with the seams alone the cameras end the walk over 5 m from where the closures put
+        them (median shift by tenth of the walk, cm: 1 10 94 138 269 306 376 281 548 537), and the 164 bridges of
+        smallest own residual (< 3 cm) are missed by 8.4 cm at the median.
+    (2) A HELD-OUT REFEREE FROM THE BRIDGES THEMSELVES: those 164 split in two halves, one half never in the
+        solve, both taking the role — the held-out half's error (median / p90, cm; how many of 82 within 3 sigma):
+          no bridge             8.5 / 36.7 | 8.3 / 28.0   (32 | 36)
+          the other half alone  4.5 / 10.2 | 4.3 /  8.2   (65 | 68)
+          + all within 3 m      4.4 /  9.3 | 4.3 /  7.5   (67 | 73)
+          + within 4 m          4.3 /  8.8 | 4.3 /  7.2   (67 | 77)
+          + within 5 m          4.4 /  8.6 | 4.3 /  7.1   (67 | 79)
+          + within 6 m          4.8 /  8.6 | 4.6 /  7.1   (66 | 72)
+          + within 8 m          4.8 /  8.4 | 4.5 /  6.9   (66 | 76)
+          + all                 4.9 /  8.4 | 4.6 /  6.9   (66 | 76)
+          ONLY those over 6 m   7.7 / 14.9 | 8.0 / 13.4   (33 | 37)
+          ONLY those of 4–6 m   5.3 / 10.1 | 5.2 /  8.7   (55 | 62)
+        The information is in the bridges up to about 5 m; those over 6 m (566, 42 min of the card) leave the
+        held-out error where it was (a few mm, inside the noise of 82 samples); alone they mend the gross misses
+        (p90 halves) and not the centimetres.
+    (3) BUT THEY MOVE THE END OF THE WALK: all 1726 against "cameras within 6 m", median camera shift by tenth
+        of the walk (cm): 0 1 0 1 2 13 27 23 42 37, largest 48 cm at video 12150 (cube 149); against "within 5 m"
+        … 28 28 51 42 (60 cm); against "within 3 m" (379) or "own residual under 3 cm" (164): up to 155–159 cm
+        in the ninth tenth (1.8–1.9 m at video ~12350, cube 153). WHICH POSITION OF THE END IS RIGHT IS NOT
+        KNOWN — it is where he saw the duplicates and the rack; the copy running uses all 1726: his eye on its
+        cloud is the first verdict.
+    (4) THE BRIDGE'S OWN RESIDUAL IS ALREADY THE EDGE'S WEIGHT (sigma = hypot of its two fits' residuals); as a
+        filter it changes little (under 10 cm: 1067 kept, cameras 6 cm median / 29 max from all; under 6 cm:
+        675, 8 / 44) and it is known only AFTER the bridge is computed; the distance (the first pass's) is known
+        before. No variant differs on the cameras' "down" along the walk (13 / 17 / 27 deg, the operator's hand).
+    NOT MEASURED: the same on the ORIGINAL run or another session; the rack under each variant (the copy's cubes
+    are deleted: only its published cloud will tell, for the all-closures graph).
   · APPLIED TO THE COPY WITHOUT INFERRING ITS CUBES AGAIN (the clean way — the rule changed in cube_run.py — would
     discard the 170 cubes by the stamp: 5.5 h; told to him, he was told he could ask for it): stage 2 cancelled
     at 20:22 UTC (it was building on the old graph and about to delete the cubes); scratchpad regraph.py —
