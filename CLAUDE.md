@@ -1543,6 +1543,33 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   on 2026-11-10, above) · 4 F4 TF32 (1.5–3 h; last decimals, his eye) · 5 F5 "hessian" damping (30–60 min; within
   tolerance) · 6 PointDiT in larger batches (15–25 min; last decimals) · 7 more cards for F4 / F6 / the cubes
   (time divided by the cards at the same total cost; a multi-card pod and deterministic sharding).
+  ⭐ HIS WORD (USER 2026-11-20): "las palancas si, todo lo queno cambie el resultado debe programarse mas rapido,
+  y lo del modo rapido, si no cambia resultado, sirve dependiendo de cuanto ahorre, el paralelismo con mas placas
+  no por ahora no" → EVERYTHING THAT KEEPS THE RESULT IS PROGRAMMED (levers 1, 2 and the small ones), in the clone
+  /root/dev/stac-build, measured on the card when the copy ends; TF32 (it DOES change the last decimals — told to
+  him) is NOT adopted: measured on one session (the saving and the change), the two numbers to him; MORE CARDS:
+  not for now.
+  · LEVER 1 DONE IN THE CLONE (server patch 0002, on top of 0001): precision/f6_torch.py — `Resident` (every
+    map the vote reads on the device ONCE, in its own dtype; a witness's judged surface in the world kept
+    between keyframes within a byte budget), `zbuffer_min` (the splat's z-buffer as ONE exact minimum,
+    scatter_reduce amin, in place of two stable sorts — `zbuffer_method()` probes the device once under the
+    strict mode and keeps the record's sorts where the reduction is refused or differs), `two_sided_vote_fast`
+    (the record's own matrix products one witness at a time — a BLAS product's last bit belongs to its
+    operands' shapes — and every elementwise step, comparison, gather and count over the witnesses in batches);
+    depth_on_f5.edge_keeping_vote(vote_batch=…); `reconstruction.precision.cloud.vote_batch` (0 = THE RECORD,
+    the value in config.yaml: merging changes nothing by itself). HELD TO THE RECORD: 31 tests — every entry of
+    the vote bit for bit in seven modes (tau, tau + parallax, colmap keep + in place, without a range, repair
+    with a short range, adjust, adjust without a range) at batches 1 / 3 / 32, every call the existing vote
+    tests make (over 40, through the rules: flyer, rescue, adjust, repair, occlusion veto, range, majority, in
+    place, turn witnesses), the cloud step's own vote (maps and totals), the sorted z-buffer path, the kept
+    surfaces' budget; the 142 tests of F6 and its configuration pass. ON REAL MAPS (scratch vote_ab_real.py: 26
+    keyframes of the copy's records at 464x832, the configured recipe, ~20 witnesses each, CPU): tau equal,
+    totals equal (kept 1,046,961, in place 915,132, occlusion veto 8,462, minority 33,592), every published
+    depth map and support map equal bit for bit, 1,962,093 pixels. NOT MEASURED: its time on the card (on the
+    CPU there is no upload to save: 59 s the record, 45 s at 8 witnesses, 82 s at 32 — the batch size is to be
+    chosen ON THE CARD) and the reduction under the strict mode on CUDA (the probe decides at run time).
+    ⚠ The assistant's estimate "60–85 min" for this lever leans on the low side: the medians over the witnesses
+    (three sorts of [V, H, W] a keyframe) and the elementwise passes' memory traffic stay.
   PASSIVE RECORDS LEFT RUNNING ON THE COPY (scratchpad, read only): stage_sampler.py → stage_usage.csv (every
   5 s: stage, card utilisation / memory / power, the stage process's CPU and its busiest threads) and
   stage_log_stamped.txt (every stage line of the log with its UTC time) — they give the real split of F5's
